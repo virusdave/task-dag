@@ -68,6 +68,51 @@ The objects we have identified so far are:
 - `purchase order position`: a line item on an incoming purchase order
 - `suggested product`: Sweed's best guess at which existing catalog product should map to an unmapped purchase position
 
+## UI Selection Pattern: Labels Versus IDs
+
+Many Sweed UI fields are live-search or typeahead selectors.
+
+This means the visible text in the UI is often just a label, while the value that matters to the API is an internal primary key selected behind the scenes.
+
+Examples:
+
+- a visible size label such as `7g` or `0.35g` is not itself the payload value; the API usually wants a `sizeId`
+- a visible distributor name is not the durable value; the API usually wants a `distributorId`
+- a visible brand, strain, category, or subcategory label typically maps to an internal ID that must be looked up first
+
+This pattern appears to be common throughout the UI and should be assumed unless a captured request proves otherwise.
+
+Practical implications:
+
+- Do not automate by replaying UI labels directly when the API expects IDs.
+- When a form appears to accept free text, verify in the HAR whether the submitted payload contains the label or a looked-up key.
+- Preserve both the human-readable label and the resolved ID when documenting or scripting a workflow.
+- Expect many automation tasks to require a lookup phase before the create or update call.
+
+## Levels And Scope
+
+Sweed has a notion of operational level or scope.
+
+Examples mentioned so far include:
+
+- `US`
+- `NY`
+- individual sites such as `Midtown` or `Arthur`
+
+Observed working rule:
+
+- product catalog operations typically happen at the state level
+- inventory operations and purchase operations typically happen at the site level
+
+This matters because the same workflow can behave differently depending on the current level selected in the UI.
+
+Practical implications:
+
+- When capturing HARs, note which level the UI was set to.
+- When replaying or scripting actions, make sure the session is operating at the correct level for that task.
+- Do not assume that data visible at one level is visible or writable at another.
+- If an operation appears to fail mysteriously, verify level before assuming the payload is wrong.
+
 ## Product Creation Flow
 
 From the product-creation HAR, the sequence for creating a new catalog item was:
