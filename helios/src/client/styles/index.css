@@ -15,6 +15,18 @@
   --success: #74a66f;
   --warning: #c79a2e;
   --text-muted: #645a4d;
+  /* Stronger muted ink used in the primary nav for inactive group labels,
+   * counts, and link notes. The base --text-muted is intentionally soft for
+   * incidental copy; nav anchors need a touch more weight on the cream
+   * canvas so unselected leaves like "Jobs" / "Config" do not read as
+   * disabled. */
+  --text-muted-strong: #4f4639;
+  /* Form-control border. Distinct from --panel-border (used by cards and
+   * panels) so we can darken inputs/selects/textareas on the cream theme
+   * without thickening every surface edge in the app. Tuned to clear the
+   * WCAG 3:1 UI-component contrast minimum against the near-white input
+   * fill (#fffdfa); a paler tan looked anemic in smoke critique. */
+  --control-border: #a07a4a;
   --shadow: 0 10px 30px rgba(51, 31, 8, 0.08);
 }
 
@@ -79,7 +91,7 @@ input:is(
   [type='datetime-local']
 ) {
   width: 100%;
-  border: 1px solid var(--panel-border);
+  border: 1px solid var(--control-border);
   background: #fffdfa;
   color: #17130f;
   padding: 0.75rem 0.9rem;
@@ -218,7 +230,7 @@ pre {
 .sidebar-heading {
   margin: 0.5rem 0 0.1rem;
   padding: 0 0.35rem;
-  color: var(--text-muted);
+  color: var(--text-muted-strong);
   font-size: 0.72rem;
   letter-spacing: 0.16em;
   text-transform: uppercase;
@@ -229,7 +241,7 @@ pre {
 }
 
 .sidebar-link-note {
-  color: var(--text-muted);
+  color: var(--text-muted-strong);
   font-size: 0.8rem;
 }
 
@@ -1444,7 +1456,7 @@ pre {
   height: 1rem;
 }
 .tree-nav-branch-label {
-  color: var(--text-muted);
+  color: var(--text-muted-strong);
   font-weight: 600;
 }
 a.tree-nav-branch-label.is-link,
@@ -1492,7 +1504,7 @@ a.tree-nav-branch-label.is-link,
   font-weight: 700;
 }
 .tree-nav-count {
-  color: var(--text-muted);
+  color: var(--text-muted-strong);
   font-weight: 400;
   margin-left: 0.25rem;
 }
