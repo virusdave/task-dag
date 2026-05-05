@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto'
 import type { QueryResultRow } from 'pg'
 
 import type { JobStatusResponse } from '../../shared/contracts/api/jobs.js'
+import type { JobType } from '../../shared/contracts/domain/jobs.js'
 import { attachPoolClientErrorLogger, getPool } from '../../server/db/pool.js'
 
 interface LeasedJobRow extends QueryResultRow {
@@ -25,11 +26,23 @@ export interface LeasedJob {
   scope: JobStatusResponse['job']['scope']
 }
 
-export async function leaseJobs(limit: number): Promise<LeasedJob[]> {
+export interface LeaseJobsOptions {
+  /**
+   * If provided, restrict leasing to these job types. Concurrency-key
+   * conflict checks against running jobs are still global, so a Sweed-pool
+   * worker correctly waits when any other worker is running a
+   * `sweed-session` job.
+   */
+  jobTypes?: JobType[]
+}
+
+export async function leaseJobs(limit: number, options: LeaseJobsOptions = {}): Promise<LeasedJob[]> {
   const leaseToken = randomUUID()
   const pool = getPool()
   const client = await pool.connect()
   const removeErrorLogger = attachPoolClientErrorLogger(client, 'leaseJobs')
+
+  const jobTypeFilter = options.jobTypes && options.jobTypes.length > 0 ? options.jobTypes : null
 
   try {
     await client.query('begin')
@@ -80,6 +93,7 @@ export async function leaseJobs(limit: number): Promise<LeasedJob[]> {
           inner join runnable on runnable.id = jq.id
           where jq.status = 'queued'
             and runnable.concurrency_rank = 1
+            and ($3::text[] is null or jq.job_type = any($3::text[]))
           order by jq.run_at asc, jq.id asc
           for update skip locked
           limit $1
@@ -96,7 +110,7 @@ export async function leaseJobs(limit: number): Promise<LeasedJob[]> {
         where jq.id = candidates.id
         returning jq.id, jq.job_type, jq.module_code, jq.scope_entity_type, jq.scope_entity_id, jq.payload_json, jq.attempt_count
       `,
-      [limit, leaseToken],
+      [limit, leaseToken, jobTypeFilter],
     )
     await client.query('commit')
 

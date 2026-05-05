@@ -4,6 +4,7 @@ import {
   readOptionalEnv,
   readRequiredDatabaseUrl,
 } from '../../shared/config/runtimeEnv.js'
+import { JOB_EXECUTION_POOLS, type WorkerPoolSelector } from '../runtime/jobPools.js'
 
 const BEDROCK_MANTLE_BEARER_TOKEN_SECRET_FILE_PATHS = buildDefaultSecretFilePaths(
   'bedrock/mantle-bearer-token',
@@ -35,6 +36,7 @@ export interface WorkerEnv {
   sweedStateDealerId: number
   workerMaxAttempts: number
   workerMaxConcurrentJobs: number
+  workerPool: WorkerPoolSelector
   workerRetryBaseDelayMs: number
 }
 
@@ -72,6 +74,7 @@ export function getWorkerEnv(): WorkerEnv {
     sweedStateDealerId: readNumberEnv('SWEED_STATE_DEALER_ID', 210248),
     workerMaxAttempts: readNumberEnv('WORKER_MAX_ATTEMPTS', 5),
     workerMaxConcurrentJobs: readNumberEnv('WORKER_MAX_CONCURRENT_JOBS', 2),
+    workerPool: readWorkerPoolEnv(),
     workerRetryBaseDelayMs: readNumberEnv('WORKER_RETRY_BASE_DELAY_MS', 5000),
   }
 
@@ -89,6 +92,23 @@ function readNumberEnv(name: string, fallback: number): number {
     throw new Error(`${name} must be a valid integer.`)
   }
   return parsed
+}
+
+function readWorkerPoolEnv(): WorkerPoolSelector {
+  const rawValue = readOptionalEnv('WORKER_POOL')
+  if (rawValue === null || rawValue.trim() === '') {
+    return 'all'
+  }
+  const normalized = rawValue.trim().toLowerCase()
+  if (normalized === 'all') {
+    return 'all'
+  }
+  if ((JOB_EXECUTION_POOLS as readonly string[]).includes(normalized)) {
+    return normalized as WorkerPoolSelector
+  }
+  throw new Error(
+    `WORKER_POOL must be 'all' or one of ${JOB_EXECUTION_POOLS.join(', ')}; got '${rawValue}'.`,
+  )
 }
 
 function readNumberListEnv(name: string, fallback: number[]): number[] {

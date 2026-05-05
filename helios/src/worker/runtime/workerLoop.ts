@@ -2,22 +2,33 @@ import { getWorkerEnv } from '../config/env.js'
 import { tickConfigWorkersScheduler } from './configWorkersScheduler.js'
 import { ensureDependenciesReadyForJob, warmDependencyHealth } from './dependencyHealth.js'
 import { isDependencyUnavailableWorkerError, isRetryableWorkerError } from './errors.js'
+import {
+  getJobTypesForPoolSelector,
+  shouldRunConfigWorkersSchedulerTickForPoolSelector,
+} from './jobPools.js'
 import { markJobDeadLetter, markJobDeferred, markJobFailed, markJobForRetry, markJobSucceeded, renewJobLease, runJob } from './jobRegistry.js'
 import { leaseJobs } from './leaseJobs.js'
 
 export async function runWorkerLoop(): Promise<never> {
   const env = getWorkerEnv()
+  const allowedJobTypes = getJobTypesForPoolSelector(env.workerPool)
+  const runScheduler = shouldRunConfigWorkersSchedulerTickForPoolSelector(env.workerPool)
+  console.log(
+    `[worker] pool=${env.workerPool} jobTypes=${allowedJobTypes.length} schedulerTick=${runScheduler}`,
+  )
   await warmDependencyHealth()
 
   for (;;) {
-    try {
-      await tickConfigWorkersScheduler()
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unknown scheduler error.'
-      console.error(`[config-workers-scheduler] tick failed: ${message}`)
+    if (runScheduler) {
+      try {
+        await tickConfigWorkersScheduler()
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Unknown scheduler error.'
+        console.error(`[config-workers-scheduler] tick failed: ${message}`)
+      }
     }
 
-    const leasedJobs = await leaseJobs(env.workerMaxConcurrentJobs)
+    const leasedJobs = await leaseJobs(env.workerMaxConcurrentJobs, { jobTypes: allowedJobTypes })
 
     await Promise.all(
       leasedJobs.map(async (job) => {

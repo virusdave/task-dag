@@ -10,6 +10,7 @@ Use this index to decide whether a workflow belongs in Helios and to find the cu
 
 ## Task Map
 
+- Target architecture and migration phases adopted 2026-05 (modular monolith + worker pools + singleton Sweed worker; rejects splitting into independent services that share Postgres): [`architecture-2026-05.md`](./architecture-2026-05.md)
 - Current migration boundaries, owned surfaces, and not-yet-migrated areas: [`migration-and-ownership.md`](./migration-and-ownership.md)
 - Durable UI standards (one nav pane to rule them all, leaf/branch row sizing, reviewer-page completeness rules): [`ui-standards.md`](./ui-standards.md)
 - Repricing module planning proposal plus current implemented foundations for Midtown historical repricing: [`pricing-repricing-module-proposal.md`](./pricing-repricing-module-proposal.md)
@@ -18,6 +19,7 @@ Use this index to decide whether a workflow belongs in Helios and to find the cu
 
 ## Suggested Reading Order For New Agents
 
-1. [`migration-and-ownership.md`](./migration-and-ownership.md)
-2. [`pricing-repricing-module-proposal.md`](./pricing-repricing-module-proposal.md) when the task touches pricing or repricing UX
-3. The one Helios code path or live handoff note that matches the task
+1. [`architecture-2026-05.md`](./architecture-2026-05.md)
+2. [`migration-and-ownership.md`](./migration-and-ownership.md)
+3. [`pricing-repricing-module-proposal.md`](./pricing-repricing-module-proposal.md) when the task touches pricing or repricing UX
+4. The one Helios code path or live handoff note that matches the task
