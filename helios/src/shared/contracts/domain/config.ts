@@ -40,8 +40,8 @@ export const CONFIG_BACKGROUND_TASKS: ReadonlyArray<ConfigBackgroundTaskDefiniti
     key: 'workers.scheduling.litalerts',
     label: 'Litalerts',
     slug: 'litalerts',
-    implemented: false,
-    summary: 'Periodic Lit Alerts competitor pricing/sales refresh tied back to catalog variants. TODO: implement before turning the schedule on.',
+    implemented: true,
+    summary: 'Drains the pending Lit Alerts refresh queue (one job per queued variant) by capturing competitor listings for each variant whose stock just transitioned out-of-stock to in-stock.',
   },
   {
     key: 'workers.scheduling.stock',
@@ -111,5 +111,22 @@ export const STOCK_DEFAULT_SCHEDULE_WINDOWS: ReadonlyArray<Omit<ConfigWorkerSche
     intervalMinutes: 15,
     paused: false,
     notes: 'Off-hours cadence (02:00 -> 08:00).',
+  },
+]
+
+/**
+ * Default schedule for the Lit Alerts refresh drainer. Modest cadence
+ * because the queue refills only when a variant transitions out-of-stock
+ * to in-stock, and each scheduler tick may enqueue many per-variant jobs
+ * in one batch.
+ */
+export const LITALERTS_DEFAULT_SCHEDULE_WINDOWS: ReadonlyArray<Omit<ConfigWorkerScheduleWindow, 'id'>> = [
+  {
+    weekdayMask: WEEKDAY_MASK_ALL,
+    windowStartMinute: 0,
+    windowEndMinute: 1440,
+    intervalMinutes: 5,
+    paused: false,
+    notes: 'Drain pending Lit Alerts refresh queue every 5 minutes.',
   },
 ]

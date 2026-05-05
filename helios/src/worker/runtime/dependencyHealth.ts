@@ -56,6 +56,9 @@ export async function ensureDependenciesReadyForJob(jobType: JobType, payload: u
     case 'config.workers.stock_refresh':
       await assertSweedReady()
       return
+    case 'config.workers.litalerts_refresh.variant':
+      await assertLitAlertsReady('Lit Alerts refresh worker')
+      return
     case 'proposal.generate.description_batch': {
       const parsedPayload = ProposalGenerateDescriptionBatchJobPayloadSchema.parse(payload)
       await assertBedrockReady('Description generation')

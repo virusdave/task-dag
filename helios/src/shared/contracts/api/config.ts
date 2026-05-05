@@ -11,26 +11,71 @@ export const ConfigBackgroundTasksListResponseSchema = z.object({
 })
 export type ConfigBackgroundTasksListResponse = z.infer<typeof ConfigBackgroundTasksListResponseSchema>
 
+const RecentStockSnapshotSchema = z.object({
+  id: z.number().int().positive(),
+  siteDealerId: z.number().int(),
+  siteKey: z.string(),
+  siteLabel: z.string(),
+  status: z.enum(['running', 'succeeded', 'failed']),
+  startedAt: z.string(),
+  finishedAt: z.string().nullable(),
+  variantCount: z.number().int().min(0).nullable(),
+  inStockVariantCount: z.number().int().min(0).nullable(),
+  newlyInStockVariantCount: z.number().int().min(0).nullable(),
+  newlyOutOfStockVariantCount: z.number().int().min(0).nullable(),
+  litalertsRefreshEnqueuedCount: z.number().int().min(0).nullable(),
+  jobId: z.number().int().positive().nullable(),
+  error: z.string().nullable(),
+})
+export type RecentStockSnapshot = z.infer<typeof RecentStockSnapshotSchema>
+
+const RecentLitalertsObservationSchema = z.object({
+  id: z.number().int().positive(),
+  queueRowId: z.number().int().positive().nullable(),
+  productId: z.number().int().positive(),
+  siteDealerId: z.number().int().nullable(),
+  sourceSnapshotId: z.number().int().positive().nullable(),
+  jobId: z.number().int().positive().nullable(),
+  status: z.enum(['succeeded', 'failed']),
+  brandId: z.number().int().nullable(),
+  brandName: z.string().nullable(),
+  groupId: z.number().int().nullable(),
+  groupName: z.string().nullable(),
+  categoryName: z.string().nullable(),
+  searchTermLabel: z.string().nullable(),
+  availability: z.string().nullable(),
+  listingCount: z.number().int().min(0),
+  pricingEligibleListingCount: z.number().int().min(0),
+  nearListingCount: z.number().int().min(0),
+  midListingCount: z.number().int().min(0),
+  farListingCount: z.number().int().min(0),
+  notes: z.string().nullable(),
+  error: z.string().nullable(),
+  capturedAt: z.string(),
+})
+export type RecentLitalertsObservation = z.infer<typeof RecentLitalertsObservationSchema>
+
+const PendingLitalertsRefreshSchema = z.object({
+  id: z.number().int().positive(),
+  productId: z.number().int().positive(),
+  siteDealerId: z.number().int().nullable(),
+  reason: z.enum(['variant_in_stock_transition', 'manual', 'daily_full_sweep']),
+  sourceSnapshotId: z.number().int().positive().nullable(),
+  enqueuedAt: z.string(),
+  notes: z.string().nullable(),
+})
+export type PendingLitalertsRefresh = z.infer<typeof PendingLitalertsRefreshSchema>
+
 export const ConfigBackgroundTaskDetailResponseSchema = z.object({
   schedule: ConfigWorkerScheduleSchema,
-  recentSnapshots: z.array(
-    z.object({
-      id: z.number().int().positive(),
-      siteDealerId: z.number().int(),
-      siteKey: z.string(),
-      siteLabel: z.string(),
-      status: z.enum(['running', 'succeeded', 'failed']),
-      startedAt: z.string(),
-      finishedAt: z.string().nullable(),
-      variantCount: z.number().int().min(0).nullable(),
-      inStockVariantCount: z.number().int().min(0).nullable(),
-      newlyInStockVariantCount: z.number().int().min(0).nullable(),
-      newlyOutOfStockVariantCount: z.number().int().min(0).nullable(),
-      litalertsRefreshEnqueuedCount: z.number().int().min(0).nullable(),
-      jobId: z.number().int().positive().nullable(),
-      error: z.string().nullable(),
-    }),
-  ),
+  recentSnapshots: z.array(RecentStockSnapshotSchema),
+  litalerts: z
+    .object({
+      pendingQueueDepth: z.number().int().min(0),
+      pendingQueueSample: z.array(PendingLitalertsRefreshSchema),
+      recentObservations: z.array(RecentLitalertsObservationSchema),
+    })
+    .nullable(),
 })
 export type ConfigBackgroundTaskDetailResponse = z.infer<typeof ConfigBackgroundTaskDetailResponseSchema>
 

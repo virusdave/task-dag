@@ -13,9 +13,12 @@ import { appendAuditEvent } from '../audit/appendAuditEvent.js'
 import { requireSessionUser } from '../auth/requireSession.js'
 import { withTransaction } from '../db/tx.js'
 import {
+  countPendingLitalertsRefreshRows,
   ensureDefaultConfigSchedules,
   loadAllConfigSchedules,
   loadConfigSchedule,
+  loadPendingLitalertsRefreshRows,
+  loadRecentLitalertsObservations,
   loadRecentStockSnapshots,
   recordConfigScheduleEnqueue,
   replaceConfigScheduleWindows,
@@ -45,10 +48,14 @@ export async function registerConfigRoutes(server: FastifyInstance): Promise<voi
     const recentSnapshots = taskKey === 'workers.scheduling.stock'
       ? await loadRecentStockSnapshots(20)
       : []
+    const litalerts = taskKey === 'workers.scheduling.litalerts'
+      ? await buildLitalertsTaskDetail()
+      : null
     return reply.send(
       ConfigBackgroundTaskDetailResponseSchema.parse({
         schedule,
         recentSnapshots,
+        litalerts,
       }),
     )
   })
@@ -103,10 +110,14 @@ export async function registerConfigRoutes(server: FastifyInstance): Promise<voi
     const recentSnapshots = taskKey === 'workers.scheduling.stock'
       ? await loadRecentStockSnapshots(20)
       : []
+    const litalerts = taskKey === 'workers.scheduling.litalerts'
+      ? await buildLitalertsTaskDetail()
+      : null
     return reply.send(
       ConfigBackgroundTaskDetailResponseSchema.parse({
         schedule,
         recentSnapshots,
+        litalerts,
       }),
     )
   })
@@ -125,50 +136,133 @@ export async function registerConfigRoutes(server: FastifyInstance): Promise<voi
           error: `Background task ${taskKey} is not implemented yet; cannot run on demand.`,
         })
       }
-      if (taskKey !== 'workers.scheduling.stock') {
-        return reply.status(400).send({
-          error: `Background task ${taskKey} has no run-now wiring yet.`,
-        })
+
+      if (taskKey === 'workers.scheduling.stock') {
+        const jobId = await runNowStockRefresh(user.id)
+        return reply.send(ConfigBackgroundTaskRunNowResponseSchema.parse({ jobId }))
+      }
+      if (taskKey === 'workers.scheduling.litalerts') {
+        const jobId = await runNowLitalertsRefresh(user.id)
+        if (jobId === null) {
+          return reply.status(400).send({
+            error: 'No pending Lit Alerts refresh queue rows to drain right now.',
+          })
+        }
+        return reply.send(ConfigBackgroundTaskRunNowResponseSchema.parse({ jobId }))
       }
 
-      const siteDealerIds = HELIOS_PENDING_PURCHASE_SITE_DEALERS.map((site) => site.dealerId)
-      const enqueuedAt = new Date()
-      const jobId = await withTransaction(async (db) => {
-        const newJobId = await enqueueJob(db, {
-          concurrencyKey: getOptionalSweedSessionConcurrencyKey(true),
-          dedupeKey: `config.workers.stock_refresh:manual:${enqueuedAt.toISOString().slice(0, 16)}`,
-          jobType: 'config.workers.stock_refresh',
-          module: 'config',
-          payload: {
-            requestedByUserId: user.id,
-            siteDealerIds,
-            trigger: 'manual_run',
-          },
-          requestedByUserId: user.id,
-          scope: null,
-        })
-
-        await recordConfigScheduleEnqueue(db, taskKey, newJobId, enqueuedAt)
-        await appendAuditEvent(db, {
-          actorType: 'user',
-          actorUserId: user.id,
-          entityId: String(newJobId),
-          entityType: 'job',
-          eventType: 'config.workers.stock_refresh.requested',
-          module: 'config',
-          payload: {
-            siteDealerIds,
-            taskKey,
-            trigger: 'manual_run',
-          },
-          requestId: null,
-          scope: null,
-          undoPayload: null,
-        })
-        return newJobId
+      return reply.status(400).send({
+        error: `Background task ${taskKey} has no run-now wiring yet.`,
       })
-
-      return reply.send(ConfigBackgroundTaskRunNowResponseSchema.parse({ jobId }))
     },
   )
+}
+
+async function runNowStockRefresh(userId: number): Promise<number> {
+  const siteDealerIds = HELIOS_PENDING_PURCHASE_SITE_DEALERS.map((site) => site.dealerId)
+  const enqueuedAt = new Date()
+  return withTransaction(async (db) => {
+    const newJobId = await enqueueJob(db, {
+      concurrencyKey: getOptionalSweedSessionConcurrencyKey(true),
+      dedupeKey: `config.workers.stock_refresh:manual:${enqueuedAt.toISOString().slice(0, 16)}`,
+      jobType: 'config.workers.stock_refresh',
+      module: 'config',
+      payload: {
+        requestedByUserId: userId,
+        siteDealerIds,
+        trigger: 'manual_run',
+      },
+      requestedByUserId: userId,
+      scope: null,
+    })
+
+    await recordConfigScheduleEnqueue(db, 'workers.scheduling.stock', newJobId, enqueuedAt)
+    await appendAuditEvent(db, {
+      actorType: 'user',
+      actorUserId: userId,
+      entityId: String(newJobId),
+      entityType: 'job',
+      eventType: 'config.workers.stock_refresh.requested',
+      module: 'config',
+      payload: {
+        siteDealerIds,
+        taskKey: 'workers.scheduling.stock',
+        trigger: 'manual_run',
+      },
+      requestId: null,
+      scope: null,
+      undoPayload: null,
+    })
+    return newJobId
+  })
+}
+
+async function runNowLitalertsRefresh(userId: number): Promise<number | null> {
+  const pendingRows = await loadPendingLitalertsRefreshRows(50)
+  if (pendingRows.length === 0) {
+    return null
+  }
+  const enqueuedAt = new Date()
+  const enqueuedJobIds: number[] = []
+
+  for (const row of pendingRows) {
+    const jobId = await withTransaction(async (db) => {
+      return enqueueJob(db, {
+        concurrencyKey: null,
+        dedupeKey: `config.workers.litalerts_refresh.variant:${row.id}`,
+        jobType: 'config.workers.litalerts_refresh.variant',
+        module: 'config',
+        payload: {
+          productId: row.productId,
+          queueRowId: row.id,
+          siteDealerId: row.siteDealerId,
+          sourceSnapshotId: row.sourceSnapshotId,
+          requestedByUserId: userId,
+          trigger: 'manual_run',
+        },
+        requestedByUserId: userId,
+        runAt: enqueuedAt,
+        scope: null,
+      })
+    })
+    enqueuedJobIds.push(jobId)
+  }
+
+  const lastJobId = enqueuedJobIds[enqueuedJobIds.length - 1] ?? null
+
+  await withTransaction(async (db) => {
+    await recordConfigScheduleEnqueue(db, 'workers.scheduling.litalerts', lastJobId, enqueuedAt)
+    await appendAuditEvent(db, {
+      actorType: 'user',
+      actorUserId: userId,
+      entityId: 'workers.scheduling.litalerts',
+      entityType: 'job',
+      eventType: 'config.workers.litalerts_refresh.requested',
+      module: 'config',
+      payload: {
+        enqueuedJobIds,
+        queueRowIds: pendingRows.map((row) => row.id),
+        taskKey: 'workers.scheduling.litalerts',
+        trigger: 'manual_run',
+      },
+      requestId: null,
+      scope: null,
+      undoPayload: null,
+    })
+  })
+
+  return lastJobId
+}
+
+async function buildLitalertsTaskDetail() {
+  const [pendingQueueDepth, pendingQueueSample, recentObservations] = await Promise.all([
+    countPendingLitalertsRefreshRows(),
+    loadPendingLitalertsRefreshRows(20),
+    loadRecentLitalertsObservations(20),
+  ])
+  return {
+    pendingQueueDepth,
+    pendingQueueSample,
+    recentObservations,
+  }
 }

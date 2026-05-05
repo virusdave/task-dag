@@ -2,6 +2,7 @@ import type { QueryResultRow } from 'pg'
 
 import {
   CONFIG_BACKGROUND_TASKS,
+  LITALERTS_DEFAULT_SCHEDULE_WINDOWS,
   STOCK_DEFAULT_SCHEDULE_WINDOWS,
   getConfigBackgroundTaskDefinition,
   type ConfigBackgroundTaskKey,
@@ -130,9 +131,20 @@ export async function replaceConfigScheduleWindows(
  * inserting the documented defaults the first time we see an empty schedule.
  * Operators can then edit the rows; we never overwrite an existing row.
  */
+const DEFAULT_WINDOWS_BY_TASK_KEY: Partial<
+  Record<ConfigBackgroundTaskKey, ReadonlyArray<Omit<ConfigWorkerScheduleWindow, 'id'>>>
+> = {
+  'workers.scheduling.stock': STOCK_DEFAULT_SCHEDULE_WINDOWS,
+  'workers.scheduling.litalerts': LITALERTS_DEFAULT_SCHEDULE_WINDOWS,
+}
+
 export async function ensureDefaultConfigSchedules(db: Queryable = getPool()): Promise<void> {
   for (const definition of CONFIG_BACKGROUND_TASKS) {
     if (!definition.implemented) {
+      continue
+    }
+    const defaults = DEFAULT_WINDOWS_BY_TASK_KEY[definition.key]
+    if (!defaults || defaults.length === 0) {
       continue
     }
     const result = await db.query<{ count: string }>(
@@ -143,26 +155,24 @@ export async function ensureDefaultConfigSchedules(db: Queryable = getPool()): P
     if (count > 0) {
       continue
     }
-    if (definition.key === 'workers.scheduling.stock') {
-      for (const window of STOCK_DEFAULT_SCHEDULE_WINDOWS) {
-        await db.query(
-          `
-            insert into config_worker_schedules (
-              task_key, weekday_mask, window_start_minute, window_end_minute,
-              interval_minutes, paused, notes
-            ) values ($1, $2, $3, $4, $5, $6, $7)
-          `,
-          [
-            definition.key,
-            window.weekdayMask,
-            window.windowStartMinute,
-            window.windowEndMinute,
-            window.intervalMinutes,
-            window.paused,
-            window.notes,
-          ],
-        )
-      }
+    for (const window of defaults) {
+      await db.query(
+        `
+          insert into config_worker_schedules (
+            task_key, weekday_mask, window_start_minute, window_end_minute,
+            interval_minutes, paused, notes
+          ) values ($1, $2, $3, $4, $5, $6, $7)
+        `,
+        [
+          definition.key,
+          window.weekdayMask,
+          window.windowStartMinute,
+          window.windowEndMinute,
+          window.intervalMinutes,
+          window.paused,
+          window.notes,
+        ],
+      )
     }
   }
 }
@@ -170,7 +180,7 @@ export async function ensureDefaultConfigSchedules(db: Queryable = getPool()): P
 export async function recordConfigScheduleEnqueue(
   db: Queryable,
   taskKey: ConfigBackgroundTaskKey,
-  jobId: number,
+  jobId: number | null,
   enqueuedAt: Date,
 ): Promise<void> {
   await db.query(
@@ -253,4 +263,150 @@ export async function loadRecentStockSnapshots(
     jobId: row.job_id,
     error: row.error,
   }))
+}
+
+export interface PendingLitalertsRefreshRow {
+  id: number
+  productId: number
+  siteDealerId: number | null
+  reason: 'variant_in_stock_transition' | 'manual' | 'daily_full_sweep'
+  sourceSnapshotId: number | null
+  enqueuedAt: string
+  notes: string | null
+}
+
+interface PendingLitalertsRefreshDbRow extends QueryResultRow {
+  id: number
+  product_id: number
+  site_dealer_id: number | null
+  reason: 'variant_in_stock_transition' | 'manual' | 'daily_full_sweep'
+  source_snapshot_id: number | null
+  enqueued_at: Date
+  notes: string | null
+}
+
+export async function loadPendingLitalertsRefreshRows(
+  limit: number,
+  db: Queryable = getPool(),
+): Promise<PendingLitalertsRefreshRow[]> {
+  const result = await db.query<PendingLitalertsRefreshDbRow>(
+    `
+      select id, product_id, site_dealer_id, reason, source_snapshot_id,
+             enqueued_at, notes
+      from pending_litalerts_refresh_queue
+      where status = 'pending'
+      order by enqueued_at asc, id asc
+      limit $1
+    `,
+    [limit],
+  )
+  return result.rows.map((row) => ({
+    id: row.id,
+    productId: row.product_id,
+    siteDealerId: row.site_dealer_id,
+    reason: row.reason,
+    sourceSnapshotId: row.source_snapshot_id,
+    enqueuedAt: row.enqueued_at.toISOString(),
+    notes: row.notes,
+  }))
+}
+
+export interface RecentLitalertsObservationRow {
+  id: number
+  queueRowId: number | null
+  productId: number
+  siteDealerId: number | null
+  sourceSnapshotId: number | null
+  jobId: number | null
+  status: 'succeeded' | 'failed'
+  brandId: number | null
+  brandName: string | null
+  groupId: number | null
+  groupName: string | null
+  categoryName: string | null
+  searchTermLabel: string | null
+  availability: string | null
+  listingCount: number
+  pricingEligibleListingCount: number
+  nearListingCount: number
+  midListingCount: number
+  farListingCount: number
+  notes: string | null
+  error: string | null
+  capturedAt: string
+}
+
+interface RecentLitalertsObservationDbRow extends QueryResultRow {
+  id: number
+  queue_row_id: number | null
+  product_id: number
+  site_dealer_id: number | null
+  source_snapshot_id: number | null
+  job_id: number | null
+  status: 'succeeded' | 'failed'
+  brand_id: number | null
+  brand_name: string | null
+  group_id: number | null
+  group_name: string | null
+  category_name: string | null
+  search_term_label: string | null
+  availability: string | null
+  listing_count: number
+  pricing_eligible_listing_count: number
+  near_listing_count: number
+  mid_listing_count: number
+  far_listing_count: number
+  notes: string | null
+  error: string | null
+  captured_at: Date
+}
+
+export async function loadRecentLitalertsObservations(
+  limit: number,
+  db: Queryable = getPool(),
+): Promise<RecentLitalertsObservationRow[]> {
+  const result = await db.query<RecentLitalertsObservationDbRow>(
+    `
+      select id, queue_row_id, product_id, site_dealer_id, source_snapshot_id, job_id,
+             status, brand_id, brand_name, group_id, group_name, category_name,
+             search_term_label, availability, listing_count, pricing_eligible_listing_count,
+             near_listing_count, mid_listing_count, far_listing_count, notes, error,
+             captured_at
+      from litalerts_competitor_observations
+      order by captured_at desc, id desc
+      limit $1
+    `,
+    [limit],
+  )
+  return result.rows.map((row) => ({
+    id: row.id,
+    queueRowId: row.queue_row_id,
+    productId: row.product_id,
+    siteDealerId: row.site_dealer_id,
+    sourceSnapshotId: row.source_snapshot_id,
+    jobId: row.job_id,
+    status: row.status,
+    brandId: row.brand_id,
+    brandName: row.brand_name,
+    groupId: row.group_id,
+    groupName: row.group_name,
+    categoryName: row.category_name,
+    searchTermLabel: row.search_term_label,
+    availability: row.availability,
+    listingCount: row.listing_count,
+    pricingEligibleListingCount: row.pricing_eligible_listing_count,
+    nearListingCount: row.near_listing_count,
+    midListingCount: row.mid_listing_count,
+    farListingCount: row.far_listing_count,
+    notes: row.notes,
+    error: row.error,
+    capturedAt: row.captured_at.toISOString(),
+  }))
+}
+
+export async function countPendingLitalertsRefreshRows(db: Queryable = getPool()): Promise<number> {
+  const result = await db.query<{ count: string }>(
+    `select count(*)::text as count from pending_litalerts_refresh_queue where status = 'pending'`,
+  )
+  return Number(result.rows[0]?.count ?? '0')
 }

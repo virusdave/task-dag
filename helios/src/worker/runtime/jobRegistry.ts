@@ -4,6 +4,7 @@ import {
   CatalogPendingPurchasesImportJobPayloadSchema,
   CatalogReviewRerunRowJobPayloadSchema,
   CatalogSyncFullSummaryJobPayloadSchema,
+  ConfigWorkersLitalertsRefreshVariantJobPayloadSchema,
   ConfigWorkersStockRefreshJobPayloadSchema,
   CatalogSyncGroupDetailJobPayloadSchema,
   LlmDebugRerunJobPayloadSchema,
@@ -30,6 +31,7 @@ import { runCatalogPendingPurchasesApplyJob } from '../jobs/applyPendingPurchase
 import { runCatalogPendingPurchasesGenerateJob } from '../jobs/generatePendingPurchasePacketJob.js'
 import { runCatalogReviewRerunRowJob } from '../jobs/catalogReviewRerunRowJob.js'
 import { runCatalogPendingPurchasesImportJob } from '../jobs/importPendingPurchasePacketJob.js'
+import { runConfigWorkersLitalertsRefreshVariantJob } from '../jobs/configWorkersLitalertsRefreshJob.js'
 import { runConfigWorkersStockRefreshJob } from '../jobs/configWorkersStockRefreshJob.js'
 import { runProposalImportReviewJsonJob } from '../jobs/importReviewJsonJob.js'
 import { getPool } from '../../server/db/pool.js'
@@ -135,6 +137,12 @@ const handlers: Record<JobType, JobHandler> = {
     await runConfigWorkersStockRefreshJob(
       context,
       ConfigWorkersStockRefreshJobPayloadSchema.parse(context.payload),
+    )
+  },
+  'config.workers.litalerts_refresh.variant': async (context) => {
+    await runConfigWorkersLitalertsRefreshVariantJob(
+      context,
+      ConfigWorkersLitalertsRefreshVariantJobPayloadSchema.parse(context.payload),
     )
   },
 }

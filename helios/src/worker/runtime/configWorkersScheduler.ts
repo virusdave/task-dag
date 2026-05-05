@@ -8,10 +8,13 @@ import { withTransaction } from '../../server/db/tx.js'
 import {
   ensureDefaultConfigSchedules,
   loadAllConfigSchedules,
+  loadPendingLitalertsRefreshRows,
   recordConfigScheduleEnqueue,
 } from '../../server/db/queries/configQueries.js'
 import { getOptionalSweedSessionConcurrencyKey } from '../../server/jobs/concurrency.js'
 import { enqueueJob } from '../../server/jobs/enqueueJob.js'
+
+const LITALERTS_DRAIN_BATCH_SIZE = 50
 
 interface SchedulerStateEntry {
   defaultsEnsured: boolean
@@ -51,6 +54,8 @@ export async function tickConfigWorkersScheduler(now: Date = new Date()): Promis
 
     if (schedule.taskKey === 'workers.scheduling.stock') {
       await enqueueScheduledStockRefresh(schedule.taskKey, now, activeWindow.intervalMinutes)
+    } else if (schedule.taskKey === 'workers.scheduling.litalerts') {
+      await enqueueScheduledLitalertsRefreshBatch(schedule.taskKey, now, activeWindow.intervalMinutes)
     }
   }
 }
@@ -136,6 +141,72 @@ async function enqueueScheduledStockRefresh(
       payload: {
         intervalMinutes,
         siteDealerIds,
+        taskKey,
+        trigger: 'scheduled',
+      },
+      requestId: null,
+      scope: null,
+      undoPayload: null,
+    })
+  })
+}
+
+async function enqueueScheduledLitalertsRefreshBatch(
+  taskKey: ConfigBackgroundTaskKey,
+  now: Date,
+  intervalMinutes: number,
+): Promise<void> {
+  const pendingRows = await loadPendingLitalertsRefreshRows(LITALERTS_DRAIN_BATCH_SIZE)
+  if (pendingRows.length === 0) {
+    // Still record the tick so we honor the interval bucket and do not
+    // re-scan the queue every poll when it is empty.
+    await withTransaction(async (db) => {
+      await recordConfigScheduleEnqueue(db, taskKey, null, now)
+    })
+    return
+  }
+
+  const enqueuedJobIds: number[] = []
+
+  for (const row of pendingRows) {
+    const jobId = await withTransaction(async (db) => {
+      return enqueueJob(db, {
+        // Lit Alerts refresh does not touch Sweed; no shared session lane.
+        concurrencyKey: null,
+        // One job per pending queue row keeps the dedupe surface obvious.
+        dedupeKey: `config.workers.litalerts_refresh.variant:${row.id}`,
+        jobType: 'config.workers.litalerts_refresh.variant',
+        module: 'config',
+        payload: {
+          productId: row.productId,
+          queueRowId: row.id,
+          siteDealerId: row.siteDealerId,
+          sourceSnapshotId: row.sourceSnapshotId,
+          trigger: 'scheduled',
+        },
+        requestedByUserId: null,
+        runAt: now,
+        scope: null,
+      })
+    })
+    enqueuedJobIds.push(jobId)
+  }
+
+  const lastEnqueuedJobId = enqueuedJobIds[enqueuedJobIds.length - 1] ?? 0
+
+  await withTransaction(async (db) => {
+    await recordConfigScheduleEnqueue(db, taskKey, lastEnqueuedJobId, now)
+    await appendAuditEvent(db, {
+      actorType: 'system',
+      actorUserId: null,
+      entityId: taskKey,
+      entityType: 'job',
+      eventType: 'config.workers.litalerts_refresh.requested',
+      module: 'config',
+      payload: {
+        intervalMinutes,
+        enqueuedJobIds,
+        queueRowIds: pendingRows.map((row) => row.id),
         taskKey,
         trigger: 'scheduled',
       },
