@@ -798,19 +798,39 @@ pre {
   white-space: nowrap;
 }
 
+/* Marker line colors are darker hues so the 2px border-left reads against
+ * the cream pricing-ladder-track. The floating tooltip pill below sits on
+ * its own dark background, so its text overrides currentColor with the
+ * original bright hue for legibility on dark. */
 .pricing-ladder-marker.live {
+  color: #b8651a;
+}
+
+.pricing-ladder-marker.live span {
   color: #f3b35f;
 }
 
 .pricing-ladder-marker.proposed {
+  color: #1d6e93;
+}
+
+.pricing-ladder-marker.proposed span {
   color: #66d6ff;
 }
 
 .pricing-ladder-marker.average {
+  color: #2f8a48;
+}
+
+.pricing-ladder-marker.average span {
   color: #7de48f;
 }
 
 .pricing-ladder-marker.median {
+  color: #7a6f1d;
+}
+
+.pricing-ladder-marker.median span {
   color: #d7d27a;
 }
 
