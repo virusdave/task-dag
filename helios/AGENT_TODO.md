@@ -4,7 +4,54 @@
 
 Turn this app into `Helios`, the single internal Freshly Baked NYC operations surface under `/internal/tools`, while preserving the strongest existing workflows from the current one-off apps and scripts.
 
-### Active Handoff (2026-05-05, third pass): Config Module Catalog + Litalerts Schedules Now Live
+### Active Handoff (2026-05-05, fourth pass): Live Verification Found And Fixed Two Worker Bugs
+
+#### What Just Landed (Committed)
+
+- Three new local commits on top of the third-pass history:
+  - `6ca631c` Stop catalog refresh from looping on non-paginating Sweed list RPCs
+  - `8ff8c13` Read live grouped-inventory quantity from availableQty for stock refresh
+  - `9ade8b1` Record that store.product.brand.list ignores pagination params (tracking docs/sweed/catalog/creation-and-editing.md for the first time)
+- Nothing pushed; remote is unchanged.
+- `npm run typecheck` clean. `npm test` 126/126 passing. `npm run build` clean (only the pre-existing >500 kB chunk warning).
+
+#### Live Verification Performed In This Pass
+
+The third pass landed code-level + migration-level verification only. This pass restarted the helios server and worker from `helios/` (the old `bulk_additions/catalog_curation/` worker and server were still on port 3001 and were killed) and ran them against live TigerData and live Sweed. That uncovered two real bugs that did not show up in any unit test:
+
+- The catalog refresh worker's first scheduled run (job 55) hung for 30+ minutes with one Sweed connection open and no `catalog_taxonomy_snapshot_rows` ever inserted. Direct probing of `store.product.brand.list` against `prime.sweedpos.com` confirmed it ignores the `page` and `pageSize` arguments and returns the entire 231-row brand list on every call. The pre-fix `collectFlatList` / `collectPagedListShort` / `collectDistributors` loops only terminated on `data.length < pageSize`, so they spun forever. The fix tracks per-RPC entity ids across pages and stops when a page yields zero previously-unseen ids. Live runs now complete a full state-level snapshot (3296 products, 3075 groups, 231 brands, 95 distributors) in roughly twelve seconds.
+- The stock refresh worker's first runs reported zero in-stock variants for both Bronx and Midtown even though both sites obviously carry inventory, leaving every variant marked `is_on_stock = false` in `stock_variant_state` and the Lit Alerts queue empty. Direct probing of `store.inventory.item.list.grouped` showed each row exposes `currentQty` / `holdQty` / `availableQty` rather than the legacy `quantity` field, so the schema parser silently saw all rows as having no stock. The fix reads `availableQty` first (already net of holds), with `quantity` and `currentQty` as compatibility fallbacks. Live runs now correctly report Bronx 1226 variants / 148 in stock and Midtown 323 variants / 259 in stock.
+- The Postgres "inconsistent types deduced for parameter $6" failure on the `stock_variant_state` upsert is also fixed by casting `$6` to `timestamptz` so the conditional `case when $3 then $6 else null end` branches resolve to a single concrete type.
+
+After both fixes:
+
+- catalog_taxonomy_snapshots and catalog_taxonomy_snapshot_rows are populated on every scheduler tick.
+- stock_snapshots / stock_snapshot_items / stock_variant_state are populated correctly per site.
+- The first correct stock snapshot diff produced 407 out-of-stock-to-in-stock transitions (148 Bronx + 259 Midtown), each enqueued into pending_litalerts_refresh_queue with a populated `source_snapshot_id` FK.
+- The litalerts drainer scheduler is enqueuing batches (up to 50 per 5-min tick) of `config.workers.litalerts_refresh.variant` jobs and capturing real `litalerts_competitor_observations` rows with `queue_row_id`, `source_snapshot_id`, `brand_name`, `near_listing_count`, `mid_listing_count`, `far_listing_count`, etc. populated. As of this writing, 47 observations have succeeded and ~360 queue rows remain pending; they will drain at 50 per 5 min.
+- All `requested` and `completed` audit events for `config.workers.{stock,catalog,litalerts}_refresh.*` are visible from `/jobs` and `/history` via the shared `module=config` filter.
+
+The earlier orphan rows from the bug runs (`stock_snapshots.id = 14` and `catalog_taxonomy_snapshots.id = 1`) were marked `failed` directly with explanatory notes in the `error` column rather than deleted, so the operator still sees the historical incident in the per-task recent-snapshots table.
+
+#### Known Limitations / Risks
+
+- The stock refresh transaction does ~1226 `stock_variant_state` upserts plus ~407 `pending_litalerts_refresh_queue` inserts in one `withTransaction` block. The first run after the parser fix took close to the 5-minute lease window because of this, and the lease heartbeat (60s `setInterval`, fire-and-forget) only just barely kept up. If the per-site population grows much past today's numbers the same lease can expire mid-transaction and `leaseJobs.ts` will requeue with `Worker lease expired before job completion; retrying.`, leaving an orphan `stock_snapshots` row in `running`. Steady-state runs (when most variants are already stable) only take a few seconds because almost no rows transition.
+- The default Catalog cadence (every 5 min daytime, mirroring Stock) is now provably safe against live Sweed, but operators may still want to slow it down if Sweed throttles or rate-limits at peak hours.
+- The Lit Alerts drainer batch ceiling of 50 per 5-min tick will work through ~360 pending rows in roughly an hour. If a future Stock snapshot ever flips a much larger transition set into the queue, operators may want to raise the batch ceiling temporarily from `src/worker/runtime/configWorkersScheduler.ts`.
+
+#### Immediate Next Steps For Resume
+
+1. Visit `/config/workers/scheduling/{stock,litalerts,catalog}` in a signed-in localhost session and confirm the seeded windows, recent-runs, and run-now flows render correctly with the now-populated data. The HTML page renders; this pass only verified the JSON endpoints and the underlying TigerData rows.
+2. Continue watching `litalerts_competitor_observations` over the next hour and confirm the queue drains to zero (or close to zero) without any rows landing in `status='failed'`.
+3. Optional: implement the Slice 4 drift-detection warnings on each schedule page using the data now available in `stock_snapshots`, `catalog_taxonomy_snapshots`, `litalerts_competitor_observations`, and `config_worker_schedule_runs`.
+4. Optional: split the Stock refresh's per-variant upsert + queue-insert work out of one giant transaction to keep the worker lease-heartbeat headroom comfortable as catalog size grows.
+5. Optional: when a future agent surfaces these new tables in downstream Helios features (e.g. drift overlays in `/catalog`, packet-side enrichment in `/pricing`), keep the existing FKs intact (`stock_snapshot_items.snapshot_id`, `pending_litalerts_refresh_queue.source_snapshot_id`, `litalerts_competitor_observations.queue_row_id` and `source_snapshot_id`) so the audit trail back to the source snapshot remains queryable.
+
+The larger goal remains the same: keep growing Helios as the single internal Freshly Baked NYC operations surface, folding remaining script-only workflows into typed worker jobs behind the canonical `PrimarySidebar` instead of bespoke webapps.
+
+---
+
+### Prior Active Handoff (2026-05-05, third pass): Config Module Catalog + Litalerts Schedules Now Live
 
 #### Immediate Next Steps For Resume
 
