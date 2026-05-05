@@ -1,0 +1,93 @@
+import { z } from 'zod'
+
+import {
+  PendingPurchaseApprovalStatusSchema,
+  PendingPurchaseApplyRequestSummarySchema,
+  PendingPurchasePacketSummarySchema,
+  PendingPurchaseRowSchema,
+} from '../domain/pendingPurchases.js'
+import { JobStatusResponseSchema } from './jobs.js'
+
+const BlankStringSchema = z.preprocess(
+  (value) => (typeof value === 'string' && value.trim().length === 0 ? undefined : value),
+  z.string().trim().min(1).optional(),
+)
+
+const BlankNumberSchema = z.preprocess(
+  (value) => (value === '' || value === null || value === undefined ? undefined : value),
+  z.coerce.number().int().positive().optional(),
+)
+
+export const PendingPurchaseRowRouteParamsSchema = z.object({
+  rowId: z.coerce.number().int().positive(),
+})
+export type PendingPurchaseRowRouteParams = z.infer<typeof PendingPurchaseRowRouteParamsSchema>
+
+export const PendingPurchaseListQuerySchema = z.object({
+  actionType: BlankStringSchema,
+  packetId: BlankNumberSchema,
+  page: z.coerce.number().int().min(1).default(1),
+  pageSize: z.coerce.number().int().min(1).max(100).default(25),
+  search: BlankStringSchema,
+  siteKey: BlankStringSchema,
+})
+export type PendingPurchaseListQuery = z.infer<typeof PendingPurchaseListQuerySchema>
+
+export const PendingPurchaseListResponseSchema = z.object({
+  activePacket: PendingPurchasePacketSummarySchema.nullable(),
+  activeGenerationJob: JobStatusResponseSchema.nullable(),
+  filters: PendingPurchaseListQuerySchema,
+  items: z.array(PendingPurchaseRowSchema),
+  latestApplyRequest: PendingPurchaseApplyRequestSummarySchema.nullable(),
+  packets: z.array(PendingPurchasePacketSummarySchema),
+  totalCount: z.number().int().min(0),
+})
+export type PendingPurchaseListResponse = z.infer<typeof PendingPurchaseListResponseSchema>
+
+export const QueuePendingPurchasePacketImportRequestSchema = z.object({
+  filePath: z.string().trim().min(1).max(4096),
+  reason: z.string().trim().max(500).nullable().optional(),
+})
+export type QueuePendingPurchasePacketImportRequest = z.infer<typeof QueuePendingPurchasePacketImportRequestSchema>
+
+export const QueuePendingPurchasePacketGenerationRequestSchema = z
+  .object({
+    fromDate: z.iso.date(),
+    reason: z.string().trim().max(500).nullable().optional(),
+    siteDealerIds: z.array(z.coerce.number().int().positive()).default([]),
+    toDate: z.iso.date(),
+  })
+  .refine((value) => value.fromDate <= value.toDate, 'fromDate must be on or before toDate.')
+export type QueuePendingPurchasePacketGenerationRequest = z.infer<typeof QueuePendingPurchasePacketGenerationRequestSchema>
+
+export const QueuePendingPurchaseApplyRequestSchema = z.object({
+  packetId: z.number().int().positive(),
+  reason: z.string().trim().max(500).nullable().optional(),
+  rowIds: z.array(z.coerce.number().int().positive()).min(1).max(500),
+})
+export type QueuePendingPurchaseApplyRequest = z.infer<typeof QueuePendingPurchaseApplyRequestSchema>
+
+export const UpdatePendingPurchaseRowApprovalRequestSchema = z.object({
+  approvalStatus: PendingPurchaseApprovalStatusSchema,
+  expectedVersion: z.number().int().positive(),
+})
+export type UpdatePendingPurchaseRowApprovalRequest = z.infer<typeof UpdatePendingPurchaseRowApprovalRequestSchema>
+
+export const UpdatePendingPurchaseRowRequestSchema = z
+  .object({
+    editedPrimaryImageUrl: z.string().trim().url().max(4096).nullable().optional(),
+    editedProposedDescription: z.string().trim().max(20000).nullable().optional(),
+    editedProposedPrice: z.number().finite().min(0).max(100000).nullable().optional(),
+    expectedVersion: z.number().int().positive(),
+    notes: z.string().trim().max(5000).nullable().optional(),
+  })
+  .refine(
+    (value) => (
+      value.editedPrimaryImageUrl !== undefined ||
+      value.editedProposedDescription !== undefined ||
+      value.editedProposedPrice !== undefined ||
+      value.notes !== undefined
+    ),
+    'At least one pending-purchase field must be updated.',
+  )
+export type UpdatePendingPurchaseRowRequest = z.infer<typeof UpdatePendingPurchaseRowRequestSchema>

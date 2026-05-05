@@ -1,0 +1,1593 @@
+import { z } from 'zod'
+
+import {
+  PRICING_FAR_DISTANCE_MAX_MILES,
+  PRICING_MID_DISTANCE_MAX_MILES,
+  PRICING_MID_DISTANCE_WEIGHT,
+  PRICING_NEAR_DISTANCE_MAX_MILES,
+  PRICING_NEAR_DISTANCE_WEIGHT,
+  PRICING_POST_TAX_MULTIPLIER,
+} from '../../shared/domain/pricingGeneration.js'
+import type { NormalizedCatalogGroupLiveState } from '../catalog/liveState.js'
+import { getWorkerEnv } from '../config/env.js'
+import { RetryableWorkerError } from '../runtime/errors.js'
+import { pageDave } from '../runtime/pageDave.js'
+import type { PricingDistanceBand, PricingMarketContext, ProductPricingMarketEvidence } from './deterministicPricing.js'
+
+const GENERIC_SEARCH_WORDS = new Set([
+  'all',
+  'and',
+  'aio',
+  'cartridge',
+  'cart',
+  'disposable',
+  'do',
+  'flower',
+  'gummies',
+  'gummy',
+  'infused',
+  'in',
+  'not',
+  'one',
+  'pack',
+  'pk',
+  'pre',
+  'preroll',
+  'prerolls',
+  'pre-roll',
+  'pre-rolls',
+  'roll',
+  'rosin',
+  'the',
+  'use',
+  'vape',
+  'vapes',
+  'vaporizers',
+])
+
+const BRAND_MANUFACTURER_ALIASES = new Map<string, string>([
+  ['airo', 'airo brands'],
+  ['american hash maker', 'american hash makers'],
+  ['anthem', 'anthem curaleaf'],
+  ['camino', 'camino kiva'],
+  ['cru', 'cru cannabis'],
+  ['dank', 'dank by definition'],
+  ['grass roots', 'grassroots curaleaf'],
+  ['jams', 'jams curaleaf'],
+  ['select', 'select curaleaf'],
+])
+
+const ManufacturerResponseSchema = z.object({
+  manufacturers: z.array(
+    z.object({
+      id: z.coerce.number().int().positive(),
+      name: z.string().trim().min(1),
+    }),
+  ),
+})
+
+const MenuListingConfigSchema = z.object({
+  price: z.union([z.number(), z.string()]).nullable().optional(),
+  salePrice: z.union([z.number(), z.string()]).nullable().optional(),
+  weight: z.string().nullable().optional(),
+}).passthrough()
+
+const MenuListingSchema = z.object({
+  availability: z.union([z.string(), z.number()]).nullable().optional(),
+  brand: z.string().nullable().optional(),
+  category: z.string().nullable().optional(),
+  configs: z.array(MenuListingConfigSchema).default([]),
+  dispensaryName: z.string().nullable().optional(),
+  name: z.string().nullable().optional(),
+  url: z.string().nullable().optional(),
+}).passthrough()
+
+const MenuListingsResponseSchema = z.object({
+  listings: z.array(MenuListingSchema).default([]),
+})
+
+const DispensaryLocationSchema = z.object({
+  address: z.string().nullable().optional(),
+  city: z.string().nullable().optional(),
+  id: z.coerce.number().int().positive(),
+  latitude: z.coerce.number().nullable().optional(),
+  longitude: z.coerce.number().nullable().optional(),
+  name: z.string().trim().min(1),
+  state: z.string().nullable().optional(),
+  zip: z.string().nullable().optional(),
+})
+
+const DispensaryLocationsResponseSchema = z.array(DispensaryLocationSchema)
+
+const MIDTOWN_REFERENCE_COORDINATES = {
+  latitude: 40.762318,
+  longitude: -73.97676,
+} as const
+
+const MIN_PRICING_ELIGIBLE_COMP_COUNT = 3
+const PRICING_SEARCH_ADAPTATION_MODEL = 'google.gemma-3-27b-it'
+const PRICING_SEARCH_ADAPTATION_MAX_TERMS = 4
+const LITALERTS_FETCH_MAX_ATTEMPTS = 5
+const LITALERTS_RETRY_BASE_DELAY_MS = 1000
+const PRICING_SEARCH_ADAPTATION_MAX_ATTEMPTS = 4
+const PRICING_SEARCH_ADAPTATION_RETRY_BASE_DELAY_MS = 1500
+const SEARCH_ANNOTATION_CANNABINOID_PATTERN = /\b(?:thc|cbd|cbn|cbg|cbc|thca|cbda|delta[- ]?9)\b/i
+const SEARCH_ANNOTATION_POTENCY_PATTERN = /\b\d+(?:\.\d+)?\s*mg\s*(?:thc|cbd|cbn|cbg|cbc|thca|cbda)\b/i
+const SEARCH_ANNOTATION_RATIO_PATTERN = /\b\d+(?:\.\d+)?\s*:\s*\d+(?:\.\d+)?\b/
+
+let dispensaryDirectoryPromise: Promise<DispensaryDirectory> | null = null
+let manufacturersPromise: Promise<z.infer<typeof ManufacturerResponseSchema>['manufacturers']> | null = null
+const brandMatchCache = new Map<string, Promise<BrandMatch | null>>()
+
+interface BrandMatch {
+  brandId: number
+  brandName: string
+}
+
+interface ParsedSizeProfile {
+  measure: 'g' | 'mg' | null
+  packCount: number
+  totalValue: number | null
+  unitValue: number | null
+}
+
+interface DispensaryDirectoryEntry {
+  address: string | null
+  city: string | null
+  distanceBand: PricingDistanceBand
+  distanceMiles: number | null
+  id: number
+  name: string
+  normalizedName: string
+}
+
+interface DispensaryDirectory {
+  byId: Map<number, DispensaryDirectoryEntry>
+  byNormalizedName: Map<string, DispensaryDirectoryEntry>
+  withinTenMiles: DispensaryDirectoryEntry[]
+}
+
+interface ListingPriceCandidate {
+  availability: string | null
+  category: string | null
+  distanceBand: PricingDistanceBand
+  distanceMiles: number | null
+  dispensaryName: string
+  listingName: string
+  postTaxPrice: number
+  preTaxPrice: number
+  size: ParsedSizeProfile
+  source: 'nearby' | 'statewide'
+  url: string | null
+}
+
+interface ProductComparableProfile {
+  laneKey: string | null
+  size: ParsedSizeProfile
+}
+
+interface ListingMatchAssessment {
+  laneTier: 0 | 1 | 2 | 3
+  listing: ListingPriceCandidate
+  matchTier: 'exact' | 'fallback' | 'weak'
+  sizeTier: 0 | 1 | 2 | 3
+}
+
+type WeightedPriceListing = Pick<ListingPriceCandidate, 'distanceBand' | 'postTaxPrice' | 'preTaxPrice'>
+type EvidenceSourceListing = Pick<ListingPriceCandidate, 'source'>
+
+const PricingSearchAdaptationEnvelopeSchema = z.object({
+  adaptation: z.object({
+    rationale: z.string().trim().min(1),
+    searchTerms: z.array(z.string().trim().min(1)).min(1).max(PRICING_SEARCH_ADAPTATION_MAX_TERMS),
+  }),
+})
+
+export async function buildPricingMarketContext(
+  liveState: NormalizedCatalogGroupLiveState,
+): Promise<PricingMarketContext> {
+  if (!getWorkerEnv().litAlertsBearerToken) {
+    return {
+      availability: 'disabled',
+      note: 'Lit Alerts pricing enrichment is disabled because no bearer token is configured.',
+      productEvidenceById: {},
+      searchTerm: null,
+    }
+  }
+
+  if (!liveState.brand) {
+    return {
+      availability: 'no_brand',
+      note: 'Lit Alerts pricing enrichment is unavailable because the live group has no brand.',
+      productEvidenceById: {},
+      searchTerm: null,
+    }
+  }
+
+  const brandMatch = await resolveBrandMatch(liveState.brand)
+  if (!brandMatch) {
+    return {
+      availability: 'unresolved_brand',
+      note: `Could not resolve Lit Alerts manufacturer identity for ${liveState.brand}.`,
+      productEvidenceById: {},
+      searchTerm: null,
+    }
+  }
+
+  const categoryId = resolveLitAlertsCategoryId(liveState)
+  const deterministicSearchTerms = deriveSearchTerms(liveState)
+  const searchTerm = await resolveSearchTerm(deterministicSearchTerms, brandMatch.brandId, categoryId)
+  let combinedSearchTerms = searchTerm ? [searchTerm] : []
+  let mergedListings = combinedSearchTerms.length > 0
+    ? await collectListingsForSearchTerms({
+        brandId: brandMatch.brandId,
+        categoryId,
+        searchTerms: combinedSearchTerms,
+      })
+    : []
+  let evidenceByProductId = collectProductEvidence(liveState, mergedListings, buildSearchTermLabel(combinedSearchTerms))
+  let adaptationSummary: string | null = null
+
+  if (shouldAttemptSearchAdaptation(liveState, evidenceByProductId)) {
+    const adaptation = await requestPricingSearchAdaptation({
+      categoryId,
+      currentListings: mergedListings,
+      deterministicSearchTerms,
+      liveState,
+      primarySearchTerm: searchTerm,
+      productEvidenceById: evidenceByProductId,
+    })
+    const adaptedSearchTerms = adaptation?.searchTerms.filter((term) => !combinedSearchTerms.includes(term)) ?? []
+    if (adaptedSearchTerms.length > 0) {
+      combinedSearchTerms = [...combinedSearchTerms, ...adaptedSearchTerms]
+      const adaptedListings = await collectListingsForSearchTerms({
+        brandId: brandMatch.brandId,
+        categoryId,
+        searchTerms: adaptedSearchTerms,
+      })
+      mergedListings = dedupeListingCandidates([...mergedListings, ...adaptedListings])
+      evidenceByProductId = collectProductEvidence(liveState, mergedListings, buildSearchTermLabel(combinedSearchTerms))
+      adaptationSummary = `Mantle search adaptation added ${adaptedSearchTerms.map((term) => `"${term}"`).join(', ')} because the initial pass left at least one SKU below ${MIN_PRICING_ELIGIBLE_COMP_COUNT} near/mid comps. ${adaptation?.rationale ?? ''}`.trim()
+    } else if (adaptation?.rationale) {
+      adaptationSummary = `Mantle search adaptation reviewed the thin-comp case but did not add safer search terms. ${adaptation.rationale}`
+    }
+  }
+
+  if (combinedSearchTerms.length === 0) {
+    return {
+      availability: 'no_family_matches',
+      note: adaptationSummary
+        ? `${adaptationSummary} No Lit Alerts family listing cluster was found for ${liveState.brand} / ${liveState.groupName}.`
+        : `No Lit Alerts family listing cluster was found for ${liveState.brand} / ${liveState.groupName}.`,
+      productEvidenceById: {},
+      searchTerm: null,
+    }
+  }
+
+  const evidenceEntries = Object.values(evidenceByProductId)
+  const searchLabel = buildSearchTermLabel(combinedSearchTerms)
+  const adaptationPrefix = adaptationSummary ? `${adaptationSummary} ` : ''
+  if (evidenceEntries.some((evidence) => evidence.averagePostTaxPrice !== null)) {
+    return {
+      availability: 'matched',
+      note:
+        adaptationPrefix +
+        `Matched Lit Alerts distance-banded competitor listings for ${liveState.brand} using ${searchLabel}. ` +
+        `Near (${PRICING_NEAR_DISTANCE_MAX_MILES.toFixed(1)}mi) listings drive pricing much more strongly than mid (${PRICING_MID_DISTANCE_MAX_MILES.toFixed(1)}mi) listings; far and very-far listings remain display-only evidence.`,
+      productEvidenceById: evidenceByProductId,
+      searchTerm: searchLabel,
+    }
+  }
+
+  if (evidenceEntries.some((evidence) => evidence.listingCount > 0)) {
+    return {
+      availability: 'display_only',
+      note:
+        adaptationPrefix +
+        `Lit Alerts found same-brand family listings for ${searchLabel}, but none landed inside the near or mid distance buckets. ` +
+        `Those farther listings are still retained in the pricing ladder for context while the draft falls back to the managed GM target.`,
+      productEvidenceById: evidenceByProductId,
+      searchTerm: searchLabel,
+    }
+  }
+
+  return {
+    availability: 'no_safe_matches',
+    note: `${adaptationPrefix}Lit Alerts found a family cluster for ${searchLabel}, but no safe size-aligned competitor rows matched the current SKUs.`,
+    productEvidenceById: {},
+    searchTerm: searchLabel,
+  }
+}
+
+export async function buildPricingMarketContextWithFailureHandling(input: {
+  failureContext: string
+  liveState: NormalizedCatalogGroupLiveState
+  shouldPageOnFailure?: ((error: unknown) => boolean | Promise<boolean>) | undefined
+}): Promise<PricingMarketContext> {
+  try {
+    return await buildPricingMarketContext(input.liveState)
+  } catch (error) {
+    const shouldPage = await input.shouldPageOnFailure?.(error)
+    if (!shouldPage) {
+      throw error
+    }
+
+    try {
+      await pageDave(buildPricingMarketFailurePageMessage(input.failureContext, input.liveState, error))
+    } catch (pagingError) {
+      throw new Error(
+        `${buildUnknownErrorMessage(error)} Also failed to page Dave: ${buildUnknownErrorMessage(pagingError)}`,
+      )
+    }
+
+    throw error
+  }
+}
+
+export function resetPricingMarketCachesForTest(): void {
+  dispensaryDirectoryPromise = null
+  manufacturersPromise = null
+  brandMatchCache.clear()
+}
+
+export const __test__ = {
+  assessListingForProduct,
+  classifyLaneTier,
+  classifySizeTier,
+  inferComparableLaneKey,
+}
+
+async function resolveBrandMatch(brandName: string): Promise<BrandMatch | null> {
+  const normalizedTarget = normalizeBrandKey(brandName)
+  const normalizedTargetWithoutParenthetical = stripParentheticalSuffix(normalizedTarget)
+  const cachedMatch = brandMatchCache.get(normalizedTarget)
+  if (cachedMatch) {
+    return cachedMatch
+  }
+
+  const pendingMatch = loadManufacturers().then((manufacturers) => {
+    const aliasTarget = BRAND_MANUFACTURER_ALIASES.get(normalizedTarget)
+    if (aliasTarget) {
+      const aliased = manufacturers.find((manufacturer) => normalizeBrandKey(manufacturer.name) === aliasTarget)
+      if (aliased) {
+        return { brandId: aliased.id, brandName: aliased.name }
+      }
+    }
+
+    const exact = manufacturers.find((manufacturer) => {
+      const manufacturerKey = normalizeBrandKey(manufacturer.name)
+      return manufacturerKey === normalizedTarget || stripParentheticalSuffix(manufacturerKey) === normalizedTargetWithoutParenthetical
+    })
+
+    return exact ? { brandId: exact.id, brandName: exact.name } : null
+  })
+
+  brandMatchCache.set(normalizedTarget, pendingMatch)
+  return pendingMatch
+}
+
+async function loadManufacturers(): Promise<z.infer<typeof ManufacturerResponseSchema>['manufacturers']> {
+  if (manufacturersPromise) {
+    return manufacturersPromise
+  }
+
+  manufacturersPromise = fetchManufacturers()
+  return manufacturersPromise
+}
+
+async function fetchManufacturers(): Promise<z.infer<typeof ManufacturerResponseSchema>['manufacturers']> {
+  const env = getWorkerEnv()
+  const response = await fetchLitAlertsJson(
+    `/Manufacturers/real?page=0&pagesize=2000&state=${encodeURIComponent(env.litAlertsStateCode)}`,
+    {
+      method: 'GET',
+      timeoutMs: env.litAlertsRequestTimeoutMs,
+    },
+  )
+  return ManufacturerResponseSchema.parse(response).manufacturers
+}
+
+async function resolveSearchTerm(
+  searchTerms: string[],
+  brandId: number,
+  categoryId: string | null,
+): Promise<string | null> {
+  const dispensaryDirectory = await loadDispensaryDirectory()
+
+  for (const searchTerm of searchTerms) {
+    const listings = await listMenuListings({
+      brandId,
+      categoryId,
+      dispensaryDirectory,
+      dispensaryIds: null,
+      maxPages: 1,
+      pageSize: 100,
+      searchTerm,
+      source: 'statewide',
+      statewide: true,
+    })
+    if (listings.length > 0) {
+      return searchTerm
+    }
+  }
+
+  return null
+}
+
+async function collectListingsForSearchTerms(input: {
+  brandId: number
+  categoryId: string | null
+  searchTerms: string[]
+}): Promise<ListingPriceCandidate[]> {
+  const dispensaryDirectory = await loadDispensaryDirectory()
+  const nearbyDispensaryIds = dispensaryDirectory.withinTenMiles.map((dispensary) => dispensary.id)
+  const mergedListings: ListingPriceCandidate[] = []
+
+  for (const searchTerm of input.searchTerms) {
+    const nearbyListings = await listMenuListings({
+      brandId: input.brandId,
+      categoryId: input.categoryId,
+      dispensaryDirectory,
+      dispensaryIds: nearbyDispensaryIds,
+      searchTerm,
+      source: 'nearby',
+      statewide: false,
+    })
+    const statewideListings = await listMenuListings({
+      brandId: input.brandId,
+      categoryId: input.categoryId,
+      dispensaryDirectory,
+      dispensaryIds: null,
+      searchTerm,
+      source: 'statewide',
+      statewide: true,
+    })
+    mergedListings.push(...nearbyListings, ...statewideListings)
+  }
+
+  return dedupeListingCandidates(mergedListings)
+}
+
+async function listMenuListings(input: {
+  brandId: number
+  categoryId: string | null
+  dispensaryDirectory: DispensaryDirectory
+  dispensaryIds: number[] | null
+  maxPages?: number
+  pageSize?: number
+  searchTerm: string
+  source: 'nearby' | 'statewide'
+  statewide: boolean
+}): Promise<ListingPriceCandidate[]> {
+  const env = getWorkerEnv()
+  const listings: ListingPriceCandidate[] = []
+  const pageSize = input.pageSize ?? 250
+  const maxPages = input.maxPages ?? 10
+
+  for (let page = 0; page < maxPages; page += 1) {
+    const payload = {
+      brandIDs: [input.brandId],
+      dispensaryIDs: input.statewide ? null : input.dispensaryIds,
+      filters: {
+        ...(input.categoryId ? { CategoryId: input.categoryId } : {}),
+        ...(input.statewide || !input.dispensaryIds ? {} : { Dispensary: JSON.stringify(input.dispensaryIds) }),
+        Availability: 'All',
+        Brand: `[${input.brandId}]`,
+        Image: 'All',
+        MedRec: input.statewide ? 'All' : 'Rec',
+        Name: input.searchTerm,
+        ShowHiddenDisps: 'false',
+        ShowStaleItems: 'False',
+        StateID: String(env.litAlertsStateId),
+      },
+      page,
+      pagesize: pageSize,
+      sortfields: ['Name'],
+      stateID: env.litAlertsStateId,
+    }
+
+    const response = await fetchLitAlertsJson('/Products/menulistings', {
+      body: JSON.stringify(payload),
+      method: 'POST',
+      timeoutMs: env.litAlertsRequestTimeoutMs,
+    })
+    const parsed = parseMenuListingsResponse(response)
+    const pageListings = flattenListingCandidates(parsed.listings, input.dispensaryDirectory, input.source)
+    listings.push(...pageListings)
+    if (parsed.listings.length < pageSize) {
+      break
+    }
+  }
+
+  return listings.filter((listing) => !/freshly baked/i.test(listing.dispensaryName))
+}
+
+function collectProductEvidence(
+  liveState: NormalizedCatalogGroupLiveState,
+  listings: ListingPriceCandidate[],
+  searchTerm: string,
+): Record<number, ProductPricingMarketEvidence> {
+  const result: Record<number, ProductPricingMarketEvidence> = {}
+
+  for (const product of liveState.products) {
+    const productProfile: ProductComparableProfile = {
+      laneKey: inferComparableLaneKey({
+        category: liveState.category,
+        subcategory: liveState.subcategory,
+        text: `${liveState.groupFullName} ${product.name} ${product.tab}`,
+      }),
+      size: parseProductSizeProfile(product.name, product.tab),
+    }
+    const assessedListings = dedupeListingCandidates(
+      listings.filter((listing) => isCategoryCompatible(liveState, listing.category)),
+    ).map((listing) => assessListingForProduct(productProfile, listing))
+    if (assessedListings.length === 0) {
+      continue
+    }
+
+    const bestLaneTier = assessedListings.reduce<ListingMatchAssessment['laneTier']>(
+      (best, assessment) => (assessment.laneTier > best ? assessment.laneTier : best),
+      0,
+    )
+    const strongestLaneListings = assessedListings.filter((assessment) => assessment.laneTier === bestLaneTier)
+    const bestSizeTier = strongestLaneListings.reduce<ListingMatchAssessment['sizeTier']>(
+      (best, assessment) => (assessment.sizeTier > best ? assessment.sizeTier : best),
+      0,
+    )
+    const matchedListings = assessedListings.map((assessment) => {
+      const tierEligible = bestLaneTier > 0
+        && bestSizeTier > 0
+        && assessment.laneTier === bestLaneTier
+        && assessment.sizeTier === bestSizeTier
+      const eligibleForPricing = tierEligible
+        && (assessment.listing.distanceBand === 'near' || assessment.listing.distanceBand === 'mid')
+
+      return {
+        category: assessment.listing.category,
+        distanceBand: assessment.listing.distanceBand,
+        distanceMiles: assessment.listing.distanceMiles,
+        dispensaryName: assessment.listing.dispensaryName,
+        eligibleForPricing,
+        exclusionReason: eligibleForPricing
+          ? null
+          : describeListingExclusionReason({
+              assessment,
+              bestLaneTier,
+              bestSizeTier,
+            }),
+        listingName: assessment.listing.listingName,
+        matchTier: assessment.matchTier,
+        postTaxPrice: assessment.listing.postTaxPrice,
+        preTaxPrice: assessment.listing.preTaxPrice,
+        source: assessment.listing.source,
+        url: assessment.listing.url,
+      }
+    })
+    if (matchedListings.length === 0) {
+      continue
+    }
+
+    const pricingEligibleListings = matchedListings.filter((listing) => listing.eligibleForPricing)
+    const farListings = matchedListings.filter((listing) => listing.distanceBand === 'far')
+    const dispensaryCount = new Set(matchedListings.map((listing) => listing.dispensaryName.toLowerCase())).size
+    const pricingEligibleDispensaryCount = new Set(
+      pricingEligibleListings.map((listing) => listing.dispensaryName.toLowerCase()),
+    ).size
+
+    const weightedAverage = buildWeightedAveragePrice(pricingEligibleListings)
+    const pricingMedian = buildMedianPrice(pricingEligibleListings)
+    const farAverage = buildAveragePrice(farListings)
+    result[product.productId] = {
+      averagePostTaxPrice: weightedAverage?.postTaxPrice ?? null,
+      averagePreTaxPrice: weightedAverage?.preTaxPrice ?? null,
+      dispensaryCount,
+      farAveragePostTaxPrice: farAverage?.postTaxPrice ?? null,
+      farAveragePreTaxPrice: farAverage?.preTaxPrice ?? null,
+      farListingCount: farListings.length,
+      listingCount: matchedListings.length,
+      medianPostTaxPrice: pricingMedian?.postTaxPrice ?? null,
+      medianPreTaxPrice: pricingMedian?.preTaxPrice ?? null,
+      pricingEligibleDispensaryCount,
+      pricingEligibleListingCount: pricingEligibleListings.length,
+      matchedListings,
+      searchTerm,
+      source: deriveEvidenceSource(matchedListings),
+    }
+  }
+
+  return result
+}
+
+function flattenListingCandidates(
+  listings: z.infer<typeof MenuListingSchema>[],
+  dispensaryDirectory: DispensaryDirectory,
+  source: 'nearby' | 'statewide',
+): ListingPriceCandidate[] {
+  const flattened: ListingPriceCandidate[] = []
+
+  for (const listing of listings) {
+    const listingName = normalizeInlineText(listing.name)
+    if (!listingName) {
+      continue
+    }
+
+    const dispensaryName = normalizeInlineText(listing.dispensaryName) || 'Unknown dispensary'
+    const dispensaryDirectoryEntry = dispensaryDirectory.byNormalizedName.get(normalizeDispensaryKey(dispensaryName))
+    for (const config of listing.configs) {
+      const preTaxPrice = parseLitAlertsPrice(config.salePrice) ?? parseLitAlertsPrice(config.price)
+      if (preTaxPrice === null || preTaxPrice <= 0) {
+        continue
+      }
+
+      flattened.push({
+        availability: normalizeInlineText(listing.availability),
+        category: normalizeInlineText(listing.category),
+        distanceBand: dispensaryDirectoryEntry?.distanceBand ?? 'unknown',
+        distanceMiles: dispensaryDirectoryEntry?.distanceMiles ?? null,
+        dispensaryName,
+        listingName,
+        postTaxPrice: roundCurrency(preTaxPrice * PRICING_POST_TAX_MULTIPLIER),
+        preTaxPrice: roundCurrency(preTaxPrice),
+        size: parseListingSizeProfile(listingName, normalizeInlineText(config.weight)),
+        source,
+        url: normalizeInlineText(listing.url),
+      })
+    }
+  }
+
+  return flattened
+}
+
+async function fetchLitAlertsJson(
+  path: string,
+  input: { body?: string; method: 'GET' | 'POST'; timeoutMs: number },
+): Promise<unknown> {
+  const env = getWorkerEnv()
+  if (!env.litAlertsBearerToken) {
+    throw new Error('LITALERTS_BEARER_TOKEN is required for Lit Alerts pricing enrichment.')
+  }
+
+  return fetchJsonWithRetry({
+    body: input.body,
+    headers: {
+      authorization: `Bearer ${env.litAlertsBearerToken}`,
+      'content-type': 'application/json; charset=utf-8',
+      origin: 'https://brands.litalerts.com',
+      referer: 'https://brands.litalerts.com/',
+    },
+    maxAttempts: LITALERTS_FETCH_MAX_ATTEMPTS,
+    method: input.method,
+    requestLabel: `Lit Alerts ${path}`,
+    retryBaseDelayMs: LITALERTS_RETRY_BASE_DELAY_MS,
+    timeoutMs: input.timeoutMs,
+    url: `${env.litAlertsApiUrl}${path}`,
+  })
+}
+
+async function loadDispensaryDirectory(): Promise<DispensaryDirectory> {
+  if (dispensaryDirectoryPromise) {
+    return dispensaryDirectoryPromise
+  }
+
+  dispensaryDirectoryPromise = fetchDispensaryDirectory()
+  return dispensaryDirectoryPromise
+}
+
+async function fetchDispensaryDirectory(): Promise<DispensaryDirectory> {
+  const env = getWorkerEnv()
+  const response = await fetchLitAlertsJson('/Dispensaries/alllocations', {
+    body: JSON.stringify({
+      MedRecFilter: 2,
+      StateId: env.litAlertsStateId,
+      ZipCodesFilter: null,
+      ZipRadiusFilter: null,
+    }),
+    method: 'POST',
+    timeoutMs: env.litAlertsRequestTimeoutMs,
+  })
+  const parsed = DispensaryLocationsResponseSchema.parse(response)
+  const byId = new Map<number, DispensaryDirectoryEntry>()
+  const byNormalizedName = new Map<string, DispensaryDirectoryEntry>()
+  const withinTenMiles: DispensaryDirectoryEntry[] = []
+
+  for (const dispensary of parsed) {
+    const distanceMiles = dispensary.latitude === null || dispensary.longitude === null || dispensary.latitude === undefined || dispensary.longitude === undefined
+      ? null
+      : roundCurrency(
+          haversineMiles(
+            MIDTOWN_REFERENCE_COORDINATES.latitude,
+            MIDTOWN_REFERENCE_COORDINATES.longitude,
+            dispensary.latitude,
+            dispensary.longitude,
+          ),
+        )
+    const entry: DispensaryDirectoryEntry = {
+      address: normalizeInlineText(dispensary.address),
+      city: normalizeInlineText(dispensary.city),
+      distanceBand: classifyPricingDistanceBand(distanceMiles),
+      distanceMiles,
+      id: dispensary.id,
+      name: dispensary.name,
+      normalizedName: normalizeDispensaryKey(dispensary.name),
+    }
+    byId.set(entry.id, entry)
+    if (entry.normalizedName) {
+      byNormalizedName.set(entry.normalizedName, entry)
+    }
+    if (entry.distanceMiles !== null && entry.distanceMiles <= PRICING_FAR_DISTANCE_MAX_MILES) {
+      withinTenMiles.push(entry)
+    }
+  }
+
+  return {
+    byId,
+    byNormalizedName,
+    withinTenMiles,
+  }
+}
+
+export function classifyPricingDistanceBand(distanceMiles: number | null): PricingDistanceBand {
+  if (distanceMiles === null || !Number.isFinite(distanceMiles)) {
+    return 'unknown'
+  }
+  if (distanceMiles <= PRICING_NEAR_DISTANCE_MAX_MILES) {
+    return 'near'
+  }
+  if (distanceMiles <= PRICING_MID_DISTANCE_MAX_MILES) {
+    return 'mid'
+  }
+  if (distanceMiles <= PRICING_FAR_DISTANCE_MAX_MILES) {
+    return 'far'
+  }
+  return 'very_far'
+}
+
+export function buildWeightedAveragePrice<TListing extends WeightedPriceListing>(
+  listings: TListing[],
+): { postTaxPrice: number; preTaxPrice: number } | null {
+  if (listings.length === 0) {
+    return null
+  }
+
+  let weightedPostTaxTotal = 0
+  let weightedPreTaxTotal = 0
+  let totalWeight = 0
+
+  for (const listing of listings) {
+    const weight = listing.distanceBand === 'near'
+      ? PRICING_NEAR_DISTANCE_WEIGHT
+      : listing.distanceBand === 'mid'
+        ? PRICING_MID_DISTANCE_WEIGHT
+        : 0
+    if (weight <= 0) {
+      continue
+    }
+    weightedPostTaxTotal += listing.postTaxPrice * weight
+    weightedPreTaxTotal += listing.preTaxPrice * weight
+    totalWeight += weight
+  }
+
+  if (totalWeight <= 0) {
+    return null
+  }
+
+  return {
+    postTaxPrice: roundCurrency(weightedPostTaxTotal / totalWeight),
+    preTaxPrice: roundCurrency(weightedPreTaxTotal / totalWeight),
+  }
+}
+
+export function buildAveragePrice<TListing extends Pick<ListingPriceCandidate, 'postTaxPrice' | 'preTaxPrice'>>(
+  listings: TListing[],
+): { postTaxPrice: number; preTaxPrice: number } | null {
+  if (listings.length === 0) {
+    return null
+  }
+
+  const postTaxValues = listings.map((listing) => listing.postTaxPrice)
+  const preTaxValues = listings.map((listing) => listing.preTaxPrice)
+
+  return {
+    postTaxPrice: roundCurrency(postTaxValues.reduce((sum, value) => sum + value, 0) / postTaxValues.length),
+    preTaxPrice: roundCurrency(preTaxValues.reduce((sum, value) => sum + value, 0) / preTaxValues.length),
+  }
+}
+
+export function buildMedianPrice<TListing extends Pick<ListingPriceCandidate, 'postTaxPrice' | 'preTaxPrice'>>(
+  listings: TListing[],
+): { postTaxPrice: number; preTaxPrice: number } | null {
+  if (listings.length === 0) {
+    return null
+  }
+
+  const postTaxValues = listings.map((listing) => listing.postTaxPrice).sort((left, right) => left - right)
+  const preTaxValues = listings.map((listing) => listing.preTaxPrice).sort((left, right) => left - right)
+
+  return {
+    postTaxPrice: medianOfSortedValues(postTaxValues),
+    preTaxPrice: medianOfSortedValues(preTaxValues),
+  }
+}
+
+export function parseMenuListingsResponse(response: unknown): z.infer<typeof MenuListingsResponseSchema> {
+  return MenuListingsResponseSchema.parse(response)
+}
+
+function deriveEvidenceSource<TListing extends EvidenceSourceListing>(
+  listings: TListing[],
+): ProductPricingMarketEvidence['source'] {
+  const hasNearby = listings.some((listing) => listing.source === 'nearby')
+  const hasStatewide = listings.some((listing) => listing.source === 'statewide')
+  if (hasNearby && hasStatewide) {
+    return 'mixed'
+  }
+  if (hasNearby) {
+    return 'nearby'
+  }
+  if (hasStatewide) {
+    return 'statewide'
+  }
+  return null
+}
+
+function medianOfSortedValues(values: number[]): number {
+  const midpoint = Math.floor(values.length / 2)
+  if (values.length % 2 === 1) {
+    return roundCurrency(values[midpoint] ?? 0)
+  }
+
+  return roundCurrency(((values[midpoint - 1] ?? 0) + (values[midpoint] ?? 0)) / 2)
+}
+
+function assessListingForProduct(
+  productProfile: ProductComparableProfile,
+  listing: ListingPriceCandidate,
+): ListingMatchAssessment {
+  const listingLaneKey = inferComparableLaneKey({
+    category: listing.category,
+    subcategory: null,
+    text: listing.listingName,
+  })
+  const laneTier = classifyLaneTier(productProfile.laneKey, listingLaneKey)
+  const sizeTier = classifySizeTier(productProfile.size, listing.size)
+  return {
+    laneTier,
+    listing,
+    matchTier: classifyListingMatchTier(laneTier, sizeTier),
+    sizeTier,
+  }
+}
+
+function classifyListingMatchTier(
+  laneTier: ListingMatchAssessment['laneTier'],
+  sizeTier: ListingMatchAssessment['sizeTier'],
+): ListingMatchAssessment['matchTier'] {
+  const floorTier = Math.min(laneTier, sizeTier)
+  if (floorTier >= 3) {
+    return 'exact'
+  }
+  if (floorTier >= 2) {
+    return 'fallback'
+  }
+  return 'weak'
+}
+
+function describeListingExclusionReason(input: {
+  assessment: ListingMatchAssessment
+  bestLaneTier: ListingMatchAssessment['laneTier']
+  bestSizeTier: ListingMatchAssessment['sizeTier']
+}): string {
+  const { assessment, bestLaneTier, bestSizeTier } = input
+  if (assessment.laneTier < bestLaneTier) {
+    return bestLaneTier >= 3
+      ? 'Excluded from pricing comps because stronger exact-format matches exist.'
+      : 'Excluded from pricing comps because stronger category-format matches exist.'
+  }
+  if (bestSizeTier === 0 || assessment.sizeTier === 0) {
+    return 'Excluded from pricing comps because the size does not align safely with this SKU.'
+  }
+  if (assessment.sizeTier < bestSizeTier) {
+    return bestSizeTier >= 3
+      ? 'Excluded from pricing comps because stronger exact-size matches exist.'
+      : 'Excluded from pricing comps because stronger size-aligned matches exist.'
+  }
+  if (assessment.listing.distanceBand !== 'near' && assessment.listing.distanceBand !== 'mid') {
+    return 'Shown for context only because it sits outside the near/mid pricing radius.'
+  }
+  return 'Shown for context only; stronger pricing comps were retained instead.'
+}
+
+function shouldAttemptSearchAdaptation(
+  liveState: NormalizedCatalogGroupLiveState,
+  evidenceByProductId: Record<number, ProductPricingMarketEvidence>,
+): boolean {
+  return liveState.products.some((product) => (evidenceByProductId[product.productId]?.pricingEligibleListingCount ?? 0) < MIN_PRICING_ELIGIBLE_COMP_COUNT)
+}
+
+async function requestPricingSearchAdaptation(input: {
+  categoryId: string | null
+  currentListings: ListingPriceCandidate[]
+  deterministicSearchTerms: string[]
+  liveState: NormalizedCatalogGroupLiveState
+  primarySearchTerm: string | null
+  productEvidenceById: Record<number, ProductPricingMarketEvidence>
+}): Promise<{ rationale: string; searchTerms: string[] } | null> {
+  const env = getWorkerEnv()
+  if (!env.bedrockMantleBearerToken) {
+    return null
+  }
+
+  const response = await fetchJsonWithRetry({
+    body: JSON.stringify({
+      max_tokens: 1200,
+      messages: [
+        {
+          role: 'system',
+          content: [
+            'You adapt Lit Alerts product-family search terms for Freshly Baked NYC pricing research.',
+            'Return only valid JSON shaped as {"adaptation": {"rationale": string, "searchTerms": string[]}}.',
+            'Suggest at most 4 short search terms, usually 1-3 words each.',
+            'The terms must be literal substrings likely to appear in retailer menu names.',
+            'Brand and category are already locked outside this prompt, so do not repeat the brand name unless it is essential inside the family token.',
+            'Avoid generic words like vape, gummies, flower, preroll, disposable, or size-only phrases unless paired with a distinctive family token.',
+            'Prefer rare cultivar, flavor, family, or subline phrases that broaden discovery without crossing into unrelated products.',
+          ].join(' '),
+        },
+        {
+          role: 'user',
+          content: JSON.stringify({
+            currentEvidence: input.liveState.products.map((product) => ({
+              currentEligibleCompCount: input.productEvidenceById[product.productId]?.pricingEligibleListingCount ?? 0,
+              currentListingCount: input.productEvidenceById[product.productId]?.listingCount ?? 0,
+              productName: product.name,
+              tab: product.tab,
+            })),
+            currentSearchTerm: input.primarySearchTerm,
+            deterministicSearchTerms: input.deterministicSearchTerms,
+            existingListingSamples: input.currentListings.slice(0, 20).map((listing) => ({
+              distanceBand: listing.distanceBand,
+              listingName: listing.listingName,
+            })),
+            productFamily: {
+              brand: input.liveState.brand,
+              category: input.liveState.category,
+              categoryId: input.categoryId,
+              groupFullName: input.liveState.groupFullName,
+              groupName: input.liveState.groupName,
+              strain: input.liveState.strain,
+              subcategory: input.liveState.subcategory,
+            },
+          }, null, 2),
+        },
+      ],
+      model: PRICING_SEARCH_ADAPTATION_MODEL,
+      response_format: { type: 'json_object' },
+      temperature: 0.1,
+      top_p: 0.2,
+    }),
+    headers: {
+      Authorization: `Bearer ${env.bedrockMantleBearerToken}`,
+      'Content-Type': 'application/json',
+    },
+    maxAttempts: PRICING_SEARCH_ADAPTATION_MAX_ATTEMPTS,
+    method: 'POST',
+    requestLabel: 'Pricing search adaptation',
+    retryBaseDelayMs: PRICING_SEARCH_ADAPTATION_RETRY_BASE_DELAY_MS,
+    timeoutMs: env.llmRequestTimeoutMs,
+    url: `${env.bedrockMantleBaseUrl}/chat/completions`,
+  })
+
+  const parsedEnvelope = PricingSearchAdaptationEnvelopeSchema.parse(JSON.parse(extractChatCompletionContent(JSON.stringify(response))))
+  const searchTerms = Array.from(new Set(parsedEnvelope.adaptation.searchTerms.map((term) => normalizeInlineText(term)).filter((term): term is string => term.length > 0)))
+    .slice(0, PRICING_SEARCH_ADAPTATION_MAX_TERMS)
+  if (searchTerms.length === 0) {
+    return null
+  }
+
+  return {
+    rationale: parsedEnvelope.adaptation.rationale,
+    searchTerms,
+  }
+}
+
+function dedupeListingCandidates(listings: ListingPriceCandidate[]): ListingPriceCandidate[] {
+  const deduped = new Map<string, ListingPriceCandidate>()
+  for (const listing of listings) {
+    const key = [
+      normalizeDispensaryKey(listing.dispensaryName),
+      listing.listingName.toLowerCase(),
+      listing.preTaxPrice.toFixed(2),
+      listing.postTaxPrice.toFixed(2),
+    ].join('::')
+    const existing = deduped.get(key)
+    if (!existing || compareListingSpecificity(listing, existing) < 0) {
+      deduped.set(key, listing)
+    }
+  }
+  return Array.from(deduped.values())
+}
+
+function compareListingSpecificity(left: ListingPriceCandidate, right: ListingPriceCandidate): number {
+  const leftRank = distanceBandRank(left.distanceBand)
+  const rightRank = distanceBandRank(right.distanceBand)
+  if (leftRank !== rightRank) {
+    return leftRank - rightRank
+  }
+  if (left.distanceMiles !== null && right.distanceMiles !== null && left.distanceMiles !== right.distanceMiles) {
+    return left.distanceMiles - right.distanceMiles
+  }
+  if (left.source !== right.source) {
+    return left.source === 'nearby' ? -1 : 1
+  }
+  return 0
+}
+
+function distanceBandRank(distanceBand: PricingDistanceBand): number {
+  switch (distanceBand) {
+    case 'near':
+      return 0
+    case 'mid':
+      return 1
+    case 'far':
+      return 2
+    case 'very_far':
+      return 3
+    default:
+      return 4
+  }
+}
+
+export function deriveSearchTerms(liveState: NormalizedCatalogGroupLiveState): string[] {
+  const baseText = stripBrandPrefix(liveState.groupName || liveState.groupFullName, liveState.brand)
+  const candidates = new Set<string>()
+  for (const rawVariantText of deriveSearchTextVariants(baseText)) {
+    const variantText = stripBrandPrefix(rawVariantText, liveState.brand)
+    const tokenMatches = Array.from(variantText.matchAll(/[A-Za-z0-9]+(?:['-][A-Za-z0-9]+)*/g)).map((match) => match[0])
+    const meaningfulTokens = tokenMatches.filter((token) => {
+      const normalizedToken = token.toLowerCase()
+      return !GENERIC_SEARCH_WORDS.has(normalizedToken) && !/^\d/.test(normalizedToken)
+    })
+
+    if (variantText) {
+      candidates.add(variantText)
+    }
+    for (let windowSize = Math.min(3, meaningfulTokens.length); windowSize >= 1; windowSize -= 1) {
+      for (let start = 0; start <= meaningfulTokens.length - windowSize; start += 1) {
+        candidates.add(meaningfulTokens.slice(start, start + windowSize).join(' '))
+      }
+    }
+  }
+
+  return Array.from(candidates).filter((candidate) => candidate.length > 0)
+}
+
+function deriveSearchTextVariants(baseText: string): string[] {
+  const normalizedBase = normalizeInlineText(baseText)
+  const strippedAnnotationBase = stripBespokeSearchAnnotations(normalizedBase)
+  return Array.from(new Set([strippedAnnotationBase, normalizedBase].filter((value) => value.length > 0)))
+}
+
+function buildSearchTermLabel(searchTerms: string[]): string {
+  if (searchTerms.length === 0) {
+    return 'the attempted search terms'
+  }
+  if (searchTerms.length === 1) {
+    return `search term "${searchTerms[0]}"`
+  }
+  return `search terms ${searchTerms.map((term) => `"${term}"`).join(', ')}`
+}
+
+function resolveLitAlertsCategoryId(liveState: NormalizedCatalogGroupLiveState): string | null {
+  const categoryKey = normalizeCategoryKey(liveState.category)
+  if (categoryKey === 'pre rolls' || categoryKey === 'prerolls') {
+    return '2'
+  }
+  if (categoryKey === 'vapes' || categoryKey === 'vaporizers') {
+    return '4'
+  }
+  return null
+}
+
+function isCategoryCompatible(liveState: NormalizedCatalogGroupLiveState, listingCategory: string | null): boolean {
+  const liveCategory = normalizeCategoryKey(liveState.category)
+  const competitorCategory = normalizeCategoryKey(listingCategory)
+  if (!liveCategory || !competitorCategory) {
+    return true
+  }
+  if (liveCategory === competitorCategory) {
+    return true
+  }
+  if ((liveCategory === 'vapes' || liveCategory === 'vaporizers') && (competitorCategory === 'vapes' || competitorCategory === 'vaporizers')) {
+    return true
+  }
+  if ((liveCategory === 'pre rolls' || liveCategory === 'prerolls') && (competitorCategory === 'pre rolls' || competitorCategory === 'prerolls')) {
+    return true
+  }
+  return false
+}
+
+function inferComparableLaneKey(input: {
+  category: string | null
+  subcategory: string | null
+  text: string
+}): string | null {
+  const categoryKey = normalizeCategoryKey(input.category)
+  const subcategoryKey = normalizeCategoryKey(input.subcategory)
+  const combinedText = normalizeCategoryKey(`${input.subcategory ?? ''} ${input.text}`)
+
+  if (categoryKey === 'vapes' || categoryKey === 'vaporizers') {
+    const deviceKey = subcategoryKey?.includes('disposable') || combinedText.includes('disposable') || combinedText.includes('all in one') || combinedText.includes('aio')
+      ? 'disposable'
+      : subcategoryKey?.includes('pod') || combinedText.includes('pod')
+        ? 'pod'
+        : subcategoryKey?.includes('cartridge') || combinedText.includes('cartridge') || combinedText.includes('cart') || combinedText.includes('510')
+          ? 'cartridge'
+          : 'vape'
+    const extractKey = combinedText.includes('live rosin') || combinedText.includes('solventless')
+      ? 'live-rosin'
+      : combinedText.includes('live resin')
+        ? 'live-resin'
+        : combinedText.includes('liquid diamonds') || combinedText.includes('diamond')
+          ? 'liquid-diamonds'
+          : 'standard'
+    return `${deviceKey}|${extractKey}`
+  }
+
+  if (categoryKey === 'pre rolls' || categoryKey === 'prerolls') {
+    const prerollLane = combinedText.includes('infused') || combinedText.includes('hash hole') || combinedText.includes('hash-hole')
+      ? 'infused'
+      : 'standard'
+    return subcategoryKey ? `${subcategoryKey}|${prerollLane}` : prerollLane
+  }
+
+  if (categoryKey === 'concentrates') {
+    if (combinedText.includes('jetpack') || combinedText.includes('diamond')) {
+      return 'diamonds'
+    }
+    if (combinedText.includes('badder') || combinedText.includes('budder')) {
+      return 'badder'
+    }
+    if (combinedText.includes('hash rosin')) {
+      return 'hash-rosin'
+    }
+    if (combinedText.includes('live rosin') || combinedText.includes('solventless')) {
+      return 'live-rosin'
+    }
+    if (combinedText.includes('live resin')) {
+      return 'live-resin'
+    }
+    if (combinedText.includes('shatter')) {
+      return 'shatter'
+    }
+    if (combinedText.includes('crumble')) {
+      return 'crumble'
+    }
+    if (combinedText.includes('sauce')) {
+      return 'sauce'
+    }
+    if (combinedText.includes('wax')) {
+      return 'wax'
+    }
+    if (combinedText.includes('distillate')) {
+      return 'distillate'
+    }
+    if (combinedText.includes('kief')) {
+      return 'kief'
+    }
+    return subcategoryKey || null
+  }
+
+  if (categoryKey === 'edibles' || categoryKey === 'beverages') {
+    if (combinedText.includes('beverage') || combinedText.includes('drink') || combinedText.includes('soda')) {
+      return 'beverage'
+    }
+    if (combinedText.includes('gummy') || combinedText.includes('chew')) {
+      return 'gummy'
+    }
+    if (combinedText.includes('chocolate')) {
+      return 'chocolate'
+    }
+    if (combinedText.includes('mint') || combinedText.includes('lozenge')) {
+      return 'mint'
+    }
+    if (combinedText.includes('capsule') || combinedText.includes('tablet')) {
+      return 'capsule'
+    }
+    if (combinedText.includes('tincture')) {
+      return 'tincture'
+    }
+    return subcategoryKey || null
+  }
+
+  if (categoryKey === 'flower') {
+    if (combinedText.includes('smalls') || combinedText.includes('littles')) {
+      return 'smalls'
+    }
+    if (combinedText.includes('shake')) {
+      return 'shake'
+    }
+    if (combinedText.includes('ground')) {
+      return 'ground'
+    }
+    return subcategoryKey || null
+  }
+
+  return subcategoryKey || null
+}
+
+function parseProductSizeProfile(productName: string, tab: string): ParsedSizeProfile {
+  return parseSizeProfile(`${productName} ${tab}`)
+}
+
+function parseListingSizeProfile(listingName: string, configWeight: string | null): ParsedSizeProfile {
+  return parseSizeProfile([listingName, configWeight].filter((value): value is string => Boolean(value)).join(' '))
+}
+
+function parseSizeProfile(text: string): ParsedSizeProfile {
+  const normalizedText = normalizeInlineText(text)
+  const explicitMultipack = normalizedText.match(/(\d+)\s*x\s*(\d+(?:\.\d+)?)\s*(mg|g)\b/i)
+  if (explicitMultipack) {
+    const packCount = Number.parseInt(explicitMultipack[1], 10)
+    const unitValue = Number.parseFloat(explicitMultipack[2])
+    const measure = explicitMultipack[3].toLowerCase() as 'g' | 'mg'
+    return {
+      measure,
+      packCount,
+      totalValue: roundCurrency(packCount * unitValue),
+      unitValue: roundCurrency(unitValue),
+    }
+  }
+
+  const packCount = parsePackCount(normalizedText)
+  const sizeValues = extractSizeValues(normalizedText)
+  const measure = chooseDominantMeasure(sizeValues)
+  const matchingValues = sizeValues.filter((value) => value.measure === measure).map((value) => value.value)
+  if (measure === null || matchingValues.length === 0) {
+    return {
+      measure: null,
+      packCount,
+      totalValue: null,
+      unitValue: null,
+    }
+  }
+
+  const sortedValues = [...matchingValues].sort((left, right) => left - right)
+  const totalValue = sortedValues[sortedValues.length - 1]
+  const unitValue = packCount > 1 ? roundCurrency(totalValue / packCount) : totalValue
+  return {
+    measure,
+    packCount,
+    totalValue: roundCurrency(totalValue),
+    unitValue: roundCurrency(unitValue),
+  }
+}
+
+function extractSizeValues(text: string): Array<{ measure: 'g' | 'mg'; value: number }> {
+  const matches = Array.from(text.matchAll(/(\d+(?:\.\d+)?)\s*(mg|g|oz|ounce|ounces)\b/gi))
+  return matches
+    .map((match) => {
+      const rawValue = Number.parseFloat(match[1])
+      const rawMeasure = match[2].toLowerCase()
+      if (!Number.isFinite(rawValue)) {
+        return null
+      }
+      if (rawMeasure === 'mg' || rawMeasure === 'g') {
+        return { measure: rawMeasure, value: rawValue } as const
+      }
+      return { measure: 'g' as const, value: rawValue * 28.3495 }
+    })
+    .filter((value): value is { measure: 'g' | 'mg'; value: number } => value !== null)
+}
+
+function chooseDominantMeasure(values: Array<{ measure: 'g' | 'mg'; value: number }>): 'g' | 'mg' | null {
+  if (values.length === 0) {
+    return null
+  }
+  const gramCount = values.filter((value) => value.measure === 'g').length
+  const milligramCount = values.length - gramCount
+  return gramCount >= milligramCount ? 'g' : 'mg'
+}
+
+function classifyLaneTier(productLaneKey: string | null, listingLaneKey: string | null): 0 | 1 | 2 | 3 {
+  if (productLaneKey && listingLaneKey) {
+    return productLaneKey === listingLaneKey ? 3 : 1
+  }
+  if (productLaneKey || listingLaneKey) {
+    return 2
+  }
+  return 2
+}
+
+function classifySizeTier(productSize: ParsedSizeProfile, listingSize: ParsedSizeProfile): 0 | 1 | 2 | 3 {
+  if ((productSize.packCount > 1 || listingSize.packCount > 1) && productSize.packCount !== listingSize.packCount) {
+    return 0
+  }
+  if (productSize.measure && listingSize.measure && productSize.measure !== listingSize.measure) {
+    return 0
+  }
+
+  const measure = productSize.measure ?? listingSize.measure
+  const exactTolerance = measure === 'mg' ? 2 : 0.02
+  const fallbackTolerance = measure === 'mg' ? 10 : 0.11
+  const totalDelta = computeSizeDelta(productSize.totalValue, listingSize.totalValue)
+  const unitDelta = computeSizeDelta(productSize.unitValue, listingSize.unitValue)
+
+  if (totalDelta !== null && totalDelta <= exactTolerance) {
+    return 3
+  }
+  if (unitDelta !== null && unitDelta <= exactTolerance) {
+    return 3
+  }
+  if (totalDelta !== null && totalDelta <= fallbackTolerance) {
+    return 2
+  }
+  if (unitDelta !== null && unitDelta <= fallbackTolerance) {
+    return 2
+  }
+  if (productSize.measure === null || listingSize.measure === null) {
+    return 1
+  }
+  if (productSize.measure === listingSize.measure && (productSize.totalValue === null || listingSize.totalValue === null || productSize.unitValue === null || listingSize.unitValue === null)) {
+    return 1
+  }
+  if (productSize.packCount === 1 && listingSize.packCount === 1 && productSize.measure === listingSize.measure) {
+    return 1
+  }
+  return 0
+}
+
+function computeSizeDelta(left: number | null, right: number | null): number | null {
+  if (left === null || right === null) {
+    return null
+  }
+  return Math.abs(left - right)
+}
+
+function parsePackCount(text: string): number {
+  const exact = text.match(/(\d+)\s*(?:pk|pack|packs)\b/i)
+  if (exact) {
+    return Number.parseInt(exact[1], 10)
+  }
+  return 1
+}
+
+function parseLitAlertsPrice(value: number | string | null | undefined): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value
+  }
+  if (typeof value !== 'string') {
+    return null
+  }
+  const normalized = value.replace(/[$,]/g, '').trim()
+  if (!normalized) {
+    return null
+  }
+  const parsed = Number.parseFloat(normalized)
+  return Number.isFinite(parsed) ? parsed : null
+}
+
+function normalizeBrandKey(value: string | null | undefined): string {
+  return normalizeInlineText(value)
+    .toLowerCase()
+    .replace(/&/g, ' and ')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+}
+
+function normalizeCategoryKey(value: string | null | undefined): string {
+  return normalizeInlineText(value)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+}
+
+function stripParentheticalSuffix(value: string): string {
+  return value.replace(/\s*\([^)]*\)\s*$/g, '').trim()
+}
+
+function stripBrandPrefix(text: string, brand: string | null): string {
+  const normalizedText = normalizeInlineText(text)
+  const normalizedBrand = normalizeInlineText(brand)
+  if (!normalizedBrand) {
+    return normalizedText
+  }
+
+  const loweredText = normalizedText.toLowerCase()
+  const loweredBrand = normalizedBrand.toLowerCase()
+  if (loweredText === loweredBrand) {
+    return ''
+  }
+  if (loweredText.startsWith(`${loweredBrand} `)) {
+    return normalizedText.slice(normalizedBrand.length).trim()
+  }
+  return normalizedText
+}
+
+function stripBespokeSearchAnnotations(text: string): string {
+  const normalizedText = normalizeInlineText(text)
+  const hasPotencyAnnotation = SEARCH_ANNOTATION_CANNABINOID_PATTERN.test(normalizedText) || SEARCH_ANNOTATION_POTENCY_PATTERN.test(normalizedText)
+  let stripped = normalizedText.replace(/\(([^)]*)\)/g, (fullMatch, innerText: string) => {
+    if (isBespokeSearchAnnotation(innerText)) {
+      return ' '
+    }
+    return fullMatch
+  })
+
+  if (hasPotencyAnnotation) {
+    stripped = stripped.replace(SEARCH_ANNOTATION_RATIO_PATTERN, ' ')
+  }
+
+  return normalizeInlineText(stripped)
+}
+
+function isBespokeSearchAnnotation(text: string): boolean {
+  const normalizedText = normalizeInlineText(text)
+  return SEARCH_ANNOTATION_CANNABINOID_PATTERN.test(normalizedText)
+    || SEARCH_ANNOTATION_POTENCY_PATTERN.test(normalizedText)
+    || (SEARCH_ANNOTATION_RATIO_PATTERN.test(normalizedText) && /\d+(?:\.\d+)?\s*mg/i.test(normalizedText))
+}
+
+function normalizeDispensaryKey(value: string | null | undefined): string {
+  return normalizeInlineText(value)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+}
+
+function normalizeInlineText(value: string | number | null | undefined): string {
+  return String(value ?? '')
+    .split(/\s+/)
+    .filter((part) => part.length > 0)
+    .join(' ')
+    .trim()
+}
+
+function extractChatCompletionContent(payloadText: string): string {
+  const payload = JSON.parse(payloadText) as { choices?: Array<{ message?: { content?: string | Array<{ text?: string }> } }> }
+  const firstChoice = payload.choices?.[0]
+  const content = firstChoice?.message?.content
+  if (typeof content === 'string') {
+    return content
+  }
+  if (Array.isArray(content)) {
+    const joined = content
+      .map((item) => (typeof item?.text === 'string' ? item.text : ''))
+      .join('')
+      .trim()
+    if (joined) {
+      return joined
+    }
+  }
+
+  throw new Error('Pricing search adaptation returned no assistant content.')
+}
+
+function truncate(value: string): string {
+  const normalized = value.replace(/\s+/g, ' ').trim()
+  if (normalized.length <= 240) {
+    return normalized
+  }
+  return `${normalized.slice(0, 239)}…`
+}
+
+function buildPricingMarketFailurePageMessage(
+  failureContext: string,
+  liveState: NormalizedCatalogGroupLiveState,
+  error: unknown,
+): string {
+  const brandLabel = liveState.brand ?? 'Unknown brand'
+  const groupLabel = liveState.groupFullName || liveState.groupName || `group ${liveState.groupId}`
+  return `${failureContext}: pricing market research failed for ${brandLabel} / ${groupLabel} (group ${liveState.groupId}): ${buildUnknownErrorMessage(error)}`
+}
+
+function buildUnknownErrorMessage(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message
+  }
+  return 'Unknown pricing market error.'
+}
+
+function haversineMiles(
+  latitudeA: number,
+  longitudeA: number,
+  latitudeB: number,
+  longitudeB: number,
+): number {
+  const toRadians = (value: number) => (value * Math.PI) / 180
+  const earthRadiusMiles = 3958.7613
+  const latitudeDelta = toRadians(latitudeB - latitudeA)
+  const longitudeDelta = toRadians(longitudeB - longitudeA)
+  const normalizedLatitudeA = toRadians(latitudeA)
+  const normalizedLatitudeB = toRadians(latitudeB)
+  const haversine = Math.sin(latitudeDelta / 2) ** 2
+    + Math.cos(normalizedLatitudeA) * Math.cos(normalizedLatitudeB) * Math.sin(longitudeDelta / 2) ** 2
+  return 2 * earthRadiusMiles * Math.asin(Math.sqrt(haversine))
+}
+
+function roundCurrency(value: number): number {
+  return Math.round((value + Number.EPSILON) * 100) / 100
+}
+
+function isRetryableMarketStatus(status: number): boolean {
+  return status === 408 || status === 429 || status === 500 || status === 502 || status === 503 || status === 504
+}
+
+function isRetryableMarketTransportError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false
+  }
+  return error.name === 'AbortError' || error.name === 'TimeoutError' || /timed out|timeout|network|fetch failed|socket hang up/i.test(error.message)
+}
+
+async function fetchJsonWithRetry(input: {
+  body?: string
+  headers: Record<string, string>
+  maxAttempts: number
+  method: 'GET' | 'POST'
+  requestLabel: string
+  retryBaseDelayMs: number
+  timeoutMs: number
+  url: string
+}): Promise<unknown> {
+  for (let attempt = 0; attempt < input.maxAttempts; attempt += 1) {
+    let response: Response
+    try {
+      response = await fetch(input.url, {
+        body: input.body,
+        headers: input.headers,
+        method: input.method,
+        signal: AbortSignal.timeout(input.timeoutMs),
+      })
+    } catch (error) {
+      if (attempt + 1 < input.maxAttempts && isRetryableMarketTransportError(error)) {
+        await delayPricingMarketRetry(attempt, input.retryBaseDelayMs)
+        continue
+      }
+      if (isRetryableMarketTransportError(error)) {
+        throw new RetryableWorkerError(buildTransportErrorMessage(input.requestLabel, error))
+      }
+      throw error
+    }
+
+    const responseText = await response.text()
+    if (!response.ok) {
+      const message = `${input.requestLabel} failed: HTTP ${response.status} ${response.statusText} ${truncate(responseText)}`
+      if (attempt + 1 < input.maxAttempts && isRetryableMarketStatus(response.status)) {
+        await delayPricingMarketRetry(attempt, input.retryBaseDelayMs)
+        continue
+      }
+      if (isRetryableMarketStatus(response.status)) {
+        throw new RetryableWorkerError(message)
+      }
+      throw new Error(message)
+    }
+
+    try {
+      return JSON.parse(responseText)
+    } catch (error) {
+      const message = `${input.requestLabel} returned invalid JSON: ${truncate(responseText)}`
+      if (attempt + 1 < input.maxAttempts) {
+        await delayPricingMarketRetry(attempt, input.retryBaseDelayMs)
+        continue
+      }
+      if (error instanceof SyntaxError) {
+        throw new RetryableWorkerError(message)
+      }
+      throw new Error(message)
+    }
+  }
+
+  throw new RetryableWorkerError(`${input.requestLabel} exhausted all retry attempts.`)
+}
+
+function buildTransportErrorMessage(requestLabel: string, error: unknown): string {
+  if (error instanceof Error) {
+    return `${requestLabel} transport failed: ${error.message}`
+  }
+  return `${requestLabel} transport failed unexpectedly.`
+}
+
+async function delayPricingMarketRetry(attempt: number, baseDelayMs: number): Promise<void> {
+  const delayMs = Math.min(baseDelayMs * 2 ** attempt, 8000)
+  await new Promise((resolve) => setTimeout(resolve, delayMs))
+}

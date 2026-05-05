@@ -1,0 +1,382 @@
+import type { QueryResultRow } from 'pg'
+import { z } from 'zod'
+
+import {
+  HELIOS_PENDING_PURCHASE_SITE_DEALERS,
+  type ConfigWorkersStockRefreshJobPayload,
+  type HeliosPendingPurchaseSiteDealer,
+} from '../../shared/contracts/index.js'
+import { appendAuditEvent } from '../../server/audit/appendAuditEvent.js'
+import { withTransaction } from '../../server/db/tx.js'
+import { callSweedRpcForDealer } from '../sweed/client.js'
+import type { JobHandlerContext } from '../runtime/jobRegistry.js'
+
+const STOCK_INVENTORY_PAGE_SIZE = 200
+
+const StockInventoryRowSchema = z
+  .object({
+    isOnStock: z.boolean().optional(),
+    packageCount: z.coerce.number().int().min(0).optional(),
+    product: z
+      .object({
+        id: z.coerce.number().int().positive().optional(),
+        name: z.string().nullable().optional(),
+        shortName: z.string().nullable().optional(),
+      })
+      .passthrough()
+      .optional(),
+    quantity: z.coerce.number().nullable().optional(),
+  })
+  .passthrough()
+
+const StockInventoryResponseSchema = z
+  .object({
+    data: z.array(StockInventoryRowSchema).default([]),
+    totalCount: z.coerce.number().int().min(0).optional(),
+  })
+  .passthrough()
+
+interface ParsedRow {
+  productId: number
+  isOnStock: boolean
+  quantity: number | null
+  packageCount: number | null
+  productName: string | null
+}
+
+interface SiteScanResult {
+  rowsByProductId: Map<number, ParsedRow>
+}
+
+interface SnapshotInsertRow extends QueryResultRow {
+  id: number
+}
+
+interface ExistingStateRow extends QueryResultRow {
+  product_id: number
+  is_on_stock: boolean
+}
+
+export async function runConfigWorkersStockRefreshJob(
+  context: JobHandlerContext,
+  payload: ConfigWorkersStockRefreshJobPayload,
+): Promise<void> {
+  const requestedSites = resolveTargetSites(payload.siteDealerIds)
+  if (requestedSites.length === 0) {
+    return
+  }
+
+  let totalNewlyInStockVariants = 0
+  let totalLitalertsRefreshEnqueued = 0
+
+  for (const site of requestedSites) {
+    const startedAt = new Date()
+    const snapshotId = await withTransaction(async (db) => {
+      const result = await db.query<SnapshotInsertRow>(
+        `
+          insert into stock_snapshots (
+            site_dealer_id, site_key, site_label, job_id, status, started_at, metadata_json
+          ) values ($1, $2, $3, $4, 'running', $5, $6::jsonb)
+          returning id
+        `,
+        [
+          site.dealerId,
+          site.siteKey,
+          site.siteLabel,
+          context.id,
+          startedAt,
+          JSON.stringify({ trigger: payload.trigger, jobId: context.id }),
+        ],
+      )
+      return result.rows[0].id
+    })
+
+    try {
+      const scan = await scanFullStockForSite(site)
+
+      const summary = await persistSnapshotAndDiff({
+        context,
+        site,
+        snapshotId,
+        rowsByProductId: scan.rowsByProductId,
+      })
+
+      totalNewlyInStockVariants += summary.newlyInStockVariantCount
+      totalLitalertsRefreshEnqueued += summary.litalertsRefreshEnqueuedCount
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown stock refresh error.'
+      await withTransaction(async (db) => {
+        await db.query(
+          `
+            update stock_snapshots
+            set status = 'failed',
+                finished_at = now(),
+                error = $2
+            where id = $1
+          `,
+          [snapshotId, message],
+        )
+      })
+      throw error
+    }
+  }
+
+  await withTransaction(async (db) => {
+    await appendAuditEvent(db, {
+      actorType: payload.requestedByUserId ? 'user' : 'system',
+      actorUserId: payload.requestedByUserId ?? null,
+      entityId: String(context.id),
+      entityType: 'job',
+      eventType: 'config.workers.stock_refresh.completed',
+      module: 'config',
+      payload: {
+        litalertsRefreshEnqueuedCount: totalLitalertsRefreshEnqueued,
+        newlyInStockVariantCount: totalNewlyInStockVariants,
+        siteDealerIds: requestedSites.map((site) => site.dealerId),
+        trigger: payload.trigger,
+      },
+      requestId: null,
+      scope: null,
+      undoPayload: null,
+    })
+  })
+}
+
+function resolveTargetSites(siteDealerIds: number[]): HeliosPendingPurchaseSiteDealer[] {
+  if (siteDealerIds.length === 0) {
+    return [...HELIOS_PENDING_PURCHASE_SITE_DEALERS]
+  }
+  const requested = new Set(siteDealerIds)
+  return HELIOS_PENDING_PURCHASE_SITE_DEALERS.filter((site) => requested.has(site.dealerId))
+}
+
+async function scanFullStockForSite(site: HeliosPendingPurchaseSiteDealer): Promise<SiteScanResult> {
+  const rowsByProductId = new Map<number, ParsedRow>()
+
+  let page = 1
+  while (true) {
+    const raw = await callSweedRpcForDealer(site.dealerId, 'store.inventory.item.list.grouped', {
+      page,
+      pageSize: STOCK_INVENTORY_PAGE_SIZE,
+    })
+    const parsed = StockInventoryResponseSchema.parse(raw)
+
+    for (const row of parsed.data) {
+      const productId = row.product?.id
+      if (!productId) {
+        continue
+      }
+      const existing = rowsByProductId.get(productId)
+      const quantity = typeof row.quantity === 'number' ? row.quantity : null
+      const packageCount = typeof row.packageCount === 'number' ? row.packageCount : null
+      const isOnStock = typeof row.isOnStock === 'boolean'
+        ? row.isOnStock
+        : (typeof quantity === 'number' && quantity > 0) || (typeof packageCount === 'number' && packageCount > 0)
+      const productName = row.product?.shortName ?? row.product?.name ?? null
+
+      if (!existing) {
+        rowsByProductId.set(productId, {
+          productId,
+          isOnStock,
+          quantity,
+          packageCount,
+          productName,
+        })
+        continue
+      }
+
+      // The grouped feed should be unique-per-product, but defensively merge.
+      rowsByProductId.set(productId, {
+        productId,
+        isOnStock: existing.isOnStock || isOnStock,
+        quantity: sumNullable(existing.quantity, quantity),
+        packageCount: sumNullable(existing.packageCount, packageCount),
+        productName: existing.productName ?? productName,
+      })
+    }
+
+    if (parsed.data.length < STOCK_INVENTORY_PAGE_SIZE) {
+      break
+    }
+    page += 1
+  }
+
+  return { rowsByProductId }
+}
+
+function sumNullable(left: number | null, right: number | null): number | null {
+  if (left === null && right === null) {
+    return null
+  }
+  return (left ?? 0) + (right ?? 0)
+}
+
+interface PersistResult {
+  newlyInStockVariantCount: number
+  litalertsRefreshEnqueuedCount: number
+}
+
+async function persistSnapshotAndDiff(input: {
+  context: JobHandlerContext
+  site: HeliosPendingPurchaseSiteDealer
+  snapshotId: number
+  rowsByProductId: Map<number, ParsedRow>
+}): Promise<PersistResult> {
+  const { context, site, snapshotId, rowsByProductId } = input
+  const rows = [...rowsByProductId.values()]
+  const inStockRows = rows.filter((row) => row.isOnStock)
+
+  return withTransaction(async (db) => {
+    if (rows.length > 0) {
+      const values: string[] = []
+      const args: unknown[] = []
+      let argIndex = 1
+      for (const row of rows) {
+        values.push(`($${argIndex++}, $${argIndex++}, $${argIndex++}, $${argIndex++}, $${argIndex++}, $${argIndex++})`)
+        args.push(snapshotId, row.productId, row.isOnStock, row.quantity, row.packageCount, row.productName)
+      }
+      await db.query(
+        `
+          insert into stock_snapshot_items (
+            snapshot_id, product_id, is_on_stock, quantity, package_count, product_name
+          ) values ${values.join(', ')}
+        `,
+        args,
+      )
+    }
+
+    const existingResult = await db.query<ExistingStateRow>(
+      `
+        select product_id, is_on_stock
+        from stock_variant_state
+        where site_dealer_id = $1
+      `,
+      [site.dealerId],
+    )
+    const existingByProductId = new Map<number, boolean>()
+    for (const row of existingResult.rows) {
+      existingByProductId.set(row.product_id, row.is_on_stock)
+    }
+
+    let newlyInStockVariantCount = 0
+    let newlyOutOfStockVariantCount = 0
+    const variantsTransitionedToInStock: number[] = []
+
+    const observedAt = new Date()
+    for (const row of rows) {
+      const previousIsOnStock = existingByProductId.get(row.productId) ?? null
+      const transitionedToInStock = row.isOnStock && previousIsOnStock !== true
+      const transitionedToOutOfStock = !row.isOnStock && previousIsOnStock === true
+      if (transitionedToInStock) {
+        newlyInStockVariantCount += 1
+        variantsTransitionedToInStock.push(row.productId)
+      }
+      if (transitionedToOutOfStock) {
+        newlyOutOfStockVariantCount += 1
+      }
+
+      await db.query(
+        `
+          insert into stock_variant_state (
+            site_dealer_id, product_id, is_on_stock, quantity, last_snapshot_id, last_observed_at,
+            last_in_stock_at, last_out_of_stock_at
+          ) values ($1, $2, $3, $4, $5, $6,
+            case when $3 then $6 else null end,
+            case when $3 then null else $6 end)
+          on conflict (site_dealer_id, product_id) do update
+            set is_on_stock = excluded.is_on_stock,
+                quantity = excluded.quantity,
+                last_snapshot_id = excluded.last_snapshot_id,
+                last_observed_at = excluded.last_observed_at,
+                last_in_stock_at = case
+                  when excluded.is_on_stock then excluded.last_observed_at
+                  else stock_variant_state.last_in_stock_at
+                end,
+                last_out_of_stock_at = case
+                  when excluded.is_on_stock then stock_variant_state.last_out_of_stock_at
+                  else excluded.last_observed_at
+                end
+        `,
+        [
+          site.dealerId,
+          row.productId,
+          row.isOnStock,
+          row.quantity,
+          snapshotId,
+          observedAt,
+        ],
+      )
+    }
+
+    let litalertsRefreshEnqueuedCount = 0
+    for (const productId of variantsTransitionedToInStock) {
+      // Skip if a pending refresh row already exists for this (product, site).
+      // The partial unique index protects us under concurrent inserts; this
+      // guard avoids the catch path on the common no-op case.
+      const existing = await db.query<{ id: number }>(
+        `
+          select id from pending_litalerts_refresh_queue
+          where product_id = $1
+            and coalesce(site_dealer_id, 0) = coalesce($2, 0)
+            and status = 'pending'
+          limit 1
+        `,
+        [productId, site.dealerId],
+      )
+      if (existing.rows.length > 0) {
+        continue
+      }
+      try {
+        await db.query(
+          `
+            insert into pending_litalerts_refresh_queue (
+              product_id, site_dealer_id, reason, source_snapshot_id, status, notes
+            ) values ($1, $2, 'variant_in_stock_transition', $3, 'pending', $4)
+          `,
+          [
+            productId,
+            site.dealerId,
+            snapshotId,
+            `Variant transitioned out-of-stock -> in-stock at ${site.siteLabel} via snapshot ${snapshotId}.`,
+          ],
+        )
+        litalertsRefreshEnqueuedCount += 1
+      } catch (insertError) {
+        // Either a concurrent insert or a violation of the partial unique
+        // index. Either way, the desired pending refresh row exists; do not
+        // double-count.
+        if (!(insertError instanceof Error) || !/duplicate key|unique/i.test(insertError.message)) {
+          throw insertError
+        }
+      }
+    }
+
+    await db.query(
+      `
+        update stock_snapshots
+        set status = 'succeeded',
+            finished_at = now(),
+            variant_count = $2,
+            in_stock_variant_count = $3,
+            newly_in_stock_variant_count = $4,
+            newly_out_of_stock_variant_count = $5,
+            litalerts_refresh_enqueued_count = $6
+        where id = $1
+      `,
+      [
+        snapshotId,
+        rows.length,
+        inStockRows.length,
+        newlyInStockVariantCount,
+        newlyOutOfStockVariantCount,
+        litalertsRefreshEnqueuedCount,
+      ],
+    )
+
+    void context
+    return {
+      newlyInStockVariantCount,
+      litalertsRefreshEnqueuedCount,
+    }
+  })
+}

@@ -1,0 +1,1434 @@
+:root {
+  font-family: 'Avenir Next', 'Segoe UI Variable', 'Helvetica Neue', sans-serif;
+  color: #f6f3eb;
+  background:
+    radial-gradient(circle at top left, rgba(217, 105, 45, 0.18), transparent 32%),
+    radial-gradient(circle at top right, rgba(72, 115, 88, 0.22), transparent 28%),
+    linear-gradient(180deg, #17130f 0%, #231d18 48%, #11110f 100%);
+  color-scheme: dark;
+  --panel: rgba(31, 26, 22, 0.92);
+  --panel-border: rgba(238, 221, 205, 0.14);
+  --accent: #e38b4e;
+  --accent-strong: #ffb16f;
+  --accent-muted: rgba(227, 139, 78, 0.16);
+  --danger: #d76a54;
+  --success: #6fb78c;
+  --warning: #d6a14a;
+  --text-muted: #c7b8a8;
+  --shadow: 0 24px 64px rgba(0, 0, 0, 0.34);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+}
+
+a {
+  color: var(--accent-strong);
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+button,
+input,
+select,
+textarea,
+.data-table,
+pre {
+  border-radius: 14px;
+}
+
+input,
+select,
+textarea {
+  width: 100%;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.03);
+  color: inherit;
+  padding: 0.75rem 0.9rem;
+}
+
+textarea {
+  resize: vertical;
+}
+
+pre {
+  margin: 0;
+  padding: 1rem;
+  overflow: auto;
+  background: rgba(0, 0, 0, 0.28);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.app-shell {
+  max-width: 1440px;
+  margin: 0 auto;
+  padding: 1.5rem;
+}
+
+.topbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+  margin-bottom: 1.5rem;
+}
+
+.runtime-status-strip {
+  display: grid;
+  gap: 0.75rem;
+  margin: -0.5rem 0 1.25rem;
+}
+
+.runtime-status-item {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.8rem 0.95rem;
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.topbar h1,
+.page-header h2,
+.hero-card h2 {
+  margin: 0.15rem 0 0;
+  font-size: clamp(1.8rem, 3vw, 2.8rem);
+  line-height: 1.05;
+}
+
+.layout-grid {
+  display: grid;
+  /* Sidebar column auto-sizes to its tree content (so expanding a deep
+   * branch makes the rail wider) but is capped at 25vw on desktop. When the
+   * tree's natural width exceeds 25vw the column stops growing and the
+   * .sidebar element scrolls horizontally instead of overflowing. */
+  grid-template-columns: fit-content(25vw) minmax(0, 1fr);
+  gap: 1.25rem;
+}
+
+.layout-grid.sidebar-collapsed {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.sidebar,
+.content-panel,
+.hero-card,
+.review-card,
+.detail-panel,
+.history-card {
+  border: 1px solid var(--panel-border);
+  background: var(--panel);
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(20px);
+}
+
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  padding: 1rem;
+  position: sticky;
+  top: 1.5rem;
+  height: fit-content;
+  /* Pair with the grid column above: never wider than 25vw, but allow the
+   * tree's natural content to push us up to that cap. When the content
+   * exceeds the cap, scroll horizontally and clip overflowing text rather
+   * than letting it bleed into the main panel. */
+  min-width: 200px;
+  max-width: 25vw;
+  max-height: calc(100vh - 3rem);
+  overflow-x: auto;
+  overflow-y: auto;
+}
+
+.sidebar a {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.9rem 1rem;
+  border-radius: 12px;
+  color: inherit;
+}
+
+.sidebar-heading {
+  margin: 0.5rem 0 0.1rem;
+  padding: 0 0.35rem;
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.sidebar-link-label {
+  min-width: 0;
+}
+
+.sidebar-link-note {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+}
+
+.sidebar a.active {
+  background: linear-gradient(135deg, rgba(227, 139, 78, 0.22), rgba(111, 183, 140, 0.15));
+}
+
+.like-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-decoration: none;
+}
+
+.content-panel {
+  padding: 1.4rem;
+}
+
+.page-header,
+.review-card-header,
+.inline-row,
+.history-card-topline,
+.topbar-meta,
+.user-chip {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.wrap-row {
+  flex-wrap: wrap;
+}
+
+.eyebrow {
+  margin: 0;
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+  font-size: 0.72rem;
+  color: var(--accent-strong);
+}
+
+.subtle-copy {
+  margin: 0.2rem 0 0;
+  color: var(--text-muted);
+  font-size: 0.92rem;
+}
+
+.primary-button,
+.ghost-button,
+.danger-button {
+  cursor: pointer;
+  padding: 0.8rem 1.05rem;
+  border: 1px solid transparent;
+}
+
+.primary-button {
+  background: linear-gradient(135deg, #e38b4e, #eea767);
+  color: #1a140f;
+  font-weight: 700;
+}
+
+.ghost-button {
+  background: rgba(255, 255, 255, 0.03);
+  border-color: rgba(255, 255, 255, 0.12);
+  color: inherit;
+}
+
+.danger-button {
+  background: rgba(215, 106, 84, 0.16);
+  border-color: rgba(215, 106, 84, 0.28);
+  color: #ffd4cb;
+}
+
+.hero-card {
+  max-width: 760px;
+  margin: 10vh auto;
+  padding: 2rem;
+}
+
+.filter-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.filter-row input,
+.filter-row select {
+  min-width: 180px;
+  flex: 1 1 180px;
+}
+
+.user-chip {
+  padding: 0.6rem 0.85rem;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.38rem 0.66rem;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.pill-muted {
+  background: rgba(255, 255, 255, 0.08);
+  color: #e8ddd1;
+}
+
+.pill-success {
+  background: rgba(111, 183, 140, 0.18);
+  color: #bbe7ca;
+}
+
+.pill-warning {
+  background: rgba(214, 161, 74, 0.18);
+  color: #f6d288;
+}
+
+.pill-danger {
+  background: rgba(215, 106, 84, 0.2);
+  color: #ffc7bc;
+}
+
+.data-table-wrapper {
+  overflow: auto;
+}
+
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.data-table th,
+.data-table td {
+  padding: 0.95rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  vertical-align: top;
+  text-align: left;
+}
+
+.review-grid,
+.detail-grid,
+.stacked-list,
+.timeline-list {
+  display: grid;
+  gap: 1rem;
+}
+
+.review-grid {
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+}
+
+.review-card,
+.detail-panel,
+.history-card {
+  padding: 1rem;
+}
+
+.comparison-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.75rem;
+  margin: 1rem 0;
+}
+
+.pending-purchase-layout {
+  display: grid;
+  grid-template-columns: 260px minmax(0, 1fr);
+  gap: 1rem;
+  align-items: start;
+}
+
+.pending-purchase-sidebar {
+  position: sticky;
+  top: 1rem;
+  padding: 1rem;
+  border-radius: 18px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.pending-purchase-nav-list,
+.pending-purchase-nav-children {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.pending-purchase-nav-list {
+  margin-top: 1rem;
+}
+
+.pending-purchase-nav-children {
+  margin-left: 0.9rem;
+}
+
+.pending-purchase-nav-group {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.45rem;
+  align-items: start;
+}
+
+.pending-purchase-nav-group a {
+  color: inherit;
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+
+.pending-purchase-nav-group a:hover {
+  color: var(--accent-strong);
+  text-decoration: underline;
+}
+
+.pending-purchase-nav-count {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+}
+
+.pending-purchase-nav-children {
+  grid-column: 1 / -1;
+}
+
+.pending-purchase-content {
+  min-width: 0;
+}
+
+.pending-purchase-group {
+  border-radius: 18px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.03);
+  overflow: hidden;
+}
+
+.pending-purchase-group-level-2 {
+  background: rgba(227, 139, 78, 0.05);
+}
+
+.pending-purchase-group-level-3 {
+  background: rgba(111, 183, 140, 0.06);
+}
+
+.pending-purchase-group-level-4 {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.pending-purchase-summary {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.95rem 1rem;
+  cursor: pointer;
+  list-style: none;
+}
+
+.pending-purchase-summary::-webkit-details-marker {
+  display: none;
+}
+
+.pending-purchase-summary > span {
+  display: grid;
+  gap: 0.2rem;
+}
+
+.pending-purchase-group-body {
+  display: grid;
+  gap: 0.8rem;
+  padding: 0 0.8rem 0.8rem;
+}
+
+.pending-purchase-hierarchy-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 0.75rem;
+  margin-top: 0.85rem;
+}
+
+.pending-purchase-pricing-support {
+  display: grid;
+  gap: 0.85rem;
+  margin-top: 0.85rem;
+}
+
+.value-panel {
+  padding: 0.85rem;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.value-panel span {
+  display: block;
+  margin-bottom: 0.35rem;
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.value-panel p,
+.stack-field span,
+.history-card p {
+  margin: 0;
+}
+
+.stack-field {
+  display: grid;
+  gap: 0.45rem;
+  margin-bottom: 0.85rem;
+}
+
+.detail-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
+}
+
+.wide-panel {
+  grid-column: 1 / -1;
+}
+
+.mini-card,
+.history-card,
+.detail-panel {
+  border-radius: 18px;
+}
+
+.mini-card {
+  padding: 0.9rem;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.mini-card header,
+.mini-card-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.8rem;
+  align-items: flex-start;
+}
+
+.module-card-links {
+  margin-top: 0.9rem;
+}
+
+.module-subnav {
+  display: flex;
+  gap: 0.65rem;
+  margin: -0.2rem 0 1rem;
+  flex-wrap: wrap;
+}
+
+.module-subnav a {
+  padding: 0.6rem 0.85rem;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: inherit;
+  text-decoration: none;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.module-subnav a.active {
+  background: rgba(227, 139, 78, 0.22);
+  border-color: rgba(227, 139, 78, 0.34);
+}
+
+.pricing-metric-grid {
+  display: grid;
+  gap: 0.75rem;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+}
+
+.job-progress-panel {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.job-progress-track {
+  width: 100%;
+  height: 0.8rem;
+  overflow: hidden;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.job-progress-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(135deg, #e38b4e, #6fb78c);
+  transition: width 180ms ease;
+}
+
+.job-progress-fill.failed {
+  background: linear-gradient(135deg, #c34f4f, #d46868);
+}
+
+.job-log-tail {
+  max-height: 22rem;
+  overflow-y: auto;
+  padding-right: 0.35rem;
+}
+
+.job-log-message {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, monospace;
+  white-space: pre-wrap;
+}
+
+.catalog-recent-sales-row,
+.sales-site-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+  align-items: center;
+}
+
+.catalog-recent-sales-row {
+  margin-top: 0.55rem;
+}
+
+.sales-site-grid {
+  margin-top: 1rem;
+}
+
+.velocity-summary-row,
+.velocity-header-stack {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.velocity-summary-row {
+  margin-top: 0.5rem;
+}
+
+.velocity-header-stack {
+  justify-content: flex-end;
+}
+
+.velocity-indicator {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.45rem 0.8rem;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  font-size: 0.82rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.velocity-indicator-success {
+  background: rgba(111, 183, 140, 0.2);
+  color: #c9f0d4;
+}
+
+.velocity-indicator-danger {
+  background: rgba(215, 106, 84, 0.22);
+  color: #ffd2c8;
+}
+
+.velocity-indicator-muted {
+  background: rgba(255, 255, 255, 0.08);
+  color: #e8ddd1;
+}
+
+.pricing-review-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.8fr) minmax(320px, 1fr);
+  gap: 1rem;
+  align-items: start;
+}
+
+.pricing-table tbody tr {
+  cursor: pointer;
+}
+
+.pricing-table input[type='checkbox'] {
+  width: auto;
+}
+
+.selected-table-row {
+  background: rgba(227, 139, 78, 0.12);
+}
+
+.bulk-action-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+.bulk-action-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  align-items: center;
+}
+
+.bulk-action-controls input {
+  width: 140px;
+}
+
+.pricing-ladder-card {
+  padding: 0.95rem;
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.03);
+  margin-bottom: 1rem;
+}
+
+.pricing-ladder-track {
+  position: relative;
+  height: 86px;
+  border-radius: 999px;
+  background:
+    linear-gradient(90deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.08)),
+    rgba(0, 0, 0, 0.24);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+}
+
+.pricing-ladder-dot {
+  position: absolute;
+  top: 50%;
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  transform: translate(-50%, -50%);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.25);
+}
+
+.pricing-ladder-dot.is-excluded {
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.14);
+}
+
+.pricing-ladder-marker {
+  position: absolute;
+  top: 10px;
+  bottom: 10px;
+  width: 0;
+  border-left: 2px solid currentColor;
+  transform: translateX(-50%);
+}
+
+.pricing-ladder-marker span {
+  position: absolute;
+  top: -0.15rem;
+  left: 0.45rem;
+  padding: 0.18rem 0.45rem;
+  border-radius: 999px;
+  background: rgba(11, 15, 20, 0.92);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  font-size: 0.7rem;
+  white-space: nowrap;
+}
+
+.pricing-ladder-marker.live {
+  color: #f3b35f;
+}
+
+.pricing-ladder-marker.proposed {
+  color: #66d6ff;
+}
+
+.pricing-ladder-marker.average {
+  color: #7de48f;
+}
+
+.pricing-ladder-marker.median {
+  color: #d7d27a;
+}
+
+.pricing-ladder-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.85rem;
+  margin-top: 0.8rem;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+.pricing-ladder-legend span {
+  display: inline-flex;
+  gap: 0.4rem;
+  align-items: center;
+}
+
+.legend-swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  display: inline-block;
+}
+
+.band-near {
+  background: rgba(88, 212, 122, 0.95);
+}
+
+.band-mid {
+  background: rgba(88, 212, 122, 0.72);
+}
+
+.band-far {
+  background: rgba(88, 212, 122, 0.38);
+}
+
+.band-very_far {
+  background: rgba(190, 196, 206, 0.42);
+}
+
+.band-unknown {
+  background: rgba(190, 196, 206, 0.3);
+}
+
+.marker-live {
+  background: #f3b35f;
+}
+
+.marker-proposed {
+  background: #66d6ff;
+}
+
+.marker-median {
+  background: #d7d27a;
+}
+
+.dealer-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+}
+
+.dealer-toggle input {
+  width: auto;
+}
+
+.compact-stack {
+  gap: 0;
+}
+
+.mini-card-row + .mini-card-row {
+  margin-top: 0.75rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.timeline-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.detail-panel h3 {
+  font-size: 1.15rem;
+}
+
+.compact-list li + li,
+.timeline-list li + li {
+  margin-top: 0.8rem;
+  padding-top: 0.8rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.error-text {
+  margin: 0 0 0.75rem;
+  color: #ffc0b6;
+}
+
+.success-text {
+  margin: 0 0 0.75rem;
+  color: #9be5aa;
+}
+
+.empty-state {
+  color: var(--text-muted);
+}
+
+.scheduling-results-stack {
+  display: grid;
+  gap: 1rem;
+}
+
+.scheduling-candidate-shell {
+  display: grid;
+  gap: 1rem;
+}
+
+.scheduling-candidate-summary {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  cursor: pointer;
+  list-style: none;
+}
+
+.scheduling-candidate-summary::-webkit-details-marker {
+  display: none;
+}
+
+.scheduling-candidate-summary-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1rem;
+  margin-top: 0.65rem;
+}
+
+.scheduling-employee-legend,
+.scheduling-chip-list,
+.scheduling-month-chip-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}
+
+.scheduling-employee-legend {
+  margin-top: -0.25rem;
+}
+
+.scheduling-employee-chip,
+.scheduling-unfilled-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.35rem 0.6rem;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  font-size: 0.78rem;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+.scheduling-employee-chip {
+  backdrop-filter: blur(10px);
+}
+
+.scheduling-unfilled-chip {
+  background: rgba(255, 255, 255, 0.05);
+  border-color: rgba(255, 255, 255, 0.12);
+  color: var(--text-muted);
+}
+
+.scheduling-months-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+  gap: 1rem;
+}
+
+.scheduling-months-grid.is-calendar-only {
+  grid-template-columns: 1fr;
+}
+
+.scheduling-month-panel {
+  padding: 0.95rem;
+  border-radius: 18px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.03);
+  overflow-x: auto;
+}
+
+.scheduling-daypilot-month-shell,
+.scheduling-daypilot-scheduler-shell {
+  border-radius: 16px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.scheduling-daypilot-scheduler-shell {
+  overflow: auto;
+}
+
+.scheduling-month-grid {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  min-width: 42rem;
+  gap: 0.5rem;
+}
+
+.scheduling-month-header {
+  font-size: 0.74rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.scheduling-month-cell {
+  min-height: 112px;
+  padding: 0.7rem;
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.scheduling-month-cell.is-outside-month {
+  opacity: 0.46;
+}
+
+.scheduling-month-cell.is-scheduled-week {
+  border-color: rgba(227, 139, 78, 0.35);
+  background: rgba(227, 139, 78, 0.08);
+}
+
+.scheduling-month-cell-header,
+.scheduling-assignment-card-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.scheduling-month-chip-list {
+  margin-top: 0.6rem;
+}
+
+.scheduling-month-chip-list .scheduling-employee-chip {
+  font-size: 0.72rem;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.scheduling-swimlane-wrapper {
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.scheduling-swimlane-table th,
+.scheduling-swimlane-table td {
+  min-width: 180px;
+}
+
+.scheduling-swimlane-table th:first-child {
+  min-width: 220px;
+}
+
+.scheduling-swimlane-cell {
+  min-height: 116px;
+}
+
+.scheduling-lane-title {
+  font-weight: 700;
+}
+
+.scheduling-assignment-card {
+  display: grid;
+  gap: 0.45rem;
+  padding: 0.75rem;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.scheduling-assignment-card + .scheduling-assignment-card {
+  margin-top: 0.65rem;
+}
+
+.scheduling-day-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 1rem;
+}
+
+.scheduling-day-card {
+  display: grid;
+  gap: 0.85rem;
+}
+
+.scheduling-day-assignment-list {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.scheduling-constraint-review {
+  display: grid;
+  gap: 1rem;
+}
+
+.scheduling-constraint-legend-row {
+  align-items: flex-start;
+}
+
+.scheduling-constraint-summary-grid .value-panel p {
+  font-size: 1.4rem;
+}
+
+.scheduling-constraint-tab-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+}
+
+.scheduling-constraint-tab.is-active {
+  background: rgba(227, 139, 78, 0.18);
+  border-color: rgba(227, 139, 78, 0.34);
+}
+
+.scheduling-constraint-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(280px, 0.95fr);
+  gap: 1rem;
+  align-items: start;
+}
+
+.scheduling-constraint-board-shell,
+.scheduling-constraint-detail-card {
+  border-radius: 18px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.scheduling-constraint-board-shell {
+  overflow: auto;
+}
+
+.scheduling-constraint-detail-card {
+  padding: 1rem;
+}
+
+.scheduling-constraint-table {
+  min-width: 1020px;
+}
+
+.scheduling-constraint-table th:first-child,
+.scheduling-constraint-table td:first-child {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  background: rgba(25, 21, 18, 0.98);
+}
+
+.scheduling-constraint-table th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: rgba(25, 21, 18, 0.98);
+}
+
+.scheduling-constraint-table th:first-child {
+  z-index: 3;
+}
+
+.scheduling-constraint-day-cell {
+  min-width: 140px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.scheduling-constraint-day-cell.is-soft-preference {
+  background:
+    linear-gradient(180deg, rgba(214, 161, 74, 0.12), rgba(214, 161, 74, 0.04)),
+    rgba(255, 255, 255, 0.02);
+}
+
+.scheduling-constraint-cell-stack,
+.scheduling-constraint-detail-stack {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.scheduling-constraint-anchor,
+.scheduling-requirement-card {
+  width: 100%;
+  text-align: left;
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.03);
+  color: inherit;
+}
+
+.scheduling-constraint-anchor {
+  display: grid;
+  gap: 0.45rem;
+  padding: 0.75rem;
+}
+
+.scheduling-requirement-card {
+  display: grid;
+  gap: 0.5rem;
+  padding: 0.65rem;
+}
+
+.scheduling-constraint-anchor.is-selected,
+.scheduling-requirement-card.is-selected {
+  border-color: rgba(227, 139, 78, 0.44);
+  background: rgba(227, 139, 78, 0.12);
+  box-shadow: inset 0 0 0 1px rgba(227, 139, 78, 0.18);
+}
+
+.scheduling-constraint-anchor-title,
+.scheduling-requirement-card-title {
+  display: block;
+  font-weight: 700;
+}
+
+.scheduling-constraint-anchor-subtle {
+  display: block;
+  color: var(--text-muted);
+  font-size: 0.84rem;
+}
+
+.scheduling-constraint-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.scheduling-constraint-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.24rem 0.48rem;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  font-size: 0.72rem;
+  line-height: 1.2;
+}
+
+.scheduling-constraint-badge.tone-muted {
+  background: rgba(255, 255, 255, 0.06);
+  color: #efe5da;
+}
+
+.scheduling-constraint-badge.tone-success {
+  background: rgba(111, 183, 140, 0.16);
+  color: #b8e4c7;
+}
+
+.scheduling-constraint-badge.tone-warning {
+  background: rgba(214, 161, 74, 0.18);
+  color: #f4d18d;
+}
+
+.scheduling-constraint-badge.tone-danger {
+  background: rgba(215, 106, 84, 0.18);
+  color: #ffcabf;
+}
+
+.scheduling-constraint-window-chip {
+  display: inline-flex;
+  align-items: center;
+  width: 100%;
+  padding: 0.4rem 0.5rem;
+  border-radius: 12px;
+  border: 1px solid rgba(111, 183, 140, 0.36);
+  background: rgba(111, 183, 140, 0.16);
+  color: #ddf6e7;
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.scheduling-constraint-soft-flag,
+.scheduling-constraint-empty-mark {
+  color: var(--text-muted);
+  font-size: 0.78rem;
+}
+
+.scheduling-constraint-soft-flag {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  padding: 0.2rem 0.48rem;
+  border-radius: 999px;
+  border: 1px dashed rgba(214, 161, 74, 0.4);
+  color: #f6d288;
+}
+
+.scheduling-constraint-detail-list li + li {
+  margin-top: 0.55rem;
+  padding-top: 0.55rem;
+}
+
+@media (max-width: 960px) {
+  .layout-grid,
+  .detail-grid,
+  .comparison-grid,
+  .pending-purchase-layout,
+  .scheduling-constraint-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .pricing-review-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .bulk-action-bar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .bulk-action-controls {
+    width: 100%;
+  }
+
+  .runtime-status-item {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .scheduling-month-grid {
+    gap: 0.35rem;
+  }
+
+  .scheduling-month-cell {
+    min-height: 92px;
+    padding: 0.5rem;
+  }
+
+  .scheduling-candidate-summary {
+    flex-direction: column;
+  }
+
+  .scheduling-constraint-board-shell {
+    overflow: auto;
+  }
+
+  .sidebar {
+    position: static;
+    /* Stay a column tree on mobile too, but allow it to take the full
+     * viewport width since fit-content(25vw) is too narrow for tablets. */
+    max-width: none;
+    max-height: none;
+  }
+
+  .pending-purchase-sidebar {
+    position: static;
+  }
+}
+
+/* Helios canonical tree nav (Windows-98-style +/- expand boxes). */
+.tree-nav {
+  display: flex;
+  flex-direction: column;
+  font-size: 0.9rem;
+  font-family: 'Segoe UI', 'Tahoma', 'Avenir Next', sans-serif;
+  user-select: none;
+  padding: 0.25rem 0;
+  /* Grow to the widest row so the sidebar's overflow-x scroll engages
+   * once the tree exceeds the sidebar's content width. min-width:100%
+   * keeps short trees flush to the sidebar edge. */
+  width: max-content;
+  min-width: 100%;
+}
+.tree-nav-row {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.15rem 0.4rem;
+  /* Match height of the +/- toggle (1rem) plus row padding (2 x 0.15rem)
+   * so leaves and branches share one canonical vertical row size. */
+  min-height: calc(1rem + 0.3rem);
+  white-space: nowrap;
+}
+.tree-nav-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1rem;
+  height: 1rem;
+  font-size: 0.75rem;
+  line-height: 1;
+  font-weight: 700;
+  color: #1c1c1c;
+  background: #efeae0;
+  border: 1px solid #6b6155;
+  box-shadow: inset -1px -1px 0 #b9aa97, inset 1px 1px 0 #ffffff;
+  cursor: pointer;
+  padding: 0;
+  border-radius: 0;
+  font-family: 'Lucida Console', 'Courier New', monospace;
+}
+.tree-nav-toggle:focus-visible {
+  outline: 1px dotted #1c1c1c;
+  outline-offset: 1px;
+}
+.tree-nav-toggle-spacer {
+  display: inline-block;
+  width: 1rem;
+  height: 1rem;
+}
+.tree-nav-branch-label {
+  color: var(--text-muted);
+  font-weight: 600;
+}
+a.tree-nav-branch-label.is-link,
+.tree-nav-branch-label.is-link {
+  color: var(--accent-strong);
+  text-decoration: none;
+  padding: 0.05rem 0.3rem;
+  border-radius: 2px;
+}
+.tree-nav-branch-label.is-link:hover {
+  background: var(--accent-muted);
+}
+.tree-nav-branch-label.is-link.is-active {
+  background: var(--accent);
+  color: #1c1c1c;
+}
+.tree-nav-children {
+  display: flex;
+  flex-direction: column;
+  border-left: 1px dotted rgba(199, 184, 168, 0.35);
+  margin-left: 0.55rem;
+  padding-left: 0.05rem;
+}
+.tree-nav-leaf-row {
+  display: flex;
+  align-items: center;
+  /* Use the same vertical sizing as branch rows so leaves do not visually
+   * shrink relative to their parents. See `.tree-nav-row` above. */
+  padding: 0.15rem 0.4rem;
+  min-height: calc(1rem + 0.3rem);
+  white-space: nowrap;
+}
+.tree-nav-leaf {
+  color: var(--accent-strong);
+  text-decoration: none;
+  padding: 0.05rem 0.3rem;
+  border-radius: 2px;
+}
+.tree-nav-leaf:hover {
+  background: var(--accent-muted);
+}
+.tree-nav-leaf.is-active {
+  background: var(--accent);
+  color: #1c1c1c;
+  font-weight: 600;
+}
+.tree-nav-count {
+  color: var(--text-muted);
+  font-weight: 400;
+  margin-left: 0.25rem;
+}
+
+/* The per-page tree-nav rail (.review-with-tree-nav, .tree-nav-rail) was
+ * retired: the primary AppShell sidebar is the only navigation surface. */
+.review-content {
+  min-width: 0;
+}
