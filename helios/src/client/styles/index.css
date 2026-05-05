@@ -351,17 +351,17 @@ pre {
 
 .pill-success {
   background: rgba(111, 183, 140, 0.18);
-  color: #bbe7ca;
+  color: #2f5b3c;
 }
 
 .pill-warning {
   background: rgba(214, 161, 74, 0.18);
-  color: #f6d288;
+  color: #6b4c0e;
 }
 
 .pill-danger {
   background: rgba(215, 106, 84, 0.2);
-  color: #ffc7bc;
+  color: #6e2316;
 }
 
 .data-table-wrapper {
@@ -693,17 +693,17 @@ pre {
 
 .velocity-indicator-success {
   background: rgba(111, 183, 140, 0.2);
-  color: #c9f0d4;
+  color: #2f5b3c;
 }
 
 .velocity-indicator-danger {
   background: rgba(215, 106, 84, 0.22);
-  color: #ffd2c8;
+  color: #6e2316;
 }
 
 .velocity-indicator-muted {
-  background: rgba(255, 250, 241, 0.65);
-  color: #e8ddd1;
+  background: rgba(120, 86, 48, 0.12);
+  color: var(--text-muted);
 }
 
 .pricing-review-layout {
@@ -907,12 +907,12 @@ pre {
 
 .error-text {
   margin: 0 0 0.75rem;
-  color: #ffc0b6;
+  color: #8c2f1e;
 }
 
 .success-text {
   margin: 0 0 0.75rem;
-  color: #9be5aa;
+  color: #2f5b3c;
 }
 
 .empty-state {
@@ -1262,23 +1262,23 @@ pre {
 }
 
 .scheduling-constraint-badge.tone-muted {
-  background: rgba(255, 250, 241, 0.65);
-  color: #efe5da;
+  background: rgba(120, 86, 48, 0.12);
+  color: var(--text-muted);
 }
 
 .scheduling-constraint-badge.tone-success {
   background: rgba(111, 183, 140, 0.16);
-  color: #b8e4c7;
+  color: #2f5b3c;
 }
 
 .scheduling-constraint-badge.tone-warning {
   background: rgba(214, 161, 74, 0.18);
-  color: #f4d18d;
+  color: #6b4c0e;
 }
 
 .scheduling-constraint-badge.tone-danger {
   background: rgba(215, 106, 84, 0.18);
-  color: #ffcabf;
+  color: #6e2316;
 }
 
 .scheduling-constraint-window-chip {
@@ -1289,7 +1289,7 @@ pre {
   border-radius: 12px;
   border: 1px solid rgba(111, 183, 140, 0.36);
   background: rgba(111, 183, 140, 0.16);
-  color: #ddf6e7;
+  color: #2f5b3c;
   font-size: 0.8rem;
   font-weight: 600;
 }
@@ -1307,7 +1307,7 @@ pre {
   padding: 0.2rem 0.48rem;
   border-radius: 999px;
   border: 1px dashed rgba(214, 161, 74, 0.4);
-  color: #f6d288;
+  color: #6b4c0e;
 }
 
 .scheduling-constraint-detail-list li + li {
@@ -1642,20 +1642,6 @@ a.tree-nav-branch-label.is-link,
 }
 .policy-replacement-review .copy-grid {
   grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-}
-/* Virtualized card list (headlines / descriptions / template families).
- * Single-column scroll viewport so only the visible window mounts; trades
- * the responsive auto-fit copy-grid for ~10x lower mounted DOM. */
-.policy-replacement-review .virtual-card-list {
-  overflow: auto;
-  border: 1px solid var(--line);
-  border-radius: 14px;
-  background: #fffdfa;
-  padding: 0 10px;
-}
-.policy-replacement-review .virtual-card-list-inner {
-  position: relative;
-  width: 100%;
 }
 .policy-replacement-review .two {
   grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
