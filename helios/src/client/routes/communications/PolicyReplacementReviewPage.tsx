@@ -474,11 +474,22 @@ function MappingRow({
 }: MappingRowProps) {
   const itemId = mapping.mappingId
   const proposedReplacement = mapping.proposedReplacement ?? ''
-  const editedText = state.fields.text ?? proposedReplacement
   const defaultCategoryRaw: string = (mapping.defaultReplacementCategory ?? '') as string
   const selectedCategory: string = state.fields.replacementCategory ?? defaultCategoryRaw
   const selectedSourceId = state.fields.sourceId ?? ''
   const sourceDecision = resolveSourceDecision(selectedSourceId, items)
+  // Live source -> mapping cascade: when a source is bound, the fallback for
+  // editedText is the *current* source text resolved through the items map.
+  // This way an edit to e.g. template-family-3 propagates immediately into
+  // every mapping whose sourceId points at template-family-3, without
+  // overwriting any reviewer-edited mapping text (state.fields.text wins).
+  // When no source is bound, the baked proposedReplacement remains the
+  // fallback. resolveSourceText can return null if the id is malformed or
+  // not found in the packet detail; fall back to proposedReplacement then.
+  const sourceFallbackText = selectedSourceId
+    ? resolveSourceText(selectedSourceId, detail, items) ?? proposedReplacement
+    : proposedReplacement
+  const editedText = state.fields.text ?? sourceFallbackText
   const rowSourceClass = sourceDecision ? `is-source-${sourceDecision}` : ''
   const mappingClass = `is-mapping-${state.decision}`
   // Resolve a status note for the bound source's review state.
