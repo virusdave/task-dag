@@ -166,6 +166,7 @@ async function collectPagedListShort(
   entityType: EntityType,
 ): Promise<CatalogEntityRow[]> {
   const rows: CatalogEntityRow[] = []
+  const seenIds = new Set<number>()
   let page = 1
   while (true) {
     const raw = await callSweedRpcForDealer(stateDealerId, rpcName, {
@@ -173,7 +174,13 @@ async function collectPagedListShort(
       pageSize: LIST_PAGE_SIZE,
     })
     const parsed = PagedListResponseSchema.parse(raw)
+    let newRowsThisPage = 0
     for (const row of parsed.data) {
+      if (seenIds.has(row.id)) {
+        continue
+      }
+      seenIds.add(row.id)
+      newRowsThisPage += 1
       rows.push({
         entityType,
         entityId: row.id,
@@ -181,7 +188,11 @@ async function collectPagedListShort(
         payload: row,
       })
     }
-    if (parsed.data.length < LIST_PAGE_SIZE) {
+    // Stop when the page is short OR the page returns no rows we have not
+    // already seen (e.g. an RPC that ignores `page` and returns the same
+    // payload every call). Without this, a non-paginating endpoint would
+    // loop forever.
+    if (parsed.data.length < LIST_PAGE_SIZE || newRowsThisPage === 0) {
       break
     }
     page += 1
@@ -195,6 +206,7 @@ async function collectFlatList(
   entityType: EntityType,
 ): Promise<CatalogEntityRow[]> {
   const rows: CatalogEntityRow[] = []
+  const seenIds = new Set<number>()
   let page = 1
   while (true) {
     const raw = await callSweedRpcForDealer(stateDealerId, rpcName, {
@@ -202,7 +214,13 @@ async function collectFlatList(
       pageSize: LIST_PAGE_SIZE,
     })
     const parsedRows = parseFlexibleListResponse(raw)
+    let newRowsThisPage = 0
     for (const row of parsedRows) {
+      if (seenIds.has(row.id)) {
+        continue
+      }
+      seenIds.add(row.id)
+      newRowsThisPage += 1
       rows.push({
         entityType,
         entityId: row.id,
@@ -210,7 +228,7 @@ async function collectFlatList(
         payload: row,
       })
     }
-    if (parsedRows.length < LIST_PAGE_SIZE) {
+    if (parsedRows.length < LIST_PAGE_SIZE || newRowsThisPage === 0) {
       break
     }
     page += 1
@@ -244,6 +262,7 @@ async function collectCategoriesAndSubcategories(stateDealerId: number): Promise
 
 async function collectDistributors(stateDealerId: number): Promise<CatalogEntityRow[]> {
   const rows: CatalogEntityRow[] = []
+  const seenIds = new Set<number>()
   let page = 1
   while (true) {
     const raw = await callSweedRpcForDealer(stateDealerId, 'store.distributor.list', {
@@ -251,7 +270,13 @@ async function collectDistributors(stateDealerId: number): Promise<CatalogEntity
       pageSize: LIST_PAGE_SIZE,
     })
     const parsedRows = parseFlexibleListResponse(raw)
+    let newRowsThisPage = 0
     for (const row of parsedRows) {
+      if (seenIds.has(row.id)) {
+        continue
+      }
+      seenIds.add(row.id)
+      newRowsThisPage += 1
       rows.push({
         entityType: 'distributor',
         entityId: row.id,
@@ -259,7 +284,7 @@ async function collectDistributors(stateDealerId: number): Promise<CatalogEntity
         payload: row,
       })
     }
-    if (parsedRows.length < LIST_PAGE_SIZE) {
+    if (parsedRows.length < LIST_PAGE_SIZE || newRowsThisPage === 0) {
       break
     }
     page += 1
