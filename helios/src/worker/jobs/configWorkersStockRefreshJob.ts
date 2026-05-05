@@ -15,6 +15,8 @@ const STOCK_INVENTORY_PAGE_SIZE = 200
 
 const StockInventoryRowSchema = z
   .object({
+    // Some Sweed builds expose `isOnStock` directly; the current grouped feed
+    // does not and we instead derive it from the available quantity below.
     isOnStock: z.boolean().optional(),
     packageCount: z.coerce.number().int().min(0).optional(),
     product: z
@@ -26,6 +28,11 @@ const StockInventoryRowSchema = z
       .passthrough()
       .optional(),
     quantity: z.coerce.number().nullable().optional(),
+    // Live grouped feed shape: per-row `currentQty`, `holdQty`, `availableQty`.
+    // `availableQty` already nets out holds; treat it as the in-stock signal.
+    currentQty: z.coerce.number().nullable().optional(),
+    holdQty: z.coerce.number().nullable().optional(),
+    availableQty: z.coerce.number().nullable().optional(),
   })
   .passthrough()
 
@@ -167,7 +174,17 @@ async function scanFullStockForSite(site: HeliosPendingPurchaseSiteDealer): Prom
         continue
       }
       const existing = rowsByProductId.get(productId)
-      const quantity = typeof row.quantity === 'number' ? row.quantity : null
+      // Prefer the new grouped-feed `availableQty` (already nets out holds),
+      // then fall back to legacy `quantity`/`currentQty` if a Sweed build
+      // ever returns those instead.
+      const quantity =
+        typeof row.availableQty === 'number'
+          ? row.availableQty
+          : typeof row.quantity === 'number'
+            ? row.quantity
+            : typeof row.currentQty === 'number'
+              ? row.currentQty
+              : null
       const packageCount = typeof row.packageCount === 'number' ? row.packageCount : null
       const isOnStock = typeof row.isOnStock === 'boolean'
         ? row.isOnStock
@@ -280,9 +297,9 @@ async function persistSnapshotAndDiff(input: {
           insert into stock_variant_state (
             site_dealer_id, product_id, is_on_stock, quantity, last_snapshot_id, last_observed_at,
             last_in_stock_at, last_out_of_stock_at
-          ) values ($1, $2, $3, $4, $5, $6,
-            case when $3 then $6 else null end,
-            case when $3 then null else $6 end)
+          ) values ($1, $2, $3, $4, $5, $6::timestamptz,
+            case when $3 then $6::timestamptz else null end,
+            case when $3 then null else $6::timestamptz end)
           on conflict (site_dealer_id, product_id) do update
             set is_on_stock = excluded.is_on_stock,
                 quantity = excluded.quantity,
