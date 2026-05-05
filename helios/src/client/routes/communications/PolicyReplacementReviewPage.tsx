@@ -1,9 +1,9 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useLoaderData, useParams } from 'react-router-dom'
+import { useVirtualizer } from '@tanstack/react-virtual'
 
 import {
   POLICY_REPLACEMENT_CATEGORIES,
-  POLICY_REPLACEMENT_DECISIONS,
   PolicyReplacementDraftEmptyResponseSchema,
   PolicyReplacementDraftResponseSchema,
   PolicyReplacementPacketDetailSchema,
@@ -22,7 +22,6 @@ import {
   type VisualReplacementPlanDetail,
 } from '../../../shared/contracts/index.js'
 import { loadJson, mutateJson } from '../../app/fetchJson.js'
-import { Pill } from '../../components/Pill.js'
 import { useRegisterSidebarSubtree } from '../../components/SidebarNavContext.js'
 import type { TreeNavNode } from '../../components/TreeNav.js'
 
@@ -90,32 +89,32 @@ function buildCategorySections(summary: PolicyReplacementPacketSummary): Categor
     {
       prefix: 'visual',
       typeLabel: 'Visuals',
-      longLabel: 'Visual replacement plans',
+      longLabel: 'Limited logo / image replacements',
       count: summary.categories.visualReplacementPlans,
     },
-    { prefix: 'headline', typeLabel: 'Headlines', longLabel: 'Headlines', count: summary.categories.headlines },
+    { prefix: 'headline', typeLabel: 'Headlines', longLabel: 'Replacement headline bank', count: summary.categories.headlines },
     {
       prefix: 'long-headline',
       typeLabel: 'Long headlines',
-      longLabel: 'Long headlines',
+      longLabel: 'Long headline bank',
       count: summary.categories.longHeadlines,
     },
     {
       prefix: 'description',
       typeLabel: 'Descriptions',
-      longLabel: 'Descriptions',
+      longLabel: 'Description bank',
       count: summary.categories.descriptions,
     },
     {
       prefix: 'template-family',
       typeLabel: 'Template families',
-      longLabel: 'Template families',
+      longLabel: 'Reusable template families',
       count: summary.categories.templateFamilies,
     },
     {
       prefix: 'text-map',
       typeLabel: 'Text replacement mappings',
-      longLabel: 'Text replacement mappings',
+      longLabel: 'Text replacement mapping',
       count: summary.categories.textReplacementMappings,
     },
   ]
@@ -170,13 +169,6 @@ function resolveSourceText(
 
 const EMPTY_STATE: PolicyReplacementItemState = { decision: 'unreviewed', fields: {} }
 
-const DECISION_TONE: Record<PolicyReplacementDecision, 'success' | 'danger' | 'warning' | 'muted'> = {
-  accepted: 'success',
-  rejected: 'danger',
-  hold: 'warning',
-  unreviewed: 'muted',
-}
-
 function formatNumber(value: number | undefined | null): string {
   if (typeof value !== 'number' || !Number.isFinite(value)) {
     return '0'
@@ -195,50 +187,46 @@ function formatRecordEntries(record: Record<string, number> | undefined): string
   return entries.map(([key, value]) => `${key}: ${formatNumber(value)}`).join(' · ')
 }
 
+/**
+ * Reviewer pill button row (Accept / Reject / Hold). Mirrors the
+ * pre-Helios standalone packet: pill-shaped buttons that recolor to
+ * good/bad/warn when active, not radios.
+ */
 interface DecisionRowProps {
-  itemId: string
   decision: PolicyReplacementDecision
   onChange: (next: PolicyReplacementDecision) => void
+  acceptLabel?: string
+  rejectLabel?: string
+  holdLabel?: string
 }
 
-function DecisionRow({ itemId, decision, onChange }: DecisionRowProps) {
+function DecisionRow({
+  decision,
+  onChange,
+  acceptLabel = 'Accept',
+  rejectLabel = 'Reject',
+  holdLabel = 'Hold',
+}: DecisionRowProps) {
+  const labels: Record<Exclude<PolicyReplacementDecision, 'unreviewed'>, string> = {
+    accepted: acceptLabel,
+    rejected: rejectLabel,
+    hold: holdLabel,
+  }
+  const order: Array<Exclude<PolicyReplacementDecision, 'unreviewed'>> = ['accepted', 'rejected', 'hold']
   return (
-    <div className="inline-row wrap-row" role="group" aria-label="Review decision">
-      {POLICY_REPLACEMENT_DECISIONS.map((option) => (
-        <label key={option} className="inline-row">
-          <input
-            type="radio"
-            name={`decision-${itemId}`}
-            checked={decision === option}
-            onChange={() => onChange(option)}
-          />
-          <span>{option}</span>
-        </label>
+    <div className="decision-row" role="group" aria-label="Review decision">
+      {order.map((option) => (
+        <button
+          key={option}
+          type="button"
+          className={`decision-button${decision === option ? ' is-active' : ''}`}
+          data-decision={option}
+          onClick={() => onChange(option)}
+        >
+          {labels[option]}
+        </button>
       ))}
-      <Pill tone={DECISION_TONE[decision]}>{decision}</Pill>
     </div>
-  )
-}
-
-interface NoteFieldProps {
-  itemId: string
-  value: string
-  placeholder?: string
-  onChange: (value: string) => void
-}
-
-function NoteField({ itemId, value, placeholder, onChange }: NoteFieldProps) {
-  return (
-    <label className="stack-field" htmlFor={`note-${itemId}`}>
-      <span>Reviewer note</span>
-      <textarea
-        id={`note-${itemId}`}
-        rows={2}
-        value={value}
-        placeholder={placeholder}
-        onChange={(event) => onChange(event.currentTarget.value)}
-      />
-    </label>
   )
 }
 
@@ -247,30 +235,35 @@ interface VisualCardProps {
   index: number
   plan: VisualReplacementPlanDetail | undefined
   state: PolicyReplacementItemState
-  onDecision: (decision: PolicyReplacementDecision) => void
-  onField: (key: keyof PolicyReplacementItemFields, value: string) => void
+  setDecision: (itemId: string, decision: PolicyReplacementDecision) => void
+  setField: (itemId: string, key: keyof PolicyReplacementItemFields, value: string) => void
 }
 
-function VisualCard({ itemId, index, plan, state, onDecision, onField }: VisualCardProps) {
+const VisualCard = memo(function VisualCard({ itemId, index, plan, state, setDecision, setField }: VisualCardProps) {
+  const onDecision = useCallback(
+    (decision: PolicyReplacementDecision) => setDecision(itemId, decision),
+    [itemId, setDecision],
+  )
+  const onField = useCallback(
+    (key: keyof PolicyReplacementItemFields, value: string) => setField(itemId, key, value),
+    [itemId, setField],
+  )
   if (!plan) {
     return (
-      <div className="detail-panel" style={{ marginTop: '0.5rem' }}>
-        <p className="error-text">Visual {index + 1} ({itemId}) is missing from the packet detail payload.</p>
-      </div>
+      <article className="review-card review-card-missing">
+        <p>Visual {index + 1} ({itemId}) is missing from the packet detail payload.</p>
+      </article>
     )
   }
   const associationCount = plan.associationCount ?? 0
   return (
-    <div className="detail-panel" style={{ marginTop: '0.5rem' }} id={`item-${itemId}`}>
-      <header className="page-header">
-        <div>
-          <p className="eyebrow">{plan.assetType ?? 'Visual'}</p>
-          <strong>{itemId}</strong>
-        </div>
-        <Pill tone={associationCount > 0 ? 'warning' : 'muted'}>
+    <article className={`review-card visual is-${state.decision}`} id={`item-${itemId}`}>
+      <div className="card-head">
+        <span className="eyebrow">{plan.assetType ?? 'Visual'}</span>
+        <span className={`pill ${associationCount > 0 ? 'warning' : 'neutral'}`}>
           {`${formatNumber(associationCount)} associations`}
-        </Pill>
-      </header>
+        </span>
+      </div>
       {plan.currentAsset ? (
         <p>
           <strong>Current limited asset:</strong>{' '}
@@ -290,22 +283,24 @@ function VisualCard({ itemId, index, plan, state, onDecision, onField }: VisualC
           <strong>Attach as:</strong> <code>{plan.plannedReplacementFieldType}</code>
         </p>
       ) : null}
-      {plan.applyInstruction ? <p className="subtle-copy">{plan.applyInstruction}</p> : null}
-      <p className="subtle-copy">
-        {plan.impressions !== undefined ? `Impressions: ${formatNumber(plan.impressions)}` : null}
-        {plan.statusReasons ? ` · ${formatRecordEntries(plan.statusReasons)}` : null}
-        {plan.levels ? ` · Levels — ${formatRecordEntries(plan.levels)}` : null}
-      </p>
-      <DecisionRow itemId={itemId} decision={state.decision} onChange={onDecision} />
-      <NoteField
-        itemId={itemId}
+      {plan.applyInstruction ? <p className="muted">{plan.applyInstruction}</p> : null}
+      {(plan.impressions !== undefined || plan.statusReasons || plan.levels) ? (
+        <p className="muted">
+          {plan.impressions !== undefined ? `Impressions: ${formatNumber(plan.impressions)}` : null}
+          {plan.statusReasons ? ` · ${formatRecordEntries(plan.statusReasons)}` : null}
+          {plan.levels ? ` · Levels — ${formatRecordEntries(plan.levels)}` : null}
+        </p>
+      ) : null}
+      <DecisionRow decision={state.decision} onChange={onDecision} />
+      <textarea
+        rows={2}
         value={state.fields.note ?? ''}
         placeholder="Reviewer note for this visual replacement"
-        onChange={(value) => onField('note', value)}
+        onChange={(event) => onField('note', event.currentTarget.value)}
       />
-    </div>
+    </article>
   )
-}
+})
 
 interface CopyCardProps {
   itemId: string
@@ -313,235 +308,475 @@ interface CopyCardProps {
   index: number
   entry: CopyEntryDetail | undefined
   state: PolicyReplacementItemState
-  onDecision: (decision: PolicyReplacementDecision) => void
-  onField: (key: keyof PolicyReplacementItemFields, value: string) => void
+  setDecision: (itemId: string, decision: PolicyReplacementDecision) => void
+  setField: (itemId: string, key: keyof PolicyReplacementItemFields, value: string) => void
 }
 
-function CopyCard({ itemId, label, index, entry, state, onDecision, onField }: CopyCardProps) {
+const CopyCard = memo(function CopyCard({ itemId, label, index, entry, state, setDecision, setField }: CopyCardProps) {
+  const onDecision = useCallback(
+    (decision: PolicyReplacementDecision) => setDecision(itemId, decision),
+    [itemId, setDecision],
+  )
+  const onField = useCallback(
+    (key: keyof PolicyReplacementItemFields, value: string) => setField(itemId, key, value),
+    [itemId, setField],
+  )
   if (!entry) {
     return (
-      <div className="detail-panel" style={{ marginTop: '0.5rem' }}>
-        <p className="error-text">{label} {index + 1} ({itemId}) is missing from the packet detail payload.</p>
-      </div>
+      <article className="review-card review-card-missing">
+        <p>{label} {index + 1} ({itemId}) is missing from the packet detail payload.</p>
+      </article>
     )
   }
-  // Edited replacement text is what flows into the resolver/apply step.
-  // Default to the packet's source text if the reviewer has not edited it.
   const sourceText = entry.text ?? ''
   const editedText = state.fields.text ?? sourceText
   return (
-    <div className="detail-panel" style={{ marginTop: '0.5rem' }} id={`item-${itemId}`}>
-      <header className="page-header">
-        <div>
-          <p className="eyebrow">{`${label} ${index + 1}`}</p>
-          <strong>{itemId}</strong>
-        </div>
-        <span className="subtle-copy">{`${editedText.length} chars`}</span>
-      </header>
-      <label className="stack-field" htmlFor={`text-${itemId}`}>
-        <span>Replacement text</span>
-        <textarea
-          id={`text-${itemId}`}
-          rows={2}
-          value={editedText}
-          onChange={(event) => onField('text', event.currentTarget.value)}
-        />
-      </label>
-      <p className="subtle-copy">
-        {entry.use ? <strong>Use:</strong> : null} {entry.use ?? null}
-        {entry.use && entry.whySafer ? ' · ' : ''}
-        {entry.whySafer ? <em>{entry.whySafer}</em> : null}
-        {entry.source ? ` · ${entry.source}` : null}
-      </p>
-      <DecisionRow itemId={itemId} decision={state.decision} onChange={onDecision} />
-      <NoteField
-        itemId={itemId}
-        value={state.fields.note ?? ''}
-        onChange={(value) => onField('note', value)}
+    <article className={`review-card is-${state.decision}`} id={`item-${itemId}`}>
+      <div className="card-head">
+        <span className="eyebrow">{`${label} ${index + 1}`}</span>
+        <span className="char-count">{editedText.length}</span>
+      </div>
+      <textarea
+        rows={2}
+        value={editedText}
+        onChange={(event) => onField('text', event.currentTarget.value)}
       />
-    </div>
+      <DecisionRow decision={state.decision} onChange={onDecision} />
+      {(entry.use || entry.whySafer || entry.source) ? (
+        <details>
+          <summary>Why / intended use</summary>
+          {entry.whySafer ? <p>{entry.whySafer}</p> : null}
+          {(entry.use || entry.source) ? (
+            <p className="muted">
+              {entry.use ?? ''}
+              {entry.use && entry.source ? ' · ' : ''}
+              {entry.source ?? ''}
+            </p>
+          ) : null}
+        </details>
+      ) : null}
+      <textarea
+        className="reviewer-note"
+        rows={1}
+        value={state.fields.note ?? ''}
+        placeholder="Reviewer note"
+        onChange={(event) => onField('note', event.currentTarget.value)}
+      />
+    </article>
   )
-}
+})
 
 interface TemplateFamilyCardProps {
   itemId: string
   index: number
   entry: TemplateFamilyDetail | undefined
   state: PolicyReplacementItemState
-  onDecision: (decision: PolicyReplacementDecision) => void
-  onField: (key: keyof PolicyReplacementItemFields, value: string) => void
+  setDecision: (itemId: string, decision: PolicyReplacementDecision) => void
+  setField: (itemId: string, key: keyof PolicyReplacementItemFields, value: string) => void
 }
 
-function TemplateFamilyCard({ itemId, index, entry, state, onDecision, onField }: TemplateFamilyCardProps) {
+const TemplateFamilyCard = memo(function TemplateFamilyCard({ itemId, index, entry, state, setDecision, setField }: TemplateFamilyCardProps) {
+  const onDecision = useCallback(
+    (decision: PolicyReplacementDecision) => setDecision(itemId, decision),
+    [itemId, setDecision],
+  )
+  const onField = useCallback(
+    (key: keyof PolicyReplacementItemFields, value: string) => setField(itemId, key, value),
+    [itemId, setField],
+  )
   if (!entry) {
     return (
-      <div className="detail-panel" style={{ marginTop: '0.5rem' }}>
-        <p className="error-text">Template family {index + 1} ({itemId}) is missing from the packet detail payload.</p>
-      </div>
+      <article className="review-card review-card-missing">
+        <p>Template family {index + 1} ({itemId}) is missing from the packet detail payload.</p>
+      </article>
     )
   }
   const sourceText = entry.template ?? ''
   const editedText = state.fields.text ?? sourceText
+  const fieldType = entry.fieldType ?? 'Template'
   return (
-    <div className="detail-panel" style={{ marginTop: '0.5rem' }} id={`item-${itemId}`}>
-      <header className="page-header">
-        <div>
-          <p className="eyebrow">{`Template family ${index + 1}${entry.fieldType ? ` · ${entry.fieldType}` : ''}`}</p>
-          <strong>{itemId}</strong>
-        </div>
-        <span className="subtle-copy">{`${editedText.length} chars`}</span>
-      </header>
-      <label className="stack-field" htmlFor={`text-${itemId}`}>
-        <span>Template (use placeholders like {'{location}'})</span>
-        <textarea
-          id={`text-${itemId}`}
-          rows={2}
-          value={editedText}
-          onChange={(event) => onField('text', event.currentTarget.value)}
-        />
-      </label>
-      <p className="subtle-copy">
-        {entry.use ? <strong>Use:</strong> : null} {entry.use ?? null}
-        {entry.use && entry.whySafer ? ' · ' : ''}
-        {entry.whySafer ? <em>{entry.whySafer}</em> : null}
-        {entry.source ? ` · ${entry.source}` : null}
-      </p>
-      <DecisionRow itemId={itemId} decision={state.decision} onChange={onDecision} />
-      <NoteField
-        itemId={itemId}
-        value={state.fields.note ?? ''}
-        onChange={(value) => onField('note', value)}
+    <article className={`review-card family-card is-${state.decision}`} id={`item-${itemId}`}>
+      <div className="card-head">
+        <span className="eyebrow">{`${fieldType} template ${index + 1}`}</span>
+        <span className="pill neutral">template</span>
+      </div>
+      <textarea
+        rows={2}
+        value={editedText}
+        onChange={(event) => onField('text', event.currentTarget.value)}
       />
-    </div>
+      <DecisionRow decision={state.decision} onChange={onDecision} />
+      {(entry.use || entry.whySafer || entry.source) ? (
+        <details>
+          <summary>Use and safety note</summary>
+          {entry.whySafer ? <p>{entry.whySafer}</p> : null}
+          {(entry.use || entry.source) ? (
+            <p className="muted">
+              {entry.use ?? ''}
+              {entry.use && entry.source ? ' · ' : ''}
+              {entry.source ?? ''}
+            </p>
+          ) : null}
+        </details>
+      ) : null}
+      <textarea
+        className="reviewer-note"
+        rows={1}
+        value={state.fields.note ?? ''}
+        placeholder="Reviewer note"
+        onChange={(event) => onField('note', event.currentTarget.value)}
+      />
+    </article>
   )
+})
+
+/**
+ * Resolve the decision of the source item bound to this mapping (if any).
+ * Drives the row-tinting and column-1 inset shadow indicator just like the
+ * standalone packet does.
+ */
+function resolveSourceDecision(
+  sourceId: string | undefined,
+  items: Record<string, PolicyReplacementItemState>,
+): PolicyReplacementDecision | null {
+  if (!sourceId) {
+    return null
+  }
+  return items[sourceId]?.decision ?? null
 }
 
-interface TextMapCardProps {
-  itemId: string
-  mapping: TextReplacementMappingDetail | undefined
+interface MappingRowProps {
+  mapping: TextReplacementMappingDetail
   categoryLabels: Record<string, string>
   state: PolicyReplacementItemState
+  items: Record<string, PolicyReplacementItemState>
+  detail: PolicyReplacementPacketDetail
   onDecision: (decision: PolicyReplacementDecision) => void
   onField: (key: keyof PolicyReplacementItemFields, value: string) => void
   onPickCategory: (category: PolicyReplacementCategory | '', sourceId: string | null) => void
+  /** Virtualizer ref for measureElement. Optional so the row can also be rendered outside a virtualizer. */
+  rowRef?: (node: HTMLTableRowElement | null) => void
+  /** Required by `useVirtualizer.measureElement` to know which virtual row this DOM node represents. */
+  virtualIndex?: number
 }
 
-function TextMapCard({
-  itemId,
+function MappingRow({
   mapping,
   categoryLabels,
   state,
+  items,
+  detail,
   onDecision,
   onField,
   onPickCategory,
-}: TextMapCardProps) {
-  if (!mapping) {
-    return (
-      <div className="detail-panel" style={{ marginTop: '0.5rem' }}>
-        <p className="error-text">Mapping {itemId} is missing from the packet detail payload.</p>
-      </div>
-    )
-  }
+  rowRef,
+  virtualIndex,
+}: MappingRowProps) {
+  const itemId = mapping.mappingId
   const proposedReplacement = mapping.proposedReplacement ?? ''
   const editedText = state.fields.text ?? proposedReplacement
   const defaultCategoryRaw: string = (mapping.defaultReplacementCategory ?? '') as string
   const selectedCategory: string = state.fields.replacementCategory ?? defaultCategoryRaw
   const selectedSourceId = state.fields.sourceId ?? ''
+  const sourceDecision = resolveSourceDecision(selectedSourceId, items)
+  const rowSourceClass = sourceDecision ? `is-source-${sourceDecision}` : ''
+  const mappingClass = `is-mapping-${state.decision}`
+  // Resolve a status note for the bound source's review state.
+  const sourceStatusText = (() => {
+    if (!selectedSourceId) {
+      return 'No source selected.'
+    }
+    const sourceText = resolveSourceText(selectedSourceId, detail, items)
+    const decisionLabel = sourceDecision ?? 'unreviewed'
+    const preview = sourceText ? ` — ${sourceText.length > 80 ? `${sourceText.slice(0, 80)}…` : sourceText}` : ''
+    return `Selected source ${selectedSourceId} (${decisionLabel})${preview}`
+  })()
+  const options = mapping.replacementOptions
   return (
-    <div className="detail-panel" style={{ marginTop: '0.5rem' }} id={`item-${itemId}`}>
-      <header className="page-header">
-        <div>
-          <p className="eyebrow">{mapping.assetType ?? 'Mapping'}</p>
-          <strong>{itemId}</strong>
-        </div>
-        <Pill tone="muted">{`${formatNumber(mapping.associationCount ?? 0)} associations`}</Pill>
-      </header>
-      {mapping.currentText ? (
-        <p>
-          <strong>Current limited text:</strong> <code>{mapping.currentText}</code>
-        </p>
-      ) : null}
-      <p className="subtle-copy">
-        {mapping.impressions !== undefined ? `Impressions: ${formatNumber(mapping.impressions)}` : null}
-        {mapping.statusReasons ? ` · ${formatRecordEntries(mapping.statusReasons)}` : null}
-        {mapping.levels ? ` · Levels — ${formatRecordEntries(mapping.levels)}` : null}
-        {mapping.replacementSource ? ` · Source: ${mapping.replacementSource}` : null}
-        {selectedSourceId ? ` · Selected source id: ${selectedSourceId}` : null}
-      </p>
-      <label className="stack-field" htmlFor={`text-${itemId}`}>
-        <span>Proposed replacement text</span>
+    <tr
+      id={`item-${itemId}`}
+      className={`${rowSourceClass} ${mappingClass}`.trim()}
+      data-review-item={itemId}
+      data-index={virtualIndex}
+      ref={rowRef}
+    >
+      <td>
+        <span className="eyebrow">{mapping.assetType ?? 'Mapping'}</span>
+      </td>
+      <td>{formatNumber(mapping.associationCount ?? 0)}</td>
+      <td>{mapping.impressions !== undefined ? formatNumber(mapping.impressions) : ''}</td>
+      <td className="muted">
+        {mapping.levels ? formatRecordEntries(mapping.levels) : ''}
+      </td>
+      <td>
+        <code>{mapping.currentText ?? ''}</code>
+        {mapping.statusReasons ? (
+          <p className="muted">{formatRecordEntries(mapping.statusReasons)}</p>
+        ) : null}
+      </td>
+      <td>
+        {options.length > 0 ? (
+          <div className="category-options">
+            <label className="category-option">
+              <input
+                type="radio"
+                name={`category-${itemId}`}
+                checked={!selectedCategory}
+                onChange={() => onPickCategory('', null)}
+              />
+              <span>None</span>
+            </label>
+            {options.map((option) => (
+              <label key={option.category} className="category-option" title={`Sourced from ${option.sourceId}`}>
+                <input
+                  type="radio"
+                  name={`category-${itemId}`}
+                  checked={selectedCategory === option.category}
+                  onChange={() => onPickCategory(option.category, option.sourceId)}
+                />
+                <span>{categoryLabels[option.category] ?? option.label}</span>
+              </label>
+            ))}
+          </div>
+        ) : (
+          <div className="category-options">
+            <label className="category-option">
+              <input
+                type="radio"
+                name={`category-${itemId}`}
+                checked={!selectedCategory}
+                onChange={() => onPickCategory('', null)}
+              />
+              <span>None</span>
+            </label>
+            {POLICY_REPLACEMENT_CATEGORIES.map((category) => (
+              <label key={category} className="category-option">
+                <input
+                  type="radio"
+                  name={`category-${itemId}`}
+                  checked={selectedCategory === category}
+                  onChange={() => onPickCategory(category, null)}
+                />
+                <span>{categoryLabels[category] ?? category}</span>
+              </label>
+            ))}
+          </div>
+        )}
         <textarea
-          id={`text-${itemId}`}
           rows={2}
           value={editedText}
           onChange={(event) => onField('text', event.currentTarget.value)}
         />
-      </label>
-      {mapping.whySafer ? <p className="subtle-copy"><em>{mapping.whySafer}</em></p> : null}
-      {mapping.replacementOptions.length > 0 ? (
-        <div className="inline-row wrap-row">
-          <span className="subtle-copy">Replacement category</span>
-          <label className="inline-row">
-            <input
-              type="radio"
-              name={`cat-${itemId}`}
-              checked={!selectedCategory}
-              onChange={() => onPickCategory('', null)}
-            />
-            <span>none</span>
-          </label>
-          {mapping.replacementOptions.map((option) => (
-            <label key={option.category} className="inline-row" title={`Sourced from ${option.sourceId}`}>
-              <input
-                type="radio"
-                name={`cat-${itemId}`}
-                checked={selectedCategory === option.category}
-                onChange={() => onPickCategory(option.category, option.sourceId)}
-              />
-              <span>{categoryLabels[option.category] ?? option.label}</span>
-            </label>
-          ))}
-        </div>
-      ) : (
-        <div className="inline-row wrap-row">
-          <span className="subtle-copy">Replacement category</span>
-          <label className="inline-row">
-            <input
-              type="radio"
-              name={`cat-${itemId}`}
-              checked={!selectedCategory}
-              onChange={() => onPickCategory('', null)}
-            />
-            <span>none</span>
-          </label>
-          {POLICY_REPLACEMENT_CATEGORIES.map((category) => (
-            <label key={category} className="inline-row">
-              <input
-                type="radio"
-                name={`cat-${itemId}`}
-                checked={selectedCategory === category}
-                onChange={() => onPickCategory(category, null)}
-              />
-              <span>{categoryLabels[category] ?? category}</span>
-            </label>
-          ))}
-        </div>
-      )}
-      <label className="stack-field" htmlFor={`source-${itemId}`}>
-        <span>Source asset id (optional override)</span>
-        <input
-          id={`source-${itemId}`}
-          type="text"
-          value={state.fields.sourceId ?? ''}
-          onChange={(event) => onField('sourceId', event.currentTarget.value)}
+        {mapping.whySafer ? <p className="muted"><em>{mapping.whySafer}</em></p> : null}
+        <p className="muted source-status">{sourceStatusText}</p>
+      </td>
+      <td>
+        <DecisionRow
+          decision={state.decision}
+          onChange={onDecision}
+          acceptLabel="Accept mapping"
+          rejectLabel="Reject mapping"
+          holdLabel="Hold mapping"
         />
-      </label>
-      <DecisionRow itemId={itemId} decision={state.decision} onChange={onDecision} />
-      <NoteField
-        itemId={itemId}
-        value={state.fields.note ?? ''}
-        onChange={(value) => onField('note', value)}
-      />
+        <textarea
+          className="reviewer-note"
+          rows={1}
+          value={state.fields.note ?? ''}
+          placeholder="note"
+          onChange={(event) => onField('note', event.currentTarget.value)}
+        />
+      </td>
+      <td className="muted">{mapping.replacementSource ?? ''}</td>
+    </tr>
+  )
+}
+
+interface MappingTableProps {
+  textMapCount: number
+  mappings: TextReplacementMappingDetail[]
+  categoryLabels: Record<string, string>
+  items: Record<string, PolicyReplacementItemState>
+  detail: PolicyReplacementPacketDetail
+  setDecision: (itemId: string, decision: PolicyReplacementDecision) => void
+  setField: (itemId: string, key: keyof PolicyReplacementItemFields, value: string) => void
+  pickMappingCategory: (
+    itemId: string,
+    category: PolicyReplacementCategory | '',
+    sourceId: string | null,
+  ) => void
+}
+
+/**
+ * Virtualized body for the text-replacement mapping table. The mapping ledger
+ * is the largest list in the page (~152 rows of radios + textareas + a
+ * reviewer-note textarea + DecisionRow), so we render only the rows that fall
+ * inside the visible scroll window. The table is wrapped in a fixed-height
+ * scroll container (`.table-wrap` already sets `max-height: 640px`); rows
+ * outside the window are represented by two padding `<tr>`s above and below.
+ *
+ * Rows have variable height (whySafer, statusReasons, multiline source
+ * status), so we use `measureElement` to record observed heights instead of a
+ * fixed estimate. The estimate is only used for the initial render.
+ */
+function MappingTable({
+  textMapCount,
+  mappings,
+  categoryLabels,
+  items,
+  detail,
+  setDecision,
+  setField,
+  pickMappingCategory,
+}: MappingTableProps) {
+  const scrollRef = useRef<HTMLDivElement | null>(null)
+  // Pre-resolve mapping lookup once per render so each row doesn't re-scan the
+  // mappings array. The find() in the original tbody was O(n) per row -> O(n^2)
+  // overall on every keystroke; with the lookup we get O(n) per render.
+  const mappingsById = useMemo(() => {
+    const byId = new Map<string, TextReplacementMappingDetail>()
+    for (const mapping of mappings) {
+      byId.set(mapping.mappingId, mapping)
+    }
+    return byId
+  }, [mappings])
+  const virtualizer = useVirtualizer({
+    count: textMapCount,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: () => 260,
+    overscan: 6,
+    measureElement: (element) => element.getBoundingClientRect().height,
+  })
+  const virtualRows = virtualizer.getVirtualItems()
+  const totalSize = virtualizer.getTotalSize()
+  const paddingTop = virtualRows.length > 0 ? virtualRows[0].start : 0
+  const paddingBottom =
+    virtualRows.length > 0 ? totalSize - virtualRows[virtualRows.length - 1].end : 0
+  return (
+    <div className="table-wrap" ref={scrollRef}>
+      <table>
+        <thead>
+          <tr>
+            <th>Type</th>
+            <th>Assoc.</th>
+            <th>Impr.</th>
+            <th>Levels</th>
+            <th>Current limited text</th>
+            <th>Proposed replacement + category</th>
+            <th>Mapping review</th>
+            <th>Source</th>
+          </tr>
+        </thead>
+        <tbody>
+          {paddingTop > 0 ? (
+            <tr aria-hidden style={{ height: paddingTop }}>
+              <td colSpan={8} style={{ padding: 0, border: 0 }} />
+            </tr>
+          ) : null}
+          {virtualRows.map((vRow) => {
+            const itemId = buildItemId('text-map', vRow.index + 1)
+            const mapping = mappingsById.get(itemId)
+            if (!mapping) {
+              return (
+                <tr key={itemId} ref={virtualizer.measureElement} data-index={vRow.index}>
+                  <td colSpan={8} className="error-text">
+                    Mapping {itemId} is missing from the packet detail payload.
+                  </td>
+                </tr>
+              )
+            }
+            const state = items[itemId] ?? EMPTY_STATE
+            return (
+              <MappingRow
+                key={itemId}
+                mapping={mapping}
+                categoryLabels={categoryLabels}
+                state={state}
+                items={items}
+                detail={detail}
+                onDecision={(decision) => setDecision(itemId, decision)}
+                onField={(key, value) => setField(itemId, key, value)}
+                onPickCategory={(category, sourceId) =>
+                  pickMappingCategory(itemId, category, sourceId)
+                }
+                rowRef={virtualizer.measureElement}
+                virtualIndex={vRow.index}
+              />
+            )
+          })}
+          {paddingBottom > 0 ? (
+            <tr aria-hidden style={{ height: paddingBottom }}>
+              <td colSpan={8} style={{ padding: 0, border: 0 }} />
+            </tr>
+          ) : null}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+interface VirtualizedCardListProps {
+  count: number
+  /** Initial estimate; rows are remeasured via `measureElement` after mount. */
+  estimateSize?: number
+  /** Max-height of the inner scroll container (px). */
+  maxHeight?: number
+  renderItem: (index: number) => React.ReactNode
+  /** Stable key for each index. */
+  getKey: (index: number) => string
+}
+
+/**
+ * Single-column virtualized scroll container for card sections (headlines,
+ * descriptions, template families). Each section gets its own fixed-height
+ * scroll viewport so only ~6–8 cards are mounted at a time instead of the
+ * full 47/33/12 list. Item heights vary (textareas, optional details, char
+ * counts, reviewer notes), so we use `measureElement` and let the virtualizer
+ * remeasure after mount.
+ *
+ * Cards are positioned absolutely inside a relatively-positioned spacer div
+ * sized to the virtualizer's `getTotalSize()`, so the scrollbar always
+ * reflects the full content height.
+ */
+function VirtualizedCardList({
+  count,
+  estimateSize = 240,
+  maxHeight = 720,
+  renderItem,
+  getKey,
+}: VirtualizedCardListProps) {
+  const scrollRef = useRef<HTMLDivElement | null>(null)
+  const virtualizer = useVirtualizer({
+    count,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: () => estimateSize,
+    overscan: 4,
+    measureElement: (element) => element.getBoundingClientRect().height,
+  })
+  const virtualItems = virtualizer.getVirtualItems()
+  return (
+    <div className="virtual-card-list" ref={scrollRef} style={{ maxHeight }}>
+      <div
+        className="virtual-card-list-inner"
+        style={{ height: virtualizer.getTotalSize(), position: 'relative', width: '100%' }}
+      >
+        {virtualItems.map((vItem) => (
+          <div
+            key={getKey(vItem.index)}
+            data-index={vItem.index}
+            ref={virtualizer.measureElement}
+            style={{
+              position: 'absolute',
+              top: 0,
+              left: 0,
+              right: 0,
+              transform: `translateY(${vItem.start}px)`,
+              padding: '7px 0',
+            }}
+          >
+            {renderItem(vItem.index)}
+          </div>
+        ))}
+      </div>
     </div>
   )
 }
@@ -554,6 +789,7 @@ export function PolicyReplacementReviewPage() {
   const [submittedAt, setSubmittedAt] = useState<string | null>(initialDraft?.submittedAt ?? null)
   const [statusMessage, setStatusMessage] = useState<string>('')
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
+  const [copyStatus, setCopyStatus] = useState<string>('Nothing copied yet')
   const [isSaving, setIsSaving] = useState(false)
   const [isSubmitting, setIsSubmitting] = useState(false)
   const sections = useMemo(() => buildCategorySections(summary), [summary])
@@ -575,6 +811,12 @@ export function PolicyReplacementReviewPage() {
             navKey: `communications.policy-replacements.${packetId}.review.overview`,
             label: 'Overview',
             targetId: 'section-overview',
+          },
+          {
+            kind: 'leaf' as const,
+            navKey: `communications.policy-replacements.${packetId}.review.submit`,
+            label: 'Submit review',
+            targetId: 'section-submit',
           },
           {
             kind: 'leaf' as const,
@@ -616,42 +858,6 @@ export function PolicyReplacementReviewPage() {
   const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const itemsRef = useRef(items)
   itemsRef.current = items
-
-  const initialActiveType = sections[0]?.typeLabel ?? 'Assets'
-  const [activeType, setActiveType] = useState<string>(initialActiveType)
-
-  // Scroll-spy: track the section nearest the viewport top so the page
-  // header breadcrumb can update its `<TYPE>` tail as the reviewer scrolls.
-  useEffect(() => {
-    function onScroll() {
-      let bestPrefix: string | null = null
-      let bestDelta = Number.POSITIVE_INFINITY
-      for (const section of sections) {
-        const element = document.getElementById(sectionAnchorId(section.prefix))
-        if (!element) {
-          continue
-        }
-        const rect = element.getBoundingClientRect()
-        const distance = Math.abs(rect.top - 80)
-        if (rect.top - 80 <= 0 && distance < bestDelta) {
-          bestDelta = distance
-          bestPrefix = section.prefix
-        }
-      }
-      if (!bestPrefix && sections[0]) {
-        bestPrefix = sections[0].prefix
-      }
-      if (bestPrefix) {
-        const matched = sections.find((s) => s.prefix === bestPrefix)
-        if (matched) {
-          setActiveType(matched.typeLabel)
-        }
-      }
-    }
-    window.addEventListener('scroll', onScroll, { passive: true })
-    onScroll()
-    return () => window.removeEventListener('scroll', onScroll)
-  }, [sections])
 
   const performSave = useCallback(
     async (markSubmitted: boolean) => {
@@ -837,152 +1043,212 @@ export function PolicyReplacementReviewPage() {
     return counts
   }, [items, summary.itemIdCount])
 
+  /**
+   * Bulk decision applied to every reviewable item id in the packet.
+   * Used by the "Accept all visible" / "Hold all visible" controls in
+   * the top hero bar — matching the pre-Helios packet behavior.
+   */
+  const applyBulkDecision = useCallback(
+    (decision: PolicyReplacementDecision) => {
+      setItems((prev) => {
+        const next: Record<string, PolicyReplacementItemState> = { ...prev }
+        for (const section of sections) {
+          for (let i = 1; i <= section.count; i += 1) {
+            const itemId = buildItemId(section.prefix, i)
+            const existing = next[itemId] ?? EMPTY_STATE
+            next[itemId] = { ...existing, decision }
+          }
+        }
+        return next
+      })
+      scheduleDebouncedSave()
+    },
+    [sections, scheduleDebouncedSave],
+  )
+
+  const exportStateJson = useCallback(() => {
+    const payload = {
+      packetId,
+      savedAt,
+      submittedAt,
+      items,
+    }
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `${packetId}-review-state.json`
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+    URL.revokeObjectURL(url)
+  }, [items, packetId, savedAt, submittedAt])
+
+  const copyStateForAmp = useCallback(() => {
+    const payload = JSON.stringify({ packetId, items }, null, 2)
+    if (typeof navigator !== 'undefined' && navigator.clipboard) {
+      navigator.clipboard
+        .writeText(payload)
+        .then(() => setCopyStatus(`Copied ${Object.keys(items).length} items at ${new Date().toLocaleTimeString()}`))
+        .catch(() => setCopyStatus('Could not copy to clipboard'))
+    } else {
+      setCopyStatus('Clipboard not available in this browser')
+    }
+  }, [items, packetId])
+
   if (paramPacketId !== packetId) {
     return <p className="error-text">Packet id mismatch in URL ({paramPacketId} vs {packetId}).</p>
   }
 
-  const breadcrumbCrumbs = ['Ads', 'Review', 'Assets', activeType]
   const categoryLabels = detail.replacementCategoryLabels ?? {}
+  const visualSection = sections.find((s) => s.prefix === 'visual')
+  const headlineSection = sections.find((s) => s.prefix === 'headline')
+  const longHeadlineSection = sections.find((s) => s.prefix === 'long-headline')
+  const descriptionSection = sections.find((s) => s.prefix === 'description')
+  const templateSection = sections.find((s) => s.prefix === 'template-family')
+  const textMapSection = sections.find((s) => s.prefix === 'text-map')
 
   return (
-    <section>
-      <div className="page-header">
-        <div>
-          <p className="eyebrow">{breadcrumbCrumbs.join(' \u203A ')}</p>
-          <h2>{packetId}</h2>
-          <p className="subtle-copy">
-            Server-persisted reviewer draft. Helios does not mutate Google Ads from this surface; only items with
-            decision <code>accepted</code> flow into the narrow post-review Google Ads resolver pass.
-          </p>
+    <div className="policy-replacement-review">
+      <header className="hero">
+        <p className="eyebrow">
+          Report-driven review packet · packet id <code>{packetId}</code>
+        </p>
+        <h1>Policy-limited asset replacement plan</h1>
+        <p className="hero-lede">
+          Server-persisted reviewer draft. Helios does not mutate Google Ads from this surface; only items with
+          decision <code>accepted</code> flow into the narrow post-review Google Ads resolver pass.
+        </p>
+        <div className="controls-bar">
+          <button type="button" onClick={() => applyBulkDecision('accepted')}>Accept all visible</button>
+          <button type="button" onClick={() => applyBulkDecision('hold')}>Hold all visible</button>
+          <button type="button" onClick={exportStateJson}>Export review state JSON</button>
+          <span className="muted">
+            {`${decisionCounts.accepted} accepted · ${decisionCounts.rejected} rejected · ${decisionCounts.hold} hold · ${decisionCounts.unreviewed} unreviewed of ${summary.itemIdCount}`}
+          </span>
         </div>
-        <Pill tone={submittedAt ? 'success' : 'warning'}>{submittedAt ? 'submitted' : 'in review'}</Pill>
-      </div>
+      </header>
 
-      <div className="inline-row wrap-row">
-        <Pill tone="muted">{`${summary.itemIdCount} items`}</Pill>
-        <Pill tone="success">{`accepted ${decisionCounts.accepted}`}</Pill>
-        <Pill tone="danger">{`rejected ${decisionCounts.rejected}`}</Pill>
-        <Pill tone="warning">{`hold ${decisionCounts.hold}`}</Pill>
-        <Pill tone="muted">{`unreviewed ${decisionCounts.unreviewed}`}</Pill>
-      </div>
-
-      <div className="inline-row wrap-row" style={{ marginTop: '0.75rem' }}>
-        <button
-          type="button"
-          disabled={isSubmitting}
-          onClick={() => {
-            void performSave(true)
-          }}
-        >
-          {isSubmitting ? 'Submitting…' : 'Submit review'}
-        </button>
-        <span className="subtle-copy">
-          {isSaving ? 'Saving…' : statusMessage || (savedAt ? `Saved at ${savedAt}` : 'No saved draft yet.')}
-          {submittedAt ? ` · Submitted at ${submittedAt}` : ''}
-        </span>
-      </div>
-
-      {errorMessage ? <p className="error-text">{errorMessage}</p> : null}
-
-      {detail.summary ? (
-        <article className="detail-panel" style={{ marginTop: '0.75rem' }} id="section-overview">
-          <h3>Overview</h3>
-          <div className="inline-row wrap-row">
-            {typeof detail.summary.reportRows === 'number' ? (
-              <Pill tone="muted">{`${formatNumber(detail.summary.reportRows)} report rows`}</Pill>
-            ) : null}
-            {typeof detail.summary.limitedAssociations === 'number' ? (
-              <Pill tone="warning">{`${formatNumber(detail.summary.limitedAssociations)} limited associations`}</Pill>
-            ) : null}
-            {typeof detail.summary.limitedVisualAssociations === 'number' ? (
-              <Pill tone="muted">{`${formatNumber(detail.summary.limitedVisualAssociations)} limited visual associations`}</Pill>
-            ) : null}
-            {typeof detail.summary.uniqueLimitedVisualAssets === 'number' ? (
-              <Pill tone="muted">{`${formatNumber(detail.summary.uniqueLimitedVisualAssets)} unique limited visual assets`}</Pill>
-            ) : null}
-            {typeof detail.summary.limitedTextAssociations === 'number' ? (
-              <Pill tone="muted">{`${formatNumber(detail.summary.limitedTextAssociations)} limited text associations`}</Pill>
-            ) : null}
-            {typeof detail.summary.uniqueLimitedTexts === 'number' ? (
-              <Pill tone="muted">{`${formatNumber(detail.summary.uniqueLimitedTexts)} unique limited texts`}</Pill>
-            ) : null}
-          </div>
-          {detail.summary.visualAssociationsByType ? (
-            <p className="subtle-copy">
-              <strong>Visuals by type:</strong> {formatRecordEntries(detail.summary.visualAssociationsByType)}
-            </p>
-          ) : null}
-          {detail.summary.limitedTextAssociationsByType ? (
-            <p className="subtle-copy">
-              <strong>Limited text by type:</strong>{' '}
-              {formatRecordEntries(detail.summary.limitedTextAssociationsByType)}
-            </p>
-          ) : null}
-        </article>
-      ) : null}
-
-      {detail.applyPlan.length > 0 ? (
-        <article className="detail-panel" style={{ marginTop: '0.75rem' }} id="section-apply-gates">
-          <h3>Apply gates after review</h3>
-          <ol>
-            {detail.applyPlan.map((step, index) => (
-              <li key={index}>{step}</li>
-            ))}
-          </ol>
-        </article>
-      ) : null}
-
-      {detail.llmSafePatterns.length > 0 || detail.llmRiskPatterns.length > 0 ? (
-        <article className="detail-panel" style={{ marginTop: '0.75rem' }} id="section-llm-patterns">
-          <h3>LLM pattern read</h3>
-          <div className="inline-row wrap-row" style={{ alignItems: 'flex-start', gap: '1.5rem' }}>
-            {detail.llmSafePatterns.length > 0 ? (
-              <div>
-                <strong>Safer patterns</strong>
-                <ul>
-                  {detail.llmSafePatterns.map((pattern, index) => (
-                    <li key={index}>{pattern}</li>
-                  ))}
-                </ul>
-              </div>
-            ) : null}
-            {detail.llmRiskPatterns.length > 0 ? (
-              <div>
-                <strong>Risk patterns to avoid</strong>
-                <ul>
-                  {detail.llmRiskPatterns.map((pattern, index) => (
-                    <li key={index}>{pattern}</li>
-                  ))}
-                </ul>
-              </div>
-            ) : null}
-          </div>
-        </article>
-      ) : null}
-
-      <div style={{ marginTop: '1rem' }}>
-        <div className="review-content">
-          {sections.map((section) => (
-            <article
-              key={section.prefix}
-              id={sectionAnchorId(section.prefix)}
-              className="detail-panel"
-              style={{ marginTop: '0.5rem' }}
+      <main className="review-main">
+        <section id="section-submit" className="panel">
+          <h2>How to submit your review state</h2>
+          <p className="muted">
+            Edits autosave to the local Helios service every couple of seconds. Click <strong>Submit review</strong>{' '}
+            to mark the current state as the submitted draft. The post-review apply step only acts on items
+            whose decision is <code>accepted</code>.
+          </p>
+          <div className="controls-bar">
+            <button
+              type="button"
+              disabled={isSubmitting}
+              onClick={() => {
+                void performSave(true)
+              }}
             >
-              <header className="page-header">
-                <h3>
-                  {section.longLabel} <span className="subtle-copy">({section.count})</span>
-                </h3>
-              </header>
-              {section.count === 0 ? (
-                <p className="subtle-copy">No items in this category.</p>
+              {isSubmitting ? 'Submitting…' : 'Submit review'}
+            </button>
+            <button type="button" onClick={copyStateForAmp}>Copy review state for Amp</button>
+            <span className={`pill ${submittedAt ? 'good' : 'warning'}`}>
+              {submittedAt ? 'submitted' : 'in review'}
+            </span>
+            <span className="muted">
+              {isSaving
+                ? 'Saving…'
+                : statusMessage || (savedAt ? `Saved at ${savedAt}` : 'No saved draft yet.')}
+              {submittedAt ? ` · Submitted at ${submittedAt}` : ''}
+            </span>
+            <span className="muted">{copyStatus}</span>
+          </div>
+          {errorMessage ? <p className="error-text">{errorMessage}</p> : null}
+        </section>
+
+        {detail.summary ? (
+          <section id="section-overview" className="panel">
+            <h2>Overview</h2>
+            <div className="grid summary-grid">
+              {typeof detail.summary.reportRows === 'number' ? (
+                <div className="metric"><strong>{formatNumber(detail.summary.reportRows)}</strong><span>report rows parsed</span></div>
               ) : null}
-              {Array.from({ length: section.count }, (_value, index) => {
-                const itemId = buildItemId(section.prefix, index + 1)
-                const state = items[itemId] ?? EMPTY_STATE
-                const onDecision = (decision: PolicyReplacementDecision) => setDecision(itemId, decision)
-                const onField = (key: keyof PolicyReplacementItemFields, value: string) => setField(itemId, key, value)
-                if (section.prefix === 'visual') {
+              {typeof detail.summary.limitedAssociations === 'number' ? (
+                <div className="metric"><strong>{formatNumber(detail.summary.limitedAssociations)}</strong><span>limited associations</span></div>
+              ) : null}
+              {typeof detail.summary.limitedVisualAssociations === 'number' ? (
+                <div className="metric"><strong>{formatNumber(detail.summary.limitedVisualAssociations)}</strong><span>limited logo/image associations</span></div>
+              ) : null}
+              {typeof detail.summary.uniqueLimitedVisualAssets === 'number' ? (
+                <div className="metric"><strong>{formatNumber(detail.summary.uniqueLimitedVisualAssets)}</strong><span>unique limited visual assets</span></div>
+              ) : null}
+              {typeof detail.summary.limitedTextAssociations === 'number' ? (
+                <div className="metric"><strong>{formatNumber(detail.summary.limitedTextAssociations)}</strong><span>limited text associations</span></div>
+              ) : null}
+              {typeof detail.summary.uniqueLimitedTexts === 'number' ? (
+                <div className="metric"><strong>{formatNumber(detail.summary.uniqueLimitedTexts)}</strong><span>unique limited texts</span></div>
+              ) : null}
+            </div>
+            {detail.summary.visualAssociationsByType ? (
+              <p className="muted">
+                <strong>Visuals by type:</strong> {formatRecordEntries(detail.summary.visualAssociationsByType)}
+              </p>
+            ) : null}
+            {detail.summary.limitedTextAssociationsByType ? (
+              <p className="muted">
+                <strong>Limited text by type:</strong>{' '}
+                {formatRecordEntries(detail.summary.limitedTextAssociationsByType)}
+              </p>
+            ) : null}
+          </section>
+        ) : null}
+
+        {detail.applyPlan.length > 0 ? (
+          <section id="section-apply-gates" className="panel">
+            <h2>Apply gates after review</h2>
+            <ol>
+              {detail.applyPlan.map((step, index) => (
+                <li key={index}>{step}</li>
+              ))}
+            </ol>
+          </section>
+        ) : null}
+
+        {(detail.llmSafePatterns.length > 0 || detail.llmRiskPatterns.length > 0) ? (
+          <section id="section-llm-patterns" className="panel">
+            <h2>LLM pattern read</h2>
+            <div className="grid two">
+              {detail.llmSafePatterns.length > 0 ? (
+                <div>
+                  <h3>Safer patterns</h3>
+                  <ul>
+                    {detail.llmSafePatterns.map((pattern, index) => (
+                      <li key={index}>{pattern}</li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+              {detail.llmRiskPatterns.length > 0 ? (
+                <div>
+                  <h3>Risk patterns to avoid</h3>
+                  <ul>
+                    {detail.llmRiskPatterns.map((pattern, index) => (
+                      <li key={index}>{pattern}</li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+            </div>
+          </section>
+        ) : null}
+
+        {visualSection ? (
+          <section id={sectionAnchorId('visual')} className="panel">
+            <h2>{visualSection.longLabel} <span className="muted">({visualSection.count})</span></h2>
+            <p className="muted">Every limited Logo or Image asset in the uploaded report is covered here.</p>
+            {visualSection.count === 0 ? (
+              <p className="muted">No items in this category.</p>
+            ) : (
+              <div className="grid copy-grid">
+                {Array.from({ length: visualSection.count }, (_v, index) => {
+                  const itemId = buildItemId('visual', index + 1)
+                  const state = items[itemId] ?? EMPTY_STATE
                   return (
                     <VisualCard
                       key={itemId}
@@ -990,127 +1256,152 @@ export function PolicyReplacementReviewPage() {
                       index={index}
                       plan={detail.visualReplacementPlans[index]}
                       state={state}
-                      onDecision={onDecision}
-                      onField={onField}
+                      setDecision={setDecision}
+                      setField={setField}
                     />
                   )
-                }
-                if (section.prefix === 'headline') {
-                  return (
-                    <CopyCard
-                      key={itemId}
-                      itemId={itemId}
-                      label="Headline"
-                      index={index}
-                      entry={detail.headlines[index]}
-                      state={state}
-                      onDecision={onDecision}
-                      onField={onField}
-                    />
-                  )
-                }
-                if (section.prefix === 'long-headline') {
-                  return (
-                    <CopyCard
-                      key={itemId}
-                      itemId={itemId}
-                      label="Long headline"
-                      index={index}
-                      entry={detail.longHeadlines[index]}
-                      state={state}
-                      onDecision={onDecision}
-                      onField={onField}
-                    />
-                  )
-                }
-                if (section.prefix === 'description') {
-                  return (
-                    <CopyCard
-                      key={itemId}
-                      itemId={itemId}
-                      label="Description"
-                      index={index}
-                      entry={detail.descriptions[index]}
-                      state={state}
-                      onDecision={onDecision}
-                      onField={onField}
-                    />
-                  )
-                }
-                if (section.prefix === 'template-family') {
+                })}
+              </div>
+            )}
+          </section>
+        ) : null}
+
+        {([
+          { section: headlineSection, prefix: 'headline', label: 'Headline', list: detail.headlines },
+          { section: longHeadlineSection, prefix: 'long-headline', label: 'Long headline', list: detail.longHeadlines },
+          { section: descriptionSection, prefix: 'description', label: 'Description', list: detail.descriptions },
+        ] as const).map(({ section, prefix, label, list }) =>
+          section ? (
+            <section key={prefix} id={sectionAnchorId(prefix)} className="panel">
+              <h2>{section.longLabel} <span className="muted">({section.count})</span></h2>
+              {section.count === 0 ? (
+                <p className="muted">No items in this category.</p>
+              ) : (
+                <VirtualizedCardList
+                  count={section.count}
+                  getKey={(index) => buildItemId(prefix, index + 1)}
+                  renderItem={(index) => {
+                    const itemId = buildItemId(prefix, index + 1)
+                    const state = items[itemId] ?? EMPTY_STATE
+                    return (
+                      <CopyCard
+                        itemId={itemId}
+                        label={label}
+                        index={index}
+                        entry={list[index]}
+                        state={state}
+                        setDecision={setDecision}
+                        setField={setField}
+                      />
+                    )
+                  }}
+                />
+              )}
+            </section>
+          ) : null,
+        )}
+
+        {templateSection ? (
+          <section id={sectionAnchorId('template-family')} className="panel">
+            <h2>{templateSection.longLabel} <span className="muted">({templateSection.count})</span></h2>
+            <p className="muted">
+              These are reviewable source templates. If a mapping selects a category backed by one of these
+              templates, edits and Accept / Reject / Hold status cascade into the mapping table.
+            </p>
+            {templateSection.count === 0 ? (
+              <p className="muted">No items in this category.</p>
+            ) : (
+              <VirtualizedCardList
+                count={templateSection.count}
+                getKey={(index) => buildItemId('template-family', index + 1)}
+                renderItem={(index) => {
+                  const itemId = buildItemId('template-family', index + 1)
+                  const state = items[itemId] ?? EMPTY_STATE
                   return (
                     <TemplateFamilyCard
-                      key={itemId}
                       itemId={itemId}
                       index={index}
                       entry={detail.templateFamilies[index]}
                       state={state}
-                      onDecision={onDecision}
-                      onField={onField}
+                      setDecision={setDecision}
+                      setField={setField}
                     />
                   )
-                }
-                // section.prefix === 'text-map'
-                const mapping = detail.textReplacementMappings.find((entry) => entry.mappingId === itemId)
-                return (
-                  <TextMapCard
-                    key={itemId}
-                    itemId={itemId}
-                    mapping={mapping}
-                    categoryLabels={categoryLabels}
-                    state={state}
-                    onDecision={onDecision}
-                    onField={onField}
-                    onPickCategory={(category, sourceId) => pickMappingCategory(itemId, category, sourceId)}
-                  />
-                )
-              })}
-            </article>
-          ))}
-        </div>
-      </div>
+                }}
+              />
+            )}
+          </section>
+        ) : null}
 
-      {(detail.anchorExamples.eligible.length > 0 || detail.anchorExamples.limited.length > 0) ? (
-        <article className="detail-panel" style={{ marginTop: '0.75rem' }} id="section-anchors">
-          <h3>LLM anchors</h3>
-          <p className="subtle-copy">
-            Reference examples that anchored the LLM-assisted copy generation. These items are not
-            individually reviewable — they are shown for context only.
-          </p>
-          {detail.anchorExamples.eligible.length > 0 ? (
-            <details>
-              <summary>{`Eligible examples (${detail.anchorExamples.eligible.length})`}</summary>
-              <ul>
-                {detail.anchorExamples.eligible.map((entry, index) => (
-                  <li key={`elig-${index}`}>
-                    <code>{entry.assetType ?? 'Asset'}</code> — {entry.text ?? ''}{' '}
-                    <span className="subtle-copy">
-                      ({entry.level ?? 'unknown'}
-                      {typeof entry.impressions === 'number' ? `, ${formatNumber(entry.impressions)} impressions` : ''})
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            </details>
-          ) : null}
-          {detail.anchorExamples.limited.length > 0 ? (
-            <details>
-              <summary>{`Limited examples (${detail.anchorExamples.limited.length})`}</summary>
-              <ul>
-                {detail.anchorExamples.limited.map((entry, index) => (
-                  <li key={`lim-${index}`}>
-                    <code>{entry.assetType ?? 'Asset'}</code> — {entry.text ?? ''}{' '}
-                    <span className="subtle-copy">
-                      ({entry.level ?? 'unknown'}
-                      {typeof entry.impressions === 'number' ? `, ${formatNumber(entry.impressions)} impressions` : ''})
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            </details>
-          ) : null}
-        </article>
-      ) : null}
-    </section>
+        {textMapSection ? (
+          <section id={sectionAnchorId('text-map')} className="panel">
+            <h2>{textMapSection.longLabel} <span className="muted">({textMapSection.count})</span></h2>
+            <p className="muted">
+              This is the full current-limited-text to proposed-replacement mapping for every unique limited text
+              asset in the uploaded report. Pick one of the replacement categories per row. The proposed
+              replacement textarea is sourced from the selected category's reviewable asset/template; rows tint
+              light green / red / yellow when the selected source is accepted / rejected / held, and the column-1
+              indicator reflects the mapping's own decision.
+            </p>
+            {textMapSection.count === 0 ? (
+              <p className="muted">No items in this category.</p>
+            ) : (
+              <MappingTable
+                textMapCount={textMapSection.count}
+                mappings={detail.textReplacementMappings}
+                categoryLabels={categoryLabels}
+                items={items}
+                detail={detail}
+                setDecision={setDecision}
+                setField={setField}
+                pickMappingCategory={pickMappingCategory}
+              />
+            )}
+          </section>
+        ) : null}
+
+        {(detail.anchorExamples.eligible.length > 0 || detail.anchorExamples.limited.length > 0) ? (
+          <section id="section-anchors" className="panel">
+            <h2>LLM anchors</h2>
+            <p className="muted">
+              Reference examples that anchored the LLM-assisted copy generation. These items are not
+              individually reviewable — they are shown for context only.
+            </p>
+            {detail.anchorExamples.eligible.length > 0 ? (
+              <details>
+                <summary>{`Eligible examples (${detail.anchorExamples.eligible.length})`}</summary>
+                <ul className="anchor-list">
+                  {detail.anchorExamples.eligible.map((entry, index) => (
+                    <li key={`elig-${index}`}>
+                      <span className="mini">{entry.assetType ?? 'Asset'}</span> {entry.text ?? ''}{' '}
+                      <span className="muted">
+                        ({entry.level ?? 'unknown'}
+                        {typeof entry.impressions === 'number' ? `, ${formatNumber(entry.impressions)} impressions` : ''})
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </details>
+            ) : null}
+            {detail.anchorExamples.limited.length > 0 ? (
+              <details>
+                <summary>{`Limited examples (${detail.anchorExamples.limited.length})`}</summary>
+                <ul className="anchor-list">
+                  {detail.anchorExamples.limited.map((entry, index) => (
+                    <li key={`lim-${index}`}>
+                      <span className="mini">{entry.assetType ?? 'Asset'}</span> {entry.text ?? ''}{' '}
+                      <span className="muted">
+                        ({entry.level ?? 'unknown'}
+                        {typeof entry.impressions === 'number' ? `, ${formatNumber(entry.impressions)} impressions` : ''})
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </details>
+            ) : null}
+          </section>
+        ) : null}
+      </main>
+    </div>
   )
 }

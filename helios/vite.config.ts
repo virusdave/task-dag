@@ -16,6 +16,9 @@ export default defineConfig(({ mode }) => {
     },
     server: {
       port: 5173,
+      // Allow rendering the dev page from a docker-hosted headless browser
+      // (host.docker.internal) for screenshot-based UI assessment. Dev-only.
+      allowedHosts: ['host.docker.internal', 'localhost', '127.0.0.1'],
       proxy: {
         [joinBasePath(appBasePath, '/api')]: {
           target: 'http://127.0.0.1:3001',
