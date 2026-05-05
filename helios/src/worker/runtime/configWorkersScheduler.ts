@@ -56,6 +56,8 @@ export async function tickConfigWorkersScheduler(now: Date = new Date()): Promis
       await enqueueScheduledStockRefresh(schedule.taskKey, now, activeWindow.intervalMinutes)
     } else if (schedule.taskKey === 'workers.scheduling.litalerts') {
       await enqueueScheduledLitalertsRefreshBatch(schedule.taskKey, now, activeWindow.intervalMinutes)
+    } else if (schedule.taskKey === 'workers.scheduling.catalog') {
+      await enqueueScheduledCatalogRefresh(schedule.taskKey, now, activeWindow.intervalMinutes)
     }
   }
 }
@@ -207,6 +209,49 @@ async function enqueueScheduledLitalertsRefreshBatch(
         intervalMinutes,
         enqueuedJobIds,
         queueRowIds: pendingRows.map((row) => row.id),
+        taskKey,
+        trigger: 'scheduled',
+      },
+      requestId: null,
+      scope: null,
+      undoPayload: null,
+    })
+  })
+}
+
+async function enqueueScheduledCatalogRefresh(
+  taskKey: ConfigBackgroundTaskKey,
+  now: Date,
+  intervalMinutes: number,
+): Promise<void> {
+  const bucketMs = intervalMinutes * 60 * 1000
+  const bucketStartMs = Math.floor(now.getTime() / bucketMs) * bucketMs
+  const bucketIso = new Date(bucketStartMs).toISOString()
+
+  await withTransaction(async (db) => {
+    const jobId = await enqueueJob(db, {
+      concurrencyKey: getOptionalSweedSessionConcurrencyKey(true),
+      dedupeKey: `config.workers.catalog_refresh:scheduled:${bucketIso}`,
+      jobType: 'config.workers.catalog_refresh',
+      module: 'config',
+      payload: {
+        trigger: 'scheduled',
+      },
+      requestedByUserId: null,
+      runAt: now,
+      scope: null,
+    })
+
+    await recordConfigScheduleEnqueue(db, taskKey, jobId, now)
+    await appendAuditEvent(db, {
+      actorType: 'system',
+      actorUserId: null,
+      entityId: String(jobId),
+      entityType: 'job',
+      eventType: 'config.workers.catalog_refresh.requested',
+      module: 'config',
+      payload: {
+        intervalMinutes,
         taskKey,
         trigger: 'scheduled',
       },

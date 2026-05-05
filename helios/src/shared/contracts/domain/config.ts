@@ -33,8 +33,8 @@ export const CONFIG_BACKGROUND_TASKS: ReadonlyArray<ConfigBackgroundTaskDefiniti
     key: 'workers.scheduling.catalog',
     label: 'Catalog',
     slug: 'catalog',
-    implemented: false,
-    summary: 'Periodic state-level catalog taxonomy snapshot (product, variant, brand, category, subcategory, strain, prevalence, size, distributor). TODO: implement before turning the schedule on.',
+    implemented: true,
+    summary: 'Periodic state-level catalog taxonomy snapshot (product, variant, brand, category, subcategory, strain, prevalence, size, distributor) so downstream Helios surfaces stay aligned with live Sweed taxonomy.',
   },
   {
     key: 'workers.scheduling.litalerts',
@@ -128,5 +128,29 @@ export const LITALERTS_DEFAULT_SCHEDULE_WINDOWS: ReadonlyArray<Omit<ConfigWorker
     intervalMinutes: 5,
     paused: false,
     notes: 'Drain pending Lit Alerts refresh queue every 5 minutes.',
+  },
+]
+
+/**
+ * Default schedule for the Catalog state-level taxonomy refresh worker.
+ * Daytime cadence is brisk; off-hours falls back to a lighter cadence to
+ * keep the state catalog dealer free of unnecessary churn.
+ */
+export const CATALOG_DEFAULT_SCHEDULE_WINDOWS: ReadonlyArray<Omit<ConfigWorkerScheduleWindow, 'id'>> = [
+  {
+    weekdayMask: WEEKDAY_MASK_ALL,
+    windowStartMinute: 8 * 60, // 08:00
+    windowEndMinute: 2 * 60,   // 02:00 next day (wraps)
+    intervalMinutes: 5,
+    paused: false,
+    notes: 'Daytime cadence (08:00 -> 02:00).',
+  },
+  {
+    weekdayMask: WEEKDAY_MASK_ALL,
+    windowStartMinute: 2 * 60, // 02:00
+    windowEndMinute: 8 * 60,   // 08:00
+    intervalMinutes: 15,
+    paused: false,
+    notes: 'Off-hours cadence (02:00 -> 08:00).',
   },
 ]

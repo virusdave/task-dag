@@ -1,6 +1,7 @@
 import type { QueryResultRow } from 'pg'
 
 import {
+  CATALOG_DEFAULT_SCHEDULE_WINDOWS,
   CONFIG_BACKGROUND_TASKS,
   LITALERTS_DEFAULT_SCHEDULE_WINDOWS,
   STOCK_DEFAULT_SCHEDULE_WINDOWS,
@@ -136,6 +137,7 @@ const DEFAULT_WINDOWS_BY_TASK_KEY: Partial<
 > = {
   'workers.scheduling.stock': STOCK_DEFAULT_SCHEDULE_WINDOWS,
   'workers.scheduling.litalerts': LITALERTS_DEFAULT_SCHEDULE_WINDOWS,
+  'workers.scheduling.catalog': CATALOG_DEFAULT_SCHEDULE_WINDOWS,
 }
 
 export async function ensureDefaultConfigSchedules(db: Queryable = getPool()): Promise<void> {
@@ -409,4 +411,80 @@ export async function countPendingLitalertsRefreshRows(db: Queryable = getPool()
     `select count(*)::text as count from pending_litalerts_refresh_queue where status = 'pending'`,
   )
   return Number(result.rows[0]?.count ?? '0')
+}
+
+export interface RecentCatalogTaxonomySnapshotRow {
+  id: number
+  stateDealerId: number
+  jobId: number | null
+  status: 'running' | 'succeeded' | 'failed'
+  trigger: string
+  startedAt: string
+  finishedAt: string | null
+  productCount: number | null
+  groupCount: number | null
+  categoryCount: number | null
+  strainCount: number | null
+  prevalenceCount: number | null
+  sizeCount: number | null
+  distributorCount: number | null
+  brandCount: number | null
+  subcategoryCount: number | null
+  error: string | null
+}
+
+interface CatalogTaxonomySnapshotDbRow extends QueryResultRow {
+  id: number
+  state_dealer_id: number
+  job_id: number | null
+  status: 'running' | 'succeeded' | 'failed'
+  trigger: string
+  started_at: Date
+  finished_at: Date | null
+  product_count: number | null
+  group_count: number | null
+  category_count: number | null
+  strain_count: number | null
+  prevalence_count: number | null
+  size_count: number | null
+  distributor_count: number | null
+  brand_count: number | null
+  subcategory_count: number | null
+  error: string | null
+}
+
+export async function loadRecentCatalogTaxonomySnapshots(
+  limit: number,
+  db: Queryable = getPool(),
+): Promise<RecentCatalogTaxonomySnapshotRow[]> {
+  const result = await db.query<CatalogTaxonomySnapshotDbRow>(
+    `
+      select id, state_dealer_id, job_id, status, trigger, started_at, finished_at,
+             product_count, group_count, category_count, strain_count, prevalence_count,
+             size_count, distributor_count, brand_count, subcategory_count, error
+      from catalog_taxonomy_snapshots
+      order by started_at desc, id desc
+      limit $1
+    `,
+    [limit],
+  )
+  return result.rows.map((row) => ({
+    id: row.id,
+    stateDealerId: row.state_dealer_id,
+    jobId: row.job_id,
+    status: row.status,
+    trigger: row.trigger,
+    startedAt: row.started_at.toISOString(),
+    finishedAt: row.finished_at ? row.finished_at.toISOString() : null,
+    productCount: row.product_count,
+    groupCount: row.group_count,
+    categoryCount: row.category_count,
+    strainCount: row.strain_count,
+    prevalenceCount: row.prevalence_count,
+    sizeCount: row.size_count,
+    distributorCount: row.distributor_count,
+    brandCount: row.brand_count,
+    subcategoryCount: row.subcategory_count,
+    error: row.error,
+  }))
 }

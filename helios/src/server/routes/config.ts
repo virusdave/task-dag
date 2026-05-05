@@ -18,6 +18,7 @@ import {
   loadAllConfigSchedules,
   loadConfigSchedule,
   loadPendingLitalertsRefreshRows,
+  loadRecentCatalogTaxonomySnapshots,
   loadRecentLitalertsObservations,
   loadRecentStockSnapshots,
   recordConfigScheduleEnqueue,
@@ -51,11 +52,15 @@ export async function registerConfigRoutes(server: FastifyInstance): Promise<voi
     const litalerts = taskKey === 'workers.scheduling.litalerts'
       ? await buildLitalertsTaskDetail()
       : null
+    const catalog = taskKey === 'workers.scheduling.catalog'
+      ? await buildCatalogTaskDetail()
+      : null
     return reply.send(
       ConfigBackgroundTaskDetailResponseSchema.parse({
         schedule,
         recentSnapshots,
         litalerts,
+        catalog,
       }),
     )
   })
@@ -113,11 +118,15 @@ export async function registerConfigRoutes(server: FastifyInstance): Promise<voi
     const litalerts = taskKey === 'workers.scheduling.litalerts'
       ? await buildLitalertsTaskDetail()
       : null
+    const catalog = taskKey === 'workers.scheduling.catalog'
+      ? await buildCatalogTaskDetail()
+      : null
     return reply.send(
       ConfigBackgroundTaskDetailResponseSchema.parse({
         schedule,
         recentSnapshots,
         litalerts,
+        catalog,
       }),
     )
   })
@@ -148,6 +157,10 @@ export async function registerConfigRoutes(server: FastifyInstance): Promise<voi
             error: 'No pending Lit Alerts refresh queue rows to drain right now.',
           })
         }
+        return reply.send(ConfigBackgroundTaskRunNowResponseSchema.parse({ jobId }))
+      }
+      if (taskKey === 'workers.scheduling.catalog') {
+        const jobId = await runNowCatalogRefresh(user.id)
         return reply.send(ConfigBackgroundTaskRunNowResponseSchema.parse({ jobId }))
       }
 
@@ -265,4 +278,46 @@ async function buildLitalertsTaskDetail() {
     pendingQueueSample,
     recentObservations,
   }
+}
+
+async function runNowCatalogRefresh(userId: number): Promise<number> {
+  const enqueuedAt = new Date()
+  return withTransaction(async (db) => {
+    const newJobId = await enqueueJob(db, {
+      concurrencyKey: getOptionalSweedSessionConcurrencyKey(true),
+      dedupeKey: `config.workers.catalog_refresh:manual:${enqueuedAt.toISOString().slice(0, 16)}`,
+      jobType: 'config.workers.catalog_refresh',
+      module: 'config',
+      payload: {
+        requestedByUserId: userId,
+        trigger: 'manual_run',
+      },
+      requestedByUserId: userId,
+      runAt: enqueuedAt,
+      scope: null,
+    })
+
+    await recordConfigScheduleEnqueue(db, 'workers.scheduling.catalog', newJobId, enqueuedAt)
+    await appendAuditEvent(db, {
+      actorType: 'user',
+      actorUserId: userId,
+      entityId: String(newJobId),
+      entityType: 'job',
+      eventType: 'config.workers.catalog_refresh.requested',
+      module: 'config',
+      payload: {
+        taskKey: 'workers.scheduling.catalog',
+        trigger: 'manual_run',
+      },
+      requestId: null,
+      scope: null,
+      undoPayload: null,
+    })
+    return newJobId
+  })
+}
+
+async function buildCatalogTaskDetail() {
+  const recentSnapshots = await loadRecentCatalogTaxonomySnapshots(20)
+  return { recentSnapshots }
 }

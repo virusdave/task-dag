@@ -54,6 +54,7 @@ export async function ensureDependenciesReadyForJob(jobType: JobType, payload: u
     case 'screens.midtown_priced_to_move_promo_rebind':
     case 'screens.midtown_fresh_and_intense_promo_rebind':
     case 'config.workers.stock_refresh':
+    case 'config.workers.catalog_refresh':
       await assertSweedReady()
       return
     case 'config.workers.litalerts_refresh.variant':

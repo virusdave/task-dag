@@ -85,6 +85,8 @@ export const AuditEventTypeSchema = z.enum([
   'config.workers.stock_refresh.completed',
   'config.workers.litalerts_refresh.requested',
   'config.workers.litalerts_refresh.completed',
+  'config.workers.catalog_refresh.requested',
+  'config.workers.catalog_refresh.completed',
 ])
 
 export type AuditEntityType = z.infer<typeof AuditEntityTypeSchema>

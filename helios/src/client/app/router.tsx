@@ -12,8 +12,8 @@ import { ReviewDetailsPage } from '../routes/catalog/ReviewDetailsPage.js'
 import { CommunicationsLandingPage } from '../routes/communications/CommunicationsLandingPage.js'
 import { PolicyReplacementReviewPage, policyReplacementReviewLoader } from '../routes/communications/PolicyReplacementReviewPage.js'
 import { ConfigModulePage } from '../routes/config/ConfigModulePage.js'
+import { ConfigCatalogSchedulePage, configCatalogScheduleLoader } from '../routes/config/ConfigCatalogSchedulePage.js'
 import { ConfigLitalertsSchedulePage, configLitalertsScheduleLoader } from '../routes/config/ConfigLitalertsSchedulePage.js'
-import { ConfigSchedulingTodoPage } from '../routes/config/ConfigSchedulingTodoPage.js'
 import { ConfigStockSchedulePage, configStockScheduleLoader } from '../routes/config/ConfigStockSchedulePage.js'
 import { ConfigWorkersPage } from '../routes/config/ConfigWorkersPage.js'
 import { ConfigWorkersSchedulingPage, configWorkersSchedulingLoader } from '../routes/config/ConfigWorkersSchedulingPage.js'
@@ -193,7 +193,8 @@ export const router = createBrowserRouter([
         path: 'config/workers/scheduling',
       },
       {
-        element: <ConfigSchedulingTodoPage taskKey="workers.scheduling.catalog" />,
+        element: <ConfigCatalogSchedulePage />,
+        loader: configCatalogScheduleLoader,
         path: 'config/workers/scheduling/catalog',
       },
       {

@@ -66,6 +66,27 @@ const PendingLitalertsRefreshSchema = z.object({
 })
 export type PendingLitalertsRefresh = z.infer<typeof PendingLitalertsRefreshSchema>
 
+const RecentCatalogTaxonomySnapshotSchema = z.object({
+  id: z.number().int().positive(),
+  stateDealerId: z.number().int(),
+  jobId: z.number().int().positive().nullable(),
+  status: z.enum(['running', 'succeeded', 'failed']),
+  trigger: z.string(),
+  startedAt: z.string(),
+  finishedAt: z.string().nullable(),
+  productCount: z.number().int().min(0).nullable(),
+  groupCount: z.number().int().min(0).nullable(),
+  categoryCount: z.number().int().min(0).nullable(),
+  subcategoryCount: z.number().int().min(0).nullable(),
+  brandCount: z.number().int().min(0).nullable(),
+  strainCount: z.number().int().min(0).nullable(),
+  prevalenceCount: z.number().int().min(0).nullable(),
+  sizeCount: z.number().int().min(0).nullable(),
+  distributorCount: z.number().int().min(0).nullable(),
+  error: z.string().nullable(),
+})
+export type RecentCatalogTaxonomySnapshot = z.infer<typeof RecentCatalogTaxonomySnapshotSchema>
+
 export const ConfigBackgroundTaskDetailResponseSchema = z.object({
   schedule: ConfigWorkerScheduleSchema,
   recentSnapshots: z.array(RecentStockSnapshotSchema),
@@ -74,6 +95,11 @@ export const ConfigBackgroundTaskDetailResponseSchema = z.object({
       pendingQueueDepth: z.number().int().min(0),
       pendingQueueSample: z.array(PendingLitalertsRefreshSchema),
       recentObservations: z.array(RecentLitalertsObservationSchema),
+    })
+    .nullable(),
+  catalog: z
+    .object({
+      recentSnapshots: z.array(RecentCatalogTaxonomySnapshotSchema),
     })
     .nullable(),
 })

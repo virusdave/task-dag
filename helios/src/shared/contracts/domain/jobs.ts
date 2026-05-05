@@ -41,6 +41,7 @@ export const JobTypeSchema = z.enum([
   'catalog.review.rerun_row',
   'config.workers.stock_refresh',
   'config.workers.litalerts_refresh.variant',
+  'config.workers.catalog_refresh',
 ])
 export type JobType = z.infer<typeof JobTypeSchema>
 
@@ -181,6 +182,14 @@ export const ConfigWorkersLitalertsRefreshVariantJobPayloadSchema = z.object({
 })
 export type ConfigWorkersLitalertsRefreshVariantJobPayload = z.infer<
   typeof ConfigWorkersLitalertsRefreshVariantJobPayloadSchema
+>
+
+export const ConfigWorkersCatalogRefreshJobPayloadSchema = z.object({
+  requestedByUserId: z.number().int().positive().nullable().optional(),
+  trigger: z.enum(['manual_run', 'scheduled']).default('scheduled'),
+})
+export type ConfigWorkersCatalogRefreshJobPayload = z.infer<
+  typeof ConfigWorkersCatalogRefreshJobPayloadSchema
 >
 
 export const CatalogReviewRerunRowJobPayloadSchema = z.object({
