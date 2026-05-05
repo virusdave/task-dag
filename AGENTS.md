@@ -8,7 +8,7 @@ This directory keeps a structured knowledgebase. Start with `docs/README.md` for
 
 Before using any LLM path in this workspace - including Oracle, Painter, Bedrock Mantle, LibreChat-backed model access, or a proposed new backend/model - consult `HOW_PRIVATE_LLM_ACCESS_WORKS.md` and `config/llm_use/registry.yaml` first. If the intended model/backend is not already approved or explicitly recorded as a limited trial for that use case, update the registry before proceeding.
 
-If a task touches functionality Helios has already subsumed, work in `bulk_additions/catalog_curation/` rather than extending or reviving a bespoke webapp. Use `HOW_HELIOS_WORKS.md` to confirm what is already migrated. Standalone scripts may still remain as worker adapters or underlying execution engines, but new operator-facing behavior for migrated workflows belongs in Helios unless the user explicitly asks otherwise.
+If a task touches functionality Helios has already subsumed, work in `helios/` rather than extending or reviving a bespoke webapp. Use `HOW_HELIOS_WORKS.md` to confirm what is already migrated. Standalone scripts may still remain as worker adapters or underlying execution engines, but new operator-facing behavior for migrated workflows belongs in Helios unless the user explicitly asks otherwise.
 
 When the user says "handoff", update `AGENT_TODO.md` in the current working directory with the current state, the immediate next steps, and the larger goal so the work is ready for agent handoff. If `AGENT_TODO.md` does not exist in the current working directory yet, create it there instead of using a parent-directory handoff file.
 
