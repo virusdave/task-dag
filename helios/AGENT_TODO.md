@@ -6,6 +6,19 @@ Turn this app into `Helios`, the single internal Freshly Baked NYC operations su
 
 ### Active Handoff (2026-05-05, third pass): Config Module Catalog + Litalerts Schedules Now Live
 
+#### Immediate Next Steps For Resume
+
+1. Restart the Helios worker from `helios/` (not from the old `bulk_additions/catalog_curation/` cwd) so the new handler entries (`config.workers.litalerts_refresh.variant`, `config.workers.catalog_refresh`) and the new scheduler branches actually load. The long-running `vite` dev process at the old path should be left alone (it keeps recreating `.vite/deps/` there).
+2. Sign in to localhost and visit `/config/workers/scheduling/litalerts` and `/config/workers/scheduling/catalog`. Confirm the seeded default windows render, the editors save, and `Run now` enqueues a job for each.
+3. Inspect live results in TigerData after the first scheduler tick:
+   - `litalerts_competitor_observations` should grow each time a queued variant is drained (FK back to source `stock_snapshots.id` populated; `evidence_json` carries matched listings).
+   - `catalog_taxonomy_snapshots` + `catalog_taxonomy_snapshot_rows` should grow once per Catalog scan (per-entity counts populated; status `succeeded`).
+   - Failed scans should appear as `status='failed'` rows with the underlying Sweed/Lit Alerts error in the `error` column rather than disappearing.
+4. If `store.distributor.list` rejects pagination params or returns a different shape, the Catalog snapshot will surface the error directly. Adjust the pagination shape in `src/worker/jobs/configWorkersCatalogRefreshJob.ts#collectDistributors` and re-run; the rest of the job will keep working.
+5. Optional: implement Slice 4 drift-detection warnings on each schedule page (data already exists in `stock_snapshots`, `litalerts_competitor_observations`, `catalog_taxonomy_snapshots`, and `config_worker_schedule_runs`).
+
+The larger goal remains the same: keep growing Helios as the single internal Freshly Baked NYC operations surface, folding remaining script-only workflows into typed worker jobs behind the canonical `PrimarySidebar` instead of bespoke webapps.
+
 #### What Just Landed (Committed)
 
 - Three new local commits on top of the prior Helios history:
