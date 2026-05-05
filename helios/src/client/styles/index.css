@@ -7,7 +7,11 @@
     linear-gradient(180deg, #fbf7f0 0%, #f6f1e8 48%, #efe4d3 100%);
   color-scheme: light;
   --panel: rgba(255, 250, 241, 0.94);
-  --panel-border: #decfba;
+  /* Card / panel edge. Intentionally softer than --control-border so cards
+   * recede behind their content, but bumped one step from the original
+   * #decfba to ~1.9:1 against the cream page so card / table / sidebar /
+   * hero outlines do not visually dissolve into the page background. */
+  --panel-border: #c9b698;
   --accent: #9b4a22;
   --accent-strong: #7f3819;
   --accent-muted: rgba(155, 74, 34, 0.10);
