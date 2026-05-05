@@ -620,8 +620,14 @@ pre {
 }
 
 .module-subnav a.active {
-  background: rgba(227, 139, 78, 0.22);
-  border-color: rgba(227, 139, 78, 0.34);
+  /* Mirror the strong active treatment from .tree-nav-leaf.is-active so
+   * the per-module subnav reads as "this is the current view" at a glance.
+   * The previous pale orange tint (22% opacity) blended into the cream
+   * page and left the three-tab strip looking inert. */
+  background: var(--accent);
+  border-color: var(--accent-strong);
+  color: #fffaf1;
+  font-weight: 700;
 }
 
 .pricing-metric-grid {
