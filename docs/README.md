@@ -8,11 +8,14 @@ This folder holds task-focused entry docs so agents can load only the domain the
 - For Sweed operational work, read [`sweed/README.md`](./sweed/README.md).
 - For Lit Alerts API and competitor-data work, read [`litalerts/README.md`](./litalerts/README.md).
 - For Google Ads API setup and integration work, read [`google-ads/README.md`](./google-ads/README.md).
+- For coordinated marketing work across ads, landing pages, site updates, and future cross-channel orchestration, read [`marketing/README.md`](./marketing/README.md).
 - For Helios ownership and migration boundaries, read [`helios/README.md`](./helios/README.md).
+- For shared UI controls, review-tree behavior, and UI element reuse policy, read [`ui/README.md`](./ui/README.md).
 - For Mantis advertiser-campaign automation research, read [`mantis/README.md`](./mantis/README.md).
 - For Playwright automation setup and browser-execution work, read [`playwright/README.md`](./playwright/README.md).
 - For TigerData / Timescale database work, read [`tigerdata/README.md`](./tigerdata/README.md).
 - For shared private-LLM access, model policy, and trial workflow, read [`private-llm/README.md`](./private-llm/README.md).
+- For git commit message conventions, read [`../HOW_GIT_COMMIT_WORKS.md`](../HOW_GIT_COMMIT_WORKS.md).
 
 ## Shortcut Aliases
 
