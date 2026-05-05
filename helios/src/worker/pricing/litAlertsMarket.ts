@@ -371,8 +371,19 @@ async function loadManufacturers(): Promise<z.infer<typeof ManufacturerResponseS
     return manufacturersPromise
   }
 
-  manufacturersPromise = fetchManufacturers()
-  return manufacturersPromise
+  // Clear the cached promise on rejection so a transient failure (HTTP 401
+  // from `/Manufacturers/real`, network blip, etc.) does not poison every
+  // subsequent pricing/litalerts job in this worker until restart. Brand
+  // matches are derived from this fetch, so clear them too.
+  const pending = fetchManufacturers()
+  manufacturersPromise = pending
+  pending.catch(() => {
+    if (manufacturersPromise === pending) {
+      manufacturersPromise = null
+      brandMatchCache.clear()
+    }
+  })
+  return pending
 }
 
 async function fetchManufacturers(): Promise<z.infer<typeof ManufacturerResponseSchema>['manufacturers']> {
@@ -669,8 +680,17 @@ async function loadDispensaryDirectory(): Promise<DispensaryDirectory> {
     return dispensaryDirectoryPromise
   }
 
-  dispensaryDirectoryPromise = fetchDispensaryDirectory()
-  return dispensaryDirectoryPromise
+  // Clear the cached promise on rejection so a transient Lit Alerts failure
+  // does not poison every subsequent pricing/litalerts job in this worker
+  // until restart.
+  const pending = fetchDispensaryDirectory()
+  dispensaryDirectoryPromise = pending
+  pending.catch(() => {
+    if (dispensaryDirectoryPromise === pending) {
+      dispensaryDirectoryPromise = null
+    }
+  })
+  return pending
 }
 
 async function fetchDispensaryDirectory(): Promise<DispensaryDirectory> {
