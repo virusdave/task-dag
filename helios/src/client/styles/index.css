@@ -21,11 +21,13 @@
    * canvas so unselected leaves like "Jobs" / "Config" do not read as
    * disabled. */
   --text-muted-strong: #4f4639;
-  /* Form-control border. Distinct from --panel-border (used by cards and
-   * panels) so we can darken inputs/selects/textareas on the cream theme
-   * without thickening every surface edge in the app. Tuned to clear the
-   * WCAG 3:1 UI-component contrast minimum against the near-white input
-   * fill (#fffdfa); a paler tan looked anemic in smoke critique. */
+  /* Interactive-control border for inputs, selects, textareas, and ghost /
+   * default buttons. Distinct from --panel-border (used by cards and
+   * panels) so we can give clickable / typeable controls a stronger edge
+   * on the cream theme without thickening every surface in the app. Tuned
+   * to clear the WCAG 3:1 UI-component contrast minimum against both the
+   * near-white input fill (#fffdfa) and the warm cream button fill
+   * (#fff7ec); a paler tan looked anemic in smoke critique. */
   --control-border: #a07a4a;
   --shadow: 0 10px 30px rgba(51, 31, 8, 0.08);
 }
@@ -117,7 +119,7 @@ textarea {
 }
 
 button {
-  border: 1px solid var(--panel-border);
+  border: 1px solid var(--control-border);
   background: #fff7ec;
   color: inherit;
   cursor: pointer;
@@ -309,7 +311,7 @@ pre {
 
 .ghost-button {
   background: rgba(255, 250, 241, 0.72);
-  border-color: var(--panel-border);
+  border-color: var(--control-border);
   color: inherit;
 }
 
