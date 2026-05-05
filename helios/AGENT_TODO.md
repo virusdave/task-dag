@@ -28,7 +28,7 @@ After both fixes:
 - catalog_taxonomy_snapshots and catalog_taxonomy_snapshot_rows are populated on every scheduler tick.
 - stock_snapshots / stock_snapshot_items / stock_variant_state are populated correctly per site.
 - The first correct stock snapshot diff produced 407 out-of-stock-to-in-stock transitions (148 Bronx + 259 Midtown), each enqueued into pending_litalerts_refresh_queue with a populated `source_snapshot_id` FK.
-- The litalerts drainer scheduler is enqueuing batches (up to 50 per 5-min tick) of `config.workers.litalerts_refresh.variant` jobs and capturing real `litalerts_competitor_observations` rows with `queue_row_id`, `source_snapshot_id`, `brand_name`, `near_listing_count`, `mid_listing_count`, `far_listing_count`, etc. populated. As of this writing, 47 observations have succeeded and ~360 queue rows remain pending; they will drain at 50 per 5 min.
+- The litalerts drainer scheduler is enqueuing batches (up to 50 per 5-min tick) of `config.workers.litalerts_refresh.variant` jobs and capturing real `litalerts_competitor_observations` rows with `queue_row_id`, `source_snapshot_id`, `brand_name`, `near_listing_count`, `mid_listing_count`, `far_listing_count`, etc. populated. After roughly an hour of steady drain, 187 observations have succeeded, 0 failed, and ~221 queue rows remain pending. By the time the next agent picks this up the queue should already be drained or very close to it; if it is not, check whether a recent stock snapshot enqueued a fresh batch first before treating the residual pending count as a stall.
 - All `requested` and `completed` audit events for `config.workers.{stock,catalog,litalerts}_refresh.*` are visible from `/jobs` and `/history` via the shared `module=config` filter.
 
 The earlier orphan rows from the bug runs (`stock_snapshots.id = 14` and `catalog_taxonomy_snapshots.id = 1`) were marked `failed` directly with explanatory notes in the `error` column rather than deleted, so the operator still sees the historical incident in the per-task recent-snapshots table.
@@ -38,6 +38,15 @@ The earlier orphan rows from the bug runs (`stock_snapshots.id = 14` and `catalo
 - The stock refresh transaction does ~1226 `stock_variant_state` upserts plus ~407 `pending_litalerts_refresh_queue` inserts in one `withTransaction` block. The first run after the parser fix took close to the 5-minute lease window because of this, and the lease heartbeat (60s `setInterval`, fire-and-forget) only just barely kept up. If the per-site population grows much past today's numbers the same lease can expire mid-transaction and `leaseJobs.ts` will requeue with `Worker lease expired before job completion; retrying.`, leaving an orphan `stock_snapshots` row in `running`. Steady-state runs (when most variants are already stable) only take a few seconds because almost no rows transition.
 - The default Catalog cadence (every 5 min daytime, mirroring Stock) is now provably safe against live Sweed, but operators may still want to slow it down if Sweed throttles or rate-limits at peak hours.
 - The Lit Alerts drainer batch ceiling of 50 per 5-min tick will work through ~360 pending rows in roughly an hour. If a future Stock snapshot ever flips a much larger transition set into the queue, operators may want to raise the batch ceiling temporarily from `src/worker/runtime/configWorkersScheduler.ts`.
+
+#### Local Process State At Handoff
+
+- `helios-dev` tmux session has three windows:
+  - window 1 (`bash*`) holds the `npm run dev:client` Vite process on `:4174` (started by an earlier thread; left alone).
+  - window 2 (`server`) is running `APP_BASE_URL='http://localhost:4174' SESSION_COOKIE_SECRET='dev-session-secret' PORT=3001 npm run dev:server` and is serving the Fastify API at `http://127.0.0.1:3001`.
+  - window 3 (`worker`) is running `npm run dev:worker` and is currently the only worker hitting TigerData. The previous `bulk_additions/catalog_curation/`-rooted server (pid 36829) and worker (pid 38121) were killed at the start of this pass so the new helios-rooted code paths could load.
+- A signed-in dev session cookie for `dave@freshlybaked.nyc` (admin) is available in `/tmp/helios-resume.cookies` if the next pass wants to keep using `curl` against `http://127.0.0.1:3001/api/...`. Re-create with `curl -X POST -H 'Origin: http://localhost:4174' -H 'Content-Type: application/json' -d '{"email":"dave@freshlybaked.nyc"}' http://127.0.0.1:3001/api/auth/dev-login` if it has expired.
+- Do not kill the long-lived Vite process or the unrelated `bulk_additions/catalog_curation/`-rooted scripts that may be running in other sessions; everything Helios proper owns is in the `helios-dev` `server` and `worker` windows only.
 
 #### Immediate Next Steps For Resume
 
