@@ -13,6 +13,24 @@ import type { JobHandlerContext } from '../runtime/jobRegistry.js'
 
 const STOCK_INVENTORY_PAGE_SIZE = 200
 
+const StockInventoryItemSchema = z
+  .object({
+    availableQty: z.coerce.number().nullable().optional(),
+    currentQty: z.coerce.number().nullable().optional(),
+    isAvailableOnline: z.boolean().nullable().optional(),
+    isNotForSale: z.boolean().nullable().optional(),
+    isTradeSample: z.boolean().nullable().optional(),
+    stockLocation: z
+      .object({
+        id: z.coerce.number().int().optional(),
+        name: z.string().nullable().optional(),
+      })
+      .passthrough()
+      .nullable()
+      .optional(),
+  })
+  .passthrough()
+
 const StockInventoryRowSchema = z
   .object({
     // Some Sweed builds expose `isOnStock` directly; the current grouped feed
@@ -27,12 +45,21 @@ const StockInventoryRowSchema = z
       })
       .passthrough()
       .optional(),
+    productBrand: z
+      .object({
+        id: z.coerce.number().int().optional(),
+        name: z.string().nullable().optional(),
+      })
+      .passthrough()
+      .nullable()
+      .optional(),
     quantity: z.coerce.number().nullable().optional(),
     // Live grouped feed shape: per-row `currentQty`, `holdQty`, `availableQty`.
     // `availableQty` already nets out holds; treat it as the in-stock signal.
     currentQty: z.coerce.number().nullable().optional(),
     holdQty: z.coerce.number().nullable().optional(),
     availableQty: z.coerce.number().nullable().optional(),
+    items: z.array(StockInventoryItemSchema).default([]),
   })
   .passthrough()
 
@@ -51,8 +78,27 @@ interface ParsedRow {
   productName: string | null
 }
 
+interface BrandRollup {
+  brandId: number
+  brandName: string
+  // product_ids whose row had at least one "for sale" lot in this scan
+  forSaleProductIds: Set<number>
+  forSaleLotCount: number
+  forSaleTotalAvailableQty: number
+}
+
 interface SiteScanResult {
   rowsByProductId: Map<number, ParsedRow>
+  brandRollupsByBrandId: Map<number, BrandRollup>
+}
+
+const FOR_SALE_STOCK_LOCATION_PREFIX = 'for sale'
+
+function isForSaleStockLocationName(name: string | null | undefined): boolean {
+  if (typeof name !== 'string') {
+    return false
+  }
+  return name.trim().toLowerCase().startsWith(FOR_SALE_STOCK_LOCATION_PREFIX)
 }
 
 interface SnapshotInsertRow extends QueryResultRow {
@@ -106,6 +152,7 @@ export async function runConfigWorkersStockRefreshJob(
         site,
         snapshotId,
         rowsByProductId: scan.rowsByProductId,
+        brandRollupsByBrandId: scan.brandRollupsByBrandId,
       })
 
       totalNewlyInStockVariants += summary.newlyInStockVariantCount
@@ -159,6 +206,7 @@ function resolveTargetSites(siteDealerIds: number[]): HeliosPendingPurchaseSiteD
 
 async function scanFullStockForSite(site: HeliosPendingPurchaseSiteDealer): Promise<SiteScanResult> {
   const rowsByProductId = new Map<number, ParsedRow>()
+  const brandRollupsByBrandId = new Map<number, BrandRollup>()
 
   let page = 1
   while (true) {
@@ -199,17 +247,18 @@ async function scanFullStockForSite(site: HeliosPendingPurchaseSiteDealer): Prom
           packageCount,
           productName,
         })
-        continue
+      } else {
+        // The grouped feed should be unique-per-product, but defensively merge.
+        rowsByProductId.set(productId, {
+          productId,
+          isOnStock: existing.isOnStock || isOnStock,
+          quantity: sumNullable(existing.quantity, quantity),
+          packageCount: sumNullable(existing.packageCount, packageCount),
+          productName: existing.productName ?? productName,
+        })
       }
 
-      // The grouped feed should be unique-per-product, but defensively merge.
-      rowsByProductId.set(productId, {
-        productId,
-        isOnStock: existing.isOnStock || isOnStock,
-        quantity: sumNullable(existing.quantity, quantity),
-        packageCount: sumNullable(existing.packageCount, packageCount),
-        productName: existing.productName ?? productName,
-      })
+      accumulateBrandRollup(brandRollupsByBrandId, row, productId)
     }
 
     if (parsed.data.length < STOCK_INVENTORY_PAGE_SIZE) {
@@ -218,7 +267,59 @@ async function scanFullStockForSite(site: HeliosPendingPurchaseSiteDealer): Prom
     page += 1
   }
 
-  return { rowsByProductId }
+  return { rowsByProductId, brandRollupsByBrandId }
+}
+
+function accumulateBrandRollup(
+  brandRollupsByBrandId: Map<number, BrandRollup>,
+  row: z.infer<typeof StockInventoryRowSchema>,
+  productId: number,
+): void {
+  const brandId = row.productBrand?.id
+  const brandName = (row.productBrand?.name ?? '').trim()
+  if (typeof brandId !== 'number' || brandId <= 0 || brandName.length === 0) {
+    return
+  }
+
+  let productHasForSaleLot = false
+  let forSaleLotCount = 0
+  let forSaleAvailableQty = 0
+  for (const item of row.items) {
+    if (item.isTradeSample === true) continue
+    if (item.isNotForSale === true) continue
+    if (item.isAvailableOnline !== true) continue
+    if (!isForSaleStockLocationName(item.stockLocation?.name)) continue
+    const itemQty =
+      typeof item.availableQty === 'number'
+        ? item.availableQty
+        : typeof item.currentQty === 'number'
+          ? item.currentQty
+          : 0
+    if (itemQty <= 0) continue
+    productHasForSaleLot = true
+    forSaleLotCount += 1
+    forSaleAvailableQty += itemQty
+  }
+
+  let rollup = brandRollupsByBrandId.get(brandId)
+  if (!rollup) {
+    rollup = {
+      brandId,
+      brandName,
+      forSaleProductIds: new Set<number>(),
+      forSaleLotCount: 0,
+      forSaleTotalAvailableQty: 0,
+    }
+    brandRollupsByBrandId.set(brandId, rollup)
+  } else if (rollup.brandName.length === 0 && brandName.length > 0) {
+    rollup.brandName = brandName
+  }
+
+  if (productHasForSaleLot) {
+    rollup.forSaleProductIds.add(productId)
+    rollup.forSaleLotCount += forSaleLotCount
+    rollup.forSaleTotalAvailableQty += forSaleAvailableQty
+  }
 }
 
 function sumNullable(left: number | null, right: number | null): number | null {
@@ -238,8 +339,9 @@ async function persistSnapshotAndDiff(input: {
   site: HeliosPendingPurchaseSiteDealer
   snapshotId: number
   rowsByProductId: Map<number, ParsedRow>
+  brandRollupsByBrandId: Map<number, BrandRollup>
 }): Promise<PersistResult> {
-  const { context, site, snapshotId, rowsByProductId } = input
+  const { context, site, snapshotId, rowsByProductId, brandRollupsByBrandId } = input
   const rows = [...rowsByProductId.values()]
   const inStockRows = rows.filter((row) => row.isOnStock)
 
@@ -366,6 +468,60 @@ async function persistSnapshotAndDiff(input: {
           throw insertError
         }
       }
+    }
+
+    for (const rollup of brandRollupsByBrandId.values()) {
+      const forSaleVariantCount = rollup.forSaleProductIds.size
+      const hasForSaleNow = forSaleVariantCount > 0
+      await db.query(
+        `
+          insert into landingpage_brand_site_presence (
+            site_dealer_id, site_key, site_label, brand_id, brand_name,
+            for_sale_variant_count, for_sale_total_available_qty, for_sale_lot_count,
+            last_observed_at, last_for_sale_observed_at,
+            last_observed_snapshot_id, last_for_sale_observed_snapshot_id,
+            first_observed_at
+          ) values (
+            $1, $2, $3, $4, $5,
+            $6, $7, $8,
+            $9::timestamptz,
+            case when $10 then $9::timestamptz else null end,
+            $11,
+            case when $10 then $11 else null end,
+            $9::timestamptz
+          )
+          on conflict (site_dealer_id, brand_id) do update
+            set site_key = excluded.site_key,
+                site_label = excluded.site_label,
+                brand_name = excluded.brand_name,
+                for_sale_variant_count = excluded.for_sale_variant_count,
+                for_sale_total_available_qty = excluded.for_sale_total_available_qty,
+                for_sale_lot_count = excluded.for_sale_lot_count,
+                last_observed_at = excluded.last_observed_at,
+                last_observed_snapshot_id = excluded.last_observed_snapshot_id,
+                last_for_sale_observed_at = case
+                  when excluded.for_sale_variant_count > 0 then excluded.last_observed_at
+                  else landingpage_brand_site_presence.last_for_sale_observed_at
+                end,
+                last_for_sale_observed_snapshot_id = case
+                  when excluded.for_sale_variant_count > 0 then excluded.last_observed_snapshot_id
+                  else landingpage_brand_site_presence.last_for_sale_observed_snapshot_id
+                end
+        `,
+        [
+          site.dealerId,
+          site.siteKey,
+          site.siteLabel,
+          rollup.brandId,
+          rollup.brandName,
+          forSaleVariantCount,
+          rollup.forSaleTotalAvailableQty,
+          rollup.forSaleLotCount,
+          observedAt,
+          hasForSaleNow,
+          snapshotId,
+        ],
+      )
     }
 
     await db.query(

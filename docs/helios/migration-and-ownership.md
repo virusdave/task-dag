@@ -77,6 +77,27 @@ This doc is the durable home for current Helios migration boundaries and ownersh
 - Promo proposal review surfaces are not fully migrated yet. Until a Helios pricing or communications promo workflow exists, keep using the local reviewer-first packet pattern established in `bulk_additions/2026-04-16`: bundle related promos together, make before or after GM and selector-pool sales analysis prominent, keep clickable detail pages, and collapse raw payload or debug material by default.
 - The next major Helios screens follow-up is wiring the existing hourly scheduled enqueue path for `screens.banner_health_maintenance`.
 
+## Read-only Projections For External Systems
+
+Helios is the canonical owner of any per-(site, sweed-entity) projection downstream
+systems need. External callers must be granted SELECT-only access to a dedicated
+projection table; they must never write into Helios-owned tables, even for
+"convenience" upserts.
+
+- **`landingpage_brand_site_presence`**: per-(site_dealer_id, brand_id) presence
+  row maintained by [`../../helios/src/worker/jobs/configWorkersStockRefreshJob.ts`](../../helios/src/worker/jobs/configWorkersStockRefreshJob.ts)
+  on every stock-refresh tick (migration `0018_landingpage_brand_site_presence.sql`).
+  Each row carries the latest count of "for sale" variants and total available
+  qty, plus `last_observed_at` and `last_for_sale_observed_at` watermarks. Rows
+  persist after a brand goes to zero "for sale" inventory so downstream
+  generators (currently the Freshly Baked landing-page service in the
+  `mostly-static-sites` repo) can keep generating brand pages for previously-
+  observed brands and the brand never silently disappears from review surfaces.
+  "For sale" follows the documented Sweed inventory rule: a per-item lot counts
+  only when its `stockLocation.name` starts with `FOR SALE` AND `!isTradeSample`
+  AND `!isNotForSale` AND `isAvailableOnline` AND `availableQty > 0`. Grant the
+  external consumer a SELECT-only role on this table only.
+
 ## Useful Code Paths
 
 - Canonical app: [`../../helios`](../../helios)
