@@ -4,6 +4,83 @@
 
 Turn this app into `Helios`, the single internal Freshly Baked NYC operations surface under `/internal/tools`, while preserving the strongest existing workflows from the current one-off apps and scripts.
 
+### Active Handoff (2026-05-05, third pass): Config Module Catalog + Litalerts Schedules Now Live
+
+#### What Just Landed (Committed)
+
+- Three new local commits on top of the prior Helios history:
+  - `114db1c` Establish workspace git commit message convention (workspace doc)
+  - `d3cb73c` Add Lit Alerts refresh worker that drains the pending queue
+  - `fffd036` Activate the Catalog state-level taxonomy refresh worker
+- Migrations `0016_litalerts_competitor_observations.sql` and `0017_catalog_taxonomy_snapshots.sql` were applied against live TigerData. New tables in production: `litalerts_competitor_observations`, `catalog_taxonomy_snapshots`, `catalog_taxonomy_snapshot_rows`. A GIN index `catalog_groups_live_state_products_gin` was added on `(live_state_json -> 'products')` so the Lit Alerts drainer's productId lookup hits an index instead of full-scanning catalog_groups.
+- `npm run typecheck`, `npm test` (126/126), and `npm run build` clean for both new commits.
+- All three Workers > Scheduling tasks are now implemented: `Stock`, `Litalerts`, `Catalog`. Each has a real per-task editor page with weekday-mask + HH:MM windows, save schedule, run-now, and per-task recent-runs sections. The `ConfigSchedulingTodoPage` placeholder is removed.
+- New worker job `config.workers.litalerts_refresh.variant`: per-row drainer of `pending_litalerts_refresh_queue`. Each job resolves the variant's mirrored catalog group via JSONB containment lookup on `live_state_json -> 'products'`, calls `buildPricingMarketContext` to capture brand-anchored Lit Alerts competitor listings (reusing the existing manufacturer + dispensary directory caches in `litAlertsMarket.ts`), persists a first-class `litalerts_competitor_observations` row with the matched listings, distance-bucket counts, search-term metadata, and FK back to the source snapshot, and closes the queue row to `completed` or `cancelled` with the captured outcome. Failures still write the observation row with `status='failed'` AND the job throws (worker retry/dead-letter applies).
+- New worker job `config.workers.catalog_refresh`: state-level taxonomy snapshot (no site-dealer scope). Pages `store.product.list.short`, `store.product.group.list`, `store.product.category.list` (yields category + subcategory rows), `store.product.brand.list`, `store.product.strain.list`, `store.product.strain.prevalence.list`, `store.product.size.list`, `store.distributor.list` until empty/short page. Persists one `catalog_taxonomy_snapshots` row per attempt + per-entity `catalog_taxonomy_snapshot_rows` rows. Failures move snapshot to `failed` with error AND throw. Goes through the shared `sweed-session` concurrency lane.
+- Scheduler extended in `src/worker/runtime/configWorkersScheduler.ts`: catalog branch enqueues a single state-level job per interval bucket (sweed-session lane); litalerts branch enqueues one job per pending queue row (no concurrency lane needed since Lit Alerts API is independent of Sweed sessions), with a 50-row drain batch ceiling per tick. Empty-queue litalerts ticks still record the run so the next tick honors the interval.
+- `recordConfigScheduleEnqueue` now accepts a nullable `jobId` so empty-batch litalerts ticks can still mark the bucket consumed without referencing a non-existent job_queue row.
+- Default schedules auto-seed on first read: Litalerts every 5 min 24x7; Catalog every 5 min 08:00->02:00 + every 15 min 02:00->08:00 (mirrors Stock's daytime/off-hours cadence).
+- Audit events added: `config.workers.litalerts_refresh.{requested,completed}` and `config.workers.catalog_refresh.{requested,completed}`. All visible from `/jobs` and `/history` via the shared `module=config` filter.
+- Run-now affordances: `/api/config/workers/schedules/workers.scheduling.litalerts/run-now` enqueues every currently pending queue row (up to 50) immediately and returns the latest job id; returns 400 with a clear message if the queue is empty. `/api/config/workers/schedules/workers.scheduling.catalog/run-now` enqueues a state-level scan immediately. Stock run-now behavior is unchanged.
+- Detail response schema `ConfigBackgroundTaskDetailResponseSchema` grew per-task `litalerts` and `catalog` nullable extensions. The Stock-shaped `recentSnapshots` field is preserved as the per-task stock detail. Litalerts detail surfaces pending-queue depth + 20-row sample + 20 most recent observations; Catalog detail surfaces the 20 most recent taxonomy snapshots with per-entity counts.
+
+#### Verification Done in This Pass
+
+- `npm run typecheck` clean after each slice.
+- `npm test` 126/126 passing after each slice.
+- `npm run build` clean (only the pre-existing >500 kB chunk warning).
+- `npm run db:migrate` applied `0016_litalerts_competitor_observations.sql` and then `0017_catalog_taxonomy_snapshots.sql` against live TigerData.
+
+#### Known Limitations / Risks
+
+- The Catalog refresh job calls `store.distributor.list` per the spec; this RPC is documented in `docs/sweed/catalog/creation-and-editing.md` but is not previously exercised in this codebase. If the live RPC name differs or rejects pagination params, the snapshot will move to `failed` with the underlying Sweed error and the operator can adjust.
+- The Lit Alerts drainer runs `buildPricingMarketContext` per pending queue row. With the existing manufacturer + dispensary caches this stays linear in queue depth, but each row still costs at least one menulistings call. If the queue ever accumulates thousands of pending rows, per-tick batch ceiling (currently 50) keeps blast radius small but operators may want to bump it.
+- Default Catalog cadence is brisk (every 5 min daytime). The first live run will tell whether that is too aggressive against the state catalog dealer; tune via the editor without code changes.
+- No live worker run has been observed yet inside this thread; verification was code-level + migration apply only. The worker process needs to be restarted from `helios/` so the new handlers + scheduler branches are loaded.
+
+#### Still Open / Optional Next Slices
+
+- Optional polish (Slice 4 in the original handoff): drift-detection warning on each schedule page when the worker has not enqueued any job within the expected interval. Data is already there in `stock_snapshots`, `catalog_taxonomy_snapshots`, `litalerts_competitor_observations`, and `config_worker_schedule_runs`.
+- Live smoke pass: restart helios worker from `helios/`, visit `/config/workers/scheduling/{stock,litalerts,catalog}`, confirm seeded windows, save edits, run-now, observe new rows in `stock_snapshots`, `pending_litalerts_refresh_queue`, `litalerts_competitor_observations`, and `catalog_taxonomy_snapshots`.
+- Decide whether Catalog snapshot data should also feed downstream Helios surfaces (e.g. backfilling missing brand_id columns, dictionary refresh in `/catalog`) instead of staying as audit-only history.
+
+---
+
+### Prior Handoff (2026-05-05, second pass): Config Module First Slice Landed; Catalog/Litalerts Schedules Still TODO
+
+#### What Just Landed (Committed)
+
+- Two local commits on top of the prior Helios history:
+  - `5038321` Relocate Helios into automation/helios/ and add Config module with stock-refresh worker
+  - `5c092e6` Update Helios documentation and knowledgebase to point at the new helios/ path
+- Migration `0015_config_workers_and_stock.sql` was applied against live TigerData (alongside the previously pending `0014_module_comments_and_annotations.sql`). All six new tables verified in production: `config_worker_schedules`, `config_worker_schedule_runs`, `stock_snapshots`, `stock_snapshot_items`, `stock_variant_state`, `pending_litalerts_refresh_queue`.
+- `npm run typecheck`, `npm test` (126/126), and `npm run build` all clean. The pre-existing `screensBannerHealthMaintenanceJob.ts` typecheck regression is fixed.
+- New top-level `config` Helios module is wired into the canonical `PrimarySidebar`/`TreeNav`. Per the user's "bottom of the nav pane" wording, `AppShell.tsx` now renders the Config branch AFTER the operational `Jobs` and `Audit history` leaves rather than inline with the other modules.
+- Sidebar tree under Config: `Workers > Scheduling > {Catalog, Litalerts, Stock}`. Catalog and Litalerts render TODO placeholder pages; Stock has a real editor + run-now button.
+- New worker job `config.workers.stock_refresh` scans the FULL grouped inventory (no `isOnStock` filter) for each configured site dealer (Bronx + Midtown via `HELIOS_PENDING_PURCHASE_SITE_DEALERS`), persists `stock_snapshot_items` rows, diffs against the per-(site, variant) `stock_variant_state` table, and on each variant going out-of-stock -> in-stock auto-enqueues a `pending_litalerts_refresh_queue` row foreign-keyed to the source snapshot.
+- New recurring scheduler in `src/worker/runtime/configWorkersScheduler.ts` ticks on every worker poll, picks the smallest-interval active window per task, dedupes via an interval-bucket dedupe key, and enqueues the job through the shared `sweed-session` concurrency lane.
+- Default Stock schedule (auto-seeded on first read or first scheduler tick): every 2 minutes inside `08:00 -> 02:00` (wraps midnight) and every 15 minutes inside `02:00 -> 08:00`, 7 days/week, in the worker's local time.
+- Audit events: `config.workers.schedule_updated`, `config.workers.stock_refresh.requested`, `config.workers.stock_refresh.completed`. All are visible from the global `/jobs` and `/history` surfaces via the shared module-aware filters (`module=config`).
+- Tests: new `src/worker/runtime/configWorkersScheduler.test.ts` (5 cases) covers wrap-around windows, paused-window filtering, smaller-interval window preference on overlap, and "no active window" returning null.
+
+#### Immediate Next Steps
+
+- Restart the local worker process from `helios/` (not from the old `bulk_additions/catalog_curation/` cwd) so the new scheduler tick begins enqueuing `config.workers.stock_refresh` jobs on its 2-minute cadence. The previously running `tsx watch src/worker/main.ts` and the standalone review service on `8788` are still pointed at the old path; they must be killed and restarted from the new directory before any of this work runs live.
+- After the restart, sign in to localhost and visit `/config/workers/scheduling/stock` to confirm the seeded default windows render, the editor saves, the recent-snapshots table populates, and the `Run now` button enqueues a job that completes successfully.
+- Inspect a fresh `pending_litalerts_refresh_queue` row to confirm the FK back to its `source_snapshot_id` is populated and that the row was created only for variants that genuinely transitioned out-of-stock -> in-stock (i.e. previous `stock_variant_state.is_on_stock` was either `false` or absent and current is `true`).
+- Implement the Lit Alerts refresh worker that drains `pending_litalerts_refresh_queue`. Suggested job type: `config.workers.litalerts_refresh.variant`. Use the bounded brand-anchored Lit Alerts product-matching path documented in `HOW_LITALERTS_PRODUCT_MATCHING_WORKS.md`. Honor the `do not trust total, page until empty/short page` rule from `AGENTS_MUST_KNOW.md`. Persist results in a future `litalerts_competitor_observations` table foreign-keyed to both the catalog product/variant id AND the source snapshot id.
+- Implement the Catalog refresh worker (state-level snapshot of `product`, `variant`, `brand`, `category`, `subcategory`, `strain`, `prevalence`, `size`, `distributor` rows). Suggested job type: `config.workers.catalog_refresh`. Replace the `ConfigSchedulingTodoPage` for `workers.scheduling.catalog` with a real editor that mirrors the Stock page shape.
+- Once both Catalog and Litalerts workers ship, replace the `implemented: false` flag on those `CONFIG_BACKGROUND_TASKS` entries in `src/shared/contracts/domain/config.ts` and add their default schedule windows to the auto-seed branch in `configQueries.ensureDefaultConfigSchedules`.
+- Consider adding a small `/api/config/workers/schedules/:taskKey` history view that summarizes the last N stock snapshots, plus visible warnings when the worker has not enqueued any job within the expected interval (drift detection). The data is already there in `stock_snapshots` and `config_worker_schedule_runs`.
+- Per the standing rule about durable knowledgebase, when any of the above lands, update the smallest correct doc under `docs/helios/` first and then add a one-line entry to `HOW_HELIOS_WORKS.md` so a future agent can find the Config module from the workspace index without reading commit history.
+
+#### Caveats For The Next Agent
+
+- The `bulk_additions/catalog_curation/` directory still has an empty `.vite/deps/` cache directory because the original Vite dev process is still running from there. Do not kill that process without explicit user direction; once it stops the cache directory can be removed. The directory is not referenced by any current code or doc.
+- The previously-noted concurrent-edit incident on `PolicyReplacementReviewPage.tsx` resolved itself: the larger 35KB version is now in `helios/src/client/routes/communications/PolicyReplacementReviewPage.tsx` and matches what the live editor session was producing.
+- TigerData credentials must be loaded from `~amp-local/.secret/tigerdata/` per `AGENTS_MUST_KNOW.md`; the migration runner auto-discovers them, so `npm run db:migrate` from `helios/` works without manual env setup. Future migrations against TigerData should follow the same path.
+- The git worktree contains a large amount of pre-existing untracked workspace material (most of `automation/`). The two commits I just landed only touched the helios codebase, the three external functional path-fix scripts, and the documentation files I directly modified. Other workspace untracked files were left alone per the AGENTS rule about not modifying changes I did not author. Nothing has been pushed; remote state is unchanged.
+
 ### Active Handoff (2026-05-05): Codebase Relocation Plus New `Config` Module With Background Tasks
 
 #### Codebase Relocation (Completed)

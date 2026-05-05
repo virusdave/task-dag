@@ -25,6 +25,7 @@ The goal is to help a new agent quickly determine whether a task now belongs in 
 - Durable migration and ownership guidance: [`docs/helios/migration-and-ownership.md`](./docs/helios/migration-and-ownership.md)
 - Repricing module planning proposal and reviewer workflow: [`docs/helios/pricing-repricing-module-proposal.md`](./docs/helios/pricing-repricing-module-proposal.md)
 - Active pricing-module implementation now lives in `helios/src/client/routes/pricing/`, `src/server/routes/pricing.ts`, `src/server/db/queries/pricingQueries.ts`, and `src/worker/pricing/`
+- Active Config-module background workers (Stock, Litalerts, Catalog) and their Workers > Scheduling editor pages live in `helios/src/worker/jobs/configWorkers*.ts`, `src/worker/runtime/configWorkersScheduler.ts`, `src/server/routes/config.ts`, and `src/client/routes/config/Config*SchedulePage.tsx`
 - Current pricing foundations already include the `midtownEverReceived` historical scope, explicit `keep-price` review rows, and bounded Lit Alerts search adaptation for thin-comp repricing cases
 - Current queue or handoff state: [`helios/AGENT_TODO.md`](./helios/AGENT_TODO.md)
 - Underlying screens playbooks and safety rules: [`docs/sweed/marketing/screens-and-banners.md`](./docs/sweed/marketing/screens-and-banners.md)
