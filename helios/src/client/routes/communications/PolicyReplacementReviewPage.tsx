@@ -1,6 +1,5 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useLoaderData, useParams } from 'react-router-dom'
-import { useVirtualizer } from '@tanstack/react-virtual'
 
 import {
   POLICY_REPLACEMENT_CATEGORIES,
@@ -454,10 +453,6 @@ interface MappingRowProps {
   onDecision: (decision: PolicyReplacementDecision) => void
   onField: (key: keyof PolicyReplacementItemFields, value: string) => void
   onPickCategory: (category: PolicyReplacementCategory | '', sourceId: string | null) => void
-  /** Virtualizer ref for measureElement. Optional so the row can also be rendered outside a virtualizer. */
-  rowRef?: (node: HTMLTableRowElement | null) => void
-  /** Required by `useVirtualizer.measureElement` to know which virtual row this DOM node represents. */
-  virtualIndex?: number
 }
 
 function MappingRow({
@@ -469,8 +464,6 @@ function MappingRow({
   onDecision,
   onField,
   onPickCategory,
-  rowRef,
-  virtualIndex,
 }: MappingRowProps) {
   const itemId = mapping.mappingId
   const proposedReplacement = mapping.proposedReplacement ?? ''
@@ -508,8 +501,6 @@ function MappingRow({
       id={`item-${itemId}`}
       className={`${rowSourceClass} ${mappingClass}`.trim()}
       data-review-item={itemId}
-      data-index={virtualIndex}
-      ref={rowRef}
     >
       <td>
         <span className="eyebrow">{mapping.assetType ?? 'Mapping'}</span>
@@ -617,18 +608,10 @@ interface MappingTableProps {
   ) => void
 }
 
-/**
- * Virtualized body for the text-replacement mapping table. The mapping ledger
- * is the largest list in the page (~152 rows of radios + textareas + a
- * reviewer-note textarea + DecisionRow), so we render only the rows that fall
- * inside the visible scroll window. The table is wrapped in a fixed-height
- * scroll container (`.table-wrap` already sets `max-height: 640px`); rows
- * outside the window are represented by two padding `<tr>`s above and below.
- *
- * Rows have variable height (whySafer, statusReasons, multiline source
- * status), so we use `measureElement` to record observed heights instead of a
- * fixed estimate. The estimate is only used for the initial render.
- */
+/** Full text-replacement mapping ledger. Keep this non-virtualized: Chrome had
+ * real-scroll paint failures with table-row virtualization on this variable
+ * height textarea/radio table. The Map lookup below preserves the important
+ * O(n) render behavior without risking disappearing rows. */
 function MappingTable({
   textMapCount,
   mappings,
@@ -639,7 +622,6 @@ function MappingTable({
   setField,
   pickMappingCategory,
 }: MappingTableProps) {
-  const scrollRef = useRef<HTMLDivElement | null>(null)
   // Pre-resolve mapping lookup once per render so each row doesn't re-scan the
   // mappings array. The find() in the original tbody was O(n) per row -> O(n^2)
   // overall on every keystroke; with the lookup we get O(n) per render.
@@ -650,20 +632,8 @@ function MappingTable({
     }
     return byId
   }, [mappings])
-  const virtualizer = useVirtualizer({
-    count: textMapCount,
-    getScrollElement: () => scrollRef.current,
-    estimateSize: () => 260,
-    overscan: 6,
-    measureElement: (element) => element.getBoundingClientRect().height,
-  })
-  const virtualRows = virtualizer.getVirtualItems()
-  const totalSize = virtualizer.getTotalSize()
-  const paddingTop = virtualRows.length > 0 ? virtualRows[0].start : 0
-  const paddingBottom =
-    virtualRows.length > 0 ? totalSize - virtualRows[virtualRows.length - 1].end : 0
   return (
-    <div className="table-wrap" ref={scrollRef}>
+    <div className="table-wrap">
       <table>
         <thead>
           <tr>
@@ -678,17 +648,12 @@ function MappingTable({
           </tr>
         </thead>
         <tbody>
-          {paddingTop > 0 ? (
-            <tr aria-hidden style={{ height: paddingTop }}>
-              <td colSpan={8} style={{ padding: 0, border: 0 }} />
-            </tr>
-          ) : null}
-          {virtualRows.map((vRow) => {
-            const itemId = buildItemId('text-map', vRow.index + 1)
+          {Array.from({ length: textMapCount }, (_v, index) => {
+            const itemId = buildItemId('text-map', index + 1)
             const mapping = mappingsById.get(itemId)
             if (!mapping) {
               return (
-                <tr key={itemId} ref={virtualizer.measureElement} data-index={vRow.index}>
+                <tr key={itemId}>
                   <td colSpan={8} className="error-text">
                     Mapping {itemId} is missing from the packet detail payload.
                   </td>
@@ -709,85 +674,11 @@ function MappingTable({
                 onPickCategory={(category, sourceId) =>
                   pickMappingCategory(itemId, category, sourceId)
                 }
-                rowRef={virtualizer.measureElement}
-                virtualIndex={vRow.index}
               />
             )
           })}
-          {paddingBottom > 0 ? (
-            <tr aria-hidden style={{ height: paddingBottom }}>
-              <td colSpan={8} style={{ padding: 0, border: 0 }} />
-            </tr>
-          ) : null}
         </tbody>
       </table>
-    </div>
-  )
-}
-
-interface VirtualizedCardListProps {
-  count: number
-  /** Initial estimate; rows are remeasured via `measureElement` after mount. */
-  estimateSize?: number
-  /** Max-height of the inner scroll container (px). */
-  maxHeight?: number
-  renderItem: (index: number) => React.ReactNode
-  /** Stable key for each index. */
-  getKey: (index: number) => string
-}
-
-/**
- * Single-column virtualized scroll container for card sections (headlines,
- * descriptions, template families). Each section gets its own fixed-height
- * scroll viewport so only ~6–8 cards are mounted at a time instead of the
- * full 47/33/12 list. Item heights vary (textareas, optional details, char
- * counts, reviewer notes), so we use `measureElement` and let the virtualizer
- * remeasure after mount.
- *
- * Cards are positioned absolutely inside a relatively-positioned spacer div
- * sized to the virtualizer's `getTotalSize()`, so the scrollbar always
- * reflects the full content height.
- */
-function VirtualizedCardList({
-  count,
-  estimateSize = 240,
-  maxHeight = 720,
-  renderItem,
-  getKey,
-}: VirtualizedCardListProps) {
-  const scrollRef = useRef<HTMLDivElement | null>(null)
-  const virtualizer = useVirtualizer({
-    count,
-    getScrollElement: () => scrollRef.current,
-    estimateSize: () => estimateSize,
-    overscan: 4,
-    measureElement: (element) => element.getBoundingClientRect().height,
-  })
-  const virtualItems = virtualizer.getVirtualItems()
-  return (
-    <div className="virtual-card-list" ref={scrollRef} style={{ maxHeight }}>
-      <div
-        className="virtual-card-list-inner"
-        style={{ height: virtualizer.getTotalSize(), position: 'relative', width: '100%' }}
-      >
-        {virtualItems.map((vItem) => (
-          <div
-            key={getKey(vItem.index)}
-            data-index={vItem.index}
-            ref={virtualizer.measureElement}
-            style={{
-              position: 'absolute',
-              top: 0,
-              left: 0,
-              right: 0,
-              transform: `translateY(${vItem.start}px)`,
-              padding: '7px 0',
-            }}
-          >
-            {renderItem(vItem.index)}
-          </div>
-        ))}
-      </div>
     </div>
   )
 }
@@ -1288,14 +1179,13 @@ export function PolicyReplacementReviewPage() {
               {section.count === 0 ? (
                 <p className="muted">No items in this category.</p>
               ) : (
-                <VirtualizedCardList
-                  count={section.count}
-                  getKey={(index) => buildItemId(prefix, index + 1)}
-                  renderItem={(index) => {
+                <div className="grid copy-grid">
+                  {Array.from({ length: section.count }, (_v, index) => {
                     const itemId = buildItemId(prefix, index + 1)
                     const state = items[itemId] ?? EMPTY_STATE
                     return (
                       <CopyCard
+                        key={itemId}
                         itemId={itemId}
                         label={label}
                         index={index}
@@ -1305,8 +1195,8 @@ export function PolicyReplacementReviewPage() {
                         setField={setField}
                       />
                     )
-                  }}
-                />
+                  })}
+                </div>
               )}
             </section>
           ) : null,
@@ -1322,14 +1212,13 @@ export function PolicyReplacementReviewPage() {
             {templateSection.count === 0 ? (
               <p className="muted">No items in this category.</p>
             ) : (
-              <VirtualizedCardList
-                count={templateSection.count}
-                getKey={(index) => buildItemId('template-family', index + 1)}
-                renderItem={(index) => {
+              <div className="grid copy-grid">
+                {Array.from({ length: templateSection.count }, (_v, index) => {
                   const itemId = buildItemId('template-family', index + 1)
                   const state = items[itemId] ?? EMPTY_STATE
                   return (
                     <TemplateFamilyCard
+                      key={itemId}
                       itemId={itemId}
                       index={index}
                       entry={detail.templateFamilies[index]}
@@ -1338,8 +1227,8 @@ export function PolicyReplacementReviewPage() {
                       setField={setField}
                     />
                   )
-                }}
-              />
+                })}
+              </div>
             )}
           </section>
         ) : null}
