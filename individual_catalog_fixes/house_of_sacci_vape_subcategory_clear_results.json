@@ -1,0 +1,270 @@
+{
+  "startedAt": "2026-05-11T17:18:53Z",
+  "dryRun": false,
+  "stateContext": {
+    "dealerId": 210248,
+    "dealerName": "Freshly Baked NY"
+  },
+  "siteContext": [
+    {
+      "dealerId": 210249,
+      "dealerName": "Freshly Baked NYC - The Bronx"
+    },
+    {
+      "dealerId": 210705,
+      "dealerName": "Freshly Baked NYC - Midtown"
+    }
+  ],
+  "targetBrand": "House of Sacci",
+  "targetCategory": "Vapes",
+  "rationale": "House of Sacci only sells 510 cartridges in this workspace. Per the catalog creation rule, marking a non-AIO vape as AIO causes spoiled-product refunds; leaving an AIO unmarked is OK. We therefore clear the subcategory on every in-stock House of Sacci vape group rather than trusting any inherited label.",
+  "groups": [
+    {
+      "groupId": 319178,
+      "groupName": "Laughing Gas",
+      "brandName": "House of Sacci",
+      "categoryName": "Vapes",
+      "before": {
+        "groupId": 319178,
+        "groupName": "Laughing Gas",
+        "brandName": "House of Sacci",
+        "categoryId": 1087,
+        "categoryName": "Vapes",
+        "subcategoryId": 1112,
+        "subcategoryName": "All In One / Disposable",
+        "productCount": 1
+      },
+      "observedInventory": {
+        "groupId": 319178,
+        "brandName": "House of Sacci",
+        "categoryName": "Vapes",
+        "products": [
+          {
+            "productId": 414749,
+            "productName": "House of Sacci Laughing Gas 1g",
+            "observedVariantSubcategoryName": "All In One / Disposable",
+            "observedVariantSubcategoryId": 1112,
+            "sites": [
+              "Freshly Baked NYC - Midtown"
+            ]
+          }
+        ],
+        "sites": [
+          "Freshly Baked NYC - Midtown"
+        ]
+      },
+      "status": "updated",
+      "after": {
+        "groupId": 319178,
+        "groupName": "Laughing Gas",
+        "brandName": "House of Sacci",
+        "categoryId": 1087,
+        "categoryName": "Vapes",
+        "subcategoryId": null,
+        "subcategoryName": null,
+        "productCount": 1,
+        "verifyAttempt": 1
+      },
+      "updatedAt": "2026-05-11T17:18:57Z"
+    },
+    {
+      "groupId": 319179,
+      "groupName": "Maui Waui",
+      "brandName": "House of Sacci",
+      "categoryName": "Vapes",
+      "before": {
+        "groupId": 319179,
+        "groupName": "Maui Waui",
+        "brandName": "House of Sacci",
+        "categoryId": 1087,
+        "categoryName": "Vapes",
+        "subcategoryId": 1112,
+        "subcategoryName": "All In One / Disposable",
+        "productCount": 1
+      },
+      "observedInventory": {
+        "groupId": 319179,
+        "brandName": "House of Sacci",
+        "categoryName": "Vapes",
+        "products": [
+          {
+            "productId": 414750,
+            "productName": "House of Sacci Maui Waui 1g",
+            "observedVariantSubcategoryName": "All In One / Disposable",
+            "observedVariantSubcategoryId": 1112,
+            "sites": [
+              "Freshly Baked NYC - Midtown"
+            ]
+          }
+        ],
+        "sites": [
+          "Freshly Baked NYC - Midtown"
+        ]
+      },
+      "status": "updated",
+      "after": {
+        "groupId": 319179,
+        "groupName": "Maui Waui",
+        "brandName": "House of Sacci",
+        "categoryId": 1087,
+        "categoryName": "Vapes",
+        "subcategoryId": null,
+        "subcategoryName": null,
+        "productCount": 1,
+        "verifyAttempt": 1
+      },
+      "updatedAt": "2026-05-11T17:18:58Z"
+    },
+    {
+      "groupId": 319181,
+      "groupName": "Rose' Runtz",
+      "brandName": "House of Sacci",
+      "categoryName": "Vapes",
+      "before": {
+        "groupId": 319181,
+        "groupName": "Rose' Runtz",
+        "brandName": "House of Sacci",
+        "categoryId": 1087,
+        "categoryName": "Vapes",
+        "subcategoryId": 1112,
+        "subcategoryName": "All In One / Disposable",
+        "productCount": 1
+      },
+      "observedInventory": {
+        "groupId": 319181,
+        "brandName": "House of Sacci",
+        "categoryName": "Vapes",
+        "products": [
+          {
+            "productId": 414752,
+            "productName": "House of Sacci Rose' Runtz 1g",
+            "observedVariantSubcategoryName": "All In One / Disposable",
+            "observedVariantSubcategoryId": 1112,
+            "sites": [
+              "Freshly Baked NYC - Midtown"
+            ]
+          }
+        ],
+        "sites": [
+          "Freshly Baked NYC - Midtown"
+        ]
+      },
+      "status": "updated",
+      "after": {
+        "groupId": 319181,
+        "groupName": "Rose' Runtz",
+        "brandName": "House of Sacci",
+        "categoryId": 1087,
+        "categoryName": "Vapes",
+        "subcategoryId": null,
+        "subcategoryName": null,
+        "productCount": 1,
+        "verifyAttempt": 1
+      },
+      "updatedAt": "2026-05-11T17:18:59Z"
+    },
+    {
+      "groupId": 319183,
+      "groupName": "Sweet Mint",
+      "brandName": "House of Sacci",
+      "categoryName": "Vapes",
+      "before": {
+        "groupId": 319183,
+        "groupName": "Sweet Mint",
+        "brandName": "House of Sacci",
+        "categoryId": 1087,
+        "categoryName": "Vapes",
+        "subcategoryId": 1112,
+        "subcategoryName": "All In One / Disposable",
+        "productCount": 1
+      },
+      "observedInventory": {
+        "groupId": 319183,
+        "brandName": "House of Sacci",
+        "categoryName": "Vapes",
+        "products": [
+          {
+            "productId": 414754,
+            "productName": "House of Sacci Sweet Mint 1g",
+            "observedVariantSubcategoryName": "All In One / Disposable",
+            "observedVariantSubcategoryId": 1112,
+            "sites": [
+              "Freshly Baked NYC - Midtown"
+            ]
+          }
+        ],
+        "sites": [
+          "Freshly Baked NYC - Midtown"
+        ]
+      },
+      "status": "updated",
+      "after": {
+        "groupId": 319183,
+        "groupName": "Sweet Mint",
+        "brandName": "House of Sacci",
+        "categoryId": 1087,
+        "categoryName": "Vapes",
+        "subcategoryId": null,
+        "subcategoryName": null,
+        "productCount": 1,
+        "verifyAttempt": 1
+      },
+      "updatedAt": "2026-05-11T17:19:00Z"
+    },
+    {
+      "groupId": 319187,
+      "groupName": "ZPK",
+      "brandName": "House of Sacci",
+      "categoryName": "Vapes",
+      "before": {
+        "groupId": 319187,
+        "groupName": "ZPK",
+        "brandName": "House of Sacci",
+        "categoryId": 1087,
+        "categoryName": "Vapes",
+        "subcategoryId": 1112,
+        "subcategoryName": "All In One / Disposable",
+        "productCount": 1
+      },
+      "observedInventory": {
+        "groupId": 319187,
+        "brandName": "House of Sacci",
+        "categoryName": "Vapes",
+        "products": [
+          {
+            "productId": 414758,
+            "productName": "House of Sacci ZPK 1g",
+            "observedVariantSubcategoryName": "All In One / Disposable",
+            "observedVariantSubcategoryId": 1112,
+            "sites": [
+              "Freshly Baked NYC - Midtown"
+            ]
+          }
+        ],
+        "sites": [
+          "Freshly Baked NYC - Midtown"
+        ]
+      },
+      "status": "updated",
+      "after": {
+        "groupId": 319187,
+        "groupName": "ZPK",
+        "brandName": "House of Sacci",
+        "categoryId": 1087,
+        "categoryName": "Vapes",
+        "subcategoryId": null,
+        "subcategoryName": null,
+        "productCount": 1,
+        "verifyAttempt": 1
+      },
+      "updatedAt": "2026-05-11T17:19:01Z"
+    }
+  ],
+  "lastUpdatedAt": "2026-05-11T17:19:01Z",
+  "runStatus": "completed",
+  "summary": {
+    "groupCount": 5,
+    "updatedGroupCount": 5,
+    "alreadyClearGroupCount": 0
+  }
+}

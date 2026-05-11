@@ -1,0 +1,89 @@
+[
+  {
+    "id": "multi_unit_pack_naming",
+    "title": "Multi-unit packs follow the canonical variant naming pattern",
+    "severity": "warning",
+    "scope": "state_catalog_variant_cannabis",
+    "detectionMode": "live_scan",
+    "proposalMode": "review_packet",
+    "autoFixable": true,
+    "remediation": "Set the variant tab to `<pack>x <size>` and align the trailing variant name/short-name suffix to the same canonical pack label.",
+    "workflow": "Emit a janitorial review row per affected variant, then apply via a packet-driven `store.product.edit` pass after approval."
+  },
+  {
+    "id": "edible_potency_data",
+    "title": "Edibles do not surface potency/prevalence percentage data",
+    "severity": "warning",
+    "scope": "storefront_review_packet",
+    "detectionMode": "supporting_artifact",
+    "proposalMode": "review_packet",
+    "autoFixable": false,
+    "remediation": "Use the edible THC prevalence review packet to remove storefront percentage-style potency labels while keeping reviewed amount displays such as `10x 10mg`.",
+    "workflow": "Treat edible potency rows as a dedicated janitorial lane; do not add or preserve prevalence-style potency data on edible catalog rows."
+  },
+  {
+    "id": "disabled_subcategory_attachment",
+    "title": "No in-scope cannabis catalog entry remains attached to a disabled subcategory",
+    "severity": "error",
+    "scope": "state_catalog_group_cannabis",
+    "detectionMode": "live_scan",
+    "proposalMode": "review_packet",
+    "autoFixable": true,
+    "remediation": "Clear the product-group `subcategoryId` unless a reviewed enabled replacement has already been approved.",
+    "workflow": "Emit one janitorial review row per affected group, then apply with `store.product.group.edit { id, subcategoryId: null }` after approval."
+  },
+  {
+    "id": "missing_catalog_image",
+    "title": "Every in-scope cannabis catalog entry has an image",
+    "severity": "warning",
+    "scope": "state_catalog_group_cannabis",
+    "detectionMode": "live_scan",
+    "proposalMode": "review_packet",
+    "autoFixable": false,
+    "remediation": "Route the group into the existing image review/backfill workflow; prefer exact product imagery first, and only surface clearly labeled same-brand placeholder-grade imagery as a temporary fallback when no exact image can be found. Do not auto-invent or auto-apply an image.",
+    "workflow": "Use the janitorial packet to surface missing-image groups and hand them off to the established image review lane, keeping exact-product and placeholder-grade brand proposals reviewer-visible and separate."
+  },
+  {
+    "id": "quarter_price_rounding",
+    "title": "Every in-scope cannabis catalog price lands on an even $0.25 increment",
+    "severity": "warning",
+    "scope": "state_catalog_variant_cannabis",
+    "detectionMode": "live_scan",
+    "proposalMode": "review_packet",
+    "autoFixable": false,
+    "remediation": "Flag any missing or non-quarter global price and propose the nearest quarter-dollar target for review.",
+    "workflow": "Treat quarter-rounding as a janitorial pricing review lane; metrics should count only actual variant hits, not raw scanned rows."
+  },
+  {
+    "id": "vape_aio_subcategory_must_be_evidenced",
+    "title": "Vape `All In One / Disposable` subcategory requires explicit AIO evidence",
+    "severity": "error",
+    "scope": "state_catalog_group_vape",
+    "detectionMode": "live_scan",
+    "proposalMode": "review_packet",
+    "autoFixable": true,
+    "remediation": "Clear the vape product-group `subcategoryId` whenever the row currently reads `All In One / Disposable` but the product is actually a 510 cartridge or any other non-self-contained device. Null is preferred over a wrong AIO label because mislabeling a 510 cart as AIO causes spoiled-product refunds when customers without a 510 battery try to use it.",
+    "workflow": "Flag any in-stock vape group whose live subcategory is `All In One / Disposable` without independent vendor evidence of an integrated battery (`disposable`, `AIO`, `Briq`, `puff bar`, `USB-C`, `battery life`); apply with `store.product.group.edit { id, subcategoryId: null }` from state context. See `docs/sweed/catalog/creation-and-editing.md` for the full asymmetry rule and `automation/individual_catalog_fixes/clear_house_of_sacci_vape_subcategories.py` for the brand-scoped template."
+  },
+  {
+    "id": "fake_barcode_alarm",
+    "title": "Fake inventory barcodes trigger a loud alarm",
+    "severity": "alarm",
+    "scope": "site_inventory_package",
+    "detectionMode": "supporting_artifact",
+    "proposalMode": "alarm_only",
+    "autoFixable": false,
+    "suppressionBySite": {
+      "midtown": {
+        "suppressUntil": "2026-05-01",
+        "reason": "Barcode rollout is already in flight for Midtown. Hide janitorial alarm noise until May 1."
+      },
+      "bronx": {
+        "suppressUntil": "2026-05-03",
+        "reason": "Barcode rollout is already in flight for Bronx. Hide janitorial alarm noise until May 3."
+      }
+    },
+    "remediation": "Escalate immediately when any in-stock package barcode starts with the fake `25000...` prefix so the package gets a real barcode ASAP.",
+    "workflow": "Use the site-level fake-barcode audit packet as an alarm lane; do not silently auto-fix or bury these hits inside generic cleanup metrics."
+  }
+]

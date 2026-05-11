@@ -63,6 +63,23 @@ From live Freshly Baked NY state-catalog work on 2026-04-19:
 - a full live migration script in `bulk_additions/2026-04-18/migrate_chews_gummies_edibles_subcategories.py` cleared `276` Edibles groups (`288` products) out of `Chews/Gummies`
 - the verified post-migration Edibles product counts were `289` rows with no subcategory, `34` rows in `Pills / Tablets`, `20` rows in `Chocolate`, `11` rows in `Hard Candy`, `5` rows in `Cooking Ingredients`, `3` rows in `Drinks`, `2` rows in `Baked Goods`, and `1` row in `Freeze Pops`, with `0` rows left in `Chews/Gummies`
 
+## Vape Subcategory Asymmetry: Cartridge Vs All-In-One
+
+The vape `subcategory` (`Cartridge`, `Live Resin Cartridge`, `All In One / Disposable`, etc.) is not just a cosmetic taxonomy field. Customers, drivers, and storefront filters rely on it to decide whether the unit is usable on its own (AIO/disposable, has its own battery) or requires a separate 510 battery.
+
+The error costs are sharply asymmetric:
+
+- Marking an actual AIO/disposable as a 510 cartridge, or leaving the subcategory blank, is recoverable: the customer just sees a less specific lane, and they can still use the unit because it has its own battery.
+- Marking an actual 510 cartridge as `All In One / Disposable` is dangerous: a customer who does not own a compatible 510 battery may attempt to use the cart, ruin or destroy the oil, and almost certainly demand a refund of a spoiled product. This is the worst class of catalog miscategorization on vape rows in this workspace.
+
+Practical rules:
+
+- During catalog creation or apply flows, never set `Vapes / All In One / Disposable` from inferred or default values. Require explicit, vendor-confirmed evidence that the unit is a self-contained battery + oil unit (e.g. `disposable`, `AIO`, `Briq`, `puff bar`, `pod with built-in battery`, `USB-C charging`, `battery life`).
+- When the device form is unknown or only weakly cued, leave the vape group's `subcategoryId` null. Null is preferred over a wrong AIO label.
+- During cleanup of an existing brand whose live catalog rows already carry `All In One / Disposable`, do not trust that label transitively. Confirm the device form from the brand's own product page or vendor docs before keeping it; otherwise clear the subcategory.
+- Live confirmation on 2026-05-11: every in-stock House of Sacci vape variant in this workspace was a 510 cartridge, but all 5 in-stock product groups (`Laughing Gas` 319178, `Maui Waui` 319179, `Rose' Runtz` 319181, `Sweet Mint` 319183, `ZPK` 319187) were attached to `All In One / Disposable` (subcategory `1112`). They were cleared to null with `store.product.group.edit { id, subcategoryId: null }` from state context (`Freshly Baked NY` dealer `210248`); see [`automation/individual_catalog_fixes/clear_house_of_sacci_vape_subcategories.py`](../../../individual_catalog_fixes/clear_house_of_sacci_vape_subcategories.py) and the recorded results JSON next to it.
+- The same script doubles as a brand-scoped cleanup template: it pages `store.inventory.item.list.grouped { isOnStock: true }` at each site, filters by brand and category, resolves variant -> group via `store.product.get { id }.product.productGroupId`, and then clears subcategory at state context with per-group verification.
+
 ## Disabled Subcategories Must Stay Unattached
 
 From live Freshly Baked NY state-catalog work on 2026-04-23:
