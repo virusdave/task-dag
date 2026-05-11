@@ -59,6 +59,13 @@ export async function buildServer() {
     return reply.status(500).send({ error: message })
   })
 
+  // Scaffolding health check, mounted at the root so it is reachable
+  // regardless of appBasePath. The trailing `zz` is the project's
+  // poor-man's obfuscation marker for infrastructure-only endpoints.
+  server.get('/healthzz', async (_request: FastifyRequest, reply: FastifyReply) =>
+    reply.type('text/plain').send('okzz\n'),
+  )
+
   if (env.appBasePath === '/') {
     await registerApplicationSurface(server)
   } else {
