@@ -1,0 +1,1103 @@
+[apply] scrubbed 8 Dutchie-hosted primary image(s) out of 43 row(s); these will be created image-less.
+[apply] === site Midtown (midtown) rows=36 packet=_apply_packet_midtown.json ===
+Traceback (most recent call last):
+  File "/Users/dave/tmp/scratch/fbnyc/sweed/automation/categories/2026-04-13/apply_pending_order_catalog_proposal.py", line 734, in <module>
+    main()
+    ~~~~^^
+  File "/Users/dave/tmp/scratch/fbnyc/sweed/automation/categories/2026-04-13/apply_pending_order_catalog_proposal.py", line 727, in main
+    results["postRegeneration"] = regenerate_packet(results)
+                                  ~~~~~~~~~~~~~~~~~^^^^^^^^^
+  File "/Users/dave/tmp/scratch/fbnyc/sweed/automation/categories/2026-04-13/apply_pending_order_catalog_proposal.py", line 615, in regenerate_packet
+    rows = [proposal_generator.build_row(group) for group in groups]
+            ~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^
+  File "/Users/dave/tmp/scratch/fbnyc/sweed/automation/categories/2026-04-13/generate_pending_order_catalog_proposal.py", line 2612, in build_row
+    parsed = parse_product_name(distributor_product_name)
+  File "/Users/dave/tmp/scratch/fbnyc/sweed/automation/categories/2026-04-13/generate_pending_order_catalog_proposal.py", line 2469, in parse_product_name
+    return parse_hrbotanical_name(normalized)
+  File "/Users/dave/tmp/scratch/fbnyc/sweed/automation/categories/2026-04-13/generate_pending_order_catalog_proposal.py", line 1486, in parse_hrbotanical_name
+    raise RuntimeError(f"Unhandled HR botanical product name: {name}")
+RuntimeError: Unhandled HR botanical product name: 1O-5PR-SB26-BLDR
+Traceback (most recent call last):
+  File "/Users/dave/tmp/scratch/fbnyc/sweed/automation/catalog/purchases/2026-05-11/apply_combined_proposal.py", line 203, in <module>
+    sys.exit(main())
+             ~~~~^^
+  File "/Users/dave/tmp/scratch/fbnyc/sweed/automation/catalog/purchases/2026-05-11/apply_combined_proposal.py", line 177, in main
+    raise RuntimeError(
+    ...<2 lines>...
+    )
+RuntimeError: Legacy apply for site 'midtown' failed with exit code 1; see the per-site results JSON and stdout for details.
+[patches] LLM cache entries available: 43; brand GM overrides: ['Herb', 'Doobie Labs', 'Jungle Girl', 'Moonlit', 'Purps', 'Runtz', 'Smartbud', 'Strain Gang']
+[apply] scrubbed 8 Dutchie-hosted primary image(s) out of 43 row(s); these will be created image-less.
+[apply] === site Midtown (midtown) already complete (36 rows). Skipping write phase; will only run regenerate_packet/postWriteVerification if missing. ===
+[patches] LLM cache entries available: 43; brand GM overrides: ['Herb', 'Doobie Labs', 'Jungle Girl', 'Moonlit', 'Purps', 'Runtz', 'Smartbud', 'Strain Gang']
+[apply] scrubbed 8 Dutchie-hosted primary image(s) out of 43 row(s); these will be created image-less.
+[apply] === site Midtown (midtown) already complete (36 rows). Skipping write phase; will only run regenerate_packet/postWriteVerification if missing. ===
+[apply] === site Bronx (bronx) rows=7 packet=_apply_packet_bronx.json ===
+{
+  "startedAt": "2026-05-12T03:39:17Z",
+  "siteKey": "bronx",
+  "packetPath": "/Users/dave/tmp/scratch/fbnyc/sweed/automation/catalog/purchases/2026-05-11/_apply_packet_bronx.json",
+  "packetGeneratedAt": "2026-05-12T03:03:44Z",
+  "stateContext": {
+    "dealerId": 210248,
+    "dealerName": "Freshly Baked NY"
+  },
+  "siteContext": {
+    "dealerId": 210249,
+    "dealerName": "Freshly Baked NYC - The Bronx"
+  },
+  "approvedRowCount": 7,
+  "created": {
+    "brands": [
+      {
+        "id": 16413,
+        "name": "Dr Jekyll and Mr High"
+      },
+      {
+        "id": 16414,
+        "name": "Moony's Zooties"
+      }
+    ],
+    "strains": []
+  },
+  "rows": [
+    {
+      "distributorProductId": "623542",
+      "distributorProductName": "BS Ice Cream Swirl 14g",
+      "actionType": "mapping-only",
+      "targetVariantName": "Booty Shake Ice Cream Swirl 14g",
+      "targetGroupName": "Ice Cream Swirl",
+      "targetBrand": "Booty Shake",
+      "targetStrain": "Ice Cream Swirl",
+      "targetPrevalence": "",
+      "targetVariantTab": "14g",
+      "proposedPrice": 60.0,
+      "effectiveUnitCost": 25.0,
+      "orderIds": [
+        131642
+      ],
+      "positionIds": [
+        778407
+      ],
+      "reviewFlags": [
+        "No live family anchor",
+        "Brand MSO classification defaulted to non-MSO (no annotation source available)"
+      ],
+      "groupSource": "exact-variant",
+      "brand": {
+        "id": 4413,
+        "name": "Booty Shake"
+      },
+      "size": {
+        "id": 853,
+        "name": "14g"
+      },
+      "packCount": 1,
+      "createdBlobId": null,
+      "createdGroupId": null,
+      "createdProductId": null,
+      "groupBefore": {
+        "id": 76908,
+        "name": "Ice Cream Swirl",
+        "brand": "Booty Shake",
+        "category": "Flower",
+        "subcategory": "Pre-Ground",
+        "strain": "Hybrid",
+        "images": [
+          {
+            "id": "d286e383-87c1-47ac-9680-9e631393e66e",
+            "url": "https://media-prime.sweedpos.com/store/prime/1777242453_d286e383-87c1-47ac-9680-9e631393e66e.jpg"
+          }
+        ],
+        "products": [
+          {
+            "id": 88776,
+            "name": "Booty Shake Ice Cream Swirl 14g",
+            "tab": "14g",
+            "price": 60.0
+          }
+        ]
+      },
+      "groupAfter": {
+        "id": 76908,
+        "name": "Ice Cream Swirl",
+        "brand": "Booty Shake",
+        "category": "Flower",
+        "subcategory": "Pre-Ground",
+        "strain": "Hybrid",
+        "images": [
+          {
+            "id": "d286e383-87c1-47ac-9680-9e631393e66e",
+            "url": "https://media-prime.sweedpos.com/store/prime/1777242453_d286e383-87c1-47ac-9680-9e631393e66e.jpg"
+          }
+        ],
+        "products": [
+          {
+            "id": 88776,
+            "name": "Booty Shake Ice Cream Swirl 14g",
+            "tab": "14g",
+            "price": 60.0
+          }
+        ]
+      },
+      "productUpdate": {
+        "before": {
+          "id": 88776,
+          "name": "Booty Shake Ice Cream Swirl 14g",
+          "shortName": "Ice Cream Swirl 14g",
+          "tab": "14g",
+          "price": 60.0,
+          "productGroupId": 76908,
+          "packOfSize": 1,
+          "displayInEcommerce": true,
+          "isPacked": true,
+          "allowedSaleType": "Medical and recreational",
+          "size": "14g"
+        },
+        "after": {
+          "id": 88776,
+          "name": "Booty Shake Ice Cream Swirl 14g",
+          "shortName": "Ice Cream Swirl 14g",
+          "tab": "14g",
+          "price": 60.0,
+          "productGroupId": 76908,
+          "packOfSize": 1,
+          "displayInEcommerce": true,
+          "isPacked": true,
+          "allowedSaleType": "Medical and recreational",
+          "size": "14g"
+        },
+        "editApplied": true,
+        "editParams": {
+          "id": 88776,
+          "shortName": "Booty Shake Ice Cream Swirl 14g"
+        }
+      },
+      "distributor": {
+        "orderId": 131642,
+        "distributorId": 3244,
+        "distributorName": "N&M Farms Distribution LLC"
+      },
+      "distributorLink": {
+        "created": true,
+        "priceAdded": true,
+        "priceSkippedReason": null,
+        "distributorProduct": {
+          "name": "BS Ice Cream Swirl 14g",
+          "price": 0,
+          "externalProductName": "BS Ice Cream Swirl 14g",
+          "distributor": {
+            "id": 3244,
+            "name": "N&M Farms Distribution LLC"
+          },
+          "product": {
+            "id": "88776",
+            "name": "Ice Cream Swirl 14g"
+          },
+          "productQty": 1.0,
+          "hasPartialReception": false,
+          "pricesLists": [],
+          "sku": "Boo-Pre-",
+          "id": "625000"
+        }
+      }
+    },
+    {
+      "distributorProductId": "623543",
+      "distributorProductName": "J&H Apple Jax 3.5g",
+      "actionType": "catalog-create",
+      "targetVariantName": "Dr Jekyll and Mr High Apple Jax 3.5g",
+      "targetGroupName": "Apple Jax",
+      "targetBrand": "Dr Jekyll and Mr High",
+      "targetStrain": "Apple Jax",
+      "targetPrevalence": "",
+      "targetVariantTab": "3.5g",
+      "proposedPrice": 38.0,
+      "effectiveUnitCost": 15.0,
+      "orderIds": [
+        131642
+      ],
+      "positionIds": [
+        778408
+      ],
+      "reviewFlags": [
+        "No Lit Alerts evidence",
+        "No live family anchor",
+        "Needs image review",
+        "Brand MSO classification defaulted to non-MSO (no annotation source available)"
+      ],
+      "groupSource": "new-group",
+      "brand": {
+        "id": 16413,
+        "name": "Dr Jekyll and Mr High"
+      },
+      "size": {
+        "id": 850,
+        "name": "3.5g"
+      },
+      "packCount": 1,
+      "createdBlobId": null,
+      "createdGroupId": 323430,
+      "createdProductId": 419332,
+      "groupBefore": null,
+      "groupAfter": {
+        "id": 323430,
+        "name": "Apple Jax",
+        "brand": "Dr Jekyll and Mr High",
+        "category": "Flower",
+        "subcategory": "Pre-Packaged Flower",
+        "strain": null,
+        "images": [],
+        "products": [
+          {
+            "id": 419332,
+            "name": "Dr Jekyll and Mr High Apple Jax 3.5g",
+            "tab": "3.5g",
+            "price": 38.0
+          }
+        ]
+      },
+      "productUpdate": {
+        "before": {
+          "id": 419332,
+          "name": "Dr Jekyll and Mr High Apple Jax 3.5g",
+          "shortName": "Apple Jax 3.5g",
+          "tab": "3.5g",
+          "price": 38.0,
+          "productGroupId": 323430,
+          "packOfSize": 1,
+          "displayInEcommerce": true,
+          "isPacked": true,
+          "allowedSaleType": "Medical and recreational",
+          "size": "3.5g"
+        },
+        "after": {
+          "id": 419332,
+          "name": "Dr Jekyll and Mr High Apple Jax 3.5g",
+          "shortName": "Apple Jax 3.5g",
+          "tab": "3.5g",
+          "price": 38.0,
+          "productGroupId": 323430,
+          "packOfSize": 1,
+          "displayInEcommerce": true,
+          "isPacked": true,
+          "allowedSaleType": "Medical and recreational",
+          "size": "3.5g"
+        },
+        "editApplied": true,
+        "editParams": {
+          "id": 419332,
+          "shortName": "Dr Jekyll and Mr High Apple Jax 3.5g"
+        }
+      },
+      "distributor": {
+        "orderId": 131642,
+        "distributorId": 3244,
+        "distributorName": "N&M Farms Distribution LLC"
+      },
+      "distributorLink": {
+        "created": true,
+        "priceAdded": true,
+        "priceSkippedReason": null,
+        "distributorProduct": {
+          "name": "J&H Apple Jax 3.5g",
+          "price": 0,
+          "externalProductName": "J&H Apple Jax 3.5g",
+          "distributor": {
+            "id": 3244,
+            "name": "N&M Farms Distribution LLC"
+          },
+          "product": {
+            "id": "419332",
+            "name": "Apple Jax 3.5g"
+          },
+          "productQty": 1.0,
+          "hasPartialReception": false,
+          "pricesLists": [],
+          "sku": "Dr -Pre-",
+          "id": "625001"
+        }
+      }
+    },
+    {
+      "distributorProductId": "623544",
+      "distributorProductName": "J&H Obama 3.5g",
+      "actionType": "catalog-create",
+      "targetVariantName": "Dr Jekyll and Mr High Obama 3.5g",
+      "targetGroupName": "Obama",
+      "targetBrand": "Dr Jekyll and Mr High",
+      "targetStrain": "Obama",
+      "targetPrevalence": "",
+      "targetVariantTab": "3.5g",
+      "proposedPrice": 42.0,
+      "effectiveUnitCost": 15.0,
+      "orderIds": [
+        131642
+      ],
+      "positionIds": [
+        778410
+      ],
+      "reviewFlags": [
+        "Thin Lit Alerts evidence",
+        "No live family anchor",
+        "Brand MSO classification defaulted to non-MSO (no annotation source available)"
+      ],
+      "groupSource": "new-group",
+      "brand": {
+        "id": 16413,
+        "name": "Dr Jekyll and Mr High"
+      },
+      "size": {
+        "id": 850,
+        "name": "3.5g"
+      },
+      "packCount": 1,
+      "createdBlobId": "2c31ca42-ba2d-44b8-a733-29b61cbac249",
+      "createdGroupId": 323431,
+      "createdProductId": 419333,
+      "groupBefore": null,
+      "groupAfter": {
+        "id": 323431,
+        "name": "Obama",
+        "brand": "Dr Jekyll and Mr High",
+        "category": "Flower",
+        "subcategory": "Pre-Packaged Flower",
+        "strain": null,
+        "images": [
+          {
+            "id": "2c31ca42-ba2d-44b8-a733-29b61cbac249",
+            "url": "https://media-prime.sweedpos.com/store/prime/1778557165_2c31ca42-ba2d-44b8-a733-29b61cbac249.jpg"
+          }
+        ],
+        "products": [
+          {
+            "id": 419333,
+            "name": "Dr Jekyll and Mr High Obama 3.5g",
+            "tab": "3.5g",
+            "price": 42.0
+          }
+        ]
+      },
+      "productUpdate": {
+        "before": {
+          "id": 419333,
+          "name": "Dr Jekyll and Mr High Obama 3.5g",
+          "shortName": "Obama 3.5g",
+          "tab": "3.5g",
+          "price": 42.0,
+          "productGroupId": 323431,
+          "packOfSize": 1,
+          "displayInEcommerce": true,
+          "isPacked": true,
+          "allowedSaleType": "Medical and recreational",
+          "size": "3.5g"
+        },
+        "after": {
+          "id": 419333,
+          "name": "Dr Jekyll and Mr High Obama 3.5g",
+          "shortName": "Obama 3.5g",
+          "tab": "3.5g",
+          "price": 42.0,
+          "productGroupId": 323431,
+          "packOfSize": 1,
+          "displayInEcommerce": true,
+          "isPacked": true,
+          "allowedSaleType": "Medical and recreational",
+          "size": "3.5g"
+        },
+        "editApplied": true,
+        "editParams": {
+          "id": 419333,
+          "shortName": "Dr Jekyll and Mr High Obama 3.5g"
+        }
+      },
+      "distributor": {
+        "orderId": 131642,
+        "distributorId": 3244,
+        "distributorName": "N&M Farms Distribution LLC"
+      },
+      "distributorLink": {
+        "created": true,
+        "priceAdded": true,
+        "priceSkippedReason": null,
+        "distributorProduct": {
+          "name": "J&H Obama 3.5g",
+          "price": 0,
+          "externalProductName": "J&H Obama 3.5g",
+          "distributor": {
+            "id": 3244,
+            "name": "N&M Farms Distribution LLC"
+          },
+          "product": {
+            "id": "419333",
+            "name": "Obama 3.5g"
+          },
+          "productQty": 1.0,
+          "hasPartialReception": false,
+          "pricesLists": [],
+          "sku": "Dr -Pre-",
+          "id": "625002"
+        }
+      }
+    },
+    {
+      "distributorProductId": "623545",
+      "distributorProductName": "MZ Blue Zushi 7Pk Pre-Roll",
+      "actionType": "catalog-create",
+      "targetVariantName": "Moony's Zooties Blue Zushi 7x 0.5g",
+      "targetGroupName": "Blue Zushi",
+      "targetBrand": "Moony's Zooties",
+      "targetStrain": "Blue Zushi",
+      "targetPrevalence": "",
+      "targetVariantTab": "7x 0.5g",
+      "proposedPrice": 32.0,
+      "effectiveUnitCost": 12.0,
+      "orderIds": [
+        131642
+      ],
+      "positionIds": [
+        778411
+      ],
+      "reviewFlags": [
+        "Thin Lit Alerts evidence",
+        "No live family anchor",
+        "Brand MSO classification defaulted to non-MSO (no annotation source available)"
+      ],
+      "groupSource": "new-group",
+      "brand": {
+        "id": 16414,
+        "name": "Moony's Zooties"
+      },
+      "size": {
+        "id": 836,
+        "name": "0.5g"
+      },
+      "packCount": 7,
+      "createdBlobId": "c3c8014a-5182-4826-b10c-6c8952f83686",
+      "createdGroupId": 323432,
+      "createdProductId": 419334,
+      "groupBefore": null,
+      "groupAfter": {
+        "id": 323432,
+        "name": "Blue Zushi",
+        "brand": "Moony's Zooties",
+        "category": "Pre-Rolls",
+        "subcategory": "Multi-Pack",
+        "strain": "Blue Zushi",
+        "images": [
+          {
+            "id": "c3c8014a-5182-4826-b10c-6c8952f83686",
+            "url": "https://media-prime.sweedpos.com/store/prime/1778557169_c3c8014a-5182-4826-b10c-6c8952f83686.png"
+          }
+        ],
+        "products": [
+          {
+            "id": 419334,
+            "name": "Moony's Zooties Blue Zushi 7x 0.5g",
+            "tab": "7x 0.5g",
+            "price": 32.0
+          }
+        ]
+      },
+      "productUpdate": {
+        "before": {
+          "id": 419334,
+          "name": "Moony's Zooties Blue Zushi 7x 0.5g",
+          "shortName": "Blue Zushi 7x 0.5g",
+          "tab": "7x 0.5g",
+          "price": 32.0,
+          "productGroupId": 323432,
+          "packOfSize": 7,
+          "displayInEcommerce": true,
+          "isPacked": true,
+          "allowedSaleType": "Medical and recreational",
+          "size": "0.5g"
+        },
+        "after": {
+          "id": 419334,
+          "name": "Moony's Zooties Blue Zushi 7x 0.5g",
+          "shortName": "Blue Zushi 7x 0.5g",
+          "tab": "7x 0.5g",
+          "price": 32.0,
+          "productGroupId": 323432,
+          "packOfSize": 7,
+          "displayInEcommerce": true,
+          "isPacked": true,
+          "allowedSaleType": "Medical and recreational",
+          "size": "0.5g"
+        },
+        "editApplied": true,
+        "editParams": {
+          "id": 419334,
+          "shortName": "Moony's Zooties Blue Zushi 7x 0.5g"
+        }
+      },
+      "distributor": {
+        "orderId": 131642,
+        "distributorId": 3244,
+        "distributorName": "N&M Farms Distribution LLC"
+      },
+      "distributorLink": {
+        "created": true,
+        "priceAdded": true,
+        "priceSkippedReason": null,
+        "distributorProduct": {
+          "name": "MZ Blue Zushi 7Pk Pre-Roll",
+          "price": 0,
+          "externalProductName": "MZ Blue Zushi 7Pk Pre-Roll",
+          "distributor": {
+            "id": 3244,
+            "name": "N&M Farms Distribution LLC"
+          },
+          "product": {
+            "id": "419334",
+            "name": "Blue Zushi 7x 0.5g"
+          },
+          "productQty": 1.0,
+          "hasPartialReception": false,
+          "pricesLists": [],
+          "sku": "Moo-Mul-",
+          "id": "625003"
+        }
+      }
+    },
+    {
+      "distributorProductId": "623546",
+      "distributorProductName": "MZ Dante's Inferno 7Pk Pre-Roll",
+      "actionType": "catalog-create",
+      "targetVariantName": "Moony's Zooties Dante's Inferno 7x 0.5g",
+      "targetGroupName": "Dante's Inferno",
+      "targetBrand": "Moony's Zooties",
+      "targetStrain": "Dante's Inferno",
+      "targetPrevalence": "",
+      "targetVariantTab": "7x 0.5g",
+      "proposedPrice": 32.0,
+      "effectiveUnitCost": 12.0,
+      "orderIds": [
+        131642
+      ],
+      "positionIds": [
+        778412
+      ],
+      "reviewFlags": [
+        "Thin Lit Alerts evidence",
+        "No live family anchor",
+        "Brand MSO classification defaulted to non-MSO (no annotation source available)"
+      ],
+      "groupSource": "new-group",
+      "brand": {
+        "id": 16414,
+        "name": "Moony's Zooties"
+      },
+      "size": {
+        "id": 836,
+        "name": "0.5g"
+      },
+      "packCount": 7,
+      "createdBlobId": "9824f7cd-6565-4ed4-8d2f-04a74619337e",
+      "createdGroupId": 323433,
+      "createdProductId": 419335,
+      "groupBefore": null,
+      "groupAfter": {
+        "id": 323433,
+        "name": "Dante's Inferno",
+        "brand": "Moony's Zooties",
+        "category": "Pre-Rolls",
+        "subcategory": "Multi-Pack",
+        "strain": "Dante's Inferno",
+        "images": [
+          {
+            "id": "9824f7cd-6565-4ed4-8d2f-04a74619337e",
+            "url": "https://media-prime.sweedpos.com/store/prime/1778557172_9824f7cd-6565-4ed4-8d2f-04a74619337e.png"
+          }
+        ],
+        "products": [
+          {
+            "id": 419335,
+            "name": "Moony's Zooties Dante's Inferno 7x 0.5g",
+            "tab": "7x 0.5g",
+            "price": 32.0
+          }
+        ]
+      },
+      "productUpdate": {
+        "before": {
+          "id": 419335,
+          "name": "Moony's Zooties Dante's Inferno 7x 0.5g",
+          "shortName": "Dante's Inferno 7x 0.5g",
+          "tab": "7x 0.5g",
+          "price": 32.0,
+          "productGroupId": 323433,
+          "packOfSize": 7,
+          "displayInEcommerce": true,
+          "isPacked": true,
+          "allowedSaleType": "Medical and recreational",
+          "size": "0.5g"
+        },
+        "after": {
+          "id": 419335,
+          "name": "Moony's Zooties Dante's Inferno 7x 0.5g",
+          "shortName": "Dante's Inferno 7x 0.5g",
+          "tab": "7x 0.5g",
+          "price": 32.0,
+          "productGroupId": 323433,
+          "packOfSize": 7,
+          "displayInEcommerce": true,
+          "isPacked": true,
+          "allowedSaleType": "Medical and recreational",
+          "size": "0.5g"
+        },
+        "editApplied": true,
+        "editParams": {
+          "id": 419335,
+          "shortName": "Moony's Zooties Dante's Inferno 7x 0.5g"
+        }
+      },
+      "distributor": {
+        "orderId": 131642,
+        "distributorId": 3244,
+        "distributorName": "N&M Farms Distribution LLC"
+      },
+      "distributorLink": {
+        "created": true,
+        "priceAdded": true,
+        "priceSkippedReason": null,
+        "distributorProduct": {
+          "name": "MZ Dante's Inferno 7Pk Pre-Roll",
+          "price": 0,
+          "externalProductName": "MZ Dante's Inferno 7Pk Pre-Roll",
+          "distributor": {
+            "id": 3244,
+            "name": "N&M Farms Distribution LLC"
+          },
+          "product": {
+            "id": "419335",
+            "name": "Dante's Inferno 7x 0.5g"
+          },
+          "productQty": 1.0,
+          "hasPartialReception": false,
+          "pricesLists": [],
+          "sku": "Moo-Mul-",
+          "id": "625004"
+        }
+      }
+    },
+    {
+      "distributorProductId": "623547",
+      "distributorProductName": "MZ Lemon Cherry Gelato Live Rosin Vape .5g",
+      "actionType": "catalog-create",
+      "targetVariantName": "Moony's Zooties Lemon Cherry Gelato Live Rosin 0.5g",
+      "targetGroupName": "Lemon Cherry Gelato Live Rosin",
+      "targetBrand": "Moony's Zooties",
+      "targetStrain": "Lemon Cherry Gelato",
+      "targetPrevalence": "Hybrid",
+      "targetVariantTab": "0.5g",
+      "proposedPrice": 55.5,
+      "effectiveUnitCost": 22.0,
+      "orderIds": [
+        131642
+      ],
+      "positionIds": [
+        778413
+      ],
+      "reviewFlags": [
+        "No Lit Alerts evidence",
+        "No live family anchor",
+        "Needs image review",
+        "Brand MSO classification defaulted to non-MSO (no annotation source available)"
+      ],
+      "groupSource": "new-group",
+      "brand": {
+        "id": 16414,
+        "name": "Moony's Zooties"
+      },
+      "size": {
+        "id": 836,
+        "name": "0.5g"
+      },
+      "packCount": 1,
+      "createdBlobId": null,
+      "createdGroupId": 323434,
+      "createdProductId": 419336,
+      "groupBefore": null,
+      "groupAfter": {
+        "id": 323434,
+        "name": "Lemon Cherry Gelato Live Rosin",
+        "brand": "Moony's Zooties",
+        "category": "Vapes",
+        "subcategory": "Live Resin Cartridge",
+        "strain": "Lemon Cherry Gelato",
+        "images": [],
+        "products": [
+          {
+            "id": 419336,
+            "name": "Moony's Zooties Lemon Cherry Gelato Live Rosin 0.5g",
+            "tab": "0.5g",
+            "price": 55.5
+          }
+        ]
+      },
+      "productUpdate": {
+        "before": {
+          "id": 419336,
+          "name": "Moony's Zooties Lemon Cherry Gelato Live Rosin 0.5g",
+          "shortName": "Lemon Cherry Gelato Live Rosin 0.5g",
+          "tab": "0.5g",
+          "price": 55.5,
+          "productGroupId": 323434,
+          "packOfSize": 1,
+          "displayInEcommerce": true,
+          "isPacked": true,
+          "allowedSaleType": "Medical and recreational",
+          "size": "0.5g"
+        },
+        "after": {
+          "id": 419336,
+          "name": "Moony's Zooties Lemon Cherry Gelato Live Rosin 0.5g",
+          "shortName": "Lemon Cherry Gelato Live Rosin 0.5g",
+          "tab": "0.5g",
+          "price": 55.5,
+          "productGroupId": 323434,
+          "packOfSize": 1,
+          "displayInEcommerce": true,
+          "isPacked": true,
+          "allowedSaleType": "Medical and recreational",
+          "size": "0.5g"
+        },
+        "editApplied": true,
+        "editParams": {
+          "id": 419336,
+          "shortName": "Moony's Zooties Lemon Cherry Gelato Live Rosin 0.5g"
+        }
+      },
+      "distributor": {
+        "orderId": 131642,
+        "distributorId": 3244,
+        "distributorName": "N&M Farms Distribution LLC"
+      },
+      "distributorLink": {
+        "created": true,
+        "priceAdded": true,
+        "priceSkippedReason": null,
+        "distributorProduct": {
+          "name": "MZ Lemon Cherry Gelato Live Rosin Vape .5g",
+          "price": 0,
+          "externalProductName": "MZ Lemon Cherry Gelato Live Rosin Vape .5g",
+          "distributor": {
+            "id": 3244,
+            "name": "N&M Farms Distribution LLC"
+          },
+          "product": {
+            "id": "419336",
+            "name": "Lemon Cherry Gelato Live Rosin 0.5g"
+          },
+          "productQty": 1.0,
+          "hasPartialReception": false,
+          "pricesLists": [],
+          "sku": "Moo-Liv-",
+          "id": "625005"
+        }
+      }
+    },
+    {
+      "distributorProductId": "623548",
+      "distributorProductName": "MZ NYC Diesel Live Rosin Vape .5g",
+      "actionType": "catalog-create",
+      "targetVariantName": "Moony's Zooties NYC Diesel Live Rosin 0.5g",
+      "targetGroupName": "NYC Diesel Live Rosin",
+      "targetBrand": "Moony's Zooties",
+      "targetStrain": "NYC Diesel",
+      "targetPrevalence": "Sativa",
+      "targetVariantTab": "0.5g",
+      "proposedPrice": 55.5,
+      "effectiveUnitCost": 22.0,
+      "orderIds": [
+        131642
+      ],
+      "positionIds": [
+        778414
+      ],
+      "reviewFlags": [
+        "No Lit Alerts evidence",
+        "No live family anchor",
+        "Needs image review",
+        "Brand MSO classification defaulted to non-MSO (no annotation source available)"
+      ],
+      "groupSource": "new-group",
+      "brand": {
+        "id": 16414,
+        "name": "Moony's Zooties"
+      },
+      "size": {
+        "id": 836,
+        "name": "0.5g"
+      },
+      "packCount": 1,
+      "createdBlobId": null,
+      "createdGroupId": 323435,
+      "createdProductId": 419337,
+      "groupBefore": null,
+      "groupAfter": {
+        "id": 323435,
+        "name": "NYC Diesel Live Rosin",
+        "brand": "Moony's Zooties",
+        "category": "Vapes",
+        "subcategory": "Live Resin Cartridge",
+        "strain": "NYC Diesel",
+        "images": [],
+        "products": [
+          {
+            "id": 419337,
+            "name": "Moony's Zooties NYC Diesel Live Rosin 0.5g",
+            "tab": "0.5g",
+            "price": 55.5
+          }
+        ]
+      },
+      "productUpdate": {
+        "before": {
+          "id": 419337,
+          "name": "Moony's Zooties NYC Diesel Live Rosin 0.5g",
+          "shortName": "NYC Diesel Live Rosin 0.5g",
+          "tab": "0.5g",
+          "price": 55.5,
+          "productGroupId": 323435,
+          "packOfSize": 1,
+          "displayInEcommerce": true,
+          "isPacked": true,
+          "allowedSaleType": "Medical and recreational",
+          "size": "0.5g"
+        },
+        "after": {
+          "id": 419337,
+          "name": "Moony's Zooties NYC Diesel Live Rosin 0.5g",
+          "shortName": "NYC Diesel Live Rosin 0.5g",
+          "tab": "0.5g",
+          "price": 55.5,
+          "productGroupId": 323435,
+          "packOfSize": 1,
+          "displayInEcommerce": true,
+          "isPacked": true,
+          "allowedSaleType": "Medical and recreational",
+          "size": "0.5g"
+        },
+        "editApplied": true,
+        "editParams": {
+          "id": 419337,
+          "shortName": "Moony's Zooties NYC Diesel Live Rosin 0.5g"
+        }
+      },
+      "distributor": {
+        "orderId": 131642,
+        "distributorId": 3244,
+        "distributorName": "N&M Farms Distribution LLC"
+      },
+      "distributorLink": {
+        "created": true,
+        "priceAdded": true,
+        "priceSkippedReason": null,
+        "distributorProduct": {
+          "name": "MZ NYC Diesel Live Rosin Vape .5g",
+          "price": 0,
+          "externalProductName": "MZ NYC Diesel Live Rosin Vape .5g",
+          "distributor": {
+            "id": 3244,
+            "name": "N&M Farms Distribution LLC"
+          },
+          "product": {
+            "id": "419337",
+            "name": "NYC Diesel Live Rosin 0.5g"
+          },
+          "productQty": 1.0,
+          "hasPartialReception": false,
+          "pricesLists": [],
+          "sku": "Moo-Liv-",
+          "id": "625006"
+        }
+      }
+    }
+  ],
+  "preloadedAt": "2026-05-12T03:39:17Z",
+  "summary": {
+    "createdBrandCount": 2,
+    "createdStrainCount": 0,
+    "createdGroupCount": 6,
+    "createdProductCount": 6,
+    "exactVariantReuseCount": 1,
+    "existingGroupReuseCount": 0,
+    "newGroupCount": 6,
+    "createdDistributorLinkCount": 7,
+    "skippedDistributorPriceCount": 0
+  },
+  "postWriteVerification": {
+    "131642": {
+      "purchaseOrderPositionCount": 8,
+      "targetPositionIds": [
+        778407,
+        778408,
+        778410,
+        778411,
+        778412,
+        778413,
+        778414
+      ],
+      "targetSuggestions": {
+        "778407": {
+          "suggestedProductCount": 5,
+          "products": [
+            {
+              "id": 88776,
+              "name": "Booty Shake Ice Cream Swirl 14g",
+              "score": 5,
+              "isSuggestion": true
+            },
+            {
+              "id": 88609,
+              "name": "Moony's Ice Cream Swirl 0.5g",
+              "score": 8,
+              "isSuggestion": true
+            },
+            {
+              "id": 163183,
+              "name": "Moony's Ice Cream Swirl 5x 0.7g",
+              "score": 9,
+              "isSuggestion": true
+            },
+            {
+              "id": 88721,
+              "name": "Moony's Ice Cream Swirl 2x 0.5g",
+              "score": 9,
+              "isSuggestion": true
+            },
+            {
+              "id": 42915,
+              "name": "Jetpacks Ice Cream Diamonds 1g",
+              "score": 10,
+              "isSuggestion": true
+            }
+          ]
+        },
+        "778408": {
+          "suggestedProductCount": 1,
+          "products": [
+            {
+              "id": 419332,
+              "name": "Dr Jekyll and Mr High Apple Jax 3.5g",
+              "score": 1,
+              "isSuggestion": true
+            }
+          ]
+        },
+        "778410": {
+          "suggestedProductCount": 1,
+          "products": [
+            {
+              "id": 419333,
+              "name": "Dr Jekyll and Mr High Obama 3.5g",
+              "score": 1,
+              "isSuggestion": true
+            }
+          ]
+        },
+        "778411": {
+          "suggestedProductCount": 1,
+          "products": [
+            {
+              "id": 419334,
+              "name": "Moony's Zooties Blue Zushi 7x 0.5g",
+              "score": 1,
+              "isSuggestion": true
+            }
+          ]
+        },
+        "778412": {
+          "suggestedProductCount": 1,
+          "products": [
+            {
+              "id": 419335,
+              "name": "Moony's Zooties Dante's Inferno 7x 0.5g",
+              "score": 1,
+              "isSuggestion": true
+            }
+          ]
+        },
+        "778413": {
+          "suggestedProductCount": 1,
+          "products": [
+            {
+              "id": 419336,
+              "name": "Moony's Zooties Lemon Cherry Gelato Live Rosin 0.5g",
+              "score": 1,
+              "isSuggestion": true
+            }
+          ]
+        },
+        "778414": {
+          "suggestedProductCount": 9,
+          "products": [
+            {
+              "id": 419337,
+              "name": "Moony's Zooties NYC Diesel Live Rosin 0.5g",
+              "score": 10,
+              "isSuggestion": true
+            },
+            {
+              "id": 41669,
+              "name": "Animal NYC Diesel 1g",
+              "score": 15,
+              "isSuggestion": true
+            },
+            {
+              "id": 382982,
+              "name": "Presidential NYC Diesel 1g",
+              "score": 15,
+              "isSuggestion": true
+            },
+            {
+              "id": 42920,
+              "name": "Jetpacks Live Resin Apple Diesel 1g",
+              "score": 15,
+              "isSuggestion": true
+            },
+            {
+              "id": 43530,
+              "name": "Sapphire NYC Diesel 1g",
+              "score": 15,
+              "isSuggestion": true
+            },
+            {
+              "id": 41673,
+              "name": "Animal NYC Diesel 1g",
+              "score": 15,
+              "isSuggestion": true
+            },
+            {
+              "id": 43525,
+              "name": "Sapphire NYC Diesel 1g",
+              "score": 15,
+              "isSuggestion": true
+            },
+            {
+              "id": 41676,
+              "name": "Animal NYC Diesel 1g",
+              "score": 15,
+              "isSuggestion": true
+            },
+            {
+              "id": 360027,
+              "name": "MFNY Sour Diesel Live Resin 0.5g",
+              "score": 15,
+              "isSuggestion": true
+            }
+          ]
+        }
+      },
+      "unresolvedTargetPositionIds": []
+    }
+  },
+  "postRegeneration": {
+    "skipped": "regenerate_packet disabled by combined apply driver"
+  },
+  "completedAt": "2026-05-12T03:39:41Z"
+}
+[apply] wrote combined results to /Users/dave/tmp/scratch/fbnyc/sweed/automation/catalog/purchases/2026-05-11/combined_apply_results.json
