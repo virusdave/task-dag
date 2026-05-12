@@ -1,35 +1,56 @@
-Handoff Updated: 2026-05-12 (manifest-corrected re-apply pending; migrating to VPS3 amp instance)
+Handoff Updated: 2026-05-12 (resume runbook landed; remote VPS3 agent should start here)
 
 Source thread: https://ampcode.com/threads/T-019e1a0f-75c6-71e3-ac6c-5e2133bb48bd
 Predecessor (stuck) thread: T-019e191b-0112-72a2-9ab7-47374ebb434b
 
-## Status
+## Read these first, in order
 
-The 2026-05-11 combined pending-purchases packet had its first-round apply rolled back (bad LLM decoding of Stop 31 SKUs). A scanned 10FF Distribution manifest is now the source of truth for that order, parsed into [`purchases/2026-05-11/manifest_10ff.json`](./purchases/2026-05-11/manifest_10ff.json) and wired into the generator via [`purchases/2026-05-11/_legacy_patches.py`](./purchases/2026-05-11/_legacy_patches.py).
+1. [`purchases/RESUME_RUNBOOK.md`](./purchases/RESUME_RUNBOOK.md) — operational
+   guide for any agent (including remote `vps-nixos-3.squaker-court.ts.net`)
+   picking up the recurring "produce pending purchases proposal" workflow on a
+   host that did not originate the work. Covers bootstrap, discovery,
+   in-flight order state, the partially-correct Midtown 131845 resume plan,
+   and decisions on record.
+2. [`../docs/sweed/catalog/produce-pending-purchase-proposal.md`](../docs/sweed/catalog/produce-pending-purchase-proposal.md)
+   — canonical spec of what the workflow must produce. Read after the runbook.
+3. [`purchases/2026-05-11/HANDOFF.md`](./purchases/2026-05-11/HANDOFF.md) —
+   per-packet narrative state for the 2026-05-11 round: why a first apply
+   was rolled back, what the scanned manifest corrects, and the
+   per-distributor-SKU correction table.
 
-**Full assessment, file inventory, decisions on record, and VPS3 migration checklist** live in [`purchases/2026-05-11/HANDOFF.md`](./purchases/2026-05-11/HANDOFF.md). Read that before doing anything else in this directory.
+## In-flight snapshot
 
-## Snapshot of corrected state
-
-- Bronx (N&M Farms, order 131642) catalog entries are live and correct — do **not** touch.
-- Midtown / Stop 31 (order 131845) bad entries are disabled (41 products + 41 groups; see [`purchases/2026-05-11/disable_just_created_results.json`](./purchases/2026-05-11/disable_just_created_results.json)). Strains/effects/flavors created remain active per Dave.
-- Manifest layer overrides 32 distributor SKUs with corrected brand/group/variant/pack-size; brand normalization updated for `Moonlit Hash Co` and `Preferred Gardens`.
-- GM target override (67.5%) covers Herb + 8 sibling brands co-located on the Stop 31 order.
-- Dutchie imagery is forbidden in any catalog write — apply path strips them; generator pre-filter still TODO.
+- **Bronx 131642 (N&M Farms):** live and correct. Do NOT recreate or disable.
+- **Midtown 131845 (Stop 31 LLC / 10FF Distribution):** bad first-round apply
+  rolled back; 41 products + 41 groups disabled. Strains/effects/flavors
+  created remain active. Manifest at
+  [`10FF Distribution.pdf`](./10FF%20Distribution.pdf), parsed into
+  [`purchases/2026-05-11/manifest_10ff.json`](./purchases/2026-05-11/manifest_10ff.json),
+  is the source of truth for SKU decoding. Manifest-first parse layer is wired
+  into [`purchases/2026-05-11/_legacy_patches.py`](./purchases/2026-05-11/_legacy_patches.py).
+- **New orders since 2026-05-11:** discover at runtime per RESUME_RUNBOOK.md
+  section 4. Fold Midtown-side new orders into the Stop 31 re-run; new
+  Bronx-side orders get a new dated packet directory.
 
 ## Immediate next steps (resumable on VPS3)
 
-1. Regenerate packet: `python catalog/purchases/2026-05-11/generate_combined_pending_packet.py` (verify `manifest overrides: 32` in stdout).
-2. Add Dutchie URL pre-filter in `build_rows_for_site` (generator side) and stamp `metrcTag` from `g._manifest_overrides` onto each row.
-3. Review HTML in Firefox — confirm Stop 31 brands/variants match manifest, HERB Forbidden Fruit Infused 1g has no Dutchie image.
-4. Apply Midtown corrections only (do not re-touch Bronx). Bad disabled rows stay disabled; new corrected groups/products get created.
-5. Image quality pass (deferred). Page Dave on completion.
+Per `purchases/RESUME_RUNBOOK.md` section 5:
 
-## VPS3 migration notes
+1. Verify manifest count = 32.
+2. Regenerate the Midtown packet (`generate_combined_pending_packet.py`).
+3. Add Dutchie URL pre-filter in the generator + stamp METRC tags onto rows.
+4. Review HTML in Firefox (or via `python -m http.server` from a workstation).
+5. Re-apply Midtown ONLY (do not re-touch Bronx).
+6. Image quality pass (deferred).
+7. `page-dave` on completion.
 
-Nothing in this packet is macbook-specific. Caveats:
-- Playwright SIGTRAP workaround in `HOW_PLAYWRIGHT_WORKS.md` is nix-darwin-only; ignore on Linux.
-- Re-provision Sweed bearer + Lit Alerts session secrets on VPS3.
-- Mantle/LLM is only a parse fallback; manifest covers Stop 31 fully and the LLM cache covers other historical rows.
+## Decisions on record (do not relitigate)
 
-See [`purchases/2026-05-11/HANDOFF.md`](./purchases/2026-05-11/HANDOFF.md) for the full migration checklist.
+- Stop 31 + co-located brands draft to 67.5% GM; marketing discounts via promos.
+- Dutchie images forbidden everywhere.
+- Bronx 131642 already correct — do not touch.
+- Smartbud `Ground Flower 1/2oz` SKUs are `<Strain> Shake 14g`.
+- Jungle Girl 5pks are multi-cultivar assortments (no single strain).
+- Canonical brand names: `Moonlit Hash Co`, `Preferred Gardens`.
+- Disabled products/groups stay disabled; the active strains/effects/flavors
+  created alongside them remain active.
