@@ -23,6 +23,7 @@ jobs:
           ISSUE_BODY: ${{ github.event.issue.body }}
           ISSUE_URL: ${{ github.event.issue.html_url }}
           ISSUE_AUTHOR: ${{ github.event.issue.user.login }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -e
           
@@ -64,5 +65,3 @@ ${ISSUE_BODY}"
 Branch: \`tasks/pending/${ISSUE_NUMBER}\`
 
 This issue is now tracked in the Git-based task DAG system."
-        env:
-          GH_TOKEN: ${{ github.token }}
