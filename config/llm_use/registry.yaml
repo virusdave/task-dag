@@ -1,0 +1,71 @@
+# LLM Usage Registry
+#
+# All (backend, model, use-case) combinations must be recorded here before use.
+# Mark as either `approved` or `limited-trial` with explicit scope.
+#
+# See: automation/docs/policy-review-compliance-architecture.md
+# See: automation/AGENTS_MUST_KNOW.md lines 27-28
+
+llm_usage:
+  # Pending Purchase Taxonomy Classification (Limited Trial)
+  - backend: bedrock-mantle
+    model: google.gemma-3-27b-it
+    use_case: pending-purchase-taxonomy-classification
+    status: limited-trial
+    scope: Midtown pending purchase packet generation only
+    request_shape: structured-json
+    approved_by: user
+    approved_at: 2026-04-14
+    notes: Fallback classifier when deterministic parsing fails
+
+  # Landing Page Compliance Audit (Approved)
+  - backend: bedrock-mantle
+    model: google.gemma-3-27b-it
+    use_case: landing-page-compliance-audit
+    status: approved
+    scope: Automated compliance scanning for Freshly Baked US landing pages (conquest, brand, tours, deliverance, recurse families)
+    request_shape: structured-json-report
+    approved_by: user
+    approved_at: 2026-05-12
+    notes: |
+      Detects meta-level leaks and compliance violations:
+      - Cannabis terms in alt text, aria-labels, data attributes
+      - Prices as HTML text instead of images
+      - Wrong/missing compliance footer
+      - Forbidden internal/meta phrasing
+      - Readable competitor IDs in URLs
+      Complementary to human review, not a replacement.
+      See: mostly-static-sites/docs/landing-page-compliance-scanner.md
+
+  # Catalog Description Generation (Approved)
+  - backend: bedrock-mantle
+    model: google.gemma-3-27b-it
+    use_case: catalog-description-generation
+    status: approved
+    scope: Helios catalog module description generation and debug reruns
+    request_shape: structured-json
+    approved_by: user
+    approved_at: 2026-04-10
+    notes: Recorded in llm_runs table with full audit trail
+
+  # Pricing Market Context (Approved)
+  - backend: bedrock-mantle
+    model: google.gemma-3-27b-it
+    use_case: pricing-market-context
+    status: approved
+    scope: Lit Alerts search term adaptation for thin-competition pricing cases
+    request_shape: structured-json
+    approved_by: user
+    approved_at: 2026-04-12
+    notes: Adapts search terms while maintaining AGENTS_MUST_KNOW.md constraints
+
+  # Scheduling Constraint Extraction (Approved)
+  - backend: bedrock-mantle
+    model: google.gemma-3-27b-it
+    use_case: scheduling-constraint-extraction
+    status: approved
+    scope: Helios scheduling module - natural language schedule requests to structured constraints
+    request_shape: structured-json-with-repair
+    approved_by: user
+    approved_at: 2026-05-01
+    notes: Uses JSON repair loop (up to 3 attempts) for robustness
