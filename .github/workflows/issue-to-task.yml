@@ -1,0 +1,68 @@
+name: Issue to Task Metadata Commit
+
+on:
+  issues:
+    types: [opened, edited]
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  create-task-commit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          
+      - name: Create metadata commit for issue
+        env:
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          ISSUE_URL: ${{ github.event.issue.html_url }}
+          ISSUE_AUTHOR: ${{ github.event.issue.user.login }}
+        run: |
+          set -e
+          
+          # Configure git
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # Get current HEAD commit
+          CURRENT_HEAD=$(git rev-parse HEAD)
+          
+          # Get empty tree hash (this is a well-known constant in git)
+          EMPTY_TREE=$(git hash-object -t tree /dev/null)
+          
+          # Create commit message with issue metadata
+          COMMIT_MSG="Task: ${ISSUE_TITLE}
+
+Issue: #${ISSUE_NUMBER}
+Author: ${ISSUE_AUTHOR}
+URL: ${ISSUE_URL}
+Status: pending
+Type: epic
+
+${ISSUE_BODY}"
+          
+          # Create metadata-only commit (empty tree, parent is current HEAD)
+          TASK_COMMIT=$(echo "${COMMIT_MSG}" | git commit-tree ${EMPTY_TREE} -p ${CURRENT_HEAD})
+          
+          echo "Created task commit: ${TASK_COMMIT}"
+          
+          # Update task tracking branch to point to this commit
+          git update-ref refs/heads/tasks/pending/${ISSUE_NUMBER} ${TASK_COMMIT}
+          
+          # Push the new ref
+          git push origin refs/heads/tasks/pending/${ISSUE_NUMBER}
+          
+          # Comment on issue with commit SHA
+          gh issue comment ${ISSUE_NUMBER} --body "Task metadata commit created: \`${TASK_COMMIT}\`
+
+Branch: \`tasks/pending/${ISSUE_NUMBER}\`
+
+This issue is now tracked in the Git-based task DAG system."
+        env:
+          GH_TOKEN: ${{ github.token }}
