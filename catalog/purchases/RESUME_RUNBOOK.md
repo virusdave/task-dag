@@ -81,9 +81,16 @@ refresh:
 
 The legacy generator reads a saved request payload from
 [`categories/2026-04-13/brands.litalerts.com_Products_menulistings_Archive [26-04-13 22-28-32].har`](../../categories/2026-04-13/brands.litalerts.com_Products_menulistings_Archive%20%5B26-04-13%2022-28-32%5D.har).
-Treat the embedded session cookie as long-lived but rotatable: if LitAlerts
-returns 401/403 mid-run, capture a fresh menu-listings HAR on the host and
-drop it at the same path.
+That file's `Authorization: Bearer` and `Cookie` headers are kept fresh by
+patching them in place from operator-captured HARs whenever LitAlerts rotates
+the session (last refreshed 2026-05-12 from a `Products/fullcategoryitems`
+capture). The HAR's URL and POST body remain pinned to the `Products/menulistings`
+endpoint; only the auth-bearing headers rotate. If LitAlerts returns 401/403
+mid-run, recapture a fresh HAR (any LitAlerts endpoint while authenticated
+will do), pull the `Authorization` + `Cookie` header values out of
+`log.entries[0].request.headers`, and overwrite those two header entries in
+the menu-listings HAR. Do not change the URL/body fields — the legacy
+generator depends on the menu-listings shape.
 
 The supplementary HARs at [`catalog/brands.litalerts.com_Users_userhash_Archive [26-05-10 13-47-31].har`](../brands.litalerts.com_Users_userhash_Archive%20%5B26-05-10%2013-47-31%5D.har) and [`catalog/prime.sweedpos.com_api__Archive [26-05-10 13-05-21].har`](../prime.sweedpos.com_api__Archive%20%5B26-05-10%2013-05-21%5D.har) are useful as cross-references.
 
