@@ -8,20 +8,36 @@
 - **Import script ready**: `import_po21_packet.ts` to load packet into Helios DB
 - **Infrastructure reviewed**: Full pending-purchase system in `helios/src/` (contracts, routes, workers, DB queries)
 
-## Immediate Next Steps
+## Status Update (2026-05-12 03:35 UTC)
 
-1. **Import PO 21 packet** into Helios database using import script
-2. **Enrich packet rows** with:
-   - Catalog matching (check existing products via `store.product.list.short`)
-   - Lit Alerts market pricing data
-   - Primary image suggestions
-   - Cost basis from invoice
-3. **Generate proposal HTML** review artifact with:
-   - Product cards showing current/proposed catalog state
-   - Market pricing comparisons
-   - Action recommendations (create/link/review)
-4. **Test apply workflow** for subset of rows to verify end-to-end flow
-5. **Document** manual invoice import workflow for future POs
+**Completed:**
+- ✅ PO 21 packet imported (Packet ID 8, 37 rows in Helios DB)
+- ✅ Reviewed mss-one-offs service documentation (`docs/HOW_ONE_OFFS_WORKS.md`)
+- ✅ Switched to `feature/mss-one-offs` branch in mostly-static-sites repo
+
+**Blocked/Waiting:**
+- ⏸ mss-one-offs service not yet deployed on this host (no `/run/mss-one-offs/control.sock`)
+- User requested modern UI review page via one-offs service (not Helios UI)
+
+## Next Steps (Resume When Service Available)
+
+1. **Verify mss-one-offs service** is running:
+   ```bash
+   curl --unix-socket /run/mss-one-offs/control.sock http://localhost/v1/health
+   ```
+2. **Enrich packet rows** with catalog matching and pricing:
+   - Query Sweed for existing products
+   - Fetch Lit Alerts market data
+   - Calculate proposed prices with GM% targets
+3. **Generate modern review UI** using modern components (shadcn/ui):
+   - Product cards with images, current/proposed state
+   - Market pricing comparison charts
+   - Inline approval/edit controls
+4. **Publish via one-offs**:
+   - Stage HTML to `/var/lib/mss-one-offs/incoming/<uploadId>/`
+   - POST to control socket to claim slot
+   - Page Dave with the tailnet URL
+5. **Test apply workflow** after approval
 
 ## Larger Goal
 
