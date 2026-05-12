@@ -18,24 +18,58 @@ llm_usage:
     approved_at: 2026-04-14
     notes: Fallback classifier when deterministic parsing fails
 
-  # Landing Page Compliance Audit (Approved)
+  # Landing Page Google Trigger Scanning - L1 Spot Checks (Approved)
   - backend: bedrock-mantle
     model: google.gemma-3-27b-it
-    use_case: landing-page-compliance-audit
+    use_case: landing-page-l1-spot-check
     status: approved
-    scope: Automated compliance scanning for Freshly Baked US landing pages (conquest, brand, tours, deliverance, recurse families)
-    request_shape: structured-json-report
+    scope: Sample-based anomaly detection on 3-5 pages per family; LLM reviews extracted features not raw HTML
+    request_shape: structured-json-findings
     approved_by: user
     approved_at: 2026-05-12
     notes: |
-      Detects meta-level leaks and compliance violations:
-      - Cannabis terms in alt text, aria-labels, data attributes
-      - Prices as HTML text instead of images
-      - Wrong/missing compliance footer
-      - Forbidden internal/meta phrasing
-      - Readable competitor IDs in URLs
-      Complementary to human review, not a replacement.
-      See: mostly-static-sites/docs/landing-page-compliance-scanner.md
+      L1 layer: cheap deterministic extraction + targeted LLM spot-checks.
+      LLM sees: extracted feature vectors, family context, guided questions from L2.
+      LLM returns: "looks fine" OR "flag for L2: [concern]" + confidence.
+      Cost: ~$0.025 per full scan (5 pages/family × 5 families × $0.001).
+      See: mostly-static-sites/docs/landing-page-google-trigger-scanner.md
+
+  # Landing Page Google Trigger Scanning - L2 Prediction (Approved)
+  - backend: bedrock-mantle
+    model: google.gemma-3-27b-it
+    use_case: landing-page-l2-google-trigger-prediction
+    status: approved
+    scope: Infer Google Ads triggers from aggregated L1 summaries + documented experiences; includes nearby-strategy search
+    request_shape: structured-json-predictions-with-alternatives
+    approved_by: user
+    approved_at: 2026-05-12
+    notes: |
+      L2 layer: high-leverage LLM analysis on family summaries.
+      Input: ~5K tokens (L1 summaries + documented Google experiences).
+      Output: trigger predictions, nearby legitimate strategies, architecture improvements, L1 rule updates.
+      Encodes white/grey-hat philosophy: optimize for (compliance × clarity × performance), not pure evasion.
+      Nearby strategy search: when detecting evasive patterns, must propose compliant alternatives.
+      Cost: ~$0.007 per L2 run.
+      See: mostly-static-sites/docs/landing-page-google-trigger-scanner.md
+      Prompt: mostly-static-sites/scripts/lib/prompts/l2-system-prompt-v1.txt
+
+  # Landing Page Google Trigger Scanning - L3 Meta-Analysis (Approved)
+  - backend: bedrock-mantle
+    model: google.gemma-3-27b-it
+    use_case: landing-page-l3-prompt-improvement
+    status: approved
+    scope: Meta-analyze L2 effectiveness against actual Google Ads outcomes; propose prompt improvements
+    request_shape: structured-json-prompt-updates
+    approved_by: user
+    approved_at: 2026-05-12
+    notes: |
+      L3 layer: meta-analysis and self-improvement.
+      Input: ~10K tokens (L2 prediction history + actual serving outcomes from Google Ads API).
+      Output: prompt improvement proposals, L1 rule update recommendations, evaluation metrics.
+      Governance: proposals written to staging, require human review before promotion.
+      Future enhancement: multi-objective optimization (compliance × performance) when perf data available.
+      Cost: ~$0.013 per L3 run.
+      See: mostly-static-sites/docs/landing-page-google-trigger-scanner.md
 
   # Catalog Description Generation (Approved)
   - backend: bedrock-mantle
