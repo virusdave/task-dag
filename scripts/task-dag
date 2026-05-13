@@ -518,10 +518,19 @@ EOF
     local tree=$(git rev-parse "$commit_sha^{tree}")
     local old_message=$(git log -1 --format='%B' "$commit_sha")
     
-    # Create new commit with task as second parent
+    # Extract issue URL from task commit
+    local task_msg=$(parse_commit_metadata "$task_sha")
+    local issue_url=$(extract_field "$task_msg" "URL")
+    
+    # Create new commit with task as second parent and issue URL
     local new_message="${old_message}
 
 Task-Commit: $task_sha"
+    
+    if [ -n "$issue_url" ]; then
+        new_message="${new_message}
+Related: $issue_url"
+    fi
     
     local new_commit=$(git commit-tree "$tree" -p "$commit_sha" -p "$task_sha" -m "$new_message")
     
