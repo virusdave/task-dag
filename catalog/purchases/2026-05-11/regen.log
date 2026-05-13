@@ -1,0 +1,26 @@
+[patches] manifest overrides: 36; LLM cache entries available: 49; brand GM overrides: ['Herb', 'Doobie Labs', 'Jungle Girl', 'Moonlit Hash Co', 'Preferred Gardens', 'Purps', 'Runtz', 'Smartbud', 'Strain Gang']
+[collect] site=Midtown dealer=210705  orders=3 unmapped-positions=46  groups=46
+  [row] Midtown  Smartbud                 Smartbud Blue Dream 5x 0.75g                            cost=   16.5  price=   57.5  GM= 67.57
+  [row] Midtown  Smartbud                 Smartbud Purple Punch 5x 0.75g                          cost=   16.5  price=   57.5  GM= 67.57
+  [row] Midtown  Smartbud                 Smartbud Sour Candy 5x 0.75g                            cost=   16.5  price=   57.5  GM= 67.57
+  [row] Midtown  Doobie Labs              Doobie Labs Blue Nerdz 3.5g                             cost=   26.0  price=   90.5  GM= 67.54
+  [row] Midtown  Purps                    Purps Oishii 3.5g                                       cost=   22.0  price=   76.5  GM=  67.5
+  [row] Midtown  Purps                    Purps Roy G Biv 3.5g                                    cost=   22.0  price=   76.5  GM=  67.5
+  [row] Midtown  Runtz                    Runtz Trump Runtz 3.5g                                  cost=   26.5  price=   92.5  GM= 67.63
+  [row] Midtown  Preferred Gardens        Preferred Gardens Cookie Dough 1g                       cost=    7.0  price=   24.5  GM= 67.71
+  [row] Midtown  Preferred Gardens        Preferred Gardens Zourz 1g                              cost=    7.0  price=   24.5  GM= 67.71
+  [row] Midtown  Herb                     Herb King Louie OG 32x 1g                               cost=   65.0  price=  226.0  GM=  67.5
+  [row] Midtown  Doobie Labs              Doobie Labs Blue Dream 3.5g                             cost=   26.0  price=   90.5  GM= 67.54
+  [row] Midtown  Herb                     Herb Biscotti 1g                                        cost=   15.0  price=   52.5  GM= 67.71
+  [row] Midtown  Herb                     Herb Forbidden Fruit 1g                                 cost=   15.0  price=   52.5  GM= 67.71
+  [row] Midtown  Herb                     Herb Jack Herer 1g                                      cost=   15.0  price=   52.5  GM= 67.71
+  [row] Midtown  Herb                     Herb King Louie OG 1g                                   cost=   15.0  price=   52.5  GM= 67.71
+  [row] Midtown  Herb                     Herb Runtz 1g                                           cost=   15.0  price=   52.5  GM= 67.71
+  [row] Midtown  Herb                     Herb Silver Haze 1g                                     cost=   15.0  price=   52.5  GM= 67.71
+  [row] Midtown  Herb                     Herb Sour Diesel 1g                                     cost=   15.0  price=   52.5  GM= 67.71
+  [row] Midtown  Herb                     Herb Sour Tangie 1g                                     cost=   15.0  price=   52.5  GM= 67.71
+  [row] Midtown  Herb                     Herb Forbidden Fruit Infused 1g                         cost=   5.75  price=   20.0  GM= 67.51
+  [row] Midtown  Herb                     Herb Lemon Haze Infused 1g                              cost=   5.75  price=   20.0  GM= 67.51
+  [row] Midtown  Herb                     Herb Tropicana Cookies Infused 1g                       cost=   5.75  price=   20.0  GM= 67.51
+  [row] Midtown  Jungle Girl              Jungle Girl Harmonious 5x 0.5g                          cost=   17.5  price=   61.0  GM= 67.58
+  [row] Midtown  Jungle Girl              Jungle Girl Uplifting 5x 0.5g                           cost=   17.5  price=   61.0  GM= 67.58
