@@ -1,0 +1,388 @@
+#!/usr/bin/env bash
+# Git-DAG Task Management CLI
+# See docs/task_dag/README.md and HOW_TASK_DAG_WORKS.md
+
+set -euo pipefail
+
+VERSION="0.1.0"
+EMPTY_TREE="4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+
+# Colors for output (if supported)
+if [ -t 1 ]; then
+    RED='\033[0;31m'
+    GREEN='\033[0;32m'
+    YELLOW='\033[1;33m'
+    BLUE='\033[0;34m'
+    BOLD='\033[1m'
+    RESET='\033[0m'
+else
+    RED='' GREEN='' YELLOW='' BLUE='' BOLD='' RESET=''
+fi
+
+# Helper: resolve ref or SHA to full SHA
+resolve_sha() {
+    local ref_or_sha="$1"
+    git rev-parse "$ref_or_sha" 2>/dev/null || {
+        echo "Error: Cannot resolve '$ref_or_sha'" >&2
+        return 1
+    }
+}
+
+# Helper: parse commit message metadata
+parse_commit_metadata() {
+    local sha="$1"
+    git log -1 --format='%B' "$sha"
+}
+
+# Helper: extract field from commit message
+extract_field() {
+    local message="$1"
+    local field="$2"
+    echo "$message" | grep "^${field}:" | sed "s/^${field}: *//" | head -1
+}
+
+# Helper: get task title (first line minus "Task: " prefix)
+get_task_title() {
+    local sha="$1"
+    git log -1 --format='%s' "$sha" | sed 's/^Task: *//'
+}
+
+# Helper: get commit parents
+get_parents() {
+    local sha="$1"
+    git rev-list --parents -1 "$sha" | awk '{for(i=2;i<=NF;i++) print $i}'
+}
+
+# Helper: get first parent (breakdown parent)
+get_first_parent() {
+    local sha="$1"
+    get_parents "$sha" | head -1
+}
+
+# Helper: get dependency parents (2nd+)
+get_dep_parents() {
+    local sha="$1"
+    get_parents "$sha" | tail -n +2
+}
+
+# Helper: check if task is completed (appears as non-primary parent in master history)
+is_task_completed() {
+    local task_sha="$1"
+    # Check if this SHA appears as any parent in master history
+    git log --all --format='%P' | grep -q "$task_sha" && return 0 || return 1
+}
+
+# Helper: list all task refs
+list_task_refs() {
+    git for-each-ref refs/heads/tasks/ --format='%(objectname) %(refname:short)'
+}
+
+# Command: help
+cmd_help() {
+    cat <<EOF
+task-dag - Git-DAG Task Management CLI v${VERSION}
+
+USAGE:
+    task-dag <command> [options]
+
+COMMANDS:
+    dag <ref>              Show task DAG for epic/task
+    frontier               List available leaf tasks
+    show <sha>             Show task details
+    deps <sha>             Show task dependencies
+    breakdown <parent>     Create task breakdown
+    complete <sha>         Mark task as complete
+    validate               Validate DAG structure
+    help                   Show this help
+
+OPTIONS:
+    --json                 Output in JSON format (where supported)
+    --help, -h             Show command help
+
+See docs/task_dag/README.md for full documentation.
+EOF
+}
+
+# Command: frontier - list available leaf tasks
+cmd_frontier() {
+    local json=false
+    local issue_filter=""
+    local status_filter=""
+    
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --json) json=true; shift ;;
+            --issue=*) issue_filter="${1#*=}"; shift ;;
+            --status=*) status_filter="${1#*=}"; shift ;;
+            *) echo "Unknown option: $1" >&2; return 1 ;;
+        esac
+    done
+    
+    if [ "$json" = true ]; then
+        echo "["
+    else
+        printf "${BOLD}%-12s %-50s %-12s %-8s${RESET}\n" "SHA" "TITLE" "ISSUE" "STATUS"
+        printf "%-12s %-50s %-12s %-8s\n" "$(printf '%.12s' '============')" "$(printf '%.50s' '==================================================')" "$(printf '%.12s' '============')" "$(printf '%.8s' '========')"
+    fi
+    
+    local first=true
+    git for-each-ref refs/heads/tasks/frontier/ --format='%(objectname)' | while read sha; do
+        local short_sha=$(git rev-parse --short "$sha")
+        local title=$(get_task_title "$sha")
+        local msg=$(parse_commit_metadata "$sha")
+        local issue=$(extract_field "$msg" "Issue" | sed 's/^#//')
+        local status=$(extract_field "$msg" "Status")
+        
+        # Apply filters
+        if [ -n "$issue_filter" ] && [ "$issue" != "$issue_filter" ]; then
+            continue
+        fi
+        if [ -n "$status_filter" ] && [ "$status" != "$status_filter" ]; then
+            continue
+        fi
+        
+        if [ "$json" = true ]; then
+            [ "$first" = false ] && echo ","
+            cat <<JSON
+    {
+        "sha": "$sha",
+        "shortSha": "$short_sha",
+        "title": "$title",
+        "issue": ${issue:-null},
+        "status": "${status:-pending}"
+    }
+JSON
+            first=false
+        else
+            printf "%-12s %-50s %-12s %-8s\n" \
+                "$short_sha" \
+                "${title:0:50}" \
+                "${issue:+#$issue}" \
+                "${status:-pending}"
+        fi
+    done
+    
+    if [ "$json" = true ]; then
+        echo ""
+        echo "]"
+    fi
+}
+
+# Command: show - show task details
+cmd_show() {
+    local json=false
+    local sha=""
+    
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --json) json=true; shift ;;
+            --help|-h) 
+                echo "Usage: task-dag show <sha> [--json]"
+                return 0
+                ;;
+            *) 
+                if [ -z "$sha" ]; then
+                    sha="$1"
+                else
+                    echo "Unknown option: $1" >&2
+                    return 1
+                fi
+                shift
+                ;;
+        esac
+    done
+    
+    if [ -z "$sha" ]; then
+        echo "Error: SHA required" >&2
+        return 1
+    fi
+    
+    sha=$(resolve_sha "$sha") || return 1
+    
+    local msg=$(parse_commit_metadata "$sha")
+    local title=$(get_task_title "$sha")
+    local issue=$(extract_field "$msg" "Issue")
+    local author=$(extract_field "$msg" "Author")
+    local status=$(extract_field "$msg" "Status")
+    local type=$(extract_field "$msg" "Type")
+    local parent_task=$(extract_field "$msg" "Parent-Task")
+    local first_parent=$(get_first_parent "$sha")
+    local deps=$(get_dep_parents "$sha")
+    
+    # Find refs pointing to this task
+    local refs=$(git for-each-ref --format='%(refname:short)' --points-at "$sha" | grep '^tasks/' || true)
+    
+    if [ "$json" = true ]; then
+        cat <<JSON
+{
+    "sha": "$sha",
+    "shortSha": "$(git rev-parse --short "$sha")",
+    "title": "$title",
+    "issue": ${issue:+\"$issue\"},
+    "author": ${author:+\"$author\"},
+    "status": "${status:-pending}",
+    "type": "${type:-task}",
+    "parentTask": ${parent_task:+\"$parent_task\"},
+    "firstParent": ${first_parent:+\"$first_parent\"},
+    "dependencies": [$(echo "$deps" | while read d; do echo -n "\"$d\","; done | sed 's/,$//')],
+    "refs": [$(echo "$refs" | while read r; do echo -n "\"$r\","; done | sed 's/,$//')],
+    "completed": $(is_task_completed "$sha" && echo "true" || echo "false")
+}
+JSON
+    else
+        printf "${BOLD}Task: ${RESET}%s\n" "$title"
+        printf "${BOLD}SHA:${RESET}  %s\n" "$sha"
+        [ -n "$issue" ] && printf "${BOLD}Issue:${RESET} %s\n" "$issue"
+        [ -n "$author" ] && printf "${BOLD}Author:${RESET} %s\n" "$author"
+        printf "${BOLD}Status:${RESET} %s\n" "${status:-pending}"
+        printf "${BOLD}Type:${RESET} %s\n" "${type:-task}"
+        
+        if [ -n "$refs" ]; then
+            printf "${BOLD}Refs:${RESET}\n"
+            echo "$refs" | while read r; do echo "  - $r"; done
+        fi
+        
+        if [ -n "$parent_task" ] || [ -n "$first_parent" ]; then
+            printf "${BOLD}Parent:${RESET} %s\n" "${parent_task:-$first_parent}"
+        fi
+        
+        if [ -n "$deps" ]; then
+            printf "${BOLD}Dependencies:${RESET}\n"
+            echo "$deps" | while read dep; do
+                local dep_title=$(get_task_title "$dep" 2>/dev/null || echo "Unknown")
+                local dep_short=$(git rev-parse --short "$dep")
+                if is_task_completed "$dep"; then
+                    printf "  ${GREEN}✓${RESET} %s - %s\n" "$dep_short" "$dep_title"
+                else
+                    printf "  ${RED}✗${RESET} %s - %s\n" "$dep_short" "$dep_title"
+                fi
+            done
+        fi
+        
+        if is_task_completed "$sha"; then
+            printf "\n${GREEN}✓ Task completed${RESET}\n"
+        else
+            printf "\n${YELLOW}○ Task pending${RESET}\n"
+        fi
+    fi
+}
+
+# Command: deps - show dependencies and check if ready
+cmd_deps() {
+    local json=false
+    local check_complete=false
+    local sha=""
+    
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --json) json=true; shift ;;
+            --check-complete) check_complete=true; shift ;;
+            --help|-h)
+                echo "Usage: task-dag deps <sha> [--json] [--check-complete]"
+                echo "  --check-complete: Exit with code 2 if any dependency is not met"
+                return 0
+                ;;
+            *)
+                if [ -z "$sha" ]; then
+                    sha="$1"
+                else
+                    echo "Unknown option: $1" >&2
+                    return 1
+                fi
+                shift
+                ;;
+        esac
+    done
+    
+    if [ -z "$sha" ]; then
+        echo "Error: SHA required" >&2
+        return 1
+    fi
+    
+    sha=$(resolve_sha "$sha") || return 1
+    local deps=$(get_dep_parents "$sha")
+    
+    if [ -z "$deps" ]; then
+        [ "$json" = true ] && echo '{"dependencies": [], "allMet": true}' || echo "No dependencies"
+        return 0
+    fi
+    
+    local all_met=true
+    
+    if [ "$json" = true ]; then
+        echo "{"
+        echo "  \"dependencies\": ["
+    fi
+    
+    local first=true
+    while read -r dep; do
+        local dep_title=$(get_task_title "$dep" 2>/dev/null || echo "Unknown")
+        local dep_short=$(git rev-parse --short "$dep")
+        local completed=$(is_task_completed "$dep" && echo "true" || echo "false")
+        
+        if [ "$completed" = "false" ]; then
+            all_met=false
+        fi
+        
+        if [ "$json" = true ]; then
+            [ "$first" = false ] && echo ","
+            cat <<JSON
+    {
+        "sha": "$dep",
+        "shortSha": "$dep_short",
+        "title": "$dep_title",
+        "completed": $completed
+    }
+JSON
+            first=false
+        else
+            if [ "$completed" = "true" ]; then
+                printf "${GREEN}✓${RESET} %s - %s\n" "$dep_short" "$dep_title"
+            else
+                printf "${RED}✗${RESET} %s - %s (PENDING)\n" "$dep_short" "$dep_title"
+            fi
+        fi
+    done <<< "$deps"
+    
+    if [ "$json" = true ]; then
+        echo "  ],"
+        echo "  \"allMet\": $all_met"
+        echo "}"
+    fi
+    
+    if [ "$check_complete" = true ] && [ "$all_met" = false ]; then
+        return 2
+    fi
+    
+    return 0
+}
+
+# Main dispatch
+main() {
+    if [ $# -eq 0 ]; then
+        cmd_help
+        return 0
+    fi
+    
+    local command="$1"
+    shift
+    
+    case "$command" in
+        help|--help|-h) cmd_help ;;
+        --version|-v) echo "task-dag v${VERSION}" ;;
+        frontier) cmd_frontier "$@" ;;
+        show) cmd_show "$@" ;;
+        deps) cmd_deps "$@" ;;
+        dag|breakdown|complete|validate)
+            echo "Command '$command' not yet implemented" >&2
+            return 1
+            ;;
+        *)
+            echo "Unknown command: $command" >&2
+            echo "Run 'task-dag help' for usage" >&2
+            return 1
+            ;;
+    esac
+}
+
+main "$@"
