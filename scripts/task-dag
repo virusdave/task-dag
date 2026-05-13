@@ -638,6 +638,7 @@ main() {
         complete) cmd_complete "$@" ;;
         validate) cmd_validate "$@" ;;
         issue-update) cmd_issue_update "$@" ;;
+        check-workflow) cmd_check_workflow "$@" ;;
         *)
             echo "Unknown command: $command" >&2
             echo "Run 'task-dag help' for usage" >&2
@@ -742,6 +743,91 @@ $message"
     if [ "$status" = "completed" ]; then
         # TODO: Check if all sibling tasks are complete, then close issue
         :
+    fi
+    
+    return 0
+}
+
+# Command: check-workflow - validate recent commits follow task-dag convention
+cmd_check_workflow() {
+    local count=10
+    local json=false
+    
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --count=*) count="${1#*=}"; shift ;;
+            --json) json=true; shift ;;
+            --help|-h)
+                cat <<EOF
+Usage: task-dag check-workflow [--count=N] [--json]
+
+Check recent commits for proper task-dag workflow compliance.
+
+Warns about:
+- Empty commits that look like tombstones (should use task-dag complete on real commits)
+- Commits referencing tasks without proper parent linkage
+- Work commits that should be linked to tasks
+
+Options:
+  --count=N    Number of recent commits to check (default: 10)
+  --json       Output in JSON format
+EOF
+                return 0
+                ;;
+            *) echo "Unknown option: $1" >&2; return 1 ;;
+        esac
+    done
+    
+    local warnings=0
+    
+    if [ "$json" = false ]; then
+        printf "${BOLD}Checking last $count commits for workflow compliance...${RESET}\n\n"
+    fi
+    
+    # Check recent commits
+    git log -$count --format='%H %s' | while read sha subject; do
+        local tree=$(git rev-parse "$sha^{tree}")
+        local parents=$(git rev-list --parents -1 "$sha" | awk '{print NF-1}')
+        local body=$(git log -1 --format='%B' "$sha")
+        
+        # Check for empty tombstone commits (should be rare)
+        if [ "$tree" = "$(git hash-object -t tree /dev/null)" ]; then
+            if echo "$subject" | grep -qi "tombstone"; then
+                # Expected tombstone for retroactive fix
+                :
+            else
+                warnings=$((warnings + 1))
+                [ "$json" = false ] && printf "${YELLOW}⚠${RESET} %s: Empty commit (possible incorrect tombstone)\n" "$(git rev-parse --short "$sha")"
+            fi
+        fi
+        
+        # Check for Task-Commit without task parent
+        if echo "$body" | grep -q "^Task-Commit:"; then
+            local has_task_parent=false
+            git rev-list --parents -1 "$sha" | awk '{for(i=3;i<=NF;i++) print $i}' | while read parent; do
+                local parent_tree=$(git rev-parse "$parent^{tree}" 2>/dev/null || echo "")
+                if [ "$parent_tree" = "$(git hash-object -t tree /dev/null)" ]; then
+                    has_task_parent=true
+                fi
+            done
+            
+            if [ "$has_task_parent" != "true" ] && [ "$parents" -le 1 ]; then
+                warnings=$((warnings + 1))
+                [ "$json" = false ] && printf "${YELLOW}⚠${RESET} %s: Has Task-Commit but no task parent\n" "$(git rev-parse --short "$sha")"
+            fi
+        fi
+    done
+    
+    if [ "$json" = false ]; then
+        echo ""
+        if [ $warnings -eq 0 ]; then
+            printf "${GREEN}✓ All commits follow workflow convention${RESET}\n"
+        else
+            printf "${YELLOW}⚠ Found $warnings potential workflow violations${RESET}\n"
+            echo ""
+            echo "Reminder: Use 'task-dag complete <task-sha>' on real work commits"
+            echo "Tombstones are ONLY for retroactive fixes of pre-CLI commits"
+        fi
     fi
     
     return 0
