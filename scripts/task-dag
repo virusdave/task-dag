@@ -357,6 +357,257 @@ JSON
     return 0
 }
 
+# Command: dag - show task DAG hierarchy
+cmd_dag() {
+    local json=false
+    local depth=-1
+    local sha=""
+    
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --json) json=true; shift ;;
+            --depth=*) depth="${1#*=}"; shift ;;
+            --help|-h)
+                echo "Usage: task-dag dag <ref> [--json] [--depth=N]"
+                return 0
+                ;;
+            *)
+                if [ -z "$sha" ]; then
+                    sha="$1"
+                else
+                    echo "Unknown option: $1" >&2
+                    return 1
+                fi
+                shift
+                ;;
+        esac
+    done
+    
+    if [ -z "$sha" ]; then
+        echo "Error: ref/SHA required" >&2
+        return 1
+    fi
+    
+    sha=$(resolve_sha "$sha") || return 1
+    
+    if [ "$json" = true ]; then
+        echo "Not yet implemented: JSON output for dag command" >&2
+        return 1
+    fi
+    
+    # Use git log with custom format to show the DAG
+    printf "${BOLD}Task DAG for: ${RESET}%s\n\n" "$(get_task_title "$sha")"
+    
+    # Show the task and all its descendants via git log
+    git log --graph --oneline --decorate --all --ancestry-path "$sha"..refs/heads/tasks/ 2>/dev/null | head -50 || true
+    
+    echo ""
+    printf "${BOLD}Task Details:${RESET}\n"
+    cmd_show "$sha"
+}
+
+# Command: breakdown - create task breakdown from spec
+cmd_breakdown() {
+    local parent_sha=""
+    local spec_file=""
+    local stdin_json=false
+    
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --spec-file=*) spec_file="${1#*=}"; shift ;;
+            --stdin-json) stdin_json=true; shift ;;
+            --help|-h)
+                cat <<EOF
+Usage: task-dag breakdown <parent-sha> [--spec-file=PATH | --stdin-json]
+
+Create subtasks from a JSON specification.
+
+Spec format:
+[
+  {
+    "title": "Task title",
+    "description": "Task description",
+    "dependencies": ["<sha1>", "<sha2>"],
+    "type": "task|leaf",
+    "status": "pending"
+  }
+]
+EOF
+                return 0
+                ;;
+            *)
+                if [ -z "$parent_sha" ]; then
+                    parent_sha="$1"
+                else
+                    echo "Unknown option: $1" >&2
+                    return 1
+                fi
+                shift
+                ;;
+        esac
+    done
+    
+    if [ -z "$parent_sha" ]; then
+        echo "Error: parent SHA required" >&2
+        return 1
+    fi
+    
+    parent_sha=$(resolve_sha "$parent_sha") || return 1
+    
+    echo "Command 'breakdown' not yet fully implemented" >&2
+    echo "Parent: $parent_sha" >&2
+    return 1
+}
+
+# Command: complete - mark task as complete
+cmd_complete() {
+    local task_sha=""
+    local commit_sha=""
+    local no_cleanup=false
+    
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --commit=*) commit_sha="${1#*=}"; shift ;;
+            --no-cleanup) no_cleanup=true; shift ;;
+            --help|-h)
+                cat <<EOF
+Usage: task-dag complete <task-sha> [--commit=SHA] [--no-cleanup]
+
+Mark a task as complete by creating a completion commit.
+
+Options:
+  --commit=SHA     Use this commit as base (default: HEAD)
+  --no-cleanup     Don't delete frontier/active refs
+EOF
+                return 0
+                ;;
+            *)
+                if [ -z "$task_sha" ]; then
+                    task_sha="$1"
+                else
+                    echo "Unknown option: $1" >&2
+                    return 1
+                fi
+                shift
+                ;;
+        esac
+    done
+    
+    if [ -z "$task_sha" ]; then
+        echo "Error: task SHA required" >&2
+        return 1
+    fi
+    
+    task_sha=$(resolve_sha "$task_sha") || return 1
+    
+    # Check dependencies
+    if ! cmd_deps "$task_sha" --check-complete >/dev/null 2>&1; then
+        echo "Error: Dependencies not met for task $task_sha" >&2
+        cmd_deps "$task_sha"
+        return 2
+    fi
+    
+    # Use provided commit or HEAD
+    if [ -z "$commit_sha" ]; then
+        commit_sha=$(git rev-parse HEAD)
+    else
+        commit_sha=$(resolve_sha "$commit_sha") || return 1
+    fi
+    
+    # Get current commit details
+    local tree=$(git rev-parse "$commit_sha^{tree}")
+    local old_message=$(git log -1 --format='%B' "$commit_sha")
+    
+    # Create new commit with task as second parent
+    local new_message="${old_message}
+
+Task-Commit: $task_sha"
+    
+    local new_commit=$(git commit-tree "$tree" -p "$commit_sha" -p "$task_sha" -m "$new_message")
+    
+    echo "Created completion commit: $new_commit"
+    
+    # Reset to new commit
+    git reset --hard "$new_commit"
+    
+    # Clean up refs unless --no-cleanup
+    if [ "$no_cleanup" = false ]; then
+        local short_sha=$(git rev-parse --short "$task_sha")
+        local frontier_ref="refs/heads/tasks/frontier/$short_sha"
+        local active_ref="refs/heads/tasks/active/$short_sha"
+        
+        if git show-ref --verify --quiet "$frontier_ref"; then
+            git update-ref -d "$frontier_ref"
+            echo "Deleted $frontier_ref"
+        fi
+        
+        if git show-ref --verify --quiet "$active_ref"; then
+            git update-ref -d "$active_ref"
+            echo "Deleted $active_ref"
+        fi
+    fi
+    
+    printf "${GREEN}✓ Task completed: %s${RESET}\n" "$(get_task_title "$task_sha")"
+    
+    return 0
+}
+
+# Command: validate - validate DAG structure
+cmd_validate() {
+    local json=false
+    local scope=""
+    
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --json) json=true; shift ;;
+            --help|-h)
+                echo "Usage: task-dag validate [scope] [--json]"
+                return 0
+                ;;
+            *) scope="$1"; shift ;;
+        esac
+    done
+    
+    local errors=0
+    local warnings=0
+    
+    if [ "$json" = false ]; then
+        printf "${BOLD}Validating task DAG structure...${RESET}\n\n"
+    fi
+    
+    # Check 1: All task commits have empty tree
+    while read sha ref; do
+        local tree=$(git rev-parse "$sha^{tree}")
+        if [ "$tree" != "$EMPTY_TREE" ]; then
+            errors=$((errors + 1))
+            [ "$json" = false ] && printf "${RED}✗${RESET} Task $sha ($ref) has non-empty tree\n"
+        fi
+    done < <(list_task_refs)
+    
+    # Check 2: Frontier refs point only to leaf-type tasks
+    git for-each-ref refs/heads/tasks/frontier/ --format='%(objectname) %(refname:short)' | while read sha ref; do
+        local msg=$(parse_commit_metadata "$sha")
+        local type=$(extract_field "$msg" "Type")
+        if [ "$type" != "leaf" ] && [ "$type" != "task" ]; then
+            warnings=$((warnings + 1))
+            [ "$json" = false ] && printf "${YELLOW}⚠${RESET} Frontier task $sha is type '$type', expected 'leaf' or 'task'\n"
+        fi
+    done
+    
+    if [ "$json" = true ]; then
+        echo "{\"errors\": $errors, \"warnings\": $warnings, \"valid\": $([ $errors -eq 0 ] && echo "true" || echo "false")}"
+    else
+        echo ""
+        if [ $errors -eq 0 ]; then
+            printf "${GREEN}✓ Validation passed${RESET} ($warnings warnings)\n"
+        else
+            printf "${RED}✗ Validation failed${RESET} ($errors errors, $warnings warnings)\n"
+        fi
+    fi
+    
+    [ $errors -eq 0 ] && return 0 || return 3
+}
+
 # Main dispatch
 main() {
     if [ $# -eq 0 ]; then
@@ -373,10 +624,10 @@ main() {
         frontier) cmd_frontier "$@" ;;
         show) cmd_show "$@" ;;
         deps) cmd_deps "$@" ;;
-        dag|breakdown|complete|validate)
-            echo "Command '$command' not yet implemented" >&2
-            return 1
-            ;;
+        dag) cmd_dag "$@" ;;
+        breakdown) cmd_breakdown "$@" ;;
+        complete) cmd_complete "$@" ;;
+        validate) cmd_validate "$@" ;;
         *)
             echo "Unknown command: $command" >&2
             echo "Run 'task-dag help' for usage" >&2
