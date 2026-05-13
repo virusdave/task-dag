@@ -12,6 +12,28 @@ Read this file before working in this workspace. It is the only required workspa
 - For long-running tasks, use `page-dave` as soon as the work is ready for review or fully complete, instead of waiting silently at the end.
 - **Commit when an atomic useful change is complete.** This workspace explicitly overrides the default "ask before committing" guidance: `git commit` is granted authority for any change that (a) implements a single coherent idea, (b) typechecks / runs as required, and (c) leaves the tree in a buildable state. Use a clear, descriptive message. Do not bundle unrelated changes into one commit; split them. **`git push` still requires explicit user instruction** — commit freely, push only when asked.
 
+## Git-DAG Task Workflow
+
+When working on tasks tracked in the Git-DAG system (identified by GitHub issues that have created task metadata commits at `refs/heads/tasks/pending/<N>`):
+
+1. **Query available tasks**: `scripts/task-dag frontier [--issue=N]`
+2. **Pick a leaf task**: Choose one with no dependencies or all dependencies met
+3. **Do the implementation work**: Write code, create files, make changes
+4. **Commit your work**: Normal `git commit` with descriptive message
+5. **Link to task**: `scripts/task-dag complete <task-sha>`
+   - This adds the task commit as a non-primary parent
+   - Automatically appends "Related: {issue-url}" for GitHub linking
+   - Cleans up frontier refs
+6. **Push**: `git push origin master` (and delete remote frontier refs if needed)
+
+**NEVER**:
+- Create empty "tombstone" commits to link tasks (only for retroactive fixes of pre-CLI work)
+- Commit work without linking to its task
+- Skip the `task-dag complete` step
+- Create your own task parent relationships manually (use the CLI)
+
+**Convention**: Real implementation commits are linked to tasks via `task-dag complete`. Tombstones are ONLY for historical commits that predate the CLI tool.
+
 ## Handoff And Resume
 
 - When the user says "handoff", update `AGENT_TODO.md` in the current working directory with the current state, immediate next steps, the larger goal, and the thread ID of the thread the handoff command was issued from. If `AGENT_TODO.md` does not exist there yet, create it there instead of using a parent-directory handoff file.
