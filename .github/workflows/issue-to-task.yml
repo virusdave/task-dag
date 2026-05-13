@@ -1,5 +1,6 @@
 name: Issue to Task Metadata Commit
 on:
+  workflow_dispatch:
   issues:
     types: [opened, edited]
 permissions:
