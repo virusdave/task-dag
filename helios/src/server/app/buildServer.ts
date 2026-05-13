@@ -26,6 +26,7 @@ import { registerReviewRoutes } from '../routes/review.js'
 import { registerSchedulingRoutes } from '../routes/scheduling.js'
 import { registerScreensRoutes } from '../routes/screens.js'
 import { registerSessionRoutes } from '../routes/session.js'
+import { registerTaskDagRoutes } from '../routes/taskDag.js'
 import { joinBasePath } from '../../shared/config/appBasePath.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -94,6 +95,7 @@ async function registerApplicationSurface(server: FastifyInstance) {
   await registerHistoryRoutes(server)
   await registerLlmRoutes(server)
   await registerJobRoutes(server)
+  await registerTaskDagRoutes(server)
 
   const clientDistPath = resolve(__dirname, '../../../client')
   if (!existsSync(clientDistPath)) {
