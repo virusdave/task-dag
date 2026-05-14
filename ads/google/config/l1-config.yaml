@@ -1,0 +1,189 @@
+# L1 Feature Extractor Configuration
+# Version: 1.0.0
+
+version: "1.0.0"
+
+# Text pattern detection thresholds
+text_patterns:
+  urgency:
+    keywords:
+      - "now"
+      - "today"
+      - "immediately"
+      - "hurry"
+      - "limited time"
+      - "act fast"
+      - "don't wait"
+      - "expires"
+    weight: 0.1  # Weight per occurrence
+    max_score: 1.0
+    
+  hype:
+    keywords:
+      - "amazing"
+      - "incredible"
+      - "unbelievable"
+      - "revolutionary"
+      - "life-changing"
+      - "miraculous"
+      - "ultimate"
+    weight: 0.15
+    max_score: 1.0
+    
+  superlatives:
+    patterns:
+      - "best"
+      - "#1"
+      - "number one"
+      - "top rated"
+      - "highest quality"
+      - "superior"
+      - "premier"
+      - "guaranteed"
+    require_qualifier: true  # e.g., "best in NYC" is ok, "best" alone is not
+    
+  capitalization:
+    threshold: 0.3  # % of text that's uppercase before flagging
+    ignore_acronyms: true
+    
+  punctuation:
+    max_exclamations: 1
+    max_question_marks: 1
+    max_consecutive_punctuation: 1
+
+# Restricted vocabulary buckets
+# These are CATEGORY LABELS, not explicit word lists
+# Actual word lists are maintained separately and not committed
+restricted_vocab_buckets:
+  - cannabis_generic
+  - cannabis_medical
+  - cannabis_recreational
+  - medical_claims
+  - health_benefits
+  - drug_terminology
+  - pharmaceutical_terms
+  - regulatory_evasion
+
+# Structure analysis thresholds
+structure:
+  rsa:
+    min_headlines: 5  # Minimum for good performance
+    max_headlines: 15
+    min_descriptions: 2
+    max_descriptions: 4
+    min_headline_length: 15
+    max_headline_length: 30
+    min_description_length: 60
+    max_description_length: 90
+    
+  eta:
+    min_headlines: 2
+    max_headlines: 3
+    min_descriptions: 1
+    max_descriptions: 2
+    min_headline_length: 15
+    max_headline_length: 30
+    min_description_length: 60
+    max_description_length: 90
+    
+  redundancy:
+    jaccard_threshold: 0.5  # > 0.5 = too similar
+    
+# Landing page risk mapping
+landing_linkage:
+  # Risk domains (from MSS landing page scanner)
+  high_risk_domains:
+    - example-high-risk-domain.com
+  
+  medium_risk_domains:
+    - example-medium-risk-domain.com
+    
+  # Map to MSS landing page families
+  mss_integration:
+    enabled: true
+    api_endpoint: "http://localhost:3000/api/landing-pages"
+    
+# Policy status normalization
+policy_status:
+  # Map Google policy topic codes to internal categories
+  topic_mapping:
+    "ADULT_CONTENT": "adult"
+    "ALCOHOL": "alcohol"
+    "CANNABIS": "cannabis"
+    "COPYRIGHTS": "copyright"
+    "COUNTERFEIT": "counterfeit"
+    "DANGEROUS_PRODUCTS": "dangerous"
+    "DISHONEST_BEHAVIOR": "dishonest"
+    "EDITORIAL": "editorial"
+    "GAMBLING": "gambling"
+    "HEALTHCARE": "healthcare"
+    "MISREPRESENTATION": "misrepresentation"
+    "POLITICAL": "political"
+    "TRADEMARKS": "trademark"
+    
+  # Limitation reason normalization
+  limit_reason_mapping:
+    "ADULT_CONTENT_LIMITED": "adult_limited"
+    "CANNABIS_LIMITED": "cannabis_limited"
+    "HEALTHCARE_LIMITED": "healthcare_limited"
+    "UNCLEAR_RELEVANCE": "unclear"
+    "LOW_QUALITY": "quality"
+
+# Family aggregation settings
+family_aggregation:
+  # Which tags to use for family grouping
+  family_tag_keys:
+    - "creative_theme"
+    - "product_tag"
+    - "geo_target"
+    
+  # Minimum ads per family
+  min_family_size: 3
+  
+  # Pattern occurrence threshold (% of family)
+  pattern_threshold: 0.1  # 10% of ads must have pattern to report
+  
+  # Sample size for L1 LLM spot-checks
+  sample_size: 5
+  sample_strategy: "mixed"  # "mixed" | "random" | "risky_only"
+
+# L1 LLM spot-check settings
+llm_spot_check:
+  enabled: true
+  use_case: "gads-ads-l1-spot-check"
+  
+  # Sampling strategy
+  sample_per_family: 5
+  sample_composition:
+    disapproved_or_limited: 2  # Prioritize problematic ads
+    eligible_but_risky: 2      # Ads with high L1 risk scores
+    random: 1                  # Random for diversity
+    
+  # LLM prompt template
+  prompt_template: |
+    You are analyzing Google Ads ad copy for policy compliance.
+    
+    Ad Text:
+    Headlines: {headlines}
+    Descriptions: {descriptions}
+    Final URL: {final_url}
+    
+    L1 Feature Vector:
+    {l1_features}
+    
+    Family Context:
+    {family_summary}
+    
+    Policy Context:
+    {policy_anecdotes}
+    
+    Assess this ad and provide:
+    1. Overall assessment: "ok" | "borderline" | "likely_policy_issue"
+    2. Specific issues (if any)
+    3. Suggested new deterministic checks we should add
+    4. Confidence (0-1)
+    
+    Output as JSON matching L1SpotCheckResult schema.
+    
+  # Confidence threshold for flagging
+  confidence_threshold: 0.7
