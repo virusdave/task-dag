@@ -623,14 +623,27 @@ Related: $issue_url"
         local frontier_ref="refs/heads/tasks/frontier/$short_sha"
         local active_ref="refs/heads/tasks/active/$short_sha"
         
+        # Delete local refs
         if git show-ref --verify --quiet "$frontier_ref"; then
             git update-ref -d "$frontier_ref"
-            echo "Deleted $frontier_ref"
+            echo "Deleted local $frontier_ref"
         fi
         
         if git show-ref --verify --quiet "$active_ref"; then
             git update-ref -d "$active_ref"
-            echo "Deleted $active_ref"
+            echo "Deleted local $active_ref"
+        fi
+        
+        # Delete remote refs if they exist
+        local remote_frontier="tasks/frontier/$short_sha"
+        local remote_active="tasks/active/$short_sha"
+        
+        if git ls-remote --exit-code origin "refs/heads/$remote_frontier" >/dev/null 2>&1; then
+            git push origin --delete "$remote_frontier" 2>/dev/null && echo "Deleted remote $remote_frontier" || true
+        fi
+        
+        if git ls-remote --exit-code origin "refs/heads/$remote_active" >/dev/null 2>&1; then
+            git push origin --delete "$remote_active" 2>/dev/null && echo "Deleted remote $remote_active" || true
         fi
     fi
     
