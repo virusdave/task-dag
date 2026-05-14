@@ -578,6 +578,13 @@ URL: $issue_url"
     new_message="${new_message}
 Status: completed"
     
+    # Add Related: footer for GitHub auto-linking
+    if [ -n "$issue_url" ]; then
+        new_message="${new_message}
+
+Related: $issue_url"
+    fi
+    
     local new_commit=$(git commit-tree "$tree" -p "$commit_sha" -p "$task_sha" -m "$new_message")
     
     echo "Created completion commit: $new_commit"
