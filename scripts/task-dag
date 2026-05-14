@@ -68,8 +68,32 @@ get_dep_parents() {
 # Helper: check if task is completed (appears as non-primary parent in master history)
 is_task_completed() {
     local task_sha="$1"
-    # Check if this SHA appears as any parent in master history
-    git log --all --format='%P' | grep -q "$task_sha" && return 0 || return 1
+    # Check if this SHA appears as any parent in the commit history
+    local count=$(git log HEAD --format='%P' | grep -c "$task_sha" || true)
+    if [ "$count" -gt 0 ]; then
+        return 0
+    fi
+    return 1
+}
+
+# Helper: check if all child tasks of an epic are complete
+is_epic_complete() {
+    local epic_sha="$1"
+    
+    # Find all tasks that have this epic as parent
+    local all_complete=true
+    while read -r task_sha; do
+        if ! is_task_completed "$task_sha"; then
+            all_complete=false
+            break
+        fi
+    done < <(git log --all --format='%H %P' | grep "$epic_sha" | awk '{print $1}')
+    
+    if [ "$all_complete" = true ]; then
+        return 0
+    else
+        return 1
+    fi
 }
 
 # Helper: list all task refs
@@ -611,6 +635,52 @@ Related: $issue_url"
     fi
     
     printf "${GREEN}✓ Task completed: %s${RESET}\n" "$(get_task_title "$task_sha")"
+    
+    # Check if parent epic is now complete
+    local parent_sha=$(get_first_parent "$task_sha")
+    if [ -n "$parent_sha" ]; then
+        local parent_msg=$(parse_commit_metadata "$parent_sha")
+        local parent_type=$(extract_field "$parent_msg" "Type")
+        
+        if [ "$parent_type" = "epic" ]; then
+            if is_epic_complete "$parent_sha"; then
+                local parent_issue_num=$(extract_field "$parent_msg" "Issue" | sed 's/^#//')
+                local parent_issue_url=$(extract_field "$parent_msg" "URL")
+                
+                if [ -n "$parent_issue_num" ] && [ -n "$parent_issue_url" ]; then
+                    printf "\n${GREEN}🎉 Epic completed! All tasks done.${RESET}\n"
+                    
+                    # Extract repo from URL
+                    local repo=$(echo "$parent_issue_url" | sed -E 's|https://github.com/([^/]+/[^/]+)/.*|\1|')
+                    
+                    # Check for GITHUB_TOKEN
+                    if [ -n "${GITHUB_TOKEN:-}" ]; then
+                        # Post completion comment and close issue
+                        local epic_title=$(get_task_title "$parent_sha")
+                        local comment_body="🎉 Epic **$epic_title** completed!\n\nAll child tasks have been implemented and merged."
+                        
+                        # Post comment
+                        local api_url="https://api.github.com/repos/$repo/issues/$parent_issue_num/comments"
+                        curl -s -X POST "$api_url" \
+                            -H "Authorization: token $GITHUB_TOKEN" \
+                            -H "Accept: application/vnd.github.v3+json" \
+                            -d "{\"body\":\"$comment_body\"}" > /dev/null
+                        
+                        # Close issue
+                        api_url="https://api.github.com/repos/$repo/issues/$parent_issue_num"
+                        curl -s -X PATCH "$api_url" \
+                            -H "Authorization: token $GITHUB_TOKEN" \
+                            -H "Accept: application/vnd.github.v3+json" \
+                            -d '{"state":"closed"}' > /dev/null
+                        
+                        printf "${GREEN}✓ Closed issue #$parent_issue_num${RESET}\n"
+                    else
+                        echo "Note: Set GITHUB_TOKEN to auto-close issue #$parent_issue_num"
+                    fi
+                fi
+            fi
+        fi
+    fi
     
     return 0
 }
