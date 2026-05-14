@@ -649,6 +649,27 @@ Related: $issue_url"
     
     printf "${GREEN}✓ Task completed: %s${RESET}\n" "$(get_task_title "$task_sha")"
     
+    # Post progress update to GitHub issue (if issue exists and GITHUB_TOKEN is set)
+    if [ -n "$issue_num" ] && [ -n "$issue_url" ] && [ -n "${GITHUB_TOKEN:-}" ]; then
+        local repo=$(echo "$issue_url" | sed -E 's|https://github.com/([^/]+/[^/]+)/.*|\1|')
+        local short_task_sha=$(git rev-parse --short "$task_sha")
+        local comment_body="✅ Task **${task_title}** completed!\n\nTask SHA: \`${short_task_sha}\`\nCompletion commit: \`$(git rev-parse --short "$new_commit")\`"
+        
+        # Post comment
+        local api_url="https://api.github.com/repos/$repo/issues/$issue_num/comments"
+        local response=$(curl -s -w "\n%{http_code}" -X POST "$api_url" \
+            -H "Authorization: token $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github.v3+json" \
+            -d "{\"body\":\"$comment_body\"}")
+        
+        local http_code=$(echo "$response" | tail -n1)
+        if [ "$http_code" = "201" ]; then
+            printf "${GREEN}✓ Posted completion update to issue #$issue_num${RESET}\n"
+        else
+            printf "${YELLOW}⚠ Could not post to issue #$issue_num (HTTP $http_code)${RESET}\n" >&2
+        fi
+    fi
+    
     # Check if parent epic is now complete
     local parent_sha=$(get_first_parent "$task_sha")
     if [ -n "$parent_sha" ]; then
