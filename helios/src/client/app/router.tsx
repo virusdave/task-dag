@@ -35,6 +35,10 @@ import { SchedulingRunDetailPage, schedulingRunDetailLoader } from '../routes/sc
 import { SchedulingRunsPage, schedulingRunsLoader } from '../routes/scheduling/SchedulingRunsPage.js'
 import { ScreensDevicesPage, screensDevicesLoader } from '../routes/screens/ScreensDevicesPage.js'
 import { ScreensModulePage, screensModuleLoader } from '../routes/screens/ScreensModulePage.js'
+import { TasksPage } from '../routes/tasks/TasksPage.js'
+import { TaskFrontierPage } from '../routes/tasks/TaskFrontierPage.js'
+import { EpicDagPage } from '../routes/tasks/EpicDagPage.js'
+import { TaskDetailPage } from '../routes/tasks/TaskDetailPage.js'
 
 async function rootLoader() {
   return loadSession()
@@ -178,6 +182,22 @@ export const router = createBrowserRouter([
       {
         element: <ModuleLandingPage moduleCode="utilities" />,
         path: 'utilities',
+      },
+      {
+        element: <TasksPage />,
+        path: 'tasks',
+      },
+      {
+        element: <TaskFrontierPage />,
+        path: 'tasks/frontier',
+      },
+      {
+        element: <EpicDagPage />,
+        path: 'tasks/epic/:id',
+      },
+      {
+        element: <TaskDetailPage />,
+        path: 'tasks/task/:sha',
       },
       {
         element: <ConfigModulePage />,
