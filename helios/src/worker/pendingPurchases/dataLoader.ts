@@ -3,7 +3,6 @@
  * Fetches pending purchase orders from Sweed API and prepares for processing
  */
 
-import type { Pool } from 'pg'
 import type { HeliosPendingPurchaseSiteDealer } from '../../shared/contracts/domain/pendingPurchases.js'
 
 export interface SweedOrder {

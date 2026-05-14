@@ -3,7 +3,6 @@
  */
 
 import { describe, it, expect } from 'vitest'
-import type { Pool } from 'pg'
 
 describe('Pending Purchases Integration', () => {
   describe('end-to-end packet generation', () => {

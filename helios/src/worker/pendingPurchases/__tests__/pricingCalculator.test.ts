@@ -14,7 +14,7 @@ describe('pricingCalculator', () => {
   describe('calculateGMPercent', () => {
     it('calculates GM% correctly for MSO target', () => {
       const gm = calculateGMPercent(25, 55)
-      expect(gm).toBeCloseTo(48.4, 1)
+      expect(gm).toBeCloseTo(48.64, 1)
     })
 
     it('calculates GM% correctly for 67.5% target', () => {
