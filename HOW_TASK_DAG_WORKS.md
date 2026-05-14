@@ -2,7 +2,9 @@
 
 ## TL;DR
 
-Tasks are metadata-only Git commits beyond the implementation frontier. GitHub issues → epic commits → recursive breakdown → leaf tasks. Agents pick up leaves, complete work on master, link back via non-primary parent. All tracked in Git DAG with named refs as GC roots.
+Tasks are metadata-only Git commits beyond the implementation frontier. GitHub issues → epic commits → recursive breakdown → leaf tasks. Agents pick up leaves, complete work on master, link back via non-primary parent using `task-dag complete`. All tracked in Git DAG with named refs as GC roots.
+
+**IMPORTANT**: Use `task-dag complete` to link real implementation commits to tasks. Never create empty "tombstone" commits for active work—those are only for retroactive linking of historical commits that predate the task-dag system.
 
 ## Quick Reference
 
@@ -106,10 +108,12 @@ git push origin --delete refs/heads/tasks/frontier/$(git rev-parse --short $TASK
 1. Query frontier: `git for-each-ref refs/heads/tasks/frontier/`
 2. Pick task, verify dependencies met
 3. Mark active: `git update-ref refs/heads/tasks/active/<sha> <task-sha>`
-4. Do work on master (code changes, commits)
-5. Link completion: amend last commit to include task SHA as non-primary parent
+4. Do work on master (code changes, commits with REAL implementation)
+5. Link completion: `task-dag complete <task-sha>` (links your real code commits to the task)
 6. Push master
-7. Delete frontier ref
+7. Frontier ref automatically deleted by task-dag complete
+
+**NEVER** create empty "tombstone" commits to represent your work. The `task-dag complete` command links your actual implementation commits to the task metadata.
 
 ## Metadata Commit Message Format
 

@@ -16,23 +16,58 @@ Read this file before working in this workspace. It is the only required workspa
 
 When working on tasks tracked in the Git-DAG system (identified by GitHub issues that have created task metadata commits at `refs/heads/tasks/pending/<N>`):
 
+### Normal Workflow (DO THIS)
+
 1. **Query available tasks**: `scripts/task-dag frontier [--issue=N]`
 2. **Pick a leaf task**: Choose one with no dependencies or all dependencies met
 3. **Do the implementation work**: Write code, create files, make changes
 4. **Commit your work**: Normal `git commit` with descriptive message
+   - These are REAL implementation commits with actual code/file changes
+   - They should contain the work that completes the task
 5. **Link to task**: `scripts/task-dag complete <task-sha>`
-   - This adds the task commit as a non-primary parent
+   - This adds the task commit as a non-primary parent to your REAL implementation commit
    - Automatically appends "Related: {issue-url}" for GitHub linking
    - Cleans up frontier refs
 6. **Push**: `git push origin master` (and delete remote frontier refs if needed)
 
-**NEVER**:
-- Create empty "tombstone" commits to link tasks (only for retroactive fixes of pre-CLI work)
-- Commit work without linking to its task
-- Skip the `task-dag complete` step
-- Create your own task parent relationships manually (use the CLI)
+### DO / DON'T
 
-**Convention**: Real implementation commits are linked to tasks via `task-dag complete`. Tombstones are ONLY for historical commits that predate the CLI tool.
+**DO:**
+- ✓ Write real code first, then run `task-dag complete` to link that commit
+- ✓ Ensure every completed task references at least one non-empty implementation commit
+- ✓ Use `task-dag complete` with the actual implementation commits
+
+**DON'T:**
+- ✗ Create empty commits ("tombstones") to represent work you just did
+- ✗ Copy the commit approach from issue #1 or #2 (those examples predate `task-dag complete` and are now deprecated)
+- ✗ Commit work without linking to its task
+- ✗ Skip the `task-dag complete` step
+- ✗ Create your own task parent relationships manually (use the CLI)
+- ✗ Call any tombstone-related command unless you are backfilling links for already-merged historical work
+
+### Tombstones = Retroactive Only (ADVANCED/RARE)
+
+A **tombstone** is an empty task-completion record used when we need to link **old, already-merged** work to the DAG after the fact.
+
+**If you are actively implementing a task, you should never need a tombstone. Use `task-dag complete` with the real commits instead.**
+
+Tombstones are ONLY for:
+- Commits that were made **before** task-dag tracking existed
+- Historical work that cannot be retroactively altered for process reasons (e.g., already merged)
+- Explicit backfilling operations with clear justification
+
+**WARNING**: Do not use the tombstone examples from issue #1 or #2 as templates for current work. Those were created before `task-dag complete` existed and represent the OLD, deprecated pattern.
+
+### Protection: Install Git Hooks
+
+To help prevent tombstone misuse, install the commit-msg hook:
+
+```bash
+cp .github/hooks/commit-msg .git/hooks/commit-msg
+chmod +x .git/hooks/commit-msg
+```
+
+This hook will block empty tombstone commits during active work and remind you to use the correct workflow. See [.github/hooks/README.md](.github/hooks/README.md) for details.
 
 ## Handoff And Resume
 

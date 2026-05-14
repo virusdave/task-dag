@@ -40,6 +40,12 @@ get_issue_url() {
     git log -1 --format='%B' "$task_sha" | grep "^URL:" | sed 's/^URL: *//' | head -1
 }
 
+# Function to get issue author
+get_issue_author() {
+    local task_sha="$1"
+    git log -1 --format='%B' "$task_sha" | grep "^Author:" | sed 's/^Author: *//' | head -1
+}
+
 # Check each commit in the range
 git rev-list "$COMMIT_RANGE" | while read commit; do
     echo "Checking commit: $commit"
@@ -59,6 +65,7 @@ git rev-list "$COMMIT_RANGE" | while read commit; do
         issue_num=$(get_issue_number "$task_sha")
         task_title=$(get_task_title "$task_sha")
         issue_url=$(get_issue_url "$task_sha")
+        issue_author=$(get_issue_author "$task_sha")
         
         if [ -z "$issue_num" ]; then
             echo "  No issue number found in task commit"
@@ -67,6 +74,7 @@ git rev-list "$COMMIT_RANGE" | while read commit; do
         
         echo "  Task: $task_title"
         echo "  Issue: #$issue_num"
+        echo "  Author: ${issue_author:-unknown}"
         
         # Create completion comment
         commit_short=$(git rev-parse --short "$commit")
@@ -81,6 +89,13 @@ git rev-list "$COMMIT_RANGE" | while read commit; do
 
 View commit: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/commit/$commit
 EOF
+        
+        if [ -n "$issue_url" ]; then
+            cat >> /tmp/comment.md <<EOF
+
+Root issue: $issue_url
+EOF
+        fi
         
         # Post comment to issue
         if command -v gh &> /dev/null; then
@@ -106,7 +121,14 @@ EOF
             echo "  All tasks complete for issue #$issue_num - closing issue"
             
             if command -v gh &> /dev/null; then
-                gh issue close "$issue_num" --comment "All tasks completed. Epic is complete." && \
+                # Build close comment with author tag if available
+                if [ -z "$issue_author" ]; then
+                    close_comment="All tasks completed. Epic is complete."
+                else
+                    close_comment="All tasks completed. Epic is complete. cc @${issue_author}"
+                fi
+                
+                gh issue close "$issue_num" --comment "$close_comment" && \
                     echo "  ✓ Closed issue #$issue_num"
             fi
         else

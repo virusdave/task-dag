@@ -207,6 +207,37 @@ git push origin --delete refs/heads/tasks/active/$(git rev-parse --short $TASK_S
 
 ### 5. Completion and Lineage
 
+#### Normal Completion (Use This)
+
+Use the `task-dag complete` command to link your real implementation commits to tasks:
+
+```bash
+# After committing real code changes to master
+TASK_SHA=<task-commit-sha>
+task-dag complete $TASK_SHA
+```
+
+This command:
+1. Verifies all dependencies are met
+2. Creates a new commit with:
+   - Same tree as your current HEAD (your real implementation)
+   - Primary parent: your implementation commit
+   - Secondary parent: task commit (links task to code)
+   - Updated message with `Task-Commit: <sha>` and GitHub issue link
+3. Resets HEAD to the new commit
+4. Deletes `tasks/frontier/` and `tasks/active/` refs
+
+**CRITICAL**: The commit being completed must contain real code changes. Never create empty "tombstone" commits to represent work you just did.
+
+#### Retroactive Completion (Advanced/Rare)
+
+**Only use this for historical commits that predate the task-dag system.**
+
+For commits that were already merged before tasks were created:
+- This requires manual Git operations with explicit justification
+- Document why the retroactive link is necessary
+- Not for normal development workflow
+
 When a task is completed:
 1. The completion commit on master includes the task metadata commit as a non-primary parent
 2. This creates auditable lineage: `git log --graph --all` shows which commits addressed which tasks

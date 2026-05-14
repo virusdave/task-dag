@@ -518,19 +518,65 @@ EOF
     local tree=$(git rev-parse "$commit_sha^{tree}")
     local old_message=$(git log -1 --format='%B' "$commit_sha")
     
-    # Extract issue URL from task commit
-    local task_msg=$(parse_commit_metadata "$task_sha")
-    local issue_url=$(extract_field "$task_msg" "URL")
+    # Validate: Reject empty commits (tombstone pattern)
+    if git diff-tree --no-commit-id --name-only -r "$commit_sha" | grep -q .; then
+        # Commit has changes - good
+        :
+    else
+        # Empty commit detected
+        echo "" >&2
+        echo "${RED}ERROR: Empty commit detected${RESET}" >&2
+        echo "" >&2
+        echo "The commit you are completing against ($commit_sha) appears to be empty." >&2
+        echo "" >&2
+        echo "For normal work, 'task-dag complete' must reference a real implementation" >&2
+        echo "commit with actual code/file changes." >&2
+        echo "" >&2
+        echo "Empty 'tombstone' commits are ONLY for retroactive linking of historical" >&2
+        echo "work that predates the task-dag system. If you are currently implementing" >&2
+        echo "this task, commit your code changes first, then run 'task-dag complete'." >&2
+        echo "" >&2
+        return 1
+    fi
     
-    # Create new commit with task as second parent and issue URL
+    # Warn if commit message looks like a tombstone (starts with tombstone keyword)
+    if echo "$old_message" | grep -qiE "^(Task completion tombstone|Tombstone:|Retroactive completion)"; then
+        echo "" >&2
+        echo "${YELLOW}WARNING: This commit message looks like a tombstone${RESET}" >&2
+        echo "" >&2
+        echo "Message: $(echo "$old_message" | head -1)" >&2
+        echo "" >&2
+        echo "Tombstones are only for retroactive linking of historical work." >&2
+        echo "If you are actively working on this task, you should NOT create" >&2
+        echo "tombstone commits. Use 'task-dag complete' with real implementation commits." >&2
+        echo "" >&2
+        echo "Press Ctrl-C to abort or Enter to continue anyway..." >&2
+        read -r
+    fi
+    
+    # Extract metadata from task commit
+    local task_msg=$(parse_commit_metadata "$task_sha")
+    local issue_num=$(extract_field "$task_msg" "Issue" | sed 's/^#//')
+    local issue_url=$(extract_field "$task_msg" "URL")
+    local task_title=$(get_task_title "$task_sha")
+    
+    # Create new commit with task as second parent and full issue metadata
     local new_message="${old_message}
 
 Task-Commit: $task_sha"
     
+    if [ -n "$issue_num" ]; then
+        new_message="${new_message}
+Issue: #$issue_num"
+    fi
+    
     if [ -n "$issue_url" ]; then
         new_message="${new_message}
-Related: $issue_url"
+URL: $issue_url"
     fi
+    
+    new_message="${new_message}
+Status: completed"
     
     local new_commit=$(git commit-tree "$tree" -p "$commit_sha" -p "$task_sha" -m "$new_message")
     
@@ -725,6 +771,12 @@ EOF
 Task SHA: \`$(git rev-parse --short "$task_sha")\`
 Status: $status"
     
+    if [ -n "$issue_url" ]; then
+        comment="$comment
+
+Root issue: $issue_url"
+    fi
+    
     if [ -n "$message" ]; then
         comment="$comment
 
@@ -739,11 +791,8 @@ $message"
     
     printf "${GREEN}✓ Posted status update to issue #$issue_num${RESET}\n"
     
-    # If completed and this is the last task, close the issue
-    if [ "$status" = "completed" ]; then
-        # TODO: Check if all sibling tasks are complete, then close issue
-        :
-    fi
+    # Note: Issue closing logic is handled by the check-task-completions.sh GitHub Action
+    # which runs on push and closes issues when all tasks are complete
     
     return 0
 }
