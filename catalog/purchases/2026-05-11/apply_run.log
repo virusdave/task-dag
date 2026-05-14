@@ -1,5 +1,0 @@
-[patches] manifest overrides: 36; LLM cache entries available: 49; brand GM overrides: ['Herb', 'Doobie Labs', 'Jungle Girl', 'Moonlit Hash Co', 'Preferred Gardens', 'Purps', 'Runtz', 'Smartbud', 'Strain Gang']
-[apply] scrubbed 8 Dutchie-hosted primary image(s) out of 43 row(s); these will be created image-less.
-[apply] === site Midtown (midtown) already complete (36 rows). Skipping write phase; will only run regenerate_packet/postWriteVerification if missing. ===
-[apply] === site Bronx (bronx) already complete (7 rows). Skipping write phase; will only run regenerate_packet/postWriteVerification if missing. ===
-[apply] wrote combined results to /home/amp-local/src/automation/catalog/purchases/2026-05-11/combined_apply_results.json
