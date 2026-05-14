@@ -3,6 +3,7 @@
  * Implements CRUD operations for pending purchase packets, rows, and apply requests
  */
 
+import type { Pool } from 'pg'
 import type {
   PendingPurchasePacketSummary,
   PendingPurchaseApplyRequestSummary,
