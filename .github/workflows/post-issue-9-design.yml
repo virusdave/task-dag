@@ -1,0 +1,26 @@
+name: Post Design to Issue 9
+
+on:
+  push:
+    branches:
+      - feature/issue-comment-task-sync
+    paths:
+      - 'ISSUE_9_DESIGN_SUMMARY.md'
+
+permissions:
+  issues: write
+  contents: read
+
+jobs:
+  post-design:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Post design summary to issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue comment 9 \
+            --repo FreshlyBakedNYC/automation \
+            --body-file ISSUE_9_DESIGN_SUMMARY.md
