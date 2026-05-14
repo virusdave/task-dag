@@ -92,6 +92,7 @@ COMMANDS:
     deps <sha>             Show task dependencies
     breakdown <parent>     Create task breakdown
     complete <sha>         Mark task as complete
+    issue-update <sha>     Update GitHub issue with task progress
     validate               Validate DAG structure
     help                   Show this help
 
@@ -668,6 +669,127 @@ cmd_validate() {
     fi
     
     [ $errors -eq 0 ] && return 0 || return 3
+}
+
+# Command: issue-update - update GitHub issue with task progress
+cmd_issue_update() {
+    local task_sha=""
+    local status=""
+    local dry_run=false
+    
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --status=*) status="${1#*=}"; shift ;;
+            --dry-run) dry_run=true; shift ;;
+            --help|-h)
+                cat <<EOF
+Usage: task-dag issue-update <task-sha> [--status=completed|blocked|in-progress] [--dry-run]
+
+Update GitHub issue with task progress.
+
+Options:
+  --status=STATUS    Task status (completed, blocked, in-progress)
+  --dry-run          Print what would be done without making API calls
+EOF
+                return 0
+                ;;
+            *)
+                if [ -z "$task_sha" ]; then
+                    task_sha="$1"
+                else
+                    echo "Unknown option: $1" >&2
+                    return 1
+                fi
+                shift
+                ;;
+        esac
+    done
+    
+    if [ -z "$task_sha" ]; then
+        echo "Error: task SHA required" >&2
+        return 1
+    fi
+    
+    task_sha=$(resolve_sha "$task_sha") || return 1
+    
+    local task_msg=$(parse_commit_metadata "$task_sha")
+    local issue_num=$(extract_field "$task_msg" "Issue" | sed 's/^#//')
+    local issue_url=$(extract_field "$task_msg" "URL")
+    local task_title=$(get_task_title "$task_sha")
+    local short_sha=$(git rev-parse --short "$task_sha")
+    
+    if [ -z "$issue_num" ]; then
+        echo "Error: Task has no Issue number" >&2
+        return 1
+    fi
+    
+    # Extract repo from issue URL or git remote
+    local repo=""
+    if [ -n "$issue_url" ]; then
+        repo=$(echo "$issue_url" | sed -E 's|https://github.com/([^/]+/[^/]+)/.*|\1|')
+    else
+        # Try to get from git remote
+        local remote_url=$(git remote get-url origin 2>/dev/null || echo "")
+        if [[ "$remote_url" =~ github.com[:/]([^/]+/[^/]+)(\.git)?$ ]]; then
+            repo="${BASH_REMATCH[1]}"
+        fi
+    fi
+    
+    if [ -z "$repo" ]; then
+        echo "Error: Could not determine GitHub repository" >&2
+        return 1
+    fi
+    
+    # Determine status message
+    local status_msg="${status:-pending}"
+    local comment_body="Task [\`$short_sha\`](${issue_url:-https://github.com/$repo/issues/$issue_num}) **$task_title**"
+    
+    case "$status_msg" in
+        completed)
+            comment_body="$comment_body\n\n✓ Status: **Completed**"
+            ;;
+        blocked)
+            comment_body="$comment_body\n\n⚠️ Status: **Blocked**"
+            ;;
+        in-progress)
+            comment_body="$comment_body\n\n🔄 Status: **In Progress**"
+            ;;
+        *)
+            comment_body="$comment_body\n\nStatus: $status_msg"
+            ;;
+    esac
+    
+    if [ "$dry_run" = true ]; then
+        echo "Would post to issue #$issue_num in $repo:"
+        echo "$comment_body"
+        return 0
+    fi
+    
+    # Check for GITHUB_TOKEN
+    if [ -z "${GITHUB_TOKEN:-}" ]; then
+        echo "Error: GITHUB_TOKEN environment variable not set" >&2
+        echo "Set GITHUB_TOKEN to post comments to GitHub issues" >&2
+        return 1
+    fi
+    
+    # Post comment via GitHub API
+    local api_url="https://api.github.com/repos/$repo/issues/$issue_num/comments"
+    local response=$(curl -s -w "\n%{http_code}" -X POST "$api_url" \
+        -H "Authorization: token $GITHUB_TOKEN" \
+        -H "Accept: application/vnd.github.v3+json" \
+        -d "{\"body\":\"$comment_body\"}")
+    
+    local http_code=$(echo "$response" | tail -n1)
+    local body=$(echo "$response" | sed '$d')
+    
+    if [ "$http_code" = "201" ]; then
+        printf "${GREEN}✓ Posted comment to issue #$issue_num${RESET}\n"
+        return 0
+    else
+        echo "Error: Failed to post comment (HTTP $http_code)" >&2
+        echo "$body" >&2
+        return 1
+    fi
 }
 
 # Main dispatch
