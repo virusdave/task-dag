@@ -567,11 +567,15 @@ def generate_html(purchases, market_research):
     .review-tree-nav-header strong { font-size: 14px; }
     .review-tree-nav-toggle {
       font-size: 11px;
-      padding: 4px 8px;
+      padding: 6px 10px;
       cursor: pointer;
       border: 1px solid var(--line);
       background: #fff;
       border-radius: 4px;
+      font-weight: 600;
+    }
+    .review-tree-nav-toggle:hover {
+      background: #e8dfc8;
     }
     .review-tree-nav details { margin-left: 6px; }
     .review-tree-nav summary { cursor: pointer; padding: 2px 0; }
@@ -761,17 +765,39 @@ def generate_html(purchases, market_research):
       top: 8px;
       left: 8px;
       z-index: 50;
-      padding: 8px 12px;
-      font-size: 13px;
+      padding: 10px 16px;
+      font-size: 14px;
       font-weight: 600;
       cursor: pointer;
       background: #f7f1e6;
-      border: 1px solid #d8d4cc;
-      border-radius: 6px;
+      border: 2px solid #d8d4cc;
+      border-radius: 8px;
       display: none;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+    }
+    .review-tree-nav-show:hover {
+      background: #ede3d0;
+      border-color: #8a4626;
     }
     body.nav-hidden .review-tree-nav-show {
       display: block;
+    }
+    
+    /* Mobile nav backdrop */
+    .nav-backdrop {
+      display: none;
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: rgba(0,0,0,0.4);
+      z-index: 90;
+    }
+    @media (max-width: 1024px) {
+      body:not(.nav-hidden) .nav-backdrop {
+        display: block;
+      }
     }
     
     /* Mobile responsiveness */
@@ -889,6 +915,7 @@ def generate_html(purchases, market_research):
     </div>
   </nav>
   
+  <div class="nav-backdrop" data-nav-backdrop></div>
   <button type="button" class="review-tree-nav-show" data-review-tree-nav-show>☰ Menu</button>
   
   <div class="wrap">
@@ -994,6 +1021,23 @@ def generate_html(purchases, market_research):
       navControl.setSidebarHidden(!isHidden);
     }
   });
+  
+  // On mobile, close nav when clicking a link
+  document.querySelectorAll('[data-review-tree-nav-link]').forEach(link => {
+    link.addEventListener('click', () => {
+      if (window.innerWidth <= 1024) {
+        navControl.setSidebarHidden(true);
+      }
+    });
+  });
+  
+  // Close nav when clicking backdrop
+  const backdrop = document.querySelector('[data-nav-backdrop]');
+  if (backdrop) {
+    backdrop.addEventListener('click', () => {
+      navControl.setSidebarHidden(true);
+    });
+  }
   
   // Initialize competitor drawer (singleton)
   const competitorDrawer = CompetitorDrawer.create();
