@@ -330,7 +330,7 @@ function coerceSchedulingExtractionObject(
   value: Record<string, unknown>,
   input: { scheduleWeek: SchedulingWeekWindow; sourceText: string },
   employeeAvailabilityOverrides: Map<string, z.infer<typeof SchedulingAvailabilityWindowSchema>[]> | null = null,
-): Record<string, unknown> {
+): unknown {
   const sourceDerivedShiftRequirements = buildShiftRequirementsFromSource(input.sourceText)
   const employeeQualificationAssignments = buildEmployeeQualificationAssignments(input.sourceText)
 
