@@ -109,6 +109,7 @@
       border-right: 1px solid #d8d4cc;
       background: #f7f1e6;
       font-size: 13px;
+      z-index: 200;
     }
     .review-tree-nav-header {
       display: flex;
@@ -116,6 +117,8 @@
       justify-content: space-between;
       gap: 8px;
       margin-bottom: 12px;
+      position: relative;
+      z-index: 210;
     }
     .review-tree-nav-header strong { font-size: 14px; }
     .review-tree-nav-toggle {
@@ -345,7 +348,8 @@
       right: 0;
       bottom: 0;
       background: rgba(0,0,0,0.4);
-      z-index: 90;
+      z-index: 100;
+      cursor: pointer;
     }
     @media (max-width: 1024px) {
       body:not(.nav-hidden) .nav-backdrop {
@@ -5590,6 +5594,7 @@ if (typeof window !== 'undefined' && !window.CompetitorDrawer) {
     const targetAttribute = options && options.targetAttribute ? options.targetAttribute : 'data-review-tree-nav-target-id'
     const hideButtonSelector = options && options.hideButtonSelector ? options.hideButtonSelector : '[data-review-tree-nav-hide]'
     const showButtonSelector = options && options.showButtonSelector ? options.showButtonSelector : '[data-review-tree-nav-show]'
+    const backdropSelector = options && options.backdropSelector ? options.backdropSelector : '[data-nav-backdrop]'
     const navStorageKey = options && options.navStorageKey ? options.navStorageKey : ''
     const sidebarStorageKey = options && options.sidebarStorageKey ? options.sidebarStorageKey : ''
     const sidebarHiddenTarget = options && options.sidebarHiddenTarget ? options.sidebarHiddenTarget : document.body
@@ -5603,6 +5608,7 @@ if (typeof window !== 'undefined' && !window.CompetitorDrawer) {
     const links = Array.from(root.querySelectorAll(linkSelector))
     const hideButtons = Array.from(root.querySelectorAll(hideButtonSelector))
     const showButtons = Array.from(root.querySelectorAll(showButtonSelector))
+    const backdrops = Array.from(document.querySelectorAll(backdropSelector))
     const defaultOpenByKey = new Map()
 
     details.forEach((detail) => {
@@ -5742,6 +5748,13 @@ if (typeof window !== 'undefined' && !window.CompetitorDrawer) {
       })
     })
 
+    backdrops.forEach((backdrop) => {
+      backdrop.addEventListener('click', (event) => {
+        event.preventDefault()
+        setSidebarHidden(true)
+      })
+    })
+
     links.forEach((link) => {
       link.addEventListener('click', (event) => {
         if (!options || typeof options.onNavigate !== 'function') {
@@ -5781,6 +5794,15 @@ if (typeof window !== 'undefined' && !window.CompetitorDrawer) {
     }
 
     window.addEventListener('storage', handleStorage)
+
+    const handleKeydown = (event) => {
+      if (event.key === 'Escape' || event.key === 'Esc') {
+        const isHidden = sidebarHiddenTarget.classList.contains(sidebarHiddenClassName)
+        setSidebarHidden(!isHidden)
+      }
+    }
+
+    window.addEventListener('keydown', handleKeydown)
 
     return {
       items: items,
@@ -5825,14 +5847,6 @@ if (typeof window !== 'undefined' && !window.CompetitorDrawer) {
     }
   }
   
-  // Handle Escape key to toggle nav
-  document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') {
-      const isHidden = document.body.classList.contains('nav-hidden');
-      navControl.setSidebarHidden(!isHidden);
-    }
-  });
-  
   // On mobile, close nav when clicking a link
   document.querySelectorAll('[data-review-tree-nav-link]').forEach(link => {
     link.addEventListener('click', () => {
@@ -5841,14 +5855,6 @@ if (typeof window !== 'undefined' && !window.CompetitorDrawer) {
       }
     });
   });
-  
-  // Close nav when clicking backdrop
-  const backdrop = document.querySelector('[data-nav-backdrop]');
-  if (backdrop) {
-    backdrop.addEventListener('click', () => {
-      navControl.setSidebarHidden(true);
-    });
-  }
   
   // Initialize competitor drawer (singleton)
   const competitorDrawer = CompetitorDrawer.create();

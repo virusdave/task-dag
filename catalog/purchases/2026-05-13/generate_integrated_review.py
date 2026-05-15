@@ -556,6 +556,7 @@ def generate_html(purchases, market_research):
       border-right: 1px solid #d8d4cc;
       background: #f7f1e6;
       font-size: 13px;
+      z-index: 200;
     }
     .review-tree-nav-header {
       display: flex;
@@ -563,6 +564,8 @@ def generate_html(purchases, market_research):
       justify-content: space-between;
       gap: 8px;
       margin-bottom: 12px;
+      position: relative;
+      z-index: 210;
     }
     .review-tree-nav-header strong { font-size: 14px; }
     .review-tree-nav-toggle {
@@ -792,7 +795,8 @@ def generate_html(purchases, market_research):
       right: 0;
       bottom: 0;
       background: rgba(0,0,0,0.4);
-      z-index: 90;
+      z-index: 100;
+      cursor: pointer;
     }
     @media (max-width: 1024px) {
       body:not(.nav-hidden) .nav-backdrop {
@@ -1014,14 +1018,6 @@ def generate_html(purchases, market_research):
     }
   }
   
-  // Handle Escape key to toggle nav
-  document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') {
-      const isHidden = document.body.classList.contains('nav-hidden');
-      navControl.setSidebarHidden(!isHidden);
-    }
-  });
-  
   // On mobile, close nav when clicking a link
   document.querySelectorAll('[data-review-tree-nav-link]').forEach(link => {
     link.addEventListener('click', () => {
@@ -1030,14 +1026,6 @@ def generate_html(purchases, market_research):
       }
     });
   });
-  
-  // Close nav when clicking backdrop
-  const backdrop = document.querySelector('[data-nav-backdrop]');
-  if (backdrop) {
-    backdrop.addEventListener('click', () => {
-      navControl.setSidebarHidden(true);
-    });
-  }
   
   // Initialize competitor drawer (singleton)
   const competitorDrawer = CompetitorDrawer.create();
