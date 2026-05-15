@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   sync-comment-to-task:
-    uses: Nicponskis/shared-workflows/.github/workflows/sync-comment-to-task.yml@main
+    uses: Nicponskis/shared-workflows/.github/workflows/sync-comment-to-task.yml@master
     with:
       max_comment_size: 2048
       max_daily_comments: 20
