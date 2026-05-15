@@ -177,15 +177,18 @@ trial_design:
   controls_per_trial: 1  # Single baseline for comparison
   variants_per_trial_range: [1, 1000]  # Arbitrary sized parallel experiments
   
-  # Success criteria - policy probe lifecycle
+  # Success criteria - multi-objective optimization
   default_success_criteria:
-    # Check approval status at intervals, then REMOVE completely
+    # Check BOTH policy status AND performance at intervals
     check_intervals_hours: [1, 4, 24, 48]
-    # Don't care about impressions - this is policy probing, not ad serving
-    min_impressions: null
+    # Need enough impressions to evaluate performance vs control
+    min_impressions: 100  # Need data to compare effectiveness
     allowed_serving_statuses:
       - "eligible"
       - "eligible_limited"
+    # Performance criteria (vs control baseline)
+    min_ctr_ratio: 0.8  # Must be at least 80% as effective as control
+    min_conversion_rate_ratio: 0.8  # Must convert nearly as well
     # After final check, remove trial group entirely
     auto_remove_after_hours: 48
       

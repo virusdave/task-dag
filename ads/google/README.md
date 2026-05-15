@@ -76,14 +76,18 @@ Format: `{global_batch:05d}-{ad-group}-trial-{seq:03d}`
 - Next batch: `00002-bronx-edibles-trial-001`, etc.
 
 Characteristics:
-- **Budget**: $0.01/day (microscopic - just for policy review)
+- **Budget**: $0.01/day (microscopic - for policy + performance testing)
 - **Scale**: 10-1000 parallel experiments per batch
-- **Control**: 1 baseline ad
+- **Control**: 1 baseline ad (for performance comparison)
 - **Variants**: 1-1000 systematic pattern permutations
-- **Lifecycle**: Check at 1hr, 4hr, 24hr, 48hr → Remove completely
+- **Lifecycle**: Check BOTH policy AND performance at 1hr, 4hr, 24hr, 48hr → Remove
 - **Labels**: `FB_POLICY_PROBE_YYYY-MM-DD-{batch:05d}`
 
-Goal: Learn which patterns trigger approval/limitation/disapproval, then discard.
+Goal: **Multi-objective optimization** - find variants that are BOTH:
+1. Compliant (serve without limitations)
+2. Effective (CTR/conv ≥80% of control)
+
+An ad that serves cleanly but performs poorly is useless. An ad that performs well but gets limited is useless. We need BOTH.
 
 ## Configuration
 
