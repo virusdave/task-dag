@@ -74,8 +74,10 @@ export async function registerPendingPurchaseRoutes(server: FastifyInstance): Pr
 
     const query = PendingPurchaseListQuerySchema.parse(request.query)
     const db = getPool()
-    const [response, activeGenerationJobIdResult] = await Promise.all([
-      listPendingPurchaseRows(db, query),
+    const [items, activeGenerationJobIdResult] = await Promise.all([
+      query.packetId != null
+        ? listPendingPurchaseRows(db, query.packetId)
+        : Promise.resolve([] as Awaited<ReturnType<typeof listPendingPurchaseRows>>),
       db.query<JobIdRow>(
         `
           select jq.id
@@ -90,8 +92,13 @@ export async function registerPendingPurchaseRoutes(server: FastifyInstance): Pr
     const activeGenerationJobId = activeGenerationJobIdResult.rows[0]?.id ?? null
     const activeGenerationJob = activeGenerationJobId ? await getJobStatus(db, activeGenerationJobId) : null
     return reply.send(PendingPurchaseListResponseSchema.parse({
-      ...response,
+      activePacket: null,
       activeGenerationJob,
+      filters: query,
+      items,
+      latestApplyRequest: null,
+      packets: [],
+      totalCount: items.length,
     }))
   })
 

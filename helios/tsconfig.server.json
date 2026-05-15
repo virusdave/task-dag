@@ -19,6 +19,7 @@
     "**/*.test.ts",
     "**/*.test.tsx",
     "**/__tests__/**/*",
-    "src/worker/scheduling/extractConstraints.ts"
+    "src/worker/scheduling/extractConstraints.ts",
+    "src/shared/ui/**/*"
   ]
 }

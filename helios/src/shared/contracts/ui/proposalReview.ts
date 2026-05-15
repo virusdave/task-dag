@@ -62,8 +62,8 @@ export const UiProposalRowSchema = z.object({
   brandName: z.string().nullable().optional(),
   itemName: z.string().nullable().optional(),
   msoAnnotation: MSOBrandAnnotationSchema.optional(),
-  merchContext: z.record(z.unknown()).default({}),
-  evidence: z.record(z.unknown()).default({}),
+  merchContext: z.record(z.string(), z.unknown()).default({}),
+  evidence: z.record(z.string(), z.unknown()).default({}),
   lineItems: z.array(UiLineItemSchema),
   // Hierarchy for filtering
   siteId: z.number().optional(),
@@ -104,16 +104,23 @@ export const ProposalReviewResponseSchema = z.object({
 
 export type ProposalReviewResponse = z.infer<typeof ProposalReviewResponseSchema>
 
-export const HierarchyNodeSchema = z.object({
-  id: z.string(), // e.g., "site:123" or "brand:456"
+export interface HierarchyNode {
+  id: string // e.g., "site:123" or "brand:456"
+  type: 'site' | 'catalog' | 'brand' | 'item'
+  label: string
+  itemCount: number // number of rows at this level
+  children: HierarchyNode[]
+  isExpanded: boolean
+}
+
+export const HierarchyNodeSchema: z.ZodType<HierarchyNode> = z.object({
+  id: z.string(),
   type: z.enum(['site', 'catalog', 'brand', 'item']),
   label: z.string(),
-  itemCount: z.number(), // number of rows at this level
+  itemCount: z.number(),
   children: z.array(z.lazy(() => HierarchyNodeSchema)).default([]),
   isExpanded: z.boolean().default(false),
 })
-
-export type HierarchyNode = z.infer<typeof HierarchyNodeSchema>
 
 export const BulkActionRequestSchema = z.object({
   batchId: z.number(),
