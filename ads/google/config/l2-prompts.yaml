@@ -164,35 +164,42 @@ action_selection:
 
 # Trial design parameters
 trial_design:
-  # Trial naming
-  trial_name_pattern: "{original_ad_group}-trial-{sequence:03d}"
+  # Trial naming with GLOBAL sequencing across all runs
+  # Format: 00001-<campaign/group>-trial-001, 00001-<campaign/group>-trial-002
+  # Next batch: 00002-<campaign/group>-trial-001, ..., 00002-<campaign/group>-trial-107
+  trial_name_pattern: "{global_batch:05d}-{original_ad_group}-trial-{sequence:03d}"
   
-  # Budget settings
-  default_budget_usd: 1
-  max_budget_usd: 5
+  # Budget settings - MICROSCOPIC for policy probing, not ad serving
+  default_budget_usd: 0.01  # Or whatever minimum Google accepts
+  max_budget_usd: 0.05
   
-  # Trial composition
-  controls_per_trial: 2
-  variants_per_trial: 3
+  # Trial composition - can be large batches (10-1000 experiments)
+  controls_per_trial: 1  # Single baseline for comparison
+  variants_per_trial_range: [1, 1000]  # Arbitrary sized parallel experiments
   
-  # Success criteria defaults
+  # Success criteria - policy probe lifecycle
   default_success_criteria:
-    time_window_days: 7
-    min_impressions: 100
+    # Check approval status at intervals, then REMOVE completely
+    check_intervals_hours: [1, 4, 24, 48]
+    # Don't care about impressions - this is policy probing, not ad serving
+    min_impressions: null
     allowed_serving_statuses:
       - "eligible"
       - "eligible_limited"
+    # After final check, remove trial group entirely
+    auto_remove_after_hours: 48
       
   # Trial categories
   trial_categories:
-    - pattern_isolation
-    - alternative_phrasing
-    - boundary_probing
-    - performance_optimization
+    - pattern_isolation      # Test if specific pattern triggers limitation
+    - alternative_phrasing   # Test compliant alternatives
+    - boundary_probing       # Test where policy threshold lies
+    - vocab_permutations     # Systematic vocab testing
     
-  # Experiment throttling
-  max_trials_per_family: 3
-  max_total_trials_per_run: 20
+  # Experiment throttling - can be large batches
+  max_trials_per_family: 100  # Large parallel experiment sets
+  max_total_trials_per_run: 1000  # Up to 1000 experiments per run
+  max_trials_per_batch: 1000  # Max in single global batch
 
 # CSV batch assignment
 csv_batches:
