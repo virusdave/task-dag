@@ -69,12 +69,21 @@ Human-readable interface with:
 
 ## Trial Groups
 
-Experimental `*-trial-00N` ad groups with:
-- $1/day budgets
-- 1-2 control ads (current approved)
-- 1-3 variant ads (L2 suggestions)
-- Clear hypothesis and success criteria
-- Labels: `FB_POLICY_PROBE_YYYY-MM-DD-NNN`
+**Policy probe experiments** (NOT ad serving campaigns):
+
+Format: `{global_batch:05d}-{ad-group}-trial-{seq:03d}`
+- Example: `00001-midtown-cannabis-trial-001` through `00001-midtown-cannabis-107`
+- Next batch: `00002-bronx-edibles-trial-001`, etc.
+
+Characteristics:
+- **Budget**: $0.01/day (microscopic - just for policy review)
+- **Scale**: 10-1000 parallel experiments per batch
+- **Control**: 1 baseline ad
+- **Variants**: 1-1000 systematic pattern permutations
+- **Lifecycle**: Check at 1hr, 4hr, 24hr, 48hr → Remove completely
+- **Labels**: `FB_POLICY_PROBE_YYYY-MM-DD-{batch:05d}`
+
+Goal: Learn which patterns trigger approval/limitation/disapproval, then discard.
 
 ## Configuration
 
