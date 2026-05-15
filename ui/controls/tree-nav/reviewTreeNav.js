@@ -24,6 +24,7 @@
     const targetAttribute = options && options.targetAttribute ? options.targetAttribute : 'data-review-tree-nav-target-id'
     const hideButtonSelector = options && options.hideButtonSelector ? options.hideButtonSelector : '[data-review-tree-nav-hide]'
     const showButtonSelector = options && options.showButtonSelector ? options.showButtonSelector : '[data-review-tree-nav-show]'
+    const backdropSelector = options && options.backdropSelector ? options.backdropSelector : '[data-nav-backdrop]'
     const navStorageKey = options && options.navStorageKey ? options.navStorageKey : ''
     const sidebarStorageKey = options && options.sidebarStorageKey ? options.sidebarStorageKey : ''
     const sidebarHiddenTarget = options && options.sidebarHiddenTarget ? options.sidebarHiddenTarget : document.body
@@ -37,6 +38,7 @@
     const links = Array.from(root.querySelectorAll(linkSelector))
     const hideButtons = Array.from(root.querySelectorAll(hideButtonSelector))
     const showButtons = Array.from(root.querySelectorAll(showButtonSelector))
+    const backdrops = Array.from(document.querySelectorAll(backdropSelector))
     const defaultOpenByKey = new Map()
 
     details.forEach((detail) => {
@@ -176,6 +178,13 @@
       })
     })
 
+    backdrops.forEach((backdrop) => {
+      backdrop.addEventListener('click', (event) => {
+        event.preventDefault()
+        setSidebarHidden(true)
+      })
+    })
+
     links.forEach((link) => {
       link.addEventListener('click', (event) => {
         if (!options || typeof options.onNavigate !== 'function') {
@@ -215,6 +224,15 @@
     }
 
     window.addEventListener('storage', handleStorage)
+
+    const handleKeydown = (event) => {
+      if (event.key === 'Escape' || event.key === 'Esc') {
+        const isHidden = sidebarHiddenTarget.classList.contains(sidebarHiddenClassName)
+        setSidebarHidden(!isHidden)
+      }
+    }
+
+    window.addEventListener('keydown', handleKeydown)
 
     return {
       items: items,
