@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# Pre-commit hook to validate GitHub Actions workflow references
+
+set -e
+
+# Check for workflow files being committed
+workflow_files=$(git diff --cached --name-only --diff-filter=ACM | grep -E '^\.github/workflows/.*\.ya?ml$' || true)
+
+if [ -z "$workflow_files" ]; then
+    exit 0
+fi
+
+echo "Validating workflow references..."
+
+errors=0
+
+for file in $workflow_files; do
+    # Extract external workflow references (uses: org/repo/.github/workflows/file.yml@ref)
+    refs=$(grep -E '^\s*uses:\s+[^/]+/[^/]+/\.github/workflows/.*@' "$file" || true)
+    
+    if [ -n "$refs" ]; then
+        echo "Checking $file..."
+        
+        while IFS= read -r line; do
+            # Extract repo and ref
+            if [[ "$line" =~ uses:[[:space:]]+([^/]+)/([^/]+)/\.github/workflows/.*@([^[:space:]]+) ]]; then
+                owner="${BASH_REMATCH[1]}"
+                repo="${BASH_REMATCH[2]}"
+                ref="${BASH_REMATCH[3]}"
+                
+                echo "  Validating ${owner}/${repo}@${ref}..."
+                
+                # Check if ref exists using GitHub API
+                if ! gh api "repos/${owner}/${repo}/git/ref/heads/${ref}" &>/dev/null && \
+                   ! gh api "repos/${owner}/${repo}/git/ref/tags/${ref}" &>/dev/null && \
+                   ! gh api "repos/${owner}/${repo}/commits/${ref}" &>/dev/null; then
+                    echo "  ❌ ERROR: Reference '${ref}' not found in ${owner}/${repo}"
+                    echo "     Suggested fix: Check default branch with 'gh repo view ${owner}/${repo} --json defaultBranchRef'"
+                    errors=$((errors + 1))
+                else
+                    echo "  ✓ Valid reference"
+                fi
+            fi
+        done <<< "$refs"
+    fi
+done
+
+if [ $errors -gt 0 ]; then
+    echo ""
+    echo "❌ Workflow validation failed with $errors error(s)"
+    echo "Please fix the workflow references before committing."
+    exit 1
+fi
+
+echo "✓ All workflow references validated"
+exit 0
