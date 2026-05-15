@@ -19,7 +19,9 @@ import {
 } from '../../../shared/contracts/index.js'
 import { loadJson, mutateJson } from '../../app/fetchJson.js'
 import { isJobTerminal, loadJobStatus, waitForJob } from '../../app/jobPolling.js'
+import { CanonicalPricingLadder } from '../../components/CanonicalPricingLadder.js'
 import { Pill } from '../../components/Pill.js'
+import { type CompetitorListing } from '../../../shared/ui/pricing-ladder/index.js'
 import { useRegisterCatalogSidebarSubtree } from './catalogSidebarSubtree.js'
 
 export async function pendingPurchasesLoader({ request }: { request: Request }) {
@@ -686,7 +688,7 @@ function PendingPurchaseRowCard(
             {item.siteLabel} · {item.targetBrand ?? 'No brand'} · {item.targetVariantName ?? item.targetGroupName ?? 'No target variant'}
           </p>
           <p className="subtle-copy">
-            <Link to={buildHeliosModulePath('catalog', `review-details/pending_purchase_row/${item.rowId}`)}>
+            <Link to={buildHeliosModulePath('catalog', `review-details/pending_purchase_row/${item.rowId}`)} target="_blank" rel="noopener noreferrer">
               Review details (comments, annotations, re-run, fail)
             </Link>
           </p>
@@ -706,13 +708,14 @@ function PendingPurchaseRowCard(
       </div>
 
       {hasPricingLadder ? (
-        <PendingPurchasePricingLadder
+        <CanonicalPricingLadder
+          productId={item.rowId}
           livePrice={item.currentPrice}
-          marketAveragePostTaxPrice={item.averageCompetitorPostTaxPrice}
-          marketListings={item.marketListings}
-          marketMedianPostTaxPrice={item.marketMedianPostTaxPrice}
-          proposedLabel={priceMarkerLabel}
           proposedPrice={displayedPrice}
+          marketAveragePostTax={item.averageCompetitorPostTaxPrice}
+          marketMedianPostTax={item.marketMedianPostTaxPrice}
+          competitorListings={mapToCompetitorListings(item.marketListings)}
+          variant="compact"
         />
       ) : null}
 
@@ -780,13 +783,14 @@ function PendingPurchaseRowCard(
               <PendingValuePanel label="Market median" value={formatCurrency(item.marketMedianPostTaxPrice)} />
             </div>
             {hasPricingLadder ? (
-              <PendingPurchasePricingLadder
+              <CanonicalPricingLadder
+                productId={item.rowId}
                 livePrice={item.currentPrice}
-                marketAveragePostTaxPrice={item.averageCompetitorPostTaxPrice}
-                marketListings={item.marketListings}
-                marketMedianPostTaxPrice={item.marketMedianPostTaxPrice}
-                proposedLabel={priceMarkerLabel}
                 proposedPrice={displayedPrice}
+                marketAveragePostTax={item.averageCompetitorPostTaxPrice}
+                marketMedianPostTax={item.marketMedianPostTaxPrice}
+                competitorListings={mapToCompetitorListings(item.marketListings)}
+                variant="compact"
               />
             ) : null}
             {item.marketNote ? <p className="subtle-copy">{item.marketNote}</p> : null}
@@ -1010,81 +1014,17 @@ function readNumericDraftPrice(value: string): number | null {
   return Math.round((parsed + Number.EPSILON) * 100) / 100
 }
 
-function PendingPurchasePricingLadder(input: {
-  livePrice: number | null
-  marketAveragePostTaxPrice: number | null
-  marketListings: PendingPurchaseMarketListing[]
-  marketMedianPostTaxPrice: number | null
-  proposedLabel: string
-  proposedPrice: number | null
-}) {
-  const points = [
-    input.livePrice,
-    input.proposedPrice,
-    input.marketAveragePostTaxPrice,
-    input.marketMedianPostTaxPrice,
-    ...input.marketListings.map((listing) => listing.postTaxPrice),
-  ].filter((value): value is number => value !== null && Number.isFinite(value))
-
-  if (points.length < 2) {
-    return null
-  }
-
-  const minimumPoint = Math.min(...points)
-  const maximumPoint = Math.max(...points)
-  const padding = Math.max((maximumPoint - minimumPoint) * 0.12, 1)
-  const scaleMinimum = Math.max(0, minimumPoint - padding)
-  const scaleMaximum = maximumPoint + padding
-  const bandSummary = summarizePendingPurchaseListingBands(input.marketListings)
-
-  return (
-    <div className="pricing-ladder-card">
-      <div className="inline-row wrap-row" style={{ justifyContent: 'space-between', marginBottom: '0.6rem' }}>
-        <strong>Price ladder</strong>
-        <span className="subtle-copy">{formatCurrency(scaleMinimum)} to {formatCurrency(scaleMaximum)}</span>
-      </div>
-      <div className="pricing-ladder-track">
-        {input.marketListings.map((listing, index) => (
-          <span
-            className={`pricing-ladder-dot band-${listing.distanceBand}${listing.eligibleForPricing ? '' : ' is-excluded'}`}
-            key={buildPendingPurchaseMarketListingKey(listing, index)}
-            style={{ left: `${toPendingPurchaseLadderPercent(listing.postTaxPrice, scaleMinimum, scaleMaximum)}%`, opacity: pendingPurchaseListingOpacity(listing) }}
-            title={buildPendingPurchaseMarketTooltip(listing)}
-          />
-        ))}
-        {input.marketAveragePostTaxPrice !== null ? (
-          <span className="pricing-ladder-marker average" style={{ left: `${toPendingPurchaseLadderPercent(input.marketAveragePostTaxPrice, scaleMinimum, scaleMaximum)}%` }}>
-            <span>Market avg</span>
-          </span>
-        ) : null}
-        {input.marketMedianPostTaxPrice !== null ? (
-          <span className="pricing-ladder-marker median" style={{ left: `${toPendingPurchaseLadderPercent(input.marketMedianPostTaxPrice, scaleMinimum, scaleMaximum)}%` }}>
-            <span>Market median</span>
-          </span>
-        ) : null}
-        {input.livePrice !== null ? (
-          <span className="pricing-ladder-marker live" style={{ left: `${toPendingPurchaseLadderPercent(input.livePrice, scaleMinimum, scaleMaximum)}%` }}>
-            <span>Current</span>
-          </span>
-        ) : null}
-        {input.proposedPrice !== null ? (
-          <span className="pricing-ladder-marker proposed" style={{ left: `${toPendingPurchaseLadderPercent(input.proposedPrice, scaleMinimum, scaleMaximum)}%` }}>
-            <span>{input.proposedLabel}</span>
-          </span>
-        ) : null}
-      </div>
-      <div className="pricing-ladder-legend">
-        <span><i className="legend-swatch band-near" />Near</span>
-        <span><i className="legend-swatch band-mid" />Mid</span>
-        <span><i className="legend-swatch band-far" />Far</span>
-        <span><i className="legend-swatch band-very_far" />Very far</span>
-        <span><i className="legend-swatch marker-median" />Market median</span>
-        <span><i className="legend-swatch marker-live" />Current</span>
-        <span><i className="legend-swatch marker-proposed" />Reviewed</span>
-      </div>
-      {bandSummary ? <p className="subtle-copy" style={{ marginTop: '0.6rem' }}>{bandSummary}</p> : null}
-    </div>
-  )
+function mapToCompetitorListings(marketListings: PendingPurchaseMarketListing[]): CompetitorListing[] {
+  return marketListings.map((listing, index) => ({
+    listingId: `${listing.dispensaryName}-${listing.listingName}-${listing.source}-${index}`,
+    postTaxPrice: listing.postTaxPrice,
+    distanceMiles: listing.distanceMiles,
+    dispensaryName: listing.dispensaryName,
+    dispensaryAddress: null,
+    listingName: listing.listingName,
+    url: null,
+    eligibleForPricing: listing.eligibleForPricing,
+  }))
 }
 
 function formatPendingPurchaseMarketReferenceText(
@@ -1101,83 +1041,7 @@ function formatPendingPurchaseMarketReferenceText(
   return parts.length > 0 ? `Lit Alerts market: ${parts.join(' · ')}` : null
 }
 
-function toPendingPurchaseLadderPercent(value: number, minimum: number, maximum: number): number {
-  if (maximum <= minimum) {
-    return 50
-  }
 
-  return ((value - minimum) / (maximum - minimum)) * 100
-}
-
-function pendingPurchaseListingOpacity(listing: PendingPurchaseMarketListing): number {
-  const baseOpacity = (() => {
-    switch (listing.distanceBand) {
-      case 'near':
-        return 1
-      case 'mid':
-        return 0.76
-      case 'far':
-        return 0.42
-      case 'very_far':
-        return listing.distanceMiles === null ? 0.32 : Math.max(0.18, 0.42 - Math.max(0, listing.distanceMiles - 10) * 0.01)
-      default:
-        return 0.28
-    }
-  })()
-
-  return listing.eligibleForPricing ? baseOpacity : Math.max(0.18, baseOpacity * 0.75)
-}
-
-function summarizePendingPurchaseListingBands(listings: PendingPurchaseMarketListing[]): string | null {
-  if (listings.length === 0) {
-    return null
-  }
-
-  const summary = listings.reduce<Record<PendingPurchaseMarketListing['distanceBand'], number>>(
-    (counts, listing) => ({
-      ...counts,
-      [listing.distanceBand]: counts[listing.distanceBand] + 1,
-    }),
-    { far: 0, mid: 0, near: 0, unknown: 0, very_far: 0 },
-  )
-  const parts = [
-    summary.near ? `${summary.near} near` : null,
-    summary.mid ? `${summary.mid} mid` : null,
-    summary.far ? `${summary.far} far` : null,
-    summary.very_far ? `${summary.very_far} very far` : null,
-    summary.unknown ? `${summary.unknown} unknown-distance` : null,
-  ].filter((value): value is string => value !== null)
-
-  return parts.length > 0 ? `Displayed competitor pool: ${parts.join(', ')}.` : null
-}
-
-function buildPendingPurchaseMarketTooltip(listing: PendingPurchaseMarketListing): string {
-  const exclusionText = !listing.eligibleForPricing && listing.exclusionReason ? ` · ${listing.exclusionReason}` : ''
-  return `${listing.dispensaryName} · ${formatCurrency(listing.postTaxPrice)} · ${formatPendingPurchaseDistanceBandLabel(listing.distanceBand, listing.distanceMiles)}${exclusionText}`
-}
-
-function buildPendingPurchaseMarketListingKey(listing: PendingPurchaseMarketListing, index: number): string {
-  return `${listing.dispensaryName}-${listing.listingName}-${listing.source}-${index}`
-}
-
-function formatPendingPurchaseDistanceBandLabel(
-  distanceBand: PendingPurchaseMarketListing['distanceBand'],
-  distanceMiles: number | null,
-): string {
-  const distanceText = distanceMiles === null ? null : `${distanceMiles.toFixed(2)}mi`
-  switch (distanceBand) {
-    case 'near':
-      return distanceText ? `Near · ${distanceText}` : 'Near'
-    case 'mid':
-      return distanceText ? `Mid · ${distanceText}` : 'Mid'
-    case 'far':
-      return distanceText ? `Far · ${distanceText}` : 'Far'
-    case 'very_far':
-      return distanceText ? `Very far · ${distanceText}` : 'Very far'
-    default:
-      return distanceText ? `Unknown · ${distanceText}` : 'Unknown distance'
-  }
-}
 
 function jobStatusTone(status: JobStatusResponse['job']['status']): 'danger' | 'muted' | 'success' | 'warning' {
   switch (status) {
