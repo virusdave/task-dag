@@ -411,10 +411,22 @@ async function extractEmployeeAvailabilitySupplements(input: {
     temperature: 0.1,
   })
 
+  const employees = Array.isArray(parsed.employees) ? parsed.employees : []
   return new Map(
-    parsed.employees
-      .filter((employee) => employee.availability.length > 0)
-      .map((employee) => [normalizeEmployeeConstraintName(employee.name), employee.availability] as const),
+    employees
+      .filter((employee) => {
+        if (typeof employee !== 'object' || !employee || !('availability' in employee)) {
+          return false
+        }
+        const avail = employee.availability
+        return Array.isArray(avail) && avail.length > 0
+      })
+      .map((employee) => {
+        const emp = employee as Record<string, unknown>
+        const name = typeof emp.name === 'string' ? emp.name : ''
+        const availability = Array.isArray(emp.availability) ? emp.availability : []
+        return [normalizeEmployeeConstraintName(name), availability] as const
+      }),
   )
 }
 
