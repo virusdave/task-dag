@@ -5,7 +5,9 @@
     "rootDir": "./src",
     "lib": ["ES2022"],
     "types": ["node"],
-    "tsBuildInfoFile": "./tsconfig.server.tsbuildinfo"
+    "tsBuildInfoFile": "./tsconfig.server.tsbuildinfo",
+    "skipLibCheck": true,
+    "noEmit": false
   },
   "include": [
     "src/server/**/*",
@@ -16,6 +18,7 @@
     "src/client/**/*",
     "**/*.test.ts",
     "**/*.test.tsx",
-    "**/__tests__/**/*"
+    "**/__tests__/**/*",
+    "src/worker/scheduling/extractConstraints.ts"
   ]
 }
