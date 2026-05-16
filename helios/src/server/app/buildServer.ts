@@ -118,6 +118,10 @@ async function registerApplicationSurface(server: FastifyInstance) {
   await server.register(fastifyStatic, {
     root: clientDistPath,
     wildcard: false,
+    // Don't let fastify-static auto-serve index.html for `/` — we own
+    // that response below so we can set Cache-Control: no-store on the
+    // SPA shell.
+    index: false,
   })
 
   // SPA history fallback: any unmatched GET falls back to index.html so
