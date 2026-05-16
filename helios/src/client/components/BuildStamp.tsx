@@ -1,13 +1,21 @@
 // Tiny build-stamp overlay anchored to the top-left of every page,
 // including /login. Renders the short git SHA the bundle was built
-// from and the build timestamp. The values are baked into the bundle
-// at vite-build time (see vite.config.ts `define`), so the only way
-// these change is a fresh build + deploy — making it trivial to spot
-// when production is serving stale code.
+// from and the build timestamp.
+//
+// The values come from /build-info.json, which the vite build emits
+// alongside the hashed asset bundle. We deliberately do NOT bake them
+// into the JS bundle (via vite `define`) because doing so changes the
+// bundle hash on every build (timestamp drifts), which rotates the
+// /assets/* filenames on every redeploy and bricks open browser tabs
+// whose cached index.html still references the previous hash.
 
-declare const __HELIOS_BUILD_SHA__: string
-declare const __HELIOS_BUILD_SUBJECT__: string
-declare const __HELIOS_BUILD_TIME__: string
+import { useEffect, useState } from 'react'
+
+interface BuildInfo {
+  sha: string
+  subject: string
+  builtAt: string
+}
 
 const STYLE: React.CSSProperties = {
   position: 'fixed',
@@ -25,17 +33,43 @@ const STYLE: React.CSSProperties = {
   userSelect: 'all',
 }
 
-export function BuildStamp(): JSX.Element {
-  const sha = __HELIOS_BUILD_SHA__
-  const builtAt = __HELIOS_BUILD_TIME__
-  // Render in America/New_York at hh:mm resolution so it matches the
-  // ops team's wall clock. The tzdb abbreviation (EST/EDT) is shown
-  // so the stamp is unambiguous across DST transitions.
-  const compactTime = formatCompactNewYork(builtAt)
-  const title = `Helios bundle\nsha: ${sha}\nbuilt: ${builtAt}\nsubject: ${__HELIOS_BUILD_SUBJECT__ || '(unavailable)'}`
+export function BuildStamp(): JSX.Element | null {
+  const [info, setInfo] = useState<BuildInfo | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    fetch('/build-info.json', { cache: 'no-store' })
+      .then((response) => (response.ok ? response.json() : null))
+      .then((payload: unknown) => {
+        if (cancelled || !payload || typeof payload !== 'object') {
+          return
+        }
+        const candidate = payload as Partial<BuildInfo>
+        if (
+          typeof candidate.sha === 'string' &&
+          typeof candidate.subject === 'string' &&
+          typeof candidate.builtAt === 'string'
+        ) {
+          setInfo({ sha: candidate.sha, subject: candidate.subject, builtAt: candidate.builtAt })
+        }
+      })
+      .catch(() => {
+        // Stamp is purely cosmetic; ignore fetch errors.
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  if (!info) {
+    return null
+  }
+
+  const compactTime = formatCompactNewYork(info.builtAt)
+  const title = `Helios bundle\nsha: ${info.sha}\nbuilt: ${info.builtAt}\nsubject: ${info.subject || '(unavailable)'}`
   return (
     <div style={STYLE} title={title} aria-label="helios build stamp">
-      {sha} · {compactTime}
+      {info.sha} · {compactTime}
     </div>
   )
 }

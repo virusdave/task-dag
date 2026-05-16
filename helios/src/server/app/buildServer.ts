@@ -120,7 +120,20 @@ async function registerApplicationSurface(server: FastifyInstance) {
     wildcard: false,
   })
 
-  server.get('/*', async (_request: FastifyRequest, reply: FastifyReply) => reply.sendFile('index.html'))
+  // SPA history fallback: any unmatched GET falls back to index.html so
+  // client-side react-router can take over. We deliberately exclude
+  // /assets/* (hashed bundles, CSS, source maps) so a stale browser tab
+  // requesting a no-longer-built asset hash gets a clean 404 instead of
+  // an index.html body served with text/html MIME — which the browser
+  // would otherwise refuse with "Failed to load module script: Expected
+  // a JavaScript-or-Wasm module script but the server responded with a
+  // MIME type of 'text/html'", bricking the page across redeploys.
+  server.get('/*', async (request: FastifyRequest, reply: FastifyReply) => {
+    if (request.url.startsWith('/assets/')) {
+      return reply.status(404).send({ error: 'asset not found' })
+    }
+    return reply.sendFile('index.html')
+  })
 }
 
 function isMutatingMethod(method: string): boolean {
