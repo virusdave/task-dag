@@ -1,24 +1,26 @@
 #!/usr/bin/env python3
-"""Create one Sweed promo action per distinct brand in purchase order
-131845 (Stop 31 LLC), each granting 15% off everything from that brand,
-all attached to the existing campaign "1Off" (id 13020,
-GUID 9176347c-503f-413c-a53a-7f7eefb03cca).
+"""Create a single consolidated Sweed promo action that grants 15% off
+every product from any of the distinct brands present in purchase order
+131845 (Stop 31 LLC), attached to the existing campaign "1Off" (id
+13020, GUID 9176347c-503f-413c-a53a-7f7eefb03cca).
 
-Each promo:
+Shape of the promo:
   * applicationType  = Simple
   * actionType       = Percent discount
   * applicationTarget= Product   (discount applies to qualifying items)
   * applicationMode  = Regular   (stacks at the discount step)
   * discountPercent  = 15
-  * one Get selector with a single rule: brandsIds == <brand>
+  * exactly one Get selector whose single rule is
+    `brandsIds IN [<every brand from the PO>]`
 
-Sweed treats the "Get" selector as the set of items the discount is
-applied to. For Simple + Percent discount promos the Buy selector is
-generally unused (it's a BOGO/Bundle concept); using one here just
-hides the promo from the Sweed UI's "Discounted items" view.
+Sweed uses the "Get" selector to define the items the discount is
+applied to. The Buy selector is a BOGO/Bundle concept and should not
+be used for Simple + Percent promos (it just hides the brand filter
+from the "Discounted items" view).
 
-The brand list is derived live from the order's positions (each position's
-suggestedProduct -> product.get -> productGroup.get -> brand).
+Customer-facing fields (name, description) must never leak distributor
+name, PO number, cost, or any other internal sourcing data - Sweed
+surfaces them in the e-commerce UI.
 
 Run:
   python3 ads/promos/2026-05-16-1off-stop31/create_brand_promos.py        # dry run
@@ -30,7 +32,6 @@ import argparse
 import base64
 import datetime as dt
 import json
-import re
 import sys
 import uuid
 from pathlib import Path
@@ -49,9 +50,12 @@ PURCHASE_ORDER_ID = 131845
 SITE_DEALER_ID = 210705  # Freshly Baked NYC - Midtown (purchase is filed here)
 DISCOUNT_PERCENT = 15.0
 FROM_DATE_ISO = "2026-05-16T00:00:00Z"
+PROMO_NAME = "1Off Brands 15% Off"
+PROMO_SHORT_NAME = "1OffBrands15%"
+PROMO_DESCRIPTION = "15% off all featured 1Off brands:"
 
 
-def collect_distinct_brand_ids(order_id: int) -> list[dict]:
+def collect_distinct_brands(order_id: int) -> list[dict]:
     sweed.api_call("store.auth.dealer.set", {"dealerId": SITE_DEALER_ID})
     order = sweed.api_call("store.purchase.order.get", {"id": order_id})
 
@@ -78,15 +82,7 @@ def collect_distinct_brand_ids(order_id: int) -> list[dict]:
     return [{"id": bid, "name": bname} for bid, bname in sorted(brands.items(), key=lambda kv: (kv[1] or "").lower())]
 
 
-def brand_short_name(brand_name: str) -> str:
-    # Sweed shortName has a ~16 char practical UI limit; keep it tight.
-    # Do NOT prefix with the campaign name (e.g. "1Off") - the campaign
-    # already provides that context in the UI.
-    slug = re.sub(r"[^A-Za-z0-9]+", "", brand_name)
-    return f"{slug}15"[:24]
-
-
-def make_selector_data(brand_id: int, brand_name: str) -> str:
+def make_selector_data(brands: list[dict]) -> str:
     payload = {
         "id": "__ROOT__",
         "root": True,
@@ -98,18 +94,17 @@ def make_selector_data(brand_id: int, brand_name: str) -> str:
                 "field": "brandsIds",
                 "type": "multiSelect",
                 "operator": "equal",
-                "value": [{"id": brand_id, "name": brand_name}],
+                "value": [{"id": b["id"], "name": b["name"]} for b in brands],
             }
         ],
         "touched": True,
     }
-    return base64.b64encode(json.dumps(payload).encode()).decode()
+    return base64.b64encode(json.dumps(payload, separators=(",", ":")).encode()).decode()
 
 
-def existing_action_for_brand(brand_id: int) -> dict | None:
-    """Return any enabled action in this campaign whose get selector targets
-    exactly this brand (so we don't double-create on re-runs). Disabled
-    actions and disabled selectors are ignored."""
+def existing_consolidated_action(brand_ids: set[int]) -> dict | None:
+    """Return any enabled action in the campaign whose lone get selector
+    targets exactly this brand set (so re-runs are idempotent)."""
     page = 1
     while True:
         resp = sweed.api_call(
@@ -120,102 +115,96 @@ def existing_action_for_brand(brand_id: int) -> dict | None:
         for action in data:
             if not action.get("enabled"):
                 continue
-            for selector in action.get("getSelectors") or []:
-                if not selector.get("enabled"):
-                    continue
-                brands = selector.get("brands") or []
-                if len(brands) == 1 and int(brands[0]["id"]) == brand_id:
-                    return action
+            get_selectors = [s for s in (action.get("getSelectors") or []) if s.get("enabled")]
+            if len(get_selectors) != 1:
+                continue
+            sel_brand_ids = {int(b["id"]) for b in (get_selectors[0].get("brands") or [])}
+            if sel_brand_ids == brand_ids:
+                return action
         if len(data) < 200:
             return None
         page += 1
 
 
-def create_promo_for_brand(brand: dict) -> dict:
-    name = f"{brand['name']} 15% off"
-    short_name = brand_short_name(brand["name"])
-    # Customer-facing: never include distributor name, PO number, cost,
-    # or any other internal sourcing detail. Sweed surfaces this field
-    # in ecommerce contexts. Keep it short and benefit-focused.
-    description = f"15% off all {brand['name']} products."
-    action = sweed.api_call(
-        "store.promo.action.add",
-        {
-            "campaignId": CAMPAIGN_ID,
-            "applicationStepId": 1,   # Discount
-            "applicationTargetId": 1, # Product (qualifying items)
-            "applicationModeId": 1,   # Regular
-            "applicationTypeId": 1,   # Simple
-            "actionTypeId": 1,        # Percent discount
-            "name": name,
-            "shortName": short_name,
-            "description": description,
-            "fromDate": FROM_DATE_ISO,
-            "discountPercent": DISCOUNT_PERCENT,
-            "discountAmounts": [{"buyValue": 0.01, "discountPercent": DISCOUNT_PERCENT}],
-            "requirementTypeId": 1,   # Qty
-        },
-    )
-    action_id = action["id"]
-    selector = sweed.api_call(
-        "store.promo.selector.get.add",
-        {
-            "actionId": action_id,
-            "brandsIds": [brand["id"]],
-            "applicationModeId": 2,    # Any product
-            "distributionLevelId": 3,  # All stores
-            "selectorData": make_selector_data(brand["id"], brand["name"]),
-        },
-    )
-    return {"action": action, "getSelector": selector}
-
-
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--apply", action="store_true", help="Actually create promo actions.")
+    parser.add_argument("--apply", action="store_true", help="Actually create the promo action.")
     args = parser.parse_args()
 
-    brands = collect_distinct_brand_ids(PURCHASE_ORDER_ID)
+    brands = collect_distinct_brands(PURCHASE_ORDER_ID)
     print(f"Distinct brands in purchase {PURCHASE_ORDER_ID} ({len(brands)}):")
     for b in brands:
         print(f"  {b['id']:>5}  {b['name']}")
 
-    # Re-enter site context for promo writes (campaign is owned by Midtown).
     sweed.api_call("store.auth.dealer.set", {"dealerId": SITE_DEALER_ID})
 
-    results = []
-    for brand in brands:
-        existing = existing_action_for_brand(brand["id"])
-        if existing:
-            print(f"  ! {brand['name']}: existing action {existing['id']} ({existing.get('name')!r}) already targets this brand; skipping.")
-            results.append({"brand": brand, "skippedExistingActionId": existing["id"]})
-            continue
-        if not args.apply:
-            print(f"  + {brand['name']}: would create action and brand get-selector.")
-            results.append({"brand": brand, "dryRun": True})
-            continue
-        created = create_promo_for_brand(brand)
-        print(f"  + {brand['name']}: action {created['action']['id']} selector {created['getSelector']['id']}")
-        results.append({"brand": brand, "created": created})
-
-    if args.apply:
-        out = WORKDIR / "create_brand_promos_results.json"
-        out.write_text(
-            json.dumps(
-                {
-                    "ranAt": dt.datetime.now(dt.timezone.utc).isoformat(),
-                    "campaignId": CAMPAIGN_ID,
-                    "purchaseOrderId": PURCHASE_ORDER_ID,
-                    "results": results,
-                },
-                indent=2,
-                default=str,
-            )
-            + "\n"
+    brand_ids = {b["id"] for b in brands}
+    existing = existing_consolidated_action(brand_ids)
+    if existing:
+        print(
+            f"\n  ! Enabled action {existing['id']} ({existing.get('name')!r}) "
+            "already covers exactly this brand set; nothing to do."
         )
-        print(f"\nWrote {out}")
-    else:
-        print("\nDry run — pass --apply to actually create promo actions.")
+        return 0
+
+    if not args.apply:
+        print(
+            f"\n  + would create action {PROMO_NAME!r} in campaign {CAMPAIGN_ID} "
+            f"with one get selector matching brandsIds IN {sorted(brand_ids)}."
+        )
+        print("\nDry run — pass --apply to write.")
+        return 0
+
+    action = sweed.api_call(
+        "store.promo.action.add",
+        {
+            "campaignId": CAMPAIGN_ID,
+            "applicationStepId": 1,    # Discount
+            "applicationTargetId": 1,  # Product
+            "applicationModeId": 1,    # Regular
+            "applicationTypeId": 1,    # Simple
+            "actionTypeId": 1,         # Percent discount
+            "name": PROMO_NAME,
+            "shortName": PROMO_SHORT_NAME,
+            "description": PROMO_DESCRIPTION,
+            "fromDate": FROM_DATE_ISO,
+            "discountPercent": DISCOUNT_PERCENT,
+            "discountAmounts": [{"buyValue": 0.01, "discountPercent": DISCOUNT_PERCENT}],
+            "requirementTypeId": 1,    # Qty
+        },
+    )
+    selector = sweed.api_call(
+        "store.promo.selector.get.add",
+        {
+            "actionId": action["id"],
+            "brandsIds": [b["id"] for b in brands],
+            "applicationModeId": 2,    # Any product
+            "distributionLevelId": 3,  # All stores
+            "selectorData": make_selector_data(brands),
+        },
+    )
+    print(
+        f"\n  + created action {action['id']} {PROMO_NAME!r} with get selector "
+        f"{selector['id']} (productCount={selector.get('productCount')})"
+    )
+
+    out = WORKDIR / "create_brand_promos_results.json"
+    out.write_text(
+        json.dumps(
+            {
+                "ranAt": dt.datetime.now(dt.timezone.utc).isoformat(),
+                "campaignId": CAMPAIGN_ID,
+                "purchaseOrderId": PURCHASE_ORDER_ID,
+                "brands": brands,
+                "action": action,
+                "getSelector": selector,
+            },
+            indent=2,
+            default=str,
+        )
+        + "\n"
+    )
+    print(f"\nWrote {out}")
     return 0
 
 

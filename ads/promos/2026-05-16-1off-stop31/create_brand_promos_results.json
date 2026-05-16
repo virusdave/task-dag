@@ -1,1078 +1,126 @@
 {
-  "ranAt": "2026-05-16T15:20:59.297550+00:00",
+  "finalizedAt": "2026-05-16T15:58:14.171519+00:00",
   "campaignId": "13020",
   "purchaseOrderId": 131845,
-  "results": [
-    {
-      "brand": {
-        "id": 15391,
-        "name": "Doobie Labs"
-      },
-      "created": {
-        "action": {
-          "productCount": 0,
-          "isAdditional": false,
-          "shortName": "1OffDoobieLabs15",
-          "campaignId": "13020",
-          "campaignName": "1Off",
-          "campaignFromDate": "2026-05-16T00:00:00Z",
-          "campaignTypeId": "1",
-          "applicationStep": {
-            "id": 1,
-            "name": "Discount"
+  "consolidatedAction": {
+    "id": "44901",
+    "name": "1Off Brands 15% Off",
+    "shortName": "1OffBrands15%",
+    "description": "15% off all featured 1Off brands:",
+    "enabled": true,
+    "getSelectors": [
+      {
+        "brands": [
+          {
+            "id": 15391,
+            "name": "Doobie Labs"
           },
-          "applicationTarget": {
-            "id": 1,
-            "name": "Product"
+          {
+            "id": 11912,
+            "name": "Herb"
           },
-          "applicationMode": {
-            "id": 1,
-            "name": "Regular"
+          {
+            "id": 16409,
+            "name": "Jungle Girl"
           },
-          "applicationType": {
-            "id": 1,
-            "name": "Simple"
+          {
+            "id": 14295,
+            "name": "Moonlit Hash Co"
           },
-          "actionType": {
-            "id": 1,
-            "name": "Percent discount"
+          {
+            "id": 16596,
+            "name": "Preferred Gardens"
           },
-          "actionMixAndMatchType": {
-            "id": 1,
-            "name": "Best for customer"
+          {
+            "id": 14294,
+            "name": "Purps"
           },
-          "applyToGrantedAction": false,
-          "isCodeRequired": false,
-          "discountPercent": 15.0,
-          "isBonusLoyaltyQualifying": true,
-          "dates": [],
-          "salesChannels": [],
-          "fulfilmentTypes": [],
-          "selectorSync": [],
-          "ecommerceUpsellModalActionDisplay": false,
-          "ecommerceDiscountMenuActionDisplayType": {
-            "id": 1,
-            "name": "Do not show"
+          {
+            "id": 16411,
+            "name": "Runtz"
           },
-          "ecommerceHomePageActionDisplayType": {
-            "id": 1,
-            "name": "Do not show"
+          {
+            "id": 14289,
+            "name": "Smartbud"
           },
-          "displayInEcommerceProducts": false,
-          "excludeDiscountedProducts": false,
-          "originator": {
-            "id": 210705,
-            "name": "Freshly Baked NYC - Midtown"
-          },
-          "targetStoreNames": [],
-          "tags": [],
-          "isVendorReimbursement": false,
-          "discountAmounts": [
-            {
-              "buyValue": 0.01,
-              "discountPercent": 15.0
-            }
-          ],
-          "requirementTypeId": 1,
-          "requirementType": {
-            "id": 1,
-            "name": "Qty"
-          },
-          "includeBuySelectors": false,
-          "amountLimitPerInvoiceOnSubtotal": false,
-          "alwaysDisplayPromotionDeals": false,
-          "name": "1Off - Doobie Labs 15% off",
-          "description": "15% off all Doobie Labs products. Distributor: Stop 31 LLC; purchase order 131845.",
-          "id": "44880",
-          "fromDate": "2026-05-16T00:00:00Z",
-          "enabled": true
+          {
+            "id": 16412,
+            "name": "Strain Gang"
+          }
+        ],
+        "stores": [],
+        "applicationMode": {
+          "id": 2,
+          "name": "Any product"
         },
-        "buySelector": {
-          "brands": [
-            {
-              "id": 15391,
-              "name": "Doobie Labs"
-            }
-          ],
-          "stores": [],
-          "applicationMode": {
-            "id": 2,
-            "name": "Any product"
-          },
-          "distributionLevel": {
-            "id": 3,
-            "name": "All stores"
-          },
-          "selectorType": {
-            "id": 2,
-            "name": "Buy selector"
-          },
-          "requirementType": {
-            "id": 1,
-            "name": "Qty"
-          },
-          "actionId": "44880",
-          "targetStoreNames": [
-            "All stores"
-          ],
-          "productCount": 0,
-          "selectorData": "eyJpZCI6ICJfX1JPT1RfXyIsICJyb290IjogdHJ1ZSwgImNvbWJpbmF0b3IiOiAiYW5kIiwgInJ1bGVzIjogW3siaWQiOiAiNzQ0Mzg2YTEtZmMzYS00MzJhLWI5YTQtYjJkZTk3NTU2MTk4IiwgIm5ldyI6IHRydWUsICJmaWVsZCI6ICJicmFuZHNJZHMiLCAidHlwZSI6ICJtdWx0aVNlbGVjdCIsICJvcGVyYXRvciI6ICJlcXVhbCIsICJ2YWx1ZSI6IFt7ImlkIjogMTUzOTEsICJuYW1lIjogIkRvb2JpZSBMYWJzIn1dfV0sICJ0b3VjaGVkIjogdHJ1ZX0=",
-          "id": "32583",
-          "enabled": true
-        }
+        "distributionLevel": {
+          "id": 3,
+          "name": "All stores"
+        },
+        "selectorType": {
+          "id": 1,
+          "name": "Get selector"
+        },
+        "stackType": {
+          "id": 1,
+          "name": "Or"
+        },
+        "actionId": "44901",
+        "targetStoreNames": [
+          "All stores"
+        ],
+        "productCount": 67,
+        "selectorData": "eyJpZCI6Il9fUk9PVF9fIiwicm9vdCI6dHJ1ZSwiY29tYmluYXRvciI6ImFuZCIsInJ1bGVzIjpbeyJpZCI6Ijc5MzAwYzE0LTJmMjItNGM1Zi1iYzMyLTk2NzVmZWY2Yzg0OCIsIm5ldyI6dHJ1ZSwiZmllbGQiOiJicmFuZHNJZHMiLCJ0eXBlIjoibXVsdGlTZWxlY3QiLCJvcGVyYXRvciI6ImVxdWFsIiwidmFsdWUiOlt7ImlkIjoxNTM5MSwibmFtZSI6IkRvb2JpZSBMYWJzIn0seyJpZCI6MTE5MTIsIm5hbWUiOiJIZXJiIn0seyJpZCI6MTY0MDksIm5hbWUiOiJKdW5nbGUgR2lybCJ9LHsiaWQiOjE0Mjk1LCJuYW1lIjoiTW9vbmxpdCBIYXNoIENvIn0seyJpZCI6MTY1OTYsIm5hbWUiOiJQcmVmZXJyZWQgR2FyZGVucyJ9LHsiaWQiOjE0Mjk0LCJuYW1lIjoiUHVycHMifSx7ImlkIjoxNjQxMSwibmFtZSI6IlJ1bnR6In0seyJpZCI6MTQyODksIm5hbWUiOiJTbWFydGJ1ZCJ9LHsiaWQiOjE2NDEyLCJuYW1lIjoiU3RyYWluIEdhbmcifV19XSwidG91Y2hlZCI6dHJ1ZX0=",
+        "id": "32614",
+        "enabled": true
       }
+    ]
+  },
+  "supersededActions": [
+    {
+      "id": "44880",
+      "name": "Doobie Labs 15% off",
+      "enabled": false
     },
     {
-      "brand": {
-        "id": 11912,
-        "name": "Herb"
-      },
-      "created": {
-        "action": {
-          "productCount": 0,
-          "isAdditional": false,
-          "shortName": "1OffHerb15",
-          "campaignId": "13020",
-          "campaignName": "1Off",
-          "campaignFromDate": "2026-05-16T00:00:00Z",
-          "campaignTypeId": "1",
-          "applicationStep": {
-            "id": 1,
-            "name": "Discount"
-          },
-          "applicationTarget": {
-            "id": 1,
-            "name": "Product"
-          },
-          "applicationMode": {
-            "id": 1,
-            "name": "Regular"
-          },
-          "applicationType": {
-            "id": 1,
-            "name": "Simple"
-          },
-          "actionType": {
-            "id": 1,
-            "name": "Percent discount"
-          },
-          "actionMixAndMatchType": {
-            "id": 1,
-            "name": "Best for customer"
-          },
-          "applyToGrantedAction": false,
-          "isCodeRequired": false,
-          "discountPercent": 15.0,
-          "isBonusLoyaltyQualifying": true,
-          "dates": [],
-          "salesChannels": [],
-          "fulfilmentTypes": [],
-          "selectorSync": [],
-          "ecommerceUpsellModalActionDisplay": false,
-          "ecommerceDiscountMenuActionDisplayType": {
-            "id": 1,
-            "name": "Do not show"
-          },
-          "ecommerceHomePageActionDisplayType": {
-            "id": 1,
-            "name": "Do not show"
-          },
-          "displayInEcommerceProducts": false,
-          "excludeDiscountedProducts": false,
-          "originator": {
-            "id": 210705,
-            "name": "Freshly Baked NYC - Midtown"
-          },
-          "targetStoreNames": [],
-          "tags": [],
-          "isVendorReimbursement": false,
-          "discountAmounts": [
-            {
-              "buyValue": 0.01,
-              "discountPercent": 15.0
-            }
-          ],
-          "requirementTypeId": 1,
-          "requirementType": {
-            "id": 1,
-            "name": "Qty"
-          },
-          "includeBuySelectors": false,
-          "amountLimitPerInvoiceOnSubtotal": false,
-          "alwaysDisplayPromotionDeals": false,
-          "name": "1Off - Herb 15% off",
-          "description": "15% off all Herb products. Distributor: Stop 31 LLC; purchase order 131845.",
-          "id": "44881",
-          "fromDate": "2026-05-16T00:00:00Z",
-          "enabled": true
-        },
-        "buySelector": {
-          "brands": [
-            {
-              "id": 11912,
-              "name": "Herb"
-            }
-          ],
-          "stores": [],
-          "applicationMode": {
-            "id": 2,
-            "name": "Any product"
-          },
-          "distributionLevel": {
-            "id": 3,
-            "name": "All stores"
-          },
-          "selectorType": {
-            "id": 2,
-            "name": "Buy selector"
-          },
-          "requirementType": {
-            "id": 1,
-            "name": "Qty"
-          },
-          "actionId": "44881",
-          "targetStoreNames": [
-            "All stores"
-          ],
-          "productCount": 0,
-          "selectorData": "eyJpZCI6ICJfX1JPT1RfXyIsICJyb290IjogdHJ1ZSwgImNvbWJpbmF0b3IiOiAiYW5kIiwgInJ1bGVzIjogW3siaWQiOiAiMWUwY2QzZDMtYzcyMi00OTZkLWFiZTUtOTVmNTI3MWZjZjRjIiwgIm5ldyI6IHRydWUsICJmaWVsZCI6ICJicmFuZHNJZHMiLCAidHlwZSI6ICJtdWx0aVNlbGVjdCIsICJvcGVyYXRvciI6ICJlcXVhbCIsICJ2YWx1ZSI6IFt7ImlkIjogMTE5MTIsICJuYW1lIjogIkhlcmIifV19XSwgInRvdWNoZWQiOiB0cnVlfQ==",
-          "id": "32584",
-          "enabled": true
-        }
-      }
+      "id": "44881",
+      "name": "Herb 15% off",
+      "enabled": false
     },
     {
-      "brand": {
-        "id": 16409,
-        "name": "Jungle Girl"
-      },
-      "created": {
-        "action": {
-          "productCount": 0,
-          "isAdditional": false,
-          "shortName": "1OffJungleGirl15",
-          "campaignId": "13020",
-          "campaignName": "1Off",
-          "campaignFromDate": "2026-05-16T00:00:00Z",
-          "campaignTypeId": "1",
-          "applicationStep": {
-            "id": 1,
-            "name": "Discount"
-          },
-          "applicationTarget": {
-            "id": 1,
-            "name": "Product"
-          },
-          "applicationMode": {
-            "id": 1,
-            "name": "Regular"
-          },
-          "applicationType": {
-            "id": 1,
-            "name": "Simple"
-          },
-          "actionType": {
-            "id": 1,
-            "name": "Percent discount"
-          },
-          "actionMixAndMatchType": {
-            "id": 1,
-            "name": "Best for customer"
-          },
-          "applyToGrantedAction": false,
-          "isCodeRequired": false,
-          "discountPercent": 15.0,
-          "isBonusLoyaltyQualifying": true,
-          "dates": [],
-          "salesChannels": [],
-          "fulfilmentTypes": [],
-          "selectorSync": [],
-          "ecommerceUpsellModalActionDisplay": false,
-          "ecommerceDiscountMenuActionDisplayType": {
-            "id": 1,
-            "name": "Do not show"
-          },
-          "ecommerceHomePageActionDisplayType": {
-            "id": 1,
-            "name": "Do not show"
-          },
-          "displayInEcommerceProducts": false,
-          "excludeDiscountedProducts": false,
-          "originator": {
-            "id": 210705,
-            "name": "Freshly Baked NYC - Midtown"
-          },
-          "targetStoreNames": [],
-          "tags": [],
-          "isVendorReimbursement": false,
-          "discountAmounts": [
-            {
-              "buyValue": 0.01,
-              "discountPercent": 15.0
-            }
-          ],
-          "requirementTypeId": 1,
-          "requirementType": {
-            "id": 1,
-            "name": "Qty"
-          },
-          "includeBuySelectors": false,
-          "amountLimitPerInvoiceOnSubtotal": false,
-          "alwaysDisplayPromotionDeals": false,
-          "name": "1Off - Jungle Girl 15% off",
-          "description": "15% off all Jungle Girl products. Distributor: Stop 31 LLC; purchase order 131845.",
-          "id": "44882",
-          "fromDate": "2026-05-16T00:00:00Z",
-          "enabled": true
-        },
-        "buySelector": {
-          "brands": [
-            {
-              "id": 16409,
-              "name": "Jungle Girl"
-            }
-          ],
-          "stores": [],
-          "applicationMode": {
-            "id": 2,
-            "name": "Any product"
-          },
-          "distributionLevel": {
-            "id": 3,
-            "name": "All stores"
-          },
-          "selectorType": {
-            "id": 2,
-            "name": "Buy selector"
-          },
-          "requirementType": {
-            "id": 1,
-            "name": "Qty"
-          },
-          "actionId": "44882",
-          "targetStoreNames": [
-            "All stores"
-          ],
-          "productCount": 0,
-          "selectorData": "eyJpZCI6ICJfX1JPT1RfXyIsICJyb290IjogdHJ1ZSwgImNvbWJpbmF0b3IiOiAiYW5kIiwgInJ1bGVzIjogW3siaWQiOiAiNDMwM2UxMjctYTBjYi00ZjYxLWI0NDgtYWYwNWEzODRiODhhIiwgIm5ldyI6IHRydWUsICJmaWVsZCI6ICJicmFuZHNJZHMiLCAidHlwZSI6ICJtdWx0aVNlbGVjdCIsICJvcGVyYXRvciI6ICJlcXVhbCIsICJ2YWx1ZSI6IFt7ImlkIjogMTY0MDksICJuYW1lIjogIkp1bmdsZSBHaXJsIn1dfV0sICJ0b3VjaGVkIjogdHJ1ZX0=",
-          "id": "32585",
-          "enabled": true
-        }
-      }
+      "id": "44882",
+      "name": "Jungle Girl 15% off",
+      "enabled": false
     },
     {
-      "brand": {
-        "id": 14295,
-        "name": "Moonlit Hash Co"
-      },
-      "created": {
-        "action": {
-          "productCount": 0,
-          "isAdditional": false,
-          "shortName": "1OffMoonlitHashCo15",
-          "campaignId": "13020",
-          "campaignName": "1Off",
-          "campaignFromDate": "2026-05-16T00:00:00Z",
-          "campaignTypeId": "1",
-          "applicationStep": {
-            "id": 1,
-            "name": "Discount"
-          },
-          "applicationTarget": {
-            "id": 1,
-            "name": "Product"
-          },
-          "applicationMode": {
-            "id": 1,
-            "name": "Regular"
-          },
-          "applicationType": {
-            "id": 1,
-            "name": "Simple"
-          },
-          "actionType": {
-            "id": 1,
-            "name": "Percent discount"
-          },
-          "actionMixAndMatchType": {
-            "id": 1,
-            "name": "Best for customer"
-          },
-          "applyToGrantedAction": false,
-          "isCodeRequired": false,
-          "discountPercent": 15.0,
-          "isBonusLoyaltyQualifying": true,
-          "dates": [],
-          "salesChannels": [],
-          "fulfilmentTypes": [],
-          "selectorSync": [],
-          "ecommerceUpsellModalActionDisplay": false,
-          "ecommerceDiscountMenuActionDisplayType": {
-            "id": 1,
-            "name": "Do not show"
-          },
-          "ecommerceHomePageActionDisplayType": {
-            "id": 1,
-            "name": "Do not show"
-          },
-          "displayInEcommerceProducts": false,
-          "excludeDiscountedProducts": false,
-          "originator": {
-            "id": 210705,
-            "name": "Freshly Baked NYC - Midtown"
-          },
-          "targetStoreNames": [],
-          "tags": [],
-          "isVendorReimbursement": false,
-          "discountAmounts": [
-            {
-              "buyValue": 0.01,
-              "discountPercent": 15.0
-            }
-          ],
-          "requirementTypeId": 1,
-          "requirementType": {
-            "id": 1,
-            "name": "Qty"
-          },
-          "includeBuySelectors": false,
-          "amountLimitPerInvoiceOnSubtotal": false,
-          "alwaysDisplayPromotionDeals": false,
-          "name": "1Off - Moonlit Hash Co 15% off",
-          "description": "15% off all Moonlit Hash Co products. Distributor: Stop 31 LLC; purchase order 131845.",
-          "id": "44883",
-          "fromDate": "2026-05-16T00:00:00Z",
-          "enabled": true
-        },
-        "buySelector": {
-          "brands": [
-            {
-              "id": 14295,
-              "name": "Moonlit Hash Co"
-            }
-          ],
-          "stores": [],
-          "applicationMode": {
-            "id": 2,
-            "name": "Any product"
-          },
-          "distributionLevel": {
-            "id": 3,
-            "name": "All stores"
-          },
-          "selectorType": {
-            "id": 2,
-            "name": "Buy selector"
-          },
-          "requirementType": {
-            "id": 1,
-            "name": "Qty"
-          },
-          "actionId": "44883",
-          "targetStoreNames": [
-            "All stores"
-          ],
-          "productCount": 0,
-          "selectorData": "eyJpZCI6ICJfX1JPT1RfXyIsICJyb290IjogdHJ1ZSwgImNvbWJpbmF0b3IiOiAiYW5kIiwgInJ1bGVzIjogW3siaWQiOiAiNzMwYzhiYmQtZmUwMy00ZWU3LTk3NzAtOTY4YTYzZjhkNzk5IiwgIm5ldyI6IHRydWUsICJmaWVsZCI6ICJicmFuZHNJZHMiLCAidHlwZSI6ICJtdWx0aVNlbGVjdCIsICJvcGVyYXRvciI6ICJlcXVhbCIsICJ2YWx1ZSI6IFt7ImlkIjogMTQyOTUsICJuYW1lIjogIk1vb25saXQgSGFzaCBDbyJ9XX1dLCAidG91Y2hlZCI6IHRydWV9",
-          "id": "32586",
-          "enabled": true
-        }
-      }
+      "id": "44883",
+      "name": "Moonlit Hash Co 15% off",
+      "enabled": false
     },
     {
-      "brand": {
-        "id": 16596,
-        "name": "Preferred Gardens"
-      },
-      "created": {
-        "action": {
-          "productCount": 0,
-          "isAdditional": false,
-          "shortName": "1OffPreferredGardens15",
-          "campaignId": "13020",
-          "campaignName": "1Off",
-          "campaignFromDate": "2026-05-16T00:00:00Z",
-          "campaignTypeId": "1",
-          "applicationStep": {
-            "id": 1,
-            "name": "Discount"
-          },
-          "applicationTarget": {
-            "id": 1,
-            "name": "Product"
-          },
-          "applicationMode": {
-            "id": 1,
-            "name": "Regular"
-          },
-          "applicationType": {
-            "id": 1,
-            "name": "Simple"
-          },
-          "actionType": {
-            "id": 1,
-            "name": "Percent discount"
-          },
-          "actionMixAndMatchType": {
-            "id": 1,
-            "name": "Best for customer"
-          },
-          "applyToGrantedAction": false,
-          "isCodeRequired": false,
-          "discountPercent": 15.0,
-          "isBonusLoyaltyQualifying": true,
-          "dates": [],
-          "salesChannels": [],
-          "fulfilmentTypes": [],
-          "selectorSync": [],
-          "ecommerceUpsellModalActionDisplay": false,
-          "ecommerceDiscountMenuActionDisplayType": {
-            "id": 1,
-            "name": "Do not show"
-          },
-          "ecommerceHomePageActionDisplayType": {
-            "id": 1,
-            "name": "Do not show"
-          },
-          "displayInEcommerceProducts": false,
-          "excludeDiscountedProducts": false,
-          "originator": {
-            "id": 210705,
-            "name": "Freshly Baked NYC - Midtown"
-          },
-          "targetStoreNames": [],
-          "tags": [],
-          "isVendorReimbursement": false,
-          "discountAmounts": [
-            {
-              "buyValue": 0.01,
-              "discountPercent": 15.0
-            }
-          ],
-          "requirementTypeId": 1,
-          "requirementType": {
-            "id": 1,
-            "name": "Qty"
-          },
-          "includeBuySelectors": false,
-          "amountLimitPerInvoiceOnSubtotal": false,
-          "alwaysDisplayPromotionDeals": false,
-          "name": "1Off - Preferred Gardens 15% off",
-          "description": "15% off all Preferred Gardens products. Distributor: Stop 31 LLC; purchase order 131845.",
-          "id": "44884",
-          "fromDate": "2026-05-16T00:00:00Z",
-          "enabled": true
-        },
-        "buySelector": {
-          "brands": [
-            {
-              "id": 16596,
-              "name": "Preferred Gardens"
-            }
-          ],
-          "stores": [],
-          "applicationMode": {
-            "id": 2,
-            "name": "Any product"
-          },
-          "distributionLevel": {
-            "id": 3,
-            "name": "All stores"
-          },
-          "selectorType": {
-            "id": 2,
-            "name": "Buy selector"
-          },
-          "requirementType": {
-            "id": 1,
-            "name": "Qty"
-          },
-          "actionId": "44884",
-          "targetStoreNames": [
-            "All stores"
-          ],
-          "productCount": 0,
-          "selectorData": "eyJpZCI6ICJfX1JPT1RfXyIsICJyb290IjogdHJ1ZSwgImNvbWJpbmF0b3IiOiAiYW5kIiwgInJ1bGVzIjogW3siaWQiOiAiMDQyYzY5YjQtYmEyYy00YWNiLTkyNzktNzdkYjc5Y2NhYmViIiwgIm5ldyI6IHRydWUsICJmaWVsZCI6ICJicmFuZHNJZHMiLCAidHlwZSI6ICJtdWx0aVNlbGVjdCIsICJvcGVyYXRvciI6ICJlcXVhbCIsICJ2YWx1ZSI6IFt7ImlkIjogMTY1OTYsICJuYW1lIjogIlByZWZlcnJlZCBHYXJkZW5zIn1dfV0sICJ0b3VjaGVkIjogdHJ1ZX0=",
-          "id": "32587",
-          "enabled": true
-        }
-      }
+      "id": "44884",
+      "name": "Preferred Gardens 15% off",
+      "enabled": false
     },
     {
-      "brand": {
-        "id": 14294,
-        "name": "Purps"
-      },
-      "created": {
-        "action": {
-          "productCount": 0,
-          "isAdditional": false,
-          "shortName": "1OffPurps15",
-          "campaignId": "13020",
-          "campaignName": "1Off",
-          "campaignFromDate": "2026-05-16T00:00:00Z",
-          "campaignTypeId": "1",
-          "applicationStep": {
-            "id": 1,
-            "name": "Discount"
-          },
-          "applicationTarget": {
-            "id": 1,
-            "name": "Product"
-          },
-          "applicationMode": {
-            "id": 1,
-            "name": "Regular"
-          },
-          "applicationType": {
-            "id": 1,
-            "name": "Simple"
-          },
-          "actionType": {
-            "id": 1,
-            "name": "Percent discount"
-          },
-          "actionMixAndMatchType": {
-            "id": 1,
-            "name": "Best for customer"
-          },
-          "applyToGrantedAction": false,
-          "isCodeRequired": false,
-          "discountPercent": 15.0,
-          "isBonusLoyaltyQualifying": true,
-          "dates": [],
-          "salesChannels": [],
-          "fulfilmentTypes": [],
-          "selectorSync": [],
-          "ecommerceUpsellModalActionDisplay": false,
-          "ecommerceDiscountMenuActionDisplayType": {
-            "id": 1,
-            "name": "Do not show"
-          },
-          "ecommerceHomePageActionDisplayType": {
-            "id": 1,
-            "name": "Do not show"
-          },
-          "displayInEcommerceProducts": false,
-          "excludeDiscountedProducts": false,
-          "originator": {
-            "id": 210705,
-            "name": "Freshly Baked NYC - Midtown"
-          },
-          "targetStoreNames": [],
-          "tags": [],
-          "isVendorReimbursement": false,
-          "discountAmounts": [
-            {
-              "buyValue": 0.01,
-              "discountPercent": 15.0
-            }
-          ],
-          "requirementTypeId": 1,
-          "requirementType": {
-            "id": 1,
-            "name": "Qty"
-          },
-          "includeBuySelectors": false,
-          "amountLimitPerInvoiceOnSubtotal": false,
-          "alwaysDisplayPromotionDeals": false,
-          "name": "1Off - Purps 15% off",
-          "description": "15% off all Purps products. Distributor: Stop 31 LLC; purchase order 131845.",
-          "id": "44885",
-          "fromDate": "2026-05-16T00:00:00Z",
-          "enabled": true
-        },
-        "buySelector": {
-          "brands": [
-            {
-              "id": 14294,
-              "name": "Purps"
-            }
-          ],
-          "stores": [],
-          "applicationMode": {
-            "id": 2,
-            "name": "Any product"
-          },
-          "distributionLevel": {
-            "id": 3,
-            "name": "All stores"
-          },
-          "selectorType": {
-            "id": 2,
-            "name": "Buy selector"
-          },
-          "requirementType": {
-            "id": 1,
-            "name": "Qty"
-          },
-          "actionId": "44885",
-          "targetStoreNames": [
-            "All stores"
-          ],
-          "productCount": 0,
-          "selectorData": "eyJpZCI6ICJfX1JPT1RfXyIsICJyb290IjogdHJ1ZSwgImNvbWJpbmF0b3IiOiAiYW5kIiwgInJ1bGVzIjogW3siaWQiOiAiM2JlOTI0N2UtYzlkNy00YTRkLTk0M2MtZDQ4Y2E1YzYwMmVjIiwgIm5ldyI6IHRydWUsICJmaWVsZCI6ICJicmFuZHNJZHMiLCAidHlwZSI6ICJtdWx0aVNlbGVjdCIsICJvcGVyYXRvciI6ICJlcXVhbCIsICJ2YWx1ZSI6IFt7ImlkIjogMTQyOTQsICJuYW1lIjogIlB1cnBzIn1dfV0sICJ0b3VjaGVkIjogdHJ1ZX0=",
-          "id": "32588",
-          "enabled": true
-        }
-      }
+      "id": "44885",
+      "name": "Purps 15% off",
+      "enabled": false
     },
     {
-      "brand": {
-        "id": 16411,
-        "name": "Runtz"
-      },
-      "created": {
-        "action": {
-          "productCount": 0,
-          "isAdditional": false,
-          "shortName": "1OffRuntz15",
-          "campaignId": "13020",
-          "campaignName": "1Off",
-          "campaignFromDate": "2026-05-16T00:00:00Z",
-          "campaignTypeId": "1",
-          "applicationStep": {
-            "id": 1,
-            "name": "Discount"
-          },
-          "applicationTarget": {
-            "id": 1,
-            "name": "Product"
-          },
-          "applicationMode": {
-            "id": 1,
-            "name": "Regular"
-          },
-          "applicationType": {
-            "id": 1,
-            "name": "Simple"
-          },
-          "actionType": {
-            "id": 1,
-            "name": "Percent discount"
-          },
-          "actionMixAndMatchType": {
-            "id": 1,
-            "name": "Best for customer"
-          },
-          "applyToGrantedAction": false,
-          "isCodeRequired": false,
-          "discountPercent": 15.0,
-          "isBonusLoyaltyQualifying": true,
-          "dates": [],
-          "salesChannels": [],
-          "fulfilmentTypes": [],
-          "selectorSync": [],
-          "ecommerceUpsellModalActionDisplay": false,
-          "ecommerceDiscountMenuActionDisplayType": {
-            "id": 1,
-            "name": "Do not show"
-          },
-          "ecommerceHomePageActionDisplayType": {
-            "id": 1,
-            "name": "Do not show"
-          },
-          "displayInEcommerceProducts": false,
-          "excludeDiscountedProducts": false,
-          "originator": {
-            "id": 210705,
-            "name": "Freshly Baked NYC - Midtown"
-          },
-          "targetStoreNames": [],
-          "tags": [],
-          "isVendorReimbursement": false,
-          "discountAmounts": [
-            {
-              "buyValue": 0.01,
-              "discountPercent": 15.0
-            }
-          ],
-          "requirementTypeId": 1,
-          "requirementType": {
-            "id": 1,
-            "name": "Qty"
-          },
-          "includeBuySelectors": false,
-          "amountLimitPerInvoiceOnSubtotal": false,
-          "alwaysDisplayPromotionDeals": false,
-          "name": "1Off - Runtz 15% off",
-          "description": "15% off all Runtz products. Distributor: Stop 31 LLC; purchase order 131845.",
-          "id": "44886",
-          "fromDate": "2026-05-16T00:00:00Z",
-          "enabled": true
-        },
-        "buySelector": {
-          "brands": [
-            {
-              "id": 16411,
-              "name": "Runtz"
-            }
-          ],
-          "stores": [],
-          "applicationMode": {
-            "id": 2,
-            "name": "Any product"
-          },
-          "distributionLevel": {
-            "id": 3,
-            "name": "All stores"
-          },
-          "selectorType": {
-            "id": 2,
-            "name": "Buy selector"
-          },
-          "requirementType": {
-            "id": 1,
-            "name": "Qty"
-          },
-          "actionId": "44886",
-          "targetStoreNames": [
-            "All stores"
-          ],
-          "productCount": 0,
-          "selectorData": "eyJpZCI6ICJfX1JPT1RfXyIsICJyb290IjogdHJ1ZSwgImNvbWJpbmF0b3IiOiAiYW5kIiwgInJ1bGVzIjogW3siaWQiOiAiZmY5ZjZkODktNDA3OC00ZWUyLTliZTItYzMxZmU2ZTgwMWFiIiwgIm5ldyI6IHRydWUsICJmaWVsZCI6ICJicmFuZHNJZHMiLCAidHlwZSI6ICJtdWx0aVNlbGVjdCIsICJvcGVyYXRvciI6ICJlcXVhbCIsICJ2YWx1ZSI6IFt7ImlkIjogMTY0MTEsICJuYW1lIjogIlJ1bnR6In1dfV0sICJ0b3VjaGVkIjogdHJ1ZX0=",
-          "id": "32589",
-          "enabled": true
-        }
-      }
+      "id": "44886",
+      "name": "Runtz 15% off",
+      "enabled": false
     },
     {
-      "brand": {
-        "id": 14289,
-        "name": "Smartbud"
-      },
-      "created": {
-        "action": {
-          "productCount": 0,
-          "isAdditional": false,
-          "shortName": "1OffSmartbud15",
-          "campaignId": "13020",
-          "campaignName": "1Off",
-          "campaignFromDate": "2026-05-16T00:00:00Z",
-          "campaignTypeId": "1",
-          "applicationStep": {
-            "id": 1,
-            "name": "Discount"
-          },
-          "applicationTarget": {
-            "id": 1,
-            "name": "Product"
-          },
-          "applicationMode": {
-            "id": 1,
-            "name": "Regular"
-          },
-          "applicationType": {
-            "id": 1,
-            "name": "Simple"
-          },
-          "actionType": {
-            "id": 1,
-            "name": "Percent discount"
-          },
-          "actionMixAndMatchType": {
-            "id": 1,
-            "name": "Best for customer"
-          },
-          "applyToGrantedAction": false,
-          "isCodeRequired": false,
-          "discountPercent": 15.0,
-          "isBonusLoyaltyQualifying": true,
-          "dates": [],
-          "salesChannels": [],
-          "fulfilmentTypes": [],
-          "selectorSync": [],
-          "ecommerceUpsellModalActionDisplay": false,
-          "ecommerceDiscountMenuActionDisplayType": {
-            "id": 1,
-            "name": "Do not show"
-          },
-          "ecommerceHomePageActionDisplayType": {
-            "id": 1,
-            "name": "Do not show"
-          },
-          "displayInEcommerceProducts": false,
-          "excludeDiscountedProducts": false,
-          "originator": {
-            "id": 210705,
-            "name": "Freshly Baked NYC - Midtown"
-          },
-          "targetStoreNames": [],
-          "tags": [],
-          "isVendorReimbursement": false,
-          "discountAmounts": [
-            {
-              "buyValue": 0.01,
-              "discountPercent": 15.0
-            }
-          ],
-          "requirementTypeId": 1,
-          "requirementType": {
-            "id": 1,
-            "name": "Qty"
-          },
-          "includeBuySelectors": false,
-          "amountLimitPerInvoiceOnSubtotal": false,
-          "alwaysDisplayPromotionDeals": false,
-          "name": "1Off - Smartbud 15% off",
-          "description": "15% off all Smartbud products. Distributor: Stop 31 LLC; purchase order 131845.",
-          "id": "44887",
-          "fromDate": "2026-05-16T00:00:00Z",
-          "enabled": true
-        },
-        "buySelector": {
-          "brands": [
-            {
-              "id": 14289,
-              "name": "Smartbud"
-            }
-          ],
-          "stores": [],
-          "applicationMode": {
-            "id": 2,
-            "name": "Any product"
-          },
-          "distributionLevel": {
-            "id": 3,
-            "name": "All stores"
-          },
-          "selectorType": {
-            "id": 2,
-            "name": "Buy selector"
-          },
-          "requirementType": {
-            "id": 1,
-            "name": "Qty"
-          },
-          "actionId": "44887",
-          "targetStoreNames": [
-            "All stores"
-          ],
-          "productCount": 0,
-          "selectorData": "eyJpZCI6ICJfX1JPT1RfXyIsICJyb290IjogdHJ1ZSwgImNvbWJpbmF0b3IiOiAiYW5kIiwgInJ1bGVzIjogW3siaWQiOiAiMjkwODQ1NmItODg1OC00NTQxLWE0M2ItZjI1Y2ZmN2FhOWQzIiwgIm5ldyI6IHRydWUsICJmaWVsZCI6ICJicmFuZHNJZHMiLCAidHlwZSI6ICJtdWx0aVNlbGVjdCIsICJvcGVyYXRvciI6ICJlcXVhbCIsICJ2YWx1ZSI6IFt7ImlkIjogMTQyODksICJuYW1lIjogIlNtYXJ0YnVkIn1dfV0sICJ0b3VjaGVkIjogdHJ1ZX0=",
-          "id": "32590",
-          "enabled": true
-        }
-      }
+      "id": "44887",
+      "name": "Smartbud 15% off",
+      "enabled": false
     },
     {
-      "brand": {
-        "id": 16412,
-        "name": "Strain Gang"
-      },
-      "created": {
-        "action": {
-          "productCount": 0,
-          "isAdditional": false,
-          "shortName": "1OffStrainGang15",
-          "campaignId": "13020",
-          "campaignName": "1Off",
-          "campaignFromDate": "2026-05-16T00:00:00Z",
-          "campaignTypeId": "1",
-          "applicationStep": {
-            "id": 1,
-            "name": "Discount"
-          },
-          "applicationTarget": {
-            "id": 1,
-            "name": "Product"
-          },
-          "applicationMode": {
-            "id": 1,
-            "name": "Regular"
-          },
-          "applicationType": {
-            "id": 1,
-            "name": "Simple"
-          },
-          "actionType": {
-            "id": 1,
-            "name": "Percent discount"
-          },
-          "actionMixAndMatchType": {
-            "id": 1,
-            "name": "Best for customer"
-          },
-          "applyToGrantedAction": false,
-          "isCodeRequired": false,
-          "discountPercent": 15.0,
-          "isBonusLoyaltyQualifying": true,
-          "dates": [],
-          "salesChannels": [],
-          "fulfilmentTypes": [],
-          "selectorSync": [],
-          "ecommerceUpsellModalActionDisplay": false,
-          "ecommerceDiscountMenuActionDisplayType": {
-            "id": 1,
-            "name": "Do not show"
-          },
-          "ecommerceHomePageActionDisplayType": {
-            "id": 1,
-            "name": "Do not show"
-          },
-          "displayInEcommerceProducts": false,
-          "excludeDiscountedProducts": false,
-          "originator": {
-            "id": 210705,
-            "name": "Freshly Baked NYC - Midtown"
-          },
-          "targetStoreNames": [],
-          "tags": [],
-          "isVendorReimbursement": false,
-          "discountAmounts": [
-            {
-              "buyValue": 0.01,
-              "discountPercent": 15.0
-            }
-          ],
-          "requirementTypeId": 1,
-          "requirementType": {
-            "id": 1,
-            "name": "Qty"
-          },
-          "includeBuySelectors": false,
-          "amountLimitPerInvoiceOnSubtotal": false,
-          "alwaysDisplayPromotionDeals": false,
-          "name": "1Off - Strain Gang 15% off",
-          "description": "15% off all Strain Gang products. Distributor: Stop 31 LLC; purchase order 131845.",
-          "id": "44888",
-          "fromDate": "2026-05-16T00:00:00Z",
-          "enabled": true
-        },
-        "buySelector": {
-          "brands": [
-            {
-              "id": 16412,
-              "name": "Strain Gang"
-            }
-          ],
-          "stores": [],
-          "applicationMode": {
-            "id": 2,
-            "name": "Any product"
-          },
-          "distributionLevel": {
-            "id": 3,
-            "name": "All stores"
-          },
-          "selectorType": {
-            "id": 2,
-            "name": "Buy selector"
-          },
-          "requirementType": {
-            "id": 1,
-            "name": "Qty"
-          },
-          "actionId": "44888",
-          "targetStoreNames": [
-            "All stores"
-          ],
-          "productCount": 0,
-          "selectorData": "eyJpZCI6ICJfX1JPT1RfXyIsICJyb290IjogdHJ1ZSwgImNvbWJpbmF0b3IiOiAiYW5kIiwgInJ1bGVzIjogW3siaWQiOiAiY2Y0NmVhNjYtYTI0Zi00NGUyLWFiYWYtOTY0MDc3YzAzNDZlIiwgIm5ldyI6IHRydWUsICJmaWVsZCI6ICJicmFuZHNJZHMiLCAidHlwZSI6ICJtdWx0aVNlbGVjdCIsICJvcGVyYXRvciI6ICJlcXVhbCIsICJ2YWx1ZSI6IFt7ImlkIjogMTY0MTIsICJuYW1lIjogIlN0cmFpbiBHYW5nIn1dfV0sICJ0b3VjaGVkIjogdHJ1ZX0=",
-          "id": "32591",
-          "enabled": true
-        }
-      }
+      "id": "44888",
+      "name": "Strain Gang 15% off",
+      "enabled": false
     }
   ]
 }
