@@ -28,9 +28,10 @@ const STYLE: React.CSSProperties = {
 export function BuildStamp(): JSX.Element {
   const sha = __HELIOS_BUILD_SHA__
   const builtAt = __HELIOS_BUILD_TIME__
-  // Render the timestamp as "YYYY-MM-DD HH:MM UTC" so it stays compact
-  // but is unambiguous about timezone.
-  const compactTime = formatCompactUtc(builtAt)
+  // Render in America/New_York at hh:mm resolution so it matches the
+  // ops team's wall clock. The tzdb abbreviation (EST/EDT) is shown
+  // so the stamp is unambiguous across DST transitions.
+  const compactTime = formatCompactNewYork(builtAt)
   const title = `Helios bundle\nsha: ${sha}\nbuilt: ${builtAt}\nsubject: ${__HELIOS_BUILD_SUBJECT__ || '(unavailable)'}`
   return (
     <div style={STYLE} title={title} aria-label="helios build stamp">
@@ -39,15 +40,32 @@ export function BuildStamp(): JSX.Element {
   )
 }
 
-function formatCompactUtc(iso: string): string {
+const NEW_YORK_FORMATTER = new Intl.DateTimeFormat('en-CA', {
+  timeZone: 'America/New_York',
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+  hour: '2-digit',
+  minute: '2-digit',
+  hour12: false,
+  timeZoneName: 'short',
+})
+
+function formatCompactNewYork(iso: string): string {
   const date = new Date(iso)
   if (Number.isNaN(date.getTime())) {
     return iso
   }
-  const yyyy = date.getUTCFullYear()
-  const mm = String(date.getUTCMonth() + 1).padStart(2, '0')
-  const dd = String(date.getUTCDate()).padStart(2, '0')
-  const hh = String(date.getUTCHours()).padStart(2, '0')
-  const mi = String(date.getUTCMinutes()).padStart(2, '0')
-  return `${yyyy}-${mm}-${dd} ${hh}:${mi}Z`
+  // en-CA gives "YYYY-MM-DD, HH:MM EDT" with a literal comma.
+  // Normalize to "YYYY-MM-DD HH:MM EDT".
+  const parts = NEW_YORK_FORMATTER.formatToParts(date)
+  const get = (type: Intl.DateTimeFormatPartTypes): string =>
+    parts.find((part) => part.type === type)?.value ?? ''
+  const yyyy = get('year')
+  const mm = get('month')
+  const dd = get('day')
+  const hh = get('hour') === '24' ? '00' : get('hour') // some platforms emit 24
+  const mi = get('minute')
+  const tz = get('timeZoneName')
+  return `${yyyy}-${mm}-${dd} ${hh}:${mi} ${tz}`
 }
