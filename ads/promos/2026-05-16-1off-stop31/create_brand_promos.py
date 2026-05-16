@@ -125,10 +125,10 @@ def existing_action_for_brand(brand_id: int) -> dict | None:
 def create_promo_for_brand(brand: dict) -> dict:
     name = f"1Off - {brand['name']} 15% off"
     short_name = brand_short_name(brand["name"])
-    description = (
-        f"15% off all {brand['name']} products. Distributor: Stop 31 LLC; "
-        f"purchase order {PURCHASE_ORDER_ID}."
-    )
+    # Customer-facing: never include distributor name, PO number, cost,
+    # or any other internal sourcing detail. Sweed surfaces this field
+    # in ecommerce contexts. Keep it short and benefit-focused.
+    description = f"15% off all {brand['name']} products."
     action = sweed.api_call(
         "store.promo.action.add",
         {
