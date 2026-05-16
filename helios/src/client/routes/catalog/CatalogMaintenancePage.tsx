@@ -464,7 +464,11 @@ function VariantRow(props: VariantRowProps) {
         onBarcodeError('This browser cannot decode barcodes from photos. Type the value manually.')
         return
       }
-      const Detector = (window as unknown as { BarcodeDetector: typeof BarcodeDetectorLike }).BarcodeDetector
+      const Detector = (window as unknown as { BarcodeDetector?: BarcodeDetectorCtor }).BarcodeDetector
+      if (!Detector) {
+        onBarcodeError('This browser cannot decode barcodes from photos. Type the value manually.')
+        return
+      }
       const detector = new Detector({
         formats: ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128', 'code_39', 'itf', 'codabar', 'qr_code'],
       })
@@ -560,8 +564,8 @@ function VariantRow(props: VariantRowProps) {
   )
 }
 
-function MetrcTagsLine(props: { metrcTags: string[] }) {
-  const { metrcTags } = props
+function MetrcTagsLine(props: { metrcTags?: string[] | null }) {
+  const metrcTags = Array.isArray(props.metrcTags) ? props.metrcTags : []
   if (metrcTags.length === 0) {
     return <span className="catalog-maintenance-metrc-line subtle-copy">METRC: —</span>
   }
@@ -569,7 +573,7 @@ function MetrcTagsLine(props: { metrcTags: string[] }) {
     <span className="catalog-maintenance-metrc-line subtle-copy">
       METRC{metrcTags.length > 1 ? ` (${metrcTags.length})` : ''}:{' '}
       {metrcTags.map((tag, index) => (
-        <span key={tag}>
+        <span key={`${tag}:${index}`}>
           {renderMetrcTagSuffix(tag)}
           {index < metrcTags.length - 1 ? ', ' : null}
         </span>
@@ -578,7 +582,7 @@ function MetrcTagsLine(props: { metrcTags: string[] }) {
   )
 }
 
-function renderMetrcTagSuffix(tag: string): JSX.Element {
+function renderMetrcTagSuffix(tag: string) {
   const cleaned = tag.replace(/\s+/g, '')
   if (cleaned.length === 0) {
     return <code className="catalog-maintenance-metrc-tag">—</code>
@@ -694,7 +698,7 @@ interface BarcodeDetectionResult {
   format?: string
 }
 
-interface BarcodeDetectorLike {
+interface BarcodeDetectorCtor {
   new (options?: { formats?: string[] }): {
     detect: (source: CanvasImageSource | ImageBitmap | Blob | ImageData) => Promise<BarcodeDetectionResult[]>
   }
