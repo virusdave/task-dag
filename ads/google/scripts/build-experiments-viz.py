@@ -652,11 +652,15 @@ def build_recovery(snapshot: list[dict]) -> tuple[str, str, dict]:
     md_lines.append("There are two steps. The bulk-pause step is manual (Ads UI);")
     md_lines.append("the new-RSA step uses `002-recovery.csv` in this same ZIP.\n")
 
-    md_lines.append("## Step 1 -- bulk-pause the currently-broken enabled ads\n")
+    md_lines.append("## Step 1 -- pause the currently-broken enabled ads\n")
     md_lines.append("These ads are Enabled but cannot serve (disapproved) or are")
-    md_lines.append("throttled (approved_limited). Pause them in the Ads UI so they")
-    md_lines.append("stop dragging on account quality and free up the 3-RSA-per-group")
-    md_lines.append("cap for the replacements created in Step 2.\n")
+    md_lines.append("throttled (approved_limited). `002-recovery.csv` now also")
+    md_lines.append("contains a `Status: Paused` row for each one, matched by full")
+    md_lines.append("content, so Ads Editor flips them to Paused in the same import")
+    md_lines.append("that creates the replacement RSAs. This is what frees the")
+    md_lines.append("3-enabled-RSAs-per-group slot so the new RSA can be added")
+    md_lines.append("without hitting the cap. The table below is for awareness /")
+    md_lines.append("audit; you don't need to pause them manually.\n")
     md_lines.append("| Ad group | Ad ID | Status | First headline |")
     md_lines.append("| --- | --- | --- | --- |")
     for g, bad in broken_groups:
@@ -692,7 +696,39 @@ def build_recovery(snapshot: list[dict]) -> tuple[str, str, dict]:
     md_lines.append("need fresh creative written by hand.\n")
 
     no_source_groups: list[str] = []
+    n_pause_rows = 0
     for g, bad in broken_groups:
+        campaign_name = ag_to_campaign.get(g, "")
+        if not campaign_name:
+            campaign_name = f"<<FILL IN: Campaign for ad group '{g}'>>"
+            unmapped_groups.append(g)
+
+        # 1) Pause-rows for each broken enabled ad in this group, keyed
+        #    by full content so Ads Editor matches them to the existing
+        #    ad and just flips Status to Paused. This frees up the
+        #    3-enabled-RSAs-per-group cap before the replacement row in
+        #    the same import is processed.
+        for ad in bad:
+            bh = _dedupe_headlines(ad.get("headlines") or [])[:HEADLINE_MAX]
+            bd = _dedupe_headlines(ad.get("descriptions") or [])[:DESCRIPTION_MAX]
+            paths = ad.get("paths") or []
+            prow = {
+                "Campaign": campaign_name,
+                "Ad group": g,
+                "Status": "Paused",
+                "Ad type": "Responsive search ad",
+                "Final URL": ad.get("final_url") or "",
+            }
+            for i, x in enumerate(bh):
+                prow[f"Headline {i + 1}"] = x
+            for i, x in enumerate(bd):
+                prow[f"Description {i + 1}"] = x
+            for i, p in enumerate((paths or [])[:2]):
+                prow[f"Path {i + 1}"] = p
+            csv_rows.append(prow)
+            n_pause_rows += 1
+
+        # 2) The fresh replacement RSA cloned from the best source.
         src, kind = _find_clone_source(g, snapshot)
         if src is None:
             no_source_groups.append(g)
@@ -703,10 +739,6 @@ def build_recovery(snapshot: list[dict]) -> tuple[str, str, dict]:
         src_paths = src.get("paths") or []
         h = _dedupe_headlines(src_h)[:HEADLINE_MAX]
         d = _dedupe_headlines(src_d)[:DESCRIPTION_MAX]
-        campaign_name = ag_to_campaign.get(g, "")
-        if not campaign_name:
-            campaign_name = f"<<FILL IN: Campaign for ad group '{g}'>>"
-            unmapped_groups.append(g)
         row = {
             "Campaign": campaign_name,
             "Ad group": g,
@@ -756,6 +788,7 @@ def build_recovery(snapshot: list[dict]) -> tuple[str, str, dict]:
     stats = {
         "broken_groups": len(broken_groups),
         "pause_count": n_pause,
+        "pause_rows_in_csv": n_pause_rows,
         "cloned_count": n_cloned,
         "no_source_count": n_no_source,
         "unmapped_count": len(set(unmapped_groups)),
