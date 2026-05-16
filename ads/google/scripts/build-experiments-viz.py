@@ -49,6 +49,31 @@ def load_l2_runs() -> list[dict]:
     return runs
 
 
+def load_campaign_map() -> dict[str, str]:
+    """Optional ad_group_name -> campaign_name mapping.
+
+    The live snapshot collector currently drops campaign names, so the
+    recovery CSV cannot point new RSAs at the correct existing campaign
+    without help. Operators fill in
+    ads/google/snapshots/ad-group-campaign-map.csv (header row, two
+    columns: ad_group_name, campaign_name) and we honor it everywhere
+    that needs the parent campaign.
+    """
+    path = GADS_ROOT / "snapshots" / "ad-group-campaign-map.csv"
+    if not path.exists():
+        return {}
+    mapping: dict[str, str] = {}
+    import csv as _csv_mod
+    with open(path, newline="") as f:
+        reader = _csv_mod.DictReader(f)
+        for row in reader:
+            ag = (row.get("ad_group_name") or "").strip()
+            cn = (row.get("campaign_name") or "").strip()
+            if ag and cn:
+                mapping[ag] = cn
+    return mapping
+
+
 def load_latest_snapshot() -> list[dict]:
     live = GADS_ROOT / "snapshots" / "ads-snapshot-live.jsonl"
     if not live.exists():
@@ -63,6 +88,16 @@ def load_latest_snapshot() -> list[dict]:
                 rows.append(json.loads(line))
             except json.JSONDecodeError:
                 pass
+    # Augment rows missing campaign_name from the operator-supplied map.
+    cmap = load_campaign_map()
+    if cmap:
+        for r in rows:
+            if not r.get("campaign_name"):
+                cn = cmap.get(r.get("ad_group_name") or "")
+                if cn:
+                    r["campaign_name"] = cn
+                    if not r.get("campaign_id"):
+                        r["campaign_id"] = cn
     return rows
 
 
@@ -595,9 +630,19 @@ def build_recovery(snapshot: list[dict]) -> tuple[str, str, dict]:
         "Path 2",
     ] + headline_cols + description_cols
 
+    # Build ad_group_name -> campaign_name from snapshot itself first
+    # (post-augmentation, so any operator-supplied map is already merged).
+    ag_to_campaign: dict[str, str] = {}
+    for r in snapshot:
+        ag = r.get("ad_group_name") or ""
+        cn = r.get("campaign_name") or ""
+        if ag and cn and ag not in ag_to_campaign:
+            ag_to_campaign[ag] = cn
+
     csv_rows: list[dict] = []
     md_lines: list[str] = []
     pause_lines: list[str] = []
+    unmapped_groups: list[str] = []
     n_cloned = 0
     n_no_source = 0
     n_pause = 0
@@ -629,13 +674,20 @@ def build_recovery(snapshot: list[dict]) -> tuple[str, str, dict]:
     md_lines.append("This CSV creates one new Enabled RSA per broken ad group,")
     md_lines.append("cloned from the best surviving source ad (sibling in the same")
     md_lines.append("group when available, otherwise a family-mate matching")
-    md_lines.append("creative_theme + product_tag). Once posted these go into review.")
-    md_lines.append("After they're approved, you can confidently leave the originals")
-    md_lines.append("paused (or remove them).\n")
-    md_lines.append("**Important:** the snapshot doesn't record the parent campaign")
-    md_lines.append("name, so the `Campaign` column is blank. Before importing in")
-    md_lines.append("Ads Editor, do a find/replace in the CSV (or just fill the")
-    md_lines.append("Campaign column with the matching live campaign name).\n")
+    md_lines.append("creative_theme + product_tag). Each row points the new RSA at")
+    md_lines.append("the **existing** parent campaign + ad group, so Ads Editor")
+    md_lines.append("attaches it instead of trying to create a new campaign (which")
+    md_lines.append("would trigger the budget/EU-political/asset-count errors).\n")
+    md_lines.append("**Campaign mapping:** the live snapshot collector is currently")
+    md_lines.append("dropping campaign names, so the script reads")
+    md_lines.append("`ads/google/snapshots/ad-group-campaign-map.csv` (two columns:")
+    md_lines.append("`ad_group_name`, `campaign_name`) to recover them. The bundle")
+    md_lines.append("also ships `CAMPAIGN_MAP_TEMPLATE.csv` -- if any of your broken")
+    md_lines.append("groups don't already have a mapping, fill that in, commit it to")
+    md_lines.append("the repo as `ad-group-campaign-map.csv`, and re-run the")
+    md_lines.append("dashboard. Rows for unmapped groups will have an obvious")
+    md_lines.append("`<<FILL IN: Campaign>>` placeholder and Ads Editor will refuse")
+    md_lines.append("to import them until they're filled.\n")
     md_lines.append("Groups with no clone source available are listed below -- they")
     md_lines.append("need fresh creative written by hand.\n")
 
@@ -651,8 +703,12 @@ def build_recovery(snapshot: list[dict]) -> tuple[str, str, dict]:
         src_paths = src.get("paths") or []
         h = _dedupe_headlines(src_h)[:HEADLINE_MAX]
         d = _dedupe_headlines(src_d)[:DESCRIPTION_MAX]
+        campaign_name = ag_to_campaign.get(g, "")
+        if not campaign_name:
+            campaign_name = f"<<FILL IN: Campaign for ad group '{g}'>>"
+            unmapped_groups.append(g)
         row = {
-            "Campaign": "",  # filled in by the human; see README
+            "Campaign": campaign_name,
             "Ad group": g,
             "Status": "Enabled",
             "Ad type": "Responsive search ad",
@@ -674,11 +730,26 @@ def build_recovery(snapshot: list[dict]) -> tuple[str, str, dict]:
             md_lines.append(f"- {g}")
             n_no_source += 1
 
+    if unmapped_groups:
+        md_lines.append("\n## ⚠ Ad groups missing campaign mapping (blocking import)\n")
+        md_lines.append("Fill these into `ads/google/snapshots/ad-group-campaign-map.csv`")
+        md_lines.append("then re-run the dashboard:\n")
+        for g in sorted(set(unmapped_groups)):
+            md_lines.append(f"- {g}")
+
     md_lines.append("\n## Paste-able list for bulk-pause\n")
     md_lines.append("```")
     md_lines.append("ad_group\tad_id")
     md_lines.extend(pause_lines)
     md_lines.append("```")
+
+    # Template CSV the operator can fill in and commit as
+    # ads/google/snapshots/ad-group-campaign-map.csv.
+    template_rows = [
+        {"ad_group_name": g, "campaign_name": ag_to_campaign.get(g, "")}
+        for g, _bad in broken_groups
+    ]
+    template_csv = _csv(template_rows, ["ad_group_name", "campaign_name"])
 
     csv_text = _csv(csv_rows, columns)
     md_text = "\n".join(md_lines) + "\n"
@@ -687,6 +758,8 @@ def build_recovery(snapshot: list[dict]) -> tuple[str, str, dict]:
         "pause_count": n_pause,
         "cloned_count": n_cloned,
         "no_source_count": n_no_source,
+        "unmapped_count": len(set(unmapped_groups)),
+        "template_csv": template_csv,
     }
     return csv_text, md_text, stats
 
@@ -712,6 +785,7 @@ def build_csv_zip(trials: list[dict], snapshot: list[dict]) -> tuple[bytes, dict
         if recovery_stats["cloned_count"] or recovery_stats["pause_count"]:
             zf.writestr("002-recovery.csv", recovery_csv)
             zf.writestr("RECOVERY.md", recovery_md)
+            zf.writestr("CAMPAIGN_MAP_TEMPLATE.csv", recovery_stats.pop("template_csv", ""))
     return buf.getvalue(), stats
 
 
@@ -940,17 +1014,20 @@ footer .row {{ display: flex; justify-content: space-between; gap: 12px; flex-wr
       <div class="stat"><div class="v bad">{recovery_broken_groups}</div><div class="l">Ad groups with broken enabled ads</div></div>
       <div class="stat"><div class="v warn">{recovery_pause_count}</div><div class="l">Enabled ads to bulk-pause</div></div>
       <div class="stat"><div class="v good">{recovery_cloned_count}</div><div class="l">New RSAs auto-cloned in <code>002-recovery.csv</code></div></div>
-      <div class="stat"><div class="v">{recovery_no_source_count}</div><div class="l">Need fresh creative (no clone source)</div></div>
+      <div class="stat"><div class="v {recovery_unmapped_class}">{recovery_unmapped_count}</div><div class="l">Ad groups missing campaign mapping (blocks import)</div></div>
     </div>
+    {recovery_blocker_html}
     <div class="card" style="margin-top:12px">
       <div class="title">How to use this</div>
-      <div class="sub">The bundle ZIP now also contains <code>RECOVERY.md</code> and
-      <code>002-recovery.csv</code>. Pause the listed enabled-but-broken ads in the Ads
-      UI, then in Ads Editor open <code>002-recovery.csv</code>. The <code>Campaign</code>
-      column is intentionally blank (the snapshot doesn't carry campaign names) — do
-      a find/replace to fill it before Post. Sources for each clone: sibling RSA in the
-      same group when available, otherwise a family-mate matching creative_theme +
-      product_tag.</div>
+      <div class="sub">The bundle ZIP contains <code>RECOVERY.md</code>,
+      <code>002-recovery.csv</code>, and <code>CAMPAIGN_MAP_TEMPLATE.csv</code>.
+      Step&nbsp;1: pause the listed enabled-but-broken ads in the Ads UI. Step&nbsp;2:
+      open <code>002-recovery.csv</code> in Ads Editor and Post. The <code>Campaign</code>
+      column is populated from <code>ads/google/snapshots/ad-group-campaign-map.csv</code>;
+      any rows still containing <code>&lt;&lt;FILL IN: Campaign…&gt;&gt;</code> mean
+      that mapping is missing — fill it in (template provided), commit, and re-run.
+      Clone sources: sibling RSA in the same group when available, otherwise a
+      family-mate matching creative_theme + product_tag.</div>
     </div>
   </section>
 
@@ -1177,6 +1254,28 @@ def build_html(out_path: Path) -> Path:
         recovery_pause_count=csv_stats.get("recovery", {}).get("pause_count", 0),
         recovery_cloned_count=csv_stats.get("recovery", {}).get("cloned_count", 0),
         recovery_no_source_count=csv_stats.get("recovery", {}).get("no_source_count", 0),
+        recovery_unmapped_count=csv_stats.get("recovery", {}).get("unmapped_count", 0),
+        recovery_unmapped_class=(
+            "bad" if csv_stats.get("recovery", {}).get("unmapped_count", 0) else "good"
+        ),
+        recovery_blocker_html=(
+            f'<div class="card" style="margin-top:12px;border-color:var(--bad);">'
+            f'<div class="title">⚠ Import will fail until campaign mapping is supplied</div>'
+            f'<div class="sub"><b>{csv_stats.get("recovery", {}).get("unmapped_count", 0)} ad group(s)</b> '
+            f'have no known parent campaign. The snapshot collector is currently '
+            f'not recording campaign names, so the recovery CSV inserts a '
+            f'<code>&lt;&lt;FILL IN: Campaign…&gt;&gt;</code> placeholder for those rows. '
+            f'Open <code>CAMPAIGN_MAP_TEMPLATE.csv</code> from the bundle, fill in '
+            f'<code>campaign_name</code> for each row, save it as '
+            f'<code>ads/google/snapshots/ad-group-campaign-map.csv</code>, commit, '
+            f'and re-run the dashboard. The errors you saw — '
+            f'"Campaign name can\'t be empty", "EU political ads", "budget invalid", '
+            f'"fewer than 3/4 image/callout/sitelink assets" — all come from Ads Editor '
+            f'treating these rows as a new campaign instead of additions to an '
+            f'existing one.</div></div>'
+            if csv_stats.get("recovery", {}).get("unmapped_count", 0)
+            else ""
+        ),
         persistent_html=render_persistent(persistent),
         in_flight_count=len(in_flight),
         in_flight_html=render_group(in_flight, "warn", "in flight",
