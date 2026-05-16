@@ -714,6 +714,16 @@ def build_recovery(snapshot: list[dict]) -> tuple[str, str, dict]:
             campaign_name = f"<<FILL IN: Campaign for ad group '{g}'>>"
             unmapped_groups.append(g)
 
+        # Resolve the clone source first so we can borrow its Final URL
+        # as a fallback for any pause-rows whose broken ad has no URL of
+        # its own (Editor validates every row it touches, including
+        # pure Status updates -- empty final_url => "missing a final
+        # URL" error). Reusing the recovery URL is harmless: the row is
+        # content-matched to the existing broken ad and just flips
+        # Status=Paused.
+        src, kind = _find_clone_source(g, snapshot)
+        fallback_url = (src or {}).get("final_url") or ""
+
         # 1) Pause-rows for each broken enabled ad in this group, keyed
         #    by full content so Ads Editor matches them to the existing
         #    ad and just flips Status to Paused. This frees up the
@@ -728,7 +738,7 @@ def build_recovery(snapshot: list[dict]) -> tuple[str, str, dict]:
                 "Ad group": g,
                 "Status": "Paused",
                 "Ad type": "Responsive search ad",
-                "Final URL": ad.get("final_url") or "",
+                "Final URL": (ad.get("final_url") or "").strip() or fallback_url,
             }
             for i, x in enumerate(bh):
                 prow[f"Headline {i + 1}"] = x
@@ -740,7 +750,6 @@ def build_recovery(snapshot: list[dict]) -> tuple[str, str, dict]:
             n_pause_rows += 1
 
         # 2) The fresh replacement RSA cloned from the best source.
-        src, kind = _find_clone_source(g, snapshot)
         if src is None:
             no_source_groups.append(g)
             continue
