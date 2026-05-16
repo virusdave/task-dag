@@ -1,0 +1,57 @@
+{
+  "newGroup": {
+    "id": 333826,
+    "name": "J Bermuda Triangle",
+    "brand": "Jenny's",
+    "category": "Pre-Rolls",
+    "categoryId": 1085,
+    "subcategory": null,
+    "subcategoryId": null,
+    "strain": "Bermuda Triangle",
+    "description": "Jenny's J Bermuda Triangle is a 1g pre-roll featuring the Bermuda Triangle strain in Jenny's signature ready-to-light single J format. Bermuda Triangle is an OG-leaning hybrid known for a layered arom",
+    "images": []
+  },
+  "newVariant": {
+    "id": "432708",
+    "name": "Jenny's J Bermuda Triangle 1g",
+    "tab": "1g",
+    "groupId": 333826,
+    "size": "1g",
+    "packOfSize": 1,
+    "isPacked": true,
+    "price": 13.5,
+    "displayInEcommerce": true
+  },
+  "newGroupParams": {
+    "name": "J Bermuda Triangle",
+    "brandId": 1941,
+    "categoryId": 1085,
+    "strainId": 10213,
+    "description": "Jenny's J Bermuda Triangle is a 1g pre-roll featuring the Bermuda Triangle strain in Jenny's signature ready-to-light single J format. Bermuda Triangle is an OG-leaning hybrid known for a layered aroma of bright citrus peel, earthy diesel and a hint of spicy pine, with a flavor that opens on sweet lime and finishes with smooth diesel warmth. The hand-rolled 1g format makes it easy to spark up and enjoy without any prep.\n\nBermuda Triangle is often reported to bring on a clear, uplifting head lift that gradually settles into a deep, relaxed body feel. Many people reach for it to feel Relaxed, Happy and Calm at the end of a long day, and its terpene profile - led by limonene, caryophyllene and myrcene - delivers a balanced experience that leans toward unwinding. Each Jenny's J pre-roll offers a straightforward way to enjoy the qualities of this distinctive strain in a single-session size.\n\nLooking for the Bermuda Triangle experience in an easy 1g pre-roll? You'll find Jenny's J Bermuda Triangle at Freshly Baked NYC, your trusted local weed shop. We're a licensed cannabis dispensary committed to a convenient, accessible shopping experience, with fast delivery that brings Jenny's pre-rolls right to your door. Visit us today and discover why Freshly Baked NYC is the go-to destination for cannabis in the city.",
+    "imagesIds": []
+  },
+  "newVariantParams": {
+    "sizeId": 842,
+    "price": 13.5,
+    "tab": "1g",
+    "displayInEcommerce": true,
+    "isPacked": true,
+    "packOfSize": 1,
+    "productGroupId": 333826
+  },
+  "retailPrice": 13.5,
+  "priceMatchedFrom": [
+    {
+      "groupId": 317809,
+      "variantId": 413055,
+      "name": "Jenny's J Acapulco Gold 1g",
+      "price": 13.5
+    },
+    {
+      "groupId": 317810,
+      "variantId": 413056,
+      "name": "Jenny's J Biscotti 1g",
+      "price": 13.5
+    }
+  ]
+}
