@@ -75,8 +75,10 @@ def collect_distinct_brand_ids(order_id: int) -> list[dict]:
 
 def brand_short_name(brand_name: str) -> str:
     # Sweed shortName has a ~16 char practical UI limit; keep it tight.
+    # Do NOT prefix with the campaign name (e.g. "1Off") - the campaign
+    # already provides that context in the UI.
     slug = re.sub(r"[^A-Za-z0-9]+", "", brand_name)
-    return f"1Off{slug}15"[:24]
+    return f"{slug}15"[:24]
 
 
 def make_selector_data(brand_id: int, brand_name: str) -> str:
@@ -123,7 +125,7 @@ def existing_action_for_brand(brand_id: int) -> dict | None:
 
 
 def create_promo_for_brand(brand: dict) -> dict:
-    name = f"1Off - {brand['name']} 15% off"
+    name = f"{brand['name']} 15% off"
     short_name = brand_short_name(brand["name"])
     # Customer-facing: never include distributor name, PO number, cost,
     # or any other internal sourcing detail. Sweed surfaces this field
