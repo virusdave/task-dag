@@ -1,0 +1,1821 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>67.7% GM Reprice Review — 2026-05-15 10FF brands</title>
+<style>
+  :root {
+    --bg:#f4efe4; --card:#fffaf0; --ink:#1f1b17; --muted:#6d665b;
+    --line:#d9ceb7; --edit:#27417e; --keep:#1f5d42; --skip:#8d2f52;
+    --warn:#8b5e11; --up:#1f5d42; --down:#8d2f52;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;padding:24px;font:14px/1.5 -apple-system,system-ui,sans-serif;
+        background:var(--bg);color:var(--ink)}
+  .wrap{max-width:1400px;margin:0 auto}
+  h1{margin:0 0 6px}
+  .sub{color:var(--muted);margin:0 0 18px}
+  .card{background:var(--card);border:1px solid var(--line);
+         border-radius:14px;padding:18px;margin:14px 0;
+         box-shadow:0 4px 16px rgba(31,27,23,0.05)}
+  table{border-collapse:collapse;width:100%}
+  th,td{padding:6px 8px;text-align:left;border-bottom:1px solid var(--line);
+        vertical-align:top}
+  th{background:#efe3cf;font-weight:600;font-size:12px;text-transform:uppercase;
+      letter-spacing:0.04em;color:var(--muted)}
+  .num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+  .pill{display:inline-block;padding:1px 8px;border-radius:999px;
+        font-size:11px;font-weight:600;text-transform:uppercase;
+        letter-spacing:0.04em}
+  .pill.edit{background:#e2eaf5;color:var(--edit)}
+  .pill.keep{background:#dfeae2;color:var(--keep)}
+  .pill.skip{background:#f3dde4;color:var(--skip)}
+  .pill.up{background:#dfeae2;color:var(--up)}
+  .pill.down{background:#f3dde4;color:var(--down)}
+  .pill.big{background:#f0e1c2;color:var(--warn)}
+  .delta-up{color:var(--up);font-weight:600}
+  .delta-down{color:var(--down);font-weight:600}
+  .delta-zero{color:var(--muted)}
+  .keep-row td{opacity:0.55}
+  .brand-h{margin:24px 0 8px;font-size:18px}
+  .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));
+          gap:10px;margin-top:10px}
+  .stat{padding:10px 12px;background:#fff;border:1px solid var(--line);
+        border-radius:10px}
+  .stat .v{font-size:22px;font-weight:600}
+  .stat .l{font-size:11px;color:var(--muted);text-transform:uppercase;
+           letter-spacing:0.04em;margin-bottom:4px}
+  .note{background:#fffaee;border:1px solid #f0e1c2;border-radius:10px;
+        padding:12px 14px;color:#5d4214;margin:10px 0}
+  details > summary{cursor:pointer;font-weight:600;padding:4px 0}
+  .cost-meta{font-size:11px;color:var(--muted)}
+  code{font-family:'SFMono-Regular',Menlo,monospace;font-size:12px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>67.7% GM Reprice Review</h1>
+  <p class="sub">Brands from the 2026-05-15 midtown 10FF manifest ·
+    State dealer 210248 (Freshly Baked NY) ·
+    Generated 2026-05-16T16:55:34Z (dry-run)</p>
+
+  <div class="card">
+    <strong>What this is.</strong> A proposal to rewrite the per-variant
+    catalog <code>price</code> on every active variant for the nine brands
+    that appeared on the 2026-05-15 midtown 10FF order, targeting a
+    <strong>67.7% gross margin</strong> on the most-recent distributor
+    cost (rounded to nearest $0.25 with a mild pull toward .00 and .50
+    endings — max push ±$0.15).
+    <br><br>
+    The 67.7% target is intentionally above the canonical Helios 55–65%
+    non-MSO band; the spread is absorbed by active promos per vendor
+    agreement. This proposal does <em>not</em> touch promos, per-site
+    overrides, or any non-price fields.
+    <br><br>
+    Formula: <code>price = 1.13 × cost / (1 − 0.677)</code> ≈ <code>3.4985 × cost</code>.
+    Cost source: most recent <code>pricesLists</code> entry across every
+    linked <code>store.distributor.product</code> row at the state dealer.
+  </div>
+
+  <div class="stats">
+    <div class="stat"><div class="l">Products in scope</div>
+        <div class="v">67</div></div>
+    <div class="stat"><div class="l">Edits queued</div>
+        <div class="v" style="color:var(--edit)">51</div></div>
+    <div class="stat"><div class="l">Already correct</div>
+        <div class="v" style="color:var(--keep)">16</div></div>
+    <div class="stat"><div class="l">Skipped (no cost)</div>
+        <div class="v" style="color:var(--skip)">0</div></div>
+    <div class="stat"><div class="l">∑ current price (edits)</div>
+        <div class="v">$3,510.50</div></div>
+    <div class="stat"><div class="l">∑ proposed price (edits)</div>
+        <div class="v">$3,838.00</div></div>
+    <div class="stat"><div class="l">Net change (edits)</div>
+        <div class="v" style="color:var(--up)">
+            +$327.50</div></div>
+  </div>
+
+  <div class="card">
+    <strong>By brand</strong>
+    <table style="margin-top:8px">
+      <thead><tr><th>Brand</th><th class="num">Edit</th>
+        <th class="num">Keep</th><th class="num">Skip</th>
+        <th class="num">Total</th></tr></thead>
+      <tbody>
+<tr><td>Doobie Labs</td><td class="num">9</td><td class="num">0</td><td class="num">0</td><td class="num"><strong>9</strong></td></tr><tr><td>Herb</td><td class="num">16</td><td class="num">11</td><td class="num">0</td><td class="num"><strong>27</strong></td></tr><tr><td>Jungle Girl</td><td class="num">3</td><td class="num">0</td><td class="num">0</td><td class="num"><strong>3</strong></td></tr><tr><td>Moonlit Hash Co</td><td class="num">4</td><td class="num">1</td><td class="num">0</td><td class="num"><strong>5</strong></td></tr><tr><td>Preferred Gardens</td><td class="num">0</td><td class="num">2</td><td class="num">0</td><td class="num"><strong>2</strong></td></tr><tr><td>Purps</td><td class="num">7</td><td class="num">0</td><td class="num">0</td><td class="num"><strong>7</strong></td></tr><tr><td>Runtz</td><td class="num">3</td><td class="num">0</td><td class="num">0</td><td class="num"><strong>3</strong></td></tr><tr><td>Smartbud</td><td class="num">9</td><td class="num">1</td><td class="num">0</td><td class="num"><strong>10</strong></td></tr><tr><td>Strain Gang</td><td class="num">0</td><td class="num">1</td><td class="num">0</td><td class="num"><strong>1</strong></td></tr></tbody></table></div><h2 class="brand-h">Doobie Labs</h2>
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center;
+              flex-wrap:wrap;gap:8px">
+    <div>
+      <strong>Doobie Labs Blue Dream</strong>
+      <span class="cost-meta"> · group 331995 · Flower</span>
+    </div>
+    <div>
+      <span class="pill edit">edit 1</span>
+      <span class="pill keep">keep 0</span>
+      
+    </div>
+  </div>
+  <table style="margin-top:10px">
+    <thead><tr>
+      <th>Variant</th><th>Tab</th>
+      <th class="num">Cost</th>
+      <th class="num">Current $</th>
+      <th class="num">Proposed $</th>
+      <th class="num">Δ</th>
+      <th class="num">Current GM</th>
+      <th class="num">Proposed GM</th>
+      <th>Action</th>
+    </tr></thead>
+    <tbody>
+<tr class=""><td>Doobie Labs Blue Dream 3.5g<br><span class="cost-meta">prod 430526</span></td><td>3.5g</td><td class="num">$26.00<div class="cost-meta">Stop 31 LLC · DOOBIE LABS - Blue Dream 3.5G · from 2026-05-15T00:00:00Z</div></td><td class="num">$90.50</td><td class="num"><strong>$91.00</strong></td><td class="num delta-up">+0.50</td><td class="num">67.54%</td><td class="num">67.71%</td><td><span class="pill edit">edit</span></td></tr></tbody></table></div>
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center;
+              flex-wrap:wrap;gap:8px">
+    <div>
+      <strong>Doobie Labs Blue Lobster</strong>
+      <span class="cost-meta"> · group 311207 · Vapes / All In One / Disposable</span>
+    </div>
+    <div>
+      <span class="pill edit">edit 1</span>
+      <span class="pill keep">keep 0</span>
+      
+    </div>
+  </div>
+  <table style="margin-top:10px">
+    <thead><tr>
+      <th>Variant</th><th>Tab</th>
+      <th class="num">Cost</th>
+      <th class="num">Current $</th>
+      <th class="num">Proposed $</th>
+      <th class="num">Δ</th>
+      <th class="num">Current GM</th>
+      <th class="num">Proposed GM</th>
+      <th>Action</th>
+    </tr></thead>
+    <tbody>
+<tr class=""><td>Doobie Labs Blue Lobster 1g<br><span class="cost-meta">prod 405465</span></td><td>1g</td><td class="num">$20.00<div class="cost-meta">Stop 31 LLC · Doobie Labs - Vape - Blue Lobster - 1g · from 2026-04-23T00:00:00Z</div></td><td class="num">$46.50</td><td class="num"><strong>$70.00</strong></td><td class="num delta-up">+23.50</td><td class="num">51.40%</td><td class="num">67.71%</td><td><span class="pill edit">edit</span> <span class="pill big">big swing</span></td></tr></tbody></table></div>
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center;
+              flex-wrap:wrap;gap:8px">
+    <div>
+      <strong>Doobie Labs Blue Nerdz</strong>
+      <span class="cost-meta"> · group 331988 · Flower</span>
+    </div>
+    <div>
+      <span class="pill edit">edit 1</span>
+      <span class="pill keep">keep 0</span>
+      
+    </div>
+  </div>
+  <table style="margin-top:10px">
+    <thead><tr>
+      <th>Variant</th><th>Tab</th>
+      <th class="num">Cost</th>
+      <th class="num">Current $</th>
+      <th class="num">Proposed $</th>
+      <th class="num">Δ</th>
+      <th class="num">Current GM</th>
+      <th class="num">Proposed GM</th>
+      <th>Action</th>
+    </tr></thead>
+    <tbody>
+<tr class=""><td>Doobie Labs Blue Nerdz 3.5g<br><span class="cost-meta">prod 430518</span></td><td>3.5g</td><td class="num">$26.00<div class="cost-meta">Stop 31 LLC · 1O-8F-DL26-BNRD · from 2026-05-15T00:00:00Z</div></td><td class="num">$90.50</td><td class="num"><strong>$91.00</strong></td><td class="num delta-up">+0.50</td><td class="num">67.54%</td><td class="num">67.71%</td><td><span class="pill edit">edit</span></td></tr></tbody></table></div>
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center;
+              flex-wrap:wrap;gap:8px">
+    <div>
+      <strong>Doobie Labs Candy Fumes</strong>
+      <span class="cost-meta"> · group 311208 · Vapes / All In One / Disposable</span>
+    </div>
+    <div>
+      <span class="pill edit">edit 1</span>
+      <span class="pill keep">keep 0</span>
+      
+    </div>
+  </div>
+  <table style="margin-top:10px">
+    <thead><tr>
+      <th>Variant</th><th>Tab</th>
+      <th class="num">Cost</th>
+      <th class="num">Current $</th>
+      <th class="num">Proposed $</th>
+      <th class="num">Δ</th>
+      <th class="num">Current GM</th>
+      <th class="num">Proposed GM</th>
+      <th>Action</th>
+    </tr></thead>
+    <tbody>
+<tr class=""><td>Doobie Labs Candy Fumes 1g<br><span class="cost-meta">prod 405466</span></td><td>1g</td><td class="num">$20.00<div class="cost-meta">Stop 31 LLC · Doobie Labs - Vape - Candy Fumes - 1g · from 2026-04-23T00:00:00Z</div></td><td class="num">$46.50</td><td class="num"><strong>$70.00</strong></td><td class="num delta-up">+23.50</td><td class="num">51.40%</td><td class="num">67.71%</td><td><span class="pill edit">edit</span> <span class="pill big">big swing</span></td></tr></tbody></table></div>
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center;
+              flex-wrap:wrap;gap:8px">
+    <div>
+      <strong>Doobie Labs Grape Stomper</strong>
+      <span class="cost-meta"> · group 311209 · Vapes / All In One / Disposable</span>
+    </div>
+    <div>
+      <span class="pill edit">edit 1</span>
+      <span class="pill keep">keep 0</span>
+      
+    </div>
+  </div>
+  <table style="margin-top:10px">
+    <thead><tr>
+      <th>Variant</th><th>Tab</th>
+      <th class="num">Cost</th>
+      <th class="num">Current $</th>
+      <th class="num">Proposed $</th>
+      <th class="num">Δ</th>
+      <th class="num">Current GM</th>
+      <th class="num">Proposed GM</th>
+      <th>Action</th>
+    </tr></thead>
+    <tbody>
+<tr class=""><td>Doobie Labs Grape Stomper 1g<br><span class="cost-meta">prod 405467</span></td><td>1g</td><td class="num">$20.00<div class="cost-meta">Stop 31 LLC · Doobie Labs - Vape - Grape Stomper - 1g · from 2026-04-23T00:00:00Z</div></td><td class="num">$46.50</td><td class="num"><strong>$70.00</strong></td><td class="num delta-up">+23.50</td><td class="num">51.40%</td><td class="num">67.71%</td><td><span class="pill edit">edit</span> <span class="pill big">big swing</span></td></tr></tbody></table></div>
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center;
+              flex-wrap:wrap;gap:8px">
+    <div>
+      <strong>Doobie Labs Maraschino Runtz</strong>
+      <span class="cost-meta"> · group 311210 · Vapes / All In One / Disposable</span>
+    </div>
+    <div>
+      <span class="pill edit">edit 1</span>
+      <span class="pill keep">keep 0</span>
+      
+    </div>
+  </div>
+  <table style="margin-top:10px">
+    <thead><tr>
+      <th>Variant</th><th>Tab</th>
+      <th class="num">Cost</th>
+      <th class="num">Current $</th>
+      <th class="num">Proposed $</th>
+      <th class="num">Δ</th>
+      <th class="num">Current GM</th>
+      <th class="num">Proposed GM</th>
+      <th>Action</th>
+    </tr></thead>
+    <tbody>
+<tr class=""><td>Doobie Labs Maraschino Runtz 1g<br><span class="cost-meta">prod 405468</span></td><td>1g</td><td class="num">$20.00<div class="cost-meta">Stop 31 LLC · Doobie Labs - Vape - Maraschino Runtz - 1g · from 2026-04-23T00:00:00Z</div></td><td class="num">$46.50</td><td class="num"><strong>$70.00</strong></td><td class="num delta-up">+23.50</td><td class="num">51.40%</td><td class="num">67.71%</td><td><span class="pill edit">edit</span> <span class="pill big">big swing</span></td></tr></tbody></table></div>
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center;
+              flex-wrap:wrap;gap:8px">
+    <div>
+      <strong>Doobie Labs Pinata Guts</strong>
+      <span class="cost-meta"> · group 311211 · Vapes / All In One / Disposable</span>
+    </div>
+    <div>
+      <span class="pill edit">edit 1</span>
+      <span class="pill keep">keep 0</span>
+      
+    </div>
+  </div>
+  <table style="margin-top:10px">
+    <thead><tr>
+      <th>Variant</th><th>Tab</th>
+      <th class="num">Cost</th>
+      <th class="num">Current $</th>
+      <th class="num">Proposed $</th>
+      <th class="num">Δ</th>
+      <th class="num">Current GM</th>
+      <th class="num">Proposed GM</th>
+      <th>Action</th>
+    </tr></thead>
+    <tbody>
+<tr class=""><td>Doobie Labs Pinata Guts 1g<br><span class="cost-meta">prod 405469</span></td><td>1g</td><td class="num">$20.00<div class="cost-meta">Stop 31 LLC · Doobie Labs - Vape - Pinata Guts - 1g · from 2026-04-23T00:00:00Z</div></td><td class="num">$46.50</td><td class="num"><strong>$70.00</strong></td><td class="num delta-up">+23.50</td><td class="num">51.40%</td><td class="num">67.71%</td><td><span class="pill edit">edit</span> <span class="pill big">big swing</span></td></tr></tbody></table></div>
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center;
+              flex-wrap:wrap;gap:8px">
+    <div>
+      <strong>Doobie Labs Toad Venom</strong>
+      <span class="cost-meta"> · group 311212 · Vapes / All In One / Disposable</span>
+    </div>
+    <div>
+      <span class="pill edit">edit 1</span>
+      <span class="pill keep">keep 0</span>
+      
+    </div>
+  </div>
+  <table style="margin-top:10px">
+    <thead><tr>
+      <th>Variant</th><th>Tab</th>
+      <th class="num">Cost</th>
+      <th class="num">Current $</th>
+      <th class="num">Proposed $</th>
+      <th class="num">Δ</th>
+      <th class="num">Current GM</th>
+      <th class="num">Proposed GM</th>
+      <th>Action</th>
+    </tr></thead>
+    <tbody>
+<tr class=""><td>Doobie Labs Toad Venom 1g<br><span class="cost-meta">prod 405470</span></td><td>1g</td><td class="num">$20.00<div class="cost-meta">Stop 31 LLC · Doobie Labs - Vape - Toad Venom- 1g · from 2026-04-23T00:00:00Z</div></td><td class="num">$46.50</td><td class="num"><strong>$70.00</strong></td><td class="num delta-up">+23.50</td><td class="num">51.40%</td><td class="num">67.71%</td><td><span class="pill edit">edit</span> <span class="pill big">big swing</span></td></tr></tbody></table></div>
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center;
+              flex-wrap:wrap;gap:8px">
+    <div>
+      <strong>Doobie Labs White Widow</strong>
+      <span class="cost-meta"> · group 311213 · Vapes / All In One / Disposable</span>
+    </div>
+    <div>
+      <span class="pill edit">edit 1</span>
+      <span class="pill keep">keep 0</span>
+      
+    </div>
+  </div>
+  <table style="margin-top:10px">
+    <thead><tr>
+      <th>Variant</th><th>Tab</th>
+      <th class="num">Cost</th>
+      <th class="num">Current $</th>
+      <th class="num">Proposed $</th>
+      <th class="num">Δ</th>
+      <th class="num">Current GM</th>
+      <th class="num">Proposed GM</th>
+      <th>Action</th>
+    </tr></thead>
+    <tbody>
+<tr class=""><td>Doobie Labs White Widow 1g<br><span class="cost-meta">prod 405471</span></td><td>1g</td><td class="num">$20.00<div class="cost-meta">Stop 31 LLC · Doobie Labs - Vape - White Widow - 1g · from 2026-04-23T00:00:00Z</div></td><td class="num">$46.50</td><td class="num"><strong>$70.00</strong></td><td class="num delta-up">+23.50</td><td class="num">51.40%</td><td class="num">67.71%</td><td><span class="pill edit">edit</span> <span class="pill big">big swing</span></td></tr></tbody></table></div><h2 class="brand-h">Herb</h2>
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center;
+              flex-wrap:wrap;gap:8px">
+    <div>
+      <strong>Herb Biscotti</strong>
+      <span class="cost-meta"> · group 331996 · Vapes / All In One / Disposable</span>
+    </div>
+    <div>
+      <span class="pill edit">edit 0</span>
+      <span class="pill keep">keep 1</span>
+      
+    </div>
+  </div>
+  <table style="margin-top:10px">
+    <thead><tr>
+      <th>Variant</th><th>Tab</th>
+      <th class="num">Cost</th>
+      <th class="num">Current $</th>
+      <th class="num">Proposed $</th>
+      <th class="num">Δ</th>
+      <th class="num">Current GM</th>
+      <th class="num">Proposed GM</th>
+      <th>Action</th>
+    </tr></thead>
+    <tbody>
+<tr class="keep-row"><td>Herb Biscotti 1g<br><span class="cost-meta">prod 430527</span></td><td>1g</td><td class="num">$15.00<div class="cost-meta">Stop 31 LLC · Herb - Vape - Biscotti - 1g · from 2026-05-15T00:00:00Z</div></td><td class="num">$52.50</td><td class="num"><strong>$52.50</strong></td><td class="num delta-zero">—</td><td class="num">67.71%</td><td class="num">67.71%</td><td><span class="pill keep">keep</span></td></tr></tbody></table></div>
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center;
+              flex-wrap:wrap;gap:8px">
+    <div>
+      <strong>Herb Blue Dream</strong>
+      <span class="cost-meta"> · group 220003 · Flower</span>
+    </div>
+    <div>
+      <span class="pill edit">edit 1</span>
+      <span class="pill keep">keep 0</span>
+      
+    </div>
+  </div>
+  <table style="margin-top:10px">
+    <thead><tr>
+      <th>Variant</th><th>Tab</th>
+      <th class="num">Cost</th>
+      <th class="num">Current $</th>
+      <th class="num">Proposed $</th>
+      <th class="num">Δ</th>
+      <th class="num">Current GM</th>
+      <th class="num">Proposed GM</th>
+      <th>Action</th>
+    </tr></thead>
+    <tbody>
+<tr class=""><td>Herb Blue Dream 3.5g<br><span class="cost-meta">prod 283850</span></td><td>3.5g</td><td class="num">$11.00<div class="cost-meta">Stop 31 LLC · Herb - Flower - Blue Dream - 3.5g · from 2026-02-27T00:00:00Z</div></td><td class="num">$35.50</td><td class="num"><strong>$38.50</strong></td><td class="num delta-up">+3.00</td><td class="num">64.99%</td><td class="num">67.71%</td><td><span class="pill edit">edit</span></td></tr></tbody></table></div>
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center;
+              flex-wrap:wrap;gap:8px">
+    <div>
+      <strong>Herb Chocolate Haze</strong>
+      <span class="cost-meta"> · group 220011 · Flower</span>
+    </div>
+    <div>
+      <span class="pill edit">edit 1</span>
+      <span class="pill keep">keep 0</span>
+      
+    </div>
+  </div>
+  <table style="margin-top:10px">
+    <thead><tr>
+      <th>Variant</th><th>Tab</th>
+      <th class="num">Cost</th>
+      <th class="num">Current $</th>
+      <th class="num">Proposed $</th>
+      <th class="num">Δ</th>
+      <th class="num">Current GM</th>
+      <th class="num">Proposed GM</th>
+      <th>Action</th>
+    </tr></thead>
+    <tbody>
+<tr class=""><td>Herb Chocolate Haze 3.5g<br><span class="cost-meta">prod 283862</span></td><td>3.5g</td><td class="num">$11.00<div class="cost-meta">Stop 31 LLC · Herb - Flower - Chocolate Haze - 3.5g · from 2026-04-06T00:00:00Z</div></td><td class="num">$35.50</td><td class="num"><strong>$38.50</strong></td><td class="num delta-up">+3.00</td><td class="num">64.99%</td><td class="num">67.71%</td><td><span class="pill edit">edit</span></td></tr></tbody></table></div>
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center;
+              flex-wrap:wrap;gap:8px">
+    <div>
+      <strong>Herb Cookie Dough</strong>
+      <span class="cost-meta"> · group 286963 · Flower</span>
+    </div>
+    <div>
+      <span class="pill edit">edit 1</span>
+      <span class="pill keep">keep 0</span>
+      
+    </div>
+  </div>
+  <table style="margin-top:10px">
+    <thead><tr>
+      <th>Variant</th><th>Tab</th>
+      <th class="num">Cost</th>
+      <th class="num">Current $</th>
+      <th class="num">Proposed $</th>
+      <th class="num">Δ</th>
+      <th class="num">Current GM</th>
+      <th class="num">Proposed GM</th>
+      <th>Action</th>
+    </tr></thead>
+    <tbody>
+<tr class=""><td>Herb Cookie Dough 28g<br><span class="cost-meta">prod 377008</span></td><td>28g</td><td class="num">$65.00<div class="cost-meta">Stop 31 LLC · Herb - Flower - Cookie Dough - 1oz · from 2026-04-06T00:00:00Z</div></td><td class="num">$197.50</td><td class="num"><strong>$227.50</strong></td><td class="num delta-up">+30.00</td><td class="num">62.81%</td><td class="num">67.71%</td><td><span class="pill edit">edit</span> <span class="pill big">big swing</span></td></tr></tbody></table></div>
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center;
+              flex-wrap:wrap;gap:8px">
+    <div>
+      <strong>Herb Donny Burger</strong>
+      <span class="cost-meta"> · group 286951 · Pre-Rolls</span>
+    </div>
+    <div>
+      <span class="pill edit">edit 1</span>
+      <span class="pill keep">keep 0</span>
+      
+    </div>
+  </div>
+  <table style="margin-top:10px">
+    <thead><tr>
+      <th>Variant</th><th>Tab</th>
+      <th class="num">Cost</th>
+      <th class="num">Current $</th>
+      <th class="num">Proposed $</th>
+      <th class="num">Δ</th>
+      <th class="num">Current GM</th>
+      <th class="num">Proposed GM</th>
+      <th>Action</th>
+    </tr></thead>
+    <tbody>
+<tr class=""><td>Herb Donny Burger 1g<br><span class="cost-meta">prod 376995</span></td><td>1g</td><td class="num">$3.50<div class="cost-meta">1Off · Herb Cannabis Flower Products Donny Burger 1g · from 2026-04-06T00:00:00Z</div></td><td class="num">$15.00</td><td class="num"><strong>$12.25</strong></td><td class="num delta-down">-2.75</td><td class="num">73.63%</td><td class="num">67.71%</td><td><span class="pill edit">edit</span></td></tr></tbody></table></div>
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center;
+              flex-wrap:wrap;gap:8px">
+    <div>
+      <strong>Herb Durban Poison</strong>
+      <span class="cost-meta"> · group 286959 · Pre-Rolls</span>
+    </div>
+    <div>
+      <span class="pill edit">edit 1</span>
+      <span class="pill keep">keep 0</span>
+      
+    </div>
+  </div>
+  <table style="margin-top:10px">
+    <thead><tr>
+      <th>Variant</th><th>Tab</th>
+      <th class="num">Cost</th>
+      <th class="num">Current $</th>
+      <th class="num">Proposed $</th>
+      <th class="num">Δ</th>
+      <th class="num">Current GM</th>
+      <th class="num">Proposed GM</th>
+      <th>Action</th>
+    </tr></thead>
+    <tbody>
+<tr class=""><td>Herb Durban Poison 1g<br><span class="cost-meta">prod 377003</span></td><td>1g</td><td class="num">$3.50<div class="cost-meta">Stop 31 LLC · 1O-PR-H26-DURB2 · from 2026-04-06T00:00:00Z</div></td><td class="num">$15.00</td><td class="num"><strong>$12.25</strong></td><td class="num delta-down">-2.75</td><td class="num">73.63%</td><td class="num">67.71%</td><td><span class="pill edit">edit</span></td></tr></tbody></table></div>
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center;
+              flex-wrap:wrap;gap:8px">
+    <div>
+      <strong>Herb Forbidden Fruit</strong>
+      <span class="cost-meta"> · group 331998 · Vapes / All In One / Disposable</span>
+    </div>
+    <div>
+      <span class="pill edit">edit 0</span>
+      <span class="pill keep">keep 1</span>
+      
+    </div>
+  </div>
+  <table style="margin-top:10px">
+    <thead><tr>
+      <th>Variant</th><th>Tab</th>
+      <th class="num">Cost</th>
+      <th class="num">Current $</th>
+      <th class="num">Proposed $</th>
+      <th class="num">Δ</th>
+      <th class="num">Current GM</th>
+      <th class="num">Proposed GM</th>
+      <th>Action</th>
+    </tr></thead>
+    <tbody>
+<tr class="keep-row"><td>Herb Forbidden Fruit 1g<br><span class="cost-meta">prod 430528</span></td><td>1g</td><td class="num">$15.00<div class="cost-meta">Stop 31 LLC · Herb - Vape - Forbidden Fruit - 1g · from 2026-05-15T00:00:00Z</div></td><td class="num">$52.50</td><td class="num"><strong>$52.50</strong></td><td class="num delta-zero">—</td><td class="num">67.71%</td><td class="num">67.71%</td><td><span class="pill keep">keep</span></td></tr></tbody></table></div>
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center;
+              flex-wrap:wrap;gap:8px">
+    <div>
+      <strong>Herb Forbidden Fruit Infused</strong>
+      <span class="cost-meta"> · group 332005 · Pre-Rolls / Infused</span>
+    </div>
+    <div>
+      <span class="pill edit">edit 0</span>
+      <span class="pill keep">keep 1</span>
+      
+    </div>
+  </div>
+  <table style="margin-top:10px">
+    <thead><tr>
+      <th>Variant</th><th>Tab</th>
+      <th class="num">Cost</th>
+      <th class="num">Current $</th>
+      <th class="num">Proposed $</th>
+      <th class="num">Δ</th>
+      <th class="num">Current GM</th>
+      <th class="num">Proposed GM</th>
+      <th>Action</th>
+    </tr></thead>
+    <tbody>
+<tr class="keep-row"><td>Herb Forbidden Fruit Infused 1g<br><span class="cost-meta">prod 430535</span></td><td>1g</td><td class="num">$5.75<div class="cost-meta">Stop 31 LLC · HERB Forbidden Fruit 1G Infused PR · from 2026-05-15T00:00:00Z</div></td><td class="num">$20.00</td><td class="num"><strong>$20.00</strong></td><td class="num delta-zero">—</td><td class="num">67.51%</td><td class="num">67.51%</td><td><span class="pill keep">keep</span></td></tr></tbody></table></div>
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center;
+              flex-wrap:wrap;gap:8px">
+    <div>
+      <strong>Herb Gelato</strong>
+      <span class="cost-meta"> · group 286965 · Flower</span>
+    </div>
+    <div>
+      <span class="pill edit">edit 1</span>
+      <span class="pill keep">keep 0</span>
+      
+    </div>
+  </div>
+  <table style="margin-top:10px">
+    <thead><tr>
+      <th>Variant</th><th>Tab</th>
+      <th class="num">Cost</th>
+      <th class="num">Current $</th>
+      <th class="num">Proposed $</th>
+      <th class="num">Δ</th>
+      <th class="num">Current GM</th>
+      <th class="num">Proposed GM</th>
+      <th>Action</th>
+    </tr></thead>
+    <tbody>
+<tr class=""><td>Herb Gelato 28g<br><span class="cost-meta">prod 377010</span></td><td>28g</td><td class="num">$65.00<div class="cost-meta">Stop 31 LLC · Herb - Flower - Gelato - 1oz · from 2026-04-06T00:00:00Z</div></td><td class="num">$197.50</td><td class="num"><strong>$227.50</strong></td><td class="num delta-up">+30.00</td><td class="num">62.81%</td><td class="num">67.71%</td><td><span class="pill edit">edit</span> <span class="pill big">big swing</span></td></tr></tbody></table></div>
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center;
+              flex-wrap:wrap;gap:8px">
+    <div>
+      <strong>Herb Jack Herer</strong>
+      <span class="cost-meta"> · group 331999 · Vapes / All In One / Disposable</span>
+    </div>
+    <div>
+      <span class="pill edit">edit 0</span>
+      <span class="pill keep">keep 1</span>
+      
+    </div>
+  </div>
+  <table style="margin-top:10px">
+    <thead><tr>
+      <th>Variant</th><th>Tab</th>
+      <th class="num">Cost</th>
+      <th class="num">Current $</th>
+      <th class="num">Proposed $</th>
+      <th class="num">Δ</th>
+      <th class="num">Current GM</th>
+      <th class="num">Proposed GM</th>
+      <th>Action</th>
+    </tr></thead>
+    <tbody>
+<tr class="keep-row"><td>Herb Jack Herer 1g<br><span class="cost-meta">prod 430529</span></td><td>1g</td><td class="num">$15.00<div class="cost-meta">Stop 31 LLC · Herb - Vape - Jack Herer - 1g · from 2026-05-15T00:00:00Z</div></td><td class="num">$52.50</td><td class="num"><strong>$52.50</strong></td><td class="num delta-zero">—</td><td class="num">67.71%</td><td class="num">67.71%</td><td><span class="pill keep">keep</span></td></tr></tbody></table></div>
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center;
+              flex-wrap:wrap;gap:8px">
+    <div>
+      <strong>Herb King Louie OG</strong>
+      <span class="cost-meta"> · group 331992 · Pre-Rolls</span>
+    </div>
+    <div>
+      <span class="pill edit">edit 1</span>
+      <span class="pill keep">keep 0</span>
+      
+    </div>
+  </div>
+  <table style="margin-top:10px">
+    <thead><tr>
+      <th>Variant</th><th>Tab</th>
+      <th class="num">Cost</th>
+      <th class="num">Current $</th>
+      <th class="num">Proposed $</th>
+      <th class="num">Δ</th>
+      <th class="num">Current GM</th>
+      <th class="num">Proposed GM</th>
+      <th>Action</th>
+    </tr></thead>
+    <tbody>
+<tr class=""><td>Herb King Louie OG 32x 1g<br><span class="cost-meta">prod 430523</span></td><td>32x 1g</td><td class="num">$65.00<div class="cost-meta">Stop 31 LLC · 1O-PR32-H26-KNGL · from 2026-05-15T00:00:00Z</div></td><td class="num">$226.00</td><td class="num"><strong>$227.50</strong></td><td class="num delta-up">+1.50</td><td class="num">67.50%</td><td class="num">67.71%</td><td><span class="pill edit">edit</span></td></tr></tbody></table></div>
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center;
+              flex-wrap:wrap;gap:8px">
+    <div>
+      <strong>Herb King Louie OG</strong>
+      <span class="cost-meta"> · group 332000 · Vapes / All In One / Disposable</span>
+    </div>
+    <div>
+      <span class="pill edit">edit 0</span>
+      <span class="pill keep">keep 1</span>
+      
+    </div>
+  </div>
+  <table style="margin-top:10px">
+    <thead><tr>
+      <th>Variant</th><th>Tab</th>
+      <th class="num">Cost</th>
+      <th class="num">Current $</th>
+      <th class="num">Proposed $</th>
+      <th class="num">Δ</th>
+      <th class="num">Current GM</th>
+      <th class="num">Proposed GM</th>
+      <th>Action</th>
+    </tr></thead>
+    <tbody>
+<tr class="keep-row"><td>Herb King Louie OG 1g<br><span class="cost-meta">prod 430530</span></td><td>1g</td><td class="num">$15.00<div class="cost-meta">Stop 31 LLC · Herb - Vape - King Louie OG - 1g · from 2026-05-15T00:00:00Z</div></td><td class="num">$52.50</td><td class="num"><strong>$52.50</strong></td><td class="num delta-zero">—</td><td class="num">67.71%</td><td class="num">67.71%</td><td><span class="pill keep">keep</span></td></tr></tbody></table></div>
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center;
+              flex-wrap:wrap;gap:8px">
+    <div>
+      <strong>Herb Lemon Haze Infused</strong>
+      <span class="cost-meta"> · group 332006 · Pre-Rolls / Infused</span>
+    </div>
+    <div>
+      <span class="pill edit">edit 0</span>
+      <span class="pill keep">keep 1</span>
+      
+    </div>
+  </div>
+  <table style="margin-top:10px">
+    <thead><tr>
+      <th>Variant</th><th>Tab</th>
+      <th class="num">Cost</th>
+      <th class="num">Current $</th>
+      <th class="num">Proposed $</th>
+      <th class="num">Δ</th>
+      <th class="num">Current GM</th>
+      <th class="num">Proposed GM</th>
+      <th>Action</th>
+    </tr></thead>
+    <tbody>
+<tr class="keep-row"><td>Herb Lemon Haze Infused 1g<br><span class="cost-meta">prod 430536</span></td><td>1g</td><td class="num">$5.75<div class="cost-meta">Stop 31 LLC · HERB Lemon Haze 1G Infused PR · from 2026-05-15T00:00:00Z</div></td><td class="num">$20.00</td><td class="num"><strong>$20.00</strong></td><td class="num delta-zero">—</td><td class="num">67.51%</td><td class="num">67.51%</td><td><span class="pill keep">keep</span></td></tr></tbody></table></div>
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center;
+              flex-wrap:wrap;gap:8px">
+    <div>
+      <strong>Herb Mimosa</strong>
+      <span class="cost-meta"> · group 220017 · Flower</span>
+    </div>
+    <div>
+      <span class="pill edit">edit 2</span>
+      <span class="pill keep">keep 0</span>
+      
+    </div>
+  </div>
+  <table style="margin-top:10px">
+    <thead><tr>
+      <th>Variant</th><th>Tab</th>
+      <th class="num">Cost</th>
+      <th class="num">Current $</th>
+      <th class="num">Proposed $</th>
+      <th class="num">Δ</th>
+      <th class="num">Current GM</th>
+      <th class="num">Proposed GM</th>
+      <th>Action</th>
+    </tr></thead>
+    <tbody>
+<tr class=""><td>Herb Mimosa 3.5g<br><span class="cost-meta">prod 283874</span></td><td>3.5g</td><td class="num">$11.00<div class="cost-meta">Stop 31 LLC · Herb - Flower - Mimosa - 3.5 · from 2026-02-27T00:00:00Z</div></td><td class="num">$35.50</td><td class="num"><strong>$38.50</strong></td><td class="num delta-up">+3.00</td><td class="num">64.99%</td><td class="num">67.71%</td><td><span class="pill edit">edit</span></td></tr><tr class=""><td>Herb Mimosa 28g<br><span class="cost-meta">prod 283897</span></td><td>28g</td><td class="num">$65.00<div class="cost-meta">Stop 31 LLC · Herb - Flower - Mimosa - 1oz · from 2026-04-06T00:00:00Z</div></td><td class="num">$197.50</td><td class="num"><strong>$227.50</strong></td><td class="num delta-up">+30.00</td><td class="num">62.81%</td><td class="num">67.71%</td><td><span class="pill edit">edit</span> <span class="pill big">big swing</span></td></tr></tbody></table></div>
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center;
+              flex-wrap:wrap;gap:8px">
+    <div>
+      <strong>Herb Orange Cookies</strong>
+      <span class="cost-meta"> · group 220024 · Flower</span>
+    </div>
+    <div>
+      <span class="pill edit">edit 1</span>
+      <span class="pill keep">keep 0</span>
+      
+    </div>
+  </div>
+  <table style="margin-top:10px">
+    <thead><tr>
+      <th>Variant</th><th>Tab</th>
+      <th class="num">Cost</th>
+      <th class="num">Current $</th>
+      <th class="num">Proposed $</th>
+      <th class="num">Δ</th>
+      <th class="num">Current GM</th>
+      <th class="num">Proposed GM</th>
+      <th>Action</th>
+    </tr></thead>
+    <tbody>
+<tr class=""><td>Herb Orange Cookies 3.5g<br><span class="cost-meta">prod 283880</span></td><td>3.5g</td><td class="num">$11.00<div class="cost-meta">Stop 31 LLC · HERB-3.5-ORANGE COOKIES · from 2026-02-27T00:00:00Z</div></td><td class="num">$35.50</td><td class="num"><strong>$38.50</strong></td><td class="num delta-up">+3.00</td><td class="num">64.99%</td><td class="num">67.71%</td><td><span class="pill edit">edit</span></td></tr></tbody></table></div>
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center;
+              flex-wrap:wrap;gap:8px">
+    <div>
+      <strong>Herb Runtz</strong>
+      <span class="cost-meta"> · group 220028 · Flower</span>
+    </div>
+    <div>
+      <span class="pill edit">edit 2</span>
+      <span class="pill keep">keep 0</span>
+      
+    </div>
+  </div>
+  <table style="margin-top:10px">
+    <thead><tr>
+      <th>Variant</th><th>Tab</th>
+      <th class="num">Cost</th>
+      <th class="num">Current $</th>
+      <th class="num">Proposed $</th>
+      <th class="num">Δ</th>
+      <th class="num">Current GM</th>
+      <th class="num">Proposed GM</th>
+      <th>Action</th>
+    </tr></thead>
+    <tbody>
+<tr class=""><td>Herb Runtz 3.5g<br><span class="cost-meta">prod 283884</span></td><td>3.5g</td><td class="num">$11.00<div class="cost-meta">Stop 31 LLC · Herb - Flower - Runtz - 3.5g · from 2026-04-06T00:00:00Z</div></td><td class="num">$35.50</td><td class="num"><strong>$38.50</strong></td><td class="num delta-up">+3.00</td><td class="num">64.99%</td><td class="num">67.71%</td><td><span class="pill edit">edit</span></td></tr><tr class=""><td>Herb Runtz 14g<br><span class="cost-meta">prod 283899</span></td><td>14g</td><td class="num">$34.00<div class="cost-meta">Stop 31 LLC · Herb - Flower - Runtz - 14g · from 2026-02-27T00:00:00Z</div></td><td class="num">$109.50</td><td class="num"><strong>$119.00</strong></td><td class="num delta-up">+9.50</td><td class="num">64.91%</td><td class="num">67.71%</td><td><span class="pill edit">edit</span> <span class="pill big">big swing</span></td></tr></tbody></table></div>
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center;
+              flex-wrap:wrap;gap:8px">
+    <div>
+      <strong>Herb Runtz</strong>
+      <span class="cost-meta"> · group 286968 · Flower</span>
+    </div>
+    <div>
+      <span class="pill edit">edit 1</span>
+      <span class="pill keep">keep 0</span>
+      
+    </div>
+  </div>
+  <table style="margin-top:10px">
+    <thead><tr>
+      <th>Variant</th><th>Tab</th>
+      <th class="num">Cost</th>
+      <th class="num">Current $</th>
+      <th class="num">Proposed $</th>
+      <th class="num">Δ</th>
+      <th class="num">Current GM</th>
+      <th class="num">Proposed GM</th>
+      <th>Action</th>
+    </tr></thead>
+    <tbody>
+<tr class=""><td>Herb Runtz 28g<br><span class="cost-meta">prod 377015</span></td><td>28g</td><td class="num">$65.00<div class="cost-meta">1Off · Herb Cannabis Flower Products Runtz 28g · from 2026-04-06T00:00:00Z</div></td><td class="num">$197.50</td><td class="num"><strong>$227.50</strong></td><td class="num delta-up">+30.00</td><td class="num">62.81%</td><td class="num">67.71%</td><td><span class="pill edit">edit</span> <span class="pill big">big swing</span></td></tr></tbody></table></div>
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center;
+              flex-wrap:wrap;gap:8px">
+    <div>
+      <strong>Herb Runtz</strong>
+      <span class="cost-meta"> · group 332001 · Vapes / All In One / Disposable</span>
+    </div>
+    <div>
+      <span class="pill edit">edit 0</span>
+      <span class="pill keep">keep 1</span>
+      
+    </div>
+  </div>
+  <table style="margin-top:10px">
+    <thead><tr>
+      <th>Variant</th><th>Tab</th>
+      <th class="num">Cost</th>
+      <th class="num">Current $</th>
+      <th class="num">Proposed $</th>
+      <th class="num">Δ</th>
+      <th class="num">Current GM</th>
+      <th class="num">Proposed GM</th>
+      <th>Action</th>
+    </tr></thead>
+    <tbody>
+<tr class="keep-row"><td>Herb Runtz 1g<br><span class="cost-meta">prod 430532</span></td><td>1g</td><td class="num">$15.00<div class="cost-meta">Stop 31 LLC · Herb - Vape - Runtz - 1g · from 2026-05-15T00:00:00Z</div></td><td class="num">$52.50</td><td class="num"><strong>$52.50</strong></td><td class="num delta-zero">—</td><td class="num">67.71%</td><td class="num">67.71%</td><td><span class="pill keep">keep</span></td></tr></tbody></table></div>
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center;
+              flex-wrap:wrap;gap:8px">
+    <div>
+      <strong>Herb Silver Haze</strong>
+      <span class="cost-meta"> · group 332002 · Vapes / All In One / Disposable</span>
+    </div>
+    <div>
+      <span class="pill edit">edit 0</span>
+      <span class="pill keep">keep 1</span>
+      
+    </div>
+  </div>
+  <table style="margin-top:10px">
+    <thead><tr>
+      <th>Variant</th><th>Tab</th>
+      <th class="num">Cost</th>
+      <th class="num">Current $</th>
+      <th class="num">Proposed $</th>
+      <th class="num">Δ</th>
+      <th class="num">Current GM</th>
+      <th class="num">Proposed GM</th>
+      <th>Action</th>
+    </tr></thead>
+    <tbody>
+<tr class="keep-row"><td>Herb Silver Haze 1g<br><span class="cost-meta">prod 430533</span></td><td>1g</td><td class="num">$15.00<div class="cost-meta">Stop 31 LLC · Herb - Vape - Silver Haze - 1g · from 2026-05-15T00:00:00Z</div></td><td class="num">$52.50</td><td class="num"><strong>$52.50</strong></td><td class="num delta-zero">—</td><td class="num">67.71%</td><td class="num">67.71%</td><td><span class="pill keep">keep</span></td></tr></tbody></table></div>
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center;
+              flex-wrap:wrap;gap:8px">
+    <div>
+      <strong>Herb Sour Diesel</strong>
+      <span class="cost-meta"> · group 286942 · Vapes / All In One / Disposable</span>
+    </div>
+    <div>
+      <span class="pill edit">edit 0</span>
+      <span class="pill keep">keep 1</span>
+      
+    </div>
+  </div>
+  <table style="margin-top:10px">
+    <thead><tr>
+      <th>Variant</th><th>Tab</th>
+      <th class="num">Cost</th>
+      <th class="num">Current $</th>
+      <th class="num">Proposed $</th>
+      <th class="num">Δ</th>
+      <th class="num">Current GM</th>
+      <th class="num">Proposed GM</th>
+      <th>Action</th>
+    </tr></thead>
+    <tbody>
+<tr class="keep-row"><td>Herb Sour Diesel 1g<br><span class="cost-meta">prod 376985</span></td><td>1g</td><td class="num">$15.00<div class="cost-meta">Stop 31 LLC · Herb - Vape - Sour Diesel - 1g · from 2026-05-11T00:00:00Z</div></td><td class="num">$52.50</td><td class="num"><strong>$52.50</strong></td><td class="num delta-zero">—</td><td class="num">67.71%</td><td class="num">67.71%</td><td><span class="pill keep">keep</span></td></tr></tbody></table></div>
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center;
+              flex-wrap:wrap;gap:8px">
+    <div>
+      <strong>Herb Sour OG</strong>
+      <span class="cost-meta"> · group 220030 · Flower</span>
+    </div>
+    <div>
+      <span class="pill edit">edit 1</span>
+      <span class="pill keep">keep 0</span>
+      
+    </div>
+  </div>
+  <table style="margin-top:10px">
+    <thead><tr>
+      <th>Variant</th><th>Tab</th>
+      <th class="num">Cost</th>
+      <th class="num">Current $</th>
+      <th class="num">Proposed $</th>
+      <th class="num">Δ</th>
+      <th class="num">Current GM</th>
+      <th class="num">Proposed GM</th>
+      <th>Action</th>
+    </tr></thead>
+    <tbody>
+<tr class=""><td>Herb Sour OG 3.5g<br><span class="cost-meta">prod 283888</span></td><td>3.5g</td><td class="num">$11.00<div class="cost-meta">Stop 31 LLC · HERB-3.5-SOUR OG · from 2026-02-27T00:00:00Z</div></td><td class="num">$35.50</td><td class="num"><strong>$38.50</strong></td><td class="num delta-up">+3.00</td><td class="num">64.99%</td><td class="num">67.71%</td><td><span class="pill edit">edit</span></td></tr></tbody></table></div>
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center;
+              flex-wrap:wrap;gap:8px">
+    <div>
+      <strong>Herb Sour Tangie</strong>
+      <span class="cost-meta"> · group 332004 · Vapes / All In One / Disposable</span>
+    </div>
+    <div>
+      <span class="pill edit">edit 0</span>
+      <span class="pill keep">keep 1</span>
+      
+    </div>
+  </div>
+  <table style="margin-top:10px">
+    <thead><tr>
+      <th>Variant</th><th>Tab</th>
+      <th class="num">Cost</th>
+      <th class="num">Current $</th>
+      <th class="num">Proposed $</th>
+      <th class="num">Δ</th>
+      <th class="num">Current GM</th>
+      <th class="num">Proposed GM</th>
+      <th>Action</th>
+    </tr></thead>
+    <tbody>
+<tr class="keep-row"><td>Herb Sour Tangie 1g<br><span class="cost-meta">prod 430534</span></td><td>1g</td><td class="num">$15.00<div class="cost-meta">Stop 31 LLC · Herb - Vape - Sour Tangie - 1g · from 2026-05-15T00:00:00Z</div></td><td class="num">$52.50</td><td class="num"><strong>$52.50</strong></td><td class="num delta-zero">—</td><td class="num">67.71%</td><td class="num">67.71%</td><td><span class="pill keep">keep</span></td></tr></tbody></table></div>
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center;
+              flex-wrap:wrap;gap:8px">
+    <div>
+      <strong>Herb Space Runtz</strong>
+      <span class="cost-meta"> · group 220033 · Flower</span>
+    </div>
+    <div>
+      <span class="pill edit">edit 1</span>
+      <span class="pill keep">keep 0</span>
+      
+    </div>
+  </div>
+  <table style="margin-top:10px">
+    <thead><tr>
+      <th>Variant</th><th>Tab</th>
+      <th class="num">Cost</th>
+      <th class="num">Current $</th>
+      <th class="num">Proposed $</th>
+      <th class="num">Δ</th>
+      <th class="num">Current GM</th>
+      <th class="num">Proposed GM</th>
+      <th>Action</th>
+    </tr></thead>
+    <tbody>
+<tr class=""><td>Herb Space Runtz 3.5g<br><span class="cost-meta">prod 283893</span></td><td>3.5g</td><td class="num">$11.00<div class="cost-meta">Stop 31 LLC · HERB-3.5-SPACE RUNTZ · from 2026-02-27T00:00:00Z</div></td><td class="num">$35.50</td><td class="num"><strong>$38.50</strong></td><td class="num delta-up">+3.00</td><td class="num">64.99%</td><td class="num">67.71%</td><td><span class="pill edit">edit</span></td></tr></tbody></table></div>
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center;
+              flex-wrap:wrap;gap:8px">
+    <div>
+      <strong>Herb Tropicana Cookies Infused</strong>
+      <span class="cost-meta"> · group 332007 · Pre-Rolls / Infused</span>
+    </div>
+    <div>
+      <span class="pill edit">edit 0</span>
+      <span class="pill keep">keep 0</span>
+      
+    </div>
+  </div>
+  <table style="margin-top:10px">
+    <thead><tr>
+      <th>Variant</th><th>Tab</th>
+      <th class="num">Cost</th>
+      <th class="num">Current $</th>
+      <th class="num">Proposed $</th>
+      <th class="num">Δ</th>
+      <th class="num">Current GM</th>
+      <th class="num">Proposed GM</th>
+      <th>Action</th>
+    </tr></thead>
+    <tbody>
+</tbody></table></div>
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center;
+              flex-wrap:wrap;gap:8px">
+    <div>
+      <strong>Herb Tropicana Cookies Infused</strong>
+      <span class="cost-meta"> · group 332010 · Pre-Rolls / Infused</span>
+    </div>
+    <div>
+      <span class="pill edit">edit 0</span>
+      <span class="pill keep">keep 1</span>
+      
+    </div>
+  </div>
+  <table style="margin-top:10px">
+    <thead><tr>
+      <th>Variant</th><th>Tab</th>
+      <th class="num">Cost</th>
+      <th class="num">Current $</th>
+      <th class="num">Proposed $</th>
+      <th class="num">Δ</th>
+      <th class="num">Current GM</th>
+      <th class="num">Proposed GM</th>
+      <th>Action</th>
+    </tr></thead>
+    <tbody>
+<tr class="keep-row"><td>Herb Tropicana Cookies Infused 1g<br><span class="cost-meta">prod 430541</span></td><td>1g</td><td class="num">$5.75<div class="cost-meta">Stop 31 LLC · HERB Tropicana Cookies1G Infused PR · from 2026-05-15T00:00:00Z</div></td><td class="num">$20.00</td><td class="num"><strong>$20.00</strong></td><td class="num delta-zero">—</td><td class="num">67.51%</td><td class="num">67.51%</td><td><span class="pill keep">keep</span></td></tr></tbody></table></div>
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center;
+              flex-wrap:wrap;gap:8px">
+    <div>
+      <strong>Herb WiFi OG</strong>
+      <span class="cost-meta"> · group 299567 · Pre-Rolls</span>
+    </div>
+    <div>
+      <span class="pill edit">edit 1</span>
+      <span class="pill keep">keep 0</span>
+      
+    </div>
+  </div>
+  <table style="margin-top:10px">
+    <thead><tr>
+      <th>Variant</th><th>Tab</th>
+      <th class="num">Cost</th>
+      <th class="num">Current $</th>
+      <th class="num">Proposed $</th>
+      <th class="num">Δ</th>
+      <th class="num">Current GM</th>
+      <th class="num">Proposed GM</th>
+      <th>Action</th>
+    </tr></thead>
+    <tbody>
+<tr class=""><td>Herb WiFi OG 1g<br><span class="cost-meta">prod 391535</span></td><td>1g</td><td class="num">$2.71<div class="cost-meta">Stop 31 LLC · 1O-PR-H26-WIOG · from 2026-04-20T00:00:00Z</div></td><td class="num">$15.00</td><td class="num"><strong>$9.50</strong></td><td class="num delta-down">-5.50</td><td class="num">79.58%</td><td class="num">67.77%</td><td><span class="pill edit">edit</span> <span class="pill big">big swing</span></td></tr></tbody></table></div><h2 class="brand-h">Jungle Girl</h2>
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center;
+              flex-wrap:wrap;gap:8px">
+    <div>
+      <strong>Jungle Girl Harmonious</strong>
+      <span class="cost-meta"> · group 332011 · Pre-Rolls</span>
+    </div>
+    <div>
+      <span class="pill edit">edit 1</span>
+      <span class="pill keep">keep 0</span>
+      
+    </div>
+  </div>
+  <table style="margin-top:10px">
+    <thead><tr>
+      <th>Variant</th><th>Tab</th>
+      <th class="num">Cost</th>
+      <th class="num">Current $</th>
+      <th class="num">Proposed $</th>
+      <th class="num">Δ</th>
+      <th class="num">Current GM</th>
+      <th class="num">Proposed GM</th>
+      <th>Action</th>
+    </tr></thead>
+    <tbody>
+<tr class=""><td>Jungle Girl Harmonious 5x 0.5g<br><span class="cost-meta">prod 430542</span></td><td>5x 0.5g</td><td class="num">$17.50<div class="cost-meta">Stop 31 LLC · Jungle Girl - Harmonious - 5pk · from 2026-05-15T00:00:00Z</div></td><td class="num">$61.00</td><td class="num"><strong>$61.25</strong></td><td class="num delta-up">+0.25</td><td class="num">67.58%</td><td class="num">67.71%</td><td><span class="pill edit">edit</span></td></tr></tbody></table></div>
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center;
+              flex-wrap:wrap;gap:8px">
+    <div>
+      <strong>Jungle Girl Uplifting</strong>
+      <span class="cost-meta"> · group 332012 · Pre-Rolls</span>
+    </div>
+    <div>
+      <span class="pill edit">edit 1</span>
+      <span class="pill keep">keep 0</span>
+      
+    </div>
+  </div>
+  <table style="margin-top:10px">
+    <thead><tr>
+      <th>Variant</th><th>Tab</th>
+      <th class="num">Cost</th>
+      <th class="num">Current $</th>
+      <th class="num">Proposed $</th>
+      <th class="num">Δ</th>
+      <th class="num">Current GM</th>
+      <th class="num">Proposed GM</th>
+      <th>Action</th>
+    </tr></thead>
+    <tbody>
+<tr class=""><td>Jungle Girl Uplifting 5x 0.5g<br><span class="cost-meta">prod 430543</span></td><td>5x 0.5g</td><td class="num">$17.50<div class="cost-meta">Stop 31 LLC · Jungle Girl - Uplifting - 5pk · from 2026-05-15T00:00:00Z</div></td><td class="num">$61.00</td><td class="num"><strong>$61.25</strong></td><td class="num delta-up">+0.25</td><td class="num">67.58%</td><td class="num">67.71%</td><td><span class="pill edit">edit</span></td></tr></tbody></table></div>
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center;
+              flex-wrap:wrap;gap:8px">
+    <div>
+      <strong>Jungle Girl Vibrant</strong>
+      <span class="cost-meta"> · group 332013 · Pre-Rolls</span>
+    </div>
+    <div>
+      <span class="pill edit">edit 1</span>
+      <span class="pill keep">keep 0</span>
+      
+    </div>
+  </div>
+  <table style="margin-top:10px">
+    <thead><tr>
+      <th>Variant</th><th>Tab</th>
+      <th class="num">Cost</th>
+      <th class="num">Current $</th>
+      <th class="num">Proposed $</th>
+      <th class="num">Δ</th>
+      <th class="num">Current GM</th>
+      <th class="num">Proposed GM</th>
+      <th>Action</th>
+    </tr></thead>
+    <tbody>
+<tr class=""><td>Jungle Girl Vibrant 5x 0.5g<br><span class="cost-meta">prod 430544</span></td><td>5x 0.5g</td><td class="num">$17.50<div class="cost-meta">Stop 31 LLC · Jungle Girl - Vibrant - 5pk · from 2026-05-15T00:00:00Z</div></td><td class="num">$61.00</td><td class="num"><strong>$61.25</strong></td><td class="num delta-up">+0.25</td><td class="num">67.58%</td><td class="num">67.71%</td><td><span class="pill edit">edit</span></td></tr></tbody></table></div><h2 class="brand-h">Moonlit Hash Co</h2>
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center;
+              flex-wrap:wrap;gap:8px">
+    <div>
+      <strong>Moonlit Hash Co Alaskan Cherry Legs</strong>
+      <span class="cost-meta"> · group 270285 · Pre-Rolls / Infused</span>
+    </div>
+    <div>
+      <span class="pill edit">edit 1</span>
+      <span class="pill keep">keep 0</span>
+      
+    </div>
+  </div>
+  <table style="margin-top:10px">
+    <thead><tr>
+      <th>Variant</th><th>Tab</th>
+      <th class="num">Cost</th>
+      <th class="num">Current $</th>
+      <th class="num">Proposed $</th>
+      <th class="num">Δ</th>
+      <th class="num">Current GM</th>
+      <th class="num">Proposed GM</th>
+      <th>Action</th>
+    </tr></thead>
+    <tbody>
+<tr class=""><td>Moonlit Hash Co Alaskan Cherry Legs 1.2g<br><span class="cost-meta">prod 357789</span></td><td>1.2g</td><td class="num">$6.00<div class="cost-meta">Stop 31 LLC · MOONLIT 1.2G NON-INFUSED ALASKAN · from 2026-04-01T00:00:00Z</div></td><td class="num">$14.00</td><td class="num"><strong>$21.00</strong></td><td class="num delta-up">+7.00</td><td class="num">51.57%</td><td class="num">67.71%</td><td><span class="pill edit">edit</span> <span class="pill big">big swing</span></td></tr></tbody></table></div>
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center;
+              flex-wrap:wrap;gap:8px">
+    <div>
+      <strong>Moonlit Hash Co Cheetah Piss</strong>
+      <span class="cost-meta"> · group 299568 · Pre-Rolls / Infused</span>
+    </div>
+    <div>
+      <span class="pill edit">edit 1</span>
+      <span class="pill keep">keep 0</span>
+      
+    </div>
+  </div>
+  <table style="margin-top:10px">
+    <thead><tr>
+      <th>Variant</th><th>Tab</th>
+      <th class="num">Cost</th>
+      <th class="num">Current $</th>
+      <th class="num">Proposed $</th>
+      <th class="num">Δ</th>
+      <th class="num">Current GM</th>
+      <th class="num">Proposed GM</th>
+      <th>Action</th>
+    </tr></thead>
+    <tbody>
+<tr class=""><td>Moonlit Hash Co Cheetah Piss 1.2g<br><span class="cost-meta">prod 391536</span></td><td>1.2g</td><td class="num">$7.81<div class="cost-meta">Stop 31 LLC · MOONLIT- CHEETAH PISS 1.2G INFUSED PREROLL · from 2026-04-20T00:00:00Z</div></td><td class="num">$21.00</td><td class="num"><strong>$27.25</strong></td><td class="num delta-up">+6.25</td><td class="num">57.97%</td><td class="num">67.61%</td><td><span class="pill edit">edit</span> <span class="pill big">big swing</span></td></tr></tbody></table></div>
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center;
+              flex-wrap:wrap;gap:8px">
+    <div>
+      <strong>Moonlit Hash Co Mac 1</strong>
+      <span class="cost-meta"> · group 332016 · Pre-Rolls</span>
+    </div>
+    <div>
+      <span class="pill edit">edit 0</span>
+      <span class="pill keep">keep 1</span>
+      
+    </div>
+  </div>
+  <table style="margin-top:10px">
+    <thead><tr>
+      <th>Variant</th><th>Tab</th>
+      <th class="num">Cost</th>
+      <th class="num">Current $</th>
+      <th class="num">Proposed $</th>
+      <th class="num">Δ</th>
+      <th class="num">Current GM</th>
+      <th class="num">Proposed GM</th>
+      <th>Action</th>
+    </tr></thead>
+    <tbody>
+<tr class="keep-row"><td>Moonlit Hash Co Mac 1 1.2g<br><span class="cost-meta">prod 430547</span></td><td>1.2g</td><td class="num">$6.00<div class="cost-meta">Stop 31 LLC · MOONLIT-MAC1 Non-Infused 1.2G · from 2026-05-15T00:00:00Z</div></td><td class="num">$21.00</td><td class="num"><strong>$21.00</strong></td><td class="num delta-zero">—</td><td class="num">67.71%</td><td class="num">67.71%</td><td><span class="pill keep">keep</span></td></tr></tbody></table></div>
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center;
+              flex-wrap:wrap;gap:8px">
+    <div>
+      <strong>Moonlit Hash Co Mac 1 Infused</strong>
+      <span class="cost-meta"> · group 332014 · Pre-Rolls / Infused</span>
+    </div>
+    <div>
+      <span class="pill edit">edit 1</span>
+      <span class="pill keep">keep 0</span>
+      
+    </div>
+  </div>
+  <table style="margin-top:10px">
+    <thead><tr>
+      <th>Variant</th><th>Tab</th>
+      <th class="num">Cost</th>
+      <th class="num">Current $</th>
+      <th class="num">Proposed $</th>
+      <th class="num">Δ</th>
+      <th class="num">Current GM</th>
+      <th class="num">Proposed GM</th>
+      <th>Action</th>
+    </tr></thead>
+    <tbody>
+<tr class=""><td>Moonlit Hash Co Mac 1 Infused 1.2g<br><span class="cost-meta">prod 430545</span></td><td>1.2g</td><td class="num">$9.50<div class="cost-meta">Stop 31 LLC · MOONLIT- MAC1 INFUSED 1.2G · from 2026-05-15T00:00:00Z</div></td><td class="num">$33.50</td><td class="num"><strong>$33.25</strong></td><td class="num delta-down">-0.25</td><td class="num">67.96%</td><td class="num">67.71%</td><td><span class="pill edit">edit</span></td></tr></tbody></table></div>
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center;
+              flex-wrap:wrap;gap:8px">
+    <div>
+      <strong>Moonlit Hash Co UK Cheese Infused</strong>
+      <span class="cost-meta"> · group 332015 · Pre-Rolls / Infused</span>
+    </div>
+    <div>
+      <span class="pill edit">edit 1</span>
+      <span class="pill keep">keep 0</span>
+      
+    </div>
+  </div>
+  <table style="margin-top:10px">
+    <thead><tr>
+      <th>Variant</th><th>Tab</th>
+      <th class="num">Cost</th>
+      <th class="num">Current $</th>
+      <th class="num">Proposed $</th>
+      <th class="num">Δ</th>
+      <th class="num">Current GM</th>
+      <th class="num">Proposed GM</th>
+      <th>Action</th>
+    </tr></thead>
+    <tbody>
+<tr class=""><td>Moonlit Hash Co UK Cheese Infused 1.2g<br><span class="cost-meta">prod 430546</span></td><td>1.2g</td><td class="num">$9.50<div class="cost-meta">Stop 31 LLC · MOONLIT- UK CHEESE INFUSED 1.2G · from 2026-05-15T00:00:00Z</div></td><td class="num">$33.50</td><td class="num"><strong>$33.25</strong></td><td class="num delta-down">-0.25</td><td class="num">67.96%</td><td class="num">67.71%</td><td><span class="pill edit">edit</span></td></tr></tbody></table></div><h2 class="brand-h">Preferred Gardens</h2>
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center;
+              flex-wrap:wrap;gap:8px">
+    <div>
+      <strong>Preferred Gardens Cookie Dough</strong>
+      <span class="cost-meta"> · group 331993 · Pre-Rolls</span>
+    </div>
+    <div>
+      <span class="pill edit">edit 0</span>
+      <span class="pill keep">keep 1</span>
+      
+    </div>
+  </div>
+  <table style="margin-top:10px">
+    <thead><tr>
+      <th>Variant</th><th>Tab</th>
+      <th class="num">Cost</th>
+      <th class="num">Current $</th>
+      <th class="num">Proposed $</th>
+      <th class="num">Δ</th>
+      <th class="num">Current GM</th>
+      <th class="num">Proposed GM</th>
+      <th>Action</th>
+    </tr></thead>
+    <tbody>
+<tr class="keep-row"><td>Preferred Gardens Cookie Dough 1g<br><span class="cost-meta">prod 430524</span></td><td>1g</td><td class="num">$7.00<div class="cost-meta">Stop 31 LLC · 1O-PR-PG26-CKD · from 2026-05-15T00:00:00Z</div></td><td class="num">$24.50</td><td class="num"><strong>$24.50</strong></td><td class="num delta-zero">—</td><td class="num">67.71%</td><td class="num">67.71%</td><td><span class="pill keep">keep</span></td></tr></tbody></table></div>
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center;
+              flex-wrap:wrap;gap:8px">
+    <div>
+      <strong>Preferred Gardens Zourz</strong>
+      <span class="cost-meta"> · group 331994 · Pre-Rolls</span>
+    </div>
+    <div>
+      <span class="pill edit">edit 0</span>
+      <span class="pill keep">keep 1</span>
+      
+    </div>
+  </div>
+  <table style="margin-top:10px">
+    <thead><tr>
+      <th>Variant</th><th>Tab</th>
+      <th class="num">Cost</th>
+      <th class="num">Current $</th>
+      <th class="num">Proposed $</th>
+      <th class="num">Δ</th>
+      <th class="num">Current GM</th>
+      <th class="num">Proposed GM</th>
+      <th>Action</th>
+    </tr></thead>
+    <tbody>
+<tr class="keep-row"><td>Preferred Gardens Zourz 1g<br><span class="cost-meta">prod 430525</span></td><td>1g</td><td class="num">$7.00<div class="cost-meta">Stop 31 LLC · 1O-PR-PG26-ZRZ · from 2026-05-15T00:00:00Z</div></td><td class="num">$24.50</td><td class="num"><strong>$24.50</strong></td><td class="num delta-zero">—</td><td class="num">67.71%</td><td class="num">67.71%</td><td><span class="pill keep">keep</span></td></tr></tbody></table></div><h2 class="brand-h">Purps</h2>
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center;
+              flex-wrap:wrap;gap:8px">
+    <div>
+      <strong>Purps Blue Nerdz</strong>
+      <span class="cost-meta"> · group 303979 · Flower</span>
+    </div>
+    <div>
+      <span class="pill edit">edit 1</span>
+      <span class="pill keep">keep 0</span>
+      
+    </div>
+  </div>
+  <table style="margin-top:10px">
+    <thead><tr>
+      <th>Variant</th><th>Tab</th>
+      <th class="num">Cost</th>
+      <th class="num">Current $</th>
+      <th class="num">Proposed $</th>
+      <th class="num">Δ</th>
+      <th class="num">Current GM</th>
+      <th class="num">Proposed GM</th>
+      <th>Action</th>
+    </tr></thead>
+    <tbody>
+<tr class=""><td>Purps Blue Nerdz 3.5g<br><span class="cost-meta">prod 392889</span></td><td>3.5g</td><td class="num">$16.89<div class="cost-meta">Stop 31 LLC · Purp - Flower - Blue Nerdz - 3.5g · from 2026-04-22T00:00:00Z</div></td><td class="num">$76.50</td><td class="num"><strong>$59.00</strong></td><td class="num delta-down">-17.50</td><td class="num">75.05%</td><td class="num">67.65%</td><td><span class="pill edit">edit</span> <span class="pill big">big swing</span></td></tr></tbody></table></div>
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center;
+              flex-wrap:wrap;gap:8px">
+    <div>
+      <strong>Purps Crypto Cherries</strong>
+      <span class="cost-meta"> · group 270279 · Pre-Rolls</span>
+    </div>
+    <div>
+      <span class="pill edit">edit 1</span>
+      <span class="pill keep">keep 0</span>
+      
+    </div>
+  </div>
+  <table style="margin-top:10px">
+    <thead><tr>
+      <th>Variant</th><th>Tab</th>
+      <th class="num">Cost</th>
+      <th class="num">Current $</th>
+      <th class="num">Proposed $</th>
+      <th class="num">Δ</th>
+      <th class="num">Current GM</th>
+      <th class="num">Proposed GM</th>
+      <th>Action</th>
+    </tr></thead>
+    <tbody>
+<tr class=""><td>Purps Crypto Cherries 1g<br><span class="cost-meta">prod 357681</span></td><td>1g</td><td class="num">$6.00<div class="cost-meta">1Off · Purps Cannabis Flower Products Crypto Cherries 1g · from 2026-04-01T00:00:00Z</div></td><td class="num">$14.00</td><td class="num"><strong>$21.00</strong></td><td class="num delta-up">+7.00</td><td class="num">51.57%</td><td class="num">67.71%</td><td><span class="pill edit">edit</span> <span class="pill big">big swing</span></td></tr></tbody></table></div>
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center;
+              flex-wrap:wrap;gap:8px">
+    <div>
+      <strong>Purps Crypto Cherries</strong>
+      <span class="cost-meta"> · group 303982 · Flower</span>
+    </div>
+    <div>
+      <span class="pill edit">edit 1</span>
+      <span class="pill keep">keep 0</span>
+      
+    </div>
+  </div>
+  <table style="margin-top:10px">
+    <thead><tr>
+      <th>Variant</th><th>Tab</th>
+      <th class="num">Cost</th>
+      <th class="num">Current $</th>
+      <th class="num">Proposed $</th>
+      <th class="num">Δ</th>
+      <th class="num">Current GM</th>
+      <th class="num">Proposed GM</th>
+      <th>Action</th>
+    </tr></thead>
+    <tbody>
+<tr class=""><td>Purps Crypto Cherries 3.5g<br><span class="cost-meta">prod 392890</span></td><td>3.5g</td><td class="num">$16.84<div class="cost-meta">Stop 31 LLC · Purp - Flower - Crypto Cherries - 3.5g · from 2026-04-22T00:00:00Z</div></td><td class="num">$76.50</td><td class="num"><strong>$59.00</strong></td><td class="num delta-down">-17.50</td><td class="num">75.13%</td><td class="num">67.75%</td><td><span class="pill edit">edit</span> <span class="pill big">big swing</span></td></tr></tbody></table></div>
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center;
+              flex-wrap:wrap;gap:8px">
+    <div>
+      <strong>Purps Granddaddy Purple</strong>
+      <span class="cost-meta"> · group 332017 · Pre-Rolls</span>
+    </div>
+    <div>
+      <span class="pill edit">edit 1</span>
+      <span class="pill keep">keep 0</span>
+      
+    </div>
+  </div>
+  <table style="margin-top:10px">
+    <thead><tr>
+      <th>Variant</th><th>Tab</th>
+      <th class="num">Cost</th>
+      <th class="num">Current $</th>
+      <th class="num">Proposed $</th>
+      <th class="num">Δ</th>
+      <th class="num">Current GM</th>
+      <th class="num">Proposed GM</th>
+      <th>Action</th>
+    </tr></thead>
+    <tbody>
+<tr class=""><td>Purps Granddaddy Purple 5x 0.5g<br><span class="cost-meta">prod 430548</span></td><td>5x 0.5g</td><td class="num">$19.50<div class="cost-meta">Stop 31 LLC · PURPS-5PR-GDP · from 2026-05-15T00:00:00Z</div></td><td class="num">$68.00</td><td class="num"><strong>$68.25</strong></td><td class="num delta-up">+0.25</td><td class="num">67.60%</td><td class="num">67.71%</td><td><span class="pill edit">edit</span></td></tr></tbody></table></div>
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center;
+              flex-wrap:wrap;gap:8px">
+    <div>
+      <strong>Purps Oishii</strong>
+      <span class="cost-meta"> · group 331989 · Flower</span>
+    </div>
+    <div>
+      <span class="pill edit">edit 1</span>
+      <span class="pill keep">keep 0</span>
+      
+    </div>
+  </div>
+  <table style="margin-top:10px">
+    <thead><tr>
+      <th>Variant</th><th>Tab</th>
+      <th class="num">Cost</th>
+      <th class="num">Current $</th>
+      <th class="num">Proposed $</th>
+      <th class="num">Δ</th>
+      <th class="num">Current GM</th>
+      <th class="num">Proposed GM</th>
+      <th>Action</th>
+    </tr></thead>
+    <tbody>
+<tr class=""><td>Purps Oishii 3.5g<br><span class="cost-meta">prod 430519</span></td><td>3.5g</td><td class="num">$22.00<div class="cost-meta">Stop 31 LLC · 1O-8F-P26-OISH · from 2026-05-15T00:00:00Z</div></td><td class="num">$76.50</td><td class="num"><strong>$77.00</strong></td><td class="num delta-up">+0.50</td><td class="num">67.50%</td><td class="num">67.71%</td><td><span class="pill edit">edit</span></td></tr></tbody></table></div>
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center;
+              flex-wrap:wrap;gap:8px">
+    <div>
+      <strong>Purps Purple Gushers</strong>
+      <span class="cost-meta"> · group 332018 · Pre-Rolls</span>
+    </div>
+    <div>
+      <span class="pill edit">edit 1</span>
+      <span class="pill keep">keep 0</span>
+      
+    </div>
+  </div>
+  <table style="margin-top:10px">
+    <thead><tr>
+      <th>Variant</th><th>Tab</th>
+      <th class="num">Cost</th>
+      <th class="num">Current $</th>
+      <th class="num">Proposed $</th>
+      <th class="num">Δ</th>
+      <th class="num">Current GM</th>
+      <th class="num">Proposed GM</th>
+      <th>Action</th>
+    </tr></thead>
+    <tbody>
+<tr class=""><td>Purps Purple Gushers 5x 0.5g<br><span class="cost-meta">prod 430549</span></td><td>5x 0.5g</td><td class="num">$19.50<div class="cost-meta">Stop 31 LLC · PURPS-5PR-PGSH · from 2026-05-15T00:00:00Z</div></td><td class="num">$68.00</td><td class="num"><strong>$68.25</strong></td><td class="num delta-up">+0.25</td><td class="num">67.60%</td><td class="num">67.71%</td><td><span class="pill edit">edit</span></td></tr></tbody></table></div>
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center;
+              flex-wrap:wrap;gap:8px">
+    <div>
+      <strong>Purps Roy G Biv</strong>
+      <span class="cost-meta"> · group 331990 · Flower</span>
+    </div>
+    <div>
+      <span class="pill edit">edit 1</span>
+      <span class="pill keep">keep 0</span>
+      
+    </div>
+  </div>
+  <table style="margin-top:10px">
+    <thead><tr>
+      <th>Variant</th><th>Tab</th>
+      <th class="num">Cost</th>
+      <th class="num">Current $</th>
+      <th class="num">Proposed $</th>
+      <th class="num">Δ</th>
+      <th class="num">Current GM</th>
+      <th class="num">Proposed GM</th>
+      <th>Action</th>
+    </tr></thead>
+    <tbody>
+<tr class=""><td>Purps Roy G Biv 3.5g<br><span class="cost-meta">prod 430520</span></td><td>3.5g</td><td class="num">$22.00<div class="cost-meta">Stop 31 LLC · 1O-8F-P26-RGB · from 2026-05-15T00:00:00Z</div></td><td class="num">$76.50</td><td class="num"><strong>$77.00</strong></td><td class="num delta-up">+0.50</td><td class="num">67.50%</td><td class="num">67.71%</td><td><span class="pill edit">edit</span></td></tr></tbody></table></div><h2 class="brand-h">Runtz</h2>
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center;
+              flex-wrap:wrap;gap:8px">
+    <div>
+      <strong>Runtz Bubblegum Runtz</strong>
+      <span class="cost-meta"> · group 332020 · Flower</span>
+    </div>
+    <div>
+      <span class="pill edit">edit 1</span>
+      <span class="pill keep">keep 0</span>
+      
+    </div>
+  </div>
+  <table style="margin-top:10px">
+    <thead><tr>
+      <th>Variant</th><th>Tab</th>
+      <th class="num">Cost</th>
+      <th class="num">Current $</th>
+      <th class="num">Proposed $</th>
+      <th class="num">Δ</th>
+      <th class="num">Current GM</th>
+      <th class="num">Proposed GM</th>
+      <th>Action</th>
+    </tr></thead>
+    <tbody>
+<tr class=""><td>Runtz Bubblegum Runtz 3.5g<br><span class="cost-meta">prod 430551</span></td><td>3.5g</td><td class="num">$26.50<div class="cost-meta">Stop 31 LLC · R-Original Bubblegum Runtz 3.5G · from 2026-05-15T00:00:00Z</div></td><td class="num">$92.50</td><td class="num"><strong>$92.75</strong></td><td class="num delta-up">+0.25</td><td class="num">67.63%</td><td class="num">67.71%</td><td><span class="pill edit">edit</span></td></tr></tbody></table></div>
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center;
+              flex-wrap:wrap;gap:8px">
+    <div>
+      <strong>Runtz Lemon Candy Runtz</strong>
+      <span class="cost-meta"> · group 332019 · Flower</span>
+    </div>
+    <div>
+      <span class="pill edit">edit 1</span>
+      <span class="pill keep">keep 0</span>
+      
+    </div>
+  </div>
+  <table style="margin-top:10px">
+    <thead><tr>
+      <th>Variant</th><th>Tab</th>
+      <th class="num">Cost</th>
+      <th class="num">Current $</th>
+      <th class="num">Proposed $</th>
+      <th class="num">Δ</th>
+      <th class="num">Current GM</th>
+      <th class="num">Proposed GM</th>
+      <th>Action</th>
+    </tr></thead>
+    <tbody>
+<tr class=""><td>Runtz Lemon Candy Runtz 3.5g<br><span class="cost-meta">prod 430550</span></td><td>3.5g</td><td class="num">$26.50<div class="cost-meta">Stop 31 LLC · R-LEMON CANDY RUNTZ 3.5G · from 2026-05-15T00:00:00Z</div></td><td class="num">$92.50</td><td class="num"><strong>$92.75</strong></td><td class="num delta-up">+0.25</td><td class="num">67.63%</td><td class="num">67.71%</td><td><span class="pill edit">edit</span></td></tr></tbody></table></div>
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center;
+              flex-wrap:wrap;gap:8px">
+    <div>
+      <strong>Runtz Trump Runtz</strong>
+      <span class="cost-meta"> · group 331991 · Flower</span>
+    </div>
+    <div>
+      <span class="pill edit">edit 1</span>
+      <span class="pill keep">keep 0</span>
+      
+    </div>
+  </div>
+  <table style="margin-top:10px">
+    <thead><tr>
+      <th>Variant</th><th>Tab</th>
+      <th class="num">Cost</th>
+      <th class="num">Current $</th>
+      <th class="num">Proposed $</th>
+      <th class="num">Δ</th>
+      <th class="num">Current GM</th>
+      <th class="num">Proposed GM</th>
+      <th>Action</th>
+    </tr></thead>
+    <tbody>
+<tr class=""><td>Runtz Trump Runtz 3.5g<br><span class="cost-meta">prod 430522</span></td><td>3.5g</td><td class="num">$26.50<div class="cost-meta">Stop 31 LLC · 1O-8F-R26-TRP · from 2026-05-15T00:00:00Z</div></td><td class="num">$92.50</td><td class="num"><strong>$92.75</strong></td><td class="num delta-up">+0.25</td><td class="num">67.63%</td><td class="num">67.71%</td><td><span class="pill edit">edit</span></td></tr></tbody></table></div><h2 class="brand-h">Smartbud</h2>
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center;
+              flex-wrap:wrap;gap:8px">
+    <div>
+      <strong>Smartbud Applescotti</strong>
+      <span class="cost-meta"> · group 270246 · Flower</span>
+    </div>
+    <div>
+      <span class="pill edit">edit 1</span>
+      <span class="pill keep">keep 0</span>
+      
+    </div>
+  </div>
+  <table style="margin-top:10px">
+    <thead><tr>
+      <th>Variant</th><th>Tab</th>
+      <th class="num">Cost</th>
+      <th class="num">Current $</th>
+      <th class="num">Proposed $</th>
+      <th class="num">Δ</th>
+      <th class="num">Current GM</th>
+      <th class="num">Proposed GM</th>
+      <th>Action</th>
+    </tr></thead>
+    <tbody>
+<tr class=""><td>Smartbud Applescotti 3.5g<br><span class="cost-meta">prod 357343</span></td><td>3.5g</td><td class="num">$16.00<div class="cost-meta">Stop 31 LLC · SmartBud - Flower - Applescotti - 3.5g · from 2026-04-01T00:00:00Z</div></td><td class="num">$51.50</td><td class="num"><strong>$56.00</strong></td><td class="num delta-up">+4.50</td><td class="num">64.89%</td><td class="num">67.71%</td><td><span class="pill edit">edit</span></td></tr></tbody></table></div>
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center;
+              flex-wrap:wrap;gap:8px">
+    <div>
+      <strong>Smartbud AppleScotti Shake</strong>
+      <span class="cost-meta"> · group 332022 · Flower</span>
+    </div>
+    <div>
+      <span class="pill edit">edit 1</span>
+      <span class="pill keep">keep 0</span>
+      
+    </div>
+  </div>
+  <table style="margin-top:10px">
+    <thead><tr>
+      <th>Variant</th><th>Tab</th>
+      <th class="num">Cost</th>
+      <th class="num">Current $</th>
+      <th class="num">Proposed $</th>
+      <th class="num">Δ</th>
+      <th class="num">Current GM</th>
+      <th class="num">Proposed GM</th>
+      <th>Action</th>
+    </tr></thead>
+    <tbody>
+<tr class=""><td>Smartbud AppleScotti Shake 14g<br><span class="cost-meta">prod 430553</span></td><td>14g</td><td class="num">$25.00<div class="cost-meta">Stop 31 LLC · SMARTBUD-applescotti Ground Flower 1/2oz · from 2026-05-15T00:00:00Z</div></td><td class="num">$87.00</td><td class="num"><strong>$87.50</strong></td><td class="num delta-up">+0.50</td><td class="num">67.53%</td><td class="num">67.71%</td><td><span class="pill edit">edit</span></td></tr></tbody></table></div>
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center;
+              flex-wrap:wrap;gap:8px">
+    <div>
+      <strong>Smartbud Blue Dream</strong>
+      <span class="cost-meta"> · group 331984 · Pre-Rolls</span>
+    </div>
+    <div>
+      <span class="pill edit">edit 1</span>
+      <span class="pill keep">keep 0</span>
+      
+    </div>
+  </div>
+  <table style="margin-top:10px">
+    <thead><tr>
+      <th>Variant</th><th>Tab</th>
+      <th class="num">Cost</th>
+      <th class="num">Current $</th>
+      <th class="num">Proposed $</th>
+      <th class="num">Δ</th>
+      <th class="num">Current GM</th>
+      <th class="num">Proposed GM</th>
+      <th>Action</th>
+    </tr></thead>
+    <tbody>
+<tr class=""><td>Smartbud Blue Dream 5x 0.75g<br><span class="cost-meta">prod 430515</span></td><td>5x 0.75g</td><td class="num">$16.50<div class="cost-meta">Stop 31 LLC · 1O-5PR-SB26-BLDR · from 2026-05-15T00:00:00Z</div></td><td class="num">$57.50</td><td class="num"><strong>$57.75</strong></td><td class="num delta-up">+0.25</td><td class="num">67.57%</td><td class="num">67.71%</td><td><span class="pill edit">edit</span></td></tr></tbody></table></div>
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center;
+              flex-wrap:wrap;gap:8px">
+    <div>
+      <strong>Smartbud CandyLato Shake</strong>
+      <span class="cost-meta"> · group 332023 · Flower</span>
+    </div>
+    <div>
+      <span class="pill edit">edit 1</span>
+      <span class="pill keep">keep 0</span>
+      
+    </div>
+  </div>
+  <table style="margin-top:10px">
+    <thead><tr>
+      <th>Variant</th><th>Tab</th>
+      <th class="num">Cost</th>
+      <th class="num">Current $</th>
+      <th class="num">Proposed $</th>
+      <th class="num">Δ</th>
+      <th class="num">Current GM</th>
+      <th class="num">Proposed GM</th>
+      <th>Action</th>
+    </tr></thead>
+    <tbody>
+<tr class=""><td>Smartbud CandyLato Shake 14g<br><span class="cost-meta">prod 430554</span></td><td>14g</td><td class="num">$25.00<div class="cost-meta">Stop 31 LLC · SMARTBUD-candy-lato Ground Flower 1/2oz · from 2026-05-15T00:00:00Z</div></td><td class="num">$87.00</td><td class="num"><strong>$87.50</strong></td><td class="num delta-up">+0.50</td><td class="num">67.53%</td><td class="num">67.71%</td><td><span class="pill edit">edit</span></td></tr></tbody></table></div>
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center;
+              flex-wrap:wrap;gap:8px">
+    <div>
+      <strong>Smartbud Dosilato</strong>
+      <span class="cost-meta"> · group 299569 · Pre-Rolls</span>
+    </div>
+    <div>
+      <span class="pill edit">edit 1</span>
+      <span class="pill keep">keep 0</span>
+      
+    </div>
+  </div>
+  <table style="margin-top:10px">
+    <thead><tr>
+      <th>Variant</th><th>Tab</th>
+      <th class="num">Cost</th>
+      <th class="num">Current $</th>
+      <th class="num">Proposed $</th>
+      <th class="num">Δ</th>
+      <th class="num">Current GM</th>
+      <th class="num">Proposed GM</th>
+      <th>Action</th>
+    </tr></thead>
+    <tbody>
+<tr class=""><td>Smartbud Dosilato 10x 0.75g<br><span class="cost-meta">prod 391537</span></td><td>10x 0.75g</td><td class="num">$23.85<div class="cost-meta">Stop 31 LLC · Smartbud - 10Pk Preroll - Dosilato - 7.5g · from 2026-04-20T00:00:00Z</div></td><td class="num">$65.50</td><td class="num"><strong>$83.50</strong></td><td class="num delta-up">+18.00</td><td class="num">58.85%</td><td class="num">67.72%</td><td><span class="pill edit">edit</span> <span class="pill big">big swing</span></td></tr></tbody></table></div>
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center;
+              flex-wrap:wrap;gap:8px">
+    <div>
+      <strong>Smartbud Girl Scout Cookies</strong>
+      <span class="cost-meta"> · group 270261 · Flower</span>
+    </div>
+    <div>
+      <span class="pill edit">edit 1</span>
+      <span class="pill keep">keep 0</span>
+      
+    </div>
+  </div>
+  <table style="margin-top:10px">
+    <thead><tr>
+      <th>Variant</th><th>Tab</th>
+      <th class="num">Cost</th>
+      <th class="num">Current $</th>
+      <th class="num">Proposed $</th>
+      <th class="num">Δ</th>
+      <th class="num">Current GM</th>
+      <th class="num">Proposed GM</th>
+      <th>Action</th>
+    </tr></thead>
+    <tbody>
+<tr class=""><td>Smartbud Girl Scout Cookies 3.5g<br><span class="cost-meta">prod 357490</span></td><td>3.5g</td><td class="num">$16.00<div class="cost-meta">Stop 31 LLC · SmartBud - Flower - Girl Scout Cookies - 3.5g · from 2026-04-01T00:00:00Z</div></td><td class="num">$51.50</td><td class="num"><strong>$56.00</strong></td><td class="num delta-up">+4.50</td><td class="num">64.89%</td><td class="num">67.71%</td><td><span class="pill edit">edit</span></td></tr></tbody></table></div>
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center;
+              flex-wrap:wrap;gap:8px">
+    <div>
+      <strong>Smartbud Gorilla Glue #6</strong>
+      <span class="cost-meta"> · group 270270 · Flower</span>
+    </div>
+    <div>
+      <span class="pill edit">edit 1</span>
+      <span class="pill keep">keep 0</span>
+      
+    </div>
+  </div>
+  <table style="margin-top:10px">
+    <thead><tr>
+      <th>Variant</th><th>Tab</th>
+      <th class="num">Cost</th>
+      <th class="num">Current $</th>
+      <th class="num">Proposed $</th>
+      <th class="num">Δ</th>
+      <th class="num">Current GM</th>
+      <th class="num">Proposed GM</th>
+      <th>Action</th>
+    </tr></thead>
+    <tbody>
+<tr class=""><td>Smartbud Gorilla Glue #6 3.5g<br><span class="cost-meta">prod 357577</span></td><td>3.5g</td><td class="num">$16.00<div class="cost-meta">Stop 31 LLC · SmartBud - Flower - Gorilla Glue #6 - 3.5g · from 2026-04-01T00:00:00Z</div></td><td class="num">$51.50</td><td class="num"><strong>$56.00</strong></td><td class="num delta-up">+4.50</td><td class="num">64.89%</td><td class="num">67.71%</td><td><span class="pill edit">edit</span></td></tr></tbody></table></div>
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center;
+              flex-wrap:wrap;gap:8px">
+    <div>
+      <strong>Smartbud Motorhead</strong>
+      <span class="cost-meta"> · group 332021 · Flower</span>
+    </div>
+    <div>
+      <span class="pill edit">edit 0</span>
+      <span class="pill keep">keep 1</span>
+      
+    </div>
+  </div>
+  <table style="margin-top:10px">
+    <thead><tr>
+      <th>Variant</th><th>Tab</th>
+      <th class="num">Cost</th>
+      <th class="num">Current $</th>
+      <th class="num">Proposed $</th>
+      <th class="num">Δ</th>
+      <th class="num">Current GM</th>
+      <th class="num">Proposed GM</th>
+      <th>Action</th>
+    </tr></thead>
+    <tbody>
+<tr class="keep-row"><td>Smartbud Motorhead 3.5g<br><span class="cost-meta">prod 430552</span></td><td>3.5g</td><td class="num">$16.00<div class="cost-meta">Stop 31 LLC · SMARTBUD 3.5 MOTORHEAD · from 2026-05-15T00:00:00Z</div></td><td class="num">$56.00</td><td class="num"><strong>$56.00</strong></td><td class="num delta-zero">—</td><td class="num">67.71%</td><td class="num">67.71%</td><td><span class="pill keep">keep</span></td></tr></tbody></table></div>
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center;
+              flex-wrap:wrap;gap:8px">
+    <div>
+      <strong>Smartbud Purple Punch</strong>
+      <span class="cost-meta"> · group 331985 · Pre-Rolls</span>
+    </div>
+    <div>
+      <span class="pill edit">edit 1</span>
+      <span class="pill keep">keep 0</span>
+      
+    </div>
+  </div>
+  <table style="margin-top:10px">
+    <thead><tr>
+      <th>Variant</th><th>Tab</th>
+      <th class="num">Cost</th>
+      <th class="num">Current $</th>
+      <th class="num">Proposed $</th>
+      <th class="num">Δ</th>
+      <th class="num">Current GM</th>
+      <th class="num">Proposed GM</th>
+      <th>Action</th>
+    </tr></thead>
+    <tbody>
+<tr class=""><td>Smartbud Purple Punch 5x 0.75g<br><span class="cost-meta">prod 430516</span></td><td>5x 0.75g</td><td class="num">$16.50<div class="cost-meta">Stop 31 LLC · 1O-5PR-SB26-PNCH · from 2026-05-15T00:00:00Z</div></td><td class="num">$57.50</td><td class="num"><strong>$57.75</strong></td><td class="num delta-up">+0.25</td><td class="num">67.57%</td><td class="num">67.71%</td><td><span class="pill edit">edit</span></td></tr></tbody></table></div>
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center;
+              flex-wrap:wrap;gap:8px">
+    <div>
+      <strong>Smartbud Sour Candy</strong>
+      <span class="cost-meta"> · group 331987 · Pre-Rolls</span>
+    </div>
+    <div>
+      <span class="pill edit">edit 1</span>
+      <span class="pill keep">keep 0</span>
+      
+    </div>
+  </div>
+  <table style="margin-top:10px">
+    <thead><tr>
+      <th>Variant</th><th>Tab</th>
+      <th class="num">Cost</th>
+      <th class="num">Current $</th>
+      <th class="num">Proposed $</th>
+      <th class="num">Δ</th>
+      <th class="num">Current GM</th>
+      <th class="num">Proposed GM</th>
+      <th>Action</th>
+    </tr></thead>
+    <tbody>
+<tr class=""><td>Smartbud Sour Candy 5x 0.75g<br><span class="cost-meta">prod 430517</span></td><td>5x 0.75g</td><td class="num">$16.50<div class="cost-meta">Stop 31 LLC · 1O-5PR-SB26-SCND · from 2026-05-15T00:00:00Z</div></td><td class="num">$57.50</td><td class="num"><strong>$57.75</strong></td><td class="num delta-up">+0.25</td><td class="num">67.57%</td><td class="num">67.71%</td><td><span class="pill edit">edit</span></td></tr></tbody></table></div><h2 class="brand-h">Strain Gang</h2>
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center;
+              flex-wrap:wrap;gap:8px">
+    <div>
+      <strong>Strain Gang Sour Diesel</strong>
+      <span class="cost-meta"> · group 332024 · Pre-Rolls</span>
+    </div>
+    <div>
+      <span class="pill edit">edit 0</span>
+      <span class="pill keep">keep 1</span>
+      
+    </div>
+  </div>
+  <table style="margin-top:10px">
+    <thead><tr>
+      <th>Variant</th><th>Tab</th>
+      <th class="num">Cost</th>
+      <th class="num">Current $</th>
+      <th class="num">Proposed $</th>
+      <th class="num">Δ</th>
+      <th class="num">Current GM</th>
+      <th class="num">Proposed GM</th>
+      <th>Action</th>
+    </tr></thead>
+    <tbody>
+<tr class="keep-row"><td>Strain Gang Sour Diesel 5x 0.5g<br><span class="cost-meta">prod 430555</span></td><td>5x 0.5g</td><td class="num">$20.00<div class="cost-meta">Stop 31 LLC · STRAIN GANG- Sour Diesel 2.5g 5pk preroll · from 2026-05-15T00:00:00Z</div></td><td class="num">$70.00</td><td class="num"><strong>$70.00</strong></td><td class="num delta-zero">—</td><td class="num">67.71%</td><td class="num">67.71%</td><td><span class="pill keep">keep</span></td></tr></tbody></table></div></div></body></html>
