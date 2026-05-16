@@ -542,6 +542,21 @@ before clicking Post:
     return files, stats
 
 
+_DOUBLE_PERIOD_RE = re.compile(r"(?<=\w)\.\.(?!\.)")
+
+
+def _has_invalid_punct(s: str) -> bool:
+    """Google rejects a word ending with exactly 2 periods.
+
+    Other validation patterns can be added here as they surface."""
+    return bool(_DOUBLE_PERIOD_RE.search(s))
+
+
+def _normalize_punct(s: str) -> str:
+    """Make text safe for a NEW RSA: word ending '..' -> '...'."""
+    return _DOUBLE_PERIOD_RE.sub("...", s)
+
+
 def _is_broken(row: dict) -> bool:
     """An ad that is currently consuming a slot but not serving healthily.
     Disapproved=fully blocked. approved_limited=throttled. Both starve
@@ -708,6 +723,7 @@ def build_recovery(snapshot: list[dict]) -> tuple[str, str, dict]:
 
     no_source_groups: list[str] = []
     n_pause_rows = 0
+    manual_pause_groups: list[tuple[str, str]] = []  # (group, first_headline)
     for g, bad in broken_groups:
         campaign_name = ag_to_campaign.get(g, "")
         if not campaign_name:
@@ -733,6 +749,14 @@ def build_recovery(snapshot: list[dict]) -> tuple[str, str, dict]:
             bh = _dedupe_headlines(ad.get("headlines") or [])[:HEADLINE_MAX]
             bd = _dedupe_headlines(ad.get("descriptions") or [])[:DESCRIPTION_MAX]
             paths = ad.get("paths") or []
+            # Editor validates every row -- if the existing ad's text
+            # contains a validation buster we'd be unable to import the
+            # pause-row because content-matching prevents us from
+            # mutating the text. Surface as manual.
+            offenders = [s for s in (bh + bd) if _has_invalid_punct(s)]
+            if offenders:
+                manual_pause_groups.append((g, bh[0] if bh else ""))
+                continue
             prow = {
                 "Campaign": campaign_name,
                 "Ad group": g,
@@ -757,8 +781,10 @@ def build_recovery(snapshot: list[dict]) -> tuple[str, str, dict]:
         src_d = src.get("descriptions") or []
         src_url = src.get("final_url") or ""
         src_paths = src.get("paths") or []
-        h = _dedupe_headlines(src_h)[:HEADLINE_MAX]
-        d = _dedupe_headlines(src_d)[:DESCRIPTION_MAX]
+        # Normalize punct on new RSAs (this row is not content-matched
+        # to anything existing, so it's safe to mutate text here).
+        h = [_normalize_punct(x) for x in _dedupe_headlines(src_h)[:HEADLINE_MAX]]
+        d = [_normalize_punct(x) for x in _dedupe_headlines(src_d)[:DESCRIPTION_MAX]]
         row = {
             "Campaign": campaign_name,
             "Ad group": g,
@@ -781,6 +807,15 @@ def build_recovery(snapshot: list[dict]) -> tuple[str, str, dict]:
         for g in no_source_groups:
             md_lines.append(f"- {g}")
             n_no_source += 1
+
+    if manual_pause_groups:
+        md_lines.append("\n## ⚠ Pause these ads manually in the UI\n")
+        md_lines.append("These broken ads contain text Google won't let us re-import")
+        md_lines.append("(e.g. word ending in `..`). Content-matching prevents the")
+        md_lines.append("CSV from updating them, so pause them by hand in the Ads UI")
+        md_lines.append("after running the import:\n")
+        for g, first in manual_pause_groups:
+            md_lines.append(f"- **{g}** — {first}")
 
     if unmapped_groups:
         md_lines.append("\n## ⚠ Ad groups missing campaign mapping (blocking import)\n")

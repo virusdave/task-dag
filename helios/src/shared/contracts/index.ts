@@ -1,6 +1,7 @@
 export * from './api/annotations.js'
 export * from './api/catalog.js'
 export * from './api/catalogHistory.js'
+export * from './api/catalogMaintenance.js'
 export * from './api/comments.js'
 export * from './api/communications.js'
 export * from './api/config.js'

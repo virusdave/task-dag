@@ -5,6 +5,7 @@ import { getAppBasePath } from './paths.js'
 import { AppShell } from '../components/AppShell.js'
 import { loadSession } from './session.js'
 import { CatalogHistoryPage, catalogHistoryLoader } from '../routes/catalog/CatalogHistoryPage.js'
+import { CatalogMaintenancePage } from '../routes/catalog/CatalogMaintenancePage.js'
 import { CatalogModulePage } from '../routes/catalog/CatalogModulePage.js'
 import { CatalogPage, catalogLoader } from '../routes/catalog/CatalogPage.js'
 import { PendingPurchasesPage, pendingPurchasesLoader } from '../routes/catalog/PendingPurchasesPage.js'
@@ -100,6 +101,10 @@ export const router = createBrowserRouter([
         element: <PendingPurchasesPage />,
         loader: pendingPurchasesLoader,
         path: 'catalog/pending-purchases',
+      },
+      {
+        element: <CatalogMaintenancePage />,
+        path: 'catalog/maintenance',
       },
       {
         element: <ReviewDetailsPage />,

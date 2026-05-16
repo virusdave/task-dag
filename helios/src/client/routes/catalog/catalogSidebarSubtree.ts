@@ -36,6 +36,12 @@ export function useRegisterCatalogSidebarSubtree(): void {
       },
       {
         kind: 'leaf',
+        navKey: 'catalog.maintenance',
+        label: 'Maintenance',
+        to: buildHeliosModulePath('catalog', 'maintenance'),
+      },
+      {
+        kind: 'leaf',
         navKey: 'catalog.history',
         label: 'History',
         to: buildHeliosModulePath('catalog', 'history'),

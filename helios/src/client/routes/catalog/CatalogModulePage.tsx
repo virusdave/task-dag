@@ -61,6 +61,20 @@ export function CatalogModulePage() {
 
         <article className="mini-card">
           <header>
+            <strong>Image maintenance</strong>
+            <Pill tone="warning">mobile</Pill>
+          </header>
+          <p className="subtle-copy">
+            Surface in-stock SKUs missing a product-catalog image, or with multiple variants but no per-variant
+            images, and upload or capture a photo on the spot to attach it.
+          </p>
+          <div className="inline-row wrap-row module-card-links">
+            <Link to={buildHeliosModulePath('catalog', 'maintenance')}>Open image maintenance</Link>
+          </div>
+        </article>
+
+        <article className="mini-card">
+          <header>
             <strong>History and queue</strong>
             <Pill tone="muted">shared</Pill>
           </header>

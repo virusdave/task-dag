@@ -3,6 +3,7 @@ import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import cookie from '@fastify/cookie'
+import fastifyMultipart from '@fastify/multipart'
 import fastifyStatic from '@fastify/static'
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify'
 import { ZodError } from 'zod'
@@ -11,6 +12,7 @@ import { getServerEnv } from '../config/env.js'
 import { registerAnnotationsRoutes } from '../routes/annotations.js'
 import { registerAuthRoutes } from '../routes/auth.js'
 import { registerCatalogRoutes } from '../routes/catalog.js'
+import { registerCatalogMaintenanceRoutes } from '../routes/catalogMaintenance.js'
 import { registerCatalogReviewRoutes } from '../routes/catalogReview.js'
 import { registerCommentsRoutes } from '../routes/comments.js'
 import { registerCommunicationsRoutes } from '../routes/communications.js'
@@ -38,6 +40,16 @@ export async function buildServer() {
   await server.register(cookie, {
     hook: 'onRequest',
     secret: env.sessionCookieSecret,
+  })
+
+  await server.register(fastifyMultipart, {
+    attachFieldsToBody: false,
+    limits: {
+      fields: 20,
+      fieldSize: 1024 * 1024,
+      fileSize: 12 * 1024 * 1024,
+      files: 1,
+    },
   })
 
   server.addHook('preHandler', async (request, reply) => {
@@ -81,6 +93,7 @@ async function registerApplicationSurface(server: FastifyInstance) {
   await registerAuthRoutes(server)
   await registerAnnotationsRoutes(server)
   await registerCatalogRoutes(server)
+  await registerCatalogMaintenanceRoutes(server)
   await registerCatalogReviewRoutes(server)
   await registerCommentsRoutes(server)
   await registerCommunicationsRoutes(server)
