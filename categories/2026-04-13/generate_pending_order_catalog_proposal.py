@@ -2475,12 +2475,26 @@ def exact_reuse_product_id(distributor_product_name: str) -> int | None:
         return EXACT_REUSE_PRODUCT_IDS[distributor_product_name]
 
     parsed = parse_product_name(distributor_product_name)
+    expected_category = parsed["category"]
+    expected_subcategory = parsed["subcategory"] or ""
     exact_query = parsed["variantName"]
     exact_compact = compact_text(exact_query)
     for row in cache.search(exact_query):
         row_name = row.get("name") or ""
-        if compact_text(row_name) == exact_compact:
-            return int(row["id"])
+        if compact_text(row_name) != exact_compact:
+            continue
+        # Only treat this as a safe exact-reuse if the live group is in the
+        # same category/subcategory the parser expects. Otherwise the live
+        # variant just happens to share a name — reusing it would silently
+        # misclassify the new purchase (see 2026-05-13 incident where
+        # "Herb Sour Diesel 1g" matched a Pre-Roll and a Vape order was
+        # filed against the Pre-Roll group).
+        summary = cache.summary(int(row["id"]))
+        if summary["category"] != expected_category:
+            continue
+        if (summary["subcategory"] or "") != expected_subcategory:
+            continue
+        return int(row["id"])
     return None
 
 

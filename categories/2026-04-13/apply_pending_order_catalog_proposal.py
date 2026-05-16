@@ -459,8 +459,31 @@ def ensure_row(row: dict, lookups: dict, created: dict[str, list[dict]], order_c
 
     if exact_variant:
         final_product = fetch_product(int(exact_variant["id"]))
+        existing_group = fetch_group(int(final_product["productGroupId"]))
+        existing_category = (existing_group.get("category") or {}).get("name") or ""
+        existing_subcategory = (existing_group.get("subcategory") or {}).get("name") or ""
+        # Hard-stop if the variant name collides with a live product whose
+        # group is in a different category/subcategory than what the proposal
+        # expected. Silently reusing the existing group is what caused
+        # product 376985 ("Herb Sour Diesel 1g") to be miscategorised as a
+        # Pre-Roll when it was really a 1g All-In-One vape on 2026-05-13.
+        # Forcing a loud failure here means the operator must either
+        # (a) rename the new variant so it doesn't collide, or
+        # (b) re-categorise the existing group up-front, before re-running.
+        if existing_category != row["expectedCategory"] or existing_subcategory != (row["expectedSubcategory"] or ""):
+            raise RunError(
+                "Exact-variant reuse refused: variant name "
+                f"{row['targetVariantName']!r} matches live product "
+                f"{int(exact_variant['id'])} whose group "
+                f"{int(existing_group['id'])} is in "
+                f"{existing_category!r}/{existing_subcategory!r}, but the "
+                f"proposal expected "
+                f"{row['expectedCategory']!r}/{row['expectedSubcategory'] or ''!r}. "
+                "Rename the new variant or re-categorise the existing group "
+                "before re-running."
+            )
         group_source = "exact-variant"
-        group_before = summarize_group(fetch_group(int(final_product["productGroupId"])))
+        group_before = summarize_group(existing_group)
     else:
         existing_group_match = find_existing_group_for_row(row)
         if existing_group_match:
