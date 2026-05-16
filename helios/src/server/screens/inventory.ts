@@ -99,7 +99,6 @@ export async function loadScreensInventory(): Promise<ScreensInventoryResponse> 
 async function findLatestInventoryArtifact(): Promise<ArtifactCandidate | null> {
   const directories = [
     resolve(process.cwd(), 'runtime-artifacts/screens'),
-    resolve(process.cwd(), '../../screens'),
   ]
   const candidates: ArtifactCandidate[] = []
 
