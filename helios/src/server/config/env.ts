@@ -33,6 +33,7 @@ export interface ServerEnv {
   allowedOrigins: string[]
   databaseUrl: string
   googleAllowedDomain: string
+  googleAllowedEmails: string[]
   googleClientId: string | null
   googleClientSecret: string | null
   googleRedirectUri: string | null
@@ -64,6 +65,7 @@ export function getServerEnv(): ServerEnv {
     allowedOrigins,
     databaseUrl: readRequiredDatabaseUrl(),
     googleAllowedDomain: readOptionalEnv('GOOGLE_OAUTH_ALLOWED_DOMAIN') ?? 'freshlybaked.nyc',
+    googleAllowedEmails: parseEmailList(readOptionalEnv('GOOGLE_OAUTH_ALLOWED_EMAILS')),
     googleClientId: readOptionalSecretEnv('GOOGLE_OAUTH_CLIENT_ID', {
       defaultFilePaths: GOOGLE_OAUTH_CLIENT_ID_SECRET_FILE_PATHS,
     }),
@@ -149,6 +151,20 @@ function readNodeEnv(value: string | undefined): ServerEnv['nodeEnv'] {
     default:
       return 'development'
   }
+}
+
+function parseEmailList(raw: string | null): string[] {
+  if (raw === null) {
+    return []
+  }
+  return [
+    ...new Set(
+      raw
+        .split(',')
+        .map((value) => value.trim().toLowerCase())
+        .filter((value) => value.length > 0),
+    ),
+  ]
 }
 
 function readNumberEnv(name: string, fallback: number): number {

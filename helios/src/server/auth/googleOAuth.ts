@@ -10,6 +10,7 @@ export interface GoogleProfile {
 
 interface GoogleOAuthConfig {
   googleAllowedDomain: string
+  googleAllowedEmails: string[]
   googleClientId: string
   googleClientSecret: string
   googleRedirectUri: string
@@ -19,9 +20,13 @@ export function buildGoogleAuthorizationUrl(state: string): string {
   const config = requireGoogleOAuthConfig()
   const client = new OAuth2Client(config.googleClientId, config.googleClientSecret, config.googleRedirectUri)
 
+  // NOTE: Deliberately do not set `hd:` here. The Google `hd` hint locks the
+  // account chooser to a single hosted domain, which would exclude the
+  // explicitly allowlisted non-domain emails (e.g. dave.nicponski@gmail.com).
+  // Domain + email enforcement is applied server-side in
+  // `exchangeGoogleAuthorizationCode` after the ID token comes back.
   return client.generateAuthUrl({
     access_type: 'offline',
-    hd: config.googleAllowedDomain,
     prompt: 'select_account',
     scope: ['openid', 'email', 'profile'],
     state,
@@ -51,9 +56,12 @@ export async function exchangeGoogleAuthorizationCode(code: string): Promise<Goo
     throw new Error('Google account email is not verified.')
   }
 
-  const emailDomain = payload.email.split('@')[1]?.toLowerCase() ?? ''
-  if (emailDomain !== config.googleAllowedDomain.toLowerCase()) {
-    throw new Error(`Only ${config.googleAllowedDomain} accounts can sign in.`)
+  const normalizedEmail = payload.email.toLowerCase()
+  const emailDomain = normalizedEmail.split('@')[1] ?? ''
+  const domainAllowed = emailDomain === config.googleAllowedDomain.toLowerCase()
+  const emailAllowed = config.googleAllowedEmails.includes(normalizedEmail)
+  if (!domainAllowed && !emailAllowed) {
+    throw new Error(`This Google account is not permitted to sign in to Helios.`)
   }
 
   return {
@@ -73,6 +81,7 @@ function requireGoogleOAuthConfig(): GoogleOAuthConfig {
 
   return {
     googleAllowedDomain: env.googleAllowedDomain,
+    googleAllowedEmails: env.googleAllowedEmails,
     googleClientId: env.googleClientId!,
     googleClientSecret: env.googleClientSecret!,
     googleRedirectUri: env.googleRedirectUri!,

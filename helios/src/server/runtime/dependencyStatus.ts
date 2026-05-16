@@ -13,7 +13,9 @@ export function buildRuntimeDependencyStatuses(): RuntimeDependencyStatus[] {
       label: 'Google OAuth',
       status: isGoogleOAuthReady(serverEnv) ? 'configured' : 'missing',
       summary: isGoogleOAuthReady(serverEnv)
-        ? `Sign-in is configured for ${serverEnv.googleAllowedDomain}.`
+        ? serverEnv.googleAllowedEmails.length > 0
+          ? `Sign-in is configured for ${serverEnv.googleAllowedDomain} plus: ${serverEnv.googleAllowedEmails.join(', ')}.`
+          : `Sign-in is configured for ${serverEnv.googleAllowedDomain}.`
         : googleOAuthIssue ?? 'Sign-in is unavailable until the Google OAuth client ID, secret, and redirect URI are configured.',
     },
     {
