@@ -149,15 +149,20 @@ async function registerApplicationSurface(server: FastifyInstance) {
       // tiny self-reloading module that bounces the document to a
       // cache-busted URL, which forces a fresh index.html (and thus
       // current bundle pointers) the next time the SPA loads.
-      if (request.url.endsWith('.js')) {
+      // Strip the query string before checking the extension so URLs
+      // like /assets/index-deadbeef.js?_=1234 still match.
+      const pathOnly = request.url.split('?', 1)[0] ?? request.url
+      if (pathOnly.endsWith('.js')) {
         reply
           .header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
+          .header('Access-Control-Allow-Origin', '*')
           .type('application/javascript; charset=utf-8')
         return reply.send(
           "// helios: stale bundle pointer, forcing a fresh document load\n" +
             "try{var u=new URL(location.href);if(u.searchParams.has('_cb')){throw new Error('already busted')}u.searchParams.set('_cb',Date.now());location.replace(u.toString())}catch(e){console.error('helios stale-bundle reload failed',e)}\n",
         )
       }
+      reply.header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
       return reply.status(404).send({ error: 'asset not found' })
     }
     const body = readFileSync(indexHtmlPath, 'utf8')

@@ -18,6 +18,8 @@ const LITALERTS_BEARER_TOKEN_SECRET_FILE_PATHS = buildDefaultSecretFilePaths(
 
 const SWEED_AUTH_TOKEN_SECRET_FILE_PATHS = buildDefaultSecretFilePaths('sweed/auth-token', 'sweed/auth-token.env')
 
+const SWEED_CREDENTIALS_SECRET_FILE_PATHS = buildDefaultSecretFilePaths('sweed/credentials.env')
+
 export interface WorkerEnv {
   bedrockMantleBaseUrl: string
   bedrockMantleBearerToken: string | null
@@ -32,6 +34,8 @@ export interface WorkerEnv {
   pollIntervalMs: number
   sweedApiUrl: string
   sweedAuthToken: string | null
+  sweedLoginEmail: string | null
+  sweedLoginPassword: string | null
   sweedRequestTimeoutMs: number
   sweedStateDealerId: number
   workerMaxAttempts: number
@@ -69,6 +73,12 @@ export function getWorkerEnv(): WorkerEnv {
     sweedApiUrl: readOptionalEnv('SWEED_API_URL') ?? 'https://prime.sweedpos.com/api/',
     sweedAuthToken: readOptionalSecretEnv('SWEED_AUTH_TOKEN', {
       defaultFilePaths: SWEED_AUTH_TOKEN_SECRET_FILE_PATHS,
+    }),
+    sweedLoginEmail: readOptionalSecretEnv('SWEED_LOGIN_EMAIL', {
+      defaultFilePaths: SWEED_CREDENTIALS_SECRET_FILE_PATHS,
+    }),
+    sweedLoginPassword: readOptionalSecretEnv('SWEED_LOGIN_PASSWORD', {
+      defaultFilePaths: SWEED_CREDENTIALS_SECRET_FILE_PATHS,
     }),
     sweedRequestTimeoutMs: readNumberEnv('SWEED_REQUEST_TIMEOUT_MS', 30000),
     sweedStateDealerId: readNumberEnv('SWEED_STATE_DEALER_ID', 210248),
