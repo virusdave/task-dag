@@ -4,6 +4,7 @@ import { z } from 'zod'
 
 import { getWorkerEnv } from '../config/env.js'
 import { RetryableWorkerError } from '../runtime/errors.js'
+import { runWithSweedSessionLock } from './sessionLock.js'
 
 const DealerSetResultSchema = z.object({
   user: z.object({
@@ -38,18 +39,22 @@ export async function callSweedRpcForDealer<TResult>(
   name: string,
   params: Record<string, unknown>,
 ): Promise<TResult> {
-  await ensureDealerContext(dealerId)
-  return callSweedRpcRaw(name, params)
+  return runWithSweedSessionLock(async () => {
+    await ensureDealerContext(dealerId)
+    return callSweedRpcRaw(name, params)
+  })
 }
 
 export async function readSweedDealerContext(
   dealerId: number,
 ): Promise<{ dealerId: number; dealerName: string | null }> {
-  const result = DealerSetResultSchema.parse(await callDealerSet(dealerId))
-  return {
-    dealerId: result.user.currentDealerId,
-    dealerName: result.user.currentDealerName ?? null,
-  }
+  return runWithSweedSessionLock(async () => {
+    const result = DealerSetResultSchema.parse(await callDealerSet(dealerId))
+    return {
+      dealerId: result.user.currentDealerId,
+      dealerName: result.user.currentDealerName ?? null,
+    }
+  })
 }
 
 export async function editProductPrice(productId: number, price: number): Promise<unknown> {
@@ -93,14 +98,17 @@ export async function verifySweedSession(): Promise<void> {
     throw new Error('SWEED_AUTH_TOKEN is required for Sweed-backed worker jobs.')
   }
 
-  await callSweedRpcRaw('store.auth.initial.data.get')
-  await ensureStateDealerContext()
+  await runWithSweedSessionLock(async () => {
+    await callSweedRpcRaw('store.auth.initial.data.get')
+    await ensureStateDealerContext()
+  })
 }
 
 async function callSweedRpc<TResult>(name: string, params: Record<string, unknown>): Promise<TResult> {
-  await ensureStateDealerContext()
-
-  return callSweedRpcRaw(name, params)
+  return runWithSweedSessionLock(async () => {
+    await ensureStateDealerContext()
+    return callSweedRpcRaw(name, params)
+  })
 }
 
 async function callSweedRpcRaw<TResult>(name: string, params?: Record<string, unknown>): Promise<TResult> {

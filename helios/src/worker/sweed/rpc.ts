@@ -4,17 +4,29 @@ import { z } from 'zod'
 
 import { getWorkerEnv } from '../config/env.js'
 import { RetryableWorkerError } from '../runtime/errors.js'
+import { runWithSweedSessionLock } from './sessionLock.js'
 
+/**
+ * Switch the shared Sweed session to `dealerId` and issue an RPC,
+ * atomically with respect to other helios workers/jobs sharing the
+ * same SWEED_AUTH_TOKEN. See sessionLock.ts for why this matters.
+ */
 export async function callSweedRpc<TResult>(
   dealerId: number,
   name: string,
   params: Record<string, unknown>,
 ): Promise<TResult> {
-  await ensureDealerContext(dealerId)
-  return callSweedRpcRaw<TResult>(name, params)
+  return runWithSweedSessionLock(async () => {
+    await setDealerContextLocked(dealerId)
+    return callSweedRpcRaw<TResult>(name, params)
+  })
 }
 
 export async function ensureDealerContext(dealerId: number): Promise<void> {
+  await runWithSweedSessionLock(() => setDealerContextLocked(dealerId))
+}
+
+async function setDealerContextLocked(dealerId: number): Promise<void> {
   const result = await callSweedRpcRaw<unknown>('store.auth.dealer.set', { dealerId })
   const parsed = z
     .object({
