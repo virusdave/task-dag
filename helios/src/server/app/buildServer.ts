@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -128,20 +128,41 @@ async function registerApplicationSurface(server: FastifyInstance) {
   // would otherwise refuse with "Failed to load module script: Expected
   // a JavaScript-or-Wasm module script but the server responded with a
   // MIME type of 'text/html'", bricking the page across redeploys.
+  // The index.html embeds hashed asset URLs, so we must never let any
+  // browser (including mobile Safari's bfcache, which ignores
+  // max-age=0 on back/forward + pull-to-refresh) — or Cloudflare —
+  // keep a stale copy that points at an asset hash we no longer build.
+  // We bypass @fastify/static.sendFile entirely (its default
+  // Cache-Control: public,max-age=0 still lets browsers store the
+  // document) and emit the index.html ourselves with no-store.
+  const indexHtmlPath = resolve(clientDistPath, 'index.html')
   server.get('/*', async (request: FastifyRequest, reply: FastifyReply) => {
     if (request.url.startsWith('/assets/')) {
+      // A stale browser tab (especially on mobile, where the user can't
+      // hard-refresh) may still be asking for an asset hash we no
+      // longer build. Returning a hard 404 leaves the page blank with
+      // no way to recover. Instead, for JS module requests we return a
+      // tiny self-reloading module that bounces the document to a
+      // cache-busted URL, which forces a fresh index.html (and thus
+      // current bundle pointers) the next time the SPA loads.
+      if (request.url.endsWith('.js')) {
+        reply
+          .header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
+          .type('application/javascript; charset=utf-8')
+        return reply.send(
+          "// helios: stale bundle pointer, forcing a fresh document load\n" +
+            "try{var u=new URL(location.href);if(u.searchParams.has('_cb')){throw new Error('already busted')}u.searchParams.set('_cb',Date.now());location.replace(u.toString())}catch(e){console.error('helios stale-bundle reload failed',e)}\n",
+        )
+      }
       return reply.status(404).send({ error: 'asset not found' })
     }
-    // The index.html embeds hashed asset URLs, so we must never let any
-    // browser (including mobile Safari's bfcache, which ignores
-    // max-age=0 on back/forward + pull-to-refresh) keep a stale copy
-    // that points at an asset hash we no longer build. no-store +
-    // must-revalidate forces every navigation to fetch the current
-    // bundle pointers.
-    reply.header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
-    reply.header('Pragma', 'no-cache')
-    reply.header('Expires', '0')
-    return reply.sendFile('index.html')
+    const body = readFileSync(indexHtmlPath, 'utf8')
+    reply
+      .header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
+      .header('Pragma', 'no-cache')
+      .header('Expires', '0')
+      .type('text/html; charset=utf-8')
+    return reply.send(body)
   })
 }
 
