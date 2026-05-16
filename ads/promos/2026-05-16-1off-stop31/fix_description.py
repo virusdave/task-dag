@@ -30,11 +30,25 @@ import apply_product_catalog_attribute_updates as sweed
 
 ACTION_ID = "44901"
 SITE_DEALER_ID = 210705  # Midtown - where the campaign lives
-DESCRIPTION_PREFIX = "15% off all featured 1Off brands:"
 
 
-def build_description(brand_names: list[str]) -> str:
-    return f"{DESCRIPTION_PREFIX} " + ", ".join(sorted(brand_names, key=str.lower)) + "."
+def format_percent(value) -> str:
+    """Render a discount percent the way Sweed UIs show it ('15', '12.5')."""
+    try:
+        as_float = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if as_float == int(as_float):
+        return str(int(as_float))
+    return f"{as_float:g}"
+
+
+def build_description(percent_label: str, brand_names: list[str]) -> str:
+    return (
+        f"{percent_label}% off all featured 1Off brands: "
+        + ", ".join(sorted(brand_names, key=str.lower))
+        + "."
+    )
 
 
 def main() -> int:
@@ -58,10 +72,16 @@ def main() -> int:
         print(f"  ! action {ACTION_ID} selector has no brands; refusing to write empty description.", file=sys.stderr)
         return 1
 
-    new_description = build_description(brand_names)
+    discount_percent = action.get("discountPercent")
+    if discount_percent in (None, ""):
+        print(f"  ! action {ACTION_ID} has no discountPercent; cannot build description.", file=sys.stderr)
+        return 1
+    percent_label = format_percent(discount_percent)
+    new_description = build_description(percent_label, brand_names)
     current_description = action.get("description") or ""
 
     print(f"action: {ACTION_ID} - {action.get('name')!r}")
+    print(f"  discount: {percent_label}%")
     print(f"  brands ({len(brand_names)}): {', '.join(sorted(brand_names, key=str.lower))}")
     print(f"  current description: {current_description!r}")
     print(f"  desired description: {new_description!r}")
