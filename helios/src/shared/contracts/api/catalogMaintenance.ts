@@ -11,6 +11,8 @@ export const CatalogMaintenanceVariantSchema = z.object({
   imageCount: z.number().int(),
   variantSpecificImageCount: z.number().int(),
   previewImageUrl: z.string().nullable(),
+  metrcTags: z.array(z.string()),
+  externalBarcode: z.string().nullable(),
 })
 export type CatalogMaintenanceVariant = z.infer<typeof CatalogMaintenanceVariantSchema>
 
@@ -56,3 +58,19 @@ export const CatalogMaintenanceUploadResultSchema = z.object({
   blobUrl: z.string().nullable(),
 })
 export type CatalogMaintenanceUploadResult = z.infer<typeof CatalogMaintenanceUploadResultSchema>
+
+export const CatalogMaintenanceUpdateBarcodeRequestSchema = z.object({
+  productId: z.number().int().positive(),
+  externalBarcode: z.string().trim().min(1).max(128),
+})
+export type CatalogMaintenanceUpdateBarcodeRequest = z.infer<
+  typeof CatalogMaintenanceUpdateBarcodeRequestSchema
+>
+
+export const CatalogMaintenanceUpdateBarcodeResponseSchema = z.object({
+  productId: z.number().int(),
+  externalBarcode: z.string(),
+})
+export type CatalogMaintenanceUpdateBarcodeResponse = z.infer<
+  typeof CatalogMaintenanceUpdateBarcodeResponseSchema
+>

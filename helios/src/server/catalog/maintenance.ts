@@ -85,6 +85,7 @@ const SweedProductSchema = z
     productGroupId: z.union([z.coerce.number().int(), z.string().trim().min(1)]).nullable().optional(),
     images: z.array(SweedImageSchema).default([]),
     groupImages: z.array(SweedImageSchema).default([]),
+    externalBarcode: z.string().nullable().optional(),
   })
   .passthrough()
 
@@ -122,9 +123,22 @@ const GroupedInventoryResponseSchema = z
                   .union([z.coerce.number().int(), z.string().trim().min(1)])
                   .nullable()
                   .optional(),
+                externalBarcode: z.string().nullable().optional(),
               })
               .passthrough()
               .optional(),
+            items: z
+              .array(
+                z
+                  .object({
+                    metrcTag: z.string().nullable().optional(),
+                    metrcPackageTag: z.string().nullable().optional(),
+                    packageMetrcTag: z.string().nullable().optional(),
+                    availableQty: z.coerce.number().nullable().optional(),
+                  })
+                  .passthrough(),
+              )
+              .default([]),
           })
           .passthrough(),
       )
@@ -143,6 +157,8 @@ interface InStockVariantSeed {
   name: string | null
   shortName: string | null
   siteKeys: Set<string>
+  metrcTags: Set<string>
+  externalBarcode: string | null
 }
 
 interface ResolvedVariant {
@@ -151,6 +167,8 @@ interface ResolvedVariant {
   name: string | null
   shortName: string | null
   siteKeys: Set<string>
+  metrcTags: Set<string>
+  externalBarcode: string | null
 }
 
 interface SurveyResult {
@@ -263,6 +281,8 @@ async function buildSurveyWithinLock(): Promise<SurveyResult> {
         name: seed.name,
         shortName: seed.shortName,
         siteKeys: seed.siteKeys,
+        metrcTags: seed.metrcTags,
+        externalBarcode: seed.externalBarcode,
       })
       resolvedByGroup.set(groupId, bucket)
     }
@@ -403,7 +423,11 @@ function buildGroupSummary(
       productGroupId: group.id,
       images: [],
       groupImages: [],
+      externalBarcode: null,
     }
+
+    const variantExternalBarcode =
+      nonEmptyString(baseProduct.externalBarcode) ?? variant.externalBarcode
 
     variants.push({
       productId: variant.productId,
@@ -416,6 +440,8 @@ function buildGroupSummary(
       imageCount: sourceImages.length,
       variantSpecificImageCount,
       previewImageUrl: pickPreviewUrl(sourceImages),
+      metrcTags: [...variant.metrcTags].sort(),
+      externalBarcode: variantExternalBarcode,
     })
   }
 
@@ -481,6 +507,35 @@ function normalizeImageId(image: SweedImage): string | null {
   return String(image.id)
 }
 
+function collectMetrcTagsFromInventoryRow(
+  items: ReadonlyArray<{
+    metrcTag?: string | null
+    metrcPackageTag?: string | null
+    packageMetrcTag?: string | null
+    availableQty?: number | null
+  }>,
+): string[] {
+  const tags: string[] = []
+  for (const item of items) {
+    if (typeof item.availableQty === 'number' && item.availableQty <= 0) {
+      continue
+    }
+    const tag = nonEmptyString(item.metrcTag) ?? nonEmptyString(item.metrcPackageTag) ?? nonEmptyString(item.packageMetrcTag)
+    if (tag) {
+      tags.push(tag)
+    }
+  }
+  return tags
+}
+
+function nonEmptyString(value: unknown): string | null {
+  if (typeof value !== 'string') {
+    return null
+  }
+  const trimmed = value.trim()
+  return trimmed.length === 0 ? null : trimmed
+}
+
 function coerceOptionalInt(value: unknown): number | null {
   if (typeof value === 'number' && Number.isInteger(value)) {
     return value
@@ -512,6 +567,8 @@ async function collectInStockVariantsForSite(
       if (!product || typeof product.id !== 'number') {
         continue
       }
+      const metrcTagsFromRow = collectMetrcTagsFromInventoryRow(row.items)
+      const externalBarcode = nonEmptyString(product.externalBarcode)
       const existing = variantSeeds.get(product.id)
       if (existing) {
         existing.siteKeys.add(site.siteKey)
@@ -524,6 +581,12 @@ async function collectInStockVariantsForSite(
         if (!existing.shortName && product.shortName) {
           existing.shortName = product.shortName
         }
+        if (!existing.externalBarcode && externalBarcode) {
+          existing.externalBarcode = externalBarcode
+        }
+        for (const tag of metrcTagsFromRow) {
+          existing.metrcTags.add(tag)
+        }
         continue
       }
       variantSeeds.set(product.id, {
@@ -532,6 +595,8 @@ async function collectInStockVariantsForSite(
         name: product.name ?? null,
         shortName: product.shortName ?? null,
         siteKeys: new Set([site.siteKey]),
+        metrcTags: new Set(metrcTagsFromRow),
+        externalBarcode,
       })
     }
 
@@ -662,6 +727,33 @@ export async function uploadCatalogMaintenanceImage(input: UploadInput): Promise
       }
     }
     return { uploadedBlobId: blobId, blobUrl, affectedProductIds }
+  })
+}
+
+export interface UpdateBarcodeInput {
+  productId: number
+  externalBarcode: string
+}
+
+export interface UpdateBarcodeResult {
+  productId: number
+  externalBarcode: string
+}
+
+export async function updateVariantBarcode(input: UpdateBarcodeInput): Promise<UpdateBarcodeResult> {
+  const normalized = input.externalBarcode.trim()
+  if (normalized.length === 0) {
+    throw new HttpError(400, 'externalBarcode must be non-empty.')
+  }
+  return withSweedSessionLockReturning(async () => {
+    const stateDealerId = getServerEnv().sweedStateDealerId
+    await callSweedRpcForDealer(stateDealerId, 'store.product.edit', {
+      id: input.productId,
+      externalBarcode: normalized,
+    })
+    const refreshed = await fetchProductDetailWithinLock(input.productId)
+    const next = nonEmptyString(refreshed.externalBarcode) ?? normalized
+    return { productId: input.productId, externalBarcode: next }
   })
 }
 

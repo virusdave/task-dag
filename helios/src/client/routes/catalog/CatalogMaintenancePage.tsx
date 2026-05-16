@@ -322,49 +322,43 @@ function MaintenanceCard(props: CardProps) {
         </div>
       </div>
 
-      {mode === 'variants' && group.variants.length > 0 ? (
+      {group.variants.length > 0 ? (
         <div className="catalog-maintenance-variants">
-          <div className="catalog-maintenance-variants-head">
-            <span className="subtle-copy">Attach photo to:</span>
-            <button
-              type="button"
-              className="ghost-button"
-              onClick={() => {
-                if (selectedVariantIds.length === group.variants.length) {
-                  setSelectedVariantIds([])
-                } else {
-                  setSelectedVariantIds(group.variants.map((variant) => variant.productId))
-                }
-              }}
-            >
-              {selectedVariantIds.length === group.variants.length ? 'None' : 'All'}
-            </button>
-          </div>
+          {mode === 'variants' ? (
+            <div className="catalog-maintenance-variants-head">
+              <span className="subtle-copy">Attach photo to:</span>
+              <button
+                type="button"
+                className="ghost-button"
+                onClick={() => {
+                  if (selectedVariantIds.length === group.variants.length) {
+                    setSelectedVariantIds([])
+                  } else {
+                    setSelectedVariantIds(group.variants.map((variant) => variant.productId))
+                  }
+                }}
+              >
+                {selectedVariantIds.length === group.variants.length ? 'None' : 'All'}
+              </button>
+            </div>
+          ) : (
+            <div className="catalog-maintenance-variants-head">
+              <span className="subtle-copy">In-stock variants:</span>
+            </div>
+          )}
           <ul className="catalog-maintenance-variant-list">
             {group.variants.map((variant) => (
               <li key={variant.productId}>
-                <label className="catalog-maintenance-variant-row">
-                  <input
-                    type="checkbox"
-                    checked={selectedVariantIds.includes(variant.productId)}
-                    onChange={() => toggleVariant(variant.productId)}
-                  />
-                  <span className="catalog-maintenance-variant-thumb">
-                    {variant.previewImageUrl ? (
-                      <img src={variant.previewImageUrl} alt={`${variantLabel(variant)} variant image`} loading="lazy" />
-                    ) : (
-                      <span className="catalog-maintenance-variant-thumb-empty">—</span>
-                    )}
-                  </span>
-                  <span className="catalog-maintenance-variant-text">
-                    <strong>{variantLabel(variant)}</strong>
-                    <span className="subtle-copy">
-                      {variant.variantSpecificImageCount > 0
-                        ? `${variant.variantSpecificImageCount} own image${variant.variantSpecificImageCount === 1 ? '' : 's'}`
-                        : 'no variant-specific image'}
-                    </span>
-                  </span>
-                </label>
+                <VariantRow
+                  variant={variant}
+                  mode={mode}
+                  selected={selectedVariantIds.includes(variant.productId)}
+                  onToggle={() => toggleVariant(variant.productId)}
+                  onBarcodeUpdated={(_productId, externalBarcode) => {
+                    void onComplete(`Barcode saved for ${variantLabel(variant)}: ${externalBarcode}`)
+                  }}
+                  onBarcodeError={onError}
+                />
               </li>
             ))}
           </ul>
@@ -403,6 +397,307 @@ function MaintenanceCard(props: CardProps) {
       </div>
     </article>
   )
+}
+
+interface VariantRowProps {
+  variant: CatalogMaintenanceVariant
+  mode: Mode
+  selected: boolean
+  onToggle: () => void
+  onBarcodeUpdated: (productId: number, externalBarcode: string) => void
+  onBarcodeError: (message: string) => void
+}
+
+function VariantRow(props: VariantRowProps) {
+  const { variant, mode, selected, onToggle, onBarcodeUpdated, onBarcodeError } = props
+  const [editingBarcode, setEditingBarcode] = useState(false)
+  const [draftBarcode, setDraftBarcode] = useState<string>(variant.externalBarcode ?? '')
+  const [savingBarcode, setSavingBarcode] = useState(false)
+  const [scanningBarcode, setScanningBarcode] = useState(false)
+  const barcodeFileInputRef = useRef<HTMLInputElement | null>(null)
+  const scannerSupported = useMemo(() => typeof window !== 'undefined' && 'BarcodeDetector' in window, [])
+
+  useEffect(() => {
+    setDraftBarcode(variant.externalBarcode ?? '')
+  }, [variant.externalBarcode, variant.productId])
+
+  const saveBarcode = async (next: string) => {
+    const trimmed = next.trim()
+    if (trimmed.length === 0) {
+      onBarcodeError('Barcode cannot be empty.')
+      return
+    }
+    if (trimmed === (variant.externalBarcode ?? '')) {
+      setEditingBarcode(false)
+      return
+    }
+    setSavingBarcode(true)
+    try {
+      const response = await fetch(buildAppPath('/api/catalog/maintenance/barcode'), {
+        body: JSON.stringify({ externalBarcode: trimmed, productId: variant.productId }),
+        credentials: 'same-origin',
+        headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+        method: 'POST',
+      })
+      if (response.status === 401) {
+        throw new AuthRequiredError()
+      }
+      if (!response.ok) {
+        const errorPayload = await maybeReadErrorPayload(response)
+        throw new Error(errorPayload ?? `${response.status} ${response.statusText}`)
+      }
+      const payload = (await response.json()) as { productId: number; externalBarcode: string }
+      onBarcodeUpdated(payload.productId, payload.externalBarcode)
+      setEditingBarcode(false)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to save barcode.'
+      onBarcodeError(message)
+    } finally {
+      setSavingBarcode(false)
+    }
+  }
+
+  const handleScannedFile = async (file: File) => {
+    setScanningBarcode(true)
+    try {
+      if (!scannerSupported) {
+        onBarcodeError('This browser cannot decode barcodes from photos. Type the value manually.')
+        return
+      }
+      const Detector = (window as unknown as { BarcodeDetector: typeof BarcodeDetectorLike }).BarcodeDetector
+      const detector = new Detector({
+        formats: ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128', 'code_39', 'itf', 'codabar', 'qr_code'],
+      })
+      const bitmap = await createImageBitmap(file)
+      try {
+        const detections = await detector.detect(bitmap)
+        if (detections.length === 0) {
+          onBarcodeError('No barcode detected in that photo. Hold steady and fill the frame.')
+          return
+        }
+        const value = detections[0]?.rawValue?.trim() ?? ''
+        if (value.length === 0) {
+          onBarcodeError('Decoded barcode was empty.')
+          return
+        }
+        setDraftBarcode(value)
+        setEditingBarcode(true)
+      } finally {
+        bitmap.close?.()
+      }
+    } catch (error) {
+      onBarcodeError(error instanceof Error ? error.message : 'Failed to read barcode photo.')
+    } finally {
+      setScanningBarcode(false)
+      if (barcodeFileInputRef.current) {
+        barcodeFileInputRef.current.value = ''
+      }
+    }
+  }
+
+  return (
+    <div className="catalog-maintenance-variant-row">
+      <div className="catalog-maintenance-variant-row-top">
+        {mode === 'variants' ? (
+          <label className="catalog-maintenance-variant-check">
+            <input type="checkbox" checked={selected} onChange={onToggle} />
+            <span className="sr-only">Attach photo to {variantLabel(variant)}</span>
+          </label>
+        ) : null}
+        <span className="catalog-maintenance-variant-thumb">
+          {variant.previewImageUrl ? (
+            <img src={variant.previewImageUrl} alt={`${variantLabel(variant)} variant image`} loading="lazy" />
+          ) : (
+            <span className="catalog-maintenance-variant-thumb-empty">—</span>
+          )}
+        </span>
+        <span className="catalog-maintenance-variant-text">
+          <strong>{variantLabel(variant)}</strong>
+          <span className="subtle-copy">
+            {variant.variantSpecificImageCount > 0
+              ? `${variant.variantSpecificImageCount} own image${variant.variantSpecificImageCount === 1 ? '' : 's'}`
+              : 'no variant-specific image'}
+          </span>
+        </span>
+      </div>
+
+      <div className="catalog-maintenance-variant-row-meta">
+        <MetrcTagsLine metrcTags={variant.metrcTags} />
+        <BarcodeLine
+          editing={editingBarcode}
+          draftValue={draftBarcode}
+          currentValue={variant.externalBarcode}
+          saving={savingBarcode}
+          scanning={scanningBarcode}
+          scannerSupported={scannerSupported}
+          onBeginEdit={() => {
+            setDraftBarcode(variant.externalBarcode ?? '')
+            setEditingBarcode(true)
+          }}
+          onCancelEdit={() => {
+            setEditingBarcode(false)
+            setDraftBarcode(variant.externalBarcode ?? '')
+          }}
+          onChange={setDraftBarcode}
+          onSave={() => void saveBarcode(draftBarcode)}
+          onPickPhoto={() => barcodeFileInputRef.current?.click()}
+        />
+        <input
+          ref={barcodeFileInputRef}
+          type="file"
+          accept="image/*"
+          capture="environment"
+          className="catalog-maintenance-file-input"
+          onChange={(event) => {
+            const file = event.target.files?.[0]
+            if (file) {
+              void handleScannedFile(file)
+            }
+          }}
+        />
+      </div>
+    </div>
+  )
+}
+
+function MetrcTagsLine(props: { metrcTags: string[] }) {
+  const { metrcTags } = props
+  if (metrcTags.length === 0) {
+    return <span className="catalog-maintenance-metrc-line subtle-copy">METRC: —</span>
+  }
+  return (
+    <span className="catalog-maintenance-metrc-line subtle-copy">
+      METRC{metrcTags.length > 1 ? ` (${metrcTags.length})` : ''}:{' '}
+      {metrcTags.map((tag, index) => (
+        <span key={tag}>
+          {renderMetrcTagSuffix(tag)}
+          {index < metrcTags.length - 1 ? ', ' : null}
+        </span>
+      ))}
+    </span>
+  )
+}
+
+function renderMetrcTagSuffix(tag: string): JSX.Element {
+  const cleaned = tag.replace(/\s+/g, '')
+  if (cleaned.length === 0) {
+    return <code className="catalog-maintenance-metrc-tag">—</code>
+  }
+  const last5 = cleaned.slice(-5)
+  const headLength = Math.max(0, last5.length - 3)
+  const head = last5.slice(0, headLength)
+  const tail = last5.slice(headLength)
+  return (
+    <code className="catalog-maintenance-metrc-tag" title={tag}>
+      {head}
+      <strong>{tail}</strong>
+    </code>
+  )
+}
+
+interface BarcodeLineProps {
+  editing: boolean
+  draftValue: string
+  currentValue: string | null
+  saving: boolean
+  scanning: boolean
+  scannerSupported: boolean
+  onBeginEdit: () => void
+  onCancelEdit: () => void
+  onChange: (next: string) => void
+  onSave: () => void
+  onPickPhoto: () => void
+}
+
+function BarcodeLine(props: BarcodeLineProps) {
+  const {
+    editing,
+    draftValue,
+    currentValue,
+    saving,
+    scanning,
+    scannerSupported,
+    onBeginEdit,
+    onCancelEdit,
+    onChange,
+    onSave,
+    onPickPhoto,
+  } = props
+
+  if (!editing) {
+    return (
+      <span className="catalog-maintenance-barcode-line">
+        <span className="subtle-copy">Barcode:</span>{' '}
+        {currentValue ? (
+          <code className="catalog-maintenance-barcode-value">{currentValue}</code>
+        ) : (
+          <span className="subtle-copy">none on file</span>
+        )}{' '}
+        <button type="button" className="ghost-button catalog-maintenance-barcode-btn" onClick={onBeginEdit}>
+          Edit
+        </button>{' '}
+        <button
+          type="button"
+          className="ghost-button catalog-maintenance-barcode-btn"
+          onClick={onPickPhoto}
+          disabled={scanning}
+          title={scannerSupported ? 'Capture a photo of the barcode' : 'Capture / browse a barcode photo (decoding requires Chrome on Android)'}
+        >
+          {scanning ? 'Scanning…' : '📷 Scan barcode'}
+        </button>
+      </span>
+    )
+  }
+
+  return (
+    <span className="catalog-maintenance-barcode-line">
+      <input
+        type="text"
+        inputMode="numeric"
+        autoComplete="off"
+        value={draftValue}
+        onChange={(event) => onChange(event.target.value)}
+        className="catalog-maintenance-barcode-input"
+        placeholder="e.g. 767461887525"
+        disabled={saving}
+      />
+      <button
+        type="button"
+        className="primary-button catalog-maintenance-barcode-btn"
+        onClick={onSave}
+        disabled={saving || draftValue.trim().length === 0}
+      >
+        {saving ? 'Saving…' : 'Save barcode'}
+      </button>
+      <button
+        type="button"
+        className="ghost-button catalog-maintenance-barcode-btn"
+        onClick={onCancelEdit}
+        disabled={saving}
+      >
+        Cancel
+      </button>
+      <button
+        type="button"
+        className="ghost-button catalog-maintenance-barcode-btn"
+        onClick={onPickPhoto}
+        disabled={saving || scanning}
+      >
+        {scanning ? 'Scanning…' : '📷 Scan'}
+      </button>
+    </span>
+  )
+}
+
+interface BarcodeDetectionResult {
+  rawValue?: string
+  format?: string
+}
+
+interface BarcodeDetectorLike {
+  new (options?: { formats?: string[] }): {
+    detect: (source: CanvasImageSource | ImageBitmap | Blob | ImageData) => Promise<BarcodeDetectionResult[]>
+  }
 }
 
 function defaultSelectedVariantIds(group: CatalogMaintenanceGroup): number[] {

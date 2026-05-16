@@ -2284,20 +2284,101 @@ a.tree-nav-branch-label.is-link,
 
 .catalog-maintenance-variant-row {
   display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 8px 10px;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
   border: 1px solid var(--panel-border);
   border-radius: 10px;
   background: var(--panel);
-  cursor: pointer;
 }
 
-.catalog-maintenance-variant-row input[type='checkbox'] {
+.catalog-maintenance-variant-row-top {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.catalog-maintenance-variant-row-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-left: 4px;
+}
+
+.catalog-maintenance-variant-check {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.catalog-maintenance-variant-check input[type='checkbox'] {
   width: 22px;
   height: 22px;
-  flex: 0 0 auto;
   accent-color: var(--accent);
+  margin: 0;
+}
+
+.catalog-maintenance-metrc-line,
+.catalog-maintenance-barcode-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.85rem;
+  line-height: 1.4;
+}
+
+.catalog-maintenance-metrc-tag {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: 0.02em;
+  background: rgba(155, 74, 34, 0.08);
+  padding: 1px 6px;
+  border-radius: 6px;
+  color: var(--text);
+}
+
+.catalog-maintenance-metrc-tag strong {
+  font-weight: 700;
+}
+
+.catalog-maintenance-barcode-value {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  background: rgba(155, 74, 34, 0.08);
+  padding: 1px 6px;
+  border-radius: 6px;
+  word-break: break-all;
+}
+
+.catalog-maintenance-barcode-input {
+  flex: 1 1 160px;
+  min-width: 0;
+  min-height: 40px;
+  padding: 6px 10px;
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  background: var(--panel-bg);
+  color: var(--text);
+  font: inherit;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.95rem;
+}
+
+.catalog-maintenance-barcode-btn {
+  min-height: 36px;
+  padding: 6px 10px;
+  font-size: 0.85rem;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 .catalog-maintenance-variant-thumb {

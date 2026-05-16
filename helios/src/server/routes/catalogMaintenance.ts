@@ -3,6 +3,8 @@ import { z } from 'zod'
 
 import {
   CatalogMaintenanceListResponseSchema,
+  CatalogMaintenanceUpdateBarcodeRequestSchema,
+  CatalogMaintenanceUpdateBarcodeResponseSchema,
   CatalogMaintenanceUploadResultSchema,
 } from '../../shared/contracts/index.js'
 import { requireSessionUser } from '../auth/requireSession.js'
@@ -10,6 +12,7 @@ import {
   HttpError,
   invalidateCatalogMaintenanceSurvey,
   loadCatalogMaintenanceList,
+  updateVariantBarcode,
   uploadCatalogMaintenanceImage,
   type MaintenanceSurveyList,
 } from '../catalog/maintenance.js'
@@ -41,6 +44,32 @@ export async function registerCatalogMaintenanceRoutes(server: FastifyInstance):
 
   server.get('/api/catalog/maintenance/missing-group-images', handleList('missing-group-images'))
   server.get('/api/catalog/maintenance/missing-variant-images', handleList('missing-variant-images'))
+
+  server.post('/api/catalog/maintenance/barcode', async (request, reply) => {
+    const user = await requireSessionUser(request, reply, 'editor')
+    if (!user) {
+      return
+    }
+    const body = CatalogMaintenanceUpdateBarcodeRequestSchema.parse(request.body ?? {})
+    try {
+      const result = await updateVariantBarcode({
+        externalBarcode: body.externalBarcode,
+        productId: body.productId,
+      })
+      await invalidateCatalogMaintenanceSurvey()
+      return reply.send(
+        CatalogMaintenanceUpdateBarcodeResponseSchema.parse({
+          externalBarcode: result.externalBarcode,
+          productId: result.productId,
+        }),
+      )
+    } catch (error) {
+      if (error instanceof HttpError) {
+        return reply.status(error.status).send({ error: error.message })
+      }
+      throw error
+    }
+  })
 
   server.post('/api/catalog/maintenance/images', async (request, reply) => {
     const user = await requireSessionUser(request, reply, 'editor')
