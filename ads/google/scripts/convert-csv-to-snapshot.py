@@ -13,7 +13,11 @@ def main():
     
     ads = []
     
-    with open(input_file, 'r') as f:
+    # Ads Editor exports as UTF-8-SIG (with BOM); otherwise the first
+    # header key becomes '\ufeffCampaign' and every Campaign lookup
+    # silently returns empty -- this is exactly what produced our
+    # campaign-name-less snapshot.
+    with open(input_file, 'r', encoding='utf-8-sig') as f:
         reader = csv.DictReader(f, delimiter='\t')
         
         for row in reader:
