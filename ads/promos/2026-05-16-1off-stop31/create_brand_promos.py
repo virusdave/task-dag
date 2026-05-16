@@ -10,7 +10,12 @@ Each promo:
   * applicationTarget= Product   (discount applies to qualifying items)
   * applicationMode  = Regular   (stacks at the discount step)
   * discountPercent  = 15
-  * one Buy selector with a single rule: brandsIds == <brand>
+  * one Get selector with a single rule: brandsIds == <brand>
+
+Sweed treats the "Get" selector as the set of items the discount is
+applied to. For Simple + Percent discount promos the Buy selector is
+generally unused (it's a BOGO/Bundle concept); using one here just
+hides the promo from the Sweed UI's "Discounted items" view.
 
 The brand list is derived live from the order's positions (each position's
 suggestedProduct -> product.get -> productGroup.get -> brand).
@@ -102,9 +107,9 @@ def make_selector_data(brand_id: int, brand_name: str) -> str:
 
 
 def existing_action_for_brand(brand_id: int) -> dict | None:
-    """Return any enabled action in this campaign whose buy selector targets
+    """Return any enabled action in this campaign whose get selector targets
     exactly this brand (so we don't double-create on re-runs). Disabled
-    actions (e.g. earlier scratch/test rows) are ignored."""
+    actions and disabled selectors are ignored."""
     page = 1
     while True:
         resp = sweed.api_call(
@@ -115,7 +120,9 @@ def existing_action_for_brand(brand_id: int) -> dict | None:
         for action in data:
             if not action.get("enabled"):
                 continue
-            for selector in action.get("buySelectors") or []:
+            for selector in action.get("getSelectors") or []:
+                if not selector.get("enabled"):
+                    continue
                 brands = selector.get("brands") or []
                 if len(brands) == 1 and int(brands[0]["id"]) == brand_id:
                     return action
@@ -151,7 +158,7 @@ def create_promo_for_brand(brand: dict) -> dict:
     )
     action_id = action["id"]
     selector = sweed.api_call(
-        "store.promo.selector.buy.add",
+        "store.promo.selector.get.add",
         {
             "actionId": action_id,
             "brandsIds": [brand["id"]],
@@ -160,7 +167,7 @@ def create_promo_for_brand(brand: dict) -> dict:
             "selectorData": make_selector_data(brand["id"], brand["name"]),
         },
     )
-    return {"action": action, "buySelector": selector}
+    return {"action": action, "getSelector": selector}
 
 
 def main() -> int:
@@ -184,11 +191,11 @@ def main() -> int:
             results.append({"brand": brand, "skippedExistingActionId": existing["id"]})
             continue
         if not args.apply:
-            print(f"  + {brand['name']}: would create action and brand buy-selector.")
+            print(f"  + {brand['name']}: would create action and brand get-selector.")
             results.append({"brand": brand, "dryRun": True})
             continue
         created = create_promo_for_brand(brand)
-        print(f"  + {brand['name']}: action {created['action']['id']} selector {created['buySelector']['id']}")
+        print(f"  + {brand['name']}: action {created['action']['id']} selector {created['getSelector']['id']}")
         results.append({"brand": brand, "created": created})
 
     if args.apply:
