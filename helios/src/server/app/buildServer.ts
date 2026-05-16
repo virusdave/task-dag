@@ -132,6 +132,15 @@ async function registerApplicationSurface(server: FastifyInstance) {
     if (request.url.startsWith('/assets/')) {
       return reply.status(404).send({ error: 'asset not found' })
     }
+    // The index.html embeds hashed asset URLs, so we must never let any
+    // browser (including mobile Safari's bfcache, which ignores
+    // max-age=0 on back/forward + pull-to-refresh) keep a stale copy
+    // that points at an asset hash we no longer build. no-store +
+    // must-revalidate forces every navigation to fetch the current
+    // bundle pointers.
+    reply.header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
+    reply.header('Pragma', 'no-cache')
+    reply.header('Expires', '0')
     return reply.sendFile('index.html')
   })
 }
