@@ -1,0 +1,552 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Moonlit Hash Co Mac 1 Infused 1.2g - Pending Order Proposal Detail</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f2eee5;
+      --card: #fffaf1;
+      --ink: #1f1b17;
+      --muted: #6d665b;
+      --line: #d9ceb7;
+      --catalog: #27417e;
+      --mapping: #1f5d42;
+      --evidence: #614478;
+      --warning: #8b5e11;
+      --danger: #8d2f52;
+      --image: #916c1e;
+      --neutral: #6d665b;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: var(--bg); color: var(--ink); }
+    a { color: inherit; }
+    .wrap { max-width: 1260px; margin: 0 auto; padding: 28px 24px 40px; }
+    .topbar { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 18px; }
+    .back-link { color: var(--muted); text-decoration: none; font-size: 14px; }
+    .hero { display: grid; grid-template-columns: 240px minmax(0, 1fr); gap: 22px; align-items: start; }
+    .hero-card, .section { background: var(--card); border: 1px solid var(--line); border-radius: 18px; padding: 18px; box-shadow: 0 8px 24px rgba(31, 27, 23, 0.05); }
+    h1 { margin: 0 0 8px; font-size: 26px; line-height: 1.15; }
+    h2 { margin: 0 0 12px; font-size: 17px; }
+    .meta { color: var(--muted); font-size: 14px; line-height: 1.5; }
+    .muted { color: var(--muted); }
+    .metric { font-weight: 700; }
+    .chip { display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px; border-radius: 999px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; color: #fff; margin: 0 6px 6px 0; }
+    .chip.catalog { background: var(--catalog); }
+    .chip.mapping { background: var(--mapping); }
+    .chip.evidence { background: var(--evidence); }
+    .chip.warning { background: var(--warning); }
+    .chip.danger { background: var(--danger); }
+    .chip.image { background: var(--image); }
+    .chip.neutral { background: var(--neutral); }
+    .thumb-link, .thumb-empty { display: inline-flex; width: 100%; aspect-ratio: 1 / 1; align-items: center; justify-content: center; border-radius: 16px; border: 1px solid var(--line); overflow: hidden; background: #f8f1e5; }
+    .thumb-link img { width: 100%; height: 100%; object-fit: cover; }
+    .detail-thumb { max-width: 240px; }
+    .section-grid { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(320px, 0.8fr); gap: 18px; margin-top: 18px; }
+    .detail-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 18px; }
+    .detail-grid div { font-size: 14px; line-height: 1.5; }
+    .pricing-ladder-shell { margin-top: 6px; }
+    .pricing-ladder-shell.is-detail { margin-top: 12px; }
+    .pricing-ladder-head { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: baseline; margin-bottom: 12px; }
+    .metric-detail { font-weight: 400; }
+    .pricing-ladder { position: relative; height: 96px; margin: 6px 0 8px; }
+    .pricing-ladder.is-detail { height: 172px; margin: 10px 0 12px; }
+    .ladder-track { position: absolute; left: 0; right: 0; top: 34px; height: 4px; border-radius: 999px; background: #d9ceb7; }
+    .pricing-ladder.is-detail .ladder-track { top: 88px; }
+    .ladder-iqr { position: absolute; top: 28px; height: 16px; border-radius: 999px; background: rgba(39, 65, 126, 0.18); border: 1px solid rgba(39, 65, 126, 0.26); }
+    .pricing-ladder.is-detail .ladder-iqr { top: 80px; }
+    .ladder-median { position: absolute; top: 22px; width: 2px; height: 28px; background: #27417e; }
+    .pricing-ladder.is-detail .ladder-median { top: 74px; height: 32px; }
+    .ladder-competitor { position: absolute; width: 10px; height: 10px; margin-left: -5px; border-radius: 999px; border: 1px solid rgba(31, 27, 23, 0.25); box-shadow: 0 0 0 2px rgba(255, 250, 241, 0.85); background: var(--evidence); }
+    .ladder-competitor.statewide, .ladder-competitor.unknown { background: var(--evidence); }
+    .ladder-marker { position: absolute; top: 44px; width: 2px; height: 24px; transform: translateX(-1px); }
+    .pricing-ladder.is-detail .ladder-marker.current,
+    .pricing-ladder.is-detail .ladder-marker.proposed { top: 98px; height: 28px; }
+    .ladder-marker::before { content: ''; position: absolute; left: 50%; top: -12px; width: 12px; height: 12px; transform: translateX(-50%) rotate(45deg); border: 2px solid currentColor; background: var(--card); }
+    .ladder-marker span { position: absolute; top: 18px; left: 50%; transform: translateX(-50%); font-size: 11px; font-weight: 700; white-space: nowrap; background: rgba(255,250,241,0.92); padding: 1px 6px; border-radius: 999px; border: 1px solid currentColor; }
+    .pricing-ladder.is-detail .ladder-marker span { font-size: 12px; }
+    .ladder-marker.current { color: #6d665b; }
+    .ladder-marker.proposed { color: #8a4626; }
+    .ladder-marker.market-average { top: 12px; height: 18px; color: #27417e; }
+    .pricing-ladder.is-detail .ladder-marker.market-average { top: 16px; height: 54px; }
+    .ladder-marker.market-average::before { top: auto; bottom: -12px; }
+    .ladder-marker.market-average span { top: auto; bottom: 18px; }
+    .ladder-axis { position: absolute; bottom: 0; font-size: 11px; color: var(--muted); }
+    .ladder-axis.axis-min { left: 0; }
+    .ladder-axis.axis-max { right: 0; }
+    .pricing-ladder-meta { display: flex; flex-wrap: wrap; gap: 8px 12px; font-size: 12px; }
+    .pricing-note { margin-top: 8px; font-size: 12px; }
+    .notes-list, .flag-list { margin: 8px 0 0; padding-left: 18px; }
+    .notes-list li, .flag-list li { margin: 4px 0; }
+    .source-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 10px; margin-top: 10px; }
+    .source-card { display: grid; grid-template-columns: 76px minmax(0, 1fr); gap: 10px; padding: 10px; border: 1px solid var(--line); border-radius: 14px; background: rgba(255,255,255,0.7); }
+    .source-thumb, .source-thumb.thumb-empty { width: 76px; height: 76px; border-radius: 12px; }
+    .source-body { min-width: 0; }
+    .source-title { font-weight: 700; margin-bottom: 2px; overflow-wrap: anywhere; }
+    .source-price { font-weight: 700; color: var(--catalog); }
+    .match-chip { display: inline-flex; align-items: center; padding: 3px 9px; border-radius: 999px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; border: 1px solid transparent; }
+    .match-chip.match-exact { background: rgba(31, 93, 66, 0.12); color: #1f5d42; border-color: rgba(31, 93, 66, 0.3); }
+    .match-chip.match-family { background: rgba(39, 65, 126, 0.1); color: #27417e; border-color: rgba(39, 65, 126, 0.24); }
+    .match-chip.match-cultivar { background: rgba(97, 68, 120, 0.1); color: #614478; border-color: rgba(97, 68, 120, 0.24); }
+    .match-chip.match-equivalent { background: rgba(109, 102, 91, 0.1); color: #6d665b; border-color: rgba(109, 102, 91, 0.24); }
+    .market-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    .market-table th, .market-table td { padding: 10px 12px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+    .market-table th { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); }
+    .market-row.match-exact td { background: rgba(31, 93, 66, 0.04); }
+    .empty-evidence { margin-top: 10px; padding: 12px 14px; border: 1px dashed rgba(139, 94, 17, 0.4); border-radius: 14px; background: rgba(139, 94, 17, 0.06); }
+    @media (max-width: 960px) {
+      .hero { grid-template-columns: 1fr; }
+      .section-grid, .detail-grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="topbar">
+      <a class="back-link" href="../bronx_pending_2026-05-11.html">Back to pending-order packet</a>
+      <span class="muted">Click listing links for the original Lit Alerts source pages.</span>
+    </div>
+
+    <section class="hero">
+      <div class="hero-card">
+        <a class="thumb-link detail-thumb" href="https://media-prime.sweedpos.com/store/prime/1775143642_32a4f7e1-01cf-4c4d-8982-fc9ae97b17b5.png" target="_blank" rel="noopener noreferrer"><img src="https://media-prime.sweedpos.com/store/prime/1775143642_32a4f7e1-01cf-4c4d-8982-fc9ae97b17b5.png" alt="Moonlit Hash Co Mac 1 Infused 1.2g"></a>
+        <div class="muted" style="margin-top: 10px;">Image reuses same-format live family anchor Moonlit Hash Co Alaskan Cherry Legs 1.2g (product 357789) for reviewer context.</div>
+      </div>
+      <div class="hero-card">
+        <h1>Moonlit Hash Co Mac 1 Infused 1.2g</h1>
+        <div class="meta">Distributor product MOONLIT- MAC1 INFUSED 1.2G<br>DP 624902 - orders 131845 - positions 779706</div>
+        <div style="margin-top: 12px;"><span class="chip raise">raise price</span><span class="chip catalog">catalog create</span><span class="chip image">live family anchor</span><span class="chip evidence">19 lit alerts matches</span><span class="chip warning">Brand GM-target override applied</span><span class="chip warning">Brand MSO classification defaulted to non-MSO (no annotation source available)</span></div>
+        
+      <div class="pricing-ladder-shell is-detail">
+        <div class="pricing-ladder-head">
+          <span class="metric">$17.50 <span class="metric-detail">(38.66% GM)</span> -&gt; $33.50<span class="metric-detail"> (67.96% GM)</span></span>
+        </div>
+        <div class="pricing-ladder is-detail" data-domain-min="10.5700" data-domain-max="36.4900" data-cost="9.5000">
+          <div class="ladder-track"></div>
+          <div class="ladder-iqr" style="left:16.74%; width:27.55%;"></div><div class="ladder-median" style="left:42.05%;"></div><a class="ladder-competitor statewide" style="left:11.54%; top:28px;" href="https://dutchie.com/dispensary/small-leaf-79/product/moonlit-hash-co-pre-roll-mac-1-1-2g" target="_blank" rel="noopener noreferrer" title="Canna Blooms&#10;Post-tax: $13.56&#10;Distance: statewide&#10;Brand: MoonLit Hash Co.&#10;Category: Pre-Rolls&#10;Weight: 1.2g (1,200mg)&#10;Quantity: 25"></a><a class="ladder-competitor statewide" style="left:11.54%; top:38px;" href="https://dutchie.com/embedded-menu/elivate-ny/product/moonlit-hash-co-mac-1-hash-non-infused-pre-roll-1-2g" target="_blank" rel="noopener noreferrer" title="Elevate NY&#10;Post-tax: $13.56&#10;Distance: statewide&#10;Brand: MoonLit Hash Co.&#10;Category: Pre-Rolls&#10;Weight: 1.2g (1,200mg)&#10;Quantity: 25"></a><a class="ladder-competitor statewide" style="left:11.54%; top:48px;" href="https://dutchie.com/embedded-menu/high-of-brooklyn/product/moonlit-hash-co-mac-1-preroll-1-2g" target="_blank" rel="noopener noreferrer" title="Kaya Bliss Dispensary - Brooklyn Heights&#10;Post-tax: $13.56&#10;Distance: statewide&#10;Brand: MoonLit Hash Co.&#10;Category: Pre-Rolls&#10;Weight: 1.2g (1,200mg)&#10;Quantity: 25"></a><a class="ladder-competitor statewide" style="left:11.54%; top:58px;" href="https://dutchie.com/embedded-menu/madame-jane/product/moonlit-hash-co-x-leadfarmer-mac-1-capitlator-s-cut-1-2g-craft-indoor-exclusive-flower-pre-roll" target="_blank" rel="noopener noreferrer" title="Madame Jane&#x27;s&#10;Post-tax: $13.56&#10;Distance: statewide&#10;Brand: MoonLit Hash Co.&#10;Category: Pre-Rolls&#10;Weight: 1.2g (1,200mg)&#10;Quantity: 25"></a><a class="ladder-competitor statewide" style="left:13.23%; top:28px;" href="https://dutchie.com/embedded-menu/the-flowery-east-village/product/moonlit-hash-co-mac-1-preroll" target="_blank" rel="noopener noreferrer" title="The Flowery - East Village&#10;Post-tax: $14.00&#10;Distance: statewide&#10;Brand: MoonLit Hash Co.&#10;Category: Pre-Rolls&#10;Weight: 1.2g (1,200mg)&#10;Quantity: 25"></a><a class="ladder-competitor statewide" style="left:20.25%; top:28px;" href="https://dutchie.com/embedded-menu/northern-lights-dispensary/product/moonlit-hash-co-mac-1-1-2g-pre-roll" target="_blank" rel="noopener noreferrer" title="Northern Lights - Canton&#10;Post-tax: $15.82&#10;Distance: statewide&#10;Brand: MoonLit Hash Co.&#10;Category: Pre-Rolls&#10;Weight: 1.2g (1,200mg)&#10;Quantity: 25"></a><a class="ladder-competitor statewide" style="left:20.25%; top:38px;" href="https://dutchie.com/embedded-menu/case-management/product/moonlit-hash-preroll-mac-1-1-2g-hybrid-thc-34-36" target="_blank" rel="noopener noreferrer" title="Quality Control Dispensary&#10;Post-tax: $15.82&#10;Distance: statewide&#10;Brand: MoonLit Hash Co.&#10;Category: Pre-Rolls&#10;Weight: 1.2g (1,200mg)&#10;Quantity: 14"></a><a class="ladder-competitor statewide" style="left:42.05%; top:28px;" href="https://dutchie.com/dispensary/small-leaf-79/product/moonlit-hash-co-infused-pre-roll-mac-1-1-2g" target="_blank" rel="noopener noreferrer" title="Canna Blooms&#10;Post-tax: $21.47&#10;Distance: statewide&#10;Brand: MoonLit Hash Co.&#10;Category: Pre-Rolls&#10;Weight: 1.2g (1,200mg)&#10;Quantity: 25"></a><a class="ladder-competitor statewide" style="left:42.05%; top:38px;" href="https://dutchie.com/embedded-menu/dankley-manhattan/product/moonlit-hash-co-infused-single-mac-1" target="_blank" rel="noopener noreferrer" title="Dankley - FiDi&#10;Post-tax: $21.47&#10;Distance: statewide&#10;Brand: MoonLit Hash Co.&#10;Category: Pre-Rolls&#10;Weight: 1.2g (1,200mg)&#10;Quantity: 25"></a><a class="ladder-competitor statewide" style="left:42.05%; top:48px;" href="https://dutchie.com/embedded-menu/elivate-ny/product/moonlit-hash-co-mac-1-hash-infused-pre-roll-1-2g" target="_blank" rel="noopener noreferrer" title="Elevate NY&#10;Post-tax: $21.47&#10;Distance: statewide&#10;Brand: MoonLit Hash Co.&#10;Category: Pre-Rolls&#10;Weight: 1.2g (1,200mg)&#10;Quantity: 25"></a><a class="ladder-competitor statewide" style="left:42.05%; top:58px;" href="https://dutchie.com/embedded-menu/high-of-brooklyn/product/moonlit-hash-co-mac-1-hash-infused-preroll-1-2g" target="_blank" rel="noopener noreferrer" title="Kaya Bliss Dispensary - Brooklyn Heights&#10;Post-tax: $21.47&#10;Distance: statewide&#10;Brand: MoonLit Hash Co.&#10;Category: Pre-Rolls&#10;Weight: 1.2g (1,200mg)&#10;Quantity: 25"></a><a class="ladder-competitor statewide" style="left:42.05%; top:68px;" href="https://dutchie.com/embedded-menu/madame-jane/product/moonlit-hash-co-x-leadfarmer-mac-1-capitlator-s-cut-1-2g-hash-infused-pre-roll" target="_blank" rel="noopener noreferrer" title="Madame Jane&#x27;s&#10;Post-tax: $21.47&#10;Distance: statewide&#10;Brand: MoonLit Hash Co.&#10;Category: Pre-Rolls&#10;Weight: 1.2g (1,200mg)&#10;Quantity: 25"></a><a class="ladder-competitor statewide" style="left:42.05%; top:78px;" href="https://dutchie.com/embedded-menu/luke-cloud/product/moonlit-hash-co-mac-1-infused-pre-roll-1-2g" target="_blank" rel="noopener noreferrer" title="The Bronx Joint &#10;Post-tax: $21.47&#10;Distance: statewide&#10;Brand: MoonLit Hash Co.&#10;Category: Pre-Rolls&#10;Weight: 1.2g (1,200mg)&#10;Quantity: 25"></a><a class="ladder-competitor statewide" style="left:42.17%; top:28px;" href="https://dutchie.com/embedded-menu/aroma-farms/product/870-moonlit-hash-co-infused-preroll-mac-1-h" target="_blank" rel="noopener noreferrer" title="Aroma Farms&#10;Post-tax: $21.50&#10;Distance: statewide&#10;Brand: MoonLit Hash Co.&#10;Category: Pre-Rolls&#10;Weight: 1.2g (1,200mg)&#10;Quantity: 25"></a><a class="ladder-competitor statewide" style="left:46.41%; top:28px;" href="https://dutchie.com/embedded-menu/black-market-canna-poughkeepsie/product/mac-1-1-2g-hash-infused-pre-roll-moonlit" target="_blank" rel="noopener noreferrer" title="Black Market Canna - Poughkeepsie&#10;Post-tax: $22.60&#10;Distance: statewide&#10;Brand: MoonLit Hash Co.&#10;Category: Pre-Rolls&#10;Weight: 1.2g (1,200mg)&#10;Quantity: 25"></a><a class="ladder-competitor statewide" style="left:46.41%; top:38px;" href="https://dutchie.com/embedded-menu/northern-lights-dispensary/product/moonlit-hash-co-mac-1-1-2g-hash-infused-pre-roll" target="_blank" rel="noopener noreferrer" title="Northern Lights - Canton&#10;Post-tax: $22.60&#10;Distance: statewide&#10;Brand: MoonLit Hash Co.&#10;Category: Pre-Rolls&#10;Weight: 1.2g (1,200mg)&#10;Quantity: 25"></a><a class="ladder-competitor statewide" style="left:47.96%; top:28px;" href="https://dutchie.com/embedded-menu/the-flowery-east-village/product/moonlit-hash-co-mac-1-infused-preroll" target="_blank" rel="noopener noreferrer" title="The Flowery - East Village&#10;Post-tax: $23.00&#10;Distance: statewide&#10;Brand: MoonLit Hash Co.&#10;Category: Pre-Rolls&#10;Weight: 1.2g (1,200mg)&#10;Quantity: 25"></a><a class="ladder-competitor statewide" style="left:55.13%; top:28px;" href="https://dutchie.com/embedded-menu/case-management/product/moonlit-hash-infused-preroll-hash-infused-mac-1-1-2g-hybrid-thc-46-99" target="_blank" rel="noopener noreferrer" title="Quality Control Dispensary&#10;Post-tax: $24.86&#10;Distance: statewide&#10;Brand: MoonLit Hash Co.&#10;Category: Pre-Rolls&#10;Weight: 1g (1,000mg)&#10;Quantity: 25"></a><a class="ladder-competitor statewide" style="left:55.13%; top:38px;" href="https://dutchie.com/dispensary/the-daily-green/product/moonlit-hash-co-mac-1-dry-sift-hash-infused-pre-roll-single" target="_blank" rel="noopener noreferrer" title="The Daily Green&#10;Post-tax: $24.86&#10;Distance: statewide&#10;Brand: MoonLit Hash Co.&#10;Category: Pre-Rolls&#10;Weight: 1.2g (1,200mg)&#10;Quantity: 25"></a><div class="ladder-marker market-average" style="left:33.99%;" title="Market average: $19.38&#10;Post-tax average across the retained Lit Alerts statewide listings."><span>Market avg</span></div>
+          <div class="ladder-marker current" style="left:26.74%;" title="Current basis: $17.50&#10;Basis: live family anchor&#10;Current GM: 38.66%&#10;Cost: $9.50"><span>Current</span></div>
+          <div class="ladder-marker proposed" style="left:88.46%;" title="Proposed price: $33.50&#10;Proposed GM: 67.96%&#10;Cost: $9.50"><span>Proposed</span></div>
+          <div class="ladder-axis axis-min">$10.57</div>
+          <div class="ladder-axis axis-max">$36.49</div>
+        </div>
+        <div class="pricing-ladder-meta muted"><span>Market avg $19.38</span><span>Median $21.47</span><span>IQR $14.91-$22.05</span><span>Range $13.56-$24.86</span><span>12 stores / 19 matches / statewide</span></div>
+      </div>
+    
+        <div class="detail-grid" style="margin-top: 12px;">
+          <div><span class="muted">Target brand</span><br><span class="metric">Moonlit Hash Co</span></div>
+          <div><span class="muted">Target group</span><br><span class="metric">Mac 1 Infused</span></div>
+          <div><span class="muted">Target tab</span><br><span class="metric">1.2g</span></div>
+          <div><span class="muted">Category lane</span><br><span class="metric">Pre-Rolls / Infused</span></div>
+        </div>
+      </div>
+    </section>
+
+    <div class="section-grid">
+      <section class="section">
+        <h2>Pricing Context</h2>
+        <div class="detail-grid">
+          <div><span class="muted">Current basis</span><br><span class="metric">$17.50</span> <span class="muted">(38.66% GM)</span></div>
+          <div><span class="muted">Proposed</span><br><span class="metric">$33.50</span> <span class="muted">(67.96% GM)</span></div>
+          <div><span class="muted">Market avg</span><br><span class="metric">$19.38</span></div>
+          <div><span class="muted">Evidence coverage</span><br><span class="metric">12 stores / 19 matches / statewide</span></div>
+          <div><span class="muted">Effective cost</span><br><span class="metric">$9.50</span></div>
+          <div><span class="muted">Pricing reason</span><br>Brand GM-target override: Moonlit Hash Co priced to 67.5% GM (top of MSO band) per Stop 31 LLC purchase order directive 2026-05-11; marketing will discount via promos rather than charging the full shelf price out of the box. Pre-override draft was $18.50. Competitor pressure keeps the draft below the normal 55% GM floor. Lit Alerts average $17.15 pre-tax -&gt; $19.38 post-tax equivalent. The live same-format family anchor median is available and is used as the current-basis reference for this draft. Lit Alerts strategy: statewide-brand-search+variants.</div>
+        </div>
+      </section>
+
+      <section class="section">
+        <h2>Catalog Context</h2>
+        <div class="detail-grid">
+          <div><span class="muted">Proposed action</span><br>Create new Moonlit Hash Co Mac 1 Infused 1.2g under Pre-Rolls / Infused, then link the existing purchase distributor product to the created variant.</div>
+          <div><span class="muted">Reuse status</span><br>No exact live variant reuse found yet</div>
+          <div><span class="muted">Target strain</span><br><span class="metric">Mac 1</span></div>
+          <div><span class="muted">Current price basis</span><br><span class="metric">live family anchor</span></div>
+          <div><span class="muted">Action type</span><br><span class="metric">catalog-create</span></div>
+          <div><span class="muted">Sample-like</span><br><span class="metric">No</span></div>
+          <div style="grid-column: 1 / -1;"><span class="muted">Notes</span><br><ul class="notes-list"><li>Competitor pressure keeps the draft below the normal 55% GM floor. Lit Alerts average $17.15 pre-tax -&gt; $19.38 post-tax equivalent. Anchor family price uses 2 live same-format Moonlit Hash Co row(s): 357789, 391536.</li><li>Live family anchors: 357789, 391536</li><li>Lit Alerts brand IDs: 27160</li></ul></div>
+          <div style="grid-column: 1 / -1;"><span class="muted">Review flags</span><br><ul class="flag-list"><li>Brand GM-target override applied</li><li>Brand MSO classification defaulted to non-MSO (no annotation source available)</li></ul></div>
+        </div>
+      </section>
+    </div>
+
+    <section class="section" style="margin-top: 18px;">
+      <h2>Evidence Cards</h2>
+      <p class="muted">This is the same reviewer evidence from the packet row, expanded so you can inspect each source without staying in the dense table.</p>
+      <div class='source-grid'>
+      <article class="source-card">
+        <a class="thumb-link source-thumb" href="https://dutchie.com/embedded-menu/aroma-farms/product/870-moonlit-hash-co-infused-preroll-mac-1-h" target="_blank" rel="noopener noreferrer"><img src="https://s3-us-west-2.amazonaws.com/dutchie-images/preroll-stock-3-v1.jpg" alt="870 Moonlit Hash Co. Infused Preroll - Mac 1 (H)"></a>
+        <div class="source-body">
+          <div class="source-title">Aroma Farms</div>
+          <div class="muted">870 Moonlit Hash Co. Infused Preroll - Mac 1 (H)</div>
+          <div class="source-price">$19.03</div>
+          <div class="muted">Pre-Rolls - 1.2g (1,200mg)</div>
+          <div class="muted"><a href="https://dutchie.com/embedded-menu/aroma-farms/product/870-moonlit-hash-co-infused-preroll-mac-1-h" target="_blank" rel="noopener noreferrer">Open listing</a></div>
+        </div>
+      </article>
+    
+      <article class="source-card">
+        <a class="thumb-link source-thumb" href="https://dutchie.com/embedded-menu/black-market-canna-poughkeepsie/product/mac-1-1-2g-hash-infused-pre-roll-moonlit" target="_blank" rel="noopener noreferrer"><img src="https://s3-us-west-2.amazonaws.com/dutchie-images/34a37909f4c971ef8619fde721733f57" alt="Mac 1 | 1.2g Hash Infused Pre-roll | MOONLiT |"></a>
+        <div class="source-body">
+          <div class="source-title">Black Market Canna - Poughkeepsie</div>
+          <div class="muted">Mac 1 | 1.2g Hash Infused Pre-roll | MOONLiT |</div>
+          <div class="source-price">$20.00</div>
+          <div class="muted">Pre-Rolls - 1.2g (1,200mg)</div>
+          <div class="muted"><a href="https://dutchie.com/embedded-menu/black-market-canna-poughkeepsie/product/mac-1-1-2g-hash-infused-pre-roll-moonlit" target="_blank" rel="noopener noreferrer">Open listing</a></div>
+        </div>
+      </article>
+    
+      <article class="source-card">
+        <a class="thumb-link source-thumb" href="https://dutchie.com/dispensary/small-leaf-79/product/moonlit-hash-co-infused-pre-roll-mac-1-1-2g" target="_blank" rel="noopener noreferrer"><img src="https://s3-us-west-2.amazonaws.com/dutchie-images/44f339e70debd11169dea484cfd955cd" alt="MoonLit Hash Co | Infused Pre Roll | Mac 1 | 1.2g"></a>
+        <div class="source-body">
+          <div class="source-title">Canna Blooms</div>
+          <div class="muted">MoonLit Hash Co | Infused Pre Roll | Mac 1 | 1.2g</div>
+          <div class="source-price">$19.00</div>
+          <div class="muted">Pre-Rolls - 1.2g (1,200mg)</div>
+          <div class="muted"><a href="https://dutchie.com/dispensary/small-leaf-79/product/moonlit-hash-co-infused-pre-roll-mac-1-1-2g" target="_blank" rel="noopener noreferrer">Open listing</a></div>
+        </div>
+      </article>
+    
+      <article class="source-card">
+        <a class="thumb-link source-thumb" href="https://dutchie.com/embedded-menu/dankley-manhattan/product/moonlit-hash-co-infused-single-mac-1" target="_blank" rel="noopener noreferrer"><img src="https://s3-us-west-2.amazonaws.com/dutchie-images/f50c16ff284c111f8237bfb32c37de17" alt="Moonlit Hash Co | Infused Single | Mac 1"></a>
+        <div class="source-body">
+          <div class="source-title">Dankley - FiDi</div>
+          <div class="muted">Moonlit Hash Co | Infused Single | Mac 1</div>
+          <div class="source-price">$19.00</div>
+          <div class="muted">Pre-Rolls - 1.2g (1,200mg)</div>
+          <div class="muted"><a href="https://dutchie.com/embedded-menu/dankley-manhattan/product/moonlit-hash-co-infused-single-mac-1" target="_blank" rel="noopener noreferrer">Open listing</a></div>
+        </div>
+      </article>
+    
+      <article class="source-card">
+        <a class="thumb-link source-thumb" href="https://dutchie.com/embedded-menu/northern-lights-dispensary/product/moonlit-hash-co-mac-1-1-2g-hash-infused-pre-roll" target="_blank" rel="noopener noreferrer"><img src="https://s3-us-west-2.amazonaws.com/dutchie-images/preroll-stock-1-v1.jpg" alt="Moonlit Hash Co | Mac 1 | 1.2g | Hash Infused Pre-Roll"></a>
+        <div class="source-body">
+          <div class="source-title">Northern Lights - Canton</div>
+          <div class="muted">Moonlit Hash Co | Mac 1 | 1.2g | Hash Infused Pre-Roll</div>
+          <div class="source-price">$20.00</div>
+          <div class="muted">Pre-Rolls - 1.2g (1,200mg)</div>
+          <div class="muted"><a href="https://dutchie.com/embedded-menu/northern-lights-dispensary/product/moonlit-hash-co-mac-1-1-2g-hash-infused-pre-roll" target="_blank" rel="noopener noreferrer">Open listing</a></div>
+        </div>
+      </article>
+    
+      <article class="source-card">
+        <a class="thumb-link source-thumb" href="https://dutchie.com/embedded-menu/northern-lights-dispensary/product/moonlit-hash-co-mac-1-1-2g-pre-roll" target="_blank" rel="noopener noreferrer"><img src="https://s3-us-west-2.amazonaws.com/dutchie-images/preroll-stock-3-v1.jpg" alt="Moonlit Hash Co | Mac 1 | 1.2g | Pre-Roll"></a>
+        <div class="source-body">
+          <div class="source-title">Northern Lights - Canton</div>
+          <div class="muted">Moonlit Hash Co | Mac 1 | 1.2g | Pre-Roll</div>
+          <div class="source-price">$14.00</div>
+          <div class="muted">Pre-Rolls - 1.2g (1,200mg)</div>
+          <div class="muted"><a href="https://dutchie.com/embedded-menu/northern-lights-dispensary/product/moonlit-hash-co-mac-1-1-2g-pre-roll" target="_blank" rel="noopener noreferrer">Open listing</a></div>
+        </div>
+      </article>
+    </div>
+    </section>
+
+    <section class="section" style="margin-top: 18px;">
+      <h2>Enumerated Lit Alerts Sources</h2>
+      <p class="muted">This view lists every retained statewide competitor price so duplicate-price stacks are readable even when the compact ladder gets crowded.</p>
+      
+    <table class="market-table">
+      <thead>
+        <tr>
+          <th>Post-tax</th>
+          <th>Match</th>
+          <th>Competitor product</th>
+          <th>Brand</th>
+          <th>Category</th>
+          <th>Distance</th>
+          <th>Dispensary</th>
+          <th>Listing</th>
+        </tr>
+      </thead>
+      <tbody>
+        
+            <tr class="market-row match-family">
+              <td>$13.56</td>
+              <td><span class="match-chip match-family">brand+categorical equivalent</span></td>
+              <td>MoonLit Hash Co | Pre Roll | Mac 1 | 1.2g</td>
+              <td>MoonLit Hash Co.</td>
+              <td>Pre-Rolls</td>
+              <td>statewide</td>
+              <td>Canna Blooms</td>
+              <td><a href="https://dutchie.com/dispensary/small-leaf-79/product/moonlit-hash-co-pre-roll-mac-1-1-2g" target="_blank" rel="noopener noreferrer">Open listing</a></td>
+            </tr>
+            
+            <tr class="market-row match-family">
+              <td>$13.56</td>
+              <td><span class="match-chip match-family">brand+categorical equivalent</span></td>
+              <td>Mac 1  Hash (Non Infused)  Pre-roll - 1.2g</td>
+              <td>MoonLit Hash Co.</td>
+              <td>Pre-Rolls</td>
+              <td>statewide</td>
+              <td>Elevate NY</td>
+              <td><a href="https://dutchie.com/embedded-menu/elivate-ny/product/moonlit-hash-co-mac-1-hash-non-infused-pre-roll-1-2g" target="_blank" rel="noopener noreferrer">Open listing</a></td>
+            </tr>
+            
+            <tr class="market-row match-family">
+              <td>$13.56</td>
+              <td><span class="match-chip match-family">brand+categorical equivalent</span></td>
+              <td>MAC 1 Preroll - 1.2g</td>
+              <td>MoonLit Hash Co.</td>
+              <td>Pre-Rolls</td>
+              <td>statewide</td>
+              <td>Kaya Bliss Dispensary - Brooklyn Heights</td>
+              <td><a href="https://dutchie.com/embedded-menu/high-of-brooklyn/product/moonlit-hash-co-mac-1-preroll-1-2g" target="_blank" rel="noopener noreferrer">Open listing</a></td>
+            </tr>
+            
+            <tr class="market-row match-family">
+              <td>$13.56</td>
+              <td><span class="match-chip match-family">brand+categorical equivalent</span></td>
+              <td>Mac 1 Capitlator&#x27;s Cut - 1.2g - Craft Indoor Exclusive Flower Pre Roll</td>
+              <td>MoonLit Hash Co.</td>
+              <td>Pre-Rolls</td>
+              <td>statewide</td>
+              <td>Madame Jane&#x27;s</td>
+              <td><a href="https://dutchie.com/embedded-menu/madame-jane/product/moonlit-hash-co-x-leadfarmer-mac-1-capitlator-s-cut-1-2g-craft-indoor-exclusive-flower-pre-roll" target="_blank" rel="noopener noreferrer">Open listing</a></td>
+            </tr>
+            
+            <tr class="market-row match-family">
+              <td>$14.00</td>
+              <td><span class="match-chip match-family">brand+categorical equivalent</span></td>
+              <td>MoonLit Hash Co. MAC 1 Preroll</td>
+              <td>MoonLit Hash Co.</td>
+              <td>Pre-Rolls</td>
+              <td>statewide</td>
+              <td>The Flowery - East Village</td>
+              <td><a href="https://dutchie.com/embedded-menu/the-flowery-east-village/product/moonlit-hash-co-mac-1-preroll" target="_blank" rel="noopener noreferrer">Open listing</a></td>
+            </tr>
+            
+            <tr class="market-row match-family">
+              <td>$15.82</td>
+              <td><span class="match-chip match-family">brand+categorical equivalent</span></td>
+              <td>Moonlit Hash Co | Mac 1 | 1.2g | Pre-Roll</td>
+              <td>MoonLit Hash Co.</td>
+              <td>Pre-Rolls</td>
+              <td>statewide</td>
+              <td>Northern Lights - Canton</td>
+              <td><a href="https://dutchie.com/embedded-menu/northern-lights-dispensary/product/moonlit-hash-co-mac-1-1-2g-pre-roll" target="_blank" rel="noopener noreferrer">Open listing</a></td>
+            </tr>
+            
+            <tr class="market-row match-family">
+              <td>$15.82</td>
+              <td><span class="match-chip match-family">brand+categorical equivalent</span></td>
+              <td>Moonlit Hash | Preroll | MAC 1 | 1.2g | Hybrid | THC 34.36%</td>
+              <td>MoonLit Hash Co.</td>
+              <td>Pre-Rolls</td>
+              <td>statewide</td>
+              <td>Quality Control Dispensary</td>
+              <td><a href="https://dutchie.com/embedded-menu/case-management/product/moonlit-hash-preroll-mac-1-1-2g-hybrid-thc-34-36" target="_blank" rel="noopener noreferrer">Open listing</a></td>
+            </tr>
+            
+            <tr class="market-row match-family">
+              <td>$21.47</td>
+              <td><span class="match-chip match-family">brand+categorical equivalent</span></td>
+              <td>MoonLit Hash Co | Infused Pre Roll | Mac 1 | 1.2g</td>
+              <td>MoonLit Hash Co.</td>
+              <td>Pre-Rolls</td>
+              <td>statewide</td>
+              <td>Canna Blooms</td>
+              <td><a href="https://dutchie.com/dispensary/small-leaf-79/product/moonlit-hash-co-infused-pre-roll-mac-1-1-2g" target="_blank" rel="noopener noreferrer">Open listing</a></td>
+            </tr>
+            
+            <tr class="market-row match-family">
+              <td>$21.47</td>
+              <td><span class="match-chip match-family">brand+categorical equivalent</span></td>
+              <td>Moonlit Hash Co | Infused Single | Mac 1</td>
+              <td>MoonLit Hash Co.</td>
+              <td>Pre-Rolls</td>
+              <td>statewide</td>
+              <td>Dankley - FiDi</td>
+              <td><a href="https://dutchie.com/embedded-menu/dankley-manhattan/product/moonlit-hash-co-infused-single-mac-1" target="_blank" rel="noopener noreferrer">Open listing</a></td>
+            </tr>
+            
+            <tr class="market-row match-family">
+              <td>$21.47</td>
+              <td><span class="match-chip match-family">brand+categorical equivalent</span></td>
+              <td>Mac 1  Hash Infused Pre-roll - 1.2g</td>
+              <td>MoonLit Hash Co.</td>
+              <td>Pre-Rolls</td>
+              <td>statewide</td>
+              <td>Elevate NY</td>
+              <td><a href="https://dutchie.com/embedded-menu/elivate-ny/product/moonlit-hash-co-mac-1-hash-infused-pre-roll-1-2g" target="_blank" rel="noopener noreferrer">Open listing</a></td>
+            </tr>
+            
+            <tr class="market-row match-family">
+              <td>$21.47</td>
+              <td><span class="match-chip match-family">brand+categorical equivalent</span></td>
+              <td>Mac 1 Hash Infused Preroll - 1.2g</td>
+              <td>MoonLit Hash Co.</td>
+              <td>Pre-Rolls</td>
+              <td>statewide</td>
+              <td>Kaya Bliss Dispensary - Brooklyn Heights</td>
+              <td><a href="https://dutchie.com/embedded-menu/high-of-brooklyn/product/moonlit-hash-co-mac-1-hash-infused-preroll-1-2g" target="_blank" rel="noopener noreferrer">Open listing</a></td>
+            </tr>
+            
+            <tr class="market-row match-family">
+              <td>$21.47</td>
+              <td><span class="match-chip match-family">brand+categorical equivalent</span></td>
+              <td>MAC 1 Capitlator&#x27;s Cut - 1.2G - Hash Infused Pre Roll</td>
+              <td>MoonLit Hash Co.</td>
+              <td>Pre-Rolls</td>
+              <td>statewide</td>
+              <td>Madame Jane&#x27;s</td>
+              <td><a href="https://dutchie.com/embedded-menu/madame-jane/product/moonlit-hash-co-x-leadfarmer-mac-1-capitlator-s-cut-1-2g-hash-infused-pre-roll" target="_blank" rel="noopener noreferrer">Open listing</a></td>
+            </tr>
+            
+            <tr class="market-row match-cultivar">
+              <td>$21.47</td>
+              <td><span class="match-chip match-cultivar">same-brand cultivar</span></td>
+              <td>Mac 1 - Infused Pre-roll - 1.2g</td>
+              <td>MoonLit Hash Co.</td>
+              <td>Pre-Rolls</td>
+              <td>statewide</td>
+              <td>The Bronx Joint </td>
+              <td><a href="https://dutchie.com/embedded-menu/luke-cloud/product/moonlit-hash-co-mac-1-infused-pre-roll-1-2g" target="_blank" rel="noopener noreferrer">Open listing</a></td>
+            </tr>
+            
+            <tr class="market-row match-family">
+              <td>$21.50</td>
+              <td><span class="match-chip match-family">brand+categorical equivalent</span></td>
+              <td>Mac 1 (H)</td>
+              <td>MoonLit Hash Co.</td>
+              <td>Pre-Rolls</td>
+              <td>statewide</td>
+              <td>Aroma Farms</td>
+              <td><a href="https://dutchie.com/embedded-menu/aroma-farms/product/870-moonlit-hash-co-infused-preroll-mac-1-h" target="_blank" rel="noopener noreferrer">Open listing</a></td>
+            </tr>
+            
+            <tr class="market-row match-family">
+              <td>$22.60</td>
+              <td><span class="match-chip match-family">brand+categorical equivalent</span></td>
+              <td>Mac 1 | 1.2g Hash Infused Pre-roll | MOONLiT |</td>
+              <td>MoonLit Hash Co.</td>
+              <td>Pre-Rolls</td>
+              <td>statewide</td>
+              <td>Black Market Canna - Poughkeepsie</td>
+              <td><a href="https://dutchie.com/embedded-menu/black-market-canna-poughkeepsie/product/mac-1-1-2g-hash-infused-pre-roll-moonlit" target="_blank" rel="noopener noreferrer">Open listing</a></td>
+            </tr>
+            
+            <tr class="market-row match-family">
+              <td>$22.60</td>
+              <td><span class="match-chip match-family">brand+categorical equivalent</span></td>
+              <td>Moonlit Hash Co | Mac 1 | 1.2g | Hash Infused Pre-Roll</td>
+              <td>MoonLit Hash Co.</td>
+              <td>Pre-Rolls</td>
+              <td>statewide</td>
+              <td>Northern Lights - Canton</td>
+              <td><a href="https://dutchie.com/embedded-menu/northern-lights-dispensary/product/moonlit-hash-co-mac-1-1-2g-hash-infused-pre-roll" target="_blank" rel="noopener noreferrer">Open listing</a></td>
+            </tr>
+            
+            <tr class="market-row match-cultivar">
+              <td>$23.00</td>
+              <td><span class="match-chip match-cultivar">same-brand cultivar</span></td>
+              <td>MoonLit Hash Co. MAC 1 Infused Preroll</td>
+              <td>MoonLit Hash Co.</td>
+              <td>Pre-Rolls</td>
+              <td>statewide</td>
+              <td>The Flowery - East Village</td>
+              <td><a href="https://dutchie.com/embedded-menu/the-flowery-east-village/product/moonlit-hash-co-mac-1-infused-preroll" target="_blank" rel="noopener noreferrer">Open listing</a></td>
+            </tr>
+            
+            <tr class="market-row match-family">
+              <td>$24.86</td>
+              <td><span class="match-chip match-family">brand+categorical equivalent</span></td>
+              <td>MoonLit Hash | Infused Preroll | Hash Infused | MAC 1 | 1.2g | Hybrid | THC 46.99%</td>
+              <td>MoonLit Hash Co.</td>
+              <td>Pre-Rolls</td>
+              <td>statewide</td>
+              <td>Quality Control Dispensary</td>
+              <td><a href="https://dutchie.com/embedded-menu/case-management/product/moonlit-hash-infused-preroll-hash-infused-mac-1-1-2g-hybrid-thc-46-99" target="_blank" rel="noopener noreferrer">Open listing</a></td>
+            </tr>
+            
+            <tr class="market-row match-family">
+              <td>$24.86</td>
+              <td><span class="match-chip match-family">brand+categorical equivalent</span></td>
+              <td>Moonlit Hash Co. | MAC 1 | Dry Sift Hash Infused Pre-Roll Single</td>
+              <td>MoonLit Hash Co.</td>
+              <td>Pre-Rolls</td>
+              <td>statewide</td>
+              <td>The Daily Green</td>
+              <td><a href="https://dutchie.com/dispensary/the-daily-green/product/moonlit-hash-co-mac-1-dry-sift-hash-infused-pre-roll-single" target="_blank" rel="noopener noreferrer">Open listing</a></td>
+            </tr>
+            
+      </tbody>
+    </table>
+    
+    </section>
+  </div>
+
+  <script>
+    // Draggable proposed-price marker
+    function moneyText(value) {
+      if (value === null || value === undefined || isNaN(value)) return '-';
+      return '$' + value.toFixed(2);
+    }
+    function updateProposedMarker(marker, newPrice) {
+      var ladder = marker.closest('.pricing-ladder');
+      if (!ladder) return;
+      var domainMin = parseFloat(ladder.dataset.domainMin);
+      var domainMax = parseFloat(ladder.dataset.domainMax);
+      if (!isFinite(domainMin) || !isFinite(domainMax)) return;
+      var cost = parseFloat(ladder.dataset.cost);
+      var POST_TAX = 1.13;
+      var leftPercent = (newPrice - domainMin) / (domainMax - domainMin) * 100;
+      leftPercent = Math.max(0, Math.min(100, leftPercent));
+      marker.style.left = leftPercent.toFixed(2) + '%';
+      var gmText = '';
+      if (isFinite(cost) && cost > 0 && newPrice > 0) {
+        var gm = (1 - POST_TAX * cost / newPrice) * 100;
+        gmText = gm.toFixed(2) + '% GM';
+      } else {
+        gmText = 'GM unavailable';
+      }
+      marker.setAttribute('title', 'Proposed: ' + moneyText(newPrice) + ' (' + gmText + ')');
+      
+      // Update the head metric if it exists
+      var shell = ladder.closest('.pricing-ladder-shell');
+      if (shell) {
+        var head = shell.querySelector('.pricing-ladder-head .metric');
+        if (head) {
+          var parts = head.textContent.split('→');
+          if (parts.length >= 2) {
+            head.innerHTML = parts[0] + '→ ' + moneyText(newPrice) + ' <span class="metric-detail">(' + gmText + ')</span>';
+          }
+        }
+      }
+    }
+    
+    document.querySelectorAll('.ladder-marker.proposed').forEach(function(marker) {
+      var ladder = marker.closest('.pricing-ladder');
+      if (!ladder) return;
+      
+      var isDragging = false;
+      var domainMin = parseFloat(ladder.dataset.domainMin);
+      var domainMax = parseFloat(ladder.dataset.domainMax);
+      
+      marker.style.cursor = 'ew-resize';
+      
+      marker.addEventListener('pointerdown', function(e) {
+        isDragging = true;
+        marker.setPointerCapture(e.pointerId);
+        e.preventDefault();
+      });
+      
+      marker.addEventListener('pointermove', function(e) {
+        if (!isDragging) return;
+        var rect = ladder.getBoundingClientRect();
+        var x = e.clientX - rect.left;
+        var leftPercent = (x / rect.width) * 100;
+        var newPrice = domainMin + (domainMax - domainMin) * (leftPercent / 100);
+        newPrice = Math.round(newPrice * 2) / 2; // Snap to half dollar
+        updateProposedMarker(marker, newPrice);
+      });
+      
+      marker.addEventListener('pointerup', function(e) {
+        isDragging = false;
+        marker.releasePointerCapture(e.pointerId);
+      });
+    });
+  </script>
+
+</body>
+</html>

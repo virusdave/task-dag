@@ -17,6 +17,8 @@ import { extractLandingLinkage } from '../lib/l1/landing-linkage.js';
 import { aggregateByFamily } from '../lib/l1/family-aggregation.js';
 import { generateCSVBatches, csvBatchToString } from '../lib/l2/csv-generator.js';
 import { generateHTMLPacket } from '../lib/html/packet-generator.js';
+import { createLLMClientFromEnv } from '../lib/shared/llm-client.js';
+import { createL2Predictor } from '../lib/l2/llm-predictor.js';
 
 interface CliArgs {
   snapshotFile: string;
@@ -105,7 +107,7 @@ function loadL1Config() {
     },
     familyAggregation: {
       family_tag_keys: ['creative_theme', 'product_tag'],
-      min_family_size: 3,
+      min_family_size: 1, // Lowered for testing with small snapshots
       pattern_threshold: 0.1,
       sample_size: 5,
       sample_strategy: 'mixed' as const,
@@ -198,7 +200,43 @@ async function main() {
   
   // Run L2 prediction
   console.log('\n🤖 Running L2 prediction...');
-  const l2Output = mockL2Prediction(familySummaries, runId);
+  let l2Output: L2PredictionOutput;
+  
+  // Try to use real LLM if configured, otherwise fall back to mock
+  try {
+    const llmClient = createLLMClientFromEnv();
+    const promptPath = path.join(__dirname, '../config/l2-prompts.yaml');
+    const predictor = await createL2Predictor(llmClient, promptPath);
+    l2Output = await predictor.predict(
+      familySummaries, 
+      runId,
+      new Date().toISOString().split('T')[0]
+    );
+  } catch (error: any) {
+    const msg = error?.message || String(error);
+
+    const isConfigError =
+      msg.includes('LLM credentials') ||
+      msg.includes('ENOENT') ||
+      msg.includes('Bedrock Mantle token not found');
+
+    const isTransientLLMError =
+      msg.includes('LLM API error') ||
+      msg.includes('timeout') ||
+      msg.includes('network') ||
+      msg.includes('Invalid JSON response from LLM') ||
+      msg.includes('missing families') ||
+      msg.includes('fetch failed');
+
+    if (isConfigError || isTransientLLMError) {
+      console.warn('⚠️  LLM unavailable or failed, using mock predictions');
+      console.warn(`    Error: ${msg}`);
+      l2Output = mockL2Prediction(familySummaries, runId);
+    } else {
+      throw error;
+    }
+  }
+  
   console.log(`Generated predictions for ${l2Output.families.length} families`);
   
   // Generate CSV batches

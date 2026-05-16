@@ -20,6 +20,8 @@ import { generateRunId } from '../lib/shared/utils.js';
 import { collectTrialOutcomes } from '../lib/l3/outcome-collector.js';
 import { evaluatePredictions, evaluatePatternEffectiveness } from '../lib/l3/prediction-evaluator.js';
 import { generateUpdateProposals, formatProposalsForReview } from '../lib/l3/prompt-updater.js';
+import { createLLMClientFromEnv } from '../lib/shared/llm-client.js';
+import { createL3Analyzer } from '../lib/l3/llm-analyzer.js';
 
 interface L3Options {
   l2RunIds: string[];
@@ -138,24 +140,51 @@ async function main() {
   console.log(`  Continue: ${effective.length}`);
   console.log(`  Retire: ${ineffective.length}`);
   
-  // Generate update proposals
-  console.log('\n💡 Generating update proposals...');
-  const proposals = generateUpdateProposals(predictionAccuracy, patternEffectiveness);
-  console.log(`Generated ${proposals.length} proposals`);
+  // Use LLM for deep analysis and proposal generation
+  console.log('\n🤖 Running LLM-based meta-analysis...');
+  let l3Output: L3EvaluationOutput;
   
-  // Build L3 output
-  const l3Output: L3EvaluationOutput = {
-    run_id: evaluationId,
-    evaluation_date: new Date().toISOString().split('T')[0],
-    l2_run_ids_evaluated: options.l2RunIds,
-    prediction_accuracy: predictionAccuracy,
-    pattern_effectiveness: patternEffectiveness,
-    trial_outcomes: trialOutcomes,
-    proposed_updates: proposals,
-    governance_status: 'pending_review',
-    generated_at: new Date().toISOString(),
-    l3_prompt_version: '1.0.0',
-  };
+  try {
+    const llmClient = createLLMClientFromEnv();
+    const analyzer = createL3Analyzer(llmClient);
+    
+    const predictionAccuracyArray = [{
+      l2_run_id: options.l2RunIds.join(','),
+      total_families: allPredictions.length,
+      high_risk_correct: 0,
+      high_risk_total: 0,
+      medium_risk_correct: 0,
+      medium_risk_total: 0,
+      low_risk_correct: 0,
+      low_risk_total: 0,
+      overall_accuracy: predictionAccuracy.precision,
+    }];
+    
+    l3Output = await analyzer.analyze(l2Outputs, trialOutcomes, predictionAccuracyArray);
+  } catch (error: any) {
+    if (error.message?.includes('Missing required environment variables')) {
+      console.warn('⚠️  LLM not configured, using deterministic evaluation only');
+      
+      // Fallback to deterministic analysis
+      const proposals = generateUpdateProposals(predictionAccuracy, patternEffectiveness);
+      l3Output = {
+        evaluation_id: evaluationId,
+        l2_runs_analyzed: options.l2RunIds,
+        trials_analyzed: trialOutcomes.length,
+        prediction_accuracy: predictionAccuracyArray[0],
+        trial_insights: [],
+        prompt_updates: proposals,
+        rule_updates: [],
+        generated_at: new Date().toISOString(),
+        requires_human_approval: true,
+      };
+    } else {
+      throw error;
+    }
+  }
+  
+  console.log(`Generated ${l3Output.prompt_updates.length} prompt updates`);
+  console.log(`Generated ${l3Output.rule_updates.length} rule updates`);
   
   // Write outputs
   console.log('\n💾 Writing outputs...');
@@ -166,7 +195,7 @@ async function main() {
   console.log(`  JSON: ${jsonPath}`);
   
   const proposalsPath = path.join(options.outputDir, `${evaluationId}-proposals.md`);
-  const proposalsMarkdown = formatProposalsForReview(proposals);
+  const proposalsMarkdown = formatProposalsForReview(l3Output.prompt_updates);
   await fs.writeFile(proposalsPath, proposalsMarkdown);
   console.log(`  Proposals: ${proposalsPath}`);
   

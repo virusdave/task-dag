@@ -52,7 +52,7 @@ function generateTrialGroupsCSV(l2Output: L2PredictionOutput): CSVBatch {
           'Ad group': trial.trial_group_name,
           'Ad group status': 'Enabled',
           'Default max. CPC': '1.00',
-          'Campaign daily budget': trial.trial_budget_usd.toFixed(2),
+          'Campaign daily budget': (trial.trial_budget_usd || 0.01).toFixed(2),
         },
         source_trial_id: trial.trial_id,
       });
@@ -230,7 +230,8 @@ function generateTrialAdsCSV(l2Output: L2PredictionOutput): CSVBatch {
   for (const family of l2Output.families) {
     for (const trial of family.trial_plans) {
       // Add control ads
-      for (const control of trial.control_ads) {
+      const controlAds = trial.control_ads || trial.controls || [];
+      for (const control of controlAds) {
         if (control.creative) {
           rows.push(createTrialAdRow(
             rowNumber++,
@@ -245,16 +246,21 @@ function generateTrialAdsCSV(l2Output: L2PredictionOutput): CSVBatch {
       }
       
       // Add variant ads
-      for (const variant of trial.variant_creatives) {
-        rows.push(createTrialAdRow(
-          rowNumber++,
-          trial,
-          variant.headlines,
-          variant.descriptions,
-          variant.final_url,
-          variant.variant_label,
-          false
-        ));
+      const variantCreatives = trial.variant_creatives || trial.variants || trial.variant_ads || [];
+      for (const variant of variantCreatives) {
+        try {
+          rows.push(createTrialAdRow(
+            rowNumber++,
+            trial,
+            variant.headlines || [],
+            variant.descriptions || [],
+            variant.final_url || '',
+            variant.variant_label || 'trial',
+            false
+          ));
+        } catch (error) {
+          console.warn(`Skipping malformed variant in trial ${trial.trial_group_name}:`, error);
+        }
       }
     }
   }

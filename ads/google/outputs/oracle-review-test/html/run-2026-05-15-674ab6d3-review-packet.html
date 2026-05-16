@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Google Ads Content Optimization – example-snapshot.jsonl</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; line-height: 1.6; color: #333; background: #f5f5f5; padding: 20px; }
+    .container { max-width: 1200px; margin: 0 auto; background: white; padding: 40px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+    h1 { font-size: 2em; margin-bottom: 10px; color: #1a1a1a; }
+    h2 { font-size: 1.5em; margin: 30px 0 15px; padding-bottom: 10px; border-bottom: 2px solid #4CAF50; color: #2c3e50; }
+    h3 { font-size: 1.2em; margin: 20px 0 10px; color: #34495e; }
+    .metadata { color: #666; margin-bottom: 20px; font-size: 0.9em; }
+    .exec-summary { background: #e8f5e9; padding: 20px; border-radius: 8px; margin: 20px 0; }
+    .metric { display: inline-block; margin: 10px 20px 10px 0; }
+    .metric-value { font-size: 2em; font-weight: bold; color: #4CAF50; display: block; }
+    .metric-label { font-size: 0.9em; color: #666; }
+    .checklist { list-style: none; margin: 15px 0; }
+    .checklist li:before { content: "✓ "; color: #4CAF50; font-weight: bold; }
+    table { width: 100%; border-collapse: collapse; margin: 15px 0; }
+    th, td { padding: 12px; text-align: left; border-bottom: 1px solid #ddd; }
+    th { background: #f8f9fa; font-weight: 600; color: #495057; }
+    .risk-high { color: #d32f2f; font-weight: bold; }
+    .risk-medium { color: #f57c00; font-weight: bold; }
+    .risk-low { color: #388e3c; font-weight: bold; }
+    .trial { background: #fff3e0; padding: 15px; border-radius: 5px; margin: 15px 0; border-left: 4px solid #ff9800; }
+    .action { background: #f5f5f5; padding: 10px; margin: 10px 0; border-radius: 4px; }
+    .csv-ref { font-family: monospace; background: #263238; color: #aed581; padding: 2px 6px; border-radius: 3px; font-size: 0.9em; }
+    .warning { background: #fff3cd; border-left: 4px solid #ffc107; padding: 15px; margin: 15px 0; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Google Ads Content Optimization – example-snapshot.jsonl</h1>
+    <div class="metadata">
+      Run ID: run-2026-05-15-674ab6d3 | Snapshot: example-snapshot.jsonl | Generated: 5/15/2026, 11:12:46 AM
+    </div>
+    
+    <div class="exec-summary">
+      <h2>Executive Summary</h2>
+      <div>
+        <div class="metric">
+          <span class="metric-value">0</span>
+          <span class="metric-label">Campaigns</span>
+        </div>
+        <div class="metric">
+          <span class="metric-value">1</span>
+          <span class="metric-label">High Risk Families</span>
+        </div>
+        <div class="metric">
+          <span class="metric-value">0</span>
+          <span class="metric-label">Repairs</span>
+        </div>
+        <div class="metric">
+          <span class="metric-value">0</span>
+          <span class="metric-label">Replacements</span>
+        </div>
+        <div class="metric">
+          <span class="metric-value">2</span>
+          <span class="metric-label">Trial Groups</span>
+        </div>
+      </div>
+      <h3>What to Do</h3>
+      <ul class="checklist">
+        <li>Skim the summary tables below</li><li>Review per-campaign recommendations</li><li>If acceptable, import CSVs 001→005 in Ads Editor sequentially</li><li>Monitor trial groups with labels FB_POLICY_PROBE_*</li>
+      </ul>
+    </div>
+    
+    <h2>Global Overview</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Family</th>
+          <th>Risk</th>
+          <th>Repairs</th>
+          <th>Replacements</th>
+          <th>Trials</th>
+        </tr>
+      </thead>
+      <tbody>
+        
+          <tr>
+            <td><a href="#family-0">123-456-7890/brand/flower</a></td>
+            <td class="risk-medium">MEDIUM</td>
+            <td>0</td>
+            <td>0</td>
+            <td>1</td>
+          </tr>
+        
+          <tr>
+            <td><a href="#family-1">123-456-7890/promo/edibles</a></td>
+            <td class="risk-low">LOW</td>
+            <td>0</td>
+            <td>0</td>
+            <td>0</td>
+          </tr>
+        
+          <tr>
+            <td><a href="#family-2">123-456-7890/local/flower</a></td>
+            <td class="risk-low">LOW</td>
+            <td>0</td>
+            <td>0</td>
+            <td>0</td>
+          </tr>
+        
+          <tr>
+            <td><a href="#family-3">123-456-7890/medical/flower</a></td>
+            <td class="risk-high">HIGH</td>
+            <td>0</td>
+            <td>0</td>
+            <td>1</td>
+          </tr>
+        
+      </tbody>
+    </table>
+    
+    
+      <div id="family-0">
+        <h2>123-456-7890/brand/flower</h2>
+        <p><strong>Risk Level:</strong> <span class="risk-medium">MEDIUM</span></p>
+        <p><strong>Main Issues:</strong> moderate</p>
+        
+        
+        
+        
+        
+        
+        
+        
+          <div class="trial">
+            <h3>brand-flower-trial-001</h3>
+            <p><strong>Hypothesis:</strong> Using 'Locally Grown' alongside 'Cannabis Flower' will not trigger further limitations compared to simply stating 'Cannabis Flower'.</p>
+            <p><strong>Budget:</strong> $undefined/day | <strong>Run Time:</strong> 7 days</p>
+            <p><strong>Policy Question:</strong> </p>
+            <p><strong>CSV Refs:</strong> <span class="csv-ref">001:?</span> <span class="csv-ref">005:?</span></p>
+          </div>
+        
+      </div>
+    
+      <div id="family-1">
+        <h2>123-456-7890/promo/edibles</h2>
+        <p><strong>Risk Level:</strong> <span class="risk-low">LOW</span></p>
+        <p><strong>Main Issues:</strong> low</p>
+        
+        
+        
+        
+        
+        
+        
+        
+      </div>
+    
+      <div id="family-2">
+        <h2>123-456-7890/local/flower</h2>
+        <p><strong>Risk Level:</strong> <span class="risk-low">LOW</span></p>
+        <p><strong>Main Issues:</strong> low</p>
+        
+        
+        
+        
+        
+        
+        
+        
+      </div>
+    
+      <div id="family-3">
+        <h2>123-456-7890/medical/flower</h2>
+        <p><strong>Risk Level:</strong> <span class="risk-high">HIGH</span></p>
+        <p><strong>Main Issues:</strong> critical, moderate</p>
+        
+        
+        
+        
+        
+        
+        
+        
+          <div class="trial">
+            <h3>medical-flower-trial-001</h3>
+            <p><strong>Hypothesis:</strong> Using the term 'Wellness' instead of explicit medical claims will allow the ad to serve without triggering policy violations.</p>
+            <p><strong>Budget:</strong> $undefined/day | <strong>Run Time:</strong> 7 days</p>
+            <p><strong>Policy Question:</strong> </p>
+            <p><strong>CSV Refs:</strong> <span class="csv-ref">001:?</span> <span class="csv-ref">005:?</span></p>
+          </div>
+        
+      </div>
+    
+    
+    <h2>Issue Taxonomy</h2>
+    <h3>Risk Definitions</h3>
+    <ul>
+      <li><strong>HIGH:</strong> High probability of limitation/disapproval based on observed patterns</li><li><strong>MEDIUM:</strong> Moderate risk, borderline patterns detected</li><li><strong>LOW:</strong> Low risk, compliant patterns</li>
+    </ul>
+    <p><strong>Constraints:</strong> All recommendations maintain white-/grey-hat alignment: no deception, policy evasion, or classifier-only tricks.</p>
+    
+  </div>
+</body>
+</html>

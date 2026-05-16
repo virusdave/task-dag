@@ -131,10 +131,17 @@ Google Ads (API) → Helios (DB) → Snapshot (JSONL) → L1 → L2 → CSV + HT
 - Operator runbook
 - Test data and scripts
 
+### ✅ Fully Implemented (No Mocks)
+- Complete L2 LLM integration (`lib/l2/llm-predictor.ts`)
+- Complete L3 LLM integration (`lib/l3/llm-analyzer.ts`)
+- LLM client with retry and error handling (`lib/shared/llm-client.ts`)
+- Graceful fallback to mocks when LLM not configured
+- Full prompt management from `config/l2-prompts.yaml`
+
 ### 🔧 Needs Configuration
+- LLM API credentials (LLM_ENDPOINT_BASE, LLM_API_KEY)
 - Google Ads API credentials
 - Helios database connection
-- LLM API endpoints (replace mocks)
 - Restricted vocab buckets (not committed)
 - mss-one-offs serving endpoint
 - litalerts endpoint

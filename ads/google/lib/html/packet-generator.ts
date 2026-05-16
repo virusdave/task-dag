@@ -157,16 +157,16 @@ function buildCampaignSections(l2Output: L2PredictionOutput): CampaignSection[] 
         issue_codes: a.issue_codes,
         csv_ref: `004:${a.csv_row_number || '?'}`,
       })),
-    trial_plans: family.trial_plans.map(trial => ({
+    trial_plans: (family.trial_plans || []).map(trial => ({
       trial_name: trial.trial_group_name,
       hypothesis: trial.hypothesis,
-      controls: trial.control_ads.map(c => ({
+      controls: (trial.control_ads || trial.controls || []).map((c: any) => ({
         label: c.label,
         snippet: c.creative ? createAdSnippet(c.creative.headlines, c.creative.descriptions) : '',
       })),
-      variants: trial.variant_creatives.map(v => ({
-        label: v.variant_label,
-        snippet: createAdSnippet(v.headlines, v.descriptions),
+      variants: (trial.variant_creatives || trial.variants || []).map((v: any) => ({
+        label: v.variant_label || v.label || 'variant',
+        snippet: createAdSnippet(v.headlines || [], v.descriptions || []),
       })),
       budget: trial.trial_budget_usd,
       expected_run_time: `${trial.success_criteria.time_window_days || 7} days`,

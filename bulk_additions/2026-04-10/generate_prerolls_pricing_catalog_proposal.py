@@ -559,7 +559,7 @@ def export_sort_key(row: dict) -> tuple[str, str, int]:
     return (row["brand"].lower(), row["productName"].lower(), int(row["productId"]))
 
 
-LITALERTS_BEARER_TOKEN_PATH = Path("/Users/amp-local/.secret/litalerts/bearer-token")
+LITALERTS_BEARER_TOKEN_PATH = Path("/home/amp-local/.secret/litalerts/bearer-token")
 
 
 @functools.lru_cache(maxsize=1)
