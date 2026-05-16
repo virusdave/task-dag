@@ -236,104 +236,119 @@ def build_importable_csvs(trials: list[dict], snapshot: list[dict]) -> tuple[dic
 
     total_budget = max(1.00, round(sum(float(t.get("budget") or 0.01) for t, _ in resolved_trials) + 0.50, 2))
 
-    # 001: Campaign creation
-    # Columns chosen are the standard set Google Ads Editor recognises for a
-    # Search campaign create. Locations/Languages/Bid strategy etc. are
-    # provided as conservative defaults; the import packet README tells the
-    # human to review before posting.
-    campaign_rows = [
+    # All rows live in ONE combined CSV with mixed entity types. Ads Editor
+    # distinguishes campaign vs ad-group vs keyword vs ad rows by which
+    # cells are populated -- empty cells mean "no change for this column on
+    # this row". Importing four separate files is what made Ads Editor say
+    # "nothing to post" before: each later file referenced a campaign that
+    # was only a pending proposal, not yet posted.
+    #
+    # Column names + values follow the Google Ads Editor docs exactly:
+    #   https://support.google.com/google-ads/editor/answer/57747
+    # Notably:
+    #   - Networks must be one of {Search, Google Search, Search Partners,
+    #     Display, Select}, semicolon-separated; "Google search" (lower
+    #     case) is silently ignored.
+    #   - Languages must be ISO codes like 'en', semicolon-separated.
+    #   - Locations go on their OWN row (each Location ID = one row).
+    #     United States = 2840.
+    #   - Phrase-match keywords must be wrapped in "double quotes" and
+    #     use `Criterion type = Phrase`. (Broad would be unquoted, Exact
+    #     would be in [brackets].)
+
+    headline_cols = [f"Headline {i + 1}" for i in range(HEADLINE_MAX)]
+    description_cols = [f"Description {i + 1}" for i in range(DESCRIPTION_MAX)]
+
+    columns = [
+        "Campaign",
+        "Campaign type",
+        "Campaign status",
+        "Budget",
+        "Budget type",
+        "Networks",
+        "Languages",
+        "Bid strategy type",
+        "Start date",
+        "Location ID",
+        "Ad group",
+        "Ad group status",
+        "Max CPC",
+        "Keyword",
+        "Criterion type",
+        "Status",
+        "Ad type",
+        "Final URL",
+        "Path 1",
+        "Path 2",
+    ] + headline_cols + description_cols
+
+    rows: list[dict] = []
+
+    # --- Campaign row (one) ---
+    rows.append(
         {
             "Campaign": campaign_name,
             "Campaign type": "Search",
             "Campaign status": "Enabled",
-            "Campaign daily budget": f"{total_budget:.2f}",
-            "Budget type": "Standard",
-            "Networks": "Google search",
-            "Languages": "English",
-            "Locations": "United States",
+            "Budget": f"{total_budget:.2f}",
+            "Budget type": "Daily",
+            "Networks": "Search",  # includes both Google Search and Search Partners
+            "Languages": "en",
             "Bid strategy type": "Manual CPC",
-            "Default max. CPC": "1.00",
             "Start date": today,
         }
-    ]
-    campaign_csv = _csv(
-        campaign_rows,
-        [
-            "Campaign",
-            "Campaign type",
-            "Campaign status",
-            "Campaign daily budget",
-            "Budget type",
-            "Networks",
-            "Languages",
-            "Locations",
-            "Bid strategy type",
-            "Default max. CPC",
-            "Start date",
-        ],
     )
 
-    # 002: Ad groups
-    # Note: 'Labels' deliberately omitted -- the L2 'policy_class' field
-    # describes what hypothesis we're testing and would leak strategy.
-    ad_group_rows = []
+    # --- Location targeting row (US = 2840) on its own row ---
+    rows.append(
+        {
+            "Campaign": campaign_name,
+            "Location ID": "2840",
+        }
+    )
+
+    # --- Ad-group rows ---
     for t, _src in resolved_trials:
-        ad_group_rows.append(
+        rows.append(
             {
                 "Campaign": campaign_name,
                 "Ad group": t["name"],
                 "Ad group status": "Enabled",
-                "Ad group type": "Standard",
-                "Default max. CPC": "1.00",
+                "Max CPC": "1.00",
             }
         )
-    ad_group_csv = _csv(
-        ad_group_rows,
-        ["Campaign", "Ad group", "Ad group status", "Ad group type", "Default max. CPC"],
-    )
 
-    # 003: Keywords
-    keyword_rows = []
+    # --- Keyword rows (phrase-match, wrapped in quotes) ---
+    keyword_count = 0
     for t, _src in resolved_trials:
         base = _source_ad_group_name(t["name"])
-        # Reasonable broad+phrase coverage so the ad actually has a chance to
-        # serve and trigger policy verdict. Human should curate before import.
-        seeds = {base, base.split(" | ")[0], base.split(" - ")[0]}
-        for kw in sorted({s for s in seeds if s}):
-            keyword_rows.append(
+        seeds = sorted({s for s in {base, base.split(" | ")[0], base.split(" - ")[0]} if s})
+        for kw in seeds:
+            rows.append(
                 {
                     "Campaign": campaign_name,
                     "Ad group": t["name"],
-                    "Keyword": kw,
-                    "Match type": "Phrase",
-                    "Keyword status": "Enabled",
+                    "Keyword": f'"{kw}"',  # phrase-match formatting
+                    "Criterion type": "Phrase",
+                    "Status": "Enabled",
                     "Max CPC": "1.00",
                 }
             )
-    keyword_csv = _csv(
-        keyword_rows,
-        ["Campaign", "Ad group", "Keyword", "Match type", "Keyword status", "Max CPC"],
-    )
+            keyword_count += 1
 
-    # 004: Ads (RSA) -- one control + variant ads per trial, all enabled.
-    ad_rows = []
-    headline_cols = [f"Headline {i + 1}" for i in range(HEADLINE_MAX)]
-    description_cols = [f"Description {i + 1}" for i in range(DESCRIPTION_MAX)]
-    path_cols = ["Path 1", "Path 2"]
-
+    # --- Ad rows (RSA: 1 control + N variants per trial) ---
     def _ad_row(t, headlines, descriptions, final_url, paths):
-        # NOTE: no 'Label' column -- it would reveal which ads are
-        # 'CONTROL' vs 'VARIANT' and what we are A/B testing.
         # Ads Editor rejects duplicate headlines or descriptions within an
         # RSA ("This headline is the same as another"); dedupe before
         # writing the row so the human doesn't have to fix it by hand.
+        # No 'Label' column -- it would reveal CONTROL vs VARIANT structure.
         headlines = _dedupe_headlines(headlines)[:HEADLINE_MAX]
         descriptions = _dedupe_headlines(descriptions)[:DESCRIPTION_MAX]
         row = {
             "Campaign": campaign_name,
             "Ad group": t["name"],
+            "Status": "Enabled",
             "Ad type": "Responsive search ad",
-            "Ad status": "Enabled",
             "Final URL": final_url or "",
         }
         for i, h in enumerate(headlines):
@@ -345,6 +360,7 @@ def build_importable_csvs(trials: list[dict], snapshot: list[dict]) -> tuple[dic
         return row
 
     needs_url_fix: list[str] = []  # trial names whose source had no final_url
+    ad_count = 0
     for t, src in resolved_trials:
         src_h = src.get("headlines") or []
         src_d = src.get("descriptions") or []
@@ -353,11 +369,8 @@ def build_importable_csvs(trials: list[dict], snapshot: list[dict]) -> tuple[dic
             src_url = FALLBACK_FINAL_URL
             needs_url_fix.append(t["name"])
         src_paths = src.get("paths") or []
-        # Control: clone source verbatim
-        ad_rows.append(_ad_row(t, src_h, src_d, src_url, src_paths))
-        # Variants: one per L2 variant label, with mechanical headline swap.
-        # The label itself only influences the swapped-in headline text;
-        # it is not stored in any CSV column.
+        rows.append(_ad_row(t, src_h, src_d, src_url, src_paths))
+        ad_count += 1
         variants = t.get("variants") or []
         for v in variants:
             if isinstance(v, str):
@@ -368,13 +381,13 @@ def build_importable_csvs(trials: list[dict], snapshot: list[dict]) -> tuple[dic
                 label = "variant"
             clean_label = _clean_variant_label(label)
             v_h = _variant_headlines(src_h, clean_label)
-            ad_rows.append(_ad_row(t, v_h, src_d, src_url, src_paths))
+            rows.append(_ad_row(t, v_h, src_d, src_url, src_paths))
+            ad_count += 1
 
-    ads_csv = _csv(
-        ad_rows,
-        ["Campaign", "Ad group", "Ad type", "Ad status", "Final URL"]
-        + headline_cols + description_cols + path_cols,
-    )
+    combined_csv = _csv(rows, columns)
+    campaign_rows = [r for r in rows if r.get("Campaign type")]
+    ad_group_rows = [r for r in rows if r.get("Ad group status")]
+    keyword_rows = [r for r in rows if r.get("Criterion type")]
 
     readme = f"""# Trials -- import bundle ({today})
 
@@ -385,14 +398,26 @@ themselves are what get uploaded to Google. Internal-strategy language
 (e.g. policy probing, hypotheses, "control vs variant") deliberately
 does NOT appear in any campaign/ad-group/ad/keyword field.
 
-## Import order (Google Ads Editor)
+## Import (Google Ads Editor)
 
-Open each CSV via File -> Import -> From file and accept in order:
+In Ads Editor: **Account -> Import -> From file...** -> select
+`001-import.csv`. Review the proposed changes (Editor will preview the
+campaign, ad groups, keywords, ads, and location targeting). Click
+"Keep proposed changes", then **Post** to push to Google.
 
-1. 001-create-campaign.csv      ({len(campaign_rows)} campaign)
-2. 002-create-ad-groups.csv     ({len(ad_group_rows)} ad group(s))
-3. 003-create-keywords.csv      ({len(keyword_rows)} keyword(s))
-4. 004-create-ads.csv           ({len(ad_rows)} RSA(s) -- all Enabled)
+The file is ONE CSV containing campaign / location-target / ad-group /
+keyword / ad rows mixed together. Ads Editor distinguishes them by
+which columns are populated. Importing them as separate files (as the
+previous bundle did) leaves later imports referencing a campaign that
+is still only a pending proposal, which is why nothing posted.
+
+Counts:
+
+- {len(campaign_rows)} campaign
+- 1 location target (US, Location ID 2840)
+- {len(ad_group_rows)} ad group(s)
+- {keyword_count} keyword(s) (phrase-match)
+- {ad_count} RSA(s) (all Enabled)
 
 ## What this does
 
@@ -408,13 +433,16 @@ ads shortly after "Post" in Ads Editor.
 
 ## Review before posting
 
-Ads Editor will surface most validation errors before posting, but the
-following defaults are conservative and you should usually narrow them:
+Defaults are conservative; you should usually narrow them in Editor
+before clicking Post:
 
-- Locations: currently "United States" -- narrow to NY/your delivery zones.
-- Languages: English.
-- Bid strategy: Manual CPC at $1.00. Switch to your usual strategy if you
-  want this to actually compete in auction rather than only probe policy.
+- Location target: currently United States (ID 2840). Narrow to NY or
+  your delivery zones in the campaign's Locations panel.
+- Languages: 'en'.
+- Networks: 'Search' (Google Search + Search Partners).
+- Bid strategy: Manual CPC at $1.00. Switch to your usual strategy if
+  you want this to actually compete in auction rather than only sit at
+  the bid floor.
 - Final URL: copied from the source ad when available. When the source
   ad had an empty final_url (typical for disapproved ads) we fall back
   to {FALLBACK_FINAL_URL} so the rows validate. You almost certainly
@@ -430,17 +458,14 @@ following defaults are conservative and you should usually narrow them:
 """
 
     files = {
-        "001-create-campaign.csv": campaign_csv,
-        "002-create-ad-groups.csv": ad_group_csv,
-        "003-create-keywords.csv": keyword_csv,
-        "004-create-ads.csv": ads_csv,
+        "001-import.csv": combined_csv,
         "README.md": readme,
     }
     stats = {
         "campaign_count": len(campaign_rows),
         "ad_group_count": len(ad_group_rows),
-        "keyword_count": len(keyword_rows),
-        "ad_count": len(ad_rows),
+        "keyword_count": keyword_count,
+        "ad_count": ad_count,
         "resolved_trials": len(resolved_trials),
         "skipped": skipped,
         "needs_url_fix": needs_url_fix,
