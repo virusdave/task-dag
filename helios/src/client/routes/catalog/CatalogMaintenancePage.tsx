@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 
 import {
   CatalogMaintenanceListResponseSchema,
@@ -6,7 +7,6 @@ import {
   type CatalogMaintenanceListResponse,
   type CatalogMaintenanceVariant,
 } from '../../../shared/contracts/index.js'
-import { loadJson } from '../../app/fetchJson.js'
 import { buildAppPath } from '../../app/paths.js'
 import { Pill } from '../../components/Pill.js'
 import { useRegisterCatalogSidebarSubtree } from './catalogSidebarSubtree.js'
@@ -31,24 +31,32 @@ const INITIAL_STATE: ListsState = {
 
 export function CatalogMaintenancePage() {
   useRegisterCatalogSidebarSubtree()
+  const navigate = useNavigate()
   const [state, setState] = useState<ListsState>(INITIAL_STATE)
   const [busyGroupId, setBusyGroupId] = useState<number | null>(null)
   const [feedback, setFeedback] = useState<{ kind: 'ok' | 'err'; message: string } | null>(null)
 
-  const fetchLists = useCallback(async (forceRefresh: boolean) => {
-    setState((prev) => ({ ...prev, refreshing: true, error: null }))
-    try {
-      const search = forceRefresh ? '?refresh=1' : ''
-      const [missingGroup, missingVariant] = await Promise.all([
-        loadJson(`/api/catalog/maintenance/missing-group-images${search}`, CatalogMaintenanceListResponseSchema),
-        loadJson(`/api/catalog/maintenance/missing-variant-images${search}`, CatalogMaintenanceListResponseSchema),
-      ])
-      setState({ loading: false, refreshing: false, missingGroup, missingVariant, error: null })
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to load catalog maintenance survey.'
-      setState((prev) => ({ ...prev, loading: false, refreshing: false, error: message }))
-    }
-  }, [])
+  const fetchLists = useCallback(
+    async (forceRefresh: boolean) => {
+      setState((prev) => ({ ...prev, refreshing: true, error: null }))
+      try {
+        const search = forceRefresh ? '?refresh=1' : ''
+        const [missingGroup, missingVariant] = await Promise.all([
+          fetchMaintenanceList(`/api/catalog/maintenance/missing-group-images${search}`),
+          fetchMaintenanceList(`/api/catalog/maintenance/missing-variant-images${search}`),
+        ])
+        setState({ loading: false, refreshing: false, missingGroup, missingVariant, error: null })
+      } catch (error) {
+        if (error instanceof AuthRequiredError) {
+          navigate('/login')
+          return
+        }
+        const message = error instanceof Error ? error.message : 'Failed to load catalog maintenance survey.'
+        setState((prev) => ({ ...prev, loading: false, refreshing: false, error: message }))
+      }
+    },
+    [navigate],
+  )
 
   useEffect(() => {
     void fetchLists(false)
@@ -465,6 +473,29 @@ function formatRelativeTime(iso: string): string {
     return `${Math.floor(seconds / 3600)}h ago`
   }
   return `${Math.floor(seconds / 86_400)}d ago`
+}
+
+class AuthRequiredError extends Error {
+  constructor() {
+    super('Authentication required.')
+    this.name = 'AuthRequiredError'
+  }
+}
+
+async function fetchMaintenanceList(path: string): Promise<CatalogMaintenanceListResponse> {
+  const response = await fetch(buildAppPath(path), {
+    credentials: 'same-origin',
+    headers: { Accept: 'application/json' },
+  })
+  if (response.status === 401) {
+    throw new AuthRequiredError()
+  }
+  if (!response.ok) {
+    const errorPayload = await maybeReadErrorPayload(response)
+    throw new Error(errorPayload ?? `${response.status} ${response.statusText}`)
+  }
+  const payload = await response.json()
+  return CatalogMaintenanceListResponseSchema.parse(payload)
 }
 
 async function maybeReadErrorPayload(response: Response): Promise<string | null> {
