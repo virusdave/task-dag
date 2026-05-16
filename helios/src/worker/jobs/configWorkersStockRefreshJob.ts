@@ -486,8 +486,8 @@ async function persistSnapshotAndDiff(input: {
             $6, $7, $8,
             $9::timestamptz,
             case when $10 then $9::timestamptz else null end,
-            $11,
-            case when $10 then $11 else null end,
+            $11::bigint,
+            case when $10 then $11::bigint else null end,
             $9::timestamptz
           )
           on conflict (site_dealer_id, brand_id) do update
