@@ -307,12 +307,42 @@ def build_importable_csvs(trials: list[dict], snapshot: list[dict]) -> tuple[dic
         }
     )
 
+    # Google Ads enforces "max 3 enabled responsive search ads per ad
+    # group". To stay safely under that and to keep each probe clean
+    # (one variant per group makes the policy verdict unambiguous), we
+    # cap each generated ad group at 1 control + 1 variant = 2 RSAs,
+    # spreading additional variants across sequentially numbered
+    # '*-trial-NNN' ad groups. This matches the '*-trial-00N' naming
+    # convention from the original gads epic.
+    MAX_VARIANTS_PER_AD_GROUP = 1
+
+    def _expand_trials(trial_list):
+        """Yield (ad_group_name, source_ad, list_of_variants) tuples.
+        For each L2 trial, emit one ad group per variant (or one ad
+        group with no variants if there are none), each named with a
+        fresh sequential -trial-NNN suffix."""
+        for t, src in trial_list:
+            base = _source_ad_group_name(t["name"])
+            variants = t.get("variants") or []
+            if not variants:
+                yield (f"{base}-trial-001", src, [])
+                continue
+            # Chunk variants into groups of MAX_VARIANTS_PER_AD_GROUP
+            chunks = [
+                variants[i : i + MAX_VARIANTS_PER_AD_GROUP]
+                for i in range(0, len(variants), MAX_VARIANTS_PER_AD_GROUP)
+            ]
+            for idx, chunk in enumerate(chunks, start=1):
+                yield (f"{base}-trial-{idx:03d}", src, chunk)
+
+    expanded = list(_expand_trials(resolved_trials))
+
     # --- Ad-group rows ---
-    for t, _src in resolved_trials:
+    for ag_name, _src, _variants in expanded:
         rows.append(
             {
                 "Campaign": campaign_name,
-                "Ad group": t["name"],
+                "Ad group": ag_name,
                 "Ad group status": "Enabled",
                 "Max CPC": "1.00",
             }
@@ -320,14 +350,14 @@ def build_importable_csvs(trials: list[dict], snapshot: list[dict]) -> tuple[dic
 
     # --- Keyword rows (phrase-match, wrapped in quotes) ---
     keyword_count = 0
-    for t, _src in resolved_trials:
-        base = _source_ad_group_name(t["name"])
+    for ag_name, _src, _variants in expanded:
+        base = _source_ad_group_name(ag_name)
         seeds = sorted({s for s in {base, base.split(" | ")[0], base.split(" - ")[0]} if s})
         for kw in seeds:
             rows.append(
                 {
                     "Campaign": campaign_name,
-                    "Ad group": t["name"],
+                    "Ad group": ag_name,
                     "Keyword": f'"{kw}"',  # phrase-match formatting
                     "Criterion type": "Phrase",
                     "Status": "Enabled",
@@ -336,8 +366,8 @@ def build_importable_csvs(trials: list[dict], snapshot: list[dict]) -> tuple[dic
             )
             keyword_count += 1
 
-    # --- Ad rows (RSA: 1 control + N variants per trial) ---
-    def _ad_row(t, headlines, descriptions, final_url, paths):
+    # --- Ad rows (RSA: 1 control + up-to-MAX_VARIANTS_PER_AD_GROUP per group) ---
+    def _ad_row(ag_name, headlines, descriptions, final_url, paths):
         # Ads Editor rejects duplicate headlines or descriptions within an
         # RSA ("This headline is the same as another"); dedupe before
         # writing the row so the human doesn't have to fix it by hand.
@@ -346,7 +376,7 @@ def build_importable_csvs(trials: list[dict], snapshot: list[dict]) -> tuple[dic
         descriptions = _dedupe_headlines(descriptions)[:DESCRIPTION_MAX]
         row = {
             "Campaign": campaign_name,
-            "Ad group": t["name"],
+            "Ad group": ag_name,
             "Status": "Enabled",
             "Ad type": "Responsive search ad",
             "Final URL": final_url or "",
@@ -359,20 +389,21 @@ def build_importable_csvs(trials: list[dict], snapshot: list[dict]) -> tuple[dic
             row[f"Path {i + 1}"] = p
         return row
 
-    needs_url_fix: list[str] = []  # trial names whose source had no final_url
+    needs_url_fix_set: set[str] = set()  # base brand names with no source URL
     ad_count = 0
-    for t, src in resolved_trials:
+    for ag_name, src, variants_chunk in expanded:
         src_h = src.get("headlines") or []
         src_d = src.get("descriptions") or []
         src_url = src.get("final_url") or ""
         if not src_url:
             src_url = FALLBACK_FINAL_URL
-            needs_url_fix.append(t["name"])
+            needs_url_fix_set.add(_source_ad_group_name(ag_name))
         src_paths = src.get("paths") or []
-        rows.append(_ad_row(t, src_h, src_d, src_url, src_paths))
+        # Control: clone source verbatim
+        rows.append(_ad_row(ag_name, src_h, src_d, src_url, src_paths))
         ad_count += 1
-        variants = t.get("variants") or []
-        for v in variants:
+        # Variant(s) for this chunked ad group
+        for v in variants_chunk:
             if isinstance(v, str):
                 label = v
             elif isinstance(v, dict):
@@ -381,8 +412,9 @@ def build_importable_csvs(trials: list[dict], snapshot: list[dict]) -> tuple[dic
                 label = "variant"
             clean_label = _clean_variant_label(label)
             v_h = _variant_headlines(src_h, clean_label)
-            rows.append(_ad_row(t, v_h, src_d, src_url, src_paths))
+            rows.append(_ad_row(ag_name, v_h, src_d, src_url, src_paths))
             ad_count += 1
+    needs_url_fix: list[str] = sorted(needs_url_fix_set)
 
     combined_csv = _csv(rows, columns)
     campaign_rows = [r for r in rows if r.get("Campaign type")]
