@@ -52,7 +52,15 @@ DISCOUNT_PERCENT = 15.0
 FROM_DATE_ISO = "2026-05-16T00:00:00Z"
 PROMO_NAME = "1Off Brands 15% Off"
 PROMO_SHORT_NAME = "1OffBrands15%"
-PROMO_DESCRIPTION = "15% off all featured 1Off brands:"
+# Customer-facing. The brand list itself is appended by build_description()
+# from the live brand set (case-insensitive alphabetical) so it always
+# matches the actual selector.
+PROMO_DESCRIPTION_PREFIX = "15% off all featured 1Off brands:"
+
+
+def build_description(brands: list[dict]) -> str:
+    names = sorted([b["name"] for b in brands], key=str.lower)
+    return f"{PROMO_DESCRIPTION_PREFIX} " + ", ".join(names) + "."
 
 
 def collect_distinct_brands(order_id: int) -> list[dict]:
@@ -166,7 +174,7 @@ def main() -> int:
             "actionTypeId": 1,         # Percent discount
             "name": PROMO_NAME,
             "shortName": PROMO_SHORT_NAME,
-            "description": PROMO_DESCRIPTION,
+            "description": build_description(brands),
             "fromDate": FROM_DATE_ISO,
             "discountPercent": DISCOUNT_PERCENT,
             "discountAmounts": [{"buyValue": 0.01, "discountPercent": DISCOUNT_PERCENT}],
