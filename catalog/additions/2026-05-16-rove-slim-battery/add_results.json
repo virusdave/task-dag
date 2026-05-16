@@ -1,0 +1,32 @@
+{
+  "sourceUrl": "https://rovebrand.com/collections/batteries/products/rove-slim-battery",
+  "imageSourceUrl": "https://rovebrand.com/cdn/shop/products/gunbattery2.jpg?v=1674583607",
+  "imageBlobId": "d5e2c4b2-d311-4a86-a364-f4c42ee4faef",
+  "vendorMsrp": 22.0,
+  "listPrice": 18.37,
+  "otdPrice": 20.0,
+  "salesTaxRate": 0.08875,
+  "newGroup": {
+    "id": 333828,
+    "name": "Slim Battery",
+    "brand": "Rove",
+    "category": "Accessories",
+    "subcategory": "Batteries",
+    "description": "The Rove Slim Battery is a sleek 510-thread vape battery designed to pair with Rove cartridges and other standard 510 carts. It features a 350mAh capacity with three adjustable voltage settings so you",
+    "images": [
+      {
+        "id": "d5e2c4b2-d311-4a86-a364-f4c42ee4faef",
+        "url": "https://media-prime.sweedpos.com/store/prime/1778957296_d5e2c4b2-d311-4a86-a364-f4c42ee4faef.jpg"
+      }
+    ]
+  },
+  "newVariant": {
+    "id": "432710",
+    "tab": "Each",
+    "size": "Each",
+    "packOfSize": 1,
+    "isPacked": true,
+    "price": 18.37,
+    "displayInEcommerce": true
+  }
+}
