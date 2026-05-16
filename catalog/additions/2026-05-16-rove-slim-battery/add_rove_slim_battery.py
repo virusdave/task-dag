@@ -11,13 +11,11 @@ Background:
     image.
 
 Pricing:
-  - User asked for $20.00 OTD ("out the door", tax-inclusive).
-  - This is a non-cannabis accessory (Accessories / Batteries,
-    productClass Non-cannabis), so it is subject only to NYS+NYC
-    combined sales tax of 8.875%, not the 13% combined cannabis
-    excise.
-  - List price = round(20.00 / 1.08875, 2) = $18.37
-  - Sanity check: 18.37 * 1.08875 = $20.00 (within $0.005).
+  - User asked for $20.00 OTD ("out the door").
+  - At FB we use OTD pricing as the Sweed list price directly (the
+    sticker / Sweed-displayed price is what the customer pays at the
+    register), not a pre-tax computation. So variant price is set to
+    $20.00.
 
 Verified ids:
   - Rove brand id = 1981
@@ -55,7 +53,7 @@ EACH_SIZE_ID = 813
 
 GROUP_NAME = "Slim Battery"
 VARIANT_TAB = "Each"
-VARIANT_LIST_PRICE = 18.37  # $20.00 OTD at 8.875% combined NYS+NYC sales tax
+VARIANT_LIST_PRICE = 20.00  # OTD == Sweed list price at FB
 VARIANT_PACK_OF_SIZE = 1
 VARIANT_IS_PACKED = True
 VARIANT_DISPLAY_IN_ECOMMERCE = True
@@ -167,8 +165,6 @@ def main() -> int:
     }
     print("  3. store.product.add (productGroupId resolved at apply):")
     print(json.dumps(new_variant_params_template, indent=4))
-    otd = round(VARIANT_LIST_PRICE * 1.08875, 2)
-    print(f"\n  (List price ${VARIANT_LIST_PRICE} * 1.08875 sales tax = ${otd} OTD)")
 
     if not args.apply:
         print("\nDry run - pass --apply to upload image and write to Sweed.")
@@ -193,7 +189,7 @@ def main() -> int:
     print(f"  -> created group id {new_group_id}")
 
     new_variant_params = {**new_variant_params_template, "productGroupId": new_group_id}
-    print(f"Applying step 3 (create Each variant at ${VARIANT_LIST_PRICE} list / ${otd} OTD)...")
+    print(f"Applying step 3 (create Each variant at ${VARIANT_LIST_PRICE} OTD)...")
     new_variant_result = sweed.api_call("store.product.add", new_variant_params)
     new_variant_id = new_variant_result.get("id") if isinstance(new_variant_result, dict) else new_variant_result
     if isinstance(new_variant_id, dict):
@@ -218,9 +214,7 @@ def main() -> int:
                 "imageSourceUrl": PRODUCT_IMAGE_URL,
                 "imageBlobId": blob_id,
                 "vendorMsrp": 22.00,
-                "listPrice": VARIANT_LIST_PRICE,
-                "otdPrice": otd,
-                "salesTaxRate": 0.08875,
+                "otdPrice": VARIANT_LIST_PRICE,
                 "newGroup": summarize_group(new_group_after),
                 "newVariant": summarize_product(new_variant_after),
                 "newGroupParams": new_group_params,
