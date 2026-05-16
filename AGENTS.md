@@ -27,3 +27,21 @@ unpushed. Specifically:
 
 Never use `--no-verify` or other safety-bypassing flags to "make it work" on
 your own.
+
+## Always ship a public URL for deployable artifacts
+
+If a task involves producing an HTML page, report, dashboard, downloadable
+bundle, or any other artifact a human needs to look at, you MUST end with a
+working public URL the user can open immediately.
+
+- Deploy via `scripts/upload-to-mss <file> "<note>" <ttl>` (the
+  oauth-proxied `mss-one-offs` host). The TTL should usually be 86400
+  (24 h) unless the user says otherwise.
+- After every change to such an artifact — every fix, every regeneration —
+  redeploy and surface the new URL in your reply. Do not assume the
+  previous URL still reflects the current state.
+- Verify the URL is reachable (`curl -sSI` returns 2xx or 3xx) before
+  reporting it.
+- If you cannot produce a public URL (e.g. `mss-one-offs` is down,
+  permissions are wrong, the artifact requires extra infra), **LOUDLY**
+  say so and explain what's blocking, per the commit/push rule above.
