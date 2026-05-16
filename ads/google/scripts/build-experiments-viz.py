@@ -152,6 +152,50 @@ def _variant_headlines(source: list[str], variant_label: str) -> list[str]:
     return out
 
 
+def _dedupe_headlines(headlines: list[str]) -> list[str]:
+    """RSAs reject duplicate headlines (Ads Editor: 'This headline is the
+    same as another'). Comparison is case-insensitive after collapsing
+    whitespace. We try to nudge later duplicates so they differ from
+    earlier ones via cheap edits the user said work in practice:
+      1. replace ' - ' with ', '
+      2. swap trailing punctuation
+      3. append a soft separator (' ·')
+      4. as a last resort drop the duplicate (RSAs need 3-15 headlines)
+    Always keep the first occurrence; only modify duplicates."""
+    def norm(s: str) -> str:
+        return re.sub(r"\s+", " ", s).strip().lower()
+
+    seen: set[str] = set()
+    out: list[str] = []
+    for h in headlines:
+        candidate = h
+        n = norm(candidate)
+        if n not in seen:
+            seen.add(n)
+            out.append(candidate)
+            continue
+        # Try mechanical edits in order.
+        edits = [
+            candidate.replace(" - ", ", "),
+            candidate.replace(" – ", ", "),
+            candidate.rstrip(".!?") + ".",
+            candidate.rstrip(".!?") + "!",
+            candidate + " ·",
+            candidate + " ",
+        ]
+        fixed = None
+        for e in edits:
+            e = e[:30].rstrip()  # respect Google's 30-char headline cap
+            if norm(e) not in seen and e:
+                fixed = e
+                break
+        if fixed is not None:
+            seen.add(norm(fixed))
+            out.append(fixed)
+        # else: silently drop the duplicate; RSAs only need 3 headlines min
+    return out
+
+
 def build_importable_csvs(trials: list[dict], snapshot: list[dict]) -> tuple[dict[str, str], dict]:
     """Return (filename -> CSV-text) plus a stats dict describing what was built.
 
@@ -280,6 +324,11 @@ def build_importable_csvs(trials: list[dict], snapshot: list[dict]) -> tuple[dic
     def _ad_row(t, headlines, descriptions, final_url, paths):
         # NOTE: no 'Label' column -- it would reveal which ads are
         # 'CONTROL' vs 'VARIANT' and what we are A/B testing.
+        # Ads Editor rejects duplicate headlines or descriptions within an
+        # RSA ("This headline is the same as another"); dedupe before
+        # writing the row so the human doesn't have to fix it by hand.
+        headlines = _dedupe_headlines(headlines)[:HEADLINE_MAX]
+        descriptions = _dedupe_headlines(descriptions)[:DESCRIPTION_MAX]
         row = {
             "Campaign": campaign_name,
             "Ad group": t["name"],
@@ -287,9 +336,9 @@ def build_importable_csvs(trials: list[dict], snapshot: list[dict]) -> tuple[dic
             "Ad status": "Enabled",
             "Final URL": final_url or "",
         }
-        for i, h in enumerate(headlines[:HEADLINE_MAX]):
+        for i, h in enumerate(headlines):
             row[f"Headline {i + 1}"] = h
-        for i, d in enumerate(descriptions[:DESCRIPTION_MAX]):
+        for i, d in enumerate(descriptions):
             row[f"Description {i + 1}"] = d
         for i, p in enumerate((paths or [])[:2]):
             row[f"Path {i + 1}"] = p
