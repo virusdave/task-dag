@@ -35,8 +35,12 @@ import {
 } from '../../server/pendingPurchases/pendingPurchasePacketImport.js'
 import { getWorkerEnv } from '../config/env.js'
 import type { NormalizedCatalogGroupLiveState } from '../catalog/liveState.js'
-import { RetryableWorkerError } from '../runtime/errors.js'
 import type { JobHandlerContext } from '../runtime/jobRegistry.js'
+import { readSweedDealerContext } from '../sweed/client.js'
+import {
+  callSweedRpc as callSharedSweedRpc,
+  ensureDealerContext as ensureSharedDealerContext,
+} from '../sweed/rpc.js'
 import type { PricingMarketContext, ProductPricingMarketEvidence } from '../pricing/deterministicPricing.js'
 import { buildPricingMarketContext } from '../pricing/litAlertsMarket.js'
 
@@ -70,13 +74,6 @@ const PREVALENCE_MAP = new Map<string, string>([
 ])
 
 const PENDING_PURCHASE_SOURCE_SYSTEM = 'metrc'
-
-const DealerSetResultSchema = z.object({
-  user: z.object({
-    currentDealerId: z.coerce.number().int(),
-    currentDealerName: z.string().nullable().optional(),
-  }),
-})
 
 const PurchaseOrderListResponseSchema = z.object({
   data: z.array(z.object({
@@ -418,8 +415,11 @@ export async function runCatalogPendingPurchasesGenerateJob(
   payload: CatalogPendingPurchasesGenerateJobPayload,
 ): Promise<void> {
   const env = getWorkerEnv()
-  if (!env.sweedAuthToken) {
-    throw new Error('SWEED_AUTH_TOKEN is required for pending-purchase generation jobs.')
+  const hasCredentials = env.sweedLoginEmail !== null && env.sweedLoginPassword !== null
+  if (!hasCredentials && !env.sweedAuthToken) {
+    throw new Error(
+      'Sweed auth is not configured; pending-purchase generation requires SWEED_LOGIN_EMAIL+SWEED_LOGIN_PASSWORD or SWEED_AUTH_TOKEN.',
+    )
   }
 
   const sites = resolveSites(payload.siteDealerIds)
@@ -3012,87 +3012,17 @@ function extractChatCompletionContent(rawResponseText: string): string {
 }
 
 async function callSweedRpc<TResult>(dealerId: number, name: string, params: Record<string, unknown>): Promise<TResult> {
-  await ensureDealerContext(dealerId)
-  return callSweedRpcRaw(name, params)
+  return callSharedSweedRpc<TResult>(dealerId, name, params)
 }
 
 async function readCurrentDealerContext(dealerId: number): Promise<Record<string, unknown>> {
-  const result = DealerSetResultSchema.parse(await callDealerSet(dealerId))
+  const context = await readSweedDealerContext(dealerId)
   return {
-    dealerId: result.user.currentDealerId,
-    dealerName: result.user.currentDealerName ?? `dealer ${result.user.currentDealerId}`,
+    dealerId: context.dealerId,
+    dealerName: context.dealerName ?? `dealer ${context.dealerId}`,
   }
 }
 
 async function ensureDealerContext(dealerId: number): Promise<void> {
-  const result = DealerSetResultSchema.parse(await callDealerSet(dealerId))
-  if (result.user.currentDealerId !== dealerId) {
-    throw new Error(
-      `Sweed dealer context mismatch. Expected ${dealerId}, got ${result.user.currentDealerId} ${result.user.currentDealerName ?? ''}`.trim(),
-    )
-  }
-}
-
-async function callDealerSet(dealerId: number): Promise<unknown> {
-  return callSweedRpcRaw('store.auth.dealer.set', { dealerId })
-}
-
-async function callSweedRpcRaw<TResult>(name: string, params: Record<string, unknown>): Promise<TResult> {
-  const env = getWorkerEnv()
-  if (!env.sweedAuthToken) {
-    throw new Error('SWEED_AUTH_TOKEN is required for pending-purchase generation jobs.')
-  }
-
-  let response: Response
-  try {
-    response = await fetch(env.sweedApiUrl, {
-      body: JSON.stringify({
-        auth: env.sweedAuthToken,
-        id: randomUUID(),
-        name,
-        params,
-      }),
-      headers: {
-        'content-type': 'application/json',
-        'user-agent': 'helios-worker/1.0',
-      },
-      method: 'POST',
-      signal: AbortSignal.timeout(env.sweedRequestTimeoutMs),
-    })
-  } catch (error) {
-    throw new RetryableWorkerError(buildTransportErrorMessage(name, error))
-  }
-
-  const responseText = await response.text()
-  if (!response.ok) {
-    const message = `${name} returned HTTP ${response.status}: ${truncate(responseText)}`
-    if (response.status === 403 || response.status === 429 || (response.status >= 500 && response.status <= 504)) {
-      throw new RetryableWorkerError(message)
-    }
-    throw new Error(message)
-  }
-
-  const envelope = JSON.parse(responseText) as { error?: { message?: string }; result?: TResult }
-  if (envelope.error) {
-    throw new Error(`${name} failed: ${envelope.error.message ?? 'Unknown Sweed RPC error.'}`)
-  }
-  if (envelope.result === undefined) {
-    throw new Error(`${name} returned no result payload.`)
-  }
-  return envelope.result
-}
-
-function buildTransportErrorMessage(name: string, error: unknown): string {
-  if (error instanceof Error && error.message) {
-    return `${name} transport failed: ${error.message}`
-  }
-  return `${name} transport failed.`
-}
-
-function truncate(value: string): string {
-  const normalized = value.replace(/\s+/g, ' ').trim()
-  if (normalized.length <= 240) {
-    return normalized
-  }
-  return `${normalized.slice(0, 239)}...`
+  await ensureSharedDealerContext(dealerId)
 }

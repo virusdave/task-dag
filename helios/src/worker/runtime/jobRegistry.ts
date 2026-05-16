@@ -51,6 +51,7 @@ import { runSchedulingGenerateCandidatesJob } from '../jobs/schedulingGenerateCa
 import { runCatalogSyncGroupDetailJob } from '../jobs/syncGroupDetailJob.js'
 import { runCatalogSyncFullSummaryJob } from '../jobs/syncFullSummaryJob.js'
 import { runUndoExecuteJob } from '../jobs/undoExecuteJob.js'
+import { withSweedSession } from '../sweed/session.js'
 
 export interface JobHandlerContext {
   id: number
@@ -155,8 +156,45 @@ const handlers: Record<JobType, JobHandler> = {
   },
 }
 
+/**
+ * Jobs whose handler is guaranteed to call the Sweed JSON-RPC API.
+ *
+ * Each such job runs inside its own fresh `withSweedSession()` so it
+ * owns a private auth token (and therefore a private server-side
+ * dealer context) for its entire lifetime. This eliminates the
+ * dealer-context race we used to hit when multiple concurrent jobs
+ * shared one SWEED_AUTH_TOKEN — the failure mode that surfaced as
+ * `store.screen.carousel.banner.list failed: Action does not exist
+ * or you do not have permission` on screen-banner-bounce runs.
+ *
+ * Jobs that only sometimes touch Sweed (e.g. forceLiveRefresh paths
+ * in proposal/llm.debug jobs, or undo.execute on Sweed-flavored
+ * undo records) are intentionally NOT in this set; they fall through
+ * to the legacy shared-token mutex on their occasional Sweed calls.
+ */
+const SWEED_BACKED_JOB_TYPES: ReadonlySet<JobType> = new Set<JobType>([
+  'catalog.pending_purchases.apply',
+  'catalog.pending_purchases.generate',
+  'catalog.sync.full_summary',
+  'catalog.sync.group_detail',
+  'config.workers.catalog_refresh',
+  'config.workers.stock_refresh',
+  'reconcile.group',
+  'screens.banner_refresh',
+  'screens.banner_health_maintenance',
+  'screens.bronx_midtown_image_clone',
+  'screens.enable_healthy_banners',
+  'screens.image_banner_sync',
+  'screens.midtown_fresh_and_intense_promo_rebind',
+  'screens.midtown_priced_to_move_promo_rebind',
+])
+
 export async function runJob(context: JobHandlerContext): Promise<void> {
   const handler = handlers[context.jobType]
+  if (SWEED_BACKED_JOB_TYPES.has(context.jobType)) {
+    await withSweedSession(() => handler(context))
+    return
+  }
   await handler(context)
 }
 

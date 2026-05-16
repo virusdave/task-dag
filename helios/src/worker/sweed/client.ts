@@ -1,9 +1,13 @@
-import { randomUUID } from 'node:crypto'
-
 import { z } from 'zod'
 
 import { getWorkerEnv } from '../config/env.js'
 import { RetryableWorkerError } from '../runtime/errors.js'
+import {
+  callSweedRpc as callSweedRpcForDealerImpl,
+  callSweedRpcRaw,
+  ensureDealerContext as ensureDealerContextImpl,
+} from './rpc.js'
+import { hasActiveSweedSession, withSweedSession } from './session.js'
 import { runWithSweedSessionLock } from './sessionLock.js'
 
 const DealerSetResultSchema = z.object({
@@ -13,25 +17,22 @@ const DealerSetResultSchema = z.object({
   }),
 })
 
-const SweedProductSummarySchema = z.object({
-  id: z.coerce.number().int(),
-  price: z.coerce.number().nullable().optional(),
-  priceInfo: z.object({ actualPrice: z.coerce.number().nullable().optional() }).passthrough().nullable().optional(),
-}).passthrough()
+const SweedProductSummarySchema = z
+  .object({
+    id: z.coerce.number().int(),
+    price: z.coerce.number().nullable().optional(),
+    priceInfo: z
+      .object({ actualPrice: z.coerce.number().nullable().optional() })
+      .passthrough()
+      .nullable()
+      .optional(),
+  })
+  .passthrough()
 
 const SweedProductDetailWrappedSchema = z.object({ product: SweedProductSummarySchema }).passthrough()
 
-interface RpcErrorBody {
-  message?: string
-}
-
-interface RpcEnvelope<TResult> {
-  error?: RpcErrorBody
-  result?: TResult
-}
-
 export async function editProductGroupDescription(groupId: number, description: string): Promise<unknown> {
-  return callSweedRpc('store.product.group.edit', { description, id: groupId })
+  return callOnStateDealer('store.product.group.edit', { description, id: groupId })
 }
 
 export async function callSweedRpcForDealer<TResult>(
@@ -39,17 +40,15 @@ export async function callSweedRpcForDealer<TResult>(
   name: string,
   params: Record<string, unknown>,
 ): Promise<TResult> {
-  return runWithSweedSessionLock(async () => {
-    await ensureDealerContext(dealerId)
-    return callSweedRpcRaw(name, params)
-  })
+  return callSweedRpcForDealerImpl<TResult>(dealerId, name, params)
 }
 
 export async function readSweedDealerContext(
   dealerId: number,
 ): Promise<{ dealerId: number; dealerName: string | null }> {
-  return runWithSweedSessionLock(async () => {
-    const result = DealerSetResultSchema.parse(await callDealerSet(dealerId))
+  return runWithDealerSerialization(async () => {
+    const raw = await callSweedRpcRaw<unknown>('store.auth.dealer.set', { dealerId })
+    const result = DealerSetResultSchema.parse(raw)
     return {
       dealerId: result.user.currentDealerId,
       dealerName: result.user.currentDealerName ?? null,
@@ -58,15 +57,15 @@ export async function readSweedDealerContext(
 }
 
 export async function editProductPrice(productId: number, price: number): Promise<unknown> {
-  return callSweedRpc('store.product.edit', { id: productId, price })
+  return callOnStateDealer('store.product.edit', { id: productId, price })
 }
 
 export async function getProductGroupDetail(groupId: number): Promise<unknown> {
-  return callSweedRpc('store.product.group.get', { id: groupId })
+  return callOnStateDealer('store.product.group.get', { id: groupId })
 }
 
 export async function getProductDetail(productId: number): Promise<unknown> {
-  return callSweedRpc('store.product.get', { id: productId })
+  return callOnStateDealer('store.product.get', { id: productId })
 }
 
 export async function waitForProductPrice(productId: number, targetPrice: number): Promise<unknown> {
@@ -92,142 +91,38 @@ export async function waitForProductPrice(productId: number, targetPrice: number
   )
 }
 
+/**
+ * Light-weight readiness probe. Opens a fresh per-call session if
+ * credentials are configured (so we exercise the real login path),
+ * otherwise reuses the legacy shared token. Either way it issues
+ * `store.auth.initial.data.get` plus a state-dealer pin to confirm
+ * the credentials work end-to-end.
+ */
 export async function verifySweedSession(): Promise<void> {
   const env = getWorkerEnv()
-  if (!env.sweedAuthToken) {
-    throw new Error('SWEED_AUTH_TOKEN is required for Sweed-backed worker jobs.')
-  }
-
-  await runWithSweedSessionLock(async () => {
-    await callSweedRpcRaw('store.auth.initial.data.get')
-    await ensureStateDealerContext()
-  })
-}
-
-async function callSweedRpc<TResult>(name: string, params: Record<string, unknown>): Promise<TResult> {
-  return runWithSweedSessionLock(async () => {
-    await ensureStateDealerContext()
-    return callSweedRpcRaw(name, params)
-  })
-}
-
-async function callSweedRpcRaw<TResult>(name: string, params?: Record<string, unknown>): Promise<TResult> {
-  const env = getWorkerEnv()
-  if (!env.sweedAuthToken) {
-    throw new Error('SWEED_AUTH_TOKEN is required for Sweed-backed worker jobs.')
-  }
-
-  let response: Response
-  try {
-    response = await fetch(env.sweedApiUrl, {
-      body: JSON.stringify({
-        auth: env.sweedAuthToken,
-        id: randomUUID(),
-        name,
-        ...(params === undefined ? {} : { params }),
-      }),
-      headers: {
-        'content-type': 'application/json',
-        'user-agent': 'helios-worker/1.0',
-      },
-      method: 'POST',
-      signal: AbortSignal.timeout(env.sweedRequestTimeoutMs),
-    })
-  } catch (error) {
-    throw new RetryableWorkerError(buildTransportErrorMessage(name, error))
-  }
-
-  const responseText = await response.text()
-  if (!response.ok) {
-    const message = `${name} returned HTTP ${response.status}: ${truncate(responseText)}`
-    if (isRetryableStatusCode(response.status)) {
-      throw new RetryableWorkerError(message)
-    }
-    throw new Error(message)
-  }
-
-  let envelope: RpcEnvelope<TResult>
-  try {
-    envelope = parseRpcEnvelope<TResult>(responseText)
-  } catch (error) {
-    const message = buildInvalidResponseMessage(name, responseText)
-    if (error instanceof SyntaxError) {
-      throw new RetryableWorkerError(message)
-    }
-    throw new Error(message)
-  }
-
-  if (envelope.error) {
-    throw new Error(`${name} failed: ${envelope.error.message ?? 'Unknown Sweed RPC error.'}`)
-  }
-  if (envelope.result === undefined) {
-    throw new Error(`${name} returned no result payload.`)
-  }
-
-  return envelope.result
-}
-
-async function ensureStateDealerContext(): Promise<void> {
-  const env = getWorkerEnv()
-  await ensureDealerContext(env.sweedStateDealerId)
-}
-
-async function ensureDealerContext(dealerId: number): Promise<void> {
-  const result = DealerSetResultSchema.parse(await callDealerSet(dealerId))
-  if (result.user.currentDealerId !== dealerId) {
+  const hasCredentials = env.sweedLoginEmail !== null && env.sweedLoginPassword !== null
+  if (!hasCredentials && !env.sweedAuthToken) {
     throw new Error(
-      `Sweed dealer context mismatch. Expected ${dealerId}, got ${result.user.currentDealerId} ${result.user.currentDealerName ?? ''}`.trim(),
+      'Sweed auth is not configured. Set SWEED_LOGIN_EMAIL+SWEED_LOGIN_PASSWORD (preferred) or SWEED_AUTH_TOKEN.',
     )
   }
+
+  await withSweedSession(async () => {
+    await callSweedRpcRaw<unknown>('store.auth.initial.data.get')
+    await ensureDealerContextImpl(env.sweedStateDealerId)
+  })
 }
 
-async function callDealerSet(dealerId: number): Promise<unknown> {
+async function callOnStateDealer<TResult>(name: string, params: Record<string, unknown>): Promise<TResult> {
   const env = getWorkerEnv()
-  if (!env.sweedAuthToken) {
-    throw new Error('SWEED_AUTH_TOKEN is required for Sweed-backed worker jobs.')
-  }
-
-  let response: Response
-  try {
-    response = await fetch(env.sweedApiUrl, {
-      body: JSON.stringify({
-        auth: env.sweedAuthToken,
-        id: randomUUID(),
-        name: 'store.auth.dealer.set',
-        params: { dealerId },
-      }),
-      headers: {
-        'content-type': 'application/json',
-        'user-agent': 'helios-worker/1.0',
-      },
-      method: 'POST',
-      signal: AbortSignal.timeout(env.sweedRequestTimeoutMs),
-    })
-  } catch (error) {
-    throw new RetryableWorkerError(buildTransportErrorMessage('store.auth.dealer.set', error))
-  }
-
-  const responseText = await response.text()
-  if (!response.ok) {
-    const message = `store.auth.dealer.set returned HTTP ${response.status}: ${truncate(responseText)}`
-    if (isRetryableStatusCode(response.status)) {
-      throw new RetryableWorkerError(message)
-    }
-    throw new Error(message)
-  }
-
-  const envelope = parseRpcEnvelope<unknown>(responseText)
-  if (envelope.error) {
-    throw new Error(`store.auth.dealer.set failed: ${envelope.error.message ?? 'Unknown Sweed RPC error.'}`)
-  }
-  if (envelope.result === undefined) {
-    throw new Error('store.auth.dealer.set returned no result payload.')
-  }
-  return envelope.result
+  return callSweedRpcForDealerImpl<TResult>(env.sweedStateDealerId, name, params)
 }
 
-function buildInvalidResponseMessage(name: string, responseText: string): string {
-  return `${name} returned an invalid JSON response: ${truncate(responseText)}`
+function runWithDealerSerialization<T>(fn: () => Promise<T>): Promise<T> {
+  if (hasActiveSweedSession()) {
+    return fn()
+  }
+  return runWithSweedSessionLock(fn)
 }
 
 function unwrapProductDetail(detail: unknown): z.infer<typeof SweedProductSummarySchema> {
@@ -236,29 +131,6 @@ function unwrapProductDetail(detail: unknown): z.infer<typeof SweedProductSummar
     return wrapped.data.product
   }
   return SweedProductSummarySchema.parse(detail)
-}
-
-function buildTransportErrorMessage(name: string, error: unknown): string {
-  if (error instanceof Error && error.message) {
-    return `${name} transport failed: ${error.message}`
-  }
-  return `${name} transport failed.`
-}
-
-function isRetryableStatusCode(statusCode: number): boolean {
-  return statusCode === 403 || statusCode === 429 || (statusCode >= 500 && statusCode <= 504)
-}
-
-function parseRpcEnvelope<TResult>(responseText: string): RpcEnvelope<TResult> {
-  return JSON.parse(responseText) as RpcEnvelope<TResult>
-}
-
-function truncate(value: string): string {
-  const normalized = value.replace(/\s+/g, ' ').trim()
-  if (normalized.length <= 240) {
-    return normalized
-  }
-  return `${normalized.slice(0, 239)}…`
 }
 
 function delay(milliseconds: number): Promise<void> {
@@ -271,6 +143,5 @@ function formatObservedPrice(value: number | null): string {
   if (value === null) {
     return 'null'
   }
-
   return value.toFixed(2)
 }

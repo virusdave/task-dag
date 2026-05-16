@@ -22,8 +22,10 @@ let cachedSweedHealth: CachedDependencyHealth | null = null
 export async function warmDependencyHealth(): Promise<void> {
   const env = getWorkerEnv()
 
-  if (!env.sweedAuthToken) {
-    console.warn('SWEED_AUTH_TOKEN is not configured; Sweed-backed jobs will remain queued until the token is available.')
+  if (!hasSweedAuthConfigured(env)) {
+    console.warn(
+      'No Sweed auth configured (SWEED_LOGIN_EMAIL+SWEED_LOGIN_PASSWORD or SWEED_AUTH_TOKEN). Sweed-backed jobs will remain queued.',
+    )
   } else {
     try {
       await assertSweedReady()
@@ -99,11 +101,18 @@ export async function ensureDependenciesReadyForJob(jobType: JobType, payload: u
   }
 }
 
+function hasSweedAuthConfigured(env: ReturnType<typeof getWorkerEnv>): boolean {
+  if (env.sweedLoginEmail !== null && env.sweedLoginPassword !== null) {
+    return true
+  }
+  return env.sweedAuthToken !== null
+}
+
 async function assertSweedReady(): Promise<void> {
   const env = getWorkerEnv()
-  if (!env.sweedAuthToken) {
+  if (!hasSweedAuthConfigured(env)) {
     throw new DependencyUnavailableWorkerError(
-      'SWEED_AUTH_TOKEN is not configured. Sweed-backed jobs will remain queued until the automation token is available.',
+      'No Sweed auth configured. Set SWEED_LOGIN_EMAIL+SWEED_LOGIN_PASSWORD (preferred) or SWEED_AUTH_TOKEN; jobs remain queued until auth is available.',
       { delayMs: DEPENDENCY_RETRY_DELAY_MS },
     )
   }
