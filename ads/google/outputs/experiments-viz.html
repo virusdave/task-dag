@@ -1,0 +1,294 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0b1220">
+<title>Gads Experiments — Issue #11</title>
+<style>
+:root {
+  --bg: #0b1220;
+  --card: #131c2e;
+  --card-2: #1a2540;
+  --text: #e6ecf5;
+  --muted: #9aa6b8;
+  --accent: #60a5fa;
+  --good: #34d399;
+  --warn: #fbbf24;
+  --bad: #f87171;
+  --border: #2a3553;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text);
+  font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, Roboto,
+  "Helvetica Neue", Arial, sans-serif; -webkit-text-size-adjust: 100%; }
+a { color: var(--accent); }
+header.bar {
+  position: sticky; top: 0; z-index: 10;
+  display: flex; gap: 12px; align-items: center; justify-content: space-between;
+  padding: 12px 16px; background: rgba(11,18,32,0.92);
+  backdrop-filter: saturate(140%) blur(8px);
+  border-bottom: 1px solid var(--border);
+}
+header.bar h1 { font-size: 1.05rem; margin: 0; font-weight: 600; }
+header.bar .meta { font-size: 0.75rem; color: var(--muted); }
+.btn {
+  display: inline-flex; align-items: center; gap: 8px;
+  min-height: 44px; padding: 0 16px; border-radius: 999px;
+  background: var(--accent); color: #0b1220; font-weight: 600;
+  text-decoration: none; border: 0; cursor: pointer; font-size: 0.95rem;
+  white-space: nowrap;
+}
+.btn:active { transform: scale(0.97); }
+.btn.secondary { background: transparent; color: var(--text); border: 1px solid var(--border); }
+main { padding: 16px; max-width: 1100px; margin: 0 auto; }
+section { margin: 24px 0; }
+section > h2 { font-size: 1.15rem; margin: 0 0 12px; display: flex; align-items: baseline; gap: 8px; }
+section > h2 .count { color: var(--muted); font-weight: 400; font-size: 0.85rem; }
+.cards { display: grid; grid-template-columns: 1fr; gap: 12px; }
+@media (min-width: 768px) {
+  .cards { grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
+}
+.stat {
+  padding: 16px; background: linear-gradient(135deg, var(--card-2), var(--card));
+  border: 1px solid var(--border); border-radius: 14px;
+}
+.stat .v { font-size: 2rem; font-weight: 700; line-height: 1.1; }
+.stat .v.good { color: var(--good); }
+.stat .v.warn { color: var(--warn); }
+.stat .v.bad { color: var(--bad); }
+.stat .l { font-size: 0.85rem; color: var(--muted); margin-top: 6px; }
+.card {
+  background: var(--card); border: 1px solid var(--border);
+  border-radius: 14px; padding: 14px; display: flex; flex-direction: column; gap: 8px;
+}
+.card .row { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.card .title { font-weight: 600; font-size: 1rem; }
+.card .sub { color: var(--muted); font-size: 0.85rem; }
+.tag {
+  display: inline-block; padding: 2px 8px; border-radius: 999px;
+  font-size: 0.72rem; font-weight: 600; letter-spacing: 0.02em;
+  background: var(--card-2); color: var(--text); border: 1px solid var(--border);
+}
+.tag.good { background: rgba(52,211,153,.12); color: var(--good); border-color: rgba(52,211,153,.4); }
+.tag.warn { background: rgba(251,191,36,.12); color: var(--warn); border-color: rgba(251,191,36,.4); }
+.tag.bad { background: rgba(248,113,113,.12); color: var(--bad); border-color: rgba(248,113,113,.4); }
+.tag.info { background: rgba(96,165,250,.12); color: var(--accent); border-color: rgba(96,165,250,.4); }
+.hyp { font-style: italic; color: #cdd6e3; border-left: 3px solid var(--accent); padding-left: 10px; }
+.kv { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; font-size: 0.85rem; color: var(--muted); }
+.kv b { color: var(--text); font-weight: 500; }
+details > summary { cursor: pointer; padding: 6px 0; color: var(--accent); font-weight: 600; list-style: none; }
+details > summary::-webkit-details-marker { display: none; }
+details > summary:before { content: "▸ "; }
+details[open] > summary:before { content: "▾ "; }
+ul.snippets { list-style: none; padding: 0; margin: 4px 0 0; font-size: 0.85rem; }
+ul.snippets li { padding: 4px 8px; background: var(--card-2); border-radius: 6px; margin-top: 4px; }
+footer { margin: 32px 0 16px; padding: 16px; border-top: 1px solid var(--border); color: var(--muted); font-size: 0.8rem; }
+footer .row { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; align-items: center; }
+.empty { padding: 20px; text-align: center; color: var(--muted); border: 1px dashed var(--border); border-radius: 14px; }
+</style>
+</head>
+<body>
+<header class="bar">
+  <h1>🧪 Gads Experiments</h1>
+  <a class="btn" download="gads-experiments-bundle.zip" href="data:application/zip;base64,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">⬇ CSV bundle</a>
+</header>
+<main>
+  <div class="meta" style="color:var(--muted);font-size:0.8rem;margin-bottom:8px;">
+    Generated 2026-05-16 11:11 · 7 trial(s) · 6 CSV(s) in bundle · Issue
+    <a href="https://github.com/FreshlyBakedNYC/automation/issues/11">#11</a>
+  </div>
+
+  <section>
+    <h2>Summary</h2>
+    <div class="cards">
+      <div class="stat"><div class="v">7</div><div class="l">Total trials</div></div>
+      <div class="stat"><div class="v">10</div><div class="l">Variant ads</div></div>
+      <div class="stat"><div class="v good">0</div><div class="l">Persistent positive approvals</div></div>
+      <div class="stat"><div class="v">$7.00</div><div class="l">Daily trial budget</div></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>🟢 Persistent positive approvals <span class="count">(0)</span></h2>
+    <div class="empty">No persistent positive approvals detected yet. Once trial-named ads survive policy review enabled+eligible+approved for ≥1 day, they appear here.</div>
+  </section>
+
+  <section>
+    <h2>🔥 In flight <span class="count">(0)</span></h2>
+    <div class="empty">No experiments in flight.</div>
+  </section>
+
+  <section>
+    <h2>📋 Planned (not yet pushed to gads) <span class="count">(7)</span></h2>
+    <div class="cards">
+    <div class="card">
+      <div class="row">
+        <div class="title">brand-flower-trial-001</div>
+        <span class="tag info">planned</span>
+        <span class="tag info">(unspecified)</span>
+      </div>
+      <div class="sub">brand / flower · $1.00/day</div>
+      <div class="hyp">Using &#x27;Discover&#x27; instead of &#x27;Explore&#x27; will not significantly impact serving status or performance.</div>
+      <div class="kv">
+        <span>Controls</span><b>1</b>
+        <span>Variants</span><b>1</b>
+        <span>Live ad rows</span><b>0</b>
+        <span>Impressions</span><b>0</b>
+        <span>CTR</span><b>0.00%</b>
+      </div>
+      <details>
+        <summary>Sample ads</summary>
+        <ul class="snippets"><li><b style="color:var(--good)">CTRL</b> Premium Cannabis Flower - Explore Our Selection!</li><li><b style="color:var(--warn)">VAR</b> Cannabis Flower - Discover Our Range!</li></ul>
+      </details>
+      <div class="sub">💡 Determine if Google&#x27;s algorithm differentiates between similar action verbs when combined with cannabis-related terms.</div>
+    </div>
+    
+    <div class="card">
+      <div class="row">
+        <div class="title">medical-flower-trial-001</div>
+        <span class="tag info">planned</span>
+        <span class="tag info">(unspecified)</span>
+      </div>
+      <div class="sub">medical / flower · $1.00/day</div>
+      <div class="hyp">Phrasing related to &#x27;relief&#x27; and &#x27;wellness&#x27; will trigger the &#x27;medical_claims&#x27; flag, even without explicitly stating a medical benefit.</div>
+      <div class="kv">
+        <span>Controls</span><b>1</b>
+        <span>Variants</span><b>1</b>
+        <span>Live ad rows</span><b>0</b>
+        <span>Impressions</span><b>0</b>
+        <span>CTR</span><b>0.00%</b>
+      </div>
+      <details>
+        <summary>Sample ads</summary>
+        <ul class="snippets"><li><b style="color:var(--good)">CTRL</b> Cannabis Flower - Explore Our Selection!</li><li><b style="color:var(--warn)">VAR</b> Cannabis Flower - Find Relief and Wellness.</li></ul>
+      </details>
+      <div class="sub">💡 Determine the sensitivity of the &#x27;medical_claims&#x27; detector to suggestive language.</div>
+    </div>
+    
+    <div class="card">
+      <div class="row">
+        <div class="title">brand-flower-trial-001</div>
+        <span class="tag info">planned</span>
+        <span class="tag info">Cannabis-specific terminology</span>
+      </div>
+      <div class="sub">brand / flower · $1.00/day</div>
+      <div class="hyp">Using &#x27;Locally Grown&#x27; alongside &#x27;Cannabis Flower&#x27; will not trigger further limitations compared to simply stating &#x27;Cannabis Flower&#x27;.</div>
+      <div class="kv">
+        <span>Controls</span><b>1</b>
+        <span>Variants</span><b>1</b>
+        <span>Live ad rows</span><b>0</b>
+        <span>Impressions</span><b>0</b>
+        <span>CTR</span><b>0.00%</b>
+      </div>
+      <details>
+        <summary>Sample ads</summary>
+        <ul class="snippets"><li><b style="color:var(--good)">CTRL</b> Premium Cannabis Flower - Explore Our Selection!</li><li><b style="color:var(--warn)">VAR</b> Cannabis Flower - Locally Grown</li></ul>
+      </details>
+      <div class="sub">💡 Determine if geographic qualifiers are viewed more favorably by the policy system.</div>
+    </div>
+    
+    <div class="card">
+      <div class="row">
+        <div class="title">medical-flower-trial-001</div>
+        <span class="tag info">planned</span>
+        <span class="tag info">Medical Claims</span>
+      </div>
+      <div class="sub">medical / flower · $1.00/day</div>
+      <div class="hyp">Using the term &#x27;Wellness&#x27; instead of explicit medical claims will allow the ad to serve without triggering policy violations.</div>
+      <div class="kv">
+        <span>Controls</span><b>1</b>
+        <span>Variants</span><b>1</b>
+        <span>Live ad rows</span><b>0</b>
+        <span>Impressions</span><b>0</b>
+        <span>CTR</span><b>0.00%</b>
+      </div>
+      <details>
+        <summary>Sample ads</summary>
+        <ul class="snippets"><li><b style="color:var(--good)">CTRL</b> High-Quality Cannabis Flower Available Now!</li><li><b style="color:var(--warn)">VAR</b> Cannabis Flower - For Wellness</li></ul>
+      </details>
+      <div class="sub">💡 Determine if softer language related to wellness is permissible.</div>
+    </div>
+    
+    <div class="card">
+      <div class="row">
+        <div class="title">NYC Bud-trial-001</div>
+        <span class="tag info">planned</span>
+        <span class="tag info">Geotargeting &amp; Brand References</span>
+      </div>
+      <div class="sub">core / flower · $1.00/day</div>
+      <div class="hyp">The phrase &#x27;NYC Bud&#x27; itself may be triggering a policy violation, even without explicit restricted terms.  Testing variations with location and quality descriptors will help isolate the issue.</div>
+      <div class="kv">
+        <span>Controls</span><b>1</b>
+        <span>Variants</span><b>2</b>
+        <span>Live ad rows</span><b>0</b>
+        <span>Impressions</span><b>0</b>
+        <span>CTR</span><b>0.00%</b>
+      </div>
+      <details>
+        <summary>Sample ads</summary>
+        <ul class="snippets"><li><b style="color:var(--good)">CTRL</b> NYC Bud | Core-1 (assuming this is an eligible ad)</li><li><b style="color:var(--warn)">VAR</b> NYC Bud - Local Delivery | Core-1</li><li><b style="color:var(--warn)">VAR</b> NYC Bud - Premium Quality | Core-1</li></ul>
+      </details>
+      <div class="sub">💡 Determine if &#x27;NYC Bud&#x27; is a problematic phrase or if the issue lies elsewhere in the ad copy.</div>
+    </div>
+    
+    <div class="card">
+      <div class="row">
+        <div class="title">Smoking Scholars-trial-001</div>
+        <span class="tag info">planned</span>
+        <span class="tag info">Brand References &amp; Activities</span>
+      </div>
+      <div class="sub">core / general · $1.00/day</div>
+      <div class="hyp">The name &#x27;Smoking Scholars&#x27; may be triggering a policy violation due to the association with smoking. Testing variations with different descriptors will help isolate the issue.</div>
+      <div class="kv">
+        <span>Controls</span><b>1</b>
+        <span>Variants</span><b>2</b>
+        <span>Live ad rows</span><b>0</b>
+        <span>Impressions</span><b>0</b>
+        <span>CTR</span><b>0.00%</b>
+      </div>
+      <details>
+        <summary>Sample ads</summary>
+        <ul class="snippets"><li><b style="color:var(--good)">CTRL</b> Smoking Scholars | Core-1 (assuming this is an eligible ad)</li><li><b style="color:var(--warn)">VAR</b> Smoking Scholars - Premium Products | Core-1</li><li><b style="color:var(--warn)">VAR</b> Smoking Scholars - Local Experts | Core-1</li></ul>
+      </details>
+      <div class="sub">💡 Determine if the brand name is the primary issue or if other elements of the ad copy are contributing.</div>
+    </div>
+    
+    <div class="card">
+      <div class="row">
+        <div class="title">Midtown Brands Conquest-trial-001</div>
+        <span class="tag info">planned</span>
+        <span class="tag info">Brand References &amp; Activities</span>
+      </div>
+      <div class="sub">brand / general · $1.00/day</div>
+      <div class="hyp">The phrase &#x27;Conquest&#x27; may be triggering a policy violation due to its aggressive connotation. Testing variations with different descriptors will help isolate the issue.</div>
+      <div class="kv">
+        <span>Controls</span><b>1</b>
+        <span>Variants</span><b>2</b>
+        <span>Live ad rows</span><b>0</b>
+        <span>Impressions</span><b>0</b>
+        <span>CTR</span><b>0.00%</b>
+      </div>
+      <details>
+        <summary>Sample ads</summary>
+        <ul class="snippets"><li><b style="color:var(--good)">CTRL</b> Midtown Brands Conquest - jams-1 (assuming this is an eligible ad)</li><li><b style="color:var(--warn)">VAR</b> Midtown Brands - Quality Products | jams-1</li><li><b style="color:var(--warn)">VAR</b> Midtown Brands - Local Experts | jams-1</li></ul>
+      </details>
+      <div class="sub">💡 Determine if the word &#x27;Conquest&#x27; is the primary issue or if other elements of the ad copy are contributing.</div>
+    </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>📚 Lessons & completed <span class="count">(0)</span></h2>
+    <div class="empty">No completed experiments yet. As trials retire (T+48h), outcomes will appear here.</div>
+  </section>
+
+  <footer>
+    <div class="row">
+      <div>Source: 9 L2 run(s) · snapshot 2026-05-15 · 188 ad row(s)</div>
+      <a class="btn secondary" download="gads-experiments-bundle.zip" href="data:application/zip;base64,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">⬇ Download CSV bundle</a>
+    </div>
+  </footer>
+</main>
+</body>
+</html>
