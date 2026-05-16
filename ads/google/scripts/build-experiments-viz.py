@@ -66,31 +66,339 @@ def load_latest_snapshot() -> list[dict]:
     return rows
 
 
-def build_csv_zip() -> bytes:
-    """Bundle every CSV under outputs/*/csv into a single ZIP, sequentially numbered."""
-    csv_paths = sorted(glob.glob(str(GADS_ROOT / "outputs" / "*" / "csv" / "*.csv")))
+TRIAL_SUFFIX_RE = re.compile(r"\s*[-]?\s*trial-\d+\s*$", re.IGNORECASE)
+
+
+def _source_ad_group_name(trial_group_name: str) -> str:
+    """Map 'NYC Bud-trial-001' -> 'NYC Bud'; keep base for matching."""
+    return TRIAL_SUFFIX_RE.sub("", trial_group_name).strip()
+
+
+def _ad_priority(row: dict) -> tuple:
+    """Higher tuple = better candidate to clone for the trial."""
+    return (
+        bool(row.get("final_url")),
+        row.get("policy_status") == "approved",
+        row.get("serving_status") == "eligible",
+        row.get("ad_status") == "enabled",
+        len(row.get("headlines") or []),
+        len(row.get("descriptions") or []),
+    )
+
+
+def resolve_source_ad(trial: dict, snapshot: list[dict]) -> dict | None:
+    """Pick the best snapshot ad to base a trial's content on."""
+    base = _source_ad_group_name(trial["name"]).lower()
+    if not base:
+        return None
+    candidates = []
+    for row in snapshot:
+        ag = (row.get("ad_group_name") or row.get("ad_group_id") or "").lower()
+        # Match if the snapshot ad group starts with the trial base
+        # (e.g. 'NYC Bud | Core' starts with 'NYC Bud')
+        if ag == base or ag.startswith(base + " ") or ag.startswith(base + " |") or ag.startswith(base + "-"):
+            if row.get("ad_type") == "responsive_search_ad" and row.get("headlines"):
+                candidates.append(row)
+    if not candidates:
+        return None
+    return max(candidates, key=_ad_priority)
+
+
+# Generic fallback URL used when the cloned source ad has no final_url
+# (typical for disapproved ads). README directs the human to replace this
+# per ad group before posting.
+FALLBACK_FINAL_URL = "https://freshlybaked.us/"
+
+
+def _clean_variant_label(label: str) -> str:
+    """Strip internal ad-id suffixes like ' | Core-1' from L2-proposed
+    variant labels so they read as actual ad headlines, not row identifiers."""
+    # drop trailing '| <anything>-<digits>'
+    out = re.sub(r"\s*\|\s*\w+-\d+\s*$", "", label)
+    # drop trailing '-<digits>' if anything left
+    out = re.sub(r"\s*-\s*\d+\s*$", "", out)
+    return out.strip() or label.strip()
+
+
+# ---- Google Ads Editor CSV generators --------------------------------------
+
+# Google Ads Editor headline cap = 15, descriptions cap = 4.
+HEADLINE_MAX = 15
+DESCRIPTION_MAX = 4
+
+
+def _csv(rows: list[dict], columns: list[str]) -> str:
+    """Render rows -> CSV string with the given column order."""
+    import csv as _csvmod
+    buf = io.StringIO()
+    w = _csvmod.DictWriter(buf, fieldnames=columns, extrasaction="ignore")
+    w.writeheader()
+    for r in rows:
+        # Stringify all values; blank for missing
+        w.writerow({c: ("" if r.get(c) is None else str(r[c])) for c in columns})
+    return buf.getvalue()
+
+
+def _variant_headlines(source: list[str], variant_label: str) -> list[str]:
+    """Mechanically derive variant headlines by swapping in the variant label
+    for the first 1-2 headlines. Keeps the rest of the source ad's content so
+    the ad remains coherent and Ads Editor accepts the row."""
+    out = list(source)
+    if not out:
+        return [variant_label[:30]]
+    out[0] = variant_label[:30]
+    if len(out) >= 2 and len(variant_label) > 10:
+        out[1] = (variant_label + " · Order Today")[:30]
+    return out
+
+
+def build_importable_csvs(trials: list[dict], snapshot: list[dict]) -> tuple[dict[str, str], dict]:
+    """Return (filename -> CSV-text) plus a stats dict describing what was built."""
+    today = dt.date.today().isoformat()
+    campaign_name = f"Policy Probe Trials {today}"
+
+    resolved_trials = []
+    skipped_set: dict[str, str] = {}
+    seen_trial_names: set[str] = set()
+    for t in trials:
+        if t["name"] in seen_trial_names:
+            continue
+        seen_trial_names.add(t["name"])
+        src = resolve_source_ad(t, snapshot)
+        if not src:
+            skipped_set[t["name"]] = "no matching ad group in snapshot"
+            continue
+        resolved_trials.append((t, src))
+    skipped: list[tuple[str, str]] = list(skipped_set.items())
+
+    if not resolved_trials:
+        return {}, {
+            "campaign_count": 0,
+            "ad_group_count": 0,
+            "keyword_count": 0,
+            "ad_count": 0,
+            "resolved_trials": 0,
+            "skipped": skipped,
+        }
+
+    total_budget = max(1.00, round(sum(float(t.get("budget") or 0.01) for t, _ in resolved_trials) + 0.50, 2))
+
+    # 001: Campaign creation
+    # Columns chosen are the standard set Google Ads Editor recognises for a
+    # Search campaign create. Locations/Languages/Bid strategy etc. are
+    # provided as conservative defaults; the import packet README tells the
+    # human to review before posting.
+    campaign_rows = [
+        {
+            "Campaign": campaign_name,
+            "Campaign type": "Search",
+            "Campaign status": "Enabled",
+            "Campaign daily budget": f"{total_budget:.2f}",
+            "Budget type": "Standard",
+            "Networks": "Google search",
+            "Languages": "English",
+            "Locations": "United States",
+            "Bid strategy type": "Manual CPC",
+            "Default max. CPC": "1.00",
+            "Start date": today,
+        }
+    ]
+    campaign_csv = _csv(
+        campaign_rows,
+        [
+            "Campaign",
+            "Campaign type",
+            "Campaign status",
+            "Campaign daily budget",
+            "Budget type",
+            "Networks",
+            "Languages",
+            "Locations",
+            "Bid strategy type",
+            "Default max. CPC",
+            "Start date",
+        ],
+    )
+
+    # 002: Ad groups
+    ad_group_rows = []
+    for t, _src in resolved_trials:
+        ad_group_rows.append(
+            {
+                "Campaign": campaign_name,
+                "Ad group": t["name"],
+                "Ad group status": "Enabled",
+                "Ad group type": "Standard",
+                "Default max. CPC": "1.00",
+                "Labels": t.get("policy_class") or "trial",
+            }
+        )
+    ad_group_csv = _csv(
+        ad_group_rows,
+        ["Campaign", "Ad group", "Ad group status", "Ad group type", "Default max. CPC", "Labels"],
+    )
+
+    # 003: Keywords
+    keyword_rows = []
+    for t, _src in resolved_trials:
+        base = _source_ad_group_name(t["name"])
+        # Reasonable broad+phrase coverage so the ad actually has a chance to
+        # serve and trigger policy verdict. Human should curate before import.
+        seeds = {base, base.split(" | ")[0], base.split(" - ")[0]}
+        for kw in sorted({s for s in seeds if s}):
+            keyword_rows.append(
+                {
+                    "Campaign": campaign_name,
+                    "Ad group": t["name"],
+                    "Keyword": kw,
+                    "Match type": "Phrase",
+                    "Keyword status": "Enabled",
+                    "Max CPC": "1.00",
+                }
+            )
+    keyword_csv = _csv(
+        keyword_rows,
+        ["Campaign", "Ad group", "Keyword", "Match type", "Keyword status", "Max CPC"],
+    )
+
+    # 004: Ads (RSA) -- one control + variant ads per trial, all enabled.
+    ad_rows = []
+    headline_cols = [f"Headline {i + 1}" for i in range(HEADLINE_MAX)]
+    description_cols = [f"Description {i + 1}" for i in range(DESCRIPTION_MAX)]
+    path_cols = ["Path 1", "Path 2"]
+
+    def _ad_row(t, headlines, descriptions, final_url, paths, label):
+        row = {
+            "Campaign": campaign_name,
+            "Ad group": t["name"],
+            "Ad type": "Responsive search ad",
+            "Ad status": "Enabled",
+            "Final URL": final_url or "",
+            "Label": label,
+        }
+        for i, h in enumerate(headlines[:HEADLINE_MAX]):
+            row[f"Headline {i + 1}"] = h
+        for i, d in enumerate(descriptions[:DESCRIPTION_MAX]):
+            row[f"Description {i + 1}"] = d
+        for i, p in enumerate((paths or [])[:2]):
+            row[f"Path {i + 1}"] = p
+        return row
+
+    needs_url_fix: list[str] = []  # trial names whose source had no final_url
+    for t, src in resolved_trials:
+        src_h = src.get("headlines") or []
+        src_d = src.get("descriptions") or []
+        src_url = src.get("final_url") or ""
+        if not src_url:
+            src_url = FALLBACK_FINAL_URL
+            needs_url_fix.append(t["name"])
+        src_paths = src.get("paths") or []
+        # Control: clone source verbatim
+        ad_rows.append(_ad_row(t, src_h, src_d, src_url, src_paths, "CONTROL"))
+        # Variants: one per L2 variant label, with mechanical headline swap
+        variants = t.get("variants") or []
+        for v in variants:
+            if isinstance(v, str):
+                label = v
+            elif isinstance(v, dict):
+                label = v.get("variant_label") or v.get("label") or v.get("name") or "variant"
+            else:
+                label = "variant"
+            clean_label = _clean_variant_label(label)
+            v_h = _variant_headlines(src_h, clean_label)
+            ad_rows.append(_ad_row(t, v_h, src_d, src_url, src_paths, f"VARIANT: {clean_label}"))
+
+    ads_csv = _csv(
+        ad_rows,
+        ["Campaign", "Ad group", "Ad type", "Ad status", "Final URL", "Label"]
+        + headline_cols + description_cols + path_cols,
+    )
+
+    readme = f"""# Policy Probe Trials -- import bundle ({today})
+
+Generated by ads/google/scripts/build-experiments-viz.py.
+
+## Import order (Google Ads Editor)
+
+Open each CSV via File -> Import -> From file and accept in order:
+
+1. 001-create-campaign.csv      ({len(campaign_rows)} campaign)
+2. 002-create-ad-groups.csv     ({len(ad_group_rows)} ad group(s))
+3. 003-create-keywords.csv      ({len(keyword_rows)} keyword(s))
+4. 004-create-ads.csv           ({len(ad_rows)} RSA(s) -- all Enabled)
+
+## What this does
+
+Creates a new "{campaign_name}" Search campaign at ${total_budget:.2f}/day,
+populated with one Enabled ad group per planned trial, each ad group with
+keywords and one CONTROL RSA cloned verbatim from the best existing ad in
+the corresponding source ad group, plus one VARIANT RSA per L2-proposed
+variant label (first 1-2 headlines swapped to the variant phrase).
+
+Everything is Enabled so that Google's policy engine reviews the new ads
+within a few hours of "Post" in Ads Editor.
+
+## Review before posting
+
+Ads Editor will surface most validation errors before posting, but the
+following defaults are conservative and you should usually narrow them:
+
+- Locations: currently "United States" -- narrow to NY/your delivery zones.
+- Languages: English.
+- Bid strategy: Manual CPC at $1.00. Switch to your usual strategy if you
+  want this to actually compete in auction rather than only probe policy.
+- Final URL: copied from the source ad when available. When the source
+  ad had an empty final_url (typical for disapproved ads) we fall back
+  to {FALLBACK_FINAL_URL} so the rows validate. You almost certainly
+  want to replace those URLs with the real landing page before posting.
+
+## Trials whose source ad had no Final URL (placeholder applied)
+
+{chr(10).join(f"- {name}" for name in needs_url_fix) or "(none)"}
+
+## Skipped trials (no matching source ad group in snapshot)
+
+{chr(10).join(f"- {name}: {reason}" for name, reason in skipped) or "(none -- all trials resolved to a source ad)"}
+"""
+
+    files = {
+        "001-create-campaign.csv": campaign_csv,
+        "002-create-ad-groups.csv": ad_group_csv,
+        "003-create-keywords.csv": keyword_csv,
+        "004-create-ads.csv": ads_csv,
+        "README.md": readme,
+    }
+    stats = {
+        "campaign_count": len(campaign_rows),
+        "ad_group_count": len(ad_group_rows),
+        "keyword_count": len(keyword_rows),
+        "ad_count": len(ad_rows),
+        "resolved_trials": len(resolved_trials),
+        "skipped": skipped,
+        "needs_url_fix": needs_url_fix,
+        "total_budget": total_budget,
+        "campaign_name": campaign_name,
+    }
+    return files, stats
+
+
+def build_csv_zip(trials: list[dict], snapshot: list[dict]) -> tuple[bytes, dict]:
+    """Build an importable ZIP and return (zip-bytes, stats)."""
+    files, stats = build_importable_csvs(trials, snapshot)
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        # Group by source bucket to keep provenance visible
-        seq = 1
-        for path in csv_paths:
-            bucket = Path(path).parts[-3]
-            original = Path(path).name
-            # Strip leading NNN- from filename so we can renumber globally
-            stripped = re.sub(r"^\d+-", "", original)
-            entry = f"{seq:03d}-{bucket}-{stripped}"
-            with open(path, "rb") as f:
-                zf.writestr(entry, f.read())
-            seq += 1
-        # Add a manifest
         manifest = {
             "generated_at": dt.datetime.now().isoformat(timespec="seconds"),
-            "file_count": seq - 1,
             "source_repo": "FreshlyBakedNYC/automation",
-            "note": "Import files in numeric order via Google Ads Editor.",
+            "issue": "https://github.com/FreshlyBakedNYC/automation/issues/11",
+            "campaign_name": stats.get("campaign_name"),
+            "stats": {k: v for k, v in stats.items() if k not in ("skipped", "needs_url_fix")},
+            "trials_needing_url_fix": stats.get("needs_url_fix", []),
         }
         zf.writestr("MANIFEST.json", json.dumps(manifest, indent=2))
-    return buf.getvalue()
+        for name, content in files.items():
+            zf.writestr(name, content)
+    return buf.getvalue(), stats
 
 
 # ---- Data transformation ----------------------------------------------------
@@ -292,6 +600,27 @@ footer .row {{ display: flex; justify-content: space-between; gap: 12px; flex-wr
   </section>
 
   <section>
+    <h2>📦 What the CSV bundle will create</h2>
+    <div class="cards">
+      <div class="stat"><div class="v {bundle_class}">{bundle_resolved}/{bundle_total}</div><div class="l">Trials resolved to a source ad group</div></div>
+      <div class="stat"><div class="v">{bundle_campaigns}</div><div class="l">New campaign(s)</div></div>
+      <div class="stat"><div class="v">{bundle_ad_groups}</div><div class="l">New ad group(s)</div></div>
+      <div class="stat"><div class="v">{bundle_ads}</div><div class="l">New RSA(s) (Enabled)</div></div>
+      <div class="stat"><div class="v">{bundle_keywords}</div><div class="l">Keyword(s)</div></div>
+      <div class="stat"><div class="v">${bundle_budget:.2f}</div><div class="l">Campaign daily budget</div></div>
+    </div>
+    <div class="card" style="margin-top:12px">
+      <div class="title">Campaign: <span class="tag info">{bundle_campaign_name}</span></div>
+      <div class="sub">All ad groups + ads are Enabled so the Google policy engine
+      reviews them shortly after Ads Editor "Post". Defaults: Search /
+      Google search / English / US / Manual CPC $1.00. Review locations &amp;
+      bid strategy in Ads Editor before posting. Full instructions in
+      the bundle's README.md.</div>
+      {bundle_skipped_html}
+    </div>
+  </section>
+
+  <section>
     <h2>🟢 Persistent positive approvals <span class="count">({persistent_count})</span></h2>
     {persistent_html}
   </section>
@@ -422,14 +751,22 @@ def build_html(out_path: Path) -> Path:
     snapshot = load_latest_snapshot()
     snapshot_date = (snapshot[0].get("snapshot_date") if snapshot else None) or "(none)"
     print(f"  loaded {len(snapshot)} snapshot row(s) (date={snapshot_date})")
-    print(f"  building CSV bundle ZIP...")
-    csv_zip = build_csv_zip()
+    trials = flatten_trials(l2_runs)
+    print(f"  flattened {len(trials)} trial(s) from L2 runs")
+    print(f"  building importable CSV bundle ZIP...")
+    csv_zip, csv_stats = build_csv_zip(trials, snapshot)
     csv_count = 0
     with zipfile.ZipFile(io.BytesIO(csv_zip)) as zf:
         csv_count = sum(1 for n in zf.namelist() if n.lower().endswith(".csv"))
-    print(f"  ZIP contains {csv_count} CSV file(s), {len(csv_zip)} bytes")
+    print(
+        f"  ZIP: {csv_count} CSV(s), {len(csv_zip):,} bytes, "
+        f"{csv_stats.get('resolved_trials', 0)}/{len(trials)} trials resolved, "
+        f"{csv_stats.get('ad_count', 0)} ad row(s)"
+    )
+    if csv_stats.get("skipped"):
+        for name, reason in csv_stats["skipped"]:
+            print(f"    skipped trial {name!r}: {reason}")
 
-    trials = flatten_trials(l2_runs)
     live_by_trial = correlate_live_status(trials, snapshot)
     persistent = detect_persistent_positives(snapshot)
 
@@ -456,6 +793,33 @@ def build_html(out_path: Path) -> Path:
     )
     total_budget = sum(float(t.get("budget") or 0) for t in trials)
 
+    bundle_resolved = csv_stats.get("resolved_trials", 0)
+    bundle_total = len(trials)
+    bundle_class = "good" if bundle_resolved == bundle_total and bundle_total > 0 else ("warn" if bundle_resolved else "bad")
+    skipped_items = csv_stats.get("skipped") or []
+    needs_url_fix = csv_stats.get("needs_url_fix") or []
+    notes_html_parts = []
+    if needs_url_fix:
+        items = "".join(f"<li>{_esc(n)}</li>" for n in needs_url_fix)
+        notes_html_parts.append(
+            f'<div class="sub" style="margin-top:8px;color:var(--warn);">'
+            f"<b>⚠ {len(needs_url_fix)} trial(s)</b> had no Final URL on the "
+            f"source ad (typical for disapproved ads); the bundle uses a "
+            f"placeholder. Replace before posting in Ads Editor:"
+            f'<ul class="snippets">{items}</ul></div>'
+        )
+    if skipped_items:
+        items = "".join(
+            f"<li>{_esc(name)} — {_esc(reason)}</li>" for name, reason in skipped_items
+        )
+        notes_html_parts.append(
+            f'<div class="sub" style="margin-top:8px;color:var(--bad);">'
+            f"<b>Skipped {len(skipped_items)} trial(s)</b> "
+            f'(no matching ad group in the snapshot to clone from):'
+            f'<ul class="snippets">{items}</ul></div>'
+        )
+    bundle_skipped_html = "".join(notes_html_parts)
+
     page = PAGE_TEMPLATE.format(
         csv_b64=base64.b64encode(csv_zip).decode("ascii"),
         generated_at=dt.datetime.now().strftime("%Y-%m-%d %H:%M %Z").strip(),
@@ -465,6 +829,16 @@ def build_html(out_path: Path) -> Path:
         total_variants=total_variants,
         persistent_count=len(persistent),
         total_budget=total_budget,
+        bundle_resolved=bundle_resolved,
+        bundle_total=bundle_total,
+        bundle_class=bundle_class,
+        bundle_campaigns=csv_stats.get("campaign_count", 0),
+        bundle_ad_groups=csv_stats.get("ad_group_count", 0),
+        bundle_ads=csv_stats.get("ad_count", 0),
+        bundle_keywords=csv_stats.get("keyword_count", 0),
+        bundle_budget=csv_stats.get("total_budget", 0.0),
+        bundle_campaign_name=_esc(csv_stats.get("campaign_name") or "(none — no trials resolved)"),
+        bundle_skipped_html=bundle_skipped_html,
         persistent_html=render_persistent(persistent),
         in_flight_count=len(in_flight),
         in_flight_html=render_group(in_flight, "warn", "in flight",
