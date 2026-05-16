@@ -1,7 +1,0 @@
-{
-  "dependencies": {
-    "@types/js-yaml": "^4.0.9",
-    "google-ads-api": "^23.0.0",
-    "js-yaml": "^4.1.1"
-  }
-}
