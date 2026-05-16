@@ -1,37 +1,65 @@
-import { mkdir, readFile } from 'node:fs/promises'
+import { mkdir, writeFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
-import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 
 import { z } from 'zod'
 
-import type { ScreensBannerRefreshJobPayload } from '../../shared/contracts/index.js'
+import {
+  HELIOS_SCREENS_SITE_DEALERS,
+  getHeliosScreensSiteDealer,
+  type ScreensBannerRefreshJobPayload,
+} from '../../shared/contracts/index.js'
 import { appendAuditEvent } from '../../server/audit/appendAuditEvent.js'
 import { getPool } from '../../server/db/pool.js'
 import { withTransaction } from '../../server/db/tx.js'
-import { getWorkerEnv } from '../config/env.js'
 import { pageDave } from '../runtime/pageDave.js'
 import type { JobHandlerContext } from '../runtime/jobRegistry.js'
+import { callSweedRpc } from '../sweed/rpc.js'
 
 export const ScreenBannerArtifactSchema = z.object({
   finishedAt: z.string(),
   mode: z.enum(['apply', 'dry-run']),
-  siteDealers: z.array(z.object({
-    dealerId: z.number().int(),
-    dealerName: z.string(),
-    screens: z.array(z.object({
-      bannerCount: z.number().int(),
-      banners: z.array(z.object({
-        finalEnabled: z.boolean().optional(),
-        finalTotalDuration: z.number().int().optional(),
-        forcedDisabledBecauseZero: z.boolean(),
-        originalEnabled: z.boolean(),
-        originalTotalDuration: z.number().int(),
-      }).passthrough()),
-      screenId: z.number().int(),
-      screenName: z.string(),
-    }).passthrough()),
-  }).passthrough()),
+  siteDealers: z.array(
+    z
+      .object({
+        dealerId: z.number().int(),
+        dealerName: z.string(),
+        screens: z.array(
+          z
+            .object({
+              bannerCount: z.number().int(),
+              banners: z.array(
+                z
+                  .object({
+                    bannerId: z.string(),
+                    bannerName: z.string(),
+                    duration: z.number().int().nullable().optional(),
+                    finalEnabled: z.boolean().optional(),
+                    finalTotalDuration: z.number().int().optional(),
+                    forcedDisabledBecauseZero: z.boolean(),
+                    originalEnabled: z.boolean(),
+                    originalTotalDuration: z.number().int(),
+                    promoActionId: z.string().nullable().optional(),
+                    totalDuration: z.number().int().nullable().optional(),
+                    type: z.string(),
+                  })
+                  .passthrough(),
+              ),
+              screenId: z.number().int(),
+              screenName: z.string(),
+              screenToggle: z
+                .object({
+                  finalEnabled: z.boolean().optional(),
+                  originalEnabled: z.boolean().optional(),
+                })
+                .passthrough()
+                .optional(),
+            })
+            .passthrough(),
+        ),
+      })
+      .passthrough(),
+  ),
   startedAt: z.string(),
 })
 export type ScreenBannerArtifact = z.infer<typeof ScreenBannerArtifactSchema>
@@ -66,6 +94,97 @@ const STAGE_TO_PHASE: Record<string, { phaseIndex: number; phase: string }> = {
   completed: { phaseIndex: 5, phase: 'Completed' },
 }
 
+const ScreenListResponseSchema = z
+  .object({
+    data: z.array(
+      z
+        .object({
+          enabled: z.boolean(),
+          id: z.coerce.number().int().positive(),
+          name: z.string().trim().min(1),
+          totalScreenDuration: z.coerce.number().int().nullable().optional(),
+        })
+        .passthrough(),
+    ),
+  })
+  .passthrough()
+
+const BannerListResponseSchema = z.array(
+  z
+    .object({
+      enabled: z.boolean(),
+      id: z.union([z.string(), z.number()]).transform((value) => String(value)),
+      name: z.string().trim().min(1),
+      duration: z.coerce.number().int().nullable().optional(),
+      ordering: z.coerce.number().int().nullable().optional(),
+      promoActionId: z
+        .union([z.string(), z.number()])
+        .transform((value) => String(value))
+        .nullable()
+        .optional(),
+      totalDuration: z.coerce.number().int().nullable().optional(),
+      type: z.union([
+        z.string().trim().min(1),
+        z.object({ name: z.string().trim().min(1) }).passthrough().transform((value) => value.name),
+      ]),
+    })
+    .passthrough(),
+)
+
+const BannerDetailSchema = z
+  .object({
+    brands: z.unknown().optional(),
+    categories: z.unknown().optional(),
+    cronExpression: z.string().nullable().optional(),
+    duration: z.coerce.number().int().nullable().optional(),
+    enabled: z.boolean(),
+    fromDate: z.string().nullable().optional(),
+    fromTime: z.string().nullable().optional(),
+    id: z.union([z.string(), z.number()]).transform((value) => String(value)),
+    layoutType: z.object({ id: z.coerce.number().int() }).passthrough().nullable().optional(),
+    maxWholesaleCost: z.unknown().optional(),
+    media: z.object({ id: z.string().trim().min(1) }).passthrough().nullable().optional(),
+    minWholesaleCost: z.unknown().optional(),
+    name: z.string().trim().min(1),
+    ordering: z.coerce.number().int().nullable().optional(),
+    productGroups: z.unknown().optional(),
+    productTypes: z.unknown().optional(),
+    products: z.unknown().optional(),
+    promoActionId: z
+      .union([z.string(), z.number()])
+      .transform((value) => String(value))
+      .nullable()
+      .optional(),
+    qualityLines: z.unknown().optional(),
+    screenId: z.coerce.number().int().positive(),
+    sizes: z.unknown().optional(),
+    subCategories: z.unknown().optional(),
+    toDate: z.string().nullable().optional(),
+    toTime: z.string().nullable().optional(),
+    totalDuration: z.coerce.number().int().nullable().optional(),
+    type: z.object({ id: z.coerce.number().int(), name: z.string().trim().min(1) }).passthrough(),
+    usePromoHeader: z.boolean().nullable().optional(),
+  })
+  .passthrough()
+
+type BannerDetail = z.infer<typeof BannerDetailSchema>
+
+interface ScreenSnapshot {
+  enabled: boolean
+  screenId: number
+  screenName: string
+}
+
+interface BannerSnapshot {
+  bannerId: string
+  bannerName: string
+  duration: number | null
+  enabled: boolean
+  promoActionId: string | null
+  totalDuration: number | null
+  type: string
+}
+
 export async function runScreensBannerRefreshJob(
   context: JobHandlerContext,
   payload: ScreensBannerRefreshJobPayload,
@@ -75,9 +194,10 @@ export async function runScreensBannerRefreshJob(
     phase: 'Starting refresh',
     phaseIndex: 1,
     phaseCount: TOTAL_PHASES,
-    message: payload.intent === 'bounce'
-      ? `Starting ${payload.holdSeconds}-second banner/screen bounce.`
-      : 'Starting screens banner refresh.',
+    message:
+      payload.intent === 'bounce'
+        ? `Starting ${payload.holdSeconds}-second banner/screen bounce.`
+        : 'Starting screens banner refresh.',
     completed: null,
     total: null,
   })
@@ -87,7 +207,7 @@ export async function runScreensBannerRefreshJob(
   let summary: ScreenBannerArtifactSummary
   try {
     artifactPath = await runScreensRefreshScript(context.id, payload)
-    artifact = ScreenBannerArtifactSchema.parse(JSON.parse(await readFile(artifactPath, 'utf-8')))
+    artifact = ScreenBannerArtifactSchema.parse(JSON.parse(await readArtifactFile(artifactPath)))
     summary = summarizeScreenBannerArtifact(artifact)
   } catch (error) {
     if (payload.intent === 'bounce') {
@@ -167,98 +287,143 @@ export async function runScreensBannerRefreshJob(
   }
 }
 
+/**
+ * Runs the screens banner refresh / bounce inline (TypeScript only, no python).
+ * Returns the path to a JSON artifact that matches `ScreenBannerArtifactSchema`.
+ */
 export async function runScreensRefreshScript(jobId: number, payload: ScreensBannerRefreshJobPayload): Promise<string> {
-  const env = getWorkerEnv()
-  if (!env.sweedAuthToken) {
-    throw new Error('SWEED_AUTH_TOKEN is required for screens banner refresh jobs.')
-  }
+  const startedAt = new Date().toISOString()
+  const mode: 'apply' | 'dry-run' = payload.mode === 'apply' ? 'apply' : 'dry-run'
+  const targetDealers = resolveTargetDealers(payload.siteDealerIds)
 
-  const artifactDirectory = resolve(process.cwd(), 'runtime-artifacts/screens')
-  await mkdir(artifactDirectory, { recursive: true })
+  await emitStage(jobId, 'starting', payload)
 
-  const outputPath = resolve(
-    artifactDirectory,
-    `screens-banner-refresh-job-${jobId}-${new Date().toISOString().replace(/[:.]/g, '-')}.json`,
-  )
-  const scriptPath = resolve(process.cwd(), '../../screens/refresh_all_sites_screen_banners.py')
-  const args = [scriptPath, '--output', outputPath]
+  const siteDealerArtifacts: ScreenBannerArtifact['siteDealers'] = []
+  const allBanners: { dealerId: number; screenId: number; banner: BannerSnapshot }[] = []
+  const allScreens: { dealerId: number; screen: ScreenSnapshot }[] = []
 
-  if (payload.mode === 'apply') {
-    args.push('--apply')
-  }
-  for (const dealerId of payload.siteDealerIds) {
-    args.push('--dealer-id', String(dealerId))
-  }
-  if (payload.holdSeconds > 0) {
-    args.push('--hold-seconds', String(payload.holdSeconds))
-  }
+  // 1) Read original inventory for every target site/screen/banner.
+  for (const dealer of targetDealers) {
+    const screens = await listScreens(dealer.dealerId)
+    const screenArtifacts: ScreenBannerArtifact['siteDealers'][number]['screens'] = []
 
-  await new Promise<void>((resolvePromise, reject) => {
-    const child = spawn('python3', args, {
-      cwd: process.cwd(),
-      env: {
-        ...process.env,
-        PYTHONUNBUFFERED: '1',
-        SWEED_AUTH_TOKEN: env.sweedAuthToken ?? '',
-      },
-      stdio: ['ignore', 'pipe', 'pipe'],
-    })
-
-    let stdout = ''
-    let stderr = ''
-    let stdoutBuffer = ''
-    let stderrBuffer = ''
-
-    const handleLines = (chunk: string, isError: boolean) => {
-      const text = chunk.toString()
-      const buffer = isError ? stderrBuffer + text : stdoutBuffer + text
-      const lines = buffer.split('\n')
-      const tail = lines.pop() ?? ''
-      if (isError) {
-        stderrBuffer = tail
-      } else {
-        stdoutBuffer = tail
+    for (const screen of screens) {
+      const banners = await listScreenBanners(dealer.dealerId, screen.screenId)
+      for (const banner of banners) {
+        allBanners.push({ dealerId: dealer.dealerId, screenId: screen.screenId, banner })
       }
-      for (const line of lines) {
-        if (line.length === 0) continue
-        if (isError) {
-          console.error(`[screens.banner_refresh][job ${jobId}] ${line}`)
-        } else {
-          console.log(`[screens.banner_refresh][job ${jobId}] ${line}`)
+      allScreens.push({ dealerId: dealer.dealerId, screen })
+
+      screenArtifacts.push({
+        bannerCount: banners.length,
+        banners: banners.map((banner) => ({
+          bannerId: banner.bannerId,
+          bannerName: banner.bannerName,
+          duration: banner.duration ?? null,
+          forcedDisabledBecauseZero: false,
+          originalEnabled: banner.enabled,
+          originalTotalDuration: banner.totalDuration ?? 0,
+          promoActionId: banner.promoActionId ?? null,
+          totalDuration: banner.totalDuration ?? null,
+          type: banner.type,
+        })),
+        screenId: screen.screenId,
+        screenName: screen.screenName,
+        screenToggle: {
+          originalEnabled: screen.enabled,
+        },
+      })
+    }
+
+    siteDealerArtifacts.push({
+      dealerId: dealer.dealerId,
+      dealerName: dealer.dealerName,
+      screens: screenArtifacts,
+    })
+  }
+
+  // 2) On dry-run, just freeze the snapshot and report.
+  if (mode === 'dry-run') {
+    for (const site of siteDealerArtifacts) {
+      for (const screen of site.screens) {
+        for (const banner of screen.banners) {
+          banner.finalEnabled = banner.originalEnabled
+          banner.finalTotalDuration = banner.originalTotalDuration
+          banner.forcedDisabledBecauseZero =
+            banner.originalEnabled === false && banner.originalTotalDuration === 0
         }
-        const stage = parseHeliosStageLine(line)
-        if (stage) {
-          void writeStageProgress(jobId, stage, payload).catch((error) => {
-            console.error(`[screens.banner_refresh][job ${jobId}] failed to record stage progress: ${(error as Error).message}`)
-          })
+        screen.screenToggle = {
+          ...screen.screenToggle,
+          finalEnabled: screen.screenToggle?.originalEnabled ?? false,
         }
       }
     }
+    return writeArtifact(jobId, mode, startedAt, siteDealerArtifacts)
+  }
 
-    child.stdout.on('data', (chunk: Buffer | string) => {
-      const text = chunk.toString()
-      stdout += text
-      handleLines(text, false)
-    })
-    child.stderr.on('data', (chunk: Buffer | string) => {
-      const text = chunk.toString()
-      stderr += text
-      handleLines(text, true)
-    })
-    child.on('error', (error) => {
-      reject(error)
-    })
-    child.on('close', (code) => {
-      if (code === 0) {
-        resolvePromise()
-        return
+  // 3) APPLY mode. Standard bounce: banners off → screens off → hold → screens on → healthy banners back on.
+  if (payload.intent === 'bounce' || payload.intent === 'refresh') {
+    await emitStage(jobId, 'banners_off', payload)
+    for (const entry of allBanners) {
+      if (entry.banner.enabled) {
+        await setBannerEnabled(entry.dealerId, entry.banner.bannerId, false)
+      }
+    }
+
+    await emitStage(jobId, 'hold_started', payload)
+    for (const entry of allScreens) {
+      if (entry.screen.enabled) {
+        await setScreenEnabled(entry.dealerId, entry.screen.screenId, false)
+      }
+    }
+
+    if (payload.holdSeconds > 0) {
+      await sleep(payload.holdSeconds * 1000)
+    }
+
+    await emitStage(jobId, 'hold_finished', payload)
+    for (const entry of allScreens) {
+      if (entry.screen.enabled) {
+        await setScreenEnabled(entry.dealerId, entry.screen.screenId, true)
+      }
+    }
+
+    await emitStage(jobId, 'reenable', payload)
+    for (const entry of allBanners) {
+      const wasHealthyAndEnabled = entry.banner.enabled && (entry.banner.totalDuration ?? 0) > 0
+      if (wasHealthyAndEnabled) {
+        await setBannerEnabled(entry.dealerId, entry.banner.bannerId, true)
+      }
+    }
+  }
+
+  await emitStage(jobId, 'finalize', payload)
+
+  // 4) Re-read state to record final values.
+  for (const site of siteDealerArtifacts) {
+    for (const screen of site.screens) {
+      const post = await listScreenBanners(site.dealerId, screen.screenId)
+      const byId = new Map(post.map((banner) => [banner.bannerId, banner]))
+      for (const banner of screen.banners) {
+        const after = byId.get(banner.bannerId)
+        banner.finalEnabled = after?.enabled ?? banner.originalEnabled
+        banner.finalTotalDuration = after?.totalDuration ?? banner.originalTotalDuration
+        banner.forcedDisabledBecauseZero =
+          banner.originalEnabled === true &&
+          banner.originalTotalDuration === 0 &&
+          banner.finalEnabled === false
       }
 
-      reject(new Error(buildScriptFailureMessage(code, stdout, stderr)))
-    })
-  })
+      const postScreens = await listScreens(site.dealerId)
+      const screenAfter = postScreens.find((candidate) => candidate.screenId === screen.screenId)
+      screen.screenToggle = {
+        ...screen.screenToggle,
+        finalEnabled: screenAfter?.enabled ?? screen.screenToggle?.originalEnabled ?? false,
+      }
+    }
+  }
 
-  return outputPath
+  return writeArtifact(jobId, mode, startedAt, siteDealerArtifacts)
 }
 
 export function summarizeScreenBannerArtifact(artifact: ScreenBannerArtifact): ScreenBannerArtifactSummary {
@@ -299,9 +464,10 @@ export function buildScreenBannerRefreshCompletionSummary(
   payload?: ScreensBannerRefreshJobPayload,
   elapsedSeconds?: number,
 ): string {
-  const intentLabel = payload?.intent === 'bounce'
-    ? `${payload.holdSeconds > 0 ? `${payload.holdSeconds}-second ` : ''}banner/screen bounce`
-    : 'screens banner refresh'
+  const intentLabel =
+    payload?.intent === 'bounce'
+      ? `${payload.holdSeconds > 0 ? `${payload.holdSeconds}-second ` : ''}banner/screen bounce`
+      : 'screens banner refresh'
   const elapsedTail = typeof elapsedSeconds === 'number' ? ` Elapsed ${elapsedSeconds}s.` : ''
   if (mode === 'apply') {
     return `Applied ${intentLabel} across ${summary.siteDealerCount} site(s), ${summary.screenCount} screen(s), and ${summary.bannerCount} banner(s); ${summary.zeroDurationBannerCount} zero-duration banner(s) remained disabled.${elapsedTail}`
@@ -310,14 +476,160 @@ export function buildScreenBannerRefreshCompletionSummary(
   return `Completed ${intentLabel} dry-run across ${summary.siteDealerCount} site(s), ${summary.screenCount} screen(s), and ${summary.bannerCount} banner(s); ${summary.zeroDurationBannerCount} banner(s) are currently disabled with zero duration.${elapsedTail}`
 }
 
-function buildScriptFailureMessage(code: number | null, stdout: string, stderr: string): string {
-  const combinedOutput = [stdout.trim(), stderr.trim()].filter((value) => value.length > 0).join('\n')
-  if (combinedOutput.length === 0) {
-    return `Screens banner refresh script exited with code ${code ?? 'unknown'}.`
+function resolveTargetDealers(siteDealerIds: number[]): ReadonlyArray<{ dealerId: number; dealerName: string }> {
+  if (siteDealerIds.length === 0) {
+    return HELIOS_SCREENS_SITE_DEALERS
+  }
+  return siteDealerIds.map((dealerId) => {
+    const dealer = getHeliosScreensSiteDealer(dealerId)
+    if (!dealer) {
+      throw new Error(`Unknown screens site dealer ${dealerId}.`)
+    }
+    return dealer
+  })
+}
+
+async function listScreens(dealerId: number): Promise<ScreenSnapshot[]> {
+  const result = ScreenListResponseSchema.parse(
+    await callSweedRpc(dealerId, 'store.screen.carousel.list', { page: 1, pageSize: 200 }),
+  )
+  return result.data.map((screen) => ({
+    enabled: screen.enabled,
+    screenId: screen.id,
+    screenName: screen.name,
+  }))
+}
+
+async function listScreenBanners(dealerId: number, screenId: number): Promise<BannerSnapshot[]> {
+  const result = BannerListResponseSchema.parse(
+    await callSweedRpc(dealerId, 'store.screen.carousel.banner.list', { screenId }),
+  )
+  return result.map((banner) => ({
+    bannerId: banner.id,
+    bannerName: banner.name,
+    duration: banner.duration ?? null,
+    enabled: banner.enabled,
+    promoActionId: banner.promoActionId ?? null,
+    totalDuration: banner.totalDuration ?? null,
+    type: banner.type,
+  }))
+}
+
+async function getBannerDetail(dealerId: number, bannerId: string): Promise<BannerDetail> {
+  return BannerDetailSchema.parse(await callSweedRpc(dealerId, 'store.screen.carousel.banner.get', { id: bannerId }))
+}
+
+async function setBannerEnabled(dealerId: number, bannerId: string, enabled: boolean): Promise<void> {
+  const detail = await getBannerDetail(dealerId, bannerId)
+  if (detail.enabled === enabled) {
+    return
+  }
+  await callSweedRpc(dealerId, 'store.screen.carousel.banner.edit', buildBannerEditParams(detail, enabled))
+}
+
+async function setScreenEnabled(dealerId: number, screenId: number, enabled: boolean): Promise<void> {
+  await callSweedRpc(dealerId, 'store.screen.carousel.edit', { enabled, id: screenId })
+}
+
+function buildBannerEditParams(detail: BannerDetail, enabled: boolean): Record<string, unknown> {
+  const params: Record<string, unknown> = {
+    brands: normalizeSelectorIds(detail.brands),
+    categories: normalizeSelectorIds(detail.categories),
+    enabled,
+    fromDate: toDateOnly(detail.fromDate),
+    id: detail.id,
+    maxWholesaleCost: detail.maxWholesaleCost ?? null,
+    minWholesaleCost: detail.minWholesaleCost ?? null,
+    productGroups: normalizeSelectorIds(detail.productGroups),
+    productTypes: normalizeSelectorIds(detail.productTypes),
+    products: normalizeSelectorIds(detail.products),
+    promoActionId: detail.promoActionId ?? null,
+    qualityLines: normalizeSelectorIds(detail.qualityLines),
+    sizes: normalizeSelectorIds(detail.sizes),
+    subCategories: normalizeSelectorIds(detail.subCategories),
+    toDate: toDateOnly(detail.toDate),
+    typeId: detail.type.id,
+    usePromoHeader: detail.usePromoHeader ?? false,
   }
 
-  const truncatedOutput = combinedOutput.length > 800 ? `${combinedOutput.slice(0, 799)}…` : combinedOutput
-  return `Screens banner refresh script exited with code ${code ?? 'unknown'}: ${truncatedOutput}`
+  if (detail.layoutType?.id) {
+    params.layoutTypeId = detail.layoutType.id
+  }
+  if (detail.cronExpression !== undefined) {
+    params.cronExpression = detail.cronExpression
+  }
+  if (detail.fromTime !== undefined) {
+    params.fromTime = detail.fromTime
+  }
+  if (detail.toTime !== undefined) {
+    params.toTime = detail.toTime
+  }
+  if (detail.duration !== undefined && detail.duration !== null) {
+    params.duration = detail.duration
+  }
+
+  return params
+}
+
+function normalizeSelectorIds(value: unknown): unknown {
+  if (value === null || value === undefined) {
+    return null
+  }
+  if (Array.isArray(value) && value.every((item) => item && typeof item === 'object' && 'id' in item)) {
+    return value
+      .map((item) => (item as { id: unknown }).id)
+      .filter((item): item is string | number => typeof item === 'string' || typeof item === 'number')
+  }
+  return value
+}
+
+function toDateOnly(value: string | null | undefined): string | null {
+  if (!value) {
+    return null
+  }
+  const separatorIndex = value.indexOf('T')
+  return separatorIndex === -1 ? value : value.slice(0, separatorIndex)
+}
+
+async function writeArtifact(
+  jobId: number,
+  mode: 'apply' | 'dry-run',
+  startedAt: string,
+  siteDealers: ScreenBannerArtifact['siteDealers'],
+): Promise<string> {
+  const finishedAt = new Date().toISOString()
+  const artifact: ScreenBannerArtifact = {
+    finishedAt,
+    mode,
+    siteDealers,
+    startedAt,
+  }
+  const artifactDirectory = resolve(process.cwd(), 'runtime-artifacts/screens')
+  await mkdir(artifactDirectory, { recursive: true })
+  const outputPath = resolve(
+    artifactDirectory,
+    `screens-banner-refresh-job-${jobId}-${finishedAt.replace(/[:.]/g, '-')}.json`,
+  )
+  await writeFile(outputPath, `${JSON.stringify(artifact, null, 2)}\n`, 'utf-8')
+  return outputPath
+}
+
+async function readArtifactFile(path: string): Promise<string> {
+  const { readFile } = await import('node:fs/promises')
+  return readFile(path, 'utf-8')
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolveSleep) => setTimeout(resolveSleep, ms))
+}
+
+async function emitStage(jobId: number, stage: string, payload: ScreensBannerRefreshJobPayload): Promise<void> {
+  console.log(`[screens.banner_refresh][job ${jobId}] HELIOS_STAGE ${stage}`)
+  await writeStageProgress(jobId, stage, payload).catch((error) => {
+    console.error(
+      `[screens.banner_refresh][job ${jobId}] failed to record stage progress: ${(error as Error).message}`,
+    )
+  })
 }
 
 function buildBounceFailureMessage(jobId: number, payload: ScreensBannerRefreshJobPayload, error: unknown): string {
@@ -334,11 +646,6 @@ async function pageDaveSafe(message: string): Promise<void> {
   }
 }
 
-function parseHeliosStageLine(line: string): string | null {
-  const match = line.match(/HELIOS_STAGE\s+(\w+)/)
-  return match ? match[1] : null
-}
-
 async function writeStageProgress(
   jobId: number,
   stage: string,
@@ -348,13 +655,15 @@ async function writeStageProgress(
   if (!mapped) return
 
   const messages: Record<string, string> = {
-    starting: payload.intent === 'bounce'
-      ? `Starting ${payload.holdSeconds}-second banner/screen bounce.`
-      : 'Starting screens banner refresh.',
+    starting:
+      payload.intent === 'bounce'
+        ? `Starting ${payload.holdSeconds}-second banner/screen bounce.`
+        : 'Starting screens banner refresh.',
     banners_off: 'Turning targeted banners off.',
-    hold_started: payload.holdSeconds > 0
-      ? `Screens off; holding for ${payload.holdSeconds} seconds.`
-      : 'Screens off; immediate continuation.',
+    hold_started:
+      payload.holdSeconds > 0
+        ? `Screens off; holding for ${payload.holdSeconds} seconds.`
+        : 'Screens off; immediate continuation.',
     hold_finished: 'Hold complete; re-enabling banners.',
     reenable: 'Re-enabling banners.',
     finalize: 'Finalizing artifact and readback.',
