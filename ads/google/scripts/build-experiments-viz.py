@@ -553,12 +553,23 @@ def _is_broken(row: dict) -> bool:
 
 
 def _is_healthy(row: dict) -> bool:
-    return (
-        row.get("policy_status") == "approved"
-        and row.get("serving_status") == "eligible"
-        and (row.get("headlines") or [])
-        and (row.get("final_url") or "")
-    )
+    """A clone source must be approved+eligible AND carry enough content
+    to satisfy Google's minimum-RSA validation when imported in Editor.
+    Google rejects RSAs with <3 headlines, <2 descriptions, or no final
+    URL — checking against dedup'd counts because _dedupe_headlines may
+    drop a duplicate before write-out.
+    """
+    if row.get("policy_status") != "approved":
+        return False
+    if row.get("serving_status") != "eligible":
+        return False
+    if not (row.get("final_url") or "").strip():
+        return False
+    if len(_dedupe_headlines(row.get("headlines") or [])) < 3:
+        return False
+    if len(_dedupe_headlines(row.get("descriptions") or [])) < 2:
+        return False
+    return True
 
 
 def _find_clone_source(broken_group: str, snapshot: list[dict]) -> tuple[dict | None, str]:
