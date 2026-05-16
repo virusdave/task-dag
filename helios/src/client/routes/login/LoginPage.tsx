@@ -55,7 +55,7 @@ export function LoginPage() {
           Continue with Google
         </a>
       ) : null}
-      {googleOAuthStatus?.status !== 'configured' ? (
+      {googleOAuthStatus?.status !== 'configured' && session.localDevSignInAvailable ? (
         <form onSubmit={handleDevLoginSubmit} style={{ display: 'grid', gap: '0.75rem', marginTop: '1rem' }}>
           <label style={{ display: 'grid', gap: '0.35rem' }}>
             <span>Local dev sign-in email</span>

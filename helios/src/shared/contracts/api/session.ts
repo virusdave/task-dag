@@ -15,6 +15,7 @@ export type RuntimeDependencyStatus = z.infer<typeof RuntimeDependencyStatusSche
 
 export const SessionEnvelopeSchema = z.object({
   authMode: z.enum(['anonymous', 'session']),
+  localDevSignInAvailable: z.boolean(),
   permissions: PermissionSetSchema,
   runtimeDependencies: z.array(RuntimeDependencyStatusSchema),
   user: SessionUserSchema.nullable(),
