@@ -2337,6 +2337,14 @@ a.tree-nav-branch-label.is-link,
   color: var(--text);
 }
 
+.catalog-maintenance-metrc-line--fatal {
+  color: #b3261e;
+  font-weight: 600;
+  background: rgba(179, 38, 30, 0.08);
+  padding: 2px 8px;
+  border-radius: 6px;
+}
+
 .catalog-maintenance-metrc-tag strong {
   font-weight: 700;
 }

@@ -770,7 +770,14 @@ function VariantRow(props: VariantRowProps) {
 function MetrcTagsLine(props: { metrcTags?: string[] | null }) {
   const metrcTags = Array.isArray(props.metrcTags) ? props.metrcTags : []
   if (metrcTags.length === 0) {
-    return <span className="catalog-maintenance-metrc-line subtle-copy">METRC: —</span>
+    return (
+      <span
+        className="catalog-maintenance-metrc-line catalog-maintenance-metrc-line--fatal"
+        title="No METRC packages are cached for this variant. Use the page-level 'Fix cache' button to enqueue a high-priority refresh from the store-level stock items RPC."
+      >
+        ⚠ METRC: missing — fix cache to repopulate
+      </span>
+    )
   }
   return (
     <span className="catalog-maintenance-metrc-line subtle-copy">
