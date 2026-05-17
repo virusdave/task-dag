@@ -59,6 +59,10 @@ async function pricingIndexLoader() {
   throw redirect(buildHeliosModulePath('pricing', 'generate'))
 }
 
+async function legacyAdsLoader() {
+  throw redirect(buildHeliosModulePath('communications', 'drive-ingest'))
+}
+
 export const router = createBrowserRouter([
   {
     element: <LoginPage />,
@@ -76,7 +80,7 @@ export const router = createBrowserRouter([
         path: 'dashboard',
       },
       {
-        element: <AdsIngestPage />,
+        loader: legacyAdsLoader,
         path: 'ads',
       },
       {
@@ -141,6 +145,10 @@ export const router = createBrowserRouter([
       {
         element: <CommunicationsLandingPage />,
         path: 'communications',
+      },
+      {
+        element: <AdsIngestPage />,
+        path: 'communications/drive-ingest',
       },
       {
         element: <PolicyReplacementReviewPage />,

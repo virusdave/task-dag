@@ -9,6 +9,8 @@ import {
 } from '../../../shared/contracts/index.js'
 import { loadJson, mutateJson } from '../../app/fetchJson.js'
 import { Pill } from '../../components/Pill.js'
+import { useRegisterSidebarSubtree } from '../../components/SidebarNavContext.js'
+import { COMMUNICATIONS_SIDEBAR_SUBTREE } from '../communications/communicationsSidebar.js'
 
 type Op =
   | { kind: 'idle' }
@@ -19,6 +21,7 @@ type Op =
 const STATUS_POLL_MS = 10_000
 
 export function AdsIngestPage() {
+  useRegisterSidebarSubtree('communications', COMMUNICATIONS_SIDEBAR_SUBTREE)
   const [status, setStatus] = useState<AdsStatusResponse | null>(null)
   const [statusError, setStatusError] = useState<string | null>(null)
   const [op, setOp] = useState<Op>({ kind: 'idle' })
@@ -87,7 +90,7 @@ export function AdsIngestPage() {
     <section>
       <div className="page-header">
         <div>
-          <p className="eyebrow">Ads &rsaquo; Ingest</p>
+          <p className="eyebrow">Ads &rsaquo; Drive ingest</p>
           <h2>Google Drive auto-ingest</h2>
           <p className="subtle-copy">
             Helios polls the{' '}
