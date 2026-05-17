@@ -20,9 +20,11 @@
     "@fastify/static": "^8.0.2",
     "@zxing/browser": "^0.2.0",
     "@zxing/library": "^0.22.0",
+    "arcsecond": "^5.0.0",
     "dagre": "^0.8.5",
     "fastify": "^5.2.0",
     "google-auth-library": "^10.4.0",
+    "jsonc-parser": "^3.3.1",
     "pg": "^8.13.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
@@ -36,6 +38,7 @@
     "@types/react": "^18.3.18",
     "@types/react-dom": "^18.3.5",
     "@vitejs/plugin-react": "^4.3.4",
+    "tsx": "^4.22.1",
     "typescript": "^5.7.2",
     "vite": "^6.0.7"
   }
