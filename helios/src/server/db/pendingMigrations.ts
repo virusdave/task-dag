@@ -145,6 +145,24 @@ const SENTINELS: MigrationSentinel[] = [
       return hasTable && hasView
     },
   },
+  {
+    migrationId: '014_sweed_session_tokens',
+    label: 'Sweed session tokens (sweed_session_tokens table) — required for the operator paste-token flow that replaces the legacy SWEED_AUTH_TOKEN env var',
+    check: (db) => tableExists(db, 'sweed_session_tokens'),
+  },
+  {
+    migrationId: '015_sweed_session_tokens_pool',
+    label:
+      'Sweed session tokens pool columns (claimed_at, claimed_by, claim_expires_at) — required so workers can claim/release Sweed sessions exclusively from the pool',
+    check: async (db) => {
+      const [hasClaimedAt, hasClaimedBy, hasClaimExpiresAt] = await Promise.all([
+        columnExists(db, 'sweed_session_tokens', 'claimed_at'),
+        columnExists(db, 'sweed_session_tokens', 'claimed_by'),
+        columnExists(db, 'sweed_session_tokens', 'claim_expires_at'),
+      ])
+      return hasClaimedAt && hasClaimedBy && hasClaimExpiresAt
+    },
+  },
 ]
 
 interface CacheEntry {

@@ -1,22 +1,25 @@
-// Manual verification harness for the Sweed ephemeral-session flow.
+// Manual verification harness for the Sweed session-pool flow.
 //
 // Drives the EXACT same `withSweedSession()` path the worker uses:
-//   1. POST store.auth.user with login + password (mints a fresh
-//      session token).
-//   2. POST store.auth.initial.data.get with that token (read-only
-//      sanity check — confirms the token is alive).
+//   1. CLAIM an available row from sweed_session_tokens (or fall
+//      back to SWEED_AUTH_TOKEN if the pool is empty).
+//   2. POST store.auth.initial.data.get with the claimed token
+//      (read-only sanity check — confirms the session is alive).
 //   3. POST store.auth.dealer.set to the configured state dealer
 //      (read-only side effect; pins the session's dealer context).
-//   4. POST store.auth.end on session teardown (best-effort logout).
+//   4. RELEASE the claimed row back to the pool on session
+//      teardown so the next worker can reuse it. There is NO
+//      Sweed-side logout (no store.auth.end) — the operator-pasted
+//      token must keep working for future claimers.
 //
 // Every RPC is auto-logged into sweed_auth_events via the same
 // recordAuthEvent() path the worker uses, so a run also serves as a
 // live integration test of the auth-event audit trail.
 //
-// Usage (locally, with creds in env):
-//   SWEED_LOGIN_EMAIL=... SWEED_LOGIN_PASSWORD=... \
-//   SWEED_API_URL=https://prime.sweedpos.com/api/ \
+// Usage (locally, with a DB URL pointing at a sweed_session_tokens
+// table that has at least one unexpired row):
 //   DATABASE_URL=postgres://... \
+//   SWEED_API_URL=https://prime.sweedpos.com/api/ \
 //   npx tsx scripts/verify-sweed-session.ts
 //
 // Prints a structured summary to stdout and exits 0 on success, 1
@@ -28,6 +31,7 @@ import { ensureDealerContext } from '../src/worker/sweed/rpc.js'
 import { callSweedRpcRaw } from '../src/worker/sweed/rpc.js'
 import {
   getCurrentSweedAuthToken,
+  getCurrentSweedSessionClaim,
   getCurrentSweedSessionOrigin,
   withSweedSession,
 } from '../src/worker/sweed/session.js'
@@ -38,18 +42,17 @@ interface InitialDataResponse {
 
 async function main(): Promise<void> {
   const env = getWorkerEnv()
-  const hasCredentials = env.sweedLoginEmail !== null && env.sweedLoginPassword !== null
-  const hasLegacy = env.sweedAuthToken !== null
-  console.log('[verify-sweed-session] mode:', hasCredentials ? 'fresh-credentials' : hasLegacy ? 'legacy-shared-token' : 'NONE')
-  if (!hasCredentials && !hasLegacy) {
-    console.error('[verify-sweed-session] FAIL: no Sweed auth configured (need SWEED_LOGIN_EMAIL+SWEED_LOGIN_PASSWORD or SWEED_AUTH_TOKEN).')
-    process.exit(1)
-  }
 
   const summary = await withSweedSession(async () => {
     const sessionOrigin = getCurrentSweedSessionOrigin()
+    const claim = getCurrentSweedSessionClaim()
     const tokenPrefix = (getCurrentSweedAuthToken() ?? '').slice(0, 8)
-    console.log(`[verify-sweed-session] inside session: origin=${sessionOrigin} token=${tokenPrefix}…`)
+    const source = claim?.source ?? 'unknown'
+    const rowId = claim?.rowId ?? null
+    console.log(
+      `[verify-sweed-session] claimed: source=${source} rowId=${rowId ?? '-'} ` +
+        `origin=${sessionOrigin} token=${tokenPrefix}…`,
+    )
 
     // (a) Read-only sanity check.
     const initialData = await callSweedRpcRaw<InitialDataResponse>('store.auth.initial.data.get')
@@ -64,8 +67,9 @@ async function main(): Promise<void> {
     await ensureDealerContext(env.sweedStateDealerId)
     console.log(`[verify-sweed-session] dealer.set OK: pinned to ${env.sweedStateDealerId}`)
 
-    return { sessionOrigin, tokenPrefix, dealerId: env.sweedStateDealerId }
+    return { source, rowId, sessionOrigin, tokenPrefix, dealerId: env.sweedStateDealerId }
   })
+  console.log('[verify-sweed-session] session released back to pool (no Sweed-side logout).')
 
   console.log('[verify-sweed-session] PASS', summary)
 }

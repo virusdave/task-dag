@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 
 import { getWorkerEnv } from '../config/env.js'
 import { RetryableWorkerError } from '../runtime/errors.js'
+import { expireClaimedSweedToken } from './activeSessionToken.js'
 import {
   looksLikeAuthError,
   recordAuthEvent,
@@ -10,6 +11,7 @@ import {
 import {
   getCurrentSweedAuthToken,
   getCurrentSweedDealerId,
+  getCurrentSweedSessionClaim,
   getCurrentSweedSessionOrigin,
 } from './session.js'
 
@@ -28,15 +30,14 @@ const AUTH_RPC_EVENT_KINDS: Readonly<Record<string, SweedAuthEventKind>> = {
 /**
  * Single low-level Sweed JSON-RPC POST. Resolves the auth token in
  * this order:
- *   1. explicit `authToken` passed in (used by the login flow itself
- *      and by callers that already hold a session token)
- *   2. the AsyncLocalStorage cell populated by withSweedSession()
- *   3. the legacy env.sweedAuthToken (shared-token mode)
+ *   1. explicit `authToken` arg (dependency probe / one-off scripts
+ *      that already hold a token they want to validate directly)
+ *   2. the AsyncLocalStorage claim populated by withSweedSession()
+ *   3. the legacy env.sweedAuthToken (smoke-test / bootstrap fallback)
  *
  * If nothing resolves an auth token, throws a clear configuration
- * error. If we silently fall back to the legacy shared token while a
- * job has been migrated to withSweedSession, that's a bug we want to
- * surface, not paper over.
+ * error. Most worker code paths should be inside a withSweedSession
+ * block; (3) only kicks in for early-boot probes / dev scripts.
  */
 export interface PostSweedRpcOptions {
   name: string
@@ -46,26 +47,35 @@ export interface PostSweedRpcOptions {
 
 export async function postSweedRpc<TResult>({ name, params, authToken }: PostSweedRpcOptions): Promise<TResult> {
   const env = getWorkerEnv()
-  const resolvedAuthToken = authToken ?? getCurrentSweedAuthToken() ?? env.sweedAuthToken
+
+  const sessionClaim = getCurrentSweedSessionClaim()
+  let resolvedAuthToken: string | null = null
+  let resolvedTokenRowId: number | null = null
+  let resolvedTokenSource: 'explicit' | 'als' | 'db-pasted' | 'env-fallback' | null = null
+  if (authToken) {
+    resolvedAuthToken = authToken
+    resolvedTokenSource = 'explicit'
+  } else if (sessionClaim !== null) {
+    resolvedAuthToken = sessionClaim.token
+    resolvedTokenRowId = sessionClaim.rowId
+    // Distinguish 'db-pasted' (real pool row, eligible for auth-error
+    // retirement) from 'env-fallback' (env var, nothing to retire).
+    resolvedTokenSource = sessionClaim.source
+  } else {
+    const alsToken = getCurrentSweedAuthToken()
+    if (alsToken) {
+      resolvedAuthToken = alsToken
+      resolvedTokenSource = 'als'
+    } else if (env.sweedAuthToken) {
+      resolvedAuthToken = env.sweedAuthToken
+      resolvedTokenSource = 'env-fallback'
+    }
+  }
 
   if (!resolvedAuthToken) {
     throw new Error(
-      `${name}: no Sweed auth token available. Configure SWEED_LOGIN_EMAIL+SWEED_LOGIN_PASSWORD or SWEED_AUTH_TOKEN, ` +
-        `or wrap the call in withSweedSession().`,
-    )
-  }
-
-  // Diagnostic: legacy shared-token path is racy; log once-per-job so
-  // missed withSweedSession() wrappers don't pass silently.
-  if (
-    getCurrentSweedAuthToken() === null &&
-    getCurrentSweedSessionOrigin() === null &&
-    !authToken &&
-    !warnedAboutLegacyTokenUse
-  ) {
-    warnedAboutLegacyTokenUse = true
-    console.warn(
-      '[sweed] Using legacy shared SWEED_AUTH_TOKEN. Wrap the caller in withSweedSession() to remove the dealer-context race.',
+      `${name}: no Sweed auth token available. Paste a session UUID at /config/sweed/sessions ` +
+        `(or set SWEED_AUTH_TOKEN as a bootstrap fallback), or wrap the call in withSweedSession().`,
     )
   }
 
@@ -77,7 +87,7 @@ export async function postSweedRpc<TResult>({ name, params, authToken }: PostSwe
   // when the deferred logger eventually runs).
   const sessionOrigin =
     getCurrentSweedSessionOrigin() ??
-    (resolvedAuthToken === env.sweedAuthToken ? 'legacy' : null)
+    (resolvedTokenSource === 'db-pasted' || resolvedTokenSource === 'env-fallback' ? 'legacy' : null)
   const sessionDealerId = getCurrentSweedDealerId()
   const explicitEventKind = AUTH_RPC_EVENT_KINDS[name] ?? null
   let httpStatus: number | null = null
@@ -121,10 +131,29 @@ export async function postSweedRpc<TResult>({ name, params, authToken }: PostSwe
       durationMs: Date.now() - startedAt,
       context: {
         rpcId,
+        tokenSource: resolvedTokenSource,
+        tokenRowId: resolvedTokenRowId,
         paramKeys: params ? Object.keys(params) : [],
         ...extraContext,
       },
     })
+  }
+
+  // When a DB-pasted pool token sees an auth-error response, retire
+  // it permanently so the next claim attempt skips it and the
+  // operator gets prompted to paste a fresh one. The claim row is
+  // never returned to the pool in that case.
+  const maybeExpireDbToken = (): void => {
+    if (sessionClaim === null || sessionClaim.source !== 'db-pasted') {
+      return
+    }
+    if (!looksLikeAuthError(errorMessage, httpStatus)) {
+      return
+    }
+    void expireClaimedSweedToken(
+      sessionClaim,
+      `${name} returned auth error: ${errorMessage ?? 'unknown'}`,
+    )
   }
 
   let response: Response
@@ -157,10 +186,12 @@ export async function postSweedRpc<TResult>({ name, params, authToken }: PostSwe
     if (isRetryableStatusCode(response.status)) {
       outcome = 'retryable'
       emit()
+      maybeExpireDbToken()
       throw new RetryableWorkerError(errorMessage)
     }
     outcome = 'error'
     emit()
+    maybeExpireDbToken()
     throw new Error(errorMessage)
   }
 
@@ -174,10 +205,20 @@ export async function postSweedRpc<TResult>({ name, params, authToken }: PostSwe
     throw new RetryableWorkerError(errorMessage)
   }
 
-  if (envelope.error) {
+  // Sweed wraps some pre-auth failures in a NESTED result.error
+  // envelope (see session.ts for the same handling on store.auth.user).
+  // Treat both shapes as RPC errors so an "Auth expired" hiding
+  // inside { result: { error: {...} } } still retires the token.
+  const nestedError =
+    envelope.result && typeof envelope.result === 'object' && envelope.result !== null
+      ? (envelope.result as { error?: { message?: string } }).error
+      : undefined
+  const rpcError = envelope.error ?? nestedError
+  if (rpcError) {
     outcome = 'error'
-    errorMessage = `${name} failed: ${envelope.error.message ?? 'Unknown Sweed RPC error.'}`
+    errorMessage = `${name} failed: ${rpcError.message ?? 'Unknown Sweed RPC error.'}`
     emit()
+    maybeExpireDbToken()
     throw new Error(errorMessage)
   }
   if (envelope.result === undefined) {
@@ -191,8 +232,6 @@ export async function postSweedRpc<TResult>({ name, params, authToken }: PostSwe
   emit()
   return envelope.result
 }
-
-let warnedAboutLegacyTokenUse = false
 
 function isRetryableStatusCode(statusCode: number): boolean {
   return statusCode === 403 || statusCode === 429 || (statusCode >= 500 && statusCode <= 504)
