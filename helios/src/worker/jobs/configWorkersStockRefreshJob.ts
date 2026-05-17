@@ -20,6 +20,12 @@ const StockInventoryItemSchema = z
     isAvailableOnline: z.boolean().nullable().optional(),
     isNotForSale: z.boolean().nullable().optional(),
     isTradeSample: z.boolean().nullable().optional(),
+    // The canonical Sweed field for the METRC tag is
+    // `externalTrackCode` (a UID like "1A41203000005DD000010231").
+    // The `metrcTag` / `metrcPackageTag` / `packageMetrcTag` aliases
+    // are only present in a handful of older Sweed builds and are
+    // kept here as belt-and-suspenders fallbacks.
+    externalTrackCode: z.string().nullable().optional(),
     metrcTag: z.string().nullable().optional(),
     metrcPackageTag: z.string().nullable().optional(),
     packageMetrcTag: z.string().nullable().optional(),
@@ -151,17 +157,13 @@ export async function runConfigWorkersStockRefreshJob(
     try {
       const scan = await scanFullStockForSite(site)
 
-      // The grouped feed at `store.inventory.item.list.grouped` does not
-      // include the per-package `items[]` arrays in every Sweed build, so
-      // METRC tags end up empty when we read only from it. Make a second
-      // pass against the un-grouped `store.inventory.item.list` "stock
-      // items" RPC, which returns one row per package (both in-stock and
-      // out-of-stock) at the store level with `metrcTag` /
-      // `metrcPackageTag` and `stockLocation` populated. Variant -> METRC
-      // is one-to-many (multiple lots / packages per product), so we
-      // aggregate as a deduped array per (site, product).
-      const perPackageMetrcByProductId = await scanPerPackageMetrcForSite(site)
-      mergePerPackageMetrcIntoRows(scan.rowsByProductId, perPackageMetrcByProductId)
+      // The grouped feed at `store.inventory.item.list.grouped`
+      // already returns per-product `items[]` with each package's
+      // `externalTrackCode` (the METRC tag), so we no longer need
+      // a second pass against `store.inventory.item.list`. That
+      // RPC also now rejects bulk enumeration with subcode 816
+      // ("Mandatory filter not found") — it requires a per-product
+      // filter — which made the old fallback impossible anyway.
 
       const summary = await persistSnapshotAndDiff({
         context,
@@ -341,107 +343,9 @@ function accumulateBrandRollup(
   }
 }
 
-/**
- * Per-package shape returned by `store.inventory.item.list` (the
- * un-grouped "stock items" RPC). One row per physical package at the
- * store level. The same `product.id` can appear many times because a
- * single variant can have multiple METRC packages (one-to-many).
- */
-const PerPackageStockItemSchema = z
-  .object({
-    product: z
-      .object({ id: z.coerce.number().int().positive().optional() })
-      .passthrough()
-      .optional(),
-    metrcTag: z.string().nullable().optional(),
-    metrcPackageTag: z.string().nullable().optional(),
-    packageMetrcTag: z.string().nullable().optional(),
-    availableQty: z.coerce.number().nullable().optional(),
-    currentQty: z.coerce.number().nullable().optional(),
-    isNotForSale: z.boolean().nullable().optional(),
-    isTradeSample: z.boolean().nullable().optional(),
-    stockLocation: z
-      .object({
-        id: z.coerce.number().int().optional(),
-        name: z.string().nullable().optional(),
-      })
-      .passthrough()
-      .nullable()
-      .optional(),
-  })
-  .passthrough()
-
-const PerPackageStockItemResponseSchema = z
-  .object({
-    data: z.array(PerPackageStockItemSchema).default([]),
-    totalCount: z.coerce.number().int().min(0).optional(),
-  })
-  .passthrough()
-
-async function scanPerPackageMetrcForSite(
-  site: HeliosPendingPurchaseSiteDealer,
-): Promise<Map<number, string[]>> {
-  const tagsByProductId = new Map<number, Set<string>>()
-  let page = 1
-  while (true) {
-    const raw = await callSweedRpcForDealer(site.dealerId, 'store.inventory.item.list', {
-      page,
-      pageSize: STOCK_INVENTORY_PAGE_SIZE,
-    })
-    const parsed = PerPackageStockItemResponseSchema.parse(raw)
-    for (const item of parsed.data) {
-      const productId = item.product?.id
-      if (!productId) continue
-      const tag =
-        nonEmptyTrimmed(item.metrcTag) ??
-        nonEmptyTrimmed(item.metrcPackageTag) ??
-        nonEmptyTrimmed(item.packageMetrcTag)
-      if (!tag) continue
-      let set = tagsByProductId.get(productId)
-      if (!set) {
-        set = new Set<string>()
-        tagsByProductId.set(productId, set)
-      }
-      set.add(tag)
-    }
-    if (parsed.data.length < STOCK_INVENTORY_PAGE_SIZE) break
-    page += 1
-  }
-  const result = new Map<number, string[]>()
-  for (const [productId, set] of tagsByProductId.entries()) {
-    result.set(productId, [...set].sort())
-  }
-  return result
-}
-
-function mergePerPackageMetrcIntoRows(
-  rowsByProductId: Map<number, ParsedRow>,
-  perPackageMetrcByProductId: Map<number, string[]>,
-): void {
-  for (const [productId, tags] of perPackageMetrcByProductId.entries()) {
-    const existing = rowsByProductId.get(productId)
-    if (existing) {
-      existing.metrcTags = mergeMetrcTags(existing.metrcTags, tags)
-      continue
-    }
-    // Package exists at the store but the grouped feed didn't produce a
-    // row for it (e.g. fully out-of-stock and not surfaced). Insert a
-    // metric-only row so the METRC fatal check passes for in-stock
-    // variants the grouped feed *does* surface that share the same
-    // productId via another lot.
-    rowsByProductId.set(productId, {
-      productId,
-      isOnStock: false,
-      quantity: null,
-      packageCount: null,
-      productName: null,
-      metrcTags: tags,
-    })
-  }
-}
-
 function collectMetrcTagsFromInventoryItems(
   items: ReadonlyArray<{
+    externalTrackCode?: string | null
     metrcTag?: string | null
     metrcPackageTag?: string | null
     packageMetrcTag?: string | null
@@ -454,6 +358,7 @@ function collectMetrcTagsFromInventoryItems(
       continue
     }
     const tag =
+      nonEmptyTrimmed(item.externalTrackCode) ??
       nonEmptyTrimmed(item.metrcTag) ??
       nonEmptyTrimmed(item.metrcPackageTag) ??
       nonEmptyTrimmed(item.packageMetrcTag)
