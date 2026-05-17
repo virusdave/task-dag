@@ -184,4 +184,46 @@ export const PRICING_LADDER_STYLE = `
   border-radius: 50%;
   display: inline-block;
 }
+.ladder-freshness-chip {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 6px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  border: 1px solid transparent;
+  line-height: 1.5;
+}
+.ladder-freshness-chip.is-fresh      { background: #dfeae2; color: #1f5d42; border-color: #c2d8c8; }
+.ladder-freshness-chip.is-stale      { background: #f0e1c2; color: #8b5e11; border-color: #e0cf9d; }
+.ladder-freshness-chip.is-very-stale { background: #f3dde4; color: #8d2f52; border-color: #e6c3cf; }
+.ladder-freshness-chip.is-expired    { background: #f3dde4; color: #8d2f52; border-color: #e0a3ba; }
+.ladder-freshness-chip.is-absent     { background: #eee;    color: #777;    border-color: #d9d9d9; }
+.canonical-pricing-ladder[data-freshness-locked="true"] .canonical-pricing-ladder-track {
+  background: repeating-linear-gradient(
+    135deg,
+    rgba(141, 47, 82, 0.05) 0px,
+    rgba(141, 47, 82, 0.05) 10px,
+    rgba(141, 47, 82, 0.10) 10px,
+    rgba(141, 47, 82, 0.10) 20px
+  );
+}
+.canonical-pricing-ladder-expired-lock {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  padding: 4px 12px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid #e0a3ba;
+  color: #8d2f52;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  z-index: 5;
+  pointer-events: none;
+}
 `

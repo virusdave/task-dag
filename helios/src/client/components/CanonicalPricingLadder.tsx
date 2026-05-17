@@ -16,6 +16,12 @@ export interface CanonicalPricingLadderProps {
   variant?: 'detail' | 'compact'
   headHtml?: string
   onProposedPriceChange?: (nextPrice: number) => void
+  /** Cached competitor-evidence freshness; drives the chip + expired-lock. */
+  freshness?: 'fresh' | 'stale' | 'very_stale' | 'expired' | 'absent'
+  /** Age of the underlying observation, in days. */
+  freshnessAgeDays?: number | null
+  /** Per-row operator opt-in to view & apply expired evidence. */
+  acknowledgeExpiredEvidence?: boolean
 }
 
 export function CanonicalPricingLadder(props: CanonicalPricingLadderProps) {
@@ -32,9 +38,12 @@ export function CanonicalPricingLadder(props: CanonicalPricingLadderProps) {
           marketMedianPostTax: props.marketMedianPostTax,
           competitorListings: props.competitorListings,
         },
-        { 
+        {
           variant: props.variant ?? 'detail',
           headHtml: props.headHtml,
+          freshness: props.freshness,
+          freshnessAgeDays: props.freshnessAgeDays,
+          acknowledgeExpiredEvidence: props.acknowledgeExpiredEvidence,
         },
       ),
     [
@@ -46,6 +55,9 @@ export function CanonicalPricingLadder(props: CanonicalPricingLadderProps) {
       props.competitorListings,
       props.variant,
       props.headHtml,
+      props.freshness,
+      props.freshnessAgeDays,
+      props.acknowledgeExpiredEvidence,
     ],
   )
 

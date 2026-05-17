@@ -21,6 +21,8 @@ import {
   type PricingLadderInput,
 } from './geometry.js'
 
+export type LadderFreshness = 'fresh' | 'stale' | 'very_stale' | 'expired' | 'absent'
+
 export interface RenderOptions {
   /** 'compact' for embedded table-row use; 'detail' for full-width pages. */
   variant?: 'compact' | 'detail'
@@ -32,6 +34,19 @@ export interface RenderOptions {
   includeLegend?: boolean
   /** Show the meta caption row beneath the ladder (default true). */
   includeMeta?: boolean
+  /**
+   * Per-row freshness of the cached competitor evidence backing this
+   * ladder. When provided, a chip is emitted inside the head block.
+   * When `freshness === 'expired'` and `acknowledgeExpiredEvidence !==
+   * true`, competitor diamonds + the IQR band/median tick are
+   * suppressed and a lock overlay is rendered (apply-time consumers
+   * key off `data-freshness-locked="true"` on the root).
+   */
+  freshness?: LadderFreshness
+  /** Age of the cached observation in days; surfaced inside the chip text. */
+  freshnessAgeDays?: number | null
+  /** When true, an `expired` ladder renders normally (with an acknowledged-chip). */
+  acknowledgeExpiredEvidence?: boolean
 }
 
 export function renderPricingLadder(
@@ -56,11 +71,27 @@ export function renderPricingLadderFromGeometry(
   const includeLegend = options.includeLegend !== false
   const includeMeta = options.includeMeta !== false
 
+  const isExpiredLocked =
+    options.freshness === 'expired' && options.acknowledgeExpiredEvidence !== true
+
   const legend = includeLegend ? renderLegend(geometry.bandsPresent) : ''
 
-  const head = options.headHtml
-    ? `<div class="canonical-pricing-ladder-head">${options.headHtml}</div>`
+  const freshnessChipHtml = options.freshness
+    ? renderFreshnessChip(
+        options.freshness,
+        options.freshnessAgeDays ?? null,
+        options.freshness === 'expired' && options.acknowledgeExpiredEvidence === true,
+      )
     : ''
+
+  const headInner = `${options.headHtml ?? ''}${freshnessChipHtml}`
+  const head = headInner ? `<div class="canonical-pricing-ladder-head">${headInner}</div>` : ''
+
+  const rootClasses = [
+    'canonical-pricing-ladder',
+    variant === 'detail' ? 'is-detail' : 'is-compact',
+  ]
+  if (options.freshness) rootClasses.push(`is-freshness-${options.freshness.replace(/_/g, '-')}`)
 
   const dataAttrs = [
     'data-canonical-pricing-ladder=""',
@@ -68,31 +99,79 @@ export function renderPricingLadderFromGeometry(
     `data-ladder-min="${geometry.domainMin.toFixed(4)}"`,
     `data-ladder-max="${geometry.domainMax.toFixed(4)}"`,
     `data-variant="${escapeHtml(variant)}"`,
-  ].join(' ')
+    options.freshness ? `data-freshness="${escapeHtml(options.freshness)}"` : '',
+    isExpiredLocked ? `data-freshness-locked="true"` : '',
+  ]
+    .filter(Boolean)
+    .join(' ')
 
-  const iqrHtml = geometry.iqr
+  const iqrHtml = !isExpiredLocked && geometry.iqr
     ? `<div class="canonical-ladder-iqr" style="left:${geometry.iqr.leftPercent.toFixed(2)}%; width:${geometry.iqr.widthPercent.toFixed(2)}%;"></div>`
     : ''
 
-  const competitorsHtml = geometry.competitors.map(renderCompetitor).join('')
+  const competitorsHtml = isExpiredLocked
+    ? ''
+    : geometry.competitors.map(renderCompetitor).join('')
   const markersHtml = geometry.markers.map(renderMarker).join('')
+  const medianHtml = !isExpiredLocked && geometry.iqr && geometry.stats.medianPostTax !== null
+    ? renderMedianTick(geometry)
+    : ''
+
+  const lockOverlayHtml = isExpiredLocked
+    ? `<div class="canonical-pricing-ladder-expired-lock">expired — acknowledge to view</div>`
+    : ''
 
   const meta = includeMeta ? renderMeta(geometry) : ''
 
-  return `<div class="canonical-pricing-ladder ${variant === 'detail' ? 'is-detail' : 'is-compact'}" ${dataAttrs}>
+  return `<div class="${rootClasses.join(' ')}" ${dataAttrs}>
 ${head}
 ${legend}
 <div class="canonical-pricing-ladder-track">
 <div class="canonical-ladder-baseline"></div>
 ${iqrHtml}
-${geometry.iqr && geometry.stats.medianPostTax !== null ? renderMedianTick(geometry) : ''}
+${medianHtml}
 ${competitorsHtml}
 ${markersHtml}
+${lockOverlayHtml}
 <div class="canonical-ladder-axis axis-min">${formatUsd(geometry.domainMin)}</div>
 <div class="canonical-ladder-axis axis-max">${formatUsd(geometry.domainMax)}</div>
 </div>
 ${meta}
 </div>`
+}
+
+function renderFreshnessChip(
+  freshness: LadderFreshness,
+  ageDays: number | null,
+  acknowledged: boolean,
+): string {
+  const statusClass = `is-${freshness.replace(/_/g, '-')}`
+  let text: string
+  switch (freshness) {
+    case 'fresh': {
+      const hours = ageDays !== null ? Math.max(0, Math.round(ageDays * 24)) : 0
+      text = `fresh (${hours}h)`
+      break
+    }
+    case 'stale': {
+      text = `stale (${(ageDays ?? 0).toFixed(1)}d)`
+      break
+    }
+    case 'very_stale': {
+      text = `very stale (${(ageDays ?? 0).toFixed(1)}d)`
+      break
+    }
+    case 'expired': {
+      text = acknowledged
+        ? `expired (${(ageDays ?? 0).toFixed(1)}d, acknowledged)`
+        : `expired (${(ageDays ?? 0).toFixed(1)}d)`
+      break
+    }
+    case 'absent':
+    default:
+      text = 'no cached evidence'
+  }
+  return `<span class="ladder-freshness-chip ${statusClass}" data-freshness="${escapeHtml(freshness)}">${escapeHtml(text)}</span>`
 }
 
 function renderMedianTick(geometry: LadderGeometry): string {

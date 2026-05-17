@@ -346,6 +346,16 @@ interface MarketResearchPanelProps {
 
 function MarketResearchPanel({ evidence }: MarketResearchPanelProps) {
   const showWarning = evidence.some((entry) => entry.freshness !== 'fresh')
+  const [acknowledgedExpired, setAcknowledgedExpired] = useState<Record<number, boolean>>({})
+  const expiredEntries = evidence.filter((entry) => entry.freshness === 'expired')
+  const unacknowledgedExpiredCount = expiredEntries.reduce(
+    (count, entry) => count + (acknowledgedExpired[entry.productId] ? 0 : 1),
+    0,
+  )
+
+  function toggleAcknowledged(productId: number) {
+    setAcknowledgedExpired((current) => ({ ...current, [productId]: !current[productId] }))
+  }
 
   return (
     <section className="detail-panel wide-panel">
@@ -355,12 +365,23 @@ function MarketResearchPanel({ evidence }: MarketResearchPanelProps) {
           Live market refresh is currently broken (legacy Lit Alerts bearer expired); the evidence below is whatever was last successfully cached. The catalog-wide partner-API refresh is task-B phase 1.
         </p>
       ) : null}
+      {unacknowledgedExpiredCount > 0 ? (
+        <p className="error-text" data-market-evidence-apply-block="true">
+          {`Apply actions are blocked — ${unacknowledgedExpiredCount} product${unacknowledgedExpiredCount === 1 ? '' : 's'} ` +
+            `have expired competitor evidence. Either Refresh now or Acknowledge expired evidence per-product to proceed.`}
+        </p>
+      ) : null}
       {evidence.length === 0 ? (
         <p className="empty-state">No in-group products to research.</p>
       ) : (
         <div className="stacked-list">
           {evidence.map((entry) => (
-            <MarketResearchProductCard entry={entry} key={entry.productId} />
+            <MarketResearchProductCard
+              acknowledgeExpired={acknowledgedExpired[entry.productId] === true}
+              entry={entry}
+              key={entry.productId}
+              onToggleAcknowledgeExpired={() => toggleAcknowledged(entry.productId)}
+            />
           ))}
         </div>
       )}
@@ -373,9 +394,11 @@ function MarketResearchPanel({ evidence }: MarketResearchPanelProps) {
 
 interface MarketResearchProductCardProps {
   entry: GroupProductMarketEvidence
+  acknowledgeExpired: boolean
+  onToggleAcknowledgeExpired: () => void
 }
 
-function MarketResearchProductCard({ entry }: MarketResearchProductCardProps) {
+function MarketResearchProductCard({ entry, acknowledgeExpired, onToggleAcknowledgeExpired }: MarketResearchProductCardProps) {
   const freshness = describeMarketEvidenceFreshness(entry)
   const competitorListings = mapMarketListingsToCompetitorListings(entry.matchedListings)
   const visibleListings = entry.matchedListings.slice(0, 25)
@@ -392,7 +415,19 @@ function MarketResearchProductCard({ entry }: MarketResearchProductCardProps) {
             <span>{entry.livePrice !== null ? `Live ${formatCurrency(entry.livePrice)}` : 'Live —'}</span>
           </div>
         </div>
-        <Pill tone={freshness.tone}>{freshness.label}</Pill>
+        <div className="inline-row wrap-row" style={{ gap: '0.5rem' }}>
+          <Pill tone={freshness.tone}>{freshness.label}</Pill>
+          {entry.freshness === 'expired' ? (
+            <label className="inline-row" style={{ gap: '0.25rem', fontSize: '0.75rem' }}>
+              <input
+                checked={acknowledgeExpired}
+                onChange={onToggleAcknowledgeExpired}
+                type="checkbox"
+              />
+              Acknowledge expired evidence
+            </label>
+          ) : null}
+        </div>
       </header>
 
       {entry.freshness === 'absent' ? (
@@ -403,12 +438,15 @@ function MarketResearchProductCard({ entry }: MarketResearchProductCardProps) {
         <>
           <div style={{ marginTop: '0.75rem' }}>
             <CanonicalPricingLadder
-              productId={entry.productId}
+              acknowledgeExpiredEvidence={acknowledgeExpired}
+              competitorListings={competitorListings}
+              freshness={entry.freshness}
+              freshnessAgeDays={entry.ageDays}
               livePrice={entry.livePrice}
-              proposedPrice={null}
               marketAveragePostTax={entry.averagePostTaxPrice}
               marketMedianPostTax={entry.medianPostTaxPrice}
-              competitorListings={competitorListings}
+              productId={entry.productId}
+              proposedPrice={null}
               variant="compact"
             />
           </div>
