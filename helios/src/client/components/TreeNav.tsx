@@ -32,6 +32,11 @@ export interface TreeNavLeaf {
   /** Router path (e.g. "/communications"). When set, the leaf renders as a
    * react-router NavLink and active state is driven by NavLink. */
   to?: string
+  /** Absolute external URL (e.g. "https://freshlybaked.us/internal/..."). When
+   * set, the leaf renders as a plain `<a>` opened in a new tab with
+   * `rel="noopener noreferrer"`. Mutually exclusive with `to` and
+   * `targetId`; takes precedence over both if multiple are provided. */
+  externalHref?: string
   /** Optional trailing count rendered after the label, e.g. "(47)". */
   count?: number
 }
@@ -292,6 +297,21 @@ interface LeafProps {
 function Leaf({ leaf, depth, activeTargetId, onNavigate }: LeafProps) {
   // Pad the leaf so its label aligns under the branch label (past the +/- box).
   const padLeft = `${depth * 1.1 + 1.5}rem`
+  if (leaf.externalHref) {
+    return (
+      <div className="tree-nav-leaf-row" style={{ paddingLeft: padLeft }}>
+        <a
+          href={leaf.externalHref}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="tree-nav-leaf is-external"
+        >
+          {leaf.label}
+          <span className="tree-nav-count">{formatCount(leaf.count)}</span>
+        </a>
+      </div>
+    )
+  }
   if (leaf.to) {
     return (
       <div className="tree-nav-leaf-row" style={{ paddingLeft: padLeft }}>
