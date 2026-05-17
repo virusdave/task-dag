@@ -9,6 +9,7 @@ import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest }
 import { ZodError } from 'zod'
 
 import { getServerEnv } from '../config/env.js'
+import { startAdsDrivePoller, stopAdsDrivePoller } from '../ads/adsDrivePoller.js'
 import { registerAdsRoutes } from '../routes/ads.js'
 import { registerAnnotationsRoutes } from '../routes/annotations.js'
 import { registerAuthRoutes } from '../routes/auth.js'
@@ -85,6 +86,14 @@ export async function buildServer() {
   } else {
     await server.register(registerApplicationSurface, { prefix: env.appBasePath })
   }
+
+  // Auto-ingest poller: scans the canonical Google Drive ads folder
+  // every ~30s and runs the ingestion pipeline whenever the newest
+  // CSV changes. No-ops cleanly when the API key isn't configured.
+  startAdsDrivePoller()
+  server.addHook('onClose', async () => {
+    stopAdsDrivePoller()
+  })
 
   return server
 }

@@ -27,15 +27,16 @@ Drive file ID
 
 ## How operators use it
 
-1. In the Drive folder above, open the latest Ads Editor export, click
-   **Share** → make sure "Anyone with the link can view" is set.
-2. Copy the file URL (or just the file ID — the part after `/file/d/`
-   or `?id=`).
-3. Visit `https://vpn-helios.freshlybaked.us/ads` (the helios "Ads
-   ingest" page).
-4. Paste the URL/ID into the input, click **Ingest latest from Google
-   Drive**.
-5. The page shows the new public URL when the pipeline finishes.
+1. Drop a new export into the Drive folder above. Make sure the file
+   is shared "Anyone with the link can view" (the folder-level share
+   usually inherits to new uploads).
+2. That's it. Helios polls the folder every ~30s, notices the new
+   newest CSV, and runs the whole pipeline automatically.
+3. The result page is at `https://vpn-helios.freshlybaked.us/ads` —
+   it shows the current latest file, the last successful ingest, and
+   a link to the current public experiments URL.
+
+To force an immediate check, click **Ingest now** on the same page.
 
 For CLI/host-side use, the same pipeline is exposed by:
 
@@ -45,17 +46,42 @@ ads/google/scripts/ingest-drive-export.sh <drive-file-url-or-id>
 
 which prints a JSON object with the resulting public URL on stdout.
 
-## Why we don't auto-pick "latest"
+## One-time setup: Drive API key for auto-discovery
 
-Listing a Drive folder requires either an API key or an OAuth token
-with `drive.readonly` (or stricter) scope. The repo's existing
-`~/.secret/google-ads` refresh token is for the Google Ads API only
-and currently returns `invalid_grant` anyway. Adding a Drive OAuth
-flow + refresh-token storage is a separate project; until then,
-operator-selected file ID is the reliable minimum.
+Listing the Drive folder needs a credential. Because the folder is
+shared "Anyone with the link can view", a read-only **API key** is
+sufficient (no OAuth flow, no refresh tokens, no service account).
+Mint one once and Helios is hands-off forever.
 
-When the manual paste becomes friction, the upgrade path is:
-- add a server-side Drive API client (`googleapis` is already a
-  transitive dep via `google-auth-library`),
-- list the folder by `modifiedTime desc`,
-- pick the newest CSV automatically.
+1. Open https://console.cloud.google.com/apis/credentials in the
+   `freshlybakedus` (or equivalent) GCP project.
+2. **+ Create credentials → API key**. Copy the value.
+3. Click the new key, **Restrict key**:
+   - **API restrictions** → restrict to **Google Drive API**.
+   - **Application restrictions** → optional but recommended:
+     restrict by IP to the helios host's egress IP.
+4. On the helios host:
+   ```bash
+   install -d -m 700 ~/.secret/google-drive
+   printf '%s' '<API_KEY>' > ~/.secret/google-drive/api-key
+   chmod 600 ~/.secret/google-drive/api-key
+   ```
+5. Rotation is one command: overwrite that file. No restart needed —
+   the key is re-read from disk on every poll.
+
+Until the key is in place, the helios `/ads` page surfaces a clear
+"not configured" banner and the manual paste flow stays available
+as a fallback.
+
+## Why polling instead of webhooks
+
+Drive push notifications (`files.watch`) require a public HTTPS
+endpoint Google can reach and channels expire every ~7 days. For a
+single human-scale folder, 30s polling is the right KISS trade-off:
+~2,880 calls/day, well inside the Drive API free tier.
+
+If we ever need sub-30s latency or the folder becomes private,
+upgrade paths are:
+- Service account at `~/.secret/google-drive/service-account.json`
+  (share the folder with the SA email as viewer).
+- `files.watch` push channel renewed by a periodic job.

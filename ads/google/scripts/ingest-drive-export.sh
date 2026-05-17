@@ -33,13 +33,16 @@ SNAPSHOT_PATH="${REPO_ROOT}/ads/google/snapshots/ads-snapshot-live.jsonl"
 HTML_PATH="${REPO_ROOT}/ads/google/outputs/experiments-viz.html"
 LOCK_PATH="/tmp/ads-google-ingest.lock"
 
-# --- Parse Drive file ID from URL or raw ID ----------------------------------
+# --- Parse Drive file ID + optional resource key from URL or raw ID ---------
 # Accepts:
 #   https://drive.google.com/file/d/<ID>/view?usp=sharing
 #   https://drive.google.com/open?id=<ID>
 #   https://drive.usercontent.google.com/download?id=<ID>&...
 #   <ID>   (raw)
+# Plus an optional resourcekey=<KEY> querystring param (some link-shared
+# folders require it on every file fetch).
 FILE_ID=""
+RESOURCE_KEY=""
 if [[ "${INPUT}" =~ /file/d/([A-Za-z0-9_-]+) ]]; then
   FILE_ID="${BASH_REMATCH[1]}"
 elif [[ "${INPUT}" =~ [?\&]id=([A-Za-z0-9_-]+) ]]; then
@@ -50,6 +53,9 @@ else
   echo "Could not parse a Drive file ID from: ${INPUT}" >&2
   echo "Expected a /file/d/<ID> URL, an ?id=<ID> URL, or the raw ID." >&2
   exit 3
+fi
+if [[ "${INPUT}" =~ [?\&]resourcekey=([A-Za-z0-9_-]+) ]]; then
+  RESOURCE_KEY="${BASH_REMATCH[1]}"
 fi
 
 # Single-flight: prevent two clicks from clobbering shared paths.
@@ -64,6 +70,9 @@ fi
 # files without a token. `-fsSL` aborts on HTTP error and follows
 # redirects silently.
 DRIVE_URL="https://drive.usercontent.google.com/download?id=${FILE_ID}&export=download&confirm=t"
+if [[ -n "${RESOURCE_KEY}" ]]; then
+  DRIVE_URL="${DRIVE_URL}&resourcekey=${RESOURCE_KEY}"
+fi
 if ! curl -fsSL -o "${CSV_PATH}" "${DRIVE_URL}"; then
   echo "Failed to download Drive file id=${FILE_ID}" >&2
   echo "Make sure the file is shared 'Anyone with the link can view'." >&2
