@@ -10,9 +10,19 @@ import {
 } from '../../shared/domain/pricingGeneration.js'
 import type { NormalizedCatalogGroupLiveState } from '../catalog/liveState.js'
 import { getWorkerEnv } from '../config/env.js'
+import {
+  hasPartnerApiToken,
+  listBrandProducts,
+  listBrandsForState,
+  listRetailers,
+  type LitAlertsProduct,
+  type LitAlertsRetailer,
+} from '../litalerts/partnerClient.js'
 import { RetryableWorkerError } from '../runtime/errors.js'
 import { pageDave } from '../runtime/pageDave.js'
 import type { PricingDistanceBand, PricingMarketContext, ProductPricingMarketEvidence } from './deterministicPricing.js'
+
+const LIT_ALERTS_PARTNER_STATE_CODE = 'NY'
 
 const GENERIC_SEARCH_WORDS = new Set([
   'all',
@@ -57,66 +67,15 @@ const BRAND_MANUFACTURER_ALIASES = new Map<string, string>([
   ['select', 'select curaleaf'],
 ])
 
-const ManufacturerResponseSchema = z.object({
-  manufacturers: z.array(
-    z.object({
-      id: z.coerce.number().int().positive(),
-      name: z.string().trim().min(1),
-    }),
-  ),
-})
-
-const MenuListingConfigSchema = z.object({
-  price: z.union([z.number(), z.string()]).nullable().optional(),
-  salePrice: z.union([z.number(), z.string()]).nullable().optional(),
-  weight: z.string().nullable().optional(),
-}).passthrough()
-
-const MenuListingSchema = z.object({
-  availability: z.union([z.string(), z.number()]).nullable().optional(),
-  brand: z.string().nullable().optional(),
-  category: z.string().nullable().optional(),
-  configs: z.array(MenuListingConfigSchema).default([]),
-  dispensaryName: z.string().nullable().optional(),
-  name: z.string().nullable().optional(),
-  url: z.string().nullable().optional(),
-}).passthrough()
-
-const MenuListingsResponseSchema = z.object({
-  listings: z.array(MenuListingSchema).default([]),
-})
-
-const DispensaryLocationSchema = z.object({
-  address: z.string().nullable().optional(),
-  city: z.string().nullable().optional(),
-  id: z.coerce.number().int().positive(),
-  latitude: z.coerce.number().nullable().optional(),
-  longitude: z.coerce.number().nullable().optional(),
-  name: z.string().trim().min(1),
-  state: z.string().nullable().optional(),
-  zip: z.string().nullable().optional(),
-})
-
-const DispensaryLocationsResponseSchema = z.array(DispensaryLocationSchema)
-
-const MIDTOWN_REFERENCE_COORDINATES = {
-  latitude: 40.762318,
-  longitude: -73.97676,
-} as const
-
 const MIN_PRICING_ELIGIBLE_COMP_COUNT = 3
 const PRICING_SEARCH_ADAPTATION_MODEL = 'google.gemma-3-27b-it'
 const PRICING_SEARCH_ADAPTATION_MAX_TERMS = 4
-const LITALERTS_FETCH_MAX_ATTEMPTS = 5
-const LITALERTS_RETRY_BASE_DELAY_MS = 1000
 const PRICING_SEARCH_ADAPTATION_MAX_ATTEMPTS = 4
 const PRICING_SEARCH_ADAPTATION_RETRY_BASE_DELAY_MS = 1500
 const SEARCH_ANNOTATION_CANNABINOID_PATTERN = /\b(?:thc|cbd|cbn|cbg|cbc|thca|cbda|delta[- ]?9)\b/i
 const SEARCH_ANNOTATION_POTENCY_PATTERN = /\b\d+(?:\.\d+)?\s*mg\s*(?:thc|cbd|cbn|cbg|cbc|thca|cbda)\b/i
 const SEARCH_ANNOTATION_RATIO_PATTERN = /\b\d+(?:\.\d+)?\s*:\s*\d+(?:\.\d+)?\b/
 
-let dispensaryDirectoryPromise: Promise<DispensaryDirectory> | null = null
-let manufacturersPromise: Promise<z.infer<typeof ManufacturerResponseSchema>['manufacturers']> | null = null
 const brandMatchCache = new Map<string, Promise<BrandMatch | null>>()
 
 interface BrandMatch {
@@ -131,20 +90,16 @@ interface ParsedSizeProfile {
   unitValue: number | null
 }
 
-interface DispensaryDirectoryEntry {
+interface RetailerDirectoryEntry {
   address: string | null
-  city: string | null
-  distanceBand: PricingDistanceBand
-  distanceMiles: number | null
   id: number
   name: string
   normalizedName: string
 }
 
-interface DispensaryDirectory {
-  byId: Map<number, DispensaryDirectoryEntry>
-  byNormalizedName: Map<string, DispensaryDirectoryEntry>
-  withinTenMiles: DispensaryDirectoryEntry[]
+interface RetailerDirectory {
+  byId: Map<number, RetailerDirectoryEntry>
+  byNormalizedName: Map<string, RetailerDirectoryEntry>
 }
 
 interface ListingPriceCandidate {
@@ -186,10 +141,10 @@ const PricingSearchAdaptationEnvelopeSchema = z.object({
 export async function buildPricingMarketContext(
   liveState: NormalizedCatalogGroupLiveState,
 ): Promise<PricingMarketContext> {
-  if (!getWorkerEnv().litAlertsBearerToken) {
+  if (!hasPartnerApiToken()) {
     return {
       availability: 'disabled',
-      note: 'Lit Alerts pricing enrichment is disabled because no bearer token is configured.',
+      note: 'Lit Alerts pricing enrichment is disabled because no Lit Alerts partner API token is configured.',
       productEvidenceById: {},
       searchTerm: null,
     }
@@ -214,16 +169,20 @@ export async function buildPricingMarketContext(
     }
   }
 
+  const retailerDirectory = await loadRetailerDirectory()
+  // Fetch the brand's full product roster once. The partner API returns the
+  // entire statewide product catalog for this brand; we filter it client-side
+  // by search term instead of paginating multiple search-filtered API calls
+  // like the legacy public-api flow did.
+  const brandProducts = await listBrandProducts(brandMatch.brandId, LIT_ALERTS_PARTNER_STATE_CODE)
+  const allBrandListings = flattenBrandProductsToListingCandidates(brandProducts, retailerDirectory)
+
   const categoryId = resolveLitAlertsCategoryId(liveState)
   const deterministicSearchTerms = deriveSearchTerms(liveState)
-  const searchTerm = await resolveSearchTerm(deterministicSearchTerms, brandMatch.brandId, categoryId)
+  const searchTerm = pickFirstMatchingSearchTerm(deterministicSearchTerms, allBrandListings)
   let combinedSearchTerms = searchTerm ? [searchTerm] : []
   let mergedListings = combinedSearchTerms.length > 0
-    ? await collectListingsForSearchTerms({
-        brandId: brandMatch.brandId,
-        categoryId,
-        searchTerms: combinedSearchTerms,
-      })
+    ? filterListingCandidatesBySearchTerms(allBrandListings, combinedSearchTerms)
     : []
   let evidenceByProductId = collectProductEvidence(liveState, mergedListings, buildSearchTermLabel(combinedSearchTerms))
   let adaptationSummary: string | null = null
@@ -240,11 +199,7 @@ export async function buildPricingMarketContext(
     const adaptedSearchTerms = adaptation?.searchTerms.filter((term) => !combinedSearchTerms.includes(term)) ?? []
     if (adaptedSearchTerms.length > 0) {
       combinedSearchTerms = [...combinedSearchTerms, ...adaptedSearchTerms]
-      const adaptedListings = await collectListingsForSearchTerms({
-        brandId: brandMatch.brandId,
-        categoryId,
-        searchTerms: adaptedSearchTerms,
-      })
+      const adaptedListings = filterListingCandidatesBySearchTerms(allBrandListings, adaptedSearchTerms)
       mergedListings = dedupeListingCandidates([...mergedListings, ...adaptedListings])
       evidenceByProductId = collectProductEvidence(liveState, mergedListings, buildSearchTermLabel(combinedSearchTerms))
       adaptationSummary = `Mantle search adaptation added ${adaptedSearchTerms.map((term) => `"${term}"`).join(', ')} because the initial pass left at least one SKU below ${MIN_PRICING_ELIGIBLE_COMP_COUNT} near/mid comps. ${adaptation?.rationale ?? ''}`.trim()
@@ -325,8 +280,6 @@ export async function buildPricingMarketContextWithFailureHandling(input: {
 }
 
 export function resetPricingMarketCachesForTest(): void {
-  dispensaryDirectoryPromise = null
-  manufacturersPromise = null
   brandMatchCache.clear()
 }
 
@@ -345,172 +298,64 @@ async function resolveBrandMatch(brandName: string): Promise<BrandMatch | null> 
     return cachedMatch
   }
 
-  const pendingMatch = loadManufacturers().then((manufacturers) => {
+  const pendingMatch = (async (): Promise<BrandMatch | null> => {
+    const brands = await listBrandsForState(LIT_ALERTS_PARTNER_STATE_CODE)
     const aliasTarget = BRAND_MANUFACTURER_ALIASES.get(normalizedTarget)
     if (aliasTarget) {
-      const aliased = manufacturers.find((manufacturer) => normalizeBrandKey(manufacturer.name) === aliasTarget)
+      const aliased = brands.find((brand) => normalizeBrandKey(brand.name) === aliasTarget)
       if (aliased) {
         return { brandId: aliased.id, brandName: aliased.name }
       }
     }
 
-    const exact = manufacturers.find((manufacturer) => {
-      const manufacturerKey = normalizeBrandKey(manufacturer.name)
-      return manufacturerKey === normalizedTarget || stripParentheticalSuffix(manufacturerKey) === normalizedTargetWithoutParenthetical
+    const exact = brands.find((brand) => {
+      const brandKey = normalizeBrandKey(brand.name)
+      return brandKey === normalizedTarget || stripParentheticalSuffix(brandKey) === normalizedTargetWithoutParenthetical
     })
 
     return exact ? { brandId: exact.id, brandName: exact.name } : null
-  })
+  })()
 
   brandMatchCache.set(normalizedTarget, pendingMatch)
+  // Clear the cached promise on rejection so a transient partner-API failure
+  // does not poison every subsequent pricing/litalerts job in this worker
+  // until restart.
+  pendingMatch.catch(() => {
+    if (brandMatchCache.get(normalizedTarget) === pendingMatch) {
+      brandMatchCache.delete(normalizedTarget)
+    }
+  })
   return pendingMatch
 }
 
-async function loadManufacturers(): Promise<z.infer<typeof ManufacturerResponseSchema>['manufacturers']> {
-  if (manufacturersPromise) {
-    return manufacturersPromise
-  }
-
-  // Clear the cached promise on rejection so a transient failure (HTTP 401
-  // from `/Manufacturers/real`, network blip, etc.) does not poison every
-  // subsequent pricing/litalerts job in this worker until restart. Brand
-  // matches are derived from this fetch, so clear them too.
-  const pending = fetchManufacturers()
-  manufacturersPromise = pending
-  pending.catch(() => {
-    if (manufacturersPromise === pending) {
-      manufacturersPromise = null
-      brandMatchCache.clear()
-    }
-  })
-  return pending
-}
-
-async function fetchManufacturers(): Promise<z.infer<typeof ManufacturerResponseSchema>['manufacturers']> {
-  const env = getWorkerEnv()
-  const response = await fetchLitAlertsJson(
-    `/Manufacturers/real?page=0&pagesize=2000&state=${encodeURIComponent(env.litAlertsStateCode)}`,
-    {
-      method: 'GET',
-      timeoutMs: env.litAlertsRequestTimeoutMs,
-    },
-  )
-  return ManufacturerResponseSchema.parse(response).manufacturers
-}
-
-async function resolveSearchTerm(
+function pickFirstMatchingSearchTerm(
   searchTerms: string[],
-  brandId: number,
-  categoryId: string | null,
-): Promise<string | null> {
-  const dispensaryDirectory = await loadDispensaryDirectory()
-
+  candidateListings: ListingPriceCandidate[],
+): string | null {
   for (const searchTerm of searchTerms) {
-    const listings = await listMenuListings({
-      brandId,
-      categoryId,
-      dispensaryDirectory,
-      dispensaryIds: null,
-      maxPages: 1,
-      pageSize: 100,
-      searchTerm,
-      source: 'statewide',
-      statewide: true,
-    })
-    if (listings.length > 0) {
+    if (filterListingCandidatesBySearchTerms(candidateListings, [searchTerm]).length > 0) {
       return searchTerm
     }
   }
-
   return null
 }
 
-async function collectListingsForSearchTerms(input: {
-  brandId: number
-  categoryId: string | null
-  searchTerms: string[]
-}): Promise<ListingPriceCandidate[]> {
-  const dispensaryDirectory = await loadDispensaryDirectory()
-  const nearbyDispensaryIds = dispensaryDirectory.withinTenMiles.map((dispensary) => dispensary.id)
-  const mergedListings: ListingPriceCandidate[] = []
-
-  for (const searchTerm of input.searchTerms) {
-    const nearbyListings = await listMenuListings({
-      brandId: input.brandId,
-      categoryId: input.categoryId,
-      dispensaryDirectory,
-      dispensaryIds: nearbyDispensaryIds,
-      searchTerm,
-      source: 'nearby',
-      statewide: false,
-    })
-    const statewideListings = await listMenuListings({
-      brandId: input.brandId,
-      categoryId: input.categoryId,
-      dispensaryDirectory,
-      dispensaryIds: null,
-      searchTerm,
-      source: 'statewide',
-      statewide: true,
-    })
-    mergedListings.push(...nearbyListings, ...statewideListings)
+function filterListingCandidatesBySearchTerms(
+  candidateListings: ListingPriceCandidate[],
+  searchTerms: string[],
+): ListingPriceCandidate[] {
+  if (searchTerms.length === 0) {
+    return []
   }
-
-  return dedupeListingCandidates(mergedListings)
-}
-
-async function listMenuListings(input: {
-  brandId: number
-  categoryId: string | null
-  dispensaryDirectory: DispensaryDirectory
-  dispensaryIds: number[] | null
-  maxPages?: number
-  pageSize?: number
-  searchTerm: string
-  source: 'nearby' | 'statewide'
-  statewide: boolean
-}): Promise<ListingPriceCandidate[]> {
-  const env = getWorkerEnv()
-  const listings: ListingPriceCandidate[] = []
-  const pageSize = input.pageSize ?? 250
-  const maxPages = input.maxPages ?? 10
-
-  for (let page = 0; page < maxPages; page += 1) {
-    const payload = {
-      brandIDs: [input.brandId],
-      dispensaryIDs: input.statewide ? null : input.dispensaryIds,
-      filters: {
-        ...(input.categoryId ? { CategoryId: input.categoryId } : {}),
-        ...(input.statewide || !input.dispensaryIds ? {} : { Dispensary: JSON.stringify(input.dispensaryIds) }),
-        Availability: 'All',
-        Brand: `[${input.brandId}]`,
-        Image: 'All',
-        MedRec: input.statewide ? 'All' : 'Rec',
-        Name: input.searchTerm,
-        ShowHiddenDisps: 'false',
-        ShowStaleItems: 'False',
-        StateID: String(env.litAlertsStateId),
-      },
-      page,
-      pagesize: pageSize,
-      sortfields: ['Name'],
-      stateID: env.litAlertsStateId,
-    }
-
-    const response = await fetchLitAlertsJson('/Products/menulistings', {
-      body: JSON.stringify(payload),
-      method: 'POST',
-      timeoutMs: env.litAlertsRequestTimeoutMs,
-    })
-    const parsed = parseMenuListingsResponse(response)
-    const pageListings = flattenListingCandidates(parsed.listings, input.dispensaryDirectory, input.source)
-    listings.push(...pageListings)
-    if (parsed.listings.length < pageSize) {
-      break
-    }
+  const normalizedTerms = searchTerms.map((term) => term.toLowerCase()).filter((term) => term.length > 0)
+  if (normalizedTerms.length === 0) {
+    return []
   }
-
-  return listings.filter((listing) => !/freshly baked/i.test(listing.dispensaryName))
+  const matched = candidateListings.filter((listing) => {
+    const haystack = listing.listingName.toLowerCase()
+    return normalizedTerms.some((term) => haystack.includes(term))
+  })
+  return dedupeListingCandidates(matched)
 }
 
 function collectProductEvidence(
@@ -609,39 +454,53 @@ function collectProductEvidence(
   return result
 }
 
-function flattenListingCandidates(
-  listings: z.infer<typeof MenuListingSchema>[],
-  dispensaryDirectory: DispensaryDirectory,
-  source: 'nearby' | 'statewide',
+function flattenBrandProductsToListingCandidates(
+  products: LitAlertsProduct[],
+  retailerDirectory: RetailerDirectory,
 ): ListingPriceCandidate[] {
   const flattened: ListingPriceCandidate[] = []
 
-  for (const listing of listings) {
-    const listingName = normalizeInlineText(listing.name)
+  for (const product of products) {
+    const listingName = normalizeInlineText(product.name)
     if (!listingName) {
       continue
     }
 
-    const dispensaryName = normalizeInlineText(listing.dispensaryName) || 'Unknown dispensary'
-    const dispensaryDirectoryEntry = dispensaryDirectory.byNormalizedName.get(normalizeDispensaryKey(dispensaryName))
-    for (const config of listing.configs) {
-      const preTaxPrice = parseLitAlertsPrice(config.salePrice) ?? parseLitAlertsPrice(config.price)
+    const retailerEntry = product.retailerId !== null && product.retailerId !== undefined
+      ? retailerDirectory.byId.get(product.retailerId)
+      : undefined
+    const dispensaryName = retailerEntry?.name ?? `Retailer #${product.retailerId ?? 'unknown'}`
+    if (/freshly baked/i.test(dispensaryName)) {
+      continue
+    }
+
+    const url = normalizeInlineText(product.recreationalURL) || normalizeInlineText(product.medicalURL) || null
+    const category = normalizeInlineText(product.category)
+
+    for (const config of product.configs) {
+      const preTaxPrice = parseLitAlertsPrice(config.salePrice) ?? parseLitAlertsPrice(config.normalPrice)
       if (preTaxPrice === null || preTaxPrice <= 0) {
         continue
       }
 
+      const configWeight = buildConfigWeightText(config.amount, config.units)
+      // TODO(market-data-sweep): the partner API does not expose retailer
+      // lat/lng, so every listing comes back as distanceBand='unknown' /
+      // distanceMiles=null. Geocoding retailer addresses (or sourcing
+      // coordinates from a separate provider) is a follow-on enhancement that
+      // will restore the near/mid/far distance-weighted comp ladder.
       flattened.push({
-        availability: normalizeInlineText(listing.availability),
-        category: normalizeInlineText(listing.category),
-        distanceBand: dispensaryDirectoryEntry?.distanceBand ?? 'unknown',
-        distanceMiles: dispensaryDirectoryEntry?.distanceMiles ?? null,
+        availability: null,
+        category,
+        distanceBand: 'unknown',
+        distanceMiles: null,
         dispensaryName,
         listingName,
         postTaxPrice: roundCurrency(preTaxPrice * PRICING_POST_TAX_MULTIPLIER),
         preTaxPrice: roundCurrency(preTaxPrice),
-        size: parseListingSizeProfile(listingName, normalizeInlineText(config.weight)),
-        source,
-        url: normalizeInlineText(listing.url),
+        size: parseListingSizeProfile(listingName, configWeight),
+        source: 'statewide',
+        url,
       })
     }
   }
@@ -649,101 +508,36 @@ function flattenListingCandidates(
   return flattened
 }
 
-async function fetchLitAlertsJson(
-  path: string,
-  input: { body?: string; method: 'GET' | 'POST'; timeoutMs: number },
-): Promise<unknown> {
-  const env = getWorkerEnv()
-  if (!env.litAlertsBearerToken) {
-    throw new Error('LITALERTS_BEARER_TOKEN is required for Lit Alerts pricing enrichment.')
+function buildConfigWeightText(amount: number | string | null | undefined, units: string | null | undefined): string | null {
+  const normalizedAmount = amount === null || amount === undefined ? null : normalizeInlineText(String(amount))
+  const normalizedUnits = normalizeInlineText(units)
+  if (!normalizedAmount && !normalizedUnits) {
+    return null
   }
-
-  return fetchJsonWithRetry({
-    body: input.body,
-    headers: {
-      authorization: `Bearer ${env.litAlertsBearerToken}`,
-      'content-type': 'application/json; charset=utf-8',
-      origin: 'https://brands.litalerts.com',
-      referer: 'https://brands.litalerts.com/',
-    },
-    maxAttempts: LITALERTS_FETCH_MAX_ATTEMPTS,
-    method: input.method,
-    requestLabel: `Lit Alerts ${path}`,
-    retryBaseDelayMs: LITALERTS_RETRY_BASE_DELAY_MS,
-    timeoutMs: input.timeoutMs,
-    url: `${env.litAlertsApiUrl}${path}`,
-  })
+  return `${normalizedAmount ?? ''}${normalizedUnits ? `${normalizedAmount ? ' ' : ''}${normalizedUnits}` : ''}`.trim() || null
 }
 
-async function loadDispensaryDirectory(): Promise<DispensaryDirectory> {
-  if (dispensaryDirectoryPromise) {
-    return dispensaryDirectoryPromise
-  }
-
-  // Clear the cached promise on rejection so a transient Lit Alerts failure
-  // does not poison every subsequent pricing/litalerts job in this worker
-  // until restart.
-  const pending = fetchDispensaryDirectory()
-  dispensaryDirectoryPromise = pending
-  pending.catch(() => {
-    if (dispensaryDirectoryPromise === pending) {
-      dispensaryDirectoryPromise = null
-    }
-  })
-  return pending
+async function loadRetailerDirectory(): Promise<RetailerDirectory> {
+  const retailers = await listRetailers(LIT_ALERTS_PARTNER_STATE_CODE)
+  return buildRetailerDirectory(retailers)
 }
 
-async function fetchDispensaryDirectory(): Promise<DispensaryDirectory> {
-  const env = getWorkerEnv()
-  const response = await fetchLitAlertsJson('/Dispensaries/alllocations', {
-    body: JSON.stringify({
-      MedRecFilter: 2,
-      StateId: env.litAlertsStateId,
-      ZipCodesFilter: null,
-      ZipRadiusFilter: null,
-    }),
-    method: 'POST',
-    timeoutMs: env.litAlertsRequestTimeoutMs,
-  })
-  const parsed = DispensaryLocationsResponseSchema.parse(response)
-  const byId = new Map<number, DispensaryDirectoryEntry>()
-  const byNormalizedName = new Map<string, DispensaryDirectoryEntry>()
-  const withinTenMiles: DispensaryDirectoryEntry[] = []
-
-  for (const dispensary of parsed) {
-    const distanceMiles = dispensary.latitude === null || dispensary.longitude === null || dispensary.latitude === undefined || dispensary.longitude === undefined
-      ? null
-      : roundCurrency(
-          haversineMiles(
-            MIDTOWN_REFERENCE_COORDINATES.latitude,
-            MIDTOWN_REFERENCE_COORDINATES.longitude,
-            dispensary.latitude,
-            dispensary.longitude,
-          ),
-        )
-    const entry: DispensaryDirectoryEntry = {
-      address: normalizeInlineText(dispensary.address),
-      city: normalizeInlineText(dispensary.city),
-      distanceBand: classifyPricingDistanceBand(distanceMiles),
-      distanceMiles,
-      id: dispensary.id,
-      name: dispensary.name,
-      normalizedName: normalizeDispensaryKey(dispensary.name),
+function buildRetailerDirectory(retailers: LitAlertsRetailer[]): RetailerDirectory {
+  const byId = new Map<number, RetailerDirectoryEntry>()
+  const byNormalizedName = new Map<string, RetailerDirectoryEntry>()
+  for (const retailer of retailers) {
+    const entry: RetailerDirectoryEntry = {
+      address: normalizeInlineText(retailer.address) || null,
+      id: retailer.id,
+      name: retailer.name,
+      normalizedName: normalizeDispensaryKey(retailer.name),
     }
     byId.set(entry.id, entry)
     if (entry.normalizedName) {
       byNormalizedName.set(entry.normalizedName, entry)
     }
-    if (entry.distanceMiles !== null && entry.distanceMiles <= PRICING_FAR_DISTANCE_MAX_MILES) {
-      withinTenMiles.push(entry)
-    }
   }
-
-  return {
-    byId,
-    byNormalizedName,
-    withinTenMiles,
-  }
+  return { byId, byNormalizedName }
 }
 
 export function classifyPricingDistanceBand(distanceMiles: number | null): PricingDistanceBand {
@@ -827,10 +621,6 @@ export function buildMedianPrice<TListing extends Pick<ListingPriceCandidate, 'p
     postTaxPrice: medianOfSortedValues(postTaxValues),
     preTaxPrice: medianOfSortedValues(preTaxValues),
   }
-}
-
-export function parseMenuListingsResponse(response: unknown): z.infer<typeof MenuListingsResponseSchema> {
-  return MenuListingsResponseSchema.parse(response)
 }
 
 function deriveEvidenceSource<TListing extends EvidenceSourceListing>(
@@ -1505,23 +1295,6 @@ function buildUnknownErrorMessage(error: unknown): string {
     return error.message
   }
   return 'Unknown pricing market error.'
-}
-
-function haversineMiles(
-  latitudeA: number,
-  longitudeA: number,
-  latitudeB: number,
-  longitudeB: number,
-): number {
-  const toRadians = (value: number) => (value * Math.PI) / 180
-  const earthRadiusMiles = 3958.7613
-  const latitudeDelta = toRadians(latitudeB - latitudeA)
-  const longitudeDelta = toRadians(longitudeB - longitudeA)
-  const normalizedLatitudeA = toRadians(latitudeA)
-  const normalizedLatitudeB = toRadians(latitudeB)
-  const haversine = Math.sin(latitudeDelta / 2) ** 2
-    + Math.cos(normalizedLatitudeA) * Math.cos(normalizedLatitudeB) * Math.sin(longitudeDelta / 2) ** 2
-  return 2 * earthRadiusMiles * Math.asin(Math.sqrt(haversine))
 }
 
 function roundCurrency(value: number): number {
