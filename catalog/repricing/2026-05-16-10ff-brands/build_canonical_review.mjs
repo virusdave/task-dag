@@ -27,7 +27,8 @@ import {
 } from '../../../helios/dist/server/shared/ui/pricing-ladder/index.js'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
-const PROPOSAL_PATH = resolve(HERE, 'reprice_proposal_dryrun.json')
+const ENRICHED_PROPOSAL_PATH = resolve(HERE, 'proposal_with_evidence.json')
+const BASE_PROPOSAL_PATH = resolve(HERE, 'reprice_proposal_dryrun.json')
 const SUMMARY_PATH = resolve(HERE, 'reprice_summary_dryrun.json')
 const OUT_PATH = resolve(HERE, 'review.html')
 
@@ -72,45 +73,97 @@ function renderLadderForProduct(product) {
   const proposed = product.proposedPrice
   if (current === null && proposed === null) return ''
   const delta = fmtDelta(current, proposed)
+
+  // Map cached evidence into the canonical CompetitorListingInput shape.
+  const evidence = product.marketEvidence
+  const matchedListings = evidence?.matchedListings ?? []
+  const competitorListings = matchedListings.map((listing, index) => ({
+    listingId: `${product.productId}:${index}`,
+    postTaxPrice: Number(listing.postTaxPrice),
+    distanceMiles: listing.distanceMiles ?? null,
+    dispensaryName: listing.dispensaryName ?? null,
+    dispensaryAddress: null,
+    listingName: listing.listingName ?? null,
+    url: listing.url ?? null,
+    eligibleForPricing: listing.eligibleForPricing !== false,
+  })).filter((l) => Number.isFinite(l.postTaxPrice) && l.postTaxPrice > 0)
+
+  let cachedNote = ''
+  if (product.marketCacheStatus === 'absent') {
+    cachedNote = '<span class="ladder-cache-tag absent">no cached market evidence</span>'
+  } else if (product.marketCacheStatus === 'very_stale') {
+    cachedNote = `<span class="ladder-cache-tag very-stale">market evidence VERY stale (${product.marketCacheAgeDays}d)</span>`
+  } else if (product.marketCacheStatus === 'stale') {
+    cachedNote = `<span class="ladder-cache-tag stale">market evidence stale (${product.marketCacheAgeDays}d)</span>`
+  } else if (product.marketCacheStatus === 'fresh') {
+    cachedNote = `<span class="ladder-cache-tag fresh">market evidence fresh (${product.marketCacheAgeDays}d)</span>`
+  }
+
   const headHtml = `<span class="ladder-head-metric">
     Current ${escapeHtml(fmtMoney(current))} (${escapeHtml(fmtPct(product.currentGmPercent))} GM)
     →
     <strong>Proposed ${escapeHtml(fmtMoney(proposed))}</strong>
     (${escapeHtml(fmtPct(product.proposedGmPercent))} GM)
     <span class="ladder-head-delta ${delta.cls}">${delta.text}</span>
+    ${cachedNote}
   </span>`
   return renderPricingLadder(
     {
       productId: product.productId,
       livePrice: current ?? null,
       proposedPrice: proposed ?? null,
-      marketAveragePostTax: null,
-      marketMedianPostTax: null,
-      competitorListings: [],
+      marketAveragePostTax: evidence?.averagePostTaxPrice ?? null,
+      marketMedianPostTax: evidence?.medianPostTaxPrice ?? null,
+      competitorListings,
     },
     {
       variant: 'compact',
       headHtml,
       includeLegend: false,
-      includeMeta: false,
+      includeMeta: competitorListings.length > 0,
       productLabel: product.name ?? `Product ${product.productId}`,
     },
   )
 }
 
 async function main() {
+  let proposalPath = ENRICHED_PROPOSAL_PATH
+  try {
+    await readFile(ENRICHED_PROPOSAL_PATH)
+  } catch {
+    proposalPath = BASE_PROPOSAL_PATH
+    console.warn(`No enriched proposal at ${ENRICHED_PROPOSAL_PATH}; falling back to ${BASE_PROPOSAL_PATH}`)
+  }
   const [proposal, summary] = await Promise.all([
-    readFile(PROPOSAL_PATH, 'utf8').then(JSON.parse),
+    readFile(proposalPath, 'utf8').then(JSON.parse),
     readFile(SUMMARY_PATH, 'utf8').then(JSON.parse),
   ])
 
   let totalCurrent = 0
   let totalProposed = 0
+  let productsWithDiamonds = 0
+  let totalDiamonds = 0
+  let productsStale = 0
+  let productsVeryStale = 0
+  let productsAbsent = 0
+  let productsFresh = 0
   for (const group of proposal.groups) {
     for (const product of group.products) {
       if (product.action === 'edit' && product.currentPrice != null && product.proposedPrice != null) {
         totalCurrent += Number(product.currentPrice)
         totalProposed += Number(product.proposedPrice)
+      }
+      const n = product.marketEvidence?.matchedListings?.length ?? 0
+      if (n > 0) {
+        productsWithDiamonds += 1
+        totalDiamonds += n
+      }
+      switch (product.marketCacheStatus) {
+        case 'fresh': productsFresh += 1; break
+        case 'stale': productsStale += 1; break
+        case 'very_stale': productsVeryStale += 1; break
+        case 'absent': productsAbsent += 1; break
+        default: break
       }
     }
   }
@@ -179,6 +232,12 @@ async function main() {
   .ladder-head-metric{font-size:13px}
   .ladder-head-metric strong{color:var(--edit)}
   .ladder-head-delta{margin-left:6px;font-weight:600}
+  .ladder-cache-tag{display:inline-block;margin-left:8px;padding:1px 6px;
+        border-radius:6px;font-size:10px;font-weight:600;letter-spacing:0.02em}
+  .ladder-cache-tag.fresh{background:#dfeae2;color:#1f5d42}
+  .ladder-cache-tag.stale{background:#f0e1c2;color:#8b5e11}
+  .ladder-cache-tag.very-stale{background:#f3dde4;color:#8d2f52}
+  .ladder-cache-tag.absent{background:#eee;color:#777}
   .delta-up{color:var(--up)}
   .delta-down{color:var(--down)}
   .delta-zero{color:var(--muted)}
@@ -216,10 +275,20 @@ async function main() {
     <code>store.distributor.product</code> row at the state dealer.
     <br><br>
     Each variant below renders the canonical
-    <code>renderPricingLadder()</code> control: live price marker (right
-    side label) and proposed price marker (with a numeric label). The
-    market-evidence rail is intentionally empty — this exercise is purely
-    cost-driven, not market-driven.
+    <code>renderPricingLadder()</code> control: live price marker,
+    proposed price marker, and (when available) cached competitor menu
+    listings as diamonds positioned by post-tax price and colored by
+    distance band.
+    <br><br>
+    <strong>Market-evidence caveat.</strong> Diamonds are sourced from
+    <code>helios.litalerts_competitor_observations</code> and are
+    typically <em>11 days stale</em> right now — the legacy
+    brands-console bearer at <code>~/.secret/litalerts/bearer-token</code>
+    has expired and its Cognito refresh token has been revoked, so a
+    live refresh can't run. The proposal&apos;s 67.7% target is purely
+    cost-driven so the diamonds are context, not input to the math.
+    Replacing this cached-evidence path with a live partner-API +
+    geocoding sweep is design item (B), being scheduled separately.
   </div>
 
   <div class="stats">

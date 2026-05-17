@@ -1,164 +1,177 @@
 #!/usr/bin/env node
 /**
- * Enrich the reprice proposal with live competitor menu listings via the
- * canonical Helios `buildPricingMarketContext()` worker module, so the
- * canonical pricing-ladder UI in the review packet can render the
- * competitor diamonds (not just the live/proposed markers).
+ * Enrich the reprice proposal with whatever competitor menu listings
+ * Helios already has cached in `litalerts_competitor_observations`,
+ * so the canonical pricing-ladder UI in the review packet can draw the
+ * diamonds.
  *
- * Strategy: re-normalize the live Sweed group detail through the
- * canonical `normalizeCatalogGroupDetail()` (the same path the catalog
- * mirror takes) instead of round-tripping through the Helios DB, since
- * TigerData is firewalled from this host's egress IPs. Then feed that
- * NormalizedCatalogGroupLiveState into the canonical
- * `buildPricingMarketContext()`, which talks to Lit Alerts using the
- * legacy brands-console bearer at `~/.secret/litalerts/bearer-token`.
+ * For each proposal product:
+ *   1. Pull the most recent `succeeded` row from
+ *      `litalerts_competitor_observations`.
+ *   2. Use the `evidence_json` (which already has the
+ *      `matchedListings[]` shape the canonical ladder consumes — name,
+ *      url, distanceMiles, postTaxPrice, dispensaryName, etc.).
+ *   3. Annotate stale rows so the review caller can warn about them.
  *
- * Writes `proposal_with_evidence.json` next to this script. Does NOT
- * mutate the original dry-run proposal artefacts.
+ * Does NOT attempt to live-refresh — that requires the still-to-be-
+ * built partner-API + geocoding sweep system (see task-dag for "B").
+ * Live-refresh through the legacy `buildPricingMarketContext()` is
+ * blocked: the brands-console bearer at
+ * `~/.secret/litalerts/bearer-token` has expired and its Cognito
+ * refresh token has been revoked.
+ *
+ * Writes `proposal_with_evidence.json` next to this script. Read-only
+ * against TigerData; no live network calls.
  */
 
 import { readFile, writeFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import { dirname, resolve } from 'node:path'
+import { readFileSync } from 'node:fs'
 
-import {
-  buildPricingMarketContext,
-} from '../../../helios/dist/server/worker/pricing/litAlertsMarket.js'
-import {
-  normalizeCatalogGroupDetail,
-} from '../../../helios/dist/server/worker/catalog/liveState.js'
+import pg from '../../../helios/node_modules/pg/lib/index.js'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const PROPOSAL_PATH = resolve(HERE, 'reprice_proposal_dryrun.json')
 const OUT_PATH = resolve(HERE, 'proposal_with_evidence.json')
 
-const SWEED_API_URL = 'https://prime.sweedpos.com/api/'
-const SWEED_AUTH_TOKEN = '74a71554-e0ef-4fe6-bdc0-d02ad68db483'
-const STATE_DEALER_ID = 210248
+// 3 days per the proposed sweep policy: anything older is considered
+// stale enough to warrant a fresh refresh.
+const STALENESS_DAYS = 3
 
-function randomId() {
-  return crypto.randomUUID()
-}
-
-async function sweedCall(name, params = {}) {
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    const response = await fetch(SWEED_API_URL, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', 'user-agent': 'amp/reprice-enrichment' },
-      body: JSON.stringify({ auth: SWEED_AUTH_TOKEN, name, params, id: randomId() }),
-    })
-    if (response.ok) {
-      const body = await response.json()
-      if (body.error) {
-        throw new Error(`${name} failed: ${JSON.stringify(body.error)}`)
-      }
-      if (!('result' in body)) {
-        throw new Error(`${name} returned unexpected payload`)
-      }
-      return body.result
-    }
-    if (![403, 429, 500, 502, 503, 504].includes(response.status) || attempt === 2) {
-      throw new Error(`${name} HTTP ${response.status}`)
-    }
-    await new Promise((r) => setTimeout(r, 1000 + attempt * 1000))
-  }
-  throw new Error(`${name} exceeded retry budget`)
-}
-
-async function ensureStateContext() {
-  await sweedCall('store.auth.dealer.set', { dealerId: STATE_DEALER_ID })
+function readDatabaseUrl() {
+  if (process.env.DATABASE_URL) return process.env.DATABASE_URL
+  const credsFile = `${process.env.HOME}/.secret/tigerdata/tiger-cloud-db-94793-credentials.txt`
+  const text = readFileSync(credsFile, 'utf8')
+  const match = text.match(/postgres(?:ql)?:\/\/[^\s"'`]+/)
+  if (!match) throw new Error(`No postgres URL in ${credsFile}`)
+  return match[0]
 }
 
 async function main() {
   const proposal = JSON.parse(await readFile(PROPOSAL_PATH, 'utf8'))
 
-  await ensureStateContext()
+  const pool = new pg.Pool({ connectionString: readDatabaseUrl(), max: 4 })
 
+  const allProductIds = []
+  for (const group of proposal.groups) {
+    for (const product of group.products) {
+      allProductIds.push(product.productId)
+    }
+  }
+
+  console.log(`Looking up cached observations for ${allProductIds.length} products...`)
+
+  // One query: most-recent succeeded observation per product.
+  const observationsResult = await pool.query(
+    `select distinct on (product_id)
+       product_id, brand_name, group_name, category_name,
+       availability, listing_count, near_listing_count,
+       mid_listing_count, far_listing_count,
+       evidence_json, captured_at, search_term_label, notes
+     from litalerts_competitor_observations
+     where product_id = ANY($1::int[]) and status = 'succeeded'
+     order by product_id, captured_at desc`,
+    [allProductIds],
+  )
+  const observationByProductId = new Map()
+  for (const row of observationsResult.rows) {
+    // pg returns bigint as string by default; normalize to number to match
+    // the integer productId in the proposal JSON.
+    observationByProductId.set(Number(row.product_id), row)
+  }
+
+  console.log(
+    `Found cached observations for ${observationByProductId.size}/${allProductIds.length} products.`,
+  )
+
+  const now = new Date()
   const enriched = {
     ...proposal,
-    enrichedAt: new Date().toISOString(),
+    enrichedAt: now.toISOString(),
+    enrichmentSource: 'helios.litalerts_competitor_observations (cached)',
+    enrichmentStalenessThresholdDays: STALENESS_DAYS,
     groups: [],
   }
 
-  let groupIndex = 0
-  const totalGroups = proposal.groups.length
+  let groupsWithEvidence = 0
+  let productsWithEvidence = 0
+  let productsTotal = 0
+  let totalListings = 0
+  let staleProducts = 0
+  let veryStaleProducts = 0
+
   for (const group of proposal.groups) {
-    groupIndex += 1
-    let availability = 'unknown'
-    let searchTerm = null
-    let note = null
-    let productEvidenceById = {}
-    let liveState = null
-
-    try {
-      const detail = await sweedCall('store.product.group.get', { id: group.groupId })
-      liveState = normalizeCatalogGroupDetail(detail)
-    } catch (error) {
-      note = `Failed to fetch/normalize group ${group.groupId}: ${error.message}`
-      availability = 'error'
-    }
-
-    if (liveState) {
-      try {
-        const marketContext = await buildPricingMarketContext(liveState)
-        availability = marketContext.availability
-        searchTerm = marketContext.searchTerm
-        note = marketContext.note
-        productEvidenceById = marketContext.productEvidenceById ?? {}
-      } catch (fetchError) {
-        availability = 'error'
-        note = `buildPricingMarketContext failed: ${fetchError.message}`
-      }
-    }
-
     const enrichedProducts = group.products.map((product) => {
-      const evidence = productEvidenceById[product.productId] ?? null
-      return { ...product, marketEvidence: evidence }
+      productsTotal += 1
+      const observation = observationByProductId.get(product.productId)
+      if (!observation) {
+        return { ...product, marketEvidence: null, marketCacheStatus: 'absent' }
+      }
+
+      const evidence = observation.evidence_json ?? {}
+      const matchedListings = Array.isArray(evidence.matchedListings)
+        ? evidence.matchedListings
+        : []
+      const capturedAt = new Date(observation.captured_at)
+      const ageMs = now.getTime() - capturedAt.getTime()
+      const ageDays = ageMs / 86_400_000
+      const isStale = ageDays > STALENESS_DAYS
+      const isVeryStale = ageDays > STALENESS_DAYS * 2
+      if (isStale) staleProducts += 1
+      if (isVeryStale) veryStaleProducts += 1
+      if (matchedListings.length > 0) {
+        productsWithEvidence += 1
+        totalListings += matchedListings.length
+      }
+
+      return {
+        ...product,
+        marketEvidence: {
+          matchedListings,
+          averagePostTaxPrice: evidence.averagePostTaxPrice ?? null,
+          medianPostTaxPrice: evidence.medianPostTaxPrice ?? null,
+          listingCount: evidence.listingCount ?? matchedListings.length,
+          pricingEligibleListingCount:
+            evidence.pricingEligibleListingCount ?? matchedListings.filter((l) => l.eligibleForPricing).length,
+          searchTerm: evidence.searchTerm ?? observation.search_term_label,
+          source: evidence.source ?? null,
+        },
+        marketCacheStatus: isStale
+          ? (isVeryStale ? 'very_stale' : 'stale')
+          : 'fresh',
+        marketCacheCapturedAt: observation.captured_at,
+        marketCacheAgeDays: Math.round(ageDays * 10) / 10,
+        marketAvailability: observation.availability,
+        marketSearchTerm: observation.search_term_label,
+        marketNote: observation.notes,
+      }
     })
 
-    const listingCount = Object.values(productEvidenceById).reduce(
-      (sum, ev) => sum + (ev?.matchedListings?.length ?? 0),
-      0,
+    const groupHasEvidence = enrichedProducts.some(
+      (p) => (p.marketEvidence?.matchedListings?.length ?? 0) > 0,
     )
-    console.log(
-      `[${groupIndex}/${totalGroups}] ${group.brandName} / ${group.groupName} (sweed=${group.groupId}) ` +
-      `→ ${availability} · listings=${listingCount}` +
-      (note ? ` · ${note.slice(0, 90)}` : ''),
-    )
+    if (groupHasEvidence) groupsWithEvidence += 1
 
-    enriched.groups.push({
-      ...group,
-      marketAvailability: availability,
-      marketSearchTerm: searchTerm,
-      marketNote: note,
-      products: enrichedProducts,
-    })
+    enriched.groups.push({ ...group, products: enrichedProducts })
   }
 
   await writeFile(OUT_PATH, JSON.stringify(enriched, null, 2) + '\n')
-  console.log(`\nWrote ${OUT_PATH}`)
+  await pool.end()
 
-  // Summary
-  let totalListings = 0
-  let groupsWithListings = 0
-  let productsWithListings = 0
-  let productsTotal = 0
-  for (const group of enriched.groups) {
-    let listingsHere = 0
-    for (const product of group.products) {
-      productsTotal += 1
-      const n = product.marketEvidence?.matchedListings?.length ?? 0
-      if (n > 0) productsWithListings += 1
-      listingsHere += n
-    }
-    if (listingsHere > 0) groupsWithListings += 1
-    totalListings += listingsHere
-  }
+  console.log(`\nSUMMARY:`)
   console.log(
-    `\nSUMMARY: ${totalListings} total competitor listings across ` +
-    `${productsWithListings}/${productsTotal} products in ` +
-    `${groupsWithListings}/${enriched.groups.length} groups.`,
+    `  Products with cached competitor listings: ${productsWithEvidence}/${productsTotal}`,
   )
+  console.log(
+    `  Total competitor listings across all products: ${totalListings}`,
+  )
+  console.log(
+    `  Groups with at least one product with evidence: ${groupsWithEvidence}/${proposal.groups.length}`,
+  )
+  console.log(`  Stale (>${STALENESS_DAYS}d): ${staleProducts}`)
+  console.log(`  Very stale (>${STALENESS_DAYS * 2}d): ${veryStaleProducts}`)
+  console.log(`\nWrote ${OUT_PATH}`)
 }
 
 main().catch((error) => {
