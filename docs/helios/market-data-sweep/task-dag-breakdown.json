@@ -1,0 +1,70 @@
+[
+  {
+    "title": "Partner-API client (helios/src/worker/litalerts/partnerClient.ts)",
+    "description": "Thin typed wrapper around https://partnerapi.litalerts.com. Reads token from ~/.secret/litalerts/partner-api-token (or LITALERTS_PARTNER_API_TOKEN). Implements the endpoints actually used by the pricing pipeline: /v1/brands, /v1/brands/{brandId}/products?state=NY, /v1/retailers?state=NY, /v1/retailers/{retailerId}/products?state=NY, /v1/categories, /v1/subcategories. Small in-process LRU on the slowly-changing dictionary calls. Zod-validated response types. Unit tests at partnerClient.test.ts with recorded fixtures.",
+    "type": "leaf",
+    "status": "pending"
+  },
+  {
+    "title": "Migrate buildPricingMarketContext() to partner API",
+    "description": "Refactor helios/src/worker/pricing/litAlertsMarket.ts so that buildPricingMarketContext() uses partnerClient instead of the legacy public-api.litalerts.com bearer flow. Per-retailer NY fan-out replaces /Products/menulistings. Output shape (PricingMarketContext, ProductPricingMarketEvidence, matchedListings) must remain identical so all downstream readers (deterministicPricing, configWorkersLitalertsRefreshJob, canonical pricing ladder, repricing reviews) keep working unchanged. Update litAlertsMarket.test.ts to mock partnerClient at the same boundary. Delete legacy bearer/refresh-token rotation scripts in litalerts/ once tests are green and add a README note pointing rotators at the agenix partner-API flow.",
+    "type": "leaf",
+    "status": "pending",
+    "dependencies": ["<phase1-partner-client>"]
+  },
+  {
+    "title": "Schema migration: queue priority + observation freshness columns",
+    "description": "Add columns to pending_litalerts_refresh_queue (priority smallint default 100, next_run_at timestamptz, enqueue_reason text default 'rolling', alarm_class text). Add columns to litalerts_competitor_observations (expires_at timestamptz not null, next_refresh_at timestamptz, images_jsonb, description_text, competitor_urls_jsonb). Backfill expires_at = captured_at + interval '4 days' for existing rows. Provide a forward-only migration file and a tested rollback path.",
+    "type": "leaf",
+    "status": "pending"
+  },
+  {
+    "title": "vw_pricing_evidence_freshness view + configQueries surface",
+    "description": "Create vw_pricing_evidence_freshness joining catalog_groups, the catalog products array, and litalerts_competitor_observations. Exposes per-product freshness enum (fresh|stale|very_stale|absent|expired) plus alarm-class booleans (is_in_stock, is_in_pending_purchase, is_brand_of_pending_purchase). Update helios/src/server/db/queries/configQueries.ts to read evidence via this view so freshness logic lives in one place. Unit tests against seed fixtures covering every freshness/alarm combination.",
+    "type": "leaf",
+    "status": "pending",
+    "dependencies": ["<phase2-schema-migration>"]
+  },
+  {
+    "title": "Rolling 24h ± 2h staggered re-enqueue scheduler",
+    "description": "Extend helios/src/worker/runtime/configWorkersScheduler.ts so that every product with next_refresh_at <= now() is enqueued at priority=100, enqueue_reason='rolling'. Worker sets next_refresh_at = now() + 24h + uniform jitter in [-2h, +2h] keyed on product_id (deterministic stagger). On terminal failure, back off to 6h with jitter and surface the failure reason in evidence_json. Tests covering: drift stability under repeated runs, no thundering herd in a synthetic 10k-product population, deterministic per-product slot recovery after a missed cycle.",
+    "type": "leaf",
+    "status": "pending",
+    "dependencies": ["<phase2-schema-migration>", "<phase1-migrate-build-context>"]
+  },
+  {
+    "title": "enqueueMarketRefreshForProducts() helper + proposal-source wiring",
+    "description": "Add helios/src/worker/litalerts/enqueueMarketRefresh.ts exporting enqueueMarketRefreshForProducts(productIds, { priority, enqueueReason, alarmClass }). Wire calls into: (a) catalog repricing drivers (catalog/repricing/.../reprice.py and successors) at priority=10, enqueue_reason='proposal-source'; (b) generatePendingPurchasePacketJob; (c) bulk_additions/ proposal generators; (d) any other 'propose product catalog curation' entry point. Each enqueue emits an audit event so the trigger is provable after the fact.",
+    "type": "leaf",
+    "status": "pending",
+    "dependencies": ["<phase2-schema-migration>"]
+  },
+  {
+    "title": "Alarm scanner job + pageDave integration",
+    "description": "New worker job configWorkersMarketEvidenceAlarmJob running every 15 minutes. Reads vw_pricing_evidence_freshness, selects every product with non-null alarm class whose expires_at is within the next 12h. Calls enqueueMarketRefreshForProducts([productId, ...same-brand siblings...], { priority: 0, alarmClass }) and fires a single batched pageDave per alarm class describing the products and time-to-expiry. Bump the litalerts refresh worker pool size in jobPools.ts so priority=0 alarms actually run in parallel rather than queueing behind rolling refresh. Tests cover the 'alarm fires for in-stock product about to expire' and 'same-brand-as-pending-purchase' triggers.",
+    "type": "leaf",
+    "status": "pending",
+    "dependencies": ["<phase3-view>", "<phase4-enqueue-helper>", "<phase3-scheduler>"]
+  },
+  {
+    "title": "Canonical pricing-ladder UI: freshness chip + expired guard",
+    "description": "Move the ladder-cache-tag freshness chip from the one-off repricing review packet into the canonical helios/src/shared/ui/pricing-ladder/ control (and its React wrapper CanonicalPricingLadder.tsx). Render fresh|stale|very_stale|absent|expired in the ladder head. Refuse to draw competitor diamonds for evidence with freshness='expired' unless the call site passes acknowledgeStale: true. Update the catalog-curation review pages (and the repricing review builder) to render an evidence-freshness status strip at the top counting per-bucket products. Snapshot tests confirm the chip and guard behavior.",
+    "type": "leaf",
+    "status": "pending",
+    "dependencies": ["<phase3-view>"]
+  },
+  {
+    "title": "Regenerate 67.7% GM review packet against the new flow",
+    "description": "After Phase 1-6 land, re-run catalog/repricing/2026-05-16-10ff-brands/enrich_with_market_evidence.mjs and build_canonical_review.mjs against freshly-refreshed observations. Expected outcome: all 67 products show 'fresh' cache tags, full diamond coverage for all 9 brands (not just the 10 products that currently have any cached evidence), and the operator can sign off on apply. Upload as a new mss-one-off and link it from this epic for closure.",
+    "type": "leaf",
+    "status": "pending",
+    "dependencies": ["<phase6-ui>", "<phase5-alarm>"]
+  },
+  {
+    "title": "Runbook + legacy cleanup",
+    "description": "Write docs/helios/market-data-sweep/RUNBOOK.md covering: partner-API token rotation, reading vw_pricing_evidence_freshness, manually firing an alarm-class refresh, interpreting pageDave alarms from this system, and the 4-day expiry contract. Remove all legacy brands-console bearer/refresh-token rotation scripts from litalerts/ that the partner-API migration has obsoleted (keep only the README note for emergency break-glass). Update litalerts/README.md to delete the 'partner API does not expose menu listings' statement, which is no longer true.",
+    "type": "leaf",
+    "status": "pending",
+    "dependencies": ["<phase1-migrate-build-context>", "<phase6-ui>"]
+  }
+]
