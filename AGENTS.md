@@ -1,5 +1,21 @@
 # Agent instructions for the `automation` repo
 
+## One-time setup: enable the shared git hooks
+
+This repo ships a pre-commit gate under `.githooks/` that runs the
+helios server typecheck + an in-process SPA smoke test whenever a
+commit touches `helios/`. Git does **not** auto-enable hooks from a
+tracked directory; on a fresh clone you must run once:
+
+```
+git config core.hooksPath .githooks
+```
+
+The hook expects `helios/node_modules/` to be populated (`npm install`
+inside `helios/`). If you genuinely need to bypass the gate, see the
+comment at the top of `.githooks/pre-commit` — and per the rule below,
+agents must **not** use `--no-verify`.
+
 ## Commit and push — always
 
 **When you finish a task that involves code or file changes, you MUST commit
