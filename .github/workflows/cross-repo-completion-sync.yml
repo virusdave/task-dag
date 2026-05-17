@@ -5,8 +5,10 @@ name: Cross-Repo Completion Sync
 # `<!-- task-dag:completion --> Satisfies …` comment on that issue so
 # the top-level coordinator can ingest the completion into its DAG.
 #
-# Requires a fine-grained PAT in repo/org secret CROSS_REPO_TASK_DAG_PAT
-# with issues:write on virusdave/top-level.
+# Requires a GitHub App installed on virusdave/top-level with
+# Issues: Read & write, exposed via repo/org secrets:
+#   TASK_DAG_APP_ID          - the App ID (numeric)
+#   TASK_DAG_APP_PRIVATE_KEY - the App's PEM-encoded private key
 
 on:
   push:
@@ -24,4 +26,5 @@ jobs:
       base_sha: ${{ github.event.before }}
       head_sha: ${{ github.sha }}
     secrets:
-      token: ${{ secrets.CROSS_REPO_TASK_DAG_PAT }}
+      app_id: ${{ secrets.TASK_DAG_APP_ID }}
+      app_private_key: ${{ secrets.TASK_DAG_APP_PRIVATE_KEY }}

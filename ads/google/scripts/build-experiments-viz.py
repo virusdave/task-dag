@@ -175,59 +175,45 @@ def _csv(rows: list[dict], columns: list[str]) -> str:
 
 
 def _variant_headlines(source: list[str], variant_label: str) -> list[str]:
-    """Mechanically derive variant headlines by swapping in the variant label
-    for the first 1-2 headlines. Keeps the rest of the source ad's content so
-    the ad remains coherent and Ads Editor accepts the row."""
+    """Inject the variant label at position 0 and leave the rest of the
+    source intact. We deliberately do NOT echo the variant label into
+    position 1 -- doing so produces near-duplicate headlines (truncated
+    at the 30-char cap) that Google's server-side dedup collapses into
+    one, dropping the ad below the 3-headline minimum and triggering
+    'Add at least 3 headlines' on import."""
     out = list(source)
     if not out:
         return [variant_label[:30]]
     out[0] = variant_label[:30]
-    if len(out) >= 2 and len(variant_label) > 10:
-        out[1] = (variant_label + " · Order Today")[:30]
     return out
 
 
 def _dedupe_headlines(headlines: list[str]) -> list[str]:
-    """RSAs reject duplicate headlines (Ads Editor: 'This headline is the
-    same as another'). Comparison is case-insensitive after collapsing
-    whitespace. We try to nudge later duplicates so they differ from
-    earlier ones via cheap edits the user said work in practice:
-      1. replace ' - ' with ', '
-      2. swap trailing punctuation
-      3. append a soft separator (' ·')
-      4. as a last resort drop the duplicate (RSAs need 3-15 headlines)
-    Always keep the first occurrence; only modify duplicates."""
+    """Drop duplicates with the same aggressive normalization Google's
+    server-side validator uses: lowercase, strip non-alphanumerics
+    (punctuation, separators, emoji), collapse whitespace. Punctuation-
+    swap tricks like ' - ' -> ', ' or appending ' ·' fool Ads Editor
+    locally but Google still collapses them, so the ad ends up below
+    the 3-headlines / 2-descriptions minimum.
+
+    Strategy is now: keep first occurrence verbatim, drop subsequent
+    near-duplicates entirely. The caller is responsible for ensuring
+    the source ad had enough genuinely-distinct content to clear the
+    minimum after dedup (see _is_healthy)."""
     def norm(s: str) -> str:
-        return re.sub(r"\s+", " ", s).strip().lower()
+        return re.sub(r"[^a-z0-9]+", "", s.lower())
 
     seen: set[str] = set()
     out: list[str] = []
     for h in headlines:
-        candidate = h
-        n = norm(candidate)
-        if n not in seen:
-            seen.add(n)
-            out.append(candidate)
+        candidate = (h or "").strip()
+        if not candidate:
             continue
-        # Try mechanical edits in order.
-        edits = [
-            candidate.replace(" - ", ", "),
-            candidate.replace(" – ", ", "),
-            candidate.rstrip(".!?") + ".",
-            candidate.rstrip(".!?") + "!",
-            candidate + " ·",
-            candidate + " ",
-        ]
-        fixed = None
-        for e in edits:
-            e = e[:30].rstrip()  # respect Google's 30-char headline cap
-            if norm(e) not in seen and e:
-                fixed = e
-                break
-        if fixed is not None:
-            seen.add(norm(fixed))
-            out.append(fixed)
-        # else: silently drop the duplicate; RSAs only need 3 headlines min
+        n = norm(candidate)
+        if not n or n in seen:
+            continue
+        seen.add(n)
+        out.append(candidate)
     return out
 
 
