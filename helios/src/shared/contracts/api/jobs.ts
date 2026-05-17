@@ -2,6 +2,7 @@ import { z } from 'zod'
 
 import { JobLinkedRecordRefsSchema, JobLogEntrySchema, JobModuleMetadataSchema, JobProgressSchema, JobStatusSchema, JobTypeSchema } from '../domain/jobs.js'
 import { HeliosModuleCodeSchema } from '../domain/modules.js'
+import { SweedAuthEventSchema } from './sweedAuthEvents.js'
 
 export const JobRouteParamsSchema = z.object({
   jobId: z.coerce.number().int().positive(),
@@ -62,5 +63,12 @@ export const JobStatusResponseSchema = z.object({
   linkedRecords: JobLinkedRecordRefsSchema,
   progressLog: z.array(JobLogEntrySchema),
   progress: JobProgressSchema.nullable(),
+  // Every Sweed JSON-RPC this job's worker process logged for this
+  // job: every login/logout/dealer-set/initial-data call, plus every
+  // failed RPC (auth-looking or otherwise). Always present; empty
+  // array means either the job hasn't touched Sweed yet or migration
+  // 011_sweed_auth_events hasn't been applied. Ordered oldest-first
+  // so the UI can render a chronological timeline.
+  sweedAuthEvents: z.array(SweedAuthEventSchema),
 })
 export type JobStatusResponse = z.infer<typeof JobStatusResponseSchema>

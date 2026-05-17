@@ -93,13 +93,25 @@ export async function postSweedRpc<TResult>({ name, params, authToken }: PostSwe
 
   const emit = (extraContext?: Record<string, unknown>): void => {
     const isAuthRpc = explicitEventKind !== null
-    const authyError = outcome !== 'ok' && looksLikeAuthError(errorMessage, httpStatus)
-    if (!isAuthRpc && !authyError) {
+    const failed = outcome !== 'ok'
+    // We always emit for auth-lifecycle RPCs (login/logout/dealer_set/
+    // initial_data), and for ANY failure of any RPC. Successful non-
+    // auth RPCs are intentionally NOT persisted to keep the table
+    // bounded — there can be thousands of them per job.
+    if (!isAuthRpc && !failed) {
       return
+    }
+    let eventKind: SweedAuthEventKind
+    if (explicitEventKind !== null) {
+      eventKind = explicitEventKind
+    } else if (looksLikeAuthError(errorMessage, httpStatus)) {
+      eventKind = 'rpc_auth_error'
+    } else {
+      eventKind = 'rpc_error'
     }
     recordAuthEvent({
       rpcName: name,
-      eventKind: explicitEventKind ?? 'rpc_auth_error',
+      eventKind,
       sessionOrigin,
       authToken: resolvedAuthToken,
       dealerId: dealerSetTarget ?? sessionDealerId,

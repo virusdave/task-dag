@@ -17,6 +17,11 @@ export type SweedAuthEventKind =
   | 'dealer_set'
   | 'initial_data'
   | 'rpc_auth_error'
+  // Any other Sweed RPC failure (transport error, HTTP non-2xx,
+  // Sweed RPC `error` envelope, missing result) that does NOT look
+  // like an auth error. We persist these so the UI can render the
+  // full failure history alongside the auth-touching calls.
+  | 'rpc_error'
 
 export type SweedAuthEventOutcome = 'ok' | 'error' | 'retryable'
 

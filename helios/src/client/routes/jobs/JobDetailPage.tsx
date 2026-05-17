@@ -1,10 +1,15 @@
 import { useEffect, useState } from 'react'
 import { Link, useLoaderData } from 'react-router-dom'
 
-import { JobStatusResponseSchema, buildHeliosModulePath, type JobStatusResponse } from '../../../shared/contracts/index.js'
+import {
+  JobStatusResponseSchema,
+  buildHeliosModulePath,
+  type JobStatusResponse,
+  type SweedAuthEvent,
+} from '../../../shared/contracts/index.js'
 import { loadJson } from '../../app/fetchJson.js'
 import { isJobTerminal, loadJobStatus } from '../../app/jobPolling.js'
-import { Pill } from '../../components/Pill.js'
+import { Pill, type PillProps } from '../../components/Pill.js'
 
 export async function jobDetailLoader({ params }: { params: Record<string, string | undefined> }) {
   return loadJson(`/api/jobs/${params.jobId}`, JobStatusResponseSchema)
@@ -112,6 +117,34 @@ export function JobDetailPage() {
         )}
       </article>
 
+      <article className="detail-panel" style={{ marginBottom: '1rem' }}>
+        <div className="page-header" style={{ marginBottom: '0.75rem' }}>
+          <div>
+            <h3 style={{ margin: 0 }}>Sweed RPC log</h3>
+            <p className="subtle-copy">
+              Every Sweed JSON-RPC this worker logged for this job: every auth-lifecycle call
+              (login, dealer pin, initial data fetch, logout) and every RPC failure (auth-looking
+              or otherwise). Use this to diagnose "Auth expired" and similar Sweed errors. See the{' '}
+              <Link to="/config/sweed-auth-log">full auth log</Link> for cross-job context.
+            </p>
+          </div>
+        </div>
+        {data.sweedAuthEvents.length > 0 ? (
+          <ul className="timeline-list job-sweed-rpc-log">
+            {data.sweedAuthEvents.map((event) => (
+              <SweedAuthEventRow key={event.id} event={event} />
+            ))}
+          </ul>
+        ) : (
+          <p className="empty-state">
+            This job has not issued any Sweed auth RPCs or recorded any RPC failures yet. If you
+            expected Sweed activity, verify that migration <code>011_sweed_auth_events</code> has
+            been applied (the all-pages banner will warn if it hasn't) and that this job actually
+            touches Sweed.
+          </p>
+        )}
+      </article>
+
       <article className="detail-panel">
         <div className="page-header" style={{ marginBottom: '0.75rem' }}>
           <h3 style={{ margin: 0 }}>Related records</h3>
@@ -212,4 +245,95 @@ function readJobProgressSummary(jobStatus: JobStatusResponse): string {
 
 function formatTimestamp(value: string | null): string {
   return value ? new Date(value).toLocaleString() : '—'
+}
+
+function SweedAuthEventRow({ event }: { event: SweedAuthEvent }) {
+  const contextEntries = Object.entries(event.context ?? {})
+  return (
+    <li>
+      <strong>{formatTimestamp(event.createdAt)}</strong>
+      <div className="inline-row wrap-row" style={{ gap: 6, marginTop: 2 }}>
+        <Pill tone={sweedOutcomeTone(event.outcome)}>{event.outcome}</Pill>
+        <Pill tone="muted">{sweedEventKindLabel(event.eventKind)}</Pill>
+        <code>{event.rpcName}</code>
+        {event.sessionOrigin ? <Pill tone="muted">{event.sessionOrigin}</Pill> : null}
+        {event.httpStatus !== null ? <Pill tone="muted">{`HTTP ${event.httpStatus}`}</Pill> : null}
+        {event.dealerId !== null ? <Pill tone="muted">{`dealer ${event.dealerId}`}</Pill> : null}
+        {event.authTokenPrefix ? (
+          <Pill tone="muted">{`tok ${event.authTokenPrefix}…`}</Pill>
+        ) : null}
+        <span className="subtle-copy">{sweedFormatDuration(event.durationMs)}</span>
+      </div>
+      {event.errorMessage ? (
+        <pre
+          style={{
+            background: 'rgba(255,0,0,0.08)',
+            padding: 8,
+            borderRadius: 4,
+            margin: '6px 0 0',
+            whiteSpace: 'pre-wrap',
+            wordBreak: 'break-word',
+          }}
+        >
+          {event.errorMessage}
+        </pre>
+      ) : null}
+      {contextEntries.length > 0 ? (
+        <details style={{ marginTop: 4 }}>
+          <summary className="subtle-copy">context</summary>
+          <pre
+            style={{
+              background: 'rgba(0,0,0,0.04)',
+              padding: 8,
+              borderRadius: 4,
+              margin: '4px 0 0',
+              whiteSpace: 'pre-wrap',
+              wordBreak: 'break-word',
+            }}
+          >
+            {JSON.stringify(event.context, null, 2)}
+          </pre>
+        </details>
+      ) : null}
+    </li>
+  )
+}
+
+function sweedOutcomeTone(outcome: SweedAuthEvent['outcome']): PillProps['tone'] {
+  switch (outcome) {
+    case 'ok':
+      return 'success'
+    case 'retryable':
+      return 'warning'
+    case 'error':
+      return 'danger'
+    default:
+      return 'muted'
+  }
+}
+
+function sweedEventKindLabel(kind: SweedAuthEvent['eventKind']): string {
+  switch (kind) {
+    case 'login':
+      return 'Login'
+    case 'logout':
+      return 'Logout'
+    case 'dealer_set':
+      return 'Dealer pin'
+    case 'initial_data':
+      return 'Initial data'
+    case 'rpc_auth_error':
+      return 'Auth error'
+    case 'rpc_error':
+      return 'RPC failure'
+    default:
+      return kind
+  }
+}
+
+function sweedFormatDuration(ms: number): string {
+  if (ms < 1000) {
+    return `${ms} ms`
+  }
+  return `${(ms / 1000).toFixed(2)} s`
 }

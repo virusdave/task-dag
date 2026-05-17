@@ -3,6 +3,7 @@ import type { QueryResultRow } from 'pg'
 import type { JobsQuery, JobsResponse, JobStatusResponse } from '../../../shared/contracts/api/jobs.js'
 import type { Queryable } from '../pool.js'
 import { toIsoString } from './helpers.js'
+import { listSweedAuthEventsForJob } from './sweedAuthEventsQueries.js'
 
 interface JobRow extends QueryResultRow {
   attempt_count: number
@@ -150,6 +151,8 @@ export async function getJobStatus(db: Queryable, jobId: number): Promise<JobSta
     return null
   }
 
+  const sweedAuthEvents = await listSweedAuthEventsForJob(db, row.id)
+
   return {
     job: {
       attemptCount: row.attempt_count,
@@ -174,6 +177,7 @@ export async function getJobStatus(db: Queryable, jobId: number): Promise<JobSta
     linkedRecords: readLinkedRecords(row.payload_json),
     progressLog: readProgressLog(row.payload_json),
     progress: readProgress(row.payload_json),
+    sweedAuthEvents,
   }
 }
 

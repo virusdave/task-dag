@@ -1,4 +1,4 @@
-interface PillProps {
+export interface PillProps {
   tone?: 'danger' | 'muted' | 'success' | 'warning'
   children: string
 }

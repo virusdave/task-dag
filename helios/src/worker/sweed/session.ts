@@ -5,7 +5,8 @@ import { z } from 'zod'
 
 import { getWorkerEnv } from '../config/env.js'
 import { RetryableWorkerError } from '../runtime/errors.js'
-import { recordAuthEvent } from './authLog.js'
+import { getCurrentJobAuthContext, recordAuthEvent } from './authLog.js'
+import { runWithSweedSessionLock } from './sessionLock.js'
 
 /**
  * Per-job Sweed session: instead of every helios worker job sharing one
@@ -123,24 +124,48 @@ export async function withSweedSession<T>(fn: () => Promise<T>): Promise<T> {
     )
   }
 
-  let context: SweedSessionContext
+  // Fresh-session mode: serialize the ENTIRE login → fn() → logout
+  // lifecycle behind the process-wide Sweed mutex.
+  //
+  // Rationale: we kept seeing "store.auth.initial.data.get failed:
+  // Auth expired" immediately after a successful store.auth.user.
+  // The only way that happens with a brand-new token is if another
+  // login (or logout) from this same Sweed user landed in between —
+  // Sweed appears to invalidate the previous session-token when a
+  // second login for the same login_email is issued, and to take
+  // user-level effect when store.auth.end fires. With the lock in
+  // place each ephemeral session lives end-to-end without any other
+  // login/logout for this user racing it from within this worker
+  // process. (Multi-process / multi-host parallelism is still
+  // bounded by whatever Sweed's per-user session model actually
+  // permits; the auth-event log surfaces the cross-process picture.)
+  //
+  // The legacy shared-token path still goes through the same lock
+  // via runWithDealerSerialization() in rpc.ts, so a legacy job and
+  // a fresh-session job cannot interleave either.
   if (hasCredentials) {
-    const login = await issueFreshSweedSession(env.sweedLoginEmail as string, env.sweedLoginPassword as string)
-    context = {
-      authToken: login.authToken,
-      origin: 'fresh',
-      currentDealerId: login.initialDealerId,
-    }
-  } else {
-    context = { authToken: env.sweedAuthToken as string, origin: 'legacy', currentDealerId: null }
+    return runWithSweedSessionLock(() => runFreshSession(env.sweedLoginEmail as string, env.sweedLoginPassword as string, fn))
   }
 
+  const context: SweedSessionContext = {
+    authToken: env.sweedAuthToken as string,
+    origin: 'legacy',
+    currentDealerId: null,
+  }
+  return sessionStorage.run(context, fn)
+}
+
+async function runFreshSession<T>(login: string, password: string, fn: () => Promise<T>): Promise<T> {
+  const result = await issueFreshSweedSession(login, password)
+  const context: SweedSessionContext = {
+    authToken: result.authToken,
+    origin: 'fresh',
+    currentDealerId: result.initialDealerId,
+  }
   try {
     return await sessionStorage.run(context, fn)
   } finally {
-    if (context.origin === 'fresh') {
-      await tearDownFreshSweedSession(context.authToken)
-    }
+    await tearDownFreshSweedSession(context.authToken)
   }
 }
 
@@ -229,6 +254,14 @@ async function issueFreshSweedSession(login: string, password: string): Promise<
   let errorMessage: string | null = null
   let issuedToken: string | null = null
 
+  // `trigger` makes it obvious in the UI / log whether this login
+  // was initiated by a real worker job vs the per-job dependency
+  // probe (`verifySweedSession()` from assertSweedReady) vs the
+  // boot-time warm probe. The job context AsyncLocalStorage is only
+  // populated for the first case, so we use its presence to label.
+  const jobCtx = getCurrentJobAuthContext()
+  const trigger = jobCtx ? 'job' : 'probe-or-warm-boot'
+
   const finish = (extra?: Record<string, unknown>): void => {
     recordAuthEvent({
       rpcName: 'store.auth.user',
@@ -243,7 +276,7 @@ async function issueFreshSweedSession(login: string, password: string): Promise<
       httpStatus,
       errorMessage,
       durationMs: Date.now() - startedAt,
-      context: { rpcId, loginEmail: login, ...extra },
+      context: { rpcId, loginEmail: login, trigger, ...extra },
     })
   }
 

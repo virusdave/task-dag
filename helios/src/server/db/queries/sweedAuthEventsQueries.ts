@@ -41,6 +41,55 @@ function rowToEvent(row: SweedAuthEventRow): SweedAuthEvent {
   }
 }
 
+/**
+ * Fetch every sweed_auth_events row for `jobId` in chronological
+ * order (oldest first), so callers can render a session timeline.
+ *
+ * Tolerates the table being absent (migration 011 not applied) by
+ * returning an empty array, so the job-detail API does not 500 in
+ * environments that haven't picked up the migration yet.
+ */
+export async function listSweedAuthEventsForJob(
+  db: Queryable,
+  jobId: number,
+): Promise<SweedAuthEvent[]> {
+  try {
+    // Hard cap so a single runaway job (e.g. one retrying the same
+    // RPC thousands of times) can't blow up the job-detail response.
+    const result = await db.query<SweedAuthEventRow>(
+      `
+        select
+          id,
+          created_at,
+          job_id,
+          job_type,
+          rpc_name,
+          event_kind,
+          session_origin,
+          auth_token_prefix,
+          dealer_id,
+          outcome,
+          http_status,
+          error_message,
+          duration_ms,
+          context_json
+        from sweed_auth_events
+        where job_id = $1
+        order by created_at asc, id asc
+        limit 500
+      `,
+      [jobId],
+    )
+    return result.rows.map(rowToEvent)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    if (/relation .*sweed_auth_events.* does not exist/i.test(message)) {
+      return []
+    }
+    throw error
+  }
+}
+
 export async function listSweedAuthEvents(
   db: Queryable,
   query: SweedAuthEventsQuery,

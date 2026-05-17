@@ -52,6 +52,8 @@ function eventKindLabel(kind: SweedAuthEvent['eventKind']): string {
       return 'Initial data'
     case 'rpc_auth_error':
       return 'Auth error on RPC'
+    case 'rpc_error':
+      return 'RPC failure'
     default:
       return kind
   }

@@ -7,7 +7,12 @@ export const SweedAuthEventKindSchema = z.enum([
   'logout',
   'dealer_set',
   'initial_data',
+  // Failure of a non-auth RPC whose response carried an auth-error
+  // signature (e.g. "Auth expired", HTTP 401/403).
   'rpc_auth_error',
+  // Any other Sweed RPC failure (transport error, HTTP non-2xx,
+  // Sweed RPC `error` envelope, missing result, JSON parse error).
+  'rpc_error',
 ])
 export type SweedAuthEventKind = z.infer<typeof SweedAuthEventKindSchema>
 

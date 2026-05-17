@@ -24,7 +24,12 @@ create table if not exists sweed_auth_events (
   -- 'store.auth.initial.data.get', or the name of any other RPC that
   -- surfaced an auth-error in its response.
   rpc_name          text not null,
-  -- one of: 'login' | 'logout' | 'dealer_set' | 'initial_data' | 'rpc_auth_error'
+  -- one of: 'login' | 'logout' | 'dealer_set' | 'initial_data' |
+  --         'rpc_auth_error' (failure of a non-auth RPC whose response
+  --                            text looks like an auth failure) |
+  --         'rpc_error'      (failure of any other RPC: transport error,
+  --                            HTTP non-2xx, Sweed `error` envelope,
+  --                            missing result payload, JSON parse error)
   event_kind        text not null,
   -- 'fresh' (per-job login) | 'legacy' (shared SWEED_AUTH_TOKEN) |
   -- null when the event happened before a session was opened (i.e. the
