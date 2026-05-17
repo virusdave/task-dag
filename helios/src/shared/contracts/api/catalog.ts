@@ -2,6 +2,7 @@ import { z } from 'zod'
 
 import { JsonValueSchema } from '../common/json.js'
 import { CatalogGroupSummarySchema } from '../domain/catalog.js'
+import { PendingPurchaseMarketListingSchema } from '../domain/pendingPurchases.js'
 import { ProposalLineItemSchema } from '../domain/proposals.js'
 
 export const CatalogBrowserQuerySchema = z.object({
@@ -78,6 +79,26 @@ export const CatalogGroupRouteParamsSchema = z.object({
 })
 export type CatalogGroupRouteParams = z.infer<typeof CatalogGroupRouteParamsSchema>
 
+export const GroupProductMarketEvidenceSchema = z.object({
+  productId: z.number().int().positive(),
+  productName: z.string(),
+  productTab: z.string().nullable(),
+  livePrice: z.number().nullable(),
+  capturedAt: z.iso.datetime().nullable(),
+  freshness: z.enum(['fresh', 'stale', 'very_stale', 'expired', 'absent']),
+  ageDays: z.number().nullable(),
+  availability: z.string().nullable(),
+  searchTermLabel: z.string().nullable(),
+  notes: z.string().nullable(),
+  brandName: z.string().nullable(),
+  listingCount: z.number().int().min(0),
+  eligibleListingCount: z.number().int().min(0),
+  averagePostTaxPrice: z.number().nullable(),
+  medianPostTaxPrice: z.number().nullable(),
+  matchedListings: z.array(PendingPurchaseMarketListingSchema),
+})
+export type GroupProductMarketEvidence = z.infer<typeof GroupProductMarketEvidenceSchema>
+
 export const GroupDetailResponseSchema = z.object({
   desiredState: z.array(
     z.object({
@@ -109,6 +130,7 @@ export const GroupDetailResponseSchema = z.object({
     source: z.string(),
     stateJson: JsonValueSchema,
   }).nullable(),
+  marketEvidence: z.array(GroupProductMarketEvidenceSchema),
   recentSales: GroupRecentSalesSchema,
   recentSalesIssue: z.string().nullable().optional(),
   llmRuns: z.array(

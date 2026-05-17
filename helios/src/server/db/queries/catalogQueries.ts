@@ -4,9 +4,12 @@ import type {
   CatalogBrowserQuery,
   CatalogBrowserResponse,
   GroupDetailResponse,
+  GroupProductMarketEvidence,
   JsonValue,
+  PendingPurchaseMarketListing,
   ProposalLineItem,
 } from '../../../shared/contracts/index.js'
+import { PendingPurchaseMarketListingSchema } from '../../../shared/contracts/index.js'
 import type { Queryable } from '../pool.js'
 import { buildEmptyGroupRecentSales, loadRecentSalesForGroups } from '../../catalog/liveRecentSales.js'
 import { buildTextPreview, jsonValueToPreview, toIsoString } from './helpers.js'
@@ -127,6 +130,25 @@ interface AuditRow extends QueryResultRow {
   event_type: string
   id: number
   undo_status: string | null
+}
+
+interface LitalertsObservationRow extends QueryResultRow {
+  product_id: string | number
+  captured_at: Date
+  availability: string | null
+  search_term_label: string | null
+  notes: string | null
+  brand_name: string | null
+  listing_count: number
+  pricing_eligible_listing_count: number
+  evidence_json: JsonValue
+}
+
+interface LiveStateProductEntry {
+  productId: number
+  name: string | null
+  tab: string | null
+  price: number | null
 }
 
 export async function listCatalogGroups(
@@ -252,7 +274,10 @@ export async function getGroupDetail(db: Queryable, catalogGroupId: number): Pro
     return null
   }
 
-  const [snapshotResult, lineItemsResult, desiredStateResult, writeOperationsResult, llmRunsResult, jobsResult, auditsResult] =
+  const liveStateProducts = extractLiveStateProducts(group.live_state_json)
+  const productIds = liveStateProducts.map((entry) => entry.productId)
+
+  const [snapshotResult, lineItemsResult, desiredStateResult, writeOperationsResult, llmRunsResult, jobsResult, auditsResult, observationsResult] =
     await Promise.all([
       db.query<SnapshotRow>(
         `
@@ -359,7 +384,23 @@ export async function getGroupDetail(db: Queryable, catalogGroupId: number): Pro
         `,
         [catalogGroupId],
       ),
+      productIds.length === 0
+        ? Promise.resolve({ rows: [] as LitalertsObservationRow[] })
+        : db.query<LitalertsObservationRow>(
+            `
+              select distinct on (product_id)
+                product_id, captured_at, availability, search_term_label, notes,
+                brand_name, listing_count, pricing_eligible_listing_count,
+                evidence_json
+              from litalerts_competitor_observations
+              where product_id = any($1::bigint[]) and status = 'succeeded'
+              order by product_id, captured_at desc
+            `,
+            [productIds],
+          ),
     ])
+
+  const marketEvidence = buildMarketEvidence(liveStateProducts, observationsResult.rows)
 
   let recentSalesIssue: string | null = null
   let recentSales = buildEmptyGroupRecentSales(group.live_state_json)
@@ -422,6 +463,7 @@ export async function getGroupDetail(db: Queryable, catalogGroupId: number): Pro
           stateJson: liveSnapshot.state_json,
         }
       : null,
+    marketEvidence,
     recentSales,
     recentSalesIssue,
     llmRuns: llmRunsResult.rows.map((row) => ({
@@ -547,4 +589,147 @@ function mapProposalLineItem(row: LineItemRow): ProposalLineItem {
 
 export function lineItemSummaryText(lineItem: ProposalLineItem): string {
   return `${lineItem.groupSummary.groupName}: ${lineItem.fieldPath} -> ${jsonValueToPreview(lineItem.effectiveValue)}`
+}
+
+function extractLiveStateProducts(liveState: JsonValue): LiveStateProductEntry[] {
+  if (!liveState || typeof liveState !== 'object' || Array.isArray(liveState)) return []
+  const productsValue = (liveState as Record<string, JsonValue>).products
+  if (!Array.isArray(productsValue)) return []
+
+  const entries: LiveStateProductEntry[] = []
+  for (const candidate of productsValue) {
+    if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) continue
+    const record = candidate as Record<string, JsonValue>
+    const rawId = record.productId
+    const productId = typeof rawId === 'number' ? rawId : Number(rawId)
+    if (!Number.isFinite(productId) || productId <= 0 || !Number.isInteger(productId)) continue
+
+    const rawName = record.name
+    const rawTab = record.tab
+    const rawPrice = record.price
+
+    entries.push({
+      productId,
+      name: typeof rawName === 'string' ? rawName : null,
+      tab: typeof rawTab === 'string' ? rawTab : null,
+      price: typeof rawPrice === 'number' && Number.isFinite(rawPrice) ? rawPrice : null,
+    })
+  }
+  return entries
+}
+
+function buildMarketEvidence(
+  products: LiveStateProductEntry[],
+  observations: LitalertsObservationRow[],
+): GroupProductMarketEvidence[] {
+  if (products.length === 0) return []
+
+  const obsByProductId = new Map<number, LitalertsObservationRow>()
+  for (const row of observations) {
+    const productId = typeof row.product_id === 'number' ? row.product_id : Number(row.product_id)
+    if (!Number.isFinite(productId)) continue
+    obsByProductId.set(productId, row)
+  }
+
+  const now = Date.now()
+
+  return products.map((product) => {
+    const obs = obsByProductId.get(product.productId)
+    if (!obs) {
+      return {
+        productId: product.productId,
+        productName: product.name ?? `Product #${product.productId}`,
+        productTab: product.tab,
+        livePrice: product.price,
+        capturedAt: null,
+        freshness: 'absent' as const,
+        ageDays: null,
+        availability: null,
+        searchTermLabel: null,
+        notes: null,
+        brandName: null,
+        listingCount: 0,
+        eligibleListingCount: 0,
+        averagePostTaxPrice: null,
+        medianPostTaxPrice: null,
+        matchedListings: [],
+      }
+    }
+
+    const capturedAtMs = obs.captured_at instanceof Date ? obs.captured_at.getTime() : new Date(obs.captured_at).getTime()
+    const ageMs = Math.max(0, now - capturedAtMs)
+    const ageDaysRaw = ageMs / (1000 * 60 * 60 * 24)
+    const ageDays = Math.round(ageDaysRaw * 10) / 10
+    const freshness: GroupProductMarketEvidence['freshness'] =
+      ageMs <= 24 * 60 * 60 * 1000
+        ? 'fresh'
+        : ageMs <= 4 * 24 * 60 * 60 * 1000
+          ? 'stale'
+          : ageMs <= 7 * 24 * 60 * 60 * 1000
+            ? 'very_stale'
+            : 'expired'
+
+    const matchedListings = extractMatchedListings(obs.evidence_json)
+    const eligible = matchedListings.filter((listing) => listing.eligibleForPricing === true)
+    const eligiblePrices = eligible.map((listing) => listing.postTaxPrice).filter((value) => Number.isFinite(value))
+
+    const averagePostTaxPrice =
+      eligiblePrices.length > 0 ? eligiblePrices.reduce((acc, value) => acc + value, 0) / eligiblePrices.length : null
+
+    let medianPostTaxPrice: number | null = null
+    if (eligiblePrices.length > 0) {
+      const sorted = [...eligiblePrices].sort((a, b) => a - b)
+      const mid = Math.floor(sorted.length / 2)
+      medianPostTaxPrice = sorted.length % 2 === 0 ? (sorted[mid - 1]! + sorted[mid]!) / 2 : sorted[mid]!
+    }
+
+    return {
+      productId: product.productId,
+      productName: product.name ?? `Product #${product.productId}`,
+      productTab: product.tab,
+      livePrice: product.price,
+      capturedAt: toIsoString(obs.captured_at),
+      freshness,
+      ageDays,
+      availability: obs.availability,
+      searchTermLabel: obs.search_term_label,
+      notes: obs.notes,
+      brandName: obs.brand_name,
+      listingCount: Number(obs.listing_count) || 0,
+      eligibleListingCount: Number(obs.pricing_eligible_listing_count) || 0,
+      averagePostTaxPrice,
+      medianPostTaxPrice,
+      matchedListings,
+    }
+  })
+}
+
+function extractMatchedListings(evidenceJson: JsonValue): PendingPurchaseMarketListing[] {
+  if (!evidenceJson || typeof evidenceJson !== 'object' || Array.isArray(evidenceJson)) return []
+  const candidate = (evidenceJson as Record<string, JsonValue>).matchedListings
+  if (!Array.isArray(candidate)) return []
+
+  const listings: PendingPurchaseMarketListing[] = []
+  for (const raw of candidate) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue
+    const record = raw as Record<string, JsonValue>
+    const normalized = {
+      category: typeof record.category === 'string' ? record.category : null,
+      distanceBand: record.distanceBand ?? 'unknown',
+      distanceMiles:
+        typeof record.distanceMiles === 'number' && Number.isFinite(record.distanceMiles) ? record.distanceMiles : null,
+      dispensaryName: typeof record.dispensaryName === 'string' ? record.dispensaryName : '',
+      eligibleForPricing: typeof record.eligibleForPricing === 'boolean' ? record.eligibleForPricing : false,
+      exclusionReason: typeof record.exclusionReason === 'string' ? record.exclusionReason : null,
+      listingName: typeof record.listingName === 'string' ? record.listingName : '',
+      matchTier: record.matchTier ?? 'weak',
+      postTaxPrice: typeof record.postTaxPrice === 'number' ? record.postTaxPrice : Number.NaN,
+      preTaxPrice: typeof record.preTaxPrice === 'number' ? record.preTaxPrice : Number.NaN,
+      source: record.source ?? 'nearby',
+      url: typeof record.url === 'string' ? record.url : null,
+    }
+    const parsed = PendingPurchaseMarketListingSchema.safeParse(normalized)
+    if (parsed.success) listings.push(parsed.data)
+  }
+  return listings
 }

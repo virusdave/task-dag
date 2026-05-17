@@ -1,9 +1,19 @@
 import { useState } from 'react'
 import { useLoaderData, useRevalidator } from 'react-router-dom'
 
-import { GroupDetailResponseSchema, LlmRunDetailResponseSchema, MutationAcceptedResponseSchema, type GroupDetailResponse, type LlmRunDetailResponse } from '../../../shared/contracts/index.js'
+import {
+  GroupDetailResponseSchema,
+  LlmRunDetailResponseSchema,
+  MutationAcceptedResponseSchema,
+  type GroupDetailResponse,
+  type GroupProductMarketEvidence,
+  type LlmRunDetailResponse,
+  type PendingPurchaseMarketListing,
+} from '../../../shared/contracts/index.js'
+import type { CompetitorListing } from '../../../shared/ui/pricing-ladder/index.js'
 import { loadJson, mutateJson } from '../../app/fetchJson.js'
 import { waitForJob } from '../../app/jobPolling.js'
+import { CanonicalPricingLadder } from '../../components/CanonicalPricingLadder.js'
 import { Pill } from '../../components/Pill.js'
 import { useRegisterCatalogSidebarSubtree } from '../catalog/catalogSidebarSubtree.js'
 import { describeRecentSales, formatCount, formatCoverage, formatCurrency } from '../catalog/recentSales.js'
@@ -209,6 +219,8 @@ export function GroupDetailPage() {
           </div>
         </section>
 
+        <MarketResearchPanel evidence={data.marketEvidence} />
+
         <section className="detail-panel">
           <h3>Live Snapshot</h3>
           <pre>{JSON.stringify(data.liveSnapshot?.stateJson ?? null, null, 2)}</pre>
@@ -326,4 +338,159 @@ export function GroupDetailPage() {
       </div>
     </section>
   )
+}
+
+interface MarketResearchPanelProps {
+  evidence: GroupProductMarketEvidence[]
+}
+
+function MarketResearchPanel({ evidence }: MarketResearchPanelProps) {
+  const showWarning = evidence.some((entry) => entry.freshness !== 'fresh')
+
+  return (
+    <section className="detail-panel wide-panel">
+      <h3>Market Research</h3>
+      {showWarning ? (
+        <p className="error-text">
+          Live market refresh is currently broken (legacy Lit Alerts bearer expired); the evidence below is whatever was last successfully cached. The catalog-wide partner-API refresh is task-B phase 1.
+        </p>
+      ) : null}
+      {evidence.length === 0 ? (
+        <p className="empty-state">No in-group products to research.</p>
+      ) : (
+        <div className="stacked-list">
+          {evidence.map((entry) => (
+            <MarketResearchProductCard entry={entry} key={entry.productId} />
+          ))}
+        </div>
+      )}
+      <p className="subtle-copy" style={{ marginTop: '0.75rem', fontSize: '0.8rem' }}>
+        Evidence sourced from helios.litalerts_competitor_observations (most recent succeeded observation per product).
+      </p>
+    </section>
+  )
+}
+
+interface MarketResearchProductCardProps {
+  entry: GroupProductMarketEvidence
+}
+
+function MarketResearchProductCard({ entry }: MarketResearchProductCardProps) {
+  const freshness = describeMarketEvidenceFreshness(entry)
+  const competitorListings = mapMarketListingsToCompetitorListings(entry.matchedListings)
+  const visibleListings = entry.matchedListings.slice(0, 25)
+  const remaining = entry.matchedListings.length - visibleListings.length
+
+  return (
+    <article className="mini-card">
+      <header className="inline-row wrap-row" style={{ justifyContent: 'space-between' }}>
+        <div>
+          <strong>{entry.productName}</strong>
+          <div className="subtle-copy inline-row wrap-row">
+            {entry.productTab ? <span>{entry.productTab}</span> : null}
+            <Pill tone="muted">{`#${entry.productId}`}</Pill>
+            <span>{entry.livePrice !== null ? `Live ${formatCurrency(entry.livePrice)}` : 'Live —'}</span>
+          </div>
+        </div>
+        <Pill tone={freshness.tone}>{freshness.label}</Pill>
+      </header>
+
+      {entry.freshness === 'absent' ? (
+        <p className="empty-state" style={{ marginTop: '0.75rem' }}>
+          No cached competitor evidence for this product yet. Will be picked up by the partner-API sweep once task-B phase 1 lands.
+        </p>
+      ) : (
+        <>
+          <div style={{ marginTop: '0.75rem' }}>
+            <CanonicalPricingLadder
+              productId={entry.productId}
+              livePrice={entry.livePrice}
+              proposedPrice={null}
+              marketAveragePostTax={entry.averagePostTaxPrice}
+              marketMedianPostTax={entry.medianPostTaxPrice}
+              competitorListings={competitorListings}
+              variant="compact"
+            />
+          </div>
+
+          <div className="subtle-copy inline-row wrap-row" style={{ marginTop: '0.5rem' }}>
+            <span>{`${entry.listingCount} listing${entry.listingCount === 1 ? '' : 's'}`}</span>
+            <span>{`${entry.eligibleListingCount} eligible`}</span>
+            {entry.searchTermLabel ? <span>{`search: ${entry.searchTermLabel}`}</span> : null}
+            {entry.brandName ? <span>{`brand: ${entry.brandName}`}</span> : null}
+            {entry.availability ? <span>{`availability: ${entry.availability}`}</span> : null}
+            {entry.capturedAt ? <span>{`captured: ${new Date(entry.capturedAt).toLocaleString()}`}</span> : null}
+          </div>
+          {entry.notes ? <p className="subtle-copy" style={{ marginTop: '0.25rem' }}>{entry.notes}</p> : null}
+
+          {visibleListings.length === 0 ? (
+            <p className="empty-state" style={{ marginTop: '0.5rem' }}>
+              Observation has no matched listings.
+            </p>
+          ) : (
+            <ul className="stacked-list compact-list" style={{ marginTop: '0.5rem' }}>
+              {visibleListings.map((listing, index) => (
+                <li key={`${listing.dispensaryName}-${listing.listingName}-${listing.source}-${index}`} className="mini-card-row">
+                  <div>
+                    <strong>{listing.dispensaryName}</strong>
+                    <div className="subtle-copy">{listing.listingName}</div>
+                  </div>
+                  <div className="subtle-copy inline-row wrap-row">
+                    <span>{formatCurrency(listing.postTaxPrice)} post-tax</span>
+                    <span>
+                      {listing.distanceMiles !== null
+                        ? `${listing.distanceMiles.toFixed(1)} mi (${listing.distanceBand})`
+                        : listing.distanceBand}
+                    </span>
+                    <Pill tone={listing.source === 'nearby' ? 'success' : 'muted'}>{listing.source}</Pill>
+                    <Pill tone={listing.eligibleForPricing ? 'success' : 'warning'}>
+                      {listing.eligibleForPricing ? 'eligible' : listing.exclusionReason ?? 'excluded'}
+                    </Pill>
+                    {listing.url ? (
+                      <a href={listing.url} target="_blank" rel="noopener noreferrer">view</a>
+                    ) : null}
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+          {remaining > 0 ? <p className="subtle-copy">{`and ${remaining} more`}</p> : null}
+        </>
+      )}
+    </article>
+  )
+}
+
+function describeMarketEvidenceFreshness(entry: GroupProductMarketEvidence): {
+  label: string
+  tone: 'success' | 'warning' | 'danger' | 'muted'
+} {
+  switch (entry.freshness) {
+    case 'fresh': {
+      const hours = entry.ageDays !== null ? Math.max(0, Math.round(entry.ageDays * 24)) : 0
+      return { label: `fresh (${hours}h)`, tone: 'success' }
+    }
+    case 'stale':
+      return { label: `stale (${(entry.ageDays ?? 0).toFixed(1)}d)`, tone: 'warning' }
+    case 'very_stale':
+      return { label: `very stale (${(entry.ageDays ?? 0).toFixed(1)}d)`, tone: 'danger' }
+    case 'expired':
+      return { label: `expired (${(entry.ageDays ?? 0).toFixed(1)}d)`, tone: 'danger' }
+    case 'absent':
+    default:
+      return { label: 'no cached market evidence', tone: 'muted' }
+  }
+}
+
+function mapMarketListingsToCompetitorListings(marketListings: PendingPurchaseMarketListing[]): CompetitorListing[] {
+  return marketListings.map((listing, index) => ({
+    listingId: `${listing.dispensaryName}-${listing.listingName}-${listing.source}-${index}`,
+    postTaxPrice: listing.postTaxPrice,
+    distanceMiles: listing.distanceMiles,
+    dispensaryName: listing.dispensaryName,
+    dispensaryAddress: null,
+    listingName: listing.listingName,
+    url: null,
+    eligibleForPricing: listing.eligibleForPricing,
+  }))
 }
