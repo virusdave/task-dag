@@ -9,8 +9,10 @@ import * as path from 'node:path'
  *
  * Lookup order:
  *   1. GOOGLE_DRIVE_API_KEY env var
- *   2. GOOGLE_DRIVE_API_KEY_FILE env var (path to a file with the key)
- *   3. ~/.secret/google-drive/api-key
+ *   2. GOOGLE_DRIVE_API_KEY_FILE env var (path to a file with the key;
+ *      this is what nixos-sbc wires on production via agenix)
+ *   3. /run/agenix/helios-google-drive-api-key
+ *   4. ~/.secret/google-drive/api-key
  *
  * Returns null when nothing is configured. Callers should surface that
  * state in the UI rather than crashing.
@@ -24,16 +26,15 @@ export function loadGoogleDriveApiKey(): string | null {
   if (envFile) {
     return readTrimmedFileIfExists(envFile)
   }
-  // Lookup order matches the eventual agenix wiring:
-  //   1. canonical agenix-decrypted secret for the helios user
-  //   2. helios user's ~/.secret (matches the personal convention)
-  //   3. /tmp/google-drive-api-key -- explicit stopgap while we don't
-  //      yet have an agenix entry for the Drive API key; mode 644 so
-  //      the helios systemd unit can read it without further plumbing
+  // Lookup order:
+  //   1. canonical agenix-decrypted secret for the helios user on
+  //      production (wired by nixos-sbc; also exposed via
+  //      GOOGLE_DRIVE_API_KEY_FILE on the helios systemd units).
+  //   2. helios user's ~/.secret (matches the personal convention,
+  //      handy for local dev).
   const candidates = [
     '/run/agenix/helios-google-drive-api-key',
     path.join(os.homedir(), '.secret/google-drive/api-key'),
-    '/tmp/google-drive-api-key',
   ]
   for (const p of candidates) {
     const value = readTrimmedFileIfExists(p)
