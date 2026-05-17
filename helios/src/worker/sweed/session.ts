@@ -144,21 +144,37 @@ export async function withSweedSession<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 /**
- * Best-effort sign-out for a fresh Sweed session. Sweed's documented
- * surface does not expose a logout RPC; attempts at the obvious names
- * (`store.auth.logout`, `store.auth.user.logout`, `store.auth.signout`)
- * should be confirmed against a captured HAR before we wire them in.
- *
- * See the task-dag task `sweed-research-session-teardown` for the
- * follow-up. Until that work is done we simply no-op so the session
- * relies on Sweed's server-side expiry. Any failure here must NEVER
- * propagate; it would mask the real outcome of the caller's work.
+ * Best-effort sign-out for a fresh Sweed session via the `store.auth.end`
+ * RPC. This is fire-and-forget: any failure (network blip, Sweed
+ * rejecting the call, malformed response, etc.) must NEVER propagate
+ * because it would mask the real outcome of the caller's work. The
+ * session will eventually expire server-side either way; this call
+ * just makes that immediate so we don't leak short-lived tokens.
  */
 async function tearDownFreshSweedSession(authToken: string): Promise<void> {
-  // Intentional no-op until a logout RPC is confirmed. See
-  // `task: sweed-research-session-teardown` in the automation repo's
-  // task-dag for the investigation/wiring follow-up.
-  void authToken
+  const env = getWorkerEnv()
+  try {
+    const response = await fetch(env.sweedApiUrl, {
+      body: JSON.stringify({
+        auth: authToken,
+        id: randomUUID(),
+        name: 'store.auth.end',
+      }),
+      headers: {
+        'content-type': 'application/json',
+        'user-agent': 'helios-worker/1.0',
+      },
+      method: 'POST',
+      signal: AbortSignal.timeout(env.sweedRequestTimeoutMs),
+    })
+    // Drain the body so the underlying HTTP connection can be reused
+    // and we don't leak a half-read response.
+    await response.text().catch(() => undefined)
+  } catch (error) {
+    // Logout is best-effort; never propagate. Log so a persistent
+    // failure (e.g. Sweed renamed the RPC) is at least observable.
+    console.warn('[sweed] store.auth.end best-effort logout failed:', error instanceof Error ? error.message : error)
+  }
 }
 
 async function issueFreshSweedSession(login: string, password: string): Promise<FreshSweedSessionLogin> {
