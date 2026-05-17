@@ -1,22 +1,38 @@
 import { z } from 'zod'
 
-export const CatalogMaintenanceVariantSchema = z.object({
+/* -------------------------------------------------------------------------- */
+/*  Survey response — Images & Barcodes page.                                  */
+/* -------------------------------------------------------------------------- */
+
+export const CatalogMaintenanceBarcodeStatusSchema = z.enum(['ok', 'missing', 'invalid'])
+export type CatalogMaintenanceBarcodeStatus = z.infer<typeof CatalogMaintenanceBarcodeStatusSchema>
+
+export const CatalogMaintenanceSectionKindSchema = z.enum([
+  'missing-catalog-image',
+  'missing-variant-image',
+  'missing-or-invalid-barcode',
+])
+export type CatalogMaintenanceSectionKind = z.infer<typeof CatalogMaintenanceSectionKindSchema>
+
+export const CatalogMaintenanceSiteVariantSchema = z.object({
   productId: z.number().int(),
   name: z.string().nullable(),
   shortName: z.string().nullable(),
   tab: z.string().nullable(),
   packOfSize: z.number().int().nullable(),
   sizeName: z.string().nullable(),
-  inStockSites: z.array(z.string()),
+  quantity: z.number().nullable(),
+  metrcTags: z.array(z.string()),
+  previewImageUrl: z.string().nullable(),
   imageCount: z.number().int(),
   variantSpecificImageCount: z.number().int(),
-  previewImageUrl: z.string().nullable(),
-  metrcTags: z.array(z.string()),
   externalBarcode: z.string().nullable(),
+  barcodeStatus: CatalogMaintenanceBarcodeStatusSchema,
+  barcodeIssueReason: z.string().nullable(),
 })
-export type CatalogMaintenanceVariant = z.infer<typeof CatalogMaintenanceVariantSchema>
+export type CatalogMaintenanceSiteVariant = z.infer<typeof CatalogMaintenanceSiteVariantSchema>
 
-export const CatalogMaintenanceGroupSchema = z.object({
+export const CatalogMaintenanceSiteGroupSchema = z.object({
   groupId: z.number().int(),
   groupName: z.string().nullable(),
   brandName: z.string().nullable(),
@@ -24,12 +40,61 @@ export const CatalogMaintenanceGroupSchema = z.object({
   subcategoryName: z.string().nullable(),
   groupImageCount: z.number().int(),
   groupPreviewImageUrl: z.string().nullable(),
-  inStockSites: z.array(z.string()),
-  inStockVariantCount: z.number().int(),
+  siteKey: z.string(),
+  siteLabel: z.string(),
   totalVariantCount: z.number().int(),
-  variants: z.array(CatalogMaintenanceVariantSchema),
+  variants: z.array(CatalogMaintenanceSiteVariantSchema),
+  needsReanalysis: z.boolean(),
 })
-export type CatalogMaintenanceGroup = z.infer<typeof CatalogMaintenanceGroupSchema>
+export type CatalogMaintenanceSiteGroup = z.infer<typeof CatalogMaintenanceSiteGroupSchema>
+
+export const CatalogMaintenanceSurveySectionSchema = z.object({
+  kind: CatalogMaintenanceSectionKindSchema,
+  label: z.string(),
+  targetId: z.string(),
+  issueCount: z.number().int(),
+  groups: z.array(CatalogMaintenanceSiteGroupSchema),
+})
+export type CatalogMaintenanceSurveySection = z.infer<typeof CatalogMaintenanceSurveySectionSchema>
+
+export const CatalogMaintenanceSurveySiteSchema = z.object({
+  siteKey: z.string(),
+  siteLabel: z.string(),
+  targetId: z.string(),
+  totalIssueCount: z.number().int(),
+  sections: z.array(CatalogMaintenanceSurveySectionSchema),
+})
+export type CatalogMaintenanceSurveySite = z.infer<typeof CatalogMaintenanceSurveySiteSchema>
+
+export const CatalogMaintenanceQuickFilterBrandSchema = z.object({
+  brandName: z.string(),
+  issueCount: z.number().int(),
+})
+export type CatalogMaintenanceQuickFilterBrand = z.infer<typeof CatalogMaintenanceQuickFilterBrandSchema>
+
+export const CatalogMaintenanceFatalReasonCodeSchema = z.enum([
+  'orphan-in-stock-variants',
+  'stock-metrc-tags-missing',
+  'live-state-schema-stale',
+  'live-state-parse-failed',
+])
+export type CatalogMaintenanceFatalReasonCode = z.infer<typeof CatalogMaintenanceFatalReasonCodeSchema>
+
+export const CatalogMaintenanceFatalReasonSchema = z.object({
+  code: CatalogMaintenanceFatalReasonCodeSchema,
+  message: z.string(),
+  count: z.number().int(),
+  sampleIds: z.array(z.union([z.number().int(), z.string()])),
+})
+export type CatalogMaintenanceFatalReason = z.infer<typeof CatalogMaintenanceFatalReasonSchema>
+
+export const CatalogMaintenanceFatalBannerSchema = z.object({
+  title: z.string(),
+  message: z.string(),
+  reasons: z.array(CatalogMaintenanceFatalReasonSchema),
+  canRepair: z.boolean(),
+})
+export type CatalogMaintenanceFatalBanner = z.infer<typeof CatalogMaintenanceFatalBannerSchema>
 
 export const CatalogMaintenanceSurveyMetaSchema = z.object({
   generatedAt: z.string(),
@@ -41,11 +106,19 @@ export const CatalogMaintenanceSurveyMetaSchema = z.object({
 })
 export type CatalogMaintenanceSurveyMeta = z.infer<typeof CatalogMaintenanceSurveyMetaSchema>
 
-export const CatalogMaintenanceListResponseSchema = z.object({
+export const CatalogMaintenanceSurveyResponseSchema = z.object({
   meta: CatalogMaintenanceSurveyMetaSchema,
-  groups: z.array(CatalogMaintenanceGroupSchema),
+  fatal: CatalogMaintenanceFatalBannerSchema.nullable(),
+  sites: z.array(CatalogMaintenanceSurveySiteSchema),
+  quickFilters: z.object({
+    brands: z.array(CatalogMaintenanceQuickFilterBrandSchema),
+  }),
 })
-export type CatalogMaintenanceListResponse = z.infer<typeof CatalogMaintenanceListResponseSchema>
+export type CatalogMaintenanceSurveyResponse = z.infer<typeof CatalogMaintenanceSurveyResponseSchema>
+
+/* -------------------------------------------------------------------------- */
+/*  Write paths (unchanged shapes, plus repair endpoint).                      */
+/* -------------------------------------------------------------------------- */
 
 export const CatalogMaintenanceUploadTargetTypeSchema = z.enum(['group', 'variants'])
 export type CatalogMaintenanceUploadTargetType = z.infer<typeof CatalogMaintenanceUploadTargetTypeSchema>
@@ -77,3 +150,10 @@ export const CatalogMaintenanceUpdateBarcodeResponseSchema = z.object({
 export type CatalogMaintenanceUpdateBarcodeResponse = z.infer<
   typeof CatalogMaintenanceUpdateBarcodeResponseSchema
 >
+
+export const CatalogMaintenanceCacheRepairResponseSchema = z.object({
+  fullSummaryJobId: z.number().int().nullable(),
+  stockRefreshJobId: z.number().int().nullable(),
+  discoverOrphanGroupsJobId: z.number().int().nullable(),
+})
+export type CatalogMaintenanceCacheRepairResponse = z.infer<typeof CatalogMaintenanceCacheRepairResponseSchema>

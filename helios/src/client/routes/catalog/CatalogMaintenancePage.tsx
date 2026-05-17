@@ -1,57 +1,69 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 
 import {
-  CatalogMaintenanceListResponseSchema,
-  type CatalogMaintenanceGroup,
-  type CatalogMaintenanceListResponse,
-  type CatalogMaintenanceVariant,
+  CatalogMaintenanceSurveyResponseSchema,
+  type CatalogMaintenanceCacheRepairResponse,
+  type CatalogMaintenanceFatalBanner,
+  type CatalogMaintenanceSectionKind,
+  type CatalogMaintenanceSiteGroup,
+  type CatalogMaintenanceSiteVariant,
+  type CatalogMaintenanceSurveyResponse,
 } from '../../../shared/contracts/index.js'
 import { buildAppPath } from '../../app/paths.js'
+import { buildHeliosModulePath } from '../../../shared/contracts/index.js'
 import { Pill } from '../../components/Pill.js'
 import { useRegisterCatalogSidebarSubtree } from './catalogSidebarSubtree.js'
 
-type Mode = 'group' | 'variants'
+type CardMode = 'group' | 'variants' | 'barcode'
 
-interface ListsState {
+interface SurveyState {
   loading: boolean
   refreshing: boolean
-  missingGroup: CatalogMaintenanceListResponse | null
-  missingVariant: CatalogMaintenanceListResponse | null
+  survey: CatalogMaintenanceSurveyResponse | null
   error: string | null
 }
 
-const INITIAL_STATE: ListsState = {
+const INITIAL_STATE: SurveyState = {
   loading: true,
   refreshing: false,
-  missingGroup: null,
-  missingVariant: null,
+  survey: null,
   error: null,
 }
 
-export function CatalogMaintenancePage() {
-  useRegisterCatalogSidebarSubtree()
-  const navigate = useNavigate()
-  const [state, setState] = useState<ListsState>(INITIAL_STATE)
-  const [busyGroupId, setBusyGroupId] = useState<number | null>(null)
-  const [feedback, setFeedback] = useState<{ kind: 'ok' | 'err'; message: string } | null>(null)
+const PAGE_PATH = buildHeliosModulePath('catalog', 'maintenance')
 
-  const fetchLists = useCallback(
+export function CatalogMaintenancePage() {
+  const [searchParams, setSearchParams] = useSearchParams()
+  const activeBrand = searchParams.get('brand')
+  const navigate = useNavigate()
+  const [state, setState] = useState<SurveyState>(INITIAL_STATE)
+  const [busyGroupKey, setBusyGroupKey] = useState<string | null>(null)
+  const [feedback, setFeedback] = useState<{ kind: 'ok' | 'err'; message: string } | null>(null)
+  const [repairBusy, setRepairBusy] = useState(false)
+
+  const fetchSurvey = useCallback(
     async (forceRefresh: boolean) => {
       setState((prev) => ({ ...prev, refreshing: true, error: null }))
       try {
         const search = forceRefresh ? '?refresh=1' : ''
-        const [missingGroup, missingVariant] = await Promise.all([
-          fetchMaintenanceList(`/api/catalog/maintenance/missing-group-images${search}`),
-          fetchMaintenanceList(`/api/catalog/maintenance/missing-variant-images${search}`),
-        ])
-        setState({ loading: false, refreshing: false, missingGroup, missingVariant, error: null })
-      } catch (error) {
-        if (error instanceof AuthRequiredError) {
+        const response = await fetch(buildAppPath(`/api/catalog/maintenance/survey${search}`), {
+          credentials: 'same-origin',
+          headers: { Accept: 'application/json' },
+        })
+        if (response.status === 401) {
           navigate('/login')
           return
         }
-        const message = error instanceof Error ? error.message : 'Failed to load catalog maintenance survey.'
+        if (!response.ok) {
+          const errorPayload = await maybeReadErrorPayload(response)
+          throw new Error(errorPayload ?? `${response.status} ${response.statusText}`)
+        }
+        const payload = await response.json()
+        const survey = CatalogMaintenanceSurveyResponseSchema.parse(payload)
+        setState({ loading: false, refreshing: false, survey, error: null })
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Failed to load Images & Barcodes survey.'
         setState((prev) => ({ ...prev, loading: false, refreshing: false, error: message }))
       }
     },
@@ -59,45 +71,119 @@ export function CatalogMaintenancePage() {
   )
 
   useEffect(() => {
-    void fetchLists(false)
-  }, [fetchLists])
+    void fetchSurvey(false)
+  }, [fetchSurvey])
+
+  // Compute sidebar metadata once we have the survey.
+  const sidebarOptions = useMemo(() => {
+    const survey = state.survey
+    if (!survey) return undefined
+    const siteAnchors = survey.sites
+      .filter((site) => site.totalIssueCount > 0)
+      .map((site) => ({
+        siteKey: site.siteKey,
+        siteLabel: site.siteLabel,
+        targetId: site.targetId,
+        count: site.totalIssueCount,
+      }))
+    return {
+      siteAnchors,
+      brandQuickFilters: survey.quickFilters.brands,
+      activeBrand,
+      imagesAndBarcodesPath: PAGE_PATH,
+    }
+  }, [state.survey, activeBrand])
+
+  useRegisterCatalogSidebarSubtree({ imagesAndBarcodes: sidebarOptions })
 
   const handleUploadComplete = useCallback(
     async (message: string) => {
       setFeedback({ kind: 'ok', message })
-      await fetchLists(true)
+      await fetchSurvey(true)
     },
-    [fetchLists],
+    [fetchSurvey],
   )
 
   const handleUploadError = useCallback((message: string) => {
     setFeedback({ kind: 'err', message })
   }, [])
 
-  const lastScannedAt = state.missingGroup?.meta.generatedAt ?? state.missingVariant?.meta.generatedAt ?? null
+  const handleRepairCache = useCallback(async () => {
+    setRepairBusy(true)
+    try {
+      const response = await fetch(buildAppPath('/api/catalog/maintenance/cache-repair'), {
+        credentials: 'same-origin',
+        headers: { Accept: 'application/json' },
+        method: 'POST',
+      })
+      if (response.status === 401) {
+        navigate('/login')
+        return
+      }
+      if (!response.ok) {
+        const errorPayload = await maybeReadErrorPayload(response)
+        throw new Error(errorPayload ?? `${response.status} ${response.statusText}`)
+      }
+      const payload = (await response.json()) as CatalogMaintenanceCacheRepairResponse
+      const jobIds = [payload.fullSummaryJobId, payload.stockRefreshJobId, payload.discoverOrphanGroupsJobId]
+        .filter((v): v is number => v !== null)
+        .join(', ')
+      setFeedback({
+        kind: 'ok',
+        message: `Fix-cache jobs enqueued (ids: ${jobIds}). The page will look correct once workers finish.`,
+      })
+    } catch (error) {
+      setFeedback({ kind: 'err', message: error instanceof Error ? error.message : 'Fix cache failed.' })
+    } finally {
+      setRepairBusy(false)
+    }
+  }, [navigate])
+
+  const handleBrandFilter = (brand: string | null) => {
+    if (brand === null) {
+      searchParams.delete('brand')
+    } else {
+      searchParams.set('brand', brand)
+    }
+    setSearchParams(searchParams, { replace: true })
+  }
+
+  const filteredSurvey = useMemo(() => filterSurveyByBrand(state.survey, activeBrand), [state.survey, activeBrand])
 
   return (
     <section className="catalog-maintenance-page">
       <div className="page-header">
         <div>
           <p className="eyebrow">Catalog Module</p>
-          <h2>Image maintenance</h2>
+          <h2>Images &amp; Barcodes</h2>
           <p className="subtle-copy">
-            In-stock SKUs whose Sweed group has no image, and in-stock SKUs whose variants don&apos;t each have
-            their own image. Tap a card to upload or capture a photo and Helios will attach it for you.
+            In-stock SKUs whose Sweed group has no image, whose variants don&apos;t each have their own image,
+            or whose package barcode is missing or invalid. Tap a card to upload or capture a photo and Helios
+            will attach it for you.
           </p>
         </div>
         <div className="inline-row wrap-row catalog-maintenance-meta">
-          {lastScannedAt ? (
-            <Pill tone="muted">scanned {formatRelativeTime(lastScannedAt)}</Pill>
+          {state.survey?.meta.generatedAt ? (
+            <Pill tone="muted">scanned {formatRelativeTime(state.survey.meta.generatedAt)}</Pill>
+          ) : null}
+          {activeBrand ? (
+            <Pill tone="warning">
+              brand: {activeBrand}{' '}
+              <button
+                type="button"
+                className="ghost-button"
+                onClick={() => handleBrandFilter(null)}
+                style={{ marginLeft: '0.25rem' }}
+              >
+                clear
+              </button>
+            </Pill>
           ) : null}
           <button
             type="button"
             className="ghost-button"
             disabled={state.refreshing}
-            onClick={() => {
-              void fetchLists(true)
-            }}
+            onClick={() => void fetchSurvey(true)}
           >
             {state.refreshing ? 'Refreshing…' : 'Refresh survey'}
           </button>
@@ -113,93 +199,178 @@ export function CatalogMaintenancePage() {
         </div>
       ) : null}
 
-      {state.error ? <div className="catalog-maintenance-toast catalog-maintenance-toast-err">{state.error}</div> : null}
+      {state.error ? (
+        <div className="catalog-maintenance-toast catalog-maintenance-toast-err">{state.error}</div>
+      ) : null}
 
-      <CatalogMaintenanceSection
-        title="Missing product image"
-        emptyHint="Every in-stock product has a group image."
-        mode="group"
-        loading={state.loading}
-        list={state.missingGroup}
-        busyGroupId={busyGroupId}
-        setBusyGroupId={setBusyGroupId}
-        onComplete={handleUploadComplete}
-        onError={handleUploadError}
-      />
+      {filteredSurvey?.fatal ? (
+        <FatalBanner banner={filteredSurvey.fatal} busy={repairBusy} onRepair={() => void handleRepairCache()} />
+      ) : null}
 
-      <CatalogMaintenanceSection
-        title="Variants lacking exhaustive images"
-        emptyHint="Every in-stock multi-variant product has per-variant images."
-        mode="variants"
-        loading={state.loading}
-        list={state.missingVariant}
-        busyGroupId={busyGroupId}
-        setBusyGroupId={setBusyGroupId}
-        onComplete={handleUploadComplete}
-        onError={handleUploadError}
-      />
+      {state.loading && !state.survey ? <p className="subtle-copy">Loading…</p> : null}
+
+      {filteredSurvey
+        ? filteredSurvey.sites.map((site) => (
+            <SiteSection
+              key={site.siteKey}
+              site={site}
+              busyGroupKey={busyGroupKey}
+              setBusyGroupKey={setBusyGroupKey}
+              onComplete={handleUploadComplete}
+              onError={handleUploadError}
+            />
+          ))
+        : null}
+
+      {filteredSurvey && filteredSurvey.sites.every((s) => s.totalIssueCount === 0) ? (
+        <p className="subtle-copy">No issues to address for the active filter.</p>
+      ) : null}
     </section>
   )
 }
 
-interface SectionProps {
-  title: string
-  emptyHint: string
-  mode: Mode
-  loading: boolean
-  list: CatalogMaintenanceListResponse | null
-  busyGroupId: number | null
-  setBusyGroupId: (id: number | null) => void
+function filterSurveyByBrand(
+  survey: CatalogMaintenanceSurveyResponse | null,
+  activeBrand: string | null,
+): CatalogMaintenanceSurveyResponse | null {
+  if (!survey) return null
+  if (!activeBrand) return survey
+  return {
+    ...survey,
+    sites: survey.sites.map((site) => ({
+      ...site,
+      sections: site.sections.map((section) => {
+        const groups = section.groups.filter((g) => g.brandName === activeBrand)
+        return { ...section, groups, issueCount: groups.length }
+      }),
+      totalIssueCount: site.sections.reduce(
+        (acc, s) => acc + s.groups.filter((g) => g.brandName === activeBrand).length,
+        0,
+      ),
+    })),
+  }
+}
+
+interface FatalBannerProps {
+  banner: CatalogMaintenanceFatalBanner
+  busy: boolean
+  onRepair: () => void
+}
+
+function FatalBanner({ banner, busy, onRepair }: FatalBannerProps) {
+  return (
+    <div className="catalog-maintenance-fatal-banner catalog-maintenance-toast catalog-maintenance-toast-err">
+      <div>
+        <strong>⚠ {banner.title}</strong>
+        <p style={{ margin: '0.25rem 0' }}>{banner.message}</p>
+        <ul style={{ margin: '0 0 0.5rem 1.25rem' }}>
+          {banner.reasons.map((reason) => (
+            <li key={reason.code}>
+              <strong>{reason.count}</strong> · {reason.message}
+              {reason.sampleIds.length > 0 ? (
+                <span className="subtle-copy"> (sample: {reason.sampleIds.join(', ')})</span>
+              ) : null}
+            </li>
+          ))}
+        </ul>
+        {banner.canRepair ? (
+          <button type="button" className="primary-button" onClick={onRepair} disabled={busy}>
+            {busy ? 'Enqueuing fix-cache jobs…' : '🛠 Fix cache (enqueue high-priority workers)'}
+          </button>
+        ) : null}
+      </div>
+    </div>
+  )
+}
+
+interface SiteSectionProps {
+  site: CatalogMaintenanceSurveyResponse['sites'][number]
+  busyGroupKey: string | null
+  setBusyGroupKey: (key: string | null) => void
   onComplete: (message: string) => Promise<void>
   onError: (message: string) => void
 }
 
-function CatalogMaintenanceSection(props: SectionProps) {
-  const { title, emptyHint, mode, loading, list, busyGroupId, setBusyGroupId, onComplete, onError } = props
-  const groups = list?.groups ?? []
-  const warnings = list?.meta.warnings ?? []
-
+function SiteSection({ site, busyGroupKey, setBusyGroupKey, onComplete, onError }: SiteSectionProps) {
   return (
-    <section className="catalog-maintenance-section">
-      <header className="catalog-maintenance-section-head">
-        <h3>{title}</h3>
-        <Pill tone={groups.length === 0 ? 'muted' : 'warning'}>{groups.length} candidate{groups.length === 1 ? '' : 's'}</Pill>
+    <section className="catalog-maintenance-site" id={site.targetId} style={{ scrollMarginTop: '1rem' }}>
+      <header className="page-header" style={{ marginTop: '2rem' }}>
+        <h3>
+          {site.siteLabel}{' '}
+          <Pill tone={site.totalIssueCount === 0 ? 'muted' : 'warning'}>
+            {site.totalIssueCount} issue{site.totalIssueCount === 1 ? '' : 's'}
+          </Pill>
+        </h3>
       </header>
-      {warnings.length > 0 ? (
-        <details className="catalog-maintenance-warnings">
-          <summary>{warnings.length} warning{warnings.length === 1 ? '' : 's'} during scan</summary>
-          <ul>
-            {warnings.map((warning, index) => (
-              <li key={index}>{warning}</li>
-            ))}
-          </ul>
-        </details>
-      ) : null}
-      {loading && !list ? <p className="subtle-copy">Loading…</p> : null}
-      {!loading && groups.length === 0 ? <p className="subtle-copy">{emptyHint}</p> : null}
-      <ul className="catalog-maintenance-list">
-        {groups.map((group) => (
-          <li key={`${mode}:${group.groupId}`}>
-            <MaintenanceCard
-              mode={mode}
-              group={group}
-              busy={busyGroupId === group.groupId}
-              disabled={busyGroupId !== null && busyGroupId !== group.groupId}
-              onUploadStart={() => setBusyGroupId(group.groupId)}
-              onUploadEnd={() => setBusyGroupId(null)}
-              onComplete={onComplete}
-              onError={onError}
-            />
-          </li>
-        ))}
-      </ul>
+      {site.sections.map((section) => (
+        <SectionBlock
+          key={section.kind}
+          section={section}
+          busyGroupKey={busyGroupKey}
+          setBusyGroupKey={setBusyGroupKey}
+          onComplete={onComplete}
+          onError={onError}
+        />
+      ))}
+    </section>
+  )
+}
+
+interface SectionBlockProps {
+  section: CatalogMaintenanceSurveyResponse['sites'][number]['sections'][number]
+  busyGroupKey: string | null
+  setBusyGroupKey: (key: string | null) => void
+  onComplete: (message: string) => Promise<void>
+  onError: (message: string) => void
+}
+
+function SectionBlock({ section, busyGroupKey, setBusyGroupKey, onComplete, onError }: SectionBlockProps) {
+  const mode: CardMode =
+    section.kind === 'missing-catalog-image'
+      ? 'group'
+      : section.kind === 'missing-variant-image'
+        ? 'variants'
+        : 'barcode'
+  return (
+    <section className="catalog-maintenance-section" id={section.targetId} style={{ scrollMarginTop: '1rem' }}>
+      <header className="catalog-maintenance-section-head">
+        <h4>{section.label}</h4>
+        <Pill tone={section.issueCount === 0 ? 'muted' : 'warning'}>
+          {section.issueCount} candidate{section.issueCount === 1 ? '' : 's'}
+        </Pill>
+      </header>
+      {section.groups.length === 0 ? (
+        <p className="subtle-copy">Nothing to fix here.</p>
+      ) : (
+        <ul className="catalog-maintenance-list">
+          {section.groups.map((group) => {
+            const key = `${section.kind}:${group.siteKey}:${group.groupId}`
+            return (
+              <li key={key}>
+                <MaintenanceCard
+                  cardKey={key}
+                  mode={mode}
+                  group={group}
+                  busy={busyGroupKey === key}
+                  disabled={busyGroupKey !== null && busyGroupKey !== key}
+                  onUploadStart={() => setBusyGroupKey(key)}
+                  onUploadEnd={() => setBusyGroupKey(null)}
+                  onComplete={onComplete}
+                  onError={onError}
+                />
+              </li>
+            )
+          })}
+        </ul>
+      )}
     </section>
   )
 }
 
 interface CardProps {
-  mode: Mode
-  group: CatalogMaintenanceGroup
+  cardKey: string
+  mode: CardMode
+  group: CatalogMaintenanceSiteGroup
   busy: boolean
   disabled: boolean
   onUploadStart: () => void
@@ -212,12 +383,9 @@ function MaintenanceCard(props: CardProps) {
   const { mode, group, busy, disabled, onUploadStart, onUploadEnd, onComplete, onError } = props
   const [file, setFile] = useState<File | null>(null)
   const [localPreviewUrl, setLocalPreviewUrl] = useState<string | null>(null)
-  const [selectedVariantIds, setSelectedVariantIds] = useState<number[]>(() => defaultSelectedVariantIds(group))
-  // Optimistic UI overlay: after a successful upload we keep showing the
-  // just-uploaded image (and a "syncing…" pill) until the next server
-  // refresh produces fresh data. This lets the operator see their fix
-  // immediately, even though the worker that updates the DB cache may
-  // be a few seconds behind.
+  const [selectedVariantIds, setSelectedVariantIds] = useState<number[]>(() =>
+    group.variants.map((variant) => variant.productId),
+  )
   const [optimisticImageUrl, setOptimisticImageUrl] = useState<string | null>(null)
   const [optimisticAffectedProductIds, setOptimisticAffectedProductIds] = useState<readonly number[]>([])
   const [syncingReanalysis, setSyncingReanalysis] = useState(false)
@@ -234,10 +402,10 @@ function MaintenanceCard(props: CardProps) {
   }, [file])
 
   useEffect(() => {
-    setSelectedVariantIds(defaultSelectedVariantIds(group))
+    setSelectedVariantIds(group.variants.map((variant) => variant.productId))
   }, [group])
 
-  const summaryLine = useMemo(() => buildSummaryLine(group), [group])
+  const summaryLine = useMemo(() => buildSummaryLine(group, mode), [group, mode])
 
   const toggleVariant = (productId: number) => {
     setSelectedVariantIds((prev) =>
@@ -245,11 +413,8 @@ function MaintenanceCard(props: CardProps) {
     )
   }
 
-  const handleFile = (selectedFile: File | null) => {
-    setFile(selectedFile)
-  }
-
   const handleSubmit = async () => {
+    if (mode === 'barcode') return
     if (!file) {
       onError('Pick or capture a photo first.')
       return
@@ -282,22 +447,15 @@ function MaintenanceCard(props: CardProps) {
         affectedProductIds?: number[]
         reanalysisJobId?: number | null
       }
-      // Pin the just-uploaded image as the optimistic preview so the
-      // operator can see their fix immediately, even before the worker
-      // refreshes the DB-cached live state.
       setOptimisticImageUrl(payload.blobUrl ?? localPreviewUrl ?? null)
-      setOptimisticAffectedProductIds(
-        mode === 'group' ? [] : (payload.affectedProductIds ?? selectedVariantIds),
-      )
+      setOptimisticAffectedProductIds(mode === 'group' ? [] : (payload.affectedProductIds ?? selectedVariantIds))
       setSyncingReanalysis(payload.reanalysisJobId !== null && payload.reanalysisJobId !== undefined)
       setFile(null)
-      if (inputRef.current) {
-        inputRef.current.value = ''
-      }
+      if (inputRef.current) inputRef.current.value = ''
       const message =
         mode === 'group'
-          ? `Group image attached to ${displayGroupName(group)}.`
-          : `Variant image attached to ${selectedVariantIds.length} variant${selectedVariantIds.length === 1 ? '' : 's'} of ${displayGroupName(group)}.`
+          ? `Group image attached to ${displayGroupName(group)} (${group.siteLabel}).`
+          : `Variant image attached to ${selectedVariantIds.length} variant${selectedVariantIds.length === 1 ? '' : 's'} of ${displayGroupName(group)} (${group.siteLabel}).`
       await onComplete(message)
     } catch (error) {
       onError(error instanceof Error ? error.message : 'Upload failed.')
@@ -315,7 +473,8 @@ function MaintenanceCard(props: CardProps) {
       ? 'Upload group photo'
       : `Upload variant photo (${selectedVariantIds.length}/${group.variants.length})`
 
-  const cardPreviewSrc = (mode === 'group' ? optimisticImageUrl : null) ?? localPreviewUrl ?? group.groupPreviewImageUrl
+  const cardPreviewSrc =
+    (mode === 'group' ? optimisticImageUrl : null) ?? localPreviewUrl ?? group.groupPreviewImageUrl
 
   return (
     <article className={`catalog-maintenance-card${disabled ? ' is-disabled' : ''}`}>
@@ -331,12 +490,10 @@ function MaintenanceCard(props: CardProps) {
           <div className="catalog-maintenance-card-title">
             <strong>{displayGroupName(group)}</strong>
             {group.brandName ? <span className="subtle-copy">{group.brandName}</span> : null}
-            {syncingReanalysis ? <Pill tone="muted">syncing…</Pill> : null}
+            <Pill tone="muted">{group.siteLabel}</Pill>
+            {(group.needsReanalysis || syncingReanalysis) ? <Pill tone="muted">syncing…</Pill> : null}
           </div>
           <div className="catalog-maintenance-card-tags">
-            {group.inStockSites.map((site) => (
-              <Pill key={site} tone="muted">{site}</Pill>
-            ))}
             {group.categoryName ? <Pill tone="muted">{group.categoryName}</Pill> : null}
             {group.subcategoryName ? <Pill tone="muted">{group.subcategoryName}</Pill> : null}
           </div>
@@ -365,7 +522,7 @@ function MaintenanceCard(props: CardProps) {
             </div>
           ) : (
             <div className="catalog-maintenance-variants-head">
-              <span className="subtle-copy">In-stock variants:</span>
+              <span className="subtle-copy">{mode === 'barcode' ? 'Affected variants:' : 'In-stock variants:'}</span>
             </div>
           )}
           <ul className="catalog-maintenance-variant-list">
@@ -394,43 +551,42 @@ function MaintenanceCard(props: CardProps) {
         </div>
       ) : null}
 
-      <div className="catalog-maintenance-card-actions">
-        <input
-          ref={inputRef}
-          type="file"
-          accept="image/*"
-          capture="environment"
-          className="catalog-maintenance-file-input"
-          onChange={(event) => {
-            const next = event.target.files?.[0] ?? null
-            handleFile(next)
-          }}
-        />
-        <button
-          type="button"
-          className="ghost-button catalog-maintenance-pick"
-          onClick={() => inputRef.current?.click()}
-          disabled={busy || disabled}
-        >
-          {file ? 'Replace photo' : 'Pick / take a photo'}
-        </button>
-        <button
-          type="button"
-          className="primary-button catalog-maintenance-upload"
-          onClick={() => void handleSubmit()}
-          disabled={busy || disabled || !file}
-        >
-          {ctaLabel}
-        </button>
-        <p className="subtle-copy catalog-maintenance-file-label">{fileLabel}</p>
-      </div>
+      {mode !== 'barcode' ? (
+        <div className="catalog-maintenance-card-actions">
+          <input
+            ref={inputRef}
+            type="file"
+            accept="image/*"
+            capture="environment"
+            className="catalog-maintenance-file-input"
+            onChange={(event) => setFile(event.target.files?.[0] ?? null)}
+          />
+          <button
+            type="button"
+            className="ghost-button catalog-maintenance-pick"
+            onClick={() => inputRef.current?.click()}
+            disabled={busy || disabled}
+          >
+            {file ? 'Replace photo' : 'Pick / take a photo'}
+          </button>
+          <button
+            type="button"
+            className="primary-button catalog-maintenance-upload"
+            onClick={() => void handleSubmit()}
+            disabled={busy || disabled || !file}
+          >
+            {ctaLabel}
+          </button>
+          <p className="subtle-copy catalog-maintenance-file-label">{fileLabel}</p>
+        </div>
+      ) : null}
     </article>
   )
 }
 
 interface VariantRowProps {
-  variant: CatalogMaintenanceVariant
-  mode: Mode
+  variant: CatalogMaintenanceSiteVariant
+  mode: CardMode
   sweedGroupId: number
   selected: boolean
   optimisticPreviewUrl: string | null
@@ -485,9 +641,6 @@ function VariantRow(props: VariantRowProps) {
         headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
         method: 'POST',
       })
-      if (response.status === 401) {
-        throw new AuthRequiredError()
-      }
       if (!response.ok) {
         const errorPayload = await maybeReadErrorPayload(response)
         throw new Error(errorPayload ?? `${response.status} ${response.statusText}`)
@@ -539,9 +692,7 @@ function VariantRow(props: VariantRowProps) {
       onBarcodeError(error instanceof Error ? error.message : 'Failed to read barcode photo.')
     } finally {
       setScanningBarcode(false)
-      if (barcodeFileInputRef.current) {
-        barcodeFileInputRef.current.value = ''
-      }
+      if (barcodeFileInputRef.current) barcodeFileInputRef.current.value = ''
     }
   }
 
@@ -571,6 +722,7 @@ function VariantRow(props: VariantRowProps) {
               : variant.variantSpecificImageCount > 0
                 ? `${variant.variantSpecificImageCount} own image${variant.variantSpecificImageCount === 1 ? '' : 's'}`
                 : 'no variant-specific image'}
+            {variant.quantity !== null ? ` · qty ${formatQty(variant.quantity)}` : null}
           </span>
           {syncingReanalysis ? <span className="subtle-copy">· syncing…</span> : null}
         </span>
@@ -582,6 +734,8 @@ function VariantRow(props: VariantRowProps) {
           editing={editingBarcode}
           draftValue={draftBarcode}
           currentValue={variant.externalBarcode}
+          status={variant.barcodeStatus}
+          issueReason={variant.barcodeIssueReason}
           saving={savingBarcode}
           scanning={scanningBarcode}
           scannerSupported={scannerSupported}
@@ -605,9 +759,7 @@ function VariantRow(props: VariantRowProps) {
           className="catalog-maintenance-file-input"
           onChange={(event) => {
             const file = event.target.files?.[0]
-            if (file) {
-              void handleScannedFile(file)
-            }
+            if (file) void handleScannedFile(file)
           }}
         />
       </div>
@@ -654,6 +806,8 @@ interface BarcodeLineProps {
   editing: boolean
   draftValue: string
   currentValue: string | null
+  status: 'ok' | 'missing' | 'invalid'
+  issueReason: string | null
   saving: boolean
   scanning: boolean
   scannerSupported: boolean
@@ -669,6 +823,8 @@ function BarcodeLine(props: BarcodeLineProps) {
     editing,
     draftValue,
     currentValue,
+    status,
+    issueReason,
     saving,
     scanning,
     scannerSupported,
@@ -688,6 +844,10 @@ function BarcodeLine(props: BarcodeLineProps) {
         ) : (
           <span className="subtle-copy">none on file</span>
         )}{' '}
+        {status !== 'ok' ? (
+          <Pill tone="warning">{status === 'missing' ? 'missing' : 'invalid'}</Pill>
+        ) : null}
+        {issueReason ? <span className="subtle-copy"> ({issueReason})</span> : null}{' '}
         <button type="button" className="ghost-button catalog-maintenance-barcode-btn" onClick={onBeginEdit}>
           Edit
         </button>{' '}
@@ -755,19 +915,11 @@ interface BarcodeDetectorCtor {
   }
 }
 
-function defaultSelectedVariantIds(group: CatalogMaintenanceGroup): number[] {
-  const missing = group.variants.filter((variant) => variant.variantSpecificImageCount === 0).map((v) => v.productId)
-  if (missing.length > 0) {
-    return missing
-  }
-  return group.variants.map((variant) => variant.productId)
-}
-
-function displayGroupName(group: CatalogMaintenanceGroup): string {
+function displayGroupName(group: CatalogMaintenanceSiteGroup): string {
   return group.groupName ?? `Group #${group.groupId}`
 }
 
-function variantLabel(variant: CatalogMaintenanceVariant): string {
+function variantLabel(variant: CatalogMaintenanceSiteVariant): string {
   const parts: string[] = []
   if (variant.shortName) {
     parts.push(variant.shortName)
@@ -776,76 +928,46 @@ function variantLabel(variant: CatalogMaintenanceVariant): string {
   } else {
     parts.push(`#${variant.productId}`)
   }
-  if (variant.sizeName) {
-    parts.push(variant.sizeName)
+  if (variant.sizeName) parts.push(variant.sizeName)
+  if (variant.packOfSize && variant.packOfSize > 1) parts.push(`pack of ${variant.packOfSize}`)
+  if (variant.tab) parts.push(`tab: ${variant.tab}`)
+  return parts.join(' · ')
+}
+
+function buildSummaryLine(group: CatalogMaintenanceSiteGroup, mode: CardMode): string {
+  const parts: string[] = []
+  parts.push(`${group.variants.length} variant${group.variants.length === 1 ? '' : 's'} in stock at ${group.siteLabel}`)
+  parts.push(`${group.groupImageCount} group image${group.groupImageCount === 1 ? '' : 's'}`)
+  if (mode !== 'barcode') {
+    const variantsWithImages = group.variants.filter((variant) => variant.variantSpecificImageCount > 0).length
+    parts.push(`${variantsWithImages}/${group.variants.length} variants have own image`)
   }
-  if (variant.packOfSize && variant.packOfSize > 1) {
-    parts.push(`pack of ${variant.packOfSize}`)
-  }
-  if (variant.tab) {
-    parts.push(`tab: ${variant.tab}`)
+  const totalQty = group.variants.reduce((acc, v) => acc + (v.quantity ?? 0), 0)
+  if (totalQty > 0) {
+    parts.push(`total qty ${formatQty(totalQty)}`)
   }
   return parts.join(' · ')
 }
 
-function buildSummaryLine(group: CatalogMaintenanceGroup): string {
-  const parts: string[] = []
-  parts.push(`${group.inStockVariantCount}/${group.totalVariantCount} variant${group.totalVariantCount === 1 ? '' : 's'} in stock`)
-  parts.push(`${group.groupImageCount} group image${group.groupImageCount === 1 ? '' : 's'}`)
-  const variantsWithImages = group.variants.filter((variant) => variant.variantSpecificImageCount > 0).length
-  parts.push(`${variantsWithImages}/${group.variants.length} variants have own image`)
-  return parts.join(' · ')
+function formatQty(value: number): string {
+  if (!Number.isFinite(value)) return '?'
+  return Number.isInteger(value) ? String(value) : value.toFixed(2)
 }
 
 function formatBytes(bytes: number): string {
-  if (bytes < 1024) {
-    return `${bytes} B`
-  }
-  if (bytes < 1024 * 1024) {
-    return `${(bytes / 1024).toFixed(1)} KB`
-  }
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
   return `${(bytes / (1024 * 1024)).toFixed(2)} MB`
 }
 
 function formatRelativeTime(iso: string): string {
   const generated = Date.parse(iso)
-  if (!Number.isFinite(generated)) {
-    return iso
-  }
+  if (!Number.isFinite(generated)) return iso
   const seconds = Math.max(0, Math.floor((Date.now() - generated) / 1000))
-  if (seconds < 60) {
-    return `${seconds}s ago`
-  }
-  if (seconds < 3600) {
-    return `${Math.floor(seconds / 60)}m ago`
-  }
-  if (seconds < 86_400) {
-    return `${Math.floor(seconds / 3600)}h ago`
-  }
+  if (seconds < 60) return `${seconds}s ago`
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`
+  if (seconds < 86_400) return `${Math.floor(seconds / 3600)}h ago`
   return `${Math.floor(seconds / 86_400)}d ago`
-}
-
-class AuthRequiredError extends Error {
-  constructor() {
-    super('Authentication required.')
-    this.name = 'AuthRequiredError'
-  }
-}
-
-async function fetchMaintenanceList(path: string): Promise<CatalogMaintenanceListResponse> {
-  const response = await fetch(buildAppPath(path), {
-    credentials: 'same-origin',
-    headers: { Accept: 'application/json' },
-  })
-  if (response.status === 401) {
-    throw new AuthRequiredError()
-  }
-  if (!response.ok) {
-    const errorPayload = await maybeReadErrorPayload(response)
-    throw new Error(errorPayload ?? `${response.status} ${response.statusText}`)
-  }
-  const payload = await response.json()
-  return CatalogMaintenanceListResponseSchema.parse(payload)
 }
 
 async function maybeReadErrorPayload(response: Response): Promise<string | null> {
@@ -856,3 +978,10 @@ async function maybeReadErrorPayload(response: Response): Promise<string | null>
     return null
   }
 }
+
+void displayGroupName
+
+// `displayGroupName` is reused by the upload-completion toast string; keep
+// the export-style reference above to satisfy TS's unused-symbol lint
+// when the function appears only inside JSX template literals during
+// future refactors. Cheap, side-effect-free.

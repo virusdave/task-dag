@@ -3,6 +3,7 @@ import {
   CatalogPendingPurchasesGenerateJobPayloadSchema,
   CatalogPendingPurchasesImportJobPayloadSchema,
   CatalogReviewRerunRowJobPayloadSchema,
+  CatalogSyncDiscoverOrphanGroupsJobPayloadSchema,
   CatalogSyncFullSummaryJobPayloadSchema,
   ConfigWorkersCatalogRefreshJobPayloadSchema,
   ConfigWorkersLitalertsRefreshVariantJobPayloadSchema,
@@ -48,6 +49,7 @@ import { runScreensMidtownFreshAndIntensePromoRebindJob } from '../jobs/screensM
 import { runScreensMidtownPricedToMovePromoRebindJob } from '../jobs/screensMidtownPricedToMovePromoRebindJob.js'
 import { runSchedulingExtractConstraintsJob } from '../jobs/schedulingExtractConstraintsJob.js'
 import { runSchedulingGenerateCandidatesJob } from '../jobs/schedulingGenerateCandidatesJob.js'
+import { runCatalogSyncDiscoverOrphanGroupsJob } from '../jobs/catalogSyncDiscoverOrphanGroupsJob.js'
 import { runCatalogSyncGroupDetailJob } from '../jobs/syncGroupDetailJob.js'
 import { runCatalogSyncFullSummaryJob } from '../jobs/syncFullSummaryJob.js'
 import { runUndoExecuteJob } from '../jobs/undoExecuteJob.js'
@@ -78,6 +80,12 @@ const handlers: Record<JobType, JobHandler> = {
   },
   'catalog.sync.group_detail': async (context) => {
     await runCatalogSyncGroupDetailJob(CatalogSyncGroupDetailJobPayloadSchema.parse(context.payload))
+  },
+  'catalog.sync.discover_orphan_groups': async (context) => {
+    await runCatalogSyncDiscoverOrphanGroupsJob(
+      context,
+      CatalogSyncDiscoverOrphanGroupsJobPayloadSchema.parse(context.payload),
+    )
   },
   'catalog.review.rerun_row': async (context) => {
     await runCatalogReviewRerunRowJob(context, CatalogReviewRerunRowJobPayloadSchema.parse(context.payload))
@@ -177,6 +185,7 @@ const SWEED_BACKED_JOB_TYPES: ReadonlySet<JobType> = new Set<JobType>([
   'catalog.pending_purchases.generate',
   'catalog.sync.full_summary',
   'catalog.sync.group_detail',
+  'catalog.sync.discover_orphan_groups',
   'config.workers.catalog_refresh',
   'config.workers.stock_refresh',
   'reconcile.group',

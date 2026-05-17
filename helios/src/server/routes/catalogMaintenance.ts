@@ -2,18 +2,19 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 import { z } from 'zod'
 
 import {
-  CatalogMaintenanceListResponseSchema,
+  CatalogMaintenanceCacheRepairResponseSchema,
+  CatalogMaintenanceSurveyResponseSchema,
   CatalogMaintenanceUpdateBarcodeRequestSchema,
   CatalogMaintenanceUpdateBarcodeResponseSchema,
   CatalogMaintenanceUploadResultSchema,
 } from '../../shared/contracts/index.js'
 import { requireSessionUser } from '../auth/requireSession.js'
 import {
+  enqueueCacheRepairJobs,
   HttpError,
-  loadCatalogMaintenanceList,
+  loadCatalogMaintenanceSurvey,
   updateVariantBarcode,
   uploadCatalogMaintenanceImage,
-  type MaintenanceSurveyList,
 } from '../catalog/maintenance.js'
 
 const RefreshQuerySchema = z.object({
@@ -29,26 +30,24 @@ interface UploadFormFields {
 }
 
 export async function registerCatalogMaintenanceRoutes(server: FastifyInstance): Promise<void> {
-  const handleList = (kind: MaintenanceSurveyList) => async (request: FastifyRequest, reply: FastifyReply) => {
+  server.get('/api/catalog/maintenance/survey', async (request, reply) => {
     const user = await requireSessionUser(request, reply, 'viewer')
-    if (!user) {
-      return
-    }
+    if (!user) return
     const query = RefreshQuerySchema.parse(request.query)
-    const response = await loadCatalogMaintenanceList(kind, {
-      forceRefresh: query.refresh !== undefined,
-    })
-    return reply.send(CatalogMaintenanceListResponseSchema.parse(response))
-  }
+    const response = await loadCatalogMaintenanceSurvey({ forceRefresh: query.refresh !== undefined })
+    return reply.send(CatalogMaintenanceSurveyResponseSchema.parse(response))
+  })
 
-  server.get('/api/catalog/maintenance/missing-group-images', handleList('missing-group-images'))
-  server.get('/api/catalog/maintenance/missing-variant-images', handleList('missing-variant-images'))
+  server.post('/api/catalog/maintenance/cache-repair', async (request, reply) => {
+    const user = await requireSessionUser(request, reply, 'editor')
+    if (!user) return
+    const response = await enqueueCacheRepairJobs(user.id)
+    return reply.send(CatalogMaintenanceCacheRepairResponseSchema.parse(response))
+  })
 
   server.post('/api/catalog/maintenance/barcode', async (request, reply) => {
     const user = await requireSessionUser(request, reply, 'editor')
-    if (!user) {
-      return
-    }
+    if (!user) return
     const body = CatalogMaintenanceUpdateBarcodeRequestSchema.parse(request.body ?? {})
     try {
       const result = await updateVariantBarcode({
@@ -74,9 +73,7 @@ export async function registerCatalogMaintenanceRoutes(server: FastifyInstance):
 
   server.post('/api/catalog/maintenance/images', async (request, reply) => {
     const user = await requireSessionUser(request, reply, 'editor')
-    if (!user) {
-      return
-    }
+    if (!user) return
     if (!request.isMultipart()) {
       return reply.status(400).send({ error: 'multipart/form-data required.' })
     }
@@ -127,7 +124,6 @@ async function collectUploadFields(request: FastifyRequest): Promise<UploadFormF
   for await (const part of request.parts()) {
     if (part.type === 'file') {
       if (part.fieldname !== 'file') {
-        // Drain the stream to keep Fastify happy.
         await part.toBuffer()
         continue
       }
@@ -178,9 +174,7 @@ async function collectUploadFields(request: FastifyRequest): Promise<UploadFormF
 
 function parseProductIds(value: string): number[] {
   const trimmed = value.trim()
-  if (trimmed.length === 0) {
-    return []
-  }
+  if (trimmed.length === 0) return []
   if (trimmed.startsWith('[')) {
     try {
       const parsed: unknown = JSON.parse(trimmed)
@@ -198,14 +192,10 @@ function parseProductIds(value: string): number[] {
 }
 
 function toInt(value: unknown): number | null {
-  if (typeof value === 'number' && Number.isInteger(value)) {
-    return value
-  }
+  if (typeof value === 'number' && Number.isInteger(value)) return value
   if (typeof value === 'string' && value.length > 0) {
     const parsed = Number(value)
-    if (Number.isInteger(parsed)) {
-      return parsed
-    }
+    if (Number.isInteger(parsed)) return parsed
   }
   return null
 }

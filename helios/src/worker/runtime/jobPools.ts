@@ -36,6 +36,7 @@ export const JOB_EXECUTION_POOL_BY_TYPE: Record<JobType, JobPoolMetadata> = {
   // --- sweed pool: anything that touches the shared Sweed UI session ---
   'catalog.sync.full_summary': { pool: 'sweed', requiresSweedSession: true },
   'catalog.sync.group_detail': { pool: 'sweed', requiresSweedSession: true },
+  'catalog.sync.discover_orphan_groups': { pool: 'sweed', requiresSweedSession: true },
   'catalog.pending_purchases.generate': { pool: 'sweed', requiresSweedSession: true },
   'catalog.pending_purchases.apply': { pool: 'sweed', requiresSweedSession: true },
   'config.workers.stock_refresh': { pool: 'sweed', requiresSweedSession: true },

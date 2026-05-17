@@ -20,6 +20,7 @@ import {
 export const JobTypeSchema = z.enum([
   'catalog.sync.full_summary',
   'catalog.sync.group_detail',
+  'catalog.sync.discover_orphan_groups',
   'catalog.pending_purchases.generate',
   'catalog.pending_purchases.apply',
   'catalog.pending_purchases.import_json',
@@ -87,7 +88,9 @@ export type JobLinkedRecordRefs = z.infer<typeof JobLinkedRecordRefsSchema>
 
 export const CatalogSyncFullSummaryJobPayloadSchema = z.object({
   requestedByUserId: z.number().int().positive().nullable().optional(),
-  trigger: z.enum(['manual_refresh', 'scheduled']).default('manual_refresh'),
+  trigger: z
+    .enum(['manual_refresh', 'scheduled', 'catalog_maintenance_fix_cache'])
+    .default('manual_refresh'),
 })
 export type CatalogSyncFullSummaryJobPayload = z.infer<typeof CatalogSyncFullSummaryJobPayloadSchema>
 
@@ -95,9 +98,30 @@ export const CatalogSyncGroupDetailJobPayloadSchema = z.object({
   catalogGroupId: z.number().int().positive(),
   forceLiveRefresh: z.boolean().optional().default(false),
   requestedByUserId: z.number().int().positive().nullable().optional(),
-  trigger: z.enum(['full_summary', 'manual_refresh', 'reconcile_post_write', 'scheduled']).default('manual_refresh'),
+  trigger: z
+    .enum([
+      'full_summary',
+      'manual_refresh',
+      'reconcile_post_write',
+      'scheduled',
+      'catalog_maintenance_edit',
+      'catalog_maintenance_fix_cache',
+      'discovered_orphan_group',
+    ])
+    .default('manual_refresh'),
 })
 export type CatalogSyncGroupDetailJobPayload = z.infer<typeof CatalogSyncGroupDetailJobPayloadSchema>
+
+export const CatalogSyncDiscoverOrphanGroupsJobPayloadSchema = z.object({
+  requestedByUserId: z.number().int().positive().nullable().optional(),
+  siteDealerIds: z.array(z.number().int().positive()).default([]),
+  trigger: z
+    .enum(['catalog_maintenance_fix_cache', 'manual_refresh', 'scheduled'])
+    .default('catalog_maintenance_fix_cache'),
+})
+export type CatalogSyncDiscoverOrphanGroupsJobPayload = z.infer<
+  typeof CatalogSyncDiscoverOrphanGroupsJobPayloadSchema
+>
 
 export const ProposalImportReviewJsonJobPayloadSchema = z.object({
   filePath: z.string().trim().min(1),
@@ -168,7 +192,9 @@ export type LlmDebugRerunJobPayload = z.infer<typeof LlmDebugRerunJobPayloadSche
 export const ConfigWorkersStockRefreshJobPayloadSchema = z.object({
   requestedByUserId: z.number().int().positive().nullable().optional(),
   siteDealerIds: z.array(z.number().int().positive()).default([]),
-  trigger: z.enum(['manual_run', 'scheduled']).default('scheduled'),
+  trigger: z
+    .enum(['manual_run', 'scheduled', 'catalog_maintenance_fix_cache'])
+    .default('scheduled'),
 })
 export type ConfigWorkersStockRefreshJobPayload = z.infer<typeof ConfigWorkersStockRefreshJobPayloadSchema>
 
