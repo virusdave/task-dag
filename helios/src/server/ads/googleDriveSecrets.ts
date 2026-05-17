@@ -24,7 +24,24 @@ export function loadGoogleDriveApiKey(): string | null {
   if (envFile) {
     return readTrimmedFileIfExists(envFile)
   }
-  return readTrimmedFileIfExists(path.join(os.homedir(), '.secret/google-drive/api-key'))
+  // Lookup order matches the eventual agenix wiring:
+  //   1. canonical agenix-decrypted secret for the helios user
+  //   2. helios user's ~/.secret (matches the personal convention)
+  //   3. /tmp/google-drive-api-key -- explicit stopgap while we don't
+  //      yet have an agenix entry for the Drive API key; mode 644 so
+  //      the helios systemd unit can read it without further plumbing
+  const candidates = [
+    '/run/agenix/helios-google-drive-api-key',
+    path.join(os.homedir(), '.secret/google-drive/api-key'),
+    '/tmp/google-drive-api-key',
+  ]
+  for (const p of candidates) {
+    const value = readTrimmedFileIfExists(p)
+    if (value) {
+      return value
+    }
+  }
+  return null
 }
 
 function readTrimmedFileIfExists(p: string): string | null {
