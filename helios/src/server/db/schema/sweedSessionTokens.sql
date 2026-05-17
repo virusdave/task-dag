@@ -61,11 +61,15 @@ create table if not exists sweed_session_tokens (
 create unique index if not exists sweed_session_tokens_prefix_idx
   on sweed_session_tokens (token_prefix);
 
--- Fast lookup of the next available row for claimAvailableSweedSessionToken.
+-- Partial index covering unexpired, unclaimed rows — the hot path for
+-- claimAvailableSweedSessionToken. The predicate intentionally omits
+-- a `claim_expires_at <= now()` clause because Postgres requires
+-- index predicates to be IMMUTABLE and `now()` is not. The claim
+-- query itself ORs in the lapsed-lease case at runtime.
 create index if not exists sweed_session_tokens_available_idx
   on sweed_session_tokens (created_at)
   where marked_expired_at is null
-    and (claimed_at is null or claim_expires_at <= now());
+    and claimed_at is null;
 
 create index if not exists sweed_session_tokens_history_idx
   on sweed_session_tokens (created_at desc);

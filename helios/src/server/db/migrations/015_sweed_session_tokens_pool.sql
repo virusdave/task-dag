@@ -28,7 +28,14 @@ alter table sweed_session_tokens
   add column if not exists claimed_by       text,
   add column if not exists claim_expires_at timestamptz;
 
+-- Partial index covering unexpired, unclaimed rows — the hot path for
+-- claimAvailableSweedSessionToken. The predicate intentionally omits
+-- a `claim_expires_at <= now()` clause because Postgres requires
+-- index predicates to be IMMUTABLE and `now()` is not. The claim
+-- query itself ORs in the lapsed-lease case at runtime; rows with a
+-- lapsed lease are uncommon in steady state so a sequential scan of
+-- those is cheap.
 create index if not exists sweed_session_tokens_available_idx
   on sweed_session_tokens (created_at)
   where marked_expired_at is null
-    and (claimed_at is null or claim_expires_at <= now());
+    and claimed_at is null;
