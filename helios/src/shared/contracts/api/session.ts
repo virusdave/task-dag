@@ -13,9 +13,21 @@ export const RuntimeDependencyStatusSchema = z.object({
 })
 export type RuntimeDependencyStatus = z.infer<typeof RuntimeDependencyStatusSchema>
 
+// Server-side schema-drift signal: any helios SQL migration that the
+// shipped server code expects to find applied but the live database
+// does not. The SPA surfaces these in an all-pages banner so an
+// operator notices before a user trips into a raw SQL error.
+export const PendingMigrationSchema = z.object({
+  migrationId: z.string(),
+  label: z.string(),
+  applyCommand: z.string(),
+})
+export type PendingMigration = z.infer<typeof PendingMigrationSchema>
+
 export const SessionEnvelopeSchema = z.object({
   authMode: z.enum(['anonymous', 'session']),
   localDevSignInAvailable: z.boolean(),
+  pendingMigrations: z.array(PendingMigrationSchema),
   permissions: PermissionSetSchema,
   runtimeDependencies: z.array(RuntimeDependencyStatusSchema),
   user: SessionUserSchema.nullable(),

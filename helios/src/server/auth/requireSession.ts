@@ -5,6 +5,7 @@ import { getPermissionsForRole } from '../../shared/domain/permissions.js'
 import { getServerEnv, isGoogleOAuthReady } from '../config/env.js'
 import { buildRuntimeDependencyStatuses } from '../runtime/dependencyStatus.js'
 import { getPool } from '../db/pool.js'
+import { getPendingMigrations } from '../db/pendingMigrations.js'
 import { getUserById } from '../db/queries/authQueries.js'
 import { hasAtLeastRole } from './permissions.js'
 import { readSessionUserId } from './sessionCookie.js'
@@ -12,11 +13,19 @@ import { readSessionUserId } from './sessionCookie.js'
 export async function buildSessionEnvelope(request: FastifyRequest): Promise<SessionEnvelope> {
   const runtimeDependencies = buildRuntimeDependencyStatuses()
   const localDevSignInAvailable = isLocalDevSignInAvailable()
+  // Pending-migration detection runs against the live DB but is
+  // cached for ~30s inside getPendingMigrations, so the per-request
+  // cost is amortized. We intentionally surface this on every
+  // session response (including anonymous / login-screen calls) so
+  // the all-pages banner can render before a user successfully
+  // signs in and trips into the underlying SQL error.
+  const pendingMigrations = await safelyGetPendingMigrations()
   const userId = readSessionUserId(request)
   if (userId === null) {
     return {
       authMode: 'anonymous',
       localDevSignInAvailable,
+      pendingMigrations,
       permissions: getPermissionsForRole(null),
       runtimeDependencies,
       user: null,
@@ -28,6 +37,7 @@ export async function buildSessionEnvelope(request: FastifyRequest): Promise<Ses
     return {
       authMode: 'anonymous',
       localDevSignInAvailable,
+      pendingMigrations,
       permissions: getPermissionsForRole(null),
       runtimeDependencies,
       user: null,
@@ -37,9 +47,25 @@ export async function buildSessionEnvelope(request: FastifyRequest): Promise<Ses
   return {
     authMode: 'session',
     localDevSignInAvailable,
+    pendingMigrations,
     permissions: getPermissionsForRole(user.role),
     runtimeDependencies,
     user,
+  }
+}
+
+async function safelyGetPendingMigrations() {
+  try {
+    return await getPendingMigrations(getPool())
+  } catch (error) {
+    // Pool is broken / DB unreachable. Don't take down the session
+    // response (which already gracefully handles the same kind of
+    // failure for the user lookup path). Returning an empty array
+    // means the banner stays hidden — the deeper outage will show
+    // up via the runtime-dependency badges or the actual route
+    // loaders failing.
+    console.warn('[buildSessionEnvelope] could not check pending migrations:', error)
+    return []
   }
 }
 

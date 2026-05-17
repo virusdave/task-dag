@@ -1,0 +1,153 @@
+// Runtime check: are any of helios's known SQL migrations still
+// unapplied against the live database?
+//
+// Helios's migrations live as `src/server/db/migrations/NNN_*.sql`
+// files that are applied **manually** (`psql -f …`) by an operator —
+// there is no boot-time runner. That makes it easy for a deploy to
+// ship server code that depends on a column or table the production
+// DB doesn't have yet, which then surfaces only at first request
+// (e.g. `column "needs_reanalysis_at" does not exist`).
+//
+// To make that failure mode visible *before* a user trips into it,
+// we maintain a hand-curated registry of `{ migrationId, sentinel }`
+// pairs below. Each sentinel is the cheapest query we can run that
+// returns 0 rows iff the migration hasn't landed. We surface the
+// pending list on the session envelope so the SPA can render an
+// all-pages banner explaining what the operator has to run.
+//
+// When you add a new migration NNN_foo.sql, ALSO add an entry here.
+// (If you forget, the new code will simply fail with a raw SQL error
+// when it tries to use the missing schema — same as today.) Drop the
+// entries here only once you're confident every long-lived
+// environment has the migration applied; until then the entry is
+// effectively a sentinel that the prod DB and the source tree are in
+// sync.
+
+import type { Queryable } from './pool.js'
+
+export interface MigrationSentinel {
+  readonly migrationId: string
+  readonly label: string
+  readonly check: (db: Queryable) => Promise<boolean>
+}
+
+export interface PendingMigration {
+  readonly migrationId: string
+  readonly label: string
+  readonly applyCommand: string
+}
+
+function makeApplyCommand(migrationId: string): string {
+  // The shipped helper invocation an operator can copy-paste. The
+  // exact `psql` invocation will depend on how they've configured
+  // their credentials (TIGERDATA_CREDENTIALS_FILE, DATABASE_URL,
+  // etc.); we surface the file path and leave the connection string
+  // to the operator.
+  return `psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f helios/src/server/db/migrations/${migrationId}.sql`
+}
+
+async function columnExists(db: Queryable, tableName: string, columnName: string): Promise<boolean> {
+  const result = await db.query<{ exists: boolean }>(
+    `select exists(
+       select 1
+         from information_schema.columns
+        where table_schema = 'public'
+          and table_name = $1
+          and column_name = $2
+     ) as exists`,
+    [tableName, columnName],
+  )
+  return result.rows[0]?.exists === true
+}
+
+async function tableExists(db: Queryable, tableName: string): Promise<boolean> {
+  const result = await db.query<{ exists: boolean }>(
+    `select exists(
+       select 1
+         from information_schema.tables
+        where table_schema = 'public'
+          and table_name = $1
+     ) as exists`,
+    [tableName],
+  )
+  return result.rows[0]?.exists === true
+}
+
+const SENTINELS: MigrationSentinel[] = [
+  {
+    migrationId: '007_pending_purchases',
+    label: 'Pending Purchases tables',
+    check: (db) => tableExists(db, 'pending_purchase_packets'),
+  },
+  {
+    migrationId: '008_catalog_maintenance_cached_inputs',
+    label: 'Catalog Maintenance cached inputs (catalog_groups.needs_reanalysis_at, stock_variant_state.metrc_tags_json)',
+    check: async (db) => {
+      const [hasCol, hasTagsCol] = await Promise.all([
+        columnExists(db, 'catalog_groups', 'needs_reanalysis_at'),
+        columnExists(db, 'stock_variant_state', 'metrc_tags_json'),
+      ])
+      return hasCol && hasTagsCol
+    },
+  },
+]
+
+interface CacheEntry {
+  readonly pending: PendingMigration[]
+  readonly checkedAt: number
+}
+
+const CACHE_TTL_MS = 30_000
+let cache: CacheEntry | null = null
+let inflight: Promise<PendingMigration[]> | null = null
+
+export async function getPendingMigrations(db: Queryable): Promise<PendingMigration[]> {
+  const now = Date.now()
+  if (cache !== null && now - cache.checkedAt < CACHE_TTL_MS) {
+    return cache.pending
+  }
+  if (inflight !== null) {
+    return inflight
+  }
+
+  inflight = (async () => {
+    try {
+      const pending: PendingMigration[] = []
+      for (const sentinel of SENTINELS) {
+        let isApplied = false
+        try {
+          isApplied = await sentinel.check(db)
+        } catch (error) {
+          // A sentinel that throws (e.g. underlying table itself
+          // doesn't exist yet) means the migration definitely isn't
+          // applied. Treat as pending rather than blowing up the
+          // whole session response.
+          isApplied = false
+          console.warn(
+            `[pendingMigrations] sentinel for ${sentinel.migrationId} threw; treating as pending:`,
+            error,
+          )
+        }
+        if (!isApplied) {
+          pending.push({
+            migrationId: sentinel.migrationId,
+            label: sentinel.label,
+            applyCommand: makeApplyCommand(sentinel.migrationId),
+          })
+        }
+      }
+      cache = { pending, checkedAt: Date.now() }
+      return pending
+    } finally {
+      inflight = null
+    }
+  })()
+
+  return inflight
+}
+
+// Test helper.
+export function resetPendingMigrationsCache(): void {
+  cache = null
+  inflight = null
+}
