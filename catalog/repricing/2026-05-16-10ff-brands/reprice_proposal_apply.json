@@ -1,0 +1,2398 @@
+{
+  "generatedAt": "2026-05-17T06:52:48Z",
+  "stateDealerId": 210248,
+  "stateDealerName": "Freshly Baked NY",
+  "targetGmPercent": 67.7,
+  "postTaxMultiplier": 1.13,
+  "brandsRequested": [
+    "Doobie Labs",
+    "Herb",
+    "Jungle Girl",
+    "Moonlit Hash Co",
+    "Preferred Gardens",
+    "Purps",
+    "Runtz",
+    "Smartbud",
+    "Strain Gang"
+  ],
+  "brandsResolved": {
+    "Doobie Labs": 15391,
+    "Herb": 11912,
+    "Jungle Girl": 16409,
+    "Moonlit Hash Co": 14295,
+    "Preferred Gardens": 16596,
+    "Purps": 14294,
+    "Runtz": 16411,
+    "Smartbud": 14289,
+    "Strain Gang": 16412
+  },
+  "groups": [
+    {
+      "brandName": "Doobie Labs",
+      "brandId": 15391,
+      "groupId": 331995,
+      "groupName": "Blue Dream",
+      "fullName": "Doobie Labs Blue Dream",
+      "category": "Flower",
+      "subcategory": null,
+      "enabled": true,
+      "products": [
+        {
+          "productId": 430526,
+          "name": "Doobie Labs Blue Dream 3.5g",
+          "shortName": "Blue Dream 3.5g",
+          "tab": "3.5g",
+          "enabled": null,
+          "currentPrice": 90.5,
+          "currentGmPercent": 67.54,
+          "wholesaleCost": 26.0,
+          "costSource": {
+            "distributorProductId": "640887",
+            "distributorProductName": "DOOBIE LABS - Blue Dream 3.5G",
+            "distributorName": "Stop 31 LLC",
+            "priceListId": "433240",
+            "fromDate": "2026-05-15T00:00:00Z",
+            "price": 26.0
+          },
+          "distributorRowCount": 2,
+          "rawTargetPrice": 90.9598,
+          "proposedPrice": 91.0,
+          "proposedGmPercent": 67.71,
+          "action": "edit"
+        }
+      ]
+    },
+    {
+      "brandName": "Doobie Labs",
+      "brandId": 15391,
+      "groupId": 311207,
+      "groupName": "Blue Lobster",
+      "fullName": "Doobie Labs Blue Lobster",
+      "category": "Vapes",
+      "subcategory": "All In One / Disposable",
+      "enabled": true,
+      "products": [
+        {
+          "productId": 405465,
+          "name": "Doobie Labs Blue Lobster 1g",
+          "shortName": "Blue Lobster 1g",
+          "tab": "1g",
+          "enabled": null,
+          "currentPrice": 46.5,
+          "currentGmPercent": 51.4,
+          "wholesaleCost": 20.0,
+          "costSource": {
+            "distributorProductId": "576872",
+            "distributorProductName": "Doobie Labs - Vape - Blue Lobster - 1g",
+            "distributorName": "Stop 31 LLC",
+            "priceListId": "390404",
+            "fromDate": "2026-04-23T00:00:00Z",
+            "price": 20.0
+          },
+          "distributorRowCount": 2,
+          "rawTargetPrice": 69.969,
+          "proposedPrice": 70.0,
+          "proposedGmPercent": 67.71,
+          "action": "edit"
+        }
+      ]
+    },
+    {
+      "brandName": "Doobie Labs",
+      "brandId": 15391,
+      "groupId": 331988,
+      "groupName": "Blue Nerdz",
+      "fullName": "Doobie Labs Blue Nerdz",
+      "category": "Flower",
+      "subcategory": null,
+      "enabled": true,
+      "products": [
+        {
+          "productId": 430518,
+          "name": "Doobie Labs Blue Nerdz 3.5g",
+          "shortName": "Blue Nerdz 3.5g",
+          "tab": "3.5g",
+          "enabled": null,
+          "currentPrice": 90.5,
+          "currentGmPercent": 67.54,
+          "wholesaleCost": 26.0,
+          "costSource": {
+            "distributorProductId": "640880",
+            "distributorProductName": "1O-8F-DL26-BNRD",
+            "distributorName": "Stop 31 LLC",
+            "priceListId": "433233",
+            "fromDate": "2026-05-15T00:00:00Z",
+            "price": 26.0
+          },
+          "distributorRowCount": 2,
+          "rawTargetPrice": 90.9598,
+          "proposedPrice": 91.0,
+          "proposedGmPercent": 67.71,
+          "action": "edit"
+        }
+      ]
+    },
+    {
+      "brandName": "Doobie Labs",
+      "brandId": 15391,
+      "groupId": 311208,
+      "groupName": "Candy Fumes",
+      "fullName": "Doobie Labs Candy Fumes",
+      "category": "Vapes",
+      "subcategory": "All In One / Disposable",
+      "enabled": true,
+      "products": [
+        {
+          "productId": 405466,
+          "name": "Doobie Labs Candy Fumes 1g",
+          "shortName": "Candy Fumes 1g",
+          "tab": "1g",
+          "enabled": null,
+          "currentPrice": 46.5,
+          "currentGmPercent": 51.4,
+          "wholesaleCost": 20.0,
+          "costSource": {
+            "distributorProductId": "576873",
+            "distributorProductName": "Doobie Labs - Vape - Candy Fumes - 1g",
+            "distributorName": "Stop 31 LLC",
+            "priceListId": "390405",
+            "fromDate": "2026-04-23T00:00:00Z",
+            "price": 20.0
+          },
+          "distributorRowCount": 2,
+          "rawTargetPrice": 69.969,
+          "proposedPrice": 70.0,
+          "proposedGmPercent": 67.71,
+          "action": "edit"
+        }
+      ]
+    },
+    {
+      "brandName": "Doobie Labs",
+      "brandId": 15391,
+      "groupId": 311209,
+      "groupName": "Grape Stomper",
+      "fullName": "Doobie Labs Grape Stomper",
+      "category": "Vapes",
+      "subcategory": "All In One / Disposable",
+      "enabled": true,
+      "products": [
+        {
+          "productId": 405467,
+          "name": "Doobie Labs Grape Stomper 1g",
+          "shortName": "Grape Stomper 1g",
+          "tab": "1g",
+          "enabled": null,
+          "currentPrice": 46.5,
+          "currentGmPercent": 51.4,
+          "wholesaleCost": 20.0,
+          "costSource": {
+            "distributorProductId": "576874",
+            "distributorProductName": "Doobie Labs - Vape - Grape Stomper - 1g",
+            "distributorName": "Stop 31 LLC",
+            "priceListId": "390406",
+            "fromDate": "2026-04-23T00:00:00Z",
+            "price": 20.0
+          },
+          "distributorRowCount": 2,
+          "rawTargetPrice": 69.969,
+          "proposedPrice": 70.0,
+          "proposedGmPercent": 67.71,
+          "action": "edit"
+        }
+      ]
+    },
+    {
+      "brandName": "Doobie Labs",
+      "brandId": 15391,
+      "groupId": 311210,
+      "groupName": "Maraschino Runtz",
+      "fullName": "Doobie Labs Maraschino Runtz",
+      "category": "Vapes",
+      "subcategory": "All In One / Disposable",
+      "enabled": true,
+      "products": [
+        {
+          "productId": 405468,
+          "name": "Doobie Labs Maraschino Runtz 1g",
+          "shortName": "Maraschino Runtz 1g",
+          "tab": "1g",
+          "enabled": null,
+          "currentPrice": 46.5,
+          "currentGmPercent": 51.4,
+          "wholesaleCost": 20.0,
+          "costSource": {
+            "distributorProductId": "576875",
+            "distributorProductName": "Doobie Labs - Vape - Maraschino Runtz - 1g",
+            "distributorName": "Stop 31 LLC",
+            "priceListId": "390407",
+            "fromDate": "2026-04-23T00:00:00Z",
+            "price": 20.0
+          },
+          "distributorRowCount": 2,
+          "rawTargetPrice": 69.969,
+          "proposedPrice": 70.0,
+          "proposedGmPercent": 67.71,
+          "action": "edit"
+        }
+      ]
+    },
+    {
+      "brandName": "Doobie Labs",
+      "brandId": 15391,
+      "groupId": 311211,
+      "groupName": "Pinata Guts",
+      "fullName": "Doobie Labs Pinata Guts",
+      "category": "Vapes",
+      "subcategory": "All In One / Disposable",
+      "enabled": true,
+      "products": [
+        {
+          "productId": 405469,
+          "name": "Doobie Labs Pinata Guts 1g",
+          "shortName": "Pinata Guts 1g",
+          "tab": "1g",
+          "enabled": null,
+          "currentPrice": 46.5,
+          "currentGmPercent": 51.4,
+          "wholesaleCost": 20.0,
+          "costSource": {
+            "distributorProductId": "576876",
+            "distributorProductName": "Doobie Labs - Vape - Pinata Guts - 1g",
+            "distributorName": "Stop 31 LLC",
+            "priceListId": "390408",
+            "fromDate": "2026-04-23T00:00:00Z",
+            "price": 20.0
+          },
+          "distributorRowCount": 2,
+          "rawTargetPrice": 69.969,
+          "proposedPrice": 70.0,
+          "proposedGmPercent": 67.71,
+          "action": "edit"
+        }
+      ]
+    },
+    {
+      "brandName": "Doobie Labs",
+      "brandId": 15391,
+      "groupId": 311212,
+      "groupName": "Toad Venom",
+      "fullName": "Doobie Labs Toad Venom",
+      "category": "Vapes",
+      "subcategory": "All In One / Disposable",
+      "enabled": true,
+      "products": [
+        {
+          "productId": 405470,
+          "name": "Doobie Labs Toad Venom 1g",
+          "shortName": "Toad Venom 1g",
+          "tab": "1g",
+          "enabled": null,
+          "currentPrice": 46.5,
+          "currentGmPercent": 51.4,
+          "wholesaleCost": 20.0,
+          "costSource": {
+            "distributorProductId": "576877",
+            "distributorProductName": "Doobie Labs - Vape - Toad Venom- 1g",
+            "distributorName": "Stop 31 LLC",
+            "priceListId": "390409",
+            "fromDate": "2026-04-23T00:00:00Z",
+            "price": 20.0
+          },
+          "distributorRowCount": 2,
+          "rawTargetPrice": 69.969,
+          "proposedPrice": 70.0,
+          "proposedGmPercent": 67.71,
+          "action": "edit"
+        }
+      ]
+    },
+    {
+      "brandName": "Doobie Labs",
+      "brandId": 15391,
+      "groupId": 311213,
+      "groupName": "White Widow",
+      "fullName": "Doobie Labs White Widow",
+      "category": "Vapes",
+      "subcategory": "All In One / Disposable",
+      "enabled": true,
+      "products": [
+        {
+          "productId": 405471,
+          "name": "Doobie Labs White Widow 1g",
+          "shortName": "White Widow 1g",
+          "tab": "1g",
+          "enabled": null,
+          "currentPrice": 46.5,
+          "currentGmPercent": 51.4,
+          "wholesaleCost": 20.0,
+          "costSource": {
+            "distributorProductId": "576878",
+            "distributorProductName": "Doobie Labs - Vape - White Widow - 1g",
+            "distributorName": "Stop 31 LLC",
+            "priceListId": "390410",
+            "fromDate": "2026-04-23T00:00:00Z",
+            "price": 20.0
+          },
+          "distributorRowCount": 2,
+          "rawTargetPrice": 69.969,
+          "proposedPrice": 70.0,
+          "proposedGmPercent": 67.71,
+          "action": "edit"
+        }
+      ]
+    },
+    {
+      "brandName": "Herb",
+      "brandId": 11912,
+      "groupId": 331996,
+      "groupName": "Biscotti",
+      "fullName": "Herb Biscotti",
+      "category": "Vapes",
+      "subcategory": "All In One / Disposable",
+      "enabled": true,
+      "products": [
+        {
+          "productId": 430527,
+          "name": "Herb Biscotti 1g",
+          "shortName": "Biscotti 1g",
+          "tab": "1g",
+          "enabled": null,
+          "currentPrice": 52.5,
+          "currentGmPercent": 67.71,
+          "wholesaleCost": 15.0,
+          "costSource": {
+            "distributorProductId": "640888",
+            "distributorProductName": "Herb - Vape - Biscotti - 1g",
+            "distributorName": "Stop 31 LLC",
+            "priceListId": "433241",
+            "fromDate": "2026-05-15T00:00:00Z",
+            "price": 15.0
+          },
+          "distributorRowCount": 2,
+          "rawTargetPrice": 52.4768,
+          "proposedPrice": 52.5,
+          "proposedGmPercent": 67.71,
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "brandName": "Herb",
+      "brandId": 11912,
+      "groupId": 220003,
+      "groupName": "Blue Dream",
+      "fullName": "Herb Blue Dream",
+      "category": "Flower",
+      "subcategory": null,
+      "enabled": true,
+      "products": [
+        {
+          "productId": 283850,
+          "name": "Herb Blue Dream 3.5g",
+          "shortName": "Blue Dream 3.5g",
+          "tab": "3.5g",
+          "enabled": null,
+          "currentPrice": 35.5,
+          "currentGmPercent": 64.99,
+          "wholesaleCost": 11.0,
+          "costSource": {
+            "distributorProductId": "392591",
+            "distributorProductName": "Herb - Flower - Blue Dream - 3.5g",
+            "distributorName": "Stop 31 LLC",
+            "priceListId": "289070",
+            "fromDate": "2026-02-27T00:00:00Z",
+            "price": 11.0
+          },
+          "distributorRowCount": 2,
+          "rawTargetPrice": 38.483,
+          "proposedPrice": 38.5,
+          "proposedGmPercent": 67.71,
+          "action": "edit"
+        }
+      ]
+    },
+    {
+      "brandName": "Herb",
+      "brandId": 11912,
+      "groupId": 220011,
+      "groupName": "Chocolate Haze",
+      "fullName": "Herb Chocolate Haze",
+      "category": "Flower",
+      "subcategory": null,
+      "enabled": true,
+      "products": [
+        {
+          "productId": 283862,
+          "name": "Herb Chocolate Haze 3.5g",
+          "shortName": "Chocolate Haze 3.5g",
+          "tab": "3.5g",
+          "enabled": null,
+          "currentPrice": 35.5,
+          "currentGmPercent": 64.99,
+          "wholesaleCost": 11.0,
+          "costSource": {
+            "distributorProductId": "516909",
+            "distributorProductName": "Herb - Flower - Chocolate Haze - 3.5g",
+            "distributorName": "Stop 31 LLC",
+            "priceListId": "357945",
+            "fromDate": "2026-04-06T00:00:00Z",
+            "price": 11.0
+          },
+          "distributorRowCount": 2,
+          "rawTargetPrice": 38.483,
+          "proposedPrice": 38.5,
+          "proposedGmPercent": 67.71,
+          "action": "edit"
+        }
+      ]
+    },
+    {
+      "brandName": "Herb",
+      "brandId": 11912,
+      "groupId": 286963,
+      "groupName": "Cookie Dough",
+      "fullName": "Herb Cookie Dough",
+      "category": "Flower",
+      "subcategory": null,
+      "enabled": true,
+      "products": [
+        {
+          "productId": 377008,
+          "name": "Herb Cookie Dough 28g",
+          "shortName": "Cookie Dough 28g",
+          "tab": "28g",
+          "enabled": null,
+          "currentPrice": 197.5,
+          "currentGmPercent": 62.81,
+          "wholesaleCost": 65.0,
+          "costSource": {
+            "distributorProductId": "511138",
+            "distributorProductName": "Herb - Flower - Cookie Dough - 1oz",
+            "distributorName": "Stop 31 LLC",
+            "priceListId": "357942",
+            "fromDate": "2026-04-06T00:00:00Z",
+            "price": 65.0
+          },
+          "distributorRowCount": 2,
+          "rawTargetPrice": 227.3994,
+          "proposedPrice": 227.5,
+          "proposedGmPercent": 67.71,
+          "action": "edit"
+        }
+      ]
+    },
+    {
+      "brandName": "Herb",
+      "brandId": 11912,
+      "groupId": 286951,
+      "groupName": "Donny Burger",
+      "fullName": "Herb Donny Burger",
+      "category": "Pre-Rolls",
+      "subcategory": null,
+      "enabled": true,
+      "products": [
+        {
+          "productId": 376995,
+          "name": "Herb Donny Burger 1g",
+          "shortName": "Donny Burger 1g",
+          "tab": "1g",
+          "enabled": null,
+          "currentPrice": 15.0,
+          "currentGmPercent": 73.63,
+          "wholesaleCost": 3.5,
+          "costSource": {
+            "distributorProductId": "512384",
+            "distributorProductName": "Herb Cannabis Flower Products Donny Burger 1g",
+            "distributorName": "1Off",
+            "priceListId": "354456",
+            "fromDate": "2026-04-06T00:00:00Z",
+            "price": 3.5
+          },
+          "distributorRowCount": 2,
+          "rawTargetPrice": 12.2446,
+          "proposedPrice": 12.25,
+          "proposedGmPercent": 67.71,
+          "action": "edit"
+        }
+      ]
+    },
+    {
+      "brandName": "Herb",
+      "brandId": 11912,
+      "groupId": 286959,
+      "groupName": "Durban Poison",
+      "fullName": "Herb Durban Poison",
+      "category": "Pre-Rolls",
+      "subcategory": null,
+      "enabled": true,
+      "products": [
+        {
+          "productId": 377003,
+          "name": "Herb Durban Poison 1g",
+          "shortName": "Durban Poison 1g",
+          "tab": "1g",
+          "enabled": null,
+          "currentPrice": 15.0,
+          "currentGmPercent": 73.63,
+          "wholesaleCost": 3.5,
+          "costSource": {
+            "distributorProductId": "511136",
+            "distributorProductName": "1O-PR-H26-DURB2",
+            "distributorName": "Stop 31 LLC",
+            "priceListId": "357940",
+            "fromDate": "2026-04-06T00:00:00Z",
+            "price": 3.5
+          },
+          "distributorRowCount": 2,
+          "rawTargetPrice": 12.2446,
+          "proposedPrice": 12.25,
+          "proposedGmPercent": 67.71,
+          "action": "edit"
+        }
+      ]
+    },
+    {
+      "brandName": "Herb",
+      "brandId": 11912,
+      "groupId": 331998,
+      "groupName": "Forbidden Fruit",
+      "fullName": "Herb Forbidden Fruit",
+      "category": "Vapes",
+      "subcategory": "All In One / Disposable",
+      "enabled": true,
+      "products": [
+        {
+          "productId": 430528,
+          "name": "Herb Forbidden Fruit 1g",
+          "shortName": "Forbidden Fruit 1g",
+          "tab": "1g",
+          "enabled": null,
+          "currentPrice": 52.5,
+          "currentGmPercent": 67.71,
+          "wholesaleCost": 15.0,
+          "costSource": {
+            "distributorProductId": "640889",
+            "distributorProductName": "Herb - Vape - Forbidden Fruit - 1g",
+            "distributorName": "Stop 31 LLC",
+            "priceListId": "433242",
+            "fromDate": "2026-05-15T00:00:00Z",
+            "price": 15.0
+          },
+          "distributorRowCount": 2,
+          "rawTargetPrice": 52.4768,
+          "proposedPrice": 52.5,
+          "proposedGmPercent": 67.71,
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "brandName": "Herb",
+      "brandId": 11912,
+      "groupId": 332005,
+      "groupName": "Forbidden Fruit Infused",
+      "fullName": "Herb Forbidden Fruit Infused",
+      "category": "Pre-Rolls",
+      "subcategory": "Infused",
+      "enabled": true,
+      "products": [
+        {
+          "productId": 430535,
+          "name": "Herb Forbidden Fruit Infused 1g",
+          "shortName": "Forbidden Fruit Infused 1g",
+          "tab": "1g",
+          "enabled": null,
+          "currentPrice": 20.0,
+          "currentGmPercent": 67.51,
+          "wholesaleCost": 5.75,
+          "costSource": {
+            "distributorProductId": "640895",
+            "distributorProductName": "HERB Forbidden Fruit 1G Infused PR",
+            "distributorName": "Stop 31 LLC",
+            "priceListId": "433248",
+            "fromDate": "2026-05-15T00:00:00Z",
+            "price": 5.75
+          },
+          "distributorRowCount": 2,
+          "rawTargetPrice": 20.1161,
+          "proposedPrice": 20.0,
+          "proposedGmPercent": 67.51,
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "brandName": "Herb",
+      "brandId": 11912,
+      "groupId": 286965,
+      "groupName": "Gelato",
+      "fullName": "Herb Gelato",
+      "category": "Flower",
+      "subcategory": null,
+      "enabled": true,
+      "products": [
+        {
+          "productId": 377010,
+          "name": "Herb Gelato 28g",
+          "shortName": "Gelato 28g",
+          "tab": "28g",
+          "enabled": null,
+          "currentPrice": 197.5,
+          "currentGmPercent": 62.81,
+          "wholesaleCost": 65.0,
+          "costSource": {
+            "distributorProductId": "511139",
+            "distributorProductName": "Herb - Flower - Gelato - 1oz",
+            "distributorName": "Stop 31 LLC",
+            "priceListId": "357943",
+            "fromDate": "2026-04-06T00:00:00Z",
+            "price": 65.0
+          },
+          "distributorRowCount": 2,
+          "rawTargetPrice": 227.3994,
+          "proposedPrice": 227.5,
+          "proposedGmPercent": 67.71,
+          "action": "edit"
+        }
+      ]
+    },
+    {
+      "brandName": "Herb",
+      "brandId": 11912,
+      "groupId": 331999,
+      "groupName": "Jack Herer",
+      "fullName": "Herb Jack Herer",
+      "category": "Vapes",
+      "subcategory": "All In One / Disposable",
+      "enabled": true,
+      "products": [
+        {
+          "productId": 430529,
+          "name": "Herb Jack Herer 1g",
+          "shortName": "Jack Herer 1g",
+          "tab": "1g",
+          "enabled": null,
+          "currentPrice": 52.5,
+          "currentGmPercent": 67.71,
+          "wholesaleCost": 15.0,
+          "costSource": {
+            "distributorProductId": "640890",
+            "distributorProductName": "Herb - Vape - Jack Herer - 1g",
+            "distributorName": "Stop 31 LLC",
+            "priceListId": "433243",
+            "fromDate": "2026-05-15T00:00:00Z",
+            "price": 15.0
+          },
+          "distributorRowCount": 2,
+          "rawTargetPrice": 52.4768,
+          "proposedPrice": 52.5,
+          "proposedGmPercent": 67.71,
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "brandName": "Herb",
+      "brandId": 11912,
+      "groupId": 331992,
+      "groupName": "King Louie OG",
+      "fullName": "Herb King Louie OG",
+      "category": "Pre-Rolls",
+      "subcategory": null,
+      "enabled": true,
+      "products": [
+        {
+          "productId": 430523,
+          "name": "Herb King Louie OG 32x 1g",
+          "shortName": "King Louie OG 32x 1g",
+          "tab": "32x 1g",
+          "enabled": null,
+          "currentPrice": 226.0,
+          "currentGmPercent": 67.5,
+          "wholesaleCost": 65.0,
+          "costSource": {
+            "distributorProductId": "640884",
+            "distributorProductName": "1O-PR32-H26-KNGL",
+            "distributorName": "Stop 31 LLC",
+            "priceListId": "433237",
+            "fromDate": "2026-05-15T00:00:00Z",
+            "price": 65.0
+          },
+          "distributorRowCount": 2,
+          "rawTargetPrice": 227.3994,
+          "proposedPrice": 227.5,
+          "proposedGmPercent": 67.71,
+          "action": "edit"
+        }
+      ]
+    },
+    {
+      "brandName": "Herb",
+      "brandId": 11912,
+      "groupId": 332000,
+      "groupName": "King Louie OG",
+      "fullName": "Herb King Louie OG",
+      "category": "Vapes",
+      "subcategory": "All In One / Disposable",
+      "enabled": true,
+      "products": [
+        {
+          "productId": 430530,
+          "name": "Herb King Louie OG 1g",
+          "shortName": "King Louie OG 1g",
+          "tab": "1g",
+          "enabled": null,
+          "currentPrice": 52.5,
+          "currentGmPercent": 67.71,
+          "wholesaleCost": 15.0,
+          "costSource": {
+            "distributorProductId": "640891",
+            "distributorProductName": "Herb - Vape - King Louie OG - 1g",
+            "distributorName": "Stop 31 LLC",
+            "priceListId": "433244",
+            "fromDate": "2026-05-15T00:00:00Z",
+            "price": 15.0
+          },
+          "distributorRowCount": 2,
+          "rawTargetPrice": 52.4768,
+          "proposedPrice": 52.5,
+          "proposedGmPercent": 67.71,
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "brandName": "Herb",
+      "brandId": 11912,
+      "groupId": 332006,
+      "groupName": "Lemon Haze Infused",
+      "fullName": "Herb Lemon Haze Infused",
+      "category": "Pre-Rolls",
+      "subcategory": "Infused",
+      "enabled": true,
+      "products": [
+        {
+          "productId": 430536,
+          "name": "Herb Lemon Haze Infused 1g",
+          "shortName": "Lemon Haze Infused 1g",
+          "tab": "1g",
+          "enabled": null,
+          "currentPrice": 20.0,
+          "currentGmPercent": 67.51,
+          "wholesaleCost": 5.75,
+          "costSource": {
+            "distributorProductId": "640896",
+            "distributorProductName": "HERB Lemon Haze 1G Infused PR",
+            "distributorName": "Stop 31 LLC",
+            "priceListId": "433249",
+            "fromDate": "2026-05-15T00:00:00Z",
+            "price": 5.75
+          },
+          "distributorRowCount": 2,
+          "rawTargetPrice": 20.1161,
+          "proposedPrice": 20.0,
+          "proposedGmPercent": 67.51,
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "brandName": "Herb",
+      "brandId": 11912,
+      "groupId": 220017,
+      "groupName": "Mimosa",
+      "fullName": "Herb Mimosa",
+      "category": "Flower",
+      "subcategory": null,
+      "enabled": true,
+      "products": [
+        {
+          "productId": 283874,
+          "name": "Herb Mimosa 3.5g",
+          "shortName": "Mimosa 3.5g",
+          "tab": "3.5g",
+          "enabled": null,
+          "currentPrice": 35.5,
+          "currentGmPercent": 64.99,
+          "wholesaleCost": 11.0,
+          "costSource": {
+            "distributorProductId": "392594",
+            "distributorProductName": "Herb - Flower - Mimosa - 3.5",
+            "distributorName": "Stop 31 LLC",
+            "priceListId": "289073",
+            "fromDate": "2026-02-27T00:00:00Z",
+            "price": 11.0
+          },
+          "distributorRowCount": 2,
+          "rawTargetPrice": 38.483,
+          "proposedPrice": 38.5,
+          "proposedGmPercent": 67.71,
+          "action": "edit"
+        },
+        {
+          "productId": 283897,
+          "name": "Herb Mimosa 28g",
+          "shortName": "Mimosa 28g",
+          "tab": "28g",
+          "enabled": null,
+          "currentPrice": 197.5,
+          "currentGmPercent": 62.81,
+          "wholesaleCost": 65.0,
+          "costSource": {
+            "distributorProductId": "516910",
+            "distributorProductName": "Herb - Flower - Mimosa - 1oz",
+            "distributorName": "Stop 31 LLC",
+            "priceListId": "357946",
+            "fromDate": "2026-04-06T00:00:00Z",
+            "price": 65.0
+          },
+          "distributorRowCount": 2,
+          "rawTargetPrice": 227.3994,
+          "proposedPrice": 227.5,
+          "proposedGmPercent": 67.71,
+          "action": "edit"
+        }
+      ]
+    },
+    {
+      "brandName": "Herb",
+      "brandId": 11912,
+      "groupId": 220024,
+      "groupName": "Orange Cookies",
+      "fullName": "Herb Orange Cookies",
+      "category": "Flower",
+      "subcategory": null,
+      "enabled": true,
+      "products": [
+        {
+          "productId": 283880,
+          "name": "Herb Orange Cookies 3.5g",
+          "shortName": "Orange Cookies 3.5g",
+          "tab": "3.5g",
+          "enabled": null,
+          "currentPrice": 35.5,
+          "currentGmPercent": 64.99,
+          "wholesaleCost": 11.0,
+          "costSource": {
+            "distributorProductId": "392597",
+            "distributorProductName": "HERB-3.5-ORANGE COOKIES",
+            "distributorName": "Stop 31 LLC",
+            "priceListId": "289076",
+            "fromDate": "2026-02-27T00:00:00Z",
+            "price": 11.0
+          },
+          "distributorRowCount": 2,
+          "rawTargetPrice": 38.483,
+          "proposedPrice": 38.5,
+          "proposedGmPercent": 67.71,
+          "action": "edit"
+        }
+      ]
+    },
+    {
+      "brandName": "Herb",
+      "brandId": 11912,
+      "groupId": 220028,
+      "groupName": "Runtz",
+      "fullName": "Herb Runtz",
+      "category": "Flower",
+      "subcategory": null,
+      "enabled": true,
+      "products": [
+        {
+          "productId": 283884,
+          "name": "Herb Runtz 3.5g",
+          "shortName": "Runtz 3.5g",
+          "tab": "3.5g",
+          "enabled": null,
+          "currentPrice": 35.5,
+          "currentGmPercent": 64.99,
+          "wholesaleCost": 11.0,
+          "costSource": {
+            "distributorProductId": "516911",
+            "distributorProductName": "Herb - Flower - Runtz - 3.5g",
+            "distributorName": "Stop 31 LLC",
+            "priceListId": "357947",
+            "fromDate": "2026-04-06T00:00:00Z",
+            "price": 11.0
+          },
+          "distributorRowCount": 2,
+          "rawTargetPrice": 38.483,
+          "proposedPrice": 38.5,
+          "proposedGmPercent": 67.71,
+          "action": "edit"
+        },
+        {
+          "productId": 283899,
+          "name": "Herb Runtz 14g",
+          "shortName": "Runtz 14g",
+          "tab": "14g",
+          "enabled": null,
+          "currentPrice": 109.5,
+          "currentGmPercent": 64.91,
+          "wholesaleCost": 34.0,
+          "costSource": {
+            "distributorProductId": "392595",
+            "distributorProductName": "Herb - Flower - Runtz - 14g",
+            "distributorName": "Stop 31 LLC",
+            "priceListId": "289074",
+            "fromDate": "2026-02-27T00:00:00Z",
+            "price": 34.0
+          },
+          "distributorRowCount": 2,
+          "rawTargetPrice": 118.9474,
+          "proposedPrice": 119.0,
+          "proposedGmPercent": 67.71,
+          "action": "edit"
+        }
+      ]
+    },
+    {
+      "brandName": "Herb",
+      "brandId": 11912,
+      "groupId": 286968,
+      "groupName": "Runtz",
+      "fullName": "Herb Runtz",
+      "category": "Flower",
+      "subcategory": null,
+      "enabled": true,
+      "products": [
+        {
+          "productId": 377015,
+          "name": "Herb Runtz 28g",
+          "shortName": "Runtz 28g",
+          "tab": "28g",
+          "enabled": null,
+          "currentPrice": 197.5,
+          "currentGmPercent": 62.81,
+          "wholesaleCost": 65.0,
+          "costSource": {
+            "distributorProductId": "513749",
+            "distributorProductName": "Herb Cannabis Flower Products Runtz 28g",
+            "distributorName": "1Off",
+            "priceListId": "355512",
+            "fromDate": "2026-04-06T00:00:00Z",
+            "price": 65.0
+          },
+          "distributorRowCount": 2,
+          "rawTargetPrice": 227.3994,
+          "proposedPrice": 227.5,
+          "proposedGmPercent": 67.71,
+          "action": "edit"
+        }
+      ]
+    },
+    {
+      "brandName": "Herb",
+      "brandId": 11912,
+      "groupId": 332001,
+      "groupName": "Runtz",
+      "fullName": "Herb Runtz",
+      "category": "Vapes",
+      "subcategory": "All In One / Disposable",
+      "enabled": true,
+      "products": [
+        {
+          "productId": 430532,
+          "name": "Herb Runtz 1g",
+          "shortName": "Runtz 1g",
+          "tab": "1g",
+          "enabled": null,
+          "currentPrice": 52.5,
+          "currentGmPercent": 67.71,
+          "wholesaleCost": 15.0,
+          "costSource": {
+            "distributorProductId": "640892",
+            "distributorProductName": "Herb - Vape - Runtz - 1g",
+            "distributorName": "Stop 31 LLC",
+            "priceListId": "433245",
+            "fromDate": "2026-05-15T00:00:00Z",
+            "price": 15.0
+          },
+          "distributorRowCount": 2,
+          "rawTargetPrice": 52.4768,
+          "proposedPrice": 52.5,
+          "proposedGmPercent": 67.71,
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "brandName": "Herb",
+      "brandId": 11912,
+      "groupId": 332002,
+      "groupName": "Silver Haze",
+      "fullName": "Herb Silver Haze",
+      "category": "Vapes",
+      "subcategory": "All In One / Disposable",
+      "enabled": true,
+      "products": [
+        {
+          "productId": 430533,
+          "name": "Herb Silver Haze 1g",
+          "shortName": "Silver Haze 1g",
+          "tab": "1g",
+          "enabled": null,
+          "currentPrice": 52.5,
+          "currentGmPercent": 67.71,
+          "wholesaleCost": 15.0,
+          "costSource": {
+            "distributorProductId": "640893",
+            "distributorProductName": "Herb - Vape - Silver Haze - 1g",
+            "distributorName": "Stop 31 LLC",
+            "priceListId": "433246",
+            "fromDate": "2026-05-15T00:00:00Z",
+            "price": 15.0
+          },
+          "distributorRowCount": 2,
+          "rawTargetPrice": 52.4768,
+          "proposedPrice": 52.5,
+          "proposedGmPercent": 67.71,
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "brandName": "Herb",
+      "brandId": 11912,
+      "groupId": 286942,
+      "groupName": "Sour Diesel",
+      "fullName": "Herb Sour Diesel",
+      "category": "Pre-Rolls",
+      "subcategory": null,
+      "enabled": true,
+      "products": [
+        {
+          "productId": 376985,
+          "name": "Herb Sour Diesel 1g",
+          "shortName": "Sour Diesel 1g",
+          "tab": "1g",
+          "enabled": null,
+          "currentPrice": 12.5,
+          "currentGmPercent": -35.6,
+          "wholesaleCost": 15.0,
+          "costSource": {
+            "distributorProductId": "624981",
+            "distributorProductName": "Herb - Vape - Sour Diesel - 1g",
+            "distributorName": "Stop 31 LLC",
+            "priceListId": "423318",
+            "fromDate": "2026-05-11T00:00:00Z",
+            "price": 15.0
+          },
+          "distributorRowCount": 3,
+          "rawTargetPrice": 52.4768,
+          "proposedPrice": 52.5,
+          "proposedGmPercent": 67.71,
+          "action": "edit"
+        }
+      ]
+    },
+    {
+      "brandName": "Herb",
+      "brandId": 11912,
+      "groupId": 333810,
+      "groupName": "Sour Diesel",
+      "fullName": "Herb Sour Diesel",
+      "category": "Vapes",
+      "subcategory": "All In One / Disposable",
+      "enabled": true,
+      "products": [
+        {
+          "productId": 432690,
+          "name": "Herb Sour Diesel 1g",
+          "shortName": "Sour Diesel 1g",
+          "tab": "1g",
+          "enabled": null,
+          "currentPrice": 52.5,
+          "currentGmPercent": 56.95,
+          "wholesaleCost": 20.0,
+          "costSource": {
+            "distributorProductId": "642705",
+            "distributorProductName": "Herb - Vape - Sour Diesel - 1g",
+            "distributorName": "Stop 31 LLC",
+            "priceListId": "434437",
+            "fromDate": "2026-05-16T00:00:00Z",
+            "price": 20.0
+          },
+          "distributorRowCount": 1,
+          "rawTargetPrice": 69.969,
+          "proposedPrice": 70.0,
+          "proposedGmPercent": 67.71,
+          "action": "edit"
+        }
+      ]
+    },
+    {
+      "brandName": "Herb",
+      "brandId": 11912,
+      "groupId": 220030,
+      "groupName": "Sour OG",
+      "fullName": "Herb Sour OG",
+      "category": "Flower",
+      "subcategory": null,
+      "enabled": true,
+      "products": [
+        {
+          "productId": 283888,
+          "name": "Herb Sour OG 3.5g",
+          "shortName": "Sour OG 3.5g",
+          "tab": "3.5g",
+          "enabled": null,
+          "currentPrice": 35.5,
+          "currentGmPercent": 64.99,
+          "wholesaleCost": 11.0,
+          "costSource": {
+            "distributorProductId": "392598",
+            "distributorProductName": "HERB-3.5-SOUR OG",
+            "distributorName": "Stop 31 LLC",
+            "priceListId": "289077",
+            "fromDate": "2026-02-27T00:00:00Z",
+            "price": 11.0
+          },
+          "distributorRowCount": 2,
+          "rawTargetPrice": 38.483,
+          "proposedPrice": 38.5,
+          "proposedGmPercent": 67.71,
+          "action": "edit"
+        }
+      ]
+    },
+    {
+      "brandName": "Herb",
+      "brandId": 11912,
+      "groupId": 332004,
+      "groupName": "Sour Tangie",
+      "fullName": "Herb Sour Tangie",
+      "category": "Vapes",
+      "subcategory": "All In One / Disposable",
+      "enabled": true,
+      "products": [
+        {
+          "productId": 430534,
+          "name": "Herb Sour Tangie 1g",
+          "shortName": "Sour Tangie 1g",
+          "tab": "1g",
+          "enabled": null,
+          "currentPrice": 52.5,
+          "currentGmPercent": 67.71,
+          "wholesaleCost": 15.0,
+          "costSource": {
+            "distributorProductId": "640894",
+            "distributorProductName": "Herb - Vape - Sour Tangie - 1g",
+            "distributorName": "Stop 31 LLC",
+            "priceListId": "433247",
+            "fromDate": "2026-05-15T00:00:00Z",
+            "price": 15.0
+          },
+          "distributorRowCount": 2,
+          "rawTargetPrice": 52.4768,
+          "proposedPrice": 52.5,
+          "proposedGmPercent": 67.71,
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "brandName": "Herb",
+      "brandId": 11912,
+      "groupId": 220033,
+      "groupName": "Space Runtz",
+      "fullName": "Herb Space Runtz",
+      "category": "Flower",
+      "subcategory": null,
+      "enabled": true,
+      "products": [
+        {
+          "productId": 283893,
+          "name": "Herb Space Runtz 3.5g",
+          "shortName": "Space Runtz 3.5g",
+          "tab": "3.5g",
+          "enabled": null,
+          "currentPrice": 35.5,
+          "currentGmPercent": 64.99,
+          "wholesaleCost": 11.0,
+          "costSource": {
+            "distributorProductId": "392759",
+            "distributorProductName": "HERB-3.5-SPACE RUNTZ",
+            "distributorName": "Stop 31 LLC",
+            "priceListId": "289185",
+            "fromDate": "2026-02-27T00:00:00Z",
+            "price": 11.0
+          },
+          "distributorRowCount": 2,
+          "rawTargetPrice": 38.483,
+          "proposedPrice": 38.5,
+          "proposedGmPercent": 67.71,
+          "action": "edit"
+        }
+      ]
+    },
+    {
+      "brandName": "Herb",
+      "brandId": 11912,
+      "groupId": 332007,
+      "groupName": "Tropicana Cookies Infused",
+      "fullName": "Herb Tropicana Cookies Infused",
+      "category": "Pre-Rolls",
+      "subcategory": "Infused",
+      "enabled": true,
+      "products": []
+    },
+    {
+      "brandName": "Herb",
+      "brandId": 11912,
+      "groupId": 332010,
+      "groupName": "Tropicana Cookies Infused",
+      "fullName": "Herb Tropicana Cookies Infused",
+      "category": "Pre-Rolls",
+      "subcategory": "Infused",
+      "enabled": true,
+      "products": [
+        {
+          "productId": 430541,
+          "name": "Herb Tropicana Cookies Infused 1g",
+          "shortName": "Tropicana Cookies Infused 1g",
+          "tab": "1g",
+          "enabled": null,
+          "currentPrice": 20.0,
+          "currentGmPercent": 67.51,
+          "wholesaleCost": 5.75,
+          "costSource": {
+            "distributorProductId": "640925",
+            "distributorProductName": "HERB Tropicana Cookies1G Infused PR",
+            "distributorName": "Stop 31 LLC",
+            "priceListId": "433251",
+            "fromDate": "2026-05-15T00:00:00Z",
+            "price": 5.75
+          },
+          "distributorRowCount": 2,
+          "rawTargetPrice": 20.1161,
+          "proposedPrice": 20.0,
+          "proposedGmPercent": 67.51,
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "brandName": "Herb",
+      "brandId": 11912,
+      "groupId": 299567,
+      "groupName": "WiFi OG",
+      "fullName": "Herb WiFi OG",
+      "category": "Pre-Rolls",
+      "subcategory": null,
+      "enabled": true,
+      "products": [
+        {
+          "productId": 391535,
+          "name": "Herb WiFi OG 1g",
+          "shortName": "WiFi OG 1g",
+          "tab": "1g",
+          "enabled": null,
+          "currentPrice": 15.0,
+          "currentGmPercent": 79.58,
+          "wholesaleCost": 2.71,
+          "costSource": {
+            "distributorProductId": "568102",
+            "distributorProductName": "1O-PR-H26-WIOG",
+            "distributorName": "Stop 31 LLC",
+            "priceListId": "385404",
+            "fromDate": "2026-04-20T00:00:00Z",
+            "price": 2.71
+          },
+          "distributorRowCount": 2,
+          "rawTargetPrice": 9.4808,
+          "proposedPrice": 9.5,
+          "proposedGmPercent": 67.77,
+          "action": "edit"
+        }
+      ]
+    },
+    {
+      "brandName": "Jungle Girl",
+      "brandId": 16409,
+      "groupId": 332011,
+      "groupName": "Harmonious",
+      "fullName": "Jungle Girl Harmonious",
+      "category": "Pre-Rolls",
+      "subcategory": null,
+      "enabled": true,
+      "products": [
+        {
+          "productId": 430542,
+          "name": "Jungle Girl Harmonious 5x 0.5g",
+          "shortName": "Harmonious 5x 0.5g",
+          "tab": "5x 0.5g",
+          "enabled": null,
+          "currentPrice": 61.0,
+          "currentGmPercent": 67.58,
+          "wholesaleCost": 17.5,
+          "costSource": {
+            "distributorProductId": "640926",
+            "distributorProductName": "Jungle Girl - Harmonious - 5pk",
+            "distributorName": "Stop 31 LLC",
+            "priceListId": "433252",
+            "fromDate": "2026-05-15T00:00:00Z",
+            "price": 17.5
+          },
+          "distributorRowCount": 2,
+          "rawTargetPrice": 61.2229,
+          "proposedPrice": 61.25,
+          "proposedGmPercent": 67.71,
+          "action": "edit"
+        }
+      ]
+    },
+    {
+      "brandName": "Jungle Girl",
+      "brandId": 16409,
+      "groupId": 332012,
+      "groupName": "Uplifting",
+      "fullName": "Jungle Girl Uplifting",
+      "category": "Pre-Rolls",
+      "subcategory": null,
+      "enabled": true,
+      "products": [
+        {
+          "productId": 430543,
+          "name": "Jungle Girl Uplifting 5x 0.5g",
+          "shortName": "Uplifting 5x 0.5g",
+          "tab": "5x 0.5g",
+          "enabled": null,
+          "currentPrice": 61.0,
+          "currentGmPercent": 67.58,
+          "wholesaleCost": 17.5,
+          "costSource": {
+            "distributorProductId": "640927",
+            "distributorProductName": "Jungle Girl - Uplifting - 5pk",
+            "distributorName": "Stop 31 LLC",
+            "priceListId": "433253",
+            "fromDate": "2026-05-15T00:00:00Z",
+            "price": 17.5
+          },
+          "distributorRowCount": 2,
+          "rawTargetPrice": 61.2229,
+          "proposedPrice": 61.25,
+          "proposedGmPercent": 67.71,
+          "action": "edit"
+        }
+      ]
+    },
+    {
+      "brandName": "Jungle Girl",
+      "brandId": 16409,
+      "groupId": 332013,
+      "groupName": "Vibrant",
+      "fullName": "Jungle Girl Vibrant",
+      "category": "Pre-Rolls",
+      "subcategory": null,
+      "enabled": true,
+      "products": [
+        {
+          "productId": 430544,
+          "name": "Jungle Girl Vibrant 5x 0.5g",
+          "shortName": "Vibrant 5x 0.5g",
+          "tab": "5x 0.5g",
+          "enabled": null,
+          "currentPrice": 61.0,
+          "currentGmPercent": 67.58,
+          "wholesaleCost": 17.5,
+          "costSource": {
+            "distributorProductId": "640928",
+            "distributorProductName": "Jungle Girl - Vibrant - 5pk",
+            "distributorName": "Stop 31 LLC",
+            "priceListId": "433254",
+            "fromDate": "2026-05-15T00:00:00Z",
+            "price": 17.5
+          },
+          "distributorRowCount": 2,
+          "rawTargetPrice": 61.2229,
+          "proposedPrice": 61.25,
+          "proposedGmPercent": 67.71,
+          "action": "edit"
+        }
+      ]
+    },
+    {
+      "brandName": "Moonlit Hash Co",
+      "brandId": 14295,
+      "groupId": 270285,
+      "groupName": "Alaskan Cherry Legs",
+      "fullName": "Moonlit Hash Co Alaskan Cherry Legs",
+      "category": "Pre-Rolls",
+      "subcategory": "Infused",
+      "enabled": true,
+      "products": [
+        {
+          "productId": 357789,
+          "name": "Moonlit Hash Co Alaskan Cherry Legs 1.2g",
+          "shortName": "Alaskan Cherry Legs 1.2g",
+          "tab": "1.2g",
+          "enabled": null,
+          "currentPrice": 14.0,
+          "currentGmPercent": 51.57,
+          "wholesaleCost": 6.0,
+          "costSource": {
+            "distributorProductId": "494697",
+            "distributorProductName": "MOONLIT 1.2G NON-INFUSED ALASKAN",
+            "distributorName": "Stop 31 LLC",
+            "priceListId": "344018",
+            "fromDate": "2026-04-01T00:00:00Z",
+            "price": 6.0
+          },
+          "distributorRowCount": 2,
+          "rawTargetPrice": 20.9907,
+          "proposedPrice": 21.0,
+          "proposedGmPercent": 67.71,
+          "action": "edit"
+        }
+      ]
+    },
+    {
+      "brandName": "Moonlit Hash Co",
+      "brandId": 14295,
+      "groupId": 299568,
+      "groupName": "Cheetah Piss",
+      "fullName": "Moonlit Hash Co Cheetah Piss",
+      "category": "Pre-Rolls",
+      "subcategory": "Infused",
+      "enabled": true,
+      "products": [
+        {
+          "productId": 391536,
+          "name": "Moonlit Hash Co Cheetah Piss 1.2g",
+          "shortName": "Cheetah Piss 1.2g",
+          "tab": "1.2g",
+          "enabled": null,
+          "currentPrice": 21.0,
+          "currentGmPercent": 57.97,
+          "wholesaleCost": 7.81,
+          "costSource": {
+            "distributorProductId": "568103",
+            "distributorProductName": "MOONLIT- CHEETAH PISS 1.2G INFUSED PREROLL",
+            "distributorName": "Stop 31 LLC",
+            "priceListId": "385405",
+            "fromDate": "2026-04-20T00:00:00Z",
+            "price": 7.81
+          },
+          "distributorRowCount": 2,
+          "rawTargetPrice": 27.3229,
+          "proposedPrice": 27.25,
+          "proposedGmPercent": 67.61,
+          "action": "edit"
+        }
+      ]
+    },
+    {
+      "brandName": "Moonlit Hash Co",
+      "brandId": 14295,
+      "groupId": 332016,
+      "groupName": "Mac 1",
+      "fullName": "Moonlit Hash Co Mac 1",
+      "category": "Pre-Rolls",
+      "subcategory": null,
+      "enabled": true,
+      "products": [
+        {
+          "productId": 430547,
+          "name": "Moonlit Hash Co Mac 1 1.2g",
+          "shortName": "Mac 1 1.2g",
+          "tab": "1.2g",
+          "enabled": null,
+          "currentPrice": 21.0,
+          "currentGmPercent": 67.71,
+          "wholesaleCost": 6.0,
+          "costSource": {
+            "distributorProductId": "640931",
+            "distributorProductName": "MOONLIT-MAC1 Non-Infused 1.2G",
+            "distributorName": "Stop 31 LLC",
+            "priceListId": "433257",
+            "fromDate": "2026-05-15T00:00:00Z",
+            "price": 6.0
+          },
+          "distributorRowCount": 2,
+          "rawTargetPrice": 20.9907,
+          "proposedPrice": 21.0,
+          "proposedGmPercent": 67.71,
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "brandName": "Moonlit Hash Co",
+      "brandId": 14295,
+      "groupId": 332014,
+      "groupName": "Mac 1 Infused",
+      "fullName": "Moonlit Hash Co Mac 1 Infused",
+      "category": "Pre-Rolls",
+      "subcategory": "Infused",
+      "enabled": true,
+      "products": [
+        {
+          "productId": 430545,
+          "name": "Moonlit Hash Co Mac 1 Infused 1.2g",
+          "shortName": "Mac 1 Infused 1.2g",
+          "tab": "1.2g",
+          "enabled": null,
+          "currentPrice": 33.5,
+          "currentGmPercent": 67.96,
+          "wholesaleCost": 9.5,
+          "costSource": {
+            "distributorProductId": "640929",
+            "distributorProductName": "MOONLIT- MAC1 INFUSED 1.2G",
+            "distributorName": "Stop 31 LLC",
+            "priceListId": "433255",
+            "fromDate": "2026-05-15T00:00:00Z",
+            "price": 9.5
+          },
+          "distributorRowCount": 2,
+          "rawTargetPrice": 33.2353,
+          "proposedPrice": 33.25,
+          "proposedGmPercent": 67.71,
+          "action": "edit"
+        }
+      ]
+    },
+    {
+      "brandName": "Moonlit Hash Co",
+      "brandId": 14295,
+      "groupId": 332015,
+      "groupName": "UK Cheese Infused",
+      "fullName": "Moonlit Hash Co UK Cheese Infused",
+      "category": "Pre-Rolls",
+      "subcategory": "Infused",
+      "enabled": true,
+      "products": [
+        {
+          "productId": 430546,
+          "name": "Moonlit Hash Co UK Cheese Infused 1.2g",
+          "shortName": "UK Cheese Infused 1.2g",
+          "tab": "1.2g",
+          "enabled": null,
+          "currentPrice": 33.5,
+          "currentGmPercent": 67.96,
+          "wholesaleCost": 9.5,
+          "costSource": {
+            "distributorProductId": "640930",
+            "distributorProductName": "MOONLIT- UK CHEESE INFUSED 1.2G",
+            "distributorName": "Stop 31 LLC",
+            "priceListId": "433256",
+            "fromDate": "2026-05-15T00:00:00Z",
+            "price": 9.5
+          },
+          "distributorRowCount": 2,
+          "rawTargetPrice": 33.2353,
+          "proposedPrice": 33.25,
+          "proposedGmPercent": 67.71,
+          "action": "edit"
+        }
+      ]
+    },
+    {
+      "brandName": "Preferred Gardens",
+      "brandId": 16596,
+      "groupId": 331993,
+      "groupName": "Cookie Dough",
+      "fullName": "Preferred Gardens Cookie Dough",
+      "category": "Pre-Rolls",
+      "subcategory": null,
+      "enabled": true,
+      "products": [
+        {
+          "productId": 430524,
+          "name": "Preferred Gardens Cookie Dough 1g",
+          "shortName": "Cookie Dough 1g",
+          "tab": "1g",
+          "enabled": null,
+          "currentPrice": 24.5,
+          "currentGmPercent": 67.71,
+          "wholesaleCost": 7.0,
+          "costSource": {
+            "distributorProductId": "640885",
+            "distributorProductName": "1O-PR-PG26-CKD",
+            "distributorName": "Stop 31 LLC",
+            "priceListId": "433238",
+            "fromDate": "2026-05-15T00:00:00Z",
+            "price": 7.0
+          },
+          "distributorRowCount": 2,
+          "rawTargetPrice": 24.4892,
+          "proposedPrice": 24.5,
+          "proposedGmPercent": 67.71,
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "brandName": "Preferred Gardens",
+      "brandId": 16596,
+      "groupId": 331994,
+      "groupName": "Zourz",
+      "fullName": "Preferred Gardens Zourz",
+      "category": "Pre-Rolls",
+      "subcategory": null,
+      "enabled": true,
+      "products": [
+        {
+          "productId": 430525,
+          "name": "Preferred Gardens Zourz 1g",
+          "shortName": "Zourz 1g",
+          "tab": "1g",
+          "enabled": null,
+          "currentPrice": 24.5,
+          "currentGmPercent": 67.71,
+          "wholesaleCost": 7.0,
+          "costSource": {
+            "distributorProductId": "640886",
+            "distributorProductName": "1O-PR-PG26-ZRZ",
+            "distributorName": "Stop 31 LLC",
+            "priceListId": "433239",
+            "fromDate": "2026-05-15T00:00:00Z",
+            "price": 7.0
+          },
+          "distributorRowCount": 2,
+          "rawTargetPrice": 24.4892,
+          "proposedPrice": 24.5,
+          "proposedGmPercent": 67.71,
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "brandName": "Purps",
+      "brandId": 14294,
+      "groupId": 303979,
+      "groupName": "Blue Nerdz",
+      "fullName": "Purps Blue Nerdz",
+      "category": "Flower",
+      "subcategory": null,
+      "enabled": true,
+      "products": [
+        {
+          "productId": 392889,
+          "name": "Purps Blue Nerdz 3.5g",
+          "shortName": "Blue Nerdz 3.5g",
+          "tab": "3.5g",
+          "enabled": null,
+          "currentPrice": 76.5,
+          "currentGmPercent": 75.05,
+          "wholesaleCost": 16.89,
+          "costSource": {
+            "distributorProductId": "574482",
+            "distributorProductName": "Purp - Flower - Blue Nerdz - 3.5g",
+            "distributorName": "Stop 31 LLC",
+            "priceListId": "388589",
+            "fromDate": "2026-04-22T00:00:00Z",
+            "price": 16.89
+          },
+          "distributorRowCount": 2,
+          "rawTargetPrice": 59.0889,
+          "proposedPrice": 59.0,
+          "proposedGmPercent": 67.65,
+          "action": "edit"
+        }
+      ]
+    },
+    {
+      "brandName": "Purps",
+      "brandId": 14294,
+      "groupId": 270279,
+      "groupName": "Crypto Cherries",
+      "fullName": "Purps Crypto Cherries",
+      "category": "Pre-Rolls",
+      "subcategory": null,
+      "enabled": true,
+      "products": [
+        {
+          "productId": 357681,
+          "name": "Purps Crypto Cherries 1g",
+          "shortName": "Crypto Cherries 1g",
+          "tab": "1g",
+          "enabled": null,
+          "currentPrice": 14.0,
+          "currentGmPercent": 51.57,
+          "wholesaleCost": 6.0,
+          "costSource": {
+            "distributorProductId": "494678",
+            "distributorProductName": "Purps Cannabis Flower Products Crypto Cherries 1g",
+            "distributorName": "1Off",
+            "priceListId": "343942",
+            "fromDate": "2026-04-01T00:00:00Z",
+            "price": 6.0
+          },
+          "distributorRowCount": 2,
+          "rawTargetPrice": 20.9907,
+          "proposedPrice": 21.0,
+          "proposedGmPercent": 67.71,
+          "action": "edit"
+        }
+      ]
+    },
+    {
+      "brandName": "Purps",
+      "brandId": 14294,
+      "groupId": 303982,
+      "groupName": "Crypto Cherries",
+      "fullName": "Purps Crypto Cherries",
+      "category": "Flower",
+      "subcategory": null,
+      "enabled": true,
+      "products": [
+        {
+          "productId": 392890,
+          "name": "Purps Crypto Cherries 3.5g",
+          "shortName": "Crypto Cherries 3.5g",
+          "tab": "3.5g",
+          "enabled": null,
+          "currentPrice": 76.5,
+          "currentGmPercent": 75.13,
+          "wholesaleCost": 16.84,
+          "costSource": {
+            "distributorProductId": "574483",
+            "distributorProductName": "Purp - Flower - Crypto Cherries - 3.5g",
+            "distributorName": "Stop 31 LLC",
+            "priceListId": "388590",
+            "fromDate": "2026-04-22T00:00:00Z",
+            "price": 16.84
+          },
+          "distributorRowCount": 2,
+          "rawTargetPrice": 58.9139,
+          "proposedPrice": 59.0,
+          "proposedGmPercent": 67.75,
+          "action": "edit"
+        }
+      ]
+    },
+    {
+      "brandName": "Purps",
+      "brandId": 14294,
+      "groupId": 332017,
+      "groupName": "Granddaddy Purple",
+      "fullName": "Purps Granddaddy Purple",
+      "category": "Pre-Rolls",
+      "subcategory": null,
+      "enabled": true,
+      "products": [
+        {
+          "productId": 430548,
+          "name": "Purps Granddaddy Purple 5x 0.5g",
+          "shortName": "Granddaddy Purple 5x 0.5g",
+          "tab": "5x 0.5g",
+          "enabled": null,
+          "currentPrice": 68.0,
+          "currentGmPercent": 67.6,
+          "wholesaleCost": 19.5,
+          "costSource": {
+            "distributorProductId": "640932",
+            "distributorProductName": "PURPS-5PR-GDP",
+            "distributorName": "Stop 31 LLC",
+            "priceListId": "433258",
+            "fromDate": "2026-05-15T00:00:00Z",
+            "price": 19.5
+          },
+          "distributorRowCount": 2,
+          "rawTargetPrice": 68.2198,
+          "proposedPrice": 68.25,
+          "proposedGmPercent": 67.71,
+          "action": "edit"
+        }
+      ]
+    },
+    {
+      "brandName": "Purps",
+      "brandId": 14294,
+      "groupId": 331989,
+      "groupName": "Oishii",
+      "fullName": "Purps Oishii",
+      "category": "Flower",
+      "subcategory": null,
+      "enabled": true,
+      "products": [
+        {
+          "productId": 430519,
+          "name": "Purps Oishii 3.5g",
+          "shortName": "Oishii 3.5g",
+          "tab": "3.5g",
+          "enabled": null,
+          "currentPrice": 76.5,
+          "currentGmPercent": 67.5,
+          "wholesaleCost": 22.0,
+          "costSource": {
+            "distributorProductId": "640881",
+            "distributorProductName": "1O-8F-P26-OISH",
+            "distributorName": "Stop 31 LLC",
+            "priceListId": "433234",
+            "fromDate": "2026-05-15T00:00:00Z",
+            "price": 22.0
+          },
+          "distributorRowCount": 2,
+          "rawTargetPrice": 76.9659,
+          "proposedPrice": 77.0,
+          "proposedGmPercent": 67.71,
+          "action": "edit"
+        }
+      ]
+    },
+    {
+      "brandName": "Purps",
+      "brandId": 14294,
+      "groupId": 332018,
+      "groupName": "Purple Gushers",
+      "fullName": "Purps Purple Gushers",
+      "category": "Pre-Rolls",
+      "subcategory": null,
+      "enabled": true,
+      "products": [
+        {
+          "productId": 430549,
+          "name": "Purps Purple Gushers 5x 0.5g",
+          "shortName": "Purple Gushers 5x 0.5g",
+          "tab": "5x 0.5g",
+          "enabled": null,
+          "currentPrice": 68.0,
+          "currentGmPercent": 67.6,
+          "wholesaleCost": 19.5,
+          "costSource": {
+            "distributorProductId": "640933",
+            "distributorProductName": "PURPS-5PR-PGSH",
+            "distributorName": "Stop 31 LLC",
+            "priceListId": "433259",
+            "fromDate": "2026-05-15T00:00:00Z",
+            "price": 19.5
+          },
+          "distributorRowCount": 2,
+          "rawTargetPrice": 68.2198,
+          "proposedPrice": 68.25,
+          "proposedGmPercent": 67.71,
+          "action": "edit"
+        }
+      ]
+    },
+    {
+      "brandName": "Purps",
+      "brandId": 14294,
+      "groupId": 331990,
+      "groupName": "Roy G Biv",
+      "fullName": "Purps Roy G Biv",
+      "category": "Flower",
+      "subcategory": null,
+      "enabled": true,
+      "products": [
+        {
+          "productId": 430520,
+          "name": "Purps Roy G Biv 3.5g",
+          "shortName": "Roy G Biv 3.5g",
+          "tab": "3.5g",
+          "enabled": null,
+          "currentPrice": 76.5,
+          "currentGmPercent": 67.5,
+          "wholesaleCost": 22.0,
+          "costSource": {
+            "distributorProductId": "640882",
+            "distributorProductName": "1O-8F-P26-RGB",
+            "distributorName": "Stop 31 LLC",
+            "priceListId": "433235",
+            "fromDate": "2026-05-15T00:00:00Z",
+            "price": 22.0
+          },
+          "distributorRowCount": 2,
+          "rawTargetPrice": 76.9659,
+          "proposedPrice": 77.0,
+          "proposedGmPercent": 67.71,
+          "action": "edit"
+        }
+      ]
+    },
+    {
+      "brandName": "Runtz",
+      "brandId": 16411,
+      "groupId": 332020,
+      "groupName": "Bubblegum Runtz",
+      "fullName": "Runtz Bubblegum Runtz",
+      "category": "Flower",
+      "subcategory": null,
+      "enabled": true,
+      "products": [
+        {
+          "productId": 430551,
+          "name": "Runtz Bubblegum Runtz 3.5g",
+          "shortName": "Bubblegum Runtz 3.5g",
+          "tab": "3.5g",
+          "enabled": null,
+          "currentPrice": 92.5,
+          "currentGmPercent": 67.63,
+          "wholesaleCost": 26.5,
+          "costSource": {
+            "distributorProductId": "640935",
+            "distributorProductName": "R-Original Bubblegum Runtz 3.5G",
+            "distributorName": "Stop 31 LLC",
+            "priceListId": "433261",
+            "fromDate": "2026-05-15T00:00:00Z",
+            "price": 26.5
+          },
+          "distributorRowCount": 2,
+          "rawTargetPrice": 92.709,
+          "proposedPrice": 92.75,
+          "proposedGmPercent": 67.71,
+          "action": "edit"
+        }
+      ]
+    },
+    {
+      "brandName": "Runtz",
+      "brandId": 16411,
+      "groupId": 332019,
+      "groupName": "Lemon Candy Runtz",
+      "fullName": "Runtz Lemon Candy Runtz",
+      "category": "Flower",
+      "subcategory": null,
+      "enabled": true,
+      "products": [
+        {
+          "productId": 430550,
+          "name": "Runtz Lemon Candy Runtz 3.5g",
+          "shortName": "Lemon Candy Runtz 3.5g",
+          "tab": "3.5g",
+          "enabled": null,
+          "currentPrice": 92.5,
+          "currentGmPercent": 67.63,
+          "wholesaleCost": 26.5,
+          "costSource": {
+            "distributorProductId": "640934",
+            "distributorProductName": "R-LEMON CANDY RUNTZ 3.5G",
+            "distributorName": "Stop 31 LLC",
+            "priceListId": "433260",
+            "fromDate": "2026-05-15T00:00:00Z",
+            "price": 26.5
+          },
+          "distributorRowCount": 2,
+          "rawTargetPrice": 92.709,
+          "proposedPrice": 92.75,
+          "proposedGmPercent": 67.71,
+          "action": "edit"
+        }
+      ]
+    },
+    {
+      "brandName": "Runtz",
+      "brandId": 16411,
+      "groupId": 331991,
+      "groupName": "Trump Runtz",
+      "fullName": "Runtz Trump Runtz",
+      "category": "Flower",
+      "subcategory": null,
+      "enabled": true,
+      "products": [
+        {
+          "productId": 430522,
+          "name": "Runtz Trump Runtz 3.5g",
+          "shortName": "Trump Runtz 3.5g",
+          "tab": "3.5g",
+          "enabled": null,
+          "currentPrice": 92.5,
+          "currentGmPercent": 67.63,
+          "wholesaleCost": 26.5,
+          "costSource": {
+            "distributorProductId": "640883",
+            "distributorProductName": "1O-8F-R26-TRP",
+            "distributorName": "Stop 31 LLC",
+            "priceListId": "433236",
+            "fromDate": "2026-05-15T00:00:00Z",
+            "price": 26.5
+          },
+          "distributorRowCount": 2,
+          "rawTargetPrice": 92.709,
+          "proposedPrice": 92.75,
+          "proposedGmPercent": 67.71,
+          "action": "edit"
+        }
+      ]
+    },
+    {
+      "brandName": "Smartbud",
+      "brandId": 14289,
+      "groupId": 270246,
+      "groupName": "Applescotti",
+      "fullName": "Smartbud Applescotti",
+      "category": "Flower",
+      "subcategory": null,
+      "enabled": true,
+      "products": [
+        {
+          "productId": 357343,
+          "name": "Smartbud Applescotti 3.5g",
+          "shortName": "Applescotti 3.5g",
+          "tab": "3.5g",
+          "enabled": null,
+          "currentPrice": 51.5,
+          "currentGmPercent": 64.89,
+          "wholesaleCost": 16.0,
+          "costSource": {
+            "distributorProductId": "494699",
+            "distributorProductName": "SmartBud - Flower - Applescotti - 3.5g",
+            "distributorName": "Stop 31 LLC",
+            "priceListId": "344020",
+            "fromDate": "2026-04-01T00:00:00Z",
+            "price": 16.0
+          },
+          "distributorRowCount": 2,
+          "rawTargetPrice": 55.9752,
+          "proposedPrice": 56.0,
+          "proposedGmPercent": 67.71,
+          "action": "edit"
+        }
+      ]
+    },
+    {
+      "brandName": "Smartbud",
+      "brandId": 14289,
+      "groupId": 332022,
+      "groupName": "AppleScotti Shake",
+      "fullName": "Smartbud AppleScotti Shake",
+      "category": "Flower",
+      "subcategory": null,
+      "enabled": true,
+      "products": [
+        {
+          "productId": 430553,
+          "name": "Smartbud AppleScotti Shake 14g",
+          "shortName": "AppleScotti Shake 14g",
+          "tab": "14g",
+          "enabled": null,
+          "currentPrice": 87.0,
+          "currentGmPercent": 67.53,
+          "wholesaleCost": 25.0,
+          "costSource": {
+            "distributorProductId": "640937",
+            "distributorProductName": "SMARTBUD-applescotti Ground Flower 1/2oz",
+            "distributorName": "Stop 31 LLC",
+            "priceListId": "433263",
+            "fromDate": "2026-05-15T00:00:00Z",
+            "price": 25.0
+          },
+          "distributorRowCount": 2,
+          "rawTargetPrice": 87.4613,
+          "proposedPrice": 87.5,
+          "proposedGmPercent": 67.71,
+          "action": "edit"
+        }
+      ]
+    },
+    {
+      "brandName": "Smartbud",
+      "brandId": 14289,
+      "groupId": 331984,
+      "groupName": "Blue Dream",
+      "fullName": "Smartbud Blue Dream",
+      "category": "Pre-Rolls",
+      "subcategory": null,
+      "enabled": true,
+      "products": [
+        {
+          "productId": 430515,
+          "name": "Smartbud Blue Dream 5x 0.75g",
+          "shortName": "Blue Dream 5x 0.75g",
+          "tab": "5x 0.75g",
+          "enabled": null,
+          "currentPrice": 57.5,
+          "currentGmPercent": 67.57,
+          "wholesaleCost": 16.5,
+          "costSource": {
+            "distributorProductId": "640872",
+            "distributorProductName": "1O-5PR-SB26-BLDR",
+            "distributorName": "Stop 31 LLC",
+            "priceListId": "433230",
+            "fromDate": "2026-05-15T00:00:00Z",
+            "price": 16.5
+          },
+          "distributorRowCount": 2,
+          "rawTargetPrice": 57.7245,
+          "proposedPrice": 57.75,
+          "proposedGmPercent": 67.71,
+          "action": "edit"
+        }
+      ]
+    },
+    {
+      "brandName": "Smartbud",
+      "brandId": 14289,
+      "groupId": 332023,
+      "groupName": "CandyLato Shake",
+      "fullName": "Smartbud CandyLato Shake",
+      "category": "Flower",
+      "subcategory": null,
+      "enabled": true,
+      "products": [
+        {
+          "productId": 430554,
+          "name": "Smartbud CandyLato Shake 14g",
+          "shortName": "CandyLato Shake 14g",
+          "tab": "14g",
+          "enabled": null,
+          "currentPrice": 87.0,
+          "currentGmPercent": 67.53,
+          "wholesaleCost": 25.0,
+          "costSource": {
+            "distributorProductId": "640938",
+            "distributorProductName": "SMARTBUD-candy-lato Ground Flower 1/2oz",
+            "distributorName": "Stop 31 LLC",
+            "priceListId": "433264",
+            "fromDate": "2026-05-15T00:00:00Z",
+            "price": 25.0
+          },
+          "distributorRowCount": 2,
+          "rawTargetPrice": 87.4613,
+          "proposedPrice": 87.5,
+          "proposedGmPercent": 67.71,
+          "action": "edit"
+        }
+      ]
+    },
+    {
+      "brandName": "Smartbud",
+      "brandId": 14289,
+      "groupId": 299569,
+      "groupName": "Dosilato",
+      "fullName": "Smartbud Dosilato",
+      "category": "Pre-Rolls",
+      "subcategory": null,
+      "enabled": true,
+      "products": [
+        {
+          "productId": 391537,
+          "name": "Smartbud Dosilato 10x 0.75g",
+          "shortName": "Dosilato 10x 0.75g",
+          "tab": "10x 0.75g",
+          "enabled": null,
+          "currentPrice": 65.5,
+          "currentGmPercent": 58.85,
+          "wholesaleCost": 23.85,
+          "costSource": {
+            "distributorProductId": "568104",
+            "distributorProductName": "Smartbud - 10Pk Preroll - Dosilato - 7.5g",
+            "distributorName": "Stop 31 LLC",
+            "priceListId": "385406",
+            "fromDate": "2026-04-20T00:00:00Z",
+            "price": 23.85
+          },
+          "distributorRowCount": 2,
+          "rawTargetPrice": 83.4381,
+          "proposedPrice": 83.5,
+          "proposedGmPercent": 67.72,
+          "action": "edit"
+        }
+      ]
+    },
+    {
+      "brandName": "Smartbud",
+      "brandId": 14289,
+      "groupId": 270261,
+      "groupName": "Girl Scout Cookies",
+      "fullName": "Smartbud Girl Scout Cookies",
+      "category": "Flower",
+      "subcategory": null,
+      "enabled": true,
+      "products": [
+        {
+          "productId": 357490,
+          "name": "Smartbud Girl Scout Cookies 3.5g",
+          "shortName": "Girl Scout Cookies 3.5g",
+          "tab": "3.5g",
+          "enabled": null,
+          "currentPrice": 51.5,
+          "currentGmPercent": 64.89,
+          "wholesaleCost": 16.0,
+          "costSource": {
+            "distributorProductId": "494700",
+            "distributorProductName": "SmartBud - Flower - Girl Scout Cookies - 3.5g",
+            "distributorName": "Stop 31 LLC",
+            "priceListId": "344021",
+            "fromDate": "2026-04-01T00:00:00Z",
+            "price": 16.0
+          },
+          "distributorRowCount": 2,
+          "rawTargetPrice": 55.9752,
+          "proposedPrice": 56.0,
+          "proposedGmPercent": 67.71,
+          "action": "edit"
+        }
+      ]
+    },
+    {
+      "brandName": "Smartbud",
+      "brandId": 14289,
+      "groupId": 270270,
+      "groupName": "Gorilla Glue #6",
+      "fullName": "Smartbud Gorilla Glue #6",
+      "category": "Flower",
+      "subcategory": null,
+      "enabled": true,
+      "products": [
+        {
+          "productId": 357577,
+          "name": "Smartbud Gorilla Glue #6 3.5g",
+          "shortName": "Gorilla Glue #6 3.5g",
+          "tab": "3.5g",
+          "enabled": null,
+          "currentPrice": 51.5,
+          "currentGmPercent": 64.89,
+          "wholesaleCost": 16.0,
+          "costSource": {
+            "distributorProductId": "494701",
+            "distributorProductName": "SmartBud - Flower - Gorilla Glue #6 - 3.5g",
+            "distributorName": "Stop 31 LLC",
+            "priceListId": "344022",
+            "fromDate": "2026-04-01T00:00:00Z",
+            "price": 16.0
+          },
+          "distributorRowCount": 2,
+          "rawTargetPrice": 55.9752,
+          "proposedPrice": 56.0,
+          "proposedGmPercent": 67.71,
+          "action": "edit"
+        }
+      ]
+    },
+    {
+      "brandName": "Smartbud",
+      "brandId": 14289,
+      "groupId": 332021,
+      "groupName": "Motorhead",
+      "fullName": "Smartbud Motorhead",
+      "category": "Flower",
+      "subcategory": null,
+      "enabled": true,
+      "products": [
+        {
+          "productId": 430552,
+          "name": "Smartbud Motorhead 3.5g",
+          "shortName": "Motorhead 3.5g",
+          "tab": "3.5g",
+          "enabled": null,
+          "currentPrice": 56.0,
+          "currentGmPercent": 67.71,
+          "wholesaleCost": 16.0,
+          "costSource": {
+            "distributorProductId": "640936",
+            "distributorProductName": "SMARTBUD 3.5 MOTORHEAD",
+            "distributorName": "Stop 31 LLC",
+            "priceListId": "433262",
+            "fromDate": "2026-05-15T00:00:00Z",
+            "price": 16.0
+          },
+          "distributorRowCount": 2,
+          "rawTargetPrice": 55.9752,
+          "proposedPrice": 56.0,
+          "proposedGmPercent": 67.71,
+          "action": "keep"
+        }
+      ]
+    },
+    {
+      "brandName": "Smartbud",
+      "brandId": 14289,
+      "groupId": 331985,
+      "groupName": "Purple Punch",
+      "fullName": "Smartbud Purple Punch",
+      "category": "Pre-Rolls",
+      "subcategory": null,
+      "enabled": true,
+      "products": [
+        {
+          "productId": 430516,
+          "name": "Smartbud Purple Punch 5x 0.75g",
+          "shortName": "Purple Punch 5x 0.75g",
+          "tab": "5x 0.75g",
+          "enabled": null,
+          "currentPrice": 57.5,
+          "currentGmPercent": 67.57,
+          "wholesaleCost": 16.5,
+          "costSource": {
+            "distributorProductId": "640878",
+            "distributorProductName": "1O-5PR-SB26-PNCH",
+            "distributorName": "Stop 31 LLC",
+            "priceListId": "433231",
+            "fromDate": "2026-05-15T00:00:00Z",
+            "price": 16.5
+          },
+          "distributorRowCount": 2,
+          "rawTargetPrice": 57.7245,
+          "proposedPrice": 57.75,
+          "proposedGmPercent": 67.71,
+          "action": "edit"
+        }
+      ]
+    },
+    {
+      "brandName": "Smartbud",
+      "brandId": 14289,
+      "groupId": 331987,
+      "groupName": "Sour Candy",
+      "fullName": "Smartbud Sour Candy",
+      "category": "Pre-Rolls",
+      "subcategory": null,
+      "enabled": true,
+      "products": [
+        {
+          "productId": 430517,
+          "name": "Smartbud Sour Candy 5x 0.75g",
+          "shortName": "Sour Candy 5x 0.75g",
+          "tab": "5x 0.75g",
+          "enabled": null,
+          "currentPrice": 57.5,
+          "currentGmPercent": 67.57,
+          "wholesaleCost": 16.5,
+          "costSource": {
+            "distributorProductId": "640879",
+            "distributorProductName": "1O-5PR-SB26-SCND",
+            "distributorName": "Stop 31 LLC",
+            "priceListId": "433232",
+            "fromDate": "2026-05-15T00:00:00Z",
+            "price": 16.5
+          },
+          "distributorRowCount": 2,
+          "rawTargetPrice": 57.7245,
+          "proposedPrice": 57.75,
+          "proposedGmPercent": 67.71,
+          "action": "edit"
+        }
+      ]
+    },
+    {
+      "brandName": "Strain Gang",
+      "brandId": 16412,
+      "groupId": 332024,
+      "groupName": "Sour Diesel",
+      "fullName": "Strain Gang Sour Diesel",
+      "category": "Pre-Rolls",
+      "subcategory": null,
+      "enabled": true,
+      "products": [
+        {
+          "productId": 430555,
+          "name": "Strain Gang Sour Diesel 5x 0.5g",
+          "shortName": "Sour Diesel 5x 0.5g",
+          "tab": "5x 0.5g",
+          "enabled": null,
+          "currentPrice": 70.0,
+          "currentGmPercent": 67.71,
+          "wholesaleCost": 20.0,
+          "costSource": {
+            "distributorProductId": "640939",
+            "distributorProductName": "STRAIN GANG- Sour Diesel 2.5g 5pk preroll",
+            "distributorName": "Stop 31 LLC",
+            "priceListId": "433265",
+            "fromDate": "2026-05-15T00:00:00Z",
+            "price": 20.0
+          },
+          "distributorRowCount": 2,
+          "rawTargetPrice": 69.969,
+          "proposedPrice": 70.0,
+          "proposedGmPercent": 67.71,
+          "action": "keep"
+        }
+      ]
+    }
+  ]
+}
