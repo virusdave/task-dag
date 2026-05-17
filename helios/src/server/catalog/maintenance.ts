@@ -278,7 +278,11 @@ async function buildSurveyFromDb(): Promise<CatalogMaintenanceSurveyResponse> {
     siteLabelByKey.set(site.siteKey, site.siteLabel)
   }
 
-  const productIdsMissingMetrc: number[] = []
+  // Candidate set; we filter to cannabis categories below once we have the
+  // catalog group → category mapping. METRC tags are only an error condition
+  // for cannabis categories (not Accessories / Other) — for non-cannabis
+  // categories a missing METRC tag is not even a warning.
+  const productIdsMissingMetrcCandidates: number[] = []
   for (const stockRow of stockResult.rows) {
     const siteKey = siteKeyByDealerId.get(stockRow.site_dealer_id)
     if (!siteKey) {
@@ -286,7 +290,7 @@ async function buildSurveyFromDb(): Promise<CatalogMaintenanceSurveyResponse> {
     }
     const metrcTags = parseMetrcTagsJson(stockRow.metrc_tags_json)
     if (metrcTags.length === 0) {
-      productIdsMissingMetrc.push(stockRow.product_id)
+      productIdsMissingMetrcCandidates.push(stockRow.product_id)
     }
     const quantity =
       typeof stockRow.quantity === 'number'
@@ -413,8 +417,13 @@ async function buildSurveyFromDb(): Promise<CatalogMaintenanceSurveyResponse> {
         entries.length >= 2
           ? entries.filter((entry) => entry.product.variantSpecificImageCount === 0)
           : []
-      // Variants whose barcode is missing or invalid (for any in-stock variant).
-      const barcodeIssueVariants = entries.filter((entry) => classifyBarcode(entry.product.externalBarcode).status !== 'ok')
+      // Variants whose barcode is missing or invalid (for any in-stock
+      // variant). Like the missing-METRC check, this is only an error
+      // condition for cannabis categories — Accessories / Other groups are
+      // skipped entirely (no warning either).
+      const barcodeIssueVariants = isCannabisCategory(indexed.categoryName)
+        ? entries.filter((entry) => classifyBarcode(entry.product.externalBarcode).status !== 'ok')
+        : []
 
       if (groupNeedsCatalogImage) {
         const card = buildSiteGroupCard({
@@ -508,6 +517,17 @@ async function buildSurveyFromDb(): Promise<CatalogMaintenanceSurveyResponse> {
       orphanProductIds.push(productId)
     }
   }
+
+  // Restrict missing-METRC complaints to cannabis-category groups. For
+  // Accessories / Other groups a missing METRC tag is expected and is not
+  // an error or warning. Products with no resolvable catalog group fall
+  // into `orphanProductIds` and are reported separately, so we drop them
+  // from the METRC list here to avoid double-counting.
+  const productIdsMissingMetrc = productIdsMissingMetrcCandidates.filter((productId) => {
+    const indexed = productIndex.get(productId)
+    if (!indexed) return false
+    return isCannabisCategory(indexed.group.categoryName)
+  })
 
   const fatal = buildFatalBanner({
     orphanProductIds,
@@ -618,6 +638,19 @@ function compareVariantsForCard(left: CatalogMaintenanceSiteVariant, right: Cata
 function countBrandIssue(counts: Map<string, number>, brand: string | null, n: number): void {
   if (!brand) return
   counts.set(brand, (counts.get(brand) ?? 0) + n)
+}
+
+/**
+ * Category names for which METRC tags and barcode quality are NOT tracked
+ * as errors or warnings on the Images & Barcodes page. Everything else is
+ * treated as a cannabis category, so we err on the side of flagging issues
+ * for groups whose category we don't recognize.
+ */
+const NON_CANNABIS_CATEGORY_NAMES = new Set<string>(['Accessories', 'Other'])
+
+function isCannabisCategory(categoryName: string | null): boolean {
+  if (categoryName === null) return true
+  return !NON_CANNABIS_CATEGORY_NAMES.has(categoryName.trim())
 }
 
 function classifyBarcode(value: string | null): { status: 'ok' | 'missing' | 'invalid'; reason: string | null } {

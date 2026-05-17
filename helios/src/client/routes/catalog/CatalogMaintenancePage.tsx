@@ -532,6 +532,7 @@ function MaintenanceCard(props: CardProps) {
                   variant={variant}
                   mode={mode}
                   sweedGroupId={group.groupId}
+                  categoryName={group.categoryName}
                   selected={selectedVariantIds.includes(variant.productId)}
                   optimisticPreviewUrl={
                     optimisticAffectedProductIds.includes(variant.productId) ? optimisticImageUrl : null
@@ -588,6 +589,13 @@ interface VariantRowProps {
   variant: CatalogMaintenanceSiteVariant
   mode: CardMode
   sweedGroupId: number
+  /**
+   * Category of the variant's catalog group. Used to suppress the missing-
+   * METRC and missing/invalid-barcode warnings for non-cannabis categories
+   * (Accessories / Other), where those signals are not error or warning
+   * conditions.
+   */
+  categoryName: string | null
   selected: boolean
   optimisticPreviewUrl: string | null
   syncingReanalysis: boolean
@@ -601,6 +609,7 @@ function VariantRow(props: VariantRowProps) {
     variant,
     mode,
     sweedGroupId,
+    categoryName,
     selected,
     optimisticPreviewUrl,
     syncingReanalysis,
@@ -608,6 +617,7 @@ function VariantRow(props: VariantRowProps) {
     onBarcodeUpdated,
     onBarcodeError,
   } = props
+  const cannabisCategory = isCannabisCategory(categoryName)
   const [editingBarcode, setEditingBarcode] = useState(false)
   const [draftBarcode, setDraftBarcode] = useState<string>(variant.externalBarcode ?? '')
   const [savingBarcode, setSavingBarcode] = useState(false)
@@ -729,13 +739,14 @@ function VariantRow(props: VariantRowProps) {
       </div>
 
       <div className="catalog-maintenance-variant-row-meta">
-        <MetrcTagsLine metrcTags={variant.metrcTags} />
+        <MetrcTagsLine metrcTags={variant.metrcTags} cannabisCategory={cannabisCategory} />
         <BarcodeLine
           editing={editingBarcode}
           draftValue={draftBarcode}
           currentValue={variant.externalBarcode}
           status={variant.barcodeStatus}
           issueReason={variant.barcodeIssueReason}
+          cannabisCategory={cannabisCategory}
           saving={savingBarcode}
           scanning={scanningBarcode}
           scannerSupported={scannerSupported}
@@ -767,9 +778,14 @@ function VariantRow(props: VariantRowProps) {
   )
 }
 
-function MetrcTagsLine(props: { metrcTags?: string[] | null }) {
+function MetrcTagsLine(props: { metrcTags?: string[] | null; cannabisCategory: boolean }) {
   const metrcTags = Array.isArray(props.metrcTags) ? props.metrcTags : []
   if (metrcTags.length === 0) {
+    // For non-cannabis categories (Accessories / Other) a missing METRC tag
+    // is expected — don't surface it as an error or even a warning.
+    if (!props.cannabisCategory) {
+      return null
+    }
     return (
       <span
         className="catalog-maintenance-metrc-line catalog-maintenance-metrc-line--fatal"
@@ -815,6 +831,12 @@ interface BarcodeLineProps {
   currentValue: string | null
   status: 'ok' | 'missing' | 'invalid'
   issueReason: string | null
+  /**
+   * For non-cannabis categories (Accessories / Other) we still let the user
+   * see / edit the barcode value, but we never surface "missing" or "invalid"
+   * as a warning — those are only error conditions for cannabis categories.
+   */
+  cannabisCategory: boolean
   saving: boolean
   scanning: boolean
   scannerSupported: boolean
@@ -832,6 +854,7 @@ function BarcodeLine(props: BarcodeLineProps) {
     currentValue,
     status,
     issueReason,
+    cannabisCategory,
     saving,
     scanning,
     scannerSupported,
@@ -841,6 +864,7 @@ function BarcodeLine(props: BarcodeLineProps) {
     onSave,
     onPickPhoto,
   } = props
+  const showIssueSignal = cannabisCategory && status !== 'ok'
 
   if (!editing) {
     return (
@@ -851,10 +875,10 @@ function BarcodeLine(props: BarcodeLineProps) {
         ) : (
           <span className="subtle-copy">none on file</span>
         )}{' '}
-        {status !== 'ok' ? (
+        {showIssueSignal ? (
           <Pill tone="warning">{status === 'missing' ? 'missing' : 'invalid'}</Pill>
         ) : null}
-        {issueReason ? <span className="subtle-copy"> ({issueReason})</span> : null}{' '}
+        {showIssueSignal && issueReason ? <span className="subtle-copy"> ({issueReason})</span> : null}{' '}
         <button type="button" className="ghost-button catalog-maintenance-barcode-btn" onClick={onBeginEdit}>
           Edit
         </button>{' '}
@@ -920,6 +944,18 @@ interface BarcodeDetectorCtor {
   new (options?: { formats?: string[] }): {
     detect: (source: CanvasImageSource | ImageBitmap | Blob | ImageData) => Promise<BarcodeDetectionResult[]>
   }
+}
+
+/**
+ * Category names for which missing METRC tags and missing/invalid barcodes
+ * are NOT error or warning conditions. Must stay in sync with the server-side
+ * NON_CANNABIS_CATEGORY_NAMES set in src/server/catalog/maintenance.ts.
+ */
+const NON_CANNABIS_CATEGORY_NAMES = new Set<string>(['Accessories', 'Other'])
+
+function isCannabisCategory(categoryName: string | null): boolean {
+  if (categoryName === null) return true
+  return !NON_CANNABIS_CATEGORY_NAMES.has(categoryName.trim())
 }
 
 function displayGroupName(group: CatalogMaintenanceSiteGroup): string {
