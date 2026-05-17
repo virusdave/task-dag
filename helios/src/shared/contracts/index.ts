@@ -1,5 +1,6 @@
 export * from './api/ads.js'
 export * from './api/annotations.js'
+export * from './api/brandExpiryOverrides.js'
 export * from './api/catalog.js'
 export * from './api/catalogHistory.js'
 export * from './api/catalogMaintenance.js'

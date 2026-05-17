@@ -25,6 +25,7 @@ export const AuditEntityTypeSchema = z.enum([
   'catalog_item',
   'comment',
   'annotation',
+  'brand_expiry_override',
 ])
 export const AuditEventTypeSchema = z.enum([
   'auth.user.signed_in',
@@ -87,6 +88,9 @@ export const AuditEventTypeSchema = z.enum([
   'config.workers.litalerts_refresh.completed',
   'config.workers.catalog_refresh.requested',
   'config.workers.catalog_refresh.completed',
+  'config.workers.market_evidence_alarm.completed',
+  'config.brand_expiry_override.upserted',
+  'config.brand_expiry_override.deleted',
 ])
 
 export type AuditEntityType = z.infer<typeof AuditEntityTypeSchema>

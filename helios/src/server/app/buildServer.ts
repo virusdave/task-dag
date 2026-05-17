@@ -13,6 +13,7 @@ import { startAdsDrivePoller, stopAdsDrivePoller } from '../ads/adsDrivePoller.j
 import { registerAdsRoutes } from '../routes/ads.js'
 import { registerAnnotationsRoutes } from '../routes/annotations.js'
 import { registerAuthRoutes } from '../routes/auth.js'
+import { registerBrandExpiryOverridesRoutes } from '../routes/brandExpiryOverrides.js'
 import { registerCatalogRoutes } from '../routes/catalog.js'
 import { registerCatalogMaintenanceRoutes } from '../routes/catalogMaintenance.js'
 import { registerCatalogReviewRoutes } from '../routes/catalogReview.js'
@@ -110,6 +111,7 @@ async function registerApplicationSurface(server: FastifyInstance) {
   await registerCommentsRoutes(server)
   await registerCommunicationsRoutes(server)
   await registerConfigRoutes(server)
+  await registerBrandExpiryOverridesRoutes(server)
   await registerPendingPurchaseRoutes(server)
   await registerPricingRoutes(server)
   await registerProposalBatchRoutes(server)

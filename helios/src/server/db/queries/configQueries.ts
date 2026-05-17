@@ -4,6 +4,8 @@ import {
   CATALOG_DEFAULT_SCHEDULE_WINDOWS,
   CONFIG_BACKGROUND_TASKS,
   LITALERTS_DEFAULT_SCHEDULE_WINDOWS,
+  LITALERTS_ROLLING_DEFAULT_SCHEDULE_WINDOWS,
+  MARKET_EVIDENCE_ALARM_DEFAULT_SCHEDULE_WINDOWS,
   STOCK_DEFAULT_SCHEDULE_WINDOWS,
   getConfigBackgroundTaskDefinition,
   type ConfigBackgroundTaskKey,
@@ -137,6 +139,8 @@ const DEFAULT_WINDOWS_BY_TASK_KEY: Partial<
 > = {
   'workers.scheduling.stock': STOCK_DEFAULT_SCHEDULE_WINDOWS,
   'workers.scheduling.litalerts': LITALERTS_DEFAULT_SCHEDULE_WINDOWS,
+  'workers.scheduling.litalerts_rolling': LITALERTS_ROLLING_DEFAULT_SCHEDULE_WINDOWS,
+  'workers.scheduling.market_evidence_alarm': MARKET_EVIDENCE_ALARM_DEFAULT_SCHEDULE_WINDOWS,
   'workers.scheduling.catalog': CATALOG_DEFAULT_SCHEDULE_WINDOWS,
 }
 
@@ -411,6 +415,89 @@ export async function countPendingLitalertsRefreshRows(db: Queryable = getPool()
     `select count(*)::text as count from pending_litalerts_refresh_queue where status = 'pending'`,
   )
   return Number(result.rows[0]?.count ?? '0')
+}
+
+export type PricingEvidenceFreshness = 'fresh' | 'stale' | 'very_stale' | 'expired' | 'absent'
+export type PricingEvidenceAlarmClass = 'in_stock' | 'pending_purchase' | 'brand_match'
+
+export interface PricingEvidenceFreshnessRow {
+  catalogGroupId: number
+  productId: number
+  brandName: string | null
+  productName: string | null
+  productTab: string | null
+  livePrice: string | null
+  latestObservationId: number | null
+  capturedAt: string | null
+  expiresAt: string | null
+  ageDays: number | null
+  freshness: PricingEvidenceFreshness
+  listingCount: number
+  pricingEligibleListingCount: number
+  isInStock: boolean
+  isInPendingPurchase: boolean
+  isBrandOfPendingPurchase: boolean
+  alarmClass: PricingEvidenceAlarmClass | null
+}
+
+interface PricingEvidenceFreshnessDbRow extends QueryResultRow {
+  catalog_group_id: string | number
+  product_id: string | number
+  brand_name: string | null
+  product_name: string | null
+  product_tab: string | null
+  live_price: string | null
+  latest_observation_id: string | number | null
+  captured_at: Date | null
+  expires_at: Date | null
+  age_days: string | null
+  freshness: PricingEvidenceFreshness
+  listing_count: number
+  pricing_eligible_listing_count: number
+  is_in_stock: boolean
+  is_in_pending_purchase: boolean
+  is_brand_of_pending_purchase: boolean
+  alarm_class: PricingEvidenceAlarmClass | null
+}
+
+export async function getPricingEvidenceFreshness(
+  db: Queryable,
+  productIds: readonly number[],
+): Promise<PricingEvidenceFreshnessRow[]> {
+  if (productIds.length === 0) {
+    return []
+  }
+  const result = await db.query<PricingEvidenceFreshnessDbRow>(
+    `
+      select catalog_group_id, product_id, brand_name, product_name, product_tab,
+             live_price, latest_observation_id, captured_at, expires_at, age_days,
+             freshness, listing_count, pricing_eligible_listing_count,
+             is_in_stock, is_in_pending_purchase, is_brand_of_pending_purchase,
+             alarm_class
+        from vw_pricing_evidence_freshness
+       where product_id = any($1::bigint[])
+    `,
+    [productIds],
+  )
+  return result.rows.map((row) => ({
+    catalogGroupId: Number(row.catalog_group_id),
+    productId: Number(row.product_id),
+    brandName: row.brand_name,
+    productName: row.product_name,
+    productTab: row.product_tab,
+    livePrice: row.live_price,
+    latestObservationId: row.latest_observation_id === null ? null : Number(row.latest_observation_id),
+    capturedAt: row.captured_at ? row.captured_at.toISOString() : null,
+    expiresAt: row.expires_at ? row.expires_at.toISOString() : null,
+    ageDays: row.age_days === null ? null : Number(row.age_days),
+    freshness: row.freshness,
+    listingCount: row.listing_count,
+    pricingEligibleListingCount: row.pricing_eligible_listing_count,
+    isInStock: row.is_in_stock,
+    isInPendingPurchase: row.is_in_pending_purchase,
+    isBrandOfPendingPurchase: row.is_brand_of_pending_purchase,
+    alarmClass: row.alarm_class,
+  }))
 }
 
 export interface RecentCatalogTaxonomySnapshotRow {

@@ -91,9 +91,59 @@ const SENTINELS: MigrationSentinel[] = [
     },
   },
   {
+    migrationId: '009_market_data_sweep_columns',
+    label:
+      'Market Data Sweep columns (pending_litalerts_refresh_queue.priority, ' +
+      'litalerts_competitor_observations.expires_at, …)',
+    check: (db) => columnExists(db, 'pending_litalerts_refresh_queue', 'priority'),
+  },
+  {
+    migrationId: '010_market_data_sweep_view',
+    label: 'Market Data Sweep view (vw_pricing_evidence_freshness)',
+    check: async (db) => {
+      const result = await db.query<{ exists: boolean }>(
+        `select to_regclass('public.vw_pricing_evidence_freshness') is not null as exists`,
+      )
+      return result.rows[0]?.exists === true
+    },
+  },
+  {
     migrationId: '011_sweed_auth_events',
     label: 'Sweed auth event log (sweed_auth_events table) — required for worker auth diagnostics + UI surface',
     check: (db) => tableExists(db, 'sweed_auth_events'),
+  },
+  {
+    migrationId: '012_market_data_brand_expiry_overrides',
+    label: 'Brand expiry overrides (brand_expiry_overrides table) — operator-managed per-brand market-evidence freshness windows',
+    check: (db) => tableExists(db, 'brand_expiry_overrides'),
+  },
+  {
+    migrationId: '013_market_data_view_per_brand_expiry',
+    label: 'vw_pricing_evidence_freshness honors brand_expiry_overrides — re-declares the view',
+    // We detect the post-013 shape by probing whether the view's
+    // freshness calc references brand_expiry_overrides at all. Simple
+    // smoke: select 1 from the view filtered through the overrides
+    // table; if the post-013 view is installed the planner will
+    // resolve the join correctly. We can't easily introspect the
+    // view body cross-version, so we just check the table exists +
+    // the view exists (the orchestrator applies 013 right after
+    // 012, so they go together).
+    check: async (db) => {
+      const [hasTable, hasView] = await Promise.all([
+        tableExists(db, 'brand_expiry_overrides'),
+        db
+          .query<{ exists: boolean }>(
+            `select exists(
+               select 1
+                 from information_schema.views
+                where table_schema = 'public'
+                  and table_name = 'vw_pricing_evidence_freshness'
+             ) as exists`,
+          )
+          .then((r) => r.rows[0]?.exists === true),
+      ])
+      return hasTable && hasView
+    },
   },
 ]
 

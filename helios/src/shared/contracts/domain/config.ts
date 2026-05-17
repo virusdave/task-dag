@@ -13,6 +13,8 @@ import { z } from 'zod'
 export const CONFIG_BACKGROUND_TASK_KEYS = [
   'workers.scheduling.catalog',
   'workers.scheduling.litalerts',
+  'workers.scheduling.litalerts_rolling',
+  'workers.scheduling.market_evidence_alarm',
   'workers.scheduling.stock',
 ] as const
 export const ConfigBackgroundTaskKeySchema = z.enum(CONFIG_BACKGROUND_TASK_KEYS)
@@ -42,6 +44,20 @@ export const CONFIG_BACKGROUND_TASKS: ReadonlyArray<ConfigBackgroundTaskDefiniti
     slug: 'litalerts',
     implemented: true,
     summary: 'Drains the pending Lit Alerts refresh queue (one job per queued variant) by capturing competitor listings for each variant whose stock just transitioned out-of-stock to in-stock.',
+  },
+  {
+    key: 'workers.scheduling.litalerts_rolling',
+    label: 'Litalerts Rolling',
+    slug: 'litalerts-rolling',
+    implemented: true,
+    summary: 'Rolling 24h ± 2h market-data sweep: scans every catalog product for stale or absent Lit Alerts evidence and drops batches of stale variants back onto the Lit Alerts refresh queue with a deterministic per-product jitter so the load spreads evenly.',
+  },
+  {
+    key: 'workers.scheduling.market_evidence_alarm',
+    label: 'Market Evidence Alarm',
+    slug: 'market-evidence-alarm',
+    implemented: true,
+    summary: 'Scans vw_pricing_evidence_freshness every 15 minutes for in-stock / pending-purchase / brand-match products whose competitor evidence is missing, expired, or about to expire; re-enqueues a market-data refresh at priority=0 and pages Dave when a class fires.',
   },
   {
     key: 'workers.scheduling.stock',
@@ -128,6 +144,42 @@ export const LITALERTS_DEFAULT_SCHEDULE_WINDOWS: ReadonlyArray<Omit<ConfigWorker
     intervalMinutes: 5,
     paused: false,
     notes: 'Drain pending Lit Alerts refresh queue every 5 minutes.',
+  },
+]
+
+/**
+ * Default schedule for the rolling 24h ± 2h Lit Alerts market-data
+ * sweep. The scheduler scans the freshness view and re-enqueues any
+ * product whose `next_refresh_at` has elapsed, capped at 100 products
+ * per tick — so a 5-minute cadence is fast enough to roll a few
+ * thousand products through within ~an hour while staying well below
+ * partner-API rate ceilings.
+ */
+export const LITALERTS_ROLLING_DEFAULT_SCHEDULE_WINDOWS: ReadonlyArray<Omit<ConfigWorkerScheduleWindow, 'id'>> = [
+  {
+    weekdayMask: WEEKDAY_MASK_ALL,
+    windowStartMinute: 0,
+    windowEndMinute: 1440,
+    intervalMinutes: 5,
+    paused: false,
+    notes: 'Rolling 24h ± 2h market-data sweep tick (every 5 minutes, capped at 100 products).',
+  },
+]
+
+/**
+ * Default schedule for the market-evidence alarm scanner. Runs every
+ * 15 minutes; the scanner is cheap (one read against the freshness view
+ * plus an idempotent per-product enqueue) so the cadence is bounded only
+ * by how quickly we want alarm conditions to surface in the queue.
+ */
+export const MARKET_EVIDENCE_ALARM_DEFAULT_SCHEDULE_WINDOWS: ReadonlyArray<Omit<ConfigWorkerScheduleWindow, 'id'>> = [
+  {
+    weekdayMask: WEEKDAY_MASK_ALL,
+    windowStartMinute: 0,
+    windowEndMinute: 1440,
+    intervalMinutes: 15,
+    paused: false,
+    notes: 'Scan freshness view for alarm-class products with stale/expired/absent evidence every 15 minutes.',
   },
 ]
 
