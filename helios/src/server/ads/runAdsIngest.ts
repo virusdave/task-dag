@@ -1,65 +1,117 @@
 import { execFile } from 'node:child_process'
-import * as path from 'node:path'
 import { promisify } from 'node:util'
 
-import {
-  AdsIngestResponseSchema,
-  type AdsIngestResponse,
-} from '../../shared/contracts/index.js'
+import { type AdsIngestResponse } from '../../shared/contracts/index.js'
+import { automationRepoPath } from './automationRepoRoot.js'
+import { buildSnapshotFromCsv } from './buildSnapshotFromCsv.js'
+import { downloadDriveFile } from './googleDriveClient.js'
+import { uploadToMssOneOffs } from './mssOneOffsUpload.js'
+import { parseDriveInput } from './parseDriveInput.js'
 
 const execFileP = promisify(execFile)
 
-// helios/src/server/ads/ -> repo root is 4 levels up. Same offset
-// whether we're running from src/ (tsx) or dist/ (built).
-const REPO_ROOT = path.resolve(new URL('.', import.meta.url).pathname, '../../../..')
-const INGEST_SCRIPT = path.join(REPO_ROOT, 'ads/google/scripts/ingest-drive-export.sh')
+// Pipeline runs Drive download + JSONL build + viz render + upload.
+// Cap at 5min so a stuck render can't hold a request forever.
+const VIZ_TIMEOUT_MS = 5 * 60 * 1000
 
-// The full pipeline (Drive download + 2 Python steps + upload) is
-// well under a minute in practice; cap at 5min so a stuck process
-// can't hold a request forever.
-const TIMEOUT_MS = 5 * 60 * 1000
+const CSV_PATH = '/tmp/google-ads-export-utf8.csv'
 
 export interface AdsIngestError extends Error {
   detail: string
   stderr: string
 }
 
-/**
- * Runs ads/google/scripts/ingest-drive-export.sh and parses the JSON
- * line on stdout. Both the manual /api/ads/ingest route and the
- * background poller go through this single helper so we stay
- * single-flight (the script's own flock takes care of cross-process
- * collisions; we just need shared error handling here).
- */
-export async function runAdsIngest(driveFileUrlOrId: string): Promise<AdsIngestResponse> {
-  let stdout = ''
-  let stderr = ''
+// Module-level mutex so the background poller and the manual button
+// can't race against each other when they both call this helper.
+let inFlight: Promise<AdsIngestResponse> | null = null
+
+export function runAdsIngest(driveFileUrlOrId: string): Promise<AdsIngestResponse> {
+  if (inFlight) {
+    return inFlight
+  }
+  inFlight = doRunAdsIngest(driveFileUrlOrId).finally(() => {
+    inFlight = null
+  })
+  return inFlight
+}
+
+async function doRunAdsIngest(driveFileUrlOrId: string): Promise<AdsIngestResponse> {
+  const parsed = parseDriveInput(driveFileUrlOrId)
+  const snapshotPath = automationRepoPath('ads/google/snapshots/ads-snapshot-live.jsonl')
+  const htmlPath = automationRepoPath('ads/google/outputs/experiments-viz.html')
+
+  // 1. Drive download (in-process fetch; rejects HTML interstitials).
   try {
-    const result = await execFileP(INGEST_SCRIPT, [driveFileUrlOrId], {
-      timeout: TIMEOUT_MS,
-      maxBuffer: 8 * 1024 * 1024,
+    await downloadDriveFile({
+      fileId: parsed.fileId,
+      resourceKey: parsed.resourceKey,
+      destPath: CSV_PATH,
     })
-    stdout = result.stdout
-    stderr = result.stderr
   } catch (err) {
-    const e = err as { stdout?: string; stderr?: string; code?: number; message?: string }
-    const detail = (e.stderr || e.message || '').trim().slice(-4000)
-    const error = new Error(`ads ingest script failed: ${detail.split('\n').pop() ?? ''}`) as AdsIngestError
-    error.detail = detail
-    error.stderr = e.stderr ?? ''
-    throw error
+    throw makeError('drive download failed', err)
   }
 
-  const lastLine = stdout.trim().split(/\r?\n/).pop() ?? ''
-  let parsed: unknown
+  // 2. CSV -> snapshot (in-process port of convert-csv-to-snapshot.py).
   try {
-    parsed = JSON.parse(lastLine)
-  } catch {
-    const detail = stderr.trim().slice(-4000)
-    const error = new Error('ingest finished but produced no parseable result') as AdsIngestError
-    error.detail = detail
-    error.stderr = stderr
-    throw error
+    await buildSnapshotFromCsv({
+      csvPath: CSV_PATH,
+      outputPath: snapshotPath,
+      snapshotDate: todayYMD(),
+    })
+  } catch (err) {
+    throw makeError('snapshot build failed', err)
   }
-  return AdsIngestResponseSchema.parse(parsed)
+
+  // 3. Snapshot -> HTML viz. This step is still a Python subprocess
+  // (build-experiments-viz.py is ~1400 lines of viz rendering with a
+  // big embedded CSV bundle); helios invokes it directly, not via a
+  // bash orchestrator. Porting to TS is a follow-up.
+  const vizScript = automationRepoPath('ads/google/scripts/build-experiments-viz.py')
+  try {
+    await execFileP('python3', [vizScript, '--output', htmlPath], {
+      timeout: VIZ_TIMEOUT_MS,
+      maxBuffer: 8 * 1024 * 1024,
+    })
+  } catch (err) {
+    throw makeError('build-experiments-viz failed', err)
+  }
+
+  // 4. Public deploy via mss-one-offs (in-process unix-socket POST).
+  let upload
+  try {
+    upload = await uploadToMssOneOffs({
+      sourcePath: htmlPath,
+      note: 'helios ads ingest',
+      ttlSeconds: 86_400,
+    })
+  } catch (err) {
+    throw makeError('mss-one-offs upload failed', err)
+  }
+
+  return {
+    publicUrl: upload.publicUrl,
+    sourceFileId: parsed.fileId,
+    snapshotPath,
+    outputPath: htmlPath,
+  }
+}
+
+function makeError(prefix: string, err: unknown): AdsIngestError {
+  const e = err as { stdout?: string; stderr?: string; message?: string; code?: number }
+  const stderr = (e.stderr ?? '').toString()
+  const message = (e.message ?? String(err)).toString()
+  // Prefer the last non-empty line of stderr (most specific) when present.
+  const stderrTail = stderr.trim().split(/\r?\n/).filter(Boolean).pop() ?? ''
+  const summary = stderrTail || message
+  const detail = (stderr.trim() || message).slice(-4000)
+  const error = new Error(`${prefix}: ${summary}`) as AdsIngestError
+  error.detail = detail
+  error.stderr = stderr
+  return error
+}
+
+function todayYMD(): string {
+  const d = new Date()
+  const pad = (n: number) => n.toString().padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
 }

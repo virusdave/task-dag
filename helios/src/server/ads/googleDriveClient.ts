@@ -88,6 +88,63 @@ export async function findLatestCsv(
   return files[0] ?? null
 }
 
+/**
+ * Download a Drive file's bytes to a local path. Uses the public
+ * `drive.usercontent.google.com/download` endpoint which works for
+ * files shared "Anyone with the link can view" without an OAuth token
+ * or API key. Returns the number of bytes written.
+ *
+ * Throws if the response is non-2xx OR if the first bytes look like an
+ * HTML interstitial (Drive permission-denied / virus-scan page / native
+ * Google Sheet rendered as HTML), since that's silent data corruption
+ * downstream.
+ */
+export async function downloadDriveFile(args: {
+  fileId: string
+  resourceKey?: string | null
+  destPath: string
+}): Promise<number> {
+  const params = new URLSearchParams({
+    id: args.fileId,
+    export: 'download',
+    confirm: 't',
+  })
+  if (args.resourceKey) {
+    params.set('resourcekey', args.resourceKey)
+  }
+  const url = `https://drive.usercontent.google.com/download?${params.toString()}`
+  const referer = process.env.GOOGLE_DRIVE_REFERER ?? 'https://vpn-helios.freshlybaked.us/ads'
+  const response = await fetch(url, {
+    headers: {
+      Referer: referer,
+      'User-Agent': 'helios-ads-ingest/1.0',
+    },
+    redirect: 'follow',
+  })
+  if (!response.ok) {
+    throw new DriveDownloadError(
+      `Drive download failed for id=${args.fileId}: ${response.status} ${response.statusText}. ` +
+        `Make sure the file is shared 'Anyone with the link can view'.`,
+    )
+  }
+  const buffer = Buffer.from(await response.arrayBuffer())
+  const head = buffer.slice(0, 200).toString('utf-8').toLowerCase()
+  if (
+    head.startsWith('<!doctype html') ||
+    head.startsWith('<html') ||
+    head.includes('<title>google drive')
+  ) {
+    throw new DriveDownloadError(
+      `Drive returned HTML, not a CSV (id=${args.fileId}). The file may be private ` +
+        `or it may be a native Google Sheet rather than an uploaded CSV.`,
+    )
+  }
+  await (await import('node:fs/promises')).writeFile(args.destPath, buffer)
+  return buffer.length
+}
+
+export class DriveDownloadError extends Error {}
+
 function isCsvLike(raw: DriveFileRaw): boolean {
   const name = (raw.name ?? '').toLowerCase()
   const mime = (raw.mimeType ?? '').toLowerCase()
