@@ -498,6 +498,72 @@ def apply_edits(proposal: dict) -> dict:
     return results
 
 
+def _enqueue_market_refresh_for_proposal(proposal: dict) -> None:
+    """Best-effort: shell out to helios/scripts/enqueue-market-refresh.mjs
+    with every productId the proposal touches so Lit Alerts evidence is
+    fresh by the time the proposal is reviewed.
+
+    Never raises; failures print a warning so the dry-run still completes.
+    """
+    product_ids: list[int] = []
+    seen: set[int] = set()
+    for group in proposal.get("groups", []):
+        for product in group.get("products", []):
+            pid = product.get("productId")
+            if isinstance(pid, int) and pid not in seen:
+                seen.add(pid)
+                product_ids.append(pid)
+
+    if not product_ids:
+        return
+
+    script_path = AUTOMATION_ROOT / "helios" / "scripts" / "enqueue-market-refresh.mjs"
+    if not script_path.exists():
+        print(
+            f"\n[warn] enqueue-market-refresh CLI not found at {script_path}; "
+            "skipping market-data enqueue.",
+            flush=True,
+        )
+        return
+
+    import subprocess
+
+    label = WORKDIR.name
+    cmd = [
+        "node",
+        str(script_path),
+        "--productIds",
+        ",".join(str(pid) for pid in product_ids),
+        "--reason",
+        "proposal-source",
+        "--proposalLabel",
+        label,
+    ]
+
+    print(
+        f"\nEnqueueing {len(product_ids)} product(s) for Lit Alerts "
+        f"market-data refresh (proposalLabel={label})...",
+        flush=True,
+    )
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
+        print(f"[warn] market-data enqueue skipped: {exc}", flush=True)
+        return
+
+    if result.returncode != 0:
+        print(
+            "[warn] market-data enqueue exited non-zero "
+            f"(rc={result.returncode}); stderr was:\n{result.stderr.strip()}",
+            flush=True,
+        )
+        return
+
+    stdout = result.stdout.strip()
+    if stdout:
+        print(f"  -> {stdout}", flush=True)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--apply", action="store_true",
@@ -536,6 +602,15 @@ def main() -> None:
 
     print(f"\nProposal:  {proposal_path}")
     print(f"Summary:   {summary_path}")
+
+    # Fire-and-forget: drop every in-scope productId onto the Helios
+    # Lit Alerts market-data refresh queue at proposal-source priority
+    # so reviewers see fresh evidence by the time they look at the
+    # proposal. We do this at dry-run time (NOT just on --apply) because
+    # the operator workflow is: dry-run -> review with fresh evidence ->
+    # apply. Helper exits non-zero on plumbing failure but we never
+    # fail the dry-run on it.
+    _enqueue_market_refresh_for_proposal(proposal)
 
     if not args.apply:
         print("\nDry run complete. Re-run with --apply to push edits.")

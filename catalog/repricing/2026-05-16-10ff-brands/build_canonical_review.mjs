@@ -95,17 +95,6 @@ function renderLadderForProduct(product) {
     eligibleForPricing: listing.eligibleForPricing !== false,
   })).filter((l) => Number.isFinite(l.postTaxPrice) && l.postTaxPrice > 0)
 
-  let cachedNote = ''
-  if (product.marketCacheStatus === 'absent') {
-    cachedNote = '<span class="ladder-cache-tag absent">no cached market evidence</span>'
-  } else if (product.marketCacheStatus === 'very_stale') {
-    cachedNote = `<span class="ladder-cache-tag very-stale">market evidence VERY stale (${product.marketCacheAgeDays}d)</span>`
-  } else if (product.marketCacheStatus === 'stale') {
-    cachedNote = `<span class="ladder-cache-tag stale">market evidence stale (${product.marketCacheAgeDays}d)</span>`
-  } else if (product.marketCacheStatus === 'fresh') {
-    cachedNote = `<span class="ladder-cache-tag fresh">market evidence fresh (${product.marketCacheAgeDays}d)</span>`
-  }
-
   // Where would a 20% promo land? Only meaningful when we have a
   // proposed price; cost is needed for the GM annotation.
   const postPromoPrice = proposed != null && Number.isFinite(Number(proposed))
@@ -150,8 +139,25 @@ function renderLadderForProduct(product) {
     (${escapeHtml(fmtPct(product.proposedGmPercent))} GM)
     <span class="ladder-head-delta ${delta.cls}">${delta.text}</span>
     ${promoChip}
-    ${cachedNote}
   </span>`
+  // Translate the packet's legacy freshness label ('very_stale' shape)
+  // into the canonical renderer's freshness enum and surface it via
+  // the chip the renderer now emits.
+  const canonicalFreshness = (() => {
+    switch (product.marketCacheStatus) {
+      case 'fresh':
+      case 'stale':
+      case 'very_stale':
+      case 'expired':
+      case 'absent':
+        return product.marketCacheStatus
+      default:
+        return undefined
+    }
+  })()
+  const canonicalFreshnessAgeDays = product.marketCacheAgeDays != null
+    ? Number(product.marketCacheAgeDays)
+    : null
   let html = renderPricingLadder(
     {
       productId: product.productId,
@@ -169,6 +175,8 @@ function renderLadderForProduct(product) {
       includeLegend: false,
       includeMeta: competitorListings.length > 0,
       productLabel: product.name ?? `Product ${product.productId}`,
+      freshness: canonicalFreshness,
+      freshnessAgeDays: canonicalFreshnessAgeDays,
     },
   )
 
@@ -210,6 +218,7 @@ async function main() {
   let totalDiamonds = 0
   let productsStale = 0
   let productsVeryStale = 0
+  let productsExpired = 0
   let productsAbsent = 0
   let productsFresh = 0
   for (const group of proposal.groups) {
@@ -227,6 +236,7 @@ async function main() {
         case 'fresh': productsFresh += 1; break
         case 'stale': productsStale += 1; break
         case 'very_stale': productsVeryStale += 1; break
+        case 'expired': productsExpired += 1; break
         case 'absent': productsAbsent += 1; break
         default: break
       }
@@ -297,12 +307,9 @@ async function main() {
   .ladder-head-metric{font-size:13px}
   .ladder-head-metric strong{color:var(--edit)}
   .ladder-head-delta{margin-left:6px;font-weight:600}
-  .ladder-cache-tag{display:inline-block;margin-left:8px;padding:1px 6px;
-        border-radius:6px;font-size:10px;font-weight:600;letter-spacing:0.02em}
-  .ladder-cache-tag.fresh{background:#dfeae2;color:#1f5d42}
-  .ladder-cache-tag.stale{background:#f0e1c2;color:#8b5e11}
-  .ladder-cache-tag.very-stale{background:#f3dde4;color:#8d2f52}
-  .ladder-cache-tag.absent{background:#eee;color:#777}
+  .apply-block-banner{background:#f3dde4;border:1px solid #e0a3ba;
+        color:#8d2f52;border-radius:10px;padding:10px 14px;
+        margin:8px 0 14px;font-weight:600;letter-spacing:0.02em}
   .ladder-head-promo{display:inline-block;margin-left:8px;padding:1px 6px;
         border-radius:6px;font-size:11px;font-weight:600;letter-spacing:0.02em;
         background:#efe6ff;color:#5b3aa6;border:1px solid #d6c4f7}
@@ -330,6 +337,7 @@ async function main() {
     State dealer ${proposal.stateDealerId} (${escapeHtml(proposal.stateDealerName)}) ·
     Generated ${escapeHtml(proposal.generatedAt)} (dry-run) ·
     UI: <code>helios/src/shared/ui/pricing-ladder</code></p>
+  ${productsExpired > 0 ? `<div class="apply-block-banner" data-market-evidence-apply-block="true">Apply is blocked — ${productsExpired} variant${productsExpired === 1 ? '' : 's'} have expired competitor evidence.</div>` : ''}
 
   <div class="card">
     <strong>What this is.</strong> A proposal to rewrite the per-variant
