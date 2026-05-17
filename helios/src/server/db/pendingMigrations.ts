@@ -163,6 +163,12 @@ const SENTINELS: MigrationSentinel[] = [
       return hasClaimedAt && hasClaimedBy && hasClaimExpiresAt
     },
   },
+  {
+    migrationId: '016_job_queue_priority',
+    label:
+      'job_queue.priority column + lease ordering — required so operator-initiated jobs jump ahead of system-generated background backlog',
+    check: (db) => columnExists(db, 'job_queue', 'priority'),
+  },
 ]
 
 interface CacheEntry {

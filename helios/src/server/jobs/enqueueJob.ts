@@ -22,6 +22,36 @@ export interface EnqueueJobInput {
   requestedByUserId?: number | null
   runAt?: Date
   scope?: HeliosModuleScope | null
+  /**
+   * Lease ordering: leaseJobs picks rows by priority desc, run_at asc,
+   * id asc. Default 0 ("normal background work"). Operator-initiated /
+   * UI-triggered jobs should typically pass JOB_PRIORITY_HIGH so they
+   * jump past system-generated backlog.
+   */
+  priority?: number
+}
+
+/**
+ * Priority band constants. Plain numbers so we can layer more bands
+ * later without a schema change.
+ */
+export const JOB_PRIORITY_BACKGROUND = 0
+export const JOB_PRIORITY_HIGH = 100
+
+/**
+ * Default priority for an enqueue that didn't pass one explicitly.
+ *
+ * Heuristic: if the enqueue carries a `requestedByUserId`, treat it
+ * as operator-initiated and put it in the high-priority band so it
+ * jumps past system-generated background backlog (e.g. the periodic
+ * `catalog.sync.group_detail` cohort the scheduler tick produces).
+ * Background ticks / recurring scheduler enqueues don't pass a user
+ * id and stay at background priority.
+ *
+ * Call sites that want different behaviour pass `priority` explicitly.
+ */
+function defaultPriorityFor(input: EnqueueJobInput): number {
+  return input.requestedByUserId != null ? JOB_PRIORITY_HIGH : JOB_PRIORITY_BACKGROUND
 }
 
 export async function enqueueJob(db: Queryable, input: EnqueueJobInput): Promise<number> {
@@ -57,9 +87,10 @@ export async function enqueueJob(db: Queryable, input: EnqueueJobInput): Promise
         payload_json,
         status,
         run_at,
-        requested_by_user_id
+        requested_by_user_id,
+        priority
       )
-      values ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, 'queued', $9, $10)
+      values ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, 'queued', $9, $10, $11)
       returning id
     `,
     [
@@ -73,6 +104,7 @@ export async function enqueueJob(db: Queryable, input: EnqueueJobInput): Promise
       JSON.stringify(input.payload),
       input.runAt ?? new Date(),
       input.requestedByUserId ?? null,
+      input.priority ?? defaultPriorityFor(input),
     ],
   )
 

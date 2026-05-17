@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
 
+import { DependencyUnavailableWorkerError } from '../runtime/errors.js'
 import {
   buildClaimTag,
   claimSweedToken,
@@ -7,7 +8,12 @@ import {
   type ClaimedSweedToken,
 } from './activeSessionToken.js'
 import { getCurrentJobAuthContext } from './authLog.js'
-import { runWithSweedSessionLock } from './sessionLock.js'
+
+// How long to defer a job whose claim attempt found the pool
+// fully leased. Short enough that a job which "just missed" a
+// release comes back online quickly, long enough not to busy-poll
+// the DB when the pool is genuinely empty.
+const POOL_EMPTY_RETRY_DELAY_MS = 5_000
 
 /**
  * Per-job Sweed session context.
@@ -96,6 +102,20 @@ export function getCurrentSweedSessionClaim(): ClaimedSweedToken | null {
  *
  * Nested calls reuse the outer session — we never re-claim inside a
  * session that already has a token pinned.
+ *
+ * Empty-pool handling: if every unexpired pool row is currently
+ * leased to another worker, we throw a
+ * `DependencyUnavailableWorkerError` so the worker loop defers the
+ * job (re-queues with a short delay) instead of failing it. This is
+ * the natural backpressure for "more concurrent Sweed jobs than pool
+ * tokens" — extra jobs sit in the queue until a token frees up,
+ * rather than erroring out.
+ *
+ * Concurrency: there is NO per-process serialization. With each job
+ * holding an exclusive pool row, Sweed's server-side dealer context
+ * is partitioned by token and two jobs in the same worker can run
+ * in parallel safely. The old `runWithSweedSessionLock` mutex made
+ * sense only under the shared-token model.
  */
 export async function withSweedSession<T>(fn: () => Promise<T>): Promise<T> {
   if (sessionStorage.getStore() !== undefined) {
@@ -106,10 +126,12 @@ export async function withSweedSession<T>(fn: () => Promise<T>): Promise<T> {
   const claimedBy = buildClaimTag(jobCtx ? { jobId: jobCtx.jobId } : null)
   const claim = await claimSweedToken({ claimedBy })
   if (claim === null) {
-    throw new Error(
-      'Sweed session pool is empty. Paste a live session UUID at ' +
-        '/config/sweed/sessions (or set SWEED_AUTH_TOKEN as a bootstrap ' +
-        'fallback in the helios runtime env).',
+    throw new DependencyUnavailableWorkerError(
+      'Sweed session pool exhausted: every unexpired token is currently in ' +
+        'use by another worker. The job will be re-queued automatically. If ' +
+        'this keeps happening, paste another live session UUID at ' +
+        '/config/sweed/sessions to enlarge the pool.',
+      { delayMs: POOL_EMPTY_RETRY_DELAY_MS },
     )
   }
 
@@ -125,7 +147,7 @@ export async function withSweedSession<T>(fn: () => Promise<T>): Promise<T> {
   }
 
   try {
-    return await runWithSweedSessionLock(() => sessionStorage.run(context, fn))
+    return await sessionStorage.run(context, fn)
   } finally {
     // Always release back to the pool, even on failure. If the
     // transport layer retired the row (auth-expired), the release

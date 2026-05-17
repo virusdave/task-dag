@@ -83,7 +83,13 @@ export function getWorkerEnv(): WorkerEnv {
     sweedRequestTimeoutMs: readNumberEnv('SWEED_REQUEST_TIMEOUT_MS', 30000),
     sweedStateDealerId: readNumberEnv('SWEED_STATE_DEALER_ID', 210248),
     workerMaxAttempts: readNumberEnv('WORKER_MAX_ATTEMPTS', 5),
-    workerMaxConcurrentJobs: readNumberEnv('WORKER_MAX_CONCURRENT_JOBS', 2),
+    // Default raised from 2 → 8 once Sweed jobs stopped being
+    // serialized through `concurrency_key='sweed-session'`. With
+    // every Sweed job claiming its own exclusive pool row (see
+    // worker/sweed/activeSessionToken.ts), per-process concurrency
+    // is naturally bounded by pool size — extra leases that can't
+    // claim a token defer themselves via DependencyUnavailableWorkerError.
+    workerMaxConcurrentJobs: readNumberEnv('WORKER_MAX_CONCURRENT_JOBS', 8),
     workerPool: readWorkerPoolEnv(),
     workerRetryBaseDelayMs: readNumberEnv('WORKER_RETRY_BASE_DELAY_MS', 5000),
   }

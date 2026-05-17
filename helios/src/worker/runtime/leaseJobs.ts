@@ -68,11 +68,15 @@ export async function leaseJobs(limit: number, options: LeaseJobsOptions = {}): 
         with runnable as (
           select
             jq.id,
+            jq.priority,
             jq.run_at,
             jq.concurrency_key,
             case
               when jq.concurrency_key is null then 1
-              else row_number() over (partition by jq.concurrency_key order by jq.run_at asc, jq.id asc)
+              else row_number() over (
+                partition by jq.concurrency_key
+                order by jq.priority desc, jq.run_at asc, jq.id asc
+              )
             end as concurrency_rank
           from job_queue jq
           where jq.status = 'queued'
@@ -94,7 +98,10 @@ export async function leaseJobs(limit: number, options: LeaseJobsOptions = {}): 
           where jq.status = 'queued'
             and runnable.concurrency_rank = 1
             and ($3::text[] is null or jq.job_type = any($3::text[]))
-          order by jq.run_at asc, jq.id asc
+          -- Lease ordering: high-priority jobs (operator-initiated) come
+          -- out before background-priority backlog regardless of age. Ties
+          -- break by run_at (oldest first) then id for determinism.
+          order by jq.priority desc, jq.run_at asc, jq.id asc
           for update skip locked
           limit $1
         )
