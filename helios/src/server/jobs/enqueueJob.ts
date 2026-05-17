@@ -8,6 +8,7 @@ import {
   type JobType,
 } from '../../shared/contracts/index.js'
 import type { Queryable } from '../db/pool.js'
+import { getCurrentJobAuthContext } from '../../worker/sweed/authLog.js'
 
 interface JobRow extends QueryResultRow {
   id: number
@@ -41,17 +42,23 @@ export const JOB_PRIORITY_HIGH = 100
 /**
  * Default priority for an enqueue that didn't pass one explicitly.
  *
- * Heuristic: if the enqueue carries a `requestedByUserId`, treat it
- * as operator-initiated and put it in the high-priority band so it
- * jumps past system-generated background backlog (e.g. the periodic
- * `catalog.sync.group_detail` cohort the scheduler tick produces).
- * Background ticks / recurring scheduler enqueues don't pass a user
- * id and stay at background priority.
+ * Heuristic: enqueues coming from HTTP routes / the operator-facing
+ * UI are top-level work and get JOB_PRIORITY_HIGH so they jump past
+ * background backlog. Enqueues coming from INSIDE a running worker
+ * job (fan-out children, scheduled follow-ups) stay at
+ * JOB_PRIORITY_BACKGROUND even if the parent's requestedByUserId is
+ * propagated — otherwise a single operator click can dump 2,000+
+ * "high priority" children into the queue and starve actual top-
+ * level operator clicks.
+ *
+ * We detect "inside a worker job" via the `withJobAuthContext` ALS
+ * cell, which the worker loop enters before every job handler runs.
  *
  * Call sites that want different behaviour pass `priority` explicitly.
  */
-function defaultPriorityFor(input: EnqueueJobInput): number {
-  return input.requestedByUserId != null ? JOB_PRIORITY_HIGH : JOB_PRIORITY_BACKGROUND
+function defaultPriorityFor(_input: EnqueueJobInput): number {
+  const insideWorkerJob = getCurrentJobAuthContext() !== null
+  return insideWorkerJob ? JOB_PRIORITY_BACKGROUND : JOB_PRIORITY_HIGH
 }
 
 export async function enqueueJob(db: Queryable, input: EnqueueJobInput): Promise<number> {

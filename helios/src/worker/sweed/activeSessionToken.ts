@@ -27,6 +27,34 @@ import {
 } from '../../server/db/queries/sweedSessionTokensQueries.js'
 import { getWorkerEnv } from '../config/env.js'
 
+/**
+ * Returns true only when the pool table has literally zero rows
+ * (no operator has pasted any session token, ever). The env-fallback
+ * lease is ONLY appropriate in that bootstrap case — once even a
+ * single row exists, the pool is the source of truth and we must
+ * NOT silently mask "pool exhausted" by handing out a stale legacy
+ * SWEED_AUTH_TOKEN that will return "Auth expired" on every RPC.
+ */
+async function sweedTokenPoolIsUnconfigured(): Promise<boolean> {
+  try {
+    const result = await getPool().query<{ exists: boolean }>(
+      `select exists(select 1 from sweed_session_tokens) as exists`,
+    )
+    return !(result.rows[0]?.exists ?? false)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    // If the table doesn't exist yet (pre-migration boot), treat as
+    // unconfigured so dev/smoke env-fallback still works.
+    if (/relation .*sweed_session_tokens.* does not exist/i.test(message)) {
+      return true
+    }
+    // Any other DB problem: be conservative and refuse env-fallback
+    // so we surface the real error rather than masking it with a
+    // stale token that returns auth-expired.
+    return false
+  }
+}
+
 // Default lease length for a per-job claim. Generous enough to cover
 // any realistic single-job Sweed workload; if a worker crashes
 // without releasing, another worker can reclaim the row after this
@@ -79,8 +107,15 @@ export async function claimSweedToken(
       error instanceof Error ? error.message : error,
     )
   }
+  // Pool returned null (or threw). Only fall back to the env token
+  // when the pool is genuinely unconfigured (zero rows ever pasted).
+  // If the pool is merely exhausted (every row currently leased to
+  // another worker) we MUST return null so withSweedSession defers
+  // the job — otherwise we silently hand out a stale SWEED_AUTH_TOKEN
+  // and the job dies with "Auth expired" even though there are valid
+  // pasted tokens in flight.
   const env = getWorkerEnv()
-  if (env.sweedAuthToken) {
+  if (env.sweedAuthToken && (await sweedTokenPoolIsUnconfigured())) {
     return {
       token: env.sweedAuthToken,
       tokenPrefix: env.sweedAuthToken.slice(0, 8),

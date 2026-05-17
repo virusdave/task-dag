@@ -7,10 +7,15 @@ import {
 } from '../../shared/contracts/domain/jobs.js'
 import { getWorkerEnv } from '../config/env.js'
 import { verifySweedSession } from '../sweed/client.js'
-import { DependencyUnavailableWorkerError } from './errors.js'
+import { DependencyUnavailableWorkerError, isDependencyUnavailableWorkerError } from './errors.js'
 
 const DEPENDENCY_RETRY_DELAY_MS = 60_000
-const SWEED_HEALTH_CACHE_TTL_MS = 60_000
+// Short cache: we previously held a stale "Auth expired" diagnosis
+// for 60s, which pinned the entire worker fleet to a dead token even
+// after fresh pool rows became available. 5s is long enough to
+// dampen a burst of identical probes (one per leased job in the same
+// tick) without holding onto stale verdicts.
+const SWEED_HEALTH_CACHE_TTL_MS = 5_000
 
 interface CachedDependencyHealth {
   checkedAt: number
@@ -132,6 +137,15 @@ async function assertSweedReady(): Promise<void> {
     await verifySweedSession()
     cachedSweedHealth = { checkedAt: now, errorMessage: null }
   } catch (error) {
+    // Pool-exhaustion is transient: another worker is holding every
+    // available session token RIGHT NOW. We must not cache that as a
+    // "Sweed is unhealthy" verdict — the pool can free up within
+    // milliseconds and the next probe should re-check. Surface the
+    // dependency-unavailable directly so the worker loop defers the
+    // job with the correct (short) delay from withSweedSession.
+    if (isDependencyUnavailableWorkerError(error)) {
+      throw error
+    }
     const message =
       error instanceof Error
         ? `Sweed automation verification failed: ${error.message}`
