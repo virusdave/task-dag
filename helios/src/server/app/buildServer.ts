@@ -9,6 +9,7 @@ import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest }
 import { ZodError } from 'zod'
 
 import { getServerEnv } from '../config/env.js'
+import { registerAdsRoutes } from '../routes/ads.js'
 import { registerAnnotationsRoutes } from '../routes/annotations.js'
 import { registerAuthRoutes } from '../routes/auth.js'
 import { registerCatalogRoutes } from '../routes/catalog.js'
@@ -91,6 +92,7 @@ export async function buildServer() {
 async function registerApplicationSurface(server: FastifyInstance) {
   await registerSessionRoutes(server)
   await registerAuthRoutes(server)
+  await registerAdsRoutes(server)
   await registerAnnotationsRoutes(server)
   await registerCatalogRoutes(server)
   await registerCatalogMaintenanceRoutes(server)

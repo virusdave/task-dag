@@ -4,6 +4,7 @@ import { buildHeliosModulePath } from '../../shared/contracts/index.js'
 import { getAppBasePath } from './paths.js'
 import { AppShell } from '../components/AppShell.js'
 import { loadSession } from './session.js'
+import { AdsIngestPage } from '../routes/ads/AdsIngestPage.js'
 import { CatalogHistoryPage, catalogHistoryLoader } from '../routes/catalog/CatalogHistoryPage.js'
 import { CatalogMaintenancePage } from '../routes/catalog/CatalogMaintenancePage.js'
 import { CatalogModulePage } from '../routes/catalog/CatalogModulePage.js'
@@ -72,6 +73,10 @@ export const router = createBrowserRouter([
       {
         element: <DashboardPage />,
         path: 'dashboard',
+      },
+      {
+        element: <AdsIngestPage />,
+        path: 'ads',
       },
       {
         element: <CatalogModulePage />,
