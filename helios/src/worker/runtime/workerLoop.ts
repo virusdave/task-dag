@@ -1,4 +1,5 @@
 import { getWorkerEnv } from '../config/env.js'
+import { recordAuthEvent, withJobAuthContext } from '../sweed/authLog.js'
 import { tickConfigWorkersScheduler } from './configWorkersScheduler.js'
 import { ensureDependenciesReadyForJob, warmDependencyHealth } from './dependencyHealth.js'
 import { isDependencyUnavailableWorkerError, isRetryableWorkerError } from './errors.js'
@@ -36,30 +37,61 @@ export async function runWorkerLoop(): Promise<never> {
           void renewJobLease(job.id, job.leaseToken)
         }, 60_000)
 
+        // Wrap the WHOLE per-job pipeline (dependency probe + handler)
+        // in withJobAuthContext so any sweed_auth_events row emitted
+        // while preparing this job — most importantly the
+        // verifySweedSession() probe that explodes with "Auth
+        // expired" on a stale legacy token — gets tagged with the
+        // job_id. Without this, probe failures appear in the audit
+        // table with job_id = NULL and the operator-facing job
+        // detail page (/jobs/:id) shows nothing useful even though
+        // the worker is shouting in stderr.
         try {
-          await ensureDependenciesReadyForJob(job.jobType, job.payload)
-          await runJob({ id: job.id, jobType: job.jobType, module: job.module, payload: job.payload, scope: job.scope })
-          await markJobSucceeded(job.id, job.leaseToken)
-        } catch (error) {
-          const message = error instanceof Error ? error.message : 'Unknown worker error.'
-          if (isDependencyUnavailableWorkerError(error)) {
-            const delayMs = error.delayMs ?? getRetryDelayMs(0, env.workerRetryBaseDelayMs)
-            await markJobDeferred(job.id, job.leaseToken, message, new Date(Date.now() + delayMs))
-            return
-          }
+          await withJobAuthContext({ jobId: job.id, jobType: job.jobType }, async () => {
+            try {
+              await ensureDependenciesReadyForJob(job.jobType, job.payload)
+              await runJob({ id: job.id, jobType: job.jobType, module: job.module, payload: job.payload, scope: job.scope })
+              await markJobSucceeded(job.id, job.leaseToken)
+            } catch (error) {
+              const message = error instanceof Error ? error.message : 'Unknown worker error.'
+              if (isDependencyUnavailableWorkerError(error)) {
+                const delayMs = error.delayMs ?? getRetryDelayMs(0, env.workerRetryBaseDelayMs)
+                // Synthesize a sweed_auth_events row so the job detail
+                // page can show *why* a job is stuck "queued" forever.
+                // The probe itself already logs its own row when it
+                // hits Sweed; this second row makes the connection
+                // between "probe failure" and "this specific job is
+                // deferred for delayMs" explicit in one place.
+                recordAuthEvent({
+                  rpcName: 'dependency.probe',
+                  eventKind: 'rpc_error',
+                  sessionOrigin: null,
+                  authToken: null,
+                  dealerId: null,
+                  outcome: 'retryable',
+                  httpStatus: null,
+                  errorMessage: message,
+                  durationMs: 0,
+                  context: { deferredMs: delayMs, jobType: job.jobType },
+                })
+                await markJobDeferred(job.id, job.leaseToken, message, new Date(Date.now() + delayMs))
+                return
+              }
 
-          if (isRetryableWorkerError(error)) {
-            if (job.attemptCount >= env.workerMaxAttempts) {
-              await markJobDeadLetter(job.id, job.leaseToken, message)
-              return
+              if (isRetryableWorkerError(error)) {
+                if (job.attemptCount >= env.workerMaxAttempts) {
+                  await markJobDeadLetter(job.id, job.leaseToken, message)
+                  return
+                }
+
+                const delayMs = error.delayMs ?? getRetryDelayMs(job.attemptCount, env.workerRetryBaseDelayMs)
+                await markJobForRetry(job.id, job.leaseToken, message, new Date(Date.now() + delayMs))
+                return
+              }
+
+              await markJobFailed(job.id, job.leaseToken, message)
             }
-
-            const delayMs = error.delayMs ?? getRetryDelayMs(job.attemptCount, env.workerRetryBaseDelayMs)
-            await markJobForRetry(job.id, job.leaseToken, message, new Date(Date.now() + delayMs))
-            return
-          }
-
-          await markJobFailed(job.id, job.leaseToken, message)
+          })
         } finally {
           clearInterval(leaseHeartbeat)
         }
