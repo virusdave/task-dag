@@ -76,9 +76,6 @@ const ALLOWED_IMAGE_MIME_TYPES = new Set([
   'image/gif',
 ])
 
-const BARCODE_MIN_DIGITS = 8
-const BARCODE_PLACEHOLDER_PREFIX = '000000'
-
 const RpcEnvelopeSchema = z.object({
   error: z.object({ message: z.string().nullable().optional() }).optional(),
   result: z.unknown().optional(),
@@ -376,7 +373,6 @@ async function buildSurveyFromDb(): Promise<CatalogMaintenanceSurveyResponse> {
 
   for (const site of HELIOS_PENDING_PURCHASE_SITE_DEALERS) {
     const missingCatalogImage: CatalogMaintenanceSiteGroup[] = []
-    const missingVariantImage: CatalogMaintenanceSiteGroup[] = []
     const missingBarcode: CatalogMaintenanceSiteGroup[] = []
 
     // Bucket in-stock products at this site by their group.
@@ -409,20 +405,14 @@ async function buildSurveyFromDb(): Promise<CatalogMaintenanceSurveyResponse> {
       )
 
       const groupNeedsCatalogImage = indexed.liveState.groupImageCount === 0
-      // Variants missing their own image (for the variant section we only
-      // include the variants that are actually in stock at this site AND
-      // lack a variant-specific image AND there's more than one in-stock
-      // variant for the group at this site).
-      const variantsNeedingOwnImage =
-        entries.length >= 2
-          ? entries.filter((entry) => entry.product.variantSpecificImageCount === 0)
-          : []
-      // Variants whose barcode is missing or invalid (for any in-stock
-      // variant). Like the missing-METRC check, this is only an error
-      // condition for cannabis categories — Accessories / Other groups are
-      // skipped entirely (no warning either).
+      // Variants whose barcode is missing. Like the missing-METRC check,
+      // this is only an error condition for cannabis categories —
+      // Accessories / Other groups are skipped entirely (no warning
+      // either). "Invalid" barcode detection has been deliberately removed
+      // until the human defines the validation rules they actually care
+      // about; today we only surface MISSING barcodes.
       const barcodeIssueVariants = isCannabisCategory(indexed.categoryName)
-        ? entries.filter((entry) => classifyBarcode(entry.product.externalBarcode).status !== 'ok')
+        ? entries.filter((entry) => classifyBarcode(entry.product.externalBarcode).status === 'missing')
         : []
 
       if (groupNeedsCatalogImage) {
@@ -436,18 +426,13 @@ async function buildSurveyFromDb(): Promise<CatalogMaintenanceSurveyResponse> {
         countBrandIssue(brandIssueCounts, indexed.brandName, entries.length)
       }
 
-      if (variantsNeedingOwnImage.length > 0 && !groupNeedsCatalogImage) {
-        const onlyAffected = variantsForGroupCard.filter((v) => variantsNeedingOwnImage.some((e) => e.product.productId === v.productId))
-        missingVariantImage.push(
-          buildSiteGroupCard({
-            parsedGroup: indexed,
-            site,
-            entries: variantsNeedingOwnImage,
-            variantsForGroupCard: onlyAffected,
-          }),
-        )
-        countBrandIssue(brandIssueCounts, indexed.brandName, variantsNeedingOwnImage.length)
-      }
+      // Per-variant image gaps are intentionally NOT surfaced as their own
+      // section today. The upload-image-to-variant path is not yet known
+      // to work against Sweed (variant-specific images don't take via
+      // `store.product.edit { imagesIds }`), so flagging variants whose
+      // own image is missing would just queue up actions an operator
+      // can't complete. The corresponding section kind in the contract
+      // is left in place but always populated with zero candidates.
 
       if (barcodeIssueVariants.length > 0) {
         const onlyAffected = variantsForGroupCard.filter((v) => barcodeIssueVariants.some((e) => e.product.productId === v.productId))
@@ -466,9 +451,14 @@ async function buildSurveyFromDb(): Promise<CatalogMaintenanceSurveyResponse> {
     }
 
     sortSiteGroups(missingCatalogImage)
-    sortSiteGroups(missingVariantImage)
     sortSiteGroups(missingBarcode)
 
+    // NOTE: the `missing-variant-image` section kind is intentionally NOT
+    // emitted today. Variant-level image upload isn't a working flow yet
+    // (Sweed's `store.product.edit { imagesIds }` doesn't appear to
+    // persist), so surfacing variants without their own image would only
+    // queue up un-fixable work for the operator. The enum value is left
+    // in the shared contract for forward-compat.
     const sections: CatalogMaintenanceSurveySection[] = [
       {
         kind: 'missing-catalog-image',
@@ -478,15 +468,8 @@ async function buildSurveyFromDb(): Promise<CatalogMaintenanceSurveyResponse> {
         groups: missingCatalogImage,
       },
       {
-        kind: 'missing-variant-image',
-        label: 'Missing variant image',
-        targetId: sectionAnchorId(site.siteKey, 'missing-variant-image'),
-        issueCount: missingVariantImage.length,
-        groups: missingVariantImage,
-      },
-      {
         kind: 'missing-or-invalid-barcode',
-        label: 'Missing or invalid package barcode',
+        label: 'Missing package barcode',
         targetId: sectionAnchorId(site.siteKey, 'missing-or-invalid-barcode'),
         issueCount: missingBarcode.length,
         groups: missingBarcode,
@@ -654,21 +637,17 @@ function isCannabisCategory(categoryName: string | null): boolean {
 }
 
 function classifyBarcode(value: string | null): { status: 'ok' | 'missing' | 'invalid'; reason: string | null } {
+  // Today we ONLY classify a barcode as missing vs ok. "Invalid" is
+  // deliberately not detected — the human has not yet defined what
+  // patterns we consider invalid (and explicitly does NOT want us to
+  // apply any ISO-spec / heuristic checks in the meantime). The 'invalid'
+  // status value is left in the shared contract for forward-compat.
   if (value === null) {
     return { status: 'missing', reason: 'No barcode on file.' }
   }
   const trimmed = value.trim()
   if (trimmed.length === 0) {
     return { status: 'missing', reason: 'Barcode is empty.' }
-  }
-  if (!/^\d+$/.test(trimmed)) {
-    return { status: 'invalid', reason: 'Barcode contains non-digit characters.' }
-  }
-  if (trimmed.length < BARCODE_MIN_DIGITS) {
-    return { status: 'invalid', reason: `Barcode is shorter than ${BARCODE_MIN_DIGITS} digits.` }
-  }
-  if (trimmed.startsWith(BARCODE_PLACEHOLDER_PREFIX)) {
-    return { status: 'invalid', reason: 'Barcode looks like a placeholder (000000…).' }
   }
   return { status: 'ok', reason: null }
 }

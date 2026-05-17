@@ -157,9 +157,8 @@ export function CatalogMaintenancePage() {
           <p className="eyebrow">Catalog Module</p>
           <h2>Images &amp; Barcodes</h2>
           <p className="subtle-copy">
-            In-stock SKUs whose Sweed group has no image, whose variants don&apos;t each have their own image,
-            or whose package barcode is missing or invalid. Tap a card to upload or capture a photo and Helios
-            will attach it for you.
+            In-stock SKUs whose Sweed product group has no image, or whose package barcode is missing.
+            Tap a card to upload or capture a photo and Helios will attach it to the group for you.
           </p>
         </div>
         <div className="inline-row wrap-row catalog-maintenance-meta">
@@ -325,12 +324,12 @@ interface SectionBlockProps {
 }
 
 function SectionBlock({ section, busyGroupKey, setBusyGroupKey, onComplete, onError }: SectionBlockProps) {
-  const mode: CardMode =
-    section.kind === 'missing-catalog-image'
-      ? 'group'
-      : section.kind === 'missing-variant-image'
-        ? 'variants'
-        : 'barcode'
+  // Today the server only emits `missing-catalog-image` and
+  // `missing-or-invalid-barcode` sections. The `missing-variant-image`
+  // kind is left in the contract enum for forward-compat but never
+  // populated. Treat anything that isn't a barcode section as a group
+  // image card.
+  const mode: CardMode = section.kind === 'missing-or-invalid-barcode' ? 'barcode' : 'group'
   return (
     <section className="catalog-maintenance-section" id={section.targetId} style={{ scrollMarginTop: '1rem' }}>
       <header className="catalog-maintenance-section-head">
