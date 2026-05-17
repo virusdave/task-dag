@@ -2386,8 +2386,11 @@ a.tree-nav-branch-label.is-link,
 
 .catalog-maintenance-metrc-tag strong {
   /* Bolded last-3 suffix: was 700, bumped ~40% heavier (capped at 900,
-   * the heaviest weight CSS / typical fonts render). */
+   * the heaviest weight CSS / typical fonts render). And an additional
+   * 20% larger than the surrounding code chip so the canonical handle
+   * pops on a phone. */
   font-weight: 900;
+  font-size: 1.2em;
 }
 
 .catalog-maintenance-barcode-value {
