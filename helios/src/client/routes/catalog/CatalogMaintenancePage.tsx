@@ -389,6 +389,10 @@ function MaintenanceCard(props: CardProps) {
   const [optimisticImageUrl, setOptimisticImageUrl] = useState<string | null>(null)
   const [optimisticAffectedProductIds, setOptimisticAffectedProductIds] = useState<readonly number[]>([])
   const [syncingReanalysis, setSyncingReanalysis] = useState(false)
+  // Per-card status banner — distinct from the global toast at the top of
+  // the page (which scrolls off-screen on mobile). Stays visible inside the
+  // card so the operator can SEE what happened without scrolling.
+  const [cardStatus, setCardStatus] = useState<{ kind: 'ok' | 'err' | 'busy'; message: string } | null>(null)
   const inputRef = useRef<HTMLInputElement | null>(null)
 
   useEffect(() => {
@@ -416,14 +420,25 @@ function MaintenanceCard(props: CardProps) {
   const handleSubmit = async () => {
     if (mode === 'barcode') return
     if (!file) {
-      onError('Pick or capture a photo first.')
+      const msg = 'Pick or capture a photo first.'
+      setCardStatus({ kind: 'err', message: msg })
+      onError(msg)
       return
     }
     if (mode === 'variants' && selectedVariantIds.length === 0) {
-      onError('Select at least one variant before uploading.')
+      const msg = 'Select at least one variant before uploading.'
+      setCardStatus({ kind: 'err', message: msg })
+      onError(msg)
       return
     }
     onUploadStart()
+    setCardStatus({
+      kind: 'busy',
+      message:
+        mode === 'group'
+          ? 'Uploading group photo to Sweed and verifying it stuck…'
+          : `Uploading photo and attaching to ${selectedVariantIds.length} variant${selectedVariantIds.length === 1 ? '' : 's'} (verifying each)…`,
+    })
     try {
       const formData = new FormData()
       formData.append('targetType', mode === 'group' ? 'group' : 'variants')
@@ -454,11 +469,14 @@ function MaintenanceCard(props: CardProps) {
       if (inputRef.current) inputRef.current.value = ''
       const message =
         mode === 'group'
-          ? `Group image attached to ${displayGroupName(group)} (${group.siteLabel}).`
-          : `Variant image attached to ${selectedVariantIds.length} variant${selectedVariantIds.length === 1 ? '' : 's'} of ${displayGroupName(group)} (${group.siteLabel}).`
+          ? `✓ Group image attached to ${displayGroupName(group)} (${group.siteLabel}). Sweed confirmed the blob is on the group.`
+          : `✓ Variant image attached to ${selectedVariantIds.length} variant${selectedVariantIds.length === 1 ? '' : 's'} of ${displayGroupName(group)} (${group.siteLabel}). Sweed confirmed the blob is on each variant.`
+      setCardStatus({ kind: 'ok', message })
       await onComplete(message)
     } catch (error) {
-      onError(error instanceof Error ? error.message : 'Upload failed.')
+      const message = error instanceof Error ? error.message : 'Upload failed.'
+      setCardStatus({ kind: 'err', message: `✗ ${message}` })
+      onError(message)
     } finally {
       onUploadEnd()
     }
@@ -579,6 +597,46 @@ function MaintenanceCard(props: CardProps) {
             {ctaLabel}
           </button>
           <p className="subtle-copy catalog-maintenance-file-label">{fileLabel}</p>
+        </div>
+      ) : null}
+      {cardStatus ? (
+        <div
+          role={cardStatus.kind === 'err' ? 'alert' : 'status'}
+          className={`catalog-maintenance-card-status catalog-maintenance-card-status--${cardStatus.kind}`}
+          style={{
+            border: '1px solid',
+            borderRadius: 6,
+            padding: '0.5rem 0.75rem',
+            marginTop: '0.5rem',
+            display: 'flex',
+            alignItems: 'flex-start',
+            justifyContent: 'space-between',
+            gap: '0.5rem',
+            background:
+              cardStatus.kind === 'ok'
+                ? 'rgba(20, 130, 70, 0.12)'
+                : cardStatus.kind === 'err'
+                  ? 'rgba(180, 30, 30, 0.12)'
+                  : 'rgba(100, 100, 100, 0.08)',
+            borderColor:
+              cardStatus.kind === 'ok'
+                ? 'rgb(20, 130, 70)'
+                : cardStatus.kind === 'err'
+                  ? 'rgb(180, 30, 30)'
+                  : 'rgb(150, 150, 150)',
+          }}
+        >
+          <span style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{cardStatus.message}</span>
+          {cardStatus.kind !== 'busy' ? (
+            <button
+              type="button"
+              className="ghost-button"
+              onClick={() => setCardStatus(null)}
+              style={{ flexShrink: 0 }}
+            >
+              Dismiss
+            </button>
+          ) : null}
         </div>
       ) : null}
     </article>

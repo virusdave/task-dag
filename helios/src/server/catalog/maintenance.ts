@@ -986,7 +986,14 @@ export async function uploadCatalogMaintenanceImage(input: UploadInput): Promise
         imagesIds: nextImageIds,
       })
       const refreshed = await fetchGroupImagesWithinLock(input.groupId)
-      const blobUrl = pickRawPreviewUrl(refreshed.images.filter((image) => normalizeImageId(image) === blobId))
+      const matching = refreshed.images.filter((image) => normalizeImageId(image) === blobId)
+      if (matching.length === 0) {
+        throw new HttpError(
+          502,
+          `Sweed accepted store.product.group.edit for group ${input.groupId} but the new image blob ${blobId} is not present in the refreshed image list (got ${describeImageIds(refreshed.images)}). The upload did NOT take effect.`,
+        )
+      }
+      const blobUrl = pickRawPreviewUrl(matching)
       return { uploadedBlobId: blobId, blobUrl, affectedProductIds: [] }
     }
 
@@ -1000,10 +1007,23 @@ export async function uploadCatalogMaintenanceImage(input: UploadInput): Promise
         id: productId,
         imagesIds: nextImageIds,
       })
+      // Re-fetch *every* variant after the edit and verify the new blob
+      // is actually attached. Sweed's `store.product.edit` does not return
+      // a body that reflects the post-edit image list, and historically
+      // some product fields are silently ignored. Without this read-back
+      // a successful HTTP 200 would mask a no-op write and the operator
+      // would see nothing change in Sweed.
+      const refreshed = await fetchProductImagesWithinLock(productId)
+      const matching = refreshed.images.filter((image) => normalizeImageId(image) === blobId)
+      if (matching.length === 0) {
+        throw new HttpError(
+          502,
+          `Sweed accepted store.product.edit for variant ${productId} but the new image blob ${blobId} is not present in the refreshed image list (got ${describeImageIds(refreshed.images)}). The upload did NOT take effect — likely Sweed does not accept \`imagesIds\` for variants and we need a different RPC / field name.`,
+        )
+      }
       affectedProductIds.push(productId)
       if (blobUrl === null) {
-        const refreshed = await fetchProductImagesWithinLock(productId)
-        blobUrl = pickRawPreviewUrl(refreshed.images.filter((image) => normalizeImageId(image) === blobId))
+        blobUrl = pickRawPreviewUrl(matching)
       }
     }
     return { uploadedBlobId: blobId, blobUrl, affectedProductIds }
@@ -1133,6 +1153,12 @@ function pickRawPreviewUrl(images: Array<z.infer<typeof SweedImageRefSchema>>): 
 function normalizeImageId(image: z.infer<typeof SweedImageRefSchema>): string | null {
   if (image.id === undefined || image.id === null) return null
   return String(image.id)
+}
+
+function describeImageIds(images: Array<z.infer<typeof SweedImageRefSchema>>): string {
+  if (images.length === 0) return '[]'
+  const ids = images.map((image) => normalizeImageId(image) ?? '<no-id>')
+  return `[${ids.join(', ')}]`
 }
 
 function nonEmptyString(value: unknown): string | null {
