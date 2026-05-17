@@ -53,6 +53,7 @@ import { runCatalogSyncDiscoverOrphanGroupsJob } from '../jobs/catalogSyncDiscov
 import { runCatalogSyncGroupDetailJob } from '../jobs/syncGroupDetailJob.js'
 import { runCatalogSyncFullSummaryJob } from '../jobs/syncFullSummaryJob.js'
 import { runUndoExecuteJob } from '../jobs/undoExecuteJob.js'
+import { withJobAuthContext } from '../sweed/authLog.js'
 import { withSweedSession } from '../sweed/session.js'
 
 export interface JobHandlerContext {
@@ -200,11 +201,18 @@ const SWEED_BACKED_JOB_TYPES: ReadonlySet<JobType> = new Set<JobType>([
 
 export async function runJob(context: JobHandlerContext): Promise<void> {
   const handler = handlers[context.jobType]
-  if (SWEED_BACKED_JOB_TYPES.has(context.jobType)) {
-    await withSweedSession(() => handler(context))
-    return
-  }
-  await handler(context)
+  // Tag the AsyncLocalStorage cell that `recordAuthEvent` reads, so
+  // any Sweed auth-log row this job appends gets stamped with the
+  // job id + type. Jobs that never touch Sweed still get tagged —
+  // the overhead is one ALS hop — so the row, if a downstream
+  // utility ever logs one, still correlates.
+  return withJobAuthContext({ jobId: context.id, jobType: context.jobType }, async () => {
+    if (SWEED_BACKED_JOB_TYPES.has(context.jobType)) {
+      await withSweedSession(() => handler(context))
+      return
+    }
+    await handler(context)
+  })
 }
 
 export async function markJobSucceeded(jobId: number, leaseToken: string): Promise<void> {

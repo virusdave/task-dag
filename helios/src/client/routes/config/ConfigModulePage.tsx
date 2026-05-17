@@ -46,6 +46,24 @@ export function ConfigModulePage() {
             ))}
           </div>
         </article>
+
+        <article className="mini-card">
+          <header>
+            <strong>Diagnostics</strong>
+            <Pill tone="success">live</Pill>
+          </header>
+          <p className="subtle-copy">
+            Live log of every Sweed auth-related JSON-RPC the worker issued — logins, logouts,
+            dealer pins, and any non-auth call whose response looked like an auth error. Useful for
+            diagnosing &quot;Auth expired&quot; bursts and stomped-session races.
+          </p>
+          <div className="inline-row wrap-row module-card-links">
+            <Link to={buildHeliosModulePath('config', 'sweed-auth-log')}>Open Sweed auth log</Link>
+            <Link to={buildHeliosModulePath('config', 'sweed-auth-log') + '?outcomeFilter=errors'}>
+              Errors only
+            </Link>
+          </div>
+        </article>
       </div>
     </section>
   )

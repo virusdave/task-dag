@@ -2,7 +2,28 @@ import { randomUUID } from 'node:crypto'
 
 import { getWorkerEnv } from '../config/env.js'
 import { RetryableWorkerError } from '../runtime/errors.js'
-import { getCurrentSweedAuthToken, getCurrentSweedSessionOrigin } from './session.js'
+import {
+  looksLikeAuthError,
+  recordAuthEvent,
+  type SweedAuthEventKind,
+} from './authLog.js'
+import {
+  getCurrentSweedAuthToken,
+  getCurrentSweedDealerId,
+  getCurrentSweedSessionOrigin,
+} from './session.js'
+
+// RPCs whose every invocation we always log — they make up the
+// per-job auth lifecycle and the dealer-pin sequence that follows.
+// Anything else is only persisted to sweed_auth_events when its
+// response looks like an auth error (see looksLikeAuthError + the
+// rpc_auth_error event kind).
+const AUTH_RPC_EVENT_KINDS: Readonly<Record<string, SweedAuthEventKind>> = {
+  'store.auth.user': 'login',
+  'store.auth.end': 'logout',
+  'store.auth.dealer.set': 'dealer_set',
+  'store.auth.initial.data.get': 'initial_data',
+}
 
 /**
  * Single low-level Sweed JSON-RPC POST. Resolves the auth token in
@@ -48,12 +69,58 @@ export async function postSweedRpc<TResult>({ name, params, authToken }: PostSwe
     )
   }
 
+  const startedAt = Date.now()
+  const rpcId = randomUUID()
+  // Snapshot the session origin / dealer at the moment the call
+  // fires so the log row reflects context that's stable for this
+  // exact RPC (rather than whatever the AsyncLocalStorage holds
+  // when the deferred logger eventually runs).
+  const sessionOrigin =
+    getCurrentSweedSessionOrigin() ??
+    (resolvedAuthToken === env.sweedAuthToken ? 'legacy' : null)
+  const sessionDealerId = getCurrentSweedDealerId()
+  const explicitEventKind = AUTH_RPC_EVENT_KINDS[name] ?? null
+  let httpStatus: number | null = null
+  let outcome: 'ok' | 'error' | 'retryable' = 'error'
+  let errorMessage: string | null = null
+
+  // `dealerId` is provided by callers of store.auth.dealer.set via
+  // params.dealerId; pull it out for the log row when we have it.
+  const dealerSetTarget =
+    typeof (params as { dealerId?: unknown } | undefined)?.dealerId === 'number'
+      ? ((params as { dealerId: number }).dealerId)
+      : null
+
+  const emit = (extraContext?: Record<string, unknown>): void => {
+    const isAuthRpc = explicitEventKind !== null
+    const authyError = outcome !== 'ok' && looksLikeAuthError(errorMessage, httpStatus)
+    if (!isAuthRpc && !authyError) {
+      return
+    }
+    recordAuthEvent({
+      rpcName: name,
+      eventKind: explicitEventKind ?? 'rpc_auth_error',
+      sessionOrigin,
+      authToken: resolvedAuthToken,
+      dealerId: dealerSetTarget ?? sessionDealerId,
+      outcome,
+      httpStatus,
+      errorMessage,
+      durationMs: Date.now() - startedAt,
+      context: {
+        rpcId,
+        paramKeys: params ? Object.keys(params) : [],
+        ...extraContext,
+      },
+    })
+  }
+
   let response: Response
   try {
     response = await fetch(env.sweedApiUrl, {
       body: JSON.stringify({
         auth: resolvedAuthToken,
-        id: randomUUID(),
+        id: rpcId,
         name,
         ...(params === undefined ? {} : { params }),
       }),
@@ -65,31 +132,51 @@ export async function postSweedRpc<TResult>({ name, params, authToken }: PostSwe
       signal: AbortSignal.timeout(env.sweedRequestTimeoutMs),
     })
   } catch (error) {
-    throw new RetryableWorkerError(buildTransportErrorMessage(name, error))
+    outcome = 'retryable'
+    errorMessage = buildTransportErrorMessage(name, error)
+    emit({ transportFailure: true })
+    throw new RetryableWorkerError(errorMessage)
   }
+  httpStatus = response.status
 
   const responseText = await response.text()
   if (!response.ok) {
-    const message = `${name} returned HTTP ${response.status}: ${truncate(responseText)}`
+    errorMessage = `${name} returned HTTP ${response.status}: ${truncate(responseText)}`
     if (isRetryableStatusCode(response.status)) {
-      throw new RetryableWorkerError(message)
+      outcome = 'retryable'
+      emit()
+      throw new RetryableWorkerError(errorMessage)
     }
-    throw new Error(message)
+    outcome = 'error'
+    emit()
+    throw new Error(errorMessage)
   }
 
   let envelope: { error?: { message?: string }; result?: TResult }
   try {
     envelope = JSON.parse(responseText) as { error?: { message?: string }; result?: TResult }
   } catch {
-    throw new RetryableWorkerError(`${name} returned an invalid JSON response: ${truncate(responseText)}`)
+    outcome = 'retryable'
+    errorMessage = `${name} returned an invalid JSON response: ${truncate(responseText)}`
+    emit()
+    throw new RetryableWorkerError(errorMessage)
   }
 
   if (envelope.error) {
-    throw new Error(`${name} failed: ${envelope.error.message ?? 'Unknown Sweed RPC error.'}`)
+    outcome = 'error'
+    errorMessage = `${name} failed: ${envelope.error.message ?? 'Unknown Sweed RPC error.'}`
+    emit()
+    throw new Error(errorMessage)
   }
   if (envelope.result === undefined) {
-    throw new Error(`${name} returned no result payload.`)
+    outcome = 'error'
+    errorMessage = `${name} returned no result payload.`
+    emit()
+    throw new Error(errorMessage)
   }
+
+  outcome = 'ok'
+  emit()
   return envelope.result
 }
 

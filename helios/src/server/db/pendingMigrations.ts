@@ -90,6 +90,11 @@ const SENTINELS: MigrationSentinel[] = [
       return hasCol && hasTagsCol
     },
   },
+  {
+    migrationId: '011_sweed_auth_events',
+    label: 'Sweed auth event log (sweed_auth_events table) — required for worker auth diagnostics + UI surface',
+    check: (db) => tableExists(db, 'sweed_auth_events'),
+  },
 ]
 
 interface CacheEntry {

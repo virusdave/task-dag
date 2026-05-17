@@ -18,6 +18,7 @@ import { ConfigCatalogSchedulePage, configCatalogScheduleLoader } from '../route
 import { ConfigLitalertsSchedulePage, configLitalertsScheduleLoader } from '../routes/config/ConfigLitalertsSchedulePage.js'
 import { ConfigStockSchedulePage, configStockScheduleLoader } from '../routes/config/ConfigStockSchedulePage.js'
 import { ConfigWorkersPage } from '../routes/config/ConfigWorkersPage.js'
+import { SweedAuthLogPage, sweedAuthLogLoader } from '../routes/config/SweedAuthLogPage.js'
 import { ConfigWorkersSchedulingPage, configWorkersSchedulingLoader } from '../routes/config/ConfigWorkersSchedulingPage.js'
 import { DashboardPage } from '../routes/dashboard/DashboardPage.js'
 import { GroupDetailPage, groupDetailLoader } from '../routes/groups/GroupDetailPage.js'
@@ -216,6 +217,11 @@ export const router = createBrowserRouter([
       {
         element: <ConfigWorkersPage />,
         path: 'config/workers',
+      },
+      {
+        element: <SweedAuthLogPage />,
+        loader: sweedAuthLogLoader,
+        path: 'config/sweed-auth-log',
       },
       {
         element: <ConfigWorkersSchedulingPage />,

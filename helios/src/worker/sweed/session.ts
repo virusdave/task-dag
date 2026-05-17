@@ -5,6 +5,7 @@ import { z } from 'zod'
 
 import { getWorkerEnv } from '../config/env.js'
 import { RetryableWorkerError } from '../runtime/errors.js'
+import { recordAuthEvent } from './authLog.js'
 
 /**
  * Per-job Sweed session: instead of every helios worker job sharing one
@@ -153,6 +154,9 @@ export async function withSweedSession<T>(fn: () => Promise<T>): Promise<T> {
  */
 async function tearDownFreshSweedSession(authToken: string): Promise<void> {
   const env = getWorkerEnv()
+  const startedAt = Date.now()
+  let httpStatus: number | null = null
+  let errorMessage: string | null = null
   try {
     const response = await fetch(env.sweedApiUrl, {
       body: JSON.stringify({
@@ -167,23 +171,80 @@ async function tearDownFreshSweedSession(authToken: string): Promise<void> {
       method: 'POST',
       signal: AbortSignal.timeout(env.sweedRequestTimeoutMs),
     })
+    httpStatus = response.status
     // Drain the body so the underlying HTTP connection can be reused
-    // and we don't leak a half-read response.
-    await response.text().catch(() => undefined)
+    // and we don't leak a half-read response. Capture a snippet for
+    // the auth log if Sweed surfaced an error envelope.
+    const text = await response.text().catch(() => '')
+    if (!response.ok) {
+      errorMessage = `HTTP ${response.status}: ${text.slice(0, 240)}`
+    } else if (text.length > 0) {
+      try {
+        const envelope = JSON.parse(text) as { error?: { message?: string } }
+        if (envelope.error?.message) {
+          errorMessage = `sweed error: ${envelope.error.message}`
+        }
+      } catch {
+        // Non-JSON body; ignore.
+      }
+    }
   } catch (error) {
+    errorMessage = error instanceof Error ? error.message : String(error)
     // Logout is best-effort; never propagate. Log so a persistent
     // failure (e.g. Sweed renamed the RPC) is at least observable.
-    console.warn('[sweed] store.auth.end best-effort logout failed:', error instanceof Error ? error.message : error)
+    console.warn('[sweed] store.auth.end best-effort logout failed:', errorMessage)
+  } finally {
+    recordAuthEvent({
+      rpcName: 'store.auth.end',
+      eventKind: 'logout',
+      sessionOrigin: 'fresh',
+      authToken,
+      dealerId: null,
+      outcome: errorMessage ? 'error' : 'ok',
+      httpStatus,
+      errorMessage,
+      durationMs: Date.now() - startedAt,
+      context: { trigger: 'withSweedSession-teardown' },
+    })
   }
 }
 
 async function issueFreshSweedSession(login: string, password: string): Promise<FreshSweedSessionLogin> {
   const env = getWorkerEnv()
+  const startedAt = Date.now()
+  const rpcId = randomUUID()
   const body = {
     auth: '',
-    id: randomUUID(),
+    id: rpcId,
     name: 'store.auth.user',
     params: { login, password, profileTypeId: 1 },
+  }
+
+  // We log exactly one event for the whole login attempt, populated
+  // by whichever exit path fires. The token (success path) or error
+  // message (failure paths) feeds into the auth log so an operator
+  // can see "did the login succeed, and what token did this job get".
+  let httpStatus: number | null = null
+  let outcome: 'ok' | 'error' | 'retryable' = 'error'
+  let errorMessage: string | null = null
+  let issuedToken: string | null = null
+
+  const finish = (extra?: Record<string, unknown>): void => {
+    recordAuthEvent({
+      rpcName: 'store.auth.user',
+      eventKind: 'login',
+      // Origin of the session being created. The token doesn't exist
+      // yet on the failure paths; the field is still 'fresh' because
+      // this is the fresh-login codepath.
+      sessionOrigin: 'fresh',
+      authToken: issuedToken,
+      dealerId: null,
+      outcome,
+      httpStatus,
+      errorMessage,
+      durationMs: Date.now() - startedAt,
+      context: { rpcId, loginEmail: login, ...extra },
+    })
   }
 
   let response: Response
@@ -198,35 +259,56 @@ async function issueFreshSweedSession(login: string, password: string): Promise<
       signal: AbortSignal.timeout(env.sweedRequestTimeoutMs),
     })
   } catch (error) {
-    throw new RetryableWorkerError(
-      `store.auth.user transport failed: ${error instanceof Error ? error.message : String(error)}`,
-    )
+    outcome = 'retryable'
+    errorMessage = `store.auth.user transport failed: ${error instanceof Error ? error.message : String(error)}`
+    finish()
+    throw new RetryableWorkerError(errorMessage)
   }
+  httpStatus = response.status
 
   const responseText = await response.text()
   if (!response.ok) {
-    const message = `store.auth.user returned HTTP ${response.status}: ${truncate(responseText)}`
+    errorMessage = `store.auth.user returned HTTP ${response.status}: ${truncate(responseText)}`
     if (response.status === 429 || response.status >= 500) {
-      throw new RetryableWorkerError(message)
+      outcome = 'retryable'
+      finish()
+      throw new RetryableWorkerError(errorMessage)
     }
-    throw new Error(message)
+    outcome = 'error'
+    finish()
+    throw new Error(errorMessage)
   }
 
   let envelope: { error?: { message?: string }; result?: unknown }
   try {
     envelope = JSON.parse(responseText) as { error?: { message?: string }; result?: unknown }
   } catch {
-    throw new RetryableWorkerError(`store.auth.user returned invalid JSON: ${truncate(responseText)}`)
+    outcome = 'retryable'
+    errorMessage = `store.auth.user returned invalid JSON: ${truncate(responseText)}`
+    finish()
+    throw new RetryableWorkerError(errorMessage)
   }
   if (envelope.error) {
-    throw new Error(`store.auth.user failed: ${envelope.error.message ?? 'Unknown Sweed RPC error.'}`)
+    outcome = 'error'
+    errorMessage = `store.auth.user failed: ${envelope.error.message ?? 'Unknown Sweed RPC error.'}`
+    finish()
+    throw new Error(errorMessage)
   }
   if (envelope.result === undefined) {
-    throw new Error('store.auth.user returned no result payload.')
+    outcome = 'error'
+    errorMessage = 'store.auth.user returned no result payload.'
+    finish()
+    throw new Error(errorMessage)
   }
 
   const parsed = SignInResultSchema.parse(envelope.result)
   const initialDealerIdRaw = parsed.initialData?.user?.currentDealerId
+  issuedToken = parsed.auth
+  outcome = 'ok'
+  finish({
+    initialDealerId: typeof initialDealerIdRaw === 'number' ? initialDealerIdRaw : null,
+    initialDealerName: parsed.initialData?.user?.currentDealerName ?? null,
+  })
   return {
     authToken: parsed.auth,
     initialDealerId: typeof initialDealerIdRaw === 'number' ? initialDealerIdRaw : null,
