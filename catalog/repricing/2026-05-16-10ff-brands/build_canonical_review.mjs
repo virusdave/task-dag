@@ -33,6 +33,13 @@ const SUMMARY_PATH = resolve(HERE, 'reprice_summary_dryrun.json')
 const OUT_PATH = resolve(HERE, 'review.html')
 
 const BIG_SWING_USD = 5.0
+// Operator-set: the catalog price is intentionally above the canonical
+// 55-65% non-MSO band; an active promo on top absorbs the spread. 20%
+// off the proposed post-tax price lands at the customer's effective
+// post-promo price. Render that as a separate marker so reviewers can
+// see at a glance where the customer-facing price will sit.
+const PROMO_DISCOUNT_FRACTION = 0.20
+const POST_TAX_MULTIPLIER = 1.13 // matches reprice.py
 
 function escapeHtml(value) {
   if (value === null || value === undefined) return ''
@@ -99,15 +106,53 @@ function renderLadderForProduct(product) {
     cachedNote = `<span class="ladder-cache-tag fresh">market evidence fresh (${product.marketCacheAgeDays}d)</span>`
   }
 
+  // Where would a 20% promo land? Only meaningful when we have a
+  // proposed price; cost is needed for the GM annotation.
+  const postPromoPrice = proposed != null && Number.isFinite(Number(proposed))
+    ? Number(proposed) * (1 - PROMO_DISCOUNT_FRACTION)
+    : null
+  const cost = product.wholesaleCost != null ? Number(product.wholesaleCost) : null
+  const postPromoGm = postPromoPrice != null && cost != null && cost > 0
+    ? (1 - (POST_TAX_MULTIPLIER * cost) / postPromoPrice) * 100
+    : null
+  const promoChip = postPromoPrice != null
+    ? `<span class="ladder-head-promo">@-${Math.round(PROMO_DISCOUNT_FRACTION * 100)}% promo → <strong>${escapeHtml(fmtMoney(postPromoPrice))}</strong>${postPromoGm != null ? ` (${escapeHtml(fmtPct(postPromoGm))} GM)` : ''}</span>`
+    : ''
+
+  // Widen the ladder domain to guarantee the post-promo marker is
+  // visible (it sits 20% below proposed, which is usually the natural
+  // domain min). Replicates the 8% padding used by the canonical
+  // geometry so the inferred axis labels stay sensible.
+  const anchors = [
+    current,
+    proposed,
+    postPromoPrice,
+    evidence?.averagePostTaxPrice ?? null,
+    evidence?.medianPostTaxPrice ?? null,
+    ...competitorListings.map((l) => l.postTaxPrice),
+  ]
+    .map((v) => (v == null ? null : Number(v)))
+    .filter((v) => v !== null && Number.isFinite(v))
+  let domainMinOverride
+  let domainMaxOverride
+  if (anchors.length > 0) {
+    const rawMin = Math.min(...anchors)
+    const rawMax = Math.max(...anchors)
+    const padding = Math.max((rawMax - rawMin) * 0.08, 1)
+    domainMinOverride = Math.max(0, rawMin - padding)
+    domainMaxOverride = rawMax + padding
+  }
+
   const headHtml = `<span class="ladder-head-metric">
     Current ${escapeHtml(fmtMoney(current))} (${escapeHtml(fmtPct(product.currentGmPercent))} GM)
     →
     <strong>Proposed ${escapeHtml(fmtMoney(proposed))}</strong>
     (${escapeHtml(fmtPct(product.proposedGmPercent))} GM)
     <span class="ladder-head-delta ${delta.cls}">${delta.text}</span>
+    ${promoChip}
     ${cachedNote}
   </span>`
-  return renderPricingLadder(
+  let html = renderPricingLadder(
     {
       productId: product.productId,
       livePrice: current ?? null,
@@ -115,6 +160,8 @@ function renderLadderForProduct(product) {
       marketAveragePostTax: evidence?.averagePostTaxPrice ?? null,
       marketMedianPostTax: evidence?.medianPostTaxPrice ?? null,
       competitorListings,
+      domainMin: domainMinOverride,
+      domainMax: domainMaxOverride,
     },
     {
       variant: 'compact',
@@ -124,6 +171,24 @@ function renderLadderForProduct(product) {
       productLabel: product.name ?? `Product ${product.productId}`,
     },
   )
+
+  // Inject the post-promo marker into the canonical track using the
+  // same domain math the canonical geometry used (we pinned the
+  // domain above, so this just re-derives the position).
+  if (postPromoPrice != null && domainMinOverride != null && domainMaxOverride != null && domainMaxOverride > domainMinOverride) {
+    const ratio = (postPromoPrice - domainMinOverride) / (domainMaxOverride - domainMinOverride)
+    const leftPct = Math.max(0, Math.min(100, ratio * 100))
+    const title = escapeHtml(`${Math.round(PROMO_DISCOUNT_FRACTION * 100)}% promo → ${fmtMoney(postPromoPrice)}${postPromoGm != null ? ` (${fmtPct(postPromoGm)} GM)` : ''}`)
+    const markerHtml = `<div class="canonical-ladder-marker post-promo" data-canonical-pricing-ladder-marker="post-promo" style="left:${leftPct.toFixed(2)}%;" title="${title}">
+<span class="pip"></span>
+<span class="pin"></span>
+<span class="label">−${Math.round(PROMO_DISCOUNT_FRACTION * 100)}% promo ${escapeHtml(fmtMoney(postPromoPrice))}</span>
+</div>`
+    // Insert just before the axis-min label, which is the last node
+    // inside the canonical track div.
+    html = html.replace('<div class="canonical-ladder-axis axis-min">', `${markerHtml}\n<div class="canonical-ladder-axis axis-min">`)
+  }
+  return html
 }
 
 async function main() {
@@ -238,6 +303,16 @@ async function main() {
   .ladder-cache-tag.stale{background:#f0e1c2;color:#8b5e11}
   .ladder-cache-tag.very-stale{background:#f3dde4;color:#8d2f52}
   .ladder-cache-tag.absent{background:#eee;color:#777}
+  .ladder-head-promo{display:inline-block;margin-left:8px;padding:1px 6px;
+        border-radius:6px;font-size:11px;font-weight:600;letter-spacing:0.02em;
+        background:#efe6ff;color:#5b3aa6;border:1px solid #d6c4f7}
+  .ladder-head-promo strong{color:#3d228f}
+  /* Custom marker color for the post-promo overlay (the canonical
+     control only styles live/proposed/market-average/market-median). */
+  .canonical-ladder-marker.post-promo{color:#5b3aa6}
+  .canonical-ladder-marker.post-promo .pin{background:#5b3aa6}
+  .canonical-ladder-marker.post-promo .pip{background:#5b3aa6}
+  .canonical-ladder-marker.post-promo .label{color:#3d228f;font-weight:600}
   .delta-up{color:var(--up)}
   .delta-down{color:var(--down)}
   .delta-zero{color:var(--muted)}
@@ -276,9 +351,13 @@ async function main() {
     <br><br>
     Each variant below renders the canonical
     <code>renderPricingLadder()</code> control: live price marker,
-    proposed price marker, and (when available) cached competitor menu
-    listings as diamonds positioned by post-tax price and colored by
-    distance band.
+    proposed price marker, an additional <span class="ladder-head-promo"
+    style="margin:0">−${Math.round(PROMO_DISCOUNT_FRACTION * 100)}% promo</span>
+    marker showing where the customer's effective post-promo price would
+    land (and its resulting GM%), and (when available) cached competitor
+    menu listings as diamonds positioned by post-tax price and colored
+    by distance band. The ladder domain has been widened to keep the
+    post-promo marker on-axis.
     <br><br>
     <strong>Market-evidence caveat.</strong> Diamonds are sourced from
     <code>helios.litalerts_competitor_observations</code> and are

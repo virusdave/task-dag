@@ -218,6 +218,16 @@
   .ladder-cache-tag.stale{background:#f0e1c2;color:#8b5e11}
   .ladder-cache-tag.very-stale{background:#f3dde4;color:#8d2f52}
   .ladder-cache-tag.absent{background:#eee;color:#777}
+  .ladder-head-promo{display:inline-block;margin-left:8px;padding:1px 6px;
+        border-radius:6px;font-size:11px;font-weight:600;letter-spacing:0.02em;
+        background:#efe6ff;color:#5b3aa6;border:1px solid #d6c4f7}
+  .ladder-head-promo strong{color:#3d228f}
+  /* Custom marker color for the post-promo overlay (the canonical
+     control only styles live/proposed/market-average/market-median). */
+  .canonical-ladder-marker.post-promo{color:#5b3aa6}
+  .canonical-ladder-marker.post-promo .pin{background:#5b3aa6}
+  .canonical-ladder-marker.post-promo .pip{background:#5b3aa6}
+  .canonical-ladder-marker.post-promo .label{color:#3d228f;font-weight:600}
   .delta-up{color:var(--up)}
   .delta-down{color:var(--down)}
   .delta-zero{color:var(--muted)}
@@ -256,9 +266,13 @@
     <br><br>
     Each variant below renders the canonical
     <code>renderPricingLadder()</code> control: live price marker,
-    proposed price marker, and (when available) cached competitor menu
-    listings as diamonds positioned by post-tax price and colored by
-    distance band.
+    proposed price marker, an additional <span class="ladder-head-promo"
+    style="margin:0">−20% promo</span>
+    marker showing where the customer's effective post-promo price would
+    land (and its resulting GM%), and (when available) cached competitor
+    menu listings as diamonds positioned by post-tax price and colored
+    by distance band. The ladder domain has been widened to keep the
+    post-promo marker on-axis.
     <br><br>
     <strong>Market-evidence caveat.</strong> Diamonds are sourced from
     <code>helios.litalerts_competitor_observations</code> and are
@@ -320,13 +334,14 @@
     <div class="variant-meta">Stop 31 LLC · DOOBIE LABS - Blue Dream 3.5G · from 2026-05-15T00:00:00Z</div>
     
   </div>
-  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="430526" data-ladder-min="89.5000" data-ladder-max="92.0000" data-variant="compact">
+  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="430526" data-ladder-min="71.3440" data-ladder-max="92.4560" data-variant="compact">
 <div class="canonical-pricing-ladder-head"><span class="ladder-head-metric">
     Current $90.50 (67.54% GM)
     →
     <strong>Proposed $91.00</strong>
     (67.71% GM)
     <span class="ladder-head-delta delta-up">+0.50</span>
+    <span class="ladder-head-promo">@-20% promo → <strong>$72.80</strong> (59.64% GM)</span>
     <span class="ladder-cache-tag fresh">market evidence fresh (0.2d)</span>
   </span></div>
 
@@ -335,17 +350,22 @@
 
 
 
-<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:40.00%;" title="Live: $90.50">
+<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:90.74%;" title="Live: $90.50">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Live $90.50</span>
-</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:60.00%;" title="Proposed: $91.00">
+</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:93.10%;" title="Proposed: $91.00">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Proposed $91.00</span>
 </div>
-<div class="canonical-ladder-axis axis-min">$89.50</div>
-<div class="canonical-ladder-axis axis-max">$92.00</div>
+<div class="canonical-ladder-marker post-promo" data-canonical-pricing-ladder-marker="post-promo" style="left:6.90%;" title="20% promo → $72.80 (59.64% GM)">
+<span class="pip"></span>
+<span class="pin"></span>
+<span class="label">−20% promo $72.80</span>
+</div>
+<div class="canonical-ladder-axis axis-min">$71.34</div>
+<div class="canonical-ladder-axis axis-max">$92.46</div>
 </div>
 
 </div></div>
@@ -381,6 +401,7 @@
     <strong>Proposed $70.00</strong>
     (67.71% GM)
     <span class="ladder-head-delta delta-up">+23.50</span>
+    <span class="ladder-head-promo">@-20% promo → <strong>$56.00</strong> (59.64% GM)</span>
     <span class="ladder-cache-tag very-stale">market evidence VERY stale (11.4d)</span>
   </span></div>
 
@@ -397,6 +418,11 @@
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Proposed $70.00</span>
+</div>
+<div class="canonical-ladder-marker post-promo" data-canonical-pricing-ladder-marker="post-promo" style="left:41.75%;" title="20% promo → $56.00 (59.64% GM)">
+<span class="pip"></span>
+<span class="pin"></span>
+<span class="label">−20% promo $56.00</span>
 </div>
 <div class="canonical-ladder-axis axis-min">$44.62</div>
 <div class="canonical-ladder-axis axis-max">$71.88</div>
@@ -428,13 +454,14 @@
     <div class="variant-meta">Stop 31 LLC · 1O-8F-DL26-BNRD · from 2026-05-15T00:00:00Z</div>
     
   </div>
-  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="430518" data-ladder-min="89.5000" data-ladder-max="92.0000" data-variant="compact">
+  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="430518" data-ladder-min="71.3440" data-ladder-max="92.4560" data-variant="compact">
 <div class="canonical-pricing-ladder-head"><span class="ladder-head-metric">
     Current $90.50 (67.54% GM)
     →
     <strong>Proposed $91.00</strong>
     (67.71% GM)
     <span class="ladder-head-delta delta-up">+0.50</span>
+    <span class="ladder-head-promo">@-20% promo → <strong>$72.80</strong> (59.64% GM)</span>
     <span class="ladder-cache-tag fresh">market evidence fresh (0.2d)</span>
   </span></div>
 
@@ -443,17 +470,22 @@
 
 
 
-<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:40.00%;" title="Live: $90.50">
+<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:90.74%;" title="Live: $90.50">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Live $90.50</span>
-</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:60.00%;" title="Proposed: $91.00">
+</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:93.10%;" title="Proposed: $91.00">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Proposed $91.00</span>
 </div>
-<div class="canonical-ladder-axis axis-min">$89.50</div>
-<div class="canonical-ladder-axis axis-max">$92.00</div>
+<div class="canonical-ladder-marker post-promo" data-canonical-pricing-ladder-marker="post-promo" style="left:6.90%;" title="20% promo → $72.80 (59.64% GM)">
+<span class="pip"></span>
+<span class="pin"></span>
+<span class="label">−20% promo $72.80</span>
+</div>
+<div class="canonical-ladder-axis axis-min">$71.34</div>
+<div class="canonical-ladder-axis axis-max">$92.46</div>
 </div>
 
 </div></div>
@@ -489,6 +521,7 @@
     <strong>Proposed $70.00</strong>
     (67.71% GM)
     <span class="ladder-head-delta delta-up">+23.50</span>
+    <span class="ladder-head-promo">@-20% promo → <strong>$56.00</strong> (59.64% GM)</span>
     <span class="ladder-cache-tag very-stale">market evidence VERY stale (11.4d)</span>
   </span></div>
 
@@ -505,6 +538,11 @@
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Proposed $70.00</span>
+</div>
+<div class="canonical-ladder-marker post-promo" data-canonical-pricing-ladder-marker="post-promo" style="left:41.75%;" title="20% promo → $56.00 (59.64% GM)">
+<span class="pip"></span>
+<span class="pin"></span>
+<span class="label">−20% promo $56.00</span>
 </div>
 <div class="canonical-ladder-axis axis-min">$44.62</div>
 <div class="canonical-ladder-axis axis-max">$71.88</div>
@@ -543,6 +581,7 @@
     <strong>Proposed $70.00</strong>
     (67.71% GM)
     <span class="ladder-head-delta delta-up">+23.50</span>
+    <span class="ladder-head-promo">@-20% promo → <strong>$56.00</strong> (59.64% GM)</span>
     <span class="ladder-cache-tag very-stale">market evidence VERY stale (11.4d)</span>
   </span></div>
 
@@ -559,6 +598,11 @@
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Proposed $70.00</span>
+</div>
+<div class="canonical-ladder-marker post-promo" data-canonical-pricing-ladder-marker="post-promo" style="left:41.75%;" title="20% promo → $56.00 (59.64% GM)">
+<span class="pip"></span>
+<span class="pin"></span>
+<span class="label">−20% promo $56.00</span>
 </div>
 <div class="canonical-ladder-axis axis-min">$44.62</div>
 <div class="canonical-ladder-axis axis-max">$71.88</div>
@@ -597,6 +641,7 @@
     <strong>Proposed $70.00</strong>
     (67.71% GM)
     <span class="ladder-head-delta delta-up">+23.50</span>
+    <span class="ladder-head-promo">@-20% promo → <strong>$56.00</strong> (59.64% GM)</span>
     <span class="ladder-cache-tag very-stale">market evidence VERY stale (11.4d)</span>
   </span></div>
 
@@ -613,6 +658,11 @@
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Proposed $70.00</span>
+</div>
+<div class="canonical-ladder-marker post-promo" data-canonical-pricing-ladder-marker="post-promo" style="left:41.75%;" title="20% promo → $56.00 (59.64% GM)">
+<span class="pip"></span>
+<span class="pin"></span>
+<span class="label">−20% promo $56.00</span>
 </div>
 <div class="canonical-ladder-axis axis-min">$44.62</div>
 <div class="canonical-ladder-axis axis-max">$71.88</div>
@@ -651,6 +701,7 @@
     <strong>Proposed $70.00</strong>
     (67.71% GM)
     <span class="ladder-head-delta delta-up">+23.50</span>
+    <span class="ladder-head-promo">@-20% promo → <strong>$56.00</strong> (59.64% GM)</span>
     <span class="ladder-cache-tag very-stale">market evidence VERY stale (11.4d)</span>
   </span></div>
 
@@ -667,6 +718,11 @@
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Proposed $70.00</span>
+</div>
+<div class="canonical-ladder-marker post-promo" data-canonical-pricing-ladder-marker="post-promo" style="left:41.75%;" title="20% promo → $56.00 (59.64% GM)">
+<span class="pip"></span>
+<span class="pin"></span>
+<span class="label">−20% promo $56.00</span>
 </div>
 <div class="canonical-ladder-axis axis-min">$44.62</div>
 <div class="canonical-ladder-axis axis-max">$71.88</div>
@@ -705,6 +761,7 @@
     <strong>Proposed $70.00</strong>
     (67.71% GM)
     <span class="ladder-head-delta delta-up">+23.50</span>
+    <span class="ladder-head-promo">@-20% promo → <strong>$56.00</strong> (59.64% GM)</span>
     <span class="ladder-cache-tag very-stale">market evidence VERY stale (11.4d)</span>
   </span></div>
 
@@ -721,6 +778,11 @@
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Proposed $70.00</span>
+</div>
+<div class="canonical-ladder-marker post-promo" data-canonical-pricing-ladder-marker="post-promo" style="left:41.75%;" title="20% promo → $56.00 (59.64% GM)">
+<span class="pip"></span>
+<span class="pin"></span>
+<span class="label">−20% promo $56.00</span>
 </div>
 <div class="canonical-ladder-axis axis-min">$44.62</div>
 <div class="canonical-ladder-axis axis-max">$71.88</div>
@@ -759,6 +821,7 @@
     <strong>Proposed $70.00</strong>
     (67.71% GM)
     <span class="ladder-head-delta delta-up">+23.50</span>
+    <span class="ladder-head-promo">@-20% promo → <strong>$56.00</strong> (59.64% GM)</span>
     <span class="ladder-cache-tag very-stale">market evidence VERY stale (11.4d)</span>
   </span></div>
 
@@ -775,6 +838,11 @@
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Proposed $70.00</span>
+</div>
+<div class="canonical-ladder-marker post-promo" data-canonical-pricing-ladder-marker="post-promo" style="left:41.75%;" title="20% promo → $56.00 (59.64% GM)">
+<span class="pip"></span>
+<span class="pin"></span>
+<span class="label">−20% promo $56.00</span>
 </div>
 <div class="canonical-ladder-axis axis-min">$44.62</div>
 <div class="canonical-ladder-axis axis-max">$71.88</div>
@@ -806,13 +874,14 @@
     <div class="variant-meta">Stop 31 LLC · Herb - Vape - Biscotti - 1g · from 2026-05-15T00:00:00Z</div>
     
   </div>
-  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="430527" data-ladder-min="51.5000" data-ladder-max="53.5000" data-variant="compact">
+  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="430527" data-ladder-min="41.0000" data-ladder-max="53.5000" data-variant="compact">
 <div class="canonical-pricing-ladder-head"><span class="ladder-head-metric">
     Current $52.50 (67.71% GM)
     →
     <strong>Proposed $52.50</strong>
     (67.71% GM)
     <span class="ladder-head-delta delta-zero">0.00</span>
+    <span class="ladder-head-promo">@-20% promo → <strong>$42.00</strong> (59.64% GM)</span>
     <span class="ladder-cache-tag fresh">market evidence fresh (0.2d)</span>
   </span></div>
 
@@ -821,16 +890,21 @@
 
 
 
-<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:50.00%;" title="Live: $52.50">
+<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:92.00%;" title="Live: $52.50">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Live $52.50</span>
-</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:50.00%;" title="Proposed: $52.50">
+</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:92.00%;" title="Proposed: $52.50">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Proposed $52.50</span>
 </div>
-<div class="canonical-ladder-axis axis-min">$51.50</div>
+<div class="canonical-ladder-marker post-promo" data-canonical-pricing-ladder-marker="post-promo" style="left:8.00%;" title="20% promo → $42.00 (59.64% GM)">
+<span class="pip"></span>
+<span class="pin"></span>
+<span class="label">−20% promo $42.00</span>
+</div>
+<div class="canonical-ladder-axis axis-min">$41.00</div>
 <div class="canonical-ladder-axis axis-max">$53.50</div>
 </div>
 
@@ -860,13 +934,14 @@
     <div class="variant-meta">Stop 31 LLC · Herb - Flower - Blue Dream - 3.5g · from 2026-02-27T00:00:00Z</div>
     
   </div>
-  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="283850" data-ladder-min="34.5000" data-ladder-max="39.5000" data-variant="compact">
+  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="283850" data-ladder-min="29.8000" data-ladder-max="39.5000" data-variant="compact">
 <div class="canonical-pricing-ladder-head"><span class="ladder-head-metric">
     Current $35.50 (64.99% GM)
     →
     <strong>Proposed $38.50</strong>
     (67.71% GM)
     <span class="ladder-head-delta delta-up">+3.00</span>
+    <span class="ladder-head-promo">@-20% promo → <strong>$30.80</strong> (59.64% GM)</span>
     <span class="ladder-cache-tag absent">no cached market evidence</span>
   </span></div>
 
@@ -875,16 +950,21 @@
 
 
 
-<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:20.00%;" title="Live: $35.50">
+<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:58.76%;" title="Live: $35.50">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Live $35.50</span>
-</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:80.00%;" title="Proposed: $38.50">
+</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:89.69%;" title="Proposed: $38.50">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Proposed $38.50</span>
 </div>
-<div class="canonical-ladder-axis axis-min">$34.50</div>
+<div class="canonical-ladder-marker post-promo" data-canonical-pricing-ladder-marker="post-promo" style="left:10.31%;" title="20% promo → $30.80 (59.64% GM)">
+<span class="pip"></span>
+<span class="pin"></span>
+<span class="label">−20% promo $30.80</span>
+</div>
+<div class="canonical-ladder-axis axis-min">$29.80</div>
 <div class="canonical-ladder-axis axis-max">$39.50</div>
 </div>
 
@@ -921,6 +1001,7 @@
     <strong>Proposed $38.50</strong>
     (67.71% GM)
     <span class="ladder-head-delta delta-up">+3.00</span>
+    <span class="ladder-head-promo">@-20% promo → <strong>$30.80</strong> (59.64% GM)</span>
     <span class="ladder-cache-tag very-stale">market evidence VERY stale (11.3d)</span>
   </span></div>
 
@@ -937,6 +1018,11 @@
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Proposed $38.50</span>
+</div>
+<div class="canonical-ladder-marker post-promo" data-canonical-pricing-ladder-marker="post-promo" style="left:52.07%;" title="20% promo → $30.80 (59.64% GM)">
+<span class="pip"></span>
+<span class="pin"></span>
+<span class="label">−20% promo $30.80</span>
 </div>
 <div class="canonical-ladder-axis axis-min">$19.72</div>
 <div class="canonical-ladder-axis axis-max">$41.00</div>
@@ -975,6 +1061,7 @@
     <strong>Proposed $227.50</strong>
     (67.71% GM)
     <span class="ladder-head-delta delta-up">+30.00</span>
+    <span class="ladder-head-promo">@-20% promo → <strong>$182.00</strong> (59.64% GM)</span>
     <span class="ladder-cache-tag very-stale">market evidence VERY stale (11.3d)</span>
   </span></div>
 
@@ -991,6 +1078,11 @@
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Proposed $228</span>
+</div>
+<div class="canonical-ladder-marker post-promo" data-canonical-pricing-ladder-marker="post-promo" style="left:74.20%;" title="20% promo → $182.00 (59.64% GM)">
+<span class="pip"></span>
+<span class="pin"></span>
+<span class="label">−20% promo $182.00</span>
 </div>
 <div class="canonical-ladder-axis axis-min">$3.40</div>
 <div class="canonical-ladder-axis axis-max">$244</div>
@@ -1029,6 +1121,7 @@
     <strong>Proposed $12.25</strong>
     (67.71% GM)
     <span class="ladder-head-delta delta-down">-2.75</span>
+    <span class="ladder-head-promo">@-20% promo → <strong>$9.80</strong> (59.64% GM)</span>
     <span class="ladder-cache-tag very-stale">market evidence VERY stale (11.3d)</span>
   </span></div>
 
@@ -1053,6 +1146,11 @@
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Proposed $12.25</span>
+</div>
+<div class="canonical-ladder-marker post-promo" data-canonical-pricing-ladder-marker="post-promo" style="left:41.89%;" title="20% promo → $9.80 (59.64% GM)">
+<span class="pip"></span>
+<span class="pin"></span>
+<span class="label">−20% promo $9.80</span>
 </div>
 <div class="canonical-ladder-axis axis-min">$5.33</div>
 <div class="canonical-ladder-axis axis-max">$16.00</div>
@@ -1091,6 +1189,7 @@
     <strong>Proposed $12.25</strong>
     (67.71% GM)
     <span class="ladder-head-delta delta-down">-2.75</span>
+    <span class="ladder-head-promo">@-20% promo → <strong>$9.80</strong> (59.64% GM)</span>
     <span class="ladder-cache-tag very-stale">market evidence VERY stale (11.3d)</span>
   </span></div>
 
@@ -1115,6 +1214,11 @@
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Proposed $12.25</span>
+</div>
+<div class="canonical-ladder-marker post-promo" data-canonical-pricing-ladder-marker="post-promo" style="left:41.89%;" title="20% promo → $9.80 (59.64% GM)">
+<span class="pip"></span>
+<span class="pin"></span>
+<span class="label">−20% promo $9.80</span>
 </div>
 <div class="canonical-ladder-axis axis-min">$5.33</div>
 <div class="canonical-ladder-axis axis-max">$16.00</div>
@@ -1146,13 +1250,14 @@
     <div class="variant-meta">Stop 31 LLC · Herb - Vape - Forbidden Fruit - 1g · from 2026-05-15T00:00:00Z</div>
     
   </div>
-  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="430528" data-ladder-min="51.5000" data-ladder-max="53.5000" data-variant="compact">
+  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="430528" data-ladder-min="41.0000" data-ladder-max="53.5000" data-variant="compact">
 <div class="canonical-pricing-ladder-head"><span class="ladder-head-metric">
     Current $52.50 (67.71% GM)
     →
     <strong>Proposed $52.50</strong>
     (67.71% GM)
     <span class="ladder-head-delta delta-zero">0.00</span>
+    <span class="ladder-head-promo">@-20% promo → <strong>$42.00</strong> (59.64% GM)</span>
     <span class="ladder-cache-tag fresh">market evidence fresh (0.2d)</span>
   </span></div>
 
@@ -1161,16 +1266,21 @@
 
 
 
-<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:50.00%;" title="Live: $52.50">
+<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:92.00%;" title="Live: $52.50">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Live $52.50</span>
-</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:50.00%;" title="Proposed: $52.50">
+</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:92.00%;" title="Proposed: $52.50">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Proposed $52.50</span>
 </div>
-<div class="canonical-ladder-axis axis-min">$51.50</div>
+<div class="canonical-ladder-marker post-promo" data-canonical-pricing-ladder-marker="post-promo" style="left:8.00%;" title="20% promo → $42.00 (59.64% GM)">
+<span class="pip"></span>
+<span class="pin"></span>
+<span class="label">−20% promo $42.00</span>
+</div>
+<div class="canonical-ladder-axis axis-min">$41.00</div>
 <div class="canonical-ladder-axis axis-max">$53.50</div>
 </div>
 
@@ -1200,13 +1310,14 @@
     <div class="variant-meta">Stop 31 LLC · HERB Forbidden Fruit 1G Infused PR · from 2026-05-15T00:00:00Z</div>
     
   </div>
-  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="430535" data-ladder-min="19.0000" data-ladder-max="21.0000" data-variant="compact">
+  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="430535" data-ladder-min="15.0000" data-ladder-max="21.0000" data-variant="compact">
 <div class="canonical-pricing-ladder-head"><span class="ladder-head-metric">
     Current $20.00 (67.51% GM)
     →
     <strong>Proposed $20.00</strong>
     (67.51% GM)
     <span class="ladder-head-delta delta-zero">0.00</span>
+    <span class="ladder-head-promo">@-20% promo → <strong>$16.00</strong> (59.39% GM)</span>
     <span class="ladder-cache-tag fresh">market evidence fresh (0.2d)</span>
   </span></div>
 
@@ -1215,16 +1326,21 @@
 
 
 
-<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:50.00%;" title="Live: $20.00">
+<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:83.33%;" title="Live: $20.00">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Live $20.00</span>
-</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:50.00%;" title="Proposed: $20.00">
+</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:83.33%;" title="Proposed: $20.00">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Proposed $20.00</span>
 </div>
-<div class="canonical-ladder-axis axis-min">$19.00</div>
+<div class="canonical-ladder-marker post-promo" data-canonical-pricing-ladder-marker="post-promo" style="left:16.67%;" title="20% promo → $16.00 (59.39% GM)">
+<span class="pip"></span>
+<span class="pin"></span>
+<span class="label">−20% promo $16.00</span>
+</div>
+<div class="canonical-ladder-axis axis-min">$15.00</div>
 <div class="canonical-ladder-axis axis-max">$21.00</div>
 </div>
 
@@ -1261,6 +1377,7 @@
     <strong>Proposed $227.50</strong>
     (67.71% GM)
     <span class="ladder-head-delta delta-up">+30.00</span>
+    <span class="ladder-head-promo">@-20% promo → <strong>$182.00</strong> (59.64% GM)</span>
     <span class="ladder-cache-tag very-stale">market evidence VERY stale (11.3d)</span>
   </span></div>
 
@@ -1277,6 +1394,11 @@
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Proposed $228</span>
+</div>
+<div class="canonical-ladder-marker post-promo" data-canonical-pricing-ladder-marker="post-promo" style="left:73.75%;" title="20% promo → $182.00 (59.64% GM)">
+<span class="pip"></span>
+<span class="pin"></span>
+<span class="label">−20% promo $182.00</span>
 </div>
 <div class="canonical-ladder-axis axis-min">$8.65</div>
 <div class="canonical-ladder-axis axis-max">$244</div>
@@ -1308,13 +1430,14 @@
     <div class="variant-meta">Stop 31 LLC · Herb - Vape - Jack Herer - 1g · from 2026-05-15T00:00:00Z</div>
     
   </div>
-  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="430529" data-ladder-min="51.5000" data-ladder-max="53.5000" data-variant="compact">
+  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="430529" data-ladder-min="41.0000" data-ladder-max="53.5000" data-variant="compact">
 <div class="canonical-pricing-ladder-head"><span class="ladder-head-metric">
     Current $52.50 (67.71% GM)
     →
     <strong>Proposed $52.50</strong>
     (67.71% GM)
     <span class="ladder-head-delta delta-zero">0.00</span>
+    <span class="ladder-head-promo">@-20% promo → <strong>$42.00</strong> (59.64% GM)</span>
     <span class="ladder-cache-tag fresh">market evidence fresh (0.2d)</span>
   </span></div>
 
@@ -1323,16 +1446,21 @@
 
 
 
-<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:50.00%;" title="Live: $52.50">
+<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:92.00%;" title="Live: $52.50">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Live $52.50</span>
-</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:50.00%;" title="Proposed: $52.50">
+</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:92.00%;" title="Proposed: $52.50">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Proposed $52.50</span>
 </div>
-<div class="canonical-ladder-axis axis-min">$51.50</div>
+<div class="canonical-ladder-marker post-promo" data-canonical-pricing-ladder-marker="post-promo" style="left:8.00%;" title="20% promo → $42.00 (59.64% GM)">
+<span class="pip"></span>
+<span class="pin"></span>
+<span class="label">−20% promo $42.00</span>
+</div>
+<div class="canonical-ladder-axis axis-min">$41.00</div>
 <div class="canonical-ladder-axis axis-max">$53.50</div>
 </div>
 
@@ -1362,13 +1490,14 @@
     <div class="variant-meta">Stop 31 LLC · 1O-PR32-H26-KNGL · from 2026-05-15T00:00:00Z</div>
     
   </div>
-  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="430523" data-ladder-min="225.0000" data-ladder-max="228.5000" data-variant="compact">
+  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="430523" data-ladder-min="178.3600" data-ladder-max="231.1400" data-variant="compact">
 <div class="canonical-pricing-ladder-head"><span class="ladder-head-metric">
     Current $226.00 (67.50% GM)
     →
     <strong>Proposed $227.50</strong>
     (67.71% GM)
     <span class="ladder-head-delta delta-up">+1.50</span>
+    <span class="ladder-head-promo">@-20% promo → <strong>$182.00</strong> (59.64% GM)</span>
     <span class="ladder-cache-tag fresh">market evidence fresh (0.2d)</span>
   </span></div>
 
@@ -1377,17 +1506,22 @@
 
 
 
-<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:28.57%;" title="Live: $226">
+<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:90.26%;" title="Live: $226">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Live $226</span>
-</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:71.43%;" title="Proposed: $228">
+</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:93.10%;" title="Proposed: $228">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Proposed $228</span>
 </div>
-<div class="canonical-ladder-axis axis-min">$225</div>
-<div class="canonical-ladder-axis axis-max">$229</div>
+<div class="canonical-ladder-marker post-promo" data-canonical-pricing-ladder-marker="post-promo" style="left:6.90%;" title="20% promo → $182.00 (59.64% GM)">
+<span class="pip"></span>
+<span class="pin"></span>
+<span class="label">−20% promo $182.00</span>
+</div>
+<div class="canonical-ladder-axis axis-min">$178</div>
+<div class="canonical-ladder-axis axis-max">$231</div>
 </div>
 
 </div></div>
@@ -1416,13 +1550,14 @@
     <div class="variant-meta">Stop 31 LLC · Herb - Vape - King Louie OG - 1g · from 2026-05-15T00:00:00Z</div>
     
   </div>
-  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="430530" data-ladder-min="51.5000" data-ladder-max="53.5000" data-variant="compact">
+  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="430530" data-ladder-min="41.0000" data-ladder-max="53.5000" data-variant="compact">
 <div class="canonical-pricing-ladder-head"><span class="ladder-head-metric">
     Current $52.50 (67.71% GM)
     →
     <strong>Proposed $52.50</strong>
     (67.71% GM)
     <span class="ladder-head-delta delta-zero">0.00</span>
+    <span class="ladder-head-promo">@-20% promo → <strong>$42.00</strong> (59.64% GM)</span>
     <span class="ladder-cache-tag fresh">market evidence fresh (0.2d)</span>
   </span></div>
 
@@ -1431,16 +1566,21 @@
 
 
 
-<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:50.00%;" title="Live: $52.50">
+<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:92.00%;" title="Live: $52.50">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Live $52.50</span>
-</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:50.00%;" title="Proposed: $52.50">
+</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:92.00%;" title="Proposed: $52.50">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Proposed $52.50</span>
 </div>
-<div class="canonical-ladder-axis axis-min">$51.50</div>
+<div class="canonical-ladder-marker post-promo" data-canonical-pricing-ladder-marker="post-promo" style="left:8.00%;" title="20% promo → $42.00 (59.64% GM)">
+<span class="pip"></span>
+<span class="pin"></span>
+<span class="label">−20% promo $42.00</span>
+</div>
+<div class="canonical-ladder-axis axis-min">$41.00</div>
 <div class="canonical-ladder-axis axis-max">$53.50</div>
 </div>
 
@@ -1470,13 +1610,14 @@
     <div class="variant-meta">Stop 31 LLC · HERB Lemon Haze 1G Infused PR · from 2026-05-15T00:00:00Z</div>
     
   </div>
-  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="430536" data-ladder-min="19.0000" data-ladder-max="21.0000" data-variant="compact">
+  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="430536" data-ladder-min="15.0000" data-ladder-max="21.0000" data-variant="compact">
 <div class="canonical-pricing-ladder-head"><span class="ladder-head-metric">
     Current $20.00 (67.51% GM)
     →
     <strong>Proposed $20.00</strong>
     (67.51% GM)
     <span class="ladder-head-delta delta-zero">0.00</span>
+    <span class="ladder-head-promo">@-20% promo → <strong>$16.00</strong> (59.39% GM)</span>
     <span class="ladder-cache-tag fresh">market evidence fresh (0.2d)</span>
   </span></div>
 
@@ -1485,16 +1626,21 @@
 
 
 
-<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:50.00%;" title="Live: $20.00">
+<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:83.33%;" title="Live: $20.00">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Live $20.00</span>
-</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:50.00%;" title="Proposed: $20.00">
+</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:83.33%;" title="Proposed: $20.00">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Proposed $20.00</span>
 </div>
-<div class="canonical-ladder-axis axis-min">$19.00</div>
+<div class="canonical-ladder-marker post-promo" data-canonical-pricing-ladder-marker="post-promo" style="left:16.67%;" title="20% promo → $16.00 (59.39% GM)">
+<span class="pip"></span>
+<span class="pin"></span>
+<span class="label">−20% promo $16.00</span>
+</div>
+<div class="canonical-ladder-axis axis-min">$15.00</div>
 <div class="canonical-ladder-axis axis-max">$21.00</div>
 </div>
 
@@ -1524,13 +1670,14 @@
     <div class="variant-meta">Stop 31 LLC · Herb - Flower - Mimosa - 3.5 · from 2026-02-27T00:00:00Z</div>
     
   </div>
-  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="283874" data-ladder-min="34.5000" data-ladder-max="39.5000" data-variant="compact">
+  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="283874" data-ladder-min="29.8000" data-ladder-max="39.5000" data-variant="compact">
 <div class="canonical-pricing-ladder-head"><span class="ladder-head-metric">
     Current $35.50 (64.99% GM)
     →
     <strong>Proposed $38.50</strong>
     (67.71% GM)
     <span class="ladder-head-delta delta-up">+3.00</span>
+    <span class="ladder-head-promo">@-20% promo → <strong>$30.80</strong> (59.64% GM)</span>
     <span class="ladder-cache-tag absent">no cached market evidence</span>
   </span></div>
 
@@ -1539,16 +1686,21 @@
 
 
 
-<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:20.00%;" title="Live: $35.50">
+<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:58.76%;" title="Live: $35.50">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Live $35.50</span>
-</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:80.00%;" title="Proposed: $38.50">
+</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:89.69%;" title="Proposed: $38.50">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Proposed $38.50</span>
 </div>
-<div class="canonical-ladder-axis axis-min">$34.50</div>
+<div class="canonical-ladder-marker post-promo" data-canonical-pricing-ladder-marker="post-promo" style="left:10.31%;" title="20% promo → $30.80 (59.64% GM)">
+<span class="pip"></span>
+<span class="pin"></span>
+<span class="label">−20% promo $30.80</span>
+</div>
+<div class="canonical-ladder-axis axis-min">$29.80</div>
 <div class="canonical-ladder-axis axis-max">$39.50</div>
 </div>
 
@@ -1571,6 +1723,7 @@
     <strong>Proposed $227.50</strong>
     (67.71% GM)
     <span class="ladder-head-delta delta-up">+30.00</span>
+    <span class="ladder-head-promo">@-20% promo → <strong>$182.00</strong> (59.64% GM)</span>
     <span class="ladder-cache-tag very-stale">market evidence VERY stale (11.3d)</span>
   </span></div>
 
@@ -1587,6 +1740,11 @@
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Proposed $228</span>
+</div>
+<div class="canonical-ladder-marker post-promo" data-canonical-pricing-ladder-marker="post-promo" style="left:74.20%;" title="20% promo → $182.00 (59.64% GM)">
+<span class="pip"></span>
+<span class="pin"></span>
+<span class="label">−20% promo $182.00</span>
 </div>
 <div class="canonical-ladder-axis axis-min">$3.40</div>
 <div class="canonical-ladder-axis axis-max">$244</div>
@@ -1618,13 +1776,14 @@
     <div class="variant-meta">Stop 31 LLC · HERB-3.5-ORANGE COOKIES · from 2026-02-27T00:00:00Z</div>
     
   </div>
-  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="283880" data-ladder-min="34.5000" data-ladder-max="39.5000" data-variant="compact">
+  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="283880" data-ladder-min="29.8000" data-ladder-max="39.5000" data-variant="compact">
 <div class="canonical-pricing-ladder-head"><span class="ladder-head-metric">
     Current $35.50 (64.99% GM)
     →
     <strong>Proposed $38.50</strong>
     (67.71% GM)
     <span class="ladder-head-delta delta-up">+3.00</span>
+    <span class="ladder-head-promo">@-20% promo → <strong>$30.80</strong> (59.64% GM)</span>
     <span class="ladder-cache-tag absent">no cached market evidence</span>
   </span></div>
 
@@ -1633,16 +1792,21 @@
 
 
 
-<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:20.00%;" title="Live: $35.50">
+<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:58.76%;" title="Live: $35.50">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Live $35.50</span>
-</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:80.00%;" title="Proposed: $38.50">
+</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:89.69%;" title="Proposed: $38.50">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Proposed $38.50</span>
 </div>
-<div class="canonical-ladder-axis axis-min">$34.50</div>
+<div class="canonical-ladder-marker post-promo" data-canonical-pricing-ladder-marker="post-promo" style="left:10.31%;" title="20% promo → $30.80 (59.64% GM)">
+<span class="pip"></span>
+<span class="pin"></span>
+<span class="label">−20% promo $30.80</span>
+</div>
+<div class="canonical-ladder-axis axis-min">$29.80</div>
 <div class="canonical-ladder-axis axis-max">$39.50</div>
 </div>
 
@@ -1679,6 +1843,7 @@
     <strong>Proposed $38.50</strong>
     (67.71% GM)
     <span class="ladder-head-delta delta-up">+3.00</span>
+    <span class="ladder-head-promo">@-20% promo → <strong>$30.80</strong> (59.64% GM)</span>
     <span class="ladder-cache-tag very-stale">market evidence VERY stale (11.3d)</span>
   </span></div>
 
@@ -1696,6 +1861,11 @@
 <span class="pin"></span>
 <span class="label">Proposed $38.50</span>
 </div>
+<div class="canonical-ladder-marker post-promo" data-canonical-pricing-ladder-marker="post-promo" style="left:13.27%;" title="20% promo → $30.80 (59.64% GM)">
+<span class="pip"></span>
+<span class="pin"></span>
+<span class="label">−20% promo $30.80</span>
+</div>
 <div class="canonical-ladder-axis axis-min">$8.31</div>
 <div class="canonical-ladder-axis axis-max">$178</div>
 </div>
@@ -1712,13 +1882,14 @@
     <div class="variant-meta">Stop 31 LLC · Herb - Flower - Runtz - 14g · from 2026-02-27T00:00:00Z</div>
     
   </div>
-  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="283899" data-ladder-min="108.5000" data-ladder-max="120.0000" data-variant="compact">
+  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="283899" data-ladder-min="93.2960" data-ladder-max="120.9040" data-variant="compact">
 <div class="canonical-pricing-ladder-head"><span class="ladder-head-metric">
     Current $109.50 (64.91% GM)
     →
     <strong>Proposed $119.00</strong>
     (67.71% GM)
     <span class="ladder-head-delta delta-up">+9.50</span>
+    <span class="ladder-head-promo">@-20% promo → <strong>$95.20</strong> (59.64% GM)</span>
     <span class="ladder-cache-tag absent">no cached market evidence</span>
   </span></div>
 
@@ -1727,17 +1898,22 @@
 
 
 
-<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:8.70%;" title="Live: $110">
+<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:58.69%;" title="Live: $110">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Live $110</span>
-</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:91.30%;" title="Proposed: $119">
+</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:93.10%;" title="Proposed: $119">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Proposed $119</span>
 </div>
-<div class="canonical-ladder-axis axis-min">$109</div>
-<div class="canonical-ladder-axis axis-max">$120</div>
+<div class="canonical-ladder-marker post-promo" data-canonical-pricing-ladder-marker="post-promo" style="left:6.90%;" title="20% promo → $95.20 (59.64% GM)">
+<span class="pip"></span>
+<span class="pin"></span>
+<span class="label">−20% promo $95.20</span>
+</div>
+<div class="canonical-ladder-axis axis-min">$93.30</div>
+<div class="canonical-ladder-axis axis-max">$121</div>
 </div>
 
 </div></div>
@@ -1773,6 +1949,7 @@
     <strong>Proposed $227.50</strong>
     (67.71% GM)
     <span class="ladder-head-delta delta-up">+30.00</span>
+    <span class="ladder-head-promo">@-20% promo → <strong>$182.00</strong> (59.64% GM)</span>
     <span class="ladder-cache-tag very-stale">market evidence VERY stale (11.3d)</span>
   </span></div>
 
@@ -1789,6 +1966,11 @@
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Proposed $228</span>
+</div>
+<div class="canonical-ladder-marker post-promo" data-canonical-pricing-ladder-marker="post-promo" style="left:74.20%;" title="20% promo → $182.00 (59.64% GM)">
+<span class="pip"></span>
+<span class="pin"></span>
+<span class="label">−20% promo $182.00</span>
 </div>
 <div class="canonical-ladder-axis axis-min">$3.40</div>
 <div class="canonical-ladder-axis axis-max">$244</div>
@@ -1820,13 +2002,14 @@
     <div class="variant-meta">Stop 31 LLC · Herb - Vape - Runtz - 1g · from 2026-05-15T00:00:00Z</div>
     
   </div>
-  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="430532" data-ladder-min="51.5000" data-ladder-max="53.5000" data-variant="compact">
+  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="430532" data-ladder-min="41.0000" data-ladder-max="53.5000" data-variant="compact">
 <div class="canonical-pricing-ladder-head"><span class="ladder-head-metric">
     Current $52.50 (67.71% GM)
     →
     <strong>Proposed $52.50</strong>
     (67.71% GM)
     <span class="ladder-head-delta delta-zero">0.00</span>
+    <span class="ladder-head-promo">@-20% promo → <strong>$42.00</strong> (59.64% GM)</span>
     <span class="ladder-cache-tag fresh">market evidence fresh (0.2d)</span>
   </span></div>
 
@@ -1835,16 +2018,21 @@
 
 
 
-<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:50.00%;" title="Live: $52.50">
+<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:92.00%;" title="Live: $52.50">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Live $52.50</span>
-</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:50.00%;" title="Proposed: $52.50">
+</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:92.00%;" title="Proposed: $52.50">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Proposed $52.50</span>
 </div>
-<div class="canonical-ladder-axis axis-min">$51.50</div>
+<div class="canonical-ladder-marker post-promo" data-canonical-pricing-ladder-marker="post-promo" style="left:8.00%;" title="20% promo → $42.00 (59.64% GM)">
+<span class="pip"></span>
+<span class="pin"></span>
+<span class="label">−20% promo $42.00</span>
+</div>
+<div class="canonical-ladder-axis axis-min">$41.00</div>
 <div class="canonical-ladder-axis axis-max">$53.50</div>
 </div>
 
@@ -1874,13 +2062,14 @@
     <div class="variant-meta">Stop 31 LLC · Herb - Vape - Silver Haze - 1g · from 2026-05-15T00:00:00Z</div>
     
   </div>
-  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="430533" data-ladder-min="51.5000" data-ladder-max="53.5000" data-variant="compact">
+  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="430533" data-ladder-min="41.0000" data-ladder-max="53.5000" data-variant="compact">
 <div class="canonical-pricing-ladder-head"><span class="ladder-head-metric">
     Current $52.50 (67.71% GM)
     →
     <strong>Proposed $52.50</strong>
     (67.71% GM)
     <span class="ladder-head-delta delta-zero">0.00</span>
+    <span class="ladder-head-promo">@-20% promo → <strong>$42.00</strong> (59.64% GM)</span>
     <span class="ladder-cache-tag fresh">market evidence fresh (0.2d)</span>
   </span></div>
 
@@ -1889,16 +2078,21 @@
 
 
 
-<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:50.00%;" title="Live: $52.50">
+<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:92.00%;" title="Live: $52.50">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Live $52.50</span>
-</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:50.00%;" title="Proposed: $52.50">
+</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:92.00%;" title="Proposed: $52.50">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Proposed $52.50</span>
 </div>
-<div class="canonical-ladder-axis axis-min">$51.50</div>
+<div class="canonical-ladder-marker post-promo" data-canonical-pricing-ladder-marker="post-promo" style="left:8.00%;" title="20% promo → $42.00 (59.64% GM)">
+<span class="pip"></span>
+<span class="pin"></span>
+<span class="label">−20% promo $42.00</span>
+</div>
+<div class="canonical-ladder-axis axis-min">$41.00</div>
 <div class="canonical-ladder-axis axis-max">$53.50</div>
 </div>
 
@@ -1935,6 +2129,7 @@
     <strong>Proposed $52.50</strong>
     (67.71% GM)
     <span class="ladder-head-delta delta-zero">0.00</span>
+    <span class="ladder-head-promo">@-20% promo → <strong>$42.00</strong> (59.64% GM)</span>
     <span class="ladder-cache-tag very-stale">market evidence VERY stale (11.4d)</span>
   </span></div>
 
@@ -1959,6 +2154,11 @@
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Proposed $52.50</span>
+</div>
+<div class="canonical-ladder-marker post-promo" data-canonical-pricing-ladder-marker="post-promo" style="left:23.81%;" title="20% promo → $42.00 (59.64% GM)">
+<span class="pip"></span>
+<span class="pin"></span>
+<span class="label">−20% promo $42.00</span>
 </div>
 <div class="canonical-ladder-axis axis-min">$0.00</div>
 <div class="canonical-ladder-axis axis-max">$176</div>
@@ -1990,13 +2190,14 @@
     <div class="variant-meta">Stop 31 LLC · HERB-3.5-SOUR OG · from 2026-02-27T00:00:00Z</div>
     
   </div>
-  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="283888" data-ladder-min="34.5000" data-ladder-max="39.5000" data-variant="compact">
+  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="283888" data-ladder-min="29.8000" data-ladder-max="39.5000" data-variant="compact">
 <div class="canonical-pricing-ladder-head"><span class="ladder-head-metric">
     Current $35.50 (64.99% GM)
     →
     <strong>Proposed $38.50</strong>
     (67.71% GM)
     <span class="ladder-head-delta delta-up">+3.00</span>
+    <span class="ladder-head-promo">@-20% promo → <strong>$30.80</strong> (59.64% GM)</span>
     <span class="ladder-cache-tag absent">no cached market evidence</span>
   </span></div>
 
@@ -2005,16 +2206,21 @@
 
 
 
-<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:20.00%;" title="Live: $35.50">
+<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:58.76%;" title="Live: $35.50">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Live $35.50</span>
-</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:80.00%;" title="Proposed: $38.50">
+</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:89.69%;" title="Proposed: $38.50">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Proposed $38.50</span>
 </div>
-<div class="canonical-ladder-axis axis-min">$34.50</div>
+<div class="canonical-ladder-marker post-promo" data-canonical-pricing-ladder-marker="post-promo" style="left:10.31%;" title="20% promo → $30.80 (59.64% GM)">
+<span class="pip"></span>
+<span class="pin"></span>
+<span class="label">−20% promo $30.80</span>
+</div>
+<div class="canonical-ladder-axis axis-min">$29.80</div>
 <div class="canonical-ladder-axis axis-max">$39.50</div>
 </div>
 
@@ -2044,13 +2250,14 @@
     <div class="variant-meta">Stop 31 LLC · Herb - Vape - Sour Tangie - 1g · from 2026-05-15T00:00:00Z</div>
     
   </div>
-  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="430534" data-ladder-min="51.5000" data-ladder-max="53.5000" data-variant="compact">
+  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="430534" data-ladder-min="41.0000" data-ladder-max="53.5000" data-variant="compact">
 <div class="canonical-pricing-ladder-head"><span class="ladder-head-metric">
     Current $52.50 (67.71% GM)
     →
     <strong>Proposed $52.50</strong>
     (67.71% GM)
     <span class="ladder-head-delta delta-zero">0.00</span>
+    <span class="ladder-head-promo">@-20% promo → <strong>$42.00</strong> (59.64% GM)</span>
     <span class="ladder-cache-tag fresh">market evidence fresh (0.2d)</span>
   </span></div>
 
@@ -2059,16 +2266,21 @@
 
 
 
-<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:50.00%;" title="Live: $52.50">
+<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:92.00%;" title="Live: $52.50">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Live $52.50</span>
-</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:50.00%;" title="Proposed: $52.50">
+</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:92.00%;" title="Proposed: $52.50">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Proposed $52.50</span>
 </div>
-<div class="canonical-ladder-axis axis-min">$51.50</div>
+<div class="canonical-ladder-marker post-promo" data-canonical-pricing-ladder-marker="post-promo" style="left:8.00%;" title="20% promo → $42.00 (59.64% GM)">
+<span class="pip"></span>
+<span class="pin"></span>
+<span class="label">−20% promo $42.00</span>
+</div>
+<div class="canonical-ladder-axis axis-min">$41.00</div>
 <div class="canonical-ladder-axis axis-max">$53.50</div>
 </div>
 
@@ -2098,13 +2310,14 @@
     <div class="variant-meta">Stop 31 LLC · HERB-3.5-SPACE RUNTZ · from 2026-02-27T00:00:00Z</div>
     
   </div>
-  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="283893" data-ladder-min="34.5000" data-ladder-max="39.5000" data-variant="compact">
+  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="283893" data-ladder-min="29.8000" data-ladder-max="39.5000" data-variant="compact">
 <div class="canonical-pricing-ladder-head"><span class="ladder-head-metric">
     Current $35.50 (64.99% GM)
     →
     <strong>Proposed $38.50</strong>
     (67.71% GM)
     <span class="ladder-head-delta delta-up">+3.00</span>
+    <span class="ladder-head-promo">@-20% promo → <strong>$30.80</strong> (59.64% GM)</span>
     <span class="ladder-cache-tag absent">no cached market evidence</span>
   </span></div>
 
@@ -2113,16 +2326,21 @@
 
 
 
-<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:20.00%;" title="Live: $35.50">
+<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:58.76%;" title="Live: $35.50">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Live $35.50</span>
-</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:80.00%;" title="Proposed: $38.50">
+</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:89.69%;" title="Proposed: $38.50">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Proposed $38.50</span>
 </div>
-<div class="canonical-ladder-axis axis-min">$34.50</div>
+<div class="canonical-ladder-marker post-promo" data-canonical-pricing-ladder-marker="post-promo" style="left:10.31%;" title="20% promo → $30.80 (59.64% GM)">
+<span class="pip"></span>
+<span class="pin"></span>
+<span class="label">−20% promo $30.80</span>
+</div>
+<div class="canonical-ladder-axis axis-min">$29.80</div>
 <div class="canonical-ladder-axis axis-max">$39.50</div>
 </div>
 
@@ -2166,13 +2384,14 @@
     <div class="variant-meta">Stop 31 LLC · HERB Tropicana Cookies1G Infused PR · from 2026-05-15T00:00:00Z</div>
     
   </div>
-  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="430541" data-ladder-min="19.0000" data-ladder-max="21.0000" data-variant="compact">
+  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="430541" data-ladder-min="15.0000" data-ladder-max="21.0000" data-variant="compact">
 <div class="canonical-pricing-ladder-head"><span class="ladder-head-metric">
     Current $20.00 (67.51% GM)
     →
     <strong>Proposed $20.00</strong>
     (67.51% GM)
     <span class="ladder-head-delta delta-zero">0.00</span>
+    <span class="ladder-head-promo">@-20% promo → <strong>$16.00</strong> (59.39% GM)</span>
     <span class="ladder-cache-tag fresh">market evidence fresh (0.2d)</span>
   </span></div>
 
@@ -2181,16 +2400,21 @@
 
 
 
-<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:50.00%;" title="Live: $20.00">
+<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:83.33%;" title="Live: $20.00">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Live $20.00</span>
-</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:50.00%;" title="Proposed: $20.00">
+</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:83.33%;" title="Proposed: $20.00">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Proposed $20.00</span>
 </div>
-<div class="canonical-ladder-axis axis-min">$19.00</div>
+<div class="canonical-ladder-marker post-promo" data-canonical-pricing-ladder-marker="post-promo" style="left:16.67%;" title="20% promo → $16.00 (59.39% GM)">
+<span class="pip"></span>
+<span class="pin"></span>
+<span class="label">−20% promo $16.00</span>
+</div>
+<div class="canonical-ladder-axis axis-min">$15.00</div>
 <div class="canonical-ladder-axis axis-max">$21.00</div>
 </div>
 
@@ -2220,13 +2444,14 @@
     <div class="variant-meta">Stop 31 LLC · 1O-PR-H26-WIOG · from 2026-04-20T00:00:00Z</div>
     
   </div>
-  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="391535" data-ladder-min="8.5000" data-ladder-max="16.0000" data-variant="compact">
+  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="391535" data-ladder-min="6.6000" data-ladder-max="16.0000" data-variant="compact">
 <div class="canonical-pricing-ladder-head"><span class="ladder-head-metric">
     Current $15.00 (79.58% GM)
     →
     <strong>Proposed $9.50</strong>
     (67.77% GM)
     <span class="ladder-head-delta delta-down">-5.50</span>
+    <span class="ladder-head-promo">@-20% promo → <strong>$7.60</strong> (59.71% GM)</span>
     <span class="ladder-cache-tag very-stale">market evidence VERY stale (11.3d)</span>
   </span></div>
 
@@ -2235,16 +2460,21 @@
 
 
 
-<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:86.67%;" title="Live: $15.00">
+<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:89.36%;" title="Live: $15.00">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Live $15.00</span>
-</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:13.33%;" title="Proposed: $9.50">
+</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:30.85%;" title="Proposed: $9.50">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Proposed $9.50</span>
 </div>
-<div class="canonical-ladder-axis axis-min">$8.50</div>
+<div class="canonical-ladder-marker post-promo" data-canonical-pricing-ladder-marker="post-promo" style="left:10.64%;" title="20% promo → $7.60 (59.71% GM)">
+<span class="pip"></span>
+<span class="pin"></span>
+<span class="label">−20% promo $7.60</span>
+</div>
+<div class="canonical-ladder-axis axis-min">$6.60</div>
 <div class="canonical-ladder-axis axis-max">$16.00</div>
 </div>
 
@@ -2274,13 +2504,14 @@
     <div class="variant-meta">Stop 31 LLC · Jungle Girl - Harmonious - 5pk · from 2026-05-15T00:00:00Z</div>
     
   </div>
-  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="430542" data-ladder-min="60.0000" data-ladder-max="62.2500" data-variant="compact">
+  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="430542" data-ladder-min="48.0000" data-ladder-max="62.2500" data-variant="compact">
 <div class="canonical-pricing-ladder-head"><span class="ladder-head-metric">
     Current $61.00 (67.58% GM)
     →
     <strong>Proposed $61.25</strong>
     (67.71% GM)
     <span class="ladder-head-delta delta-up">+0.25</span>
+    <span class="ladder-head-promo">@-20% promo → <strong>$49.00</strong> (59.64% GM)</span>
     <span class="ladder-cache-tag fresh">market evidence fresh (0.2d)</span>
   </span></div>
 
@@ -2289,16 +2520,21 @@
 
 
 
-<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:44.44%;" title="Live: $61.00">
+<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:91.23%;" title="Live: $61.00">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Live $61.00</span>
-</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:55.56%;" title="Proposed: $61.25">
+</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:92.98%;" title="Proposed: $61.25">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Proposed $61.25</span>
 </div>
-<div class="canonical-ladder-axis axis-min">$60.00</div>
+<div class="canonical-ladder-marker post-promo" data-canonical-pricing-ladder-marker="post-promo" style="left:7.02%;" title="20% promo → $49.00 (59.64% GM)">
+<span class="pip"></span>
+<span class="pin"></span>
+<span class="label">−20% promo $49.00</span>
+</div>
+<div class="canonical-ladder-axis axis-min">$48.00</div>
 <div class="canonical-ladder-axis axis-max">$62.25</div>
 </div>
 
@@ -2328,13 +2564,14 @@
     <div class="variant-meta">Stop 31 LLC · Jungle Girl - Uplifting - 5pk · from 2026-05-15T00:00:00Z</div>
     
   </div>
-  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="430543" data-ladder-min="60.0000" data-ladder-max="62.2500" data-variant="compact">
+  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="430543" data-ladder-min="48.0000" data-ladder-max="62.2500" data-variant="compact">
 <div class="canonical-pricing-ladder-head"><span class="ladder-head-metric">
     Current $61.00 (67.58% GM)
     →
     <strong>Proposed $61.25</strong>
     (67.71% GM)
     <span class="ladder-head-delta delta-up">+0.25</span>
+    <span class="ladder-head-promo">@-20% promo → <strong>$49.00</strong> (59.64% GM)</span>
     <span class="ladder-cache-tag fresh">market evidence fresh (0.2d)</span>
   </span></div>
 
@@ -2343,16 +2580,21 @@
 
 
 
-<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:44.44%;" title="Live: $61.00">
+<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:91.23%;" title="Live: $61.00">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Live $61.00</span>
-</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:55.56%;" title="Proposed: $61.25">
+</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:92.98%;" title="Proposed: $61.25">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Proposed $61.25</span>
 </div>
-<div class="canonical-ladder-axis axis-min">$60.00</div>
+<div class="canonical-ladder-marker post-promo" data-canonical-pricing-ladder-marker="post-promo" style="left:7.02%;" title="20% promo → $49.00 (59.64% GM)">
+<span class="pip"></span>
+<span class="pin"></span>
+<span class="label">−20% promo $49.00</span>
+</div>
+<div class="canonical-ladder-axis axis-min">$48.00</div>
 <div class="canonical-ladder-axis axis-max">$62.25</div>
 </div>
 
@@ -2382,13 +2624,14 @@
     <div class="variant-meta">Stop 31 LLC · Jungle Girl - Vibrant - 5pk · from 2026-05-15T00:00:00Z</div>
     
   </div>
-  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="430544" data-ladder-min="60.0000" data-ladder-max="62.2500" data-variant="compact">
+  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="430544" data-ladder-min="48.0000" data-ladder-max="62.2500" data-variant="compact">
 <div class="canonical-pricing-ladder-head"><span class="ladder-head-metric">
     Current $61.00 (67.58% GM)
     →
     <strong>Proposed $61.25</strong>
     (67.71% GM)
     <span class="ladder-head-delta delta-up">+0.25</span>
+    <span class="ladder-head-promo">@-20% promo → <strong>$49.00</strong> (59.64% GM)</span>
     <span class="ladder-cache-tag fresh">market evidence fresh (0.2d)</span>
   </span></div>
 
@@ -2397,16 +2640,21 @@
 
 
 
-<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:44.44%;" title="Live: $61.00">
+<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:91.23%;" title="Live: $61.00">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Live $61.00</span>
-</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:55.56%;" title="Proposed: $61.25">
+</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:92.98%;" title="Proposed: $61.25">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Proposed $61.25</span>
 </div>
-<div class="canonical-ladder-axis axis-min">$60.00</div>
+<div class="canonical-ladder-marker post-promo" data-canonical-pricing-ladder-marker="post-promo" style="left:7.02%;" title="20% promo → $49.00 (59.64% GM)">
+<span class="pip"></span>
+<span class="pin"></span>
+<span class="label">−20% promo $49.00</span>
+</div>
+<div class="canonical-ladder-axis axis-min">$48.00</div>
 <div class="canonical-ladder-axis axis-max">$62.25</div>
 </div>
 
@@ -2443,6 +2691,7 @@
     <strong>Proposed $21.00</strong>
     (67.71% GM)
     <span class="ladder-head-delta delta-up">+7.00</span>
+    <span class="ladder-head-promo">@-20% promo → <strong>$16.80</strong> (59.64% GM)</span>
     <span class="ladder-cache-tag absent">no cached market evidence</span>
   </span></div>
 
@@ -2459,6 +2708,11 @@
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Proposed $21.00</span>
+</div>
+<div class="canonical-ladder-marker post-promo" data-canonical-pricing-ladder-marker="post-promo" style="left:42.22%;" title="20% promo → $16.80 (59.64% GM)">
+<span class="pip"></span>
+<span class="pin"></span>
+<span class="label">−20% promo $16.80</span>
 </div>
 <div class="canonical-ladder-axis axis-min">$13.00</div>
 <div class="canonical-ladder-axis axis-max">$22.00</div>
@@ -2497,6 +2751,7 @@
     <strong>Proposed $27.25</strong>
     (67.61% GM)
     <span class="ladder-head-delta delta-up">+6.25</span>
+    <span class="ladder-head-promo">@-20% promo → <strong>$21.80</strong> (59.52% GM)</span>
     <span class="ladder-cache-tag very-stale">market evidence VERY stale (11.3d)</span>
   </span></div>
 
@@ -2513,6 +2768,11 @@
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Proposed $27.25</span>
+</div>
+<div class="canonical-ladder-marker post-promo" data-canonical-pricing-ladder-marker="post-promo" style="left:21.82%;" title="20% promo → $21.80 (59.52% GM)">
+<span class="pip"></span>
+<span class="pin"></span>
+<span class="label">−20% promo $21.80</span>
 </div>
 <div class="canonical-ladder-axis axis-min">$20.00</div>
 <div class="canonical-ladder-axis axis-max">$28.25</div>
@@ -2544,13 +2804,14 @@
     <div class="variant-meta">Stop 31 LLC · MOONLIT-MAC1 Non-Infused 1.2G · from 2026-05-15T00:00:00Z</div>
     
   </div>
-  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="430547" data-ladder-min="20.0000" data-ladder-max="22.0000" data-variant="compact">
+  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="430547" data-ladder-min="15.8000" data-ladder-max="22.0000" data-variant="compact">
 <div class="canonical-pricing-ladder-head"><span class="ladder-head-metric">
     Current $21.00 (67.71% GM)
     →
     <strong>Proposed $21.00</strong>
     (67.71% GM)
     <span class="ladder-head-delta delta-zero">0.00</span>
+    <span class="ladder-head-promo">@-20% promo → <strong>$16.80</strong> (59.64% GM)</span>
     <span class="ladder-cache-tag fresh">market evidence fresh (0.2d)</span>
   </span></div>
 
@@ -2559,16 +2820,21 @@
 
 
 
-<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:50.00%;" title="Live: $21.00">
+<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:83.87%;" title="Live: $21.00">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Live $21.00</span>
-</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:50.00%;" title="Proposed: $21.00">
+</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:83.87%;" title="Proposed: $21.00">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Proposed $21.00</span>
 </div>
-<div class="canonical-ladder-axis axis-min">$20.00</div>
+<div class="canonical-ladder-marker post-promo" data-canonical-pricing-ladder-marker="post-promo" style="left:16.13%;" title="20% promo → $16.80 (59.64% GM)">
+<span class="pip"></span>
+<span class="pin"></span>
+<span class="label">−20% promo $16.80</span>
+</div>
+<div class="canonical-ladder-axis axis-min">$15.80</div>
 <div class="canonical-ladder-axis axis-max">$22.00</div>
 </div>
 
@@ -2598,13 +2864,14 @@
     <div class="variant-meta">Stop 31 LLC · MOONLIT- MAC1 INFUSED 1.2G · from 2026-05-15T00:00:00Z</div>
     
   </div>
-  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="430545" data-ladder-min="32.2500" data-ladder-max="34.5000" data-variant="compact">
+  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="430545" data-ladder-min="25.6000" data-ladder-max="34.5000" data-variant="compact">
 <div class="canonical-pricing-ladder-head"><span class="ladder-head-metric">
     Current $33.50 (67.96% GM)
     →
     <strong>Proposed $33.25</strong>
     (67.71% GM)
     <span class="ladder-head-delta delta-down">-0.25</span>
+    <span class="ladder-head-promo">@-20% promo → <strong>$26.60</strong> (59.64% GM)</span>
     <span class="ladder-cache-tag fresh">market evidence fresh (0.2d)</span>
   </span></div>
 
@@ -2613,16 +2880,21 @@
 
 
 
-<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:55.56%;" title="Live: $33.50">
+<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:88.76%;" title="Live: $33.50">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Live $33.50</span>
-</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:44.44%;" title="Proposed: $33.25">
+</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:85.96%;" title="Proposed: $33.25">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Proposed $33.25</span>
 </div>
-<div class="canonical-ladder-axis axis-min">$32.25</div>
+<div class="canonical-ladder-marker post-promo" data-canonical-pricing-ladder-marker="post-promo" style="left:11.24%;" title="20% promo → $26.60 (59.64% GM)">
+<span class="pip"></span>
+<span class="pin"></span>
+<span class="label">−20% promo $26.60</span>
+</div>
+<div class="canonical-ladder-axis axis-min">$25.60</div>
 <div class="canonical-ladder-axis axis-max">$34.50</div>
 </div>
 
@@ -2652,13 +2924,14 @@
     <div class="variant-meta">Stop 31 LLC · MOONLIT- UK CHEESE INFUSED 1.2G · from 2026-05-15T00:00:00Z</div>
     
   </div>
-  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="430546" data-ladder-min="32.2500" data-ladder-max="34.5000" data-variant="compact">
+  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="430546" data-ladder-min="25.6000" data-ladder-max="34.5000" data-variant="compact">
 <div class="canonical-pricing-ladder-head"><span class="ladder-head-metric">
     Current $33.50 (67.96% GM)
     →
     <strong>Proposed $33.25</strong>
     (67.71% GM)
     <span class="ladder-head-delta delta-down">-0.25</span>
+    <span class="ladder-head-promo">@-20% promo → <strong>$26.60</strong> (59.64% GM)</span>
     <span class="ladder-cache-tag fresh">market evidence fresh (0.2d)</span>
   </span></div>
 
@@ -2667,16 +2940,21 @@
 
 
 
-<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:55.56%;" title="Live: $33.50">
+<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:88.76%;" title="Live: $33.50">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Live $33.50</span>
-</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:44.44%;" title="Proposed: $33.25">
+</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:85.96%;" title="Proposed: $33.25">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Proposed $33.25</span>
 </div>
-<div class="canonical-ladder-axis axis-min">$32.25</div>
+<div class="canonical-ladder-marker post-promo" data-canonical-pricing-ladder-marker="post-promo" style="left:11.24%;" title="20% promo → $26.60 (59.64% GM)">
+<span class="pip"></span>
+<span class="pin"></span>
+<span class="label">−20% promo $26.60</span>
+</div>
+<div class="canonical-ladder-axis axis-min">$25.60</div>
 <div class="canonical-ladder-axis axis-max">$34.50</div>
 </div>
 
@@ -2706,13 +2984,14 @@
     <div class="variant-meta">Stop 31 LLC · 1O-PR-PG26-CKD · from 2026-05-15T00:00:00Z</div>
     
   </div>
-  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="430524" data-ladder-min="23.5000" data-ladder-max="25.5000" data-variant="compact">
+  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="430524" data-ladder-min="18.6000" data-ladder-max="25.5000" data-variant="compact">
 <div class="canonical-pricing-ladder-head"><span class="ladder-head-metric">
     Current $24.50 (67.71% GM)
     →
     <strong>Proposed $24.50</strong>
     (67.71% GM)
     <span class="ladder-head-delta delta-zero">0.00</span>
+    <span class="ladder-head-promo">@-20% promo → <strong>$19.60</strong> (59.64% GM)</span>
     <span class="ladder-cache-tag fresh">market evidence fresh (0.2d)</span>
   </span></div>
 
@@ -2721,16 +3000,21 @@
 
 
 
-<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:50.00%;" title="Live: $24.50">
+<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:85.51%;" title="Live: $24.50">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Live $24.50</span>
-</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:50.00%;" title="Proposed: $24.50">
+</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:85.51%;" title="Proposed: $24.50">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Proposed $24.50</span>
 </div>
-<div class="canonical-ladder-axis axis-min">$23.50</div>
+<div class="canonical-ladder-marker post-promo" data-canonical-pricing-ladder-marker="post-promo" style="left:14.49%;" title="20% promo → $19.60 (59.64% GM)">
+<span class="pip"></span>
+<span class="pin"></span>
+<span class="label">−20% promo $19.60</span>
+</div>
+<div class="canonical-ladder-axis axis-min">$18.60</div>
 <div class="canonical-ladder-axis axis-max">$25.50</div>
 </div>
 
@@ -2760,13 +3044,14 @@
     <div class="variant-meta">Stop 31 LLC · 1O-PR-PG26-ZRZ · from 2026-05-15T00:00:00Z</div>
     
   </div>
-  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="430525" data-ladder-min="23.5000" data-ladder-max="25.5000" data-variant="compact">
+  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="430525" data-ladder-min="18.6000" data-ladder-max="25.5000" data-variant="compact">
 <div class="canonical-pricing-ladder-head"><span class="ladder-head-metric">
     Current $24.50 (67.71% GM)
     →
     <strong>Proposed $24.50</strong>
     (67.71% GM)
     <span class="ladder-head-delta delta-zero">0.00</span>
+    <span class="ladder-head-promo">@-20% promo → <strong>$19.60</strong> (59.64% GM)</span>
     <span class="ladder-cache-tag fresh">market evidence fresh (0.2d)</span>
   </span></div>
 
@@ -2775,16 +3060,21 @@
 
 
 
-<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:50.00%;" title="Live: $24.50">
+<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:85.51%;" title="Live: $24.50">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Live $24.50</span>
-</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:50.00%;" title="Proposed: $24.50">
+</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:85.51%;" title="Proposed: $24.50">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Proposed $24.50</span>
 </div>
-<div class="canonical-ladder-axis axis-min">$23.50</div>
+<div class="canonical-ladder-marker post-promo" data-canonical-pricing-ladder-marker="post-promo" style="left:14.49%;" title="20% promo → $19.60 (59.64% GM)">
+<span class="pip"></span>
+<span class="pin"></span>
+<span class="label">−20% promo $19.60</span>
+</div>
+<div class="canonical-ladder-axis axis-min">$18.60</div>
 <div class="canonical-ladder-axis axis-max">$25.50</div>
 </div>
 
@@ -2814,13 +3104,14 @@
     <div class="variant-meta">Stop 31 LLC · Purp - Flower - Blue Nerdz - 3.5g · from 2026-04-22T00:00:00Z</div>
     
   </div>
-  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="392889" data-ladder-min="57.6000" data-ladder-max="77.9000" data-variant="compact">
+  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="392889" data-ladder-min="44.8560" data-ladder-max="78.8440" data-variant="compact">
 <div class="canonical-pricing-ladder-head"><span class="ladder-head-metric">
     Current $76.50 (75.05% GM)
     →
     <strong>Proposed $59.00</strong>
     (67.65% GM)
     <span class="ladder-head-delta delta-down">-17.50</span>
+    <span class="ladder-head-promo">@-20% promo → <strong>$47.20</strong> (59.56% GM)</span>
     <span class="ladder-cache-tag very-stale">market evidence VERY stale (11.3d)</span>
   </span></div>
 
@@ -2833,13 +3124,18 @@
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Live $76.50</span>
-</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:6.90%;" title="Proposed: $59.00">
+</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:41.61%;" title="Proposed: $59.00">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Proposed $59.00</span>
 </div>
-<div class="canonical-ladder-axis axis-min">$57.60</div>
-<div class="canonical-ladder-axis axis-max">$77.90</div>
+<div class="canonical-ladder-marker post-promo" data-canonical-pricing-ladder-marker="post-promo" style="left:6.90%;" title="20% promo → $47.20 (59.56% GM)">
+<span class="pip"></span>
+<span class="pin"></span>
+<span class="label">−20% promo $47.20</span>
+</div>
+<div class="canonical-ladder-axis axis-min">$44.86</div>
+<div class="canonical-ladder-axis axis-max">$78.84</div>
 </div>
 
 </div></div>
@@ -2875,6 +3171,7 @@
     <strong>Proposed $21.00</strong>
     (67.71% GM)
     <span class="ladder-head-delta delta-up">+7.00</span>
+    <span class="ladder-head-promo">@-20% promo → <strong>$16.80</strong> (59.64% GM)</span>
     <span class="ladder-cache-tag very-stale">market evidence VERY stale (11.4d)</span>
   </span></div>
 
@@ -2899,6 +3196,11 @@
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Proposed $21.00</span>
+</div>
+<div class="canonical-ladder-marker post-promo" data-canonical-pricing-ladder-marker="post-promo" style="left:24.65%;" title="20% promo → $16.80 (59.64% GM)">
+<span class="pip"></span>
+<span class="pin"></span>
+<span class="label">−20% promo $16.80</span>
 </div>
 <div class="canonical-ladder-axis axis-min">$4.46</div>
 <div class="canonical-ladder-axis axis-max">$54.53</div>
@@ -2930,13 +3232,14 @@
     <div class="variant-meta">Stop 31 LLC · Purp - Flower - Crypto Cherries - 3.5g · from 2026-04-22T00:00:00Z</div>
     
   </div>
-  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="392890" data-ladder-min="57.6000" data-ladder-max="77.9000" data-variant="compact">
+  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="392890" data-ladder-min="44.8560" data-ladder-max="78.8440" data-variant="compact">
 <div class="canonical-pricing-ladder-head"><span class="ladder-head-metric">
     Current $76.50 (75.13% GM)
     →
     <strong>Proposed $59.00</strong>
     (67.75% GM)
     <span class="ladder-head-delta delta-down">-17.50</span>
+    <span class="ladder-head-promo">@-20% promo → <strong>$47.20</strong> (59.68% GM)</span>
     <span class="ladder-cache-tag very-stale">market evidence VERY stale (11.3d)</span>
   </span></div>
 
@@ -2949,13 +3252,18 @@
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Live $76.50</span>
-</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:6.90%;" title="Proposed: $59.00">
+</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:41.61%;" title="Proposed: $59.00">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Proposed $59.00</span>
 </div>
-<div class="canonical-ladder-axis axis-min">$57.60</div>
-<div class="canonical-ladder-axis axis-max">$77.90</div>
+<div class="canonical-ladder-marker post-promo" data-canonical-pricing-ladder-marker="post-promo" style="left:6.90%;" title="20% promo → $47.20 (59.68% GM)">
+<span class="pip"></span>
+<span class="pin"></span>
+<span class="label">−20% promo $47.20</span>
+</div>
+<div class="canonical-ladder-axis axis-min">$44.86</div>
+<div class="canonical-ladder-axis axis-max">$78.84</div>
 </div>
 
 </div></div>
@@ -2984,13 +3292,14 @@
     <div class="variant-meta">Stop 31 LLC · PURPS-5PR-GDP · from 2026-05-15T00:00:00Z</div>
     
   </div>
-  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="430548" data-ladder-min="67.0000" data-ladder-max="69.2500" data-variant="compact">
+  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="430548" data-ladder-min="53.5080" data-ladder-max="69.3420" data-variant="compact">
 <div class="canonical-pricing-ladder-head"><span class="ladder-head-metric">
     Current $68.00 (67.60% GM)
     →
     <strong>Proposed $68.25</strong>
     (67.71% GM)
     <span class="ladder-head-delta delta-up">+0.25</span>
+    <span class="ladder-head-promo">@-20% promo → <strong>$54.60</strong> (59.64% GM)</span>
     <span class="ladder-cache-tag fresh">market evidence fresh (0.2d)</span>
   </span></div>
 
@@ -2999,17 +3308,22 @@
 
 
 
-<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:44.44%;" title="Live: $68.00">
+<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:91.52%;" title="Live: $68.00">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Live $68.00</span>
-</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:55.56%;" title="Proposed: $68.25">
+</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:93.10%;" title="Proposed: $68.25">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Proposed $68.25</span>
 </div>
-<div class="canonical-ladder-axis axis-min">$67.00</div>
-<div class="canonical-ladder-axis axis-max">$69.25</div>
+<div class="canonical-ladder-marker post-promo" data-canonical-pricing-ladder-marker="post-promo" style="left:6.90%;" title="20% promo → $54.60 (59.64% GM)">
+<span class="pip"></span>
+<span class="pin"></span>
+<span class="label">−20% promo $54.60</span>
+</div>
+<div class="canonical-ladder-axis axis-min">$53.51</div>
+<div class="canonical-ladder-axis axis-max">$69.34</div>
 </div>
 
 </div></div>
@@ -3038,13 +3352,14 @@
     <div class="variant-meta">Stop 31 LLC · 1O-8F-P26-OISH · from 2026-05-15T00:00:00Z</div>
     
   </div>
-  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="430519" data-ladder-min="75.5000" data-ladder-max="78.0000" data-variant="compact">
+  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="430519" data-ladder-min="60.3680" data-ladder-max="78.2320" data-variant="compact">
 <div class="canonical-pricing-ladder-head"><span class="ladder-head-metric">
     Current $76.50 (67.50% GM)
     →
     <strong>Proposed $77.00</strong>
     (67.71% GM)
     <span class="ladder-head-delta delta-up">+0.50</span>
+    <span class="ladder-head-promo">@-20% promo → <strong>$61.60</strong> (59.64% GM)</span>
     <span class="ladder-cache-tag fresh">market evidence fresh (0.2d)</span>
   </span></div>
 
@@ -3053,17 +3368,22 @@
 
 
 
-<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:40.00%;" title="Live: $76.50">
+<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:90.30%;" title="Live: $76.50">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Live $76.50</span>
-</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:60.00%;" title="Proposed: $77.00">
+</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:93.10%;" title="Proposed: $77.00">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Proposed $77.00</span>
 </div>
-<div class="canonical-ladder-axis axis-min">$75.50</div>
-<div class="canonical-ladder-axis axis-max">$78.00</div>
+<div class="canonical-ladder-marker post-promo" data-canonical-pricing-ladder-marker="post-promo" style="left:6.90%;" title="20% promo → $61.60 (59.64% GM)">
+<span class="pip"></span>
+<span class="pin"></span>
+<span class="label">−20% promo $61.60</span>
+</div>
+<div class="canonical-ladder-axis axis-min">$60.37</div>
+<div class="canonical-ladder-axis axis-max">$78.23</div>
 </div>
 
 </div></div>
@@ -3092,13 +3412,14 @@
     <div class="variant-meta">Stop 31 LLC · PURPS-5PR-PGSH · from 2026-05-15T00:00:00Z</div>
     
   </div>
-  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="430549" data-ladder-min="67.0000" data-ladder-max="69.2500" data-variant="compact">
+  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="430549" data-ladder-min="53.5080" data-ladder-max="69.3420" data-variant="compact">
 <div class="canonical-pricing-ladder-head"><span class="ladder-head-metric">
     Current $68.00 (67.60% GM)
     →
     <strong>Proposed $68.25</strong>
     (67.71% GM)
     <span class="ladder-head-delta delta-up">+0.25</span>
+    <span class="ladder-head-promo">@-20% promo → <strong>$54.60</strong> (59.64% GM)</span>
     <span class="ladder-cache-tag fresh">market evidence fresh (0.2d)</span>
   </span></div>
 
@@ -3107,17 +3428,22 @@
 
 
 
-<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:44.44%;" title="Live: $68.00">
+<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:91.52%;" title="Live: $68.00">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Live $68.00</span>
-</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:55.56%;" title="Proposed: $68.25">
+</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:93.10%;" title="Proposed: $68.25">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Proposed $68.25</span>
 </div>
-<div class="canonical-ladder-axis axis-min">$67.00</div>
-<div class="canonical-ladder-axis axis-max">$69.25</div>
+<div class="canonical-ladder-marker post-promo" data-canonical-pricing-ladder-marker="post-promo" style="left:6.90%;" title="20% promo → $54.60 (59.64% GM)">
+<span class="pip"></span>
+<span class="pin"></span>
+<span class="label">−20% promo $54.60</span>
+</div>
+<div class="canonical-ladder-axis axis-min">$53.51</div>
+<div class="canonical-ladder-axis axis-max">$69.34</div>
 </div>
 
 </div></div>
@@ -3146,13 +3472,14 @@
     <div class="variant-meta">Stop 31 LLC · 1O-8F-P26-RGB · from 2026-05-15T00:00:00Z</div>
     
   </div>
-  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="430520" data-ladder-min="75.5000" data-ladder-max="78.0000" data-variant="compact">
+  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="430520" data-ladder-min="60.3680" data-ladder-max="78.2320" data-variant="compact">
 <div class="canonical-pricing-ladder-head"><span class="ladder-head-metric">
     Current $76.50 (67.50% GM)
     →
     <strong>Proposed $77.00</strong>
     (67.71% GM)
     <span class="ladder-head-delta delta-up">+0.50</span>
+    <span class="ladder-head-promo">@-20% promo → <strong>$61.60</strong> (59.64% GM)</span>
     <span class="ladder-cache-tag fresh">market evidence fresh (0.2d)</span>
   </span></div>
 
@@ -3161,17 +3488,22 @@
 
 
 
-<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:40.00%;" title="Live: $76.50">
+<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:90.30%;" title="Live: $76.50">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Live $76.50</span>
-</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:60.00%;" title="Proposed: $77.00">
+</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:93.10%;" title="Proposed: $77.00">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Proposed $77.00</span>
 </div>
-<div class="canonical-ladder-axis axis-min">$75.50</div>
-<div class="canonical-ladder-axis axis-max">$78.00</div>
+<div class="canonical-ladder-marker post-promo" data-canonical-pricing-ladder-marker="post-promo" style="left:6.90%;" title="20% promo → $61.60 (59.64% GM)">
+<span class="pip"></span>
+<span class="pin"></span>
+<span class="label">−20% promo $61.60</span>
+</div>
+<div class="canonical-ladder-axis axis-min">$60.37</div>
+<div class="canonical-ladder-axis axis-max">$78.23</div>
 </div>
 
 </div></div>
@@ -3200,13 +3532,14 @@
     <div class="variant-meta">Stop 31 LLC · R-Original Bubblegum Runtz 3.5G · from 2026-05-15T00:00:00Z</div>
     
   </div>
-  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="430551" data-ladder-min="91.5000" data-ladder-max="93.7500" data-variant="compact">
+  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="430551" data-ladder-min="72.7160" data-ladder-max="94.2340" data-variant="compact">
 <div class="canonical-pricing-ladder-head"><span class="ladder-head-metric">
     Current $92.50 (67.63% GM)
     →
     <strong>Proposed $92.75</strong>
     (67.71% GM)
     <span class="ladder-head-delta delta-up">+0.25</span>
+    <span class="ladder-head-promo">@-20% promo → <strong>$74.20</strong> (59.64% GM)</span>
     <span class="ladder-cache-tag fresh">market evidence fresh (0.2d)</span>
   </span></div>
 
@@ -3215,17 +3548,22 @@
 
 
 
-<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:44.44%;" title="Live: $92.50">
+<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:91.94%;" title="Live: $92.50">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Live $92.50</span>
-</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:55.56%;" title="Proposed: $92.75">
+</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:93.10%;" title="Proposed: $92.75">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Proposed $92.75</span>
 </div>
-<div class="canonical-ladder-axis axis-min">$91.50</div>
-<div class="canonical-ladder-axis axis-max">$93.75</div>
+<div class="canonical-ladder-marker post-promo" data-canonical-pricing-ladder-marker="post-promo" style="left:6.90%;" title="20% promo → $74.20 (59.64% GM)">
+<span class="pip"></span>
+<span class="pin"></span>
+<span class="label">−20% promo $74.20</span>
+</div>
+<div class="canonical-ladder-axis axis-min">$72.72</div>
+<div class="canonical-ladder-axis axis-max">$94.23</div>
 </div>
 
 </div></div>
@@ -3254,13 +3592,14 @@
     <div class="variant-meta">Stop 31 LLC · R-LEMON CANDY RUNTZ 3.5G · from 2026-05-15T00:00:00Z</div>
     
   </div>
-  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="430550" data-ladder-min="91.5000" data-ladder-max="93.7500" data-variant="compact">
+  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="430550" data-ladder-min="72.7160" data-ladder-max="94.2340" data-variant="compact">
 <div class="canonical-pricing-ladder-head"><span class="ladder-head-metric">
     Current $92.50 (67.63% GM)
     →
     <strong>Proposed $92.75</strong>
     (67.71% GM)
     <span class="ladder-head-delta delta-up">+0.25</span>
+    <span class="ladder-head-promo">@-20% promo → <strong>$74.20</strong> (59.64% GM)</span>
     <span class="ladder-cache-tag fresh">market evidence fresh (0.2d)</span>
   </span></div>
 
@@ -3269,17 +3608,22 @@
 
 
 
-<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:44.44%;" title="Live: $92.50">
+<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:91.94%;" title="Live: $92.50">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Live $92.50</span>
-</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:55.56%;" title="Proposed: $92.75">
+</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:93.10%;" title="Proposed: $92.75">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Proposed $92.75</span>
 </div>
-<div class="canonical-ladder-axis axis-min">$91.50</div>
-<div class="canonical-ladder-axis axis-max">$93.75</div>
+<div class="canonical-ladder-marker post-promo" data-canonical-pricing-ladder-marker="post-promo" style="left:6.90%;" title="20% promo → $74.20 (59.64% GM)">
+<span class="pip"></span>
+<span class="pin"></span>
+<span class="label">−20% promo $74.20</span>
+</div>
+<div class="canonical-ladder-axis axis-min">$72.72</div>
+<div class="canonical-ladder-axis axis-max">$94.23</div>
 </div>
 
 </div></div>
@@ -3308,13 +3652,14 @@
     <div class="variant-meta">Stop 31 LLC · 1O-8F-R26-TRP · from 2026-05-15T00:00:00Z</div>
     
   </div>
-  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="430522" data-ladder-min="91.5000" data-ladder-max="93.7500" data-variant="compact">
+  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="430522" data-ladder-min="72.7160" data-ladder-max="94.2340" data-variant="compact">
 <div class="canonical-pricing-ladder-head"><span class="ladder-head-metric">
     Current $92.50 (67.63% GM)
     →
     <strong>Proposed $92.75</strong>
     (67.71% GM)
     <span class="ladder-head-delta delta-up">+0.25</span>
+    <span class="ladder-head-promo">@-20% promo → <strong>$74.20</strong> (59.64% GM)</span>
     <span class="ladder-cache-tag fresh">market evidence fresh (0.2d)</span>
   </span></div>
 
@@ -3323,17 +3668,22 @@
 
 
 
-<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:44.44%;" title="Live: $92.50">
+<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:91.94%;" title="Live: $92.50">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Live $92.50</span>
-</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:55.56%;" title="Proposed: $92.75">
+</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:93.10%;" title="Proposed: $92.75">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Proposed $92.75</span>
 </div>
-<div class="canonical-ladder-axis axis-min">$91.50</div>
-<div class="canonical-ladder-axis axis-max">$93.75</div>
+<div class="canonical-ladder-marker post-promo" data-canonical-pricing-ladder-marker="post-promo" style="left:6.90%;" title="20% promo → $74.20 (59.64% GM)">
+<span class="pip"></span>
+<span class="pin"></span>
+<span class="label">−20% promo $74.20</span>
+</div>
+<div class="canonical-ladder-axis axis-min">$72.72</div>
+<div class="canonical-ladder-axis axis-max">$94.23</div>
 </div>
 
 </div></div>
@@ -3362,13 +3712,14 @@
     <div class="variant-meta">Stop 31 LLC · SmartBud - Flower - Applescotti - 3.5g · from 2026-04-01T00:00:00Z</div>
     
   </div>
-  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="357343" data-ladder-min="50.5000" data-ladder-max="57.0000" data-variant="compact">
+  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="357343" data-ladder-min="43.8000" data-ladder-max="57.0000" data-variant="compact">
 <div class="canonical-pricing-ladder-head"><span class="ladder-head-metric">
     Current $51.50 (64.89% GM)
     →
     <strong>Proposed $56.00</strong>
     (67.71% GM)
     <span class="ladder-head-delta delta-up">+4.50</span>
+    <span class="ladder-head-promo">@-20% promo → <strong>$44.80</strong> (59.64% GM)</span>
     <span class="ladder-cache-tag absent">no cached market evidence</span>
   </span></div>
 
@@ -3377,16 +3728,21 @@
 
 
 
-<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:15.38%;" title="Live: $51.50">
+<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:58.33%;" title="Live: $51.50">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Live $51.50</span>
-</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:84.62%;" title="Proposed: $56.00">
+</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:92.42%;" title="Proposed: $56.00">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Proposed $56.00</span>
 </div>
-<div class="canonical-ladder-axis axis-min">$50.50</div>
+<div class="canonical-ladder-marker post-promo" data-canonical-pricing-ladder-marker="post-promo" style="left:7.58%;" title="20% promo → $44.80 (59.64% GM)">
+<span class="pip"></span>
+<span class="pin"></span>
+<span class="label">−20% promo $44.80</span>
+</div>
+<div class="canonical-ladder-axis axis-min">$43.80</div>
 <div class="canonical-ladder-axis axis-max">$57.00</div>
 </div>
 
@@ -3416,13 +3772,14 @@
     <div class="variant-meta">Stop 31 LLC · SMARTBUD-applescotti Ground Flower 1/2oz · from 2026-05-15T00:00:00Z</div>
     
   </div>
-  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="430553" data-ladder-min="86.0000" data-ladder-max="88.5000" data-variant="compact">
+  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="430553" data-ladder-min="68.6000" data-ladder-max="88.9000" data-variant="compact">
 <div class="canonical-pricing-ladder-head"><span class="ladder-head-metric">
     Current $87.00 (67.53% GM)
     →
     <strong>Proposed $87.50</strong>
     (67.71% GM)
     <span class="ladder-head-delta delta-up">+0.50</span>
+    <span class="ladder-head-promo">@-20% promo → <strong>$70.00</strong> (59.64% GM)</span>
     <span class="ladder-cache-tag fresh">market evidence fresh (0.2d)</span>
   </span></div>
 
@@ -3431,17 +3788,22 @@
 
 
 
-<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:40.00%;" title="Live: $87.00">
+<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:90.64%;" title="Live: $87.00">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Live $87.00</span>
-</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:60.00%;" title="Proposed: $87.50">
+</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:93.10%;" title="Proposed: $87.50">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Proposed $87.50</span>
 </div>
-<div class="canonical-ladder-axis axis-min">$86.00</div>
-<div class="canonical-ladder-axis axis-max">$88.50</div>
+<div class="canonical-ladder-marker post-promo" data-canonical-pricing-ladder-marker="post-promo" style="left:6.90%;" title="20% promo → $70.00 (59.64% GM)">
+<span class="pip"></span>
+<span class="pin"></span>
+<span class="label">−20% promo $70.00</span>
+</div>
+<div class="canonical-ladder-axis axis-min">$68.60</div>
+<div class="canonical-ladder-axis axis-max">$88.90</div>
 </div>
 
 </div></div>
@@ -3470,13 +3832,14 @@
     <div class="variant-meta">Stop 31 LLC · 1O-5PR-SB26-BLDR · from 2026-05-15T00:00:00Z</div>
     
   </div>
-  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="430515" data-ladder-min="56.5000" data-ladder-max="58.7500" data-variant="compact">
+  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="430515" data-ladder-min="45.2000" data-ladder-max="58.7500" data-variant="compact">
 <div class="canonical-pricing-ladder-head"><span class="ladder-head-metric">
     Current $57.50 (67.57% GM)
     →
     <strong>Proposed $57.75</strong>
     (67.71% GM)
     <span class="ladder-head-delta delta-up">+0.25</span>
+    <span class="ladder-head-promo">@-20% promo → <strong>$46.20</strong> (59.64% GM)</span>
     <span class="ladder-cache-tag fresh">market evidence fresh (0.2d)</span>
   </span></div>
 
@@ -3485,16 +3848,21 @@
 
 
 
-<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:44.44%;" title="Live: $57.50">
+<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:90.77%;" title="Live: $57.50">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Live $57.50</span>
-</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:55.56%;" title="Proposed: $57.75">
+</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:92.62%;" title="Proposed: $57.75">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Proposed $57.75</span>
 </div>
-<div class="canonical-ladder-axis axis-min">$56.50</div>
+<div class="canonical-ladder-marker post-promo" data-canonical-pricing-ladder-marker="post-promo" style="left:7.38%;" title="20% promo → $46.20 (59.64% GM)">
+<span class="pip"></span>
+<span class="pin"></span>
+<span class="label">−20% promo $46.20</span>
+</div>
+<div class="canonical-ladder-axis axis-min">$45.20</div>
 <div class="canonical-ladder-axis axis-max">$58.75</div>
 </div>
 
@@ -3524,13 +3892,14 @@
     <div class="variant-meta">Stop 31 LLC · SMARTBUD-candy-lato Ground Flower 1/2oz · from 2026-05-15T00:00:00Z</div>
     
   </div>
-  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="430554" data-ladder-min="86.0000" data-ladder-max="88.5000" data-variant="compact">
+  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="430554" data-ladder-min="68.6000" data-ladder-max="88.9000" data-variant="compact">
 <div class="canonical-pricing-ladder-head"><span class="ladder-head-metric">
     Current $87.00 (67.53% GM)
     →
     <strong>Proposed $87.50</strong>
     (67.71% GM)
     <span class="ladder-head-delta delta-up">+0.50</span>
+    <span class="ladder-head-promo">@-20% promo → <strong>$70.00</strong> (59.64% GM)</span>
     <span class="ladder-cache-tag fresh">market evidence fresh (0.2d)</span>
   </span></div>
 
@@ -3539,17 +3908,22 @@
 
 
 
-<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:40.00%;" title="Live: $87.00">
+<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:90.64%;" title="Live: $87.00">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Live $87.00</span>
-</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:60.00%;" title="Proposed: $87.50">
+</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:93.10%;" title="Proposed: $87.50">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Proposed $87.50</span>
 </div>
-<div class="canonical-ladder-axis axis-min">$86.00</div>
-<div class="canonical-ladder-axis axis-max">$88.50</div>
+<div class="canonical-ladder-marker post-promo" data-canonical-pricing-ladder-marker="post-promo" style="left:6.90%;" title="20% promo → $70.00 (59.64% GM)">
+<span class="pip"></span>
+<span class="pin"></span>
+<span class="label">−20% promo $70.00</span>
+</div>
+<div class="canonical-ladder-axis axis-min">$68.60</div>
+<div class="canonical-ladder-axis axis-max">$88.90</div>
 </div>
 
 </div></div>
@@ -3585,6 +3959,7 @@
     <strong>Proposed $83.50</strong>
     (67.72% GM)
     <span class="ladder-head-delta delta-up">+18.00</span>
+    <span class="ladder-head-promo">@-20% promo → <strong>$66.80</strong> (59.65% GM)</span>
     <span class="ladder-cache-tag very-stale">market evidence VERY stale (11.2d)</span>
   </span></div>
 
@@ -3601,6 +3976,11 @@
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Proposed $83.50</span>
+</div>
+<div class="canonical-ladder-marker post-promo" data-canonical-pricing-ladder-marker="post-promo" style="left:13.12%;" title="20% promo → $66.80 (59.65% GM)">
+<span class="pip"></span>
+<span class="pin"></span>
+<span class="label">−20% promo $66.80</span>
 </div>
 <div class="canonical-ladder-axis axis-min">$64.06</div>
 <div class="canonical-ladder-axis axis-max">$84.94</div>
@@ -3632,13 +4012,14 @@
     <div class="variant-meta">Stop 31 LLC · SmartBud - Flower - Girl Scout Cookies - 3.5g · from 2026-04-01T00:00:00Z</div>
     
   </div>
-  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="357490" data-ladder-min="50.5000" data-ladder-max="57.0000" data-variant="compact">
+  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="357490" data-ladder-min="43.8000" data-ladder-max="57.0000" data-variant="compact">
 <div class="canonical-pricing-ladder-head"><span class="ladder-head-metric">
     Current $51.50 (64.89% GM)
     →
     <strong>Proposed $56.00</strong>
     (67.71% GM)
     <span class="ladder-head-delta delta-up">+4.50</span>
+    <span class="ladder-head-promo">@-20% promo → <strong>$44.80</strong> (59.64% GM)</span>
     <span class="ladder-cache-tag very-stale">market evidence VERY stale (11.4d)</span>
   </span></div>
 
@@ -3647,16 +4028,21 @@
 
 
 
-<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:15.38%;" title="Live: $51.50">
+<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:58.33%;" title="Live: $51.50">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Live $51.50</span>
-</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:84.62%;" title="Proposed: $56.00">
+</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:92.42%;" title="Proposed: $56.00">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Proposed $56.00</span>
 </div>
-<div class="canonical-ladder-axis axis-min">$50.50</div>
+<div class="canonical-ladder-marker post-promo" data-canonical-pricing-ladder-marker="post-promo" style="left:7.58%;" title="20% promo → $44.80 (59.64% GM)">
+<span class="pip"></span>
+<span class="pin"></span>
+<span class="label">−20% promo $44.80</span>
+</div>
+<div class="canonical-ladder-axis axis-min">$43.80</div>
 <div class="canonical-ladder-axis axis-max">$57.00</div>
 </div>
 
@@ -3686,13 +4072,14 @@
     <div class="variant-meta">Stop 31 LLC · SmartBud - Flower - Gorilla Glue #6 - 3.5g · from 2026-04-01T00:00:00Z</div>
     
   </div>
-  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="357577" data-ladder-min="50.5000" data-ladder-max="57.0000" data-variant="compact">
+  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="357577" data-ladder-min="43.8000" data-ladder-max="57.0000" data-variant="compact">
 <div class="canonical-pricing-ladder-head"><span class="ladder-head-metric">
     Current $51.50 (64.89% GM)
     →
     <strong>Proposed $56.00</strong>
     (67.71% GM)
     <span class="ladder-head-delta delta-up">+4.50</span>
+    <span class="ladder-head-promo">@-20% promo → <strong>$44.80</strong> (59.64% GM)</span>
     <span class="ladder-cache-tag absent">no cached market evidence</span>
   </span></div>
 
@@ -3701,16 +4088,21 @@
 
 
 
-<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:15.38%;" title="Live: $51.50">
+<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:58.33%;" title="Live: $51.50">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Live $51.50</span>
-</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:84.62%;" title="Proposed: $56.00">
+</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:92.42%;" title="Proposed: $56.00">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Proposed $56.00</span>
 </div>
-<div class="canonical-ladder-axis axis-min">$50.50</div>
+<div class="canonical-ladder-marker post-promo" data-canonical-pricing-ladder-marker="post-promo" style="left:7.58%;" title="20% promo → $44.80 (59.64% GM)">
+<span class="pip"></span>
+<span class="pin"></span>
+<span class="label">−20% promo $44.80</span>
+</div>
+<div class="canonical-ladder-axis axis-min">$43.80</div>
 <div class="canonical-ladder-axis axis-max">$57.00</div>
 </div>
 
@@ -3740,13 +4132,14 @@
     <div class="variant-meta">Stop 31 LLC · SMARTBUD 3.5 MOTORHEAD · from 2026-05-15T00:00:00Z</div>
     
   </div>
-  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="430552" data-ladder-min="55.0000" data-ladder-max="57.0000" data-variant="compact">
+  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="430552" data-ladder-min="43.8000" data-ladder-max="57.0000" data-variant="compact">
 <div class="canonical-pricing-ladder-head"><span class="ladder-head-metric">
     Current $56.00 (67.71% GM)
     →
     <strong>Proposed $56.00</strong>
     (67.71% GM)
     <span class="ladder-head-delta delta-zero">0.00</span>
+    <span class="ladder-head-promo">@-20% promo → <strong>$44.80</strong> (59.64% GM)</span>
     <span class="ladder-cache-tag fresh">market evidence fresh (0.2d)</span>
   </span></div>
 
@@ -3755,16 +4148,21 @@
 
 
 
-<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:50.00%;" title="Live: $56.00">
+<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:92.42%;" title="Live: $56.00">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Live $56.00</span>
-</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:50.00%;" title="Proposed: $56.00">
+</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:92.42%;" title="Proposed: $56.00">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Proposed $56.00</span>
 </div>
-<div class="canonical-ladder-axis axis-min">$55.00</div>
+<div class="canonical-ladder-marker post-promo" data-canonical-pricing-ladder-marker="post-promo" style="left:7.58%;" title="20% promo → $44.80 (59.64% GM)">
+<span class="pip"></span>
+<span class="pin"></span>
+<span class="label">−20% promo $44.80</span>
+</div>
+<div class="canonical-ladder-axis axis-min">$43.80</div>
 <div class="canonical-ladder-axis axis-max">$57.00</div>
 </div>
 
@@ -3794,13 +4192,14 @@
     <div class="variant-meta">Stop 31 LLC · 1O-5PR-SB26-PNCH · from 2026-05-15T00:00:00Z</div>
     
   </div>
-  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="430516" data-ladder-min="56.5000" data-ladder-max="58.7500" data-variant="compact">
+  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="430516" data-ladder-min="45.2000" data-ladder-max="58.7500" data-variant="compact">
 <div class="canonical-pricing-ladder-head"><span class="ladder-head-metric">
     Current $57.50 (67.57% GM)
     →
     <strong>Proposed $57.75</strong>
     (67.71% GM)
     <span class="ladder-head-delta delta-up">+0.25</span>
+    <span class="ladder-head-promo">@-20% promo → <strong>$46.20</strong> (59.64% GM)</span>
     <span class="ladder-cache-tag fresh">market evidence fresh (0.2d)</span>
   </span></div>
 
@@ -3809,16 +4208,21 @@
 
 
 
-<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:44.44%;" title="Live: $57.50">
+<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:90.77%;" title="Live: $57.50">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Live $57.50</span>
-</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:55.56%;" title="Proposed: $57.75">
+</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:92.62%;" title="Proposed: $57.75">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Proposed $57.75</span>
 </div>
-<div class="canonical-ladder-axis axis-min">$56.50</div>
+<div class="canonical-ladder-marker post-promo" data-canonical-pricing-ladder-marker="post-promo" style="left:7.38%;" title="20% promo → $46.20 (59.64% GM)">
+<span class="pip"></span>
+<span class="pin"></span>
+<span class="label">−20% promo $46.20</span>
+</div>
+<div class="canonical-ladder-axis axis-min">$45.20</div>
 <div class="canonical-ladder-axis axis-max">$58.75</div>
 </div>
 
@@ -3848,13 +4252,14 @@
     <div class="variant-meta">Stop 31 LLC · 1O-5PR-SB26-SCND · from 2026-05-15T00:00:00Z</div>
     
   </div>
-  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="430517" data-ladder-min="56.5000" data-ladder-max="58.7500" data-variant="compact">
+  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="430517" data-ladder-min="45.2000" data-ladder-max="58.7500" data-variant="compact">
 <div class="canonical-pricing-ladder-head"><span class="ladder-head-metric">
     Current $57.50 (67.57% GM)
     →
     <strong>Proposed $57.75</strong>
     (67.71% GM)
     <span class="ladder-head-delta delta-up">+0.25</span>
+    <span class="ladder-head-promo">@-20% promo → <strong>$46.20</strong> (59.64% GM)</span>
     <span class="ladder-cache-tag fresh">market evidence fresh (0.2d)</span>
   </span></div>
 
@@ -3863,16 +4268,21 @@
 
 
 
-<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:44.44%;" title="Live: $57.50">
+<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:90.77%;" title="Live: $57.50">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Live $57.50</span>
-</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:55.56%;" title="Proposed: $57.75">
+</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:92.62%;" title="Proposed: $57.75">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Proposed $57.75</span>
 </div>
-<div class="canonical-ladder-axis axis-min">$56.50</div>
+<div class="canonical-ladder-marker post-promo" data-canonical-pricing-ladder-marker="post-promo" style="left:7.38%;" title="20% promo → $46.20 (59.64% GM)">
+<span class="pip"></span>
+<span class="pin"></span>
+<span class="label">−20% promo $46.20</span>
+</div>
+<div class="canonical-ladder-axis axis-min">$45.20</div>
 <div class="canonical-ladder-axis axis-max">$58.75</div>
 </div>
 
@@ -3902,13 +4312,14 @@
     <div class="variant-meta">Stop 31 LLC · STRAIN GANG- Sour Diesel 2.5g 5pk preroll · from 2026-05-15T00:00:00Z</div>
     
   </div>
-  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="430555" data-ladder-min="69.0000" data-ladder-max="71.0000" data-variant="compact">
+  <div><div class="canonical-pricing-ladder is-compact" data-canonical-pricing-ladder="" data-product-id="430555" data-ladder-min="54.8800" data-ladder-max="71.1200" data-variant="compact">
 <div class="canonical-pricing-ladder-head"><span class="ladder-head-metric">
     Current $70.00 (67.71% GM)
     →
     <strong>Proposed $70.00</strong>
     (67.71% GM)
     <span class="ladder-head-delta delta-zero">0.00</span>
+    <span class="ladder-head-promo">@-20% promo → <strong>$56.00</strong> (59.64% GM)</span>
     <span class="ladder-cache-tag fresh">market evidence fresh (0.2d)</span>
   </span></div>
 
@@ -3917,17 +4328,22 @@
 
 
 
-<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:50.00%;" title="Live: $70.00">
+<div class="canonical-ladder-marker live" data-canonical-pricing-ladder-marker="live" style="left:93.10%;" title="Live: $70.00">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Live $70.00</span>
-</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:50.00%;" title="Proposed: $70.00">
+</div><div class="canonical-ladder-marker proposed" data-canonical-pricing-ladder-marker="proposed" style="left:93.10%;" title="Proposed: $70.00">
 <span class="pip"></span>
 <span class="pin"></span>
 <span class="label">Proposed $70.00</span>
 </div>
-<div class="canonical-ladder-axis axis-min">$69.00</div>
-<div class="canonical-ladder-axis axis-max">$71.00</div>
+<div class="canonical-ladder-marker post-promo" data-canonical-pricing-ladder-marker="post-promo" style="left:6.90%;" title="20% promo → $56.00 (59.64% GM)">
+<span class="pip"></span>
+<span class="pin"></span>
+<span class="label">−20% promo $56.00</span>
+</div>
+<div class="canonical-ladder-axis axis-min">$54.88</div>
+<div class="canonical-ladder-axis axis-max">$71.12</div>
 </div>
 
 </div></div>
