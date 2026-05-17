@@ -184,6 +184,17 @@ function AppShellInner() {
           <Outlet />
         </main>
       </div>
+      {isSidebarCollapsed ? (
+        <button
+          type="button"
+          className="sidebar-reopen-chip"
+          onClick={toggleSidebar}
+          title="Show nav (Esc)"
+          aria-label="Show nav"
+        >
+          ☰ Nav
+        </button>
+      ) : null}
     </div>
   )
 }

@@ -1536,6 +1536,42 @@ pre {
   padding-top: 0.55rem;
 }
 
+/* Floating "show nav" chip — only appears on mobile, only when the
+ * sidebar is collapsed. Desktop has the "Show nav" button up in the
+ * topbar, which is reachable without scrolling. On mobile the topbar
+ * scrolls away as soon as the user moves down the page, so we need
+ * a persistent fixed-position handle to bring the nav back. */
+.sidebar-reopen-chip {
+  display: none;
+}
+
+@media (max-width: 960px) {
+  .sidebar-reopen-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    position: fixed;
+    left: 0.75rem;
+    bottom: calc(0.75rem + env(safe-area-inset-bottom, 0px));
+    z-index: 1000;
+    padding: 0.55rem 0.9rem;
+    border: 1px solid rgba(255, 255, 255, 0.25);
+    border-radius: 999px;
+    background: rgba(20, 20, 30, 0.85);
+    color: #f6f6f8;
+    font: inherit;
+    font-weight: 600;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+    cursor: pointer;
+    /* Make sure tap target is big enough for thumbs. */
+    min-height: 44px;
+  }
+
+  .sidebar-reopen-chip:active {
+    transform: translateY(1px);
+  }
+}
+
 @media (max-width: 960px) {
   .layout-grid,
   .detail-grid,
