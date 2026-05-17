@@ -10,7 +10,6 @@ import {
 import { requireSessionUser } from '../auth/requireSession.js'
 import {
   HttpError,
-  invalidateCatalogMaintenanceSurvey,
   loadCatalogMaintenanceList,
   updateVariantBarcode,
   uploadCatalogMaintenanceImage,
@@ -55,12 +54,14 @@ export async function registerCatalogMaintenanceRoutes(server: FastifyInstance):
       const result = await updateVariantBarcode({
         externalBarcode: body.externalBarcode,
         productId: body.productId,
+        sweedGroupId: body.sweedGroupId,
+        requestedByUserId: user.id,
       })
-      await invalidateCatalogMaintenanceSurvey()
       return reply.send(
         CatalogMaintenanceUpdateBarcodeResponseSchema.parse({
           externalBarcode: result.externalBarcode,
           productId: result.productId,
+          reanalysisJobId: result.reanalysisJobId,
         }),
       )
     } catch (error) {
@@ -95,8 +96,8 @@ export async function registerCatalogMaintenanceRoutes(server: FastifyInstance):
         groupId: fields.groupId,
         productIds: fields.productIds,
         targetType: fields.targetType,
+        requestedByUserId: user.id,
       })
-      await invalidateCatalogMaintenanceSurvey()
       return reply.send(
         CatalogMaintenanceUploadResultSchema.parse({
           affectedProductIds: result.affectedProductIds,
@@ -104,6 +105,7 @@ export async function registerCatalogMaintenanceRoutes(server: FastifyInstance):
           groupId: fields.groupId,
           targetType: fields.targetType,
           uploadedBlobId: result.uploadedBlobId,
+          reanalysisJobId: result.reanalysisJobId,
         }),
       )
     } catch (error) {

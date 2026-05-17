@@ -213,6 +213,14 @@ function MaintenanceCard(props: CardProps) {
   const [file, setFile] = useState<File | null>(null)
   const [localPreviewUrl, setLocalPreviewUrl] = useState<string | null>(null)
   const [selectedVariantIds, setSelectedVariantIds] = useState<number[]>(() => defaultSelectedVariantIds(group))
+  // Optimistic UI overlay: after a successful upload we keep showing the
+  // just-uploaded image (and a "syncing…" pill) until the next server
+  // refresh produces fresh data. This lets the operator see their fix
+  // immediately, even though the worker that updates the DB cache may
+  // be a few seconds behind.
+  const [optimisticImageUrl, setOptimisticImageUrl] = useState<string | null>(null)
+  const [optimisticAffectedProductIds, setOptimisticAffectedProductIds] = useState<readonly number[]>([])
+  const [syncingReanalysis, setSyncingReanalysis] = useState(false)
   const inputRef = useRef<HTMLInputElement | null>(null)
 
   useEffect(() => {
@@ -269,6 +277,19 @@ function MaintenanceCard(props: CardProps) {
         const errorPayload = await maybeReadErrorPayload(response)
         throw new Error(errorPayload ?? `${response.status} ${response.statusText}`)
       }
+      const payload = (await response.json()) as {
+        blobUrl: string | null
+        affectedProductIds?: number[]
+        reanalysisJobId?: number | null
+      }
+      // Pin the just-uploaded image as the optimistic preview so the
+      // operator can see their fix immediately, even before the worker
+      // refreshes the DB-cached live state.
+      setOptimisticImageUrl(payload.blobUrl ?? localPreviewUrl ?? null)
+      setOptimisticAffectedProductIds(
+        mode === 'group' ? [] : (payload.affectedProductIds ?? selectedVariantIds),
+      )
+      setSyncingReanalysis(payload.reanalysisJobId !== null && payload.reanalysisJobId !== undefined)
       setFile(null)
       if (inputRef.current) {
         inputRef.current.value = ''
@@ -294,14 +315,14 @@ function MaintenanceCard(props: CardProps) {
       ? 'Upload group photo'
       : `Upload variant photo (${selectedVariantIds.length}/${group.variants.length})`
 
+  const cardPreviewSrc = (mode === 'group' ? optimisticImageUrl : null) ?? localPreviewUrl ?? group.groupPreviewImageUrl
+
   return (
     <article className={`catalog-maintenance-card${disabled ? ' is-disabled' : ''}`}>
       <div className="catalog-maintenance-card-top">
         <div className="catalog-maintenance-card-preview">
-          {localPreviewUrl ? (
-            <img src={localPreviewUrl} alt="Pending upload preview" loading="lazy" />
-          ) : group.groupPreviewImageUrl ? (
-            <img src={group.groupPreviewImageUrl} alt={`${displayGroupName(group)} group image`} loading="lazy" />
+          {cardPreviewSrc ? (
+            <img src={cardPreviewSrc} alt={`${displayGroupName(group)} preview`} loading="lazy" />
           ) : (
             <div className="catalog-maintenance-card-preview-empty">No image</div>
           )}
@@ -310,6 +331,7 @@ function MaintenanceCard(props: CardProps) {
           <div className="catalog-maintenance-card-title">
             <strong>{displayGroupName(group)}</strong>
             {group.brandName ? <span className="subtle-copy">{group.brandName}</span> : null}
+            {syncingReanalysis ? <Pill tone="muted">syncing…</Pill> : null}
           </div>
           <div className="catalog-maintenance-card-tags">
             {group.inStockSites.map((site) => (
@@ -352,7 +374,14 @@ function MaintenanceCard(props: CardProps) {
                 <VariantRow
                   variant={variant}
                   mode={mode}
+                  sweedGroupId={group.groupId}
                   selected={selectedVariantIds.includes(variant.productId)}
+                  optimisticPreviewUrl={
+                    optimisticAffectedProductIds.includes(variant.productId) ? optimisticImageUrl : null
+                  }
+                  syncingReanalysis={
+                    syncingReanalysis && optimisticAffectedProductIds.includes(variant.productId)
+                  }
                   onToggle={() => toggleVariant(variant.productId)}
                   onBarcodeUpdated={(_productId, externalBarcode) => {
                     void onComplete(`Barcode saved for ${variantLabel(variant)}: ${externalBarcode}`)
@@ -402,14 +431,27 @@ function MaintenanceCard(props: CardProps) {
 interface VariantRowProps {
   variant: CatalogMaintenanceVariant
   mode: Mode
+  sweedGroupId: number
   selected: boolean
+  optimisticPreviewUrl: string | null
+  syncingReanalysis: boolean
   onToggle: () => void
   onBarcodeUpdated: (productId: number, externalBarcode: string) => void
   onBarcodeError: (message: string) => void
 }
 
 function VariantRow(props: VariantRowProps) {
-  const { variant, mode, selected, onToggle, onBarcodeUpdated, onBarcodeError } = props
+  const {
+    variant,
+    mode,
+    sweedGroupId,
+    selected,
+    optimisticPreviewUrl,
+    syncingReanalysis,
+    onToggle,
+    onBarcodeUpdated,
+    onBarcodeError,
+  } = props
   const [editingBarcode, setEditingBarcode] = useState(false)
   const [draftBarcode, setDraftBarcode] = useState<string>(variant.externalBarcode ?? '')
   const [savingBarcode, setSavingBarcode] = useState(false)
@@ -434,7 +476,11 @@ function VariantRow(props: VariantRowProps) {
     setSavingBarcode(true)
     try {
       const response = await fetch(buildAppPath('/api/catalog/maintenance/barcode'), {
-        body: JSON.stringify({ externalBarcode: trimmed, productId: variant.productId }),
+        body: JSON.stringify({
+          externalBarcode: trimmed,
+          productId: variant.productId,
+          sweedGroupId,
+        }),
         credentials: 'same-origin',
         headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
         method: 'POST',
@@ -509,7 +555,9 @@ function VariantRow(props: VariantRowProps) {
           </label>
         ) : null}
         <span className="catalog-maintenance-variant-thumb">
-          {variant.previewImageUrl ? (
+          {optimisticPreviewUrl ? (
+            <img src={optimisticPreviewUrl} alt={`${variantLabel(variant)} just-uploaded image`} loading="lazy" />
+          ) : variant.previewImageUrl ? (
             <img src={variant.previewImageUrl} alt={`${variantLabel(variant)} variant image`} loading="lazy" />
           ) : (
             <span className="catalog-maintenance-variant-thumb-empty">—</span>
@@ -518,10 +566,13 @@ function VariantRow(props: VariantRowProps) {
         <span className="catalog-maintenance-variant-text">
           <strong>{variantLabel(variant)}</strong>
           <span className="subtle-copy">
-            {variant.variantSpecificImageCount > 0
-              ? `${variant.variantSpecificImageCount} own image${variant.variantSpecificImageCount === 1 ? '' : 's'}`
-              : 'no variant-specific image'}
+            {optimisticPreviewUrl
+              ? 'image just uploaded'
+              : variant.variantSpecificImageCount > 0
+                ? `${variant.variantSpecificImageCount} own image${variant.variantSpecificImageCount === 1 ? '' : 's'}`
+                : 'no variant-specific image'}
           </span>
+          {syncingReanalysis ? <span className="subtle-copy">· syncing…</span> : null}
         </span>
       </div>
 

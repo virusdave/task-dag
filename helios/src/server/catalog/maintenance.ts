@@ -1,5 +1,5 @@
 /**
- * Catalog Image Maintenance — server-side survey + upload helpers.
+ * Catalog Image Maintenance — DB-backed survey + Sweed write helpers.
  *
  * The page under /catalog/maintenance surfaces two categories of catalog
  * gaps for in-stock SKUs:
@@ -10,14 +10,29 @@
  *      per-variant image set (some variants only inherit the group image,
  *      or every variant shares the same single variant image)
  *
- * The operator fixes them by uploading or capturing a photo on the spot,
- * which is attached either to the Sweed group or to a specific set of its
- * variants via `store.product.group.edit` / `store.product.edit` (with the
- * `imagesIds` field).
+ * Read path:
+ *   We do NOT crawl Sweed at page-render time. Both lists are derived
+ *   entirely from Helios DB tables that other workers already keep
+ *   fresh:
+ *     - `catalog_groups.live_state_json`  (per-group + per-variant
+ *       image refs, barcode, size, pack-of-size, brand/category/etc.)
+ *     - `stock_variant_state`             (which in-stock products at
+ *       which site, plus the most recent METRC tags observed there)
+ *   A small in-memory cache keyed by query parameters keeps the
+ *   per-render cost negligible. `?refresh=1` and successful writes
+ *   both invalidate the cache.
  *
- * We hit Sweed live and cache the survey in process for 10 minutes; uploads
- * invalidate the cache immediately so the fixed candidate disappears on the
- * next refresh.
+ * Write path:
+ *   Uploads / barcode edits still need Sweed. We open one locked
+ *   write batch per operation, pin the Sweed dealer context exactly
+ *   once at the top (then skip redundant `store.auth.dealer.set`
+ *   calls), push the new image blob, attach it, and on success:
+ *     - invalidate the in-memory survey cache
+ *     - flag the affected catalog_group as `needs_reanalysis` and
+ *       enqueue a forced `catalog.sync.group_detail` job so the
+ *       worker pulls fresh live state into `live_state_json` ASAP
+ *   The route returns the freshly-uploaded blob URL so the client can
+ *   optimistically render it without waiting for the worker.
  */
 
 import { randomUUID } from 'node:crypto'
@@ -25,6 +40,7 @@ import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 
 import {
+  buildCatalogGroupModuleScope,
   HELIOS_PENDING_PURCHASE_SITE_DEALERS,
   type CatalogMaintenanceGroup,
   type CatalogMaintenanceListResponse,
@@ -32,14 +48,22 @@ import {
   type CatalogMaintenanceVariant,
   type HeliosPendingPurchaseSiteDealer,
 } from '../../shared/contracts/index.js'
+import {
+  NormalizedCatalogGroupLiveStateSchema,
+  type NormalizedCatalogGroupLiveState,
+  type NormalizedCatalogImageRef,
+  type NormalizedCatalogProductLiveState,
+} from '../../worker/catalog/liveState.js'
 import { getServerEnv } from '../config/env.js'
+import { getPool, type Queryable } from '../db/pool.js'
+import { enqueueJob } from '../jobs/enqueueJob.js'
+import {
+  SWEED_SESSION_CONCURRENCY_KEY,
+  getOptionalSweedSessionConcurrencyKey,
+} from '../jobs/concurrency.js'
 
-const SURVEY_TTL_MS = 10 * 60 * 1000
-const GROUPED_INVENTORY_PAGE_SIZE = 200
+const SURVEY_TTL_MS = 60 * 1000
 const SWEED_REQUEST_TIMEOUT_MS = 30_000
-const GROUP_FETCH_CONCURRENCY = 6
-const PRODUCT_FETCH_CONCURRENCY = 8
-const VARIANT_FETCH_CONCURRENCY = 6
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024
 const ALLOWED_IMAGE_MIME_TYPES = new Set([
   'image/jpeg',
@@ -60,116 +84,37 @@ const DealerSetResultSchema = z.object({
   }),
 })
 
-const SweedImageSchema = z
+const SweedImageRefSchema = z
   .object({
     id: z.union([z.coerce.number().int(), z.string().trim().min(1)]).nullable().optional(),
     url: z.string().nullable().optional(),
   })
   .passthrough()
 
-const SweedNamedRefSchema = z
-  .object({
-    id: z.coerce.number().int().nullable().optional(),
-    name: z.string().nullable().optional(),
-  })
-  .passthrough()
-
-const SweedProductSchema = z
+const SweedProductImagesSchema = z
   .object({
     id: z.coerce.number().int(),
-    name: z.string().nullable().optional(),
-    shortName: z.string().nullable().optional(),
-    tab: z.string().nullable().optional(),
-    packOfSize: z.coerce.number().int().nullable().optional(),
-    size: SweedNamedRefSchema.nullable().optional(),
-    productGroupId: z.union([z.coerce.number().int(), z.string().trim().min(1)]).nullable().optional(),
-    images: z.array(SweedImageSchema).default([]),
-    groupImages: z.array(SweedImageSchema).default([]),
     externalBarcode: z.string().nullable().optional(),
+    images: z.array(SweedImageRefSchema).default([]),
   })
   .passthrough()
 
-const SweedProductDetailWrappedSchema = z
-  .object({ product: SweedProductSchema })
+const SweedProductDetailWrappedImagesSchema = z
+  .object({ product: SweedProductImagesSchema })
   .passthrough()
   .transform((value) => value.product)
 
-const SweedProductDetailSchema = z.union([SweedProductDetailWrappedSchema, SweedProductSchema])
+const SweedProductImagesDetailSchema = z.union([
+  SweedProductDetailWrappedImagesSchema,
+  SweedProductImagesSchema,
+])
 
-const SweedGroupSchema = z
+const SweedGroupImagesSchema = z
   .object({
     id: z.coerce.number().int(),
-    name: z.string().nullable().optional(),
-    brand: SweedNamedRefSchema.nullable().optional(),
-    category: SweedNamedRefSchema.nullable().optional(),
-    subcategory: SweedNamedRefSchema.nullable().optional(),
-    images: z.array(SweedImageSchema).default([]),
-    products: z.array(SweedProductSchema).default([]),
+    images: z.array(SweedImageRefSchema).default([]),
   })
   .passthrough()
-
-const GroupedInventoryResponseSchema = z
-  .object({
-    data: z
-      .array(
-        z
-          .object({
-            product: z
-              .object({
-                id: z.coerce.number().int().positive().optional(),
-                name: z.string().nullable().optional(),
-                shortName: z.string().nullable().optional(),
-                productGroupId: z
-                  .union([z.coerce.number().int(), z.string().trim().min(1)])
-                  .nullable()
-                  .optional(),
-                externalBarcode: z.string().nullable().optional(),
-              })
-              .passthrough()
-              .optional(),
-            items: z
-              .array(
-                z
-                  .object({
-                    metrcTag: z.string().nullable().optional(),
-                    metrcPackageTag: z.string().nullable().optional(),
-                    packageMetrcTag: z.string().nullable().optional(),
-                    availableQty: z.coerce.number().nullable().optional(),
-                  })
-                  .passthrough(),
-              )
-              .default([]),
-          })
-          .passthrough(),
-      )
-      .default([]),
-    totalCount: z.coerce.number().int().min(0).optional(),
-  })
-  .passthrough()
-
-type SweedImage = z.infer<typeof SweedImageSchema>
-type SweedProduct = z.infer<typeof SweedProductSchema>
-type SweedGroup = z.infer<typeof SweedGroupSchema>
-
-interface InStockVariantSeed {
-  productId: number
-  productGroupId: number | null
-  name: string | null
-  shortName: string | null
-  siteKeys: Set<string>
-  metrcTags: Set<string>
-  externalBarcode: string | null
-}
-
-interface ResolvedVariant {
-  productId: number
-  groupId: number
-  name: string | null
-  shortName: string | null
-  siteKeys: Set<string>
-  metrcTags: Set<string>
-  externalBarcode: string | null
-}
 
 interface SurveyResult {
   missingGroupImage: CatalogMaintenanceGroup[]
@@ -184,7 +129,8 @@ interface CachedSurvey {
 
 let cachedSurvey: CachedSurvey | null = null
 let inFlightSurvey: Promise<SurveyResult> | null = null
-let sweedSessionQueue: Promise<void> = Promise.resolve()
+let sweedWriteQueue: Promise<void> = Promise.resolve()
+let sweedWriteDealerId: number | null = null
 
 export interface MaintenanceSurveyOptions {
   forceRefresh?: boolean
@@ -218,7 +164,7 @@ export async function loadCatalogMaintenanceSurvey(
 
   inFlightSurvey = (async () => {
     try {
-      const result = await buildSurvey()
+      const result = await buildSurveyFromDb()
       cachedSurvey = {
         expiresAt: Date.now() + SURVEY_TTL_MS,
         value: result,
@@ -232,216 +178,278 @@ export async function loadCatalogMaintenanceSurvey(
   return inFlightSurvey
 }
 
-async function buildSurvey(): Promise<SurveyResult> {
-  return withSweedSessionLockReturning(async () => buildSurveyWithinLock())
+/* -------------------------------------------------------------------------- */
+/*  Survey: read entirely from cached DB tables.                              */
+/* -------------------------------------------------------------------------- */
+
+interface CatalogGroupRow {
+  id: number
+  sweed_group_id: number
+  group_name: string | null
+  brand_name: string | null
+  category_name: string | null
+  subcategory_name: string | null
+  live_state_json: unknown
+  last_synced_at: Date | null
+  needs_reanalysis_at: Date | null
 }
 
-async function buildSurveyWithinLock(): Promise<SurveyResult> {
+interface StockRow {
+  site_dealer_id: number
+  product_id: number
+  metrc_tags_json: unknown
+}
+
+async function buildSurveyFromDb(): Promise<SurveyResult> {
+  const db = getPool()
   const warnings: string[] = []
-  const scannedDealerIds: number[] = []
-  const variantSeeds = new Map<number, InStockVariantSeed>()
+  const scannedDealerIds: number[] = HELIOS_PENDING_PURCHASE_SITE_DEALERS.map((site) => site.dealerId)
 
-  {
-    for (const site of HELIOS_PENDING_PURCHASE_SITE_DEALERS) {
-      scannedDealerIds.push(site.dealerId)
-      await collectInStockVariantsForSite(site, variantSeeds)
+  const [groupsResult, stockResult] = await Promise.all([
+    db.query<CatalogGroupRow>(
+      `
+        select
+          id,
+          sweed_group_id,
+          group_name,
+          brand_name,
+          category_name,
+          subcategory_name,
+          live_state_json,
+          last_synced_at,
+          needs_reanalysis_at
+        from catalog_groups
+        where deleted_at is null
+      `,
+    ),
+    db.query<StockRow>(
+      `
+        select site_dealer_id, product_id, metrc_tags_json
+        from stock_variant_state
+        where is_on_stock = true
+          and site_dealer_id = any($1::bigint[])
+      `,
+      [scannedDealerIds],
+    ),
+  ])
+
+  const inStockByProductId = new Map<number, { siteKeys: Set<string>; metrcTags: Set<string> }>()
+  const siteKeyByDealerId = new Map<number, string>()
+  for (const site of HELIOS_PENDING_PURCHASE_SITE_DEALERS) {
+    siteKeyByDealerId.set(site.dealerId, site.siteKey)
+  }
+
+  for (const stockRow of stockResult.rows) {
+    const siteKey = siteKeyByDealerId.get(stockRow.site_dealer_id)
+    if (!siteKey) {
+      continue
+    }
+    let bucket = inStockByProductId.get(stockRow.product_id)
+    if (!bucket) {
+      bucket = { siteKeys: new Set(), metrcTags: new Set() }
+      inStockByProductId.set(stockRow.product_id, bucket)
+    }
+    bucket.siteKeys.add(siteKey)
+    for (const tag of parseMetrcTagsJson(stockRow.metrc_tags_json)) {
+      bucket.metrcTags.add(tag)
+    }
+  }
+
+  let oldestSyncedAt: Date | null = null
+  let totalInStockVariants = 0
+  let totalUniqueGroups = 0
+  const matchedProductIds = new Set<number>()
+  const reanalyzingGroupNames: string[] = []
+
+  const missingGroupImage: CatalogMaintenanceGroup[] = []
+  const missingVariantImages: CatalogMaintenanceGroup[] = []
+
+  for (const row of groupsResult.rows) {
+    const parsed = safeParseLiveState(row.live_state_json)
+    if (!parsed) {
+      warnings.push(`Skipping group ${row.id} (${row.group_name ?? 'unnamed'}): live_state_json failed to parse.`)
+      continue
     }
 
-    // Variants whose grouped-inventory row did not surface productGroupId
-    // require a one-off store.product.get to discover it.
-    const variantsNeedingGroupId = [...variantSeeds.values()].filter(
-      (seed) => seed.productGroupId === null,
-    )
-    if (variantsNeedingGroupId.length > 0) {
-      await runWithConcurrency(variantsNeedingGroupId, PRODUCT_FETCH_CONCURRENCY, async (seed) => {
-        try {
-          const product = await fetchProductDetail(seed.productId)
-          const numericGroupId = coerceOptionalInt(product.productGroupId)
-          if (numericGroupId !== null) {
-            seed.productGroupId = numericGroupId
-          }
-        } catch (error) {
-          warnings.push(
-            `Failed to resolve productGroupId for product ${seed.productId}: ${describeError(error)}`,
-          )
-        }
-      })
+    if (row.last_synced_at !== null) {
+      if (oldestSyncedAt === null || row.last_synced_at.getTime() < oldestSyncedAt.getTime()) {
+        oldestSyncedAt = row.last_synced_at
+      }
     }
 
-    const resolvedByGroup = new Map<number, ResolvedVariant[]>()
-    for (const seed of variantSeeds.values()) {
-      if (seed.productGroupId === null) {
+    const liveState = parsed
+    const inStockVariantEntries: Array<{
+      product: NormalizedCatalogProductLiveState
+      siteKeys: string[]
+      metrcTags: string[]
+    }> = []
+
+    for (const product of liveState.products) {
+      const stock = inStockByProductId.get(product.productId)
+      if (!stock) {
         continue
       }
-      const groupId = seed.productGroupId
-      const bucket = resolvedByGroup.get(groupId) ?? []
-      bucket.push({
-        productId: seed.productId,
-        groupId,
-        name: seed.name,
-        shortName: seed.shortName,
-        siteKeys: seed.siteKeys,
-        metrcTags: seed.metrcTags,
-        externalBarcode: seed.externalBarcode,
+      matchedProductIds.add(product.productId)
+      inStockVariantEntries.push({
+        product,
+        siteKeys: [...stock.siteKeys].sort(),
+        metrcTags: [...stock.metrcTags].sort(),
       })
-      resolvedByGroup.set(groupId, bucket)
     }
 
-    const groupIds = [...resolvedByGroup.keys()].sort((left, right) => left - right)
-    const fetchedGroups = new Map<number, SweedGroup>()
+    if (inStockVariantEntries.length === 0) {
+      continue
+    }
 
-    await runWithConcurrency(groupIds, GROUP_FETCH_CONCURRENCY, async (groupId) => {
-      try {
-        const group = await fetchGroupDetail(groupId)
-        fetchedGroups.set(groupId, group)
-      } catch (error) {
-        warnings.push(`Failed to fetch group ${groupId}: ${describeError(error)}`)
-      }
+    totalInStockVariants += inStockVariantEntries.length
+    totalUniqueGroups += 1
+
+    const summary = buildGroupSummary({
+      catalogGroupId: row.id,
+      sweedGroupId: row.sweed_group_id,
+      groupName: row.group_name ?? liveState.groupName,
+      brandName: row.brand_name,
+      categoryName: row.category_name,
+      subcategoryName: row.subcategory_name,
+      liveState,
+      inStockEntries: inStockVariantEntries,
+      needsReanalysis: row.needs_reanalysis_at !== null,
     })
 
-    // For variant-level analysis we need to know which images live on the
-    // variant itself vs. inherited from the group. The grouped products
-    // embedded in store.product.group.get may or may not include the
-    // images array; when missing or empty we fall back to per-variant
-    // fetches but only for groups that look like candidates for the
-    // "missing exhaustive variant images" list.
-    const variantDetailsNeeded: number[] = []
-    for (const [groupId, variants] of resolvedByGroup) {
-      if (variants.length < 2) {
-        continue
-      }
-      const group = fetchedGroups.get(groupId)
-      if (!group) {
-        continue
-      }
-      for (const variant of variants) {
-        const embedded = group.products.find((entry) => entry.id === variant.productId)
-        const hasImagesField =
-          embedded !== undefined && (embedded.images.length > 0 || embedded.groupImages.length > 0)
-        if (!embedded || !hasImagesField) {
-          variantDetailsNeeded.push(variant.productId)
-        }
-      }
+    if (row.needs_reanalysis_at !== null) {
+      reanalyzingGroupNames.push(summary.groupName ?? `Group #${summary.groupId}`)
     }
 
-    const variantDetailMap = new Map<number, SweedProduct>()
-    if (variantDetailsNeeded.length > 0) {
-      await runWithConcurrency(variantDetailsNeeded, VARIANT_FETCH_CONCURRENCY, async (productId) => {
-        try {
-          const product = await fetchProductDetail(productId)
-          variantDetailMap.set(productId, product)
-        } catch (error) {
-          warnings.push(`Failed to fetch variant ${productId}: ${describeError(error)}`)
-        }
-      })
+    if (summary.groupImageCount === 0) {
+      missingGroupImage.push(summary)
+      continue
     }
 
-    const missingGroupImage: CatalogMaintenanceGroup[] = []
-    const missingVariantImages: CatalogMaintenanceGroup[] = []
-
-    for (const groupId of groupIds) {
-      const group = fetchedGroups.get(groupId)
-      if (!group) {
-        continue
-      }
-      const inStockVariants = resolvedByGroup.get(groupId) ?? []
-      const summary = buildGroupSummary(group, inStockVariants, variantDetailMap)
-
-      if (summary.groupImageCount === 0) {
-        missingGroupImage.push(summary)
-        continue
-      }
-
-      if (inStockVariants.length >= 2) {
-        const variantsWithOwnImage = summary.variants.filter((variant) => variant.variantSpecificImageCount > 0)
-        const distinctVariantImageSignatures = new Set(
-          summary.variants.map((variant) => variant.previewImageUrl ?? `id:${variant.productId}`),
-        )
-        if (
-          variantsWithOwnImage.length < inStockVariants.length ||
-          distinctVariantImageSignatures.size < inStockVariants.length
-        ) {
-          missingVariantImages.push(summary)
-        }
+    if (summary.inStockVariantCount >= 2) {
+      const variantsWithOwnImage = summary.variants.filter((variant) => variant.variantSpecificImageCount > 0)
+      const distinctVariantImageSignatures = new Set(
+        summary.variants.map((variant) => variant.previewImageUrl ?? `id:${variant.productId}`),
+      )
+      if (
+        variantsWithOwnImage.length < summary.inStockVariantCount ||
+        distinctVariantImageSignatures.size < summary.inStockVariantCount
+      ) {
+        missingVariantImages.push(summary)
       }
     }
-
-    const meta: CatalogMaintenanceSurveyMeta = {
-      generatedAt: new Date().toISOString(),
-      expiresAt: new Date(Date.now() + SURVEY_TTL_MS).toISOString(),
-      scannedDealerIds,
-      totalInStockVariants: variantSeeds.size,
-      totalUniqueGroups: groupIds.length,
-      warnings,
-    }
-
-    missingGroupImage.sort(compareGroupForUi)
-    missingVariantImages.sort(compareGroupForUi)
-
-    return { missingGroupImage, missingVariantImages, meta }
   }
+
+  const unmatchedProductIds: number[] = []
+  for (const productId of inStockByProductId.keys()) {
+    if (!matchedProductIds.has(productId)) {
+      unmatchedProductIds.push(productId)
+    }
+  }
+  if (unmatchedProductIds.length > 0) {
+    const sample = unmatchedProductIds.slice(0, 5).join(', ')
+    warnings.push(
+      `${unmatchedProductIds.length} in-stock variants were skipped because no cached catalog_groups row contains them (sample productIds: ${sample}).`,
+    )
+  }
+  if (reanalyzingGroupNames.length > 0) {
+    const sample = reanalyzingGroupNames.slice(0, 5).join(', ')
+    warnings.push(
+      `${reanalyzingGroupNames.length} group${reanalyzingGroupNames.length === 1 ? ' is' : 's are'} pending worker reanalysis after a recent edit (sample: ${sample}).`,
+    )
+  }
+
+  missingGroupImage.sort(compareGroupForUi)
+  missingVariantImages.sort(compareGroupForUi)
+
+  const generatedAtMs = oldestSyncedAt?.getTime() ?? Date.now()
+  const meta: CatalogMaintenanceSurveyMeta = {
+    generatedAt: new Date(generatedAtMs).toISOString(),
+    expiresAt: new Date(Date.now() + SURVEY_TTL_MS).toISOString(),
+    scannedDealerIds,
+    totalInStockVariants,
+    totalUniqueGroups,
+    warnings,
+  }
+
+  return { missingGroupImage, missingVariantImages, meta }
 }
 
-function buildGroupSummary(
-  group: SweedGroup,
-  inStockVariants: ResolvedVariant[],
-  variantDetailMap: Map<number, SweedProduct>,
-): CatalogMaintenanceGroup {
-  const groupImageCount = group.images.length
-  const groupPreviewImageUrl = pickPreviewUrl(group.images)
-  const groupImageIds = new Set(
-    group.images.map((image) => normalizeImageId(image)).filter((value): value is string => value !== null),
-  )
+function safeParseLiveState(value: unknown): NormalizedCatalogGroupLiveState | null {
+  const result = NormalizedCatalogGroupLiveStateSchema.safeParse(value)
+  return result.success ? result.data : null
+}
 
-  const allSiteKeys = new Set<string>()
-  for (const variant of inStockVariants) {
-    for (const siteKey of variant.siteKeys) {
-      allSiteKeys.add(siteKey)
+function parseMetrcTagsJson(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return []
+  }
+  const tags: string[] = []
+  for (const entry of value) {
+    if (typeof entry === 'string') {
+      const trimmed = entry.trim()
+      if (trimmed.length > 0) {
+        tags.push(trimmed)
+      }
     }
   }
+  return tags
+}
+
+interface GroupSummaryInput {
+  catalogGroupId: number
+  sweedGroupId: number
+  groupName: string | null
+  brandName: string | null
+  categoryName: string | null
+  subcategoryName: string | null
+  liveState: NormalizedCatalogGroupLiveState
+  inStockEntries: Array<{
+    product: NormalizedCatalogProductLiveState
+    siteKeys: string[]
+    metrcTags: string[]
+  }>
+  needsReanalysis: boolean
+}
+
+function buildGroupSummary(input: GroupSummaryInput): CatalogMaintenanceGroup {
+  const groupImages = input.liveState.images
+  const groupImageIds = new Set(
+    groupImages.map((image) => image.id).filter((id): id is string => id !== null),
+  )
+  const groupImageUrls = new Set(
+    groupImages.map((image) => image.url).filter((url): url is string => url !== null),
+  )
 
   const variants: CatalogMaintenanceVariant[] = []
-  for (const variant of inStockVariants) {
-    const embedded = group.products.find((entry) => entry.id === variant.productId)
-    const detail = variantDetailMap.get(variant.productId) ?? null
-    const sourceImages = pickBestImageSource(embedded, detail)
-    const variantSpecificImageCount = sourceImages.filter((image) => {
-      const id = normalizeImageId(image)
-      if (id === null) {
+  const allSiteKeys = new Set<string>()
+  for (const entry of input.inStockEntries) {
+    for (const siteKey of entry.siteKeys) {
+      allSiteKeys.add(siteKey)
+    }
+    const ownImages = entry.product.images
+    const variantSpecificImageCount = ownImages.filter((image) => {
+      if (image.id !== null && groupImageIds.has(image.id)) {
         return false
       }
-      return !groupImageIds.has(id)
+      if (image.id === null && image.url !== null && groupImageUrls.has(image.url)) {
+        return false
+      }
+      return true
     }).length
 
-    const baseProduct: SweedProduct = detail ?? embedded ?? {
-      id: variant.productId,
-      name: variant.name,
-      shortName: variant.shortName,
-      tab: null,
-      packOfSize: null,
-      size: null,
-      productGroupId: group.id,
-      images: [],
-      groupImages: [],
-      externalBarcode: null,
-    }
-
-    const variantExternalBarcode =
-      nonEmptyString(baseProduct.externalBarcode) ?? variant.externalBarcode
-
     variants.push({
-      productId: variant.productId,
-      name: baseProduct.name ?? variant.name,
-      shortName: baseProduct.shortName ?? variant.shortName,
-      tab: baseProduct.tab ?? null,
-      packOfSize: baseProduct.packOfSize ?? null,
-      sizeName: baseProduct.size?.name ?? null,
-      inStockSites: [...variant.siteKeys].sort(),
-      imageCount: sourceImages.length,
+      productId: entry.product.productId,
+      name: entry.product.name,
+      shortName: entry.product.shortName,
+      tab: entry.product.tab,
+      packOfSize: entry.product.packOfSize,
+      sizeName: entry.product.sizeName,
+      inStockSites: entry.siteKeys,
+      imageCount: ownImages.length > 0 ? ownImages.length : groupImages.length,
       variantSpecificImageCount,
-      previewImageUrl: pickPreviewUrl(sourceImages),
-      metrcTags: [...variant.metrcTags].sort(),
-      externalBarcode: variantExternalBarcode,
+      previewImageUrl: pickPreviewUrl(ownImages) ?? pickPreviewUrl(groupImages) ?? entry.product.imageUrl,
+      metrcTags: entry.metrcTags,
+      externalBarcode: entry.product.externalBarcode,
     })
   }
 
@@ -452,16 +460,16 @@ function buildGroupSummary(
   })
 
   return {
-    groupId: group.id,
-    groupName: group.name ?? null,
-    brandName: group.brand?.name ?? null,
-    categoryName: group.category?.name ?? null,
-    subcategoryName: group.subcategory?.name ?? null,
-    groupImageCount,
-    groupPreviewImageUrl,
+    groupId: input.sweedGroupId,
+    groupName: input.groupName ?? input.liveState.groupName,
+    brandName: input.brandName ?? input.liveState.brand,
+    categoryName: input.categoryName ?? input.liveState.category,
+    subcategoryName: input.subcategoryName ?? input.liveState.subcategory,
+    groupImageCount: groupImages.length,
+    groupPreviewImageUrl: pickPreviewUrl(groupImages) ?? input.liveState.imageUrl,
     inStockSites: [...allSiteKeys].sort(),
-    inStockVariantCount: inStockVariants.length,
-    totalVariantCount: group.products.length,
+    inStockVariantCount: input.inStockEntries.length,
+    totalVariantCount: input.liveState.products.length,
     variants,
   }
 }
@@ -472,182 +480,13 @@ function compareGroupForUi(left: CatalogMaintenanceGroup, right: CatalogMaintena
   return leftKey.localeCompare(rightKey)
 }
 
-function pickBestImageSource(
-  embedded: SweedProduct | undefined,
-  detail: SweedProduct | null,
-): SweedImage[] {
-  if (detail && detail.images.length > 0) {
-    return detail.images
-  }
-  if (embedded && embedded.images.length > 0) {
-    return embedded.images
-  }
-  if (detail && detail.groupImages.length > 0) {
-    return detail.groupImages
-  }
-  if (embedded && embedded.groupImages.length > 0) {
-    return embedded.groupImages
-  }
-  return []
-}
-
-function pickPreviewUrl(images: SweedImage[]): string | null {
+function pickPreviewUrl(images: NormalizedCatalogImageRef[]): string | null {
   for (const image of images) {
     if (typeof image.url === 'string' && image.url.length > 0) {
       return image.url
     }
   }
   return null
-}
-
-function normalizeImageId(image: SweedImage): string | null {
-  if (image.id === undefined || image.id === null) {
-    return null
-  }
-  return String(image.id)
-}
-
-function collectMetrcTagsFromInventoryRow(
-  items: ReadonlyArray<{
-    metrcTag?: string | null
-    metrcPackageTag?: string | null
-    packageMetrcTag?: string | null
-    availableQty?: number | null
-  }>,
-): string[] {
-  const tags: string[] = []
-  for (const item of items) {
-    if (typeof item.availableQty === 'number' && item.availableQty <= 0) {
-      continue
-    }
-    const tag = nonEmptyString(item.metrcTag) ?? nonEmptyString(item.metrcPackageTag) ?? nonEmptyString(item.packageMetrcTag)
-    if (tag) {
-      tags.push(tag)
-    }
-  }
-  return tags
-}
-
-function nonEmptyString(value: unknown): string | null {
-  if (typeof value !== 'string') {
-    return null
-  }
-  const trimmed = value.trim()
-  return trimmed.length === 0 ? null : trimmed
-}
-
-function coerceOptionalInt(value: unknown): number | null {
-  if (typeof value === 'number' && Number.isInteger(value)) {
-    return value
-  }
-  if (typeof value === 'string' && value.trim().length > 0) {
-    const parsed = Number(value)
-    if (Number.isInteger(parsed)) {
-      return parsed
-    }
-  }
-  return null
-}
-
-async function collectInStockVariantsForSite(
-  site: HeliosPendingPurchaseSiteDealer,
-  variantSeeds: Map<number, InStockVariantSeed>,
-): Promise<void> {
-  let page = 1
-  while (true) {
-    const raw = await callSweedRpcForDealer(site.dealerId, 'store.inventory.item.list.grouped', {
-      isOnStock: true,
-      page,
-      pageSize: GROUPED_INVENTORY_PAGE_SIZE,
-    })
-    const parsed = GroupedInventoryResponseSchema.parse(raw)
-
-    for (const row of parsed.data) {
-      const product = row.product
-      if (!product || typeof product.id !== 'number') {
-        continue
-      }
-      const metrcTagsFromRow = collectMetrcTagsFromInventoryRow(row.items)
-      const externalBarcode = nonEmptyString(product.externalBarcode)
-      const existing = variantSeeds.get(product.id)
-      if (existing) {
-        existing.siteKeys.add(site.siteKey)
-        if (existing.productGroupId === null) {
-          existing.productGroupId = coerceOptionalInt(product.productGroupId)
-        }
-        if (!existing.name && product.name) {
-          existing.name = product.name
-        }
-        if (!existing.shortName && product.shortName) {
-          existing.shortName = product.shortName
-        }
-        if (!existing.externalBarcode && externalBarcode) {
-          existing.externalBarcode = externalBarcode
-        }
-        for (const tag of metrcTagsFromRow) {
-          existing.metrcTags.add(tag)
-        }
-        continue
-      }
-      variantSeeds.set(product.id, {
-        productId: product.id,
-        productGroupId: coerceOptionalInt(product.productGroupId),
-        name: product.name ?? null,
-        shortName: product.shortName ?? null,
-        siteKeys: new Set([site.siteKey]),
-        metrcTags: new Set(metrcTagsFromRow),
-        externalBarcode,
-      })
-    }
-
-    if (parsed.data.length < GROUPED_INVENTORY_PAGE_SIZE) {
-      break
-    }
-    page += 1
-  }
-}
-
-async function fetchGroupDetail(groupId: number): Promise<SweedGroup> {
-  const stateDealerId = getServerEnv().sweedStateDealerId
-  const raw = await callSweedRpcForDealer(stateDealerId, 'store.product.group.get', { id: groupId })
-  return SweedGroupSchema.parse(raw)
-}
-
-async function fetchProductDetail(productId: number): Promise<SweedProduct> {
-  const stateDealerId = getServerEnv().sweedStateDealerId
-  const raw = await callSweedRpcForDealer(stateDealerId, 'store.product.get', { id: String(productId) })
-  return SweedProductDetailSchema.parse(raw)
-}
-
-async function runWithConcurrency<TItem>(
-  items: TItem[],
-  concurrency: number,
-  worker: (item: TItem) => Promise<void>,
-): Promise<void> {
-  let cursor = 0
-  const runnerCount = Math.min(concurrency, items.length)
-  if (runnerCount <= 0) {
-    return
-  }
-  await Promise.all(
-    Array.from({ length: runnerCount }, async () => {
-      while (true) {
-        const index = cursor
-        cursor += 1
-        if (index >= items.length) {
-          return
-        }
-        await worker(items[index]!)
-      }
-    }),
-  )
-}
-
-function describeError(error: unknown): string {
-  if (error instanceof Error) {
-    return error.message
-  }
-  return String(error)
 }
 
 /* -------------------------------------------------------------------------- */
@@ -660,12 +499,14 @@ export interface UploadInput {
   targetType: 'group' | 'variants'
   groupId: number
   productIds: number[]
+  requestedByUserId: number | null
 }
 
 export interface UploadResult {
   uploadedBlobId: string
   blobUrl: string | null
   affectedProductIds: number[]
+  reanalysisJobId: number | null
 }
 
 export async function uploadCatalogMaintenanceImage(input: UploadInput): Promise<UploadResult> {
@@ -682,62 +523,70 @@ export async function uploadCatalogMaintenanceImage(input: UploadInput): Promise
     throw new HttpError(400, 'At least one variant must be selected for variant uploads.')
   }
 
-  return withSweedSessionLockReturning(async () => {
+  const result = await runInSweedWriteBatch(async () => {
     const stateDealerId = getServerEnv().sweedStateDealerId
+    await ensureDealerContext(stateDealerId)
 
     const blobId = await createBlob(stateDealerId)
     await putBlobBytes(blobId, input.fileBytes, input.contentType)
 
     if (input.targetType === 'group') {
-      const group = await fetchGroupDetailWithinLock(input.groupId)
+      const group = await fetchGroupImagesWithinLock(input.groupId)
       const existingImageIds = collectExistingImageIds(group.images)
-      if (existingImageIds.includes(blobId)) {
-        existingImageIds.splice(existingImageIds.indexOf(blobId), 1)
-      }
-      const nextImageIds = [...existingImageIds, blobId]
+      const nextImageIds = appendUnique(existingImageIds, blobId)
       await callSweedRpcForDealer(stateDealerId, 'store.product.group.edit', {
         id: input.groupId,
         imagesIds: nextImageIds,
       })
-      const refreshed = await fetchGroupDetailWithinLock(input.groupId)
-      const blobUrl = pickPreviewUrl(refreshed.images.filter((image) => normalizeImageId(image) === blobId))
+      const refreshed = await fetchGroupImagesWithinLock(input.groupId)
+      const blobUrl = pickRawPreviewUrl(refreshed.images.filter((image) => normalizeImageId(image) === blobId))
       return { uploadedBlobId: blobId, blobUrl, affectedProductIds: [] }
     }
 
-    // variants: attach the same blob to each selected variant. Sweed
-    // expects imagesIds to fully describe the variant image set, so we
-    // read each variant first and append rather than replace.
     const affectedProductIds: number[] = []
     let blobUrl: string | null = null
     for (const productId of input.productIds) {
-      const product = await fetchProductDetailWithinLock(productId)
+      const product = await fetchProductImagesWithinLock(productId)
       const existingImageIds = collectExistingImageIds(product.images)
-      if (existingImageIds.includes(blobId)) {
-        existingImageIds.splice(existingImageIds.indexOf(blobId), 1)
-      }
-      const nextImageIds = [...existingImageIds, blobId]
+      const nextImageIds = appendUnique(existingImageIds, blobId)
       await callSweedRpcForDealer(stateDealerId, 'store.product.edit', {
         id: productId,
         imagesIds: nextImageIds,
       })
       affectedProductIds.push(productId)
       if (blobUrl === null) {
-        const refreshed = await fetchProductDetailWithinLock(productId)
-        blobUrl = pickPreviewUrl(refreshed.images.filter((image) => normalizeImageId(image) === blobId))
+        const refreshed = await fetchProductImagesWithinLock(productId)
+        blobUrl = pickRawPreviewUrl(refreshed.images.filter((image) => normalizeImageId(image) === blobId))
       }
     }
     return { uploadedBlobId: blobId, blobUrl, affectedProductIds }
   })
+
+  const reanalysisJobId = await flagSweedGroupForReanalysis({
+    sweedGroupId: input.groupId,
+    reason:
+      input.targetType === 'group'
+        ? 'catalog_maintenance_group_image_upload'
+        : 'catalog_maintenance_variant_image_upload',
+    requestedByUserId: input.requestedByUserId,
+  })
+
+  await invalidateCatalogMaintenanceSurvey()
+
+  return { ...result, reanalysisJobId }
 }
 
 export interface UpdateBarcodeInput {
   productId: number
   externalBarcode: string
+  sweedGroupId: number
+  requestedByUserId: number | null
 }
 
 export interface UpdateBarcodeResult {
   productId: number
   externalBarcode: string
+  reanalysisJobId: number | null
 }
 
 export async function updateVariantBarcode(input: UpdateBarcodeInput): Promise<UpdateBarcodeResult> {
@@ -745,45 +594,60 @@ export async function updateVariantBarcode(input: UpdateBarcodeInput): Promise<U
   if (normalized.length === 0) {
     throw new HttpError(400, 'externalBarcode must be non-empty.')
   }
-  return withSweedSessionLockReturning(async () => {
+  const result = await runInSweedWriteBatch(async () => {
     const stateDealerId = getServerEnv().sweedStateDealerId
+    await ensureDealerContext(stateDealerId)
     await callSweedRpcForDealer(stateDealerId, 'store.product.edit', {
       id: input.productId,
       externalBarcode: normalized,
     })
-    const refreshed = await fetchProductDetailWithinLock(input.productId)
-    const next = nonEmptyString(refreshed.externalBarcode) ?? normalized
-    return { productId: input.productId, externalBarcode: next }
+    const refreshed = await fetchProductImagesWithinLock(input.productId)
+    return {
+      productId: input.productId,
+      externalBarcode: nonEmptyString(refreshed.externalBarcode) ?? normalized,
+    }
   })
+
+  const reanalysisJobId = await flagSweedGroupForReanalysis({
+    sweedGroupId: input.sweedGroupId,
+    reason: 'catalog_maintenance_barcode_edit',
+    requestedByUserId: input.requestedByUserId,
+  })
+
+  await invalidateCatalogMaintenanceSurvey()
+  return { ...result, reanalysisJobId }
 }
 
-async function fetchGroupDetailWithinLock(groupId: number): Promise<SweedGroup> {
+async function fetchGroupImagesWithinLock(groupId: number): Promise<z.infer<typeof SweedGroupImagesSchema>> {
   const stateDealerId = getServerEnv().sweedStateDealerId
   const raw = await callSweedRpcForDealer(stateDealerId, 'store.product.group.get', { id: groupId })
-  return SweedGroupSchema.parse(raw)
+  return SweedGroupImagesSchema.parse(raw)
 }
 
-async function fetchProductDetailWithinLock(productId: number): Promise<SweedProduct> {
+async function fetchProductImagesWithinLock(productId: number): Promise<z.infer<typeof SweedProductImagesSchema>> {
   const stateDealerId = getServerEnv().sweedStateDealerId
   const raw = await callSweedRpcForDealer(stateDealerId, 'store.product.get', { id: String(productId) })
-  return SweedProductDetailSchema.parse(raw)
+  return SweedProductImagesDetailSchema.parse(raw)
 }
 
-function collectExistingImageIds(images: SweedImage[]): string[] {
+function collectExistingImageIds(images: Array<z.infer<typeof SweedImageRefSchema>>): string[] {
   const seen = new Set<string>()
   const ids: string[] = []
   for (const image of images) {
     const id = normalizeImageId(image)
-    if (id === null) {
-      continue
-    }
-    if (seen.has(id)) {
+    if (id === null || seen.has(id)) {
       continue
     }
     seen.add(id)
     ids.push(id)
   }
   return ids
+}
+
+function appendUnique(existing: string[], blobId: string): string[] {
+  const filtered = existing.filter((id) => id !== blobId)
+  filtered.push(blobId)
+  return filtered
 }
 
 async function createBlob(stateDealerId: number): Promise<string> {
@@ -814,8 +678,84 @@ async function putBlobBytes(blobId: string, bytes: Uint8Array, contentType: stri
   }
 }
 
+function pickRawPreviewUrl(images: Array<z.infer<typeof SweedImageRefSchema>>): string | null {
+  for (const image of images) {
+    if (typeof image.url === 'string' && image.url.length > 0) {
+      return image.url
+    }
+  }
+  return null
+}
+
+function normalizeImageId(image: z.infer<typeof SweedImageRefSchema>): string | null {
+  if (image.id === undefined || image.id === null) {
+    return null
+  }
+  return String(image.id)
+}
+
+function nonEmptyString(value: unknown): string | null {
+  if (typeof value !== 'string') {
+    return null
+  }
+  const trimmed = value.trim()
+  return trimmed.length === 0 ? null : trimmed
+}
+
 /* -------------------------------------------------------------------------- */
-/*  Sweed RPC plumbing — own session lock for this module.                    */
+/*  Post-write reanalysis: flag DB row + enqueue forced sync job.             */
+/* -------------------------------------------------------------------------- */
+
+interface FlagForReanalysisInput {
+  sweedGroupId: number
+  reason: string
+  requestedByUserId: number | null
+}
+
+async function flagSweedGroupForReanalysis(input: FlagForReanalysisInput): Promise<number | null> {
+  const db: Queryable = getPool()
+  const lookup = await db.query<{ id: number }>(
+    `select id from catalog_groups where sweed_group_id = $1 and deleted_at is null limit 1`,
+    [input.sweedGroupId],
+  )
+  const catalogGroupId = lookup.rows[0]?.id ?? null
+  if (catalogGroupId === null) {
+    // No cached catalog_groups row for this Sweed group yet (e.g. brand-new
+    // group that hasn't been picked up by the review packet importer).
+    // Nothing to flag; the next stock-refresh cycle will surface it.
+    return null
+  }
+
+  await db.query(
+    `
+      update catalog_groups
+      set needs_reanalysis_at = now(),
+          needs_reanalysis_reason = $2,
+          updated_at = now()
+      where id = $1
+    `,
+    [catalogGroupId, input.reason],
+  )
+
+  const scope = buildCatalogGroupModuleScope(catalogGroupId)
+  return enqueueJob(db, {
+    concurrencyKey: getOptionalSweedSessionConcurrencyKey(true),
+    dedupeKey: `catalog.sync.group_detail:${catalogGroupId}`,
+    jobType: 'catalog.sync.group_detail',
+    module: 'catalog',
+    payload: {
+      catalogGroupId,
+      forceLiveRefresh: true,
+      requestedByUserId: input.requestedByUserId,
+      trigger: 'catalog_maintenance_edit',
+    },
+    requestedByUserId: input.requestedByUserId,
+    scope,
+  })
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Sweed RPC plumbing — module-local write queue with sticky dealer cache.    */
 /* -------------------------------------------------------------------------- */
 
 async function callSweedRpcForDealer<TResult>(
@@ -828,12 +768,21 @@ async function callSweedRpcForDealer<TResult>(
 }
 
 async function ensureDealerContext(dealerId: number): Promise<void> {
+  // The write queue (`runInSweedWriteBatch`) guarantees we're the only
+  // caller using this shared Sweed auth token right now, so a previously
+  // pinned dealerId is still in effect on Sweed's side. Skip the redundant
+  // `store.auth.dealer.set` round-trip on the hot path.
+  if (sweedWriteDealerId === dealerId) {
+    return
+  }
   const result = DealerSetResultSchema.parse(await callSweedRpcRaw('store.auth.dealer.set', { dealerId }))
   if (result.user.currentDealerId !== dealerId) {
+    sweedWriteDealerId = null
     throw new Error(
       `Sweed dealer context mismatch. Expected ${dealerId}, got ${result.user.currentDealerId} ${result.user.currentDealerName ?? ''}`.trim(),
     )
   }
+  sweedWriteDealerId = dealerId
 }
 
 async function callSweedRpcRaw<TResult>(name: string, params?: Record<string, unknown>): Promise<TResult> {
@@ -872,17 +821,24 @@ async function callSweedRpcRaw<TResult>(name: string, params?: Record<string, un
   return envelope.result as TResult
 }
 
-function withSweedSessionLock<TResult>(operation: () => Promise<TResult>): Promise<TResult> {
-  const run = sweedSessionQueue.then(operation, operation)
-  sweedSessionQueue = run.then(
+/**
+ * Serialize Sweed write operations behind a shared queue so the
+ * sticky `sweedWriteDealerId` short-circuit in `ensureDealerContext`
+ * remains coherent: while one batch is running, no other batch is
+ * allowed to switch the shared SWEED_AUTH_TOKEN's dealer context out
+ * from under it. On any thrown error we forget the cached dealer id
+ * so the next batch defensively re-pins it.
+ */
+function runInSweedWriteBatch<T>(operation: () => Promise<T>): Promise<T> {
+  const run = sweedWriteQueue.then(operation, operation)
+  sweedWriteQueue = run.then(
     () => undefined,
-    () => undefined,
+    () => {
+      sweedWriteDealerId = null
+      return undefined
+    },
   )
   return run
-}
-
-function withSweedSessionLockReturning<TResult>(operation: () => Promise<TResult>): Promise<TResult> {
-  return withSweedSessionLock(operation)
 }
 
 function truncate(value: string): string {
@@ -900,3 +856,7 @@ export class HttpError extends Error {
     this.status = status
   }
 }
+
+// Re-export for legacy callers that imported the concurrency key from
+// this module before the maintenance flow grew its own write queue.
+export const _SWEED_WRITE_CONCURRENCY_KEY = SWEED_SESSION_CONCURRENCY_KEY

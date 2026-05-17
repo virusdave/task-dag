@@ -33,6 +33,14 @@ import { RetryableWorkerError } from '../runtime/errors.js'
 interface SweedSessionContext {
   authToken: string
   origin: 'fresh' | 'legacy'
+  /**
+   * Last dealer the session was pinned to via `store.auth.dealer.set`.
+   * Used to skip redundant dealer-set RPCs when subsequent calls
+   * target the same dealer. Sweed's session keeps the dealer context
+   * sticky on the server side so we don't need to re-pin it for every
+   * call. Mutated via setCurrentSweedDealerId().
+   */
+  currentDealerId: number | null
 }
 
 const sessionStorage = new AsyncLocalStorage<SweedSessionContext>()
@@ -69,6 +77,18 @@ export function getCurrentSweedSessionOrigin(): 'fresh' | 'legacy' | null {
   return sessionStorage.getStore()?.origin ?? null
 }
 
+export function getCurrentSweedDealerId(): number | null {
+  return sessionStorage.getStore()?.currentDealerId ?? null
+}
+
+export function setCurrentSweedDealerId(dealerId: number | null): void {
+  const store = sessionStorage.getStore()
+  if (store === undefined) {
+    return
+  }
+  store.currentDealerId = dealerId
+}
+
 /**
  * Run `fn` inside a fresh Sweed session.
  *
@@ -82,7 +102,12 @@ export function getCurrentSweedSessionOrigin(): 'fresh' | 'legacy' | null {
  * Nested calls reuse the outer session; we never open a session inside a
  * session.
  *
- * No sign-out is issued; tokens are left to expire on the Sweed side.
+ * For sessions opened via `'fresh'` login, we make a best-effort
+ * sign-out attempt when `fn` finishes (success or failure). Sweed
+ * does not document a logout RPC; if/when one is confirmed it should
+ * be wired into `tearDownFreshSweedSession()` below. Until then we
+ * just clear our ALS context and let the token expire server-side.
+ * Tracked by task-dag task: `sweed-research-session-teardown`.
  */
 export async function withSweedSession<T>(fn: () => Promise<T>): Promise<T> {
   if (sessionStorage.getStore() !== undefined) {
@@ -99,16 +124,44 @@ export async function withSweedSession<T>(fn: () => Promise<T>): Promise<T> {
 
   let context: SweedSessionContext
   if (hasCredentials) {
-    const authToken = await issueFreshSweedSession(env.sweedLoginEmail as string, env.sweedLoginPassword as string)
-    context = { authToken, origin: 'fresh' }
+    const login = await issueFreshSweedSession(env.sweedLoginEmail as string, env.sweedLoginPassword as string)
+    context = {
+      authToken: login.authToken,
+      origin: 'fresh',
+      currentDealerId: login.initialDealerId,
+    }
   } else {
-    context = { authToken: env.sweedAuthToken as string, origin: 'legacy' }
+    context = { authToken: env.sweedAuthToken as string, origin: 'legacy', currentDealerId: null }
   }
 
-  return sessionStorage.run(context, fn)
+  try {
+    return await sessionStorage.run(context, fn)
+  } finally {
+    if (context.origin === 'fresh') {
+      await tearDownFreshSweedSession(context.authToken)
+    }
+  }
 }
 
-async function issueFreshSweedSession(login: string, password: string): Promise<string> {
+/**
+ * Best-effort sign-out for a fresh Sweed session. Sweed's documented
+ * surface does not expose a logout RPC; attempts at the obvious names
+ * (`store.auth.logout`, `store.auth.user.logout`, `store.auth.signout`)
+ * should be confirmed against a captured HAR before we wire them in.
+ *
+ * See the task-dag task `sweed-research-session-teardown` for the
+ * follow-up. Until that work is done we simply no-op so the session
+ * relies on Sweed's server-side expiry. Any failure here must NEVER
+ * propagate; it would mask the real outcome of the caller's work.
+ */
+async function tearDownFreshSweedSession(authToken: string): Promise<void> {
+  // Intentional no-op until a logout RPC is confirmed. See
+  // `task: sweed-research-session-teardown` in the automation repo's
+  // task-dag for the investigation/wiring follow-up.
+  void authToken
+}
+
+async function issueFreshSweedSession(login: string, password: string): Promise<FreshSweedSessionLogin> {
   const env = getWorkerEnv()
   const body = {
     auth: '',
@@ -157,7 +210,16 @@ async function issueFreshSweedSession(login: string, password: string): Promise<
   }
 
   const parsed = SignInResultSchema.parse(envelope.result)
-  return parsed.auth
+  const initialDealerIdRaw = parsed.initialData?.user?.currentDealerId
+  return {
+    authToken: parsed.auth,
+    initialDealerId: typeof initialDealerIdRaw === 'number' ? initialDealerIdRaw : null,
+  }
+}
+
+interface FreshSweedSessionLogin {
+  authToken: string
+  initialDealerId: number | null
 }
 
 function truncate(value: string): string {

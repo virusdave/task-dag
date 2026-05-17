@@ -20,6 +20,9 @@ const StockInventoryItemSchema = z
     isAvailableOnline: z.boolean().nullable().optional(),
     isNotForSale: z.boolean().nullable().optional(),
     isTradeSample: z.boolean().nullable().optional(),
+    metrcTag: z.string().nullable().optional(),
+    metrcPackageTag: z.string().nullable().optional(),
+    packageMetrcTag: z.string().nullable().optional(),
     stockLocation: z
       .object({
         id: z.coerce.number().int().optional(),
@@ -76,6 +79,7 @@ interface ParsedRow {
   quantity: number | null
   packageCount: number | null
   productName: string | null
+  metrcTags: string[]
 }
 
 interface BrandRollup {
@@ -238,6 +242,7 @@ async function scanFullStockForSite(site: HeliosPendingPurchaseSiteDealer): Prom
         ? row.isOnStock
         : (typeof quantity === 'number' && quantity > 0) || (typeof packageCount === 'number' && packageCount > 0)
       const productName = row.product?.shortName ?? row.product?.name ?? null
+      const metrcTags = collectMetrcTagsFromInventoryItems(row.items)
 
       if (!existing) {
         rowsByProductId.set(productId, {
@@ -246,6 +251,7 @@ async function scanFullStockForSite(site: HeliosPendingPurchaseSiteDealer): Prom
           quantity,
           packageCount,
           productName,
+          metrcTags,
         })
       } else {
         // The grouped feed should be unique-per-product, but defensively merge.
@@ -255,6 +261,7 @@ async function scanFullStockForSite(site: HeliosPendingPurchaseSiteDealer): Prom
           quantity: sumNullable(existing.quantity, quantity),
           packageCount: sumNullable(existing.packageCount, packageCount),
           productName: existing.productName ?? productName,
+          metrcTags: mergeMetrcTags(existing.metrcTags, metrcTags),
         })
       }
 
@@ -320,6 +327,42 @@ function accumulateBrandRollup(
     rollup.forSaleLotCount += forSaleLotCount
     rollup.forSaleTotalAvailableQty += forSaleAvailableQty
   }
+}
+
+function collectMetrcTagsFromInventoryItems(
+  items: ReadonlyArray<{
+    metrcTag?: string | null
+    metrcPackageTag?: string | null
+    packageMetrcTag?: string | null
+    availableQty?: number | null
+  }>,
+): string[] {
+  const seen = new Set<string>()
+  for (const item of items) {
+    if (typeof item.availableQty === 'number' && item.availableQty <= 0) {
+      continue
+    }
+    const tag =
+      nonEmptyTrimmed(item.metrcTag) ??
+      nonEmptyTrimmed(item.metrcPackageTag) ??
+      nonEmptyTrimmed(item.packageMetrcTag)
+    if (tag) {
+      seen.add(tag)
+    }
+  }
+  return [...seen].sort()
+}
+
+function nonEmptyTrimmed(value: string | null | undefined): string | null {
+  if (typeof value !== 'string') {
+    return null
+  }
+  const trimmed = value.trim()
+  return trimmed.length === 0 ? null : trimmed
+}
+
+function mergeMetrcTags(left: string[], right: string[]): string[] {
+  return [...new Set([...left, ...right])].sort()
 }
 
 function sumNullable(left: number | null, right: number | null): number | null {
@@ -397,14 +440,16 @@ async function persistSnapshotAndDiff(input: {
       await db.query(
         `
           insert into stock_variant_state (
-            site_dealer_id, product_id, is_on_stock, quantity, last_snapshot_id, last_observed_at,
+            site_dealer_id, product_id, is_on_stock, quantity, metrc_tags_json,
+            last_snapshot_id, last_observed_at,
             last_in_stock_at, last_out_of_stock_at
-          ) values ($1, $2, $3, $4, $5, $6::timestamptz,
+          ) values ($1, $2, $3, $4, $7::jsonb, $5, $6::timestamptz,
             case when $3 then $6::timestamptz else null end,
             case when $3 then null else $6::timestamptz end)
           on conflict (site_dealer_id, product_id) do update
             set is_on_stock = excluded.is_on_stock,
                 quantity = excluded.quantity,
+                metrc_tags_json = excluded.metrc_tags_json,
                 last_snapshot_id = excluded.last_snapshot_id,
                 last_observed_at = excluded.last_observed_at,
                 last_in_stock_at = case
@@ -423,6 +468,7 @@ async function persistSnapshotAndDiff(input: {
           row.quantity,
           snapshotId,
           observedAt,
+          JSON.stringify(row.metrcTags),
         ],
       )
     }

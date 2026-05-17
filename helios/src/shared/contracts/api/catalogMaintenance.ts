@@ -56,11 +56,13 @@ export const CatalogMaintenanceUploadResultSchema = z.object({
   affectedProductIds: z.array(z.number().int()),
   uploadedBlobId: z.string(),
   blobUrl: z.string().nullable(),
+  reanalysisJobId: z.number().int().nullable(),
 })
 export type CatalogMaintenanceUploadResult = z.infer<typeof CatalogMaintenanceUploadResultSchema>
 
 export const CatalogMaintenanceUpdateBarcodeRequestSchema = z.object({
   productId: z.number().int().positive(),
+  sweedGroupId: z.number().int().positive(),
   externalBarcode: z.string().trim().min(1).max(128),
 })
 export type CatalogMaintenanceUpdateBarcodeRequest = z.infer<
@@ -70,6 +72,7 @@ export type CatalogMaintenanceUpdateBarcodeRequest = z.infer<
 export const CatalogMaintenanceUpdateBarcodeResponseSchema = z.object({
   productId: z.number().int(),
   externalBarcode: z.string(),
+  reanalysisJobId: z.number().int().nullable(),
 })
 export type CatalogMaintenanceUpdateBarcodeResponse = z.infer<
   typeof CatalogMaintenanceUpdateBarcodeResponseSchema

@@ -1,6 +1,10 @@
 import { z } from 'zod'
 
-import { hasActiveSweedSession } from './session.js'
+import {
+  getCurrentSweedDealerId,
+  hasActiveSweedSession,
+  setCurrentSweedDealerId,
+} from './session.js'
 import { runWithSweedSessionLock } from './sessionLock.js'
 import { postSweedRpc } from './transport.js'
 
@@ -34,6 +38,17 @@ export async function ensureDealerContext(dealerId: number): Promise<void> {
 }
 
 async function setDealerContextLocked(dealerId: number): Promise<void> {
+  // Sweed keeps the dealer context sticky per session token, so once
+  // we've pinned this session to `dealerId` there's no need to issue
+  // another `store.auth.dealer.set` for the same dealer. This avoids
+  // doubling the RPC count on hot paths that issue many calls in a
+  // row against the same dealer (e.g. the catalog maintenance write
+  // flow, which previously called dealer.set before every single
+  // Sweed call even though it always targets the state dealer).
+  if (hasActiveSweedSession() && getCurrentSweedDealerId() === dealerId) {
+    return
+  }
+
   const result = await postSweedRpc<unknown>({ name: 'store.auth.dealer.set', params: { dealerId } })
   const parsed = z
     .object({
@@ -49,6 +64,8 @@ async function setDealerContextLocked(dealerId: number): Promise<void> {
       `Sweed dealer context mismatch. Expected ${dealerId}, got ${parsed.user.currentDealerId} ${parsed.user.currentDealerName ?? ''}`.trim(),
     )
   }
+
+  setCurrentSweedDealerId(dealerId)
 }
 
 export async function callSweedRpcRaw<TResult>(

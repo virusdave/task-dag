@@ -21,17 +21,25 @@ const SweedNamedValueSchema = z.object({
 }).passthrough()
 
 const SweedImageSchema = z.object({
+  id: z.union([z.coerce.number().int(), z.string().trim().min(1)]).nullable().optional(),
   url: z.string().nullable().optional(),
 }).passthrough()
 
+const SweedSizeSchema = z.object({
+  name: z.string().nullable().optional(),
+}).passthrough()
+
 const SweedProductSchema = z.object({
+  externalBarcode: z.string().nullable().optional(),
   groupImages: z.array(SweedImageSchema).optional(),
   id: z.coerce.number().int(),
   images: z.array(SweedImageSchema).optional(),
   name: z.string().nullable().optional(),
+  packOfSize: z.coerce.number().int().nullable().optional(),
   price: z.coerce.number().nullable().optional(),
   priceInfo: z.object({ actualPrice: z.coerce.number().nullable().optional() }).passthrough().nullable().optional(),
   shortName: z.string().nullable().optional(),
+  size: SweedSizeSchema.nullable().optional(),
   sku: z.string().nullable().optional(),
   tab: z.string().nullable().optional(),
   wholesaleCost: z.coerce.number().nullable().optional(),
@@ -54,13 +62,23 @@ const SweedProductGroupDetailSchema = z.object({
   tags: z.array(SweedNamedValueSchema).optional(),
 }).passthrough()
 
+export const NormalizedCatalogImageRefSchema = z.object({
+  id: z.string().nullable(),
+  url: z.string().nullable(),
+})
+export type NormalizedCatalogImageRef = z.infer<typeof NormalizedCatalogImageRefSchema>
+
 export const NormalizedCatalogProductLiveStateSchema = z.object({
+  externalBarcode: z.string().nullable().default(null),
   gmPercent: z.number().nullable(),
   imageUrl: z.string().nullable(),
+  images: z.array(NormalizedCatalogImageRefSchema).default([]),
   name: z.string(),
+  packOfSize: z.number().int().nullable().default(null),
   price: z.number().nullable(),
   productId: z.number().int(),
   shortName: z.string().nullable(),
+  sizeName: z.string().nullable().default(null),
   sku: z.string().nullable(),
   tab: z.string(),
   wholesaleCost: z.number().nullable(),
@@ -77,6 +95,7 @@ export const NormalizedCatalogGroupLiveStateSchema = z.object({
   groupId: z.number().int(),
   groupName: z.string(),
   imageUrl: z.string().nullable(),
+  images: z.array(NormalizedCatalogImageRefSchema).default([]),
   productTabs: z.array(z.string()),
   products: z.array(NormalizedCatalogProductLiveStateSchema),
   scents: z.array(z.string()),
@@ -113,12 +132,16 @@ export function normalizeCatalogGroupDetail(detail: unknown): NormalizedCatalogG
   const products = [...(parsed.products ?? [])]
     .sort((left, right) => compareProducts(left.id, left.tab, left.name, right.id, right.tab, right.name))
     .map((product) => ({
+      externalBarcode: normalizeOptionalInlineText(product.externalBarcode),
       gmPercent: calculateGrossMarginPercent(resolveProductPrice(product), product.wholesaleCost ?? null),
       imageUrl: firstImageUrl(product.images, product.groupImages, parsed.images),
+      images: normalizeImageRefs(product.images),
       name: normalizeInlineText(product.name),
+      packOfSize: product.packOfSize ?? null,
       price: resolveProductPrice(product),
       productId: product.id,
       shortName: normalizeOptionalInlineText(product.shortName),
+      sizeName: normalizeOptionalInlineText(product.size?.name),
       sku: normalizeOptionalInlineText(product.sku),
       tab: normalizeInlineText(product.tab),
       wholesaleCost: product.wholesaleCost ?? null,
@@ -134,6 +157,7 @@ export function normalizeCatalogGroupDetail(detail: unknown): NormalizedCatalogG
     groupId: parsed.id,
     groupName: normalizeInlineText(parsed.name),
     imageUrl: firstImageUrl(parsed.images),
+    images: normalizeImageRefs(parsed.images),
     productTabs: products.map((product) => product.tab).filter((tab, index, allTabs) => allTabs.indexOf(tab) === index),
     products,
     scents: normalizeNamedList(parsed.scents),
@@ -141,6 +165,30 @@ export function normalizeCatalogGroupDetail(detail: unknown): NormalizedCatalogG
     subcategory: normalizeOptionalInlineText(parsed.subcategory?.name),
     tags: normalizeNamedList(parsed.tags),
   }
+}
+
+function normalizeImageRefs(images: Array<{ id?: unknown; url?: string | null }> | undefined): NormalizedCatalogImageRef[] {
+  if (!images || images.length === 0) {
+    return []
+  }
+  return images.map((image) => ({
+    id: normalizeImageRefId(image.id),
+    url: normalizeOptionalInlineText(image.url),
+  }))
+}
+
+function normalizeImageRefId(value: unknown): string | null {
+  if (value === undefined || value === null) {
+    return null
+  }
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return String(value)
+  }
+  if (typeof value === 'string') {
+    const trimmed = value.trim()
+    return trimmed.length === 0 ? null : trimmed
+  }
+  return null
 }
 
 export function normalizeDescriptionText(value: string | null | undefined): string {
