@@ -73,7 +73,8 @@ DRIVE_URL="https://drive.usercontent.google.com/download?id=${FILE_ID}&export=do
 if [[ -n "${RESOURCE_KEY}" ]]; then
   DRIVE_URL="${DRIVE_URL}&resourcekey=${RESOURCE_KEY}"
 fi
-if ! curl -fsSL -o "${CSV_PATH}" "${DRIVE_URL}"; then
+DRIVE_REFERER="${GOOGLE_DRIVE_REFERER:-https://vpn-helios.freshlybaked.us/ads}"
+if ! curl -fsSL --referer "${DRIVE_REFERER}" -o "${CSV_PATH}" "${DRIVE_URL}"; then
   echo "Failed to download Drive file id=${FILE_ID}" >&2
   echo "Make sure the file is shared 'Anyone with the link can view'." >&2
   exit 5

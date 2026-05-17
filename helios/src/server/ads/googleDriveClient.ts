@@ -43,6 +43,10 @@ export async function listFolderCsvs(
   })
   const url = `https://www.googleapis.com/drive/v3/files?${params.toString()}`
   const headers: Record<string, string> = { Accept: 'application/json' }
+  // Mint-time HTTP-referrer restriction on the API key requires every
+  // request to advertise itself as coming from the allowlisted origin.
+  // Default to our canonical helios proxy domain; overridable via env.
+  headers['Referer'] = process.env.GOOGLE_DRIVE_REFERER ?? 'https://vpn-helios.freshlybaked.us/ads'
   if (opts?.folderResourceKey) {
     headers['X-Goog-Drive-Resource-Keys'] = `${folderId}/${opts.folderResourceKey}`
   }
