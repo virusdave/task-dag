@@ -47,11 +47,18 @@
     "dependencies": ["<phase3-view>", "<phase4-enqueue-helper>", "<phase3-scheduler>"]
   },
   {
-    "title": "Canonical pricing-ladder UI: freshness chip + expired guard",
-    "description": "Move the ladder-cache-tag freshness chip from the one-off repricing review packet into the canonical helios/src/shared/ui/pricing-ladder/ control (and its React wrapper CanonicalPricingLadder.tsx). Render fresh|stale|very_stale|absent|expired in the ladder head. Refuse to draw competitor diamonds for evidence with freshness='expired' unless the call site passes acknowledgeStale: true. Update the catalog-curation review pages (and the repricing review builder) to render an evidence-freshness status strip at the top counting per-bucket products. Snapshot tests confirm the chip and guard behavior.",
+    "title": "Canonical pricing-ladder UI: freshness chip + expired-blocks-apply guard",
+    "description": "Move the ladder-cache-tag freshness chip from the one-off repricing review packet into the canonical helios/src/shared/ui/pricing-ladder/ control (and its React wrapper CanonicalPricingLadder.tsx). Render fresh|stale|very_stale|absent|expired in the ladder head. Refuse to draw competitor diamonds for evidence with freshness='expired' unless the call site passes acknowledgeExpiredEvidence: true. In the catalog-curation review pages (and the repricing review builder) render an evidence-freshness status strip at the top counting per-bucket products AND hard-block the 'Apply' action whenever any in-scope product has freshness='expired', requiring an explicit per-row or per-proposal acknowledgeExpiredEvidence toggle to unblock. The escape hatch the operator is expected to reach for first is enqueueMarketRefreshForProducts() from phase4 to get back to fresh evidence rather than overriding. Snapshot + integration tests confirm the chip, the per-row guard, and the apply-time block.",
     "type": "leaf",
     "status": "pending",
     "dependencies": ["<phase3-view>"]
+  },
+  {
+    "title": "Per-brand expiry overrides (follow-on, non-blocking)",
+    "description": "Once the global 4-day expiry flow is healthy in prod, add brand_expiry_overrides (brand_id, expiry_days, notes, updated_at, updated_by) and thread the override through vw_pricing_evidence_freshness, the rolling-refresh scheduler's next_refresh_at jitter, and the alarm scanner's 12h pre-expiry window. Default remains 4 days when no row exists for a brand. Add a small admin surface (config screen) to set per-brand overrides; audit-event on every change. This is the 'sure but fast to start' follow-on the operator agreed to: not part of the initial rollout, intentionally sequenced after the alarm scanner so we don't gold-plate the simple case.",
+    "type": "leaf",
+    "status": "pending",
+    "dependencies": ["<phase3-view>", "<phase3-scheduler>", "<phase5-alarm>"]
   },
   {
     "title": "Regenerate 67.7% GM review packet against the new flow",

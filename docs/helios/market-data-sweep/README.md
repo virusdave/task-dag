@@ -7,8 +7,12 @@ for the "always-fresh competitor data with loud alarms" epic.
   settled operator requirements, data model, architecture, phase
   breakdown, open questions.
 - [`task-dag-breakdown.json`](./task-dag-breakdown.json) —
-  10-leaf breakdown for `task-dag breakdown <epic-sha>
+  11-leaf breakdown for `task-dag breakdown <epic-sha>
   --spec-file=docs/helios/market-data-sweep/task-dag-breakdown.json`.
+  Includes a `phase2b-per-brand-expiry` follow-on leaf that is
+  intentionally sequenced after the alarm scanner: the global 4-day
+  expiry ships first and is hardened in prod before we add the
+  per-brand override.
 
 ## How to apply the breakdown
 

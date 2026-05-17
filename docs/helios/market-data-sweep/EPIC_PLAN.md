@@ -310,12 +310,30 @@ The phases below map 1:1 onto the JSON task-DAG breakdown in
   known-in-stock product in a non-prod env; confirm pageDave fires
   and a `priority=0` queue row appears.
 
-## Open questions for the operator
+## Settled follow-ups (operator answers)
 
-1. Is `pageDave` the right channel for the alarm or do we want a
-   dedicated channel (Slack, SMS, dashboard banner)?
-2. Should the 4-day hard expiry be configurable per-brand? Brands
-   that move slowly might be fine at 7 days; the "10FF brands"
-   bucket clearly wants the tighter window.
-3. Do we want to enforce that a curation proposal *blocks* if any
-   in-scope product has `expired` evidence, or just warns?
+1. **Alarm channel**: `pageDave()` for now. No separate channel.
+2. **Per-brand expiry override**: yes, but ship with the tight
+   4-day default everywhere first; the per-brand override comes as
+   a small follow-on once the core flow is healthy.
+3. **Expired evidence in curation proposals**: **blocks** without
+   explicit operator approval. The canonical UI MUST refuse to let
+   a proposal be applied if any in-scope product has
+   `freshness='expired'` unless the operator passes an explicit
+   `acknowledgeExpiredEvidence: true` per row (or per proposal,
+   for bulk overrides). This applies to repricing, catalog
+   curation, and any other "propose product catalog modification"
+   entry point.
+
+These answers are encoded in the corresponding phases:
+
+- Alarm channel → Phase 5 (`pageDave()` only; no Slack/SMS adapter).
+- Per-brand expiry → Phase 2 ships the global 4-day constant; a
+  follow-on leaf (`phase2b-per-brand-expiry`) adds a
+  `brand_expiry_overrides` table and threads the per-brand TTL
+  through the view, scheduler, and alarm scanner.
+- Block-on-expired → Phase 6 ships the guard *and* the
+  `acknowledgeExpiredEvidence` toggle; Phase 4's
+  `enqueueMarketRefreshForProducts()` is the escape hatch the
+  operator uses to get back to fresh evidence quickly when a
+  proposal is blocked.
