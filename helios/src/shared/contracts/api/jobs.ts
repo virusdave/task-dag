@@ -9,14 +9,22 @@ export const JobRouteParamsSchema = z.object({
 })
 export type JobRouteParams = z.infer<typeof JobRouteParamsSchema>
 
+// Form GETs on /jobs send blank-but-present fields like `status=` and
+// `jobType=` when the operator clears a filter. Treat those as "no
+// filter" instead of rejecting the request with a validation error.
+const emptyToUndefined = z.preprocess(
+  (value) => (typeof value === 'string' && value.trim() === '' ? undefined : value),
+  z.unknown(),
+)
+
 export const JobsQuerySchema = z.object({
-  beforeRunAt: z.string().optional(),
-  jobType: z.string().trim().min(1).optional(),
-  module: HeliosModuleCodeSchema.optional(),
+  beforeRunAt: emptyToUndefined.pipe(z.string().optional()),
+  jobType: emptyToUndefined.pipe(z.string().trim().min(1).optional()),
+  module: emptyToUndefined.pipe(HeliosModuleCodeSchema.optional()),
   pageSize: z.coerce.number().int().min(1).max(100).default(50),
-  scopeEntityId: z.string().trim().min(1).optional(),
-  scopeEntityType: z.string().trim().min(1).optional(),
-  status: JobStatusSchema.optional(),
+  scopeEntityId: emptyToUndefined.pipe(z.string().trim().min(1).optional()),
+  scopeEntityType: emptyToUndefined.pipe(z.string().trim().min(1).optional()),
+  status: emptyToUndefined.pipe(JobStatusSchema.optional()),
 })
 export type JobsQuery = z.infer<typeof JobsQuerySchema>
 
