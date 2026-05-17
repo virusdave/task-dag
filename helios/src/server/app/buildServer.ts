@@ -140,8 +140,30 @@ async function registerApplicationSurface(server: FastifyInstance) {
   // Cache-Control: public,max-age=0 still lets browsers store the
   // document) and emit the index.html ourselves with no-store.
   const indexHtmlPath = resolve(clientDistPath, 'index.html')
+  const assetsDir = resolve(clientDistPath, 'assets')
   server.get('/*', async (request: FastifyRequest, reply: FastifyReply) => {
     if (request.url.startsWith('/assets/')) {
+      // We register @fastify/static with `wildcard: false` (so it
+      // doesn't claim GET /* and step on the SPA fallback), which means
+      // *no* routes from that plugin actually serve /assets/* — every
+      // asset request lands here. So first, try to serve the real file
+      // off disk; only when the hash is genuinely missing (the symptom
+      // of a stale cached HTML pointing at a since-redeployed bundle)
+      // do we fall through to the recovery script below.
+      const pathOnly = request.url.split('?', 1)[0] ?? request.url
+      const assetRelative = pathOnly.slice('/assets/'.length)
+      const assetPath = resolve(assetsDir, assetRelative)
+      // Guard against path traversal (`../`) — the resolved path must
+      // still live under the assets dir.
+      if (assetPath === assetsDir || assetPath.startsWith(assetsDir + '/')) {
+        if (existsSync(assetPath)) {
+          // Vite-hashed asset URLs are content-addressed and immutable;
+          // safe to cache aggressively.
+          reply.header('Cache-Control', 'public, max-age=31536000, immutable')
+          return reply.sendFile('assets/' + assetRelative)
+        }
+      }
+
       // A stale browser tab (especially on mobile, where the user can't
       // hard-refresh) may still be asking for an asset hash we no
       // longer build. Returning a hard 404 leaves the page blank with
@@ -149,9 +171,6 @@ async function registerApplicationSurface(server: FastifyInstance) {
       // tiny self-reloading module that bounces the document to a
       // cache-busted URL, which forces a fresh index.html (and thus
       // current bundle pointers) the next time the SPA loads.
-      // Strip the query string before checking the extension so URLs
-      // like /assets/index-deadbeef.js?_=1234 still match.
-      const pathOnly = request.url.split('?', 1)[0] ?? request.url
       if (pathOnly.endsWith('.js')) {
         reply
           .header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
