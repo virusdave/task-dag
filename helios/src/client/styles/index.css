@@ -2371,6 +2371,9 @@ a.tree-nav-branch-label.is-link,
   padding: 1px 6px;
   border-radius: 6px;
   color: var(--text);
+  /* 20% larger than the inherited line size so the suffix code is
+   * easier to read at a glance on the floor. */
+  font-size: 1.2em;
 }
 
 .catalog-maintenance-metrc-line--fatal {
@@ -2382,7 +2385,9 @@ a.tree-nav-branch-label.is-link,
 }
 
 .catalog-maintenance-metrc-tag strong {
-  font-weight: 700;
+  /* Bolded last-3 suffix: was 700, bumped ~40% heavier (capped at 900,
+   * the heaviest weight CSS / typical fonts render). */
+  font-weight: 900;
 }
 
 .catalog-maintenance-barcode-value {
