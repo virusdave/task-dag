@@ -238,8 +238,14 @@ async function issueFreshSweedSession(login: string, password: string): Promise<
   const env = getWorkerEnv()
   const startedAt = Date.now()
   const rpcId = randomUUID()
+  // Sweed's JSON-RPC envelope requires `auth` to be either absent
+  // (the pre-login case) OR a UUID-formatted session token. Sending
+  // `auth: ""` triggers "Request validation error" with details
+  // `Value does not match format "uuid"` and the login never gets
+  // routed to the auth handler. The HAR snippet at the top of this
+  // file accidentally implied an empty string was acceptable — it
+  // isn't. Omit the field entirely on the login call.
   const body = {
-    auth: '',
     id: rpcId,
     name: 'store.auth.user',
     params: { login, password, profileTypeId: 1 },
@@ -312,25 +318,43 @@ async function issueFreshSweedSession(login: string, password: string): Promise<
     throw new Error(errorMessage)
   }
 
-  let envelope: { error?: { message?: string }; result?: unknown }
+  let envelope: {
+    error?: { message?: string; code?: number; data?: unknown }
+    result?: unknown
+  }
   try {
-    envelope = JSON.parse(responseText) as { error?: { message?: string }; result?: unknown }
+    envelope = JSON.parse(responseText) as typeof envelope
   } catch {
     outcome = 'retryable'
     errorMessage = `store.auth.user returned invalid JSON: ${truncate(responseText)}`
     finish()
     throw new RetryableWorkerError(errorMessage)
   }
-  if (envelope.error) {
+  // Sweed wraps reCAPTCHA / pre-auth validation failures in a NESTED
+  // `result.error` envelope (`{ result: { error: {...} } }`) instead
+  // of the top-level `{ error: {...} }` shape we see for normal RPC
+  // errors. Check both so login failures don't fall through to the
+  // SignInResultSchema parser, which would then explode with an
+  // unhelpful zod "expected string, received undefined" trace.
+  const nestedError =
+    envelope.result && typeof envelope.result === 'object' && envelope.result !== null
+      ? (envelope.result as { error?: { message?: string; code?: number; data?: unknown } }).error
+      : undefined
+  const rpcError = envelope.error ?? nestedError
+  if (rpcError) {
     outcome = 'error'
-    errorMessage = `store.auth.user failed: ${envelope.error.message ?? 'Unknown Sweed RPC error.'}`
-    finish()
+    errorMessage = `store.auth.user failed: ${rpcError.message ?? 'Unknown Sweed RPC error.'}`
+    finish({
+      sweedErrorCode: rpcError.code ?? null,
+      sweedErrorData: rpcError.data ?? null,
+      sweedRawSnippet: truncate(responseText),
+    })
     throw new Error(errorMessage)
   }
   if (envelope.result === undefined) {
     outcome = 'error'
     errorMessage = 'store.auth.user returned no result payload.'
-    finish()
+    finish({ sweedRawSnippet: truncate(responseText) })
     throw new Error(errorMessage)
   }
 
