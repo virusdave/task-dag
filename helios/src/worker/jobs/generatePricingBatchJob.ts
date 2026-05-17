@@ -18,6 +18,7 @@ import {
 import { buildPricingFamilyContext } from '../pricing/familyPricing.js'
 import { buildPricingMarketContextWithFailureHandling } from '../pricing/litAlertsMarket.js'
 import { isRetryableWorkerError } from '../runtime/errors.js'
+import { withSweedSession } from '../sweed/session.js'
 import { runCatalogSyncGroupDetailJob } from './syncGroupDetailJob.js'
 
 const GeneratedBatchConfigSchema = z.object({
@@ -83,7 +84,18 @@ export async function runGeneratePricingBatchJob(
   const forceLiveRefresh = payload.forceLiveRefresh || batchConfig.forceLiveRefresh
   let skippedProductCount = 0
 
-  try {
+  // When the run will hit Sweed (forceLiveRefresh => per-group
+  // store.product.group.detail RPC via runCatalogSyncGroupDetailJob),
+  // reserve one pool session token up front and pin it for the whole
+  // batch via withSweedSession. Without this wrapper, postSweedRpc
+  // falls through to the env-fallback SWEED_AUTH_TOKEN (often stale)
+  // and the run dies mid-batch with "Auth expired" even though the
+  // operator has live pasted tokens in the pool. With the wrapper,
+  // the batch claims a live row at start and releases it on completion
+  // (or, if the chosen row was itself dead, retires that row and
+  // surfaces a clean pool-empty error to the operator instead of
+  // silently consuming a stale env token).
+  const runBatchBody = async (): Promise<void> => {
     for (const catalogGroupId of batchConfig.catalogGroupIds) {
       const alreadyGenerated = await hasProposalRow(batch.id, catalogGroupId)
       if (alreadyGenerated) {
@@ -144,6 +156,14 @@ export async function runGeneratePricingBatchJob(
         undoPayload: null,
       })
     })
+  }
+
+  try {
+    if (forceLiveRefresh) {
+      await withSweedSession(runBatchBody)
+    } else {
+      await runBatchBody()
+    }
   } catch (error) {
     if (!isRetryableWorkerError(error) || (await isFinalAttempt(context.id))) {
       await markBatchFailed(batch.id, batchConfig.catalogGroupIds.length, skippedProductCount, error)
