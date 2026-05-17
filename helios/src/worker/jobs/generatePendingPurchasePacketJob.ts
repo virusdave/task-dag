@@ -43,6 +43,7 @@ import {
 } from '../sweed/rpc.js'
 import type { PricingMarketContext, ProductPricingMarketEvidence } from '../pricing/deterministicPricing.js'
 import { buildPricingMarketContext } from '../pricing/litAlertsMarket.js'
+import { enqueueMarketRefreshForProducts } from '../litalerts/enqueueMarketRefresh.js'
 
 const GENERIC_PLACEHOLDER_PRODUCT_NAMES = new Set(['preroll samples samples'])
 
@@ -510,7 +511,7 @@ export async function runCatalogPendingPurchasesGenerateJob(
     total: 1,
   })
 
-  await withTransaction(async (db) => {
+  const persistResult = await withTransaction(async (db) => {
     const result = await persistPendingPurchasePacket(db, {
       createdByUserId: payload.requestedByUserId ?? null,
       importFileName: null,
@@ -530,7 +531,52 @@ export async function runCatalogPendingPurchasesGenerateJob(
       `,
       [context.id, result.packetId],
     )
+    return result
   })
+
+  // Drop every product the packet references onto the market-data
+  // refresh queue at priority 10 so the pending-purchase reviewer sees
+  // fresh Lit Alerts evidence by the time they open the packet. The
+  // helper is idempotent within a 5-minute window so concurrent packets
+  // referencing the same product will not double-enqueue.
+  const packetProductIds = collectPendingPurchasePacketProductIds(packet)
+  if (packetProductIds.length > 0) {
+    try {
+      await enqueueMarketRefreshForProducts(packetProductIds, {
+        trigger: {
+          kind: 'pending-purchase',
+          pendingPurchaseRowId: persistResult.packetId,
+        },
+        priority: 10,
+        requestedByUserId: payload.requestedByUserId ?? null,
+      })
+    } catch (enqueueError) {
+      // Refresh enqueue is best-effort; never fail packet generation
+      // because the queue is temporarily unhappy.
+      console.warn(
+        `Failed to enqueue market-data refresh for packet ${persistResult.packetId}:`,
+        enqueueError,
+      )
+    }
+  }
+}
+
+/**
+ * Pull every productId referenced by a packet's rows (preferring the
+ * `reuseProductId` mapped variant on rows where Helios already resolved
+ * the target). Uses the raw, looser shape because the import schema
+ * is `.passthrough()`-typed.
+ */
+function collectPendingPurchasePacketProductIds(packet: PendingPurchasePacket): number[] {
+  const ids = new Set<number>()
+  for (const row of packet.rows) {
+    const looseRow = row as unknown as Record<string, unknown>
+    const reuseId = looseRow.reuseProductId
+    if (typeof reuseId === 'number' && Number.isFinite(reuseId) && reuseId > 0) {
+      ids.add(reuseId)
+    }
+  }
+  return Array.from(ids)
 }
 
 class CatalogCache {

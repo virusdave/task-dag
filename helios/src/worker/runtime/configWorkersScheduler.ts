@@ -5,6 +5,7 @@ import {
 } from '../../shared/contracts/index.js'
 import { appendAuditEvent } from '../../server/audit/appendAuditEvent.js'
 import { withTransaction } from '../../server/db/tx.js'
+import { getPool } from '../../server/db/pool.js'
 import {
   ensureDefaultConfigSchedules,
   loadAllConfigSchedules,
@@ -13,8 +14,13 @@ import {
 } from '../../server/db/queries/configQueries.js'
 import { getOptionalSweedSessionConcurrencyKey } from '../../server/jobs/concurrency.js'
 import { enqueueJob } from '../../server/jobs/enqueueJob.js'
+import {
+  enqueueMarketRefreshForProducts,
+  rollingRefreshJitterSecondsForProduct,
+} from '../litalerts/enqueueMarketRefresh.js'
 
 const LITALERTS_DRAIN_BATCH_SIZE = 50
+const LITALERTS_ROLLING_BATCH_SIZE = 100
 
 interface SchedulerStateEntry {
   defaultsEnsured: boolean
@@ -56,6 +62,10 @@ export async function tickConfigWorkersScheduler(now: Date = new Date()): Promis
       await enqueueScheduledStockRefresh(schedule.taskKey, now, activeWindow.intervalMinutes)
     } else if (schedule.taskKey === 'workers.scheduling.litalerts') {
       await enqueueScheduledLitalertsRefreshBatch(schedule.taskKey, now, activeWindow.intervalMinutes)
+    } else if (schedule.taskKey === 'workers.scheduling.litalerts_rolling') {
+      await runScheduledLitalertsRollingTick(schedule.taskKey, now)
+    } else if (schedule.taskKey === 'workers.scheduling.market_evidence_alarm') {
+      await runScheduledMarketEvidenceAlarmScanTick(schedule.taskKey, now)
     } else if (schedule.taskKey === 'workers.scheduling.catalog') {
       await enqueueScheduledCatalogRefresh(schedule.taskKey, now, activeWindow.intervalMinutes)
     }
@@ -216,6 +226,122 @@ async function enqueueScheduledLitalertsRefreshBatch(
       scope: null,
       undoPayload: null,
     })
+  })
+}
+
+interface RollingRefreshCandidateRow {
+  product_id: number
+  latest_observation_id: number | null
+  next_refresh_at: Date | null
+}
+
+/**
+ * Scans the freshness view for products whose next_refresh_at has elapsed
+ * (or who have never had an observation) and re-enqueues them through the
+ * canonical enqueueMarketRefreshForProducts helper. Capped at
+ * LITALERTS_ROLLING_BATCH_SIZE products per tick so a single tick cannot
+ * stampede the partner API; the scheduler runs every few minutes so a few
+ * thousand stale products will roll over within an hour.
+ *
+ * On success the corresponding latest_observation rows get their
+ * next_refresh_at updated to base+24h+jitter so they do not show up in
+ * the candidate scan again next tick.
+ */
+async function runScheduledLitalertsRollingTick(
+  taskKey: ConfigBackgroundTaskKey,
+  now: Date,
+): Promise<void> {
+  const candidatesResult = await getPool().query<RollingRefreshCandidateRow>(
+    `
+      with candidates as (
+        select
+          vw.product_id,
+          vw.latest_observation_id,
+          obs.next_refresh_at
+        from vw_pricing_evidence_freshness vw
+        left join litalerts_competitor_observations obs
+          on obs.id = vw.latest_observation_id
+        where vw.latest_observation_id is null
+           or obs.next_refresh_at is null
+           or obs.next_refresh_at <= now()
+      )
+      select distinct on (product_id)
+        product_id, latest_observation_id, next_refresh_at
+      from candidates
+      order by product_id
+      limit $1
+    `,
+    [LITALERTS_ROLLING_BATCH_SIZE],
+  )
+
+  if (candidatesResult.rows.length === 0) {
+    // Record the tick anyway so the interval bucket honors its own cadence.
+    await withTransaction(async (db) => {
+      await recordConfigScheduleEnqueue(db, taskKey, null, now)
+    })
+    return
+  }
+
+  const productIds = candidatesResult.rows.map((row) => row.product_id)
+  const enqueueResult = await enqueueMarketRefreshForProducts(productIds, {
+    trigger: { kind: 'rolling' },
+    runAt: now,
+  })
+
+  // For each product we successfully enqueued AND that had a latest
+  // observation, push next_refresh_at out to base+24h+jitter so we do
+  // not re-pick the same row on the very next tick.
+  const baseMs = now.getTime() + 24 * 60 * 60 * 1000
+  for (const row of candidatesResult.rows) {
+    if (row.latest_observation_id === null) {
+      continue
+    }
+    const jitterSeconds = rollingRefreshJitterSecondsForProduct(row.product_id)
+    const nextRefreshAt = new Date(baseMs + jitterSeconds * 1000)
+    await getPool().query(
+      `
+        update litalerts_competitor_observations
+           set next_refresh_at = $2
+         where id = $1
+      `,
+      [row.latest_observation_id, nextRefreshAt],
+    )
+  }
+
+  await withTransaction(async (db) => {
+    const lastJobId = enqueueResult.enqueuedJobIds[enqueueResult.enqueuedJobIds.length - 1] ?? null
+    await recordConfigScheduleEnqueue(db, taskKey, lastJobId, now)
+  })
+}
+
+/**
+ * Enqueue a single `config.workers.market_evidence_alarm_scan` job per
+ * scheduler tick. The scanner itself is cheap and idempotent — the
+ * enqueue helper it calls dedupes per (productId, enqueue_reason) for
+ * 5 minutes, so back-to-back ticks are safe. Dedupe key buckets per
+ * scanner tick so two scheduler instances in the same minute do not
+ * double-queue.
+ */
+async function runScheduledMarketEvidenceAlarmScanTick(
+  taskKey: ConfigBackgroundTaskKey,
+  now: Date,
+): Promise<void> {
+  const bucketIso = new Date(Math.floor(now.getTime() / 60000) * 60000).toISOString()
+  await withTransaction(async (db) => {
+    const jobId = await enqueueJob(db, {
+      concurrencyKey: null,
+      dedupeKey: `config.workers.market_evidence_alarm_scan:scheduled:${bucketIso}`,
+      jobType: 'config.workers.market_evidence_alarm_scan',
+      module: 'config',
+      payload: {
+        trigger: 'scheduled',
+        requestedByUserId: null,
+      },
+      requestedByUserId: null,
+      runAt: now,
+      scope: null,
+    })
+    await recordConfigScheduleEnqueue(db, taskKey, jobId, now)
   })
 }
 

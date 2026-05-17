@@ -11,6 +11,21 @@ import { getPool } from '../../server/db/pool.js'
 import type { ProductPricingMarketEvidence } from '../pricing/deterministicPricing.js'
 import { buildPricingMarketContext } from '../pricing/litAlertsMarket.js'
 import type { JobHandlerContext } from '../runtime/jobRegistry.js'
+import { rollingRefreshJitterSecondsForProduct } from '../litalerts/enqueueMarketRefresh.js'
+
+/**
+ * Lit Alerts evidence is considered authoritative for this many days
+ * post-capture **unless** a brand_expiry_overrides row narrows or
+ * widens the window for the captured brand (see migration 012/013 +
+ * loadBrandExpiryDays() below).
+ */
+const DEFAULT_OBSERVATION_EXPIRY_DAYS = 4
+/** Base rolling cadence: 24h between successful captures (before jitter). */
+const OBSERVATION_BASE_REFRESH_MS = 24 * 60 * 60 * 1000
+/** On failure, expire-soon hint: scan again in 30 minutes. */
+const OBSERVATION_FAILURE_FAST_RETRY_MS = 30 * 60 * 1000
+/** Treat "expires_at within next 12h" as the trigger for the faster retry. */
+const OBSERVATION_EXPIRY_FAST_RETRY_WINDOW_MS = 12 * 60 * 60 * 1000
 
 interface QueueRow extends QueryResultRow {
   id: number
@@ -149,6 +164,37 @@ export async function runConfigWorkersLitalertsRefreshVariantJob(
   }
 }
 
+/**
+ * Look up the operator-managed per-brand expiry window in days.
+ * Returns DEFAULT_OBSERVATION_EXPIRY_DAYS when no override is
+ * configured, when the brand name is null, or when the
+ * brand_expiry_overrides table is not yet present (migration 012
+ * unapplied — we don't want to wedge the worker on an unmigrated env).
+ */
+async function loadBrandExpiryDays(brandName: string | null): Promise<number> {
+  if (!brandName) return DEFAULT_OBSERVATION_EXPIRY_DAYS
+  try {
+    const result = await getPool().query<{ expiry_days: number }>(
+      `select expiry_days
+         from brand_expiry_overrides
+        where lower(brand_name) = lower($1)
+        limit 1`,
+      [brandName],
+    )
+    const row = result.rows[0]
+    if (!row) return DEFAULT_OBSERVATION_EXPIRY_DAYS
+    const days = Number(row.expiry_days)
+    if (!Number.isFinite(days) || days < 1) return DEFAULT_OBSERVATION_EXPIRY_DAYS
+    return Math.min(30, Math.floor(days))
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    if (/relation .*brand_expiry_overrides.* does not exist/i.test(message)) {
+      return DEFAULT_OBSERVATION_EXPIRY_DAYS
+    }
+    throw error
+  }
+}
+
 async function loadQueueRow(queueRowId: number): Promise<QueueRow | null> {
   const result = await getPool().query<QueueRow>(
     `
@@ -197,7 +243,54 @@ async function persistObservationAndCloseQueue(input: PersistObservationInput): 
   const farListings = matchedListings.filter((listing) => listing.distanceBand === 'far')
   const pricingEligibleListings = matchedListings.filter((listing) => listing.eligibleForPricing)
 
+  // Honor brand_expiry_overrides — the operator-managed per-brand
+  // expiry window from migration 012 — when computing expires_at on
+  // a successful capture. Defaults to 4 days when no row exists or
+  // when the brand is not resolvable from this observation. Cheap
+  // one-row lookup keyed by lower(brand_name).
+  const candidateBrandName = liveState?.brand ?? groupRow?.brand_name ?? null
+  const expiryDays = await loadBrandExpiryDays(candidateBrandName)
+  const observationExpiryMs = expiryDays * 24 * 60 * 60 * 1000
+
   return withTransaction(async (db) => {
+    // For successful captures we set expires_at = captured_at + 4 days
+    // (matching the freshness-view bucket boundary) and
+    // next_refresh_at = captured_at + 24h + deterministic ± 2h jitter so
+    // the rolling scheduler does not pick up the same product right away.
+    // For failed captures we leave next_refresh_at NULL — the rolling
+    // scheduler will retry on its normal cadence — unless the prior
+    // observation's expires_at is within the next 12 hours, in which
+    // case we push a faster retry through.
+    const succeeded = input.status === 'succeeded'
+    const jitterSeconds = rollingRefreshJitterSecondsForProduct(payload.productId)
+
+    let nextRefreshAtClause = 'null'
+    let failureNextRefreshAt: Date | null = null
+    if (succeeded) {
+      nextRefreshAtClause = `now() + interval '${OBSERVATION_BASE_REFRESH_MS / 1000} seconds' + (${jitterSeconds}::int * interval '1 second')`
+    } else {
+      // Look up the previous successful observation's expires_at and
+      // decide whether a fast retry is needed.
+      const previous = await db.query<{ expires_at: Date | null }>(
+        `
+          select expires_at
+          from litalerts_competitor_observations
+          where product_id = $1
+            and status = 'succeeded'
+          order by captured_at desc, id desc
+          limit 1
+        `,
+        [payload.productId],
+      )
+      const previousExpiresAt = previous.rows[0]?.expires_at ?? null
+      if (
+        previousExpiresAt !== null
+        && previousExpiresAt.getTime() - Date.now() < OBSERVATION_EXPIRY_FAST_RETRY_WINDOW_MS
+      ) {
+        failureNextRefreshAt = new Date(Date.now() + OBSERVATION_FAILURE_FAST_RETRY_MS)
+      }
+    }
+
     const insertResult = await db.query<{ id: number }>(
       `
         insert into litalerts_competitor_observations (
@@ -206,14 +299,17 @@ async function persistObservationAndCloseQueue(input: PersistObservationInput): 
           search_terms_json, search_term_label, availability,
           listing_count, pricing_eligible_listing_count,
           near_listing_count, mid_listing_count, far_listing_count,
-          evidence_json, notes, error
+          evidence_json, notes, error,
+          expires_at, next_refresh_at
         ) values (
           $1, $2, $3, $4, $5,
           $6, $7, $8, $9, $10, $11,
           $12::jsonb, $13, $14,
           $15, $16,
           $17, $18, $19,
-          $20::jsonb, $21, $22
+          $20::jsonb, $21, $22,
+          now() + interval '${observationExpiryMs / 1000} seconds',
+          ${succeeded ? nextRefreshAtClause : '$23'}
         )
         returning id
       `,
@@ -240,6 +336,7 @@ async function persistObservationAndCloseQueue(input: PersistObservationInput): 
         JSON.stringify(evidence ?? {}),
         input.notes,
         input.error,
+        ...(succeeded ? [] : [failureNextRefreshAt]),
       ],
     )
 

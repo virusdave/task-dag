@@ -43,6 +43,7 @@ export const JobTypeSchema = z.enum([
   'config.workers.stock_refresh',
   'config.workers.litalerts_refresh.variant',
   'config.workers.catalog_refresh',
+  'config.workers.market_evidence_alarm_scan',
 ])
 export type JobType = z.infer<typeof JobTypeSchema>
 
@@ -116,8 +117,8 @@ export const CatalogSyncDiscoverOrphanGroupsJobPayloadSchema = z.object({
   requestedByUserId: z.number().int().positive().nullable().optional(),
   siteDealerIds: z.array(z.number().int().positive()).default([]),
   trigger: z
-    .enum(['catalog_maintenance_fix_cache', 'manual_refresh', 'scheduled'])
-    .default('catalog_maintenance_fix_cache'),
+    .enum(['manual_refresh', 'scheduled', 'catalog_maintenance_fix_cache'])
+    .default('manual_refresh'),
 })
 export type CatalogSyncDiscoverOrphanGroupsJobPayload = z.infer<
   typeof CatalogSyncDiscoverOrphanGroupsJobPayloadSchema
@@ -204,7 +205,22 @@ export const ConfigWorkersLitalertsRefreshVariantJobPayloadSchema = z.object({
   siteDealerId: z.number().int().positive().nullable().optional(),
   sourceSnapshotId: z.number().int().positive().nullable().optional(),
   requestedByUserId: z.number().int().positive().nullable().optional(),
-  trigger: z.enum(['manual_run', 'scheduled']).default('scheduled'),
+  trigger: z
+    .enum([
+      // Legacy trigger values from the pre-market-data-sweep scheduler.
+      'manual_run',
+      'scheduled',
+      // New market-data-sweep enqueue reason kinds. The string mirrors the
+      // `enqueue_reason` constraint on pending_litalerts_refresh_queue plus
+      // the `MarketRefreshTrigger` union in worker/litalerts/enqueueMarketRefresh.ts.
+      'rolling',
+      'proposal-source',
+      'pending-purchase',
+      'brand-alarm',
+      'in-stock-alarm',
+      'manual',
+    ])
+    .default('scheduled'),
 })
 export type ConfigWorkersLitalertsRefreshVariantJobPayload = z.infer<
   typeof ConfigWorkersLitalertsRefreshVariantJobPayloadSchema
@@ -216,6 +232,21 @@ export const ConfigWorkersCatalogRefreshJobPayloadSchema = z.object({
 })
 export type ConfigWorkersCatalogRefreshJobPayload = z.infer<
   typeof ConfigWorkersCatalogRefreshJobPayloadSchema
+>
+
+/**
+ * Periodic alarm scanner over `vw_pricing_evidence_freshness`. Scans for
+ * products whose alarm_class is non-null and whose competitor evidence is
+ * missing / expired / about to expire, then re-enqueues a market-data
+ * refresh at the alarm priority (0). One job per scheduler tick; the
+ * scheduler runs every 15 minutes by default.
+ */
+export const ConfigWorkersMarketEvidenceAlarmScanJobPayloadSchema = z.object({
+  trigger: z.enum(['scheduled', 'manual']),
+  requestedByUserId: z.number().int().positive().nullable(),
+})
+export type ConfigWorkersMarketEvidenceAlarmScanJobPayload = z.infer<
+  typeof ConfigWorkersMarketEvidenceAlarmScanJobPayloadSchema
 >
 
 export const CatalogReviewRerunRowJobPayloadSchema = z.object({

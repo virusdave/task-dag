@@ -7,6 +7,7 @@ import {
   CatalogSyncFullSummaryJobPayloadSchema,
   ConfigWorkersCatalogRefreshJobPayloadSchema,
   ConfigWorkersLitalertsRefreshVariantJobPayloadSchema,
+  ConfigWorkersMarketEvidenceAlarmScanJobPayloadSchema,
   ConfigWorkersStockRefreshJobPayloadSchema,
   CatalogSyncGroupDetailJobPayloadSchema,
   LlmDebugRerunJobPayloadSchema,
@@ -35,6 +36,7 @@ import { runCatalogReviewRerunRowJob } from '../jobs/catalogReviewRerunRowJob.js
 import { runCatalogPendingPurchasesImportJob } from '../jobs/importPendingPurchasePacketJob.js'
 import { runConfigWorkersCatalogRefreshJob } from '../jobs/configWorkersCatalogRefreshJob.js'
 import { runConfigWorkersLitalertsRefreshVariantJob } from '../jobs/configWorkersLitalertsRefreshJob.js'
+import { runConfigWorkersMarketEvidenceAlarmScanJob } from '../jobs/configWorkersMarketEvidenceAlarmScanJob.js'
 import { runConfigWorkersStockRefreshJob } from '../jobs/configWorkersStockRefreshJob.js'
 import { runProposalImportReviewJsonJob } from '../jobs/importReviewJsonJob.js'
 import { getPool } from '../../server/db/pool.js'
@@ -161,6 +163,12 @@ const handlers: Record<JobType, JobHandler> = {
     await runConfigWorkersCatalogRefreshJob(
       context,
       ConfigWorkersCatalogRefreshJobPayloadSchema.parse(context.payload),
+    )
+  },
+  'config.workers.market_evidence_alarm_scan': async (context) => {
+    await runConfigWorkersMarketEvidenceAlarmScanJob(
+      context,
+      ConfigWorkersMarketEvidenceAlarmScanJobPayloadSchema.parse(context.payload),
     )
   },
 }

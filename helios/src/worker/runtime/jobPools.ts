@@ -59,6 +59,7 @@ export const JOB_EXECUTION_POOL_BY_TYPE: Record<JobType, JobPoolMetadata> = {
   'catalog.pending_purchases.import_json': { pool: 'system', requiresSweedSession: false },
   'catalog.review.rerun_row': { pool: 'system', requiresSweedSession: false },
   'config.workers.litalerts_refresh.variant': { pool: 'system', requiresSweedSession: false },
+  'config.workers.market_evidence_alarm_scan': { pool: 'system', requiresSweedSession: false },
   'llm.debug.rerun': { pool: 'system', requiresSweedSession: false },
   'proposal.generate.description_batch': { pool: 'system', requiresSweedSession: false },
   'proposal.generate.pricing_batch': { pool: 'system', requiresSweedSession: false },
