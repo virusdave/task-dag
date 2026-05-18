@@ -44,6 +44,9 @@ import {
 import type { PricingMarketContext, ProductPricingMarketEvidence } from '../pricing/deterministicPricing.js'
 import { buildPricingMarketContext } from '../pricing/litAlertsMarket.js'
 import { enqueueMarketRefreshForProducts } from '../litalerts/enqueueMarketRefresh.js'
+import { parseWith } from '../../lib/parsekit/engine.js'
+import { getParserRegistry } from '../../lib/parsekit/node/parserRegistry.js'
+import type { CompiledParser, CompiledRelease } from '../../lib/parsekit/types.js'
 
 const GENERIC_PLACEHOLDER_PRODUCT_NAMES = new Set(['preroll samples samples'])
 
@@ -1792,7 +1795,19 @@ function resolveSites(siteDealerIds: number[]): HeliosPendingPurchaseSiteDealer[
     .filter((site): site is HeliosPendingPurchaseSiteDealer => site !== null)
 }
 
-export function parseProductName(name: string): ParsedProductName {
+/**
+ * Legacy hardcoded waterfall parser for METRC pending-purchase product
+ * names. This is the byte-for-byte comparator that the parsekit-based
+ * reverse-shadow harness in `parseProductName` measures the new parser
+ * against. Once parsekit has reached and held parity across all live
+ * inputs for long enough, the legacy implementation can be retired.
+ *
+ * Public exports stay stable: callers continue to import `parseProductName`;
+ * the parity tests in `src/lib/parsekit/__tests__/metrc-v1.test.ts` import
+ * `parseProductNameLegacy` directly so they're comparing two independent
+ * implementations rather than parsekit-versus-itself.
+ */
+export function parseProductNameLegacy(name: string): ParsedProductName {
   const normalized = name.trim()
   const lowered = normalized.toLowerCase()
   if (normalized.startsWith('Pr(') || normalized.startsWith('F(') || normalized.startsWith('V(')) {
@@ -1829,6 +1844,259 @@ export function parseProductName(name: string): ParsedProductName {
     return normalizeAndValidateParsedProductName(parseCannabalsName(normalized), normalized)
   }
   return normalizeAndValidateParsedProductName(parseHrBotanicalName(normalized), normalized)
+}
+
+/**
+ * Reverse-shadow entry point: parsekit is the live parser, the legacy
+ * implementation is the comparator and the fallback.
+ *
+ *   1. Run parsekit (loaded from the helios-parser-configs repo by
+ *      `getParserRegistry()`). If no registry has loaded yet (e.g. dev
+ *      boot or tests), treat that as "parsekit did not match".
+ *   2. Run the legacy parser.
+ *   3. If parsekit succeeded:
+ *        - record `ok_match` or `regression_diff` depending on whether
+ *          the parsekit output equals the legacy output, then return
+ *          the parsekit output (we trust parsekit).
+ *   4. If parsekit declined to dispatch (no detect-prefix match) we use
+ *      legacy silently — that's the expected path for tenants not yet
+ *      modeled in parsekit (currently: hr-botanical).
+ *   5. If parsekit dispatched but failed to parse, that's a regression:
+ *      log it loud and return the legacy output.
+ *
+ * Counters and a small ring buffer of recent regressions are exposed via
+ * `getParsekitReverseShadowSnapshot()` for the Helios `Config -> Parsing
+ * -> Purchases` page.
+ */
+export function parseProductName(name: string): ParsedProductName {
+  const normalized = name.trim()
+  const parsekit = tryParsekitParsePendingPurchase(normalized)
+
+  let legacy: ParsedProductName | null = null
+  let legacyErr: unknown = null
+  try {
+    legacy = parseProductNameLegacy(name)
+  } catch (err) {
+    legacyErr = err
+  }
+
+  if (parsekit.kind === 'ok') {
+    if (legacy === null) {
+      // Legacy threw on something parsekit accepted. Treat as a (good)
+      // surprise: use parsekit's output but record it for review.
+      REVERSE_SHADOW_STATS.legacy_threw += 1
+      recordReverseShadowRecord({
+        ts: Date.now(),
+        kind: 'legacy_threw',
+        input: name,
+        parsekit: parsekit.output,
+        parserId: parsekit.parserId,
+        snapshotSha: parsekit.snapshotSha,
+        legacyError: errMessage(legacyErr),
+      })
+      return parsekit.output
+    }
+    const diffs = diffParsedProductName(parsekit.output, legacy)
+    if (diffs.length === 0) {
+      REVERSE_SHADOW_STATS.ok_match += 1
+    } else {
+      REVERSE_SHADOW_STATS.regression_diff += 1
+      recordReverseShadowRecord({
+        ts: Date.now(),
+        kind: 'regression_diff',
+        input: name,
+        parsekit: parsekit.output,
+        legacy,
+        parserId: parsekit.parserId,
+        ruleId: parsekit.ruleId,
+        snapshotSha: parsekit.snapshotSha,
+        diffFields: diffs,
+      })
+    }
+    return parsekit.output
+  }
+
+  // parsekit did not produce a successful parse — fall back to legacy.
+  if (legacy === null) {
+    // No safety net.
+    if (legacyErr) throw legacyErr
+    throw new Error('parseProductName: legacy returned no result')
+  }
+
+  if (parsekit.kind === 'fail') {
+    REVERSE_SHADOW_STATS.regression_unmatched += 1
+    recordReverseShadowRecord({
+      ts: Date.now(),
+      kind: 'regression_unmatched',
+      input: name,
+      legacy,
+      parserId: parsekit.parserId,
+      snapshotSha: parsekit.snapshotSha,
+      parsekitFailureReason: parsekit.reason,
+    })
+  } else {
+    // 'no_registry' or 'no_detect_match' — silent legacy use, this is
+    // the expected path for tenants not yet ported (hr-botanical) and
+    // for boot windows before the registry has loaded.
+    REVERSE_SHADOW_STATS.ok_no_detect += 1
+  }
+  return legacy
+}
+
+// ---------------------------------------------------------------------
+// Reverse-shadow telemetry
+// ---------------------------------------------------------------------
+
+export interface ParsekitReverseShadowRecord {
+  ts: number
+  kind: 'regression_unmatched' | 'regression_diff' | 'legacy_threw'
+  input: string
+  parsekit?: ParsedProductName
+  legacy?: ParsedProductName
+  parserId?: string
+  ruleId?: string
+  snapshotSha?: string
+  /** Fields whose values differ between parsekit and legacy. */
+  diffFields?: string[]
+  /** parsekit failure reason ({no_match,validation_error,...}: diagnostics). */
+  parsekitFailureReason?: string
+  /** Stringified legacy error when `kind === 'legacy_threw'`. */
+  legacyError?: string
+}
+
+export interface ParsekitReverseShadowSnapshot {
+  /** parsekit succeeded with identical output to legacy. */
+  ok_match: number
+  /** parsekit did not dispatch (no detect prefix or no registry) — legacy used. */
+  ok_no_detect: number
+  /** parsekit dispatched but failed to parse — legacy used, regression. */
+  regression_unmatched: number
+  /** parsekit succeeded but output differs from legacy. */
+  regression_diff: number
+  /** legacy threw on input parsekit accepted. */
+  legacy_threw: number
+  /** Most-recent-first ring buffer (cap MAX_RECENT). */
+  recent: ParsekitReverseShadowRecord[]
+}
+
+const REVERSE_SHADOW_MAX_RECENT = 100
+const REVERSE_SHADOW_STATS: ParsekitReverseShadowSnapshot = {
+  ok_match: 0,
+  ok_no_detect: 0,
+  regression_unmatched: 0,
+  regression_diff: 0,
+  legacy_threw: 0,
+  recent: [],
+}
+
+export function getParsekitReverseShadowSnapshot(): ParsekitReverseShadowSnapshot {
+  return {
+    ok_match: REVERSE_SHADOW_STATS.ok_match,
+    ok_no_detect: REVERSE_SHADOW_STATS.ok_no_detect,
+    regression_unmatched: REVERSE_SHADOW_STATS.regression_unmatched,
+    regression_diff: REVERSE_SHADOW_STATS.regression_diff,
+    legacy_threw: REVERSE_SHADOW_STATS.legacy_threw,
+    recent: REVERSE_SHADOW_STATS.recent.slice(),
+  }
+}
+
+/** Test-only: clear counters and ring buffer. */
+export function __resetParsekitReverseShadowSnapshot(): void {
+  REVERSE_SHADOW_STATS.ok_match = 0
+  REVERSE_SHADOW_STATS.ok_no_detect = 0
+  REVERSE_SHADOW_STATS.regression_unmatched = 0
+  REVERSE_SHADOW_STATS.regression_diff = 0
+  REVERSE_SHADOW_STATS.legacy_threw = 0
+  REVERSE_SHADOW_STATS.recent.length = 0
+}
+
+function recordReverseShadowRecord(rec: ParsekitReverseShadowRecord): void {
+  REVERSE_SHADOW_STATS.recent.unshift(rec)
+  if (REVERSE_SHADOW_STATS.recent.length > REVERSE_SHADOW_MAX_RECENT) {
+    REVERSE_SHADOW_STATS.recent.length = REVERSE_SHADOW_MAX_RECENT
+  }
+  // Loud structured log: one JSON line per event. The Helios UI reads
+  // from the in-memory ring buffer; this log is the durable trail.
+  console.warn(JSON.stringify({ msg: 'parsekit reverse-shadow', ...rec }))
+}
+
+function diffParsedProductName(a: ParsedProductName, b: ParsedProductName): string[] {
+  const out: string[] = []
+  const keys = new Set<string>([...Object.keys(a), ...Object.keys(b)])
+  const ar = a as unknown as Record<string, unknown>
+  const br = b as unknown as Record<string, unknown>
+  for (const k of keys) {
+    if (ar[k] !== br[k]) out.push(k)
+  }
+  return out
+}
+
+type ParsekitDispatchResult =
+  | { kind: 'no_registry' }
+  | { kind: 'no_detect_match'; snapshotSha: string }
+  | { kind: 'fail'; snapshotSha: string; parserId: string; reason: string }
+  | {
+      kind: 'ok'
+      snapshotSha: string
+      parserId: string
+      ruleId: string
+      output: ParsedProductName
+    }
+
+function tryParsekitParsePendingPurchase(input: string): ParsekitDispatchResult {
+  const release = getParserRegistry().current()
+  if (!release) return { kind: 'no_registry' }
+  const dispatch = findParsekitDispatchByPrefix(release, input)
+  if (!dispatch) return { kind: 'no_detect_match', snapshotSha: release.sha }
+  let r
+  try {
+    r = parseWith(dispatch, input, { snapshotSha: release.sha })
+  } catch (err) {
+    return {
+      kind: 'fail',
+      snapshotSha: release.sha,
+      parserId: dispatch.config.parserId,
+      reason: `threw: ${errMessage(err)}`,
+    }
+  }
+  if (r.ok) {
+    return {
+      kind: 'ok',
+      snapshotSha: r.snapshotSha,
+      parserId: r.parserId,
+      ruleId: r.ruleId,
+      output: r.output as ParsedProductName,
+    }
+  }
+  const diagSummary = r.diagnostics?.length
+    ? ': ' + r.diagnostics.map((d) => `${d.ruleId || '-'}=${d.reason}`).join('; ')
+    : ''
+  return {
+    kind: 'fail',
+    snapshotSha: release.sha,
+    parserId: dispatch.config.parserId,
+    reason: `${r.reason}${diagSummary}`,
+  }
+}
+
+function findParsekitDispatchByPrefix(
+  release: CompiledRelease,
+  input: string,
+): CompiledParser<unknown> | null {
+  const lowered = input.toLowerCase()
+  for (const parser of release.parsers.values()) {
+    if (parser.config.scope.useCase !== 'pending-purchases') continue
+    const prefixes = parser.config.detect.prefixes ?? []
+    for (const p of prefixes) {
+      if (lowered.startsWith(p.toLowerCase())) return parser
+    }
+  }
+  return null
+}
+
+function errMessage(err: unknown): string {
+  if (err instanceof Error) return err.message
+  return String(err)
 }
 
 async function classifyPendingPurchaseNameWithLlmFallback(input: {

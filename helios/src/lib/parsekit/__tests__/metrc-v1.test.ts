@@ -22,7 +22,9 @@ import {
   pendingPurchasesOutputFields,
 } from '../contracts/pendingPurchases.js'
 import { metrcV1Dialect } from '../dialects/metrc-v1.js'
-// Legacy `parseProductName` is imported dynamically per parity test
+// Legacy `parseProductNameLegacy` (the un-shadowed waterfall parser,
+// renamed when the parsekit reverse-shadow harness took over the
+// exported `parseProductName`) is imported dynamically per parity test
 // case (see below) to isolate the shared-state mutation bug in
 // `parseCuraleafName` from earlier cases in the same run.
 
@@ -73,7 +75,7 @@ describe('metrc-v1 dialect: end-to-end goldens', () => {
   }
 })
 
-describe('metrc-v1 dialect: parity with legacy parseProductName', () => {
+describe('metrc-v1 dialect: parity with legacy parseProductNameLegacy', () => {
   // Compile once.
   const compiledBy = new Map(
     TENANT_CONFIGS.map((c) => [c.parserId, compileParser(c, metrcV1Dialect, pendingPurchasesContract)]),
@@ -511,7 +513,7 @@ describe('metrc-v1 dialect: parity with legacy parseProductName', () => {
       }
     })
 
-    it(`${c.parserId}: "${c.input}" matches legacy parseProductName`, async () => {
+    it(`${c.parserId}: "${c.input}" matches legacy parseProductNameLegacy`, async () => {
       const compiled = compiledBy.get(c.parserId)!
       const result = parseWith(compiled, c.input)
       expect(result.ok).toBe(true)
@@ -521,9 +523,13 @@ describe('metrc-v1 dialect: parity with legacy parseProductName', () => {
         // (mapping.subcategory = 'Infused' for the Anthem+Bold branch)
         // can't leak between parity cases. parsekit does NOT reproduce
         // that mutation bug — see Oracle critique notes.
+        //
+        // We call `parseProductNameLegacy` (not `parseProductName`) here:
+        // `parseProductName` is now the reverse-shadow entry point that
+        // *runs parsekit first* and would make this comparison circular.
         vi.resetModules()
         const fresh = await import('../../../worker/jobs/generatePendingPurchasePacketJob.js')
-        const legacy = fresh.parseProductName(c.input)
+        const legacy = fresh.parseProductNameLegacy(c.input)
         expect(result.output).toEqual(legacy)
       }
     })
