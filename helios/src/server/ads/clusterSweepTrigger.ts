@@ -3,37 +3,38 @@
  *
  * The cluster-proposals page exposes a single "Run cluster sweep now"
  * button. When clicked it POSTs /api/ads/cluster-proposals/sweep/run,
- * which calls into here. We invoke `systemctl --no-block start` on the
- * shipped unit name and translate systemctl's exit code + stderr into
- * one of a small set of operator-facing statuses, so the page can
- * render a single line of plain English regardless of what failed
- * underneath. Operator-facing copy NEVER includes the literal
- * `systemctl` command; that's the whole point.
+ * which calls into here. We shell out to the
+ * `gads-cluster-sweep-trigger` wrapper (a tiny nixpkgs-built shell
+ * script declared in nixos-sbc/modules/google-ads-automation.nix
+ * that does exactly `systemctl --no-block start
+ * gads-cluster-sweep.service`). That wrapper is sudo-whitelisted for
+ * the `helios` system user; helios never invokes `systemctl` directly,
+ * so we don't need a permissive sudo rule for the systemctl binary
+ * itself.
  *
- * Until P4 of the gemini-clusters epic lands (which provisions the
- * unit + a polkit rule granting the helios service user permission to
- * start it), `triggerClusterSweep` will resolve to
- * `service-not-deployed` or `permission-denied` and the page will
- * show a clean disabled-state with a one-liner explaining what's
- * missing — still no infra leakage.
+ * We translate exit code + stderr into one of a small set of
+ * operator-facing statuses so the page can render a single line of
+ * plain English regardless of what failed underneath. The operator
+ * never sees the literal `systemctl`/`sudo` commands.
  */
 
 import { spawn } from 'node:child_process'
 
 import type { ClusterSweepRunTriggerResponse } from '../../shared/contracts/index.js'
 
-const CLUSTER_SWEEP_UNIT = 'gads-cluster-sweep.service'
+/**
+ * Path to the nix-built wrapper from
+ * nixos-sbc/modules/google-ads-automation.nix. The wrapper is
+ * declared in `environment.systemPackages` so it is reliably
+ * available at `/run/current-system/sw/bin/<name>` on every
+ * activation of the system closure that includes it. We pin the
+ * fully-qualified path rather than relying on $PATH so the helios
+ * service unit (which has a minimal default PATH) can find it.
+ */
+const TRIGGER_WRAPPER = '/run/current-system/sw/bin/gads-cluster-sweep-trigger'
 
 export async function triggerClusterSweep(): Promise<ClusterSweepRunTriggerResponse> {
-  const status = await runSystemctl(['is-active', CLUSTER_SWEEP_UNIT])
-  if (status.exitCode === 0 && status.stdout.trim() === 'active') {
-    return {
-      status: 'already-running',
-      message: 'A cluster sweep is already running. The new run will appear at the top of this page once it completes.',
-    }
-  }
-
-  const start = await runSystemctl(['--no-block', 'start', CLUSTER_SWEEP_UNIT])
+  const start = await runWrapper()
   if (start.exitCode === 0) {
     return {
       status: 'triggered',
@@ -42,54 +43,61 @@ export async function triggerClusterSweep(): Promise<ClusterSweepRunTriggerRespo
     }
   }
 
-  // Translate systemctl's noisier failure modes to one of our typed
-  // statuses. systemctl writes its diagnostic to stderr; we look for
-  // the well-known strings rather than parsing the exit code (which
-  // is overloaded across distros + unit states).
-  const combined = `${start.stdout}\n${start.stderr}`.toLowerCase()
-
-  if (
-    combined.includes('not loaded') ||
-    combined.includes('not found') ||
-    combined.includes('no such file or directory') ||
-    combined.includes('could not be found')
-  ) {
-    return {
-      status: 'service-not-deployed',
-      message:
-        'The cluster-sweep service is not deployed on this host yet. It is part of an in-progress rollout; once it lands this button will start working automatically.',
-    }
-  }
-
-  if (
-    combined.includes('access denied') ||
-    combined.includes('permission denied') ||
-    combined.includes('interactive authentication required') ||
-    combined.includes('not authorized')
-  ) {
-    return {
-      status: 'permission-denied',
-      message:
-        'Helios does not currently have permission to start the cluster-sweep service. The host needs a polkit/sudo rule for the helios service user; this is part of the same rollout that ships the service itself.',
-    }
-  }
-
-  return {
-    status: 'trigger-failed',
-    message: 'Could not start the cluster-sweep service. Try again in a minute; if it keeps failing, alert on-call.',
-    detail: combined.trim() || null,
+  // The wrapper exits with distinct codes so we can translate them
+  // back to typed statuses without scraping localised systemctl
+  // stderr. See the writeShellApplication body in
+  // nixos-sbc/modules/google-ads-automation.nix.
+  switch (start.exitCode) {
+    case 64:
+      // Reserved by the wrapper for "service unit not present in the
+      // running system" (e.g. someone disabled it, or the system
+      // closure is older than this helios deploy).
+      return {
+        status: 'service-not-deployed',
+        message:
+          'The cluster-sweep service is not deployed on this host yet. Re-run self-deploy on vps-nixos-3 to pick up the unit.',
+      }
+    case 65:
+      // Reserved by the wrapper for "another sweep is already in
+      // flight"; isolated from generic failure so the UI can render
+      // a friendlier message.
+      return {
+        status: 'already-running',
+        message: 'A cluster sweep is already running. The new run will appear at the top of this page once it completes.',
+      }
+    case 77:
+      // EX_NOPERM — wrapper detected it does not have permission to
+      // run systemctl. Should not happen on a properly-deployed
+      // vps-nixos-3 but covered defensively.
+      return {
+        status: 'permission-denied',
+        message:
+          'Helios was blocked from starting the cluster-sweep service. The sudo whitelist for the gads-cluster-sweep-trigger wrapper is missing or out of date.',
+      }
+    default:
+      return {
+        status: 'trigger-failed',
+        message: 'Could not start the cluster-sweep service. Try again in a minute; if it keeps failing, alert on-call.',
+        detail: `${start.stdout}\n${start.stderr}`.trim() || null,
+      }
   }
 }
 
-interface SystemctlResult {
+interface SpawnResult {
   exitCode: number | null
   stdout: string
   stderr: string
 }
 
-function runSystemctl(args: string[]): Promise<SystemctlResult> {
+function runWrapper(): Promise<SpawnResult> {
   return new Promise((resolve) => {
-    const child = spawn('systemctl', args, { stdio: ['ignore', 'pipe', 'pipe'] })
+    // `sudo -n` — non-interactive. With the NOPASSWD rule provisioned
+    // by the nix module, sudo immediately runs the wrapper as root.
+    // Without it sudo exits non-zero with "a password is required"
+    // and the wrapper's distinct exit codes are unreachable; we fall
+    // through to the `trigger-failed` default branch, which surfaces
+    // the sudo diagnostic in the collapsed <details> on the page.
+    const child = spawn('sudo', ['-n', TRIGGER_WRAPPER], { stdio: ['ignore', 'pipe', 'pipe'] })
     let stdout = ''
     let stderr = ''
     child.stdout.on('data', (chunk: Buffer) => {
