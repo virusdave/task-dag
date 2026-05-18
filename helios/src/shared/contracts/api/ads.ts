@@ -89,5 +89,52 @@ export const ClusterSweepRunsResponseSchema = z.object({
 })
 export type ClusterSweepRunsResponse = z.infer<typeof ClusterSweepRunsResponseSchema>
 
+/**
+ * POST /api/ads/cluster-proposals/sweep/run
+ *
+ * Operator-facing "Run cluster sweep now" trigger. Asks the host to
+ * start `gads-cluster-sweep.service` (the unit shipped by P4 of the
+ * gemini-clusters epic) without blocking; the actual sweep typically
+ * takes minutes, so the response only reports whether the *trigger*
+ * succeeded. The page polls the runs index after a successful
+ * trigger to discover the resulting run.
+ *
+ * The body is empty; the route is auth-gated to the `editor` role.
+ *
+ * Failure modes the client must render gracefully:
+ *   - service-not-deployed:  the systemd unit doesn't exist yet
+ *                            (P4 hasn't landed on this host).
+ *   - permission-denied:     the helios service user can't start the
+ *                            unit (polkit/sudo rule not provisioned).
+ *   - already-running:       a sweep is already in flight; no-op.
+ *   - trigger-failed:        anything else (network split,
+ *                            systemd broken, ...); detail in `message`.
+ */
+export const ClusterSweepRunTriggerResponseSchema = z.discriminatedUnion('status', [
+  z.object({
+    status: z.literal('triggered'),
+    startedAt: z.string(),
+    message: z.string(),
+  }),
+  z.object({
+    status: z.literal('already-running'),
+    message: z.string(),
+  }),
+  z.object({
+    status: z.literal('service-not-deployed'),
+    message: z.string(),
+  }),
+  z.object({
+    status: z.literal('permission-denied'),
+    message: z.string(),
+  }),
+  z.object({
+    status: z.literal('trigger-failed'),
+    message: z.string(),
+    detail: z.string().nullable(),
+  }),
+])
+export type ClusterSweepRunTriggerResponse = z.infer<typeof ClusterSweepRunTriggerResponseSchema>
+
 export const ADS_DRIVE_FOLDER_URL =
   `https://drive.google.com/drive/folders/${ADS_DRIVE_FOLDER_ID}`

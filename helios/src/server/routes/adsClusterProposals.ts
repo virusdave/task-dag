@@ -19,12 +19,16 @@ import * as path from 'node:path'
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 
-import { ClusterSweepRunsResponseSchema } from '../../shared/contracts/index.js'
+import {
+  ClusterSweepRunsResponseSchema,
+  ClusterSweepRunTriggerResponseSchema,
+} from '../../shared/contracts/index.js'
 import {
   getClusterSweepRun,
   isSafeRunId,
   listClusterSweepRuns,
 } from '../ads/clusterSweepRuns.js'
+import { triggerClusterSweep } from '../ads/clusterSweepTrigger.js'
 import { requireSessionUser } from '../auth/requireSession.js'
 
 export async function registerAdsClusterProposalsRoutes(
@@ -67,6 +71,15 @@ export async function registerAdsClusterProposalsRoutes(
       return streamZipForRun(reply, run.runDirAbsPath, runId)
     },
   )
+
+  server.post('/api/ads/cluster-proposals/sweep/run', async (request, reply) => {
+    const user = await requireSessionUser(request, reply, 'editor')
+    if (!user) {
+      return
+    }
+    const result = await triggerClusterSweep()
+    return reply.send(ClusterSweepRunTriggerResponseSchema.parse(result))
+  })
 
   // Latest-run convenience: same as above but resolves the latest run
   // server-side so the UI can offer a single "Download latest" link
