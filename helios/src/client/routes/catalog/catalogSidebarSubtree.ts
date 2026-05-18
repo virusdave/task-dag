@@ -85,37 +85,11 @@ export function useRegisterCatalogSidebarSubtree(options?: { imagesAndBarcodes?:
         label: 'History',
         to: buildHeliosModulePath('catalog', 'history'),
       },
-      // TODO(market-data-review): The FB-US "competitor price match review"
-      // pages currently live in the mostly-static-sites Next.js app
-      // (apps/freshlybakedus-site/app/internal/{midtown,bronx}-conquest/...)
-      // and are reached here via external links into the OAuth-gated
-      // /internal/ subtree on freshlybaked.us. The longer-term plan is to
-      // migrate the matching UI (category/subcategory/variant/brand filters,
-      // in-stock vs in-stock-related toggle, mobile-friendly review) into
-      // Helios itself underneath the Catalog module, at which point these
-      // two external leaves should be replaced with a Helios-native route.
-      {
-        kind: 'branch',
-        navKey: 'catalog.market-data-review',
-        label: 'Market data review',
-        defaultOpen: false,
-        children: [
-          {
-            kind: 'leaf',
-            navKey: 'catalog.market-data-review.midtown',
-            label: 'FB-US Midtown competitor matches (MSS)',
-            externalHref:
-              'https://freshlybaked.us/internal/midtown-conquest/conquest-index.html',
-          },
-          {
-            kind: 'leaf',
-            navKey: 'catalog.market-data-review.bronx',
-            label: 'FB-US Bronx competitor matches (MSS)',
-            externalHref:
-              'https://freshlybaked.us/internal/bronx-conquest/conquest-index.html',
-          },
-        ],
-      },
+      // Note: "Price comparison review" (FB-US Midtown/Bronx competitor
+      // match review) now lives under Ads → Price comparison review
+      // (see communicationsSidebar.ts). It's competitor pricing intel
+      // for the ads / merchandising surface, not a catalog-mirroring
+      // workflow.
     ],
     [imagesAndBarcodes],
   )
