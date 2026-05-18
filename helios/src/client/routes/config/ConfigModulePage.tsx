@@ -64,6 +64,21 @@ export function ConfigModulePage() {
             </Link>
           </div>
         </article>
+
+        <article className="mini-card">
+          <header>
+            <strong>Access</strong>
+            <Pill tone="success">live</Pill>
+          </header>
+          <p className="subtle-copy">
+            Admin-only. Provision new operators, change roles
+            (viewer / editor / approver / admin), and deactivate accounts. Soft-deleted users keep
+            their audit footprint but can no longer sign in.
+          </p>
+          <div className="inline-row wrap-row module-card-links">
+            <Link to={buildHeliosModulePath('config', 'users')}>Open Users</Link>
+          </div>
+        </article>
       </div>
     </section>
   )

@@ -29,6 +29,10 @@ export const AuditEntityTypeSchema = z.enum([
 ])
 export const AuditEventTypeSchema = z.enum([
   'auth.user.signed_in',
+  'auth.user.provisioned',
+  'auth.user.role_changed',
+  'auth.user.active_changed',
+  'auth.user.name_changed',
   'pending_purchase.packet.generation_requested',
   'pending_purchase.packet.generated',
   'pending_purchase.packet.import_requested',

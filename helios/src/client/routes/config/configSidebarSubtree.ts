@@ -37,6 +37,12 @@ export function useRegisterConfigSidebarSubtree(): void {
           },
         ],
       },
+      {
+        kind: 'leaf',
+        navKey: 'config.users',
+        label: 'Users',
+        to: buildHeliosModulePath('config', 'users'),
+      },
     ],
     [],
   )
