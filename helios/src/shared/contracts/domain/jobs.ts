@@ -44,6 +44,7 @@ export const JobTypeSchema = z.enum([
   'config.workers.litalerts_refresh.variant',
   'config.workers.catalog_refresh',
   'config.workers.market_evidence_alarm_scan',
+  'catalog.maintenance.upload_group_image',
 ])
 export type JobType = z.infer<typeof JobTypeSchema>
 
@@ -247,6 +248,30 @@ export const ConfigWorkersMarketEvidenceAlarmScanJobPayloadSchema = z.object({
 })
 export type ConfigWorkersMarketEvidenceAlarmScanJobPayload = z.infer<
   typeof ConfigWorkersMarketEvidenceAlarmScanJobPayloadSchema
+>
+
+/**
+ * Worker-side resilient image upload for the catalog-maintenance
+ * "Images & Barcodes" page. The Fastify route stashes the uploaded
+ * bytes via `PendingImageUploadStore` and enqueues this job. The
+ * worker leases a token from the Sweed session pool (see
+ * SWEED_BACKED_JOB_TYPES + withSweedSession), runs blob.add → PUT
+ * bytes → group.get → group.edit → group.get verify, flags the
+ * group for reanalysis, and deletes the staged bytes on success.
+ *
+ * `stagedRef` is opaque to the worker — it's whatever
+ * PendingImageUploadStore returned for the bytes. The store today is
+ * local-filesystem at /var/lib/helios/pending-image-uploads; an S3
+ * backend is planned (Phase 7 in EPIC_PLAN.md).
+ */
+export const CatalogMaintenanceUploadGroupImageJobPayloadSchema = z.object({
+  stagedRef: z.string().trim().min(1),
+  catalogGroupId: z.number().int().positive(),
+  sweedGroupId: z.number().int().positive(),
+  requestedByUserId: z.number().int().positive().nullable(),
+})
+export type CatalogMaintenanceUploadGroupImageJobPayload = z.infer<
+  typeof CatalogMaintenanceUploadGroupImageJobPayloadSchema
 >
 
 export const CatalogReviewRerunRowJobPayloadSchema = z.object({

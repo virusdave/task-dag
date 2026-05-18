@@ -123,15 +123,37 @@ export type CatalogMaintenanceSurveyResponse = z.infer<typeof CatalogMaintenance
 export const CatalogMaintenanceUploadTargetTypeSchema = z.enum(['group', 'variants'])
 export type CatalogMaintenanceUploadTargetType = z.infer<typeof CatalogMaintenanceUploadTargetTypeSchema>
 
+/**
+ * Image-upload responses are now always asynchronous: the route
+ * stashes bytes via PendingImageUploadStore and enqueues a worker
+ * job (catalog.maintenance.upload_group_image). The client polls
+ * /api/jobs/:id (the existing endpoint) to watch the job through
+ * queued → running → succeeded | failed and shows ✓ / ✗ in the
+ * per-card status banner. On failure the operator can retry without
+ * re-selecting the file because the bytes are durable.
+ *
+ * Variant-image uploads remain parked — the route returns HTTP 410
+ * for `targetType: 'variants'` until the Sweed RPC for attaching
+ * variant-level images is figured out.
+ */
 export const CatalogMaintenanceUploadResultSchema = z.object({
-  targetType: CatalogMaintenanceUploadTargetTypeSchema,
-  groupId: z.number().int(),
-  affectedProductIds: z.array(z.number().int()),
-  uploadedBlobId: z.string(),
-  blobUrl: z.string().nullable(),
-  reanalysisJobId: z.number().int().nullable(),
+  status: z.literal('queued'),
+  jobId: z.number().int().positive(),
+  stagedRef: z.string().min(1),
+  sweedGroupId: z.number().int().positive(),
+  targetType: z.literal('group'),
 })
 export type CatalogMaintenanceUploadResult = z.infer<typeof CatalogMaintenanceUploadResultSchema>
+
+/**
+ * Body for POST /api/catalog/maintenance/images/:stagedRef/retry.
+ * No fields — the staged bytes already carry every input the worker
+ * needs.
+ */
+export const CatalogMaintenanceRetryUploadRequestSchema = z.object({}).optional()
+export type CatalogMaintenanceRetryUploadRequest = z.infer<
+  typeof CatalogMaintenanceRetryUploadRequestSchema
+>
 
 export const CatalogMaintenanceUpdateBarcodeRequestSchema = z.object({
   productId: z.number().int().positive(),

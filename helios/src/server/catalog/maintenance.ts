@@ -61,6 +61,7 @@ import { withSweedSession } from '../../worker/sweed/session.js'
 import { getServerEnv } from '../config/env.js'
 import { getPool, type Queryable } from '../db/pool.js'
 import { enqueueJob } from '../jobs/enqueueJob.js'
+import { getPendingImageUploadStore } from './pendingImageUploadStore.js'
 import {
   SWEED_SESSION_CONCURRENCY_KEY,
   getOptionalSweedSessionConcurrencyKey,
@@ -902,26 +903,38 @@ export async function enqueueCacheRepairJobs(requestedByUserId: number | null): 
 }
 
 /* -------------------------------------------------------------------------- */
-/*  Image upload — accept multipart bytes, push to Sweed blob, then attach.   */
+/*  Image upload — durable staging + queued worker job.                       */
+/*                                                                            */
+/*  The route handler stashes incoming bytes via PendingImageUploadStore and  */
+/*  enqueues a `catalog.maintenance.upload_group_image` worker job. The       */
+/*  worker (see src/worker/jobs/catalogMaintenanceUploadGroupImageJob.ts)     */
+/*  leases a token from sweed_session_tokens, performs blob.add → PUT bytes   */
+/*  → group.edit → verify, flags the group for reanalysis, and deletes the    */
+/*  staged bytes only on success. A transient failure leaves the bytes on     */
+/*  disk so the worker's standard retry/backoff re-runs against the same      */
+/*  stagedRef — operators do NOT need to re-upload.                            */
+/*                                                                            */
+/*  Variant-image uploads are not supported by this flow because              */
+/*  store.product.edit { imagesIds } silently no-ops for variants in Sweed;    */
+/*  the route returns HTTP 410 for `targetType: 'variants'`.                   */
 /* -------------------------------------------------------------------------- */
 
-export interface UploadInput {
+export interface EnqueueGroupImageUploadInput {
   fileBytes: Uint8Array
   contentType: string
-  targetType: 'group' | 'variants'
-  groupId: number
-  productIds: number[]
+  originalFilename: string | null
   requestedByUserId: number | null
+  sweedGroupId: number
 }
 
-export interface UploadResult {
-  uploadedBlobId: string
-  blobUrl: string | null
-  affectedProductIds: number[]
-  reanalysisJobId: number | null
+export interface EnqueueGroupImageUploadResult {
+  jobId: number
+  stagedRef: string
 }
 
-export async function uploadCatalogMaintenanceImage(input: UploadInput): Promise<UploadResult> {
+export async function enqueueGroupImageUploadJob(
+  input: EnqueueGroupImageUploadInput,
+): Promise<EnqueueGroupImageUploadResult> {
   if (input.fileBytes.byteLength === 0) {
     throw new HttpError(400, 'Upload payload is empty.')
   }
@@ -931,80 +944,82 @@ export async function uploadCatalogMaintenanceImage(input: UploadInput): Promise
   if (!ALLOWED_IMAGE_MIME_TYPES.has(input.contentType.toLowerCase())) {
     throw new HttpError(415, `Unsupported content type ${input.contentType}.`)
   }
-  if (input.targetType === 'variants' && input.productIds.length === 0) {
-    throw new HttpError(400, 'At least one variant must be selected for variant uploads.')
+
+  const store = getPendingImageUploadStore()
+  const { stagedRef } = await store.put({
+    bytes: input.fileBytes,
+    meta: {
+      contentType: input.contentType,
+      groupId: input.sweedGroupId, // legacy alias kept for the meta sidecar
+      originalFilename: input.originalFilename,
+      requestedByUserId: input.requestedByUserId,
+      sweedGroupId: input.sweedGroupId,
+      targetType: 'group',
+    },
+  })
+
+  const jobId = await enqueueJob(getPool(), {
+    concurrencyKey: getOptionalSweedSessionConcurrencyKey(true),
+    dedupeKey: `catalog.maintenance.upload_group_image:${stagedRef}`,
+    jobType: 'catalog.maintenance.upload_group_image',
+    module: 'catalog',
+    payload: {
+      stagedRef,
+      sweedGroupId: input.sweedGroupId,
+      requestedByUserId: input.requestedByUserId,
+    },
+    requestedByUserId: input.requestedByUserId,
+    scope: null,
+  })
+
+  // Don't invalidate the survey cache yet — the upload is only
+  // queued. The client polls /api/jobs/:id and force-refreshes the
+  // survey when the job transitions to `succeeded`.
+  return { jobId, stagedRef }
+}
+
+export interface RetryGroupImageUploadInput {
+  stagedRef: string
+  requestedByUserId: number | null
+}
+
+export interface RetryGroupImageUploadResult {
+  jobId: number
+  stagedRef: string
+  sweedGroupId: number
+}
+
+export async function retryGroupImageUploadJob(
+  input: RetryGroupImageUploadInput,
+): Promise<RetryGroupImageUploadResult> {
+  const store = getPendingImageUploadStore()
+  let staged: Awaited<ReturnType<typeof store.read>>
+  try {
+    staged = await store.read(input.stagedRef)
+  } catch (error) {
+    throw new HttpError(
+      404,
+      `Staged image ${input.stagedRef} no longer exists; the upload likely ` +
+        `succeeded already or was garbage-collected. Re-select the file and upload again. ` +
+        `(${(error as Error).message})`,
+    )
   }
 
-  const result = await withSweedSession(async () => {
-    const stateDealerId = getServerEnv().sweedStateDealerId
-
-    const blobId = await createBlob(stateDealerId)
-    await putBlobBytes(blobId, input.fileBytes, input.contentType)
-
-    if (input.targetType === 'group') {
-      const group = await fetchGroupImagesWithinLock(input.groupId)
-      const existingImageIds = collectExistingImageIds(group.images)
-      const nextImageIds = appendUnique(existingImageIds, blobId)
-      await callSweedRpc(stateDealerId, 'store.product.group.edit', {
-        id: input.groupId,
-        imagesIds: nextImageIds,
-      })
-      const refreshed = await fetchGroupImagesWithinLock(input.groupId)
-      const matching = refreshed.images.filter((image) => normalizeImageId(image) === blobId)
-      if (matching.length === 0) {
-        throw new HttpError(
-          502,
-          `Sweed accepted store.product.group.edit for group ${input.groupId} but the new image blob ${blobId} is not present in the refreshed image list (got ${describeImageIds(refreshed.images)}). The upload did NOT take effect.`,
-        )
-      }
-      const blobUrl = pickRawPreviewUrl(matching)
-      return { uploadedBlobId: blobId, blobUrl, affectedProductIds: [] }
-    }
-
-    const affectedProductIds: number[] = []
-    let blobUrl: string | null = null
-    for (const productId of input.productIds) {
-      const product = await fetchProductImagesWithinLock(productId)
-      const existingImageIds = collectExistingImageIds(product.images)
-      const nextImageIds = appendUnique(existingImageIds, blobId)
-      await callSweedRpc(stateDealerId, 'store.product.edit', {
-        id: productId,
-        imagesIds: nextImageIds,
-      })
-      // Re-fetch *every* variant after the edit and verify the new blob
-      // is actually attached. Sweed's `store.product.edit` does not return
-      // a body that reflects the post-edit image list, and historically
-      // some product fields are silently ignored. Without this read-back
-      // a successful HTTP 200 would mask a no-op write and the operator
-      // would see nothing change in Sweed.
-      const refreshed = await fetchProductImagesWithinLock(productId)
-      const matching = refreshed.images.filter((image) => normalizeImageId(image) === blobId)
-      if (matching.length === 0) {
-        throw new HttpError(
-          502,
-          `Sweed accepted store.product.edit for variant ${productId} but the new image blob ${blobId} is not present in the refreshed image list (got ${describeImageIds(refreshed.images)}). The upload did NOT take effect — likely Sweed does not accept \`imagesIds\` for variants and we need a different RPC / field name.`,
-        )
-      }
-      affectedProductIds.push(productId)
-      if (blobUrl === null) {
-        blobUrl = pickRawPreviewUrl(matching)
-      }
-    }
-    return { uploadedBlobId: blobId, blobUrl, affectedProductIds }
-  })
-
-  const reanalysisJobId = await flagSweedGroupForReanalysis({
-    sweedGroupId: input.groupId,
-    reason:
-      input.targetType === 'group'
-        ? 'catalog_maintenance_group_image_upload'
-        : 'catalog_maintenance_variant_image_upload',
+  const jobId = await enqueueJob(getPool(), {
+    concurrencyKey: getOptionalSweedSessionConcurrencyKey(true),
+    dedupeKey: `catalog.maintenance.upload_group_image:${input.stagedRef}`,
+    jobType: 'catalog.maintenance.upload_group_image',
+    module: 'catalog',
+    payload: {
+      stagedRef: input.stagedRef,
+      sweedGroupId: staged.meta.sweedGroupId,
+      requestedByUserId: input.requestedByUserId,
+    },
     requestedByUserId: input.requestedByUserId,
+    scope: null,
   })
 
-  await invalidateCatalogMaintenanceSurvey()
-
-  return { ...result, reanalysisJobId }
+  return { jobId, stagedRef: input.stagedRef, sweedGroupId: staged.meta.sweedGroupId }
 }
 
 export interface UpdateBarcodeInput {
@@ -1140,7 +1155,7 @@ interface FlagForReanalysisInput {
   requestedByUserId: number | null
 }
 
-async function flagSweedGroupForReanalysis(input: FlagForReanalysisInput): Promise<number | null> {
+export async function flagSweedGroupForReanalysis(input: FlagForReanalysisInput): Promise<number | null> {
   const db: Queryable = getPool()
   const lookup = await db.query<{ id: number }>(
     `select id from catalog_groups where sweed_group_id = $1 and deleted_at is null limit 1`,

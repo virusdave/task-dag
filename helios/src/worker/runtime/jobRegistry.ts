@@ -1,4 +1,5 @@
 import {
+  CatalogMaintenanceUploadGroupImageJobPayloadSchema,
   CatalogPendingPurchasesApplyJobPayloadSchema,
   CatalogPendingPurchasesGenerateJobPayloadSchema,
   CatalogPendingPurchasesImportJobPayloadSchema,
@@ -30,6 +31,7 @@ import {
 import type { HeliosModuleCode, HeliosModuleScope } from '../../shared/contracts/index.js'
 import { runGenerateDescriptionBatchJob } from '../jobs/generateDescriptionBatchJob.js'
 import { runGeneratePricingBatchJob } from '../jobs/generatePricingBatchJob.js'
+import { runCatalogMaintenanceUploadGroupImageJob } from '../jobs/catalogMaintenanceUploadGroupImageJob.js'
 import { runCatalogPendingPurchasesApplyJob } from '../jobs/applyPendingPurchaseRequestJob.js'
 import { runCatalogPendingPurchasesGenerateJob } from '../jobs/generatePendingPurchasePacketJob.js'
 import { runCatalogReviewRerunRowJob } from '../jobs/catalogReviewRerunRowJob.js'
@@ -69,6 +71,12 @@ export interface JobHandlerContext {
 type JobHandler = (context: JobHandlerContext) => Promise<void>
 
 const handlers: Record<JobType, JobHandler> = {
+  'catalog.maintenance.upload_group_image': async (context) => {
+    await runCatalogMaintenanceUploadGroupImageJob(
+      context,
+      CatalogMaintenanceUploadGroupImageJobPayloadSchema.parse(context.payload),
+    )
+  },
   'catalog.pending_purchases.apply': async (context) => {
     await runCatalogPendingPurchasesApplyJob(context, CatalogPendingPurchasesApplyJobPayloadSchema.parse(context.payload))
   },
@@ -190,6 +198,7 @@ const handlers: Record<JobType, JobHandler> = {
  * to the legacy shared-token mutex on their occasional Sweed calls.
  */
 const SWEED_BACKED_JOB_TYPES: ReadonlySet<JobType> = new Set<JobType>([
+  'catalog.maintenance.upload_group_image',
   'catalog.pending_purchases.apply',
   'catalog.pending_purchases.generate',
   'catalog.sync.full_summary',

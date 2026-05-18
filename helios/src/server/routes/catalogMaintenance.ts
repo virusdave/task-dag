@@ -11,10 +11,11 @@ import {
 import { requireSessionUser } from '../auth/requireSession.js'
 import {
   enqueueCacheRepairJobs,
+  enqueueGroupImageUploadJob,
   HttpError,
   loadCatalogMaintenanceSurvey,
+  retryGroupImageUploadJob,
   updateVariantBarcode,
-  uploadCatalogMaintenanceImage,
 } from '../catalog/maintenance.js'
 
 const RefreshQuerySchema = z.object({
@@ -27,6 +28,7 @@ interface UploadFormFields {
   productIds: number[]
   fileBytes: Uint8Array
   contentType: string
+  originalFilename: string | null
 }
 
 export async function registerCatalogMaintenanceRoutes(server: FastifyInstance): Promise<void> {
@@ -86,23 +88,58 @@ export async function registerCatalogMaintenanceRoutes(server: FastifyInstance):
       }
       throw error
     }
+    if (fields.targetType === 'variants') {
+      // Variant-image uploads are parked — store.product.edit
+      // { imagesIds } silently no-ops for variants and we have not
+      // identified the correct Sweed RPC yet. The /catalog/maintenance
+      // page already hides the variant card; if a client still POSTs a
+      // variant upload it gets a clear 410 rather than a silent
+      // queueing of work that will never apply.
+      return reply
+        .status(410)
+        .send({ error: 'Variant-image upload is currently unsupported. Only group images are accepted.' })
+    }
     try {
-      const result = await uploadCatalogMaintenanceImage({
+      const result = await enqueueGroupImageUploadJob({
         contentType: fields.contentType,
         fileBytes: fields.fileBytes,
-        groupId: fields.groupId,
-        productIds: fields.productIds,
-        targetType: fields.targetType,
+        originalFilename: fields.originalFilename,
+        requestedByUserId: user.id,
+        sweedGroupId: fields.groupId,
+      })
+      return reply.send(
+        CatalogMaintenanceUploadResultSchema.parse({
+          status: 'queued',
+          jobId: result.jobId,
+          stagedRef: result.stagedRef,
+          sweedGroupId: fields.groupId,
+          targetType: 'group',
+        }),
+      )
+    } catch (error) {
+      if (error instanceof HttpError) {
+        return reply.status(error.status).send({ error: error.message })
+      }
+      throw error
+    }
+  })
+
+  server.post('/api/catalog/maintenance/images/:stagedRef/retry', async (request, reply) => {
+    const user = await requireSessionUser(request, reply, 'editor')
+    if (!user) return
+    const params = z.object({ stagedRef: z.string().min(1) }).parse(request.params)
+    try {
+      const result = await retryGroupImageUploadJob({
+        stagedRef: params.stagedRef,
         requestedByUserId: user.id,
       })
       return reply.send(
         CatalogMaintenanceUploadResultSchema.parse({
-          affectedProductIds: result.affectedProductIds,
-          blobUrl: result.blobUrl,
-          groupId: fields.groupId,
-          targetType: fields.targetType,
-          uploadedBlobId: result.uploadedBlobId,
-          reanalysisJobId: result.reanalysisJobId,
+          status: 'queued',
+          jobId: result.jobId,
+          stagedRef: result.stagedRef,
+          sweedGroupId: result.sweedGroupId,
+          targetType: 'group',
         }),
       )
     } catch (error) {
@@ -120,6 +157,7 @@ async function collectUploadFields(request: FastifyRequest): Promise<UploadFormF
   let productIds: number[] = []
   let fileBytes: Uint8Array | null = null
   let contentType: string | null = null
+  let originalFilename: string | null = null
 
   for await (const part of request.parts()) {
     if (part.type === 'file') {
@@ -130,6 +168,7 @@ async function collectUploadFields(request: FastifyRequest): Promise<UploadFormF
       const buffer = await part.toBuffer()
       fileBytes = new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength)
       contentType = part.mimetype
+      originalFilename = typeof part.filename === 'string' && part.filename.length > 0 ? part.filename : null
       continue
     }
 
@@ -169,7 +208,7 @@ async function collectUploadFields(request: FastifyRequest): Promise<UploadFormF
     throw new HttpError(400, 'productIds is required for variant uploads.')
   }
 
-  return { contentType, fileBytes, groupId, productIds, targetType }
+  return { contentType, fileBytes, groupId, originalFilename, productIds, targetType }
 }
 
 function parseProductIds(value: string): number[] {

@@ -34,6 +34,7 @@ export interface JobPoolMetadata {
  */
 export const JOB_EXECUTION_POOL_BY_TYPE: Record<JobType, JobPoolMetadata> = {
   // --- sweed pool: anything that touches the shared Sweed UI session ---
+  'catalog.maintenance.upload_group_image': { pool: 'sweed', requiresSweedSession: true },
   'catalog.sync.full_summary': { pool: 'sweed', requiresSweedSession: true },
   'catalog.sync.group_detail': { pool: 'sweed', requiresSweedSession: true },
   'catalog.sync.discover_orphan_groups': { pool: 'sweed', requiresSweedSession: true },
