@@ -1,0 +1,362 @@
+/**
+ * End-to-end parity tests for parsekit + metrc-v1 dialect vs the legacy
+ * hardcoded parsers in generatePendingPurchasePacketJob.ts.
+ *
+ * Covers the three simplest tenants in this slice (Phase 4 of the
+ * parsekit epic): Bytes, Outrankd, The Gram. Each tenant config below
+ * is the JSONC-shape that will move into
+ * parsekit-configs/use-cases/pending-purchases/parsers/<tenantId>.jsonc
+ * in Phase 6; expressing it here in TS first lets us prove the
+ * pipeline before the configs repo exists.
+ */
+
+import { describe, expect, it } from 'vitest'
+
+import {
+  compileParser,
+  parseWith,
+  verifyParser,
+  type TenantParserConfig,
+} from '../index.js'
+import {
+  pendingPurchasesContract,
+  pendingPurchasesOutputFields,
+} from '../contracts/pendingPurchases.js'
+import { metrcV1Dialect } from '../dialects/metrc-v1.js'
+import { parseProductName as legacyParseProductName } from '../../../worker/jobs/generatePendingPurchasePacketJob.js'
+
+// ---------------------------------------------------------------------
+// Tenant: Bytes
+//   Legacy: ^Bytes\s*-\s*(.+?)\s*-\s*Edibles\s*-\s*(\d+)\s*$
+// ---------------------------------------------------------------------
+
+const bytesConfig: TenantParserConfig = {
+  configVersion: 1,
+  parserId: 'pending-purchases.bytes',
+  scope: { tenantId: 'bytes', useCase: 'pending-purchases' },
+  dialectRef: { id: 'metrc-v1', version: 1 },
+  detect: { prefixes: ['Bytes'] },
+  rules: [
+    {
+      id: 'bytes.default',
+      priority: 100,
+      parser: {
+        kind: 'seq',
+        items: [
+          { kind: 'lit', value: 'Bytes' },
+          { kind: 'token', token: 'dash' },
+          { kind: 'capture', name: 'cultivar', expr: { kind: 'token', token: 'cultivarText' } },
+          { kind: 'token', token: 'dash' },
+          { kind: 'lit', value: 'Edibles' },
+          { kind: 'token', token: 'dash' },
+          { kind: 'capture', name: 'pack', expr: { kind: 'token', token: 'int' } },
+          { kind: 'token', token: 'optWs' },
+        ],
+      },
+      project: {
+        brand: { literal: 'Bytes' },
+        category: { literal: 'Edibles' },
+        groupName: { from: 'cultivar', transforms: [{ name: 'cleanCultivar', version: 1 }] },
+        packCount: { from: 'pack', transforms: [{ name: 'parseIntStrict', version: 1 }] },
+        prevalence: { literal: null },
+        searchTerm: { from: 'cultivar', transforms: [{ name: 'cleanCultivar', version: 1 }] },
+        size: { literal: '10mg' },
+        strainName: { literal: '' },
+        subcategory: { literal: 'Chews/Gummies' },
+        variantTab: { literal: '__placeholder__' },
+        variantName: { literal: '__placeholder__' },
+      },
+      transforms: [
+        { name: 'composeVariantTab', version: 1, args: { sizeField: 'size' } },
+        { name: 'composeVariantName', version: 1 },
+      ],
+      goldens: [
+        {
+          kind: 'match',
+          id: 'bytes.watermelon-10',
+          input: 'Bytes - Watermelon - Edibles - 10',
+          expected: {
+            brand: 'Bytes',
+            category: 'Edibles',
+            groupName: 'Watermelon',
+            packCount: 10,
+            prevalence: null,
+            searchTerm: 'Watermelon',
+            size: '10mg',
+            strainName: '',
+            subcategory: 'Chews/Gummies',
+            variantName: 'Bytes Watermelon 10x 10mg',
+            variantTab: '10x 10mg',
+          },
+        },
+      ],
+    },
+  ],
+}
+
+// ---------------------------------------------------------------------
+// Tenant: Outrankd
+//   Legacy: ^Outrankd\s*-\s*(.+?)\s*-\s*Disposable Vape\s*-\s*(\d+(?:\.\d+)?)g\s*$
+// ---------------------------------------------------------------------
+
+const outrankdConfig: TenantParserConfig = {
+  configVersion: 1,
+  parserId: 'pending-purchases.outrankd',
+  scope: { tenantId: 'outrankd', useCase: 'pending-purchases' },
+  dialectRef: { id: 'metrc-v1', version: 1 },
+  detect: { prefixes: ['Outrankd'] },
+  rules: [
+    {
+      id: 'outrankd.default',
+      priority: 100,
+      parser: {
+        kind: 'seq',
+        items: [
+          { kind: 'lit', value: 'Outrankd' },
+          { kind: 'token', token: 'dash' },
+          { kind: 'capture', name: 'cultivar', expr: { kind: 'token', token: 'cultivarText' } },
+          { kind: 'token', token: 'dash' },
+          { kind: 'lit', value: 'Disposable Vape' },
+          { kind: 'token', token: 'dash' },
+          { kind: 'capture', name: 'grams', expr: { kind: 'token', token: 'decimal' } },
+          { kind: 'token', token: 'gramsSuffix' },
+          { kind: 'token', token: 'optWs' },
+        ],
+      },
+      project: {
+        brand: { literal: 'Outrankd' },
+        category: { literal: 'Vapes' },
+        groupName: { from: 'cultivar', transforms: [{ name: 'cleanCultivar', version: 1 }] },
+        packCount: { literal: 1 },
+        prevalence: { literal: null },
+        searchTerm: { from: 'cultivar', transforms: [{ name: 'cleanCultivar', version: 1 }] },
+        size: { from: 'grams', transforms: [{ name: 'formatGrams', version: 1 }] },
+        strainName: { from: 'cultivar', transforms: [{ name: 'cleanCultivar', version: 1 }] },
+        subcategory: { literal: '' },
+        variantTab: { literal: '__placeholder__' },
+        variantName: { literal: '__placeholder__' },
+      },
+      transforms: [
+        { name: 'composeVariantTab', version: 1, args: { sizeField: 'size' } },
+        { name: 'composeVariantName', version: 1, args: { fields: ['brand', 'groupName', 'size'] } },
+      ],
+      goldens: [
+        {
+          kind: 'match',
+          id: 'outrankd.banana-1g',
+          input: 'Outrankd - Banana OG - Disposable Vape - 1g',
+          expected: {
+            brand: 'Outrankd',
+            category: 'Vapes',
+            groupName: 'Banana OG',
+            packCount: 1,
+            prevalence: null,
+            searchTerm: 'Banana OG',
+            size: '1g',
+            strainName: 'Banana OG',
+            subcategory: '',
+            variantName: 'Outrankd Banana OG 1g',
+            variantTab: '1g',
+          },
+        },
+      ],
+    },
+  ],
+}
+
+// ---------------------------------------------------------------------
+// Tenant: The Gram
+//   Legacy: ^The Gram\s*-\s*(.+?)\s*-\s*Flower\s*-\s*(\d+(?:\.\d+)?)g\s*$
+// ---------------------------------------------------------------------
+
+const theGramConfig: TenantParserConfig = {
+  configVersion: 1,
+  parserId: 'pending-purchases.the-gram',
+  scope: { tenantId: 'the-gram', useCase: 'pending-purchases' },
+  dialectRef: { id: 'metrc-v1', version: 1 },
+  detect: { prefixes: ['The Gram'] },
+  rules: [
+    {
+      id: 'the-gram.default',
+      priority: 100,
+      parser: {
+        kind: 'seq',
+        items: [
+          { kind: 'lit', value: 'The Gram' },
+          { kind: 'token', token: 'dash' },
+          { kind: 'capture', name: 'cultivar', expr: { kind: 'token', token: 'cultivarText' } },
+          { kind: 'token', token: 'dash' },
+          { kind: 'lit', value: 'Flower' },
+          { kind: 'token', token: 'dash' },
+          { kind: 'capture', name: 'grams', expr: { kind: 'token', token: 'decimal' } },
+          { kind: 'token', token: 'gramsSuffix' },
+          { kind: 'token', token: 'optWs' },
+        ],
+      },
+      project: {
+        brand: { literal: 'The Gram' },
+        category: { literal: 'Pre-Rolls' },
+        groupName: { from: 'cultivar', transforms: [{ name: 'cleanCultivar', version: 1 }] },
+        packCount: { literal: 1 },
+        prevalence: { literal: null },
+        searchTerm: { from: 'cultivar', transforms: [{ name: 'cleanCultivar', version: 1 }] },
+        size: { from: 'grams', transforms: [{ name: 'formatGrams', version: 1 }] },
+        strainName: { from: 'cultivar', transforms: [{ name: 'cleanCultivar', version: 1 }] },
+        subcategory: { literal: '' },
+        variantTab: { literal: '__placeholder__' },
+        variantName: { literal: '__placeholder__' },
+      },
+      transforms: [
+        { name: 'composeVariantTab', version: 1, args: { sizeField: 'size' } },
+        { name: 'composeVariantName', version: 1, args: { fields: ['brand', 'groupName', 'size'] } },
+      ],
+      goldens: [
+        {
+          kind: 'match',
+          id: 'the-gram.og-kush-1g',
+          input: 'The Gram - OG Kush - Flower - 1g',
+          expected: {
+            brand: 'The Gram',
+            category: 'Pre-Rolls',
+            groupName: 'OG Kush',
+            packCount: 1,
+            prevalence: null,
+            searchTerm: 'OG Kush',
+            size: '1g',
+            strainName: 'OG Kush',
+            subcategory: '',
+            variantName: 'The Gram OG Kush 1g',
+            variantTab: '1g',
+          },
+        },
+      ],
+    },
+  ],
+}
+
+// ---------------------------------------------------------------------
+
+const TENANT_CONFIGS: TenantParserConfig[] = [bytesConfig, outrankdConfig, theGramConfig]
+
+describe('metrc-v1 dialect: static safety verify', () => {
+  for (const cfg of TENANT_CONFIGS) {
+    it(`${cfg.parserId} passes verifyParser`, () => {
+      const report = verifyParser(cfg, metrcV1Dialect, pendingPurchasesOutputFields)
+      if (!report.ok) {
+        console.error(report.issues)
+      }
+      expect(report.ok).toBe(true)
+    })
+  }
+})
+
+describe('metrc-v1 dialect: end-to-end goldens', () => {
+  for (const cfg of TENANT_CONFIGS) {
+    const compiled = compileParser(cfg, metrcV1Dialect, pendingPurchasesContract)
+    for (const rule of cfg.rules) {
+      for (const golden of rule.goldens) {
+        if (golden.kind !== 'match') continue
+        it(`${cfg.parserId} / ${golden.id}`, () => {
+          const result = parseWith(compiled, golden.input, {
+            snapshotSha: 'test',
+          })
+          if (!result.ok) {
+            // eslint-disable-next-line no-console
+            console.error(result)
+          }
+          expect(result.ok).toBe(true)
+          if (result.ok) {
+            expect(result.output).toEqual(golden.expected)
+            expect(result.ruleId).toBe(rule.id)
+          }
+        })
+      }
+    }
+  }
+})
+
+describe('metrc-v1 dialect: parity with legacy parseProductName', () => {
+  // Compile once.
+  const compiledBy = new Map(
+    TENANT_CONFIGS.map((c) => [c.parserId, compileParser(c, metrcV1Dialect, pendingPurchasesContract)]),
+  )
+
+  // (tenantParserId, raw name) pairs that the legacy hardcoded parsers
+  // accept today. The expected outputs were captured by running the
+  // legacy parser; if these drift, the parity gate (Phase 7) will catch
+  // it.
+  const cases: Array<{ parserId: string; input: string; expected: unknown }> = [
+    {
+      parserId: 'pending-purchases.bytes',
+      input: 'Bytes - Sour Diesel - Edibles - 20',
+      expected: {
+        brand: 'Bytes',
+        category: 'Edibles',
+        groupName: 'Sour Diesel',
+        packCount: 20,
+        prevalence: null,
+        searchTerm: 'Sour Diesel',
+        size: '10mg',
+        strainName: '',
+        subcategory: 'Chews/Gummies',
+        variantName: 'Bytes Sour Diesel 20x 10mg',
+        variantTab: '20x 10mg',
+      },
+    },
+    {
+      parserId: 'pending-purchases.outrankd',
+      input: 'Outrankd - Pineapple Express - Disposable Vape - 0.5g',
+      expected: {
+        brand: 'Outrankd',
+        category: 'Vapes',
+        groupName: 'Pineapple Express',
+        packCount: 1,
+        prevalence: null,
+        searchTerm: 'Pineapple Express',
+        size: '0.5g',
+        strainName: 'Pineapple Express',
+        subcategory: '',
+        variantName: 'Outrankd Pineapple Express 0.5g',
+        variantTab: '0.5g',
+      },
+    },
+    {
+      parserId: 'pending-purchases.the-gram',
+      input: 'The Gram - Wedding Cake - Flower - 3.5g',
+      expected: {
+        brand: 'The Gram',
+        category: 'Pre-Rolls',
+        groupName: 'Wedding Cake',
+        packCount: 1,
+        prevalence: null,
+        searchTerm: 'Wedding Cake',
+        size: '3.5g',
+        strainName: 'Wedding Cake',
+        subcategory: '',
+        variantName: 'The Gram Wedding Cake 3.5g',
+        variantTab: '3.5g',
+      },
+    },
+  ]
+
+  for (const c of cases) {
+    it(`${c.parserId}: "${c.input}" matches baked expectation`, () => {
+      const compiled = compiledBy.get(c.parserId)!
+      const result = parseWith(compiled, c.input)
+      expect(result.ok).toBe(true)
+      if (result.ok) {
+        expect(result.output).toEqual(c.expected)
+      }
+    })
+
+    it(`${c.parserId}: "${c.input}" matches legacy parseProductName`, () => {
+      const compiled = compiledBy.get(c.parserId)!
+      const result = parseWith(compiled, c.input)
+      expect(result.ok).toBe(true)
+      if (result.ok) {
+        const legacy = legacyParseProductName(c.input)
+        expect(result.output).toEqual(legacy)
+      }
+    })
+  }
+})
