@@ -139,17 +139,187 @@ export async function loadCatalogMaintenanceSurvey(
   inFlightSurvey = (async () => {
     try {
       const result = await buildSurveyFromDb()
+      // Cached DB tables lag Sweed by up to a sync cycle, so the
+      // candidate set frequently includes groups/variants that have
+      // already been fixed in Sweed but whose `catalog_groups` row
+      // hasn't been re-ingested yet. Hit Sweed live for just the
+      // candidate set and drop anything that's already resolved.
+      // Failures here are non-fatal — we keep the original entry so
+      // the operator can still act on it.
+      const verified = await liveVerifyCandidateSet(result)
       cachedSurvey = {
         expiresAt: Date.now() + SURVEY_TTL_MS,
-        value: result,
+        value: verified,
       }
-      return result
+      return verified
     } finally {
       inFlightSurvey = null
     }
   })()
 
   return inFlightSurvey
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Live verification — drop candidates that Sweed says are already fixed.    */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Page size for the per-site grouped-inventory pull. The survey only
+ * ever cares about in-stock variants, so a single ≥500-row page covers
+ * every in-stock SKU at each site in one shot today (or two if a site
+ * grows past 500 distinct in-stock variants).
+ */
+const LIVE_VERIFY_PAGE_SIZE = 500
+
+/**
+ * Loose schema for `store.inventory.item.list.grouped` rows that picks
+ * out only the fields we need to settle "is the image / barcode now
+ * present?". Sweed's response also carries quantity / pricing / METRC
+ * data but we deliberately don't touch any of that here. Any field we
+ * can't read just leaves the candidate in the response (fail-open).
+ */
+const LiveVerifyImageRefSchema = z
+  .object({
+    id: z.union([z.coerce.number().int(), z.string().trim().min(1)]).nullable().optional(),
+    url: z.string().nullable().optional(),
+  })
+  .passthrough()
+
+const LiveVerifyProductGroupSchema = z
+  .object({
+    id: z.coerce.number().int().positive().optional(),
+    images: z.array(LiveVerifyImageRefSchema).optional(),
+  })
+  .passthrough()
+
+const LiveVerifyProductSchema = z
+  .object({
+    id: z.coerce.number().int().positive().optional(),
+    externalBarcode: z.string().nullable().optional(),
+    images: z.array(LiveVerifyImageRefSchema).optional(),
+    productGroup: LiveVerifyProductGroupSchema.nullable().optional(),
+  })
+  .passthrough()
+
+const LiveVerifyRowSchema = z
+  .object({
+    product: LiveVerifyProductSchema.nullable().optional(),
+  })
+  .passthrough()
+
+const LiveVerifyResponseSchema = z
+  .object({
+    data: z.array(LiveVerifyRowSchema).default([]),
+  })
+  .passthrough()
+
+async function liveVerifyCandidateSet(
+  survey: CatalogMaintenanceSurveyResponse,
+): Promise<CatalogMaintenanceSurveyResponse> {
+  // Collect the unique work items.
+  const groupIdsNeedingImageCheck = new Set<number>()
+  const productIdsNeedingBarcodeCheck = new Set<number>()
+  for (const site of survey.sites) {
+    for (const section of site.sections) {
+      if (section.kind === 'missing-catalog-image') {
+        for (const group of section.groups) groupIdsNeedingImageCheck.add(group.groupId)
+      } else if (section.kind === 'missing-or-invalid-barcode') {
+        for (const group of section.groups) {
+          for (const variant of group.variants) productIdsNeedingBarcodeCheck.add(variant.productId)
+        }
+      }
+    }
+  }
+  if (groupIdsNeedingImageCheck.size === 0 && productIdsNeedingBarcodeCheck.size === 0) {
+    return survey
+  }
+
+  // Single grouped-inventory pull per site covers the whole candidate
+  // set in 1–2 RPC calls; way cheaper than fanning out one
+  // `store.product.group.get` + one `store.product.get` per item.
+  // The grouped rows include `product.externalBarcode`,
+  // `product.images`, and `product.productGroup.{id, images}` which is
+  // all the verifier needs.
+  const groupHasImage = new Map<number, boolean>()
+  const productHasBarcode = new Map<number, boolean>()
+  try {
+    await withSweedSession(async () => {
+      for (const site of HELIOS_PENDING_PURCHASE_SITE_DEALERS) {
+        let page = 1
+        while (true) {
+          const raw = await callSweedRpc(site.dealerId, 'store.inventory.item.list.grouped', {
+            isOnStock: true,
+            page,
+            pageSize: LIVE_VERIFY_PAGE_SIZE,
+          })
+          const parsed = LiveVerifyResponseSchema.parse(raw)
+          for (const row of parsed.data) {
+            const product = row.product
+            if (!product) continue
+            const productId = product.id
+            if (productId !== undefined) {
+              const barcode = nonEmptyString(product.externalBarcode ?? null)
+              productHasBarcode.set(productId, barcode !== null)
+            }
+            const group = product.productGroup
+            if (group && group.id !== undefined && Array.isArray(group.images)) {
+              groupHasImage.set(group.id, group.images.length > 0)
+            }
+          }
+          if (parsed.data.length < LIVE_VERIFY_PAGE_SIZE) break
+          page += 1
+        }
+      }
+    })
+  } catch (error) {
+    // No pool token available, transport blew up, etc. Fail open: return
+    // the unverified survey rather than blocking the page.
+    console.warn('[catalog-maintenance] live verify pass failed; returning unverified survey.', error)
+    return survey
+  }
+
+  const brandIssueCounts = new Map<string, number>()
+  const newSites = survey.sites.map((site) => {
+    const newSections = site.sections.map((section) => {
+      if (section.kind === 'missing-catalog-image') {
+        const keptGroups = section.groups.filter((group) => groupHasImage.get(group.groupId) !== true)
+        for (const group of keptGroups) {
+          countBrandIssue(brandIssueCounts, group.brandName, group.variants.length)
+        }
+        return { ...section, groups: keptGroups, issueCount: keptGroups.length }
+      }
+      if (section.kind === 'missing-or-invalid-barcode') {
+        const keptGroups: CatalogMaintenanceSiteGroup[] = []
+        for (const group of section.groups) {
+          const keptVariants = group.variants.filter(
+            (variant) => productHasBarcode.get(variant.productId) !== true,
+          )
+          if (keptVariants.length === 0) continue
+          keptGroups.push({ ...group, variants: keptVariants })
+          countBrandIssue(brandIssueCounts, group.brandName, keptVariants.length)
+        }
+        return { ...section, groups: keptGroups, issueCount: keptGroups.length }
+      }
+      return section
+    })
+    return {
+      ...site,
+      sections: newSections,
+      totalIssueCount: newSections.reduce((acc, s) => acc + s.issueCount, 0),
+    }
+  })
+
+  const brands = [...brandIssueCounts.entries()]
+    .filter(([, count]) => count > 0)
+    .map(([brandName, issueCount]) => ({ brandName, issueCount }))
+    .sort((a, b) => a.brandName.localeCompare(b.brandName))
+
+  return {
+    ...survey,
+    sites: newSites,
+    quickFilters: { brands },
+  }
 }
 
 /* -------------------------------------------------------------------------- */
