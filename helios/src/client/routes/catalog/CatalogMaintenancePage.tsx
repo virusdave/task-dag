@@ -767,7 +767,6 @@ function VariantRow(props: VariantRowProps) {
   const [savingBarcode, setSavingBarcode] = useState(false)
   const [scanningBarcode, setScanningBarcode] = useState(false)
   const barcodeFileInputRef = useRef<HTMLInputElement | null>(null)
-  const scannerSupported = useMemo(() => typeof window !== 'undefined' && 'BarcodeDetector' in window, [])
 
   useEffect(() => {
     setDraftBarcode(variant.externalBarcode ?? '')
@@ -813,35 +812,17 @@ function VariantRow(props: VariantRowProps) {
   const handleScannedFile = async (file: File) => {
     setScanningBarcode(true)
     try {
-      if (!scannerSupported) {
-        onBarcodeError('This browser cannot decode barcodes from photos. Type the value manually.')
+      const value = await decodeBarcodeFromImageFile(file)
+      if (value === null) {
+        onBarcodeError('No barcode detected in that photo. Hold steady and fill the frame.')
         return
       }
-      const Detector = (window as unknown as { BarcodeDetector?: BarcodeDetectorCtor }).BarcodeDetector
-      if (!Detector) {
-        onBarcodeError('This browser cannot decode barcodes from photos. Type the value manually.')
+      if (value.length === 0) {
+        onBarcodeError('Decoded barcode was empty.')
         return
       }
-      const detector = new Detector({
-        formats: ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128', 'code_39', 'itf', 'codabar', 'qr_code'],
-      })
-      const bitmap = await createImageBitmap(file)
-      try {
-        const detections = await detector.detect(bitmap)
-        if (detections.length === 0) {
-          onBarcodeError('No barcode detected in that photo. Hold steady and fill the frame.')
-          return
-        }
-        const value = detections[0]?.rawValue?.trim() ?? ''
-        if (value.length === 0) {
-          onBarcodeError('Decoded barcode was empty.')
-          return
-        }
-        setDraftBarcode(value)
-        setEditingBarcode(true)
-      } finally {
-        bitmap.close?.()
-      }
+      setDraftBarcode(value)
+      setEditingBarcode(true)
     } catch (error) {
       onBarcodeError(error instanceof Error ? error.message : 'Failed to read barcode photo.')
     } finally {
@@ -893,7 +874,6 @@ function VariantRow(props: VariantRowProps) {
           cannabisCategory={cannabisCategory}
           saving={savingBarcode}
           scanning={scanningBarcode}
-          scannerSupported={scannerSupported}
           onBeginEdit={() => {
             setDraftBarcode(variant.externalBarcode ?? '')
             setEditingBarcode(true)
@@ -983,7 +963,6 @@ interface BarcodeLineProps {
   cannabisCategory: boolean
   saving: boolean
   scanning: boolean
-  scannerSupported: boolean
   onBeginEdit: () => void
   onCancelEdit: () => void
   onChange: (next: string) => void
@@ -1001,7 +980,6 @@ function BarcodeLine(props: BarcodeLineProps) {
     cannabisCategory,
     saving,
     scanning,
-    scannerSupported,
     onBeginEdit,
     onCancelEdit,
     onChange,
@@ -1031,7 +1009,7 @@ function BarcodeLine(props: BarcodeLineProps) {
           className="ghost-button catalog-maintenance-barcode-btn"
           onClick={onPickPhoto}
           disabled={scanning}
-          title={scannerSupported ? 'Capture a photo of the barcode' : 'Capture / browse a barcode photo (decoding requires Chrome on Android)'}
+          title="Capture a photo of the barcode"
         >
           {scanning ? 'Scanning…' : '📷 Scan barcode'}
         </button>
@@ -1087,6 +1065,60 @@ interface BarcodeDetectionResult {
 interface BarcodeDetectorCtor {
   new (options?: { formats?: string[] }): {
     detect: (source: CanvasImageSource | ImageBitmap | Blob | ImageData) => Promise<BarcodeDetectionResult[]>
+  }
+}
+
+/**
+ * Decode a barcode value from an image file taken/picked by the user.
+ *
+ * Prefers the native `BarcodeDetector` API (Chrome on Android / desktop Chrome)
+ * because it's fast and zero-bundle. On browsers that don't ship it — most
+ * notably iOS Safari — falls back to a lazily-imported `@zxing/browser`
+ * decoder so iPhone users get the same one-tap scan flow.
+ *
+ * Returns the decoded string on success, `null` if no barcode was found,
+ * or throws if decoding blew up unexpectedly.
+ */
+async function decodeBarcodeFromImageFile(file: File): Promise<string | null> {
+  const Detector = (window as unknown as { BarcodeDetector?: BarcodeDetectorCtor }).BarcodeDetector
+  if (Detector) {
+    const detector = new Detector({
+      formats: ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128', 'code_39', 'itf', 'codabar', 'qr_code'],
+    })
+    const bitmap = await createImageBitmap(file)
+    try {
+      const detections = await detector.detect(bitmap)
+      if (detections.length === 0) return null
+      const value = detections[0]?.rawValue?.trim() ?? ''
+      return value
+    } finally {
+      bitmap.close?.()
+    }
+  }
+
+  // Fallback path: dynamic-import keeps the ~200 KB zxing bundle out of the
+  // main chunk; it's only fetched on devices that actually need it (iOS).
+  const { BrowserMultiFormatReader } = await import('@zxing/browser')
+  const objectUrl = URL.createObjectURL(file)
+  const img = new Image()
+  try {
+    await new Promise<void>((resolve, reject) => {
+      img.onload = () => resolve()
+      img.onerror = () => reject(new Error('Failed to load image for barcode decode.'))
+      img.src = objectUrl
+    })
+    const reader = new BrowserMultiFormatReader()
+    try {
+      const result = await reader.decodeFromImageElement(img)
+      return result.getText().trim()
+    } catch (error) {
+      // zxing throws NotFoundException when nothing decoded — treat as miss.
+      const name = (error as { name?: string } | null)?.name ?? ''
+      if (name === 'NotFoundException' || name === 'NotFoundException2') return null
+      throw error
+    }
+  } finally {
+    URL.revokeObjectURL(objectUrl)
   }
 }
 

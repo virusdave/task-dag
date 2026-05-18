@@ -41,9 +41,15 @@ if (!existsSync(indexHtmlPath)) {
 
 const assetsDir = resolve(clientDist, 'assets')
 const assetFiles = existsSync(assetsDir) ? readdirSync(assetsDir) : []
-const aJsAsset = assetFiles.find((name) => name.endsWith('.js'))
+// Pick the .js asset actually referenced from index.html as the entry
+// bundle. With code-splitting (e.g. lazy `@zxing/browser` import) the
+// assets/ dir contains additional chunks that aren't referenced from
+// the SPA shell directly — they're loaded on demand — and which the
+// smoke test must NOT assert against the index.html.
+const indexHtmlForEntry = readFileSync(indexHtmlPath, 'utf8')
+const aJsAsset = assetFiles.find((name) => name.endsWith('.js') && indexHtmlForEntry.includes(`/assets/${name}`))
 if (!aJsAsset) {
-  console.error(`[smoke] FAIL: no .js bundle found under ${assetsDir}.`)
+  console.error(`[smoke] FAIL: no .js bundle in ${assetsDir} is referenced from ${indexHtmlPath}.`)
   process.exit(2)
 }
 
