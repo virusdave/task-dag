@@ -16,12 +16,15 @@ import {
   choice as aChoice,
   digits as aDigits,
   endOfInput as aEnd,
+  everyCharUntil as aEveryCharUntil,
+  fail as aFail,
   many as aMany,
   optionalWhitespace as aOptWs,
   possibly as aPossibly,
   sepBy as aSepBy,
   sequenceOf as aSeq,
   str as aStr,
+  succeedWith as aSucceed,
   whitespace as aWs,
   type Parser as AParser,
 } from 'arcsecond'
@@ -88,6 +91,8 @@ export function compileExpr(
     }
     case 'sepBy':
       return compileSepBy(expr.expr, expr.sep, expr.min, expr.max, dialect)
+    case 'consumeUntil':
+      return compileConsumeUntil(expr.terminator, expr.minLen ?? 1, dialect)
     case 'macro':
       return compileMacro(expr.target, expr.args, dialect)
     case 'ref':
@@ -136,7 +141,7 @@ function compileToken(name: string, dialect: DialectPack<unknown>): AParser<Capt
 
 function compileSeq(parts: AParser<CaptureNode>[]): AParser<CaptureNode> {
   if (parts.length === 0) {
-    return aStr('').map(() => EMPTY) as AParser<CaptureNode>
+    return aSucceed(EMPTY) as AParser<CaptureNode>
   }
   return aSeq(parts).map((nodes) => {
     const ns = nodes as CaptureNode[]
@@ -166,20 +171,17 @@ function compileRepeat(
   return aMany(inner).chain((rsRaw) => {
     const rs = rsRaw as CaptureNode[]
     if (rs.length < min || rs.length > max) {
-      // Force a failure: use a never-matching parser. We import from
-      // arcsecond's choice with no alternatives — simulate via a parser
-      // that always fails.
-      return aStr('\u0000__parsekit_repeat_oob__').map(() => EMPTY) as AParser<CaptureNode>
+      return aFail(
+        `parsekit: repeat count ${rs.length} outside [${min}, ${max}]`,
+      ) as AParser<CaptureNode>
     }
-    return aStr('').map(() => {
-      let text = ''
-      let caps: Record<string, string> = {}
-      for (const n of rs) {
-        text += n.text
-        caps = mergeCaptures(caps, n.captures)
-      }
-      return { text, captures: caps }
-    }) as AParser<CaptureNode>
+    let text = ''
+    let caps: Record<string, string> = {}
+    for (const n of rs) {
+      text += n.text
+      caps = mergeCaptures(caps, n.captures)
+    }
+    return aSucceed({ text, captures: caps }) as AParser<CaptureNode>
   }) as AParser<CaptureNode>
 }
 
@@ -197,17 +199,34 @@ function compileSepBy(
     const lo = min ?? 0
     const hi = max ?? Number.POSITIVE_INFINITY
     if (rs.length < lo || rs.length > hi) {
-      return aStr('\u0000__parsekit_sepby_oob__').map(() => EMPTY) as AParser<CaptureNode>
+      return aFail(
+        `parsekit: sepBy count ${rs.length} outside [${lo}, ${hi}]`,
+      ) as AParser<CaptureNode>
     }
-    return aStr('').map(() => {
-      let text = ''
-      let caps: Record<string, string> = {}
-      for (const n of rs) {
-        text += n.text
-        caps = mergeCaptures(caps, n.captures)
-      }
-      return { text, captures: caps }
-    }) as AParser<CaptureNode>
+    let text = ''
+    let caps: Record<string, string> = {}
+    for (const n of rs) {
+      text += n.text
+      caps = mergeCaptures(caps, n.captures)
+    }
+    return aSucceed({ text, captures: caps }) as AParser<CaptureNode>
+  }) as AParser<CaptureNode>
+}
+
+function compileConsumeUntil(
+  terminator: Expr,
+  minLen: number,
+  dialect: DialectPack<unknown>,
+): AParser<CaptureNode> {
+  const term = compileExpr(terminator, dialect) as AParser<unknown>
+  return aEveryCharUntil(term).chain((sRaw) => {
+    const s = sRaw as string
+    if (s.length < minLen) {
+      return aFail(
+        `parsekit: consumeUntil consumed ${s.length} chars, min ${minLen}`,
+      ) as AParser<CaptureNode>
+    }
+    return aSucceed(ok(s)) as AParser<CaptureNode>
   }) as AParser<CaptureNode>
 }
 
@@ -262,6 +281,8 @@ function expandMacro(def: MacroDef, args: Record<string, unknown>): Expr {
         }
       case 'sepBy':
         return { kind: 'sepBy', expr: walk(e.expr), sep: walk(e.sep), min: e.min, max: e.max }
+      case 'consumeUntil':
+        return { kind: 'consumeUntil', terminator: walk(e.terminator), minLen: e.minLen }
       case 'ref':
         return e
       case 'macro':

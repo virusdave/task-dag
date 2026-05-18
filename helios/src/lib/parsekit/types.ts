@@ -35,6 +35,10 @@ export type Expr =
   | { kind: 'repeat'; expr: Expr; min: number; max: number }
   | { kind: 'between'; expr: Expr; left: Expr; right: Expr }
   | { kind: 'sepBy'; expr: Expr; sep: Expr; min?: number; max?: number }
+  /** Consume input characters until `terminator` would succeed (lookahead).
+   *  Terminator is NOT consumed. Captured text is the consumed run.
+   *  Always requires at least 1 char unless `minLen: 0`. */
+  | { kind: 'consumeUntil'; terminator: Expr; minLen?: number }
   | { kind: 'ref'; target: string }
   | { kind: 'macro'; target: string; args?: Record<string, JsonValue> }
 

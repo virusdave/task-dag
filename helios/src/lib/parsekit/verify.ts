@@ -204,6 +204,13 @@ function walkExpr(
       walkExpr(expr.sep, `${path}.sepBy.sep`, depth + 1, captures, ctx)
       return
     }
+    case 'consumeUntil': {
+      // The terminator runs as a lookahead; captures inside it are
+      // not consumed and would be misleading, but we still walk it to
+      // validate references.
+      walkExpr(expr.terminator, `${path}.consumeUntil.terminator`, depth + 1, captures, ctx)
+      return
+    }
     case 'ref': {
       // No top-level rule-ref table in v1; reserve for v2.
       ctx.issues.push({

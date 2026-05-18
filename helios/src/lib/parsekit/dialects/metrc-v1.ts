@@ -172,6 +172,26 @@ const transforms: Record<string, TransformDef<ParsedProductName>> = {
       out[a.to] = out[a.from]
     },
   },
+  /**
+   * Title-case the value only if it is entirely uppercase. Mirrors the
+   * legacy parseMoonlitName behavior:
+   *   `rawCultivar === rawCultivar.toUpperCase() ? toTitleCase(rawCultivar) : rawCultivar`
+   */
+  titleCaseIfAllUpper: {
+    impl: (_args, ctx) => {
+      const bag = bagOf(ctx)
+      const s = String(bag.value ?? '').trim()
+      if (s.length === 0 || s !== s.toUpperCase()) {
+        bag.value = s
+        return
+      }
+      bag.value = s
+        .toLowerCase()
+        .split(/\s+/)
+        .map((part) => `${part.slice(0, 1).toUpperCase()}${part.slice(1)}`)
+        .join(' ')
+    },
+  },
   /** Set a literal value on the output (escape hatch for derived constants). */
   setLiteral: {
     argsSchema: z.object({ field: z.string().min(1), value: z.unknown() }).strict(),

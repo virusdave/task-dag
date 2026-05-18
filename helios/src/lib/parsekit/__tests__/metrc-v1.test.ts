@@ -235,8 +235,289 @@ const theGramConfig: TenantParserConfig = {
 }
 
 // ---------------------------------------------------------------------
+// Tenant: Herb (fixed-code lookup table — 3 hardcoded SKUs in legacy)
+// ---------------------------------------------------------------------
 
-const TENANT_CONFIGS: TenantParserConfig[] = [bytesConfig, outrankdConfig, theGramConfig]
+function herbRule(
+  code: string,
+  cultivar: string,
+): TenantParserConfig['rules'][number] {
+  return {
+    id: `herb.${code}`,
+    priority: 100,
+    parser: { kind: 'seq', items: [{ kind: 'lit', value: code }] },
+    project: {
+      brand: { literal: 'Herb' },
+      category: { literal: 'Pre-Rolls' },
+      groupName: { literal: cultivar },
+      packCount: { literal: 1 },
+      prevalence: { literal: null },
+      searchTerm: { literal: cultivar },
+      size: { literal: '1g' },
+      strainName: { literal: cultivar },
+      subcategory: { literal: '' },
+      variantName: { literal: `Herb ${cultivar} 1g` },
+      variantTab: { literal: '1g' },
+    },
+    goldens: [],
+  }
+}
+
+const herbConfig: TenantParserConfig = {
+  configVersion: 1,
+  parserId: 'pending-purchases.herb',
+  scope: { tenantId: 'herb', useCase: 'pending-purchases' },
+  dialectRef: { id: 'metrc-v1', version: 1 },
+  detect: { prefixes: ['1O-PR-H26-'] },
+  rules: [
+    herbRule('1O-PR-H26-DBUR', 'Donny Burger'),
+    herbRule('1O-PR-H26-SDSL', 'Sour Diesel'),
+    herbRule('1O-PR-H26-WIOG', 'WiFi OG'),
+  ],
+}
+
+// ---------------------------------------------------------------------
+// Tenant: LayUp
+//   Legacy: ^LayUp\s*-\s*Beverage\s*-\s*(.+?)\s*-\s*(\d+)\s*(?:MG\s*THC|mg)\s*$
+// ---------------------------------------------------------------------
+
+const layUpConfig: TenantParserConfig = {
+  configVersion: 1,
+  parserId: 'pending-purchases.layup',
+  scope: { tenantId: 'layup', useCase: 'pending-purchases' },
+  dialectRef: { id: 'metrc-v1', version: 1 },
+  detect: { prefixes: ['LayUp'] },
+  rules: [
+    {
+      id: 'layup.default',
+      priority: 100,
+      parser: {
+        kind: 'seq',
+        items: [
+          { kind: 'lit', value: 'LayUp' },
+          { kind: 'token', token: 'dash' },
+          { kind: 'lit', value: 'Beverage' },
+          { kind: 'token', token: 'dash' },
+          { kind: 'capture', name: 'flavor', expr: { kind: 'token', token: 'cultivarText' } },
+          { kind: 'token', token: 'dash' },
+          { kind: 'capture', name: 'mg', expr: { kind: 'token', token: 'int' } },
+          { kind: 'token', token: 'optWs' },
+          {
+            kind: 'choice',
+            items: [
+              { kind: 'lit', value: 'MG THC', caseInsensitive: true },
+              { kind: 'lit', value: 'mg', caseInsensitive: true },
+            ],
+          },
+          { kind: 'token', token: 'optWs' },
+        ],
+      },
+      project: {
+        brand: { literal: 'LayUp' },
+        category: { literal: 'Beverages' },
+        groupName: { from: 'flavor', transforms: [{ name: 'cleanCultivar', version: 1 }] },
+        packCount: { literal: 1 },
+        prevalence: { literal: null },
+        searchTerm: { from: 'flavor', transforms: [{ name: 'cleanCultivar', version: 1 }] },
+        size: { from: 'mg', transforms: [{ name: 'formatMilligrams', version: 1 }] },
+        strainName: { literal: '' },
+        subcategory: { literal: '' },
+        variantTab: { literal: '__placeholder__' },
+        variantName: { literal: '__placeholder__' },
+      },
+      transforms: [
+        { name: 'composeVariantTab', version: 1, args: { sizeField: 'size' } },
+        { name: 'composeVariantName', version: 1, args: { fields: ['brand', 'groupName', 'size'] } },
+      ],
+      goldens: [],
+    },
+  ],
+}
+
+// ---------------------------------------------------------------------
+// Tenant: Moonlit
+//   Legacy: ^MOONLIT-\s*(.+?)\s+(\d+(?:\.\d+)?)\s*G\s+INFUSED\s+PREROLL\s*$
+//   Brand label: "Moonlit Hash Co"
+// ---------------------------------------------------------------------
+
+const moonlitConfig: TenantParserConfig = {
+  configVersion: 1,
+  parserId: 'pending-purchases.moonlit',
+  scope: { tenantId: 'moonlit', useCase: 'pending-purchases' },
+  dialectRef: { id: 'metrc-v1', version: 1 },
+  detect: { prefixes: ['MOONLIT-', 'Moonlit-'] },
+  rules: [
+    {
+      id: 'moonlit.default',
+      priority: 100,
+      parser: {
+        kind: 'seq',
+        items: [
+          { kind: 'lit', value: 'MOONLIT-', caseInsensitive: true },
+          { kind: 'token', token: 'optWs' },
+          {
+            kind: 'capture',
+            name: 'cultivar',
+            expr: {
+              kind: 'consumeUntil',
+              terminator: {
+                kind: 'seq',
+                items: [
+                  { kind: 'token', token: 'ws' },
+                  { kind: 'token', token: 'decimal' },
+                ],
+              },
+            },
+          },
+          { kind: 'token', token: 'ws' },
+          { kind: 'capture', name: 'grams', expr: { kind: 'token', token: 'decimal' } },
+          { kind: 'token', token: 'optWs' },
+          { kind: 'lit', value: 'G', caseInsensitive: true },
+          { kind: 'token', token: 'ws' },
+          { kind: 'lit', value: 'INFUSED', caseInsensitive: true },
+          { kind: 'token', token: 'ws' },
+          { kind: 'lit', value: 'PREROLL', caseInsensitive: true },
+          { kind: 'token', token: 'optWs' },
+        ],
+      },
+      project: {
+        brand: { literal: 'Moonlit Hash Co' },
+        category: { literal: 'Pre-Rolls' },
+        groupName: {
+          from: 'cultivar',
+          transforms: [
+            { name: 'titleCaseIfAllUpper', version: 1 },
+            { name: 'cleanCultivar', version: 1 },
+          ],
+        },
+        packCount: { literal: 1 },
+        prevalence: { literal: null },
+        searchTerm: {
+          from: 'cultivar',
+          transforms: [
+            { name: 'titleCaseIfAllUpper', version: 1 },
+            { name: 'cleanCultivar', version: 1 },
+          ],
+        },
+        size: { from: 'grams', transforms: [{ name: 'formatGrams', version: 1 }] },
+        strainName: {
+          from: 'cultivar',
+          transforms: [
+            { name: 'titleCaseIfAllUpper', version: 1 },
+            { name: 'cleanCultivar', version: 1 },
+          ],
+        },
+        subcategory: { literal: 'Infused' },
+        variantTab: { literal: '__placeholder__' },
+        variantName: { literal: '__placeholder__' },
+      },
+      transforms: [
+        { name: 'composeVariantTab', version: 1, args: { sizeField: 'size' } },
+        { name: 'composeVariantName', version: 1, args: { fields: ['brand', 'groupName', 'size'] } },
+      ],
+      goldens: [],
+    },
+  ],
+}
+
+// ---------------------------------------------------------------------
+// Tenant: Jenny's
+//   Legacy: ^Jenny'?s\s+J\s+(\d+(?:\.\d+)?)\s*g\s+(.+?)\s+Pre[-\s]?Roll\s*$
+// ---------------------------------------------------------------------
+
+const jennysConfig: TenantParserConfig = {
+  configVersion: 1,
+  parserId: 'pending-purchases.jennys',
+  scope: { tenantId: 'jennys', useCase: 'pending-purchases' },
+  dialectRef: { id: 'metrc-v1', version: 1 },
+  detect: { prefixes: ["Jenny's", 'Jennys '] },
+  rules: [
+    {
+      id: 'jennys.default',
+      priority: 100,
+      parser: {
+        kind: 'seq',
+        items: [
+          {
+            kind: 'choice',
+            items: [
+              { kind: 'lit', value: "Jenny's" },
+              { kind: 'lit', value: 'Jennys' },
+            ],
+          },
+          { kind: 'token', token: 'ws' },
+          { kind: 'lit', value: 'J' },
+          { kind: 'token', token: 'ws' },
+          { kind: 'capture', name: 'grams', expr: { kind: 'token', token: 'decimal' } },
+          { kind: 'token', token: 'optWs' },
+          { kind: 'lit', value: 'g', caseInsensitive: true },
+          { kind: 'token', token: 'ws' },
+          {
+            kind: 'capture',
+            name: 'cultivar',
+            expr: {
+              kind: 'consumeUntil',
+              terminator: {
+                kind: 'seq',
+                items: [
+                  { kind: 'token', token: 'ws' },
+                  {
+                    kind: 'choice',
+                    items: [
+                      { kind: 'lit', value: 'Pre-Roll', caseInsensitive: true },
+                      { kind: 'lit', value: 'Pre Roll', caseInsensitive: true },
+                      { kind: 'lit', value: 'PreRoll', caseInsensitive: true },
+                    ],
+                  },
+                ],
+              },
+            },
+          },
+          { kind: 'token', token: 'ws' },
+          {
+            kind: 'choice',
+            items: [
+              { kind: 'lit', value: 'Pre-Roll', caseInsensitive: true },
+              { kind: 'lit', value: 'Pre Roll', caseInsensitive: true },
+              { kind: 'lit', value: 'PreRoll', caseInsensitive: true },
+            ],
+          },
+          { kind: 'token', token: 'optWs' },
+        ],
+      },
+      project: {
+        brand: { literal: "Jenny's" },
+        category: { literal: 'Pre-Rolls' },
+        groupName: { from: 'cultivar', transforms: [{ name: 'cleanCultivar', version: 1 }] },
+        packCount: { literal: 1 },
+        prevalence: { literal: null },
+        searchTerm: { from: 'cultivar', transforms: [{ name: 'cleanCultivar', version: 1 }] },
+        size: { from: 'grams', transforms: [{ name: 'formatGrams', version: 1 }] },
+        strainName: { from: 'cultivar', transforms: [{ name: 'cleanCultivar', version: 1 }] },
+        subcategory: { literal: '' },
+        variantTab: { literal: '__placeholder__' },
+        variantName: { literal: '__placeholder__' },
+      },
+      transforms: [
+        { name: 'composeVariantTab', version: 1, args: { sizeField: 'size' } },
+        { name: 'composeVariantName', version: 1, args: { fields: ['brand', 'groupName', 'size'] } },
+      ],
+      goldens: [],
+    },
+  ],
+}
+
+// ---------------------------------------------------------------------
+
+const TENANT_CONFIGS: TenantParserConfig[] = [
+  bytesConfig,
+  outrankdConfig,
+  theGramConfig,
+  herbConfig,
+  layUpConfig,
+  moonlitConfig,
+  jennysConfig,
+]
 
 describe('metrc-v1 dialect: static safety verify', () => {
   for (const cfg of TENANT_CONFIGS) {
@@ -335,6 +616,111 @@ describe('metrc-v1 dialect: parity with legacy parseProductName', () => {
         subcategory: '',
         variantName: 'The Gram Wedding Cake 3.5g',
         variantTab: '3.5g',
+      },
+    },
+    {
+      parserId: 'pending-purchases.herb',
+      input: '1O-PR-H26-DBUR',
+      expected: {
+        brand: 'Herb',
+        category: 'Pre-Rolls',
+        groupName: 'Donny Burger',
+        packCount: 1,
+        prevalence: null,
+        searchTerm: 'Donny Burger',
+        size: '1g',
+        strainName: 'Donny Burger',
+        subcategory: '',
+        variantName: 'Herb Donny Burger 1g',
+        variantTab: '1g',
+      },
+    },
+    {
+      parserId: 'pending-purchases.herb',
+      input: '1O-PR-H26-WIOG',
+      expected: {
+        brand: 'Herb',
+        category: 'Pre-Rolls',
+        groupName: 'WiFi OG',
+        packCount: 1,
+        prevalence: null,
+        searchTerm: 'WiFi OG',
+        size: '1g',
+        strainName: 'WiFi OG',
+        subcategory: '',
+        variantName: 'Herb WiFi OG 1g',
+        variantTab: '1g',
+      },
+    },
+    {
+      parserId: 'pending-purchases.layup',
+      input: 'LayUp - Beverage - Mango - 10mg',
+      expected: {
+        brand: 'LayUp',
+        category: 'Beverages',
+        groupName: 'Mango',
+        packCount: 1,
+        prevalence: null,
+        searchTerm: 'Mango',
+        size: '10mg',
+        strainName: '',
+        subcategory: '',
+        variantName: 'LayUp Mango 10mg',
+        variantTab: '10mg',
+      },
+    },
+    {
+      parserId: 'pending-purchases.layup',
+      input: 'LayUp - Beverage - Strawberry Lemonade - 5 MG THC',
+      expected: {
+        brand: 'LayUp',
+        category: 'Beverages',
+        groupName: 'Strawberry Lemonade',
+        packCount: 1,
+        prevalence: null,
+        searchTerm: 'Strawberry Lemonade',
+        size: '5mg',
+        strainName: '',
+        subcategory: '',
+        variantName: 'LayUp Strawberry Lemonade 5mg',
+        variantTab: '5mg',
+      },
+    },
+    {
+      parserId: 'pending-purchases.moonlit',
+      // Note: legacy toTitleCase lowercases then upper-cases first char
+      // of each token, so "OG" -> "Og". parsekit must match (this
+      // documents the legacy quirk).
+      input: 'MOONLIT- BANANA OG 1G INFUSED PREROLL',
+      expected: {
+        brand: 'Moonlit Hash Co',
+        category: 'Pre-Rolls',
+        groupName: 'Banana Og',
+        packCount: 1,
+        prevalence: null,
+        searchTerm: 'Banana Og',
+        size: '1g',
+        strainName: 'Banana Og',
+        subcategory: 'Infused',
+        variantName: 'Moonlit Hash Co Banana Og 1g',
+        variantTab: '1g',
+      },
+    },
+    {
+      parserId: 'pending-purchases.jennys',
+      input: "Jenny's J 0.5g OG Kush Pre-Roll",
+      expected: {
+        brand: "Jenny's",
+        category: 'Pre-Rolls',
+        groupName: 'OG Kush',
+        packCount: 1,
+        prevalence: null,
+        searchTerm: 'OG Kush',
+        size: '0.5g',
+        strainName: 'OG Kush',
+        subcategory: '',
+        variantName: "Jenny's OG Kush 0.5g",
+        variantTab: '0.5g',
       },
     },
   ]
