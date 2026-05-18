@@ -39,15 +39,20 @@ import type {
 export interface CaptureNode {
   text: string
   captures: Record<string, string>
+  listCaptures: Record<string, string[]>
 }
 
-const EMPTY: CaptureNode = { text: '', captures: {} }
+const EMPTY: CaptureNode = { text: '', captures: {}, listCaptures: {} }
 
-function ok(text: string, captures: Record<string, string> = {}): CaptureNode {
-  return { text, captures }
+function ok(
+  text: string,
+  captures: Record<string, string> = {},
+  listCaptures: Record<string, string[]> = {},
+): CaptureNode {
+  return { text, captures, listCaptures }
 }
 
-function mergeCaptures(a: Record<string, string>, b: Record<string, string>): Record<string, string> {
+function mergeMap<V>(a: Record<string, V>, b: Record<string, V>): Record<string, V> {
   // Right-biased merge keeps "last seen" semantics, which matches the
   // sequential order children are walked in.
   if (Object.keys(a).length === 0) return b
@@ -75,8 +80,11 @@ export function compileExpr(
       return inner.map((node: CaptureNode) => ({
         text: node.text,
         captures: { ...node.captures, [expr.name]: node.text },
+        listCaptures: node.listCaptures,
       })) as AParser<CaptureNode>
     }
+    case 'captureMany':
+      return compileCaptureMany(expr.name, expr.expr, dialect)
     case 'optional': {
       const inner = compileExpr(expr.expr, dialect)
       return aPossibly(inner).map((r) => (r === null ? EMPTY : (r as CaptureNode))) as AParser<CaptureNode>
@@ -147,11 +155,13 @@ function compileSeq(parts: AParser<CaptureNode>[]): AParser<CaptureNode> {
     const ns = nodes as CaptureNode[]
     let text = ''
     let caps: Record<string, string> = {}
+    let lists: Record<string, string[]> = {}
     for (const n of ns) {
       text += n.text
-      caps = mergeCaptures(caps, n.captures)
+      caps = mergeMap(caps, n.captures)
+      lists = mergeMap(lists, n.listCaptures)
     }
-    return { text, captures: caps }
+    return { text, captures: caps, listCaptures: lists }
   }) as AParser<CaptureNode>
 }
 
@@ -177,11 +187,13 @@ function compileRepeat(
     }
     let text = ''
     let caps: Record<string, string> = {}
+    let lists: Record<string, string[]> = {}
     for (const n of rs) {
       text += n.text
-      caps = mergeCaptures(caps, n.captures)
+      caps = mergeMap(caps, n.captures)
+      lists = mergeMap(lists, n.listCaptures)
     }
-    return aSucceed({ text, captures: caps }) as AParser<CaptureNode>
+    return aSucceed({ text, captures: caps, listCaptures: lists }) as AParser<CaptureNode>
   }) as AParser<CaptureNode>
 }
 
@@ -205,12 +217,84 @@ function compileSepBy(
     }
     let text = ''
     let caps: Record<string, string> = {}
+    let lists: Record<string, string[]> = {}
     for (const n of rs) {
       text += n.text
-      caps = mergeCaptures(caps, n.captures)
+      caps = mergeMap(caps, n.captures)
+      lists = mergeMap(lists, n.listCaptures)
     }
-    return aSucceed({ text, captures: caps }) as AParser<CaptureNode>
+    return aSucceed({ text, captures: caps, listCaptures: lists }) as AParser<CaptureNode>
   }) as AParser<CaptureNode>
+}
+
+/**
+ * Compile a `captureMany(name, body)` node. The body MUST be either
+ * `repeat` or `sepBy`; we compile the inner body element (not the
+ * whole repeat/sepBy) and then run arcsecond's many/sepBy directly so
+ * we keep access to the *array* of child CaptureNodes rather than the
+ * joined text. Each child's `.text` becomes one item in the list
+ * capture `listCaptures[name]`.
+ */
+function compileCaptureMany(
+  name: string,
+  body: Expr,
+  dialect: DialectPack<unknown>,
+): AParser<CaptureNode> {
+  if (body.kind === 'repeat') {
+    const inner = compileExpr(body.expr, dialect)
+    const min = body.min
+    const max = body.max
+    return aMany(inner).chain((rsRaw) => {
+      const rs = rsRaw as CaptureNode[]
+      if (rs.length < min || rs.length > max) {
+        return aFail(
+          `parsekit: captureMany('${name}') repeat count ${rs.length} outside [${min}, ${max}]`,
+        ) as AParser<CaptureNode>
+      }
+      return aSucceed(buildListCapture(name, rs)) as AParser<CaptureNode>
+    }) as AParser<CaptureNode>
+  }
+  if (body.kind === 'sepBy') {
+    const innerBody = compileExpr(body.expr, dialect)
+    const innerSep = compileExpr(body.sep, dialect)
+    const lo = body.min ?? 0
+    const hi = body.max ?? Number.POSITIVE_INFINITY
+    return aSepBy(innerSep)(innerBody).chain((rsRaw) => {
+      const rs = rsRaw as CaptureNode[]
+      if (rs.length < lo || rs.length > hi) {
+        return aFail(
+          `parsekit: captureMany('${name}') sepBy count ${rs.length} outside [${lo}, ${hi}]`,
+        ) as AParser<CaptureNode>
+      }
+      // sepBy text reconstruction needs the original separator text
+      // between items; we don't have it here, but the parsed string IS
+      // already advanced past the separators, so we just join with a
+      // single space placeholder for the .text return (it's not used
+      // anywhere meaningful — list-capture consumers read listCaptures).
+      return aSucceed(buildListCapture(name, rs, ' ')) as AParser<CaptureNode>
+    }) as AParser<CaptureNode>
+  }
+  throw new Error(
+    `parsekit: captureMany body must be 'repeat' or 'sepBy' (got '${body.kind}')`,
+  )
+}
+
+function buildListCapture(
+  name: string,
+  rs: CaptureNode[],
+  textJoiner = '',
+): CaptureNode {
+  const items: string[] = []
+  let text = ''
+  for (const n of rs) {
+    items.push(n.text)
+    text += (text.length > 0 ? textJoiner : '') + n.text
+  }
+  return {
+    text,
+    captures: {},
+    listCaptures: { [name]: items },
+  }
 }
 
 function compileConsumeUntil(
@@ -268,6 +352,8 @@ function expandMacro(def: MacroDef, args: Record<string, unknown>): Expr {
         return { kind: 'choice', items: e.items.map(walk) }
       case 'capture':
         return { kind: 'capture', name: e.name, expr: walk(e.expr) }
+      case 'captureMany':
+        return { kind: 'captureMany', name: e.name, expr: walk(e.expr) }
       case 'optional':
         return { kind: 'optional', expr: walk(e.expr) }
       case 'repeat':

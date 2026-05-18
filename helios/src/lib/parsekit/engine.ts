@@ -61,7 +61,16 @@ export function compileParser<TOutput>(
     // partial matches.
     const inner = compileExpr(rule.parser, dialect as DialectPack<unknown>)
     const withEnd = aSeq([inner, aEnd]).map((rs) => (rs as [CaptureNode, unknown])[0]) as AParser<CaptureNode>
-    return { rule, parser: withEnd.map((n) => n.captures) as AParser<Record<string, string>> }
+    return {
+      rule,
+      parser: withEnd.map((n) => ({
+        captures: n.captures,
+        listCaptures: n.listCaptures,
+      })) as AParser<{
+        captures: Record<string, string>
+        listCaptures: Record<string, string[]>
+      }>,
+    }
   })
 
   return { config, rules, dialect, contract }
@@ -109,8 +118,17 @@ export function parseWith<TOutput>(
       continue
     }
     // Project + transform + zod + semantic
-    const captures = r.result as Record<string, string>
-    const projected = applyProjection(cr.rule, captures, compiled, opts.callerContext)
+    const parseResult = r.result as {
+      captures: Record<string, string>
+      listCaptures: Record<string, string[]>
+    }
+    const projected = applyProjection(
+      cr.rule,
+      parseResult.captures,
+      parseResult.listCaptures,
+      compiled,
+      opts.callerContext,
+    )
     if ('error' in projected) {
       diagnostics.push({ ruleId: cr.rule.id, reason: projected.error })
       continue
@@ -153,6 +171,7 @@ export function parseWith<TOutput>(
 function applyProjection<TOutput>(
   rule: Rule,
   captures: Record<string, string>,
+  listCaptures: Record<string, string[]>,
   compiled: CompiledParser<TOutput>,
   callerContext: unknown,
 ): { value: unknown } | { error: string } {
@@ -160,6 +179,7 @@ function applyProjection<TOutput>(
   const ctx: TransformContext<TOutput> = {
     output: out as Partial<TOutput>,
     captures,
+    listCaptures,
     callerContext,
   }
   // Per-field projection
@@ -192,10 +212,22 @@ function evalValueExpr(
   dialect: DialectPack<unknown>,
 ): unknown {
   if ('literal' in ve) return ve.literal
-  let v: unknown = ctx.captures[ve.from]
-  if (v === undefined) {
-    throw new Error(`missing capture '${ve.from}'`)
+
+  let v: unknown
+  if ('fromList' in ve) {
+    const list = ctx.listCaptures[ve.fromList]
+    if (list === undefined) {
+      throw new Error(`missing list capture '${ve.fromList}'`)
+    }
+    // Defensive copy — transforms must not mutate the parser's list.
+    v = list.slice()
+  } else {
+    v = ctx.captures[ve.from]
+    if (v === undefined) {
+      throw new Error(`missing capture '${ve.from}'`)
+    }
   }
+
   if (ve.transforms) {
     // Per-field transforms use a transient sub-context whose output is
     // a single-field bag {value}. Each transform mutates that bag's
@@ -204,6 +236,7 @@ function evalValueExpr(
     const subCtx: TransformContext<unknown> = {
       output: bag as unknown as Partial<unknown>,
       captures: ctx.captures,
+      listCaptures: ctx.listCaptures,
       callerContext: ctx.callerContext,
     }
     for (const call of ve.transforms) {

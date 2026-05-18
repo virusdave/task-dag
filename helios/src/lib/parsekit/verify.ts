@@ -42,6 +42,10 @@ export interface SafetyIssue {
     | 'macro_args_unknown'
     | 'projection_unknown_field'
     | 'projection_from_unknown_capture'
+    | 'projection_from_unknown_list_capture'
+    | 'projection_capture_kind_mismatch'
+    | 'capturemany_body_invalid'
+    | 'capturemany_nested_capture'
     | 'duplicate_rule_id'
     | 'duplicate_capture_name'
     | 'detect_prefix_empty'
@@ -130,7 +134,7 @@ export function verifyParser(
 
   // Per-rule structural checks
   for (const rule of config.rules) {
-    const capturesSeen = new Set<string>()
+    const capturesSeen = new Map<string, 'scalar' | 'list'>()
     walkExpr(rule.parser, `rules[id=${rule.id}].parser`, 0, capturesSeen, ctx)
     verifyProjection(rule, capturesSeen, ctx)
     verifyTransformsList(rule.transforms, `rules[id=${rule.id}].transforms`, ctx)
@@ -145,7 +149,7 @@ function walkExpr(
   expr: Expr,
   path: string,
   depth: number,
-  captures: Set<string>,
+  captures: Map<string, 'scalar' | 'list'>,
   ctx: VerifyContext,
 ): void {
   if (depth > ctx.limits.maxDepth) {
@@ -186,12 +190,40 @@ function walkExpr(
       if (captures.has(expr.name)) {
         ctx.issues.push({
           code: 'duplicate_capture_name',
-          message: `Duplicate capture name '${expr.name}' in rule`,
+          message: `Duplicate capture name '${expr.name}' in rule (was ${captures.get(expr.name)})`,
           path,
         })
       }
-      captures.add(expr.name)
+      captures.set(expr.name, 'scalar')
       walkExpr(expr.expr, `${path}.capture(${expr.name})`, depth + 1, captures, ctx)
+      return
+    }
+    case 'captureMany': {
+      if (captures.has(expr.name)) {
+        ctx.issues.push({
+          code: 'duplicate_capture_name',
+          message: `Duplicate capture name '${expr.name}' in rule (was ${captures.get(expr.name)})`,
+          path,
+        })
+      }
+      captures.set(expr.name, 'list')
+      // v1 constraint: body must be repeat or sepBy.
+      if (expr.expr.kind !== 'repeat' && expr.expr.kind !== 'sepBy') {
+        ctx.issues.push({
+          code: 'capturemany_body_invalid',
+          message: `captureMany('${expr.name}') body must be 'repeat' or 'sepBy' (got '${expr.expr.kind}')`,
+          path: `${path}.captureMany`,
+        })
+      }
+      // v1 constraint: no nested named captures inside captureMany.
+      if (containsNamedCapture(expr.expr)) {
+        ctx.issues.push({
+          code: 'capturemany_nested_capture',
+          message: `captureMany('${expr.name}') body may not contain nested capture/captureMany nodes`,
+          path: `${path}.captureMany`,
+        })
+      }
+      walkExpr(expr.expr, `${path}.captureMany(${expr.name})`, depth + 1, captures, ctx)
       return
     }
     case 'optional': {
@@ -310,7 +342,11 @@ function walkExpr(
   }
 }
 
-function verifyProjection(rule: Rule, captures: Set<string>, ctx: VerifyContext): void {
+function verifyProjection(
+  rule: Rule,
+  captures: Map<string, 'scalar' | 'list'>,
+  ctx: VerifyContext,
+): void {
   for (const [field, value] of Object.entries(rule.project)) {
     if (!ctx.allowedOutputFields.has(field)) {
       ctx.issues.push({
@@ -326,18 +362,75 @@ function verifyProjection(rule: Rule, captures: Set<string>, ctx: VerifyContext)
 function verifyValueExpr(
   v: ValueExpr,
   path: string,
-  captures: Set<string>,
+  captures: Map<string, 'scalar' | 'list'>,
   ctx: VerifyContext,
 ): void {
   if ('literal' in v) return
-  if (!captures.has(v.from)) {
-    ctx.issues.push({
-      code: 'projection_from_unknown_capture',
-      message: `Projection references unknown capture '${v.from}'`,
-      path,
-    })
+  if ('fromList' in v) {
+    const kind = captures.get(v.fromList)
+    if (kind === undefined) {
+      ctx.issues.push({
+        code: 'projection_from_unknown_list_capture',
+        message: `Projection references unknown list capture '${v.fromList}'`,
+        path,
+      })
+    } else if (kind !== 'list') {
+      ctx.issues.push({
+        code: 'projection_capture_kind_mismatch',
+        message: `Projection 'fromList: ${v.fromList}' references a scalar capture; use 'from' instead`,
+        path,
+      })
+    }
+  } else {
+    const kind = captures.get(v.from)
+    if (kind === undefined) {
+      ctx.issues.push({
+        code: 'projection_from_unknown_capture',
+        message: `Projection references unknown capture '${v.from}'`,
+        path,
+      })
+    } else if (kind !== 'scalar') {
+      ctx.issues.push({
+        code: 'projection_capture_kind_mismatch',
+        message: `Projection 'from: ${v.from}' references a list capture; use 'fromList' instead`,
+        path,
+      })
+    }
   }
   verifyTransformsList(v.transforms, `${path}.transforms`, ctx)
+}
+
+/** Returns true if the given expression contains a (named) `capture` or
+ *  `captureMany` node anywhere in its subtree. Used to enforce the v1
+ *  rule that captureMany bodies may not contain nested named captures.
+ */
+function containsNamedCapture(expr: Expr): boolean {
+  switch (expr.kind) {
+    case 'capture':
+    case 'captureMany':
+      return true
+    case 'seq':
+    case 'choice':
+      return expr.items.some(containsNamedCapture)
+    case 'optional':
+    case 'repeat':
+      return containsNamedCapture(expr.expr)
+    case 'between':
+      return (
+        containsNamedCapture(expr.left) ||
+        containsNamedCapture(expr.expr) ||
+        containsNamedCapture(expr.right)
+      )
+    case 'sepBy':
+      return containsNamedCapture(expr.expr) || containsNamedCapture(expr.sep)
+    case 'consumeUntil':
+      return containsNamedCapture(expr.terminator)
+    case 'lit':
+    case 'token':
+    case 'macro':
+    case 'ref':
+      return false
+  }
 }
 
 function verifyTransformsList(
@@ -402,6 +495,9 @@ function canMatchEmpty(expr: Expr, dialect: DialectPack<unknown>): boolean {
     case 'choice':
       return expr.items.some((e) => canMatchEmpty(e, dialect))
     case 'capture':
+      return canMatchEmpty(expr.expr, dialect)
+    case 'captureMany':
+      // Inherits emptiness from body (repeat with min:0 OR sepBy with min:0).
       return canMatchEmpty(expr.expr, dialect)
     case 'repeat':
       return expr.min === 0 || canMatchEmpty(expr.expr, dialect)

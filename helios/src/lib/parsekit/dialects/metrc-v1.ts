@@ -86,6 +86,17 @@ function bagOf(ctx: TransformContext<unknown>): { value: unknown } {
   return ctx.output as unknown as { value: unknown }
 }
 
+/** Throw if the per-field bag value is not a string[]. List transforms
+ *  call this so misuse on a scalar source surfaces as a parse error
+ *  rather than a silent miscompute. */
+function assertListBag(bag: { value: unknown }, transformName: string): void {
+  if (!Array.isArray(bag.value)) {
+    throw new Error(
+      `${transformName}: expected list source (use { fromList: ... }); got ${typeof bag.value}`,
+    )
+  }
+}
+
 const transforms: Record<string, TransformDef<ParsedProductName>> = {
   /** Trim whitespace + strip `(I|S|H)` suffix + apply NAME_ALIASES.
    *  TODO(parsekit-configs): NAME_ALIASES should migrate to per-tenant
@@ -254,6 +265,115 @@ const transforms: Record<string, TransformDef<ParsedProductName>> = {
       const pack = Number(out[packField] ?? 1)
       const per = pack > 0 ? total / pack : total
       out[targetField] = formatGramsNumber(per)
+    },
+  },
+  /**
+   * Generic table lookup. Per-field; replaces the input value with
+   * `table[normalize(input)]` if present, else with `default` if
+   * provided, else passes the original input through.
+   *
+   * args: { table, default?, caseInsensitive?, trim? }
+   *
+   * Use cases: brand aliasing (`Grassroots` → `Grass Roots`),
+   * label normalization (`(I)` → `Indica`), category mapping. Replaces
+   * the dialect-internal NAME_ALIASES / PREVALENCE_MAP tables with
+   * per-tenant data in the configs repo.
+   */
+  mapValue: {
+    version: 1,
+    argsSchema: z
+      .object({
+        table: z.record(z.string(), z.string()),
+        default: z.string().optional(),
+        caseInsensitive: z.boolean().optional(),
+        trim: z.boolean().optional(),
+      })
+      .strict(),
+    impl: (args, ctx) => {
+      const a = args as {
+        table: Record<string, string>
+        default?: string
+        caseInsensitive?: boolean
+        trim?: boolean
+      }
+      const bag = bagOf(ctx)
+      let key = String(bag.value ?? '')
+      if (a.trim) key = key.trim()
+      const table: Record<string, string> = a.caseInsensitive
+        ? Object.fromEntries(Object.entries(a.table).map(([k, v]) => [k.toLowerCase(), v]))
+        : a.table
+      const lookup = a.caseInsensitive ? key.toLowerCase() : key
+      if (Object.prototype.hasOwnProperty.call(table, lookup)) {
+        bag.value = table[lookup]
+        return
+      }
+      if (a.default !== undefined) {
+        bag.value = a.default
+        return
+      }
+      // Sparse-table passthrough: preserve original input.
+      bag.value = bag.value
+    },
+  },
+  /**
+   * List-aware (per-field): drop items from a list-source value whose
+   * string matches `pattern` (a JS regex; `caseInsensitive` optional).
+   * Input MUST be an array (use after `{ fromList: ... }`).
+   *
+   * args: { pattern: string, caseInsensitive?: boolean }
+   */
+  filterTokens: {
+    version: 1,
+    argsSchema: z
+      .object({ pattern: z.string().min(1), caseInsensitive: z.boolean().optional() })
+      .strict(),
+    impl: (args, ctx) => {
+      const a = args as { pattern: string; caseInsensitive?: boolean }
+      const bag = bagOf(ctx)
+      assertListBag(bag, 'filterTokens')
+      const re = new RegExp(a.pattern, a.caseInsensitive ? 'i' : undefined)
+      bag.value = (bag.value as string[]).filter((s) => !re.test(s))
+    },
+  },
+  /**
+   * List-aware (per-field): return the FIRST item from a list-source
+   * value matching `pattern`, or `''` if none. Reduces the value from
+   * `string[]` to `string`.
+   *
+   * args: { pattern: string, caseInsensitive?: boolean, default?: string }
+   */
+  findToken: {
+    version: 1,
+    argsSchema: z
+      .object({
+        pattern: z.string().min(1),
+        caseInsensitive: z.boolean().optional(),
+        default: z.string().optional(),
+      })
+      .strict(),
+    impl: (args, ctx) => {
+      const a = args as { pattern: string; caseInsensitive?: boolean; default?: string }
+      const bag = bagOf(ctx)
+      assertListBag(bag, 'findToken')
+      const re = new RegExp(a.pattern, a.caseInsensitive ? 'i' : undefined)
+      const hit = (bag.value as string[]).find((s) => re.test(s))
+      bag.value = hit ?? a.default ?? ''
+    },
+  },
+  /**
+   * List-aware (per-field): join a list-source value with a string
+   * separator. Reduces the value from `string[]` to `string`.
+   *
+   * args: { sep: string }
+   */
+  joinTokens: {
+    version: 1,
+    argsSchema: z.object({ sep: z.string() }).strict(),
+    impl: (args, ctx) => {
+      const a = args as { sep: string }
+      const bag = bagOf(ctx)
+      assertListBag(bag, 'joinTokens')
+      bag.value = (bag.value as string[]).join(a.sep)
     },
   },
   /** Set a literal value on the output (escape hatch for derived constants). */

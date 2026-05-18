@@ -31,6 +31,11 @@ export type Expr =
   | { kind: 'seq'; items: Expr[] }
   | { kind: 'choice'; items: Expr[] }
   | { kind: 'capture'; name: string; expr: Expr }
+  /** Capture a list of child match texts into the parallel
+   *  list-captures namespace. The wrapped expr MUST be a `repeat` or
+   *  `sepBy`; nested named captures inside the body are NOT allowed
+   *  in v1. Read in projection via `{ fromList: name }`. */
+  | { kind: 'captureMany'; name: string; expr: Expr }
   | { kind: 'optional'; expr: Expr }
   | { kind: 'repeat'; expr: Expr; min: number; max: number }
   | { kind: 'between'; expr: Expr; left: Expr; right: Expr }
@@ -49,7 +54,13 @@ export interface TransformCall {
 }
 
 export type ValueExpr =
+  /** Read a scalar capture. */
   | { from: string; transforms?: TransformCall[] }
+  /** Read a list capture (from a `captureMany` AST node) as `string[]`.
+   *  Transforms then operate on the array; list-aware transforms can
+   *  reduce to a scalar (`findToken`, `joinTokens`) or remain a list
+   *  (`filterTokens`). */
+  | { fromList: string; transforms?: TransformCall[] }
   | { literal: JsonValue }
 
 export type Projection = Record<string, ValueExpr>
@@ -114,8 +125,10 @@ export interface TransformContext<TOutput> {
    *  pass). Transforms can read prior fields and mutate to derive
    *  new ones. */
   output: Partial<TOutput>
-  /** The raw capture map produced by the parser, before projection. */
+  /** The raw scalar capture map produced by the parser, before projection. */
   captures: Record<string, string>
+  /** The raw list capture map produced by `captureMany` nodes. */
+  listCaptures: Record<string, string[]>
   /** Parse-time context passed by the caller (e.g. distributor names,
    *  manifest hints). */
   callerContext: unknown
@@ -174,7 +187,10 @@ export interface ReleaseManifest {
 
 export interface CompiledRule<TOutput> {
   rule: Rule
-  parser: ArcsecondParser<Record<string, string>>
+  parser: ArcsecondParser<{
+    captures: Record<string, string>
+    listCaptures: Record<string, string[]>
+  }>
 }
 
 export interface CompiledParser<TOutput> {
