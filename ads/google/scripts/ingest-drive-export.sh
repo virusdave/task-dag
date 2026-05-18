@@ -28,10 +28,30 @@ INPUT="$1"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 
-CSV_PATH="/tmp/google-ads-export-utf8.csv"
+# Use per-user, per-invocation temp files so concurrent runs by
+# different system users (helios from the UI, amp-local from ssh,
+# the gads cron job) can never collide on /tmp file ownership.
+# Previously we hard-coded /tmp/google-ads-export-utf8.csv and
+# /tmp/ads-google-ingest.lock; the first writer's uid claimed
+# them forever (sticky-bit /tmp), so the next user got EACCES
+# from curl -o and the Helios UI returned 502.
+TMP_ROOT="${TMPDIR:-/tmp}/gads-ingest-$(id -u)"
+mkdir -p "${TMP_ROOT}"
+chmod 700 "${TMP_ROOT}"
+CSV_PATH="$(mktemp "${TMP_ROOT}/google-ads-export-XXXXXX.csv")"
 SNAPSHOT_PATH="${REPO_ROOT}/ads/google/snapshots/ads-snapshot-live.jsonl"
 HTML_PATH="${REPO_ROOT}/ads/google/outputs/experiments-viz.html"
-LOCK_PATH="/tmp/ads-google-ingest.lock"
+# Per-user lock. We accept that two different system users could
+# in theory ingest concurrently; in practice 100% of operator
+# traffic goes through helios, so this is a non-issue. The
+# critical thing is that the lock can never be 'stolen' by an
+# earlier user and cause EACCES for everyone else.
+LOCK_PATH="${TMP_ROOT}/ingest.lock"
+
+# Always clean up the per-invocation CSV on exit so we don't leak
+# multi-MB files into /tmp/gads-ingest-<uid>/ on every run.
+cleanup() { rm -f "${CSV_PATH}"; }
+trap cleanup EXIT
 
 # --- Parse Drive file ID + optional resource key from URL or raw ID ---------
 # Accepts:

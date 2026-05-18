@@ -47,7 +47,14 @@ GADS_DIR="${REPO_ROOT}/ads/google"
 SNAPSHOTS_DIR="${GADS_DIR}/snapshots"
 PROD_DIR="${GADS_DIR}/outputs/prod"
 BUNDLE_DIR="${PROD_DIR}/bundle"
-LOCK_PATH="/tmp/gads-run-morning.lock"
+# Per-user lock path: a shared /tmp file would be unwritable by the
+# second uid (sticky-bit /tmp), causing EACCES for whichever user
+# wasn't first. See ingest-drive-export.sh for the same pattern and
+# the 502 incident this guards against.
+LOCK_DIR="${TMPDIR:-/tmp}/gads-run-morning-$(id -u)"
+mkdir -p "${LOCK_DIR}"
+chmod 700 "${LOCK_DIR}"
+LOCK_PATH="${LOCK_DIR}/lock"
 
 if [[ $# -gt 0 ]]; then
   echo "Usage: $0   (this script takes no arguments)" >&2
@@ -91,7 +98,8 @@ if [[ -z "${SNAPSHOT}" ]]; then
 fi
 SNAPSHOT_MTIME="$(stat -c %Y "${SNAPSHOT}")"
 NOW_EPOCH="$(date +%s)"
-SNAPSHOT_AGE_HOURS="$(python3 -c "print(round(($NOW_EPOCH - $SNAPSHOT_MTIME) / 3600.0, 1))")"
+SNAPSHOT_AGE_HOURS="$(awk -v now="${NOW_EPOCH}" -v then="${SNAPSHOT_MTIME}" \
+                      'BEGIN { printf "%.1f", (now - then) / 3600.0 }')"
 log "using snapshot: ${SNAPSHOT} (age ${SNAPSHOT_AGE_HOURS}h)"
 
 # --- 2. Analysis ------------------------------------------------------------
@@ -167,10 +175,7 @@ MD
 
 BUNDLE_PATH="${BUNDLE_DIR}/${RUN_ID}.zip"
 rm -f "${BUNDLE_PATH}"
-# Use python's zipfile module instead of `zip` so the script works on
-# any host with python3 (the systemd unit and the operator's shell
-# both have python3; `zip` is not always in PATH on NixOS).
-( cd "${STAGE_DIR}" && python3 -m zipfile -c "${BUNDLE_PATH}" . )
+( cd "${STAGE_DIR}" && zip -q -r "${BUNDLE_PATH}" . )
 log "bundle: ${BUNDLE_PATH}"
 
 # --- 4. Upload --------------------------------------------------------------
@@ -188,18 +193,16 @@ if [[ -z "${PUBLIC_URL}" ]]; then
 fi
 
 # --- 5. Machine-readable result on stdout -----------------------------------
-python3 - "$RUN_ID" "$PUBLIC_URL" "$BUNDLE_PATH" "$CSV_COUNT" \
-            "$RUN_HTML" "$RUN_JSON" "$SNAPSHOT" "$SNAPSHOT_AGE_HOURS" <<'PY'
-import json, sys
-run_id, url, bundle_path, csv_count, html, jsn, snap, age = sys.argv[1:9]
-print(json.dumps({
-    "runId":            run_id,
-    "bundleUrl":        url,
-    "bundlePath":       bundle_path,
-    "csvCount":         int(csv_count),
-    "htmlPath":         html,
-    "jsonPath":         jsn,
-    "snapshotPath":     snap,
-    "snapshotAgeHours": float(age),
-}))
-PY
+# jq does the JSON escaping correctly without needing python.
+jq -nc \
+   --arg   runId            "${RUN_ID}" \
+   --arg   bundleUrl        "${PUBLIC_URL}" \
+   --arg   bundlePath       "${BUNDLE_PATH}" \
+   --argjson csvCount       "${CSV_COUNT}" \
+   --arg   htmlPath         "${RUN_HTML}" \
+   --arg   jsonPath         "${RUN_JSON}" \
+   --arg   snapshotPath     "${SNAPSHOT}" \
+   --argjson snapshotAgeHours "${SNAPSHOT_AGE_HOURS}" \
+   '{runId:$runId, bundleUrl:$bundleUrl, bundlePath:$bundlePath,
+     csvCount:$csvCount, htmlPath:$htmlPath, jsonPath:$jsonPath,
+     snapshotPath:$snapshotPath, snapshotAgeHours:$snapshotAgeHours}'
