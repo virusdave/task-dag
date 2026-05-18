@@ -34,6 +34,24 @@ export function compileParser<TOutput>(
   dialect: DialectPack<TOutput>,
   contract: UseCaseContract<TOutput>,
 ): CompiledParser<TOutput> {
+  // Identity invariants (cheap, fail-fast). The static safety verifier
+  // also reports these as issues; the engine refuses outright because
+  // compiling a parser against the wrong dialect or wrong use-case
+  // contract is a programmer error, not a config issue.
+  if (config.dialectRef.id !== dialect.id || config.dialectRef.version !== dialect.version) {
+    throw new Error(
+      `parsekit.compileParser: parser '${config.parserId}' dialectRef ` +
+        `${config.dialectRef.id}@${config.dialectRef.version} does not match ` +
+        `supplied dialect ${dialect.id}@${dialect.version}`,
+    )
+  }
+  if (config.scope.useCase !== contract.useCase) {
+    throw new Error(
+      `parsekit.compileParser: parser '${config.parserId}' scope.useCase ` +
+        `'${config.scope.useCase}' does not match contract useCase '${contract.useCase}'`,
+    )
+  }
+
   const sorted = [...config.rules]
     .filter((r) => r.enabled !== false)
     .sort((a, b) => (b.priority - a.priority) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))

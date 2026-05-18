@@ -127,6 +127,10 @@ export type TransformImpl<TOutput> = (
 ) => void
 
 export interface TransformDef<TOutput> {
+  /** Transform version. Bumped by the dialect author when behavior
+   *  changes; tenant configs pin a specific version via TransformCall
+   *  and the verifier rejects calls whose `version` differs. */
+  version: number
   /** Args schema. Validated before the transform runs. */
   argsSchema?: ZodType<unknown>
   /** Required to be a pure function of (args, captures, output). */

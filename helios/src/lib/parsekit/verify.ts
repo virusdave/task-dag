@@ -29,9 +29,13 @@ export interface SafetyIssue {
     | 'unknown_macro'
     | 'unknown_ref'
     | 'unknown_transform'
+    | 'transform_version_mismatch'
     | 'repeat_unbounded'
     | 'repeat_max_too_large'
+    | 'repeat_empty_body'
     | 'sepby_max_too_large'
+    | 'sepby_empty_body'
+    | 'sepby_empty_separator'
     | 'choice_fanout_too_large'
     | 'depth_exceeded'
     | 'cycle_detected'
@@ -41,6 +45,8 @@ export interface SafetyIssue {
     | 'duplicate_rule_id'
     | 'duplicate_capture_name'
     | 'detect_prefix_empty'
+    | 'dialect_ref_mismatch'
+    | 'use_case_mismatch'
   message: string
   path: string
 }
@@ -63,6 +69,7 @@ export function verifyParser(
   config: TenantParserConfig,
   dialect: DialectPack<unknown>,
   allowedOutputFields: Set<string>,
+  useCase?: string,
   limits: SafetyLimits = DEFAULT_SAFETY_LIMITS,
 ): SafetyReport {
   const ctx: VerifyContext = {
@@ -71,6 +78,28 @@ export function verifyParser(
     allowedOutputFields,
     issues: [],
     expansionStack: new Set(),
+  }
+
+  // DialectRef must match the supplied dialect pack (id + version).
+  if (config.dialectRef.id !== dialect.id || config.dialectRef.version !== dialect.version) {
+    ctx.issues.push({
+      code: 'dialect_ref_mismatch',
+      message:
+        `Parser dialectRef ${config.dialectRef.id}@${config.dialectRef.version} ` +
+        `does not match supplied dialect ${dialect.id}@${dialect.version}`,
+      path: 'dialectRef',
+    })
+  }
+
+  // Use-case identity must match the contract the caller has chosen.
+  if (useCase !== undefined && config.scope.useCase !== useCase) {
+    ctx.issues.push({
+      code: 'use_case_mismatch',
+      message:
+        `Parser scope.useCase='${config.scope.useCase}' does not match ` +
+        `requested useCase='${useCase}'`,
+      path: 'scope.useCase',
+    })
   }
 
   // Duplicate rule IDs
@@ -183,6 +212,15 @@ function walkExpr(
           path,
         })
       }
+      if (canMatchEmpty(expr.expr, ctx.dialect)) {
+        ctx.issues.push({
+          code: 'repeat_empty_body',
+          message:
+            'repeat body can match empty input; this would loop or be ambiguous. ' +
+            'Wrap in a non-empty primitive or use optional() outside the repeat.',
+          path: `${path}.repeat`,
+        })
+      }
       walkExpr(expr.expr, `${path}.repeat`, depth + 1, captures, ctx)
       return
     }
@@ -198,6 +236,20 @@ function walkExpr(
           code: 'sepby_max_too_large',
           message: `sepBy.max ${expr.max} exceeds limit ${ctx.limits.maxRepeat}`,
           path,
+        })
+      }
+      if (canMatchEmpty(expr.expr, ctx.dialect)) {
+        ctx.issues.push({
+          code: 'sepby_empty_body',
+          message: 'sepBy body can match empty input; would loop or be ambiguous.',
+          path: `${path}.sepBy.body`,
+        })
+      }
+      if (canMatchEmpty(expr.sep, ctx.dialect)) {
+        ctx.issues.push({
+          code: 'sepby_empty_separator',
+          message: 'sepBy separator can match empty input; this is ambiguous.',
+          path: `${path}.sepBy.sep`,
         })
       }
       walkExpr(expr.expr, `${path}.sepBy.body`, depth + 1, captures, ctx)
@@ -295,7 +347,8 @@ function verifyTransformsList(
 ): void {
   if (!calls) return
   for (const [i, call] of calls.entries()) {
-    if (!ctx.dialect.transforms[call.name]) {
+    const def = ctx.dialect.transforms[call.name]
+    if (!def) {
       ctx.issues.push({
         code: 'unknown_transform',
         message: `Unknown transform '${call.name}'`,
@@ -303,7 +356,15 @@ function verifyTransformsList(
       })
       continue
     }
-    const def = ctx.dialect.transforms[call.name]
+    if (call.version !== def.version) {
+      ctx.issues.push({
+        code: 'transform_version_mismatch',
+        message:
+          `Transform '${call.name}' v${call.version} requested but dialect ships v${def.version}; ` +
+          `update the call to v${def.version} or pin to an older dialect.`,
+        path: `${path}[${i}]`,
+      })
+    }
     if (def.argsSchema) {
       const r = def.argsSchema.safeParse(call.args ?? undefined)
       if (!r.success) {
@@ -314,5 +375,48 @@ function verifyTransformsList(
         })
       }
     }
+  }
+}
+
+/**
+ * Conservative static check: returns true if `expr` can succeed
+ * without consuming any input. Used to reject repeat/sepBy whose body
+ * matches empty (a classic parser footgun).
+ *
+ * Token primitives are treated as opaque — they are assumed to be
+ * non-empty-consuming. The one dialect token we know about and that
+ * canonically matches empty is `optWs`; we special-case it.
+ */
+function canMatchEmpty(expr: Expr, dialect: DialectPack<unknown>): boolean {
+  switch (expr.kind) {
+    case 'lit':
+      return expr.value.length === 0
+    case 'token':
+      // Conservative special-case for our known optional-whitespace
+      // token; everything else is treated as consuming.
+      return expr.token === 'optWs'
+    case 'optional':
+      return true
+    case 'seq':
+      return expr.items.every((e) => canMatchEmpty(e, dialect))
+    case 'choice':
+      return expr.items.some((e) => canMatchEmpty(e, dialect))
+    case 'capture':
+      return canMatchEmpty(expr.expr, dialect)
+    case 'repeat':
+      return expr.min === 0 || canMatchEmpty(expr.expr, dialect)
+    case 'sepBy':
+      return (expr.min ?? 0) === 0
+    case 'between':
+      return (
+        canMatchEmpty(expr.left, dialect) &&
+        canMatchEmpty(expr.expr, dialect) &&
+        canMatchEmpty(expr.right, dialect)
+      )
+    case 'consumeUntil':
+      return (expr.minLen ?? 1) === 0
+    case 'macro':
+    case 'ref':
+      return false
   }
 }

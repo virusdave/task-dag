@@ -87,8 +87,11 @@ function bagOf(ctx: TransformContext<unknown>): { value: unknown } {
 }
 
 const transforms: Record<string, TransformDef<ParsedProductName>> = {
-  /** Trim whitespace + strip `(I|S|H)` suffix + apply NAME_ALIASES. */
+  /** Trim whitespace + strip `(I|S|H)` suffix + apply NAME_ALIASES.
+   *  TODO(parsekit-configs): NAME_ALIASES should migrate to per-tenant
+   *  config via the generic `mapValue` transform (Phase 6.5). */
   cleanCultivar: {
+    version: 1,
     impl: (_args, ctx) => {
       const bag = bagOf(ctx)
       const s = String(bag.value ?? '')
@@ -96,15 +99,25 @@ const transforms: Record<string, TransformDef<ParsedProductName>> = {
       bag.value = NAME_ALIASES.get(trimmed) ?? trimmed
     },
   },
-  /** Parse string → integer. */
+  /** Parse a string of ONLY digits into an integer. Throws if the
+   *  string contains anything else (so "10PK" no longer silently
+   *  becomes 10 — the parser is forced to capture only the digits). */
   parseIntStrict: {
+    version: 1,
     impl: (_args, ctx) => {
       const bag = bagOf(ctx)
-      bag.value = Number.parseInt(String(bag.value), 10)
+      const s = String(bag.value ?? '').trim()
+      if (!/^\d+$/.test(s)) {
+        throw new Error(
+          `parseIntStrict: value '${s}' is not a pure integer string`,
+        )
+      }
+      bag.value = Number.parseInt(s, 10)
     },
   },
   /** Parse string → number, then format as `Xg`. */
   formatGrams: {
+    version: 1,
     impl: (_args, ctx) => {
       const bag = bagOf(ctx)
       const n = Number.parseFloat(String(bag.value))
@@ -113,6 +126,7 @@ const transforms: Record<string, TransformDef<ParsedProductName>> = {
   },
   /** Format string as `Nmg` (the input is the milligram count as string). */
   formatMilligrams: {
+    version: 1,
     impl: (_args, ctx) => {
       const bag = bagOf(ctx)
       const n = Number.parseInt(String(bag.value), 10)
@@ -121,6 +135,7 @@ const transforms: Record<string, TransformDef<ParsedProductName>> = {
   },
   /** Derive prevalence from `(I)|(S)|(H)` capture; output `'Indica'|'Sativa'|'Hybrid'|null`. */
   prevalenceFromParen: {
+    version: 1,
     impl: (_args, ctx) => {
       const bag = bagOf(ctx)
       const m = /\((I|S|H)\)/i.exec(String(bag.value ?? ''))
@@ -135,6 +150,7 @@ const transforms: Record<string, TransformDef<ParsedProductName>> = {
    *  - else:             variantTab = size
    */
   composeVariantTab: {
+    version: 1,
     argsSchema: z.object({ sizeField: z.string().min(1) }).strict(),
     impl: (args, ctx) => {
       const a = args as { sizeField: string }
@@ -150,6 +166,7 @@ const transforms: Record<string, TransformDef<ParsedProductName>> = {
    * Default fields: ['brand', 'groupName', 'variantTab'].
    */
   composeVariantName: {
+    version: 1,
     argsSchema: z
       .object({ fields: z.array(z.string().min(1)).min(1).optional() })
       .strict()
@@ -166,6 +183,7 @@ const transforms: Record<string, TransformDef<ParsedProductName>> = {
    * args: { from: string, to: string }
    */
   copyField: {
+    version: 1,
     argsSchema: z.object({ from: z.string().min(1), to: z.string().min(1) }).strict(),
     impl: (args, ctx) => {
       const a = args as { from: string; to: string }
@@ -179,6 +197,7 @@ const transforms: Record<string, TransformDef<ParsedProductName>> = {
    *   `rawCultivar === rawCultivar.toUpperCase() ? toTitleCase(rawCultivar) : rawCultivar`
    */
   titleCaseIfAllUpper: {
+    version: 1,
     impl: (_args, ctx) => {
       const bag = bagOf(ctx)
       const s = String(bag.value ?? '').trim()
@@ -198,6 +217,7 @@ const transforms: Record<string, TransformDef<ParsedProductName>> = {
    * args: { prefix: string }
    */
   prepend: {
+    version: 1,
     argsSchema: z.object({ prefix: z.string() }).strict(),
     impl: (args, ctx) => {
       const a = args as { prefix: string }
@@ -213,6 +233,7 @@ const transforms: Record<string, TransformDef<ParsedProductName>> = {
    * Mirrors the legacy Smartbud/Cannabals Gummy Brick math.
    */
   sizeFromTotalAndPack: {
+    version: 1,
     argsSchema: z
       .object({
         totalCapture: z.string().min(1),
@@ -237,6 +258,7 @@ const transforms: Record<string, TransformDef<ParsedProductName>> = {
   },
   /** Set a literal value on the output (escape hatch for derived constants). */
   setLiteral: {
+    version: 1,
     argsSchema: z.object({ field: z.string().min(1), value: z.unknown() }).strict(),
     impl: (args, ctx) => {
       const a = args as { field: string; value: unknown }

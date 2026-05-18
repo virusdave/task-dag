@@ -667,7 +667,12 @@ const TENANT_CONFIGS: TenantParserConfig[] = [
 describe('metrc-v1 dialect: static safety verify', () => {
   for (const cfg of TENANT_CONFIGS) {
     it(`${cfg.parserId} passes verifyParser`, () => {
-      const report = verifyParser(cfg, metrcV1Dialect, pendingPurchasesOutputFields)
+      const report = verifyParser(
+        cfg,
+        metrcV1Dialect,
+        pendingPurchasesOutputFields,
+        pendingPurchasesContract.useCase,
+      )
       if (!report.ok) {
         console.error(report.issues)
       }

@@ -156,6 +156,120 @@ describe('verifyParser', () => {
     expect(r.issues.some((i) => i.code === 'cycle_detected')).toBe(true)
   })
 
+  it('rejects repeat whose body can match empty (optional)', () => {
+    const r = verifyParser(
+      makeParser({
+        rules: [
+          {
+            id: 'r1',
+            priority: 100,
+            parser: {
+              kind: 'repeat',
+              min: 0,
+              max: 8,
+              expr: { kind: 'optional', expr: { kind: 'lit', value: 'a' } },
+            },
+            project: { brand: { literal: 'X' } },
+            goldens: [],
+          },
+        ],
+      }),
+      emptyDialect,
+      new Set(['brand']),
+    )
+    expect(r.ok).toBe(false)
+    expect(r.issues.some((i) => i.code === 'repeat_empty_body')).toBe(true)
+  })
+
+  it('rejects sepBy with empty separator', () => {
+    const dialect: DialectPack<unknown> = {
+      id: 'empty-v1',
+      version: 1,
+      tokens: { optWs: { expr: { kind: 'optional', expr: { kind: 'lit', value: ' ' } } } },
+      macros: {},
+      transforms: {},
+    }
+    const r = verifyParser(
+      makeParser({
+        rules: [
+          {
+            id: 'r1',
+            priority: 100,
+            parser: {
+              kind: 'sepBy',
+              min: 1,
+              max: 8,
+              expr: { kind: 'lit', value: 'a' },
+              sep: { kind: 'token', token: 'optWs' },
+            },
+            project: { brand: { literal: 'X' } },
+            goldens: [],
+          },
+        ],
+      }),
+      dialect,
+      new Set(['brand']),
+    )
+    expect(r.ok).toBe(false)
+    expect(r.issues.some((i) => i.code === 'sepby_empty_separator')).toBe(true)
+  })
+
+  it('rejects dialectRef mismatch', () => {
+    const r = verifyParser(
+      makeParser({ dialectRef: { id: 'other', version: 1 } }),
+      emptyDialect,
+      new Set(['brand']),
+    )
+    expect(r.ok).toBe(false)
+    expect(r.issues.some((i) => i.code === 'dialect_ref_mismatch')).toBe(true)
+  })
+
+  it('rejects use-case mismatch when caller asserts a useCase', () => {
+    const r = verifyParser(
+      makeParser({ scope: { tenantId: 'x', useCase: 'demo' } }),
+      emptyDialect,
+      new Set(['brand']),
+      'other-use-case',
+    )
+    expect(r.ok).toBe(false)
+    expect(r.issues.some((i) => i.code === 'use_case_mismatch')).toBe(true)
+  })
+
+  it('rejects transform whose version does not match the dialect', () => {
+    const dialect: DialectPack<unknown> = {
+      id: 'tv-v1',
+      version: 1,
+      tokens: {},
+      macros: {},
+      transforms: {
+        upper: {
+          version: 2,
+          impl: () => undefined,
+        },
+      },
+    }
+    const r = verifyParser(
+      makeParser({
+        dialectRef: { id: 'tv-v1', version: 1 },
+        rules: [
+          {
+            id: 'r1',
+            priority: 100,
+            parser: { kind: 'capture', name: 'x', expr: { kind: 'lit', value: 'a' } },
+            project: {
+              brand: { from: 'x', transforms: [{ name: 'upper', version: 1 }] },
+            },
+            goldens: [],
+          },
+        ],
+      }),
+      dialect,
+      new Set(['brand']),
+    )
+    expect(r.ok).toBe(false)
+    expect(r.issues.some((i) => i.code === 'transform_version_mismatch')).toBe(true)
+  })
+
   it('rejects duplicate rule IDs and duplicate captures', () => {
     const r = verifyParser(
       makeParser({

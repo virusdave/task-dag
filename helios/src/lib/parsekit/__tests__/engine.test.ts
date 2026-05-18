@@ -34,6 +34,7 @@ const dialect: DialectPack<Out> = {
   macros: {},
   transforms: {
     toInt: {
+      version: 1,
       impl: (_a, ctx) => {
         const bag = ctx.output as { value: unknown }
         bag.value = parseInt(String(bag.value), 10)

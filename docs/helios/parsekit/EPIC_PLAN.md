@@ -260,6 +260,41 @@ Auto-merge whitelist (v1): `addGolden`, `setRulePriority`, and `upsertRule` only
 
 The identity model `{ tenantId, useCase }` and the dialect/contract split mean LitAlerts and ecom dialects ship as separate dialect packs + use-case contracts without touching METRC code. Adapters (HTML/JSON-LD extraction) live outside parsekit and feed strings in.
 
+## AST drift log (v1 surface, source of truth)
+
+The AST that ships in v1 has drifted from the snippet in §"TypeScript
+surface (final)" above as implementation hit real tenants. The
+authoritative shape lives in
+[`helios/src/lib/parsekit/types.ts`](../../../helios/src/lib/parsekit/types.ts).
+Changes accepted into the v1 surface:
+
+| Addition | Why | Status |
+|---|---|---|
+| `consumeUntil(terminator, minLen?)` | Variable-length cultivar text terminated by a lookahead (Moonlit, Jenny's, Posh Puff). Built on arcsecond `everyCharUntil`. | shipped |
+| `captureMany(name, expr)` + parallel `listCaptures: Record<string,string[]>` runtime map + `ValueExpr.fromList` projection source | Variable-length modifier-token bag with optional inline pack token (Curaleaf, Cannabals Gummy Brick). Constrained: may only wrap `repeat`/`sepBy`; no nested named captures inside. | planned (Phase 6 hardening) |
+
+These are the *last* intentional v1 AST additions before configs
+externalize to the parsekit-configs repo. Any further changes after
+Phase 6 require bumping `configVersion` and migrating tenant configs.
+
+### Stabilization invariants (Phase 4.5 — already in code)
+
+- `compileParser` refuses to build when `config.dialectRef.{id,version}`
+  does not match the supplied dialect, or when `config.scope.useCase`
+  does not match the supplied contract's `useCase`. The static safety
+  verifier reports these as `dialect_ref_mismatch` /
+  `use_case_mismatch` issues for batch validation.
+- `TransformDef.version` is now mandatory; the verifier rejects calls
+  whose `TransformCall.version` does not match the dialect-shipped
+  version (`transform_version_mismatch`). This makes version pinning
+  enforceable, not decorative.
+- Verifier rejects `repeat`/`sepBy` whose body (or `sepBy.sep`) can
+  match empty input — a classic parser footgun. Detection is a
+  conservative `canMatchEmpty(expr)` walk; opaque tokens are assumed
+  non-empty except the well-known `optWs`.
+- `parseIntStrict` rejects strings containing anything other than
+  digits (so `"10PK"` no longer silently becomes `10`).
+
 ## Open questions (pending operator input)
 
 These are NOT blockers for implementation but should be confirmed before reconciler + LLM gap-fill go live:
