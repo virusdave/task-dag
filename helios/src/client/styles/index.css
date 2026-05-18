@@ -2245,6 +2245,25 @@ a.tree-nav-branch-label.is-link,
   align-items: flex-start;
 }
 
+.catalog-maintenance-card-top--clickable {
+  cursor: pointer;
+  border-radius: 8px;
+  margin: -4px;
+  padding: 4px;
+  -webkit-tap-highlight-color: rgba(155, 74, 34, 0.18);
+  transition: background-color 120ms ease;
+}
+
+.catalog-maintenance-card-top--clickable:hover,
+.catalog-maintenance-card-top--clickable:focus-visible {
+  background: rgba(155, 74, 34, 0.06);
+  outline: none;
+}
+
+.catalog-maintenance-card-top--clickable:focus-visible {
+  box-shadow: 0 0 0 2px rgba(155, 74, 34, 0.35);
+}
+
 .catalog-maintenance-card-preview {
   flex: 0 0 96px;
   width: 96px;

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 
 import {
@@ -566,9 +566,35 @@ function MaintenanceCard(props: CardProps) {
   const cardPreviewSrc =
     (mode === 'group' ? optimisticImageUrl : null) ?? localPreviewUrl ?? group.groupPreviewImageUrl
 
+  const storefrontUrl =
+    group.variants.length > 0
+      ? buildStorefrontProductUrl(group.siteKey, group.variants[0]!.productId)
+      : null
+  const cardTopClickable = storefrontUrl !== null
+  const cardTopAriaLabel = cardTopClickable
+    ? `Open ${displayGroupName(group)} on the ${group.siteLabel} storefront in a new tab`
+    : undefined
+
   return (
     <article className={`catalog-maintenance-card${disabled ? ' is-disabled' : ''}`}>
-      <div className="catalog-maintenance-card-top">
+      <div
+        className={`catalog-maintenance-card-top${cardTopClickable ? ' catalog-maintenance-card-top--clickable' : ''}`}
+        {...(cardTopClickable
+          ? {
+              role: 'button',
+              tabIndex: 0,
+              'aria-label': cardTopAriaLabel,
+              title: 'Open on storefront',
+              onClick: () => offerOpenStorefront(group),
+              onKeyDown: (event: KeyboardEvent<HTMLDivElement>) => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                  event.preventDefault()
+                  offerOpenStorefront(group)
+                }
+              },
+            }
+          : {})}
+      >
         <div className="catalog-maintenance-card-preview">
           {cardPreviewSrc ? (
             <img src={cardPreviewSrc} alt={`${displayGroupName(group)} preview`} loading="lazy" />
@@ -1136,6 +1162,42 @@ function isCannabisCategory(categoryName: string | null): boolean {
 
 function displayGroupName(group: CatalogMaintenanceSiteGroup): string {
   return group.groupName ?? `Group #${group.groupId}`
+}
+
+/**
+ * Build the public-facing Freshly Baked storefront URL for a product, keyed
+ * by the catalog `productId`. The Sweed storefront supports a deep-link form
+ * `/stores/<site>/shop/menu/_/<productId>` that resolves to the product page
+ * regardless of category/slug, which is what we want here — we only have the
+ * productId on hand. Returns `null` for sites whose storefront slug we don't
+ * know.
+ */
+function buildStorefrontProductUrl(siteKey: string, productId: number): string | null {
+  const normalized = siteKey.trim().toLowerCase()
+  let storeSlug: string | null = null
+  if (normalized === 'midtown' || normalized.includes('midtown')) storeSlug = 'midtown'
+  else if (normalized === 'bronx' || normalized.includes('bronx')) storeSlug = 'bronx'
+  if (storeSlug === null) return null
+  return `https://freshlybaked.nyc/stores/${storeSlug}/shop/menu/_/${productId}`
+}
+
+/**
+ * Click handler for the product card top region. Offers (does not silently
+ * navigate) to open the Sweed storefront page for this group in a new tab.
+ * Uses the first variant's `productId` since storefront URLs are keyed by
+ * product. Uses `window.confirm` for a reliable, mobile-friendly prompt that
+ * doesn't require adding any extra UI state.
+ */
+function offerOpenStorefront(group: CatalogMaintenanceSiteGroup): void {
+  const firstVariant = group.variants[0]
+  if (!firstVariant) return
+  const url = buildStorefrontProductUrl(group.siteKey, firstVariant.productId)
+  if (!url) return
+  const confirmed = window.confirm(
+    `Open ${displayGroupName(group)} on the ${group.siteLabel} storefront in a new tab?`,
+  )
+  if (!confirmed) return
+  window.open(url, '_blank', 'noopener,noreferrer')
 }
 
 function variantLabel(variant: CatalogMaintenanceSiteVariant): string {
