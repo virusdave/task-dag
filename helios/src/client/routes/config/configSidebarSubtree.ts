@@ -38,6 +38,20 @@ export function useRegisterConfigSidebarSubtree(): void {
         ],
       },
       {
+        kind: 'branch',
+        navKey: 'config.parsing',
+        label: 'Parsing',
+        to: buildHeliosModulePath('config', 'parsing/pending-purchases'),
+        children: [
+          {
+            kind: 'leaf',
+            navKey: 'config.parsing.pending-purchases',
+            label: 'Purchases',
+            to: buildHeliosModulePath('config', 'parsing/pending-purchases'),
+          },
+        ],
+      },
+      {
         kind: 'leaf',
         navKey: 'config.users',
         label: 'Users',

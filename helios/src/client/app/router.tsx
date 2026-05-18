@@ -18,6 +18,10 @@ import { ConfigModulePage } from '../routes/config/ConfigModulePage.js'
 import { ConfigCatalogSchedulePage, configCatalogScheduleLoader } from '../routes/config/ConfigCatalogSchedulePage.js'
 import { ConfigLitalertsSchedulePage, configLitalertsScheduleLoader } from '../routes/config/ConfigLitalertsSchedulePage.js'
 import { ConfigStockSchedulePage, configStockScheduleLoader } from '../routes/config/ConfigStockSchedulePage.js'
+import {
+  ConfigParsingPendingPurchasesPage,
+  configParsingPendingPurchasesLoader,
+} from '../routes/config/ConfigParsingPendingPurchasesPage.js'
 import { ConfigWorkersPage } from '../routes/config/ConfigWorkersPage.js'
 import { SweedAuthLogPage, sweedAuthLogLoader } from '../routes/config/SweedAuthLogPage.js'
 import { UsersPage, usersLoader } from '../routes/config/UsersPage.js'
@@ -256,6 +260,11 @@ export const router = createBrowserRouter([
         element: <ConfigStockSchedulePage />,
         loader: configStockScheduleLoader,
         path: 'config/workers/scheduling/stock',
+      },
+      {
+        element: <ConfigParsingPendingPurchasesPage />,
+        loader: configParsingPendingPurchasesLoader,
+        path: 'config/parsing/pending-purchases',
       },
       {
         element: <UsersPage />,

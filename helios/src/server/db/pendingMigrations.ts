@@ -169,6 +169,12 @@ const SENTINELS: MigrationSentinel[] = [
       'job_queue.priority column + lease ordering — required so operator-initiated jobs jump ahead of system-generated background backlog',
     check: (db) => columnExists(db, 'job_queue', 'priority'),
   },
+  {
+    migrationId: '017_parsekit_reverse_shadow_events',
+    label:
+      'parsekit_reverse_shadow_events table — required so the worker can persist parsekit-vs-legacy regressions and the Config -> Parsing -> Purchases page can render them',
+    check: (db) => tableExists(db, 'parsekit_reverse_shadow_events'),
+  },
 ]
 
 interface CacheEntry {

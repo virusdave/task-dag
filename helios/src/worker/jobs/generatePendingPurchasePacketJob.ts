@@ -47,6 +47,7 @@ import { enqueueMarketRefreshForProducts } from '../litalerts/enqueueMarketRefre
 import { parseWith } from '../../lib/parsekit/engine.js'
 import { getParserRegistry } from '../../lib/parsekit/node/parserRegistry.js'
 import type { CompiledParser, CompiledRelease } from '../../lib/parsekit/types.js'
+import { insertParsekitReverseShadowEvent } from '../../server/db/queries/parsekitReverseShadowQueries.js'
 
 const GENERIC_PLACEHOLDER_PRODUCT_NAMES = new Set(['preroll samples samples'])
 
@@ -2016,8 +2017,35 @@ function recordReverseShadowRecord(rec: ParsekitReverseShadowRecord): void {
     REVERSE_SHADOW_STATS.recent.length = REVERSE_SHADOW_MAX_RECENT
   }
   // Loud structured log: one JSON line per event. The Helios UI reads
-  // from the in-memory ring buffer; this log is the durable trail.
+  // from the DB-backed event log via /api/config/parsing/pending-purchases;
+  // this log line is the durable trail for ops-debugging via journalctl.
   console.warn(JSON.stringify({ msg: 'parsekit reverse-shadow', ...rec }))
+
+  // Persist asynchronously so the parser stays synchronous and
+  // call-site free of DB plumbing. Failures (no DB, no migration,
+  // anything) must NOT propagate: parser correctness has already
+  // been decided by the caller before this point.
+  void insertParsekitReverseShadowEvent({
+    kind: rec.kind,
+    input: rec.input,
+    parserId: rec.parserId ?? null,
+    ruleId: rec.ruleId ?? null,
+    snapshotSha: rec.snapshotSha ?? null,
+    diffFields: rec.diffFields ?? null,
+    parsekitOutput: rec.parsekit ?? null,
+    legacyOutput: rec.legacy ?? null,
+    parsekitFailureReason: rec.parsekitFailureReason ?? null,
+    legacyError: rec.legacyError ?? null,
+  }).catch((err) => {
+    // Swallow — already logged loudly above. We don't want a DB
+    // hiccup to slow down or break the parsing path.
+    console.warn(
+      JSON.stringify({
+        msg: 'parsekit reverse-shadow: db persist failed',
+        err: err instanceof Error ? err.message : String(err),
+      }),
+    )
+  })
 }
 
 function diffParsedProductName(a: ParsedProductName, b: ParsedProductName): string[] {
