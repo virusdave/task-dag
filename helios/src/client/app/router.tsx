@@ -11,6 +11,7 @@ import { CatalogModulePage } from '../routes/catalog/CatalogModulePage.js'
 import { CatalogPage, catalogLoader } from '../routes/catalog/CatalogPage.js'
 import { PendingPurchasesPage, pendingPurchasesLoader } from '../routes/catalog/PendingPurchasesPage.js'
 import { ReviewDetailsPage } from '../routes/catalog/ReviewDetailsPage.js'
+import { ClusterProposalsPage } from '../routes/communications/ClusterProposalsPage.js'
 import { CommunicationsLandingPage } from '../routes/communications/CommunicationsLandingPage.js'
 import { PolicyReplacementReviewPage, policyReplacementReviewLoader } from '../routes/communications/PolicyReplacementReviewPage.js'
 import { ConfigModulePage } from '../routes/config/ConfigModulePage.js'
@@ -150,6 +151,10 @@ export const router = createBrowserRouter([
       {
         element: <AdsIngestPage />,
         path: 'communications/drive-ingest',
+      },
+      {
+        element: <ClusterProposalsPage />,
+        path: 'communications/cluster-proposals',
       },
       {
         element: <PolicyReplacementReviewPage />,

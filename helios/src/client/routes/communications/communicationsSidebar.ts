@@ -29,6 +29,12 @@ export const COMMUNICATIONS_SIDEBAR_SUBTREE: TreeNavNode[] = [
     to: '/communications/drive-ingest',
   },
   {
+    kind: 'leaf',
+    navKey: 'communications.cluster-proposals',
+    label: 'Cluster proposals',
+    to: '/communications/cluster-proposals',
+  },
+  {
     kind: 'branch',
     navKey: 'communications.price-comparison-review',
     label: 'Price comparison review',

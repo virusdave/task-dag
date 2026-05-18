@@ -11,6 +11,7 @@ import { ZodError } from 'zod'
 import { getServerEnv } from '../config/env.js'
 import { startAdsDrivePoller, stopAdsDrivePoller } from '../ads/adsDrivePoller.js'
 import { registerAdsRoutes } from '../routes/ads.js'
+import { registerAdsClusterProposalsRoutes } from '../routes/adsClusterProposals.js'
 import { registerAnnotationsRoutes } from '../routes/annotations.js'
 import { registerAuthRoutes } from '../routes/auth.js'
 import { registerBrandExpiryOverridesRoutes } from '../routes/brandExpiryOverrides.js'
@@ -105,6 +106,7 @@ async function registerApplicationSurface(server: FastifyInstance) {
   await registerSessionRoutes(server)
   await registerAuthRoutes(server)
   await registerAdsRoutes(server)
+  await registerAdsClusterProposalsRoutes(server)
   await registerAnnotationsRoutes(server)
   await registerCatalogRoutes(server)
   await registerCatalogMaintenanceRoutes(server)

@@ -58,5 +58,36 @@ export const AdsStatusResponseSchema = z.object({
 export type AdsStatusResponse = z.infer<typeof AdsStatusResponseSchema>
 
 export const ADS_DRIVE_FOLDER_ID = '1zaGxH-nY1ARF9VyddDbs5oO7OUawaTbL'
+
+/**
+ * GET /api/ads/cluster-proposals/runs
+ *
+ * Index of cluster-sweep runs the gads-cluster-sweep service has
+ * written to disk under ads/google/outputs/cluster-sweep/. The
+ * cluster-sweep proper is delivered by P1 of the gemini-clusters epic
+ * (see docs/helios/gemini-clusters/EPIC_PLAN.md); this contract is the
+ * read-only surface that lets the Ads → Cluster proposals page list
+ * what's available and download the bundle ZIP for any given run.
+ *
+ * `manifestPresent` is false when the run dir exists but the
+ * cluster-sweep hadn't written its manifest.json yet (a still-running
+ * sweep, or a sweep that crashed mid-write). The UI uses that to
+ * label such runs as "in progress" or "incomplete" rather than
+ * silently hiding them.
+ */
+export const ClusterSweepRunSummarySchema = z.object({
+  runId: z.string(),
+  generatedAt: z.string().nullable(),
+  fileCount: z.number().int().nonnegative(),
+  bytes: z.number().int().nonnegative(),
+  manifestPresent: z.boolean(),
+})
+export type ClusterSweepRunSummary = z.infer<typeof ClusterSweepRunSummarySchema>
+
+export const ClusterSweepRunsResponseSchema = z.object({
+  runs: z.array(ClusterSweepRunSummarySchema),
+})
+export type ClusterSweepRunsResponse = z.infer<typeof ClusterSweepRunsResponseSchema>
+
 export const ADS_DRIVE_FOLDER_URL =
   `https://drive.google.com/drive/folders/${ADS_DRIVE_FOLDER_ID}`

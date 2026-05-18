@@ -40,6 +40,32 @@ export function CommunicationsLandingPage() {
 
       <article className="detail-panel">
         <header className="page-header">
+          <h3>Ads · Cluster proposals</h3>
+          <Pill tone="muted">weekly + on-demand</Pill>
+        </header>
+        <p className="subtle-copy">
+          Strategic-cluster proposals + ad-side repair work, produced by the
+          weekly <code>gads-cluster-sweep.service</code> on vps-nixos-3 (plus
+          on-demand triggers). Each run drops a downloadable bundle ZIP with
+          per-cluster Ads Editor CSVs (Lane A) and a Web-UI operator
+          checklist with deep-links (Lane C). See the
+          {' '}
+          <a
+            href="https://github.com/virusdave/top-level/blob/master/docs/epics/gemini-clusters/EPIC_PLAN.md"
+            target="_blank"
+            rel="noreferrer noopener"
+          >
+            gemini-clusters epic
+          </a>
+          {' '}for the full plan.
+        </p>
+        <div className="inline-row wrap-row">
+          <Link to="/communications/cluster-proposals">Open Cluster proposals</Link>
+        </div>
+      </article>
+
+      <article className="detail-panel">
+        <header className="page-header">
           <h3>Ads · Review · Assets · Policy-limited replacement</h3>
           <Pill tone="warning">human review required</Pill>
         </header>
