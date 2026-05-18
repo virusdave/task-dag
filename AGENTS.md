@@ -1,5 +1,41 @@
 # Agent instructions for the `automation` repo
 
+## MANDATORY: develop in an ephemeral checkout, not the shared `~/src` tree
+
+The canonical `~/src/<repo>` checkout (including `~/src/automation` and
+`~/src/automation/helios`) is shared by multiple concurrent agents and by
+the human operator. Editing, building, testing, committing, or pushing
+directly inside it corrupts other agents' in-flight work, mixes unrelated
+dirty hunks into your commits, and is unsafe. **You MUST NOT** do
+development work in `~/src/<repo>`.
+
+Before making any edits, spin up a private, throwaway working copy with
+the ephemeral checkout tool:
+
+```sh
+ws=$(/home/amp-local/src/github-worker/bin/ephemeral-checkout \
+        /home/amp-local/src/automation \
+        --label <short-task-label>)
+cd "$ws"
+```
+
+The tool creates an isolated git worktree (or, when worktrees aren't
+possible, a local clone) under `${TMPDIR:-/tmp}/github-worker/<repo>-<tag>`
+on its own branch. Do **all** editing, building, testing, committing, and
+pushing inside that workspace. Treat `~/src/automation` only as a
+source-of-truth reference and as the upstream `origin` push target.
+
+When the task is complete (after you've pushed), tear the workspace down:
+
+```sh
+/home/amp-local/src/github-worker/bin/ephemeral-checkout --remove "$ws"
+```
+
+If you encounter unexpected uncommitted state in the shared `~/src` tree,
+**do not "clean it up"** — it belongs to another concurrent agent or to
+the operator. Move your own work into an ephemeral checkout and proceed
+there.
+
 ## One-time setup: enable the shared git hooks
 
 This repo ships a pre-commit gate under `.githooks/` that runs the
