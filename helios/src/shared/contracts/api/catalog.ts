@@ -5,14 +5,24 @@ import { CatalogGroupSummarySchema } from '../domain/catalog.js'
 import { PendingPurchaseMarketListingSchema } from '../domain/pendingPurchases.js'
 import { ProposalLineItemSchema } from '../domain/proposals.js'
 
+// Helpers to make `?brand=` (empty string) behave the same as "no filter
+// supplied" — without this Fastify hands us `""` and the strict `min(1)`
+// would 400. Reviewers regularly clear filters via the form, which
+// produces empty query strings.
+const optionalTrimmedString = z
+  .string()
+  .trim()
+  .transform((value) => (value.length === 0 ? undefined : value))
+  .optional()
+
 export const CatalogBrowserQuerySchema = z.object({
-  brand: z.string().trim().min(1).optional(),
-  category: z.string().trim().min(1).optional(),
+  brand: optionalTrimmedString,
+  category: optionalTrimmedString,
   page: z.coerce.number().int().min(1).default(1),
   pageSize: z.coerce.number().int().min(1).max(100).default(25),
-  reconcileStatus: z.string().trim().min(1).optional(),
-  search: z.string().trim().min(1).optional(),
-  subcategory: z.string().trim().min(1).optional(),
+  reconcileStatus: optionalTrimmedString,
+  search: optionalTrimmedString,
+  subcategory: optionalTrimmedString,
 })
 export type CatalogBrowserQuery = z.infer<typeof CatalogBrowserQuerySchema>
 
@@ -66,7 +76,16 @@ export const CatalogBrowserItemSchema = CatalogGroupSummarySchema.extend({
 })
 export type CatalogBrowserItem = z.infer<typeof CatalogBrowserItemSchema>
 
+export const CatalogBrowserFacetsSchema = z.object({
+  brands: z.array(z.string()),
+  categories: z.array(z.string()),
+  reconcileStatuses: z.array(z.string()),
+  subcategories: z.array(z.string()),
+})
+export type CatalogBrowserFacets = z.infer<typeof CatalogBrowserFacetsSchema>
+
 export const CatalogBrowserResponseSchema = z.object({
+  facets: CatalogBrowserFacetsSchema,
   filters: CatalogBrowserQuerySchema,
   items: z.array(CatalogBrowserItemSchema),
   recentSalesIssue: z.string().nullable().optional(),

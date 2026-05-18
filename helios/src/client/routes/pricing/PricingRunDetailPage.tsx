@@ -12,6 +12,7 @@ import {
 import { loadJson, mutateJson } from '../../app/fetchJson.js'
 import { waitForJob } from '../../app/jobPolling.js'
 import { Pill } from '../../components/Pill.js'
+import { useRegisterCatalogSidebarSubtree } from '../catalog/catalogSidebarSubtree.js'
 import { describeRecentSales, formatCount, formatCurrency } from '../catalog/recentSales.js'
 import { PricingNav } from './PricingNav.js'
 
@@ -20,6 +21,8 @@ export async function pricingRunDetailLoader({ params }: { params: Record<string
 }
 
 export function PricingRunDetailPage() {
+  // Catalog sidebar context for the new under-Catalog placement.
+  useRegisterCatalogSidebarSubtree()
   const data = useLoaderData() as PricingRunDetailResponse
   const revalidator = useRevalidator()
   const reviewQueuePath = data.run.status === 'superseded'

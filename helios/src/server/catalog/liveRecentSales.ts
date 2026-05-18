@@ -13,9 +13,15 @@ import { withSweedSession } from '../../worker/sweed/session.js'
 const REPORT_CACHE_TTL_MS = 60_000
 const REPORT_PAGE_SIZE = 200
 
+// `store.reports.reorder` echoes the request `page` / `pageSize`, but on the
+// final (often empty) page Sweed sometimes returns `pageSize: 0`. The fields
+// are not consumed by our pipeline, so accept any non-negative integer and
+// don't reject the whole response on a benign echo value — the previous
+// `.min(1)` constraint surfaced as a confusing "Recent sales velocity is
+// unavailable right now" banner on /catalog/browser.
 const ReorderReportResponseSchema = z.object({
-  page: z.coerce.number().int().min(1).optional(),
-  pageSize: z.coerce.number().int().min(1).optional(),
+  page: z.coerce.number().int().min(0).optional(),
+  pageSize: z.coerce.number().int().min(0).optional(),
   reportDate: z.string().nullable().optional(),
   table: z.array(
     z.object({

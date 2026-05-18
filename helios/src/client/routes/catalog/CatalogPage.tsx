@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Form, Link, useLoaderData, useRevalidator, useRouteLoaderData } from 'react-router-dom'
+import { Form, Link, useLoaderData, useRevalidator, useRouteLoaderData, useSearchParams } from 'react-router-dom'
 
 import {
   CatalogBrowserResponseSchema,
@@ -16,6 +16,8 @@ import { Pill } from '../../components/Pill.js'
 import { useRegisterCatalogSidebarSubtree } from './catalogSidebarSubtree.js'
 import { describeRecentSales, formatCount, formatCoverage, formatCurrency } from './recentSales.js'
 
+const PAGE_SIZE_CHOICES = [25, 50, 100] as const
+
 export async function catalogLoader({ request }: { request: Request }) {
   const url = new URL(request.url)
   return loadJson(`/api/catalog/groups${url.search}`, CatalogBrowserResponseSchema)
@@ -26,6 +28,7 @@ export function CatalogPage() {
   const data = useLoaderData() as CatalogBrowserResponse
   const session = useRouteLoaderData('root') as SessionEnvelope
   const revalidator = useRevalidator()
+  const [searchParams] = useSearchParams()
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [importFilePath, setImportFilePath] = useState('')
   const [importSuccessMessage, setImportSuccessMessage] = useState<string | null>(null)
@@ -36,6 +39,29 @@ export function CatalogPage() {
   const [descriptionGenerationForceLiveRefresh, setDescriptionGenerationForceLiveRefresh] = useState(false)
   const [pricingGenerationForceLiveRefresh, setPricingGenerationForceLiveRefresh] = useState(false)
   const [generationSuccessMessage, setGenerationSuccessMessage] = useState<string | null>(null)
+
+  const currentPage = data.filters.page
+  const currentPageSize = data.filters.pageSize
+  const totalCount = data.totalCount
+  const pageStart = totalCount === 0 ? 0 : (currentPage - 1) * currentPageSize + 1
+  const pageEnd = Math.min(currentPage * currentPageSize, totalCount)
+  const totalPages = totalCount === 0 ? 1 : Math.ceil(totalCount / currentPageSize)
+  const hasPrev = currentPage > 1
+  const hasNext = currentPage < totalPages
+  const hasAnyFilter = Boolean(
+    data.filters.search ||
+      data.filters.brand ||
+      data.filters.category ||
+      data.filters.subcategory ||
+      data.filters.reconcileStatus,
+  )
+  const browserPath = buildHeliosModulePath('catalog', 'browser')
+
+  function buildPageHref(nextPage: number): string {
+    const params = new URLSearchParams(searchParams)
+    params.set('page', String(nextPage))
+    return `${browserPath}?${params.toString()}`
+  }
 
   async function handleRefresh(catalogGroupId: number) {
     setErrorMessage(null)
@@ -210,110 +236,126 @@ export function CatalogPage() {
           <p className="eyebrow">Catalog Browser</p>
           <h2>Mirrored groups and managed-field status</h2>
         </div>
-        <div className="inline-row wrap-row">
-          <Form className="filter-row" method="get">
-            <input defaultValue={data.filters.search ?? ''} name="search" placeholder="Search group or brand" />
-            <button className="ghost-button" type="submit">
-              Filter
-            </button>
-          </Form>
-          {session.permissions.canEditProposals ? (
-            <button className="primary-button" disabled={isRefreshingAll} onClick={() => void handleRefreshAll()} type="button">
-              {isRefreshingAll ? 'Queueing full refresh…' : 'Refresh all mirrored groups'}
-            </button>
-          ) : null}
-        </div>
       </div>
       {errorMessage ? <p className="error-text">{errorMessage}</p> : null}
       {data.recentSalesIssue ? <p className="error-text">{data.recentSalesIssue}</p> : null}
       {generationSuccessMessage ? <p>{generationSuccessMessage}</p> : null}
       {importSuccessMessage ? <p>{importSuccessMessage}</p> : null}
-      {session.permissions.canEditProposals ? (
-        <article className="mini-card" style={{ marginBottom: '1rem' }}>
-          <header>
-            <strong>Generate visible description batch</strong>
-            <Pill tone="warning">editor+</Pill>
-          </header>
-          <p className="subtle-copy">
-            Queue a description proposal batch for the groups on the current catalog page. The worker persists proposal rows and
-            LLM diagnostics asynchronously.
-          </p>
-          <label className="inline-row wrap-row" style={{ marginBottom: '0.75rem' }}>
-            <input
-              checked={descriptionGenerationForceLiveRefresh}
-              onChange={(event) => setDescriptionGenerationForceLiveRefresh(event.currentTarget.checked)}
-              type="checkbox"
-            />
-            Refresh live state from Sweed before generating
+
+      <article className="mini-card" style={{ marginBottom: '1rem' }}>
+        <Form className="filter-row wrap-row" method="get">
+          <label className="stack-field" style={{ minWidth: '14rem', flex: '1 1 14rem' }}>
+            <span>Search</span>
+            <input defaultValue={data.filters.search ?? ''} name="search" placeholder="Group or brand" />
           </label>
-          <button
-            className="primary-button"
-            disabled={isGeneratingDescriptions || data.items.length === 0}
-            onClick={() => void handleGenerateDescriptionBatch()}
-            type="button"
-          >
-            {isGeneratingDescriptions ? 'Generating descriptions…' : `Generate for ${data.items.length} visible groups`}
-          </button>
-        </article>
-      ) : null}
-      {session.permissions.canEditProposals ? (
-        <article className="mini-card" style={{ marginBottom: '1rem' }}>
-          <header>
-            <strong>Generate visible pricing batch</strong>
-            <Pill tone="warning">editor+</Pill>
-          </header>
-          <p className="subtle-copy">
-            Queue pricing proposals for the groups on the current catalog page. The worker reads persisted live price and cost
-            snapshots, then emits actionable `products.price` line items for out-of-band margins.
-          </p>
-          <label className="inline-row wrap-row" style={{ marginBottom: '0.75rem' }}>
-            <input
-              checked={pricingGenerationForceLiveRefresh}
-              onChange={(event) => setPricingGenerationForceLiveRefresh(event.currentTarget.checked)}
-              type="checkbox"
-            />
-            Refresh live state from Sweed before generating
+          <label className="stack-field" style={{ minWidth: '10rem' }}>
+            <span>Brand</span>
+            <select defaultValue={data.filters.brand ?? ''} name="brand">
+              <option value="">All brands</option>
+              {data.facets.brands.map((brand) => (
+                <option key={brand} value={brand}>
+                  {brand}
+                </option>
+              ))}
+            </select>
           </label>
-          <button
-            className="primary-button"
-            disabled={isGeneratingPricing || data.items.length === 0}
-            onClick={() => void handleGeneratePricingBatch()}
-            type="button"
-          >
-            {isGeneratingPricing ? 'Generating pricing…' : `Generate for ${data.items.length} visible groups`}
-          </button>
-        </article>
-      ) : null}
-      {session.user?.role === 'admin' ? (
-        <article className="mini-card" style={{ marginBottom: '1rem' }}>
-          <header>
-            <strong>Import review packet</strong>
-            <Pill tone="warning">admin</Pill>
-          </header>
-          <p className="subtle-copy">Queue a JSON review packet import from an absolute server file path. This only writes app state and proposal history.</p>
-          <div className="filter-row">
-            <input
-              onChange={(event) => setImportFilePath(event.currentTarget.value)}
-              placeholder="/absolute/path/to/catalog_description_mass_update_review.json"
-              value={importFilePath}
-            />
-            <button
-              className="primary-button"
-              disabled={isImporting || importFilePath.trim().length === 0}
-              onClick={() => void handleImportReviewPacket()}
-              type="button"
-            >
-              {isImporting ? 'Importing review packet…' : 'Import review packet'}
+          <label className="stack-field" style={{ minWidth: '10rem' }}>
+            <span>Category</span>
+            <select defaultValue={data.filters.category ?? ''} name="category">
+              <option value="">All categories</option>
+              {data.facets.categories.map((category) => (
+                <option key={category} value={category}>
+                  {category}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="stack-field" style={{ minWidth: '10rem' }}>
+            <span>Subcategory</span>
+            <select defaultValue={data.filters.subcategory ?? ''} name="subcategory">
+              <option value="">All subcategories</option>
+              {data.facets.subcategories.map((subcategory) => (
+                <option key={subcategory} value={subcategory}>
+                  {subcategory}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="stack-field" style={{ minWidth: '9rem' }}>
+            <span>Status</span>
+            <select defaultValue={data.filters.reconcileStatus ?? ''} name="reconcileStatus">
+              <option value="">Any status</option>
+              {data.facets.reconcileStatuses.map((status) => (
+                <option key={status} value={status}>
+                  {status}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="stack-field" style={{ minWidth: '7rem' }}>
+            <span>Per page</span>
+            <select defaultValue={String(currentPageSize)} name="pageSize">
+              {PAGE_SIZE_CHOICES.map((size) => (
+                <option key={size} value={String(size)}>
+                  {size}
+                </option>
+              ))}
+            </select>
+          </label>
+          {/* Always reset to page 1 when filters change; otherwise the
+              previous page param would survive a narrowed result set. */}
+          <input type="hidden" name="page" value="1" />
+          <div className="inline-row wrap-row" style={{ alignSelf: 'flex-end' }}>
+            <button className="primary-button" type="submit">
+              Apply
             </button>
+            {hasAnyFilter ? (
+              <Link className="ghost-button like-button" to={browserPath}>
+                Clear all
+              </Link>
+            ) : null}
           </div>
-        </article>
-      ) : null}
+        </Form>
+      </article>
+
+      <div className="inline-row wrap-row" style={{ alignItems: 'center', marginBottom: '0.75rem', justifyContent: 'space-between' }}>
+        <span className="subtle-copy">
+          {totalCount === 0
+            ? 'No groups match the current filters.'
+            : `Showing ${pageStart.toLocaleString()}–${pageEnd.toLocaleString()} of ${totalCount.toLocaleString()} groups`}
+        </span>
+        <div className="inline-row" style={{ gap: '0.25rem' }}>
+          {hasPrev ? (
+            <Link className="ghost-button like-button" to={buildPageHref(currentPage - 1)}>
+              ← Prev
+            </Link>
+          ) : (
+            <button className="ghost-button" disabled type="button">
+              ← Prev
+            </button>
+          )}
+          <span className="subtle-copy" style={{ padding: '0 0.5rem' }}>
+            Page {currentPage} of {totalPages}
+          </span>
+          {hasNext ? (
+            <Link className="ghost-button like-button" to={buildPageHref(currentPage + 1)}>
+              Next →
+            </Link>
+          ) : (
+            <button className="ghost-button" disabled type="button">
+              Next →
+            </button>
+          )}
+        </div>
+      </div>
+
       <div className="data-table-wrapper">
         <table className="data-table">
           <thead>
             <tr>
               <th>Group</th>
               <th>Status</th>
+              <th>Recent sales</th>
               <th>Tabs</th>
               <th>Desired</th>
               <th>Queue</th>
@@ -321,32 +363,140 @@ export function CatalogPage() {
             </tr>
           </thead>
           <tbody>
-            {data.items.map((item) => (
-              <tr key={item.catalogGroupId}>
-                <td>
-                  <Link to={buildHeliosModulePath('catalog', `groups/${item.catalogGroupId}`)}>{item.groupName}</Link>
-                  <div className="subtle-copy">{item.brandName ?? 'No brand'} · {item.categoryName ?? 'No category'}</div>
-                  <div className="catalog-recent-sales-row">
-                    <Pill tone={describeRecentSales(item.recentSales).tone}>{describeRecentSales(item.recentSales).detailLabel}</Pill>
-                    <span className="subtle-copy">
-                      {`${formatCount(item.recentSales.onHand)} on hand · ${formatCurrency(item.recentSales.last30DaysGrossSales)} gross / 30d · ${formatCoverage(item.recentSales)}`}
-                    </span>
-                  </div>
-                </td>
-                <td><Pill tone={statusTone(item.reconcileStatus)}>{item.reconcileStatus}</Pill></td>
-                <td>{item.productTabs.join(', ') || '—'}</td>
-                <td>{item.activeDesiredFieldCount}</td>
-                <td>{item.pendingLineItemCount} pending / {item.approvedLineItemCount} approved</td>
-                <td>
-                  <button className="ghost-button" onClick={() => void handleRefresh(item.catalogGroupId)} type="button">
-                    Refresh
-                  </button>
-                </td>
-              </tr>
-            ))}
+            {data.items.map((item) => {
+              const salesPill = describeRecentSales(item.recentSales)
+              return (
+                <tr key={item.catalogGroupId}>
+                  <td>
+                    <Link to={buildHeliosModulePath('catalog', `groups/${item.catalogGroupId}`)}>{item.groupName}</Link>
+                    <div className="subtle-copy">
+                      {item.brandName ?? 'No brand'} · {item.categoryName ?? 'No category'}
+                      {item.subcategoryName ? ` · ${item.subcategoryName}` : ''}
+                    </div>
+                  </td>
+                  <td>
+                    <Pill tone={statusTone(item.reconcileStatus)}>{item.reconcileStatus}</Pill>
+                  </td>
+                  <td>
+                    <Pill tone={salesPill.tone}>{salesPill.detailLabel}</Pill>
+                    <div className="subtle-copy">
+                      {`${formatCount(item.recentSales.onHand)} on hand · ${formatCurrency(item.recentSales.last30DaysGrossSales)} / 30d · ${formatCoverage(item.recentSales)}`}
+                    </div>
+                  </td>
+                  <td>{item.productTabs.join(', ') || '—'}</td>
+                  <td>{item.activeDesiredFieldCount}</td>
+                  <td>
+                    {item.pendingLineItemCount} pending / {item.approvedLineItemCount} approved
+                  </td>
+                  <td>
+                    <button className="ghost-button" onClick={() => void handleRefresh(item.catalogGroupId)} type="button">
+                      Refresh
+                    </button>
+                  </td>
+                </tr>
+              )
+            })}
           </tbody>
         </table>
       </div>
+
+      {session.permissions.canEditProposals ? (
+        <details className="mini-card" style={{ marginTop: '1.5rem' }}>
+          <summary>
+            <strong>Generate batch from visible groups</strong>{' '}
+            <span className="subtle-copy">({data.items.length} on this page)</span>
+          </summary>
+          <p className="subtle-copy" style={{ marginTop: '0.5rem' }}>
+            Queue a description or pricing proposal batch for the {data.items.length} groups currently visible on this page. Worker
+            persists proposal rows and LLM diagnostics asynchronously. To act on a larger set, narrow filters and apply, then re-open this card.
+          </p>
+          <div className="inline-row wrap-row" style={{ gap: '1rem', marginTop: '0.75rem' }}>
+            <article style={{ flex: '1 1 18rem' }}>
+              <header>
+                <strong>Description batch</strong> <Pill tone="warning">editor+</Pill>
+              </header>
+              <label className="inline-row wrap-row" style={{ margin: '0.5rem 0' }}>
+                <input
+                  checked={descriptionGenerationForceLiveRefresh}
+                  onChange={(event) => setDescriptionGenerationForceLiveRefresh(event.currentTarget.checked)}
+                  type="checkbox"
+                />
+                Refresh live state from Sweed first
+              </label>
+              <button
+                className="primary-button"
+                disabled={isGeneratingDescriptions || data.items.length === 0}
+                onClick={() => void handleGenerateDescriptionBatch()}
+                type="button"
+              >
+                {isGeneratingDescriptions ? 'Generating…' : `Generate for ${data.items.length} groups`}
+              </button>
+            </article>
+            <article style={{ flex: '1 1 18rem' }}>
+              <header>
+                <strong>Pricing batch</strong> <Pill tone="warning">editor+</Pill>
+              </header>
+              <label className="inline-row wrap-row" style={{ margin: '0.5rem 0' }}>
+                <input
+                  checked={pricingGenerationForceLiveRefresh}
+                  onChange={(event) => setPricingGenerationForceLiveRefresh(event.currentTarget.checked)}
+                  type="checkbox"
+                />
+                Refresh live state from Sweed first
+              </label>
+              <button
+                className="primary-button"
+                disabled={isGeneratingPricing || data.items.length === 0}
+                onClick={() => void handleGeneratePricingBatch()}
+                type="button"
+              >
+                {isGeneratingPricing ? 'Generating…' : `Generate for ${data.items.length} groups`}
+              </button>
+            </article>
+          </div>
+        </details>
+      ) : null}
+
+      {session.permissions.canEditProposals || session.user?.role === 'admin' ? (
+        <details className="mini-card" style={{ marginTop: '1rem' }}>
+          <summary>
+            <strong>Operations &amp; admin tools</strong>
+          </summary>
+          {session.permissions.canEditProposals ? (
+            <div style={{ marginTop: '0.75rem' }}>
+              <p className="subtle-copy">
+                Re-run the full mirrored catalog sync. Use this when you suspect drift across many groups.
+              </p>
+              <button className="primary-button" disabled={isRefreshingAll} onClick={() => void handleRefreshAll()} type="button">
+                {isRefreshingAll ? 'Queueing full refresh…' : 'Refresh all mirrored groups'}
+              </button>
+            </div>
+          ) : null}
+          {session.user?.role === 'admin' ? (
+            <div style={{ marginTop: '1rem' }}>
+              <header>
+                <strong>Import review packet</strong> <Pill tone="warning">admin</Pill>
+              </header>
+              <p className="subtle-copy">Queue a JSON review packet import from an absolute server file path.</p>
+              <div className="filter-row">
+                <input
+                  onChange={(event) => setImportFilePath(event.currentTarget.value)}
+                  placeholder="/absolute/path/to/catalog_description_mass_update_review.json"
+                  value={importFilePath}
+                />
+                <button
+                  className="primary-button"
+                  disabled={isImporting || importFilePath.trim().length === 0}
+                  onClick={() => void handleImportReviewPacket()}
+                  type="button"
+                >
+                  {isImporting ? 'Importing…' : 'Import review packet'}
+                </button>
+              </div>
+            </div>
+          ) : null}
+        </details>
+      ) : null}
     </section>
   )
 }

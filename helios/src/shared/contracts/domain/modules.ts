@@ -22,20 +22,30 @@ export const HeliosModuleDefinitionSchema = z.object({
 })
 export type HeliosModuleDefinition = z.infer<typeof HeliosModuleDefinitionSchema>
 
+// Top-level nav order matches the operator-facing IA in the AppShell:
+//   [Ads, Catalog, CRM, Screens, Scheduling, Utilities, Config]
+// Pricing is still a routed module (its existing /pricing/* pages keep
+// working and audit/job rows still carry module='pricing') but it is
+// rendered as a SUB-section of Catalog in the sidebar rather than as
+// its own top-level branch — pricing is just one of the things a
+// catalog reviewer does. The AppShell explicitly skips the 'pricing'
+// entry when building the top-level branch list; catalog's sidebar
+// subtree (catalogSidebarSubtree.ts) registers the New run / Run
+// history / Review queue leaves under the Catalog branch instead.
 export const HELIOS_MODULES: ReadonlyArray<HeliosModuleDefinition> = [
+  {
+    code: 'communications',
+    label: 'Ads',
+    routePrefix: 'communications',
+    rolloutStatus: 'active',
+    summary: 'Google Ads review surfaces (currently the policy-limited asset replacement review) live in Helios with server-persisted reviewer drafts and append-only audit. Live Google Ads mutates still run through a separate narrow resolver pass after review submission.',
+  },
   {
     code: 'catalog',
     label: 'Catalog',
     routePrefix: 'catalog',
     rolloutStatus: 'active',
-    summary: 'Review, mirror, reconcile, LLM rerun, jobs, and audit workflows are now live inside Helios.',
-  },
-  {
-    code: 'screens',
-    label: 'Screens',
-    routePrefix: 'screens',
-    rolloutStatus: 'active',
-    summary: 'Banner refresh, chained banner-health maintenance, healthy-banner enable sweeps, Bronx-to-Midtown image fallback clone, and Midtown promo rebinding workflows now queue through Helios jobs and audit surfaces.',
+    summary: 'Review, mirror, reconcile, LLM rerun, pricing runs, jobs, and audit workflows are now live inside Helios.',
   },
   {
     code: 'crm',
@@ -45,18 +55,11 @@ export const HELIOS_MODULES: ReadonlyArray<HeliosModuleDefinition> = [
     summary: 'Planned migration for customer segmentation and CRM sync with data provenance, job history, and review outputs.',
   },
   {
-    code: 'communications',
-    label: 'Ads',
-    routePrefix: 'communications',
+    code: 'screens',
+    label: 'Screens',
+    routePrefix: 'screens',
     rolloutStatus: 'active',
-    summary: 'Google Ads review surfaces (currently the policy-limited asset replacement review) live in Helios with server-persisted reviewer drafts and append-only audit. Live Google Ads mutates still run through a separate narrow resolver pass after review submission.',
-  },
-  {
-    code: 'pricing',
-    label: 'Pricing',
-    routePrefix: 'pricing',
-    rolloutStatus: 'active',
-    summary: 'Dedicated pricing run generation, run history, and pricing-specific review now sit on top of the shared proposal, job, and reconcile model.',
+    summary: 'Banner refresh, chained banner-health maintenance, healthy-banner enable sweeps, Bronx-to-Midtown image fallback clone, and Midtown promo rebinding workflows now queue through Helios jobs and audit surfaces.',
   },
   {
     code: 'scheduling',
@@ -78,6 +81,17 @@ export const HELIOS_MODULES: ReadonlyArray<HeliosModuleDefinition> = [
     routePrefix: 'config',
     rolloutStatus: 'active',
     summary: 'Operator-editable Helios configuration: background worker schedules and other meta-settings that drive recurring Helios behavior.',
+  },
+  // Pricing is intentionally last and is hidden from the top-level
+  // sidebar (see AppShell.tsx). Its routes still live at /pricing/*
+  // and existing audit/job rows still validate against the module
+  // enum, so removing it from HELIOS_MODULE_CODES would be breaking.
+  {
+    code: 'pricing',
+    label: 'Pricing',
+    routePrefix: 'pricing',
+    rolloutStatus: 'active',
+    summary: 'Pricing run generation, run history, and pricing review. Rendered under Catalog in the sidebar — pricing is a catalog reviewer workflow.',
   },
 ]
 

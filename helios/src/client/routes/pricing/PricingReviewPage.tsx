@@ -14,6 +14,7 @@ import {
 import { loadJson, mutateJson } from '../../app/fetchJson.js'
 import { waitForJob } from '../../app/jobPolling.js'
 import { Pill } from '../../components/Pill.js'
+import { useRegisterCatalogSidebarSubtree } from '../catalog/catalogSidebarSubtree.js'
 import { describeRecentSales, formatCount, formatCoverage, formatCurrency } from '../catalog/recentSales.js'
 import { PricingNav } from './PricingNav.js'
 
@@ -28,6 +29,9 @@ export async function pricingReviewLoader({ request }: { request: Request }) {
 }
 
 export function PricingReviewPage() {
+  // Pricing now lives under Catalog in the sidebar; keep the catalog
+  // subtree registered so navigation context is consistent.
+  useRegisterCatalogSidebarSubtree()
   const data = useLoaderData() as { review: PricingReviewResponse; runs: PricingRunListResponse }
   const revalidator = useRevalidator()
   const selectedRun = data.review.filters.batchId

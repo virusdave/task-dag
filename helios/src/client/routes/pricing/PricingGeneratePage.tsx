@@ -10,6 +10,7 @@ import {
 } from '../../../shared/contracts/index.js'
 import { loadJson, mutateJson } from '../../app/fetchJson.js'
 import { Pill } from '../../components/Pill.js'
+import { useRegisterCatalogSidebarSubtree } from '../catalog/catalogSidebarSubtree.js'
 import { PricingNav } from './PricingNav.js'
 
 export async function pricingGenerateLoader({ request }: { request: Request }) {
@@ -18,6 +19,10 @@ export async function pricingGenerateLoader({ request }: { request: Request }) {
 }
 
 export function PricingGeneratePage() {
+  // Pricing pages live under Catalog in the sidebar — register the
+  // catalog subtree so the Pricing branch (and its sibling Catalog
+  // leaves) stay visible while reviewing/creating runs.
+  useRegisterCatalogSidebarSubtree()
   const preview = useLoaderData() as PricingScopePreviewResponse
   const navigate = useNavigate()
   const navigation = useNavigation()

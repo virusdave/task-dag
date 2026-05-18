@@ -158,7 +158,7 @@ export async function listCatalogGroups(
   const { values, whereSql } = buildCatalogWhere(filters)
   const pageOffset = (filters.page - 1) * filters.pageSize
 
-  const [itemsResult, countResult] = await Promise.all([
+  const [itemsResult, countResult, facets] = await Promise.all([
     db.query<CatalogBrowserRow>(
       `
         select
@@ -209,6 +209,7 @@ export async function listCatalogGroups(
       `,
       values,
     ),
+    loadCatalogBrowserFacets(db),
   ])
 
   let recentSalesIssue: string | null = null
@@ -226,6 +227,7 @@ export async function listCatalogGroups(
   }
 
   return {
+    facets,
     filters,
     items: itemsResult.rows.map((row) => ({
       activeDesiredFieldCount: row.active_desired_field_count,
@@ -505,6 +507,52 @@ export async function getGroupDetail(db: Queryable, catalogGroupId: number): Pro
       status: row.status,
       writeOperationId: row.id,
     })),
+  }
+}
+
+// Distinct brand/category/subcategory/status values pulled from the
+// catalog_groups table. These power the filter-rail <select> menus on
+// /catalog/browser so reviewers can discover legal values rather than
+// guessing exact strings. Cheap enough to run inline on every browser
+// request (one scan per column, table is small and the columns are
+// already used by other queries).
+async function loadCatalogBrowserFacets(db: Queryable): Promise<{
+  brands: string[]
+  categories: string[]
+  reconcileStatuses: string[]
+  subcategories: string[]
+}> {
+  const [brands, categories, subcategories, statuses] = await Promise.all([
+    db.query<{ value: string }>(
+      `select distinct brand_name as value
+         from catalog_groups
+        where brand_name is not null and brand_name <> ''
+        order by brand_name asc`,
+    ),
+    db.query<{ value: string }>(
+      `select distinct category_name as value
+         from catalog_groups
+        where category_name is not null and category_name <> ''
+        order by category_name asc`,
+    ),
+    db.query<{ value: string }>(
+      `select distinct subcategory_name as value
+         from catalog_groups
+        where subcategory_name is not null and subcategory_name <> ''
+        order by subcategory_name asc`,
+    ),
+    db.query<{ value: string }>(
+      `select distinct reconcile_status as value
+         from catalog_groups
+        where reconcile_status is not null and reconcile_status <> ''
+        order by reconcile_status asc`,
+    ),
+  ])
+  return {
+    brands: brands.rows.map((row) => row.value),
+    categories: categories.rows.map((row) => row.value),
+    reconcileStatuses: statuses.rows.map((row) => row.value),
+    subcategories: subcategories.rows.map((row) => row.value),
   }
 }
 

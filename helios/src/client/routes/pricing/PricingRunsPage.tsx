@@ -8,6 +8,7 @@ import {
 } from '../../../shared/contracts/index.js'
 import { loadJson } from '../../app/fetchJson.js'
 import { Pill } from '../../components/Pill.js'
+import { useRegisterCatalogSidebarSubtree } from '../catalog/catalogSidebarSubtree.js'
 import { PricingNav } from './PricingNav.js'
 
 export async function pricingRunsLoader({ request }: { request: Request }) {
@@ -16,6 +17,8 @@ export async function pricingRunsLoader({ request }: { request: Request }) {
 }
 
 export function PricingRunsPage() {
+  // Catalog sidebar context for the new under-Catalog placement.
+  useRegisterCatalogSidebarSubtree()
   const data = useLoaderData() as PricingRunListResponse
   const revalidator = useRevalidator()
   const hasInProgressRun = data.items.some((item) => item.status === 'draft' || item.jobStatus === 'queued' || item.jobStatus === 'running')

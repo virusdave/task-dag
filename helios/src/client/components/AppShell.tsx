@@ -45,15 +45,19 @@ function buildPrimarySidebarNodes(
   // the operational leaves (Jobs, Audit history), because it owns
   // meta-settings like recurring background-worker schedules rather than a
   // workflow surface.
-  const moduleBranches: TreeNavNode[] = HELIOS_MODULES.filter((module) => module.code !== 'config').map(
-    (module) => ({
-      kind: 'branch',
-      navKey: `module.${module.code}`,
-      label: module.label,
-      to: buildHeliosModulePath(module.code),
-      children: subtreesByModule[module.code] ?? [],
-    }),
-  )
+  // `pricing` is intentionally NOT rendered as a top-level branch — its
+  // routes are reached through the Catalog branch's subtree
+  // (catalogSidebarSubtree.ts). `config` is rendered separately below
+  // the operational leaves.
+  const moduleBranches: TreeNavNode[] = HELIOS_MODULES.filter(
+    (module) => module.code !== 'config' && module.code !== 'pricing',
+  ).map((module) => ({
+    kind: 'branch',
+    navKey: `module.${module.code}`,
+    label: module.label,
+    to: buildHeliosModulePath(module.code),
+    children: subtreesByModule[module.code] ?? [],
+  }))
 
   const configModule = HELIOS_MODULES.find((module) => module.code === 'config')
   const configBranch: TreeNavNode | null = configModule
