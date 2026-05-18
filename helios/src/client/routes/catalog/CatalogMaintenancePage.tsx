@@ -392,6 +392,11 @@ function MaintenanceCard(props: CardProps) {
   // the page (which scrolls off-screen on mobile). Stays visible inside the
   // card so the operator can SEE what happened without scrolling.
   const [cardStatus, setCardStatus] = useState<{ kind: 'ok' | 'err' | 'busy'; message: string } | null>(null)
+  // When the worker job fails, we keep the stagedRef around so the
+  // operator can click Retry without re-selecting the file. Cleared
+  // on successful upload, on a fresh upload, or when the operator
+  // picks a new file.
+  const [failedStagedRef, setFailedStagedRef] = useState<string | null>(null)
   const inputRef = useRef<HTMLInputElement | null>(null)
 
   useEffect(() => {
@@ -431,13 +436,8 @@ function MaintenanceCard(props: CardProps) {
       return
     }
     onUploadStart()
-    setCardStatus({
-      kind: 'busy',
-      message:
-        mode === 'group'
-          ? 'Uploading group photo to Sweed and verifying it stuck…'
-          : `Uploading photo and attaching to ${selectedVariantIds.length} variant${selectedVariantIds.length === 1 ? '' : 's'} (verifying each)…`,
-    })
+    setFailedStagedRef(null)
+    setCardStatus({ kind: 'busy', message: 'Staging bytes on the server…' })
     try {
       const formData = new FormData()
       formData.append('targetType', mode === 'group' ? 'group' : 'variants')
@@ -457,24 +457,97 @@ function MaintenanceCard(props: CardProps) {
         throw new Error(errorPayload ?? `${response.status} ${response.statusText}`)
       }
       const payload = (await response.json()) as {
-        blobUrl: string | null
-        affectedProductIds?: number[]
-        reanalysisJobId?: number | null
+        status: 'queued'
+        jobId: number
+        stagedRef: string
+        sweedGroupId: number
+        targetType: 'group'
       }
-      setOptimisticImageUrl(payload.blobUrl ?? localPreviewUrl ?? null)
-      setOptimisticAffectedProductIds(mode === 'group' ? [] : (payload.affectedProductIds ?? selectedVariantIds))
-      setSyncingReanalysis(payload.reanalysisJobId !== null && payload.reanalysisJobId !== undefined)
+      setOptimisticImageUrl(localPreviewUrl ?? null)
+      setOptimisticAffectedProductIds([])
+      setSyncingReanalysis(true)
       setFile(null)
       if (inputRef.current) inputRef.current.value = ''
-      const message =
-        mode === 'group'
-          ? `✓ Group image attached to ${displayGroupName(group)} (${group.siteLabel}). Sweed confirmed the blob is on the group.`
-          : `✓ Variant image attached to ${selectedVariantIds.length} variant${selectedVariantIds.length === 1 ? '' : 's'} of ${displayGroupName(group)} (${group.siteLabel}). Sweed confirmed the blob is on each variant.`
-      setCardStatus({ kind: 'ok', message })
-      await onComplete(message)
+
+      await pollUploadJob({
+        cardKey: props.cardKey,
+        jobId: payload.jobId,
+        stagedRef: payload.stagedRef,
+        group,
+        onPhase: (message) => setCardStatus({ kind: 'busy', message }),
+        onSuccess: async () => {
+          const message = `✓ Group image attached to ${displayGroupName(group)} (${group.siteLabel}). Sweed confirmed the blob is on the group.`
+          setCardStatus({ kind: 'ok', message })
+          await onComplete(message)
+        },
+        onFailure: (errorMessage, stagedRef) => {
+          setFailedStagedRef(stagedRef)
+          setCardStatus({
+            kind: 'err',
+            message: `✗ ${errorMessage} — bytes are still staged; click Retry to re-enqueue.`,
+          })
+          onError(errorMessage)
+        },
+      })
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Upload failed.'
       setCardStatus({ kind: 'err', message: `✗ ${message}` })
+      onError(message)
+    } finally {
+      onUploadEnd()
+    }
+  }
+
+  const handleRetry = async () => {
+    if (mode === 'barcode' || failedStagedRef === null) return
+    const stagedRef = failedStagedRef
+    onUploadStart()
+    setFailedStagedRef(null)
+    setCardStatus({ kind: 'busy', message: `Re-enqueuing upload from staged bytes ${stagedRef}…` })
+    try {
+      const response = await fetch(
+        buildAppPath(`/api/catalog/maintenance/images/${encodeURIComponent(stagedRef)}/retry`),
+        {
+          body: '{}',
+          credentials: 'same-origin',
+          headers: { 'content-type': 'application/json' },
+          method: 'POST',
+        },
+      )
+      if (!response.ok) {
+        const errorPayload = await maybeReadErrorPayload(response)
+        throw new Error(errorPayload ?? `${response.status} ${response.statusText}`)
+      }
+      const payload = (await response.json()) as {
+        status: 'queued'
+        jobId: number
+        stagedRef: string
+      }
+      await pollUploadJob({
+        cardKey: props.cardKey,
+        jobId: payload.jobId,
+        stagedRef: payload.stagedRef,
+        group,
+        onPhase: (message) => setCardStatus({ kind: 'busy', message }),
+        onSuccess: async () => {
+          const message = `✓ Group image attached to ${displayGroupName(group)} (${group.siteLabel}). Sweed confirmed the blob is on the group.`
+          setCardStatus({ kind: 'ok', message })
+          await onComplete(message)
+        },
+        onFailure: (errorMessage, failedRef) => {
+          setFailedStagedRef(failedRef)
+          setCardStatus({
+            kind: 'err',
+            message: `✗ ${errorMessage} — bytes are still staged; click Retry to re-enqueue.`,
+          })
+          onError(errorMessage)
+        },
+      })
+    } catch (error) {
+      // 404 here usually means the staged bytes were GC'd. Re-prompt
+      // for a file pick.
+      const message = error instanceof Error ? error.message : 'Retry failed.'
+      setCardStatus({ kind: 'err', message: `✗ Retry failed: ${message}` })
       onError(message)
     } finally {
       onUploadEnd()
@@ -626,16 +699,30 @@ function MaintenanceCard(props: CardProps) {
           }}
         >
           <span style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{cardStatus.message}</span>
-          {cardStatus.kind !== 'busy' ? (
-            <button
-              type="button"
-              className="ghost-button"
-              onClick={() => setCardStatus(null)}
-              style={{ flexShrink: 0 }}
-            >
-              Dismiss
-            </button>
-          ) : null}
+          <span style={{ flexShrink: 0, display: 'flex', gap: '0.5rem' }}>
+            {cardStatus.kind === 'err' && failedStagedRef !== null ? (
+              <button
+                type="button"
+                className="primary-button"
+                onClick={() => void handleRetry()}
+                disabled={busy || disabled}
+              >
+                Retry
+              </button>
+            ) : null}
+            {cardStatus.kind !== 'busy' ? (
+              <button
+                type="button"
+                className="ghost-button"
+                onClick={() => {
+                  setCardStatus(null)
+                  setFailedStagedRef(null)
+                }}
+              >
+                Dismiss
+              </button>
+            ) : null}
+          </span>
         </div>
       ) : null}
     </article>
@@ -1077,6 +1164,118 @@ async function maybeReadErrorPayload(response: Response): Promise<string | null>
   } catch {
     return null
   }
+}
+
+/**
+ * Poll /api/jobs/:jobId for the catalog.maintenance.upload_group_image
+ * job until it reaches a terminal state. Reports per-phase progress via
+ * `onPhase`. Resolves silently on success/failure (callers handle the
+ * banner state via the provided callbacks).
+ */
+const UPLOAD_JOB_POLL_INTERVAL_MS = 1500
+const UPLOAD_JOB_POLL_TIMEOUT_MS = 5 * 60 * 1000
+
+async function pollUploadJob(input: {
+  cardKey: string
+  jobId: number
+  stagedRef: string
+  group: CatalogMaintenanceSiteGroup
+  onPhase: (message: string) => void
+  onSuccess: () => Promise<void> | void
+  onFailure: (errorMessage: string, stagedRef: string) => void
+}): Promise<void> {
+  const startedAt = Date.now()
+  let lastPhaseMessage = ''
+  // Reference cardKey + group to keep them in the closure for future
+  // debug-logging hooks without tripping unused-locals lint.
+  void input.cardKey
+  void input.group
+  while (true) {
+    if (Date.now() - startedAt > UPLOAD_JOB_POLL_TIMEOUT_MS) {
+      input.onFailure(
+        `Upload job #${input.jobId} did not finish within ${Math.round(UPLOAD_JOB_POLL_TIMEOUT_MS / 1000)}s.`,
+        input.stagedRef,
+      )
+      return
+    }
+    let response: Response
+    try {
+      response = await fetch(buildAppPath(`/api/jobs/${input.jobId}`), {
+        credentials: 'same-origin',
+        headers: { Accept: 'application/json' },
+      })
+    } catch (err) {
+      // Transient network blip — wait and retry.
+      await delay(UPLOAD_JOB_POLL_INTERVAL_MS)
+      void err
+      continue
+    }
+    if (!response.ok) {
+      const errorPayload = await maybeReadErrorPayload(response)
+      input.onFailure(
+        errorPayload ?? `Failed to poll job #${input.jobId}: HTTP ${response.status}.`,
+        input.stagedRef,
+      )
+      return
+    }
+    const payload = (await response.json()) as {
+      job: {
+        status: 'queued' | 'running' | 'succeeded' | 'failed' | 'dead_letter'
+        lastError: string | null
+      }
+      progress: {
+        phase?: string | null
+        phaseIndex?: number | null
+        phaseCount?: number | null
+        message?: string | null
+      } | null
+    }
+    const phaseMessage = formatUploadJobPhase(payload.job.status, payload.progress, input.jobId)
+    if (phaseMessage !== lastPhaseMessage) {
+      input.onPhase(phaseMessage)
+      lastPhaseMessage = phaseMessage
+    }
+    if (payload.job.status === 'succeeded') {
+      await input.onSuccess()
+      return
+    }
+    if (payload.job.status === 'failed' || payload.job.status === 'dead_letter') {
+      input.onFailure(
+        payload.job.lastError ?? `Job #${input.jobId} ${payload.job.status} without an error message.`,
+        input.stagedRef,
+      )
+      return
+    }
+    await delay(UPLOAD_JOB_POLL_INTERVAL_MS)
+  }
+}
+
+function formatUploadJobPhase(
+  status: 'queued' | 'running' | 'succeeded' | 'failed' | 'dead_letter',
+  progress:
+    | { phase?: string | null; phaseIndex?: number | null; phaseCount?: number | null; message?: string | null }
+    | null,
+  jobId: number,
+): string {
+  if (status === 'queued') {
+    return `Queued (job #${jobId}) — waiting for a Sweed session pool token…`
+  }
+  if (status === 'running' && progress) {
+    const stepFragment =
+      progress.phaseIndex != null && progress.phaseCount != null
+        ? `Step ${progress.phaseIndex}/${progress.phaseCount}: `
+        : ''
+    const messageFragment = progress.message ?? progress.phase ?? 'running'
+    return `${stepFragment}${messageFragment}`
+  }
+  if (status === 'running') {
+    return `Running (job #${jobId})…`
+  }
+  return `Job #${jobId} ${status}.`
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
 void displayGroupName
