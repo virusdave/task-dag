@@ -520,9 +520,10 @@ async function loadCatalogBrowserFacets(db: Queryable): Promise<{
   brands: string[]
   categories: string[]
   reconcileStatuses: string[]
+  sizes: string[]
   subcategories: string[]
 }> {
-  const [brands, categories, subcategories, statuses] = await Promise.all([
+  const [brands, categories, subcategories, statuses, sizes] = await Promise.all([
     db.query<{ value: string }>(
       `select distinct brand_name as value
          from catalog_groups
@@ -547,11 +548,25 @@ async function loadCatalogBrowserFacets(db: Queryable): Promise<{
         where reconcile_status is not null and reconcile_status <> ''
         order by reconcile_status asc`,
     ),
+    // sizeName is per-product (live_state_json -> 'products' -> [i] ->
+    // 'sizeName'). Cross-join expands the JSONB array and we pull the
+    // distinct non-empty values. Sort by `length` first so short
+    // numeric-style sizes (1g, 3.5g, 10mg) group together ahead of
+    // longer free-form labels.
+    db.query<{ value: string }>(
+      `select distinct value
+         from catalog_groups cg,
+              lateral jsonb_array_elements(coalesce(cg.live_state_json->'products', '[]'::jsonb)) p
+        cross join lateral (select trim(p->>'sizeName') as value) v
+        where v.value is not null and v.value <> ''
+        order by length(value) asc, value asc`,
+    ),
   ])
   return {
     brands: brands.rows.map((row) => row.value),
     categories: categories.rows.map((row) => row.value),
     reconcileStatuses: statuses.rows.map((row) => row.value),
+    sizes: sizes.rows.map((row) => row.value),
     subcategories: subcategories.rows.map((row) => row.value),
   }
 }
@@ -575,6 +590,19 @@ function buildCatalogWhere(filters: CatalogBrowserQuery): { values: unknown[]; w
   if (filters.reconcileStatus) {
     values.push(filters.reconcileStatus)
     clauses.push(`cg.reconcile_status = $${values.length}`)
+  }
+  if (filters.size) {
+    // Keep this group if any product's sizeName matches. Uses the
+    // JSONB containment operator with a trimmed comparison; we don't
+    // have an index on (live_state_json -> 'products' -> 'sizeName'),
+    // so this scans live_state_json for matching rows — acceptable at
+    // current catalog_groups row counts (~thousands).
+    values.push(filters.size)
+    clauses.push(`exists (
+      select 1
+        from jsonb_array_elements(coalesce(cg.live_state_json->'products', '[]'::jsonb)) p
+       where trim(p->>'sizeName') = $${values.length}
+    )`)
   }
   if (filters.search) {
     values.push(`%${filters.search}%`)

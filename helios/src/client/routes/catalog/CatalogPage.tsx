@@ -53,7 +53,8 @@ export function CatalogPage() {
       data.filters.brand ||
       data.filters.category ||
       data.filters.subcategory ||
-      data.filters.reconcileStatus,
+      data.filters.reconcileStatus ||
+      data.filters.size,
   )
   const browserPath = buildHeliosModulePath('catalog', 'browser')
 
@@ -277,6 +278,17 @@ export function CatalogPage() {
               {data.facets.subcategories.map((subcategory) => (
                 <option key={subcategory} value={subcategory}>
                   {subcategory}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="stack-field" style={{ minWidth: '8rem' }}>
+            <span>Size</span>
+            <select defaultValue={data.filters.size ?? ''} name="size">
+              <option value="">Any size</option>
+              {data.facets.sizes.map((size) => (
+                <option key={size} value={size}>
+                  {size}
                 </option>
               ))}
             </select>

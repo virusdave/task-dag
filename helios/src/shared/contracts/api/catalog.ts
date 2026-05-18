@@ -22,6 +22,10 @@ export const CatalogBrowserQuerySchema = z.object({
   pageSize: z.coerce.number().int().min(1).max(100).default(25),
   reconcileStatus: optionalTrimmedString,
   search: optionalTrimmedString,
+  // Filters catalog groups down to those containing at least one
+  // product whose normalized `sizeName` (e.g. "1g", "3.5g", "10mg")
+  // matches. Sourced from live_state_json.products[*].sizeName.
+  size: optionalTrimmedString,
   subcategory: optionalTrimmedString,
 })
 export type CatalogBrowserQuery = z.infer<typeof CatalogBrowserQuerySchema>
@@ -80,6 +84,11 @@ export const CatalogBrowserFacetsSchema = z.object({
   brands: z.array(z.string()),
   categories: z.array(z.string()),
   reconcileStatuses: z.array(z.string()),
+  // Distinct sizeName values found across all products in
+  // catalog_groups.live_state_json. Powers the size <select> on the
+  // browser filter rail so reviewers can quickly scope to e.g. just
+  // 3.5g flower or 0.5g vapes.
+  sizes: z.array(z.string()),
   subcategories: z.array(z.string()),
 })
 export type CatalogBrowserFacets = z.infer<typeof CatalogBrowserFacetsSchema>
