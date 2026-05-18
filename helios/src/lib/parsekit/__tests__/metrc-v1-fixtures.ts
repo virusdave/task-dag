@@ -1133,6 +1133,677 @@ export const cannabalsConfig: TenantParserConfig = {
   ],
 }
 
+// ---------------------------------------------------------------------
+// Tenant: HR Botanical
+//   Legacy: parseHrBotanicalName in generatePendingPurchasePacketJob.ts
+//
+//   HR Botanical is the LEGACY fallback tenant: the legacy waterfall
+//   routes every distributor name that doesn't match one of the other
+//   10 tenant prefixes into `parseHrBotanicalName`, which then itself
+//   waterfalls across 8 brand sub-prefixes (and throws on anything
+//   else). This parsekit port models each of those 8 brand families
+//   as its own rule, prioritized in the same order as the legacy
+//   if/else chain.
+//
+//   Brand family rules (in priority order):
+//     200  hr-botanical.revert-edible-gummy        'Revert Edible Gummy '
+//     200  hr-botanical.revert-ground-flower-2pack 'Revert Distillate Infused Ground Flower Pre Roll 2 Pack '
+//     150  hr-botanical.revert-preroll-half-g      'Revert Pre Roll <cultivar> .5g'
+//     150  hr-botanical.smack-infused-prefix       'SMACK Infused <size> Pre-Roll <cultivar>'
+//     150  hr-botanical.smack-uninfused-prefix     'SMACK Uninfused <size> Pre-Roll <cultivar>'
+//     100  hr-botanical.juan-roll-dash-last        '#Juan Roll - … - <cultivar>'    (also '#JUAN-ROLL')
+//     100  hr-botanical.ichi-roll-dash-last        'Ichi Roll - … - <cultivar>'
+//      90  hr-botanical.chopsticks-after-2pack     '(Chopsticks|Chopstix) … 2-Pack <cultivar>'
+//      90  hr-botanical.o-yeah-after-paren-size    'O-Yeah … (2.5g) <cultivar>'
+//      90  hr-botanical.state-of-mind-after-paren  '(STATE OF MIND|State of Mind) … (2.5g) <cultivar>'
+//      90  hr-botanical.sushi-hash-after-paren     'Sushi Hash … (2.5g) <cultivar>'
+//      90  hr-botanical.sushi-hash-single          'Sushi Hash Single <cultivar>'
+//
+//   Inputs that none of those rules match still fall through to the
+//   reverse-shadow harness's "no-detect" silent legacy fallback (the
+//   harness dispatches by detect-prefix, then by parser rule), so a
+//   missed shape is logged as a regression instead of crashing.
+//
+//   The cultivar/groupName/variantName/strainName shaping mirrors the
+//   legacy per-brand quirks (e.g. Revert-gummy groupName is
+//   '<cultivar> Gummy', strainName is ''; everything else has
+//   groupName === strainName === cleanCultivar(<cultivar>)).
+//
+//   Limitation: the legacy parser pre-normalizes input with
+//   .replace('Pre-roll', 'Preroll') and .replace('#JUAN-ROLL', '#Juan Roll')
+//   before brand dispatch. We don't reproduce that pre-normalization
+//   inside parsekit; instead each affected rule accepts both raw
+//   spellings via `choice`/multiple prefixes. Cases that mix the
+//   spellings in ways the rules don't anticipate will fall through to
+//   legacy.
+// ---------------------------------------------------------------------
+
+const REVERT_BRAND = 'Revert Cannabis'
+
+export const hrBotanicalConfig: TenantParserConfig = {
+  configVersion: 1,
+  parserId: 'pending-purchases.hr-botanical',
+  scope: { tenantId: 'hr-botanical', useCase: 'pending-purchases' },
+  dialectRef: { id: 'metrc-v1', version: 1 },
+  detect: {
+    prefixes: [
+      '#Juan Roll',
+      '#JUAN-ROLL',
+      'Revert ',
+      'Ichi Roll',
+      'Chopsticks',
+      'Chopstix',
+      'O-Yeah',
+      'SMACK',
+      'STATE OF MIND',
+      'State of Mind',
+      'Sushi Hash',
+    ],
+  },
+  rules: [
+    // -- Revert Edible Gummy -----------------------------------------
+    {
+      id: 'hr-botanical.revert-edible-gummy',
+      priority: 200,
+      parser: {
+        kind: 'seq',
+        items: [
+          { kind: 'lit', value: 'Revert Edible Gummy' },
+          { kind: 'token', token: 'ws' },
+          {
+            kind: 'capture',
+            name: 'cultivar',
+            expr: {
+              kind: 'consumeUntil',
+              terminator: {
+                kind: 'seq',
+                items: [
+                  { kind: 'token', token: 'ws' },
+                  { kind: 'lit', value: '100mg', caseInsensitive: true },
+                ],
+              },
+            },
+          },
+          { kind: 'token', token: 'ws' },
+          { kind: 'lit', value: '100mg', caseInsensitive: true },
+          { kind: 'token', token: 'optWs' },
+        ],
+      },
+      project: {
+        brand: { literal: REVERT_BRAND },
+        category: { literal: 'Edibles' },
+        groupName: {
+          from: 'cultivar',
+          transforms: [
+            { name: 'cleanCultivar', version: 1 },
+            { name: 'append', version: 1, args: { suffix: ' Gummy' } },
+          ],
+        },
+        packCount: { literal: 1 },
+        prevalence: { literal: null },
+        searchTerm: { from: 'cultivar', transforms: [{ name: 'cleanCultivar', version: 1 }] },
+        size: { literal: '100mg' },
+        strainName: { literal: '' },
+        subcategory: { literal: 'Chews/Gummies' },
+        variantTab: { literal: '__placeholder__' },
+        variantName: { literal: '__placeholder__' },
+      },
+      transforms: [
+        { name: 'composeVariantTab', version: 1, args: { sizeField: 'size' } },
+        { name: 'composeVariantName', version: 1, args: { fields: ['brand', 'groupName', 'size'] } },
+      ],
+      goldens: [],
+    },
+
+    // -- Revert Distillate Infused Ground Flower Pre Roll 2 Pack -----
+    {
+      id: 'hr-botanical.revert-ground-flower-2pack',
+      priority: 200,
+      parser: {
+        kind: 'seq',
+        items: [
+          { kind: 'lit', value: 'Revert Distillate Infused Ground Flower Pre Roll 2 Pack' },
+          { kind: 'token', token: 'ws' },
+          { kind: 'capture', name: 'cultivar', expr: { kind: 'token', token: 'cultivarText' } },
+          { kind: 'token', token: 'optWs' },
+        ],
+      },
+      project: {
+        brand: { literal: REVERT_BRAND },
+        category: { literal: 'Pre-Rolls' },
+        groupName: { from: 'cultivar', transforms: [{ name: 'cleanCultivar', version: 1 }] },
+        packCount: { literal: 2 },
+        prevalence: { from: 'cultivar', transforms: [{ name: 'prevalenceFromParen', version: 1 }] },
+        searchTerm: { from: 'cultivar', transforms: [{ name: 'cleanCultivar', version: 1 }] },
+        size: { literal: '0.5g' },
+        strainName: { from: 'cultivar', transforms: [{ name: 'cleanCultivar', version: 1 }] },
+        subcategory: { literal: 'Infused' },
+        variantTab: { literal: '__placeholder__' },
+        variantName: { literal: '__placeholder__' },
+      },
+      transforms: [
+        { name: 'composeVariantTab', version: 1, args: { sizeField: 'size' } },
+        { name: 'composeVariantName', version: 1 },
+      ],
+      goldens: [],
+    },
+
+    // -- Revert Pre Roll <cultivar> .5g ------------------------------
+    {
+      id: 'hr-botanical.revert-preroll-half-g',
+      priority: 150,
+      parser: {
+        kind: 'seq',
+        items: [
+          { kind: 'lit', value: 'Revert Pre Roll' },
+          { kind: 'token', token: 'ws' },
+          {
+            kind: 'capture',
+            name: 'cultivar',
+            expr: {
+              kind: 'consumeUntil',
+              terminator: {
+                kind: 'seq',
+                items: [
+                  { kind: 'token', token: 'ws' },
+                  {
+                    kind: 'choice',
+                    items: [
+                      { kind: 'lit', value: '.5g', caseInsensitive: true },
+                      { kind: 'lit', value: '0.5g', caseInsensitive: true },
+                    ],
+                  },
+                ],
+              },
+            },
+          },
+          { kind: 'token', token: 'ws' },
+          {
+            kind: 'choice',
+            items: [
+              { kind: 'lit', value: '.5g', caseInsensitive: true },
+              { kind: 'lit', value: '0.5g', caseInsensitive: true },
+            ],
+          },
+          { kind: 'token', token: 'optWs' },
+        ],
+      },
+      project: {
+        brand: { literal: REVERT_BRAND },
+        category: { literal: 'Pre-Rolls' },
+        groupName: { from: 'cultivar', transforms: [{ name: 'cleanCultivar', version: 1 }] },
+        packCount: { literal: 1 },
+        prevalence: { from: 'cultivar', transforms: [{ name: 'prevalenceFromParen', version: 1 }] },
+        searchTerm: { from: 'cultivar', transforms: [{ name: 'cleanCultivar', version: 1 }] },
+        size: { literal: '0.5g' },
+        strainName: { from: 'cultivar', transforms: [{ name: 'cleanCultivar', version: 1 }] },
+        subcategory: { literal: '' },
+        variantTab: { literal: '__placeholder__' },
+        variantName: { literal: '__placeholder__' },
+      },
+      transforms: [
+        { name: 'composeVariantTab', version: 1, args: { sizeField: 'size' } },
+        { name: 'composeVariantName', version: 1, args: { fields: ['brand', 'groupName', 'size'] } },
+      ],
+      goldens: [],
+    },
+
+    // -- SMACK Infused <size> Pre-Roll <cultivar> --------------------
+    {
+      id: 'hr-botanical.smack-infused',
+      priority: 150,
+      parser: {
+        kind: 'seq',
+        items: [
+          { kind: 'lit', value: 'SMACK' },
+          { kind: 'token', token: 'ws' },
+          { kind: 'lit', value: 'Infused', caseInsensitive: true },
+          { kind: 'token', token: 'ws' },
+          { kind: 'capture', name: 'grams', expr: { kind: 'token', token: 'decimal' } },
+          { kind: 'lit', value: 'g', caseInsensitive: true },
+          { kind: 'token', token: 'ws' },
+          {
+            kind: 'choice',
+            items: [
+              { kind: 'lit', value: 'Pre-Roll', caseInsensitive: true },
+              { kind: 'lit', value: 'Pre Roll', caseInsensitive: true },
+              { kind: 'lit', value: 'Preroll', caseInsensitive: true },
+            ],
+          },
+          { kind: 'token', token: 'ws' },
+          { kind: 'capture', name: 'cultivar', expr: { kind: 'token', token: 'cultivarText' } },
+          { kind: 'token', token: 'optWs' },
+        ],
+      },
+      project: {
+        brand: { literal: 'Smack' },
+        category: { literal: 'Pre-Rolls' },
+        groupName: { from: 'cultivar', transforms: [{ name: 'cleanCultivar', version: 1 }] },
+        packCount: { literal: 1 },
+        prevalence: { from: 'cultivar', transforms: [{ name: 'prevalenceFromParen', version: 1 }] },
+        searchTerm: { from: 'cultivar', transforms: [{ name: 'cleanCultivar', version: 1 }] },
+        size: { from: 'grams', transforms: [{ name: 'formatGrams', version: 1 }] },
+        strainName: { from: 'cultivar', transforms: [{ name: 'cleanCultivar', version: 1 }] },
+        subcategory: { literal: 'Infused' },
+        variantTab: { literal: '__placeholder__' },
+        variantName: { literal: '__placeholder__' },
+      },
+      transforms: [
+        { name: 'composeVariantTab', version: 1, args: { sizeField: 'size' } },
+        { name: 'composeVariantName', version: 1, args: { fields: ['brand', 'groupName', 'size'] } },
+      ],
+      goldens: [],
+    },
+
+    // -- SMACK Uninfused <size> Pre-Roll <cultivar> ------------------
+    {
+      id: 'hr-botanical.smack-uninfused',
+      priority: 150,
+      parser: {
+        kind: 'seq',
+        items: [
+          { kind: 'lit', value: 'SMACK' },
+          { kind: 'token', token: 'ws' },
+          { kind: 'lit', value: 'Uninfused', caseInsensitive: true },
+          { kind: 'token', token: 'ws' },
+          { kind: 'capture', name: 'grams', expr: { kind: 'token', token: 'decimal' } },
+          { kind: 'lit', value: 'g', caseInsensitive: true },
+          { kind: 'token', token: 'ws' },
+          {
+            kind: 'choice',
+            items: [
+              { kind: 'lit', value: 'Pre-Roll', caseInsensitive: true },
+              { kind: 'lit', value: 'Pre Roll', caseInsensitive: true },
+              { kind: 'lit', value: 'Preroll', caseInsensitive: true },
+            ],
+          },
+          { kind: 'token', token: 'ws' },
+          { kind: 'capture', name: 'cultivar', expr: { kind: 'token', token: 'cultivarText' } },
+          { kind: 'token', token: 'optWs' },
+        ],
+      },
+      project: {
+        brand: { literal: 'Smack' },
+        category: { literal: 'Pre-Rolls' },
+        groupName: { from: 'cultivar', transforms: [{ name: 'cleanCultivar', version: 1 }] },
+        packCount: { literal: 1 },
+        prevalence: { from: 'cultivar', transforms: [{ name: 'prevalenceFromParen', version: 1 }] },
+        searchTerm: { from: 'cultivar', transforms: [{ name: 'cleanCultivar', version: 1 }] },
+        size: { from: 'grams', transforms: [{ name: 'formatGrams', version: 1 }] },
+        strainName: { from: 'cultivar', transforms: [{ name: 'cleanCultivar', version: 1 }] },
+        subcategory: { literal: '' },
+        variantTab: { literal: '__placeholder__' },
+        variantName: { literal: '__placeholder__' },
+      },
+      transforms: [
+        { name: 'composeVariantTab', version: 1, args: { sizeField: 'size' } },
+        { name: 'composeVariantName', version: 1, args: { fields: ['brand', 'groupName', 'size'] } },
+      ],
+      goldens: [],
+    },
+
+    // -- #Juan Roll / #JUAN-ROLL — split on dash, last segment wins --
+    //
+    //   Legacy: `cleaned.split('-')` then `parts[parts.length - 1]`,
+    //   then cleanCultivar. We use sepBy(cultivarText, dash) and
+    //   lastToken to mirror that "last segment wins" semantic.
+    //
+    //   Subcategory hard-coded to 'Infused' because Juan-Roll dash-last
+    //   names in legacy data are dominated by Live Resin / Rosin /
+    //   Hash Hole shapes (which legacy detects via input-substring
+    //   sniff). Non-infused names will surface as `regression_diff`
+    //   in the reverse-shadow UI and can be split off into a new rule
+    //   if they prove non-trivial in volume.
+    {
+      id: 'hr-botanical.juan-roll-dash-last',
+      priority: 100,
+      parser: {
+        kind: 'seq',
+        items: [
+          {
+            kind: 'choice',
+            items: [
+              { kind: 'lit', value: '#Juan Roll' },
+              { kind: 'lit', value: '#JUAN-ROLL' },
+            ],
+          },
+          { kind: 'token', token: 'dash' },
+          {
+            kind: 'captureMany',
+            name: 'parts',
+            expr: {
+              kind: 'sepBy',
+              min: 1,
+              max: 10,
+              expr: { kind: 'token', token: 'cultivarText' },
+              sep: { kind: 'token', token: 'dash' },
+            },
+          },
+          { kind: 'token', token: 'optWs' },
+        ],
+      },
+      project: {
+        brand: { literal: '#Juan Roll' },
+        category: { literal: 'Pre-Rolls' },
+        groupName: {
+          fromList: 'parts',
+          transforms: [
+            { name: 'lastToken', version: 1 },
+            { name: 'cleanCultivar', version: 1 },
+          ],
+        },
+        packCount: { literal: 1 },
+        prevalence: { literal: null },
+        searchTerm: {
+          fromList: 'parts',
+          transforms: [
+            { name: 'lastToken', version: 1 },
+            { name: 'cleanCultivar', version: 1 },
+          ],
+        },
+        size: { literal: '1g' },
+        strainName: {
+          fromList: 'parts',
+          transforms: [
+            { name: 'lastToken', version: 1 },
+            { name: 'cleanCultivar', version: 1 },
+          ],
+        },
+        subcategory: { literal: 'Infused' },
+        variantTab: { literal: '__placeholder__' },
+        variantName: { literal: '__placeholder__' },
+      },
+      transforms: [
+        { name: 'composeVariantTab', version: 1, args: { sizeField: 'size' } },
+        { name: 'composeVariantName', version: 1, args: { fields: ['brand', 'groupName', 'size'] } },
+      ],
+      goldens: [],
+    },
+
+    // -- Ichi Roll — split on dash, last segment wins ----------------
+    //   Same dash-last semantic as Juan Roll. Subcategory='' here
+    //   because Ichi Roll legacy data trends non-infused.
+    {
+      id: 'hr-botanical.ichi-roll-dash-last',
+      priority: 100,
+      parser: {
+        kind: 'seq',
+        items: [
+          { kind: 'lit', value: 'Ichi Roll' },
+          { kind: 'token', token: 'dash' },
+          {
+            kind: 'captureMany',
+            name: 'parts',
+            expr: {
+              kind: 'sepBy',
+              min: 1,
+              max: 10,
+              expr: { kind: 'token', token: 'cultivarText' },
+              sep: { kind: 'token', token: 'dash' },
+            },
+          },
+          { kind: 'token', token: 'optWs' },
+        ],
+      },
+      project: {
+        brand: { literal: 'Ichi Roll' },
+        category: { literal: 'Pre-Rolls' },
+        groupName: {
+          fromList: 'parts',
+          transforms: [
+            { name: 'lastToken', version: 1 },
+            { name: 'cleanCultivar', version: 1 },
+          ],
+        },
+        packCount: { literal: 1 },
+        prevalence: { literal: null },
+        searchTerm: {
+          fromList: 'parts',
+          transforms: [
+            { name: 'lastToken', version: 1 },
+            { name: 'cleanCultivar', version: 1 },
+          ],
+        },
+        size: { literal: '1g' },
+        strainName: {
+          fromList: 'parts',
+          transforms: [
+            { name: 'lastToken', version: 1 },
+            { name: 'cleanCultivar', version: 1 },
+          ],
+        },
+        subcategory: { literal: '' },
+        variantTab: { literal: '__placeholder__' },
+        variantName: { literal: '__placeholder__' },
+      },
+      transforms: [
+        { name: 'composeVariantTab', version: 1, args: { sizeField: 'size' } },
+        { name: 'composeVariantName', version: 1, args: { fields: ['brand', 'groupName', 'size'] } },
+      ],
+      goldens: [],
+    },
+
+    // -- Chopsticks/Chopstix — '... 2-Pack <cultivar>' ---------------
+    {
+      id: 'hr-botanical.chopsticks-after-2pack',
+      priority: 90,
+      parser: {
+        kind: 'seq',
+        items: [
+          {
+            kind: 'choice',
+            items: [
+              { kind: 'lit', value: 'Chopsticks' },
+              { kind: 'lit', value: 'Chopstix' },
+            ],
+          },
+          {
+            kind: 'consumeUntil',
+            terminator: {
+              kind: 'seq',
+              items: [
+                { kind: 'lit', value: '2-Pack' },
+                { kind: 'token', token: 'ws' },
+              ],
+            },
+          },
+          { kind: 'lit', value: '2-Pack' },
+          { kind: 'token', token: 'ws' },
+          { kind: 'capture', name: 'cultivar', expr: { kind: 'token', token: 'cultivarText' } },
+          { kind: 'token', token: 'optWs' },
+        ],
+      },
+      project: {
+        brand: { literal: 'Chopsticks' },
+        category: { literal: 'Pre-Rolls' },
+        groupName: { from: 'cultivar', transforms: [{ name: 'cleanCultivar', version: 1 }] },
+        packCount: { literal: 2 },
+        prevalence: { from: 'cultivar', transforms: [{ name: 'prevalenceFromParen', version: 1 }] },
+        searchTerm: { from: 'cultivar', transforms: [{ name: 'cleanCultivar', version: 1 }] },
+        size: { literal: '0.5g' },
+        strainName: { from: 'cultivar', transforms: [{ name: 'cleanCultivar', version: 1 }] },
+        subcategory: { literal: '' },
+        variantTab: { literal: '__placeholder__' },
+        variantName: { literal: '__placeholder__' },
+      },
+      transforms: [
+        { name: 'composeVariantTab', version: 1, args: { sizeField: 'size' } },
+        { name: 'composeVariantName', version: 1 },
+      ],
+      goldens: [],
+    },
+
+    // -- O-Yeah — '... (2.5g) <cultivar>' ----------------------------
+    {
+      id: 'hr-botanical.o-yeah-after-paren',
+      priority: 90,
+      parser: {
+        kind: 'seq',
+        items: [
+          { kind: 'lit', value: 'O-Yeah' },
+          {
+            kind: 'consumeUntil',
+            terminator: {
+              kind: 'seq',
+              items: [
+                { kind: 'lit', value: '(2.5g)' },
+                { kind: 'token', token: 'optWs' },
+              ],
+            },
+          },
+          { kind: 'lit', value: '(2.5g)' },
+          { kind: 'token', token: 'optWs' },
+          { kind: 'capture', name: 'cultivar', expr: { kind: 'token', token: 'cultivarText' } },
+          { kind: 'token', token: 'optWs' },
+        ],
+      },
+      project: {
+        brand: { literal: 'O-YEAH!' },
+        category: { literal: 'Pre-Rolls' },
+        groupName: { from: 'cultivar', transforms: [{ name: 'cleanCultivar', version: 1 }] },
+        packCount: { literal: 5 },
+        prevalence: { from: 'cultivar', transforms: [{ name: 'prevalenceFromParen', version: 1 }] },
+        searchTerm: { from: 'cultivar', transforms: [{ name: 'cleanCultivar', version: 1 }] },
+        size: { literal: '0.5g' },
+        strainName: { from: 'cultivar', transforms: [{ name: 'cleanCultivar', version: 1 }] },
+        subcategory: { literal: '' },
+        variantTab: { literal: '__placeholder__' },
+        variantName: { literal: '__placeholder__' },
+      },
+      transforms: [
+        { name: 'composeVariantTab', version: 1, args: { sizeField: 'size' } },
+        { name: 'composeVariantName', version: 1 },
+      ],
+      goldens: [],
+    },
+
+    // -- State of Mind / STATE OF MIND — '... (2.5g) <cultivar>' -----
+    {
+      id: 'hr-botanical.state-of-mind-after-paren',
+      priority: 90,
+      parser: {
+        kind: 'seq',
+        items: [
+          {
+            kind: 'choice',
+            items: [
+              { kind: 'lit', value: 'STATE OF MIND' },
+              { kind: 'lit', value: 'State of Mind' },
+            ],
+          },
+          {
+            kind: 'consumeUntil',
+            terminator: {
+              kind: 'seq',
+              items: [
+                { kind: 'lit', value: '(2.5g)' },
+                { kind: 'token', token: 'optWs' },
+              ],
+            },
+          },
+          { kind: 'lit', value: '(2.5g)' },
+          { kind: 'token', token: 'optWs' },
+          { kind: 'capture', name: 'cultivar', expr: { kind: 'token', token: 'cultivarText' } },
+          { kind: 'token', token: 'optWs' },
+        ],
+      },
+      project: {
+        brand: { literal: 'State of Mind' },
+        category: { literal: 'Pre-Rolls' },
+        groupName: { from: 'cultivar', transforms: [{ name: 'cleanCultivar', version: 1 }] },
+        packCount: { literal: 5 },
+        prevalence: { from: 'cultivar', transforms: [{ name: 'prevalenceFromParen', version: 1 }] },
+        searchTerm: { from: 'cultivar', transforms: [{ name: 'cleanCultivar', version: 1 }] },
+        size: { literal: '0.5g' },
+        strainName: { from: 'cultivar', transforms: [{ name: 'cleanCultivar', version: 1 }] },
+        subcategory: { literal: '' },
+        variantTab: { literal: '__placeholder__' },
+        variantName: { literal: '__placeholder__' },
+      },
+      transforms: [
+        { name: 'composeVariantTab', version: 1, args: { sizeField: 'size' } },
+        { name: 'composeVariantName', version: 1 },
+      ],
+      goldens: [],
+    },
+
+    // -- Sushi Hash — '(2.5g) <cultivar>' or 'Single <cultivar>' -----
+    {
+      id: 'hr-botanical.sushi-hash-after-paren',
+      priority: 90,
+      parser: {
+        kind: 'seq',
+        items: [
+          { kind: 'lit', value: 'Sushi Hash' },
+          {
+            kind: 'consumeUntil',
+            terminator: {
+              kind: 'seq',
+              items: [
+                { kind: 'lit', value: '(2.5g)' },
+                { kind: 'token', token: 'optWs' },
+              ],
+            },
+          },
+          { kind: 'lit', value: '(2.5g)' },
+          { kind: 'token', token: 'optWs' },
+          { kind: 'capture', name: 'cultivar', expr: { kind: 'token', token: 'cultivarText' } },
+          { kind: 'token', token: 'optWs' },
+        ],
+      },
+      project: {
+        brand: { literal: 'Sushi Hash' },
+        category: { literal: 'Pre-Rolls' },
+        groupName: { from: 'cultivar', transforms: [{ name: 'cleanCultivar', version: 1 }] },
+        packCount: { literal: 5 },
+        prevalence: { from: 'cultivar', transforms: [{ name: 'prevalenceFromParen', version: 1 }] },
+        searchTerm: { from: 'cultivar', transforms: [{ name: 'cleanCultivar', version: 1 }] },
+        size: { literal: '0.5g' },
+        strainName: { from: 'cultivar', transforms: [{ name: 'cleanCultivar', version: 1 }] },
+        subcategory: { literal: '' },
+        variantTab: { literal: '__placeholder__' },
+        variantName: { literal: '__placeholder__' },
+      },
+      transforms: [
+        { name: 'composeVariantTab', version: 1, args: { sizeField: 'size' } },
+        { name: 'composeVariantName', version: 1 },
+      ],
+      goldens: [],
+    },
+    {
+      id: 'hr-botanical.sushi-hash-single',
+      priority: 90,
+      parser: {
+        kind: 'seq',
+        items: [
+          { kind: 'lit', value: 'Sushi Hash Single' },
+          { kind: 'token', token: 'ws' },
+          { kind: 'capture', name: 'cultivar', expr: { kind: 'token', token: 'cultivarText' } },
+          { kind: 'token', token: 'optWs' },
+        ],
+      },
+      project: {
+        brand: { literal: 'Sushi Hash' },
+        category: { literal: 'Pre-Rolls' },
+        groupName: { from: 'cultivar', transforms: [{ name: 'cleanCultivar', version: 1 }] },
+        packCount: { literal: 1 },
+        prevalence: { from: 'cultivar', transforms: [{ name: 'prevalenceFromParen', version: 1 }] },
+        searchTerm: { from: 'cultivar', transforms: [{ name: 'cleanCultivar', version: 1 }] },
+        size: { literal: '1g' },
+        strainName: { from: 'cultivar', transforms: [{ name: 'cleanCultivar', version: 1 }] },
+        subcategory: { literal: '' },
+        variantTab: { literal: '__placeholder__' },
+        variantName: { literal: '__placeholder__' },
+      },
+      transforms: [
+        { name: 'composeVariantTab', version: 1, args: { sizeField: 'size' } },
+        { name: 'composeVariantName', version: 1, args: { fields: ['brand', 'groupName', 'size'] } },
+      ],
+      goldens: [],
+    },
+  ],
+}
+
 export const TENANT_CONFIGS: TenantParserConfig[] = [
   bytesConfig,
   outrankdConfig,
@@ -1145,4 +1816,5 @@ export const TENANT_CONFIGS: TenantParserConfig[] = [
   poshPuffConfig,
   curaleafConfig,
   cannabalsConfig,
+  hrBotanicalConfig,
 ]
