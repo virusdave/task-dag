@@ -38,8 +38,6 @@
  *   group for immediate reanalysis.
  */
 
-import { randomUUID } from 'node:crypto'
-
 import { z } from 'zod'
 
 import {
@@ -58,6 +56,8 @@ import {
   type CatalogMaintenanceSurveySite,
   type HeliosPendingPurchaseSiteDealer,
 } from '../../shared/contracts/index.js'
+import { callSweedRpc } from '../../worker/sweed/rpc.js'
+import { withSweedSession } from '../../worker/sweed/session.js'
 import { getServerEnv } from '../config/env.js'
 import { getPool, type Queryable } from '../db/pool.js'
 import { enqueueJob } from '../jobs/enqueueJob.js'
@@ -75,18 +75,6 @@ const ALLOWED_IMAGE_MIME_TYPES = new Set([
   'image/webp',
   'image/gif',
 ])
-
-const RpcEnvelopeSchema = z.object({
-  error: z.object({ message: z.string().nullable().optional() }).optional(),
-  result: z.unknown().optional(),
-})
-
-const DealerSetResultSchema = z.object({
-  user: z.object({
-    currentDealerId: z.coerce.number().int(),
-    currentDealerName: z.string().nullable().optional(),
-  }),
-})
 
 const SweedImageRefSchema = z
   .object({
@@ -127,8 +115,6 @@ interface CachedSurvey {
 
 let cachedSurvey: CachedSurvey | null = null
 let inFlightSurvey: Promise<CatalogMaintenanceSurveyResponse> | null = null
-let sweedWriteQueue: Promise<void> = Promise.resolve()
-let sweedWriteDealerId: number | null = null
 
 export interface MaintenanceSurveyOptions {
   forceRefresh?: boolean
@@ -949,9 +935,8 @@ export async function uploadCatalogMaintenanceImage(input: UploadInput): Promise
     throw new HttpError(400, 'At least one variant must be selected for variant uploads.')
   }
 
-  const result = await runInSweedWriteBatch(async () => {
+  const result = await withSweedSession(async () => {
     const stateDealerId = getServerEnv().sweedStateDealerId
-    await ensureDealerContext(stateDealerId)
 
     const blobId = await createBlob(stateDealerId)
     await putBlobBytes(blobId, input.fileBytes, input.contentType)
@@ -960,7 +945,7 @@ export async function uploadCatalogMaintenanceImage(input: UploadInput): Promise
       const group = await fetchGroupImagesWithinLock(input.groupId)
       const existingImageIds = collectExistingImageIds(group.images)
       const nextImageIds = appendUnique(existingImageIds, blobId)
-      await callSweedRpcForDealer(stateDealerId, 'store.product.group.edit', {
+      await callSweedRpc(stateDealerId, 'store.product.group.edit', {
         id: input.groupId,
         imagesIds: nextImageIds,
       })
@@ -982,7 +967,7 @@ export async function uploadCatalogMaintenanceImage(input: UploadInput): Promise
       const product = await fetchProductImagesWithinLock(productId)
       const existingImageIds = collectExistingImageIds(product.images)
       const nextImageIds = appendUnique(existingImageIds, blobId)
-      await callSweedRpcForDealer(stateDealerId, 'store.product.edit', {
+      await callSweedRpc(stateDealerId, 'store.product.edit', {
         id: productId,
         imagesIds: nextImageIds,
       })
@@ -1040,10 +1025,9 @@ export async function updateVariantBarcode(input: UpdateBarcodeInput): Promise<U
   if (normalized.length === 0) {
     throw new HttpError(400, 'externalBarcode must be non-empty.')
   }
-  const result = await runInSweedWriteBatch(async () => {
+  const result = await withSweedSession(async () => {
     const stateDealerId = getServerEnv().sweedStateDealerId
-    await ensureDealerContext(stateDealerId)
-    await callSweedRpcForDealer(stateDealerId, 'store.product.edit', {
+    await callSweedRpc(stateDealerId, 'store.product.edit', {
       id: input.productId,
       externalBarcode: normalized,
     })
@@ -1066,13 +1050,13 @@ export async function updateVariantBarcode(input: UpdateBarcodeInput): Promise<U
 
 async function fetchGroupImagesWithinLock(groupId: number): Promise<z.infer<typeof SweedGroupImagesSchema>> {
   const stateDealerId = getServerEnv().sweedStateDealerId
-  const raw = await callSweedRpcForDealer(stateDealerId, 'store.product.group.get', { id: groupId })
+  const raw = await callSweedRpc(stateDealerId, 'store.product.group.get', { id: groupId })
   return SweedGroupImagesSchema.parse(raw)
 }
 
 async function fetchProductImagesWithinLock(productId: number): Promise<z.infer<typeof SweedProductImagesSchema>> {
   const stateDealerId = getServerEnv().sweedStateDealerId
-  const raw = await callSweedRpcForDealer(stateDealerId, 'store.product.get', { id: String(productId) })
+  const raw = await callSweedRpc(stateDealerId, 'store.product.get', { id: String(productId) })
   return SweedProductImagesDetailSchema.parse(raw)
 }
 
@@ -1095,7 +1079,7 @@ function appendUnique(existing: string[], blobId: string): string[] {
 }
 
 async function createBlob(stateDealerId: number): Promise<string> {
-  const raw = await callSweedRpcForDealer(stateDealerId, 'store.blob.add', { type: 'banner' })
+  const raw = await callSweedRpc(stateDealerId, 'store.blob.add', { type: 'banner' })
   return z
     .union([
       z.string().trim().min(1),
@@ -1194,83 +1178,14 @@ async function flagSweedGroupForReanalysis(input: FlagForReanalysisInput): Promi
 }
 
 /* -------------------------------------------------------------------------- */
-/*  Sweed RPC plumbing — module-local write queue with sticky dealer cache.    */
+/*  Sweed RPC plumbing — pooled session via withSweedSession().                */
+/*  All Sweed RPCs from this module run inside withSweedSession() blocks so   */
+/*  they lease a token from sweed_session_tokens (claimed for the duration    */
+/*  of the call), pin the dealer once per session, and release the token in   */
+/*  `finally`. Empty-pool deferral and dead-token retirement are handled by   */
+/*  src/worker/sweed/session.ts and src/worker/sweed/transport.ts; this       */
+/*  module no longer touches SWEED_AUTH_TOKEN directly.                       */
 /* -------------------------------------------------------------------------- */
-
-async function callSweedRpcForDealer<TResult>(
-  dealerId: number,
-  name: string,
-  params: Record<string, unknown>,
-): Promise<TResult> {
-  await ensureDealerContext(dealerId)
-  return callSweedRpcRaw(name, params)
-}
-
-async function ensureDealerContext(dealerId: number): Promise<void> {
-  if (sweedWriteDealerId === dealerId) return
-  const result = DealerSetResultSchema.parse(await callSweedRpcRaw('store.auth.dealer.set', { dealerId }))
-  if (result.user.currentDealerId !== dealerId) {
-    sweedWriteDealerId = null
-    throw new Error(
-      `Sweed dealer context mismatch. Expected ${dealerId}, got ${result.user.currentDealerId} ${result.user.currentDealerName ?? ''}`.trim(),
-    )
-  }
-  sweedWriteDealerId = dealerId
-}
-
-async function callSweedRpcRaw<TResult>(name: string, params?: Record<string, unknown>): Promise<TResult> {
-  const env = getServerEnv()
-  if (!env.sweedAuthToken) {
-    throw new Error('SWEED_AUTH_TOKEN is required for catalog maintenance.')
-  }
-
-  const response = await fetch(env.sweedApiUrl, {
-    body: JSON.stringify({
-      auth: env.sweedAuthToken,
-      id: randomUUID(),
-      name,
-      ...(params === undefined ? {} : { params }),
-    }),
-    headers: {
-      'content-type': 'application/json',
-      'user-agent': 'helios-server/1.0',
-    },
-    method: 'POST',
-    signal: AbortSignal.timeout(SWEED_REQUEST_TIMEOUT_MS),
-  })
-
-  const responseText = await response.text()
-  if (!response.ok) {
-    throw new Error(`${name} returned HTTP ${response.status}: ${truncate(responseText)}`)
-  }
-
-  const envelope = RpcEnvelopeSchema.parse(JSON.parse(responseText))
-  if (envelope.error) {
-    throw new Error(`${name} failed: ${envelope.error.message ?? 'Unknown Sweed RPC error.'}`)
-  }
-  if (envelope.result === undefined) {
-    throw new Error(`${name} returned no result payload.`)
-  }
-  return envelope.result as TResult
-}
-
-function runInSweedWriteBatch<T>(operation: () => Promise<T>): Promise<T> {
-  const run = sweedWriteQueue.then(operation, operation)
-  sweedWriteQueue = run.then(
-    () => undefined,
-    () => {
-      sweedWriteDealerId = null
-      return undefined
-    },
-  )
-  return run
-}
-
-function truncate(value: string): string {
-  const normalized = value.replace(/\s+/g, ' ').trim()
-  if (normalized.length <= 240) return normalized
-  return `${normalized.slice(0, 239)}…`
-}
 
 export class HttpError extends Error {
   status: number

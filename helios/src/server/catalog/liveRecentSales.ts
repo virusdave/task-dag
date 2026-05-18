@@ -1,5 +1,3 @@
-import { randomUUID } from 'node:crypto'
-
 import { z } from 'zod'
 
 import {
@@ -9,22 +7,11 @@ import {
   type JsonValue,
   type RecentSalesSummary,
 } from '../../shared/contracts/index.js'
-import { getServerEnv } from '../config/env.js'
+import { callSweedRpc } from '../../worker/sweed/rpc.js'
+import { withSweedSession } from '../../worker/sweed/session.js'
 
 const REPORT_CACHE_TTL_MS = 60_000
 const REPORT_PAGE_SIZE = 200
-
-const RpcEnvelopeSchema = z.object({
-  error: z.object({ message: z.string().nullable().optional() }).optional(),
-  result: z.unknown().optional(),
-})
-
-const DealerSetResultSchema = z.object({
-  user: z.object({
-    currentDealerId: z.coerce.number().int(),
-    currentDealerName: z.string().nullable().optional(),
-  }),
-})
 
 const ReorderReportResponseSchema = z.object({
   page: z.coerce.number().int().min(1).optional(),
@@ -78,8 +65,6 @@ interface GroupRecentSalesInput {
 }
 
 const siteReportCache = new Map<number, CachedSiteReport>()
-
-let sweedSessionQueue: Promise<void> = Promise.resolve()
 
 export function buildEmptyGroupRecentSales(liveState: JsonValue): GroupRecentSales {
   const products = extractGroupProducts(liveState)
@@ -217,7 +202,7 @@ async function loadSiteReport(dealerId: number): Promise<CachedSiteReport> {
     return cached
   }
 
-  return withSweedSessionLock(async () => {
+  return withSweedSession(async () => {
     const freshCache = siteReportCache.get(dealerId)
     if (freshCache && freshCache.expiresAt > Date.now()) {
       return freshCache
@@ -229,7 +214,7 @@ async function loadSiteReport(dealerId: number): Promise<CachedSiteReport> {
 
     while (true) {
       const response = ReorderReportResponseSchema.parse(
-        await callSweedRpcForDealer(dealerId, 'store.reports.reorder', {
+        await callSweedRpc(dealerId, 'store.reports.reorder', {
           page,
           pageSize: REPORT_PAGE_SIZE,
         }),
@@ -268,67 +253,6 @@ async function loadSiteReport(dealerId: number): Promise<CachedSiteReport> {
     siteReportCache.set(dealerId, nextCache)
     return nextCache
   })
-}
-
-function withSweedSessionLock<TResult>(operation: () => Promise<TResult>): Promise<TResult> {
-  const run = sweedSessionQueue.then(operation, operation)
-  sweedSessionQueue = run.then(() => undefined, () => undefined)
-  return run
-}
-
-async function callSweedRpcForDealer<TResult>(
-  dealerId: number,
-  name: string,
-  params: Record<string, unknown>,
-): Promise<TResult> {
-  await ensureDealerContext(dealerId)
-  return callSweedRpcRaw(name, params)
-}
-
-async function ensureDealerContext(dealerId: number): Promise<void> {
-  const result = DealerSetResultSchema.parse(await callSweedRpcRaw('store.auth.dealer.set', { dealerId }))
-  if (result.user.currentDealerId !== dealerId) {
-    throw new Error(
-      `Sweed dealer context mismatch. Expected ${dealerId}, got ${result.user.currentDealerId} ${result.user.currentDealerName ?? ''}`.trim(),
-    )
-  }
-}
-
-async function callSweedRpcRaw<TResult>(name: string, params?: Record<string, unknown>): Promise<TResult> {
-  const env = getServerEnv()
-  if (!env.sweedAuthToken) {
-    throw new Error('SWEED_AUTH_TOKEN is required for recent sales velocity.')
-  }
-
-  const response = await fetch(env.sweedApiUrl, {
-    body: JSON.stringify({
-      auth: env.sweedAuthToken,
-      id: randomUUID(),
-      name,
-      ...(params === undefined ? {} : { params }),
-    }),
-    headers: {
-      'content-type': 'application/json',
-      'user-agent': 'helios-server/1.0',
-    },
-    method: 'POST',
-    signal: AbortSignal.timeout(30000),
-  })
-
-  const responseText = await response.text()
-  if (!response.ok) {
-    throw new Error(`${name} returned HTTP ${response.status}: ${truncate(responseText)}`)
-  }
-
-  const envelope = RpcEnvelopeSchema.parse(JSON.parse(responseText))
-  if (envelope.error) {
-    throw new Error(`${name} failed: ${envelope.error.message ?? 'Unknown Sweed RPC error.'}`)
-  }
-  if (envelope.result === undefined) {
-    throw new Error(`${name} returned no result payload.`)
-  }
-
-  return envelope.result as TResult
 }
 
 function latestReportDate(reportDates: Array<string | null>): string | null {
@@ -377,11 +301,4 @@ function normalizeText(value: string | null | undefined): string {
     .trim()
 }
 
-function truncate(value: string): string {
-  const normalized = value.replace(/\s+/g, ' ').trim()
-  if (normalized.length <= 240) {
-    return normalized
-  }
 
-  return `${normalized.slice(0, 239)}…`
-}
