@@ -69,18 +69,25 @@ const tokens: Record<string, TokenDef> = {
       /^(?!\.?\d+(?:\.\d+)?g(?:-|$))(?![ISH](?:-|$))[^-]+/,
     ) as never,
   },
-  /** Modifier-list separator: a literal `-`, but only when the NEXT
-   *  token is NOT a trailing size (`\.?\d+(?:\.\d+)?g(?:-|$)`) or a
-   *  bare prevalence (`[ISH](?:-|$)`).
+  /** Modifier-list separator: `\s*-\s*` (matches both tight `-` and
+   *  whitespace-surrounded ` - ` styles), but only when the dash is NOT
+   *  the boundary in front of a trailing terminal slot, i.e. NOT one of:
+   *    -<size>-<prev>$    (Curaleaf shape)
+   *    -<size>$           (Cannabals shape)
+   *    -<prev>$           (bare prevalence tail)
    *
    *  Arcsecond's `sepBy` is non-backtracking: once a separator is
    *  consumed, sepBy commits to the next item. A naive `dash` separator
-   *  therefore eats the dash before the trailing `-<size>-<prev>`
-   *  slots, and the subsequent modToken refusal kills the whole match.
-   *  This token's negative lookahead short-circuits sepBy cleanly. */
+   *  therefore eats the dash before those trailing slots, and the
+   *  subsequent modToken refusal kills the whole match.
+   *
+   *  Critically the lookaheads are anchored at the start (before any
+   *  prefix is consumed) so JS's greedy/backtracking `\s*` can't sneak
+   *  past them by matching a shorter prefix. */
   modDash: {
     parser: aRegex(
-      /^-(?![ISH](?:-|$))(?!\.?\d+(?:\.\d+)?g(?:-|$))/,
+      // eslint-disable-next-line no-useless-escape
+      /^(?!\s*-\s*\.?\d+(?:\.\d+)?g\s*-\s*[ISH]\s*$)(?!\s*-\s*\.?\d+(?:\.\d+)?g\s*$)(?!\s*-\s*[ISH]\s*$)\s*-\s*/,
     ) as never,
   },
 }
@@ -267,6 +274,22 @@ const transforms: Record<string, TransformDef<ParsedProductName>> = {
     },
   },
   /**
+   * Per-field transform: append a static string to the current value.
+   * args: { suffix: string }
+   *
+   * Use case: Cannabals Gummy Brick groupName composition
+   * (`'<cultivar> Gummy Brick'`).
+   */
+  append: {
+    version: 1,
+    argsSchema: z.object({ suffix: z.string() }).strict(),
+    impl: (args, ctx) => {
+      const a = args as { suffix: string }
+      const bag = bagOf(ctx)
+      bag.value = `${String(bag.value ?? '')}${a.suffix}`
+    },
+  },
+  /**
    * Rule-level transform: derive `size` from a "total grams" capture
    * divided by `output.packCount`, formatted via formatGrams().
    * args: { totalCapture: string, packField?: string = 'packCount',
@@ -295,6 +318,51 @@ const transforms: Record<string, TransformDef<ParsedProductName>> = {
       const pack = Number(out[packField] ?? 1)
       const per = pack > 0 ? total / pack : total
       out[targetField] = formatGramsNumber(per)
+    },
+  },
+  /**
+   * Rule-level transform: derive per-piece milligrams from a total-mg
+   * string (e.g. `'100mg'` or `'100mg THC'`) divided by `output[packField]`.
+   * If the total is not evenly divisible by the pack count, falls back to
+   * `indivisibleFallback` mg (mirrors the Cannabals Gummy Brick quirk:
+   * legacy returns 10mg in that case).
+   *
+   * args: {
+   *   totalField?: string = 'size'
+   *   packField?: string  = 'packCount'
+   *   targetField?: string = 'size'
+   *   indivisibleFallback?: number = 10
+   * }
+   */
+  mgPerPieceFromTotalAndPack: {
+    version: 1,
+    argsSchema: z
+      .object({
+        totalField: z.string().min(1).optional(),
+        packField: z.string().min(1).optional(),
+        targetField: z.string().min(1).optional(),
+        indivisibleFallback: z.number().int().nonnegative().optional(),
+      })
+      .strict()
+      .optional(),
+    impl: (args, ctx) => {
+      const a = (args ?? {}) as {
+        totalField?: string
+        packField?: string
+        targetField?: string
+        indivisibleFallback?: number
+      }
+      const out = ctx.output as Record<string, unknown>
+      const totalField = a.totalField ?? 'size'
+      const packField = a.packField ?? 'packCount'
+      const targetField = a.targetField ?? 'size'
+      const fallback = a.indivisibleFallback ?? 10
+      const raw = String(out[totalField] ?? '')
+      const m = /^(\d+)/.exec(raw.trim())
+      const total = m ? Number.parseInt(m[1], 10) : 0
+      const pack = Number(out[packField] ?? 1)
+      const per = pack > 0 && total % pack === 0 ? total / pack : fallback
+      out[targetField] = `${per}mg`
     },
   },
   /**
@@ -388,6 +456,29 @@ const transforms: Record<string, TransformDef<ParsedProductName>> = {
       const re = new RegExp(a.pattern, a.caseInsensitive ? 'i' : undefined)
       const hit = (bag.value as string[]).find((s) => re.test(s))
       bag.value = hit ?? a.default ?? ''
+    },
+  },
+  /**
+   * List-aware (per-field): return the LAST item of a list-source value,
+   * or `''` if empty. Reduces the value from `string[]` to `string`.
+   *
+   * args: { default?: string }
+   *
+   * Use case: Cannabals Gummy Brick — the legacy loop assigns
+   * `cultivar = part` on every "unrecognized" part, so the LAST
+   * unrecognized part wins. After filtering out pack/dosage/distillate
+   * tokens, `lastToken` mirrors that "last assignment wins" semantic
+   * (whereas `joinTokens` would merge multiple unrecognized parts).
+   */
+  lastToken: {
+    version: 1,
+    argsSchema: z.object({ default: z.string().optional() }).strict().optional(),
+    impl: (args, ctx) => {
+      const a = (args ?? {}) as { default?: string }
+      const bag = bagOf(ctx)
+      assertListBag(bag, 'lastToken')
+      const arr = bag.value as string[]
+      bag.value = arr.length > 0 ? arr[arr.length - 1] : a.default ?? ''
     },
   },
   /**

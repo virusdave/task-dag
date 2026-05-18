@@ -940,6 +940,211 @@ const curaleafConfig: TenantParserConfig = {
 
 // ---------------------------------------------------------------------
 
+// ---------------------------------------------------------------------
+// Tenant: Cannabals
+//   Legacy: parseCannabalsName in generatePendingPurchasePacketJob.ts
+//
+//   Header:  parts[0] must be /^cannabals$/i
+//   Family:  parts[1] — branches by lowercased substring match:
+//              'chubby puff'  -> Vapes branch
+//              'gummy brick'  -> Edibles branch
+//
+//   Chubby Puff:
+//     parts = [Cannabals, <family>, <cultivar parts...>, <NgSize>]
+//     cultivar = parts.slice(2, -1).join(' ')
+//     size     = formatGrams(parseFloat(sizeText.replace('g','')))
+//     output groupName = 'Chubby Puff <cultivar>'
+//
+//   Gummy Brick:
+//     parts = [Cannabals, Gummy Brick, ...unordered bag...]
+//     For each part in parts.slice(2):
+//       /^(\d+)\s*pk$/i               -> packCount (legacy: '1pk' becomes 10)
+//       /^(\d+)\s*(?:MG\s*THC|mg)$/i  -> dosageText
+//       /distillate|fast[-\s]acting/  -> skip
+//       else                          -> cultivar = part   (LAST WINS!)
+//     packCount defaults to 10; size = perPieceMg = totalMg/packCount if even,
+//     else 10; variantTab = `${packCount}x ${size}`
+//     output groupName = '<cultivar> Gummy Brick'
+//
+//   This port uses captureMany over the modifier bag + the new
+//   `lastToken` list transform to mirror the "last unrecognized part
+//   wins" cultivar semantic; pack/dosage/skip tokens are pulled via
+//   findToken/filterTokens.
+// ---------------------------------------------------------------------
+
+const PACK_PATTERN_CANNABALS = '^\\d+\\s*[Pp][Kk]$'
+const DOSAGE_PATTERN_CANNABALS = '^\\d+\\s*(?:MG(?:\\s*THC)?|mg(?:\\s*THC)?)$'
+const SKIP_PATTERN_CANNABALS = '(?:distillate|fast[-\\s]acting)'
+
+const cannabalsConfig: TenantParserConfig = {
+  configVersion: 1,
+  parserId: 'pending-purchases.cannabals',
+  scope: { tenantId: 'cannabals', useCase: 'pending-purchases' },
+  dialectRef: { id: 'metrc-v1', version: 1 },
+  detect: { prefixes: ['Cannabals'] },
+  rules: [
+    // -- Chubby Puff (Vapes) ----------------------------------------
+    {
+      id: 'cannabals.chubby-puff',
+      priority: 200,
+      parser: {
+        kind: 'seq',
+        items: [
+          { kind: 'lit', value: 'Cannabals' },
+          { kind: 'token', token: 'dash' },
+          { kind: 'lit', value: 'Chubby Puff', caseInsensitive: true },
+          // Eat any extras in the family slot (e.g. " Vape") until the
+          // next dash. minLen:0 because "Chubby Puff" alone is valid.
+          { kind: 'consumeUntil', terminator: { kind: 'token', token: 'dash' }, minLen: 0 },
+          { kind: 'token', token: 'dash' },
+          {
+            kind: 'captureMany',
+            name: 'cultivarParts',
+            expr: {
+              kind: 'sepBy',
+              min: 1,
+              max: 10,
+              expr: { kind: 'token', token: 'modToken' },
+              sep: { kind: 'token', token: 'modDash' },
+            },
+          },
+          { kind: 'token', token: 'dash' },
+          { kind: 'capture', name: 'grams', expr: { kind: 'token', token: 'decimal' } },
+          { kind: 'token', token: 'gramsSuffix' },
+          { kind: 'token', token: 'optWs' },
+        ],
+      },
+      project: {
+        brand: { literal: 'Cannabals' },
+        category: { literal: 'Vapes' },
+        subcategory: { literal: 'All In One / Disposable' },
+        packCount: { literal: 1 },
+        prevalence: { literal: null },
+        groupName: {
+          fromList: 'cultivarParts',
+          transforms: [
+            { name: 'joinTokens', version: 1, args: { sep: ' ' } },
+            { name: 'cleanCultivar', version: 1 },
+            { name: 'prepend', version: 1, args: { prefix: 'Chubby Puff ' } },
+          ],
+        },
+        strainName: {
+          fromList: 'cultivarParts',
+          transforms: [
+            { name: 'joinTokens', version: 1, args: { sep: ' ' } },
+            { name: 'cleanCultivar', version: 1 },
+          ],
+        },
+        searchTerm: {
+          fromList: 'cultivarParts',
+          transforms: [
+            { name: 'joinTokens', version: 1, args: { sep: ' ' } },
+            { name: 'cleanCultivar', version: 1 },
+          ],
+        },
+        size: { from: 'grams', transforms: [{ name: 'formatGrams', version: 1 }] },
+        variantTab: { literal: '__placeholder__' },
+        variantName: { literal: '__placeholder__' },
+      },
+      transforms: [
+        { name: 'composeVariantTab', version: 1, args: { sizeField: 'size' } },
+        { name: 'composeVariantName', version: 1 },
+      ],
+      goldens: [],
+    },
+    // -- Gummy Brick (Edibles) --------------------------------------
+    {
+      id: 'cannabals.gummy-brick',
+      priority: 200,
+      parser: {
+        kind: 'seq',
+        items: [
+          { kind: 'lit', value: 'Cannabals' },
+          { kind: 'token', token: 'dash' },
+          { kind: 'lit', value: 'Gummy Brick', caseInsensitive: true },
+          { kind: 'consumeUntil', terminator: { kind: 'token', token: 'dash' }, minLen: 0 },
+          { kind: 'token', token: 'dash' },
+          {
+            kind: 'captureMany',
+            name: 'mods',
+            expr: {
+              kind: 'sepBy',
+              min: 1,
+              max: 10,
+              expr: { kind: 'token', token: 'modToken' },
+              sep: { kind: 'token', token: 'modDash' },
+            },
+          },
+          { kind: 'token', token: 'optWs' },
+        ],
+      },
+      project: {
+        brand: { literal: 'Cannabals' },
+        category: { literal: 'Edibles' },
+        subcategory: { literal: '' },
+        prevalence: { literal: null },
+        // packCount: findToken(\d+pk) -> stripSuffix('pk') -> mapValue
+        // (legacy quirk: '1pk' becomes 10) -> parseIntStrict.
+        packCount: {
+          fromList: 'mods',
+          transforms: [
+            { name: 'findToken', version: 1, args: { pattern: PACK_PATTERN_CANNABALS, caseInsensitive: true, default: '10pk' } },
+            { name: 'stripSuffix', version: 1, args: { suffix: 'pk', caseInsensitive: true } },
+            { name: 'mapValue', version: 1, args: { table: { '1': '10' } } },
+            { name: 'parseIntStrict', version: 1 },
+          ],
+        },
+        // Surface the raw dosage text (e.g. '100mg' or '100mg THC') into
+        // size; the rule transform below splits the leading digits and
+        // divides by packCount.
+        size: {
+          fromList: 'mods',
+          transforms: [
+            { name: 'findToken', version: 1, args: { pattern: DOSAGE_PATTERN_CANNABALS, default: '100mg' } },
+          ],
+        },
+        // Cultivar: filter pack/dosage/skip tokens then take LAST
+        // unrecognized item (mirrors legacy `cultivar = part` loop).
+        strainName: { literal: '' },
+        searchTerm: {
+          fromList: 'mods',
+          transforms: [
+            { name: 'filterTokens', version: 1, args: { pattern: PACK_PATTERN_CANNABALS, caseInsensitive: true } },
+            { name: 'filterTokens', version: 1, args: { pattern: DOSAGE_PATTERN_CANNABALS } },
+            { name: 'filterTokens', version: 1, args: { pattern: SKIP_PATTERN_CANNABALS, caseInsensitive: true } },
+            { name: 'lastToken', version: 1 },
+            { name: 'cleanCultivar', version: 1 },
+          ],
+        },
+        // groupName = '<cultivar> Gummy Brick' (the `append` transform
+        // tacks on the suffix in the per-field pipeline).
+        groupName: {
+          fromList: 'mods',
+          transforms: [
+            { name: 'filterTokens', version: 1, args: { pattern: PACK_PATTERN_CANNABALS, caseInsensitive: true } },
+            { name: 'filterTokens', version: 1, args: { pattern: DOSAGE_PATTERN_CANNABALS } },
+            { name: 'filterTokens', version: 1, args: { pattern: SKIP_PATTERN_CANNABALS, caseInsensitive: true } },
+            { name: 'lastToken', version: 1 },
+            { name: 'cleanCultivar', version: 1 },
+            { name: 'append', version: 1, args: { suffix: ' Gummy Brick' } },
+          ],
+        },
+        variantTab: { literal: '__placeholder__' },
+        variantName: { literal: '__placeholder__' },
+      },
+      transforms: [
+        // Compute per-piece mg = total / pack (fallback 10 if not
+        // evenly divisible). Reads + writes output.size in place.
+        { name: 'mgPerPieceFromTotalAndPack', version: 1 },
+        // variantTab + variantName composition.
+        { name: 'composeVariantTab', version: 1, args: { sizeField: 'size' } },
+        { name: 'composeVariantName', version: 1 },
+      ],
+      goldens: [],
+    },
+  ],
+}
+
 const TENANT_CONFIGS: TenantParserConfig[] = [
   bytesConfig,
   outrankdConfig,
@@ -951,6 +1156,7 @@ const TENANT_CONFIGS: TenantParserConfig[] = [
   smartbudConfig,
   poshPuffConfig,
   curaleafConfig,
+  cannabalsConfig,
 ]
 
 describe('metrc-v1 dialect: static safety verify', () => {
@@ -1363,6 +1569,62 @@ describe('metrc-v1 dialect: parity with legacy parseProductName', () => {
         subcategory: '',
         variantName: 'Anthem Sour Diesel 10x 0.35g',
         variantTab: '10x 0.35g',
+      },
+    },
+    // -- Cannabals parity cases (covers both real fixtures from
+    //    pendingPurchaseParser.test.ts + the 1pk-becomes-10 quirk). ---
+    {
+      parserId: 'pending-purchases.cannabals',
+      input: 'Cannabals - Chubby Puff Vape - Strawberry Cough - 6g',
+      expected: {
+        brand: 'Cannabals',
+        category: 'Vapes',
+        groupName: 'Chubby Puff Strawberry Cough',
+        packCount: 1,
+        prevalence: null,
+        searchTerm: 'Strawberry Cough',
+        size: '6g',
+        strainName: 'Strawberry Cough',
+        subcategory: 'All In One / Disposable',
+        variantName: 'Cannabals Chubby Puff Strawberry Cough 6g',
+        variantTab: '6g',
+      },
+    },
+    {
+      parserId: 'pending-purchases.cannabals',
+      input: 'Cannabals - Gummy Brick - Orange Soda - 100mg THC',
+      expected: {
+        brand: 'Cannabals',
+        category: 'Edibles',
+        groupName: 'Orange Soda Gummy Brick',
+        packCount: 10,
+        prevalence: null,
+        searchTerm: 'Orange Soda',
+        size: '10mg',
+        // legacy parser sets strainName='' for Gummy Brick.
+        strainName: '',
+        subcategory: '',
+        variantName: 'Cannabals Orange Soda Gummy Brick 10x 10mg',
+        variantTab: '10x 10mg',
+      },
+    },
+    {
+      parserId: 'pending-purchases.cannabals',
+      // The "1pk" -> 10 quirk + skip tokens (Fast-Acting Distillate) +
+      // "last unrecognized part wins" (Playoff Punch beats Fast-Acting).
+      input: 'Cannabals - Gummy Brick - Fast-Acting Distillate - 1pk - 100 MG THC - Playoff Punch',
+      expected: {
+        brand: 'Cannabals',
+        category: 'Edibles',
+        groupName: 'Playoff Punch Gummy Brick',
+        packCount: 10,
+        prevalence: null,
+        searchTerm: 'Playoff Punch',
+        size: '10mg',
+        strainName: '',
+        subcategory: '',
+        variantName: 'Cannabals Playoff Punch Gummy Brick 10x 10mg',
+        variantTab: '10x 10mg',
       },
     },
   ]
