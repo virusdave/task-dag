@@ -1,0 +1,57 @@
+[
+  {
+    "title": "P0: strategic-clusters YAML schema + Gemini seed",
+    "description": "Define ads/google/config/strategic-clusters.yaml (operator-curated strategic-cluster definitions) and ads/google/lib/shared/strategicClustersSchema.ts (Zod schema). Seed the YAML with the eight clusters from the Gemini share: strain-brand-power, local-discovery, delivery-revamped, bronx-arthur-ave, brand-protection, general-category, financial-logistics, regulatory-legitimacy. Each cluster carries: slug, display_name, intent_summary, target_query_patterns (string[]), seed_keyword_examples (string[]), proposed_landing_page_slug, proposed_ad_themes (string[]), usp_hooks (string[]), reconciliation_hint (free text: which existing campaign(s) the operator believes already cover this, if any), and provenance_url (the Gemini share). The schema is consumed by both the gads L2 cluster-sweep and the landing-pages L2 cluster mode in mostly-static-sites.",
+    "type": "leaf",
+    "status": "pending"
+  },
+  {
+    "title": "P1a: cluster-sweep prompt + LLM driver",
+    "description": "Add ads/google/config/l2-cluster-sweep-prompts.yaml (system + user-prompt templates for cluster reconciliation) and ads/google/lib/l2/cluster-sweep/llm-driver.ts (calls the LLM with the strategic-clusters yaml + latest snapshot + latest daily L2 repair queue, expects a structured JSON response with one entry per cluster: verdict, rationale, referenced_existing_campaign_ids, proposed_actions[]). Each proposed_action carries: action_kind (campaign_create | campaign_pause | ad_group_create | keyword_add | keyword_negative | ad_create | ad_pause | bid_adjust | landing_page_create | landing_page_edit | webui_appeal | webui_business_profile | ...), lane (A | B | C), and either a csv_payload (Lane A) or a webui_deeplink_template (Lane C).",
+    "type": "leaf",
+    "status": "pending",
+    "dependencies": ["<P0-strategic-clusters-yaml>"]
+  },
+  {
+    "title": "P1b: cluster-sweep CSV generator",
+    "description": "Add ads/google/lib/l2/cluster-sweep/csv-generator.ts. Consumes the LLM driver's proposed_actions[]. For Lane A actions it emits Google-Ads-Editor-compatible CSV batches per cluster (campaign, ad_groups, keywords, negatives, ads). The CSV column conventions match what the existing daily L2 csv-generator emits so the operator's Editor import muscle memory transfers. For Lane C actions it emits a markdown checklist with webui_deeplink resolved to a concrete URL (campaign-id, ad-id, etc. substituted from snapshot context).",
+    "type": "leaf",
+    "status": "pending",
+    "dependencies": ["<P1a-cluster-sweep-llm>"]
+  },
+  {
+    "title": "P1c: cluster-sweep run script",
+    "description": "Add ads/google/scripts/run-cluster-sweep.ts. CLI driver: loads strategic-clusters.yaml, finds the most recent snapshot in ads/google/snapshots/, finds the most recent daily L2 run output in ads/google/outputs/prod/, calls the LLM driver, calls the CSV generator, writes one run directory under ads/google/outputs/cluster-sweep/run-<runId>/ containing strategic-context.yaml (copy), per-cluster subdirectories with their CSVs + verdict.md + copy.md, repairs/ (copied/projected from the daily L2 output), and manifest.json. Idempotent (re-run with same snapshot is a no-op unless --force).",
+    "type": "leaf",
+    "status": "pending",
+    "dependencies": ["<P1b-cluster-sweep-csv>"]
+  },
+  {
+    "title": "P3a: helios /ads/cluster-proposals server route + contracts",
+    "description": "Add helios/src/server/routes/adsClusterProposals.ts (Express route handlers: GET /api/ads/cluster-proposals (latest runs index), GET /api/ads/cluster-proposals/:runId (one run with all clusters expanded), POST /api/ads/cluster-proposals/run (trigger an on-demand cluster-sweep, returning a runId for polling)) and helios/src/shared/contracts/api/adsClusterProposals.ts (typed request/response contracts shared client/server). The route handlers read from ads/google/outputs/cluster-sweep/ rather than re-running the sweep on every request.",
+    "type": "leaf",
+    "status": "pending",
+    "dependencies": ["<P1c-cluster-sweep-script>"]
+  },
+  {
+    "title": "P3b: helios /ads/cluster-proposals client page",
+    "description": "Add helios/src/client/routes/ads/AdsClusterProposalsPage.tsx + a child <ClusterCard /> component + an <ApplyModal /> with two tabs (Lane A: download CSV ZIP + step-by-step Editor import instructions; Lane C: deep-link checklist with per-step checkmarks persisted to localStorage). Add a top-level 'Download bundle' button. Add a 'Run sweep now' button (uses POST .../run, polls for runId completion). Route registered in the client router with a sidebar link under the existing Ads section.",
+    "type": "leaf",
+    "status": "pending",
+    "dependencies": ["<P3a-cluster-proposals-server>"]
+  },
+  {
+    "title": "P3c: bundle ZIP generator",
+    "description": "Add helios/src/server/ads/clusterBundle.ts. assembleBundle(runId, opts: { clusterSlug?: string }) streams a ZIP from the run directory on disk (using yazl or archiver) and serves it via GET /api/ads/cluster-proposals/:runId/bundle.zip and GET /api/ads/cluster-proposals/:runId/clusters/:slug/bundle.zip. Layout per EPIC_PLAN.md. Includes a generated README.md (operator-facing summary: snapshot date, cluster verdicts table, repair counts, suggested order-of-operations) and a manifest.json (L2 run IDs, prompt versions, snapshot SHA, per-cluster file index, generated_at timestamp).",
+    "type": "leaf",
+    "status": "pending",
+    "dependencies": ["<P3a-cluster-proposals-server>"]
+  },
+  {
+    "title": "P5: integration test + operator runbook + page-dave wiring",
+    "description": "Add ads/google/scripts/test-cluster-sweep.sh (end-to-end: synthetic strategic-clusters.yaml + example snapshot + canned daily L2 output → run-cluster-sweep.ts → assertion that the run directory + manifest.json + per-cluster CSVs are present and parseable, then assertion that the helios bundle endpoint returns a valid ZIP). Add docs/helios/gemini-clusters/RUNBOOK.md (how to trigger an on-demand sweep, how to read the verdicts, how to import a per-cluster CSV via Ads Editor, how to work through a Lane C checklist, how to roll back a cluster, how to interpret the page-dave alarm if the weekly run fails). Wire page-dave to fire on (a) sweep run failure, (b) sweep run success with a one-line summary (#clusters, #repairs, helios URL).",
+    "type": "leaf",
+    "status": "pending",
+    "dependencies": ["<P3b-cluster-proposals-client>", "<P3c-bundle-zip>"]
+  }
+]
