@@ -36,6 +36,28 @@ If you encounter unexpected uncommitted state in the shared `~/src` tree,
 the operator. Move your own work into an ephemeral checkout and proceed
 there.
 
+## Default branch: `master` (always, unless told otherwise)
+
+We do **all** development on `master`. Do **not** open feature/topic
+branches on `origin` (`git push origin -u feat/foo`) unless the human
+has explicitly asked you to (e.g. for testing GitHub Actions pre-merge,
+or when an experiment genuinely needs to live alongside `master` for
+review).
+
+The ephemeral-checkout tool creates an **internal** throwaway branch
+(e.g. `ephemeral/amp-local-<ts>`) for git-worktree mechanics — that
+name exists only inside your ephemeral workspace and is never published.
+When your commits are ready, push `HEAD` directly to `master`:
+
+```sh
+git push origin HEAD:master
+```
+
+If you find yourself thinking "I'll just push this to a feature branch
+to be safe" — **don't**. Either the work is ready for `master`, in
+which case push it, or it isn't, in which case keep iterating in your
+ephemeral workspace until it is.
+
 ## One-time setup: enable the shared git hooks
 
 This repo ships a pre-commit gate under `.githooks/` that runs the
