@@ -39,8 +39,9 @@ const tokens: Record<string, TokenDef> = {
   optWs: { parser: aOptWs as never },
   /** One or more digits. */
   int: { parser: aRegex(/^\d+/) as never },
-  /** Integer or decimal, e.g. `1`, `1.0`, `0.5`. */
-  decimal: { parser: aRegex(/^\d+(?:\.\d+)?/) as never },
+  /** Integer or decimal, e.g. `1`, `1.0`, `0.5`, `.5`. Leading dot is
+   *  allowed (parseFloat treats `.5` as 0.5). */
+  decimal: { parser: aRegex(/^\.?\d+(?:\.\d+)?/) as never },
   /** A grams suffix: `g`. */
   gramsSuffix: { parser: aRegex(/^g/i) as never },
   /** A milligrams suffix: `mg`. */
@@ -190,6 +191,48 @@ const transforms: Record<string, TransformDef<ParsedProductName>> = {
         .split(/\s+/)
         .map((part) => `${part.slice(0, 1).toUpperCase()}${part.slice(1)}`)
         .join(' ')
+    },
+  },
+  /**
+   * Per-field transform: prepend a static string to the current value.
+   * args: { prefix: string }
+   */
+  prepend: {
+    argsSchema: z.object({ prefix: z.string() }).strict(),
+    impl: (args, ctx) => {
+      const a = args as { prefix: string }
+      const bag = bagOf(ctx)
+      bag.value = `${a.prefix}${String(bag.value ?? '')}`
+    },
+  },
+  /**
+   * Rule-level transform: derive `size` from a "total grams" capture
+   * divided by `output.packCount`, formatted via formatGrams().
+   * args: { totalCapture: string, packField?: string = 'packCount',
+   *         targetField?: string = 'size' }
+   * Mirrors the legacy Smartbud/Cannabals Gummy Brick math.
+   */
+  sizeFromTotalAndPack: {
+    argsSchema: z
+      .object({
+        totalCapture: z.string().min(1),
+        packField: z.string().min(1).optional(),
+        targetField: z.string().min(1).optional(),
+      })
+      .strict(),
+    impl: (args, ctx) => {
+      const a = args as {
+        totalCapture: string
+        packField?: string
+        targetField?: string
+      }
+      const out = ctx.output as Record<string, unknown>
+      const packField = a.packField ?? 'packCount'
+      const targetField = a.targetField ?? 'size'
+      const total = Number.parseFloat(ctx.captures[a.totalCapture] ?? '0')
+      const pack = Number(out[packField] ?? 1)
+      const per = pack > 0 ? total / pack : total
+      out[targetField] = formatGramsNumber(per)
     },
   },
   /** Set a literal value on the output (escape hatch for derived constants). */

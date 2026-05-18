@@ -508,6 +508,149 @@ const jennysConfig: TenantParserConfig = {
 }
 
 // ---------------------------------------------------------------------
+// Tenant: Smartbud
+//   Legacy: ^Smartbud\s*-\s*(\d+)Pk\s+Preroll\s*-\s*(.+?)\s*-\s*(\d+(?:\.\d+)?)g\s*$
+//   Derived: size = totalGrams / packCount, formatted via formatGrams.
+// ---------------------------------------------------------------------
+
+const smartbudConfig: TenantParserConfig = {
+  configVersion: 1,
+  parserId: 'pending-purchases.smartbud',
+  scope: { tenantId: 'smartbud', useCase: 'pending-purchases' },
+  dialectRef: { id: 'metrc-v1', version: 1 },
+  detect: { prefixes: ['Smartbud'] },
+  rules: [
+    {
+      id: 'smartbud.default',
+      priority: 100,
+      parser: {
+        kind: 'seq',
+        items: [
+          { kind: 'lit', value: 'Smartbud' },
+          { kind: 'token', token: 'dash' },
+          { kind: 'capture', name: 'pack', expr: { kind: 'token', token: 'int' } },
+          { kind: 'lit', value: 'Pk', caseInsensitive: true },
+          { kind: 'token', token: 'ws' },
+          { kind: 'lit', value: 'Preroll', caseInsensitive: true },
+          { kind: 'token', token: 'dash' },
+          { kind: 'capture', name: 'cultivar', expr: { kind: 'token', token: 'cultivarText' } },
+          { kind: 'token', token: 'dash' },
+          { kind: 'capture', name: 'totalGrams', expr: { kind: 'token', token: 'decimal' } },
+          { kind: 'lit', value: 'g', caseInsensitive: true },
+          { kind: 'token', token: 'optWs' },
+        ],
+      },
+      project: {
+        brand: { literal: 'Smartbud' },
+        category: { literal: 'Pre-Rolls' },
+        groupName: { from: 'cultivar', transforms: [{ name: 'cleanCultivar', version: 1 }] },
+        packCount: { from: 'pack', transforms: [{ name: 'parseIntStrict', version: 1 }] },
+        prevalence: { literal: null },
+        searchTerm: { from: 'cultivar', transforms: [{ name: 'cleanCultivar', version: 1 }] },
+        size: { literal: '__placeholder__' },
+        strainName: { from: 'cultivar', transforms: [{ name: 'cleanCultivar', version: 1 }] },
+        subcategory: { literal: '' },
+        variantTab: { literal: '__placeholder__' },
+        variantName: { literal: '__placeholder__' },
+      },
+      transforms: [
+        { name: 'sizeFromTotalAndPack', version: 1, args: { totalCapture: 'totalGrams' } },
+        { name: 'composeVariantTab', version: 1, args: { sizeField: 'size' } },
+        { name: 'composeVariantName', version: 1 },
+      ],
+      goldens: [],
+    },
+  ],
+}
+
+// ---------------------------------------------------------------------
+// Tenant: Posh Puff
+//   Legacy: ^Posh\s+Puff\s+(\.?\d+(?:\.\d+)?)\s*g\s+(.+?)\s+Vapes?\s*$
+//   Quirks: brand is "Jenny's" (not "Posh Puff"); groupName is
+//           composite "Posh Puff <cultivar>".
+// ---------------------------------------------------------------------
+
+const poshPuffConfig: TenantParserConfig = {
+  configVersion: 1,
+  parserId: 'pending-purchases.posh-puff',
+  scope: { tenantId: 'posh-puff', useCase: 'pending-purchases' },
+  dialectRef: { id: 'metrc-v1', version: 1 },
+  detect: { prefixes: ['Posh Puff'] },
+  rules: [
+    {
+      id: 'posh-puff.default',
+      priority: 100,
+      parser: {
+        kind: 'seq',
+        items: [
+          { kind: 'lit', value: 'Posh', caseInsensitive: true },
+          { kind: 'token', token: 'ws' },
+          { kind: 'lit', value: 'Puff', caseInsensitive: true },
+          { kind: 'token', token: 'ws' },
+          { kind: 'capture', name: 'grams', expr: { kind: 'token', token: 'decimal' } },
+          { kind: 'token', token: 'optWs' },
+          { kind: 'lit', value: 'g', caseInsensitive: true },
+          { kind: 'token', token: 'ws' },
+          {
+            kind: 'capture',
+            name: 'cultivar',
+            expr: {
+              kind: 'consumeUntil',
+              terminator: {
+                kind: 'seq',
+                items: [
+                  { kind: 'token', token: 'ws' },
+                  {
+                    kind: 'choice',
+                    items: [
+                      { kind: 'lit', value: 'Vapes', caseInsensitive: true },
+                      { kind: 'lit', value: 'Vape', caseInsensitive: true },
+                    ],
+                  },
+                ],
+              },
+            },
+          },
+          { kind: 'token', token: 'ws' },
+          {
+            kind: 'choice',
+            items: [
+              { kind: 'lit', value: 'Vapes', caseInsensitive: true },
+              { kind: 'lit', value: 'Vape', caseInsensitive: true },
+            ],
+          },
+          { kind: 'token', token: 'optWs' },
+        ],
+      },
+      project: {
+        brand: { literal: "Jenny's" },
+        category: { literal: 'Vapes' },
+        groupName: {
+          from: 'cultivar',
+          transforms: [
+            { name: 'cleanCultivar', version: 1 },
+            { name: 'prepend', version: 1, args: { prefix: 'Posh Puff ' } },
+          ],
+        },
+        packCount: { literal: 1 },
+        prevalence: { literal: null },
+        searchTerm: { from: 'cultivar', transforms: [{ name: 'cleanCultivar', version: 1 }] },
+        size: { from: 'grams', transforms: [{ name: 'formatGrams', version: 1 }] },
+        strainName: { from: 'cultivar', transforms: [{ name: 'cleanCultivar', version: 1 }] },
+        subcategory: { literal: 'All In One / Disposable' },
+        variantTab: { literal: '__placeholder__' },
+        variantName: { literal: '__placeholder__' },
+      },
+      transforms: [
+        { name: 'composeVariantTab', version: 1, args: { sizeField: 'size' } },
+        { name: 'composeVariantName', version: 1, args: { fields: ['brand', 'groupName', 'size'] } },
+      ],
+      goldens: [],
+    },
+  ],
+}
+
+// ---------------------------------------------------------------------
 
 const TENANT_CONFIGS: TenantParserConfig[] = [
   bytesConfig,
@@ -517,6 +660,8 @@ const TENANT_CONFIGS: TenantParserConfig[] = [
   layUpConfig,
   moonlitConfig,
   jennysConfig,
+  smartbudConfig,
+  poshPuffConfig,
 ]
 
 describe('metrc-v1 dialect: static safety verify', () => {
@@ -720,6 +865,42 @@ describe('metrc-v1 dialect: parity with legacy parseProductName', () => {
         strainName: 'OG Kush',
         subcategory: '',
         variantName: "Jenny's OG Kush 0.5g",
+        variantTab: '0.5g',
+      },
+    },
+    {
+      parserId: 'pending-purchases.smartbud',
+      input: 'Smartbud - 10Pk Preroll - Banana OG - 3.5g',
+      expected: {
+        brand: 'Smartbud',
+        category: 'Pre-Rolls',
+        groupName: 'Banana OG',
+        packCount: 10,
+        prevalence: null,
+        searchTerm: 'Banana OG',
+        size: '0.35g',
+        strainName: 'Banana OG',
+        subcategory: '',
+        variantName: 'Smartbud Banana OG 10x 0.35g',
+        variantTab: '10x 0.35g',
+      },
+    },
+    {
+      parserId: 'pending-purchases.posh-puff',
+      // Leading-dot decimal (`.5`) + composite groupName + brand
+      // override to "Jenny's" — covered by Posh Puff's legacy quirks.
+      input: 'Posh Puff .5g Banana OG Vape',
+      expected: {
+        brand: "Jenny's",
+        category: 'Vapes',
+        groupName: 'Posh Puff Banana OG',
+        packCount: 1,
+        prevalence: null,
+        searchTerm: 'Banana OG',
+        size: '0.5g',
+        strainName: 'Banana OG',
+        subcategory: 'All In One / Disposable',
+        variantName: "Jenny's Posh Puff Banana OG 0.5g",
         variantTab: '0.5g',
       },
     },
