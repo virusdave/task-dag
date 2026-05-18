@@ -53,6 +53,36 @@ const tokens: Record<string, TokenDef> = {
   cultivarText: { parser: aRegex(/^[^-]+/) as never },
   /** Pack token like "10PK" / "2PK" — captures the integer. */
   packPK: { parser: aRegex(/^\d+PK/i) as never },
+  /** Size text like `3.5g`, `1g`, `.5g`. Used as the trailing size slot
+   *  in Curaleaf-style dash-separated names. */
+  sizeText: { parser: aRegex(/^\.?\d+(?:\.\d+)?g/i) as never },
+  /** Single-letter strain prevalence: `I`, `S`, or `H`. Used as the
+   *  trailing prevalence slot in Curaleaf-style names. */
+  prevToken: { parser: aRegex(/^[ISH]/) as never },
+  /** Modifier-list element: `[^-]+`, but refuses to match a size-shaped
+   *  token (`\.?\d+(?:\.\d+)?g(?:-|$)`) or a bare prevalence letter
+   *  (`[ISH](?:-|$)`). This lets a greedy `sepBy` over modifiers stop
+   *  cleanly at the trailing `-<size>-<prev>` slots without backtrack
+   *  gymnastics. See the Curaleaf port. */
+  modToken: {
+    parser: aRegex(
+      /^(?!\.?\d+(?:\.\d+)?g(?:-|$))(?![ISH](?:-|$))[^-]+/,
+    ) as never,
+  },
+  /** Modifier-list separator: a literal `-`, but only when the NEXT
+   *  token is NOT a trailing size (`\.?\d+(?:\.\d+)?g(?:-|$)`) or a
+   *  bare prevalence (`[ISH](?:-|$)`).
+   *
+   *  Arcsecond's `sepBy` is non-backtracking: once a separator is
+   *  consumed, sepBy commits to the next item. A naive `dash` separator
+   *  therefore eats the dash before the trailing `-<size>-<prev>`
+   *  slots, and the subsequent modToken refusal kills the whole match.
+   *  This token's negative lookahead short-circuits sepBy cleanly. */
+  modDash: {
+    parser: aRegex(
+      /^-(?![ISH](?:-|$))(?!\.?\d+(?:\.\d+)?g(?:-|$))/,
+    ) as never,
+  },
 }
 
 // ---------------------------------------------------------------------
@@ -374,6 +404,60 @@ const transforms: Record<string, TransformDef<ParsedProductName>> = {
       const bag = bagOf(ctx)
       assertListBag(bag, 'joinTokens')
       bag.value = (bag.value as string[]).join(a.sep)
+    },
+  },
+  /**
+   * Per-field: strip a literal suffix off the current string value if it
+   * ends with that suffix; otherwise pass the value through unchanged.
+   * args: { suffix: string, caseInsensitive?: boolean }
+   *
+   * Use case: turn the pack-token text `10PK` (returned by `findToken`)
+   * into the bare integer string `10` for `parseIntStrict`. Stays a
+   * narrow scalar primitive — no regex DSL.
+   */
+  stripSuffix: {
+    version: 1,
+    argsSchema: z
+      .object({ suffix: z.string().min(1), caseInsensitive: z.boolean().optional() })
+      .strict(),
+    impl: (args, ctx) => {
+      const a = args as { suffix: string; caseInsensitive?: boolean }
+      const bag = bagOf(ctx)
+      const s = String(bag.value ?? '')
+      if (s.length < a.suffix.length) {
+        bag.value = s
+        return
+      }
+      const tail = s.slice(-a.suffix.length)
+      const match = a.caseInsensitive
+        ? tail.toLowerCase() === a.suffix.toLowerCase()
+        : tail === a.suffix
+      bag.value = match ? s.slice(0, -a.suffix.length) : s
+    },
+  },
+  /**
+   * Per-field: remove literal substrings from the current string value
+   * (each value removed wherever it occurs), in the order given.
+   *
+   * args: { values: string[] }
+   *
+   * Use case: Curaleaf's `.replace('Diamond Infused','').replace('Glass Tip Infused','')`
+   * and `.replace('Essentials Briq ','')` cleanups. Deliberately literal
+   * and ordered — does NOT become a regex replace DSL.
+   */
+  removeSubstrings: {
+    version: 1,
+    argsSchema: z
+      .object({ values: z.array(z.string().min(1)).min(1) })
+      .strict(),
+    impl: (args, ctx) => {
+      const a = args as { values: string[] }
+      const bag = bagOf(ctx)
+      let s = String(bag.value ?? '')
+      for (const v of a.values) {
+        s = s.split(v).join('')
+      }
+      bag.value = s
     },
   },
   /** Set a literal value on the output (escape hatch for derived constants). */

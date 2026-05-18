@@ -10,7 +10,7 @@
  * pipeline before the configs repo exists.
  */
 
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 import {
   compileParser,
@@ -23,7 +23,9 @@ import {
   pendingPurchasesOutputFields,
 } from '../contracts/pendingPurchases.js'
 import { metrcV1Dialect } from '../dialects/metrc-v1.js'
-import { parseProductName as legacyParseProductName } from '../../../worker/jobs/generatePendingPurchasePacketJob.js'
+// Legacy `parseProductName` is imported dynamically per parity test
+// case (see below) to isolate the shared-state mutation bug in
+// `parseCuraleafName` from earlier cases in the same run.
 
 // ---------------------------------------------------------------------
 // Tenant: Bytes
@@ -651,6 +653,292 @@ const poshPuffConfig: TenantParserConfig = {
 }
 
 // ---------------------------------------------------------------------
+// Tenant: Curaleaf
+//   Legacy: parseCuraleafName in generatePendingPurchasePacketJob.ts
+//
+//   Header:   ^(Pr\(Pre-Roll(?: Pack)?\)|F\(Whole Flower\)|V\(BRIQ\))-(.+)$
+//   Body:     dash-separated:
+//             brand - [maybe leading-mod] - mods+ - size - prevalence
+//
+//   Brand-conditional fixups (legacy):
+//     Grassroots                          -> brand 'Grass Roots'
+//     Anthem    + leading 'Bold'          -> drop 'Bold', subcategory='Infused'
+//     Grassroots+ leading 'Dark Heart'    -> drop 'Dark Heart'
+//     Select    + leading 'Essentials'    -> drop, groupName prefixed with 'Essentials Briq '
+//
+//   Output composition is category-keyed:
+//     Pre-Rolls: size = formatGrams(grams / packCount), variantTab packs-aware
+//     Vapes/Flower: size = raw sizeToken, variantTab = size
+//
+//   This config models the legacy with rule explosion + the
+//   captureMany/fromList/mapValue/filter/find/joinTokens/stripSuffix/removeSubstrings
+//   features from commit 307a0c4 (and the new tokens added alongside this port).
+//
+//   No conditional transform DSL — every per-brand or per-category
+//   asymmetry is expressed as a separate rule (priority-ranked).
+// ---------------------------------------------------------------------
+
+const CURALEAF_BRAND_TABLE = { Grassroots: 'Grass Roots' } as const
+
+const PREVALENCE_TABLE = { I: 'Indica', S: 'Sativa', H: 'Hybrid' } as const
+
+const CURALEAF_GROUP_CLEAN = [
+  { name: 'filterTokens', version: 1, args: { pattern: '^\\d+PK$', caseInsensitive: true } },
+  { name: 'joinTokens', version: 1, args: { sep: '-' } },
+  { name: 'removeSubstrings', version: 1, args: { values: ['Diamond Infused', 'Glass Tip Infused'] } },
+  { name: 'cleanCultivar', version: 1 },
+] as const
+
+type CuraleafRuleOpts = {
+  id: string
+  priority: number
+  prefix: string
+  category: string
+  subcategory: string
+  formatSize: boolean
+  /** Parser literal that must match in the input. */
+  brandLit?: string
+  /** Projection literal — defaults to brandLit. Use when the source
+   *  brand token differs from the canonical brand (e.g. parser
+   *  'Grassroots' → output 'Grass Roots'). */
+  brandOut?: string
+  leadingMod?: string
+  groupNamePrefix?: string
+}
+
+function buildCuraleafRule(opts: CuraleafRuleOpts) {
+  // Parser: prefix - [brand-lit or capture] - [leading-mod lit -]? - mods - size - prev - optWs
+  const items: Array<Record<string, unknown>> = [
+    { kind: 'lit', value: opts.prefix },
+    { kind: 'token', token: 'dash' },
+  ]
+  if (opts.brandLit !== undefined) {
+    items.push({ kind: 'lit', value: opts.brandLit })
+  } else {
+    items.push({ kind: 'capture', name: 'brand', expr: { kind: 'token', token: 'cultivarText' } })
+  }
+  items.push({ kind: 'token', token: 'dash' })
+  if (opts.leadingMod !== undefined) {
+    items.push({ kind: 'lit', value: opts.leadingMod })
+    items.push({ kind: 'token', token: 'dash' })
+  }
+  items.push({
+    kind: 'captureMany',
+    name: 'mods',
+    expr: {
+      kind: 'sepBy',
+      min: 1,
+      max: 10,
+      expr: { kind: 'token', token: 'modToken' },
+      // Lookahead-aware dash that refuses to commit before the trailing
+      // `-<size>-<prev>` slots. Required because arcsecond's sepBy is
+      // non-backtracking once a separator is consumed.
+      sep: { kind: 'token', token: 'modDash' },
+    },
+  })
+  items.push({ kind: 'token', token: 'dash' })
+  items.push({ kind: 'capture', name: 'size', expr: { kind: 'token', token: 'sizeText' } })
+  items.push({ kind: 'token', token: 'dash' })
+  items.push({ kind: 'capture', name: 'prev', expr: { kind: 'token', token: 'prevToken' } })
+  items.push({ kind: 'token', token: 'optWs' })
+
+  // Projection:
+  //   brand        -> literal (specialized) or mapValue table (generic, passthrough)
+  //   category     -> literal
+  //   subcategory  -> literal
+  //   packCount    -> mods -> findToken(\d+PK, default '1PK') -> stripSuffix('PK') -> parseIntStrict
+  //                   (default '1PK' so stripSuffix yields '1' -> parseInt 1 when no pack token)
+  //   groupName    -> mods -> filter(pack) -> join('-') -> removeSubstrings -> cleanCultivar
+  //                   + optional `prepend({prefix: 'Essentials Briq '})` for vape-select
+  //   strainName   -> same as groupName (legacy mirrors strainName = groupName)
+  //   searchTerm   -> mods -> same cleaning pipeline + removeSubstrings(['Essentials Briq '])
+  //                   (no-op outside vape-select; matches legacy literal scrub)
+  //   prevalence   -> prev -> mapValue({I:'Indica',S:'Sativa',H:'Hybrid'})
+  //   size/variantTab/variantName -> placeholders, computed by rule transforms below.
+  const brandExpr = opts.brandLit !== undefined
+    ? { literal: opts.brandOut ?? opts.brandLit }
+    : {
+        from: 'brand',
+        transforms: [
+          { name: 'mapValue', version: 1, args: { table: { ...CURALEAF_BRAND_TABLE } } },
+        ],
+      }
+
+  const cleanedMods: Array<Record<string, unknown>> = [...CURALEAF_GROUP_CLEAN]
+  const groupNameTransforms: Array<Record<string, unknown>> = [...cleanedMods]
+  if (opts.groupNamePrefix !== undefined) {
+    groupNameTransforms.push({ name: 'prepend', version: 1, args: { prefix: opts.groupNamePrefix } })
+  }
+  // Legacy mirrors strainName from the LOCAL (unprefixed) groupName
+  // even when the output `groupName` carries the 'Essentials Briq ' prefix
+  // (vape-select). So strainName always uses the cleaned-but-unprefixed
+  // mod text, never the prepend.
+  const strainNameTransforms: Array<Record<string, unknown>> = [...cleanedMods]
+
+  const searchTermTransforms: Array<Record<string, unknown>> = [
+    ...CURALEAF_GROUP_CLEAN,
+    { name: 'removeSubstrings', version: 1, args: { values: ['Essentials Briq '] } },
+    { name: 'cleanCultivar', version: 1 },
+  ]
+
+  const project: Record<string, unknown> = {
+    brand: brandExpr,
+    category: { literal: opts.category },
+    subcategory: { literal: opts.subcategory },
+    packCount: {
+      fromList: 'mods',
+      transforms: [
+        { name: 'findToken', version: 1, args: { pattern: '^\\d+PK$', caseInsensitive: true, default: '1PK' } },
+        { name: 'stripSuffix', version: 1, args: { suffix: 'PK', caseInsensitive: true } },
+        { name: 'parseIntStrict', version: 1 },
+      ],
+    },
+    groupName: { fromList: 'mods', transforms: groupNameTransforms },
+    strainName: { fromList: 'mods', transforms: strainNameTransforms },
+    searchTerm: { fromList: 'mods', transforms: searchTermTransforms },
+    prevalence: {
+      from: 'prev',
+      transforms: [
+        { name: 'mapValue', version: 1, args: { table: { ...PREVALENCE_TABLE } } },
+      ],
+    },
+    size: { literal: '__placeholder__' },
+    variantTab: { literal: '__placeholder__' },
+    variantName: { literal: '__placeholder__' },
+  }
+
+  // Rule transforms:
+  //   Pre-Rolls:  size = sizeFromTotalAndPack(grams/packCount); variantTab + variantName composed.
+  //   Vapes/Flower: copy raw size capture into output.size (no formatGrams); then compose.
+  const ruleTransforms: Array<Record<string, unknown>> = []
+  if (opts.formatSize) {
+    ruleTransforms.push({
+      name: 'sizeFromTotalAndPack',
+      version: 1,
+      args: { totalCapture: 'size' },
+    })
+  } else {
+    // The capture name is 'size' and the output field is also 'size'; we
+    // need the raw capture text rather than the placeholder. Easiest: a
+    // setLiteral-by-reference doesn't exist, so reach into ctx via a
+    // tiny copy through prepend with empty prefix on a from:size value.
+    // Simpler: replace the placeholder projection with a from-projection.
+    project.size = { from: 'size' }
+  }
+  ruleTransforms.push({ name: 'composeVariantTab', version: 1, args: { sizeField: 'size' } })
+  ruleTransforms.push({ name: 'composeVariantName', version: 1 })
+
+  return {
+    id: opts.id,
+    priority: opts.priority,
+    parser: { kind: 'seq', items } as Record<string, unknown>,
+    project,
+    transforms: ruleTransforms,
+    goldens: [],
+  }
+}
+
+const curaleafConfig: TenantParserConfig = {
+  configVersion: 1,
+  parserId: 'pending-purchases.curaleaf',
+  scope: { tenantId: 'curaleaf', useCase: 'pending-purchases' },
+  dialectRef: { id: 'metrc-v1', version: 1 },
+  detect: { prefixes: ['Pr(', 'F(', 'V('] },
+  rules: [
+    // -- Pre-Roll (single, infused) ----------------------------------
+    buildCuraleafRule({
+      id: 'curaleaf.preroll-anthem-bold',
+      priority: 200,
+      prefix: 'Pr(Pre-Roll)',
+      category: 'Pre-Rolls',
+      subcategory: 'Infused',
+      formatSize: true,
+      brandLit: 'Anthem',
+      leadingMod: 'Bold',
+    }),
+    buildCuraleafRule({
+      id: 'curaleaf.preroll-grass-dh',
+      priority: 200,
+      prefix: 'Pr(Pre-Roll)',
+      category: 'Pre-Rolls',
+      subcategory: 'Infused',
+      formatSize: true,
+      brandLit: 'Grassroots',
+      brandOut: 'Grass Roots',
+      leadingMod: 'Dark Heart',
+    }),
+    buildCuraleafRule({
+      id: 'curaleaf.preroll-default',
+      priority: 100,
+      prefix: 'Pr(Pre-Roll)',
+      category: 'Pre-Rolls',
+      subcategory: 'Infused',
+      formatSize: true,
+    }),
+    // -- Pre-Roll Pack (multi) ---------------------------------------
+    // Anthem+Bold under Pre-Roll Pack overrides subcategory to 'Infused'.
+    buildCuraleafRule({
+      id: 'curaleaf.preroll-pack-anthem-bold',
+      priority: 200,
+      prefix: 'Pr(Pre-Roll Pack)',
+      category: 'Pre-Rolls',
+      subcategory: 'Infused',
+      formatSize: true,
+      brandLit: 'Anthem',
+      leadingMod: 'Bold',
+    }),
+    buildCuraleafRule({
+      id: 'curaleaf.preroll-pack-grass-dh',
+      priority: 200,
+      prefix: 'Pr(Pre-Roll Pack)',
+      category: 'Pre-Rolls',
+      subcategory: '',
+      formatSize: true,
+      brandLit: 'Grassroots',
+      brandOut: 'Grass Roots',
+      leadingMod: 'Dark Heart',
+    }),
+    buildCuraleafRule({
+      id: 'curaleaf.preroll-pack-default',
+      priority: 100,
+      prefix: 'Pr(Pre-Roll Pack)',
+      category: 'Pre-Rolls',
+      subcategory: '',
+      formatSize: true,
+    }),
+    // -- Whole Flower ------------------------------------------------
+    buildCuraleafRule({
+      id: 'curaleaf.flower-default',
+      priority: 100,
+      prefix: 'F(Whole Flower)',
+      category: 'Flower',
+      subcategory: 'Pre-Packaged Flower',
+      formatSize: false,
+    }),
+    // -- BRIQ Vapes --------------------------------------------------
+    buildCuraleafRule({
+      id: 'curaleaf.vape-select-essentials',
+      priority: 200,
+      prefix: 'V(BRIQ)',
+      category: 'Vapes',
+      subcategory: '',
+      formatSize: false,
+      brandLit: 'Select',
+      leadingMod: 'Essentials',
+      groupNamePrefix: 'Essentials Briq ',
+    }),
+    buildCuraleafRule({
+      id: 'curaleaf.vape-default',
+      priority: 100,
+      prefix: 'V(BRIQ)',
+      category: 'Vapes',
+      subcategory: '',
+      formatSize: false,
+    }),
+  ] as never,
+}
+
+// ---------------------------------------------------------------------
 
 const TENANT_CONFIGS: TenantParserConfig[] = [
   bytesConfig,
@@ -662,6 +950,7 @@ const TENANT_CONFIGS: TenantParserConfig[] = [
   jennysConfig,
   smartbudConfig,
   poshPuffConfig,
+  curaleafConfig,
 ]
 
 describe('metrc-v1 dialect: static safety verify', () => {
@@ -909,6 +1198,173 @@ describe('metrc-v1 dialect: parity with legacy parseProductName', () => {
         variantTab: '0.5g',
       },
     },
+    // -- Curaleaf parity cases ---------------------------------------
+    // The real-corpus seed (also pinned in EXACT_REUSE_PRODUCT_IDS).
+    {
+      parserId: 'pending-purchases.curaleaf',
+      input: 'Pr(Pre-Roll Pack)-Anthem-Indica Blend-10PK-3.5g-I',
+      expected: {
+        brand: 'Anthem',
+        category: 'Pre-Rolls',
+        groupName: 'Indica Blend',
+        packCount: 10,
+        prevalence: 'Indica',
+        searchTerm: 'Indica Blend',
+        size: '0.35g',
+        strainName: 'Indica Blend',
+        subcategory: '',
+        variantName: 'Anthem Indica Blend 10x 0.35g',
+        variantTab: '10x 0.35g',
+      },
+    },
+    // Pre-Roll (single, infused) default — no leading mod, no pack token.
+    {
+      parserId: 'pending-purchases.curaleaf',
+      input: 'Pr(Pre-Roll)-Anthem-Sour Diesel-1g-S',
+      expected: {
+        brand: 'Anthem',
+        category: 'Pre-Rolls',
+        groupName: 'Sour Diesel',
+        packCount: 1,
+        prevalence: 'Sativa',
+        searchTerm: 'Sour Diesel',
+        size: '1g',
+        strainName: 'Sour Diesel',
+        subcategory: 'Infused',
+        variantName: 'Anthem Sour Diesel 1g',
+        variantTab: '1g',
+      },
+    },
+    // Anthem + Bold under Pre-Roll Pack overrides subcategory to 'Infused'.
+    {
+      parserId: 'pending-purchases.curaleaf',
+      input: 'Pr(Pre-Roll Pack)-Anthem-Bold-Sour Diesel-10PK-3.5g-I',
+      expected: {
+        brand: 'Anthem',
+        category: 'Pre-Rolls',
+        groupName: 'Sour Diesel',
+        packCount: 10,
+        prevalence: 'Indica',
+        searchTerm: 'Sour Diesel',
+        size: '0.35g',
+        strainName: 'Sour Diesel',
+        subcategory: 'Infused',
+        variantName: 'Anthem Sour Diesel 10x 0.35g',
+        variantTab: '10x 0.35g',
+      },
+    },
+    // Grassroots + Dark Heart under Pre-Roll Pack -> brand alias.
+    {
+      parserId: 'pending-purchases.curaleaf',
+      input: 'Pr(Pre-Roll Pack)-Grassroots-Dark Heart-Cookies-2PK-1g-H',
+      expected: {
+        brand: 'Grass Roots',
+        category: 'Pre-Rolls',
+        groupName: 'Cookies',
+        packCount: 2,
+        prevalence: 'Hybrid',
+        searchTerm: 'Cookies',
+        size: '0.5g',
+        strainName: 'Cookies',
+        subcategory: '',
+        variantName: 'Grass Roots Cookies 2x 0.5g',
+        variantTab: '2x 0.5g',
+      },
+    },
+    // Grassroots brand alias under generic Pre-Roll (no leading mod).
+    {
+      parserId: 'pending-purchases.curaleaf',
+      input: 'Pr(Pre-Roll)-Grassroots-Wedding Cake-1g-H',
+      expected: {
+        brand: 'Grass Roots',
+        category: 'Pre-Rolls',
+        groupName: 'Wedding Cake',
+        packCount: 1,
+        prevalence: 'Hybrid',
+        searchTerm: 'Wedding Cake',
+        size: '1g',
+        strainName: 'Wedding Cake',
+        subcategory: 'Infused',
+        variantName: 'Grass Roots Wedding Cake 1g',
+        variantTab: '1g',
+      },
+    },
+    // Whole Flower — raw size (no formatGrams), subcategory 'Pre-Packaged Flower'.
+    {
+      parserId: 'pending-purchases.curaleaf',
+      input: 'F(Whole Flower)-Grassroots-Pineapple Express-3.5g-S',
+      expected: {
+        brand: 'Grass Roots',
+        category: 'Flower',
+        groupName: 'Pineapple Express',
+        packCount: 1,
+        prevalence: 'Sativa',
+        searchTerm: 'Pineapple Express',
+        size: '3.5g',
+        strainName: 'Pineapple Express',
+        subcategory: 'Pre-Packaged Flower',
+        variantName: 'Grass Roots Pineapple Express 3.5g',
+        variantTab: '3.5g',
+      },
+    },
+    // Vapes default (non-Select) — raw size, groupName not prefixed.
+    {
+      parserId: 'pending-purchases.curaleaf',
+      input: 'V(BRIQ)-Anthem-Indica Blend-0.5g-I',
+      expected: {
+        brand: 'Anthem',
+        category: 'Vapes',
+        groupName: 'Indica Blend',
+        packCount: 1,
+        prevalence: 'Indica',
+        searchTerm: 'Indica Blend',
+        size: '0.5g',
+        strainName: 'Indica Blend',
+        subcategory: '',
+        variantName: 'Anthem Indica Blend 0.5g',
+        variantTab: '0.5g',
+      },
+    },
+    // Vape + Select + Essentials — groupName prefixed with 'Essentials Briq ',
+    // searchTerm strips that prefix back off; strainName mirrors groupName.
+    {
+      parserId: 'pending-purchases.curaleaf',
+      input: 'V(BRIQ)-Select-Essentials-Cookies-0.5g-H',
+      expected: {
+        brand: 'Select',
+        category: 'Vapes',
+        groupName: 'Essentials Briq Cookies',
+        packCount: 1,
+        prevalence: 'Hybrid',
+        searchTerm: 'Cookies',
+        size: '0.5g',
+        // strainName mirrors the LOCAL (unprefixed) groupName in legacy,
+        // even though the output `groupName` carries the 'Essentials Briq '
+        // prefix for vape-select.
+        strainName: 'Cookies',
+        subcategory: '',
+        variantName: 'Select Essentials Briq Cookies 0.5g',
+        variantTab: '0.5g',
+      },
+    },
+    // Diamond Infused substring scrub inside a modifier token body.
+    {
+      parserId: 'pending-purchases.curaleaf',
+      input: 'Pr(Pre-Roll Pack)-Anthem-Sour Diesel Diamond Infused-10PK-3.5g-I',
+      expected: {
+        brand: 'Anthem',
+        category: 'Pre-Rolls',
+        groupName: 'Sour Diesel',
+        packCount: 10,
+        prevalence: 'Indica',
+        searchTerm: 'Sour Diesel',
+        size: '0.35g',
+        strainName: 'Sour Diesel',
+        subcategory: '',
+        variantName: 'Anthem Sour Diesel 10x 0.35g',
+        variantTab: '10x 0.35g',
+      },
+    },
   ]
 
   for (const c of cases) {
@@ -921,12 +1377,19 @@ describe('metrc-v1 dialect: parity with legacy parseProductName', () => {
       }
     })
 
-    it(`${c.parserId}: "${c.input}" matches legacy parseProductName`, () => {
+    it(`${c.parserId}: "${c.input}" matches legacy parseProductName`, async () => {
       const compiled = compiledBy.get(c.parserId)!
       const result = parseWith(compiled, c.input)
       expect(result.ok).toBe(true)
       if (result.ok) {
-        const legacy = legacyParseProductName(c.input)
+        // Re-import the legacy module per case so the shared
+        // CURALEAF_CATEGORY_MAP mutation in parseCuraleafName
+        // (mapping.subcategory = 'Infused' for the Anthem+Bold branch)
+        // can't leak between parity cases. parsekit does NOT reproduce
+        // that mutation bug — see Oracle critique notes.
+        vi.resetModules()
+        const fresh = await import('../../../worker/jobs/generatePendingPurchasePacketJob.js')
+        const legacy = fresh.parseProductName(c.input)
         expect(result.output).toEqual(legacy)
       }
     })
