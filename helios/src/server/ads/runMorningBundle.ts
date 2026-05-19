@@ -87,15 +87,54 @@ export async function runMorningBundle(opts?: {
   const analysisScript = path.join(gadsDir, 'scripts', 'run-analysis.ts')
   await assertExists(analysisScript, 'analysis')
 
+  // The analysis script's createLLMClientFromEnv() prefers an
+  // explicit env-var path (LLM_ENDPOINT_BASE + LLM_API_KEY /
+  // BEDROCK_MANTLE_BEARER_TOKEN). When neither LLM_ENDPOINT_BASE
+  // nor OPENAI_BASE_URL is set it falls back to reading a token
+  // file under ~/.secret/bedrock/ — that path doesn't exist for
+  // the helios user, so the analysis would silently swap in
+  // mockL2Prediction() and ship a bundle with 0 CSV rows and an
+  // HTML packet whose "main issues" stringified to '[object
+  // Object]'. We default the endpoint to the same Bedrock Mantle
+  // URL the helios worker already uses (see
+  // helios/src/worker/config/env.ts:55) so the env-var path is
+  // hit and the LLM call really happens.
+  const analysisEnv: Record<string, string> = { ...processEnvAsRecord() }
+  if (!analysisEnv.LLM_ENDPOINT_BASE && !analysisEnv.OPENAI_BASE_URL) {
+    analysisEnv.LLM_ENDPOINT_BASE =
+      analysisEnv.BEDROCK_MANTLE_BASE_URL ??
+      'https://bedrock-mantle.us-east-2.api.aws/v1'
+  }
+
   onLog('running L1→L2 analysis')
   const analysis = await runChild(
     tsxBin,
     [analysisScript, '--snapshot', snapshot.path, '--output-dir', prodDir],
-    { cwd: gadsDir },
+    { cwd: gadsDir, env: analysisEnv },
   )
   if (analysis.exitCode !== 0) {
     throw new MorningBundleRunError(
       `run-analysis.ts exited with code ${analysis.exitCode}`,
+      'analysis',
+      tail(`${analysis.stdout}\n${analysis.stderr}`, 4000),
+    )
+  }
+
+  // run-analysis.ts swallows LLM failures and falls back to
+  // mockL2Prediction() (see ads/google/scripts/run-analysis.ts).
+  // The mock has empty ad_actions / trial_plans (→ 0 CSVs) and
+  // stringifies anomaly details to '[object Object]' inside the
+  // HTML packet's "main issues" field. Detect the fallback by
+  // its warning and surface the underlying LLM error instead of
+  // shipping a useless bundle.
+  const mockWarning = detectMockFallback(analysis.stdout, analysis.stderr)
+  if (mockWarning) {
+    throw new MorningBundleRunError(
+      `L1→L2 analysis fell back to mock predictions: ${mockWarning}. ` +
+        `The resulting bundle would have 0 CSV rows and a garbled HTML packet, ` +
+        `so it is rejected. Fix the LLM configuration ` +
+        `(LLM_ENDPOINT_BASE + BEDROCK_MANTLE_BEARER_TOKEN on helios-server) ` +
+        `and retry.`,
       'analysis',
       tail(`${analysis.stdout}\n${analysis.stderr}`, 4000),
     )
@@ -255,13 +294,13 @@ interface ChildResult {
 function runChild(
   cmd: string,
   args: string[],
-  opts: { cwd: string },
+  opts: { cwd: string; env?: Record<string, string> },
 ): Promise<ChildResult> {
   return new Promise((resolve) => {
     const child = spawn(cmd, args, {
       cwd: opts.cwd,
       stdio: ['ignore', 'pipe', 'pipe'],
-      env: process.env,
+      env: opts.env ?? processEnvAsRecord(),
     })
     let stdout = ''
     let stderr = ''
@@ -305,6 +344,33 @@ async function assertExists(p: string, stage: 'analysis' | 'bundle'): Promise<vo
 function tail(s: string, n: number): string {
   if (s.length <= n) return s
   return s.slice(-n)
+}
+
+function processEnvAsRecord(): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const [k, v] of Object.entries(process.env)) {
+    if (typeof v === 'string') out[k] = v
+  }
+  return out
+}
+
+/**
+ * run-analysis.ts prints a warning of the form
+ *   ⚠️  LLM unavailable or failed, using mock predictions
+ *       Error: <message>
+ * to stderr whenever createLLMClientFromEnv() / the predictor
+ * throws a recoverable error and it falls back to
+ * mockL2Prediction. Detect that warning and return the underlying
+ * error message so the route layer can surface it instead of
+ * silently shipping a useless bundle.
+ */
+function detectMockFallback(stdout: string, stderr: string): string | null {
+  const haystack = `${stdout}\n${stderr}`
+  if (!/using mock predictions/i.test(haystack)) {
+    return null
+  }
+  const m = haystack.match(/Error:\s*([^\n]+)/i)
+  return m ? m[1].trim() : 'reason not captured in script output'
 }
 
 function renderReadme(args: { runId: string; snapshot: Snapshot; snapshotAgeHours: number }): string {
