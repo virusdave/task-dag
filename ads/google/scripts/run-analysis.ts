@@ -141,6 +141,32 @@ function runL1Extraction(ads: AdSnapshot[], config: ReturnType<typeof loadL1Conf
 }
 
 /**
+ * Render a human-readable description from an Anomaly's `details`
+ * Record. The previous code did `a.details.toString()` which yields
+ * the literal '[object Object]' for any non-trivial details payload
+ * — that string then flowed all the way through to the HTML packet's
+ * "Main Issues" field. This helper picks the first interesting field
+ * and falls back to the anomaly type when details is empty.
+ */
+function summarizeAnomalyDetails(
+  details: Record<string, unknown> | null | undefined,
+  fallback: string,
+): string {
+  if (!details || typeof details !== 'object') return fallback;
+  const entries = Object.entries(details).filter(([, v]) => v !== null && v !== undefined && v !== '');
+  if (entries.length === 0) return fallback;
+  // Prefer a 'description' / 'message' / 'reason' field if present.
+  for (const key of ['description', 'message', 'reason', 'detail', 'summary']) {
+    const hit = entries.find(([k]) => k === key);
+    if (hit && typeof hit[1] === 'string') return hit[1];
+  }
+  // Otherwise emit a compact "key=value, key=value" summary.
+  return entries
+    .map(([k, v]) => `${k}=${typeof v === 'object' ? JSON.stringify(v) : String(v)}`)
+    .join(', ');
+}
+
+/**
  * Mock L2 prediction (simplified - would use LLM)
  */
 function mockL2Prediction(familySummaries: L1FamilySummary[], runId: string): L2PredictionOutput {
@@ -153,7 +179,7 @@ function mockL2Prediction(familySummaries: L1FamilySummary[], runId: string): L2
       risk_score: summary.anomalies.length / 10,
       issues: summary.anomalies.map(a => ({
         issue_code: a.anomaly_type,
-        issue_description: a.details.toString(),
+        issue_description: summarizeAnomalyDetails(a.details, a.anomaly_type),
         affected_ad_count: 1,
         severity: a.severity,
       })),
@@ -287,4 +313,12 @@ async function main() {
   console.log(`  2. Import CSVs 001-005 into Ads Editor sequentially`);
 }
 
-main().catch(console.error);
+// Propagate failures as a non-zero exit code so callers (e.g. the
+// helios morning-bundle pipeline) can detect them. Previously this
+// was `main().catch(console.error)` which logged the error but kept
+// exit 0 — silent failures shipped stale bundles to the operator.
+main().catch((err) => {
+  console.error('run-analysis.ts: fatal error');
+  console.error(err instanceof Error ? (err.stack ?? err.message) : err);
+  process.exit(1);
+});

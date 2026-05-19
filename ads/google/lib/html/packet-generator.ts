@@ -11,6 +11,7 @@ import type {
   CampaignSection,
 } from '../shared/types.js';
 import { formatFamilyKey, createAdSnippet, percentage, round } from '../shared/utils.js';
+import { safeRender, safeText, safeToken, escapeHtml } from './safe-render.js';
 
 /**
  * Generate complete HTML packet
@@ -202,166 +203,474 @@ function buildIssueTaxonomy() {
   };
 }
 
+// ----------------------------------------------------------------------
+// Render helpers — all interpolations route through safe-render so the
+// packet never shows '[object Object]' or bare 'undefined' even when
+// the L2 LLM (or mock fallback) produces malformed data.
+// ----------------------------------------------------------------------
+
+const asArray = <T = unknown>(value: unknown): T[] =>
+  Array.isArray(value) ? (value as T[]) : [];
+
+const formatDateTime = (value: unknown): string => {
+  if (value instanceof Date && !Number.isNaN(value.getTime())) return value.toLocaleString();
+  if (typeof value === 'string' || typeof value === 'number') {
+    const d = new Date(value);
+    if (!Number.isNaN(d.getTime())) return d.toLocaleString();
+  }
+  return '—';
+};
+
+const riskClass = (risk: unknown): string => `risk-${safeToken(risk, 'unknown')}`;
+
+const riskLabel = (risk: unknown): string => {
+  if (typeof risk !== 'string' || risk.trim() === '') return safeText(risk);
+  return escapeHtml(risk.toUpperCase());
+};
+
+function renderRiskBadge(risk: unknown): string {
+  return `<span class="risk-badge ${riskClass(risk)}">${riskLabel(risk)}</span>`;
+}
+
+function renderCsvChip(ref: unknown): string {
+  return `<span class="csv-ref">${safeText(ref)}</span>`;
+}
+
+function renderActionCard(action: unknown): string {
+  const a = (action ?? {}) as Record<string, unknown>;
+  const issues = asArray(a.issue_codes);
+  return `
+    <div class="action-card">
+      <div class="action-row"><span class="kv-key">Ad ID</span><span class="kv-val">${safeText(a.ad_id)}</span></div>
+      <div class="action-row"><span class="kv-key">Issues</span><span class="kv-val">${safeRender(issues, { mode: 'inline' })}</span></div>
+      <div class="action-row"><span class="kv-key">CSV</span><span class="kv-val">${renderCsvChip(a.csv_ref)}</span></div>
+    </div>`;
+}
+
+function renderActionGroup(label: string, csvLabel: string, actions: unknown, tone: 'neutral' | 'warning'): string {
+  const list = asArray(actions);
+  if (list.length === 0) return '';
+  const toneClass = tone === 'warning' ? 'group warning' : 'group';
+  return `
+    <section class="${toneClass}">
+      <h3 class="group-title">${safeText(label)} <span class="group-meta">${safeText(csvLabel)}</span> <span class="count-pill">${list.length}</span></h3>
+      <div class="action-list">${list.map((a) => renderActionCard(a)).join('')}</div>
+    </section>`;
+}
+
+function renderTrialCard(trial: unknown): string {
+  const t = (trial ?? {}) as Record<string, unknown>;
+  const refs = asArray(t.csv_refs);
+  return `
+    <article class="trial-card">
+      <h3 class="trial-name">${safeText(t.trial_name)}</h3>
+      <dl class="kv-grid">
+        <dt>Hypothesis</dt><dd>${safeRender(t.hypothesis, { mode: 'auto' })}</dd>
+        <dt>Budget</dt><dd>${t.budget !== undefined && t.budget !== null ? `$${safeText(t.budget)}/day` : safeText(undefined)}</dd>
+        <dt>Run time</dt><dd>${safeText(t.expected_run_time)}</dd>
+        <dt>Policy question</dt><dd>${safeRender(t.policy_questions, { mode: 'auto' })}</dd>
+        <dt>CSV refs</dt><dd class="chip-row">${refs.length > 0 ? refs.map((r) => renderCsvChip(r)).join(' ') : safeText(undefined)}</dd>
+      </dl>
+    </article>`;
+}
+
+function renderFamilyDetails(section: unknown, idx: number): string {
+  const s = (section ?? {}) as Record<string, unknown>;
+  const summary = (s.summary ?? {}) as Record<string, unknown>;
+  const risk = summary.risk_level;
+  const repairCount = asArray(s.repair_actions).length;
+  const replaceCount = asArray(s.replacement_actions).length;
+  const pauseCount = asArray(s.pause_actions).length;
+  const trialCount = asArray(s.trial_plans).length;
+  const isHigh = typeof risk === 'string' && risk.toLowerCase() === 'high';
+  return `
+    <details id="family-${idx}" class="family-card" ${isHigh ? 'open' : ''}>
+      <summary class="family-summary">
+        <span class="family-name">${safeText(s.campaign_name)}</span>
+        <span class="family-meta">
+          ${renderRiskBadge(risk)}
+          ${repairCount > 0 ? `<span class="count-pill repair" title="Repair actions">${repairCount}R</span>` : ''}
+          ${replaceCount > 0 ? `<span class="count-pill replace" title="Replacement actions">${replaceCount}X</span>` : ''}
+          ${pauseCount > 0 ? `<span class="count-pill pause" title="Pause actions">${pauseCount}P</span>` : ''}
+          ${trialCount > 0 ? `<span class="count-pill trial" title="Trial plans">${trialCount}T</span>` : ''}
+        </span>
+      </summary>
+      <div class="family-body">
+        <dl class="kv-grid">
+          <dt>Risk</dt><dd>${renderRiskBadge(risk)}</dd>
+          <dt>Main issues</dt><dd>${safeRender(summary.main_issues, { mode: 'auto' })}</dd>
+        </dl>
+        ${renderActionGroup('Repair actions', 'CSV 002', s.repair_actions, 'neutral')}
+        ${renderActionGroup('Replacement actions', 'CSV 003', s.replacement_actions, 'neutral')}
+        ${renderActionGroup('Pause actions — review carefully', 'CSV 004', s.pause_actions, 'warning')}
+        ${asArray(s.trial_plans).length > 0 ? `
+          <section class="group">
+            <h3 class="group-title">Trial plans <span class="group-meta">CSV 001 / 005</span> <span class="count-pill">${trialCount}</span></h3>
+            <div class="trial-list">${asArray(s.trial_plans).map((t) => renderTrialCard(t)).join('')}</div>
+          </section>` : ''}
+      </div>
+    </details>`;
+}
+
 /**
- * Render HTML packet to string
+ * Render HTML packet to string. Mobile-first; every value flows
+ * through safe-render so undefineds/objects/arrays of objects
+ * degrade gracefully instead of producing '[object Object]'.
  */
 function renderHTMLPacket(packet: HTMLPacket): string {
+  const exec = (packet.executive_summary ?? {}) as Record<string, unknown>;
+  const overviewFamilies = asArray((packet.global_overview ?? {} as any).families);
+  const sections = asArray(packet.campaign_sections);
+  const taxonomy = (packet.issue_taxonomy ?? {}) as Record<string, unknown>;
+  const riskDefs = (taxonomy.risk_definitions ?? {}) as Record<string, unknown>;
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>${packet.title}</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <title>${safeText(packet.title)}</title>
   <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; line-height: 1.6; color: #333; background: #f5f5f5; padding: 20px; }
-    .container { max-width: 1200px; margin: 0 auto; background: white; padding: 40px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
-    h1 { font-size: 2em; margin-bottom: 10px; color: #1a1a1a; }
-    h2 { font-size: 1.5em; margin: 30px 0 15px; padding-bottom: 10px; border-bottom: 2px solid #4CAF50; color: #2c3e50; }
-    h3 { font-size: 1.2em; margin: 20px 0 10px; color: #34495e; }
-    .metadata { color: #666; margin-bottom: 20px; font-size: 0.9em; }
-    .exec-summary { background: #e8f5e9; padding: 20px; border-radius: 8px; margin: 20px 0; }
-    .metric { display: inline-block; margin: 10px 20px 10px 0; }
-    .metric-value { font-size: 2em; font-weight: bold; color: #4CAF50; display: block; }
-    .metric-label { font-size: 0.9em; color: #666; }
-    .checklist { list-style: none; margin: 15px 0; }
-    .checklist li:before { content: "✓ "; color: #4CAF50; font-weight: bold; }
-    table { width: 100%; border-collapse: collapse; margin: 15px 0; }
-    th, td { padding: 12px; text-align: left; border-bottom: 1px solid #ddd; }
-    th { background: #f8f9fa; font-weight: 600; color: #495057; }
-    .risk-high { color: #d32f2f; font-weight: bold; }
-    .risk-medium { color: #f57c00; font-weight: bold; }
-    .risk-low { color: #388e3c; font-weight: bold; }
-    .trial { background: #fff3e0; padding: 15px; border-radius: 5px; margin: 15px 0; border-left: 4px solid #ff9800; }
-    .action { background: #f5f5f5; padding: 10px; margin: 10px 0; border-radius: 4px; }
-    .csv-ref { font-family: monospace; background: #263238; color: #aed581; padding: 2px 6px; border-radius: 3px; font-size: 0.9em; }
-    .warning { background: #fff3cd; border-left: 4px solid #ffc107; padding: 15px; margin: 15px 0; }
+    :root {
+      --bg: #f7f7f8;
+      --surface: #ffffff;
+      --surface-2: #f1f3f5;
+      --text: #1a1a1a;
+      --text-muted: #5f6b76;
+      --border: #e4e7ea;
+      --accent: #2e7d32;
+      --accent-fg: #ffffff;
+      --high: #c62828;
+      --medium: #ef6c00;
+      --low: #2e7d32;
+      --warn-bg: #fff8e1;
+      --warn-border: #f9a825;
+      --chip-bg: #1f2933;
+      --chip-fg: #c5e1a5;
+      --radius: 10px;
+      --tap: 44px;
+      --max-w: 760px;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0f1115;
+        --surface: #181b21;
+        --surface-2: #1f242c;
+        --text: #f0f2f5;
+        --text-muted: #9aa4ad;
+        --border: #2a2f37;
+        --accent: #66bb6a;
+        --accent-fg: #0f1115;
+        --high: #ef9a9a;
+        --medium: #ffb74d;
+        --low: #a5d6a7;
+        --warn-bg: #3a2f10;
+        --warn-border: #ffb300;
+        --chip-bg: #0c1116;
+        --chip-fg: #c5e1a5;
+      }
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      line-height: 1.5;
+      color: var(--text);
+      background: var(--bg);
+      -webkit-font-smoothing: antialiased;
+      -webkit-text-size-adjust: 100%;
+    }
+    a { color: inherit; }
+    .sticky-header {
+      position: sticky; top: 0; z-index: 20;
+      background: color-mix(in srgb, var(--surface) 92%, transparent);
+      backdrop-filter: saturate(140%) blur(8px);
+      -webkit-backdrop-filter: saturate(140%) blur(8px);
+      border-bottom: 1px solid var(--border);
+      padding: env(safe-area-inset-top, 0) clamp(12px, 4vw, 24px) 10px;
+    }
+    .sticky-header .title {
+      font-size: clamp(1.05rem, 4.2vw, 1.5rem);
+      font-weight: 700;
+      margin: 12px 0 4px;
+      line-height: 1.2;
+    }
+    .sticky-header .meta {
+      display: flex; flex-wrap: wrap; gap: 6px 12px;
+      font-size: 0.78rem; color: var(--text-muted);
+    }
+    .container {
+      max-width: var(--max-w);
+      margin: 0 auto;
+      padding: clamp(12px, 4vw, 24px);
+      padding-bottom: max(24px, env(safe-area-inset-bottom, 0));
+    }
+    h2 { font-size: clamp(1.05rem, 4vw, 1.3rem); margin: 20px 0 10px; color: var(--text); }
+    h3 { font-size: clamp(0.95rem, 3.6vw, 1.1rem); margin: 14px 0 8px; color: var(--text); }
+    p  { margin: 6px 0; }
+    .panel {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: clamp(12px, 3vw, 18px);
+      margin: 12px 0;
+    }
+    .panel.warning { background: var(--warn-bg); border-color: var(--warn-border); }
+    .metric-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+      gap: 10px;
+      margin: 8px 0 4px;
+    }
+    .metric {
+      background: var(--surface-2);
+      border-radius: 8px;
+      padding: 10px 12px;
+      text-align: left;
+    }
+    .metric-value { font-size: 1.6rem; font-weight: 700; color: var(--accent); display: block; line-height: 1.1; }
+    .metric-label { font-size: 0.78rem; color: var(--text-muted); display: block; margin-top: 2px; }
+    .checklist { list-style: none; margin: 6px 0; padding-left: 0; }
+    .checklist li {
+      padding: 6px 0 6px 22px;
+      position: relative;
+      border-bottom: 1px solid var(--border);
+    }
+    .checklist li:last-child { border-bottom: none; }
+    .checklist li:before {
+      content: "✓";
+      color: var(--accent);
+      font-weight: 700;
+      position: absolute;
+      left: 0;
+      top: 6px;
+    }
+    .family-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      margin: 10px 0;
+      overflow: hidden;
+    }
+    .family-summary {
+      list-style: none;
+      cursor: pointer;
+      padding: 12px 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      min-height: var(--tap);
+      align-items: flex-start;
+    }
+    .family-summary::-webkit-details-marker { display: none; }
+    .family-summary::after {
+      content: "▸";
+      color: var(--text-muted);
+      font-size: 0.9rem;
+      align-self: flex-end;
+      margin-top: -22px;
+      transition: transform 0.15s ease;
+    }
+    details[open] > .family-summary::after { transform: rotate(90deg); }
+    .family-name { font-weight: 600; word-break: break-word; }
+    .family-meta { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+    .family-body { padding: 0 14px 14px; border-top: 1px solid var(--border); }
+    .risk-badge {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-size: 0.72rem;
+      font-weight: 700;
+      letter-spacing: 0.03em;
+      text-transform: uppercase;
+      color: var(--accent-fg);
+      background: var(--text-muted);
+    }
+    .risk-high   { background: var(--high); color: #ffffff; }
+    .risk-medium { background: var(--medium); color: #1a1a1a; }
+    .risk-low    { background: var(--low); color: #ffffff; }
+    .count-pill {
+      display: inline-block;
+      min-width: 28px;
+      padding: 2px 7px;
+      border-radius: 999px;
+      background: var(--surface-2);
+      color: var(--text);
+      font-size: 0.72rem;
+      font-weight: 600;
+      text-align: center;
+      border: 1px solid var(--border);
+    }
+    .count-pill.repair  { background: rgba(46,125,50,0.12); }
+    .count-pill.replace { background: rgba(239,108,0,0.12); }
+    .count-pill.pause   { background: rgba(198,40,40,0.12); }
+    .count-pill.trial   { background: rgba(25,118,210,0.12); }
+    .kv-grid {
+      display: grid;
+      grid-template-columns: minmax(110px, max-content) 1fr;
+      gap: 4px 12px;
+      margin: 6px 0 10px;
+    }
+    .kv-grid dt { color: var(--text-muted); font-size: 0.85rem; padding-top: 2px; }
+    .kv-grid dd { margin: 0; word-break: break-word; }
+    .group { margin: 14px 0; }
+    .group-title {
+      display: flex; align-items: center; gap: 8px;
+      margin: 0 0 8px;
+    }
+    .group-meta {
+      font-size: 0.72rem;
+      color: var(--text-muted);
+      font-weight: 500;
+    }
+    .action-list { display: flex; flex-direction: column; gap: 8px; }
+    .action-card {
+      background: var(--surface-2);
+      border-radius: 8px;
+      padding: 10px 12px;
+      border: 1px solid var(--border);
+    }
+    .action-row {
+      display: grid;
+      grid-template-columns: minmax(70px, max-content) 1fr;
+      gap: 6px 12px;
+      padding: 4px 0;
+      align-items: baseline;
+    }
+    .action-row + .action-row { border-top: 1px dashed var(--border); }
+    .kv-key { color: var(--text-muted); font-size: 0.82rem; }
+    .kv-val { word-break: break-word; }
+    .csv-ref {
+      display: inline-block;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      background: var(--chip-bg);
+      color: var(--chip-fg);
+      padding: 4px 8px;
+      border-radius: 6px;
+      font-size: 0.8rem;
+      line-height: 1;
+      min-height: 24px;
+    }
+    .chip-row { display: flex; flex-wrap: wrap; gap: 6px; }
+    .trial-list { display: flex; flex-direction: column; gap: 10px; }
+    .trial-card {
+      background: var(--surface-2);
+      border-radius: 8px;
+      padding: 12px;
+      border: 1px solid var(--border);
+    }
+    .trial-name { margin: 0 0 6px; font-size: 1rem; }
+    .nav-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+    .nav-item a {
+      display: flex; justify-content: space-between; align-items: center; gap: 10px;
+      min-height: var(--tap);
+      padding: 10px 12px;
+      border-radius: 8px;
+      background: var(--surface-2);
+      text-decoration: none;
+      color: var(--text);
+      border: 1px solid var(--border);
+    }
+    .nav-item a:active { background: var(--surface); }
+    .nav-name { word-break: break-word; }
+    .nav-counts { display: flex; gap: 4px; flex-shrink: 0; }
+    .appendix { margin-top: 24px; }
+    .appendix > summary {
+      cursor: pointer;
+      padding: 12px 0;
+      font-weight: 600;
+      color: var(--text-muted);
+      list-style: none;
+    }
+    .appendix > summary::after { content: " ▸"; }
+    .appendix[open] > summary::after { content: " ▾"; }
+    /* safe-render fallback styles */
+    .sr-empty { color: var(--text-muted); }
+    .sr-truncated { color: var(--text-muted); font-style: italic; }
+    .sr-list { margin: 4px 0 4px 18px; padding: 0; }
+    .sr-list li { margin: 2px 0; }
+    .sr-object { margin: 4px 0; display: grid; grid-template-columns: minmax(90px, max-content) 1fr; gap: 2px 10px; }
+    .sr-object .sr-row { display: contents; }
+    .sr-object dt { color: var(--text-muted); font-size: 0.82rem; }
+    .sr-object dd { margin: 0; }
+    @media (min-width: 720px) {
+      :root { --max-w: 880px; }
+      .kv-grid { grid-template-columns: 160px 1fr; }
+    }
   </style>
 </head>
 <body>
-  <div class="container">
-    <h1>${packet.title}</h1>
-    <div class="metadata">
-      Run ID: ${packet.run_id} | Snapshot: ${packet.snapshot_date} | Generated: ${new Date(packet.generated_at).toLocaleString()}
-    </div>
-    
-    <div class="exec-summary">
-      <h2>Executive Summary</h2>
-      <div>
-        <div class="metric">
-          <span class="metric-value">${packet.executive_summary.total_campaigns}</span>
-          <span class="metric-label">Campaigns</span>
-        </div>
-        <div class="metric">
-          <span class="metric-value">${packet.executive_summary.high_risk_families}</span>
-          <span class="metric-label">High Risk Families</span>
-        </div>
-        <div class="metric">
-          <span class="metric-value">${packet.executive_summary.repair_actions}</span>
-          <span class="metric-label">Repairs</span>
-        </div>
-        <div class="metric">
-          <span class="metric-value">${packet.executive_summary.replacement_actions}</span>
-          <span class="metric-label">Replacements</span>
-        </div>
-        <div class="metric">
-          <span class="metric-value">${packet.executive_summary.trial_groups}</span>
-          <span class="metric-label">Trial Groups</span>
-        </div>
+  <header class="sticky-header">
+    <div class="container" style="padding-top: 0; padding-bottom: 0;">
+      <div class="title">${safeText(packet.title)}</div>
+      <div class="meta">
+        <span><strong>Run</strong> ${safeText(packet.run_id)}</span>
+        <span><strong>Snapshot</strong> ${safeText(packet.snapshot_date)}</span>
+        <span><strong>Generated</strong> ${safeText(formatDateTime(packet.generated_at))}</span>
       </div>
-      <h3>What to Do</h3>
+    </div>
+  </header>
+
+  <main class="container">
+    <section class="panel">
+      <h2 style="margin-top:0">Executive summary</h2>
+      <div class="metric-grid">
+        <div class="metric"><span class="metric-value">${safeText(exec.total_campaigns)}</span><span class="metric-label">Campaigns</span></div>
+        <div class="metric"><span class="metric-value">${safeText(exec.high_risk_families)}</span><span class="metric-label">High-risk families</span></div>
+        <div class="metric"><span class="metric-value">${safeText(exec.repair_actions)}</span><span class="metric-label">Repairs</span></div>
+        <div class="metric"><span class="metric-value">${safeText(exec.replacement_actions)}</span><span class="metric-label">Replacements</span></div>
+        <div class="metric"><span class="metric-value">${safeText(exec.trial_groups)}</span><span class="metric-label">Trial groups</span></div>
+      </div>
+      <h3>What to do</h3>
       <ul class="checklist">
-        ${packet.executive_summary.checklist.map(item => `<li>${item}</li>`).join('')}
+        ${asArray(exec.checklist).map((item) => `<li>${safeRender(item, { mode: 'inline' })}</li>`).join('')}
       </ul>
-    </div>
-    
-    <h2>Global Overview</h2>
-    <table>
-      <thead>
-        <tr>
-          <th>Family</th>
-          <th>Risk</th>
-          <th>Repairs</th>
-          <th>Replacements</th>
-          <th>Trials</th>
-        </tr>
-      </thead>
-      <tbody>
-        ${packet.global_overview.families.map(f => `
-          <tr>
-            <td><a href="#${f.anchor_id}">${formatFamilyKey(f.family_key)}</a></td>
-            <td class="risk-${f.family_risk}">${f.family_risk.toUpperCase()}</td>
-            <td>${f.repair_count}</td>
-            <td>${f.replacement_count}</td>
-            <td>${f.trial_count}</td>
-          </tr>
-        `).join('')}
-      </tbody>
-    </table>
-    
-    ${packet.campaign_sections.map((section, idx) => `
-      <div id="family-${idx}">
-        <h2>${section.campaign_name}</h2>
-        <p><strong>Risk Level:</strong> <span class="risk-${section.summary.risk_level}">${section.summary.risk_level.toUpperCase()}</span></p>
-        <p><strong>Main Issues:</strong> ${section.summary.main_issues.join(', ') || 'None'}</p>
-        
-        ${section.repair_actions.length > 0 ? `
-          <h3>Repair Actions (CSV 002)</h3>
-          ${section.repair_actions.map(a => `
-            <div class="action">
-              <strong>Ad ID:</strong> ${a.ad_id} | 
-              <strong>Issues:</strong> ${a.issue_codes.join(', ')} | 
-              <span class="csv-ref">${a.csv_ref}</span>
-            </div>
+    </section>
+
+    ${overviewFamilies.length > 0 ? `
+    <section class="panel">
+      <h2 style="margin-top:0">Jump to family</h2>
+      <ul class="nav-list">
+        ${overviewFamilies.map((f: any) => {
+          const anchor = safeToken(f?.anchor_id, 'family');
+          const repair = Number(f?.repair_count) || 0;
+          const replace = Number(f?.replacement_count) || 0;
+          const trial = Number(f?.trial_count) || 0;
+          return `
+          <li class="nav-item">
+            <a href="#${anchor}">
+              <span class="nav-name">${safeText(formatFamilyKey((f?.family_key ?? {}) as any))} ${renderRiskBadge(f?.family_risk)}</span>
+              <span class="nav-counts">
+                ${repair > 0 ? `<span class="count-pill repair">${repair}R</span>` : ''}
+                ${replace > 0 ? `<span class="count-pill replace">${replace}X</span>` : ''}
+                ${trial > 0 ? `<span class="count-pill trial">${trial}T</span>` : ''}
+              </span>
+            </a>
+          </li>`;
+        }).join('')}
+      </ul>
+    </section>` : ''}
+
+    <section>
+      <h2>Per-family detail</h2>
+      ${sections.map((section, idx) => renderFamilyDetails(section, idx)).join('')}
+    </section>
+
+    <details class="appendix">
+      <summary>Reference: risk levels &amp; constraints</summary>
+      <div class="panel">
+        <h3 style="margin-top:0">Risk levels</h3>
+        <dl class="kv-grid">
+          ${Object.entries(riskDefs).map(([level, def]) => `
+            <dt>${renderRiskBadge(level)}</dt>
+            <dd>${safeRender(def, { mode: 'auto' })}</dd>
           `).join('')}
-        ` : ''}
-        
-        ${section.replacement_actions.length > 0 ? `
-          <h3>Replacement Actions (CSV 003)</h3>
-          ${section.replacement_actions.map(a => `
-            <div class="action">
-              <strong>Ad ID:</strong> ${a.ad_id} | 
-              <strong>Issues:</strong> ${a.issue_codes.join(', ')} | 
-              <span class="csv-ref">${a.csv_ref}</span>
-            </div>
-          `).join('')}
-        ` : ''}
-        
-        ${section.pause_actions.length > 0 ? `
-          <div class="warning">
-            <h3>⚠️ Pause Actions (CSV 004) - Review Carefully</h3>
-            ${section.pause_actions.map(a => `
-              <div class="action">
-                <strong>Ad ID:</strong> ${a.ad_id} | 
-                <strong>Issues:</strong> ${a.issue_codes.join(', ')} | 
-                <span class="csv-ref">${a.csv_ref}</span>
-              </div>
-            `).join('')}
-          </div>
-        ` : ''}
-        
-        ${section.trial_plans.map(trial => `
-          <div class="trial">
-            <h3>${trial.trial_name}</h3>
-            <p><strong>Hypothesis:</strong> ${trial.hypothesis}</p>
-            <p><strong>Budget:</strong> $${trial.budget}/day | <strong>Run Time:</strong> ${trial.expected_run_time}</p>
-            <p><strong>Policy Question:</strong> ${trial.policy_questions.join(', ')}</p>
-            <p><strong>CSV Refs:</strong> ${trial.csv_refs.map(r => `<span class="csv-ref">${r}</span>`).join(' ')}</p>
-          </div>
-        `).join('')}
+        </dl>
+        <h3>Constraints</h3>
+        <p>${safeRender(taxonomy.white_grey_hat_constraints, { mode: 'auto' })}</p>
       </div>
-    `).join('')}
-    
-    <h2>Issue Taxonomy</h2>
-    <h3>Risk Definitions</h3>
-    <ul>
-      ${Object.entries(packet.issue_taxonomy.risk_definitions).map(([level, def]) => 
-        `<li><strong>${level.toUpperCase()}:</strong> ${def}</li>`
-      ).join('')}
-    </ul>
-    <p><strong>Constraints:</strong> ${packet.issue_taxonomy.white_grey_hat_constraints}</p>
-    
-  </div>
+    </details>
+  </main>
 </body>
 </html>`;
 }
