@@ -8,6 +8,7 @@ import { AdsIngestPage } from '../routes/ads/AdsIngestPage.js'
 import { CatalogHistoryPage, catalogHistoryLoader } from '../routes/catalog/CatalogHistoryPage.js'
 import { CatalogMaintenancePage } from '../routes/catalog/CatalogMaintenancePage.js'
 import { CatalogModulePage } from '../routes/catalog/CatalogModulePage.js'
+import { CatalogNewEntryPage } from '../routes/catalog/CatalogNewEntryPage.js'
 import { CatalogPage, catalogLoader } from '../routes/catalog/CatalogPage.js'
 import { PendingPurchasesPage, pendingPurchasesLoader } from '../routes/catalog/PendingPurchasesPage.js'
 import { ReviewDetailsPage } from '../routes/catalog/ReviewDetailsPage.js'
@@ -121,6 +122,10 @@ export const router = createBrowserRouter([
       {
         element: <CatalogMaintenancePage />,
         path: 'catalog/maintenance',
+      },
+      {
+        element: <CatalogNewEntryPage />,
+        path: 'catalog/new-entry',
       },
       {
         element: <ReviewDetailsPage />,

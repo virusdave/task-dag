@@ -47,6 +47,12 @@ export function useRegisterCatalogSidebarSubtree(options?: { imagesAndBarcodes?:
         to: buildHeliosModulePath('catalog', 'pending-purchases'),
       },
       buildImagesAndBarcodesNode(imagesAndBarcodes),
+      {
+        kind: 'leaf',
+        navKey: 'catalog.new-entry',
+        label: 'New entry',
+        to: buildHeliosModulePath('catalog', 'new-entry'),
+      },
       // Pricing was previously its own top-level module branch but is
       // now scoped under Catalog: pricing runs are a catalog reviewer
       // workflow, not a separate operator surface. The /pricing/* routes

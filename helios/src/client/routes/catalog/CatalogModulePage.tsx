@@ -75,6 +75,22 @@ export function CatalogModulePage() {
 
         <article className="mini-card">
           <header>
+            <strong>New catalog entry</strong>
+            <Pill tone="muted">intake</Pill>
+          </header>
+          <p className="subtle-copy">
+            Propose a brand-new catalog group (or a small number of variants) from a freeform
+            English description plus zero or more photos. Useful for non-cannabis items
+            (510 batteries, rolling papers, blunt wraps, etc.). See the catalog-one-offs
+            epic plan for the phased rollout.
+          </p>
+          <div className="inline-row wrap-row module-card-links">
+            <Link to={buildHeliosModulePath('catalog', 'new-entry')}>Open new-entry intake</Link>
+          </div>
+        </article>
+
+        <article className="mini-card">
+          <header>
             <strong>History and queue</strong>
             <Pill tone="muted">shared</Pill>
           </header>
