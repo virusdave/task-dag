@@ -592,7 +592,7 @@ EOF
     # leaf task whose commit message lacks an explicit URL.
     local ancestor_sha="$task_sha"
     local hops=0
-    while { [ -z "$issue_num" ] || [ -z "$issue_url" ]; } && [ "$hops" -lt 10 ]; do
+    while { [ -z "$issue_num" ] || [ -z "$issue_url" ]; } && [ "$hops" -lt 25 ]; do
         local parent_sha=$(get_first_parent "$ancestor_sha" || true)
         if [ -z "$parent_sha" ] || [ "$parent_sha" = "$ancestor_sha" ]; then
             break
