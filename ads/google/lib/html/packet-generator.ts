@@ -56,39 +56,55 @@ function buildHTMLPacketData(
 
 /**
  * Build executive summary
+ *
+ * Every read off l2Output is wrapped in asArray() / optional
+ * chaining so a malformed/mock L2 payload (missing arrays, null
+ * keys, etc.) can't throw — it just degrades to a zero count.
  */
 function buildExecutiveSummary(l2Output: L2PredictionOutput): ExecutiveSummary {
-  let totalCampaigns = new Set<string>();
+  const families = asArray<any>((l2Output as any)?.families);
+  const familyKeys = new Set<string>();
   let totalAds = 0;
   let limitedDisapprovedAds = 0;
   let highRiskFamilies = 0;
   let repairActions = 0;
   let replacementActions = 0;
   let trialGroups = 0;
-  
-  for (const family of l2Output.families) {
-    if (family.family_key.campaign_name) {
-      totalCampaigns.add(family.family_key.campaign_name);
-    }
-    
-    totalAds += family.ad_actions.length;
-    
-    if (family.family_risk === 'high') {
+
+  for (const family of families) {
+    const key = formatFamilyKey((family?.family_key ?? {}) as any);
+    if (key && key !== 'unknown') familyKeys.add(key);
+
+    const actions = asArray<any>(family?.ad_actions);
+    totalAds += actions.length;
+
+    if (family?.family_risk === 'high') {
       highRiskFamilies++;
     }
-    
-    for (const action of family.ad_actions) {
-      if (action.action_type === 'repair') repairActions++;
-      if (action.action_type === 'replace') replacementActions++;
+
+    for (const action of actions) {
+      if (action?.action_type === 'repair') repairActions++;
+      if (action?.action_type === 'replace') replacementActions++;
     }
-    
-    trialGroups += family.trial_plans.length;
+
+    trialGroups += asArray(family?.trial_plans).length;
   }
-  
+
   const pct = round(percentage(limitedDisapprovedAds, totalAds), 1);
-  
+
+  // Build a checklist that only references CSV batches the bundle
+  // will actually contain, so the operator isn't told to import
+  // CSVs that don't exist.
+  const csvBatches: number[] = [];
+  if (trialGroups > 0) csvBatches.push(1, 5);
+  if (repairActions > 0) csvBatches.push(2);
+  if (replacementActions > 0) csvBatches.push(3);
+  const csvList = csvBatches.length > 0
+    ? csvBatches.sort((a, b) => a - b).map((n) => String(n).padStart(3, '0')).join(', ')
+    : null;
+
   return {
-    total_campaigns: totalCampaigns.size,
+    total_campaigns: familyKeys.size,
     total_ads: totalAds,
     limited_disapproved_ads: limitedDisapprovedAds,
     limited_disapproved_pct: pct,
@@ -97,9 +113,11 @@ function buildExecutiveSummary(l2Output: L2PredictionOutput): ExecutiveSummary {
     replacement_actions: replacementActions,
     trial_groups: trialGroups,
     checklist: [
-      'Skim the summary tables below',
-      'Review per-campaign recommendations',
-      'If acceptable, import CSVs 001→005 in Ads Editor sequentially',
+      'Skim the executive summary above',
+      'Tap each family below for per-family recommendations',
+      csvList
+        ? `If acceptable, import CSV batches ${csvList} into Ads Editor (in numeric order)`
+        : 'No CSV batches generated this run — review-only',
       `Monitor trial groups with labels FB_POLICY_PROBE_*`,
     ],
   };
@@ -109,72 +127,106 @@ function buildExecutiveSummary(l2Output: L2PredictionOutput): ExecutiveSummary {
  * Build global overview
  */
 function buildGlobalOverview(l2Output: L2PredictionOutput): GlobalOverview {
+  const families = asArray<any>((l2Output as any)?.families);
   return {
-    families: l2Output.families.map((family, idx) => ({
-      family_key: family.family_key,
-      family_risk: family.family_risk,
-      limited_disapproved_count: 0,
-      repair_count: family.ad_actions.filter(a => a.action_type === 'repair').length,
-      replacement_count: family.ad_actions.filter(a => a.action_type === 'replace').length,
-      trial_count: family.trial_plans.length,
-      anchor_id: `family-${idx}`,
-    })),
+    families: families.map((family, idx) => {
+      const actions = asArray<any>(family?.ad_actions);
+      return {
+        family_key: family?.family_key,
+        family_risk: family?.family_risk,
+        limited_disapproved_count: 0,
+        repair_count: actions.filter((a) => a?.action_type === 'repair').length,
+        replacement_count: actions.filter((a) => a?.action_type === 'replace').length,
+        trial_count: asArray(family?.trial_plans).length,
+        anchor_id: `family-${idx}`,
+      };
+    }),
   };
 }
 
 /**
+ * Format a csv row reference like `002:14`. If row is missing or
+ * malformed, falls back to `002:?` so we never emit something
+ * like `002:[object Object]` from a stringified non-number.
+ */
+function formatCsvRef(batch: string, row: unknown): string {
+  const n = Number(row);
+  return Number.isFinite(n) && n > 0 ? `${batch}:${Math.trunc(n)}` : `${batch}:?`;
+}
+
+/**
  * Build campaign sections
+ *
+ * Robust against partial / malformed family payloads: every nested
+ * read is guarded, every array is asArray()'d.
  */
 function buildCampaignSections(l2Output: L2PredictionOutput): CampaignSection[] {
-  return l2Output.families.map(family => ({
-    campaign_name: family.family_key.campaign_name || formatFamilyKey(family.family_key),
-    family_key: family.family_key,
-    summary: {
-      risk_level: family.family_risk,
-      main_issues: family.issues.map(i => i.issue_description),
-    },
-    policy_snapshot: [],
-    repair_actions: family.ad_actions
-      .filter(a => a.action_type === 'repair')
-      .map(a => ({
-        ad_group: '',
-        ad_id: a.ad_id,
-        issue_codes: a.issue_codes,
-        csv_ref: `002:${a.csv_row_number || '?'}`,
-      })),
-    replacement_actions: family.ad_actions
-      .filter(a => a.action_type === 'replace')
-      .map(a => ({
-        ad_group: '',
-        ad_id: a.ad_id,
-        issue_codes: a.issue_codes,
-        csv_ref: `003:${a.csv_row_number || '?'}`,
-      })),
-    pause_actions: family.ad_actions
-      .filter(a => a.action_type === 'pause')
-      .map(a => ({
-        ad_group: '',
-        ad_id: a.ad_id,
-        issue_codes: a.issue_codes,
-        csv_ref: `004:${a.csv_row_number || '?'}`,
-      })),
-    trial_plans: (family.trial_plans || []).map(trial => ({
-      trial_name: trial.trial_group_name,
-      hypothesis: trial.hypothesis,
-      controls: (trial.control_ads || trial.controls || []).map((c: any) => ({
-        label: c.label,
-        snippet: c.creative ? createAdSnippet(c.creative.headlines, c.creative.descriptions) : '',
-      })),
-      variants: (trial.variant_creatives || trial.variants || []).map((v: any) => ({
-        label: v.variant_label || v.label || 'variant',
-        snippet: createAdSnippet(v.headlines || [], v.descriptions || []),
-      })),
-      budget: trial.trial_budget_usd,
-      expected_run_time: `${trial.success_criteria.time_window_days || 7} days`,
-      policy_questions: [trial.policy_class_being_probed],
-      csv_refs: ['001:?', '005:?'],
-    })),
-  }));
+  const families = asArray<any>((l2Output as any)?.families);
+  return families.map((family) => {
+    const fkey = (family?.family_key ?? {}) as any;
+    const actions = asArray<any>(family?.ad_actions);
+    const issues = asArray<any>(family?.issues);
+    const trials = asArray<any>(family?.trial_plans);
+    return {
+      campaign_name: fkey.campaign_name || formatFamilyKey(fkey),
+      family_key: fkey,
+      summary: {
+        risk_level: family?.family_risk,
+        main_issues: issues.map((i) => i?.issue_description),
+      },
+      policy_snapshot: [],
+      repair_actions: actions
+        .filter((a) => a?.action_type === 'repair')
+        .map((a) => ({
+          ad_group: '',
+          ad_id: a?.ad_id,
+          issue_codes: asArray(a?.issue_codes),
+          csv_ref: formatCsvRef('002', a?.csv_row_number),
+        })),
+      replacement_actions: actions
+        .filter((a) => a?.action_type === 'replace')
+        .map((a) => ({
+          ad_group: '',
+          ad_id: a?.ad_id,
+          issue_codes: asArray(a?.issue_codes),
+          csv_ref: formatCsvRef('003', a?.csv_row_number),
+        })),
+      pause_actions: actions
+        .filter((a) => a?.action_type === 'pause')
+        .map((a) => ({
+          ad_group: '',
+          ad_id: a?.ad_id,
+          issue_codes: asArray(a?.issue_codes),
+          csv_ref: formatCsvRef('004', a?.csv_row_number),
+        })),
+      trial_plans: trials.map((trial) => {
+        const successCriteria = (trial?.success_criteria ?? {}) as any;
+        const days = Number(successCriteria.time_window_days);
+        const runDays = Number.isFinite(days) && days > 0 ? days : 7;
+        const budget = Number(trial?.trial_budget_usd);
+        return {
+          trial_name: trial?.trial_group_name,
+          hypothesis: trial?.hypothesis,
+          controls: asArray<any>(trial?.control_ads || trial?.controls).map((c) => ({
+            label: c?.label,
+            snippet: c?.creative
+              ? createAdSnippet(asArray(c.creative?.headlines), asArray(c.creative?.descriptions))
+              : '',
+          })),
+          variants: asArray<any>(trial?.variant_creatives || trial?.variants).map((v) => ({
+            label: v?.variant_label || v?.label || 'variant',
+            snippet: createAdSnippet(asArray(v?.headlines), asArray(v?.descriptions)),
+          })),
+          budget: Number.isFinite(budget) ? budget : undefined,
+          expected_run_time: `${runDays} days`,
+          policy_questions: trial?.policy_class_being_probed
+            ? [trial.policy_class_being_probed]
+            : [],
+          csv_refs: ['001:?', '005:?'],
+        };
+      }),
+    };
+  });
 }
 
 /**
@@ -209,8 +261,9 @@ function buildIssueTaxonomy() {
 // the L2 LLM (or mock fallback) produces malformed data.
 // ----------------------------------------------------------------------
 
-const asArray = <T = unknown>(value: unknown): T[] =>
-  Array.isArray(value) ? (value as T[]) : [];
+function asArray<T = unknown>(value: unknown): T[] {
+  return Array.isArray(value) ? (value as T[]) : [];
+}
 
 const formatDateTime = (value: unknown): string => {
   if (value instanceof Date && !Number.isNaN(value.getTime())) return value.toLocaleString();
@@ -261,15 +314,17 @@ function renderActionGroup(label: string, csvLabel: string, actions: unknown, to
 function renderTrialCard(trial: unknown): string {
   const t = (trial ?? {}) as Record<string, unknown>;
   const refs = asArray(t.csv_refs);
+  const budgetNum = typeof t.budget === 'number' && Number.isFinite(t.budget) ? t.budget : null;
+  const budgetText = budgetNum !== null ? `$${budgetNum}/day` : '—';
   return `
     <article class="trial-card">
       <h3 class="trial-name">${safeText(t.trial_name)}</h3>
       <dl class="kv-grid">
         <dt>Hypothesis</dt><dd>${safeRender(t.hypothesis, { mode: 'auto' })}</dd>
-        <dt>Budget</dt><dd>${t.budget !== undefined && t.budget !== null ? `$${safeText(t.budget)}/day` : safeText(undefined)}</dd>
+        <dt>Budget</dt><dd>${escapeHtml(budgetText)}</dd>
         <dt>Run time</dt><dd>${safeText(t.expected_run_time)}</dd>
         <dt>Policy question</dt><dd>${safeRender(t.policy_questions, { mode: 'auto' })}</dd>
-        <dt>CSV refs</dt><dd class="chip-row">${refs.length > 0 ? refs.map((r) => renderCsvChip(r)).join(' ') : safeText(undefined)}</dd>
+        <dt>CSV refs</dt><dd class="chip-row">${refs.length > 0 ? refs.map((r) => renderCsvChip(r)).join(' ') : '—'}</dd>
       </dl>
     </article>`;
 }
@@ -282,17 +337,20 @@ function renderFamilyDetails(section: unknown, idx: number): string {
   const replaceCount = asArray(s.replacement_actions).length;
   const pauseCount = asArray(s.pause_actions).length;
   const trialCount = asArray(s.trial_plans).length;
-  const isHigh = typeof risk === 'string' && risk.toLowerCase() === 'high';
+  // Only the first family is auto-expanded so the operator isn't
+  // dumped into a scroll wall of expanded high-risk panels on a
+  // small screen. They can tap any other card to expand it.
+  const isOpen = idx === 0;
   return `
-    <details id="family-${idx}" class="family-card" ${isHigh ? 'open' : ''}>
+    <details id="family-${idx}" class="family-card" ${isOpen ? 'open' : ''}>
       <summary class="family-summary">
         <span class="family-name">${safeText(s.campaign_name)}</span>
         <span class="family-meta">
           ${renderRiskBadge(risk)}
-          ${repairCount > 0 ? `<span class="count-pill repair" title="Repair actions">${repairCount}R</span>` : ''}
-          ${replaceCount > 0 ? `<span class="count-pill replace" title="Replacement actions">${replaceCount}X</span>` : ''}
-          ${pauseCount > 0 ? `<span class="count-pill pause" title="Pause actions">${pauseCount}P</span>` : ''}
-          ${trialCount > 0 ? `<span class="count-pill trial" title="Trial plans">${trialCount}T</span>` : ''}
+          ${repairCount > 0 ? `<span class="count-pill repair"><span class="sr-only">${repairCount} repair actions</span><span aria-hidden="true">${repairCount}R</span></span>` : ''}
+          ${replaceCount > 0 ? `<span class="count-pill replace"><span class="sr-only">${replaceCount} replacement actions</span><span aria-hidden="true">${replaceCount}X</span></span>` : ''}
+          ${pauseCount > 0 ? `<span class="count-pill pause"><span class="sr-only">${pauseCount} pause actions</span><span aria-hidden="true">${pauseCount}P</span></span>` : ''}
+          ${trialCount > 0 ? `<span class="count-pill trial"><span class="sr-only">${trialCount} trial plans</span><span aria-hidden="true">${trialCount}T</span></span>` : ''}
         </span>
       </summary>
       <div class="family-body">
@@ -394,7 +452,9 @@ function renderHTMLPacket(packet: HTMLPacket): string {
       font-weight: 700;
       margin: 12px 0 4px;
       line-height: 1.2;
+      color: var(--text);
     }
+    h1.title { padding: 0; }
     .sticky-header .meta {
       display: flex; flex-wrap: wrap; gap: 6px 12px;
       font-size: 0.78rem; color: var(--text-muted);
@@ -593,6 +653,43 @@ function renderHTMLPacket(packet: HTMLPacket): string {
     .sr-object .sr-row { display: contents; }
     .sr-object dt { color: var(--text-muted); font-size: 0.82rem; }
     .sr-object dd { margin: 0; }
+    /* Accessibility: focus rings for keyboard / switch users. */
+    a:focus-visible,
+    summary:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+      border-radius: 4px;
+    }
+    /* Visually-hidden text for screen readers. */
+    .sr-only {
+      position: absolute !important;
+      width: 1px; height: 1px;
+      padding: 0; margin: -1px;
+      overflow: hidden; clip: rect(0, 0, 0, 0);
+      white-space: nowrap; border: 0;
+    }
+    /* Make jump-link targets land below the sticky header. */
+    .family-card { scroll-margin-top: 88px; }
+    /* Pause action group needs its 'warning' tone to actually show. */
+    .group.warning .group-title { color: var(--warn-border); }
+    .group.warning .action-card {
+      background: var(--warn-bg);
+      border-color: var(--warn-border);
+    }
+    /* Sticky header on phones is too tall — collapse meta + drop sticky. */
+    @media (max-width: 480px) {
+      .sticky-header { position: static; }
+      .sticky-header .meta { display: none; }
+      .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .kv-grid { grid-template-columns: 1fr; gap: 2px; }
+      .kv-grid dt { padding-top: 8px; font-weight: 600; color: var(--text); }
+      .action-row { grid-template-columns: 1fr; gap: 2px; }
+      .family-card { scroll-margin-top: 12px; }
+    }
+    /* Dark-mode badge contrast: light backgrounds need dark text. */
+    @media (prefers-color-scheme: dark) {
+      .risk-high, .risk-medium, .risk-low { color: #0f1115; }
+    }
     @media (min-width: 720px) {
       :root { --max-w: 880px; }
       .kv-grid { grid-template-columns: 160px 1fr; }
@@ -602,7 +699,7 @@ function renderHTMLPacket(packet: HTMLPacket): string {
 <body>
   <header class="sticky-header">
     <div class="container" style="padding-top: 0; padding-bottom: 0;">
-      <div class="title">${safeText(packet.title)}</div>
+      <h1 class="title">${safeText(packet.title)}</h1>
       <div class="meta">
         <span><strong>Run</strong> ${safeText(packet.run_id)}</span>
         <span><strong>Snapshot</strong> ${safeText(packet.snapshot_date)}</span>
@@ -628,7 +725,7 @@ function renderHTMLPacket(packet: HTMLPacket): string {
     </section>
 
     ${overviewFamilies.length > 0 ? `
-    <section class="panel">
+    <nav class="panel" aria-label="Jump to family">
       <h2 style="margin-top:0">Jump to family</h2>
       <ul class="nav-list">
         ${overviewFamilies.map((f: any) => {
@@ -649,7 +746,7 @@ function renderHTMLPacket(packet: HTMLPacket): string {
           </li>`;
         }).join('')}
       </ul>
-    </section>` : ''}
+    </nav>` : ''}
 
     <section>
       <h2>Per-family detail</h2>

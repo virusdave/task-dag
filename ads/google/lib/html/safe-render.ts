@@ -204,7 +204,14 @@ function primitiveText(value: unknown): string | null {
     return String(value)
   }
   if (typeof value === 'string') {
-    return value.trim() === '' ? null : value
+    const s = value.trim()
+    if (s === '') return null
+    // Treat already-stringified garbage as null so upstream
+    // `[object Object]` or `undefined`-as-string never reaches
+    // the operator.
+    if (/^(undefined|null|nan)$/i.test(s)) return null
+    if (/^\[object\s+[^\]]+\]$/.test(s)) return null
+    return value
   }
   if (typeof value === 'boolean') return value ? 'yes' : 'no'
   if (typeof value === 'bigint') return value.toString()
