@@ -720,7 +720,9 @@ function buildPendingPurchaseSyntheticLiveState(input: {
 
   return {
     brand: input.brand,
+    brandId: null,
     category: input.category,
+    categoryId: null,
     currentDescription: '',
     effects: [],
     flavorings: [],
@@ -748,6 +750,7 @@ function buildPendingPurchaseSyntheticLiveState(input: {
     scents: [],
     strain: null,
     subcategory: input.subcategory,
+    subcategoryId: null,
     tags: [],
   }
 }

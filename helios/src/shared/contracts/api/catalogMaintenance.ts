@@ -36,8 +36,18 @@ export const CatalogMaintenanceSiteGroupSchema = z.object({
   groupId: z.number().int(),
   groupName: z.string().nullable(),
   brandName: z.string().nullable(),
+  /**
+   * Sweed's numeric brand id. Used client-side to deep-link the
+   * storefront's brand filter. Nullable because (a) older
+   * catalog_groups rows were synced before brandId extraction was
+   * added to liveState normalization and (b) some groups don't have
+   * a brand on Sweed.
+   */
+  brandId: z.number().int().nullable(),
   categoryName: z.string().nullable(),
+  categoryId: z.number().int().nullable(),
   subcategoryName: z.string().nullable(),
+  subcategoryId: z.number().int().nullable(),
   groupImageCount: z.number().int(),
   groupPreviewImageUrl: z.string().nullable(),
   siteKey: z.string(),

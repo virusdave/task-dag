@@ -369,6 +369,15 @@ interface ParsedLiveState {
   groupPreviewImageUrl: string | null
   totalVariantCount: number
   products: ParsedProduct[]
+  /**
+   * Sweed numeric identifiers extracted from the normalized live state's
+   * `brand.id` / `category.id` / `subcategory.id` (when present). Null
+   * for older catalog_groups rows synced before the liveState
+   * normalizer learned to capture them.
+   */
+  brandId: number | null
+  categoryId: number | null
+  subcategoryId: number | null
 }
 
 interface ParsedProduct {
@@ -718,8 +727,11 @@ function buildSiteGroupCard(input: {
     groupId: parsedGroup.sweedGroupId,
     groupName: parsedGroup.groupName,
     brandName: parsedGroup.brandName,
+    brandId: parsedGroup.liveState.brandId,
     categoryName: parsedGroup.categoryName,
+    categoryId: parsedGroup.liveState.categoryId,
     subcategoryName: parsedGroup.subcategoryName,
+    subcategoryId: parsedGroup.liveState.subcategoryId,
     groupImageCount: parsedGroup.liveState.groupImageCount,
     groupPreviewImageUrl: parsedGroup.liveState.groupPreviewImageUrl,
     siteKey: site.siteKey,
@@ -908,6 +920,9 @@ function parseLiveStateForSurvey(value: unknown): ParsedLiveState | null {
     groupPreviewImageUrl,
     totalVariantCount: products.length,
     products,
+    brandId: coerceInt(obj.brandId),
+    categoryId: coerceInt(obj.categoryId),
+    subcategoryId: coerceInt(obj.subcategoryId),
   }
 }
 

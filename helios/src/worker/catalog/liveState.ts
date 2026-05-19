@@ -17,6 +17,7 @@ const MEDICAL_CLAIM_PATTERNS: Array<{ label: string; pattern: RegExp }> = [
 ]
 
 const SweedNamedValueSchema = z.object({
+  id: z.union([z.coerce.number().int(), z.string().trim().min(1)]).nullable().optional(),
   name: z.string().nullable().optional(),
 }).passthrough()
 
@@ -87,7 +88,12 @@ export type NormalizedCatalogProductLiveState = z.infer<typeof NormalizedCatalog
 
 export const NormalizedCatalogGroupLiveStateSchema = z.object({
   brand: z.string().nullable(),
+  // Sweed's numeric brand id. Optional / nullable on the schema so older
+  // catalog_groups rows (synced before this field was extracted) still
+  // parse; freshly-synced groups always have it when Sweed returns one.
+  brandId: z.number().int().nullable().default(null),
   category: z.string().nullable(),
+  categoryId: z.number().int().nullable().default(null),
   currentDescription: z.string(),
   effects: z.array(z.string()),
   flavorings: z.array(z.string()),
@@ -101,6 +107,7 @@ export const NormalizedCatalogGroupLiveStateSchema = z.object({
   scents: z.array(z.string()),
   strain: z.string().nullable(),
   subcategory: z.string().nullable(),
+  subcategoryId: z.number().int().nullable().default(null),
   tags: z.array(z.string()),
 })
 export type NormalizedCatalogGroupLiveState = z.infer<typeof NormalizedCatalogGroupLiveStateSchema>
@@ -149,7 +156,9 @@ export function normalizeCatalogGroupDetail(detail: unknown): NormalizedCatalogG
 
   return {
     brand: normalizeOptionalInlineText(parsed.brand?.name),
+    brandId: coerceOptionalIntId(parsed.brand?.id),
     category: normalizeOptionalInlineText(parsed.category?.name),
+    categoryId: coerceOptionalIntId(parsed.category?.id),
     currentDescription: normalizeDescriptionText(parsed.description),
     effects: normalizeNamedList(parsed.effects),
     flavorings: normalizeNamedList(parsed.flavorings),
@@ -163,8 +172,20 @@ export function normalizeCatalogGroupDetail(detail: unknown): NormalizedCatalogG
     scents: normalizeNamedList(parsed.scents),
     strain: normalizeOptionalInlineText(parsed.strain?.name),
     subcategory: normalizeOptionalInlineText(parsed.subcategory?.name),
+    subcategoryId: coerceOptionalIntId(parsed.subcategory?.id),
     tags: normalizeNamedList(parsed.tags),
   }
+}
+
+function coerceOptionalIntId(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isInteger(value) && value > 0) return value
+  if (typeof value === 'string') {
+    const trimmed = value.trim()
+    if (trimmed.length === 0) return null
+    const parsed = Number(trimmed)
+    if (Number.isInteger(parsed) && parsed > 0) return parsed
+  }
+  return null
 }
 
 function normalizeImageRefs(images: Array<{ id?: unknown; url?: string | null }> | undefined): NormalizedCatalogImageRef[] {

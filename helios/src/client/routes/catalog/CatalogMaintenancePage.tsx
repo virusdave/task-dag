@@ -566,16 +566,8 @@ function MaintenanceCard(props: CardProps) {
   const cardPreviewSrc =
     (mode === 'group' ? optimisticImageUrl : null) ?? localPreviewUrl ?? group.groupPreviewImageUrl
 
-  const firstVariantForUrl = group.variants[0] ?? null
-  const storefrontUrl = firstVariantForUrl
-    ? buildStorefrontProductUrl(
-        group.siteKey,
-        group,
-        firstVariantForUrl.productId,
-        firstVariantForUrl.shortName ?? firstVariantForUrl.name ?? group.groupName,
-      )
-    : null
-  const cardTopClickable = storefrontUrl !== null
+  const storefrontTarget = buildStorefrontGroupUrl(group)
+  const cardTopClickable = storefrontTarget !== null
   const cardTopAriaLabel = cardTopClickable
     ? `Open ${displayGroupName(group)} on the ${group.siteLabel} storefront in a new tab`
     : undefined
@@ -1170,36 +1162,67 @@ function displayGroupName(group: CatalogMaintenanceSiteGroup): string {
 }
 
 /**
- * Build the exact public-facing Freshly Baked storefront PDP URL for a
- * specific Sweed product. The storefront's router cares only about the
- * trailing `-<productId>` segment (verified empirically — the category
- * slug and the product slug prefix can be anything, e.g.
- * `/menu/anything-1/x-41788` resolves to product 41788). We still build
- * a human-readable slug so the URL is meaningful when copy-pasted; the
- * trailing `<productId>` is what actually routes.
+ * Build the public-facing Freshly Baked storefront URL we want to open
+ * for a group. Preference order, picking the most exact-content link
+ * we have enough metadata to build:
  *
- * When the product isn't in the public storefront's index (rare; e.g.
- * a hidden / stale catalog id) the storefront serves its own "product
- * not found" PDP — which is at least specific to that product and is
- * stable, unlike a volatile search result.
+ *   1. Brand + category filter — when both `brandId` and `categoryId`
+ *      are known, link to the category page with the brand filter
+ *      applied (Sweed: `/menu/<slug>-<categoryId>?filters={"brand":[brandId]}`).
+ *      Same brand within the same category: a small, stable, known-
+ *      content set the operator can scan visually.
+ *
+ *   2. Brand-only filter — when only `brandId` is known, link to the
+ *      menu page with the brand filter applied (Sweed:
+ *      `/menu?filters={"brand":[brandId]}`). Stable, brand-scoped.
+ *
+ *   3. PDP fallback — when neither id is known (older catalog_groups
+ *      rows that haven't been re-synced yet), fall back to a specific
+ *      product PDP URL built from the group's first variant. The
+ *      trailing `-<productId>` is what the Sweed router resolves on;
+ *      slugs are decorative.
  *
  * Returns `null` only for sites whose storefront slug we don't know.
  */
-function buildStorefrontProductUrl(
-  siteKey: string,
-  group: CatalogMaintenanceSiteGroup,
-  productId: number,
-  variantNameForSlug: string | null,
-): string | null {
-  const normalized = siteKey.trim().toLowerCase()
-  let storeSlug: string | null = null
-  if (normalized === 'midtown' || normalized.includes('midtown')) storeSlug = 'midtown'
-  else if (normalized === 'bronx' || normalized.includes('bronx')) storeSlug = 'bronx'
+function buildStorefrontGroupUrl(group: CatalogMaintenanceSiteGroup): {
+  url: string
+  kind: 'brand+category' | 'brand' | 'pdp'
+} | null {
+  const storeSlug = resolveStorefrontSlug(group.siteKey)
   if (storeSlug === null) return null
 
+  if (group.brandId !== null) {
+    const filterParam = encodeURIComponent(JSON.stringify({ brand: [group.brandId] }))
+    if (group.categoryId !== null) {
+      const categorySlug = toUrlSlug(group.categoryName ?? '') || 'category'
+      return {
+        kind: 'brand+category',
+        url: `https://freshlybaked.nyc/stores/${storeSlug}/shop/menu/${categorySlug}-${group.categoryId}?filters=${filterParam}`,
+      }
+    }
+    return {
+      kind: 'brand',
+      url: `https://freshlybaked.nyc/stores/${storeSlug}/shop/menu?filters=${filterParam}`,
+    }
+  }
+
+  // No brand id available — fall back to a per-variant PDP deep-link
+  // so we at least open something contextual (rather than the menu home).
+  const firstVariant = group.variants[0]
+  if (!firstVariant) return null
   const categorySlug = toUrlSlug(group.categoryName ?? '') || '_'
-  const baseSlug = toUrlSlug(variantNameForSlug ?? group.groupName ?? '') || 'p'
-  return `https://freshlybaked.nyc/stores/${storeSlug}/shop/menu/${categorySlug}/${baseSlug}-${productId}`
+  const baseSlug = toUrlSlug(firstVariant.shortName ?? firstVariant.name ?? group.groupName ?? '') || 'p'
+  return {
+    kind: 'pdp',
+    url: `https://freshlybaked.nyc/stores/${storeSlug}/shop/menu/${categorySlug}/${baseSlug}-${firstVariant.productId}`,
+  }
+}
+
+function resolveStorefrontSlug(siteKey: string): string | null {
+  const normalized = siteKey.trim().toLowerCase()
+  if (normalized === 'midtown' || normalized.includes('midtown')) return 'midtown'
+  if (normalized === 'bronx' || normalized.includes('bronx')) return 'bronx'
+  return null
 }
 
 function toUrlSlug(value: string): string {
@@ -1213,25 +1236,25 @@ function toUrlSlug(value: string): string {
 
 /**
  * Click handler for the product card top region. Offers (does not silently
- * navigate) to open the Sweed storefront PDP for this group's first
- * variant in a new tab. Uses `window.confirm` for a reliable,
- * mobile-friendly prompt that doesn't require adding any extra UI state.
+ * navigate) to open the Sweed storefront in a new tab. Uses
+ * `window.confirm` for a reliable, mobile-friendly prompt that doesn't
+ * require adding any extra UI state.
  */
 function offerOpenStorefront(group: CatalogMaintenanceSiteGroup): void {
-  const firstVariant = group.variants[0]
-  if (!firstVariant) return
-  const url = buildStorefrontProductUrl(
-    group.siteKey,
-    group,
-    firstVariant.productId,
-    firstVariant.shortName ?? firstVariant.name ?? group.groupName,
-  )
-  if (!url) return
-  const confirmed = window.confirm(
-    `Open ${displayGroupName(group)} (#${firstVariant.productId}) on the ${group.siteLabel} storefront in a new tab?`,
-  )
+  const target = buildStorefrontGroupUrl(group)
+  if (!target) return
+  const groupLabel = displayGroupName(group)
+  const brandLabel = group.brandName ?? 'this brand'
+  const categoryLabel = group.categoryName ?? 'this category'
+  const message =
+    target.kind === 'brand+category'
+      ? `Open ${brandLabel} in ${categoryLabel} on the ${group.siteLabel} storefront in a new tab?`
+      : target.kind === 'brand'
+        ? `Open all ${brandLabel} products on the ${group.siteLabel} storefront in a new tab?`
+        : `Open ${groupLabel} on the ${group.siteLabel} storefront in a new tab?`
+  const confirmed = window.confirm(message)
   if (!confirmed) return
-  window.open(url, '_blank', 'noopener,noreferrer')
+  window.open(target.url, '_blank', 'noopener,noreferrer')
 }
 
 function variantLabel(variant: CatalogMaintenanceSiteVariant): string {
