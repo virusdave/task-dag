@@ -566,7 +566,15 @@ function MaintenanceCard(props: CardProps) {
   const cardPreviewSrc =
     (mode === 'group' ? optimisticImageUrl : null) ?? localPreviewUrl ?? group.groupPreviewImageUrl
 
-  const storefrontUrl = buildStorefrontGroupUrl(group.siteKey, group)
+  const firstVariantForUrl = group.variants[0] ?? null
+  const storefrontUrl = firstVariantForUrl
+    ? buildStorefrontProductUrl(
+        group.siteKey,
+        group,
+        firstVariantForUrl.productId,
+        firstVariantForUrl.shortName ?? firstVariantForUrl.name ?? group.groupName,
+      )
+    : null
   const cardTopClickable = storefrontUrl !== null
   const cardTopAriaLabel = cardTopClickable
     ? `Open ${displayGroupName(group)} on the ${group.siteLabel} storefront in a new tab`
@@ -1162,41 +1170,65 @@ function displayGroupName(group: CatalogMaintenanceSiteGroup): string {
 }
 
 /**
- * Build the public-facing Freshly Baked storefront URL for a group. The
- * Sweed storefront only routes to a product page via slug+id URLs (e.g.
- * `/edibles-1086/indica-chill-wild-berry-20x-5mg-41788`); a productId-only
- * deep-link silently lands on the menu (or a "not found" SPA state) for
- * many ids — including any product that isn't currently in that site's
- * inventory snapshot. We don't have the slug or category id client-side,
- * so instead we send the operator to the menu search filtered by the
- * group's name, which always resolves to a usable storefront page.
+ * Build the exact public-facing Freshly Baked storefront PDP URL for a
+ * specific Sweed product. The storefront's router cares only about the
+ * trailing `-<productId>` segment (verified empirically — the category
+ * slug and the product slug prefix can be anything, e.g.
+ * `/menu/anything-1/x-41788` resolves to product 41788). We still build
+ * a human-readable slug so the URL is meaningful when copy-pasted; the
+ * trailing `<productId>` is what actually routes.
  *
- * Returns `null` for sites whose storefront slug we don't know or for
- * groups without a usable search term.
+ * When the product isn't in the public storefront's index (rare; e.g.
+ * a hidden / stale catalog id) the storefront serves its own "product
+ * not found" PDP — which is at least specific to that product and is
+ * stable, unlike a volatile search result.
+ *
+ * Returns `null` only for sites whose storefront slug we don't know.
  */
-function buildStorefrontGroupUrl(siteKey: string, group: CatalogMaintenanceSiteGroup): string | null {
+function buildStorefrontProductUrl(
+  siteKey: string,
+  group: CatalogMaintenanceSiteGroup,
+  productId: number,
+  variantNameForSlug: string | null,
+): string | null {
   const normalized = siteKey.trim().toLowerCase()
   let storeSlug: string | null = null
   if (normalized === 'midtown' || normalized.includes('midtown')) storeSlug = 'midtown'
   else if (normalized === 'bronx' || normalized.includes('bronx')) storeSlug = 'bronx'
   if (storeSlug === null) return null
-  const searchTerm = (group.groupName ?? '').trim()
-  if (searchTerm.length === 0) return null
-  const params = new URLSearchParams({ searchTerm })
-  return `https://freshlybaked.nyc/stores/${storeSlug}/shop/menu/search?${params.toString()}`
+
+  const categorySlug = toUrlSlug(group.categoryName ?? '') || '_'
+  const baseSlug = toUrlSlug(variantNameForSlug ?? group.groupName ?? '') || 'p'
+  return `https://freshlybaked.nyc/stores/${storeSlug}/shop/menu/${categorySlug}/${baseSlug}-${productId}`
+}
+
+function toUrlSlug(value: string): string {
+  return value
+    .toLowerCase()
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
 }
 
 /**
  * Click handler for the product card top region. Offers (does not silently
- * navigate) to open the Sweed storefront search for this group in a new
- * tab. Uses `window.confirm` for a reliable, mobile-friendly prompt that
- * doesn't require adding any extra UI state.
+ * navigate) to open the Sweed storefront PDP for this group's first
+ * variant in a new tab. Uses `window.confirm` for a reliable,
+ * mobile-friendly prompt that doesn't require adding any extra UI state.
  */
 function offerOpenStorefront(group: CatalogMaintenanceSiteGroup): void {
-  const url = buildStorefrontGroupUrl(group.siteKey, group)
+  const firstVariant = group.variants[0]
+  if (!firstVariant) return
+  const url = buildStorefrontProductUrl(
+    group.siteKey,
+    group,
+    firstVariant.productId,
+    firstVariant.shortName ?? firstVariant.name ?? group.groupName,
+  )
   if (!url) return
   const confirmed = window.confirm(
-    `Find "${displayGroupName(group)}" on the ${group.siteLabel} storefront in a new tab?`,
+    `Open ${displayGroupName(group)} (#${firstVariant.productId}) on the ${group.siteLabel} storefront in a new tab?`,
   )
   if (!confirmed) return
   window.open(url, '_blank', 'noopener,noreferrer')
