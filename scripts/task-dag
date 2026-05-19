@@ -724,6 +724,7 @@ Related: $issue_url"
             if is_epic_complete "$parent_sha"; then
                 local parent_issue_num=$(extract_field "$parent_msg" "Issue" | sed 's/^#//')
                 local parent_issue_url=$(extract_field "$parent_msg" "URL")
+                local parent_author=$(extract_field "$parent_msg" "Author")
                 
                 if [ -n "$parent_issue_num" ] && [ -n "$parent_issue_url" ]; then
                     printf "\n${GREEN}🎉 Epic completed! All tasks done.${RESET}\n"
@@ -733,25 +734,42 @@ Related: $issue_url"
                     
                     # Check for GITHUB_TOKEN
                     if [ -n "${GITHUB_TOKEN:-}" ]; then
-                        # Post completion comment and close issue
+                        # Build completion comment, tagging the issue opener (Author field)
                         local epic_title=$(get_task_title "$parent_sha")
-                        local comment_body="🎉 Epic **$epic_title** completed!\n\nAll child tasks have been implemented and merged."
+                        local mention=""
+                        # Only treat Author as a GitHub handle if it looks like one
+                        # (bots / agent identifiers like 'amp-agent' or 'github-actions[bot]'
+                        # should not be @mentioned).
+                        if [[ -n "$parent_author" && "$parent_author" =~ ^[A-Za-z0-9][A-Za-z0-9-]*$ && "$parent_author" != *agent* && "$parent_author" != *bot* ]]; then
+                            mention="@${parent_author} "
+                        fi
+                        local comment_body
+                        comment_body=$(printf '🎉 %sEpic **%s** completed!\n\nAll child tasks have been implemented and merged. Closing as completed.' "$mention" "$epic_title")
+                        
+                        # JSON-escape the body (handles quotes / newlines / backslashes safely)
+                        local json_body
+                        json_body=$(printf '%s' "$comment_body" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))' 2>/dev/null) || \
+                            json_body="\"$(printf '%s' "$comment_body" | sed 's/\\/\\\\/g; s/"/\\"/g' | awk 'BEGIN{ORS="\\n"}{print}' | sed 's/\\n$//')\""
                         
                         # Post comment
                         local api_url="https://api.github.com/repos/$repo/issues/$parent_issue_num/comments"
                         curl -s -X POST "$api_url" \
                             -H "Authorization: token $GITHUB_TOKEN" \
                             -H "Accept: application/vnd.github.v3+json" \
-                            -d "{\"body\":\"$comment_body\"}" > /dev/null
+                            -d "{\"body\":$json_body}" > /dev/null
                         
-                        # Close issue
+                        # Close issue as completed
                         api_url="https://api.github.com/repos/$repo/issues/$parent_issue_num"
                         curl -s -X PATCH "$api_url" \
                             -H "Authorization: token $GITHUB_TOKEN" \
                             -H "Accept: application/vnd.github.v3+json" \
-                            -d '{"state":"closed"}' > /dev/null
+                            -d '{"state":"closed","state_reason":"completed"}' > /dev/null
                         
-                        printf "${GREEN}✓ Closed issue #$parent_issue_num${RESET}\n"
+                        if [ -n "$mention" ]; then
+                            printf "${GREEN}✓ Closed issue #%s and tagged %s${RESET}\n" "$parent_issue_num" "@${parent_author}"
+                        else
+                            printf "${GREEN}✓ Closed issue #%s${RESET}\n" "$parent_issue_num"
+                        fi
                     else
                         echo "Note: Set GITHUB_TOKEN to auto-close issue #$parent_issue_num"
                     fi
@@ -970,110 +988,6 @@ main() {
     esac
 }
 
-main "$@"
-
-# Command: issue-update - update GitHub issue with task progress
-cmd_issue_update() {
-    local task_sha=""
-    local status="in-progress"
-    local message=""
-    
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            --status=*) status="${1#*=}"; shift ;;
-            --message=*) message="${1#*=}"; shift ;;
-            --help|-h)
-                cat <<EOF
-Usage: task-dag issue-update <task-sha> [--status=STATUS] [--message=TEXT]
-
-Post status update to GitHub issue associated with task.
-
-Options:
-  --status=STATUS    Task status: completed|blocked|in-progress (default: in-progress)
-  --message=TEXT     Additional message for issue comment
-
-Requires: gh CLI installed and authenticated
-EOF
-                return 0
-                ;;
-            *)
-                if [ -z "$task_sha" ]; then
-                    task_sha="$1"
-                else
-                    echo "Unknown option: $1" >&2
-                    return 1
-                fi
-                shift
-                ;;
-        esac
-    done
-    
-    if [ -z "$task_sha" ]; then
-        echo "Error: task SHA required" >&2
-        return 1
-    fi
-    
-    task_sha=$(resolve_sha "$task_sha") || return 1
-    
-    # Extract issue URL from task commit
-    local task_msg=$(parse_commit_metadata "$task_sha")
-    local issue_url=$(extract_field "$task_msg" "URL")
-    local issue_num=$(extract_field "$task_msg" "Issue" | sed 's/^#//')
-    local task_title=$(get_task_title "$task_sha")
-    
-    if [ -z "$issue_num" ]; then
-        echo "Error: No issue number found in task commit" >&2
-        return 1
-    fi
-    
-    # Check if gh CLI is available
-    if ! command -v gh &> /dev/null; then
-        echo "Warning: gh CLI not installed, cannot update GitHub issue" >&2
-        echo "Task status: $status - $task_title" >&2
-        return 0
-    fi
-    
-    # Build status emoji
-    local status_emoji
-    case "$status" in
-        completed) status_emoji="✅" ;;
-        blocked) status_emoji="🚫" ;;
-        in-progress) status_emoji="⏳" ;;
-        *) status_emoji="📝" ;;
-    esac
-    
-    # Create issue comment
-    local comment="$status_emoji Task **$status**: $task_title
-
-Task SHA: \`$(git rev-parse --short "$task_sha")\`
-Status: $status"
-    
-    if [ -n "$issue_url" ]; then
-        comment="$comment
-
-Root issue: $issue_url"
-    fi
-    
-    if [ -n "$message" ]; then
-        comment="$comment
-
-$message"
-    fi
-    
-    # Post comment to issue
-    echo "$comment" | gh issue comment "$issue_num" --body-file - || {
-        echo "Failed to post comment to issue #$issue_num" >&2
-        return 1
-    }
-    
-    printf "${GREEN}✓ Posted status update to issue #$issue_num${RESET}\n"
-    
-    # Note: Issue closing logic is handled by the check-task-completions.sh GitHub Action
-    # which runs on push and closes issues when all tasks are complete
-    
-    return 0
-}
-
 # Command: check-workflow - validate recent commits follow task-dag convention
 cmd_check_workflow() {
     local count=10
@@ -1158,3 +1072,5 @@ EOF
     
     return 0
 }
+
+main "$@"
