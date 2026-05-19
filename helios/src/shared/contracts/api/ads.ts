@@ -13,11 +13,19 @@ export const AdsIngestRequestSchema = z.object({
 })
 export type AdsIngestRequest = z.infer<typeof AdsIngestRequestSchema>
 
+// publicUrl + outputPath are nullable: helios's ingest pipeline used
+// to also render the experiments-viz HTML and upload it to
+// mss-one-offs, returning a public URL. Rendering required spawning
+// python, which is now forbidden inside helios; the dashboard is
+// rebuilt out-of-band via gads-run-morning and there is no longer a
+// per-ingest publicUrl. Kept on the schema (rather than removed
+// entirely) so older clients that pre-cached the field don't have to
+// branch on its presence — they just see `null`.
 export const AdsIngestResponseSchema = z.object({
-  publicUrl: z.string().url(),
+  publicUrl: z.string().url().nullable(),
   sourceFileId: z.string(),
   snapshotPath: z.string(),
-  outputPath: z.string(),
+  outputPath: z.string().nullable(),
 })
 export type AdsIngestResponse = z.infer<typeof AdsIngestResponseSchema>
 

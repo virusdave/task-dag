@@ -1,29 +1,49 @@
-import { execFile } from 'node:child_process'
-import { promisify } from 'node:util'
+import * as fs from 'node:fs/promises'
+import * as os from 'node:os'
+import * as path from 'node:path'
 
 import { type AdsIngestResponse } from '../../shared/contracts/index.js'
 import { automationRepoPath } from './automationRepoRoot.js'
 import { buildSnapshotFromCsv } from './buildSnapshotFromCsv.js'
 import { downloadDriveFile } from './googleDriveClient.js'
-import { uploadToMssOneOffs } from './mssOneOffsUpload.js'
 import { parseDriveInput } from './parseDriveInput.js'
 
-const execFileP = promisify(execFile)
+/**
+ * Drive ingest pipeline.
+ *
+ * The current contract is intentionally narrow: this code is allowed to
+ * download from Drive and build the `ads-snapshot-live.jsonl` snapshot,
+ * and that's it. Specifically:
+ *
+ *   - It MUST NOT spawn python (helios is python-free, both in
+ *     dependencies and in its execution chain). The previous version
+ *     shelled out to `python3 build-experiments-viz.py` to render the
+ *     experiments dashboard HTML; that step has been removed. The
+ *     dashboard is rebuilt out-of-band (the gads-run-analysis.service
+ *     09:00 timer + on-demand `gads-run-morning` produce the
+ *     operator-facing review packet now).
+ *   - It MUST use a per-user, per-invocation temp file for the CSV
+ *     download — `/tmp` is sticky-bit, and a previous hard-coded path
+ *     (`/tmp/google-ads-export-utf8.csv`) caused EACCES every time a
+ *     second uid (e.g. the manual ssh tester after helios, or vice
+ *     versa) tried to overwrite a file the first uid owned.
+ *
+ * Operator-visible effect: the "Ingest now" button now reports
+ * "snapshot refreshed" and leaves dashboard regeneration to the
+ * gads-run-morning surface; AdsIngestResponse.publicUrl is no longer
+ * populated by this code path.
+ */
 
-// Pipeline runs Drive download + JSONL build + viz render + upload.
-// Cap at 5min so a stuck render can't hold a request forever.
-const VIZ_TIMEOUT_MS = 5 * 60 * 1000
+const PER_USER_TMP_DIR = path.join(os.tmpdir(), `helios-ads-ingest-${process.getuid?.() ?? 0}`)
 
-const CSV_PATH = '/tmp/google-ads-export-utf8.csv'
+// Module-level mutex so the background poller and the manual button
+// can't race against each other when they both call this helper.
+let inFlight: Promise<AdsIngestResponse> | null = null
 
 export interface AdsIngestError extends Error {
   detail: string
   stderr: string
 }
-
-// Module-level mutex so the background poller and the manual button
-// can't race against each other when they both call this helper.
-let inFlight: Promise<AdsIngestResponse> | null = null
 
 export function runAdsIngest(driveFileUrlOrId: string): Promise<AdsIngestResponse> {
   if (inFlight) {
@@ -38,61 +58,49 @@ export function runAdsIngest(driveFileUrlOrId: string): Promise<AdsIngestRespons
 async function doRunAdsIngest(driveFileUrlOrId: string): Promise<AdsIngestResponse> {
   const parsed = parseDriveInput(driveFileUrlOrId)
   const snapshotPath = automationRepoPath('ads/google/snapshots/ads-snapshot-live.jsonl')
-  const htmlPath = automationRepoPath('ads/google/outputs/experiments-viz.html')
 
-  // 1. Drive download (in-process fetch; rejects HTML interstitials).
+  // Per-user temp dir, owned 700 by the helios user — never collides
+  // with a parallel `amp-local` (or other uid) ssh test on the same host.
+  await fs.mkdir(PER_USER_TMP_DIR, { recursive: true })
+  await fs.chmod(PER_USER_TMP_DIR, 0o700)
+  const csvPath = path.join(PER_USER_TMP_DIR, `drive-export-${process.pid}-${Date.now()}.csv`)
+
   try {
-    await downloadDriveFile({
-      fileId: parsed.fileId,
-      resourceKey: parsed.resourceKey,
-      destPath: CSV_PATH,
-    })
-  } catch (err) {
-    throw makeError('drive download failed', err)
-  }
+    // 1. Drive download (in-process fetch; rejects HTML interstitials).
+    try {
+      await downloadDriveFile({
+        fileId: parsed.fileId,
+        resourceKey: parsed.resourceKey,
+        destPath: csvPath,
+      })
+    } catch (err) {
+      throw makeError('drive download failed', err)
+    }
 
-  // 2. CSV -> snapshot (in-process port of convert-csv-to-snapshot.py).
-  try {
-    await buildSnapshotFromCsv({
-      csvPath: CSV_PATH,
-      outputPath: snapshotPath,
-      snapshotDate: todayYMD(),
-    })
-  } catch (err) {
-    throw makeError('snapshot build failed', err)
-  }
+    // 2. CSV -> snapshot (in-process port of convert-csv-to-snapshot.py;
+    // pure TypeScript, no python).
+    try {
+      await buildSnapshotFromCsv({
+        csvPath,
+        outputPath: snapshotPath,
+        snapshotDate: todayYMD(),
+      })
+    } catch (err) {
+      throw makeError('snapshot build failed', err)
+    }
 
-  // 3. Snapshot -> HTML viz. This step is still a Python subprocess
-  // (build-experiments-viz.py is ~1400 lines of viz rendering with a
-  // big embedded CSV bundle); helios invokes it directly, not via a
-  // bash orchestrator. Porting to TS is a follow-up.
-  const vizScript = automationRepoPath('ads/google/scripts/build-experiments-viz.py')
-  try {
-    await execFileP('python3', [vizScript, '--output', htmlPath], {
-      timeout: VIZ_TIMEOUT_MS,
-      maxBuffer: 8 * 1024 * 1024,
-    })
-  } catch (err) {
-    throw makeError('build-experiments-viz failed', err)
-  }
-
-  // 4. Public deploy via mss-one-offs (in-process unix-socket POST).
-  let upload
-  try {
-    upload = await uploadToMssOneOffs({
-      sourcePath: htmlPath,
-      note: 'helios ads ingest',
-      ttlSeconds: 86_400,
-    })
-  } catch (err) {
-    throw makeError('mss-one-offs upload failed', err)
-  }
-
-  return {
-    publicUrl: upload.publicUrl,
-    sourceFileId: parsed.fileId,
-    snapshotPath,
-    outputPath: htmlPath,
+    return {
+      sourceFileId: parsed.fileId,
+      snapshotPath,
+      // publicUrl + outputPath are explicitly null now: the operator
+      // gets the public dashboard via the gads-run-morning bundle,
+      // not from this code path. See the file-header docstring.
+      publicUrl: null,
+      outputPath: null,
+    }
+  } finally {
+    // Clean up the multi-MB CSV every time, success or failure.
+    await fs.unlink(csvPath).catch(() => {})
   }
 }
 

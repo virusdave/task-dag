@@ -97,9 +97,10 @@ export function AdsIngestPage() {
             <a href={ADS_DRIVE_FOLDER_URL} target="_blank" rel="noreferrer">
               canonical Drive folder
             </a>{' '}
-            every 30s. When the newest CSV changes, the snapshot + recovery
-            bundle are rebuilt and the public experiments dashboard is re-deployed
-            automatically. Use the "Ingest now" button to force a check.
+            every 30s. When the newest CSV changes, the live snapshot
+            (<code>ads-snapshot-live.jsonl</code>) is rebuilt and the
+            morning pipeline picks it up on its next run. Use the
+            "Ingest now" button to force a check.
           </p>
         </div>
         <Pill tone={headerTone}>{headerLabel}</Pill>
@@ -195,11 +196,24 @@ export function AdsIngestPage() {
 
         {op.kind === 'ok' ? (
           <div className="detail-panel" style={{ marginTop: 16, borderColor: 'var(--ok, #2a8c4a)' }}>
-            <h4 style={{ marginTop: 0 }}>✅ Manual run complete</h4>
-            <p>
-              <a href={op.result.publicUrl} target="_blank" rel="noreferrer">
-                {op.result.publicUrl}
-              </a>
+            <h4 style={{ marginTop: 0 }}>✅ Snapshot refreshed</h4>
+            <p className="subtle-copy" style={{ marginBottom: 0 }}>
+              {op.result.publicUrl ? (
+                <>
+                  Dashboard:{' '}
+                  <a href={op.result.publicUrl} target="_blank" rel="noreferrer">
+                    {op.result.publicUrl}
+                  </a>
+                </>
+              ) : (
+                <>
+                  The snapshot at <code>{op.result.snapshotPath}</code> is now up
+                  to date. Run <code>ssh vps-nixos-3 gads-run-morning</code>{' '}
+                  (or wait for the 09:00 timer) to regenerate the morning bundle
+                  against this snapshot — the bundle URL appears in the
+                  cluster-proposals page.
+                </>
+              )}
             </p>
           </div>
         ) : null}
