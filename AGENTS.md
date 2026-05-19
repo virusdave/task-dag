@@ -219,3 +219,32 @@ working public URL the user can open immediately.
 - If you cannot produce a public URL (e.g. `mss-one-offs` is down,
   permissions are wrong, the artifact requires extra infra), **LOUDLY**
   say so and explain what's blocking, per the commit/push rule above.
+
+## Paging the human — ALWAYS via `page-dave`, NEVER via `gh`
+
+When you need to "page", "notify", or "alert" Dave (the human operator) — e.g.
+announcing a deploy is ready for on-device verification, asking for a decision
+on a blocker, or signalling that a long-running job has finished — you MUST
+use the installed `page-dave` CLI:
+
+```sh
+page-dave -p <priority> -t "<short title>" "<message body>"
+```
+
+- `-p` / `--priority`: ntfy priority (`1`–`5`, or names `min` / `low` /
+  `default` / `high` / `max`). Use `4` (`high`) for most success/completion
+  pages, `5` (`max`) only when you need immediate human attention to unblock
+  work, `3` (`default`) for routine FYIs.
+- `-t` / `--title`: short headline shown in the notification banner.
+- Final positional argument: the message body. Do **not** prefix the body
+  with the priority number — pass priority via the flag.
+
+Posting a GitHub issue comment with `gh issue comment` (even with an
+`@`-mention or a 📟 emoji) is **NOT** paging. GitHub notifications are not
+delivered as a pager; if you want Dave to look at something right now, you
+must call `page-dave`. A GitHub comment can accompany the page (and usually
+should, so the URL / context is persisted on the issue) but it never
+substitutes for one.
+
+If `page-dave` is not on `$PATH` in your environment, LOUDLY say so rather
+than silently falling back to a `gh` comment and pretending you paged.
