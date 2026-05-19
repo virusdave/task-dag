@@ -883,27 +883,62 @@ EOF
     local issue_url=$(extract_field "$task_msg" "URL")
     local task_title=$(get_task_title "$task_sha")
     local short_sha=$(git rev-parse --short "$task_sha")
-    
+
+    # Walk up the parent chain to inherit Issue/URL if missing on the leaf
+    # task commit. Breakdown children typically only carry "Issue: #N" and
+    # rely on the epic ancestor to hold the canonical "URL:" field.
+    # Mirrors the cmd_complete walk added in aa0c14e.
+    local ancestor_sha="$task_sha"
+    local hops=0
+    while { [ -z "$issue_num" ] || [ -z "$issue_url" ]; } && [ "$hops" -lt 10 ]; do
+        local parent_sha=$(get_first_parent "$ancestor_sha" || true)
+        if [ -z "$parent_sha" ] || [ "$parent_sha" = "$ancestor_sha" ]; then
+            break
+        fi
+        local parent_msg=$(parse_commit_metadata "$parent_sha")
+        local parent_type=$(extract_field "$parent_msg" "Type")
+        if [ -z "$parent_type" ]; then
+            break
+        fi
+        if [ -z "$issue_num" ]; then
+            issue_num=$(extract_field "$parent_msg" "Issue" | sed 's/^#//')
+        fi
+        if [ -z "$issue_url" ]; then
+            issue_url=$(extract_field "$parent_msg" "URL")
+        fi
+        ancestor_sha="$parent_sha"
+        hops=$((hops + 1))
+    done
+
     if [ -z "$issue_num" ]; then
         echo "Error: Task has no Issue number" >&2
         return 1
     fi
-    
-    # Extract repo from issue URL or git remote
+
+    # Extract repo from issue URL, then fall back to origin remote.
+    # Normalizes both `git@host:owner/repo(.git)` (including SSH host
+    # aliases like `github-automation`) and `https://host/owner/repo(.git)`
+    # into the owner/repo slug we need for the GitHub API.
     local repo=""
     if [ -n "$issue_url" ]; then
-        repo=$(echo "$issue_url" | sed -E 's|https://github.com/([^/]+/[^/]+)/.*|\1|')
-    else
-        # Try to get from git remote
-        local remote_url=$(git remote get-url origin 2>/dev/null || echo "")
-        if [[ "$remote_url" =~ github.com[:/]([^/]+/[^/]+)(\.git)?$ ]]; then
-            repo="${BASH_REMATCH[1]}"
-        fi
+        repo=$(echo "$issue_url" | sed -E 's|https?://[^/]+/([^/]+/[^/]+)/.*|\1|')
     fi
-    
+    if [ -z "$repo" ]; then
+        local remote_url=$(git remote get-url origin 2>/dev/null || echo "")
+        repo=$(echo "$remote_url" \
+            | sed -E 's#^git@[^:]+:#https://github.com/#' \
+            | sed -E 's#\.git$##' \
+            | sed -E 's#^https?://[^/]+/##')
+    fi
+
     if [ -z "$repo" ]; then
         echo "Error: Could not determine GitHub repository" >&2
         return 1
+    fi
+
+    # Synthesize the issue URL when only the ancestor Issue # was found.
+    if [ -z "$issue_url" ]; then
+        issue_url="https://github.com/${repo}/issues/${issue_num}"
     fi
     
     # Determine status message
