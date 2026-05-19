@@ -181,17 +181,22 @@ and so we surface intermediate progress in the review queue early.
 
 ## Open questions for the operator
 
-These should be confirmed before locking the design in step 1:
+These were surfaced for the operator before locking the design in step 1
+(see [issue #12 comment 4487365557][q-comment]). As of the date this
+section was last edited, the operator has not yet responded, so the
+implementation proceeds with the defaults previously proposed in this
+plan. Each decision is reversible if the operator wants to override in a
+follow-up comment; the relevant surface area (one route + one form) is
+narrow.
 
-* **Do we want the operator to be able to *also* propose new variants
-  of an existing group from this same page?** (e.g. "add the
-  Banana flavor of an existing Backwoods entry.") That collapses two
-  flows into one but complicates the form. Default assumption: yes,
-  same page, with a "add to existing group" mode toggle on top.
-* **Pricing on the draft** — should the *Propose* CTA reject drafts
-  without a retail price suggestion, or should it accept and let
-  pricing be set downstream during review? Default assumption: accept;
-  pricing is review-time.
-* **Department / category vocabulary** — confirm the LLM is being
-  asked to pick from the canonical list (same one the proposal-review
-  UI displays) and not invent free-form taxonomy.
+[q-comment]: https://github.com/FreshlyBakedNYC/automation/issues/12#issuecomment-4487365557
+
+| Question | Adopted default | Reversibility cost if overridden |
+|---|---|---|
+| Single new-entry form vs. also support "add variant to existing group" on the same page? | **Combined page** with an "add to existing group" mode toggle at the top. The LLM extraction module returns the same `NewCatalogEntryDraft` shape either way; only the apply path branches (`group.create` + variants vs. variants under an existing `productGroupId`). | Low — flipping the toggle into a separate route is a router + nav change; the draft schema does not change. |
+| `Propose` CTA must reject drafts missing a retail-price suggestion? | **Accept** drafts without a retail price. Pricing is set during review by the existing pricing proposal flow; the operator's suggested price (if any) rides along on the proposal as a hint. | Low — flipping to "required at submit" is a single guard in the route handler + a form-validation message; no schema change. |
+| LLM extraction taxonomy: canonical list only, or free-form? | **Canonical only.** The extraction prompt is given the same controlled-vocabulary lists (departments, categories, brands) the proposal-review UI uses; out-of-vocabulary values surface as a low-confidence hint for the operator to correct before submit, rather than minting new taxonomy entries. | Low — relaxing to free-form means dropping the vocabulary list from the LLM prompt and removing the validation step; the draft schema already carries the strings as plain text. |
+
+If the operator wants any of these flipped, please reply on the issue
+and the worker can land a follow-up that adjusts the corresponding hunk
+in subtask 1 / 2 / 4.
