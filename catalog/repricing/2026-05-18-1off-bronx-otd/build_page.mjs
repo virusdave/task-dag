@@ -302,6 +302,8 @@ input[type=number]::-webkit-input-placeholder{color:#8a7f6c;opacity:1;font-weigh
 .row.review-approved{background:linear-gradient(to right,rgba(31,93,66,0.05),transparent 50%)}
 .row.review-rejected{background:linear-gradient(to right,rgba(141,47,82,0.05),transparent 50%)}
 .row .name{font-weight:700;font-size:14px}
+.row .details-link{appearance:none;background:transparent;border:1px solid var(--line);color:var(--current);font-weight:600;font-size:11px;padding:1px 6px;border-radius:6px;cursor:pointer;margin-left:6px;vertical-align:middle;text-decoration:none}
+.row .details-link:hover{background:var(--current);color:#fff;border-color:var(--current)}
 .row .name-line{display:flex;align-items:center;gap:8px}
 .row .image{width:32px;height:32px;border-radius:6px;background:#eee;background-size:cover;background-position:center;flex-shrink:0;border:1px solid var(--line)}
 .row .meta{color:var(--muted);font-size:11px;margin-top:2px}
@@ -508,7 +510,7 @@ input[type=number]::-webkit-input-placeholder{color:#8a7f6c;opacity:1;font-weigh
     <div class="name-line">
       ${product.imageUrl ? `<div class="image" style="background-image:url('${escapeHtml(product.imageUrl)}')"></div>` : `<div class="image"></div>`}
       <div>
-        <div class="name">${escapeHtml(product.name ?? '')}</div>
+        <div class="name">${escapeHtml(product.name ?? '')} <button type="button" class="details-link" data-details-link="${product.productId}" title="open expanded price control + competitor table in a new tab">↗ details</button></div>
         <div class="meta">prod ${product.productId} · tab ${escapeHtml(product.tab ?? '—')} · cost ${escapeHtml(fmtMoney(product.wholesaleCost))}</div>
       </div>
     </div>
@@ -611,13 +613,66 @@ function buildClientScript({ data, postTax, initialDiscountFraction }) {
     currentChainPrice: Number(p.globalPrice) || 0,
     currentLocalPrice: p.bronxLocalPrice != null ? Number(p.bronxLocalPrice) : null,
   }))
+  // Full per-product payload for the click-to-new-tab details popup.
+  // Listings are kept verbatim (small subset of fields) so the popup
+  // can render its sortable distance-ordered competitor table.
+  const detailsPayload = data.products.map((p) => ({
+    productId: p.productId,
+    name: p.name,
+    shortName: p.shortName,
+    tab: p.tab,
+    groupId: p.groupId,
+    groupName: p.groupName,
+    brandId: p.brandId,
+    brandName: p.brandName,
+    categoryName: p.categoryName,
+    subcategoryName: p.subcategoryName,
+    imageUrl: p.imageUrl,
+    size: p.size,
+    wholesaleCost: p.wholesaleCost,
+    globalPrice: p.globalPrice,
+    bronxLocalPrice: p.bronxLocalPrice,
+    bronxActualPrice: p.bronxActualPrice,
+    bronxIsStorePrice: p.bronxIsStorePrice,
+    status: p.status,
+    displayInEcommerce: p.displayInEcommerce,
+    market: {
+      refreshedAt: p.market?.refreshedAt ?? null,
+      status: p.market?.status ?? null,
+      searchTerm: p.market?.searchTerm ?? null,
+      note: p.market?.note ?? null,
+      averagePostTaxPrice: p.market?.averagePostTaxPrice ?? null,
+      medianPostTaxPrice: p.market?.medianPostTaxPrice ?? null,
+      listingCount: p.market?.listingCount ?? 0,
+      pricingEligibleListingCount: p.market?.pricingEligibleListingCount ?? 0,
+      matchedListings: (p.market?.matchedListings ?? []).map((l) => ({
+        dispensaryName: l.dispensaryName,
+        listingName: l.listingName,
+        url: l.url,
+        preTaxPrice: l.preTaxPrice,
+        postTaxPrice: l.postTaxPrice,
+        distanceMiles: l.distanceMiles,
+        distanceBand: l.distanceBand,
+        source: l.source,
+        availability: l.availability,
+        eligibleForPricing: l.eligibleForPricing,
+        sizeLabel: l.sizeLabel,
+      })),
+    },
+  }))
   return `
 (function () {
   const POST_TAX = ${postTax};
   const INITIAL_PAGE_PROMO = ${data.currentPromoDiscountPercent};
   const SNAPSHOT = ${JSON.stringify(snapshot)};
+  const DETAILS = ${JSON.stringify(detailsPayload)};
+  const DETAILS_BY_ID = new Map(DETAILS.map((d) => [String(d.productId), d]));
   const BRONX_DEALER_ID = ${data.bronxDealerId};
   const STATE_DEALER_ID = ${data.stateDealerId};
+  const CAMPAIGN_ID = '${data.campaignId}';
+  const ACTION_ID = '${data.actionId}';
+  const CAMPAIGN_NAME = ${JSON.stringify(data.campaignName ?? '')};
+  const ACTION_NAME = ${JSON.stringify(data.actionName ?? '')};
 
   const fmtMoney = (v) => (v == null || !isFinite(v)) ? '—' : '$' + Number(v).toFixed(2);
   const fmtPct = (v) => (v == null || !isFinite(v)) ? '—' : Number(v).toFixed(1) + '%';
@@ -1030,6 +1085,265 @@ function buildClientScript({ data, postTax, initialDiscountFraction }) {
   document.getElementById('copyPlanJson').addEventListener('click', async () => {
     await navigator.clipboard.writeText(planPre.textContent || '');
   });
+
+  // -------- click-to-new-tab per-product details popup --------
+  // Click "↗ details" in a row → open a new browser tab/window with
+  // an expanded price control + a full distance-sorted competitor
+  // table. The popup snapshots the parent row's current proposed
+  // local price + effective promo % at open time; re-click to refresh.
+  document.body.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-details-link]');
+    if (!btn) return;
+    e.preventDefault();
+    const pid = btn.dataset.detailsLink;
+    openDetailsWindow(pid);
+  });
+
+  function distanceBandLabel(band) {
+    switch (band) {
+      case 'very-near': return 'very-near (≤2 mi)';
+      case 'near':      return 'near (2–5 mi)';
+      case 'mid':       return 'mid (5–10 mi)';
+      case 'far':       return 'far (10–25 mi)';
+      case 'statewide': return 'statewide (>25 mi)';
+      case 'unknown':   return 'unknown';
+      default:          return band || 'unknown';
+    }
+  }
+  function bandColor(band) {
+    switch (band) {
+      case 'very-near': return '#1d7a4f';
+      case 'near':      return '#3aa269';
+      case 'mid':       return '#b58a25';
+      case 'far':       return '#c45a3b';
+      case 'statewide': return '#7b3a8a';
+      default:          return '#6d665b';
+    }
+  }
+  function escapeHtmlClient(s) {
+    return String(s ?? '').replace(/[&<>"']/g, (c) => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+    })[c]);
+  }
+  function safeNum(v) { return v == null ? null : Number(v); }
+
+  function snapshotRowForDetails(pid) {
+    const row = document.querySelector('.row[data-product-id="' + pid + '"]');
+    if (!row) return null;
+    const localInput = row.querySelector('input[data-input="local-price"]');
+    const chainInput = row.querySelector('input[data-input="chain-price"]');
+    const { fraction: promoFraction, source: promoSource } = effectivePromoForRow(row);
+    return {
+      proposedLocal: Number(localInput?.value) || 0,
+      proposedChain: Number(chainInput?.value) || 0,
+      effectivePromoFraction: promoFraction,
+      effectivePromoSource: promoSource,
+      pageDiscountFraction: pageDiscountFraction(),
+    };
+  }
+
+  function openDetailsWindow(pid) {
+    const detail = DETAILS_BY_ID.get(String(pid));
+    if (!detail) {
+      console.warn('no detail payload for product', pid);
+      return;
+    }
+    const live = snapshotRowForDetails(pid) || {
+      proposedLocal: Number(detail.bronxLocalPrice ?? detail.globalPrice) || 0,
+      proposedChain: Number(detail.globalPrice) || 0,
+      effectivePromoFraction: pageDiscountFraction(),
+      effectivePromoSource: 'page',
+      pageDiscountFraction: pageDiscountFraction(),
+    };
+    const win = window.open('', '_blank');
+    if (!win) {
+      alert('Popup blocked. Allow popups for this page to open details.');
+      return;
+    }
+    win.document.open();
+    win.document.write(renderDetailsHtml(detail, live));
+    win.document.close();
+    try { win.focus(); } catch (e) {}
+  }
+
+  function renderDetailsHtml(d, live) {
+    const cost = Number(d.wholesaleCost) || 0;
+    const chain = Number(d.globalPrice) || 0;
+    const localOverride = d.bronxLocalPrice != null ? Number(d.bronxLocalPrice) : null;
+    const currentEffective = Number(d.bronxActualPrice ?? d.globalPrice) || 0;
+    const proposed = Number(live.proposedLocal) || currentEffective;
+    const promoFrac = Number(live.effectivePromoFraction) || 0;
+    const postPromoPrice = proposed * (1 - promoFrac);
+
+    const otd = (p) => p * POST_TAX;
+    const gm = (p) => (cost > 0 && p > 0) ? (1 - (POST_TAX * cost) / p) * 100 : null;
+
+    const listings = (d.market?.matchedListings ?? []).slice();
+    // Sort ascending by distanceMiles; null/undefined to the end,
+    // ties broken by post-tax price ascending then dispensary name.
+    listings.sort((a, b) => {
+      const da = a.distanceMiles == null ? Infinity : Number(a.distanceMiles);
+      const db = b.distanceMiles == null ? Infinity : Number(b.distanceMiles);
+      if (da !== db) return da - db;
+      const pa = Number(a.postTaxPrice) || 0;
+      const pb = Number(b.postTaxPrice) || 0;
+      if (pa !== pb) return pa - pb;
+      return String(a.dispensaryName || '').localeCompare(String(b.dispensaryName || ''));
+    });
+
+    // Build header summary blocks.
+    const headerImg = d.imageUrl
+      ? '<div class="hdr-img" style="background-image:url(\\'' + escapeHtmlClient(d.imageUrl) + '\\')"></div>'
+      : '<div class="hdr-img"></div>';
+
+    const promoSourceLbl = live.effectivePromoSource && live.effectivePromoSource !== 'page'
+      ? ' (' + escapeHtmlClient(live.effectivePromoSource) + ' override)'
+      : '';
+
+    // Listings table rows.
+    let lastBand = null;
+    const tbody = listings.map((l, i) => {
+      const band = l.distanceBand || 'unknown';
+      const showBandHdr = band !== lastBand;
+      lastBand = band;
+      const dist = l.distanceMiles == null ? '—' : Number(l.distanceMiles).toFixed(1) + ' mi';
+      const post = l.postTaxPrice == null ? '—' : '$' + Number(l.postTaxPrice).toFixed(2);
+      const pre  = l.preTaxPrice == null ? '—' : '$' + Number(l.preTaxPrice).toFixed(2);
+      const url = l.url ? '<a href="' + escapeHtmlClient(l.url) + '" target="_blank" rel="noopener">' + escapeHtmlClient(l.listingName || '(open)') + '</a>' : escapeHtmlClient(l.listingName || '—');
+      const eligible = l.eligibleForPricing ? '<span class="elig yes">eligible</span>' : '<span class="elig no">display-only</span>';
+      const avail = l.availability ? escapeHtmlClient(l.availability) : '—';
+      const size = l.sizeLabel ? escapeHtmlClient(l.sizeLabel) : '—';
+      const source = l.source ? escapeHtmlClient(l.source) : '—';
+      const bandHdr = showBandHdr
+        ? '<tr class="band-hdr"><td colspan="9" style="background:' + bandColor(band) + '20;border-left:4px solid ' + bandColor(band) + '"><strong style="color:' + bandColor(band) + '">' + escapeHtmlClient(distanceBandLabel(band)) + '</strong> · source=' + source + '</td></tr>'
+        : '';
+      return bandHdr +
+        '<tr>' +
+          '<td class="num">' + (i + 1) + '</td>' +
+          '<td>' + escapeHtmlClient(l.dispensaryName || '—') + '</td>' +
+          '<td>' + url + '</td>' +
+          '<td class="num">' + dist + '</td>' +
+          '<td>' + escapeHtmlClient(distanceBandLabel(band)) + '</td>' +
+          '<td class="num">' + post + '</td>' +
+          '<td class="num">' + pre + '</td>' +
+          '<td>' + size + '</td>' +
+          '<td>' + eligible + ' · ' + avail + '</td>' +
+        '</tr>';
+    }).join('');
+
+    const tableHtml = listings.length === 0
+      ? '<p class="muted">No competitor listings captured for this product in the latest refresh.</p>'
+      : '<table class="listings"><thead><tr><th>#</th><th>Dispensary</th><th>Listing</th><th class="num">Distance</th><th>Band</th><th class="num">Post-tax</th><th class="num">Pre-tax</th><th>Size</th><th>Status</th></tr></thead><tbody>' + tbody + '</tbody></table>';
+
+    return [
+'<!doctype html><html lang="en"><head><meta charset="utf-8">',
+'<title>' + escapeHtmlClient(d.name || ('product ' + d.productId)) + ' — pricing details</title>',
+'<style>',
+':root{--bg:#f4efe4;--card:#fffaf0;--ink:#1f1b17;--muted:#6d665b;--line:#d9ceb7;--rule:#e9dec2;',
+'--current:#27417e;--proposed:#1f5d42;--post-promo:#5b3aa6;--avg:#8b5e11;--median:#a23f6c;',
+'--up:#1f5d42;--down:#8d2f52;--warn:#8b5e11;}',
+'*{box-sizing:border-box}body{margin:0;padding:24px;font:14px/1.5 -apple-system,system-ui,sans-serif;background:var(--bg);color:var(--ink)}',
+'.wrap{max-width:1400px;margin:0 auto}',
+'h1{margin:0 0 4px;font-size:24px}.sub{color:var(--muted);font-size:13px;margin:0 0 14px}',
+'.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px;margin:14px 0;box-shadow:0 4px 16px rgba(31,27,23,0.05)}',
+'.hdr{display:grid;grid-template-columns:96px 1fr;gap:18px;align-items:flex-start}',
+'.hdr-img{width:96px;height:96px;border-radius:10px;background:#eee;background-size:cover;background-position:center;border:1px solid var(--line)}',
+'.hdr .meta{color:var(--muted);font-size:12px;line-height:1.6}',
+'.hdr .meta code{font-family:SFMono-Regular,Menlo,monospace;font-size:11px}',
+'.prices{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-top:14px}',
+'.price{padding:14px;background:#fff;border:1px solid var(--line);border-radius:10px}',
+'.price .l{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:0.04em;margin-bottom:4px}',
+'.price .v{font-size:26px;font-weight:700;font-variant-numeric:tabular-nums}',
+'.price .gm{font-size:12px;color:var(--muted);margin-top:2px}',
+'.price.current{border-top:3px solid var(--current)}.price.current .v{color:var(--current)}',
+'.price.proposed{border-top:3px solid var(--proposed)}.price.proposed .v{color:var(--proposed)}',
+'.price.post-promo{border-top:3px solid var(--post-promo)}.price.post-promo .v{color:var(--post-promo)}',
+'.controls{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px;margin-top:14px}',
+'.controls label{display:flex;flex-direction:column;gap:4px;font-weight:600;font-size:12px;color:var(--muted)}',
+'.controls input[type=number]{font:inherit;font-weight:700;font-size:18px;padding:8px 12px;border:1px solid var(--line);border-radius:8px;background:#fff;text-align:right;color:var(--ink);width:100%}',
+'.market-summary{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;margin-top:10px}',
+'.market-summary .stat{padding:10px;background:#fff;border:1px solid var(--line);border-radius:10px}',
+'.market-summary .stat .l{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.04em}',
+'.market-summary .stat .v{font-size:18px;font-weight:700;font-variant-numeric:tabular-nums}',
+'table.listings{width:100%;border-collapse:collapse;margin-top:8px;font-size:12px}',
+'table.listings th,table.listings td{padding:6px 8px;border-bottom:1px solid var(--rule);vertical-align:top;text-align:left}',
+'table.listings th{background:#efe7d3;font-weight:700;font-size:11px;text-transform:uppercase;letter-spacing:0.03em;color:var(--ink);position:sticky;top:0;z-index:1}',
+'table.listings td.num,table.listings th.num{text-align:right;font-variant-numeric:tabular-nums}',
+'table.listings tr.band-hdr td{background:#f7f0dd;padding:8px;font-size:12px}',
+'table.listings a{color:var(--current);text-decoration:none}table.listings a:hover{text-decoration:underline}',
+'.elig.yes{color:var(--up);font-weight:600}.elig.no{color:var(--warn)}',
+'.muted{color:var(--muted)}',
+'.searchterm{font-family:SFMono-Regular,Menlo,monospace;font-size:11px;color:var(--muted);background:#fff;border:1px solid var(--line);border-radius:6px;padding:6px 10px;display:block;white-space:pre-wrap}',
+'.note{font-size:12px;color:var(--muted);margin-top:8px;padding:10px;background:#fff;border-left:3px solid var(--warn);border-radius:0 8px 8px 0}',
+'.warn-banner{padding:8px 12px;border-radius:8px;background:#fdf1d8;border:1px solid var(--warn);color:var(--warn);font-size:12px;margin-bottom:10px}',
+'</style></head><body>',
+'<div class="wrap">',
+'<h1>' + escapeHtmlClient(d.name || ('product ' + d.productId)) + '</h1>',
+'<p class="sub">brand <strong>' + escapeHtmlClient(d.brandName || '—') + '</strong> · group <strong>' + escapeHtmlClient(d.groupName || '—') + '</strong> · product <code>' + d.productId + '</code> · group <code>' + (d.groupId ?? '—') + '</code> · Bronx · campaign <code>' + escapeHtmlClient(CAMPAIGN_ID) + '</code> action <code>' + escapeHtmlClient(ACTION_ID) + '</code></p>',
+'<div class="card">',
+'<div class="hdr">',
+headerImg,
+'<div>',
+'<div class="meta">',
+'<div>tab: <strong>' + escapeHtmlClient(d.tab || '—') + '</strong> · category: <strong>' + escapeHtmlClient(d.categoryName || '—') + '</strong>' + (d.subcategoryName ? ' / <strong>' + escapeHtmlClient(d.subcategoryName) + '</strong>' : '') + (d.size ? ' · size: <strong>' + escapeHtmlClient(d.size) + '</strong>' : '') + '</div>',
+'<div>wholesale cost: <strong>' + (cost > 0 ? '$' + cost.toFixed(2) : '—') + '</strong> · status: <strong>' + escapeHtmlClient(d.status || '—') + '</strong> · in ecommerce: <strong>' + (d.displayInEcommerce ? 'yes' : 'no') + '</strong></div>',
+'<div>chain (global) price: <strong>$' + chain.toFixed(2) + '</strong> · Bronx local override: <strong>' + (localOverride != null ? '$' + localOverride.toFixed(2) : '<em>none (uses chain)</em>') + '</strong> · effective Bronx price: <strong>$' + currentEffective.toFixed(2) + '</strong></div>',
+'<div>refreshed: <code>' + escapeHtmlClient(d.market?.refreshedAt || '—') + '</code> · market status: <strong>' + escapeHtmlClient(d.market?.status || '—') + '</strong></div>',
+'</div>',
+(promoFrac > 0 ? '<div class="warn-banner">Snapshot from parent page — effective promo for this row is <strong>' + (promoFrac * 100).toFixed(1) + '%</strong>' + promoSourceLbl + '. Re-click "↗ details" in the main page to refresh after changes.</div>' : ''),
+'</div>',
+'</div>',
+'<div class="prices">',
+'<div class="price current"><div class="l">Current OTD (Bronx)</div><div class="v">' + (function(){const p=otd(currentEffective);return p?'$'+p.toFixed(2):'—'})() + '</div><div class="gm">GM% ' + (function(){const g=gm(currentEffective);return g==null?'—':g.toFixed(1)+'%'})() + ' (pre-promo, at chain price $' + currentEffective.toFixed(2) + ')</div></div>',
+'<div class="price proposed"><div class="l">Proposed OTD</div><div class="v">' + (function(){const p=otd(proposed);return p?'$'+p.toFixed(2):'—'})() + '</div><div class="gm">GM% ' + (function(){const g=gm(proposed);return g==null?'—':g.toFixed(1)+'%'})() + ' (pre-promo, at proposed Bronx local $' + proposed.toFixed(2) + ')</div></div>',
+'<div class="price post-promo"><div class="l">Post-promo OTD @ ' + (promoFrac * 100).toFixed(1) + '%</div><div class="v">' + (function(){const p=otd(postPromoPrice);return p?'$'+p.toFixed(2):'—'})() + '</div><div class="gm">GM% ' + (function(){const g=gm(postPromoPrice);return g==null?'—':g.toFixed(1)+'%'})() + ' (after promo on proposed price)</div></div>',
+'</div>',
+'<div class="controls">',
+'<label>Proposed Bronx local — pre-tax<input type="number" id="dProposed" min="0" step="0.25" value="' + proposed.toFixed(2) + '"></label>',
+'<label>Promo % (snapshot)<input type="number" id="dPromo" min="0" max="80" step="0.5" value="' + (promoFrac * 100).toFixed(1) + '"></label>',
+'<label>Chain (global) — pre-tax (read-only here)<input type="number" id="dChain" min="0" step="0.25" value="' + chain.toFixed(2) + '" disabled></label>',
+'</div>',
+'<p class="muted" style="margin:10px 0 0;font-size:12px">Editing values here is a local what-if calculator only — it does not push back to the main page. Adjust the proposed price + promo % to explore GM at this product\\'s competitor band, then return to the main page and update the row inputs there.</p>',
+'</div>',
+'<div class="card">',
+'<h2 style="margin:0 0 6px;font-size:16px">Market context</h2>',
+'<div class="market-summary">',
+'<div class="stat"><div class="l">Total listings</div><div class="v">' + (d.market?.listingCount ?? 0) + '</div></div>',
+'<div class="stat"><div class="l">Pricing-eligible</div><div class="v">' + (d.market?.pricingEligibleListingCount ?? 0) + '</div></div>',
+'<div class="stat"><div class="l">Avg post-tax</div><div class="v">' + (d.market?.averagePostTaxPrice != null ? '$' + Number(d.market.averagePostTaxPrice).toFixed(2) : '—') + '</div></div>',
+'<div class="stat"><div class="l">Median post-tax</div><div class="v">' + (d.market?.medianPostTaxPrice != null ? '$' + Number(d.market.medianPostTaxPrice).toFixed(2) : '—') + '</div></div>',
+'</div>',
+(d.market?.searchTerm ? '<div style="margin-top:10px"><div class="muted" style="font-size:11px;text-transform:uppercase;letter-spacing:0.04em;margin-bottom:4px">search term(s)</div><span class="searchterm">' + escapeHtmlClient(d.market.searchTerm) + '</span></div>' : ''),
+(d.market?.note ? '<div class="note">' + escapeHtmlClient(d.market.note) + '</div>' : ''),
+'</div>',
+'<div class="card">',
+'<h2 style="margin:0 0 6px;font-size:16px">Competitor listings <span class="muted" style="font-weight:400;font-size:13px">(sorted by ascending distance; band breaks shown)</span></h2>',
+tableHtml,
+'</div>',
+'</div>',
+'<script>(function(){',
+'var p=document.getElementById("dProposed"),pr=document.getElementById("dPromo");',
+'function recompute(){location.search=location.search;}',
+// Simple inline recompute on input — update the 3 price cards on the fly.
+'function nodeBy(sel){return document.querySelector(sel);}',
+'function recomputeLocal(){',
+'  var pp=parseFloat(p.value)||0, prF=(parseFloat(pr.value)||0)/100, post=' + POST_TAX + ', cost=' + cost + ';',
+'  var cards=document.querySelectorAll(".price");',
+'  var proposedOtd=pp*post, postPromoP=pp*(1-prF), postPromoOtd=postPromoP*post;',
+'  var fmt=function(x){return isFinite(x)&&x>0?"$"+x.toFixed(2):"—"};',
+'  var gm=function(price){return (cost>0&&price>0)?((1-(post*cost)/price)*100).toFixed(1)+"%":"—"};',
+'  cards[1].querySelector(".v").textContent=fmt(proposedOtd);',
+'  cards[1].querySelector(".gm").textContent="GM% "+gm(pp)+" (pre-promo, at proposed Bronx local $"+pp.toFixed(2)+")";',
+'  cards[2].querySelector(".l").textContent="Post-promo OTD @ "+(prF*100).toFixed(1)+"%";',
+'  cards[2].querySelector(".v").textContent=fmt(postPromoOtd);',
+'  cards[2].querySelector(".gm").textContent="GM% "+gm(postPromoP)+" (after promo on proposed price)";',
+'}',
+'if(p)p.addEventListener("input",recomputeLocal);',
+'if(pr)pr.addEventListener("input",recomputeLocal);',
+'})();<' + '/script>',
+'</body></html>'
+    ].join('\\n');
+  }
 
   // initialize: mark every row unreviewed and refresh.
   document.querySelectorAll('.row[data-product-id]').forEach((row) => setRowState(row, 'unreviewed'));
