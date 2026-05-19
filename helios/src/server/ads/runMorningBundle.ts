@@ -106,12 +106,39 @@ export async function runMorningBundle(opts?: {
       'https://bedrock-mantle.us-east-2.api.aws/v1'
   }
 
+  // The analysis script and its lib/ chain reach for packages via
+  // dynamic `await import('js-yaml')` (llm-client.ts +
+  // strategicClustersSchema.ts). Node's ESM resolver walks up from
+  // the importing file's URL looking for a `node_modules/` dir; the
+  // ads/google/ tree has none, and neither does anything between it
+  // and /. (NODE_PATH does NOT help with ESM resolution — it's a
+  // CommonJS-only lookup.) Ensure a `node_modules/` shim sits at
+  // the repo root so the walk-up resolves; we point it at helios'
+  // own node_modules, which already has every package the analysis
+  // chain needs (js-yaml is now an explicit helios dep).
+  await ensureRepoRootNodeModulesSymlink(repoRoot)
+
   onLog('running L1→L2 analysis')
+  // Track the spawn epoch so we can require the analysis to write
+  // a NEW l2-output.json (mtime >= spawnStartMs). Otherwise a
+  // silently-failing run that exits 0 without writing anything
+  // would cause us to bundle the previous run's stale json — the
+  // bug the operator hit earlier today.
+  const spawnStartMs = Date.now()
   const analysis = await runChild(
     tsxBin,
     [analysisScript, '--snapshot', snapshot.path, '--output-dir', prodDir],
     { cwd: gadsDir, env: analysisEnv },
   )
+
+  // Always log a tail of the analysis output — it's the only way
+  // an operator can diagnose what went wrong inside the spawn
+  // (run-analysis.ts logs to stdout/stderr, not to our pino logger).
+  const analysisTail = tail(`${analysis.stdout}\n${analysis.stderr}`, 1500)
+  if (analysisTail.trim() !== '') {
+    onLog(`analysis output (tail):\n${analysisTail}`)
+  }
+
   if (analysis.exitCode !== 0) {
     throw new MorningBundleRunError(
       `run-analysis.ts exited with code ${analysis.exitCode}`,
@@ -120,18 +147,17 @@ export async function runMorningBundle(opts?: {
     )
   }
 
-  // run-analysis.ts swallows LLM failures and falls back to
-  // mockL2Prediction() (see ads/google/scripts/run-analysis.ts).
-  // The mock has empty ad_actions / trial_plans (→ 0 CSVs) and
-  // stringifies anomaly details to '[object Object]' inside the
-  // HTML packet's "main issues" field. Detect the fallback by
-  // its warning and surface the underlying LLM error instead of
-  // shipping a useless bundle.
+  // run-analysis.ts can fall back to mockL2Prediction() when the
+  // LLM call fails with a recognized "transient" error pattern.
+  // Even with the post-fix script we treat that as a hard failure
+  // for the operator bundle (the mock has empty actions/trials
+  // and produces a packet that isn't worth shipping). Detect by
+  // the script's own warning text.
   const mockWarning = detectMockFallback(analysis.stdout, analysis.stderr)
   if (mockWarning) {
     throw new MorningBundleRunError(
       `L1→L2 analysis fell back to mock predictions: ${mockWarning}. ` +
-        `The resulting bundle would have 0 CSV rows and a garbled HTML packet, ` +
+        `The resulting bundle would have 0 CSV rows and a near-empty HTML packet, ` +
         `so it is rejected. Fix the LLM configuration ` +
         `(LLM_ENDPOINT_BASE + BEDROCK_MANTLE_BEARER_TOKEN on helios-server) ` +
         `and retry.`,
@@ -141,8 +167,22 @@ export async function runMorningBundle(opts?: {
   }
 
   // 3. Identify the new run by the freshest l2-output.json produced.
+  //    Require its mtime to be at-or-after the spawn start, so we
+  //    never silently bundle a stale prior-run json.
   const jsonDir = path.join(prodDir, 'json')
   const newestJson = await findNewestMatching(jsonDir, /^run-.*-l2-output\.json$/)
+  if (newestJson && newestJson.mtimeMs + 1000 < spawnStartMs) {
+    // We have a json file, but it predates this spawn — the
+    // analysis didn't actually produce a new one.
+    throw new MorningBundleRunError(
+      `run-analysis.ts exited 0 but wrote no new l2-output.json ` +
+        `(newest on disk is ${newestJson.name}, ` +
+        `${Math.round((spawnStartMs - newestJson.mtimeMs) / 1000)}s older than this spawn). ` +
+        `Treating as a silent failure.`,
+      'analysis',
+      tail(`${analysis.stdout}\n${analysis.stderr}`, 4000),
+    )
+  }
   if (!newestJson) {
     throw new MorningBundleRunError(
       `Analysis completed but no run-*-l2-output.json appeared in ${jsonDir}.`,
@@ -344,6 +384,60 @@ async function assertExists(p: string, stage: 'analysis' | 'bundle'): Promise<vo
 function tail(s: string, n: number): string {
   if (s.length <= n) return s
   return s.slice(-n)
+}
+
+/**
+ * Make `<repoRoot>/node_modules` resolve to helios' own
+ * `node_modules/` so that ESM imports made from anywhere inside
+ * the automation checkout (notably ads/google/*) can find packages
+ * via Node's standard "walk up looking for node_modules" rule.
+ *
+ * We intentionally do this from helios at runtime instead of from
+ * helios-prep so the behaviour stays self-contained in this
+ * codebase: a fresh checkout that has only run `npm install` in
+ * `helios/` still works when helios spawns the analysis. The op
+ * is idempotent and only writes when missing or pointing the
+ * wrong way.
+ */
+async function ensureRepoRootNodeModulesSymlink(repoRoot: string): Promise<void> {
+  const target = path.join(repoRoot, 'helios', 'node_modules')
+  const link = path.join(repoRoot, 'node_modules')
+  let existing: import('node:fs').Stats | null = null
+  try {
+    existing = await fs.lstat(link)
+  } catch {
+    existing = null
+  }
+  if (existing) {
+    if (existing.isSymbolicLink()) {
+      try {
+        const cur = await fs.readlink(link)
+        if (path.resolve(repoRoot, cur) === target) return
+      } catch {
+        // fall through to rewrite
+      }
+      try {
+        await fs.unlink(link)
+      } catch {
+        return
+      }
+    } else {
+      // A real directory exists; assume it was installed
+      // intentionally (e.g. a future top-level package.json).
+      // Don't touch it.
+      return
+    }
+  }
+  try {
+    await fs.symlink(target, link, 'dir')
+  } catch (err) {
+    // Best effort: if the symlink can't be created we'll let the
+    // analysis fail with its native ERR_MODULE_NOT_FOUND, which
+    // surfaces clearly in the analysis tail logged above.
+    if ((err as NodeJS.ErrnoException).code !== 'EEXIST') {
+      throw err
+    }
+  }
 }
 
 function processEnvAsRecord(): Record<string, string> {
