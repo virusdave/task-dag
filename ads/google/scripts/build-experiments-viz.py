@@ -34,6 +34,30 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parents[3]
 GADS_ROOT = REPO_ROOT / "ads" / "google"
 
+# Persistent global turn counter -- monotonically increments every time
+# the operator drives the analysis loop forward one turn (typically via
+# scripts/run-turn.sh after uploading a fresh gads CSV export). The
+# number prefixes the import-bundle filenames and shows up in the page
+# header so the operator (and Ads Editor's import history) can see
+# which generated bundle corresponds to which iteration of the
+# crisis-mitigation loop discussed in issue #11.
+TURN_COUNTER_PATH = GADS_ROOT / "snapshots" / ".turn-counter"
+
+
+def read_turn_counter() -> int:
+    try:
+        return int(TURN_COUNTER_PATH.read_text().strip() or "0")
+    except (FileNotFoundError, ValueError):
+        return 0
+
+
+def bump_turn_counter() -> int:
+    """Increment the persistent global turn counter and return the new value."""
+    n = read_turn_counter() + 1
+    TURN_COUNTER_PATH.parent.mkdir(parents=True, exist_ok=True)
+    TURN_COUNTER_PATH.write_text(f"{n}\n")
+    return n
+
 
 def load_l2_runs() -> list[dict]:
     runs = []
@@ -838,28 +862,37 @@ def build_recovery(snapshot: list[dict]) -> tuple[str, str, dict]:
     return csv_text, md_text, stats
 
 
-def build_csv_zip(trials: list[dict], snapshot: list[dict]) -> tuple[bytes, dict]:
-    """Build an importable ZIP and return (zip-bytes, stats)."""
+def build_csv_zip(trials: list[dict], snapshot: list[dict], turn: int = 0) -> tuple[bytes, dict]:
+    """Build an importable ZIP and return (zip-bytes, stats).
+
+    When `turn` > 0 the file names inside the ZIP are prefixed with the
+    global sequential turn number (e.g. `turn-007/001-import.csv`) so
+    that, after the operator re-imports successive bundles into Ads
+    Editor, the import history makes the iteration order obvious.
+    """
     files, stats = build_importable_csvs(trials, snapshot)
     recovery_csv, recovery_md, recovery_stats = build_recovery(snapshot)
     stats["recovery"] = recovery_stats
+    stats["turn"] = turn
+    prefix = f"turn-{turn:03d}/" if turn else ""
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         manifest = {
             "generated_at": dt.datetime.now().isoformat(timespec="seconds"),
             "source_repo": "FreshlyBakedNYC/automation",
             "issue": "https://github.com/FreshlyBakedNYC/automation/issues/11",
+            "turn": turn,
             "campaign_name": stats.get("campaign_name"),
             "stats": {k: v for k, v in stats.items() if k not in ("skipped", "needs_url_fix")},
             "trials_needing_url_fix": stats.get("needs_url_fix", []),
         }
-        zf.writestr("MANIFEST.json", json.dumps(manifest, indent=2))
+        zf.writestr(f"{prefix}MANIFEST.json", json.dumps(manifest, indent=2))
         for name, content in files.items():
-            zf.writestr(name, content)
+            zf.writestr(f"{prefix}{name}", content)
         if recovery_stats["cloned_count"] or recovery_stats["pause_count"]:
-            zf.writestr("002-recovery.csv", recovery_csv)
-            zf.writestr("RECOVERY.md", recovery_md)
-            zf.writestr("CAMPAIGN_MAP_TEMPLATE.csv", recovery_stats.pop("template_csv", ""))
+            zf.writestr(f"{prefix}002-recovery.csv", recovery_csv)
+            zf.writestr(f"{prefix}RECOVERY.md", recovery_md)
+            zf.writestr(f"{prefix}CAMPAIGN_MAP_TEMPLATE.csv", recovery_stats.pop("template_csv", ""))
     return buf.getvalue(), stats
 
 
@@ -1042,12 +1075,12 @@ footer .row {{ display: flex; justify-content: space-between; gap: 12px; flex-wr
 </head>
 <body>
 <header class="bar">
-  <h1>🧪 Gads Experiments</h1>
-  <a class="btn" download="gads-experiments-bundle.zip" href="data:application/zip;base64,{csv_b64}">⬇ CSV bundle</a>
+  <h1>🧪 Gads Experiments {turn_badge_html}</h1>
+  <a class="btn" download="{bundle_filename}" href="data:application/zip;base64,{csv_b64}">⬇ CSV bundle</a>
 </header>
 <main>
   <div class="meta" style="color:var(--muted);font-size:0.8rem;margin-bottom:8px;">
-    Generated {generated_at} · {trial_count} trial(s) · {csv_count} CSV(s) in bundle · Issue
+    Generated {generated_at} · {turn_label}{trial_count} trial(s) · {csv_count} CSV(s) in bundle · Issue
     <a href="https://github.com/FreshlyBakedNYC/automation/issues/11">#11</a>
   </div>
 
@@ -1128,7 +1161,7 @@ footer .row {{ display: flex; justify-content: space-between; gap: 12px; flex-wr
   <footer>
     <div class="row">
       <div>Source: {source_runs} L2 run(s) · snapshot {snapshot_date} · {snapshot_count} ad row(s)</div>
-      <a class="btn secondary" download="gads-experiments-bundle.zip" href="data:application/zip;base64,{csv_b64}">⬇ Download CSV bundle</a>
+      <a class="btn secondary" download="{bundle_filename}" href="data:application/zip;base64,{csv_b64}">⬇ Download CSV bundle</a>
     </div>
   </footer>
 </main>
@@ -1228,7 +1261,7 @@ def render_persistent(rows: list[dict]) -> str:
     return f'<div class="cards">{"".join(cards)}</div>'
 
 
-def build_html(out_path: Path) -> Path:
+def build_html(out_path: Path, turn: int = 0) -> Path:
     print(f"  loading L2 runs from {GADS_ROOT}/outputs/*/json/...")
     l2_runs = load_l2_runs()
     print(f"  loaded {len(l2_runs)} L2 run(s)")
@@ -1238,8 +1271,10 @@ def build_html(out_path: Path) -> Path:
     print(f"  loaded {len(snapshot)} snapshot row(s) (date={snapshot_date})")
     trials = flatten_trials(l2_runs)
     print(f"  flattened {len(trials)} trial(s) from L2 runs")
+    if turn:
+        print(f"  global turn counter: {turn}")
     print(f"  building importable CSV bundle ZIP...")
-    csv_zip, csv_stats = build_csv_zip(trials, snapshot)
+    csv_zip, csv_stats = build_csv_zip(trials, snapshot, turn=turn)
     csv_count = 0
     with zipfile.ZipFile(io.BytesIO(csv_zip)) as zf:
         csv_count = sum(1 for n in zf.namelist() if n.lower().endswith(".csv"))
@@ -1305,8 +1340,21 @@ def build_html(out_path: Path) -> Path:
         )
     bundle_skipped_html = "".join(notes_html_parts)
 
+    bundle_filename = (
+        f"gads-experiments-turn-{turn:03d}.zip" if turn else "gads-experiments-bundle.zip"
+    )
+    turn_badge_html = (
+        f'<span class="tag info" style="margin-left:8px;font-size:0.7rem;vertical-align:middle;">turn {turn:03d}</span>'
+        if turn
+        else ""
+    )
+    turn_label = f"turn {turn:03d} · " if turn else ""
+
     page = PAGE_TEMPLATE.format(
         csv_b64=base64.b64encode(csv_zip).decode("ascii"),
+        bundle_filename=bundle_filename,
+        turn_badge_html=turn_badge_html,
+        turn_label=turn_label,
         generated_at=dt.datetime.now().strftime("%Y-%m-%d %H:%M %Z").strip(),
         trial_count=total_trials,
         csv_count=csv_count,
@@ -1377,10 +1425,34 @@ def main():
         default=str(GADS_ROOT / "outputs" / "experiments-viz.html"),
         help="Output HTML path",
     )
+    ap.add_argument(
+        "--turn",
+        type=int,
+        default=None,
+        help="Global sequential turn number for this rebuild. When omitted, "
+             "the existing counter value is read but NOT incremented (use "
+             "--bump-turn to increment). When 0, the turn badge / numbered "
+             "filenames are suppressed.",
+    )
+    ap.add_argument(
+        "--bump-turn",
+        action="store_true",
+        help="Increment the persistent global turn counter (ads/google/"
+             "snapshots/.turn-counter) before rendering. Intended for use "
+             "by scripts/run-turn.sh after uploading a fresh gads CSV.",
+    )
     args = ap.parse_args()
-    out = build_html(Path(args.output))
+    if args.bump_turn:
+        turn = bump_turn_counter()
+    elif args.turn is not None:
+        turn = args.turn
+    else:
+        turn = read_turn_counter()
+    out = build_html(Path(args.output), turn=turn)
     size = out.stat().st_size
     print(f"\n✅ Wrote {out} ({size:,} bytes)")
+    if turn:
+        print(f"   global turn: {turn:03d}")
 
 
 if __name__ == "__main__":
