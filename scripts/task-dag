@@ -584,6 +584,50 @@ EOF
     local issue_num=$(extract_field "$task_msg" "Issue" | sed 's/^#//')
     local issue_url=$(extract_field "$task_msg" "URL")
     local task_title=$(get_task_title "$task_sha")
+
+    # Walk up the parent chain to inherit Issue/URL if missing on the leaf
+    # task commit. Breakdown children typically only carry "Issue: #N" and
+    # rely on the epic ancestor to hold the canonical "URL:" field. Without
+    # this walk, `Related: <url>` would silently never be appended for any
+    # leaf task whose commit message lacks an explicit URL.
+    local ancestor_sha="$task_sha"
+    local hops=0
+    while { [ -z "$issue_num" ] || [ -z "$issue_url" ]; } && [ "$hops" -lt 10 ]; do
+        local parent_sha=$(get_first_parent "$ancestor_sha" || true)
+        if [ -z "$parent_sha" ] || [ "$parent_sha" = "$ancestor_sha" ]; then
+            break
+        fi
+        local parent_msg=$(parse_commit_metadata "$parent_sha")
+        # Stop walking once we leave task/epic metadata commits
+        local parent_type=$(extract_field "$parent_msg" "Type")
+        if [ -z "$parent_type" ]; then
+            break
+        fi
+        if [ -z "$issue_num" ]; then
+            issue_num=$(extract_field "$parent_msg" "Issue" | sed 's/^#//')
+        fi
+        if [ -z "$issue_url" ]; then
+            issue_url=$(extract_field "$parent_msg" "URL")
+        fi
+        ancestor_sha="$parent_sha"
+        hops=$((hops + 1))
+    done
+
+    # Last-resort fallback: synthesize URL from origin remote + Issue #.
+    # Only fires when the entire ancestor chain lacks a URL field but we do
+    # have an issue number and an origin remote that looks like GitHub.
+    if [ -z "$issue_url" ] && [ -n "$issue_num" ]; then
+        local origin_url=$(git config --get remote.origin.url 2>/dev/null || true)
+        # Normalize git@github.com:owner/repo(.git) and
+        # https://github.com/owner/repo(.git) into owner/repo.
+        local repo_slug=$(echo "$origin_url" \
+            | sed -E 's#^git@[^:]+:#https://github.com/#' \
+            | sed -E 's#\.git$##' \
+            | sed -E 's#^https?://[^/]+/##')
+        if [ -n "$repo_slug" ] && echo "$origin_url" | grep -qi github; then
+            issue_url="https://github.com/${repo_slug}/issues/${issue_num}"
+        fi
+    fi
     
     # Create new commit with task as second parent and full issue metadata
     local new_message="${old_message}
