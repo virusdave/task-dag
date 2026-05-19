@@ -23,6 +23,7 @@
     "arcsecond": "^5.0.0",
     "dagre": "^0.8.5",
     "fastify": "^5.2.0",
+    "fflate": "^0.8.3",
     "google-auth-library": "^10.4.0",
     "jsonc-parser": "^3.3.1",
     "pg": "^8.13.1",

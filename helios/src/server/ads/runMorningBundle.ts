@@ -32,6 +32,7 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 
 import { automationRepoPath, getAutomationRepoRoot } from './automationRepoRoot.js'
+import { zipDirectoryToBuffer } from './zipDirectory.js'
 
 export interface MorningBundleRunResult {
   runId: string
@@ -149,16 +150,11 @@ export async function runMorningBundle(opts?: {
     bundlePath = path.join(bundleDir, `${runId}.zip`)
     await fs.rm(bundlePath, { force: true })
 
-    const zipResult = await runChild('zip', ['-q', '-r', bundlePath, '.'], { cwd: stageDir })
-    if (zipResult.exitCode !== 0) {
-      throw new MorningBundleRunError(
-        `zip exited with code ${zipResult.exitCode}`,
-        'bundle',
-        tail(zipResult.stderr, 2000),
-      )
-    }
-    const stat = await fs.stat(bundlePath)
-    bytes = stat.size
+    // In-process ZIP — see helios/src/server/ads/zipDirectory.ts for
+    // why we no longer shell out to the system `zip` binary.
+    const zipBuf = await zipDirectoryToBuffer(stageDir)
+    await fs.writeFile(bundlePath, zipBuf)
+    bytes = zipBuf.byteLength
   } finally {
     await fs.rm(stageDir, { recursive: true, force: true })
   }
