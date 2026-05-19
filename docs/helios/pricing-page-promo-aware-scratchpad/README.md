@@ -153,6 +153,29 @@ default, the group's price-ladder promo marker label must read e.g.
 `promo OTD $X (group override 25%)`, not the page default's percent.
 Same for row-level overrides.
 
+### 9. Reviewer-attention efficiency — collapse "info-only" copy
+
+Optimize the page for the reviewer's actual task (scanning rows,
+adjusting prices, approving). Do **not** force "how this works" text
+or other info-only copy into the reviewer's face once they have
+started working.
+
+Rule of thumb: if a piece of UI text is **not** always useful to a
+reviewer doing their job — i.e. it is useful at most one time, like a
+legend or a "how to read this" hint — it must collapse away as soon
+as the surrounding chrome (sticky toolbar, sticky header, etc.)
+becomes a working surface and detaches from the document flow.
+Genuinely persistent task UI (price ladders, controls, approval pills)
+stays visible.
+
+Concretely, in this scratchpad the toolbar's explanatory copy
+("Promo % cascades row → group → page…") is full-width when the
+toolbar is in its at-rest position at the top of the page, but
+collapses to zero width with a brief transition the moment the
+toolbar pins to the viewport. Future Helios pricing pages should
+adopt the same pattern for every "info-only, one-shot" string in a
+sticky region.
+
 ## Status at time of writing
 
 | Requirement                                                       | Scratchpad now | Helios proper |
