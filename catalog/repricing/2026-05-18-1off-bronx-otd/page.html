@@ -23,8 +23,15 @@ h1{margin:0 0 6px}
 .toolbar input[type=number]{font:inherit;font-weight:700;font-size:17px;padding:5px 9px;border:1px solid var(--line);border-radius:8px;width:104px;background:#fff;text-align:right;color:var(--post-promo)}
 input[type=number]::placeholder{color:#8a7f6c;opacity:1;font-weight:500;font-style:italic}
 input[type=number]::-webkit-input-placeholder{color:#8a7f6c;opacity:1;font-weight:500;font-style:italic}
-.toolbar .meta{color:var(--muted);font-size:12px;line-height:1.4;max-width:340px;transition:max-width 0.18s ease,opacity 0.18s ease,margin 0.18s ease}
-.toolbar.pinned .meta{max-width:0;opacity:0;margin:0;padding:0;overflow:hidden;pointer-events:none}
+.toolbar .meta{color:var(--muted);font-size:12px;line-height:1.4;max-width:340px;min-width:0}
+@media (min-width: 900px){
+  .toolbar.pinned{flex-wrap:nowrap;gap:12px;padding:8px 14px;overflow-x:auto;overflow-y:hidden}
+  .toolbar.pinned .meta{display:none}
+  .toolbar.pinned .summary{min-width:0;flex:1 1 auto;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .toolbar.pinned label,
+  .toolbar.pinned .review-pill,
+  .toolbar.pinned > button{flex:0 0 auto;white-space:nowrap}
+}
 .toolbar button{font:inherit;padding:6px 12px;border:1px solid var(--line);background:#fff;border-radius:8px;cursor:pointer;font-size:12px}
 .toolbar button.primary{background:var(--approved);color:#fff;border-color:var(--approved);font-weight:600}
 .toolbar .review-pill{display:inline-flex;gap:4px;align-items:center}
@@ -137,7 +144,6 @@ input[type=number]::-webkit-input-placeholder{color:#8a7f6c;opacity:1;font-weigh
     · UX design input recorded at <code>docs/helios/pricing-page-promo-aware-scratchpad/</code>
   </p>
 
-  <div id="toolbarSentinel" aria-hidden="true" style="height:1px;margin:0;padding:0"></div>
   <div class="toolbar" id="mainToolbar">
     <label>
       Page discount %:
@@ -6852,20 +6858,24 @@ input[type=number]::-webkit-input-placeholder{color:#8a7f6c;opacity:1;font-weigh
   document.querySelectorAll('.row[data-product-id]').forEach((row) => setRowState(row, 'unreviewed'));
   refreshAllRows();
 
-  // Collapse the toolbar's info-only "how this works" copy as soon as
-  // the toolbar starts floating (sentinel scrolls past the sticky top
-  // offset). The hint is useful at most once; once the reviewer is
-  // working, we reclaim the visual space.
+  // Collapse the toolbar's info-only "how this works" copy + the
+  // secondary "reset every proposed" / "no rows reviewed yet" widgets
+  // as soon as the toolbar actually pins to the viewport. The hint
+  // text is useful at most once; once the reviewer is scrolling and
+  // working, we reclaim the vertical space so the floating bar stays
+  // a single compact row instead of dominating the viewport.
   const toolbar = document.getElementById('mainToolbar');
-  const sentinel = document.getElementById('toolbarSentinel');
-  if (toolbar && sentinel && 'IntersectionObserver' in window) {
+  if (toolbar) {
     const stickyTop = 8; // matches .toolbar { top: 8px }
-    const observer = new IntersectionObserver((entries) => {
-      for (const entry of entries) {
-        toolbar.classList.toggle('pinned', !entry.isIntersecting);
-      }
-    }, { rootMargin: '-' + (stickyTop + 1) + 'px 0px 0px 0px', threshold: 0 });
-    observer.observe(sentinel);
+    const syncPinned = () => {
+      const pinned =
+        window.scrollY > 0 &&
+        toolbar.getBoundingClientRect().top <= stickyTop + 0.5;
+      toolbar.classList.toggle('pinned', pinned);
+    };
+    syncPinned();
+    window.addEventListener('scroll', syncPinned, { passive: true });
+    window.addEventListener('resize', syncPinned);
   }
 })();
 

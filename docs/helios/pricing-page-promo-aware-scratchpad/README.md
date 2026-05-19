@@ -169,12 +169,43 @@ Genuinely persistent task UI (price ladders, controls, approval pills)
 stays visible.
 
 Concretely, in this scratchpad the toolbar's explanatory copy
-("Promo % cascades row → group → page…") is full-width when the
-toolbar is in its at-rest position at the top of the page, but
-collapses to zero width with a brief transition the moment the
-toolbar pins to the viewport. Future Helios pricing pages should
-adopt the same pattern for every "info-only, one-shot" string in a
-sticky region.
+("Promo % cascades row → group → page…") is fully present when the
+toolbar is in its at-rest position at the top of the page, but is
+`display:none`'d the moment the toolbar pins to the viewport; in
+pinned state the toolbar also switches to `flex-wrap:nowrap`,
+compactified padding/gap, and the summary cell ellipsises so the
+floating bar stays a single ~50px row instead of dominating the
+viewport. Future Helios pricing pages should adopt the same pattern
+for every "info-only, one-shot" string in a sticky region.
+
+**Pre-commit checklist for any layout-impacting change to a sticky
+or floating component** (we burned a release on this; do not skip):
+
+1. Test four scroll states explicitly — at rest, first scrolled
+   pixel, fully pinned, and scrolled back to top.
+2. Sum the intrinsic widths of every sticky-region child. If they
+   cannot fit on one row at a representative desktop width, define
+   the pinned overflow strategy on purpose (nowrap + ellipsis,
+   horizontal scroll, or hide low-priority content).
+3. For flex items meant to collapse, use `display:none` or
+   `min-width:0` + explicit flex sizing. `max-width:0` alone is not
+   enough — `min-width:auto` on flex items will keep them affecting
+   wrap.
+4. Decide pinned behavior explicitly — never let wrap "figure it
+   out".
+5. If using `IntersectionObserver` to detect "pinned", verify the
+   sentinel's geometry at `scrollTop=0` against the `rootMargin`;
+   the cleaner path is usually a passive `scroll`+`resize` listener
+   that checks `getBoundingClientRect().top` against the sticky
+   offset.
+6. Check short desktop heights and 100% / 125% browser zoom; sticky
+   regressions usually appear in height before width.
+7. Rank children by importance before coding: primary actions
+   (discount input, approval pill, primary CTA) must survive pinned
+   state; explanatory copy is first to collapse.
+8. Run the diff past a reviewer (oracle / second LLM) with the
+   prompt "what does this break on a non-mobile viewport when the
+   element pins/floats?" before pushing.
 
 ## Status at time of writing
 
