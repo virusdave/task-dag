@@ -20,6 +20,13 @@ import type { MorningBundleRunTriggerResponse } from '../../shared/contracts/ind
 
 const TRIGGER_WRAPPER = '/run/current-system/sw/bin/gads-run-morning-trigger'
 
+// NixOS keeps the setuid `sudo` under /run/wrappers/bin/, which is
+// NOT on the helios systemd unit's PATH (it only has the explicit
+// nix-store entries baked into environment.systemd.PATH). Spawn the
+// absolute path so we don't fail with `spawn sudo ENOENT` before the
+// wrapper even gets a chance to run.
+const SUDO_BIN = '/run/wrappers/bin/sudo'
+
 export async function triggerMorningBundle(): Promise<MorningBundleRunTriggerResponse> {
   const start = await runWrapper()
   if (start.exitCode === 0) {
@@ -67,7 +74,7 @@ interface SpawnResult {
 
 function runWrapper(): Promise<SpawnResult> {
   return new Promise((resolve) => {
-    const child = spawn('sudo', ['-n', TRIGGER_WRAPPER], { stdio: ['ignore', 'pipe', 'pipe'] })
+    const child = spawn(SUDO_BIN, ['-n', TRIGGER_WRAPPER], { stdio: ['ignore', 'pipe', 'pipe'] })
     let stdout = ''
     let stderr = ''
     child.stdout.on('data', (chunk: Buffer) => {

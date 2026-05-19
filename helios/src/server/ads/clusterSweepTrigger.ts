@@ -33,6 +33,12 @@ import type { ClusterSweepRunTriggerResponse } from '../../shared/contracts/inde
  */
 const TRIGGER_WRAPPER = '/run/current-system/sw/bin/gads-cluster-sweep-trigger'
 
+// NixOS keeps the setuid `sudo` under /run/wrappers/bin/, which is
+// NOT on the helios systemd unit's PATH. Spawn the absolute path so
+// we don't fail with `spawn sudo ENOENT` before the wrapper even gets
+// a chance to run.
+const SUDO_BIN = '/run/wrappers/bin/sudo'
+
 export async function triggerClusterSweep(): Promise<ClusterSweepRunTriggerResponse> {
   const start = await runWrapper()
   if (start.exitCode === 0) {
@@ -97,7 +103,7 @@ function runWrapper(): Promise<SpawnResult> {
     // and the wrapper's distinct exit codes are unreachable; we fall
     // through to the `trigger-failed` default branch, which surfaces
     // the sudo diagnostic in the collapsed <details> on the page.
-    const child = spawn('sudo', ['-n', TRIGGER_WRAPPER], { stdio: ['ignore', 'pipe', 'pipe'] })
+    const child = spawn(SUDO_BIN, ['-n', TRIGGER_WRAPPER], { stdio: ['ignore', 'pipe', 'pipe'] })
     let stdout = ''
     let stderr = ''
     child.stdout.on('data', (chunk: Buffer) => {
