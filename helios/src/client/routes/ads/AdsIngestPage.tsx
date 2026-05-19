@@ -61,10 +61,21 @@ export function AdsIngestPage() {
     return () => clearInterval(id)
   }, [fetchStatus])
 
+  const [morningInflight, setMorningInflight] = useState<{ startedAt: string } | null>(null)
+  const [morningLastResult, setMorningLastResult] = useState<{
+    finishedAt: string
+    ok: boolean
+    runId: string | null
+    errorMessage: string | null
+    errorDetail: string | null
+  } | null>(null)
+
   const fetchMorningRuns = useCallback(async () => {
     try {
       const next = await loadJson('/api/ads/morning-bundles/runs', MorningBundleRunsResponseSchema)
       setMorningRuns(next.runs)
+      setMorningInflight(next.inflight ?? null)
+      setMorningLastResult(next.lastResult ?? null)
       setMorningRunsError(null)
       return next.runs
     } catch (err) {
@@ -77,22 +88,23 @@ export function AdsIngestPage() {
     void fetchMorningRuns()
   }, [fetchMorningRuns])
 
-  // While we're waiting for a freshly-triggered morning run to land
-  // on disk, poll the runs index every few seconds and stop as soon
-  // as a new runId appears (or we hit the watch deadline).
+  // Poll the runs index every few seconds while a pipeline run is
+  // in flight (either we just triggered one, or the server tells us
+  // one is running). Stops once `inflight` clears and a fresh fetch
+  // confirms it. Also bounded by a hard watch deadline so a stuck
+  // run doesn't keep polling forever.
   useEffect(() => {
-    if (morningOp.kind !== 'triggered' || morningOp.result.status !== 'triggered') {
+    const justTriggered =
+      morningOp.kind === 'triggered' && morningOp.result.status === 'triggered'
+    if (!justTriggered && !morningInflight) {
       return
     }
-    const baseline = morningOp.baselineRunIds
     const startedAt = Date.now()
     let cancelled = false
     const tick = async () => {
       if (cancelled) return
-      const runs = await fetchMorningRuns()
+      await fetchMorningRuns()
       if (cancelled) return
-      const sawNew = runs ? runs.some((r) => !baseline.has(r.runId)) : false
-      if (sawNew) return
       if (Date.now() - startedAt > MORNING_TRIGGER_WATCH_MS) return
       window.setTimeout(() => void tick(), MORNING_RUNS_POLL_MS)
     }
@@ -100,7 +112,7 @@ export function AdsIngestPage() {
     return () => {
       cancelled = true
     }
-  }, [morningOp, fetchMorningRuns])
+  }, [morningOp, morningInflight, fetchMorningRuns])
 
   const onTriggerMorningRun = useCallback(async () => {
     const baseline = new Set((morningRuns ?? []).map((r) => r.runId))
@@ -308,7 +320,7 @@ export function AdsIngestPage() {
               when it finishes (typically 1–2 minutes).
             </p>
           </div>
-          {renderMorningTriggerPill(morningOp)}
+          {renderMorningTriggerPill(morningOp, !!morningInflight)}
         </header>
 
         <div className="inline-row wrap-row" style={{ gap: 12, marginTop: 12 }}>
@@ -316,15 +328,12 @@ export function AdsIngestPage() {
             type="button"
             className="primary-button"
             onClick={onTriggerMorningRun}
-            disabled={
-              morningOp.kind === 'triggering' ||
-              (morningOp.kind === 'triggered' && morningOp.result.status === 'triggered')
-            }
+            disabled={morningOp.kind === 'triggering' || !!morningInflight}
           >
             {morningOp.kind === 'triggering'
               ? 'Starting…'
-              : morningOp.kind === 'triggered' && morningOp.result.status === 'triggered'
-                ? 'Pipeline started — polling for the new ZIP…'
+              : morningInflight
+                ? 'Pipeline running — polling for the new ZIP…'
                 : 'Run morning pipeline now'}
           </button>
           <a
@@ -342,10 +351,37 @@ export function AdsIngestPage() {
           </a>
         </div>
 
-        {morningOp.kind === 'triggered' ? (
+        {morningInflight ? (
+          <p className="subtle-copy" style={{ marginTop: '0.75rem' }}>
+            Pipeline running since {formatTime(morningInflight.startedAt)}. New
+            ZIP will appear below when it finishes.
+          </p>
+        ) : null}
+        {morningOp.kind === 'triggered' && !morningInflight ? (
           <p className="subtle-copy" style={{ marginTop: '0.75rem' }}>
             {morningOp.result.message}
           </p>
+        ) : null}
+        {morningLastResult && !morningLastResult.ok && !morningInflight ? (
+          <div
+            className="detail-panel"
+            style={{ marginTop: 12, borderColor: 'var(--bad, #b22)' }}
+          >
+            <h4 style={{ marginTop: 0 }}>
+              ⚠ Last morning run failed ({formatTime(morningLastResult.finishedAt)})
+            </h4>
+            <pre style={{ whiteSpace: 'pre-wrap', margin: 0 }}>
+              {morningLastResult.errorMessage}
+            </pre>
+            {morningLastResult.errorDetail ? (
+              <details style={{ marginTop: '0.5rem' }}>
+                <summary>Technical detail</summary>
+                <pre style={{ whiteSpace: 'pre-wrap' }}>
+                  {morningLastResult.errorDetail}
+                </pre>
+              </details>
+            ) : null}
+          </div>
         ) : null}
         {morningOp.kind === 'err' ? (
           <p className="subtle-copy" style={{ marginTop: '0.75rem', color: 'var(--bad, #b22)' }}>
@@ -438,7 +474,8 @@ function formatBytes(bytes: number): string {
   return `${n >= 10 || i === 0 ? Math.round(n) : n.toFixed(1)} ${units[i]}`
 }
 
-function renderMorningTriggerPill(morningOp: MorningOp) {
+function renderMorningTriggerPill(morningOp: MorningOp, inflight: boolean) {
+  if (inflight) return <Pill tone="warning">running</Pill>
   if (morningOp.kind === 'idle') return null
   if (morningOp.kind === 'triggering') return <Pill tone="warning">starting…</Pill>
   if (morningOp.kind === 'err') return <Pill tone="warning">trigger error</Pill>

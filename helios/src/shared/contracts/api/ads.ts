@@ -167,8 +167,32 @@ export const MorningBundleRunSummarySchema = z.object({
 })
 export type MorningBundleRunSummary = z.infer<typeof MorningBundleRunSummarySchema>
 
+export const MorningBundleInflightSchema = z.object({
+  startedAt: z.string(),
+})
+export type MorningBundleInflight = z.infer<typeof MorningBundleInflightSchema>
+
+export const MorningBundleLastResultSchema = z.object({
+  finishedAt: z.string(),
+  ok: z.boolean(),
+  runId: z.string().nullable(),
+  errorMessage: z.string().nullable(),
+  errorDetail: z.string().nullable(),
+})
+export type MorningBundleLastResult = z.infer<typeof MorningBundleLastResultSchema>
+
 export const MorningBundleRunsResponseSchema = z.object({
   runs: z.array(MorningBundleRunSummarySchema),
+  // Non-null while a pipeline run is in-process (started from the
+  // helios server itself; survives only for the lifetime of the
+  // server process — a restart loses the in-flight signal but the
+  // ZIP, once written, persists in the runs list above).
+  inflight: MorningBundleInflightSchema.nullable(),
+  // The most recent completed run *as observed in-process by this
+  // server*. Useful for surfacing pipeline failures (no snapshot, zip
+  // failed, ...) that don't produce a runs[] entry. Also null until
+  // the first pipeline run completes in this server's lifetime.
+  lastResult: MorningBundleLastResultSchema.nullable(),
 })
 export type MorningBundleRunsResponse = z.infer<typeof MorningBundleRunsResponseSchema>
 

@@ -30,7 +30,11 @@ import {
   isSafeRunId,
   listMorningBundleRuns,
 } from '../ads/morningBundleRuns.js'
-import { triggerMorningBundle } from '../ads/morningBundleTrigger.js'
+import {
+  getMorningBundleInflight,
+  getMorningBundleLastResult,
+  triggerMorningBundle,
+} from '../ads/morningBundleTrigger.js'
 import { requireSessionUser } from '../auth/requireSession.js'
 
 export async function registerAdsMorningBundlesRoutes(
@@ -42,6 +46,7 @@ export async function registerAdsMorningBundlesRoutes(
       return
     }
     const runs = await listMorningBundleRuns()
+    const last = getMorningBundleLastResult()
     return reply.send(
       MorningBundleRunsResponseSchema.parse({
         runs: runs.map((r) => ({
@@ -49,6 +54,16 @@ export async function registerAdsMorningBundlesRoutes(
           generatedAt: r.generatedAt,
           bytes: r.bytes,
         })),
+        inflight: getMorningBundleInflight(),
+        lastResult: last
+          ? {
+              finishedAt: last.finishedAt.toISOString(),
+              ok: last.ok,
+              runId: last.runId,
+              errorMessage: last.errorMessage,
+              errorDetail: last.errorDetail,
+            }
+          : null,
       }),
     )
   })
@@ -58,7 +73,7 @@ export async function registerAdsMorningBundlesRoutes(
     if (!user) {
       return
     }
-    const result = await triggerMorningBundle()
+    const result = await triggerMorningBundle(request.log)
     return reply.send(MorningBundleRunTriggerResponseSchema.parse(result))
   })
 
