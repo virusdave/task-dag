@@ -266,7 +266,9 @@ h1{margin:0 0 6px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px;margin:14px 0;box-shadow:0 4px 16px rgba(31,27,23,0.05)}
 .toolbar{position:sticky;top:8px;z-index:50;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px 18px;box-shadow:0 6px 14px rgba(31,27,23,0.08);display:flex;flex-wrap:wrap;gap:18px;align-items:center}
 .toolbar label{display:flex;align-items:center;gap:8px;font-weight:600;font-size:13px}
-.toolbar input[type=number]{font:inherit;font-weight:700;font-size:17px;padding:5px 9px;border:1px solid var(--line);border-radius:8px;width:80px;background:#fff;text-align:right;color:var(--post-promo)}
+.toolbar input[type=number]{font:inherit;font-weight:700;font-size:17px;padding:5px 9px;border:1px solid var(--line);border-radius:8px;width:104px;background:#fff;text-align:right;color:var(--post-promo)}
+input[type=number]::placeholder{color:#8a7f6c;opacity:1;font-weight:500;font-style:italic}
+input[type=number]::-webkit-input-placeholder{color:#8a7f6c;opacity:1;font-weight:500;font-style:italic}
 .toolbar .meta{color:var(--muted);font-size:12px;line-height:1.4;max-width:340px}
 .toolbar button{font:inherit;padding:6px 12px;border:1px solid var(--line);background:#fff;border-radius:8px;cursor:pointer;font-size:12px}
 .toolbar button.primary{background:var(--approved);color:#fff;border-color:var(--approved);font-weight:600}
@@ -281,12 +283,12 @@ h1{margin:0 0 6px}
 .brand-h .count{color:var(--muted);font-size:13px;font-weight:400}
 .brand-controls{display:flex;gap:14px;align-items:center;font-size:12px;margin-left:auto;flex-wrap:wrap}
 .brand-controls label{font-weight:600;display:flex;align-items:center;gap:6px}
-.brand-controls input[type=number]{font:inherit;font-weight:700;padding:3px 6px;width:60px;border:1px solid var(--line);border-radius:6px;text-align:right;background:#fff}
+.brand-controls input[type=number]{font:inherit;font-weight:700;padding:3px 6px;width:84px;border:1px solid var(--line);border-radius:6px;text-align:right;background:#fff}
 .group-h{margin:14px 0 4px;font-size:14px;color:var(--muted);font-weight:600;display:flex;align-items:center;gap:14px;flex-wrap:wrap}
 .group-h .group-title{color:var(--ink)}
 .group-controls{display:flex;gap:10px;align-items:center;font-size:11px;margin-left:auto;flex-wrap:wrap}
 .group-controls label{font-weight:600;display:flex;align-items:center;gap:4px}
-.group-controls input[type=number]{font:inherit;font-weight:700;padding:2px 5px;width:55px;border:1px solid var(--line);border-radius:6px;text-align:right;background:#fff}
+.group-controls input[type=number]{font:inherit;font-weight:700;padding:2px 5px;width:78px;border:1px solid var(--line);border-radius:6px;text-align:right;background:#fff}
 .row{display:grid;grid-template-columns:minmax(240px,1.4fr) minmax(220px,1.2fr) minmax(170px,0.9fr) minmax(440px,3fr);gap:14px;align-items:start;padding:12px 0;border-top:1px dashed var(--rule)}
 .row:first-of-type{border-top:none}
 .row.review-approved{background:linear-gradient(to right,rgba(31,93,66,0.05),transparent 50%)}
@@ -302,7 +304,7 @@ h1{margin:0 0 6px}
 .row .market-meta .badge.stale{background:#f0e1c2;color:var(--warn)}
 .row .market-meta .badge.absent{background:#f3dde4;color:var(--down)}
 .row .input-cell{display:flex;flex-direction:column;gap:4px;font-size:12px}
-.row input[type=number]{font:inherit;font-weight:700;font-size:14px;padding:4px 7px;border:1px solid var(--line);border-radius:6px;width:96px;background:#fff;text-align:right}
+.row input[type=number]{font:inherit;font-weight:700;font-size:14px;padding:4px 7px;border:1px solid var(--line);border-radius:6px;width:120px;background:#fff;text-align:right}
 .row .input-cell .l{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.04em;margin-top:2px}
 .row .scope-toggle{display:flex;gap:6px;font-size:11px;margin-top:2px}
 .row .scope-toggle label{display:flex;align-items:center;gap:3px;cursor:pointer;padding:2px 6px;border:1px solid var(--line);border-radius:6px;background:#fff}
@@ -319,7 +321,7 @@ h1{margin:0 0 6px}
 .row .gm-cell .v.warn{color:var(--down)}
 .row.no-cost{opacity:0.65}
 .row .row-promo-row{font-size:11px;display:flex;align-items:center;gap:6px;margin-top:6px;color:var(--muted)}
-.row .row-promo-row input[type=number]{font:inherit;font-weight:700;width:60px;padding:2px 5px;font-size:11px}
+.row .row-promo-row input[type=number]{font:inherit;font-weight:700;width:84px;padding:2px 5px;font-size:11px}
 .row .effective-promo{font-weight:600;color:var(--post-promo)}
 .review-pill{display:inline-flex;align-items:center;gap:4px;border:1px solid var(--line);border-radius:999px;padding:1px 6px;font-size:11px;background:#fff}
 .review-pill button{appearance:none;background:transparent;border:none;cursor:pointer;font:inherit;padding:1px 5px;border-radius:999px;color:var(--muted);font-weight:600}
