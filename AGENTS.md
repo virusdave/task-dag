@@ -102,6 +102,106 @@ unpushed. Specifically:
 Never use `--no-verify` or other safety-bypassing flags to "make it work" on
 your own.
 
+## Git-DAG task workflow — use `scripts/task-dag`, not tombstones
+
+When a GitHub issue has been ingested into the Git-DAG task system (signalled
+by a `Task metadata commit:` comment from `github-actions` on the issue, and
+the existence of `refs/heads/tasks/pending/<N>` and one or more
+`refs/heads/tasks/frontier/<sha>` refs), agents working that issue **MUST**
+use `scripts/task-dag` to manage and link their work. Do **not** invent
+parent links, edit task refs by hand, or rely on the issue-comment trail
+alone.
+
+### The required workflow
+
+1. **Find available work**
+
+   ```sh
+   scripts/task-dag frontier               # all leaf tasks ready to be done
+   scripts/task-dag frontier --issue=N     # scope to one issue
+   ```
+
+   Pick a leaf task whose dependencies are all met (`scripts/task-dag deps
+   <sha>` to confirm). The SHA shown by `frontier` is the **task SHA** you
+   will pass to `complete` later.
+
+2. **Do the work in a real commit**
+
+   Make the actual code/file changes and commit them normally:
+
+   ```sh
+   git add <files>
+   git commit -m "<descriptive message about the implementation>"
+   ```
+
+   That commit MUST contain the real diff that implements the task. It is
+   **not** a placeholder, and its message should describe the change, not
+   the task ceremony.
+
+3. **Link the implementation commit to the task**
+
+   ```sh
+   scripts/task-dag complete <task-sha>
+   ```
+
+   This rewrites `HEAD` so the task commit becomes a non-primary parent,
+   appends `Related: <issue-url>` for GitHub auto-linking, posts a progress
+   comment on the issue (when `GITHUB_TOKEN` is set), and cleans up
+   `tasks/frontier/<sha>` / `tasks/active/<sha>` refs.
+
+4. **Push `master`** as usual (`git push origin HEAD:master`). Any remote
+   frontier refs that `task-dag complete` retired locally are also deleted
+   on `origin`.
+
+### NEVER create "tombstone" commits for active work
+
+A **tombstone** is an empty commit (no tree changes) whose only purpose is
+to attach a task SHA as a parent. They exist as a backfill mechanism for
+historical work that predates the task-dag tooling — that is the **only**
+legitimate use. Issues #1 and #2 contain tombstone examples from that
+backfill era; do **not** copy that pattern for any new task.
+
+`scripts/task-dag complete` already enforces this:
+
+- It **rejects** completing against an empty commit and prints an error
+  pointing you back to this workflow.
+- It **warns** when the commit message looks like a tombstone (`Task
+  completion tombstone:`, `Tombstone:`, `Retroactive completion`) and
+  requires interactive confirmation.
+
+If you see those errors/warnings while implementing a task, the correct
+response is to go back, make the real code change, commit it, and run
+`task-dag complete` against that real commit — not to bypass the guard.
+
+Retroactive tombstoning (for genuinely pre-tooling work) is the **only**
+case where you should ever produce an empty completion commit, and you
+should call it out loudly in the commit message and in the issue comment
+so a human can audit it.
+
+### DO / DON'T summary
+
+**DO**
+- ✓ Run `scripts/task-dag frontier` (optionally with `--issue=N`) before
+  picking up task-tracked work.
+- ✓ Commit the real implementation first, then run `task-dag complete
+  <task-sha>` against `HEAD`.
+- ✓ Let `task-dag complete` write the `Related:` / `Task-Commit:` /
+  `Issue:` trailers — don't hand-author them.
+- ✓ Push `HEAD:master` after completion (per the "Commit and push" rule
+  above).
+
+**DON'T**
+- ✗ Create empty / tombstone completion commits to represent work you
+  just did.
+- ✗ Imitate the tombstone pattern visible in issues #1 / #2 — that was a
+  one-time backfill, not the convention.
+- ✗ Manually `git commit --amend` task metadata onto your implementation
+  commit, or hand-craft parent links with `git commit-tree`.
+- ✗ Skip `task-dag complete` and rely on issue comments alone to record
+  that the task is done.
+- ✗ Bypass the empty-commit guard in `task-dag complete` with
+  `--allow-empty`, environment overrides, or by editing the script.
+
 ## Always ship a public URL for deployable artifacts
 
 If a task involves producing an HTML page, report, dashboard, downloadable
