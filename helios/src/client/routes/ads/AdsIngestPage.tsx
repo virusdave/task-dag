@@ -4,8 +4,12 @@ import {
   ADS_DRIVE_FOLDER_URL,
   AdsIngestResponseSchema,
   AdsStatusResponseSchema,
+  MorningBundleRunsResponseSchema,
+  MorningBundleRunTriggerResponseSchema,
   type AdsIngestResponse,
   type AdsStatusResponse,
+  type MorningBundleRunSummary,
+  type MorningBundleRunTriggerResponse,
 } from '../../../shared/contracts/index.js'
 import { loadJson, mutateJson } from '../../app/fetchJson.js'
 import { Pill } from '../../components/Pill.js'
@@ -18,7 +22,15 @@ type Op =
   | { kind: 'ok'; result: AdsIngestResponse }
   | { kind: 'err'; message: string }
 
+type MorningOp =
+  | { kind: 'idle' }
+  | { kind: 'triggering' }
+  | { kind: 'triggered'; result: MorningBundleRunTriggerResponse; baselineRunIds: ReadonlySet<string> }
+  | { kind: 'err'; message: string }
+
 const STATUS_POLL_MS = 10_000
+const MORNING_RUNS_POLL_MS = 5_000
+const MORNING_TRIGGER_WATCH_MS = 5 * 60_000
 
 export function AdsIngestPage() {
   useRegisterSidebarSubtree('communications', COMMUNICATIONS_SIDEBAR_SUBTREE)
@@ -27,6 +39,9 @@ export function AdsIngestPage() {
   const [op, setOp] = useState<Op>({ kind: 'idle' })
   const [showAdvanced, setShowAdvanced] = useState(false)
   const [manualInput, setManualInput] = useState('')
+  const [morningRuns, setMorningRuns] = useState<MorningBundleRunSummary[] | null>(null)
+  const [morningRunsError, setMorningRunsError] = useState<string | null>(null)
+  const [morningOp, setMorningOp] = useState<MorningOp>({ kind: 'idle' })
 
   const fetchStatus = useCallback(async () => {
     try {
@@ -45,6 +60,62 @@ export function AdsIngestPage() {
     }, STATUS_POLL_MS)
     return () => clearInterval(id)
   }, [fetchStatus])
+
+  const fetchMorningRuns = useCallback(async () => {
+    try {
+      const next = await loadJson('/api/ads/morning-bundles/runs', MorningBundleRunsResponseSchema)
+      setMorningRuns(next.runs)
+      setMorningRunsError(null)
+      return next.runs
+    } catch (err) {
+      setMorningRunsError(err instanceof Error ? err.message : String(err))
+      return null
+    }
+  }, [])
+
+  useEffect(() => {
+    void fetchMorningRuns()
+  }, [fetchMorningRuns])
+
+  // While we're waiting for a freshly-triggered morning run to land
+  // on disk, poll the runs index every few seconds and stop as soon
+  // as a new runId appears (or we hit the watch deadline).
+  useEffect(() => {
+    if (morningOp.kind !== 'triggered' || morningOp.result.status !== 'triggered') {
+      return
+    }
+    const baseline = morningOp.baselineRunIds
+    const startedAt = Date.now()
+    let cancelled = false
+    const tick = async () => {
+      if (cancelled) return
+      const runs = await fetchMorningRuns()
+      if (cancelled) return
+      const sawNew = runs ? runs.some((r) => !baseline.has(r.runId)) : false
+      if (sawNew) return
+      if (Date.now() - startedAt > MORNING_TRIGGER_WATCH_MS) return
+      window.setTimeout(() => void tick(), MORNING_RUNS_POLL_MS)
+    }
+    void tick()
+    return () => {
+      cancelled = true
+    }
+  }, [morningOp, fetchMorningRuns])
+
+  const onTriggerMorningRun = useCallback(async () => {
+    const baseline = new Set((morningRuns ?? []).map((r) => r.runId))
+    setMorningOp({ kind: 'triggering' })
+    try {
+      const result = await mutateJson(
+        '/api/ads/morning-bundles/run',
+        MorningBundleRunTriggerResponseSchema,
+        { method: 'POST' },
+      )
+      setMorningOp({ kind: 'triggered', result, baselineRunIds: baseline })
+    } catch (err) {
+      setMorningOp({ kind: 'err', message: err instanceof Error ? err.message : String(err) })
+    }
+  }, [morningRuns])
 
   const runIngest = useCallback(
     async (driveFileUrlOrId?: string) => {
@@ -208,10 +279,9 @@ export function AdsIngestPage() {
               ) : (
                 <>
                   The snapshot at <code>{op.result.snapshotPath}</code> is now up
-                  to date. Run <code>ssh vps-nixos-3 gads-run-morning</code>{' '}
-                  (or wait for the 09:00 timer) to regenerate the morning bundle
-                  against this snapshot — the bundle URL appears in the
-                  cluster-proposals page.
+                  to date. Use the "Run morning pipeline now" button below
+                  (or wait for the 07:00 timer) to regenerate the morning bundle
+                  ZIP against this snapshot.
                 </>
               )}
             </p>
@@ -224,6 +294,102 @@ export function AdsIngestPage() {
             <pre style={{ whiteSpace: 'pre-wrap', margin: 0 }}>{op.message}</pre>
           </div>
         ) : null}
+      </article>
+
+      <article className="detail-panel" style={{ marginTop: 16 }}>
+        <header className="page-header">
+          <div>
+            <h3>Morning bundle</h3>
+            <p className="subtle-copy" style={{ margin: 0 }}>
+              Generates the L1→L2 analysis ZIP from the freshest snapshot
+              on disk. Same pipeline as the daily 07:00 timer; downloads
+              are stable for ~24h on mss-one-offs too. Each click below
+              starts a fresh run and the new ZIP appears in the list
+              when it finishes (typically 1–2 minutes).
+            </p>
+          </div>
+          {renderMorningTriggerPill(morningOp)}
+        </header>
+
+        <div className="inline-row wrap-row" style={{ gap: 12, marginTop: 12 }}>
+          <button
+            type="button"
+            className="primary-button"
+            onClick={onTriggerMorningRun}
+            disabled={
+              morningOp.kind === 'triggering' ||
+              (morningOp.kind === 'triggered' && morningOp.result.status === 'triggered')
+            }
+          >
+            {morningOp.kind === 'triggering'
+              ? 'Starting…'
+              : morningOp.kind === 'triggered' && morningOp.result.status === 'triggered'
+                ? 'Pipeline started — polling for the new ZIP…'
+                : 'Run morning pipeline now'}
+          </button>
+          <a
+            className="ghost-button"
+            href="/api/ads/morning-bundles/latest.zip"
+            download
+            aria-disabled={morningRuns !== null && morningRuns.length === 0}
+            style={
+              morningRuns !== null && morningRuns.length === 0
+                ? { pointerEvents: 'none', opacity: 0.5 }
+                : undefined
+            }
+          >
+            Download latest ZIP
+          </a>
+        </div>
+
+        {morningOp.kind === 'triggered' ? (
+          <p className="subtle-copy" style={{ marginTop: '0.75rem' }}>
+            {morningOp.result.message}
+          </p>
+        ) : null}
+        {morningOp.kind === 'err' ? (
+          <p className="subtle-copy" style={{ marginTop: '0.75rem', color: 'var(--bad, #b22)' }}>
+            <strong>Could not reach the trigger endpoint:</strong>{' '}
+            <code>{morningOp.message}</code>
+          </p>
+        ) : null}
+        {morningOp.kind === 'triggered' && morningOp.result.status === 'trigger-failed' && morningOp.result.detail ? (
+          <details style={{ marginTop: '0.5rem' }}>
+            <summary>Technical detail</summary>
+            <pre style={{ whiteSpace: 'pre-wrap' }}>{morningOp.result.detail}</pre>
+          </details>
+        ) : null}
+
+        <div style={{ marginTop: 16 }}>
+          <h4 style={{ marginBottom: 8 }}>Recent runs</h4>
+          {morningRunsError ? (
+            <p className="subtle-copy" style={{ color: 'var(--bad, #b22)' }}>
+              Couldn't list runs: {morningRunsError}
+            </p>
+          ) : null}
+          {morningRuns === null ? (
+            <p className="subtle-copy">Loading…</p>
+          ) : morningRuns.length === 0 ? (
+            <p className="subtle-copy">No morning-bundle ZIPs on disk yet.</p>
+          ) : (
+            <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
+              {morningRuns.slice(0, 10).map((run) => (
+                <li key={run.runId} style={{ padding: '4px 0', borderTop: '1px solid var(--border, #ddd)' }}>
+                  <a
+                    href={`/api/ads/morning-bundles/runs/${encodeURIComponent(run.runId)}.zip`}
+                    download={`${run.runId}.zip`}
+                  >
+                    {run.runId}.zip
+                  </a>{' '}
+                  <span className="subtle-copy">
+                    ({formatBytes(run.bytes)}
+                    {run.generatedAt ? `, ${formatTime(run.generatedAt)}` : ''})
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
       </article>
 
       <article className="detail-panel" style={{ marginTop: 16 }}>
@@ -258,6 +424,36 @@ export function AdsIngestPage() {
       </article>
     </section>
   )
+}
+
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return '—'
+  const units = ['B', 'KB', 'MB', 'GB']
+  let n = bytes
+  let i = 0
+  while (n >= 1024 && i < units.length - 1) {
+    n /= 1024
+    i += 1
+  }
+  return `${n >= 10 || i === 0 ? Math.round(n) : n.toFixed(1)} ${units[i]}`
+}
+
+function renderMorningTriggerPill(morningOp: MorningOp) {
+  if (morningOp.kind === 'idle') return null
+  if (morningOp.kind === 'triggering') return <Pill tone="warning">starting…</Pill>
+  if (morningOp.kind === 'err') return <Pill tone="warning">trigger error</Pill>
+  switch (morningOp.result.status) {
+    case 'triggered':
+      return <Pill tone="success">triggered</Pill>
+    case 'already-running':
+      return <Pill tone="warning">already running</Pill>
+    case 'service-not-deployed':
+      return <Pill tone="warning">not deployed</Pill>
+    case 'permission-denied':
+      return <Pill tone="warning">denied</Pill>
+    case 'trigger-failed':
+      return <Pill tone="warning">failed</Pill>
+  }
 }
 
 function formatTime(iso: string): string {

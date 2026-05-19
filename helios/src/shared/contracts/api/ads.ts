@@ -146,3 +146,72 @@ export type ClusterSweepRunTriggerResponse = z.infer<typeof ClusterSweepRunTrigg
 
 export const ADS_DRIVE_FOLDER_URL =
   `https://drive.google.com/drive/folders/${ADS_DRIVE_FOLDER_ID}`
+
+/**
+ * GET /api/ads/morning-bundles/runs
+ *
+ * Index of morning-bundle ZIPs the gads-run-analysis pipeline (the
+ * `gads-run-morning` binary baked into the nix closure) has dropped
+ * into ads/google/outputs/prod/bundle/. Each entry is one
+ * `run-<YYYY-MM-DD>-<shortid>.zip` file.
+ *
+ * The morning pipeline runs unattended via the daily systemd timer
+ * and can also be kicked on demand from the Helios button surface
+ * below; both code paths produce identically-shaped run ZIPs that
+ * appear here.
+ */
+export const MorningBundleRunSummarySchema = z.object({
+  runId: z.string(),
+  generatedAt: z.string().nullable(),
+  bytes: z.number().int().nonnegative(),
+})
+export type MorningBundleRunSummary = z.infer<typeof MorningBundleRunSummarySchema>
+
+export const MorningBundleRunsResponseSchema = z.object({
+  runs: z.array(MorningBundleRunSummarySchema),
+})
+export type MorningBundleRunsResponse = z.infer<typeof MorningBundleRunsResponseSchema>
+
+/**
+ * POST /api/ads/morning-bundles/run
+ *
+ * Operator-facing "Run morning pipeline now" trigger. Asks the host
+ * to start `gads-run-analysis.service` (the same unit the daily 07:00
+ * timer fires) without blocking. The pipeline takes ~1-2 minutes; the
+ * response only reports whether the *trigger* succeeded, and the page
+ * polls the runs index to surface the resulting ZIP for download.
+ *
+ * Body is empty; route is auth-gated to the `editor` role.
+ *
+ * Status semantics mirror the cluster-sweep trigger one-for-one:
+ *   - triggered:             oneshot was successfully started
+ *   - already-running:       a morning run is already in flight; no-op
+ *   - service-not-deployed:  the systemd unit isn't loaded on this host
+ *   - permission-denied:     the helios sudo whitelist is missing/wrong
+ *   - trigger-failed:        anything else; detail in `message`
+ */
+export const MorningBundleRunTriggerResponseSchema = z.discriminatedUnion('status', [
+  z.object({
+    status: z.literal('triggered'),
+    startedAt: z.string(),
+    message: z.string(),
+  }),
+  z.object({
+    status: z.literal('already-running'),
+    message: z.string(),
+  }),
+  z.object({
+    status: z.literal('service-not-deployed'),
+    message: z.string(),
+  }),
+  z.object({
+    status: z.literal('permission-denied'),
+    message: z.string(),
+  }),
+  z.object({
+    status: z.literal('trigger-failed'),
+    message: z.string(),
+    detail: z.string().nullable(),
+  }),
+])
+export type MorningBundleRunTriggerResponse = z.infer<typeof MorningBundleRunTriggerResponseSchema>
