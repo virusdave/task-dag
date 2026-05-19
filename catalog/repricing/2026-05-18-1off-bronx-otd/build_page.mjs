@@ -267,6 +267,9 @@ h1{margin:0 0 6px}
 .toolbar{position:sticky;top:8px;z-index:50;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px 18px;box-shadow:0 6px 14px rgba(31,27,23,0.08);display:flex;flex-wrap:wrap;gap:18px;align-items:center}
 .toolbar label{display:flex;align-items:center;gap:8px;font-weight:600;font-size:13px}
 .toolbar input[type=number]{font:inherit;font-weight:700;font-size:17px;padding:5px 9px;border:1px solid var(--line);border-radius:8px;width:104px;background:#fff;text-align:right;color:var(--post-promo)}
+.toolbar select{font:inherit;font-weight:700;font-size:13px;padding:5px 9px;border:1px solid var(--line);border-radius:8px;background:#fff;color:var(--ink);cursor:pointer}
+.brand-controls select,.group-controls select{font:inherit;font-weight:700;font-size:12px;padding:2px 6px;border:1px solid var(--line);border-radius:6px;background:#fff;color:var(--ink);cursor:pointer}
+.row select{font:inherit;font-weight:700;font-size:11px;padding:2px 6px;border:1px solid var(--line);border-radius:6px;background:#fff;color:var(--ink);cursor:pointer}
 input[type=number]::placeholder{color:#8a7f6c;opacity:1;font-weight:500;font-style:italic}
 input[type=number]::-webkit-input-placeholder{color:#8a7f6c;opacity:1;font-weight:500;font-style:italic}
 .toolbar .meta{color:var(--muted);font-size:12px;line-height:1.4;max-width:340px;min-width:0}
@@ -397,6 +400,13 @@ input[type=number]::-webkit-input-placeholder{color:#8a7f6c;opacity:1;font-weigh
       Page discount %:
       <input id="globalDiscount" type="number" min="0" max="80" step="0.5" value="${data.currentPromoDiscountPercent}">
     </label>
+    <label title="default apply scope for every row; brand / group / row can override">
+      Default scope:
+      <select id="pageScope" data-page-scope>
+        <option value="local" selected>local override (Bronx)</option>
+        <option value="global">global (chain)</option>
+      </select>
+    </label>
     <div class="review-pill">
       <span class="rollup" id="pageRollupRollup">…</span>
       <button type="button" data-page-review="approved">approve all</button>
@@ -452,6 +462,13 @@ input[type=number]::-webkit-input-placeholder{color:#8a7f6c;opacity:1;font-weigh
         <label>Brand promo % override:
           <input type="number" min="0" max="80" step="0.5" placeholder="(use page)" data-brand-promo="${escapeHtml(brandName)}">
         </label>
+        <label>Brand scope override:
+          <select data-brand-scope="${escapeHtml(brandName)}">
+            <option value="">(inherit page)</option>
+            <option value="local">local override (Bronx)</option>
+            <option value="global">global (chain)</option>
+          </select>
+        </label>
         <div class="review-pill" data-brand-review-pill="${escapeHtml(brandName)}">
           <span class="rollup" data-brand-rollup="${escapeHtml(brandName)}">…</span>
           <button type="button" data-brand-review="${escapeHtml(brandName)}" data-state="approved">✓</button>
@@ -476,6 +493,13 @@ input[type=number]::-webkit-input-placeholder{color:#8a7f6c;opacity:1;font-weigh
         <div class="group-controls">
           <label>Group promo % override:
             <input type="number" min="0" max="80" step="0.5" placeholder="(inherit)" data-group-promo="${gid}">
+          </label>
+          <label>Group scope override:
+            <select data-group-scope="${gid}">
+              <option value="">(inherit)</option>
+              <option value="local">local override</option>
+              <option value="global">global</option>
+            </select>
           </label>
           <div class="review-pill" data-group-review-pill="${gid}">
             <span class="rollup" data-group-rollup="${gid}">…</span>
@@ -534,9 +558,15 @@ input[type=number]::-webkit-input-placeholder{color:#8a7f6c;opacity:1;font-weigh
         data-input="local-price">
       <span style="font-weight:400;color:var(--muted);font-size:11px">→ OTD <span data-bind="local-otd-display">${escapeHtml(fmtMoney(initialLocal * postTax))}</span></span>
     </div>
-    <div class="scope-toggle">
-      <label class="local"><input type="radio" name="scope-${product.productId}" value="local" ${hasOverrideNow ? 'checked' : 'checked'}>apply as local override</label>
-      <label class="global"><input type="radio" name="scope-${product.productId}" value="global">apply as global chain price</label>
+    <div class="scope-toggle" style="flex-wrap:wrap;align-items:center">
+      <label style="font-weight:600;color:var(--muted)">scope:
+        <select data-input="row-scope" data-product-id="${product.productId}" style="margin-left:4px">
+          <option value="">(inherit)</option>
+          <option value="local">local override (Bronx)</option>
+          <option value="global">global (chain)</option>
+        </select>
+      </label>
+      <span style="font-size:10px;color:var(--muted)">effective: <span class="effective-scope" data-bind="effective-scope-lbl">local <em>(page)</em></span></span>
     </div>
     ${hasOverrideNow
       ? `<div class="meta" style="color:var(--warn);margin-top:2px">currently overridden at Bronx: ${escapeHtml(fmtMoney(product.bronxLocalPrice))}</div>`
@@ -726,6 +756,33 @@ function buildClientScript({ data, postTax, initialDiscountFraction }) {
     return { fraction: pageDiscountFraction(), source: 'page' };
   }
 
+  // -------- effective apply-scope (local vs global) cascade --------
+  // Resolution order, same shape as effectivePromoForRow:
+  //   row select -> group select -> brand select -> page select
+  // Any '' value at a level means "inherit"; only 'local' or 'global'
+  // produce a concrete answer at that level.
+  function pageScopeValue() {
+    const el = document.getElementById('pageScope');
+    return (el && (el.value === 'global' || el.value === 'local')) ? el.value : 'local';
+  }
+  function effectiveScopeForRow(rowEl) {
+    const rowSel = rowEl.querySelector('select[data-input="row-scope"]');
+    if (rowSel && (rowSel.value === 'local' || rowSel.value === 'global')) {
+      return { scope: rowSel.value, source: 'row' };
+    }
+    const groupId = rowEl.dataset.groupId;
+    const groupSel = document.querySelector('select[data-group-scope="' + groupId + '"]');
+    if (groupSel && (groupSel.value === 'local' || groupSel.value === 'global')) {
+      return { scope: groupSel.value, source: 'group' };
+    }
+    const brand = rowEl.dataset.brand;
+    const brandSel = document.querySelector('select[data-brand-scope="' + CSS.escape(brand) + '"]');
+    if (brandSel && (brandSel.value === 'local' || brandSel.value === 'global')) {
+      return { scope: brandSel.value, source: 'brand' };
+    }
+    return { scope: pageScopeValue(), source: 'page' };
+  }
+
   function placeMarker(rowEl, selector, otdValue, labelKey) {
     const marker = rowEl.querySelector(selector);
     if (!marker) return;
@@ -776,6 +833,14 @@ function buildClientScript({ data, postTax, initialDiscountFraction }) {
     const postPromoGm = cost > 0 && postPromoPrice > 0 ? (1 - (POST_TAX * cost) / postPromoPrice) * 100 : null;
     set('post-promo-gm', fmtPct(postPromoGm), postPromoGm != null && postPromoGm < 0);
     set('effective-promo-lbl', fmtPct(promoFraction * 100) + ' (' + promoSource + ')');
+
+    // Effective apply-scope label (local vs global), with cascade source.
+    const { scope: effScope, source: effScopeSource } = effectiveScopeForRow(rowEl);
+    const scopeLbl = rowEl.querySelector('[data-bind="effective-scope-lbl"]');
+    if (scopeLbl) {
+      scopeLbl.innerHTML = effScope + ' <em>(' + effScopeSource + ')</em>';
+      scopeLbl.style.color = effScope === 'global' ? 'var(--current)' : 'var(--proposed)';
+    }
 
     // Reposition the 3 diamonds on the ladder.
     placeMarker(rowEl, '.ours[data-marker="current"]', currentPrice * POST_TAX, 'current-otd');
@@ -896,7 +961,7 @@ function buildClientScript({ data, postTax, initialDiscountFraction }) {
       const localInput = row.querySelector('input[data-input="local-price"]');
       const proposedChain = Number(chainInput.value) || 0;
       const proposedLocal = Number(localInput.value) || 0;
-      const scope = row.querySelector('input[name="scope-' + pid + '"]:checked')?.value || 'local';
+      const { scope, source: scopeSource } = effectiveScopeForRow(row);
       const { fraction: effFraction, source: effSource } = effectivePromoForRow(row);
       if (effSource !== 'page') {
         promoNotes.push({
@@ -915,6 +980,7 @@ function buildClientScript({ data, postTax, initialDiscountFraction }) {
             name: snap.name,
             currentPrice: snap.currentChainPrice,
             newPrice: proposedChain,
+            scopeSource,
           });
         }
         // If a local override exists and we're moving global, the
@@ -927,6 +993,7 @@ function buildClientScript({ data, postTax, initialDiscountFraction }) {
             name: snap.name,
             currentLocalPrice: snap.currentLocalPrice,
             reason: 'scope=global; existing local override would mask the new chain price at Bronx',
+            scopeSource,
           });
         }
       } else {
@@ -942,6 +1009,7 @@ function buildClientScript({ data, postTax, initialDiscountFraction }) {
               name: snap.name,
               currentLocalPrice: snap.currentLocalPrice,
               reason: 'proposed local equals chain; remove override so Bronx tracks chain',
+              scopeSource,
             });
           }
         } else if (snap.currentLocalPrice == null) {
@@ -952,6 +1020,7 @@ function buildClientScript({ data, postTax, initialDiscountFraction }) {
             name: snap.name,
             newPrice: wantLocal,
             chainPrice: snap.currentChainPrice,
+            scopeSource,
           });
         } else if (Math.abs(wantLocal - snap.currentLocalPrice) > 0.005) {
           pricingEdits.push({
@@ -961,6 +1030,7 @@ function buildClientScript({ data, postTax, initialDiscountFraction }) {
             name: snap.name,
             currentLocalPrice: snap.currentLocalPrice,
             newPrice: wantLocal,
+            scopeSource,
           });
         }
       }
@@ -1003,8 +1073,27 @@ function buildClientScript({ data, postTax, initialDiscountFraction }) {
   });
 
   document.addEventListener('change', (e) => {
-    if (e.target.matches('input[type=radio][name^="scope-"]')) {
+    // Page-level scope select: changes the default for every row that
+    // hasn't been individually overridden.
+    if (e.target.matches('select#pageScope,select[data-page-scope]')) {
+      refreshAllRows();
       rebuildPlan();
+      return;
+    }
+    // Brand- or group-level scope select: re-eval every row (cheap;
+    // we already do it for promo overrides at the same levels).
+    if (e.target.matches('select[data-brand-scope],select[data-group-scope]')) {
+      refreshAllRows();
+      rebuildPlan();
+      return;
+    }
+    // Row-level scope select: only this row's effective label + plan
+    // needs to be recomputed.
+    if (e.target.matches('select[data-input="row-scope"]')) {
+      const row = e.target.closest('.row[data-product-id]');
+      if (row) updateRow(row);
+      rebuildPlan();
+      return;
     }
   });
 

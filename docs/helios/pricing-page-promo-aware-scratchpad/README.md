@@ -129,6 +129,18 @@ When the operator hits Apply, the engine must:
   iteration. The engine prints a "promo plan" summary the operator
   uses to make the promo edits out-of-band.
 
+**The "local vs global" decision is itself a first-class operator
+input with a page / brand / group / row cascade** — exactly the same
+shape as the promo % cascade in section 2. The operator may pick a
+default scope at the page level (e.g. "all edits land as Bronx-local
+overrides"), override it for one brand or group (e.g. "Strain Gang
+gets promoted to global because we negotiated chain-wide pricing"),
+and then override that again for a specific row. Each level shows
+its effective resolved scope and which level supplied it ("local
+(brand override)"). The apply engine records `scopeSource` on each
+emitted edit so the results JSON / audit log can explain why a given
+mutation went to the state dealer vs the Bronx dealer.
+
 The engine output should mirror the dry-run/apply pattern already
 established by `bulk_additions/2026-04-10/apply_product_catalog_attribute_updates.py`
 and `catalog/repricing/2026-05-16-10ff-brands/reprice.py`: write a
