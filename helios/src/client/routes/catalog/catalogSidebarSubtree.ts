@@ -194,44 +194,33 @@ function buildImagesAndBarcodesNode(options: ImagesAndBarcodesSidebarOptions | u
       to: buildHeliosModulePath('catalog', 'maintenance'),
     }
   }
-  // Build one branch per site, with that site's brands nested
-  // underneath. Only sites that actually have candidates are surfaced
-  // (the index page itself handles the empty-state copy).
-  const siteBranches: TreeNavNode[] = options.sites
+  // Sites are LEAVES (not branches) in the sidebar — one tap navigates
+  // straight to the per-site page. We deliberately do NOT nest brands
+  // underneath each site here:
+  //   * On phones, a 1rem +/- box is impossible to tap reliably, and
+  //     tapping the row navigates instead of expanding. Operators were
+  //     left with "Midtown" and "Bronx" rows that wouldn't expand.
+  //   * Brand drill-down lives in the in-page SiteBrandFilterStrip
+  //     (which works the same on phone and desktop), so we'd just be
+  //     duplicating it with a much worse touch target.
+  // Reference: the per-task UX critique in
+  // T-019e437d-85c8-7588-ad92-cc80f25eded0 explicitly recommended
+  // site-only nav for the mobile-collapsed case.
+  const siteLeaves: TreeNavNode[] = options.sites
     .filter((site) => site.totalIssueCount > 0)
-    .map((site) => {
-      const isActiveSite = options.activeSiteKey === site.siteKey
-      const brandLeaves: TreeNavNode[] = [
-        {
-          kind: 'leaf' as const,
-          navKey: `catalog.images-and-barcodes.site.${site.siteKey}.all`,
-          label: 'All brands',
-          to: site.sitePath,
-        },
-        ...site.brands.map((brand) => ({
-          kind: 'leaf' as const,
-          navKey: `catalog.images-and-barcodes.site.${site.siteKey}.brand.${brand.brandName}`,
-          label: brand.brandName,
-          to: `${site.sitePath}?brand=${encodeURIComponent(brand.brandName)}`,
-          count: brand.issueCount,
-        })),
-      ]
-      return {
-        kind: 'branch' as const,
-        navKey: `catalog.images-and-barcodes.site.${site.siteKey}`,
-        label: site.siteLabel,
-        to: site.sitePath,
-        count: site.totalIssueCount,
-        defaultOpen: isActiveSite,
-        children: brandLeaves,
-      }
-    })
+    .map((site) => ({
+      kind: 'leaf' as const,
+      navKey: `catalog.images-and-barcodes.site.${site.siteKey}`,
+      label: site.siteLabel,
+      to: site.sitePath,
+      count: site.totalIssueCount,
+    }))
   return {
     kind: 'branch',
     navKey: 'catalog.images-and-barcodes',
     label: 'Images & Barcodes',
     to: options.indexPath,
     defaultOpen: true,
-    children: siteBranches,
+    children: siteLeaves,
   }
 }
