@@ -9,6 +9,7 @@ import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest }
 import { ZodError } from 'zod'
 
 import { getServerEnv } from '../config/env.js'
+import { registerAuthGate } from '../auth/authGate.js'
 import { startAdsDrivePoller, stopAdsDrivePoller } from '../ads/adsDrivePoller.js'
 import { registerAdsRoutes } from '../routes/ads.js'
 import { registerAdsClusterProposalsRoutes } from '../routes/adsClusterProposals.js'
@@ -60,6 +61,15 @@ export async function buildServer() {
       files: 1,
     },
   })
+
+  // Site-wide authentication gate. Must run after the cookie plugin
+  // (so we can read the session cookie) but before any route handler.
+  // Allows /healthzz, /api/session, /api/session/logout, and the
+  // Google/dev login endpoints; everything else requires a valid
+  // session. Anonymous browser navigations get 302'd into the OAuth
+  // flow; everything else gets a flat 401. See authGate.ts for the
+  // allowlist and the rationale.
+  registerAuthGate(server)
 
   server.addHook('preHandler', async (request, reply) => {
     if (!isMutatingMethod(request.method) || !request.url.startsWith(joinBasePath(env.appBasePath, '/api/'))) {

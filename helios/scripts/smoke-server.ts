@@ -77,16 +77,55 @@ if (process.env.SMOKE_DEBUG === '1') {
   console.error(server.printRoutes())
 }
 
+// Helios is now fully OAuth-gated: every URL except the login-flow
+// endpoints and /healthzz returns 401 (or a 302 into the OAuth
+// dance) without a valid signed session cookie. The SPA shell, hashed
+// asset bundles, and stale-bundle recovery shim that this smoke test
+// exercises all sit behind that gate, so we mint a signed
+// session-cookie for the smoke test's "authenticated" requests using
+// the same SESSION_COOKIE_SECRET the server itself is bootstrapped
+// with above.
+const { default: cookieSigner } = (await import('@fastify/cookie')) as typeof import('@fastify/cookie')
+const signer = new cookieSigner.Signer(process.env.SESSION_COOKIE_SECRET!)
+const sessionCookieName = process.env.SESSION_COOKIE_NAME ?? 'helios-session'
+// The user id here is arbitrary — the gate only validates the
+// cookie's signature against SESSION_COOKIE_SECRET; downstream
+// requireSessionUser would reject a non-existent user, but the
+// endpoints exercised by this smoke test (SPA shell + static assets)
+// don't call requireSessionUser.
+const signedSessionCookie = `${sessionCookieName}=${encodeURIComponent(signer.sign('1'))}`
+
 try {
-  // 1) Health check is mounted at /healthzz regardless of base path.
+  // 1) Health check is mounted at /healthzz regardless of base path
+  //    and must be reachable WITHOUT a session (infra-only probe).
   const health = await server.inject({ method: 'GET', url: '/healthzz' })
   if (health.statusCode !== 200 || !health.body.startsWith('okzz')) {
     fail(`/healthzz returned ${health.statusCode} body=${JSON.stringify(health.body)}`)
   }
 
+  // 1b) Anonymous browser navigation to / must NOT leak the SPA
+  //     shell — it must redirect into the OAuth flow (or, if Google
+  //     OAuth isn't configured in this env, return a bare 401).
+  const anonRoot = await server.inject({
+    method: 'GET',
+    url: '/',
+    headers: { accept: 'text/html' },
+  })
+  if (anonRoot.statusCode !== 302 && anonRoot.statusCode !== 401) {
+    fail(`anonymous GET / leaked content: status=${anonRoot.statusCode} body=${anonRoot.body.slice(0, 120)}`)
+  }
+  if (anonRoot.body.includes('<title') && /helios/i.test(anonRoot.body)) {
+    fail('anonymous GET / leaked a Helios-branded HTML body')
+  }
+
   // 2) The SPA shell at / must be HTML, no-store, and reference the
-  //    current hashed asset bundle from the index.html on disk.
-  const root = await server.inject({ method: 'GET', url: '/' })
+  //    current hashed asset bundle from the index.html on disk — but
+  //    ONLY when the request carries a valid signed session cookie.
+  const root = await server.inject({
+    method: 'GET',
+    url: '/',
+    headers: { cookie: signedSessionCookie },
+  })
   if (root.statusCode !== 200) fail(`/ returned ${root.statusCode}`)
   const ct = String(root.headers['content-type'] ?? '')
   if (!ct.startsWith('text/html')) fail(`/ content-type was ${ct}`)
@@ -103,7 +142,11 @@ try {
   //    bricked production: with `wildcard: false`, every /assets/*
   //    request used to fall through to the SPA fallback which
   //    answered .js requests with the recovery script.
-  const asset = await server.inject({ method: 'GET', url: `/assets/${aJsAsset}` })
+  const asset = await server.inject({
+    method: 'GET',
+    url: `/assets/${aJsAsset}`,
+    headers: { cookie: signedSessionCookie },
+  })
   if (asset.statusCode !== 200) fail(`/assets/${aJsAsset} returned ${asset.statusCode}`)
   const assetCt = String(asset.headers['content-type'] ?? '')
   if (!/javascript/.test(assetCt)) fail(`/assets/${aJsAsset} content-type=${assetCt}`)
@@ -120,7 +163,11 @@ try {
 
   // 4) A genuinely missing JS hash must still trigger the recovery
   //    shim (so stale tabs can recover), not a hard 404.
-  const missing = await server.inject({ method: 'GET', url: '/assets/index-DOESNOTEXIST.js' })
+  const missing = await server.inject({
+    method: 'GET',
+    url: '/assets/index-DOESNOTEXIST.js',
+    headers: { cookie: signedSessionCookie },
+  })
   if (missing.statusCode !== 200) fail(`missing .js returned ${missing.statusCode}`)
   if (!missing.body.includes('stale bundle pointer')) {
     fail(`missing .js did not return recovery shim; body=${missing.body.slice(0, 120)}`)
