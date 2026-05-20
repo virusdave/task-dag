@@ -6,6 +6,7 @@ import { AppShell } from '../components/AppShell.js'
 import { loadSession } from './session.js'
 import { AdsIngestPage } from '../routes/ads/AdsIngestPage.js'
 import { CatalogHistoryPage, catalogHistoryLoader } from '../routes/catalog/CatalogHistoryPage.js'
+import { CatalogMaintenanceIndexPage } from '../routes/catalog/CatalogMaintenanceIndexPage.js'
 import { CatalogMaintenancePage } from '../routes/catalog/CatalogMaintenancePage.js'
 import { CatalogModulePage } from '../routes/catalog/CatalogModulePage.js'
 import { CatalogNewEntryPage } from '../routes/catalog/CatalogNewEntryPage.js'
@@ -120,8 +121,12 @@ export const router = createBrowserRouter([
         path: 'catalog/pending-purchases',
       },
       {
-        element: <CatalogMaintenancePage />,
+        element: <CatalogMaintenanceIndexPage />,
         path: 'catalog/maintenance',
+      },
+      {
+        element: <CatalogMaintenancePage />,
+        path: 'catalog/maintenance/site/:siteKey',
       },
       {
         element: <CatalogNewEntryPage />,

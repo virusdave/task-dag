@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Outlet, useLoaderData, useLocation, useNavigate } from 'react-router-dom'
 
 import {
@@ -14,6 +14,7 @@ import { TreeNav, type TreeNavNode } from './TreeNav.js'
 
 const SIDEBAR_COLLAPSED_STORAGE_KEY = 'helios.sidebar.collapsed'
 const SIDEBAR_TREE_STORAGE_KEY = 'helios.sidebar.tree'
+const MOBILE_BREAKPOINT_QUERY = '(max-width: 960px)'
 
 function isAnyModalOpen(): boolean {
   if (typeof document === 'undefined') {
@@ -103,6 +104,7 @@ function PrimarySidebar() {
 function AppShellInner() {
   const session = useLoaderData() as SessionEnvelope
   const navigate = useNavigate()
+  const location = useLocation()
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState<boolean>(() => {
     if (typeof window === 'undefined') {
       return false
@@ -114,6 +116,26 @@ function AppShellInner() {
   useEffect(() => {
     window.localStorage.setItem(SIDEBAR_COLLAPSED_STORAGE_KEY, isSidebarCollapsed ? 'true' : 'false')
   }, [isSidebarCollapsed])
+
+  // On mobile, hide the sidebar whenever the user navigates (e.g. taps a
+  // link inside the sidebar). On desktop, the sidebar stays put. Without
+  // this, tapping a sidebar item on a phone navigates "past" the nav with
+  // no obvious way to get back to it.
+  const prevLocationKeyRef = useRef(`${location.pathname}${location.search}`)
+  useEffect(() => {
+    const key = `${location.pathname}${location.search}`
+    if (key === prevLocationKeyRef.current) {
+      return
+    }
+    prevLocationKeyRef.current = key
+    if (typeof window === 'undefined') {
+      return
+    }
+    const isMobile = window.matchMedia(MOBILE_BREAKPOINT_QUERY).matches
+    if (isMobile) {
+      setIsSidebarCollapsed(true)
+    }
+  }, [location.pathname, location.search])
 
   const toggleSidebar = useCallback(() => {
     setIsSidebarCollapsed((current) => !current)

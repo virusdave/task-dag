@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
-import { useNavigate, useSearchParams } from 'react-router-dom'
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 
 import {
   CatalogMaintenanceSurveyResponseSchema,
@@ -11,9 +11,13 @@ import {
   type CatalogMaintenanceSurveyResponse,
 } from '../../../shared/contracts/index.js'
 import { buildAppPath } from '../../app/paths.js'
-import { buildHeliosModulePath } from '../../../shared/contracts/index.js'
 import { Pill } from '../../components/Pill.js'
-import { useRegisterCatalogSidebarSubtree } from './catalogSidebarSubtree.js'
+import {
+  buildMaintenanceIndexPath,
+  computePerSiteBrandFilters,
+  useRegisterCatalogSidebarSubtree,
+  type ImagesAndBarcodesSiteEntry,
+} from './catalogSidebarSubtree.js'
 
 type CardMode = 'group' | 'variants' | 'barcode'
 
@@ -31,14 +35,26 @@ const INITIAL_STATE: SurveyState = {
   error: null,
 }
 
-const PAGE_PATH = buildHeliosModulePath('catalog', 'maintenance')
+/**
+ * Shared survey-loading + cache-repair state used by both the
+ * Images & Barcodes index page and the per-site page.
+ *
+ * Exported (not a private hook inside this file) so the index page can
+ * pull from the same code path and we don't accidentally diverge fetch
+ * logic between the two routes.
+ */
+export interface UseMaintenanceSurveyResult {
+  state: SurveyState
+  feedback: { kind: 'ok' | 'err'; message: string } | null
+  setFeedback: (feedback: { kind: 'ok' | 'err'; message: string } | null) => void
+  fetchSurvey: (forceRefresh: boolean) => Promise<void>
+  repairBusy: boolean
+  handleRepairCache: () => Promise<void>
+}
 
-export function CatalogMaintenancePage() {
-  const [searchParams, setSearchParams] = useSearchParams()
-  const activeBrand = searchParams.get('brand')
+export function useMaintenanceSurvey(): UseMaintenanceSurveyResult {
   const navigate = useNavigate()
   const [state, setState] = useState<SurveyState>(INITIAL_STATE)
-  const [busyGroupKey, setBusyGroupKey] = useState<string | null>(null)
   const [feedback, setFeedback] = useState<{ kind: 'ok' | 'err'; message: string } | null>(null)
   const [repairBusy, setRepairBusy] = useState(false)
 
@@ -74,40 +90,6 @@ export function CatalogMaintenancePage() {
     void fetchSurvey(false)
   }, [fetchSurvey])
 
-  // Compute sidebar metadata once we have the survey.
-  const sidebarOptions = useMemo(() => {
-    const survey = state.survey
-    if (!survey) return undefined
-    const siteAnchors = survey.sites
-      .filter((site) => site.totalIssueCount > 0)
-      .map((site) => ({
-        siteKey: site.siteKey,
-        siteLabel: site.siteLabel,
-        targetId: site.targetId,
-        count: site.totalIssueCount,
-      }))
-    return {
-      siteAnchors,
-      brandQuickFilters: survey.quickFilters.brands,
-      activeBrand,
-      imagesAndBarcodesPath: PAGE_PATH,
-    }
-  }, [state.survey, activeBrand])
-
-  useRegisterCatalogSidebarSubtree({ imagesAndBarcodes: sidebarOptions })
-
-  const handleUploadComplete = useCallback(
-    async (message: string) => {
-      setFeedback({ kind: 'ok', message })
-      await fetchSurvey(true)
-    },
-    [fetchSurvey],
-  )
-
-  const handleUploadError = useCallback((message: string) => {
-    setFeedback({ kind: 'err', message })
-  }, [])
-
   const handleRepairCache = useCallback(async () => {
     setRepairBusy(true)
     try {
@@ -139,6 +121,70 @@ export function CatalogMaintenancePage() {
     }
   }, [navigate])
 
+  return { state, feedback, setFeedback, fetchSurvey, repairBusy, handleRepairCache }
+}
+
+/**
+ * Per-site Images & Barcodes page.
+ *
+ * Mounted at `/catalog/maintenance/site/:siteKey`. Renders ONLY the
+ * candidates for that single store (never all sites together), so a
+ * mobile browser standing in Midtown isn't paying for Bronx's DOM.
+ *
+ * The optional `?brand=` query narrows to a single brand WITHIN that
+ * site. Brand options are scoped to brands actually present in this
+ * site's candidate set — an operator in site A is never offered a
+ * brand that's only stocked at site B.
+ */
+export function CatalogMaintenancePage() {
+  const { siteKey: rawSiteKey } = useParams<{ siteKey?: string }>()
+  const siteKey = rawSiteKey ?? null
+  const [searchParams, setSearchParams] = useSearchParams()
+  const activeBrand = searchParams.get('brand')
+  const navigate = useNavigate()
+  const { state, feedback, setFeedback, fetchSurvey, repairBusy, handleRepairCache } = useMaintenanceSurvey()
+  const [busyGroupKey, setBusyGroupKey] = useState<string | null>(null)
+
+  // If we somehow land here without a siteKey in the URL (legacy link
+  // or a typo), bounce to the site index so the operator can pick one.
+  useEffect(() => {
+    if (siteKey === null) {
+      navigate(buildMaintenanceIndexPath(), { replace: true })
+    }
+  }, [siteKey, navigate])
+
+  // Per-site brand quick filters for the sidebar. Brands live UNDER
+  // the active site in the sidebar — see comments in
+  // catalogSidebarSubtree.ts.
+  const perSiteBrands: ImagesAndBarcodesSiteEntry[] = useMemo(
+    () => (state.survey ? computePerSiteBrandFilters(state.survey) : []),
+    [state.survey],
+  )
+
+  useRegisterCatalogSidebarSubtree({
+    imagesAndBarcodes: {
+      indexPath: buildMaintenanceIndexPath(),
+      sites: perSiteBrands,
+      activeSiteKey: siteKey,
+      activeBrand,
+    },
+  })
+
+  const handleUploadComplete = useCallback(
+    async (message: string) => {
+      setFeedback({ kind: 'ok', message })
+      await fetchSurvey(true)
+    },
+    [fetchSurvey, setFeedback],
+  )
+
+  const handleUploadError = useCallback(
+    (message: string) => {
+      setFeedback({ kind: 'err', message })
+    },
+    [setFeedback],
+  )
+
   const handleBrandFilter = (brand: string | null) => {
     if (brand === null) {
       searchParams.delete('brand')
@@ -148,17 +194,50 @@ export function CatalogMaintenancePage() {
     setSearchParams(searchParams, { replace: true })
   }
 
-  const filteredSurvey = useMemo(() => filterSurveyByBrand(state.survey, activeBrand), [state.survey, activeBrand])
+  // Filter survey to just this one site, then (optionally) just this
+  // one brand inside that site.
+  const filteredSurvey = useMemo(
+    () => filterSurveyToSiteAndBrand(state.survey, siteKey, activeBrand),
+    [state.survey, siteKey, activeBrand],
+  )
+
+  // The site row in the original (unfiltered) survey, used for the
+  // header label + brand chip count even when the brand filter empties
+  // the visible cards.
+  const siteRow = useMemo(() => {
+    if (!state.survey || siteKey === null) return null
+    return state.survey.sites.find((s) => s.siteKey === siteKey) ?? null
+  }, [state.survey, siteKey])
+
+  const siteBrands = useMemo(
+    () => perSiteBrands.find((s) => s.siteKey === siteKey)?.brands ?? [],
+    [perSiteBrands, siteKey],
+  )
+
+  if (siteKey === null) {
+    return null
+  }
 
   return (
     <section className="catalog-maintenance-page">
       <div className="page-header">
         <div>
-          <p className="eyebrow">Catalog Module</p>
-          <h2>Images &amp; Barcodes</h2>
+          <p className="eyebrow">
+            Catalog Module ·{' '}
+            <Link to={buildMaintenanceIndexPath()}>Images &amp; Barcodes</Link>
+          </p>
+          <h2>
+            {siteRow?.siteLabel ?? siteKey}{' '}
+            {siteRow ? (
+              <Pill tone={siteRow.totalIssueCount === 0 ? 'muted' : 'warning'}>
+                {siteRow.totalIssueCount} issue{siteRow.totalIssueCount === 1 ? '' : 's'}
+              </Pill>
+            ) : null}
+          </h2>
           <p className="subtle-copy">
-            In-stock SKUs whose Sweed product group has no image, or whose package barcode is missing.
-            Tap a card to upload or capture a photo and Helios will attach it to the group for you.
+            In-stock SKUs at {siteRow?.siteLabel ?? 'this site'} whose Sweed product group has no image,
+            or whose package barcode is missing. Tap a card to upload or capture a photo and Helios will
+            attach it to the group for you.
           </p>
         </div>
         <div className="inline-row wrap-row catalog-maintenance-meta">
@@ -188,6 +267,14 @@ export function CatalogMaintenancePage() {
           </button>
         </div>
       </div>
+
+      {siteBrands.length > 0 ? (
+        <SiteBrandFilterStrip
+          brands={siteBrands}
+          activeBrand={activeBrand}
+          onSelect={handleBrandFilter}
+        />
+      ) : null}
 
       {feedback ? (
         <div className={`catalog-maintenance-toast catalog-maintenance-toast-${feedback.kind}`}>
@@ -221,6 +308,13 @@ export function CatalogMaintenancePage() {
           ))
         : null}
 
+      {filteredSurvey && filteredSurvey.sites.length === 0 && state.survey ? (
+        <p className="subtle-copy">
+          No site matches <code>{siteKey}</code> in the latest survey.{' '}
+          <Link to={buildMaintenanceIndexPath()}>Back to sites</Link>.
+        </p>
+      ) : null}
+
       {filteredSurvey && filteredSurvey.sites.every((s) => s.totalIssueCount === 0) ? (
         <p className="subtle-copy">No issues to address for the active filter.</p>
       ) : null}
@@ -228,26 +322,66 @@ export function CatalogMaintenancePage() {
   )
 }
 
-function filterSurveyByBrand(
+interface SiteBrandFilterStripProps {
+  brands: Array<{ brandName: string; issueCount: number }>
+  activeBrand: string | null
+  onSelect: (brand: string | null) => void
+}
+
+/**
+ * One-tap brand filter strip rendered above the card list on the
+ * per-site page. Mirrors the brand subtree in the sidebar, but is
+ * present even when the sidebar is collapsed (the common case on
+ * mobile).
+ */
+function SiteBrandFilterStrip({ brands, activeBrand, onSelect }: SiteBrandFilterStripProps) {
+  return (
+    <div className="inline-row wrap-row" style={{ gap: '0.35rem', marginBottom: '0.75rem' }}>
+      <button
+        type="button"
+        className={`ghost-button${activeBrand === null ? ' is-active' : ''}`}
+        onClick={() => onSelect(null)}
+      >
+        All brands
+      </button>
+      {brands.map((brand) => (
+        <button
+          key={brand.brandName}
+          type="button"
+          className={`ghost-button${activeBrand === brand.brandName ? ' is-active' : ''}`}
+          onClick={() => onSelect(brand.brandName)}
+        >
+          {brand.brandName} ({brand.issueCount})
+        </button>
+      ))}
+    </div>
+  )
+}
+
+/**
+ * Narrow a survey to a single site (and optional brand within that
+ * site). Returns null only when the source survey is null; otherwise
+ * always returns a survey shape, possibly with zero sites if siteKey
+ * doesn't match anything in the survey.
+ */
+export function filterSurveyToSiteAndBrand(
   survey: CatalogMaintenanceSurveyResponse | null,
+  siteKey: string | null,
   activeBrand: string | null,
 ): CatalogMaintenanceSurveyResponse | null {
   if (!survey) return null
-  if (!activeBrand) return survey
-  return {
-    ...survey,
-    sites: survey.sites.map((site) => ({
-      ...site,
-      sections: site.sections.map((section) => {
+  const sites = (siteKey === null ? survey.sites : survey.sites.filter((s) => s.siteKey === siteKey)).map(
+    (site) => {
+      if (!activeBrand) return site
+      const sections = site.sections.map((section) => {
         const groups = section.groups.filter((g) => g.brandName === activeBrand)
         return { ...section, groups, issueCount: groups.length }
-      }),
-      totalIssueCount: site.sections.reduce(
-        (acc, s) => acc + s.groups.filter((g) => g.brandName === activeBrand).length,
-        0,
-      ),
-    })),
-  }
+      })
+      const totalIssueCount = sections.reduce((acc, s) => acc + s.issueCount, 0)
+      return { ...site, sections, totalIssueCount }
+    },
+  )
+  return { ...survey, sites }
 }
 
 interface FatalBannerProps {
@@ -388,6 +522,12 @@ function MaintenanceCard(props: CardProps) {
   const [optimisticImageUrl, setOptimisticImageUrl] = useState<string | null>(null)
   const [optimisticAffectedProductIds, setOptimisticAffectedProductIds] = useState<readonly number[]>([])
   const [syncingReanalysis, setSyncingReanalysis] = useState(false)
+  // `isPolling` tracks the background worker-job poll AFTER the enqueue
+  // POST has returned. The page-level busy gate (`busy` prop) is released
+  // immediately at enqueue so the operator can keep working on other
+  // cards while this card's worker job runs. `isPolling` only gates THIS
+  // card's submit/retry buttons.
+  const [isPolling, setIsPolling] = useState(false)
   // Per-card status banner — distinct from the global toast at the top of
   // the page (which scrolls off-screen on mobile). Stays visible inside the
   // card so the operator can SEE what happened without scrolling.
@@ -438,6 +578,7 @@ function MaintenanceCard(props: CardProps) {
     onUploadStart()
     setFailedStagedRef(null)
     setCardStatus({ kind: 'busy', message: 'Staging bytes on the server…' })
+    let enqueued = false
     try {
       const formData = new FormData()
       formData.append('targetType', mode === 'group' ? 'group' : 'variants')
@@ -469,7 +610,19 @@ function MaintenanceCard(props: CardProps) {
       setFile(null)
       if (inputRef.current) inputRef.current.value = ''
 
-      await pollUploadJob({
+      // Job is enqueued — release the page-level busy gate IMMEDIATELY so
+      // the operator can keep working on other cards while the worker
+      // picks this job up. This card's own buttons stay disabled via the
+      // local `isPolling` state until the background poll concludes.
+      enqueued = true
+      setIsPolling(true)
+      setCardStatus({
+        kind: 'busy',
+        message: `Queued (job #${payload.jobId}) — waiting for a Sweed worker…`,
+      })
+      onUploadEnd()
+
+      pollUploadJob({
         cardKey: props.cardKey,
         jobId: payload.jobId,
         stagedRef: payload.stagedRef,
@@ -489,12 +642,24 @@ function MaintenanceCard(props: CardProps) {
           onError(errorMessage)
         },
       })
+        .catch((pollErr) => {
+          // Defensive: pollUploadJob handles all known failures via
+          // its onFailure callback. If it ever throws (e.g. an unexpected
+          // JSON parse error), surface it in the card status rather than
+          // emitting an unhandled rejection.
+          const message = pollErr instanceof Error ? pollErr.message : 'Polling failed.'
+          setCardStatus({ kind: 'err', message: `✗ ${message}` })
+          onError(message)
+        })
+        .finally(() => setIsPolling(false))
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Upload failed.'
       setCardStatus({ kind: 'err', message: `✗ ${message}` })
       onError(message)
     } finally {
-      onUploadEnd()
+      if (!enqueued) {
+        onUploadEnd()
+      }
     }
   }
 
@@ -504,6 +669,7 @@ function MaintenanceCard(props: CardProps) {
     onUploadStart()
     setFailedStagedRef(null)
     setCardStatus({ kind: 'busy', message: `Re-enqueuing upload from staged bytes ${stagedRef}…` })
+    let enqueued = false
     try {
       const response = await fetch(
         buildAppPath(`/api/catalog/maintenance/images/${encodeURIComponent(stagedRef)}/retry`),
@@ -523,7 +689,17 @@ function MaintenanceCard(props: CardProps) {
         jobId: number
         stagedRef: string
       }
-      await pollUploadJob({
+      // Job is enqueued — release page-level gate and let polling run
+      // in the background; same rationale as handleSubmit.
+      enqueued = true
+      setIsPolling(true)
+      setCardStatus({
+        kind: 'busy',
+        message: `Queued (job #${payload.jobId}) — waiting for a Sweed worker…`,
+      })
+      onUploadEnd()
+
+      pollUploadJob({
         cardKey: props.cardKey,
         jobId: payload.jobId,
         stagedRef: payload.stagedRef,
@@ -543,6 +719,12 @@ function MaintenanceCard(props: CardProps) {
           onError(errorMessage)
         },
       })
+        .catch((pollErr) => {
+          const message = pollErr instanceof Error ? pollErr.message : 'Polling failed.'
+          setCardStatus({ kind: 'err', message: `✗ ${message}` })
+          onError(message)
+        })
+        .finally(() => setIsPolling(false))
     } catch (error) {
       // 404 here usually means the staged bytes were GC'd. Re-prompt
       // for a file pick.
@@ -550,12 +732,21 @@ function MaintenanceCard(props: CardProps) {
       setCardStatus({ kind: 'err', message: `✗ Retry failed: ${message}` })
       onError(message)
     } finally {
-      onUploadEnd()
+      if (!enqueued) {
+        onUploadEnd()
+      }
     }
   }
 
   const fileLabel = file ? `${file.name} (${formatBytes(file.size)})` : 'No photo selected'
-  const ctaLabel = busy
+  // `cardBusy` is the local interactivity gate for THIS card's own
+  // buttons. It includes the page-level enqueue gate (`busy`) AND the
+  // post-enqueue background poll (`isPolling`). Sibling cards only see
+  // `disabled` (the brief page-level enqueue gate), not this card's
+  // ongoing poll — that's what makes the page usable again right after
+  // enqueue.
+  const cardBusy = busy || isPolling
+  const ctaLabel = cardBusy
     ? mode === 'group'
       ? 'Uploading group photo…'
       : 'Uploading variant photo…'
@@ -679,7 +870,7 @@ function MaintenanceCard(props: CardProps) {
             type="button"
             className="ghost-button catalog-maintenance-pick"
             onClick={() => inputRef.current?.click()}
-            disabled={busy || disabled}
+            disabled={cardBusy || disabled}
           >
             {file ? 'Replace photo' : 'Pick / take a photo'}
           </button>
@@ -687,7 +878,7 @@ function MaintenanceCard(props: CardProps) {
             type="button"
             className="primary-button catalog-maintenance-upload"
             onClick={() => void handleSubmit()}
-            disabled={busy || disabled || !file}
+            disabled={cardBusy || disabled || !file}
           >
             {ctaLabel}
           </button>
@@ -728,7 +919,7 @@ function MaintenanceCard(props: CardProps) {
                 type="button"
                 className="primary-button"
                 onClick={() => void handleRetry()}
-                disabled={busy || disabled}
+                disabled={cardBusy || disabled}
               >
                 Retry
               </button>
