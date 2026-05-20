@@ -63,6 +63,20 @@ interface DetectionOverlay {
 
 type ScannerStage = 'idle' | 'requesting' | 'starting' | 'active' | 'error'
 
+interface NativeDetectedBarcode {
+  rawValue?: string
+  cornerPoints?: Array<{ x: number; y: number }>
+}
+
+interface NativeBarcodeDetectorInstance {
+  detect(source: HTMLVideoElement | HTMLCanvasElement | ImageBitmap): Promise<NativeDetectedBarcode[]>
+}
+
+interface NativeBarcodeDetectorCtor {
+  new (options?: { formats?: string[] }): NativeBarcodeDetectorInstance
+  getSupportedFormats?: () => Promise<string[]>
+}
+
 export function LiveBarcodeScanner({ open, onDetected, onCancel }: Props) {
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const overlayRef = useRef<HTMLCanvasElement | null>(null)
@@ -258,31 +272,27 @@ export function LiveBarcodeScanner({ open, onDetected, onCancel }: Props) {
 
       runRafLoop()
 
-      // 3) Decode against the already-running video. No need to ask
-      // the library to manage the stream lifecycle for us — we own
-      // it.
-      const { BrowserMultiFormatReader } = await import('@zxing/browser')
-      const reader = new BrowserMultiFormatReader()
-      const controls = await reader.decodeFromVideoElement(video, (result, _err) => {
+      // 3) Decode against the already-running video. We prefer the
+      // browser's native BarcodeDetector when available (Android
+      // Chrome) because it's significantly more accurate and faster
+      // than @zxing/browser on mobile. Fall back to zxing on iOS /
+      // desktop browsers that don't ship BarcodeDetector.
+      const productFormats = [
+        'upc_a',
+        'upc_e',
+        'ean_13',
+        'ean_8',
+        'code_128',
+        'code_39',
+        'code_93',
+        'codabar',
+        'itf',
+        'qr_code',
+        'data_matrix',
+      ]
+      const handleDecodedValue = (value: string, points: Array<{ x: number; y: number }>) => {
         if (lockedRef.current) return
-        const videoNow = videoRef.current
-        const overlayNow = overlayRef.current
-        if (!videoNow || !overlayNow) return
-        if (!result) {
-          detectionRef.current = null
-          return
-        }
-        const value = result.getText().trim()
         if (value.length === 0) return
-        const overlayWidth = overlayNow.clientWidth
-        const overlayHeight = overlayNow.clientHeight
-        const points = mapResultPointsToOverlay(
-          result.getResultPoints(),
-          videoNow.videoWidth,
-          videoNow.videoHeight,
-          overlayWidth,
-          overlayHeight,
-        )
         detectionRef.current = { points, value }
         lockedRef.current = true
         setStatus(`✓ ${value}`)
@@ -290,8 +300,122 @@ export function LiveBarcodeScanner({ open, onDetected, onCancel }: Props) {
         window.setTimeout(() => {
           onDetectedRef.current(value)
         }, 350)
-      })
-      controlsStopRef.current = () => controls.stop()
+      }
+      const nativeDetectorCtor = (
+        window as unknown as { BarcodeDetector?: NativeBarcodeDetectorCtor }
+      ).BarcodeDetector
+      if (nativeDetectorCtor) {
+        // Prefer native: usually backed by Google's library on Android
+        // and Vision framework on macOS — much more accurate than
+        // zxing.
+        let nativeFormats: string[] = productFormats
+        try {
+          const supported = (await nativeDetectorCtor.getSupportedFormats?.()) ?? []
+          if (supported.length > 0) {
+            const supportedSet = new Set(supported)
+            const filtered = productFormats.filter((f) => supportedSet.has(f))
+            if (filtered.length > 0) nativeFormats = filtered
+          }
+        } catch {
+          /* getSupportedFormats is optional; ignore */
+        }
+        const detector = new nativeDetectorCtor({ formats: nativeFormats })
+        let nativeRunning = true
+        controlsStopRef.current = () => {
+          nativeRunning = false
+        }
+        const tick = async () => {
+          if (!nativeRunning || lockedRef.current) return
+          const videoNow = videoRef.current
+          const overlayNow = overlayRef.current
+          if (!videoNow || !overlayNow) {
+            window.setTimeout(tick, 150)
+            return
+          }
+          if (videoNow.readyState < 2 || videoNow.videoWidth === 0) {
+            window.setTimeout(tick, 150)
+            return
+          }
+          try {
+            const detections = await detector.detect(videoNow)
+            if (!nativeRunning || lockedRef.current) return
+            if (detections.length === 0) {
+              detectionRef.current = null
+            } else {
+              const best = detections[0]
+              const corners = best.cornerPoints ?? []
+              const mapped = mapPlainPointsToOverlay(
+                corners,
+                videoNow.videoWidth,
+                videoNow.videoHeight,
+                overlayNow.clientWidth,
+                overlayNow.clientHeight,
+              )
+              const value = (best.rawValue ?? '').trim()
+              if (value.length > 0) handleDecodedValue(value, mapped)
+            }
+          } catch (err) {
+            // Native detector can throw on partial frames; just skip.
+            // eslint-disable-next-line no-console
+            console.debug('[live-barcode-scanner] native detect tick failed', err)
+          }
+          if (nativeRunning && !lockedRef.current) {
+            window.setTimeout(tick, 120)
+          }
+        }
+        void tick()
+      } else {
+        const { BrowserMultiFormatReader } = await import('@zxing/browser')
+        const { BarcodeFormat, DecodeHintType } = await import('@zxing/library')
+        const zxingFormats = [
+          BarcodeFormat.UPC_A,
+          BarcodeFormat.UPC_E,
+          BarcodeFormat.EAN_13,
+          BarcodeFormat.EAN_8,
+          BarcodeFormat.CODE_128,
+          BarcodeFormat.CODE_39,
+          BarcodeFormat.CODE_93,
+          BarcodeFormat.CODABAR,
+          BarcodeFormat.ITF,
+          BarcodeFormat.QR_CODE,
+          BarcodeFormat.DATA_MATRIX,
+        ]
+        // Enum is dynamically imported, so we can't use it as a type
+        // here. It's a numeric enum, so `number` is the right key type.
+        const hints = new Map<number, unknown>()
+        // TRY_HARDER costs CPU but dramatically improves hit rate on
+        // imperfect frames — exactly what we want when waving a phone
+        // at a product label.
+        hints.set(DecodeHintType.TRY_HARDER, true)
+        hints.set(DecodeHintType.POSSIBLE_FORMATS, zxingFormats)
+        const reader = new BrowserMultiFormatReader(hints, {
+          // Default is 500ms — too slow when the operator is briefly
+          // holding the phone steady. 120ms gives ~8 scan attempts/s
+          // which is what the rest of the UI assumes.
+          delayBetweenScanAttempts: 120,
+          delayBetweenScanSuccess: 250,
+        })
+        const controls = await reader.decodeFromVideoElement(video, (result, _err) => {
+          if (lockedRef.current) return
+          const videoNow = videoRef.current
+          const overlayNow = overlayRef.current
+          if (!videoNow || !overlayNow) return
+          if (!result) {
+            detectionRef.current = null
+            return
+          }
+          const value = result.getText().trim()
+          const points = mapResultPointsToOverlay(
+            result.getResultPoints(),
+            videoNow.videoWidth,
+            videoNow.videoHeight,
+            overlayNow.clientWidth,
+            overlayNow.clientHeight,
+          )
+          handleDecodedValue(value, points)
+        })
+        controlsStopRef.current = () => controls.stop()
+      }
 
       setStage('active')
       setStatus('Point the camera at a barcode…')
@@ -502,6 +626,36 @@ function mapResultPointsToOverlay(
   dstWidth: number,
   dstHeight: number,
 ): Array<{ x: number; y: number }> {
+  return mapPointsToOverlay(
+    points.map((p) => ({ x: p.getX(), y: p.getY() })),
+    srcWidth,
+    srcHeight,
+    dstWidth,
+    dstHeight,
+  )
+}
+
+/**
+ * Same as mapResultPointsToOverlay, but for the plain {x,y} shape the
+ * native BarcodeDetector returns (no getX()/getY() methods).
+ */
+function mapPlainPointsToOverlay(
+  points: ReadonlyArray<{ x: number; y: number }>,
+  srcWidth: number,
+  srcHeight: number,
+  dstWidth: number,
+  dstHeight: number,
+): Array<{ x: number; y: number }> {
+  return mapPointsToOverlay(points, srcWidth, srcHeight, dstWidth, dstHeight)
+}
+
+function mapPointsToOverlay(
+  points: ReadonlyArray<{ x: number; y: number }>,
+  srcWidth: number,
+  srcHeight: number,
+  dstWidth: number,
+  dstHeight: number,
+): Array<{ x: number; y: number }> {
   if (srcWidth === 0 || srcHeight === 0 || dstWidth === 0 || dstHeight === 0) {
     return []
   }
@@ -511,8 +665,8 @@ function mapResultPointsToOverlay(
   const offsetX = (dstWidth - scaledW) / 2
   const offsetY = (dstHeight - scaledH) / 2
   return points.map((p) => ({
-    x: p.getX() * scale + offsetX,
-    y: p.getY() * scale + offsetY,
+    x: p.x * scale + offsetX,
+    y: p.y * scale + offsetY,
   }))
 }
 
