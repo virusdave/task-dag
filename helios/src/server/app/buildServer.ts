@@ -19,6 +19,7 @@ import { registerBrandExpiryOverridesRoutes } from '../routes/brandExpiryOverrid
 import { registerCatalogRoutes } from '../routes/catalog.js'
 import { registerCatalogMaintenanceRoutes } from '../routes/catalogMaintenance.js'
 import { registerCatalogReviewRoutes } from '../routes/catalogReview.js'
+import { registerClientErrorsRoutes } from '../routes/clientErrors.js'
 import { registerCommentsRoutes } from '../routes/comments.js'
 import { registerCommunicationsRoutes } from '../routes/communications.js'
 import { registerConfigRoutes } from '../routes/config.js'
@@ -114,6 +115,7 @@ async function registerApplicationSurface(server: FastifyInstance) {
   await registerCatalogRoutes(server)
   await registerCatalogMaintenanceRoutes(server)
   await registerCatalogReviewRoutes(server)
+  await registerClientErrorsRoutes(server)
   await registerCommentsRoutes(server)
   await registerCommunicationsRoutes(server)
   await registerConfigRoutes(server)

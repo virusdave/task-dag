@@ -143,7 +143,6 @@ export function CatalogMaintenancePage() {
   const activeBrand = searchParams.get('brand')
   const navigate = useNavigate()
   const { state, feedback, setFeedback, fetchSurvey, repairBusy, handleRepairCache } = useMaintenanceSurvey()
-  const [busyGroupKey, setBusyGroupKey] = useState<string | null>(null)
 
   // If we somehow land here without a siteKey in the URL (legacy link
   // or a typo), bounce to the site index so the operator can pick one.
@@ -300,8 +299,6 @@ export function CatalogMaintenancePage() {
             <SiteSection
               key={site.siteKey}
               site={site}
-              busyGroupKey={busyGroupKey}
-              setBusyGroupKey={setBusyGroupKey}
               onComplete={handleUploadComplete}
               onError={handleUploadError}
             />
@@ -418,13 +415,11 @@ function FatalBanner({ banner, busy, onRepair }: FatalBannerProps) {
 
 interface SiteSectionProps {
   site: CatalogMaintenanceSurveyResponse['sites'][number]
-  busyGroupKey: string | null
-  setBusyGroupKey: (key: string | null) => void
   onComplete: (message: string) => Promise<void>
   onError: (message: string) => void
 }
 
-function SiteSection({ site, busyGroupKey, setBusyGroupKey, onComplete, onError }: SiteSectionProps) {
+function SiteSection({ site, onComplete, onError }: SiteSectionProps) {
   return (
     <section className="catalog-maintenance-site" id={site.targetId} style={{ scrollMarginTop: '1rem' }}>
       <header className="page-header" style={{ marginTop: '2rem' }}>
@@ -439,8 +434,6 @@ function SiteSection({ site, busyGroupKey, setBusyGroupKey, onComplete, onError 
         <SectionBlock
           key={section.kind}
           section={section}
-          busyGroupKey={busyGroupKey}
-          setBusyGroupKey={setBusyGroupKey}
           onComplete={onComplete}
           onError={onError}
         />
@@ -451,13 +444,11 @@ function SiteSection({ site, busyGroupKey, setBusyGroupKey, onComplete, onError 
 
 interface SectionBlockProps {
   section: CatalogMaintenanceSurveyResponse['sites'][number]['sections'][number]
-  busyGroupKey: string | null
-  setBusyGroupKey: (key: string | null) => void
   onComplete: (message: string) => Promise<void>
   onError: (message: string) => void
 }
 
-function SectionBlock({ section, busyGroupKey, setBusyGroupKey, onComplete, onError }: SectionBlockProps) {
+function SectionBlock({ section, onComplete, onError }: SectionBlockProps) {
   // Today the server only emits `missing-catalog-image` and
   // `missing-or-invalid-barcode` sections. The `missing-variant-image`
   // kind is left in the contract enum for forward-compat but never
@@ -484,10 +475,6 @@ function SectionBlock({ section, busyGroupKey, setBusyGroupKey, onComplete, onEr
                   cardKey={key}
                   mode={mode}
                   group={group}
-                  busy={busyGroupKey === key}
-                  disabled={busyGroupKey !== null && busyGroupKey !== key}
-                  onUploadStart={() => setBusyGroupKey(key)}
-                  onUploadEnd={() => setBusyGroupKey(null)}
                   onComplete={onComplete}
                   onError={onError}
                 />
@@ -504,16 +491,12 @@ interface CardProps {
   cardKey: string
   mode: CardMode
   group: CatalogMaintenanceSiteGroup
-  busy: boolean
-  disabled: boolean
-  onUploadStart: () => void
-  onUploadEnd: () => void
   onComplete: (message: string) => Promise<void>
   onError: (message: string) => void
 }
 
 function MaintenanceCard(props: CardProps) {
-  const { mode, group, busy, disabled, onUploadStart, onUploadEnd, onComplete, onError } = props
+  const { mode, group, onComplete, onError } = props
   const [file, setFile] = useState<File | null>(null)
   const [localPreviewUrl, setLocalPreviewUrl] = useState<string | null>(null)
   const [selectedVariantIds, setSelectedVariantIds] = useState<number[]>(() =>
@@ -522,11 +505,15 @@ function MaintenanceCard(props: CardProps) {
   const [optimisticImageUrl, setOptimisticImageUrl] = useState<string | null>(null)
   const [optimisticAffectedProductIds, setOptimisticAffectedProductIds] = useState<readonly number[]>([])
   const [syncingReanalysis, setSyncingReanalysis] = useState(false)
-  // `isPolling` tracks the background worker-job poll AFTER the enqueue
-  // POST has returned. The page-level busy gate (`busy` prop) is released
-  // immediately at enqueue so the operator can keep working on other
-  // cards while this card's worker job runs. `isPolling` only gates THIS
-  // card's submit/retry buttons.
+  // `isStaging` covers the synchronous HTTP POST that ships the bytes to
+  // the server's icebox. It's purely a per-card gate now — sibling
+  // cards are never disabled by THIS card's upload so the operator can
+  // walk a shelf and rip through every missing-image SKU in parallel,
+  // exactly as the user asked.
+  const [isStaging, setIsStaging] = useState(false)
+  // `isPolling` tracks the background worker-job poll AFTER the
+  // enqueue POST has returned. Only gates THIS card's submit/retry
+  // buttons; sibling cards keep working.
   const [isPolling, setIsPolling] = useState(false)
   // Per-card status banner — distinct from the global toast at the top of
   // the page (which scrolls off-screen on mobile). Stays visible inside the
@@ -563,6 +550,10 @@ function MaintenanceCard(props: CardProps) {
 
   const handleSubmit = async () => {
     if (mode === 'barcode') return
+    // These two checks are the ONLY upload errors the operator can
+    // actually act on (pick a photo / select a variant). Everything
+    // else below is server / network / worker plumbing that gets a
+    // friendly "we paged Dave" treatment instead of raw stack text.
     if (!file) {
       const msg = 'Pick or capture a photo first.'
       setCardStatus({ kind: 'err', message: msg })
@@ -575,9 +566,9 @@ function MaintenanceCard(props: CardProps) {
       onError(msg)
       return
     }
-    onUploadStart()
+    setIsStaging(true)
     setFailedStagedRef(null)
-    setCardStatus({ kind: 'busy', message: 'Staging bytes on the server…' })
+    setCardStatus({ kind: 'busy', message: 'Uploading photo…' })
     let enqueued = false
     try {
       const formData = new FormData()
@@ -610,55 +601,70 @@ function MaintenanceCard(props: CardProps) {
       setFile(null)
       if (inputRef.current) inputRef.current.value = ''
 
-      // Job is enqueued — release the page-level busy gate IMMEDIATELY so
-      // the operator can keep working on other cards while the worker
-      // picks this job up. This card's own buttons stay disabled via the
-      // local `isPolling` state until the background poll concludes.
+      // Bytes safe on the server. Drop the staging gate immediately so
+      // THIS card's buttons re-enable for the next photo (sibling
+      // cards were never blocked).
       enqueued = true
       setIsPolling(true)
-      setCardStatus({
-        kind: 'busy',
-        message: `Queued (job #${payload.jobId}) — waiting for a Sweed worker…`,
-      })
-      onUploadEnd()
+      setCardStatus({ kind: 'busy', message: 'Saving to Sweed…' })
+      setIsStaging(false)
 
       pollUploadJob({
         cardKey: props.cardKey,
         jobId: payload.jobId,
         stagedRef: payload.stagedRef,
         group,
-        onPhase: (message) => setCardStatus({ kind: 'busy', message }),
+        onPhase: (_message) => {
+          // Operator doesn't need step-by-step worker plumbing on a
+          // 4-inch screen; "Saving to Sweed…" already tells them
+          // what's happening.
+          setCardStatus({ kind: 'busy', message: 'Saving to Sweed…' })
+        },
         onSuccess: async () => {
-          const message = `✓ Group image attached to ${displayGroupName(group)} (${group.siteLabel}). Sweed confirmed the blob is on the group.`
+          const message = `✓ Photo saved to ${displayGroupName(group)} (${group.siteLabel}).`
           setCardStatus({ kind: 'ok', message })
           await onComplete(message)
         },
         onFailure: (errorMessage, stagedRef) => {
           setFailedStagedRef(stagedRef)
-          setCardStatus({
-            kind: 'err',
-            message: `✗ ${errorMessage} — bytes are still staged; click Retry to re-enqueue.`,
+          surfaceUnactionableUploadError({
+            context: 'catalog.maintenance.upload.worker-job',
+            rawMessage: errorMessage,
+            group,
+            jobId: payload.jobId,
+            stagedRef,
+            setCardStatus,
+            onError,
           })
-          onError(errorMessage)
         },
       })
         .catch((pollErr) => {
-          // Defensive: pollUploadJob handles all known failures via
-          // its onFailure callback. If it ever throws (e.g. an unexpected
-          // JSON parse error), surface it in the card status rather than
-          // emitting an unhandled rejection.
-          const message = pollErr instanceof Error ? pollErr.message : 'Polling failed.'
-          setCardStatus({ kind: 'err', message: `✗ ${message}` })
-          onError(message)
+          // pollUploadJob handles known failures via onFailure; this
+          // path is for unexpected throws (JSON parse, etc.).
+          surfaceUnactionableUploadError({
+            context: 'catalog.maintenance.upload.poll-unexpected',
+            rawMessage: pollErr instanceof Error ? pollErr.message : String(pollErr),
+            group,
+            jobId: payload.jobId,
+            stagedRef: payload.stagedRef,
+            setCardStatus,
+            onError,
+          })
         })
         .finally(() => setIsPolling(false))
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Upload failed.'
-      setCardStatus({ kind: 'err', message: `✗ ${message}` })
-      onError(message)
+      surfaceUnactionableUploadError({
+        context: 'catalog.maintenance.upload.stage',
+        rawMessage: error instanceof Error ? error.message : String(error),
+        group,
+        jobId: null,
+        stagedRef: null,
+        setCardStatus,
+        onError,
+      })
     } finally {
       if (!enqueued) {
-        onUploadEnd()
+        setIsStaging(false)
       }
     }
   }
@@ -666,9 +672,9 @@ function MaintenanceCard(props: CardProps) {
   const handleRetry = async () => {
     if (mode === 'barcode' || failedStagedRef === null) return
     const stagedRef = failedStagedRef
-    onUploadStart()
+    setIsStaging(true)
     setFailedStagedRef(null)
-    setCardStatus({ kind: 'busy', message: `Re-enqueuing upload from staged bytes ${stagedRef}…` })
+    setCardStatus({ kind: 'busy', message: 'Re-trying upload…' })
     let enqueued = false
     try {
       const response = await fetch(
@@ -689,63 +695,70 @@ function MaintenanceCard(props: CardProps) {
         jobId: number
         stagedRef: string
       }
-      // Job is enqueued — release page-level gate and let polling run
-      // in the background; same rationale as handleSubmit.
       enqueued = true
       setIsPolling(true)
-      setCardStatus({
-        kind: 'busy',
-        message: `Queued (job #${payload.jobId}) — waiting for a Sweed worker…`,
-      })
-      onUploadEnd()
+      setCardStatus({ kind: 'busy', message: 'Saving to Sweed…' })
+      setIsStaging(false)
 
       pollUploadJob({
         cardKey: props.cardKey,
         jobId: payload.jobId,
         stagedRef: payload.stagedRef,
         group,
-        onPhase: (message) => setCardStatus({ kind: 'busy', message }),
+        onPhase: () => setCardStatus({ kind: 'busy', message: 'Saving to Sweed…' }),
         onSuccess: async () => {
-          const message = `✓ Group image attached to ${displayGroupName(group)} (${group.siteLabel}). Sweed confirmed the blob is on the group.`
+          const message = `✓ Photo saved to ${displayGroupName(group)} (${group.siteLabel}).`
           setCardStatus({ kind: 'ok', message })
           await onComplete(message)
         },
         onFailure: (errorMessage, failedRef) => {
           setFailedStagedRef(failedRef)
-          setCardStatus({
-            kind: 'err',
-            message: `✗ ${errorMessage} — bytes are still staged; click Retry to re-enqueue.`,
+          surfaceUnactionableUploadError({
+            context: 'catalog.maintenance.upload.retry-worker-job',
+            rawMessage: errorMessage,
+            group,
+            jobId: payload.jobId,
+            stagedRef: failedRef,
+            setCardStatus,
+            onError,
           })
-          onError(errorMessage)
         },
       })
         .catch((pollErr) => {
-          const message = pollErr instanceof Error ? pollErr.message : 'Polling failed.'
-          setCardStatus({ kind: 'err', message: `✗ ${message}` })
-          onError(message)
+          surfaceUnactionableUploadError({
+            context: 'catalog.maintenance.upload.retry-poll-unexpected',
+            rawMessage: pollErr instanceof Error ? pollErr.message : String(pollErr),
+            group,
+            jobId: payload.jobId,
+            stagedRef: payload.stagedRef,
+            setCardStatus,
+            onError,
+          })
         })
         .finally(() => setIsPolling(false))
     } catch (error) {
-      // 404 here usually means the staged bytes were GC'd. Re-prompt
-      // for a file pick.
-      const message = error instanceof Error ? error.message : 'Retry failed.'
-      setCardStatus({ kind: 'err', message: `✗ Retry failed: ${message}` })
-      onError(message)
+      surfaceUnactionableUploadError({
+        context: 'catalog.maintenance.upload.retry-stage',
+        rawMessage: error instanceof Error ? error.message : String(error),
+        group,
+        jobId: null,
+        stagedRef,
+        setCardStatus,
+        onError,
+      })
     } finally {
       if (!enqueued) {
-        onUploadEnd()
+        setIsStaging(false)
       }
     }
   }
 
   const fileLabel = file ? `${file.name} (${formatBytes(file.size)})` : 'No photo selected'
-  // `cardBusy` is the local interactivity gate for THIS card's own
-  // buttons. It includes the page-level enqueue gate (`busy`) AND the
-  // post-enqueue background poll (`isPolling`). Sibling cards only see
-  // `disabled` (the brief page-level enqueue gate), not this card's
-  // ongoing poll — that's what makes the page usable again right after
-  // enqueue.
-  const cardBusy = busy || isPolling
+  // `cardBusy` gates THIS card's own buttons only. There is no global
+  // / cross-card lock — each card runs its own staging + poll lifecycle
+  // independently so the operator can fire off multiple uploads in
+  // parallel.
+  const cardBusy = isStaging || isPolling
   const ctaLabel = cardBusy
     ? mode === 'group'
       ? 'Uploading group photo…'
@@ -764,7 +777,7 @@ function MaintenanceCard(props: CardProps) {
     : undefined
 
   return (
-    <article className={`catalog-maintenance-card${disabled ? ' is-disabled' : ''}`}>
+    <article className="catalog-maintenance-card">
       <div
         className={`catalog-maintenance-card-top${cardTopClickable ? ' catalog-maintenance-card-top--clickable' : ''}`}
         {...(cardTopClickable
@@ -870,7 +883,7 @@ function MaintenanceCard(props: CardProps) {
             type="button"
             className="ghost-button catalog-maintenance-pick"
             onClick={() => inputRef.current?.click()}
-            disabled={cardBusy || disabled}
+            disabled={cardBusy}
           >
             {file ? 'Replace photo' : 'Pick / take a photo'}
           </button>
@@ -878,7 +891,7 @@ function MaintenanceCard(props: CardProps) {
             type="button"
             className="primary-button catalog-maintenance-upload"
             onClick={() => void handleSubmit()}
-            disabled={cardBusy || disabled || !file}
+            disabled={cardBusy || !file}
           >
             {ctaLabel}
           </button>
@@ -919,7 +932,7 @@ function MaintenanceCard(props: CardProps) {
                 type="button"
                 className="primary-button"
                 onClick={() => void handleRetry()}
-                disabled={cardBusy || disabled}
+                disabled={cardBusy}
               >
                 Retry
               </button>
@@ -1016,8 +1029,15 @@ function VariantRow(props: VariantRowProps) {
       onBarcodeUpdated(payload.productId, payload.externalBarcode)
       setEditingBarcode(false)
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to save barcode.'
-      onBarcodeError(message)
+      const raw = error instanceof Error ? error.message : String(error)
+      // eslint-disable-next-line no-console
+      console.warn('[catalog.maintenance.barcode-save] unexpected', raw)
+      reportClientError({
+        context: 'catalog.maintenance.barcode-save',
+        message: raw,
+        detail: { productId: variant.productId, sweedGroupId },
+      })
+      onBarcodeError('Couldn’t save the barcode right now. Dave has been paged — try again in a moment.')
     } finally {
       setSavingBarcode(false)
     }
@@ -1027,18 +1047,27 @@ function VariantRow(props: VariantRowProps) {
     setScanningBarcode(true)
     try {
       const value = await decodeBarcodeFromImageFile(file)
-      if (value === null) {
-        onBarcodeError('No barcode detected in that photo. Hold steady and fill the frame.')
-        return
-      }
-      if (value.length === 0) {
-        onBarcodeError('Decoded barcode was empty.')
+      if (value === null || value.length === 0) {
+        // Actionable: operator can re-aim and retake the photo.
+        onBarcodeError('No barcode detected — hold steady, fill the frame, and try again.')
         return
       }
       setDraftBarcode(value)
       setEditingBarcode(true)
     } catch (error) {
-      onBarcodeError(error instanceof Error ? error.message : 'Failed to read barcode photo.')
+      // Unexpected — the decoder helpers normally swallow zxing /
+      // BarcodeDetector errors as misses, so anything that reaches
+      // here is something the operator can't act on. Page Dave; show
+      // a friendly message.
+      const raw = error instanceof Error ? error.message : String(error)
+      // eslint-disable-next-line no-console
+      console.warn('[catalog.maintenance.barcode-scan] unexpected', raw)
+      reportClientError({
+        context: 'catalog.maintenance.barcode-scan',
+        message: raw,
+        detail: { productId: variant.productId, sweedGroupId },
+      })
+      onBarcodeError('Couldn’t read the barcode right now. Dave has been paged — try again in a moment.')
     } finally {
       setScanningBarcode(false)
       if (barcodeFileInputRef.current) barcodeFileInputRef.current.value = ''
@@ -1285,33 +1314,58 @@ interface BarcodeDetectorCtor {
 /**
  * Decode a barcode value from an image file taken/picked by the user.
  *
- * Prefers the native `BarcodeDetector` API (Chrome on Android / desktop Chrome)
- * because it's fast and zero-bundle. On browsers that don't ship it — most
- * notably iOS Safari — falls back to a lazily-imported `@zxing/browser`
- * decoder so iPhone users get the same one-tap scan flow.
+ * Tries the native `BarcodeDetector` API first (fast, zero-bundle on
+ * Chrome / Android). If that misses OR throws, falls back to a
+ * lazily-imported `@zxing/browser` decoder which is slower but
+ * dramatically more tolerant of motion blur, off-axis angles, glare,
+ * and tight crops — the exact conditions an operator hits standing in
+ * a store aisle one-handing their phone at a package.
  *
- * Returns the decoded string on success, `null` if no barcode was found,
- * or throws if decoding blew up unexpectedly.
+ * This double-tap was previously either/or based on API availability,
+ * which made scanning brittle on Chrome / Android (the common case):
+ * any single BarcodeDetector miss surfaced as a hard "no barcode
+ * detected" toast even when zxing would have happily decoded the
+ * exact same image. Now both decoders get a shot before we give up.
+ *
+ * Returns the decoded string on success, or `null` if BOTH decoders
+ * came up empty. Never throws for routine misses or decoder hiccups —
+ * the caller treats `null` as "ask the operator to retake the photo".
  */
 async function decodeBarcodeFromImageFile(file: File): Promise<string | null> {
+  const native = await tryNativeBarcodeDetector(file)
+  if (native !== null && native.length > 0) return native
+  const zxing = await tryZxingDecode(file)
+  if (zxing !== null && zxing.length > 0) return zxing
+  return null
+}
+
+async function tryNativeBarcodeDetector(file: File): Promise<string | null> {
   const Detector = (window as unknown as { BarcodeDetector?: BarcodeDetectorCtor }).BarcodeDetector
-  if (Detector) {
+  if (!Detector) return null
+  let bitmap: ImageBitmap | null = null
+  try {
     const detector = new Detector({
       formats: ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128', 'code_39', 'itf', 'codabar', 'qr_code'],
     })
-    const bitmap = await createImageBitmap(file)
-    try {
-      const detections = await detector.detect(bitmap)
-      if (detections.length === 0) return null
-      const value = detections[0]?.rawValue?.trim() ?? ''
-      return value
-    } finally {
-      bitmap.close?.()
-    }
+    bitmap = await createImageBitmap(file)
+    const detections = await detector.detect(bitmap)
+    if (detections.length === 0) return null
+    return detections[0]?.rawValue?.trim() ?? null
+  } catch (error) {
+    // Some Android Chrome builds advertise BarcodeDetector but throw
+    // NotSupportedError or hit codec issues on certain JPEG profiles.
+    // Treat any failure as a miss and let zxing have a go.
+    // eslint-disable-next-line no-console
+    console.warn('[barcode-scan] native BarcodeDetector threw, falling back to zxing', error)
+    return null
+  } finally {
+    bitmap?.close?.()
   }
+}
 
-  // Fallback path: dynamic-import keeps the ~200 KB zxing bundle out of the
-  // main chunk; it's only fetched on devices that actually need it (iOS).
+async function tryZxingDecode(file: File): Promise<string | null> {
+  // Dynamic-import keeps the ~200 KB zxing bundle out of the main
+  // chunk; it's only paid for when a scan actually happens.
   const { BrowserMultiFormatReader } = await import('@zxing/browser')
   const objectUrl = URL.createObjectURL(file)
   const img = new Image()
@@ -1326,10 +1380,14 @@ async function decodeBarcodeFromImageFile(file: File): Promise<string | null> {
       const result = await reader.decodeFromImageElement(img)
       return result.getText().trim()
     } catch (error) {
-      // zxing throws NotFoundException when nothing decoded — treat as miss.
+      // NotFoundException is a clean miss.
       const name = (error as { name?: string } | null)?.name ?? ''
       if (name === 'NotFoundException' || name === 'NotFoundException2') return null
-      throw error
+      // Unexpected throw: log and treat as miss. Showing the operator
+      // a stack-y zxing message is worse than telling them to retake.
+      // eslint-disable-next-line no-console
+      console.warn('[barcode-scan] zxing decoder threw', error)
+      return null
     }
   } finally {
     URL.revokeObjectURL(objectUrl)
@@ -1506,6 +1564,89 @@ async function maybeReadErrorPayload(response: Response): Promise<string | null>
   } catch {
     return null
   }
+}
+
+/**
+ * Fire-and-forget POST to /api/client-errors. The server logs the
+ * report and (rate-limited) pages Dave. We never block the UI on this
+ * or surface the response — the whole point of paging Dave is that
+ * the operator is freed from caring about plumbing failures they
+ * can't fix.
+ */
+function reportClientError(input: {
+  context: string
+  message: string
+  detail?: Record<string, string | number | boolean | null>
+}): void {
+  try {
+    void fetch(buildAppPath('/api/client-errors'), {
+      body: JSON.stringify({
+        context: input.context,
+        message: input.message.slice(0, 4000),
+        detail: input.detail,
+      }),
+      credentials: 'same-origin',
+      headers: { 'content-type': 'application/json' },
+      keepalive: true,
+      method: 'POST',
+    }).catch(() => {
+      // Intentionally swallow — see jsdoc above. We still log to the
+      // console so a developer with devtools open can see what was
+      // intended to be reported.
+      // eslint-disable-next-line no-console
+      console.warn('[reportClientError] failed to deliver', input)
+    })
+  } catch {
+    // window.fetch isn't available (extremely unlikely in our
+    // supported browsers); silently no-op.
+  }
+}
+
+/**
+ * Friendly, action-oriented status text + Dave-paging for upload
+ * errors the operator can't actually fix from the phone (network blip,
+ * Sweed token died mid-PUT, worker job dead-lettered, etc.). The raw
+ * `rawMessage` is sent to the server (and logged to the browser
+ * console) so engineers can debug; the operator just sees "Couldn't
+ * save this photo right now — Dave has been paged. Tap Retry to try
+ * again."
+ */
+function surfaceUnactionableUploadError(input: {
+  context: string
+  rawMessage: string
+  group: CatalogMaintenanceSiteGroup
+  jobId: number | null
+  stagedRef: string | null
+  setCardStatus: (status: { kind: 'ok' | 'err' | 'busy'; message: string }) => void
+  onError: (message: string) => void
+}): void {
+  // Console log gives a developer with devtools open the full raw
+  // detail without polluting the visible UI.
+  // eslint-disable-next-line no-console
+  console.warn(`[${input.context}] ${input.rawMessage}`, {
+    groupId: input.group.groupId,
+    siteKey: input.group.siteKey,
+    jobId: input.jobId,
+    stagedRef: input.stagedRef,
+  })
+
+  reportClientError({
+    context: input.context,
+    message: input.rawMessage,
+    detail: {
+      groupId: input.group.groupId,
+      siteKey: input.group.siteKey,
+      jobId: input.jobId,
+      stagedRef: input.stagedRef,
+    },
+  })
+
+  const friendly =
+    input.stagedRef !== null
+      ? 'Couldn’t save this photo right now. Dave has been paged. Tap Retry to try again.'
+      : 'Couldn’t upload this photo right now. Dave has been paged. Try again in a moment.'
+  input.setCardStatus({ kind: 'err', message: friendly })
+  input.onError(friendly)
 }
 
 /**
