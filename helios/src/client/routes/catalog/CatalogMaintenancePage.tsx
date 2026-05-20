@@ -18,6 +18,7 @@ import {
   useRegisterCatalogSidebarSubtree,
   type ImagesAndBarcodesSiteEntry,
 } from './catalogSidebarSubtree.js'
+import { LiveBarcodeScanner } from './LiveBarcodeScanner.js'
 
 type CardMode = 'group' | 'variants' | 'barcode'
 
@@ -993,6 +994,7 @@ function VariantRow(props: VariantRowProps) {
   const [draftBarcode, setDraftBarcode] = useState<string>(variant.externalBarcode ?? '')
   const [savingBarcode, setSavingBarcode] = useState(false)
   const [scanningBarcode, setScanningBarcode] = useState(false)
+  const [liveScannerOpen, setLiveScannerOpen] = useState(false)
   const barcodeFileInputRef = useRef<HTMLInputElement | null>(null)
 
   useEffect(() => {
@@ -1128,6 +1130,7 @@ function VariantRow(props: VariantRowProps) {
           onChange={setDraftBarcode}
           onSave={() => void saveBarcode(draftBarcode)}
           onPickPhoto={() => barcodeFileInputRef.current?.click()}
+          onLiveScan={() => setLiveScannerOpen(true)}
         />
         <input
           ref={barcodeFileInputRef}
@@ -1139,6 +1142,15 @@ function VariantRow(props: VariantRowProps) {
             const file = event.target.files?.[0]
             if (file) void handleScannedFile(file)
           }}
+        />
+        <LiveBarcodeScanner
+          open={liveScannerOpen}
+          onDetected={(value) => {
+            setLiveScannerOpen(false)
+            setDraftBarcode(value)
+            setEditingBarcode(true)
+          }}
+          onCancel={() => setLiveScannerOpen(false)}
         />
       </div>
     </div>
@@ -1210,6 +1222,9 @@ interface BarcodeLineProps {
   onCancelEdit: () => void
   onChange: (next: string) => void
   onSave: () => void
+  /** Open the live-camera scanner (preferred path). */
+  onLiveScan: () => void
+  /** Fall back to picking a still photo (used when camera access is unavailable). */
   onPickPhoto: () => void
 }
 
@@ -1227,6 +1242,7 @@ function BarcodeLine(props: BarcodeLineProps) {
     onCancelEdit,
     onChange,
     onSave,
+    onLiveScan,
     onPickPhoto,
   } = props
   const showIssueSignal = cannabisCategory && status !== 'ok'
@@ -1249,12 +1265,21 @@ function BarcodeLine(props: BarcodeLineProps) {
         </button>{' '}
         <button
           type="button"
+          className="primary-button catalog-maintenance-barcode-btn"
+          onClick={onLiveScan}
+          disabled={scanning}
+          title="Open live camera and auto-grab the barcode"
+        >
+          📷 Scan barcode
+        </button>{' '}
+        <button
+          type="button"
           className="ghost-button catalog-maintenance-barcode-btn"
           onClick={onPickPhoto}
           disabled={scanning}
-          title="Capture a photo of the barcode"
+          title="Fallback: pick a still photo"
         >
-          {scanning ? 'Scanning…' : '📷 Scan barcode'}
+          {scanning ? 'Scanning…' : 'From photo'}
         </button>
       </span>
     )
@@ -1291,10 +1316,20 @@ function BarcodeLine(props: BarcodeLineProps) {
       <button
         type="button"
         className="ghost-button catalog-maintenance-barcode-btn"
+        onClick={onLiveScan}
+        disabled={saving || scanning}
+        title="Open live camera and auto-grab the barcode"
+      >
+        📷 Scan
+      </button>
+      <button
+        type="button"
+        className="ghost-button catalog-maintenance-barcode-btn"
         onClick={onPickPhoto}
         disabled={saving || scanning}
+        title="Fallback: pick a still photo"
       >
-        {scanning ? 'Scanning…' : '📷 Scan'}
+        {scanning ? 'Scanning…' : 'From photo'}
       </button>
     </span>
   )
