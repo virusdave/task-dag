@@ -2,38 +2,43 @@
  * Fullscreen live-camera barcode scanner.
  *
  * Why this exists:
- *   The original Images & Barcodes flow used a plain `<input type="file"
- *   capture="environment">` that opened the OS camera, made the
- *   operator snap a still, then ran a one-shot decode on the captured
- *   JPEG. That meant blind aiming, no feedback when the frame was
- *   bad, and a tap-tap-tap loop for every miss. This component runs
- *   the decoder against the live video stream so the operator gets
- *   an immediate red→green box the moment a barcode is in frame and
- *   we auto-grab the value without an extra "use this photo?" tap.
+ *   The Images & Barcodes flow used to need a tap-snap-confirm loop
+ *   for every barcode read. This component scans the live video stream
+ *   so the operator gets immediate feedback and auto-grab without
+ *   manual capture.
  *
- *   Implementation notes:
- *     * Uses @zxing/browser's `decodeFromConstraints` which wraps the
- *       MediaStream lifecycle for us — we just consume the
- *       (result | error) callback. No manual frame loop; the library
- *       drives it at as many FPS as the device can sustain (CPU
- *       bound; typically 5-15 FPS on phones, which the user said is
- *       fine).
- *     * Bounding box: zxing returns `Result.getResultPoints()`. For
- *       1D barcodes there are typically 2 points (start + end of the
- *       middle horizontal scan line); for 2D it's 3-4 corner points.
- *       We translate from video-pixel coords to overlay-canvas
- *       coords and draw a polyline.
- *     * Confirmation beep: short WebAudio oscillator, 880 Hz, 120 ms.
- *       Falls back to silent if AudioContext is unavailable.
- *     * Rear camera preferred via `facingMode: { ideal: 'environment' }`.
- *     * Cleanup: always call `controls.stop()` on unmount or close
- *       so the camera light doesn't stay on.
+ * Defensive choices made because the prior implementation rendered as
+ * a 4-screens-tall pane that never showed video and required a hard
+ * refresh to recover:
+ *   * The overlay is rendered via React Portal to `document.body`
+ *     instead of inline in the catalog tree, so an ancestor with
+ *     `transform` / `filter` / `will-change` (any of which break
+ *     `position: fixed`) cannot affect us.
+ *   * Width/height are pinned in pixels via `window.innerWidth/Height`
+ *     plus `100vw`/`100dvh` fallbacks, so a flex parent can't blow
+ *     the box up to multiple screen heights even if the portal step
+ *     ever fails.
+ *   * We own the MediaStream ourselves via `getUserMedia`, attach it
+ *     to the <video> element, call `video.play()` (which Safari
+ *     requires for `playsInline+muted` to actually display frames),
+ *     and only then ask `@zxing/browser` to decode against the
+ *     already-running <video>. This avoids the
+ *     `decodeFromConstraints` race where the camera setup can hang
+ *     silently when the host page has a complex flex layout.
+ *   * Teardown stops every MediaStreamTrack and clears `srcObject`
+ *     so the camera light goes off even on close/unmount/route-change.
  *
- * The component renders inline-styled markup (no new CSS class
- * dependencies) so it can ship without touching the global stylesheet.
+ * If the page ever again "appears to hang and requires a hard
+ * refresh" after closing the scanner, the most likely culprits are:
+ *   - a stuck `requestAnimationFrame` loop (cancelled in teardown)
+ *   - a not-stopped MediaStreamTrack (stopped in teardown)
+ *   - a not-released AudioContext (closed in `playConfirmBeep`)
+ * Search for any new code holding refs to those objects past
+ * teardown before adding new state.
  */
 
 import { useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 
 interface Props {
   open: boolean
@@ -51,11 +56,11 @@ export function LiveBarcodeScanner({ open, onDetected, onCancel }: Props) {
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const overlayRef = useRef<HTMLCanvasElement | null>(null)
   // Latched once we detect a real value so the rAF overlay loop can
-  // keep painting the green box for ~400 ms before we tear down. Held
+  // keep painting the green box for ~350 ms before we tear down. Held
   // in a ref (not state) because the rAF loop closes over it.
   const lockedRef = useRef<boolean>(false)
-  // Most recent detection. Painted by the rAF loop. Cleared after the
-  // detection is committed.
+  // Most recent detection. Painted by the rAF loop. Cleared after
+  // commit.
   const detectionRef = useRef<DetectionOverlay | null>(null)
   const [status, setStatus] = useState<string>('Requesting camera…')
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
@@ -63,6 +68,7 @@ export function LiveBarcodeScanner({ open, onDetected, onCancel }: Props) {
   useEffect(() => {
     if (!open) return
     let cancelled = false
+    let stream: MediaStream | null = null
     let controlsStop: (() => void) | null = null
     let rafHandle: number | null = null
 
@@ -79,6 +85,29 @@ export function LiveBarcodeScanner({ open, onDetected, onCancel }: Props) {
         cancelAnimationFrame(rafHandle)
         rafHandle = null
       }
+      if (stream) {
+        for (const track of stream.getTracks()) {
+          try {
+            track.stop()
+          } catch {
+            /* noop */
+          }
+        }
+        stream = null
+      }
+      const v = videoRef.current
+      if (v) {
+        try {
+          v.pause()
+        } catch {
+          /* noop */
+        }
+        try {
+          v.srcObject = null
+        } catch {
+          /* noop */
+        }
+      }
     }
 
     const runRafLoop = () => {
@@ -87,9 +116,6 @@ export function LiveBarcodeScanner({ open, onDetected, onCancel }: Props) {
         const overlay = overlayRef.current
         const video = videoRef.current
         if (overlay && video) {
-          // Resize the overlay backing store to match the on-screen
-          // CSS size × devicePixelRatio so lines stay crisp on hi-dpi
-          // displays.
           const dpr = window.devicePixelRatio || 1
           const cssWidth = overlay.clientWidth
           const cssHeight = overlay.clientHeight
@@ -105,13 +131,13 @@ export function LiveBarcodeScanner({ open, onDetected, onCancel }: Props) {
             if (detection && detection.points.length > 0) {
               ctx.lineWidth = 4
               ctx.strokeStyle = lockedRef.current ? '#1ad81a' : '#ffcc00'
-              ctx.fillStyle = lockedRef.current ? 'rgba(26, 216, 26, 0.18)' : 'rgba(255, 204, 0, 0.18)'
+              ctx.fillStyle = lockedRef.current
+                ? 'rgba(26, 216, 26, 0.18)'
+                : 'rgba(255, 204, 0, 0.18)'
               const pts = detection.points
               const xs = pts.map((p) => p.x)
               const ys = pts.map((p) => p.y)
               if (pts.length >= 3) {
-                // 2D barcode (QR / DataMatrix): connect the dots into
-                // a polygon.
                 ctx.beginPath()
                 ctx.moveTo(pts[0].x, pts[0].y)
                 for (let i = 1; i < pts.length; i += 1) ctx.lineTo(pts[i].x, pts[i].y)
@@ -119,10 +145,6 @@ export function LiveBarcodeScanner({ open, onDetected, onCancel }: Props) {
                 ctx.fill()
                 ctx.stroke()
               } else {
-                // 1D barcode: zxing gives us the endpoints of the
-                // middle scan line. Build a fat rectangle around it
-                // so the operator actually sees a "box" highlighting
-                // the code.
                 const minX = Math.min(...xs)
                 const maxX = Math.max(...xs)
                 const minY = Math.min(...ys)
@@ -146,50 +168,77 @@ export function LiveBarcodeScanner({ open, onDetected, onCancel }: Props) {
 
     const start = async () => {
       try {
-        const { BrowserMultiFormatReader } = await import('@zxing/browser')
-        if (cancelled) return
-        const reader = new BrowserMultiFormatReader()
-        const constraints: MediaStreamConstraints = {
-          audio: false,
-          video: {
-            facingMode: { ideal: 'environment' },
-            width: { ideal: 1280 },
-            height: { ideal: 720 },
-          },
+        if (!navigator.mediaDevices?.getUserMedia) {
+          throw new Error('getUserMedia is not available in this browser')
         }
         const video = videoRef.current
         if (!video) {
           throw new Error('video element not mounted')
         }
+        // 1) Acquire the camera ourselves. Two-step fallback: prefer
+        // the rear camera but accept any camera if the device has no
+        // back-facing one.
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({
+            audio: false,
+            video: {
+              facingMode: { ideal: 'environment' },
+              width: { ideal: 1280 },
+              height: { ideal: 720 },
+            },
+          })
+        } catch (primaryErr) {
+          if (cancelled) return
+          stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: true })
+          // eslint-disable-next-line no-console
+          console.warn('[live-barcode-scanner] rear camera unavailable, using default', primaryErr)
+        }
+        if (cancelled) {
+          tearDown()
+          return
+        }
+        // 2) Attach the stream to the <video> and start playback.
+        // Safari/iOS will NOT render frames unless we call .play()
+        // explicitly after setting srcObject — even with autoplay,
+        // muted, and playsInline already on the element.
+        video.srcObject = stream
+        video.muted = true
+        ;(video as HTMLVideoElement & { playsInline: boolean }).playsInline = true
+        try {
+          await video.play()
+        } catch (playErr) {
+          // Autoplay-policy weirdness; user can tap once to recover.
+          // eslint-disable-next-line no-console
+          console.warn('[live-barcode-scanner] video.play() rejected', playErr)
+        }
         setStatus('Point the camera at a barcode…')
         runRafLoop()
-        const controls = await reader.decodeFromConstraints(constraints, video, (result, _err) => {
+        // 3) Decode against the already-running video. No need to ask
+        // the library to manage the stream lifecycle for us — we own
+        // it.
+        const { BrowserMultiFormatReader } = await import('@zxing/browser')
+        if (cancelled) {
+          tearDown()
+          return
+        }
+        const reader = new BrowserMultiFormatReader()
+        const controls = await reader.decodeFromVideoElement(video, (result, _err) => {
           if (cancelled || lockedRef.current) return
-          const video = videoRef.current
-          const overlay = overlayRef.current
-          if (!video || !overlay) return
+          const videoNow = videoRef.current
+          const overlayNow = overlayRef.current
+          if (!videoNow || !overlayNow) return
           if (!result) {
-            // Routine miss. Fade the overlay box out gradually by
-            // clearing the detection ref every ~150 ms so we don't
-            // leave a stale yellow rectangle behind.
-            // (Simple impl: drop the ref immediately. The rAF loop
-            // clears the canvas every frame anyway.)
             detectionRef.current = null
             return
           }
           const value = result.getText().trim()
           if (value.length === 0) return
-          const overlayWidth = overlay.clientWidth
-          const overlayHeight = overlay.clientHeight
-          // The video is rendered with `object-fit: cover`, so source
-          // pixels and overlay pixels share a scale factor centred
-          // around the visible region. Compute it here so the box
-          // lines up with what the user sees, not with the off-screen
-          // letterboxed area.
+          const overlayWidth = overlayNow.clientWidth
+          const overlayHeight = overlayNow.clientHeight
           const points = mapResultPointsToOverlay(
             result.getResultPoints(),
-            video.videoWidth,
-            video.videoHeight,
+            videoNow.videoWidth,
+            videoNow.videoHeight,
             overlayWidth,
             overlayHeight,
           )
@@ -197,8 +246,6 @@ export function LiveBarcodeScanner({ open, onDetected, onCancel }: Props) {
           lockedRef.current = true
           setStatus(`✓ ${value}`)
           playConfirmBeep()
-          // Leave the green box on-screen briefly so the operator
-          // sees what we grabbed before the modal closes.
           window.setTimeout(() => {
             if (!cancelled) onDetected(value)
           }, 350)
@@ -211,6 +258,7 @@ export function LiveBarcodeScanner({ open, onDetected, onCancel }: Props) {
         console.warn('[live-barcode-scanner] camera/decoder failed', error)
         setErrorMessage(humanizeCameraError(message))
         setStatus('')
+        tearDown()
       }
     }
 
@@ -226,20 +274,34 @@ export function LiveBarcodeScanner({ open, onDetected, onCancel }: Props) {
   }, [open, onDetected])
 
   if (!open) return null
+  if (typeof document === 'undefined') return null
 
-  return (
+  // Pin the dialog to the viewport via pixel dimensions in addition
+  // to `inset: 0` + `100dvh` — belt-and-suspenders against the prior
+  // "4 screens tall" regression where an ancestor layout context
+  // was capable of disturbing position:fixed.
+  const vw = typeof window !== 'undefined' ? `${window.innerWidth}px` : '100vw'
+  const vh = typeof window !== 'undefined' ? `${window.innerHeight}px` : '100dvh'
+
+  const overlay = (
     <div
       role="dialog"
       aria-modal="true"
       aria-label="Live barcode scanner"
       style={{
         position: 'fixed',
-        inset: 0,
-        zIndex: 1000,
-        background: 'rgba(0, 0, 0, 0.92)',
+        top: 0,
+        left: 0,
+        width: vw,
+        height: vh,
+        maxWidth: '100vw',
+        maxHeight: '100dvh',
+        zIndex: 2147483000,
+        background: 'rgba(0, 0, 0, 0.95)',
         display: 'flex',
         flexDirection: 'column',
         color: '#fff',
+        overflow: 'hidden',
       }}
     >
       <div
@@ -249,6 +311,7 @@ export function LiveBarcodeScanner({ open, onDetected, onCancel }: Props) {
           justifyContent: 'space-between',
           padding: '0.75rem 1rem',
           gap: '0.5rem',
+          flex: '0 0 auto',
         }}
       >
         <strong style={{ fontSize: '1rem' }}>Scan barcode</strong>
@@ -264,28 +327,33 @@ export function LiveBarcodeScanner({ open, onDetected, onCancel }: Props) {
       <div
         style={{
           position: 'relative',
-          flex: 1,
+          flex: '1 1 auto',
+          minHeight: 0,
           overflow: 'hidden',
           background: '#000',
         }}
       >
         <video
           ref={videoRef}
+          autoPlay
           playsInline
           muted
           style={{
             position: 'absolute',
-            inset: 0,
+            top: 0,
+            left: 0,
             width: '100%',
             height: '100%',
             objectFit: 'cover',
+            background: '#000',
           }}
         />
         <canvas
           ref={overlayRef}
           style={{
             position: 'absolute',
-            inset: 0,
+            top: 0,
+            left: 0,
             width: '100%',
             height: '100%',
             pointerEvents: 'none',
@@ -298,6 +366,7 @@ export function LiveBarcodeScanner({ open, onDetected, onCancel }: Props) {
           textAlign: 'center',
           background: 'rgba(0,0,0,0.6)',
           minHeight: '2.5rem',
+          flex: '0 0 auto',
         }}
       >
         {errorMessage ? (
@@ -308,6 +377,8 @@ export function LiveBarcodeScanner({ open, onDetected, onCancel }: Props) {
       </div>
     </div>
   )
+
+  return createPortal(overlay, document.body)
 }
 
 /**
@@ -326,8 +397,6 @@ function mapResultPointsToOverlay(
   if (srcWidth === 0 || srcHeight === 0 || dstWidth === 0 || dstHeight === 0) {
     return []
   }
-  // object-fit: cover scales the source uniformly to fully cover the
-  // dst, then centre-crops the overflow.
   const scale = Math.max(dstWidth / srcWidth, dstHeight / srcHeight)
   const scaledW = srcWidth * scale
   const scaledH = srcHeight * scale
