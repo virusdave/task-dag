@@ -1,5 +1,23 @@
 # Agent instructions for the `automation` repo
 
+## Deploying changes (helios on vps-nixos-3)
+
+After `git push origin HEAD:master`, redeploy helios with:
+
+```sh
+ssh vps-nixos-3 'sudo -n /nix/store/9rpism89x6lyjcwzzkp6kana25rs03nn-systemd-260.1/bin/systemctl restart helios-prep.service helios-server.service helios-worker.service'
+```
+
+`helios-prep` fetches/builds master into `/var/lib/helios/automation/`,
+so this command picks up anything you pushed to master — including
+files outside `helios/` (e.g. `ads/google/scripts/*.ts`) that helios
+imports or shells out to at runtime.
+
+The `/nix/store/.../systemctl` path is what sudo NOPASSWD whitelists
+for the `amp-local` user; bare `systemctl` requires a password.
+Re-resolve the current path on the host with `sudo -nl` whenever a
+new system closure may have changed it.
+
 ## MANDATORY: develop in an ephemeral checkout, not the shared `~/src` tree
 
 The canonical `~/src/<repo>` checkout (including `~/src/automation` and
