@@ -1104,6 +1104,31 @@ export async function enqueueCacheRepairJobs(requestedByUserId: number | null): 
 /*  the route returns HTTP 410 for `targetType: 'variants'`.                   */
 /* -------------------------------------------------------------------------- */
 
+/**
+ * Resolve the helios `catalog_groups.id` for a given Sweed group id.
+ *
+ * The upload-group-image worker payload schema requires `catalogGroupId`
+ * (used to address the row for reanalysis flagging). Callers in this
+ * module pass `sweedGroupId` (the external Sweed id) because that's what
+ * the route + staged metadata carry, so we look up the internal id here.
+ */
+async function resolveCatalogGroupIdForSweedGroup(sweedGroupId: number): Promise<number> {
+  const db: Queryable = getPool()
+  const lookup = await db.query<{ id: number }>(
+    `select id from catalog_groups where sweed_group_id = $1 and deleted_at is null limit 1`,
+    [sweedGroupId],
+  )
+  const catalogGroupId = lookup.rows[0]?.id ?? null
+  if (catalogGroupId === null) {
+    throw new HttpError(
+      404,
+      `No catalog_groups row found for sweed_group_id=${sweedGroupId}; ` +
+        `cannot enqueue image upload until the group has been synced into helios.`,
+    )
+  }
+  return catalogGroupId
+}
+
 export interface EnqueueGroupImageUploadInput {
   fileBytes: Uint8Array
   contentType: string
@@ -1130,6 +1155,8 @@ export async function enqueueGroupImageUploadJob(
     throw new HttpError(415, `Unsupported content type ${input.contentType}.`)
   }
 
+  const catalogGroupId = await resolveCatalogGroupIdForSweedGroup(input.sweedGroupId)
+
   const store = getPendingImageUploadStore()
   const { stagedRef } = await store.put({
     bytes: input.fileBytes,
@@ -1150,6 +1177,7 @@ export async function enqueueGroupImageUploadJob(
     module: 'catalog',
     payload: {
       stagedRef,
+      catalogGroupId,
       sweedGroupId: input.sweedGroupId,
       requestedByUserId: input.requestedByUserId,
     },
@@ -1190,6 +1218,8 @@ export async function retryGroupImageUploadJob(
     )
   }
 
+  const catalogGroupId = await resolveCatalogGroupIdForSweedGroup(staged.meta.sweedGroupId)
+
   const jobId = await enqueueJob(getPool(), {
     concurrencyKey: getOptionalSweedSessionConcurrencyKey(true),
     dedupeKey: `catalog.maintenance.upload_group_image:${input.stagedRef}`,
@@ -1197,6 +1227,7 @@ export async function retryGroupImageUploadJob(
     module: 'catalog',
     payload: {
       stagedRef: input.stagedRef,
+      catalogGroupId,
       sweedGroupId: staged.meta.sweedGroupId,
       requestedByUserId: input.requestedByUserId,
     },
