@@ -139,10 +139,25 @@ export async function withSweedSession<T>(fn: () => Promise<T>): Promise<T> {
   // the server side" — same operational semantics whether the token
   // came from the DB pool or from SWEED_AUTH_TOKEN. The distinguishing
   // tokenSource is captured per-RPC in the auth-events row.
+  // Do NOT pre-populate currentDealerId from claim.initialDealerId.
+  // initialDealerId is only the dealer Sweed was on at OPERATOR PASTE
+  // time; any subsequent job that held this same row could have called
+  // store.auth.dealer.set on Sweed's side and changed it. Pool rows
+  // outlive paste events. If we trusted initialDealerId, the first
+  // ensureDealerContext(X) where X equals initialDealerId would silently
+  // SKIP the dealer.set call — and we'd read the WRONG dealer's data
+  // back from Sweed, with no error. (Observed: a freshly-claimed token
+  // whose initialDealerId was 210705 returned 1 row of inventory under
+  // Midtown context — actually Bronx/state-holder data from the prior
+  // job. See bulk-flower-cost-table recall bug, 2026-05-20.)
+  // By leaving currentDealerId null we force the first
+  // ensureDealerContext call inside the session to actually round-trip
+  // store.auth.dealer.set + verification; subsequent calls within the
+  // same session keep the per-RPC-skip optimization.
   const context: SweedSessionContext = {
     authToken: claim.token,
     origin: 'legacy',
-    currentDealerId: claim.initialDealerId,
+    currentDealerId: null,
     claim,
   }
 
