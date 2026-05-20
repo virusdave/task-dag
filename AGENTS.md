@@ -238,6 +238,42 @@ working public URL the user can open immediately.
   permissions are wrong, the artifact requires extra infra), **LOUDLY**
   say so and explain what's blocking, per the commit/push rule above.
 
+## Sweed auth — claim a token from the pool, never paste a static secret
+
+There is **no** `~/.secret/sweed/auth-token` on agent hosts anymore.
+Sweed's `store.auth.user` is gated by reCAPTCHA v3 so no script can
+mint its own session — instead an operator pastes captured browser
+sessions into the helios `sweed_session_tokens` table (the **pool**)
+at <https://helios.freshlybaked.us/config/sweed/sessions>, and every
+worker / one-off script claims one row out of the pool for the
+lifetime of one task and releases it back when done.
+
+If your task touches live Sweed RPCs:
+
+1. Put your script under `helios/scripts/` so it can import
+   [`withSweedSession`](./helios/src/worker/sweed/session.ts) from
+   the helios worker — the helper does claim + release + dealer
+   pinning + auth-event audit for you.
+2. Set `DATABASE_URL` to the helios Tiger Cloud URL (sourced from
+   `/home/amp-local/.secret/tigerdata/tiger-cloud-db-94793-credentials.txt`
+   on the prod helios host) so the helper can reach the pool table.
+3. **Do not** invent a `SWEED_AUTH_TOKEN` env var from a captured
+   cookie. It will be stale within days, and worse, future readers
+   will copy the anti-pattern. If you genuinely cannot use the
+   helper, drive the same SQL as
+   [`claimAvailableSweedSessionToken`](./helios/src/server/db/queries/sweedSessionTokensQueries.ts)
+   from your script and release in a `try/finally`.
+
+Full instructions, including the canonical one-off-script harness
+([`helios/scripts/verify-sweed-session.ts`](./helios/scripts/verify-sweed-session.ts))
+and an example of running on the prod helios host, live in
+[`docs/sweed/getting-a-token-for-one-offs.md`](./docs/sweed/getting-a-token-for-one-offs.md).
+
+If the pool is exhausted (every unexpired row leased to another
+worker) `withSweedSession` throws `DependencyUnavailableWorkerError`
+rather than handing you a stale fallback — back off and retry, or
+page the operator to paste another live session.
+
 ## Paging the human — ALWAYS via `page-dave`, NEVER via `gh`
 
 When you need to "page", "notify", or "alert" Dave (the human operator) — e.g.
