@@ -7,9 +7,10 @@
  *   so the operator gets immediate feedback and auto-grab without
  *   manual capture.
  *
- * Defensive choices made because the prior implementation rendered as
- * a 4-screens-tall pane that never showed video and required a hard
- * refresh to recover:
+ * Defensive choices made because earlier implementations rendered as
+ * a 4-screens-tall pane that never showed video, or showed nothing at
+ * all on iOS:
+ *
  *   * The overlay is rendered via React Portal to `document.body`
  *     instead of inline in the catalog tree, so an ancestor with
  *     `transform` / `filter` / `will-change` (any of which break
@@ -18,6 +19,22 @@
  *     plus `100vw`/`100dvh` fallbacks, so a flex parent can't blow
  *     the box up to multiple screen heights even if the portal step
  *     ever fails.
+ *   * The scanner does **not** auto-start in `useEffect`. The previous
+ *     version did, which had two problems:
+ *       1. Inline `onDetected` callbacks from the parent meant the
+ *          effect re-fired every parent render, tearing down and
+ *          re-acquiring the camera mid-stream.
+ *       2. On iOS Safari, `video.play()` after `await getUserMedia(...)`
+ *          falls outside the user-gesture chain and silently rejects,
+ *          leaving a black preview with no recovery path.
+ *     Instead we render a "Tap to start camera" button inside the
+ *     portal. The first tap is a guaranteed user-gesture context, so
+ *     iOS will let `video.play()` run.
+ *   * `onDetected` / `onCancel` are stashed in refs so parent
+ *     re-renders never restart scanner lifecycle.
+ *   * A visible stage chip (`Requesting camera… / Starting decoder…
+ *     / Active`) sits on top of the video so when something fails we
+ *     can see which step failed instead of staring at a black box.
  *   * We own the MediaStream ourselves via `getUserMedia`, attach it
  *     to the <video> element, call `video.play()` (which Safari
  *     requires for `playsInline+muted` to actually display frames),
@@ -27,17 +44,9 @@
  *     silently when the host page has a complex flex layout.
  *   * Teardown stops every MediaStreamTrack and clears `srcObject`
  *     so the camera light goes off even on close/unmount/route-change.
- *
- * If the page ever again "appears to hang and requires a hard
- * refresh" after closing the scanner, the most likely culprits are:
- *   - a stuck `requestAnimationFrame` loop (cancelled in teardown)
- *   - a not-stopped MediaStreamTrack (stopped in teardown)
- *   - a not-released AudioContext (closed in `playConfirmBeep`)
- * Search for any new code holding refs to those objects past
- * teardown before adding new state.
  */
 
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 
 interface Props {
@@ -52,226 +61,252 @@ interface DetectionOverlay {
   value: string
 }
 
+type ScannerStage = 'idle' | 'requesting' | 'starting' | 'active' | 'error'
+
 export function LiveBarcodeScanner({ open, onDetected, onCancel }: Props) {
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const overlayRef = useRef<HTMLCanvasElement | null>(null)
+
   // Latched once we detect a real value so the rAF overlay loop can
-  // keep painting the green box for ~350 ms before we tear down. Held
-  // in a ref (not state) because the rAF loop closes over it.
+  // keep painting the green box for ~350 ms before we tear down.
   const lockedRef = useRef<boolean>(false)
   // Most recent detection. Painted by the rAF loop. Cleared after
   // commit.
   const detectionRef = useRef<DetectionOverlay | null>(null)
-  const [status, setStatus] = useState<string>('Requesting camera…')
+
+  // Camera/decoder lifecycle owned by refs, NOT by `useEffect`
+  // closures, so parent re-renders cannot tear it down.
+  const streamRef = useRef<MediaStream | null>(null)
+  const controlsStopRef = useRef<(() => void) | null>(null)
+  const rafHandleRef = useRef<number | null>(null)
+  const startBusyRef = useRef<boolean>(false)
+
+  // Keep the latest callbacks reachable from async paths without
+  // forcing the effect/start handler to re-run on prop churn.
+  const onDetectedRef = useRef(onDetected)
+  const onCancelRef = useRef(onCancel)
+  useEffect(() => {
+    onDetectedRef.current = onDetected
+  }, [onDetected])
+  useEffect(() => {
+    onCancelRef.current = onCancel
+  }, [onCancel])
+
+  const [stage, setStage] = useState<ScannerStage>('idle')
+  const [status, setStatus] = useState<string>('Tap to start camera')
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
 
-  useEffect(() => {
-    if (!open) return
-    let cancelled = false
-    let stream: MediaStream | null = null
-    let controlsStop: (() => void) | null = null
-    let rafHandle: number | null = null
-
-    const tearDown = () => {
-      if (controlsStop) {
+  const tearDown = useCallback(() => {
+    if (controlsStopRef.current) {
+      try {
+        controlsStopRef.current()
+      } catch {
+        /* noop */
+      }
+      controlsStopRef.current = null
+    }
+    if (rafHandleRef.current !== null) {
+      cancelAnimationFrame(rafHandleRef.current)
+      rafHandleRef.current = null
+    }
+    if (streamRef.current) {
+      for (const track of streamRef.current.getTracks()) {
         try {
-          controlsStop()
+          track.stop()
         } catch {
           /* noop */
         }
-        controlsStop = null
       }
-      if (rafHandle !== null) {
-        cancelAnimationFrame(rafHandle)
-        rafHandle = null
+      streamRef.current = null
+    }
+    const v = videoRef.current
+    if (v) {
+      try {
+        v.pause()
+      } catch {
+        /* noop */
       }
-      if (stream) {
-        for (const track of stream.getTracks()) {
-          try {
-            track.stop()
-          } catch {
-            /* noop */
-          }
-        }
-        stream = null
-      }
-      const v = videoRef.current
-      if (v) {
-        try {
-          v.pause()
-        } catch {
-          /* noop */
-        }
-        try {
-          v.srcObject = null
-        } catch {
-          /* noop */
-        }
+      try {
+        v.srcObject = null
+      } catch {
+        /* noop */
       }
     }
+  }, [])
 
-    const runRafLoop = () => {
-      const paint = () => {
-        if (cancelled) return
-        const overlay = overlayRef.current
-        const video = videoRef.current
-        if (overlay && video) {
-          const dpr = window.devicePixelRatio || 1
-          const cssWidth = overlay.clientWidth
-          const cssHeight = overlay.clientHeight
-          const desiredW = Math.max(1, Math.floor(cssWidth * dpr))
-          const desiredH = Math.max(1, Math.floor(cssHeight * dpr))
-          if (overlay.width !== desiredW) overlay.width = desiredW
-          if (overlay.height !== desiredH) overlay.height = desiredH
-          const ctx = overlay.getContext('2d')
-          if (ctx) {
-            ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
-            ctx.clearRect(0, 0, cssWidth, cssHeight)
-            const detection = detectionRef.current
-            if (detection && detection.points.length > 0) {
-              ctx.lineWidth = 4
-              ctx.strokeStyle = lockedRef.current ? '#1ad81a' : '#ffcc00'
-              ctx.fillStyle = lockedRef.current
-                ? 'rgba(26, 216, 26, 0.18)'
-                : 'rgba(255, 204, 0, 0.18)'
-              const pts = detection.points
-              const xs = pts.map((p) => p.x)
-              const ys = pts.map((p) => p.y)
-              if (pts.length >= 3) {
-                ctx.beginPath()
-                ctx.moveTo(pts[0].x, pts[0].y)
-                for (let i = 1; i < pts.length; i += 1) ctx.lineTo(pts[i].x, pts[i].y)
-                ctx.closePath()
-                ctx.fill()
-                ctx.stroke()
-              } else {
-                const minX = Math.min(...xs)
-                const maxX = Math.max(...xs)
-                const minY = Math.min(...ys)
-                const maxY = Math.max(...ys)
-                const padX = 8
-                const padY = 36
-                const rectX = Math.max(0, minX - padX)
-                const rectY = Math.max(0, minY - padY)
-                const rectW = Math.min(cssWidth - rectX, maxX - minX + padX * 2)
-                const rectH = Math.min(cssHeight - rectY, maxY - minY + padY * 2)
-                ctx.fillRect(rectX, rectY, rectW, rectH)
-                ctx.strokeRect(rectX, rectY, rectW, rectH)
-              }
+  // Reset/teardown only — never auto-starts the camera.
+  useEffect(() => {
+    if (!open) return
+    lockedRef.current = false
+    detectionRef.current = null
+    setStage('idle')
+    setStatus('Tap to start camera')
+    setErrorMessage(null)
+    return () => {
+      tearDown()
+    }
+  }, [open, tearDown])
+
+  const runRafLoop = useCallback(() => {
+    const paint = () => {
+      const overlay = overlayRef.current
+      const video = videoRef.current
+      if (overlay && video) {
+        const dpr = window.devicePixelRatio || 1
+        const cssWidth = overlay.clientWidth
+        const cssHeight = overlay.clientHeight
+        const desiredW = Math.max(1, Math.floor(cssWidth * dpr))
+        const desiredH = Math.max(1, Math.floor(cssHeight * dpr))
+        if (overlay.width !== desiredW) overlay.width = desiredW
+        if (overlay.height !== desiredH) overlay.height = desiredH
+        const ctx = overlay.getContext('2d')
+        if (ctx) {
+          ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+          ctx.clearRect(0, 0, cssWidth, cssHeight)
+          const detection = detectionRef.current
+          if (detection && detection.points.length > 0) {
+            ctx.lineWidth = 4
+            ctx.strokeStyle = lockedRef.current ? '#1ad81a' : '#ffcc00'
+            ctx.fillStyle = lockedRef.current
+              ? 'rgba(26, 216, 26, 0.18)'
+              : 'rgba(255, 204, 0, 0.18)'
+            const pts = detection.points
+            const xs = pts.map((p) => p.x)
+            const ys = pts.map((p) => p.y)
+            if (pts.length >= 3) {
+              ctx.beginPath()
+              ctx.moveTo(pts[0].x, pts[0].y)
+              for (let i = 1; i < pts.length; i += 1) ctx.lineTo(pts[i].x, pts[i].y)
+              ctx.closePath()
+              ctx.fill()
+              ctx.stroke()
+            } else {
+              const minX = Math.min(...xs)
+              const maxX = Math.max(...xs)
+              const minY = Math.min(...ys)
+              const maxY = Math.max(...ys)
+              const padX = 8
+              const padY = 36
+              const rectX = Math.max(0, minX - padX)
+              const rectY = Math.max(0, minY - padY)
+              const rectW = Math.min(cssWidth - rectX, maxX - minX + padX * 2)
+              const rectH = Math.min(cssHeight - rectY, maxY - minY + padY * 2)
+              ctx.fillRect(rectX, rectY, rectW, rectH)
+              ctx.strokeRect(rectX, rectY, rectW, rectH)
             }
           }
         }
-        rafHandle = window.requestAnimationFrame(paint)
       }
-      rafHandle = window.requestAnimationFrame(paint)
+      rafHandleRef.current = window.requestAnimationFrame(paint)
     }
+    if (rafHandleRef.current !== null) cancelAnimationFrame(rafHandleRef.current)
+    rafHandleRef.current = window.requestAnimationFrame(paint)
+  }, [])
 
-    const start = async () => {
-      try {
-        if (!navigator.mediaDevices?.getUserMedia) {
-          throw new Error('getUserMedia is not available in this browser')
-        }
-        const video = videoRef.current
-        if (!video) {
-          throw new Error('video element not mounted')
-        }
-        // 1) Acquire the camera ourselves. Two-step fallback: prefer
-        // the rear camera but accept any camera if the device has no
-        // back-facing one.
-        try {
-          stream = await navigator.mediaDevices.getUserMedia({
-            audio: false,
-            video: {
-              facingMode: { ideal: 'environment' },
-              width: { ideal: 1280 },
-              height: { ideal: 720 },
-            },
-          })
-        } catch (primaryErr) {
-          if (cancelled) return
-          stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: true })
-          // eslint-disable-next-line no-console
-          console.warn('[live-barcode-scanner] rear camera unavailable, using default', primaryErr)
-        }
-        if (cancelled) {
-          tearDown()
-          return
-        }
-        // 2) Attach the stream to the <video> and start playback.
-        // Safari/iOS will NOT render frames unless we call .play()
-        // explicitly after setting srcObject — even with autoplay,
-        // muted, and playsInline already on the element.
-        video.srcObject = stream
-        video.muted = true
-        ;(video as HTMLVideoElement & { playsInline: boolean }).playsInline = true
-        try {
-          await video.play()
-        } catch (playErr) {
-          // Autoplay-policy weirdness; user can tap once to recover.
-          // eslint-disable-next-line no-console
-          console.warn('[live-barcode-scanner] video.play() rejected', playErr)
-        }
-        setStatus('Point the camera at a barcode…')
-        runRafLoop()
-        // 3) Decode against the already-running video. No need to ask
-        // the library to manage the stream lifecycle for us — we own
-        // it.
-        const { BrowserMultiFormatReader } = await import('@zxing/browser')
-        if (cancelled) {
-          tearDown()
-          return
-        }
-        const reader = new BrowserMultiFormatReader()
-        const controls = await reader.decodeFromVideoElement(video, (result, _err) => {
-          if (cancelled || lockedRef.current) return
-          const videoNow = videoRef.current
-          const overlayNow = overlayRef.current
-          if (!videoNow || !overlayNow) return
-          if (!result) {
-            detectionRef.current = null
-            return
-          }
-          const value = result.getText().trim()
-          if (value.length === 0) return
-          const overlayWidth = overlayNow.clientWidth
-          const overlayHeight = overlayNow.clientHeight
-          const points = mapResultPointsToOverlay(
-            result.getResultPoints(),
-            videoNow.videoWidth,
-            videoNow.videoHeight,
-            overlayWidth,
-            overlayHeight,
-          )
-          detectionRef.current = { points, value }
-          lockedRef.current = true
-          setStatus(`✓ ${value}`)
-          playConfirmBeep()
-          window.setTimeout(() => {
-            if (!cancelled) onDetected(value)
-          }, 350)
-        })
-        controlsStop = () => controls.stop()
-      } catch (error) {
-        if (cancelled) return
-        const message = error instanceof Error ? error.message : String(error)
-        // eslint-disable-next-line no-console
-        console.warn('[live-barcode-scanner] camera/decoder failed', error)
-        setErrorMessage(humanizeCameraError(message))
-        setStatus('')
-        tearDown()
-      }
+  const handleStartCamera = useCallback(async () => {
+    if (startBusyRef.current) return
+    const video = videoRef.current
+    if (!video) {
+      setStage('error')
+      setErrorMessage('Scanner UI not ready yet. Close and reopen, then try again.')
+      return
     }
-
+    startBusyRef.current = true
     lockedRef.current = false
     detectionRef.current = null
-    setStatus('Requesting camera…')
     setErrorMessage(null)
-    void start()
-    return () => {
-      cancelled = true
+    try {
+      if (!navigator.mediaDevices?.getUserMedia) {
+        throw new Error('getUserMedia is not available in this browser')
+      }
+
+      // 1) Acquire the camera ourselves. Two-step fallback: prefer
+      // the rear camera but accept any camera if the device has no
+      // back-facing one.
+      setStage('requesting')
+      setStatus('Requesting camera…')
+      let stream: MediaStream
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: false,
+          video: {
+            facingMode: { ideal: 'environment' },
+            width: { ideal: 1280 },
+            height: { ideal: 720 },
+          },
+        })
+      } catch (primaryErr) {
+        stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: true })
+        // eslint-disable-next-line no-console
+        console.warn('[live-barcode-scanner] rear camera unavailable, using default', primaryErr)
+      }
+
+      streamRef.current = stream
+
+      // 2) Attach the stream to the <video> and start playback.
+      // Safari/iOS will NOT render frames unless we call .play()
+      // explicitly after setting srcObject — even with autoplay,
+      // muted, and playsInline already on the element. Because this
+      // path is reached from a button click inside the portal (not
+      // an effect), we are still in user-gesture context.
+      video.srcObject = stream
+      video.muted = true
+      ;(video as HTMLVideoElement & { playsInline: boolean }).playsInline = true
+      setStage('starting')
+      setStatus('Starting decoder…')
+      await video.play()
+
+      runRafLoop()
+
+      // 3) Decode against the already-running video. No need to ask
+      // the library to manage the stream lifecycle for us — we own
+      // it.
+      const { BrowserMultiFormatReader } = await import('@zxing/browser')
+      const reader = new BrowserMultiFormatReader()
+      const controls = await reader.decodeFromVideoElement(video, (result, _err) => {
+        if (lockedRef.current) return
+        const videoNow = videoRef.current
+        const overlayNow = overlayRef.current
+        if (!videoNow || !overlayNow) return
+        if (!result) {
+          detectionRef.current = null
+          return
+        }
+        const value = result.getText().trim()
+        if (value.length === 0) return
+        const overlayWidth = overlayNow.clientWidth
+        const overlayHeight = overlayNow.clientHeight
+        const points = mapResultPointsToOverlay(
+          result.getResultPoints(),
+          videoNow.videoWidth,
+          videoNow.videoHeight,
+          overlayWidth,
+          overlayHeight,
+        )
+        detectionRef.current = { points, value }
+        lockedRef.current = true
+        setStatus(`✓ ${value}`)
+        playConfirmBeep()
+        window.setTimeout(() => {
+          onDetectedRef.current(value)
+        }, 350)
+      })
+      controlsStopRef.current = () => controls.stop()
+
+      setStage('active')
+      setStatus('Point the camera at a barcode…')
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      // eslint-disable-next-line no-console
+      console.warn('[live-barcode-scanner] camera/decoder failed', error)
+      setStage('error')
+      setStatus('Tap to start camera')
+      setErrorMessage(humanizeCameraError(message))
       tearDown()
+    } finally {
+      startBusyRef.current = false
     }
-  }, [open, onDetected])
+  }, [runRafLoop, tearDown])
 
   if (!open) return null
   if (typeof document === 'undefined') return null
@@ -282,6 +317,24 @@ export function LiveBarcodeScanner({ open, onDetected, onCancel }: Props) {
   // was capable of disturbing position:fixed.
   const vw = typeof window !== 'undefined' ? `${window.innerWidth}px` : '100vw'
   const vh = typeof window !== 'undefined' ? `${window.innerHeight}px` : '100dvh'
+
+  const stageLabel =
+    stage === 'requesting'
+      ? 'Requesting camera…'
+      : stage === 'starting'
+        ? 'Starting decoder…'
+        : stage === 'active'
+          ? 'Active'
+          : stage === 'error'
+            ? 'Error'
+            : 'Idle'
+
+  const ctaLabel =
+    stage === 'error'
+      ? 'Tap to try camera again'
+      : stage === 'requesting' || stage === 'starting'
+        ? 'Starting…'
+        : 'Tap to start camera'
 
   const overlay = (
     <div
@@ -318,7 +371,10 @@ export function LiveBarcodeScanner({ open, onDetected, onCancel }: Props) {
         <button
           type="button"
           className="ghost-button"
-          onClick={onCancel}
+          onClick={() => {
+            tearDown()
+            onCancelRef.current()
+          }}
           style={{ color: '#fff', borderColor: 'rgba(255,255,255,0.5)' }}
         >
           ✕ Close
@@ -359,6 +415,58 @@ export function LiveBarcodeScanner({ open, onDetected, onCancel }: Props) {
             pointerEvents: 'none',
           }}
         />
+        <div
+          style={{
+            position: 'absolute',
+            top: 12,
+            left: 12,
+            zIndex: 3,
+            padding: '0.35rem 0.6rem',
+            borderRadius: 999,
+            background: 'rgba(0, 0, 0, 0.72)',
+            border: '1px solid rgba(255, 255, 255, 0.18)',
+            color: '#fff',
+            fontSize: '0.8rem',
+            fontWeight: 600,
+            letterSpacing: '0.02em',
+            pointerEvents: 'none',
+          }}
+        >
+          {stageLabel}
+        </div>
+        {stage !== 'active' ? (
+          <div
+            style={{
+              position: 'absolute',
+              inset: 0,
+              zIndex: 2,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              padding: '1rem',
+              background: 'rgba(0, 0, 0, 0.55)',
+            }}
+          >
+            <button
+              type="button"
+              onClick={() => void handleStartCamera()}
+              disabled={stage === 'requesting' || stage === 'starting'}
+              style={{
+                padding: '0.9rem 1.4rem',
+                borderRadius: 12,
+                border: '1px solid rgba(255, 255, 255, 0.28)',
+                background: 'rgba(0, 0, 0, 0.72)',
+                color: '#fff',
+                fontSize: '1rem',
+                fontWeight: 600,
+                cursor:
+                  stage === 'requesting' || stage === 'starting' ? 'progress' : 'pointer',
+              }}
+            >
+              {ctaLabel}
+            </button>
+          </div>
+        ) : null}
       </div>
       <div
         style={{

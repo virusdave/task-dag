@@ -997,6 +997,19 @@ function VariantRow(props: VariantRowProps) {
   const [liveScannerOpen, setLiveScannerOpen] = useState(false)
   const barcodeFileInputRef = useRef<HTMLInputElement | null>(null)
 
+  // Stable callbacks: passing inline lambdas here would change identity
+  // on every parent render and re-fire LiveBarcodeScanner's effect,
+  // tearing down the camera mid-stream. See LiveBarcodeScanner.tsx
+  // for the longer story.
+  const handleLiveScannerDetected = useCallback((value: string) => {
+    setLiveScannerOpen(false)
+    setDraftBarcode(value)
+    setEditingBarcode(true)
+  }, [])
+  const handleLiveScannerCancel = useCallback(() => {
+    setLiveScannerOpen(false)
+  }, [])
+
   useEffect(() => {
     setDraftBarcode(variant.externalBarcode ?? '')
   }, [variant.externalBarcode, variant.productId])
@@ -1145,12 +1158,8 @@ function VariantRow(props: VariantRowProps) {
         />
         <LiveBarcodeScanner
           open={liveScannerOpen}
-          onDetected={(value) => {
-            setLiveScannerOpen(false)
-            setDraftBarcode(value)
-            setEditingBarcode(true)
-          }}
-          onCancel={() => setLiveScannerOpen(false)}
+          onDetected={handleLiveScannerDetected}
+          onCancel={handleLiveScannerCancel}
         />
       </div>
     </div>
