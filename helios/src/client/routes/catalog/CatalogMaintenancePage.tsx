@@ -2,9 +2,13 @@ import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent }
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 
 import {
+  CatalogMaintenanceMovePackageResponseSchema,
   CatalogMaintenanceSurveyResponseSchema,
+  HELIOS_PENDING_PURCHASE_SITE_DEALERS,
   type CatalogMaintenanceCacheRepairResponse,
   type CatalogMaintenanceFatalBanner,
+  type CatalogMaintenanceMovePackageResponse,
+  type CatalogMaintenancePackageLot,
   type CatalogMaintenanceSectionKind,
   type CatalogMaintenanceSiteGroup,
   type CatalogMaintenanceSiteVariant,
@@ -850,6 +854,7 @@ function MaintenanceCard(props: CardProps) {
                   variant={variant}
                   mode={mode}
                   sweedGroupId={group.groupId}
+                  siteKey={group.siteKey}
                   categoryName={group.categoryName}
                   selected={selectedVariantIds.includes(variant.productId)}
                   optimisticPreviewUrl={
@@ -863,6 +868,7 @@ function MaintenanceCard(props: CardProps) {
                     void onComplete(`Barcode saved for ${variantLabel(variant)}: ${externalBarcode}`)
                   }}
                   onBarcodeError={onError}
+                  onPackageMoved={onComplete}
                 />
               </li>
             ))}
@@ -962,6 +968,12 @@ interface VariantRowProps {
   mode: CardMode
   sweedGroupId: number
   /**
+   * Site key from the parent group, used to resolve the Sweed dealer id
+   * for the move-package-to-inspection RPC. Without it the per-package
+   * action buttons render disabled with a tooltip.
+   */
+  siteKey: string
+  /**
    * Category of the variant's catalog group. Used to suppress the missing-
    * METRC and missing/invalid-barcode warnings for non-cannabis categories
    * (Accessories / Other), where those signals are not error or warning
@@ -974,6 +986,7 @@ interface VariantRowProps {
   onToggle: () => void
   onBarcodeUpdated: (productId: number, externalBarcode: string) => void
   onBarcodeError: (message: string) => void
+  onPackageMoved: (message: string) => Promise<void>
 }
 
 function VariantRow(props: VariantRowProps) {
@@ -981,6 +994,7 @@ function VariantRow(props: VariantRowProps) {
     variant,
     mode,
     sweedGroupId,
+    siteKey,
     categoryName,
     selected,
     optimisticPreviewUrl,
@@ -988,6 +1002,7 @@ function VariantRow(props: VariantRowProps) {
     onToggle,
     onBarcodeUpdated,
     onBarcodeError,
+    onPackageMoved,
   } = props
   const cannabisCategory = isCannabisCategory(categoryName)
   const [editingBarcode, setEditingBarcode] = useState(false)
@@ -1161,6 +1176,199 @@ function VariantRow(props: VariantRowProps) {
           onDetected={handleLiveScannerDetected}
           onCancel={handleLiveScannerCancel}
         />
+        <PackagesPanel
+          variant={variant}
+          siteKey={siteKey}
+          onError={onBarcodeError}
+          onMoved={onPackageMoved}
+        />
+      </div>
+    </div>
+  )
+}
+
+/**
+ * Per-package list shown under each variant row. Each lot row carries
+ * a "Move to Inspection" button that, after a typed confirmation,
+ * POSTs to `/api/catalog/maintenance/move-package-to-inspection`. The
+ * page-level `onPackageMoved` callback re-fetches the survey on
+ * success so the moved lots disappear from the FOR-SALE filter.
+ */
+function PackagesPanel(props: {
+  variant: CatalogMaintenanceSiteVariant
+  siteKey: string
+  onError: (message: string) => void
+  onMoved: (message: string) => Promise<void>
+}) {
+  const { variant, siteKey, onError, onMoved } = props
+  const dealer = HELIOS_PENDING_PURCHASE_SITE_DEALERS.find((s) => s.siteKey === siteKey) ?? null
+  const lots = variant.lots ?? []
+  const [pendingLot, setPendingLot] = useState<CatalogMaintenancePackageLot | null>(null)
+  const [busy, setBusy] = useState(false)
+
+  if (lots.length === 0) {
+    // Live verify hadn't returned per-lot detail (or the server
+    // failed open). Hide the panel entirely — the operator can still
+    // re-trigger Sweed via the existing "Fix cache" button.
+    return null
+  }
+
+  const handleConfirm = useCallback(async () => {
+    if (!pendingLot || !dealer) return
+    setBusy(true)
+    try {
+      const response = await fetch(buildAppPath('/api/catalog/maintenance/move-package-to-inspection'), {
+        body: JSON.stringify({
+          siteDealerId: dealer.dealerId,
+          productId: variant.productId,
+          externalTrackCode: pendingLot.externalTrackCode ?? '',
+          expectedItemId: pendingLot.itemId,
+          expectedLocationName: pendingLot.stockLocationName,
+        }),
+        credentials: 'same-origin',
+        headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+        method: 'POST',
+      })
+      if (!response.ok) {
+        const errorPayload = await maybeReadErrorPayload(response)
+        throw new Error(errorPayload ?? `${response.status} ${response.statusText}`)
+      }
+      const parsed = CatalogMaintenanceMovePackageResponseSchema.parse(await response.json())
+      setPendingLot(null)
+      await onMoved(describeMoveOutcome(parsed, variant, pendingLot))
+    } catch (error) {
+      onError(error instanceof Error ? error.message : String(error))
+    } finally {
+      setBusy(false)
+    }
+  }, [dealer, onError, onMoved, pendingLot, variant])
+
+  return (
+    <div className="catalog-maintenance-packages">
+      <span className="subtle-copy">Packages:</span>
+      <ul className="catalog-maintenance-package-list">
+        {lots.map((lot) => (
+          <li key={lot.itemId} className="catalog-maintenance-package-row">
+            <code className="catalog-maintenance-metrc-tag" title={lot.externalTrackCode ?? '(no METRC tag)'}>
+              {lot.externalTrackCode ? renderMetrcTagSuffix(lot.externalTrackCode) : '—'}
+            </code>
+            <span className="subtle-copy">
+              {lot.stockLocationName ?? `loc #${lot.stockLocationId ?? '?'}`}
+              {lot.availableQty !== null ? ` · qty ${formatQty(lot.availableQty)}` : ''}
+              {lot.isTradeSample ? ' · trade sample' : ''}
+              {!lot.isForSale ? ' · NOT FOR SALE' : ''}
+            </span>
+            <button
+              type="button"
+              className="catalog-maintenance-package-move-btn"
+              disabled={busy || !dealer}
+              title={
+                dealer
+                  ? `Move this package into "Hold for Dave inspection" at ${dealer.siteLabel}.`
+                  : `Unknown site '${siteKey}' — cannot resolve dealer id.`
+              }
+              onClick={() => setPendingLot(lot)}
+            >
+              Move to Inspection
+            </button>
+          </li>
+        ))}
+      </ul>
+      {pendingLot ? (
+        <ConfirmMoveToInspectionModal
+          dealerLabel={dealer?.siteLabel ?? siteKey}
+          variant={variant}
+          lot={pendingLot}
+          busy={busy}
+          onCancel={() => (busy ? null : setPendingLot(null))}
+          onConfirm={handleConfirm}
+        />
+      ) : null}
+    </div>
+  )
+}
+
+function describeMoveOutcome(
+  response: CatalogMaintenanceMovePackageResponse,
+  variant: CatalogMaintenanceSiteVariant,
+  lot: CatalogMaintenancePackageLot,
+): string {
+  const label = `${variantLabel(variant)} · ${lot.externalTrackCode ?? lot.itemId}`
+  const target = response.targetLocationName
+  const movedCount = response.movedLots.length
+  if (response.outcome === 'moved-target-lot') {
+    return `Moved ${label} → ${target} (${movedCount} lot${movedCount === 1 ? '' : 's'}).`
+  }
+  if (response.outcome === 'moved-fallback-all-lots') {
+    return `Specific package not found in Sweed; moved ALL remaining lots of ${variantLabel(
+      variant,
+    )} → ${target} (${movedCount} lot${movedCount === 1 ? '' : 's'}).`
+  }
+  return `Nothing to move for ${label} — Sweed already shows zero stock. Refreshed cache.`
+}
+
+/**
+ * Typed-confirmation modal. The operator must type the word
+ * `INSPECTION` exactly before the destructive "Move" button enables,
+ * matching the convention used elsewhere on the site for destructive
+ * Sweed writes.
+ */
+function ConfirmMoveToInspectionModal(props: {
+  dealerLabel: string
+  variant: CatalogMaintenanceSiteVariant
+  lot: CatalogMaintenancePackageLot
+  busy: boolean
+  onCancel: () => void
+  onConfirm: () => void
+}) {
+  const { dealerLabel, variant, lot, busy, onCancel, onConfirm } = props
+  const [typed, setTyped] = useState('')
+  const armed = typed.trim().toUpperCase() === 'INSPECTION'
+  return (
+    <div className="catalog-maintenance-modal-overlay" role="dialog" aria-modal="true">
+      <div className="catalog-maintenance-modal">
+        <h3>Move package to NOT FOR SALE — Hold for Dave inspection?</h3>
+        <p>
+          This will use Sweed's <code>store.inventory.item.transfer</code> to drain{' '}
+          <strong>{lot.availableQty !== null ? formatQty(lot.availableQty) : 'all qty'}</strong> of{' '}
+          <strong>{variantLabel(variant)}</strong> (package{' '}
+          <code title={lot.externalTrackCode ?? lot.itemId}>
+            {lot.externalTrackCode ?? lot.itemId}
+          </code>
+          ) out of <strong>{lot.stockLocationName ?? `loc #${lot.stockLocationId ?? '?'}`}</strong>{' '}
+          at <strong>{dealerLabel}</strong> and into the dealer's
+          "NOT FOR SALE - Hold for Dave inspection" location.
+        </p>
+        <p>
+          If Sweed has already moved or consumed this package, every remaining lot of the
+          variant will be drained into Inspection instead so the variant stops appearing
+          on the store.
+        </p>
+        <p>
+          Type <code>INSPECTION</code> to confirm:
+        </p>
+        <input
+          type="text"
+          autoFocus
+          autoComplete="off"
+          spellCheck={false}
+          value={typed}
+          disabled={busy}
+          onChange={(event) => setTyped(event.target.value)}
+        />
+        <div className="catalog-maintenance-modal-actions">
+          <button type="button" onClick={onCancel} disabled={busy}>
+            Cancel
+          </button>
+          <button
+            type="button"
+            className="catalog-maintenance-package-move-btn"
+            onClick={onConfirm}
+            disabled={!armed || busy}
+          >
+            {busy ? 'Moving…' : 'Move to Inspection'}
+          </button>
+        </div>
       </div>
     </div>
   )

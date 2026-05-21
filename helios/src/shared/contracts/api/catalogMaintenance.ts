@@ -14,6 +14,33 @@ export const CatalogMaintenanceSectionKindSchema = z.enum([
 ])
 export type CatalogMaintenanceSectionKind = z.infer<typeof CatalogMaintenanceSectionKindSchema>
 
+/**
+ * A single physical package / inventory item / lot — what Sweed calls
+ * an `inventory.item` and Metrc calls a tagged package. One variant
+ * may have several lots at the same site at once. Carried on the
+ * survey response so the Images & Barcodes page can render a
+ * per-package "Move to Inspection" button without needing a second
+ * fetch.
+ *
+ * `itemId` is Sweed's `inventory.item.id` (string in their API even
+ * though numeric on the wire). `externalTrackCode` is the METRC
+ * package tag. `stockType` / `stockLocation` carry both id and name
+ * so the UI can label the source bucket without re-resolving against
+ * `store.stock.location.list`.
+ */
+export const CatalogMaintenancePackageLotSchema = z.object({
+  itemId: z.string(),
+  externalTrackCode: z.string().nullable(),
+  stockLocationId: z.number().int().nullable(),
+  stockLocationName: z.string().nullable(),
+  stockTypeId: z.number().int().nullable(),
+  stockTypeName: z.string().nullable(),
+  availableQty: z.number().nullable(),
+  isForSale: z.boolean(),
+  isTradeSample: z.boolean(),
+})
+export type CatalogMaintenancePackageLot = z.infer<typeof CatalogMaintenancePackageLotSchema>
+
 export const CatalogMaintenanceSiteVariantSchema = z.object({
   productId: z.number().int(),
   name: z.string().nullable(),
@@ -23,6 +50,14 @@ export const CatalogMaintenanceSiteVariantSchema = z.object({
   sizeName: z.string().nullable(),
   quantity: z.number().nullable(),
   metrcTags: z.array(z.string()),
+  /**
+   * Per-package detail derived from the same live grouped-inventory
+   * pull that drives `liveVerifyCandidateSet`. Empty array when the
+   * live verify pass could not run (no Sweed pool token, transport
+   * failure, etc.) — the UI degrades to showing METRC tags without
+   * action buttons in that case.
+   */
+  lots: z.array(CatalogMaintenancePackageLotSchema),
   previewImageUrl: z.string().nullable(),
   imageCount: z.number().int(),
   variantSpecificImageCount: z.number().int(),
@@ -189,3 +224,68 @@ export const CatalogMaintenanceCacheRepairResponseSchema = z.object({
   discoverOrphanGroupsJobId: z.number().int().nullable(),
 })
 export type CatalogMaintenanceCacheRepairResponse = z.infer<typeof CatalogMaintenanceCacheRepairResponseSchema>
+
+/* -------------------------------------------------------------------------- */
+/*  Move-package-to-inspection — write path.                                   */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Body for POST /api/catalog/maintenance/move-package-to-inspection.
+ *
+ * The Images & Barcodes page sends `productId` + `externalTrackCode`
+ * (the METRC tag) for the package the operator clicked on, plus the
+ * `siteDealerId` that owns it. The server live-resolves the lot via
+ * `store.inventory.product.item.list` and drains it into the
+ * dealer's "NOT FOR SALE - Hold for Dave inspection" location using
+ * `store.inventory.item.transfer`.
+ *
+ * The `expectedItemId` and `expectedLocationName` fields are
+ * optimistic hints from the survey payload — if Sweed disagrees
+ * (e.g. another operator just moved or sold the lot) we use Sweed's
+ * fresh data, but we record the mismatch in the audit event so the
+ * cache-staleness pattern is visible.
+ */
+export const CatalogMaintenanceMovePackageRequestSchema = z.object({
+  siteDealerId: z.number().int().positive(),
+  productId: z.number().int().positive(),
+  externalTrackCode: z.string().trim().min(1).max(128),
+  expectedItemId: z.string().trim().min(1).max(64).nullable().optional(),
+  expectedLocationName: z.string().trim().min(1).max(128).nullable().optional(),
+})
+export type CatalogMaintenanceMovePackageRequest = z.infer<
+  typeof CatalogMaintenanceMovePackageRequestSchema
+>
+
+export const CatalogMaintenanceMovePackageOutcomeSchema = z.enum([
+  // Found the exact lot by METRC tag and transferred it.
+  'moved-target-lot',
+  // Could not find a lot for that METRC tag; transferred every
+  // remaining lot of the product as a fallback.
+  'moved-fallback-all-lots',
+  // No live lots at all — nothing to move. The variant is already
+  // off the floor; we just invalidate the survey cache.
+  'nothing-to-move',
+])
+export type CatalogMaintenanceMovePackageOutcome = z.infer<
+  typeof CatalogMaintenanceMovePackageOutcomeSchema
+>
+
+export const CatalogMaintenanceMovedLotSchema = z.object({
+  itemId: z.string(),
+  externalTrackCode: z.string().nullable(),
+  qty: z.number(),
+  fromStockLocationId: z.number().int(),
+  fromStockLocationName: z.string(),
+  fromStockTypeId: z.number().int(),
+})
+export type CatalogMaintenanceMovedLot = z.infer<typeof CatalogMaintenanceMovedLotSchema>
+
+export const CatalogMaintenanceMovePackageResponseSchema = z.object({
+  outcome: CatalogMaintenanceMovePackageOutcomeSchema,
+  targetLocationId: z.number().int(),
+  targetLocationName: z.string(),
+  movedLots: z.array(CatalogMaintenanceMovedLotSchema),
+})
+export type CatalogMaintenanceMovePackageResponse = z.infer<
+  typeof CatalogMaintenanceMovePackageResponseSchema
+>

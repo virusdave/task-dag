@@ -3,6 +3,8 @@ import { z } from 'zod'
 
 import {
   CatalogMaintenanceCacheRepairResponseSchema,
+  CatalogMaintenanceMovePackageRequestSchema,
+  CatalogMaintenanceMovePackageResponseSchema,
   CatalogMaintenanceSurveyResponseSchema,
   CatalogMaintenanceUpdateBarcodeRequestSchema,
   CatalogMaintenanceUpdateBarcodeResponseSchema,
@@ -14,6 +16,7 @@ import {
   enqueueGroupImageUploadJob,
   HttpError,
   loadCatalogMaintenanceSurvey,
+  movePackageToInspection,
   retryGroupImageUploadJob,
   updateVariantBarcode,
 } from '../catalog/maintenance.js'
@@ -116,6 +119,28 @@ export async function registerCatalogMaintenanceRoutes(server: FastifyInstance):
           targetType: 'group',
         }),
       )
+    } catch (error) {
+      if (error instanceof HttpError) {
+        return reply.status(error.status).send({ error: error.message })
+      }
+      throw error
+    }
+  })
+
+  server.post('/api/catalog/maintenance/move-package-to-inspection', async (request, reply) => {
+    const user = await requireSessionUser(request, reply, 'editor')
+    if (!user) return
+    const body = CatalogMaintenanceMovePackageRequestSchema.parse(request.body ?? {})
+    try {
+      const result = await movePackageToInspection({
+        siteDealerId: body.siteDealerId,
+        productId: body.productId,
+        externalTrackCode: body.externalTrackCode,
+        expectedItemId: body.expectedItemId ?? null,
+        expectedLocationName: body.expectedLocationName ?? null,
+        requestedByUserId: user.id,
+      })
+      return reply.send(CatalogMaintenanceMovePackageResponseSchema.parse(result))
     } catch (error) {
       if (error instanceof HttpError) {
         return reply.status(error.status).send({ error: error.message })

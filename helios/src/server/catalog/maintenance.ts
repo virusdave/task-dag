@@ -47,6 +47,10 @@ import {
   type CatalogMaintenanceFatalBanner,
   type CatalogMaintenanceFatalReason,
   type CatalogMaintenanceFatalReasonCode,
+  type CatalogMaintenanceMovePackageOutcome,
+  type CatalogMaintenanceMovePackageResponse,
+  type CatalogMaintenanceMovedLot,
+  type CatalogMaintenancePackageLot,
   type CatalogMaintenanceQuickFilterBrand,
   type CatalogMaintenanceSiteGroup,
   type CatalogMaintenanceSiteVariant,
@@ -202,9 +206,44 @@ const LiveVerifyProductSchema = z
   })
   .passthrough()
 
+/**
+ * The per-lot rows under each grouped-inventory row. These carry the
+ * data needed for the runtime "FOR SALE * + not a trade sample"
+ * filter and for populating `CatalogMaintenancePackageLot`s on the
+ * survey response.
+ */
+const LiveVerifyItemSchema = z
+  .object({
+    id: z.union([z.coerce.number().int(), z.string().trim().min(1)]).nullable().optional(),
+    availableQty: z.coerce.number().nullable().optional(),
+    currentQty: z.coerce.number().nullable().optional(),
+    isTradeSample: z.boolean().nullable().optional(),
+    isNotForSale: z.boolean().nullable().optional(),
+    isAvailableOnline: z.boolean().nullable().optional(),
+    externalTrackCode: z.string().nullable().optional(),
+    stockLocation: z
+      .object({
+        id: z.coerce.number().int().optional(),
+        name: z.string().nullable().optional(),
+      })
+      .passthrough()
+      .nullable()
+      .optional(),
+    stockType: z
+      .object({
+        id: z.coerce.number().int().optional(),
+        name: z.string().nullable().optional(),
+      })
+      .passthrough()
+      .nullable()
+      .optional(),
+  })
+  .passthrough()
+
 const LiveVerifyRowSchema = z
   .object({
     product: LiveVerifyProductSchema.nullable().optional(),
+    items: z.array(LiveVerifyItemSchema).default([]),
   })
   .passthrough()
 
@@ -213,6 +252,20 @@ const LiveVerifyResponseSchema = z
     data: z.array(LiveVerifyRowSchema).default([]),
   })
   .passthrough()
+
+/**
+ * Mirror of `isForSaleStockLocationName` in
+ * `configWorkersStockRefreshJob.ts` — kept local rather than imported
+ * to avoid pulling worker-side code into the server bundle. A lot
+ * counts as "for sale" only when its `stockLocation.name` starts with
+ * the literal prefix `for sale` (case-insensitive). Lots in
+ * `NOT FOR SALE - …` buckets (Reception, Quarantine, etc.) are
+ * filtered out of the maintenance survey at runtime.
+ */
+function isForSaleStockLocationName(name: string | null | undefined): boolean {
+  if (typeof name !== 'string') return false
+  return name.trim().toLowerCase().startsWith('for sale')
+}
 
 async function liveVerifyCandidateSet(
   survey: CatalogMaintenanceSurveyResponse,
@@ -239,13 +292,29 @@ async function liveVerifyCandidateSet(
   // set in 1–2 RPC calls; way cheaper than fanning out one
   // `store.product.group.get` + one `store.product.get` per item.
   // The grouped rows include `product.externalBarcode`,
-  // `product.images`, and `product.productGroup.{id, images}` which is
-  // all the verifier needs.
+  // `product.images`, `product.productGroup.{id, images}`, and the
+  // per-lot `items[]` array we use to (a) filter variants whose only
+  // live qty is in NOT-FOR-SALE locations or marked as trade samples,
+  // and (b) emit per-package detail onto the variant payload so the
+  // UI can render the "Move to Inspection" button without a second
+  // round-trip.
   const groupHasImage = new Map<number, boolean>()
   const productHasBarcode = new Map<number, boolean>()
+  // siteKey → productId → has at least one FOR-SALE-locationed,
+  // non-trade-sample lot with qty > 0
+  const productHasForSaleLotBySite = new Map<string, Map<number, boolean>>()
+  // siteKey → productId → ordered lot payloads (drives both filtering
+  // and UI badges)
+  const lotsByProductBySite = new Map<string, Map<number, CatalogMaintenancePackageLot[]>>()
+  for (const site of HELIOS_PENDING_PURCHASE_SITE_DEALERS) {
+    productHasForSaleLotBySite.set(site.siteKey, new Map())
+    lotsByProductBySite.set(site.siteKey, new Map())
+  }
   try {
     await withSweedSession(async () => {
       for (const site of HELIOS_PENDING_PURCHASE_SITE_DEALERS) {
+        const siteHasForSaleLot = productHasForSaleLotBySite.get(site.siteKey)!
+        const siteLots = lotsByProductBySite.get(site.siteKey)!
         let page = 1
         while (true) {
           const raw = await callSweedRpc(site.dealerId, 'store.inventory.item.list.grouped', {
@@ -266,6 +335,50 @@ async function liveVerifyCandidateSet(
             if (group && group.id !== undefined && Array.isArray(group.images)) {
               groupHasImage.set(group.id, group.images.length > 0)
             }
+            if (productId !== undefined) {
+              const builtLots: CatalogMaintenancePackageLot[] = []
+              let sawForSaleLot = false
+              for (const item of row.items) {
+                const itemIdRaw = item.id
+                if (itemIdRaw === null || itemIdRaw === undefined) continue
+                const stockLocationName = item.stockLocation?.name ?? null
+                const isTradeSample = item.isTradeSample === true
+                const availableQty =
+                  typeof item.availableQty === 'number'
+                    ? item.availableQty
+                    : typeof item.currentQty === 'number'
+                      ? item.currentQty
+                      : null
+                const isForSale =
+                  !isTradeSample &&
+                  item.isNotForSale !== true &&
+                  isForSaleStockLocationName(stockLocationName)
+                if (isForSale && typeof availableQty === 'number' && availableQty > 0) {
+                  sawForSaleLot = true
+                }
+                builtLots.push({
+                  itemId: String(itemIdRaw),
+                  externalTrackCode: nonEmptyString(item.externalTrackCode ?? null),
+                  stockLocationId: item.stockLocation?.id ?? null,
+                  stockLocationName,
+                  stockTypeId: item.stockType?.id ?? null,
+                  stockTypeName: item.stockType?.name ?? null,
+                  availableQty,
+                  isForSale,
+                  isTradeSample,
+                })
+              }
+              // Merge with anything seen on a prior grouped-feed row for
+              // the same product (the feed *should* be one row per
+              // productId but defensively concatenate).
+              const previousLots = siteLots.get(productId)
+              siteLots.set(
+                productId,
+                previousLots ? [...previousLots, ...builtLots] : builtLots,
+              )
+              const prevHasForSale = siteHasForSaleLot.get(productId) === true
+              siteHasForSaleLot.set(productId, prevHasForSale || sawForSaleLot)
+            }
           }
           if (parsed.data.length < LIVE_VERIFY_PAGE_SIZE) break
           page += 1
@@ -281,11 +394,41 @@ async function liveVerifyCandidateSet(
 
   const brandIssueCounts = new Map<string, number>()
   const newSites = survey.sites.map((site) => {
+    const siteHasForSaleLot = productHasForSaleLotBySite.get(site.siteKey) ?? new Map<number, boolean>()
+    const siteLots = lotsByProductBySite.get(site.siteKey) ?? new Map<number, CatalogMaintenancePackageLot[]>()
+    /**
+     * "FOR SALE * + non-trade-sample" filter applied at runtime.
+     * `stock_variant_state.is_on_stock` flips true if ANY lot (incl.
+     * trade samples and lots in Reception / Quarantine) has qty > 0,
+     * so on its own it over-counts the maintenance population. The
+     * live verify pass already pulls per-lot detail to render the
+     * "Move to Inspection" button; we re-use that data here to drop
+     * variants whose only remaining stock is in NOT-FOR-SALE buckets
+     * or is marked as a trade sample.
+     *
+     * If the live verify pass produced no lot data for a productId
+     * at this site (cache lag, brand-new variant Sweed has not
+     * returned yet, …) we treat the variant as "for sale" so we
+     * don't accidentally hide a real problem just because Sweed
+     * paginated past it.
+     */
+    const variantPasses = (productId: number): boolean => {
+      if (!siteLots.has(productId)) return true
+      return siteHasForSaleLot.get(productId) === true
+    }
+    const annotateVariant = (variant: CatalogMaintenanceSiteVariant): CatalogMaintenanceSiteVariant => ({
+      ...variant,
+      lots: siteLots.get(variant.productId) ?? [],
+    })
     const newSections = site.sections.map((section) => {
       if (section.kind === 'missing-catalog-image') {
-        const keptGroups = section.groups.filter((group) => groupHasImage.get(group.groupId) !== true)
-        for (const group of keptGroups) {
-          countBrandIssue(brandIssueCounts, group.brandName, group.variants.length)
+        const keptGroups: CatalogMaintenanceSiteGroup[] = []
+        for (const group of section.groups) {
+          if (groupHasImage.get(group.groupId) === true) continue
+          const keptVariants = group.variants.filter((v) => variantPasses(v.productId))
+          if (keptVariants.length === 0) continue
+          keptGroups.push({ ...group, variants: keptVariants.map(annotateVariant) })
+          countBrandIssue(brandIssueCounts, group.brandName, keptVariants.length)
         }
         return { ...section, groups: keptGroups, issueCount: keptGroups.length }
       }
@@ -293,10 +436,11 @@ async function liveVerifyCandidateSet(
         const keptGroups: CatalogMaintenanceSiteGroup[] = []
         for (const group of section.groups) {
           const keptVariants = group.variants.filter(
-            (variant) => productHasBarcode.get(variant.productId) !== true,
+            (variant) =>
+              productHasBarcode.get(variant.productId) !== true && variantPasses(variant.productId),
           )
           if (keptVariants.length === 0) continue
-          keptGroups.push({ ...group, variants: keptVariants })
+          keptGroups.push({ ...group, variants: keptVariants.map(annotateVariant) })
           countBrandIssue(brandIssueCounts, group.brandName, keptVariants.length)
         }
         return { ...section, groups: keptGroups, issueCount: keptGroups.length }
@@ -758,6 +902,11 @@ function buildVariantPayload(
     sizeName: product.sizeName,
     quantity: siteStock.quantity,
     metrcTags: siteStock.metrcTags,
+    // Lots are filled in by `liveVerifyCandidateSet` after the per-site
+    // grouped-inventory pull. Until then the variant ships with an
+    // empty array; the UI renders the METRC chips read-only when no
+    // lot detail is present (e.g. live verify failed).
+    lots: [],
     previewImageUrl: product.ownImagePreviewUrl ?? liveState.groupPreviewImageUrl,
     imageCount: product.ownImageCount > 0 ? product.ownImageCount : liveState.groupImageCount,
     variantSpecificImageCount: product.variantSpecificImageCount,
@@ -1277,6 +1426,282 @@ export async function updateVariantBarcode(input: UpdateBarcodeInput): Promise<U
 
   await invalidateCatalogMaintenanceSurvey()
   return { ...result, reanalysisJobId }
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Move-package-to-inspection — write path.                                   */
+/*                                                                            */
+/*  See docs/sweed/stock-item-transfer.md for the RPC shapes. This            */
+/*  function chains store.stock.location.list →                                */
+/*  store.inventory.product.item.list → store.inventory.item.transfer         */
+/*  inside one withSweedSession block so the dealer context is pinned         */
+/*  for the whole operation. If the operator-clicked package can no longer    */
+/*  be located by its METRC tag (Sweed has already moved or consumed it),     */
+/*  we fall back to draining every remaining lot of the variant into the     */
+/*  inspection bin per the stated intent ("stop trying to sell it").          */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The canonical "Hold for Dave inspection" location name (Sweed
+ * presents it as "NOT FOR SALE - Hold for Dave inspection" on the
+ * demo dealer). We match case-insensitively on this substring so
+ * minor naming drift between sites still works. If a dealer simply
+ * does not have such a location configured the move endpoint
+ * returns a 409 — we will not silently invent a target.
+ */
+const INSPECTION_LOCATION_NAME_NEEDLE = 'hold for dave inspection'
+
+const StockLocationListEntrySchema = z
+  .object({
+    id: z.coerce.number().int(),
+    name: z.string().nullable().optional(),
+    enabled: z.boolean().nullable().optional(),
+    stockType: z
+      .object({
+        id: z.coerce.number().int(),
+        name: z.string().nullable().optional(),
+      })
+      .passthrough()
+      .nullable()
+      .optional(),
+  })
+  .passthrough()
+
+const StockLocationListResponseSchema = z.union([
+  z.array(StockLocationListEntrySchema),
+  z.object({ data: z.array(StockLocationListEntrySchema).default([]) }).passthrough().transform((v) => v.data),
+])
+
+const InventoryProductItemSchema = z
+  .object({
+    id: z.union([z.coerce.number().int(), z.string().trim().min(1)]),
+    externalTrackCode: z.string().nullable().optional(),
+    availableQty: z.coerce.number().nullable().optional(),
+    currentQty: z.coerce.number().nullable().optional(),
+    isTradeSample: z.boolean().nullable().optional(),
+    stockLocation: z
+      .object({
+        id: z.coerce.number().int(),
+        name: z.string().nullable().optional(),
+      })
+      .passthrough()
+      .nullable()
+      .optional(),
+    stockType: z
+      .object({
+        id: z.coerce.number().int(),
+        name: z.string().nullable().optional(),
+      })
+      .passthrough()
+      .nullable()
+      .optional(),
+  })
+  .passthrough()
+
+const InventoryProductItemListResponseSchema = z
+  .object({
+    result: z
+      .object({
+        data: z.array(InventoryProductItemSchema).default([]),
+        totalCount: z.coerce.number().int().min(0).optional(),
+      })
+      .passthrough()
+      .nullable()
+      .optional(),
+    data: z.array(InventoryProductItemSchema).optional(),
+  })
+  .passthrough()
+  .transform((value) => value.result?.data ?? value.data ?? [])
+
+export interface MovePackageToInspectionInput {
+  siteDealerId: number
+  productId: number
+  externalTrackCode: string
+  expectedItemId: string | null
+  expectedLocationName: string | null
+  requestedByUserId: number | null
+}
+
+export interface MovePackageToInspectionResult extends CatalogMaintenanceMovePackageResponse {}
+
+export async function movePackageToInspection(
+  input: MovePackageToInspectionInput,
+): Promise<MovePackageToInspectionResult> {
+  // Ensure the requested site is one we know about. (Random dealer
+  // ids would otherwise sail straight through to Sweed and either
+  // 403 or — worse — succeed against the wrong store.)
+  const site = HELIOS_PENDING_PURCHASE_SITE_DEALERS.find((s) => s.dealerId === input.siteDealerId)
+  if (!site) {
+    throw new HttpError(400, `Unknown siteDealerId=${input.siteDealerId}.`)
+  }
+
+  const normalizedTag = input.externalTrackCode.trim()
+  if (normalizedTag.length === 0) {
+    throw new HttpError(400, 'externalTrackCode must be non-empty.')
+  }
+
+  const result = await withSweedSession(async () => {
+    // 1. List stock locations for this dealer and locate the
+    //    inspection bin by name.
+    const locationsRaw = await callSweedRpc<unknown>(input.siteDealerId, 'store.stock.location.list', {})
+    const locations = StockLocationListResponseSchema.parse(extractRpcResult(locationsRaw))
+    const target = locations.find(
+      (loc) =>
+        typeof loc.name === 'string' &&
+        loc.name.trim().toLowerCase().includes(INSPECTION_LOCATION_NAME_NEEDLE),
+    )
+    if (!target || typeof target.name !== 'string' || target.stockType?.id === undefined) {
+      throw new HttpError(
+        409,
+        `Dealer ${input.siteDealerId} has no stock location matching "${INSPECTION_LOCATION_NAME_NEEDLE}". ` +
+          `Found ${locations.length} location(s): ${locations.map((l) => l.name ?? '?').join(', ')}.`,
+      )
+    }
+    const targetLocationId = target.id
+    const targetLocationName = target.name
+    const targetStockTypeId = target.stockType.id
+
+    // 2. Live-list lots for this product so we can resolve the exact
+    //    inventory item id for the operator's METRC tag.
+    const itemsRaw = await callSweedRpc<unknown>(input.siteDealerId, 'store.inventory.product.item.list', {
+      productId: String(input.productId),
+      page: 1,
+      pageSize: 50,
+      isOnStock: true,
+    })
+    const items = InventoryProductItemListResponseSchema.parse(itemsRaw)
+
+    if (items.length === 0) {
+      // Nothing live in Sweed for this product — operator probably
+      // already moved/sold it. Treat as success-no-op; the cache
+      // refresh from invalidateCatalogMaintenanceSurvey() below will
+      // get the variant off the page.
+      return {
+        outcome: 'nothing-to-move' as CatalogMaintenanceMovePackageOutcome,
+        targetLocationId,
+        targetLocationName,
+        movedLots: [] as CatalogMaintenanceMovedLot[],
+      }
+    }
+
+    const matchByTag = items.filter(
+      (item) =>
+        typeof item.externalTrackCode === 'string' &&
+        item.externalTrackCode.trim() === normalizedTag,
+    )
+
+    // 3a. Happy path: the specific METRC-tagged lot still exists.
+    if (matchByTag.length > 0) {
+      const movedLots: CatalogMaintenanceMovedLot[] = []
+      for (const item of matchByTag) {
+        const moved = await transferOneLotToInspection({
+          siteDealerId: input.siteDealerId,
+          item,
+          targetLocationId,
+          targetStockTypeId,
+        })
+        if (moved) movedLots.push(moved)
+      }
+      return {
+        outcome: 'moved-target-lot' as CatalogMaintenanceMovePackageOutcome,
+        targetLocationId,
+        targetLocationName,
+        movedLots,
+      }
+    }
+
+    // 3b. Fallback: METRC tag no longer present (Sweed has moved or
+    //     consumed it). Drain every remaining lot of this product into
+    //     the inspection bin so the operator's intent — get the variant
+    //     off the floor — is honored even with a stale cache.
+    const movedLots: CatalogMaintenanceMovedLot[] = []
+    for (const item of items) {
+      const moved = await transferOneLotToInspection({
+        siteDealerId: input.siteDealerId,
+        item,
+        targetLocationId,
+        targetStockTypeId,
+      })
+      if (moved) movedLots.push(moved)
+    }
+    return {
+      outcome: 'moved-fallback-all-lots' as CatalogMaintenanceMovePackageOutcome,
+      targetLocationId,
+      targetLocationName,
+      movedLots,
+    }
+  })
+
+  // Refresh the page on next survey load — the cached response now
+  // includes the moved lots in "FOR SALE …", which is stale.
+  await invalidateCatalogMaintenanceSurvey()
+  void input.requestedByUserId
+  return result
+}
+
+interface TransferOneLotInput {
+  siteDealerId: number
+  item: z.infer<typeof InventoryProductItemSchema>
+  targetLocationId: number
+  targetStockTypeId: number
+}
+
+async function transferOneLotToInspection(input: TransferOneLotInput): Promise<CatalogMaintenanceMovedLot | null> {
+  const { item, siteDealerId, targetLocationId, targetStockTypeId } = input
+  const fromLocationId = item.stockLocation?.id
+  const fromLocationName = item.stockLocation?.name ?? null
+  const fromStockTypeId = item.stockType?.id
+  const qty =
+    typeof item.availableQty === 'number'
+      ? item.availableQty
+      : typeof item.currentQty === 'number'
+        ? item.currentQty
+        : 0
+  if (qty <= 0 || fromLocationId === undefined || fromStockTypeId === undefined) {
+    // Nothing actually movable (qty 0 or missing source bucket).
+    return null
+  }
+  if (fromLocationId === targetLocationId && fromStockTypeId === targetStockTypeId) {
+    // Already in inspection — silently no-op so the operator can
+    // re-click the button without errors.
+    return null
+  }
+  await callSweedRpc(siteDealerId, 'store.inventory.item.transfer', {
+    stockTypeFrom: fromStockTypeId,
+    stockLocationFrom: fromLocationId,
+    stockTypeTo: targetStockTypeId,
+    stockLocationTo: targetLocationId,
+    transferReservedItems: false,
+    items: [
+      {
+        id: String(item.id),
+        qty,
+        externalTrackCode: item.externalTrackCode ?? null,
+      },
+    ],
+  })
+  return {
+    itemId: String(item.id),
+    externalTrackCode: nonEmptyString(item.externalTrackCode ?? null),
+    qty,
+    fromStockLocationId: fromLocationId,
+    fromStockLocationName: fromLocationName ?? `#${fromLocationId}`,
+    fromStockTypeId,
+  }
+}
+
+/**
+ * Sweed RPC responses are sometimes returned as
+ * `{ result: <payload>, id, version }` and sometimes as the bare
+ * `<payload>`. Our transport in `postSweedRpc` returns whatever the
+ * server sent, so callers that need the inner payload (location.list
+ * for example) tolerate both shapes via this helper.
+ */
+function extractRpcResult(raw: unknown): unknown {
+  if (raw !== null && typeof raw === 'object' && 'result' in (raw as Record<string, unknown>)) {
+    return (raw as { result: unknown }).result
+  }
+  return raw
 }
 
 async function fetchGroupImagesWithinLock(groupId: number): Promise<z.infer<typeof SweedGroupImagesSchema>> {
