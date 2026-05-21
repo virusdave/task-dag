@@ -102,55 +102,67 @@ export async function claimAvailableSweedSessionToken(
   db: Queryable,
   options: { claimedBy: string; ttlMs: number },
 ): Promise<ClaimedSweedSessionToken | null> {
+  // The claim MUST be performed in a single SQL statement.
+  //
+  // We callers pass a `pg.Pool` (see getPool()), not a checked-out
+  // PoolClient — so each `pool.query()` may run on a DIFFERENT
+  // backend connection, and a multi-statement
+  // BEGIN / SELECT ... FOR UPDATE SKIP LOCKED / UPDATE / COMMIT
+  // does NOT actually share a transaction or hold the row lock
+  // across statements. Two concurrent workers could both pass the
+  // SELECT, both UPDATE, both end up holding the SAME pool row,
+  // and therefore both hand out the SAME Sweed auth token. That
+  // breaks the "private token per job" invariant the rest of the
+  // Sweed runtime relies on for dealer-context partitioning, and
+  // shows up as `store.screen.carousel.banner.list: Action does
+  // not exist or you do not have permission` (subcode 14002) on
+  // the screen-banner bounce job when a concurrent catalog job
+  // flips the shared token to the state dealer.
+  //
+  // The CTE below performs the candidate selection (with row-level
+  // SKIP LOCKED) AND the claiming UPDATE in one atomic statement
+  // on one connection, so exclusivity is guaranteed regardless of
+  // how the Queryable manages connections.
   try {
-    await db.query('begin')
-    try {
-      const picked = await db.query<{ id: string | number }>(
-        `
-          select id from sweed_session_tokens
-           where marked_expired_at is null
-             and (claimed_at is null or claim_expires_at <= now())
-           order by created_at asc, id asc
-           for update skip locked
-           limit 1
-        `,
-      )
-      const pickedId = picked.rows[0]?.id
-      if (pickedId === undefined) {
-        await db.query('commit')
-        return null
-      }
-      const claimed = await db.query<{
-        id: string | number
-        token: string
-        token_prefix: string
-        initial_dealer_id: string | number | null
-        claimed_by: string
-        claim_expires_at: Date
-      }>(
-        `
-          update sweed_session_tokens
-             set claimed_at       = now(),
-                 claimed_by       = $2,
-                 claim_expires_at = now() + ($3::int * interval '1 millisecond')
-           where id = $1
-          returning id, token, token_prefix, initial_dealer_id, claimed_by, claim_expires_at
-        `,
-        [pickedId, options.claimedBy, options.ttlMs],
-      )
-      await db.query('commit')
-      const row = claimed.rows[0]!
-      return {
-        id: Number(row.id),
-        token: row.token,
-        tokenPrefix: row.token_prefix,
-        initialDealerId: row.initial_dealer_id === null ? null : Number(row.initial_dealer_id),
-        claimedBy: row.claimed_by,
-        claimExpiresAt: row.claim_expires_at,
-      }
-    } catch (error) {
-      await db.query('rollback').catch(() => undefined)
-      throw error
+    const claimed = await db.query<{
+      id: string | number
+      token: string
+      token_prefix: string
+      initial_dealer_id: string | number | null
+      claimed_by: string
+      claim_expires_at: Date
+    }>(
+      `
+        with candidate as (
+          select id
+          from sweed_session_tokens
+          where marked_expired_at is null
+            and (claimed_at is null or claim_expires_at <= now())
+          order by created_at asc, id asc
+          for update skip locked
+          limit 1
+        )
+        update sweed_session_tokens t
+           set claimed_at       = now(),
+               claimed_by       = $1,
+               claim_expires_at = now() + ($2::int * interval '1 millisecond')
+          from candidate
+         where t.id = candidate.id
+        returning t.id, t.token, t.token_prefix, t.initial_dealer_id, t.claimed_by, t.claim_expires_at
+      `,
+      [options.claimedBy, options.ttlMs],
+    )
+    const row = claimed.rows[0]
+    if (row === undefined) {
+      return null
+    }
+    return {
+      id: Number(row.id),
+      token: row.token,
+      tokenPrefix: row.token_prefix,
+      initialDealerId: row.initial_dealer_id === null ? null : Number(row.initial_dealer_id),
+      claimedBy: row.claimed_by,
+      claimExpiresAt: row.claim_expires_at,
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
