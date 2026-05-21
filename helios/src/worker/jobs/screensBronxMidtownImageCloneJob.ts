@@ -15,6 +15,7 @@ import { appendAuditEvent } from '../../server/audit/appendAuditEvent.js'
 import { withTransaction } from '../../server/db/tx.js'
 import type { JobHandlerContext } from '../runtime/jobRegistry.js'
 import { callSweedRpc } from '../sweed/rpc.js'
+import { isScreenEligibleForBannerOps, looksLikeSweedDeadScreenError } from './screensCarouselHelpers.js'
 
 const ScreensBronxMidtownImageCloneArtifactSchema = z.object({
   bronxSources: z.array(
@@ -406,11 +407,15 @@ async function listScreens(
   const result = ScreenListResponseSchema.parse(
     await callSweedRpc(dealerId, 'store.screen.carousel.list', { page: 1, pageSize: 200 }),
   )
-  return result.data.map((screen) => ({
-    enabled: screen.enabled,
-    screenId: screen.id,
-    screenName: screen.name,
-  }))
+  // Skip disabled screens — Sweed rejects banner.list on them with a
+  // misleading 14002 error. See screensCarouselHelpers.
+  return result.data
+    .filter(isScreenEligibleForBannerOps)
+    .map((screen) => ({
+      enabled: screen.enabled,
+      screenId: screen.id,
+      screenName: screen.name,
+    }))
 }
 
 async function listScreenBanners(
@@ -426,9 +431,20 @@ async function listScreenBanners(
     type: string
   }>
 > {
-  const result = BannerListResponseSchema.parse(
-    await callSweedRpc(dealerId, 'store.screen.carousel.banner.list', { screenId }),
-  )
+  let raw: unknown
+  try {
+    raw = await callSweedRpc(dealerId, 'store.screen.carousel.banner.list', { screenId })
+  } catch (error) {
+    if (looksLikeSweedDeadScreenError(error)) {
+      console.warn(
+        `[screens.bronx_midtown_image_clone] dealer ${dealerId} screen ${screenId}: ` +
+          `Sweed rejected banner.list (${(error as Error).message}); treating as empty.`,
+      )
+      return []
+    }
+    throw error
+  }
+  const result = BannerListResponseSchema.parse(raw)
   return result.map((banner) => ({
     bannerId: banner.id,
     enabled: banner.enabled,

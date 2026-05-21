@@ -13,6 +13,7 @@ import { appendAuditEvent } from '../../server/audit/appendAuditEvent.js'
 import { withTransaction } from '../../server/db/tx.js'
 import type { JobHandlerContext } from '../runtime/jobRegistry.js'
 import { callSweedRpc } from '../sweed/rpc.js'
+import { looksLikeSweedDeadScreenError } from './screensCarouselHelpers.js'
 
 const ScreenListResponseSchema = z.object({
   data: z.array(z.object({
@@ -326,7 +327,22 @@ async function listScreens(dealerId: number): Promise<ScreenSummary[]> {
 }
 
 async function listScreenBanners(dealerId: number, screenId: number): Promise<BannerListRow[]> {
-  const result = BannerListResponseSchema.parse(await callSweedRpc(dealerId, 'store.screen.carousel.banner.list', { screenId }))
+  let raw: unknown
+  try {
+    raw = await callSweedRpc(dealerId, 'store.screen.carousel.banner.list', { screenId })
+  } catch (error) {
+    if (looksLikeSweedDeadScreenError(error)) {
+      // Disabled / soft-deleted screen — treat as empty rather than
+      // aborting the whole sync. See screensCarouselHelpers.
+      console.warn(
+        `[screens.image_banner_sync] dealer ${dealerId} screen ${screenId}: ` +
+          `Sweed rejected banner.list (${(error as Error).message}); treating as empty.`,
+      )
+      return []
+    }
+    throw error
+  }
+  const result = BannerListResponseSchema.parse(raw)
   return result.map((banner) => ({
     bannerId: banner.id,
     bannerName: banner.name,
