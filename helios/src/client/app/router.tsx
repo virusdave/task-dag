@@ -11,6 +11,7 @@ import { CatalogMaintenancePage } from '../routes/catalog/CatalogMaintenancePage
 import { CatalogModulePage } from '../routes/catalog/CatalogModulePage.js'
 import { CatalogNewEntryPage } from '../routes/catalog/CatalogNewEntryPage.js'
 import { CatalogPage, catalogLoader } from '../routes/catalog/CatalogPage.js'
+import { WhiteLabelPricingPage } from '../routes/catalog/whitelabel/WhiteLabelPricingPage.js'
 import { PendingPurchasesPage, pendingPurchasesLoader } from '../routes/catalog/PendingPurchasesPage.js'
 import { ReviewDetailsPage } from '../routes/catalog/ReviewDetailsPage.js'
 import { ClusterProposalsPage } from '../routes/communications/ClusterProposalsPage.js'
@@ -131,6 +132,10 @@ export const router = createBrowserRouter([
       {
         element: <CatalogNewEntryPage />,
         path: 'catalog/new-entry',
+      },
+      {
+        element: <WhiteLabelPricingPage />,
+        path: 'catalog/whitelabel/pricing',
       },
       {
         element: <ReviewDetailsPage />,

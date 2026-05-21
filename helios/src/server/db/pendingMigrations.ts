@@ -175,6 +175,12 @@ const SENTINELS: MigrationSentinel[] = [
       'parsekit_reverse_shadow_events table — required so the worker can persist parsekit-vs-legacy regressions and the Config -> Parsing -> Purchases page can render them',
     check: (db) => tableExists(db, 'parsekit_reverse_shadow_events'),
   },
+  {
+    migrationId: '018_whitelabel_pricing_snapshots',
+    label:
+      'whitelabel_pricing_snapshots table — required so Catalog -> WhiteLabel -> Pricing can save reviewer-approved bulk-flower menus and the public /api/whitelabel/public/bulk-flower endpoint can serve them',
+    check: (db) => tableExists(db, 'whitelabel_pricing_snapshots'),
+  },
 ]
 
 interface CacheEntry {

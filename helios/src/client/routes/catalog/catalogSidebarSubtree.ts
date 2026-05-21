@@ -174,6 +174,21 @@ export function useRegisterCatalogSidebarSubtree(options?: {
         label: 'History',
         to: buildHeliosModulePath('catalog', 'history'),
       },
+      {
+        kind: 'branch',
+        navKey: 'catalog.whitelabel',
+        label: 'WhiteLabel',
+        to: buildHeliosModulePath('catalog', 'whitelabel/pricing'),
+        defaultOpen: false,
+        children: [
+          {
+            kind: 'leaf',
+            navKey: 'catalog.whitelabel.pricing',
+            label: 'Pricing',
+            to: buildHeliosModulePath('catalog', 'whitelabel/pricing'),
+          },
+        ],
+      },
       // Note: "Price comparison review" (FB-US Midtown/Bronx competitor
       // match review) now lives under Ads → Price comparison review
       // (see communicationsSidebar.ts). It's competitor pricing intel

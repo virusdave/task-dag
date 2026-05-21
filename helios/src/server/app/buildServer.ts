@@ -39,6 +39,7 @@ import { registerSessionRoutes } from '../routes/session.js'
 import { registerSweedAuthEventsRoutes } from '../routes/sweedAuthEvents.js'
 import { registerTaskDagRoutes } from '../routes/taskDag.js'
 import { registerUsersRoutes } from '../routes/users.js'
+import { registerWhitelabelPricingRoutes } from '../routes/whitelabelPricing.js'
 import { joinBasePath } from '../../shared/config/appBasePath.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -144,6 +145,7 @@ async function registerApplicationSurface(server: FastifyInstance) {
   await registerJobRoutes(server)
   await registerTaskDagRoutes(server)
   await registerUsersRoutes(server)
+  await registerWhitelabelPricingRoutes(server)
 
   const clientDistPath = resolve(__dirname, '../../../client')
   if (!existsSync(clientDistPath)) {

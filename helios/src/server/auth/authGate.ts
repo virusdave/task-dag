@@ -34,6 +34,11 @@ const LOGIN_FLOW_ENDPOINTS: readonly LoginFlowEndpoint[] = [
   // Logout must be callable when there is no session (it's a no-op
   // cookie clear) so a stale browser tab can always recover.
   { method: 'POST', appRelativePath: '/api/session/logout' },
+  // Public bulk-flower menu projection. Read-only, no cost / GM /
+  // provenance — see registerWhitelabelPricingRoutes for the
+  // projection. Consumed by the mostly-static-sites
+  // freshlybaked.nyc/white-label/bulk-flower page.
+  { method: 'GET', appRelativePath: '/api/whitelabel/public/bulk-flower' },
 ]
 
 export function registerAuthGate(server: FastifyInstance): void {
