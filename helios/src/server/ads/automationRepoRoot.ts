@@ -8,7 +8,10 @@ import { fileURLToPath } from 'node:url'
  * is running from src (under tsx) or from dist (built).
  *
  * Lookup order:
- *   1. AUTOMATION_REPO_ROOT env var (production override).
+ *   1. AUTOMATION_REPO_PATH env var (production override; this is the
+ *      name the helios-server systemd unit sets, and the same name
+ *      taskDagRepo.ts already reads — keep them aligned).
+ *      AUTOMATION_REPO_ROOT is accepted as a legacy alias.
  *   2. Nearest ancestor directory named "helios" -> its parent.
  *
  * Throws if neither finds a usable directory; helios should surface
@@ -20,10 +23,14 @@ export function getAutomationRepoRoot(): string {
   if (cached) {
     return cached
   }
-  const fromEnv = process.env.AUTOMATION_REPO_ROOT?.trim()
+  const fromEnv =
+    process.env.AUTOMATION_REPO_PATH?.trim() ||
+    process.env.AUTOMATION_REPO_ROOT?.trim()
   if (fromEnv) {
     if (!fs.existsSync(fromEnv)) {
-      throw new Error(`AUTOMATION_REPO_ROOT=${fromEnv} does not exist on disk.`)
+      throw new Error(
+        `AUTOMATION_REPO_PATH=${fromEnv} does not exist on disk.`,
+      )
     }
     cached = path.resolve(fromEnv)
     return cached
@@ -45,7 +52,7 @@ export function getAutomationRepoRoot(): string {
   }
   throw new Error(
     `Could not locate the automation repo root above ${here}. ` +
-      `Set AUTOMATION_REPO_ROOT to point at the directory that contains helios/ and ads/.`,
+      `Set AUTOMATION_REPO_PATH to point at the directory that contains helios/ and ads/.`,
   )
 }
 
