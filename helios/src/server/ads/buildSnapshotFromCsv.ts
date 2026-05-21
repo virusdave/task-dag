@@ -102,8 +102,28 @@ export async function buildSnapshotFromCsv(args: {
       snapshot_date: args.snapshotDate,
     })
   }
-  const lines = ads.map((ad) => JSON.stringify(ad)).join('\n') + (ads.length > 0 ? '\n' : '')
-  await fs.writeFile(args.outputPath, lines)
+  // Refuse to ship an empty snapshot. Before this guard, a CSV that
+  // produced 0 Responsive search ad rows (wrong export type, wrong
+  // delimiter, header-only file, etc.) would silently overwrite the
+  // existing ads-snapshot-live.jsonl with 0 bytes — the operator's
+  // ingest would report success, then the morning pipeline would
+  // bail with "No usable snapshot found" because pickFreshestSnapshot
+  // requires size > 0.
+  if (ads.length === 0) {
+    throw new Error(
+      `No Responsive search ad rows found in ${args.csvPath}. ` +
+        `The existing snapshot was left untouched. ` +
+        `Check that the Drive file is a Google Ads Editor export ` +
+        `(tab-separated, with "Ad type", "Headline 1..15", "Description 1..5" columns).`,
+    )
+  }
+  // Atomic write: stage to a sibling temp file and rename on success,
+  // so a partial write or crash mid-stream can't leave a torn live
+  // snapshot for the morning pipeline to choke on.
+  const lines = ads.map((ad) => JSON.stringify(ad)).join('\n') + '\n'
+  const tmpPath = `${args.outputPath}.${process.pid}.${Date.now()}.tmp`
+  await fs.writeFile(tmpPath, lines)
+  await fs.rename(tmpPath, args.outputPath)
   const byServingStatus: Record<string, number> = {}
   for (const ad of ads) {
     byServingStatus[ad.serving_status] = (byServingStatus[ad.serving_status] ?? 0) + 1
