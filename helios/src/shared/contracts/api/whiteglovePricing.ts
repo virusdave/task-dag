@@ -1,5 +1,5 @@
-// API contracts for the helios Catalog→WhiteLabel→Pricing editor and
-// the public freshlybaked.nyc/white-label/bulk-flower menu it feeds.
+// API contracts for the helios Catalog→WhiteGlove→Pricing editor and
+// the public freshlybaked.nyc/white-glove/bulk-flower menu it feeds.
 //
 // Domain notes
 // ------------
@@ -24,24 +24,24 @@
 
 import { z } from 'zod'
 
-export const WHITELABEL_TAX_MULT = 1.13
-export const WHITELABEL_MIN_PACK_GRAMS = 14
-export const WHITELABEL_MIN_COST_USD = 1.0
+export const WHITEGLOVE_TAX_MULT = 1.13
+export const WHITEGLOVE_MIN_PACK_GRAMS = 14
+export const WHITEGLOVE_MIN_COST_USD = 1.0
 
-export const WhitelabelDecisionSchema = z.enum(['accept', 'reject', 'pending'])
-export type WhitelabelDecision = z.infer<typeof WhitelabelDecisionSchema>
+export const WhitegloveDecisionSchema = z.enum(['accept', 'reject', 'pending'])
+export type WhitegloveDecision = z.infer<typeof WhitegloveDecisionSchema>
 
-export const WhitelabelSizeKeySchema = z.enum(['quarterLb', 'halfLb', 'lb'])
-export type WhitelabelSizeKey = z.infer<typeof WhitelabelSizeKeySchema>
+export const WhitegloveSizeKeySchema = z.enum(['quarterLb', 'halfLb', 'lb'])
+export type WhitegloveSizeKey = z.infer<typeof WhitegloveSizeKeySchema>
 
-export interface WhitelabelSizeSpec {
-  readonly key: WhitelabelSizeKey
+export interface WhitegloveSizeSpec {
+  readonly key: WhitegloveSizeKey
   readonly label: string
   readonly grams: number
   readonly defaultGm: number
 }
 
-export const WHITELABEL_SIZES: readonly WhitelabelSizeSpec[] = [
+export const WHITEGLOVE_SIZES: readonly WhitegloveSizeSpec[] = [
   { key: 'quarterLb', label: '1/4 lb', grams: 112, defaultGm: 0.60 },
   { key: 'halfLb',    label: '1/2 lb', grams: 224, defaultGm: 0.54 },
   { key: 'lb',        label: '1 lb',   grams: 448, defaultGm: 0.49 },
@@ -115,83 +115,83 @@ export type CostBasisRefreshResponse = z.infer<typeof CostBasisRefreshResponseSc
 // Snapshot payload — what gets persisted on Save.
 // ---------------------------------------------------------------------------
 
-export const WhitelabelRowKeySchema = z.object({
+export const WhitegloveRowKeySchema = z.object({
   brand: z.string(),
   strainShort: z.string(),
 })
-export type WhitelabelRowKey = z.infer<typeof WhitelabelRowKeySchema>
+export type WhitegloveRowKey = z.infer<typeof WhitegloveRowKeySchema>
 
-export const WhitelabelBrandGmOverridesSchema = z.record(z.string(), SizeMapSchema)
+export const WhitegloveBrandGmOverridesSchema = z.record(z.string(), SizeMapSchema)
 
-export const WhitelabelRowDecisionSchema = z.object({
+export const WhitegloveRowDecisionSchema = z.object({
   brand: z.string(),
   strainShort: z.string(),
-  decision: WhitelabelDecisionSchema,
+  decision: WhitegloveDecisionSchema,
 })
-export const WhitelabelBrandDecisionSchema = z.object({
+export const WhitegloveBrandDecisionSchema = z.object({
   brand: z.string(),
-  decision: WhitelabelDecisionSchema,
+  decision: WhitegloveDecisionSchema,
 })
 
-export const WhitelabelComputedRowSchema = z.object({
+export const WhitegloveComputedRowSchema = z.object({
   brand: z.string(),
   strainShort: z.string(),
   strainDisplay: z.string(),
   perGram: z.number().nullable(),
   imputed: z.boolean(),
   sites: z.array(z.string()),
-  effectiveDecision: WhitelabelDecisionSchema,
+  effectiveDecision: WhitegloveDecisionSchema,
   // null when perGram is null (cannot be priced).
   prices: SizeMapSchema.nullable(),
   // GM used per size (after brand override + joint default).
   gmsApplied: SizeMapSchema,
 })
-export type WhitelabelComputedRow = z.infer<typeof WhitelabelComputedRowSchema>
+export type WhitegloveComputedRow = z.infer<typeof WhitegloveComputedRowSchema>
 
-export const WhitelabelSnapshotPayloadSchema = z.object({
+export const WhitegloveSnapshotPayloadSchema = z.object({
   schemaVersion: z.literal(1),
   taxMult: z.number(),
   defaultGmBySize: SizeMapSchema,
   jointGmBySize: SizeMapSchema,
-  brandGmBySize: WhitelabelBrandGmOverridesSchema,
-  rowDecisions: z.array(WhitelabelRowDecisionSchema),
-  brandDecisions: z.array(WhitelabelBrandDecisionSchema),
+  brandGmBySize: WhitegloveBrandGmOverridesSchema,
+  rowDecisions: z.array(WhitegloveRowDecisionSchema),
+  brandDecisions: z.array(WhitegloveBrandDecisionSchema),
   costBasis: CostBasisRefreshResponseSchema,
-  computed: z.array(WhitelabelComputedRowSchema),
+  computed: z.array(WhitegloveComputedRowSchema),
   note: z.string().nullable(),
 })
-export type WhitelabelSnapshotPayload = z.infer<typeof WhitelabelSnapshotPayloadSchema>
+export type WhitegloveSnapshotPayload = z.infer<typeof WhitegloveSnapshotPayloadSchema>
 
 // Save request — client sends the inputs and the server recomputes
 // `computed`, persists, and returns the same shape from getCurrent.
-export const WhitelabelSnapshotSubmissionSchema = z.object({
+export const WhitegloveSnapshotSubmissionSchema = z.object({
   taxMult: z.number(),
   defaultGmBySize: SizeMapSchema,
   jointGmBySize: SizeMapSchema,
-  brandGmBySize: WhitelabelBrandGmOverridesSchema,
-  rowDecisions: z.array(WhitelabelRowDecisionSchema),
-  brandDecisions: z.array(WhitelabelBrandDecisionSchema),
+  brandGmBySize: WhitegloveBrandGmOverridesSchema,
+  rowDecisions: z.array(WhitegloveRowDecisionSchema),
+  brandDecisions: z.array(WhitegloveBrandDecisionSchema),
   costBasis: CostBasisRefreshResponseSchema,
   note: z.string().max(2000).nullable().optional(),
 })
-export type WhitelabelSnapshotSubmission = z.infer<typeof WhitelabelSnapshotSubmissionSchema>
+export type WhitegloveSnapshotSubmission = z.infer<typeof WhitegloveSnapshotSubmissionSchema>
 
-export const WhitelabelSnapshotEnvelopeSchema = z.object({
+export const WhitegloveSnapshotEnvelopeSchema = z.object({
   id: z.number().int(),
   createdAt: z.string(),
   createdBy: z.string(),
   costBasisGeneratedAt: z.string(),
-  payload: WhitelabelSnapshotPayloadSchema,
+  payload: WhitegloveSnapshotPayloadSchema,
 })
-export type WhitelabelSnapshotEnvelope = z.infer<typeof WhitelabelSnapshotEnvelopeSchema>
+export type WhitegloveSnapshotEnvelope = z.infer<typeof WhitegloveSnapshotEnvelopeSchema>
 
-export const WhitelabelCurrentSnapshotResponseSchema = z.object({
-  snapshot: WhitelabelSnapshotEnvelopeSchema.nullable(),
+export const WhitegloveCurrentSnapshotResponseSchema = z.object({
+  snapshot: WhitegloveSnapshotEnvelopeSchema.nullable(),
 })
-export type WhitelabelCurrentSnapshotResponse = z.infer<typeof WhitelabelCurrentSnapshotResponseSchema>
+export type WhitegloveCurrentSnapshotResponse = z.infer<typeof WhitegloveCurrentSnapshotResponseSchema>
 
 // ---------------------------------------------------------------------------
-// Public projection — what freshlybaked.nyc/white-label/bulk-flower
+// Public projection — what freshlybaked.nyc/white-glove/bulk-flower
 // reads. Strictly the visible menu; no cost, no GM, no provenance.
 // ---------------------------------------------------------------------------
 
@@ -208,7 +208,7 @@ export const PublicBulkFlowerResponseSchema = z.object({
   costBasisGeneratedAt: z.string(),
   sizes: z.array(
     z.object({
-      key: WhitelabelSizeKeySchema,
+      key: WhitegloveSizeKeySchema,
       label: z.string(),
       grams: z.number(),
     }),
@@ -224,16 +224,16 @@ export type PublicBulkFlowerResponse = z.infer<typeof PublicBulkFlowerResponseSc
 // ---------------------------------------------------------------------------
 
 /** OTD = 1.13 × cost / (1 − GM). Returns null when GM≥1. */
-export function computeWhitelabelOtd(cost: number, gm: number, taxMult: number = WHITELABEL_TAX_MULT): number | null {
+export function computeWhitegloveOtd(cost: number, gm: number, taxMult: number = WHITEGLOVE_TAX_MULT): number | null {
   if (gm >= 0.999) return null
   if (!Number.isFinite(cost) || cost <= 0) return null
   return (taxMult * cost) / (1 - gm)
 }
 
 /** Brand override wins over joint default; missing/zero falls back to default. */
-export function pickWhitelabelGm(
+export function pickWhitegloveGm(
   brand: string,
-  size: WhitelabelSizeKey,
+  size: WhitegloveSizeKey,
   jointGmBySize: { quarterLb: number; halfLb: number; lb: number },
   brandGmBySize: Record<string, { quarterLb: number; halfLb: number; lb: number }>,
 ): number {
@@ -243,10 +243,10 @@ export function pickWhitelabelGm(
 }
 
 /** Brand decision is the default; row overrides only when row ≠ 'pending'. */
-export function pickWhitelabelEffectiveDecision(
-  rowDecision: WhitelabelDecision | undefined,
-  brandDecision: WhitelabelDecision | undefined,
-): WhitelabelDecision {
+export function pickWhitegloveEffectiveDecision(
+  rowDecision: WhitegloveDecision | undefined,
+  brandDecision: WhitegloveDecision | undefined,
+): WhitegloveDecision {
   if (rowDecision && rowDecision !== 'pending') return rowDecision
   return brandDecision ?? 'pending'
 }

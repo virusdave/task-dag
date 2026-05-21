@@ -176,16 +176,16 @@ export function useRegisterCatalogSidebarSubtree(options?: {
       },
       {
         kind: 'branch',
-        navKey: 'catalog.whitelabel',
-        label: 'WhiteLabel',
-        to: buildHeliosModulePath('catalog', 'whitelabel/pricing'),
+        navKey: 'catalog.whiteglove',
+        label: 'WhiteGlove',
+        to: buildHeliosModulePath('catalog', 'whiteglove/pricing'),
         defaultOpen: false,
         children: [
           {
             kind: 'leaf',
-            navKey: 'catalog.whitelabel.pricing',
+            navKey: 'catalog.whiteglove.pricing',
             label: 'Pricing',
-            to: buildHeliosModulePath('catalog', 'whitelabel/pricing'),
+            to: buildHeliosModulePath('catalog', 'whiteglove/pricing'),
           },
         ],
       },

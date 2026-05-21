@@ -1,4 +1,4 @@
-// Server-side cost-basis collector for the white-label bulk-flower
+// Server-side cost-basis collector for the white-glove bulk-flower
 // pricing editor. Scans Midtown + Bronx grouped inventory via Sweed,
 // keeps every {brand, strain} flower SKU with pack size ≥ 14 g,
 // picks the most-recent lot whose wholesaleCost ≥ $1 as the per-gram
@@ -12,10 +12,10 @@
 
 import {
   CostBasisRefreshResponseSchema,
-  WHITELABEL_MIN_COST_USD,
-  WHITELABEL_MIN_PACK_GRAMS,
-  WHITELABEL_SIZES,
-  WHITELABEL_TAX_MULT,
+  WHITEGLOVE_MIN_COST_USD,
+  WHITEGLOVE_MIN_PACK_GRAMS,
+  WHITEGLOVE_SIZES,
+  WHITEGLOVE_TAX_MULT,
   type CostBasisItem,
   type CostBasisRefreshResponse,
 } from '../../shared/contracts/index.js'
@@ -135,13 +135,13 @@ async function pullGroupedInventory(site: SiteScope): Promise<{ evidence: LotEvi
     { dealerId: site.dealerId },
   )
   if (Number(dealerSet.user?.currentDealerId) !== site.dealerId) {
-    throw new Error(`[whitelabel-cost-basis] dealer.set mismatch: expected ${site.dealerId}, got ${dealerSet.user?.currentDealerId}`)
+    throw new Error(`[whiteglove-cost-basis] dealer.set mismatch: expected ${site.dealerId}, got ${dealerSet.user?.currentDealerId}`)
   }
   const probe = await callSweedRpcRaw<{ user?: { currentDealerId?: unknown } }>(
     'store.auth.initial.data.get',
   )
   if (Number(probe.user?.currentDealerId) !== site.dealerId) {
-    throw new Error(`[whitelabel-cost-basis] initial.data.get confirm failed for ${site.label}`)
+    throw new Error(`[whiteglove-cost-basis] initial.data.get confirm failed for ${site.label}`)
   }
 
   const evidence: LotEvidence[] = []
@@ -165,7 +165,7 @@ async function pullGroupedInventory(site: SiteScope): Promise<{ evidence: LotEvi
       const categoryName = asString(row.category?.name ?? null)
       if (!isFlower(categoryName)) continue
       const parse = parsePackWeight(productName)
-      if (parse.grams === null || parse.grams < WHITELABEL_MIN_PACK_GRAMS - 0.01) continue
+      if (parse.grams === null || parse.grams < WHITEGLOVE_MIN_PACK_GRAMS - 0.01) continue
       const brand = asString(row.productBrand?.name ?? null) ?? '(no brand)'
       const strainDisplay = stripPackWeight(productName, parse.label)
       const strainKey = strainDisplay.toLowerCase()
@@ -179,7 +179,7 @@ async function pullGroupedInventory(site: SiteScope): Promise<{ evidence: LotEvi
         if (latestReceived === null || receivedAt > latestReceived) latestReceived = receivedAt
         const cost = asNumber(lot.wholesaleCost)
         if (cost !== null) allCosts.push(cost)
-        if (cost === null || cost < WHITELABEL_MIN_COST_USD) continue
+        if (cost === null || cost < WHITEGLOVE_MIN_COST_USD) continue
         acceptedCount += 1
         evidence.push({
           site: site.label,
@@ -216,7 +216,7 @@ async function pullGroupedInventory(site: SiteScope): Promise<{ evidence: LotEvi
     if (page > 200) break
   }
   if (totalCount !== null && scannedRows !== totalCount) {
-    throw new Error(`[whitelabel-cost-basis] [${site.label}] paging incomplete: ${scannedRows}/${totalCount}`)
+    throw new Error(`[whiteglove-cost-basis] [${site.label}] paging incomplete: ${scannedRows}/${totalCount}`)
   }
   return { evidence, noCost }
 }
@@ -365,13 +365,13 @@ export async function collectFlowerCostBasis(): Promise<CostBasisRefreshResponse
   const items = buildItemsFromEvidence(allEvidence, allNoCost)
   return CostBasisRefreshResponseSchema.parse({
     generatedAt,
-    minPackGrams: WHITELABEL_MIN_PACK_GRAMS,
-    minCostUsd: WHITELABEL_MIN_COST_USD,
-    taxMult: WHITELABEL_TAX_MULT,
+    minPackGrams: WHITEGLOVE_MIN_PACK_GRAMS,
+    minCostUsd: WHITEGLOVE_MIN_COST_USD,
+    taxMult: WHITEGLOVE_TAX_MULT,
     defaultGmBySize: {
-      quarterLb: WHITELABEL_SIZES[0].defaultGm,
-      halfLb: WHITELABEL_SIZES[1].defaultGm,
-      lb: WHITELABEL_SIZES[2].defaultGm,
+      quarterLb: WHITEGLOVE_SIZES[0].defaultGm,
+      halfLb: WHITEGLOVE_SIZES[1].defaultGm,
+      lb: WHITEGLOVE_SIZES[2].defaultGm,
     },
     items,
   })

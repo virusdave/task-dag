@@ -2,28 +2,28 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 
 import {
   CostBasisRefreshResponseSchema,
-  WhitelabelCurrentSnapshotResponseSchema,
-  WHITELABEL_SIZES,
-  WHITELABEL_TAX_MULT,
-  computeWhitelabelOtd,
-  pickWhitelabelEffectiveDecision,
-  pickWhitelabelGm,
+  WhitegloveCurrentSnapshotResponseSchema,
+  WHITEGLOVE_SIZES,
+  WHITEGLOVE_TAX_MULT,
+  computeWhitegloveOtd,
+  pickWhitegloveEffectiveDecision,
+  pickWhitegloveGm,
   type CostBasisRefreshResponse,
-  type WhitelabelCurrentSnapshotResponse,
-  type WhitelabelDecision,
-  type WhitelabelSnapshotEnvelope,
+  type WhitegloveCurrentSnapshotResponse,
+  type WhitegloveDecision,
+  type WhitegloveSnapshotEnvelope,
 } from '../../../../shared/contracts/index.js'
 import { loadJson } from '../../../app/fetchJson.js'
 import { useRegisterCatalogSidebarSubtree } from '../catalogSidebarSubtree.js'
 
 type SizeMap = { quarterLb: number; halfLb: number; lb: number }
 type BrandGmMap = Record<string, SizeMap>
-type DecisionMap = Record<string, WhitelabelDecision>
+type DecisionMap = Record<string, WhitegloveDecision>
 
 const DEFAULT_GMS: SizeMap = {
-  quarterLb: WHITELABEL_SIZES[0].defaultGm,
-  halfLb: WHITELABEL_SIZES[1].defaultGm,
-  lb: WHITELABEL_SIZES[2].defaultGm,
+  quarterLb: WHITEGLOVE_SIZES[0].defaultGm,
+  halfLb: WHITEGLOVE_SIZES[1].defaultGm,
+  lb: WHITEGLOVE_SIZES[2].defaultGm,
 }
 
 function rowKey(brand: string, strainShort: string): string {
@@ -44,10 +44,10 @@ function fmt$2(v: number | null): string {
   return `$${v.toFixed(2)}`
 }
 
-export function WhiteLabelPricingPage() {
+export function WhiteGlovePricingPage() {
   useRegisterCatalogSidebarSubtree()
 
-  const [snapshot, setSnapshot] = useState<WhitelabelSnapshotEnvelope | null>(null)
+  const [snapshot, setSnapshot] = useState<WhitegloveSnapshotEnvelope | null>(null)
   const [costBasis, setCostBasis] = useState<CostBasisRefreshResponse | null>(null)
   const [jointGm, setJointGm] = useState<SizeMap>(DEFAULT_GMS)
   const [brandGm, setBrandGm] = useState<BrandGmMap>({})
@@ -64,8 +64,8 @@ export function WhiteLabelPricingPage() {
     let cancelled = false
     setBusy('load')
     setError(null)
-    loadJson('/api/whitelabel/pricing/snapshot/current', WhitelabelCurrentSnapshotResponseSchema)
-      .then((resp: WhitelabelCurrentSnapshotResponse) => {
+    loadJson('/api/whiteglove/pricing/snapshot/current', WhitegloveCurrentSnapshotResponseSchema)
+      .then((resp: WhitegloveCurrentSnapshotResponse) => {
         if (cancelled) return
         if (resp.snapshot) {
           hydrateFromSnapshot(resp.snapshot)
@@ -83,7 +83,7 @@ export function WhiteLabelPricingPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  function hydrateFromSnapshot(s: WhitelabelSnapshotEnvelope): void {
+  function hydrateFromSnapshot(s: WhitegloveSnapshotEnvelope): void {
     setSnapshot(s)
     setCostBasis(s.payload.costBasis)
     setJointGm(s.payload.jointGmBySize)
@@ -103,7 +103,7 @@ export function WhiteLabelPricingPage() {
     setError(null)
     setStatusMsg('Scanning Midtown + Bronx via Sweed (≈30–60s)…')
     try {
-      const response = await fetch('/api/whitelabel/pricing/cost-basis/refresh', {
+      const response = await fetch('/api/whiteglove/pricing/cost-basis/refresh', {
         method: 'POST',
         credentials: 'same-origin',
         headers: { Accept: 'application/json' },
@@ -130,7 +130,7 @@ export function WhiteLabelPricingPage() {
     setStatusMsg(null)
     try {
       const body = {
-        taxMult: WHITELABEL_TAX_MULT,
+        taxMult: WHITEGLOVE_TAX_MULT,
         defaultGmBySize: DEFAULT_GMS,
         jointGmBySize: jointGm,
         brandGmBySize: brandGm,
@@ -142,7 +142,7 @@ export function WhiteLabelPricingPage() {
         costBasis,
         note: note.trim() || null,
       }
-      const response = await fetch('/api/whitelabel/pricing/snapshot', {
+      const response = await fetch('/api/whiteglove/pricing/snapshot', {
         method: 'POST',
         credentials: 'same-origin',
         headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
@@ -152,7 +152,7 @@ export function WhiteLabelPricingPage() {
         const t = await response.text()
         throw new Error(`save failed: ${response.status} ${t}`)
       }
-      const parsed = WhitelabelCurrentSnapshotResponseSchema.parse(await response.json())
+      const parsed = WhitegloveCurrentSnapshotResponseSchema.parse(await response.json())
       if (parsed.snapshot) {
         hydrateFromSnapshot(parsed.snapshot)
         setStatusMsg(`Saved snapshot #${parsed.snapshot.id}. Public page now reflects accepted rows.`)
@@ -171,7 +171,7 @@ export function WhiteLabelPricingPage() {
       <style>{INLINE_CSS}</style>
       <div className="page-header">
         <div>
-          <p className="eyebrow">Catalog → WhiteLabel</p>
+          <p className="eyebrow">Catalog → WhiteGlove</p>
           <h2>Bulk-Flower Pricing</h2>
         </div>
         <div className="wl-controls">
@@ -203,7 +203,7 @@ export function WhiteLabelPricingPage() {
                 <th style={{ minWidth: '260px' }}>Strain</th>
                 <th>$ / g</th>
                 <th>Decision</th>
-                {WHITELABEL_SIZES.map((s) => (
+                {WHITEGLOVE_SIZES.map((s) => (
                   <th key={s.key} className="size">
                     {s.label} <span className="dim">({s.grams}g)</span>
                   </th>
@@ -217,7 +217,7 @@ export function WhiteLabelPricingPage() {
                   <strong>All brands (joint)</strong>
                   <div className="dim small">Moves every brand at this size in lockstep.</div>
                 </td>
-                {WHITELABEL_SIZES.map((s) => (
+                {WHITEGLOVE_SIZES.map((s) => (
                   <td key={s.key} className="slider-cell">
                     <SliderCell
                       value={jointGm[s.key]}
@@ -249,7 +249,7 @@ export function WhiteLabelPricingPage() {
                           compact
                         />
                       </td>
-                      {WHITELABEL_SIZES.map((s) => {
+                      {WHITEGLOVE_SIZES.map((s) => {
                         const v = brandGm[brand]?.[s.key]
                         const usingDefault = v === undefined
                         const display = usingDefault ? jointGm[s.key] : v
@@ -278,7 +278,7 @@ export function WhiteLabelPricingPage() {
                     {rows.map((item) => {
                       const rkey = rowKey(item.brand, item.strainShort)
                       const rdec = rowDec[rkey]
-                      const effective = pickWhitelabelEffectiveDecision(rdec, bd)
+                      const effective = pickWhitegloveEffectiveDecision(rdec, bd)
                       const perGram = item.perGram
                       return (
                         <tr key={rkey} className={`strain decision-${effective}`}>
@@ -320,10 +320,10 @@ export function WhiteLabelPricingPage() {
                               }}
                             />
                           </td>
-                          {WHITELABEL_SIZES.map((s) => {
-                            const gm = pickWhitelabelGm(item.brand, s.key, jointGm, brandGm)
+                          {WHITEGLOVE_SIZES.map((s) => {
+                            const gm = pickWhitegloveGm(item.brand, s.key, jointGm, brandGm)
                             const cost = perGram === null ? null : perGram * s.grams
-                            const otd = cost === null ? null : computeWhitelabelOtd(cost, gm)
+                            const otd = cost === null ? null : computeWhitegloveOtd(cost, gm)
                             return (
                               <td key={s.key} className="numeric price-cell">
                                 <div className="otd">{fmt$(otd)}</div>
@@ -376,7 +376,7 @@ export function WhiteLabelPricingPage() {
               </p>
               <p>
                 Decision precedence: per-row decision wins when not <em>pending</em>; otherwise the
-                per-brand decision applies. The public freshlybaked.nyc/white-label/bulk-flower page
+                per-brand decision applies. The public freshlybaked.nyc/white-glove/bulk-flower page
                 shows rows whose effective decision is <em>accept</em> AND that have a priceable cost.
               </p>
               <p>
@@ -445,8 +445,8 @@ function DecisionPicker({
   onChange,
   compact = false,
 }: {
-  value: WhitelabelDecision
-  onChange: (v: WhitelabelDecision) => void
+  value: WhitegloveDecision
+  onChange: (v: WhitegloveDecision) => void
   compact?: boolean
 }) {
   return (

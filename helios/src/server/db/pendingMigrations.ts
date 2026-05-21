@@ -176,10 +176,10 @@ const SENTINELS: MigrationSentinel[] = [
     check: (db) => tableExists(db, 'parsekit_reverse_shadow_events'),
   },
   {
-    migrationId: '018_whitelabel_pricing_snapshots',
+    migrationId: '020_rename_whitelabel_to_whiteglove',
     label:
-      'whitelabel_pricing_snapshots table — required so Catalog -> WhiteLabel -> Pricing can save reviewer-approved bulk-flower menus and the public /api/whitelabel/public/bulk-flower endpoint can serve them',
-    check: (db) => tableExists(db, 'whitelabel_pricing_snapshots'),
+      'whiteglove_pricing_snapshots table — required so Catalog -> WhiteGlove -> Pricing can save reviewer-approved bulk-flower menus and the public /api/whiteglove/public/bulk-flower endpoint can serve them. (Migration 018 created the table as whitelabel_pricing_snapshots; 020 renames it to whiteglove_pricing_snapshots.)',
+    check: (db) => tableExists(db, 'whiteglove_pricing_snapshots'),
   },
   {
     migrationId: '019_staff_inclusion',

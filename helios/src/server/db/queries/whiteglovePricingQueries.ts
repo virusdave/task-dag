@@ -1,10 +1,10 @@
 import type { PoolClient } from 'pg'
 
 import {
-  WhitelabelSnapshotEnvelopeSchema,
-  WhitelabelSnapshotPayloadSchema,
-  type WhitelabelSnapshotEnvelope,
-  type WhitelabelSnapshotPayload,
+  WhitegloveSnapshotEnvelopeSchema,
+  WhitegloveSnapshotPayloadSchema,
+  type WhitegloveSnapshotEnvelope,
+  type WhitegloveSnapshotPayload,
 } from '../../../shared/contracts/index.js'
 import { getPool, type Queryable } from '../pool.js'
 import { withTransaction } from '../tx.js'
@@ -18,27 +18,27 @@ interface SnapshotRow {
   payload: unknown
 }
 
-function rowToEnvelope(row: SnapshotRow): WhitelabelSnapshotEnvelope {
+function rowToEnvelope(row: SnapshotRow): WhitegloveSnapshotEnvelope {
   const createdAt = row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at
   const costBasisGeneratedAt =
     row.cost_basis_generated_at instanceof Date
       ? row.cost_basis_generated_at.toISOString()
       : row.cost_basis_generated_at
-  return WhitelabelSnapshotEnvelopeSchema.parse({
+  return WhitegloveSnapshotEnvelopeSchema.parse({
     id: row.id,
     createdAt,
     createdBy: row.created_by,
     costBasisGeneratedAt,
-    payload: WhitelabelSnapshotPayloadSchema.parse(row.payload),
+    payload: WhitegloveSnapshotPayloadSchema.parse(row.payload),
   })
 }
 
-export async function getCurrentWhitelabelSnapshot(
+export async function getCurrentWhitegloveSnapshot(
   db: Queryable = getPool(),
-): Promise<WhitelabelSnapshotEnvelope | null> {
+): Promise<WhitegloveSnapshotEnvelope | null> {
   const result = await db.query<SnapshotRow>(
     `select id, created_at, created_by, cost_basis_generated_at, payload_version, payload
-       from whitelabel_pricing_snapshots
+       from whiteglove_pricing_snapshots
       where is_current = true
       order by created_at desc
       limit 1`,
@@ -47,17 +47,17 @@ export async function getCurrentWhitelabelSnapshot(
   return rowToEnvelope(result.rows[0])
 }
 
-export async function insertWhitelabelSnapshot(args: {
+export async function insertWhitegloveSnapshot(args: {
   createdBy: string
   costBasisGeneratedAt: string
-  payload: WhitelabelSnapshotPayload
-}): Promise<WhitelabelSnapshotEnvelope> {
+  payload: WhitegloveSnapshotPayload
+}): Promise<WhitegloveSnapshotEnvelope> {
   return withTransaction(async (client: PoolClient) => {
     await client.query(
-      `update whitelabel_pricing_snapshots set is_current = false where is_current = true`,
+      `update whiteglove_pricing_snapshots set is_current = false where is_current = true`,
     )
     const inserted = await client.query<SnapshotRow>(
-      `insert into whitelabel_pricing_snapshots
+      `insert into whiteglove_pricing_snapshots
          (created_by, cost_basis_generated_at, payload_version, payload, is_current)
        values ($1, $2, $3, $4::jsonb, true)
        returning id, created_at, created_by, cost_basis_generated_at, payload_version, payload`,

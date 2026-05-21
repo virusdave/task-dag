@@ -1,7 +1,7 @@
--- White-label bulk-flower pricing snapshots
+-- White-glove bulk-flower pricing snapshots
 --
 -- Versioned, append-mostly. Every "Save" in the helios
--- Catalog→WhiteLabel→Pricing editor writes one new row containing the
+-- Catalog→WhiteGlove→Pricing editor writes one new row containing the
 -- entire reviewed snapshot — cost basis, GM choices, per-row and
 -- per-brand decisions, the computed OTD prices, and the public
 -- projection — as a single JSONB payload. The most recent row is
@@ -9,7 +9,7 @@
 -- menu reads from. The partial unique index enforces "at most one
 -- current snapshot at a time".
 
-create table if not exists whitelabel_pricing_snapshots (
+create table if not exists whiteglove_pricing_snapshots (
   id              bigserial primary key,
   created_at      timestamptz not null default now(),
   created_by      text not null,
@@ -23,9 +23,9 @@ create table if not exists whitelabel_pricing_snapshots (
   is_current      boolean not null default false
 );
 
-create unique index if not exists whitelabel_pricing_snapshots_one_current
-  on whitelabel_pricing_snapshots (is_current)
+create unique index if not exists whiteglove_pricing_snapshots_one_current
+  on whiteglove_pricing_snapshots (is_current)
   where is_current = true;
 
-create index if not exists whitelabel_pricing_snapshots_created_at
-  on whitelabel_pricing_snapshots (created_at desc);
+create index if not exists whiteglove_pricing_snapshots_created_at
+  on whiteglove_pricing_snapshots (created_at desc);
