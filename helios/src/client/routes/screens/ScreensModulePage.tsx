@@ -2,9 +2,6 @@ import { useEffect, useMemo, useState } from 'react'
 import { Link, useLoaderData, useRevalidator, useRouteLoaderData } from 'react-router-dom'
 
 import {
-  HELIOS_SCREENS_FRESH_AND_INTENSE_ACTION_NAME,
-  HELIOS_SCREENS_FRESH_AND_INTENSE_BANNER_NAME,
-  HELIOS_SCREENS_FRESH_AND_INTENSE_CAMPAIGN_NAME,
   HELIOS_MODULES,
   HELIOS_SCREENS_BRONX_TO_MIDTOWN_IMAGE_FALLBACK_BANNER_NAMES,
   HELIOS_SCREENS_MIDTOWN_SITE_DEALER_ID,
@@ -31,7 +28,6 @@ const bronxMidtownCloneBannerLabel = HELIOS_SCREENS_BRONX_TO_MIDTOWN_IMAGE_FALLB
 const pricedToMovePromoActionLabel = HELIOS_SCREENS_PRICED_TO_MOVE_PROMO_ACTIONS
   .map((action) => `${action.bannerName} -> ${action.actionName}`)
   .join(', ')
-const freshAndIntensePromoLabel = `${HELIOS_SCREENS_FRESH_AND_INTENSE_CAMPAIGN_NAME} / ${HELIOS_SCREENS_FRESH_AND_INTENSE_ACTION_NAME}`
 const midtownDealerLabel = HELIOS_SCREENS_SITE_DEALERS.find(
   (dealer) => dealer.dealerId === HELIOS_SCREENS_MIDTOWN_SITE_DEALER_ID,
 )?.dealerName ?? 'Freshly Baked NYC - Midtown'
@@ -49,8 +45,6 @@ type ScreensSubmissionKey =
   | 'clone_dry_run'
   | 'move_apply'
   | 'move_dry_run'
-  | 'fresh_apply'
-  | 'fresh_dry_run'
 
 interface ScreensModuleLoaderData {
   history: HistoryEventsResponse
@@ -243,24 +237,6 @@ export function ScreensModulePage() {
         apply
           ? `Queued live Midtown Priced to MOVE promo rebind as job #${jobId}.`
           : `Queued dry-run Midtown Priced to MOVE promo rebind as job #${jobId}.`
-      ),
-    })
-  }
-
-  async function queueMidtownFreshAndIntensePromoRebind(apply: boolean) {
-    await queueScreensJob({
-      body: {
-        apply,
-        reason: reason.trim() || null,
-      },
-      confirmMessage: apply ? `Queue a live Midtown Fresh & INTENSE promo rebind across all ${midtownDealerLabel} screens?` : null,
-      endpoint: '/api/screens/midtown-fresh-and-intense-promo-rebind',
-      failureMessage: 'Could not queue the Midtown Fresh & INTENSE promo rebind.',
-      submittingKey: apply ? 'fresh_apply' : 'fresh_dry_run',
-      successMessage: (jobId) => (
-        apply
-          ? `Queued live Midtown Fresh & INTENSE promo rebind as job #${jobId}.`
-          : `Queued dry-run Midtown Fresh & INTENSE promo rebind as job #${jobId}.`
       ),
     })
   }
@@ -686,50 +662,6 @@ export function ScreensModulePage() {
           </div>
         </article>
 
-        <article className="mini-card">
-          <header>
-            <strong>Queue Fresh &amp; INTENSE rebind</strong>
-            <Pill tone={canQueueScreensWorkflows ? 'success' : 'muted'}>{canQueueScreensWorkflows ? 'editor' : 'view only'}</Pill>
-          </header>
-          <p className="subtle-copy">
-            Ensure the Midtown promo surface is ready, then replace the latest {HELIOS_SCREENS_FRESH_AND_INTENSE_BANNER_NAME}{' '}
-            image fallback banners with selector-driven product-menu banners.
-          </p>
-          <div className="stack-field" style={{ marginTop: '0.9rem' }}>
-            <span>Promo surface</span>
-            <p className="subtle-copy">{freshAndIntensePromoLabel}</p>
-          </div>
-          <p className="subtle-copy">Live apply keeps the image fallback in place if the new selector-backed banner still resolves to zero duration.</p>
-          <div className="stack-field" style={{ marginTop: '0.9rem' }}>
-            <span>Run note</span>
-            <textarea
-              disabled={!canQueueScreensWorkflows || submittingAction !== null}
-              onChange={(event) => setReason(event.target.value)}
-              placeholder="Optional operator note for the audit trail"
-              rows={3}
-              value={reason}
-            />
-          </div>
-          <p className="subtle-copy">Target: all {midtownDealerLabel} screens</p>
-          <div className="inline-row wrap-row module-card-links">
-            <button
-              className="ghost-button"
-              disabled={!canQueueScreensWorkflows || submittingAction !== null}
-              onClick={() => void queueMidtownFreshAndIntensePromoRebind(false)}
-              type="button"
-            >
-              {submittingAction === 'fresh_dry_run' ? 'Queueing dry-run…' : 'Queue dry-run'}
-            </button>
-            <button
-              className="primary-button"
-              disabled={!canQueueScreensWorkflows || submittingAction !== null}
-              onClick={() => void queueMidtownFreshAndIntensePromoRebind(true)}
-              type="button"
-            >
-              {submittingAction === 'fresh_apply' ? 'Queueing live apply…' : 'Queue live apply'}
-            </button>
-          </div>
-        </article>
       </div>
 
       <div className="review-grid">

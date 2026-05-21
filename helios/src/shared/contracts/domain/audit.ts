@@ -63,8 +63,6 @@ export const AuditEventTypeSchema = z.enum([
   'screens.bronx_midtown_image_clone.completed',
   'screens.midtown_priced_to_move_promo_rebind.requested',
   'screens.midtown_priced_to_move_promo_rebind.completed',
-  'screens.midtown_fresh_and_intense_promo_rebind.requested',
-  'screens.midtown_fresh_and_intense_promo_rebind.completed',
   'screens.image_banner_sync.requested',
   'screens.image_banner_sync.completed',
   'scheduling.run.requested',

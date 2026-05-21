@@ -9,7 +9,6 @@ import {
   ScreensBronxMidtownImageCloneJobPayloadSchema,
   ScreensEnableHealthyBannersJobPayloadSchema,
   ScreensImageBannerSyncJobPayloadSchema,
-  ScreensMidtownFreshAndIntensePromoRebindJobPayloadSchema,
   ScreensMidtownPricedToMovePromoRebindJobPayloadSchema,
 } from './screens.js'
 import {
@@ -33,7 +32,6 @@ export const JobTypeSchema = z.enum([
   'screens.enable_healthy_banners',
   'screens.bronx_midtown_image_clone',
   'screens.midtown_priced_to_move_promo_rebind',
-  'screens.midtown_fresh_and_intense_promo_rebind',
   'screens.image_banner_sync',
   'scheduling.extract_constraints',
   'scheduling.generate_candidates',
@@ -288,7 +286,6 @@ export {
   ScreensBronxMidtownImageCloneJobPayloadSchema,
   ScreensEnableHealthyBannersJobPayloadSchema,
   ScreensImageBannerSyncJobPayloadSchema,
-  ScreensMidtownFreshAndIntensePromoRebindJobPayloadSchema,
   ScreensMidtownPricedToMovePromoRebindJobPayloadSchema,
   SchedulingExtractConstraintsJobPayloadSchema,
   SchedulingGenerateCandidatesJobPayloadSchema,

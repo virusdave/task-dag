@@ -4,11 +4,6 @@ import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 
 import {
-  HELIOS_SCREENS_FRESH_AND_INTENSE_ACTION_ID,
-  HELIOS_SCREENS_FRESH_AND_INTENSE_ACTION_NAME,
-  HELIOS_SCREENS_FRESH_AND_INTENSE_BANNER_NAME,
-  HELIOS_SCREENS_FRESH_AND_INTENSE_CAMPAIGN_ID,
-  HELIOS_SCREENS_FRESH_AND_INTENSE_CAMPAIGN_NAME,
   HELIOS_SCREENS_BRONX_SITE_DEALER_ID,
   HELIOS_SCREENS_BRONX_TO_MIDTOWN_IMAGE_FALLBACK_BANNER_NAMES,
   HELIOS_SCREENS_MIDTOWN_SITE_DEALER_ID,
@@ -379,68 +374,6 @@ export async function registerScreensRoutes(server: FastifyInstance): Promise<vo
     )
   })
 
-  server.post('/api/screens/midtown-fresh-and-intense-promo-rebind', async (request, reply) => {
-    const user = await requireSessionUser(request, reply, 'editor')
-    if (!user) {
-      return
-    }
-
-    const body = QueueScreensWorkflowRequestSchema.parse(request.body ?? {})
-    const mode: ScreensRunMode = body.apply ? 'apply' : 'dry_run'
-    const requestId = randomUUID()
-    const scope = buildDealerScope(HELIOS_SCREENS_MIDTOWN_SITE_DEALER_ID)
-
-    const mutationResult = await withTransaction(async (db) => {
-      const jobId = await enqueueJob(db, {
-        concurrencyKey: getOptionalSweedSessionConcurrencyKey(true),
-        dedupeKey: `screens.midtown_fresh_and_intense_promo_rebind:${mode}`,
-        jobType: 'screens.midtown_fresh_and_intense_promo_rebind',
-        module: 'screens',
-        payload: {
-          mode,
-          requestedByUserId: user.id,
-        },
-        requestedByUserId: user.id,
-        scope,
-      })
-
-      const auditEventId = await appendAuditEvent(db, {
-        actorType: 'user',
-        actorUserId: user.id,
-        entityId: String(jobId),
-        entityType: 'job',
-        eventType: 'screens.midtown_fresh_and_intense_promo_rebind.requested',
-        module: 'screens',
-        payload: {
-          actionId: HELIOS_SCREENS_FRESH_AND_INTENSE_ACTION_ID,
-          actionName: HELIOS_SCREENS_FRESH_AND_INTENSE_ACTION_NAME,
-          bannerName: HELIOS_SCREENS_FRESH_AND_INTENSE_BANNER_NAME,
-          campaignId: HELIOS_SCREENS_FRESH_AND_INTENSE_CAMPAIGN_ID,
-          campaignName: HELIOS_SCREENS_FRESH_AND_INTENSE_CAMPAIGN_NAME,
-          mode,
-          queuedJobId: jobId,
-          requestedReason: body.reason ?? null,
-          summary: buildQueuedMidtownFreshAndIntensePromoRebindSummary(mode),
-          targetDealerId: HELIOS_SCREENS_MIDTOWN_SITE_DEALER_ID,
-          targetDealerName: readDealerName(HELIOS_SCREENS_MIDTOWN_SITE_DEALER_ID),
-        },
-        requestId,
-        scope,
-        undoPayload: null,
-      })
-
-      return { auditEventId, jobId }
-    })
-
-    return reply.send(
-      MutationAcceptedResponseSchema.parse({
-        auditEventId: mutationResult.auditEventId,
-        jobId: mutationResult.jobId,
-        requestId,
-      }),
-    )
-  })
-
   server.post('/api/screens/image-banner-sync', async (request, reply) => {
     const user = await requireSessionUser(request, reply, 'editor')
     if (!user) {
@@ -565,12 +498,6 @@ function buildQueuedMidtownPricedToMovePromoRebindSummary(mode: ScreensRunMode):
   return mode === 'apply'
     ? 'Queued live Midtown Priced to MOVE promo rebinding across all Midtown screens.'
     : 'Queued dry-run Midtown Priced to MOVE promo rebinding across all Midtown screens.'
-}
-
-function buildQueuedMidtownFreshAndIntensePromoRebindSummary(mode: ScreensRunMode): string {
-  return mode === 'apply'
-    ? 'Queued live Midtown Fresh & INTENSE promo rebinding across all Midtown screens.'
-    : 'Queued dry-run Midtown Fresh & INTENSE promo rebinding across all Midtown screens.'
 }
 
 function buildQueuedImageBannerSyncSummary(

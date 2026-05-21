@@ -58,12 +58,6 @@ export const HELIOS_SCREENS_PRICED_TO_MOVE_PROMO_ACTIONS = [
   },
 ] as const satisfies ReadonlyArray<HeliosScreensPromoActionBinding>
 
-export const HELIOS_SCREENS_FRESH_AND_INTENSE_BANNER_NAME = 'Fresh & INTENSE'
-export const HELIOS_SCREENS_FRESH_AND_INTENSE_CAMPAIGN_ID = '12749'
-export const HELIOS_SCREENS_FRESH_AND_INTENSE_CAMPAIGN_NAME = 'New Arrivals'
-export const HELIOS_SCREENS_FRESH_AND_INTENSE_ACTION_ID = '42264'
-export const HELIOS_SCREENS_FRESH_AND_INTENSE_ACTION_NAME = 'Fresh & Intense'
-
 export const ScreensRunModeSchema = z.enum(['apply', 'dry_run'])
 export type ScreensRunMode = z.infer<typeof ScreensRunModeSchema>
 
@@ -114,12 +108,6 @@ export const ScreensMidtownPricedToMovePromoRebindJobPayloadSchema = z.object({
   requestedByUserId: z.number().int().positive().nullable().optional(),
 })
 export type ScreensMidtownPricedToMovePromoRebindJobPayload = z.infer<typeof ScreensMidtownPricedToMovePromoRebindJobPayloadSchema>
-
-export const ScreensMidtownFreshAndIntensePromoRebindJobPayloadSchema = z.object({
-  mode: ScreensRunModeSchema,
-  requestedByUserId: z.number().int().positive().nullable().optional(),
-})
-export type ScreensMidtownFreshAndIntensePromoRebindJobPayload = z.infer<typeof ScreensMidtownFreshAndIntensePromoRebindJobPayloadSchema>
 
 export const ScreensImageBannerSyncTargetSchema = z.object({
   dealerId: z.number().int().positive(),
