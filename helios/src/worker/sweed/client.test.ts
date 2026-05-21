@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const env = {
   BEDROCK_MANTLE_BEARER_TOKEN: 'bedrock-token',
@@ -7,7 +7,33 @@ const env = {
   SWEED_AUTH_TOKEN: 'test-sweed-token',
 }
 
+// The pool-claim path now talks to Postgres; stub it out so the
+// in-process verify path uses a fake "db-pasted" claim and never
+// tries to reach example.invalid.
+vi.mock('./activeSessionToken.js', async () => {
+  const actual = await vi.importActual<typeof import('./activeSessionToken.js')>(
+    './activeSessionToken.js',
+  )
+  return {
+    ...actual,
+    claimSweedToken: vi.fn(async () => ({
+      token: 'test-sweed-token',
+      tokenPrefix: 'test-swe',
+      source: 'db-pasted' as const,
+      rowId: 1,
+      claimedBy: 'test-claim',
+      initialDealerId: null,
+    })),
+    releaseClaimedSweedToken: vi.fn(async () => undefined),
+    expireClaimedSweedToken: vi.fn(async () => undefined),
+  }
+})
+
 describe('verifySweedSession', () => {
+  beforeEach(() => {
+    vi.resetModules()
+  })
+
   afterEach(() => {
     vi.restoreAllMocks()
     vi.resetModules()

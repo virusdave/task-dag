@@ -53,9 +53,9 @@ interface SweedSessionContext {
    */
   currentDealerId: number | null
   /**
-   * Source of the claimed token. The transport layer reads this to
-   * decide whether an auth-error response should retire the pool row
-   * (db-pasted) vs simply surface to the operator (env-fallback).
+   * The pool-row claim held by this job. Always a `db-pasted`
+   * row — the env-var fallback was retired so the transport layer
+   * can unconditionally retire the row on auth-error responses.
    */
   claim: ClaimedSweedToken
 }
@@ -135,10 +135,10 @@ export async function withSweedSession<T>(fn: () => Promise<T>): Promise<T> {
     )
   }
 
-  // `legacy` here means "shared-process token, dealer context lives on
-  // the server side" — same operational semantics whether the token
-  // came from the DB pool or from SWEED_AUTH_TOKEN. The distinguishing
-  // tokenSource is captured per-RPC in the auth-events row.
+  // `legacy` here means "operator-pasted token, dealer context lives
+  // on the server side" — the only mode now that the env-var fallback
+  // is retired. The per-RPC tokenSource captured in the auth-events
+  // row still distinguishes pool-claim usage from any future flavors.
   // Do NOT pre-populate currentDealerId from claim.initialDealerId.
   // initialDealerId is only the dealer Sweed was on at OPERATOR PASTE
   // time; any subsequent job that held this same row could have called

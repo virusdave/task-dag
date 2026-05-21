@@ -8,10 +8,11 @@
 // Two jobs never share a token concurrently — Sweed keeps
 // server-side dealer context per-token.
 //
-// Legacy fallback: if the pool is empty AND `SWEED_AUTH_TOKEN` is
-// set, we hand out a synthetic non-DB lease so dev/smoke flows
-// still work without anyone having pasted into the DB.
-// `releaseClaimedSweedToken` is a no-op for the env-fallback lease.
+// There is intentionally NO `SWEED_AUTH_TOKEN` env-var fallback
+// here: every pooled session-bound caller must lease a real DB row
+// or defer. The legacy env var was retired so a stale locally-
+// saved session secret can never silently mask an empty / exhausted
+// pool with a token that returns "Auth expired" on every RPC.
 //
 // `expireClaimedSweedToken` is the auth-error path: when a worker
 // hits "Auth expired" mid-session, the DB row is permanently
@@ -25,35 +26,6 @@ import {
   markSweedSessionTokenExpired,
   releaseSweedSessionToken as releaseSweedSessionTokenRow,
 } from '../../server/db/queries/sweedSessionTokensQueries.js'
-import { getWorkerEnv } from '../config/env.js'
-
-/**
- * Returns true only when the pool table has literally zero rows
- * (no operator has pasted any session token, ever). The env-fallback
- * lease is ONLY appropriate in that bootstrap case — once even a
- * single row exists, the pool is the source of truth and we must
- * NOT silently mask "pool exhausted" by handing out a stale legacy
- * SWEED_AUTH_TOKEN that will return "Auth expired" on every RPC.
- */
-async function sweedTokenPoolIsUnconfigured(): Promise<boolean> {
-  try {
-    const result = await getPool().query<{ exists: boolean }>(
-      `select exists(select 1 from sweed_session_tokens) as exists`,
-    )
-    return !(result.rows[0]?.exists ?? false)
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
-    // If the table doesn't exist yet (pre-migration boot), treat as
-    // unconfigured so dev/smoke env-fallback still works.
-    if (/relation .*sweed_session_tokens.* does not exist/i.test(message)) {
-      return true
-    }
-    // Any other DB problem: be conservative and refuse env-fallback
-    // so we surface the real error rather than masking it with a
-    // stale token that returns auth-expired.
-    return false
-  }
-}
 
 // Default lease length for a per-job claim. Generous enough to cover
 // any realistic single-job Sweed workload; if a worker crashes
@@ -64,9 +36,15 @@ const DEFAULT_LEASE_MS = 15 * 60 * 1000
 export interface ClaimedSweedToken {
   readonly token: string
   readonly tokenPrefix: string
-  readonly source: 'db-pasted' | 'env-fallback'
-  readonly rowId: number | null
-  readonly claimedBy: string | null
+  /**
+   * Always `'db-pasted'` — the env-var fallback was retired. The
+   * discriminator is preserved so the transport-layer auth-log /
+   * token-retirement code can keep switching on it without a
+   * coordinated rewrite.
+   */
+  readonly source: 'db-pasted'
+  readonly rowId: number
+  readonly claimedBy: string
   readonly initialDealerId: number | null
 }
 
@@ -79,8 +57,12 @@ export interface ClaimSweedTokenOptions {
 
 /**
  * Take an available Sweed session out of the pool for exclusive
- * use. Returns null when the pool is empty AND no env fallback is
- * configured.
+ * use. Returns null when no pool row is available — either the
+ * pool table is empty (operator has never pasted) or every
+ * unexpired row is currently leased to another worker. The caller
+ * (withSweedSession) translates that into a deferred re-queue so
+ * the operator can paste / a worker can release without the job
+ * silently using a stale locally-saved SWEED_AUTH_TOKEN.
  */
 export async function claimSweedToken(
   options: ClaimSweedTokenOptions,
@@ -103,43 +85,21 @@ export async function claimSweedToken(
     }
   } catch (error) {
     console.warn(
-      '[sweed] pool claim failed, falling back to env token if available:',
+      '[sweed] pool claim failed:',
       error instanceof Error ? error.message : error,
     )
-  }
-  // Pool returned null (or threw). Only fall back to the env token
-  // when the pool is genuinely unconfigured (zero rows ever pasted).
-  // If the pool is merely exhausted (every row currently leased to
-  // another worker) we MUST return null so withSweedSession defers
-  // the job — otherwise we silently hand out a stale SWEED_AUTH_TOKEN
-  // and the job dies with "Auth expired" even though there are valid
-  // pasted tokens in flight.
-  const env = getWorkerEnv()
-  if (env.sweedAuthToken && (await sweedTokenPoolIsUnconfigured())) {
-    return {
-      token: env.sweedAuthToken,
-      tokenPrefix: env.sweedAuthToken.slice(0, 8),
-      source: 'env-fallback',
-      rowId: null,
-      claimedBy: null,
-      initialDealerId: null,
-    }
   }
   return null
 }
 
 /**
  * Return a previously-claimed session to the pool so a future
- * worker can reuse it. Safe to call multiple times; safe to call
- * on env-fallback leases (no-op).
+ * worker can reuse it. Safe to call multiple times.
  *
  * Never throws — releasing is best-effort. A leaked claim will
  * be automatically reclaimable once its lease expires.
  */
 export async function releaseClaimedSweedToken(claim: ClaimedSweedToken): Promise<void> {
-  if (claim.source !== 'db-pasted' || claim.rowId === null || claim.claimedBy === null) {
-    return
-  }
   try {
     await releaseSweedSessionTokenRow(getPool(), {
       id: claim.rowId,
@@ -156,16 +116,12 @@ export async function releaseClaimedSweedToken(claim: ClaimedSweedToken): Promis
 /**
  * Permanently retire a claimed pool row (auth-expired path). The
  * token will NOT be returned to the pool — the operator must paste
- * a fresh one. No-op for env-fallback leases (the operator has to
- * rotate the env var by hand in that case).
+ * a fresh one.
  */
 export async function expireClaimedSweedToken(
   claim: ClaimedSweedToken,
   reason: string,
 ): Promise<void> {
-  if (claim.source !== 'db-pasted' || claim.rowId === null) {
-    return
-  }
   try {
     await markSweedSessionTokenExpired(getPool(), claim.rowId, reason)
     console.warn(`[sweed] marked session token #${claim.rowId} expired: ${reason}`)
