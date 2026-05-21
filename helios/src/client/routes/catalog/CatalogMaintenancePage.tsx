@@ -15,6 +15,7 @@ import {
   type CatalogMaintenanceSurveyResponse,
 } from '../../../shared/contracts/index.js'
 import { buildAppPath } from '../../app/paths.js'
+import { importChunkOrReload } from '../../app/dynamicImport.js'
 import { Pill } from '../../components/Pill.js'
 import {
   buildMaintenanceIndexPath,
@@ -1618,7 +1619,14 @@ async function tryNativeBarcodeDetector(file: File): Promise<string | null> {
 async function tryZxingDecode(file: File): Promise<string | null> {
   // Dynamic-import keeps the ~200 KB zxing bundle out of the main
   // chunk; it's only paid for when a scan actually happens.
-  const { BrowserMultiFormatReader } = await import('@zxing/browser')
+  // importChunkOrReload defends against stale-bundle scenarios:
+  // an open tab whose old chunk hash has been deleted by a redeploy
+  // would otherwise blow up with "Importing a module script failed"
+  // here; we instead force a clean cache-busted reload.
+  const { BrowserMultiFormatReader } = await importChunkOrReload(
+    () => import('@zxing/browser'),
+    '@zxing/browser (tryZxingDecode)',
+  )
   const objectUrl = URL.createObjectURL(file)
   const img = new Image()
   try {

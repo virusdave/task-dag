@@ -49,6 +49,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 
+import { importChunkOrReload } from '../../app/dynamicImport.js'
+
 interface Props {
   open: boolean
   onDetected: (value: string) => void
@@ -365,8 +367,14 @@ export function LiveBarcodeScanner({ open, onDetected, onCancel }: Props) {
         }
         void tick()
       } else {
-        const { BrowserMultiFormatReader } = await import('@zxing/browser')
-        const { BarcodeFormat, DecodeHintType } = await import('@zxing/library')
+        const { BrowserMultiFormatReader } = await importChunkOrReload(
+          () => import('@zxing/browser'),
+          '@zxing/browser (LiveBarcodeScanner)',
+        )
+        const { BarcodeFormat, DecodeHintType } = await importChunkOrReload(
+          () => import('@zxing/library'),
+          '@zxing/library (LiveBarcodeScanner)',
+        )
         const zxingFormats = [
           BarcodeFormat.UPC_A,
           BarcodeFormat.UPC_E,

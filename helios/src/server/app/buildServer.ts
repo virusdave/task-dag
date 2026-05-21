@@ -206,6 +206,16 @@ async function registerApplicationSurface(server: FastifyInstance) {
       // tiny self-reloading module that bounces the document to a
       // cache-busted URL, which forces a fresh index.html (and thus
       // current bundle pointers) the next time the SPA loads.
+      //
+      // The recovery script ALWAYS replaces `_cb` (rather than
+      // refusing to navigate when `_cb` is already present). The old
+      // "already busted → throw" guard left the dynamic-import call
+      // site stuck — the import would resolve to an empty module and
+      // the catalog barcode-scan flow blew up with browser errors
+      // like "Importing a module script failed". A theoretical
+      // infinite reload would require the server itself to keep
+      // serving stale index.html, which it can't (the SPA shell is
+      // read freshly off disk on every / request).
       if (pathOnly.endsWith('.js')) {
         reply
           .header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
@@ -213,7 +223,7 @@ async function registerApplicationSurface(server: FastifyInstance) {
           .type('application/javascript; charset=utf-8')
         return reply.send(
           "// helios: stale bundle pointer, forcing a fresh document load\n" +
-            "try{var u=new URL(location.href);if(u.searchParams.has('_cb')){throw new Error('already busted')}u.searchParams.set('_cb',Date.now());location.replace(u.toString())}catch(e){console.error('helios stale-bundle reload failed',e)}\n",
+            "try{var u=new URL(location.href);u.searchParams.set('_cb',Date.now());location.replace(u.toString())}catch(e){try{location.reload()}catch(e2){console.error('helios stale-bundle reload failed',e,e2)}}\n",
         )
       }
       reply.header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
