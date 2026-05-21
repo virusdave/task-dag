@@ -51,6 +51,8 @@ import { TasksPage } from '../routes/tasks/TasksPage.js'
 import { TaskFrontierPage } from '../routes/tasks/TaskFrontierPage.js'
 import { EpicDagPage } from '../routes/tasks/EpicDagPage.js'
 import { TaskDetailPage } from '../routes/tasks/TaskDetailPage.js'
+import { UtilitiesLandingPage } from '../routes/utilities/UtilitiesLandingPage.js'
+import { UtilitiesStaffPage, utilitiesStaffLoader } from '../routes/utilities/UtilitiesStaffPage.js'
 
 async function rootLoader() {
   return loadSession()
@@ -224,8 +226,13 @@ export const router = createBrowserRouter([
         path: 'scheduling/runs/:schedulingRunId/candidates/:candidateId',
       },
       {
-        element: <ModuleLandingPage moduleCode="utilities" />,
+        element: <UtilitiesLandingPage />,
         path: 'utilities',
+      },
+      {
+        element: <UtilitiesStaffPage />,
+        loader: utilitiesStaffLoader,
+        path: 'utilities/staff',
       },
       {
         element: <TasksPage />,

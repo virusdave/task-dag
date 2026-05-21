@@ -39,6 +39,12 @@ const LOGIN_FLOW_ENDPOINTS: readonly LoginFlowEndpoint[] = [
   // projection. Consumed by the mostly-static-sites
   // freshlybaked.nyc/white-label/bulk-flower page.
   { method: 'GET', appRelativePath: '/api/whitelabel/public/bulk-flower' },
+  // Public "Meet The Team" projection: approved staff only, with
+  // only firstName + photoUrl exposed. Consumed by the
+  // mostly-static-sites freshlybaked.nyc/about-us page. The
+  // editorial layer (approve/reject) lives behind the Utilities →
+  // Staff page in Helios.
+  { method: 'GET', appRelativePath: '/api/staff/public/team' },
 ]
 
 export function registerAuthGate(server: FastifyInstance): void {

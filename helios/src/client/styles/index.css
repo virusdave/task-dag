@@ -2530,3 +2530,100 @@ a.tree-nav-branch-label.is-link,
     text-align: left;
   }
 }
+
+/* Helios → Utilities → Staff */
+.staff-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 1rem;
+}
+
+.staff-card {
+  display: grid;
+  grid-template-rows: auto 1fr;
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  background: var(--panel-bg, #fff);
+  overflow: hidden;
+}
+
+.staff-card--no-photo {
+  opacity: 0.85;
+}
+
+.staff-card__photo {
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  background: #eee;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.staff-card__photo img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.staff-card__photo-placeholder {
+  font-size: 0.85rem;
+  color: #666;
+}
+
+.staff-card__body {
+  padding: 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.staff-card__header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.staff-card__meta {
+  margin: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 0.5rem;
+  align-items: center;
+}
+
+.staff-card__radios {
+  border: 0;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 0.75rem;
+}
+
+.staff-card__radio {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-size: 0.9rem;
+}
+
+.staff-card__decided {
+  margin: 0;
+  font-size: 0.8rem;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}

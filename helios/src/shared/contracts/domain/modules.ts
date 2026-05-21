@@ -72,8 +72,8 @@ export const HELIOS_MODULES: ReadonlyArray<HeliosModuleDefinition> = [
     code: 'utilities',
     label: 'Utilities',
     routePrefix: 'utilities',
-    rolloutStatus: 'planned',
-    summary: 'Planned migration for high-frequency one-off utilities that should become typed Helios worker entrypoints.',
+    rolloutStatus: 'active',
+    summary: 'Cross-cutting operator utilities that do not fit cleanly inside the other Helios modules. Currently: Staff (editorial approve/reject for the public Meet The Team surface).',
   },
   {
     code: 'config',

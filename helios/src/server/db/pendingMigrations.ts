@@ -181,6 +181,13 @@ const SENTINELS: MigrationSentinel[] = [
       'whitelabel_pricing_snapshots table — required so Catalog -> WhiteLabel -> Pricing can save reviewer-approved bulk-flower menus and the public /api/whitelabel/public/bulk-flower endpoint can serve them',
     check: (db) => tableExists(db, 'whitelabel_pricing_snapshots'),
   },
+  {
+    migrationId: '019_staff_inclusion',
+    label:
+      'staff_directory_cache + staff_inclusion tables — required so Utilities -> Staff can cache the Sweed state-dealer employee list and persist approve/reject decisions for the public Meet The Team surface',
+    check: async (db) =>
+      (await tableExists(db, 'staff_directory_cache')) && tableExists(db, 'staff_inclusion'),
+  },
 ]
 
 interface CacheEntry {
