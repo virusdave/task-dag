@@ -16,6 +16,7 @@ import {
   upsertStaffDirectoryCache,
 } from '../db/queries/staffQueries.js'
 import { fetchStateStaffDirectory } from '../staff/fetchStateStaff.js'
+import { buildStaffPhotoProxyToken } from '../staff/staffPhotoProxyToken.js'
 
 function isMissingStaffTableError(error: unknown): boolean {
   if (!(error instanceof Error)) return false
@@ -107,7 +108,25 @@ export async function registerStaffRoutes(server: FastifyInstance): Promise<void
   // surface. Must be allowlisted in authGate.ts.
   server.get('/api/staff/public/team', async (_request, reply) => {
     try {
-      const members = await listApprovedTeamMembers(getPool())
+      const rows = await listApprovedTeamMembers(getPool())
+      // Project to the public contract: opaque proxy token instead of
+      // the Sweed URL, plus the focal point (if cached) so the public
+      // page can keep faces framed under object-fit: cover.
+      const members = rows.map((row) => ({
+        staffId: row.staffId,
+        firstName: row.firstName,
+        photoProxyToken: buildStaffPhotoProxyToken(row.photoUrl),
+        ...(row.focalPoint
+          ? {
+              focalPoint: {
+                x: row.focalPoint.x,
+                y: row.focalPoint.y,
+                confidence: row.focalPoint.confidence,
+                model: row.focalPoint.model,
+              },
+            }
+          : {}),
+      }))
       reply.header('cache-control', 'public, max-age=60, s-maxage=300, stale-while-revalidate=600')
       reply.header('access-control-allow-origin', '*')
       return reply.send(

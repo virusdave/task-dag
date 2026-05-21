@@ -53,3 +53,41 @@ create table if not exists staff_inclusion (
 
 create index if not exists staff_inclusion_status_idx
   on staff_inclusion (status);
+
+-- Per-photo focal-point cache for the public "Meet The Team" tiles.
+--
+-- Why this exists:
+--   The public-page CSS crops each staff portrait with
+--   `object-fit: cover`. Without an explicit focal point, the
+--   geometric center wins, which clips heads off portraits where
+--   the subject is not framed dead center (a common condition for
+--   auto-imported POS headshots that no human curator framed).
+--   This table caches a per-image focal point (computed once by the
+--   private LLM in the helios worker) so the public renderer can
+--   emit `object-position: <x*100>% <y*100>%` and keep the face in
+--   frame.
+--
+-- Append-only by convention. Keys on the UUID portion of the Sweed
+-- photo URL (which is stable per image but changes on every Sweed
+-- re-upload). Old rows for replaced photos stay forever, but they
+-- are tiny and the read path joins on the *current* photo_url so
+-- they cause no harm.
+--
+-- See helios/src/server/staff/staffPhotoFocalPoint.ts for the
+-- writer and helios/src/server/db/queries/staffQueries.ts for the
+-- public-route join.
+create table if not exists staff_photo_focal_points (
+  sweed_uuid   text primary key,
+  sweed_url    text not null,
+  x            double precision not null check (x >= 0 and x <= 1),
+  y            double precision not null check (y >= 0 and y <= 1),
+  confidence   double precision not null check (confidence >= 0 and confidence <= 1),
+  model        text not null,
+  rationale    text,
+  computed_at  timestamptz not null default now()
+);
+
+-- Lookup-by-URL is what the public-team join uses (current Sweed
+-- URL → focal point). Cheap secondary index over the sparse table.
+create index if not exists staff_photo_focal_points_sweed_url_idx
+  on staff_photo_focal_points (sweed_url);

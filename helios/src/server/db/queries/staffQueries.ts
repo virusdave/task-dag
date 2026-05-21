@@ -199,17 +199,38 @@ export async function upsertStaffDirectoryCache(
   return { totalUpserted: rows.length, newlySeededInclusions }
 }
 
-export async function listApprovedTeamMembers(db: Queryable): Promise<
-  Array<{ staffId: string; firstName: string; photoUrl: string }>
-> {
+export interface ApprovedTeamMemberRow {
+  staffId: string
+  firstName: string
+  photoUrl: string
+  focalPoint: {
+    x: number
+    y: number
+    confidence: number
+    model: string
+  } | null
+}
+
+export async function listApprovedTeamMembers(db: Queryable): Promise<ApprovedTeamMemberRow[]> {
   const res = await db.query<{
     staff_id: string
     first_name: string
     photo_url: string
+    focal_x: number | null
+    focal_y: number | null
+    focal_confidence: number | null
+    focal_model: string | null
   }>(
-    `select sd.staff_id, sd.first_name, sd.photo_url
+    `select sd.staff_id,
+            sd.first_name,
+            sd.photo_url,
+            fp.x          as focal_x,
+            fp.y          as focal_y,
+            fp.confidence as focal_confidence,
+            fp.model      as focal_model
        from staff_directory_cache sd
        join staff_inclusion si on si.staff_id = sd.staff_id
+       left join staff_photo_focal_points fp on fp.sweed_url = sd.photo_url
       where si.status = 'approved'
         and sd.photo_url is not null
         and length(trim(sd.photo_url)) > 0
@@ -220,5 +241,77 @@ export async function listApprovedTeamMembers(db: Queryable): Promise<
     staffId: row.staff_id,
     firstName: row.first_name,
     photoUrl: row.photo_url,
+    focalPoint:
+      row.focal_x !== null &&
+      row.focal_y !== null &&
+      row.focal_confidence !== null &&
+      row.focal_model !== null
+        ? {
+            x: Number(row.focal_x),
+            y: Number(row.focal_y),
+            confidence: Number(row.focal_confidence),
+            model: row.focal_model,
+          }
+        : null,
   }))
+}
+
+export interface MissingFocalPointPhotoRow {
+  staffId: string
+  photoUrl: string
+}
+
+/**
+ * Return the set of currently-approved staff portraits whose Sweed
+ * URL is not yet present in staff_photo_focal_points. The worker
+ * polls this on startup, on SIGHUP, and whenever approvals change,
+ * then computes + inserts a focal point per row.
+ */
+export async function listApprovedTeamMembersMissingFocalPoint(
+  db: Queryable,
+): Promise<MissingFocalPointPhotoRow[]> {
+  const res = await db.query<{ staff_id: string; photo_url: string }>(
+    `select sd.staff_id, sd.photo_url
+       from staff_directory_cache sd
+       join staff_inclusion si on si.staff_id = sd.staff_id
+       left join staff_photo_focal_points fp on fp.sweed_url = sd.photo_url
+      where si.status = 'approved'
+        and sd.photo_url is not null
+        and length(trim(sd.photo_url)) > 0
+        and sd.blocked = false
+        and fp.sweed_url is null
+      order by sd.first_name asc, sd.staff_id asc`,
+  )
+  return res.rows.map((row) => ({ staffId: row.staff_id, photoUrl: row.photo_url }))
+}
+
+export interface StaffPhotoFocalPointInsert {
+  sweedUuid: string
+  sweedUrl: string
+  x: number
+  y: number
+  confidence: number
+  model: string
+  rationale: string | null
+}
+
+/**
+ * Append a focal-point row. Append-only by convention: ON CONFLICT
+ * DO NOTHING so concurrent workers + retries cannot stomp the first
+ * winning row, and previously-computed focal points stay even after
+ * the staffer's photo rotates in Sweed.
+ */
+export async function insertStaffPhotoFocalPointIfAbsent(
+  db: Queryable,
+  row: StaffPhotoFocalPointInsert,
+): Promise<{ inserted: boolean }> {
+  const res = await db.query<{ inserted: boolean }>(
+    `insert into staff_photo_focal_points
+       (sweed_uuid, sweed_url, x, y, confidence, model, rationale, computed_at)
+     values ($1, $2, $3, $4, $5, $6, $7, now())
+     on conflict (sweed_uuid) do nothing
+     returning true as inserted`,
+    [row.sweedUuid, row.sweedUrl, row.x, row.y, row.confidence, row.model, row.rationale],
+  )
+  return { inserted: res.rows.length > 0 }
 }
