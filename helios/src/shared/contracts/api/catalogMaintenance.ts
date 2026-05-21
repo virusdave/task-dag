@@ -56,8 +56,17 @@ export const CatalogMaintenanceSiteVariantSchema = z.object({
    * live verify pass could not run (no Sweed pool token, transport
    * failure, etc.) — the UI degrades to showing METRC tags without
    * action buttons in that case.
+   *
+   * Defensive: tolerate a missing/null `lots` field on the wire so an
+   * older server build that hasn't yet shipped the per-package payload
+   * doesn't fail client-side parse during a rolling redeploy. The UI
+   * treats an empty array the same as "no live lot detail available",
+   * so defaulting here is safe.
    */
-  lots: z.array(CatalogMaintenancePackageLotSchema),
+  lots: z
+    .array(CatalogMaintenancePackageLotSchema)
+    .nullish()
+    .transform((value) => value ?? []),
   previewImageUrl: z.string().nullable(),
   imageCount: z.number().int(),
   variantSpecificImageCount: z.number().int(),
