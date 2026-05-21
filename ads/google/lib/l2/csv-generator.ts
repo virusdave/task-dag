@@ -33,7 +33,55 @@ export function generateCSVBatches(l2Output: L2PredictionOutput): CSVBatch[] {
   // 005: Create trial ads
   batches.push(generateTrialAdsCSV(l2Output));
   
+  // Defense-in-depth: refuse to return a batch that has any row with
+  // an empty Campaign or Ad group column. Ads Editor rejects those
+  // on import with "campaign name can't be empty", and we've burned
+  // operator time more than once shipping a bundle that was
+  // dead-on-arrival. Throw here so the calling pipeline (run-analysis
+  // and runMorningBundle) treats the run as a hard failure instead
+  // of silently writing invalid CSVs.
+  assertCampaignAndAdGroupNonEmpty(batches);
+  
   return batches;
+}
+
+/**
+ * Reject any row that names a "Campaign" or "Ad group" column with
+ * an empty / whitespace-only value. Required keys are mandatory only
+ * when the column is present in row.data — batches like 002-repair
+ * (which addresses ads by Ad ID) legitimately don't emit Campaign at
+ * all, and we don't want to force them to.
+ */
+function assertCampaignAndAdGroupNonEmpty(batches: CSVBatch[]): void {
+  const REQUIRED_COLS = ['Campaign', 'Ad group'] as const;
+  const offenders: string[] = [];
+  for (const batch of batches) {
+    for (const row of batch.rows) {
+      for (const col of REQUIRED_COLS) {
+        if (!(col in row.data)) continue;
+        const raw = row.data[col];
+        const value = (raw == null ? '' : String(raw)).trim();
+        if (value === '') {
+          const source =
+            row.source_action_id ?? row.source_trial_id ?? '(unknown source)';
+          offenders.push(
+            `  - batch ${String(batch.batch_number).padStart(3, '0')}-${batch.batch_name}, ` +
+              `row ${row.row_number}, column "${col}" is empty (source: ${source})`,
+          );
+        }
+      }
+    }
+  }
+  if (offenders.length > 0) {
+    throw new Error(
+      `Refusing to emit Ads Editor CSV batches: ${offenders.length} row(s) ` +
+        `have an empty Campaign or Ad group column. Ads Editor rejects those ` +
+        `imports with "campaign name can't be empty".\n` +
+        offenders.join('\n') +
+        '\nFix the L2 prediction (TrialPlan.original_campaign_name / ' +
+        'AdAction replace handling) so every row has a real campaign / ad-group name.',
+    );
+  }
 }
 
 /**

@@ -211,11 +211,15 @@ export const SuccessCriteriaSchema = z.object({
   time_window_days: z.number().optional(),
 });
 
+// Empty Campaign / Ad group names produce CSV rows that Google Ads
+// Editor rejects on import with "campaign name can't be empty".
+// Enforce non-empty at schema validation time so an LLM response that
+// omits these fields is rejected before any CSV is written.
 export const TrialPlanSchema = z.object({
   trial_id: z.string(),
-  trial_group_name: z.string(),
-  original_campaign_name: z.string(),
-  original_ad_group_name: z.string(),
+  trial_group_name: z.string().min(1, 'trial_group_name must be non-empty'),
+  original_campaign_name: z.string().min(1, 'original_campaign_name must be non-empty (Ads Editor rejects empty Campaign)'),
+  original_ad_group_name: z.string().min(1, 'original_ad_group_name must be non-empty (Ads Editor rejects empty Ad group)'),
   trial_budget_usd: z.number(),
   control_ads: z.array(ControlRefSchema),
   variant_creatives: z.array(SuggestedCreativeSchema),
