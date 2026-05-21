@@ -267,7 +267,10 @@ async function main() {
   
   // Generate CSV batches
   console.log('\n📄 Generating CSV batches...');
-  const csvBatches = generateCSVBatches(l2Output);
+  // Pass the snapshot ads so the generator can backfill missing
+  // Campaign / Ad group cells the L2 LLM left blank, instead of
+  // throwing at the "campaign name can't be empty" guard.
+  const csvBatches = generateCSVBatches(l2Output, { snapshotAds: ads });
   console.log(`Generated ${csvBatches.length} CSV batches`);
   
   // Generate HTML packet

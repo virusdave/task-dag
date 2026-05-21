@@ -4,6 +4,7 @@
  */
 
 import type {
+  AdSnapshot,
   L2PredictionOutput,
   FamilyPrediction,
   AdAction,
@@ -13,26 +14,54 @@ import type {
 } from '../shared/types.js';
 
 /**
+ * Optional context passed alongside the L2 output. When `snapshotAds`
+ * is provided, the generator builds an ad-group -> campaign index from
+ * the snapshot and uses it to backfill missing Campaign / Ad group
+ * cells the L2 LLM didn't populate (the most common cause of
+ * "campaign name can't be empty" rejections on import).
+ */
+export interface GenerateCSVBatchesOptions {
+  snapshotAds?: AdSnapshot[];
+}
+
+/**
  * Generate all CSV batches from L2 output
  */
-export function generateCSVBatches(l2Output: L2PredictionOutput): CSVBatch[] {
+export function generateCSVBatches(
+  l2Output: L2PredictionOutput,
+  options: GenerateCSVBatchesOptions = {},
+): CSVBatch[] {
   const batches: CSVBatch[] = [];
-  
+
+  // Build the snapshot-derived backfill index once. Empty Map when no
+  // snapshot was passed — backfill is a no-op in that case.
+  const adGroupIndex = options.snapshotAds
+    ? buildAdGroupToCampaignIndex(options.snapshotAds)
+    : new Map<string, AdGroupCampaignEntry>();
+
   // 001: Create trial campaigns and ad groups
   batches.push(generateTrialGroupsCSV(l2Output));
-  
+
   // 002: Repair existing ads
   batches.push(generateRepairCSV(l2Output));
-  
+
   // 003: Replace and new ads
   batches.push(generateReplaceCSV(l2Output));
-  
+
   // 004: Pause high-risk ads
   batches.push(generatePauseCSV(l2Output));
-  
+
   // 005: Create trial ads
   batches.push(generateTrialAdsCSV(l2Output));
-  
+
+  // Backfill before validating. The L2 LLM frequently omits
+  // original_campaign_name (and sometimes original_ad_group_name)
+  // because the family summary it sees only has family_key — a
+  // single family often spans multiple campaigns, so the LLM can't
+  // know the right campaign without explicit grounding. Recover that
+  // grounding from the snapshot, which is authoritative.
+  backfillCampaignAndAdGroup(batches, adGroupIndex);
+
   // Defense-in-depth: refuse to return a batch that has any row with
   // an empty Campaign or Ad group column. Ads Editor rejects those
   // on import with "campaign name can't be empty", and we've burned
@@ -41,8 +70,109 @@ export function generateCSVBatches(l2Output: L2PredictionOutput): CSVBatch[] {
   // and runMorningBundle) treats the run as a hard failure instead
   // of silently writing invalid CSVs.
   assertCampaignAndAdGroupNonEmpty(batches);
-  
+
   return batches;
+}
+
+interface AdGroupCampaignEntry {
+  adGroupName: string;
+  campaignName: string;
+}
+
+/**
+ * Normalize an ad-group / trial-group name to a stable lookup key.
+ *
+ * The L2 LLM derives trial group names like "NYC Bud-trial-001" from
+ * snapshot ad-group names like "NYC Bud | Core" — so a literal lookup
+ * never matches. We normalize both sides identically:
+ *
+ *   - lowercase
+ *   - strip "-trial-NNN" / "-trial-NN" suffixes
+ *   - strip " | <suffix>" / " - <suffix>" (Editor lane / variant tags)
+ *   - collapse whitespace
+ *
+ * Same input produces same key on both sides; matching is exact on
+ * the normalized form (no fuzzy/edit-distance — that would silently
+ * pick wrong campaigns).
+ */
+function normalizeAdGroupKey(name: string): string {
+  let s = name.toLowerCase().trim();
+  // Suffix strippers can compose ("nyc bud-trial-001 | variant"
+  // needs both " | variant" and "-trial-001" removed). Iterate until
+  // a pass changes nothing.
+  for (let i = 0; i < 5; i++) {
+    const before = s;
+    s = s.replace(/-trial-\d+\s*$/i, '');
+    s = s.replace(/\s*\|\s*[^|]+\s*$/, '');
+    s = s.replace(/\s+-\s+[^-]+\s*$/, '');
+    s = s.trim();
+    if (s === before) break;
+  }
+  return s.replace(/\s+/g, ' ').trim();
+}
+
+function buildAdGroupToCampaignIndex(
+  ads: AdSnapshot[],
+): Map<string, AdGroupCampaignEntry> {
+  const index = new Map<string, AdGroupCampaignEntry>();
+  for (const ad of ads) {
+    if (!ad.ad_group_name || !ad.campaign_name) continue;
+    // Index under both the exact and normalized keys, so an L2
+    // response that happens to use the full ad-group name also hits.
+    const exact = ad.ad_group_name.toLowerCase().trim();
+    const norm = normalizeAdGroupKey(ad.ad_group_name);
+    const entry: AdGroupCampaignEntry = {
+      adGroupName: ad.ad_group_name,
+      campaignName: ad.campaign_name,
+    };
+    if (!index.has(exact)) index.set(exact, entry);
+    if (!index.has(norm)) index.set(norm, entry);
+  }
+  return index;
+}
+
+function lookupAdGroup(
+  index: Map<string, AdGroupCampaignEntry>,
+  candidates: Array<string | undefined>,
+): AdGroupCampaignEntry | null {
+  for (const raw of candidates) {
+    if (!raw) continue;
+    const exact = raw.toLowerCase().trim();
+    if (index.has(exact)) return index.get(exact)!;
+    const norm = normalizeAdGroupKey(raw);
+    if (norm && index.has(norm)) return index.get(norm)!;
+  }
+  return null;
+}
+
+/**
+ * Walk every row that *should* have Campaign / Ad group columns and
+ * fill in any that are empty/missing from the snapshot index, using
+ * the row's source trial/action plus the ad-group / trial-group name
+ * candidates that are present.
+ */
+function backfillCampaignAndAdGroup(
+  batches: CSVBatch[],
+  index: Map<string, AdGroupCampaignEntry>,
+): void {
+  if (index.size === 0) return;
+  for (const batch of batches) {
+    for (const row of batch.rows) {
+      const hasCampaignCol = 'Campaign' in row.data;
+      const hasAdGroupCol = 'Ad group' in row.data;
+      if (!hasCampaignCol && !hasAdGroupCol) continue;
+      const campaign = hasCampaignCol ? String(row.data['Campaign'] ?? '').trim() : '';
+      const adGroup = hasAdGroupCol ? String(row.data['Ad group'] ?? '').trim() : '';
+      if (campaign && adGroup) continue;
+      const hit = lookupAdGroup(index, [
+        adGroup,
+        row.data['Ad group'] != null ? String(row.data['Ad group']) : undefined,
+      ]);
+      if (!hit) continue;
+      if (hasCampaignCol && !campaign) row.data['Campaign'] = hit.campaignName;
+      if (hasAdGroupCol && !adGroup) row.data['Ad group'] = hit.adGroupName;
+    }
+  }
 }
 
 /**
