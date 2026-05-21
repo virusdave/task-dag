@@ -37,3 +37,39 @@ When you build or update a helios page, ask: "If my reviewer opens this
 URL for the tenth time today, are they staring at the answer, or are
 they scrolling past the explanation I wrote for them on visit one?"
 The answer must be the former.
+
+## Disabled / "DEAD" things in Sweed: skip non-fatally by default
+
+Anything Sweed marks as **disabled** (`enabled: false`), or which we
+have labeled as soft-retired (operator convention is to rename the
+record to start with `DEAD - …`, `DEAD-`, `DELETED`, `RETIRED`, etc.),
+is operationally **out of service**. Treat it as "do not use; ignore
+this thing" for every Helios read, write, sweep, or maintenance job.
+
+The rule:
+
+- Filter disabled / DEAD-marked records out at the **list** step (e.g.
+  after `store.screen.carousel.list`, `store.product.list`,
+  `store.brand.list`, etc.) so the rest of the job never iterates them.
+- If a downstream RPC still hits a disabled record (race, cache lag,
+  or a record that flipped to disabled between two calls), **catch the
+  failure and continue with empty / no-op semantics**. Do not let one
+  retired record kill an entire batch job. Sweed's typical signature
+  for this case is the misleading
+  `Action does not exist or you do not have permission` (subcode
+  14002) — see [`screensCarouselHelpers.ts`](src/worker/jobs/screensCarouselHelpers.ts)
+  for the canonical predicate + error matcher to reuse.
+- Log a `console.warn(...)` when a disabled record is encountered and
+  skipped, so the auditor can still see what was dropped, but never
+  raise.
+
+The **only** time you should touch a disabled / DEAD record is when
+the human explicitly asks to "re-enable", "reactivate", "undelete",
+"restore", "resurrect", or similar — for example, asking to re-enable
+a disabled brand, or to reuse a retired screen. In that case the
+target record IS the work; obviously do not filter it out.
+
+When in doubt, default to the skip-and-continue rule. A bounce that
+processes 4-of-5 enabled screens and warns about the 1 disabled one
+is correct; a bounce that crashes on the disabled screen and touches
+nothing is not.
