@@ -1,6 +1,6 @@
 import { z } from 'zod'
 
-export const HELIOS_MODULE_CODES = ['catalog', 'screens', 'crm', 'communications', 'pricing', 'scheduling', 'utilities', 'config'] as const
+export const HELIOS_MODULE_CODES = ['catalog', 'screens', 'crm', 'communications', 'pricing', 'scheduling', 'utilities', 'config', 'reviews'] as const
 export const HeliosModuleCodeSchema = z.enum(HELIOS_MODULE_CODES)
 export type HeliosModuleCode = z.infer<typeof HeliosModuleCodeSchema>
 
@@ -74,6 +74,13 @@ export const HELIOS_MODULES: ReadonlyArray<HeliosModuleDefinition> = [
     routePrefix: 'utilities',
     rolloutStatus: 'active',
     summary: 'Cross-cutting operator utilities that do not fit cleanly inside the other Helios modules. Currently: Staff (editorial approve/reject for the public Meet The Team surface).',
+  },
+  {
+    code: 'reviews',
+    label: 'Reviews',
+    routePrefix: 'reviews',
+    rolloutStatus: 'active',
+    summary: 'Customer-Sentiment Capture (issue #13). Captures public landing-page review submissions, drawing-form opt-ins, and (in A2+) LLM-gated next-step decisions. A1 ships the read-only submission list and the public POST /v1/reviews/submit + POST /v1/reviews/<id>/drawing-entry capture endpoints, gated by HELIOS_REVIEWS_CAPTURE_V1 and per-site flags.',
   },
   {
     code: 'config',

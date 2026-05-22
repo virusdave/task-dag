@@ -25,6 +25,7 @@ import { registerCommentsRoutes } from '../routes/comments.js'
 import { registerCommunicationsRoutes } from '../routes/communications.js'
 import { registerConfigRoutes } from '../routes/config.js'
 import { registerConfigParsingRoutes } from '../routes/configParsing.js'
+import { registerCustomerReviewsRoutes } from '../routes/customerReviews.js'
 import { registerHistoryRoutes } from '../routes/history.js'
 import { registerJobRoutes } from '../routes/jobs.js'
 import { registerLlmRoutes } from '../routes/llm.js'
@@ -132,6 +133,7 @@ async function registerApplicationSurface(server: FastifyInstance) {
   await registerCommunicationsRoutes(server)
   await registerConfigRoutes(server)
   await registerConfigParsingRoutes(server)
+  await registerCustomerReviewsRoutes(server)
   await registerBrandExpiryOverridesRoutes(server)
   await registerPendingPurchaseRoutes(server)
   await registerPricingRoutes(server)

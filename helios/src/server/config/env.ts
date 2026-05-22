@@ -45,6 +45,13 @@ export interface ServerEnv {
   sweedAuthToken: string | null
   sweedStateDealerId: number
   communicationsPolicyPacketDir: string
+  // Customer-Sentiment Capture (issue #13).  Default off so a deploy
+  // can't accidentally start accepting public POST /v1/reviews/submit
+  // calls before the operator has flipped the per-site
+  // review_drawing_enabled / review_llm_gate_enabled flags.  Set
+  // HELIOS_REVIEWS_CAPTURE_V1=1 to enable.  See
+  // docs/helios/customer-sentiment/EPIC_PLAN.md.
+  reviewsCaptureV1Enabled: boolean
 }
 
 let cachedEnv: ServerEnv | null = null
@@ -87,6 +94,7 @@ export function getServerEnv(): ServerEnv {
     communicationsPolicyPacketDir:
       readOptionalEnv('COMMUNICATIONS_POLICY_PACKET_DIR') ??
       '/Users/dave/tmp/scratch/fbnyc/sweed/automation/ads/google/policy',
+    reviewsCaptureV1Enabled: readBoolEnv('HELIOS_REVIEWS_CAPTURE_V1', false),
   }
 
   return cachedEnv
@@ -165,6 +173,17 @@ function parseEmailList(raw: string | null): string[] {
         .filter((value) => value.length > 0),
     ),
   ]
+}
+
+function readBoolEnv(name: string, fallback: boolean): boolean {
+  const rawValue = readOptionalEnv(name)
+  if (rawValue === null) {
+    return fallback
+  }
+  const normalized = rawValue.trim().toLowerCase()
+  if (['1', 'true', 'yes', 'on'].includes(normalized)) return true
+  if (['0', 'false', 'no', 'off', ''].includes(normalized)) return false
+  throw new Error(`${name} must be a boolean (1/0, true/false, yes/no, on/off).`)
 }
 
 function readNumberEnv(name: string, fallback: number): number {

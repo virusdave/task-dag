@@ -188,6 +188,17 @@ const SENTINELS: MigrationSentinel[] = [
     check: async (db) =>
       (await tableExists(db, 'staff_directory_cache')) && tableExists(db, 'staff_inclusion'),
   },
+  {
+    migrationId: '022_customer_reviews_capture',
+    label:
+      'site_review_settings + review_submissions + review_contact_info + review_drawing_entries + review_emails tables — required so the Customer-Sentiment Capture (issue #13) A1 surface (POST /v1/reviews/submit, POST /v1/reviews/<id>/drawing-entry, and the /reviews read-only list) can accept and display public submissions',
+    check: async (db) =>
+      (await tableExists(db, 'site_review_settings')) &&
+      (await tableExists(db, 'review_submissions')) &&
+      (await tableExists(db, 'review_contact_info')) &&
+      (await tableExists(db, 'review_drawing_entries')) &&
+      tableExists(db, 'review_emails'),
+  },
 ]
 
 interface CacheEntry {

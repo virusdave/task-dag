@@ -45,6 +45,24 @@ const LOGIN_FLOW_ENDPOINTS: readonly LoginFlowEndpoint[] = [
   // editorial layer (approve/reject) lives behind the Utilities →
   // Staff page in Helios.
   { method: 'GET', appRelativePath: '/api/staff/public/team' },
+  // Public Customer-Sentiment Capture submission endpoints (issue
+  // #13, A1). Called by the mostly-static-sites public landing page
+  // on behalf of an unauthenticated customer. Server-level kill
+  // switch lives in env.reviewsCaptureV1Enabled
+  // (HELIOS_REVIEWS_CAPTURE_V1=1); per-site kill switch lives in
+  // site_review_settings.review_drawing_enabled. The drawing-entry
+  // endpoint is matched as a prefix below via isLoginFlowRequest so
+  // any UUID submissionId is allowed without needing per-id
+  // allowlisting.
+  { method: 'POST', appRelativePath: '/v1/reviews/submit' },
+]
+
+// Public POST endpoints whose appPath starts with one of these
+// prefixes are allowed through the auth gate. Used for routes whose
+// path includes a customer-supplied identifier (e.g. the submission
+// uuid) that we can't enumerate up front.
+const LOGIN_FLOW_PREFIXES: ReadonlyArray<{ method: 'GET' | 'POST'; prefix: string; suffix: string }> = [
+  { method: 'POST', prefix: '/v1/reviews/', suffix: '/drawing-entry' },
 ]
 
 export function registerAuthGate(server: FastifyInstance): void {
@@ -80,8 +98,19 @@ export function registerAuthGate(server: FastifyInstance): void {
 }
 
 function isLoginFlowRequest(method: string, appPath: string): boolean {
-  return LOGIN_FLOW_ENDPOINTS.some(
-    (endpoint) => endpoint.method === method && endpoint.appRelativePath === appPath,
+  if (
+    LOGIN_FLOW_ENDPOINTS.some(
+      (endpoint) => endpoint.method === method && endpoint.appRelativePath === appPath,
+    )
+  ) {
+    return true
+  }
+  return LOGIN_FLOW_PREFIXES.some(
+    (rule) =>
+      rule.method === method &&
+      appPath.startsWith(rule.prefix) &&
+      appPath.endsWith(rule.suffix) &&
+      appPath.length > rule.prefix.length + rule.suffix.length,
   )
 }
 

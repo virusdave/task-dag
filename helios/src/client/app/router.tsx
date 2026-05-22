@@ -53,6 +53,10 @@ import { EpicDagPage } from '../routes/tasks/EpicDagPage.js'
 import { TaskDetailPage } from '../routes/tasks/TaskDetailPage.js'
 import { UtilitiesLandingPage } from '../routes/utilities/UtilitiesLandingPage.js'
 import { UtilitiesStaffPage, utilitiesStaffLoader } from '../routes/utilities/UtilitiesStaffPage.js'
+import {
+  CustomerReviewsListPage,
+  customerReviewsListLoader,
+} from '../routes/customerReviews/CustomerReviewsListPage.js'
 
 async function rootLoader() {
   return loadSession()
@@ -233,6 +237,11 @@ export const router = createBrowserRouter([
         element: <UtilitiesStaffPage />,
         loader: utilitiesStaffLoader,
         path: 'utilities/staff',
+      },
+      {
+        element: <CustomerReviewsListPage />,
+        loader: customerReviewsListLoader,
+        path: 'reviews',
       },
       {
         element: <TasksPage />,
