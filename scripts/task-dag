@@ -101,6 +101,68 @@ list_task_refs() {
     git for-each-ref refs/heads/tasks/ --format='%(objectname) %(refname:short)'
 }
 
+# Helper: fetch task refs from origin so local view reflects remote.
+# Safe to call repeatedly. Quiet on success; failure is non-fatal —
+# offline callers can still see whatever they fetched last.
+fetch_task_refs() {
+    git fetch --quiet origin \
+        '+refs/heads/tasks/frontier/*:refs/heads/tasks/frontier/*' \
+        '+refs/heads/tasks/active/*:refs/heads/tasks/active/*' \
+        2>/dev/null || true
+}
+
+# Helper: print 'yes' iff the remote currently has a tasks/active/<short>
+# ref. The remote is the source of truth for claim state — local refs may
+# lag if another worker just won the CAS.
+task_is_claimed_on_remote() {
+    local short_sha="$1"
+    git ls-remote --exit-code origin "refs/heads/tasks/active/$short_sha" \
+        >/dev/null 2>&1 && echo "yes" || echo "no"
+}
+
+# Helper: print 'yes' iff the remote currently has a tasks/frontier/<short>
+# ref pointing at the expected task SHA.
+task_frontier_on_remote() {
+    local short_sha="$1"
+    git ls-remote origin "refs/heads/tasks/frontier/$short_sha" 2>/dev/null \
+        | awk '{print $1; exit}'
+}
+
+# Helper: build the claim-commit metadata block. The active ref points
+# at a side-commit whose tree is identical to the task tree and whose
+# first parent is the task commit; the commit message holds claim
+# attribution. This keeps `git log tasks/active/<short>` readable
+# without growing a separate metadata store.
+build_claim_commit() {
+    local task_sha="$1"
+    local claimer="$2"
+    local claimer_host="$3"
+    local ttl_hours="$4"
+    local note="$5"
+
+    local task_title
+    task_title=$(get_task_title "$task_sha")
+    local task_tree
+    task_tree=$(git rev-parse "$task_sha^{tree}")
+
+    local now
+    now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+    local msg="Claim: ${task_title}
+
+Task-Commit: ${task_sha}
+Claimer: ${claimer}
+Claimer-Host: ${claimer_host}
+Claimed-At: ${now}
+TTL-Hours: ${ttl_hours}"
+    if [ -n "$note" ]; then
+        msg="${msg}
+Note: ${note}"
+    fi
+
+    git commit-tree "$task_tree" -p "$task_sha" -m "$msg"
+}
+
 # Command: help
 cmd_help() {
     cat <<EOF
@@ -111,7 +173,12 @@ USAGE:
 
 COMMANDS:
     dag <ref>              Show task DAG for epic/task
-    frontier               List available leaf tasks
+    frontier               List available leaf tasks (excludes claimed)
+    claim <sha>            Atomically claim a frontier task (must be done
+                           BEFORE you start working on it, so concurrent
+                           agents on other hosts don't duplicate your work)
+    release <sha>          Drop a claim back onto the frontier
+    active                 List currently-claimed tasks
     show <sha>             Show task details
     deps <sha>             Show task dependencies
     breakdown <parent>     Create task breakdown
@@ -129,35 +196,64 @@ EOF
 }
 
 # Command: frontier - list available leaf tasks
+#
+# By default this fetches origin's task refs first so the local view
+# reflects what's actually available (and what's actually claimed by
+# another worker). Tasks with a remote `tasks/active/<short>` ref are
+# filtered out — they are in-flight on some other agent. Pass
+# `--no-fetch` to suppress the network round-trip (offline use) and
+# `--include-claimed` to override the active-ref filter.
 cmd_frontier() {
     local json=false
     local issue_filter=""
     local status_filter=""
-    
+    local do_fetch=true
+    local include_claimed=false
+
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --json) json=true; shift ;;
             --issue=*) issue_filter="${1#*=}"; shift ;;
             --status=*) status_filter="${1#*=}"; shift ;;
+            --no-fetch) do_fetch=false; shift ;;
+            --include-claimed) include_claimed=true; shift ;;
             *) echo "Unknown option: $1" >&2; return 1 ;;
         esac
     done
-    
+
+    if [ "$do_fetch" = true ]; then
+        fetch_task_refs
+    fi
+
+    # Build a set of currently-claimed short SHAs from local refs that
+    # we just fetched. Doing a single per-row remote ls is too chatty;
+    # the fetched local view is the canonical answer modulo races.
+    local claimed_shas=""
+    if [ "$include_claimed" = false ]; then
+        claimed_shas=$(
+            git for-each-ref refs/heads/tasks/active/ \
+                --format='%(refname:strip=4)' 2>/dev/null \
+                | tr '\n' ' '
+        )
+    fi
+
     if [ "$json" = true ]; then
         echo "["
     else
         printf "${BOLD}%-12s %-50s %-12s %-8s${RESET}\n" "SHA" "TITLE" "ISSUE" "STATUS"
         printf "%-12s %-50s %-12s %-8s\n" "$(printf '%.12s' '============')" "$(printf '%.50s' '==================================================')" "$(printf '%.12s' '============')" "$(printf '%.8s' '========')"
     fi
-    
+
     local first=true
-    git for-each-ref refs/heads/tasks/frontier/ --format='%(objectname)' | while read sha; do
+    git for-each-ref refs/heads/tasks/frontier/ --format='%(objectname) %(refname:strip=3)' | while read sha short_ref; do
+        # strip=3 leaves 'frontier/<short>' — drop the prefix.
+        short_ref="${short_ref#frontier/}"
         local short_sha=$(git rev-parse --short "$sha")
         local title=$(get_task_title "$sha")
         local msg=$(parse_commit_metadata "$sha")
-        local issue=$(extract_field "$msg" "Issue" | sed 's/^#//')
-        local status=$(extract_field "$msg" "Status")
-        
+        local issue=$(extract_field "$msg" "Issue" 2>/dev/null | sed 's/^#//' || true)
+        local status=$(extract_field "$msg" "Status" 2>/dev/null || true)
+
         # Apply filters
         if [ -n "$issue_filter" ] && [ "$issue" != "$issue_filter" ]; then
             continue
@@ -165,7 +261,19 @@ cmd_frontier() {
         if [ -n "$status_filter" ] && [ "$status" != "$status_filter" ]; then
             continue
         fi
-        
+
+        # Skip tasks that are already claimed elsewhere. Match against
+        # both the ref name and the resolved short SHA — older refs
+        # may have been created at a different abbreviation length.
+        if [ "$include_claimed" = false ]; then
+            if echo " $claimed_shas " | grep -q " $short_ref "; then
+                continue
+            fi
+            if echo " $claimed_shas " | grep -q " $short_sha "; then
+                continue
+            fi
+        fi
+
         if [ "$json" = true ]; then
             [ "$first" = false ] && echo ","
             cat <<JSON
@@ -186,7 +294,397 @@ JSON
                 "${status:-pending}"
         fi
     done
-    
+
+    if [ "$json" = true ]; then
+        echo ""
+        echo "]"
+    fi
+}
+
+# Command: claim - atomically take ownership of a frontier task.
+#
+# The contract:
+#   1. We rename `tasks/frontier/<short>` -> `tasks/active/<short>` on
+#      ORIGIN in a single atomic git push protected by two
+#      compare-and-swap leases:
+#        a. `tasks/active/<short>` must NOT yet exist on origin.
+#        b. `tasks/frontier/<short>` must still point at the expected
+#           task SHA on origin.
+#      If either lease fails, the whole push aborts and no refs move.
+#      That gives us a true distributed mutex even when concurrent
+#      workers race on different hosts.
+#   2. The new `tasks/active/<short>` ref points at a "claim commit"
+#      whose tree is identical to the task commit's and whose first
+#      parent is the task commit. The commit message carries
+#      Claimer / Claimer-Host / Claimed-At / TTL-Hours so an
+#      operator can later see who's holding each claim without a
+#      separate metadata store.
+#   3. After a successful claim, the caller MUST eventually either
+#      `task-dag complete <sha>` (which deletes both refs and lands
+#      the task) or `task-dag release <sha>` (which moves the active
+#      ref back to frontier so another worker can pick it up).
+#
+# Failure modes (exit codes):
+#   0 — claim succeeded
+#   1 — argument error
+#   2 — task already claimed (another worker won the race)
+#   3 — frontier ref disappeared (task was completed or moved)
+#   4 — push failed for an unrelated reason
+cmd_claim() {
+    local task_sha=""
+    local claimer="${TASK_DAG_CLAIMER:-${USER:-unknown}}"
+    local claimer_host="${TASK_DAG_CLAIMER_HOST:-$(hostname -s 2>/dev/null || echo unknown)}"
+    local ttl_hours="${TASK_DAG_TTL_HOURS:-12}"
+    local note=""
+    local do_force=false
+    local json=false
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --by=*) claimer="${1#*=}"; shift ;;
+            --host=*) claimer_host="${1#*=}"; shift ;;
+            --ttl-hours=*) ttl_hours="${1#*=}"; shift ;;
+            --note=*) note="${1#*=}"; shift ;;
+            --force) do_force=true; shift ;;
+            --json) json=true; shift ;;
+            --help|-h)
+                cat <<EOF
+Usage: task-dag claim <task-sha> [options]
+
+Atomically claim a frontier task so concurrent agents don't duplicate
+your work. Run this BEFORE you start implementing — picking a task
+off \`task-dag frontier\` is not by itself a claim, it's only an
+observation.
+
+Options:
+  --by=<id>           Claimer identifier (default: \$TASK_DAG_CLAIMER or \$USER)
+  --host=<name>       Claimer hostname (default: \$TASK_DAG_CLAIMER_HOST or hostname -s)
+  --ttl-hours=<n>     Advisory TTL stored in the claim metadata (default: 12)
+  --note=<text>       Free-form note recorded in the claim metadata
+  --force             Steal an existing claim (only do this if you know
+                      the prior claimer is dead; logs a loud warning)
+  --json              Emit a machine-readable JSON result
+
+Exit codes:
+  0  claim succeeded
+  1  argument error
+  2  task already claimed by another worker
+  3  task frontier ref disappeared (completed or retracted)
+  4  push failed for an unrelated reason
+EOF
+                return 0
+                ;;
+            *)
+                if [ -z "$task_sha" ]; then
+                    task_sha="$1"
+                else
+                    echo "Unknown option: $1" >&2
+                    return 1
+                fi
+                shift
+                ;;
+        esac
+    done
+
+    if [ -z "$task_sha" ]; then
+        echo "Error: task SHA required" >&2
+        return 1
+    fi
+
+    task_sha=$(resolve_sha "$task_sha") || return 1
+    local short_sha
+    short_sha=$(git rev-parse --short "$task_sha")
+
+    # Refresh local view so we see other workers' claims.
+    fetch_task_refs
+
+    local frontier_local_ref="refs/heads/tasks/frontier/$short_sha"
+    local active_local_ref="refs/heads/tasks/active/$short_sha"
+
+    local remote_active
+    remote_active=$(task_is_claimed_on_remote "$short_sha")
+    if [ "$remote_active" = "yes" ] && [ "$do_force" = false ]; then
+        # Try to fetch the claim metadata for a friendlier error.
+        local existing_claimer="unknown"
+        local existing_when="unknown"
+        if git show-ref --verify --quiet "$active_local_ref"; then
+            local existing_msg
+            existing_msg=$(parse_commit_metadata "$active_local_ref" 2>/dev/null || true)
+            existing_claimer=$(extract_field "$existing_msg" "Claimer")
+            existing_when=$(extract_field "$existing_msg" "Claimed-At")
+        fi
+        if [ "$json" = true ]; then
+            cat <<JSON
+{"ok":false,"reason":"already-claimed","sha":"$task_sha","shortSha":"$short_sha","claimer":"${existing_claimer:-unknown}","claimedAt":"${existing_when:-unknown}"}
+JSON
+        else
+            printf "${RED}Task %s is already claimed by %s at %s${RESET}\n" \
+                "$short_sha" "${existing_claimer:-unknown}" "${existing_when:-unknown}" >&2
+            echo "Re-run with --force ONLY if you know that claim is dead." >&2
+        fi
+        return 2
+    fi
+
+    local remote_frontier_sha
+    remote_frontier_sha=$(task_frontier_on_remote "$short_sha")
+    if [ -z "$remote_frontier_sha" ] && [ "$do_force" = false ]; then
+        if [ "$json" = true ]; then
+            cat <<JSON
+{"ok":false,"reason":"no-frontier","sha":"$task_sha","shortSha":"$short_sha"}
+JSON
+        else
+            printf "${RED}Task %s has no frontier ref on origin — already completed or retracted.${RESET}\n" \
+                "$short_sha" >&2
+        fi
+        return 3
+    fi
+
+    # Build the claim commit locally before pushing.
+    local claim_commit
+    claim_commit=$(build_claim_commit "$task_sha" "$claimer" "$claimer_host" "$ttl_hours" "$note") || {
+        echo "Error: failed to build claim commit" >&2
+        return 4
+    }
+
+    # Atomic CAS: create active iff absent, delete frontier iff at expected SHA.
+    local lease_active="--force-with-lease=refs/heads/tasks/active/$short_sha:"
+    local lease_frontier="--force-with-lease=refs/heads/tasks/frontier/$short_sha:"
+    if [ "$do_force" = true ]; then
+        # In force mode we still want atomicity, but we accept whatever
+        # is currently on origin (we'll overwrite active and delete
+        # frontier regardless of their prior state).
+        lease_active=""
+        lease_frontier=""
+    else
+        # Frontier lease wants the explicit expected SHA so we don't
+        # delete a frontier ref that someone has since rewritten.
+        lease_frontier="--force-with-lease=refs/heads/tasks/frontier/$short_sha:$remote_frontier_sha"
+    fi
+
+    local push_output
+    if push_output=$(git push --atomic origin \
+        $lease_active \
+        $lease_frontier \
+        "${claim_commit}:refs/heads/tasks/active/$short_sha" \
+        ":refs/heads/tasks/frontier/$short_sha" 2>&1); then
+        # Mirror the remote into local refs so subsequent commands see them.
+        git update-ref "$active_local_ref" "$claim_commit"
+        if git show-ref --verify --quiet "$frontier_local_ref"; then
+            git update-ref -d "$frontier_local_ref"
+        fi
+        if [ "$json" = true ]; then
+            cat <<JSON
+{"ok":true,"sha":"$task_sha","shortSha":"$short_sha","claimCommit":"$claim_commit","claimer":"$claimer","claimerHost":"$claimer_host","ttlHours":$ttl_hours}
+JSON
+        else
+            printf "${GREEN}✓ Claimed task %s as %s@%s (TTL %sh)${RESET}\n" \
+                "$short_sha" "$claimer" "$claimer_host" "$ttl_hours"
+        fi
+        return 0
+    fi
+
+    # Distinguish "lost the CAS race" from "git itself failed". Both
+    # surface as "stale info" / "non-fast-forward" / "rejected" in
+    # push output.
+    if echo "$push_output" | grep -qiE 'rejected|stale info|non-fast-forward|fetch first'; then
+        if [ "$json" = true ]; then
+            cat <<JSON
+{"ok":false,"reason":"race-lost","sha":"$task_sha","shortSha":"$short_sha"}
+JSON
+        else
+            printf "${YELLOW}Lost claim race for %s (another worker won).${RESET}\n" "$short_sha" >&2
+            echo "$push_output" >&2
+        fi
+        return 2
+    fi
+
+    if [ "$json" = true ]; then
+        cat <<JSON
+{"ok":false,"reason":"push-failed","sha":"$task_sha","shortSha":"$short_sha","error":$(printf '%s' "$push_output" | head -c 500 | jq -Rs . 2>/dev/null || printf '"%s"' "$push_output")}
+JSON
+    else
+        printf "${RED}Push failed:${RESET}\n%s\n" "$push_output" >&2
+    fi
+    return 4
+}
+
+# Command: release - undo a claim (move active back to frontier).
+#
+# Use this when a worker is shutting down without completing the task,
+# or when an operator determines a claim is stuck and the underlying
+# work hasn't actually started. Atomic, like claim.
+cmd_release() {
+    local task_sha=""
+    local do_force=false
+    local json=false
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --force) do_force=true; shift ;;
+            --json) json=true; shift ;;
+            --help|-h)
+                cat <<EOF
+Usage: task-dag release <task-sha> [options]
+
+Drop a claim back onto the frontier so another worker can pick it
+up. Atomically moves tasks/active/<short> back to tasks/frontier/<short>.
+
+Options:
+  --force   Release even if the local repo doesn't think it holds the claim
+  --json    Emit a machine-readable JSON result
+EOF
+                return 0
+                ;;
+            *)
+                if [ -z "$task_sha" ]; then
+                    task_sha="$1"
+                else
+                    echo "Unknown option: $1" >&2
+                    return 1
+                fi
+                shift
+                ;;
+        esac
+    done
+
+    if [ -z "$task_sha" ]; then
+        echo "Error: task SHA required" >&2
+        return 1
+    fi
+
+    task_sha=$(resolve_sha "$task_sha") || return 1
+    local short_sha
+    short_sha=$(git rev-parse --short "$task_sha")
+
+    fetch_task_refs
+
+    local active_local_ref="refs/heads/tasks/active/$short_sha"
+    local frontier_local_ref="refs/heads/tasks/frontier/$short_sha"
+
+    local remote_active_sha
+    remote_active_sha=$(git ls-remote origin "refs/heads/tasks/active/$short_sha" 2>/dev/null | awk '{print $1; exit}')
+    if [ -z "$remote_active_sha" ]; then
+        if [ "$json" = true ]; then
+            echo "{\"ok\":false,\"reason\":\"not-claimed\",\"sha\":\"$task_sha\"}"
+        else
+            printf "${YELLOW}No active claim on %s — nothing to release.${RESET}\n" "$short_sha" >&2
+        fi
+        return 1
+    fi
+
+    # Atomic: delete active iff at remote_active_sha, create frontier
+    # iff absent (we'll never *replace* an existing frontier ref —
+    # that would clobber a fresh task definition).
+    local lease_active="--force-with-lease=refs/heads/tasks/active/$short_sha:$remote_active_sha"
+    local lease_frontier="--force-with-lease=refs/heads/tasks/frontier/$short_sha:"
+    if [ "$do_force" = true ]; then
+        lease_active=""
+        lease_frontier=""
+    fi
+
+    local push_output
+    if push_output=$(git push --atomic origin \
+        $lease_active \
+        $lease_frontier \
+        "${task_sha}:refs/heads/tasks/frontier/$short_sha" \
+        ":refs/heads/tasks/active/$short_sha" 2>&1); then
+        git update-ref "$frontier_local_ref" "$task_sha"
+        if git show-ref --verify --quiet "$active_local_ref"; then
+            git update-ref -d "$active_local_ref"
+        fi
+        if [ "$json" = true ]; then
+            echo "{\"ok\":true,\"sha\":\"$task_sha\"}"
+        else
+            printf "${GREEN}✓ Released %s back to frontier${RESET}\n" "$short_sha"
+        fi
+        return 0
+    fi
+
+    if [ "$json" = true ]; then
+        echo "{\"ok\":false,\"reason\":\"push-failed\",\"sha\":\"$task_sha\"}"
+    else
+        printf "${RED}Release push failed:${RESET}\n%s\n" "$push_output" >&2
+    fi
+    return 4
+}
+
+# Command: active - list currently-claimed tasks (from origin).
+cmd_active() {
+    local json=false
+    local issue_filter=""
+    local do_fetch=true
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --json) json=true; shift ;;
+            --issue=*) issue_filter="${1#*=}"; shift ;;
+            --no-fetch) do_fetch=false; shift ;;
+            *) echo "Unknown option: $1" >&2; return 1 ;;
+        esac
+    done
+
+    if [ "$do_fetch" = true ]; then
+        fetch_task_refs
+    fi
+
+    if [ "$json" = true ]; then
+        echo "["
+    else
+        printf "${BOLD}%-12s %-12s %-30s %-20s %s${RESET}\n" "SHORT" "ISSUE" "CLAIMER@HOST" "CLAIMED-AT" "TITLE"
+    fi
+
+    local first=true
+    # NOTE: every assignment below uses `local NAME=VALUE` (single
+    # statement) on purpose. Splitting into `local NAME` + `NAME=$(...)`
+    # would cause `set -e` to abort the loop the first time
+    # `extract_field` returned non-zero (which happens for any task
+    # that has no Issue: trailer, e.g. clarification messages).
+    git for-each-ref refs/heads/tasks/active/ \
+        --format='%(objectname) %(refname:strip=3)' \
+        | while read claim_sha short_ref; do
+        local task_sha=$(get_first_parent "$claim_sha" 2>/dev/null || echo "$claim_sha")
+        local task_msg=$(parse_commit_metadata "$task_sha" 2>/dev/null || true)
+        local title=$(get_task_title "$task_sha" 2>/dev/null || echo "(unknown)")
+        local issue=$(extract_field "$task_msg" "Issue" 2>/dev/null | sed 's/^#//' || true)
+        # strip refname prefix 'active/' if for-each-ref left it there
+        short_ref="${short_ref#active/}"
+
+        if [ -n "$issue_filter" ] && [ "$issue" != "$issue_filter" ]; then
+            continue
+        fi
+
+        local claim_msg=$(parse_commit_metadata "$claim_sha" 2>/dev/null || true)
+        local claimer=$(extract_field "$claim_msg" "Claimer" 2>/dev/null || true)
+        local claimer_host=$(extract_field "$claim_msg" "Claimer-Host" 2>/dev/null || true)
+        local claimed_at=$(extract_field "$claim_msg" "Claimed-At" 2>/dev/null || true)
+        local ttl_hours=$(extract_field "$claim_msg" "TTL-Hours" 2>/dev/null || true)
+
+        if [ "$json" = true ]; then
+            [ "$first" = false ] && echo ","
+            cat <<JSON
+    {
+        "shortSha": "$short_ref",
+        "taskSha": "$task_sha",
+        "claimCommit": "$claim_sha",
+        "issue": ${issue:-null},
+        "title": "$title",
+        "claimer": "${claimer:-unknown}",
+        "claimerHost": "${claimer_host:-unknown}",
+        "claimedAt": "${claimed_at:-unknown}",
+        "ttlHours": ${ttl_hours:-null}
+    }
+JSON
+            first=false
+        else
+            printf "%-12s %-12s %-30s %-20s %s\n" \
+                "$short_ref" \
+                "${issue:+#$issue}" \
+                "${claimer:-?}@${claimer_host:-?}" \
+                "${claimed_at:-unknown}" \
+                "${title:0:60}"
+        fi
+    done
+
     if [ "$json" = true ]; then
         echo ""
         echo "]"
@@ -524,7 +1022,32 @@ EOF
     fi
     
     task_sha=$(resolve_sha "$task_sha") || return 1
-    
+
+    # Soft check: did we actually hold a claim on this task? Not
+    # holding one is allowed (e.g. operator-driven completion of work
+    # that landed before claim was introduced) but worth flagging,
+    # because the racy "find a frontier ref and start coding" workflow
+    # is what gave us the duplicate-work problem this whole claim
+    # mechanism exists to fix.
+    local complete_short_sha
+    complete_short_sha=$(git rev-parse --short "$task_sha")
+    if ! git show-ref --verify --quiet "refs/heads/tasks/active/$complete_short_sha"; then
+        local remote_active_completer
+        remote_active_completer=$(task_is_claimed_on_remote "$complete_short_sha")
+        if [ "$remote_active_completer" = "yes" ]; then
+            printf "${YELLOW}WARNING: task %s is claimed on origin but not by this checkout.${RESET}\n" \
+                "$complete_short_sha" >&2
+            echo "  Another worker may have it in flight. If you are sure the work" >&2
+            echo "  you are completing here is the canonical one, continue." >&2
+            echo "" >&2
+        else
+            printf "${YELLOW}NOTE: completing %s without a prior \`task-dag claim\`.${RESET}\n" \
+                "$complete_short_sha" >&2
+            echo "  Future work on the same task in a parallel agent could have" >&2
+            echo "  raced with this. Run \`task-dag claim\` BEFORE coding next time." >&2
+        fi
+    fi
+
     # Check dependencies
     if ! cmd_deps "$task_sha" --check-complete >/dev/null 2>&1; then
         echo "Error: Dependencies not met for task $task_sha" >&2
@@ -1007,6 +1530,9 @@ main() {
         help|--help|-h) cmd_help ;;
         --version|-v) echo "task-dag v${VERSION}" ;;
         frontier) cmd_frontier "$@" ;;
+        claim) cmd_claim "$@" ;;
+        release) cmd_release "$@" ;;
+        active) cmd_active "$@" ;;
         show) cmd_show "$@" ;;
         deps) cmd_deps "$@" ;;
         dag) cmd_dag "$@" ;;

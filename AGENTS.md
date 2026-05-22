@@ -141,9 +141,37 @@ alone.
 
    Pick a leaf task whose dependencies are all met (`scripts/task-dag deps
    <sha>` to confirm). The SHA shown by `frontier` is the **task SHA** you
-   will pass to `complete` later.
+   will pass to `claim` and `complete` later.
 
-2. **Do the work in a real commit**
+2. **Claim the task IMMEDIATELY, before reading a single file**
+
+   ```sh
+   scripts/task-dag claim <task-sha> --note='<short context>'
+   ```
+
+   This pushes an atomic compare-and-swap on `origin` that renames
+   `tasks/frontier/<short>` → `tasks/active/<short>`. Concurrent agents
+   on other hosts cannot claim the same task; the second caller exits
+   non-zero with `reason=race-lost` (exit code 2). If your claim fails:
+
+   - **exit 2 (`race-lost` / `already-claimed`):** another worker has it.
+     Pick a different frontier task or stop work on this issue.
+   - **exit 3 (`no-frontier`):** the task was already completed while you
+     were looking at the listing. Refresh `frontier` and pick again.
+   - **exit 4 (`push-failed`):** transient network / auth problem. Retry
+     after a short pause; if it persists, page the operator.
+
+   Listing `scripts/task-dag frontier` after a claim hides the task from
+   *all* other agents, and `scripts/task-dag active` shows who owns each
+   in-flight claim. The claim metadata commit records claimer / host /
+   timestamp / TTL so the operator can audit stuck claims.
+
+   **Do not skip this step.** Picking a task off `frontier` is an
+   observation, not a claim. Three agents independently implemented the
+   same task (issue #13, A1) in May 2026 because the workflow had no
+   atomicity yet; the `claim` step is what prevents that recurring.
+
+3. **Do the work in a real commit**
 
    Make the actual code/file changes and commit them normally:
 
@@ -156,7 +184,7 @@ alone.
    **not** a placeholder, and its message should describe the change, not
    the task ceremony.
 
-3. **Link the implementation commit to the task**
+4. **Link the implementation commit to the task**
 
    ```sh
    scripts/task-dag complete <task-sha>
@@ -165,11 +193,30 @@ alone.
    This rewrites `HEAD` so the task commit becomes a non-primary parent,
    appends `Related: <issue-url>` for GitHub auto-linking, posts a progress
    comment on the issue (when `GITHUB_TOKEN` is set), and cleans up
-   `tasks/frontier/<sha>` / `tasks/active/<sha>` refs.
+   `tasks/frontier/<sha>` / `tasks/active/<sha>` refs (the latter is your
+   claim — `complete` consumes it).
 
-4. **Push `master`** as usual (`git push origin HEAD:master`). Any remote
-   frontier refs that `task-dag complete` retired locally are also deleted
-   on `origin`.
+   `complete` prints a soft warning when it can't find a local claim
+   ref. That warning is your last chance to notice the workflow was
+   bypassed; do not commit again on that branch without re-`claim`-ing.
+
+5. **Push `master`** as usual (`git push origin HEAD:master`). Any remote
+   frontier / active refs that `task-dag complete` retired locally are
+   also deleted on `origin`.
+
+### Releasing a claim without completing
+
+If you decide mid-task that you can't finish (blocker, redirection from
+operator, dependency revealed), put the task back on the frontier so
+another agent can pick it up:
+
+```sh
+scripts/task-dag release <task-sha>
+```
+
+This is the right move whenever you would otherwise tear down your
+ephemeral workspace with a still-active claim. Stuck claims left in
+`tasks/active/<short>` block all other agents on that task.
 
 ### NEVER create "tombstone" commits for active work
 
@@ -201,14 +248,22 @@ so a human can audit it.
 **DO**
 - ✓ Run `scripts/task-dag frontier` (optionally with `--issue=N`) before
   picking up task-tracked work.
+- ✓ Run `scripts/task-dag claim <task-sha>` BEFORE you read a single
+  file. The claim is the only thing that stops a parallel agent from
+  also picking up the same task.
 - ✓ Commit the real implementation first, then run `task-dag complete
   <task-sha>` against `HEAD`.
 - ✓ Let `task-dag complete` write the `Related:` / `Task-Commit:` /
   `Issue:` trailers — don't hand-author them.
+- ✓ Run `scripts/task-dag release <task-sha>` if you have to abandon a
+  claimed task before completion.
 - ✓ Push `HEAD:master` after completion (per the "Commit and push" rule
   above).
 
 **DON'T**
+- ✗ Skip `scripts/task-dag claim`. Picking a SHA from `frontier` and
+  starting to code is exactly the race that wasted three agents' work
+  on issue #13's A1 in May 2026.
 - ✗ Create empty / tombstone completion commits to represent work you
   just did.
 - ✗ Imitate the tombstone pattern visible in issues #1 / #2 — that was a
