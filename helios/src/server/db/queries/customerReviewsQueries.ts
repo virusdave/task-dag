@@ -4,6 +4,7 @@ import type {
   CustomerReviewContactInfoInput,
   CustomerReviewContactInfoRow,
   CustomerReviewDrawingEntryRow,
+  CustomerReviewEmailRow,
   CustomerReviewListItem,
 } from '../../../shared/contracts/index.js'
 import type { Queryable } from '../pool.js'
@@ -21,6 +22,12 @@ const SiteReviewSettingsRowSchema = z.object({
   site_label: z.string(),
   review_provider_kind: z.enum(['google', 'yelp', 'other']),
   review_provider_url_template: z.string().nullable(),
+  // A3 email-pipeline recipient columns. Nullable per-site so a fresh
+  // site row can default to "no recipients configured" without
+  // blocking submissions.
+  review_email_dave: z.string().nullable(),
+  review_email_support: z.string().nullable(),
+  review_email_ops: z.string().nullable(),
   review_drawing_enabled: z.boolean(),
   review_free_preroll_enabled: z.boolean(),
   review_llm_gate_enabled: z.boolean(),
@@ -37,6 +44,7 @@ export async function getSiteReviewSettings(
     `select
        dealer_id, site_label, review_provider_kind,
        review_provider_url_template,
+       review_email_dave, review_email_support, review_email_ops,
        review_drawing_enabled, review_free_preroll_enabled,
        review_llm_gate_enabled,
        sweed_drawing_segment_id, sweed_free_preroll_segment_id
@@ -598,6 +606,34 @@ export async function listCustomerReviews(
     }
   }
 
+  // A3: bundle email send attempts per submission for the operator UI.
+  const emailsBySubmission = new Map<string, CustomerReviewEmailRow[]>()
+  if (submissionIds.length > 0) {
+    const emailsResult = await db.query(
+      `select id, submission_id, template_kind, to_address, subject,
+              send_status, send_error, sent_at, created_at
+       from review_emails
+       where submission_id = any($1::uuid[])
+       order by created_at asc`,
+      [submissionIds],
+    )
+    for (const raw of emailsResult.rows) {
+      const parsed = ReviewEmailRowSchema.parse(raw)
+      const list = emailsBySubmission.get(parsed.submission_id) ?? []
+      list.push({
+        id: parsed.id,
+        templateKind: parsed.template_kind,
+        toAddress: parsed.to_address,
+        subject: parsed.subject,
+        sendStatus: parsed.send_status,
+        sendError: parsed.send_error,
+        sentAt: parsed.sent_at ? parsed.sent_at.toISOString() : null,
+        createdAt: parsed.created_at.toISOString(),
+      })
+      emailsBySubmission.set(parsed.submission_id, list)
+    }
+  }
+
   const items: CustomerReviewListItem[] = submissions.map((s) => ({
     submissionId: s.submission_id,
     dealerId: s.dealer_id,
@@ -618,6 +654,7 @@ export async function listCustomerReviews(
     reviewProviderUrl: s.review_provider_url,
     contacts: contactsBySubmission.get(s.submission_id) ?? [],
     drawingEntry: drawingBySubmission.get(s.submission_id) ?? null,
+    emails: emailsBySubmission.get(s.submission_id) ?? [],
     createdAt: s.created_at.toISOString(),
   }))
 
@@ -627,4 +664,180 @@ export async function listCustomerReviews(
   const totalCount = Number(totalResult.rows[0]?.count ?? items.length)
 
   return { items, totalCount }
+}
+
+// ===================================================================
+// A3 email-pipeline queries.
+// ===================================================================
+
+const ReviewEmailRowSchema = z.object({
+  id: z.string().uuid(),
+  submission_id: z.string().uuid(),
+  template_kind: z.enum(['negative', 'lukewarm', 'strong_with_text', 'other']),
+  to_address: z.string(),
+  subject: z.string(),
+  send_status: z.enum(['queued', 'sent', 'failed', 'skipped']),
+  send_error: z.string().nullable(),
+  sent_at: z.coerce.date().nullable(),
+  created_at: z.coerce.date(),
+})
+
+export interface InsertReviewEmailInput {
+  submissionId: string
+  templateKind: 'negative' | 'lukewarm' | 'strong_with_text' | 'other'
+  toAddress: string
+  subject: string
+  bodyText: string
+  bodyHtml: string
+  sendStatus: 'queued' | 'sent' | 'failed' | 'skipped'
+  sendError: string | null
+  sentAt: Date | null
+}
+
+export interface InsertReviewEmailResult {
+  id: string
+  createdAt: Date
+}
+
+export async function insertReviewEmail(
+  db: Queryable,
+  input: InsertReviewEmailInput,
+): Promise<InsertReviewEmailResult> {
+  const result = await db.query<{ id: string; created_at: Date }>(
+    `insert into review_emails (
+       submission_id, template_kind, to_address, subject,
+       body_text, body_html,
+       send_status, send_error, sent_at
+     ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+     returning id, created_at`,
+    [
+      input.submissionId,
+      input.templateKind,
+      input.toAddress,
+      input.subject,
+      input.bodyText,
+      input.bodyHtml,
+      input.sendStatus,
+      input.sendError,
+      input.sentAt,
+    ],
+  )
+  const row = result.rows[0]
+  if (!row) throw new Error('insertReviewEmail returned no row')
+  return {
+    id: row.id,
+    createdAt: row.created_at instanceof Date ? row.created_at : new Date(row.created_at),
+  }
+}
+
+// Lightweight snapshot of one submission, sufficient to re-render
+// an email on the A3 resend path without re-fetching the whole list
+// shape. Joins contact info and (when present) the LLM rationale
+// out of llm_raw->rationale.
+export interface ReviewSubmissionForRender {
+  submissionId: string
+  dealerId: number
+  starRating: number | null
+  reviewText: string | null
+  llmVerdict:
+    | 'strong-with-text'
+    | 'strong-no-text'
+    | 'lukewarm'
+    | 'negative'
+    | 'error'
+    | null
+  degradedPass: boolean | null
+  llmRationale: string | null
+  reviewProviderUrl: string | null
+  createdAt: Date
+  contacts: CustomerReviewContactInfoInput[]
+}
+
+const RenderRowSchema = z.object({
+  id: z.string().uuid(),
+  dealer_id: z.coerce.number().int(),
+  star_rating: z.coerce.number().int().nullable(),
+  review_text: z.string().nullable(),
+  llm_verdict: z
+    .enum(['strong-with-text', 'strong-no-text', 'lukewarm', 'negative', 'error'])
+    .nullable(),
+  degraded_pass: z.boolean().nullable(),
+  llm_raw: z.unknown().nullable(),
+  review_provider_url: z.string().nullable(),
+  created_at: z.coerce.date(),
+})
+
+export async function getReviewSubmissionForRender(
+  db: Queryable,
+  submissionId: string,
+): Promise<ReviewSubmissionForRender | null> {
+  const result = await db.query(
+    `select id, dealer_id, star_rating, review_text,
+            llm_verdict, degraded_pass, llm_raw,
+            review_provider_url, created_at
+     from review_submissions
+     where id = $1`,
+    [submissionId],
+  )
+  if (result.rows.length === 0) return null
+  const row = RenderRowSchema.parse(result.rows[0])
+  const contactsResult = await db.query(
+    `select contact_kind, contact_value
+     from review_contact_info
+     where submission_id = $1
+     order by created_at asc`,
+    [submissionId],
+  )
+  const contacts: CustomerReviewContactInfoInput[] = contactsResult.rows.map((r) => ({
+    kind: r.contact_kind,
+    value: r.contact_value,
+  }))
+  // Extract assistant rationale from llm_raw.choices[0].message.content
+  // (which is itself a JSON-stringified object like {label,rationale}).
+  return {
+    submissionId: row.id,
+    dealerId: row.dealer_id,
+    starRating: row.star_rating,
+    reviewText: row.review_text,
+    llmVerdict: row.llm_verdict,
+    degradedPass: row.degraded_pass,
+    llmRationale: extractLlmRationale(row.llm_raw),
+    reviewProviderUrl: row.review_provider_url,
+    createdAt: row.created_at,
+    contacts,
+  }
+}
+
+function extractLlmRationale(rawJson: unknown): string | null {
+  if (rawJson === null || typeof rawJson !== 'object') return null
+  const choices = (rawJson as { choices?: unknown }).choices
+  if (!Array.isArray(choices) || choices.length === 0) return null
+  const first = choices[0]
+  if (typeof first !== 'object' || first === null) return null
+  const message = (first as { message?: unknown }).message
+  if (typeof message !== 'object' || message === null) return null
+  const content = (message as { content?: unknown }).content
+  let assistantText: string | null = null
+  if (typeof content === 'string') {
+    assistantText = content
+  } else if (Array.isArray(content)) {
+    assistantText = content
+      .map((part) =>
+        typeof part === 'object' && part !== null && typeof (part as { text?: unknown }).text === 'string'
+          ? (part as { text: string }).text
+          : '',
+      )
+      .join('')
+  }
+  if (assistantText === null) return null
+  try {
+    const parsed: unknown = JSON.parse(assistantText)
+    if (parsed !== null && typeof parsed === 'object' && typeof (parsed as { rationale?: unknown }).rationale === 'string') {
+      return (parsed as { rationale: string }).rationale
+    }
+  } catch {
+    // Non-JSON assistant content — return the raw text as the rationale.
+    return assistantText.length > 0 ? assistantText : null
+  }
+  return null
 }

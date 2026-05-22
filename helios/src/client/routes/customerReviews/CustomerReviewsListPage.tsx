@@ -16,6 +16,7 @@ import { Link, useLoaderData, useRevalidator } from 'react-router-dom'
 
 import {
   CustomerReviewListResponseSchema,
+  type CustomerReviewEmailRow,
   type CustomerReviewListItem,
   type CustomerReviewListResponse,
 } from '../../../shared/contracts/index.js'
@@ -66,6 +67,44 @@ function summarizeContacts(item: CustomerReviewListItem): string {
     .join(' · ')
 }
 
+// A3: collapse the per-recipient send-attempt list into a small
+// status summary for the list row. Detail is exposed below the
+// summary on hover via the <details> drawer.
+function summarizeEmailRows(emails: CustomerReviewEmailRow[]): {
+  tone: PillProps['tone']
+  label: string
+} {
+  if (emails.length === 0) return { tone: 'muted', label: '—' }
+  const counts = { sent: 0, queued: 0, failed: 0, skipped: 0 }
+  for (const e of emails) counts[e.sendStatus]++
+  if (counts.failed > 0) return { tone: 'danger', label: `${counts.failed} failed / ${emails.length}` }
+  if (counts.queued > 0) return { tone: 'warning', label: `${counts.queued} queued / ${emails.length}` }
+  if (counts.sent > 0) return { tone: 'success', label: `${counts.sent} sent` }
+  return { tone: 'muted', label: `${emails.length} skipped` }
+}
+
+function emailStatusTone(status: CustomerReviewEmailRow['sendStatus']): PillProps['tone'] {
+  switch (status) {
+    case 'sent':
+      return 'success'
+    case 'queued':
+      return 'warning'
+    case 'failed':
+      return 'danger'
+    default:
+      return 'muted'
+  }
+}
+
+// A3: verdicts that DO drive an email per the pipeline contract. Used
+// to gate the resend button so we don't surface it for strong-no-text
+// / null-verdict rows where a resend would 409 with "no template".
+function verdictEmailEligible(item: CustomerReviewListItem): boolean {
+  if (item.llmVerdict === null) return false
+  if (item.llmVerdict === 'strong-no-text') return false
+  return true
+}
+
 // A2: render the LLM verdict pill. "error (degraded ✓)" makes the
 // operator-settled fallback case visually distinguishable from a
 // plain error so an at-a-glance scan tells you whether the customer
@@ -98,6 +137,29 @@ export function CustomerReviewsListPage() {
   const [starFilter, setStarFilter] = useState<StarFilter>('all')
   const [kindFilter, setKindFilter] = useState<KindFilter>('all')
   const [showFraud, setShowFraud] = useState(true)
+  const [resendingId, setResendingId] = useState<string | null>(null)
+  const [resendError, setResendError] = useState<string | null>(null)
+
+  const onResend = async (submissionId: string) => {
+    setResendingId(submissionId)
+    setResendError(null)
+    try {
+      const res = await fetch(`/api/customer-reviews/${submissionId}/resend-email`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      })
+      if (!res.ok) {
+        const errText = await res.text().catch(() => '')
+        setResendError(`Resend failed (${res.status}): ${errText.slice(0, 200)}`)
+        return
+      }
+      revalidator.revalidate()
+    } catch (err) {
+      setResendError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setResendingId(null)
+    }
+  }
 
   const filtered = useMemo<CustomerReviewListItem[]>(() => {
     return initial.items.filter((item) => {
@@ -162,6 +224,10 @@ export function CustomerReviewsListPage() {
         </label>
       </div>
 
+      {resendError !== null && (
+        <p style={{ color: '#b91c1c', marginBottom: '0.5rem' }}>{resendError}</p>
+      )}
+
       {filtered.length === 0 ? (
         <p className="subtle-copy">No submissions match these filters.</p>
       ) : (
@@ -176,45 +242,84 @@ export function CustomerReviewsListPage() {
               <th>LLM verdict</th>
               <th>Contacts</th>
               <th>Drawing</th>
+              <th>Emails</th>
               <th>Status</th>
             </tr>
           </thead>
           <tbody>
-            {filtered.map((item) => (
-              <tr key={item.submissionId}>
-                <td>
-                  <Link to={`/reviews/${item.submissionId}`}>{formatDate(item.createdAt)}</Link>
-                </td>
-                <td>{item.siteLabel || `dealer ${item.dealerId}`}</td>
-                <td>
-                  <Pill tone={starTone(item.starRating)}>{formatStars(item.starRating)}</Pill>
-                </td>
-                <td>
-                  <Pill tone={kindTone(item.submissionKind)}>{item.submissionKind}</Pill>
-                </td>
-                <td style={{ maxWidth: '24rem', whiteSpace: 'pre-wrap' }}>
-                  {item.reviewText ?? <span className="subtle-copy">(no text)</span>}
-                </td>
-                <td>{renderVerdictPill(item)}</td>
-                <td style={{ fontSize: '0.85em' }}>{summarizeContacts(item)}</td>
-                <td>
-                  {item.drawingEntry === null ? (
-                    <span className="subtle-copy">—</span>
-                  ) : item.drawingEntry.acknowledged ? (
-                    <Pill tone="success">acknowledged</Pill>
-                  ) : (
-                    <Pill tone="warning">pending</Pill>
-                  )}
-                </td>
-                <td>
-                  {item.fraudMarked ? (
-                    <Pill tone="danger">fraud</Pill>
-                  ) : (
-                    <span className="subtle-copy">—</span>
-                  )}
-                </td>
-              </tr>
-            ))}
+            {filtered.map((item) => {
+              const emailSummary = summarizeEmailRows(item.emails)
+              const canResend = verdictEmailEligible(item)
+              return (
+                <tr key={item.submissionId}>
+                  <td>
+                    <Link to={`/reviews/${item.submissionId}`}>{formatDate(item.createdAt)}</Link>
+                  </td>
+                  <td>{item.siteLabel || `dealer ${item.dealerId}`}</td>
+                  <td>
+                    <Pill tone={starTone(item.starRating)}>{formatStars(item.starRating)}</Pill>
+                  </td>
+                  <td>
+                    <Pill tone={kindTone(item.submissionKind)}>{item.submissionKind}</Pill>
+                  </td>
+                  <td style={{ maxWidth: '24rem', whiteSpace: 'pre-wrap' }}>
+                    {item.reviewText ?? <span className="subtle-copy">(no text)</span>}
+                  </td>
+                  <td>{renderVerdictPill(item)}</td>
+                  <td style={{ fontSize: '0.85em' }}>{summarizeContacts(item)}</td>
+                  <td>
+                    {item.drawingEntry === null ? (
+                      <span className="subtle-copy">—</span>
+                    ) : item.drawingEntry.acknowledged ? (
+                      <Pill tone="success">acknowledged</Pill>
+                    ) : (
+                      <Pill tone="warning">pending</Pill>
+                    )}
+                  </td>
+                  <td>
+                    <Pill tone={emailSummary.tone}>{emailSummary.label}</Pill>
+                    {item.emails.length > 0 && (
+                      <details style={{ marginTop: '0.25rem' }}>
+                        <summary className="subtle-copy" style={{ fontSize: '0.8em' }}>
+                          per-recipient
+                        </summary>
+                        <ul style={{ margin: '0.25rem 0', paddingLeft: '1rem', fontSize: '0.8em' }}>
+                          {item.emails.map((e) => (
+                            <li key={e.id}>
+                              <Pill tone={emailStatusTone(e.sendStatus)}>{e.sendStatus}</Pill>{' '}
+                              {e.toAddress}
+                              {e.sendError !== null && (
+                                <div style={{ color: '#b91c1c' }}>{e.sendError}</div>
+                              )}
+                            </li>
+                          ))}
+                        </ul>
+                      </details>
+                    )}
+                    {canResend && (
+                      <div style={{ marginTop: '0.25rem' }}>
+                        <button
+                          type="button"
+                          className="ghost-button"
+                          onClick={() => onResend(item.submissionId)}
+                          disabled={resendingId !== null}
+                          style={{ fontSize: '0.8em' }}
+                        >
+                          {resendingId === item.submissionId ? 'Resending…' : 'Resend email'}
+                        </button>
+                      </div>
+                    )}
+                  </td>
+                  <td>
+                    {item.fraudMarked ? (
+                      <Pill tone="danger">fraud</Pill>
+                    ) : (
+                      <span className="subtle-copy">—</span>
+                    )}
+                  </td>
+                </tr>
+              )
+            })}
           </tbody>
         </table>
       )}
@@ -245,10 +350,18 @@ export function CustomerReviewsListPage() {
               on every LLM error.
             </li>
             <li>
-              <strong>A3</strong> — email pipeline + templates under{' '}
+              <strong>A3 (shipped)</strong> — email pipeline + templates under{' '}
               <code>helios/email_templates/reviews/</code> (negative, lukewarm,
-              strong-with-text). From: <code>reviews@freshlybaked.us</code>{' '}
-              (mailbox provisioning owned by nixos-sbc).
+              strong-with-text). Sender <code>reviews@freshlybaked.us</code>{' '}
+              (env: <code>REVIEWS_EMAIL_FROM</code>). When{' '}
+              <code>REVIEWS_SMTP_HOST</code> is unset, sends queue with{' '}
+              <code>send_status='queued'</code> while we wait on{' '}
+              <em>nixos-sbc</em> provisioning the mailbox; when set, a minimal
+              plain-TCP SMTP exchange is attempted and{' '}
+              <code>'sent'</code>/<code>'failed'</code> is recorded. The Emails
+              column above shows the per-recipient outcomes; the{' '}
+              <em>Resend email</em> action enqueues a fresh send attempt
+              without mutating earlier rows.
             </li>
             <li>
               <strong>A4</strong> — Sweed segment add (drawing segment always

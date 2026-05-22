@@ -69,6 +69,19 @@ export interface ServerEnv {
   bedrockMantleBaseUrl: string
   bedrockMantleBearerToken: string | null
   llmRequestTimeoutMs: number
+  // Customer-Sentiment Capture (issue #13, A3 phase) — email pipeline.
+  // Sender address used as From: on outbound review notifications.
+  // Mailbox provisioning is owned by the nixos-sbc child epic; until
+  // that lands we still queue rows in review_emails so the operator
+  // page can surface the would-be sends.
+  reviewsEmailFromAddress: string
+  // Optional SMTP relay. Unset → every send returns 'queued' (no
+  // actual delivery attempted). Set → A3 attempts a minimal plain-
+  // TCP SMTP exchange; transport failures land as 'failed' with the
+  // error captured on review_emails.send_error.
+  reviewsSmtpHost: string | null
+  reviewsSmtpPort: number
+  reviewsSmtpTimeoutMs: number
 }
 
 let cachedEnv: ServerEnv | null = null
@@ -118,6 +131,11 @@ export function getServerEnv(): ServerEnv {
       defaultFilePaths: BEDROCK_MANTLE_BEARER_TOKEN_SECRET_FILE_PATHS,
     }),
     llmRequestTimeoutMs: readNumberEnv('LLM_REQUEST_TIMEOUT_MS', 120000),
+    reviewsEmailFromAddress:
+      readOptionalEnv('REVIEWS_EMAIL_FROM') ?? 'reviews@freshlybaked.us',
+    reviewsSmtpHost: readOptionalEnv('REVIEWS_SMTP_HOST'),
+    reviewsSmtpPort: readNumberEnv('REVIEWS_SMTP_PORT', 25),
+    reviewsSmtpTimeoutMs: readNumberEnv('REVIEWS_SMTP_TIMEOUT_MS', 10000),
   }
 
   return cachedEnv

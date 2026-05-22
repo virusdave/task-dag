@@ -129,6 +129,21 @@ export const CustomerReviewLlmVerdictSchema = z.enum([
 ])
 export type CustomerReviewLlmVerdict = z.infer<typeof CustomerReviewLlmVerdictSchema>
 
+// A3 email-pipeline row surfaced to the operator UI. One row per
+// recipient per send attempt (resend appends a new row, never
+// mutates the original).
+export const CustomerReviewEmailRowSchema = z.object({
+  id: z.string().uuid(),
+  templateKind: z.enum(['negative', 'lukewarm', 'strong_with_text', 'other']),
+  toAddress: z.string(),
+  subject: z.string(),
+  sendStatus: z.enum(['queued', 'sent', 'failed', 'skipped']),
+  sendError: z.string().nullable(),
+  sentAt: z.string().nullable(),
+  createdAt: z.string(),
+})
+export type CustomerReviewEmailRow = z.infer<typeof CustomerReviewEmailRowSchema>
+
 export const CustomerReviewListItemSchema = z.object({
   submissionId: z.string().uuid(),
   dealerId: z.number().int(),
@@ -151,9 +166,18 @@ export const CustomerReviewListItemSchema = z.object({
   reviewProviderUrl: z.string().nullable(),
   contacts: z.array(CustomerReviewContactInfoRowSchema),
   drawingEntry: CustomerReviewDrawingEntryRowSchema.nullable(),
+  // A3: email send attempts (zero or more rows). Ordered oldest-first.
+  emails: z.array(CustomerReviewEmailRowSchema),
   createdAt: z.string(),
 })
 export type CustomerReviewListItem = z.infer<typeof CustomerReviewListItemSchema>
+
+// A3 resend-email response.
+export const CustomerReviewResendEmailResponseSchema = z.object({
+  submissionId: z.string().uuid(),
+  enqueued: z.array(CustomerReviewEmailRowSchema),
+})
+export type CustomerReviewResendEmailResponse = z.infer<typeof CustomerReviewResendEmailResponseSchema>
 
 export const CustomerReviewListResponseSchema = z.object({
   items: z.array(CustomerReviewListItemSchema),

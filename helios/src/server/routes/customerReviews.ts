@@ -7,6 +7,7 @@ import {
   CustomerReviewDrawingEntryRequestSchema,
   CustomerReviewDrawingEntryResponseSchema,
   CustomerReviewListResponseSchema,
+  CustomerReviewResendEmailResponseSchema,
   CustomerReviewSubmitRequestSchema,
   CustomerReviewSubmitResponseSchema,
   type CustomerReviewActionResponse,
@@ -19,6 +20,7 @@ import {
   acknowledgeDrawingEntry,
   getReviewSubmissionDealerId,
   getReviewSubmissionDetail,
+  getReviewSubmissionForRender,
   getSiteReviewSettings,
   insertContactInfoRows,
   insertDrawingEntry,
@@ -43,6 +45,13 @@ import {
   performForceSegmentRemove,
   type PerSegmentOutcome,
 } from '../customerReviews/segmentOrchestrator.js'
+import {
+  buildTemplateVars,
+  pickTemplateKind,
+  queueAndSendReviewEmails,
+  renderTemplate,
+  resolveRecipients,
+} from '../reviews/emailPipeline.js'
 import { pageDave } from '../../worker/runtime/pageDave.js'
 
 // =====================================================================
@@ -240,6 +249,119 @@ async function runGateAndDecide(input: GateDecisionInput): Promise<GateDecision>
   }
 }
 
+// A3: best-effort wrapper around the email pipeline. Pulls the
+// verdict→bucket → recipients → render → enqueue sequence into one
+// place so the submit handler can fire-and-forget without leaking
+// pipeline internals or letting an email failure fail the customer's
+// POST.
+interface TryEmailInput {
+  submissionId: string
+  dealerId: number
+  siteLabel: string
+  siteEmails: {
+    review_email_dave: string | null
+    review_email_support: string | null
+    review_email_ops: string | null
+  }
+  starRating: number | null
+  reviewText: string | null
+  contacts: Array<{ kind: 'phone' | 'email' | 'name' | 'other'; value: string }>
+  llmVerdict: ReviewLlmVerdict | null
+  degradedPass: boolean | null
+  llmRationale: string | null
+  providerReviewUrl: string | null
+  createdAt: Date
+  appBaseUrl: string
+  fromAddress: string
+  logger: { error: (obj: unknown, msg: string) => void; info: (obj: unknown, msg: string) => void }
+}
+
+async function tryEmailReviewSubmission(input: TryEmailInput): Promise<void> {
+  try {
+    const templateKind = pickTemplateKind(input.llmVerdict, input.degradedPass)
+    if (templateKind === null) {
+      return // strong-no-text path or no verdict — no email per A3 spec.
+    }
+    const recipients = resolveRecipients(templateKind, input.siteEmails)
+    if (recipients.length === 0) {
+      input.logger.info(
+        { submissionId: input.submissionId, templateKind },
+        'A3 email: no recipients configured for site; nothing to queue',
+      )
+      return
+    }
+    const vars = buildTemplateVars({
+      submissionId: input.submissionId,
+      dealerId: input.dealerId,
+      siteLabel: input.siteLabel,
+      starRating: input.starRating,
+      reviewText: input.reviewText,
+      contacts: input.contacts,
+      llmVerdict: input.llmVerdict,
+      degradedPass: input.degradedPass,
+      llmRationale: input.llmRationale,
+      providerReviewUrl: input.providerReviewUrl,
+      createdAt: input.createdAt,
+      adminBaseUrl: input.appBaseUrl,
+    })
+    const rendered = await renderTemplate(templateKind, vars)
+    await queueAndSendReviewEmails({
+      db: getPool(),
+      submissionId: input.submissionId,
+      templateKind,
+      recipients,
+      rendered,
+      fromAddress: input.fromAddress,
+    })
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error)
+    input.logger.error(
+      { err: msg, submissionId: input.submissionId },
+      'A3 email pipeline failed (submit response unaffected)',
+    )
+  }
+}
+
+// Extract the assistant's rationale string out of llm_raw for the
+// email template substitution. Mirrors the parser in
+// customerReviewsQueries.extractLlmRationale so the live submit
+// path and the resend path render the same value.
+function extractRationaleFromRaw(rawJson: unknown): string | null {
+  if (rawJson === null || typeof rawJson !== 'object') return null
+  const choices = (rawJson as { choices?: unknown }).choices
+  if (!Array.isArray(choices) || choices.length === 0) return null
+  const first = choices[0]
+  if (typeof first !== 'object' || first === null) return null
+  const message = (first as { message?: unknown }).message
+  if (typeof message !== 'object' || message === null) return null
+  const content = (message as { content?: unknown }).content
+  let assistantText: string | null = null
+  if (typeof content === 'string') assistantText = content
+  if (Array.isArray(content)) {
+    assistantText = content
+      .map((part) =>
+        typeof part === 'object' && part !== null && typeof (part as { text?: unknown }).text === 'string'
+          ? (part as { text: string }).text
+          : '',
+      )
+      .join('')
+  }
+  if (assistantText === null) return null
+  try {
+    const parsed: unknown = JSON.parse(assistantText)
+    if (
+      parsed !== null &&
+      typeof parsed === 'object' &&
+      typeof (parsed as { rationale?: unknown }).rationale === 'string'
+    ) {
+      return (parsed as { rationale: string }).rationale
+    }
+  } catch {
+    return assistantText.length > 0 ? assistantText : null
+  }
+  return null
+}
+
 // P3 page on every llm_verdict='error' event. We never let the page
 // itself fail the submit POST — the customer already paid the
 // LLM-gateway latency and we still want to record the submission +
@@ -340,6 +462,32 @@ export async function registerCustomerReviewsRoutes(server: FastifyInstance): Pr
           logger: request.log,
         })
       }
+
+      // A3: queue (and optionally send) the bucket-appropriate email
+      // notification(s). Best-effort — failures land as failed/queued
+      // rows on review_emails and are surfaced on the operator UI.
+      // Never block the public response on an email pipeline issue.
+      await tryEmailReviewSubmission({
+        submissionId: result.submissionId,
+        dealerId: parsed.dealerId,
+        siteLabel: settings.site_label,
+        siteEmails: {
+          review_email_dave: settings.review_email_dave,
+          review_email_support: settings.review_email_support,
+          review_email_ops: settings.review_email_ops,
+        },
+        starRating: parsed.starRating,
+        reviewText: normalizedText,
+        contacts: parsed.contacts ?? [],
+        llmVerdict: gateDecision.verdict,
+        degradedPass: gateDecision.degradedPass,
+        llmRationale: extractRationaleFromRaw(gateDecision.llmRaw),
+        providerReviewUrl: gateDecision.pasteTextUrl,
+        createdAt: result.createdAt,
+        appBaseUrl: env.appBaseUrl,
+        fromAddress: env.reviewsEmailFromAddress,
+        logger: request.log,
+      })
 
       return reply.send(
         CustomerReviewSubmitResponseSchema.parse({
@@ -766,6 +914,98 @@ export async function registerCustomerReviewsRoutes(server: FastifyInstance): Pr
         }
         return reply.send(
           await buildActionResponse(request.params.submissionId, messages.join('; ')),
+        )
+      } catch (error) {
+        if (isMissingReviewTableError(error)) {
+          return reply.status(503).send({ error: MIGRATION_HINT })
+        }
+        throw error
+      }
+    },
+  )
+
+  // ------------------------- internal POST /api/customer-reviews/:id/resend-email
+  // Re-fire the bucket-appropriate template + recipient set for one
+  // submission. Each call appends NEW review_emails rows; previous
+  // rows are never mutated (audit trail of every send attempt).
+  // Operator-gated (editor role) since this triggers actual SMTP
+  // delivery when the relay is configured.
+  server.post<{ Params: { submissionId: string } }>(
+    '/api/customer-reviews/:submissionId/resend-email',
+    async (request, reply) => {
+      const user = await requireSessionUser(request, reply, 'editor')
+      if (!user) return
+      try {
+        const submission = await getReviewSubmissionForRender(
+          getPool(),
+          request.params.submissionId,
+        )
+        if (submission === null) {
+          return reply
+            .status(404)
+            .send({ error: `Unknown submission_id: ${request.params.submissionId}` })
+        }
+        const settings = await getSiteReviewSettings(getPool(), submission.dealerId)
+        if (settings === null) {
+          return reply
+            .status(404)
+            .send({ error: `Unknown site dealer_id: ${submission.dealerId}` })
+        }
+        const templateKind = pickTemplateKind(submission.llmVerdict, submission.degradedPass)
+        if (templateKind === null) {
+          return reply.status(409).send({
+            error: `No email template for verdict=${submission.llmVerdict ?? 'null'} (strong-no-text and ungated submissions do not emit email).`,
+          })
+        }
+        const recipients = resolveRecipients(templateKind, {
+          review_email_dave: settings.review_email_dave,
+          review_email_support: settings.review_email_support,
+          review_email_ops: settings.review_email_ops,
+        })
+        if (recipients.length === 0) {
+          return reply.status(409).send({
+            error: `No recipients configured on site_review_settings for dealer_id=${submission.dealerId} / templateKind=${templateKind}.`,
+          })
+        }
+        const env = getServerEnv()
+        const vars = buildTemplateVars({
+          submissionId: submission.submissionId,
+          dealerId: submission.dealerId,
+          siteLabel: settings.site_label,
+          starRating: submission.starRating,
+          reviewText: submission.reviewText,
+          contacts: submission.contacts,
+          llmVerdict: submission.llmVerdict,
+          degradedPass: submission.degradedPass,
+          llmRationale: submission.llmRationale,
+          providerReviewUrl: submission.reviewProviderUrl,
+          createdAt: submission.createdAt,
+          adminBaseUrl: env.appBaseUrl,
+        })
+        const rendered = await renderTemplate(templateKind, vars)
+        const result = await queueAndSendReviewEmails({
+          db: getPool(),
+          submissionId: submission.submissionId,
+          templateKind,
+          recipients,
+          rendered,
+          fromAddress: env.reviewsEmailFromAddress,
+        })
+        const enqueued = result.emailIds.map((id, idx) => ({
+          id,
+          templateKind,
+          toAddress: result.perRecipient[idx].to,
+          subject: rendered.subject,
+          sendStatus: result.perRecipient[idx].sendStatus,
+          sendError: result.perRecipient[idx].error,
+          sentAt: result.perRecipient[idx].sendStatus === 'sent' ? new Date().toISOString() : null,
+          createdAt: new Date().toISOString(),
+        }))
+        return reply.send(
+          CustomerReviewResendEmailResponseSchema.parse({
+            submissionId: submission.submissionId,
+            enqueued,
+          }),
         )
       } catch (error) {
         if (isMissingReviewTableError(error)) {
