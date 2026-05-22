@@ -22,7 +22,7 @@ ingests it as a completion ref.
 | A1 — DB schema + skeleton submission API + read-only `/reviews` list | **shipped** | Migration 022, `POST /v1/reviews/submit`, `POST /v1/reviews/<id>/drawing-entry`, `GET /api/customer-reviews`, `/reviews` SPA page. Gated server-side by `HELIOS_REVIEWS_CAPTURE_V1`, per-site by `site_review_settings.review_drawing_enabled`. |
 | A2 — LLM sentiment + suitability gate, degraded heuristic, P3 page on error | not started | See issue #13 for the contract. Re-uses helios's private-LLM gateway client. |
 | A3 — Email pipeline + templates (negative / lukewarm / strong-with-text) | not started | Blocked on `nixos-sbc` provisioning `reviews@freshlybaked.us`. |
-| A4 — Sweed integration (customers + segments) | not started | Adds `customers.find_by_phone_or_email`, `customers.create_minimal`, `segments.add_member`, `segments.remove_member` on the Sweed client. Midtown segment ids: drawing `8669`, free-preroll `8666`. |
+| A4 — Sweed integration (customers + segments) | **shipped** | Migration 024 + `helios/src/worker/sweed/customers.ts` (find/create client + segment add/remove) + drawing-entry route now fires segment-add (drawing always when id non-null; free-preroll only on `strong-with-text`/degraded + `acceptedPasteOffer=true`). New `/reviews/<id>` SPA detail page exposes acknowledge, re-run-LLM, force-add/remove (per segment), mark-fraudulent (auto-removes from both per-site segments). Midtown segment ids: drawing `8669`, free-preroll `8666`. |
 | A5 — `/reviews/drawing` exportable list + acknowledge workflow | not started | Detail-page actions: acknowledge, resend-email, re-run-llm, force-add/remove-segment, mark-fraudulent. |
 
 ## A1 surface (shipped) — orientation

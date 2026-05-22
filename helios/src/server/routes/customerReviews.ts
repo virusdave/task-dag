@@ -1,22 +1,35 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 
 import {
+  CustomerReviewActionForceSegmentRequestSchema,
+  CustomerReviewActionMarkFraudulentRequestSchema,
+  CustomerReviewActionResponseSchema,
   CustomerReviewDrawingEntryRequestSchema,
   CustomerReviewDrawingEntryResponseSchema,
   CustomerReviewListResponseSchema,
   CustomerReviewSubmitRequestSchema,
   CustomerReviewSubmitResponseSchema,
+  type CustomerReviewActionResponse,
+  type CustomerReviewListItem,
 } from '../../shared/contracts/index.js'
 import { requireSessionUser } from '../auth/requireSession.js'
 import { getServerEnv } from '../config/env.js'
 import { getPool } from '../db/pool.js'
 import {
+  acknowledgeDrawingEntry,
   getReviewSubmissionDealerId,
+  getReviewSubmissionDetail,
   getSiteReviewSettings,
   insertContactInfoRows,
   insertDrawingEntry,
   insertReviewSubmission,
   listCustomerReviews,
+  markSubmissionFraudulent,
+  setDrawingEntrySegmentOutcomes,
+  setDrawingEntrySingleSegmentOutcome,
+  setSubmissionLlmFields,
+  type CustomerReviewDetailRow,
+  type SegmentKind,
 } from '../db/queries/customerReviewsQueries.js'
 import {
   classifyReviewSentiment,
@@ -24,6 +37,12 @@ import {
   type ReviewLlmGateOutput,
   type ReviewLlmVerdict,
 } from '../llm/reviewSentimentGate.js'
+import {
+  performDrawingSegmentAdd,
+  performForceSegmentAdd,
+  performForceSegmentRemove,
+  type PerSegmentOutcome,
+} from '../customerReviews/segmentOrchestrator.js'
 import { pageDave } from '../../worker/runtime/pageDave.js'
 
 // =====================================================================
@@ -53,16 +72,18 @@ function isMissingReviewTableError(error: unknown): boolean {
     ) ||
     // A2 added llm_verdict / degraded_pass / llm_raw / llm_model_ref /
     // llm_at / review_provider_url to review_submissions in migration
-    // 023; surface the same migration-banner-friendly 503 when the
-    // operator hasn't applied it yet.
-    /column .*(llm_verdict|degraded_pass|llm_raw|llm_model_ref|llm_at|review_provider_url).* does not exist/i.test(
+    // 023; A4 added accepted_paste_offer / sweed_customer_id /
+    // drawing_segment_id / free_preroll_segment_id / fraudulent in
+    // migration 024. Surface the same migration-banner-friendly 503
+    // when the operator hasn't applied either yet.
+    /column .*(llm_verdict|degraded_pass|llm_raw|llm_model_ref|llm_at|review_provider_url|accepted_paste_offer|sweed_customer_id|drawing_segment_id|free_preroll_segment_id|fraudulent|fraudulent_marked_at|fraudulent_marked_by).* does not exist/i.test(
       error.message,
     )
   )
 }
 
 const MIGRATION_HINT =
-  'Customer-review tables / columns are missing. Apply migrations 022_customer_reviews_capture.sql and 023_customer_reviews_llm_gate.sql.'
+  'Customer-review tables / columns are missing. Apply migrations 022_customer_reviews_capture.sql, 023_customer_reviews_llm_gate.sql, and 024_customer_reviews_sweed_integration.sql.'
 
 function getRequestSourceIp(request: FastifyRequest): string | null {
   // Fastify's request.ip already handles proxy-trust (we don't enable
@@ -70,6 +91,18 @@ function getRequestSourceIp(request: FastifyRequest): string | null {
   // X-Forwarded-For as well for the raw_payload audit trail.
   const direct = request.ip ?? null
   return direct && direct.length > 0 ? direct : null
+}
+
+// Per task spec: free-preroll segment add is gated on
+//   verdict == 'strong-with-text' OR (verdict == 'error' AND degraded_pass)
+// AND on the customer accepting the paste-text offer (caller-checked).
+export function verdictMakesFreePrerollEligible(
+  verdict: ReviewLlmVerdict | null,
+  degradedPass: boolean | null,
+): boolean {
+  if (verdict === 'strong-with-text') return true
+  if (verdict === 'error' && degradedPass === true) return true
+  return false
 }
 
 function buildProviderReviewUrl(template: string | null, dealerId: number): string | null {
@@ -362,11 +395,69 @@ export async function registerCustomerReviewsRoutes(server: FastifyInstance): Pr
           await insertContactInfoRows(getPool(), request.params.submissionId, parsed.contacts)
         }
 
-        const entry = await insertDrawingEntry(getPool(), request.params.submissionId, dealerId)
+        const entry = await insertDrawingEntry(
+          getPool(),
+          request.params.submissionId,
+          dealerId,
+          parsed.acceptedPasteOffer === true,
+        )
         if (entry === null) {
           // Insertion + lookup both returned no row — shouldn't be
           // possible given the on-conflict path, but fail loudly.
           return reply.status(500).send({ error: 'Could not create drawing entry.' })
+        }
+
+        // A4 — fire the Sweed segment-add path. The orchestrator decides
+        // which segments to attempt (drawing always when id non-null;
+        // free-preroll only on strong-with-text/degraded + accepted-paste-
+        // offer) and persists the per-segment outcome. Errors are
+        // swallowed inside the orchestrator and surfaced as 'failed' rows
+        // so a Sweed outage does NOT fail the customer's submit.
+        const detail = await getReviewSubmissionDetail(getPool(), request.params.submissionId)
+        if (detail !== null) {
+          try {
+            const result = await performDrawingSegmentAdd({
+              dealerId,
+              drawingSegmentId: settings.sweed_drawing_segment_id,
+              freePrerollSegmentId: settings.sweed_free_preroll_segment_id,
+              freePrerollEligibleByVerdict: verdictMakesFreePrerollEligible(
+                detail.llmVerdict,
+                detail.degradedPass,
+              ),
+              acceptedPasteOffer: parsed.acceptedPasteOffer === true,
+              contacts: detail.contacts,
+            })
+            await setDrawingEntrySegmentOutcomes(
+              getPool(),
+              entry.drawingEntryId,
+              result.drawing,
+              result.freePreroll,
+              result.customer?.customerId ?? null,
+            )
+          } catch (error) {
+            // Defense-in-depth: even if the orchestrator throws
+            // (shouldn't, but transport-level surprises happen),
+            // record the outage on both segment columns so the
+            // operator can re-try via force-add-segment.
+            const reason = error instanceof Error ? error.message : String(error)
+            request.log.error(
+              { err: reason, submissionId: request.params.submissionId },
+              'drawing-entry segment-add failed unexpectedly',
+            )
+            const failed: PerSegmentOutcome = {
+              status: 'failed',
+              error: reason,
+              segmentId: null,
+              attemptedAt: new Date(),
+            }
+            await setDrawingEntrySegmentOutcomes(
+              getPool(),
+              entry.drawingEntryId,
+              failed,
+              failed,
+              null,
+            )
+          }
         }
 
         return reply.send(
@@ -404,5 +495,322 @@ export async function registerCustomerReviewsRoutes(server: FastifyInstance): Pr
       }
       throw error
     }
+  })
+
+  // ------------------------- internal GET /api/customer-reviews/:id
+  // Detail-page loader: same shape as a single list-item row.
+  server.get<{ Params: { submissionId: string } }>(
+    '/api/customer-reviews/:submissionId',
+    async (request, reply) => {
+      const user = await requireSessionUser(request, reply, 'viewer')
+      if (!user) return
+      try {
+        const item = await loadSingleListItem(request.params.submissionId)
+        if (item === null) {
+          return reply.status(404).send({ error: 'Unknown submission_id' })
+        }
+        return reply.send({ item, captureEnabled: getServerEnv().reviewsCaptureV1Enabled })
+      } catch (error) {
+        if (isMissingReviewTableError(error)) {
+          return reply.status(503).send({ error: MIGRATION_HINT })
+        }
+        throw error
+      }
+    },
+  )
+
+  // ------------------------- internal POST /api/customer-reviews/:id/acknowledge
+  server.post<{ Params: { submissionId: string } }>(
+    '/api/customer-reviews/:submissionId/acknowledge',
+    async (request, reply) => {
+      const user = await requireSessionUser(request, reply, 'editor')
+      if (!user) return
+      try {
+        const ok = await acknowledgeDrawingEntry(
+          getPool(),
+          request.params.submissionId,
+          user.email,
+        )
+        if (!ok) {
+          return reply.status(404).send({ error: 'No drawing entry to acknowledge.' })
+        }
+        return reply.send(
+          await buildActionResponse(request.params.submissionId, 'Acknowledged.'),
+        )
+      } catch (error) {
+        if (isMissingReviewTableError(error)) {
+          return reply.status(503).send({ error: MIGRATION_HINT })
+        }
+        throw error
+      }
+    },
+  )
+
+  // ------------------------- internal POST /api/customer-reviews/:id/re-run-llm
+  server.post<{ Params: { submissionId: string } }>(
+    '/api/customer-reviews/:submissionId/re-run-llm',
+    async (request, reply) => {
+      const user = await requireSessionUser(request, reply, 'editor')
+      if (!user) return
+      try {
+        const detail = await getReviewSubmissionDetail(getPool(), request.params.submissionId)
+        if (detail === null) {
+          return reply.status(404).send({ error: 'Unknown submission_id' })
+        }
+        const settings = await getSiteReviewSettings(getPool(), detail.dealerId)
+        if (settings === null) {
+          return reply.status(404).send({ error: 'Site config missing for submission.' })
+        }
+        const resolvedProviderUrl = buildProviderReviewUrl(
+          settings.review_provider_url_template,
+          detail.dealerId,
+        )
+        const gateDecision = await runGateAndDecide({
+          starRating: detail.starRating ?? 0,
+          reviewText: detail.reviewText,
+          // Force the gate ON for an explicit operator re-run, regardless
+          // of the per-site flag — the operator clicking the button is
+          // unambiguous intent.
+          gateEnabled: true,
+          resolvedProviderUrl,
+        })
+        await setSubmissionLlmFields(getPool(), request.params.submissionId, {
+          llmVerdict: gateDecision.verdict,
+          degradedPass: gateDecision.degradedPass,
+          llmRaw: gateDecision.llmRaw,
+          llmModelRef: gateDecision.llmModelRef,
+          llmAt: gateDecision.llmAt,
+          reviewProviderUrl: gateDecision.pasteTextUrl,
+        })
+        if (gateDecision.verdict === 'error') {
+          await pageDaveOnGateError({
+            submissionId: request.params.submissionId,
+            appBaseUrl: getServerEnv().appBaseUrl,
+            errorMessage: gateDecision.errorMessage,
+            logger: request.log,
+          })
+        }
+        return reply.send(
+          await buildActionResponse(
+            request.params.submissionId,
+            `Re-ran LLM gate → verdict=${gateDecision.verdict ?? 'null'}`,
+          ),
+        )
+      } catch (error) {
+        if (isMissingReviewTableError(error)) {
+          return reply.status(503).send({ error: MIGRATION_HINT })
+        }
+        throw error
+      }
+    },
+  )
+
+  // ------------------------- internal POST /api/customer-reviews/:id/segment/add
+  server.post<{ Params: { submissionId: string } }>(
+    '/api/customer-reviews/:submissionId/segment/add',
+    async (request, reply) => {
+      const user = await requireSessionUser(request, reply, 'editor')
+      if (!user) return
+      try {
+        const parsed = CustomerReviewActionForceSegmentRequestSchema.parse(request.body ?? {})
+        const detail = await getReviewSubmissionDetail(getPool(), request.params.submissionId)
+        if (detail === null || detail.drawing === null) {
+          return reply
+            .status(404)
+            .send({ error: 'No drawing entry for this submission yet.' })
+        }
+        const settings = await getSiteReviewSettings(getPool(), detail.dealerId)
+        if (settings === null) {
+          return reply.status(404).send({ error: 'Site config missing for submission.' })
+        }
+        const segmentId = pickConfiguredSegmentId(settings, parsed.segment)
+        if (segmentId === null) {
+          return reply.status(409).send({
+            error: `Per-site ${parsed.segment} segment id is NULL — set it in site_review_settings first.`,
+          })
+        }
+        const { customer, outcome } = await performForceSegmentAdd({
+          dealerId: detail.dealerId,
+          segmentId,
+          contacts: detail.contacts,
+          existingCustomerId: detail.drawing.sweedCustomerId,
+        })
+        await setDrawingEntrySingleSegmentOutcome(
+          getPool(),
+          detail.drawing.id,
+          parsed.segment === 'drawing' ? 'drawing' : 'free_preroll',
+          outcome,
+          customer?.customerId ?? null,
+        )
+        return reply.send(
+          await buildActionResponse(
+            request.params.submissionId,
+            `Force-add ${parsed.segment} → ${outcome.status}${outcome.error ? `: ${outcome.error}` : ''}`,
+          ),
+        )
+      } catch (error) {
+        if (isMissingReviewTableError(error)) {
+          return reply.status(503).send({ error: MIGRATION_HINT })
+        }
+        throw error
+      }
+    },
+  )
+
+  // ------------------------- internal POST /api/customer-reviews/:id/segment/remove
+  server.post<{ Params: { submissionId: string } }>(
+    '/api/customer-reviews/:submissionId/segment/remove',
+    async (request, reply) => {
+      const user = await requireSessionUser(request, reply, 'editor')
+      if (!user) return
+      try {
+        const parsed = CustomerReviewActionForceSegmentRequestSchema.parse(request.body ?? {})
+        const detail = await getReviewSubmissionDetail(getPool(), request.params.submissionId)
+        if (detail === null || detail.drawing === null) {
+          return reply
+            .status(404)
+            .send({ error: 'No drawing entry for this submission yet.' })
+        }
+        if (detail.drawing.sweedCustomerId === null) {
+          return reply.status(409).send({
+            error: 'No Sweed customer id recorded — cannot remove from segment.',
+          })
+        }
+        const settings = await getSiteReviewSettings(getPool(), detail.dealerId)
+        if (settings === null) {
+          return reply.status(404).send({ error: 'Site config missing for submission.' })
+        }
+        const segmentId = pickConfiguredSegmentId(settings, parsed.segment)
+        if (segmentId === null) {
+          return reply.status(409).send({
+            error: `Per-site ${parsed.segment} segment id is NULL — set it in site_review_settings first.`,
+          })
+        }
+        const outcome = await performForceSegmentRemove({
+          dealerId: detail.dealerId,
+          segmentId,
+          customerId: detail.drawing.sweedCustomerId,
+        })
+        await setDrawingEntrySingleSegmentOutcome(
+          getPool(),
+          detail.drawing.id,
+          parsed.segment === 'drawing' ? 'drawing' : 'free_preroll',
+          outcome,
+          null,
+        )
+        return reply.send(
+          await buildActionResponse(
+            request.params.submissionId,
+            `Force-remove ${parsed.segment} → ${outcome.status}${outcome.error ? `: ${outcome.error}` : ''}`,
+          ),
+        )
+      } catch (error) {
+        if (isMissingReviewTableError(error)) {
+          return reply.status(503).send({ error: MIGRATION_HINT })
+        }
+        throw error
+      }
+    },
+  )
+
+  // ------------------------- internal POST /api/customer-reviews/:id/mark-fraudulent
+  server.post<{ Params: { submissionId: string } }>(
+    '/api/customer-reviews/:submissionId/mark-fraudulent',
+    async (request, reply) => {
+      const user = await requireSessionUser(request, reply, 'editor')
+      if (!user) return
+      try {
+        const parsed = CustomerReviewActionMarkFraudulentRequestSchema.parse(request.body ?? {})
+        const detail = await getReviewSubmissionDetail(getPool(), request.params.submissionId)
+        if (detail === null) {
+          return reply.status(404).send({ error: 'Unknown submission_id' })
+        }
+        await markSubmissionFraudulent(
+          getPool(),
+          request.params.submissionId,
+          user.email,
+          parsed.fraudulent,
+        )
+        const messages: string[] = [
+          parsed.fraudulent ? 'Marked fraudulent.' : 'Cleared fraudulent.',
+        ]
+        // On the mark-fraudulent transition, also fire segment removes
+        // (per task spec: "attempts segments.remove_member on both
+        // per-site segment ids; results persisted"). On the
+        // un-mark transition we leave segment columns alone — operators
+        // can force-add manually if they want to undo.
+        if (parsed.fraudulent && detail.drawing !== null) {
+          const settings = await getSiteReviewSettings(getPool(), detail.dealerId)
+          const customerId = detail.drawing.sweedCustomerId
+          if (settings !== null && customerId !== null) {
+            for (const kind of ['drawing', 'free_preroll'] as const) {
+              const segmentId = pickConfiguredSegmentId(settings, kind)
+              if (segmentId === null) continue
+              const outcome = await performForceSegmentRemove({
+                dealerId: detail.dealerId,
+                segmentId,
+                customerId,
+              })
+              await setDrawingEntrySingleSegmentOutcome(
+                getPool(),
+                detail.drawing.id,
+                kind,
+                outcome,
+                null,
+              )
+              messages.push(`auto-remove ${kind} → ${outcome.status}`)
+            }
+          } else if (customerId === null) {
+            messages.push('no sweed_customer_id — skipped segment auto-remove')
+          }
+        }
+        return reply.send(
+          await buildActionResponse(request.params.submissionId, messages.join('; ')),
+        )
+      } catch (error) {
+        if (isMissingReviewTableError(error)) {
+          return reply.status(503).send({ error: MIGRATION_HINT })
+        }
+        throw error
+      }
+    },
+  )
+}
+
+// =====================================================================
+// Helpers shared by admin actions.
+// =====================================================================
+
+function pickConfiguredSegmentId(
+  settings: {
+    sweed_drawing_segment_id: number | null
+    sweed_free_preroll_segment_id: number | null
+  },
+  kind: 'drawing' | 'free_preroll',
+): number | null {
+  return kind === 'drawing'
+    ? settings.sweed_drawing_segment_id
+    : settings.sweed_free_preroll_segment_id
+}
+
+async function loadSingleListItem(submissionId: string): Promise<CustomerReviewListItem | null> {
+  // Re-use the existing list loader so the response shape never drifts.
+  const { items } = await listCustomerReviews(getPool())
+  return items.find((it) => it.submissionId === submissionId) ?? null
+}
+
+async function buildActionResponse(
+  submissionId: string,
+  message: string | null,
+): Promise<CustomerReviewActionResponse> {
+  const item = await loadSingleListItem(submissionId)
+  if (item === null) {
+    throw new Error(`buildActionResponse: submission ${submissionId} disappeared after action`)
+  }
+  return CustomerReviewActionResponseSchema.parse({
+    submissionId,
+    drawingEntry: item.drawingEntry,
+    item,
+    message,
   })
 }

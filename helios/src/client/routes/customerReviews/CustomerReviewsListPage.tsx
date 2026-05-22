@@ -12,7 +12,7 @@
 // collapsed inside <details>.
 
 import { useMemo, useState } from 'react'
-import { useLoaderData, useRevalidator } from 'react-router-dom'
+import { Link, useLoaderData, useRevalidator } from 'react-router-dom'
 
 import {
   CustomerReviewListResponseSchema,
@@ -182,7 +182,9 @@ export function CustomerReviewsListPage() {
           <tbody>
             {filtered.map((item) => (
               <tr key={item.submissionId}>
-                <td>{formatDate(item.createdAt)}</td>
+                <td>
+                  <Link to={`/reviews/${item.submissionId}`}>{formatDate(item.createdAt)}</Link>
+                </td>
                 <td>{item.siteLabel || `dealer ${item.dealerId}`}</td>
                 <td>
                   <Pill tone={starTone(item.starRating)}>{formatStars(item.starRating)}</Pill>

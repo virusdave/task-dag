@@ -212,6 +212,19 @@ const SENTINELS: MigrationSentinel[] = [
       return hasVerdict && hasDegraded && hasProviderUrl
     },
   },
+  {
+    migrationId: '024_customer_reviews_sweed_integration',
+    label:
+      'review_drawing_entries A4 columns (accepted_paste_offer, sweed_customer_id, drawing_segment_id, free_preroll_segment_id, fraudulent, fraudulent_marked_at, fraudulent_marked_by) — required so the Customer-Sentiment Capture (issue #13) A4 Sweed integration can persist per-segment add/remove outcomes plus the operator force-add/remove + mark-fraudulent actions',
+    check: async (db) => {
+      const [hasAccepted, hasCustomer, hasFraudulent] = await Promise.all([
+        columnExists(db, 'review_drawing_entries', 'accepted_paste_offer'),
+        columnExists(db, 'review_drawing_entries', 'sweed_customer_id'),
+        columnExists(db, 'review_drawing_entries', 'fraudulent'),
+      ])
+      return hasAccepted && hasCustomer && hasFraudulent
+    },
+  },
 ]
 
 interface CacheEntry {

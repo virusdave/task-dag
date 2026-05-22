@@ -95,13 +95,27 @@ export const CustomerReviewContactInfoRowSchema = z.object({
 })
 export type CustomerReviewContactInfoRow = z.infer<typeof CustomerReviewContactInfoRowSchema>
 
+export const SegmentStatusSchema = z.enum(['skipped', 'failed', 'added', 'removed'])
+export type SegmentStatus = z.infer<typeof SegmentStatusSchema>
+
 export const CustomerReviewDrawingEntryRowSchema = z.object({
   id: z.string().uuid(),
   acknowledged: z.boolean(),
   acknowledgedAt: z.string().nullable(),
   acknowledgedBy: z.string().nullable(),
-  drawingSegmentStatus: z.enum(['skipped', 'failed', 'added']).nullable(),
-  freePrerollSegmentStatus: z.enum(['skipped', 'failed', 'added']).nullable(),
+  // A4 — per-segment add/remove outcome columns + customer-id + fraud
+  // flag. All optional/nullable so older clients keep working.
+  drawingSegmentStatus: SegmentStatusSchema.nullable(),
+  drawingSegmentId: z.number().int().nullable().optional(),
+  drawingSegmentError: z.string().nullable().optional(),
+  freePrerollSegmentStatus: SegmentStatusSchema.nullable(),
+  freePrerollSegmentId: z.number().int().nullable().optional(),
+  freePrerollSegmentError: z.string().nullable().optional(),
+  acceptedPasteOffer: z.boolean().optional().default(false),
+  sweedCustomerId: z.number().int().nullable().optional(),
+  fraudulent: z.boolean().optional().default(false),
+  fraudulentMarkedAt: z.string().nullable().optional(),
+  fraudulentMarkedBy: z.string().nullable().optional(),
   createdAt: z.string(),
 })
 export type CustomerReviewDrawingEntryRow = z.infer<typeof CustomerReviewDrawingEntryRowSchema>
@@ -149,6 +163,48 @@ export const CustomerReviewListResponseSchema = z.object({
   captureEnabled: z.boolean(),
 })
 export type CustomerReviewListResponse = z.infer<typeof CustomerReviewListResponseSchema>
+
+// --------------------------- A4 admin actions ------------------------
+
+export const SegmentKindSchema = z.enum(['drawing', 'free_preroll'])
+export type SegmentKindContract = z.infer<typeof SegmentKindSchema>
+
+export const CustomerReviewActionAcknowledgeRequestSchema = z.object({})
+export type CustomerReviewActionAcknowledgeRequest = z.infer<
+  typeof CustomerReviewActionAcknowledgeRequestSchema
+>
+
+export const CustomerReviewActionMarkFraudulentRequestSchema = z.object({
+  // false unmarks fraud and clears the auto-remove attempt (segment
+  // results stay 'removed' / 'failed' so the audit trail is preserved).
+  fraudulent: z.boolean().default(true),
+})
+export type CustomerReviewActionMarkFraudulentRequest = z.infer<
+  typeof CustomerReviewActionMarkFraudulentRequestSchema
+>
+
+export const CustomerReviewActionForceSegmentRequestSchema = z.object({
+  segment: SegmentKindSchema,
+})
+export type CustomerReviewActionForceSegmentRequest = z.infer<
+  typeof CustomerReviewActionForceSegmentRequestSchema
+>
+
+export const CustomerReviewActionRerunLlmRequestSchema = z.object({})
+export type CustomerReviewActionRerunLlmRequest = z.infer<
+  typeof CustomerReviewActionRerunLlmRequestSchema
+>
+
+export const CustomerReviewActionResponseSchema = z.object({
+  submissionId: z.string().uuid(),
+  drawingEntry: CustomerReviewDrawingEntryRowSchema.nullable(),
+  // The fresh detail snapshot the SPA renders without an extra round-trip.
+  item: CustomerReviewListItemSchema,
+  // Outcome message for force-add / force-remove / re-run-llm so the
+  // SPA can surface a toast next to the action button.
+  message: z.string().nullable().optional(),
+})
+export type CustomerReviewActionResponse = z.infer<typeof CustomerReviewActionResponseSchema>
 
 // --------------------------- error envelope --------------------------
 
