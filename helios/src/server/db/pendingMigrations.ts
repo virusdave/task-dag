@@ -199,6 +199,19 @@ const SENTINELS: MigrationSentinel[] = [
       (await tableExists(db, 'review_drawing_entries')) &&
       tableExists(db, 'review_emails'),
   },
+  {
+    migrationId: '023_customer_reviews_llm_gate',
+    label:
+      'review_submissions LLM-gate columns (llm_verdict, degraded_pass, llm_raw, llm_model_ref, llm_at, review_provider_url) — required so the Customer-Sentiment Capture (issue #13) A2 LLM gate can persist its classification + the resolved per-site paste-text URL on each capture POST',
+    check: async (db) => {
+      const [hasVerdict, hasDegraded, hasProviderUrl] = await Promise.all([
+        columnExists(db, 'review_submissions', 'llm_verdict'),
+        columnExists(db, 'review_submissions', 'degraded_pass'),
+        columnExists(db, 'review_submissions', 'review_provider_url'),
+      ])
+      return hasVerdict && hasDegraded && hasProviderUrl
+    },
+  },
 ]
 
 interface CacheEntry {

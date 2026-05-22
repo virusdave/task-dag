@@ -58,6 +58,14 @@ export interface InsertReviewSubmissionInput {
   referrer: string | null
   rawPayload: unknown
   contacts: CustomerReviewContactInfoInput[]
+  // A2 LLM-gate columns. All nullable so A1-era callers / submissions
+  // with no text / sites with the gate disabled still insert cleanly.
+  llmVerdict: 'strong-with-text' | 'strong-no-text' | 'lukewarm' | 'negative' | 'error' | null
+  degradedPass: boolean | null
+  llmRaw: unknown | null
+  llmModelRef: string | null
+  llmAt: Date | null
+  reviewProviderUrl: string | null
 }
 
 export interface InsertReviewSubmissionResult {
@@ -72,8 +80,14 @@ export async function insertReviewSubmission(
   const result = await db.query<{ id: string; created_at: Date }>(
     `insert into review_submissions (
        dealer_id, star_rating, review_text, submission_kind,
-       source_ip, user_agent, referrer, raw_payload
-     ) values ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
+       source_ip, user_agent, referrer, raw_payload,
+       llm_verdict, degraded_pass, llm_raw, llm_model_ref, llm_at,
+       review_provider_url
+     ) values (
+       $1, $2, $3, $4, $5, $6, $7, $8::jsonb,
+       $9, $10, $11::jsonb, $12, $13,
+       $14
+     )
      returning id, created_at`,
     [
       input.dealerId,
@@ -84,6 +98,12 @@ export async function insertReviewSubmission(
       input.userAgent,
       input.referrer,
       JSON.stringify(input.rawPayload ?? {}),
+      input.llmVerdict,
+      input.degradedPass,
+      input.llmRaw === null || input.llmRaw === undefined ? null : JSON.stringify(input.llmRaw),
+      input.llmModelRef,
+      input.llmAt,
+      input.reviewProviderUrl,
     ],
   )
   const row = result.rows[0]
@@ -179,6 +199,13 @@ const ListItemRowSchema = z.object({
   fraud_marked: z.boolean(),
   fraud_marked_at: z.coerce.date().nullable(),
   fraud_marked_by: z.string().nullable(),
+  llm_verdict: z
+    .enum(['strong-with-text', 'strong-no-text', 'lukewarm', 'negative', 'error'])
+    .nullable(),
+  degraded_pass: z.boolean().nullable(),
+  llm_model_ref: z.string().nullable(),
+  llm_at: z.coerce.date().nullable(),
+  review_provider_url: z.string().nullable(),
   created_at: z.coerce.date(),
 })
 
@@ -218,6 +245,11 @@ export async function listCustomerReviews(
        rs.fraud_marked,
        rs.fraud_marked_at,
        rs.fraud_marked_by,
+       rs.llm_verdict,
+       rs.degraded_pass,
+       rs.llm_model_ref,
+       rs.llm_at,
+       rs.review_provider_url,
        rs.created_at
      from review_submissions rs
      left join site_review_settings srs on srs.dealer_id = rs.dealer_id
@@ -286,6 +318,11 @@ export async function listCustomerReviews(
     fraudMarked: s.fraud_marked,
     fraudMarkedAt: s.fraud_marked_at ? s.fraud_marked_at.toISOString() : null,
     fraudMarkedBy: s.fraud_marked_by,
+    llmVerdict: s.llm_verdict,
+    degradedPass: s.degraded_pass,
+    llmModelRef: s.llm_model_ref,
+    llmAt: s.llm_at ? s.llm_at.toISOString() : null,
+    reviewProviderUrl: s.review_provider_url,
     contacts: contactsBySubmission.get(s.submission_id) ?? [],
     drawingEntry: drawingBySubmission.get(s.submission_id) ?? null,
     createdAt: s.created_at.toISOString(),

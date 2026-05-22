@@ -46,13 +46,22 @@ export const CustomerReviewSubmitResponseSchema = z.object({
   submissionId: z.string().uuid(),
   acceptedAt: z.string(),
   // Convenience for the landing page so it can route the customer to
-  // the right next step.  All optional / nullable in A1 because the
-  // LLM gate (A2) and email pipeline (A3) aren't wired yet.
+  // the right next step. Driven by the A2 LLM gate (and its degraded-
+  // pass fallback on llm_verdict='error'): strong-with-text / degraded
+  // → show_drawing_form + offerPasteText=true; strong-no-text / error
+  // (degraded_pass=false) → show_drawing_form + offerPasteText=false;
+  // lukewarm / negative → thank_customer.
   nextStep: z
     .enum(['show_drawing_form', 'thank_customer', 'redirect_to_provider'])
     .optional()
     .nullable(),
+  // The final paste-text URL the customer was offered, or null when
+  // not offered. Set iff offerPasteText is true.
   providerReviewUrl: z.string().url().optional().nullable(),
+  // Whether the landing page should surface the "would you like to
+  // copy-paste your review on Google?" upsell. A2 added; older
+  // clients that ignore the field still work.
+  offerPasteText: z.boolean().optional().default(false),
 })
 export type CustomerReviewSubmitResponse = z.infer<typeof CustomerReviewSubmitResponseSchema>
 
@@ -97,6 +106,15 @@ export const CustomerReviewDrawingEntryRowSchema = z.object({
 })
 export type CustomerReviewDrawingEntryRow = z.infer<typeof CustomerReviewDrawingEntryRowSchema>
 
+export const CustomerReviewLlmVerdictSchema = z.enum([
+  'strong-with-text',
+  'strong-no-text',
+  'lukewarm',
+  'negative',
+  'error',
+])
+export type CustomerReviewLlmVerdict = z.infer<typeof CustomerReviewLlmVerdictSchema>
+
 export const CustomerReviewListItemSchema = z.object({
   submissionId: z.string().uuid(),
   dealerId: z.number().int(),
@@ -110,6 +128,13 @@ export const CustomerReviewListItemSchema = z.object({
   fraudMarked: z.boolean(),
   fraudMarkedAt: z.string().nullable(),
   fraudMarkedBy: z.string().nullable(),
+  // A2 LLM-gate columns. Null when the gate hasn't run (no text,
+  // gate disabled per-site, or row predates the A2 schema).
+  llmVerdict: CustomerReviewLlmVerdictSchema.nullable(),
+  degradedPass: z.boolean().nullable(),
+  llmModelRef: z.string().nullable(),
+  llmAt: z.string().nullable(),
+  reviewProviderUrl: z.string().nullable(),
   contacts: z.array(CustomerReviewContactInfoRowSchema),
   drawingEntry: CustomerReviewDrawingEntryRowSchema.nullable(),
   createdAt: z.string(),

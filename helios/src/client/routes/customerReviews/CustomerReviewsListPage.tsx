@@ -66,6 +66,31 @@ function summarizeContacts(item: CustomerReviewListItem): string {
     .join(' · ')
 }
 
+// A2: render the LLM verdict pill. "error (degraded ✓)" makes the
+// operator-settled fallback case visually distinguishable from a
+// plain error so an at-a-glance scan tells you whether the customer
+// still got the paste-text offer.
+function renderVerdictPill(item: CustomerReviewListItem) {
+  if (item.llmVerdict === null) {
+    return <span className="subtle-copy">— skipped</span>
+  }
+  let tone: PillProps['tone'] = 'muted'
+  let label: string = item.llmVerdict
+  if (item.llmVerdict === 'strong-with-text') {
+    tone = 'success'
+  } else if (item.llmVerdict === 'strong-no-text') {
+    tone = 'muted'
+  } else if (item.llmVerdict === 'lukewarm') {
+    tone = 'warning'
+  } else if (item.llmVerdict === 'negative') {
+    tone = 'danger'
+  } else if (item.llmVerdict === 'error') {
+    tone = item.degradedPass ? 'warning' : 'danger'
+    label = item.degradedPass ? 'error (degraded ✓)' : 'error'
+  }
+  return <Pill tone={tone}>{label}</Pill>
+}
+
 export function CustomerReviewsListPage() {
   useRegisterSidebarSubtree('reviews', REVIEWS_SIDEBAR_SUBTREE)
   const initial = useLoaderData() as CustomerReviewListResponse
@@ -148,6 +173,7 @@ export function CustomerReviewsListPage() {
               <th>Stars</th>
               <th>Kind</th>
               <th>Review text</th>
+              <th>LLM verdict</th>
               <th>Contacts</th>
               <th>Drawing</th>
               <th>Status</th>
@@ -167,6 +193,7 @@ export function CustomerReviewsListPage() {
                 <td style={{ maxWidth: '24rem', whiteSpace: 'pre-wrap' }}>
                   {item.reviewText ?? <span className="subtle-copy">(no text)</span>}
                 </td>
+                <td>{renderVerdictPill(item)}</td>
                 <td style={{ fontSize: '0.85em' }}>{summarizeContacts(item)}</td>
                 <td>
                   {item.drawingEntry === null ? (

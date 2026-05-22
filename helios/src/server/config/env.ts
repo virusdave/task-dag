@@ -27,6 +27,17 @@ const GOOGLE_OAUTH_REDIRECT_URI_SECRET_FILE_PATHS = buildDefaultSecretFilePaths(
 
 const SWEED_AUTH_TOKEN_SECRET_FILE_PATHS = buildDefaultSecretFilePaths('sweed/auth-token', 'sweed/auth-token.env')
 
+// Private-LLM gateway (Bedrock-mantle) credentials, mirrored from
+// the worker-side env so the server-side review-sentiment gate
+// (issue #13 / A2) can call the OpenAI-compatible /chat/completions
+// endpoint directly from the POST /v1/reviews/submit handler. The
+// worker uses the same env vars; this is intentional — they're
+// process-level and the same secret is fine for both processes.
+const BEDROCK_MANTLE_BEARER_TOKEN_SECRET_FILE_PATHS = buildDefaultSecretFilePaths(
+  'bedrock/mantle-bearer-token',
+  'bedrock/mantle-bearer-token.env',
+)
+
 export interface ServerEnv {
   appBasePath: string
   appBaseUrl: string
@@ -52,6 +63,12 @@ export interface ServerEnv {
   // HELIOS_REVIEWS_CAPTURE_V1=1 to enable.  See
   // docs/helios/customer-sentiment/EPIC_PLAN.md.
   reviewsCaptureV1Enabled: boolean
+  // Private-LLM gateway endpoint (OpenAI-compatible chat.completions
+  // shape). Used by the review-sentiment gate (A2) and any other
+  // server-side LLM caller. Same env vars / values as the worker.
+  bedrockMantleBaseUrl: string
+  bedrockMantleBearerToken: string | null
+  llmRequestTimeoutMs: number
 }
 
 let cachedEnv: ServerEnv | null = null
@@ -95,6 +112,12 @@ export function getServerEnv(): ServerEnv {
       readOptionalEnv('COMMUNICATIONS_POLICY_PACKET_DIR') ??
       '/Users/dave/tmp/scratch/fbnyc/sweed/automation/ads/google/policy',
     reviewsCaptureV1Enabled: readBoolEnv('HELIOS_REVIEWS_CAPTURE_V1', false),
+    bedrockMantleBaseUrl:
+      readOptionalEnv('BEDROCK_MANTLE_BASE_URL') ?? 'https://bedrock-mantle.us-east-2.api.aws/v1',
+    bedrockMantleBearerToken: readOptionalSecretEnv('BEDROCK_MANTLE_BEARER_TOKEN', {
+      defaultFilePaths: BEDROCK_MANTLE_BEARER_TOKEN_SECRET_FILE_PATHS,
+    }),
+    llmRequestTimeoutMs: readNumberEnv('LLM_REQUEST_TIMEOUT_MS', 120000),
   }
 
   return cachedEnv
