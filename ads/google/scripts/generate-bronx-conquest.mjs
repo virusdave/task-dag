@@ -36,8 +36,8 @@ import * as os from 'os';
 
 // ─── Campaign spec ────────────────────────────────────────────────────────────
 
-const CAMPAIGN_NAME = 'BronxSmokShopCon';
-const AD_GROUP_NAME = 'BronxSmokShopCon - 10458 conquest';
+const CAMPAIGN_BASE_NAME = 'BronxSmokShopCon';
+const AD_GROUP_SUFFIX = '10458 conquest';
 const FINAL_URL = 'https://freshlybaked.us/bronx/branding/herb/0';
 const TARGET_ZIP = '10458';
 const TARGET_NEIGHBORHOOD = 'Fordham / Belmont, Bronx, NY';
@@ -46,6 +46,32 @@ const TARGET_NEIGHBORHOOD = 'Fordham / Belmont, Bronx, NY';
 // per ad group; 8 gives the LLM enough variance for early A/B
 // learnings without overwhelming the operator on review.
 const TARGET_AD_COUNT = 8;
+
+// Operator rule: no more than 3 RSAs per campaign. With 8 ads we
+// spread them across ceil(8/3) = 3 campaigns. Each campaign gets
+// its own ad group, location targeting, and budget.
+const MAX_ADS_PER_CAMPAIGN = 3;
+
+// Daily budget per campaign on import (Paused — operator edits
+// before enabling).
+const PER_CAMPAIGN_DAILY_BUDGET_USD = '20.00';
+
+function campaignNameFor(index) {
+  // 1-based: BronxSmokShopCon-01, -02, -03 …
+  return `${CAMPAIGN_BASE_NAME}-${String(index + 1).padStart(2, '0')}`;
+}
+
+function adGroupNameFor(index) {
+  return `${campaignNameFor(index)} - ${AD_GROUP_SUFFIX}`;
+}
+
+function chunkAds(ads, perCampaign) {
+  const chunks = [];
+  for (let i = 0; i < ads.length; i += perCampaign) {
+    chunks.push(ads.slice(i, i + perCampaign));
+  }
+  return chunks;
+}
 
 // Per-ad targets.
 const HEADLINES_PER_AD = 12; // RSA max is 15; 12 leaves headroom.
@@ -137,8 +163,8 @@ function buildUserPrompt() {
   return `Generate exactly ${TARGET_AD_COUNT} Responsive Search Ads for a
 brand-new Google Ads campaign with the following parameters:
 
-  Campaign name:    ${CAMPAIGN_NAME}
-  Ad group:         ${AD_GROUP_NAME}
+  Campaign base:    ${CAMPAIGN_BASE_NAME} (will be split into ${Math.ceil(TARGET_AD_COUNT / MAX_ADS_PER_CAMPAIGN)} campaigns of ≤${MAX_ADS_PER_CAMPAIGN} RSAs each)
+  Ad group suffix:  ${AD_GROUP_SUFFIX}
   Geo target:       ${TARGET_NEIGHBORHOOD} (zip ${TARGET_ZIP} only)
   Landing page:     ${FINAL_URL}
   Goal:             Conquest the foot traffic of recently raided /
@@ -300,7 +326,13 @@ function csvEscape(v) {
  */
 
 function buildCsvFiles(ads) {
-  // ── File 1: campaign skeleton (campaign + ad group + location) ────────
+  // Operator rule: no more than MAX_ADS_PER_CAMPAIGN RSAs per
+  // campaign. Chunk the ads into N campaigns, each with its own
+  // skeleton (campaign row + ad group row + location row).
+  const chunks = chunkAds(ads, MAX_ADS_PER_CAMPAIGN);
+  const campaignCount = chunks.length;
+
+  // ── File 1: campaign skeletons (all N campaigns + ad groups + location) ────
   const skeletonColumns = [
     'Campaign',
     'Ad Group',
@@ -314,37 +346,39 @@ function buildCsvFiles(ads) {
     'Location',
     'Comment',
   ];
-  const skeletonRows = [
-    {
-      Campaign: CAMPAIGN_NAME,
+  const skeletonRows = [];
+  for (let ci = 0; ci < campaignCount; ci++) {
+    const campaign = campaignNameFor(ci);
+    const adGroup = adGroupNameFor(ci);
+    skeletonRows.push({
+      Campaign: campaign,
       'Campaign Type': 'Search',
       Status: 'Paused',
-      Budget: '20.00',
+      Budget: PER_CAMPAIGN_DAILY_BUDGET_USD,
       'Budget type': 'Daily',
       'Bid Strategy Type': 'Manual CPC',
       Networks: 'Google search',
       Languages: 'English',
-      Comment: `Conquest campaign targeting customers of recently raided / closed unlicensed smoke shops in ${TARGET_NEIGHBORHOOD}.`,
-    },
-    {
-      Campaign: CAMPAIGN_NAME,
-      'Ad Group': AD_GROUP_NAME,
+      Comment: `Conquest campaign ${ci + 1} of ${campaignCount} (max ${MAX_ADS_PER_CAMPAIGN} RSAs/campaign).`,
+    });
+    skeletonRows.push({
+      Campaign: campaign,
+      'Ad Group': adGroup,
       Status: 'Enabled',
-      Comment: `Single ad group; all RSA variants live here for clean experimentation.`,
-    },
-    {
-      Campaign: CAMPAIGN_NAME,
+      Comment: `Holds ${chunks[ci].length} RSA variant${chunks[ci].length === 1 ? '' : 's'} for campaign ${campaign}.`,
+    });
+    skeletonRows.push({
+      Campaign: campaign,
       Location: `${TARGET_ZIP}, New York, United States`,
       Comment: `Geo restrict to zip ${TARGET_ZIP} (${TARGET_NEIGHBORHOOD}).`,
-    },
-  ];
+    });
+  }
 
-  // ── File 2: ads (RSAs only) ────────────────────────────────────────────
+  // ── File 2: ads (RSAs only, spread across the N campaigns) ───────────────
   // Uniform schema, one row per ad. Status = Paused so the operator
   // can verify in Editor before they go live. Headlines/Descriptions
   // use Editor's documented "Headline N" / "Description N" naming;
-  // unused columns (e.g. Headline 15 if the ad has 12) are dropped
-  // below.
+  // unused columns are dropped below.
   const adColumns = [
     'Campaign',
     'Ad Group',
@@ -356,41 +390,55 @@ function buildCsvFiles(ads) {
     'Path 1',
     'Path 2',
   ];
-  const adRows = ads.map((ad) => {
-    const row = {
-      Campaign: CAMPAIGN_NAME,
-      'Ad Group': AD_GROUP_NAME,
-      'Ad Type': 'Responsive search ad',
-      Status: 'Paused',
-      'Final URL': FINAL_URL,
-      'Path 1': '',
-      'Path 2': '',
-    };
-    ad.headlines.forEach((h, i) => {
-      row[`Headline ${i + 1}`] = h;
-    });
-    ad.descriptions.forEach((d, i) => {
-      row[`Description ${i + 1}`] = d;
-    });
-    return row;
-  });
+  const adRows = [];
+  for (let ci = 0; ci < campaignCount; ci++) {
+    const campaign = campaignNameFor(ci);
+    const adGroup = adGroupNameFor(ci);
+    for (const ad of chunks[ci]) {
+      const row = {
+        Campaign: campaign,
+        'Ad Group': adGroup,
+        'Ad Type': 'Responsive search ad',
+        Status: 'Paused',
+        'Final URL': FINAL_URL,
+        'Path 1': '',
+        'Path 2': '',
+      };
+      ad.headlines.forEach((h, i) => {
+        row[`Headline ${i + 1}`] = h;
+      });
+      ad.descriptions.forEach((d, i) => {
+        row[`Description ${i + 1}`] = d;
+      });
+      adRows.push(row);
+    }
+  }
 
   // ── File 3: ad-level labels (Comment metadata) ────────────────────────
   // Separated because it's purely informational — operator doesn't
   // have to import it. We still emit so the per-ad angle / hypothesis
   // travels with the bundle.
   const noteColumns = ['Campaign', 'Ad Group', 'Ad Label', 'Angle'];
-  const noteRows = ads.map((ad) => ({
-    Campaign: CAMPAIGN_NAME,
-    'Ad Group': AD_GROUP_NAME,
-    'Ad Label': ad.label,
-    Angle: ad.angle,
-  }));
+  const noteRows = [];
+  for (let ci = 0; ci < campaignCount; ci++) {
+    const campaign = campaignNameFor(ci);
+    const adGroup = adGroupNameFor(ci);
+    for (const ad of chunks[ci]) {
+      noteRows.push({
+        Campaign: campaign,
+        'Ad Group': adGroup,
+        'Ad Label': ad.label,
+        Angle: ad.angle,
+      });
+    }
+  }
 
   return {
     skeleton: renderCsv(skeletonColumns, skeletonRows),
     ads: renderCsv(adColumns, adRows),
     notes: renderCsv(noteColumns, noteRows),
+    campaignCount,
+    chunks,
   };
 }
 
@@ -428,26 +476,31 @@ function buildHTML({ ads, csvs, generatedAt, warnings }) {
   const skeletonB64 = Buffer.from(csvs.skeleton, 'utf-8').toString('base64');
   const adsB64 = Buffer.from(csvs.ads, 'utf-8').toString('base64');
   const notesB64 = Buffer.from(csvs.notes, 'utf-8').toString('base64');
-  const adBlocks = ads.map((ad, i) => `
-    <section class="ad">
-      <h3>Ad ${i + 1}: ${escapeHtml(ad.label)}</h3>
-      <p class="angle"><em>${escapeHtml(ad.angle)}</em></p>
-      <h4>Headlines (${ad.headlines.length})</h4>
-      <ol>
-        ${ad.headlines.map((h) => `<li>${escapeHtml(h)} <span class="len">(${h.length})</span></li>`).join('')}
-      </ol>
-      <h4>Descriptions (${ad.descriptions.length})</h4>
-      <ol>
-        ${ad.descriptions.map((d) => `<li>${escapeHtml(d)} <span class="len">(${d.length})</span></li>`).join('')}
-      </ol>
-    </section>
+  // Show ads grouped by their assigned campaign so the operator can
+  // see at a glance which RSA lands in which campaign.
+  const adBlocks = csvs.chunks.map((chunk, ci) => `
+    <h3 style="margin-top:24px">Campaign <code>${escapeHtml(campaignNameFor(ci))}</code> (${chunk.length} RSA${chunk.length === 1 ? '' : 's'})</h3>
+    ${chunk.map((ad, ai) => `
+      <section class="ad">
+        <h3>Ad ${ai + 1}: ${escapeHtml(ad.label)}</h3>
+        <p class="angle"><em>${escapeHtml(ad.angle)}</em></p>
+        <h4>Headlines (${ad.headlines.length})</h4>
+        <ol>
+          ${ad.headlines.map((h) => `<li>${escapeHtml(h)} <span class="len">(${h.length})</span></li>`).join('')}
+        </ol>
+        <h4>Descriptions (${ad.descriptions.length})</h4>
+        <ol>
+          ${ad.descriptions.map((d) => `<li>${escapeHtml(d)} <span class="len">(${d.length})</span></li>`).join('')}
+        </ol>
+      </section>
+    `).join('\n')}
   `).join('\n');
 
   return `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<title>${CAMPAIGN_NAME} — Ads Editor bundle</title>
+<title>${CAMPAIGN_BASE_NAME} — Ads Editor bundle</title>
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <style>
   body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -479,25 +532,26 @@ function buildHTML({ ads, csvs, generatedAt, warnings }) {
 </style>
 </head>
 <body>
-  <h1>${CAMPAIGN_NAME}</h1>
+  <h1>${CAMPAIGN_BASE_NAME}</h1>
   <p class="subtitle">Brand-new conquest campaign for zip ${TARGET_ZIP} —
      generated ${escapeHtml(generatedAt)}</p>
 
   <div class="summary">
     <dl>
-      <dt>Campaign name</dt><dd><code>${CAMPAIGN_NAME}</code></dd>
-      <dt>Ad group</dt><dd><code>${escapeHtml(AD_GROUP_NAME)}</code></dd>
-      <dt>Geo target</dt><dd>Zip ${TARGET_ZIP} (${escapeHtml(TARGET_NEIGHBORHOOD)})</dd>
+      <dt>Campaigns</dt><dd>${csvs.campaignCount} campaigns (max ${MAX_ADS_PER_CAMPAIGN} RSAs each):<ul style="margin:4px 0">${
+        csvs.chunks.map((chunk, i) => `<li><code>${escapeHtml(campaignNameFor(i))}</code> → ${chunk.length} RSA${chunk.length === 1 ? '' : 's'}</li>`).join('')
+      }</ul></dd>
+      <dt>Geo target</dt><dd>Zip ${TARGET_ZIP} (${escapeHtml(TARGET_NEIGHBORHOOD)}) — applied to every campaign</dd>
       <dt>Landing page</dt><dd><a href="${escapeHtml(FINAL_URL)}">${escapeHtml(FINAL_URL)}</a></dd>
-      <dt>Ad count</dt><dd>${ads.length} RSAs (each ≥${RSA_MIN_HEADLINES} headlines, ≥${RSA_MIN_DESCRIPTIONS} descriptions)</dd>
-      <dt>Initial state</dt><dd>Campaign + ads imported <strong>Paused</strong> so you can review in Ads Editor before posting changes.</dd>
-      <dt>Initial budget</dt><dd>$20/day (edit in Ads Editor before enabling)</dd>
+      <dt>Ad count</dt><dd>${ads.length} RSAs total (each ≥${RSA_MIN_HEADLINES} headlines, ≥${RSA_MIN_DESCRIPTIONS} descriptions)</dd>
+      <dt>Initial state</dt><dd>Campaigns + ads imported <strong>Paused</strong> so you can review in Ads Editor before posting changes.</dd>
+      <dt>Initial budget</dt><dd>$${PER_CAMPAIGN_DAILY_BUDGET_USD}/day <em>per campaign</em> (edit in Ads Editor before enabling)</dd>
     </dl>
-    <a class="download" download="01-${CAMPAIGN_NAME}-skeleton.csv"
-       href="data:text/csv;base64,${skeletonB64}">⬇ 01 — Campaign + Ad Group + Location (${(csvs.skeleton.length / 1024).toFixed(1)} KB)</a>
-    <a class="download" download="02-${CAMPAIGN_NAME}-ads.csv"
+    <a class="download" download="01-${CAMPAIGN_BASE_NAME}-skeleton.csv"
+       href="data:text/csv;base64,${skeletonB64}">⬇ 01 — ${csvs.campaignCount} Campaigns + Ad Groups + Locations (${(csvs.skeleton.length / 1024).toFixed(1)} KB)</a>
+    <a class="download" download="02-${CAMPAIGN_BASE_NAME}-ads.csv"
        href="data:text/csv;base64,${adsB64}">⬇ 02 — ${ads.length} RSAs (${(csvs.ads.length / 1024).toFixed(1)} KB)</a>
-    <a class="download" download="03-${CAMPAIGN_NAME}-ad-notes.csv"
+    <a class="download" download="03-${CAMPAIGN_BASE_NAME}-ad-notes.csv"
        href="data:text/csv;base64,${notesB64}">⬇ 03 — Ad labels &amp; angles (reference only, ${(csvs.notes.length / 1024).toFixed(1)} KB)</a>
   </div>
 
@@ -505,18 +559,20 @@ function buildHTML({ ads, csvs, generatedAt, warnings }) {
     <h3 style="margin-top:0">How to use this in Ads Editor</h3>
     <p><strong>Import the two CSVs in order. Skip the third — it's reference only.</strong></p>
     <ol>
-      <li>Download <code>01-${CAMPAIGN_NAME}-skeleton.csv</code> and <code>02-${CAMPAIGN_NAME}-ads.csv</code>.</li>
+      <li>Download <code>01-${CAMPAIGN_BASE_NAME}-skeleton.csv</code> and <code>02-${CAMPAIGN_BASE_NAME}-ads.csv</code>.</li>
       <li>In Google Ads Editor: <strong>Account → Import → From file…</strong> and pick file 01 first.</li>
-      <li>Review &amp; post: this creates the Paused campaign, the ad group, and the
-          10458 location target.</li>
-      <li>Import file 02 next: this creates ${ads.length} Paused RSAs in the new ad group.</li>
-      <li>Verify budget &amp; targeting, then toggle the campaign to Enabled when ready.</li>
+      <li>Review &amp; post: this creates ${csvs.campaignCount} Paused campaigns
+          (<code>${csvs.chunks.map((_, i) => campaignNameFor(i)).join('</code>, <code>')}</code>),
+          one ad group per campaign, and the 10458 location target on each.</li>
+      <li>Import file 02 next: this creates ${ads.length} Paused RSAs spread
+          across the ${csvs.campaignCount} ad groups (max ${MAX_ADS_PER_CAMPAIGN} per campaign).</li>
+      <li>Verify budget &amp; targeting on each campaign, then toggle to Enabled when ready.</li>
     </ol>
-    <p>The split avoids the "your ad group contains no ads" failure we hit on
-       the previous bundle, which was caused by mixing entity types in one CSV
-       with bespoke per-entity status columns Ads Editor didn't recognize. Each
-       file now contains rows of a single entity type with a single
-       <code>Status</code> column, matching Editor's documented schema.</p>
+    <p>The split into ${csvs.campaignCount} campaigns honors the operator rule of
+       ≤${MAX_ADS_PER_CAMPAIGN} RSAs per campaign. The per-entity CSV split (skeleton
+       vs ads) avoids the "your ad group contains no ads" failure from earlier
+       bundles, which was caused by mixing entity types in one CSV with bespoke
+       per-entity status columns Ads Editor didn't recognize.</p>
   </div>
 
   ${warnings.length === 0 ? '' : `
@@ -603,11 +659,11 @@ async function main() {
     warnings,
   });
 
-  const skeletonPath = path.join(outDir, `${stamp}-01-${CAMPAIGN_NAME}-skeleton.csv`);
-  const adsPath = path.join(outDir, `${stamp}-02-${CAMPAIGN_NAME}-ads.csv`);
-  const notesPath = path.join(outDir, `${stamp}-03-${CAMPAIGN_NAME}-ad-notes.csv`);
-  const htmlPath = path.join(outDir, `${stamp}-${CAMPAIGN_NAME}.html`);
-  const jsonPath = path.join(outDir, `${stamp}-${CAMPAIGN_NAME}.json`);
+  const skeletonPath = path.join(outDir, `${stamp}-01-${CAMPAIGN_BASE_NAME}-skeleton.csv`);
+  const adsPath = path.join(outDir, `${stamp}-02-${CAMPAIGN_BASE_NAME}-ads.csv`);
+  const notesPath = path.join(outDir, `${stamp}-03-${CAMPAIGN_BASE_NAME}-ad-notes.csv`);
+  const htmlPath = path.join(outDir, `${stamp}-${CAMPAIGN_BASE_NAME}.html`);
+  const jsonPath = path.join(outDir, `${stamp}-${CAMPAIGN_BASE_NAME}.json`);
 
   await fs.writeFile(skeletonPath, csvs.skeleton);
   await fs.writeFile(adsPath, csvs.ads);
