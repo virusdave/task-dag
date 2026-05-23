@@ -73,3 +73,32 @@ When in doubt, default to the skip-and-continue rule. A bounce that
 processes 4-of-5 enabled screens and warns about the 1 disabled one
 is correct; a bounce that crashes on the disabled screen and touches
 nothing is not.
+
+## Promo actions: "Show promo price and details on product(s)" is ALWAYS on
+
+Every Sweed promo action that helios creates, edits, or "fixes up"
+MUST have the **Show promo price and details on product(s)** toggle
+enabled. In the Sweed RPC payload this is the boolean field
+`displayInEcommerceProducts` on `store.promo.action.get` /
+`store.promo.action.edit` / `store.promo.action.add` —
+`displayInEcommerceProducts: true`.
+
+The whole point of a promo is to advertise the price to shoppers on
+the product page. A promo that quietly applies at checkout but doesn't
+show the discounted price on the menu is the worst of both worlds:
+we eat the margin and get none of the conversion lift.
+
+Rules:
+
+- Any script or job that **creates** a promo action (`store.promo.action.add`)
+  MUST include `displayInEcommerceProducts: true` in the request.
+- Any script or job that **edits** a promo action MUST leave the field
+  set to `true` (don't drop it from a full-shape edit payload that
+  would default it back to `false`).
+- **Never** send `displayInEcommerceProducts: false` unless the human
+  has explicitly asked you to hide a specific promo from the product
+  page. This is a single-promo, one-off request and should be loudly
+  called out in the commit message / page-dave message.
+- If you encounter existing promos with the field off (e.g. via a
+  bulk audit / dashboard), the correct remediation is to flip them
+  on, not to leave them as-is.
