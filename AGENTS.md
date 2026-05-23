@@ -1,5 +1,15 @@
 # Agent instructions for the `automation` repo
 
+## Never SSH to the machine you're running on
+
+Do **not** SSH from a host back into itself to execute commands, unless
+there is an explicitly approved reason to do so (e.g. the operator has
+told you to, or a documented procedure in this repo calls for it). If
+you need to run something on this machine, run it directly — SSHing to
+`$(hostname)` adds auth complexity, can mask permissions / environment
+issues, and is almost always a sign the wrong execution context is
+being used.
+
 ## Deploying changes (helios on vps-nixos-3)
 
 After `git push origin HEAD:master`, redeploy helios with:
