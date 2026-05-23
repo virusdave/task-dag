@@ -73,6 +73,22 @@ main_prompt:
     propose a `trial_plan` when an in-place repair is genuinely
     impossible.
 
+    USING THE `policy_experiences` SECTION BELOW: it carries the
+    history of what we already tried on each ad over the last 30
+    days, including the result of each attempt and the specific
+    creative change we made. Two rules:
+
+      a) If an ad is listed under "WATCHDOG: do-not-retry", DO NOT
+         propose another repair or replace for it this run. Either
+         pause it, design a trial in a sibling ad group, or leave
+         it alone — the operator is explicitly telling you we've
+         already wasted three attempts on it.
+
+      b) If a prior attempt's `change` matches a change you were
+         about to propose AND its `result` is `no_change` or
+         `worse`, propose something different. Don't grind on the
+         same mutation we already proved doesn't work.
+
     ## L1 Family Summaries
     {l1_family_summaries}
     

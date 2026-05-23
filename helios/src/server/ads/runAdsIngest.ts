@@ -3,6 +3,7 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 
 import { type AdsIngestResponse } from '../../shared/contracts/index.js'
+import { evaluateOutcomesAgainstSnapshot } from './adAttemptsTracker.js'
 import { automationRepoPath } from './automationRepoRoot.js'
 import { buildSnapshotFromCsv } from './buildSnapshotFromCsv.js'
 import { downloadDriveFile } from './googleDriveClient.js'
@@ -88,6 +89,22 @@ async function doRunAdsIngest(driveFileUrlOrId: string): Promise<AdsIngestRespon
     } catch (err) {
       throw makeError('snapshot build failed', err)
     }
+
+    // 3. With a fresh snapshot in hand, grade every still-open
+    //    gads_ad_attempts row for ads in this snapshot by comparing
+    //    before/after serving_status. This is what closes the
+    //    feedback loop — without it the attempts table just grows
+    //    a pile of "unobserved" entries that the prompt prep can't
+    //    distinguish from "succeeded" or "still broken". Best
+    //    effort; a DB outage here does NOT fail the ingest (the
+    //    snapshot is the operator's primary deliverable).
+    void evaluateOutcomesAgainstSnapshot(snapshotPath, {
+      onLog: (line) => console.log(`[adsIngest] ${line}`),
+    }).catch((err) => {
+      console.warn(
+        `[adsIngest] outcome evaluation failed (continuing): ${(err as Error).message}`,
+      )
+    })
 
     return {
       sourceFileId: parsed.fileId,

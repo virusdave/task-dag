@@ -31,6 +31,10 @@ import * as fs from 'node:fs/promises'
 import * as os from 'node:os'
 import * as path from 'node:path'
 
+import {
+  preparePolicyExperiences,
+  recordAttemptsFromL2Output,
+} from './adAttemptsTracker.js'
 import { automationRepoPath, getAutomationRepoRoot } from './automationRepoRoot.js'
 import { zipDirectoryToBuffer } from './zipDirectory.js'
 
@@ -118,6 +122,21 @@ export async function runMorningBundle(opts?: {
   // chain needs (js-yaml is now an explicit helios dep).
   await ensureRepoRootNodeModulesSymlink(repoRoot)
 
+  // Render the per-ad attempt history from the helios DB into a
+  // temp text file, and point the analysis script at it via an env
+  // var. The L2 prompt has always had a `policy_experiences` slot;
+  // before this wiring it was being fed the literal string
+  // "No prior experiences available." every morning. With this in
+  // place, today's prompt sees what was tried yesterday, what
+  // succeeded, what's stuck on N consecutive failures, etc.
+  // Best-effort: a missing migration / DB outage degrades gracefully
+  // to the previous "no prior context" behaviour rather than
+  // failing the whole bundle.
+  const policyExperiences = await preparePolicyExperiences(snapshot.path, { onLog })
+  if (policyExperiences) {
+    analysisEnv[policyExperiences.envName] = policyExperiences.filePath
+  }
+
   onLog('running L1→L2 analysis')
   // Track the spawn epoch so we can require the analysis to write
   // a NEW l2-output.json (mtime >= spawnStartMs). Otherwise a
@@ -195,6 +214,18 @@ export async function runMorningBundle(opts?: {
 
   const htmlPath = path.join(prodDir, 'html', `${runId}-review-packet.html`)
   await assertExists(htmlPath, 'bundle')
+
+  // Record this run's proposed actions to gads_ad_attempts so the
+  // next morning's prompt has prior-attempt context to reason
+  // about. Best-effort: a DB write failure here is logged but does
+  // NOT block the bundle from shipping (the CSVs and HTML packet
+  // are already on disk and useful to the operator).
+  await recordAttemptsFromL2Output({
+    l2JsonPath: newestJson.absPath,
+    snapshotPath: snapshot.path,
+    runId,
+    onLog,
+  })
 
   // 4. Stage and zip.
   const stageDir = await fs.mkdtemp(path.join(os.tmpdir(), 'helios-morning-bundle-'))

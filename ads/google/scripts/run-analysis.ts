@@ -232,7 +232,25 @@ async function main() {
   try {
     const llmClient = createLLMClientFromEnv();
     const promptPath = path.join(__dirname, '../config/l2-prompts.yaml');
-    const predictor = await createL2Predictor(llmClient, promptPath);
+    // helios's morning bundle prep step writes a per-ad attempt
+    // history file and points us at it via this env var so the L2
+    // prompt's `policy_experiences` slot is actually populated. If
+    // not set (manual / standalone run), the predictor falls back
+    // to the literal "No prior experiences available." it used
+    // before this wiring existed.
+    let policyExperiences: string | undefined = undefined;
+    const policyExpFile = process.env.GADS_POLICY_EXPERIENCES_FILE;
+    if (policyExpFile) {
+      try {
+        policyExperiences = await fs.readFile(policyExpFile, 'utf-8');
+        console.log(`📚 Loaded prior-attempt context from ${policyExpFile} (${policyExperiences.length} bytes)`);
+      } catch (e) {
+        console.warn(`⚠️  Could not read GADS_POLICY_EXPERIENCES_FILE=${policyExpFile}: ${(e as Error).message}`);
+      }
+    }
+    const predictor = await createL2Predictor(llmClient, promptPath, {
+      policyExperiences,
+    });
     l2Output = await predictor.predict(
       familySummaries,
       runId,

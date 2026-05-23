@@ -304,13 +304,16 @@ function groupAdsByFamilyKey(
  */
 export async function createL2Predictor(
   llmClient: LLMClient,
-  promptConfigPath: string
+  promptConfigPath: string,
+  extra: { policyExperiences?: string; trialOutcomes?: string } = {}
 ): Promise<L2LLMPredictor> {
   const predictor = new L2LLMPredictor({
     llmClient,
     promptConfigPath,
+    policyExperiences: extra.policyExperiences,
+    trialOutcomes: extra.trialOutcomes,
   });
-  
+
   await predictor.initialize();
   return predictor;
 }

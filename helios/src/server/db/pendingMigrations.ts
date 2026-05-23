@@ -225,6 +225,12 @@ const SENTINELS: MigrationSentinel[] = [
       return hasAccepted && hasCustomer && hasFraudulent
     },
   },
+  {
+    migrationId: '025_gads_ad_attempts',
+    label:
+      'gads_ad_attempts (per-ad L2 attempt history) — required so the Google Ads automation can finally close its feedback loop: today\'s morning bundle queries past attempts + their outcomes for each ad_id and injects them into the L2 prompt as policy_experiences instead of running blind every day.',
+    check: (db) => tableExists(db, 'gads_ad_attempts'),
+  },
 ]
 
 interface CacheEntry {
