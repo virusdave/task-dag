@@ -518,7 +518,16 @@ function buildCsvFiles(ads, keywords) {
     skeletonRows.push({
       Campaign: campaign,
       'Campaign Type': 'Search',
-      Status: 'Paused',
+      // Status policy:
+      //   We import everything Enabled so the bundle is truly
+      //   turn-key. The operator's previous workflow had me default
+      //   to Paused "for safety review," but that meant every
+      //   downstream entity that inherited or copied the Paused
+      //   state became an eligibility blocker the operator had to
+      //   chase. If review is desired, pause in Ads Editor before
+      //   clicking Post — that's safer than leaving switches off
+      //   and surprising the operator with non-serving campaigns.
+      Status: 'Enabled',
       Budget: PER_CAMPAIGN_DAILY_BUDGET_USD,
       'Budget type': 'Daily',
       'Bid Strategy Type': 'Manual CPC',
@@ -752,8 +761,8 @@ function buildHTML({ ads, csvs, generatedAt, warnings }) {
       <dt>Ad count</dt><dd>${ads.length} RSAs total (each ≥${RSA_MIN_HEADLINES} headlines, ≥${RSA_MIN_DESCRIPTIONS} descriptions)</dd>
       <dt>Keywords (per ad group)</dt><dd>${csvs.keywordCounts.exact} exact + ${csvs.keywordCounts.phrase} phrase = ${kwTotal} positive, plus ${kwNegTotal} negative</dd>
       <dt>Ad-group Max CPC</dt><dd>$${AD_GROUP_MAX_CPC_USD} (Manual CPC bid; edit in Editor)</dd>
-      <dt>Initial state</dt><dd>Campaigns imported <strong>Paused</strong>; ad groups, keywords, and ads are all <strong>Enabled</strong>. To launch, you only need to flip each campaign to Enabled.</dd>
-      <dt>Initial budget</dt><dd>$${PER_CAMPAIGN_DAILY_BUDGET_USD}/day <em>per campaign</em> (edit in Ads Editor before enabling)</dd>
+      <dt>Initial state</dt><dd>Campaigns, ad groups, keywords, and ads are <strong>all Enabled</strong>. The bundle is turn-key — clicking Post in Ads Editor launches immediately. If you want a review pass, pause in Editor before posting.</dd>
+      <dt>Initial budget</dt><dd>$${PER_CAMPAIGN_DAILY_BUDGET_USD}/day <em>per campaign</em> (edit in Ads Editor before posting)</dd>
     </dl>
     <a class="download" download="01-${CAMPAIGN_BASE_NAME}-skeleton.csv"
        href="data:text/csv;base64,${skeletonB64}">⬇ 01 — ${csvs.campaignCount} Campaigns + Ad Groups + Locations (${(csvs.skeleton.length / 1024).toFixed(1)} KB)</a>
@@ -767,16 +776,21 @@ function buildHTML({ ads, csvs, generatedAt, warnings }) {
 
   <div class="instructions">
     <h3 style="margin-top:0">How to use this in Ads Editor</h3>
+    <p><strong>Important: if you've already imported a previous BronxSmokShopCon bundle,
+       delete those campaigns first to avoid conflicts.</strong> In Ads Editor:
+       Campaigns tab → filter <code>BronxSmokShopCon</code> → select all → Delete →
+       Post. (Or just rename the previous campaigns if you want to keep historical
+       data around for comparison.) Then import this bundle fresh.</p>
     <p><strong>Import files 01, 02, 03 in order. Skip 04 — it's reference only.</strong></p>
     <ol>
       <li>Download all three importable CSVs (01-skeleton, 02-keywords, 03-ads).</li>
       <li>In Google Ads Editor: <strong>Account → Import → From file…</strong> and pick file 01 first.</li>
-      <li>Review &amp; post: this creates ${csvs.campaignCount} Paused campaigns
+      <li>Review &amp; post: this creates ${csvs.campaignCount} <strong>Enabled</strong> campaigns
           (<code>${csvs.chunks.map((_, i) => campaignNameFor(i)).join('</code>, <code>')}</code>),
-          one ad group per campaign (Enabled, Max CPC $${AD_GROUP_MAX_CPC_USD}), and the 10458 location target on each.</li>
+          one Enabled ad group per campaign (Max CPC $${AD_GROUP_MAX_CPC_USD}), and the 10458 location target on each.</li>
       <li>Import file 02: this creates ${kwTotal} Enabled positive keywords + ${kwNegTotal} negatives in every ad group. <strong>Without this file the campaign serves nothing.</strong></li>
       <li>Import file 03: this creates ${ads.length} Enabled RSAs spread across the ${csvs.campaignCount} ad groups (max ${MAX_ADS_PER_CAMPAIGN} per campaign).</li>
-      <li>Verify budget &amp; targeting on each campaign, then flip each campaign from Paused → Enabled to launch.</li>
+      <li><strong>Click Post.</strong> The campaigns are live the moment Post completes — no further switches to flip.</li>
     </ol>
     <p><strong>Eligibility checklist (per oracle audit):</strong>
        ✓ Campaign Type=Search, Budget&gt;0, Bid Strategy=Manual CPC, Networks=Google search, Languages=en;

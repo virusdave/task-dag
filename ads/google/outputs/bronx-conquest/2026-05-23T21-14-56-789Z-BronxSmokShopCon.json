@@ -1,0 +1,471 @@
+{
+  "ads": [
+    {
+      "label": "raid-conquest-1",
+      "angle": "Directly addresses recent shop closures, highlighting our licensed status.",
+      "headlines": [
+        "Shop got shut down?",
+        "Licensed & Open Today",
+        "Bronx Cannabis Now",
+        "Freshly Baked NYC",
+        "Lab Tested Flower",
+        "Open in 10458",
+        "NY-Licensed Retailer",
+        "Safe, Legal Cannabis",
+        "Your Trusted Source",
+        "Walk-in & Browse",
+        "Quality Cannabis",
+        "Flower, Vapes & More"
+      ],
+      "descriptions": [
+        "Don't risk it. Freshly Baked is fully licensed & open in the Bronx. Shop with confidence!",
+        "Find lab-tested cannabis products at our Fordham location. Open daily!",
+        "We're a trusted, legal dispensary serving 10458. Quality & safety guaranteed.",
+        "Skip the uncertainty. Choose a licensed cannabis retailer. Visit Freshly Baked today."
+      ],
+      "errors": []
+    },
+    {
+      "label": "raid-conquest-2",
+      "angle": "Focuses on the reliability of a licensed dispensary vs. the risk of illegal shops.",
+      "headlines": [
+        "Licensed. Here to stay.",
+        "Legal Cannabis in 10458",
+        "Trusted Bronx Dispensary",
+        "Freshly Baked NYC",
+        "Lab Reports Available",
+        "Safe Access to Cannabis",
+        "Quality You Can Trust",
+        "Open Daily in Fordham",
+        "Skip the Raid Risk",
+        "Real Cannabis Store",
+        "Regulated & Tested",
+        "Shop with Assurance"
+      ],
+      "descriptions": [
+        "Choose peace of mind. Freshly Baked is a fully licensed cannabis retailer.",
+        "We prioritize your safety with lab-tested products. Open 7 days a week!",
+        "Don't settle for less. Experience the Freshly Baked difference.",
+        "Support a legal business and enjoy high-quality cannabis in the Bronx."
+      ],
+      "errors": []
+    },
+    {
+      "label": "10458-proximity",
+      "angle": "Emphasizes local convenience and being a neighborhood fixture.",
+      "headlines": [
+        "Local Cannabis - 10458",
+        "Fordham's Best Dispensary",
+        "Near You in the Bronx",
+        "Freshly Baked NYC",
+        "Quick & Easy Access",
+        "Walk-In Welcome!",
+        "Your Neighborhood Store",
+        "Open Late - 10458",
+        "Minutes From Fordham Rd",
+        "Convenient Cannabis",
+        "Browse Our Selection",
+        "The Bronx's Choice"
+      ],
+      "descriptions": [
+        "Right around the corner! Freshly Baked is your local cannabis source.",
+        "Serving the Fordham community with quality cannabis products daily.",
+        "Stop by today and experience the convenience of a nearby dispensary.",
+        "We’re proudly part of the 10458 neighborhood. Visit us now!"
+      ],
+      "errors": []
+    },
+    {
+      "label": "value-focused",
+      "angle": "Highlights value and potential savings without using prohibited superlatives.",
+      "headlines": [
+        "3.5g from $25 claim",
+        "Quality Cannabis Deals",
+        "Great Value in 10458",
+        "Freshly Baked NYC",
+        "Daily Specials",
+        "Explore Our Menu",
+        "Cannabis for Every Budget",
+        "Premium Flower Deals",
+        "New Customer Offers",
+        "Weekly Cannabis Sales",
+        "Find Your Perfect Strain",
+        "Value & Quality"
+      ],
+      "descriptions": [
+        "Discover affordable cannabis options at Freshly Baked. Shop today!",
+        "We offer a wide range of products to fit your budget. Visit our store.",
+        "Check out our daily specials and find the best deals on cannabis.",
+        "Quality cannabis doesn't have to break the bank. Explore our menu!"
+      ],
+      "errors": []
+    },
+    {
+      "label": "potency-focused",
+      "angle": "Showcases lab-tested potency and quality.",
+      "headlines": [
+        "Lab-tested 25%+ THC claim",
+        "High Potency Cannabis",
+        "Quality Lab Results",
+        "Freshly Baked NYC",
+        "Potent Flower Selection",
+        "Premium Cannabis Strains",
+        "Find Your Ideal High",
+        "Tested for Purity",
+        "Cannabis You Can Trust",
+        "Strong & Effective",
+        "Potency Guaranteed",
+        "Explore Our Strains"
+      ],
+      "descriptions": [
+        "We provide lab-tested cannabis with verified potency levels.",
+        "Choose from a wide selection of potent strains at Freshly Baked.",
+        "Experience the difference of high-quality, lab-tested cannabis.",
+        "We prioritize your satisfaction with potent and reliable products."
+      ],
+      "errors": []
+    },
+    {
+      "label": "selection-breadth",
+      "angle": "Emphasizes the variety of products available.",
+      "headlines": [
+        "Flower, Vapes & More",
+        "Wide Selection of Cannabis",
+        "Something for Everyone",
+        "Freshly Baked NYC",
+        "Edibles, Concentrates",
+        "Explore Our Menu Now",
+        "All Your Cannabis Needs",
+        "Find Your Perfect Product",
+        "Diverse Cannabis Options",
+        "The Bronx's Best Variety",
+        "Cannabis & Accessories",
+        "New Products Daily"
+      ],
+      "descriptions": [
+        "We offer a diverse selection of cannabis products to suit your needs.",
+        "From flower to edibles, we have something for every cannabis enthusiast.",
+        "Discover new favorites and explore our ever-changing menu.",
+        "Shop the widest variety of cannabis in the Bronx at Freshly Baked."
+      ],
+      "errors": []
+    },
+    {
+      "label": "hours-convenience",
+      "angle": "Focuses on convenient hours and easy access.",
+      "headlines": [
+        "Open Daily in 10458",
+        "Late Night Cannabis",
+        "Convenient Hours",
+        "Freshly Baked NYC",
+        "Walk-In Friendly",
+        "Easy Access to Cannabis",
+        "Open Late",
+        "Quick & Easy Shopping",
+        "Stop By Today!",
+        "Your Cannabis Destination",
+        "Shop Now",
+        "We're Open!"
+      ],
+      "descriptions": [
+        "We're open 7 days a week for your convenience. Visit us today!",
+        "Enjoy easy access to high-quality cannabis in the Bronx.",
+        "Skip the hassle and find what you need at Freshly Baked.",
+        "We’re here when you need us. Open late for your convenience."
+      ],
+      "errors": []
+    },
+    {
+      "label": "loyalty-regulars",
+      "angle": "Appeals to building a long-term customer base.",
+      "headlines": [
+        "Your Local Cannabis Shop",
+        "Join Our Cannabis Community",
+        "Loyalty Rewards Program",
+        "Freshly Baked NYC",
+        "Regular Customer Perks",
+        "Become a VIP",
+        "The Bronx's Favorite",
+        "Come Back & Save",
+        "Your Trusted Dispensary",
+        "Friendly Staff",
+        "Experience The Difference",
+        "Welcoming Atmosphere"
+      ],
+      "descriptions": [
+        "We value our customers and offer a rewarding loyalty program.",
+        "Join the Freshly Baked community and enjoy exclusive perks.",
+        "Our friendly staff is here to help you find the perfect product.",
+        "We're committed to providing a welcoming and enjoyable experience."
+      ],
+      "errors": []
+    }
+  ],
+  "keywords": {
+    "exact": [
+      "smoke shop bronx",
+      "weed delivery 10458",
+      "licensed dispensary bronx",
+      "cannabis store 10458",
+      "dispensary near fordham"
+    ],
+    "phrase": [
+      "smoke shop near me",
+      "where to buy weed bronx",
+      "fordham cannabis store",
+      "best cannabis bronx",
+      "weed shops in bronx",
+      "cannabis delivery service",
+      "legal weed bronx",
+      "bronx dispensary deals",
+      "cannabis store open late",
+      "buy weed online bronx",
+      "fordham cannabis delivery",
+      "licensed cannabis store"
+    ],
+    "negative": [
+      "synthetic",
+      "k2",
+      "spice",
+      "free weed",
+      "cbd only",
+      "jobs",
+      "wholesale",
+      "medical card",
+      "grow kits",
+      "seeds"
+    ]
+  },
+  "warnings": [],
+  "raw": {
+    "ads": [
+      {
+        "label": "raid-conquest-1",
+        "angle": "Directly addresses recent shop closures, highlighting our licensed status.",
+        "headlines": [
+          "Shop got shut down?",
+          "Licensed & Open Today",
+          "Bronx Cannabis Now",
+          "Freshly Baked NYC",
+          "Lab Tested Flower",
+          "Open in 10458",
+          "NY-Licensed Retailer",
+          "Safe, Legal Cannabis",
+          "Your Trusted Source",
+          "Walk-in & Browse",
+          "Quality Cannabis",
+          "Flower, Vapes & More"
+        ],
+        "descriptions": [
+          "Don't risk it. Freshly Baked is fully licensed & open in the Bronx. Shop with confidence!",
+          "Find lab-tested cannabis products at our Fordham location. Open daily!",
+          "We're a trusted, legal dispensary serving 10458. Quality & safety guaranteed.",
+          "Skip the uncertainty. Choose a licensed cannabis retailer. Visit Freshly Baked today."
+        ]
+      },
+      {
+        "label": "raid-conquest-2",
+        "angle": "Focuses on the reliability of a licensed dispensary vs. the risk of illegal shops.",
+        "headlines": [
+          "Licensed. Here to stay.",
+          "Legal Cannabis in 10458",
+          "Trusted Bronx Dispensary",
+          "Freshly Baked NYC",
+          "Lab Reports Available",
+          "Safe Access to Cannabis",
+          "Quality You Can Trust",
+          "Open Daily in Fordham",
+          "Skip the Raid Risk",
+          "Real Cannabis Store",
+          "Regulated & Tested",
+          "Shop with Assurance"
+        ],
+        "descriptions": [
+          "Choose peace of mind. Freshly Baked is a fully licensed cannabis retailer.",
+          "We prioritize your safety with lab-tested products. Open 7 days a week!",
+          "Don't settle for less. Experience the Freshly Baked difference.",
+          "Support a legal business and enjoy high-quality cannabis in the Bronx."
+        ]
+      },
+      {
+        "label": "10458-proximity",
+        "angle": "Emphasizes local convenience and being a neighborhood fixture.",
+        "headlines": [
+          "Local Cannabis - 10458",
+          "Fordham's Best Dispensary",
+          "Near You in the Bronx",
+          "Freshly Baked NYC",
+          "Quick & Easy Access",
+          "Walk-In Welcome!",
+          "Your Neighborhood Store",
+          "Open Late - 10458",
+          "Minutes From Fordham Rd",
+          "Convenient Cannabis",
+          "Browse Our Selection",
+          "The Bronx's Choice"
+        ],
+        "descriptions": [
+          "Right around the corner! Freshly Baked is your local cannabis source.",
+          "Serving the Fordham community with quality cannabis products daily.",
+          "Stop by today and experience the convenience of a nearby dispensary.",
+          "We’re proudly part of the 10458 neighborhood. Visit us now!"
+        ]
+      },
+      {
+        "label": "value-focused",
+        "angle": "Highlights value and potential savings without using prohibited superlatives.",
+        "headlines": [
+          "3.5g from $25 claim",
+          "Quality Cannabis Deals",
+          "Great Value in 10458",
+          "Freshly Baked NYC",
+          "Daily Specials",
+          "Explore Our Menu",
+          "Cannabis for Every Budget",
+          "Premium Flower Deals",
+          "New Customer Offers",
+          "Weekly Cannabis Sales",
+          "Find Your Perfect Strain",
+          "Value & Quality"
+        ],
+        "descriptions": [
+          "Discover affordable cannabis options at Freshly Baked. Shop today!",
+          "We offer a wide range of products to fit your budget. Visit our store.",
+          "Check out our daily specials and find the best deals on cannabis.",
+          "Quality cannabis doesn't have to break the bank. Explore our menu!"
+        ]
+      },
+      {
+        "label": "potency-focused",
+        "angle": "Showcases lab-tested potency and quality.",
+        "headlines": [
+          "Lab-tested 25%+ THC claim",
+          "High Potency Cannabis",
+          "Quality Lab Results",
+          "Freshly Baked NYC",
+          "Potent Flower Selection",
+          "Premium Cannabis Strains",
+          "Find Your Ideal High",
+          "Tested for Purity",
+          "Cannabis You Can Trust",
+          "Strong & Effective",
+          "Potency Guaranteed",
+          "Explore Our Strains"
+        ],
+        "descriptions": [
+          "We provide lab-tested cannabis with verified potency levels.",
+          "Choose from a wide selection of potent strains at Freshly Baked.",
+          "Experience the difference of high-quality, lab-tested cannabis.",
+          "We prioritize your satisfaction with potent and reliable products."
+        ]
+      },
+      {
+        "label": "selection-breadth",
+        "angle": "Emphasizes the variety of products available.",
+        "headlines": [
+          "Flower, Vapes & More",
+          "Wide Selection of Cannabis",
+          "Something for Everyone",
+          "Freshly Baked NYC",
+          "Edibles, Concentrates",
+          "Explore Our Menu Now",
+          "All Your Cannabis Needs",
+          "Find Your Perfect Product",
+          "Diverse Cannabis Options",
+          "The Bronx's Best Variety",
+          "Cannabis & Accessories",
+          "New Products Daily"
+        ],
+        "descriptions": [
+          "We offer a diverse selection of cannabis products to suit your needs.",
+          "From flower to edibles, we have something for every cannabis enthusiast.",
+          "Discover new favorites and explore our ever-changing menu.",
+          "Shop the widest variety of cannabis in the Bronx at Freshly Baked."
+        ]
+      },
+      {
+        "label": "hours-convenience",
+        "angle": "Focuses on convenient hours and easy access.",
+        "headlines": [
+          "Open Daily in 10458",
+          "Late Night Cannabis",
+          "Convenient Hours",
+          "Freshly Baked NYC",
+          "Walk-In Friendly",
+          "Easy Access to Cannabis",
+          "Open Late",
+          "Quick & Easy Shopping",
+          "Stop By Today!",
+          "Your Cannabis Destination",
+          "Shop Now",
+          "We're Open!"
+        ],
+        "descriptions": [
+          "We're open 7 days a week for your convenience. Visit us today!",
+          "Enjoy easy access to high-quality cannabis in the Bronx.",
+          "Skip the hassle and find what you need at Freshly Baked.",
+          "We’re here when you need us. Open late for your convenience."
+        ]
+      },
+      {
+        "label": "loyalty-regulars",
+        "angle": "Appeals to building a long-term customer base.",
+        "headlines": [
+          "Your Local Cannabis Shop",
+          "Join Our Cannabis Community",
+          "Loyalty Rewards Program",
+          "Freshly Baked NYC",
+          "Regular Customer Perks",
+          "Become a VIP",
+          "The Bronx's Favorite",
+          "Come Back & Save",
+          "Your Trusted Dispensary",
+          "Friendly Staff",
+          "Experience The Difference",
+          "Welcoming Atmosphere"
+        ],
+        "descriptions": [
+          "We value our customers and offer a rewarding loyalty program.",
+          "Join the Freshly Baked community and enjoy exclusive perks.",
+          "Our friendly staff is here to help you find the perfect product.",
+          "We're committed to providing a welcoming and enjoyable experience."
+        ]
+      }
+    ],
+    "keywords": {
+      "exact": [
+        "smoke shop bronx",
+        "weed delivery 10458",
+        "licensed dispensary bronx",
+        "cannabis store 10458",
+        "dispensary near fordham"
+      ],
+      "phrase": [
+        "smoke shop near me",
+        "where to buy weed bronx",
+        "fordham cannabis store",
+        "best cannabis bronx",
+        "weed shops in bronx",
+        "cannabis delivery service",
+        "legal weed bronx",
+        "bronx dispensary deals",
+        "cannabis store open late",
+        "buy weed online bronx",
+        "fordham cannabis delivery",
+        "licensed cannabis store"
+      ],
+      "negative": [
+        "synthetic",
+        "k2",
+        "spice",
+        "free weed",
+        "cbd only",
+        "jobs",
+        "wholesale",
+        "medical card",
+        "grow kits",
+        "seeds"
+      ]
+    }
+  }
+}
