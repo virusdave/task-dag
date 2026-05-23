@@ -81,13 +81,36 @@ export async function buildSnapshotFromCsv(args: {
       ctr: parsePercentOr0(row['CTR']),
       conversion_rate: parsePercentOr0(row['Conv rate']),
     }
+    // Preserve the REAL numeric Google Ads ad ID from the export.
+    // Ads Editor's exports use the column "Ad ID" (sometimes also
+    // exported alongside "Ad ID (Old)"). The previous version of this
+    // code fabricated a synthetic id like `${adGroup}-${ads.length}`
+    // unconditionally, which meant every downstream CSV referring to
+    // an ad by id (the pause / repair / replace batches) was emitting
+    // a string Ads Editor cannot match against any real ad — so the
+    // import silently no-op'd, "re-enable disapproved ads" never
+    // happened, and the operator saw zero policy state changes. We
+    // now use the real id when present and only fall back to the
+    // synthetic placeholder when the column is missing/blank (which
+    // can legitimately happen for not-yet-uploaded draft ads from an
+    // Editor session, but never for production ads).
+    const realAdId = (row['Ad ID'] ?? row['Ad Id'] ?? row['Ad id'] ?? '').trim()
+    const adId = realAdId || `${adGroup}-${ads.length}`
+    // Same fix for campaign/ad-group IDs — Editor exports include
+    // "Campaign ID" and "Ad Group ID" alongside the human-readable
+    // names. The downstream pause/repair CSVs need at least the
+    // human-readable name to match (since Editor matches on name
+    // when the id column is absent), but preserving the real id
+    // when available lets future work address ads by numeric id.
+    const realCampaignId = (row['Campaign ID'] ?? row['Campaign Id'] ?? '').trim()
+    const realAdGroupId = (row['Ad Group ID'] ?? row['Ad group ID'] ?? row['Ad Group Id'] ?? '').trim()
     ads.push({
-      account_id: (row['Customer'] ?? 'unknown') || 'unknown',
-      campaign_id: campaign,
+      account_id: ((row['Customer ID'] ?? row['Customer'] ?? 'unknown') as string).trim() || 'unknown',
+      campaign_id: realCampaignId || campaign,
       campaign_name: campaign,
-      ad_group_id: adGroup,
+      ad_group_id: realAdGroupId || adGroup,
       ad_group_name: adGroup,
-      ad_id: `${adGroup}-${ads.length}`,
+      ad_id: adId,
       ad_type: 'responsive_search_ad',
       ad_status: status,
       headlines,

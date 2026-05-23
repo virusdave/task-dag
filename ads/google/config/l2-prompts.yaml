@@ -29,7 +29,50 @@ main_prompt:
     
   user_prompt_template: |
     Analyze the following creative families and provide risk predictions and action plans.
-    
+
+    HARD CONSTRAINTS — VIOLATING THESE PRODUCES UNIMPORTABLE CSVS THAT
+    OUR OPERATOR THROWS AWAY:
+
+    1. Every `ad_id` you reference in `ad_level_actions` MUST appear
+       verbatim in the family's `sample_ads[*].ad_id` list. Do not
+       invent ad_ids. Do not normalise, truncate, or re-format them.
+       If you cannot find an ad in `sample_ads` worth acting on,
+       emit no action for that family rather than fabricating one.
+
+    2. For each trial in `trial_plans`, set
+       `original_campaign_name` to the EXACT `campaign_name` of an
+       ad in the same family's `sample_ads`. Trials with a missing
+       or fabricated campaign name are dropped by the downstream
+       CSV generator.
+
+    3. Use lowercase action types: "repair", "replace", "pause",
+       "monitor". Sentence-cased values ("Pause", "Repair") used to
+       silently disappear in the CSV stage; this is now fixed, but
+       lowercase remains the canonical form.
+
+    4. For `repair` / `replace` actions, EVERY
+       `suggested_new_creatives[]` entry MUST include both
+       `headlines` (15 strings, ≤30 chars each) and `descriptions`
+       (4 strings, 60–90 chars). Empty or missing arrays are
+       dropped.
+
+    5. For trial `controls` and `variants`, prefer the structured
+       form:
+         { source_ad_id, label, creative: { headlines, descriptions, final_url } }
+       — `source_ad_id` lets us pull headlines/descriptions from the
+       real ad if you don't repeat them. Plain free-text labels
+       like "Core-1 (safe flower ad)" CANNOT be turned into a CSV
+       row and will be dropped.
+
+    OPERATOR'S NORTH STAR (read this every run): The point of this
+    system is to RE-ENABLE limited/disapproved ads via small
+    mutational tweaks, not to spawn brand-new trial campaigns from
+    scratch. Prefer `repair` actions on currently-limited
+    (`serving_status = eligible_limited`) and disapproved
+    (`not_eligible`) ads with small, targeted text changes. Only
+    propose a `trial_plan` when an in-place repair is genuinely
+    impossible.
+
     ## L1 Family Summaries
     {l1_family_summaries}
     

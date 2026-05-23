@@ -234,9 +234,16 @@ async function main() {
     const promptPath = path.join(__dirname, '../config/l2-prompts.yaml');
     const predictor = await createL2Predictor(llmClient, promptPath);
     l2Output = await predictor.predict(
-      familySummaries, 
+      familySummaries,
       runId,
-      new Date().toISOString().split('T')[0]
+      new Date().toISOString().split('T')[0],
+      // Pass the loaded snapshot through so the LLM sees real ad
+      // creatives (with real ad_ids) for each family, not just
+      // aggregate statistics. This is what stops it from
+      // hallucinating ad_ids like "NYC Bud | Core-38" that don't
+      // exist in the account and makes the produced repair/replace
+      // actions actually addressable in Ads Editor.
+      ads
     );
   } catch (error: any) {
     const msg = error?.message || String(error);
@@ -272,6 +279,19 @@ async function main() {
   // throwing at the "campaign name can't be empty" guard.
   const csvBatches = generateCSVBatches(l2Output, { snapshotAds: ads });
   console.log(`Generated ${csvBatches.length} CSV batches`);
+  for (const batch of csvBatches) {
+    if (batch.validation_messages.length > 0) {
+      console.log(
+        `  ⚠ ${String(batch.batch_number).padStart(3, '0')}-${batch.batch_name} (${batch.rows.length} rows, status=${batch.validation_status})`
+      );
+      for (const m of batch.validation_messages.slice(0, 30)) {
+        console.log(`     - ${m}`);
+      }
+      if (batch.validation_messages.length > 30) {
+        console.log(`     … (+${batch.validation_messages.length - 30} more)`);
+      }
+    }
+  }
   
   // Generate HTML packet
   console.log('\n🌐 Generating HTML review packet...');

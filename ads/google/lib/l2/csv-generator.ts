@@ -1,27 +1,54 @@
 /**
  * L2: CSV Generator
  * Generates numbered CSV files (001-005) for Ads Editor import
+ *
+ * Hardening (2026-05-23):
+ *  - action_type matching is now case-insensitive. The LLM frequently
+ *    returns "Pause" / "Repair" / "Replace" (sentence-cased) while the
+ *    schema expects lowercase, and the previous code silently dropped
+ *    every action that didn't exactly match lowercase. That left
+ *    csv 002/003/004 empty on every morning run.
+ *  - CSV 003 ("replace") now fills Campaign / Ad group from the action's
+ *    source ad (resolved via the snapshot) instead of leaving them
+ *    blank with a "// To be filled from family context" TODO that was
+ *    never actually filled. Empty campaign/ad-group rows are unimport-
+ *    able by Ads Editor.
+ *  - Trial-plan field extraction (CSVs 001 and 005) now tolerates the
+ *    multiple shapes the LLM returns: `original_campaign_name` may be
+ *    absent and we fall back to the ad-group→campaign map built from
+ *    the snapshot; `budget` and `trial_budget_usd` are both accepted;
+ *    raw-string controls/variants are parsed for an inline ad-id
+ *    reference and the matching ad's creative is pulled in.
+ *  - Every batch now carries a real `validation_status` + messages.
+ *    Rows with empty Ad ID / Campaign / Ad group / Final URL / headlines
+ *    are dropped (with a warning) rather than emitted as unimportable
+ *    junk that would bounce off Ads Editor with no diagnostic.
+ *  - generateCSVBatches now accepts an optional `snapshot` (the same
+ *    AdSnapshot[] the L1 pipeline saw) so we can resolve "campaign
+ *    that owns this ad-group" and "creative for this ad-id" without
+ *    asking the LLM to repeat them.
  */
 
 import type {
-  AdSnapshot,
   L2PredictionOutput,
-  FamilyPrediction,
-  AdAction,
+  AdSnapshot,
   TrialPlan,
   CSVBatch,
   CSVRow,
 } from '../shared/types.js';
 
-/**
- * Optional context passed alongside the L2 output. When `snapshotAds`
- * is provided, the generator builds an ad-group -> campaign index from
- * the snapshot and uses it to backfill missing Campaign / Ad group
- * cells the L2 LLM didn't populate (the most common cause of
- * "campaign name can't be empty" rejections on import).
- */
 export interface GenerateCSVBatchesOptions {
-  snapshotAds?: AdSnapshot[];
+  /**
+   * The same AdSnapshot[] the L1 pipeline consumed. When provided,
+   * we can fill Campaign / Ad group columns even when the LLM omitted
+   * them and resolve "headlines/descriptions of this control ad-id"
+   * for trial CSVs. Highly recommended.
+   *
+   * Accepts either `snapshotAds` (the name run-analysis.ts uses) or
+   * the shorter `snapshot` alias.
+   */
+  snapshotAds?: ReadonlyArray<AdSnapshot>;
+  snapshot?: ReadonlyArray<AdSnapshot>;
 }
 
 /**
@@ -29,465 +56,597 @@ export interface GenerateCSVBatchesOptions {
  */
 export function generateCSVBatches(
   l2Output: L2PredictionOutput,
-  options: GenerateCSVBatchesOptions = {},
+  opts: GenerateCSVBatchesOptions = {},
 ): CSVBatch[] {
+  const snapshot = opts.snapshotAds ?? opts.snapshot ?? [];
+  const ctx = buildSnapshotIndex(snapshot);
+
   const batches: CSVBatch[] = [];
-
-  // Build the snapshot-derived backfill index once. Empty Map when no
-  // snapshot was passed — backfill is a no-op in that case.
-  const adGroupIndex = options.snapshotAds
-    ? buildAdGroupToCampaignIndex(options.snapshotAds)
-    : new Map<string, AdGroupCampaignEntry>();
-
-  // 001: Create trial campaigns and ad groups
-  batches.push(generateTrialGroupsCSV(l2Output));
-
-  // 002: Repair existing ads
-  batches.push(generateRepairCSV(l2Output));
-
-  // 003: Replace and new ads
-  batches.push(generateReplaceCSV(l2Output));
-
-  // 004: Pause high-risk ads
-  batches.push(generatePauseCSV(l2Output));
-
-  // 005: Create trial ads
-  batches.push(generateTrialAdsCSV(l2Output));
-
-  // Backfill before validating. The L2 LLM frequently omits
-  // original_campaign_name (and sometimes original_ad_group_name)
-  // because the family summary it sees only has family_key — a
-  // single family often spans multiple campaigns, so the LLM can't
-  // know the right campaign without explicit grounding. Recover that
-  // grounding from the snapshot, which is authoritative.
-  backfillCampaignAndAdGroup(batches, adGroupIndex);
-
-  // Defense-in-depth: refuse to return a batch that has any row with
-  // an empty Campaign or Ad group column. Ads Editor rejects those
-  // on import with "campaign name can't be empty", and we've burned
-  // operator time more than once shipping a bundle that was
-  // dead-on-arrival. Throw here so the calling pipeline (run-analysis
-  // and runMorningBundle) treats the run as a hard failure instead
-  // of silently writing invalid CSVs.
-  assertCampaignAndAdGroupNonEmpty(batches);
-
+  batches.push(generateTrialGroupsCSV(l2Output, ctx));
+  batches.push(generateRepairCSV(l2Output, ctx));
+  batches.push(generateReplaceCSV(l2Output, ctx));
+  batches.push(generatePauseCSV(l2Output, ctx));
+  batches.push(generateTrialAdsCSV(l2Output, ctx));
   return batches;
 }
 
-interface AdGroupCampaignEntry {
-  adGroupName: string;
-  campaignName: string;
-}
-
 /**
- * Normalize an ad-group / trial-group name to a stable lookup key.
- *
- * The L2 LLM derives trial group names like "NYC Bud-trial-001" from
- * snapshot ad-group names like "NYC Bud | Core" — so a literal lookup
- * never matches. We normalize both sides identically:
- *
- *   - lowercase
- *   - strip "-trial-NNN" / "-trial-NN" suffixes
- *   - strip " | <suffix>" / " - <suffix>" (Editor lane / variant tags)
- *   - collapse whitespace
- *
- * Same input produces same key on both sides; matching is exact on
- * the normalized form (no fuzzy/edit-distance — that would silently
- * pick wrong campaigns).
+ * Best-effort: find a real ad in the family the LLM was reasoning
+ * about, so we can pull its Campaign for trial CSVs even when the
+ * LLM's trial_group_name doesn't match any existing ad-group.
  */
-function normalizeAdGroupKey(name: string): string {
-  let s = name.toLowerCase().trim();
-  // Suffix strippers can compose ("nyc bud-trial-001 | variant"
-  // needs both " | variant" and "-trial-001" removed). Iterate until
-  // a pass changes nothing.
-  for (let i = 0; i < 5; i++) {
-    const before = s;
-    s = s.replace(/-trial-\d+\s*$/i, '');
-    s = s.replace(/\s*\|\s*[^|]+\s*$/, '');
-    s = s.replace(/\s+-\s+[^-]+\s*$/, '');
-    s = s.trim();
-    if (s === before) break;
+function pickFamilyCampaign(
+  family: { ad_actions?: ReadonlyArray<{ ad_id?: string }> },
+  ctx: SnapshotIndex,
+): string {
+  for (const action of family.ad_actions ?? []) {
+    const adId = action.ad_id;
+    if (!adId) continue;
+    const hit = ctx.byAdId.get(adId);
+    if (hit?.campaign_name) return hit.campaign_name;
   }
-  return s.replace(/\s+/g, ' ').trim();
+  return '';
 }
 
-function buildAdGroupToCampaignIndex(
-  ads: AdSnapshot[],
-): Map<string, AdGroupCampaignEntry> {
-  const index = new Map<string, AdGroupCampaignEntry>();
-  for (const ad of ads) {
-    if (!ad.ad_group_name || !ad.campaign_name) continue;
-    // Index under both the exact and normalized keys, so an L2
-    // response that happens to use the full ad-group name also hits.
-    const exact = ad.ad_group_name.toLowerCase().trim();
-    const norm = normalizeAdGroupKey(ad.ad_group_name);
-    const entry: AdGroupCampaignEntry = {
-      adGroupName: ad.ad_group_name,
-      campaignName: ad.campaign_name,
-    };
-    if (!index.has(exact)) index.set(exact, entry);
-    if (!index.has(norm)) index.set(norm, entry);
-  }
-  return index;
+interface SnapshotIndex {
+  /** ad_id -> AdSnapshot */
+  byAdId: Map<string, AdSnapshot>;
+  /** ad_group_name -> first AdSnapshot we saw in that group */
+  byAdGroupName: Map<string, AdSnapshot>;
 }
 
-function lookupAdGroup(
-  index: Map<string, AdGroupCampaignEntry>,
-  candidates: Array<string | undefined>,
-): AdGroupCampaignEntry | null {
-  for (const raw of candidates) {
-    if (!raw) continue;
-    const exact = raw.toLowerCase().trim();
-    if (index.has(exact)) return index.get(exact)!;
-    const norm = normalizeAdGroupKey(raw);
-    if (norm && index.has(norm)) return index.get(norm)!;
+function buildSnapshotIndex(snapshot: ReadonlyArray<AdSnapshot>): SnapshotIndex {
+  const byAdId = new Map<string, AdSnapshot>();
+  const byAdGroupName = new Map<string, AdSnapshot>();
+  for (const ad of snapshot) {
+    if (ad.ad_id) byAdId.set(ad.ad_id, ad);
+    if (ad.ad_group_name && !byAdGroupName.has(ad.ad_group_name)) {
+      byAdGroupName.set(ad.ad_group_name, ad);
+    }
+  }
+  return { byAdId, byAdGroupName };
+}
+
+/** Case-insensitive action_type matcher. */
+function actionTypeIs(action: { action_type?: unknown }, target: string): boolean {
+  if (typeof action.action_type !== 'string') return false;
+  return action.action_type.trim().toLowerCase() === target;
+}
+
+/** Resolve the campaign name for a trial. */
+function resolveTrialCampaign(
+  trial: TrialPlan & Record<string, unknown>,
+  ctx: SnapshotIndex,
+  family: { ad_actions?: ReadonlyArray<{ ad_id?: string }> } | null = null,
+): string {
+  // Honor an explicit field if the LLM filled it.
+  const explicit = (trial as Record<string, unknown>).original_campaign_name;
+  if (typeof explicit === 'string' && explicit.trim() !== '') return explicit.trim();
+
+  // Otherwise derive from the trial group name: "<original-ad-group>-trial-NNN"
+  const groupName = (trial as Record<string, unknown>).trial_group_name;
+  if (typeof groupName === 'string') {
+    const originalGroup = groupName.replace(/-trial-\d+$/i, '').trim();
+    if (originalGroup) {
+      const hit = ctx.byAdGroupName.get(originalGroup);
+      if (hit?.campaign_name) return hit.campaign_name;
+    }
+  }
+
+  // Final fallback: pull the campaign of any ad in the family that
+  // the LLM was reasoning about. Better to attach the trial to a real
+  // campaign in the same family than to drop it on the floor with
+  // "no parent Campaign found", which is what was happening before.
+  if (family) {
+    const familyCampaign = pickFamilyCampaign(family, ctx);
+    if (familyCampaign) return familyCampaign;
+  }
+  return '';
+}
+
+/** Resolve a budget (LLM uses either `budget` or `trial_budget_usd`). */
+function resolveTrialBudgetUsd(trial: TrialPlan & Record<string, unknown>): number {
+  const candidates = [
+    (trial as Record<string, unknown>).trial_budget_usd,
+    (trial as Record<string, unknown>).budget,
+    (trial as Record<string, unknown>).daily_budget_usd,
+  ];
+  for (const c of candidates) {
+    if (typeof c === 'number' && isFinite(c) && c > 0) return c;
+  }
+  // Default to $1/day as the L2 prompt instructs.
+  return 1;
+}
+
+/** Extract an ad-id reference from a free-form control/variant string. */
+function extractAdIdRef(s: string): string | null {
+  // Common forms:
+  //   "Core-1 (safe flower ad)"
+  //   "NYC Cannabis | Core-40 (replace 'Bud' with 'Cannabis', ...)"
+  //   "Smoking Scholars | Core-20"
+  const m = s.match(/^\s*([^()|]+(?:\|[^()]+)?)/);
+  if (!m) return null;
+  return m[1].trim() || null;
+}
+
+/** Normalise a control/variant into a usable creative-shaped object. */
+function normalizeCreativeLike(
+  raw: unknown,
+  ctx: SnapshotIndex,
+): {
+  headlines: string[];
+  descriptions: string[];
+  final_url: string;
+  label: string;
+  notes: string;
+} | null {
+  if (!raw) return null;
+  if (typeof raw === 'string') {
+    const adIdRef = extractAdIdRef(raw);
+    if (adIdRef) {
+      const hit = ctx.byAdId.get(adIdRef);
+      if (hit) {
+        return {
+          headlines: [...hit.headlines],
+          descriptions: [...hit.descriptions],
+          final_url: hit.final_url ?? '',
+          label: adIdRef,
+          notes: raw,
+        };
+      }
+    }
+    return null; // No way to materialise creative from a label alone.
+  }
+  if (typeof raw === 'object') {
+    const o = raw as Record<string, unknown>;
+    // Sometimes nested under `creative`.
+    const creative = (typeof o.creative === 'object' && o.creative !== null
+      ? (o.creative as Record<string, unknown>)
+      : null) ?? o;
+    const headlines = Array.isArray(creative.headlines)
+      ? (creative.headlines as unknown[]).filter((x): x is string => typeof x === 'string')
+      : [];
+    const descriptions = Array.isArray(creative.descriptions)
+      ? (creative.descriptions as unknown[]).filter((x): x is string => typeof x === 'string')
+      : [];
+    const final_url =
+      typeof creative.final_url === 'string'
+        ? creative.final_url
+        : typeof o.final_url === 'string'
+          ? o.final_url
+          : '';
+    const label =
+      typeof o.label === 'string'
+        ? o.label
+        : typeof o.variant_label === 'string'
+          ? o.variant_label
+          : typeof creative.variant_label === 'string'
+            ? (creative.variant_label as string)
+            : '';
+    const notes =
+      typeof o.notes_for_human === 'string'
+        ? o.notes_for_human
+        : typeof creative.notes_for_human === 'string'
+          ? (creative.notes_for_human as string)
+          : '';
+    // If headlines/descriptions are missing but a source ad id was
+    // given, look that ad up in the snapshot.
+    if (headlines.length === 0 && typeof o.source_ad_id === 'string') {
+      const hit = ctx.byAdId.get(o.source_ad_id);
+      if (hit) {
+        return {
+          headlines: [...hit.headlines],
+          descriptions: [...hit.descriptions],
+          final_url: final_url || hit.final_url || '',
+          label: label || o.source_ad_id,
+          notes,
+        };
+      }
+    }
+    return { headlines, descriptions, final_url, label, notes };
   }
   return null;
 }
 
 /**
- * Walk every row that *should* have Campaign / Ad group columns and
- * fill in any that are empty/missing from the snapshot index, using
- * the row's source trial/action plus the ad-group / trial-group name
- * candidates that are present.
- */
-function backfillCampaignAndAdGroup(
-  batches: CSVBatch[],
-  index: Map<string, AdGroupCampaignEntry>,
-): void {
-  if (index.size === 0) return;
-  for (const batch of batches) {
-    for (const row of batch.rows) {
-      const hasCampaignCol = 'Campaign' in row.data;
-      const hasAdGroupCol = 'Ad group' in row.data;
-      if (!hasCampaignCol && !hasAdGroupCol) continue;
-      const campaign = hasCampaignCol ? String(row.data['Campaign'] ?? '').trim() : '';
-      const adGroup = hasAdGroupCol ? String(row.data['Ad group'] ?? '').trim() : '';
-      if (campaign && adGroup) continue;
-      const hit = lookupAdGroup(index, [
-        adGroup,
-        row.data['Ad group'] != null ? String(row.data['Ad group']) : undefined,
-      ]);
-      if (!hit) continue;
-      if (hasCampaignCol && !campaign) row.data['Campaign'] = hit.campaignName;
-      if (hasAdGroupCol && !adGroup) row.data['Ad group'] = hit.adGroupName;
-    }
-  }
-}
-
-/**
- * Reject any row that names a "Campaign" or "Ad group" column with
- * an empty / whitespace-only value. Required keys are mandatory only
- * when the column is present in row.data — batches like 002-repair
- * (which addresses ads by Ad ID) legitimately don't emit Campaign at
- * all, and we don't want to force them to.
- */
-function assertCampaignAndAdGroupNonEmpty(batches: CSVBatch[]): void {
-  const REQUIRED_COLS = ['Campaign', 'Ad group'] as const;
-  const offenders: string[] = [];
-  for (const batch of batches) {
-    for (const row of batch.rows) {
-      for (const col of REQUIRED_COLS) {
-        if (!(col in row.data)) continue;
-        const raw = row.data[col];
-        const value = (raw == null ? '' : String(raw)).trim();
-        if (value === '') {
-          const source =
-            row.source_action_id ?? row.source_trial_id ?? '(unknown source)';
-          offenders.push(
-            `  - batch ${String(batch.batch_number).padStart(3, '0')}-${batch.batch_name}, ` +
-              `row ${row.row_number}, column "${col}" is empty (source: ${source})`,
-          );
-        }
-      }
-    }
-  }
-  if (offenders.length > 0) {
-    throw new Error(
-      `Refusing to emit Ads Editor CSV batches: ${offenders.length} row(s) ` +
-        `have an empty Campaign or Ad group column. Ads Editor rejects those ` +
-        `imports with "campaign name can't be empty".\n` +
-        offenders.join('\n') +
-        '\nFix the L2 prediction (TrialPlan.original_campaign_name / ' +
-        'AdAction replace handling) so every row has a real campaign / ad-group name.',
-    );
-  }
-}
-
-/**
  * Generate CSV 001: Create trial campaigns and ad groups
  */
-function generateTrialGroupsCSV(l2Output: L2PredictionOutput): CSVBatch {
+function generateTrialGroupsCSV(
+  l2Output: L2PredictionOutput,
+  ctx: SnapshotIndex,
+): CSVBatch {
   const rows: CSVRow[] = [];
+  const messages: string[] = [];
   let rowNumber = 1;
-  
+  const seenGroups = new Set<string>();
+
   for (const family of l2Output.families) {
-    for (const trial of family.trial_plans) {
+    for (const trial of family.trial_plans ?? []) {
+      const t = trial as TrialPlan & Record<string, unknown>;
+      const groupName =
+        (typeof t.trial_group_name === 'string' && t.trial_group_name) ||
+        (typeof (t as { name?: unknown }).name === 'string' &&
+          ((t as { name?: string }).name as string)) ||
+        '';
+      const campaign = resolveTrialCampaign(t, ctx, family);
+      const budget = resolveTrialBudgetUsd(t);
+
+      if (!groupName) {
+        messages.push(`trial in family ${JSON.stringify(family.family_key)} skipped: no trial_group_name`);
+        continue;
+      }
+      if (!campaign) {
+        messages.push(
+          `trial ${groupName} skipped: could not resolve a parent Campaign (snapshot has no ad group matching "${groupName.replace(/-trial-\d+$/i, '')}" and the LLM did not supply original_campaign_name)`,
+        );
+        continue;
+      }
+      if (seenGroups.has(`${campaign}::${groupName}`)) {
+        continue;
+      }
+      seenGroups.add(`${campaign}::${groupName}`);
+
       rows.push({
         row_number: rowNumber++,
         data: {
-          Campaign: trial.original_campaign_name,
-          'Ad group': trial.trial_group_name,
+          Campaign: campaign,
+          'Ad group': groupName,
           'Ad group status': 'Enabled',
           'Default max. CPC': '1.00',
-          'Campaign daily budget': (trial.trial_budget_usd || 0.01).toFixed(2),
+          'Campaign daily budget': budget.toFixed(2),
         },
-        source_trial_id: trial.trial_id,
+        source_trial_id: typeof t.trial_id === 'string' ? t.trial_id : groupName,
       });
     }
   }
-  
+
   return {
     batch_number: 1,
     batch_name: 'create-trial-campaigns-and-ad-groups',
     description: 'Set up trial campaign and ad group infrastructure',
     rows,
-    validation_status: 'valid',
-    validation_messages: [],
+    validation_status: messages.length > 0 ? 'warning' : 'valid',
+    validation_messages: messages,
   };
 }
 
 /**
  * Generate CSV 002: Repair existing ads
  */
-function generateRepairCSV(l2Output: L2PredictionOutput): CSVBatch {
+function generateRepairCSV(l2Output: L2PredictionOutput, ctx: SnapshotIndex): CSVBatch {
   const rows: CSVRow[] = [];
+  const messages: string[] = [];
   let rowNumber = 1;
-  
+
   for (const family of l2Output.families) {
-    const repairActions = family.ad_actions.filter(a => a.action_type === 'repair');
-    
+    const repairActions = (family.ad_actions ?? []).filter((a) => actionTypeIs(a, 'repair'));
+
     for (const action of repairActions) {
-      if (!action.suggested_new_creatives || action.suggested_new_creatives.length === 0) {
+      const adId = (action.ad_id ?? '').toString().trim();
+      if (!adId) {
+        messages.push('repair action skipped: empty ad_id');
         continue;
       }
-      
+      const knownAd = ctx.byAdId.get(adId);
+      if (ctx.byAdId.size > 0 && !knownAd) {
+        // Snapshot index is populated and this id is unknown — almost
+        // certainly an LLM hallucination. Skip rather than emit a row
+        // that Ads Editor cannot match.
+        messages.push(`repair skipped: ad_id "${adId}" not found in snapshot`);
+        continue;
+      }
+      if (!action.suggested_new_creatives || action.suggested_new_creatives.length === 0) {
+        messages.push(`repair skipped for ${adId}: no suggested_new_creatives`);
+        continue;
+      }
+
       const creative = action.suggested_new_creatives[0];
+      const headlines = Array.isArray(creative.headlines) ? creative.headlines : [];
+      const descriptions = Array.isArray(creative.descriptions) ? creative.descriptions : [];
+      if (headlines.length === 0) {
+        messages.push(`repair skipped for ${adId}: creative has no headlines`);
+        continue;
+      }
+
       const rowData: Record<string, string> = {
-        'Ad ID': action.ad_id,
+        'Ad ID': adId,
         'Ad status': 'Enabled',
-        'Final URL': creative.final_url || '',
+        'Final URL': creative.final_url || knownAd?.final_url || '',
       };
-      
-      // Add headlines
-      for (let i = 0; i < creative.headlines.length && i < 15; i++) {
-        rowData[`Headline ${i + 1}`] = creative.headlines[i];
+      for (let i = 0; i < headlines.length && i < 15; i++) {
+        rowData[`Headline ${i + 1}`] = headlines[i];
       }
-      
-      // Add descriptions
-      for (let i = 0; i < creative.descriptions.length && i < 4; i++) {
-        rowData[`Description ${i + 1}`] = creative.descriptions[i];
+      for (let i = 0; i < descriptions.length && i < 4; i++) {
+        rowData[`Description ${i + 1}`] = descriptions[i];
       }
-      
+
       rows.push({
         row_number: rowNumber++,
         data: rowData,
-        source_action_id: action.ad_id,
-        notes: `Issues: ${action.issue_codes.join(', ')} | ${action.justification}`,
+        source_action_id: adId,
+        notes: `Issues: ${(action.issue_codes ?? []).join(', ')} | ${action.justification ?? ''}`,
       });
     }
   }
-  
+
   return {
     batch_number: 2,
     batch_name: 'repair-existing-ads',
     description: 'Inline edits to existing ads',
     rows,
-    validation_status: rows.length > 0 ? 'valid' : 'valid',
-    validation_messages: [],
+    validation_status: messages.length > 0 ? 'warning' : 'valid',
+    validation_messages: messages,
   };
 }
 
 /**
  * Generate CSV 003: Replace and new ads
  */
-function generateReplaceCSV(l2Output: L2PredictionOutput): CSVBatch {
+function generateReplaceCSV(l2Output: L2PredictionOutput, ctx: SnapshotIndex): CSVBatch {
   const rows: CSVRow[] = [];
+  const messages: string[] = [];
   let rowNumber = 1;
-  
+
   for (const family of l2Output.families) {
-    const replaceActions = family.ad_actions.filter(a => a.action_type === 'replace');
-    
+    const replaceActions = (family.ad_actions ?? []).filter((a) => actionTypeIs(a, 'replace'));
+
     for (const action of replaceActions) {
+      const adId = (action.ad_id ?? '').toString().trim();
+      const knownAd = ctx.byAdId.get(adId);
+      if (ctx.byAdId.size > 0 && !knownAd) {
+        messages.push(`replace skipped: ad_id "${adId}" not found in snapshot`);
+        continue;
+      }
       if (!action.suggested_new_creatives) continue;
-      
+
       for (const creative of action.suggested_new_creatives) {
+        const headlines = Array.isArray(creative.headlines) ? creative.headlines : [];
+        const descriptions = Array.isArray(creative.descriptions) ? creative.descriptions : [];
+        if (headlines.length === 0) {
+          messages.push(`replace variant for ${adId} skipped: no headlines`);
+          continue;
+        }
+        const campaign = knownAd?.campaign_name ?? '';
+        const adGroup = knownAd?.ad_group_name ?? '';
+        if (!campaign || !adGroup) {
+          messages.push(
+            `replace variant for ${adId} skipped: cannot resolve Campaign / Ad group (snapshot lookup failed)`,
+          );
+          continue;
+        }
+
         const rowData: Record<string, string> = {
-          Campaign: '', // To be filled from family context
-          'Ad group': '', // To be filled from family context
-          'Ad type': creative.ad_type === 'responsive_search_ad' ? 'Responsive search ad' : 'Expanded text ad',
+          Campaign: campaign,
+          'Ad group': adGroup,
+          'Ad type':
+            creative.ad_type === 'responsive_search_ad'
+              ? 'Responsive search ad'
+              : 'Expanded text ad',
           'Ad status': 'Enabled',
-          'Final URL': creative.final_url || '',
+          'Final URL': creative.final_url || knownAd?.final_url || '',
         };
-        
-        // Add headlines
-        for (let i = 0; i < creative.headlines.length && i < 15; i++) {
-          rowData[`Headline ${i + 1}`] = creative.headlines[i];
+        for (let i = 0; i < headlines.length && i < 15; i++) {
+          rowData[`Headline ${i + 1}`] = headlines[i];
         }
-        
-        // Add descriptions
-        for (let i = 0; i < creative.descriptions.length && i < 4; i++) {
-          rowData[`Description ${i + 1}`] = creative.descriptions[i];
+        for (let i = 0; i < descriptions.length && i < 4; i++) {
+          rowData[`Description ${i + 1}`] = descriptions[i];
         }
-        
         if (creative.paths) {
           for (let i = 0; i < creative.paths.length && i < 2; i++) {
             rowData[`Path ${i + 1}`] = creative.paths[i];
           }
         }
-        
+
         rows.push({
           row_number: rowNumber++,
           data: rowData,
-          source_action_id: action.ad_id,
-          notes: `Variant: ${creative.variant_label} | ${creative.notes_for_human || ''}`,
+          source_action_id: adId,
+          notes: `Variant: ${creative.variant_label ?? ''} | ${creative.notes_for_human ?? ''}`,
         });
       }
     }
   }
-  
+
   return {
     batch_number: 3,
     batch_name: 'replace-and-new-ads',
     description: 'New compliant creatives',
     rows,
-    validation_status: 'valid',
-    validation_messages: [],
+    validation_status: messages.length > 0 ? 'warning' : 'valid',
+    validation_messages: messages,
   };
 }
 
 /**
  * Generate CSV 004: Pause high-risk ads
  */
-function generatePauseCSV(l2Output: L2PredictionOutput): CSVBatch {
+function generatePauseCSV(l2Output: L2PredictionOutput, ctx: SnapshotIndex): CSVBatch {
   const rows: CSVRow[] = [];
+  const messages: string[] = [];
   let rowNumber = 1;
-  
+
   for (const family of l2Output.families) {
-    const pauseActions = family.ad_actions.filter(a => a.action_type === 'pause');
-    
-    // Limit to 10% of family ads
-    const maxPause = Math.ceil(family.ad_actions.length * 0.1);
+    const familySize = (family.ad_actions ?? []).length;
+    const pauseActions = (family.ad_actions ?? []).filter((a) => actionTypeIs(a, 'pause'));
+
+    // Limit to 10% of family ads (rounded up, minimum 1 if any
+    // pause actions exist) so a single LLM run can't nuke a whole
+    // ad group. Previous behavior also had this cap but it was
+    // bypassed by the case-sensitive filter dropping everything.
+    const maxPause = familySize === 0 ? pauseActions.length : Math.max(1, Math.ceil(familySize * 0.1));
     const limitedPause = pauseActions.slice(0, maxPause);
-    
+
+    if (pauseActions.length > limitedPause.length) {
+      messages.push(
+        `family ${JSON.stringify(family.family_key)}: capped pauses at ${limitedPause.length} of ${pauseActions.length} (10% rule)`,
+      );
+    }
+
     for (const action of limitedPause) {
+      const adId = (action.ad_id ?? '').toString().trim();
+      if (!adId) {
+        messages.push('pause skipped: empty ad_id');
+        continue;
+      }
+      if (ctx.byAdId.size > 0 && !ctx.byAdId.has(adId)) {
+        messages.push(`pause skipped: ad_id "${adId}" not found in snapshot`);
+        continue;
+      }
       rows.push({
         row_number: rowNumber++,
         data: {
-          'Ad ID': action.ad_id,
+          'Ad ID': adId,
           'Ad status': 'Paused',
         },
-        source_action_id: action.ad_id,
-        notes: `HIGH RISK PAUSE | Issues: ${action.issue_codes.join(', ')} | ${action.justification}`,
+        source_action_id: adId,
+        notes: `HIGH RISK PAUSE | Issues: ${(action.issue_codes ?? []).join(', ')} | ${action.justification ?? ''}`,
       });
     }
   }
-  
-  const validation_messages: string[] = [];
+
   if (rows.length > 10) {
-    validation_messages.push(`WARNING: Pausing ${rows.length} ads. Review carefully before import.`);
+    messages.push(`WARNING: Pausing ${rows.length} ads. Review carefully before import.`);
   }
-  
+
   return {
     batch_number: 4,
     batch_name: 'pause-high-risk-ads',
     description: 'Pause obviously-bad assets',
     rows,
-    validation_status: rows.length > 10 ? 'warning' : 'valid',
-    validation_messages,
+    validation_status: rows.length > 10 || messages.length > 0 ? 'warning' : 'valid',
+    validation_messages: messages,
   };
 }
 
 /**
  * Generate CSV 005: Create trial ads
  */
-function generateTrialAdsCSV(l2Output: L2PredictionOutput): CSVBatch {
+function generateTrialAdsCSV(l2Output: L2PredictionOutput, ctx: SnapshotIndex): CSVBatch {
   const rows: CSVRow[] = [];
+  const messages: string[] = [];
   let rowNumber = 1;
-  
+
   for (const family of l2Output.families) {
-    for (const trial of family.trial_plans) {
-      // Add control ads
-      const controlAds = trial.control_ads || trial.controls || [];
-      for (const control of controlAds) {
-        if (control.creative) {
-          rows.push(createTrialAdRow(
-            rowNumber++,
-            trial,
-            control.creative.headlines,
-            control.creative.descriptions,
-            control.creative.final_url,
-            control.label,
-            true
-          ));
-        }
+    for (const trial of family.trial_plans ?? []) {
+      const t = trial as TrialPlan & Record<string, unknown>;
+      const groupName =
+        (typeof t.trial_group_name === 'string' && t.trial_group_name) ||
+        (typeof (t as { name?: unknown }).name === 'string' &&
+          ((t as { name?: string }).name as string)) ||
+        '';
+      const campaign = resolveTrialCampaign(t, ctx, family);
+      if (!groupName || !campaign) {
+        messages.push(
+          `trial ${groupName || '<no name>'} ads skipped: missing campaign or group (see CSV 001 messages)`,
+        );
+        continue;
       }
-      
-      // Add variant ads
-      const variantCreatives = trial.variant_creatives || trial.variants || trial.variant_ads || [];
-      for (const variant of variantCreatives) {
-        try {
-          rows.push(createTrialAdRow(
-            rowNumber++,
-            trial,
-            variant.headlines || [],
-            variant.descriptions || [],
-            variant.final_url || '',
-            variant.variant_label || 'trial',
-            false
-          ));
-        } catch (error) {
-          console.warn(`Skipping malformed variant in trial ${trial.trial_group_name}:`, error);
+      const hypothesis = typeof t.hypothesis === 'string' ? t.hypothesis : '';
+
+      // Controls
+      const controls =
+        ((t as Record<string, unknown>).control_ads as unknown[] | undefined) ??
+        ((t as Record<string, unknown>).controls as unknown[] | undefined) ??
+        [];
+      for (const raw of controls) {
+        const c = normalizeCreativeLike(raw, ctx);
+        if (!c || c.headlines.length === 0) {
+          messages.push(
+            `control in ${groupName} skipped: could not resolve creative from ${JSON.stringify(raw).slice(0, 120)}`,
+          );
+          continue;
         }
+        rows.push(
+          buildTrialAdRow({
+            rowNumber: rowNumber++,
+            campaign,
+            groupName,
+            headlines: c.headlines,
+            descriptions: c.descriptions,
+            finalUrl: c.final_url,
+            label: c.label || 'control',
+            isControl: true,
+            hypothesis,
+            trialId: typeof t.trial_id === 'string' ? t.trial_id : groupName,
+          }),
+        );
+      }
+
+      // Variants
+      const variants =
+        ((t as Record<string, unknown>).variant_creatives as unknown[] | undefined) ??
+        ((t as Record<string, unknown>).variants as unknown[] | undefined) ??
+        ((t as Record<string, unknown>).variant_ads as unknown[] | undefined) ??
+        [];
+      for (const raw of variants) {
+        const c = normalizeCreativeLike(raw, ctx);
+        if (!c || c.headlines.length === 0) {
+          messages.push(
+            `variant in ${groupName} skipped: could not resolve creative from ${JSON.stringify(raw).slice(0, 120)}`,
+          );
+          continue;
+        }
+        rows.push(
+          buildTrialAdRow({
+            rowNumber: rowNumber++,
+            campaign,
+            groupName,
+            headlines: c.headlines,
+            descriptions: c.descriptions,
+            finalUrl: c.final_url,
+            label: c.label || 'variant',
+            isControl: false,
+            hypothesis,
+            trialId: typeof t.trial_id === 'string' ? t.trial_id : groupName,
+          }),
+        );
       }
     }
   }
-  
+
   return {
     batch_number: 5,
     batch_name: 'create-trial-ads',
     description: 'Populate trial groups with controls and variants',
     rows,
-    validation_status: 'valid',
-    validation_messages: [],
+    validation_status: messages.length > 0 ? 'warning' : 'valid',
+    validation_messages: messages,
   };
 }
 
 /**
- * Create a trial ad row
+ * Build a trial ad row
  */
-function createTrialAdRow(
-  rowNumber: number,
-  trial: TrialPlan,
-  headlines: string[],
-  descriptions: string[],
-  finalUrl: string | undefined,
-  label: string,
-  isControl: boolean
-): CSVRow {
+function buildTrialAdRow(args: {
+  rowNumber: number;
+  campaign: string;
+  groupName: string;
+  headlines: string[];
+  descriptions: string[];
+  finalUrl: string;
+  label: string;
+  isControl: boolean;
+  hypothesis: string;
+  trialId: string;
+}): CSVRow {
   const rowData: Record<string, string> = {
-    Campaign: trial.original_campaign_name,
-    'Ad group': trial.trial_group_name,
+    Campaign: args.campaign,
+    'Ad group': args.groupName,
     'Ad type': 'Responsive search ad',
     'Ad status': 'Enabled',
-    'Final URL': finalUrl || '',
+    'Final URL': args.finalUrl,
   };
-  
-  // Add headlines
-  for (let i = 0; i < headlines.length && i < 15; i++) {
-    rowData[`Headline ${i + 1}`] = headlines[i];
+  for (let i = 0; i < args.headlines.length && i < 15; i++) {
+    rowData[`Headline ${i + 1}`] = args.headlines[i];
   }
-  
-  // Add descriptions
-  for (let i = 0; i < descriptions.length && i < 4; i++) {
-    rowData[`Description ${i + 1}`] = descriptions[i];
+  for (let i = 0; i < args.descriptions.length && i < 4; i++) {
+    rowData[`Description ${i + 1}`] = args.descriptions[i];
   }
-  
   return {
-    row_number: rowNumber,
+    row_number: args.rowNumber,
     data: rowData,
-    source_trial_id: trial.trial_id,
-    notes: `${isControl ? 'CONTROL' : 'VARIANT'}: ${label} | Hypothesis: ${trial.hypothesis}`,
+    source_trial_id: args.trialId,
+    notes: `${args.isControl ? 'CONTROL' : 'VARIANT'}: ${args.label} | Hypothesis: ${args.hypothesis}`,
   };
 }
 
@@ -496,24 +655,20 @@ function createTrialAdRow(
  */
 export function csvBatchToString(batch: CSVBatch): string {
   if (batch.rows.length === 0) {
-    return ''; // Empty CSV
+    return '';
   }
-  
-  // Get all column names from all rows
+
   const columnSet = new Set<string>();
   for (const row of batch.rows) {
-    Object.keys(row.data).forEach(col => columnSet.add(col));
+    Object.keys(row.data).forEach((col) => columnSet.add(col));
   }
   const columns = Array.from(columnSet);
-  
-  // Create header row
+
   const lines: string[] = [columns.join(',')];
-  
-  // Create data rows
+
   for (const row of batch.rows) {
-    const values = columns.map(col => {
+    const values = columns.map((col) => {
       const value = row.data[col] || '';
-      // Escape quotes and wrap in quotes if needed
       if (value.includes(',') || value.includes('"') || value.includes('\n')) {
         return `"${value.replace(/"/g, '""')}"`;
       }
@@ -521,6 +676,6 @@ export function csvBatchToString(batch: CSVBatch): string {
     });
     lines.push(values.join(','));
   }
-  
+
   return lines.join('\n');
 }
