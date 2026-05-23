@@ -214,10 +214,23 @@ interface PendingPurchaseSuggestionVerification {
     relevantPositionCount: number
     status: 'manual_follow_up_required' | 'verified'
   }>
-  overallStatus: 'manual_follow_up_required' | 'verified'
+  /**
+   * `verification_deferred` is set when the catalog write (group +
+   * product + distributor link) ALL succeeded but the post-write
+   * Sweed `store.distributor.product.suggestion` RPC failed (typically
+   * an intermittent 500 from Sweed). In that case the new product is
+   * already live in the catalog — we just couldn't confirm whether
+   * Sweed's suggestion engine has caught up and is now proposing the
+   * new product on the open purchase positions. Marking the row
+   * applied (rather than failed) avoids re-creating duplicate Sweed
+   * products on retry; the reviewer can re-verify suggestions later
+   * from Sweed directly.
+   */
+  overallStatus: 'manual_follow_up_required' | 'verified' | 'verification_deferred'
   relevantPositionCount: number
   summaryText: string
   targetProductName: string
+  verificationError?: string
 }
 
 class PendingPurchaseBlockedError extends Error {}
@@ -453,7 +466,34 @@ async function applyPendingPurchaseRow(
     row,
     product.id,
   )
-  const verification = await verifyPendingPurchaseSuggestions(row, product.id, row.targetVariantName)
+  // Verification is intentionally non-fatal. Every Sweed write above
+  // (group add, product add, group/product edit, distributor link)
+  // has already succeeded by this point; if Sweed's suggestion RPC
+  // throws (typically a transient 500 on
+  // store.distributor.product.suggestion), failing the WHOLE row
+  // would lie to the operator (the catalog WAS written, the product
+  // IS live) and would cause duplicate-product creation on the next
+  // apply retry. Capture the error in the verification record
+  // instead so it shows up in the apply summary for follow-up.
+  let verification: PendingPurchaseSuggestionVerification
+  try {
+    verification = await verifyPendingPurchaseSuggestions(row, product.id, row.targetVariantName)
+  } catch (verificationError) {
+    const errorMessage = verificationError instanceof Error
+      ? verificationError.message
+      : 'Unknown verification error'
+    verification = {
+      manualFollowUpOrderCount: row.orderIds.length,
+      manualFollowUpPositionCount: row.positionIds.length,
+      matchedTargetPositionCount: 0,
+      orders: [],
+      overallStatus: 'verification_deferred',
+      relevantPositionCount: 0,
+      summaryText: `Catalog apply succeeded for ${row.targetVariantName}, but Sweed's post-write suggestion check failed (${errorMessage}). The new product is live; re-check Sweed manually if you need to confirm the distributor-position suggestion mapping.`,
+      targetProductName: row.targetVariantName,
+      verificationError: errorMessage,
+    }
+  }
   const groupAfter = summarizeGroup(group)
   const productAfter = summarizeProduct(product)
   const summaryText = buildAppliedRowSummary(row, createdProductId ?? product.id, verification)
