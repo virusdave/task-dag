@@ -6,6 +6,7 @@ import {
   CustomerReviewActionResponseSchema,
   CustomerReviewDrawingEntryRequestSchema,
   CustomerReviewDrawingEntryResponseSchema,
+  CustomerReviewDrawingListResponseSchema,
   CustomerReviewListResponseSchema,
   CustomerReviewResendEmailResponseSchema,
   CustomerReviewSubmitRequestSchema,
@@ -26,11 +27,15 @@ import {
   insertDrawingEntry,
   insertReviewSubmission,
   listCustomerReviews,
+  listDrawingEntries,
   markSubmissionFraudulent,
   setDrawingEntrySegmentOutcomes,
   setDrawingEntrySingleSegmentOutcome,
   setSubmissionLlmFields,
+  UNACKNOWLEDGE_WINDOW_SECONDS,
+  unacknowledgeDrawingEntry,
   type CustomerReviewDetailRow,
+  type DrawingListEntry,
   type SegmentKind,
 } from '../db/queries/customerReviewsQueries.js'
 import {
@@ -694,6 +699,92 @@ export async function registerCustomerReviewsRoutes(server: FastifyInstance): Pr
     },
   )
 
+  // ------------------------- internal POST /api/customer-reviews/:id/unacknowledge (A5)
+  server.post<{ Params: { submissionId: string } }>(
+    '/api/customer-reviews/:submissionId/unacknowledge',
+    async (request, reply) => {
+      const user = await requireSessionUser(request, reply, 'editor')
+      if (!user) return
+      try {
+        const outcome = await unacknowledgeDrawingEntry(getPool(), request.params.submissionId)
+        if (!outcome.updated) {
+          if (outcome.reason === 'window_expired') {
+            return reply.status(409).send({
+              error: `Acknowledge is no longer reversible (>${UNACKNOWLEDGE_WINDOW_SECONDS}s old). Mark fraudulent if you need to re-surface this entry.`,
+            })
+          }
+          return reply.status(404).send({ error: 'No acknowledged drawing entry to undo.' })
+        }
+        return reply.send(
+          await buildActionResponse(request.params.submissionId, 'Acknowledge undone.'),
+        )
+      } catch (error) {
+        if (isMissingReviewTableError(error)) {
+          return reply.status(503).send({ error: MIGRATION_HINT })
+        }
+        throw error
+      }
+    },
+  )
+
+  // ------------------------- internal GET /api/customer-reviews/drawing (A5)
+  // Exportable list of review_drawing_entries. Query string:
+  //   ?site=<dealerId>&since=<iso>&includeAcked=1&includeFraudulent=1
+  // Default view is "actionable now": not-fraudulent + not-acknowledged.
+  server.get(
+    '/api/customer-reviews/drawing',
+    async (request, reply) => {
+      const user = await requireSessionUser(request, reply, 'viewer')
+      if (!user) return
+      const filters = parseDrawingFilters(request.query as Record<string, unknown>)
+      try {
+        const items = await listDrawingEntries(getPool(), filters)
+        return reply.send(
+          CustomerReviewDrawingListResponseSchema.parse({
+            items,
+            filters: {
+              dealerId: filters.dealerId ?? null,
+              sinceIso: filters.sinceIso ?? null,
+              includeAcked: !!filters.includeAcked,
+              includeFraudulent: !!filters.includeFraudulent,
+            },
+            undoWindowSeconds: UNACKNOWLEDGE_WINDOW_SECONDS,
+            captureEnabled: getServerEnv().reviewsCaptureV1Enabled,
+          }),
+        )
+      } catch (error) {
+        if (isMissingReviewTableError(error)) {
+          return reply.status(503).send({ error: MIGRATION_HINT })
+        }
+        throw error
+      }
+    },
+  )
+
+  // ------------------------- internal GET /api/customer-reviews/drawing.csv (A5)
+  server.get('/api/customer-reviews/drawing.csv', async (request, reply) => {
+    const user = await requireSessionUser(request, reply, 'viewer')
+    if (!user) return
+    const filters = parseDrawingFilters(request.query as Record<string, unknown>)
+    try {
+      const items = await listDrawingEntries(getPool(), filters)
+      const csv = renderDrawingCsv(items)
+      const fileSite = filters.dealerId == null ? 'all-sites' : `dealer-${filters.dealerId}`
+      const today = new Date().toISOString().slice(0, 10).replace(/-/g, '')
+      const filename = `reviews-drawing-${fileSite}-${today}.csv`
+      reply
+        .header('Content-Type', 'text/csv; charset=utf-8')
+        .header('Content-Disposition', `attachment; filename="${filename}"`)
+        .header('Cache-Control', 'no-store')
+      return reply.send(csv)
+    } catch (error) {
+      if (isMissingReviewTableError(error)) {
+        return reply.status(503).send({ error: MIGRATION_HINT })
+      }
+      throw error
+    }
+  })
+
   // ------------------------- internal POST /api/customer-reviews/:id/re-run-llm
   server.post<{ Params: { submissionId: string } }>(
     '/api/customer-reviews/:submissionId/re-run-llm',
@@ -1053,4 +1144,121 @@ async function buildActionResponse(
     item,
     message,
   })
+}
+
+// =====================================================================
+// A5 helpers — drawing-list filter parsing + CSV rendering.
+// =====================================================================
+
+interface ParsedDrawingFilters {
+  dealerId: number | null
+  sinceIso: string | null
+  includeAcked: boolean
+  includeFraudulent: boolean
+}
+
+function parseTruthyParam(value: unknown): boolean {
+  if (value === undefined || value === null) return false
+  const s = String(value).toLowerCase()
+  return s === '1' || s === 'true' || s === 'yes' || s === 'on'
+}
+
+function parseIncludeParam(value: unknown): { acked: boolean; fraudulent: boolean } {
+  if (value === undefined || value === null) return { acked: false, fraudulent: false }
+  const parts = String(value)
+    .split(',')
+    .map((p) => p.trim().toLowerCase())
+    .filter((p) => p.length > 0)
+  return {
+    acked: parts.includes('acked') || parts.includes('acknowledged'),
+    fraudulent: parts.includes('fraudulent') || parts.includes('fraud'),
+  }
+}
+
+function parseDrawingFilters(q: Record<string, unknown>): ParsedDrawingFilters {
+  const siteRaw = q.site ?? q.dealerId ?? q.dealer_id
+  let dealerId: number | null = null
+  if (siteRaw !== undefined && siteRaw !== null && String(siteRaw).trim() !== '') {
+    const n = Number(siteRaw)
+    if (Number.isFinite(n) && Number.isInteger(n) && n > 0) dealerId = n
+  }
+  const sinceRaw = q.since
+  let sinceIso: string | null = null
+  if (sinceRaw !== undefined && sinceRaw !== null && String(sinceRaw).trim() !== '') {
+    const s = String(sinceRaw)
+    const d = new Date(s)
+    if (!Number.isNaN(d.getTime())) sinceIso = d.toISOString()
+  }
+  const include = parseIncludeParam(q.include)
+  return {
+    dealerId,
+    sinceIso,
+    includeAcked: include.acked || parseTruthyParam(q.includeAcked) || parseTruthyParam(q.acked),
+    includeFraudulent:
+      include.fraudulent ||
+      parseTruthyParam(q.includeFraudulent) ||
+      parseTruthyParam(q.fraudulent),
+  }
+}
+
+const CSV_COLUMNS = [
+  'created_at',
+  'site_label',
+  'dealer_id',
+  'submission_id',
+  'star_rating',
+  'review_text_snippet',
+  'llm_verdict',
+  'degraded_pass',
+  'accepted_paste_offer',
+  'drawing_segment_status',
+  'drawing_segment_id',
+  'free_preroll_segment_status',
+  'free_preroll_segment_id',
+  'contact_name',
+  'contact_email',
+  'contact_phone',
+  'acknowledged_at',
+  'acknowledged_by',
+  'fraudulent',
+] as const
+
+function csvEscape(value: unknown): string {
+  if (value === null || value === undefined) return ''
+  const s = String(value)
+  if (s.includes(',') || s.includes('"') || s.includes('\n') || s.includes('\r')) {
+    return `"${s.replace(/"/g, '""')}"`
+  }
+  return s
+}
+
+function renderDrawingCsv(items: DrawingListEntry[]): string {
+  const lines: string[] = []
+  lines.push(CSV_COLUMNS.join(','))
+  for (const it of items) {
+    const row: Record<(typeof CSV_COLUMNS)[number], unknown> = {
+      created_at: it.createdAt,
+      site_label: it.siteLabel,
+      dealer_id: it.dealerId,
+      submission_id: it.submissionId,
+      star_rating: it.starRating,
+      review_text_snippet: it.reviewTextSnippet,
+      llm_verdict: it.llmVerdict,
+      degraded_pass: it.degradedPass,
+      accepted_paste_offer: it.acceptedPasteOffer,
+      drawing_segment_status: it.drawingSegmentStatus,
+      drawing_segment_id: it.drawingSegmentId,
+      free_preroll_segment_status: it.freePrerollSegmentStatus,
+      free_preroll_segment_id: it.freePrerollSegmentId,
+      contact_name: it.contactName,
+      contact_email: it.contactEmail,
+      contact_phone: it.contactPhone,
+      acknowledged_at: it.acknowledgedAt,
+      acknowledged_by: it.acknowledgedBy,
+      fraudulent: it.fraudulent,
+    }
+    lines.push(CSV_COLUMNS.map((c) => csvEscape(row[c])).join(','))
+  }
+  // CRLF for Excel/Numbers compatibility.
+  return lines.join('\r\n') + '\r\n'
 }

@@ -230,6 +230,49 @@ export const CustomerReviewActionResponseSchema = z.object({
 })
 export type CustomerReviewActionResponse = z.infer<typeof CustomerReviewActionResponseSchema>
 
+// --------------------------- A5 drawing list -------------------------
+
+export const CustomerReviewDrawingListItemSchema = z.object({
+  drawingEntryId: z.string().uuid(),
+  submissionId: z.string().uuid(),
+  dealerId: z.number().int(),
+  siteLabel: z.string(),
+  createdAt: z.string(),
+  starRating: z.number().int().nullable(),
+  reviewTextSnippet: z.string().nullable(),
+  llmVerdict: CustomerReviewLlmVerdictSchema.nullable(),
+  degradedPass: z.boolean().nullable(),
+  acceptedPasteOffer: z.boolean(),
+  drawingSegmentStatus: SegmentStatusSchema.nullable(),
+  drawingSegmentId: z.number().int().nullable(),
+  freePrerollSegmentStatus: SegmentStatusSchema.nullable(),
+  freePrerollSegmentId: z.number().int().nullable(),
+  acknowledged: z.boolean(),
+  acknowledgedAt: z.string().nullable(),
+  acknowledgedBy: z.string().nullable(),
+  acknowledgeWithinUndoWindow: z.boolean(),
+  fraudulent: z.boolean(),
+  fraudulentMarkedAt: z.string().nullable(),
+  fraudulentMarkedBy: z.string().nullable(),
+  contactName: z.string().nullable(),
+  contactEmail: z.string().nullable(),
+  contactPhone: z.string().nullable(),
+})
+export type CustomerReviewDrawingListItem = z.infer<typeof CustomerReviewDrawingListItemSchema>
+
+export const CustomerReviewDrawingListResponseSchema = z.object({
+  items: z.array(CustomerReviewDrawingListItemSchema),
+  filters: z.object({
+    dealerId: z.number().int().nullable(),
+    sinceIso: z.string().nullable(),
+    includeAcked: z.boolean(),
+    includeFraudulent: z.boolean(),
+  }),
+  undoWindowSeconds: z.number().int().positive(),
+  captureEnabled: z.boolean(),
+})
+export type CustomerReviewDrawingListResponse = z.infer<typeof CustomerReviewDrawingListResponseSchema>
+
 // --------------------------- error envelope --------------------------
 
 // Public errors deliberately do NOT echo the customer's payload — we

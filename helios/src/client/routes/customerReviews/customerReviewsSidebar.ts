@@ -6,8 +6,8 @@ import type { TreeNavNode } from '../../components/TreeNav.js'
  * `useRegisterSidebarSubtree('reviews', REVIEWS_SIDEBAR_SUBTREE)`
  * so the same leaves stay visible across the module.
  *
- * A1 ships only the list page. A5 will add the /reviews/drawing
- * exportable list.
+ * A1 shipped the read-only Submissions list. A5 adds the
+ * /reviews/drawing exportable list + acknowledge workflow.
  */
 export const REVIEWS_SIDEBAR_SUBTREE: TreeNavNode[] = [
   {
@@ -15,5 +15,11 @@ export const REVIEWS_SIDEBAR_SUBTREE: TreeNavNode[] = [
     navKey: 'reviews.list',
     label: 'Submissions',
     to: '/reviews',
+  },
+  {
+    kind: 'leaf',
+    navKey: 'reviews.drawing',
+    label: 'Drawing',
+    to: '/reviews/drawing',
   },
 ]

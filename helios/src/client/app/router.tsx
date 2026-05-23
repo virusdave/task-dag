@@ -61,6 +61,10 @@ import {
   CustomerReviewDetailPage,
   customerReviewDetailLoader,
 } from '../routes/customerReviews/CustomerReviewDetailPage.js'
+import {
+  CustomerReviewsDrawingPage,
+  customerReviewsDrawingLoader,
+} from '../routes/customerReviews/CustomerReviewsDrawingPage.js'
 
 async function rootLoader() {
   return loadSession()
@@ -246,6 +250,11 @@ export const router = createBrowserRouter([
         element: <CustomerReviewsListPage />,
         loader: customerReviewsListLoader,
         path: 'reviews',
+      },
+      {
+        element: <CustomerReviewsDrawingPage />,
+        loader: customerReviewsDrawingLoader,
+        path: 'reviews/drawing',
       },
       {
         element: <CustomerReviewDetailPage />,

@@ -296,6 +296,37 @@ export async function acknowledgeDrawingEntry(
   return result.rows.length > 0
 }
 
+// A5: undo a recent acknowledge. Only succeeds if the row was
+// acknowledged within UNACKNOWLEDGE_WINDOW_SECONDS — past that, the
+// operator must mark fraudulent or open a follow-up to reopen the
+// entry, so we don't accidentally re-surface long-acknowledged work.
+export const UNACKNOWLEDGE_WINDOW_SECONDS = 300
+
+export async function unacknowledgeDrawingEntry(
+  db: Queryable,
+  submissionId: string,
+): Promise<{ updated: boolean; reason?: 'not_found' | 'window_expired' }> {
+  const result = await db.query<{ id: string }>(
+    `update review_drawing_entries
+     set acknowledged_at = null,
+         acknowledged_by = null
+     where submission_id = $1
+       and acknowledged_at is not null
+       and acknowledged_at > now() - ($2 || ' seconds')::interval
+     returning id`,
+    [submissionId, String(UNACKNOWLEDGE_WINDOW_SECONDS)],
+  )
+  if (result.rows.length > 0) return { updated: true }
+  // Distinguish "no drawing entry / already cleared" from "ack too old".
+  const probe = await db.query<{ acknowledged_at: Date | null }>(
+    `select acknowledged_at from review_drawing_entries where submission_id = $1`,
+    [submissionId],
+  )
+  if (probe.rows.length === 0) return { updated: false, reason: 'not_found' }
+  if (probe.rows[0]?.acknowledged_at === null) return { updated: false, reason: 'not_found' }
+  return { updated: false, reason: 'window_expired' }
+}
+
 export async function markSubmissionFraudulent(
   db: Queryable,
   submissionId: string,
@@ -664,6 +695,204 @@ export async function listCustomerReviews(
   const totalCount = Number(totalResult.rows[0]?.count ?? items.length)
 
   return { items, totalCount }
+}
+
+// ===================================================================
+// A5 — /reviews/drawing exportable list.
+// ===================================================================
+
+export interface ListDrawingEntriesFilters {
+  dealerId?: number | null
+  sinceIso?: string | null
+  includeAcked?: boolean
+  includeFraudulent?: boolean
+  limit?: number
+}
+
+export interface DrawingListEntry {
+  drawingEntryId: string
+  submissionId: string
+  dealerId: number
+  siteLabel: string
+  createdAt: string
+  starRating: number | null
+  reviewTextSnippet: string | null
+  llmVerdict:
+    | 'strong-with-text'
+    | 'strong-no-text'
+    | 'lukewarm'
+    | 'negative'
+    | 'error'
+    | null
+  degradedPass: boolean | null
+  acceptedPasteOffer: boolean
+  drawingSegmentStatus: SegmentStatus | null
+  drawingSegmentId: number | null
+  freePrerollSegmentStatus: SegmentStatus | null
+  freePrerollSegmentId: number | null
+  acknowledged: boolean
+  acknowledgedAt: string | null
+  acknowledgedBy: string | null
+  acknowledgeWithinUndoWindow: boolean
+  fraudulent: boolean
+  fraudulentMarkedAt: string | null
+  fraudulentMarkedBy: string | null
+  contactName: string | null
+  contactEmail: string | null
+  contactPhone: string | null
+}
+
+const DrawingListRowSchema = z.object({
+  drawing_entry_id: z.string().uuid(),
+  submission_id: z.string().uuid(),
+  dealer_id: z.coerce.number().int(),
+  site_label: z.string(),
+  created_at: z.coerce.date(),
+  star_rating: z.coerce.number().int().nullable(),
+  review_text: z.string().nullable(),
+  llm_verdict: z
+    .enum(['strong-with-text', 'strong-no-text', 'lukewarm', 'negative', 'error'])
+    .nullable(),
+  degraded_pass: z.boolean().nullable(),
+  accepted_paste_offer: z.boolean(),
+  drawing_segment_status: z.enum(['skipped', 'failed', 'added', 'removed']).nullable(),
+  drawing_segment_id: z.coerce.number().int().nullable(),
+  free_preroll_segment_status: z
+    .enum(['skipped', 'failed', 'added', 'removed'])
+    .nullable(),
+  free_preroll_segment_id: z.coerce.number().int().nullable(),
+  acknowledged_at: z.coerce.date().nullable(),
+  acknowledged_by: z.string().nullable(),
+  ack_seconds_ago: z.coerce.number().nullable(),
+  fraudulent: z.boolean(),
+  fraudulent_marked_at: z.coerce.date().nullable(),
+  fraudulent_marked_by: z.string().nullable(),
+})
+
+function summariseReviewText(text: string | null): string | null {
+  if (text === null) return null
+  const trimmed = text.trim()
+  if (trimmed.length === 0) return null
+  return trimmed.length > 140 ? trimmed.slice(0, 137) + '…' : trimmed
+}
+
+export async function listDrawingEntries(
+  db: Queryable,
+  filters: ListDrawingEntriesFilters = {},
+): Promise<DrawingListEntry[]> {
+  const limit = filters.limit ?? 500
+  const conds: string[] = []
+  const params: unknown[] = []
+  if (!filters.includeAcked) conds.push('de.acknowledged_at is null')
+  if (!filters.includeFraudulent) conds.push('de.fraudulent = false')
+  if (filters.dealerId != null) {
+    params.push(filters.dealerId)
+    conds.push(`de.dealer_id = $${params.length}`)
+  }
+  if (filters.sinceIso) {
+    params.push(filters.sinceIso)
+    conds.push(`de.created_at >= $${params.length}::timestamptz`)
+  }
+  params.push(limit)
+  const limitPlaceholder = `$${params.length}`
+  params.push(UNACKNOWLEDGE_WINDOW_SECONDS)
+  const windowPlaceholder = `$${params.length}`
+
+  const whereClause = conds.length > 0 ? `where ${conds.join(' and ')}` : ''
+  const result = await db.query(
+    `select
+        de.id                          as drawing_entry_id,
+        de.submission_id               as submission_id,
+        de.dealer_id                   as dealer_id,
+        coalesce(srs.site_label, ''::text) as site_label,
+        de.created_at                  as created_at,
+        rs.star_rating                 as star_rating,
+        rs.review_text                 as review_text,
+        rs.llm_verdict                 as llm_verdict,
+        rs.degraded_pass               as degraded_pass,
+        de.accepted_paste_offer        as accepted_paste_offer,
+        de.drawing_segment_status      as drawing_segment_status,
+        de.drawing_segment_id          as drawing_segment_id,
+        de.free_preroll_segment_status as free_preroll_segment_status,
+        de.free_preroll_segment_id     as free_preroll_segment_id,
+        de.acknowledged_at             as acknowledged_at,
+        de.acknowledged_by             as acknowledged_by,
+        case
+          when de.acknowledged_at is null then null
+          else extract(epoch from (now() - de.acknowledged_at))
+        end                            as ack_seconds_ago,
+        de.fraudulent                  as fraudulent,
+        de.fraudulent_marked_at        as fraudulent_marked_at,
+        de.fraudulent_marked_by        as fraudulent_marked_by
+      from review_drawing_entries de
+      join review_submissions rs on rs.id = de.submission_id
+      left join site_review_settings srs on srs.dealer_id = de.dealer_id
+      ${whereClause}
+      order by de.created_at desc
+      limit ${limitPlaceholder}::int`,
+    params.slice(0, params.length - 1),
+  )
+
+  const submissionIds = result.rows.map((r) => r.submission_id)
+  const contactsByEmail = new Map<string, string>()
+  const contactsByName = new Map<string, string>()
+  const contactsByPhone = new Map<string, string>()
+  if (submissionIds.length > 0) {
+    const contactRes = await db.query(
+      `select submission_id, contact_kind, contact_value
+       from review_contact_info
+       where submission_id = any($1::uuid[])
+       order by created_at desc`,
+      [submissionIds],
+    )
+    for (const r of contactRes.rows) {
+      const sid = String(r.submission_id)
+      if (r.contact_kind === 'email' && !contactsByEmail.has(sid)) {
+        contactsByEmail.set(sid, String(r.contact_value))
+      } else if (r.contact_kind === 'phone' && !contactsByPhone.has(sid)) {
+        contactsByPhone.set(sid, String(r.contact_value))
+      } else if (r.contact_kind === 'name' && !contactsByName.has(sid)) {
+        contactsByName.set(sid, String(r.contact_value))
+      }
+    }
+  }
+  // Touch the windowPlaceholder so the lint doesn't flag unused; the
+  // ack-window is computed in-SQL above via the absolute constant.
+  void windowPlaceholder
+
+  return result.rows.map((raw) => {
+    const row = DrawingListRowSchema.parse(raw)
+    const ackWithin =
+      row.ack_seconds_ago !== null && row.ack_seconds_ago <= UNACKNOWLEDGE_WINDOW_SECONDS
+    return {
+      drawingEntryId: row.drawing_entry_id,
+      submissionId: row.submission_id,
+      dealerId: row.dealer_id,
+      siteLabel: row.site_label,
+      createdAt: row.created_at.toISOString(),
+      starRating: row.star_rating,
+      reviewTextSnippet: summariseReviewText(row.review_text),
+      llmVerdict: row.llm_verdict,
+      degradedPass: row.degraded_pass,
+      acceptedPasteOffer: row.accepted_paste_offer,
+      drawingSegmentStatus: row.drawing_segment_status,
+      drawingSegmentId: row.drawing_segment_id,
+      freePrerollSegmentStatus: row.free_preroll_segment_status,
+      freePrerollSegmentId: row.free_preroll_segment_id,
+      acknowledged: row.acknowledged_at !== null,
+      acknowledgedAt: row.acknowledged_at ? row.acknowledged_at.toISOString() : null,
+      acknowledgedBy: row.acknowledged_by,
+      acknowledgeWithinUndoWindow: ackWithin,
+      fraudulent: row.fraudulent,
+      fraudulentMarkedAt: row.fraudulent_marked_at
+        ? row.fraudulent_marked_at.toISOString()
+        : null,
+      fraudulentMarkedBy: row.fraudulent_marked_by,
+      contactName: contactsByName.get(row.submission_id) ?? null,
+      contactEmail: contactsByEmail.get(row.submission_id) ?? null,
+      contactPhone: contactsByPhone.get(row.submission_id) ?? null,
+    }
+  })
 }
 
 // ===================================================================
