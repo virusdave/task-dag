@@ -113,6 +113,47 @@ function actionTypeIs(action: { action_type?: unknown }, target: string): boolea
   return action.action_type.trim().toLowerCase() === target;
 }
 
+/**
+ * Build the "disambiguating context" columns Ads Editor needs to
+ * recognise an existing ad on import. Without these, an update row
+ * that carries only "Ad ID, Ad status" trips Editor's "Ambiguous row
+ * type" rejection because Editor can't tell what kind of entity the
+ * row is meant to address.
+ *
+ * Editor's matching: when the row carries enough identifying columns
+ * to pin down exactly one ad in the destination account (Campaign +
+ * Ad group + Ad type + Ad ID), the update applies. We pull all those
+ * values out of the snapshot so the operator never has to hand-fill
+ * them.
+ *
+ * For RSAs we ALSO replay the original Headline 1 / Description 1
+ * because Editor uses content fingerprints as a tiebreaker when the
+ * Ad ID column was elided from a previous Editor session. Including
+ * them is harmless when the Ad ID also matches and it has saved us
+ * from rare "no matching ad" rejections on accounts that lost their
+ * id column at some point.
+ */
+function contextColumnsFor(ad: AdSnapshot): Record<string, string> {
+  const out: Record<string, string> = {
+    Campaign: ad.campaign_name ?? '',
+    'Ad group': ad.ad_group_name ?? '',
+    'Ad type':
+      (ad.ad_type ?? '') === 'responsive_search_ad' ? 'Responsive search ad' : (ad.ad_type ?? ''),
+  };
+  // Replay the first original headline + description as a soft
+  // tiebreaker for Editor's content-match fallback. Limited to
+  // _1 fields so the row doesn't balloon and so the proposed
+  // headlines (Headline 1..15 written elsewhere) stay clearly
+  // visible as the new content.
+  if (ad.headlines && ad.headlines[0]) {
+    out['Original Headline 1'] = ad.headlines[0];
+  }
+  if (ad.descriptions && ad.descriptions[0]) {
+    out['Original Description 1'] = ad.descriptions[0];
+  }
+  return out;
+}
+
 /** Resolve the campaign name for a trial. */
 function resolveTrialCampaign(
   trial: TrialPlan & Record<string, unknown>,
@@ -348,11 +389,18 @@ function generateRepairCSV(l2Output: L2PredictionOutput, ctx: SnapshotIndex): CS
         continue;
       }
 
-      const rowData: Record<string, string> = {
-        'Ad ID': adId,
-        'Ad status': 'Enabled',
-        'Final URL': creative.final_url || knownAd?.final_url || '',
-      };
+      // Lead with the disambiguating context columns Editor needs
+      // to recognise this as an "update existing ad" row instead of
+      // rejecting it as "Ambiguous row type". When the snapshot
+      // doesn't know about this ad (which is the case in
+      // disabled-snapshot manual runs) we fall back to Ad ID only,
+      // which is the prior behaviour.
+      const rowData: Record<string, string> = knownAd
+        ? { ...contextColumnsFor(knownAd) }
+        : {};
+      rowData['Ad ID'] = adId;
+      rowData['Ad status'] = 'Enabled';
+      rowData['Final URL'] = creative.final_url || knownAd?.final_url || '';
       for (let i = 0; i < headlines.length && i < 15; i++) {
         rowData[`Headline ${i + 1}`] = headlines[i];
       }
@@ -488,16 +536,24 @@ function generatePauseCSV(l2Output: L2PredictionOutput, ctx: SnapshotIndex): CSV
         messages.push('pause skipped: empty ad_id');
         continue;
       }
-      if (ctx.byAdId.size > 0 && !ctx.byAdId.has(adId)) {
+      const knownAd = ctx.byAdId.get(adId);
+      if (ctx.byAdId.size > 0 && !knownAd) {
         messages.push(`pause skipped: ad_id "${adId}" not found in snapshot`);
         continue;
       }
+      // Lead with the disambiguating context columns Editor needs to
+      // recognise this as an "update existing ad" row. Without them,
+      // Editor rejects a row that has only "Ad ID, Ad status" with
+      // "Ambiguous row type" because it can't tell which entity kind
+      // (ad / ad group / campaign / keyword …) the row addresses.
+      const rowData: Record<string, string> = knownAd
+        ? { ...contextColumnsFor(knownAd) }
+        : {};
+      rowData['Ad ID'] = adId;
+      rowData['Ad status'] = 'Paused';
       rows.push({
         row_number: rowNumber++,
-        data: {
-          'Ad ID': adId,
-          'Ad status': 'Paused',
-        },
+        data: rowData,
         source_action_id: adId,
         notes: `HIGH RISK PAUSE | Issues: ${(action.issue_codes ?? []).join(', ')} | ${action.justification ?? ''}`,
       });
