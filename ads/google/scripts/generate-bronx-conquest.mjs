@@ -80,6 +80,26 @@ const DESCRIPTIONS_PER_AD = 4; // RSA max.
 const HEADLINE_MAX_LEN = 30;
 const DESCRIPTION_MAX_LEN = 90;
 
+// Keyword targets per ad group. Search campaigns will not serve at
+// all without ≥1 enabled positive keyword per ad group — this is the
+// "you don't have any enabled keywords" failure the operator hit.
+//
+// Strategy:
+//   * a handful of EXACT match for highest-intent queries
+//   * more PHRASE match for mid-intent traffic
+//   * a chunk of NEGATIVE keywords to block obviously-wasted spend
+//     (we deliberately block "free", "synthetic", "k2", "spice"
+//     because clicks from those queries don't convert at a licensed
+//     retailer and burn through the daily budget fast).
+const POSITIVE_EXACT_KEYWORDS_PER_GROUP = 5;
+const POSITIVE_PHRASE_KEYWORDS_PER_GROUP = 12;
+const NEGATIVE_KEYWORDS_PER_GROUP = 10;
+
+// Ad-group-level Max CPC bid (USD). Required because we're on Manual
+// CPC and the keyword rows don't carry per-keyword bids. The operator
+// can re-tune in Editor before enabling the campaign.
+const AD_GROUP_MAX_CPC_USD = '2.00';
+
 // ─── LLM credentials ──────────────────────────────────────────────────────────
 
 function loadMantleToken() {
@@ -138,6 +158,43 @@ Hard constraints you MUST follow on every ad:
   "Lab-tested 25%+ THC". Mark any such headline with the variant
   label "claim" so the operator can edit if needed.
 
+You ALSO generate the keyword list a Search ad group needs to
+actually trigger. Without keywords, none of the ads ever serve. Per
+the operator's request, generate keyword sets sized as follows:
+
+- exactly N positive EXACT-match keywords (highest-intent: the user
+  is searching for the *exact* thing we sell or for a competitor we
+  want to conquest). Examples for this campaign:
+    * "smoke shop bronx"           (conquest)
+    * "weed delivery 10458"        (transactional intent)
+    * "licensed dispensary bronx"  (high-trust intent)
+- exactly M positive PHRASE-match keywords (mid-intent: queries
+  containing our phrase plus modifiers). Examples:
+    * "smoke shop near me"
+    * "where to buy weed bronx"
+    * "fordham cannabis store"
+- exactly K NEGATIVE keywords (block obviously-wasted traffic and
+  policy-risky queries). Examples:
+    * synthetic
+    * k2
+    * spice
+    * free weed
+    * cbd only
+    * jobs
+    * wholesale
+    * medical card
+
+Keyword constraints you MUST follow:
+
+- Each keyword is 1-10 words. Single-word keywords like "weed" or
+  "cannabis" alone are too broad and forbidden.
+- No quotes, brackets, plus signs, or other match-type symbols in
+  the keyword text itself. Match type is a separate field.
+- Lowercase. No punctuation. No emojis.
+- Keep keywords RELEVANT to a brick-and-mortar / delivery cannabis
+  retailer in 10458 conquesting recently-raided unlicensed smoke
+  shop foot traffic. Don't drift into unrelated topics.
+
 Output format: a single JSON object with this exact shape (no
 markdown, no commentary, no extra keys):
 
@@ -150,14 +207,20 @@ markdown, no commentary, no extra keys):
       "descriptions": ["...", "...", "...", "..."]  // exactly 4 strings, each <= 90 chars
     },
     ...
-  ]
+  ],
+  "keywords": {
+    "exact":    ["...", "...", ...],   // exactly N strings
+    "phrase":   ["...", "...", ...],   // exactly M strings
+    "negative": ["...", "...", ...]    // exactly K strings
+  }
 }
 
-You will be asked for a specific number of ads. Each ad should
-pursue a DIFFERENT angle (raid conquest, licensed-vs-illegal trust,
-neighborhood proximity to 10458, pricing/value, potency/lab-tested,
-selection breadth, hours/convenience, loyalty/regulars). Do not
-duplicate angles.`;
+You will be asked for a specific number of ads and a specific
+keyword set size. Each ad should pursue a DIFFERENT angle (raid
+conquest, licensed-vs-illegal trust, neighborhood proximity to
+10458, pricing/value, potency/lab-tested, selection breadth,
+hours/convenience, loyalty/regulars). Do not duplicate angles, and
+do not duplicate keywords across the exact / phrase lists.`;
 
 function buildUserPrompt() {
   return `Generate exactly ${TARGET_AD_COUNT} Responsive Search Ads for a
@@ -189,6 +252,20 @@ Each of the ${TARGET_AD_COUNT} ads should pursue a distinct angle
 from the list in the system prompt. Within each ad, vary headline
 lengths, calls to action, and proof points so Google's RSA engine
 has real diversity to mix.
+
+For the keyword set, populate the JSON \`keywords\` object as:
+
+  exact:    N = ${POSITIVE_EXACT_KEYWORDS_PER_GROUP} keywords
+  phrase:   M = ${POSITIVE_PHRASE_KEYWORDS_PER_GROUP} keywords
+  negative: K = ${NEGATIVE_KEYWORDS_PER_GROUP} keywords
+
+The same keyword set will be used in every ad group across all ${Math.ceil(TARGET_AD_COUNT / MAX_ADS_PER_CAMPAIGN)}
+campaigns (because they all share the same conquest theme and same
+zip-${TARGET_ZIP} geo target). Maximize relevance: every keyword
+should plausibly come from a Bronx 10458 user looking for a
+licensed cannabis retailer or who is about to lose their unlicensed
+smoke shop. Avoid generic "weed" / "cannabis" single words; favor
+multi-word, location-tied or transaction-tied queries.
 
 Return ONLY the JSON object specified in the system prompt.`;
 }
@@ -284,6 +361,83 @@ function validateAd(ad, idx) {
   };
 }
 
+/**
+ * Normalize one keyword string. Returns null if the keyword is
+ * unusable (empty / too long / has match-type symbols / single word
+ * that is too generic).
+ *
+ * "single word too generic" rule: the LLM is told to avoid bare
+ * "weed" / "cannabis" / "dispensary" because they're way too broad
+ * for a 10458-only campaign. We enforce that here so a sloppy LLM
+ * response can't sneak them through.
+ */
+const TOO_GENERIC_SINGLE_WORDS = new Set([
+  'weed', 'cannabis', 'marijuana', 'dispensary', 'shop', 'flower',
+  'smoke', 'edibles', 'vape', 'thc', 'cbd', 'bud',
+]);
+
+function normalizeKeyword(raw) {
+  if (typeof raw !== 'string') return null;
+  // Strip any match-type symbols the LLM might have included
+  // despite instructions ("[exact]", "\"phrase\"", "+modified").
+  let s = raw.trim().replace(/^["[+]+|["\]+]+$/g, '').trim();
+  s = s.replace(/[",[\]]/g, '').trim();
+  s = s.toLowerCase();
+  if (!s) return null;
+  // Keyword length cap per Google: 80 characters or 10 words.
+  if (s.length > 80) return null;
+  const words = s.split(/\s+/).filter(Boolean);
+  if (words.length === 0 || words.length > 10) return null;
+  if (words.length === 1 && TOO_GENERIC_SINGLE_WORDS.has(words[0])) return null;
+  return s;
+}
+
+function validateKeywords(rawKeywords) {
+  const errs = [];
+  const buckets = { exact: [], phrase: [], negative: [] };
+  const seenAcrossPositive = new Set();
+
+  for (const matchType of ['exact', 'phrase', 'negative']) {
+    const list = Array.isArray(rawKeywords?.[matchType]) ? rawKeywords[matchType] : [];
+    for (const raw of list) {
+      const k = normalizeKeyword(raw);
+      if (!k) continue;
+      if (matchType !== 'negative') {
+        // Reject duplicates that appear in both exact and phrase.
+        if (seenAcrossPositive.has(k)) continue;
+        seenAcrossPositive.add(k);
+      }
+      buckets[matchType].push(k);
+    }
+  }
+
+  // Operator's hard requirement: at least one positive keyword,
+  // else the campaign serves nothing.
+  if (buckets.exact.length + buckets.phrase.length === 0) {
+    errs.push(
+      'KEYWORDS: LLM produced zero usable positive keywords — campaign would not serve.',
+    );
+  }
+  // Soft warnings for "less than requested".
+  if (buckets.exact.length < POSITIVE_EXACT_KEYWORDS_PER_GROUP) {
+    errs.push(
+      `KEYWORDS: only ${buckets.exact.length} exact-match keywords kept (asked for ${POSITIVE_EXACT_KEYWORDS_PER_GROUP}).`,
+    );
+  }
+  if (buckets.phrase.length < POSITIVE_PHRASE_KEYWORDS_PER_GROUP) {
+    errs.push(
+      `KEYWORDS: only ${buckets.phrase.length} phrase-match keywords kept (asked for ${POSITIVE_PHRASE_KEYWORDS_PER_GROUP}).`,
+    );
+  }
+  if (buckets.negative.length < NEGATIVE_KEYWORDS_PER_GROUP) {
+    errs.push(
+      `KEYWORDS: only ${buckets.negative.length} negative keywords kept (asked for ${NEGATIVE_KEYWORDS_PER_GROUP}).`,
+    );
+  }
+
+  return { keywords: buckets, warnings: errs };
+}
+
 // ─── CSV emission ─────────────────────────────────────────────────────────────
 
 function csvEscape(v) {
@@ -325,7 +479,7 @@ function csvEscape(v) {
  *   exports using exactly "Ad Group").
  */
 
-function buildCsvFiles(ads) {
+function buildCsvFiles(ads, keywords) {
   // Operator rule: no more than MAX_ADS_PER_CAMPAIGN RSAs per
   // campaign. Chunk the ads into N campaigns, each with its own
   // skeleton (campaign row + ad group row + location row).
@@ -333,6 +487,16 @@ function buildCsvFiles(ads) {
   const campaignCount = chunks.length;
 
   // ── File 1: campaign skeletons (all N campaigns + ad groups + location) ────
+  // Status convention (per oracle audit):
+  //   * Campaign  = Paused  (operator flips ONE switch to launch)
+  //   * Ad Group  = Enabled (carries Max CPC bid for Manual CPC)
+  //   * Keywords  = Enabled (in keywords CSV)
+  //   * Ads       = Enabled (in ads CSV)
+  // That way "operator enables campaign" is the entire launch action.
+  //
+  // Max CPC on the ad-group row gives every keyword in that group a
+  // bid source under Manual CPC. Without this, eligible keywords
+  // still don't enter auctions.
   const skeletonColumns = [
     'Campaign',
     'Ad Group',
@@ -344,6 +508,7 @@ function buildCsvFiles(ads) {
     'Networks',
     'Languages',
     'Location',
+    'Max CPC',
     'Comment',
   ];
   const skeletonRows = [];
@@ -358,14 +523,17 @@ function buildCsvFiles(ads) {
       'Budget type': 'Daily',
       'Bid Strategy Type': 'Manual CPC',
       Networks: 'Google search',
-      Languages: 'English',
+      // ISO-639-1 'en' is what Ads Editor accepts; 'English' is
+      // not always resolved in CSV import.
+      Languages: 'en',
       Comment: `Conquest campaign ${ci + 1} of ${campaignCount} (max ${MAX_ADS_PER_CAMPAIGN} RSAs/campaign).`,
     });
     skeletonRows.push({
       Campaign: campaign,
       'Ad Group': adGroup,
       Status: 'Enabled',
-      Comment: `Holds ${chunks[ci].length} RSA variant${chunks[ci].length === 1 ? '' : 's'} for campaign ${campaign}.`,
+      'Max CPC': AD_GROUP_MAX_CPC_USD,
+      Comment: `Holds ${chunks[ci].length} RSA variant${chunks[ci].length === 1 ? '' : 's'} for campaign ${campaign}. Max CPC = $${AD_GROUP_MAX_CPC_USD}.`,
     });
     skeletonRows.push({
       Campaign: campaign,
@@ -374,9 +542,38 @@ function buildCsvFiles(ads) {
     });
   }
 
-  // ── File 2: ads (RSAs only, spread across the N campaigns) ───────────────
-  // Uniform schema, one row per ad. Status = Paused so the operator
-  // can verify in Editor before they go live. Headlines/Descriptions
+  // ── File 2: keywords (positive + negative, per ad group) ─────────────────
+  // The "you don't have any enabled keywords" bug was caused by
+  // omitting this file entirely. Every Search ad group needs ≥1
+  // enabled positive keyword to serve. We attach the same keyword
+  // set to every ad group across all campaigns because they all
+  // share the same conquest theme.
+  const keywordColumns = ['Campaign', 'Ad Group', 'Keyword', 'Match Type', 'Status'];
+  const keywordRows = [];
+  for (let ci = 0; ci < campaignCount; ci++) {
+    const campaign = campaignNameFor(ci);
+    const adGroup = adGroupNameFor(ci);
+    const pushKw = (text, matchType) => {
+      keywordRows.push({
+        Campaign: campaign,
+        'Ad Group': adGroup,
+        Keyword: text,
+        // "Match Type" values Ads Editor accepts: Exact, Phrase,
+        // Broad. Negatives use 'Negative exact' or 'Negative phrase';
+        // we use 'Negative phrase' for ad-group-level negatives so
+        // the broad coverage of phrase blocking applies.
+        'Match Type': matchType,
+        Status: 'Enabled',
+      });
+    };
+    for (const k of keywords.exact) pushKw(k, 'Exact');
+    for (const k of keywords.phrase) pushKw(k, 'Phrase');
+    for (const k of keywords.negative) pushKw(k, 'Negative phrase');
+  }
+
+  // ── File 3: ads (RSAs only, spread across the N campaigns) ───────────────
+  // Uniform schema, one row per ad. Status = Enabled (the operator
+  // only needs to flip the parent campaign). Headlines/Descriptions
   // use Editor's documented "Headline N" / "Description N" naming;
   // unused columns are dropped below.
   const adColumns = [
@@ -399,7 +596,7 @@ function buildCsvFiles(ads) {
         Campaign: campaign,
         'Ad Group': adGroup,
         'Ad Type': 'Responsive search ad',
-        Status: 'Paused',
+        Status: 'Enabled',
         'Final URL': FINAL_URL,
         'Path 1': '',
         'Path 2': '',
@@ -435,10 +632,16 @@ function buildCsvFiles(ads) {
 
   return {
     skeleton: renderCsv(skeletonColumns, skeletonRows),
+    keywords: renderCsv(keywordColumns, keywordRows),
     ads: renderCsv(adColumns, adRows),
     notes: renderCsv(noteColumns, noteRows),
     campaignCount,
     chunks,
+    keywordCounts: {
+      exact: keywords.exact.length,
+      phrase: keywords.phrase.length,
+      negative: keywords.negative.length,
+    },
   };
 }
 
@@ -474,8 +677,11 @@ function buildHTML({ ads, csvs, generatedAt, warnings }) {
   // base64 each CSV so the download buttons work on a phone without
   // any server-side endpoint.
   const skeletonB64 = Buffer.from(csvs.skeleton, 'utf-8').toString('base64');
+  const keywordsB64 = Buffer.from(csvs.keywords, 'utf-8').toString('base64');
   const adsB64 = Buffer.from(csvs.ads, 'utf-8').toString('base64');
   const notesB64 = Buffer.from(csvs.notes, 'utf-8').toString('base64');
+  const kwTotal = csvs.keywordCounts.exact + csvs.keywordCounts.phrase;
+  const kwNegTotal = csvs.keywordCounts.negative;
   // Show ads grouped by their assigned campaign so the operator can
   // see at a glance which RSA lands in which campaign.
   const adBlocks = csvs.chunks.map((chunk, ci) => `
@@ -544,35 +750,45 @@ function buildHTML({ ads, csvs, generatedAt, warnings }) {
       <dt>Geo target</dt><dd>Zip ${TARGET_ZIP} (${escapeHtml(TARGET_NEIGHBORHOOD)}) — applied to every campaign</dd>
       <dt>Landing page</dt><dd><a href="${escapeHtml(FINAL_URL)}">${escapeHtml(FINAL_URL)}</a></dd>
       <dt>Ad count</dt><dd>${ads.length} RSAs total (each ≥${RSA_MIN_HEADLINES} headlines, ≥${RSA_MIN_DESCRIPTIONS} descriptions)</dd>
-      <dt>Initial state</dt><dd>Campaigns + ads imported <strong>Paused</strong> so you can review in Ads Editor before posting changes.</dd>
+      <dt>Keywords (per ad group)</dt><dd>${csvs.keywordCounts.exact} exact + ${csvs.keywordCounts.phrase} phrase = ${kwTotal} positive, plus ${kwNegTotal} negative</dd>
+      <dt>Ad-group Max CPC</dt><dd>$${AD_GROUP_MAX_CPC_USD} (Manual CPC bid; edit in Editor)</dd>
+      <dt>Initial state</dt><dd>Campaigns imported <strong>Paused</strong>; ad groups, keywords, and ads are all <strong>Enabled</strong>. To launch, you only need to flip each campaign to Enabled.</dd>
       <dt>Initial budget</dt><dd>$${PER_CAMPAIGN_DAILY_BUDGET_USD}/day <em>per campaign</em> (edit in Ads Editor before enabling)</dd>
     </dl>
     <a class="download" download="01-${CAMPAIGN_BASE_NAME}-skeleton.csv"
        href="data:text/csv;base64,${skeletonB64}">⬇ 01 — ${csvs.campaignCount} Campaigns + Ad Groups + Locations (${(csvs.skeleton.length / 1024).toFixed(1)} KB)</a>
-    <a class="download" download="02-${CAMPAIGN_BASE_NAME}-ads.csv"
-       href="data:text/csv;base64,${adsB64}">⬇ 02 — ${ads.length} RSAs (${(csvs.ads.length / 1024).toFixed(1)} KB)</a>
-    <a class="download" download="03-${CAMPAIGN_BASE_NAME}-ad-notes.csv"
-       href="data:text/csv;base64,${notesB64}">⬇ 03 — Ad labels &amp; angles (reference only, ${(csvs.notes.length / 1024).toFixed(1)} KB)</a>
+    <a class="download" download="02-${CAMPAIGN_BASE_NAME}-keywords.csv"
+       href="data:text/csv;base64,${keywordsB64}">⬇ 02 — Keywords (${kwTotal} positive + ${kwNegTotal} negative per ad group, ${(csvs.keywords.length / 1024).toFixed(1)} KB)</a>
+    <a class="download" download="03-${CAMPAIGN_BASE_NAME}-ads.csv"
+       href="data:text/csv;base64,${adsB64}">⬇ 03 — ${ads.length} RSAs (${(csvs.ads.length / 1024).toFixed(1)} KB)</a>
+    <a class="download" download="04-${CAMPAIGN_BASE_NAME}-ad-notes.csv"
+       href="data:text/csv;base64,${notesB64}">⬇ 04 — Ad labels &amp; angles (reference only, ${(csvs.notes.length / 1024).toFixed(1)} KB)</a>
   </div>
 
   <div class="instructions">
     <h3 style="margin-top:0">How to use this in Ads Editor</h3>
-    <p><strong>Import the two CSVs in order. Skip the third — it's reference only.</strong></p>
+    <p><strong>Import files 01, 02, 03 in order. Skip 04 — it's reference only.</strong></p>
     <ol>
-      <li>Download <code>01-${CAMPAIGN_BASE_NAME}-skeleton.csv</code> and <code>02-${CAMPAIGN_BASE_NAME}-ads.csv</code>.</li>
+      <li>Download all three importable CSVs (01-skeleton, 02-keywords, 03-ads).</li>
       <li>In Google Ads Editor: <strong>Account → Import → From file…</strong> and pick file 01 first.</li>
       <li>Review &amp; post: this creates ${csvs.campaignCount} Paused campaigns
           (<code>${csvs.chunks.map((_, i) => campaignNameFor(i)).join('</code>, <code>')}</code>),
-          one ad group per campaign, and the 10458 location target on each.</li>
-      <li>Import file 02 next: this creates ${ads.length} Paused RSAs spread
-          across the ${csvs.campaignCount} ad groups (max ${MAX_ADS_PER_CAMPAIGN} per campaign).</li>
-      <li>Verify budget &amp; targeting on each campaign, then toggle to Enabled when ready.</li>
+          one ad group per campaign (Enabled, Max CPC $${AD_GROUP_MAX_CPC_USD}), and the 10458 location target on each.</li>
+      <li>Import file 02: this creates ${kwTotal} Enabled positive keywords + ${kwNegTotal} negatives in every ad group. <strong>Without this file the campaign serves nothing.</strong></li>
+      <li>Import file 03: this creates ${ads.length} Enabled RSAs spread across the ${csvs.campaignCount} ad groups (max ${MAX_ADS_PER_CAMPAIGN} per campaign).</li>
+      <li>Verify budget &amp; targeting on each campaign, then flip each campaign from Paused → Enabled to launch.</li>
     </ol>
-    <p>The split into ${csvs.campaignCount} campaigns honors the operator rule of
-       ≤${MAX_ADS_PER_CAMPAIGN} RSAs per campaign. The per-entity CSV split (skeleton
-       vs ads) avoids the "your ad group contains no ads" failure from earlier
-       bundles, which was caused by mixing entity types in one CSV with bespoke
-       per-entity status columns Ads Editor didn't recognize.</p>
+    <p><strong>Eligibility checklist (per oracle audit):</strong>
+       ✓ Campaign Type=Search, Budget&gt;0, Bid Strategy=Manual CPC, Networks=Google search, Languages=en;
+       ✓ Ad Group Status=Enabled, Max CPC=$${AD_GROUP_MAX_CPC_USD};
+       ✓ ≥1 enabled positive keyword per ad group (we have ${kwTotal});
+       ✓ ≥1 enabled RSA per ad group (each meets the 3-headline / 2-description RSA minima);
+       ✓ Final URL set on every ad;
+       ✓ Location targeting via zip ${TARGET_ZIP}.</p>
+    <p><em>Note (also per oracle):</em> Google policy classifies recreational cannabis sales
+       as a restricted vertical that may not be eligible to serve on Google Search even with
+       a perfectly-structured campaign. If the campaigns import cleanly but stay
+       <code>Eligible (limited)</code> or get disapproved, that is a policy issue, not a CSV issue.</p>
   </div>
 
   ${warnings.length === 0 ? '' : `
@@ -587,9 +803,11 @@ function buildHTML({ ads, csvs, generatedAt, warnings }) {
   <h2>Raw CSV previews</h2>
   <h3>01 — Campaign skeleton</h3>
   <pre class="csv">${escapeHtml(csvs.skeleton)}</pre>
-  <h3>02 — Ads (RSAs)</h3>
+  <h3>02 — Keywords</h3>
+  <pre class="csv">${escapeHtml(csvs.keywords)}</pre>
+  <h3>03 — Ads (RSAs)</h3>
   <pre class="csv">${escapeHtml(csvs.ads)}</pre>
-  <h3>03 — Ad notes (reference)</h3>
+  <h3>04 — Ad notes (reference)</h3>
   <pre class="csv">${escapeHtml(csvs.notes)}</pre>
 </body>
 </html>
@@ -643,15 +861,33 @@ async function main() {
 
   const validated = adsIn.map((a, i) => validateAd(a, i));
   const goodAds = validated.filter((a) => a.errors.length === 0);
-  const warnings = validated.flatMap((a) => a.errors);
+  const adWarnings = validated.flatMap((a) => a.errors);
 
   if (goodAds.length === 0) {
-    throw new Error(`No valid ads after RSA-minima filter. Warnings:\n  - ${warnings.join('\n  - ')}`);
+    throw new Error(`No valid ads after RSA-minima filter. Warnings:\n  - ${adWarnings.join('\n  - ')}`);
   }
 
-  console.log(`[bronx-conquest] LLM returned ${adsIn.length} ads; ${goodAds.length} valid, ${warnings.length} warning(s)`);
+  const { keywords, warnings: kwWarnings } = validateKeywords(parsed?.keywords);
+  const warnings = [...adWarnings, ...kwWarnings];
 
-  const csvs = buildCsvFiles(goodAds);
+  // Hard guard: refuse to emit a bundle the operator would have to
+  // come back and re-fix. If the LLM produced no positive keywords,
+  // the campaign cannot serve, so we fail loudly rather than ship a
+  // CSV that would re-create the "no enabled keywords" complaint.
+  if (keywords.exact.length + keywords.phrase.length === 0) {
+    throw new Error(
+      `Generator refuses to emit a bundle with zero positive keywords (would not serve).\n` +
+        `LLM keyword response:\n${JSON.stringify(parsed?.keywords, null, 2)}`,
+    );
+  }
+
+  console.log(
+    `[bronx-conquest] LLM returned ${adsIn.length} ads; ${goodAds.length} valid; ` +
+      `keywords: ${keywords.exact.length} exact + ${keywords.phrase.length} phrase + ${keywords.negative.length} negative; ` +
+      `${warnings.length} warning(s)`,
+  );
+
+  const csvs = buildCsvFiles(goodAds, keywords);
   const html = buildHTML({
     ads: goodAds,
     csvs,
@@ -660,21 +896,24 @@ async function main() {
   });
 
   const skeletonPath = path.join(outDir, `${stamp}-01-${CAMPAIGN_BASE_NAME}-skeleton.csv`);
-  const adsPath = path.join(outDir, `${stamp}-02-${CAMPAIGN_BASE_NAME}-ads.csv`);
-  const notesPath = path.join(outDir, `${stamp}-03-${CAMPAIGN_BASE_NAME}-ad-notes.csv`);
+  const keywordsPath = path.join(outDir, `${stamp}-02-${CAMPAIGN_BASE_NAME}-keywords.csv`);
+  const adsPath = path.join(outDir, `${stamp}-03-${CAMPAIGN_BASE_NAME}-ads.csv`);
+  const notesPath = path.join(outDir, `${stamp}-04-${CAMPAIGN_BASE_NAME}-ad-notes.csv`);
   const htmlPath = path.join(outDir, `${stamp}-${CAMPAIGN_BASE_NAME}.html`);
   const jsonPath = path.join(outDir, `${stamp}-${CAMPAIGN_BASE_NAME}.json`);
 
   await fs.writeFile(skeletonPath, csvs.skeleton);
+  await fs.writeFile(keywordsPath, csvs.keywords);
   await fs.writeFile(adsPath, csvs.ads);
   await fs.writeFile(notesPath, csvs.notes);
   await fs.writeFile(htmlPath, html);
-  await fs.writeFile(jsonPath, JSON.stringify({ ads: goodAds, warnings, raw: parsed }, null, 2));
+  await fs.writeFile(jsonPath, JSON.stringify({ ads: goodAds, keywords, warnings, raw: parsed }, null, 2));
 
   console.log('\n✅ Done.');
   console.log(`  CSV 01 (skeleton): ${skeletonPath}`);
-  console.log(`  CSV 02 (ads):      ${adsPath}`);
-  console.log(`  CSV 03 (notes):    ${notesPath}`);
+  console.log(`  CSV 02 (keywords): ${keywordsPath}`);
+  console.log(`  CSV 03 (ads):      ${adsPath}`);
+  console.log(`  CSV 04 (notes):    ${notesPath}`);
   console.log(`  HTML:              ${htmlPath}`);
   console.log(`  JSON:              ${jsonPath}`);
   if (warnings.length > 0) {
