@@ -1,21 +1,67 @@
 # Agent instructions for the `automation` repo
 
-## Never SSH to the machine you're running on
+## NEVER self-SSH. Run commands directly on the host you're already on.
 
-Do **not** SSH from a host back into itself to execute commands, unless
-there is an explicitly approved reason to do so (e.g. the operator has
-told you to, or a documented procedure in this repo calls for it). If
-you need to run something on this machine, run it directly — SSHing to
-`$(hostname)` adds auth complexity, can mask permissions / environment
-issues, and is almost always a sign the wrong execution context is
-being used.
+**You are almost always running directly on `vps-nixos-3` (the helios
+production host).** That means **almost every command an operator would
+naively prefix with `ssh vps-nixos-3 …` should be run with NO `ssh`
+prefix at all.** Run it as a plain local shell command.
+
+**Do NOT** do this:
+
+```sh
+# WRONG — self-SSH back into the machine you're already running on.
+ssh vps-nixos-3 'sudo -n /nix/store/…/systemctl restart helios-prep.service …'
+ssh vps-nixos-3 'systemctl status helios-server'
+ssh vps-nixos-3 'date'
+```
+
+**DO** this:
+
+```sh
+# RIGHT — execute locally; you are already on vps-nixos-3.
+sudo -n /nix/store/…/systemctl restart helios-prep.service helios-server.service helios-worker.service
+systemctl status helios-server
+date
+```
+
+Self-SSHing not only adds auth complexity, masks env/permission issues,
+and triggers banner / rate-limit weirdness — it also frequently **hangs
+or times out for many minutes** and burns your turn before you've made
+any actual progress. If you find yourself reaching for `ssh
+vps-nixos-3` while running on vps-nixos-3, stop and run the bare
+command instead.
+
+Verify which host you're on with `hostname` before you go any further;
+if it prints `vps-nixos-3`, there is no SSH involved in anything you
+need to do, including deploys, `systemctl` calls, `nix-shell` /
+`nix run` invocations, log tails, `journalctl`, file reads under
+`/var/lib/helios/…`, etc. Run them directly.
+
+### If you genuinely need SSH to a DIFFERENT host: port 22223, not 22
+
+The only legitimate use of `ssh` in agent workflows is reaching a
+**different** machine — and in that case our hosts listen on **port
+22223**, not the default 22. Always pass `-p 22223` (or rely on a
+matching `~/.ssh/config` `Host` entry that already sets `Port 22223`).
+A bare `ssh host …` against port 22 will hang on a deliberately noisy
+banner and waste your turn.
+
+```sh
+# RIGHT — ssh to a *different* host, explicit port.
+ssh -p 22223 some-other-host 'date'
+```
+
+If you are uncertain whether you need SSH at all, the answer is almost
+certainly "no, run it directly here."
 
 ## Deploying changes (helios on vps-nixos-3)
 
-After `git push origin HEAD:master`, redeploy helios with:
+You are running on `vps-nixos-3`. After `git push origin HEAD:master`,
+redeploy helios by running systemctl **directly, locally** — no SSH:
 
 ```sh
-ssh vps-nixos-3 'sudo -n /nix/store/9rpism89x6lyjcwzzkp6kana25rs03nn-systemd-260.1/bin/systemctl restart helios-prep.service helios-server.service helios-worker.service'
+sudo -n /nix/store/9rpism89x6lyjcwzzkp6kana25rs03nn-systemd-260.1/bin/systemctl restart helios-prep.service helios-server.service helios-worker.service
 ```
 
 `helios-prep` fetches/builds master into `/var/lib/helios/automation/`,
@@ -27,6 +73,20 @@ The `/nix/store/.../systemctl` path is what sudo NOPASSWD whitelists
 for the `amp-local` user; bare `systemctl` requires a password.
 Re-resolve the current path on the host with `sudo -nl` whenever a
 new system closure may have changed it.
+
+To verify the restart landed, again **run locally** rather than
+SSHing:
+
+```sh
+systemctl is-active helios-prep.service helios-server.service helios-worker.service
+journalctl -u helios-prep.service -n 50 --no-pager
+curl -sSI http://127.0.0.1:<helios-port>/healthzz   # or via the public URL
+```
+
+Use `nix-shell` / `nix run` / `nix develop` directly in the local
+shell if a deploy or verification command needs a tool that isn't on
+the default `$PATH`. Do **not** wrap any of that in `ssh
+vps-nixos-3 '…'`.
 
 ## MANDATORY: develop in an ephemeral checkout, not the shared `~/src` tree
 
