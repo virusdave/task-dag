@@ -509,6 +509,16 @@ function buildCsvFiles(ads, keywords) {
     'Languages',
     'Location',
     'Max CPC',
+    // Required on every new campaign since Sep 2025 (EU Political Ads
+    // Regulation 2024/900). Without an explicit declaration, the Google
+    // Ads API rejects mutate calls with FieldError.REQUIRED and the UI
+    // surfaces "missing EU political ads declaration" warnings. We are
+    // a NY cannabis retailer with zero EU political intent, so this is
+    // always `false` for every campaign this generator emits. Editor
+    // matches column headers case/space-insensitively, so 'EU political
+    // ads' is the same as 'eupoliticalads'.
+    // Ref: https://developers.google.com/google-ads/api/docs/api-policy/eu-par
+    'EU political ads',
     'Comment',
   ];
   const skeletonRows = [];
@@ -535,7 +545,8 @@ function buildCsvFiles(ads, keywords) {
       // ISO-639-1 'en' is what Ads Editor accepts; 'English' is
       // not always resolved in CSV import.
       Languages: 'en',
-      Comment: `Conquest campaign ${ci + 1} of ${campaignCount} (max ${MAX_ADS_PER_CAMPAIGN} RSAs/campaign).`,
+      'EU political ads': 'false',
+      Comment: `Conquest campaign ${ci + 1} of ${campaignCount} (max ${MAX_ADS_PER_CAMPAIGN} RSAs/campaign). EU political ads = false (NY cannabis retailer, no EU political intent).`,
     });
     skeletonRows.push({
       Campaign: campaign,

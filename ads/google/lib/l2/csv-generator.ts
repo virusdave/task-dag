@@ -374,6 +374,14 @@ function generateTrialGroupsCSV(
           'Ad group status': 'Enabled',
           'Default max. CPC': '1.00',
           'Campaign daily budget': budget.toFixed(2),
+          // EU Political Ads Regulation 2024/900 declaration.
+          // Required on every new campaign since Sep 2025; without it
+          // the Google Ads API rejects mutate calls with
+          // FieldError.REQUIRED. We're a NY cannabis retailer with no
+          // EU political intent, so `false` is correct for every
+          // trial campaign this pipeline ever creates.
+          // Ref: https://developers.google.com/google-ads/api/docs/api-policy/eu-par
+          'EU political ads': 'false',
         },
         source_trial_id: typeof t.trial_id === 'string' ? t.trial_id : groupName,
       });
