@@ -2,18 +2,30 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Outlet, useLoaderData, useLocation, useNavigate } from 'react-router-dom'
 
 import {
-  HELIOS_MODULES,
   buildHeliosModulePath,
+  getHeliosModuleDefinition,
   type HeliosModuleCode,
   type SessionEnvelope,
 } from '../../shared/contracts/index.js'
 import { buildAppPath } from '../app/paths.js'
+import { buildCatalogSidebarSubtree } from '../routes/catalog/catalogSidebarSubtree.js'
+import { buildCommunicationsSidebarSubtree } from '../routes/communications/communicationsSidebar.js'
+import { buildConfigSidebarSubtree } from '../routes/config/configSidebarSubtree.js'
+import { REVIEWS_SIDEBAR_SUBTREE } from '../routes/customerReviews/customerReviewsSidebar.js'
+import { SCHEDULING_SIDEBAR_SUBTREE } from '../routes/scheduling/schedulingSidebar.js'
+import { SCREENS_SIDEBAR_SUBTREE } from '../routes/screens/screensSidebar.js'
+import { TASKS_SIDEBAR_SUBTREE } from '../routes/tasks/tasksSidebar.js'
+import { UTILITIES_SIDEBAR_SUBTREE } from '../routes/utilities/utilitiesSidebar.js'
 import { Pill } from './Pill.js'
 import { SidebarNavProvider, useSidebarNav } from './SidebarNavContext.js'
 import { TreeNav, type TreeNavNode } from './TreeNav.js'
 
 const SIDEBAR_COLLAPSED_STORAGE_KEY = 'helios.sidebar.collapsed'
-const SIDEBAR_TREE_STORAGE_KEY = 'helios.sidebar.tree'
+// Bumped to .v2 when we switched from "branches are empty until you visit
+// their page" to "every branch shows its full subtree on first load, all
+// top-level branches open by default" so existing operators don't keep
+// their stale collapsed/empty state.
+const SIDEBAR_TREE_STORAGE_KEY = 'helios.sidebar.tree.v2'
 const MOBILE_BREAKPOINT_QUERY = '(max-width: 960px)'
 
 function isAnyModalOpen(): boolean {
@@ -35,57 +47,116 @@ function isAnyModalOpen(): boolean {
   return false
 }
 
+/**
+ * Canonical static subtrees per module. Rendered by the AppShell on
+ * first load so every operator sees the FULL Helios IA from the start —
+ * not just the bare module labels of whichever route they haven't
+ * mounted yet. Individual pages may still override their module's
+ * subtree via `useRegisterSidebarSubtree(...)` (see
+ * SidebarNavContext.tsx); overrides go through `subtreesByModule` and
+ * win over the static default.
+ *
+ * `crm` is intentionally absent: it's marked rolloutStatus='planned' in
+ * HELIOS_MODULES and has no real subroutes yet, so it renders as a leaf
+ * (see `buildPrimarySidebarNodes` below) instead of a branch with no
+ * children.
+ *
+ * `pricing` is intentionally absent: its routes are surfaced under the
+ * Catalog branch's Pricing sub-branch (see catalogSidebarSubtree.ts),
+ * not as a top-level module.
+ */
+const STATIC_MODULE_SUBTREES: Partial<Record<HeliosModuleCode, TreeNavNode[]>> = {
+  communications: buildCommunicationsSidebarSubtree(),
+  catalog: buildCatalogSidebarSubtree(),
+  screens: SCREENS_SIDEBAR_SUBTREE,
+  scheduling: SCHEDULING_SIDEBAR_SUBTREE,
+  reviews: REVIEWS_SIDEBAR_SUBTREE,
+  utilities: UTILITIES_SIDEBAR_SUBTREE,
+  config: buildConfigSidebarSubtree(),
+}
+
+/**
+ * Explicit primary-sidebar IA. We deliberately do NOT derive this from
+ * `HELIOS_MODULES` order — that array is domain metadata and can't
+ * represent Dashboard / Tasks / Jobs / Audit history, nor the
+ * intentional ordering (workflow-first, ops next, meta last).
+ *
+ * Order:
+ *   1. Dashboard           — the index page; gives reviewers an at-a-glance home.
+ *   2. Ads (communications)— daily ads workflow (Drive ingest, cluster proposals, packet review).
+ *   3. Catalog             — primary catalog mirroring + reviewer queue (includes Pricing as sub-branch).
+ *   4. Screens             — banner refresh / fallback clone / promo rebind jobs.
+ *   5. Scheduling          — employee scheduling runs.
+ *   6. Reviews             — customer-sentiment capture (issue #13).
+ *   7. Utilities           — cross-cutting one-offs (Staff editorial, etc.).
+ *   8. Jobs                — cross-module job queue.
+ *   9. Audit history       — cross-module audit timeline.
+ *  10. Tasks               — Git-DAG epic / frontier surfaces.
+ *  11. Config              — meta settings (worker schedules, users, Sweed auth log).
+ *  12. CRM                 — planned; leaf only.
+ */
 function buildPrimarySidebarNodes(
   subtreesByModule: Partial<Record<HeliosModuleCode, TreeNavNode[]>>,
 ): TreeNavNode[] {
-  // Windows-Explorer-style: one root, expanded by default; every immediate
-  // child collapsed. Branch labels themselves are the navigation targets,
-  // so there are no separate "Overview" pseudo-leaves.
-  //
-  // Config is intentionally rendered last (bottom of the nav pane), below
-  // the operational leaves (Jobs, Audit history), because it owns
-  // meta-settings like recurring background-worker schedules rather than a
-  // workflow surface.
-  // `pricing` is intentionally NOT rendered as a top-level branch — its
-  // routes are reached through the Catalog branch's subtree
-  // (catalogSidebarSubtree.ts). `config` is rendered separately below
-  // the operational leaves.
-  const moduleBranches: TreeNavNode[] = HELIOS_MODULES.filter(
-    (module) => module.code !== 'config' && module.code !== 'pricing',
-  ).map((module) => ({
-    kind: 'branch',
-    navKey: `module.${module.code}`,
-    label: module.label,
-    to: buildHeliosModulePath(module.code),
-    children: subtreesByModule[module.code] ?? [],
-  }))
+  function subtreeFor(code: HeliosModuleCode): TreeNavNode[] {
+    // Page-supplied dynamic override wins over the static default. If a
+    // page registers an empty array we treat that as "no override" so
+    // the canonical subtree stays visible.
+    const override = subtreesByModule[code]
+    if (override && override.length > 0) {
+      return override
+    }
+    return STATIC_MODULE_SUBTREES[code] ?? []
+  }
 
-  const configModule = HELIOS_MODULES.find((module) => module.code === 'config')
-  const configBranch: TreeNavNode | null = configModule
-    ? {
-        kind: 'branch',
-        navKey: `module.${configModule.code}`,
-        label: configModule.label,
-        to: buildHeliosModulePath(configModule.code),
-        children: subtreesByModule[configModule.code] ?? [],
-      }
-    : null
+  function moduleBranch(code: HeliosModuleCode, options?: { defaultOpen?: boolean }): TreeNavNode {
+    const definition = getHeliosModuleDefinition(code)
+    return {
+      kind: 'branch',
+      navKey: `module.${code}`,
+      label: definition.label,
+      to: buildHeliosModulePath(code),
+      // Module branches stay highlighted while the operator is on any
+      // descendant page (e.g. /catalog/groups/42 keeps Catalog active).
+      end: false,
+      // Default-open top-level branches per the AGENTS.md rule
+      // ("purpose at top, expanded by default") so the FULL tree is
+      // visible on first load without operator interaction.
+      defaultOpen: options?.defaultOpen ?? true,
+      children: subtreeFor(code),
+    }
+  }
 
   return [
     {
+      kind: 'leaf',
+      navKey: 'dashboard',
+      label: 'Dashboard',
+      to: '/dashboard',
+    },
+    moduleBranch('communications'),
+    moduleBranch('catalog'),
+    moduleBranch('screens'),
+    moduleBranch('scheduling'),
+    moduleBranch('reviews'),
+    moduleBranch('utilities'),
+    { kind: 'leaf', navKey: 'operations.jobs', label: 'Jobs', to: '/jobs', end: false },
+    { kind: 'leaf', navKey: 'operations.history', label: 'Audit history', to: '/history', end: false },
+    {
       kind: 'branch',
-      navKey: 'helios',
-      label: 'Helios',
-      to: '/',
-      // Only the single root is expanded by default; everything below
-      // starts collapsed (+) until the user expands it.
-      defaultOpen: true,
-      children: [
-        ...moduleBranches,
-        { kind: 'leaf', navKey: 'operations.jobs', label: 'Jobs', to: '/jobs' },
-        { kind: 'leaf', navKey: 'operations.history', label: 'Audit history', to: '/history' },
-        ...(configBranch ? [configBranch] : []),
-      ],
+      navKey: 'tasks',
+      label: 'Tasks',
+      to: '/tasks',
+      end: false,
+      defaultOpen: false,
+      children: TASKS_SIDEBAR_SUBTREE,
+    },
+    moduleBranch('config', { defaultOpen: false }),
+    {
+      kind: 'leaf',
+      navKey: 'module.crm',
+      label: 'CRM & Segments',
+      to: buildHeliosModulePath('crm'),
     },
   ]
 }

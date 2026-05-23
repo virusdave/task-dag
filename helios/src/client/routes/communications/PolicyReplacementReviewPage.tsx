@@ -23,6 +23,7 @@ import {
 import { loadJson, mutateJson } from '../../app/fetchJson.js'
 import { useRegisterSidebarSubtree } from '../../components/SidebarNavContext.js'
 import type { TreeNavNode } from '../../components/TreeNav.js'
+import { buildCommunicationsSidebarSubtree } from './communicationsSidebar.js'
 
 interface LoaderData {
   packetId: string
@@ -701,59 +702,62 @@ export function PolicyReplacementReviewPage() {
   // Sidebar leaves use anchor-style targetId so the browser scrolls to the
   // matching section on this page when clicked.
   const sidebarSubtree = useMemo<TreeNavNode[]>(
-    () => [
-      {
-        kind: 'branch',
-        navKey: `communications.policy-replacements.${packetId}.review`,
-        label: 'Review',
-        defaultOpen: false,
-        children: [
-          {
-            kind: 'leaf' as const,
-            navKey: `communications.policy-replacements.${packetId}.review.overview`,
-            label: 'Overview',
-            targetId: 'section-overview',
-          },
-          {
-            kind: 'leaf' as const,
-            navKey: `communications.policy-replacements.${packetId}.review.submit`,
-            label: 'Submit review',
-            targetId: 'section-submit',
-          },
-          {
-            kind: 'leaf' as const,
-            navKey: `communications.policy-replacements.${packetId}.review.apply-gates`,
-            label: 'Apply gates',
-            targetId: 'section-apply-gates',
-          },
-          {
-            kind: 'leaf' as const,
-            navKey: `communications.policy-replacements.${packetId}.review.llm-patterns`,
-            label: 'LLM patterns',
-            targetId: 'section-llm-patterns',
-          },
+    () =>
+      buildCommunicationsSidebarSubtree({
+        extraChildren: [
           {
             kind: 'branch',
-            navKey: `communications.policy-replacements.${packetId}.review.assets`,
-            label: 'Assets',
-            defaultOpen: false,
-            children: sections.map((section) => ({
-              kind: 'leaf' as const,
-              navKey: `communications.policy-replacements.${packetId}.review.assets.${section.prefix}`,
-              label: section.longLabel,
-              targetId: sectionAnchorId(section.prefix),
-              count: section.count,
-            })),
-          },
-          {
-            kind: 'leaf' as const,
-            navKey: `communications.policy-replacements.${packetId}.review.anchors`,
-            label: 'LLM anchors',
-            targetId: 'section-anchors',
+            navKey: `communications.policy-replacements.${packetId}.review`,
+            label: 'Review',
+            defaultOpen: true,
+            children: [
+              {
+                kind: 'leaf' as const,
+                navKey: `communications.policy-replacements.${packetId}.review.overview`,
+                label: 'Overview',
+                targetId: 'section-overview',
+              },
+              {
+                kind: 'leaf' as const,
+                navKey: `communications.policy-replacements.${packetId}.review.submit`,
+                label: 'Submit review',
+                targetId: 'section-submit',
+              },
+              {
+                kind: 'leaf' as const,
+                navKey: `communications.policy-replacements.${packetId}.review.apply-gates`,
+                label: 'Apply gates',
+                targetId: 'section-apply-gates',
+              },
+              {
+                kind: 'leaf' as const,
+                navKey: `communications.policy-replacements.${packetId}.review.llm-patterns`,
+                label: 'LLM patterns',
+                targetId: 'section-llm-patterns',
+              },
+              {
+                kind: 'branch',
+                navKey: `communications.policy-replacements.${packetId}.review.assets`,
+                label: 'Assets',
+                defaultOpen: false,
+                children: sections.map((section) => ({
+                  kind: 'leaf' as const,
+                  navKey: `communications.policy-replacements.${packetId}.review.assets.${section.prefix}`,
+                  label: section.longLabel,
+                  targetId: sectionAnchorId(section.prefix),
+                  count: section.count,
+                })),
+              },
+              {
+                kind: 'leaf' as const,
+                navKey: `communications.policy-replacements.${packetId}.review.anchors`,
+                label: 'LLM anchors',
+                targetId: 'section-anchors',
+              },
+            ],
           },
         ],
-      },
-    ],
+      }),
     [packetId, sections],
   )
   useRegisterSidebarSubtree('communications', sidebarSubtree)

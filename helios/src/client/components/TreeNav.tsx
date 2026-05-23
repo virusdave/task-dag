@@ -32,6 +32,12 @@ export interface TreeNavLeaf {
   /** Router path (e.g. "/communications"). When set, the leaf renders as a
    * react-router NavLink and active state is driven by NavLink. */
   to?: string
+  /** When `to` is set, controls NavLink's `end` matching. Defaults to true
+   * so an exact-match leaf does not also light up on descendant routes.
+   * Pass `false` for leaves whose target is a "section root" (e.g. /jobs
+   * stays active on /jobs/:jobId, Audit history stays active on filtered
+   * sub-paths). */
+  end?: boolean
   /** Absolute external URL (e.g. "https://freshlybaked.us/internal/..."). When
    * set, the leaf renders as a plain `<a>` opened in a new tab with
    * `rel="noopener noreferrer"`. Mutually exclusive with `to` and
@@ -317,7 +323,7 @@ function Leaf({ leaf, depth, activeTargetId, onNavigate }: LeafProps) {
       <div className="tree-nav-leaf-row" style={{ paddingLeft: padLeft }}>
         <NavLink
           to={leaf.to}
-          end
+          end={leaf.end ?? true}
           className={({ isActive }) => `tree-nav-leaf${isActive ? ' is-active' : ''}`}
         >
           {leaf.label}

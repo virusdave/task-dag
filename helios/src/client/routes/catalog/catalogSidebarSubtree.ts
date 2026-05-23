@@ -117,93 +117,107 @@ export interface PendingPurchasesSidebarOptions {
   packetHierarchy: TreeNavNode[] | null
 }
 
-export function useRegisterCatalogSidebarSubtree(options?: {
+export interface CatalogSidebarOptions {
   imagesAndBarcodes?: ImagesAndBarcodesSidebarOptions
   pendingPurchases?: PendingPurchasesSidebarOptions
-}): void {
+}
+
+/**
+ * Pure builder for the catalog module sidebar subtree. Used statically
+ * by the AppShell so every operator sees the full Catalog tree on first
+ * load — and used by per-page hooks below to augment it with contextual
+ * children (per-site brand filters, packet hierarchy, etc.).
+ */
+export function buildCatalogSidebarSubtree(options?: CatalogSidebarOptions): TreeNavNode[] {
+  const imagesAndBarcodes = options?.imagesAndBarcodes
+  const pendingPurchases = options?.pendingPurchases
+  return [
+    {
+      kind: 'leaf',
+      navKey: 'catalog.browser',
+      label: 'Browser',
+      to: buildHeliosModulePath('catalog', 'browser'),
+    },
+    {
+      kind: 'leaf',
+      navKey: 'catalog.review',
+      label: 'Review queue',
+      to: buildHeliosModulePath('catalog', 'review'),
+    },
+    buildPendingPurchasesNode(pendingPurchases),
+    buildImagesAndBarcodesNode(imagesAndBarcodes),
+    {
+      kind: 'leaf',
+      navKey: 'catalog.new-entry',
+      label: 'New entry',
+      to: buildHeliosModulePath('catalog', 'new-entry'),
+    },
+    // Pricing was previously its own top-level module branch but is
+    // now scoped under Catalog: pricing runs are a catalog reviewer
+    // workflow, not a separate operator surface. The /pricing/* routes
+    // are unchanged; this just gives them a discoverable home in the
+    // sidebar tree.
+    {
+      kind: 'branch',
+      navKey: 'catalog.pricing',
+      label: 'Pricing',
+      to: buildHeliosModulePath('pricing', 'generate'),
+      defaultOpen: false,
+      children: [
+        {
+          kind: 'leaf',
+          navKey: 'catalog.pricing.generate',
+          label: 'New run',
+          to: buildHeliosModulePath('pricing', 'generate'),
+        },
+        {
+          kind: 'leaf',
+          navKey: 'catalog.pricing.runs',
+          label: 'Run history',
+          to: buildHeliosModulePath('pricing', 'runs'),
+        },
+        {
+          kind: 'leaf',
+          navKey: 'catalog.pricing.review',
+          label: 'Review queue',
+          to: buildHeliosModulePath('pricing', 'review'),
+        },
+      ],
+    },
+    {
+      kind: 'leaf',
+      navKey: 'catalog.history',
+      label: 'History',
+      to: buildHeliosModulePath('catalog', 'history'),
+    },
+    {
+      kind: 'branch',
+      navKey: 'catalog.whiteglove',
+      label: 'WhiteGlove',
+      to: buildHeliosModulePath('catalog', 'whiteglove/pricing'),
+      defaultOpen: false,
+      children: [
+        {
+          kind: 'leaf',
+          navKey: 'catalog.whiteglove.pricing',
+          label: 'Pricing',
+          to: buildHeliosModulePath('catalog', 'whiteglove/pricing'),
+        },
+      ],
+    },
+    // Note: "Price comparison review" (FB-US Midtown/Bronx competitor
+    // match review) now lives under Ads → Price comparison review
+    // (see communicationsSidebar.ts). It's competitor pricing intel
+    // for the ads / merchandising surface, not a catalog-mirroring
+    // workflow.
+  ]
+}
+
+export function useRegisterCatalogSidebarSubtree(options?: CatalogSidebarOptions): void {
   const imagesAndBarcodes = options?.imagesAndBarcodes
   const pendingPurchases = options?.pendingPurchases
   const subtree = useMemo<TreeNavNode[]>(
-    () => [
-      {
-        kind: 'leaf',
-        navKey: 'catalog.browser',
-        label: 'Browser',
-        to: buildHeliosModulePath('catalog', 'browser'),
-      },
-      {
-        kind: 'leaf',
-        navKey: 'catalog.review',
-        label: 'Review queue',
-        to: buildHeliosModulePath('catalog', 'review'),
-      },
-      buildPendingPurchasesNode(pendingPurchases),
-      buildImagesAndBarcodesNode(imagesAndBarcodes),
-      {
-        kind: 'leaf',
-        navKey: 'catalog.new-entry',
-        label: 'New entry',
-        to: buildHeliosModulePath('catalog', 'new-entry'),
-      },
-      // Pricing was previously its own top-level module branch but is
-      // now scoped under Catalog: pricing runs are a catalog reviewer
-      // workflow, not a separate operator surface. The /pricing/* routes
-      // are unchanged; this just gives them a discoverable home in the
-      // sidebar tree.
-      {
-        kind: 'branch',
-        navKey: 'catalog.pricing',
-        label: 'Pricing',
-        to: buildHeliosModulePath('pricing', 'generate'),
-        defaultOpen: false,
-        children: [
-          {
-            kind: 'leaf',
-            navKey: 'catalog.pricing.generate',
-            label: 'New run',
-            to: buildHeliosModulePath('pricing', 'generate'),
-          },
-          {
-            kind: 'leaf',
-            navKey: 'catalog.pricing.runs',
-            label: 'Run history',
-            to: buildHeliosModulePath('pricing', 'runs'),
-          },
-          {
-            kind: 'leaf',
-            navKey: 'catalog.pricing.review',
-            label: 'Review queue',
-            to: buildHeliosModulePath('pricing', 'review'),
-          },
-        ],
-      },
-      {
-        kind: 'leaf',
-        navKey: 'catalog.history',
-        label: 'History',
-        to: buildHeliosModulePath('catalog', 'history'),
-      },
-      {
-        kind: 'branch',
-        navKey: 'catalog.whiteglove',
-        label: 'WhiteGlove',
-        to: buildHeliosModulePath('catalog', 'whiteglove/pricing'),
-        defaultOpen: false,
-        children: [
-          {
-            kind: 'leaf',
-            navKey: 'catalog.whiteglove.pricing',
-            label: 'Pricing',
-            to: buildHeliosModulePath('catalog', 'whiteglove/pricing'),
-          },
-        ],
-      },
-      // Note: "Price comparison review" (FB-US Midtown/Bronx competitor
-      // match review) now lives under Ads → Price comparison review
-      // (see communicationsSidebar.ts). It's competitor pricing intel
-      // for the ads / merchandising surface, not a catalog-mirroring
-      // workflow.
-    ],
+    () => buildCatalogSidebarSubtree({ imagesAndBarcodes, pendingPurchases }),
     [imagesAndBarcodes, pendingPurchases],
   )
   useRegisterSidebarSubtree('catalog', subtree)
