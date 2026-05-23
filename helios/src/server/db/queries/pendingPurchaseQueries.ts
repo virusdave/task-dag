@@ -15,9 +15,14 @@ import type { Pool, QueryResultRow } from 'pg'
 
 import type {
   JsonValue,
+  PendingPurchaseApplyRequestStatus,
+  PendingPurchaseApplyRequestSummary,
   PendingPurchaseApprovalStatus,
   PendingPurchaseMappingStatus,
   PendingPurchaseMarketListing,
+  PendingPurchasePacketSource,
+  PendingPurchasePacketStatus,
+  PendingPurchasePacketSummary,
   PendingPurchaseRow,
   PendingPurchaseRowApplyStatus,
   PendingPurchaseSuggestionCandidate,
@@ -378,4 +383,140 @@ function toIso(value: Date): string {
 
 function toIsoOrNull(value: Date | null): string | null {
   return value === null ? null : value.toISOString()
+}
+
+interface PendingPurchasePacketDbRow extends QueryResultRow {
+  created_at: Date
+  generated_at: Date
+  id: string
+  import_file_name: string | null
+  packet_title: string
+  row_count: string
+  site_keys_json: JsonValue
+  site_labels_json: JsonValue
+  source: string
+  source_path: string | null
+  state_context_json: JsonValue
+  status: string
+  summary_json: JsonValue
+  updated_at: Date
+}
+
+export async function getPendingPurchasePacketSummary(
+  pool: Pool,
+  packetId: number,
+): Promise<PendingPurchasePacketSummary | null> {
+  const result = await pool.query<PendingPurchasePacketDbRow>(
+    `
+      select
+        p.created_at,
+        p.generated_at,
+        p.id,
+        p.import_file_name,
+        p.packet_title,
+        coalesce((select count(*) from pending_purchase_rows r where r.packet_id = p.id), 0) as row_count,
+        p.site_keys_json,
+        p.site_labels_json,
+        p.source,
+        p.source_path,
+        p.state_context_json,
+        p.status,
+        p.summary_json,
+        p.updated_at
+      from pending_purchase_packets p
+      where p.id = $1
+    `,
+    [packetId],
+  )
+  const row = result.rows[0]
+  if (!row) return null
+  return {
+    createdAt: toIso(row.created_at),
+    generatedAt: toIso(row.generated_at),
+    importFileName: row.import_file_name,
+    packetId: readIntFromString(row.id),
+    packetTitle: row.packet_title,
+    rowCount: Number.parseInt(row.row_count, 10),
+    siteKeys: readStringArray(row.site_keys_json),
+    siteLabels: readStringArray(row.site_labels_json),
+    source: row.source as PendingPurchasePacketSource,
+    sourcePath: row.source_path,
+    stateContext: row.state_context_json,
+    status: row.status as PendingPurchasePacketStatus,
+    summary: row.summary_json,
+    updatedAt: toIso(row.updated_at),
+  }
+}
+
+interface PendingPurchaseApplyRequestDbRow extends QueryResultRow {
+  applied_row_count: number
+  blocked_row_count: number
+  created_at: Date
+  failed_row_count: number
+  finished_at: Date | null
+  id: string
+  job_id: string | null
+  packet_id: string
+  requested_by_user_name: string | null
+  requested_reason: string | null
+  selected_row_count: number
+  started_at: Date | null
+  status: string
+  summary_json: JsonValue
+  updated_at: Date
+}
+
+export async function getLatestPendingPurchaseApplyRequest(
+  pool: Pool,
+  packetId: number,
+): Promise<PendingPurchaseApplyRequestSummary | null> {
+  const result = await pool.query<PendingPurchaseApplyRequestDbRow>(
+    `
+      select
+        a.applied_row_count,
+        a.blocked_row_count,
+        a.created_at,
+        a.failed_row_count,
+        a.finished_at,
+        a.id,
+        a.job_id,
+        a.packet_id,
+        u.name as requested_by_user_name,
+        a.requested_reason,
+        a.selected_row_count,
+        a.started_at,
+        a.status,
+        a.summary_json,
+        a.updated_at
+      from pending_purchase_apply_requests a
+      left join users u on u.id = a.requested_by_user_id
+      where a.packet_id = $1
+      order by a.created_at desc, a.id desc
+      limit 1
+    `,
+    [packetId],
+  )
+  const row = result.rows[0]
+  if (!row) return null
+  return {
+    appliedRowCount: row.applied_row_count,
+    blockedRowCount: row.blocked_row_count,
+    failedRowCount: row.failed_row_count,
+    finishedAt: toIsoOrNull(row.finished_at),
+    jobId: readOptionalIntFromString(row.job_id),
+    packetId: readIntFromString(row.packet_id),
+    requestId: readIntFromString(row.id),
+    requestedAt: toIso(row.created_at),
+    requestedByUser: row.requested_by_user_name,
+    selectedRowCount: row.selected_row_count,
+    startedAt: toIsoOrNull(row.started_at),
+    status: row.status as PendingPurchaseApplyRequestStatus,
+    summary: row.summary_json,
+    summaryText: typeof row.summary_json === 'object' && row.summary_json !== null && !Array.isArray(row.summary_json)
+      ? (typeof (row.summary_json as Record<string, unknown>).summaryText === 'string'
+          ? ((row.summary_json as Record<string, unknown>).summaryText as string)
+          : null)
+      : null,
+    updatedAt: toIso(row.updated_at),
+  }
 }

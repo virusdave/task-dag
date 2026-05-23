@@ -21,7 +21,11 @@ import { sha256 } from '../../shared/util/hash.js'
 import { appendAuditEvent } from '../audit/appendAuditEvent.js'
 import { requireSessionUser } from '../auth/requireSession.js'
 import { getPool } from '../db/pool.js'
-import { listPendingPurchaseRows } from '../db/queries/pendingPurchaseQueries.js'
+import {
+  getLatestPendingPurchaseApplyRequest,
+  getPendingPurchasePacketSummary,
+  listPendingPurchaseRows,
+} from '../db/queries/pendingPurchaseQueries.js'
 import {
   insertPendingPurchaseParseObservation,
   normalizePendingPurchaseParserText,
@@ -74,7 +78,7 @@ export async function registerPendingPurchaseRoutes(server: FastifyInstance): Pr
 
     const query = PendingPurchaseListQuerySchema.parse(request.query)
     const db = getPool()
-    const [items, activeGenerationJobIdResult] = await Promise.all([
+    const [items, activeGenerationJobIdResult, activePacket, latestApplyRequest] = await Promise.all([
       query.packetId != null
         ? listPendingPurchaseRows(db, query.packetId)
         : Promise.resolve([] as Awaited<ReturnType<typeof listPendingPurchaseRows>>),
@@ -88,16 +92,22 @@ export async function registerPendingPurchaseRoutes(server: FastifyInstance): Pr
           limit 1
         `,
       ),
+      query.packetId != null
+        ? getPendingPurchasePacketSummary(db, query.packetId)
+        : Promise.resolve(null),
+      query.packetId != null
+        ? getLatestPendingPurchaseApplyRequest(db, query.packetId)
+        : Promise.resolve(null),
     ])
     const activeGenerationJobId = activeGenerationJobIdResult.rows[0]?.id ?? null
     const activeGenerationJob = activeGenerationJobId ? await getJobStatus(db, activeGenerationJobId) : null
     return reply.send(PendingPurchaseListResponseSchema.parse({
-      activePacket: null,
+      activePacket,
       activeGenerationJob,
       filters: query,
       items,
-      latestApplyRequest: null,
-      packets: [],
+      latestApplyRequest,
+      packets: activePacket ? [activePacket] : [],
       totalCount: items.length,
     }))
   })
