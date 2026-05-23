@@ -167,21 +167,36 @@ Hard constraints you MUST follow on every ad:
 - Do NOT use ALL CAPS for whole headlines (you may capitalize a single
   short word like NYC or NEW).
 - Do NOT use more than one exclamation point per asset.
-- The retailer is LICENSED. Lean into that contrast vs raided /
-  unlicensed shops. Examples of fair angles:
+- The retailer is LICENSED. Lean into that as a POSITIVE statement
+  about us, NOT as a comparison to the unlicensed competition. The
+  contrast should be implied, never spelled out. Google's policy
+  reviewers treat any direct reference to competitor raids /
+  shutdowns / closures as disparagement and limit the ad.
+- DO NOT make pricing claims for cannabis products. No "$25", no
+  "from $X", no "deals", no "specials" — Google's cannabis policy
+  routinely "Approved limited"s these and they will not serve.
+- DO NOT include THC or CBD percentages in any headline or
+  description. "25% THC", "30%+ tested", "high potency", "strong",
+  "potent", "ideal high" all trigger Google's recreational-drugs
+  policy ("Approved limited" → effectively non-serving).
+- DO NOT name specific cannabis product *types* in headlines:
+  no "flower", "vapes", "edibles", "concentrates", "pre-rolls",
+  "gummies", "dabs", "carts". Brand/location/service language only.
+- DO NOT use "raid", "raided", "shut down", "shutdown", "closed",
+  "force-closed", or any variant in the ad copy. Google reads these
+  as competitor disparagement and limits the ad. Lean on the
+  POSITIVE side of the same contrast: "Licensed in NY", "Here to
+  stay", "Permanent shop", "Open since [year]".
+- DO NOT include the literal word "claim" anywhere in a headline,
+  description, or label. Earlier versions of this prompt asked you
+  to *label* speculative copy with the string "claim"; you instead
+  pasted the word "claim" *into* the headline text ("3.5g from $25
+  claim"). Do not do that. The label field is not a headline.
+- The retailer is LICENSED. Lean into that. Safe contrast angles:
     * "Licensed. Tested. Open Today."
-    * "Lab-tested flower, NY-licensed."
-    * "Your shop closed? We're open."
+    * "NY-Licensed Dispensary"
+    * "Permanent. Local. Open."
     * "Open & licensed in 10458"
-- You may reference the raids / shutdowns of unlicensed shops
-  factually ("Shop got shut down?", "Local shop closed?") but do NOT
-  defame any specific business by name and do NOT promise immunity
-  from enforcement ("We'll never be raided" is too far; "Licensed,
-  here to stay" is fine).
-- You may include pricing/potency only with a clear qualifier the
-  operator can stand behind. Prefer ranges. e.g. "3.5g from $25",
-  "Lab-tested 25%+ THC". Mark any such headline with the variant
-  label "claim" so the operator can edit if needed.
 
 You ALSO generate the keyword list a Search ad group needs to
 actually trigger. Without keywords, none of the ads ever serve. Per
@@ -241,11 +256,18 @@ markdown, no commentary, no extra keys):
 }
 
 You will be asked for a specific number of ads and a specific
-keyword set size. Each ad should pursue a DIFFERENT angle (raid
-conquest, licensed-vs-illegal trust, neighborhood proximity to
-10458, pricing/value, potency/lab-tested, selection breadth,
-hours/convenience, loyalty/regulars). Do not duplicate angles, and
-do not duplicate keywords across the exact / phrase lists.`;
+keyword set size. Each ad should pursue a DIFFERENT angle from this
+policy-safe set: NY-licensed / regulated trust, permanence ("here
+to stay"), neighborhood proximity to 10458 (Fordham, Belmont), Bronx
+local-business identity, customer service / friendly staff,
+hours / convenience (open daily, walk-ins), community / loyalty
+program. Do NOT use angles that imply pricing, potency, product
+type, or competitor disparagement — those are listed in the hard
+constraints above and have already gotten ads "Approved limited"
+on this account.
+
+Do not duplicate angles, and do not duplicate keywords across the
+exact / phrase lists.`;
 
 function buildUserPrompt() {
   return `Generate exactly ${TARGET_AD_COUNT} Responsive Search Ads for a
@@ -255,23 +277,31 @@ brand-new Google Ads campaign with the following parameters:
   Ad group suffix:  ${AD_GROUP_SUFFIX}
   Geo target:       ${TARGET_NEIGHBORHOOD} (zip ${TARGET_ZIP} only)
   Landing page:     ${FINAL_URL}
-  Goal:             Conquest the foot traffic of recently raided /
-                    force-closed unlicensed smoke shops in 10458.
-                    Make it obvious we are a *licensed* NY retailer
-                    that is open, lab-tested, and a trustworthy
-                    permanent option vs. the just-shuttered illegal
-                    shops.
+  Goal:             Capture foot traffic in 10458 that is currently
+                    in-market for a cannabis retailer, by positioning
+                    Freshly Baked as the obvious LICENSED, permanent,
+                    neighborhood option. The conquest motive is real
+                    (a number of unlicensed shops in 10458 were
+                    recently closed) but Google's policy reviewers
+                    treat any direct reference to that fact as
+                    competitor disparagement and limit the ad — see
+                    the hard-constraint AVOID list in the system
+                    prompt. Imply, never spell out.
 
-The operator explicitly requested aggressive angles in this style
-(use as creative seed, not literal copy — keep within the hard
-constraints in the system prompt):
+Earlier ad copy on this campaign got "Approved limited" on every
+RSA. The repair angles for this regeneration are policy-safe and
+must stay on-brand around: NY licensing, permanence, the 10458
+neighborhood, friendly walk-in service, daily hours, and customer
+community. Keep the energy aggressive in voice but neutral in
+content. Examples of safe seeds (use as creative starter, not
+literal copy):
 
-  * "Shop just raided?"
-  * "SmokeShop Shut Down?"
-  * "Your local shop closed?"
-  * "Licensed & still open."
-  * "3.5g 30%+ tested ~$25"
-  * "Walk-in. Lab-tested. Legal."
+  * "NY-Licensed in 10458"
+  * "Open Daily. Walk Right In."
+  * "Permanent. Local. Licensed."
+  * "Fordham's Licensed Shop"
+  * "Here to Stay in the Bronx"
+  * "Real Shop. Real Hours."
 
 Each of the ${TARGET_AD_COUNT} ads should pursue a distinct angle
 from the list in the system prompt. Within each ad, vary headline
@@ -351,6 +381,59 @@ function parseLLMJson(raw) {
 const RSA_MIN_HEADLINES = 3;
 const RSA_MIN_DESCRIPTIONS = 2;
 
+// Words / patterns that have historically caused Google to mark our
+// cannabis-vertical ads "Approved limited" (i.e. effectively non-
+// serving on Google Search). The LLM prompt forbids these, but the
+// last batch leaked them through anyway, so we additionally filter
+// at validation time. If a candidate headline or description matches
+// any of these, we silently drop it (it will not be counted toward
+// the RSA minimum). The aggregate RSA_MIN_* check will fail loudly
+// downstream if too many get filtered, so the operator notices.
+//
+// Categories:
+//   * Literal LLM artifact: the word "claim" (leaked from the prompt's
+//     `variant_label: "claim"` instruction into headlines).
+//   * Competitor disparagement: raid/shut down/closed references.
+//   * Cannabis-pricing claims: $ amounts and "deal/special" framing.
+//   * Recreational-drug framing: THC/CBD %, potency/strength language.
+//   * Specific cannabis product types: flower, vape, edible, etc.
+const POLICY_FORBIDDEN_PATTERNS = [
+  /\bclaim\b/i,
+  /\braid(?:ed|s)?\b/i,
+  /\bshut(?:[-\s]?down|s)?\b/i,
+  /\bshutdown\b/i,
+  /\bclosed?\b/i,
+  /\bforce[-\s]?closed?\b/i,
+  /\$\s?\d/,
+  /\bfrom\s+\$/i,
+  /\bdeal(?:s)?\b/i,
+  /\bspecials?\b/i,
+  /\bsale(?:s)?\b/i,
+  /\b\d{1,2}\s*%/,
+  /\bthc\b/i,
+  /\bcbd\b/i,
+  /\bhigh[-\s]?potency\b/i,
+  /\bpoten(?:t|cy)\b/i,
+  /\bstrong\b/i,
+  /\bideal\s+high\b/i,
+  /\bget\s+high\b/i,
+  /\bflower\b/i,
+  /\bvapes?\b/i,
+  /\bedibles?\b/i,
+  /\bconcentrates?\b/i,
+  /\bpre[-\s]?rolls?\b/i,
+  /\bgummies?\b/i,
+  /\bdabs?\b/i,
+  /\bcarts?\b/i,
+];
+
+function violatesPolicy(text) {
+  for (const pat of POLICY_FORBIDDEN_PATTERNS) {
+    if (pat.test(text)) return pat;
+  }
+  return null;
+}
+
 function trimAndDedupe(arr, maxLen) {
   const seen = new Set();
   const out = [];
@@ -359,6 +442,7 @@ function trimAndDedupe(arr, maxLen) {
     const t = item.trim();
     if (!t) continue;
     if (t.length > maxLen) continue; // drop over-long instead of truncating
+    if (violatesPolicy(t)) continue; // drop policy-risky text
     const key = t.toLowerCase();
     if (seen.has(key)) continue;
     seen.add(key);
