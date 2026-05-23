@@ -745,12 +745,25 @@ function PendingPurchaseRowCard(
       <p className="subtle-copy">
         Orders: {item.orderIds.join(', ') || '—'} · Positions: {item.positionIds.join(', ') || '—'}
       </p>
-      <details>
-        <summary>Product hierarchy</summary>
+      <details open={item.needsNewBrand || item.needsNewGroup || item.needsNewVariant}>
+        <summary>
+          Product hierarchy{' '}
+          {item.needsNewBrand || item.needsNewGroup || item.needsNewVariant ? (
+            <Pill tone="danger">
+              {[
+                item.needsNewBrand ? 'new brand' : null,
+                item.needsNewGroup ? 'new group' : null,
+                item.needsNewVariant ? 'new variant' : null,
+              ]
+                .filter((label): label is string => label != null)
+                .join(' · ')}
+            </Pill>
+          ) : null}
+        </summary>
         <div className="pending-purchase-hierarchy-grid">
-          <PendingValuePanel label="Brand" value={item.targetBrand ?? '—'} />
-          <PendingValuePanel label="Group" value={item.targetGroupName ?? '—'} />
-          <PendingValuePanel label="Variant" value={item.targetVariantName ?? '—'} />
+          <PendingValuePanel label="Brand" value={item.targetBrand ?? '—'} highlight={item.needsNewBrand} />
+          <PendingValuePanel label="Group" value={item.targetGroupName ?? '—'} highlight={item.needsNewGroup} />
+          <PendingValuePanel label="Variant" value={item.targetVariantName ?? '—'} highlight={item.needsNewVariant} />
           <PendingValuePanel label="Variant tab" value={item.targetVariantTab ?? '—'} />
           <PendingValuePanel label="Category" value={item.expectedCategory ?? '—'} />
           <PendingValuePanel label="Subcategory" value={item.expectedSubcategory ?? '—'} />
@@ -904,10 +917,21 @@ function PendingPurchaseRowCard(
   )
 }
 
-function PendingValuePanel({ label, value }: { label: string; value: string }) {
+function PendingValuePanel({
+  label,
+  value,
+  highlight,
+}: {
+  label: string
+  value: string
+  highlight?: boolean
+}) {
   return (
-    <div className="value-panel">
-      <span>{label}</span>
+    <div className={highlight ? 'value-panel value-panel-new-attribute' : 'value-panel'}>
+      <span>
+        {label}
+        {highlight ? <Pill tone="danger">NEW</Pill> : null}
+      </span>
       <p>{value}</p>
     </div>
   )

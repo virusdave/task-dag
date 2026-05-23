@@ -172,6 +172,13 @@ export const PendingPurchaseRowSchema = z.object({
   marketSearchTerm: z.string().nullable(),
   marketSource: z.enum(['nearby', 'statewide', 'mixed']).nullable(),
   mappingStatus: PendingPurchaseMappingStatusSchema,
+  // Per-attribute "would be newly created in Sweed on apply" flags.
+  // The reviewer needs these surfaced LOUDLY so a misparsed brand
+  // (e.g., a strain-word like "Cherry" mistaken for a brand) doesn't
+  // silently land in Sweed as a brand-new brand record.
+  needsNewBrand: z.boolean().default(false),
+  needsNewGroup: z.boolean().default(false),
+  needsNewVariant: z.boolean().default(false),
   marketAdviceConfidence: z.string().nullable(),
   marketAdvicePosture: z.string().nullable(),
   marketAdviceSummary: z.string().nullable(),

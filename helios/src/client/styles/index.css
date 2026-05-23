@@ -726,6 +726,25 @@ pre {
   border: 1px solid var(--panel-border);
 }
 
+/* Strong-color highlight for parsed attributes that would create a
+ * brand-new entity in Sweed on apply (e.g., the parser invented a
+ * brand name that doesn't exist yet). The reviewer MUST see this
+ * before approving — it's how we caught the bogus "Cherry" brand. */
+.value-panel-new-attribute {
+  background: rgba(215, 106, 84, 0.18);
+  border-color: #d76a54;
+  box-shadow: 0 0 0 2px rgba(215, 106, 84, 0.35);
+}
+
+.value-panel-new-attribute span {
+  color: #6e2316;
+}
+
+.value-panel-new-attribute span .pill {
+  margin-left: 0.4rem;
+  vertical-align: middle;
+}
+
 .value-panel span {
   display: block;
   margin-bottom: 0.35rem;

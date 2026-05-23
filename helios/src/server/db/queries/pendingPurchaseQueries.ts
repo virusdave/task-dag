@@ -76,11 +76,44 @@ interface PendingPurchaseRowDbRow extends QueryResultRow {
   version: number
 }
 
+interface SweedCatalogIndex {
+  brandNames: Set<string>
+  brandGroupPairs: Set<string>
+}
+
+async function loadSweedCatalogIndex(pool: Pool): Promise<SweedCatalogIndex> {
+  // Snapshot of live Sweed brand/group names (case-insensitive). Used
+  // by `mapPendingPurchaseRow` to decide whether a row's target_brand
+  // / target_group_name would result in a NEW catalog entity getting
+  // created on apply, so the UI can highlight it for the reviewer.
+  const result = await pool.query<{ brand_name: string | null; group_name: string }>(
+    `
+      select lower(brand_name) as brand_name, lower(group_name) as group_name
+      from catalog_groups
+      where deleted_at is null
+    `,
+  )
+  const brandNames = new Set<string>()
+  const brandGroupPairs = new Set<string>()
+  for (const row of result.rows) {
+    const brand = row.brand_name?.trim() ?? ''
+    if (brand.length > 0) {
+      brandNames.add(brand)
+    }
+    const group = row.group_name.trim()
+    if (brand.length > 0 && group.length > 0) {
+      brandGroupPairs.add(`${brand}\u0001${group}`)
+    }
+  }
+  return { brandNames, brandGroupPairs }
+}
+
 export async function listPendingPurchaseRows(
   pool: Pool,
   packetId: number,
 ): Promise<PendingPurchaseRow[]> {
-  const result = await pool.query<PendingPurchaseRowDbRow>(
+  const [result, catalogIndex] = await Promise.all([
+    pool.query<PendingPurchaseRowDbRow>(
     `
       select
         r.id,
@@ -133,12 +166,17 @@ export async function listPendingPurchaseRows(
       where r.packet_id = $1
       order by r.id asc
     `,
-    [packetId],
-  )
-  return result.rows.map(mapPendingPurchaseRow)
+      [packetId],
+    ),
+    loadSweedCatalogIndex(pool),
+  ])
+  return result.rows.map((row) => mapPendingPurchaseRow(row, catalogIndex))
 }
 
-function mapPendingPurchaseRow(row: PendingPurchaseRowDbRow): PendingPurchaseRow {
+function mapPendingPurchaseRow(
+  row: PendingPurchaseRowDbRow,
+  catalogIndex: SweedCatalogIndex,
+): PendingPurchaseRow {
   const raw = readRecord(row.raw_row_json)
   const editedProposedPrice = readNumberFromString(row.edited_proposed_price)
   const proposedPrice = readNumberFromString(row.proposed_price)
@@ -152,6 +190,26 @@ function mapPendingPurchaseRow(row: PendingPurchaseRowDbRow): PendingPurchaseRow
   const gmPercent = computeGmPercent(effectiveUnitCost, effectiveProposedPrice)
 
   const marketSource = readMarketSource(raw.marketSource)
+
+  const targetBrand = row.target_brand ?? readOptionalString(raw.targetBrand)
+  const targetGroupName = row.target_group_name ?? readOptionalString(raw.targetGroupName)
+  const reuseGroupId = readOptionalPositiveInt(raw.reuseGroupId)
+  const reuseProductId = readOptionalPositiveInt(raw.reuseProductId)
+  const isCatalogCreate = row.mapping_status === 'needs_catalog_create'
+  const normalizedBrand = targetBrand?.trim().toLowerCase() ?? ''
+  const normalizedGroup = targetGroupName?.trim().toLowerCase() ?? ''
+  const needsNewBrand =
+    isCatalogCreate && normalizedBrand.length > 0 && !catalogIndex.brandNames.has(normalizedBrand)
+  const brandGroupKey =
+    normalizedBrand.length > 0 && normalizedGroup.length > 0
+      ? `${normalizedBrand}\u0001${normalizedGroup}`
+      : ''
+  const needsNewGroup =
+    isCatalogCreate &&
+    reuseGroupId == null &&
+    brandGroupKey.length > 0 &&
+    !catalogIndex.brandGroupPairs.has(brandGroupKey)
+  const needsNewVariant = isCatalogCreate && reuseProductId == null
 
   return {
     actionType: row.action_type,
@@ -198,6 +256,9 @@ function mapPendingPurchaseRow(row: PendingPurchaseRowDbRow): PendingPurchaseRow
     marketNote: readOptionalString(raw.marketNote),
     marketSearchTerm: readOptionalString(raw.marketSearchTerm),
     marketSource,
+    needsNewBrand,
+    needsNewGroup,
+    needsNewVariant,
     notes: row.notes,
     orderIds: readNumberArray(row.order_ids_json),
     packetId: readIntFromString(row.packet_id),
@@ -210,8 +271,8 @@ function mapPendingPurchaseRow(row: PendingPurchaseRowDbRow): PendingPurchaseRow
     proposedDescription: row.proposed_description,
     proposedPrice,
     publicSources: readStringArray(raw.publicSources),
-    reuseGroupId: readOptionalPositiveInt(raw.reuseGroupId),
-    reuseProductId: readOptionalPositiveInt(raw.reuseProductId),
+    reuseGroupId,
+    reuseProductId,
     reuseProductName: readOptionalString(raw.reuseProductName),
     reviewFlags: readStringArray(row.review_flags_json),
     reviewerNotes: readOptionalString(raw.reviewerNotes) ?? row.notes,
@@ -223,8 +284,8 @@ function mapPendingPurchaseRow(row: PendingPurchaseRowDbRow): PendingPurchaseRow
     siteKey: row.site_key,
     siteLabel: row.site_label,
     suggestionCandidates: readSuggestionCandidates(raw.suggestionCandidates),
-    targetBrand: row.target_brand ?? readOptionalString(raw.targetBrand),
-    targetGroupName: row.target_group_name ?? readOptionalString(raw.targetGroupName),
+    targetBrand,
+    targetGroupName,
     targetPackCount: readOptionalPositiveInt(raw.targetPackCount),
     targetPrevalence: readOptionalString(raw.targetPrevalence),
     targetSize: readOptionalString(raw.targetSize),
