@@ -268,94 +268,135 @@ function csvEscape(v) {
   return s;
 }
 
-function buildCSV(ads) {
-  // Ads Editor accepts a single CSV with mixed entity rows. The set
-  // of columns is the union of every column any row needs. Each row
-  // populates only the columns relevant to its entity type; Editor
-  // infers the entity type from which columns are present.
-  //
-  // We emit, in order:
-  //   1. one Campaign row (creates the campaign, paused)
-  //   2. one Ad group row (creates the ad group)
-  //   3. one Campaign-location row (zip 10458 targeting)
-  //   4. N Ad rows (the RSAs)
-  //
-  // Operator notes:
-  //   - Campaign is created Paused so the operator can review in
-  //     Editor before posting. Toggle to Enabled when ready.
-  //   - Budget is set to a conservative $20/day; edit in Editor.
-  //   - Location is targeted via the postal code 10458. Ads Editor
-  //     resolves "10458, New York, United States" to the US postal
-  //     code location id automatically on import.
+/**
+ * Build CSV(s) for Ads Editor import.
+ *
+ * History / why we split:
+ *   The previous version of this script emitted a single mixed-entity
+ *   CSV with column names like "Ad status" / "Ad group status" /
+ *   "Campaign status". Ads Editor's importer only recognizes the
+ *   column name "Status" on each row, and it determines entity type
+ *   heuristically from which other columns are populated. With our
+ *   bespoke per-entity status columns, the ad rows came in with no
+ *   recognizable status and Editor silently dropped them — the
+ *   campaign and ad group were created but the ad group had zero
+ *   ads in it. That's the "your ad group contains no ads" bug.
+ *
+ *   Two changes fix it:
+ *     1. Every status cell goes into a single column named exactly
+ *        "Status". Editor recognizes this on Campaign, Ad Group, and
+ *        Ad rows.
+ *     2. We split the bundle into THREE small CSVs, each containing
+ *        rows of a single entity type. Mixed-entity CSVs are fragile
+ *        because Editor uses column population as its entity-type
+ *        heuristic and a sparsely-populated row can be misclassified.
+ *        Numbered imports also match the operator's existing
+ *        "import 001..005 in order" workflow.
+ *
+ *   We also switch "Ad group" → "Ad Group" (capital G) to match the
+ *   column header Editor's own exports use (see
+ *   ads/google/scripts/convert-csv-to-snapshot.py which reads real
+ *   exports using exactly "Ad Group").
+ */
 
-  const columns = [
+function buildCsvFiles(ads) {
+  // ── File 1: campaign skeleton (campaign + ad group + location) ────────
+  const skeletonColumns = [
     'Campaign',
-    'Ad group',
-    'Campaign type',
-    'Campaign status',
-    'Ad group status',
-    'Ad status',
-    'Ad type',
+    'Ad Group',
+    'Campaign Type',
+    'Status',
     'Budget',
     'Budget type',
-    'Bid strategy type',
+    'Bid Strategy Type',
     'Networks',
     'Languages',
     'Location',
+    'Comment',
+  ];
+  const skeletonRows = [
+    {
+      Campaign: CAMPAIGN_NAME,
+      'Campaign Type': 'Search',
+      Status: 'Paused',
+      Budget: '20.00',
+      'Budget type': 'Daily',
+      'Bid Strategy Type': 'Manual CPC',
+      Networks: 'Google search',
+      Languages: 'English',
+      Comment: `Conquest campaign targeting customers of recently raided / closed unlicensed smoke shops in ${TARGET_NEIGHBORHOOD}.`,
+    },
+    {
+      Campaign: CAMPAIGN_NAME,
+      'Ad Group': AD_GROUP_NAME,
+      Status: 'Enabled',
+      Comment: `Single ad group; all RSA variants live here for clean experimentation.`,
+    },
+    {
+      Campaign: CAMPAIGN_NAME,
+      Location: `${TARGET_ZIP}, New York, United States`,
+      Comment: `Geo restrict to zip ${TARGET_ZIP} (${TARGET_NEIGHBORHOOD}).`,
+    },
+  ];
+
+  // ── File 2: ads (RSAs only) ────────────────────────────────────────────
+  // Uniform schema, one row per ad. Status = Paused so the operator
+  // can verify in Editor before they go live. Headlines/Descriptions
+  // use Editor's documented "Headline N" / "Description N" naming;
+  // unused columns (e.g. Headline 15 if the ad has 12) are dropped
+  // below.
+  const adColumns = [
+    'Campaign',
+    'Ad Group',
+    'Ad Type',
+    'Status',
     'Final URL',
     ...Array.from({ length: 15 }, (_, i) => `Headline ${i + 1}`),
     ...Array.from({ length: 4 }, (_, i) => `Description ${i + 1}`),
-    'Label',
-    'Comment',
+    'Path 1',
+    'Path 2',
   ];
-
-  const rows = [];
-
-  // 1. Campaign creation row
-  rows.push({
-    Campaign: CAMPAIGN_NAME,
-    'Campaign type': 'Search',
-    'Campaign status': 'Paused',
-    Budget: '20.00',
-    'Budget type': 'Daily',
-    'Bid strategy type': 'Manual CPC',
-    Networks: 'Google search',
-    Languages: 'English',
-    Comment: `Conquest campaign targeting customers of recently raided/closed unlicensed smoke shops in ${TARGET_NEIGHBORHOOD}.`,
-  });
-
-  // 2. Ad group creation row
-  rows.push({
-    Campaign: CAMPAIGN_NAME,
-    'Ad group': AD_GROUP_NAME,
-    'Ad group status': 'Enabled',
-    Comment: `Single ad group, all creative variants live here for clean RSA experimentation.`,
-  });
-
-  // 3. Campaign-location targeting row (zip 10458)
-  rows.push({
-    Campaign: CAMPAIGN_NAME,
-    Location: `${TARGET_ZIP}, New York, United States`,
-    Comment: `Geo restrict to zip ${TARGET_ZIP} (${TARGET_NEIGHBORHOOD}).`,
-  });
-
-  // 4. Ad rows
-  for (const ad of ads) {
+  const adRows = ads.map((ad) => {
     const row = {
       Campaign: CAMPAIGN_NAME,
-      'Ad group': AD_GROUP_NAME,
-      'Ad type': 'Responsive search ad',
-      'Ad status': 'Paused',  // safer default; operator enables after review
+      'Ad Group': AD_GROUP_NAME,
+      'Ad Type': 'Responsive search ad',
+      Status: 'Paused',
       'Final URL': FINAL_URL,
-      Label: ad.label,
-      Comment: ad.angle,
+      'Path 1': '',
+      'Path 2': '',
     };
-    ad.headlines.forEach((h, i) => { row[`Headline ${i + 1}`] = h; });
-    ad.descriptions.forEach((d, i) => { row[`Description ${i + 1}`] = d; });
-    rows.push(row);
-  }
+    ad.headlines.forEach((h, i) => {
+      row[`Headline ${i + 1}`] = h;
+    });
+    ad.descriptions.forEach((d, i) => {
+      row[`Description ${i + 1}`] = d;
+    });
+    return row;
+  });
 
-  // Drop columns that no row populated (keeps the CSV tidy).
+  // ── File 3: ad-level labels (Comment metadata) ────────────────────────
+  // Separated because it's purely informational — operator doesn't
+  // have to import it. We still emit so the per-ad angle / hypothesis
+  // travels with the bundle.
+  const noteColumns = ['Campaign', 'Ad Group', 'Ad Label', 'Angle'];
+  const noteRows = ads.map((ad) => ({
+    Campaign: CAMPAIGN_NAME,
+    'Ad Group': AD_GROUP_NAME,
+    'Ad Label': ad.label,
+    Angle: ad.angle,
+  }));
+
+  return {
+    skeleton: renderCsv(skeletonColumns, skeletonRows),
+    ads: renderCsv(adColumns, adRows),
+    notes: renderCsv(noteColumns, noteRows),
+  };
+}
+
+function renderCsv(columns, rows) {
+  // Drop columns no row populates — keeps the CSV narrow and avoids
+  // Editor seeing unexpected empty columns.
   const used = new Set();
   for (const r of rows) {
     for (const k of Object.keys(r)) {
@@ -363,7 +404,6 @@ function buildCSV(ads) {
     }
   }
   const finalCols = columns.filter((c) => used.has(c));
-
   const lines = [finalCols.map(csvEscape).join(',')];
   for (const r of rows) {
     lines.push(finalCols.map((c) => csvEscape(r[c] ?? '')).join(','));
@@ -382,10 +422,12 @@ function escapeHtml(s) {
     .replace(/'/g, '&#39;');
 }
 
-function buildHTML({ ads, csv, generatedAt, warnings }) {
-  // base64 the CSV so the download button works on a phone without
+function buildHTML({ ads, csvs, generatedAt, warnings }) {
+  // base64 each CSV so the download buttons work on a phone without
   // any server-side endpoint.
-  const csvB64 = Buffer.from(csv, 'utf-8').toString('base64');
+  const skeletonB64 = Buffer.from(csvs.skeleton, 'utf-8').toString('base64');
+  const adsB64 = Buffer.from(csvs.ads, 'utf-8').toString('base64');
+  const notesB64 = Buffer.from(csvs.notes, 'utf-8').toString('base64');
   const adBlocks = ads.map((ad, i) => `
     <section class="ad">
       <h3>Ad ${i + 1}: ${escapeHtml(ad.label)}</h3>
@@ -451,22 +493,30 @@ function buildHTML({ ads, csv, generatedAt, warnings }) {
       <dt>Initial state</dt><dd>Campaign + ads imported <strong>Paused</strong> so you can review in Ads Editor before posting changes.</dd>
       <dt>Initial budget</dt><dd>$20/day (edit in Ads Editor before enabling)</dd>
     </dl>
-    <a class="download" download="${CAMPAIGN_NAME}.csv"
-       href="data:text/csv;base64,${csvB64}">⬇ Download CSV (${(csv.length / 1024).toFixed(1)} KB)</a>
+    <a class="download" download="01-${CAMPAIGN_NAME}-skeleton.csv"
+       href="data:text/csv;base64,${skeletonB64}">⬇ 01 — Campaign + Ad Group + Location (${(csvs.skeleton.length / 1024).toFixed(1)} KB)</a>
+    <a class="download" download="02-${CAMPAIGN_NAME}-ads.csv"
+       href="data:text/csv;base64,${adsB64}">⬇ 02 — ${ads.length} RSAs (${(csvs.ads.length / 1024).toFixed(1)} KB)</a>
+    <a class="download" download="03-${CAMPAIGN_NAME}-ad-notes.csv"
+       href="data:text/csv;base64,${notesB64}">⬇ 03 — Ad labels &amp; angles (reference only, ${(csvs.notes.length / 1024).toFixed(1)} KB)</a>
   </div>
 
   <div class="instructions">
     <h3 style="margin-top:0">How to use this in Ads Editor</h3>
+    <p><strong>Import the two CSVs in order. Skip the third — it's reference only.</strong></p>
     <ol>
-      <li>Click the download button above to save <code>${CAMPAIGN_NAME}.csv</code>.</li>
-      <li>In Google Ads Editor: <strong>Account → Import → From file…</strong> and pick the CSV.</li>
-      <li>Review the proposed changes (new campaign, ad group, location, ${ads.length} ads).</li>
-      <li>Post the changes (the campaign comes in Paused — verify budget &amp; targeting first).</li>
-      <li>Toggle the campaign to Enabled when you're ready to spend.</li>
+      <li>Download <code>01-${CAMPAIGN_NAME}-skeleton.csv</code> and <code>02-${CAMPAIGN_NAME}-ads.csv</code>.</li>
+      <li>In Google Ads Editor: <strong>Account → Import → From file…</strong> and pick file 01 first.</li>
+      <li>Review &amp; post: this creates the Paused campaign, the ad group, and the
+          10458 location target.</li>
+      <li>Import file 02 next: this creates ${ads.length} Paused RSAs in the new ad group.</li>
+      <li>Verify budget &amp; targeting, then toggle the campaign to Enabled when ready.</li>
     </ol>
-    <p>The CSV columns include the disambiguating context (Campaign type, Budget,
-       Location, Ad type) that Ads Editor needs to avoid the "Ambiguous row type"
-       rejection we hit on previous bundles.</p>
+    <p>The split avoids the "your ad group contains no ads" failure we hit on
+       the previous bundle, which was caused by mixing entity types in one CSV
+       with bespoke per-entity status columns Ads Editor didn't recognize. Each
+       file now contains rows of a single entity type with a single
+       <code>Status</code> column, matching Editor's documented schema.</p>
   </div>
 
   ${warnings.length === 0 ? '' : `
@@ -478,8 +528,13 @@ function buildHTML({ ads, csv, generatedAt, warnings }) {
   <h2>Generated ads (${ads.length})</h2>
   ${adBlocks}
 
-  <h2>Raw CSV preview</h2>
-  <pre class="csv">${escapeHtml(csv)}</pre>
+  <h2>Raw CSV previews</h2>
+  <h3>01 — Campaign skeleton</h3>
+  <pre class="csv">${escapeHtml(csvs.skeleton)}</pre>
+  <h3>02 — Ads (RSAs)</h3>
+  <pre class="csv">${escapeHtml(csvs.ads)}</pre>
+  <h3>03 — Ad notes (reference)</h3>
+  <pre class="csv">${escapeHtml(csvs.notes)}</pre>
 </body>
 </html>
 `;
@@ -540,26 +595,32 @@ async function main() {
 
   console.log(`[bronx-conquest] LLM returned ${adsIn.length} ads; ${goodAds.length} valid, ${warnings.length} warning(s)`);
 
-  const csv = buildCSV(goodAds);
+  const csvs = buildCsvFiles(goodAds);
   const html = buildHTML({
     ads: goodAds,
-    csv,
+    csvs,
     generatedAt: new Date().toISOString(),
     warnings,
   });
 
-  const csvPath = path.join(outDir, `${stamp}-${CAMPAIGN_NAME}.csv`);
+  const skeletonPath = path.join(outDir, `${stamp}-01-${CAMPAIGN_NAME}-skeleton.csv`);
+  const adsPath = path.join(outDir, `${stamp}-02-${CAMPAIGN_NAME}-ads.csv`);
+  const notesPath = path.join(outDir, `${stamp}-03-${CAMPAIGN_NAME}-ad-notes.csv`);
   const htmlPath = path.join(outDir, `${stamp}-${CAMPAIGN_NAME}.html`);
   const jsonPath = path.join(outDir, `${stamp}-${CAMPAIGN_NAME}.json`);
 
-  await fs.writeFile(csvPath, csv);
+  await fs.writeFile(skeletonPath, csvs.skeleton);
+  await fs.writeFile(adsPath, csvs.ads);
+  await fs.writeFile(notesPath, csvs.notes);
   await fs.writeFile(htmlPath, html);
   await fs.writeFile(jsonPath, JSON.stringify({ ads: goodAds, warnings, raw: parsed }, null, 2));
 
   console.log('\n✅ Done.');
-  console.log(`  CSV:  ${csvPath}`);
-  console.log(`  HTML: ${htmlPath}`);
-  console.log(`  JSON: ${jsonPath}`);
+  console.log(`  CSV 01 (skeleton): ${skeletonPath}`);
+  console.log(`  CSV 02 (ads):      ${adsPath}`);
+  console.log(`  CSV 03 (notes):    ${notesPath}`);
+  console.log(`  HTML:              ${htmlPath}`);
+  console.log(`  JSON:              ${jsonPath}`);
   if (warnings.length > 0) {
     console.log('\n⚠ Warnings:');
     for (const w of warnings) console.log(`  - ${w}`);
