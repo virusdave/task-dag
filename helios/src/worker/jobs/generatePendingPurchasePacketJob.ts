@@ -194,16 +194,48 @@ const ProductGroupDetailSchema = z.object({
   subcategory: z.object({ name: z.string().nullable().optional() }).passthrough().nullable().optional(),
 }).passthrough()
 
+/**
+ * LLM teachers (especially Gemma 3 27b) frequently emit confidence as a
+ * percentage (e.g. `90`) instead of the documented 0-1 probability. We
+ * want a single bad confidence value not to nuke the entire envelope
+ * and dump the row into `unresolved`, since the *classification* is
+ * usually still correct. Preprocess: clamp anything > 1 by dividing by
+ * 100 (and clamp the result into [0,1]).
+ */
+const LlmConfidenceSchema = z.preprocess((value) => {
+  if (typeof value === 'string') {
+    const trimmed = value.trim().replace(/%$/u, '')
+    const parsed = Number(trimmed)
+    if (!Number.isFinite(parsed)) return value
+    value = parsed
+  }
+  if (typeof value !== 'number' || !Number.isFinite(value)) return value
+  if (value > 1) return Math.min(value / 100, 1)
+  if (value < 0) return 0
+  return value
+}, z.number().min(0).max(1))
+
+/**
+ * Same defensiveness for size: the LLM sometimes returns `3.5` (a
+ * number, no unit) for a 3.5g flower jar. Coerce numbers to strings so
+ * downstream normalization (`normalizePendingPurchaseLlmClassification`)
+ * can re-attach the unit via the parsed size token.
+ */
+const LlmSizeSchema = z.preprocess((value) => {
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value)
+  return value
+}, z.string().trim().min(1))
+
 const PendingPurchaseLlmClassificationSchema = z.object({
   brand: z.string().trim().min(1),
   category: z.string().trim().min(1),
-  confidence: z.coerce.number().min(0).max(1),
+  confidence: LlmConfidenceSchema,
   groupName: z.string().trim().min(1),
   packCount: z.coerce.number().int().positive(),
   parserFeasibility: z.enum(['easy-rule-based', 'likely-llm-only', 'needs-more-context']),
   prevalence: z.string().trim().min(1).nullable().optional(),
   rationale: z.string().trim().min(1),
-  size: z.string().trim().min(1),
+  size: LlmSizeSchema,
   strainName: z.string().trim().nullable().optional(),
   subcategory: z.string().trim().min(1).nullable().optional(),
   variantName: z.string().trim().min(1),
@@ -214,13 +246,13 @@ const PendingPurchaseLlmClassificationSchema = z.object({
 const PendingPurchaseLlmBrandAliasCandidateSchema = z.object({
   aliasType: z.enum(['exact', 'prefix']),
   aliasValue: z.string().trim().min(1),
-  confidence: z.coerce.number().min(0).max(1),
+  confidence: LlmConfidenceSchema,
   rationale: z.string().trim().min(1),
   riskFlags: z.array(z.string().trim().min(1)).default([]),
 }).passthrough()
 
 const PendingPurchaseLlmExactNameRuleCandidateSchema = z.object({
-  confidence: z.coerce.number().min(0).max(1),
+  confidence: LlmConfidenceSchema,
   rationale: z.string().trim().min(1),
   rawName: z.string().trim().min(1),
   riskFlags: z.array(z.string().trim().min(1)).default([]),
@@ -228,7 +260,7 @@ const PendingPurchaseLlmExactNameRuleCandidateSchema = z.object({
 }).passthrough()
 
 const PendingPurchaseLlmGeneralizedRuleCandidateSchema = z.object({
-  confidence: z.coerce.number().min(0).max(1),
+  confidence: LlmConfidenceSchema,
   matchPayload: z.preprocess(
     (value) => (value == null ? {} : value),
     z.record(z.string(), z.unknown()).default({}),
@@ -2172,6 +2204,8 @@ async function classifyPendingPurchaseNameWithLlmFallback(input: {
               'Use null for subcategory or prevalence when not applicable.',
               'Use aliasType only from: exact, prefix.',
               'Use ruleKind only from: prefix, regex, template.',
+              'Every confidence field is a probability between 0 and 1 inclusive (e.g. 0.92, NOT 92 or 92%). Do not emit values above 1.',
+              'size is always a string with its unit attached, e.g. "3.5g", "1g", "100mg", "750mg" — never a bare number.',
               'Never use generic words like Beverage, Vape, or Gummy Brick by themselves as the full groupName when a flavor, cultivar, or family differentiator is present.',
               'If live anchor examples for the same brand and family are provided, follow their packCount, size, and variantTab pattern unless the raw input clearly contradicts them.',
               'For beverage and edible flavors, strainName is usually empty unless the name clearly represents a cultivar lane.',
