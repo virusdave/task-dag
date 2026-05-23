@@ -238,7 +238,14 @@ const PendingPurchaseLlmClassificationSchema = z.object({
   size: LlmSizeSchema,
   strainName: z.string().trim().nullable().optional(),
   subcategory: z.string().trim().min(1).nullable().optional(),
-  variantName: z.string().trim().min(1),
+  /**
+   * The LLM frequently emits `variantName: null` for canonical-size
+   * categories like Flower where the variant name is "just the size"
+   * (e.g. for "Herb 3.5g Durban Poison" the model returns null instead
+   * of "3.5g"). Accept null/missing here; the downstream normalizer
+   * derives the canonical variant name from variantTab/size + category.
+   */
+  variantName: z.string().trim().min(1).nullable().optional(),
   variantTab: z.string().trim().min(1).nullable().optional(),
   warningFlags: z.array(z.string().trim().min(1)).default([]),
 }).passthrough()
@@ -2525,7 +2532,7 @@ const LLM_VARIANT_NAME_CONTAINER_TOKENS = new Set([
 ])
 
 function repairLlmVariantName(
-  rawVariantName: string,
+  rawVariantName: string | null | undefined,
   category: string,
   packCount: number,
   normalizedSize: string,
@@ -2534,8 +2541,14 @@ function repairLlmVariantName(
   if (category === 'Flower') {
     return packCount > 1 ? normalizedTab : normalizedSize
   }
-  const stripped = stripTrailingContainerTokens(rawVariantName)
-  return stripped.length > 0 ? stripped : rawVariantName
+  const seed = (rawVariantName ?? '').trim()
+  if (seed.length === 0) {
+    // LLM omitted/nulled variantName. Fall back to the canonical tab,
+    // which already encodes packCount/size (e.g. "10mg", "2x 100mg").
+    return normalizedTab
+  }
+  const stripped = stripTrailingContainerTokens(seed)
+  return stripped.length > 0 ? stripped : seed
 }
 
 function stripTrailingContainerTokens(value: string): string {
@@ -2595,7 +2608,7 @@ function normalizePendingPurchaseLlmClassification(
   }
 
   try {
-    return normalizeAndValidateParsedProductName(draft, classification.variantName)
+    return normalizeAndValidateParsedProductName(draft, classification.variantName ?? repairedVariantName)
   } catch {
     return null
   }
