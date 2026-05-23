@@ -1,0 +1,10 @@
+Campaign,Ad Group,Campaign Type,Status,Budget,Budget type,Bid Strategy Type,Target ROAS,Networks,Languages,Location,Max CPC,EU political ads,Comment
+BronxSmokShopCon-01,,Search,Enabled,20.00,Daily,Target ROAS,300.00%,Google search,en,,,false,"Conquest campaign 1 of 3 (max 3 RSAs/campaign). EU political ads = false (NY cannabis retailer, no EU political intent)."
+BronxSmokShopCon-01,BronxSmokShopCon-01 - 10458 conquest,,Enabled,,,,,,,,2.00,,Holds 3 RSA variants for campaign BronxSmokShopCon-01. Max CPC = $2.00.
+BronxSmokShopCon-01,,,,,,,,,,"10458, New York, United States",,,"Geo restrict to zip 10458 (Fordham / Belmont, Bronx, NY)."
+BronxSmokShopCon-02,,Search,Enabled,20.00,Daily,Target ROAS,300.00%,Google search,en,,,false,"Conquest campaign 2 of 3 (max 3 RSAs/campaign). EU political ads = false (NY cannabis retailer, no EU political intent)."
+BronxSmokShopCon-02,BronxSmokShopCon-02 - 10458 conquest,,Enabled,,,,,,,,2.00,,Holds 3 RSA variants for campaign BronxSmokShopCon-02. Max CPC = $2.00.
+BronxSmokShopCon-02,,,,,,,,,,"10458, New York, United States",,,"Geo restrict to zip 10458 (Fordham / Belmont, Bronx, NY)."
+BronxSmokShopCon-03,,Search,Enabled,20.00,Daily,Target ROAS,300.00%,Google search,en,,,false,"Conquest campaign 3 of 3 (max 3 RSAs/campaign). EU political ads = false (NY cannabis retailer, no EU political intent)."
+BronxSmokShopCon-03,BronxSmokShopCon-03 - 10458 conquest,,Enabled,,,,,,,,2.00,,Holds 2 RSA variants for campaign BronxSmokShopCon-03. Max CPC = $2.00.
+BronxSmokShopCon-03,,,,,,,,,,"10458, New York, United States",,,"Geo restrict to zip 10458 (Fordham / Belmont, Bronx, NY)."

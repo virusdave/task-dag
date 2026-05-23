@@ -1,0 +1,338 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>BronxSmokShopCon — Ads Editor bundle</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+         max-width: 920px; margin: 24px auto; padding: 0 16px; line-height: 1.5;
+         color: #222; background: #fafafa; }
+  h1 { margin-bottom: 4px; }
+  .subtitle { color: #666; margin-top: 0; }
+  .summary { background: #fff; border: 1px solid #ddd; padding: 12px 16px;
+             border-radius: 8px; margin: 16px 0; }
+  .summary dt { font-weight: 600; color: #444; }
+  .summary dd { margin: 0 0 8px 0; }
+  .download { display: inline-block; background: #2b6cb0; color: #fff;
+              padding: 10px 18px; border-radius: 6px; text-decoration: none;
+              font-weight: 600; margin: 8px 0; }
+  .download:hover { background: #1e4e8c; }
+  .warnings { background: #fff8e1; border: 1px solid #fbc02d; padding: 12px 16px;
+              border-radius: 8px; margin: 16px 0; }
+  .ad { background: #fff; border: 1px solid #ddd; padding: 16px;
+        border-radius: 8px; margin-bottom: 16px; }
+  .ad h3 { margin-top: 0; }
+  .ad .angle { color: #555; }
+  .len { color: #888; font-size: 0.85em; }
+  pre.csv { background: #1e1e1e; color: #ddd; padding: 12px;
+            border-radius: 8px; overflow-x: auto; font-size: 12px;
+            max-height: 320px; }
+  .instructions { background: #e8f4ff; border: 1px solid #b6dafd;
+                  padding: 12px 16px; border-radius: 8px; margin: 16px 0; }
+  code { background: #eee; padding: 1px 4px; border-radius: 3px; }
+</style>
+</head>
+<body>
+  <h1>BronxSmokShopCon</h1>
+  <p class="subtitle">Brand-new conquest campaign for zip 10458 —
+     generated 2026-05-23T22:38:18.485Z</p>
+
+  <div class="summary">
+    <dl>
+      <dt>Campaigns</dt><dd>3 campaigns (max 3 RSAs each):<ul style="margin:4px 0"><li><code>BronxSmokShopCon-01</code> → 3 RSAs</li><li><code>BronxSmokShopCon-02</code> → 3 RSAs</li><li><code>BronxSmokShopCon-03</code> → 2 RSAs</li></ul></dd>
+      <dt>Geo target</dt><dd>Zip 10458 (Fordham / Belmont, Bronx, NY) — applied to every campaign</dd>
+      <dt>Landing page</dt><dd><a href="https://freshlybaked.us/bronx/branding/herb/0">https://freshlybaked.us/bronx/branding/herb/0</a></dd>
+      <dt>Ad count</dt><dd>8 RSAs total (each ≥3 headlines, ≥2 descriptions)</dd>
+      <dt>Keywords (per ad group)</dt><dd>5 exact + 12 phrase = 17 positive, plus 10 negative</dd>
+      <dt>Bidding</dt><dd>Maximize conversion value, Target ROAS 300.00% (Smart Bidding — fully automated). Per-ad-group Max CPC of $2.00 is emitted for fallback only and is ignored while Target ROAS is active.</dd>
+      <dt>Initial state</dt><dd>Campaigns, ad groups, keywords, and ads are <strong>all Enabled</strong>. The bundle is turn-key — clicking Post in Ads Editor launches immediately. If you want a review pass, pause in Editor before posting.</dd>
+      <dt>Initial budget</dt><dd>$20.00/day <em>per campaign</em> (edit in Ads Editor before posting)</dd>
+    </dl>
+    <a class="download" download="01-BronxSmokShopCon-skeleton.csv"
+       href="data:text/csv;base64,Q2FtcGFpZ24sQWQgR3JvdXAsQ2FtcGFpZ24gVHlwZSxTdGF0dXMsQnVkZ2V0LEJ1ZGdldCB0eXBlLEJpZCBTdHJhdGVneSBUeXBlLFRhcmdldCBST0FTLE5ldHdvcmtzLExhbmd1YWdlcyxMb2NhdGlvbixNYXggQ1BDLEVVIHBvbGl0aWNhbCBhZHMsQ29tbWVudApCcm9ueFNtb2tTaG9wQ29uLTAxLCxTZWFyY2gsRW5hYmxlZCwyMC4wMCxEYWlseSxUYXJnZXQgUk9BUywzMDAuMDAlLEdvb2dsZSBzZWFyY2gsZW4sLCxmYWxzZSwiQ29ucXVlc3QgY2FtcGFpZ24gMSBvZiAzIChtYXggMyBSU0FzL2NhbXBhaWduKS4gRVUgcG9saXRpY2FsIGFkcyA9IGZhbHNlIChOWSBjYW5uYWJpcyByZXRhaWxlciwgbm8gRVUgcG9saXRpY2FsIGludGVudCkuIgpCcm9ueFNtb2tTaG9wQ29uLTAxLEJyb254U21va1Nob3BDb24tMDEgLSAxMDQ1OCBjb25xdWVzdCwsRW5hYmxlZCwsLCwsLCwsMi4wMCwsSG9sZHMgMyBSU0EgdmFyaWFudHMgZm9yIGNhbXBhaWduIEJyb254U21va1Nob3BDb24tMDEuIE1heCBDUEMgPSAkMi4wMC4KQnJvbnhTbW9rU2hvcENvbi0wMSwsLCwsLCwsLCwiMTA0NTgsIE5ldyBZb3JrLCBVbml0ZWQgU3RhdGVzIiwsLCJHZW8gcmVzdHJpY3QgdG8gemlwIDEwNDU4IChGb3JkaGFtIC8gQmVsbW9udCwgQnJvbngsIE5ZKS4iCkJyb254U21va1Nob3BDb24tMDIsLFNlYXJjaCxFbmFibGVkLDIwLjAwLERhaWx5LFRhcmdldCBST0FTLDMwMC4wMCUsR29vZ2xlIHNlYXJjaCxlbiwsLGZhbHNlLCJDb25xdWVzdCBjYW1wYWlnbiAyIG9mIDMgKG1heCAzIFJTQXMvY2FtcGFpZ24pLiBFVSBwb2xpdGljYWwgYWRzID0gZmFsc2UgKE5ZIGNhbm5hYmlzIHJldGFpbGVyLCBubyBFVSBwb2xpdGljYWwgaW50ZW50KS4iCkJyb254U21va1Nob3BDb24tMDIsQnJvbnhTbW9rU2hvcENvbi0wMiAtIDEwNDU4IGNvbnF1ZXN0LCxFbmFibGVkLCwsLCwsLCwyLjAwLCxIb2xkcyAzIFJTQSB2YXJpYW50cyBmb3IgY2FtcGFpZ24gQnJvbnhTbW9rU2hvcENvbi0wMi4gTWF4IENQQyA9ICQyLjAwLgpCcm9ueFNtb2tTaG9wQ29uLTAyLCwsLCwsLCwsLCIxMDQ1OCwgTmV3IFlvcmssIFVuaXRlZCBTdGF0ZXMiLCwsIkdlbyByZXN0cmljdCB0byB6aXAgMTA0NTggKEZvcmRoYW0gLyBCZWxtb250LCBCcm9ueCwgTlkpLiIKQnJvbnhTbW9rU2hvcENvbi0wMywsU2VhcmNoLEVuYWJsZWQsMjAuMDAsRGFpbHksVGFyZ2V0IFJPQVMsMzAwLjAwJSxHb29nbGUgc2VhcmNoLGVuLCwsZmFsc2UsIkNvbnF1ZXN0IGNhbXBhaWduIDMgb2YgMyAobWF4IDMgUlNBcy9jYW1wYWlnbikuIEVVIHBvbGl0aWNhbCBhZHMgPSBmYWxzZSAoTlkgY2FubmFiaXMgcmV0YWlsZXIsIG5vIEVVIHBvbGl0aWNhbCBpbnRlbnQpLiIKQnJvbnhTbW9rU2hvcENvbi0wMyxCcm9ueFNtb2tTaG9wQ29uLTAzIC0gMTA0NTggY29ucXVlc3QsLEVuYWJsZWQsLCwsLCwsLDIuMDAsLEhvbGRzIDIgUlNBIHZhcmlhbnRzIGZvciBjYW1wYWlnbiBCcm9ueFNtb2tTaG9wQ29uLTAzLiBNYXggQ1BDID0gJDIuMDAuCkJyb254U21va1Nob3BDb24tMDMsLCwsLCwsLCwsIjEwNDU4LCBOZXcgWW9yaywgVW5pdGVkIFN0YXRlcyIsLCwiR2VvIHJlc3RyaWN0IHRvIHppcCAxMDQ1OCAoRm9yZGhhbSAvIEJlbG1vbnQsIEJyb254LCBOWSkuIgo=">⬇ 01 — 3 Campaigns + Ad Groups + Locations (1.6 KB)</a>
+    <a class="download" download="02-BronxSmokShopCon-keywords.csv"
+       href="data:text/csv;base64,Q2FtcGFpZ24sQWQgR3JvdXAsS2V5d29yZCxNYXRjaCBUeXBlLFN0YXR1cwpCcm9ueFNtb2tTaG9wQ29uLTAxLEJyb254U21va1Nob3BDb24tMDEgLSAxMDQ1OCBjb25xdWVzdCxzbW9rZSBzaG9wIGJyb254LEV4YWN0LEVuYWJsZWQKQnJvbnhTbW9rU2hvcENvbi0wMSxCcm9ueFNtb2tTaG9wQ29uLTAxIC0gMTA0NTggY29ucXVlc3Qsd2VlZCBkZWxpdmVyeSAxMDQ1OCxFeGFjdCxFbmFibGVkCkJyb254U21va1Nob3BDb24tMDEsQnJvbnhTbW9rU2hvcENvbi0wMSAtIDEwNDU4IGNvbnF1ZXN0LGxpY2Vuc2VkIGRpc3BlbnNhcnkgYnJvbngsRXhhY3QsRW5hYmxlZApCcm9ueFNtb2tTaG9wQ29uLTAxLEJyb254U21va1Nob3BDb24tMDEgLSAxMDQ1OCBjb25xdWVzdCxjYW5uYWJpcyBzdG9yZSAxMDQ1OCxFeGFjdCxFbmFibGVkCkJyb254U21va1Nob3BDb24tMDEsQnJvbnhTbW9rU2hvcENvbi0wMSAtIDEwNDU4IGNvbnF1ZXN0LGJyb254IGNhbm5hYmlzIGRlbGl2ZXJ5LEV4YWN0LEVuYWJsZWQKQnJvbnhTbW9rU2hvcENvbi0wMSxCcm9ueFNtb2tTaG9wQ29uLTAxIC0gMTA0NTggY29ucXVlc3Qsc21va2Ugc2hvcCBuZWFyIG1lLFBocmFzZSxFbmFibGVkCkJyb254U21va1Nob3BDb24tMDEsQnJvbnhTbW9rU2hvcENvbi0wMSAtIDEwNDU4IGNvbnF1ZXN0LHdoZXJlIHRvIGJ1eSB3ZWVkIGJyb254LFBocmFzZSxFbmFibGVkCkJyb254U21va1Nob3BDb24tMDEsQnJvbnhTbW9rU2hvcENvbi0wMSAtIDEwNDU4IGNvbnF1ZXN0LGZvcmRoYW0gY2FubmFiaXMgc3RvcmUsUGhyYXNlLEVuYWJsZWQKQnJvbnhTbW9rU2hvcENvbi0wMSxCcm9ueFNtb2tTaG9wQ29uLTAxIC0gMTA0NTggY29ucXVlc3QsYnJvbnggd2VlZCBkZWxpdmVyeSxQaHJhc2UsRW5hYmxlZApCcm9ueFNtb2tTaG9wQ29uLTAxLEJyb254U21va1Nob3BDb24tMDEgLSAxMDQ1OCBjb25xdWVzdCxjYW5uYWJpcyBkaXNwZW5zYXJ5IGJyb254LFBocmFzZSxFbmFibGVkCkJyb254U21va1Nob3BDb24tMDEsQnJvbnhTbW9rU2hvcENvbi0wMSAtIDEwNDU4IGNvbnF1ZXN0LHdlZWQgc2hvcHMgaW4gYnJvbngsUGhyYXNlLEVuYWJsZWQKQnJvbnhTbW9rU2hvcENvbi0wMSxCcm9ueFNtb2tTaG9wQ29uLTAxIC0gMTA0NTggY29ucXVlc3QsYmVzdCBjYW5uYWJpcyBicm9ueCxQaHJhc2UsRW5hYmxlZApCcm9ueFNtb2tTaG9wQ29uLTAxLEJyb254U21va1Nob3BDb24tMDEgLSAxMDQ1OCBjb25xdWVzdCxicm9ueCBkaXNwZW5zYXJ5IG5lYXIgbWUsUGhyYXNlLEVuYWJsZWQKQnJvbnhTbW9rU2hvcENvbi0wMSxCcm9ueFNtb2tTaG9wQ29uLTAxIC0gMTA0NTggY29ucXVlc3QsY2FubmFiaXMgc3RvcmUgbmVhciAxMDQ1OCxQaHJhc2UsRW5hYmxlZApCcm9ueFNtb2tTaG9wQ29uLTAxLEJyb254U21va1Nob3BDb24tMDEgLSAxMDQ1OCBjb25xdWVzdCxsaWNlbnNlZCBjYW5uYWJpcyBicm9ueCxQaHJhc2UsRW5hYmxlZApCcm9ueFNtb2tTaG9wQ29uLTAxLEJyb254U21va1Nob3BDb24tMDEgLSAxMDQ1OCBjb25xdWVzdCxidXkgd2VlZCBpbiBicm9ueCxQaHJhc2UsRW5hYmxlZApCcm9ueFNtb2tTaG9wQ29uLTAxLEJyb254U21va1Nob3BDb24tMDEgLSAxMDQ1OCBjb25xdWVzdCxmb3JkaGFtIHNtb2tlIHNob3AsUGhyYXNlLEVuYWJsZWQKQnJvbnhTbW9rU2hvcENvbi0wMSxCcm9ueFNtb2tTaG9wQ29uLTAxIC0gMTA0NTggY29ucXVlc3Qsc3ludGhldGljLE5lZ2F0aXZlIHBocmFzZSxFbmFibGVkCkJyb254U21va1Nob3BDb24tMDEsQnJvbnhTbW9rU2hvcENvbi0wMSAtIDEwNDU4IGNvbnF1ZXN0LGsyLE5lZ2F0aXZlIHBocmFzZSxFbmFibGVkCkJyb254U21va1Nob3BDb24tMDEsQnJvbnhTbW9rU2hvcENvbi0wMSAtIDEwNDU4IGNvbnF1ZXN0LHNwaWNlLE5lZ2F0aXZlIHBocmFzZSxFbmFibGVkCkJyb254U21va1Nob3BDb24tMDEsQnJvbnhTbW9rU2hvcENvbi0wMSAtIDEwNDU4IGNvbnF1ZXN0LGZyZWUgd2VlZCxOZWdhdGl2ZSBwaHJhc2UsRW5hYmxlZApCcm9ueFNtb2tTaG9wQ29uLTAxLEJyb254U21va1Nob3BDb24tMDEgLSAxMDQ1OCBjb25xdWVzdCxjYmQgb25seSxOZWdhdGl2ZSBwaHJhc2UsRW5hYmxlZApCcm9ueFNtb2tTaG9wQ29uLTAxLEJyb254U21va1Nob3BDb24tMDEgLSAxMDQ1OCBjb25xdWVzdCxqb2JzLE5lZ2F0aXZlIHBocmFzZSxFbmFibGVkCkJyb254U21va1Nob3BDb24tMDEsQnJvbnhTbW9rU2hvcENvbi0wMSAtIDEwNDU4IGNvbnF1ZXN0LHdob2xlc2FsZSxOZWdhdGl2ZSBwaHJhc2UsRW5hYmxlZApCcm9ueFNtb2tTaG9wQ29uLTAxLEJyb254U21va1Nob3BDb24tMDEgLSAxMDQ1OCBjb25xdWVzdCxtZWRpY2FsIGNhcmQsTmVnYXRpdmUgcGhyYXNlLEVuYWJsZWQKQnJvbnhTbW9rU2hvcENvbi0wMSxCcm9ueFNtb2tTaG9wQ29uLTAxIC0gMTA0NTggY29ucXVlc3Qsb25saW5lIG9ubHksTmVnYXRpdmUgcGhyYXNlLEVuYWJsZWQKQnJvbnhTbW9rU2hvcENvbi0wMSxCcm9ueFNtb2tTaG9wQ29uLTAxIC0gMTA0NTggY29ucXVlc3Qsb3V0IG9mIHN0YXRlLE5lZ2F0aXZlIHBocmFzZSxFbmFibGVkCkJyb254U21va1Nob3BDb24tMDIsQnJvbnhTbW9rU2hvcENvbi0wMiAtIDEwNDU4IGNvbnF1ZXN0LHNtb2tlIHNob3AgYnJvbngsRXhhY3QsRW5hYmxlZApCcm9ueFNtb2tTaG9wQ29uLTAyLEJyb254U21va1Nob3BDb24tMDIgLSAxMDQ1OCBjb25xdWVzdCx3ZWVkIGRlbGl2ZXJ5IDEwNDU4LEV4YWN0LEVuYWJsZWQKQnJvbnhTbW9rU2hvcENvbi0wMixCcm9ueFNtb2tTaG9wQ29uLTAyIC0gMTA0NTggY29ucXVlc3QsbGljZW5zZWQgZGlzcGVuc2FyeSBicm9ueCxFeGFjdCxFbmFibGVkCkJyb254U21va1Nob3BDb24tMDIsQnJvbnhTbW9rU2hvcENvbi0wMiAtIDEwNDU4IGNvbnF1ZXN0LGNhbm5hYmlzIHN0b3JlIDEwNDU4LEV4YWN0LEVuYWJsZWQKQnJvbnhTbW9rU2hvcENvbi0wMixCcm9ueFNtb2tTaG9wQ29uLTAyIC0gMTA0NTggY29ucXVlc3QsYnJvbnggY2FubmFiaXMgZGVsaXZlcnksRXhhY3QsRW5hYmxlZApCcm9ueFNtb2tTaG9wQ29uLTAyLEJyb254U21va1Nob3BDb24tMDIgLSAxMDQ1OCBjb25xdWVzdCxzbW9rZSBzaG9wIG5lYXIgbWUsUGhyYXNlLEVuYWJsZWQKQnJvbnhTbW9rU2hvcENvbi0wMixCcm9ueFNtb2tTaG9wQ29uLTAyIC0gMTA0NTggY29ucXVlc3Qsd2hlcmUgdG8gYnV5IHdlZWQgYnJvbngsUGhyYXNlLEVuYWJsZWQKQnJvbnhTbW9rU2hvcENvbi0wMixCcm9ueFNtb2tTaG9wQ29uLTAyIC0gMTA0NTggY29ucXVlc3QsZm9yZGhhbSBjYW5uYWJpcyBzdG9yZSxQaHJhc2UsRW5hYmxlZApCcm9ueFNtb2tTaG9wQ29uLTAyLEJyb254U21va1Nob3BDb24tMDIgLSAxMDQ1OCBjb25xdWVzdCxicm9ueCB3ZWVkIGRlbGl2ZXJ5LFBocmFzZSxFbmFibGVkCkJyb254U21va1Nob3BDb24tMDIsQnJvbnhTbW9rU2hvcENvbi0wMiAtIDEwNDU4IGNvbnF1ZXN0LGNhbm5hYmlzIGRpc3BlbnNhcnkgYnJvbngsUGhyYXNlLEVuYWJsZWQKQnJvbnhTbW9rU2hvcENvbi0wMixCcm9ueFNtb2tTaG9wQ29uLTAyIC0gMTA0NTggY29ucXVlc3Qsd2VlZCBzaG9wcyBpbiBicm9ueCxQaHJhc2UsRW5hYmxlZApCcm9ueFNtb2tTaG9wQ29uLTAyLEJyb254U21va1Nob3BDb24tMDIgLSAxMDQ1OCBjb25xdWVzdCxiZXN0IGNhbm5hYmlzIGJyb254LFBocmFzZSxFbmFibGVkCkJyb254U21va1Nob3BDb24tMDIsQnJvbnhTbW9rU2hvcENvbi0wMiAtIDEwNDU4IGNvbnF1ZXN0LGJyb254IGRpc3BlbnNhcnkgbmVhciBtZSxQaHJhc2UsRW5hYmxlZApCcm9ueFNtb2tTaG9wQ29uLTAyLEJyb254U21va1Nob3BDb24tMDIgLSAxMDQ1OCBjb25xdWVzdCxjYW5uYWJpcyBzdG9yZSBuZWFyIDEwNDU4LFBocmFzZSxFbmFibGVkCkJyb254U21va1Nob3BDb24tMDIsQnJvbnhTbW9rU2hvcENvbi0wMiAtIDEwNDU4IGNvbnF1ZXN0LGxpY2Vuc2VkIGNhbm5hYmlzIGJyb254LFBocmFzZSxFbmFibGVkCkJyb254U21va1Nob3BDb24tMDIsQnJvbnhTbW9rU2hvcENvbi0wMiAtIDEwNDU4IGNvbnF1ZXN0LGJ1eSB3ZWVkIGluIGJyb254LFBocmFzZSxFbmFibGVkCkJyb254U21va1Nob3BDb24tMDIsQnJvbnhTbW9rU2hvcENvbi0wMiAtIDEwNDU4IGNvbnF1ZXN0LGZvcmRoYW0gc21va2Ugc2hvcCxQaHJhc2UsRW5hYmxlZApCcm9ueFNtb2tTaG9wQ29uLTAyLEJyb254U21va1Nob3BDb24tMDIgLSAxMDQ1OCBjb25xdWVzdCxzeW50aGV0aWMsTmVnYXRpdmUgcGhyYXNlLEVuYWJsZWQKQnJvbnhTbW9rU2hvcENvbi0wMixCcm9ueFNtb2tTaG9wQ29uLTAyIC0gMTA0NTggY29ucXVlc3QsazIsTmVnYXRpdmUgcGhyYXNlLEVuYWJsZWQKQnJvbnhTbW9rU2hvcENvbi0wMixCcm9ueFNtb2tTaG9wQ29uLTAyIC0gMTA0NTggY29ucXVlc3Qsc3BpY2UsTmVnYXRpdmUgcGhyYXNlLEVuYWJsZWQKQnJvbnhTbW9rU2hvcENvbi0wMixCcm9ueFNtb2tTaG9wQ29uLTAyIC0gMTA0NTggY29ucXVlc3QsZnJlZSB3ZWVkLE5lZ2F0aXZlIHBocmFzZSxFbmFibGVkCkJyb254U21va1Nob3BDb24tMDIsQnJvbnhTbW9rU2hvcENvbi0wMiAtIDEwNDU4IGNvbnF1ZXN0LGNiZCBvbmx5LE5lZ2F0aXZlIHBocmFzZSxFbmFibGVkCkJyb254U21va1Nob3BDb24tMDIsQnJvbnhTbW9rU2hvcENvbi0wMiAtIDEwNDU4IGNvbnF1ZXN0LGpvYnMsTmVnYXRpdmUgcGhyYXNlLEVuYWJsZWQKQnJvbnhTbW9rU2hvcENvbi0wMixCcm9ueFNtb2tTaG9wQ29uLTAyIC0gMTA0NTggY29ucXVlc3Qsd2hvbGVzYWxlLE5lZ2F0aXZlIHBocmFzZSxFbmFibGVkCkJyb254U21va1Nob3BDb24tMDIsQnJvbnhTbW9rU2hvcENvbi0wMiAtIDEwNDU4IGNvbnF1ZXN0LG1lZGljYWwgY2FyZCxOZWdhdGl2ZSBwaHJhc2UsRW5hYmxlZApCcm9ueFNtb2tTaG9wQ29uLTAyLEJyb254U21va1Nob3BDb24tMDIgLSAxMDQ1OCBjb25xdWVzdCxvbmxpbmUgb25seSxOZWdhdGl2ZSBwaHJhc2UsRW5hYmxlZApCcm9ueFNtb2tTaG9wQ29uLTAyLEJyb254U21va1Nob3BDb24tMDIgLSAxMDQ1OCBjb25xdWVzdCxvdXQgb2Ygc3RhdGUsTmVnYXRpdmUgcGhyYXNlLEVuYWJsZWQKQnJvbnhTbW9rU2hvcENvbi0wMyxCcm9ueFNtb2tTaG9wQ29uLTAzIC0gMTA0NTggY29ucXVlc3Qsc21va2Ugc2hvcCBicm9ueCxFeGFjdCxFbmFibGVkCkJyb254U21va1Nob3BDb24tMDMsQnJvbnhTbW9rU2hvcENvbi0wMyAtIDEwNDU4IGNvbnF1ZXN0LHdlZWQgZGVsaXZlcnkgMTA0NTgsRXhhY3QsRW5hYmxlZApCcm9ueFNtb2tTaG9wQ29uLTAzLEJyb254U21va1Nob3BDb24tMDMgLSAxMDQ1OCBjb25xdWVzdCxsaWNlbnNlZCBkaXNwZW5zYXJ5IGJyb254LEV4YWN0LEVuYWJsZWQKQnJvbnhTbW9rU2hvcENvbi0wMyxCcm9ueFNtb2tTaG9wQ29uLTAzIC0gMTA0NTggY29ucXVlc3QsY2FubmFiaXMgc3RvcmUgMTA0NTgsRXhhY3QsRW5hYmxlZApCcm9ueFNtb2tTaG9wQ29uLTAzLEJyb254U21va1Nob3BDb24tMDMgLSAxMDQ1OCBjb25xdWVzdCxicm9ueCBjYW5uYWJpcyBkZWxpdmVyeSxFeGFjdCxFbmFibGVkCkJyb254U21va1Nob3BDb24tMDMsQnJvbnhTbW9rU2hvcENvbi0wMyAtIDEwNDU4IGNvbnF1ZXN0LHNtb2tlIHNob3AgbmVhciBtZSxQaHJhc2UsRW5hYmxlZApCcm9ueFNtb2tTaG9wQ29uLTAzLEJyb254U21va1Nob3BDb24tMDMgLSAxMDQ1OCBjb25xdWVzdCx3aGVyZSB0byBidXkgd2VlZCBicm9ueCxQaHJhc2UsRW5hYmxlZApCcm9ueFNtb2tTaG9wQ29uLTAzLEJyb254U21va1Nob3BDb24tMDMgLSAxMDQ1OCBjb25xdWVzdCxmb3JkaGFtIGNhbm5hYmlzIHN0b3JlLFBocmFzZSxFbmFibGVkCkJyb254U21va1Nob3BDb24tMDMsQnJvbnhTbW9rU2hvcENvbi0wMyAtIDEwNDU4IGNvbnF1ZXN0LGJyb254IHdlZWQgZGVsaXZlcnksUGhyYXNlLEVuYWJsZWQKQnJvbnhTbW9rU2hvcENvbi0wMyxCcm9ueFNtb2tTaG9wQ29uLTAzIC0gMTA0NTggY29ucXVlc3QsY2FubmFiaXMgZGlzcGVuc2FyeSBicm9ueCxQaHJhc2UsRW5hYmxlZApCcm9ueFNtb2tTaG9wQ29uLTAzLEJyb254U21va1Nob3BDb24tMDMgLSAxMDQ1OCBjb25xdWVzdCx3ZWVkIHNob3BzIGluIGJyb254LFBocmFzZSxFbmFibGVkCkJyb254U21va1Nob3BDb24tMDMsQnJvbnhTbW9rU2hvcENvbi0wMyAtIDEwNDU4IGNvbnF1ZXN0LGJlc3QgY2FubmFiaXMgYnJvbngsUGhyYXNlLEVuYWJsZWQKQnJvbnhTbW9rU2hvcENvbi0wMyxCcm9ueFNtb2tTaG9wQ29uLTAzIC0gMTA0NTggY29ucXVlc3QsYnJvbnggZGlzcGVuc2FyeSBuZWFyIG1lLFBocmFzZSxFbmFibGVkCkJyb254U21va1Nob3BDb24tMDMsQnJvbnhTbW9rU2hvcENvbi0wMyAtIDEwNDU4IGNvbnF1ZXN0LGNhbm5hYmlzIHN0b3JlIG5lYXIgMTA0NTgsUGhyYXNlLEVuYWJsZWQKQnJvbnhTbW9rU2hvcENvbi0wMyxCcm9ueFNtb2tTaG9wQ29uLTAzIC0gMTA0NTggY29ucXVlc3QsbGljZW5zZWQgY2FubmFiaXMgYnJvbngsUGhyYXNlLEVuYWJsZWQKQnJvbnhTbW9rU2hvcENvbi0wMyxCcm9ueFNtb2tTaG9wQ29uLTAzIC0gMTA0NTggY29ucXVlc3QsYnV5IHdlZWQgaW4gYnJvbngsUGhyYXNlLEVuYWJsZWQKQnJvbnhTbW9rU2hvcENvbi0wMyxCcm9ueFNtb2tTaG9wQ29uLTAzIC0gMTA0NTggY29ucXVlc3QsZm9yZGhhbSBzbW9rZSBzaG9wLFBocmFzZSxFbmFibGVkCkJyb254U21va1Nob3BDb24tMDMsQnJvbnhTbW9rU2hvcENvbi0wMyAtIDEwNDU4IGNvbnF1ZXN0LHN5bnRoZXRpYyxOZWdhdGl2ZSBwaHJhc2UsRW5hYmxlZApCcm9ueFNtb2tTaG9wQ29uLTAzLEJyb254U21va1Nob3BDb24tMDMgLSAxMDQ1OCBjb25xdWVzdCxrMixOZWdhdGl2ZSBwaHJhc2UsRW5hYmxlZApCcm9ueFNtb2tTaG9wQ29uLTAzLEJyb254U21va1Nob3BDb24tMDMgLSAxMDQ1OCBjb25xdWVzdCxzcGljZSxOZWdhdGl2ZSBwaHJhc2UsRW5hYmxlZApCcm9ueFNtb2tTaG9wQ29uLTAzLEJyb254U21va1Nob3BDb24tMDMgLSAxMDQ1OCBjb25xdWVzdCxmcmVlIHdlZWQsTmVnYXRpdmUgcGhyYXNlLEVuYWJsZWQKQnJvbnhTbW9rU2hvcENvbi0wMyxCcm9ueFNtb2tTaG9wQ29uLTAzIC0gMTA0NTggY29ucXVlc3QsY2JkIG9ubHksTmVnYXRpdmUgcGhyYXNlLEVuYWJsZWQKQnJvbnhTbW9rU2hvcENvbi0wMyxCcm9ueFNtb2tTaG9wQ29uLTAzIC0gMTA0NTggY29ucXVlc3Qsam9icyxOZWdhdGl2ZSBwaHJhc2UsRW5hYmxlZApCcm9ueFNtb2tTaG9wQ29uLTAzLEJyb254U21va1Nob3BDb24tMDMgLSAxMDQ1OCBjb25xdWVzdCx3aG9sZXNhbGUsTmVnYXRpdmUgcGhyYXNlLEVuYWJsZWQKQnJvbnhTbW9rU2hvcENvbi0wMyxCcm9ueFNtb2tTaG9wQ29uLTAzIC0gMTA0NTggY29ucXVlc3QsbWVkaWNhbCBjYXJkLE5lZ2F0aXZlIHBocmFzZSxFbmFibGVkCkJyb254U21va1Nob3BDb24tMDMsQnJvbnhTbW9rU2hvcENvbi0wMyAtIDEwNDU4IGNvbnF1ZXN0LG9ubGluZSBvbmx5LE5lZ2F0aXZlIHBocmFzZSxFbmFibGVkCkJyb254U21va1Nob3BDb24tMDMsQnJvbnhTbW9rU2hvcENvbi0wMyAtIDEwNDU4IGNvbnF1ZXN0LG91dCBvZiBzdGF0ZSxOZWdhdGl2ZSBwaHJhc2UsRW5hYmxlZAo=">⬇ 02 — Keywords (17 positive + 10 negative per ad group, 7.3 KB)</a>
+    <a class="download" download="03-BronxSmokShopCon-ads.csv"
+       href="data:text/csv;base64,Q2FtcGFpZ24sQWQgR3JvdXAsQWQgVHlwZSxTdGF0dXMsRmluYWwgVVJMLEhlYWRsaW5lIDEsSGVhZGxpbmUgMixIZWFkbGluZSAzLEhlYWRsaW5lIDQsSGVhZGxpbmUgNSxIZWFkbGluZSA2LEhlYWRsaW5lIDcsSGVhZGxpbmUgOCxIZWFkbGluZSA5LEhlYWRsaW5lIDEwLEhlYWRsaW5lIDExLEhlYWRsaW5lIDEyLERlc2NyaXB0aW9uIDEsRGVzY3JpcHRpb24gMixEZXNjcmlwdGlvbiAzLERlc2NyaXB0aW9uIDQKQnJvbnhTbW9rU2hvcENvbi0wMSxCcm9ueFNtb2tTaG9wQ29uLTAxIC0gMTA0NTggY29ucXVlc3QsUmVzcG9uc2l2ZSBzZWFyY2ggYWQsRW5hYmxlZCxodHRwczovL2ZyZXNobHliYWtlZC51cy9icm9ueC9icmFuZGluZy9oZXJiLzAsTlktTGljZW5zZWQgaW4gMTA0NTgsRm9yZGhhbSdzIFRydXN0ZWQgU2hvcCxPcGVuIERhaWx5IGZvciBZb3UsUmVhbCBTaG9wLiBSZWFsIEhvdXJzLixWaXNpdCBVcyBUb2RheSEsUGVybWFuZW50IEJyb254IExvY2F0aW9uLExpY2Vuc2VkICYgUmVhZHksWW91ciBOZWlnaGJvcmhvb2QgU3RvcmUsRnJpZW5kbHkgU3RhZmYgQXdhaXRzLFNob3Agd2l0aCBDb25maWRlbmNlLEhlcmUgdG8gU3RheSxMb2NhbCBDYW5uYWJpcyBTb3VyY2UsRmluZCBxdWFsaXR5IGNhbm5hYmlzIGluIHRoZSBCcm9ueC4gV2UncmUgTlktbGljZW5zZWQgYW5kIGNvbW1pdHRlZCB0byBzZXJ2aW5nIDEwNDU4LiwiRnJlc2hseSBCYWtlZCBOWUM6IFlvdXIgcmVsaWFibGUsIHBlcm1hbmVudCBjYW5uYWJpcyBzaG9wIGluIEZvcmRoYW0uIE9wZW4gZGFpbHkhIixFeHBlcmllbmNlIHRoZSBkaWZmZXJlbmNlIG9mIGEgbGljZW5zZWQgZGlzcGVuc2FyeS4gV2Fsay1pbnMgYXJlIHdlbGNvbWUhLFNlcnZpbmcgdGhlIEJyb254IGNvbW11bml0eSB3aXRoIHF1YWxpdHkgYW5kIGNhcmUuIFZpc2l0IG91ciBsb2NhdGlvbiB0b2RheS4KQnJvbnhTbW9rU2hvcENvbi0wMSxCcm9ueFNtb2tTaG9wQ29uLTAxIC0gMTA0NTggY29ucXVlc3QsUmVzcG9uc2l2ZSBzZWFyY2ggYWQsRW5hYmxlZCxodHRwczovL2ZyZXNobHliYWtlZC51cy9icm9ueC9icmFuZGluZy9oZXJiLzAsT3BlbiBEYWlseSBpbiB0aGUgQnJvbngsV2Fsay1JbnMgV2VsY29tZSEsWW91ciBMb2NhbCBEaXNwZW5zYXJ5LDEwNDU4J3MgQ2FubmFiaXMgU2hvcCxWaXNpdCBVcyBOb3csTGljZW5zZWQgJiBDb252ZW5pZW50LEVhc3kgQWNjZXNzIGluIEZvcmRoYW0sRGFpbHkgQ2FubmFiaXMgQWNjZXNzLFNob3Agd2l0aCBQZWFjZSBvZiBNaW5kLE9wZW4gTGF0ZSBEYWlseSxSZWFsIENhbm5hYmlzLiBSZWFsIEVhc3kuLEJyb254J3MgQmVzdCBDaG9pY2UsRnJlc2hseSBCYWtlZCBOWUM6IE9wZW4gNyBkYXlzIGEgd2VlayBpbiAxMDQ1OC4gWW91ciBjb252ZW5pZW50IGNhbm5hYmlzIGRlc3RpbmF0aW9uLixTdG9wIGJ5IG91ciBGb3JkaGFtIGxvY2F0aW9uIGZvciBhIGZyaWVuZGx5IGV4cGVyaWVuY2UuIE5vIGFwcG9pbnRtZW50IG5lZWRlZCEsIldlJ3JlIGhlcmUgd2hlbiB5b3UgbmVlZCB1cy4gTGljZW5zZWQsIHJlZ3VsYXRlZCwgYW5kIHJlYWR5IHRvIHNlcnZlLiIsIkZpbmQgd2hhdCB5b3UncmUgbG9va2luZyBmb3IsIGV2ZXJ5IGRheS4gVmlzaXQgRnJlc2hseSBCYWtlZCBpbiB0aGUgQnJvbnguIgpCcm9ueFNtb2tTaG9wQ29uLTAxLEJyb254U21va1Nob3BDb24tMDEgLSAxMDQ1OCBjb25xdWVzdCxSZXNwb25zaXZlIHNlYXJjaCBhZCxFbmFibGVkLGh0dHBzOi8vZnJlc2hseWJha2VkLnVzL2Jyb254L2JyYW5kaW5nL2hlcmIvMCxMaWNlbnNlZC4gVGVzdGVkLiBPcGVuLixOWS1MaWNlbnNlZCBEaXNwZW5zYXJ5LFNob3Agd2l0aCBDb25maWRlbmNlLFJlZ3VsYXRlZCBDYW5uYWJpcyBIZXJlLFF1YWxpdHkgWW91IENhbiBUcnVzdCxTYWZlICYgTGVnYWwgaW4gMTA0NTgsWW91ciBUcnVzdGVkIFNvdXJjZSxWZXJpZmllZCBDYW5uYWJpcyBTaG9wLENvbXBsaWFuY2UgaXMgS2V5LE5ZIFN0YXRlIEFwcHJvdmVkLFBlYWNlIG9mIE1pbmQsTGljZW5zZWQgZm9yIFlvdSxGcmVzaGx5IEJha2VkIE5ZQzogUHJvdWRseSBsaWNlbnNlZCBieSBOZXcgWW9yayBTdGF0ZS4gUXVhbGl0eSBhbmQgc2FmZXR5IGd1YXJhbnRlZWQuLFdlIGFkaGVyZSB0byBzdHJpY3QgcmVndWxhdGlvbnMgdG8gcHJvdmlkZSBhIHNhZmUgYW5kIHJlbGlhYmxlIGV4cGVyaWVuY2UuLFNob3AgY29uZmlkZW50bHkga25vd2luZyBvdXIgcHJvZHVjdHMgYXJlIHRob3JvdWdobHkgdGVzdGVkIGFuZCBjb21wbGlhbnQuLFlvdXIgaGVhbHRoIGFuZCBzYWZldHkgYXJlIG91ciBwcmlvcml0eS4gVmlzaXQgb3VyIGxpY2Vuc2VkIGRpc3BlbnNhcnkgdG9kYXkuCkJyb254U21va1Nob3BDb24tMDIsQnJvbnhTbW9rU2hvcENvbi0wMiAtIDEwNDU4IGNvbnF1ZXN0LFJlc3BvbnNpdmUgc2VhcmNoIGFkLEVuYWJsZWQsaHR0cHM6Ly9mcmVzaGx5YmFrZWQudXMvYnJvbngvYnJhbmRpbmcvaGVyYi8wLEJyb254J3MgTG9jYWwgRGlzcGVuc2FyeSxTdXBwb3J0IExvY2FsIENhbm5hYmlzLEZvcmRoYW0ncyBGaW5lc3QsUHJvdWRseSBTZXJ2aW5nIDEwNDU4LFRoZSBCcm9ueCdzIENob2ljZSxMb2NhbCAmIExpY2Vuc2VkLFlvdXIgTmVpZ2hib3Job29kIFNob3AsIlNob3AgQnJvbngsIFNob3AgTG9jYWwiLENvbW11bml0eSBGb2N1c2VkLEJyb254IEdyb3duLFJlYWwgTG9jYWwgQ2FubmFiaXMsU2VydmluZyBPdXIgTmVpZ2hib3JzLCJGcmVzaGx5IEJha2VkIE5ZQzogQSBwcm91ZCBCcm9ueCBidXNpbmVzcywgY29tbWl0dGVkIHRvIHNlcnZpbmcgb3VyIGNvbW11bml0eS4iLCJTdXBwb3J0IGEgbG9jYWwsIGxpY2Vuc2VkIGRpc3BlbnNhcnkuIFNob3AgRnJlc2hseSBCYWtlZCBpbiAxMDQ1OC4iLFdlJ3JlIGludmVzdGVkIGluIHRoZSBCcm9ueC4gRXhwZXJpZW5jZSB0aGUgZGlmZmVyZW5jZSBvZiBhIGxvY2FsIHNob3AuLERlZGljYXRlZCB0byBwcm92aWRpbmcgcXVhbGl0eSBjYW5uYWJpcyB0byBvdXIgbmVpZ2hib3JzIGluIEZvcmRoYW0uCkJyb254U21va1Nob3BDb24tMDIsQnJvbnhTbW9rU2hvcENvbi0wMiAtIDEwNDU4IGNvbnF1ZXN0LFJlc3BvbnNpdmUgc2VhcmNoIGFkLEVuYWJsZWQsaHR0cHM6Ly9mcmVzaGx5YmFrZWQudXMvYnJvbngvYnJhbmRpbmcvaGVyYi8wLEZyaWVuZGx5IFN0YWZmIEF3YWl0cyxXZWxjb21lIHRvIEZyZXNobHkgQmFrZWQsUmVsYXhlZCBTaG9wcGluZyBFeHBlcmllbmNlLEV4cGVydCBDYW5uYWJpcyBHdWlkYW5jZSxLbm93bGVkZ2VhYmxlIFRlYW0sV2UncmUgSGVyZSB0byBIZWxwLFlvdXIgQ2FubmFiaXMgQ29uY2llcmdlLEZlZWwgYXQgRWFzZSxGcmllbmRseSAmIEhlbHBmdWwsQ29tZSBTYXkgSGVsbG8hLFdlbGNvbWluZyBFbnZpcm9ubWVudCxZb3VyIENhbm5hYmlzIEV4cGVydHMsT3VyIGZyaWVuZGx5IHRlYW0gaXMgcmVhZHkgdG8gaGVscCB5b3UgZmluZCB3aGF0IHlvdSdyZSBsb29raW5nIGZvci4sRXhwZXJpZW5jZSBhIHJlbGF4ZWQgYW5kIHdlbGNvbWluZyBhdG1vc3BoZXJlIGF0IEZyZXNobHkgQmFrZWQgTllDLixXZSdyZSBwYXNzaW9uYXRlIGFib3V0IGNhbm5hYmlzIGFuZCBkZWRpY2F0ZWQgdG8gcHJvdmlkaW5nIGV4Y2VsbGVudCBzZXJ2aWNlLixWaXNpdCBvdXIgRm9yZGhhbSBsb2NhdGlvbiBhbmQgbGV0IHVzIGd1aWRlIHlvdSB0aHJvdWdoIG91ciBzZWxlY3Rpb24uCkJyb254U21va1Nob3BDb24tMDIsQnJvbnhTbW9rU2hvcENvbi0wMiAtIDEwNDU4IGNvbnF1ZXN0LFJlc3BvbnNpdmUgc2VhcmNoIGFkLEVuYWJsZWQsaHR0cHM6Ly9mcmVzaGx5YmFrZWQudXMvYnJvbngvYnJhbmRpbmcvaGVyYi8wLFBlcm1hbmVudCBCcm9ueCBMb2NhdGlvbixIZXJlIHRvIFN0YXkgaW4gMTA0NTgsRXN0YWJsaXNoZWQgRGlzcGVuc2FyeSxMb25nLVRlcm0gQ2FubmFiaXMgU2hvcCxCdWlsdCB0byBMYXN0LFJlbGlhYmxlICYgUGVybWFuZW50LFlvdXIgR28tVG8gU2hvcCxBIFBlcm1hbmVudCBTb2x1dGlvbixJbnZlc3RlZCBpbiB0aGUgQnJvbngsTmV3IFlvcmsgTGljZW5zZWQsT3BlbiBmb3IgWWVhcnMgdG8gQ29tZSxGb3JkaGFtJ3MgRm9yZXZlciBTaG9wLEZyZXNobHkgQmFrZWQgTllDIGlzIGEgcGVybWFuZW50IGZpeHR1cmUgaW4gdGhlIEJyb254IGNhbm5hYmlzIGxhbmRzY2FwZS4sV2UncmUgY29tbWl0dGVkIHRvIHNlcnZpbmcgdGhlIDEwNDU4IGNvbW11bml0eSBmb3IgeWVhcnMgdG8gY29tZS4sIkNob29zZSBhIHJlbGlhYmxlLCBsb25nLXRlcm0gY2FubmFiaXMgcHJvdmlkZXIuIENob29zZSBGcmVzaGx5IEJha2VkLiIsV2UncmUgbm90IGdvaW5nIGFueXdoZXJlLiBWaXNpdCBvdXIgcGVybWFuZW50IGxvY2F0aW9uIGluIEZvcmRoYW0uCkJyb254U21va1Nob3BDb24tMDMsQnJvbnhTbW9rU2hvcENvbi0wMyAtIDEwNDU4IGNvbnF1ZXN0LFJlc3BvbnNpdmUgc2VhcmNoIGFkLEVuYWJsZWQsaHR0cHM6Ly9mcmVzaGx5YmFrZWQudXMvYnJvbngvYnJhbmRpbmcvaGVyYi8wLFF1YWxpdHkgQ2FubmFiaXMgQXdhaXRzLEV4cGVyaWVuY2UgdGhlIERpZmZlcmVuY2UsUHJlbWl1bSBTZWxlY3Rpb24sRWxldmF0ZWQgQ2FubmFiaXMsVGhlIEJlc3QgaW4gdGhlIEJyb254LEV4Y2VwdGlvbmFsIENhbm5hYmlzLEZpbmQgWW91ciBQZXJmZWN0IE1hdGNoLFJlZmluZWQgQ2FubmFiaXMgU3RvcmUsUXVhbGl0eSBGb2N1c2VkLE5ZLUxpY2Vuc2VkIFF1YWxpdHksU3VwZXJpb3IgU2VsZWN0aW9uLEZyZXNobHkgQmFrZWQgUXVhbGl0eSxGcmVzaGx5IEJha2VkIE5ZQyBvZmZlcnMgYSBjdXJhdGVkIHNlbGVjdGlvbiBvZiBxdWFsaXR5IGNhbm5hYmlzIHByb2R1Y3RzLixFeHBlcmllbmNlIHRoZSBkaWZmZXJlbmNlIG9mIGEgbGljZW5zZWQgZGlzcGVuc2FyeSBkZWRpY2F0ZWQgdG8gZXhjZWxsZW5jZS4sV2UncmUgY29tbWl0dGVkIHRvIHByb3ZpZGluZyBhIHByZW1pdW0gY2FubmFiaXMgZXhwZXJpZW5jZSBpbiBGb3JkaGFtLixEaXNjb3ZlciB5b3VyIHBlcmZlY3QgbWF0Y2ggd2l0aCBvdXIga25vd2xlZGdlYWJsZSBzdGFmZiBhbmQgZGl2ZXJzZSBzZWxlY3Rpb24uCkJyb254U21va1Nob3BDb24tMDMsQnJvbnhTbW9rU2hvcENvbi0wMyAtIDEwNDU4IGNvbnF1ZXN0LFJlc3BvbnNpdmUgc2VhcmNoIGFkLEVuYWJsZWQsaHR0cHM6Ly9mcmVzaGx5YmFrZWQudXMvYnJvbngvYnJhbmRpbmcvaGVyYi8wLEpvaW4gT3VyIENhbm5hYmlzIENvbW11bml0eSxMb3lhbHR5IFJld2FyZHMgUHJvZ3JhbSxZb3VyIExvY2FsIENhbm5hYmlzIEh1YixDb25uZWN0IHdpdGggVXMsQnJvbnggQ2FubmFiaXMgRnJpZW5kcyxDb21tdW5pdHkgRm9jdXNlZCxCZWNvbWUgYSBWSVAsRXhjbHVzaXZlIFBlcmtzLFRoZSBCcm9ueCBDb2xsZWN0aXZlLFlvdXIgQ2FubmFiaXMgQ2lyY2xlLEpvaW4gdGhlIEZhbWlseSxMb2NhbCAmIENvbm5lY3RlZCxGcmVzaGx5IEJha2VkIE5ZQyBpcyBtb3JlIHRoYW4gYSBkaXNwZW5zYXJ5IOKAkyB3ZSdyZSBhIGNvbW11bml0eS4sU2lnbiB1cCBmb3Igb3VyIGxveWFsdHkgcHJvZ3JhbSBhbmQgdW5sb2NrIGV4Y2x1c2l2ZSBiZW5lZml0cy4sQ29ubmVjdCB3aXRoIGZlbGxvdyBjYW5uYWJpcyBlbnRodXNpYXN0cyBpbiB0aGUgQnJvbnguLFdlJ3JlIGRlZGljYXRlZCB0byBidWlsZGluZyBhIHZpYnJhbnQgY2FubmFiaXMgY29tbXVuaXR5IGluIDEwNDU4Lgo=">⬇ 03 — 8 RSAs (5.5 KB)</a>
+    <a class="download" download="04-BronxSmokShopCon-ad-notes.csv"
+       href="data:text/csv;base64,Q2FtcGFpZ24sQWQgR3JvdXAsQWQgTGFiZWwsQW5nbGUKQnJvbnhTbW9rU2hvcENvbi0wMSxCcm9ueFNtb2tTaG9wQ29uLTAxIC0gMTA0NTggY29ucXVlc3QscmFpZC1jb25xdWVzdC0xLCJQb3NpdGlvbnMgRnJlc2hseSBCYWtlZCBhcyB0aGUgcGVybWFuZW50LCBsaWNlbnNlZCBhbHRlcm5hdGl2ZSBpbiBGb3JkaGFtLiIKQnJvbnhTbW9rU2hvcENvbi0wMSxCcm9ueFNtb2tTaG9wQ29uLTAxIC0gMTA0NTggY29ucXVlc3QscmFpZC1jb25xdWVzdC0yLEhpZ2hsaWdodHMgdGhlIGNvbnZlbmllbmNlIGFuZCBkYWlseSBhdmFpbGFiaWxpdHkgb2YgRnJlc2hseSBCYWtlZC4KQnJvbnhTbW9rU2hvcENvbi0wMSxCcm9ueFNtb2tTaG9wQ29uLTAxIC0gMTA0NTggY29ucXVlc3QscmFpZC1jb25xdWVzdC0zLEZvY3VzZXMgb24gdGhlIHRydXN0IGFuZCByZWd1bGF0aW9uIG9mIGEgbGljZW5zZWQgZGlzcGVuc2FyeS4KQnJvbnhTbW9rU2hvcENvbi0wMixCcm9ueFNtb2tTaG9wQ29uLTAyIC0gMTA0NTggY29ucXVlc3QscmFpZC1jb25xdWVzdC00LCJFbXBoYXNpemVzIEZyZXNobHkgQmFrZWQgYXMgYSBsb2NhbCwgQnJvbngtYmFzZWQgYnVzaW5lc3MuIgpCcm9ueFNtb2tTaG9wQ29uLTAyLEJyb254U21va1Nob3BDb24tMDIgLSAxMDQ1OCBjb25xdWVzdCxyYWlkLWNvbnF1ZXN0LTUsSGlnaGxpZ2h0cyB0aGUgZnJpZW5kbHkgYW5kIHdlbGNvbWluZyBhdG1vc3BoZXJlLgpCcm9ueFNtb2tTaG9wQ29uLTAyLEJyb254U21va1Nob3BDb24tMDIgLSAxMDQ1OCBjb25xdWVzdCxyYWlkLWNvbnF1ZXN0LTYsRm9jdXNlcyBvbiB0aGUgcGVybWFuZW5jZSBhbmQgc3RhYmlsaXR5IG9mIHRoZSBidXNpbmVzcy4KQnJvbnhTbW9rU2hvcENvbi0wMyxCcm9ueFNtb2tTaG9wQ29uLTAzIC0gMTA0NTggY29ucXVlc3QscmFpZC1jb25xdWVzdC03LEVtcGhhc2l6ZXMgdGhlIHF1YWxpdHkgb2YgdGhlIGV4cGVyaWVuY2UgYW5kIHByb2R1Y3RzLgpCcm9ueFNtb2tTaG9wQ29uLTAzLEJyb254U21va1Nob3BDb24tMDMgLSAxMDQ1OCBjb25xdWVzdCxyYWlkLWNvbnF1ZXN0LTgsSGlnaGxpZ2h0cyBhIGNvbW11bml0eS1mb2N1c2VkIGFwcHJvYWNoIHdpdGggcG90ZW50aWFsIGxveWFsdHkgYmVuZWZpdHMuCg==">⬇ 04 — Ad labels &amp; angles (reference only, 1.1 KB)</a>
+  </div>
+
+  <div class="instructions">
+    <h3 style="margin-top:0">How to use this in Ads Editor</h3>
+    <p><strong>Important: if you've already imported a previous BronxSmokShopCon bundle,
+       delete those campaigns first to avoid conflicts.</strong> In Ads Editor:
+       Campaigns tab → filter <code>BronxSmokShopCon</code> → select all → Delete →
+       Post. (Or just rename the previous campaigns if you want to keep historical
+       data around for comparison.) Then import this bundle fresh.</p>
+    <p><strong>Import files 01, 02, 03 in order. Skip 04 — it's reference only.</strong></p>
+    <ol>
+      <li>Download all three importable CSVs (01-skeleton, 02-keywords, 03-ads).</li>
+      <li>In Google Ads Editor: <strong>Account → Import → From file…</strong> and pick file 01 first.</li>
+      <li>Review &amp; post: this creates 3 <strong>Enabled</strong> campaigns
+          (<code>BronxSmokShopCon-01</code>, <code>BronxSmokShopCon-02</code>, <code>BronxSmokShopCon-03</code>),
+          one Enabled ad group per campaign (Maximize conversion value @ Target ROAS 300.00%; fallback Max CPC $2.00), and the 10458 location target on each.</li>
+      <li>Import file 02: this creates 17 Enabled positive keywords + 10 negatives in every ad group. <strong>Without this file the campaign serves nothing.</strong></li>
+      <li>Import file 03: this creates 8 Enabled RSAs spread across the 3 ad groups (max 3 per campaign).</li>
+      <li><strong>Click Post.</strong> The campaigns are live the moment Post completes — no further switches to flip.</li>
+    </ol>
+    <p><strong>Eligibility checklist (per oracle audit):</strong>
+       ✓ Campaign Type=Search, Budget&gt;0, Bid Strategy=Target ROAS @ 300.00% (Maximize conversion value), Networks=Google search, Languages=en;
+       ✓ Ad Group Status=Enabled (Smart Bidding sets bids — fallback Max CPC=$2.00);
+       ✓ ≥1 enabled positive keyword per ad group (we have 17);
+       ✓ ≥1 enabled RSA per ad group (each meets the 3-headline / 2-description RSA minima);
+       ✓ Final URL set on every ad;
+       ✓ Location targeting via zip 10458.</p>
+    <p><em>Note (also per oracle):</em> Google policy classifies recreational cannabis sales
+       as a restricted vertical that may not be eligible to serve on Google Search even with
+       a perfectly-structured campaign. If the campaigns import cleanly but stay
+       <code>Eligible (limited)</code> or get disapproved, that is a policy issue, not a CSV issue.</p>
+  </div>
+
+  
+
+  <h2>Generated ads (8)</h2>
+  
+    <h3 style="margin-top:24px">Campaign <code>BronxSmokShopCon-01</code> (3 RSAs)</h3>
+    
+      <section class="ad">
+        <h3>Ad 1: raid-conquest-1</h3>
+        <p class="angle"><em>Positions Freshly Baked as the permanent, licensed alternative in Fordham.</em></p>
+        <h4>Headlines (12)</h4>
+        <ol>
+          <li>NY-Licensed in 10458 <span class="len">(20)</span></li><li>Fordham&#39;s Trusted Shop <span class="len">(22)</span></li><li>Open Daily for You <span class="len">(18)</span></li><li>Real Shop. Real Hours. <span class="len">(22)</span></li><li>Visit Us Today! <span class="len">(15)</span></li><li>Permanent Bronx Location <span class="len">(24)</span></li><li>Licensed &amp; Ready <span class="len">(16)</span></li><li>Your Neighborhood Store <span class="len">(23)</span></li><li>Friendly Staff Awaits <span class="len">(21)</span></li><li>Shop with Confidence <span class="len">(20)</span></li><li>Here to Stay <span class="len">(12)</span></li><li>Local Cannabis Source <span class="len">(21)</span></li>
+        </ol>
+        <h4>Descriptions (4)</h4>
+        <ol>
+          <li>Find quality cannabis in the Bronx. We&#39;re NY-licensed and committed to serving 10458. <span class="len">(85)</span></li><li>Freshly Baked NYC: Your reliable, permanent cannabis shop in Fordham. Open daily! <span class="len">(81)</span></li><li>Experience the difference of a licensed dispensary. Walk-ins are welcome! <span class="len">(73)</span></li><li>Serving the Bronx community with quality and care. Visit our location today. <span class="len">(76)</span></li>
+        </ol>
+      </section>
+    
+
+      <section class="ad">
+        <h3>Ad 2: raid-conquest-2</h3>
+        <p class="angle"><em>Highlights the convenience and daily availability of Freshly Baked.</em></p>
+        <h4>Headlines (12)</h4>
+        <ol>
+          <li>Open Daily in the Bronx <span class="len">(23)</span></li><li>Walk-Ins Welcome! <span class="len">(17)</span></li><li>Your Local Dispensary <span class="len">(21)</span></li><li>10458&#39;s Cannabis Shop <span class="len">(21)</span></li><li>Visit Us Now <span class="len">(12)</span></li><li>Licensed &amp; Convenient <span class="len">(21)</span></li><li>Easy Access in Fordham <span class="len">(22)</span></li><li>Daily Cannabis Access <span class="len">(21)</span></li><li>Shop with Peace of Mind <span class="len">(23)</span></li><li>Open Late Daily <span class="len">(15)</span></li><li>Real Cannabis. Real Easy. <span class="len">(25)</span></li><li>Bronx&#39;s Best Choice <span class="len">(19)</span></li>
+        </ol>
+        <h4>Descriptions (4)</h4>
+        <ol>
+          <li>Freshly Baked NYC: Open 7 days a week in 10458. Your convenient cannabis destination. <span class="len">(85)</span></li><li>Stop by our Fordham location for a friendly experience. No appointment needed! <span class="len">(78)</span></li><li>We&#39;re here when you need us. Licensed, regulated, and ready to serve. <span class="len">(69)</span></li><li>Find what you&#39;re looking for, every day. Visit Freshly Baked in the Bronx. <span class="len">(74)</span></li>
+        </ol>
+      </section>
+    
+
+      <section class="ad">
+        <h3>Ad 3: raid-conquest-3</h3>
+        <p class="angle"><em>Focuses on the trust and regulation of a licensed dispensary.</em></p>
+        <h4>Headlines (12)</h4>
+        <ol>
+          <li>Licensed. Tested. Open. <span class="len">(23)</span></li><li>NY-Licensed Dispensary <span class="len">(22)</span></li><li>Shop with Confidence <span class="len">(20)</span></li><li>Regulated Cannabis Here <span class="len">(23)</span></li><li>Quality You Can Trust <span class="len">(21)</span></li><li>Safe &amp; Legal in 10458 <span class="len">(21)</span></li><li>Your Trusted Source <span class="len">(19)</span></li><li>Verified Cannabis Shop <span class="len">(22)</span></li><li>Compliance is Key <span class="len">(17)</span></li><li>NY State Approved <span class="len">(17)</span></li><li>Peace of Mind <span class="len">(13)</span></li><li>Licensed for You <span class="len">(16)</span></li>
+        </ol>
+        <h4>Descriptions (4)</h4>
+        <ol>
+          <li>Freshly Baked NYC: Proudly licensed by New York State. Quality and safety guaranteed. <span class="len">(85)</span></li><li>We adhere to strict regulations to provide a safe and reliable experience. <span class="len">(74)</span></li><li>Shop confidently knowing our products are thoroughly tested and compliant. <span class="len">(74)</span></li><li>Your health and safety are our priority. Visit our licensed dispensary today. <span class="len">(77)</span></li>
+        </ol>
+      </section>
+    
+  
+
+    <h3 style="margin-top:24px">Campaign <code>BronxSmokShopCon-02</code> (3 RSAs)</h3>
+    
+      <section class="ad">
+        <h3>Ad 1: raid-conquest-4</h3>
+        <p class="angle"><em>Emphasizes Freshly Baked as a local, Bronx-based business.</em></p>
+        <h4>Headlines (12)</h4>
+        <ol>
+          <li>Bronx&#39;s Local Dispensary <span class="len">(24)</span></li><li>Support Local Cannabis <span class="len">(22)</span></li><li>Fordham&#39;s Finest <span class="len">(16)</span></li><li>Proudly Serving 10458 <span class="len">(21)</span></li><li>The Bronx&#39;s Choice <span class="len">(18)</span></li><li>Local &amp; Licensed <span class="len">(16)</span></li><li>Your Neighborhood Shop <span class="len">(22)</span></li><li>Shop Bronx, Shop Local <span class="len">(22)</span></li><li>Community Focused <span class="len">(17)</span></li><li>Bronx Grown <span class="len">(11)</span></li><li>Real Local Cannabis <span class="len">(19)</span></li><li>Serving Our Neighbors <span class="len">(21)</span></li>
+        </ol>
+        <h4>Descriptions (4)</h4>
+        <ol>
+          <li>Freshly Baked NYC: A proud Bronx business, committed to serving our community. <span class="len">(78)</span></li><li>Support a local, licensed dispensary. Shop Freshly Baked in 10458. <span class="len">(66)</span></li><li>We&#39;re invested in the Bronx. Experience the difference of a local shop. <span class="len">(71)</span></li><li>Dedicated to providing quality cannabis to our neighbors in Fordham. <span class="len">(68)</span></li>
+        </ol>
+      </section>
+    
+
+      <section class="ad">
+        <h3>Ad 2: raid-conquest-5</h3>
+        <p class="angle"><em>Highlights the friendly and welcoming atmosphere.</em></p>
+        <h4>Headlines (12)</h4>
+        <ol>
+          <li>Friendly Staff Awaits <span class="len">(21)</span></li><li>Welcome to Freshly Baked <span class="len">(24)</span></li><li>Relaxed Shopping Experience <span class="len">(27)</span></li><li>Expert Cannabis Guidance <span class="len">(24)</span></li><li>Knowledgeable Team <span class="len">(18)</span></li><li>We&#39;re Here to Help <span class="len">(18)</span></li><li>Your Cannabis Concierge <span class="len">(23)</span></li><li>Feel at Ease <span class="len">(12)</span></li><li>Friendly &amp; Helpful <span class="len">(18)</span></li><li>Come Say Hello! <span class="len">(15)</span></li><li>Welcoming Environment <span class="len">(21)</span></li><li>Your Cannabis Experts <span class="len">(21)</span></li>
+        </ol>
+        <h4>Descriptions (4)</h4>
+        <ol>
+          <li>Our friendly team is ready to help you find what you&#39;re looking for. <span class="len">(68)</span></li><li>Experience a relaxed and welcoming atmosphere at Freshly Baked NYC. <span class="len">(67)</span></li><li>We&#39;re passionate about cannabis and dedicated to providing excellent service. <span class="len">(77)</span></li><li>Visit our Fordham location and let us guide you through our selection. <span class="len">(70)</span></li>
+        </ol>
+      </section>
+    
+
+      <section class="ad">
+        <h3>Ad 3: raid-conquest-6</h3>
+        <p class="angle"><em>Focuses on the permanence and stability of the business.</em></p>
+        <h4>Headlines (12)</h4>
+        <ol>
+          <li>Permanent Bronx Location <span class="len">(24)</span></li><li>Here to Stay in 10458 <span class="len">(21)</span></li><li>Established Dispensary <span class="len">(22)</span></li><li>Long-Term Cannabis Shop <span class="len">(23)</span></li><li>Built to Last <span class="len">(13)</span></li><li>Reliable &amp; Permanent <span class="len">(20)</span></li><li>Your Go-To Shop <span class="len">(15)</span></li><li>A Permanent Solution <span class="len">(20)</span></li><li>Invested in the Bronx <span class="len">(21)</span></li><li>New York Licensed <span class="len">(17)</span></li><li>Open for Years to Come <span class="len">(22)</span></li><li>Fordham&#39;s Forever Shop <span class="len">(22)</span></li>
+        </ol>
+        <h4>Descriptions (4)</h4>
+        <ol>
+          <li>Freshly Baked NYC is a permanent fixture in the Bronx cannabis landscape. <span class="len">(73)</span></li><li>We&#39;re committed to serving the 10458 community for years to come. <span class="len">(65)</span></li><li>Choose a reliable, long-term cannabis provider. Choose Freshly Baked. <span class="len">(69)</span></li><li>We&#39;re not going anywhere. Visit our permanent location in Fordham. <span class="len">(66)</span></li>
+        </ol>
+      </section>
+    
+  
+
+    <h3 style="margin-top:24px">Campaign <code>BronxSmokShopCon-03</code> (2 RSAs)</h3>
+    
+      <section class="ad">
+        <h3>Ad 1: raid-conquest-7</h3>
+        <p class="angle"><em>Emphasizes the quality of the experience and products.</em></p>
+        <h4>Headlines (12)</h4>
+        <ol>
+          <li>Quality Cannabis Awaits <span class="len">(23)</span></li><li>Experience the Difference <span class="len">(25)</span></li><li>Premium Selection <span class="len">(17)</span></li><li>Elevated Cannabis <span class="len">(17)</span></li><li>The Best in the Bronx <span class="len">(21)</span></li><li>Exceptional Cannabis <span class="len">(20)</span></li><li>Find Your Perfect Match <span class="len">(23)</span></li><li>Refined Cannabis Store <span class="len">(22)</span></li><li>Quality Focused <span class="len">(15)</span></li><li>NY-Licensed Quality <span class="len">(19)</span></li><li>Superior Selection <span class="len">(18)</span></li><li>Freshly Baked Quality <span class="len">(21)</span></li>
+        </ol>
+        <h4>Descriptions (4)</h4>
+        <ol>
+          <li>Freshly Baked NYC offers a curated selection of quality cannabis products. <span class="len">(74)</span></li><li>Experience the difference of a licensed dispensary dedicated to excellence. <span class="len">(75)</span></li><li>We&#39;re committed to providing a premium cannabis experience in Fordham. <span class="len">(70)</span></li><li>Discover your perfect match with our knowledgeable staff and diverse selection. <span class="len">(79)</span></li>
+        </ol>
+      </section>
+    
+
+      <section class="ad">
+        <h3>Ad 2: raid-conquest-8</h3>
+        <p class="angle"><em>Highlights a community-focused approach with potential loyalty benefits.</em></p>
+        <h4>Headlines (12)</h4>
+        <ol>
+          <li>Join Our Cannabis Community <span class="len">(27)</span></li><li>Loyalty Rewards Program <span class="len">(23)</span></li><li>Your Local Cannabis Hub <span class="len">(23)</span></li><li>Connect with Us <span class="len">(15)</span></li><li>Bronx Cannabis Friends <span class="len">(22)</span></li><li>Community Focused <span class="len">(17)</span></li><li>Become a VIP <span class="len">(12)</span></li><li>Exclusive Perks <span class="len">(15)</span></li><li>The Bronx Collective <span class="len">(20)</span></li><li>Your Cannabis Circle <span class="len">(20)</span></li><li>Join the Family <span class="len">(15)</span></li><li>Local &amp; Connected <span class="len">(17)</span></li>
+        </ol>
+        <h4>Descriptions (4)</h4>
+        <ol>
+          <li>Freshly Baked NYC is more than a dispensary – we&#39;re a community. <span class="len">(64)</span></li><li>Sign up for our loyalty program and unlock exclusive benefits. <span class="len">(62)</span></li><li>Connect with fellow cannabis enthusiasts in the Bronx. <span class="len">(54)</span></li><li>We&#39;re dedicated to building a vibrant cannabis community in 10458. <span class="len">(66)</span></li>
+        </ol>
+      </section>
+    
+  
+
+  <h2>Raw CSV previews</h2>
+  <h3>01 — Campaign skeleton</h3>
+  <pre class="csv">Campaign,Ad Group,Campaign Type,Status,Budget,Budget type,Bid Strategy Type,Target ROAS,Networks,Languages,Location,Max CPC,EU political ads,Comment
+BronxSmokShopCon-01,,Search,Enabled,20.00,Daily,Target ROAS,300.00%,Google search,en,,,false,&quot;Conquest campaign 1 of 3 (max 3 RSAs/campaign). EU political ads = false (NY cannabis retailer, no EU political intent).&quot;
+BronxSmokShopCon-01,BronxSmokShopCon-01 - 10458 conquest,,Enabled,,,,,,,,2.00,,Holds 3 RSA variants for campaign BronxSmokShopCon-01. Max CPC = $2.00.
+BronxSmokShopCon-01,,,,,,,,,,&quot;10458, New York, United States&quot;,,,&quot;Geo restrict to zip 10458 (Fordham / Belmont, Bronx, NY).&quot;
+BronxSmokShopCon-02,,Search,Enabled,20.00,Daily,Target ROAS,300.00%,Google search,en,,,false,&quot;Conquest campaign 2 of 3 (max 3 RSAs/campaign). EU political ads = false (NY cannabis retailer, no EU political intent).&quot;
+BronxSmokShopCon-02,BronxSmokShopCon-02 - 10458 conquest,,Enabled,,,,,,,,2.00,,Holds 3 RSA variants for campaign BronxSmokShopCon-02. Max CPC = $2.00.
+BronxSmokShopCon-02,,,,,,,,,,&quot;10458, New York, United States&quot;,,,&quot;Geo restrict to zip 10458 (Fordham / Belmont, Bronx, NY).&quot;
+BronxSmokShopCon-03,,Search,Enabled,20.00,Daily,Target ROAS,300.00%,Google search,en,,,false,&quot;Conquest campaign 3 of 3 (max 3 RSAs/campaign). EU political ads = false (NY cannabis retailer, no EU political intent).&quot;
+BronxSmokShopCon-03,BronxSmokShopCon-03 - 10458 conquest,,Enabled,,,,,,,,2.00,,Holds 2 RSA variants for campaign BronxSmokShopCon-03. Max CPC = $2.00.
+BronxSmokShopCon-03,,,,,,,,,,&quot;10458, New York, United States&quot;,,,&quot;Geo restrict to zip 10458 (Fordham / Belmont, Bronx, NY).&quot;
+</pre>
+  <h3>02 — Keywords</h3>
+  <pre class="csv">Campaign,Ad Group,Keyword,Match Type,Status
+BronxSmokShopCon-01,BronxSmokShopCon-01 - 10458 conquest,smoke shop bronx,Exact,Enabled
+BronxSmokShopCon-01,BronxSmokShopCon-01 - 10458 conquest,weed delivery 10458,Exact,Enabled
+BronxSmokShopCon-01,BronxSmokShopCon-01 - 10458 conquest,licensed dispensary bronx,Exact,Enabled
+BronxSmokShopCon-01,BronxSmokShopCon-01 - 10458 conquest,cannabis store 10458,Exact,Enabled
+BronxSmokShopCon-01,BronxSmokShopCon-01 - 10458 conquest,bronx cannabis delivery,Exact,Enabled
+BronxSmokShopCon-01,BronxSmokShopCon-01 - 10458 conquest,smoke shop near me,Phrase,Enabled
+BronxSmokShopCon-01,BronxSmokShopCon-01 - 10458 conquest,where to buy weed bronx,Phrase,Enabled
+BronxSmokShopCon-01,BronxSmokShopCon-01 - 10458 conquest,fordham cannabis store,Phrase,Enabled
+BronxSmokShopCon-01,BronxSmokShopCon-01 - 10458 conquest,bronx weed delivery,Phrase,Enabled
+BronxSmokShopCon-01,BronxSmokShopCon-01 - 10458 conquest,cannabis dispensary bronx,Phrase,Enabled
+BronxSmokShopCon-01,BronxSmokShopCon-01 - 10458 conquest,weed shops in bronx,Phrase,Enabled
+BronxSmokShopCon-01,BronxSmokShopCon-01 - 10458 conquest,best cannabis bronx,Phrase,Enabled
+BronxSmokShopCon-01,BronxSmokShopCon-01 - 10458 conquest,bronx dispensary near me,Phrase,Enabled
+BronxSmokShopCon-01,BronxSmokShopCon-01 - 10458 conquest,cannabis store near 10458,Phrase,Enabled
+BronxSmokShopCon-01,BronxSmokShopCon-01 - 10458 conquest,licensed cannabis bronx,Phrase,Enabled
+BronxSmokShopCon-01,BronxSmokShopCon-01 - 10458 conquest,buy weed in bronx,Phrase,Enabled
+BronxSmokShopCon-01,BronxSmokShopCon-01 - 10458 conquest,fordham smoke shop,Phrase,Enabled
+BronxSmokShopCon-01,BronxSmokShopCon-01 - 10458 conquest,synthetic,Negative phrase,Enabled
+BronxSmokShopCon-01,BronxSmokShopCon-01 - 10458 conquest,k2,Negative phrase,Enabled
+BronxSmokShopCon-01,BronxSmokShopCon-01 - 10458 conquest,spice,Negative phrase,Enabled
+BronxSmokShopCon-01,BronxSmokShopCon-01 - 10458 conquest,free weed,Negative phrase,Enabled
+BronxSmokShopCon-01,BronxSmokShopCon-01 - 10458 conquest,cbd only,Negative phrase,Enabled
+BronxSmokShopCon-01,BronxSmokShopCon-01 - 10458 conquest,jobs,Negative phrase,Enabled
+BronxSmokShopCon-01,BronxSmokShopCon-01 - 10458 conquest,wholesale,Negative phrase,Enabled
+BronxSmokShopCon-01,BronxSmokShopCon-01 - 10458 conquest,medical card,Negative phrase,Enabled
+BronxSmokShopCon-01,BronxSmokShopCon-01 - 10458 conquest,online only,Negative phrase,Enabled
+BronxSmokShopCon-01,BronxSmokShopCon-01 - 10458 conquest,out of state,Negative phrase,Enabled
+BronxSmokShopCon-02,BronxSmokShopCon-02 - 10458 conquest,smoke shop bronx,Exact,Enabled
+BronxSmokShopCon-02,BronxSmokShopCon-02 - 10458 conquest,weed delivery 10458,Exact,Enabled
+BronxSmokShopCon-02,BronxSmokShopCon-02 - 10458 conquest,licensed dispensary bronx,Exact,Enabled
+BronxSmokShopCon-02,BronxSmokShopCon-02 - 10458 conquest,cannabis store 10458,Exact,Enabled
+BronxSmokShopCon-02,BronxSmokShopCon-02 - 10458 conquest,bronx cannabis delivery,Exact,Enabled
+BronxSmokShopCon-02,BronxSmokShopCon-02 - 10458 conquest,smoke shop near me,Phrase,Enabled
+BronxSmokShopCon-02,BronxSmokShopCon-02 - 10458 conquest,where to buy weed bronx,Phrase,Enabled
+BronxSmokShopCon-02,BronxSmokShopCon-02 - 10458 conquest,fordham cannabis store,Phrase,Enabled
+BronxSmokShopCon-02,BronxSmokShopCon-02 - 10458 conquest,bronx weed delivery,Phrase,Enabled
+BronxSmokShopCon-02,BronxSmokShopCon-02 - 10458 conquest,cannabis dispensary bronx,Phrase,Enabled
+BronxSmokShopCon-02,BronxSmokShopCon-02 - 10458 conquest,weed shops in bronx,Phrase,Enabled
+BronxSmokShopCon-02,BronxSmokShopCon-02 - 10458 conquest,best cannabis bronx,Phrase,Enabled
+BronxSmokShopCon-02,BronxSmokShopCon-02 - 10458 conquest,bronx dispensary near me,Phrase,Enabled
+BronxSmokShopCon-02,BronxSmokShopCon-02 - 10458 conquest,cannabis store near 10458,Phrase,Enabled
+BronxSmokShopCon-02,BronxSmokShopCon-02 - 10458 conquest,licensed cannabis bronx,Phrase,Enabled
+BronxSmokShopCon-02,BronxSmokShopCon-02 - 10458 conquest,buy weed in bronx,Phrase,Enabled
+BronxSmokShopCon-02,BronxSmokShopCon-02 - 10458 conquest,fordham smoke shop,Phrase,Enabled
+BronxSmokShopCon-02,BronxSmokShopCon-02 - 10458 conquest,synthetic,Negative phrase,Enabled
+BronxSmokShopCon-02,BronxSmokShopCon-02 - 10458 conquest,k2,Negative phrase,Enabled
+BronxSmokShopCon-02,BronxSmokShopCon-02 - 10458 conquest,spice,Negative phrase,Enabled
+BronxSmokShopCon-02,BronxSmokShopCon-02 - 10458 conquest,free weed,Negative phrase,Enabled
+BronxSmokShopCon-02,BronxSmokShopCon-02 - 10458 conquest,cbd only,Negative phrase,Enabled
+BronxSmokShopCon-02,BronxSmokShopCon-02 - 10458 conquest,jobs,Negative phrase,Enabled
+BronxSmokShopCon-02,BronxSmokShopCon-02 - 10458 conquest,wholesale,Negative phrase,Enabled
+BronxSmokShopCon-02,BronxSmokShopCon-02 - 10458 conquest,medical card,Negative phrase,Enabled
+BronxSmokShopCon-02,BronxSmokShopCon-02 - 10458 conquest,online only,Negative phrase,Enabled
+BronxSmokShopCon-02,BronxSmokShopCon-02 - 10458 conquest,out of state,Negative phrase,Enabled
+BronxSmokShopCon-03,BronxSmokShopCon-03 - 10458 conquest,smoke shop bronx,Exact,Enabled
+BronxSmokShopCon-03,BronxSmokShopCon-03 - 10458 conquest,weed delivery 10458,Exact,Enabled
+BronxSmokShopCon-03,BronxSmokShopCon-03 - 10458 conquest,licensed dispensary bronx,Exact,Enabled
+BronxSmokShopCon-03,BronxSmokShopCon-03 - 10458 conquest,cannabis store 10458,Exact,Enabled
+BronxSmokShopCon-03,BronxSmokShopCon-03 - 10458 conquest,bronx cannabis delivery,Exact,Enabled
+BronxSmokShopCon-03,BronxSmokShopCon-03 - 10458 conquest,smoke shop near me,Phrase,Enabled
+BronxSmokShopCon-03,BronxSmokShopCon-03 - 10458 conquest,where to buy weed bronx,Phrase,Enabled
+BronxSmokShopCon-03,BronxSmokShopCon-03 - 10458 conquest,fordham cannabis store,Phrase,Enabled
+BronxSmokShopCon-03,BronxSmokShopCon-03 - 10458 conquest,bronx weed delivery,Phrase,Enabled
+BronxSmokShopCon-03,BronxSmokShopCon-03 - 10458 conquest,cannabis dispensary bronx,Phrase,Enabled
+BronxSmokShopCon-03,BronxSmokShopCon-03 - 10458 conquest,weed shops in bronx,Phrase,Enabled
+BronxSmokShopCon-03,BronxSmokShopCon-03 - 10458 conquest,best cannabis bronx,Phrase,Enabled
+BronxSmokShopCon-03,BronxSmokShopCon-03 - 10458 conquest,bronx dispensary near me,Phrase,Enabled
+BronxSmokShopCon-03,BronxSmokShopCon-03 - 10458 conquest,cannabis store near 10458,Phrase,Enabled
+BronxSmokShopCon-03,BronxSmokShopCon-03 - 10458 conquest,licensed cannabis bronx,Phrase,Enabled
+BronxSmokShopCon-03,BronxSmokShopCon-03 - 10458 conquest,buy weed in bronx,Phrase,Enabled
+BronxSmokShopCon-03,BronxSmokShopCon-03 - 10458 conquest,fordham smoke shop,Phrase,Enabled
+BronxSmokShopCon-03,BronxSmokShopCon-03 - 10458 conquest,synthetic,Negative phrase,Enabled
+BronxSmokShopCon-03,BronxSmokShopCon-03 - 10458 conquest,k2,Negative phrase,Enabled
+BronxSmokShopCon-03,BronxSmokShopCon-03 - 10458 conquest,spice,Negative phrase,Enabled
+BronxSmokShopCon-03,BronxSmokShopCon-03 - 10458 conquest,free weed,Negative phrase,Enabled
+BronxSmokShopCon-03,BronxSmokShopCon-03 - 10458 conquest,cbd only,Negative phrase,Enabled
+BronxSmokShopCon-03,BronxSmokShopCon-03 - 10458 conquest,jobs,Negative phrase,Enabled
+BronxSmokShopCon-03,BronxSmokShopCon-03 - 10458 conquest,wholesale,Negative phrase,Enabled
+BronxSmokShopCon-03,BronxSmokShopCon-03 - 10458 conquest,medical card,Negative phrase,Enabled
+BronxSmokShopCon-03,BronxSmokShopCon-03 - 10458 conquest,online only,Negative phrase,Enabled
+BronxSmokShopCon-03,BronxSmokShopCon-03 - 10458 conquest,out of state,Negative phrase,Enabled
+</pre>
+  <h3>03 — Ads (RSAs)</h3>
+  <pre class="csv">Campaign,Ad Group,Ad Type,Status,Final URL,Headline 1,Headline 2,Headline 3,Headline 4,Headline 5,Headline 6,Headline 7,Headline 8,Headline 9,Headline 10,Headline 11,Headline 12,Description 1,Description 2,Description 3,Description 4
+BronxSmokShopCon-01,BronxSmokShopCon-01 - 10458 conquest,Responsive search ad,Enabled,https://freshlybaked.us/bronx/branding/herb/0,NY-Licensed in 10458,Fordham&#39;s Trusted Shop,Open Daily for You,Real Shop. Real Hours.,Visit Us Today!,Permanent Bronx Location,Licensed &amp; Ready,Your Neighborhood Store,Friendly Staff Awaits,Shop with Confidence,Here to Stay,Local Cannabis Source,Find quality cannabis in the Bronx. We&#39;re NY-licensed and committed to serving 10458.,&quot;Freshly Baked NYC: Your reliable, permanent cannabis shop in Fordham. Open daily!&quot;,Experience the difference of a licensed dispensary. Walk-ins are welcome!,Serving the Bronx community with quality and care. Visit our location today.
+BronxSmokShopCon-01,BronxSmokShopCon-01 - 10458 conquest,Responsive search ad,Enabled,https://freshlybaked.us/bronx/branding/herb/0,Open Daily in the Bronx,Walk-Ins Welcome!,Your Local Dispensary,10458&#39;s Cannabis Shop,Visit Us Now,Licensed &amp; Convenient,Easy Access in Fordham,Daily Cannabis Access,Shop with Peace of Mind,Open Late Daily,Real Cannabis. Real Easy.,Bronx&#39;s Best Choice,Freshly Baked NYC: Open 7 days a week in 10458. Your convenient cannabis destination.,Stop by our Fordham location for a friendly experience. No appointment needed!,&quot;We&#39;re here when you need us. Licensed, regulated, and ready to serve.&quot;,&quot;Find what you&#39;re looking for, every day. Visit Freshly Baked in the Bronx.&quot;
+BronxSmokShopCon-01,BronxSmokShopCon-01 - 10458 conquest,Responsive search ad,Enabled,https://freshlybaked.us/bronx/branding/herb/0,Licensed. Tested. Open.,NY-Licensed Dispensary,Shop with Confidence,Regulated Cannabis Here,Quality You Can Trust,Safe &amp; Legal in 10458,Your Trusted Source,Verified Cannabis Shop,Compliance is Key,NY State Approved,Peace of Mind,Licensed for You,Freshly Baked NYC: Proudly licensed by New York State. Quality and safety guaranteed.,We adhere to strict regulations to provide a safe and reliable experience.,Shop confidently knowing our products are thoroughly tested and compliant.,Your health and safety are our priority. Visit our licensed dispensary today.
+BronxSmokShopCon-02,BronxSmokShopCon-02 - 10458 conquest,Responsive search ad,Enabled,https://freshlybaked.us/bronx/branding/herb/0,Bronx&#39;s Local Dispensary,Support Local Cannabis,Fordham&#39;s Finest,Proudly Serving 10458,The Bronx&#39;s Choice,Local &amp; Licensed,Your Neighborhood Shop,&quot;Shop Bronx, Shop Local&quot;,Community Focused,Bronx Grown,Real Local Cannabis,Serving Our Neighbors,&quot;Freshly Baked NYC: A proud Bronx business, committed to serving our community.&quot;,&quot;Support a local, licensed dispensary. Shop Freshly Baked in 10458.&quot;,We&#39;re invested in the Bronx. Experience the difference of a local shop.,Dedicated to providing quality cannabis to our neighbors in Fordham.
+BronxSmokShopCon-02,BronxSmokShopCon-02 - 10458 conquest,Responsive search ad,Enabled,https://freshlybaked.us/bronx/branding/herb/0,Friendly Staff Awaits,Welcome to Freshly Baked,Relaxed Shopping Experience,Expert Cannabis Guidance,Knowledgeable Team,We&#39;re Here to Help,Your Cannabis Concierge,Feel at Ease,Friendly &amp; Helpful,Come Say Hello!,Welcoming Environment,Your Cannabis Experts,Our friendly team is ready to help you find what you&#39;re looking for.,Experience a relaxed and welcoming atmosphere at Freshly Baked NYC.,We&#39;re passionate about cannabis and dedicated to providing excellent service.,Visit our Fordham location and let us guide you through our selection.
+BronxSmokShopCon-02,BronxSmokShopCon-02 - 10458 conquest,Responsive search ad,Enabled,https://freshlybaked.us/bronx/branding/herb/0,Permanent Bronx Location,Here to Stay in 10458,Established Dispensary,Long-Term Cannabis Shop,Built to Last,Reliable &amp; Permanent,Your Go-To Shop,A Permanent Solution,Invested in the Bronx,New York Licensed,Open for Years to Come,Fordham&#39;s Forever Shop,Freshly Baked NYC is a permanent fixture in the Bronx cannabis landscape.,We&#39;re committed to serving the 10458 community for years to come.,&quot;Choose a reliable, long-term cannabis provider. Choose Freshly Baked.&quot;,We&#39;re not going anywhere. Visit our permanent location in Fordham.
+BronxSmokShopCon-03,BronxSmokShopCon-03 - 10458 conquest,Responsive search ad,Enabled,https://freshlybaked.us/bronx/branding/herb/0,Quality Cannabis Awaits,Experience the Difference,Premium Selection,Elevated Cannabis,The Best in the Bronx,Exceptional Cannabis,Find Your Perfect Match,Refined Cannabis Store,Quality Focused,NY-Licensed Quality,Superior Selection,Freshly Baked Quality,Freshly Baked NYC offers a curated selection of quality cannabis products.,Experience the difference of a licensed dispensary dedicated to excellence.,We&#39;re committed to providing a premium cannabis experience in Fordham.,Discover your perfect match with our knowledgeable staff and diverse selection.
+BronxSmokShopCon-03,BronxSmokShopCon-03 - 10458 conquest,Responsive search ad,Enabled,https://freshlybaked.us/bronx/branding/herb/0,Join Our Cannabis Community,Loyalty Rewards Program,Your Local Cannabis Hub,Connect with Us,Bronx Cannabis Friends,Community Focused,Become a VIP,Exclusive Perks,The Bronx Collective,Your Cannabis Circle,Join the Family,Local &amp; Connected,Freshly Baked NYC is more than a dispensary – we&#39;re a community.,Sign up for our loyalty program and unlock exclusive benefits.,Connect with fellow cannabis enthusiasts in the Bronx.,We&#39;re dedicated to building a vibrant cannabis community in 10458.
+</pre>
+  <h3>04 — Ad notes (reference)</h3>
+  <pre class="csv">Campaign,Ad Group,Ad Label,Angle
+BronxSmokShopCon-01,BronxSmokShopCon-01 - 10458 conquest,raid-conquest-1,&quot;Positions Freshly Baked as the permanent, licensed alternative in Fordham.&quot;
+BronxSmokShopCon-01,BronxSmokShopCon-01 - 10458 conquest,raid-conquest-2,Highlights the convenience and daily availability of Freshly Baked.
+BronxSmokShopCon-01,BronxSmokShopCon-01 - 10458 conquest,raid-conquest-3,Focuses on the trust and regulation of a licensed dispensary.
+BronxSmokShopCon-02,BronxSmokShopCon-02 - 10458 conquest,raid-conquest-4,&quot;Emphasizes Freshly Baked as a local, Bronx-based business.&quot;
+BronxSmokShopCon-02,BronxSmokShopCon-02 - 10458 conquest,raid-conquest-5,Highlights the friendly and welcoming atmosphere.
+BronxSmokShopCon-02,BronxSmokShopCon-02 - 10458 conquest,raid-conquest-6,Focuses on the permanence and stability of the business.
+BronxSmokShopCon-03,BronxSmokShopCon-03 - 10458 conquest,raid-conquest-7,Emphasizes the quality of the experience and products.
+BronxSmokShopCon-03,BronxSmokShopCon-03 - 10458 conquest,raid-conquest-8,Highlights a community-focused approach with potential loyalty benefits.
+</pre>
+</body>
+</html>
