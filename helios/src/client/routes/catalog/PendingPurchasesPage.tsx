@@ -21,6 +21,7 @@ import { loadJson, mutateJson } from '../../app/fetchJson.js'
 import { isJobTerminal, loadJobStatus, waitForJob } from '../../app/jobPolling.js'
 import { CanonicalPricingLadder } from '../../components/CanonicalPricingLadder.js'
 import { Pill } from '../../components/Pill.js'
+import type { TreeNavNode } from '../../components/TreeNav.js'
 import { type CompetitorListing } from '../../../shared/ui/pricing-ladder/index.js'
 import { useRegisterCatalogSidebarSubtree } from './catalogSidebarSubtree.js'
 
@@ -30,7 +31,6 @@ export async function pendingPurchasesLoader({ request }: { request: Request }) 
 }
 
 export function PendingPurchasesPage() {
-  useRegisterCatalogSidebarSubtree()
   const data = useLoaderData() as PendingPurchaseListResponse
   const session = useRouteLoaderData('root') as SessionEnvelope
   const revalidator = useRevalidator()
@@ -73,6 +73,13 @@ export function PendingPurchasesPage() {
     [approvedVisibleRows, selectedRowIds],
   )
   const hierarchy = useMemo(() => buildPendingPurchaseHierarchy(data.items), [data.items])
+  const sidebarPacketHierarchy = useMemo(
+    () => buildPendingPurchaseSidebarNodes(hierarchy),
+    [hierarchy],
+  )
+  useRegisterCatalogSidebarSubtree({
+    pendingPurchases: { packetHierarchy: sidebarPacketHierarchy },
+  })
 
   useEffect(() => {
     const visibleRowIds = new Set(data.items.map((item) => item.rowId))
@@ -481,45 +488,17 @@ export function PendingPurchasesPage() {
       {data.items.length === 0 ? (
         <p className="empty-state">No rows match the current filters.</p>
       ) : (
-        <div className="pending-purchase-layout">
-          <aside className="pending-purchase-sidebar">
-            <p className="sidebar-heading">Packet Hierarchy</p>
-            <p className="subtle-copy">Jump by site, catalog lane, or brand before reviewing individual SKUs.</p>
-            <div className="pending-purchase-nav-list">
-              {hierarchy.map((siteGroup) => (
-                <div className="pending-purchase-nav-group" key={siteGroup.id}>
-                  <a href={`#${siteGroup.id}`}>{siteGroup.siteLabel}</a>
-                  <span className="pending-purchase-nav-count">{siteGroup.rowCount}</span>
-                  <div className="pending-purchase-nav-children">
-                    {siteGroup.categories.map((categoryGroup) => (
-                      <div className="pending-purchase-nav-group" key={categoryGroup.id}>
-                        <a href={`#${categoryGroup.id}`}>{categoryGroup.categoryLabel}</a>
-                        <span className="pending-purchase-nav-count">{categoryGroup.rowCount}</span>
-                        <div className="pending-purchase-nav-children">
-                          {categoryGroup.subcategories.map((subcategoryGroup) => (
-                            <div className="pending-purchase-nav-group" key={subcategoryGroup.id}>
-                              <a href={`#${subcategoryGroup.id}`}>{subcategoryGroup.subcategoryLabel}</a>
-                              <span className="pending-purchase-nav-count">{subcategoryGroup.rowCount}</span>
-                              <div className="pending-purchase-nav-children">
-                                {subcategoryGroup.brands.map((brandGroup) => (
-                                  <div className="pending-purchase-nav-group" key={brandGroup.id}>
-                                    <a href={`#${brandGroup.id}`}>{brandGroup.brandLabel}</a>
-                                    <span className="pending-purchase-nav-count">{brandGroup.rowCount}</span>
-                                  </div>
-                                ))}
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              ))}
-            </div>
-          </aside>
-
-          <div className="pending-purchase-content stacked-list">
+        <div className="pending-purchase-content stacked-list">
+          {/*
+            Packet hierarchy (site → category → subcategory → brand)
+            now lives in the main Helios sidebar under
+            Catalog → Pending purchases instead of as a second in-page
+            nav rail, so it appears/disappears with the rest of the
+            primary nav when the operator hits Escape. See
+            catalogSidebarSubtree.ts and the `pendingPurchases` option
+            on `useRegisterCatalogSidebarSubtree` for the wiring.
+          */}
+          <div className="pending-purchase-content-inner stacked-list">
             {hierarchy.map((siteGroup) => (
               <details className="pending-purchase-group" id={siteGroup.id} key={siteGroup.id} open>
                 <summary className="pending-purchase-summary">
@@ -1305,6 +1284,43 @@ function buildPendingPurchaseHierarchy(items: PendingPurchaseRow[]): PendingPurc
         siteLabel,
       }
     })
+}
+
+function buildPendingPurchaseSidebarNodes(
+  hierarchy: PendingPurchaseSiteGroup[],
+): TreeNavNode[] | null {
+  if (hierarchy.length === 0) return null
+  return hierarchy.map((siteGroup) => ({
+    kind: 'branch' as const,
+    navKey: `catalog.pending-purchases.site.${siteGroup.id}`,
+    label: siteGroup.siteLabel,
+    targetId: siteGroup.id,
+    count: siteGroup.rowCount,
+    defaultOpen: true,
+    children: siteGroup.categories.map((categoryGroup) => ({
+      kind: 'branch' as const,
+      navKey: `catalog.pending-purchases.category.${categoryGroup.id}`,
+      label: categoryGroup.categoryLabel,
+      targetId: categoryGroup.id,
+      count: categoryGroup.rowCount,
+      defaultOpen: true,
+      children: categoryGroup.subcategories.map((subcategoryGroup) => ({
+        kind: 'branch' as const,
+        navKey: `catalog.pending-purchases.subcategory.${subcategoryGroup.id}`,
+        label: subcategoryGroup.subcategoryLabel,
+        targetId: subcategoryGroup.id,
+        count: subcategoryGroup.rowCount,
+        defaultOpen: true,
+        children: subcategoryGroup.brands.map((brandGroup) => ({
+          kind: 'leaf' as const,
+          navKey: `catalog.pending-purchases.brand.${brandGroup.id}`,
+          label: brandGroup.brandLabel,
+          targetId: brandGroup.id,
+          count: brandGroup.rowCount,
+        })),
+      })),
+    })),
+  }))
 }
 
 function buildHierarchyId(...parts: string[]): string {

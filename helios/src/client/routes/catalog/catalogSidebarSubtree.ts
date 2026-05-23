@@ -105,10 +105,24 @@ export interface ImagesAndBarcodesSidebarOptions {
   activeBrand: string | null
 }
 
+export interface PendingPurchasesSidebarOptions {
+  /**
+   * Optional packet hierarchy children rendered nested under the
+   * "Pending purchases" branch. Pass `null` (or omit the option) when
+   * no packet is loaded so the entry collapses back to a plain leaf.
+   * When present, each leaf's `targetId` is an in-page anchor id
+   * matching the rendered `<details id="...">` group in
+   * PendingPurchasesPage.
+   */
+  packetHierarchy: TreeNavNode[] | null
+}
+
 export function useRegisterCatalogSidebarSubtree(options?: {
   imagesAndBarcodes?: ImagesAndBarcodesSidebarOptions
+  pendingPurchases?: PendingPurchasesSidebarOptions
 }): void {
   const imagesAndBarcodes = options?.imagesAndBarcodes
+  const pendingPurchases = options?.pendingPurchases
   const subtree = useMemo<TreeNavNode[]>(
     () => [
       {
@@ -123,12 +137,7 @@ export function useRegisterCatalogSidebarSubtree(options?: {
         label: 'Review queue',
         to: buildHeliosModulePath('catalog', 'review'),
       },
-      {
-        kind: 'leaf',
-        navKey: 'catalog.pending-purchases',
-        label: 'Pending purchases',
-        to: buildHeliosModulePath('catalog', 'pending-purchases'),
-      },
+      buildPendingPurchasesNode(pendingPurchases),
       buildImagesAndBarcodesNode(imagesAndBarcodes),
       {
         kind: 'leaf',
@@ -195,9 +204,30 @@ export function useRegisterCatalogSidebarSubtree(options?: {
       // for the ads / merchandising surface, not a catalog-mirroring
       // workflow.
     ],
-    [imagesAndBarcodes],
+    [imagesAndBarcodes, pendingPurchases],
   )
   useRegisterSidebarSubtree('catalog', subtree)
+}
+
+function buildPendingPurchasesNode(options: PendingPurchasesSidebarOptions | undefined): TreeNavNode {
+  const to = buildHeliosModulePath('catalog', 'pending-purchases')
+  const children = options?.packetHierarchy ?? null
+  if (!children || children.length === 0) {
+    return {
+      kind: 'leaf',
+      navKey: 'catalog.pending-purchases',
+      label: 'Pending purchases',
+      to,
+    }
+  }
+  return {
+    kind: 'branch',
+    navKey: 'catalog.pending-purchases',
+    label: 'Pending purchases',
+    to,
+    defaultOpen: true,
+    children,
+  }
 }
 
 function buildImagesAndBarcodesNode(options: ImagesAndBarcodesSidebarOptions | undefined): TreeNavNode {

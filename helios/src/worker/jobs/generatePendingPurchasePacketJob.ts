@@ -2457,6 +2457,64 @@ async function findPendingPurchaseLlmAnchors(
     }))
 }
 
+/**
+ * Strip container nouns the LLM teacher sometimes leaves in
+ * `classification.variantName` (e.g. "3.5g Jar", "1g Tin",
+ * "100mg Pouch"), and for Flower override the variant name with the
+ * canonical size — Flower variants are conventionally named by size
+ * alone ("3.5g", "7g", "14g"), never by the container they ship in.
+ *
+ * Trims trailing single-word container nouns even outside Flower so a
+ * misclassified "X 1g Bottle" still loses the "Bottle" suffix.
+ */
+const LLM_VARIANT_NAME_CONTAINER_TOKENS = new Set([
+  'jar',
+  'jars',
+  'tin',
+  'tins',
+  'bag',
+  'bags',
+  'pouch',
+  'pouches',
+  'bottle',
+  'bottles',
+  'box',
+  'boxes',
+  'container',
+  'containers',
+  'pack',
+  'packs',
+  'tube',
+  'tubes',
+  'tray',
+  'trays',
+])
+
+function repairLlmVariantName(
+  rawVariantName: string,
+  category: string,
+  packCount: number,
+  normalizedSize: string,
+  normalizedTab: string,
+): string {
+  if (category === 'Flower') {
+    return packCount > 1 ? normalizedTab : normalizedSize
+  }
+  const stripped = stripTrailingContainerTokens(rawVariantName)
+  return stripped.length > 0 ? stripped : rawVariantName
+}
+
+function stripTrailingContainerTokens(value: string): string {
+  let working = value.trim()
+  while (true) {
+    const match = /\s+(\S+)$/.exec(working)
+    if (!match) return working
+    const lastToken = match[1].toLowerCase().replace(/[.,;:]+$/u, '')
+    if (!LLM_VARIANT_NAME_CONTAINER_TOKENS.has(lastToken)) return working
+    working = working.slice(0, match.index).trimEnd()
+  }
+}
+
 function normalizePendingPurchaseLlmClassification(
   classification: z.infer<typeof PendingPurchaseLlmClassificationSchema>,
 ): ParsedProductName | null {
@@ -2474,6 +2532,20 @@ function normalizePendingPurchaseLlmClassification(
   const repairedTab = normalizeNonEmptyString(classification.variantTab)
     ?? (classification.packCount > 1 ? `${classification.packCount}x ${normalizedSize}` : normalizedSize)
 
+  // The LLM teacher sometimes echoes container nouns from the
+  // distributor product name into `variantName` (e.g. "3.5g Jar" for a
+  // Herb flower eighth that should just be called "3.5g"). Strip those
+  // trailing container tokens and, for Flower in particular, override
+  // the variant name with the canonical size — the variant name for a
+  // flower variant is the size, not the container.
+  const repairedVariantName = repairLlmVariantName(
+    classification.variantName,
+    classification.category,
+    classification.packCount,
+    normalizedSize,
+    repairedTab,
+  )
+
   const draft: ParsedProductName = {
     brand: classification.brand,
     category: classification.category,
@@ -2484,7 +2556,7 @@ function normalizePendingPurchaseLlmClassification(
     size: normalizedSize,
     strainName: normalizeNonEmptyString(classification.strainName) ?? '',
     subcategory: normalizeNonEmptyString(classification.subcategory) ?? '',
-    variantName: classification.variantName,
+    variantName: repairedVariantName,
     variantTab: repairedTab,
   }
 
