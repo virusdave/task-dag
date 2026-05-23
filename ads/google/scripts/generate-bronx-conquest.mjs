@@ -95,10 +95,35 @@ const POSITIVE_EXACT_KEYWORDS_PER_GROUP = 5;
 const POSITIVE_PHRASE_KEYWORDS_PER_GROUP = 12;
 const NEGATIVE_KEYWORDS_PER_GROUP = 10;
 
-// Ad-group-level Max CPC bid (USD). Required because we're on Manual
-// CPC and the keyword rows don't carry per-keyword bids. The operator
-// can re-tune in Editor before enabling the campaign.
+// Ad-group-level Max CPC bid (USD). Carried through for historical
+// reference / fallback, but under our default Target ROAS smart-
+// bidding strategy (see TARGET_ROAS_PCT below) Google Ads ignores
+// per-ad-group Max CPC entirely — bids are auction-time and decided
+// by the algorithm. We still emit the column so the operator can
+// flip to Manual CPC in Editor without re-deriving a bid floor.
 const AD_GROUP_MAX_CPC_USD = '2.00';
+
+// Default bidding strategy: "Maximize conversion value" with a
+// Target ROAS of 300% (i.e. $3 in conversion value per $1 spent).
+// Operator standing rule: every new campaign we emit must be on a
+// fully-automated bid strategy out of the box — Google was warning
+// "Your campaign is using manual bidding. Use a fully automated
+// bidding strategy to bid more efficiently." on every Manual CPC
+// campaign we shipped.
+//
+// In Ads Editor's CSV schema (support.google.com/google-ads/editor/
+// answer/94241), "Maximize conversion value WITH a target ROAS" is
+// encoded as `Bid Strategy Type = Target ROAS` plus a `Target ROAS`
+// column carrying the percentage (e.g. "300.00%"). The bare
+// `Maximize conversion value` value is the no-target variant; we
+// always want the target attached.
+//
+// Caveat the operator has been warned about: Smart Bidding wants
+// ≥50 conversions in the trailing 30 days before it's reliable. New
+// accounts may underperform until that backlog exists; switch to
+// Maximize Conversions (no target) if learning stalls.
+const BID_STRATEGY_TYPE = 'Target ROAS';
+const TARGET_ROAS_PCT = '300.00%';
 
 // ─── LLM credentials ──────────────────────────────────────────────────────────
 
@@ -489,14 +514,16 @@ function buildCsvFiles(ads, keywords) {
   // ── File 1: campaign skeletons (all N campaigns + ad groups + location) ────
   // Status convention (per oracle audit):
   //   * Campaign  = Paused  (operator flips ONE switch to launch)
-  //   * Ad Group  = Enabled (carries Max CPC bid for Manual CPC)
+  //   * Ad Group  = Enabled
   //   * Keywords  = Enabled (in keywords CSV)
   //   * Ads       = Enabled (in ads CSV)
   // That way "operator enables campaign" is the entire launch action.
   //
-  // Max CPC on the ad-group row gives every keyword in that group a
-  // bid source under Manual CPC. Without this, eligible keywords
-  // still don't enter auctions.
+  // Bidding: every campaign defaults to "Maximize conversion value"
+  // with Target ROAS = 300% (see BID_STRATEGY_TYPE / TARGET_ROAS_PCT).
+  // Under Smart Bidding the per-ad-group Max CPC is ignored by Google;
+  // we still emit it so a manual-bidding fallback is one Editor edit
+  // away.
   const skeletonColumns = [
     'Campaign',
     'Ad Group',
@@ -505,6 +532,10 @@ function buildCsvFiles(ads, keywords) {
     'Budget',
     'Budget type',
     'Bid Strategy Type',
+    // Target ROAS percentage (e.g. "300.00%") — only meaningful when
+    // Bid Strategy Type is "Target ROAS". See BID_STRATEGY_TYPE /
+    // TARGET_ROAS_PCT constants and Editor docs answer/94241.
+    'Target ROAS',
     'Networks',
     'Languages',
     'Location',
@@ -540,7 +571,8 @@ function buildCsvFiles(ads, keywords) {
       Status: 'Enabled',
       Budget: PER_CAMPAIGN_DAILY_BUDGET_USD,
       'Budget type': 'Daily',
-      'Bid Strategy Type': 'Manual CPC',
+      'Bid Strategy Type': BID_STRATEGY_TYPE,
+      'Target ROAS': TARGET_ROAS_PCT,
       Networks: 'Google search',
       // ISO-639-1 'en' is what Ads Editor accepts; 'English' is
       // not always resolved in CSV import.
@@ -771,7 +803,7 @@ function buildHTML({ ads, csvs, generatedAt, warnings }) {
       <dt>Landing page</dt><dd><a href="${escapeHtml(FINAL_URL)}">${escapeHtml(FINAL_URL)}</a></dd>
       <dt>Ad count</dt><dd>${ads.length} RSAs total (each ≥${RSA_MIN_HEADLINES} headlines, ≥${RSA_MIN_DESCRIPTIONS} descriptions)</dd>
       <dt>Keywords (per ad group)</dt><dd>${csvs.keywordCounts.exact} exact + ${csvs.keywordCounts.phrase} phrase = ${kwTotal} positive, plus ${kwNegTotal} negative</dd>
-      <dt>Ad-group Max CPC</dt><dd>$${AD_GROUP_MAX_CPC_USD} (Manual CPC bid; edit in Editor)</dd>
+      <dt>Bidding</dt><dd>Maximize conversion value, Target ROAS ${TARGET_ROAS_PCT} (Smart Bidding — fully automated). Per-ad-group Max CPC of $${AD_GROUP_MAX_CPC_USD} is emitted for fallback only and is ignored while Target ROAS is active.</dd>
       <dt>Initial state</dt><dd>Campaigns, ad groups, keywords, and ads are <strong>all Enabled</strong>. The bundle is turn-key — clicking Post in Ads Editor launches immediately. If you want a review pass, pause in Editor before posting.</dd>
       <dt>Initial budget</dt><dd>$${PER_CAMPAIGN_DAILY_BUDGET_USD}/day <em>per campaign</em> (edit in Ads Editor before posting)</dd>
     </dl>
@@ -798,14 +830,14 @@ function buildHTML({ ads, csvs, generatedAt, warnings }) {
       <li>In Google Ads Editor: <strong>Account → Import → From file…</strong> and pick file 01 first.</li>
       <li>Review &amp; post: this creates ${csvs.campaignCount} <strong>Enabled</strong> campaigns
           (<code>${csvs.chunks.map((_, i) => campaignNameFor(i)).join('</code>, <code>')}</code>),
-          one Enabled ad group per campaign (Max CPC $${AD_GROUP_MAX_CPC_USD}), and the 10458 location target on each.</li>
+          one Enabled ad group per campaign (Maximize conversion value @ Target ROAS ${TARGET_ROAS_PCT}; fallback Max CPC $${AD_GROUP_MAX_CPC_USD}), and the 10458 location target on each.</li>
       <li>Import file 02: this creates ${kwTotal} Enabled positive keywords + ${kwNegTotal} negatives in every ad group. <strong>Without this file the campaign serves nothing.</strong></li>
       <li>Import file 03: this creates ${ads.length} Enabled RSAs spread across the ${csvs.campaignCount} ad groups (max ${MAX_ADS_PER_CAMPAIGN} per campaign).</li>
       <li><strong>Click Post.</strong> The campaigns are live the moment Post completes — no further switches to flip.</li>
     </ol>
     <p><strong>Eligibility checklist (per oracle audit):</strong>
-       ✓ Campaign Type=Search, Budget&gt;0, Bid Strategy=Manual CPC, Networks=Google search, Languages=en;
-       ✓ Ad Group Status=Enabled, Max CPC=$${AD_GROUP_MAX_CPC_USD};
+       ✓ Campaign Type=Search, Budget&gt;0, Bid Strategy=Target ROAS @ ${TARGET_ROAS_PCT} (Maximize conversion value), Networks=Google search, Languages=en;
+       ✓ Ad Group Status=Enabled (Smart Bidding sets bids — fallback Max CPC=$${AD_GROUP_MAX_CPC_USD});
        ✓ ≥1 enabled positive keyword per ad group (we have ${kwTotal});
        ✓ ≥1 enabled RSA per ad group (each meets the 3-headline / 2-description RSA minima);
        ✓ Final URL set on every ad;

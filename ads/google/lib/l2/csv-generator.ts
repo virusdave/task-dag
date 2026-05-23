@@ -372,8 +372,29 @@ function generateTrialGroupsCSV(
           Campaign: campaign,
           'Ad group': groupName,
           'Ad group status': 'Enabled',
+          // Default max. CPC retained for fallback only. Under our
+          // standard "Maximize conversion value + Target ROAS"
+          // strategy below, Google ignores per-ad-group Max CPC at
+          // auction time. We keep emitting it so flipping back to
+          // Manual CPC in Editor is a one-click change.
           'Default max. CPC': '1.00',
           'Campaign daily budget': budget.toFixed(2),
+          // Default bidding: Smart Bidding "Maximize conversion
+          // value" with Target ROAS 300%. Operator standing rule:
+          // every campaign we create must be on a fully automated
+          // strategy out of the box — Google was warning "Your
+          // campaign is using manual bidding. Use a fully automated
+          // bidding strategy to bid more efficiently." on Manual CPC
+          // trial campaigns.
+          //
+          // Editor schema (support.google.com/google-ads/editor/
+          // answer/94241): "Maximize conversion value WITH a target
+          // ROAS" is encoded as `Bid Strategy Type = Target ROAS`
+          // plus a `Target ROAS` column carrying the percentage.
+          // (The bare "Maximize conversion value" value is the no-
+          // target variant; we always want the 300% target attached.)
+          'Bid Strategy Type': 'Target ROAS',
+          'Target ROAS': '300.00%',
           // EU Political Ads Regulation 2024/900 declaration.
           // Required on every new campaign since Sep 2025; without it
           // the Google Ads API rejects mutate calls with
