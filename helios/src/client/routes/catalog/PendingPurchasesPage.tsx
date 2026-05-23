@@ -77,9 +77,20 @@ export function PendingPurchasesPage() {
     () => buildPendingPurchaseSidebarNodes(hierarchy),
     [hierarchy],
   )
-  useRegisterCatalogSidebarSubtree({
-    pendingPurchases: { packetHierarchy: sidebarPacketHierarchy },
-  })
+  // Memoize the options object passed to the catalog-sidebar hook —
+  // without this, every render produces a fresh `{ pendingPurchases: {
+  // packetHierarchy } }` literal whose reference change cascades into
+  // the hook's internal `useMemo([... pendingPurchases])` and then the
+  // `useEffect([... nodes])` inside `useRegisterSidebarSubtree`, which
+  // calls `setSubtree` on every render → SidebarNavProvider state
+  // update → AppShell re-render → PendingPurchasesPage re-render →
+  // loop, causing React to bail with "Maximum update depth exceeded"
+  // and leaving the reviewer staring at an empty page.
+  const catalogSidebarOptions = useMemo(
+    () => ({ pendingPurchases: { packetHierarchy: sidebarPacketHierarchy } }),
+    [sidebarPacketHierarchy],
+  )
+  useRegisterCatalogSidebarSubtree(catalogSidebarOptions)
 
   useEffect(() => {
     const visibleRowIds = new Set(data.items.map((item) => item.rowId))
