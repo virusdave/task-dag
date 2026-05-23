@@ -114,6 +114,45 @@ function actionTypeIs(action: { action_type?: unknown }, target: string): boolea
 }
 
 /**
+ * Google's minimum requirements for a Responsive Search Ad: at
+ * least 3 headlines and 2 descriptions. Any RSA row we emit that
+ * doesn't clear these is rejected by Ads Editor on import (and would
+ * be rejected by Google's policy review even if it slipped through),
+ * so we drop those rows ourselves and log why instead of producing
+ * unimportable junk.
+ *
+ * Reference: https://support.google.com/google-ads/answer/7684791
+ * ("Responsive search ads can include up to 15 headlines and 4
+ * descriptions; you must include at least 3 headlines and 2
+ * descriptions for the ad to be eligible to serve.")
+ */
+const RSA_MIN_HEADLINES = 3;
+const RSA_MIN_DESCRIPTIONS = 2;
+
+interface RsaMinCheck {
+  ok: boolean;
+  reason: string | null;
+}
+
+function checkRsaMinima(headlines: string[], descriptions: string[]): RsaMinCheck {
+  const goodHeadlines = headlines.filter((h) => typeof h === 'string' && h.trim().length > 0);
+  const goodDescriptions = descriptions.filter((d) => typeof d === 'string' && d.trim().length > 0);
+  if (goodHeadlines.length < RSA_MIN_HEADLINES) {
+    return {
+      ok: false,
+      reason: `RSA needs ≥${RSA_MIN_HEADLINES} headlines, got ${goodHeadlines.length}`,
+    };
+  }
+  if (goodDescriptions.length < RSA_MIN_DESCRIPTIONS) {
+    return {
+      ok: false,
+      reason: `RSA needs ≥${RSA_MIN_DESCRIPTIONS} descriptions, got ${goodDescriptions.length}`,
+    };
+  }
+  return { ok: true, reason: null };
+}
+
+/**
  * Build the "disambiguating context" columns Ads Editor needs to
  * recognise an existing ad on import. Without these, an update row
  * that carries only "Ad ID, Ad status" trips Editor's "Ambiguous row
@@ -384,8 +423,15 @@ function generateRepairCSV(l2Output: L2PredictionOutput, ctx: SnapshotIndex): CS
       const creative = action.suggested_new_creatives[0];
       const headlines = Array.isArray(creative.headlines) ? creative.headlines : [];
       const descriptions = Array.isArray(creative.descriptions) ? creative.descriptions : [];
-      if (headlines.length === 0) {
-        messages.push(`repair skipped for ${adId}: creative has no headlines`);
+      // Repair updates an existing RSA in place. Editor replaces the
+      // Headline N / Description N slots we specify and clears the
+      // rest, so the row must already satisfy Google's RSA minima
+      // (≥3 headlines, ≥2 descriptions) or the resulting ad is
+      // immediately ineligible. Reject sub-minimum repairs rather
+      // than ship a CSV that produces a guaranteed-rejected ad.
+      const rsaCheck = checkRsaMinima(headlines, descriptions);
+      if (!rsaCheck.ok) {
+        messages.push(`repair skipped for ${adId}: ${rsaCheck.reason}`);
         continue;
       }
 
@@ -450,8 +496,13 @@ function generateReplaceCSV(l2Output: L2PredictionOutput, ctx: SnapshotIndex): C
       for (const creative of action.suggested_new_creatives) {
         const headlines = Array.isArray(creative.headlines) ? creative.headlines : [];
         const descriptions = Array.isArray(creative.descriptions) ? creative.descriptions : [];
-        if (headlines.length === 0) {
-          messages.push(`replace variant for ${adId} skipped: no headlines`);
+        // Replace creates a brand-new RSA. Below the RSA minima
+        // (≥3 headlines, ≥2 descriptions) the resulting row is
+        // rejected by Ads Editor on import. Drop with a clear
+        // message rather than emit the invalid row.
+        const rsaCheck = checkRsaMinima(headlines, descriptions);
+        if (!rsaCheck.ok) {
+          messages.push(`replace variant for ${adId} skipped: ${rsaCheck.reason}`);
           continue;
         }
         const campaign = knownAd?.campaign_name ?? '';
@@ -612,6 +663,14 @@ function generateTrialAdsCSV(l2Output: L2PredictionOutput, ctx: SnapshotIndex): 
           );
           continue;
         }
+        // Trial controls / variants are new RSAs. Enforce the
+        // ≥3 headlines / ≥2 descriptions minimum or Ads Editor
+        // (and Google's serving check) rejects them.
+        const rsaCheck = checkRsaMinima(c.headlines, c.descriptions);
+        if (!rsaCheck.ok) {
+          messages.push(`control in ${groupName} skipped (${c.label || 'unlabelled'}): ${rsaCheck.reason}`);
+          continue;
+        }
         rows.push(
           buildTrialAdRow({
             rowNumber: rowNumber++,
@@ -640,6 +699,11 @@ function generateTrialAdsCSV(l2Output: L2PredictionOutput, ctx: SnapshotIndex): 
           messages.push(
             `variant in ${groupName} skipped: could not resolve creative from ${JSON.stringify(raw).slice(0, 120)}`,
           );
+          continue;
+        }
+        const rsaCheck = checkRsaMinima(c.headlines, c.descriptions);
+        if (!rsaCheck.ok) {
+          messages.push(`variant in ${groupName} skipped (${c.label || 'unlabelled'}): ${rsaCheck.reason}`);
           continue;
         }
         rows.push(

@@ -50,11 +50,17 @@ main_prompt:
        silently disappear in the CSV stage; this is now fixed, but
        lowercase remains the canonical form.
 
-    4. For `repair` / `replace` actions, EVERY
-       `suggested_new_creatives[]` entry MUST include both
-       `headlines` (15 strings, ≤30 chars each) and `descriptions`
-       (4 strings, 60–90 chars). Empty or missing arrays are
-       dropped.
+    4. RSA MINIMA ARE HARD. Every `suggested_new_creatives[]`
+       entry (whether for `repair`, `replace`, or a trial
+       control/variant) MUST contain at least:
+         - 3 non-empty headlines (each ≤30 characters), AND
+         - 2 non-empty descriptions (each 60–90 characters).
+       Best practice is 15 headlines and 4 descriptions; aim for
+       that. Anything short of the 3+2 minimum is rejected by Ads
+       Editor on import and would be rejected by Google's serving
+       check even if it slipped through. The downstream CSV
+       generator drops rows that fall short; do not waste a slot on
+       a 1-headline "tweak".
 
     5. For trial `controls` and `variants`, prefer the structured
        form:
