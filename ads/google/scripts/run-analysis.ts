@@ -340,6 +340,18 @@ async function main() {
     )
   }
   
+  // Persist the raw L2 JSON BEFORE generating CSVs / HTML / bundle.
+  // Any failure downstream (e.g. an LLM-emitted action shape that
+  // crashes the csv-generator) used to throw out the L2 output too,
+  // which made post-mortem impossible. L3 also depends on this file
+  // existing for failed runs so it can learn from what went wrong.
+  console.log('\n💾 Persisting L2 JSON (pre-CSV, for crash-safety)...');
+  await fs.mkdir(path.join(args.outputDir, 'json'), { recursive: true });
+  await fs.writeFile(
+    path.join(args.outputDir, 'json', `${runId}-l2-output.json`),
+    JSON.stringify(l2Output, null, 2),
+  );
+
   // Generate CSV batches
   console.log('\n📄 Generating CSV batches...');
   // Pass the snapshot ads so the generator can backfill missing
@@ -366,18 +378,11 @@ async function main() {
   const htmlPacket = generateHTMLPacket(l2Output, args.snapshotFile.split('/').pop() || 'unknown');
   console.log('HTML packet generated');
   
-  // Write outputs
+  // Write outputs (L2 JSON was already persisted above pre-CSV).
   console.log('\n💾 Writing outputs...');
-  await fs.mkdir(path.join(args.outputDir, 'json'), { recursive: true });
   await fs.mkdir(path.join(args.outputDir, 'csv'), { recursive: true });
   await fs.mkdir(path.join(args.outputDir, 'html'), { recursive: true });
-  
-  // Write L2 JSON
-  await fs.writeFile(
-    path.join(args.outputDir, 'json', `${runId}-l2-output.json`),
-    JSON.stringify(l2Output, null, 2)
-  );
-  
+
   // Write CSV batches
   for (const batch of csvBatches) {
     if (batch.rows.length > 0) {

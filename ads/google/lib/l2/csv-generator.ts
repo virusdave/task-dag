@@ -449,7 +449,17 @@ function generateRepairCSV(l2Output: L2PredictionOutput, ctx: SnapshotIndex): CS
         continue;
       }
 
+      // Defensive: the LLM occasionally returns
+      // `suggested_new_creatives: [null]` or `[{}]` when it wants to
+      // signal "I know I should propose something but I don't have
+      // one" while still emitting `action_type: repair`. We skip
+      // those rather than crash the whole bundle on the [0].headlines
+      // dereference (which used to take down the entire morning run).
       const creative = action.suggested_new_creatives[0];
+      if (!creative || typeof creative !== 'object') {
+        messages.push(`repair skipped for ${adId}: suggested_new_creatives[0] is empty`);
+        continue;
+      }
       const headlines = Array.isArray(creative.headlines) ? creative.headlines : [];
       const descriptions = Array.isArray(creative.descriptions) ? creative.descriptions : [];
       // Repair updates an existing RSA in place. Editor replaces the
@@ -523,6 +533,10 @@ function generateReplaceCSV(l2Output: L2PredictionOutput, ctx: SnapshotIndex): C
       if (!action.suggested_new_creatives) continue;
 
       for (const creative of action.suggested_new_creatives) {
+        if (!creative || typeof creative !== 'object') {
+          messages.push(`replace variant for ${adId} skipped: empty creative entry`);
+          continue;
+        }
         const headlines = Array.isArray(creative.headlines) ? creative.headlines : [];
         const descriptions = Array.isArray(creative.descriptions) ? creative.descriptions : [];
         // Replace creates a brand-new RSA. Below the RSA minima
