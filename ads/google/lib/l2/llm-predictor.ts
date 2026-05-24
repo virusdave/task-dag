@@ -243,10 +243,34 @@ export class L2LLMPredictor {
             break;
           }
         }
+        // When we send a single family in the prompt, the LLM often
+        // unwraps its response and returns the family object directly
+        // at the top level (e.g. `{family_key, ad_actions, ...}`)
+        // instead of wrapped in `{families: [{...}]}`. Accept either
+        // shape — without this fallback the per-family run silently
+        // dropped 4 out of 5 families because the response carried
+        // no `families` key. Heuristic: it looks like a family if it
+        // has any of the family-level keys we'll read downstream.
+        if (rawFamiliesArray.length === 0 && parsedResponse && typeof parsedResponse === 'object') {
+          const looksLikeFamily =
+            'ad_actions' in parsedResponse ||
+            'ad_level_actions' in parsedResponse ||
+            'family_key' in parsedResponse ||
+            'family_risk_assessment' in parsedResponse ||
+            'trial_plans' in parsedResponse;
+          if (looksLikeFamily) {
+            rawFamiliesArray = [parsedResponse];
+          }
+        }
         const rawFamily = rawFamiliesArray[0] ?? null;
         if (rawFamiliesArray.length > 1) {
           console.warn(
             `⚠️  Per-family LLM call returned ${rawFamiliesArray.length} families for ${JSON.stringify(familyPayload.family_key)}; using only the first.`,
+          );
+        }
+        if (!rawFamily) {
+          console.warn(
+            `⚠️  Per-family LLM call for ${JSON.stringify(familyPayload.family_key)} returned an unrecognized shape — keys: ${Object.keys(parsedResponse ?? {}).join(',')}`,
           );
         }
         const impairedCount = familyPayload.impaired_ads.length;
@@ -268,10 +292,18 @@ export class L2LLMPredictor {
     );
 
     // Combine per-family responses into the canonical shape the
-    // downstream code expects.
-    const rawFamilies: any[] = perFamilyResults
-      .map((r) => r.rawFamily)
-      .filter((f): f is any => f !== null);
+    // downstream code expects. Preserve a slot per input family (in
+    // input order) — when a per-family call returned an unrecognized
+    // shape we emit an empty stub so downstream `families[idx]`
+    // alignment with `familySummaries[idx]` is preserved.
+    const rawFamilies: any[] = perFamilyResults.map((r) =>
+      r.rawFamily ?? {
+        family_key: r.family_payload.family_key,
+        ad_actions: [],
+        trial_plans: [],
+        issues: [],
+      },
+    );
     const combinedL1RuleUpdates: any[] = perFamilyResults.flatMap(
       (r) => r.l1_rule_updates,
     );
