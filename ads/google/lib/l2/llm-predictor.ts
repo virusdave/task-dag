@@ -232,7 +232,12 @@ export class L2LLMPredictor {
           throw new Error(`Invalid JSON response from LLM: ${error}`);
         }
 
-        const knownKeys = ['families', 'l2_predictions', 'predictions'];
+        const knownKeys = [
+          'families',
+          'l2_predictions',
+          'predictions',
+          'family_predictions', // observed in 5/24 per-family responses
+        ];
         let rawFamiliesArray: any[] = [];
         for (const k of Object.keys(parsedResponse ?? {})) {
           if (
