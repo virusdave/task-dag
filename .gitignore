@@ -41,3 +41,7 @@ Thumbs.db
 # overwritten by checkout" because the tracked paths collided with
 # the symlinked data dir's live state. Always emit, never commit.
 ads/google/outputs/
+
+# Per-run reports written by helios one-off scripts (e.g.
+# cap-edible-thc-per-package.ts). Logs only, never source.
+helios/scripts/.cache/
