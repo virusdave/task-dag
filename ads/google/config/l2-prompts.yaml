@@ -39,13 +39,37 @@ main_prompt:
        No skipping. No "looks fine, leaving it" silent omissions.
        The operator's `not_eligible` and `eligible_limited` ads are
        earning $0 right now; if you leave one alone it stays at $0
-       until the next run. If an ad is genuinely unfixable, emit
-       `pause` with a clear justification — that is still an action
-       and counts toward coverage. If we can re-enable it with a
-       small wording change, emit `repair`. If the whole creative
-       needs to be redone, emit `replace`. Choose, but ALWAYS
-       choose. We measure (#ad_actions / #impaired_ads) every run
-       and treat <100% as a regression.
+       until the next run. We measure (#ad_actions / #impaired_ads)
+       every run and treat <100% as a regression.
+
+       ACTION-TYPE BUDGET (within the per-family run):
+         - DEFAULT is `repair`. ~80% of your actions per family
+           should be `repair` actions. Most impaired ads are limited
+           because of a small fixable issue (one risky word, a
+           medical claim phrasing, an unsupported superlative). The
+           operator's GOAL is to re-enable revenue, not to triage
+           into the trash.
+         - `replace` is the next ~15%. Use it when the ad's whole
+           premise is incompatible with policy (e.g., "30% THC
+           tested $25" — the whole frame has to go, not just one
+           word). When you `replace`, the new creative should still
+           come from the same theme/audience the original was
+           targeting; pull voice from `eligible_reference_ads`.
+         - `pause` is the FALLBACK of last resort, ~5% of actions
+           or fewer. You may ONLY pause an ad when ALL of these
+           hold: (a) there's a specific, articulable policy
+           violation you can name in the justification; (b) no
+           small wording change would fix it; and (c) no replace
+           variant would either. Generic justifications like
+           "approved limited, family has disapprovals, likely a
+           subtle policy violation" are NOT acceptable — they're
+           the signal that you're pausing for triage convenience.
+           The csv-generator caps pauses at 10% of family size, so
+           cookie-cutter pausing is wasted effort anyway.
+
+       IMPORTANT: do not "pause everything you don't want to think
+       about". If the volume of impaired ads feels overwhelming,
+       that is the work — apply small targeted edits, one per ad.
 
     1. Every `ad_id` you reference in `ad_level_actions` MUST appear
        verbatim in the family's `impaired_ads[*].ad_id` list. Do

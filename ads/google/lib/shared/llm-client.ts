@@ -183,6 +183,32 @@ export function createLLMClientFromEnv(): LLMClient {
 /**
  * Load prompt templates from YAML config
  */
+/**
+ * Read the L3 addenda file if it exists. The addenda are short
+ * natural-language guidance derived from L3 meta-analysis of recent
+ * L2 outputs and ad attempt outcomes; they are appended to the L2
+ * system prompt to feed self-improvement back into the daily loop.
+ *
+ * The file lives next to l2-prompts.yaml so L3 only needs to write
+ * one path. Absent file → empty string (no-op).
+ *
+ * Env override: GADS_L3_ADDENDA_PATH lets local dev / tests point
+ * at a fixture.
+ */
+export async function readL3Addenda(promptConfigPath: string): Promise<string> {
+  const override = process.env.GADS_L3_ADDENDA_PATH?.trim()
+  const addendaPath = override
+    ? override
+    : `${promptConfigPath.replace(/\/[^/]+\.ya?ml$/, '')}/l3-addenda.md`
+  try {
+    const txt = await fs.readFile(addendaPath, 'utf-8')
+    return txt.trim()
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return ''
+    throw err
+  }
+}
+
 export async function loadPromptConfig(configPath: string): Promise<any> {
   const yaml = await import('js-yaml');
   const content = await fs.readFile(configPath, 'utf-8');

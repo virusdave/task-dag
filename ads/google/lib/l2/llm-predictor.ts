@@ -8,7 +8,7 @@ import type {
   L1FamilySummary,
   L2PredictionOutput,
 } from '../shared/types.js';
-import { LLMClient, formatPromptTemplate, loadPromptConfig } from '../shared/llm-client.js';
+import { LLMClient, formatPromptTemplate, loadPromptConfig, readL3Addenda } from '../shared/llm-client.js';
 
 export interface L2PredictorConfig {
   promptConfigPath: string;
@@ -23,16 +23,29 @@ export interface L2PredictorConfig {
 export class L2LLMPredictor {
   private config: L2PredictorConfig;
   private promptConfig: any;
+  private l3Addenda: string = '';
 
   constructor(config: L2PredictorConfig) {
     this.config = config;
   }
 
   /**
-   * Initialize by loading prompt configuration
+   * Initialize by loading prompt configuration + any L3-generated
+   * addenda. The addenda are natural-language guidance L3 wrote
+   * after meta-analyzing recent runs — they're appended to every
+   * per-family system prompt, which is how the feedback loop
+   * (L2 output → ad attempts → L3 analysis → addenda → next L2)
+   * actually closes. Without this, L3 just produced markdown
+   * reports nobody read.
    */
   async initialize(): Promise<void> {
     this.promptConfig = await loadPromptConfig(this.config.promptConfigPath);
+    this.l3Addenda = await readL3Addenda(this.config.promptConfigPath);
+    if (this.l3Addenda) {
+      console.log(
+        `📝 L2 loaded L3 addenda (${this.l3Addenda.length} chars) — feedback loop active`,
+      );
+    }
   }
 
   /**
@@ -133,66 +146,143 @@ export class L2LLMPredictor {
       `🤖 L2 prompt: ${totalImpairedSent} impaired RSAs sent in full to the LLM across ${familySummaries.length} families`,
     );
 
-    // Build user prompt
-    const systemPrompt = this.promptConfig.main_prompt.system_prompt || '';
+    // Build user prompt header (system prompt + template).
+    //
+    // PER-FAMILY BATCHING. The previous design sent ALL families in
+    // one LLM call. With 5 families × ~20 impaired ads × full RSA
+    // content (15 headlines + 4 descriptions each), the LLM
+    // routinely allocated its attention budget to "produce a
+    // valid-looking response for 5 families" rather than "carefully
+    // repair every impaired ad in each family". The observable
+    // symptom was identical pause-with-cookie-cutter-justification
+    // rows: the model was triaging by emitting one or two real
+    // attempts per family and then bulk-pausing the rest to fit
+    // within its reasoning window.
+    //
+    // We now fire ONE LLM call per family in parallel. Each call
+    // has the same large output budget (32K tokens) but a much
+    // smaller input set, so the model can dedicate full attention
+    // to every impaired ad in the family it's looking at. Total
+    // wall time is roughly unchanged because the calls run
+    // concurrently.
+    const baseSystemPrompt = this.promptConfig.main_prompt.system_prompt || '';
+    // Append the L3 addenda (if any) under a clearly-fenced section
+    // so the LLM can attribute the guidance to the meta-analysis
+    // layer rather than the original prompt author.
+    const systemPrompt = this.l3Addenda
+      ? `${baseSystemPrompt}\n\n## L3 META-ANALYSIS ADDENDA (read this — it's based on what we learned from your previous outputs)\n\n${this.l3Addenda}`
+      : baseSystemPrompt;
     const userPromptTemplate = this.promptConfig.main_prompt.user_prompt_template || '';
-    
-    const userPrompt = formatPromptTemplate(userPromptTemplate, {
-      l1_family_summaries: JSON.stringify(l1SummariesFormatted, null, 2),
-      l1_spot_check_results: '[]', // TODO: Implement L1 spot-checks
-      policy_experiences: this.config.policyExperiences || 'No prior experiences available.',
-      trial_outcomes: this.config.trialOutcomes || 'No prior trial outcomes available.',
-    });
+    const llmClient = this.config.llmClient;
+    const policyExperiences = this.config.policyExperiences;
+    const trialOutcomes = this.config.trialOutcomes;
 
-    // Call LLM
-    const response = await this.config.llmClient.callWithRetry({
-      use_case: 'gads-ads-l2-content-optimization',
-      system_prompt: systemPrompt,
-      user_prompt: userPrompt,
-      temperature: 0.1,
-      // Output budget sized for one action per impaired ad. At ~150
-      // tokens per ad_action JSON object (id, type, justification,
-      // suggested_new_creatives with 3 headlines + 2 descriptions),
-      // 32K tokens supports ~200 impaired ads — well above the
-      // current snapshot's 95 impaired RSAs. The previous 8K cap
-      // truncated the LLM's reply, which manifested as "L2 returned
-      // N families, expected M" plus dropped families in the JSON.
-      max_tokens: 32000,
-      response_format: 'json',
-    });
+    const perFamilyResults = await Promise.all(
+      l1SummariesFormatted.map(async (familyPayload) => {
+        // Pass a 1-element array so the existing prompt template
+        // (which expects `{l1_family_summaries}` as JSON) still
+        // formats correctly. The LLM continues to return a
+        // `families: [...]` shape; we just expect length 1.
+        const userPrompt = formatPromptTemplate(userPromptTemplate, {
+          l1_family_summaries: JSON.stringify([familyPayload], null, 2),
+          l1_spot_check_results: '[]', // TODO: Implement L1 spot-checks
+          policy_experiences: policyExperiences || 'No prior experiences available.',
+          trial_outcomes: trialOutcomes || 'No prior trial outcomes available.',
+        });
 
-    // Parse response
-    let parsedResponse: any;
-    try {
-      parsedResponse = JSON.parse(response.content);
-    } catch (error) {
-      console.error('Failed to parse LLM response:', response.content);
-      throw new Error(`Invalid JSON response from LLM: ${error}`);
-    }
+        let response;
+        try {
+          response = await llmClient.callWithRetry({
+            use_case: 'gads-ads-l2-content-optimization',
+            system_prompt: systemPrompt,
+            user_prompt: userPrompt,
+            temperature: 0.1,
+            // Per-family output budget. At ~250 tokens per
+            // ad_action (id + type + justification + 3 headlines +
+            // 2 descriptions), 32K supports ~120 actions per
+            // family. The largest single family in the current
+            // snapshot has 67 impaired ads, so this fits with
+            // headroom.
+            max_tokens: 32000,
+            response_format: 'json',
+          });
+        } catch (err) {
+          // Don't poison the whole run on one family's failure —
+          // log and return an empty family record so the others
+          // still ship. run-analysis.ts's coverage guardrail will
+          // catch a fully-empty run.
+          console.warn(
+            `⚠️  L2 LLM call failed for family ${JSON.stringify(familyPayload.family_key)}: ${(err as Error).message}`,
+          );
+          return {
+            family_payload: familyPayload,
+            rawFamily: null,
+            l1_rule_updates: [] as any[],
+          };
+        }
 
-    console.log('LLM response parsed:', JSON.stringify(parsedResponse, null, 2).substring(0, 500));
+        let parsedResponse: any;
+        try {
+          parsedResponse = JSON.parse(response.content);
+        } catch (error) {
+          console.error(
+            `Failed to parse LLM response for family ${JSON.stringify(familyPayload.family_key)}:`,
+            response.content.substring(0, 400),
+          );
+          throw new Error(`Invalid JSON response from LLM: ${error}`);
+        }
 
-    // Map to L2PredictionOutput schema. The LLM is inconsistent
-    // about the key (we've seen all of `families`, `L2_Predictions`,
-    // `l2_predictions`, `predictions`, even `Families`) so accept
-    // any case-variant whose value is an array.
-    const knownKeys = ['families', 'l2_predictions', 'predictions'];
-    let rawFamilies: any[] = [];
-    for (const k of Object.keys(parsedResponse ?? {})) {
-      if (knownKeys.includes(k.toLowerCase()) && Array.isArray((parsedResponse as any)[k])) {
-        rawFamilies = (parsedResponse as any)[k];
-        break;
-      }
-    }
-    
-    // Validate response structure
-    if (!Array.isArray(rawFamilies)) {
-      console.error('LLM response missing families/L2_Predictions array:', parsedResponse);
-      throw new Error('LLM response missing families/L2_Predictions array');
-    }
+        const knownKeys = ['families', 'l2_predictions', 'predictions'];
+        let rawFamiliesArray: any[] = [];
+        for (const k of Object.keys(parsedResponse ?? {})) {
+          if (
+            knownKeys.includes(k.toLowerCase()) &&
+            Array.isArray((parsedResponse as any)[k])
+          ) {
+            rawFamiliesArray = (parsedResponse as any)[k];
+            break;
+          }
+        }
+        const rawFamily = rawFamiliesArray[0] ?? null;
+        if (rawFamiliesArray.length > 1) {
+          console.warn(
+            `⚠️  Per-family LLM call returned ${rawFamiliesArray.length} families for ${JSON.stringify(familyPayload.family_key)}; using only the first.`,
+          );
+        }
+        const impairedCount = familyPayload.impaired_ads.length;
+        const actionCount = Array.isArray(rawFamily?.ad_actions ?? rawFamily?.ad_level_actions)
+          ? (rawFamily.ad_actions ?? rawFamily.ad_level_actions).length
+          : 0;
+        if (impairedCount > 0) {
+          const pct = Math.round((actionCount / impairedCount) * 100);
+          console.log(
+            `  ${JSON.stringify(familyPayload.family_key)}: ${actionCount}/${impairedCount} impaired ads addressed (${pct}%)`,
+          );
+        }
+        return {
+          family_payload: familyPayload,
+          rawFamily,
+          l1_rule_updates: parsedResponse.l1_rule_updates ?? [],
+        };
+      }),
+    );
+
+    // Combine per-family responses into the canonical shape the
+    // downstream code expects.
+    const rawFamilies: any[] = perFamilyResults
+      .map((r) => r.rawFamily)
+      .filter((f): f is any => f !== null);
+    const combinedL1RuleUpdates: any[] = perFamilyResults.flatMap(
+      (r) => r.l1_rule_updates,
+    );
+    // Synthesize a parsedResponse-shaped object so downstream code
+    // (which reads `parsedResponse.l1_rule_updates`) is unchanged.
+    const parsedResponse: any = { l1_rule_updates: combinedL1RuleUpdates };
 
     if (rawFamilies.length !== familySummaries.length) {
-      console.warn(`⚠️  LLM returned ${rawFamilies.length} families, expected ${familySummaries.length}`);
+      console.warn(
+        `⚠️  L2 returned ${rawFamilies.length} families, expected ${familySummaries.length} (likely a per-family LLM failure — see warnings above).`,
+      );
     }
 
     // Map LLM response structure to our schema
