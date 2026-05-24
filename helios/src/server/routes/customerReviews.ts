@@ -494,12 +494,22 @@ export async function registerCustomerReviewsRoutes(server: FastifyInstance): Pr
         logger: request.log,
       })
 
+      // Surface the resolved provider URL whenever the site has one
+      // configured AND the bucket UX keeps the customer on the
+      // drawing-form path (5★ / 4★-with-text / degraded-pass). The
+      // client uses it both for the 5★ auto-open-Google behavior
+      // and for the paste-text upsell when the customer typed a
+      // review. We deliberately do NOT expose it on the
+      // thank_customer (lukewarm/negative) path — we don't want to
+      // funnel unhappy customers to Google.
+      const responseProviderUrl =
+        gateDecision.nextStep === 'show_drawing_form' ? resolvedProviderUrl : null
       return reply.send(
         CustomerReviewSubmitResponseSchema.parse({
           submissionId: result.submissionId,
           acceptedAt: result.createdAt.toISOString(),
           nextStep: gateDecision.nextStep,
-          providerReviewUrl: gateDecision.pasteTextUrl,
+          providerReviewUrl: responseProviderUrl,
           offerPasteText: gateDecision.offerPasteText,
         }),
       )
