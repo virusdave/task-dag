@@ -11,6 +11,7 @@
 
 import * as fs from 'fs/promises';
 import * as path from 'path';
+import { spawn } from 'node:child_process';
 import type {
   L2PredictionOutput,
   L3EvaluationOutput,
@@ -118,6 +119,125 @@ async function collectFamilyOutcomes(): Promise<any[]> {
 }
 
 /**
+ * Real ad-attempt outcome history, pulled from the Helios
+ * `gads_ad_attempts` table via a small standalone script that lives
+ * inside `helios/scripts/` (so it has access to the existing pg
+ * connection pool config). This is the data L3 used to mock as
+ * `collectFamilyOutcomes() => []`. Returns `null` if the script
+ * isn't reachable, the DB is down, or DATABASE_URL isn't set —
+ * the rest of L3 falls back to its deterministic L2-output-only
+ * observations in that case.
+ */
+interface AdAttemptOutcomes {
+  generated_at: string;
+  lookback_days: number;
+  totals: { attempts: number; observed: number; open: number };
+  byActionType: Array<{
+    action_type: string;
+    total: number;
+    observed: number;
+    outcomes: Record<string, number>;
+  }>;
+  byFamily: Array<{
+    family_key: Record<string, unknown> | null;
+    action_type: string;
+    total: number;
+    observed: number;
+    outcomes: Record<string, number>;
+  }>;
+}
+
+async function collectAdAttemptOutcomes(): Promise<AdAttemptOutcomes | null> {
+  // The L3 service runs with WorkingDirectory=ads/google, so the
+  // helios checkout lives two dirs up.
+  const heliosDir = path.resolve('../../helios');
+  const scriptPath = 'scripts/dump-gads-outcomes.ts';
+  try {
+    await fs.access(path.join(heliosDir, scriptPath));
+  } catch {
+    console.warn(`  (helios/${scriptPath} not found — skipping real outcome collection)`);
+    return null;
+  }
+  return new Promise<AdAttemptOutcomes | null>((resolve) => {
+    const child = spawn('npx', ['tsx', scriptPath], {
+      cwd: heliosDir,
+      env: process.env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const chunks: Buffer[] = [];
+    const errChunks: Buffer[] = [];
+    child.stdout.on('data', (b) => chunks.push(b));
+    child.stderr.on('data', (b) => errChunks.push(b));
+    child.on('error', (err) => {
+      console.warn(`  (dump-gads-outcomes spawn failed: ${err.message})`);
+      resolve(null);
+    });
+    child.on('close', (code) => {
+      const out = Buffer.concat(chunks).toString('utf-8').trim();
+      if (!out) {
+        console.warn(`  (dump-gads-outcomes exited ${code} with no stdout)`);
+        resolve(null);
+        return;
+      }
+      try {
+        const parsed = JSON.parse(out);
+        if (parsed.error) {
+          console.warn(`  (dump-gads-outcomes returned error: ${parsed.error})`);
+          resolve(null);
+          return;
+        }
+        resolve(parsed as AdAttemptOutcomes);
+      } catch (err) {
+        console.warn(`  (dump-gads-outcomes JSON parse failed: ${(err as Error).message})`);
+        resolve(null);
+      }
+    });
+  });
+}
+
+/**
+ * Translate raw outcome counts into the kind of short, concrete
+ * observation that's actually useful inside an LLM prompt addenda.
+ * Returns 0..several bullet points; empty array means "nothing
+ * worth saying".
+ */
+function summarizeAdAttemptOutcomes(o: AdAttemptOutcomes): string[] {
+  const obs: string[] = [];
+  if (o.totals.attempts === 0) return obs;
+  obs.push(
+    `Tracked ${o.totals.attempts} L2-proposed actions in the last ${o.lookback_days} days (${o.totals.observed} observed outcomes, ${o.totals.open} still open).`,
+  );
+  for (const a of o.byActionType) {
+    if (a.observed === 0) continue;
+    const parts: string[] = [];
+    for (const [k, v] of Object.entries(a.outcomes)) {
+      parts.push(`${k}=${v}`);
+    }
+    obs.push(
+      `Action "${a.action_type}": ${a.total} proposed, ${a.observed} observed → ${parts.join(', ') || 'no outcomes yet'}.`,
+    );
+  }
+  // Surface the worst-performing family/action pair if any
+  const observedFamily = o.byFamily.filter((f) => f.observed > 0);
+  if (observedFamily.length > 0) {
+    const worst = observedFamily
+      .map((f) => ({
+        f,
+        worsePct:
+          ((f.outcomes.worse ?? 0) + (f.outcomes.no_change ?? 0)) /
+          Math.max(1, f.observed),
+      }))
+      .sort((a, b) => b.worsePct - a.worsePct)[0];
+    if (worst && worst.worsePct >= 0.5) {
+      obs.push(
+        `Family ${JSON.stringify(worst.f.family_key)} ${worst.f.action_type} actions had ${(worst.worsePct * 100).toFixed(0)}% no_change/worse outcomes — try a different approach for this family.`,
+      );
+    }
+  }
+  return obs;
+}
+
+/**
  * Main
  */
 async function main() {
@@ -142,6 +262,21 @@ async function main() {
   console.log('\n📈 Collecting family outcomes...');
   const familyOutcomes = await collectFamilyOutcomes();
   console.log(`Collected ${familyOutcomes.length} family outcomes`);
+
+  // Collect real ad-attempt outcomes from Helios DB. This is the
+  // bit that used to be mocked — now it actually pulls observed
+  // outcomes (no_change / superseded / success / worse / etc.) per
+  // (family, action_type) over the last 30 days. Result is null if
+  // the DB is unreachable; we degrade gracefully.
+  console.log('\n📉 Collecting real ad-attempt outcomes from Helios DB...');
+  const adAttemptOutcomes = await collectAdAttemptOutcomes();
+  if (adAttemptOutcomes) {
+    console.log(
+      `Pulled ${adAttemptOutcomes.totals.attempts} attempts (${adAttemptOutcomes.totals.observed} observed) over ${adAttemptOutcomes.lookback_days} days`,
+    );
+  } else {
+    console.log('No ad-attempt outcome data available (DB down or empty).');
+  }
   
   // Evaluate predictions
   console.log('\n🎯 Evaluating predictions...');
@@ -233,6 +368,9 @@ async function main() {
     .filter((p) => p.update_type === 'prompt' && p.confidence >= 0.6)
     .slice(0, 10);
   const issueObservations = summarizeRecentIssues(l2Outputs);
+  const outcomeObservations = adAttemptOutcomes
+    ? summarizeAdAttemptOutcomes(adAttemptOutcomes)
+    : [];
   const addendaLines: string[] = [];
   addendaLines.push(
     `<!-- Generated by run-l3-analysis.ts at ${new Date().toISOString()}.`,
@@ -247,7 +385,11 @@ async function main() {
   addendaLines.push('');
   addendaLines.push('### What we learned from the last batch of L2 runs');
   addendaLines.push('');
-  if (issueObservations.length === 0 && highConfidenceUpdates.length === 0) {
+  if (
+    issueObservations.length === 0 &&
+    highConfidenceUpdates.length === 0 &&
+    outcomeObservations.length === 0
+  ) {
     addendaLines.push(
       '- (no high-confidence patterns this run — keep doing what you were doing)',
     );
@@ -258,6 +400,14 @@ async function main() {
         `- ${up.rationale} (expected impact: ${up.expected_impact}; confidence ${(up.confidence * 100).toFixed(0)}%)`,
       );
     }
+  }
+  if (outcomeObservations.length > 0) {
+    addendaLines.push('');
+    addendaLines.push(
+      '### Real outcomes of your previous proposed actions (from gads_ad_attempts)',
+    );
+    addendaLines.push('');
+    for (const obs of outcomeObservations) addendaLines.push(`- ${obs}`);
   }
   await fs.mkdir(path.dirname(addendaPath), { recursive: true });
   await fs.writeFile(addendaPath, addendaLines.join('\n') + '\n');
