@@ -72,7 +72,7 @@ export class LLMClient {
         'Authorization': `Bearer ${this.config.apiKey}`,
       },
       body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(this.config.timeout || 120000),
+      signal: AbortSignal.timeout(this.config.timeout || 300000),
     });
 
     if (!response.ok) {
@@ -162,7 +162,7 @@ export function createLLMClientFromEnv(): LLMClient {
       endpoint,
       apiKey,
       model: process.env.LLM_MODEL || 'google.gemma-3-27b-it',
-      timeout: parseInt(process.env.LLM_TIMEOUT || '120000'),
+      timeout: parseInt(process.env.LLM_TIMEOUT || '300000'),
     });
   }
   
@@ -173,7 +173,7 @@ export function createLLMClientFromEnv(): LLMClient {
       endpoint: credentials.endpoint,
       apiKey: credentials.apiKey,
       model: 'google.gemma-3-27b-it',
-      timeout: 120000,
+      timeout: 300000,
     });
   } catch (error) {
     throw new Error(`Failed to load LLM credentials: ${error instanceof Error ? error.message : error}`);

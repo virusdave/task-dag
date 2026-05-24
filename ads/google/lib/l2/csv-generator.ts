@@ -444,9 +444,40 @@ function generateRepairCSV(l2Output: L2PredictionOutput, ctx: SnapshotIndex): CS
         messages.push(`repair skipped: ad_id "${adId}" not found in snapshot`);
         continue;
       }
+      // The LLM sometimes emits a "shortcut" repair shape instead of
+      // a full suggested_new_creatives entry: just `before` and
+      // `after` strings (a one-token swap). When that happens we can
+      // synthesize a full creative by cloning the known ad's
+      // headlines+descriptions and applying the substitution. This
+      // recovers ~50% of repair actions that would otherwise be
+      // skipped as "no suggested_new_creatives".
+      let creative: any = action.suggested_new_creatives?.[0];
+      if (
+        (!creative ||
+          typeof creative !== 'object' ||
+          (!Array.isArray(creative.headlines) && !Array.isArray(creative.descriptions))) &&
+        typeof (action as any).before === 'string' &&
+        typeof (action as any).after === 'string' &&
+        knownAd
+      ) {
+        const before = (action as any).before as string;
+        const after = (action as any).after as string;
+        const apply = (s: string): string =>
+          before && s.includes(before) ? s.split(before).join(after) : s;
+        creative = {
+          headlines: (knownAd.headlines ?? []).map(apply),
+          descriptions: (knownAd.descriptions ?? []).map(apply),
+          final_url: knownAd.final_url,
+        };
+        messages.push(
+          `repair synthesized for ${adId}: applied "${before}" → "${after}" against snapshot creative`,
+        );
+      }
       if (!action.suggested_new_creatives || action.suggested_new_creatives.length === 0) {
-        messages.push(`repair skipped for ${adId}: no suggested_new_creatives`);
-        continue;
+        if (!creative) {
+          messages.push(`repair skipped for ${adId}: no suggested_new_creatives`);
+          continue;
+        }
       }
 
       // Defensive: the LLM occasionally returns
@@ -455,7 +486,6 @@ function generateRepairCSV(l2Output: L2PredictionOutput, ctx: SnapshotIndex): CS
       // one" while still emitting `action_type: repair`. We skip
       // those rather than crash the whole bundle on the [0].headlines
       // dereference (which used to take down the entire morning run).
-      const creative = action.suggested_new_creatives[0];
       if (!creative || typeof creative !== 'object') {
         messages.push(`repair skipped for ${adId}: suggested_new_creatives[0] is empty`);
         continue;

@@ -90,17 +90,48 @@ main_prompt:
        silently disappear in the CSV stage; this is now fixed, but
        lowercase remains the canonical form.
 
-    4. RSA MINIMA ARE HARD. Every `suggested_new_creatives[]`
+    4. REPAIR SCHEMA. A `repair` action MUST take one of these two
+       exact JSON shapes — anything else is silently dropped
+       downstream:
+
+       a) PREFERRED — full creative (use this whenever you can):
+            {
+              "ad_id": "...",
+              "action_type": "repair",
+              "justification": "...",
+              "suggested_new_creatives": [{
+                "headlines":    ["...", "...", "...", ...],
+                "descriptions": ["...", "...", ...],
+                "final_url":    "https://..."
+              }]
+            }
+
+       b) SHORTCUT — substring swap against the snapshot creative:
+            {
+              "ad_id": "...",
+              "action_type": "repair",
+              "justification": "...",
+              "before": "30% THC",
+              "after":  "premium flower"
+            }
+          The csv-generator will clone the snapshot ad's existing
+          headlines+descriptions and apply the substring substitution
+          to every slot, then emit the row. The `before` substring
+          MUST appear verbatim in at least one current headline or
+          description; if it doesn't the row is dropped.
+
+       Do NOT mix the two ("here's a before/after string AND a
+       partial suggested_new_creatives") and do NOT emit a repair
+       action with neither shape — it will be dropped with a
+       "no suggested_new_creatives" message.
+
+       RSA MINIMA APPLY to shape (a): every `suggested_new_creatives[]`
        entry (whether for `repair`, `replace`, or a trial
-       control/variant) MUST contain at least:
-         - 3 non-empty headlines (each ≤30 characters), AND
-         - 2 non-empty descriptions (each 60–90 characters).
-       Best practice is 15 headlines and 4 descriptions; aim for
-       that. Anything short of the 3+2 minimum is rejected by Ads
-       Editor on import and would be rejected by Google's serving
-       check even if it slipped through. The downstream CSV
-       generator drops rows that fall short; do not waste a slot on
-       a 1-headline "tweak".
+       control/variant) MUST contain at least 3 non-empty headlines
+       (each ≤30 characters) AND 2 non-empty descriptions (each
+       60–90 characters). Best practice is 15 headlines and 4
+       descriptions; aim for that. Shape (b) inherits the snapshot
+       ad's slot count, which already passed minima.
 
     5. For trial `controls` and `variants`, prefer the structured
        form:
