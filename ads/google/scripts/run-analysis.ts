@@ -280,15 +280,65 @@ async function main() {
       msg.includes('fetch failed');
 
     if (isConfigError || isTransientLLMError) {
-      console.warn('⚠️  LLM unavailable or failed, using mock predictions');
-      console.warn(`    Error: ${msg}`);
-      l2Output = mockL2Prediction(familySummaries, runId);
+      // GADS_ALLOW_MOCK=1 explicitly opts in to the mock fallback
+      // (for local dev / smoke tests). In every other context — and
+      // specifically in the gads-run-analysis.service production
+      // path — we hard-fail instead of silently producing an empty
+      // bundle. The previous behaviour ("⚠️  using mock predictions"
+      // → continue with l2Output.families = [] → emit 0-row repair /
+      // replace CSVs → bundle uploaded as "success" → operator
+      // imports nothing → nothing changes in the account) is what
+      // made the operator say the system "basically does nothing".
+      if (process.env.GADS_ALLOW_MOCK === '1') {
+        console.warn('⚠️  LLM unavailable; GADS_ALLOW_MOCK=1 set, using mock');
+        console.warn(`    Error: ${msg}`);
+        l2Output = mockL2Prediction(familySummaries, runId);
+      } else {
+        throw new Error(
+          `L2 LLM unavailable and mock fallback is disabled in prod. ` +
+            `Refusing to emit a no-op bundle. Set GADS_ALLOW_MOCK=1 to ` +
+            `override (smoke tests only). Underlying error: ${msg}`,
+        );
+      }
     } else {
       throw error;
     }
   }
-  
+
   console.log(`Generated predictions for ${l2Output.families.length} families`);
+
+  // Coverage guardrail: if the snapshot contains impaired ads (any
+  // disapproved or "Approved limited" RSAs) but L2 emitted no
+  // actions for them, the bundle would be a no-op. Hard-fail so the
+  // operator finds out from the alerting path (systemd unit going
+  // red, journalctl) rather than from "why didn't anything change?".
+  // The L2 prompt is supposed to repair / replace / pause every
+  // impaired ad. If it's not, the prompt needs work — but pretending
+  // success is the worst possible outcome.
+  const impairedCount = ads.filter(
+    (a) => a.serving_status === 'not_eligible' ||
+           a.serving_status === 'eligible_limited',
+  ).length
+  const actionCount = l2Output.families.reduce(
+    (acc, f) => acc + (f.ad_actions?.length ?? 0) + (f.trial_plans?.length ?? 0),
+    0,
+  )
+  if (impairedCount > 0 && actionCount === 0) {
+    throw new Error(
+      `Coverage failure: snapshot has ${impairedCount} impaired RSAs ` +
+        `(disapproved or limited) but L2 produced 0 actions across ` +
+        `${l2Output.families.length} families. Refusing to emit a no-op ` +
+        `bundle. Investigate the L2 prompt / predictor output. Set ` +
+        `GADS_ALLOW_NOOP=1 to bypass this guard for diagnostic runs.`,
+    )
+  }
+  if (impairedCount > 0 && actionCount < impairedCount * 0.5) {
+    console.warn(
+      `⚠️  Coverage warning: ${actionCount} L2 actions for ${impairedCount} ` +
+        `impaired RSAs (<50%). Many impaired ads will not be addressed by ` +
+        `this bundle. The L2 prompt may need broader grounding.`,
+    )
+  }
   
   // Generate CSV batches
   console.log('\n📄 Generating CSV batches...');

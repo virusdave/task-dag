@@ -1,4 +1,5 @@
 import * as fs from 'node:fs/promises'
+import { createHash } from 'node:crypto'
 
 /**
  * In-process port of ads/google/scripts/convert-csv-to-snapshot.py.
@@ -123,21 +124,50 @@ export async function buildSnapshotFromCsv(args: {
     // synthetic placeholder when the column is missing/blank (which
     // can legitimately happen for not-yet-uploaded draft ads from an
     // Editor session, but never for production ads).
-    const realAdId = (row['Ad ID'] ?? row['Ad Id'] ?? row['Ad id'] ?? '').trim()
-    const adId = realAdId || `${adGroup}-${ads.length}`
-    // Same fix for campaign/ad-group IDs — Editor exports include
-    // "Campaign ID" and "Ad Group ID" alongside the human-readable
-    // names. The downstream pause/repair CSVs need at least the
-    // human-readable name to match (since Editor matches on name
-    // when the id column is absent), but preserving the real id
-    // when available lets future work address ads by numeric id.
-    const realCampaignId = (row['Campaign ID'] ?? row['Campaign Id'] ?? '').trim()
-    const realAdGroupId = (row['Ad Group ID'] ?? row['Ad group ID'] ?? row['Ad Group Id'] ?? '').trim()
+    // Verified on a real Editor export
+    // (1bGypWNOMgA5fYsQrc540rB9wo62Fm4X3 / "Freshly Baked NYC++
+    // 17_Campaigns+78_Ad groups+109_Asset groups+2026-05-24.csv"):
+    // the ad's numeric id lives in a column literally named "ID",
+    // NOT "Ad ID" / "Ad Id" — those names produced empty lookups
+    // here and forced the synthetic fallback to fire on every ad.
+    //
+    // In practice the "All campaigns" Editor export leaves ID empty
+    // for every RSA (Editor only populates it after a
+    // Get-Latest-Changes round-trip the operator hasn't done). The
+    // previous synthetic fallback `${adGroup}-${ads.length}` is
+    // ORDER-DEPENDENT — re-exporting in a different order assigns a
+    // different id to the same ad, so the LLM's recommendations
+    // referenced ids that no longer pointed at anything on the next
+    // run. We replace it with a STABLE sha1 over content so the same
+    // RSA gets the same id across runs. Ads Editor itself matches
+    // import rows by content (Campaign + Ad group + Ad type +
+    // Original Headline / Description columns added by csv-generator),
+    // so the synthetic id is purely an internal join key the LLM and
+    // the CSV emitter use to refer to the same snapshot row.
+    const realAdId = (row['ID'] ?? '').trim()
+    let adId: string
+    if (realAdId) {
+      adId = realAdId
+    } else {
+      const hashInput = [
+        campaign,
+        adGroup,
+        'rsa',
+        headlines.join('\u001f'),
+        descriptions.join('\u001f'),
+        (row['Final URL'] as string | undefined) ?? '',
+      ].join('|')
+      adId = 'csyn-' + createHash('sha1').update(hashInput).digest('hex').slice(0, 16)
+    }
+    // The export does NOT include separate "Campaign ID" / "Ad
+    // Group ID" columns (verified by inspecting the header list).
+    // The campaign/ad-group identity is the human-readable name,
+    // which is what Editor matches on, so we use that directly.
     ads.push({
-      account_id: ((row['Customer ID'] ?? row['Customer'] ?? 'unknown') as string).trim() || 'unknown',
-      campaign_id: realCampaignId || campaign,
+      account_id: ((row['Customer'] ?? 'unknown') as string).trim() || 'unknown',
+      campaign_id: campaign,
       campaign_name: campaign,
-      ad_group_id: realAdGroupId || adGroup,
+      ad_group_id: adGroup,
       ad_group_name: adGroup,
       ad_id: adId,
       ad_type: 'responsive_search_ad',

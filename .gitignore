@@ -32,3 +32,12 @@ dist/
 Thumbs.db
 *.swp
 *.swo
+
+
+# Google Ads bundle outputs are per-run artifacts and are written to
+# the host's persistent data dir (symlinked over the in-tree path via
+# the gads-prep deploy script). Committing them caused gads-prep to
+# fail every hour with "untracked working tree files would be
+# overwritten by checkout" because the tracked paths collided with
+# the symlinked data dir's live state. Always emit, never commit.
+ads/google/outputs/
