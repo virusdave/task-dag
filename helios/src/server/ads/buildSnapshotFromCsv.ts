@@ -31,10 +31,39 @@ export async function buildSnapshotFromCsv(args: {
   outputPath: string
   snapshotDate: string
 }): Promise<BuildSnapshotResult> {
-  const raw = await fs.readFile(args.csvPath, 'utf-8')
-  // Ads Editor exports as UTF-8-SIG (with BOM). strip a leading BOM
-  // so the first header key isn't '\ufeffCampaign' (which silently
-  // produced campaign-name-less snapshots before the python fix).
+  // Google Ads Editor's "Export selected" actually writes a UTF-16 LE
+  // file with a 0xFF 0xFE BOM (despite the .csv extension and despite
+  // older comments in this repo that called it "UTF-8-SIG"). Reading
+  // it as UTF-8 silently produces NUL-interleaved keys
+  // ('A\0d\0 \0t\0y\0p\0e\0' instead of 'Ad type'), the
+  // Responsive-search-ad filter matches zero rows, the
+  // "No Responsive search ad rows" guard throws, the route returns
+  // 502, and the operator sees a useless 502 in the UI.
+  //
+  // Detect the BOM at the byte level and decode appropriately:
+  //   FF FE          -> UTF-16 LE  (the actual Ads Editor format)
+  //   FE FF          -> UTF-16 BE  (defensive)
+  //   EF BB BF       -> UTF-8 SIG  (some hand-edited / re-saved files)
+  //   anything else  -> assume UTF-8
+  const bytes = await fs.readFile(args.csvPath)
+  let raw: string
+  if (bytes.length >= 2 && bytes[0] === 0xff && bytes[1] === 0xfe) {
+    raw = new TextDecoder('utf-16le', { ignoreBOM: false }).decode(bytes)
+  } else if (bytes.length >= 2 && bytes[0] === 0xfe && bytes[1] === 0xff) {
+    raw = new TextDecoder('utf-16be', { ignoreBOM: false }).decode(bytes)
+  } else if (
+    bytes.length >= 3 &&
+    bytes[0] === 0xef &&
+    bytes[1] === 0xbb &&
+    bytes[2] === 0xbf
+  ) {
+    raw = bytes.toString('utf-8')
+  } else {
+    raw = bytes.toString('utf-8')
+  }
+  // TextDecoder with ignoreBOM:false strips the BOM. For UTF-8 we
+  // strip the U+FEFF code point manually because Buffer.toString
+  // does not.
   const stripped = raw.startsWith('\ufeff') ? raw.slice(1) : raw
   const rows = parseTsv(stripped)
   const ads: SnapshotAd[] = []

@@ -114,13 +114,36 @@ export async function downloadDriveFile(args: {
   }
   const url = `https://drive.usercontent.google.com/download?${params.toString()}`
   const referer = process.env.GOOGLE_DRIVE_REFERER ?? 'https://vpn-helios.freshlybaked.us/ads'
-  const response = await fetch(url, {
-    headers: {
-      Referer: referer,
-      'User-Agent': 'helios-ads-ingest/1.0',
-    },
-    redirect: 'follow',
-  })
+  // Hard 90-second cap on the whole download. Without it, a slow or
+  // hung Drive response leaves the runAdsIngest inFlight mutex stuck
+  // forever, every subsequent /api/ads/ingest call waits on the same
+  // never-resolving promise, and Cloudflare returns a bare 502 after
+  // its own 100s proxy timeout — exactly the failure mode the
+  // operator hit. 90s is well under CF's 100s ceiling and well over
+  // a realistic 10MB CSV transfer.
+  const ac = new AbortController()
+  const timer = setTimeout(() => ac.abort(), 90_000)
+  let response: Response
+  try {
+    response = await fetch(url, {
+      headers: {
+        Referer: referer,
+        'User-Agent': 'helios-ads-ingest/1.0',
+      },
+      redirect: 'follow',
+      signal: ac.signal,
+    })
+  } catch (err) {
+    if ((err as Error).name === 'AbortError') {
+      throw new DriveDownloadError(
+        `Drive download timed out after 90s for id=${args.fileId}. ` +
+          `Drive or the network is slow; retry in a moment.`,
+      )
+    }
+    throw err
+  } finally {
+    clearTimeout(timer)
+  }
   if (!response.ok) {
     throw new DriveDownloadError(
       `Drive download failed for id=${args.fileId}: ${response.status} ${response.statusText}. ` +
