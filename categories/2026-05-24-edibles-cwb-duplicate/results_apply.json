@@ -1,0 +1,1219 @@
+{
+  "mode": "apply",
+  "startedAt": "2026-05-24T16:58:52Z",
+  "stateDealerId": 210248,
+  "sourceCategoryName": "Edibles",
+  "targetCategoryName": "EdiblesCWB",
+  "sourceCategoryId": 1086,
+  "parentAddParams": {
+    "name": "EdiblesCWB",
+    "productClassId": 1,
+    "limitTypeId": 2,
+    "imageGuid": "2308d8ca-77aa-4f95-8dc2-407ff1a49aaa",
+    "sizeIds": [
+      814,
+      815,
+      816,
+      817,
+      818,
+      819,
+      821,
+      825,
+      829,
+      2014,
+      2291,
+      7231
+    ],
+    "isSynchronizedWithParent": false,
+    "isProductStrainEnabled": true,
+    "isProductScentEnabled": false,
+    "isProductFlavoringEnabled": true,
+    "isProductQualityLineEnabled": false,
+    "isProductStrengthLevelEnabled": false,
+    "displayCannabinoidRatio": false,
+    "isGroupProductsInEcommerce": true,
+    "useBrandImagesOnIos": false,
+    "isManagerDiscountsAllowed": true,
+    "isPromoDiscountAllowed": true,
+    "isLoyaltyAllowed": true,
+    "isHiddenInApp": false,
+    "useProductThcInSizeFilter": false,
+    "displayProductThcInProductCardFirst": false
+  },
+  "subcategoryCount": 10,
+  "subcategoryPlans": [
+    {
+      "sourceId": 1094,
+      "sourceName": "Cooking Ingredients",
+      "sourceEnabled": true
+    },
+    {
+      "sourceId": 1104,
+      "sourceName": "Beverages",
+      "sourceEnabled": false
+    },
+    {
+      "sourceId": 1105,
+      "sourceName": "Pills / Tablets",
+      "sourceEnabled": true
+    },
+    {
+      "sourceId": 1106,
+      "sourceName": "Chews/Gummies",
+      "sourceEnabled": false
+    },
+    {
+      "sourceId": 1107,
+      "sourceName": "Chocolate",
+      "sourceEnabled": true
+    },
+    {
+      "sourceId": 1108,
+      "sourceName": "Drinks",
+      "sourceEnabled": false
+    },
+    {
+      "sourceId": 1109,
+      "sourceName": "Freeze Pops",
+      "sourceEnabled": true
+    },
+    {
+      "sourceId": 1110,
+      "sourceName": "Hard Candy",
+      "sourceEnabled": true
+    },
+    {
+      "sourceId": 1240,
+      "sourceName": "Baked Goods",
+      "sourceEnabled": true
+    },
+    {
+      "sourceId": 1241,
+      "sourceName": "Tinctures",
+      "sourceEnabled": false
+    }
+  ],
+  "parentResult": {
+    "isProductStrainEnabled": true,
+    "isProductScentEnabled": false,
+    "isProductFlavoringEnabled": true,
+    "isProductQualityLineEnabled": false,
+    "isProductStrengthLevelEnabled": false,
+    "displayCannabinoidRatio": false,
+    "isGroupProductsInEcommerce": true,
+    "image": "https://media-prime.sweedpos.com/store/prime/1752573688_2308d8ca-77aa-4f95-8dc2-407ff1a49aaa.jpg",
+    "productClass": {
+      "isCannabis": true,
+      "id": 1,
+      "name": "Cannabis"
+    },
+    "limitType": {
+      "isThcAndCbdRequired": true,
+      "isWeightRequired": false,
+      "isAvailbleForProductCategory": true,
+      "canBeInfused": false,
+      "canBeUnpacked": false,
+      "uomTypes": [
+        {
+          "id": 2,
+          "name": "Weight Based"
+        }
+      ],
+      "id": 2,
+      "name": "Concentrate"
+    },
+    "sizes": [
+      {
+        "id": 814,
+        "name": "1mg",
+        "uom": {
+          "abbr": "G",
+          "type": {
+            "id": 2,
+            "name": "Weight Based"
+          },
+          "id": 1,
+          "name": "Gram"
+        },
+        "uomNumber": 0.001,
+        "isSystemSize": false,
+        "enabled": true,
+        "tagTypeId": 14
+      },
+      {
+        "id": 815,
+        "name": "2.5mg",
+        "uom": {
+          "abbr": "G",
+          "type": {
+            "id": 2,
+            "name": "Weight Based"
+          },
+          "id": 1,
+          "name": "Gram"
+        },
+        "uomNumber": 0.0025,
+        "isSystemSize": false,
+        "enabled": true,
+        "tagTypeId": 14
+      },
+      {
+        "id": 816,
+        "name": "5mg",
+        "uom": {
+          "abbr": "G",
+          "type": {
+            "id": 2,
+            "name": "Weight Based"
+          },
+          "id": 1,
+          "name": "Gram"
+        },
+        "uomNumber": 0.005,
+        "isSystemSize": false,
+        "enabled": true,
+        "tagTypeId": 14
+      },
+      {
+        "id": 817,
+        "name": "10mg",
+        "uom": {
+          "abbr": "G",
+          "type": {
+            "id": 2,
+            "name": "Weight Based"
+          },
+          "id": 1,
+          "name": "Gram"
+        },
+        "uomNumber": 0.01,
+        "isSystemSize": false,
+        "enabled": true,
+        "tagTypeId": 14
+      },
+      {
+        "id": 818,
+        "name": "20mg",
+        "uom": {
+          "abbr": "G",
+          "type": {
+            "id": 2,
+            "name": "Weight Based"
+          },
+          "id": 1,
+          "name": "Gram"
+        },
+        "uomNumber": 0.02,
+        "isSystemSize": false,
+        "enabled": true,
+        "tagTypeId": 14
+      },
+      {
+        "id": 819,
+        "name": "30mg",
+        "uom": {
+          "abbr": "G",
+          "type": {
+            "id": 2,
+            "name": "Weight Based"
+          },
+          "id": 1,
+          "name": "Gram"
+        },
+        "uomNumber": 0.03,
+        "isSystemSize": false,
+        "enabled": true,
+        "tagTypeId": 14
+      },
+      {
+        "id": 821,
+        "name": "50mg",
+        "uom": {
+          "abbr": "G",
+          "type": {
+            "id": 2,
+            "name": "Weight Based"
+          },
+          "id": 1,
+          "name": "Gram"
+        },
+        "uomNumber": 0.05,
+        "isSystemSize": false,
+        "enabled": true,
+        "tagTypeId": 14
+      },
+      {
+        "id": 825,
+        "name": "100mg",
+        "uom": {
+          "abbr": "G",
+          "type": {
+            "id": 2,
+            "name": "Weight Based"
+          },
+          "id": 1,
+          "name": "Gram"
+        },
+        "uomNumber": 0.1,
+        "isSystemSize": false,
+        "enabled": true,
+        "tagTypeId": 14
+      },
+      {
+        "id": 829,
+        "name": "240mg",
+        "uom": {
+          "abbr": "G",
+          "type": {
+            "id": 2,
+            "name": "Weight Based"
+          },
+          "id": 1,
+          "name": "Gram"
+        },
+        "uomNumber": 0.24,
+        "isSystemSize": false,
+        "enabled": true,
+        "tagTypeId": 14
+      },
+      {
+        "id": 2014,
+        "name": "25mg",
+        "uom": {
+          "abbr": "G",
+          "type": {
+            "id": 2,
+            "name": "Weight Based"
+          },
+          "id": 1,
+          "name": "Gram"
+        },
+        "uomNumber": 0.025,
+        "isSystemSize": false,
+        "enabled": true,
+        "tagTypeId": 14
+      },
+      {
+        "id": 2291,
+        "name": "2mg",
+        "uom": {
+          "abbr": "MG",
+          "type": {
+            "id": 2,
+            "name": "Weight Based"
+          },
+          "id": 16,
+          "name": "Milligram"
+        },
+        "uomNumber": 2,
+        "isSystemSize": false,
+        "enabled": true,
+        "tagTypeId": 14
+      },
+      {
+        "id": 7231,
+        "name": "15ml",
+        "uom": {
+          "abbr": "G",
+          "type": {
+            "id": 2,
+            "name": "Weight Based"
+          },
+          "id": 1,
+          "name": "Gram"
+        },
+        "uomNumber": 0.015,
+        "isSystemSize": false,
+        "enabled": false,
+        "tagTypeId": 14
+      }
+    ],
+    "isSynchronizedWithParent": false,
+    "useBrandImagesOnIos": false,
+    "isManagerDiscountsAllowed": true,
+    "isPromoDiscountAllowed": true,
+    "isLoyaltyAllowed": true,
+    "isHiddenInApp": false,
+    "useProductThcInSizeFilter": false,
+    "displayProductThcInProductCardFirst": false,
+    "isCannabisDaysSupplyEnabled": false,
+    "id": 7459,
+    "name": "EdiblesCWB",
+    "enabled": true
+  },
+  "childResults": [
+    {
+      "sourceId": 1094,
+      "sourceName": "Cooking Ingredients",
+      "sourceEnabled": true,
+      "newId": 7460,
+      "newName": "Cooking Ingredients",
+      "addParams": {
+        "name": "Cooking Ingredients",
+        "productClassId": 1,
+        "parentProductCategoryId": 7459,
+        "isSynchronizedWithParent": true
+      },
+      "editParams": null,
+      "addResult": {
+        "isProductStrainEnabled": false,
+        "isProductScentEnabled": false,
+        "isProductFlavoringEnabled": false,
+        "isProductQualityLineEnabled": false,
+        "isProductStrengthLevelEnabled": false,
+        "displayCannabinoidRatio": false,
+        "isGroupProductsInEcommerce": true,
+        "productClass": {
+          "isCannabis": true,
+          "id": 1,
+          "name": "Cannabis"
+        },
+        "limitType": {
+          "isThcAndCbdRequired": true,
+          "isWeightRequired": false,
+          "isAvailbleForProductCategory": true,
+          "canBeInfused": false,
+          "canBeUnpacked": false,
+          "uomTypes": [
+            {
+              "id": 2,
+              "name": "Weight Based"
+            }
+          ],
+          "id": 2,
+          "name": "Concentrate"
+        },
+        "isSynchronizedWithParent": true,
+        "useBrandImagesOnIos": false,
+        "isManagerDiscountsAllowed": true,
+        "isPromoDiscountAllowed": true,
+        "isLoyaltyAllowed": true,
+        "isHiddenInApp": false,
+        "useProductThcInSizeFilter": false,
+        "displayProductThcInProductCardFirst": false,
+        "isCannabisDaysSupplyEnabled": false,
+        "id": 7460,
+        "name": "Cooking Ingredients",
+        "enabled": true
+      },
+      "editResult": null
+    },
+    {
+      "sourceId": 1104,
+      "sourceName": "Beverages",
+      "sourceEnabled": false,
+      "newId": 7461,
+      "newName": "Beverages",
+      "addParams": {
+        "name": "Beverages",
+        "productClassId": 1,
+        "parentProductCategoryId": 7459,
+        "isSynchronizedWithParent": true
+      },
+      "editParams": {
+        "id": 7461,
+        "enabled": false
+      },
+      "addResult": {
+        "isProductStrainEnabled": false,
+        "isProductScentEnabled": false,
+        "isProductFlavoringEnabled": false,
+        "isProductQualityLineEnabled": false,
+        "isProductStrengthLevelEnabled": false,
+        "displayCannabinoidRatio": false,
+        "isGroupProductsInEcommerce": true,
+        "productClass": {
+          "isCannabis": true,
+          "id": 1,
+          "name": "Cannabis"
+        },
+        "limitType": {
+          "isThcAndCbdRequired": true,
+          "isWeightRequired": false,
+          "isAvailbleForProductCategory": true,
+          "canBeInfused": false,
+          "canBeUnpacked": false,
+          "uomTypes": [
+            {
+              "id": 2,
+              "name": "Weight Based"
+            }
+          ],
+          "id": 2,
+          "name": "Concentrate"
+        },
+        "isSynchronizedWithParent": true,
+        "useBrandImagesOnIos": false,
+        "isManagerDiscountsAllowed": true,
+        "isPromoDiscountAllowed": true,
+        "isLoyaltyAllowed": true,
+        "isHiddenInApp": false,
+        "useProductThcInSizeFilter": false,
+        "displayProductThcInProductCardFirst": false,
+        "isCannabisDaysSupplyEnabled": false,
+        "id": 7461,
+        "name": "Beverages",
+        "enabled": true
+      },
+      "editResult": "<edited>"
+    },
+    {
+      "sourceId": 1105,
+      "sourceName": "Pills / Tablets",
+      "sourceEnabled": true,
+      "newId": 7462,
+      "newName": "Pills / Tablets",
+      "addParams": {
+        "name": "Pills / Tablets",
+        "productClassId": 1,
+        "parentProductCategoryId": 7459,
+        "isSynchronizedWithParent": true
+      },
+      "editParams": null,
+      "addResult": {
+        "isProductStrainEnabled": false,
+        "isProductScentEnabled": false,
+        "isProductFlavoringEnabled": false,
+        "isProductQualityLineEnabled": false,
+        "isProductStrengthLevelEnabled": false,
+        "displayCannabinoidRatio": false,
+        "isGroupProductsInEcommerce": true,
+        "productClass": {
+          "isCannabis": true,
+          "id": 1,
+          "name": "Cannabis"
+        },
+        "limitType": {
+          "isThcAndCbdRequired": true,
+          "isWeightRequired": false,
+          "isAvailbleForProductCategory": true,
+          "canBeInfused": false,
+          "canBeUnpacked": false,
+          "uomTypes": [
+            {
+              "id": 2,
+              "name": "Weight Based"
+            }
+          ],
+          "id": 2,
+          "name": "Concentrate"
+        },
+        "isSynchronizedWithParent": true,
+        "useBrandImagesOnIos": false,
+        "isManagerDiscountsAllowed": true,
+        "isPromoDiscountAllowed": true,
+        "isLoyaltyAllowed": true,
+        "isHiddenInApp": false,
+        "useProductThcInSizeFilter": false,
+        "displayProductThcInProductCardFirst": false,
+        "isCannabisDaysSupplyEnabled": false,
+        "id": 7462,
+        "name": "Pills / Tablets",
+        "enabled": true
+      },
+      "editResult": null
+    },
+    {
+      "sourceId": 1106,
+      "sourceName": "Chews/Gummies",
+      "sourceEnabled": false,
+      "newId": 7463,
+      "newName": "Chews/Gummies",
+      "addParams": {
+        "name": "Chews/Gummies",
+        "productClassId": 1,
+        "parentProductCategoryId": 7459,
+        "isSynchronizedWithParent": true
+      },
+      "editParams": {
+        "id": 7463,
+        "enabled": false
+      },
+      "addResult": {
+        "isProductStrainEnabled": false,
+        "isProductScentEnabled": false,
+        "isProductFlavoringEnabled": false,
+        "isProductQualityLineEnabled": false,
+        "isProductStrengthLevelEnabled": false,
+        "displayCannabinoidRatio": false,
+        "isGroupProductsInEcommerce": true,
+        "productClass": {
+          "isCannabis": true,
+          "id": 1,
+          "name": "Cannabis"
+        },
+        "limitType": {
+          "isThcAndCbdRequired": true,
+          "isWeightRequired": false,
+          "isAvailbleForProductCategory": true,
+          "canBeInfused": false,
+          "canBeUnpacked": false,
+          "uomTypes": [
+            {
+              "id": 2,
+              "name": "Weight Based"
+            }
+          ],
+          "id": 2,
+          "name": "Concentrate"
+        },
+        "isSynchronizedWithParent": true,
+        "useBrandImagesOnIos": false,
+        "isManagerDiscountsAllowed": true,
+        "isPromoDiscountAllowed": true,
+        "isLoyaltyAllowed": true,
+        "isHiddenInApp": false,
+        "useProductThcInSizeFilter": false,
+        "displayProductThcInProductCardFirst": false,
+        "isCannabisDaysSupplyEnabled": false,
+        "id": 7463,
+        "name": "Chews/Gummies",
+        "enabled": true
+      },
+      "editResult": "<edited>"
+    },
+    {
+      "sourceId": 1107,
+      "sourceName": "Chocolate",
+      "sourceEnabled": true,
+      "newId": 7464,
+      "newName": "Chocolate",
+      "addParams": {
+        "name": "Chocolate",
+        "productClassId": 1,
+        "parentProductCategoryId": 7459,
+        "isSynchronizedWithParent": true
+      },
+      "editParams": null,
+      "addResult": {
+        "isProductStrainEnabled": false,
+        "isProductScentEnabled": false,
+        "isProductFlavoringEnabled": false,
+        "isProductQualityLineEnabled": false,
+        "isProductStrengthLevelEnabled": false,
+        "displayCannabinoidRatio": false,
+        "isGroupProductsInEcommerce": true,
+        "productClass": {
+          "isCannabis": true,
+          "id": 1,
+          "name": "Cannabis"
+        },
+        "limitType": {
+          "isThcAndCbdRequired": true,
+          "isWeightRequired": false,
+          "isAvailbleForProductCategory": true,
+          "canBeInfused": false,
+          "canBeUnpacked": false,
+          "uomTypes": [
+            {
+              "id": 2,
+              "name": "Weight Based"
+            }
+          ],
+          "id": 2,
+          "name": "Concentrate"
+        },
+        "isSynchronizedWithParent": true,
+        "useBrandImagesOnIos": false,
+        "isManagerDiscountsAllowed": true,
+        "isPromoDiscountAllowed": true,
+        "isLoyaltyAllowed": true,
+        "isHiddenInApp": false,
+        "useProductThcInSizeFilter": false,
+        "displayProductThcInProductCardFirst": false,
+        "isCannabisDaysSupplyEnabled": false,
+        "id": 7464,
+        "name": "Chocolate",
+        "enabled": true
+      },
+      "editResult": null
+    },
+    {
+      "sourceId": 1108,
+      "sourceName": "Drinks",
+      "sourceEnabled": false,
+      "newId": 7465,
+      "newName": "Drinks",
+      "addParams": {
+        "name": "Drinks",
+        "productClassId": 1,
+        "parentProductCategoryId": 7459,
+        "isSynchronizedWithParent": true
+      },
+      "editParams": {
+        "id": 7465,
+        "enabled": false
+      },
+      "addResult": {
+        "isProductStrainEnabled": false,
+        "isProductScentEnabled": false,
+        "isProductFlavoringEnabled": false,
+        "isProductQualityLineEnabled": false,
+        "isProductStrengthLevelEnabled": false,
+        "displayCannabinoidRatio": false,
+        "isGroupProductsInEcommerce": true,
+        "productClass": {
+          "isCannabis": true,
+          "id": 1,
+          "name": "Cannabis"
+        },
+        "limitType": {
+          "isThcAndCbdRequired": true,
+          "isWeightRequired": false,
+          "isAvailbleForProductCategory": true,
+          "canBeInfused": false,
+          "canBeUnpacked": false,
+          "uomTypes": [
+            {
+              "id": 2,
+              "name": "Weight Based"
+            }
+          ],
+          "id": 2,
+          "name": "Concentrate"
+        },
+        "isSynchronizedWithParent": true,
+        "useBrandImagesOnIos": false,
+        "isManagerDiscountsAllowed": true,
+        "isPromoDiscountAllowed": true,
+        "isLoyaltyAllowed": true,
+        "isHiddenInApp": false,
+        "useProductThcInSizeFilter": false,
+        "displayProductThcInProductCardFirst": false,
+        "isCannabisDaysSupplyEnabled": false,
+        "id": 7465,
+        "name": "Drinks",
+        "enabled": true
+      },
+      "editResult": "<edited>"
+    },
+    {
+      "sourceId": 1109,
+      "sourceName": "Freeze Pops",
+      "sourceEnabled": true,
+      "newId": 7466,
+      "newName": "Freeze Pops",
+      "addParams": {
+        "name": "Freeze Pops",
+        "productClassId": 1,
+        "parentProductCategoryId": 7459,
+        "isSynchronizedWithParent": true
+      },
+      "editParams": null,
+      "addResult": {
+        "isProductStrainEnabled": false,
+        "isProductScentEnabled": false,
+        "isProductFlavoringEnabled": false,
+        "isProductQualityLineEnabled": false,
+        "isProductStrengthLevelEnabled": false,
+        "displayCannabinoidRatio": false,
+        "isGroupProductsInEcommerce": true,
+        "productClass": {
+          "isCannabis": true,
+          "id": 1,
+          "name": "Cannabis"
+        },
+        "limitType": {
+          "isThcAndCbdRequired": true,
+          "isWeightRequired": false,
+          "isAvailbleForProductCategory": true,
+          "canBeInfused": false,
+          "canBeUnpacked": false,
+          "uomTypes": [
+            {
+              "id": 2,
+              "name": "Weight Based"
+            }
+          ],
+          "id": 2,
+          "name": "Concentrate"
+        },
+        "isSynchronizedWithParent": true,
+        "useBrandImagesOnIos": false,
+        "isManagerDiscountsAllowed": true,
+        "isPromoDiscountAllowed": true,
+        "isLoyaltyAllowed": true,
+        "isHiddenInApp": false,
+        "useProductThcInSizeFilter": false,
+        "displayProductThcInProductCardFirst": false,
+        "isCannabisDaysSupplyEnabled": false,
+        "id": 7466,
+        "name": "Freeze Pops",
+        "enabled": true
+      },
+      "editResult": null
+    },
+    {
+      "sourceId": 1110,
+      "sourceName": "Hard Candy",
+      "sourceEnabled": true,
+      "newId": 7467,
+      "newName": "Hard Candy",
+      "addParams": {
+        "name": "Hard Candy",
+        "productClassId": 1,
+        "parentProductCategoryId": 7459,
+        "isSynchronizedWithParent": true
+      },
+      "editParams": null,
+      "addResult": {
+        "isProductStrainEnabled": false,
+        "isProductScentEnabled": false,
+        "isProductFlavoringEnabled": false,
+        "isProductQualityLineEnabled": false,
+        "isProductStrengthLevelEnabled": false,
+        "displayCannabinoidRatio": false,
+        "isGroupProductsInEcommerce": true,
+        "productClass": {
+          "isCannabis": true,
+          "id": 1,
+          "name": "Cannabis"
+        },
+        "limitType": {
+          "isThcAndCbdRequired": true,
+          "isWeightRequired": false,
+          "isAvailbleForProductCategory": true,
+          "canBeInfused": false,
+          "canBeUnpacked": false,
+          "uomTypes": [
+            {
+              "id": 2,
+              "name": "Weight Based"
+            }
+          ],
+          "id": 2,
+          "name": "Concentrate"
+        },
+        "isSynchronizedWithParent": true,
+        "useBrandImagesOnIos": false,
+        "isManagerDiscountsAllowed": true,
+        "isPromoDiscountAllowed": true,
+        "isLoyaltyAllowed": true,
+        "isHiddenInApp": false,
+        "useProductThcInSizeFilter": false,
+        "displayProductThcInProductCardFirst": false,
+        "isCannabisDaysSupplyEnabled": false,
+        "id": 7467,
+        "name": "Hard Candy",
+        "enabled": true
+      },
+      "editResult": null
+    },
+    {
+      "sourceId": 1240,
+      "sourceName": "Baked Goods",
+      "sourceEnabled": true,
+      "newId": 7468,
+      "newName": "Baked Goods",
+      "addParams": {
+        "name": "Baked Goods",
+        "productClassId": 1,
+        "parentProductCategoryId": 7459,
+        "isSynchronizedWithParent": true
+      },
+      "editParams": null,
+      "addResult": {
+        "isProductStrainEnabled": false,
+        "isProductScentEnabled": false,
+        "isProductFlavoringEnabled": false,
+        "isProductQualityLineEnabled": false,
+        "isProductStrengthLevelEnabled": false,
+        "displayCannabinoidRatio": false,
+        "isGroupProductsInEcommerce": true,
+        "productClass": {
+          "isCannabis": true,
+          "id": 1,
+          "name": "Cannabis"
+        },
+        "limitType": {
+          "isThcAndCbdRequired": true,
+          "isWeightRequired": false,
+          "isAvailbleForProductCategory": true,
+          "canBeInfused": false,
+          "canBeUnpacked": false,
+          "uomTypes": [
+            {
+              "id": 2,
+              "name": "Weight Based"
+            }
+          ],
+          "id": 2,
+          "name": "Concentrate"
+        },
+        "isSynchronizedWithParent": true,
+        "useBrandImagesOnIos": false,
+        "isManagerDiscountsAllowed": true,
+        "isPromoDiscountAllowed": true,
+        "isLoyaltyAllowed": true,
+        "isHiddenInApp": false,
+        "useProductThcInSizeFilter": false,
+        "displayProductThcInProductCardFirst": false,
+        "isCannabisDaysSupplyEnabled": false,
+        "id": 7468,
+        "name": "Baked Goods",
+        "enabled": true
+      },
+      "editResult": null
+    },
+    {
+      "sourceId": 1241,
+      "sourceName": "Tinctures",
+      "sourceEnabled": false,
+      "newId": 7469,
+      "newName": "Tinctures",
+      "addParams": {
+        "name": "Tinctures",
+        "productClassId": 1,
+        "parentProductCategoryId": 7459,
+        "isSynchronizedWithParent": true
+      },
+      "editParams": {
+        "id": 7469,
+        "enabled": false
+      },
+      "addResult": {
+        "isProductStrainEnabled": false,
+        "isProductScentEnabled": false,
+        "isProductFlavoringEnabled": false,
+        "isProductQualityLineEnabled": false,
+        "isProductStrengthLevelEnabled": false,
+        "displayCannabinoidRatio": false,
+        "isGroupProductsInEcommerce": true,
+        "productClass": {
+          "isCannabis": true,
+          "id": 1,
+          "name": "Cannabis"
+        },
+        "limitType": {
+          "isThcAndCbdRequired": true,
+          "isWeightRequired": false,
+          "isAvailbleForProductCategory": true,
+          "canBeInfused": false,
+          "canBeUnpacked": false,
+          "uomTypes": [
+            {
+              "id": 2,
+              "name": "Weight Based"
+            }
+          ],
+          "id": 2,
+          "name": "Concentrate"
+        },
+        "isSynchronizedWithParent": true,
+        "useBrandImagesOnIos": false,
+        "isManagerDiscountsAllowed": true,
+        "isPromoDiscountAllowed": true,
+        "isLoyaltyAllowed": true,
+        "isHiddenInApp": false,
+        "useProductThcInSizeFilter": false,
+        "displayProductThcInProductCardFirst": false,
+        "isCannabisDaysSupplyEnabled": false,
+        "id": 7469,
+        "name": "Tinctures",
+        "enabled": true
+      },
+      "editResult": "<edited>"
+    }
+  ],
+  "verifyParentAfter": {
+    "isProductStrainEnabled": true,
+    "isProductScentEnabled": false,
+    "isProductFlavoringEnabled": true,
+    "isProductQualityLineEnabled": false,
+    "isProductStrengthLevelEnabled": false,
+    "displayCannabinoidRatio": false,
+    "isGroupProductsInEcommerce": true,
+    "image": "https://media-prime.sweedpos.com/store/prime/1752573688_2308d8ca-77aa-4f95-8dc2-407ff1a49aaa.jpg",
+    "productClass": {
+      "isCannabis": true,
+      "id": 1,
+      "name": "Cannabis"
+    },
+    "limitType": {
+      "isThcAndCbdRequired": true,
+      "isWeightRequired": false,
+      "isAvailbleForProductCategory": true,
+      "canBeInfused": false,
+      "canBeUnpacked": false,
+      "uomTypes": [
+        {
+          "id": 2,
+          "name": "Weight Based"
+        }
+      ],
+      "id": 2,
+      "name": "Concentrate"
+    },
+    "sizes": [
+      {
+        "id": 814,
+        "name": "1mg",
+        "uom": {
+          "abbr": "G",
+          "type": {
+            "id": 2,
+            "name": "Weight Based"
+          },
+          "id": 1,
+          "name": "Gram"
+        },
+        "uomNumber": 0.001,
+        "isSystemSize": false,
+        "enabled": true,
+        "tagTypeId": 14
+      },
+      {
+        "id": 815,
+        "name": "2.5mg",
+        "uom": {
+          "abbr": "G",
+          "type": {
+            "id": 2,
+            "name": "Weight Based"
+          },
+          "id": 1,
+          "name": "Gram"
+        },
+        "uomNumber": 0.0025,
+        "isSystemSize": false,
+        "enabled": true,
+        "tagTypeId": 14
+      },
+      {
+        "id": 816,
+        "name": "5mg",
+        "uom": {
+          "abbr": "G",
+          "type": {
+            "id": 2,
+            "name": "Weight Based"
+          },
+          "id": 1,
+          "name": "Gram"
+        },
+        "uomNumber": 0.005,
+        "isSystemSize": false,
+        "enabled": true,
+        "tagTypeId": 14
+      },
+      {
+        "id": 817,
+        "name": "10mg",
+        "uom": {
+          "abbr": "G",
+          "type": {
+            "id": 2,
+            "name": "Weight Based"
+          },
+          "id": 1,
+          "name": "Gram"
+        },
+        "uomNumber": 0.01,
+        "isSystemSize": false,
+        "enabled": true,
+        "tagTypeId": 14
+      },
+      {
+        "id": 818,
+        "name": "20mg",
+        "uom": {
+          "abbr": "G",
+          "type": {
+            "id": 2,
+            "name": "Weight Based"
+          },
+          "id": 1,
+          "name": "Gram"
+        },
+        "uomNumber": 0.02,
+        "isSystemSize": false,
+        "enabled": true,
+        "tagTypeId": 14
+      },
+      {
+        "id": 819,
+        "name": "30mg",
+        "uom": {
+          "abbr": "G",
+          "type": {
+            "id": 2,
+            "name": "Weight Based"
+          },
+          "id": 1,
+          "name": "Gram"
+        },
+        "uomNumber": 0.03,
+        "isSystemSize": false,
+        "enabled": true,
+        "tagTypeId": 14
+      },
+      {
+        "id": 821,
+        "name": "50mg",
+        "uom": {
+          "abbr": "G",
+          "type": {
+            "id": 2,
+            "name": "Weight Based"
+          },
+          "id": 1,
+          "name": "Gram"
+        },
+        "uomNumber": 0.05,
+        "isSystemSize": false,
+        "enabled": true,
+        "tagTypeId": 14
+      },
+      {
+        "id": 825,
+        "name": "100mg",
+        "uom": {
+          "abbr": "G",
+          "type": {
+            "id": 2,
+            "name": "Weight Based"
+          },
+          "id": 1,
+          "name": "Gram"
+        },
+        "uomNumber": 0.1,
+        "isSystemSize": false,
+        "enabled": true,
+        "tagTypeId": 14
+      },
+      {
+        "id": 829,
+        "name": "240mg",
+        "uom": {
+          "abbr": "G",
+          "type": {
+            "id": 2,
+            "name": "Weight Based"
+          },
+          "id": 1,
+          "name": "Gram"
+        },
+        "uomNumber": 0.24,
+        "isSystemSize": false,
+        "enabled": true,
+        "tagTypeId": 14
+      },
+      {
+        "id": 2014,
+        "name": "25mg",
+        "uom": {
+          "abbr": "G",
+          "type": {
+            "id": 2,
+            "name": "Weight Based"
+          },
+          "id": 1,
+          "name": "Gram"
+        },
+        "uomNumber": 0.025,
+        "isSystemSize": false,
+        "enabled": true,
+        "tagTypeId": 14
+      },
+      {
+        "id": 2291,
+        "name": "2mg",
+        "uom": {
+          "abbr": "MG",
+          "type": {
+            "id": 2,
+            "name": "Weight Based"
+          },
+          "id": 16,
+          "name": "Milligram"
+        },
+        "uomNumber": 2,
+        "isSystemSize": false,
+        "enabled": true,
+        "tagTypeId": 14
+      },
+      {
+        "id": 7231,
+        "name": "15ml",
+        "uom": {
+          "abbr": "G",
+          "type": {
+            "id": 2,
+            "name": "Weight Based"
+          },
+          "id": 1,
+          "name": "Gram"
+        },
+        "uomNumber": 0.015,
+        "isSystemSize": false,
+        "enabled": false,
+        "tagTypeId": 14
+      }
+    ],
+    "subcategories": [
+      {
+        "id": 7460,
+        "name": "Cooking Ingredients",
+        "enabled": true
+      },
+      {
+        "id": 7461,
+        "name": "Beverages",
+        "enabled": false
+      },
+      {
+        "id": 7462,
+        "name": "Pills / Tablets",
+        "enabled": true
+      },
+      {
+        "id": 7463,
+        "name": "Chews/Gummies",
+        "enabled": false
+      },
+      {
+        "id": 7464,
+        "name": "Chocolate",
+        "enabled": true
+      },
+      {
+        "id": 7465,
+        "name": "Drinks",
+        "enabled": false
+      },
+      {
+        "id": 7466,
+        "name": "Freeze Pops",
+        "enabled": true
+      },
+      {
+        "id": 7467,
+        "name": "Hard Candy",
+        "enabled": true
+      },
+      {
+        "id": 7468,
+        "name": "Baked Goods",
+        "enabled": true
+      },
+      {
+        "id": 7469,
+        "name": "Tinctures",
+        "enabled": false
+      }
+    ],
+    "isSynchronizedWithParent": false,
+    "useBrandImagesOnIos": false,
+    "isManagerDiscountsAllowed": true,
+    "isPromoDiscountAllowed": true,
+    "isLoyaltyAllowed": true,
+    "isHiddenInApp": false,
+    "useProductThcInSizeFilter": false,
+    "displayProductThcInProductCardFirst": false,
+    "isCannabisDaysSupplyEnabled": false,
+    "id": 7459,
+    "name": "EdiblesCWB",
+    "enabled": true
+  },
+  "completedAt": "2026-05-24T16:58:55Z"
+}
