@@ -63,15 +63,29 @@ export class L2LLMPredictor {
     }
     const adsByFamilyKey = groupAdsByFamilyKey(ads, familySummaries);
 
-    // Format L1 summaries for prompt
+    // Format L1 summaries for prompt.
+    //
+    // The operator's primary goal is re-enabling EVERY disapproved /
+    // limited ad in the account — at last count 95 impaired RSAs
+    // across the snapshot, while L2 was only emitting ~14 actions.
+    // The root cause was that we capped `sample_ads` at 10 per
+    // family, so the LLM literally never saw the other 85 impaired
+    // ads. We now include ALL impaired ads (no cap) and add a small
+    // reference set of eligible ads from the same family as "what
+    // currently works", letting the LLM ground its rewrites in
+    // proven-good copy from the same context.
+    let totalImpairedSent = 0;
     const l1SummariesFormatted = familySummaries.map((summary, idx) => {
       const familyAds = adsByFamilyKey.get(idx) ?? [];
 
-      // Surface real ad creatives, prioritising disapproved / limited
-      // ads (since the operator's goal is re-enabling those) and
-      // capping at 10 per family so the prompt stays bounded.
-      const ranked = [...familyAds].sort((a, b) => statusUrgency(b.serving_status) - statusUrgency(a.serving_status));
-      const sampleAds = ranked.slice(0, 10).map((ad) => ({
+      const impaired = familyAds.filter(
+        (ad) =>
+          ad.serving_status === 'not_eligible' ||
+          ad.serving_status === 'eligible_limited',
+      );
+      const eligible = familyAds.filter((ad) => ad.serving_status === 'eligible');
+
+      const compactAd = (ad: AdSnapshot) => ({
         ad_id: ad.ad_id,
         campaign_name: ad.campaign_name,
         ad_group_name: ad.ad_group_name,
@@ -83,7 +97,16 @@ export class L2LLMPredictor {
         descriptions: ad.descriptions,
         final_url: ad.final_url,
         metrics: ad.metrics,
-      }));
+      });
+
+      const impairedAds = impaired.map(compactAd);
+      // Keep the eligible reference pool small to leave token budget
+      // for the impaired ads (which is where the operator wants
+      // coverage). 5 per family is plenty of "what good copy looks
+      // like" signal.
+      const eligibleReferenceAds = eligible.slice(0, 5).map(compactAd);
+
+      totalImpairedSent += impairedAds.length;
 
       return {
         family_index: idx,
@@ -93,13 +116,22 @@ export class L2LLMPredictor {
         pattern_stats: summary.pattern_stats,
         anomalies: summary.anomalies,
         avg_performance: summary.avg_performance,
-        // Real ads from this family. The LLM MUST only emit
-        // ad-level actions that reference ad_id values from this
-        // list (the prompt is updated to call this out). This is
-        // what prevents the hallucinated-id problem.
-        sample_ads: sampleAds,
+        // Every disapproved / limited ad in this family. The LLM
+        // MUST emit a repair / replace / pause action for each
+        // entry here (prompt instruction below enforces this). The
+        // ad_id is the join key downstream CSV emitters use to
+        // match this action back to the snapshot ad.
+        impaired_ads: impairedAds,
+        // Currently-eligible ads from the same family. Use these as
+        // "what works for this audience / theme / geo" inspiration
+        // when generating replacement copy. Do NOT issue actions
+        // against these — they're serving fine.
+        eligible_reference_ads: eligibleReferenceAds,
       };
     });
+    console.log(
+      `🤖 L2 prompt: ${totalImpairedSent} impaired RSAs sent in full to the LLM across ${familySummaries.length} families`,
+    );
 
     // Build user prompt
     const systemPrompt = this.promptConfig.main_prompt.system_prompt || '';
@@ -118,7 +150,14 @@ export class L2LLMPredictor {
       system_prompt: systemPrompt,
       user_prompt: userPrompt,
       temperature: 0.1,
-      max_tokens: 8000,
+      // Output budget sized for one action per impaired ad. At ~150
+      // tokens per ad_action JSON object (id, type, justification,
+      // suggested_new_creatives with 3 headlines + 2 descriptions),
+      // 32K tokens supports ~200 impaired ads — well above the
+      // current snapshot's 95 impaired RSAs. The previous 8K cap
+      // truncated the LLM's reply, which manifested as "L2 returned
+      // N families, expected M" plus dropped families in the JSON.
+      max_tokens: 32000,
       response_format: 'json',
     });
 

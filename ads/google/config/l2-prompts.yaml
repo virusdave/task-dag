@@ -33,17 +33,33 @@ main_prompt:
     HARD CONSTRAINTS — VIOLATING THESE PRODUCES UNIMPORTABLE CSVS THAT
     OUR OPERATOR THROWS AWAY:
 
+    0. COVERAGE — THIS IS THE WHOLE POINT OF THE RUN. For EVERY ad
+       listed in a family's `impaired_ads` array, you MUST emit
+       exactly one `ad_level_actions` entry whose `ad_id` matches.
+       No skipping. No "looks fine, leaving it" silent omissions.
+       The operator's `not_eligible` and `eligible_limited` ads are
+       earning $0 right now; if you leave one alone it stays at $0
+       until the next run. If an ad is genuinely unfixable, emit
+       `pause` with a clear justification — that is still an action
+       and counts toward coverage. If we can re-enable it with a
+       small wording change, emit `repair`. If the whole creative
+       needs to be redone, emit `replace`. Choose, but ALWAYS
+       choose. We measure (#ad_actions / #impaired_ads) every run
+       and treat <100% as a regression.
+
     1. Every `ad_id` you reference in `ad_level_actions` MUST appear
-       verbatim in the family's `sample_ads[*].ad_id` list. Do not
-       invent ad_ids. Do not normalise, truncate, or re-format them.
-       If you cannot find an ad in `sample_ads` worth acting on,
-       emit no action for that family rather than fabricating one.
+       verbatim in the family's `impaired_ads[*].ad_id` list. Do
+       not invent ad_ids. Do not normalise, truncate, or re-format
+       them. Do not address ads from `eligible_reference_ads` —
+       those are serving fine and only included as "what good copy
+       looks like for this family".
 
     2. For each trial in `trial_plans`, set
        `original_campaign_name` to the EXACT `campaign_name` of an
-       ad in the same family's `sample_ads`. Trials with a missing
-       or fabricated campaign name are dropped by the downstream
-       CSV generator.
+       ad in the same family's `impaired_ads` (or
+       `eligible_reference_ads` if that's where the relevant
+       campaign lives). Trials with a missing or fabricated
+       campaign name are dropped by the downstream CSV generator.
 
     3. Use lowercase action types: "repair", "replace", "pause",
        "monitor". Sentence-cased values ("Pause", "Repair") used to

@@ -4,10 +4,10 @@ import * as path from 'node:path'
 
 import { type AdsIngestResponse } from '../../shared/contracts/index.js'
 import { evaluateOutcomesAgainstSnapshot } from './adAttemptsTracker.js'
-import { automationRepoPath } from './automationRepoRoot.js'
 import { buildSnapshotFromCsv } from './buildSnapshotFromCsv.js'
 import { downloadDriveFile } from './googleDriveClient.js'
 import { parseDriveInput } from './parseDriveInput.js'
+import { sharedSnapshotPath } from './sharedSnapshotPath.js'
 
 /**
  * Drive ingest pipeline.
@@ -58,7 +58,13 @@ export function runAdsIngest(driveFileUrlOrId: string): Promise<AdsIngestRespons
 
 async function doRunAdsIngest(driveFileUrlOrId: string): Promise<AdsIngestResponse> {
   const parsed = parseDriveInput(driveFileUrlOrId)
-  const snapshotPath = automationRepoPath('ads/google/snapshots/ads-snapshot-live.jsonl')
+  const snapshotPath = sharedSnapshotPath()
+  // Ensure the snapshot's parent dir exists. In prod this is the
+  // shared `/var/lib/gads/data/snapshots/` dir created by the gads
+  // module; in local dev it's the in-repo `ads/google/snapshots/`
+  // dir. Either way, `mkdir -p` is harmless and lets ad-hoc test
+  // setups work without pre-creating directories.
+  await fs.mkdir(path.dirname(snapshotPath), { recursive: true })
 
   // Per-user temp dir, owned 700 by the helios user — never collides
   // with a parallel `amp-local` (or other uid) ssh test on the same host.
