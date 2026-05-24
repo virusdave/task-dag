@@ -173,7 +173,18 @@ function readAllowedOrigins(appBaseUrl: string, nodeEnv: ServerEnv['nodeEnv']): 
     .map((value) => value.trim())
     .filter((value) => value.length > 0)
 
-  const defaults = [new URL(appBaseUrl).origin]
+  const defaults = [
+    new URL(appBaseUrl).origin,
+    // Customer-Sentiment Capture (virusdave/top-level#3): the public
+    // review landing pages live at
+    // `https://freshlybaked.nyc/go/<location-code>/review` and call
+    // the public `/v1/reviews/submit` + `/v1/reviews/:id/drawing-entry`
+    // endpoints from a customer's browser. Both production hosts are
+    // baked into the defaults so a stock Helios prod install accepts
+    // those preflights without per-deploy env tweaking.
+    'https://freshlybaked.nyc',
+    'https://www.freshlybaked.nyc',
+  ]
 
   if (nodeEnv !== 'production') {
     defaults.push(
@@ -181,6 +192,12 @@ function readAllowedOrigins(appBaseUrl: string, nodeEnv: ServerEnv['nodeEnv']): 
       'http://127.0.0.1:5173',
       'http://localhost:5174',
       'http://127.0.0.1:5174',
+      // mss freshlybaked-site dev/staging hosts (cf. apps/freshlybaked
+      // -site/site.config.ts and packages/config in
+      // Nicponskis/mostly-static-sites).
+      'https://staging.freshlybaked.nyc',
+      'http://localhost:4330',
+      'http://freshlybaked.local.test:4330',
     )
   }
 

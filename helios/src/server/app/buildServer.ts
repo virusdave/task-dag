@@ -65,6 +65,58 @@ export async function buildServer() {
     },
   })
 
+  // CORS for the public Customer-Sentiment Capture endpoints
+  // (virusdave/top-level#3, Nicponskis/mostly-static-sites#5).
+  //
+  // The customer-facing review page is hosted on
+  // `https://freshlybaked.nyc/go/<location-code>/review` and POSTs
+  // to Helios's public `/v1/reviews/submit` and
+  // `/v1/reviews/:id/drawing-entry` endpoints from the customer's
+  // own browser. That makes it a cross-origin request, so the
+  // browser sends a CORS preflight (`OPTIONS`) before the actual
+  // POST. Without this hook two things would break:
+  //
+  //   1. The preflight `OPTIONS /v1/reviews/...` would fall through
+  //      to the auth gate (which doesn't allowlist `OPTIONS` even
+  //      for the public review paths) and 401.
+  //   2. Even if the POST went through, the response wouldn't carry
+  //      `Access-Control-Allow-Origin`, so the browser would
+  //      discard the body.
+  //
+  // We deliberately keep this hook scoped to `/v1/reviews/` so the
+  // rest of the (auth-only, single-origin) Helios surface stays
+  // CORS-free. The list of allowed origins is the same
+  // `env.allowedOrigins` set already used by the same-origin POST
+  // guard below; the mss host names are baked into the defaults in
+  // `readAllowedOrigins`.
+  //
+  // Must be registered BEFORE `registerAuthGate` so the OPTIONS
+  // short-circuit wins over the auth gate's onRequest hook.
+  server.addHook('onRequest', async (request, reply) => {
+    const pathOnly = request.url.split('?', 1)[0]
+    if (!pathOnly.startsWith('/v1/reviews/')) {
+      return
+    }
+    const origin = request.headers.origin
+    const isAllowed = typeof origin === 'string' && env.allowedOrigins.includes(origin)
+    if (request.method === 'OPTIONS') {
+      const headers: Record<string, string> = {
+        'Access-Control-Allow-Methods': 'POST, OPTIONS',
+        'Access-Control-Allow-Headers': 'content-type, accept',
+        'Access-Control-Max-Age': '86400',
+        Vary: 'Origin',
+      }
+      if (isAllowed && typeof origin === 'string') {
+        headers['Access-Control-Allow-Origin'] = origin
+      }
+      return reply.status(204).headers(headers).send()
+    }
+    if (isAllowed && typeof origin === 'string') {
+      reply.header('Access-Control-Allow-Origin', origin)
+      reply.header('Vary', 'Origin')
+    }
+  })
+
   // Site-wide authentication gate. Must run after the cookie plugin
   // (so we can read the session cookie) but before any route handler.
   // Allows /healthzz, /api/session, /api/session/logout, and the
