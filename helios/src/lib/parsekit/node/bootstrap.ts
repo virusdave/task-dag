@@ -14,7 +14,9 @@
  */
 
 import { metrcV1Dialect } from '../dialects/metrc-v1.js'
+import { litalertsV1Dialect } from '../dialects/litalerts-v1.js'
 import { pendingPurchasesContract } from '../contracts/pendingPurchases.js'
+import { litalertsContract } from '../contracts/litalerts.js'
 import type { DialectPack, UseCaseContract } from '../types.js'
 import {
   getParserRegistry,
@@ -95,11 +97,16 @@ export function buildRegistries(): InitOptions['registries'] {
   return {
     dialects: new Map<string, DialectPack<unknown>>([
       ['metrc-v1', metrcV1Dialect as unknown as DialectPack<unknown>],
+      ['litalerts-v1', litalertsV1Dialect as unknown as DialectPack<unknown>],
     ]),
     contracts: new Map<string, UseCaseContract<unknown>>([
       [
         pendingPurchasesContract.useCase,
         pendingPurchasesContract as unknown as UseCaseContract<unknown>,
+      ],
+      [
+        litalertsContract.useCase,
+        litalertsContract as unknown as UseCaseContract<unknown>,
       ],
     ]),
   }
