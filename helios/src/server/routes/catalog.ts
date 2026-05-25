@@ -6,6 +6,7 @@ import { z } from 'zod'
 import {
   buildCatalogGroupModuleScope,
   CatalogBrowserQuerySchema,
+  CatalogBrowserResponseSchema,
   CatalogHistoryQuerySchema,
   CatalogHistoryResponseSchema,
   CatalogGroupRouteParamsSchema,
@@ -48,10 +49,15 @@ export async function registerCatalogRoutes(server: FastifyInstance): Promise<vo
     }
 
     const query = CatalogBrowserQuerySchema.parse(request.query)
-    const payload = GroupDetailResponseSchema.safeParse
-    void payload
     const response = await listCatalogGroups(getPool(), query)
-    return reply.send(response)
+    // Validate the response shape server-side so any future drift
+    // (schema rename, missing column, null where the client expects
+    // [], etc.) fails here with a precise Zod error in the server
+    // logs — rather than reaching the SPA loader and rendering as an
+    // opaque ErrorBoundary on /catalog/browser. The loader on the
+    // client also re-parses the body; this just makes the server the
+    // first line of defense (regression: issue #17).
+    return reply.send(CatalogBrowserResponseSchema.parse(response))
   })
 
   server.post('/api/catalog/refresh', async (request, reply) => {

@@ -549,17 +549,31 @@ async function loadCatalogBrowserFacets(db: Queryable): Promise<{
         order by reconcile_status asc`,
     ),
     // sizeName is per-product (live_state_json -> 'products' -> [i] ->
-    // 'sizeName'). Cross-join expands the JSONB array and we pull the
-    // distinct non-empty values. Sort by `length` first so short
-    // numeric-style sizes (1g, 3.5g, 10mg) group together ahead of
-    // longer free-form labels.
+    // 'sizeName'). Expand the JSONB array, pull the distinct non-empty
+    // values, then sort by `length` first so short numeric-style sizes
+    // (1g, 3.5g, 10mg) group together ahead of longer free-form labels.
+    //
+    // We collapse the distinct + order-by into an outer select over an
+    // inner `select distinct trim(...) as value`, because
+    //   (a) `jsonb_array_elements(...) p` itself exposes a column named
+    //       `value`, so a bare `select distinct value` against that
+    //       alongside our own `as value` alias is an ambiguous-column
+    //       error in postgres — the prior shape failed at runtime with
+    //       `column reference "value" is ambiguous` and 5xx'd
+    //       /api/catalog/groups for every reviewer (issue #17), and
+    //   (b) `select distinct` + `order by length(value)` is itself a
+    //       postgres error ("ORDER BY expressions must appear in select
+    //       list"), which would have masked the ambiguity bug above
+    //       once it was fixed.
     db.query<{ value: string }>(
-      `select distinct value
-         from catalog_groups cg,
-              lateral jsonb_array_elements(coalesce(cg.live_state_json->'products', '[]'::jsonb)) p
-        cross join lateral (select trim(p->>'sizeName') as value) v
+      `select v.value
+         from (
+           select distinct trim(p->>'sizeName') as value
+             from catalog_groups cg,
+                  lateral jsonb_array_elements(coalesce(cg.live_state_json->'products', '[]'::jsonb)) p
+         ) v
         where v.value is not null and v.value <> ''
-        order by length(value) asc, value asc`,
+        order by length(v.value) asc, v.value asc`,
     ),
   ])
   return {
