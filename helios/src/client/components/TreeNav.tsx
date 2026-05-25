@@ -143,29 +143,28 @@ function pathMatches(to: string, target: string): boolean {
   return target.startsWith(`${trimmed}/`)
 }
 
-function findAncestorChain(
+function findOpenChain(
   nodes: TreeNavNode[],
   targetId: string,
-  ancestors: string[] = [],
+  openChain: string[] = [],
 ): string[] | null {
   for (const node of nodes) {
     if (node.kind === 'leaf') {
       if (node.targetId && node.targetId === targetId) {
-        return ancestors
+        return openChain
       }
       if (node.to && pathMatches(node.to, targetId)) {
-        return ancestors
+        return openChain
       }
       continue
     }
     if (node.to && pathMatches(node.to, targetId)) {
-      // Branch itself matches - expand its ancestors but not itself.
-      return ancestors
+      return node.children.length > 0 ? [...openChain, node.navKey] : openChain
     }
     if (node.targetId && node.targetId === targetId) {
-      return ancestors
+      return node.children.length > 0 ? [...openChain, node.navKey] : openChain
     }
-    const found = findAncestorChain(node.children, targetId, [...ancestors, node.navKey])
+    const found = findOpenChain(node.children, targetId, [...openChain, node.navKey])
     if (found) {
       return found
     }
@@ -372,7 +371,7 @@ export function TreeNav({ storageKey, nodes, activeTargetId, onNavigate }: TreeN
     if (!activeTargetId) {
       return
     }
-    const chain = findAncestorChain(nodes, activeTargetId)
+    const chain = findOpenChain(nodes, activeTargetId)
     if (!chain || chain.length === 0) {
       return
     }

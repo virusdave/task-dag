@@ -21,11 +21,10 @@ import { SidebarNavProvider, useSidebarNav } from './SidebarNavContext.js'
 import { TreeNav, type TreeNavNode } from './TreeNav.js'
 
 const SIDEBAR_COLLAPSED_STORAGE_KEY = 'helios.sidebar.collapsed'
-// Bumped to .v2 when we switched from "branches are empty until you visit
-// their page" to "every branch shows its full subtree on first load, all
-// top-level branches open by default" so existing operators don't keep
-// their stale collapsed/empty state.
-const SIDEBAR_TREE_STORAGE_KEY = 'helios.sidebar.tree.v2'
+// Bumped to .v3 when primary sidebar branches started collapsed by default
+// except for branches needed to reveal the current page, so existing
+// operators do not keep stale open state from the old default.
+const SIDEBAR_TREE_STORAGE_KEY = 'helios.sidebar.tree.v3'
 const MOBILE_BREAKPOINT_QUERY = '(max-width: 960px)'
 
 function isAnyModalOpen(): boolean {
@@ -109,7 +108,7 @@ function buildPrimarySidebarNodes(
     return STATIC_MODULE_SUBTREES[code] ?? []
   }
 
-  function moduleBranch(code: HeliosModuleCode, options?: { defaultOpen?: boolean }): TreeNavNode {
+  function moduleBranch(code: HeliosModuleCode): TreeNavNode {
     const definition = getHeliosModuleDefinition(code)
     return {
       kind: 'branch',
@@ -119,10 +118,7 @@ function buildPrimarySidebarNodes(
       // Module branches stay highlighted while the operator is on any
       // descendant page (e.g. /catalog/groups/42 keeps Catalog active).
       end: false,
-      // Default-open top-level branches per the AGENTS.md rule
-      // ("purpose at top, expanded by default") so the FULL tree is
-      // visible on first load without operator interaction.
-      defaultOpen: options?.defaultOpen ?? true,
+      defaultOpen: false,
       children: subtreeFor(code),
     }
   }
@@ -151,7 +147,7 @@ function buildPrimarySidebarNodes(
       defaultOpen: false,
       children: TASKS_SIDEBAR_SUBTREE,
     },
-    moduleBranch('config', { defaultOpen: false }),
+    moduleBranch('config'),
     {
       kind: 'leaf',
       navKey: 'module.crm',
