@@ -231,6 +231,13 @@ const SENTINELS: MigrationSentinel[] = [
       'gads_ad_attempts (per-ad L2 attempt history) — required so the Google Ads automation can finally close its feedback loop: today\'s morning bundle queries past attempts + their outcomes for each ad_id and injects them into the L2 prompt as policy_experiences instead of running blind every day.',
     check: (db) => tableExists(db, 'gads_ad_attempts'),
   },
+  {
+    migrationId: '026_catalog_market_matches',
+    label:
+      'fuzzy_skus + catalog_market_matches — persisted FuzzySku records (one immutable row per source-listing × parser-version × raw-input tuple) and the verdict table that links catalog entries to those FuzzySku rows for the Catalog → Market Data review workflow (issue #18).',
+    check: async (db) =>
+      (await tableExists(db, 'fuzzy_skus')) && (await tableExists(db, 'catalog_market_matches')),
+  },
 ]
 
 interface CacheEntry {
