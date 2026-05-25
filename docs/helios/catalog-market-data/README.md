@@ -12,6 +12,9 @@ re-fuzzying competitor evidence on every run.
   proposed data model (with concrete SQL), the deterministic scorer
   formula, the reviewer UI sketch, the pricing-run cutover plan,
   open questions, and a phase-by-phase rollout.
+- [`RUNBOOK.md`](./RUNBOOK.md) — operator runbook for the phases
+  that are live today (1–4) plus the rollback / observation steps
+  you'll need when phases 5–6 start touching pricing reads.
 - [`task-dag-breakdown.json`](./task-dag-breakdown.json) — leaf-task
   spec for
   `scripts/task-dag breakdown <epic-sha> --spec-file=docs/helios/catalog-market-data/task-dag-breakdown.json`
@@ -20,11 +23,14 @@ re-fuzzying competitor evidence on every run.
 
 ## Status
 
-This directory is **design-only**. No schema migrations, server
-routes, worker jobs, or UI have been added yet. Implementation
-happens in the leaves enumerated by `task-dag-breakdown.json`, in
-the dependency order set there, after operator sign-off on the
-plan.
+Phases 1–4 are **live in production**:
+
+- ✅ Phase 1 — schema migration 026 applied; `fuzzy_skus` + `catalog_market_matches` exist.
+- ✅ Phase 2 — deterministic scorer at [`helios/src/shared/marketMatch/confidence.ts`](../../../helios/src/shared/marketMatch/confidence.ts).
+- ✅ Phase 3 — lazy parse-on-demand backfill via [`upsertFuzzySkusForObservation()`](../../../helios/src/server/db/queries/catalogMarketMatchQueries.ts) (departure from spec — see RUNBOOK.md).
+- ✅ Phase 4 — reviewer UI at <https://helios.freshlybaked.us/catalog/market-data>.
+
+Pending: phases 5a–d (pricing cutover), phase 6 (rescore cron + auto-promote).
 
 ## How this slots into the existing market-data work
 

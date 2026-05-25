@@ -403,10 +403,20 @@ export async function loadGroupReview(db: Queryable, catalogGroupId: number): Pr
         packCountNorm: fuzzy.packCountNorm,
         strainNorm: fuzzy.strainNorm,
       }
-      const factors = scoreCatalogFuzzyFactors(catalogProfile, fuzzyProfile)
+      // Heuristic brand-alias rescue: the v1 inline parser rarely
+      // extracts brand from a bare listing-name string, so a strict
+      // brand match would zero out the score. When the fuzzy side
+      // has no brand AND the listing text contains the catalog
+      // brand as a substring, treat them as alias-equivalent.
+      const listing = fuzzy.rawInputJsonb as { url?: string | null; dispensaryName?: string | null; listingName?: string | null } | null
+      const brandAliasMatch =
+        catalogProfile.brandNorm !== null
+        && fuzzy.brandNorm === null
+        && typeof listing?.listingName === 'string'
+        && listing.listingName.toLowerCase().includes(catalogProfile.brandNorm.toLowerCase())
+      const factors = scoreCatalogFuzzyFactors(catalogProfile, fuzzyProfile, { brandAliasMatch })
       const rawScore = Math.max(0, factors.brand * factors.category * factors.subcategory * factors.size * factors.pack * factors.strain)
       const finalScore = applyVerdictPostFilter(rawScore, null)
-      const listing = fuzzy.rawInputJsonb as { url?: string | null; dispensaryName?: string | null } | null
       return {
         fuzzy,
         rawScore,
