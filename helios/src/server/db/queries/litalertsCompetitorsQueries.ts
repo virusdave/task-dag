@@ -12,6 +12,7 @@ import {
   parseListingToFuzzy,
   type ParsedListing,
 } from '../../../shared/marketMatch/listingParse.js'
+import { tryParseLitalertsListing } from '../../parsekit/litalertsLookup.js'
 import type { Queryable } from '../pool.js'
 
 export interface CompetitorSummary {
@@ -36,6 +37,24 @@ export interface CompetitorSampleListing {
   }
   parsed: ParsedListing
   fuzzyHash: string
+  /**
+   * Where `parsed` came from.
+   *   - `'parsekit'`: a tenant config in helios-parser-configs matched
+   *     this listing and produced the row above. `parserId` /
+   *     `snapshotSha` identify which config + release.
+   *   - `'placeholder'`: no parsekit tenant config applied (none
+   *     loaded yet, none matches this competitor, or the tenant
+   *     parser failed on this input). `reason` says which one.
+   *
+   * The UI uses this to badge each row and to surface coverage gaps
+   * back to the LLM chat / config editor.
+   */
+  parserSource: 'parsekit' | 'placeholder'
+  parserId: string | null
+  snapshotSha: string | null
+  /** When parserSource === 'placeholder', why parsekit didn't apply. */
+  placeholderReason?: 'no_registry' | 'no_tenant_config' | 'parse_failed'
+  placeholderDetail?: string
 }
 
 /**
@@ -134,19 +153,52 @@ export async function loadCompetitorSample(
     `,
     [competitorName, limit],
   )
-  return result.rows.map((row) => ({
-    observationId: row.observation_id,
-    observedAt: row.observed_at,
-    searchTerm: row.search_term,
-    raw: {
+  return result.rows.map((row) => {
+    const raw = {
       url: row.listing?.url ?? null,
       listingName: row.listing?.listingName ?? null,
       category: row.listing?.category ?? null,
       brand: row.listing?.brand ?? null,
       dispensaryName: row.listing?.dispensaryName ?? null,
       subcategory: row.listing?.subcategory ?? null,
-    },
-    parsed: parseListingToFuzzy(row.listing ?? {}, row.search_term),
-    fuzzyHash: hashRawInput(row.listing),
-  }))
+    }
+    const attempt = tryParseLitalertsListing(raw.dispensaryName, raw.listingName)
+    if (attempt.parsed) {
+      return {
+        observationId: row.observation_id,
+        observedAt: row.observed_at,
+        searchTerm: row.search_term,
+        raw,
+        // Fill in subcategory + brand-from-row when parsekit doesn't
+        // emit them (parser parses listingName only; the LitAlerts
+        // observation already gives us these for free).
+        parsed: {
+          ...attempt.parsed,
+          brandNorm: attempt.parsed.brandNorm ?? (raw.brand ?? null),
+          categoryNorm:
+            attempt.parsed.categoryNorm && attempt.parsed.categoryNorm !== 'other'
+              ? attempt.parsed.categoryNorm
+              : raw.category ?? attempt.parsed.categoryNorm,
+          subcategoryNorm: attempt.parsed.subcategoryNorm ?? raw.subcategory ?? null,
+        },
+        fuzzyHash: hashRawInput(row.listing),
+        parserSource: 'parsekit',
+        parserId: attempt.parserId,
+        snapshotSha: attempt.snapshotSha,
+      }
+    }
+    return {
+      observationId: row.observation_id,
+      observedAt: row.observed_at,
+      searchTerm: row.search_term,
+      raw,
+      parsed: parseListingToFuzzy(row.listing ?? {}, row.search_term),
+      fuzzyHash: hashRawInput(row.listing),
+      parserSource: 'placeholder',
+      parserId: attempt.parserId,
+      snapshotSha: attempt.snapshotSha,
+      placeholderReason: attempt.reason ?? undefined,
+      placeholderDetail: attempt.failureDetail,
+    }
+  })
 }

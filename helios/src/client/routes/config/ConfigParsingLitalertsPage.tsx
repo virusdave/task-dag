@@ -41,6 +41,11 @@ interface SampleListing {
     subcategory: string | null
   }
   parsed: ParsedFuzzy
+  parserSource?: 'parsekit' | 'placeholder'
+  parserId?: string | null
+  snapshotSha?: string | null
+  placeholderReason?: 'no_registry' | 'no_tenant_config' | 'parse_failed'
+  placeholderDetail?: string
 }
 
 interface CompetitorSampleResponse {
@@ -274,6 +279,7 @@ function SampleTable({
         <tr>
           <th />
           <th>Listing</th>
+          <th>Source</th>
           <th>Raw category</th>
           <th>Parsed brand</th>
           <th>Parsed size</th>
@@ -296,6 +302,9 @@ function SampleTable({
                 <a href={row.raw.url} rel="noreferrer" target="_blank">{row.raw.listingName ?? '—'}</a>
               ) : (row.raw.listingName ?? '—')}
             </td>
+            <td>
+              <SourceBadge row={row} />
+            </td>
             <td>{row.raw.category ?? '—'}</td>
             <td>{row.parsed.brandNorm ?? <em>none</em>}</td>
             <td>
@@ -311,5 +320,35 @@ function SampleTable({
         ))}
       </tbody>
     </table>
+  )
+}
+
+function SourceBadge({ row }: { row: SampleListing }): JSX.Element {
+  if (row.parserSource === 'parsekit') {
+    const title = `${row.parserId ?? 'parsekit'} @ ${row.snapshotSha?.slice(0, 7) ?? '?'}`
+    return (
+      <span title={title}>
+        <Pill tone="success">parsekit</Pill>
+      </span>
+    )
+  }
+  const detail = row.placeholderDetail
+  const reason = row.placeholderReason
+  const title = detail
+    ? `${reason ?? 'placeholder'}: ${detail}`
+    : (reason ?? 'placeholder (legacy listingParse.ts)')
+  const tone = reason === 'parse_failed' ? 'warning' : 'muted'
+  const label =
+    reason === 'no_tenant_config'
+      ? 'no config'
+      : reason === 'no_registry'
+        ? 'no registry'
+        : reason === 'parse_failed'
+          ? 'parse failed'
+          : 'placeholder'
+  return (
+    <span title={title}>
+      <Pill tone={tone}>{label}</Pill>
+    </span>
   )
 }
