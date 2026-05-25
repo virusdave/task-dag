@@ -395,18 +395,23 @@ export function ConfigParsingLitalertsPage(): JSX.Element {
           <summary>About this page</summary>
           <div className="subtle-copy" style={{ marginTop: '0.5rem' }}>
             <p>
-              v1 review surface for LitAlerts parsing. Today the parser is the inline placeholder at
+              v1 review surface for LitAlerts parsing. The read path runs through the parsekit
+              runtime (<code>litalerts-v1</code> dialect + per-tenant configs under
+              <code>helios-parser-configs/use-cases/litalerts/parsers/&lt;tenantId&gt;.jsonc</code>);
+              listings that don't have a tenant config yet fall back to the inline placeholder at
               <code> helios/src/shared/marketMatch/listingParse.ts</code> (lifted from
-              <code> worker/pricing/litAlertsMarket.ts</code>); the <code>helios-parser-configs</code>
-              repo does <em>not</em> yet have a <code>use-cases/litalerts/</code> tree, so the
-              suggested JSONC patches the LLM emits cannot yet round-trip into the runtime loader.
+              <code> worker/pricing/litAlertsMarket.ts</code>) — those rows are tagged
+              <code>parserSource: placeholder</code> in the sample table. LLM-proposed JSONC patches
+              round-trip through <code>POST /apply-config</code>, which commits + pushes to
+              <code>helios-parser-configs</code> master and waits for the loader to refresh.
               Full design at <code>docs/helios/litalerts-parsing/EPIC_PLAN.md</code>.
             </p>
             <p>
               The chat panel sends focused rows (or the most recent 12 if none selected), the
               FuzzySku schema and a strict JSON-mode response contract to the Bedrock-mantle
               gateway. The model replies with <code>{`{rationale, patch, newGoldensSuggested}`}</code>.
-              Suggestions are advisory only; no git commit/push yet.
+              Chat suggestions never auto-apply — the operator reviews the patch, edits the JSONC
+              in the editor below, and clicks Apply to commit + push.
             </p>
           </div>
         </details>
