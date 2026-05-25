@@ -238,6 +238,14 @@ const SENTINELS: MigrationSentinel[] = [
     check: async (db) =>
       (await tableExists(db, 'fuzzy_skus')) && (await tableExists(db, 'catalog_market_matches')),
   },
+  {
+    migrationId: '027_litalerts_retailer_geo',
+    label:
+      'helios_store_locations + litalerts_retailer_locations — geocoded lat/lng for our stores and for every NY retailer in LitAlerts /v1/retailers. Powers the min-distance-to-our-stores sort on /config/parsing/litalerts (issue #19).',
+    check: async (db) =>
+      (await tableExists(db, 'helios_store_locations')) &&
+      (await tableExists(db, 'litalerts_retailer_locations')),
+  },
 ]
 
 interface CacheEntry {

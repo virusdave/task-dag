@@ -11,6 +11,8 @@ interface CompetitorSummary {
   matchedListingCount: number
   uniqueCategories: number
   uniqueBrands: number
+  minDistanceMiles: number | null
+  nearestStoreKey: string | null
 }
 
 interface ListResponse {
@@ -154,7 +156,11 @@ export function ConfigParsingLitalertsPage(): JSX.Element {
           <aside style={{ maxHeight: '70vh', overflowY: 'auto', borderRight: '1px solid rgba(0,0,0,0.1)', paddingRight: '0.5rem' }}>
             <table className="data-table" style={{ fontSize: '0.85rem' }}>
               <thead>
-                <tr><th>Competitor</th><th style={{ textAlign: 'right' }}>Listings</th></tr>
+                <tr>
+                  <th>Competitor</th>
+                  <th style={{ textAlign: 'right' }} title="Min distance (miles) to one of our stores">mi</th>
+                  <th style={{ textAlign: 'right' }}>Listings</th>
+                </tr>
               </thead>
               <tbody>
                 {data.competitors.map((row) => (
@@ -167,6 +173,12 @@ export function ConfigParsingLitalertsPage(): JSX.Element {
                     }}
                   >
                     <td>{row.competitorName}</td>
+                    <td
+                      style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums', color: row.minDistanceMiles === null ? 'rgba(0,0,0,0.4)' : undefined }}
+                      title={row.nearestStoreKey ? `nearest: ${row.nearestStoreKey}` : 'no geocoded address'}
+                    >
+                      {row.minDistanceMiles === null ? '—' : row.minDistanceMiles < 10 ? row.minDistanceMiles.toFixed(1) : Math.round(row.minDistanceMiles)}
+                    </td>
                     <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{row.matchedListingCount}</td>
                   </tr>
                 ))}

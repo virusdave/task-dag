@@ -21,6 +21,18 @@ export interface CompetitorSummary {
   matchedListingCount: number
   uniqueCategories: number
   uniqueBrands: number
+  /**
+   * Min great-circle distance (miles) from this competitor's address
+   * to ANY of our stores in helios_store_locations (where the store
+   * has a non-null lat/lng). NULL when:
+   *   - the competitor's name didn't match a row in
+   *     litalerts_retailer_locations, OR
+   *   - that row was never geocoded, OR
+   *   - no helios_store_locations row has coords yet.
+   */
+  minDistanceMiles: number | null
+  /** site_key of the nearest store, or null when minDistanceMiles is null. */
+  nearestStoreKey: string | null
 }
 
 export interface CompetitorSampleListing {
@@ -66,12 +78,20 @@ export async function listLitalertsCompetitors(
   options: { limit?: number } = {},
 ): Promise<CompetitorSummary[]> {
   const limit = options.limit ?? 50
+  // Distance computation: great-circle haversine in miles between
+  // litalerts_retailer_locations and helios_store_locations. We
+  // CROSS JOIN the (≤ 555 retailers) × (≤ ~5 stores) cardinality and
+  // take MIN per retailer. Both sides filter out NULL coords so
+  // unmatched / un-geocoded competitors get NULL min_distance,
+  // sorted to the bottom of the list.
   const result = await db.query<{
     competitor_name: string
     observation_count: number
     matched_listing_count: number
     unique_categories: number
     unique_brands: number
+    min_distance_miles: number | null
+    nearest_store_key: string | null
   }>(
     `
       with listings as (
@@ -88,16 +108,57 @@ export async function listLitalertsCompetitors(
                     else '[]'::jsonb end
              ) listing
         where listing->>'dispensaryName' is not null
+      ),
+      retailer_distances as (
+        select
+          r.retailer_id,
+          lower(trim(r.name)) as name_key,
+          s.site_key,
+          3958.7613 * 2 * asin(
+            sqrt(
+              sin(radians((s.latitude - r.latitude) / 2)) ^ 2
+              + cos(radians(r.latitude)) * cos(radians(s.latitude))
+                * sin(radians((s.longitude - r.longitude) / 2)) ^ 2
+            )
+          ) as miles
+        from litalerts_retailer_locations r
+        cross join helios_store_locations s
+        where r.latitude is not null and r.longitude is not null
+          and s.latitude is not null and s.longitude is not null
+      ),
+      retailer_nearest as (
+        select distinct on (name_key)
+          name_key,
+          site_key as nearest_store_key,
+          miles as min_distance_miles
+        from retailer_distances
+        order by name_key, miles asc
+      ),
+      grouped as (
+        select
+          competitor_name,
+          count(distinct observation_id)::int as observation_count,
+          count(*)::int as matched_listing_count,
+          count(distinct category)::int as unique_categories,
+          count(distinct brand)::int as unique_brands
+        from listings
+        group by competitor_name
       )
       select
-        competitor_name,
-        count(distinct observation_id)::int as observation_count,
-        count(*)::int as matched_listing_count,
-        count(distinct category)::int as unique_categories,
-        count(distinct brand)::int as unique_brands
-      from listings
-      group by competitor_name
-      order by matched_listing_count desc, competitor_name asc
+        g.competitor_name,
+        g.observation_count,
+        g.matched_listing_count,
+        g.unique_categories,
+        g.unique_brands,
+        rn.min_distance_miles,
+        rn.nearest_store_key
+      from grouped g
+      left join retailer_nearest rn
+        on rn.name_key = lower(trim(g.competitor_name))
+      order by
+        rn.min_distance_miles asc nulls last,
+        g.matched_listing_count desc,
+        g.competitor_name asc
       limit $1
     `,
     [limit],
@@ -108,6 +169,8 @@ export async function listLitalertsCompetitors(
     matchedListingCount: row.matched_listing_count,
     uniqueCategories: row.unique_categories,
     uniqueBrands: row.unique_brands,
+    minDistanceMiles: row.min_distance_miles,
+    nearestStoreKey: row.nearest_store_key,
   }))
 }
 
