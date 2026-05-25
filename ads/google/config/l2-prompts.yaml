@@ -133,6 +133,34 @@ main_prompt:
        descriptions; aim for that. Shape (b) inherits the snapshot
        ad's slot count, which already passed minima.
 
+       HARD RULES the operator has burned thousands of dollars
+       reminding us of — these are SILENTLY DROPPED by the CSV
+       sanitizer if you violate them, which wastes your effort
+       AND skips ads we could otherwise have served:
+
+         • Headlines MUST be ≤ 30 characters AFTER trimming.
+           Anything longer is dropped from the row, and a row that
+           ends up with < 3 valid headlines is dropped entirely.
+         • Descriptions MUST be ≤ 90 characters AFTER trimming, AND
+           MUST NOT contain a URL or bare domain (`https://…`,
+           `www.…`, or `something.com|nyc|us|io|…`). URLs in
+           descriptions are an instant Google disapproval.
+         • Headlines must NOT contain URLs either.
+         • NO bizarre punctuation in either headlines or descriptions.
+           Specifically: never emit `?.`, `!.`, `?!`, `!?`, `??`,
+           `!!`, or `..`. A single `?`, `!`, `.`, or the `...`
+           ellipsis are fine; back-to-back terminal punctuation is
+           not. Google disapproves these on sight.
+         • An ad group can hold AT MOST 3 responsive search ads
+           total (the snapshot already shows how many it has). If
+           an ad group is already at the cap, propose `repair` on
+           the existing ads instead of `replace` / new trial RSAs;
+           new RSAs past the cap are dropped.
+         • NEVER propose a sitelink whose Final URL is on the
+           internal `freshlybaked.nyc` host — sitelinks must go to
+           the public landing-page site `freshlybaked.us`. A
+           sitelink without a Final URL is also invalid.
+
     5. For trial `controls` and `variants`, prefer the structured
        form:
          { source_ad_id, label, creative: { headlines, descriptions, final_url } }

@@ -36,6 +36,11 @@ import type {
   CSVBatch,
   CSVRow,
 } from '../shared/types.js';
+import {
+  sanitizeHeadlinesReport,
+  sanitizeDescriptionsReport,
+  RsaCapTracker,
+} from '../shared/ads-validators.js';
 
 export interface GenerateCSVBatchesOptions {
   /**
@@ -61,13 +66,47 @@ export function generateCSVBatches(
   const snapshot = opts.snapshotAds ?? opts.snapshot ?? [];
   const ctx = buildSnapshotIndex(snapshot);
 
+  // Shared cap tracker: at most 3 RSAs per (campaign, ad_group)
+  // across the entire bundle. Seeded with what's already live in
+  // the account so we never push an ad group above the Google
+  // hard limit. Repair edits in place and does NOT reserve a slot;
+  // replace and trial-ads emit new RSAs and DO reserve a slot.
+  const rsaCap = new RsaCapTracker();
+  rsaCap.seedFromSnapshot(snapshot);
+
   const batches: CSVBatch[] = [];
   batches.push(generateTrialGroupsCSV(l2Output, ctx));
   batches.push(generateRepairCSV(l2Output, ctx));
-  batches.push(generateReplaceCSV(l2Output, ctx));
+  batches.push(generateReplaceCSV(l2Output, ctx, rsaCap));
   batches.push(generatePauseCSV(l2Output, ctx));
-  batches.push(generateTrialAdsCSV(l2Output, ctx));
+  batches.push(generateTrialAdsCSV(l2Output, ctx, rsaCap));
   return batches;
+}
+
+/**
+ * Sanitize a candidate RSA's headlines+descriptions through the
+ * shared validators. Returns the cleaned arrays plus a list of
+ * human-readable "dropped X because Y" messages to append to the
+ * batch's validation_messages so the operator can see exactly
+ * what was filtered (and why).
+ */
+function sanitizeRsaCreative(
+  rawHeadlines: unknown[],
+  rawDescriptions: unknown[],
+  context: string,
+): { headlines: string[]; descriptions: string[]; messages: string[] } {
+  const hr = sanitizeHeadlinesReport(rawHeadlines);
+  const dr = sanitizeDescriptionsReport(rawDescriptions);
+  const messages: string[] = [];
+  for (const d of hr.dropped) {
+    messages.push(`${context}: dropped headline "${d.value}" (${d.reason})`);
+  }
+  for (const d of dr.dropped) {
+    messages.push(
+      `${context}: dropped description "${d.value}" (${d.reason})`,
+    );
+  }
+  return { headlines: hr.kept, descriptions: dr.kept, messages };
 }
 
 /**
@@ -490,8 +529,19 @@ function generateRepairCSV(l2Output: L2PredictionOutput, ctx: SnapshotIndex): CS
         messages.push(`repair skipped for ${adId}: suggested_new_creatives[0] is empty`);
         continue;
       }
-      const headlines = Array.isArray(creative.headlines) ? creative.headlines : [];
-      const descriptions = Array.isArray(creative.descriptions) ? creative.descriptions : [];
+      const rawHeadlines = Array.isArray(creative.headlines) ? creative.headlines : [];
+      const rawDescriptions = Array.isArray(creative.descriptions) ? creative.descriptions : [];
+      // Run the operator-mandated sanitizers FIRST so a single
+      // 31-char headline or URL-bearing description doesn't take
+      // out the whole repair row. Each drop is logged for visibility.
+      const cleaned = sanitizeRsaCreative(
+        rawHeadlines,
+        rawDescriptions,
+        `repair ${adId}`,
+      );
+      for (const m of cleaned.messages) messages.push(m);
+      const headlines = cleaned.headlines;
+      const descriptions = cleaned.descriptions;
       // Repair updates an existing RSA in place. Editor replaces the
       // Headline N / Description N slots we specify and clears the
       // rest, so the row must already satisfy Google's RSA minima
@@ -500,7 +550,7 @@ function generateRepairCSV(l2Output: L2PredictionOutput, ctx: SnapshotIndex): CS
       // than ship a CSV that produces a guaranteed-rejected ad.
       const rsaCheck = checkRsaMinima(headlines, descriptions);
       if (!rsaCheck.ok) {
-        messages.push(`repair skipped for ${adId}: ${rsaCheck.reason}`);
+        messages.push(`repair skipped for ${adId}: ${rsaCheck.reason} (after sanitization)`);
         continue;
       }
 
@@ -545,7 +595,11 @@ function generateRepairCSV(l2Output: L2PredictionOutput, ctx: SnapshotIndex): CS
 /**
  * Generate CSV 003: Replace and new ads
  */
-function generateReplaceCSV(l2Output: L2PredictionOutput, ctx: SnapshotIndex): CSVBatch {
+function generateReplaceCSV(
+  l2Output: L2PredictionOutput,
+  ctx: SnapshotIndex,
+  rsaCap: RsaCapTracker,
+): CSVBatch {
   const rows: CSVRow[] = [];
   const messages: string[] = [];
   let rowNumber = 1;
@@ -567,15 +621,27 @@ function generateReplaceCSV(l2Output: L2PredictionOutput, ctx: SnapshotIndex): C
           messages.push(`replace variant for ${adId} skipped: empty creative entry`);
           continue;
         }
-        const headlines = Array.isArray(creative.headlines) ? creative.headlines : [];
-        const descriptions = Array.isArray(creative.descriptions) ? creative.descriptions : [];
+        const rawHeadlines = Array.isArray(creative.headlines) ? creative.headlines : [];
+        const rawDescriptions = Array.isArray(creative.descriptions) ? creative.descriptions : [];
+        // Sanitize first so over-length / URL-bearing / bad-punct
+        // entries get dropped before we measure minima. Surfacing
+        // why each was dropped is what stops the LLM from learning
+        // the wrong lesson on the next loop.
+        const cleaned = sanitizeRsaCreative(
+          rawHeadlines,
+          rawDescriptions,
+          `replace ${adId}`,
+        );
+        for (const m of cleaned.messages) messages.push(m);
+        const headlines = cleaned.headlines;
+        const descriptions = cleaned.descriptions;
         // Replace creates a brand-new RSA. Below the RSA minima
         // (≥3 headlines, ≥2 descriptions) the resulting row is
         // rejected by Ads Editor on import. Drop with a clear
         // message rather than emit the invalid row.
         const rsaCheck = checkRsaMinima(headlines, descriptions);
         if (!rsaCheck.ok) {
-          messages.push(`replace variant for ${adId} skipped: ${rsaCheck.reason}`);
+          messages.push(`replace variant for ${adId} skipped: ${rsaCheck.reason} (after sanitization)`);
           continue;
         }
         const campaign = knownAd?.campaign_name ?? '';
@@ -584,6 +650,14 @@ function generateReplaceCSV(l2Output: L2PredictionOutput, ctx: SnapshotIndex): C
           messages.push(
             `replace variant for ${adId} skipped: cannot resolve Campaign / Ad group (snapshot lookup failed)`,
           );
+          continue;
+        }
+        // ≤3 RSAs per ad group across the whole bundle (existing +
+        // newly emitted). Google hard limit; over-emit gets the
+        // entire CSV bounced by Ads Editor.
+        const reservation = rsaCap.tryReserve(campaign, adGroup);
+        if (!reservation.ok) {
+          messages.push(`replace variant for ${adId} skipped: ${reservation.reason}`);
           continue;
         }
 
@@ -701,10 +775,68 @@ function generatePauseCSV(l2Output: L2PredictionOutput, ctx: SnapshotIndex): CSV
 /**
  * Generate CSV 005: Create trial ads
  */
-function generateTrialAdsCSV(l2Output: L2PredictionOutput, ctx: SnapshotIndex): CSVBatch {
+function generateTrialAdsCSV(
+  l2Output: L2PredictionOutput,
+  ctx: SnapshotIndex,
+  rsaCap: RsaCapTracker,
+): CSVBatch {
   const rows: CSVRow[] = [];
   const messages: string[] = [];
   let rowNumber = 1;
+
+  // Local helper to keep the control/variant blocks symmetric. Drops
+  // the candidate (with a clear message) on any of: sanitizer kills,
+  // sub-minima after sanitize, hitting the per-ad-group RSA cap.
+  const emitTrialRsa = (
+    raw: unknown,
+    kind: 'control' | 'variant',
+    args: {
+      campaign: string;
+      groupName: string;
+      hypothesis: string;
+      trialId: string;
+    },
+  ): void => {
+    const c = normalizeCreativeLike(raw, ctx);
+    if (!c || c.headlines.length === 0) {
+      messages.push(
+        `${kind} in ${args.groupName} skipped: could not resolve creative from ${JSON.stringify(raw).slice(0, 120)}`,
+      );
+      return;
+    }
+    const cleaned = sanitizeRsaCreative(
+      c.headlines,
+      c.descriptions,
+      `trial-${kind} ${args.groupName}/${c.label || 'unlabelled'}`,
+    );
+    for (const m of cleaned.messages) messages.push(m);
+    const rsaCheck = checkRsaMinima(cleaned.headlines, cleaned.descriptions);
+    if (!rsaCheck.ok) {
+      messages.push(
+        `${kind} in ${args.groupName} skipped (${c.label || 'unlabelled'}): ${rsaCheck.reason} (after sanitization)`,
+      );
+      return;
+    }
+    const reservation = rsaCap.tryReserve(args.campaign, args.groupName);
+    if (!reservation.ok) {
+      messages.push(`${kind} in ${args.groupName} skipped (${c.label || 'unlabelled'}): ${reservation.reason}`);
+      return;
+    }
+    rows.push(
+      buildTrialAdRow({
+        rowNumber: rowNumber++,
+        campaign: args.campaign,
+        groupName: args.groupName,
+        headlines: cleaned.headlines,
+        descriptions: cleaned.descriptions,
+        finalUrl: c.final_url,
+        label: c.label || kind,
+        isControl: kind === 'control',
+        hypothesis: args.hypothesis,
+        trialId: args.trialId,
+      }),
+    );
+  };
 
   for (const family of l2Output.families) {
     for (const trial of family.trial_plans ?? []) {
@@ -722,77 +854,23 @@ function generateTrialAdsCSV(l2Output: L2PredictionOutput, ctx: SnapshotIndex): 
         continue;
       }
       const hypothesis = typeof t.hypothesis === 'string' ? t.hypothesis : '';
+      const trialId = typeof t.trial_id === 'string' ? t.trial_id : groupName;
 
-      // Controls
       const controls =
         ((t as Record<string, unknown>).control_ads as unknown[] | undefined) ??
         ((t as Record<string, unknown>).controls as unknown[] | undefined) ??
         [];
       for (const raw of controls) {
-        const c = normalizeCreativeLike(raw, ctx);
-        if (!c || c.headlines.length === 0) {
-          messages.push(
-            `control in ${groupName} skipped: could not resolve creative from ${JSON.stringify(raw).slice(0, 120)}`,
-          );
-          continue;
-        }
-        // Trial controls / variants are new RSAs. Enforce the
-        // ≥3 headlines / ≥2 descriptions minimum or Ads Editor
-        // (and Google's serving check) rejects them.
-        const rsaCheck = checkRsaMinima(c.headlines, c.descriptions);
-        if (!rsaCheck.ok) {
-          messages.push(`control in ${groupName} skipped (${c.label || 'unlabelled'}): ${rsaCheck.reason}`);
-          continue;
-        }
-        rows.push(
-          buildTrialAdRow({
-            rowNumber: rowNumber++,
-            campaign,
-            groupName,
-            headlines: c.headlines,
-            descriptions: c.descriptions,
-            finalUrl: c.final_url,
-            label: c.label || 'control',
-            isControl: true,
-            hypothesis,
-            trialId: typeof t.trial_id === 'string' ? t.trial_id : groupName,
-          }),
-        );
+        emitTrialRsa(raw, 'control', { campaign, groupName, hypothesis, trialId });
       }
 
-      // Variants
       const variants =
         ((t as Record<string, unknown>).variant_creatives as unknown[] | undefined) ??
         ((t as Record<string, unknown>).variants as unknown[] | undefined) ??
         ((t as Record<string, unknown>).variant_ads as unknown[] | undefined) ??
         [];
       for (const raw of variants) {
-        const c = normalizeCreativeLike(raw, ctx);
-        if (!c || c.headlines.length === 0) {
-          messages.push(
-            `variant in ${groupName} skipped: could not resolve creative from ${JSON.stringify(raw).slice(0, 120)}`,
-          );
-          continue;
-        }
-        const rsaCheck = checkRsaMinima(c.headlines, c.descriptions);
-        if (!rsaCheck.ok) {
-          messages.push(`variant in ${groupName} skipped (${c.label || 'unlabelled'}): ${rsaCheck.reason}`);
-          continue;
-        }
-        rows.push(
-          buildTrialAdRow({
-            rowNumber: rowNumber++,
-            campaign,
-            groupName,
-            headlines: c.headlines,
-            descriptions: c.descriptions,
-            finalUrl: c.final_url,
-            label: c.label || 'variant',
-            isControl: false,
-            hypothesis,
-            trialId: typeof t.trial_id === 'string' ? t.trial_id : groupName,
-          }),
-        );
+        emitTrialRsa(raw, 'variant', { campaign, groupName, hypothesis, trialId });
       }
     }
   }
