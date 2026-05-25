@@ -5,6 +5,7 @@ import { getAppBasePath } from './paths.js'
 import { AppShell } from '../components/AppShell.js'
 import { loadSession } from './session.js'
 import { AdsIngestPage } from '../routes/ads/AdsIngestPage.js'
+import { CatalogEdibleThcClampPage, catalogEdibleThcClampLoader } from '../routes/catalog/CatalogEdibleThcClampPage.js'
 import { CatalogHistoryPage, catalogHistoryLoader } from '../routes/catalog/CatalogHistoryPage.js'
 import { CatalogMaintenanceIndexPage } from '../routes/catalog/CatalogMaintenanceIndexPage.js'
 import { CatalogMaintenancePage } from '../routes/catalog/CatalogMaintenancePage.js'
@@ -142,6 +143,11 @@ export const router = createBrowserRouter([
       {
         element: <CatalogMaintenancePage />,
         path: 'catalog/maintenance/site/:siteKey',
+      },
+      {
+        element: <CatalogEdibleThcClampPage />,
+        loader: catalogEdibleThcClampLoader,
+        path: 'catalog/edible-thc-clamp',
       },
       {
         element: <CatalogNewEntryPage />,

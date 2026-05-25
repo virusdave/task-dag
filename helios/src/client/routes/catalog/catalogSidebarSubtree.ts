@@ -148,6 +148,20 @@ export function buildCatalogSidebarSubtree(options?: CatalogSidebarOptions): Tre
     buildImagesAndBarcodesNode(imagesAndBarcodes),
     {
       kind: 'leaf',
+      // Edible THC clamp lives in the same catalog-maintenance vein as
+      // Images & Barcodes — both are floor-operator-driven catalog fixups
+      // that shouldn't live under config/workers/scheduling alongside the
+      // background-task editor pages. The page itself just triggers the
+      // shared `config.workers.edible_thc_clamp` job (which also runs on
+      // a 15-minute scheduler) so daily-purchase-limit miscalcs from
+      // name-derived totals over 100mg/package get corrected even if no
+      // operator is watching.
+      navKey: 'catalog.edible-thc-clamp',
+      label: 'Edible THC clamp',
+      to: buildHeliosModulePath('catalog', 'edible-thc-clamp'),
+    },
+    {
+      kind: 'leaf',
       navKey: 'catalog.new-entry',
       label: 'New entry',
       to: buildHeliosModulePath('catalog', 'new-entry'),

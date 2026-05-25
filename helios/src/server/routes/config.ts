@@ -163,6 +163,10 @@ export async function registerConfigRoutes(server: FastifyInstance): Promise<voi
         const jobId = await runNowCatalogRefresh(user.id)
         return reply.send(ConfigBackgroundTaskRunNowResponseSchema.parse({ jobId }))
       }
+      if (taskKey === 'workers.scheduling.edible_thc_clamp') {
+        const jobId = await runNowEdibleThcClamp(user.id)
+        return reply.send(ConfigBackgroundTaskRunNowResponseSchema.parse({ jobId }))
+      }
 
       return reply.status(400).send({
         error: `Background task ${taskKey} has no run-now wiring yet.`,
@@ -320,4 +324,44 @@ async function runNowCatalogRefresh(userId: number): Promise<number> {
 async function buildCatalogTaskDetail() {
   const recentSnapshots = await loadRecentCatalogTaxonomySnapshots(20)
   return { recentSnapshots }
+}
+
+async function runNowEdibleThcClamp(userId: number): Promise<number> {
+  const siteDealerIds = HELIOS_PENDING_PURCHASE_SITE_DEALERS.map((site) => site.dealerId)
+  const enqueuedAt = new Date()
+  return withTransaction(async (db) => {
+    const newJobId = await enqueueJob(db, {
+      concurrencyKey: getOptionalSweedSessionConcurrencyKey(true),
+      dedupeKey: `config.workers.edible_thc_clamp:manual:${enqueuedAt.toISOString().slice(0, 16)}`,
+      jobType: 'config.workers.edible_thc_clamp',
+      module: 'config',
+      payload: {
+        requestedByUserId: userId,
+        siteDealerIds,
+        trigger: 'manual_run',
+      },
+      requestedByUserId: userId,
+      runAt: enqueuedAt,
+      scope: null,
+    })
+
+    await recordConfigScheduleEnqueue(db, 'workers.scheduling.edible_thc_clamp', newJobId, enqueuedAt)
+    await appendAuditEvent(db, {
+      actorType: 'user',
+      actorUserId: userId,
+      entityId: String(newJobId),
+      entityType: 'job',
+      eventType: 'config.workers.edible_thc_clamp.requested',
+      module: 'config',
+      payload: {
+        siteDealerIds,
+        taskKey: 'workers.scheduling.edible_thc_clamp',
+        trigger: 'manual_run',
+      },
+      requestId: null,
+      scope: null,
+      undoPayload: null,
+    })
+    return newJobId
+  })
 }

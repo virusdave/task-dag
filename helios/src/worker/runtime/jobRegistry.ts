@@ -7,6 +7,7 @@ import {
   CatalogSyncDiscoverOrphanGroupsJobPayloadSchema,
   CatalogSyncFullSummaryJobPayloadSchema,
   ConfigWorkersCatalogRefreshJobPayloadSchema,
+  ConfigWorkersEdibleThcClampJobPayloadSchema,
   ConfigWorkersLitalertsRefreshVariantJobPayloadSchema,
   ConfigWorkersMarketEvidenceAlarmScanJobPayloadSchema,
   ConfigWorkersStockRefreshJobPayloadSchema,
@@ -36,6 +37,7 @@ import { runCatalogPendingPurchasesGenerateJob } from '../jobs/generatePendingPu
 import { runCatalogReviewRerunRowJob } from '../jobs/catalogReviewRerunRowJob.js'
 import { runCatalogPendingPurchasesImportJob } from '../jobs/importPendingPurchasePacketJob.js'
 import { runConfigWorkersCatalogRefreshJob } from '../jobs/configWorkersCatalogRefreshJob.js'
+import { runConfigWorkersEdibleThcClampJob } from '../jobs/configWorkersEdibleThcClampJob.js'
 import { runConfigWorkersLitalertsRefreshVariantJob } from '../jobs/configWorkersLitalertsRefreshJob.js'
 import { runConfigWorkersMarketEvidenceAlarmScanJob } from '../jobs/configWorkersMarketEvidenceAlarmScanJob.js'
 import { runConfigWorkersStockRefreshJob } from '../jobs/configWorkersStockRefreshJob.js'
@@ -171,6 +173,12 @@ const handlers: Record<JobType, JobHandler> = {
       ConfigWorkersMarketEvidenceAlarmScanJobPayloadSchema.parse(context.payload),
     )
   },
+  'config.workers.edible_thc_clamp': async (context) => {
+    await runConfigWorkersEdibleThcClampJob(
+      context,
+      ConfigWorkersEdibleThcClampJobPayloadSchema.parse(context.payload),
+    )
+  },
 }
 
 /**
@@ -197,6 +205,7 @@ const SWEED_BACKED_JOB_TYPES: ReadonlySet<JobType> = new Set<JobType>([
   'catalog.sync.group_detail',
   'catalog.sync.discover_orphan_groups',
   'config.workers.catalog_refresh',
+  'config.workers.edible_thc_clamp',
   'config.workers.stock_refresh',
   'reconcile.group',
   'screens.banner_refresh',

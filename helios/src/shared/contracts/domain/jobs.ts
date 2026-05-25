@@ -42,6 +42,7 @@ export const JobTypeSchema = z.enum([
   'config.workers.litalerts_refresh.variant',
   'config.workers.catalog_refresh',
   'config.workers.market_evidence_alarm_scan',
+  'config.workers.edible_thc_clamp',
   'catalog.maintenance.upload_group_image',
 ])
 export type JobType = z.infer<typeof JobTypeSchema>
@@ -246,6 +247,24 @@ export const ConfigWorkersMarketEvidenceAlarmScanJobPayloadSchema = z.object({
 })
 export type ConfigWorkersMarketEvidenceAlarmScanJobPayload = z.infer<
   typeof ConfigWorkersMarketEvidenceAlarmScanJobPayloadSchema
+>
+
+/**
+ * Periodic edible THC clamp sweep. Walks Bronx + Midtown (the two
+ * pending-purchase site dealers) for category 7459 ("Edibles") and
+ * rewrites each in-stock variant's `extendedLabData.totalTHC` so the
+ * `contentPerProduct` is clamped at 100 mg/package (and
+ * `contentPerUnit` is scaled accordingly). The job logic dedupes per
+ * item against the current Sweed lab data, so repeated 15-minute ticks
+ * are cheap noops once the catalog has been corrected.
+ */
+export const ConfigWorkersEdibleThcClampJobPayloadSchema = z.object({
+  requestedByUserId: z.number().int().positive().nullable().optional(),
+  siteDealerIds: z.array(z.number().int().positive()).default([]),
+  trigger: z.enum(['manual_run', 'scheduled']).default('scheduled'),
+})
+export type ConfigWorkersEdibleThcClampJobPayload = z.infer<
+  typeof ConfigWorkersEdibleThcClampJobPayloadSchema
 >
 
 /**

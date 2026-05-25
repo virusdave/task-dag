@@ -12,6 +12,7 @@ import { z } from 'zod'
  */
 export const CONFIG_BACKGROUND_TASK_KEYS = [
   'workers.scheduling.catalog',
+  'workers.scheduling.edible_thc_clamp',
   'workers.scheduling.litalerts',
   'workers.scheduling.litalerts_rolling',
   'workers.scheduling.market_evidence_alarm',
@@ -37,6 +38,13 @@ export const CONFIG_BACKGROUND_TASKS: ReadonlyArray<ConfigBackgroundTaskDefiniti
     slug: 'catalog',
     implemented: true,
     summary: 'Periodic state-level catalog taxonomy snapshot (product, variant, brand, category, subcategory, strain, prevalence, size, distributor) so downstream Helios surfaces stay aligned with live Sweed taxonomy.',
+  },
+  {
+    key: 'workers.scheduling.edible_thc_clamp',
+    label: 'Edible THC clamp',
+    slug: 'edible-thc-clamp',
+    implemented: true,
+    summary: 'Periodically scans Bronx + Midtown edibles (category 7459) and clamps each in-stock variant\'s Total THC (labDataAttributeId=1) lab data at 100mg/package — fixes Sweed\'s daily-purchase-limit calc when name-derived totals exceed the legal cap.',
   },
   {
     key: 'workers.scheduling.litalerts',
@@ -180,6 +188,24 @@ export const MARKET_EVIDENCE_ALARM_DEFAULT_SCHEDULE_WINDOWS: ReadonlyArray<Omit<
     intervalMinutes: 15,
     paused: false,
     notes: 'Scan freshness view for alarm-class products with stale/expired/absent evidence every 15 minutes.',
+  },
+]
+
+/**
+ * Default schedule for the edible THC clamp sweep. Runs every 15 minutes;
+ * the scan is bounded (only category 7459 in two site dealers, only
+ * in-stock lots) and the worker dedupes per item against the current
+ * lab data, so consecutive ticks are cheap noops once the catalog has
+ * been corrected.
+ */
+export const EDIBLE_THC_CLAMP_DEFAULT_SCHEDULE_WINDOWS: ReadonlyArray<Omit<ConfigWorkerScheduleWindow, 'id'>> = [
+  {
+    weekdayMask: WEEKDAY_MASK_ALL,
+    windowStartMinute: 0,
+    windowEndMinute: 1440,
+    intervalMinutes: 15,
+    paused: false,
+    notes: 'Clamp every in-stock edible variant\'s THC lab data to <=100 mg/package every 15 minutes.',
   },
 ]
 

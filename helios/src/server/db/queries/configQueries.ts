@@ -3,6 +3,7 @@ import type { QueryResultRow } from 'pg'
 import {
   CATALOG_DEFAULT_SCHEDULE_WINDOWS,
   CONFIG_BACKGROUND_TASKS,
+  EDIBLE_THC_CLAMP_DEFAULT_SCHEDULE_WINDOWS,
   LITALERTS_DEFAULT_SCHEDULE_WINDOWS,
   LITALERTS_ROLLING_DEFAULT_SCHEDULE_WINDOWS,
   MARKET_EVIDENCE_ALARM_DEFAULT_SCHEDULE_WINDOWS,
@@ -142,6 +143,7 @@ const DEFAULT_WINDOWS_BY_TASK_KEY: Partial<
   'workers.scheduling.litalerts_rolling': LITALERTS_ROLLING_DEFAULT_SCHEDULE_WINDOWS,
   'workers.scheduling.market_evidence_alarm': MARKET_EVIDENCE_ALARM_DEFAULT_SCHEDULE_WINDOWS,
   'workers.scheduling.catalog': CATALOG_DEFAULT_SCHEDULE_WINDOWS,
+  'workers.scheduling.edible_thc_clamp': EDIBLE_THC_CLAMP_DEFAULT_SCHEDULE_WINDOWS,
 }
 
 export async function ensureDefaultConfigSchedules(db: Queryable = getPool()): Promise<void> {
