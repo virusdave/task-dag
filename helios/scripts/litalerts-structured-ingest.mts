@@ -67,6 +67,29 @@ async function main(): Promise<void> {
     const brands = await listBrandsForState(stateCode)
     console.log(`[run #${runId}] saw ${brands.length} brands`)
 
+    // Resume-aware: if a previous crawl was interrupted, skip the
+    // brands that already have rows in litalerts_products from the
+    // last RESUME_WINDOW_HOURS. The schema is append-only snapshots
+    // so re-crawling a brand twice is harmless but slow; skipping
+    // lets a killed-then-restarted run pick up where it left off
+    // instead of redoing everything. Pass RESUME=false to force a
+    // full re-crawl.
+    const resumeWindowHours = Number(process.env.LITALERTS_INGEST_RESUME_HOURS ?? '6')
+    const resumeEnabled = (process.env.RESUME ?? 'true').toLowerCase() !== 'false'
+    let skipBrandIds = new Set<number>()
+    if (resumeEnabled) {
+      const skipResult = await pool.query<{ brand_id: string }>(
+        `select distinct brand_id::text as brand_id
+           from litalerts_products
+           where state_code = $1
+             and observed_at > now() - ($2::int || ' hours')::interval
+             and brand_id is not null`,
+        [stateCode, resumeWindowHours],
+      )
+      skipBrandIds = new Set(skipResult.rows.map((r) => Number(r.brand_id)))
+      console.log(`[run #${runId}] resume: ${skipBrandIds.size} brands already crawled in the last ${resumeWindowHours}h — will skip`)
+    }
+
     // Upsert the brand directory snapshot.
     const brandUpsert = await pool.connect()
     try {
@@ -101,9 +124,15 @@ async function main(): Promise<void> {
     let categoryFallbacks = 0
     let subcategoryFallbacks = 0
     const categoryCounts: Record<string, number> = {}
-    const concurrency = Number(process.env.LITALERTS_INGEST_CONCURRENCY ?? '384')
+    const concurrency = Number(process.env.LITALERTS_INGEST_CONCURRENCY ?? '96')
     const maxAttempts = Number(process.env.LITALERTS_INGEST_MAX_ATTEMPTS ?? '5')
     const baseBackoffMs = Number(process.env.LITALERTS_INGEST_BACKOFF_BASE_MS ?? '500')
+    // Per-brand wall-clock budget. The category/subcategory fallback
+    // path can otherwise wedge for tens of minutes on a single brand
+    // if the upstream keeps 503-ing every cell. After this elapses we
+    // surrender on the brand for THIS run and move on; the next crawl
+    // will retry with fresh upstream state.
+    const brandDeadlineMs = Number(process.env.LITALERTS_INGEST_BRAND_DEADLINE_MS ?? `${5 * 60 * 1000}`)
 
     // Prefetch the global category list so the fallback path can split
     // a "too big" brand fetch into per-category requests without making
@@ -234,6 +263,8 @@ async function main(): Promise<void> {
     }
 
     async function fetchBrandProductsWithRetry(brand: { id: number; name: string }): Promise<LitAlertsProduct[]> {
+      const deadline = Date.now() + brandDeadlineMs
+      const haveTime = (): boolean => Date.now() < deadline
       try {
         return await retryFetch(
           () => listBrandProducts(brand.id, { stateCode, includeOutOfStock: true }),
@@ -242,27 +273,24 @@ async function main(): Promise<void> {
       } catch {
         // Full-brand fetch keeps timing out (likely too many products
         // for the endpoint to materialize within 30s). Fall back to
-        // per-category fanout and aggregate the union.
+        // per-category fanout and aggregate the union. Stop fanout
+        // when we exceed the per-brand deadline so a single sick brand
+        // can't wedge the whole run.
         categoryFallbacks += 1
         if (categoryList.length === 0) throw new Error(`brand ${brand.id}: full fetch failed and no categories available for fallback`)
         const aggregate = new Map<number, LitAlertsProduct>()
-        const results = await Promise.all(
-          categoryList.map(async (cat) => {
-            try {
-              return await fetchBrandProductsByCategory(brand, cat)
-            } catch (err) {
-              console.warn(
-                `[run #${runId}] brand ${brand.id} cat=${cat} skipped: ${err instanceof Error ? err.message : String(err)}`,
-              )
-              return [] as LitAlertsProduct[]
-            }
-          }),
-        )
-        for (const bucket of results) {
-          for (const p of bucket) {
-            // Dedupe by product id — a product belongs to a single
-            // category in practice, but defend against duplicates.
-            if (!aggregate.has(p.id)) aggregate.set(p.id, p)
+        for (const cat of categoryList) {
+          if (!haveTime()) {
+            console.warn(`[run #${runId}] brand ${brand.id}: deadline hit before category ${cat}; partial save with ${aggregate.size} rows`)
+            break
+          }
+          try {
+            const bucket = await fetchBrandProductsByCategory(brand, cat)
+            for (const p of bucket) if (!aggregate.has(p.id)) aggregate.set(p.id, p)
+          } catch (err) {
+            console.warn(
+              `[run #${runId}] brand ${brand.id} cat=${cat} skipped: ${err instanceof Error ? err.message : String(err)}`,
+            )
           }
         }
         if (aggregate.size === 0) throw new Error(`brand ${brand.id}: full + per-category fallback both produced 0 rows`)
@@ -271,11 +299,17 @@ async function main(): Promise<void> {
     }
 
     let cursor = 0
+    let skipped = 0
     async function worker(): Promise<void> {
       while (true) {
         const i = cursor++
         if (i >= brands.length) return
         const brand = brands[i]
+        if (skipBrandIds.has(brand.id)) {
+          skipped += 1
+          processed += 1
+          continue
+        }
         let products: LitAlertsProduct[]
         try {
           products = await fetchBrandProductsWithRetry(brand)
@@ -357,7 +391,7 @@ async function main(): Promise<void> {
         processed += 1
         if (processed % 25 === 0 || processed === brands.length) {
           console.log(
-            `[run #${runId}] (${processed}/${brands.length}) processed; products=${productsSeen} configs=${configRowsWritten} fetch-failures=${fetchFailures} retries=${retries} cat-fallbacks=${categoryFallbacks} sub-fallbacks=${subcategoryFallbacks}`,
+            `[run #${runId}] (${processed}/${brands.length}) processed; skipped(resume)=${skipped} products=${productsSeen} configs=${configRowsWritten} fetch-failures=${fetchFailures} retries=${retries} cat-fallbacks=${categoryFallbacks} sub-fallbacks=${subcategoryFallbacks}`,
           )
         }
       }
