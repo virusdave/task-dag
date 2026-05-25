@@ -17,6 +17,13 @@ export {
   ParsedProductNameSchema,
   type ParsedProductName,
 } from './contracts/pendingPurchases.js'
+export {
+  litalertsContract,
+  litalertsOutputFields,
+  FuzzyVariantDescriptorSchema,
+  type FuzzyVariantDescriptor,
+} from './contracts/litalerts.js'
 
 // Dialect packs
 export { metrcV1Dialect } from './dialects/metrc-v1.js'
+export { litalertsV1Dialect } from './dialects/litalerts-v1.js'
