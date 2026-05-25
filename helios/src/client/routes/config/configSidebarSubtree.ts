@@ -50,6 +50,12 @@ export function buildConfigSidebarSubtree(): TreeNavNode[] {
           label: 'Purchases',
           to: buildHeliosModulePath('config', 'parsing/pending-purchases'),
         },
+        {
+          kind: 'leaf',
+          navKey: 'config.parsing.litalerts',
+          label: 'LitAlerts',
+          to: buildHeliosModulePath('config', 'parsing/litalerts'),
+        },
       ],
     },
     {

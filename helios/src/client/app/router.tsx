@@ -24,6 +24,10 @@ import { ConfigCatalogSchedulePage, configCatalogScheduleLoader } from '../route
 import { ConfigLitalertsSchedulePage, configLitalertsScheduleLoader } from '../routes/config/ConfigLitalertsSchedulePage.js'
 import { ConfigStockSchedulePage, configStockScheduleLoader } from '../routes/config/ConfigStockSchedulePage.js'
 import {
+  ConfigParsingLitalertsPage,
+  configParsingLitalertsLoader,
+} from '../routes/config/ConfigParsingLitalertsPage.js'
+import {
   ConfigParsingPendingPurchasesPage,
   configParsingPendingPurchasesLoader,
 } from '../routes/config/ConfigParsingPendingPurchasesPage.js'
@@ -326,6 +330,11 @@ export const router = createBrowserRouter([
         element: <ConfigParsingPendingPurchasesPage />,
         loader: configParsingPendingPurchasesLoader,
         path: 'config/parsing/pending-purchases',
+      },
+      {
+        element: <ConfigParsingLitalertsPage />,
+        loader: configParsingLitalertsLoader,
+        path: 'config/parsing/litalerts',
       },
       {
         element: <UsersPage />,
