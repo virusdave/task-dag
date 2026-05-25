@@ -180,60 +180,60 @@ export function ConfigParsingLitalertsPage(): JSX.Element {
             ) : (
               <>
                 <h3 style={{ marginTop: 0 }}>{selectedCompetitor}</h3>
+
+                <section style={{ marginBottom: '1rem', padding: '0.75rem', border: '1px solid rgba(0,0,0,0.08)', borderRadius: '4px', background: 'rgba(0,0,0,0.02)' }}>
+                  <h4 style={{ marginTop: 0, marginBottom: '0.25rem' }}>LLM chat</h4>
+                  <p className="subtle-copy" style={{ marginTop: 0 }}>
+                    Describe an inadequacy in how this competitor&rsquo;s listings are parsed. The model sees the focused rows
+                    (selected below, or the top 12 if none) plus the live parser output, then proposes a JSONC patch and
+                    optional new goldens against <code>helios-parser-configs</code>.
+                  </p>
+                  <textarea
+                    onChange={(e) => setChatPrompt(e.currentTarget.value)}
+                    placeholder="e.g. Listings like 'AIO - Pink Rozay - 0.5g' are losing the brand 'Ayrloom' because brand is not a separate field. Suggest a rule that extracts the brand from the first capitalized token before the first hyphen."
+                    rows={3}
+                    style={{ width: '100%', fontFamily: 'inherit' }}
+                    value={chatPrompt}
+                  />
+                  <div className="inline-row wrap-row" style={{ marginTop: '0.5rem' }}>
+                    <button
+                      className="ghost-button"
+                      disabled={chatLoading || !chatPrompt.trim()}
+                      onClick={askLlm}
+                      type="button"
+                    >
+                      {chatLoading ? 'Asking…' : 'Ask LLM'}
+                    </button>
+                    <span className="subtle-copy">
+                      {selectedHashes.size > 0
+                        ? `${selectedHashes.size} row(s) selected as focus`
+                        : 'No rows selected — model sees the top 12 most-recent rows'}
+                    </span>
+                  </div>
+                  {chatError ? <p className="error-banner" style={{ marginTop: '0.5rem' }}>{chatError}</p> : null}
+                  {chatResponse ? (
+                    <div style={{ marginTop: '0.75rem', padding: '0.75rem', background: 'rgba(0,0,0,0.04)' }}>
+                      <p style={{ margin: 0 }}><strong>Rationale</strong></p>
+                      <p style={{ whiteSpace: 'pre-wrap', margin: '0.25rem 0 0.75rem' }}>{chatResponse.rationale}</p>
+                      <p style={{ margin: 0 }}><strong>Suggested patch</strong></p>
+                      <pre style={{ whiteSpace: 'pre-wrap', overflowX: 'auto', margin: '0.25rem 0' }}>{chatResponse.patch}</pre>
+                      {chatResponse.newGoldensSuggested.length > 0 ? (
+                        <details style={{ marginTop: '0.5rem' }}>
+                          <summary>{chatResponse.newGoldensSuggested.length} new golden(s) suggested</summary>
+                          <pre style={{ whiteSpace: 'pre-wrap' }}>{JSON.stringify(chatResponse.newGoldensSuggested, null, 2)}</pre>
+                        </details>
+                      ) : null}
+                      <p className="subtle-copy" style={{ marginTop: '0.5rem' }}>
+                        model: <code>{chatResponse.modelRef}</code>
+                      </p>
+                    </div>
+                  ) : null}
+                </section>
+
                 {error ? <p className="error-banner">{error}</p> : null}
                 {loadingSample ? <p className="subtle-copy">Loading sample…</p> : null}
                 {sample ? (
                   <SampleTable sample={sample} selectedHashes={selectedHashes} onToggleHash={toggleHash} />
-                ) : null}
-
-                <h4 style={{ marginTop: '1.5rem' }}>LLM chat (advisory)</h4>
-                <p className="subtle-copy">
-                  Describe an inadequacy in how this competitor&rsquo;s listings are parsed. The model
-                  (<code>{'google.gemma-3-27b-it'}</code> via Bedrock-mantle) sees the current parser
-                  output for the focused rows and replies with a JSONC patch suggestion plus rationale.
-                  <strong> Suggestions are not auto-applied</strong> — L5 git commit-and-push is a
-                  future epic. For now, copy any useful change into the <code>helios-parser-configs</code>
-                  repo by hand.
-                </p>
-                <textarea
-                  onChange={(e) => setChatPrompt(e.currentTarget.value)}
-                  placeholder="e.g. Listings like 'AIO - Pink Rozay - 0.5g' are losing the brand 'Ayrloom' because brand is not a separate field. Suggest a rule that extracts the brand from the first capitalized token before the first hyphen."
-                  rows={4}
-                  style={{ width: '100%', fontFamily: 'inherit' }}
-                  value={chatPrompt}
-                />
-                <div className="inline-row wrap-row" style={{ marginTop: '0.5rem' }}>
-                  <button
-                    className="ghost-button"
-                    disabled={chatLoading || !chatPrompt.trim()}
-                    onClick={askLlm}
-                    type="button"
-                  >
-                    {chatLoading ? 'Asking…' : 'Ask LLM'}
-                  </button>
-                  <span className="subtle-copy">
-                    {selectedHashes.size > 0
-                      ? `${selectedHashes.size} row(s) selected as focus`
-                      : 'No rows selected — model sees the top 12 most-recent rows'}
-                  </span>
-                </div>
-                {chatError ? <p className="error-banner" style={{ marginTop: '0.5rem' }}>{chatError}</p> : null}
-                {chatResponse ? (
-                  <div style={{ marginTop: '1rem', padding: '0.75rem', background: 'rgba(0,0,0,0.04)' }}>
-                    <p style={{ margin: 0 }}><strong>Rationale</strong></p>
-                    <p style={{ whiteSpace: 'pre-wrap', margin: '0.25rem 0 0.75rem' }}>{chatResponse.rationale}</p>
-                    <p style={{ margin: 0 }}><strong>Suggested patch</strong></p>
-                    <pre style={{ whiteSpace: 'pre-wrap', overflowX: 'auto', margin: '0.25rem 0' }}>{chatResponse.patch}</pre>
-                    {chatResponse.newGoldensSuggested.length > 0 ? (
-                      <details style={{ marginTop: '0.5rem' }}>
-                        <summary>{chatResponse.newGoldensSuggested.length} new golden(s) suggested</summary>
-                        <pre style={{ whiteSpace: 'pre-wrap' }}>{JSON.stringify(chatResponse.newGoldensSuggested, null, 2)}</pre>
-                      </details>
-                    ) : null}
-                    <p className="subtle-copy" style={{ marginTop: '0.5rem' }}>
-                      model: <code>{chatResponse.modelRef}</code>
-                    </p>
-                  </div>
                 ) : null}
               </>
             )}
