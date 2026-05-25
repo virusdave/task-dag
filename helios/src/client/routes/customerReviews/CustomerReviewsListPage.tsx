@@ -11,11 +11,11 @@
 // methodology / phase-status / capture-disabled explainer is
 // collapsed inside <details>.
 
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Link, useLoaderData, useRevalidator } from 'react-router-dom'
 
 import {
-  CustomerReviewCandidatePurchasesResponseSchema,
+  CustomerReviewCandidatePurchasesBulkResponseSchema,
   CustomerReviewListResponseSchema,
   type CustomerReviewEmailRow,
   type CustomerReviewListItem,
@@ -102,102 +102,98 @@ function candidateSummaryLine(c: CustomerReviewPurchaseCandidate): string {
   return bits.join(' · ')
 }
 
-// Contacts cell for the list row. When empty, exposes a collapsed
-// <details> that on-open fetches the time-proximity-ranked invoice
-// candidates from /candidate-purchases and lets the operator add a
-// chosen client to a per-site segment without leaving the list.
+// Contacts cell for the list row. When item.contacts is empty, we
+// render the bulk-prefetched candidates (or a loading / empty / error
+// state) inline alongside the "— (no contact captured)" hint.
 function ContactsCell(props: {
   item: CustomerReviewListItem
   state: CandidateState | undefined
-  onLoad: () => void
+  bulkLoading: boolean
+  bulkError: string | null
   onAdd: (
     candidate: CustomerReviewPurchaseCandidate,
     segment: SegmentKindContract,
   ) => void
 }) {
-  const { item, state, onLoad, onAdd } = props
+  const { item, state, bulkLoading, bulkError, onAdd } = props
   if (item.contacts.length > 0) {
     return <span>{summarizeContacts(item)}</span>
   }
+  const candidates = state?.candidates ?? null
   return (
-    <details
-      onToggle={(e) => {
-        const open = (e.target as HTMLDetailsElement).open
-        if (open && state?.candidates === null && !state?.loading) onLoad()
-      }}
-    >
-      <summary style={{ cursor: 'pointer' }}>
-        <span className="subtle-copy">— (no contact captured)</span>{' '}
-        <span style={{ fontSize: '0.85em' }}>· find candidate purchase</span>
-      </summary>
+    <div>
+      <div className="subtle-copy">— (no contact captured)</div>
       <div style={{ marginTop: '0.35rem', fontSize: '0.85em' }}>
-        {state?.loading && <span className="subtle-copy">Looking up Sweed invoices…</span>}
-        {state?.error !== undefined && state?.error !== null && (
-          <span style={{ color: '#b91c1c' }}>{state.error}</span>
+        {candidates === null && bulkLoading && (
+          <span className="subtle-copy">Looking up Sweed invoices…</span>
         )}
-        {state?.candidates !== undefined &&
-          state?.candidates !== null &&
-          state.candidates.length === 0 && (
-            <span className="subtle-copy">
-              No invoices found within ±30 min of the submission.
-            </span>
-          )}
-        {state?.candidates !== undefined &&
-          state?.candidates !== null &&
-          state.candidates.length > 0 && (
-            <ul style={{ margin: 0, paddingLeft: '1rem' }}>
-              {state.candidates.map((c, idx) => {
-                const busyDraw =
-                  state.busyKey === `${item.submissionId}::${c.clientId}::drawing`
-                const busyFree =
-                  state.busyKey === `${item.submissionId}::${c.clientId}::free_preroll`
-                const anyBusy = state.busyKey !== null
-                return (
-                  <li
-                    key={`${c.invoiceId ?? c.clientId ?? idx}`}
-                    style={{ marginBottom: '0.4rem' }}
-                  >
-                    <Pill tone={confidenceTone(c.confidence)}>
-                      {`${Math.round(c.confidence * 100)}%`}
-                    </Pill>
-                    {idx === 0 && (
-                      <span style={{ marginLeft: '0.25rem', fontSize: '0.9em' }}>
-                        ★ closest
-                      </span>
-                    )}{' '}
-                    <span>{candidateSummaryLine(c)}</span>
-                    <div className="subtle-copy" style={{ fontSize: '0.85em' }}>
-                      {formatDeltaSeconds(c.deltaSeconds)}
-                      {c.total !== null ? ` · $${c.total.toFixed(2)}` : ''}
-                      {c.invoiceId ? ` · invoice ${c.invoiceId}` : ''}
+        {candidates === null && !bulkLoading && bulkError !== null && (
+          <span style={{ color: '#b91c1c' }}>{bulkError}</span>
+        )}
+        {candidates !== null && candidates.length === 0 && (
+          <span className="subtle-copy">
+            No invoices found within ±30 min of the submission.
+          </span>
+        )}
+        {candidates !== null && candidates.length > 0 && (
+          <ul style={{ margin: 0, paddingLeft: '1rem' }}>
+            {candidates.map((c, idx) => {
+              const busyDraw =
+                state?.busyKey === `${item.submissionId}::${c.clientId}::drawing`
+              const busyFree =
+                state?.busyKey === `${item.submissionId}::${c.clientId}::free_preroll`
+              const anyBusy = state?.busyKey !== null && state?.busyKey !== undefined
+              return (
+                <li
+                  key={`${c.invoiceId ?? c.clientId ?? idx}`}
+                  style={{ marginBottom: '0.4rem' }}
+                >
+                  <Pill tone={confidenceTone(c.confidence)}>
+                    {`${Math.round(c.confidence * 100)}%`}
+                  </Pill>
+                  {idx === 0 && (
+                    <span style={{ marginLeft: '0.25rem', fontSize: '0.9em' }}>
+                      ★ closest
+                    </span>
+                  )}{' '}
+                  <span>{candidateSummaryLine(c)}</span>
+                  <div className="subtle-copy" style={{ fontSize: '0.85em' }}>
+                    {formatDeltaSeconds(c.deltaSeconds)}
+                    {c.total !== null ? ` · $${c.total.toFixed(2)}` : ''}
+                    {c.invoiceId ? ` · invoice ${c.invoiceId}` : ''}
+                  </div>
+                  <div style={{ marginTop: '0.15rem' }}>
+                    <button
+                      type="button"
+                      className="ghost-button"
+                      style={{ fontSize: '0.85em', marginRight: '0.25rem' }}
+                      disabled={anyBusy || c.clientId === null}
+                      onClick={() => onAdd(c, 'drawing')}
+                    >
+                      {busyDraw ? 'Adding…' : 'Add to drawing'}
+                    </button>
+                    <button
+                      type="button"
+                      className="ghost-button"
+                      style={{ fontSize: '0.85em' }}
+                      disabled={anyBusy || c.clientId === null}
+                      onClick={() => onAdd(c, 'free_preroll')}
+                    >
+                      {busyFree ? 'Adding…' : 'Add to free-preroll'}
+                    </button>
+                  </div>
+                  {state?.error !== undefined && state?.error !== null && (
+                    <div style={{ color: '#b91c1c', fontSize: '0.85em' }}>
+                      {state.error}
                     </div>
-                    <div style={{ marginTop: '0.15rem' }}>
-                      <button
-                        type="button"
-                        className="ghost-button"
-                        style={{ fontSize: '0.85em', marginRight: '0.25rem' }}
-                        disabled={anyBusy || c.clientId === null}
-                        onClick={() => onAdd(c, 'drawing')}
-                      >
-                        {busyDraw ? 'Adding…' : 'Add to drawing'}
-                      </button>
-                      <button
-                        type="button"
-                        className="ghost-button"
-                        style={{ fontSize: '0.85em' }}
-                        disabled={anyBusy || c.clientId === null}
-                        onClick={() => onAdd(c, 'free_preroll')}
-                      >
-                        {busyFree ? 'Adding…' : 'Add to free-preroll'}
-                      </button>
-                    </div>
-                  </li>
-                )
-              })}
-            </ul>
-          )}
+                  )}
+                </li>
+              )
+            })}
+          </ul>
+        )}
       </div>
-    </details>
+    </div>
   )
 }
 
@@ -276,43 +272,56 @@ export function CustomerReviewsListPage() {
   const [candidatesBySubmission, setCandidatesBySubmission] = useState<
     Record<string, CandidateState>
   >({})
+  const [bulkLoading, setBulkLoading] = useState(false)
+  const [bulkError, setBulkError] = useState<string | null>(null)
 
-  const loadCandidates = async (submissionId: string) => {
-    setCandidatesBySubmission((prev) => ({
-      ...prev,
-      [submissionId]: {
-        loading: true,
-        error: null,
-        candidates: prev[submissionId]?.candidates ?? null,
-        busyKey: null,
-      },
-    }))
-    try {
-      const res = await loadJson(
-        `/api/customer-reviews/${encodeURIComponent(submissionId)}/candidate-purchases`,
-        CustomerReviewCandidatePurchasesResponseSchema,
-      )
-      setCandidatesBySubmission((prev) => ({
-        ...prev,
-        [submissionId]: {
-          loading: false,
-          error: null,
-          candidates: res.candidates,
-          busyKey: null,
-        },
-      }))
-    } catch (err) {
-      setCandidatesBySubmission((prev) => ({
-        ...prev,
-        [submissionId]: {
-          loading: false,
-          error: err instanceof Error ? err.message : String(err),
-          candidates: prev[submissionId]?.candidates ?? null,
-          busyKey: null,
-        },
-      }))
+  // Number of contactless submissions visible on the page — used to
+  // decide whether to fire the bulk prefetch at all, and to drive the
+  // status banner.
+  const contactlessCount = useMemo(
+    () => initial.items.filter((it) => it.contacts.length === 0).length,
+    [initial.items],
+  )
+
+  // Fire the one-shot bulk prefetch on mount (and after any revalidate
+  // that adds new contactless submissions). The server opens a single
+  // Sweed session, does one store.sale.invoice.list per distinct
+  // dealer, and returns candidates keyed by submissionId.
+  useEffect(() => {
+    if (contactlessCount === 0) return
+    let cancelled = false
+    setBulkLoading(true)
+    setBulkError(null)
+    void (async () => {
+      try {
+        const res = await loadJson(
+          '/api/customer-reviews/candidate-purchases-bulk',
+          CustomerReviewCandidatePurchasesBulkResponseSchema,
+        )
+        if (cancelled) return
+        setCandidatesBySubmission((prev) => {
+          const next = { ...prev }
+          for (const row of res.bySubmission) {
+            next[row.submissionId] = {
+              loading: false,
+              error: null,
+              candidates: row.candidates,
+              busyKey: prev[row.submissionId]?.busyKey ?? null,
+            }
+          }
+          return next
+        })
+      } catch (err) {
+        if (cancelled) return
+        setBulkError(err instanceof Error ? err.message : String(err))
+      } finally {
+        if (!cancelled) setBulkLoading(false)
+      }
+    })()
+    return () => {
+      cancelled = true
     }
-  }
+  }, [contactlessCount, initial.totalCount])
 
   const addCandidateToSegment = async (
     submissionId: string,
@@ -510,7 +519,8 @@ export function CustomerReviewsListPage() {
                     <ContactsCell
                       item={item}
                       state={candidatesBySubmission[item.submissionId]}
-                      onLoad={() => loadCandidates(item.submissionId)}
+                      bulkLoading={bulkLoading}
+                      bulkError={bulkError}
                       onAdd={(candidate, segment) =>
                         addCandidateToSegment(item.submissionId, candidate, segment)
                       }

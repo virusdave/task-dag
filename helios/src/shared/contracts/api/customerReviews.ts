@@ -271,6 +271,22 @@ export type CustomerReviewCandidatePurchasesResponse = z.infer<
   typeof CustomerReviewCandidatePurchasesResponseSchema
 >
 
+export const CustomerReviewCandidatePurchasesBulkResponseSchema = z.object({
+  // Map-shaped as an array of { submissionId, candidates } so the
+  // wire format stays a JSON array (Maps don't round-trip).
+  bySubmission: z.array(
+    z.object({
+      submissionId: z.string().uuid(),
+      candidates: z.array(CustomerReviewPurchaseCandidateSchema),
+    }),
+  ),
+  lookBackMinutes: z.number().int().positive(),
+  lookAheadMinutes: z.number().int().positive(),
+})
+export type CustomerReviewCandidatePurchasesBulkResponse = z.infer<
+  typeof CustomerReviewCandidatePurchasesBulkResponseSchema
+>
+
 export const CustomerReviewAddCandidateToSegmentRequestSchema = z.object({
   segment: SegmentKindSchema,
   // Sweed client id from the candidate row. Required — this is the

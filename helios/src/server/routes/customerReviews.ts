@@ -5,6 +5,7 @@ import {
   CustomerReviewActionMarkFraudulentRequestSchema,
   CustomerReviewActionResponseSchema,
   CustomerReviewAddCandidateToSegmentRequestSchema,
+  CustomerReviewCandidatePurchasesBulkResponseSchema,
   CustomerReviewCandidatePurchasesResponseSchema,
   CustomerReviewDrawingEntryRequestSchema,
   CustomerReviewDrawingEntryResponseSchema,
@@ -54,6 +55,7 @@ import {
 } from '../customerReviews/segmentOrchestrator.js'
 import {
   loadCandidatePurchases,
+  loadCandidatePurchasesBulk,
   LOOK_AHEAD_MINUTES,
   LOOK_BACK_MINUTES,
 } from '../customerReviews/candidatePurchases.js'
@@ -914,6 +916,46 @@ export async function registerCustomerReviewsRoutes(server: FastifyInstance): Pr
       }
     },
   )
+
+  // ------------------------- internal GET /api/customer-reviews/candidate-purchases-bulk
+  //
+  // One-shot prefetch for the /reviews page: collects every
+  // currently-contactless submission in the same window the list
+  // endpoint returns, leases ONE Sweed session token, and runs one
+  // store.sale.invoice.list per distinct dealer covering the union
+  // window. The SPA fires this once on mount instead of one RPC
+  // per contactless row.
+  server.get('/api/customer-reviews/candidate-purchases-bulk', async (request, reply) => {
+    const user = await requireSessionUser(request, reply, 'viewer')
+    if (!user) return
+    try {
+      const { items } = await listCustomerReviews(getPool())
+      const contactless = items
+        .filter((it) => it.contacts.length === 0)
+        .map((it) => ({
+          submissionId: it.submissionId,
+          dealerId: it.dealerId,
+          submittedAt: new Date(it.createdAt),
+        }))
+      const bySubmission = await loadCandidatePurchasesBulk({
+        submissions: contactless,
+        logger: request.log,
+      })
+      return reply.send(
+        CustomerReviewCandidatePurchasesBulkResponseSchema.parse({
+          bySubmission,
+          lookBackMinutes: LOOK_BACK_MINUTES,
+          lookAheadMinutes: LOOK_AHEAD_MINUTES,
+        }),
+      )
+    } catch (error) {
+      if (isMissingReviewTableError(error)) {
+        return reply.status(503).send({ error: MIGRATION_HINT })
+      }
+      const message = error instanceof Error ? error.message : String(error)
+      return reply.status(502).send({ error: `Sweed bulk lookup failed: ${message}` })
+    }
+  })
 
   // ------------------------- internal GET /api/customer-reviews/:id/candidate-purchases
   //
