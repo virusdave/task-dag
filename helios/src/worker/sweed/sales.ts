@@ -213,15 +213,23 @@ function normalizeInvoice(raw: z.infer<typeof InvoiceRowSchema>): SweedInvoiceRo
   }
 }
 
+// Sweed rejects oversized page sizes with 'Maximum page size
+// exceeded'. The operator-confirmed safe size on
+// store.sale.invoice.list is 50, which matches their canonical
+// example RPC; values up to 100 have been observed to fail in
+// practice, so we stay at 50.
+const MAX_SWEED_INVOICE_PAGE_SIZE = 50
+// Hard cap on rows fetched per dealer per call, so an accidentally
+// huge time window can't paginate forever.
+const MAX_INVOICES_PER_LIST = 1000
+
 /**
  * List retail invoices for a dealer in a time window. The caller is
  * expected to be inside a `withSweedSession` block.
  *
- * Pagination is single-shot at `pageSize` rows — the candidate
- * surface only needs the few invoices nearest the review-submit
- * moment, so 50 is plenty even for a busy dispensary; the bulk
- * orchestrator passes 500 to cover the union window across many
- * submissions.
+ * Paginates internally up to `MAX_INVOICES_PER_LIST` rows total to
+ * cover union windows across many submissions; each page request
+ * respects Sweed's `pageSize` cap.
  */
 export async function listSaleInvoices(args: {
   dealerId: number
@@ -229,13 +237,25 @@ export async function listSaleInvoices(args: {
   toDate: Date
   pageSize?: number
 }): Promise<SweedInvoiceRow[]> {
-  const raw = await callSweedRpc<unknown>(args.dealerId, SWEED_RPC_SALE_INVOICE_LIST, {
-    page: 1,
-    pageSize: args.pageSize ?? 50,
-    fromDate: args.fromDate.toISOString(),
-    toDate: args.toDate.toISOString(),
-  })
-  const parsed = InvoiceListResponseSchema.safeParse(raw)
-  if (!parsed.success) return []
-  return (parsed.data.data ?? []).map(normalizeInvoice)
+  const pageSize = Math.min(
+    args.pageSize ?? MAX_SWEED_INVOICE_PAGE_SIZE,
+    MAX_SWEED_INVOICE_PAGE_SIZE,
+  )
+  const collected: SweedInvoiceRow[] = []
+  let page = 1
+  while (collected.length < MAX_INVOICES_PER_LIST) {
+    const raw = await callSweedRpc<unknown>(args.dealerId, SWEED_RPC_SALE_INVOICE_LIST, {
+      page,
+      pageSize,
+      fromDate: args.fromDate.toISOString(),
+      toDate: args.toDate.toISOString(),
+    })
+    const parsed = InvoiceListResponseSchema.safeParse(raw)
+    if (!parsed.success) break
+    const rows = parsed.data.data ?? []
+    for (const r of rows) collected.push(normalizeInvoice(r))
+    if (rows.length < pageSize) break // last page
+    page += 1
+  }
+  return collected
 }

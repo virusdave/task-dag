@@ -183,23 +183,26 @@ export async function loadCandidatePurchasesBulk(args: {
       const toDate = new Date(maxSubmit.getTime() + LOOK_AHEAD_MINUTES * 60_000)
       let invoices: SweedInvoiceRow[] = []
       try {
+        // listSaleInvoices paginates internally; we let it use its
+        // default per-page size (Sweed caps pageSize at 100).
         invoices = await listSaleInvoices({
           dealerId,
           fromDate,
           toDate,
-          // Generous page size so a recent slice of submissions
-          // doesn't truncate before we get to the older ones.
-          pageSize: 500,
         })
       } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
         args.logger?.error?.(
-          { err: err instanceof Error ? err.message : String(err), dealerId },
+          { err: msg, dealerId },
           'bulk candidate purchases: Sweed invoice list failed for dealer',
         )
-        for (const s of dealerSubs) {
-          out.push({ submissionId: s.submissionId, candidates: [] })
-        }
-        continue
+        // Re-throw — silently returning empty candidates makes a
+        // real Sweed-side failure look identical to "no matching
+        // invoices", which is exactly the bug that surfaced when
+        // pageSize=500 was rejected with 'Maximum page size
+        // exceeded'. The route handler turns this into a 502 with
+        // the underlying error message so the SPA shows it.
+        throw new Error(`dealer ${dealerId}: ${msg}`)
       }
       for (const s of dealerSubs) {
         const windowStart = s.submittedAt.getTime() - LOOK_BACK_MINUTES * 60_000
