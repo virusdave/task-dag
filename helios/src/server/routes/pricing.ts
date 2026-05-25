@@ -3,6 +3,9 @@ import { randomUUID } from 'node:crypto'
 import type { FastifyInstance } from 'fastify'
 
 import {
+  HELIOS_PENDING_PURCHASE_SITE_DEALERS,
+  PricingFacetsQuerySchema,
+  PricingFacetsResponseSchema,
   PricingReviewQuerySchema,
   PricingReviewResponseSchema,
   PricingRunDetailResponseSchema,
@@ -12,7 +15,10 @@ import {
   PricingScopePreviewQuerySchema,
   PricingScopePreviewResponseSchema,
   QueuePricingRunAcceptedResponseSchema,
+  type PricingFacetsQuery,
   type PricingScopePreviewQuery,
+  type PricingSelectionFilters,
+  type PricingSiteKey,
   type QueuePricingRunRequest,
   QueuePricingRunRequestSchema,
 } from '../../shared/contracts/index.js'
@@ -21,6 +27,7 @@ import { requireSessionUser } from '../auth/requireSession.js'
 import { getPool } from '../db/pool.js'
 import {
   getPricingRunDetail,
+  listPricingFacetOptions,
   listPricingReviewItems,
   listPricingRuns,
   previewPricingRunScope,
@@ -29,7 +36,8 @@ import {
 import { getOptionalSweedSessionConcurrencyKey } from '../jobs/concurrency.js'
 import { enqueueJob } from '../jobs/enqueueJob.js'
 import { withTransaction } from '../db/tx.js'
-import { loadLiveInStockProductIds, loadMidtownReceivedProductIds } from '../../worker/pricing/productScope.js'
+import { loadLiveInStockProductIds } from '../../worker/pricing/productScope.js'
+import type { Queryable } from '../db/pool.js'
 
 export async function registerPricingRoutes(server: FastifyInstance): Promise<void> {
   server.get('/api/pricing/scope-preview', async (request, reply) => {
@@ -39,11 +47,23 @@ export async function registerPricingRoutes(server: FastifyInstance): Promise<vo
     }
 
     const query = PricingScopePreviewQuerySchema.parse(request.query)
-    const scopedProductIds = await resolveScopedProductIds(query)
-    const preview = await previewPricingRunScope(getPool(), query, {
-      scopedProductIds,
-    })
+    validateScopeFilters(query)
+    const seedProductIds = await resolveSeedProductIds(getPool(), query)
+    const preview = await previewPricingRunScope(getPool(), query, { seedProductIds })
     return reply.send(PricingScopePreviewResponseSchema.parse(preview))
+  })
+
+  server.get('/api/pricing/facets', async (request, reply) => {
+    const user = await requireSessionUser(request, reply, 'viewer')
+    if (!user) {
+      return
+    }
+
+    const query = PricingFacetsQuerySchema.parse(request.query)
+    validateScopeFilters(query)
+    const seedProductIds = await resolveSeedProductIds(getPool(), query)
+    const response = await listPricingFacetOptions(getPool(), query, { seedProductIds })
+    return reply.send(PricingFacetsResponseSchema.parse(response))
   })
 
   server.get('/api/pricing/runs', async (request, reply) => {
@@ -64,39 +84,46 @@ export async function registerPricingRoutes(server: FastifyInstance): Promise<vo
     }
 
     const body = QueuePricingRunRequestSchema.parse(request.body ?? {})
+    validateScopeFilters(body)
+
     if (
       body.scopeKind === 'filtered_catalog'
       && !body.search
-      && !body.brand
-      && !body.category
-      && !body.subcategory
-      && !body.liveBronxInventory
-      && !body.liveMidtownInventory
-      && !body.midtownEverReceived
+      && body.brands.length === 0
+      && body.categories.length === 0
+      && body.subcategories.length === 0
+      && !body.stockOnly
+      && !body.includePending
     ) {
-      throw new Error('Filtered repricing runs must include at least one catalog filter.')
+      throw new Error('Filtered repricing runs must include at least one catalog filter or stock/pending source.')
     }
 
     const requestId = randomUUID()
-    const scopedProductIds = await resolveScopedProductIds(body, { forceRefresh: body.forceLiveRefresh })
-    const scopeFilters = {
-      brand: body.brand,
-      category: body.category,
-      liveBronxInventory: body.liveBronxInventory,
-      liveMidtownInventory: body.liveMidtownInventory,
-      midtownEverReceived: body.midtownEverReceived,
-      scopeKind: body.scopeKind,
-      search: body.search,
-      subcategory: body.subcategory,
-    }
-    const resolvedScope = await resolvePricingRunScope(getPool(), scopeFilters, { scopedProductIds })
+    const seedProductIds = await resolveSeedProductIds(getPool(), body, { forceRefresh: body.forceLiveRefresh })
+    const resolvedScope = await resolvePricingRunScope(getPool(), body, { seedProductIds })
     if (resolvedScope.catalogGroupIds.length === 0) {
-      throw new Error(scopedProductIds && scopedProductIds.length === 0
-        ? 'The selected repricing scope does not match any mirrored catalog groups after applying the live and historical product-scope filters.'
+      throw new Error(seedProductIds !== undefined && seedProductIds.length === 0
+        ? 'The selected repricing scope does not match any mirrored catalog groups after applying the stock/pending source filters.'
         : 'The selected repricing scope does not match any mirrored catalog groups.')
     }
 
     const scopeLabel = body.scopeLabel?.trim() || buildScopeLabel(body)
+
+    // Defensive: never queue a job with `scopedProductIds: []` — the
+    // worker treats an empty/undefined value as "no product filter"
+    // and would silently re-price the whole catalog. We checked the
+    // resolved group count above so an empty array here means the SQL
+    // intersection returned nothing meaningful.
+    const scopedProductIds = resolvedScope.scopedProductIds === undefined
+      ? undefined
+      : resolvedScope.scopedProductIds.length === 0
+        ? null
+        : resolvedScope.scopedProductIds
+    if (scopedProductIds === null) {
+      throw new Error('The selected repricing scope resolved to zero products; refine your filters and try again.')
+    }
+
+    const selectionFiltersJson = selectionFiltersForPersistence(body)
 
     const mutationResult = await withTransaction(async (db) => {
       const proposalBatchInsert = await db.query<{ id: number }>(
@@ -139,18 +166,10 @@ export async function registerPricingRoutes(server: FastifyInstance): Promise<vo
             forceLiveRefresh: body.forceLiveRefresh,
             resolvedCatalogGroupCount: resolvedScope.catalogGroupIds.length,
             resolvedProductCount: resolvedScope.matchedProductCount,
-            scopedProductIds,
+            scopedProductIds: scopedProductIds ?? null,
             scopeKind: body.scopeKind,
             scopeLabel,
-            selectionFilters: {
-              brand: body.brand ?? null,
-              category: body.category ?? null,
-              liveBronxInventory: body.liveBronxInventory,
-              liveMidtownInventory: body.liveMidtownInventory,
-              midtownEverReceived: body.midtownEverReceived,
-              search: body.search ?? null,
-              subcategory: body.subcategory ?? null,
-            },
+            selectionFilters: selectionFiltersJson,
             triggerSource: 'manual',
           }),
           user.id,
@@ -190,15 +209,7 @@ export async function registerPricingRoutes(server: FastifyInstance): Promise<vo
           resolvedProductCount: resolvedScope.matchedProductCount,
           scopeKind: body.scopeKind,
           scopeLabel,
-          selectionFilters: {
-            brand: body.brand ?? null,
-            category: body.category ?? null,
-            liveBronxInventory: body.liveBronxInventory,
-            liveMidtownInventory: body.liveMidtownInventory,
-            midtownEverReceived: body.midtownEverReceived,
-            search: body.search ?? null,
-            subcategory: body.subcategory ?? null,
-          },
+          selectionFilters: selectionFiltersJson,
         },
         requestId,
         undoPayload: null,
@@ -242,71 +253,120 @@ export async function registerPricingRoutes(server: FastifyInstance): Promise<vo
   })
 }
 
-function buildScopeLabel(body: QueuePricingRunRequest): string {
-  if (body.scopeKind === 'full_catalog') {
-    return buildCatalogScopeLabel(body)
+function validateScopeFilters(filters: { scopeKind: string; sites: PricingSiteKey[]; stockOnly: boolean; includePending: boolean }): void {
+  if (filters.scopeKind === 'family_expansion_from_stock_or_pending') {
+    if (!filters.stockOnly && !filters.includePending) {
+      throw new Error('Family expansion requires the stock-only or include-pending source toggle to be on.')
+    }
+    if (filters.sites.length === 0) {
+      throw new Error('Family expansion requires at least one selected site.')
+    }
   }
+}
 
-  const parts = [body.brand, body.category, body.subcategory, body.search].filter((value): value is string => Boolean(value))
+function selectionFiltersForPersistence(body: QueuePricingRunRequest): PricingSelectionFilters {
+  return {
+    brands: body.brands,
+    categories: body.categories,
+    includePending: body.includePending,
+    search: body.search,
+    sites: body.sites,
+    stockOnly: body.stockOnly,
+    strict: body.strict,
+    subcategories: body.subcategories,
+  }
+}
+
+function buildScopeLabel(body: QueuePricingRunRequest): string {
+  const parts: string[] = []
+  if (body.scopeKind === 'family_expansion_from_stock_or_pending') {
+    parts.push(body.strict ? 'Stock+pending (strict)' : 'Family expansion')
+  }
+  if (body.brands.length > 0) parts.push(body.brands.join(', '))
+  if (body.categories.length > 0) parts.push(body.categories.join(', '))
+  if (body.subcategories.length > 0) parts.push(body.subcategories.join(', '))
+  if (body.search) parts.push(body.search)
   const productScopeLabels = buildProductScopeLabels(body)
   if (productScopeLabels.length > 0) {
     parts.push(...productScopeLabels)
   }
-  return parts.length > 0 ? parts.join(' · ') : 'Filtered catalog'
+  if (parts.length === 0) {
+    if (body.scopeKind === 'full_catalog') return 'Full catalog'
+    if (body.scopeKind === 'family_expansion_from_stock_or_pending') return 'Family expansion'
+    return 'Filtered catalog'
+  }
+  return parts.join(' · ')
 }
 
-async function resolveScopedProductIds(
-  filters: Pick<QueuePricingRunRequest, 'liveBronxInventory' | 'liveMidtownInventory' | 'midtownEverReceived'>,
+function buildProductScopeLabels(filters: { sites: PricingSiteKey[]; stockOnly: boolean; includePending: boolean }): string[] {
+  const siteLabels = filters.sites.map((siteKey) => (siteKey === 'bronx' ? 'Bronx' : 'Midtown'))
+  const siteSummary = siteLabels.length > 0 ? siteLabels.join('+') : null
+  const labels: string[] = []
+  if (filters.stockOnly) {
+    labels.push(siteSummary ? `${siteSummary} in stock` : 'In stock')
+  }
+  if (filters.includePending) {
+    labels.push(siteSummary ? `${siteSummary} pending purchases` : 'Pending purchases')
+  }
+  return labels
+}
+
+async function resolveSeedProductIds(
+  db: Queryable,
+  filters: PricingScopePreviewQuery | QueuePricingRunRequest | PricingFacetsQuery,
   options?: { forceRefresh?: boolean },
 ): Promise<number[] | undefined> {
-  const scopedSets: number[][] = []
-  const liveInventoryDealerIds: number[] = []
-  if (filters.liveBronxInventory) {
-    liveInventoryDealerIds.push(210249)
-  }
-  if (filters.liveMidtownInventory) {
-    liveInventoryDealerIds.push(210705)
-  }
-  if (liveInventoryDealerIds.length > 0) {
-    scopedSets.push(await loadLiveInStockProductIds(liveInventoryDealerIds))
-  }
-  if (filters.midtownEverReceived) {
-    scopedSets.push(await loadMidtownReceivedProductIds({ forceRefresh: options?.forceRefresh }))
-  }
-  if (scopedSets.length === 0) {
+  const needsSeed = filters.scopeKind === 'family_expansion_from_stock_or_pending'
+    || filters.stockOnly
+    || filters.includePending
+  if (!needsSeed) {
     return undefined
   }
 
-  let intersection = new Set(scopedSets[0] ?? [])
-  for (const scopedProductIds of scopedSets.slice(1)) {
-    const nextSet = new Set(scopedProductIds)
-    intersection = new Set([...intersection].filter((productId) => nextSet.has(productId)))
+  const selectedDealerIds = HELIOS_PENDING_PURCHASE_SITE_DEALERS
+    .filter((site) => filters.sites.includes(site.siteKey as PricingSiteKey))
+    .map((site) => site.dealerId)
+  const selectedSiteKeys = filters.sites.slice()
+
+  const merged = new Set<number>()
+
+  if (filters.stockOnly && selectedDealerIds.length > 0) {
+    // `loadLiveInStockProductIds` doesn't currently expose its own
+    // cache-bypass; `options.forceRefresh` is forwarded for symmetry
+    // with the worker contract and to make future cache hooks easy.
+    void options
+    const liveIds = await loadLiveInStockProductIds(selectedDealerIds)
+    for (const id of liveIds) merged.add(id)
   }
 
-  return [...intersection].sort((left, right) => left - right)
+  if (filters.includePending && selectedSiteKeys.length > 0) {
+    const pendingIds = await loadPendingPurchaseProductIds(db, selectedSiteKeys)
+    for (const id of pendingIds) merged.add(id)
+  }
+
+  return [...merged].sort((left, right) => left - right)
 }
 
-function buildCatalogScopeLabel(filters: Pick<QueuePricingRunRequest, 'liveBronxInventory' | 'liveMidtownInventory' | 'midtownEverReceived'>): string {
-  const productScopeLabel = buildProductScopeLabels(filters).join(' · ')
-  return productScopeLabel ? `${productScopeLabel} catalog` : 'Full catalog'
-}
-
-function buildProductScopeLabels(
-  filters: Pick<PricingScopePreviewQuery, 'liveBronxInventory' | 'liveMidtownInventory' | 'midtownEverReceived'>,
-): string[] {
-  const labels: string[] = []
-  if (filters.midtownEverReceived) {
-    labels.push('Midtown ever received')
+async function loadPendingPurchaseProductIds(db: Queryable, siteKeys: PricingSiteKey[]): Promise<number[]> {
+  if (siteKeys.length === 0) {
+    return []
   }
-  if (filters.liveBronxInventory && filters.liveMidtownInventory) {
-    labels.push('Bronx + Midtown live inventory')
-    return labels
-  }
-  if (filters.liveBronxInventory) {
-    labels.push('Bronx live inventory')
-  }
-  if (filters.liveMidtownInventory) {
-    labels.push('Midtown live inventory')
-  }
-  return labels
+  // Pending purchases that are still "live" — i.e. on a packet that
+  // hasn't been superseded — and that have already been mapped to a
+  // catalog product. Unmapped rows can't contribute to a pricing run
+  // because we don't know which catalog entry to price.
+  const result = await db.query<{ product_id: number }>(
+    `
+      select distinct ppr.matched_product_id::int as product_id
+      from pending_purchase_rows ppr
+      inner join pending_purchase_packets ppp on ppp.packet_id = ppr.packet_id
+      where ppp.status = 'ready'
+        and ppr.site_key = any($1::text[])
+        and ppr.matched_product_id is not null
+        and ppr.matched_product_id > 0
+      order by product_id asc
+    `,
+    [siteKeys],
+  )
+  return result.rows.map((row) => row.product_id)
 }

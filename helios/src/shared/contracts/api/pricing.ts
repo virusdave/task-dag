@@ -26,7 +26,64 @@ const BlankPricingReviewApprovalStatusSchema = z.preprocess(
   z.enum(['approved', 'pending', 'rejected']).optional(),
 )
 
+// Explicit boolean coercion that handles GET query strings safely
+// (z.coerce.boolean() treats any non-empty string — including 'false'
+// — as true).
+const QueryBooleanSchema = z.preprocess((value) => {
+  if (value === undefined || value === null || value === '') {
+    return undefined
+  }
+  if (value === true || value === false) {
+    return value
+  }
+  if (typeof value === 'number') {
+    return value !== 0
+  }
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase()
+    if (['true', '1', 'on', 'yes'].includes(normalized)) {
+      return true
+    }
+    if (['false', '0', 'off', 'no'].includes(normalized)) {
+      return false
+    }
+  }
+  return value
+}, z.boolean())
+
+// Accepts:
+//   undefined / null / ''  -> []
+//   'foo'                  -> ['foo']
+//   ['foo', 'bar', ' ']    -> ['foo', 'bar']  (trimmed, deduped)
+// GET-form callers can repeat the param key (`?brands=foo&brands=bar`)
+// or send a single value.
+const QueryStringArraySchema = z.preprocess((value) => {
+  if (value === undefined || value === null) {
+    return []
+  }
+  const rawValues = Array.isArray(value) ? value : [value]
+  const cleaned = rawValues
+    .flatMap((item) => (typeof item === 'string' ? [item.trim()] : typeof item === 'number' ? [String(item)] : []))
+    .filter((item) => item.length > 0)
+  return [...new Set(cleaned)]
+}, z.array(z.string().min(1)))
+
+export const PricingSiteKeySchema = z.enum(['bronx', 'midtown'])
+export type PricingSiteKey = z.infer<typeof PricingSiteKeySchema>
+
+const QuerySiteArraySchema = z.preprocess((value) => {
+  if (value === undefined || value === null) {
+    return undefined
+  }
+  const rawValues = Array.isArray(value) ? value : [value]
+  const cleaned = rawValues
+    .flatMap((item) => (typeof item === 'string' ? [item.trim()] : []))
+    .filter((item) => item.length > 0)
+  return [...new Set(cleaned)]
+}, z.array(PricingSiteKeySchema).default(['bronx', 'midtown']))
+
 export const PricingRunScopeKindSchema = z.enum([
+  'family_expansion_from_stock_or_pending',
   'full_catalog',
   'filtered_catalog',
   'explicit_selection',
@@ -35,24 +92,57 @@ export const PricingRunScopeKindSchema = z.enum([
 ])
 export type PricingRunScopeKind = z.infer<typeof PricingRunScopeKindSchema>
 
+export const PricingNewRunScopeKindSchema = z.enum([
+  'family_expansion_from_stock_or_pending',
+  'full_catalog',
+  'filtered_catalog',
+])
+export type PricingNewRunScopeKind = z.infer<typeof PricingNewRunScopeKindSchema>
+
 export const PricingRunTriggerSourceSchema = z.enum(['manual', 'rerun', 'scheduled'])
 export type PricingRunTriggerSource = z.infer<typeof PricingRunTriggerSourceSchema>
 
 export const PricingSelectionFiltersSchema = z.object({
-  brand: BlankStringSchema,
-  category: BlankStringSchema,
-  liveBronxInventory: z.coerce.boolean().default(false),
-  liveMidtownInventory: z.coerce.boolean().default(false),
-  midtownEverReceived: z.coerce.boolean().default(false),
+  brands: QueryStringArraySchema,
+  categories: QueryStringArraySchema,
+  includePending: QueryBooleanSchema.default(true),
   search: BlankStringSchema,
-  subcategory: BlankStringSchema,
+  sites: QuerySiteArraySchema,
+  stockOnly: QueryBooleanSchema.default(true),
+  strict: QueryBooleanSchema.default(false),
+  subcategories: QueryStringArraySchema,
 })
 export type PricingSelectionFilters = z.infer<typeof PricingSelectionFiltersSchema>
 
 export const PricingScopePreviewQuerySchema = PricingSelectionFiltersSchema.extend({
-  scopeKind: z.enum(['full_catalog', 'filtered_catalog']).default('full_catalog'),
+  scopeKind: PricingNewRunScopeKindSchema.default('family_expansion_from_stock_or_pending'),
 })
 export type PricingScopePreviewQuery = z.infer<typeof PricingScopePreviewQuerySchema>
+
+export const PricingFacetFieldSchema = z.enum(['brand', 'category', 'subcategory'])
+export type PricingFacetField = z.infer<typeof PricingFacetFieldSchema>
+
+export const PricingFacetsQuerySchema = PricingSelectionFiltersSchema.extend({
+  facet: PricingFacetFieldSchema,
+  facetSearch: BlankStringSchema,
+  limit: z.coerce.number().int().min(1).max(500).default(200),
+  scopeKind: PricingNewRunScopeKindSchema.default('family_expansion_from_stock_or_pending'),
+})
+export type PricingFacetsQuery = z.infer<typeof PricingFacetsQuerySchema>
+
+export const PricingFacetOptionSchema = z.object({
+  rowCount: z.number().int().min(0),
+  selected: z.boolean(),
+  value: z.string().min(1),
+})
+export type PricingFacetOption = z.infer<typeof PricingFacetOptionSchema>
+
+export const PricingFacetsResponseSchema = z.object({
+  facet: PricingFacetFieldSchema,
+  filters: PricingFacetsQuerySchema,
+  options: z.array(PricingFacetOptionSchema),
+})
+export type PricingFacetsResponse = z.infer<typeof PricingFacetsResponseSchema>
 
 export const PricingScopePreviewGroupSchema = z.object({
   brandName: z.string().nullable(),
@@ -73,9 +163,9 @@ export const PricingScopePreviewResponseSchema = z.object({
 export type PricingScopePreviewResponse = z.infer<typeof PricingScopePreviewResponseSchema>
 
 export const QueuePricingRunRequestSchema = PricingSelectionFiltersSchema.extend({
-  forceLiveRefresh: z.boolean().default(false),
+  forceLiveRefresh: QueryBooleanSchema.default(false),
   reason: z.string().trim().max(500).nullable().optional(),
-  scopeKind: z.enum(['full_catalog', 'filtered_catalog']),
+  scopeKind: PricingNewRunScopeKindSchema.default('family_expansion_from_stock_or_pending'),
   scopeLabel: z.string().trim().max(240).nullable().optional(),
 })
 export type QueuePricingRunRequest = z.infer<typeof QueuePricingRunRequestSchema>

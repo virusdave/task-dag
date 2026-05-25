@@ -576,18 +576,27 @@ function buildSelectionFilterSummary(selectionFilters: PricingRunDetailResponse[
     return 'No saved scope filters.'
   }
 
-  const parts = [selectionFilters.brand, selectionFilters.category, selectionFilters.subcategory, selectionFilters.search]
-    .filter((value): value is string => Boolean(value))
-  if (selectionFilters.midtownEverReceived) {
-    parts.push('Midtown ever received')
+  const parts: string[] = []
+  if (selectionFilters.brands.length > 0) {
+    parts.push(`Brands: ${selectionFilters.brands.join(', ')}`)
   }
-  if (selectionFilters.liveBronxInventory && selectionFilters.liveMidtownInventory) {
-    parts.push('Bronx + Midtown live inventory')
-  } else if (selectionFilters.liveBronxInventory) {
-    parts.push('Bronx live inventory')
-  } else if (selectionFilters.liveMidtownInventory) {
-    parts.push('Midtown live inventory')
+  if (selectionFilters.categories.length > 0) {
+    parts.push(`Categories: ${selectionFilters.categories.join(', ')}`)
   }
+  if (selectionFilters.subcategories.length > 0) {
+    parts.push(`Subcategories: ${selectionFilters.subcategories.join(', ')}`)
+  }
+  if (selectionFilters.search) {
+    parts.push(`Search: ${selectionFilters.search}`)
+  }
+  const siteLabels = selectionFilters.sites
+    .map((siteKey) => (siteKey === 'bronx' ? 'Bronx' : siteKey === 'midtown' ? 'Midtown' : siteKey))
+  if (siteLabels.length > 0) {
+    parts.push(`Sites: ${siteLabels.join(' + ')}`)
+  }
+  if (selectionFilters.stockOnly) parts.push('In stock')
+  if (selectionFilters.includePending) parts.push('Pending purchases')
+  if (selectionFilters.strict) parts.push('Strict')
 
   return parts.length > 0 ? parts.join(' · ') : 'No saved scope filters.'
 }

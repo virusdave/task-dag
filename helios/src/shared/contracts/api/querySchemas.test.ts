@@ -23,17 +23,41 @@ describe('query schemas', () => {
 
   })
 
-  it('parses boolean pricing selection filters from GET form values', () => {
-    expect(PricingScopePreviewQuerySchema.parse({ liveBronxInventory: 'true', liveMidtownInventory: 'true', midtownEverReceived: 'true' })).toEqual({
-      brand: undefined,
-      category: undefined,
-      liveBronxInventory: true,
-      liveMidtownInventory: true,
-      midtownEverReceived: true,
-      scopeKind: 'full_catalog',
+  it('parses repeated GET-form arrays for pricing selection filters', () => {
+    // PricingScopePreviewQuerySchema defaults: family expansion mode,
+    // both sites selected, stockOnly + includePending true.
+    expect(PricingScopePreviewQuerySchema.parse({
+      brands: ['BrandA', 'BrandB'],
+      categories: 'Flower',
+      subcategories: [],
+    })).toEqual({
+      brands: ['BrandA', 'BrandB'],
+      categories: ['Flower'],
+      includePending: true,
+      scopeKind: 'family_expansion_from_stock_or_pending',
       search: undefined,
-      subcategory: undefined,
+      sites: ['bronx', 'midtown'],
+      stockOnly: true,
+      strict: false,
+      subcategories: [],
     })
+  })
+
+  it("treats the string 'false' as the boolean false in pricing filters", () => {
+    const parsed = PricingScopePreviewQuerySchema.parse({
+      includePending: 'false',
+      sites: ['bronx'],
+      stockOnly: 'true',
+      strict: 'false',
+    })
+    expect(parsed.includePending).toBe(false)
+    expect(parsed.stockOnly).toBe(true)
+    expect(parsed.strict).toBe(false)
+    expect(parsed.sites).toEqual(['bronx'])
+  })
+
+  it('rejects unknown site keys', () => {
+    expect(() => PricingScopePreviewQuerySchema.parse({ sites: ['queens'] })).toThrow()
   })
 
   it('normalizes blank GET form values for the shared review queue filters', () => {

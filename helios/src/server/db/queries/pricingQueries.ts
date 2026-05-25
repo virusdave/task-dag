@@ -4,6 +4,10 @@ import type {
   GroupRecentSales,
   GroupRecentSalesProductRow,
   JsonValue,
+  PricingFacetField,
+  PricingFacetOption,
+  PricingFacetsQuery,
+  PricingFacetsResponse,
   PricingReviewItem,
   PricingReviewQuery,
   PricingReviewResponse,
@@ -15,10 +19,12 @@ import type {
   PricingRunMarketListing,
   PricingRunRouteParams,
   PricingRunScopeKind,
+  PricingSelectionFilters,
   PricingScopePreviewQuery,
   PricingScopePreviewResponse,
   PricingRunSkippedProduct,
   PricingRunTriggerSource,
+  PricingSiteKey,
   ProposalLineItem,
   RecentSalesSummary,
 } from '../../../shared/contracts/index.js'
@@ -32,6 +38,7 @@ interface PricingScopeRow extends QueryResultRow {
   category_name: string | null
   group_name: string
   product_count: number
+  product_ids: number[]
   subcategory_name: string | null
 }
 
@@ -96,10 +103,23 @@ interface PricingReviewRow extends QueryResultRow {
   version: number
 }
 
+export interface ResolvedPricingRunScope {
+  catalogGroupIds: number[]
+  matchedProductCount: number
+  previewGroups: PricingScopePreviewResponse['previewGroups']
+  // Product-id allowlist that must be passed through to the worker job
+  // when one of the scope filters (sites/stockOnly/includePending) or
+  // strict / family-expansion modes restricts which products inside a
+  // group actually belong to this run. `undefined` means "no
+  // product-level scoping" — the worker prices every product in every
+  // selected group.
+  scopedProductIds?: number[]
+}
+
 export async function previewPricingRunScope(
   db: Queryable,
   filters: PricingScopePreviewQuery,
-  options?: { scopedProductIds?: number[] },
+  options?: { seedProductIds?: number[] },
 ): Promise<PricingScopePreviewResponse> {
   const resolved = await resolvePricingRunScope(db, filters, options)
   return {
@@ -110,38 +130,45 @@ export async function previewPricingRunScope(
   }
 }
 
+type ScopeMode = 'all' | 'seed_only' | 'family_expanded'
+
+function pickScopeMode(filters: PricingScopePreviewQuery, hasSeed: boolean): ScopeMode {
+  if (filters.scopeKind === 'family_expansion_from_stock_or_pending') {
+    return filters.strict ? 'seed_only' : 'family_expanded'
+  }
+  if (filters.scopeKind === 'full_catalog') {
+    return hasSeed ? 'seed_only' : 'all'
+  }
+  // filtered_catalog
+  return hasSeed ? 'seed_only' : 'all'
+}
+
 export async function resolvePricingRunScope(
   db: Queryable,
   filters: PricingScopePreviewQuery,
-  options?: { scopedProductIds?: number[] },
-): Promise<{
-  catalogGroupIds: number[]
-  matchedProductCount: number
-  previewGroups: PricingScopePreviewResponse['previewGroups']
-}> {
-  const { productCountSql, values, whereSql } = buildPricingScopeWhere(filters, options)
-  const result = await db.query<PricingScopeRow>(
-    `
-      select
-        cg.id as catalog_group_id,
-        cg.group_name,
-        cg.brand_name,
-        cg.category_name,
-        cg.subcategory_name,
-        ${productCountSql} as product_count
-      from catalog_groups cg
-      left join lateral (
-        select state_json
-        from catalog_group_snapshots cgs
-        where cgs.catalog_group_id = cg.id
-        order by cgs.created_at desc, cgs.id desc
-        limit 1
-      ) latest_snapshot on true
-      ${whereSql}
-      order by cg.id asc
-    `,
-    values,
-  )
+  options?: { seedProductIds?: number[] },
+): Promise<ResolvedPricingRunScope> {
+  const seedProductIds = options?.seedProductIds ?? null
+  const hasSeed = seedProductIds !== null
+  const mode: ScopeMode = pickScopeMode(filters, hasSeed)
+
+  if (filters.scopeKind === 'family_expansion_from_stock_or_pending' && !hasSeed) {
+    // Family expansion requires a seed set; the route validates this
+    // before calling us, so this branch defensively returns an empty
+    // scope rather than producing a misleading "everything matches"
+    // catalog-wide query.
+    return { catalogGroupIds: [], matchedProductCount: 0, previewGroups: [], scopedProductIds: [] }
+  }
+
+  const { sql, values } = buildResolvePricingRunScopeSql(filters, seedProductIds ?? [], mode)
+  const result = await db.query<PricingScopeRow>(sql, values)
+
+  const allScopedProductIds = new Set<number>()
+  for (const row of result.rows) {
+    for (const productId of row.product_ids ?? []) {
+      allScopedProductIds.add(productId)
+    }
+  }
 
   return {
     catalogGroupIds: result.rows.map((row) => row.catalog_group_id),
@@ -158,7 +185,259 @@ export async function resolvePricingRunScope(
         matchedProductCount: row.product_count,
         subcategoryName: row.subcategory_name,
       })),
+    scopedProductIds: mode === 'all' ? undefined : [...allScopedProductIds].sort((left, right) => left - right),
   }
+}
+
+function buildResolvePricingRunScopeSql(
+  filters: PricingScopePreviewQuery,
+  seedProductIds: number[],
+  mode: ScopeMode,
+): { sql: string; values: unknown[] } {
+  const values: unknown[] = []
+  values.push(seedProductIds)
+  const seedParam = `$${values.length}::int[]`
+  values.push(filters.brands)
+  const brandsParam = `$${values.length}::text[]`
+  values.push(filters.categories)
+  const categoriesParam = `$${values.length}::text[]`
+  values.push(filters.subcategories)
+  const subcategoriesParam = `$${values.length}::text[]`
+  values.push(filters.search ?? null)
+  const searchParam = `$${values.length}::text`
+  values.push(mode)
+  const modeParam = `$${values.length}::text`
+
+  const sql = `
+    with candidate_groups as (
+      select
+        cg.id,
+        cg.group_name,
+        cg.brand_name,
+        cg.category_name,
+        cg.subcategory_name,
+        case
+          when jsonb_typeof(cg.live_state_json -> 'products') = 'array' then cg.live_state_json -> 'products'
+          else '[]'::jsonb
+        end as products_json
+      from catalog_groups cg
+      where (cardinality(${brandsParam}) = 0 or cg.brand_name = any(${brandsParam}))
+        and (cardinality(${categoriesParam}) = 0 or cg.category_name = any(${categoriesParam}))
+        and (cardinality(${subcategoriesParam}) = 0 or cg.subcategory_name = any(${subcategoriesParam}))
+        and (
+          ${searchParam} is null
+          or cg.group_name ilike '%' || ${searchParam} || '%'
+          or coalesce(cg.brand_name, '') ilike '%' || ${searchParam} || '%'
+          or exists (
+            select 1 from jsonb_array_elements(
+              case
+                when jsonb_typeof(cg.live_state_json -> 'products') = 'array' then cg.live_state_json -> 'products'
+                else '[]'::jsonb
+              end
+            ) as product
+            where coalesce(product ->> 'name', '') ilike '%' || ${searchParam} || '%'
+               or coalesce(product ->> 'shortName', '') ilike '%' || ${searchParam} || '%'
+          )
+        )
+    ),
+    catalog_products as (
+      select
+        cg.id as catalog_group_id,
+        cg.group_name,
+        cg.brand_name,
+        cg.category_name,
+        cg.subcategory_name,
+        (product ->> 'productId')::int as product_id,
+        nullif(trim(product ->> 'sizeName'), '') as size_name
+      from candidate_groups cg
+      cross join lateral jsonb_array_elements(cg.products_json) as product
+      where (product ->> 'productId') ~ '^[0-9]+$'
+    ),
+    seed_family_sizes as (
+      select distinct cp.catalog_group_id, cp.size_name
+      from catalog_products cp
+      where cp.product_id = any(${seedParam})
+    ),
+    family_expanded_products as (
+      select cp.*
+      from catalog_products cp
+      inner join seed_family_sizes sfs
+        on sfs.catalog_group_id = cp.catalog_group_id
+       and sfs.size_name is not distinct from cp.size_name
+    ),
+    selected_products as (
+      select * from catalog_products where ${modeParam} = 'all'
+      union all
+      select * from catalog_products where ${modeParam} = 'seed_only' and product_id = any(${seedParam})
+      union all
+      select * from family_expanded_products where ${modeParam} = 'family_expanded'
+    )
+    select
+      sp.catalog_group_id,
+      sp.group_name,
+      sp.brand_name,
+      sp.category_name,
+      sp.subcategory_name,
+      count(distinct sp.product_id)::int as product_count,
+      array_agg(distinct sp.product_id order by sp.product_id) as product_ids
+    from selected_products sp
+    group by sp.catalog_group_id, sp.group_name, sp.brand_name, sp.category_name, sp.subcategory_name
+    order by sp.catalog_group_id asc
+  `
+
+  return { sql, values }
+}
+
+export async function listPricingFacetOptions(
+  db: Queryable,
+  query: PricingFacetsQuery,
+  options?: { seedProductIds?: number[] },
+): Promise<PricingFacetsResponse> {
+  const facet = query.facet
+  const facetColumn = facet === 'brand' ? 'brand_name' : facet === 'category' ? 'category_name' : 'subcategory_name'
+  // For the requested facet, ignore that facet's selected array when
+  // counting candidates — so toggling a brand on doesn't hide the
+  // other brands the reviewer might still want to pick. Other filters
+  // are applied as usual.
+  const previewFilters: PricingScopePreviewQuery = {
+    brands: facet === 'brand' ? [] : query.brands,
+    categories: facet === 'category' ? [] : query.categories,
+    includePending: query.includePending,
+    scopeKind: query.scopeKind,
+    search: query.search,
+    sites: query.sites,
+    stockOnly: query.stockOnly,
+    strict: query.strict,
+    subcategories: facet === 'subcategory' ? [] : query.subcategories,
+  }
+
+  const seedProductIds = options?.seedProductIds ?? null
+  const hasSeed = seedProductIds !== null
+  const mode = pickScopeMode(previewFilters, hasSeed)
+
+  if (previewFilters.scopeKind === 'family_expansion_from_stock_or_pending' && !hasSeed) {
+    return { facet, filters: query, options: [] }
+  }
+
+  const values: unknown[] = []
+  values.push(seedProductIds ?? [])
+  const seedParam = `$${values.length}::int[]`
+  values.push(previewFilters.brands)
+  const brandsParam = `$${values.length}::text[]`
+  values.push(previewFilters.categories)
+  const categoriesParam = `$${values.length}::text[]`
+  values.push(previewFilters.subcategories)
+  const subcategoriesParam = `$${values.length}::text[]`
+  values.push(previewFilters.search ?? null)
+  const searchParam = `$${values.length}::text`
+  values.push(mode)
+  const modeParam = `$${values.length}::text`
+  values.push(query.facetSearch ?? null)
+  const facetSearchParam = `$${values.length}::text`
+  values.push(query.limit)
+  const limitParam = `$${values.length}::int`
+
+  // Note: this CTE block mirrors buildResolvePricingRunScopeSql so the
+  // facet counts agree with the matched-group counts in the preview.
+  const sql = `
+    with candidate_groups as (
+      select
+        cg.id,
+        cg.group_name,
+        cg.brand_name,
+        cg.category_name,
+        cg.subcategory_name,
+        case
+          when jsonb_typeof(cg.live_state_json -> 'products') = 'array' then cg.live_state_json -> 'products'
+          else '[]'::jsonb
+        end as products_json
+      from catalog_groups cg
+      where (cardinality(${brandsParam}) = 0 or cg.brand_name = any(${brandsParam}))
+        and (cardinality(${categoriesParam}) = 0 or cg.category_name = any(${categoriesParam}))
+        and (cardinality(${subcategoriesParam}) = 0 or cg.subcategory_name = any(${subcategoriesParam}))
+        and (
+          ${searchParam} is null
+          or cg.group_name ilike '%' || ${searchParam} || '%'
+          or coalesce(cg.brand_name, '') ilike '%' || ${searchParam} || '%'
+          or exists (
+            select 1 from jsonb_array_elements(
+              case
+                when jsonb_typeof(cg.live_state_json -> 'products') = 'array' then cg.live_state_json -> 'products'
+                else '[]'::jsonb
+              end
+            ) as product
+            where coalesce(product ->> 'name', '') ilike '%' || ${searchParam} || '%'
+               or coalesce(product ->> 'shortName', '') ilike '%' || ${searchParam} || '%'
+          )
+        )
+    ),
+    catalog_products as (
+      select
+        cg.id as catalog_group_id,
+        cg.${facetColumn} as facet_value,
+        (product ->> 'productId')::int as product_id,
+        nullif(trim(product ->> 'sizeName'), '') as size_name
+      from candidate_groups cg
+      cross join lateral jsonb_array_elements(cg.products_json) as product
+      where (product ->> 'productId') ~ '^[0-9]+$'
+    ),
+    seed_family_sizes as (
+      select distinct cp.catalog_group_id, cp.size_name
+      from catalog_products cp
+      where cp.product_id = any(${seedParam})
+    ),
+    family_expanded_products as (
+      select cp.*
+      from catalog_products cp
+      inner join seed_family_sizes sfs
+        on sfs.catalog_group_id = cp.catalog_group_id
+       and sfs.size_name is not distinct from cp.size_name
+    ),
+    selected_products as (
+      select * from catalog_products where ${modeParam} = 'all'
+      union all
+      select * from catalog_products where ${modeParam} = 'seed_only' and product_id = any(${seedParam})
+      union all
+      select * from family_expanded_products where ${modeParam} = 'family_expanded'
+    )
+    select
+      sp.facet_value as value,
+      count(distinct sp.catalog_group_id)::int as row_count
+    from selected_products sp
+    where sp.facet_value is not null
+      and btrim(sp.facet_value) <> ''
+      and (${facetSearchParam} is null or sp.facet_value ilike '%' || ${facetSearchParam} || '%')
+    group by sp.facet_value
+    order by row_count desc, value asc
+    limit ${limitParam}
+  `
+
+  interface FacetRow extends QueryResultRow {
+    row_count: number
+    value: string
+  }
+
+  const result = await db.query<FacetRow>(sql, values)
+
+  const selectedSet = new Set(
+    facet === 'brand' ? query.brands : facet === 'category' ? query.categories : query.subcategories,
+  )
+
+  const facetOptions: PricingFacetOption[] = result.rows.map((row) => ({
+    rowCount: row.row_count,
+    selected: selectedSet.has(row.value),
+    value: row.value,
+  }))
+
+  // Append any selected values that fell out of the candidate set so the
+  // reviewer can always see (and uncheck) what they've already picked.
+  for (const selected of selectedSet) {
+    if (!facetOptions.some((option) => option.value === selected)) {
+      facetOptions.push({ rowCount: 0, selected: true, value: selected })
+    }
+  }
+
+  return { facet, filters: query, options: facetOptions }
 }
 
 export async function listPricingRuns(
@@ -484,81 +763,6 @@ export async function listPricingReviewItems(
   }
 }
 
-function buildPricingScopeWhere(
-  filters: PricingScopePreviewQuery,
-  options?: { scopedProductIds?: number[] },
-): { productCountSql: string; values: unknown[]; whereSql: string } {
-  const clauses: string[] = []
-  const values: unknown[] = []
-  const snapshotProductsSql = `
-    case
-      when jsonb_typeof(latest_snapshot.state_json -> 'products') = 'array' then latest_snapshot.state_json -> 'products'
-      else '[]'::jsonb
-    end
-  `.trim()
-  let productCountSql = `
-    coalesce(
-      case
-        when latest_snapshot.state_json is null then 0
-        when jsonb_typeof(latest_snapshot.state_json -> 'products') = 'array'
-          then jsonb_array_length(latest_snapshot.state_json -> 'products')
-        else 0
-      end,
-      0
-    )::int
-  `.trim()
-
-  if (filters.brand) {
-    values.push(filters.brand)
-    clauses.push(`cg.brand_name = $${values.length}`)
-  }
-  if (filters.category) {
-    values.push(filters.category)
-    clauses.push(`cg.category_name = $${values.length}`)
-  }
-  if (filters.subcategory) {
-    values.push(filters.subcategory)
-    clauses.push(`cg.subcategory_name = $${values.length}`)
-  }
-  if (filters.search) {
-    values.push(`%${filters.search}%`)
-    const searchParam = `$${values.length}`
-    clauses.push(`(
-      cg.group_name ilike ${searchParam}
-      or coalesce(cg.brand_name, '') ilike ${searchParam}
-      or exists (
-        select 1
-        from jsonb_array_elements(${snapshotProductsSql}) as product
-        where coalesce(product ->> 'name', '') ilike ${searchParam}
-          or coalesce(product ->> 'shortName', '') ilike ${searchParam}
-      )
-    )`)
-  }
-
-  if (filters.liveBronxInventory || filters.liveMidtownInventory || filters.midtownEverReceived) {
-    values.push(options?.scopedProductIds ?? [])
-    const scopedProductIdsParam = `$${values.length}::int[]`
-    clauses.push(`exists (
-      select 1
-      from jsonb_array_elements(${snapshotProductsSql}) as product
-      where (product ->> 'productId') ~ '^[0-9]+$'
-        and (product ->> 'productId')::int = any(${scopedProductIdsParam})
-    )`)
-    productCountSql = `(
-      select count(*)::int
-      from jsonb_array_elements(${snapshotProductsSql}) as product
-      where (product ->> 'productId') ~ '^[0-9]+$'
-        and (product ->> 'productId')::int = any(${scopedProductIdsParam})
-    )`
-  }
-
-  return {
-    productCountSql,
-    values,
-    whereSql: clauses.length > 0 ? `where ${clauses.join(' and ')}` : '',
-  }
-}
-
 function buildPricingRunWhere(filters: PricingRunListQuery): { values: unknown[]; whereSql: string } {
   const clauses: string[] = [`pb.type = 'pricing'`]
   const values: unknown[] = []
@@ -880,26 +1084,77 @@ function readNumberArray(value: JsonValue | undefined): number[] {
     .filter((candidate): candidate is number => typeof candidate === 'number' && Number.isInteger(candidate) && candidate > 0)
 }
 
+function readStringArray(value: JsonValue | undefined): string[] {
+  if (!Array.isArray(value)) {
+    return []
+  }
+  const out: string[] = []
+  for (const item of value) {
+    if (typeof item === 'string') {
+      const trimmed = item.trim()
+      if (trimmed.length > 0) {
+        out.push(trimmed)
+      }
+    }
+  }
+  return [...new Set(out)]
+}
+
+function readSiteKeys(value: JsonValue | undefined): PricingSiteKey[] {
+  const candidates = readStringArray(value)
+  return candidates.filter((candidate): candidate is PricingSiteKey =>
+    candidate === 'bronx' || candidate === 'midtown',
+  )
+}
+
 function readSelectionFilters(value: JsonValue | undefined): PricingRunDetailResponse['run']['selectionFilters'] {
   const objectValue = readObject(value)
   if (Object.keys(objectValue).length === 0) {
     return null
   }
 
+  // Migrate old single-value fields (`brand`, `category`, `subcategory`,
+  // `liveBronxInventory`, `liveMidtownInventory`, `midtownEverReceived`)
+  // into the new array/site shape so historical run detail pages keep
+  // rendering useful labels.
+  const legacyBrand = readString(objectValue.brand)
+  const legacyCategory = readString(objectValue.category)
+  const legacySubcategory = readString(objectValue.subcategory)
+  const brands = readStringArray(objectValue.brands)
+  const categories = readStringArray(objectValue.categories)
+  const subcategories = readStringArray(objectValue.subcategories)
+  if (legacyBrand && !brands.includes(legacyBrand)) brands.push(legacyBrand)
+  if (legacyCategory && !categories.includes(legacyCategory)) categories.push(legacyCategory)
+  if (legacySubcategory && !subcategories.includes(legacySubcategory)) subcategories.push(legacySubcategory)
+
+  const sites = readSiteKeys(objectValue.sites)
+  if (sites.length === 0) {
+    if (objectValue.liveBronxInventory === true) sites.push('bronx')
+    if (objectValue.liveMidtownInventory === true) sites.push('midtown')
+  }
+  const stockOnly = objectValue.stockOnly === true
+    || objectValue.liveBronxInventory === true
+    || objectValue.liveMidtownInventory === true
+    || objectValue.inStockOnly === true
+  const includePending = objectValue.includePending === true
+  const strict = objectValue.strict === true
+
   return {
-    brand: readString(objectValue.brand) ?? undefined,
-    category: readString(objectValue.category) ?? undefined,
-    liveBronxInventory: objectValue.liveBronxInventory === true || objectValue.inStockOnly === true,
-    liveMidtownInventory: objectValue.liveMidtownInventory === true || objectValue.inStockOnly === true,
-    midtownEverReceived: objectValue.midtownEverReceived === true,
+    brands,
+    categories,
+    includePending,
     search: readString(objectValue.search) ?? undefined,
-    subcategory: readString(objectValue.subcategory) ?? undefined,
+    sites,
+    stockOnly,
+    strict,
+    subcategories,
   }
 }
 
 function readScopeKind(value: JsonValue | undefined): PricingRunScopeKind | null {
   switch (value) {
     case 'explicit_selection':
+    case 'family_expansion_from_stock_or_pending':
     case 'filtered_catalog':
     case 'full_catalog':
     case 'saved_profile':
@@ -924,7 +1179,7 @@ function readTriggerSource(value: JsonValue | undefined): PricingRunTriggerSourc
 function deriveScopeLabel(scopeKind: PricingRunScopeKind, config: Record<string, JsonValue>): string {
   const selectionFilters = readSelectionFilters(config.selectionFilters)
   if (scopeKind === 'full_catalog') {
-    const liveInventoryScopeLabel = buildLiveInventoryScopeLabel(selectionFilters)
+    const liveInventoryScopeLabel = buildProductScopeLabels(selectionFilters).join(' · ')
     return liveInventoryScopeLabel ? `${liveInventoryScopeLabel} catalog` : 'Full catalog'
   }
   if (scopeKind === 'explicit_selection') {
@@ -934,22 +1189,27 @@ function deriveScopeLabel(scopeKind: PricingRunScopeKind, config: Record<string,
     return 'Single product'
   }
   if (selectionFilters) {
-    const parts = [selectionFilters.brand, selectionFilters.category, selectionFilters.subcategory, selectionFilters.search]
-      .filter((value): value is string => Boolean(value))
+    const parts: string[] = []
+    if (selectionFilters.brands.length > 0) parts.push(selectionFilters.brands.join(', '))
+    if (selectionFilters.categories.length > 0) parts.push(selectionFilters.categories.join(', '))
+    if (selectionFilters.subcategories.length > 0) parts.push(selectionFilters.subcategories.join(', '))
+    if (selectionFilters.search) parts.push(selectionFilters.search)
     const productScopeLabels = buildProductScopeLabels(selectionFilters)
     if (productScopeLabels.length > 0) {
       parts.push(...productScopeLabels)
+    }
+    if (scopeKind === 'family_expansion_from_stock_or_pending') {
+      parts.unshift(selectionFilters.strict ? 'Stock+pending (strict)' : 'Family expansion')
     }
     if (parts.length > 0) {
       return parts.join(' · ')
     }
   }
 
+  if (scopeKind === 'family_expansion_from_stock_or_pending') {
+    return 'Family expansion'
+  }
   return 'Filtered catalog'
-}
-
-function buildLiveInventoryScopeLabel(selectionFilters: PricingRunDetailResponse['run']['selectionFilters']): string {
-  return buildProductScopeLabels(selectionFilters).join(' · ')
 }
 
 function buildProductScopeLabels(selectionFilters: PricingRunDetailResponse['run']['selectionFilters']): string[] {
@@ -957,18 +1217,15 @@ function buildProductScopeLabels(selectionFilters: PricingRunDetailResponse['run
     return []
   }
   const labels: string[] = []
-  if (selectionFilters.midtownEverReceived) {
-    labels.push('Midtown ever received')
+  const siteLabels = selectionFilters.sites
+    .map((siteKey) => (siteKey === 'bronx' ? 'Bronx' : 'Midtown'))
+  const siteSummary = siteLabels.length > 0 ? siteLabels.join('+') : null
+
+  if (selectionFilters.stockOnly) {
+    labels.push(siteSummary ? `${siteSummary} in stock` : 'In stock')
   }
-  if (selectionFilters.liveBronxInventory && selectionFilters.liveMidtownInventory) {
-    labels.push('Bronx + Midtown live inventory')
-    return labels
-  }
-  if (selectionFilters.liveBronxInventory) {
-    labels.push('Bronx live inventory')
-  }
-  if (selectionFilters.liveMidtownInventory) {
-    labels.push('Midtown live inventory')
+  if (selectionFilters.includePending) {
+    labels.push(siteSummary ? `${siteSummary} pending purchases` : 'Pending purchases')
   }
   return labels
 }
