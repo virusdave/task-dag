@@ -603,6 +603,11 @@ function generateReplaceCSV(
   const rows: CSVRow[] = [];
   const messages: string[] = [];
   let rowNumber = 1;
+  // Track which source ad_ids we've already emitted a pause-source
+  // row for (we may have multiple suggested_new_creatives per
+  // source — they should all be created in the freed slot from
+  // pausing the source, not each demanding their own).
+  const sourceAdsPaused = new Set<string>();
 
   for (const family of l2Output.families) {
     const replaceActions = (family.ad_actions ?? []).filter((a) => actionTypeIs(a, 'replace'));
@@ -652,9 +657,41 @@ function generateReplaceCSV(
           );
           continue;
         }
+        // If the source ad is an ENABLED RSA, emit a pause row for
+        // it BEFORE we add the replacement (Editor processes the
+        // CSV as a single transaction). This keeps the enabled-RSA
+        // count net-zero per replace: pause source, add replacement.
+        //
+        // Without this, repeated `replace` proposals on the same
+        // group steadily push enabled count past Google's hard
+        // limit of 3 — the exact symptom the operator reported
+        // ("You've exceeded the limit of 3 enabled responsive
+        // search ads per ad group").
+        //
+        // Only paused once per source even if the LLM produced
+        // multiple suggested_new_creatives variants.
+        if (
+          knownAd &&
+          (knownAd.ad_type ?? '').toLowerCase() === 'responsive_search_ad' &&
+          (knownAd.ad_status ?? '').toLowerCase() === 'enabled' &&
+          !sourceAdsPaused.has(adId)
+        ) {
+          sourceAdsPaused.add(adId);
+          rsaCap.release(campaign, adGroup);
+          rows.push({
+            row_number: rowNumber++,
+            data: {
+              ...contextColumnsFor(knownAd),
+              'Ad ID': adId,
+              'Ad status': 'Paused',
+            },
+            source_action_id: adId,
+            notes: `Source paused — replaced by following row(s)`,
+          });
+        }
         // ≤3 RSAs per ad group across the whole bundle (existing +
-        // newly emitted). Google hard limit; over-emit gets the
-        // entire CSV bounced by Ads Editor.
+        // newly emitted, minus auto-paused sources). Google hard
+        // limit; over-emit gets the entire CSV bounced by Editor.
         const reservation = rsaCap.tryReserve(campaign, adGroup);
         if (!reservation.ok) {
           messages.push(`replace variant for ${adId} skipped: ${reservation.reason}`);

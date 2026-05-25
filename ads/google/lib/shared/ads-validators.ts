@@ -109,6 +109,38 @@ export interface SanitizeReport {
 }
 
 /**
+ * Canonical key for "is this headline/description the same one we
+ * already kept?" — purposely more aggressive than `toLowerCase()` so
+ * we never trip Google's "All headlines must be different" rejection
+ * via near-duplicates that only differ in trailing punctuation,
+ * whitespace, smart quotes, or zero-width characters.
+ *
+ * Google's exact comparator isn't public, so we intentionally bias
+ * toward false-positive dedup: better to drop a near-duplicate than
+ * to ship a CSV that bounces because two headlines were "too
+ * similar" by Google's policy check.
+ *
+ * Normalizations applied:
+ *   - NFKC unicode normalize (collapses smart quotes, etc.)
+ *   - strip zero-width chars
+ *   - lowercase (locale 'en-US')
+ *   - trim + collapse internal whitespace
+ *   - drop ALL punctuation and symbols
+ *   - drop ALL whitespace (so "best weed nyc" and "bestweednyc"
+ *     collide too — operator-intent identical)
+ */
+export function googleAdTextDedupeKey(raw: string): string {
+  return raw
+    .normalize('NFKC')
+    .replace(/[\u200B-\u200D\uFEFF]/g, '')
+    .toLocaleLowerCase('en-US')
+    .trim()
+    .replace(/\s+/g, ' ')
+    .replace(/[\p{P}\p{S}]/gu, '')
+    .replace(/\s+/g, '')
+}
+
+/**
  * Clean a list of candidate headlines, dropping ones that can't be
  * salvaged. Output preserves input order. Caller should treat
  * `dropped` entries as warnings and check `kept.length` against
@@ -144,8 +176,16 @@ export function sanitizeHeadlinesReport(input: unknown[]): SanitizeReport {
       })
       continue
     }
-    const key = s.toLowerCase()
-    if (seen.has(key)) continue
+    const key = googleAdTextDedupeKey(s)
+    if (key.length === 0) continue
+    if (seen.has(key)) {
+      dropped.push({
+        value: s,
+        reason:
+          'duplicate headline after Google-style normalization — Google rejects RSAs with identical headlines',
+      })
+      continue
+    }
     seen.add(key)
     kept.push(s)
   }
@@ -183,8 +223,16 @@ export function sanitizeDescriptionsReport(input: unknown[]): SanitizeReport {
       })
       continue
     }
-    const key = s.toLowerCase()
-    if (seen.has(key)) continue
+    const key = googleAdTextDedupeKey(s)
+    if (key.length === 0) continue
+    if (seen.has(key)) {
+      dropped.push({
+        value: s,
+        reason:
+          'duplicate description after Google-style normalization',
+      })
+      continue
+    }
     seen.add(key)
     kept.push(s)
   }
@@ -241,10 +289,24 @@ export function validateSitelinkRow(row: SitelinkRowLike): {
 export class RsaCapTracker {
   private counts = new Map<string, number>()
 
-  /** Seed from snapshot ads so we count existing live RSAs. */
-  seedFromSnapshot(ads: Iterable<{ campaign_name?: string; ad_group_name?: string; ad_type?: string }>): void {
+  /**
+   * Seed from snapshot ads so we count existing live RSAs.
+   *
+   * IMPORTANT: Google's "≤3 RSAs per ad group" limit is on ENABLED
+   * RSAs only. Paused / removed RSAs do not consume capacity, so
+   * counting them would falsely block legitimate new emissions.
+   */
+  seedFromSnapshot(
+    ads: Iterable<{
+      campaign_name?: string
+      ad_group_name?: string
+      ad_type?: string
+      ad_status?: string
+    }>,
+  ): void {
     for (const ad of ads) {
-      if ((ad.ad_type ?? '') !== 'responsive_search_ad') continue
+      if ((ad.ad_type ?? '').trim().toLowerCase() !== 'responsive_search_ad') continue
+      if ((ad.ad_status ?? '').trim().toLowerCase() !== 'enabled') continue
       const key = this.keyOf(ad.campaign_name, ad.ad_group_name)
       if (!key) continue
       this.counts.set(key, (this.counts.get(key) ?? 0) + 1)
@@ -266,11 +328,28 @@ export class RsaCapTracker {
     if (current >= RSA_MAX_PER_AD_GROUP) {
       return {
         ok: false,
-        reason: `ad group "${adGroup}" already has ${current} RSAs (max ${RSA_MAX_PER_AD_GROUP}); skipping new RSA`,
+        reason: `ad group "${adGroup}" already has ${current} enabled RSAs (max ${RSA_MAX_PER_AD_GROUP}); skipping new RSA`,
       }
     }
     this.counts.set(key, current + 1)
     return { ok: true }
+  }
+
+  /**
+   * Free one slot back to the cap. Use this when the bundle ALSO
+   * emits a pause row for an enabled RSA in the same group (the
+   * canonical case: a `replace` action retires the source ad and
+   * creates a new one — net change in enabled count is 0).
+   *
+   * Floors at 0 so a buggy double-release can't make capacity
+   * temporarily appear larger than 3.
+   */
+  release(campaign: string, adGroup: string): void {
+    const key = this.keyOf(campaign, adGroup)
+    if (!key) return
+    const current = this.counts.get(key) ?? 0
+    if (current <= 0) return
+    this.counts.set(key, current - 1)
   }
 
   private keyOf(campaign?: string, adGroup?: string): string | null {

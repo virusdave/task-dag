@@ -160,6 +160,14 @@ main_prompt:
            internal `freshlybaked.nyc` host — sitelinks must go to
            the public landing-page site `freshlybaked.us`. A
            sitelink without a Final URL is also invalid.
+         • Every headline inside a single RSA MUST be DIFFERENT
+           from every other headline in that RSA — different
+           enough that case, whitespace, terminal punctuation,
+           hyphens, and smart-quote variations all read as the
+           same string. Google rejects "All headlines must be
+           different" on near-duplicates like "Shop just raided?"
+           + "Shop just raided!" + "shop just raided". Same rule
+           applies to descriptions.
 
     5. For trial `controls` and `variants`, prefer the structured
        form:
