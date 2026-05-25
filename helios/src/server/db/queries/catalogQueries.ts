@@ -195,7 +195,7 @@ export async function listCatalogGroups(
           group by pli.catalog_group_id
         ) li on li.catalog_group_id = cg.id
         ${whereSql}
-        order by cg.updated_at desc, cg.id desc
+        order by cg.last_synced_at desc, cg.id desc
         limit $${values.length + 1}
         offset $${values.length + 2}
       `,
