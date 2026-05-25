@@ -15,6 +15,15 @@ export interface L2PredictorConfig {
   llmClient: LLMClient;
   policyExperiences?: string;
   trialOutcomes?: string;
+  /**
+   * Optional markdown block listing landing pages with high
+   * `landing_page_issue_confidence` (computed by
+   * buildSnapshotFromCsv's sidecar). Appended to the per-family
+   * system prompt so the LLM knows to recommend `monitor` (not
+   * repair/pause) for impaired ads on these URLs — the URL is the
+   * blocker, no creative tweak will help.
+   */
+  landingPageSuspicionMarkdown?: string;
 }
 
 /**
@@ -165,7 +174,15 @@ export class L2LLMPredictor {
     // to every impaired ad in the family it's looking at. Total
     // wall time is roughly unchanged because the calls run
     // concurrently.
-    const baseSystemPrompt = this.promptConfig.main_prompt.system_prompt || '';
+    const baseSystemPromptRaw = this.promptConfig.main_prompt.system_prompt || '';
+    // Insert landing-page suspicion block AFTER the prompt body but
+    // BEFORE the L3 addenda, so the LP guidance is treated as a
+    // grounded fact about this snapshot rather than a meta-analysis
+    // observation. Order is: body → LP suspicion → L3 addenda.
+    const lpSuspicion = this.config.landingPageSuspicionMarkdown?.trim();
+    const baseSystemPrompt = lpSuspicion
+      ? `${baseSystemPromptRaw}\n\n## SUSPECT LANDING PAGES (URL is the problem, not the creative)\n\nThe operator analyzed how Google has graded each landing page in this snapshot. Pages below have multiple impaired ads but Google did NOT cite any specific creative policy topic — strong evidence the URL itself is what's blocking serving.\n\nFor any impaired ad whose \`final_url\` matches one of these, you MUST emit \`action_type: monitor\` (NOT repair, NOT replace, NOT pause), with a short justification like "URL flagged as landing-page suspect (confidence=X.XX); waiting on landing-page fix before churning creative". Repairing or replacing the creative on a URL-blocked ad is wasted effort — it will fail policy on the next review with the same outcome.\n\n${lpSuspicion}`
+      : baseSystemPromptRaw;
     // Append the L3 addenda (if any) under a clearly-fenced section
     // so the LLM can attribute the guidance to the meta-analysis
     // layer rather than the original prompt author.
@@ -471,13 +488,18 @@ function groupAdsByFamilyKey(
 export async function createL2Predictor(
   llmClient: LLMClient,
   promptConfigPath: string,
-  extra: { policyExperiences?: string; trialOutcomes?: string } = {}
+  extra: {
+    policyExperiences?: string;
+    trialOutcomes?: string;
+    landingPageSuspicionMarkdown?: string;
+  } = {}
 ): Promise<L2LLMPredictor> {
   const predictor = new L2LLMPredictor({
     llmClient,
     promptConfigPath,
     policyExperiences: extra.policyExperiences,
     trialOutcomes: extra.trialOutcomes,
+    landingPageSuspicionMarkdown: extra.landingPageSuspicionMarkdown,
   });
 
   await predictor.initialize();

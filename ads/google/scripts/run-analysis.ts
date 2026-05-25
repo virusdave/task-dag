@@ -26,6 +26,61 @@ interface CliArgs {
 }
 
 /**
+ * Mirror of buildSnapshotFromCsv.ts's SnapshotIssues. Kept as a
+ * local re-declaration so this script doesn't pull a runtime dep on
+ * the helios tree.
+ */
+interface AdGroupIssueRow {
+  campaign_name: string;
+  ad_group_name: string;
+  issue_code: string;
+  total_rsas: number;
+  enabled_rsas: number;
+  paused_rsas: number;
+  removed_rsas: number;
+  disapproved_rsas: number;
+  candidate_ad_ids: string[];
+  description: string;
+}
+interface LandingPageHealthRow {
+  final_url: string;
+  total_ads: number;
+  eligible_ads: number;
+  limited_ads: number;
+  disapproved_ads: number;
+  under_review_ads: number;
+  impaired_with_specific_topics: number;
+  impaired_without_topics: number;
+  landing_page_issue_confidence: number;
+}
+interface SnapshotIssuesFile {
+  generated_at: string;
+  ad_group_issues: AdGroupIssueRow[];
+  landing_page_health: LandingPageHealthRow[];
+}
+
+/**
+ * Format the high-confidence landing-page suspects into a short
+ * markdown block for the L2 system prompt.
+ */
+function formatLandingPageSuspicion(
+  health: LandingPageHealthRow[],
+  threshold = 0.5,
+): string | undefined {
+  const suspects = health.filter(
+    (h) => h.landing_page_issue_confidence >= threshold,
+  );
+  if (suspects.length === 0) return undefined;
+  const lines: string[] = [];
+  for (const s of suspects) {
+    lines.push(
+      `- \`${s.final_url}\` — confidence ${s.landing_page_issue_confidence.toFixed(2)} (${s.disapproved_ads} disapproved / ${s.limited_ads} limited / ${s.eligible_ads} eligible; ${s.impaired_without_topics} of ${s.impaired_with_specific_topics + s.impaired_without_topics} impaired ads have NO specific policy topic)`,
+    );
+  }
+  return lines.join('\n');
+}
+
+/**
  * Parse CLI arguments
  */
 function parseArgs(): CliArgs {
@@ -209,6 +264,23 @@ async function main() {
   console.log('\n📥 Loading snapshot...');
   const ads = await loadSnapshot(args.snapshotFile);
   console.log(`Loaded ${ads.length} ads`);
+
+  // Load issues sidecar emitted by buildSnapshotFromCsv. Optional
+  // (older snapshots predate it) so we degrade gracefully.
+  let snapshotIssues: SnapshotIssuesFile | null = null;
+  const issuesPath = `${args.snapshotFile}.issues.json`;
+  try {
+    snapshotIssues = JSON.parse(await fs.readFile(issuesPath, 'utf-8'));
+    console.log(
+      `📋 Loaded snapshot issues sidecar: ${snapshotIssues!.ad_group_issues.length} ad-group issues, ${snapshotIssues!.landing_page_health.length} landing-page health rows`,
+    );
+  } catch (e: any) {
+    if (e.code === 'ENOENT') {
+      console.log(`(no issues sidecar at ${issuesPath} — skipping landing-page suspicion analysis)`);
+    } else {
+      console.warn(`⚠️  Could not read issues sidecar: ${e.message}`);
+    }
+  }
   
   // Load config
   console.log('\n⚙️  Loading configuration...');
@@ -248,8 +320,33 @@ async function main() {
         console.warn(`⚠️  Could not read GADS_POLICY_EXPERIENCES_FILE=${policyExpFile}: ${(e as Error).message}`);
       }
     }
+    // Build landing-page suspicion markdown from sidecar (if any)
+    // so L2 prefers `monitor` for ads whose URL is the likely
+    // blocker, rather than burning creative cycles on them.
+    let landingPageSuspicionMarkdown: string | undefined = undefined;
+    if (snapshotIssues && snapshotIssues.landing_page_health.length > 0) {
+      landingPageSuspicionMarkdown = formatLandingPageSuspicion(
+        snapshotIssues.landing_page_health,
+      );
+      if (landingPageSuspicionMarkdown) {
+        const suspectCount = landingPageSuspicionMarkdown.split('\n').length;
+        console.log(`🎯 Passing ${suspectCount} suspect landing page(s) to L2 prompt`);
+      }
+    }
+    if (snapshotIssues && snapshotIssues.ad_group_issues.length > 0) {
+      const byCode = new Map<string, number>();
+      for (const r of snapshotIssues.ad_group_issues) {
+        byCode.set(r.issue_code, (byCode.get(r.issue_code) ?? 0) + 1);
+      }
+      const summary = [...byCode.entries()]
+        .map(([k, v]) => `${k}=${v}`)
+        .join(', ');
+      console.log(`🚨 Ad-group eligibility issues: ${summary}`);
+    }
+
     const predictor = await createL2Predictor(llmClient, promptPath, {
       policyExperiences,
+      landingPageSuspicionMarkdown,
     });
     l2Output = await predictor.predict(
       familySummaries,

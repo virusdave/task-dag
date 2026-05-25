@@ -8,6 +8,22 @@ import { createHash } from 'node:crypto'
  * "Responsive search ad" rows, and emits a JSONL snapshot in the
  * format the gads experiments-viz builder expects.
  *
+ * Also emits a SIDECAR `<outputPath>.issues.json` summarising:
+ *   - per-(campaign, ad_group) "stupid" eligibility issues
+ *     (no enabled RSAs, all RSAs paused, ads without Final URL),
+ *   - per-landing-page health (#ads using URL, how many are
+ *     limited / disapproved, how many have specific policy_topics
+ *     vs empty), with a `landing_page_issue_confidence` score that
+ *     indicates how likely the URL itself (not the creative) is
+ *     what's blocking serving.
+ *
+ * The morning pipeline reads the sidecar to:
+ *   - auto-fix ad-group emptiness (CSV 006),
+ *   - emit operator-facing "fix these landing pages" report
+ *     (CSV 007),
+ *   - tell L2 which ads NOT to repair/pause because the URL is
+ *     the real problem.
+ *
  * Keep behavior bit-exact with the Python version so the rest of the
  * pipeline (build-experiments-viz.py, L2/L3 analyzers) stays
  * unchanged.
@@ -21,10 +37,40 @@ const APPROVAL_TO_SERVING_STATUS: Record<string, string> = {
   'Under review': 'under_review',
 }
 
+// Google Ads Editor uses several column-name variants for the same
+// policy-disapproval reason data depending on export type and version.
+// We probe each row for the first variant that has content, and split
+// the resulting string on common delimiters ("; ", "|", ",").
+const POLICY_REASON_COLUMN_NAMES = [
+  'Policy Reasons',
+  'Policy reasons',
+  'Policy Reason',
+  'Policy reason',
+  'Disapproval reasons',
+  'Disapproval Reasons',
+  'Limitations',
+  'Policy summary',
+] as const
+
+function extractPolicyTopics(row: Record<string, string>): string[] {
+  for (const col of POLICY_REASON_COLUMN_NAMES) {
+    const raw = (row[col] ?? '').trim()
+    if (!raw) continue
+    return raw
+      .split(/\s*(?:;|\||\n)\s*/)
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0)
+  }
+  return []
+}
+
 export interface BuildSnapshotResult {
   adCount: number
   byServingStatus: Record<string, number>
   outputPath: string
+  issuesPath: string
+  stupidIssueCount: number
+  landingPageSuspectCount: number
 }
 
 export async function buildSnapshotFromCsv(args: {
@@ -177,7 +223,7 @@ export async function buildSnapshotFromCsv(args: {
       paths: [row['Path 1'] ?? '', row['Path 2'] ?? ''],
       final_url: row['Final URL'] ?? '',
       policy_status: approval.toLowerCase().replace(/ /g, '_'),
-      policy_topics: [],
+      policy_topics: extractPolicyTopics(row),
       serving_status: servingStatus,
       metrics,
       family_tags: familyTags,
@@ -210,7 +256,249 @@ export async function buildSnapshotFromCsv(args: {
   for (const ad of ads) {
     byServingStatus[ad.serving_status] = (byServingStatus[ad.serving_status] ?? 0) + 1
   }
-  return { adCount: ads.length, byServingStatus, outputPath: args.outputPath }
+
+  // ── Sidecar: ad-group + landing-page issues ───────────────────
+  // Compute per-(campaign, ad_group) "stupid" eligibility issues
+  // and per-landing-page health, writing a sibling `.issues.json`
+  // file the morning pipeline reads. Separate from the JSONL so old
+  // readers that ignore the sidecar stay bit-exact.
+  const issues = computeSnapshotIssues(ads)
+  const issuesPath = `${args.outputPath}.issues.json`
+  const issuesTmp = `${issuesPath}.${process.pid}.${Date.now()}.tmp`
+  await fs.writeFile(issuesTmp, JSON.stringify(issues, null, 2))
+  await fs.rename(issuesTmp, issuesPath)
+
+  return {
+    adCount: ads.length,
+    byServingStatus,
+    outputPath: args.outputPath,
+    issuesPath,
+    stupidIssueCount: issues.ad_group_issues.length,
+    landingPageSuspectCount: issues.landing_page_health.filter(
+      (lp) => lp.landing_page_issue_confidence >= 0.5,
+    ).length,
+  }
+}
+
+export interface AdGroupIssue {
+  campaign_name: string
+  ad_group_name: string
+  issue_code:
+    | 'no_enabled_rsas'
+    | 'all_rsas_paused'
+    | 'all_rsas_disapproved'
+    | 'no_rsas_at_all'
+  total_rsas: number
+  enabled_rsas: number
+  paused_rsas: number
+  removed_rsas: number
+  disapproved_rsas: number
+  /** ad_ids of candidate RSAs that could be enabled/repaired. */
+  candidate_ad_ids: string[]
+  description: string
+}
+
+export interface LandingPageHealth {
+  final_url: string
+  total_ads: number
+  eligible_ads: number
+  limited_ads: number
+  disapproved_ads: number
+  under_review_ads: number
+  /** Ads where Google told us a specific policy_topics[] reason. */
+  impaired_with_specific_topics: number
+  /** Ads that are limited/disapproved but Google gave no specific
+   * topic — strong signal the URL itself is the problem. */
+  impaired_without_topics: number
+  /** 0..1. Higher = stronger evidence the URL is the blocker. */
+  landing_page_issue_confidence: number
+}
+
+export interface SnapshotIssues {
+  generated_at: string
+  ad_group_issues: AdGroupIssue[]
+  landing_page_health: LandingPageHealth[]
+}
+
+function computeSnapshotIssues(ads: SnapshotAd[]): SnapshotIssues {
+  // ── ad-group level ──
+  type GroupBucket = { campaign: string; group: string; ads: SnapshotAd[] }
+  const groupBuckets = new Map<string, GroupBucket>()
+  for (const ad of ads) {
+    const key = `${ad.campaign_name}\u001f${ad.ad_group_name}`
+    let b = groupBuckets.get(key)
+    if (!b) {
+      b = { campaign: ad.campaign_name, group: ad.ad_group_name, ads: [] }
+      groupBuckets.set(key, b)
+    }
+    b.ads.push(ad)
+  }
+
+  const adGroupIssues: AdGroupIssue[] = []
+  for (const b of groupBuckets.values()) {
+    if (!b.group) continue
+    const total = b.ads.length
+    const enabled = b.ads.filter((a) => a.ad_status === 'enabled').length
+    const paused = b.ads.filter((a) => a.ad_status === 'paused').length
+    const removed = b.ads.filter((a) => a.ad_status === 'removed').length
+    const disapproved = b.ads.filter(
+      (a) => a.serving_status === 'not_eligible',
+    ).length
+
+    const base = {
+      campaign_name: b.campaign,
+      ad_group_name: b.group,
+      total_rsas: total,
+      enabled_rsas: enabled,
+      paused_rsas: paused,
+      removed_rsas: removed,
+      disapproved_rsas: disapproved,
+    }
+
+    if (total === 0) {
+      // Shouldn't happen — group buckets are derived from `ads` — but
+      // keep the case explicit so downstream readers don't have to
+      // guess.
+      adGroupIssues.push({
+        ...base,
+        issue_code: 'no_rsas_at_all',
+        candidate_ad_ids: [],
+        description:
+          'Ad group has zero RSAs in the snapshot — likely a brand-new ' +
+          'group whose ads never landed in the export. Needs at least one ' +
+          'RSA before it can serve.',
+      })
+    } else if (enabled === 0 && paused > 0) {
+      // The most common "no actual ads" symptom: there ARE RSAs but
+      // every one is paused. We can flip one back on with a CSV row.
+      adGroupIssues.push({
+        ...base,
+        issue_code: 'all_rsas_paused',
+        candidate_ad_ids: b.ads
+          .filter((a) => a.ad_status === 'paused')
+          .map((a) => a.ad_id),
+        description:
+          'Every RSA in this ad group is paused. Pick one and re-enable ' +
+          'it via the auto-fix CSV.',
+      })
+    } else if (enabled === 0 && total > 0) {
+      // All removed, or some other non-enabled state.
+      adGroupIssues.push({
+        ...base,
+        issue_code: 'no_enabled_rsas',
+        candidate_ad_ids: b.ads.map((a) => a.ad_id),
+        description:
+          'No enabled RSAs in this ad group (all are removed / other ' +
+          'non-enabled). Group cannot serve.',
+      })
+    } else if (
+      enabled > 0 &&
+      disapproved === enabled &&
+      // Only flag when EVERY enabled ad is disapproved — a single
+      // disapproved ad among many isn't an ad-group-level emergency.
+      enabled >= 1
+    ) {
+      adGroupIssues.push({
+        ...base,
+        issue_code: 'all_rsas_disapproved',
+        candidate_ad_ids: b.ads
+          .filter((a) => a.serving_status === 'not_eligible')
+          .map((a) => a.ad_id),
+        description:
+          'Every enabled RSA in this ad group is disapproved. The group ' +
+          'serves zero impressions until at least one is repaired or ' +
+          'replaced.',
+      })
+    }
+  }
+
+  // ── landing-page level ──
+  type LpBucket = {
+    url: string
+    eligible: number
+    limited: number
+    disapproved: number
+    underReview: number
+    withTopics: number
+    withoutTopics: number
+  }
+  const lpBuckets = new Map<string, LpBucket>()
+  for (const ad of ads) {
+    const url = (ad.final_url ?? '').trim()
+    if (!url) continue
+    let lp = lpBuckets.get(url)
+    if (!lp) {
+      lp = {
+        url,
+        eligible: 0,
+        limited: 0,
+        disapproved: 0,
+        underReview: 0,
+        withTopics: 0,
+        withoutTopics: 0,
+      }
+      lpBuckets.set(url, lp)
+    }
+    if (ad.serving_status === 'eligible') lp.eligible++
+    else if (ad.serving_status === 'eligible_limited') lp.limited++
+    else if (ad.serving_status === 'not_eligible') lp.disapproved++
+    else if (ad.serving_status === 'under_review') lp.underReview++
+
+    const impaired =
+      ad.serving_status === 'eligible_limited' ||
+      ad.serving_status === 'not_eligible'
+    if (impaired) {
+      if ((ad.policy_topics?.length ?? 0) > 0) lp.withTopics++
+      else lp.withoutTopics++
+    }
+  }
+
+  const landingPageHealth: LandingPageHealth[] = []
+  for (const lp of lpBuckets.values()) {
+    const total = lp.eligible + lp.limited + lp.disapproved + lp.underReview
+    const impaired = lp.limited + lp.disapproved
+    // Confidence heuristic:
+    //   - need ≥2 impaired ads on this URL to claim anything
+    //   - confidence = impaired_without_topics / impaired_total
+    //   - scaled down slightly if eligible ads exist on the same URL
+    //     (because then the URL clearly CAN serve, so the impairments
+    //     are more likely creative-side)
+    let confidence = 0
+    if (impaired >= 2) {
+      const noTopicsRatio = lp.withoutTopics / Math.max(1, impaired)
+      const eligibleDamping = lp.eligible > 0 ? 0.6 : 1.0
+      confidence = noTopicsRatio * eligibleDamping
+    }
+    landingPageHealth.push({
+      final_url: lp.url,
+      total_ads: total,
+      eligible_ads: lp.eligible,
+      limited_ads: lp.limited,
+      disapproved_ads: lp.disapproved,
+      under_review_ads: lp.underReview,
+      impaired_with_specific_topics: lp.withTopics,
+      impaired_without_topics: lp.withoutTopics,
+      landing_page_issue_confidence: Math.round(confidence * 100) / 100,
+    })
+  }
+  // Sort: highest-confidence URLs first, ties broken by impaired
+  // count so the operator sees the worst-bleeding pages on top.
+  landingPageHealth.sort((a, b) => {
+    if (b.landing_page_issue_confidence !== a.landing_page_issue_confidence) {
+      return b.landing_page_issue_confidence - a.landing_page_issue_confidence
+    }
+    return (
+      b.limited_ads +
+      b.disapproved_ads -
+      (a.limited_ads + a.disapproved_ads)
+    )
+  })
+
+  return {
+    generated_at: new Date().toISOString(),
+    ad_group_issues: adGroupIssues,
+    landing_page_health: landingPageHealth,
+  }
 }
 
 interface SnapshotAd {
