@@ -26,16 +26,71 @@ import { callSweedRpc } from './rpc.js'
 // lifecycle.
 //
 // On Sweed RPC method names: the public Sweed API surface is
-// `store.*` (see existing usage in worker/jobs/, server/pricing/, etc.).
-// Customers are called "clients" inside Sweed's POS namespace and
-// marketing segments live under `store.marketing.segment.*`. The
-// concrete method strings are gathered here as named constants so
-// operator-verification against staging is a one-file change if any
-// of them prove different on the live RPC server.
+// `store.*`. The original A4 implementation guessed at the CRM
+// method strings (`store.client.list`, `store.client.add`,
+// `store.marketing.segment.member.{add,delete}`) — those guesses
+// did not match the live RPC surface and every production drawing
+// entry came back with "Action is not available" on the very
+// first call. We probed Sweed exhaustively (helios/scripts/
+// probe-sweed-customer-rpcs*.ts) and corrected what we could
+// verify; the rest are marked NEEDS_OPERATOR_VERIFICATION below.
+//
+// VERIFIED via live probe against prime.sweedpos.com under a
+// pool-claimed dealer-210705 session:
+//   - store.customer.list          : exists; returns paginated
+//                                    metadata + an empty `data`
+//                                    array regardless of search/
+//                                    filter we tried (the "in-
+//                                    store / takesShopping" page
+//                                    surface, not the CRM search).
+//   - store.customer.add           : exists but ALL payload shapes
+//                                    we tried returned "Parameters
+//                                    validation error" — required
+//                                    field shape unknown.
+//   - store.customer.get           : exists; expects `{ id }`.
+//   - store.customer.edit          : exists.
+//   - store.marketing.segment.list : exists; returns real segments
+//                                    (totalCustomers, type, etc.).
+//   - store.marketing.segment.get  : exists; expects `{ id }`.
+//   - store.marketing.segment.edit : exists; param shape for
+//                                    "set static members" unknown
+//                                    — every shape we tried was a
+//                                    silent no-op.
+//
+// NEEDS_OPERATOR_VERIFICATION (still failing in production):
+//   - The customer find-by-phone-or-email RPC.
+//     `store.customer.list` doesn't surface arbitrary CRM rows;
+//     `store.customer.{search,find,lookup,by.phone,…}` all return
+//     "Action is not available".
+//   - The "add customer to a static marketing segment" RPC.
+//     `store.marketing.segment.member.{add,delete}` etc. all
+//     return "Action is not available"; segment.edit silently
+//     accepts member-list-shaped params without mutating
+//     totalCustomers. The operator needs to capture the real RPC
+//     name + payload from Sweed's admin-UI network tab when they
+//     manually add a customer to a Static segment, and update the
+//     constants below.
 // =====================================================================
 
-export const SWEED_RPC_CLIENT_LIST = 'store.client.list'
-export const SWEED_RPC_CLIENT_ADD = 'store.client.add'
+// Verified: store.customer.list exists. Note: returns 0 rows in
+// every probe we ran; appears to be the POS "current-shoppers"
+// surface, not a CRM phone/email search. Kept here so that the
+// orchestrator at least gets a structured empty response (with
+// totalCount=0) instead of a "Action is not available" failure,
+// which lets us cleanly fall through to the create path.
+export const SWEED_RPC_CLIENT_LIST = 'store.customer.list'
+// store.customer.add exists; payload shape NOT YET VERIFIED. Every
+// attempted shape returns "Parameters validation error". The
+// orchestrator will continue to fail-and-log here until the
+// correct payload is identified.
+export const SWEED_RPC_CLIENT_ADD = 'store.customer.add'
+// NEEDS_OPERATOR_VERIFICATION. `store.marketing.segment.member.add`
+// returns "Action is not available" on live prod. Static-segment
+// member management appears to go through a different RPC we
+// haven't been able to identify by probing. Leaving the old value
+// here so failures are still recorded with a recognizable trail —
+// retire this once the real method name is captured from the
+// Sweed admin UI.
 export const SWEED_RPC_SEGMENT_MEMBER_ADD = 'store.marketing.segment.member.add'
 export const SWEED_RPC_SEGMENT_MEMBER_DELETE = 'store.marketing.segment.member.delete'
 

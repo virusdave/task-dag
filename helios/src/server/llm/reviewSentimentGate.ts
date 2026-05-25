@@ -59,7 +59,13 @@ export interface ReviewLlmGateOutput {
 // classification is a quick decision and we don't want to spend
 // 30s waiting on a high-end model while the customer's browser
 // hangs on the submit POST.
-const REVIEW_GATE_MODEL = 'anthropic.claude-3-5-haiku-20241022-v1:0'
+// Bedrock-mantle gateway proxies to Anthropic's native API
+// (`{"error":{"code":"not_found_error",…}}` shape on bad model), so
+// model names need to be Anthropic's API format — not the AWS
+// Bedrock ARN-style `anthropic.<model>-v1:0`. The previous value
+// `anthropic.claude-3-5-haiku-20241022-v1:0` was the Bedrock form
+// and was rejected by the proxy with "model not found".
+const REVIEW_GATE_MODEL = 'claude-3-5-haiku-20241022'
 
 const SYSTEM_PROMPT = [
   'You are a strict review-classification assistant for a New York cannabis retailer.',
