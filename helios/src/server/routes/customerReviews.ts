@@ -4,6 +4,8 @@ import {
   CustomerReviewActionForceSegmentRequestSchema,
   CustomerReviewActionMarkFraudulentRequestSchema,
   CustomerReviewActionResponseSchema,
+  CustomerReviewAddCandidateToSegmentRequestSchema,
+  CustomerReviewCandidatePurchasesResponseSchema,
   CustomerReviewDrawingEntryRequestSchema,
   CustomerReviewDrawingEntryResponseSchema,
   CustomerReviewDrawingListResponseSchema,
@@ -50,6 +52,13 @@ import {
   performForceSegmentRemove,
   type PerSegmentOutcome,
 } from '../customerReviews/segmentOrchestrator.js'
+import {
+  loadCandidatePurchases,
+  LOOK_AHEAD_MINUTES,
+  LOOK_BACK_MINUTES,
+} from '../customerReviews/candidatePurchases.js'
+import { addSegmentMember } from '../../worker/sweed/customers.js'
+import { withSweedSession } from '../../worker/sweed/session.js'
 import {
   buildTemplateVars,
   pickTemplateKind,
@@ -895,6 +904,161 @@ export async function registerCustomerReviewsRoutes(server: FastifyInstance): Pr
           await buildActionResponse(
             request.params.submissionId,
             `Force-add ${parsed.segment} → ${outcome.status}${outcome.error ? `: ${outcome.error}` : ''}`,
+          ),
+        )
+      } catch (error) {
+        if (isMissingReviewTableError(error)) {
+          return reply.status(503).send({ error: MIGRATION_HINT })
+        }
+        throw error
+      }
+    },
+  )
+
+  // ------------------------- internal GET /api/customer-reviews/:id/candidate-purchases
+  //
+  // List Sweed retail invoices around the submission moment, ranked
+  // by time-proximity, so the operator can attach a likely-buyer
+  // when the submission carries no phone/email. Opens its own
+  // withSweedSession; errors bubble to the SPA so the panel can show
+  // "Sweed lookup failed: <reason>" instead of silently empty.
+  server.get<{ Params: { submissionId: string } }>(
+    '/api/customer-reviews/:submissionId/candidate-purchases',
+    async (request, reply) => {
+      const user = await requireSessionUser(request, reply, 'viewer')
+      if (!user) return
+      try {
+        const detail = await getReviewSubmissionDetail(getPool(), request.params.submissionId)
+        if (detail === null) {
+          return reply.status(404).send({ error: 'Unknown submission_id' })
+        }
+        const candidates = await loadCandidatePurchases({
+          dealerId: detail.dealerId,
+          submittedAt: detail.createdAt,
+        })
+        return reply.send(
+          CustomerReviewCandidatePurchasesResponseSchema.parse({
+            submissionId: request.params.submissionId,
+            submittedAt: detail.createdAt.toISOString(),
+            candidates,
+            lookBackMinutes: LOOK_BACK_MINUTES,
+            lookAheadMinutes: LOOK_AHEAD_MINUTES,
+          }),
+        )
+      } catch (error) {
+        if (isMissingReviewTableError(error)) {
+          return reply.status(503).send({ error: MIGRATION_HINT })
+        }
+        const message = error instanceof Error ? error.message : String(error)
+        return reply.status(502).send({ error: `Sweed lookup failed: ${message}` })
+      }
+    },
+  )
+
+  // ------------------------- internal POST /api/customer-reviews/:id/candidate-purchases/add-to-segment
+  //
+  // Operator picked a candidate row. We:
+  //   1. Persist its phone / email / name on review_contact_info so
+  //      the Contacts cell stops being empty next reload.
+  //   2. Ensure a drawing_entry row exists so the same segment outcome
+  //      columns the existing UI already renders pick this up.
+  //   3. Call Sweed addSegmentMember directly with the candidate's
+  //      client id (we skip find-or-create — the candidate already
+  //      gave us the id).
+  //   4. Persist the outcome (status + customer id) on the
+  //      drawing-entry row.
+  server.post<{ Params: { submissionId: string } }>(
+    '/api/customer-reviews/:submissionId/candidate-purchases/add-to-segment',
+    async (request, reply) => {
+      const user = await requireSessionUser(request, reply, 'editor')
+      if (!user) return
+      try {
+        const parsed = CustomerReviewAddCandidateToSegmentRequestSchema.parse(
+          request.body ?? {},
+        )
+        const detail = await getReviewSubmissionDetail(getPool(), request.params.submissionId)
+        if (detail === null) {
+          return reply.status(404).send({ error: 'Unknown submission_id' })
+        }
+        const settings = await getSiteReviewSettings(getPool(), detail.dealerId)
+        if (settings === null) {
+          return reply.status(404).send({ error: 'Site config missing for submission.' })
+        }
+        const segmentId = pickConfiguredSegmentId(settings, parsed.segment)
+        if (segmentId === null) {
+          return reply.status(409).send({
+            error: `Per-site ${parsed.segment} segment id is NULL — set it in site_review_settings first.`,
+          })
+        }
+
+        // 1) Persist candidate's contact fields so the Contacts column
+        //    stops showing "—". Skip blanks.
+        const newContacts: Array<{ kind: 'phone' | 'email' | 'name'; value: string }> = []
+        if (parsed.contactPhone && parsed.contactPhone.trim().length > 0) {
+          newContacts.push({ kind: 'phone', value: parsed.contactPhone.trim() })
+        }
+        if (parsed.contactEmail && parsed.contactEmail.trim().length > 0) {
+          newContacts.push({ kind: 'email', value: parsed.contactEmail.trim() })
+        }
+        if (parsed.contactName && parsed.contactName.trim().length > 0) {
+          newContacts.push({ kind: 'name', value: parsed.contactName.trim() })
+        }
+        if (newContacts.length > 0) {
+          await insertContactInfoRows(getPool(), request.params.submissionId, newContacts)
+        }
+
+        // 2) Ensure a drawing_entry row exists. The unique index makes
+        //    this idempotent for submissions that already have one.
+        const entry = await insertDrawingEntry(
+          getPool(),
+          request.params.submissionId,
+          detail.dealerId,
+          detail.drawing?.acceptedPasteOffer ?? false,
+        )
+        if (entry === null) {
+          return reply.status(500).send({ error: 'Could not create drawing entry.' })
+        }
+
+        // 3) Call Sweed directly with the candidate's client id.
+        let outcome: PerSegmentOutcome
+        try {
+          await withSweedSession(() =>
+            addSegmentMember({
+              dealerId: detail.dealerId,
+              segmentId,
+              customerId: parsed.sweedClientId,
+            }),
+          )
+          outcome = {
+            status: 'added',
+            error: null,
+            segmentId,
+            attemptedAt: new Date(),
+          }
+        } catch (error) {
+          outcome = {
+            status: 'failed',
+            error: error instanceof Error ? error.message : String(error),
+            segmentId,
+            attemptedAt: new Date(),
+          }
+        }
+
+        // 4) Persist outcome on the drawing entry (alongside the
+        //    chosen sweed_customer_id).
+        await setDrawingEntrySingleSegmentOutcome(
+          getPool(),
+          entry.drawingEntryId,
+          parsed.segment === 'drawing' ? 'drawing' : 'free_preroll',
+          outcome,
+          parsed.sweedClientId,
+        )
+
+        const invoiceLabel = parsed.invoiceId ? ` (invoice ${parsed.invoiceId})` : ''
+        return reply.send(
+          await buildActionResponse(
+            request.params.submissionId,
+            `Candidate add ${parsed.segment}${invoiceLabel} → ${outcome.status}${outcome.error ? `: ${outcome.error}` : ''}`,
           ),
         )
       } catch (error) {

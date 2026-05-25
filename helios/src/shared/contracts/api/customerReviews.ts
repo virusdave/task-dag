@@ -230,6 +230,65 @@ export const CustomerReviewActionResponseSchema = z.object({
 })
 export type CustomerReviewActionResponse = z.infer<typeof CustomerReviewActionResponseSchema>
 
+// --------------------------- candidate purchases ---------------------
+//
+// When a review submission has no captured phone/email, the Helios
+// /reviews page surfaces the few retail invoices the dealer rang up
+// in the minutes around the submission so the operator can pick a
+// likely match. Ranking is purely by time proximity to the
+// submission moment (closer wins); confidence is normalized 0..1.
+// See server/customerReviews/candidatePurchases.ts.
+
+export const CustomerReviewPurchaseCandidateSchema = z.object({
+  invoiceId: z.string().nullable(),
+  saleTime: z.string(),
+  deltaSeconds: z.number().int(),
+  confidence: z.number().min(0).max(1),
+  total: z.number().nullable(),
+  clientId: z.number().int().nullable(),
+  clientName: z.string().nullable(),
+  clientPhone: z.string().nullable(),
+  clientEmail: z.string().nullable(),
+})
+export type CustomerReviewPurchaseCandidate = z.infer<
+  typeof CustomerReviewPurchaseCandidateSchema
+>
+
+export const CustomerReviewCandidatePurchasesResponseSchema = z.object({
+  submissionId: z.string().uuid(),
+  // When the caller asks for candidates on a submission that already
+  // has contacts, we still return them (the operator may want to
+  // cross-reference); the SPA only auto-opens the panel when contacts
+  // is empty.
+  submittedAt: z.string(),
+  candidates: z.array(CustomerReviewPurchaseCandidateSchema),
+  // Echo the window we asked Sweed for so the operator can see what
+  // we searched without re-deriving it.
+  lookBackMinutes: z.number().int().positive(),
+  lookAheadMinutes: z.number().int().positive(),
+})
+export type CustomerReviewCandidatePurchasesResponse = z.infer<
+  typeof CustomerReviewCandidatePurchasesResponseSchema
+>
+
+export const CustomerReviewAddCandidateToSegmentRequestSchema = z.object({
+  segment: SegmentKindSchema,
+  // Sweed client id from the candidate row. Required — this is the
+  // whole point of the surface vs. the contact-based force-add path.
+  sweedClientId: z.number().int().positive(),
+  // Contact fields the candidate row exposed; persisted on
+  // review_contact_info so the Contacts cell stops being empty
+  // once the operator picks a candidate.
+  contactPhone: z.string().nullable().optional(),
+  contactEmail: z.string().nullable().optional(),
+  contactName: z.string().nullable().optional(),
+  // Convenience for the audit message; the server doesn't trust it.
+  invoiceId: z.string().nullable().optional(),
+})
+export type CustomerReviewAddCandidateToSegmentRequest = z.infer<
+  typeof CustomerReviewAddCandidateToSegmentRequestSchema
+>
+
 // --------------------------- A5 drawing list -------------------------
 
 export const CustomerReviewDrawingListItemSchema = z.object({

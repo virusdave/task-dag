@@ -354,6 +354,7 @@ export async function markSubmissionFraudulent(
 export interface CustomerReviewDetailRow {
   submissionId: string
   dealerId: number
+  createdAt: Date
   starRating: number | null
   reviewText: string | null
   submissionKind: 'form' | 'drawing' | 'other'
@@ -389,7 +390,8 @@ export async function getReviewSubmissionDetail(
 ): Promise<CustomerReviewDetailRow | null> {
   const submissionResult = await db.query(
     `select id, dealer_id, star_rating, review_text, submission_kind,
-            llm_verdict, degraded_pass, review_provider_url, fraud_marked
+            llm_verdict, degraded_pass, review_provider_url, fraud_marked,
+            created_at
      from review_submissions where id = $1`,
     [submissionId],
   )
@@ -421,6 +423,10 @@ export async function getReviewSubmissionDetail(
   return {
     submissionId: submission.id,
     dealerId: Number(submission.dealer_id),
+    createdAt:
+      submission.created_at instanceof Date
+        ? submission.created_at
+        : new Date(submission.created_at),
     starRating: submission.star_rating === null ? null : Number(submission.star_rating),
     reviewText: submission.review_text,
     submissionKind: submission.submission_kind,

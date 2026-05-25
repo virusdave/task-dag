@@ -15,10 +15,13 @@ import { useMemo, useState } from 'react'
 import { Link, useLoaderData, useRevalidator } from 'react-router-dom'
 
 import {
+  CustomerReviewCandidatePurchasesResponseSchema,
   CustomerReviewListResponseSchema,
   type CustomerReviewEmailRow,
   type CustomerReviewListItem,
   type CustomerReviewListResponse,
+  type CustomerReviewPurchaseCandidate,
+  type SegmentKindContract,
 } from '../../../shared/contracts/index.js'
 import { loadJson } from '../../app/fetchJson.js'
 import { Pill, type PillProps } from '../../components/Pill.js'
@@ -65,6 +68,137 @@ function summarizeContacts(item: CustomerReviewListItem): string {
   return item.contacts
     .map((c) => `${c.kind}: ${c.value}`)
     .join(' · ')
+}
+
+interface CandidateState {
+  loading: boolean
+  error: string | null
+  candidates: CustomerReviewPurchaseCandidate[] | null
+  // submissionId currently being added (so we can disable buttons).
+  busyKey: string | null
+}
+
+function formatDeltaSeconds(s: number): string {
+  const abs = Math.abs(s)
+  const mins = Math.floor(abs / 60)
+  const secs = abs % 60
+  const sign = s >= 0 ? 'after' : 'before'
+  if (mins === 0) return `${secs}s ${sign} submit`
+  return `${mins}m ${secs}s ${sign} submit`
+}
+
+function confidenceTone(c: number): PillProps['tone'] {
+  if (c >= 0.85) return 'success'
+  if (c >= 0.5) return 'warning'
+  return 'muted'
+}
+
+function candidateSummaryLine(c: CustomerReviewPurchaseCandidate): string {
+  const bits: string[] = []
+  if (c.clientName) bits.push(c.clientName)
+  if (c.clientPhone) bits.push(c.clientPhone)
+  if (c.clientEmail) bits.push(c.clientEmail)
+  if (bits.length === 0) bits.push(`client #${c.clientId ?? '?'}`)
+  return bits.join(' · ')
+}
+
+// Contacts cell for the list row. When empty, exposes a collapsed
+// <details> that on-open fetches the time-proximity-ranked invoice
+// candidates from /candidate-purchases and lets the operator add a
+// chosen client to a per-site segment without leaving the list.
+function ContactsCell(props: {
+  item: CustomerReviewListItem
+  state: CandidateState | undefined
+  onLoad: () => void
+  onAdd: (
+    candidate: CustomerReviewPurchaseCandidate,
+    segment: SegmentKindContract,
+  ) => void
+}) {
+  const { item, state, onLoad, onAdd } = props
+  if (item.contacts.length > 0) {
+    return <span>{summarizeContacts(item)}</span>
+  }
+  return (
+    <details
+      onToggle={(e) => {
+        const open = (e.target as HTMLDetailsElement).open
+        if (open && state?.candidates === null && !state?.loading) onLoad()
+      }}
+    >
+      <summary style={{ cursor: 'pointer' }}>
+        <span className="subtle-copy">— (no contact captured)</span>{' '}
+        <span style={{ fontSize: '0.85em' }}>· find candidate purchase</span>
+      </summary>
+      <div style={{ marginTop: '0.35rem', fontSize: '0.85em' }}>
+        {state?.loading && <span className="subtle-copy">Looking up Sweed invoices…</span>}
+        {state?.error !== undefined && state?.error !== null && (
+          <span style={{ color: '#b91c1c' }}>{state.error}</span>
+        )}
+        {state?.candidates !== undefined &&
+          state?.candidates !== null &&
+          state.candidates.length === 0 && (
+            <span className="subtle-copy">
+              No invoices found within ±30 min of the submission.
+            </span>
+          )}
+        {state?.candidates !== undefined &&
+          state?.candidates !== null &&
+          state.candidates.length > 0 && (
+            <ul style={{ margin: 0, paddingLeft: '1rem' }}>
+              {state.candidates.map((c, idx) => {
+                const busyDraw =
+                  state.busyKey === `${item.submissionId}::${c.clientId}::drawing`
+                const busyFree =
+                  state.busyKey === `${item.submissionId}::${c.clientId}::free_preroll`
+                const anyBusy = state.busyKey !== null
+                return (
+                  <li
+                    key={`${c.invoiceId ?? c.clientId ?? idx}`}
+                    style={{ marginBottom: '0.4rem' }}
+                  >
+                    <Pill tone={confidenceTone(c.confidence)}>
+                      {`${Math.round(c.confidence * 100)}%`}
+                    </Pill>
+                    {idx === 0 && (
+                      <span style={{ marginLeft: '0.25rem', fontSize: '0.9em' }}>
+                        ★ closest
+                      </span>
+                    )}{' '}
+                    <span>{candidateSummaryLine(c)}</span>
+                    <div className="subtle-copy" style={{ fontSize: '0.85em' }}>
+                      {formatDeltaSeconds(c.deltaSeconds)}
+                      {c.total !== null ? ` · $${c.total.toFixed(2)}` : ''}
+                      {c.invoiceId ? ` · invoice ${c.invoiceId}` : ''}
+                    </div>
+                    <div style={{ marginTop: '0.15rem' }}>
+                      <button
+                        type="button"
+                        className="ghost-button"
+                        style={{ fontSize: '0.85em', marginRight: '0.25rem' }}
+                        disabled={anyBusy || c.clientId === null}
+                        onClick={() => onAdd(c, 'drawing')}
+                      >
+                        {busyDraw ? 'Adding…' : 'Add to drawing'}
+                      </button>
+                      <button
+                        type="button"
+                        className="ghost-button"
+                        style={{ fontSize: '0.85em' }}
+                        disabled={anyBusy || c.clientId === null}
+                        onClick={() => onAdd(c, 'free_preroll')}
+                      >
+                        {busyFree ? 'Adding…' : 'Add to free-preroll'}
+                      </button>
+                    </div>
+                  </li>
+                )
+              })}
+            </ul>
+          )}
+      </div>
+    </details>
+  )
 }
 
 // A3: collapse the per-recipient send-attempt list into a small
@@ -139,6 +273,112 @@ export function CustomerReviewsListPage() {
   const [showFraud, setShowFraud] = useState(true)
   const [resendingId, setResendingId] = useState<string | null>(null)
   const [resendError, setResendError] = useState<string | null>(null)
+  const [candidatesBySubmission, setCandidatesBySubmission] = useState<
+    Record<string, CandidateState>
+  >({})
+
+  const loadCandidates = async (submissionId: string) => {
+    setCandidatesBySubmission((prev) => ({
+      ...prev,
+      [submissionId]: {
+        loading: true,
+        error: null,
+        candidates: prev[submissionId]?.candidates ?? null,
+        busyKey: null,
+      },
+    }))
+    try {
+      const res = await loadJson(
+        `/api/customer-reviews/${encodeURIComponent(submissionId)}/candidate-purchases`,
+        CustomerReviewCandidatePurchasesResponseSchema,
+      )
+      setCandidatesBySubmission((prev) => ({
+        ...prev,
+        [submissionId]: {
+          loading: false,
+          error: null,
+          candidates: res.candidates,
+          busyKey: null,
+        },
+      }))
+    } catch (err) {
+      setCandidatesBySubmission((prev) => ({
+        ...prev,
+        [submissionId]: {
+          loading: false,
+          error: err instanceof Error ? err.message : String(err),
+          candidates: prev[submissionId]?.candidates ?? null,
+          busyKey: null,
+        },
+      }))
+    }
+  }
+
+  const addCandidateToSegment = async (
+    submissionId: string,
+    candidate: CustomerReviewPurchaseCandidate,
+    segment: SegmentKindContract,
+  ) => {
+    const key = `${submissionId}::${candidate.clientId}::${segment}`
+    setCandidatesBySubmission((prev) => ({
+      ...prev,
+      [submissionId]: {
+        loading: prev[submissionId]?.loading ?? false,
+        error: null,
+        candidates: prev[submissionId]?.candidates ?? null,
+        busyKey: key,
+      },
+    }))
+    try {
+      const res = await fetch(
+        `/api/customer-reviews/${encodeURIComponent(submissionId)}/candidate-purchases/add-to-segment`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            segment,
+            sweedClientId: candidate.clientId,
+            contactPhone: candidate.clientPhone,
+            contactEmail: candidate.clientEmail,
+            contactName: candidate.clientName,
+            invoiceId: candidate.invoiceId,
+          }),
+        },
+      )
+      if (!res.ok) {
+        const errText = await res.text().catch(() => '')
+        setCandidatesBySubmission((prev) => ({
+          ...prev,
+          [submissionId]: {
+            ...prev[submissionId],
+            busyKey: null,
+            error: `Add failed (${res.status}): ${errText.slice(0, 200)}`,
+          },
+        }))
+        return
+      }
+      // On success, clear the busy flag and revalidate the table so
+      // the Contacts cell renders the newly-persisted contact rows.
+      setCandidatesBySubmission((prev) => ({
+        ...prev,
+        [submissionId]: {
+          ...prev[submissionId],
+          busyKey: null,
+          error: null,
+        },
+      }))
+      revalidator.revalidate()
+    } catch (err) {
+      setCandidatesBySubmission((prev) => ({
+        ...prev,
+        [submissionId]: {
+          ...prev[submissionId],
+          busyKey: null,
+          error: err instanceof Error ? err.message : String(err),
+        },
+      }))
+    }
+  }
 
   const onResend = async (submissionId: string) => {
     setResendingId(submissionId)
@@ -266,7 +506,16 @@ export function CustomerReviewsListPage() {
                     {item.reviewText ?? <span className="subtle-copy">(no text)</span>}
                   </td>
                   <td>{renderVerdictPill(item)}</td>
-                  <td style={{ fontSize: '0.85em' }}>{summarizeContacts(item)}</td>
+                  <td style={{ fontSize: '0.85em', minWidth: '18rem' }}>
+                    <ContactsCell
+                      item={item}
+                      state={candidatesBySubmission[item.submissionId]}
+                      onLoad={() => loadCandidates(item.submissionId)}
+                      onAdd={(candidate, segment) =>
+                        addCandidateToSegment(item.submissionId, candidate, segment)
+                      }
+                    />
+                  </td>
                   <td>
                     {item.drawingEntry === null ? (
                       <span className="subtle-copy">—</span>
