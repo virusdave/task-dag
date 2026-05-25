@@ -76,6 +76,12 @@ interface CandidateState {
   candidates: CustomerReviewPurchaseCandidate[] | null
   // submissionId currently being added (so we can disable buttons).
   busyKey: string | null
+  // Set of `${clientId}::${segment}` strings that have been added
+  // successfully — used to badge those buttons '✓ Added' so the
+  // operator can still pick the OTHER segment for the same client
+  // (drawing + free-preroll are not mutually exclusive) and to
+  // prevent accidental double-adds.
+  completedKeys: ReadonlySet<string>
 }
 
 function formatDeltaSeconds(s: number): string {
@@ -102,9 +108,36 @@ function candidateSummaryLine(c: CustomerReviewPurchaseCandidate): string {
   return bits.join(' · ')
 }
 
-// Contacts cell for the list row. When item.contacts is empty, we
-// render the bulk-prefetched candidates (or a loading / empty / error
-// state) inline alongside the "— (no contact captured)" hint.
+function candidateButtonProps(args: {
+  state: CandidateState | undefined
+  submissionId: string
+  candidate: CustomerReviewPurchaseCandidate
+  segment: SegmentKindContract
+}): { label: string; disabled: boolean; done: boolean } {
+  const { state, submissionId, candidate, segment } = args
+  const key = `${submissionId}::${candidate.clientId}::${segment}`
+  const completed = state?.completedKeys?.has(key) ?? false
+  const busy = state?.busyKey === key
+  const anyBusy = state?.busyKey !== null && state?.busyKey !== undefined
+  const segmentLabel = segment === 'drawing' ? 'drawing' : 'free-preroll'
+  let label: string
+  if (busy) label = 'Adding…'
+  else if (completed) label = `✓ Added to ${segmentLabel}`
+  else label = `Add to ${segmentLabel}`
+  return {
+    label,
+    done: completed,
+    disabled: completed || anyBusy || candidate.clientId === null,
+  }
+}
+
+// Contacts cell for the list row. Renders any persisted contacts on
+// top; below that, always renders the bulk-prefetched candidate
+// panel when one has been loaded. Drawing + free-preroll are NOT
+// mutually exclusive, and the panel must stay visible after a
+// successful "Add to drawing" so the operator can still pick
+// "Add to free-preroll" for the same client (or pick a different
+// candidate entirely for the OTHER segment).
 function ContactsCell(props: {
   item: CustomerReviewListItem
   state: CandidateState | undefined
@@ -116,83 +149,106 @@ function ContactsCell(props: {
   ) => void
 }) {
   const { item, state, bulkLoading, bulkError, onAdd } = props
-  if (item.contacts.length > 0) {
-    return <span>{summarizeContacts(item)}</span>
-  }
+  const contactsKnown = item.contacts.length > 0
   const candidates = state?.candidates ?? null
+  // We surface the candidate panel whenever the bulk fetch ran for
+  // this submission — i.e. whenever there is local candidate state
+  // for it OR a global bulk request is still in flight that may
+  // populate it. Once contacts arrive (either originally or via an
+  // add-candidate-to-segment success), we still show the panel for
+  // the same row so the second segment can be picked.
+  const showPanel = candidates !== null || bulkLoading || bulkError !== null
+
   return (
     <div>
-      <div className="subtle-copy">— (no contact captured)</div>
-      <div style={{ marginTop: '0.35rem', fontSize: '0.85em' }}>
-        {candidates === null && bulkLoading && (
-          <span className="subtle-copy">Looking up Sweed invoices…</span>
-        )}
-        {candidates === null && !bulkLoading && bulkError !== null && (
-          <span style={{ color: '#b91c1c' }}>{bulkError}</span>
-        )}
-        {candidates !== null && candidates.length === 0 && (
-          <span className="subtle-copy">
-            No invoices found within ±30 min of the submission.
-          </span>
-        )}
-        {candidates !== null && candidates.length > 0 && (
-          <ul style={{ margin: 0, paddingLeft: '1rem' }}>
-            {candidates.map((c, idx) => {
-              const busyDraw =
-                state?.busyKey === `${item.submissionId}::${c.clientId}::drawing`
-              const busyFree =
-                state?.busyKey === `${item.submissionId}::${c.clientId}::free_preroll`
-              const anyBusy = state?.busyKey !== null && state?.busyKey !== undefined
-              return (
-                <li
-                  key={`${c.invoiceId ?? c.clientId ?? idx}`}
-                  style={{ marginBottom: '0.4rem' }}
-                >
-                  <Pill tone={confidenceTone(c.confidence)}>
-                    {`${Math.round(c.confidence * 100)}%`}
-                  </Pill>
-                  {idx === 0 && (
-                    <span style={{ marginLeft: '0.25rem', fontSize: '0.9em' }}>
-                      ★ closest
-                    </span>
-                  )}{' '}
-                  <span>{candidateSummaryLine(c)}</span>
-                  <div className="subtle-copy" style={{ fontSize: '0.85em' }}>
-                    {formatDeltaSeconds(c.deltaSeconds)}
-                    {c.total !== null ? ` · $${c.total.toFixed(2)}` : ''}
-                    {c.invoiceId ? ` · invoice ${c.invoiceId}` : ''}
-                  </div>
-                  <div style={{ marginTop: '0.15rem' }}>
-                    <button
-                      type="button"
-                      className="ghost-button"
-                      style={{ fontSize: '0.85em', marginRight: '0.25rem' }}
-                      disabled={anyBusy || c.clientId === null}
-                      onClick={() => onAdd(c, 'drawing')}
-                    >
-                      {busyDraw ? 'Adding…' : 'Add to drawing'}
-                    </button>
-                    <button
-                      type="button"
-                      className="ghost-button"
-                      style={{ fontSize: '0.85em' }}
-                      disabled={anyBusy || c.clientId === null}
-                      onClick={() => onAdd(c, 'free_preroll')}
-                    >
-                      {busyFree ? 'Adding…' : 'Add to free-preroll'}
-                    </button>
-                  </div>
-                  {state?.error !== undefined && state?.error !== null && (
-                    <div style={{ color: '#b91c1c', fontSize: '0.85em' }}>
-                      {state.error}
+      {contactsKnown ? (
+        <div>{summarizeContacts(item)}</div>
+      ) : (
+        <div className="subtle-copy">— (no contact captured)</div>
+      )}
+      {showPanel && (
+        <div style={{ marginTop: '0.35rem', fontSize: '0.85em' }}>
+          {candidates === null && bulkLoading && (
+            <span className="subtle-copy">Looking up Sweed invoices…</span>
+          )}
+          {candidates === null && !bulkLoading && bulkError !== null && (
+            <span style={{ color: '#b91c1c' }}>{bulkError}</span>
+          )}
+          {candidates !== null && candidates.length === 0 && (
+            <span className="subtle-copy">
+              No invoices found within ±30 min of the submission.
+            </span>
+          )}
+          {candidates !== null && candidates.length > 0 && (
+            <ul style={{ margin: 0, paddingLeft: '1rem' }}>
+              {candidates.map((c, idx) => {
+                const draw = candidateButtonProps({
+                  state,
+                  submissionId: item.submissionId,
+                  candidate: c,
+                  segment: 'drawing',
+                })
+                const free = candidateButtonProps({
+                  state,
+                  submissionId: item.submissionId,
+                  candidate: c,
+                  segment: 'free_preroll',
+                })
+                return (
+                  <li
+                    key={`${c.invoiceId ?? c.clientId ?? idx}`}
+                    style={{ marginBottom: '0.4rem' }}
+                  >
+                    <Pill tone={confidenceTone(c.confidence)}>
+                      {`${Math.round(c.confidence * 100)}%`}
+                    </Pill>
+                    {idx === 0 && (
+                      <span style={{ marginLeft: '0.25rem', fontSize: '0.9em' }}>
+                        ★ closest
+                      </span>
+                    )}{' '}
+                    <span>{candidateSummaryLine(c)}</span>
+                    <div className="subtle-copy" style={{ fontSize: '0.85em' }}>
+                      {formatDeltaSeconds(c.deltaSeconds)}
+                      {c.total !== null ? ` · $${c.total.toFixed(2)}` : ''}
+                      {c.invoiceId ? ` · invoice ${c.invoiceId}` : ''}
                     </div>
-                  )}
-                </li>
-              )
-            })}
-          </ul>
-        )}
-      </div>
+                    <div style={{ marginTop: '0.15rem' }}>
+                      <button
+                        type="button"
+                        className="ghost-button"
+                        style={{
+                          fontSize: '0.85em',
+                          marginRight: '0.25rem',
+                          opacity: draw.done ? 0.6 : 1,
+                        }}
+                        disabled={draw.disabled}
+                        onClick={() => onAdd(c, 'drawing')}
+                      >
+                        {draw.label}
+                      </button>
+                      <button
+                        type="button"
+                        className="ghost-button"
+                        style={{ fontSize: '0.85em', opacity: free.done ? 0.6 : 1 }}
+                        disabled={free.disabled}
+                        onClick={() => onAdd(c, 'free_preroll')}
+                      >
+                        {free.label}
+                      </button>
+                    </div>
+                    {state?.error !== undefined && state?.error !== null && (
+                      <div style={{ color: '#b91c1c', fontSize: '0.85em' }}>
+                        {state.error}
+                      </div>
+                    )}
+                  </li>
+                )
+              })}
+            </ul>
+          )}
+        </div>
+      )}
     </div>
   )
 }
@@ -307,6 +363,7 @@ export function CustomerReviewsListPage() {
               error: null,
               candidates: row.candidates,
               busyKey: prev[row.submissionId]?.busyKey ?? null,
+              completedKeys: prev[row.submissionId]?.completedKeys ?? new Set<string>(),
             }
           }
           return next
@@ -321,7 +378,13 @@ export function CustomerReviewsListPage() {
     return () => {
       cancelled = true
     }
-  }, [contactlessCount, initial.totalCount])
+    // Intentionally mount-only: re-firing the bulk fetch on every
+    // revalidate (e.g. after each Add-to-segment success) would
+    // lease another Sweed session and re-fetch invoices we already
+    // hold in state. Operator can hit Refresh / reload the page to
+    // pick up newly-landed contactless submissions.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   const addCandidateToSegment = async (
     submissionId: string,
@@ -336,6 +399,7 @@ export function CustomerReviewsListPage() {
         error: null,
         candidates: prev[submissionId]?.candidates ?? null,
         busyKey: key,
+        completedKeys: prev[submissionId]?.completedKeys ?? new Set<string>(),
       },
     }))
     try {
@@ -361,21 +425,31 @@ export function CustomerReviewsListPage() {
           [submissionId]: {
             ...prev[submissionId],
             busyKey: null,
+            completedKeys: prev[submissionId]?.completedKeys ?? new Set<string>(),
             error: `Add failed (${res.status}): ${errText.slice(0, 200)}`,
           },
         }))
         return
       }
-      // On success, clear the busy flag and revalidate the table so
-      // the Contacts cell renders the newly-persisted contact rows.
-      setCandidatesBySubmission((prev) => ({
-        ...prev,
-        [submissionId]: {
-          ...prev[submissionId],
-          busyKey: null,
-          error: null,
-        },
-      }))
+      // On success: record the (clientId, segment) pair as completed
+      // so the button badges '✓ Added' (but stays present so the
+      // operator can still pick the OTHER segment for the same
+      // client), clear busy, and revalidate so the persisted
+      // contact info shows up on the row.
+      setCandidatesBySubmission((prev) => {
+        const existing = prev[submissionId]?.completedKeys ?? new Set<string>()
+        const nextSet = new Set<string>(existing)
+        nextSet.add(key)
+        return {
+          ...prev,
+          [submissionId]: {
+            ...prev[submissionId],
+            busyKey: null,
+            error: null,
+            completedKeys: nextSet,
+          },
+        }
+      })
       revalidator.revalidate()
     } catch (err) {
       setCandidatesBySubmission((prev) => ({
@@ -383,6 +457,7 @@ export function CustomerReviewsListPage() {
         [submissionId]: {
           ...prev[submissionId],
           busyKey: null,
+          completedKeys: prev[submissionId]?.completedKeys ?? new Set<string>(),
           error: err instanceof Error ? err.message : String(err),
         },
       }))
