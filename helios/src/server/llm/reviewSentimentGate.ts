@@ -59,13 +59,17 @@ export interface ReviewLlmGateOutput {
 // classification is a quick decision and we don't want to spend
 // 30s waiting on a high-end model while the customer's browser
 // hangs on the submit POST.
-// Bedrock-mantle gateway proxies to Anthropic's native API
-// (`{"error":{"code":"not_found_error",…}}` shape on bad model), so
-// model names need to be Anthropic's API format — not the AWS
-// Bedrock ARN-style `anthropic.<model>-v1:0`. The previous value
-// `anthropic.claude-3-5-haiku-20241022-v1:0` was the Bedrock form
-// and was rejected by the proxy with "model not found".
-const REVIEW_GATE_MODEL = 'claude-3-5-haiku-20241022'
+// Use the same model that every other helios mantle caller uses
+// (staff-photo focal-point detection in
+// refreshStaffPhotoFocalPoints.ts, search-adaptation in
+// litAlertsMarket.ts, packet generation in
+// generatePendingPurchasePacketJob.ts). It's proven-working
+// against bedrock-mantle.us-east-2.api.aws and is small/fast
+// enough for a one-shot sentiment classification. The previous
+// value `anthropic.claude-3-5-haiku-20241022-v1:0` was rejected
+// by the gateway with "model not found"; we have no working
+// Anthropic-model reference in this codebase to copy.
+const REVIEW_GATE_MODEL = 'google.gemma-3-27b-it'
 
 const SYSTEM_PROMPT = [
   'You are a strict review-classification assistant for a New York cannabis retailer.',
