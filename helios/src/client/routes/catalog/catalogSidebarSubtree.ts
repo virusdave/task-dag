@@ -144,6 +144,12 @@ export function buildCatalogSidebarSubtree(options?: CatalogSidebarOptions): Tre
       label: 'Review queue',
       to: buildHeliosModulePath('catalog', 'review'),
     },
+    {
+      kind: 'leaf',
+      navKey: 'catalog.market-data',
+      label: 'Market data',
+      to: buildHeliosModulePath('catalog', 'market-data'),
+    },
     buildPendingPurchasesNode(pendingPurchases),
     buildImagesAndBarcodesNode(imagesAndBarcodes),
     {

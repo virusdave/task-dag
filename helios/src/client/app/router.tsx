@@ -8,6 +8,7 @@ import { AdsIngestPage } from '../routes/ads/AdsIngestPage.js'
 import { CatalogEdibleThcClampPage, catalogEdibleThcClampLoader } from '../routes/catalog/CatalogEdibleThcClampPage.js'
 import { CatalogHistoryPage, catalogHistoryLoader } from '../routes/catalog/CatalogHistoryPage.js'
 import { CatalogMaintenanceIndexPage } from '../routes/catalog/CatalogMaintenanceIndexPage.js'
+import { CatalogMarketDataPage, catalogMarketDataLoader } from '../routes/catalog/CatalogMarketDataPage.js'
 import { CatalogMaintenancePage } from '../routes/catalog/CatalogMaintenancePage.js'
 import { CatalogModulePage } from '../routes/catalog/CatalogModulePage.js'
 import { CatalogNewEntryPage } from '../routes/catalog/CatalogNewEntryPage.js'
@@ -130,6 +131,11 @@ export const router = createBrowserRouter([
         element: <ReviewPage />,
         loader: reviewLoader,
         path: 'catalog/review',
+      },
+      {
+        element: <CatalogMarketDataPage />,
+        loader: catalogMarketDataLoader,
+        path: 'catalog/market-data',
       },
       {
         element: <PendingPurchasesPage />,
