@@ -1,7 +1,15 @@
 import { z } from 'zod'
 
 import { JsonValueSchema } from '../common/json.js'
-import { ProposalLineItemSchema, ProposalTypeSchema } from '../domain/proposals.js'
+import { PendingPurchaseMarketListingSchema } from '../domain/pendingPurchases.js'
+import {
+  ApprovalStatusSchema,
+  ProposalLineItemSchema,
+  ProposalTypeSchema,
+  TargetEntityTypeSchema,
+  ValidationIssueSchema,
+} from '../domain/proposals.js'
+import { FieldPathSchema } from '../../domain/fieldPaths.js'
 
 const BlankStringSchema = z.preprocess(
   (value) => (typeof value === 'string' && value.trim().length === 0 ? undefined : value),
@@ -63,3 +71,107 @@ export const RejectProposalLineItemRequestSchema = z.object({
   expectedVersion: z.number().int().positive(),
 })
 export type RejectProposalLineItemRequest = z.infer<typeof RejectProposalLineItemRequestSchema>
+
+/* ------------------------------------------------------------------ */
+/* Family-grouped review queue (issue #15 — canonical product-review row) */
+/* ------------------------------------------------------------------ */
+
+export const ReviewFamilyQueueQuerySchema = z.object({
+  approvalStatus: BlankApprovalStatusSchema,
+  driftOnly: z.coerce.boolean().optional(),
+  msoOnly: z.coerce.boolean().optional(),
+  proposalType: BlankProposalTypeSchema,
+  search: BlankStringSchema,
+})
+export type ReviewFamilyQueueQuery = z.infer<typeof ReviewFamilyQueueQuerySchema>
+
+export const ReviewFamilyKeySchema = z.object({
+  brand: z.string().nullable(),
+  category: z.string().nullable(),
+  subcategory: z.string().nullable(),
+  sizeName: z.string().nullable(),
+})
+export type ReviewFamilyKey = z.infer<typeof ReviewFamilyKeySchema>
+
+export const ReviewFamilyMSOAnnotationSchema = z.object({
+  isMSOBrand: z.boolean(),
+  msoBrandId: z.number().int().positive().nullable(),
+  isHouseBrand: z.boolean(),
+})
+export type ReviewFamilyMSOAnnotation = z.infer<typeof ReviewFamilyMSOAnnotationSchema>
+
+export const ReviewFieldComparisonSchema = z.object({
+  lineItemId: z.number().int().positive(),
+  fieldPath: FieldPathSchema,
+  label: z.string(),
+  liveValueText: z.string(),
+  proposedValueText: z.string(),
+  effectiveValueText: z.string(),
+  changeKind: z.enum(['pricing', 'description', 'taxonomy', 'attribute', 'other']),
+  approvalStatus: ApprovalStatusSchema,
+})
+export type ReviewFieldComparison = z.infer<typeof ReviewFieldComparisonSchema>
+
+export const ReviewRowLineItemHandleSchema = z.object({
+  lineItemId: z.number().int().positive(),
+  fieldPath: FieldPathSchema,
+  version: z.number().int().positive(),
+  approvalStatus: ApprovalStatusSchema,
+  editedValue: JsonValueSchema.nullable(),
+  suggestedValue: JsonValueSchema,
+  baselineValue: JsonValueSchema,
+})
+export type ReviewRowLineItemHandle = z.infer<typeof ReviewRowLineItemHandleSchema>
+
+export const ReviewRowPricingLadderSchema = z.object({
+  productId: z.number().int().positive(),
+  livePrice: z.number().nullable(),
+  proposedPrice: z.number().nullable(),
+  marketAveragePostTax: z.number().nullable(),
+  marketMedianPostTax: z.number().nullable(),
+  competitorListings: z.array(PendingPurchaseMarketListingSchema),
+  evidenceFreshness: z.enum(['fresh', 'stale', 'very_stale', 'expired', 'absent']),
+  evidenceCapturedAt: z.iso.datetime().nullable(),
+  /** Largest absolute deviation between any eligible listing and the live price. */
+  priceSpread: z.number().nullable(),
+})
+export type ReviewRowPricingLadder = z.infer<typeof ReviewRowPricingLadderSchema>
+
+export const ReviewRowSchema = z.object({
+  catalogGroupId: z.number().int().positive(),
+  proposalRowId: z.number().int().positive(),
+  rowTitle: z.string(),
+  reconcileStatus: z.string(),
+  approvalRollup: z.enum(['pending', 'approved', 'rejected', 'mixed']),
+  targetEntityId: z.number().int().positive(),
+  targetEntityType: TargetEntityTypeSchema,
+  comparisons: z.array(ReviewFieldComparisonSchema),
+  pricingLadder: ReviewRowPricingLadderSchema.nullable(),
+  validationIssues: z.array(ValidationIssueSchema),
+  operatorNote: z.string().nullable(),
+  lineItems: z.array(ReviewRowLineItemHandleSchema),
+})
+export type ReviewRow = z.infer<typeof ReviewRowSchema>
+
+export const ReviewFamilyOrderingSchema = z.object({
+  driftedRowCount: z.number().int().min(0),
+  msoFirst: z.boolean(),
+  maxPriceSpread: z.number().nullable(),
+})
+export type ReviewFamilyOrdering = z.infer<typeof ReviewFamilyOrderingSchema>
+
+export const ReviewFamilySchema = z.object({
+  familyKey: ReviewFamilyKeySchema,
+  mso: ReviewFamilyMSOAnnotationSchema,
+  ordering: ReviewFamilyOrderingSchema,
+  rows: z.array(ReviewRowSchema),
+})
+export type ReviewFamily = z.infer<typeof ReviewFamilySchema>
+
+export const ReviewFamilyQueueResponseSchema = z.object({
+  filters: ReviewFamilyQueueQuerySchema,
+  families: z.array(ReviewFamilySchema),
+  totalRowCount: z.number().int().min(0),
+  totalFamilyCount: z.number().int().min(0),
+})
+export type ReviewFamilyQueueResponse = z.infer<typeof ReviewFamilyQueueResponseSchema>

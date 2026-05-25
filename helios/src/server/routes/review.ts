@@ -9,6 +9,8 @@ import {
   EditProposalLineItemRequestSchema,
   MutationAcceptedResponseSchema,
   RejectProposalLineItemRequestSchema,
+  ReviewFamilyQueueQuerySchema,
+  ReviewFamilyQueueResponseSchema,
   ReviewLineItemListQuerySchema,
   ReviewLineItemListResponseSchema,
   UpdateProposalLineItemNoteRequestSchema,
@@ -27,6 +29,7 @@ import { requireSessionUser } from '../auth/requireSession.js'
 import { getPool } from '../db/pool.js'
 import { listActiveDesiredStateFields } from '../db/queries/desiredStateQueries.js'
 import { buildDesiredProjection, getDesiredProjectionHash } from '../domain/desiredProjection.js'
+import { listReviewFamilyQueue } from '../db/queries/reviewFamilyQueueQueries.js'
 import { listReviewLineItems } from '../db/queries/reviewQueries.js'
 import { getOptionalSweedSessionConcurrencyKey } from '../jobs/concurrency.js'
 import { withTransaction } from '../db/tx.js'
@@ -68,6 +71,22 @@ export async function registerReviewRoutes(server: FastifyInstance): Promise<voi
     const query = ReviewLineItemListQuerySchema.parse(request.query)
     const response = await listReviewLineItems(getPool(), query)
     return reply.send(ReviewLineItemListResponseSchema.parse(response))
+  })
+
+  // Family-grouped review queue (issue #15 — canonical product-review row).
+  // Reviewers consume this for `/catalog/review`; groups line items into
+  // family panels and joins the latest cached LitAlerts market evidence
+  // per targeted SKU so the canonical pricing-ladder can be rendered
+  // pre-populated.
+  server.get('/api/review/family-queue', async (request, reply) => {
+    const user = await requireSessionUser(request, reply, 'viewer')
+    if (!user) {
+      return
+    }
+
+    const query = ReviewFamilyQueueQuerySchema.parse(request.query)
+    const response = await listReviewFamilyQueue(getPool(), query)
+    return reply.send(ReviewFamilyQueueResponseSchema.parse(response))
   })
 
   server.patch('/api/proposal-line-items/:lineItemId/edit', async (request, reply) => {
