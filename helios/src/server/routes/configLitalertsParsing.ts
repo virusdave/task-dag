@@ -33,10 +33,12 @@ import { getServerEnv } from '../config/env.js'
 import { getPool } from '../db/pool.js'
 import {
   listLitalertsCompetitors,
+  loadCompetitorListing,
   loadCompetitorSample,
 } from '../db/queries/litalertsCompetitorsQueries.js'
 import { dispensaryToTenantId } from '../parsekit/litalertsLookup.js'
 import { applyLitalertsTenantConfig } from '../parsekit/applyConfig.js'
+import { dryRunLitalertsTenantConfig } from '../parsekit/dryRunConfig.js'
 
 const CHAT_MODEL = 'google.gemma-3-27b-it'
 
@@ -259,6 +261,62 @@ export async function registerConfigLitalertsParsingRoutes(server: FastifyInstan
         commitSha: result.commitSha,
         pushed: result.pushed,
       })
+    },
+  )
+
+  // -----------------------------------------------------------------
+  // Per-listing details + dry-run-config — backing the
+  // /config/parsing/litalerts/:competitor/listing/:fuzzyHash page.
+  // -----------------------------------------------------------------
+
+  server.get<{ Params: { competitor: string; fuzzyHash: string } }>(
+    '/api/config/parsing/litalerts/:competitor/listing/:fuzzyHash',
+    async (request, reply) => {
+      const user = await requireSessionUser(request, reply, 'viewer')
+      if (!user) return
+
+      const competitorName = decodeURIComponent(request.params.competitor)
+      const fuzzyHash = decodeURIComponent(request.params.fuzzyHash)
+      const listing = await loadCompetitorListing(getPool(), competitorName, fuzzyHash)
+      if (!listing) {
+        return reply.code(404).send({
+          error: 'listing_not_found',
+          message: `No matched listing with fuzzyHash=${fuzzyHash} found in the most recent observations for ${competitorName}.`,
+        })
+      }
+      const tenantId = dispensaryToTenantId(competitorName)
+      return reply.send({ competitorName, tenantId, listing })
+    },
+  )
+
+  const DryRunRequestSchema = z.object({
+    jsonc: z.string().min(20).max(64_000),
+    listingName: z.string().min(0).max(2000),
+  })
+
+  server.post<{ Params: { competitor: string; fuzzyHash: string } }>(
+    '/api/config/parsing/litalerts/:competitor/listing/:fuzzyHash/dry-run',
+    async (request, reply) => {
+      const user = await requireSessionUser(request, reply, 'viewer')
+      if (!user) return
+
+      const competitorName = decodeURIComponent(request.params.competitor)
+      const tenantId = dispensaryToTenantId(competitorName)
+      const body = DryRunRequestSchema.parse(request.body ?? {})
+
+      const result = dryRunLitalertsTenantConfig({
+        tenantId,
+        jsonc: body.jsonc,
+        listingName: body.listingName,
+      })
+      if (!result.ok) {
+        return reply.code(400).send({
+          error: result.code,
+          message: result.message,
+          detail: result.detail ?? null,
+        })
+      }
+      return reply.send({ ok: true, attempt: result.attempt })
     },
   )
 }

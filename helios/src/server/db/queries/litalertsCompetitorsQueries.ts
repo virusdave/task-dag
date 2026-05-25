@@ -179,25 +179,64 @@ export async function listLitalertsCompetitors(
  * matched listings + the FuzzySku-shape that the current inline
  * parser produces.
  */
+/**
+ * Look up a single listing for a competitor by its fuzzyHash. Returns
+ * the same shape as a row in `loadCompetitorSample`, plus the full
+ * raw `listing` evidence object (so the details page can show the
+ * complete LitAlerts evidence, not just the few fields the sample
+ * row projects). Returns `null` when no matching listing is found
+ * within the most recent N observations.
+ */
+export async function loadCompetitorListing(
+  db: Queryable,
+  competitorName: string,
+  fuzzyHash: string,
+  options: { searchWindow?: number } = {},
+): Promise<(CompetitorSampleListing & { rawFull: Record<string, unknown> }) | null> {
+  const searchWindow = options.searchWindow ?? 500
+  const rows = await loadCompetitorSampleRaw(db, competitorName, { limit: searchWindow })
+  for (const row of rows) {
+    if (hashRawInput(row.listing) === fuzzyHash) {
+      const enriched = enrichSampleRow(row)
+      return {
+        ...enriched,
+        rawFull: (row.listing ?? {}) as Record<string, unknown>,
+      }
+    }
+  }
+  return null
+}
+
 export async function loadCompetitorSample(
   db: Queryable,
   competitorName: string,
   options: { limit?: number } = {},
 ): Promise<CompetitorSampleListing[]> {
+  const rows = await loadCompetitorSampleRaw(db, competitorName, options)
+  return rows.map(enrichSampleRow)
+}
+
+interface SampleRowRaw {
+  observation_id: number
+  observed_at: string
+  search_term: string | null
+  listing: {
+    url?: string | null
+    listingName?: string | null
+    category?: string | null
+    brand?: string | null
+    dispensaryName?: string | null
+    subcategory?: string | null
+  }
+}
+
+async function loadCompetitorSampleRaw(
+  db: Queryable,
+  competitorName: string,
+  options: { limit?: number } = {},
+): Promise<SampleRowRaw[]> {
   const limit = options.limit ?? 25
-  const result = await db.query<{
-    observation_id: number
-    observed_at: string
-    search_term: string | null
-    listing: {
-      url?: string | null
-      listingName?: string | null
-      category?: string | null
-      brand?: string | null
-      dispensaryName?: string | null
-      subcategory?: string | null
-    }
-  }>(
+  const result = await db.query<SampleRowRaw>(
     `
       select
         o.id as observation_id,
@@ -216,52 +255,54 @@ export async function loadCompetitorSample(
     `,
     [competitorName, limit],
   )
-  return result.rows.map((row) => {
-    const raw = {
-      url: row.listing?.url ?? null,
-      listingName: row.listing?.listingName ?? null,
-      category: row.listing?.category ?? null,
-      brand: row.listing?.brand ?? null,
-      dispensaryName: row.listing?.dispensaryName ?? null,
-      subcategory: row.listing?.subcategory ?? null,
-    }
-    const attempt = tryParseLitalertsListing(raw.dispensaryName, raw.listingName)
-    if (attempt.parsed) {
-      return {
-        observationId: row.observation_id,
-        observedAt: row.observed_at,
-        searchTerm: row.search_term,
-        raw,
-        // Fill in subcategory + brand-from-row when parsekit doesn't
-        // emit them (parser parses listingName only; the LitAlerts
-        // observation already gives us these for free).
-        parsed: {
-          ...attempt.parsed,
-          brandNorm: attempt.parsed.brandNorm ?? (raw.brand ?? null),
-          categoryNorm:
-            attempt.parsed.categoryNorm && attempt.parsed.categoryNorm !== 'other'
-              ? attempt.parsed.categoryNorm
-              : raw.category ?? attempt.parsed.categoryNorm,
-          subcategoryNorm: attempt.parsed.subcategoryNorm ?? raw.subcategory ?? null,
-        },
-        fuzzyHash: hashRawInput(row.listing),
-        parserSource: 'parsekit',
-        parserId: attempt.parserId,
-        snapshotSha: attempt.snapshotSha,
-      }
-    }
+  return result.rows
+}
+
+function enrichSampleRow(row: SampleRowRaw): CompetitorSampleListing {
+  const raw = {
+    url: row.listing?.url ?? null,
+    listingName: row.listing?.listingName ?? null,
+    category: row.listing?.category ?? null,
+    brand: row.listing?.brand ?? null,
+    dispensaryName: row.listing?.dispensaryName ?? null,
+    subcategory: row.listing?.subcategory ?? null,
+  }
+  const attempt = tryParseLitalertsListing(raw.dispensaryName, raw.listingName)
+  if (attempt.parsed) {
     return {
       observationId: row.observation_id,
       observedAt: row.observed_at,
       searchTerm: row.search_term,
       raw,
-      parsed: parseListingToFuzzy(row.listing ?? {}, row.search_term),
+      // Fill in subcategory + brand-from-row when parsekit doesn't
+      // emit them (parser parses listingName only; the LitAlerts
+      // observation already gives us these for free).
+      parsed: {
+        ...attempt.parsed,
+        brandNorm: attempt.parsed.brandNorm ?? (raw.brand ?? null),
+        categoryNorm:
+          attempt.parsed.categoryNorm && attempt.parsed.categoryNorm !== 'other'
+            ? attempt.parsed.categoryNorm
+            : raw.category ?? attempt.parsed.categoryNorm,
+        subcategoryNorm: attempt.parsed.subcategoryNorm ?? raw.subcategory ?? null,
+      },
       fuzzyHash: hashRawInput(row.listing),
-      parserSource: 'placeholder',
+      parserSource: 'parsekit',
       parserId: attempt.parserId,
       snapshotSha: attempt.snapshotSha,
-      placeholderReason: attempt.reason ?? undefined,
-      placeholderDetail: attempt.failureDetail,
     }
-  })
+  }
+  return {
+    observationId: row.observation_id,
+    observedAt: row.observed_at,
+    searchTerm: row.search_term,
+    raw,
+    parsed: parseListingToFuzzy(row.listing ?? {}, row.search_term),
+    fuzzyHash: hashRawInput(row.listing),
+    parserSource: 'placeholder',
+    parserId: attempt.parserId,
+    snapshotSha: attempt.snapshotSha,
+    placeholderReason: attempt.reason ?? undefined,
+    placeholderDetail: attempt.failureDetail,
+  }
 }

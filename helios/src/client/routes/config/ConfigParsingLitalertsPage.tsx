@@ -331,7 +331,20 @@ export function ConfigParsingLitalertsPage(): JSX.Element {
                     ) : null}
                   </p>
                   <textarea
-                    onChange={(e) => setDraftJsonc(e.currentTarget.value)}
+                    onChange={(e) => {
+                      const next = e.currentTarget.value
+                      setDraftJsonc(next)
+                      // Mirror to sessionStorage so the per-listing
+                      // details page (opened in a new tab) can seed
+                      // its "pending config" textarea automatically.
+                      if (configFetch?.tenantId) {
+                        try {
+                          window.sessionStorage.setItem(`litalerts-draft-${configFetch.tenantId}`, next)
+                        } catch {
+                          /* sessionStorage may be unavailable */
+                        }
+                      }
+                    }}
                     rows={14}
                     spellCheck={false}
                     style={{ width: '100%', fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: '0.78rem' }}
@@ -411,6 +424,13 @@ function SampleTable({
   selectedHashes: Set<string>
   onToggleHash: (hash: string) => void
 }): JSX.Element {
+  const detailsHrefFor = (fuzzyHash: string): string =>
+    `/config/parsing/litalerts/${encodeURIComponent(sample.competitorName)}/listing/${encodeURIComponent(fuzzyHash)}`
+
+  function openDetails(fuzzyHash: string): void {
+    window.open(detailsHrefFor(fuzzyHash), '_blank', 'noopener,noreferrer')
+  }
+
   return (
     <table className="data-table">
       <thead>
@@ -426,36 +446,49 @@ function SampleTable({
         </tr>
       </thead>
       <tbody>
-        {sample.sample.map((row) => (
-          <tr key={row.fuzzyHash}>
-            <td>
-              <input
-                checked={selectedHashes.has(row.fuzzyHash)}
-                onChange={() => onToggleHash(row.fuzzyHash)}
-                type="checkbox"
-              />
-            </td>
-            <td>
-              {row.raw.url ? (
-                <a href={row.raw.url} rel="noreferrer" target="_blank">{row.raw.listingName ?? '—'}</a>
-              ) : (row.raw.listingName ?? '—')}
-            </td>
-            <td>
-              <SourceBadge row={row} />
-            </td>
-            <td>{row.raw.category ?? '—'}</td>
-            <td>{row.parsed.brandNorm ?? <em>none</em>}</td>
-            <td>
-              {row.parsed.sizeGNorm != null
-                ? `${row.parsed.sizeGNorm}g`
-                : row.parsed.sizeMgNorm != null
-                  ? `${row.parsed.sizeMgNorm}mg`
-                  : <em>none</em>}
-            </td>
-            <td>{row.parsed.packCountNorm ?? '—'}</td>
-            <td>{row.parsed.strainNorm ?? '—'}</td>
-          </tr>
-        ))}
+        {sample.sample.map((row) => {
+          // Background click (i.e. any cell *not* the title link or the
+          // checkbox) opens the per-listing details page in a new tab.
+          // We register the handler on every <td> except those carrying
+          // their own interactive element; that way the listing-title
+          // link still routes to the competitor ecom, and the checkbox
+          // still toggles the LLM-focus selection without spawning a tab.
+          const bgProps = {
+            onClick: () => openDetails(row.fuzzyHash),
+            style: { cursor: 'pointer' as const },
+            title: 'Open listing details (new tab)',
+          }
+          return (
+            <tr key={row.fuzzyHash}>
+              <td onClick={(e) => e.stopPropagation()}>
+                <input
+                  checked={selectedHashes.has(row.fuzzyHash)}
+                  onChange={() => onToggleHash(row.fuzzyHash)}
+                  type="checkbox"
+                />
+              </td>
+              <td>
+                {row.raw.url ? (
+                  <a href={row.raw.url} rel="noreferrer" target="_blank">{row.raw.listingName ?? '—'}</a>
+                ) : (
+                  <a href={detailsHrefFor(row.fuzzyHash)} rel="noreferrer" target="_blank">{row.raw.listingName ?? '—'}</a>
+                )}
+              </td>
+              <td {...bgProps}><SourceBadge row={row} /></td>
+              <td {...bgProps}>{row.raw.category ?? '—'}</td>
+              <td {...bgProps}>{row.parsed.brandNorm ?? <em>none</em>}</td>
+              <td {...bgProps}>
+                {row.parsed.sizeGNorm != null
+                  ? `${row.parsed.sizeGNorm}g`
+                  : row.parsed.sizeMgNorm != null
+                    ? `${row.parsed.sizeMgNorm}mg`
+                    : <em>none</em>}
+              </td>
+              <td {...bgProps}>{row.parsed.packCountNorm ?? '—'}</td>
+              <td {...bgProps}>{row.parsed.strainNorm ?? '—'}</td>
+            </tr>
+          )
+        })}
       </tbody>
     </table>
   )

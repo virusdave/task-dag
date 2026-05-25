@@ -28,6 +28,10 @@ import {
   configParsingLitalertsLoader,
 } from '../routes/config/ConfigParsingLitalertsPage.js'
 import {
+  ConfigParsingLitalertsListingPage,
+  configParsingLitalertsListingLoader,
+} from '../routes/config/ConfigParsingLitalertsListingPage.js'
+import {
   ConfigParsingPendingPurchasesPage,
   configParsingPendingPurchasesLoader,
 } from '../routes/config/ConfigParsingPendingPurchasesPage.js'
@@ -335,6 +339,11 @@ export const router = createBrowserRouter([
         element: <ConfigParsingLitalertsPage />,
         loader: configParsingLitalertsLoader,
         path: 'config/parsing/litalerts',
+      },
+      {
+        element: <ConfigParsingLitalertsListingPage />,
+        loader: configParsingLitalertsListingLoader,
+        path: 'config/parsing/litalerts/:competitor/listing/:fuzzyHash',
       },
       {
         element: <UsersPage />,
