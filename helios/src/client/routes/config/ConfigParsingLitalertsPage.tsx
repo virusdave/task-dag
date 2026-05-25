@@ -63,9 +63,27 @@ interface ChatResponse {
   newGoldensSuggested: Array<{ listingName?: string; expected?: unknown }>
 }
 
+interface ConfigFetchResponse {
+  competitorName: string
+  tenantId: string
+  relPath: string
+  exists: boolean
+  jsonc: string | null
+}
+
+interface ApplyConfigResponse {
+  ok: boolean
+  tenantId: string
+  relPath: string
+  commitSha: string
+  pushed: boolean
+}
+
 const ListResponseSchema = z.any() as z.ZodType<ListResponse>
 const SampleSchema = z.any() as z.ZodType<CompetitorSampleResponse>
 const ChatResponseSchema = z.any() as z.ZodType<ChatResponse>
+const ConfigFetchResponseSchema = z.any() as z.ZodType<ConfigFetchResponse>
+const ApplyConfigResponseSchema = z.any() as z.ZodType<ApplyConfigResponse>
 
 export async function configParsingLitalertsLoader(): Promise<ListResponse> {
   return loadJson('/api/config/parsing/litalerts', ListResponseSchema)
@@ -83,6 +101,13 @@ export function ConfigParsingLitalertsPage(): JSX.Element {
   const [chatLoading, setChatLoading] = useState(false)
   const [chatResponse, setChatResponse] = useState<ChatResponse | null>(null)
   const [chatError, setChatError] = useState<string | null>(null)
+
+  const [configFetch, setConfigFetch] = useState<ConfigFetchResponse | null>(null)
+  const [draftJsonc, setDraftJsonc] = useState<string>('')
+  const [applyNote, setApplyNote] = useState<string>('')
+  const [applyLoading, setApplyLoading] = useState(false)
+  const [applyError, setApplyError] = useState<string | null>(null)
+  const [applyResult, setApplyResult] = useState<ApplyConfigResponse | null>(null)
 
   const loadSample = useCallback(async (name: string) => {
     setLoadingSample(true)
@@ -102,10 +127,62 @@ export function ConfigParsingLitalertsPage(): JSX.Element {
   useEffect(() => {
     if (selectedCompetitor === null) {
       setSample(null)
+      setConfigFetch(null)
+      setDraftJsonc('')
+      setApplyResult(null)
+      setApplyError(null)
       return
     }
     void loadSample(selectedCompetitor)
+    void (async () => {
+      try {
+        const next = await loadJson(
+          `/api/config/parsing/litalerts/${encodeURIComponent(selectedCompetitor)}/config`,
+          ConfigFetchResponseSchema,
+        )
+        setConfigFetch(next)
+        setDraftJsonc(next.jsonc ?? buildEmptyConfigStub(next.tenantId))
+        setApplyResult(null)
+        setApplyError(null)
+      } catch (e) {
+        setConfigFetch(null)
+        setApplyError(e instanceof Error ? e.message : 'Failed to load current config')
+      }
+    })()
   }, [selectedCompetitor, loadSample])
+
+  async function applyConfig(): Promise<void> {
+    if (!selectedCompetitor || applyLoading || !draftJsonc.trim()) return
+    setApplyLoading(true)
+    setApplyError(null)
+    setApplyResult(null)
+    try {
+      const next = await mutateJson(
+        `/api/config/parsing/litalerts/${encodeURIComponent(selectedCompetitor)}/apply-config`,
+        ApplyConfigResponseSchema,
+        {
+          method: 'POST',
+          body: JSON.stringify({ jsonc: draftJsonc, note: applyNote }),
+        },
+      )
+      setApplyResult(next)
+      // Refresh the on-disk view so the textarea matches what landed.
+      try {
+        const refreshed = await loadJson(
+          `/api/config/parsing/litalerts/${encodeURIComponent(selectedCompetitor)}/config`,
+          ConfigFetchResponseSchema,
+        )
+        setConfigFetch(refreshed)
+        if (refreshed.jsonc) setDraftJsonc(refreshed.jsonc)
+      } catch {
+        /* non-fatal */
+      }
+    } catch (e) {
+      setApplyError(e instanceof Error ? e.message : 'Apply failed')
+    } finally {
+      setApplyLoading(false)
+    }
+  }
 
   async function askLlm(): Promise<void> {
     if (!selectedCompetitor || !chatPrompt.trim() || chatLoading) return
@@ -242,6 +319,55 @@ export function ConfigParsingLitalertsPage(): JSX.Element {
                   ) : null}
                 </section>
 
+                <section style={{ marginBottom: '1rem', padding: '0.75rem', border: '1px solid rgba(0,0,0,0.08)', borderRadius: '4px' }}>
+                  <h4 style={{ marginTop: 0, marginBottom: '0.25rem' }}>Apply &amp; push parser config</h4>
+                  <p className="subtle-copy" style={{ marginTop: 0 }}>
+                    Edits below are committed straight to <code>master</code> of
+                    <code> helios-parser-configs</code>. The server validates against the
+                    parsekit contract / dialect / goldens before pushing — any failure
+                    surfaces in red without touching the repo.
+                    {configFetch ? (
+                      <> Target file: <code>{configFetch.relPath}</code> {configFetch.exists ? null : <em>(new file — will be created)</em>}</>
+                    ) : null}
+                  </p>
+                  <textarea
+                    onChange={(e) => setDraftJsonc(e.currentTarget.value)}
+                    rows={14}
+                    spellCheck={false}
+                    style={{ width: '100%', fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: '0.78rem' }}
+                    value={draftJsonc}
+                  />
+                  <textarea
+                    onChange={(e) => setApplyNote(e.currentTarget.value)}
+                    placeholder="Commit note (optional) — what changed and why."
+                    rows={2}
+                    style={{ width: '100%', fontFamily: 'inherit', marginTop: '0.5rem' }}
+                    value={applyNote}
+                  />
+                  <div className="inline-row wrap-row" style={{ marginTop: '0.5rem' }}>
+                    <button
+                      className="primary-button"
+                      disabled={applyLoading || !draftJsonc.trim()}
+                      onClick={applyConfig}
+                      type="button"
+                    >
+                      {applyLoading ? 'Applying…' : 'Apply & push'}
+                    </button>
+                    <span className="subtle-copy">
+                      {configFetch?.exists
+                        ? 'Validates → writes → commits → pushes to origin/master.'
+                        : 'No existing config; the panel is seeded with a minimal stub for editing.'}
+                    </span>
+                  </div>
+                  {applyError ? <p className="error-banner" style={{ marginTop: '0.5rem', whiteSpace: 'pre-wrap' }}>{applyError}</p> : null}
+                  {applyResult ? (
+                    <p className="subtle-copy" style={{ marginTop: '0.5rem' }}>
+                      ✓ Pushed commit <code>{applyResult.commitSha.slice(0, 7)}</code> to <code>{applyResult.relPath}</code>
+                      {applyResult.pushed ? '' : ' (remote already at HEAD)'}. Registry will pick it up on the next refresh tick (≤ 60s).
+                    </p>
+                  ) : null}
+                </section>
+
                 {error ? <p className="error-banner">{error}</p> : null}
                 {loadingSample ? <p className="subtle-copy">Loading sample…</p> : null}
                 {sample ? (
@@ -332,6 +458,31 @@ function SampleTable({
         ))}
       </tbody>
     </table>
+  )
+}
+
+function buildEmptyConfigStub(tenantId: string): string {
+  const stub = {
+    configVersion: 1,
+    parserId: `litalerts.${tenantId}`,
+    scope: { tenantId, useCase: 'litalerts' },
+    dialectRef: { id: 'litalerts-v1', version: 1 },
+    detect: {},
+    rules: [
+      {
+        id: `${tenantId}.example`,
+        priority: 100,
+        parser: { kind: 'seq', items: [] },
+        project: {},
+        transforms: [],
+        goldens: [],
+      },
+    ],
+  }
+  return (
+    '// New tenant config — fill in parser, project, and goldens, then\n' +
+    '// click "Apply & push" to validate against parsekit and commit.\n' +
+    JSON.stringify(stub, null, 2)
   )
 }
 

@@ -22,6 +22,9 @@
  *                                                        by hand for now.
  */
 
+import { existsSync, readFileSync } from 'node:fs'
+import { join, resolve } from 'node:path'
+
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 
@@ -32,6 +35,8 @@ import {
   listLitalertsCompetitors,
   loadCompetitorSample,
 } from '../db/queries/litalertsCompetitorsQueries.js'
+import { dispensaryToTenantId } from '../parsekit/litalertsLookup.js'
+import { applyLitalertsTenantConfig } from '../parsekit/applyConfig.js'
 
 const CHAT_MODEL = 'google.gemma-3-27b-it'
 
@@ -174,6 +179,86 @@ export async function registerConfigLitalertsParsingRoutes(server: FastifyInstan
         const message = error instanceof Error ? error.message : String(error)
         return reply.code(502).send({ error: 'bedrock_transport_error', message })
       }
+    },
+  )
+
+  // -----------------------------------------------------------------
+  // L5: read current tenant config from the parser-configs mirror,
+  // and apply+push a new one.
+  // -----------------------------------------------------------------
+
+  server.get<{ Params: { competitor: string } }>(
+    '/api/config/parsing/litalerts/:competitor/config',
+    async (request, reply) => {
+      const user = await requireSessionUser(request, reply, 'viewer')
+      if (!user) return
+
+      const competitorName = decodeURIComponent(request.params.competitor)
+      const tenantId = dispensaryToTenantId(competitorName)
+      const localDir = (process.env.HELIOS_PARSER_CONFIGS_LOCAL_DIR ?? '').trim()
+      if (!localDir) {
+        return reply.code(503).send({
+          error: 'mirror_unavailable',
+          message: 'HELIOS_PARSER_CONFIGS_LOCAL_DIR is not set on this server.',
+        })
+      }
+      const relPath = `use-cases/litalerts/parsers/${tenantId}.jsonc`
+      const absPath = join(resolve(localDir), relPath)
+      if (!existsSync(absPath)) {
+        return reply.send({
+          competitorName,
+          tenantId,
+          relPath,
+          exists: false,
+          jsonc: null,
+        })
+      }
+      const jsonc = readFileSync(absPath, 'utf8')
+      return reply.send({
+        competitorName,
+        tenantId,
+        relPath,
+        exists: true,
+        jsonc,
+      })
+    },
+  )
+
+  const ApplyConfigRequestSchema = z.object({
+    jsonc: z.string().min(20).max(64_000),
+    note: z.string().max(2000).default(''),
+  })
+
+  server.post<{ Params: { competitor: string } }>(
+    '/api/config/parsing/litalerts/:competitor/apply-config',
+    async (request, reply) => {
+      const user = await requireSessionUser(request, reply, 'editor')
+      if (!user) return
+
+      const competitorName = decodeURIComponent(request.params.competitor)
+      const tenantId = dispensaryToTenantId(competitorName)
+      const body = ApplyConfigRequestSchema.parse(request.body ?? {})
+
+      const result = await applyLitalertsTenantConfig({
+        tenantId,
+        jsonc: body.jsonc,
+        note: body.note,
+        actorEmail: user.email ?? 'unknown@freshlybaked.nyc',
+      })
+      if (!result.ok) {
+        return reply.code(400).send({
+          error: result.code,
+          message: result.message,
+          detail: result.detail ?? null,
+        })
+      }
+      return reply.send({
+        ok: true,
+        tenantId,
+        relPath: result.relPath,
+        commitSha: result.commitSha,
+        pushed: result.pushed,
+      })
     },
   )
 }
