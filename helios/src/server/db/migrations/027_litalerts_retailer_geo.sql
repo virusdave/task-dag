@@ -95,11 +95,11 @@ values
   ('bronx', 'Freshly Baked NYC — Bronx', '2375 Arthur Ave, The Bronx, NY 10458', 40.855074, -73.888066, now())
 on conflict (site_key) do nothing;
 
--- A placeholder midtown row with NULL coords so the distance compute
--- still works after dropping in a real address. The competitor query
--- IGNORES stores with NULL latitude/longitude so this row contributes
--- nothing until populated.
+-- Midtown coords backfilled from Census geocoding of the real
+-- address (`https://freshlybaked.nyc`). Prod DB was updated manually
+-- during the initial deploy; this insert keeps fresh environments
+-- correct without a separate backfill.
 insert into helios_store_locations (site_key, display_name, address, latitude, longitude, geocoded_at)
 values
-  ('midtown', 'Freshly Baked NYC — Midtown (placeholder)', 'TBD — populate via UPDATE before distance sort uses this site', NULL, NULL, NULL)
+  ('midtown', 'Freshly Baked NYC — Midtown', '40 W 55th St, New York, NY 10019', 40.762160, -73.976241, now())
 on conflict (site_key) do nothing;

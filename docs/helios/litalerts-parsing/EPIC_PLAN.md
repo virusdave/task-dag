@@ -1,5 +1,34 @@
 # LitAlerts parsing live-review — Epic plan
 
+> **⏸ PAUSED — superseded by issue #20 (structured LitAlerts ingest).**
+>
+> After standing up `/v1/brands/{brandId}/products` and
+> `/v1/retailers/{retailerId}/products` ingest under #20, it became
+> clear that LitAlerts already returns pre-parsed structured fields
+> (brand + brandId, category, configs[].amount/units, normalPrice,
+> salePrice, currentStock, recreational/medical flags, per-listing
+> URLs) — i.e. essentially a built-in FuzzySku for 95% of fields.
+> Per-competitor text parsing of free-text `listingName` is the
+> wrong altitude for this problem, so this epic is paused.
+>
+> What is paused: per-tenant parser-config authoring, the LLM-chat
+> + apply/push UI on `/config/parsing/litalerts`, the bootstrap
+> script for the top-N closest competitors.
+>
+> What stays live: the parsekit substrate itself (contracts,
+> dialects, registry, verify, parsers repo, applyConfig.ts,
+> dryRunConfig.ts) — it is still the right tool for residual
+> per-listing text extraction (`strainNorm`, `packCountNorm`,
+> potentially `subcategoryNorm`) that the LitAlerts structured
+> RPCs don't cover. New residual parsers should target the
+> structured `LAProduct.name` field, not free-text retailer
+> listings.
+>
+> Resume conditions: only if the structured RPCs prove materially
+> inadequate (e.g. specific competitors return useless `LAProduct`
+> rows that we genuinely have to re-derive from ecom scrapes).
+> Until then, do not invest in per-competitor parser configs.
+
 Authoritative scope: [issue #19](https://github.com/FreshlyBakedNYC/automation/issues/19).
 Sibling work / shared substrate:
 [`docs/helios/parsekit/EPIC_PLAN.md`](../parsekit/EPIC_PLAN.md) (the

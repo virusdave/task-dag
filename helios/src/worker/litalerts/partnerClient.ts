@@ -132,10 +132,16 @@ export async function listBrandsForState(stateCode: string): Promise<LitAlertsBr
 
 export async function listBrandProducts(
   brandId: number,
-  stateCode: string,
+  stateCodeOrOptions: string | { stateCode: string; includeOutOfStock?: boolean },
 ): Promise<LitAlertsProduct[]> {
+  const opts =
+    typeof stateCodeOrOptions === 'string'
+      ? { stateCode: stateCodeOrOptions, includeOutOfStock: false }
+      : { includeOutOfStock: false, ...stateCodeOrOptions }
+  const params = new URLSearchParams({ state: opts.stateCode })
+  if (opts.includeOutOfStock) params.set('includeOOS', 'true')
   const payload = await fetchPartnerJson(
-    `/v1/brands/${encodeURIComponent(String(brandId))}/products?state=${encodeURIComponent(stateCode)}`,
+    `/v1/brands/${encodeURIComponent(String(brandId))}/products?${params.toString()}`,
   )
   return ProductListResponseSchema.parse(payload).data
 }
