@@ -132,7 +132,9 @@ export async function listBrandsForState(stateCode: string): Promise<LitAlertsBr
 
 export async function listBrandProducts(
   brandId: number,
-  stateCodeOrOptions: string | { stateCode: string; includeOutOfStock?: boolean },
+  stateCodeOrOptions:
+    | string
+    | { stateCode: string; includeOutOfStock?: boolean; categoryFilter?: string; subcategoryFilter?: string },
 ): Promise<LitAlertsProduct[]> {
   const opts =
     typeof stateCodeOrOptions === 'string'
@@ -140,10 +142,24 @@ export async function listBrandProducts(
       : { includeOutOfStock: false, ...stateCodeOrOptions }
   const params = new URLSearchParams({ state: opts.stateCode })
   if (opts.includeOutOfStock) params.set('includeOOS', 'true')
+  if (opts.categoryFilter) params.set('categoryFilter', opts.categoryFilter)
+  if (opts.subcategoryFilter) params.set('subcategoryFilter', opts.subcategoryFilter)
   const payload = await fetchPartnerJson(
     `/v1/brands/${encodeURIComponent(String(brandId))}/products?${params.toString()}`,
   )
   return ProductListResponseSchema.parse(payload).data
+}
+
+const SystemListSchema = z.array(z.string())
+
+export async function listSystemCategories(): Promise<string[]> {
+  const payload = await fetchPartnerJson('/v1/categories')
+  return SystemListSchema.parse(payload)
+}
+
+export async function listSystemSubcategories(category: string): Promise<string[]> {
+  const payload = await fetchPartnerJson(`/v1/subcategories?category=${encodeURIComponent(category)}`)
+  return SystemListSchema.parse(payload)
 }
 
 export async function listRetailers(stateCode: string): Promise<LitAlertsRetailer[]> {

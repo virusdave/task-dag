@@ -29,6 +29,8 @@ import { Pool } from 'pg'
 import {
   listBrandsForState,
   listBrandProducts,
+  listSystemCategories,
+  listSystemSubcategories,
   type LitAlertsProduct,
 } from '../src/worker/litalerts/partnerClient.js'
 
@@ -43,9 +45,11 @@ async function main(): Promise<void> {
     console.error('DATABASE_URL is required')
     process.exit(1)
   }
-  // Generous pool so 32-way concurrent crawl workers don't queue
+  // Generous pool so highly-concurrent crawl workers don't queue
   // waiting for a DB client when their fetches return at the same time.
-  const pool = new Pool({ connectionString: databaseUrl, max: 40 })
+  // At default concurrency (384), most workers spend their time on
+  // HTTP I/O, so a 64-conn pool is more than enough.
+  const pool = new Pool({ connectionString: databaseUrl, max: 64 })
 
   // Heartbeat row — written on entry, finalised on exit.
   const startedAt = new Date()
@@ -94,22 +98,89 @@ async function main(): Promise<void> {
     let processed = 0
     let fetchFailures = 0
     let retries = 0
+    let categoryFallbacks = 0
+    let subcategoryFallbacks = 0
     const categoryCounts: Record<string, number> = {}
-    const concurrency = Number(process.env.LITALERTS_INGEST_CONCURRENCY ?? '32')
+    const concurrency = Number(process.env.LITALERTS_INGEST_CONCURRENCY ?? '384')
     const maxAttempts = Number(process.env.LITALERTS_INGEST_MAX_ATTEMPTS ?? '5')
     const baseBackoffMs = Number(process.env.LITALERTS_INGEST_BACKOFF_BASE_MS ?? '500')
 
+    // Prefetch the global category list so the fallback path can split
+    // a "too big" brand fetch into per-category requests without making
+    // every worker independently re-discover the category set.
+    console.log(`[run #${runId}] fetching system categories for fallback splitting…`)
+    let categoryList: string[] = []
+    try {
+      categoryList = await listSystemCategories()
+      console.log(`[run #${runId}] system categories: ${categoryList.join(', ')}`)
+    } catch (err) {
+      console.warn(
+        `[run #${runId}] WARN failed to fetch system categories; large-brand fallback disabled: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      )
+    }
+
+    // Cache of category -> subcategory list (lazy, populated on first
+    // category that needs a subcategory fallback).
+    const subcategoryCache = new Map<string, string[]>()
+    async function getSubcategories(category: string): Promise<string[]> {
+      const cached = subcategoryCache.get(category)
+      if (cached) return cached
+      const subs = await listSystemSubcategories(category)
+      subcategoryCache.set(category, subs)
+      return subs
+    }
+
+    // Adaptive global throttle: when any worker sees a 503 / 429
+    // (upstream is overloaded), every other worker waits until the
+    // cooldown expires before issuing its next request. The cooldown
+    // grows multiplicatively while the storm persists and decays
+    // back as successful requests come through.
+    let throttledUntil = 0
+    let throttleStreak = 0
+    function noteOverloaded(): void {
+      throttleStreak = Math.min(throttleStreak + 1, 12)
+      // Subexponential (power-law) growth: 1000 * streak^1.5 ms.
+      // streak = 1..12 yields 1000, 2828, 5196, 8000, 11180, 14697,
+      // 18520, 22627, 27000, 31623 — capped to 30s so we never wedge
+      // forever, but ramp slowly enough that we don't smash the API
+      // harder than the natural per-attempt retry already does.
+      const cooldownMs = Math.min(30_000, Math.round(1000 * Math.pow(throttleStreak, 1.5)))
+      const candidate = Date.now() + cooldownMs
+      if (candidate > throttledUntil) throttledUntil = candidate
+    }
+    function noteOk(): void {
+      if (throttleStreak > 0) throttleStreak = Math.max(0, throttleStreak - 1)
+    }
+    async function awaitThrottle(): Promise<void> {
+      while (Date.now() < throttledUntil) {
+        await new Promise((r) => setTimeout(r, Math.min(500, throttledUntil - Date.now())))
+      }
+    }
+    function isOverloadError(err: unknown): boolean {
+      const m = err instanceof Error ? err.message : String(err)
+      return /\b(503|429)\b/.test(m) || /Service Unavailable|Too Many Requests/i.test(m)
+    }
+
     // Subexponential (power-law) backoff: delay = base * attempt^1.5.
     // For base=500ms gives 500, 1414, 2598, 4000, 5590 — bounded growth
-    // so a struggling endpoint isn't smashed harder than 6 in-flight
-    // retries at any moment, even at concurrency=32.
-    async function fetchBrandProductsWithRetry(brand: { id: number; name: string }): Promise<LitAlertsProduct[]> {
+    // so a struggling endpoint isn't smashed harder than ~6 in-flight
+    // retries at any moment even at high concurrency.
+    async function retryFetch<T>(
+      op: () => Promise<T>,
+      label: string,
+    ): Promise<T> {
       let lastErr: unknown
       for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+        await awaitThrottle()
         try {
-          return await listBrandProducts(brand.id, { stateCode, includeOutOfStock: true })
+          const result = await op()
+          noteOk()
+          return result
         } catch (err) {
           lastErr = err
+          if (isOverloadError(err)) noteOverloaded()
           if (attempt < maxAttempts) {
             retries += 1
             const delay = Math.round(baseBackoffMs * Math.pow(attempt, 1.5))
@@ -117,7 +188,86 @@ async function main(): Promise<void> {
           }
         }
       }
-      throw lastErr
+      throw new Error(
+        `${label}: failed after ${maxAttempts} attempts: ${lastErr instanceof Error ? lastErr.message : String(lastErr)}`,
+      )
+    }
+
+    async function fetchBrandProductsByCategory(
+      brand: { id: number; name: string },
+      category: string,
+    ): Promise<LitAlertsProduct[]> {
+      try {
+        return await retryFetch(
+          () => listBrandProducts(brand.id, { stateCode, includeOutOfStock: true, categoryFilter: category }),
+          `brand ${brand.id} cat=${category}`,
+        )
+      } catch {
+        // Per-category fetch still too big — split by subcategory.
+        subcategoryFallbacks += 1
+        const subs = await retryFetch(() => getSubcategories(category), `subcategories cat=${category}`).catch(() => [])
+        if (subs.length === 0) throw new Error(`brand ${brand.id} cat=${category}: no subcategories available for split`)
+        const out: LitAlertsProduct[] = []
+        for (const sub of subs) {
+          try {
+            const subProducts = await retryFetch(
+              () =>
+                listBrandProducts(brand.id, {
+                  stateCode,
+                  includeOutOfStock: true,
+                  categoryFilter: category,
+                  subcategoryFilter: sub,
+                }),
+              `brand ${brand.id} cat=${category} sub=${sub}`,
+            )
+            out.push(...subProducts)
+          } catch (err) {
+            console.warn(
+              `[run #${runId}] brand ${brand.id} cat=${category} sub=${sub} skipped: ${
+                err instanceof Error ? err.message : String(err)
+              }`,
+            )
+          }
+        }
+        return out
+      }
+    }
+
+    async function fetchBrandProductsWithRetry(brand: { id: number; name: string }): Promise<LitAlertsProduct[]> {
+      try {
+        return await retryFetch(
+          () => listBrandProducts(brand.id, { stateCode, includeOutOfStock: true }),
+          `brand ${brand.id}`,
+        )
+      } catch {
+        // Full-brand fetch keeps timing out (likely too many products
+        // for the endpoint to materialize within 30s). Fall back to
+        // per-category fanout and aggregate the union.
+        categoryFallbacks += 1
+        if (categoryList.length === 0) throw new Error(`brand ${brand.id}: full fetch failed and no categories available for fallback`)
+        const aggregate = new Map<number, LitAlertsProduct>()
+        const results = await Promise.all(
+          categoryList.map(async (cat) => {
+            try {
+              return await fetchBrandProductsByCategory(brand, cat)
+            } catch (err) {
+              console.warn(
+                `[run #${runId}] brand ${brand.id} cat=${cat} skipped: ${err instanceof Error ? err.message : String(err)}`,
+              )
+              return [] as LitAlertsProduct[]
+            }
+          }),
+        )
+        for (const bucket of results) {
+          for (const p of bucket) {
+            // Dedupe by product id — a product belongs to a single
+            // category in practice, but defend against duplicates.
+            if (!aggregate.has(p.id)) aggregate.set(p.id, p)
+          }
+        }
+        if (aggregate.size === 0) throw new Error(`brand ${brand.id}: full + per-category fallback both produced 0 rows`)
+        return [...aggregate.values()]
+      }
     }
 
     let cursor = 0
@@ -207,7 +357,7 @@ async function main(): Promise<void> {
         processed += 1
         if (processed % 25 === 0 || processed === brands.length) {
           console.log(
-            `[run #${runId}] (${processed}/${brands.length}) processed; products=${productsSeen} configs=${configRowsWritten} fetch-failures=${fetchFailures} retries=${retries}`,
+            `[run #${runId}] (${processed}/${brands.length}) processed; products=${productsSeen} configs=${configRowsWritten} fetch-failures=${fetchFailures} retries=${retries} cat-fallbacks=${categoryFallbacks} sub-fallbacks=${subcategoryFallbacks}`,
           )
         }
       }
