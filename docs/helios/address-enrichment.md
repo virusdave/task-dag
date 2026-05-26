@@ -17,8 +17,10 @@ sweed_orders ──┬─→ A4: enrichDeliveryAddressJob    A5: enrichCustomerA
                │     + sweed_customer_addresses (kind='delivery_seen')               │
                │                                                                     │
                │                                  sweed_customer_addresses           │
-               │                                  (kind='primary')                   │
-               │                                  + sweed_customer_address_polls     │
+               │                                  (kind='primary'; "no-address"      │
+               │                                   responses link to a shared        │
+               │                                   sentinel addresses row so we      │
+               │                                   never re-poll the same customer)  │
                ▼                                                                     │
         addresses (geocode_status='pending')                                         │
                                                                                      │
@@ -41,7 +43,6 @@ sweed_orders ──┬─→ A4: enrichDeliveryAddressJob    A5: enrichCustomerA
 |----------------------------------------|---------------------------------------------------------------------------------|
 | Schema                                 | `helios/src/server/db/schema/addresses.sql`                                     |
 | Migration 037 (addresses + linkage)    | `helios/src/server/db/migrations/037_addresses.sql`                             |
-| Migration 038 (customer poll-state)    | `helios/src/server/db/migrations/038_sweed_customer_address_polls.sql`          |
 | Sweed RPC wrappers                     | `helios/src/worker/sweed/sales.ts`, `helios/src/worker/sweed/customers.ts`      |
 | Geocoder + address upsert helpers      | `helios/src/worker/geocoder/`                                                   |
 | Delivery enrichment worker (A4)        | `helios/src/worker/jobs/enrichDeliveryAddressJob.ts`                            |
@@ -62,7 +63,7 @@ and well under any known Sweed rate ceiling.
 
 ## Operator runbook
 
-1. Apply migrations 037 + 038 on production via psql.
+1. Apply migration 037 on production via psql.
 2. The two scheduler tasks materialise on first boot
    (`ensureDefaultConfigSchedules` seeds the 5-minute windows).
 3. Watch `/config/workers` for the two new rows; pause / resume / edit

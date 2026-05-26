@@ -561,7 +561,7 @@ const ORIGIN_SERIES_IDS = [
   'other',
 ] as const
 
-function bucketForAddress(county: string | null, stateCode: string | null): string {
+export function bucketForAddress(county: string | null, stateCode: string | null): string {
   const stateUpper = stateCode === null ? null : stateCode.trim().toUpperCase()
   if (county !== null && stateUpper === 'NY') {
     const canonical = county.trim().toLowerCase().replace(/\s+county$/, '')

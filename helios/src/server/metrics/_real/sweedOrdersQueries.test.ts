@@ -138,3 +138,40 @@ describe('sweed-orders metric queries — bucket-key timezone regression', () =>
     expect(sql).not.toMatch(/date_trunc\([^)]+\)\s+as\s+bucket_start/)
   })
 })
+
+// -----------------------------------------------------------------
+// bucketForAddress — NYC-borough + NJ bucketing of (county, state)
+// pairs as returned by the US Census Geocoder (#25 A6).
+// -----------------------------------------------------------------
+
+import { bucketForAddress } from './sweedOrdersQueries.js'
+
+describe('bucketForAddress — county/state → borough series', () => {
+  it('maps the five NYC counties to their NYC borough series', () => {
+    expect(bucketForAddress('New York', 'NY')).toBe('manhattan')
+    expect(bucketForAddress('Kings', 'NY')).toBe('brooklyn')
+    expect(bucketForAddress('Queens', 'NY')).toBe('queens')
+    expect(bucketForAddress('Bronx', 'NY')).toBe('bronx')
+    expect(bucketForAddress('Richmond', 'NY')).toBe('staten_island')
+  })
+
+  it("tolerates the Census 'X County' basename variant + case quirks", () => {
+    expect(bucketForAddress('Kings County', 'NY')).toBe('brooklyn')
+    expect(bucketForAddress('NEW YORK', 'ny')).toBe('manhattan')
+    expect(bucketForAddress('  bronx  ', '  NY  ')).toBe('bronx')
+  })
+
+  it('buckets every NJ county (and just NJ-state when county is null) into nj', () => {
+    expect(bucketForAddress('Bergen', 'NJ')).toBe('nj')
+    expect(bucketForAddress('Hudson', 'nj')).toBe('nj')
+    expect(bucketForAddress(null, 'NJ')).toBe('nj')
+  })
+
+  it('falls into other for non-NYC NY counties, other states, and missing data', () => {
+    expect(bucketForAddress('Westchester', 'NY')).toBe('other')
+    expect(bucketForAddress('Nassau', 'NY')).toBe('other')
+    expect(bucketForAddress('New York', 'CT')).toBe('other')
+    expect(bucketForAddress(null, null)).toBe('other')
+    expect(bucketForAddress(null, 'CT')).toBe('other')
+  })
+})
