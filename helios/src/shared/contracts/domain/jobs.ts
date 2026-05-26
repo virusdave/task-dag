@@ -43,6 +43,7 @@ export const JobTypeSchema = z.enum([
   'config.workers.catalog_refresh',
   'config.workers.market_evidence_alarm_scan',
   'config.workers.edible_thc_clamp',
+  'config.workers.litalerts_retailer_backfill',
   'catalog.maintenance.upload_group_image',
 ])
 export type JobType = z.infer<typeof JobTypeSchema>
@@ -265,6 +266,27 @@ export const ConfigWorkersEdibleThcClampJobPayloadSchema = z.object({
 })
 export type ConfigWorkersEdibleThcClampJobPayload = z.infer<
   typeof ConfigWorkersEdibleThcClampJobPayloadSchema
+>
+
+/**
+ * Daily slow refresh of Lit Alerts /v1/retailers/{id}/products for
+ * every NY competitor inside our pricing distance bands (≤50mi).
+ * Resume-aware: the worker skips retailers with a product row newer
+ * than `skipIfIngestedWithinHours`, so the daily tick naturally
+ * focuses on retailers that 5xx'd / timed-out on the prior pass.
+ * Sub-exponential backoff on 5xx + deferred-retry passes drain
+ * transient upstream storms without abandoning failed retailers.
+ */
+export const ConfigWorkersLitalertsRetailerBackfillJobPayloadSchema = z.object({
+  requestedByUserId: z.number().int().positive().nullable().optional(),
+  trigger: z.enum(['manual_run', 'scheduled']).default('scheduled'),
+  stateCode: z.string().trim().min(2).max(2).default('NY'),
+  concurrency: z.number().int().min(1).max(64).default(8),
+  maxDistanceMiles: z.number().min(0).max(500).default(50),
+  skipIfIngestedWithinHours: z.number().min(0).max(168).default(12),
+})
+export type ConfigWorkersLitalertsRetailerBackfillJobPayload = z.infer<
+  typeof ConfigWorkersLitalertsRetailerBackfillJobPayloadSchema
 >
 
 /**

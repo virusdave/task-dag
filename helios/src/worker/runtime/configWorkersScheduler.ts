@@ -70,6 +70,8 @@ export async function tickConfigWorkersScheduler(now: Date = new Date()): Promis
       await enqueueScheduledCatalogRefresh(schedule.taskKey, now, activeWindow.intervalMinutes)
     } else if (schedule.taskKey === 'workers.scheduling.edible_thc_clamp') {
       await enqueueScheduledEdibleThcClamp(schedule.taskKey, now, activeWindow.intervalMinutes)
+    } else if (schedule.taskKey === 'workers.scheduling.litalerts_retailer_backfill') {
+      await enqueueScheduledLitalertsRetailerBackfill(schedule.taskKey, now, activeWindow.intervalMinutes)
     }
   }
 }
@@ -426,6 +428,50 @@ async function enqueueScheduledEdibleThcClamp(
       payload: {
         intervalMinutes,
         siteDealerIds,
+        taskKey,
+        trigger: 'scheduled',
+      },
+      requestId: null,
+      scope: null,
+      undoPayload: null,
+    })
+  })
+}
+
+async function enqueueScheduledLitalertsRetailerBackfill(
+  taskKey: ConfigBackgroundTaskKey,
+  now: Date,
+  intervalMinutes: number,
+): Promise<void> {
+  const bucketMs = intervalMinutes * 60 * 1000
+  const bucketStartMs = Math.floor(now.getTime() / bucketMs) * bucketMs
+  const bucketIso = new Date(bucketStartMs).toISOString()
+
+  await withTransaction(async (db) => {
+    const jobId = await enqueueJob(db, {
+      // Does not touch Sweed; no shared session lane needed.
+      concurrencyKey: null,
+      dedupeKey: `config.workers.litalerts_retailer_backfill:scheduled:${bucketIso}`,
+      jobType: 'config.workers.litalerts_retailer_backfill',
+      module: 'config',
+      payload: {
+        trigger: 'scheduled',
+      },
+      requestedByUserId: null,
+      runAt: now,
+      scope: null,
+    })
+
+    await recordConfigScheduleEnqueue(db, taskKey, jobId, now)
+    await appendAuditEvent(db, {
+      actorType: 'system',
+      actorUserId: null,
+      entityId: String(jobId),
+      entityType: 'job',
+      eventType: 'config.workers.litalerts_retailer_backfill.requested',
+      module: 'config',
+      payload: {
+        intervalMinutes,
         taskKey,
         trigger: 'scheduled',
       },

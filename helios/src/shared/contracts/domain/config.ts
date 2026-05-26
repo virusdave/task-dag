@@ -14,6 +14,7 @@ export const CONFIG_BACKGROUND_TASK_KEYS = [
   'workers.scheduling.catalog',
   'workers.scheduling.edible_thc_clamp',
   'workers.scheduling.litalerts',
+  'workers.scheduling.litalerts_retailer_backfill',
   'workers.scheduling.litalerts_rolling',
   'workers.scheduling.market_evidence_alarm',
   'workers.scheduling.stock',
@@ -52,6 +53,13 @@ export const CONFIG_BACKGROUND_TASKS: ReadonlyArray<ConfigBackgroundTaskDefiniti
     slug: 'litalerts',
     implemented: true,
     summary: 'Drains the pending Lit Alerts refresh queue (one job per queued variant) by capturing competitor listings for each variant whose stock just transitioned out-of-stock to in-stock.',
+  },
+  {
+    key: 'workers.scheduling.litalerts_retailer_backfill',
+    label: 'Litalerts Retailer Backfill',
+    slug: 'litalerts-retailer-backfill',
+    implemented: true,
+    summary: 'Daily slow refresh of Lit Alerts /v1/retailers/{id}/products for every NY competitor within our pricing distance bands (≤50mi). Resume-aware (skips retailers already refreshed in the last 12h), uses sub-exponential backoff on 5xx, and runs deferred-retry passes so transient upstream failures eventually drain.',
   },
   {
     key: 'workers.scheduling.litalerts_rolling',
@@ -206,6 +214,27 @@ export const EDIBLE_THC_CLAMP_DEFAULT_SCHEDULE_WINDOWS: ReadonlyArray<Omit<Confi
     intervalMinutes: 15,
     paused: false,
     notes: 'Clamp every in-stock edible variant\'s THC lab data to <=100 mg/package every 15 minutes.',
+  },
+]
+
+/**
+ * Default schedule for the Lit Alerts nearby-retailer products
+ * backfill. Runs once per day in the small hours; the job itself is
+ * resume-aware (any retailer with a `litalerts_products` row newer
+ * than the skip window is left alone), so the daily tick naturally
+ * focuses on retailers that 5xx'd or otherwise missed the previous
+ * pass. The 02:00 wake-up is paired with the worker's deferred-retry
+ * passes so any retailer that fails the first pass is re-attempted
+ * with progressively slower fanout before the job exits.
+ */
+export const LITALERTS_RETAILER_BACKFILL_DEFAULT_SCHEDULE_WINDOWS: ReadonlyArray<Omit<ConfigWorkerScheduleWindow, 'id'>> = [
+  {
+    weekdayMask: WEEKDAY_MASK_ALL,
+    windowStartMinute: 2 * 60, // 02:00
+    windowEndMinute: 2 * 60 + 30, // narrow 30-min wake window
+    intervalMinutes: 1440,
+    paused: false,
+    notes: 'Daily slow refresh of <=50mi NY competitor product listings (02:00).',
   },
 ]
 

@@ -9,6 +9,7 @@ import {
   ConfigWorkersCatalogRefreshJobPayloadSchema,
   ConfigWorkersEdibleThcClampJobPayloadSchema,
   ConfigWorkersLitalertsRefreshVariantJobPayloadSchema,
+  ConfigWorkersLitalertsRetailerBackfillJobPayloadSchema,
   ConfigWorkersMarketEvidenceAlarmScanJobPayloadSchema,
   ConfigWorkersStockRefreshJobPayloadSchema,
   CatalogSyncGroupDetailJobPayloadSchema,
@@ -39,6 +40,7 @@ import { runCatalogPendingPurchasesImportJob } from '../jobs/importPendingPurcha
 import { runConfigWorkersCatalogRefreshJob } from '../jobs/configWorkersCatalogRefreshJob.js'
 import { runConfigWorkersEdibleThcClampJob } from '../jobs/configWorkersEdibleThcClampJob.js'
 import { runConfigWorkersLitalertsRefreshVariantJob } from '../jobs/configWorkersLitalertsRefreshJob.js'
+import { runConfigWorkersLitalertsRetailerBackfillJob } from '../jobs/configWorkersLitalertsRetailerBackfillJob.js'
 import { runConfigWorkersMarketEvidenceAlarmScanJob } from '../jobs/configWorkersMarketEvidenceAlarmScanJob.js'
 import { runConfigWorkersStockRefreshJob } from '../jobs/configWorkersStockRefreshJob.js'
 import { runProposalImportReviewJsonJob } from '../jobs/importReviewJsonJob.js'
@@ -177,6 +179,12 @@ const handlers: Record<JobType, JobHandler> = {
     await runConfigWorkersEdibleThcClampJob(
       context,
       ConfigWorkersEdibleThcClampJobPayloadSchema.parse(context.payload),
+    )
+  },
+  'config.workers.litalerts_retailer_backfill': async (context) => {
+    await runConfigWorkersLitalertsRetailerBackfillJob(
+      context,
+      ConfigWorkersLitalertsRetailerBackfillJobPayloadSchema.parse(context.payload),
     )
   },
 }

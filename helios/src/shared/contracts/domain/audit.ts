@@ -92,6 +92,8 @@ export const AuditEventTypeSchema = z.enum([
   'config.workers.catalog_refresh.completed',
   'config.workers.edible_thc_clamp.requested',
   'config.workers.edible_thc_clamp.completed',
+  'config.workers.litalerts_retailer_backfill.requested',
+  'config.workers.litalerts_retailer_backfill.completed',
   'config.workers.market_evidence_alarm.completed',
   'config.brand_expiry_override.upserted',
   'config.brand_expiry_override.deleted',
