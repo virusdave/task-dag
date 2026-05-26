@@ -366,15 +366,65 @@ the registry entry.
 
 ## P2-P6 status: stubs vs real data
 
-The P0/P1 framework + the P2-P6 metric **IDs / titles / series /
-groups** all ship in v1. The data-side of P2-P6 — i.e. the actual
-SQL that returns real numbers instead of synthetic random walks —
-needs a Sweed orders ingest pipeline that does **not yet exist**
-in helios. Pulling completed orders + line items + wholesale costs +
-fulfillment / payment fields from `store.sale.invoice.list` is a
-multi-week piece of work and is tracked as a sibling epic.
+The P0/P1 framework + every spec'd P2-P6 metric **id / title / series /
+group** ship in v1. The Sweed orders ingest worker
+([#22](https://github.com/FreshlyBakedNYC/automation/issues/22)) is
+landed and continuously backfilling, which is what un-stubs each
+metric. Whether any individual metric returns real numbers vs.
+synthetic data depends on whether the **specific** column / RPC the
+metric needs is available in helios's local store yet.
 
-While that lands, every spec'd metric ships as a **stub**:
+### How "real" gets switched on per metric
+
+The registry composition is in
+[`helios/src/server/metrics/registry.ts`](../../helios/src/server/metrics/registry.ts):
+
+```ts
+const ALL: readonly MetricDef[] = [
+  // …demos…
+  ...STUB_METRICS.filter((m) => !REAL_METRIC_IDS.has(m.id)),
+  ...REAL_METRICS,
+]
+```
+
+A metric is "real" iff its id appears in
+[`REAL_METRIC_IDS`](../../helios/src/server/metrics/_real/realMetrics.ts) —
+the real-set wins over the stub-set with the same id. To promote a
+stub to real, add an entry to `REAL_METRICS` (same id, same series,
+real `query`); the stub entry can stay until the next cleanup pass.
+
+### Real today (10)
+
+| Metric id                            | Source                                                |
+| ------------------------------------ | ----------------------------------------------------- |
+| `acquisition.first_vs_returning`     | `sweed_orders` (first-vs-returning by `customer_id`)  |
+| `basket.size_by_fulfillment`         | `sweed_orders` (avg `subtotalAmount` per fulfillment) |
+| `basket.size_by_customer_type`       | `sweed_orders` (avg `subtotalAmount` per type)        |
+| `fulfillment.order_count`            | `sweed_orders` (count per `fulfillmentType`)          |
+| `fulfillment.sales_dollars`          | `sweed_orders` (sum per `fulfillmentType`)            |
+| `payment.order_count`                | `sweed_orders` (count per `paymentMethod`)            |
+| `payment.sales_dollars`              | `sweed_orders` (sum per `paymentMethod`)              |
+| `category.sales_stack_dollars`       | `sweed_orders.raw_json.items` (sum per category)      |
+| `category.sales_stack_fraction`      | same, normalised to 100%                              |
+| `customers.origin_map`               | shim (everything currently lands in `other`; see #25) |
+
+### Still stubs (13), grouped by what unblocks them
+
+Each row of the table maps a follow-on issue under
+[#22](https://github.com/FreshlyBakedNYC/automation/issues/22)'s umbrella
+to the metric ids it un-stubs. When the follow-on lands, rewrite the
+listed `query` functions to read the new postgres table(s), add the
+ids to `REAL_METRICS`, and drop the `STUB:` description prefix.
+
+| Follow-on | Unblocks |
+| --- | --- |
+| [#23 — per-product wholesale-cost cache](https://github.com/FreshlyBakedNYC/automation/issues/23) | `margins.effective_gm_pct`, `margins.gross_margin_dollars`, `margins.stack_new_vs_returning`, `category.margin_dollars_stack`, `fulfillment.margin_dollars`, `fulfillment.effective_gm_pct`, `delivery.margin_pct` (jointly with #25) |
+| [#24 — Sweed inventory snapshot ingest](https://github.com/FreshlyBakedNYC/automation/issues/24) | `inventory.cost_distribution`, `inventory.misalignment`, `slowmovers.cost_at_risk`, `lowstock.upcoming_outs` |
+| [#25 — Sweed per-invoice detail fetch](https://github.com/FreshlyBakedNYC/automation/issues/25) | `customers.origin_map` (full zip resolution, replacing the `other` fallback), `delivery.order_count_by_zone`, `delivery.margin_pct` (jointly with #23) |
+| [#26 — NOAA daily-summary weather ingest](https://github.com/FreshlyBakedNYC/automation/issues/26) | `weather.scatter_margin_vs_high_temp`, `weather.scatter_margin_vs_low_temp`, `weather.scatter_margin_vs_precip` |
+| [#27 — Sweed Shifts ingest](https://github.com/FreshlyBakedNYC/automation/issues/27) | `cashier.transactions_per_hour` |
+
+Stub semantics while a metric is still stubbed:
 
 - The metric appears in the left-nav under its real group.
 - The chart frame, controls, and annotation surface all work.
@@ -383,11 +433,11 @@ While that lands, every spec'd metric ships as a **stub**:
 - The description starts with `STUB: synthetic data — real-data SQL
   pending` so an operator can't confuse it with a real metric.
 
-When the ingest lands, each stub is rewritten in place — same
-file, same id, same title, same series — and the `STUB:` prefix
-is dropped from the description. The page-tree IA, the left-nav,
-the operator's bookmarks, and the historical annotations all
-survive untouched.
+When a follow-on ingest lands, each stub is rewritten in place —
+same id, same title, same series — and the `STUB:` prefix is
+dropped from the description. The page-tree IA, the left-nav, the
+operator's bookmarks, and the historical annotations all survive
+untouched.
 
 ## v2 follow-ons (deferred from this epic)
 
@@ -426,12 +476,33 @@ Closing out the child epic in [FreshlyBakedNYC/automation#21](https://github.com
   - P5 (cashier / weather / delivery): <commit-sha>
   - P6 (customer origin map): <commit-sha>
   - P7 (runbook): <this commit>
-- Deferred v2 items + follow-on issues:
-  - `cashier.upsell_lift` → automation#NNN
-  - `promos.summary` + `promos.detail` → automation#NNN
-  - `customers.origin_playback` → automation#NNN
-  - Threshold alerting → automation#NNN
-  - Mobile-optimised layout → automation#NNN
+- Real metrics shipped (10 of 23): `acquisition.first_vs_returning`,
+  `basket.size_by_fulfillment`, `basket.size_by_customer_type`,
+  `category.sales_stack_dollars`, `category.sales_stack_fraction`,
+  `fulfillment.order_count`, `fulfillment.sales_dollars`,
+  `payment.order_count`, `payment.sales_dollars`,
+  `customers.origin_map` (real-shim — full zip via #25).
+- Deferred ingest-blocked metrics (each ingest is its own follow-on
+  under [#22](https://github.com/FreshlyBakedNYC/automation/issues/22)'s
+  umbrella; see the runbook's "Still stubs" table for the metric ↔ issue
+  mapping):
+  - [#23](https://github.com/FreshlyBakedNYC/automation/issues/23) —
+    per-product wholesale-cost cache (margin / COGS metrics)
+  - [#24](https://github.com/FreshlyBakedNYC/automation/issues/24) —
+    Sweed inventory snapshot ingest (inventory / slow-movers / low-stock)
+  - [#25](https://github.com/FreshlyBakedNYC/automation/issues/25) —
+    Sweed per-invoice detail fetch (delivery-zip + customer-origin)
+  - [#26](https://github.com/FreshlyBakedNYC/automation/issues/26) —
+    NOAA daily-summary weather ingest (`weather.scatter_*`)
+  - [#27](https://github.com/FreshlyBakedNYC/automation/issues/27) —
+    Sweed Shifts ingest (`cashier.transactions_per_hour`)
+- Deferred v2 items (out of scope per the parent EPIC; file as new
+  issues if/when the operator prioritises them):
+  - `cashier.upsell_lift` — per-cashier statistical-significance lift
+  - `promos.summary` + `promos.detail` — promo performance dashboards
+  - `customers.origin_playback` — animated origin-map time scrub
+  - Threshold-based alerting on any metric
+  - Mobile-optimised layout
 - Acceptance criteria #1–#6 from the parent EPIC: verified on
   vps-nixos-3.
 
