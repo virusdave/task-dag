@@ -68,6 +68,29 @@ function resolveWindow(args: MetricQueryArgs): ResolvedWindow {
 }
 
 /**
+ * Build the bucket-start SELECT expression.
+ *
+ * IMPORTANT — DO NOT inline `date_trunc(unit, pay_time at time zone 'UTC')`
+ * directly. That returns a `timestamp` WITHOUT timezone, which node-postgres
+ * then parses as **server-local time** when the row crosses the wire. The
+ * helios server runs in America/Panama (UTC-05:00), so a Postgres value of
+ * `2026-05-18 00:00:00` arrived in JS as `2026-05-18T05:00:00.000Z` —
+ * shifting every bucket five hours forward and mismatching the keys that
+ * `walkBuckets` produces in UTC. The merge step in `runBucketedQuery` then
+ * fell through to `defaultValue` (0) for every series in every bucket,
+ * which is why every live chart looked like flatline-at-zero (see the
+ * 2026-05-26 operator bug report on virusdave/top-level#7).
+ *
+ * Wrapping the trunc in `(...) at time zone 'UTC'` casts it back to
+ * `timestamptz` at UTC, which node-postgres correctly returns as a Date
+ * matching the JS-side bucket boundary.
+ */
+function bucketSelectExpr(truncUnit: string | null): string {
+  if (truncUnit === null) return 'null::timestamptz'
+  return `(date_trunc('${truncUnit}', pay_time at time zone 'UTC')) at time zone 'UTC'`
+}
+
+/**
  * Run a bucketed query that produces one row per (bucket_start, series_id, value)
  * and shape the result into MetricRow[] with one row per expected bucket.
  *
@@ -154,7 +177,7 @@ export async function queryFirstVsReturning(args: MetricQueryArgs): Promise<Metr
     })
   }
   const sql = `
-    select date_trunc('${truncUnit}', pay_time at time zone 'UTC') as bucket_start,
+    select ${bucketSelectExpr(truncUnit)} as bucket_start,
            case
              when first_time_for_customer is true then 'first_time'
              else 'returning'
@@ -197,8 +220,7 @@ async function queryGroupedByColumn(args: {
       return row as MetricRow
     })
   }
-  const bucketSelect =
-    truncUnit === null ? 'null::timestamptz' : `date_trunc('${truncUnit}', pay_time at time zone 'UTC')`
+  const bucketSelect = bucketSelectExpr(truncUnit)
   const sql = `
     select ${bucketSelect} as bucket_start,
            coalesce(lower(${args.column}), '') as col_value,
@@ -252,8 +274,7 @@ export async function queryBasketSizeByCustomerType(args: MetricQueryArgs): Prom
   if (dealerIds.length === 0 || buckets.length === 0) {
     return buckets.map((b) => ({ t: b.toISOString(), first_time: 0, returning: 0 }))
   }
-  const bucketSelect =
-    truncUnit === null ? 'null::timestamptz' : `date_trunc('${truncUnit}', pay_time at time zone 'UTC')`
+  const bucketSelect = bucketSelectExpr(truncUnit)
   const sql = `
     select ${bucketSelect} as bucket_start,
            case when first_time_for_customer is true then 'first_time' else 'returning' end as series_id,
@@ -314,8 +335,7 @@ async function queryAvgGroupedByFulfillment(args: MetricQueryArgs, aggExpr: stri
       return row as MetricRow
     })
   }
-  const bucketSelect =
-    truncUnit === null ? 'null::timestamptz' : `date_trunc('${truncUnit}', pay_time at time zone 'UTC')`
+  const bucketSelect = bucketSelectExpr(truncUnit)
   const sql = `
     select ${bucketSelect} as bucket_start,
            coalesce(lower(fulfillment_type), '') as col_value,
@@ -551,8 +571,7 @@ async function queryCategoryLineItems(args: MetricQueryArgs): Promise<MetricRow[
       return row as MetricRow
     })
   }
-  const bucketSelect =
-    truncUnit === null ? 'null::timestamptz' : `date_trunc('${truncUnit}', pay_time at time zone 'UTC')`
+  const bucketSelect = bucketSelectExpr(truncUnit)
   const sql = `
     select ${bucketSelect} as bucket_start,
            coalesce(lower(item->'productCategory'->>'name'), '') as col_value,
@@ -631,8 +650,7 @@ export async function queryCustomerOriginMap(args: MetricQueryArgs): Promise<Met
       return row as MetricRow
     })
   }
-  const bucketSelect =
-    truncUnit === null ? 'null::timestamptz' : `date_trunc('${truncUnit}', pay_time at time zone 'UTC')`
+  const bucketSelect = bucketSelectExpr(truncUnit)
   const sql = `
     select ${bucketSelect} as bucket_start,
            delivery_zip,
