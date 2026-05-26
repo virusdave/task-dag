@@ -73,6 +73,19 @@ async function tableExists(db: Queryable, tableName: string): Promise<boolean> {
   return result.rows[0]?.exists === true
 }
 
+async function indexExists(db: Queryable, indexName: string): Promise<boolean> {
+  const result = await db.query<{ exists: boolean }>(
+    `select exists(
+       select 1
+         from pg_indexes
+        where schemaname = 'public'
+          and indexname = $1
+     ) as exists`,
+    [indexName],
+  )
+  return result.rows[0]?.exists === true
+}
+
 const SENTINELS: MigrationSentinel[] = [
   {
     migrationId: '007_pending_purchases',
@@ -273,6 +286,12 @@ const SENTINELS: MigrationSentinel[] = [
     label:
       'litalerts_product_images — per-product primary image URLs captured from the LitAlerts dashboard backend (POST /Products/menulistings). Needed for image embedding on Catalog → Market Data review rows and proposed catalog entries on Pending Purchases.',
     check: async (db) => tableExists(db, 'litalerts_product_images'),
+  },
+  {
+    migrationId: '034_fuzzy_skus_partner_product_idx',
+    label:
+      'fuzzy_skus_partner_brand_category_idx — partial covering index that turns the per-(brand, category) aggregate the Catalog → Market Data list page runs on every request into an index-only scan. Without it, GET /api/catalog/market-matches takes ~500ms; with it, ~50ms.',
+    check: async (db) => indexExists(db, 'fuzzy_skus_partner_brand_category_idx'),
   },
 ]
 

@@ -194,10 +194,27 @@ export async function listGroupsForReview(
     clauses.push(`cg.brand_name = $${values.length}`)
   }
   if (options.unverdictedOnly) {
-    clauses.push(`coalesce(gms.live_verdict_count, 0) = 0`)
+    // Anti-join against the partial index
+    // `catalog_market_matches_group_idx (catalog_group_id) where
+    // superseded_by_id is null` rather than filtering on
+    // `coalesce(gms.live_verdict_count, 0) = 0`. The coalesce-of-
+    // left-join pattern makes Postgres badly underestimate the
+    // result size (~10 rows vs ~3000) and pick a Nested Loop Left
+    // Join for the structured_fuzzy lookup downstream, which
+    // re-executes the per-brand aggregate 3000+ times and blows
+    // the query out to ~3s. NOT EXISTS uses the index directly and
+    // gives the planner a usable selectivity estimate.
+    clauses.push(`not exists (
+      select 1 from catalog_market_matches m
+      where m.catalog_group_id = cg.id and m.superseded_by_id is null
+    )`)
   }
   const whereSql = `where ${clauses.join(' and ')}`
 
+  // One round-trip: window-function total_count over the filtered set
+  // so we don't pay a second seq-scan / aggregation for the
+  // pagination total. The page is limit/offset-paginated, so this is
+  // the standard "fetch one page + total" pattern.
   const result = await db.query<{
     catalog_group_id: number
     group_name: string
@@ -208,24 +225,23 @@ export async function listGroupsForReview(
     live_verdict_count: number
     parsed_fuzzy_count: number
     high_quality_fuzzy_count: number
+    total_count: number
   }>(
     `
       with group_obs as (
+        -- Use cg.live_state_json directly instead of looking up the
+        -- latest catalog_group_snapshots row. live_state_json is kept
+        -- in sync by the reconcile/sync pipeline (see
+        -- reviewPacketImport.ts), and skipping the snapshot lookup
+        -- saves a 12k-buffer index scan + TOAST detoast per group.
         select
           cg.id as catalog_group_id,
           count(distinct o.id) filter (where o.id is not null) as observation_count
         from catalog_groups cg
-        left join lateral (
-          select state_json
-          from catalog_group_snapshots cgs
-          where cgs.catalog_group_id = cg.id
-          order by cgs.created_at desc, cgs.id desc
-          limit 1
-        ) latest_snapshot on true
         left join lateral jsonb_array_elements(
           case
-            when jsonb_typeof(latest_snapshot.state_json -> 'products') = 'array'
-              then latest_snapshot.state_json -> 'products'
+            when jsonb_typeof(cg.live_state_json -> 'products') = 'array'
+              then cg.live_state_json -> 'products'
             else '[]'::jsonb
           end
         ) as product on true
@@ -257,16 +273,36 @@ export async function listGroupsForReview(
         left join catalog_litalerts_brand_overrides ov
           on ov.catalog_brand_name = cg.brand_name
       ),
+      -- Pre-aggregate fuzzy counts ONCE per (brand_norm) and per
+      -- (brand_norm, category_norm). Without this pre-aggregation,
+      -- joining catalog_groups (3k rows, ~13 groups per brand)
+      -- directly against fuzzy_skus (361k partner_product rows)
+      -- exploded into a 711k / 2.88M-row hash join that took 6+
+      -- seconds just to compute count(*) per group. The pre-aggregate
+      -- collapses fuzzy_skus to ~230 brand rows / ~1k (brand,category)
+      -- rows before fanning out across catalog_groups, dropping the
+      -- per-CTE cost from seconds to milliseconds.
+      brand_fuzzy_count as (
+        select brand_norm, count(*)::bigint as cnt
+        from fuzzy_skus
+        where source_kind = 'litalerts_partner_product'
+          and brand_norm is not null
+        group by brand_norm
+      ),
+      brand_category_fuzzy_count as (
+        select brand_norm, category_norm, count(*)::bigint as cnt
+        from fuzzy_skus
+        where source_kind = 'litalerts_partner_product'
+          and brand_norm is not null
+        group by brand_norm, category_norm
+      ),
       group_structured_fuzzy as (
         select cg.id as catalog_group_id,
-               count(*) as structured_fuzzy_count
+               bfc.cnt as structured_fuzzy_count
         from catalog_groups cg
         join brand_effective be on be.catalog_brand_name = cg.brand_name
-        join fuzzy_skus fs
-          on fs.source_kind = 'litalerts_partner_product'
-         and fs.brand_norm = be.effective_brand_norm
+        join brand_fuzzy_count bfc on bfc.brand_norm = be.effective_brand_norm
         where cg.brand_name is not null and be.effective_brand_norm is not null
-        group by cg.id
       ),
       -- Map each catalog group's raw category to a canonical alias
       -- array. Mirrors canonicalCategoryNorm() in shared/marketMatch/
@@ -328,84 +364,55 @@ export async function listGroupsForReview(
       ),
       group_high_quality_fuzzy as (
         select cg.id as catalog_group_id,
-               count(*) as high_quality_fuzzy_count
+               coalesce(sum(bcc.cnt), 0)::bigint as high_quality_fuzzy_count
         from catalog_groups cg
         join brand_effective be on be.catalog_brand_name = cg.brand_name
         join catalog_category_aliases cca on cca.catalog_group_id = cg.id
-        join fuzzy_skus fs
-          on fs.source_kind = 'litalerts_partner_product'
-         and fs.brand_norm = be.effective_brand_norm
+        left join brand_category_fuzzy_count bcc
+          on bcc.brand_norm = be.effective_brand_norm
          and (cardinality(cca.category_aliases) = 0
-              or fs.category_norm = any(cca.category_aliases))
+              or bcc.category_norm = any(cca.category_aliases))
         where cg.brand_name is not null and be.effective_brand_norm is not null
         group by cg.id
+        having coalesce(sum(bcc.cnt), 0) > 0
+      )
+      , filtered as (
+        select
+          cg.id as catalog_group_id,
+          cg.group_name,
+          cg.brand_name,
+          cg.category_name,
+          cg.subcategory_name,
+          coalesce(go.observation_count, 0)::int as observation_count,
+          coalesce(gms.live_verdict_count, 0)::int as live_verdict_count,
+          coalesce(gsf.structured_fuzzy_count, 0)::int as parsed_fuzzy_count,
+          coalesce(ghq.high_quality_fuzzy_count, 0)::int as high_quality_fuzzy_count
+        from catalog_groups cg
+        left join group_obs go on go.catalog_group_id = cg.id
+        left join group_match_stats gms on gms.catalog_group_id = cg.id
+        left join group_structured_fuzzy gsf on gsf.catalog_group_id = cg.id
+        left join group_high_quality_fuzzy ghq on ghq.catalog_group_id = cg.id
+        ${whereSql}
       )
       select
-        cg.id as catalog_group_id,
-        cg.group_name,
-        cg.brand_name,
-        cg.category_name,
-        cg.subcategory_name,
-        coalesce(go.observation_count, 0)::int as observation_count,
-        coalesce(gms.live_verdict_count, 0)::int as live_verdict_count,
-        coalesce(gsf.structured_fuzzy_count, 0)::int as parsed_fuzzy_count,
-        coalesce(ghq.high_quality_fuzzy_count, 0)::int as high_quality_fuzzy_count
-      from catalog_groups cg
-      left join group_obs go on go.catalog_group_id = cg.id
-      left join group_match_stats gms on gms.catalog_group_id = cg.id
-      left join group_structured_fuzzy gsf on gsf.catalog_group_id = cg.id
-      left join group_high_quality_fuzzy ghq on ghq.catalog_group_id = cg.id
-      ${whereSql}
-      order by coalesce(ghq.high_quality_fuzzy_count, 0) desc,
-               coalesce(go.observation_count, 0) desc,
-               coalesce(gsf.structured_fuzzy_count, 0) desc,
-               cg.id asc
+        catalog_group_id,
+        group_name,
+        brand_name,
+        category_name,
+        subcategory_name,
+        observation_count,
+        live_verdict_count,
+        parsed_fuzzy_count,
+        high_quality_fuzzy_count,
+        (count(*) over ())::int as total_count
+      from filtered
+      order by high_quality_fuzzy_count desc,
+               observation_count desc,
+               parsed_fuzzy_count desc,
+               catalog_group_id asc
       limit $${values.length + 1} offset $${values.length + 2}
     `,
     [...values, options.limit, options.offset],
-  )
-
-  const countResult = await db.query<{ count: number }>(
-    `
-      select count(distinct cg.id)::int as count
-      from catalog_groups cg
-      where (
-        -- (a) the group has at least one observation through its products
-        exists (
-          select 1
-          from catalog_group_snapshots cgs,
-               lateral jsonb_array_elements(
-                 case when jsonb_typeof(cgs.state_json -> 'products') = 'array'
-                      then cgs.state_json -> 'products'
-                      else '[]'::jsonb end
-               ) product,
-               litalerts_competitor_observations o
-          where cgs.catalog_group_id = cg.id
-            and (product ->> 'productId') ~ '^[0-9]+$'
-            and o.product_id = (product ->> 'productId')::int
-        )
-        -- (b) or at least one structured fuzzy_sku matches the brand
-        -- (preferring the operator-confirmed override if any; an
-        -- explicit-null override correctly excludes this path so the
-        -- group only shows up via (a) observations).
-        or (
-          cg.brand_name is not null
-          and exists (
-            select 1 from fuzzy_skus fs
-            left join catalog_litalerts_brand_overrides ov
-              on ov.catalog_brand_name = cg.brand_name
-            where fs.source_kind = 'litalerts_partner_product'
-              and fs.brand_norm = case
-                when ov.catalog_brand_name is not null and ov.litalerts_brand_id is null then null
-                when ov.litalerts_brand_name is not null then lower(trim(ov.litalerts_brand_name))
-                else lower(trim(cg.brand_name))
-              end
-          )
-        )
-      )
-      ${options.brandFilter ? `and cg.brand_name = $1` : ''}
-    `,
-    options.brandFilter ? [options.brandFilter] : [],
   )
 
   return {
@@ -420,7 +427,7 @@ export async function listGroupsForReview(
       parsedFuzzyCount: row.parsed_fuzzy_count,
       highQualityFuzzyCount: row.high_quality_fuzzy_count,
     })),
-    totalCount: countResult.rows[0]?.count ?? 0,
+    totalCount: result.rows[0]?.total_count ?? 0,
   }
 }
 

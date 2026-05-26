@@ -72,6 +72,14 @@ create index if not exists fuzzy_skus_brand_size_idx
   on fuzzy_skus (brand_norm, category_norm, size_g_norm)
   where brand_norm is not null and category_norm is not null;
 
+-- Partial covering index for the per-brand / per-(brand,category)
+-- aggregates the market-matches review surface runs on every page
+-- load. See 034_fuzzy_skus_partner_product_idx.sql for the rationale.
+create index if not exists fuzzy_skus_partner_brand_category_idx
+  on fuzzy_skus (brand_norm, category_norm)
+  where source_kind = 'litalerts_partner_product'
+    and brand_norm is not null;
+
 
 create table if not exists catalog_market_matches (
   id                       bigint generated always as identity primary key,
