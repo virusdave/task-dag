@@ -191,6 +191,13 @@ export function CatalogMarketDataPage(): JSX.Element {
   const [globalMinScore, setGlobalMinScore] = useState(DEFAULT_MIN_SCORE)
   const [brandOverrides, setBrandOverrides] = useState<Record<string, number>>({})
   const [itemOverrides, setItemOverrides] = useState<Record<number, number>>({})
+  // Live verdict-count delta per catalog group. The list endpoint
+  // returns `liveVerdictCount` as-of-last-fetch, but new verdicts
+  // recorded from an expanded review panel shouldn't require a full
+  // page-list refetch to update the "0 verdicts" pill. Each
+  // successful verdict bumps this counter for the affected group;
+  // the per-row pill renders `liveVerdictCount + (delta ?? 0)`.
+  const [verdictDeltas, setVerdictDeltas] = useState<Record<number, number>>({})
 
   const setBrandOverride = useCallback((brandKey: string, score: number | null) => {
     setBrandOverrides((cur) => {
@@ -207,6 +214,9 @@ export function CatalogMarketDataPage(): JSX.Element {
       else next[groupId] = score
       return next
     })
+  }, [])
+  const bumpVerdictCount = useCallback((groupId: number, delta: number) => {
+    setVerdictDeltas((cur) => ({ ...cur, [groupId]: (cur[groupId] ?? 0) + delta }))
   }, [])
 
   const totalPages = Math.max(1, Math.ceil(data.pagination.totalCount / data.pagination.limit))
@@ -317,11 +327,13 @@ export function CatalogMarketDataPage(): JSX.Element {
           expandedGroupId={expanded}
           globalMinScore={globalMinScore}
           itemOverrides={itemOverrides}
+          onBumpVerdictCount={bumpVerdictCount}
           onError={setError}
           onSetBrandOverride={setBrandOverride}
           onSetItemOverride={setItemOverride}
           onToggleGroup={(gid) => setExpanded((cur) => (cur === gid ? null : gid))}
           rows={data.rows}
+          verdictDeltas={verdictDeltas}
         />
 
         <div className="inline-row wrap-row" style={{ marginTop: '1rem' }}>
@@ -432,6 +444,8 @@ interface BrandGroupedListProps {
   itemOverrides: Record<number, number>
   onSetBrandOverride: (brandKey: string, score: number | null) => void
   onSetItemOverride: (groupId: number, score: number | null) => void
+  verdictDeltas: Record<number, number>
+  onBumpVerdictCount: (groupId: number, delta: number) => void
 }
 
 /**
@@ -458,6 +472,8 @@ function BrandGroupedList({
   itemOverrides,
   onSetBrandOverride,
   onSetItemOverride,
+  verdictDeltas,
+  onBumpVerdictCount,
 }: BrandGroupedListProps): JSX.Element {
   const groupedByBrand = useMemo(() => {
     const map = new Map<string, { brand: string | null; rows: GroupSummaryRow[] }>()
@@ -490,7 +506,9 @@ function BrandGroupedList({
     <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
       {groupedByBrand.map(({ key, brand, rows: brandRows }) => {
         const collapsed = collapsedBrands.has(key)
-        const verdictedCount = brandRows.filter((r) => r.liveVerdictCount > 0).length
+        const verdictedCount = brandRows.filter(
+          (r) => r.liveVerdictCount + (verdictDeltas[r.catalogGroupId] ?? 0) > 0,
+        ).length
         const brandOverride = brandOverrides[key]
         const brandEffective = brandOverride ?? globalMinScore
         return (
@@ -566,7 +584,9 @@ function BrandGroupedList({
                       onResetItemOverride={() => onSetItemOverride(row.catalogGroupId, null)}
                       onSetItemOverride={(v) => onSetItemOverride(row.catalogGroupId, v)}
                       onToggle={() => onToggleGroup(row.catalogGroupId)}
+                      onVerdictRecorded={(delta) => onBumpVerdictCount(row.catalogGroupId, delta)}
                       row={row}
+                      verdictDelta={verdictDeltas[row.catalogGroupId] ?? 0}
                     />
                   )
                 })}
@@ -639,6 +659,8 @@ interface GroupCardProps {
   isItemOverride: boolean
   onSetItemOverride: (score: number) => void
   onResetItemOverride: () => void
+  verdictDelta: number
+  onVerdictRecorded: (delta: number) => void
 }
 
 function GroupCard({
@@ -650,7 +672,10 @@ function GroupCard({
   isItemOverride,
   onSetItemOverride,
   onResetItemOverride,
+  verdictDelta,
+  onVerdictRecorded,
 }: GroupCardProps): JSX.Element {
+  const displayedVerdictCount = row.liveVerdictCount + verdictDelta
   return (
     <div
       style={{
@@ -674,7 +699,9 @@ function GroupCard({
           </span>
         </div>
         <div className="inline-row" style={{ gap: '0.4rem', alignItems: 'center' }}>
-          <Pill tone={row.liveVerdictCount > 0 ? 'success' : 'muted'}>{`${row.liveVerdictCount} verdicts`}</Pill>
+          <Pill tone={displayedVerdictCount > 0 ? 'success' : 'muted'}>
+            {`${displayedVerdictCount} verdict${displayedVerdictCount === 1 ? '' : 's'}`}
+          </Pill>
           <span
             title={`${row.highQualityFuzzyCount} brand+category matches of ${row.parsedFuzzyCount} total LitAlerts rows for this brand`}
           >
@@ -695,6 +722,7 @@ function GroupCard({
           onError={onError}
           onResetItemOverride={onResetItemOverride}
           onSetItemOverride={onSetItemOverride}
+          onVerdictRecorded={onVerdictRecorded}
         />
       ) : null}
     </div>
@@ -708,6 +736,7 @@ interface GroupReviewPanelProps {
   isItemOverride: boolean
   onSetItemOverride: (score: number) => void
   onResetItemOverride: () => void
+  onVerdictRecorded: (delta: number) => void
 }
 
 function GroupReviewPanel({
@@ -717,10 +746,12 @@ function GroupReviewPanel({
   isItemOverride,
   onSetItemOverride,
   onResetItemOverride,
+  onVerdictRecorded,
 }: GroupReviewPanelProps): JSX.Element {
   const [bundle, setBundle] = useState<GroupReviewBundle | null>(null)
   const [loading, setLoading] = useState(false)
   const [pendingFuzzyId, setPendingFuzzyId] = useState<number | null>(null)
+  const [pendingBatch, setPendingBatch] = useState(false)
   const [activeSizeKey, setActiveSizeKey] = useState<string | null>(null)
 
   // Fetch once per expanded row — no minScore query param. The server
@@ -756,44 +787,106 @@ function GroupReviewPanel({
 
   useEffect(() => { void load() }, [load])
 
+  /**
+   * Internal: POST one verdict + optimistically drop the candidate
+   * from the bundle. Caller is responsible for managing pending
+   * state and bumping the parent verdict counter.
+   */
+  async function postOneVerdict(
+    fuzzySkuId: number,
+    verdict: 'exact' | 'brand_family' | 'no_match',
+    confidenceAtVerdict: number | null,
+    catalogProductId: number | null,
+  ): Promise<void> {
+    if (!bundle) return
+    await mutateJson('/api/catalog/market-matches', VerdictResponseSchema, {
+      method: 'POST',
+      body: JSON.stringify({
+        catalogGroupId: bundle.catalogGroupId,
+        catalogProductId,
+        fuzzySkuId,
+        verdict,
+        confidenceAtVerdict,
+      }),
+    })
+  }
+
+  /**
+   * Drop a set of candidate fuzzyIds from the bundle in one
+   * setBundle call (so the UI doesn't flicker between bulk POSTs).
+   */
+  function pruneFromBundle(fuzzyIds: ReadonlySet<number>): void {
+    setBundle((cur) => {
+      if (!cur) return cur
+      const next: GroupReviewBundle = {
+        ...cur,
+        sizeGroups: cur.sizeGroups.map((g) => ({
+          ...g,
+          candidates: g.candidates.filter((c) => !fuzzyIds.has(c.fuzzy.id)),
+        })),
+        unmatchedCandidates: cur.unmatchedCandidates.filter((c) => !fuzzyIds.has(c.fuzzy.id)),
+      }
+      next.visibleCandidateCount = Math.max(0, cur.visibleCandidateCount - fuzzyIds.size)
+      return next
+    })
+  }
+
   async function recordVerdict(
     fuzzySkuId: number,
     verdict: 'exact' | 'brand_family' | 'no_match',
     confidenceAtVerdict: number | null,
     catalogProductId: number | null,
   ): Promise<void> {
-    if (!bundle || pendingFuzzyId !== null) return
+    if (!bundle || pendingFuzzyId !== null || pendingBatch) return
     setPendingFuzzyId(fuzzySkuId)
     onError(null)
     try {
-      await mutateJson('/api/catalog/market-matches', VerdictResponseSchema, {
-        method: 'POST',
-        body: JSON.stringify({
-          catalogGroupId: bundle.catalogGroupId,
-          catalogProductId,
-          fuzzySkuId,
-          verdict,
-          confidenceAtVerdict,
-        }),
-      })
-      // Optimistic local update: drop the candidate, decrement counts.
-      setBundle((cur) => {
-        if (!cur) return cur
-        const next: GroupReviewBundle = {
-          ...cur,
-          sizeGroups: cur.sizeGroups.map((g) => ({
-            ...g,
-            candidates: g.candidates.filter((c) => c.fuzzy.id !== fuzzySkuId),
-          })),
-          unmatchedCandidates: cur.unmatchedCandidates.filter((c) => c.fuzzy.id !== fuzzySkuId),
-        }
-        next.visibleCandidateCount = Math.max(0, cur.visibleCandidateCount - 1)
-        return next
-      })
+      await postOneVerdict(fuzzySkuId, verdict, confidenceAtVerdict, catalogProductId)
+      pruneFromBundle(new Set([fuzzySkuId]))
+      onVerdictRecorded(1)
     } catch (e) {
       onError(e instanceof Error ? e.message : 'Verdict failed')
     } finally {
       setPendingFuzzyId(null)
+    }
+  }
+
+  /**
+   * Bulk-verdict every candidate in the supplied list with the same
+   * verdict tag. Fires the POSTs in parallel; on partial failure the
+   * successes are still applied locally and `onError` surfaces the
+   * count of failures so the operator can retry.
+   */
+  async function recordBulkVerdict(
+    candidates: Candidate[],
+    verdict: 'exact' | 'brand_family' | 'no_match',
+    catalogProductId: number | null,
+  ): Promise<void> {
+    if (!bundle || pendingFuzzyId !== null || pendingBatch) return
+    if (candidates.length === 0) return
+    setPendingBatch(true)
+    onError(null)
+    try {
+      const results = await Promise.allSettled(
+        candidates.map((c) =>
+          postOneVerdict(c.fuzzy.id, verdict, c.finalScore, catalogProductId).then(() => c.fuzzy.id),
+        ),
+      )
+      const successIds = new Set<number>()
+      let failureCount = 0
+      for (const r of results) {
+        if (r.status === 'fulfilled') successIds.add(r.value)
+        else failureCount += 1
+      }
+      if (successIds.size > 0) {
+        pruneFromBundle(successIds)
+        onVerdictRecorded(successIds.size)
+      }
+      if (failureCount > 0) {
+        onError(`Bulk verdict: ${failureCount} of ${candidates.length} failed; ${successIds.size} applied. Retry the remainder.`)
+      }
+    } finally {
+      setPendingBatch(false)
     }
   }
 
@@ -892,12 +985,14 @@ function GroupReviewPanel({
       {activeGroup ? (
         <SizeGroupPanel
           group={activeGroup}
+          onBulkVerdict={recordBulkVerdict}
           ourContext={{
             brand: bundle.brandName,
             category: bundle.categoryName,
             subcategory: bundle.subcategoryName,
           }}
           onVerdict={recordVerdict}
+          pendingBatch={pendingBatch}
           pendingFuzzyId={pendingFuzzyId}
         />
       ) : null}
@@ -905,6 +1000,14 @@ function GroupReviewPanel({
       {filteredUnmatched.length > 0 ? (
         <details style={{ marginTop: '1rem' }}>
           <summary>{`${filteredUnmatched.length} candidate(s) without a matched catalog variant`}</summary>
+          <div className="inline-row wrap-row" style={{ gap: '0.3rem', margin: '0.4rem 0' }}>
+            <BulkVerdictButtons
+              candidates={filteredUnmatched}
+              disabled={pendingFuzzyId !== null || pendingBatch}
+              label="Apply to all visible unmatched"
+              onBulkVerdict={(verdict) => recordBulkVerdict(filteredUnmatched, verdict, null)}
+            />
+          </div>
           <MarketReviewTable
             candidates={filteredUnmatched}
             ourContext={{
@@ -913,6 +1016,7 @@ function GroupReviewPanel({
               subcategory: bundle.subcategoryName,
             }}
             onVerdict={recordVerdict}
+            pendingBatch={pendingBatch}
             pendingFuzzyId={pendingFuzzyId}
             productId={null}
           />
@@ -951,10 +1055,23 @@ interface SizeGroupPanelProps {
   group: SizeGroup
   ourContext: OurContext
   onVerdict: (fuzzyId: number, verdict: 'exact' | 'brand_family' | 'no_match', conf: number | null, productId: number | null) => void
+  onBulkVerdict: (
+    candidates: Candidate[],
+    verdict: 'exact' | 'brand_family' | 'no_match',
+    productId: number | null,
+  ) => void
   pendingFuzzyId: number | null
+  pendingBatch: boolean
 }
 
-function SizeGroupPanel({ group, ourContext, onVerdict, pendingFuzzyId }: SizeGroupPanelProps): JSX.Element {
+function SizeGroupPanel({
+  group,
+  ourContext,
+  onVerdict,
+  onBulkVerdict,
+  pendingFuzzyId,
+  pendingBatch,
+}: SizeGroupPanelProps): JSX.Element {
   const firstVariantId = group.variants[0]?.catalogProductId ?? null
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
@@ -967,15 +1084,24 @@ function SizeGroupPanel({ group, ourContext, onVerdict, pendingFuzzyId }: SizeGr
           background: 'rgba(0,0,0,0.04)',
           borderRadius: '4px',
           fontSize: '0.85rem',
+          justifyContent: 'space-between',
         }}
       >
-        <Pill tone="muted">{`Size ${group.sizeLabel}`}</Pill>
-        <span className="subtle-copy">
-          {`${group.variants.length} catalog variant${group.variants.length === 1 ? '' : 's'} · ${group.candidates.length} candidate${group.candidates.length === 1 ? '' : 's'} above threshold`}
-          {group.suppressedCandidateCount > 0
-            ? ` · ${group.suppressedCandidateCount} hidden`
-            : ''}
+        <span className="inline-row" style={{ gap: '0.4rem', alignItems: 'center', flexWrap: 'wrap' }}>
+          <Pill tone="muted">{`Size ${group.sizeLabel}`}</Pill>
+          <span className="subtle-copy">
+            {`${group.variants.length} catalog variant${group.variants.length === 1 ? '' : 's'} · ${group.candidates.length} candidate${group.candidates.length === 1 ? '' : 's'} above threshold`}
+            {group.suppressedCandidateCount > 0
+              ? ` · ${group.suppressedCandidateCount} hidden`
+              : ''}
+          </span>
         </span>
+        <BulkVerdictButtons
+          candidates={group.candidates}
+          disabled={pendingFuzzyId !== null || pendingBatch}
+          label={`Apply to all ${group.candidates.length} visible ${group.sizeLabel}`}
+          onBulkVerdict={(verdict) => onBulkVerdict(group.candidates, verdict, firstVariantId)}
+        />
       </div>
       <MarketReviewTable
         candidates={group.candidates}
@@ -983,6 +1109,7 @@ function SizeGroupPanel({ group, ourContext, onVerdict, pendingFuzzyId }: SizeGr
         onVerdict={onVerdict}
         ourContext={ourContext}
         ourVariants={group.variants}
+        pendingBatch={pendingBatch}
         pendingFuzzyId={pendingFuzzyId}
         productId={firstVariantId}
       />
@@ -992,6 +1119,65 @@ function SizeGroupPanel({ group, ourContext, onVerdict, pendingFuzzyId }: SizeGr
         </span>
       ) : null}
     </div>
+  )
+}
+
+/**
+ * Three bulk-action buttons — apply the same verdict
+ * (exact / brand_family / no_match) to every candidate currently
+ * visible in the supplied list. Used inside SizeGroupPanel for the
+ * active size's visible rows and inside the unmatched-candidates
+ * panel for that list.
+ *
+ * The actual POST orchestration lives in
+ * GroupReviewPanel.recordBulkVerdict; this component is just the
+ * UI. Disabled while any verdict (single or batch) is in flight,
+ * and a no-op when the candidate list is empty.
+ */
+interface BulkVerdictButtonsProps {
+  candidates: Candidate[]
+  onBulkVerdict: (verdict: 'exact' | 'brand_family' | 'no_match') => void
+  disabled: boolean
+  label?: string
+}
+
+function BulkVerdictButtons({ candidates, onBulkVerdict, disabled, label }: BulkVerdictButtonsProps): JSX.Element {
+  const isEmpty = candidates.length === 0
+  const btnStyle: React.CSSProperties = { padding: '0.2rem 0.5rem', fontSize: '0.75rem' }
+  return (
+    <span className="inline-row" style={{ gap: '0.3rem', alignItems: 'center', flexWrap: 'wrap' }}>
+      {label ? <span className="subtle-copy" style={{ fontSize: '0.75rem' }}>{label}:</span> : null}
+      <button
+        className="ghost-button"
+        disabled={disabled || isEmpty}
+        onClick={() => onBulkVerdict('exact')}
+        style={btnStyle}
+        title="Mark all visible as Exact"
+        type="button"
+      >
+        ✓ All exact
+      </button>
+      <button
+        className="ghost-button"
+        disabled={disabled || isEmpty}
+        onClick={() => onBulkVerdict('brand_family')}
+        style={btnStyle}
+        title="Mark all visible as Brand/family"
+        type="button"
+      >
+        ≈ All family
+      </button>
+      <button
+        className="ghost-button"
+        disabled={disabled || isEmpty}
+        onClick={() => onBulkVerdict('no_match')}
+        style={btnStyle}
+        title="Mark all visible as No-match"
+        type="button"
+      >
+        ✗ All no-match
+      </button>
+    </span>
   )
 }
 
@@ -1076,8 +1262,38 @@ interface MarketReviewTableProps {
   productId: number | null
   onVerdict: (fuzzyId: number, verdict: 'exact' | 'brand_family' | 'no_match', conf: number | null, productId: number | null) => void
   pendingFuzzyId: number | null
+  pendingBatch: boolean
   emptyMessage?: string
 }
+
+/**
+ * Column widths used with `table-layout: fixed` so the columns do
+ * NOT reflow as rows are added/removed (e.g. after a verdict prunes
+ * a row). The Verdict column is given a fixed pixel width so the
+ * action buttons always sit in the same horizontal slot — a reviewer
+ * working through a long list can click the same screen coordinate
+ * row after row without re-aiming, which was the actual usability
+ * complaint that triggered this fix.
+ *
+ * The Listing / Dispensary column has no fixed width, so it absorbs
+ * the remainder of the table. Min-widths on the small columns keep
+ * cells from collapsing to one character when the table itself is
+ * narrow (the outer wrapper is overflow-x: auto for phones).
+ */
+const TABLE_COLGROUP = (
+  <colgroup>
+    <col style={{ width: '3.25rem' }} />
+    <col />
+    <col style={{ width: '12%', minWidth: '7rem' }} />
+    <col style={{ width: '10%', minWidth: '6rem' }} />
+    <col style={{ width: '10%', minWidth: '6rem' }} />
+    <col style={{ width: '4.5rem' }} />
+    <col style={{ width: '3.25rem' }} />
+    <col style={{ width: '8%', minWidth: '5rem' }} />
+    <col style={{ width: '3.5rem' }} />
+    <col style={{ width: '7.5rem' }} />
+  </colgroup>
+)
 
 function MarketReviewTable({
   candidates,
@@ -1086,12 +1302,22 @@ function MarketReviewTable({
   productId,
   onVerdict,
   pendingFuzzyId,
+  pendingBatch,
   emptyMessage,
 }: MarketReviewTableProps): JSX.Element {
   const headers = ['Img', 'Listing / Dispensary', 'Brand', 'Category', 'Subcategory', 'Size', 'Pack', 'Strain', 'Score', 'Verdict']
   return (
     <div style={{ overflowX: 'auto', border: '1px solid var(--border-color, #d8d8d8)', borderRadius: '4px' }}>
-      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.78rem' }}>
+      <table
+        style={{
+          width: '100%',
+          minWidth: '60rem',
+          tableLayout: 'fixed',
+          borderCollapse: 'collapse',
+          fontSize: '0.78rem',
+        }}
+      >
+        {TABLE_COLGROUP}
         <thead>
           <tr>
             {headers.map((h) => (
@@ -1118,6 +1344,7 @@ function MarketReviewTable({
                 candidate={c}
                 key={c.fuzzy.id}
                 onVerdict={onVerdict}
+                pendingBatch={pendingBatch}
                 pendingFuzzyId={pendingFuzzyId}
                 productId={productId}
               />
@@ -1174,17 +1401,19 @@ function CandidateTableRow({
   candidate,
   onVerdict,
   pendingFuzzyId,
+  pendingBatch,
   productId,
 }: {
   candidate: Candidate
   onVerdict: MarketReviewTableProps['onVerdict']
   pendingFuzzyId: number | null
+  pendingBatch: boolean
   productId: number | null
 }): JSX.Element {
   const c = candidate
   const isPending = pendingFuzzyId === c.fuzzy.id
-  const disabled = isPending || pendingFuzzyId !== null
-  const btnStyle: React.CSSProperties = { padding: '0.15rem 0.4rem', fontSize: '0.72rem', lineHeight: 1.2 }
+  const disabled = isPending || pendingFuzzyId !== null || pendingBatch
+  const btnStyle: React.CSSProperties = { padding: '0.15rem 0.4rem', fontSize: '0.72rem', lineHeight: 1.2, width: '1.9rem' }
   return (
     <tr>
       <td style={TABLE_TD}>
@@ -1234,8 +1463,11 @@ function CandidateTableRow({
       <td style={{ ...TABLE_TD, ...scoreTone(c.finalScore), textAlign: 'center', fontWeight: 600, fontVariantNumeric: 'tabular-nums' }}>
         {c.finalScore.toFixed(2)}
       </td>
-      <td style={TABLE_TD}>
-        <div className="inline-row" style={{ gap: '0.2rem' }}>
+      <td style={{ ...TABLE_TD, whiteSpace: 'nowrap', textAlign: 'right' }}>
+        <div
+          className="inline-row"
+          style={{ gap: '0.2rem', justifyContent: 'flex-end', flexWrap: 'nowrap' }}
+        >
           <button
             className="ghost-button"
             disabled={disabled}
