@@ -404,15 +404,20 @@ export async function getGroupDetail(db: Queryable, catalogGroupId: number): Pro
 
   const marketEvidence = buildMarketEvidence(liveStateProducts, observationsResult.rows)
 
-  let recentSalesIssue: string | null = null
-  let recentSales = buildEmptyGroupRecentSales(group.live_state_json)
-  try {
-    recentSales =
-      (await loadRecentSalesForGroups([{ catalogGroupId, liveState: group.live_state_json }])).get(catalogGroupId) ?? recentSales
-  } catch (error) {
-    recentSalesIssue =
-      error instanceof Error ? `Recent sales velocity is unavailable right now: ${error.message}` : 'Recent sales velocity is unavailable right now.'
-  }
+  // Recent-sales velocity used to be loaded inline here via
+  // loadRecentSalesForGroups(), which cold-paginated the entire
+  // Sweed `store.reports.reorder` report (pageSize=200, both
+  // Bronx + Midtown) every time the 60s in-memory cache expired,
+  // just to look up sales for the 1-3 productIds in this group.
+  // That made GET /api/catalog/groups/:id take 20-25s cold even
+  // though every other query in the function completed in <70ms.
+  // We now return the empty shape (same contract) plus an
+  // informational message; if a recent-sales surface is needed
+  // we can wire a separate on-demand endpoint that doesn't block
+  // the rest of the page.
+  const recentSales = buildEmptyGroupRecentSales(group.live_state_json)
+  const recentSalesIssue: string | null =
+    'Recent sales velocity is not loaded on this page (was making the page take ~24s cold). View sales detail on the Pending Purchases page.'
 
   const proposalRowsById = new Map<number, GroupDetailResponse['proposalRows'][number]>()
   for (const row of lineItemsResult.rows) {
