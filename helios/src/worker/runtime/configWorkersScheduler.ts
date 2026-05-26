@@ -58,24 +58,38 @@ export async function tickConfigWorkersScheduler(now: Date = new Date()): Promis
       continue
     }
 
-    if (schedule.taskKey === 'workers.scheduling.stock') {
-      await enqueueScheduledStockRefresh(schedule.taskKey, now, activeWindow.intervalMinutes)
-    } else if (schedule.taskKey === 'workers.scheduling.litalerts') {
-      await enqueueScheduledLitalertsRefreshBatch(schedule.taskKey, now, activeWindow.intervalMinutes)
-    } else if (schedule.taskKey === 'workers.scheduling.litalerts_rolling') {
-      await runScheduledLitalertsRollingTick(schedule.taskKey, now)
-    } else if (schedule.taskKey === 'workers.scheduling.market_evidence_alarm') {
-      await runScheduledMarketEvidenceAlarmScanTick(schedule.taskKey, now)
-    } else if (schedule.taskKey === 'workers.scheduling.catalog') {
-      await enqueueScheduledCatalogRefresh(schedule.taskKey, now, activeWindow.intervalMinutes)
-    } else if (schedule.taskKey === 'workers.scheduling.edible_thc_clamp') {
-      await enqueueScheduledEdibleThcClamp(schedule.taskKey, now, activeWindow.intervalMinutes)
-    } else if (schedule.taskKey === 'workers.scheduling.litalerts_retailer_backfill') {
-      await enqueueScheduledLitalertsRetailerBackfill(schedule.taskKey, now, activeWindow.intervalMinutes)
-    } else if (schedule.taskKey === 'workers.scheduling.sweed_orders_ingest') {
-      await enqueueScheduledSweedOrdersIngest(schedule.taskKey, now, activeWindow.intervalMinutes)
-    } else if (schedule.taskKey === 'workers.scheduling.sweed_package_snapshots') {
-      await enqueueScheduledSweedPackageSnapshots(schedule.taskKey, now, activeWindow.intervalMinutes)
+    // Per-task try/catch so one sick task (e.g. a transient unique-key
+    // clash in the litalerts pending queue, observed in prod 2026-05-26)
+    // can't short-circuit the entire scheduler tick and starve the
+    // other tasks (sweed_orders_ingest, sweed_package_snapshots,
+    // stock_refresh, …). Logging + continue matches the skip-and-
+    // continue principle in AGENTS.md.
+    try {
+      if (schedule.taskKey === 'workers.scheduling.stock') {
+        await enqueueScheduledStockRefresh(schedule.taskKey, now, activeWindow.intervalMinutes)
+      } else if (schedule.taskKey === 'workers.scheduling.litalerts') {
+        await enqueueScheduledLitalertsRefreshBatch(schedule.taskKey, now, activeWindow.intervalMinutes)
+      } else if (schedule.taskKey === 'workers.scheduling.litalerts_rolling') {
+        await runScheduledLitalertsRollingTick(schedule.taskKey, now)
+      } else if (schedule.taskKey === 'workers.scheduling.market_evidence_alarm') {
+        await runScheduledMarketEvidenceAlarmScanTick(schedule.taskKey, now)
+      } else if (schedule.taskKey === 'workers.scheduling.catalog') {
+        await enqueueScheduledCatalogRefresh(schedule.taskKey, now, activeWindow.intervalMinutes)
+      } else if (schedule.taskKey === 'workers.scheduling.edible_thc_clamp') {
+        await enqueueScheduledEdibleThcClamp(schedule.taskKey, now, activeWindow.intervalMinutes)
+      } else if (schedule.taskKey === 'workers.scheduling.litalerts_retailer_backfill') {
+        await enqueueScheduledLitalertsRetailerBackfill(schedule.taskKey, now, activeWindow.intervalMinutes)
+      } else if (schedule.taskKey === 'workers.scheduling.sweed_orders_ingest') {
+        await enqueueScheduledSweedOrdersIngest(schedule.taskKey, now, activeWindow.intervalMinutes)
+      } else if (schedule.taskKey === 'workers.scheduling.sweed_package_snapshots') {
+        await enqueueScheduledSweedPackageSnapshots(schedule.taskKey, now, activeWindow.intervalMinutes)
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown scheduler-task error.'
+      // eslint-disable-next-line no-console
+      console.error(
+        `[config-workers-scheduler] task ${schedule.taskKey} enqueue failed; continuing with next task: ${message}`,
+      )
     }
   }
 }
