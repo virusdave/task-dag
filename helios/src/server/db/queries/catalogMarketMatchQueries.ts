@@ -204,11 +204,18 @@ export async function getMarketMatchesFilterOptions(
          where source_kind = 'litalerts_partner_product'
            and brand_norm is not null
       ),
+      -- A catalog brand counts as eligible if EITHER its lowercased
+      -- name appears as a partner_product brand_norm OR an operator
+      -- override pins its litalerts_brand_id. The override path
+      -- matters for brands like "Dank" whose canonical LitAlerts
+      -- name diverges from the raw catalog spelling.
       eligible as (
         select cg.brand_name, cg.category_name, cg.subcategory_name
           from catalog_groups cg
-          join brand_norms bn on bn.brand_norm = lower(trim(cg.brand_name))
+          left join brand_norms bn on bn.brand_norm = lower(trim(cg.brand_name))
+          left join catalog_litalerts_brand_overrides ov on ov.catalog_brand_name = cg.brand_name
          where cg.brand_name is not null
+           and (bn.brand_norm is not null or ov.litalerts_brand_id is not null)
       )
       select 'brand'::text as kind, brand_name as value
         from eligible where brand_name is not null
@@ -335,21 +342,52 @@ export async function listGroupsForReview(
         from catalog_market_matches
         group by catalog_group_id
       ),
-      -- Resolve each catalog brand's effective LitAlerts brand-norm
-      -- key, honoring operator-confirmed overrides over the raw
-      -- catalog brand name. An explicit null override (operator
-      -- recorded "no LitAlerts equivalent") yields zero rows so the
-      -- structured-match path correctly skips it.
+      -- Resolve each catalog brand to the *set* of LitAlerts
+      -- brand_norm spellings that should count toward its match
+      -- universe. Honoring operator overrides:
+      --   - No override row → use lowercased catalog brand_name as
+      --     a single-spelling guess (legacy heuristic).
+      --   - Override with litalerts_brand_id IS NULL → operator said
+      --     "no LitAlerts equivalent"; yields zero rows so the
+      --     structured-match path correctly skips this brand.
+      --   - Override with litalerts_brand_id IS NOT NULL → expand
+      --     to every brand_name spelling observed in
+      --     litalerts_products for that brand_id. This is critical
+      --     because LitAlerts itself ships the same brand_id
+      --     (e.g. 4133 = "Dank By Definition.") under ~10 different
+      --     free-text brand_name spellings ("Dank", "Dank by
+      --     definition.", "Dank. by definition", etc.), and
+      --     fuzzy_skus.brand_norm carries the spelling, not the id.
+      --     Without this explosion the catalog → market-data review
+      --     surface would only see the one spelling that happened
+      --     to exactly equal lower(trim(ov.litalerts_brand_name))
+      --     and report 0 obs for every other spelling.
+      --   - Override with litalerts_brand_id IS NULL but
+      --     litalerts_brand_name set → single norm from the name
+      --     (legacy path for overrides written before brand_id was
+      --     captured).
       brand_effective as (
         select cg.brand_name as catalog_brand_name,
-               case
-                 when ov.catalog_brand_name is not null and ov.litalerts_brand_id is null then null
-                 when ov.litalerts_brand_name is not null then lower(trim(ov.litalerts_brand_name))
-                 else lower(trim(cg.brand_name))
-               end as effective_brand_norm
-        from (select distinct brand_name from catalog_groups where brand_name is not null) cg
-        left join catalog_litalerts_brand_overrides ov
-          on ov.catalog_brand_name = cg.brand_name
+               lower(trim(cg.brand_name)) as effective_brand_norm
+          from (select distinct brand_name from catalog_groups where brand_name is not null) cg
+         where not exists (
+           select 1 from catalog_litalerts_brand_overrides ov
+            where ov.catalog_brand_name = cg.brand_name
+         )
+        union
+        select ov.catalog_brand_name,
+               lower(trim(lp.brand_name)) as effective_brand_norm
+          from catalog_litalerts_brand_overrides ov
+          join litalerts_products lp on lp.brand_id = ov.litalerts_brand_id
+         where ov.litalerts_brand_id is not null
+           and lp.brand_name is not null
+           and length(trim(lp.brand_name)) > 0
+        union
+        select ov.catalog_brand_name,
+               lower(trim(ov.litalerts_brand_name)) as effective_brand_norm
+          from catalog_litalerts_brand_overrides ov
+         where ov.litalerts_brand_id is null
+           and ov.litalerts_brand_name is not null
       ),
       -- Pre-aggregate fuzzy counts ONCE per (brand_norm) and per
       -- (brand_norm, category_norm). Without this pre-aggregation,
@@ -375,12 +413,16 @@ export async function listGroupsForReview(
         group by brand_norm, category_norm
       ),
       group_structured_fuzzy as (
+        -- brand_effective is now multi-row per catalog brand (one
+        -- row per effective brand_norm spelling). Sum the per-norm
+        -- fuzzy counts to get the true per-group total.
         select cg.id as catalog_group_id,
-               bfc.cnt as structured_fuzzy_count
+               sum(bfc.cnt)::bigint as structured_fuzzy_count
         from catalog_groups cg
         join brand_effective be on be.catalog_brand_name = cg.brand_name
         join brand_fuzzy_count bfc on bfc.brand_norm = be.effective_brand_norm
         where cg.brand_name is not null and be.effective_brand_norm is not null
+        group by cg.id
       ),
       -- Map each catalog group's raw category to a canonical alias
       -- array. Mirrors canonicalCategoryNorm() in shared/marketMatch/
@@ -733,6 +775,19 @@ export async function loadGroupReview(
   // legitimate override-mapped row just because the raw catalog brand
   // name (e.g. "Grass Roots") differs from the LitAlerts brand name
   // (e.g. "Grassroots (Curaleaf)").
+  // Resolve the catalog brand to the *set* of LitAlerts brand_norm
+  // spellings that should count as the same brand. When an override
+  // pins a litalerts_brand_id, we explode to every spelling
+  // observed for that brand_id in litalerts_products — same logic
+  // as the listGroupsForReview brand_effective CTE, just for one
+  // catalog brand. Without this, e.g. catalog brand "Dank" with
+  // override brand_id=4133 would only pull fuzzy_skus whose
+  // brand_norm exactly equals lower(litalerts_brand_name) and
+  // miss the ~95% of partner_product rows that use a different
+  // spelling for the same brand_id.
+  let effectiveBrandNorms: string[] = []
+  // `effectiveBrandNorm` (singular) is kept around for downstream
+  // scoring profiles where we just want one representative string.
   let effectiveBrandNorm: string | null = group.brand_name
     ? group.brand_name.toLowerCase().trim()
     : null
@@ -745,15 +800,39 @@ export async function loadGroupReview(
     )
     if (overrideLookup.rows.length > 0) {
       const ov = overrideLookup.rows[0]
-      if (ov.litalerts_brand_id == null) {
-        // Explicit-null override means "no LitAlerts equivalent"; skip
-        // structured pull entirely and zero brand for scoring.
+      if (ov.litalerts_brand_id == null && ov.litalerts_brand_name == null) {
+        // Explicit-null override → operator said "no LitAlerts
+        // equivalent"; skip structured pull entirely and zero
+        // brand for scoring.
         effectiveBrandNorm = null
+      } else if (ov.litalerts_brand_id != null) {
+        // Pin by id → expand to every spelling for this brand_id.
+        const spread = await db.query<{ brand_norm: string }>(
+          `select distinct lower(trim(brand_name)) as brand_norm
+             from litalerts_products
+            where brand_id = $1
+              and brand_name is not null
+              and length(trim(brand_name)) > 0`,
+          [Number.parseInt(ov.litalerts_brand_id, 10)],
+        )
+        effectiveBrandNorms = spread.rows.map((r) => r.brand_norm)
+        // Use the override's litalerts_brand_name (or the most
+        // common spelling) as the representative for scoring.
+        effectiveBrandNorm = ov.litalerts_brand_name
+          ? ov.litalerts_brand_name.toLowerCase().trim()
+          : (effectiveBrandNorms[0] ?? effectiveBrandNorm)
       } else if (ov.litalerts_brand_name) {
+        // Pin by name only (legacy / no id captured) → single norm.
         effectiveBrandNorm = ov.litalerts_brand_name.toLowerCase().trim()
       }
     }
   }
+  if (effectiveBrandNorms.length === 0 && effectiveBrandNorm != null) {
+    effectiveBrandNorms = [effectiveBrandNorm]
+  }
+  // Set form for O(1) per-fuzzy "is this brand_norm one of the
+  // expanded spellings for our catalog brand?" lookup during scoring.
+  const effectiveBrandSet = new Set(effectiveBrandNorms.map((n) => n.toLowerCase().trim()))
 
   // Canonicalize the catalog group's category to one of {flower,
   // preroll, vape, edible, accessory, …}. We require the LitAlerts
@@ -783,9 +862,11 @@ export async function loadGroupReview(
   )
   const hasAnyVariantSize = variantGrams.length > 0 || variantMgs.length > 0
 
-  if (effectiveBrandNorm != null) {
+  if (effectiveBrandNorms.length > 0) {
     // HARD filters at the SQL layer:
-    //   - brand_norm must match the effective (override-aware) brand
+    //   - brand_norm must match ANY of the effective (override-aware)
+    //     brand spellings — see effectiveBrandNorms resolution above
+    //     for why this is a set, not a single value
     //   - if the catalog group has a canonical category, the LitAlerts
     //     row must canonicalize to that same family (we recompute on
     //     read so we don't have to re-run the fuzzy backfill to pick
@@ -799,7 +880,7 @@ export async function loadGroupReview(
               size_g_norm::text, size_mg_norm::text, pack_count_norm, strain_norm
        from fuzzy_skus
        where source_kind = 'litalerts_partner_product'
-         and brand_norm = $1
+         and brand_norm = any($1::text[])
          and (
            -- No catalog category set → don't filter by category.
            $3::boolean
@@ -833,7 +914,7 @@ export async function loadGroupReview(
        order by created_at desc
        limit 1000`,
       [
-        effectiveBrandNorm,
+        effectiveBrandNorms,
         // Category aliases: send every raw LA category string that
         // canonicalizes to our canonical family. Cheap because the
         // alias set is tiny; correct because we don't need to
@@ -1014,14 +1095,27 @@ export async function loadGroupReview(
         strainNorm: fuzzy.strainNorm,
         nameTokens: fuzzyNameTokens,
       }
-      // Heuristic brand-alias rescue (preserved from the legacy
-      // observation path): if the fuzzy has no brand AND the listing
-      // text mentions the catalog brand, treat them as alias-equivalent.
+      // Brand-alias resolution:
+      //   1. The fuzzy's brand_norm is one of the LitAlerts spellings
+      //      we expanded from the operator's brand_id override
+      //      (effectiveBrandNorms). Same id → same brand even if the
+      //      free-text spelling differs ("Dank" vs "Dank by
+      //      definition." vs "Dank. by definition" all share id 4133).
+      //      Without this, the scorer's brand factor would be 0 for
+      //      every override-mapped spelling that isn't the exact
+      //      string in `catalog_litalerts_brand_overrides.litalerts_brand_name`.
+      //   2. Legacy heuristic rescue: if the fuzzy has no parsed brand
+      //      at all, fall back to "does the listing text mention the
+      //      catalog brand?".
+      const fuzzyBrandLower = fuzzy.brandNorm?.toLowerCase().trim() ?? null
       const brandAliasMatch =
-        catalogProfile.brandNorm !== null
-        && fuzzy.brandNorm === null
-        && typeof listing?.listingName === 'string'
-        && listing.listingName.toLowerCase().includes(catalogProfile.brandNorm.toLowerCase())
+        (fuzzyBrandLower !== null && effectiveBrandSet.has(fuzzyBrandLower))
+        || (
+          catalogProfile.brandNorm !== null
+          && fuzzy.brandNorm === null
+          && typeof listing?.listingName === 'string'
+          && listing.listingName.toLowerCase().includes(catalogProfile.brandNorm.toLowerCase())
+        )
 
       // HARD GATE #1 — category. The SQL prefilter already enforces
       // this for structured rows, but legacy observation rows go
