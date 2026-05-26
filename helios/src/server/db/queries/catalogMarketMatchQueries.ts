@@ -538,13 +538,27 @@ export async function loadGroupReview(
   catalogGroupId: number,
   options: { minScore?: number; includeLegacy?: boolean } = {},
 ): Promise<GroupReviewBundle | null> {
-  // Clamp the visibility floor to 0.70. Anything below that is treated
-  // as "auto no-match (hidden)" — sub-0.70 candidates require at most
-  // one of {brand, category, size} disagreeing to be misleading, and
-  // the operator has reported (correctly) that the page was unusable
-  // when we let lower-confidence matches through.
-  const MIN_VISIBLE_SCORE = 0.70
-  const minScore = Math.min(1, Math.max(MIN_VISIBLE_SCORE, options.minScore ?? MIN_VISIBLE_SCORE))
+  // The server no longer suppresses candidates by score — it returns
+  // the top N candidates per size group regardless of threshold, and
+  // the SPA's confidence slider does the visible/hidden split on the
+  // client (so moving the slider is instant + reactive instead of a
+  // 1-2s round-trip-and-rerank).
+  //
+  // The `minScore` query param is still accepted (defaults to 0.70)
+  // and echoed back in the bundle as a *suggested* default slider
+  // value for the client, but it does NOT gate any candidate from
+  // the response. `suppressedCandidateCount` is consequently always
+  // zero in new responses; the SPA computes its own
+  // visible/suppressed split from the candidate list + slider value.
+  //
+  // Cap per size group so a brand with hundreds of low-quality
+  // partner-API rows can't blow up the payload. 25 is enough for the
+  // reviewer to drag the slider from 1.00 down to 0 and watch new
+  // candidates appear without round-tripping.
+  const TOP_N_PER_SIZE_GROUP = 25
+  const TOP_N_UNMATCHED = 25
+  const SUGGESTED_DEFAULT_MIN_SCORE = 0.70
+  const minScore = Math.min(1, Math.max(0, options.minScore ?? SUGGESTED_DEFAULT_MIN_SCORE))
   const includeLegacy = options.includeLegacy === true
   const groupResult = await db.query<{
     id: number
@@ -1151,21 +1165,19 @@ export async function loadGroupReview(
     }
   }
 
-  // Split visible vs suppressed by threshold.
-  const visible: MarketMatchCandidate[] = []
-  let suppressedTotal = 0
-  for (const c of scoredAll) {
-    if (c.finalScore >= minScore) visible.push(c)
-    else suppressedTotal += 1
-  }
-  visible.sort((a, b) => b.finalScore - a.finalScore)
+  // Rank-then-cap: the SPA needs the full ranked window for the
+  // client-side slider to work, but the payload still needs to be
+  // bounded. Sort everything by score descending, then bucket by
+  // matched-variant size group and truncate to TOP_N_PER_SIZE_GROUP
+  // (and the no-matched-variant bucket to TOP_N_UNMATCHED).
+  // suppressedCandidateCount is always 0 in the new contract — the
+  // client computes its own visible/hidden split from finalScore vs
+  // the current slider value.
+  const allRanked = [...scoredAll].sort((a, b) => b.finalScore - a.finalScore)
 
-  // Bucket visible candidates by size group; surface unmatched
-  // (no catalog variants parsed) separately so the UI can still
-  // render them at the bottom.
   const sizeGroupsMap = new Map<
     string,
-    { sizeKey: string; sizeLabel: string; variants: CatalogVariant[]; candidates: MarketMatchCandidate[]; suppressedCount: number }
+    { sizeKey: string; sizeLabel: string; variants: CatalogVariant[]; candidates: MarketMatchCandidate[] }
   >()
   for (const variant of catalogVariants) {
     if (!sizeGroupsMap.has(variant.sizeKey)) {
@@ -1174,24 +1186,18 @@ export async function loadGroupReview(
         sizeLabel: variant.sizeLabel,
         variants: [],
         candidates: [],
-        suppressedCount: 0,
       })
     }
     sizeGroupsMap.get(variant.sizeKey)!.variants.push(variant)
   }
   const unmatchedCandidates: MarketMatchCandidate[] = []
-  for (const c of visible) {
+  for (const c of allRanked) {
     if (c.matchedSizeKey === 'unsized' || !sizeGroupsMap.has(c.matchedSizeKey)) {
-      unmatchedCandidates.push(c)
+      if (unmatchedCandidates.length < TOP_N_UNMATCHED) unmatchedCandidates.push(c)
     } else {
-      sizeGroupsMap.get(c.matchedSizeKey)!.candidates.push(c)
+      const bucket = sizeGroupsMap.get(c.matchedSizeKey)!
+      if (bucket.candidates.length < TOP_N_PER_SIZE_GROUP) bucket.candidates.push(c)
     }
-  }
-  // Per-size-group suppressed counts.
-  for (const c of scoredAll) {
-    if (c.finalScore >= minScore) continue
-    const bucket = sizeGroupsMap.get(c.matchedSizeKey)
-    if (bucket) bucket.suppressedCount += 1
   }
 
   const sizeGroups: SizeGroup[] = Array.from(sizeGroupsMap.values())
@@ -1200,9 +1206,16 @@ export async function loadGroupReview(
       sizeLabel: g.sizeLabel,
       variants: g.variants,
       candidates: g.candidates,
-      suppressedCandidateCount: g.suppressedCount,
+      suppressedCandidateCount: 0,
     }))
     .sort((a, b) => sizeGroupSortKey(a.sizeKey) - sizeGroupSortKey(b.sizeKey))
+
+  // Total candidate count = everything we returned to the client
+  // (capped). Kept as `visibleCandidateCount` for response-shape
+  // backward compatibility; old SPA builds that summed visible +
+  // suppressed still get a coherent total.
+  const totalReturned =
+    sizeGroups.reduce((sum, g) => sum + g.candidates.length, 0) + unmatchedCandidates.length
 
   return {
     catalogGroupId,
@@ -1215,8 +1228,8 @@ export async function loadGroupReview(
     liveVerdicts,
     sizeGroups,
     unmatchedCandidates,
-    visibleCandidateCount: visible.length,
-    suppressedCandidateCount: suppressedTotal,
+    visibleCandidateCount: totalReturned,
+    suppressedCandidateCount: 0,
     minScore,
     observationCount: obsResult.rows.length,
     hasParsedAnyObservation: fuzzies.length > 0,

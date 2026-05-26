@@ -152,6 +152,31 @@ export async function catalogMarketDataLoader({ request }: { request: Request })
   return { list, filterOptions }
 }
 
+/**
+ * Default confidence threshold for the page-level slider. The server
+ * still suggests this value via the bundle's `minScore` field for
+ * backward compatibility, but it no longer suppresses candidates by
+ * score — the SPA gets the top N candidates per size group regardless
+ * of threshold, and the slider does a pure client-side visible/hidden
+ * split. Sliders live at three scopes:
+ *
+ *   - GLOBAL  (page header)              applies to every brand/item
+ *                                        that hasn't overridden it.
+ *   - BRAND   (per-brand section header) overrides global for that
+ *                                        brand's items.
+ *   - ITEM    (per-expanded-row review)  overrides brand + global for
+ *                                        that one row.
+ *
+ * Effective threshold for an item = item override ?? brand override ??
+ * global. Each level shows an "↻ inherit" button that clears its
+ * override so the slider follows the layer above it again.
+ *
+ * The top candidate per size group (rank 0 in the server response) is
+ * ALWAYS shown regardless of slider value, so a too-aggressive
+ * threshold can never hide the row a reviewer actually needs to see.
+ */
+const DEFAULT_MIN_SCORE = 0.70
+
 export function CatalogMarketDataPage(): JSX.Element {
   useRegisterCatalogSidebarSubtree()
   const { list: data, filterOptions } = useLoaderData() as LoaderData
@@ -163,6 +188,26 @@ export function CatalogMarketDataPage(): JSX.Element {
   const [unverdictedOnly, setUnverdictedOnly] = useState(params.get('unverdictedOnly') === 'true')
   const [expanded, setExpanded] = useState<number | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [globalMinScore, setGlobalMinScore] = useState(DEFAULT_MIN_SCORE)
+  const [brandOverrides, setBrandOverrides] = useState<Record<string, number>>({})
+  const [itemOverrides, setItemOverrides] = useState<Record<number, number>>({})
+
+  const setBrandOverride = useCallback((brandKey: string, score: number | null) => {
+    setBrandOverrides((cur) => {
+      const next = { ...cur }
+      if (score === null) delete next[brandKey]
+      else next[brandKey] = score
+      return next
+    })
+  }, [])
+  const setItemOverride = useCallback((groupId: number, score: number | null) => {
+    setItemOverrides((cur) => {
+      const next = { ...cur }
+      if (score === null) delete next[groupId]
+      else next[groupId] = score
+      return next
+    })
+  }, [])
 
   const totalPages = Math.max(1, Math.ceil(data.pagination.totalCount / data.pagination.limit))
   const currentPage = Math.floor(data.pagination.offset / data.pagination.limit) + 1
@@ -208,7 +253,7 @@ export function CatalogMarketDataPage(): JSX.Element {
           <Pill tone="muted">{`page ${currentPage}/${totalPages}`}</Pill>
         </div>
 
-        <div className="inline-row wrap-row" style={{ marginBottom: '0.75rem' }}>
+        <div className="inline-row wrap-row" style={{ marginBottom: '0.75rem', gap: '0.75rem' }}>
           <TypeaheadFilter
             label="brand"
             listId="catalog-market-brand-options"
@@ -258,13 +303,23 @@ export function CatalogMarketDataPage(): JSX.Element {
               Clear all
             </button>
           )}
+          <MinScoreSlider
+            label="Confidence (global):"
+            onChange={setGlobalMinScore}
+            value={globalMinScore}
+          />
         </div>
 
         {error ? <p className="error-banner">{error}</p> : null}
 
         <BrandGroupedList
+          brandOverrides={brandOverrides}
           expandedGroupId={expanded}
+          globalMinScore={globalMinScore}
+          itemOverrides={itemOverrides}
           onError={setError}
+          onSetBrandOverride={setBrandOverride}
+          onSetItemOverride={setItemOverride}
           onToggleGroup={(gid) => setExpanded((cur) => (cur === gid ? null : gid))}
           rows={data.rows}
         />
@@ -294,9 +349,13 @@ export function CatalogMarketDataPage(): JSX.Element {
           <div className="subtle-copy" style={{ marginTop: '0.5rem' }}>
             <p>
               Reviews catalog groups against the structured LitAlerts NY product directory. Each catalog group
-              expands to per-size-family cards: the catalog variant (with photo + sku) next to its ranked
-              LitAlerts candidates. Candidates below the confidence threshold (default 0.70) are hidden and
-              counted as auto-no-match; raise/lower the threshold per group to inspect them.
+              expands to per-size-family tables: the catalog variant (with photo + sku) next to its ranked
+              LitAlerts candidates. Confidence-threshold sliders work at three scopes — page-global, per-brand
+              (in each brand's section header), and per-item (inside an expanded review) — with the more
+              specific scope overriding the less specific one. A "↻" button next to a slider clears that
+              level's override so it follows the layer above it again. The top candidate per size group is
+              always shown regardless of slider value, so an aggressive threshold can never hide the row
+              you actually need to act on.
             </p>
             <p>
               Brand resolution honours operator overrides set in <Link to={buildHeliosModulePath('catalog', 'brand-mapping')}>Catalog → Brand Mapping</Link>.
@@ -368,6 +427,11 @@ interface BrandGroupedListProps {
   expandedGroupId: number | null
   onToggleGroup: (groupId: number) => void
   onError: (msg: string | null) => void
+  globalMinScore: number
+  brandOverrides: Record<string, number>
+  itemOverrides: Record<number, number>
+  onSetBrandOverride: (brandKey: string, score: number | null) => void
+  onSetItemOverride: (groupId: number, score: number | null) => void
 }
 
 /**
@@ -384,7 +448,17 @@ interface BrandGroupedListProps {
  * batch" workflow lives at the family card layer that already
  * existed.
  */
-function BrandGroupedList({ rows, expandedGroupId, onToggleGroup, onError }: BrandGroupedListProps): JSX.Element {
+function BrandGroupedList({
+  rows,
+  expandedGroupId,
+  onToggleGroup,
+  onError,
+  globalMinScore,
+  brandOverrides,
+  itemOverrides,
+  onSetBrandOverride,
+  onSetItemOverride,
+}: BrandGroupedListProps): JSX.Element {
   const groupedByBrand = useMemo(() => {
     const map = new Map<string, { brand: string | null; rows: GroupSummaryRow[] }>()
     for (const row of rows) {
@@ -417,6 +491,8 @@ function BrandGroupedList({ rows, expandedGroupId, onToggleGroup, onError }: Bra
       {groupedByBrand.map(({ key, brand, rows: brandRows }) => {
         const collapsed = collapsedBrands.has(key)
         const verdictedCount = brandRows.filter((r) => r.liveVerdictCount > 0).length
+        const brandOverride = brandOverrides[key]
+        const brandEffective = brandOverride ?? globalMinScore
         return (
           <section
             key={key}
@@ -427,48 +503,73 @@ function BrandGroupedList({ rows, expandedGroupId, onToggleGroup, onError }: Bra
               overflow: 'hidden',
             }}
           >
-            <button
-              aria-expanded={!collapsed}
+            <div
               className="inline-row wrap-row"
-              onClick={() => toggleBrand(key)}
               style={{
                 width: '100%',
                 background: 'rgba(0,0,0,0.04)',
-                border: 'none',
                 borderBottom: collapsed ? 'none' : '1px solid var(--border-color, #e0e0e0)',
                 padding: '0.55rem 0.75rem',
-                cursor: 'pointer',
                 justifyContent: 'space-between',
                 gap: '0.5rem',
-                textAlign: 'left',
                 position: 'sticky',
                 top: 0,
                 zIndex: 1,
               }}
-              type="button"
             >
-              <span style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontWeight: 600 }}>
+              <button
+                aria-expanded={!collapsed}
+                onClick={() => toggleBrand(key)}
+                style={{
+                  background: 'transparent',
+                  border: 'none',
+                  padding: 0,
+                  cursor: 'pointer',
+                  textAlign: 'left',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '0.4rem',
+                  fontWeight: 600,
+                  flex: '1 1 auto',
+                }}
+                type="button"
+              >
                 <span style={{ display: 'inline-block', width: '0.85rem' }}>{collapsed ? '▸' : '▾'}</span>
                 {brand ?? '(No brand)'}
-              </span>
-              <span className="inline-row" style={{ gap: '0.4rem' }}>
+              </button>
+              <span className="inline-row" style={{ gap: '0.4rem', alignItems: 'center', flexWrap: 'wrap' }}>
                 <Pill tone="muted">{`${brandRows.length} ${brandRows.length === 1 ? 'family' : 'families'}`}</Pill>
                 <Pill tone={verdictedCount === brandRows.length ? 'success' : 'muted'}>
                   {`${verdictedCount}/${brandRows.length} reviewed`}
                 </Pill>
+                <MinScoreSlider
+                  inherited={brandOverride === undefined}
+                  label="brand min:"
+                  onChange={(v) => onSetBrandOverride(key, v)}
+                  onReset={brandOverride !== undefined ? () => onSetBrandOverride(key, null) : undefined}
+                  value={brandEffective}
+                />
               </span>
-            </button>
+            </div>
             {collapsed ? null : (
               <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem', padding: '0.5rem 0.6rem' }}>
-                {brandRows.map((row) => (
-                  <GroupCard
-                    expanded={expandedGroupId === row.catalogGroupId}
-                    key={row.catalogGroupId}
-                    onError={onError}
-                    onToggle={() => onToggleGroup(row.catalogGroupId)}
-                    row={row}
-                  />
-                ))}
+                {brandRows.map((row) => {
+                  const itemOverride = itemOverrides[row.catalogGroupId]
+                  const itemEffective = itemOverride ?? brandEffective
+                  return (
+                    <GroupCard
+                      effectiveMinScore={itemEffective}
+                      expanded={expandedGroupId === row.catalogGroupId}
+                      isItemOverride={itemOverride !== undefined}
+                      key={row.catalogGroupId}
+                      onError={onError}
+                      onResetItemOverride={() => onSetItemOverride(row.catalogGroupId, null)}
+                      onSetItemOverride={(v) => onSetItemOverride(row.catalogGroupId, v)}
+                      onToggle={() => onToggleGroup(row.catalogGroupId)}
+                      row={row}
+                    />
+                  )
+                })}
               </div>
             )}
           </section>
@@ -478,14 +579,78 @@ function BrandGroupedList({ rows, expandedGroupId, onToggleGroup, onError }: Bra
   )
 }
 
+interface MinScoreSliderProps {
+  value: number
+  onChange: (next: number) => void
+  label?: string
+  inherited?: boolean
+  onReset?: () => void
+}
+
+function MinScoreSlider({ value, onChange, label, inherited, onReset }: MinScoreSliderProps): JSX.Element {
+  return (
+    <span
+      className="inline-row"
+      style={{ gap: '0.3rem', alignItems: 'center', fontSize: '0.8rem' }}
+      title={inherited ? 'Inherited; move to override at this scope' : 'Override active; click ↻ to inherit'}
+    >
+      {label ? <span className="subtle-copy">{label}</span> : null}
+      <input
+        max={1}
+        min={0}
+        onChange={(e) => onChange(Number.parseFloat(e.currentTarget.value))}
+        step={0.05}
+        style={{ width: '6rem' }}
+        type="range"
+        value={value}
+      />
+      <span
+        style={{
+          fontVariantNumeric: 'tabular-nums',
+          minWidth: '2.2rem',
+          textAlign: 'right',
+          opacity: inherited ? 0.6 : 1,
+          fontWeight: inherited ? 400 : 600,
+        }}
+      >
+        {value.toFixed(2)}
+      </span>
+      {onReset ? (
+        <button
+          className="ghost-button"
+          onClick={onReset}
+          style={{ padding: '0.1rem 0.35rem', fontSize: '0.72rem', lineHeight: 1.1 }}
+          title="Inherit from parent scope"
+          type="button"
+        >
+          ↻
+        </button>
+      ) : null}
+    </span>
+  )
+}
+
 interface GroupCardProps {
   row: GroupSummaryRow
   expanded: boolean
   onToggle: () => void
   onError: (msg: string | null) => void
+  effectiveMinScore: number
+  isItemOverride: boolean
+  onSetItemOverride: (score: number) => void
+  onResetItemOverride: () => void
 }
 
-function GroupCard({ row, expanded, onToggle, onError }: GroupCardProps): JSX.Element {
+function GroupCard({
+  row,
+  expanded,
+  onToggle,
+  onError,
+  effectiveMinScore,
+  isItemOverride,
+  onSetItemOverride,
+  onResetItemOverride,
+}: GroupCardProps): JSX.Element {
   return (
     <div
       style={{
@@ -522,7 +687,16 @@ function GroupCard({ row, expanded, onToggle, onError }: GroupCardProps): JSX.El
           </button>
         </div>
       </div>
-      {expanded ? <GroupReviewPanel catalogGroupId={row.catalogGroupId} onError={onError} /> : null}
+      {expanded ? (
+        <GroupReviewPanel
+          catalogGroupId={row.catalogGroupId}
+          effectiveMinScore={effectiveMinScore}
+          isItemOverride={isItemOverride}
+          onError={onError}
+          onResetItemOverride={onResetItemOverride}
+          onSetItemOverride={onSetItemOverride}
+        />
+      ) : null}
     </div>
   )
 }
@@ -530,25 +704,45 @@ function GroupCard({ row, expanded, onToggle, onError }: GroupCardProps): JSX.El
 interface GroupReviewPanelProps {
   catalogGroupId: number
   onError: (msg: string | null) => void
+  effectiveMinScore: number
+  isItemOverride: boolean
+  onSetItemOverride: (score: number) => void
+  onResetItemOverride: () => void
 }
 
-function GroupReviewPanel({ catalogGroupId, onError }: GroupReviewPanelProps): JSX.Element {
-  const [minScore, setMinScore] = useState(0.70)
+function GroupReviewPanel({
+  catalogGroupId,
+  onError,
+  effectiveMinScore,
+  isItemOverride,
+  onSetItemOverride,
+  onResetItemOverride,
+}: GroupReviewPanelProps): JSX.Element {
   const [bundle, setBundle] = useState<GroupReviewBundle | null>(null)
   const [loading, setLoading] = useState(false)
   const [pendingFuzzyId, setPendingFuzzyId] = useState<number | null>(null)
   const [activeSizeKey, setActiveSizeKey] = useState<string | null>(null)
 
-  const load = useCallback(async (score: number) => {
+  // Fetch once per expanded row — no minScore query param. The server
+  // returns the top N candidates per size group regardless of
+  // threshold (see catalogMarketMatchQueries.loadGroupReview); the
+  // slider below is a pure client-side filter applied during render.
+  // Re-fetch-on-slider-move was what made the prior slider feel
+  // inoperative — it triggered a 1-2s round-trip + re-render that
+  // visibly lagged the slider's animation frame.
+  const load = useCallback(async () => {
     setLoading(true)
     onError(null)
     try {
       const next = await loadJson(
-        `/api/catalog/market-matches/${catalogGroupId}?minScore=${score}`,
+        `/api/catalog/market-matches/${catalogGroupId}`,
         BundleSchema,
       )
       setBundle(next)
-      // Default active size = first size with candidates, else first with variants
+      // Default active size = first size with any candidates, else
+      // first with variants. We check the raw bundle (not the slider-
+      // filtered list) so the size with the best candidate is always
+      // initially selected.
       const sizeWithCandidates = next.sizeGroups.find((g) => g.candidates.length > 0)
       const firstSize = sizeWithCandidates ?? next.sizeGroups[0]
       setActiveSizeKey(firstSize?.sizeKey ?? null)
@@ -560,7 +754,7 @@ function GroupReviewPanel({ catalogGroupId, onError }: GroupReviewPanelProps): J
     }
   }, [catalogGroupId, onError])
 
-  useEffect(() => { void load(minScore) }, [load, minScore])
+  useEffect(() => { void load() }, [load])
 
   async function recordVerdict(
     fuzzySkuId: number,
@@ -608,8 +802,40 @@ function GroupReviewPanel({ catalogGroupId, onError }: GroupReviewPanelProps): J
   }
   if (!bundle) return <p className="subtle-copy">No data.</p>
 
+  // Apply the client-side slider filter to each size group's
+  // candidates. The top candidate (the highest-scoring row in the
+  // already-rank-sorted list from the server) is preserved no matter
+  // how aggressive the slider is, so a "show me only ≥0.99 matches"
+  // sweep never hides the one row a reviewer actually wants to act
+  // on. Anything dropped from the visible list is counted into
+  // `suppressedCount` so the UI can show "+N below threshold".
+  const filteredSizeGroups: SizeGroup[] = bundle.sizeGroups.map((g) => {
+    const sorted = [...g.candidates].sort((a, b) => b.finalScore - a.finalScore)
+    const visible: Candidate[] = []
+    let suppressedCount = 0
+    sorted.forEach((c, idx) => {
+      if (idx === 0 || c.finalScore >= effectiveMinScore) visible.push(c)
+      else suppressedCount += 1
+    })
+    return {
+      ...g,
+      candidates: visible,
+      suppressedCandidateCount: suppressedCount,
+    }
+  })
+  const filteredUnmatched: Candidate[] = (() => {
+    const sorted = [...bundle.unmatchedCandidates].sort((a, b) => b.finalScore - a.finalScore)
+    return sorted.filter((c, idx) => idx === 0 || c.finalScore >= effectiveMinScore)
+  })()
+  const visibleTotal =
+    filteredSizeGroups.reduce((sum, g) => sum + g.candidates.length, 0) + filteredUnmatched.length
+  const suppressedTotal =
+    bundle.sizeGroups.reduce((sum, g) => sum + g.candidates.length, 0)
+    + bundle.unmatchedCandidates.length
+    - visibleTotal
+
   const activeGroup =
-    bundle.sizeGroups.find((g) => g.sizeKey === activeSizeKey) ?? bundle.sizeGroups[0] ?? null
+    filteredSizeGroups.find((g) => g.sizeKey === activeSizeKey) ?? filteredSizeGroups[0] ?? null
 
   return (
     <div style={{ marginTop: '0.75rem', borderTop: '1px solid var(--border-color, #e0e0e0)', paddingTop: '0.75rem' }}>
@@ -628,30 +854,24 @@ function GroupReviewPanel({ catalogGroupId, onError }: GroupReviewPanelProps): J
             {bundle.subcategoryName ? ` · ${bundle.subcategoryName}` : ''}
           </div>
           <div className="subtle-copy" style={{ fontSize: '0.78rem', marginTop: '0.2rem' }}>
-            {`${bundle.visibleCandidateCount} above ${bundle.minScore.toFixed(2)} · ${bundle.suppressedCandidateCount} below (auto no-match)`}
+            {`${visibleTotal} above ${effectiveMinScore.toFixed(2)} · ${suppressedTotal} below (auto no-match; top candidate always shown)`}
             {` · ${bundle.liveVerdicts.length} live verdict${bundle.liveVerdicts.length === 1 ? '' : 's'}`}
           </div>
         </div>
-        <div className="inline-row" style={{ gap: '0.4rem', alignItems: 'center' }}>
-          <label className="subtle-copy" style={{ fontSize: '0.8rem' }}>min:</label>
-          <input
-            max={1}
-            min={0}
-            onChange={(e) => setMinScore(Number.parseFloat(e.currentTarget.value))}
-            step={0.05}
-            style={{ width: '6rem' }}
-            type="range"
-            value={minScore}
-          />
-          <span style={{ fontVariantNumeric: 'tabular-nums', fontSize: '0.85rem' }}>{minScore.toFixed(2)}</span>
-        </div>
+        <MinScoreSlider
+          inherited={!isItemOverride}
+          label="item min:"
+          onChange={onSetItemOverride}
+          onReset={isItemOverride ? onResetItemOverride : undefined}
+          value={effectiveMinScore}
+        />
       </div>
 
-      {bundle.sizeGroups.length === 0 ? (
+      {filteredSizeGroups.length === 0 ? (
         <p className="subtle-copy">No catalog variants parsed for this group.</p>
       ) : (
         <div className="inline-row wrap-row" style={{ gap: '0.3rem', marginBottom: '0.5rem' }}>
-          {bundle.sizeGroups.map((g) => {
+          {filteredSizeGroups.map((g) => {
             const isActive = activeSizeKey === g.sizeKey
             const count = g.candidates.length
             return (
@@ -682,11 +902,11 @@ function GroupReviewPanel({ catalogGroupId, onError }: GroupReviewPanelProps): J
         />
       ) : null}
 
-      {bundle.unmatchedCandidates.length > 0 ? (
+      {filteredUnmatched.length > 0 ? (
         <details style={{ marginTop: '1rem' }}>
-          <summary>{`${bundle.unmatchedCandidates.length} candidate(s) without a matched catalog variant`}</summary>
+          <summary>{`${filteredUnmatched.length} candidate(s) without a matched catalog variant`}</summary>
           <MarketReviewTable
-            candidates={bundle.unmatchedCandidates}
+            candidates={filteredUnmatched}
             ourContext={{
               brand: bundle.brandName,
               category: bundle.categoryName,
