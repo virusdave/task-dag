@@ -492,6 +492,134 @@ function boroughForZip(zip: string | null): string {
 
 const ORIGIN_SERIES_IDS = ['manhattan', 'brooklyn', 'queens', 'bronx', 'other'] as const
 
+// ----- Category sales (P3) -----
+//
+// `store.sale.invoice.list` returns each order with a `raw_json.items[]`
+// array. Each item has a `productCategory.name` (e.g. "Pre-Rolls",
+// "Flower", "Vapes") and per-item `subtotalAmount`. We aggregate
+// `sum(subtotalAmount)` per (bucket, category) and bin the live category
+// names into the stub-declared series IDs.
+//
+// COGS-based metrics (category.margin_dollars_stack, fulfillment.margin_*)
+// still need wholesale cost — and `store.sale.invoice.list` returns
+// `wholesaleCost: 0` on every item (observed across 1,252 line items
+// on 2026-05-26). The fix needs either:
+//   (a) a per-invoice `store.sale.invoice.get` poll that includes cost, or
+//   (b) a separate `store.product.list` cache keyed by inventoryItemId.
+// Tracked as a follow-on under #22; until then those metrics stay stubs.
+
+// Sweed's live `items[].productCategory.name` values, observed on Bronx
+// + Midtown on 2026-05-26. Any value not in this map falls into 'other'.
+const CATEGORY_SERIES_BY_VALUE: ReadonlyMap<string, string> = new Map([
+  ['pre-rolls', 'preroll'],
+  ['pre rolls', 'preroll'],
+  ['preroll', 'preroll'],
+  ['flower', 'flower'],
+  ['edibles', 'edible'],
+  ['edible', 'edible'],
+  ['vapes', 'vape'],
+  ['vape', 'vape'],
+  ['concentrates', 'concentrate'],
+  ['concentrate', 'concentrate'],
+  ['accessories', 'accessory'],
+  ['accessory', 'accessory'],
+  ['beverages', 'other'],
+  ['beverage', 'other'],
+  ['other', 'other'],
+  ['', 'other'],
+])
+
+const CATEGORY_SERIES_IDS = [
+  'flower',
+  'preroll',
+  'edible',
+  'vape',
+  'concentrate',
+  'accessory',
+  'other',
+] as const
+
+/** Run a "sum/avg per (bucket, productCategory) over raw_json items"
+ *  query and shape into MetricRow[] with category-series binning. */
+async function queryCategoryLineItems(args: MetricQueryArgs): Promise<MetricRow[]> {
+  const dealerIds = resolveDealerIds(args.sites)
+  const { from, to, truncUnit, buckets } = resolveWindow(args)
+  if (dealerIds.length === 0 || buckets.length === 0) {
+    return buckets.map((b) => {
+      const row: Record<string, string | number | null> = { t: b.toISOString() }
+      for (const sid of CATEGORY_SERIES_IDS) row[sid] = 0
+      return row as MetricRow
+    })
+  }
+  const bucketSelect =
+    truncUnit === null ? 'null::timestamptz' : `date_trunc('${truncUnit}', pay_time at time zone 'UTC')`
+  const sql = `
+    select ${bucketSelect} as bucket_start,
+           coalesce(lower(item->'productCategory'->>'name'), '') as col_value,
+           sum((item->>'subtotalAmount')::numeric) as value
+      from sweed_orders, jsonb_array_elements(raw_json->'items') as item
+     where dealer_id = any($1::bigint[])
+       and pay_time >= $2 and pay_time < $3
+     group by 1, 2
+  `
+  const pool = getPool()
+  const result = await pool.query<{ bucket_start: string | null; col_value: string | null; value: string | null }>(
+    sql,
+    [dealerIds, from.toISOString(), to.toISOString()],
+  )
+  const data = new Map<string, Map<string, number>>()
+  for (const row of result.rows) {
+    const bucketKey =
+      truncUnit === null
+        ? buckets[0]!.toISOString()
+        : row.bucket_start
+          ? new Date(row.bucket_start).toISOString()
+          : null
+    if (bucketKey === null) continue
+    const canonical = (row.col_value ?? '').trim().toLowerCase()
+    const sid = CATEGORY_SERIES_BY_VALUE.get(canonical) ?? 'other'
+    let inner = data.get(bucketKey)
+    if (!inner) {
+      inner = new Map()
+      data.set(bucketKey, inner)
+    }
+    const num = row.value === null ? 0 : Number(row.value)
+    inner.set(sid, (inner.get(sid) ?? 0) + (Number.isFinite(num) ? num : 0))
+  }
+  return buckets.map((b) => {
+    const inner = data.get(b.toISOString()) ?? new Map<string, number>()
+    const out: Record<string, string | number | null> = { t: b.toISOString() }
+    for (const sid of CATEGORY_SERIES_IDS) out[sid] = round2(inner.get(sid) ?? 0)
+    return out as MetricRow
+  })
+}
+
+/** category.sales_stack_dollars — stacked sales $ by product category. */
+export function queryCategorySalesStackDollars(args: MetricQueryArgs): Promise<MetricRow[]> {
+  return queryCategoryLineItems(args)
+}
+
+/** category.sales_stack_fraction — same as dollars but normalised to
+ *  fractions per bucket. Sum across series is 1.0 in any non-empty
+ *  bucket, 0.0 in empty buckets. */
+export async function queryCategorySalesStackFraction(args: MetricQueryArgs): Promise<MetricRow[]> {
+  const rows = await queryCategoryLineItems(args)
+  return rows.map((row) => {
+    let total = 0
+    for (const sid of CATEGORY_SERIES_IDS) {
+      const v = row[sid]
+      if (typeof v === 'number') total += v
+    }
+    const out: Record<string, string | number | null> = { t: row.t }
+    for (const sid of CATEGORY_SERIES_IDS) {
+      const v = row[sid]
+      const num = typeof v === 'number' ? v : 0
+      out[sid] = total > 0 ? Math.round((num / total) * 10000) / 10000 : 0
+    }
+    return out as MetricRow
+  })
+}
+
 /** customers.origin_map — delivery-order count by NYC borough. */
 export async function queryCustomerOriginMap(args: MetricQueryArgs): Promise<MetricRow[]> {
   const dealerIds = resolveDealerIds(args.sites)

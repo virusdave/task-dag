@@ -2,6 +2,8 @@ import type { MetricDef } from '../types.js'
 import {
   queryBasketSizeByCustomerType,
   queryBasketSizeByFulfillment,
+  queryCategorySalesStackDollars,
+  queryCategorySalesStackFraction,
   queryCustomerOriginMap,
   queryFirstVsReturning,
   queryFulfillmentOrderCount,
@@ -137,6 +139,44 @@ export const REAL_METRICS: ReadonlyArray<MetricDef> = [
     defaultAggregation: 'week',
     supportedAggregations: [...SUPPORTED],
     query: queryPaymentSalesDollars,
+  },
+  {
+    id: 'category.sales_stack_dollars',
+    group: 'Category distribution',
+    title: 'Sales $ by category (stacked)',
+    description:
+      'Stacked sales $ per bucket, summed from per-line `subtotalAmount` and binned on the live `productCategory.name`. Categories outside the known six (Flower, Pre-Rolls, Edibles, Vapes, Concentrates, Accessories) — most often Beverages — land in "Other".',
+    series: [
+      { id: 'flower', label: 'Flower', colour: '#2ca02c' },
+      { id: 'preroll', label: 'Pre-roll', colour: '#1f77b4' },
+      { id: 'edible', label: 'Edible', colour: '#ff7f0e' },
+      { id: 'vape', label: 'Vape', colour: '#9467bd' },
+      { id: 'concentrate', label: 'Concentrate', colour: '#d62728' },
+      { id: 'accessory', label: 'Accessory', colour: '#7f7f7f' },
+      { id: 'other', label: 'Other', colour: '#bcbd22' },
+    ],
+    defaultAggregation: 'week',
+    supportedAggregations: [...SUPPORTED],
+    query: queryCategorySalesStackDollars,
+  },
+  {
+    id: 'category.sales_stack_fraction',
+    group: 'Category distribution',
+    title: 'Sales mix by category (100% stacked)',
+    description:
+      'Stacked sales-fraction per bucket: each series is `sum(subtotalAmount) / sum(subtotalAmount across all categories)`. Sums to 1.0 in non-empty buckets, 0 in empty buckets. Same category binning as category.sales_stack_dollars.',
+    series: [
+      { id: 'flower', label: 'Flower', colour: '#2ca02c' },
+      { id: 'preroll', label: 'Pre-roll', colour: '#1f77b4' },
+      { id: 'edible', label: 'Edible', colour: '#ff7f0e' },
+      { id: 'vape', label: 'Vape', colour: '#9467bd' },
+      { id: 'concentrate', label: 'Concentrate', colour: '#d62728' },
+      { id: 'accessory', label: 'Accessory', colour: '#7f7f7f' },
+      { id: 'other', label: 'Other', colour: '#bcbd22' },
+    ],
+    defaultAggregation: 'week',
+    supportedAggregations: [...SUPPORTED],
+    query: queryCategorySalesStackFraction,
   },
   {
     id: 'customers.origin_map',
