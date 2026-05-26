@@ -75,6 +75,10 @@ export async function registerCatalogMarketMatchRoutes(server: FastifyInstance):
     })
   })
 
+  const BundleQuerySchema = z.object({
+    minScore: z.coerce.number().min(0).max(1).optional(),
+    includeLegacy: z.coerce.boolean().optional(),
+  })
   server.get<{ Params: { groupId: string } }>('/api/catalog/market-matches/:groupId', async (request, reply) => {
     const user = await requireSessionUser(request, reply, 'viewer')
     if (!user) return
@@ -83,7 +87,11 @@ export async function registerCatalogMarketMatchRoutes(server: FastifyInstance):
     if (!Number.isFinite(groupId) || groupId <= 0) {
       return reply.code(400).send({ error: 'invalid_group_id' })
     }
-    const bundle = await loadGroupReview(getPool(), groupId)
+    const q = BundleQuerySchema.parse(request.query ?? {})
+    const bundle = await loadGroupReview(getPool(), groupId, {
+      minScore: q.minScore,
+      includeLegacy: q.includeLegacy === true,
+    })
     if (!bundle) return reply.code(404).send({ error: 'catalog_group_not_found' })
     return reply.send(bundle)
   })

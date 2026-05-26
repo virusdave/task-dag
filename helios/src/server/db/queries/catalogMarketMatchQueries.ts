@@ -24,6 +24,7 @@
 import {
   hashRawInput,
   parseListingToFuzzy,
+  parseSizeProfile,
 } from '../../../shared/marketMatch/listingParse.js'
 import {
   applyVerdictPostFilter,
@@ -75,6 +76,38 @@ export interface MarketMatchCandidate {
   liveVerdict: MarketMatchVerdict | null
   listingUrl: string | null
   dispensaryName: string | null
+  /** Which catalog variant this candidate scored best against. */
+  matchedCatalogProductId: number | null
+  /** Stable key for the size family the matched variant belongs to. */
+  matchedSizeKey: string
+  matchedSizeLabel: string
+}
+
+export interface CatalogVariant {
+  catalogProductId: number
+  name: string | null
+  shortName: string | null
+  tab: string | null
+  sku: string | null
+  sizeName: string | null
+  sizeGNorm: number | null
+  sizeMgNorm: number | null
+  packCountNorm: number | null
+  imageUrl: string | null
+  price: number | null
+  /** Stable key for grouping variants by their size family. */
+  sizeKey: string
+  sizeLabel: string
+}
+
+export interface SizeGroup {
+  sizeKey: string
+  sizeLabel: string
+  variants: CatalogVariant[]
+  /** Candidates whose best match was a variant in this size group. */
+  candidates: MarketMatchCandidate[]
+  /** Below-threshold candidates dropped from `candidates`. */
+  suppressedCandidateCount: number
 }
 
 export interface GroupReviewBundle {
@@ -83,9 +116,18 @@ export interface GroupReviewBundle {
   brandName: string | null
   categoryName: string | null
   subcategoryName: string | null
+  groupImageUrl: string | null
   catalogProfile: CatalogProfile
   liveVerdicts: Array<MarketMatchRow & { fuzzy: FuzzySkuRow; listingUrl: string | null; dispensaryName: string | null }>
-  candidates: MarketMatchCandidate[]
+  /** Size-grouped candidates (the new reviewer-efficient shape). */
+  sizeGroups: SizeGroup[]
+  /** Candidates whose best match had no associated catalog variant. */
+  unmatchedCandidates: MarketMatchCandidate[]
+  /** Flat tally across all size groups + unmatched. */
+  visibleCandidateCount: number
+  suppressedCandidateCount: number
+  /** Threshold used to suppress (server echoes for the UI). */
+  minScore: number
   observationCount: number
   hasParsedAnyObservation: boolean
 }
@@ -281,11 +323,36 @@ export async function listGroupsForReview(
 }
 
 /**
- * Load a single catalog group's review bundle. Lazy-parses any
- * observations whose matched listings haven't been turned into
- * fuzzy_skus yet.
+ * Load a single catalog group's review bundle, organized by size
+ * family with per-variant photos and confidence-thresholded
+ * candidates.
+ *
+ * Reviewer-efficiency rules baked in here (issue #20 redesign):
+ *   1. Default to structured `litalerts_partner_product` fuzzy_skus
+ *      only. The legacy observation-derived path is what made the
+ *      Review button take many seconds (lazy upserting matched
+ *      listings on every click); pass `includeLegacy: true` to opt
+ *      back in.
+ *   2. Pre-filter structured fuzzies by brand + category at the SQL
+ *      level so we don't score 500 accessories against a flower
+ *      catalog variant just to throw them away in Node.
+ *   3. Score each surviving fuzzy against every catalog variant in
+ *      the group (parsed from the latest snapshot's `products[]`)
+ *      and keep the best-scoring variant assignment per fuzzy.
+ *   4. Suppress candidates whose best score is below `minScore`
+ *      (default 0.70) — they're returned only as a count, not as
+ *      rows. The UI presents them as "auto no-match (hidden)".
+ *   5. Group surviving candidates by the matched variant's size
+ *      family ("1g", "3.5g", "100mg", etc.) so the reviewer works
+ *      one size at a time.
  */
-export async function loadGroupReview(db: Queryable, catalogGroupId: number): Promise<GroupReviewBundle | null> {
+export async function loadGroupReview(
+  db: Queryable,
+  catalogGroupId: number,
+  options: { minScore?: number; includeLegacy?: boolean } = {},
+): Promise<GroupReviewBundle | null> {
+  const minScore = Math.min(1, Math.max(0, options.minScore ?? 0.70))
+  const includeLegacy = options.includeLegacy === true
   const groupResult = await db.query<{
     id: number
     group_name: string
@@ -301,47 +368,118 @@ export async function loadGroupReview(db: Queryable, catalogGroupId: number): Pr
   const group = groupResult.rows[0]
   if (!group) return null
 
-  // Find observations for any product in this group.
-  const obsResult = await db.query<{
-    id: number
-    product_id: number
-    evidence_json: unknown
-    captured_at: string
-  }>(
-    `
-      with snapshot_products as (
-        select distinct (product ->> 'productId')::int as product_id
-        from catalog_groups cg
-        left join lateral (
-          select state_json
-          from catalog_group_snapshots cgs
-          where cgs.catalog_group_id = cg.id
-          order by cgs.created_at desc, cgs.id desc
-          limit 1
-        ) latest_snapshot on true
-        cross join lateral jsonb_array_elements(
-          case
-            when jsonb_typeof(latest_snapshot.state_json -> 'products') = 'array'
-              then latest_snapshot.state_json -> 'products'
-            else '[]'::jsonb
-          end
-        ) as product
-        where cg.id = $1
-          and (product ->> 'productId') ~ '^[0-9]+$'
-      )
-      select distinct on (o.product_id)
-        o.id, o.product_id, o.evidence_json, o.captured_at::text
-      from litalerts_competitor_observations o
-      join snapshot_products sp on sp.product_id = o.product_id
-      where o.evidence_json is not null
-      order by o.product_id, o.captured_at desc
-    `,
+  // Load the latest snapshot's state_json so we can extract product
+  // variants + their imageUrls without a Sweed round-trip.
+  const snapshotResult = await db.query<{ state_json: unknown }>(
+    `select state_json
+       from catalog_group_snapshots
+      where catalog_group_id = $1
+      order by created_at desc, id desc
+      limit 1`,
     [catalogGroupId],
   )
+  const snapshotState = snapshotResult.rows[0]?.state_json as
+    | {
+        imageUrl?: string | null
+        images?: Array<{ url?: string | null }> | null
+        products?: Array<{
+          productId?: number
+          sku?: string | null
+          name?: string | null
+          shortName?: string | null
+          tab?: string | null
+          sizeName?: string | null
+          price?: number | null
+          imageUrl?: string | null
+          images?: Array<{ url?: string | null }> | null
+        }> | null
+      }
+    | null
+
+  const groupImageUrl =
+    snapshotState?.imageUrl
+    ?? snapshotState?.images?.find((i) => i?.url)?.url
+    ?? null
+
+  const catalogVariants: CatalogVariant[] = (snapshotState?.products ?? [])
+    .map((p) => {
+      if (typeof p?.productId !== 'number') return null
+      // Prefer the explicit sizeName / tab field for size parsing;
+      // fall back to the variant name. This keeps "Cookies 1g" and
+      // a sizeName of "1g" both producing sizeGNorm=1.
+      const sizeSourceText = [p.sizeName, p.tab, p.name]
+        .filter((s): s is string => typeof s === 'string' && s.length > 0)
+        .join(' ')
+      const sp = parseSizeProfile(sizeSourceText)
+      const variantImage =
+        p.imageUrl
+        ?? p.images?.find((i) => i?.url)?.url
+        ?? groupImageUrl
+      const { sizeKey, sizeLabel } = makeSizeKey(sp.sizeGNorm, sp.sizeMgNorm, p.tab ?? p.sizeName ?? null)
+      const variant: CatalogVariant = {
+        catalogProductId: p.productId,
+        name: p.name ?? null,
+        shortName: p.shortName ?? null,
+        tab: p.tab ?? null,
+        sku: p.sku ?? null,
+        sizeName: p.sizeName ?? p.tab ?? null,
+        sizeGNorm: sp.sizeGNorm,
+        sizeMgNorm: sp.sizeMgNorm,
+        packCountNorm: sp.packCountNorm,
+        imageUrl: variantImage ?? null,
+        price: typeof p.price === 'number' ? p.price : null,
+        sizeKey,
+        sizeLabel,
+      }
+      return variant
+    })
+    .filter((v): v is CatalogVariant => v !== null)
+
+  // Find observations for any product in this group (legacy path).
+  const obsResult = includeLegacy
+    ? await db.query<{
+        id: number
+        product_id: number
+        evidence_json: unknown
+        captured_at: string
+      }>(
+        `
+          with snapshot_products as (
+            select distinct (product ->> 'productId')::int as product_id
+            from catalog_groups cg
+            left join lateral (
+              select state_json
+              from catalog_group_snapshots cgs
+              where cgs.catalog_group_id = cg.id
+              order by cgs.created_at desc, cgs.id desc
+              limit 1
+            ) latest_snapshot on true
+            cross join lateral jsonb_array_elements(
+              case
+                when jsonb_typeof(latest_snapshot.state_json -> 'products') = 'array'
+                  then latest_snapshot.state_json -> 'products'
+                else '[]'::jsonb
+              end
+            ) as product
+            where cg.id = $1
+              and (product ->> 'productId') ~ '^[0-9]+$'
+          )
+          select distinct on (o.product_id)
+            o.id, o.product_id, o.evidence_json, o.captured_at::text
+          from litalerts_competitor_observations o
+          join snapshot_products sp on sp.product_id = o.product_id
+          where o.evidence_json is not null
+          order by o.product_id, o.captured_at desc
+        `,
+        [catalogGroupId],
+      )
+    : { rows: [] as Array<{ id: number; product_id: number; evidence_json: unknown; captured_at: string }> }
 
   // Lazy backfill: ensure each observation's matched listings are in fuzzy_skus.
-  for (const obs of obsResult.rows) {
-    await upsertFuzzySkusForObservation(db, obs.id, obs.evidence_json, obs.captured_at)
+  if (includeLegacy) {
+    for (const obs of obsResult.rows) {
+      await upsertFuzzySkusForObservation(db, obs.id, obs.evidence_json, obs.captured_at)
+    }
   }
 
   // Pull fuzzy_skus from two sources:
@@ -402,6 +540,13 @@ export async function loadGroupReview(db: Queryable, catalogGroupId: number): Pr
       }
     }
     if (effectiveBrandNorm != null) {
+      // Pre-filter by category when the catalog group has one. This is
+      // the single biggest accuracy win for the reviewer: an ATF
+      // Pre-Rolls catalog group should never even score against
+      // "Accessories" / "Rolling Papers" LitAlerts rows. When the
+      // group has no category_name we fall back to brand-only so we
+      // don't accidentally hide everything.
+      const catNorm = group.category_name ? group.category_name.toLowerCase().trim() : null
       const structuredFuzzy = await db.query<typeof fuzzyRows[number]>(
         `select id, source_kind, source_listing_id, raw_input_jsonb, parsed_jsonb,
                 brand_norm, category_norm, subcategory_norm,
@@ -409,9 +554,10 @@ export async function loadGroupReview(db: Queryable, catalogGroupId: number): Pr
          from fuzzy_skus
          where source_kind = 'litalerts_partner_product'
            and brand_norm = $1
+           and ($2::text is null or category_norm = $2 or category_norm is null)
          order by created_at desc
-         limit 500`,
-        [effectiveBrandNorm],
+         limit 1000`,
+        [effectiveBrandNorm, catNorm],
       )
       fuzzyRows.push(...structuredFuzzy.rows)
     }
@@ -495,7 +641,14 @@ export async function loadGroupReview(db: Queryable, catalogGroupId: number): Pr
     })
     .filter((row): row is NonNullable<typeof row> => row !== null)
 
-  const candidates: MarketMatchCandidate[] = fuzzies
+  // Score every un-verdicted fuzzy against EVERY catalog variant and
+  // keep the best (variant, score) pair per fuzzy. Bucket below
+  // `minScore` matches as "suppressed" (returned as a count only).
+  // When the group has no parsable variants at all, fall back to
+  // group-level profile scoring so we still surface candidates — the
+  // accessory-flood case in particular hinges on category mismatch,
+  // which both per-variant and group-level scoring catch identically.
+  const scoredAll = fuzzies
     .filter((fuzzy) => !verdictByFuzzy.has(fuzzy.id))
     .map((fuzzy) => {
       const fuzzyProfile: FuzzyProfile = {
@@ -507,21 +660,57 @@ export async function loadGroupReview(db: Queryable, catalogGroupId: number): Pr
         packCountNorm: fuzzy.packCountNorm,
         strainNorm: fuzzy.strainNorm,
       }
-      // Heuristic brand-alias rescue: the v1 inline parser rarely
-      // extracts brand from a bare listing-name string, so a strict
-      // brand match would zero out the score. When the fuzzy side
-      // has no brand AND the listing text contains the catalog
-      // brand as a substring, treat them as alias-equivalent.
-      const listing = fuzzy.rawInputJsonb as { url?: string | null; dispensaryName?: string | null; listingName?: string | null } | null
+      const listing = fuzzy.rawInputJsonb as
+        | { url?: string | null; dispensaryName?: string | null; listingName?: string | null }
+        | null
+      // Heuristic brand-alias rescue (preserved from the legacy
+      // observation path): if the fuzzy has no brand AND the listing
+      // text mentions the catalog brand, treat them as alias-equivalent.
       const brandAliasMatch =
         catalogProfile.brandNorm !== null
         && fuzzy.brandNorm === null
         && typeof listing?.listingName === 'string'
         && listing.listingName.toLowerCase().includes(catalogProfile.brandNorm.toLowerCase())
-      const factors = scoreCatalogFuzzyFactors(catalogProfile, fuzzyProfile, { brandAliasMatch })
-      const rawScore = Math.max(0, factors.brand * factors.category * factors.subcategory * factors.size * factors.pack * factors.strain)
-      const finalScore = applyVerdictPostFilter(rawScore, null)
-      return {
+
+      // Per-variant scoring loop. The `sizeKey: 'unsized'` arm is
+      // used when the catalog has no parsable variants — keeps the
+      // page useful for groups that haven't been fully populated yet.
+      const variantTargets: Array<CatalogVariant | null> =
+        catalogVariants.length > 0 ? catalogVariants : [null]
+      let bestPick: {
+        variant: CatalogVariant | null
+        factors: ScoreFactors
+        rawScore: number
+        finalScore: number
+      } | null = null
+      for (const variant of variantTargets) {
+        const profile: CatalogProfile = variant
+          ? {
+              brandNorm: catalogProfile.brandNorm,
+              categoryNorm: catalogProfile.categoryNorm,
+              subcategoryNorm: catalogProfile.subcategoryNorm,
+              sizeGNorm: variant.sizeGNorm,
+              sizeMgNorm: variant.sizeMgNorm,
+              packCountNorm: variant.packCountNorm,
+              strainNorm: null,
+            }
+          : catalogProfile
+        const factors = scoreCatalogFuzzyFactors(profile, fuzzyProfile, { brandAliasMatch })
+        const rawScore = Math.max(
+          0,
+          factors.brand * factors.category * factors.subcategory * factors.size * factors.pack * factors.strain,
+        )
+        const finalScore = applyVerdictPostFilter(rawScore, null)
+        if (!bestPick || finalScore > bestPick.finalScore) {
+          bestPick = { variant, factors, rawScore, finalScore }
+        }
+      }
+      if (!bestPick) return null
+      const { variant, factors, rawScore, finalScore } = bestPick
+      const matchedKey = variant
+        ? { sizeKey: variant.sizeKey, sizeLabel: variant.sizeLabel, productId: variant.catalogProductId }
+        : { sizeKey: 'unsized', sizeLabel: 'No variant', productId: null }
+      const candidate: MarketMatchCandidate = {
         fuzzy,
         rawScore,
         finalScore,
@@ -529,9 +718,66 @@ export async function loadGroupReview(db: Queryable, catalogGroupId: number): Pr
         liveVerdict: null,
         listingUrl: listing?.url ?? null,
         dispensaryName: listing?.dispensaryName ?? null,
+        matchedCatalogProductId: matchedKey.productId,
+        matchedSizeKey: matchedKey.sizeKey,
+        matchedSizeLabel: matchedKey.sizeLabel,
       }
+      return candidate
     })
-    .sort((left, right) => right.finalScore - left.finalScore)
+    .filter((c): c is MarketMatchCandidate => c !== null)
+
+  // Split visible vs suppressed by threshold.
+  const visible: MarketMatchCandidate[] = []
+  let suppressedTotal = 0
+  for (const c of scoredAll) {
+    if (c.finalScore >= minScore) visible.push(c)
+    else suppressedTotal += 1
+  }
+  visible.sort((a, b) => b.finalScore - a.finalScore)
+
+  // Bucket visible candidates by size group; surface unmatched
+  // (no catalog variants parsed) separately so the UI can still
+  // render them at the bottom.
+  const sizeGroupsMap = new Map<
+    string,
+    { sizeKey: string; sizeLabel: string; variants: CatalogVariant[]; candidates: MarketMatchCandidate[]; suppressedCount: number }
+  >()
+  for (const variant of catalogVariants) {
+    if (!sizeGroupsMap.has(variant.sizeKey)) {
+      sizeGroupsMap.set(variant.sizeKey, {
+        sizeKey: variant.sizeKey,
+        sizeLabel: variant.sizeLabel,
+        variants: [],
+        candidates: [],
+        suppressedCount: 0,
+      })
+    }
+    sizeGroupsMap.get(variant.sizeKey)!.variants.push(variant)
+  }
+  const unmatchedCandidates: MarketMatchCandidate[] = []
+  for (const c of visible) {
+    if (c.matchedSizeKey === 'unsized' || !sizeGroupsMap.has(c.matchedSizeKey)) {
+      unmatchedCandidates.push(c)
+    } else {
+      sizeGroupsMap.get(c.matchedSizeKey)!.candidates.push(c)
+    }
+  }
+  // Per-size-group suppressed counts.
+  for (const c of scoredAll) {
+    if (c.finalScore >= minScore) continue
+    const bucket = sizeGroupsMap.get(c.matchedSizeKey)
+    if (bucket) bucket.suppressedCount += 1
+  }
+
+  const sizeGroups: SizeGroup[] = Array.from(sizeGroupsMap.values())
+    .map((g) => ({
+      sizeKey: g.sizeKey,
+      sizeLabel: g.sizeLabel,
+      variants: g.variants,
+      candidates: g.candidates,
+      suppressedCandidateCount: g.suppressedCount,
+    }))
+    .sort((a, b) => sizeGroupSortKey(a.sizeKey) - sizeGroupSortKey(b.sizeKey))
 
   return {
     catalogGroupId,
@@ -539,12 +785,53 @@ export async function loadGroupReview(db: Queryable, catalogGroupId: number): Pr
     brandName: group.brand_name,
     categoryName: group.category_name,
     subcategoryName: group.subcategory_name,
+    groupImageUrl,
     catalogProfile,
     liveVerdicts,
-    candidates,
+    sizeGroups,
+    unmatchedCandidates,
+    visibleCandidateCount: visible.length,
+    suppressedCandidateCount: suppressedTotal,
+    minScore,
     observationCount: obsResult.rows.length,
     hasParsedAnyObservation: fuzzies.length > 0,
   }
+}
+
+/**
+ * Stable size-group key + display label.
+ * "1g", "3.5g", "100mg", "1oz", "unsized" etc.
+ */
+function makeSizeKey(
+  sizeGNorm: number | null,
+  sizeMgNorm: number | null,
+  fallbackLabel: string | null,
+): { sizeKey: string; sizeLabel: string } {
+  if (sizeGNorm != null && sizeGNorm > 0) {
+    const rounded = Math.round(sizeGNorm * 1000) / 1000
+    return { sizeKey: `g:${rounded}`, sizeLabel: `${stripTrailingZeros(rounded)}g` }
+  }
+  if (sizeMgNorm != null && sizeMgNorm > 0) {
+    const rounded = Math.round(sizeMgNorm * 10) / 10
+    return { sizeKey: `mg:${rounded}`, sizeLabel: `${stripTrailingZeros(rounded)}mg` }
+  }
+  if (fallbackLabel && fallbackLabel.trim().length > 0) {
+    const label = fallbackLabel.trim()
+    return { sizeKey: `label:${label.toLowerCase()}`, sizeLabel: label }
+  }
+  return { sizeKey: 'unsized', sizeLabel: 'Unsized' }
+}
+
+function stripTrailingZeros(n: number): string {
+  return n.toString().replace(/(\.\d*?)0+$/, '$1').replace(/\.$/, '')
+}
+
+function sizeGroupSortKey(sizeKey: string): number {
+  // Sort grams ascending, then mg ascending, then label/unsized last.
+  if (sizeKey.startsWith('g:')) return Number.parseFloat(sizeKey.slice(2))
+  if (sizeKey.startsWith('mg:')) return 1000 + Number.parseFloat(sizeKey.slice(3))
+  if (sizeKey === 'unsized') return Number.POSITIVE_INFINITY
+  return 100_000
 }
 
 /**

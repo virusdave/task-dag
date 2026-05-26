@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Link, useLoaderData, useNavigate, useSearchParams } from 'react-router-dom'
 import { z } from 'zod'
 
@@ -7,9 +7,27 @@ import { loadJson, mutateJson } from '../../app/fetchJson.js'
 import { Pill } from '../../components/Pill.js'
 import { useRegisterCatalogSidebarSubtree } from './catalogSidebarSubtree.js'
 
-// Loose passthrough schemas — we trust the server contract for now
-// and avoid duplicating the full shape in shared/contracts since the
-// review surface is the only consumer of these payloads.
+/**
+ * Catalog → Market Data review (issue #18 + #20 redesign).
+ *
+ * Mobile-first card layout. Each catalog group expands inline to a
+ * review panel that:
+ *   - shows the catalog group's photo, brand, category, subcategory
+ *   - groups catalog variants by size family ("1g", "3.5g", "100mg")
+ *   - for each size group, renders the variant card (with photo +
+ *     sku) next to the ranked candidates from LitAlerts
+ *   - hides below-threshold candidates as "auto no-match" so the
+ *     reviewer only sees real candidates
+ *   - exposes a minScore slider so the operator can re-tune the
+ *     suppression threshold on the fly
+ *
+ * Verdicts are recorded server-side in catalog_market_matches; the
+ * client optimistically removes the verdict's candidate from the
+ * displayed list and increments live-verdict count instead of
+ * reloading the entire bundle, which is what made the page feel
+ * sluggish in the prior version.
+ */
+
 const ListResponseSchema = z.any() as z.ZodType<ListResponse>
 const BundleSchema = z.any() as z.ZodType<GroupReviewBundle>
 const VerdictResponseSchema = z.any()
@@ -30,36 +48,6 @@ interface ListResponse {
   pagination: { limit: number; offset: number; totalCount: number }
 }
 
-interface GroupReviewBundle {
-  catalogGroupId: number
-  groupName: string
-  brandName: string | null
-  categoryName: string | null
-  subcategoryName: string | null
-  observationCount: number
-  hasParsedAnyObservation: boolean
-  liveVerdicts: Array<{
-    id: number
-    fuzzySkuId: number
-    verdict: 'exact' | 'brand_family' | 'no_match'
-    verdictSetAt: string
-    verdictSetByUserId: string
-    confidenceAtVerdict: number | null
-    notes: string | null
-    listingUrl: string | null
-    dispensaryName: string | null
-    fuzzy: FuzzySku
-  }>
-  candidates: Array<{
-    fuzzy: FuzzySku
-    rawScore: number
-    finalScore: number
-    factors: { brand: number; category: number; subcategory: number; size: number; pack: number; strain: number }
-    listingUrl: string | null
-    dispensaryName: string | null
-  }>
-}
-
 interface FuzzySku {
   id: number
   sourceKind: string
@@ -74,14 +62,75 @@ interface FuzzySku {
   strainNorm: string | null
 }
 
+interface Candidate {
+  fuzzy: FuzzySku
+  rawScore: number
+  finalScore: number
+  factors: { brand: number; category: number; subcategory: number; size: number; pack: number; strain: number }
+  listingUrl: string | null
+  dispensaryName: string | null
+  matchedCatalogProductId: number | null
+  matchedSizeKey: string
+  matchedSizeLabel: string
+}
+
+interface CatalogVariant {
+  catalogProductId: number
+  name: string | null
+  shortName: string | null
+  tab: string | null
+  sku: string | null
+  sizeName: string | null
+  sizeGNorm: number | null
+  sizeMgNorm: number | null
+  packCountNorm: number | null
+  imageUrl: string | null
+  price: number | null
+  sizeKey: string
+  sizeLabel: string
+}
+
+interface SizeGroup {
+  sizeKey: string
+  sizeLabel: string
+  variants: CatalogVariant[]
+  candidates: Candidate[]
+  suppressedCandidateCount: number
+}
+
+interface GroupReviewBundle {
+  catalogGroupId: number
+  groupName: string
+  brandName: string | null
+  categoryName: string | null
+  subcategoryName: string | null
+  groupImageUrl: string | null
+  sizeGroups: SizeGroup[]
+  unmatchedCandidates: Candidate[]
+  visibleCandidateCount: number
+  suppressedCandidateCount: number
+  minScore: number
+  observationCount: number
+  hasParsedAnyObservation: boolean
+  liveVerdicts: Array<{
+    id: number
+    fuzzySkuId: number
+    verdict: 'exact' | 'brand_family' | 'no_match'
+    verdictSetAt: string
+    verdictSetByUserId: string
+    confidenceAtVerdict: number | null
+    notes: string | null
+    listingUrl: string | null
+    dispensaryName: string | null
+    fuzzy: FuzzySku
+  }>
+}
+
 export async function catalogMarketDataLoader({ request }: { request: Request }): Promise<ListResponse> {
   const url = new URL(request.url)
   const params = url.searchParams
   if (!params.has('limit')) params.set('limit', '50')
-  return loadJson(
-    `/api/catalog/market-matches?${params.toString()}`,
-    ListResponseSchema,
-  )
+  return loadJson(`/api/catalog/market-matches?${params.toString()}`, ListResponseSchema)
 }
 
 export function CatalogMarketDataPage(): JSX.Element {
@@ -92,65 +141,10 @@ export function CatalogMarketDataPage(): JSX.Element {
   const [brand, setBrand] = useState(params.get('brand') ?? '')
   const [unverdictedOnly, setUnverdictedOnly] = useState(params.get('unverdictedOnly') === 'true')
   const [expanded, setExpanded] = useState<number | null>(null)
-  const [bundle, setBundle] = useState<GroupReviewBundle | null>(null)
-  const [bundleLoading, setBundleLoading] = useState(false)
-  const [pendingVerdict, setPendingVerdict] = useState<number | null>(null)
   const [error, setError] = useState<string | null>(null)
 
-  const loadBundle = useCallback(async (gid: number) => {
-    setBundleLoading(true)
-    setError(null)
-    try {
-      const next = await loadJson(
-        `/api/catalog/market-matches/${gid}`,
-        BundleSchema,
-      )
-      setBundle(next)
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to load review bundle')
-      setBundle(null)
-    } finally {
-      setBundleLoading(false)
-    }
-  }, [])
-
-  useEffect(() => {
-    if (expanded === null) {
-      setBundle(null)
-      return
-    }
-    void loadBundle(expanded)
-  }, [expanded, loadBundle])
-
-  async function recordVerdict(
-    fuzzySkuId: number,
-    verdict: 'exact' | 'brand_family' | 'no_match',
-    confidenceAtVerdict: number | null,
-  ): Promise<void> {
-    if (!bundle || pendingVerdict !== null) return
-    setPendingVerdict(fuzzySkuId)
-    setError(null)
-    try {
-      await mutateJson(
-        '/api/catalog/market-matches',
-        VerdictResponseSchema,
-        {
-          method: 'POST',
-          body: JSON.stringify({
-            catalogGroupId: bundle.catalogGroupId,
-            fuzzySkuId,
-            verdict,
-            confidenceAtVerdict,
-          }),
-        },
-      )
-      await loadBundle(bundle.catalogGroupId)
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Verdict failed')
-    } finally {
-      setPendingVerdict(null)
-    }
-  }
+  const totalPages = Math.max(1, Math.ceil(data.pagination.totalCount / data.pagination.limit))
+  const currentPage = Math.floor(data.pagination.offset / data.pagination.limit) + 1
 
   function applyFilters(): void {
     const next = new URLSearchParams(params)
@@ -162,7 +156,6 @@ export function CatalogMarketDataPage(): JSX.Element {
     setParams(next)
     void navigate(`${buildHeliosModulePath('catalog', 'market-data')}?${next.toString()}`)
   }
-
   function goToOffset(offset: number): void {
     const next = new URLSearchParams(params)
     next.set('offset', String(offset))
@@ -170,16 +163,13 @@ export function CatalogMarketDataPage(): JSX.Element {
     void navigate(`${buildHeliosModulePath('catalog', 'market-data')}?${next.toString()}`)
   }
 
-  const totalPages = Math.max(1, Math.ceil(data.pagination.totalCount / data.pagination.limit))
-  const currentPage = Math.floor(data.pagination.offset / data.pagination.limit) + 1
-
   return (
     <div className="stacked-list">
       <section className="detail-panel">
         <div className="page-header" style={{ marginBottom: '0.5rem' }}>
           <div>
             <p className="eyebrow">Catalog → Market Data</p>
-            <h2>{data.pagination.totalCount.toLocaleString()} catalog groups with LitAlerts observations</h2>
+            <h2>{`${data.pagination.totalCount.toLocaleString()} catalog groups with LitAlerts coverage`}</h2>
           </div>
           <Pill tone="muted">{`page ${currentPage}/${totalPages}`}</Pill>
         </div>
@@ -201,56 +191,17 @@ export function CatalogMarketDataPage(): JSX.Element {
 
         {error ? <p className="error-banner">{error}</p> : null}
 
-        <table className="data-table">
-          <thead>
-            <tr>
-              <th>Catalog group</th>
-              <th>Brand</th>
-              <th>Category</th>
-              <th style={{ textAlign: 'right' }}>Obs</th>
-              <th style={{ textAlign: 'right' }}>Live verdicts</th>
-              <th />
-            </tr>
-          </thead>
-          <tbody>
-            {data.rows.map((row) => (
-              <>
-                <tr key={`row-${row.catalogGroupId}`}>
-                  <td>
-                    <Link to={buildHeliosModulePath('catalog', `groups/${row.catalogGroupId}`)}>{row.groupName}</Link>
-                  </td>
-                  <td>{row.brandName ?? '—'}</td>
-                  <td>{row.categoryName ?? '—'}</td>
-                  <td style={{ textAlign: 'right' }}>{row.observationCount}</td>
-                  <td style={{ textAlign: 'right' }}>{row.liveVerdictCount}</td>
-                  <td>
-                    <button
-                      className="ghost-button"
-                      onClick={() => setExpanded(expanded === row.catalogGroupId ? null : row.catalogGroupId)}
-                      type="button"
-                    >
-                      {expanded === row.catalogGroupId ? 'Collapse' : 'Review'}
-                    </button>
-                  </td>
-                </tr>
-                {expanded === row.catalogGroupId ? (
-                  <tr key={`expanded-${row.catalogGroupId}`}>
-                    <td colSpan={6} style={{ background: 'rgba(0,0,0,0.02)' }}>
-                      {bundleLoading ? <p className="subtle-copy">Loading…</p> : null}
-                      {bundle && bundle.catalogGroupId === row.catalogGroupId ? (
-                        <GroupReviewPanel
-                          bundle={bundle}
-                          onVerdict={recordVerdict}
-                          pendingVerdict={pendingVerdict}
-                        />
-                      ) : null}
-                    </td>
-                  </tr>
-                ) : null}
-              </>
-            ))}
-          </tbody>
-        </table>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+          {data.rows.map((row) => (
+            <GroupCard
+              expanded={expanded === row.catalogGroupId}
+              key={row.catalogGroupId}
+              onError={setError}
+              onToggle={() => setExpanded((cur) => (cur === row.catalogGroupId ? null : row.catalogGroupId))}
+              row={row}
+            />
+          ))}
+        </div>
 
         <div className="inline-row wrap-row" style={{ marginTop: '1rem' }}>
           <button
@@ -276,19 +227,20 @@ export function CatalogMarketDataPage(): JSX.Element {
           <summary>About this page</summary>
           <div className="subtle-copy" style={{ marginTop: '0.5rem' }}>
             <p>
-              Lists catalog groups that have at least one LitAlerts competitor observation. Expanding a row lazily parses
-              the observation&rsquo;s matched listings into FuzzySku rows (persisted to <code>fuzzy_skus</code>) and ranks
-              them via the deterministic confidence scorer at
-              <code> helios/src/shared/marketMatch/confidence.ts</code>. Recording a verdict
-              (exact/brand_family/no_match) inserts a row in <code>catalog_market_matches</code> and supersedes any
-              prior live verdict for the same (group, fuzzy) pair. See
-              <code> docs/helios/catalog-market-data/EPIC_PLAN.md</code> for the full design.
+              Reviews catalog groups against the structured LitAlerts NY product directory. Each catalog group
+              expands to per-size-family cards: the catalog variant (with photo + sku) next to its ranked
+              LitAlerts candidates. Candidates below the confidence threshold (default 0.70) are hidden and
+              counted as auto-no-match; raise/lower the threshold per group to inspect them.
             </p>
             <p>
-              <strong>v1 caveat:</strong> the inline LitAlerts listing parser is a tactical placeholder pending
-              the runtime-adjustable parser-config system (issue #19). Many listings will score 0 because their
-              brand wasn&rsquo;t extractable from the bare listing-name string &mdash; that ranking will improve
-              dramatically once the real <code>litalerts-v1</code> parser dialect lands.
+              Brand resolution honours operator overrides set in <Link to={buildHeliosModulePath('catalog', 'brand-mapping')}>Catalog → Brand Mapping</Link>.
+              Structured fuzzies are pre-filtered by brand + category at the SQL level, which is why an
+              "Alaskan Thunderfuck (Pre-Rolls)" group never sees "Dank Rolling Papers (Accessories)" as a
+              candidate even though both share the same brand string.
+            </p>
+            <p>
+              The legacy observation-derived match path is disabled by default for speed. Append
+              <code> ?includeLegacy=true</code> to the bundle URL to re-enable it for a single group.
             </p>
           </div>
         </details>
@@ -297,159 +249,416 @@ export function CatalogMarketDataPage(): JSX.Element {
   )
 }
 
-interface GroupReviewPanelProps {
-  bundle: GroupReviewBundle
-  onVerdict: (fuzzySkuId: number, verdict: 'exact' | 'brand_family' | 'no_match', confidenceAtVerdict: number | null) => void
-  pendingVerdict: number | null
+interface GroupCardProps {
+  row: GroupSummaryRow
+  expanded: boolean
+  onToggle: () => void
+  onError: (msg: string | null) => void
 }
 
-function GroupReviewPanel({ bundle, onVerdict, pendingVerdict }: GroupReviewPanelProps): JSX.Element {
-  const top = bundle.candidates.slice(0, 25)
-  const rest = bundle.candidates.slice(25)
+function GroupCard({ row, expanded, onToggle, onError }: GroupCardProps): JSX.Element {
   return (
-    <div className="stack-field">
-      <h4 style={{ margin: '0.5rem 0' }}>{bundle.groupName}</h4>
-      <p className="subtle-copy" style={{ margin: 0 }}>
-        Brand: <strong>{bundle.brandName ?? '—'}</strong> &middot; Category: <strong>{bundle.categoryName ?? '—'}</strong>
-        {bundle.subcategoryName ? <> &middot; Subcategory: <strong>{bundle.subcategoryName}</strong></> : null}
-        {' '}&middot; {bundle.observationCount} observation(s), {bundle.candidates.length} un-verdicted candidate(s), {bundle.liveVerdicts.length} live verdict(s)
-      </p>
+    <div
+      style={{
+        border: '1px solid var(--border-color, #d0d0d0)',
+        borderRadius: '6px',
+        padding: '0.6rem 0.75rem',
+        background: 'var(--panel-bg, #fff)',
+      }}
+    >
+      <div className="inline-row wrap-row" style={{ justifyContent: 'space-between', gap: '0.5rem' }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.15rem', flex: '1 1 18rem' }}>
+          <Link
+            style={{ fontWeight: 600 }}
+            to={buildHeliosModulePath('catalog', `groups/${row.catalogGroupId}`)}
+          >
+            {row.groupName}
+          </Link>
+          <span className="subtle-copy" style={{ fontSize: '0.8rem' }}>
+            {row.brandName ?? '—'} · {row.categoryName ?? '—'}
+            {row.subcategoryName ? ` · ${row.subcategoryName}` : ''}
+          </span>
+        </div>
+        <div className="inline-row" style={{ gap: '0.4rem', alignItems: 'center' }}>
+          <Pill tone={row.liveVerdictCount > 0 ? 'success' : 'muted'}>{`${row.liveVerdictCount} verdicts`}</Pill>
+          <Pill tone="muted">{`${row.observationCount} obs`}</Pill>
+          <button className="ghost-button" onClick={onToggle} type="button">
+            {expanded ? 'Collapse' : 'Review'}
+          </button>
+        </div>
+      </div>
+      {expanded ? <GroupReviewPanel catalogGroupId={row.catalogGroupId} onError={onError} /> : null}
+    </div>
+  )
+}
 
-      {bundle.liveVerdicts.length > 0 ? (
-        <details open style={{ marginTop: '0.75rem' }}>
-          <summary>Live verdicts ({bundle.liveVerdicts.length})</summary>
-          <table className="data-table" style={{ marginTop: '0.5rem' }}>
-            <thead>
-              <tr>
-                <th>Listing</th>
-                <th>Dispensary</th>
-                <th>Verdict</th>
-                <th>Set at</th>
-                <th>By</th>
-                <th />
-              </tr>
-            </thead>
-            <tbody>
-              {bundle.liveVerdicts.map((row) => (
-                <tr key={row.id}>
-                  <td>{row.fuzzy.rawInputJsonb?.listingName ?? '—'}</td>
-                  <td>{row.dispensaryName ?? '—'}</td>
-                  <td><Pill tone={verdictTone(row.verdict)}>{row.verdict}</Pill></td>
-                  <td>{new Date(row.verdictSetAt).toLocaleString()}</td>
-                  <td>{row.verdictSetByUserId}</td>
-                  <td>
-                    <button
-                      className="ghost-button"
-                      disabled={pendingVerdict !== null}
-                      onClick={() => onVerdict(row.fuzzySkuId, 'no_match', row.confidenceAtVerdict)}
-                      type="button"
-                    >
-                      Flip to no_match
-                    </button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+interface GroupReviewPanelProps {
+  catalogGroupId: number
+  onError: (msg: string | null) => void
+}
+
+function GroupReviewPanel({ catalogGroupId, onError }: GroupReviewPanelProps): JSX.Element {
+  const [minScore, setMinScore] = useState(0.70)
+  const [bundle, setBundle] = useState<GroupReviewBundle | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [pendingFuzzyId, setPendingFuzzyId] = useState<number | null>(null)
+  const [activeSizeKey, setActiveSizeKey] = useState<string | null>(null)
+
+  const load = useCallback(async (score: number) => {
+    setLoading(true)
+    onError(null)
+    try {
+      const next = await loadJson(
+        `/api/catalog/market-matches/${catalogGroupId}?minScore=${score}`,
+        BundleSchema,
+      )
+      setBundle(next)
+      // Default active size = first size with candidates, else first with variants
+      const sizeWithCandidates = next.sizeGroups.find((g) => g.candidates.length > 0)
+      const firstSize = sizeWithCandidates ?? next.sizeGroups[0]
+      setActiveSizeKey(firstSize?.sizeKey ?? null)
+    } catch (e) {
+      onError(e instanceof Error ? e.message : 'Failed to load review bundle')
+      setBundle(null)
+    } finally {
+      setLoading(false)
+    }
+  }, [catalogGroupId, onError])
+
+  useEffect(() => { void load(minScore) }, [load, minScore])
+
+  async function recordVerdict(
+    fuzzySkuId: number,
+    verdict: 'exact' | 'brand_family' | 'no_match',
+    confidenceAtVerdict: number | null,
+    catalogProductId: number | null,
+  ): Promise<void> {
+    if (!bundle || pendingFuzzyId !== null) return
+    setPendingFuzzyId(fuzzySkuId)
+    onError(null)
+    try {
+      await mutateJson('/api/catalog/market-matches', VerdictResponseSchema, {
+        method: 'POST',
+        body: JSON.stringify({
+          catalogGroupId: bundle.catalogGroupId,
+          catalogProductId,
+          fuzzySkuId,
+          verdict,
+          confidenceAtVerdict,
+        }),
+      })
+      // Optimistic local update: drop the candidate, decrement counts.
+      setBundle((cur) => {
+        if (!cur) return cur
+        const next: GroupReviewBundle = {
+          ...cur,
+          sizeGroups: cur.sizeGroups.map((g) => ({
+            ...g,
+            candidates: g.candidates.filter((c) => c.fuzzy.id !== fuzzySkuId),
+          })),
+          unmatchedCandidates: cur.unmatchedCandidates.filter((c) => c.fuzzy.id !== fuzzySkuId),
+        }
+        next.visibleCandidateCount = Math.max(0, cur.visibleCandidateCount - 1)
+        return next
+      })
+    } catch (e) {
+      onError(e instanceof Error ? e.message : 'Verdict failed')
+    } finally {
+      setPendingFuzzyId(null)
+    }
+  }
+
+  if (loading && !bundle) {
+    return <p className="subtle-copy" style={{ padding: '0.75rem 0' }}>Loading review bundle…</p>
+  }
+  if (!bundle) return <p className="subtle-copy">No data.</p>
+
+  const activeGroup =
+    bundle.sizeGroups.find((g) => g.sizeKey === activeSizeKey) ?? bundle.sizeGroups[0] ?? null
+
+  return (
+    <div style={{ marginTop: '0.75rem', borderTop: '1px solid var(--border-color, #e0e0e0)', paddingTop: '0.75rem' }}>
+      <div className="inline-row wrap-row" style={{ gap: '0.6rem', alignItems: 'center', marginBottom: '0.5rem' }}>
+        {bundle.groupImageUrl ? (
+          <img
+            alt=""
+            src={bundle.groupImageUrl}
+            style={{ width: '3.5rem', height: '3.5rem', objectFit: 'cover', borderRadius: '4px', border: '1px solid #ddd' }}
+          />
+        ) : null}
+        <div style={{ flex: '1 1 12rem' }}>
+          <div style={{ fontWeight: 600 }}>{bundle.groupName}</div>
+          <div className="subtle-copy" style={{ fontSize: '0.8rem' }}>
+            {bundle.brandName ?? '—'} · {bundle.categoryName ?? '—'}
+            {bundle.subcategoryName ? ` · ${bundle.subcategoryName}` : ''}
+          </div>
+          <div className="subtle-copy" style={{ fontSize: '0.78rem', marginTop: '0.2rem' }}>
+            {`${bundle.visibleCandidateCount} above ${bundle.minScore.toFixed(2)} · ${bundle.suppressedCandidateCount} below (auto no-match)`}
+            {` · ${bundle.liveVerdicts.length} live verdict${bundle.liveVerdicts.length === 1 ? '' : 's'}`}
+          </div>
+        </div>
+        <div className="inline-row" style={{ gap: '0.4rem', alignItems: 'center' }}>
+          <label className="subtle-copy" style={{ fontSize: '0.8rem' }}>min:</label>
+          <input
+            max={1}
+            min={0}
+            onChange={(e) => setMinScore(Number.parseFloat(e.currentTarget.value))}
+            step={0.05}
+            style={{ width: '6rem' }}
+            type="range"
+            value={minScore}
+          />
+          <span style={{ fontVariantNumeric: 'tabular-nums', fontSize: '0.85rem' }}>{minScore.toFixed(2)}</span>
+        </div>
+      </div>
+
+      {bundle.sizeGroups.length === 0 ? (
+        <p className="subtle-copy">No catalog variants parsed for this group.</p>
+      ) : (
+        <div className="inline-row wrap-row" style={{ gap: '0.3rem', marginBottom: '0.5rem' }}>
+          {bundle.sizeGroups.map((g) => {
+            const isActive = activeSizeKey === g.sizeKey
+            const count = g.candidates.length
+            return (
+              <button
+                className={isActive ? 'primary-button' : 'ghost-button'}
+                key={g.sizeKey}
+                onClick={() => setActiveSizeKey(g.sizeKey)}
+                style={{ padding: '0.25rem 0.6rem', fontSize: '0.85rem' }}
+                type="button"
+              >
+                {g.sizeLabel} {count > 0 ? `(${count})` : ''}
+              </button>
+            )
+          })}
+        </div>
+      )}
+
+      {activeGroup ? (
+        <SizeGroupPanel
+          group={activeGroup}
+          onVerdict={recordVerdict}
+          pendingFuzzyId={pendingFuzzyId}
+        />
+      ) : null}
+
+      {bundle.unmatchedCandidates.length > 0 ? (
+        <details style={{ marginTop: '1rem' }}>
+          <summary>{`${bundle.unmatchedCandidates.length} candidate(s) without a matched catalog variant`}</summary>
+          <CandidateTable
+            candidates={bundle.unmatchedCandidates}
+            onVerdict={(fuzzyId, verdict, conf) => recordVerdict(fuzzyId, verdict, conf, null)}
+            pendingFuzzyId={pendingFuzzyId}
+          />
         </details>
       ) : null}
 
-      <h5 style={{ margin: '1rem 0 0.5rem' }}>Top un-verdicted candidates</h5>
-      <CandidateTable
-        candidates={top}
-        onVerdict={onVerdict}
-        pendingVerdict={pendingVerdict}
-      />
-
-      {rest.length > 0 ? (
+      {bundle.liveVerdicts.length > 0 ? (
         <details style={{ marginTop: '1rem' }}>
-          <summary>Show {rest.length} more candidates</summary>
-          <CandidateTable
-            candidates={rest}
-            onVerdict={onVerdict}
-            pendingVerdict={pendingVerdict}
-          />
+          <summary>{`Live verdicts (${bundle.liveVerdicts.length})`}</summary>
+          <ul style={{ marginTop: '0.4rem', paddingLeft: '1rem' }}>
+            {bundle.liveVerdicts.map((v) => (
+              <li key={v.id} style={{ marginBottom: '0.2rem' }}>
+                <Pill tone={v.verdict === 'exact' ? 'success' : v.verdict === 'brand_family' ? 'muted' : 'warning'}>
+                  {v.verdict}
+                </Pill>{' '}
+                {v.fuzzy.rawInputJsonb?.listingName ?? '—'}
+                <span className="subtle-copy" style={{ fontSize: '0.8rem' }}>
+                  {' '}· {v.dispensaryName ?? '—'} · {v.verdictSetByUserId}
+                </span>
+              </li>
+            ))}
+          </ul>
         </details>
       ) : null}
     </div>
   )
 }
 
-function CandidateTable({
-  candidates,
-  onVerdict,
-  pendingVerdict,
-}: {
-  candidates: GroupReviewBundle['candidates']
-  onVerdict: GroupReviewPanelProps['onVerdict']
-  pendingVerdict: number | null
-}): JSX.Element {
+interface SizeGroupPanelProps {
+  group: SizeGroup
+  onVerdict: (fuzzyId: number, verdict: 'exact' | 'brand_family' | 'no_match', conf: number | null, productId: number | null) => void
+  pendingFuzzyId: number | null
+}
+
+function SizeGroupPanel({ group, onVerdict, pendingFuzzyId }: SizeGroupPanelProps): JSX.Element {
   return (
-    <table className="data-table">
-      <thead>
-        <tr>
-          <th>Listing</th>
-          <th>Dispensary</th>
-          <th>Brand</th>
-          <th>Cat</th>
-          <th>Size</th>
-          <th style={{ textAlign: 'right' }}>Score</th>
-          <th>Actions</th>
-        </tr>
-      </thead>
-      <tbody>
-        {candidates.map((c) => (
-          <tr key={c.fuzzy.id}>
-            <td>
-              {c.listingUrl ? (
-                <a href={c.listingUrl} rel="noreferrer" target="_blank">{c.fuzzy.rawInputJsonb?.listingName ?? '—'}</a>
-              ) : (c.fuzzy.rawInputJsonb?.listingName ?? '—')}
-            </td>
-            <td>{c.dispensaryName ?? '—'}</td>
-            <td>{c.fuzzy.brandNorm ?? '—'}</td>
-            <td>{c.fuzzy.categoryNorm ?? '—'}</td>
-            <td>{c.fuzzy.sizeGNorm != null ? `${c.fuzzy.sizeGNorm}g` : c.fuzzy.sizeMgNorm != null ? `${c.fuzzy.sizeMgNorm}mg` : '—'}</td>
-            <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{c.finalScore.toFixed(2)}</td>
-            <td>
-              <div className="inline-row" style={{ gap: '0.25rem' }}>
-                <button
-                  className="ghost-button"
-                  disabled={pendingVerdict !== null}
-                  onClick={() => onVerdict(c.fuzzy.id, 'exact', c.finalScore)}
-                  title="Mark exact match (e)"
-                  type="button"
-                >
-                  Exact
-                </button>
-                <button
-                  className="ghost-button"
-                  disabled={pendingVerdict !== null}
-                  onClick={() => onVerdict(c.fuzzy.id, 'brand_family', c.finalScore)}
-                  title="Mark brand/family match (b)"
-                  type="button"
-                >
-                  Brand/family
-                </button>
-                <button
-                  className="ghost-button"
-                  disabled={pendingVerdict !== null}
-                  onClick={() => onVerdict(c.fuzzy.id, 'no_match', c.finalScore)}
-                  title="Mark no match (n)"
-                  type="button"
-                >
-                  No match
-                </button>
-              </div>
-            </td>
-          </tr>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+      <div className="inline-row wrap-row" style={{ gap: '0.5rem' }}>
+        {group.variants.map((v) => (
+          <CatalogVariantCard key={v.catalogProductId} variant={v} />
         ))}
-      </tbody>
-    </table>
+      </div>
+      {group.candidates.length === 0 ? (
+        <p className="subtle-copy" style={{ margin: '0.5rem 0' }}>
+          No candidates above threshold for {group.sizeLabel}.
+          {group.suppressedCandidateCount > 0
+            ? ` ${group.suppressedCandidateCount} hidden as auto no-match.`
+            : ''}
+        </p>
+      ) : (
+        <CandidateTable
+          candidates={group.candidates}
+          onVerdict={(fuzzyId, verdict, conf) =>
+            onVerdict(fuzzyId, verdict, conf, group.variants[0]?.catalogProductId ?? null)
+          }
+          pendingFuzzyId={pendingFuzzyId}
+        />
+      )}
+      {group.suppressedCandidateCount > 0 ? (
+        <span className="subtle-copy" style={{ fontSize: '0.78rem' }}>
+          {`+${group.suppressedCandidateCount} below threshold (auto no-match)`}
+        </span>
+      ) : null}
+    </div>
   )
 }
 
-function verdictTone(verdict: 'exact' | 'brand_family' | 'no_match'): 'success' | 'warning' | 'muted' {
-  if (verdict === 'exact') return 'success'
-  if (verdict === 'brand_family') return 'muted'
-  return 'warning'
+function CatalogVariantCard({ variant }: { variant: CatalogVariant }): JSX.Element {
+  return (
+    <div
+      style={{
+        display: 'flex',
+        gap: '0.5rem',
+        padding: '0.4rem 0.5rem',
+        border: '1px solid var(--border-color, #d0d0d0)',
+        borderRadius: '4px',
+        background: 'rgba(0,0,0,0.02)',
+        minWidth: '12rem',
+        flex: '1 1 14rem',
+        maxWidth: '20rem',
+      }}
+    >
+      {variant.imageUrl ? (
+        <img
+          alt=""
+          src={variant.imageUrl}
+          style={{ width: '3rem', height: '3rem', objectFit: 'cover', borderRadius: '3px', border: '1px solid #ddd' }}
+        />
+      ) : (
+        <div
+          style={{
+            width: '3rem',
+            height: '3rem',
+            background: '#f1f1f1',
+            borderRadius: '3px',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            color: '#999',
+            fontSize: '0.7rem',
+          }}
+        >
+          no img
+        </div>
+      )}
+      <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+        <div style={{ fontWeight: 600, fontSize: '0.85rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {variant.shortName ?? variant.name ?? `Product ${variant.catalogProductId}`}
+        </div>
+        <div className="subtle-copy" style={{ fontSize: '0.75rem' }}>
+          {variant.sizeLabel}
+          {variant.sku ? ` · SKU ${variant.sku}` : ''}
+          {variant.price != null ? ` · $${variant.price.toFixed(2)}` : ''}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+interface CandidateTableProps {
+  candidates: Candidate[]
+  onVerdict: (fuzzyId: number, verdict: 'exact' | 'brand_family' | 'no_match', conf: number | null) => void
+  pendingFuzzyId: number | null
+}
+
+function CandidateTable({ candidates, onVerdict, pendingFuzzyId }: CandidateTableProps): JSX.Element {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
+      {candidates.map((c) => (
+        <CandidateRow candidate={c} key={c.fuzzy.id} onVerdict={onVerdict} pendingFuzzyId={pendingFuzzyId} />
+      ))}
+    </div>
+  )
+}
+
+function CandidateRow({
+  candidate,
+  onVerdict,
+  pendingFuzzyId,
+}: {
+  candidate: Candidate
+  onVerdict: CandidateTableProps['onVerdict']
+  pendingFuzzyId: number | null
+}): JSX.Element {
+  const c = candidate
+  const isPending = pendingFuzzyId === c.fuzzy.id
+  return (
+    <div
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        gap: '0.25rem',
+        padding: '0.45rem 0.55rem',
+        border: '1px solid var(--border-color, #e0e0e0)',
+        borderRadius: '4px',
+      }}
+    >
+      <div className="inline-row wrap-row" style={{ justifyContent: 'space-between', gap: '0.5rem' }}>
+        <div style={{ flex: '1 1 14rem', minWidth: 0 }}>
+          {c.listingUrl ? (
+            <a href={c.listingUrl} rel="noreferrer" target="_blank" style={{ fontWeight: 500 }}>
+              {c.fuzzy.rawInputJsonb?.listingName ?? '—'}
+            </a>
+          ) : (
+            <span style={{ fontWeight: 500 }}>{c.fuzzy.rawInputJsonb?.listingName ?? '—'}</span>
+          )}
+          <div className="subtle-copy" style={{ fontSize: '0.78rem' }}>
+            {c.dispensaryName ?? '—'} · {c.fuzzy.brandNorm ?? '—'} · {c.fuzzy.categoryNorm ?? '—'}
+            {c.fuzzy.sizeGNorm != null ? ` · ${c.fuzzy.sizeGNorm}g` : ''}
+            {c.fuzzy.sizeMgNorm != null ? ` · ${c.fuzzy.sizeMgNorm}mg` : ''}
+          </div>
+        </div>
+        <div className="inline-row" style={{ gap: '0.3rem', alignItems: 'center' }}>
+          <Pill tone={c.finalScore >= 0.85 ? 'success' : c.finalScore >= 0.70 ? 'muted' : 'warning'}>
+            {c.finalScore.toFixed(2)}
+          </Pill>
+          <button
+            className="ghost-button"
+            disabled={isPending || pendingFuzzyId !== null}
+            onClick={() => onVerdict(c.fuzzy.id, 'exact', c.finalScore)}
+            title="Exact match"
+            type="button"
+          >
+            ✓ Exact
+          </button>
+          <button
+            className="ghost-button"
+            disabled={isPending || pendingFuzzyId !== null}
+            onClick={() => onVerdict(c.fuzzy.id, 'brand_family', c.finalScore)}
+            title="Brand/family match"
+            type="button"
+          >
+            ≈ Family
+          </button>
+          <button
+            className="ghost-button"
+            disabled={isPending || pendingFuzzyId !== null}
+            onClick={() => onVerdict(c.fuzzy.id, 'no_match', c.finalScore)}
+            title="No match"
+            type="button"
+          >
+            ✗ No
+          </button>
+        </div>
+      </div>
+      <details style={{ fontSize: '0.75rem' }}>
+        <summary className="subtle-copy">Score factors</summary>
+        <div className="subtle-copy" style={{ marginTop: '0.2rem' }}>
+          brand {c.factors.brand.toFixed(2)} · cat {c.factors.category.toFixed(2)} · sub {c.factors.subcategory.toFixed(2)}
+          {' '}· size {c.factors.size.toFixed(2)} · pack {c.factors.pack.toFixed(2)} · strain {c.factors.strain.toFixed(2)}
+        </div>
+      </details>
+    </div>
+  )
 }
