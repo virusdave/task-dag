@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
+import { REAL_METRIC_IDS } from '../_real/realMetrics.js'
 import { allMetricsForTests } from '../registry.js'
 
 describe('stub metrics', () => {
@@ -69,6 +70,9 @@ describe('stub metrics', () => {
       // _demo metrics are the only non-stubs that are also non-real.
       // They have their own clear demo title and don't need the prefix.
       if (metric.id.startsWith('_demo.')) continue
+      // Real metrics shipped under automation#22 are NOT stubs and
+      // intentionally carry their own production description.
+      if (REAL_METRIC_IDS.has(metric.id)) continue
       expect(metric.description, `metric ${metric.id} missing STUB prefix`).toMatch(/^STUB:/)
     }
   })

@@ -7,6 +7,7 @@ import { P3_METRICS } from './_stub/p3_basket_category_fulfillment.js'
 import { P4_METRICS } from './_stub/p4_inventory.js'
 import { P5_METRICS } from './_stub/p5_cashier_weather_delivery.js'
 import { P6_METRICS } from './_stub/p6_customer_origin_map.js'
+import { REAL_METRICS, REAL_METRIC_IDS } from './_real/realMetrics.js'
 import { toMetricSummary, type MetricDef } from './types.js'
 
 /**
@@ -24,14 +25,24 @@ import { toMetricSummary, type MetricDef } from './types.js'
  * the unit tests. An explicit list is one extra line per metric and
  * has the bonus that grep-for-id Just Works.
  */
-const METRICS: readonly MetricDef[] = [
-  demoFlatLine,
-  demoRandomWalk,
+// Stub metrics shipped as one block; any id present in REAL_METRICS
+// is overridden below so the registry serves the real-data
+// implementation instead. See automation#22 for the orders-ingest
+// pipeline that makes the real metrics queryable, and the P7 runbook
+// (docs/runbooks/helios-metrics.md) for the full IA.
+const STUB_METRICS: readonly MetricDef[] = [
   ...P2_METRICS,
   ...P3_METRICS,
   ...P4_METRICS,
   ...P5_METRICS,
   ...P6_METRICS,
+]
+
+const METRICS: readonly MetricDef[] = [
+  demoFlatLine,
+  demoRandomWalk,
+  ...STUB_METRICS.filter((m) => !REAL_METRIC_IDS.has(m.id)),
+  ...REAL_METRICS,
 ]
 
 const METRICS_BY_ID = new Map<string, MetricDef>(METRICS.map((m) => [m.id, m]))

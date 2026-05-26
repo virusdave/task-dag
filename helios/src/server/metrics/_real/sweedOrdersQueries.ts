@@ -1,0 +1,537 @@
+import type { MetricAggregation } from '../../../shared/contracts/index.js'
+import {
+  HELIOS_PENDING_PURCHASE_SITE_DEALERS,
+  type HeliosPendingPurchaseSiteDealer,
+} from '../../../shared/contracts/index.js'
+import { getPool } from '../../db/pool.js'
+import { defaultWindow, walkBuckets } from '../timeBuckets.js'
+import type { MetricQueryArgs, MetricRow } from '../types.js'
+
+// ============================================================================
+// Real-data SQL helpers for `/metrics`.
+//
+// These query `sweed_orders` (mirrored by the ingest worker added in
+// automation#22) and return `MetricRow[]` shaped exactly like the
+// stubs they replace. The MetricDef.id / group / title / series are
+// unchanged on swap so historical screenshots + annotations still
+// line up.
+//
+// Common conventions for every helper here:
+//   * Bucket grain comes from `args.agg`; we map it to a Postgres
+//     `date_trunc()` unit. Categorical aggregations (`dow`, `dom`,
+//     `dofortnight`, `total`) collapse to a single bucket per series.
+//   * Site filtering: `args.sites` carries siteKey strings ('bronx',
+//     'midtown'). We resolve them to dealer_ids against the in-process
+//     dealer registry rather than splicing strings into SQL.
+//   * Window: caller may pass null for from/to; we use the same
+//     `defaultWindow()` the stubs use so the window math is identical.
+//   * Missing buckets are filled with zero (count / dollar metrics)
+//     or null (ratio metrics).
+// ============================================================================
+
+const POSTGRES_TRUNC_UNIT_BY_AGG: Record<
+  Exclude<MetricAggregation, 'dow' | 'dom' | 'dofortnight' | 'total'>,
+  string
+> = {
+  hour: 'hour',
+  date: 'day',
+  week: 'week',
+  month: 'month',
+}
+
+function resolveDealerIds(sites: readonly string[]): number[] {
+  if (sites.length === 0) {
+    return HELIOS_PENDING_PURCHASE_SITE_DEALERS.map((d) => d.dealerId)
+  }
+  const wanted = new Set(sites.map((s) => s.toLowerCase()))
+  const matched: HeliosPendingPurchaseSiteDealer[] = HELIOS_PENDING_PURCHASE_SITE_DEALERS.filter(
+    (d) => wanted.has(d.siteKey.toLowerCase()),
+  )
+  return matched.map((d) => d.dealerId)
+}
+
+interface ResolvedWindow {
+  from: Date
+  to: Date
+  truncUnit: string | null
+  buckets: Date[]
+}
+
+function resolveWindow(args: MetricQueryArgs): ResolvedWindow {
+  const w = defaultWindow(args.from, args.to, args.agg)
+  const buckets = walkBuckets(w.from, w.to, args.agg)
+  const truncUnit =
+    args.agg === 'dow' || args.agg === 'dom' || args.agg === 'dofortnight' || args.agg === 'total'
+      ? null
+      : POSTGRES_TRUNC_UNIT_BY_AGG[args.agg]
+  return { from: w.from, to: w.to, truncUnit, buckets }
+}
+
+/**
+ * Run a bucketed query that produces one row per (bucket_start, series_id, value)
+ * and shape the result into MetricRow[] with one row per expected bucket.
+ *
+ * `seriesIds` is the universe of series the metric declared. Any
+ * (bucket, series) pair the SQL didn't produce gets `defaultValue`
+ * (typically 0 for counts / sums, null for ratios).
+ */
+async function runBucketedQuery(args: {
+  sql: string
+  params: unknown[]
+  seriesIds: readonly string[]
+  buckets: Date[]
+  defaultValue: number | null
+  /** When agg is categorical (`total` etc.), collapse all SQL rows into
+   *  the single bucket at buckets[0]. */
+  collapseToSingleBucket: boolean
+}): Promise<MetricRow[]> {
+  const pool = getPool()
+  const result = await pool.query<{ bucket_start: string | null; series_id: string; value: string | null }>(
+    args.sql,
+    args.params,
+  )
+
+  // Map bucket-iso -> series-id -> value
+  const data = new Map<string, Map<string, number | null>>()
+  for (const row of result.rows) {
+    const key = args.collapseToSingleBucket
+      ? args.buckets[0]!.toISOString()
+      : row.bucket_start
+        ? new Date(row.bucket_start).toISOString()
+        : null
+    if (key === null) continue
+    let inner = data.get(key)
+    if (!inner) {
+      inner = new Map()
+      data.set(key, inner)
+    }
+    const num = row.value === null ? null : Number(row.value)
+    inner.set(row.series_id, Number.isFinite(num as number) ? (num as number) : null)
+  }
+
+  return args.buckets.map((b) => {
+    const isoKey = b.toISOString()
+    const inner = data.get(isoKey) ?? new Map<string, number | null>()
+    const out: Record<string, string | number | null> = { t: isoKey }
+    for (const sid of args.seriesIds) {
+      const v = inner.get(sid)
+      out[sid] = v === undefined ? args.defaultValue : v
+    }
+    return out as MetricRow
+  })
+}
+
+// ----- Concrete metric queries -----
+
+/** acquisition.first_vs_returning — count of completed orders per
+ *  bucket, split by whether the buying customer had any prior order. */
+export async function queryFirstVsReturning(args: MetricQueryArgs): Promise<MetricRow[]> {
+  const dealerIds = resolveDealerIds(args.sites)
+  const { from, to, truncUnit, buckets } = resolveWindow(args)
+  if (dealerIds.length === 0 || buckets.length === 0) {
+    return buckets.map((b) => ({ t: b.toISOString(), first_time: 0, returning: 0 }))
+  }
+  if (truncUnit === null) {
+    const sql = `
+      select case
+               when first_time_for_customer is true then 'first_time'
+               when first_time_for_customer is false then 'returning'
+               else 'returning'  -- guests counted as returning (conservative)
+             end as series_id,
+             count(*) as value
+        from sweed_orders
+       where dealer_id = any($1::bigint[])
+         and pay_time >= $2 and pay_time < $3
+       group by 1
+    `
+    return runBucketedQuery({
+      sql,
+      params: [dealerIds, from.toISOString(), to.toISOString()],
+      seriesIds: ['first_time', 'returning'],
+      buckets,
+      defaultValue: 0,
+      collapseToSingleBucket: true,
+    })
+  }
+  const sql = `
+    select date_trunc('${truncUnit}', pay_time at time zone 'UTC') as bucket_start,
+           case
+             when first_time_for_customer is true then 'first_time'
+             else 'returning'
+           end as series_id,
+           count(*) as value
+      from sweed_orders
+     where dealer_id = any($1::bigint[])
+       and pay_time >= $2 and pay_time < $3
+     group by 1, 2
+  `
+  return runBucketedQuery({
+    sql,
+    params: [dealerIds, from.toISOString(), to.toISOString()],
+    seriesIds: ['first_time', 'returning'],
+    buckets,
+    defaultValue: 0,
+    collapseToSingleBucket: false,
+  })
+}
+
+/** Generic "count or sum by some categorical column" bucketed query. */
+async function queryGroupedByColumn(args: {
+  args: MetricQueryArgs
+  /** sweed_orders column name to group by (caller pre-validated). */
+  column: 'fulfillment_type' | 'payment_method' | 'delivery_zip'
+  /** SQL aggregate expression, e.g. 'count(*)' or 'sum(grand_total_dollars)'. */
+  aggExpr: string
+  /** Mapping from canonical column value to series id. Values not in
+   *  this map fall into `unknownSeriesId` (e.g. 'other'). */
+  seriesByValue: ReadonlyMap<string, string>
+  seriesIds: readonly string[]
+  unknownSeriesId: string
+}): Promise<MetricRow[]> {
+  const dealerIds = resolveDealerIds(args.args.sites)
+  const { from, to, truncUnit, buckets } = resolveWindow(args.args)
+  if (dealerIds.length === 0 || buckets.length === 0) {
+    return buckets.map((b) => {
+      const row: Record<string, string | number | null> = { t: b.toISOString() }
+      for (const sid of args.seriesIds) row[sid] = 0
+      return row as MetricRow
+    })
+  }
+  const bucketSelect =
+    truncUnit === null ? 'null::timestamptz' : `date_trunc('${truncUnit}', pay_time at time zone 'UTC')`
+  const sql = `
+    select ${bucketSelect} as bucket_start,
+           coalesce(lower(${args.column}), '') as col_value,
+           ${args.aggExpr}::numeric as value
+      from sweed_orders
+     where dealer_id = any($1::bigint[])
+       and pay_time >= $2 and pay_time < $3
+     group by 1, 2
+  `
+  const pool = getPool()
+  const result = await pool.query<{ bucket_start: string | null; col_value: string | null; value: string | null }>(
+    sql,
+    [dealerIds, from.toISOString(), to.toISOString()],
+  )
+  const data = new Map<string, Map<string, number>>()
+  for (const row of result.rows) {
+    const bucketKey =
+      truncUnit === null
+        ? buckets[0]!.toISOString()
+        : row.bucket_start
+          ? new Date(row.bucket_start).toISOString()
+          : null
+    if (bucketKey === null) continue
+    const canonical = (row.col_value ?? '').trim().toLowerCase()
+    const sid = args.seriesByValue.get(canonical) ?? args.unknownSeriesId
+    let inner = data.get(bucketKey)
+    if (!inner) {
+      inner = new Map()
+      data.set(bucketKey, inner)
+    }
+    const num = row.value === null ? 0 : Number(row.value)
+    inner.set(sid, (inner.get(sid) ?? 0) + (Number.isFinite(num) ? num : 0))
+  }
+  return buckets.map((b) => {
+    const inner = data.get(b.toISOString()) ?? new Map<string, number>()
+    const out: Record<string, string | number | null> = { t: b.toISOString() }
+    for (const sid of args.seriesIds) out[sid] = inner.get(sid) ?? 0
+    return out as MetricRow
+  })
+}
+
+/** basket.size_by_fulfillment — avg basket $ by fulfillment type. */
+export async function queryBasketSizeByFulfillment(args: MetricQueryArgs): Promise<MetricRow[]> {
+  return queryAvgGroupedByFulfillment(args, 'avg(grand_total_dollars)')
+}
+
+/** basket.size_by_customer_type — avg basket $ split by first/returning. */
+export async function queryBasketSizeByCustomerType(args: MetricQueryArgs): Promise<MetricRow[]> {
+  const dealerIds = resolveDealerIds(args.sites)
+  const { from, to, truncUnit, buckets } = resolveWindow(args)
+  if (dealerIds.length === 0 || buckets.length === 0) {
+    return buckets.map((b) => ({ t: b.toISOString(), first_time: 0, returning: 0 }))
+  }
+  const bucketSelect =
+    truncUnit === null ? 'null::timestamptz' : `date_trunc('${truncUnit}', pay_time at time zone 'UTC')`
+  const sql = `
+    select ${bucketSelect} as bucket_start,
+           case when first_time_for_customer is true then 'first_time' else 'returning' end as series_id,
+           avg(grand_total_dollars)::numeric as value
+      from sweed_orders
+     where dealer_id = any($1::bigint[])
+       and pay_time >= $2 and pay_time < $3
+     group by 1, 2
+  `
+  return runBucketedQuery({
+    sql,
+    params: [dealerIds, from.toISOString(), to.toISOString()],
+    seriesIds: ['first_time', 'returning'],
+    buckets,
+    defaultValue: 0,
+    collapseToSingleBucket: truncUnit === null,
+  })
+}
+
+const FULFILLMENT_SERIES_BY_VALUE: ReadonlyMap<string, string> = new Map([
+  // Common Sweed taxonomy synonyms — we normalise to our 5 declared series.
+  // Anything we don't recognise lands in 'in_store' (the kiosk/POS default
+  // when fulfillment_type is null), which is the most conservative bucket
+  // since no Sweed deployment uses "in_store" as a literal fulfillment label.
+  ['delivery_prepaid', 'delivery_prepaid'],
+  ['deliveryprepaid', 'delivery_prepaid'],
+  ['delivery prepaid', 'delivery_prepaid'],
+  ['delivery_paid', 'delivery_prepaid'],
+  ['delivery_cod', 'delivery_cod'],
+  ['deliverycod', 'delivery_cod'],
+  ['delivery cod', 'delivery_cod'],
+  ['delivery', 'delivery_prepaid'],
+  ['kiosk', 'kiosk'],
+  ['pickup', 'pickup'],
+  ['pickup_in_store', 'pickup'],
+  ['pickup-in-store', 'pickup'],
+  ['in_store', 'in_store'],
+  ['instore', 'in_store'],
+  ['in-store', 'in_store'],
+  ['retail', 'in_store'],
+  ['', 'in_store'],
+])
+
+const FULFILLMENT_SERIES_IDS = ['delivery_prepaid', 'delivery_cod', 'kiosk', 'pickup', 'in_store'] as const
+
+async function queryAvgGroupedByFulfillment(args: MetricQueryArgs, aggExpr: string): Promise<MetricRow[]> {
+  const dealerIds = resolveDealerIds(args.sites)
+  const { from, to, truncUnit, buckets } = resolveWindow(args)
+  if (dealerIds.length === 0 || buckets.length === 0) {
+    return buckets.map((b) => {
+      const row: Record<string, string | number | null> = { t: b.toISOString() }
+      for (const sid of FULFILLMENT_SERIES_IDS) row[sid] = 0
+      return row as MetricRow
+    })
+  }
+  const bucketSelect =
+    truncUnit === null ? 'null::timestamptz' : `date_trunc('${truncUnit}', pay_time at time zone 'UTC')`
+  const sql = `
+    select ${bucketSelect} as bucket_start,
+           coalesce(lower(fulfillment_type), '') as col_value,
+           ${aggExpr}::numeric as value
+      from sweed_orders
+     where dealer_id = any($1::bigint[])
+       and pay_time >= $2 and pay_time < $3
+     group by 1, 2
+  `
+  const pool = getPool()
+  const result = await pool.query<{ bucket_start: string | null; col_value: string | null; value: string | null }>(
+    sql,
+    [dealerIds, from.toISOString(), to.toISOString()],
+  )
+  const data = new Map<string, Map<string, { sum: number; count: number }>>()
+  // For averages, we have to weight by count to combine same-series rows.
+  // Re-issue the query so we get both sum and count per (bucket, value).
+  const sql2 = `
+    select ${bucketSelect} as bucket_start,
+           coalesce(lower(fulfillment_type), '') as col_value,
+           sum(grand_total_dollars)::numeric as sum_value,
+           count(*) as cnt
+      from sweed_orders
+     where dealer_id = any($1::bigint[])
+       and pay_time >= $2 and pay_time < $3
+     group by 1, 2
+  `
+  const r2 = await pool.query<{ bucket_start: string | null; col_value: string | null; sum_value: string | null; cnt: string }>(
+    sql2,
+    [dealerIds, from.toISOString(), to.toISOString()],
+  )
+  for (const row of r2.rows) {
+    const bucketKey =
+      truncUnit === null
+        ? buckets[0]!.toISOString()
+        : row.bucket_start
+          ? new Date(row.bucket_start).toISOString()
+          : null
+    if (bucketKey === null) continue
+    const canonical = (row.col_value ?? '').trim().toLowerCase()
+    const sid = FULFILLMENT_SERIES_BY_VALUE.get(canonical) ?? 'in_store'
+    let inner = data.get(bucketKey)
+    if (!inner) {
+      inner = new Map()
+      data.set(bucketKey, inner)
+    }
+    const sumNum = row.sum_value === null ? 0 : Number(row.sum_value)
+    const cntNum = Number(row.cnt)
+    const prev = inner.get(sid) ?? { sum: 0, count: 0 }
+    inner.set(sid, { sum: prev.sum + (Number.isFinite(sumNum) ? sumNum : 0), count: prev.count + (Number.isFinite(cntNum) ? cntNum : 0) })
+  }
+  // Avoid unused-variable lint on the count-only result.
+  void result
+  return buckets.map((b) => {
+    const inner = data.get(b.toISOString()) ?? new Map<string, { sum: number; count: number }>()
+    const out: Record<string, string | number | null> = { t: b.toISOString() }
+    for (const sid of FULFILLMENT_SERIES_IDS) {
+      const v = inner.get(sid)
+      out[sid] = v && v.count > 0 ? round2(v.sum / v.count) : 0
+    }
+    return out as MetricRow
+  })
+}
+
+function round2(n: number): number {
+  return Math.round(n * 100) / 100
+}
+
+/** fulfillment.order_count — order count split by fulfillment type. */
+export function queryFulfillmentOrderCount(args: MetricQueryArgs): Promise<MetricRow[]> {
+  return queryGroupedByColumn({
+    args,
+    column: 'fulfillment_type',
+    aggExpr: 'count(*)',
+    seriesByValue: FULFILLMENT_SERIES_BY_VALUE,
+    seriesIds: FULFILLMENT_SERIES_IDS,
+    unknownSeriesId: 'in_store',
+  })
+}
+
+/** fulfillment.sales_dollars — sum(grand_total) split by fulfillment. */
+export function queryFulfillmentSalesDollars(args: MetricQueryArgs): Promise<MetricRow[]> {
+  return queryGroupedByColumn({
+    args,
+    column: 'fulfillment_type',
+    aggExpr: 'sum(grand_total_dollars)',
+    seriesByValue: FULFILLMENT_SERIES_BY_VALUE,
+    seriesIds: FULFILLMENT_SERIES_IDS,
+    unknownSeriesId: 'in_store',
+  })
+}
+
+const PAYMENT_SERIES_BY_VALUE: ReadonlyMap<string, string> = new Map([
+  ['cash', 'cash'],
+  ['debit', 'debit'],
+  ['debit_card', 'debit'],
+  ['debit card', 'debit'],
+  ['credit', 'credit'],
+  ['credit_card', 'credit'],
+  ['credit card', 'credit'],
+  ['aeropay', 'aeropay'],
+  ['ach', 'aeropay'], // Aeropay rides on ACH; sometimes the envelope uses the rail name
+  ['', 'other'],
+])
+
+const PAYMENT_SERIES_IDS = ['cash', 'debit', 'credit', 'aeropay', 'other'] as const
+
+/** payment.order_count — order count split by payment method. */
+export function queryPaymentOrderCount(args: MetricQueryArgs): Promise<MetricRow[]> {
+  return queryGroupedByColumn({
+    args,
+    column: 'payment_method',
+    aggExpr: 'count(*)',
+    seriesByValue: PAYMENT_SERIES_BY_VALUE,
+    seriesIds: PAYMENT_SERIES_IDS,
+    unknownSeriesId: 'other',
+  })
+}
+
+/** payment.sales_dollars — sum(grand_total) split by payment method. */
+export function queryPaymentSalesDollars(args: MetricQueryArgs): Promise<MetricRow[]> {
+  return queryGroupedByColumn({
+    args,
+    column: 'payment_method',
+    aggExpr: 'sum(grand_total_dollars)',
+    seriesByValue: PAYMENT_SERIES_BY_VALUE,
+    seriesIds: PAYMENT_SERIES_IDS,
+    unknownSeriesId: 'other',
+  })
+}
+
+// ----- Customer-origin map (P6) -----
+//
+// The stub exports a single "orders by NYC borough (Manhattan, Brooklyn,
+// Queens, Bronx, Other)" series. We do the same here, classifying each
+// `delivery_zip` against a known borough-zip list and falling back to
+// 'other' (which captures NJ + non-NYC deliveries).
+//
+// The list below is the official USPS borough → primary ZIP3 mapping,
+// pruned to the NYC service area.
+
+const BOROUGH_ZIP_PREFIX: ReadonlyArray<{ prefix: string; series: string }> = [
+  // Manhattan: 100, 101, 102
+  { prefix: '100', series: 'manhattan' },
+  { prefix: '101', series: 'manhattan' },
+  { prefix: '102', series: 'manhattan' },
+  // Bronx: 104
+  { prefix: '104', series: 'bronx' },
+  // Queens: 110, 111, 113, 114, 116
+  { prefix: '110', series: 'queens' },
+  { prefix: '111', series: 'queens' },
+  { prefix: '113', series: 'queens' },
+  { prefix: '114', series: 'queens' },
+  { prefix: '116', series: 'queens' },
+  // Brooklyn: 112
+  { prefix: '112', series: 'brooklyn' },
+  // Staten Island: 103 — folded into 'other' since the stub didn't
+  // declare a Staten Island series. Operator can request a re-cut.
+]
+
+function boroughForZip(zip: string | null): string {
+  if (zip === null || zip.length < 3) return 'other'
+  const prefix = zip.substring(0, 3)
+  for (const m of BOROUGH_ZIP_PREFIX) {
+    if (m.prefix === prefix) return m.series
+  }
+  return 'other'
+}
+
+const ORIGIN_SERIES_IDS = ['manhattan', 'brooklyn', 'queens', 'bronx', 'other'] as const
+
+/** customers.origin_map — delivery-order count by NYC borough. */
+export async function queryCustomerOriginMap(args: MetricQueryArgs): Promise<MetricRow[]> {
+  const dealerIds = resolveDealerIds(args.sites)
+  const { from, to, truncUnit, buckets } = resolveWindow(args)
+  if (dealerIds.length === 0 || buckets.length === 0) {
+    return buckets.map((b) => {
+      const row: Record<string, string | number | null> = { t: b.toISOString() }
+      for (const sid of ORIGIN_SERIES_IDS) row[sid] = 0
+      return row as MetricRow
+    })
+  }
+  const bucketSelect =
+    truncUnit === null ? 'null::timestamptz' : `date_trunc('${truncUnit}', pay_time at time zone 'UTC')`
+  const sql = `
+    select ${bucketSelect} as bucket_start,
+           delivery_zip,
+           count(*)::numeric as value
+      from sweed_orders
+     where dealer_id = any($1::bigint[])
+       and pay_time >= $2 and pay_time < $3
+       and delivery_zip is not null
+     group by 1, 2
+  `
+  const pool = getPool()
+  const result = await pool.query<{ bucket_start: string | null; delivery_zip: string | null; value: string | null }>(
+    sql,
+    [dealerIds, from.toISOString(), to.toISOString()],
+  )
+  const data = new Map<string, Map<string, number>>()
+  for (const row of result.rows) {
+    const bucketKey =
+      truncUnit === null
+        ? buckets[0]!.toISOString()
+        : row.bucket_start
+          ? new Date(row.bucket_start).toISOString()
+          : null
+    if (bucketKey === null) continue
+    const sid = boroughForZip(row.delivery_zip)
+    let inner = data.get(bucketKey)
+    if (!inner) {
+      inner = new Map()
+      data.set(bucketKey, inner)
+    }
+    const num = row.value === null ? 0 : Number(row.value)
+    inner.set(sid, (inner.get(sid) ?? 0) + (Number.isFinite(num) ? num : 0))
+  }
+  return buckets.map((b) => {
+    const inner = data.get(b.toISOString()) ?? new Map<string, number>()
+    const out: Record<string, string | number | null> = { t: b.toISOString() }
+    for (const sid of ORIGIN_SERIES_IDS) out[sid] = inner.get(sid) ?? 0
+    return out as MetricRow
+  })
+}
