@@ -4,6 +4,8 @@ import {
   applyVerdictPostFilter,
   brandFactor,
   categoryFactor,
+  nameOverlapFactor,
+  NAME_OVERLAP_FLOOR,
   packFactor,
   scoreCatalogFuzzy,
   scoreCatalogFuzzyFactors,
@@ -23,6 +25,7 @@ function profile(overrides: Partial<CatalogProfile> = {}): CatalogProfile {
     sizeMgNorm: null,
     packCountNorm: 1,
     strainNorm: 'Obama Runtz',
+    nameTokens: null,
     ...overrides,
   }
 }
@@ -162,5 +165,47 @@ describe('scoreCatalogFuzzy end-to-end', () => {
     expect(factors.size).toBe(1.0)
     expect(factors.pack).toBe(1.0)
     expect(factors.strain).toBe(1.0)
+    expect(factors.nameOverlap).toBe(1.0)
+  })
+})
+
+describe('nameOverlapFactor', () => {
+  it('returns 1.0 when both sides are null (back-compat no-op)', () => {
+    expect(nameOverlapFactor(null, null)).toBe(1.0)
+    expect(nameOverlapFactor(null, ['lemonade'])).toBe(1.0)
+    expect(nameOverlapFactor(['lemonade'], null)).toBe(1.0)
+  })
+  it('returns 1.0 when both sides are empty arrays', () => {
+    expect(nameOverlapFactor([], [])).toBe(1.0)
+  })
+  it('returns 0.85 when one side has tokens and the other is empty', () => {
+    expect(nameOverlapFactor(['lemonade'], [])).toBe(0.85)
+    expect(nameOverlapFactor([], ['honeycrisp'])).toBe(0.85)
+  })
+  it('returns 1.0 on identical token sets', () => {
+    expect(nameOverlapFactor(['lemonade', 'up'], ['up', 'lemonade'])).toBe(1.0)
+  })
+  it('drops to NAME_OVERLAP_FLOOR on fully disjoint non-empty sets', () => {
+    expect(nameOverlapFactor(['lemonade'], ['honeycrisp'])).toBe(NAME_OVERLAP_FLOOR)
+  })
+  it('interpolates between FLOOR and 1.0 on partial overlap', () => {
+    // |A ∩ B| = 1, |A ∪ B| = 3 → Jaccard = 1/3
+    const f = nameOverlapFactor(['lemonade', 'up'], ['lemonade', 'honeycrisp'])
+    expect(f).toBeCloseTo(NAME_OVERLAP_FLOOR + (1 - NAME_OVERLAP_FLOOR) * (1 / 3), 5)
+  })
+  it('differentiates Ayrloom Lemonade vs Ayrloom Honeycrisp end-to-end', () => {
+    // The user-reported case: brand+category+size all match but the
+    // distinguishing token differs. Both candidates were scoring
+    // identically before nameOverlap; now the matching-flavor one
+    // wins by ~2× on the residual factor.
+    const catalog = profile({ brandNorm: 'Ayrloom', categoryNorm: 'Beverages',
+      sizeGNorm: null, sizeMgNorm: 10, packCountNorm: 1, strainNorm: null,
+      nameTokens: ['lemonade'] })
+    const lemonadeFuzzy: FuzzyProfile = { ...catalog, nameTokens: ['lemonade'] }
+    const honeycrispFuzzy: FuzzyProfile = { ...catalog, nameTokens: ['honeycrisp'] }
+    const matching = scoreCatalogFuzzy(catalog, lemonadeFuzzy)
+    const mismatching = scoreCatalogFuzzy(catalog, honeycrispFuzzy)
+    expect(matching).toBeGreaterThan(mismatching)
+    expect(matching / mismatching).toBeGreaterThan(1.5)
   })
 })

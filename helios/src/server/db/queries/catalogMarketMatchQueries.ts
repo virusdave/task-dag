@@ -810,6 +810,16 @@ export async function loadGroupReview(
   // fuzzy's brand_norm; using the raw catalog name here would zero
   // the brand factor for legitimate override-mapped rows (the
   // "Grass Roots → Grassroots (Curaleaf)" case).
+  // Pre-compute the catalog group's significant-token set once. Each
+  // candidate listing must share at least one of these tokens with
+  // its product/variant name — otherwise it's just "same brand, same
+  // category, same size" which is exactly the failure mode that
+  // surfaced accessories as candidates for ATF.
+  const groupNameTokens = extractSignificantNameTokens(group.group_name, {
+    brandText: effectiveBrandNorm ?? group.brand_name,
+    categoryText: catalogCategoryCanonical ?? group.category_name,
+  })
+
   const catalogProfile: CatalogProfile = {
     brandNorm: effectiveBrandNorm ?? group.brand_name,
     // Score against the canonical category so "Flowers" vs "Flower"
@@ -820,17 +830,23 @@ export async function loadGroupReview(
     sizeMgNorm: null,
     packCountNorm: null,
     strainNorm: null,
+    nameTokens: Array.from(groupNameTokens),
   }
 
-  // Pre-compute the catalog group's significant-token set once. Each
-  // candidate listing must share at least one of these tokens with
-  // its product/variant name — otherwise it's just "same brand, same
-  // category, same size" which is exactly the failure mode that
-  // surfaced accessories as candidates for ATF.
-  const groupNameTokens = extractSignificantNameTokens(group.group_name, {
-    brandText: effectiveBrandNorm ?? group.brand_name,
-    categoryText: catalogCategoryCanonical ?? group.category_name,
-  })
+  // Pre-compute per-variant significant tokens once (variants are
+  // iterated for every fuzzy below; doing it inside the loop would
+  // re-tokenize the same strings ~N×variants×fuzzies times).
+  const variantNameTokensById = new Map<number, string[]>()
+  for (const v of catalogVariants) {
+    const tokens = extractSignificantNameTokens(
+      [v.name, v.shortName].filter((s): s is string => !!s).join(' '),
+      {
+        brandText: effectiveBrandNorm ?? group.brand_name,
+        categoryText: catalogCategoryCanonical ?? group.category_name,
+      },
+    )
+    variantNameTokensById.set(v.catalogProductId, Array.from(tokens))
+  }
 
   const liveVerdicts = verdictResult.rows
     .map((row) => {
@@ -868,18 +884,44 @@ export async function loadGroupReview(
       // Re-canonicalize the fuzzy's category on read so alias changes
       // in canonicalCategoryNorm() don't require a backfill rerun.
       const fuzzyCategoryCanonical = canonicalCategoryNorm(fuzzy.categoryNorm)
+      const listing = fuzzy.rawInputJsonb as
+        | { url?: string | null; dispensaryName?: string | null; listingName?: string | null }
+        | null
+
+      // Live-extract pack_count and significant tokens from the
+      // raw listingName instead of reading the DB columns — the
+      // partner_product ingest (litalerts-products-to-fuzzy-skus.mts)
+      // hardcodes pack_count_norm / strain_norm to NULL, so for the
+      // ~361k structured rows the persisted columns carry no signal.
+      // Tokenizing here costs ~1 μs per fuzzy and lets the existing
+      // scorer differentiate "Ayrloom Lemonade" from "Ayrloom
+      // Honeycrisp" by their distinguishing tokens. The legacy
+      // observation-derived rows DO have these columns populated, so
+      // we prefer the DB value when present and only fall back to
+      // listingName parsing.
+      const listingParsedSize = listing?.listingName
+        ? parseSizeProfile(listing.listingName)
+        : null
+      const fuzzyNameTokens = Array.from(
+        extractSignificantNameTokens(
+          [listing?.listingName, fuzzy.strainNorm].filter((s): s is string => !!s).join(' '),
+          {
+            brandText: effectiveBrandNorm ?? group.brand_name,
+            categoryText: catalogCategoryCanonical ?? group.category_name,
+          },
+        ),
+      )
+
       const fuzzyProfile: FuzzyProfile = {
         brandNorm: fuzzy.brandNorm,
         categoryNorm: fuzzyCategoryCanonical ?? fuzzy.categoryNorm,
         subcategoryNorm: fuzzy.subcategoryNorm,
         sizeGNorm: fuzzy.sizeGNorm,
         sizeMgNorm: fuzzy.sizeMgNorm,
-        packCountNorm: fuzzy.packCountNorm,
+        packCountNorm: fuzzy.packCountNorm ?? listingParsedSize?.packCountNorm ?? null,
         strainNorm: fuzzy.strainNorm,
+        nameTokens: fuzzyNameTokens,
       }
-      const listing = fuzzy.rawInputJsonb as
-        | { url?: string | null; dispensaryName?: string | null; listingName?: string | null }
-        | null
       // Heuristic brand-alias rescue (preserved from the legacy
       // observation path): if the fuzzy has no brand AND the listing
       // text mentions the catalog brand, treat them as alias-equivalent.
@@ -903,17 +945,11 @@ export async function loadGroupReview(
       // 3.5g Flower YYY" when the strain names share no characters.
       // Skipped when the catalog group has zero significant tokens
       // (e.g. group name is just the brand) — we have nothing to
-      // require a shared token *with*.
+      // require a shared token *with*. We reuse `fuzzyNameTokens`
+      // computed above to avoid re-tokenizing the same listingName.
       if (groupNameTokens.size > 0) {
-        const listingTokens = extractSignificantNameTokens(
-          [listing?.listingName, fuzzy.strainNorm].filter((s): s is string => !!s).join(' '),
-          {
-            brandText: effectiveBrandNorm ?? group.brand_name,
-            categoryText: catalogCategoryCanonical ?? group.category_name,
-          },
-        )
         let shares = false
-        for (const tok of listingTokens) {
+        for (const tok of fuzzyNameTokens) {
           if (groupNameTokens.has(tok)) { shares = true; break }
         }
         if (!shares) return null
@@ -954,12 +990,19 @@ export async function loadGroupReview(
               sizeMgNorm: variant.sizeMgNorm,
               packCountNorm: variant.packCountNorm,
               strainNorm: null,
+              nameTokens: variantNameTokensById.get(variant.catalogProductId) ?? catalogProfile.nameTokens,
             }
           : catalogProfile
         const factors = scoreCatalogFuzzyFactors(profile, fuzzyProfile, { brandAliasMatch })
         const rawScore = Math.max(
           0,
-          factors.brand * factors.category * factors.subcategory * factors.size * factors.pack * factors.strain,
+          factors.brand
+            * factors.category
+            * factors.subcategory
+            * factors.size
+            * factors.pack
+            * factors.strain
+            * factors.nameOverlap,
         )
         const finalScore = applyVerdictPostFilter(rawScore, null)
         if (!bestPick || finalScore > bestPick.finalScore) {

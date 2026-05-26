@@ -29,6 +29,18 @@ export interface CatalogProfile {
   sizeMgNorm: number | null
   packCountNorm: number | null
   strainNorm: string | null
+  /**
+   * "Significant" name tokens (i.e. the residual after stripping
+   * brand, category, size, and grammatical fillers — exactly the
+   * `extractSignificantNameTokens()` output). Powers the
+   * `nameOverlap` scoring factor so that e.g. "Ayrloom Lemonade"
+   * and "Ayrloom Honeycrisp" don't both score the same against a
+   * "Lemonade" catalog variant; they differ in their distinguishing
+   * tokens, which is precisely what we want to reward / punish.
+   * Pass null (not []) to mean "I didn't bother extracting tokens"
+   * so the scorer can treat it as a no-op instead of a hard miss.
+   */
+  nameTokens: string[] | null
 }
 
 export interface FuzzyProfile {
@@ -39,6 +51,8 @@ export interface FuzzyProfile {
   sizeMgNorm: number | null
   packCountNorm: number | null
   strainNorm: string | null
+  /** Same semantics as CatalogProfile.nameTokens. */
+  nameTokens: string[] | null
 }
 
 export interface ScoreOptions {
@@ -63,6 +77,16 @@ export interface ScoreFactors {
   size: number
   pack: number
   strain: number
+  /**
+   * Jaccard overlap between the catalog and fuzzy `nameTokens` sets.
+   * 1.0 when sets are identical and both non-empty, near-1 when one
+   * side missing, and drops toward `NAME_OVERLAP_FLOOR` when there
+   * are tokens on both sides that don't intersect at all — the
+   * "Lemonade vs Honeycrisp" differentiator the existing strain /
+   * shared-token gate was supposed to provide but couldn't because
+   * neither side had `strainNorm` populated.
+   */
+  nameOverlap: number
 }
 
 /**
@@ -82,7 +106,13 @@ export function scoreCatalogFuzzy(
   const factors = scoreCatalogFuzzyFactors(catalog, fuzzy, options)
   const raw = Math.max(
     0,
-    factors.brand * factors.category * factors.subcategory * factors.size * factors.pack * factors.strain,
+    factors.brand
+      * factors.category
+      * factors.subcategory
+      * factors.size
+      * factors.pack
+      * factors.strain
+      * factors.nameOverlap,
   )
   return applyVerdictPostFilter(raw, knownVerdict)
 }
@@ -104,6 +134,7 @@ export function scoreCatalogFuzzyFactors(
     size: sizeFactor(catalog, fuzzy),
     pack: packFactor(catalog.packCountNorm, fuzzy.packCountNorm),
     strain: strainFactor(catalog.strainNorm, fuzzy.strainNorm),
+    nameOverlap: nameOverlapFactor(catalog.nameTokens, fuzzy.nameTokens),
   }
 }
 
@@ -162,6 +193,54 @@ export function strainFactor(catalogStrain: string | null, fuzzyStrain: string |
   if (!catalogStrain || !fuzzyStrain) return 0.95
   if (normalize(catalogStrain) === normalize(fuzzyStrain)) return 1.0
   return 0.70
+}
+
+/**
+ * Floor for the nameOverlap factor when both sides have non-empty
+ * tokens but the sets are disjoint. We don't multiply by 0 because
+ * brand + category + size could legitimately identify a match even
+ * when the residual tokens disagree (e.g. catalog "Lemonade" vs a
+ * dispensary listing that only says "Ayrloom Up Drink 10mg" — same
+ * SKU, the dispensary just stripped the flavor word). 0.45 is low
+ * enough to push such candidates out of the auto-promote band but
+ * not so low that they vanish from the reviewer's queue.
+ */
+export const NAME_OVERLAP_FLOOR = 0.45
+
+/**
+ * Jaccard-style overlap of significant name tokens.
+ *
+ * Semantics:
+ *   - Either side `null` (caller didn't extract tokens) → 1.0 (no
+ *     effect on score), preserving back-compat with callers that
+ *     don't supply nameTokens.
+ *   - Both sides empty arrays (caller extracted, found nothing
+ *     significant beyond brand/category/size) → 1.0 too — there's
+ *     just nothing to distinguish on, treat as a wash.
+ *   - One side empty, other non-empty → 0.85 — mild penalty for
+ *     "I know something distinguishing on one side but not the
+ *     other"; the listing might be under-named.
+ *   - Both non-empty → `NAME_OVERLAP_FLOOR + (1 - FLOOR) *
+ *     |A ∩ B| / |A ∪ B|`. Identical sets → 1.0, disjoint sets
+ *     → FLOOR.
+ */
+export function nameOverlapFactor(
+  catalogTokens: string[] | null | undefined,
+  fuzzyTokens: string[] | null | undefined,
+): number {
+  if (catalogTokens == null || fuzzyTokens == null) return 1.0
+  const a = new Set(catalogTokens.map(normalize).filter((t) => t.length > 0))
+  const b = new Set(fuzzyTokens.map(normalize).filter((t) => t.length > 0))
+  if (a.size === 0 && b.size === 0) return 1.0
+  if (a.size === 0 || b.size === 0) return 0.85
+  let intersection = 0
+  for (const tok of a) {
+    if (b.has(tok)) intersection += 1
+  }
+  const union = a.size + b.size - intersection
+  if (union === 0) return 1.0
+  const jaccard = intersection / union
+  return NAME_OVERLAP_FLOOR + (1 - NAME_OVERLAP_FLOOR) * jaccard
 }
 
 export function applyVerdictPostFilter(rawScore: number, verdict: MarketMatchVerdict | null | undefined): number {
