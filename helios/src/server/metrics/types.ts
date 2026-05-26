@@ -37,9 +37,16 @@ export interface MetricRow {
  * against the in-process site registry first. The registry does not
  * sanitise them for you.
  */
-export interface MetricDef extends MetricDefSummary {
+export interface MetricDef extends Omit<MetricDefSummary, 'dataStatus' | 'blockedByUrl'> {
   readonly series: MetricSeriesDef[]
   readonly query: MetricQueryFn
+  /**
+   * Optional in the source MetricDef — when omitted, the registry tags the
+   * metric with the appropriate status (real/pending/demo) before it lands
+   * in the public summary. See `registry.ts` for the tagging policy.
+   */
+  readonly dataStatus?: MetricDefSummary['dataStatus']
+  readonly blockedByUrl?: MetricDefSummary['blockedByUrl']
 }
 
 export interface MetricQueryArgs {
@@ -68,5 +75,7 @@ export function toMetricSummary(metric: MetricDef): MetricDefSummary {
     series: metric.series,
     defaultAggregation: metric.defaultAggregation,
     supportedAggregations: metric.supportedAggregations,
+    dataStatus: metric.dataStatus ?? 'real',
+    blockedByUrl: metric.blockedByUrl,
   }
 }

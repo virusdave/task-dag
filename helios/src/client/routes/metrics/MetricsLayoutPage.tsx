@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useLoaderData } from 'react-router-dom'
 
 import {
@@ -6,6 +6,7 @@ import {
   MetricListResponseSchema,
   type MetricAggregation,
   type MetricAnnotationRecord,
+  type MetricDataStatus,
   type MetricDefSummary,
   type MetricListResponse,
 } from '../../../shared/contracts/index.js'
@@ -16,7 +17,6 @@ import { TimeAxisProvider, useTimeAxis, type TimeWindow } from './TimeAxisContex
 
 const DAY_MS = 24 * 60 * 60 * 1000
 const PRESETS: ReadonlyArray<{ label: string; days: number }> = [
-  { label: '24h', days: 1 },
   { label: '7d', days: 7 },
   { label: '30d', days: 30 },
   { label: '90d', days: 90 },
@@ -24,15 +24,18 @@ const PRESETS: ReadonlyArray<{ label: string; days: number }> = [
   { label: '1y', days: 365 },
 ]
 
-const ALL_AGGREGATIONS: ReadonlyArray<MetricAggregation> = [
-  'total',
-  'month',
-  'week',
-  'date',
-  'hour',
-  'dow',
-  'dom',
-  'dofortnight',
+const PRIMARY_AGGREGATIONS: ReadonlyArray<MetricAggregation> = ['hour', 'date', 'week', 'month', 'total']
+const ADVANCED_AGGREGATIONS: ReadonlyArray<MetricAggregation> = ['dow', 'dom', 'dofortnight']
+
+// Known store dealer ids. Surface a chip-style multi-select instead of the
+// free-form input that v1 shipped — operators know "Bronx" / "Midtown", not
+// the underlying numeric dealer ids. The values are what the API expects in
+// the `?sites=` query string.
+//
+// If a new store comes online, add it here and the chip strip picks it up.
+const KNOWN_SITES: ReadonlyArray<{ id: string; label: string }> = [
+  { id: 'bronx', label: 'Bronx' },
+  { id: 'midtown', label: 'Midtown' },
 ]
 
 export async function metricsLoader(): Promise<MetricListResponse> {
@@ -42,142 +45,278 @@ export async function metricsLoader(): Promise<MetricListResponse> {
 export function MetricsLayoutPage() {
   const { metrics } = useLoaderData() as MetricListResponse
 
-  // Site filter: free-form comma-separated text. Helios doesn't yet
-  // have a global site registry to populate a multi-select against;
-  // the input is forwarded verbatim as the `sites` query param. P2+
-  // can wire in a site-registry-backed multi-select without changing
-  // anything else on the page.
-  const [sitesParam, setSitesParam] = useState('')
-  const [pageAgg, setPageAgg] = useState<MetricAggregation>('date')
+  // Site filter: empty Set = all sites. Multi-select against KNOWN_SITES.
+  const [selectedSites, setSelectedSites] = useState<ReadonlySet<string>>(() => new Set<string>())
+  const sitesParam = useMemo(() => Array.from(selectedSites).join(','), [selectedSites])
+  const [pageAgg, setPageAgg] = useState<MetricAggregation>('week')
   // 90d default window matching the parent epic spec.
   const [initialWindow] = useState<TimeWindow>(() => ({
     fromMs: Date.now() - 90 * DAY_MS,
     toMs: Date.now(),
   }))
 
-  const groups = useMemo(() => groupByMetricGroup(metrics), [metrics])
-  const [activeMetricId, setActiveMetricId] = useState<string | null>(metrics[0]?.id ?? null)
-  const activeMetric = useMemo(
-    () => metrics.find((m) => m.id === activeMetricId) ?? null,
-    [metrics, activeMetricId],
+  // Operator may opt in to seeing pending stubs (engineering view) but they
+  // are hidden by default so synthetic random walks can't be mistaken for real
+  // business signal.
+  const [showPending, setShowPending] = useState(false)
+
+  // Annotations are fetched ONCE at the dashboard level and handed to every
+  // card. A global annotation creates an event indicator on every chart at
+  // its timestamp.
+  const [annotations, setAnnotations] = useState<MetricAnnotationRecord[]>([])
+  const [annotationsSeq, setAnnotationsSeq] = useState(0)
+  useEffect(() => {
+    let cancelled = false
+    loadJson('/api/metric-annotations', MetricAnnotationsListResponseSchema)
+      .then((r) => {
+        if (!cancelled) setAnnotations(r.annotations)
+      })
+      .catch(() => {
+        if (!cancelled) setAnnotations([])
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [annotationsSeq])
+  const onAnnotationsChanged = useCallback(() => setAnnotationsSeq((n) => n + 1), [])
+
+  // Click-to-expand focus panel: at most one expanded metric at a time.
+  const [expandedMetricId, setExpandedMetricId] = useState<string | null>(null)
+  const focusPanelRef = useRef<HTMLDivElement | null>(null)
+  useEffect(() => {
+    if (!expandedMetricId) return
+    // Scroll the focus panel into view on expand. requestAnimationFrame
+    // lets the layout settle first so getBoundingClientRect is correct.
+    const raf = requestAnimationFrame(() => {
+      focusPanelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    })
+    return () => cancelAnimationFrame(raf)
+  }, [expandedMetricId])
+  // Escape closes the focus panel.
+  useEffect(() => {
+    if (!expandedMetricId) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setExpandedMetricId(null)
+    }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [expandedMetricId])
+
+  const expandedMetric = useMemo(
+    () => metrics.find((m) => m.id === expandedMetricId) ?? null,
+    [metrics, expandedMetricId],
   )
+
+  // Partition metrics by data status and group.
+  const partitioned = useMemo(() => partitionMetrics(metrics), [metrics])
+  const realGroups = useMemo(() => groupByMetricGroup(partitioned.real), [partitioned.real])
+  const pendingGroups = useMemo(() => groupByMetricGroup(partitioned.pending), [partitioned.pending])
 
   return (
     <TimeAxisProvider initial={initialWindow}>
-      <section className="metrics-layout">
-        <header className="page-header">
+      <section className="metrics-dashboard">
+        <header className="page-header metrics-dashboard-header">
           <div>
             <p className="eyebrow">Business &amp; Performance Metrics</p>
-            <h2>{activeMetric?.group ? `${activeMetric.group} — ${activeMetric.title}` : 'Metrics'}</h2>
+            <h2>Dashboard</h2>
           </div>
+          <DataCoverageBadge
+            realCount={partitioned.real.length}
+            pendingCount={partitioned.pending.length}
+            showPending={showPending}
+            onToggleShowPending={setShowPending}
+          />
         </header>
 
-        <GlobalControlsBar
-          sitesParam={sitesParam}
-          onSitesChange={setSitesParam}
+        <DashboardControls
+          selectedSites={selectedSites}
+          onSitesChange={setSelectedSites}
           pageAgg={pageAgg}
           onAggChange={setPageAgg}
         />
 
-        {/* Mobile-first metric switcher — visible only at narrow widths
-            so the operator never has to scroll past the nav to get to
-            the chart on a phone. The left-nav (below) stays available
-            for desktop browsing. */}
-        <label className="metrics-mobile-switcher">
-          metric{' '}
-          <select
-            value={activeMetricId ?? ''}
-            onChange={(e) => setActiveMetricId(e.target.value)}
-          >
-            {groups.map((g) => (
-              <optgroup key={g.group} label={g.group}>
-                {g.metrics.map((m) => (
-                  <option key={m.id} value={m.id}>
-                    {m.title}
-                  </option>
-                ))}
-              </optgroup>
-            ))}
-          </select>
-        </label>
-
-        <div className="metrics-body">
-          {/* Chart area FIRST in DOM order so a screen reader / mobile
-              user encounters the answer before the navigation. */}
-          <div className="metrics-chart-area">
-            {activeMetric ? (
-              <MetricChartWithAnnotations
-                metric={activeMetric}
-                sitesParam={sitesParam}
-                pageAgg={pageAgg}
-              />
-            ) : (
-              <p className="subtle-copy">No metrics registered.</p>
-            )}
+        {expandedMetric ? (
+          <div className="metrics-focus-panel" ref={focusPanelRef}>
+            <div className="metrics-focus-panel-toolbar">
+              <span className="subtle-copy">Focus:</span>
+              <strong>
+                {expandedMetric.group} — {expandedMetric.title}
+              </strong>
+              <button
+                type="button"
+                className="ghost-button"
+                onClick={() => setExpandedMetricId(null)}
+                aria-label="Close focus panel"
+              >
+                ✕ close
+              </button>
+            </div>
+            <MetricChart
+              key={`focus-${expandedMetric.id}`}
+              metric={expandedMetric}
+              sitesParam={sitesParam}
+              defaultAgg={pageAgg}
+              annotations={annotations}
+              onAnnotationsChanged={onAnnotationsChanged}
+              variant="expanded"
+            />
           </div>
-          <MetricsNav groups={groups} activeMetricId={activeMetricId} onSelect={setActiveMetricId} />
-        </div>
+        ) : null}
 
-        <details className="page-collapsible">
-          <summary>About this page</summary>
-          <p className="subtle-copy">
-            The /metrics page tree is the operator-facing surface for the "Business &amp; Performance Metrics" epic
-            (automation#21, satisfying virusdave/top-level#7). All charts on a /metrics page share a single time axis
-            by default; toggle the per-chart 🔒/🔓 button to unlock a chart from the shared axis. The annotate mode
-            (✏️) lets you click to drop a point annotation or click-drag to mark a range; annotations persist forever
-            and appear as coloured ticks at the bottom of every chart whose visible window covers their time.
-          </p>
+        {realGroups.length === 0 ? (
+          <p className="subtle-copy">No live metrics registered yet.</p>
+        ) : (
+          realGroups.map((g) => (
+            <MetricGroupSection
+              key={`live-${g.group}`}
+              group={g.group}
+              metrics={g.metrics}
+              sitesParam={sitesParam}
+              pageAgg={pageAgg}
+              annotations={annotations}
+              onAnnotationsChanged={onAnnotationsChanged}
+              expandedMetricId={expandedMetricId}
+              onExpand={setExpandedMetricId}
+            />
+          ))
+        )}
+
+        {pendingGroups.length > 0 ? (
+          <details className="metrics-pending-section" open={showPending}>
+            <summary>
+              <span className="metrics-section-title">Data pending</span>{' '}
+              <span className="subtle-copy">
+                ({partitioned.pending.length} metric{partitioned.pending.length === 1 ? '' : 's'} awaiting ingest)
+              </span>
+            </summary>
+            <p className="subtle-copy metrics-pending-explainer">
+              These metrics are part of the spec but their data sources aren't wired up yet. Click any card to
+              read its definition and follow the link to the ingest issue tracking the unblock work.
+            </p>
+            {pendingGroups.map((g) => (
+              <PendingGroupSection key={`pending-${g.group}`} group={g.group} metrics={g.metrics} />
+            ))}
+          </details>
+        ) : null}
+
+        <details className="page-collapsible metrics-help-collapsible">
+          <summary>How this dashboard works</summary>
+          <ul className="subtle-copy">
+            <li>All cards share one time axis (the range picker above). Click any card to open a focus panel with pan / zoom / annotate.</li>
+            <li>In the focus panel, use the 🔒/🔓 button to unlock that chart from the shared axis, then pan/zoom independently.</li>
+            <li>Hover any chart for a per-timestamp readout; other charts dim a crosshair at the same moment so you can compare.</li>
+            <li>Annotations created with scope <em>global</em> appear as event indicators on every chart at their timestamp.</li>
+            <li>Site filter: leave all chips off for an all-sites view, or pick one or more stores.</li>
+          </ul>
         </details>
       </section>
     </TimeAxisProvider>
   )
 }
 
-interface GlobalControlsBarProps {
-  readonly sitesParam: string
-  readonly onSitesChange: (next: string) => void
-  readonly pageAgg: MetricAggregation
-  readonly onAggChange: (next: MetricAggregation) => void
+// ---------------------------------------------------------------------------
+// Dashboard chrome
+// ---------------------------------------------------------------------------
+
+interface DataCoverageBadgeProps {
+  readonly realCount: number
+  readonly pendingCount: number
+  readonly showPending: boolean
+  readonly onToggleShowPending: (v: boolean) => void
 }
 
-function GlobalControlsBar({ sitesParam, onSitesChange, pageAgg, onAggChange }: GlobalControlsBarProps) {
+function DataCoverageBadge({ realCount, pendingCount, showPending, onToggleShowPending }: DataCoverageBadgeProps) {
   return (
-    <div className="metrics-controls">
-      <label>
-        sites{' '}
-        <input
-          value={sitesParam}
-          onChange={(e) => onSitesChange(e.target.value)}
-          placeholder="all sites (comma-separated)"
-          size={28}
-        />
-      </label>
-      <label>
-        agg{' '}
-        <select value={pageAgg} onChange={(e) => onAggChange(e.target.value as MetricAggregation)}>
-          {ALL_AGGREGATIONS.map((a) => (
-            <option key={a} value={a}>
-              {a}
-            </option>
-          ))}
-        </select>
-      </label>
-      <TimeRangePicker />
+    <div className="metrics-coverage-badge">
+      <span className="metrics-coverage-chip metrics-coverage-chip--real">{realCount} live</span>
+      <span
+        className="metrics-coverage-chip metrics-coverage-chip--pending"
+        title={pendingCount === 0 ? 'No pending metrics' : 'Click to show or hide pending metrics'}
+      >
+        {pendingCount} pending
+      </span>
+      {pendingCount > 0 ? (
+        <label className="metrics-coverage-toggle subtle-copy">
+          <input type="checkbox" checked={showPending} onChange={(e) => onToggleShowPending(e.target.checked)} />{' '}
+          show pending
+        </label>
+      ) : null}
     </div>
   )
 }
 
-function TimeRangePicker() {
-  // Reads/writes the shared TimeAxisContext via children that render
-  // inside the provider.
+interface DashboardControlsProps {
+  readonly selectedSites: ReadonlySet<string>
+  readonly onSitesChange: (next: ReadonlySet<string>) => void
+  readonly pageAgg: MetricAggregation
+  readonly onAggChange: (next: MetricAggregation) => void
+}
+
+function DashboardControls({ selectedSites, onSitesChange, pageAgg, onAggChange }: DashboardControlsProps) {
   return (
-    <>
-      <span className="subtle-copy">range:</span>
-      {PRESETS.map((p) => (
-        <PresetButton key={p.label} label={p.label} days={p.days} />
-      ))}
-      <ManualRangeInputs />
-    </>
+    <div className="metrics-controls">
+      <div className="metrics-control-group">
+        <span className="subtle-copy">sites</span>
+        <button
+          type="button"
+          className={selectedSites.size === 0 ? 'metrics-site-chip is-active' : 'metrics-site-chip'}
+          onClick={() => onSitesChange(new Set())}
+          aria-pressed={selectedSites.size === 0}
+        >
+          All
+        </button>
+        {KNOWN_SITES.map((s) => {
+          const active = selectedSites.has(s.id)
+          return (
+            <button
+              key={s.id}
+              type="button"
+              className={active ? 'metrics-site-chip is-active' : 'metrics-site-chip'}
+              onClick={() => {
+                const next = new Set(selectedSites)
+                if (active) next.delete(s.id)
+                else next.add(s.id)
+                onSitesChange(next)
+              }}
+              aria-pressed={active}
+            >
+              {s.label}
+            </button>
+          )
+        })}
+      </div>
+
+      <div className="metrics-control-group">
+        <label>
+          aggregation{' '}
+          <select value={pageAgg} onChange={(e) => onAggChange(e.target.value as MetricAggregation)}>
+            {PRIMARY_AGGREGATIONS.map((a) => (
+              <option key={a} value={a}>
+                {a}
+              </option>
+            ))}
+            <optgroup label="advanced">
+              {ADVANCED_AGGREGATIONS.map((a) => (
+                <option key={a} value={a}>
+                  {a}
+                </option>
+              ))}
+            </optgroup>
+          </select>
+        </label>
+      </div>
+
+      <div className="metrics-control-group">
+        <span className="subtle-copy">range</span>
+        {PRESETS.map((p) => (
+          <PresetButton key={p.label} label={p.label} days={p.days} />
+        ))}
+        <details className="metrics-range-custom">
+          <summary>custom</summary>
+          <ManualRangeInputs />
+        </details>
+      </div>
+    </div>
   )
 }
 
@@ -197,29 +336,34 @@ function PresetButton({ label, days }: { label: string; days: number }) {
 function ManualRangeInputs() {
   const axis = useTimeAxis()
   return (
-    <>
-      <input
-        type="datetime-local"
-        value={toLocalDtInput(axis.window.fromMs)}
-        onChange={(e) => {
-          const ms = Date.parse(e.target.value)
-          if (!Number.isNaN(ms)) axis.setWindow({ fromMs: ms, toMs: axis.window.toMs })
-        }}
-      />
-      <input
-        type="datetime-local"
-        value={toLocalDtInput(axis.window.toMs)}
-        onChange={(e) => {
-          const ms = Date.parse(e.target.value)
-          if (!Number.isNaN(ms)) axis.setWindow({ fromMs: axis.window.fromMs, toMs: ms })
-        }}
-      />
-    </>
+    <div className="metrics-range-custom-inputs">
+      <label className="subtle-copy">
+        from{' '}
+        <input
+          type="datetime-local"
+          value={toLocalDtInput(axis.window.fromMs)}
+          onChange={(e) => {
+            const ms = Date.parse(e.target.value)
+            if (!Number.isNaN(ms)) axis.setWindow({ fromMs: ms, toMs: axis.window.toMs })
+          }}
+        />
+      </label>
+      <label className="subtle-copy">
+        to{' '}
+        <input
+          type="datetime-local"
+          value={toLocalDtInput(axis.window.toMs)}
+          onChange={(e) => {
+            const ms = Date.parse(e.target.value)
+            if (!Number.isNaN(ms)) axis.setWindow({ fromMs: axis.window.fromMs, toMs: ms })
+          }}
+        />
+      </label>
+    </div>
   )
 }
 
 function toLocalDtInput(ms: number): string {
-  // <input type="datetime-local"> wants "YYYY-MM-DDTHH:MM" in local time.
   const d = new Date(ms)
   const pad = (n: number) => String(n).padStart(2, '0')
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(
@@ -227,77 +371,116 @@ function toLocalDtInput(ms: number): string {
   )}`
 }
 
-interface MetricsNavProps {
-  readonly groups: Array<{ group: string; metrics: MetricDefSummary[] }>
-  readonly activeMetricId: string | null
-  readonly onSelect: (id: string) => void
-}
+// ---------------------------------------------------------------------------
+// Sections
+// ---------------------------------------------------------------------------
 
-function MetricsNav({ groups, activeMetricId, onSelect }: MetricsNavProps) {
-  return (
-    <nav className="metrics-nav" aria-label="Metrics">
-      {groups.map((g) => (
-        <details key={g.group} open className="metrics-nav-group">
-          <summary>{g.group}</summary>
-          <ul>
-            {g.metrics.map((m) => (
-              <li key={m.id}>
-                <button
-                  type="button"
-                  className={
-                    'metrics-nav-leaf' + (m.id === activeMetricId ? ' is-active' : '')
-                  }
-                  onClick={() => onSelect(m.id)}
-                  title={m.description}
-                >
-                  {m.title}
-                </button>
-              </li>
-            ))}
-          </ul>
-        </details>
-      ))}
-    </nav>
-  )
-}
-
-interface MetricChartWithAnnotationsProps {
-  readonly metric: MetricDefSummary
+interface MetricGroupSectionProps {
+  readonly group: string
+  readonly metrics: ReadonlyArray<MetricDefSummary>
   readonly sitesParam: string
   readonly pageAgg: MetricAggregation
+  readonly annotations: ReadonlyArray<MetricAnnotationRecord>
+  readonly onAnnotationsChanged: () => void
+  readonly expandedMetricId: string | null
+  readonly onExpand: (id: string) => void
 }
 
-function MetricChartWithAnnotations({ metric, sitesParam, pageAgg }: MetricChartWithAnnotationsProps) {
-  // Annotation list shared with the chart — we re-fetch on every mutation
-  // signal from the chart. We deliberately pull annotations independently
-  // of the time window so a freshly-created annotation that lands outside
-  // the current view still shows up if the operator pans to it without
-  // refetching.
-  const [annotations, setAnnotations] = useState<MetricAnnotationRecord[]>([])
-  const [refreshSeq, setRefreshSeq] = useState(0)
-  useEffect(() => {
-    let cancelled = false
-    loadJson('/api/metric-annotations', MetricAnnotationsListResponseSchema)
-      .then((r) => {
-        if (!cancelled) setAnnotations(r.annotations)
-      })
-      .catch(() => {
-        if (!cancelled) setAnnotations([])
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [refreshSeq])
-  const onChanged = useCallback(() => setRefreshSeq((n) => n + 1), [])
+function MetricGroupSection({
+  group,
+  metrics,
+  sitesParam,
+  pageAgg,
+  annotations,
+  onAnnotationsChanged,
+  expandedMetricId,
+  onExpand,
+}: MetricGroupSectionProps) {
   return (
-    <MetricChart
-      metric={metric}
-      sitesParam={sitesParam}
-      defaultAgg={pageAgg}
-      annotations={annotations}
-      onAnnotationsChanged={onChanged}
-    />
+    <section className="metrics-group">
+      <h3 className="metrics-section-title">{group}</h3>
+      <div className="metrics-grid">
+        {metrics.map((m) => (
+          <MetricChart
+            key={m.id}
+            metric={m}
+            sitesParam={sitesParam}
+            defaultAgg={pageAgg}
+            annotations={annotations}
+            onAnnotationsChanged={onAnnotationsChanged}
+            variant="card"
+            onExpand={() => onExpand(m.id === expandedMetricId ? '' : m.id)}
+          />
+        ))}
+      </div>
+    </section>
   )
+}
+
+interface PendingGroupSectionProps {
+  readonly group: string
+  readonly metrics: ReadonlyArray<MetricDefSummary>
+}
+
+function PendingGroupSection({ group, metrics }: PendingGroupSectionProps) {
+  return (
+    <section className="metrics-group">
+      <h4 className="metrics-section-subtitle">{group}</h4>
+      <div className="metrics-grid">
+        {metrics.map((m) => (
+          <PendingMetricCard key={m.id} metric={m} />
+        ))}
+      </div>
+    </section>
+  )
+}
+
+function PendingMetricCard({ metric }: { metric: MetricDefSummary }) {
+  // Strip the "STUB:" prefix that the stub factory bakes into the description;
+  // it's noise here because the whole card is already labelled "Data pending".
+  const friendlyDescription = metric.description.replace(/^STUB:\s*synthetic data — real-data SQL pending\.\s*/i, '')
+  return (
+    <article className="metric-chart-card metric-chart-card--pending">
+      <header className="metric-chart-header">
+        <div className="metric-chart-titlewrap">
+          <h3 className="metric-chart-title">{metric.title}</h3>
+          <span className="metric-chart-pending-badge">Data pending</span>
+        </div>
+      </header>
+      <div className="metric-chart-pending-body">
+        <p className="subtle-copy">{friendlyDescription || 'Data source for this metric is not yet wired up.'}</p>
+        {metric.blockedByUrl ? (
+          <p className="subtle-copy">
+            Tracked in{' '}
+            <a href={metric.blockedByUrl} target="_blank" rel="noreferrer noopener">
+              {metric.blockedByUrl.replace(/^https?:\/\//, '')}
+            </a>
+          </p>
+        ) : null}
+      </div>
+    </article>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+interface PartitionedMetrics {
+  readonly real: ReadonlyArray<MetricDefSummary>
+  readonly pending: ReadonlyArray<MetricDefSummary>
+}
+
+function partitionMetrics(metrics: ReadonlyArray<MetricDefSummary>): PartitionedMetrics {
+  const real: MetricDefSummary[] = []
+  const pending: MetricDefSummary[] = []
+  for (const m of metrics) {
+    const status: MetricDataStatus = m.dataStatus ?? 'real'
+    if (status === 'real') real.push(m)
+    else if (status === 'pending') pending.push(m)
+    // 'demo' metrics are hidden from the operator dashboard entirely.
+  }
+  return { real, pending }
 }
 
 function groupByMetricGroup(

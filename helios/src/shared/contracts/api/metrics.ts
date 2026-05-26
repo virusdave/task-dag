@@ -35,6 +35,22 @@ export const MetricSeriesDefSchema = z.object({
 })
 export type MetricSeriesDef = z.infer<typeof MetricSeriesDefSchema>
 
+/**
+ * Provenance flag for a metric:
+ *
+ *   - `real`    — backed by real ingest / SQL the operator should trust.
+ *   - `pending` — registered but the data source isn't wired yet
+ *                 (current implementation returns a synthetic stub
+ *                 series). The dashboard renders these as "Data
+ *                 pending" placeholders, never as live charts, so the
+ *                 operator can't mistake synthetic random walks for
+ *                 business signal.
+ *   - `demo`    — engineering-only sample metrics (random walk, flat
+ *                 line). Hidden from the operator dashboard by default.
+ */
+export const MetricDataStatusSchema = z.enum(['real', 'pending', 'demo'])
+export type MetricDataStatus = z.infer<typeof MetricDataStatusSchema>
+
 // Public summary of a metric — everything the SPA needs to render the
 // nav + chart frame WITHOUT firing the data query. Crucially excludes
 // the server-only `query` function.
@@ -46,6 +62,12 @@ export const MetricDefSummarySchema = z.object({
   series: z.array(MetricSeriesDefSchema).min(1),
   defaultAggregation: MetricAggregationSchema,
   supportedAggregations: z.array(MetricAggregationSchema).min(1),
+  dataStatus: MetricDataStatusSchema.default('real'),
+  /**
+   * Optional URL to the issue / runbook unblocking a `pending` metric.
+   * Rendered as a link on the "Data pending" placeholder card.
+   */
+  blockedByUrl: z.string().url().optional(),
 })
 export type MetricDefSummary = z.infer<typeof MetricDefSummarySchema>
 

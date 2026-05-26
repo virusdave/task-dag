@@ -28,13 +28,8 @@ const TAG_COLOURS: Record<string, string> = {
   note: '#888888',
 }
 
-// Pointer-drag thresholds — keep touch generous (fat-finger forgiving)
-// without making a real tap feel laggy.
 const POINTER_MOVE_PX_THRESHOLD = 4
 const TOUCH_MOVE_PX_THRESHOLD = 10
-// Per-fetch debounce so a continuous pan/zoom doesn't issue a request
-// every pointermove frame. 200ms is short enough to feel snappy when
-// the user lets go, long enough to coalesce a swipe into one fetch.
 const FETCH_DEBOUNCE_MS = 200
 
 export interface MetricChartProps {
@@ -49,6 +44,14 @@ export interface MetricChartProps {
    */
   readonly annotations: ReadonlyArray<MetricAnnotationRecord>
   readonly onAnnotationsChanged: () => void
+  /**
+   * `card` is the small dashboard variant — fixed compact height, no pan/zoom/annotate
+   * toolbar, click-to-expand affordance. `expanded` is the full focus panel — full
+   * interactive surface (pan/zoom, annotate, lock/unlock, per-chart agg override).
+   */
+  readonly variant?: 'card' | 'expanded'
+  /** Card-only: invoked when the operator clicks/taps to expand the metric. */
+  readonly onExpand?: () => void
 }
 
 export function MetricChart({
@@ -57,20 +60,15 @@ export function MetricChart({
   defaultAgg,
   annotations,
   onAnnotationsChanged,
+  variant = 'expanded',
+  onExpand,
 }: MetricChartProps) {
   const sharedAxis = useTimeAxis()
   const [locked, setLocked] = useState(true)
-  // When unlocked, the chart owns its own window; when locked, it uses
-  // the shared axis as the source of truth.
   const [localWindow, setLocalWindow] = useState<TimeWindow>(sharedAxis.window)
   const window = locked ? sharedAxis.window : localWindow
   const setWindow = locked ? sharedAxis.setWindow : setLocalWindow
 
-  // Per-chart aggregation override (null = follow page default). If
-  // the page default isn't supported by this metric we silently fall
-  // back to the metric's defaultAggregation instead of 400ing on the
-  // wire (the operator changed the page-level dropdown, they didn't
-  // pick this metric).
   const [aggOverride, setAggOverride] = useState<MetricAggregation | null>(null)
   const effectiveAgg = aggOverride ?? defaultAgg
   const agg = metric.supportedAggregations.includes(effectiveAgg)
@@ -111,17 +109,10 @@ export function MetricChart({
     }
   }, [metric.id, sitesParam, agg, window.fromMs, window.toMs])
 
-  // Clear the stale series when the operator picks a different metric
-  // so the chart doesn't briefly show series_a/series_b on the new
-  // metric's chart frame while the new fetch is in flight.
   useEffect(() => {
     setResponse(null)
   }, [metric.id])
 
-  // Filter annotations to this chart: global ones always render, plus
-  // any explicitly scoped to this metric. Then trim to the visible
-  // window with a 5% pad on each side so a tooltip near the edge still
-  // shows.
   const visibleAnnotations = useMemo(() => {
     const pad = (window.toMs - window.fromMs) * 0.05
     const fromMs = window.fromMs - pad
@@ -135,58 +126,84 @@ export function MetricChart({
     })
   }, [annotations, metric.id, window.fromMs, window.toMs])
 
+  const cardClickable = variant === 'card' && onExpand
+  const cardKeyDown = useCallback(
+    (e: React.KeyboardEvent<HTMLElement>) => {
+      if (!cardClickable) return
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault()
+        onExpand?.()
+      }
+    },
+    [cardClickable, onExpand],
+  )
+
   return (
-    <article className="metric-chart-card">
+    <article
+      className={`metric-chart-card metric-chart-card--${variant}`}
+      role={cardClickable ? 'button' : undefined}
+      tabIndex={cardClickable ? 0 : undefined}
+      onClick={cardClickable ? () => onExpand?.() : undefined}
+      onKeyDown={cardClickable ? cardKeyDown : undefined}
+      aria-label={cardClickable ? `Open ${metric.title} in expanded view` : undefined}
+    >
       <header className="metric-chart-header">
-        <div>
+        <div className="metric-chart-titlewrap">
           <h3 className="metric-chart-title">{metric.title}</h3>
-          {metric.description ? (
+          {variant === 'expanded' && metric.description ? (
             <details className="metric-chart-desc-wrap">
               <summary className="subtle-copy">about this metric</summary>
               <p className="subtle-copy metric-chart-desc">{metric.description}</p>
             </details>
           ) : null}
         </div>
-        <div className="metric-chart-controls">
-          <select
-            value={aggOverride ?? ''}
-            onChange={(e) => setAggOverride((e.target.value || null) as MetricAggregation | null)}
-            aria-label={`Aggregation for ${metric.title}`}
-          >
-            <option value="">agg: {defaultAgg} (page)</option>
-            {metric.supportedAggregations.map((a) => (
-              <option key={a} value={a}>
-                agg: {a}
-              </option>
-            ))}
-          </select>
-          <button
-            type="button"
-            className={annotateMode ? 'ghost-button is-active' : 'ghost-button'}
-            onClick={() => setAnnotateMode((v) => !v)}
-            aria-pressed={annotateMode}
-            aria-label="Toggle annotate mode"
-            title="Toggle annotate mode (tap to drop a point annotation, drag to mark a range)"
-          >
-            {annotateMode ? '✏️ annotating' : '✏️ annotate'}
-          </button>
-          <button
-            type="button"
-            className="ghost-button"
-            onClick={() => {
-              if (locked) {
-                // On unlock, seed local window from shared.
-                setLocalWindow(sharedAxis.window)
-              }
-              setLocked((v) => !v)
-            }}
-            aria-pressed={locked}
-            aria-label={locked ? 'Unlock from shared time axis' : 'Lock to shared time axis'}
-            title={locked ? 'Unlock from shared time axis' : 'Lock to shared time axis'}
-          >
-            {locked ? '🔒 locked' : '🔓 unlocked'}
-          </button>
-        </div>
+        {variant === 'expanded' ? (
+          <div className="metric-chart-controls">
+            <select
+              value={aggOverride ?? ''}
+              onChange={(e) => setAggOverride((e.target.value || null) as MetricAggregation | null)}
+              aria-label={`Aggregation for ${metric.title}`}
+            >
+              <option value="">agg: {defaultAgg} (page)</option>
+              {metric.supportedAggregations.map((a) => (
+                <option key={a} value={a}>
+                  agg: {a}
+                </option>
+              ))}
+            </select>
+            <button
+              type="button"
+              className={annotateMode ? 'ghost-button is-active' : 'ghost-button'}
+              onClick={(e) => {
+                e.stopPropagation()
+                setAnnotateMode((v) => !v)
+              }}
+              aria-pressed={annotateMode}
+              aria-label="Toggle annotate mode"
+              title="Toggle annotate mode (tap to drop a point annotation, drag to mark a range)"
+            >
+              {annotateMode ? '✏️ annotating' : '✏️ annotate'}
+            </button>
+            <button
+              type="button"
+              className="ghost-button"
+              onClick={(e) => {
+                e.stopPropagation()
+                if (locked) setLocalWindow(sharedAxis.window)
+                setLocked((v) => !v)
+              }}
+              aria-pressed={locked}
+              aria-label={locked ? 'Unlock from shared time axis' : 'Lock to shared time axis'}
+              title={locked ? 'Unlock from shared time axis' : 'Lock to shared time axis'}
+            >
+              {locked ? '🔒 locked' : '🔓 unlocked'}
+            </button>
+          </div>
+        ) : (
+          <span className="metric-chart-expand-hint" aria-hidden="true">
+            ↗
+          </span>
+        )}
       </header>
       <ChartSvg
         response={response}
@@ -194,10 +211,11 @@ export function MetricChart({
         error={error}
         window={window}
         setWindow={setWindow}
-        annotateMode={annotateMode}
+        annotateMode={variant === 'expanded' && annotateMode}
         annotations={visibleAnnotations}
         metricId={metric.id}
         onAnnotationsChanged={onAnnotationsChanged}
+        interactive={variant === 'expanded'}
       />
       <ScreenReaderSummary metric={metric} response={response} window={window} loading={loading} />
     </article>
@@ -214,6 +232,8 @@ interface ChartSvgProps {
   readonly annotations: ReadonlyArray<MetricAnnotationRecord>
   readonly metricId: string
   readonly onAnnotationsChanged: () => void
+  /** Card variant disables pan/zoom/annotate to keep the dashboard scannable. */
+  readonly interactive: boolean
 }
 
 interface DragState {
@@ -235,14 +255,22 @@ interface PinchState {
 }
 
 function ChartSvg(props: ChartSvgProps) {
-  const { response, loading, error, window, setWindow, annotateMode, annotations, metricId, onAnnotationsChanged } =
-    props
+  const {
+    response,
+    loading,
+    error,
+    window,
+    setWindow,
+    annotateMode,
+    annotations,
+    metricId,
+    onAnnotationsChanged,
+    interactive,
+  } = props
   const svgRef = useRef<SVGSVGElement | null>(null)
   const wrapRef = useRef<HTMLDivElement | null>(null)
+  const sharedAxis = useTimeAxis()
 
-  // Responsive layout: measure the wrapping div and use the measurement
-  // as the SVG viewBox width so coordinate math is always correct
-  // regardless of CSS width:100% scaling.
   const [renderedWidthPx, setRenderedWidthPx] = useState<number>(600)
   useLayoutEffect(() => {
     const el = wrapRef.current
@@ -255,11 +283,10 @@ function ChartSvg(props: ChartSvgProps) {
     return () => observer.disconnect()
   }, [])
 
-  // Height grows on narrow widths so the chart doesn't feel
-  // letterboxed on a phone — operator wants to glance at the line, not
-  // squint.
   const width = renderedWidthPx
-  const height = renderedWidthPx < 480 ? 260 : 220
+  // Card variant is shorter; expanded variant grows on narrow widths so the
+  // chart doesn't feel letterboxed on a phone.
+  const height = interactive ? (renderedWidthPx < 480 ? 260 : 280) : 150
   const marginLeft = 44
   const marginRight = 12
   const marginTop = 12
@@ -272,9 +299,6 @@ function ChartSvg(props: ChartSvgProps) {
     [window.fromMs, window.toMs, plotW, marginLeft],
   )
 
-  // Convert a client-space x (e.g. e.clientX) to an SVG user-space x.
-  // Uses getScreenCTM so the conversion is correct regardless of CSS
-  // scaling or viewBox vs rendered-size mismatch.
   const clientXToSvgX = useCallback((clientX: number): number | null => {
     const svg = svgRef.current
     if (!svg) return null
@@ -295,8 +319,14 @@ function ChartSvg(props: ChartSvgProps) {
     [clientXToSvgX, marginLeft, plotW, window.fromMs, window.toMs],
   )
 
-  const { yMin, yMax, series } = useMemo(() => {
-    if (!response) return { yMin: 0, yMax: 1, series: [] as Array<{ id: string; label: string; colour: string; points: Array<{ raw: number; t: number }> }> }
+  const { yMin, yMax, series, datumByMs } = useMemo(() => {
+    if (!response)
+      return {
+        yMin: 0,
+        yMax: 1,
+        series: [] as Array<{ id: string; label: string; colour: string; points: Array<{ raw: number; t: number }> }>,
+        datumByMs: [] as Array<{ t: number; values: Record<string, number | null> }>,
+      }
     const ids = response.metric.series.map((s) => s.id)
     let lo = Number.POSITIVE_INFINITY
     let hi = Number.NEGATIVE_INFINITY
@@ -332,7 +362,17 @@ function ChartSvg(props: ChartSvgProps) {
       }
       return { id: s.id, label: s.label, colour, points }
     })
-    return { yMin: lo, yMax: hi, series: seriesOut }
+    const datumByMs = response.data
+      .map((d) => {
+        const values: Record<string, number | null> = {}
+        for (const id of ids) {
+          const v = (d as MetricDatum)[id]
+          values[id] = typeof v === 'number' ? v : null
+        }
+        return { t: Date.parse(d.t), values }
+      })
+      .sort((a, b) => a.t - b.t)
+    return { yMin: lo, yMax: hi, series: seriesOut, datumByMs }
   }, [response])
 
   const yScale = useCallback(
@@ -340,7 +380,6 @@ function ChartSvg(props: ChartSvgProps) {
     [yMin, yMax, plotH, marginTop],
   )
 
-  // Pre-compute scaled paths.
   const seriesPaths = useMemo(() => {
     return series.map((s) => {
       const d = s.points
@@ -354,24 +393,54 @@ function ChartSvg(props: ChartSvgProps) {
     })
   }, [series, xScale, yScale])
 
-  // Pointer/touch state lives in refs so callbacks see the latest
-  // values without re-binding listeners. React state for `drag` is
-  // still used to drive the in-progress annotate-band visual.
   const [drag, setDrag] = useState<DragState | null>(null)
   const pinchRef = useRef<PinchState | null>(null)
   const activePointersRef = useRef<Map<number, { clientX: number }>>(new Map())
   const [hoverAnnotation, setHoverAnnotation] = useState<MetricAnnotationRecord | null>(null)
   const [pendingCreate, setPendingCreate] = useState<{ tStart: string; tEnd: string | null } | null>(null)
 
+  // ---- Hover read-out -----------------------------------------------------
+  // We track hover in local state for THIS chart's own readout (the
+  // tooltip + crosshair are rendered by this chart) AND publish the
+  // timestamp to the shared TimeAxisContext so other locked charts can
+  // draw their faint synchronised crosshairs.
+  const [hoverMs, setHoverMs] = useState<number | null>(null)
+  // External (other-chart-originated) hover so we can render the faint
+  // synchronised crosshair when *some other* card is being hovered.
+  const [externalHoverMs, setExternalHoverMs] = useState<number | null>(sharedAxis.getHoverMs())
+  useEffect(() => {
+    return sharedAxis.subscribeHover((ms) => {
+      // Only react when this chart isn't the source. We can tell
+      // by comparing: if our local hoverMs is set and equals ms, it's
+      // our own publish coming back; otherwise it's external.
+      setExternalHoverMs(ms)
+    })
+  }, [sharedAxis])
+
+  const onPointerEnter = useCallback(
+    (e: React.PointerEvent<SVGSVGElement>) => {
+      const t = clientXToTime(e.clientX)
+      if (t === null) return
+      setHoverMs(t)
+      sharedAxis.publishHover(t)
+    },
+    [clientXToTime, sharedAxis],
+  )
+
+  const onPointerLeave = useCallback(() => {
+    setHoverMs(null)
+    sharedAxis.publishHover(null)
+  }, [sharedAxis])
+
   const onPointerDown = useCallback(
     (e: React.PointerEvent<SVGSVGElement>) => {
+      if (!interactive) return
       if (e.button !== 0 && e.pointerType === 'mouse') return
       const t = clientXToTime(e.clientX)
       if (t === null) return
       activePointersRef.current.set(e.pointerId, { clientX: e.clientX })
 
       if (activePointersRef.current.size === 2) {
-        // Two-finger pinch begins. Cancel any in-flight pan.
         setDrag(null)
         const ids = Array.from(activePointersRef.current.keys())
         const a = activePointersRef.current.get(ids[0]!)!
@@ -413,7 +482,7 @@ function ChartSvg(props: ChartSvgProps) {
       }
       svgRef.current?.setPointerCapture(e.pointerId)
     },
-    [annotateMode, clientXToTime, window],
+    [annotateMode, clientXToTime, interactive, window],
   )
 
   const onPointerMove = useCallback(
@@ -423,7 +492,14 @@ function ChartSvg(props: ChartSvgProps) {
         tracked.clientX = e.clientX
       }
 
-      // Pinch zoom wins over pan when two pointers are active.
+      // Always update hover for the readout, even mid-drag — the operator
+      // wants to see "what value was here" while panning.
+      const t = clientXToTime(e.clientX)
+      if (t !== null) {
+        setHoverMs(t)
+        sharedAxis.publishHover(t)
+      }
+
       if (pinchRef.current) {
         const a = activePointersRef.current.get(pinchRef.current.p1.id)
         const b = activePointersRef.current.get(pinchRef.current.p2.id)
@@ -431,22 +507,18 @@ function ChartSvg(props: ChartSvgProps) {
           const distance = Math.max(1, Math.abs(b.clientX - a.clientX))
           const factor = pinchRef.current.startDistancePx / distance
           const origin = pinchRef.current.originWindow
-          const t = pinchRef.current.midpointMs
+          const tMid = pinchRef.current.midpointMs
           setWindow({
-            fromMs: t - (t - origin.fromMs) * factor,
-            toMs: t + (origin.toMs - t) * factor,
+            fromMs: tMid - (tMid - origin.fromMs) * factor,
+            toMs: tMid + (origin.toMs - tMid) * factor,
           })
         }
         return
       }
 
       if (!drag) return
-      const t = clientXToTime(e.clientX)
       if (t === null) return
       if (drag.kind === 'pan') {
-        // Anchor: original mouse position on press should still map to
-        // drag.startMs. Compute the time-delta the cursor has moved
-        // since press and shift the window by the opposite amount.
         const span = drag.originWindow.toMs - drag.originWindow.fromMs
         const dxPx = e.clientX - drag.startClientX
         const dMs = (dxPx / plotW) * span
@@ -455,7 +527,7 @@ function ChartSvg(props: ChartSvgProps) {
         setDrag({ ...drag, currentMs: t, currentClientX: e.clientX })
       }
     },
-    [clientXToTime, drag, plotW, setWindow],
+    [clientXToTime, drag, plotW, setWindow, sharedAxis],
   )
 
   const finishPointer = useCallback(
@@ -479,30 +551,19 @@ function ChartSvg(props: ChartSvgProps) {
       try {
         svgRef.current?.releasePointerCapture(e.pointerId)
       } catch {
-        // releasePointerCapture throws if capture was already released,
-        // which is normal on cancel — silently ignore.
+        /* normal on cancel */
       }
     },
     [drag],
   )
 
-  const onWheel = useCallback(
-    (e: React.WheelEvent<SVGSVGElement>) => {
-      // We can't preventDefault inside React's synthetic wheel handler
-      // (the listener is passive by default since React 17). Use a
-      // non-passive listener via ref instead, attached in the effect
-      // below. This synthetic handler still runs first; we keep it
-      // simple here and let the native listener do the math.
-      e.stopPropagation()
-    },
-    [],
-  )
+  const onWheel = useCallback((e: React.WheelEvent<SVGSVGElement>) => {
+    e.stopPropagation()
+  }, [])
 
-  // Native wheel handler so we can preventDefault and avoid page-scroll
-  // while the operator zooms.
   useEffect(() => {
     const svg = svgRef.current
-    if (!svg) return
+    if (!svg || !interactive) return
     function handler(this: SVGSVGElement, ev: WheelEvent) {
       ev.preventDefault()
       const t = clientXToTime(ev.clientX)
@@ -515,7 +576,7 @@ function ChartSvg(props: ChartSvgProps) {
     }
     svg.addEventListener('wheel', handler, { passive: false })
     return () => svg.removeEventListener('wheel', handler)
-  }, [clientXToTime, setWindow, window.fromMs, window.toMs])
+  }, [clientXToTime, interactive, setWindow, window.fromMs, window.toMs])
 
   const handleCreate = useCallback(
     async (payload: { title: string; body: string; tag: string | null; scope: string }) => {
@@ -549,6 +610,32 @@ function ChartSvg(props: ChartSvgProps) {
 
   const hasData = !!response && response.data.length > 0 && seriesPaths.some((s) => s.d.length > 0)
 
+  // Snap hover (this chart's own OR external from a sibling card) to the
+  // nearest datum bucket for tooltip / crosshair readout.
+  const nearestForHover = useMemo(() => {
+    const probeMs = hoverMs ?? externalHoverMs
+    if (probeMs == null || datumByMs.length === 0) return null
+    // Only show if probe is inside the visible window (with a small pad).
+    const pad = (window.toMs - window.fromMs) * 0.02
+    if (probeMs < window.fromMs - pad || probeMs > window.toMs + pad) return null
+    // Binary search.
+    let lo = 0
+    let hi = datumByMs.length - 1
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1
+      if (datumByMs[mid]!.t < probeMs) lo = mid + 1
+      else hi = mid
+    }
+    const cand = datumByMs[lo]!
+    const prev = lo > 0 ? datumByMs[lo - 1]! : cand
+    return Math.abs(cand.t - probeMs) < Math.abs(prev.t - probeMs) ? cand : prev
+  }, [datumByMs, externalHoverMs, hoverMs, window.fromMs, window.toMs])
+
+  // Whether THIS chart owns the hover (we render the full tooltip).
+  // If the hover came from another chart, we only render the faint sync crosshair.
+  const ownsHover = hoverMs != null
+  const crosshairMs = ownsHover ? hoverMs : externalHoverMs
+
   return (
     <div className="metric-chart-svg-wrap" ref={wrapRef}>
       <svg
@@ -559,14 +646,16 @@ function ChartSvg(props: ChartSvgProps) {
         className="metric-chart-svg"
         role="img"
         aria-label={`Time series chart for ${metricId}`}
-        tabIndex={0}
+        tabIndex={interactive ? 0 : -1}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={finishPointer}
         onPointerCancel={finishPointer}
+        onPointerEnter={onPointerEnter}
+        onPointerLeave={onPointerLeave}
         onWheel={onWheel}
         onKeyDown={(e) => {
-          // Keyboard pan/zoom for accessibility.
+          if (!interactive) return
           const span = window.toMs - window.fromMs
           if (e.key === 'ArrowLeft') {
             e.preventDefault()
@@ -585,11 +674,10 @@ function ChartSvg(props: ChartSvgProps) {
           }
         }}
         style={{
-          touchAction: 'none',
-          cursor: annotateMode ? 'crosshair' : drag?.kind === 'pan' ? 'grabbing' : 'grab',
+          touchAction: interactive ? 'none' : 'auto',
+          cursor: !interactive ? 'pointer' : annotateMode ? 'crosshair' : drag?.kind === 'pan' ? 'grabbing' : 'crosshair',
         }}
       >
-        {/* Plot area background — explicit so taps register everywhere */}
         <rect
           x={marginLeft}
           y={marginTop}
@@ -598,11 +686,9 @@ function ChartSvg(props: ChartSvgProps) {
           fill="rgba(255,255,255,0.001)"
         />
 
-        {/* Y axis baseline */}
         <line x1={marginLeft} x2={width - marginRight} y1={marginTop + plotH} y2={marginTop + plotH} stroke="#ccc" />
         <line x1={marginLeft} x2={marginLeft} y1={marginTop} y2={marginTop + plotH} stroke="#ccc" />
 
-        {/* Y axis labels (just min / max) */}
         <text x={marginLeft - 4} y={marginTop + 10} fontSize="10" textAnchor="end" fill="#555">
           {compactNumber(yMax)}
         </text>
@@ -610,7 +696,6 @@ function ChartSvg(props: ChartSvgProps) {
           {compactNumber(yMin)}
         </text>
 
-        {/* X axis labels: from / to */}
         <text x={marginLeft} y={height - 8} fontSize="10" fill="#555">
           {shortDate(window.fromMs)}
         </text>
@@ -618,12 +703,10 @@ function ChartSvg(props: ChartSvgProps) {
           {shortDate(window.toMs)}
         </text>
 
-        {/* Series paths */}
         {seriesPaths.map((s) => (
           <path key={s.id} d={s.d} fill="none" stroke={s.colour} strokeWidth="1.5" />
         ))}
 
-        {/* Range-annotation shading */}
         {annotations
           .filter((a) => a.tEnd !== null)
           .map((a) => {
@@ -644,29 +727,26 @@ function ChartSvg(props: ChartSvgProps) {
             )
           })}
 
-        {/* Annotation markers: 4-px coloured tick at the bottom plus a
-            generous 24px-wide invisible tap target so touch can land it
-            without precision aim. */}
         {annotations.map((a) => {
           const x = xScale(Date.parse(a.tStart))
           const colour = annotationColour(a.tag)
           return (
             <g
               key={a.id}
-              role="button"
-              tabIndex={0}
+              role={interactive ? 'button' : undefined}
+              tabIndex={interactive ? 0 : undefined}
               aria-label={`Annotation: ${a.title}`}
-              onClick={(e) => {
+              onClick={interactive ? (e) => {
                 e.stopPropagation()
                 setHoverAnnotation(a)
-              }}
-              onKeyDown={(e) => {
+              } : undefined}
+              onKeyDown={interactive ? (e) => {
                 if (e.key === 'Enter' || e.key === ' ') {
                   e.preventDefault()
                   setHoverAnnotation(a)
                 }
-              }}
-              style={{ cursor: 'pointer' }}
+              } : undefined}
+              style={{ cursor: interactive ? 'pointer' : 'default' }}
             >
               <rect
                 x={x - 12}
@@ -674,6 +754,7 @@ function ChartSvg(props: ChartSvgProps) {
                 width={24}
                 height={plotH}
                 fill="transparent"
+                pointerEvents={interactive ? 'auto' : 'none'}
               />
               <rect x={x - 1} y={marginTop + plotH - 4} width={2} height={4} fill={colour} />
               <circle cx={x} cy={marginTop + plotH - 6} r={3} fill={colour} fillOpacity={0.6} />
@@ -681,7 +762,6 @@ function ChartSvg(props: ChartSvgProps) {
           )
         })}
 
-        {/* In-progress annotate drag preview */}
         {drag?.kind === 'annotate' ? (
           <rect
             x={xScale(Math.min(drag.startMs, drag.currentMs))}
@@ -692,6 +772,40 @@ function ChartSvg(props: ChartSvgProps) {
             fillOpacity={0.15}
             pointerEvents="none"
           />
+        ) : null}
+
+        {/* Crosshair + readout dots for hover */}
+        {crosshairMs != null && nearestForHover ? (
+          <g pointerEvents="none">
+            <line
+              x1={xScale(nearestForHover.t)}
+              x2={xScale(nearestForHover.t)}
+              y1={marginTop}
+              y2={marginTop + plotH}
+              stroke={ownsHover ? '#444' : '#bbb'}
+              strokeWidth={ownsHover ? 1 : 1}
+              strokeDasharray={ownsHover ? undefined : '3 3'}
+              opacity={ownsHover ? 0.85 : 0.6}
+            />
+            {ownsHover
+              ? series.map((s, i) => {
+                  const v = nearestForHover.values[s.id]
+                  if (v == null) return null
+                  const colour = s.colour ?? FALLBACK_COLOURS[i % FALLBACK_COLOURS.length]
+                  return (
+                    <circle
+                      key={`hov-${s.id}`}
+                      cx={xScale(nearestForHover.t)}
+                      cy={yScale(v)}
+                      r={3.5}
+                      fill={colour}
+                      stroke="#fff"
+                      strokeWidth={1.5}
+                    />
+                  )
+                })
+              : null}
+          </g>
         ) : null}
 
         {loading && !response ? (
@@ -710,6 +824,16 @@ function ChartSvg(props: ChartSvgProps) {
       <ChartLegend series={response?.metric.series ?? []} />
 
       {error ? <div className="metric-chart-error">⚠ {error}</div> : null}
+
+      {/* Hover read-out — appears only when this chart owns the hover and we
+          have a nearest bucket to talk about. Positioned absolute so it never
+          shifts the page; CSS pins it inside the chart wrap. */}
+      {ownsHover && nearestForHover ? (
+        <HoverReadout
+          series={series}
+          datum={nearestForHover}
+        />
+      ) : null}
 
       {hoverAnnotation ? (
         <AnnotationTooltip
@@ -730,6 +854,53 @@ function ChartSvg(props: ChartSvgProps) {
           onSubmit={handleCreate}
         />
       ) : null}
+    </div>
+  )
+}
+
+function HoverReadout({
+  series,
+  datum,
+}: {
+  series: ReadonlyArray<{ id: string; label: string; colour: string }>
+  datum: { t: number; values: Record<string, number | null> }
+}) {
+  const total = useMemo(() => {
+    let t = 0
+    let n = 0
+    for (const s of series) {
+      const v = datum.values[s.id]
+      if (typeof v === 'number') {
+        t += v
+        n += 1
+      }
+    }
+    return n > 1 ? t : null
+  }, [series, datum])
+  return (
+    <div className="metric-chart-readout" aria-live="polite">
+      <div className="metric-chart-readout-time">{shortDateLong(datum.t)}</div>
+      <ul className="metric-chart-readout-list">
+        {series.map((s) => {
+          const v = datum.values[s.id]
+          return (
+            <li key={s.id}>
+              <span className="metric-chart-readout-swatch" style={{ background: s.colour }} />
+              <span className="metric-chart-readout-label">{s.label}</span>
+              <span className="metric-chart-readout-value">
+                {typeof v === 'number' ? compactNumber(v) : '—'}
+              </span>
+            </li>
+          )
+        })}
+        {total != null ? (
+          <li className="metric-chart-readout-total">
+            <span className="metric-chart-readout-swatch" style={{ background: 'transparent' }} />
+            <span className="metric-chart-readout-label">Total</span>
+            <span className="metric-chart-readout-value">{compactNumber(total)}</span>
+          </li>
+        ) : null}
+      </ul>
     </div>
   )
 }
@@ -762,7 +933,6 @@ function ScreenReaderSummary({
   window: TimeWindow
   loading: boolean
 }) {
-  // Announce window + last value per series for screen readers.
   return (
     <div className="sr-only" role="status" aria-live="polite">
       {loading && !response
@@ -880,7 +1050,10 @@ function AnnotationCreateForm({ metricId, pending, onCancel, onSubmit }: Annotat
   const [title, setTitle] = useState('')
   const [body, setBody] = useState('')
   const [tag, setTag] = useState('note')
-  const [scope, setScope] = useState<'global' | 'metric'>('metric')
+  // Default to GLOBAL so an annotation drops a cross-chart event indicator
+  // by default, matching the parent epic spec ("have an event indicator on
+  // other graphs at that moment that can hoverover to see details").
+  const [scope, setScope] = useState<'global' | 'metric'>('global')
   const [submitting, setSubmitting] = useState(false)
   const [submitError, setSubmitError] = useState<string | null>(null)
   return (
@@ -909,8 +1082,8 @@ function AnnotationCreateForm({ metricId, pending, onCancel, onSubmit }: Annotat
       <label>
         scope{' '}
         <select value={scope} onChange={(e) => setScope(e.target.value as 'global' | 'metric')}>
+          <option value="global">global (event on every chart)</option>
           <option value="metric">this chart only</option>
-          <option value="global">global (every chart)</option>
         </select>
       </label>
       {submitError ? <p className="metric-chart-error">{submitError}</p> : null}
@@ -956,14 +1129,12 @@ function compactNumber(v: number): string {
 }
 
 function shortDate(ms: number): string {
-  // "MM-DD HH:mm" — short enough for mobile, dense enough to disambiguate.
   const d = new Date(ms)
   const pad = (n: number) => String(n).padStart(2, '0')
   return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
 }
 
 function shortDateLong(ms: number): string {
-  // YYYY-MM-DD HH:mm in local time.
   const d = new Date(ms)
   const pad = (n: number) => String(n).padStart(2, '0')
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(

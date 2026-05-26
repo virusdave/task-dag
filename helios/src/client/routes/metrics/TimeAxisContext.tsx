@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useMemo, useState, type ReactNode } from 'react'
+import { createContext, useCallback, useContext, useMemo, useRef, useState, type ReactNode } from 'react'
 
 /**
  * Page-level shared time axis. Every `<MetricChart/>` on the /metrics
@@ -10,15 +10,32 @@ import { createContext, useCallback, useContext, useMemo, useState, type ReactNo
  * `setWindow` when locked, so every other locked chart re-renders to
  * match. When unlocked, the chart keeps its own local `window` in
  * component state and ignores the context updates.
+ *
+ * The context also carries a shared `hoverMs` so hovering one card on
+ * a multi-card dashboard renders a faint synchronised crosshair on every
+ * other locked card at the same timestamp. Hover updates are intentionally
+ * NOT routed through React state for every pointermove — that re-renders
+ * every chart on the page at pointer-event frequency. Instead, we keep a
+ * ref + per-chart subscriber list so charts that care can subscribe with
+ * a low-cost callback, draw their crosshair imperatively, and skip the
+ * render path entirely.
  */
 export interface TimeWindow {
   readonly fromMs: number
   readonly toMs: number
 }
 
+export type HoverListener = (ms: number | null) => void
+
 export interface TimeAxisContextValue {
   window: TimeWindow
   setWindow: (next: TimeWindow) => void
+  /** Publish a hover timestamp (or null to clear). All subscribed charts run their listeners. */
+  publishHover: (ms: number | null) => void
+  /** Subscribe to hover changes. Returns an unsubscribe fn. */
+  subscribeHover: (fn: HoverListener) => () => void
+  /** Read the most recent hover ms synchronously (e.g. when a chart first mounts). */
+  getHoverMs: () => number | null
 }
 
 const TimeAxisContext = createContext<TimeAxisContextValue | null>(null)
@@ -33,7 +50,32 @@ export function TimeAxisProvider({ initial, children }: TimeAxisProviderProps) {
   const setWindow = useCallback((next: TimeWindow) => {
     setWindowState(clampWindow(next))
   }, [])
-  const value = useMemo<TimeAxisContextValue>(() => ({ window, setWindow }), [window, setWindow])
+
+  const hoverMsRef = useRef<number | null>(null)
+  const listenersRef = useRef<Set<HoverListener>>(new Set())
+  const publishHover = useCallback((ms: number | null) => {
+    if (hoverMsRef.current === ms) return
+    hoverMsRef.current = ms
+    for (const fn of listenersRef.current) {
+      try {
+        fn(ms)
+      } catch {
+        /* never let one bad listener break others */
+      }
+    }
+  }, [])
+  const subscribeHover = useCallback((fn: HoverListener) => {
+    listenersRef.current.add(fn)
+    return () => {
+      listenersRef.current.delete(fn)
+    }
+  }, [])
+  const getHoverMs = useCallback(() => hoverMsRef.current, [])
+
+  const value = useMemo<TimeAxisContextValue>(
+    () => ({ window, setWindow, publishHover, subscribeHover, getHoverMs }),
+    [window, setWindow, publishHover, subscribeHover, getHoverMs],
+  )
   return <TimeAxisContext.Provider value={value}>{children}</TimeAxisContext.Provider>
 }
 

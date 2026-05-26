@@ -38,11 +38,27 @@ const STUB_METRICS: readonly MetricDef[] = [
   ...P6_METRICS,
 ]
 
+// URL the dashboard surfaces on every "Data pending" placeholder card.
+// Points operators back at the parent epic that tracks the remaining
+// data-ingest work so they can click through and read context without
+// having to ask in chat.
+const PENDING_FOLLOWUP_URL = 'https://github.com/virusdave/top-level/issues/7'
+
+function tagAsPending(metric: MetricDef): MetricDef {
+  return { ...metric, dataStatus: 'pending', blockedByUrl: PENDING_FOLLOWUP_URL }
+}
+function tagAsDemo(metric: MetricDef): MetricDef {
+  return { ...metric, dataStatus: 'demo' }
+}
+function tagAsReal(metric: MetricDef): MetricDef {
+  return { ...metric, dataStatus: 'real' }
+}
+
 const METRICS: readonly MetricDef[] = [
-  demoFlatLine,
-  demoRandomWalk,
-  ...STUB_METRICS.filter((m) => !REAL_METRIC_IDS.has(m.id)),
-  ...REAL_METRICS,
+  tagAsDemo(demoFlatLine),
+  tagAsDemo(demoRandomWalk),
+  ...STUB_METRICS.filter((m) => !REAL_METRIC_IDS.has(m.id)).map(tagAsPending),
+  ...REAL_METRICS.map(tagAsReal),
 ]
 
 const METRICS_BY_ID = new Map<string, MetricDef>(METRICS.map((m) => [m.id, m]))
