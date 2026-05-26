@@ -173,14 +173,31 @@ export async function listGroupsForReview(
         from catalog_market_matches
         group by catalog_group_id
       ),
+      -- Resolve each catalog brand's effective LitAlerts brand-norm
+      -- key, honoring operator-confirmed overrides over the raw
+      -- catalog brand name. An explicit null override (operator
+      -- recorded "no LitAlerts equivalent") yields zero rows so the
+      -- structured-match path correctly skips it.
+      brand_effective as (
+        select cg.brand_name as catalog_brand_name,
+               case
+                 when ov.catalog_brand_name is not null and ov.litalerts_brand_id is null then null
+                 when ov.litalerts_brand_name is not null then lower(trim(ov.litalerts_brand_name))
+                 else lower(trim(cg.brand_name))
+               end as effective_brand_norm
+        from (select distinct brand_name from catalog_groups where brand_name is not null) cg
+        left join catalog_litalerts_brand_overrides ov
+          on ov.catalog_brand_name = cg.brand_name
+      ),
       group_structured_fuzzy as (
         select cg.id as catalog_group_id,
                count(*) as structured_fuzzy_count
         from catalog_groups cg
+        join brand_effective be on be.catalog_brand_name = cg.brand_name
         join fuzzy_skus fs
           on fs.source_kind = 'litalerts_partner_product'
-         and fs.brand_norm = lower(trim(cg.brand_name))
-        where cg.brand_name is not null
+         and fs.brand_norm = be.effective_brand_norm
+        where cg.brand_name is not null and be.effective_brand_norm is not null
         group by cg.id
       )
       select
@@ -225,12 +242,21 @@ export async function listGroupsForReview(
             and o.product_id = (product ->> 'productId')::int
         )
         -- (b) or at least one structured fuzzy_sku matches the brand
+        -- (preferring the operator-confirmed override if any; an
+        -- explicit-null override correctly excludes this path so the
+        -- group only shows up via (a) observations).
         or (
           cg.brand_name is not null
           and exists (
             select 1 from fuzzy_skus fs
+            left join catalog_litalerts_brand_overrides ov
+              on ov.catalog_brand_name = cg.brand_name
             where fs.source_kind = 'litalerts_partner_product'
-              and fs.brand_norm = lower(trim(cg.brand_name))
+              and fs.brand_norm = case
+                when ov.catalog_brand_name is not null and ov.litalerts_brand_id is null then null
+                when ov.litalerts_brand_name is not null then lower(trim(ov.litalerts_brand_name))
+                else lower(trim(cg.brand_name))
+              end
           )
         )
       )
@@ -357,18 +383,38 @@ export async function loadGroupReview(db: Queryable, catalogGroupId: number): Pr
   }
 
   if (group.brand_name) {
-    const structuredFuzzy = await db.query<typeof fuzzyRows[number]>(
-      `select id, source_kind, source_listing_id, raw_input_jsonb, parsed_jsonb,
-              brand_norm, category_norm, subcategory_norm,
-              size_g_norm::text, size_mg_norm::text, pack_count_norm, strain_norm
-       from fuzzy_skus
-       where source_kind = 'litalerts_partner_product'
-         and brand_norm = lower(trim($1))
-       order by created_at desc
-       limit 500`,
+    // Resolve effective brand-norm via override table; explicit-null
+    // override means "no LitAlerts equivalent" so skip the structured
+    // pull entirely.
+    const overrideLookup = await db.query<{ litalerts_brand_id: string | null; litalerts_brand_name: string | null }>(
+      `select litalerts_brand_id::text as litalerts_brand_id, litalerts_brand_name
+         from catalog_litalerts_brand_overrides
+        where catalog_brand_name = $1`,
       [group.brand_name],
     )
-    fuzzyRows.push(...structuredFuzzy.rows)
+    let effectiveBrandNorm: string | null = group.brand_name.toLowerCase().trim()
+    if (overrideLookup.rows.length > 0) {
+      const ov = overrideLookup.rows[0]
+      if (ov.litalerts_brand_id == null) {
+        effectiveBrandNorm = null
+      } else if (ov.litalerts_brand_name) {
+        effectiveBrandNorm = ov.litalerts_brand_name.toLowerCase().trim()
+      }
+    }
+    if (effectiveBrandNorm != null) {
+      const structuredFuzzy = await db.query<typeof fuzzyRows[number]>(
+        `select id, source_kind, source_listing_id, raw_input_jsonb, parsed_jsonb,
+                brand_norm, category_norm, subcategory_norm,
+                size_g_norm::text, size_mg_norm::text, pack_count_norm, strain_norm
+         from fuzzy_skus
+         where source_kind = 'litalerts_partner_product'
+           and brand_norm = $1
+         order by created_at desc
+         limit 500`,
+        [effectiveBrandNorm],
+      )
+      fuzzyRows.push(...structuredFuzzy.rows)
+    }
   }
 
   const fuzzyResult = { rows: fuzzyRows }
