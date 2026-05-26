@@ -260,6 +260,14 @@ const SENTINELS: MigrationSentinel[] = [
       (await tableExists(db, 'sweed_orders')) &&
       (await tableExists(db, 'sweed_orders_ingest_highwater')),
   },
+  {
+    migrationId: '032_sweed_package_snapshots',
+    label:
+      'sweed_package_snapshots + sweed_package_snapshots_ingest_state — backs the per-package versioned snapshot worker (automation#24, sibling of automation#22, unblocker of #21 COGS / margin / inventory metrics). Without this the per-PACKAGE wholesale cost data does not exist in helios and the worker will fail to start.',
+    check: async (db) =>
+      (await tableExists(db, 'sweed_package_snapshots')) &&
+      (await tableExists(db, 'sweed_package_snapshots_ingest_state')),
+  },
 ]
 
 interface CacheEntry {

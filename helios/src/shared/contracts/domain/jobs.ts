@@ -45,6 +45,7 @@ export const JobTypeSchema = z.enum([
   'config.workers.edible_thc_clamp',
   'config.workers.litalerts_retailer_backfill',
   'config.workers.sweed_orders_ingest',
+  'config.workers.sweed_package_snapshots',
   'catalog.maintenance.upload_group_image',
 ])
 export type JobType = z.infer<typeof JobTypeSchema>
@@ -320,6 +321,31 @@ export const ConfigWorkersSweedOrdersIngestJobPayloadSchema = z.object({
 })
 export type ConfigWorkersSweedOrdersIngestJobPayload = z.infer<
   typeof ConfigWorkersSweedOrdersIngestJobPayloadSchema
+>
+
+/**
+ * Sweed per-package snapshot worker payload.
+ *
+ * One scheduler tick = one job per dealer. The handler pages through
+ * `store.inventory.item.list.grouped` (with `isOnStock: false` so
+ * sold-through packages remain visible for historical-cost joins) and
+ * writes a new row into `sweed_package_snapshots` whenever the
+ * observed shape changes (cost, qty, lab, expiration, location),
+ * else bumps `observed_at_max`.
+ *
+ * No highwater / cursor — the grouped feed is full-scan per tick.
+ * The 02:00–08:00 ET quiet window keeps the Sweed RPC budget free
+ * for overnight historical-backfill jobs (#22).
+ *
+ * See FreshlyBakedNYC/automation#24.
+ */
+export const ConfigWorkersSweedPackageSnapshotsJobPayloadSchema = z.object({
+  requestedByUserId: z.number().int().positive().nullable().optional(),
+  siteDealerIds: z.array(z.number().int().positive()).default([]),
+  trigger: z.enum(['manual_run', 'scheduled']).default('scheduled'),
+})
+export type ConfigWorkersSweedPackageSnapshotsJobPayload = z.infer<
+  typeof ConfigWorkersSweedPackageSnapshotsJobPayloadSchema
 >
 
 /**

@@ -11,6 +11,7 @@ import {
   MARKET_EVIDENCE_ALARM_DEFAULT_SCHEDULE_WINDOWS,
   STOCK_DEFAULT_SCHEDULE_WINDOWS,
   SWEED_ORDERS_INGEST_DEFAULT_SCHEDULE_WINDOWS,
+  SWEED_PACKAGE_SNAPSHOTS_DEFAULT_SCHEDULE_WINDOWS,
   getConfigBackgroundTaskDefinition,
   type ConfigBackgroundTaskKey,
   type ConfigWorkerSchedule,
@@ -151,6 +152,7 @@ const DEFAULT_WINDOWS_BY_TASK_KEY: Partial<
   'workers.scheduling.catalog': CATALOG_DEFAULT_SCHEDULE_WINDOWS,
   'workers.scheduling.edible_thc_clamp': EDIBLE_THC_CLAMP_DEFAULT_SCHEDULE_WINDOWS,
   'workers.scheduling.sweed_orders_ingest': SWEED_ORDERS_INGEST_DEFAULT_SCHEDULE_WINDOWS,
+  'workers.scheduling.sweed_package_snapshots': SWEED_PACKAGE_SNAPSHOTS_DEFAULT_SCHEDULE_WINDOWS,
 }
 
 export async function ensureDefaultConfigSchedules(db: Queryable = getPool()): Promise<void> {

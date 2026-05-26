@@ -19,6 +19,7 @@ export const CONFIG_BACKGROUND_TASK_KEYS = [
   'workers.scheduling.market_evidence_alarm',
   'workers.scheduling.stock',
   'workers.scheduling.sweed_orders_ingest',
+  'workers.scheduling.sweed_package_snapshots',
 ] as const
 export const ConfigBackgroundTaskKeySchema = z.enum(CONFIG_BACKGROUND_TASK_KEYS)
 export type ConfigBackgroundTaskKey = z.infer<typeof ConfigBackgroundTaskKeySchema>
@@ -89,6 +90,13 @@ export const CONFIG_BACKGROUND_TASKS: ReadonlyArray<ConfigBackgroundTaskDefiniti
     slug: 'sweed-orders-ingest',
     implemented: true,
     summary: 'Polls store.sale.invoice.list every 5 minutes per dealer, materialising completed invoices into the helios-owned sweed_orders table. Maintains a per-dealer highwater mark so worker crashes do not lose rows, and concurrently walks each dealer\'s history day-by-day back to the store-opening date. Backs the real-data implementations of every P2–P6 metric on the /metrics page tree.',
+  },
+  {
+    key: 'workers.scheduling.sweed_package_snapshots',
+    label: 'Sweed package snapshots',
+    slug: 'sweed-package-snapshots',
+    implemented: true,
+    summary: 'Polls store.inventory.item.list.grouped (with isOnStock:false so sold-through packages remain visible) every 5 minutes per dealer during 08:00–02:00 ET. Versioned snapshot per (dealer, inventory_item_id): inserts a new row whenever the observed shape changes (wholesale cost, qty, lab, expiration, location), otherwise bumps observed_at_max. Unblocks the COGS / margin / inventory metrics on the /metrics page tree because wholesale cost is a per-PACKAGE attribute that Sweed does NOT expose on the invoice envelope. See automation#24.',
   },
 ]
 
@@ -307,3 +315,30 @@ export const HELIOS_SWEED_DEALER_OPENING_DATES: Readonly<Record<number, string>>
   210249: '2025-07-15', // Bronx
   210705: '2026-04-01', // Midtown
 }
+
+/**
+ * Default schedule for the Sweed package-snapshot worker.
+ *
+ * Operator-directed cadence (2026-05-26):
+ *   "If done on a 5-minute cadence from 8am to 2am, and versioned per-
+ *    package for historical record, then this should be trivial to
+ *    join as needed."
+ *
+ * We honour that as one wrap-across-midnight window: `[08:00, 02:00)`
+ * ET, every 5 minutes. The 02:00–08:00 quiet block intentionally
+ * leaves Sweed RPC budget for overnight historical-backfill jobs.
+ *
+ * See FreshlyBakedNYC/automation#24.
+ */
+export const SWEED_PACKAGE_SNAPSHOTS_DEFAULT_SCHEDULE_WINDOWS: ReadonlyArray<
+  Omit<ConfigWorkerScheduleWindow, 'id'>
+> = [
+  {
+    weekdayMask: WEEKDAY_MASK_ALL,
+    windowStartMinute: 8 * 60,   // 08:00
+    windowEndMinute: 2 * 60,     // 02:00 (next day; wrapping window)
+    intervalMinutes: 5,
+    paused: false,
+    notes: 'Per-dealer package-snapshot sweep via store.inventory.item.list.grouped (isOnStock:false). Quiet 02:00–08:00 ET leaves Sweed budget for overnight historical backfills.',
+  },
+]
