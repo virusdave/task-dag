@@ -503,7 +503,14 @@ async function enqueueScheduledSweedOrdersIngest(
       payload: {
         siteDealerIds,
         trigger: 'scheduled',
-        backfillDays: 1,
+        // Each scheduler tick backfills this many historical days
+        // per dealer. At 5-min tick cadence and ~1-2 s per
+        // listSaleInvoices() call (with the pageSize=50 cap), 5
+        // days/tick = ~60 days/hour, so Bronx (opens 2025-07-15,
+        // ~315 days) finishes in ~5 h and Midtown (opens
+        // 2026-04-01, ~55 days) finishes in ~1 h. Well under any
+        // Sweed rate ceiling.
+        backfillDays: 5,
       },
       requestedByUserId: null,
       runAt: now,

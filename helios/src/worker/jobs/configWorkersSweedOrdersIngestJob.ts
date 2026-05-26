@@ -226,6 +226,21 @@ function nyDateString(d: Date): string {
   return `${String(y).padStart(4, '0')}-${String(m).padStart(2, '0')}-${String(day).padStart(2, '0')}`
 }
 
+/** Postgres `date` columns come back through the pg driver as JS
+ *  Date objects in our worker (no custom type parser is registered).
+ *  This helper accepts either shape and returns the canonical
+ *  "YYYY-MM-DD" string the rest of the worker assumes. */
+function coerceCursorToIso(value: string | Date | null): string | null {
+  if (value === null) return null
+  if (typeof value === 'string') return value
+  // Date objects from pg are "midnight UTC of the date" — formatting
+  // back as YYYY-MM-DD via UTC components is correct.
+  const y = value.getUTCFullYear()
+  const m = value.getUTCMonth() + 1
+  const d = value.getUTCDate()
+  return `${String(y).padStart(4, '0')}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`
+}
+
 /** Subtract one day from a "YYYY-MM-DD" string. */
 function decrementIsoDate(iso: string): string {
   const [yStr, mStr, dStr] = iso.split('-')
@@ -382,9 +397,12 @@ interface HighwaterState {
 async function ensureHighwaterRow(dealerId: number): Promise<HighwaterState> {
   return withTransaction(async (db) => {
     const existing = await db.query<{
-      highwater_pay_time: string
-      min_pay_time: string
-      backfill_cursor_day: string | null
+      highwater_pay_time: string | Date
+      min_pay_time: string | Date
+      // pg returns `date` columns as JS Dates, not strings. We
+      // coerce below so the rest of the code can treat the cursor
+      // uniformly as a "YYYY-MM-DD" string.
+      backfill_cursor_day: string | Date | null
     }>(
       `select highwater_pay_time, min_pay_time, backfill_cursor_day
          from sweed_orders_ingest_highwater
@@ -394,9 +412,9 @@ async function ensureHighwaterRow(dealerId: number): Promise<HighwaterState> {
     if (existing.rows.length === 1) {
       const r = existing.rows[0]!
       return {
-        highwaterPayTime: new Date(r.highwater_pay_time),
-        minPayTime: new Date(r.min_pay_time),
-        backfillCursorDay: r.backfill_cursor_day,
+        highwaterPayTime: new Date(r.highwater_pay_time as string),
+        minPayTime: new Date(r.min_pay_time as string),
+        backfillCursorDay: coerceCursorToIso(r.backfill_cursor_day),
       }
     }
     const openingIso = HELIOS_SWEED_DEALER_OPENING_DATES[dealerId]
