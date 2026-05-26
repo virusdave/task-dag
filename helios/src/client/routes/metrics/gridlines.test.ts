@@ -49,6 +49,31 @@ describe('niceYTicks', () => {
     const { ticks } = niceYTicks(7, 7, 5)
     expect(ticks).toEqual([7])
   })
+
+  // Regression: stepFractionDigits used to return 0 for step=2.5, causing
+  // niceYTicks(0, 12) to emit [0, 3, 5, 8, 10, 13] — exactly the
+  // "least-significant digit 3/7/9" outcome the operator forbade. Make
+  // sure we keep enough decimal precision for the 2.5×10^k family.
+  it('produces clean 2.5-step ticks for [0, 12] (regression: was 0/3/5/8/10/13)', () => {
+    const { ticks, step, fractionDigits } = niceYTicks(0, 12)
+    expect(step).toBe(2.5)
+    expect(fractionDigits).toBe(1)
+    expect(ticks).toEqual([0, 2.5, 5, 7.5, 10, 12.5])
+  })
+
+  it('produces clean 0.25-step ticks for [0, 1.2]', () => {
+    const { ticks, step, fractionDigits } = niceYTicks(0, 1.2)
+    expect(step).toBe(0.25)
+    expect(fractionDigits).toBe(2)
+    expect(ticks).toEqual([0, 0.25, 0.5, 0.75, 1, 1.25])
+  })
+
+  it('produces clean 0.025-step ticks for [0, 0.12]', () => {
+    const { ticks, step, fractionDigits } = niceYTicks(0, 0.12)
+    expect(step).toBe(0.025)
+    expect(fractionDigits).toBe(3)
+    expect(ticks).toEqual([0, 0.025, 0.05, 0.075, 0.1, 0.125])
+  })
 })
 
 describe('formatYTick', () => {
@@ -128,6 +153,21 @@ describe('bucketXTicks', () => {
       const d = new Date(t)
       expect(d.getUTCDate(), `tick ${d.toISOString()} not first-of-month`).toBe(1)
     }
+  })
+
+  it('degrades to fewer-but-still-aligned ticks for a year-long hour-grain window', () => {
+    // 1 year of hourly buckets is 8760 grain units. Even at target=8 the
+    // old hardcoded 96-step ceiling would produce ~90 ticks; the
+    // extended ladder should pick a much coarser step instead.
+    const yearMs = 365 * oneDay
+    const ticks = bucketXTicks({
+      fromMs: from,
+      toMs: from + yearMs,
+      agg: 'hour',
+      targetCount: 8,
+    })
+    expect(ticks.length).toBeLessThanOrEqual(16)
+    expect(ticks.length).toBeGreaterThan(2)
   })
 
   it('returns an empty array for categorical aggregations', () => {

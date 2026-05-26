@@ -87,14 +87,28 @@ export function niceYTicks(min: number, max: number, targetCount = 5): YTickSet 
   return { ticks, step, fractionDigits }
 }
 
+/**
+ * How many decimal places `step` needs so that representing tick values
+ * as `value.toFixed(digits)` doesn't lose information.
+ *
+ *   step = 1      → 0
+ *   step = 0.2    → 1
+ *   step = 2.5    → 1  ← critical: was 0, which made [0,12] emit
+ *                       [0, 3, 5, 8, 10, 13] (each tick rounded to int)
+ *   step = 0.25   → 2
+ *   step = 0.025  → 3
+ *   step = 200000 → 0
+ */
 function stepFractionDigits(step: number): number {
-  if (step >= 1) return 0
-  // e.g. step=0.2 → 1, step=0.025 → 3
-  return Math.max(0, -Math.floor(Math.log10(step)) + (looksLikeFraction(step) ? 0 : 0))
-}
-
-function looksLikeFraction(step: number): boolean {
-  return step < 1 && step > 0
+  if (!Number.isFinite(step) || step <= 0) return 0
+  const abs = Math.abs(step)
+  for (let digits = 0; digits <= 12; digits += 1) {
+    const scaled = abs * Math.pow(10, digits)
+    if (Math.abs(scaled - Math.round(scaled)) < 1e-9) {
+      return digits
+    }
+  }
+  return 12
 }
 
 /**
@@ -161,7 +175,24 @@ export function bucketXTicks(args: {
   }
 }
 
-const STEP_MULTIPLIER_LADDER: ReadonlyArray<number> = [1, 2, 3, 4, 6, 8, 12, 24, 48, 96]
+const STEP_MULTIPLIER_LADDER: ReadonlyArray<number> = [
+  1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64, 96,
+]
+
+/**
+ * Pick the smallest multiplier from the ladder >= `desired`. If `desired`
+ * is bigger than the ladder's tail, extend by doubling so very wide
+ * windows (e.g. a full year at hourly aggregation) still degrade
+ * gracefully instead of slamming into a hardcoded 96-tick cap.
+ */
+function pickBucketMultiplier(desired: number): number {
+  for (const m of STEP_MULTIPLIER_LADDER) {
+    if (m >= desired) return m
+  }
+  let m = STEP_MULTIPLIER_LADDER[STEP_MULTIPLIER_LADDER.length - 1]!
+  while (m < desired) m *= 2
+  return m
+}
 
 function walkFixedStep(
   fromMs: number,
@@ -172,14 +203,8 @@ function walkFixedStep(
 ): number[] {
   const span = toMs - fromMs
   const desiredStepMs = span / Math.max(1, targetCount)
-  // Pick smallest multiplier such that grainMs*mult >= desiredStepMs.
-  let multiplier = STEP_MULTIPLIER_LADDER[STEP_MULTIPLIER_LADDER.length - 1]!
-  for (const m of STEP_MULTIPLIER_LADDER) {
-    if (grainMs * m >= desiredStepMs) {
-      multiplier = m
-      break
-    }
-  }
+  const desiredMultiplier = desiredStepMs / grainMs
+  const multiplier = pickBucketMultiplier(desiredMultiplier)
   const stepMs = grainMs * multiplier
   // Snap fromMs DOWN to the nearest bucket boundary of `align`, so the
   // first tick lines up with the metric's underlying buckets.
@@ -224,15 +249,25 @@ function floorToAlign(ms: number, align: 'hour' | 'date' | 'week'): number {
 function walkCalendarMonths(fromMs: number, toMs: number, targetCount: number): number[] {
   const span = toMs - fromMs
   // Average month ≈ 30.44 days for the multiplier picker only.
-  const desiredStepMonths = Math.max(1, Math.round(span / (30.44 * DAY_MS) / Math.max(1, targetCount)))
-  // Snap to common month steps so labels are predictable.
+  const desiredStepMonths = Math.max(
+    1,
+    Math.ceil(span / (30.44 * DAY_MS) / Math.max(1, targetCount)),
+  )
+  // Snap to common month steps so labels are predictable. Beyond 2 years
+  // extend by whole-year multiples so multi-decade windows still pick a
+  // sensible step instead of capping at 24mo.
   const ladder = [1, 2, 3, 4, 6, 12, 24]
   let stepMonths = ladder[ladder.length - 1]!
+  let matched = false
   for (const m of ladder) {
     if (m >= desiredStepMonths) {
       stepMonths = m
+      matched = true
       break
     }
+  }
+  if (!matched) {
+    stepMonths = Math.ceil(desiredStepMonths / 12) * 12
   }
   const from = new Date(fromMs)
   // Snap to first-of-month UTC at or before fromMs.

@@ -401,12 +401,17 @@ function ChartSvg(props: ChartSvgProps) {
     return niceYTicks(yMin, yMax, target)
   }, [yMin, yMax, interactive, height])
 
-  // X-axis bucket-aligned ticks. Use a smaller targetCount on the short card
-  // variant or on narrow widths so labels don't collide.
+  // X-axis bucket-aligned ticks. Pixel-aware: pick a target tick count so
+  // each label has enough horizontal room not to collide with its
+  // neighbour. Different aggregations produce different label widths
+  // (e.g. "05-18 14:00" is wider than "May 18"), so the min-pixel
+  // budget tracks the aggregation.
   const xTicks = useMemo(() => {
-    const target = !interactive ? 4 : plotW < 360 ? 4 : plotW < 600 ? 6 : 8
+    const minLabelPx =
+      agg === 'hour' ? 76 : agg === 'month' ? 68 : agg === 'date' || agg === 'week' ? 60 : 56
+    const target = Math.max(1, Math.floor(plotW / minLabelPx) - 1)
     return bucketXTicks({ fromMs: window.fromMs, toMs: window.toMs, agg, targetCount: target })
-  }, [window.fromMs, window.toMs, agg, plotW, interactive])
+  }, [window.fromMs, window.toMs, agg, plotW])
 
   const xTickStraddlesYear = useMemo(() => {
     if (xTicks.length === 0) return false
@@ -746,6 +751,11 @@ function ChartSvg(props: ChartSvgProps) {
           const x = xScale(t)
           if (!Number.isFinite(x) || x < marginLeft - 0.5 || x > width - marginRight + 0.5) return null
           const label = formatXTick(t, agg, { straddlesYear: xTickStraddlesYear })
+          // Anchor first/last labels to the inside of the plot so they
+          // don't clip past the marginLeft/marginRight gutters.
+          const isLeftEdge = x <= marginLeft + 12
+          const isRightEdge = x >= width - marginRight - 12
+          const textAnchor = isLeftEdge ? 'start' : isRightEdge ? 'end' : 'middle'
           return (
             <g key={`xt-${t}`} pointerEvents="none">
               <line
@@ -760,7 +770,7 @@ function ChartSvg(props: ChartSvgProps) {
                 x={x}
                 y={marginTop + plotH + 12}
                 fontSize="10"
-                textAnchor="middle"
+                textAnchor={textAnchor}
                 fill="#555"
               >
                 {label}
