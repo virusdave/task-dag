@@ -361,18 +361,27 @@ async function loadPendingPurchaseProductIds(db: Queryable, siteKeys: PricingSit
     return []
   }
   // Pending purchases that are still "live" — i.e. on a packet that
-  // hasn't been superseded — and that have already been mapped to a
-  // catalog product. Unmapped rows can't contribute to a pricing run
-  // because we don't know which catalog entry to price.
+  // hasn't been superseded — and that have already been mapped to an
+  // existing catalog product (raw_row_json.reuseProductId). Rows
+  // creating new catalog entries can't contribute to a pricing run
+  // because the product doesn't exist yet.
+  //
+  // Schema notes (the .sql files in db/schema are out of date — read
+  // information_schema for ground truth):
+  //   - pending_purchase_packets PK is `id` (not `packet_id`)
+  //   - pending_purchase_rows.packet_id → pending_purchase_packets.id
+  //   - There is no `matched_product_id` column; the mapped product
+  //     id is carried in raw_row_json.reuseProductId, mirroring
+  //     mapPendingPurchaseRow() in pendingPurchaseQueries.ts.
   const result = await db.query<{ product_id: number }>(
     `
-      select distinct ppr.matched_product_id::int as product_id
+      select distinct (ppr.raw_row_json ->> 'reuseProductId')::int as product_id
       from pending_purchase_rows ppr
-      inner join pending_purchase_packets ppp on ppp.packet_id = ppr.packet_id
+      inner join pending_purchase_packets ppp on ppp.id = ppr.packet_id
       where ppp.status = 'ready'
         and ppr.site_key = any($1::text[])
-        and ppr.matched_product_id is not null
-        and ppr.matched_product_id > 0
+        and (ppr.raw_row_json ->> 'reuseProductId') ~ '^[0-9]+$'
+        and (ppr.raw_row_json ->> 'reuseProductId')::int > 0
       order by product_id asc
     `,
     [siteKeys],
