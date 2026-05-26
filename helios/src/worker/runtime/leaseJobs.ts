@@ -34,6 +34,16 @@ export interface LeaseJobsOptions {
    * `sweed-session` job.
    */
   jobTypes?: JobType[]
+  /**
+   * If provided, restrict leasing to jobs with `priority >= minPriority`.
+   * Used by the high-priority fast-lane loop (see
+   * `runWorkerLoop`) so that the dedicated 10-second fast scan never
+   * leases background backlog. Live-interactive / operator-flagged
+   * work (default `JOB_PRIORITY_HIGH = 100`) always wins the
+   * fast-lane slot even when the main 3-second loop is fully
+   * occupied by long-running background jobs.
+   */
+  minPriority?: number
 }
 
 export async function leaseJobs(limit: number, options: LeaseJobsOptions = {}): Promise<LeasedJob[]> {
@@ -43,6 +53,7 @@ export async function leaseJobs(limit: number, options: LeaseJobsOptions = {}): 
   const removeErrorLogger = attachPoolClientErrorLogger(client, 'leaseJobs')
 
   const jobTypeFilter = options.jobTypes && options.jobTypes.length > 0 ? options.jobTypes : null
+  const minPriority = typeof options.minPriority === 'number' ? options.minPriority : null
 
   try {
     await client.query('begin')
@@ -98,6 +109,7 @@ export async function leaseJobs(limit: number, options: LeaseJobsOptions = {}): 
           where jq.status = 'queued'
             and runnable.concurrency_rank = 1
             and ($3::text[] is null or jq.job_type = any($3::text[]))
+            and ($4::integer is null or jq.priority >= $4::integer)
           -- Lease ordering: high-priority jobs (operator-initiated) come
           -- out before background-priority backlog regardless of age. Ties
           -- break by run_at (oldest first) then id for determinism.
@@ -117,7 +129,7 @@ export async function leaseJobs(limit: number, options: LeaseJobsOptions = {}): 
         where jq.id = candidates.id
         returning jq.id, jq.job_type, jq.module_code, jq.scope_entity_type, jq.scope_entity_id, jq.payload_json, jq.attempt_count
       `,
-      [limit, leaseToken, jobTypeFilter],
+      [limit, leaseToken, jobTypeFilter, minPriority],
     )
     await client.query('commit')
 

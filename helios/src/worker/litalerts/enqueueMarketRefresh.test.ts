@@ -71,6 +71,13 @@ vi.mock('../../server/jobs/enqueueJob.js', () => ({
     dbState.nextJobId += 1
     return jobId
   }),
+  // Mirror the real module's priority band constants so call sites
+  // that import them alongside `enqueueJob` resolve at test time.
+  JOB_PRIORITY_BEST_EFFORT: 0,
+  JOB_PRIORITY_INTERACTIVE: 100,
+  JOB_PRIORITY_URGENT: 1000,
+  JOB_PRIORITY_BACKGROUND: 0,
+  JOB_PRIORITY_HIGH: 100,
 }))
 
 vi.mock('../../server/audit/appendAuditEvent.js', () => ({

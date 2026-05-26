@@ -13,7 +13,7 @@ import {
   recordConfigScheduleEnqueue,
 } from '../../server/db/queries/configQueries.js'
 import { getOptionalSweedSessionConcurrencyKey } from '../../server/jobs/concurrency.js'
-import { enqueueJob } from '../../server/jobs/enqueueJob.js'
+import { enqueueJob, JOB_PRIORITY_BEST_EFFORT } from '../../server/jobs/enqueueJob.js'
 import {
   enqueueMarketRefreshForProducts,
   rollingRefreshJitterSecondsForProduct,
@@ -151,6 +151,7 @@ async function enqueueScheduledStockRefresh(
 
   await withTransaction(async (db) => {
     const jobId = await enqueueJob(db, {
+      priority: JOB_PRIORITY_BEST_EFFORT,
       concurrencyKey: getOptionalSweedSessionConcurrencyKey(true),
       dedupeKey: `config.workers.stock_refresh:scheduled:${bucketIso}`,
       jobType: 'config.workers.stock_refresh',
@@ -218,6 +219,7 @@ async function enqueueScheduledLitalertsRefreshBatch(
           sourceSnapshotId: row.sourceSnapshotId,
           trigger: 'scheduled',
         },
+        priority: JOB_PRIORITY_BEST_EFFORT,
         requestedByUserId: null,
         runAt: now,
         scope: null,
@@ -351,6 +353,7 @@ async function runScheduledMarketEvidenceAlarmScanTick(
   const bucketIso = new Date(Math.floor(now.getTime() / 60000) * 60000).toISOString()
   await withTransaction(async (db) => {
     const jobId = await enqueueJob(db, {
+      priority: JOB_PRIORITY_BEST_EFFORT,
       concurrencyKey: null,
       dedupeKey: `config.workers.market_evidence_alarm_scan:scheduled:${bucketIso}`,
       jobType: 'config.workers.market_evidence_alarm_scan',
@@ -378,6 +381,7 @@ async function enqueueScheduledCatalogRefresh(
 
   await withTransaction(async (db) => {
     const jobId = await enqueueJob(db, {
+      priority: JOB_PRIORITY_BEST_EFFORT,
       concurrencyKey: getOptionalSweedSessionConcurrencyKey(true),
       dedupeKey: `config.workers.catalog_refresh:scheduled:${bucketIso}`,
       jobType: 'config.workers.catalog_refresh',
@@ -422,6 +426,7 @@ async function enqueueScheduledEdibleThcClamp(
 
   await withTransaction(async (db) => {
     const jobId = await enqueueJob(db, {
+      priority: JOB_PRIORITY_BEST_EFFORT,
       concurrencyKey: getOptionalSweedSessionConcurrencyKey(true),
       dedupeKey: `config.workers.edible_thc_clamp:scheduled:${bucketIso}`,
       jobType: 'config.workers.edible_thc_clamp',
@@ -467,6 +472,7 @@ async function enqueueScheduledLitalertsRetailerBackfill(
 
   await withTransaction(async (db) => {
     const jobId = await enqueueJob(db, {
+      priority: JOB_PRIORITY_BEST_EFFORT,
       // Does not touch Sweed; no shared session lane needed.
       concurrencyKey: null,
       dedupeKey: `config.workers.litalerts_retailer_backfill:scheduled:${bucketIso}`,
@@ -512,6 +518,7 @@ async function enqueueScheduledSweedOrdersIngest(
 
   await withTransaction(async (db) => {
     const jobId = await enqueueJob(db, {
+      priority: JOB_PRIORITY_BEST_EFFORT,
       concurrencyKey: getOptionalSweedSessionConcurrencyKey(true),
       dedupeKey: `config.workers.sweed_orders_ingest:scheduled:${bucketIso}`,
       jobType: 'config.workers.sweed_orders_ingest',
@@ -569,6 +576,7 @@ async function enqueueScheduledSweedPackageSnapshots(
 
   await withTransaction(async (db) => {
     const jobId = await enqueueJob(db, {
+      priority: JOB_PRIORITY_BEST_EFFORT,
       concurrencyKey: getOptionalSweedSessionConcurrencyKey(true),
       dedupeKey: `config.workers.sweed_package_snapshots:scheduled:${bucketIso}`,
       jobType: 'config.workers.sweed_package_snapshots',

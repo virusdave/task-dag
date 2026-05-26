@@ -33,7 +33,7 @@
 import type { Queryable } from '../../server/db/pool.js'
 import { withTransaction } from '../../server/db/tx.js'
 import { appendAuditEvent } from '../../server/audit/appendAuditEvent.js'
-import { enqueueJob } from '../../server/jobs/enqueueJob.js'
+import { enqueueJob, JOB_PRIORITY_BEST_EFFORT } from '../../server/jobs/enqueueJob.js'
 import type { JsonValue } from '../../shared/contracts/index.js'
 
 /**
@@ -254,6 +254,11 @@ export async function enqueueMarketRefreshForProducts(
         return { queueRowId: null, jobId: null }
       }
       const jobId = await enqueueJob(db, {
+        // Lit Alerts variant refreshes are background batch work — they
+        // run by the thousand whenever a rolling tick or alarm scan
+        // fires, and would starve live-interactive operator clicks if
+        // they defaulted to JOB_PRIORITY_INTERACTIVE.
+        priority: JOB_PRIORITY_BEST_EFFORT,
         // Lit Alerts refresh does not touch Sweed; no shared session lane.
         concurrencyKey: null,
         // One job per pending queue row keeps the dedupe surface obvious.

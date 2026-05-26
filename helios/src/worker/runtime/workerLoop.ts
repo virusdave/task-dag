@@ -1,4 +1,5 @@
 import { getWorkerEnv } from '../config/env.js'
+import { JOB_PRIORITY_URGENT } from '../../server/jobs/enqueueJob.js'
 import { recordAuthEvent, withJobAuthContext } from '../sweed/authLog.js'
 import { tickConfigWorkersScheduler } from './configWorkersScheduler.js'
 import { ensureDependenciesReadyForJob, warmDependencyHealth } from './dependencyHealth.js'
@@ -9,18 +10,88 @@ import {
 } from './jobPools.js'
 import { markJobDeadLetter, markJobDeferred, markJobFailed, markJobForRetry, markJobSucceeded, renewJobLease, runJob } from './jobRegistry.js'
 import { leaseJobs } from './leaseJobs.js'
+import type { JobType } from '../../shared/contracts/domain/jobs.js'
 
+interface LeaseLoopOptions {
+  label: string
+  allowedJobTypes: JobType[]
+  maxConcurrentJobs: number
+  pollIntervalMs: number
+  runScheduler: boolean
+  minPriority?: number
+  retryBaseDelayMs: number
+  maxAttempts: number
+}
+
+/**
+ * Runs both the main lease loop and a dedicated high-priority
+ * fast-lane loop in parallel inside the same worker process.
+ *
+ * - **main loop** polls `pollIntervalMs` (default 3 s), leases up
+ *   to `workerMaxConcurrentJobs` rows at any priority, and is the
+ *   only loop that runs the config-workers scheduler tick.
+ * - **fast-lane loop** polls `fastlanePollIntervalMs` (default
+ *   10 s) and only leases jobs with `priority >= JOB_PRIORITY_URGENT`,
+ *   capped at `fastlaneMaxConcurrentJobs` (default 2). This
+ *   guarantees that operator-flagged urgent work never has to wait
+ *   behind a fully-occupied main loop — even if the main loop is
+ *   fully saturated processing best-effort backlog (e.g. the
+ *   thousands of queued `litalerts_refresh.variant` jobs), the
+ *   fast lane has its own independent concurrency slot.
+ *
+ * Both loops share the same database queue, so urgent work also
+ * benefits from main-loop slack when the fast lane is busy: the
+ * SQL `leaseJobs` selector orders by `priority desc` so a free
+ * main-loop slot will still pick up urgent work before any
+ * best-effort row.
+ */
 export async function runWorkerLoop(): Promise<never> {
   const env = getWorkerEnv()
   const allowedJobTypes = getJobTypesForPoolSelector(env.workerPool)
   const runScheduler = shouldRunConfigWorkersSchedulerTickForPoolSelector(env.workerPool)
   console.log(
-    `[worker] pool=${env.workerPool} jobTypes=${allowedJobTypes.length} schedulerTick=${runScheduler}`,
+    `[worker] pool=${env.workerPool} jobTypes=${allowedJobTypes.length} schedulerTick=${runScheduler} ` +
+      `mainPollMs=${env.pollIntervalMs} mainMaxConcurrent=${env.workerMaxConcurrentJobs} ` +
+      `fastlanePollMs=${env.fastlanePollIntervalMs} fastlaneMaxConcurrent=${env.fastlaneMaxConcurrentJobs} ` +
+      `urgentMinPriority=${JOB_PRIORITY_URGENT}`,
   )
   await warmDependencyHealth()
 
+  // Launch both loops; each is an infinite for(;;). Promise.all
+  // never resolves (return type is `never`), but if either loop
+  // throws to top-level the whole worker process exits and systemd
+  // restarts it (`Restart=on-failure`) — same crash semantics as
+  // before this refactor.
+  await Promise.all([
+    runLeaseLoop({
+      label: 'main',
+      allowedJobTypes,
+      maxConcurrentJobs: env.workerMaxConcurrentJobs,
+      pollIntervalMs: env.pollIntervalMs,
+      runScheduler,
+      retryBaseDelayMs: env.workerRetryBaseDelayMs,
+      maxAttempts: env.workerMaxAttempts,
+    }),
+    runLeaseLoop({
+      label: 'fastlane',
+      allowedJobTypes,
+      maxConcurrentJobs: env.fastlaneMaxConcurrentJobs,
+      pollIntervalMs: env.fastlanePollIntervalMs,
+      runScheduler: false,
+      minPriority: JOB_PRIORITY_URGENT,
+      retryBaseDelayMs: env.workerRetryBaseDelayMs,
+      maxAttempts: env.workerMaxAttempts,
+    }),
+  ])
+
+  // Unreachable, but the function signature is `Promise<never>` —
+  // throwing here keeps the type-checker honest.
+  throw new Error('runWorkerLoop unexpectedly resolved')
+}
+
+async function runLeaseLoop(opts: LeaseLoopOptions): Promise<never> {
   for (;;) {
-    if (runScheduler) {
+    if (opts.runScheduler) {
       try {
         await tickConfigWorkersScheduler()
       } catch (error) {
@@ -29,7 +100,18 @@ export async function runWorkerLoop(): Promise<never> {
       }
     }
 
-    const leasedJobs = await leaseJobs(env.workerMaxConcurrentJobs, { jobTypes: allowedJobTypes })
+    const leasedJobs = await leaseJobs(opts.maxConcurrentJobs, {
+      jobTypes: opts.allowedJobTypes,
+      minPriority: opts.minPriority,
+    })
+
+    if (leasedJobs.length > 0 && opts.label !== 'main') {
+      console.log(
+        `[worker:${opts.label}] leased ${leasedJobs.length} job(s): ${leasedJobs
+          .map((j) => `#${j.id}/${j.jobType}`)
+          .join(', ')}`,
+      )
+    }
 
     await Promise.all(
       leasedJobs.map(async (job) => {
@@ -55,7 +137,7 @@ export async function runWorkerLoop(): Promise<never> {
             } catch (error) {
               const message = error instanceof Error ? error.message : 'Unknown worker error.'
               if (isDependencyUnavailableWorkerError(error)) {
-                const delayMs = error.delayMs ?? getRetryDelayMs(0, env.workerRetryBaseDelayMs)
+                const delayMs = error.delayMs ?? getRetryDelayMs(0, opts.retryBaseDelayMs)
                 // Synthesize a sweed_auth_events row so the job detail
                 // page can show *why* a job is stuck "queued" forever.
                 // The probe itself already logs its own row when it
@@ -79,12 +161,12 @@ export async function runWorkerLoop(): Promise<never> {
               }
 
               if (isRetryableWorkerError(error)) {
-                if (job.attemptCount >= env.workerMaxAttempts) {
+                if (job.attemptCount >= opts.maxAttempts) {
                   await markJobDeadLetter(job.id, job.leaseToken, message)
                   return
                 }
 
-                const delayMs = error.delayMs ?? getRetryDelayMs(job.attemptCount, env.workerRetryBaseDelayMs)
+                const delayMs = error.delayMs ?? getRetryDelayMs(job.attemptCount, opts.retryBaseDelayMs)
                 await markJobForRetry(job.id, job.leaseToken, message, new Date(Date.now() + delayMs))
                 return
               }
@@ -99,7 +181,7 @@ export async function runWorkerLoop(): Promise<never> {
     )
 
     if (leasedJobs.length === 0) {
-      await delay(env.pollIntervalMs)
+      await delay(opts.pollIntervalMs)
     }
   }
 }
