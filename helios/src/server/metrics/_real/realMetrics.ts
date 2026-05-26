@@ -30,6 +30,7 @@ import {
   queryWeatherMarginVsLowTemp,
   queryWeatherMarginVsPrecip,
 } from './weatherQueries.js'
+import { queryCashierTransactionsPerHour } from './cashierThroughputQueries.js'
 
 // ============================================================================
 // Real-data MetricDefs. These swap one-for-one with stubs of the same id;
@@ -383,6 +384,17 @@ export const REAL_METRICS: ReadonlyArray<MetricDef> = [
     supportedAggregations: [...WEATHER_METRIC_SUPPORTED_AGGS],
     chartType: 'scatter',
     query: queryWeatherMarginVsPrecip,
+  },
+  {
+    id: 'cashier.transactions_per_hour',
+    group: 'Cashier throughput',
+    title: 'Transactions per cashier-hour',
+    description:
+      'Transactions per on-the-clock cashier-hour. Numerator: count of completed sweed_orders in the bucket. Denominator: sum over CLOSED drawer-shifts (sweed_drawer_shifts) of (drawer duration ∩ bucket) × count(sessions[].user.id) — i.e. every cashier listed in a drawer-shift\'s sessions[] is treated as on-the-clock for the entire drawer window, then apportioned across buckets the drawer overlaps. Open drawer-shifts are excluded until they close (final duration unknown). Operator-confirmed approximation (FreshlyBakedNYC/automation#27, 2026-05-26); a future v2 can use sweed_orders.cashier_user_id for exact per-transaction attribution.',
+    series: [{ id: 'tx_per_hour', label: 'Transactions per cashier-hour', colour: '#1f77b4' }],
+    defaultAggregation: 'date',
+    supportedAggregations: [...SUPPORTED],
+    query: queryCashierTransactionsPerHour,
   },
   {
     id: 'customers.origin_map',
