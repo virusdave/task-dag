@@ -53,6 +53,15 @@ import { callSweedRpc } from './rpc.js'
 
 export const SWEED_RPC_SALE_INVOICE_LIST = 'store.sale.invoice.list'
 
+// `store.sale.invoice.get` returns the per-invoice envelope that
+// includes the delivery address sub-object the list call omits.
+// Operator-confirmed RPC on 2026-05-26 with sample envelope:
+//   { "name": "store.sale.invoice.get",
+//     "params": { "invoiceId": "6456283" } }
+// Used by the per-invoice delivery-address enrichment job
+// (FreshlyBakedNYC/automation#25 task A4).
+export const SWEED_RPC_SALE_INVOICE_GET = 'store.sale.invoice.get'
+
 // Process-wide timezone constant used to defensively interpret any
 // date string Sweed hands us that lacks a Z suffix or explicit
 // offset. Today's live responses are Z-suffixed; this fallback is
@@ -258,4 +267,148 @@ export async function listSaleInvoices(args: {
     page += 1
   }
   return collected
+}
+
+// =====================================================================
+// store.sale.invoice.get — per-invoice envelope (delivery address)
+// =====================================================================
+//
+// `store.sale.invoice.list` does NOT include the delivery-address
+// sub-object on each row (verified against live Sweed staging
+// 2026-05-26). The per-invoice `.get` RPC does. The address-
+// enrichment job (helios/src/worker/jobs/enrichDeliveryAddressJob.ts,
+// task A4 of FreshlyBakedNYC/automation#25) calls this wrapper
+// once per delivery-typed sweed_orders row that has not yet been
+// resolved to an addresses.id.
+//
+// Response shape (defensively parsed; only the fields we use are
+// pinned, the rest passes through as `raw`):
+//
+//   {
+//     id: "6456283",
+//     deliveryAddress: {
+//       line1: "123 Main St",
+//       line2: "Apt 4B",                  // optional
+//       city:  "Brooklyn",
+//       state: "NY",
+//       zip:   "11211",
+//       // additional fields (name, phone, instructions) — NOT
+//       // parsed or persisted by helios; the address enrichment
+//       // path is intentionally scoped to postal address only.
+//     } | null,                            // null for non-delivery
+//     ...
+//   }
+//
+// We do NOT pull line items, costs, or any other field beyond the
+// delivery address from this RPC — the existing
+// `sweed_orders.raw_json` already carries the list-call envelope
+// and per-invoice costs go through the #23 / #24 per-package
+// snapshot path.
+
+const InvoiceAddressSchema = z
+  .object({
+    line1: z.string().nullable().optional(),
+    line2: z.string().nullable().optional(),
+    city: z.string().nullable().optional(),
+    state: z.string().nullable().optional(),
+    zip: z.string().nullable().optional(),
+  })
+  .passthrough()
+
+const InvoiceGetResponseSchema = z
+  .object({
+    id: z.union([z.string(), z.number()]).optional(),
+    // Sweed's field name on the get-response is `deliveryAddress`
+    // (camelCase, matching the list-row envelope's other fields).
+    deliveryAddress: InvoiceAddressSchema.nullable().optional(),
+  })
+  .passthrough()
+
+export interface SweedInvoiceAddressDetail {
+  line1: string | null
+  line2: string | null
+  city: string | null
+  state: string | null
+  zip: string | null
+}
+
+export interface SweedInvoiceDetail {
+  invoiceId: string
+  /** null when the invoice has no delivery address (kiosk / pickup
+   *  / in-store). The caller persists this as
+   *  `invoice_get_status = 'no_address'` so the enrichment job
+   *  does not re-poll the row. */
+  deliveryAddress: SweedInvoiceAddressDetail | null
+  /** Full raw response from Sweed, for audit / re-derivation. */
+  raw: unknown
+}
+
+function trimToNullable(value: string | null | undefined): string | null {
+  if (value === null || value === undefined) return null
+  const trimmed = value.trim()
+  return trimmed.length === 0 ? null : trimmed
+}
+
+function normaliseInvoiceAddress(
+  raw: z.infer<typeof InvoiceAddressSchema> | null | undefined,
+): SweedInvoiceAddressDetail | null {
+  if (raw === null || raw === undefined) return null
+  const detail: SweedInvoiceAddressDetail = {
+    line1: trimToNullable(raw.line1),
+    line2: trimToNullable(raw.line2),
+    city: trimToNullable(raw.city),
+    state: trimToNullable(raw.state),
+    zip: trimToNullable(raw.zip),
+  }
+  // If literally every field is empty, treat as "no address" so the
+  // job can record `no_address` rather than upserting a useless
+  // all-null addresses row.
+  const anyPresent =
+    detail.line1 !== null ||
+    detail.line2 !== null ||
+    detail.city !== null ||
+    detail.state !== null ||
+    detail.zip !== null
+  return anyPresent ? detail : null
+}
+
+/**
+ * Fetch one Sweed invoice envelope including its delivery address
+ * sub-object. Caller MUST already be inside a `withSweedSession`
+ * block; `callSweedRpc` handles the dealer-context pin.
+ *
+ * Returns the normalised detail; the address sub-object is null
+ * for invoices that don't have a delivery destination (kiosk /
+ * pickup / in-store fulfillment).
+ *
+ * Throws on transport / auth errors so the enrichment job can
+ * record the row as 'failed' and retry on the next tick. Does
+ * NOT swallow Sweed's "invoice not found" — the worker-side
+ * decision of whether that means "permanently gone" vs. "retry
+ * later" lives in the job, not here.
+ */
+export async function getSaleInvoice(args: {
+  dealerId: number
+  invoiceId: string
+}): Promise<SweedInvoiceDetail> {
+  const raw = await callSweedRpc<unknown>(args.dealerId, SWEED_RPC_SALE_INVOICE_GET, {
+    invoiceId: args.invoiceId,
+  })
+  const parsed = InvoiceGetResponseSchema.safeParse(raw)
+  if (!parsed.success) {
+    // Defensive: schema mismatch is treated as "no address" and
+    // the raw payload preserved for audit. We don't throw because
+    // the response was structurally valid JSON-RPC — Sweed just
+    // didn't have the shape we expected.
+    return {
+      invoiceId: args.invoiceId,
+      deliveryAddress: null,
+      raw,
+    }
+  }
+  return {
+    invoiceId: args.invoiceId,
+    deliveryAddress: normaliseInvoiceAddress(parsed.data.deliveryAddress ?? null),
+    raw,
+  }
 }

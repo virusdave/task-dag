@@ -79,6 +79,14 @@ import { callSweedRpc } from './rpc.js'
 // totalCount=0) instead of a "Action is not available" failure,
 // which lets us cleanly fall through to the create path.
 export const SWEED_RPC_CLIENT_LIST = 'store.customer.list'
+// store.customer.get exists and expects { id } (operator-verified
+// via live probe — see the file header notes). Used by the
+// customer-of-record address enrichment job
+// (helios/src/worker/jobs/enrichCustomerAddressJob.ts, task A5
+// of FreshlyBakedNYC/automation#25) to pull the address sub-
+// object on each Sweed client we've seen on an order. The
+// caller MUST be inside a `withSweedSession` block.
+export const SWEED_RPC_CLIENT_GET = 'store.customer.get'
 // store.customer.add exists; payload shape NOT YET VERIFIED. Every
 // attempted shape returns "Parameters validation error". The
 // orchestrator will continue to fail-and-log here until the
@@ -266,4 +274,136 @@ export async function removeSegmentMember(args: {
     segmentId: args.segmentId,
     clientId: args.customerId,
   })
+}
+
+// =====================================================================
+// store.customer.get — fetch one Sweed CRM customer (incl. address)
+// =====================================================================
+//
+// Used by the customer-of-record address enrichment job
+// (helios/src/worker/jobs/enrichCustomerAddressJob.ts, task A5 of
+// FreshlyBakedNYC/automation#25). Sweed's `store.customer.list`
+// does not surface CRM rows reliably (see the long file header
+// note above), but `store.customer.get` with `{ id }` does — that
+// was confirmed via live probe under a pool-claimed session.
+//
+// Response shape — we pin only the postal-address fields we use;
+// everything else passes through as `raw` so we can re-derive
+// later without an additional Sweed call. The known shape (from
+// the same probe) carries the address under either `address` or
+// `primaryAddress`; we accept either name and fall back to a
+// nested `addresses` array if present.
+//
+// Privacy: we deliberately ignore name / phone / email / DOB /
+// any other field beyond the postal address. The address-
+// persistence layer (FreshlyBakedNYC/automation#25) is scoped
+// to postal address only.
+
+const CustomerAddressSchema = z
+  .object({
+    line1: z.string().nullable().optional(),
+    line2: z.string().nullable().optional(),
+    city: z.string().nullable().optional(),
+    state: z.string().nullable().optional(),
+    zip: z.string().nullable().optional(),
+  })
+  .passthrough()
+
+const CustomerGetResponseSchema = z
+  .object({
+    id: z.union([z.string(), z.number()]).nullable().optional(),
+    address: CustomerAddressSchema.nullable().optional(),
+    primaryAddress: CustomerAddressSchema.nullable().optional(),
+    addresses: z.array(CustomerAddressSchema).nullable().optional(),
+  })
+  .passthrough()
+
+export interface SweedCustomerAddressDetail {
+  line1: string | null
+  line2: string | null
+  city: string | null
+  state: string | null
+  zip: string | null
+}
+
+export interface SweedCustomerDetail {
+  customerId: number
+  /** null when Sweed returns the customer record but it has no
+   *  address sub-object. The enrichment job records that fact so
+   *  the same customer isn't re-polled forever. */
+  address: SweedCustomerAddressDetail | null
+  raw: unknown
+}
+
+function trimToNullable(value: string | null | undefined): string | null {
+  if (value === null || value === undefined) return null
+  const trimmed = value.trim()
+  return trimmed.length === 0 ? null : trimmed
+}
+
+function normaliseCustomerAddress(
+  raw: z.infer<typeof CustomerAddressSchema> | null | undefined,
+): SweedCustomerAddressDetail | null {
+  if (raw === null || raw === undefined) return null
+  const detail: SweedCustomerAddressDetail = {
+    line1: trimToNullable(raw.line1),
+    line2: trimToNullable(raw.line2),
+    city: trimToNullable(raw.city),
+    state: trimToNullable(raw.state),
+    zip: trimToNullable(raw.zip),
+  }
+  const anyPresent =
+    detail.line1 !== null ||
+    detail.line2 !== null ||
+    detail.city !== null ||
+    detail.state !== null ||
+    detail.zip !== null
+  return anyPresent ? detail : null
+}
+
+function pickFirstNonEmpty(
+  ...candidates: Array<z.infer<typeof CustomerAddressSchema> | null | undefined>
+): SweedCustomerAddressDetail | null {
+  for (const c of candidates) {
+    const detail = normaliseCustomerAddress(c)
+    if (detail !== null) return detail
+  }
+  return null
+}
+
+/**
+ * Fetch one Sweed CRM customer envelope and return the normalised
+ * postal address (or null if Sweed has none on file). Caller MUST
+ * already be inside a `withSweedSession` block.
+ *
+ * Throws on transport / auth errors; defensive Zod parse so a
+ * schema mismatch degrades to "no address" rather than crashing
+ * the calling job.
+ */
+export async function getSweedCustomer(args: {
+  dealerId: number
+  customerId: number
+}): Promise<SweedCustomerDetail> {
+  const raw = await callSweedRpc<unknown>(args.dealerId, SWEED_RPC_CLIENT_GET, {
+    id: args.customerId,
+  })
+  const parsed = CustomerGetResponseSchema.safeParse(raw)
+  if (!parsed.success) {
+    return {
+      customerId: args.customerId,
+      address: null,
+      raw,
+    }
+  }
+  const arr = parsed.data.addresses ?? []
+  const fromArray = arr.length > 0 ? arr[0] : null
+  return {
+    customerId: args.customerId,
+    address: pickFirstNonEmpty(
+      parsed.data.address ?? null,
+      parsed.data.primaryAddress ?? null,
+      fromArray,
+    ),
+    raw,
+  }
 }
