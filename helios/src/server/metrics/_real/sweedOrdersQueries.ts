@@ -273,27 +273,29 @@ export async function queryBasketSizeByCustomerType(args: MetricQueryArgs): Prom
   })
 }
 
+// Sweed's canonical `issuingType.name` values, as observed in live
+// Bronx + Midtown invoices on 2026-05-26. The COD vs prepaid split is
+// not directly available on `store.sale.invoice.list` — every
+// "Delivery sale" today lands in `delivery_prepaid` until a follow-on
+// adds the per-invoice get-call to distinguish.
 const FULFILLMENT_SERIES_BY_VALUE: ReadonlyMap<string, string> = new Map([
-  // Common Sweed taxonomy synonyms — we normalise to our 5 declared series.
-  // Anything we don't recognise lands in 'in_store' (the kiosk/POS default
-  // when fulfillment_type is null), which is the most conservative bucket
-  // since no Sweed deployment uses "in_store" as a literal fulfillment label.
-  ['delivery_prepaid', 'delivery_prepaid'],
-  ['deliveryprepaid', 'delivery_prepaid'],
+  ['kiosk order', 'kiosk'],
+  ['kiosk', 'kiosk'],
+  ['pick-up sale', 'pickup'],
+  ['pickup sale', 'pickup'],
+  ['pickup', 'pickup'],
+  ['delivery sale', 'delivery_prepaid'],
+  ['delivery (prepaid)', 'delivery_prepaid'],
   ['delivery prepaid', 'delivery_prepaid'],
-  ['delivery_paid', 'delivery_prepaid'],
-  ['delivery_cod', 'delivery_cod'],
-  ['deliverycod', 'delivery_cod'],
+  ['delivery (cod)', 'delivery_cod'],
   ['delivery cod', 'delivery_cod'],
   ['delivery', 'delivery_prepaid'],
-  ['kiosk', 'kiosk'],
-  ['pickup', 'pickup'],
-  ['pickup_in_store', 'pickup'],
-  ['pickup-in-store', 'pickup'],
-  ['in_store', 'in_store'],
-  ['instore', 'in_store'],
+  ['pharmacy order', 'in_store'],
+  ['in-store sale', 'in_store'],
   ['in-store', 'in_store'],
-  ['retail', 'in_store'],
+  ['in store', 'in_store'],
+  ['pos', 'in_store'],
+  ['website', 'delivery_prepaid'], // salesChannel fallback for online orders
   ['', 'in_store'],
 ])
 
@@ -403,16 +405,21 @@ export function queryFulfillmentSalesDollars(args: MetricQueryArgs): Promise<Met
   })
 }
 
+// Sweed's canonical `payments[].paymentMethod.name` values, observed
+// live on Bronx + Midtown on 2026-05-26: "Cash", "Debit Card",
+// "Aeropay", "Reverse ATM change". The reverse-ATM tender is the
+// kiosk's change-dispensing rail; it always rides on a primary
+// tender that we already pick as the largest-amount method, so any
+// row that has it as the primary is a refund / edge case and lands
+// in 'other'.
 const PAYMENT_SERIES_BY_VALUE: ReadonlyMap<string, string> = new Map([
   ['cash', 'cash'],
-  ['debit', 'debit'],
-  ['debit_card', 'debit'],
   ['debit card', 'debit'],
-  ['credit', 'credit'],
-  ['credit_card', 'credit'],
+  ['debit', 'debit'],
   ['credit card', 'credit'],
+  ['credit', 'credit'],
   ['aeropay', 'aeropay'],
-  ['ach', 'aeropay'], // Aeropay rides on ACH; sometimes the envelope uses the rail name
+  ['reverse atm change', 'other'],
   ['', 'other'],
 ])
 

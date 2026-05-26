@@ -48,52 +48,43 @@ const NY_TZ = 'America/New_York'
 // `listSaleInvoices()` returns a narrow normalised shape (invoice id,
 // pay time, total, customer summary) plus the raw envelope. We want
 // a few extra header fields for metrics queries; this Zod schema
-// extracts them defensively. Any new field added here MUST be
-// `.optional()` because Sweed's envelope is operator-configurable.
+// extracts them defensively. Field shapes confirmed against live
+// Bronx + Midtown invoices on 2026-05-26 — see
+// docs/runbooks/helios-metrics.md.
+const NamedEntitySchema = z.object({ name: z.string().nullable().optional() }).passthrough()
+
 const InvoiceEnvelopeSchema = z
   .object({
-    subTotalAmount: z.coerce.number().nullable().optional(),
-    taxAmount: z.coerce.number().nullable().optional(),
-    discountAmount: z.coerce.number().nullable().optional(),
-    // Fulfillment is exposed under several field names in different
-    // Sweed builds. We try them in preference order.
-    fulfillmentType: z.string().nullable().optional(),
-    orderType: z.string().nullable().optional(),
-    deliveryType: z.string().nullable().optional(),
-    saleType: z.string().nullable().optional(),
-    // Payments may be a single `paymentMethod` string or an array
-    // of `payments[].method`. We collapse to a single string for
-    // simple stacking; `raw_json` keeps the full breakdown.
-    paymentMethod: z.string().nullable().optional(),
+    // Cash side. Sweed uses lowercase-T `subtotalAmount` /
+    // `taxesAmount` / `grandTotalDiscountAmount`.
+    subtotalAmount: z.coerce.number().nullable().optional(),
+    taxesAmount: z.coerce.number().nullable().optional(),
+    grandTotalDiscountAmount: z.coerce.number().nullable().optional(),
+
+    // Fulfillment lives on `issuingType.name`. Known values:
+    //   * "Kiosk order"
+    //   * "Pick-up sale"
+    //   * "Delivery sale"
+    //   * "Pharmacy order"  (the in-store flow)
+    issuingType: NamedEntitySchema.nullable().optional(),
+    // `salesChannel` is a related but coarser signal ("Kiosk",
+    // "POS", "Website", …). We keep it as a fallback only.
+    salesChannel: NamedEntitySchema.nullable().optional(),
+
+    // Payments is an array of `{ paymentMethod: { name }, amount }`.
+    // We collapse to a single string (the largest-amount method) so
+    // the chart stack stays sane; raw_json keeps the full breakdown
+    // for any deeper analysis.
     payments: z
       .array(
         z
           .object({
-            method: z.string().nullable().optional(),
-            type: z.string().nullable().optional(),
-            paymentMethod: z.string().nullable().optional(),
+            amount: z.coerce.number().nullable().optional(),
+            totalPaid: z.coerce.number().nullable().optional(),
+            paymentMethod: NamedEntitySchema.nullable().optional(),
           })
           .passthrough(),
       )
-      .nullable()
-      .optional(),
-    deliveryAddress: z
-      .object({
-        zip: z.string().nullable().optional(),
-        zipCode: z.string().nullable().optional(),
-        postalCode: z.string().nullable().optional(),
-      })
-      .passthrough()
-      .nullable()
-      .optional(),
-    // Some Sweed builds put the address one level up.
-    address: z
-      .object({
-        zip: z.string().nullable().optional(),
-        zipCode: z.string().nullable().optional(),
-        postalCode: z.string().nullable().optional(),
-      })
-      .passthrough()
       .nullable()
       .optional(),
   })
@@ -115,42 +106,36 @@ interface NormalisedInvoice {
 }
 
 function pickFulfillment(env: z.infer<typeof InvoiceEnvelopeSchema>): string | null {
-  return (
-    (env.fulfillmentType?.trim() ?? null) ||
-    (env.orderType?.trim() ?? null) ||
-    (env.deliveryType?.trim() ?? null) ||
-    (env.saleType?.trim() ?? null) ||
-    null
-  )
-}
-
-function pickPaymentMethod(env: z.infer<typeof InvoiceEnvelopeSchema>): string | null {
-  const flat = env.paymentMethod?.trim()
-  if (flat && flat.length > 0) return flat
-  const payments = env.payments ?? []
-  for (const p of payments) {
-    const m = p.method ?? p.type ?? p.paymentMethod
-    if (typeof m === 'string' && m.trim().length > 0) return m.trim()
-  }
+  const issuing = env.issuingType?.name?.trim()
+  if (issuing && issuing.length > 0) return issuing
+  const channel = env.salesChannel?.name?.trim()
+  if (channel && channel.length > 0) return channel
   return null
 }
 
-function pickDeliveryZip(env: z.infer<typeof InvoiceEnvelopeSchema>): string | null {
-  const candidates = [
-    env.deliveryAddress?.zip,
-    env.deliveryAddress?.zipCode,
-    env.deliveryAddress?.postalCode,
-    env.address?.zip,
-    env.address?.zipCode,
-    env.address?.postalCode,
-  ]
-  for (const c of candidates) {
-    if (typeof c === 'string' && c.trim().length > 0) {
-      // Normalise to first 5 digits of US zip if available.
-      const m = c.trim().match(/^(\d{5})/)
-      return m ? m[1]! : c.trim()
+function pickPaymentMethod(env: z.infer<typeof InvoiceEnvelopeSchema>): string | null {
+  const payments = env.payments ?? []
+  // Pick the method that contributed the largest `amount` so a small
+  // "Reverse ATM change" tender doesn't outvote the primary cash row.
+  let bestName: string | null = null
+  let bestAmount = -Infinity
+  for (const p of payments) {
+    const name = p.paymentMethod?.name?.trim()
+    if (!name || name.length === 0) continue
+    const amount = typeof p.amount === 'number' ? p.amount : 0
+    if (amount > bestAmount) {
+      bestAmount = amount
+      bestName = name
     }
   }
+  return bestName
+}
+
+function pickDeliveryZip(_env: z.infer<typeof InvoiceEnvelopeSchema>): string | null {
+  // `store.sale.invoice.list` does not include the delivery address;
+  // that field is only surfaced by `store.sale.invoice.get`. Until
+  // we add a per-invoice get-call follow-on, the customer-origin
+  // metric falls back to "Other" for every delivery row.
   return null
 }
 
@@ -166,9 +151,9 @@ function normaliseForIngest(row: SweedInvoiceRow): NormalisedInvoice | null {
     customerId: row.clientId,
     isGuest: row.clientId === null,
     grandTotal: row.total,
-    subtotal: env.subTotalAmount ?? null,
-    tax: env.taxAmount ?? null,
-    discount: env.discountAmount ?? null,
+    subtotal: env.subtotalAmount ?? null,
+    tax: env.taxesAmount ?? null,
+    discount: env.grandTotalDiscountAmount ?? null,
     fulfillmentType: pickFulfillment(env),
     paymentMethod: pickPaymentMethod(env),
     deliveryZip: pickDeliveryZip(env),
