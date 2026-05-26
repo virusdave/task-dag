@@ -604,7 +604,7 @@ export async function loadGroupReview(
          and brand_norm = $1
          and (
            -- No catalog category set → don't filter by category.
-           $4::boolean
+           $3::boolean
            or (
              category_norm is not null
              and category_norm = any($2::text[])
@@ -612,22 +612,22 @@ export async function loadGroupReview(
          )
          and (
            -- No variant sizes → don't filter by size.
-           $5::boolean
+           $4::boolean
            or (
-             cardinality($6::numeric[]) > 0
+             cardinality($5::numeric[]) > 0
              and size_g_norm is not null
              and exists (
                select 1
-                 from unnest($6::numeric[]) as t(g)
+                 from unnest($5::numeric[]) as t(g)
                 where abs(size_g_norm - t.g) <= greatest(0.05, t.g * 0.08)
              )
            )
            or (
-             cardinality($7::numeric[]) > 0
+             cardinality($6::numeric[]) > 0
              and size_mg_norm is not null
              and exists (
                select 1
-                 from unnest($7::numeric[]) as t(mg)
+                 from unnest($6::numeric[]) as t(mg)
                 where abs(size_mg_norm - t.mg) <= greatest(5, t.mg * 0.08)
              )
            )
@@ -643,7 +643,6 @@ export async function loadGroupReview(
         catalogCategoryCanonical
           ? buildCategoryAliasList(catalogCategoryCanonical)
           : [],
-        null,
         // SKIP-CATEGORY-FILTER flag.
         catalogCategoryCanonical === null,
         // SKIP-SIZE-FILTER flag.
