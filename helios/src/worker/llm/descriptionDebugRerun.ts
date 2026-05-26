@@ -33,6 +33,15 @@ const META_DESCRIPTION_PATTERNS = [
   /\bin\s+the\s+market\b/i,
   /\bproduct\s+line\b/i,
   /\b(?:evidence packet|candidateindex|candidate index|search terms?|prompt|system prompt|paragraph\s+[123])\b/i,
+  // Boilerplate "this falls under the X category / subcategory" meta-text
+  // that adds zero shopper value and clutters the seller hook.
+  /\bfalls?\s+(?:under|into|in)\s+(?:the\s+)?[a-z][a-z\- ]*?(?:category|subcategory|class)\b/i,
+  /\b(?:this|the)\s+(?:product|item|sku|concentrate|edible|flower|pre-?roll|vape|tincture|gummy|gummies|cartridge|cart|topical|accessory)\s+(?:is\s+)?(?:part\s+of|belongs?\s+to|falls?\s+(?:under|into))\b/i,
+  /\b(?:within|in)\s+(?:the\s+)?[a-z][a-z\- ]*?(?:category|subcategory)\b/i,
+  /\bcategorized\s+as\b/i,
+  /\bclassified\s+(?:as|under)\b/i,
+  /\b(?:this|the)\s+[a-z][a-z\- ]{0,20}\s+category\b/i,
+  /\bpart\s+of\s+(?:our|the)\s+[a-z][a-z\- ]*\s+(?:lineup|collection|range|family|line)\b/i,
 ]
 const BENEFIT_CLAIM_PATTERNS = [
   /\bhelp(?:ing|s|ed)?\s+you\b/i,
@@ -142,7 +151,7 @@ interface StageLog {
   messages: ChatMessage[]
   parsedJson: JsonValue
   repairAttemptCount: number
-  stage: 'layout' | 'metadata' | 'paragraph_1' | 'paragraph_2' | 'paragraph_3'
+  stage: 'layout' | 'metadata' | 'paragraph_1' | 'paragraph_2'
   temperature: number
 }
 
@@ -369,8 +378,9 @@ function llmRetryGuidance(repairIssues: string[]): string {
     '',
     'Retry priorities:',
     `- Fix these issues from the previous attempt: ${repairIssues.join('; ')}.`,
-    '- Keep the copy in exactly three paragraphs separated by blank lines.',
-    '- Keep the first two paragraphs product-first and move all store language to the final paragraph.',
+    '- Keep the copy in exactly two paragraphs separated by one blank line.',
+    '- Paragraph 1 is the human seller hook — concrete, attractive, no meta/category language.',
+    '- Paragraph 2 is the short SEO paragraph — keep it tight and hit the required store phrases.',
   ].join('\n')
 }
 
@@ -380,6 +390,7 @@ function paragraphWriterSystemPrompt(): string {
     'Use only supported facts from the evidence packet. If a detail is not supported, omit it. ' +
     'Never use em dashes. Never mention drafts, packets, internal review, or the evidence packet. ' +
     'Never mention listings, evidence, data, research, search terms, candidate indexes, competitors, market presence, or that any fact was confirmed or supported by an outside source. ' +
+    'NEVER write category boilerplate. Forbidden phrasing includes "this falls under the X category", "this product is part of the X category", "within the X subcategory", "categorized as", "classified as", "part of our X lineup/collection/range/family", or any other line whose only job is to restate the category, subcategory, or product class. Category context is shown elsewhere on the page; do not waste shopper attention restating it. ' +
     'Do not describe anything as part of a product line, product family, collection, or broader market. ' +
     'Do not describe what the product helps with or supports for the shopper. Avoid phrases such as mental clarity, unwind, stress, tension, sleep aid, better sleep, wellness, productivity, or similar user-outcome language. ' +
     'Never make medical, therapeutic, wellness, symptom-relief, or body-benefit claims. ' +
@@ -393,7 +404,8 @@ function paragraphLayoutSystemPrompt(): string {
   return (
     'You are planning paragraph structure for cannabis retail product copy. Return only valid JSON. ' +
     'Use only supported facts from the evidence packet. If a detail is not supported there, do not mention it. ' +
-    'Plan for three paragraphs. The first two paragraphs must stay product-first. The final paragraph may introduce store and SEO language. ' +
+    'Plan for EXACTLY TWO paragraphs. Paragraph 1 is a human-attractive seller hook (most useful and compelling shopper-facing copy). Paragraph 2 is a short SEO paragraph that hammers a few store keywords. ' +
+    'NEVER plan category boilerplate. Do not plan any sentence whose job is to restate the category, subcategory, or product class (e.g. "this falls under the X category", "part of the X lineup", "within the X subcategory"). Category context is already shown on the page. ' +
     'Do not plan any references to listings, evidence, data, research, outside confirmation, competitors, market presence, or prompt instructions. ' +
     'Do not plan any product line, product family, collection, or broader market language. ' +
     'Do not plan any shopper-outcome language such as mental clarity, unwind, stress relief, better sleep, wellness, productivity, or similar benefit framing. ' +
@@ -422,7 +434,7 @@ async function buildMultipassDescription(input: {
     { role: 'system', content: paragraphLayoutSystemPrompt() },
     {
       role: 'user',
-      content: `Plan where this product description should split into paragraphs.
+      content: `Plan how this product description should split into EXACTLY TWO paragraphs.
 
 Rules:
 1. Return JSON with exactly these keys:
@@ -433,20 +445,16 @@ Rules:
    - paragraph_2_focus
    - paragraph_2_must_include
    - paragraph_2_must_avoid
-   - paragraph_3_focus
-   - paragraph_3_must_include
-   - paragraph_3_must_avoid
    - split_rationale
 2. Each *_must_include and *_must_avoid field must be a short JSON array of strings.
-3. Paragraph 1 should explain what the SKU is and why it is distinct.
-4. Paragraph 2 should deepen the product detail with supported specifics.
-5. Paragraph 3 should handle shopping context and SEO for Freshly Baked NYC.
-6. Paragraphs 1 and 2 must not mention Freshly Baked NYC, weed shop, dispensary, delivery, or local shopping language.
-7. Paragraph 3 should include Freshly Baked NYC and weed shop, should include fast delivery when delivery_phrase_required is true, and may include licensed cannabis dispensary when it fits naturally.
-8. Avoid generic praise or filler in every paragraph.
-9. The finished description should target 210 to 320 words across exactly 3 paragraphs with blank lines between them.${retryGuidance}
-10. Never mention listings, evidence, data, research, outside confirmation, competitors, the market, or prompt instructions.
-11. Convert supported facts into direct product copy, or omit them.
+3. Paragraph 1 is THE shopper-facing hook. Plan the single most useful, most attractive description of what this SKU actually is and why someone should want it. Focus on concrete, sensory, distinctive details (supported flavor / aroma / texture, format, pack structure, strain when relevant, supported process or source). Identify brand and format naturally — do not list specs in a meta way.
+4. Paragraph 1 must NOT contain category boilerplate of any kind. Plan an explicit "do not include" entry for: any sentence whose job is to restate category/subcategory/product-class (e.g. "this falls under the X category", "part of the X lineup", "categorized as").
+5. Paragraph 1 must not mention Freshly Baked NYC, weed shop, dispensary, delivery, NYC shopping, or local service areas.
+6. Paragraph 2 is the short SEO paragraph. Plan it as a brief block that hammers store keywords: include Freshly Baked NYC and weed shop, include fast delivery when delivery_phrase_required is true, may include licensed cannabis dispensary when it fits naturally, and include at most one or two evidence-grounded product keywords. Keep it tight — no narrative, no praise filler.
+7. Avoid generic praise or filler in every paragraph.
+8. The finished description should target 110 to 180 words total across EXACTLY 2 paragraphs with one blank line between them.${retryGuidance}
+9. Never mention listings, evidence, data, research, outside confirmation, competitors, the market, or prompt instructions.
+10. Convert supported facts into direct product copy, or omit them.
 
 Evidence packet:
 ${evidenceJson}`,
@@ -463,21 +471,21 @@ ${evidenceJson}`,
   const layoutJson = JSON.stringify(layout.parsed, null, 2)
 
   const paragraph1 = await runJsonStage({
-    maxTokens: 350,
+    maxTokens: 380,
     messages: [
       { role: 'system', content: paragraphWriterSystemPrompt() },
       {
         role: 'user',
-        content: `Write paragraph 1 only.
+        content: `Write paragraph 1 only. This is the SHOPPER-FACING SELLER HOOK — the most useful, most attractive single paragraph a buyer will read.
 
 Rules:
 1. Return JSON with exactly one key: paragraph.
-2. Write 55 to 85 words.
-3. Identify the actual SKU in a human-useful way: brand, product family, format, weight or pack, and the most important product distinction.
-4. Do not mention Freshly Baked NYC, weed shop, dispensary, delivery, NYC shopping, or local service areas.
-5. Do not start with Experience, Discover, Explore, Elevate, or Indulge.
-6. Keep the paragraph product-first and concrete.
-7. Follow the paragraph plan when provided.
+2. Write 65 to 110 words.
+3. Make it concrete, sensory, and distinctive. Lead with what the shopper actually gets and what makes this SKU compelling. Weave in brand, format, and pack/weight naturally (not as a spec dump).
+4. NEVER include category boilerplate. Do NOT write sentences whose job is to restate the category, subcategory, or product class — phrases like "this falls under the X category", "this product is part of the X category", "within the X subcategory", "categorized as", "classified as", or "part of our X lineup/collection/range/family" are FORBIDDEN. Category context is shown elsewhere on the page.
+5. Do not mention Freshly Baked NYC, weed shop, dispensary, delivery, NYC shopping, or local service areas.
+6. Do not start with Experience, Discover, Explore, Elevate, or Indulge.
+7. Keep the paragraph product-first and concrete. Follow the paragraph plan when provided.
 8. Do not use generic praise words such as premium, exceptional, top-shelf, standout, or expertly crafted.${retryGuidance}
 9. Never mention listings, evidence, data, research, outside confirmation, competitors, the market, or prompt instructions.
 
@@ -495,23 +503,25 @@ ${evidenceJson}`,
   const paragraph1Text = normalizeParagraph(readStringField(paragraph1.parsed, 'paragraph'))
 
   const paragraph2 = await runJsonStage({
-    maxTokens: 420,
+    maxTokens: 280,
     messages: [
       { role: 'system', content: paragraphWriterSystemPrompt() },
       {
         role: 'user',
-        content: `Write paragraph 2 only.
+        content: `Write paragraph 2 only. This is the SHORT SEO paragraph — a tight block that hammers a few store keywords. Do not narrate, do not pile on adjectives.
 
 Rules:
 1. Return JSON with exactly one key: paragraph.
-2. Write 70 to 110 words.
-3. Build on paragraph 1 without repeating it.
-4. Focus on grounded product specifics such as process, source, strain, pack structure, supported flavor or aroma details, and any supported production detail.
-5. Do not mention Freshly Baked NYC, weed shop, dispensary, delivery, NYC shopping, or local service areas.
-6. Avoid generic praise and filler.
-7. Follow the paragraph plan when provided.
-8. Do not use generic praise words such as premium, exceptional, top-shelf, standout, or expertly crafted.${retryGuidance}
-9. Never mention listings, evidence, data, research, outside confirmation, competitors, the market, or prompt instructions.
+2. Write 40 to 70 words. Keep it short.
+3. Include the exact phrases "Freshly Baked NYC" and "weed shop" naturally.
+4. If delivery_phrase_required is true, include the exact phrase "fast delivery" naturally unless it would be clearly awkward.
+5. Include the exact phrase "licensed cannabis dispensary" when it fits naturally.
+6. Include at most one or two evidence-grounded product keywords (e.g. brand, format, strain) to reinforce search relevance. No new product narrative.
+7. Do not repeat paragraph 1. Do not contradict it. Do not add new product claims that were not already in paragraph 1.
+8. Avoid generic filler like top-shelf, exceptional, premium quality, or find your next favorite.
+9. Do not use generic praise words such as premium, exceptional, top-shelf, standout, or expertly crafted.${retryGuidance}
+10. Never mention listings, evidence, data, research, outside confirmation, competitors, the market, or prompt instructions.
+11. NEVER include category boilerplate (no "this falls under the X category", "part of our X lineup", "within the X subcategory", "categorized as", etc.).
 
 Paragraph 1:
 ${paragraph1Text}
@@ -525,49 +535,10 @@ ${evidenceJson}`,
     ],
     model: input.model,
     stage: 'paragraph_2',
-    temperature: input.repairIssues.length > 0 ? 0.15 : 0.3,
-  })
-  const paragraph2Text = normalizeParagraph(readStringField(paragraph2.parsed, 'paragraph'))
-
-  const paragraph3 = await runJsonStage({
-    maxTokens: 320,
-    messages: [
-      { role: 'system', content: paragraphWriterSystemPrompt() },
-      {
-        role: 'user',
-        content: `Write paragraph 3 only.
-
-Rules:
-1. Return JSON with exactly one key: paragraph.
-2. Write 55 to 90 words.
-3. This is the only paragraph that may mention the store or shopping context.
-4. Include the exact phrases "Freshly Baked NYC" and "weed shop" naturally.
-5. If delivery_phrase_required is true, include the exact phrase "fast delivery" naturally unless it would be clearly awkward.
-6. Include the exact phrase "licensed cannabis dispensary" when it fits naturally.
-7. Keep this paragraph local-search aware, but avoid generic filler like top-shelf, exceptional, premium quality, or find your next favorite.
-8. Follow the paragraph plan when provided.
-9. Do not use generic praise words such as premium, exceptional, top-shelf, standout, or expertly crafted.${retryGuidance}
-10. Never mention listings, evidence, data, research, outside confirmation, competitors, the market, or prompt instructions.
-
-Paragraph 1:
-${paragraph1Text}
-
-Paragraph 2:
-${paragraph2Text}
-
-Paragraph plan:
-${layoutJson}
-
-Evidence packet:
-${evidenceJson}`,
-      },
-    ],
-    model: input.model,
-    stage: 'paragraph_3',
     temperature: input.repairIssues.length > 0 ? 0.1 : 0.25,
   })
-  const paragraph3Text = normalizeParagraph(readStringField(paragraph3.parsed, 'paragraph'))
-  const description = normalizeGeneratedDescription([paragraph1Text, paragraph2Text, paragraph3Text].join('\n\n'))
+  const paragraph2Text = normalizeParagraph(readStringField(paragraph2.parsed, 'paragraph'))
+  const description = normalizeGeneratedDescription([paragraph1Text, paragraph2Text].join('\n\n'))
 
   const metadata = await runJsonStage({
     maxTokens: 420,
@@ -599,7 +570,7 @@ ${evidenceJson}`,
 
   return {
     proposal: normalizeProposalPayload({ ...metadata.parsed, description }, input.promptVersion),
-    stageLogs: [layout.log, paragraph1.log, paragraph2.log, paragraph3.log, metadata.log],
+    stageLogs: [layout.log, paragraph1.log, paragraph2.log, metadata.log],
   }
 }
 
@@ -820,18 +791,18 @@ function validateGeneratedDescription(description: string, evidencePacket: Descr
   if (evidencePacket.delivery_phrase_required && !cleaned.includes(REQUIRED_PHRASE_DELIVERY)) {
     issues.push(`missing required phrase: ${REQUIRED_PHRASE_DELIVERY}`)
   }
-  if (cleaned.split(/\s+/).length < 180) {
+  if (cleaned.split(/\s+/).length < 100) {
     issues.push('shorter than target range')
   }
-  if (paragraphs.length !== 3) {
-    issues.push('not exactly 3 paragraphs')
+  if (paragraphs.length !== 2) {
+    issues.push('not exactly 2 paragraphs')
   }
   issues.push(...paragraphWordIssues(paragraphs))
 
-  if (paragraphs.length >= 2) {
-    const earlyText = paragraphs.slice(0, 2).join('\n\n')
+  if (paragraphs.length >= 1) {
+    const earlyText = paragraphs[0]
     if (EARLY_STORE_LANGUAGE_PATTERNS.some((pattern) => pattern.test(earlyText))) {
-      issues.push('store or SEO language appears before final paragraph')
+      issues.push('store or SEO language appears in the seller-hook paragraph')
     }
   }
 
@@ -839,21 +810,18 @@ function validateGeneratedDescription(description: string, evidencePacket: Descr
 }
 
 function paragraphWordIssues(paragraphs: string[]): string[] {
-  if (paragraphs.length !== 3) {
+  if (paragraphs.length !== 2) {
     return []
   }
 
   const wordCounts = paragraphs.map((paragraph) => paragraph.split(/\s+/).filter((word) => word.length > 0).length)
   const issues: string[] = []
 
-  if (wordCounts[0] < 50 || wordCounts[0] > 95) {
+  if (wordCounts[0] < 60 || wordCounts[0] > 120) {
     issues.push(`paragraph 1 word count out of range: ${wordCounts[0]}`)
   }
-  if (wordCounts[1] < 65 || wordCounts[1] > 125) {
+  if (wordCounts[1] < 35 || wordCounts[1] > 80) {
     issues.push(`paragraph 2 word count out of range: ${wordCounts[1]}`)
-  }
-  if (wordCounts[2] < 50 || wordCounts[2] > 100) {
-    issues.push(`paragraph 3 word count out of range: ${wordCounts[2]}`)
   }
 
   return issues

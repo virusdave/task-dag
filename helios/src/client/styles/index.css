@@ -726,6 +726,91 @@ pre {
   border: 1px solid var(--panel-border);
 }
 
+/* Long-form comparisons (e.g. proposed description text) need much more
+ * room than a normal 3-column grid cell. Span the full row on desktop so
+ * we can show meaningful before/after side-by-side, and use a <details>
+ * so on mobile the row stays scannable until the reviewer expands it. */
+.value-panel--full-row {
+  grid-column: 1 / -1;
+}
+
+.value-panel--long-form {
+  /* <details> elements default to display:block already; nothing else
+   * structurally; the body grid is laid out below. */
+}
+
+.value-panel--long-form > summary {
+  cursor: pointer;
+  list-style: none;
+  display: grid;
+  gap: 0.35rem;
+}
+
+.value-panel--long-form > summary::-webkit-details-marker {
+  display: none;
+}
+
+.value-panel--long-form > summary::after {
+  content: '▸ tap to expand';
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.value-panel--long-form[open] > summary::after {
+  content: '▾ tap to collapse';
+}
+
+.value-panel--long-form .value-panel__label {
+  display: block;
+  margin-bottom: 0.15rem;
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.value-panel--long-form .value-panel__preview {
+  display: block;
+  font-size: 0.92rem;
+  line-height: 1.35;
+  /* Inline preview is meant to be one or two lines so the row stays
+   * compact when collapsed. */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.value-panel__long-body {
+  margin-top: 0.85rem;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+}
+
+.value-panel__long-body h4 {
+  margin: 0 0 0.35rem;
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+}
+
+.value-panel__long-body .long-form-text {
+  margin: 0;
+  white-space: pre-wrap;
+  font-size: 0.95rem;
+  line-height: 1.45;
+}
+
+@media (max-width: 720px) {
+  .value-panel__long-body {
+    grid-template-columns: 1fr;
+  }
+}
+
 /* Strong-color highlight for parsed attributes that would create a
  * brand-new entity in Sweed on apply (e.g., the parser invented a
  * brand name that doesn't exist yet). The reviewer MUST see this

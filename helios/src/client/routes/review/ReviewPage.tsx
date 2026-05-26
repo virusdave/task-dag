@@ -20,6 +20,7 @@ import {
   buildHeliosModulePath,
   type ReviewFamily,
   type ReviewFamilyQueueResponse,
+  type ReviewFieldComparison,
   type ReviewRow,
   type ReviewRowLineItemHandle,
   type ReviewRowPricingLadder,
@@ -301,14 +302,7 @@ function ReviewRowCard({ row }: { row: ReviewRow }) {
 
       <div className="comparison-grid">
         {row.comparisons.map((cmp) => (
-          <div className="value-panel" key={cmp.lineItemId} title={`${cmp.label}`}>
-            <span>{cmp.label} · live → proposed</span>
-            <p>
-              <span className="subtle-copy">{cmp.liveValueText || '—'}</span>{' '}
-              →{' '}
-              <strong>{cmp.proposedValueText || '—'}</strong>
-            </p>
-          </div>
+          <ComparisonPanel cmp={cmp} key={cmp.lineItemId} />
         ))}
       </div>
 
@@ -373,6 +367,81 @@ function ReviewRowCard({ row }: { row: ReviewRow }) {
       </details>
     </article>
   )
+}
+
+/**
+ * Renders one live → proposed comparison cell.
+ *
+ * Short text values (price, taxonomy, attribute strings) render inline in a
+ * three-column grid cell.
+ *
+ * Long-form text values (currently `changeKind === 'description'`) need much
+ * more room than a normal grid cell, so they:
+ *   - span the full grid row width on desktop (`.value-panel--full-row`),
+ *   - collapse into a `<details>` summary on mobile (and stay closed by
+ *     default) so the reviewer can scan rows without scrolling past 500-word
+ *     descriptions, then expand to read the full before/after.
+ *
+ * The browser `title` tooltip is set to a useful "Live: … → Proposed: …"
+ * preview so hovering a row gives a quick before/after even when collapsed,
+ * instead of just echoing the column label.
+ */
+function ComparisonPanel({ cmp }: { cmp: ReviewFieldComparison }): JSX.Element {
+  const liveText = cmp.liveValueText || '—'
+  const proposedText = cmp.proposedValueText || '—'
+
+  const isLongForm =
+    cmp.changeKind === 'description' ||
+    liveText.length > 220 ||
+    proposedText.length > 220
+
+  const tooltip = `${cmp.label}\n\nLive:\n${truncateForTooltip(liveText)}\n\nProposed:\n${truncateForTooltip(proposedText)}`
+
+  if (!isLongForm) {
+    return (
+      <div className="value-panel" title={tooltip}>
+        <span>{cmp.label} · live → proposed</span>
+        <p>
+          <span className="subtle-copy">{liveText}</span>{' '}
+          →{' '}
+          <strong>{proposedText}</strong>
+        </p>
+      </div>
+    )
+  }
+
+  return (
+    <details className="value-panel value-panel--full-row value-panel--long-form" title={tooltip}>
+      <summary>
+        <span className="value-panel__label">{cmp.label} · live → proposed</span>
+        <span className="value-panel__preview">
+          <span className="subtle-copy">{truncatePreview(liveText)}</span>{' '}
+          →{' '}
+          <strong>{truncatePreview(proposedText)}</strong>
+        </span>
+      </summary>
+      <div className="value-panel__long-body">
+        <div className="value-panel__column">
+          <h4>Live</h4>
+          <p className="long-form-text">{liveText}</p>
+        </div>
+        <div className="value-panel__column">
+          <h4>Proposed</h4>
+          <p className="long-form-text">{proposedText}</p>
+        </div>
+      </div>
+    </details>
+  )
+}
+
+function truncateForTooltip(text: string): string {
+  if (text.length <= 400) return text
+  return `${text.slice(0, 400).trimEnd()}…`
+}
+
+function truncatePreview(text: string): string {
+  if (text.length <= 110) return text
+  return `${text.slice(0, 110).trimEnd()}…`
 }
 
 function PricingLadderBlock({
