@@ -206,18 +206,28 @@ export function MetricChart({
           </span>
         )}
       </header>
-      <ChartSvg
-        response={response}
-        loading={loading}
-        error={error}
-        window={window}
-        setWindow={setWindow}
-        annotateMode={variant === 'expanded' && annotateMode}
-        annotations={visibleAnnotations}
-        metricId={metric.id}
-        onAnnotationsChanged={onAnnotationsChanged}
-        interactive={variant === 'expanded'}
-      />
+      {metric.chartType === 'scatter' ? (
+        <ScatterSvg
+          response={response}
+          loading={loading}
+          error={error}
+          window={window}
+          interactive={variant === 'expanded'}
+        />
+      ) : (
+        <ChartSvg
+          response={response}
+          loading={loading}
+          error={error}
+          window={window}
+          setWindow={setWindow}
+          annotateMode={variant === 'expanded' && annotateMode}
+          annotations={visibleAnnotations}
+          metricId={metric.id}
+          onAnnotationsChanged={onAnnotationsChanged}
+          interactive={variant === 'expanded'}
+        />
+      )}
       <ScreenReaderSummary metric={metric} response={response} window={window} loading={loading} />
     </article>
   )
@@ -998,6 +1008,379 @@ function HoverReadout({
       </ul>
     </div>
   )
+}
+
+// ---------------------------------------------------------------------------
+// Scatter chart — used when `metric.chartType === 'scatter'`. X axis is the
+// first declared series value, Y axis is the second. Each row in the
+// response becomes one dot. Rows may carry an optional string `site_zip`
+// column which the renderer uses to colour dots by site (so the operator
+// can see, e.g., Midtown vs Bronx correlations side-by-side). The shared
+// time-axis `window` still scopes which rows are included (server-side
+// filtering on `from`/`to`), but pan / zoom interactions don't apply —
+// scrolling the X axis would mean "scroll temperature", which is
+// meaningless.
+// ---------------------------------------------------------------------------
+
+interface ScatterSvgProps {
+  readonly response: MetricQueryResponse | null
+  readonly loading: boolean
+  readonly error: string | null
+  readonly window: TimeWindow
+  readonly interactive: boolean
+}
+
+const SITE_COLOURS = ['#1f77b4', '#d62728', '#2ca02c', '#9467bd', '#ff7f0e', '#8c564b']
+
+function ScatterSvg({ response, loading, error, window, interactive }: ScatterSvgProps) {
+  const wrapRef = useRef<HTMLDivElement | null>(null)
+  const [renderedWidthPx, setRenderedWidthPx] = useState<number>(600)
+  useLayoutEffect(() => {
+    const el = wrapRef.current
+    if (!el) return
+    const observer = new ResizeObserver((entries) => {
+      const w = Math.max(220, Math.floor(entries[0]?.contentRect.width ?? 600))
+      setRenderedWidthPx(w)
+    })
+    observer.observe(el)
+    return () => observer.disconnect()
+  }, [])
+
+  const width = renderedWidthPx
+  const height = interactive ? (renderedWidthPx < 480 ? 280 : 320) : 170
+  const marginLeft = 56
+  const marginRight = 14
+  const marginTop = 14
+  const marginBottom = 36
+  const plotW = Math.max(50, width - marginLeft - marginRight)
+  const plotH = Math.max(50, height - marginTop - marginBottom)
+
+  const xSeries = response?.metric.series[0] ?? null
+  const ySeries = response?.metric.series[1] ?? null
+
+  // Index distinct site_zip values → stable colour. Sites are sorted
+  // server-side, so the colour assignment is stable across reloads.
+  const { points, sites, xMin, xMax, yMin, yMax } = useMemo(() => {
+    const empty = {
+      points: [] as Array<{ x: number; y: number; t: number; site: string | null }>,
+      sites: [] as string[],
+      xMin: 0,
+      xMax: 1,
+      yMin: 0,
+      yMax: 1,
+    }
+    if (!response || !xSeries || !ySeries) return empty
+    const xId = xSeries.id
+    const yId = ySeries.id
+    const pts: Array<{ x: number; y: number; t: number; site: string | null }> = []
+    const siteSet = new Set<string>()
+    let xLo = Number.POSITIVE_INFINITY
+    let xHi = Number.NEGATIVE_INFINITY
+    let yLo = Number.POSITIVE_INFINITY
+    let yHi = Number.NEGATIVE_INFINITY
+    for (const row of response.data) {
+      const r = row as MetricDatum
+      const x = r[xId]
+      const y = r[yId]
+      if (typeof x !== 'number' || typeof y !== 'number') continue
+      const siteRaw = r.site_zip
+      const site = typeof siteRaw === 'string' ? siteRaw : null
+      if (site) siteSet.add(site)
+      pts.push({ x, y, t: Date.parse(r.t), site })
+      if (x < xLo) xLo = x
+      if (x > xHi) xHi = x
+      if (y < yLo) yLo = y
+      if (y > yHi) yHi = y
+    }
+    if (pts.length === 0) return empty
+    if (xLo === xHi) {
+      xLo -= 1
+      xHi += 1
+    } else {
+      const span = xHi - xLo
+      xLo -= span * 0.05
+      xHi += span * 0.05
+    }
+    if (yLo === yHi) {
+      yLo -= 1
+      yHi += 1
+    } else {
+      const span = yHi - yLo
+      yLo -= span * 0.05
+      yHi += span * 0.05
+    }
+    return {
+      points: pts,
+      sites: Array.from(siteSet).sort(),
+      xMin: xLo,
+      xMax: xHi,
+      yMin: yLo,
+      yMax: yHi,
+    }
+  }, [response, xSeries, ySeries])
+
+  const xScale = useCallback(
+    (v: number) => marginLeft + ((v - xMin) / (xMax - xMin)) * plotW,
+    [marginLeft, plotW, xMin, xMax],
+  )
+  const yScale = useCallback(
+    (v: number) => marginTop + plotH - ((v - yMin) / (yMax - yMin)) * plotH,
+    [marginTop, plotH, yMin, yMax],
+  )
+
+  const colourForSite = useCallback(
+    (site: string | null): string => {
+      if (!site) return SITE_COLOURS[0]!
+      const idx = sites.indexOf(site)
+      if (idx < 0) return SITE_COLOURS[0]!
+      return SITE_COLOURS[idx % SITE_COLOURS.length]!
+    },
+    [sites],
+  )
+
+  // Hover: track which dot (if any) is closest to the pointer, in
+  // squared-pixel distance. We bail early outside a small radius so
+  // moving across empty space doesn't show a stale tooltip.
+  const svgRef = useRef<SVGSVGElement | null>(null)
+  const [hover, setHover] = useState<{ idx: number; clientX: number; clientY: number } | null>(null)
+  const HOVER_PX = 18
+  const HOVER_PX_SQ = HOVER_PX * HOVER_PX
+  const onPointerMove = useCallback(
+    (e: React.PointerEvent<SVGSVGElement>) => {
+      const svg = svgRef.current
+      if (!svg || points.length === 0) return
+      const ctm = svg.getScreenCTM()
+      if (!ctm) return
+      const pt = svg.createSVGPoint()
+      pt.x = e.clientX
+      pt.y = e.clientY
+      const local = pt.matrixTransform(ctm.inverse())
+      let bestIdx = -1
+      let bestDistSq = Infinity
+      for (let i = 0; i < points.length; i++) {
+        const p = points[i]!
+        const dx = xScale(p.x) - local.x
+        const dy = yScale(p.y) - local.y
+        const dsq = dx * dx + dy * dy
+        if (dsq < bestDistSq) {
+          bestDistSq = dsq
+          bestIdx = i
+        }
+      }
+      if (bestIdx >= 0 && bestDistSq <= HOVER_PX_SQ) {
+        setHover({ idx: bestIdx, clientX: e.clientX, clientY: e.clientY })
+      } else {
+        setHover(null)
+      }
+    },
+    [points, xScale, yScale, HOVER_PX_SQ],
+  )
+  const onPointerLeave = useCallback(() => setHover(null), [])
+
+  const hovered = hover ? points[hover.idx] ?? null : null
+
+  // Axis ticks — five evenly spaced labels per axis is plenty for an
+  // operator scanning a correlation. Matches the data-density of the
+  // line-chart axis labels.
+  const xTicks = useMemo(() => makeTicks(xMin, xMax, 5), [xMin, xMax])
+  const yTicks = useMemo(() => makeTicks(yMin, yMax, 5), [yMin, yMax])
+
+  const hasData = points.length > 0
+  const windowLabel = `${shortDate(window.fromMs)} → ${shortDate(window.toMs)}`
+
+  return (
+    <div className="metric-chart-svg-wrap" ref={wrapRef}>
+      <svg
+        ref={svgRef}
+        viewBox={`0 0 ${width} ${height}`}
+        width="100%"
+        height={height}
+        className="metric-chart-svg"
+        role="img"
+        aria-label={
+          xSeries && ySeries
+            ? `Scatter chart: ${ySeries.label} (y) vs ${xSeries.label} (x), ${windowLabel}`
+            : 'Scatter chart'
+        }
+        onPointerMove={interactive ? onPointerMove : undefined}
+        onPointerLeave={interactive ? onPointerLeave : undefined}
+        style={{ touchAction: 'auto', cursor: interactive ? 'crosshair' : 'pointer' }}
+      >
+        {/* axis frame */}
+        <line
+          x1={marginLeft}
+          x2={width - marginRight}
+          y1={marginTop + plotH}
+          y2={marginTop + plotH}
+          stroke="#ccc"
+        />
+        <line x1={marginLeft} x2={marginLeft} y1={marginTop} y2={marginTop + plotH} stroke="#ccc" />
+
+        {/* gridlines + tick labels */}
+        {hasData
+          ? yTicks.map((v) => {
+              const y = yScale(v)
+              return (
+                <g key={`yt-${v}`}>
+                  <line
+                    x1={marginLeft}
+                    x2={width - marginRight}
+                    y1={y}
+                    y2={y}
+                    stroke="#eee"
+                    pointerEvents="none"
+                  />
+                  <text x={marginLeft - 6} y={y + 3} fontSize="10" textAnchor="end" fill="#555">
+                    {compactNumber(v)}
+                  </text>
+                </g>
+              )
+            })
+          : null}
+        {hasData
+          ? xTicks.map((v) => {
+              const x = xScale(v)
+              return (
+                <g key={`xt-${v}`}>
+                  <line
+                    x1={x}
+                    x2={x}
+                    y1={marginTop}
+                    y2={marginTop + plotH}
+                    stroke="#eee"
+                    pointerEvents="none"
+                  />
+                  <text x={x} y={marginTop + plotH + 12} fontSize="10" textAnchor="middle" fill="#555">
+                    {compactNumber(v)}
+                  </text>
+                </g>
+              )
+            })
+          : null}
+
+        {/* axis titles */}
+        {xSeries ? (
+          <text
+            x={marginLeft + plotW / 2}
+            y={height - 6}
+            fontSize="11"
+            textAnchor="middle"
+            fill="#444"
+          >
+            {xSeries.label}
+          </text>
+        ) : null}
+        {ySeries ? (
+          <text
+            transform={`translate(14 ${marginTop + plotH / 2}) rotate(-90)`}
+            fontSize="11"
+            textAnchor="middle"
+            fill="#444"
+          >
+            {ySeries.label}
+          </text>
+        ) : null}
+
+        {/* dots */}
+        {points.map((p, i) => (
+          <circle
+            key={i}
+            cx={xScale(p.x)}
+            cy={yScale(p.y)}
+            r={hover?.idx === i ? 5 : 3}
+            fill={colourForSite(p.site)}
+            fillOpacity={hover?.idx === i ? 1 : 0.55}
+            stroke={hover?.idx === i ? '#000' : 'none'}
+            strokeWidth={hover?.idx === i ? 1 : 0}
+            pointerEvents="none"
+          />
+        ))}
+
+        {loading && !response ? (
+          <text x={width / 2} y={marginTop + plotH / 2} textAnchor="middle" fontSize="12" fill="#999">
+            loading…
+          </text>
+        ) : null}
+
+        {response && !hasData && !loading ? (
+          <text x={width / 2} y={marginTop + plotH / 2} textAnchor="middle" fontSize="12" fill="#999">
+            no (weather, margin) pairs in this window / site filter
+          </text>
+        ) : null}
+      </svg>
+
+      <ScatterLegend sites={sites} colourFor={colourForSite} />
+
+      {error ? <div className="metric-chart-error">⚠ {error}</div> : null}
+
+      {hovered && xSeries && ySeries ? (
+        <div className="metric-chart-readout" aria-live="polite">
+          <div className="metric-chart-readout-time">
+            {shortDateLong(hovered.t)}
+            {hovered.site ? ` · ZIP ${hovered.site}` : ''}
+          </div>
+          <ul className="metric-chart-readout-list">
+            <li>
+              <span
+                className="metric-chart-readout-swatch"
+                style={{ background: xSeries.colour ?? '#888' }}
+              />
+              <span className="metric-chart-readout-label">{xSeries.label}</span>
+              <span className="metric-chart-readout-value">{compactNumber(hovered.x)}</span>
+            </li>
+            <li>
+              <span
+                className="metric-chart-readout-swatch"
+                style={{ background: ySeries.colour ?? '#888' }}
+              />
+              <span className="metric-chart-readout-label">{ySeries.label}</span>
+              <span className="metric-chart-readout-value">{compactNumber(hovered.y)}</span>
+            </li>
+          </ul>
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
+function ScatterLegend({
+  sites,
+  colourFor,
+}: {
+  sites: ReadonlyArray<string>
+  colourFor: (site: string | null) => string
+}) {
+  if (sites.length === 0) return null
+  return (
+    <div className="metric-chart-legend">
+      {sites.map((s) => (
+        <span className="metric-chart-legend-item" key={s}>
+          <span
+            className="metric-chart-legend-swatch"
+            style={{ background: colourFor(s) }}
+          />
+          ZIP {s}
+        </span>
+      ))}
+    </div>
+  )
+}
+
+/**
+ * Pick `n` evenly-spaced tick values between `lo` and `hi` (inclusive
+ * of both endpoints). Rounded to a few significant digits so the
+ * labels don't carry 12 decimals of floating-point noise.
+ */
+function makeTicks(lo: number, hi: number, n: number): number[] {
+  if (!Number.isFinite(lo) || !Number.isFinite(hi) || n < 2) return [lo]
+  const out: number[] = []
+  for (let i = 0; i < n; i++) {
+    const v = lo + ((hi - lo) * i) / (n - 1)
+    // Round to 4 sig figs; avoids '14.999999999999998' axis labels.
+    const mag = Math.pow(10, Math.floor(Math.log10(Math.abs(v) || 1)) - 3)
+    out.push(mag > 0 ? Math.round(v / mag) * mag : v)
+  }
+  return out
 }
 
 function ChartLegend({ series }: { series: ReadonlyArray<{ id: string; label: string; colour?: string }> }) {

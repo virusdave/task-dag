@@ -36,6 +36,22 @@ export const MetricSeriesDefSchema = z.object({
 export type MetricSeriesDef = z.infer<typeof MetricSeriesDefSchema>
 
 /**
+ * How the SPA should render a metric.
+ *
+ *   - `line`    — default. X axis = time bucket (`t`); each series is
+ *                 drawn as a polyline over time.
+ *   - `scatter` — X axis = `series[0]` value; Y axis = `series[1]` value.
+ *                 Each row in the response is plotted as a single dot at
+ *                 (series[0], series[1]). `t` is still required on the
+ *                 wire (kept for date provenance / hover tooltips and
+ *                 for window-based filtering on the server) but does NOT
+ *                 drive horizontal position. Scatter metrics MUST declare
+ *                 exactly two numeric series.
+ */
+export const MetricChartTypeSchema = z.enum(['line', 'scatter'])
+export type MetricChartType = z.infer<typeof MetricChartTypeSchema>
+
+/**
  * Provenance flag for a metric:
  *
  *   - `real`    — backed by real ingest / SQL the operator should trust.
@@ -69,6 +85,12 @@ export const MetricDefSummarySchema = z.object({
    * Rendered as a link on the "Data pending" placeholder card.
    */
   blockedByUrl: z.string().url().optional(),
+  /**
+   * How the SPA should render this metric. Defaults to `line` (time
+   * series). When set to `scatter`, the SPA plots each row as a dot
+   * with X = `series[0]` value and Y = `series[1]` value.
+   */
+  chartType: MetricChartTypeSchema.default('line'),
 })
 export type MetricDefSummary = z.infer<typeof MetricDefSummarySchema>
 
@@ -102,11 +124,13 @@ export type MetricQueryRequest = z.infer<typeof MetricQueryRequestSchema>
 //
 // `t` is always an ISO-8601 timestamp — the bucket boundary chosen by
 // the metric's `query` function based on the requested aggregation.
-// The remaining keys are arbitrary numeric series; the chart wrapper
-// looks them up by `series[i].id` in the metric summary.
+// Most remaining keys are numeric series the chart wrapper looks up
+// by `series[i].id` in the metric summary; scatter metrics may also
+// carry an optional string dimension column (e.g. `site_zip`) which
+// the renderer uses for per-dot grouping / colour.
 export const MetricDatumSchema = z
   .object({ t: z.string() })
-  .catchall(z.union([z.number(), z.null()]))
+  .catchall(z.union([z.number(), z.string(), z.null()]))
 export type MetricDatum = z.infer<typeof MetricDatumSchema>
 
 export const MetricQueryResponseSchema = z.object({

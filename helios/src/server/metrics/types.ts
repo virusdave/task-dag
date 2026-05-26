@@ -22,6 +22,14 @@ export interface MetricRow {
 }
 
 /**
+ * Allowed extra-column value types when echoing a query row to the
+ * wire. The strict Zod schema (MetricDatumSchema) admits number, null,
+ * and (since the scatter work) string. Helios route code projects
+ * MetricRow → MetricDatum 1:1 — every non-`t` key is forwarded as-is.
+ */
+export type MetricRowValue = string | number | null
+
+/**
  * Server-side MetricDef. Each metric file under
  * `server/src/metrics/<group>/<id>.ts` exports a `metric: MetricDef`
  * that the registry picks up.
@@ -37,7 +45,8 @@ export interface MetricRow {
  * against the in-process site registry first. The registry does not
  * sanitise them for you.
  */
-export interface MetricDef extends Omit<MetricDefSummary, 'dataStatus' | 'blockedByUrl'> {
+export interface MetricDef
+  extends Omit<MetricDefSummary, 'dataStatus' | 'blockedByUrl' | 'chartType'> {
   readonly series: MetricSeriesDef[]
   readonly query: MetricQueryFn
   /**
@@ -47,6 +56,12 @@ export interface MetricDef extends Omit<MetricDefSummary, 'dataStatus' | 'blocke
    */
   readonly dataStatus?: MetricDefSummary['dataStatus']
   readonly blockedByUrl?: MetricDefSummary['blockedByUrl']
+  /**
+   * Optional renderer hint. Defaults to `'line'` (time-series) when
+   * omitted. Set to `'scatter'` for metrics whose two series should
+   * be plotted as X / Y of a scatter chart (e.g. weather correlation).
+   */
+  readonly chartType?: MetricDefSummary['chartType']
 }
 
 export interface MetricQueryArgs {
@@ -77,5 +92,6 @@ export function toMetricSummary(metric: MetricDef): MetricDefSummary {
     supportedAggregations: metric.supportedAggregations,
     dataStatus: metric.dataStatus ?? 'real',
     blockedByUrl: metric.blockedByUrl,
+    chartType: metric.chartType ?? 'line',
   }
 }

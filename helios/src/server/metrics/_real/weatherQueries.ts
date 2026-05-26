@@ -11,37 +11,39 @@ import type { MetricQueryArgs, MetricRow } from '../types.js'
 // ============================================================================
 // Weather-correlation metric queries (FreshlyBakedNYC/automation#26).
 //
-// Each metric returns one row per (site_zip, day) tuple within the
-// requested window, with two series populated:
+// These metrics back the scatter chart on `/metrics → Weather
+// correlation`. Each row in the response is one DOT in the scatter:
 //
-//   * `weather_value`    — the per-day weather observation (high °F,
-//                          low °F, or precip inches depending on the
-//                          metric variant)
-//   * `margin_dollars`   — daily sum of (grand_total - tax - discount)
-//                          from `sweed_orders`, joined to the
-//                          weather row on ET date.
-//
-// The existing chart wrapper renders two-series rows as a time
-// series over `t`; the operator can read the per-day correlation by
-// eye until a scatter renderer ships in the SPA. When that lands,
-// no query change is needed — the data is already shaped as
-// "(weather_x, margin_y) per (site, day)".
+//   * `weather_value`    — the per-day (or per-bucket-average) weather
+//                          observation (high °F, low °F, or precip
+//                          inches depending on the metric variant);
+//                          consumed by the SPA as the X coordinate.
+//   * `margin_dollars`   — daily (or per-bucket-average) sum of
+//                          (grand_total - tax - discount) from
+//                          `sweed_orders`, joined to the weather row
+//                          on ET date; consumed by the SPA as the Y
+//                          coordinate.
+//   * `site_zip`         — ZIP of the dot's source site (e.g.
+//                          '10019' or '10458'); used by the renderer
+//                          to colour-code the dots and to surface
+//                          provenance in the hover tooltip.
+//   * `t`                — bucket-start ISO date midnight; kept on
+//                          the wire so the SPA can filter by time
+//                          window and show "what date this dot is
+//                          for" on hover, but it does NOT drive
+//                          horizontal position in the scatter view.
 //
 // Bucketing: at `date` agg (the default) we return one row per day
-// per site. At `week` / `month` agg we collapse to the average of
-// each axis within the bucket, weighted equally per day. At `total`
-// agg we collapse to a single all-time average. Hourly and
+// per site — i.e. one dot per (site, day). At `week` / `month` agg
+// we return one row per (site, bucket) carrying the average of
+// each axis within the bucket (so the scatter shows one dot per
+// site per week / month). At `total` agg we collapse to one dot
+// per site representing the all-time average. Hourly and
 // categorical (`dow`, `dom`, `dofortnight`) aggregations are NOT
 // supported because the underlying weather data has daily grain.
 // ============================================================================
 
 const SUPPORTED_AGGS: ReadonlyArray<MetricAggregation> = ['total', 'month', 'week', 'date']
-
-const POSTGRES_TRUNC_UNIT_BY_AGG: Partial<Record<MetricAggregation, string>> = {
-  date: 'day',
-  week: 'week',
-  month: 'month',
-}
 
 export type WeatherVariable = 'high_temp_f' | 'low_temp_f' | 'precip_in'
 
@@ -149,13 +151,21 @@ async function fetchPerDayRows(
 }
 
 /**
- * Map the SQL per-day rows into MetricRow[] bucketed at the
- * requested aggregation. For `date` agg we surface one row per
- * (day, site) — collisions across sites within the same bucket
- * are averaged because the SPA chart only has one (weather,
- * margin) slot per bucket. (When a scatter renderer lands, this
- * collapse step gets dropped and each (site, day) becomes its
- * own point.)
+ * Map the SQL per-(site, day) rows into MetricRow[] bucketed at the
+ * requested aggregation.
+ *
+ * Output grain: one row per (site_zip, bucket). The scatter renderer
+ * reads each row as one dot at (x = weather_value, y = margin_dollars)
+ * and uses site_zip for colour-coding.
+ *
+ *   * `date` agg → one row per (site, day). Weather is the day's
+ *     observation; margin is that day's total.
+ *   * `week`/`month` agg → one row per (site, bucket). Both axes
+ *     collapse to the bucket-internal AVERAGE (over days with data)
+ *     so the dot represents "typical day in this period" rather than
+ *     a fluctuating sum that grows with bucket length.
+ *   * `total` agg → one row per site, both axes averaged over the
+ *     whole window.
  */
 function shapeBuckets(
   rows: DayWeatherMarginRow[],
@@ -164,27 +174,28 @@ function shapeBuckets(
 ): MetricRow[] {
   if (buckets.length === 0) return []
 
-  // Per-bucket accumulator. We average weather and sum margin per
-  // bucket; for the daily agg this is a no-op (one row per bucket).
-  const acc = new Map<
-    string,
-    {
-      weatherSum: number
-      weatherCount: number
-      marginSum: number
-      marginCount: number
-    }
-  >()
-
-  const truncUnit = POSTGRES_TRUNC_UNIT_BY_AGG[agg] ?? null
+  // (site_zip, bucketIso) → accumulator. We keep per-site grain so
+  // the scatter renderer can plot one dot per (site, bucket).
+  type BucketAcc = {
+    weatherSum: number
+    weatherCount: number
+    marginSum: number
+    marginCount: number
+  }
+  const acc = new Map<string, Map<string, BucketAcc>>()
 
   for (const row of rows) {
     const bucketIso = bucketIsoForRow(row.date, agg, buckets)
     if (bucketIso === null) continue
-    let entry = acc.get(bucketIso)
+    let perSite = acc.get(row.site_zip)
+    if (!perSite) {
+      perSite = new Map<string, BucketAcc>()
+      acc.set(row.site_zip, perSite)
+    }
+    let entry = perSite.get(bucketIso)
     if (!entry) {
       entry = { weatherSum: 0, weatherCount: 0, marginSum: 0, marginCount: 0 }
-      acc.set(bucketIso, entry)
+      perSite.set(bucketIso, entry)
     }
     if (row.weather_value !== null && Number.isFinite(row.weather_value)) {
       entry.weatherSum += row.weather_value
@@ -196,32 +207,35 @@ function shapeBuckets(
     }
   }
 
-  return buckets.map((b) => {
-    const key = b.toISOString()
-    const entry = acc.get(key)
-    const out: Record<string, string | number | null> = { t: key }
-    if (!entry) {
-      out.weather_value = null
-      out.margin_dollars = null
-      return out as MetricRow
+  const out: MetricRow[] = []
+  // Sort site keys for deterministic row ordering on the wire.
+  const siteZips = Array.from(acc.keys()).sort()
+  for (const siteZip of siteZips) {
+    const perSite = acc.get(siteZip)!
+    for (const b of buckets) {
+      const key = b.toISOString()
+      const entry = perSite.get(key)
+      if (!entry || entry.weatherCount === 0 || entry.marginCount === 0) {
+        // Skip empty (site, bucket) cells — a scatter dot needs both
+        // coordinates to be meaningful. Emitting (null, null) rows
+        // would just add noise to the wire payload and force the
+        // renderer to filter them out anyway.
+        continue
+      }
+      const weather = entry.weatherSum / entry.weatherCount
+      const margin =
+        agg === 'date'
+          ? entry.marginSum
+          : entry.marginSum / entry.marginCount
+      out.push({
+        t: key,
+        site_zip: siteZip,
+        weather_value: weather,
+        margin_dollars: margin,
+      } as MetricRow)
     }
-    out.weather_value = entry.weatherCount > 0 ? entry.weatherSum / entry.weatherCount : null
-    if (agg === 'date' || truncUnit === null) {
-      // For daily / total agg we surface the SUM of margins in the
-      // bucket (one day's margin for `date`, all margins for
-      // `total`). The weather value is the daily observation
-      // average — the per-day grain of the source means at `date`
-      // agg both axes are simple one-element averages.
-      out.margin_dollars = entry.marginCount > 0 ? entry.marginSum : null
-    } else {
-      // For week / month we average the daily margin so the chart
-      // shows "typical day-in-this-period" not a fluctuating sum
-      // (which would otherwise look bigger on full-week buckets
-      // than on partial-week leading / trailing buckets).
-      out.margin_dollars = entry.marginCount > 0 ? entry.marginSum / entry.marginCount : null
-    }
-    return out as MetricRow
-  })
+  }
+  return out
 }
 
 /** Find the bucket-start ISO key (as ISO string) for the given ET
@@ -261,7 +275,8 @@ async function queryWeatherMargin(
   const zips = resolveSiteZips(args.sites)
   const { from, to, buckets } = resolveWindow(args)
   if (dealerIds.length === 0 || zips.length === 0 || buckets.length === 0) {
-    return buckets.map((b) => ({ t: b.toISOString(), weather_value: null, margin_dollars: null }))
+    // Scatter: no resolvable sites or zero-width window = no dots.
+    return []
   }
   const rows = await fetchPerDayRows(variable, dealerIds, zips, from, to)
   return shapeBuckets(rows, buckets, args.agg)
