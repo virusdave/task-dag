@@ -58,10 +58,19 @@ create table if not exists sweed_shifts (
   -- `shift_open` is the canonical clock-in moment; null `shift_close`
   -- = currently open. `shift_minutes` collapses to whole minutes so
   -- the SQL is sum-friendly without a divide-by-60 at metric time.
+  --
+  -- The generated expression deliberately does NOT coalesce
+  -- `shift_close` to `now()` — Postgres only allows immutable
+  -- expressions in STORED generated columns, and `now()` is
+  -- volatile. For open shifts this column is therefore NULL; the
+  -- metric SQL coalesces to `extract(epoch from now() - shift_open)
+  -- / 60` at query time on its own. Throughput aggregates over
+  -- past windows look at closed shifts only, so this divergence is
+  -- benign in practice.
   shift_open     timestamptz not null,
   shift_close    timestamptz,
   shift_minutes  int generated always as (
-    extract(epoch from coalesce(shift_close, now()) - shift_open)::int / 60
+    extract(epoch from shift_close - shift_open)::int / 60
   ) stored,
 
   ingested_at    timestamptz not null default now(),
