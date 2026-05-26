@@ -386,6 +386,14 @@ export const router = createBrowserRouter([
         loader: metricsLoader,
         path: 'metrics',
       },
+      {
+        // Per-tab dashboard route — same loader + page, the tab id is read
+        // from useParams() inside MetricsLayoutPage. Tabs share the loaded
+        // metric list and a per-tab toolbar config (agg / stack mode).
+        element: <MetricsLayoutPage />,
+        loader: metricsLoader,
+        path: 'metrics/:tabId',
+      },
     ],
     element: <AppShell />,
     id: 'root',

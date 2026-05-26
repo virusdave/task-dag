@@ -2803,6 +2803,42 @@ a.tree-nav-branch-label.is-link,
   z-index: 2;
 }
 
+.metrics-tabs-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  align-items: stretch;
+  border-bottom: 1px solid var(--control-border);
+  padding: 0 0 0.1rem 0;
+}
+
+.metrics-tab {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.45rem 0.85rem;
+  border: 1px solid transparent;
+  border-bottom: none;
+  border-radius: 6px 6px 0 0;
+  font-size: 0.9rem;
+  color: var(--text-muted);
+  text-decoration: none;
+  background: transparent;
+  margin-bottom: -1px; /* sit on top of the bottom border so the active tab can "open" into the panel */
+}
+
+.metrics-tab:hover {
+  color: var(--text-muted-strong);
+  background: var(--panel);
+}
+
+.metrics-tab--active {
+  color: var(--accent-strong);
+  background: var(--panel);
+  border-color: var(--control-border);
+  border-bottom-color: var(--panel);
+  font-weight: 600;
+}
+
 .metrics-control-group {
   display: inline-flex;
   align-items: center;

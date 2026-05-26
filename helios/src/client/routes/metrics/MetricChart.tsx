@@ -109,6 +109,12 @@ export function MetricChart({
   const agg = metric.supportedAggregations.includes(effectiveAgg)
     ? effectiveAgg
     : metric.defaultAggregation
+  // Aggregation has no semantic meaning for a scatter chart (the X axis
+  // isn't time, it's the first series' value). Hide the per-chart dropdown
+  // for scatter so the operator can't accidentally rebucket weather dots
+  // into a no-op "weekly high temperature" cohort. The dashboard-level
+  // page-agg control is hidden in the same situation by the tab config.
+  const aggControlApplicable = metric.chartType !== 'scatter'
 
   // Stack mode applies only to multi-series LINE charts; the dropdown
   // is hidden (and the effective mode forced to 'none') otherwise so
@@ -204,18 +210,22 @@ export function MetricChart({
         </div>
         {variant === 'expanded' ? (
           <div className="metric-chart-controls">
-            <select
-              value={aggOverride ?? ''}
-              onChange={(e) => setAggOverride((e.target.value || null) as MetricAggregation | null)}
-              aria-label={`Aggregation for ${metric.title}`}
-            >
-              <option value="">agg: {defaultAgg} (page)</option>
-              {metric.supportedAggregations.map((a) => (
-                <option key={a} value={a}>
-                  agg: {a}
-                </option>
-              ))}
-            </select>
+            {aggControlApplicable ? (
+              <select
+                value={aggOverride ?? ''}
+                onChange={(e) =>
+                  setAggOverride((e.target.value || null) as MetricAggregation | null)
+                }
+                aria-label={`Aggregation for ${metric.title}`}
+              >
+                <option value="">agg: {defaultAgg} (page)</option>
+                {metric.supportedAggregations.map((a) => (
+                  <option key={a} value={a}>
+                    agg: {a}
+                  </option>
+                ))}
+              </select>
+            ) : null}
             {stackModeApplicable ? (
               <select
                 value={stackModeOverride ?? ''}

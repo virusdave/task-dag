@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { useLoaderData } from 'react-router-dom'
+import { NavLink, useLoaderData, useParams } from 'react-router-dom'
 
 import {
   MetricAnnotationsListResponseSchema,
@@ -42,20 +42,139 @@ const KNOWN_SITES: ReadonlyArray<{ id: string; label: string }> = [
   { id: 'midtown', label: 'Midtown' },
 ]
 
+// ---------------------------------------------------------------------------
+// Tabs
+//
+// The dashboard is split into URL-addressable tabs (`/metrics/:tabId`) so that
+// each tab can carry its own toolbar config — page-wide aggregation, page-wide
+// stack mode — and so that controls that are meaningless for a tab (e.g.
+// "aggregation" on a scatter tab) can be hidden rather than no-op. Tabs are
+// declared client-side; each one filters the loaded metric list with its
+// `include` predicate.
+//
+// Adding a tab is a one-liner here plus matching predicate.
+// ---------------------------------------------------------------------------
+
+export type MetricsTabId = 'sales' | 'geography' | 'inventory' | 'scatter'
+
+const DEFAULT_TAB_ID: MetricsTabId = 'sales'
+
+interface MetricsTab {
+  readonly id: MetricsTabId
+  readonly label: string
+  readonly description: string
+  readonly defaultAgg: MetricAggregation
+  readonly defaultStackMode: MetricStackMode
+  readonly showAggControl: boolean
+  readonly showStackControl: boolean
+  /** Predicate run against each loaded MetricDefSummary. */
+  readonly include: (m: MetricDefSummary) => boolean
+}
+
+// Group-membership sets, scoped per tab. Anything outside these falls into
+// the "sales" catch-all so a new metric doesn't go missing just because no
+// tab claimed it yet — the operator will see it on the default tab and we
+// can re-home it later by editing this map.
+const GEOGRAPHY_GROUPS = new Set(['Customer origin', 'Delivery'])
+const INVENTORY_GROUPS = new Set(['Inventory', 'Running low', 'Slow movers'])
+
+const METRICS_TABS: ReadonlyArray<MetricsTab> = [
+  {
+    id: 'sales',
+    label: 'Sales & ops',
+    description: 'Time-series of orders, margin, basket, payment mix, category distribution, cashier throughput.',
+    defaultAgg: 'week',
+    defaultStackMode: 'none',
+    showAggControl: true,
+    showStackControl: true,
+    include: (m) =>
+      m.chartType !== 'scatter' &&
+      !GEOGRAPHY_GROUPS.has(m.group) &&
+      !INVENTORY_GROUPS.has(m.group),
+  },
+  {
+    id: 'geography',
+    label: 'Customer geography',
+    description: 'Where orders come from (borough mix) and how they fulfill (delivery vs pickup).',
+    defaultAgg: 'week',
+    defaultStackMode: 'percent',
+    showAggControl: true,
+    showStackControl: true,
+    include: (m) => m.chartType !== 'scatter' && GEOGRAPHY_GROUPS.has(m.group),
+  },
+  {
+    id: 'inventory',
+    label: 'Inventory',
+    description: 'Current on-hand state — slow movers, running low, days-of-stock.',
+    defaultAgg: 'date',
+    defaultStackMode: 'none',
+    showAggControl: true,
+    showStackControl: true,
+    include: (m) => m.chartType !== 'scatter' && INVENTORY_GROUPS.has(m.group),
+  },
+  {
+    id: 'scatter',
+    label: 'Scatter analytics',
+    description: 'Point-per-observation scatter plots (currently weather correlation; product-analytics scatter to follow).',
+    // Scatter metrics don't bucket meaningfully across days; the dot grain
+    // belongs to the metric (per-site, per-day). Default to `date` so the
+    // server query picks one-dot-per-(site, day).
+    defaultAgg: 'date',
+    defaultStackMode: 'none',
+    // The agg/stack controls have no useful effect on a scatter tab — what
+    // would "weekly high temperature" mean for a scatter? — so we hide
+    // both globally and per-chart.
+    showAggControl: false,
+    showStackControl: false,
+    include: (m) => m.chartType === 'scatter',
+  },
+]
+
+const METRICS_TABS_BY_ID = new Map<MetricsTabId, MetricsTab>(METRICS_TABS.map((t) => [t.id, t]))
+
+function resolveTab(raw: string | undefined): MetricsTab {
+  if (!raw) return METRICS_TABS_BY_ID.get(DEFAULT_TAB_ID)!
+  return METRICS_TABS_BY_ID.get(raw as MetricsTabId) ?? METRICS_TABS_BY_ID.get(DEFAULT_TAB_ID)!
+}
+
 export async function metricsLoader(): Promise<MetricListResponse> {
   return loadJson('/api/metrics', MetricListResponseSchema)
 }
 
 export function MetricsLayoutPage() {
   const { metrics } = useLoaderData() as MetricListResponse
+  const { tabId } = useParams<{ tabId?: string }>()
+  const activeTab = useMemo(() => resolveTab(tabId), [tabId])
 
   // Site filter: empty Set = all sites. Multi-select against KNOWN_SITES.
   const [selectedSites, setSelectedSites] = useState<ReadonlySet<string>>(() => new Set<string>())
   const sitesParam = useMemo(() => Array.from(selectedSites).join(','), [selectedSites])
-  const [pageAgg, setPageAgg] = useState<MetricAggregation>('week')
-  // Page-wide stack mode for multi-series line charts; per-chart override
-  // available in the focus panel's chart toolbar.
-  const [pageStackMode, setPageStackMode] = useState<MetricStackMode>('none')
+
+  // Tab-scoped toolbar config. Each tab remembers its own aggregation +
+  // stack-mode independently so switching tabs doesn't trample the operator's
+  // preferences on the previous one. Defaults come from the tab definition.
+  const [aggByTab, setAggByTab] = useState<Record<MetricsTabId, MetricAggregation>>(() =>
+    Object.fromEntries(METRICS_TABS.map((t) => [t.id, t.defaultAgg])) as Record<
+      MetricsTabId,
+      MetricAggregation
+    >,
+  )
+  const [stackByTab, setStackByTab] = useState<Record<MetricsTabId, MetricStackMode>>(() =>
+    Object.fromEntries(METRICS_TABS.map((t) => [t.id, t.defaultStackMode])) as Record<
+      MetricsTabId,
+      MetricStackMode
+    >,
+  )
+  const pageAgg = aggByTab[activeTab.id]
+  const pageStackMode = stackByTab[activeTab.id]
+  const setPageAgg = useCallback(
+    (next: MetricAggregation) => setAggByTab((prev) => ({ ...prev, [activeTab.id]: next })),
+    [activeTab.id],
+  )
+  const setPageStackMode = useCallback(
+    (next: MetricStackMode) => setStackByTab((prev) => ({ ...prev, [activeTab.id]: next })),
+    [activeTab.id],
+  )
   // 90d default window matching the parent epic spec.
   const [initialWindow] = useState<TimeWindow>(() => ({
     fromMs: Date.now() - 90 * DAY_MS,
@@ -109,14 +228,26 @@ export function MetricsLayoutPage() {
     document.addEventListener('keydown', onKey)
     return () => document.removeEventListener('keydown', onKey)
   }, [expandedMetricId])
+  // Close any focused metric when the operator switches tabs — the focused
+  // metric usually belongs to the previous tab, and re-opening on the new
+  // tab takes one click.
+  useEffect(() => {
+    setExpandedMetricId(null)
+  }, [activeTab.id])
+
+  // Filter the loaded metric list down to what THIS tab claims, BEFORE
+  // partitioning into real/missing and grouping. That way the coverage
+  // badge ("2 live, 1 missing") and the group list both reflect just this
+  // tab's slice.
+  const tabMetrics = useMemo(() => metrics.filter(activeTab.include), [metrics, activeTab])
 
   const expandedMetric = useMemo(
-    () => metrics.find((m) => m.id === expandedMetricId) ?? null,
-    [metrics, expandedMetricId],
+    () => tabMetrics.find((m) => m.id === expandedMetricId) ?? null,
+    [tabMetrics, expandedMetricId],
   )
 
   // Partition metrics by data status and group.
-  const partitioned = useMemo(() => partitionMetrics(metrics), [metrics])
+  const partitioned = useMemo(() => partitionMetrics(tabMetrics), [tabMetrics])
   const realGroups = useMemo(() => groupByMetricGroup(partitioned.real), [partitioned.real])
   const missingGroups = useMemo(() => groupByMetricGroup(partitioned.missing), [partitioned.missing])
 
@@ -136,6 +267,8 @@ export function MetricsLayoutPage() {
           />
         </header>
 
+        <MetricsTabsNav activeTabId={activeTab.id} />
+
         <DashboardControls
           selectedSites={selectedSites}
           onSitesChange={setSelectedSites}
@@ -143,6 +276,8 @@ export function MetricsLayoutPage() {
           onAggChange={setPageAgg}
           pageStackMode={pageStackMode}
           onStackModeChange={setPageStackMode}
+          showAggControl={activeTab.showAggControl}
+          showStackControl={activeTab.showStackControl}
         />
 
         {expandedMetric ? (
@@ -175,7 +310,9 @@ export function MetricsLayoutPage() {
         ) : null}
 
         {realGroups.length === 0 ? (
-          <p className="subtle-copy">No live metrics registered yet.</p>
+          <p className="subtle-copy">
+            No live metrics on this tab yet. {activeTab.description}
+          </p>
         ) : (
           realGroups.map((g) => (
             <MetricGroupSection
@@ -265,6 +402,10 @@ interface DashboardControlsProps {
   readonly onAggChange: (next: MetricAggregation) => void
   readonly pageStackMode: MetricStackMode
   readonly onStackModeChange: (next: MetricStackMode) => void
+  /** When false the aggregation dropdown is hidden (scatter tabs etc.). */
+  readonly showAggControl: boolean
+  /** When false the stack-mode dropdown is hidden (scatter tabs etc.). */
+  readonly showStackControl: boolean
 }
 
 const STACK_MODE_PAGE_LABEL: Record<MetricStackMode, string> = {
@@ -280,6 +421,8 @@ function DashboardControls({
   onAggChange,
   pageStackMode,
   onStackModeChange,
+  showAggControl,
+  showStackControl,
 }: DashboardControlsProps) {
   return (
     <div className="metrics-controls">
@@ -314,40 +457,49 @@ function DashboardControls({
         })}
       </div>
 
-      <div className="metrics-control-group">
-        <label>
-          aggregation{' '}
-          <select value={pageAgg} onChange={(e) => onAggChange(e.target.value as MetricAggregation)}>
-            {PRIMARY_AGGREGATIONS.map((a) => (
-              <option key={a} value={a}>
-                {a}
-              </option>
-            ))}
-            <optgroup label="advanced">
-              {ADVANCED_AGGREGATIONS.map((a) => (
-                <option key={a} value={a}>
-                  {a}
-                </option>
-              ))}
-            </optgroup>
-          </select>
-        </label>
-        <label
-          title="Stack multi-series line charts as cumulative bands, or normalise each bucket to 100% so series read as a share-of-whole."
-        >
-          stack{' '}
-          <select
-            value={pageStackMode}
-            onChange={(e) => onStackModeChange(e.target.value as MetricStackMode)}
-          >
-            {METRIC_STACK_MODES.map((m) => (
-              <option key={m} value={m}>
-                {STACK_MODE_PAGE_LABEL[m]}
-              </option>
-            ))}
-          </select>
-        </label>
-      </div>
+      {showAggControl || showStackControl ? (
+        <div className="metrics-control-group">
+          {showAggControl ? (
+            <label>
+              aggregation{' '}
+              <select
+                value={pageAgg}
+                onChange={(e) => onAggChange(e.target.value as MetricAggregation)}
+              >
+                {PRIMARY_AGGREGATIONS.map((a) => (
+                  <option key={a} value={a}>
+                    {a}
+                  </option>
+                ))}
+                <optgroup label="advanced">
+                  {ADVANCED_AGGREGATIONS.map((a) => (
+                    <option key={a} value={a}>
+                      {a}
+                    </option>
+                  ))}
+                </optgroup>
+              </select>
+            </label>
+          ) : null}
+          {showStackControl ? (
+            <label
+              title="Stack multi-series line charts as cumulative bands, or normalise each bucket to 100% so series read as a share-of-whole."
+            >
+              stack{' '}
+              <select
+                value={pageStackMode}
+                onChange={(e) => onStackModeChange(e.target.value as MetricStackMode)}
+              >
+                {METRIC_STACK_MODES.map((m) => (
+                  <option key={m} value={m}>
+                    {STACK_MODE_PAGE_LABEL[m]}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ) : null}
+        </div>
+      ) : null}
 
       <div className="metrics-control-group">
         <span className="subtle-copy">range</span>
@@ -360,6 +512,42 @@ function DashboardControls({
         </details>
       </div>
     </div>
+  )
+}
+
+// Tab nav strip rendered between the dashboard header and the toolbar.
+// Each tab is a real <NavLink> so the URL drives the active tab and the
+// browser back/forward buttons work as expected. The "All" / catch-all
+// idea was rejected: tabs are meant to be intentional dashboards, not a
+// generic everything-page.
+function MetricsTabsNav({ activeTabId }: { activeTabId: MetricsTabId }) {
+  return (
+    <nav
+      className="metrics-tabs-nav"
+      role="tablist"
+      aria-label="Metrics dashboard tabs"
+    >
+      {METRICS_TABS.map((t) => (
+        <NavLink
+          key={t.id}
+          to={`/metrics/${t.id}`}
+          // Inactive tabs get the ghost-button look; the active tab gets
+          // an emphasized class. We can't trust NavLink's own active
+          // state because the bare `/metrics` URL doesn't carry a tabId
+          // (it resolves to the default tab via resolveTab()).
+          className={({ isActive }) =>
+            isActive || t.id === activeTabId
+              ? 'metrics-tab metrics-tab--active'
+              : 'metrics-tab'
+          }
+          role="tab"
+          aria-selected={t.id === activeTabId}
+          title={t.description}
+        >
+          {t.label}
+        </NavLink>
+      ))}
+    </nav>
   )
 }
 
