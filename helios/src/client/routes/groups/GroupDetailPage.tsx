@@ -361,8 +361,8 @@ function MarketResearchPanel({ evidence }: MarketResearchPanelProps) {
     <section className="detail-panel wide-panel">
       <h3>Market Research</h3>
       {showWarning ? (
-        <p className="error-text">
-          Live market refresh is currently broken (legacy Lit Alerts bearer expired); the evidence below is whatever was last successfully cached. The catalog-wide partner-API refresh is task-B phase 1.
+        <p className="subtle-copy">
+          Some evidence below is older than the live freshness window. The structured LitAlerts partner-API sweep refreshes daily; tap a per-product Refresh now to force a fetch.
         </p>
       ) : null}
       {unacknowledgedExpiredCount > 0 ? (
@@ -432,7 +432,7 @@ function MarketResearchProductCard({ entry, acknowledgeExpired, onToggleAcknowle
 
       {entry.freshness === 'absent' ? (
         <p className="empty-state" style={{ marginTop: '0.75rem' }}>
-          No cached competitor evidence for this product yet. Will be picked up by the partner-API sweep once task-B phase 1 lands.
+          No cached competitor evidence yet. Awaiting next structured LitAlerts partner-API sweep (runs daily; per-product Refresh now also forces a fetch).
         </p>
       ) : (
         <>

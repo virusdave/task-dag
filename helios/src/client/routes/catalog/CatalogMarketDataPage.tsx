@@ -601,6 +601,25 @@ interface SizeGroupPanelProps {
 function SizeGroupPanel({ group, onVerdict, pendingFuzzyId }: SizeGroupPanelProps): JSX.Element {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+      <div
+        className="inline-row wrap-row"
+        style={{
+          gap: '0.4rem',
+          alignItems: 'center',
+          padding: '0.3rem 0.5rem',
+          background: 'rgba(0,0,0,0.04)',
+          borderRadius: '4px',
+          fontSize: '0.85rem',
+        }}
+      >
+        <Pill tone="muted">{`Size ${group.sizeLabel}`}</Pill>
+        <span className="subtle-copy">
+          {`${group.variants.length} catalog variant${group.variants.length === 1 ? '' : 's'} · ${group.candidates.length} candidate${group.candidates.length === 1 ? '' : 's'} above threshold`}
+          {group.suppressedCandidateCount > 0
+            ? ` · ${group.suppressedCandidateCount} hidden`
+            : ''}
+        </span>
+      </div>
       <div className="inline-row wrap-row" style={{ gap: '0.5rem' }}>
         {group.variants.map((v) => (
           <CatalogVariantCard key={v.catalogProductId} variant={v} />
@@ -669,13 +688,23 @@ function CatalogVariantCard({ variant }: { variant: CatalogVariant }): JSX.Eleme
           no img
         </div>
       )}
-      <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0 }}>
-        <div style={{ fontWeight: 600, fontSize: '0.85rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-          {variant.shortName ?? variant.name ?? `Product ${variant.catalogProductId}`}
+      <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0, gap: '0.15rem' }}>
+        <div className="inline-row" style={{ gap: '0.3rem', alignItems: 'center' }}>
+          <Pill tone="muted">{variant.sizeLabel}</Pill>
+          <span
+            style={{
+              fontWeight: 600,
+              fontSize: '0.85rem',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            {variant.shortName ?? variant.name ?? `Product ${variant.catalogProductId}`}
+          </span>
         </div>
         <div className="subtle-copy" style={{ fontSize: '0.75rem' }}>
-          {variant.sizeLabel}
-          {variant.sku ? ` · SKU ${variant.sku}` : ''}
+          {variant.sku ? `SKU ${variant.sku}` : '—'}
           {variant.price != null ? ` · $${variant.price.toFixed(2)}` : ''}
         </div>
       </div>
@@ -723,17 +752,18 @@ function CandidateRow({
     >
       <div className="inline-row wrap-row" style={{ justifyContent: 'space-between', gap: '0.5rem' }}>
         <div style={{ flex: '1 1 14rem', minWidth: 0 }}>
-          {c.listingUrl ? (
-            <a href={c.listingUrl} rel="noreferrer" target="_blank" style={{ fontWeight: 500 }}>
-              {c.fuzzy.rawInputJsonb?.listingName ?? '—'}
-            </a>
-          ) : (
-            <span style={{ fontWeight: 500 }}>{c.fuzzy.rawInputJsonb?.listingName ?? '—'}</span>
-          )}
+          <div className="inline-row" style={{ gap: '0.3rem', alignItems: 'center', flexWrap: 'wrap' }}>
+            <Pill tone="muted">{c.matchedSizeLabel || '?'}</Pill>
+            {c.listingUrl ? (
+              <a href={c.listingUrl} rel="noreferrer" target="_blank" style={{ fontWeight: 500 }}>
+                {c.fuzzy.rawInputJsonb?.listingName ?? '—'}
+              </a>
+            ) : (
+              <span style={{ fontWeight: 500 }}>{c.fuzzy.rawInputJsonb?.listingName ?? '—'}</span>
+            )}
+          </div>
           <div className="subtle-copy" style={{ fontSize: '0.78rem' }}>
             {c.dispensaryName ?? '—'} · {c.fuzzy.brandNorm ?? '—'} · {c.fuzzy.categoryNorm ?? '—'}
-            {c.fuzzy.sizeGNorm != null ? ` · ${c.fuzzy.sizeGNorm}g` : ''}
-            {c.fuzzy.sizeMgNorm != null ? ` · ${c.fuzzy.sizeMgNorm}mg` : ''}
           </div>
         </div>
         <div className="inline-row" style={{ gap: '0.3rem', alignItems: 'center' }}>
