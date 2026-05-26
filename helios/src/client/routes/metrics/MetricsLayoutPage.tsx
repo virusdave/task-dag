@@ -12,7 +12,11 @@ import {
 } from '../../../shared/contracts/index.js'
 import { loadJson } from '../../app/fetchJson.js'
 
-import { MetricChart } from './MetricChart.js'
+import {
+  MetricChart,
+  METRIC_STACK_MODES,
+  type MetricStackMode,
+} from './MetricChart.js'
 import { TimeAxisProvider, useTimeAxis, type TimeWindow } from './TimeAxisContext.js'
 
 const DAY_MS = 24 * 60 * 60 * 1000
@@ -49,6 +53,9 @@ export function MetricsLayoutPage() {
   const [selectedSites, setSelectedSites] = useState<ReadonlySet<string>>(() => new Set<string>())
   const sitesParam = useMemo(() => Array.from(selectedSites).join(','), [selectedSites])
   const [pageAgg, setPageAgg] = useState<MetricAggregation>('week')
+  // Page-wide stack mode for multi-series line charts; per-chart override
+  // available in the focus panel's chart toolbar.
+  const [pageStackMode, setPageStackMode] = useState<MetricStackMode>('none')
   // 90d default window matching the parent epic spec.
   const [initialWindow] = useState<TimeWindow>(() => ({
     fromMs: Date.now() - 90 * DAY_MS,
@@ -134,6 +141,8 @@ export function MetricsLayoutPage() {
           onSitesChange={setSelectedSites}
           pageAgg={pageAgg}
           onAggChange={setPageAgg}
+          pageStackMode={pageStackMode}
+          onStackModeChange={setPageStackMode}
         />
 
         {expandedMetric ? (
@@ -157,6 +166,7 @@ export function MetricsLayoutPage() {
               metric={expandedMetric}
               sitesParam={sitesParam}
               defaultAgg={pageAgg}
+              defaultStackMode={pageStackMode}
               annotations={annotations}
               onAnnotationsChanged={onAnnotationsChanged}
               variant="expanded"
@@ -174,6 +184,7 @@ export function MetricsLayoutPage() {
               metrics={g.metrics}
               sitesParam={sitesParam}
               pageAgg={pageAgg}
+              pageStackMode={pageStackMode}
               annotations={annotations}
               onAnnotationsChanged={onAnnotationsChanged}
               expandedMetricId={expandedMetricId}
@@ -252,9 +263,24 @@ interface DashboardControlsProps {
   readonly onSitesChange: (next: ReadonlySet<string>) => void
   readonly pageAgg: MetricAggregation
   readonly onAggChange: (next: MetricAggregation) => void
+  readonly pageStackMode: MetricStackMode
+  readonly onStackModeChange: (next: MetricStackMode) => void
 }
 
-function DashboardControls({ selectedSites, onSitesChange, pageAgg, onAggChange }: DashboardControlsProps) {
+const STACK_MODE_PAGE_LABEL: Record<MetricStackMode, string> = {
+  none: 'off (lines)',
+  stacked: 'stacked',
+  percent: '100% (share)',
+}
+
+function DashboardControls({
+  selectedSites,
+  onSitesChange,
+  pageAgg,
+  onAggChange,
+  pageStackMode,
+  onStackModeChange,
+}: DashboardControlsProps) {
   return (
     <div className="metrics-controls">
       <div className="metrics-control-group">
@@ -304,6 +330,21 @@ function DashboardControls({ selectedSites, onSitesChange, pageAgg, onAggChange 
                 </option>
               ))}
             </optgroup>
+          </select>
+        </label>
+        <label
+          title="Stack multi-series line charts as cumulative bands, or normalise each bucket to 100% so series read as a share-of-whole."
+        >
+          stack{' '}
+          <select
+            value={pageStackMode}
+            onChange={(e) => onStackModeChange(e.target.value as MetricStackMode)}
+          >
+            {METRIC_STACK_MODES.map((m) => (
+              <option key={m} value={m}>
+                {STACK_MODE_PAGE_LABEL[m]}
+              </option>
+            ))}
           </select>
         </label>
       </div>
@@ -382,6 +423,7 @@ interface MetricGroupSectionProps {
   readonly metrics: ReadonlyArray<MetricDefSummary>
   readonly sitesParam: string
   readonly pageAgg: MetricAggregation
+  readonly pageStackMode: MetricStackMode
   readonly annotations: ReadonlyArray<MetricAnnotationRecord>
   readonly onAnnotationsChanged: () => void
   readonly expandedMetricId: string | null
@@ -393,6 +435,7 @@ function MetricGroupSection({
   metrics,
   sitesParam,
   pageAgg,
+  pageStackMode,
   annotations,
   onAnnotationsChanged,
   expandedMetricId,
@@ -408,6 +451,7 @@ function MetricGroupSection({
             metric={m}
             sitesParam={sitesParam}
             defaultAgg={pageAgg}
+            defaultStackMode={pageStackMode}
             annotations={annotations}
             onAnnotationsChanged={onAnnotationsChanged}
             variant="card"

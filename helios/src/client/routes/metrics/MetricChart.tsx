@@ -33,12 +33,45 @@ const POINTER_MOVE_PX_THRESHOLD = 4
 const TOUCH_MOVE_PX_THRESHOLD = 10
 const FETCH_DEBOUNCE_MS = 200
 
+/**
+ * How a multi-series LINE chart stacks its series. Only meaningful for
+ * line metrics with ≥ 2 numeric series; ignored entirely for scatter
+ * (chartType='scatter') and for single-series line charts.
+ *
+ *   - `none`    — default. Each series is its own polyline; the Y axis
+ *                 reflects raw series values.
+ *   - `stacked` — each series fills a band on top of the cumulative
+ *                 sum of the series before it (declared order). The Y
+ *                 axis is the cumulative total per bucket. Negative /
+ *                 null values are treated as 0 inside the stack.
+ *   - `percent` — like `stacked`, but every bucket's total is
+ *                 normalized to 100. The Y axis is 0–100% and each
+ *                 series shows its share of the per-bucket whole.
+ *                 Buckets whose total is 0 are drawn as a single
+ *                 zero-thickness slice (no series wins the share).
+ */
+export type MetricStackMode = 'none' | 'stacked' | 'percent'
+
+export const METRIC_STACK_MODES: ReadonlyArray<MetricStackMode> = ['none', 'stacked', 'percent']
+
+const STACK_MODE_LABEL: Record<MetricStackMode, string> = {
+  none: 'off',
+  stacked: 'stacked',
+  percent: '100%',
+}
+
 export interface MetricChartProps {
   readonly metric: MetricDefSummary
   /** Comma-separated list (the API parses to an array). */
   readonly sitesParam: string
   /** Page-default aggregation; the chart's own aggregation override wins if set. */
   readonly defaultAgg: MetricAggregation
+  /**
+   * Page-default stack mode for line charts. The chart's own stack-mode
+   * override wins when set. Ignored when the metric is a scatter (or has
+   * fewer than two series).
+   */
+  readonly defaultStackMode?: MetricStackMode
   /**
    * Currently-visible annotations (already filtered to scope=global +
    * `metric:<this.id>` upstream). Re-renders when the parent re-fetches.
@@ -59,6 +92,7 @@ export function MetricChart({
   metric,
   sitesParam,
   defaultAgg,
+  defaultStackMode = 'none',
   annotations,
   onAnnotationsChanged,
   variant = 'expanded',
@@ -75,6 +109,16 @@ export function MetricChart({
   const agg = metric.supportedAggregations.includes(effectiveAgg)
     ? effectiveAgg
     : metric.defaultAggregation
+
+  // Stack mode applies only to multi-series LINE charts; the dropdown
+  // is hidden (and the effective mode forced to 'none') otherwise so
+  // we don't expose a no-op control on scatter / single-series cards.
+  const stackModeApplicable =
+    metric.chartType !== 'scatter' && metric.series.length >= 2
+  const [stackModeOverride, setStackModeOverride] = useState<MetricStackMode | null>(null)
+  const stackMode: MetricStackMode = stackModeApplicable
+    ? stackModeOverride ?? defaultStackMode
+    : 'none'
 
   const [response, setResponse] = useState<MetricQueryResponse | null>(null)
   const [loading, setLoading] = useState(false)
@@ -172,6 +216,23 @@ export function MetricChart({
                 </option>
               ))}
             </select>
+            {stackModeApplicable ? (
+              <select
+                value={stackModeOverride ?? ''}
+                onChange={(e) =>
+                  setStackModeOverride((e.target.value || null) as MetricStackMode | null)
+                }
+                aria-label={`Stack mode for ${metric.title}`}
+                title="Stack the series into a cumulative band, or show each series as % of the per-bucket total"
+              >
+                <option value="">stack: {STACK_MODE_LABEL[defaultStackMode]} (page)</option>
+                {METRIC_STACK_MODES.map((m) => (
+                  <option key={m} value={m}>
+                    stack: {STACK_MODE_LABEL[m]}
+                  </option>
+                ))}
+              </select>
+            ) : null}
             <button
               type="button"
               className={annotateMode ? 'ghost-button is-active' : 'ghost-button'}
@@ -227,6 +288,7 @@ export function MetricChart({
           onAnnotationsChanged={onAnnotationsChanged}
           interactive={variant === 'expanded'}
           agg={agg}
+          stackMode={stackMode}
         />
       )}
       <ScreenReaderSummary metric={metric} response={response} window={window} loading={loading} />
@@ -248,6 +310,8 @@ interface ChartSvgProps {
   readonly interactive: boolean
   /** Effective aggregation (drives X-axis bucket-aligned tick placement). */
   readonly agg: MetricAggregation
+  /** How to stack the series. Forced to 'none' for single-series charts. */
+  readonly stackMode: MetricStackMode
 }
 
 interface DragState {
@@ -281,6 +345,7 @@ function ChartSvg(props: ChartSvgProps) {
     onAnnotationsChanged,
     interactive,
     agg,
+    stackMode,
   } = props
   const svgRef = useRef<SVGSVGElement | null>(null)
   const wrapRef = useRef<HTMLDivElement | null>(null)
@@ -334,79 +399,178 @@ function ChartSvg(props: ChartSvgProps) {
     [clientXToSvgX, marginLeft, plotW, window.fromMs, window.toMs],
   )
 
+  // Build per-series points + per-(series, bucket) stack bands. `series[i].points`
+  // carries `raw` (the original series value) for the hover read-out and the
+  // 'none'-mode polyline, and `y0`/`y1` for the stacked-area renderer. For
+  // stack mode 'none', y0 is the axis baseline (yMin) and y1 is the raw value
+  // — we only draw the polyline at y1 in that case. For 'stacked' / 'percent'
+  // we draw a filled area between y0 and y1.
   const { yMin, yMax, series, datumByMs } = useMemo(() => {
-    if (!response)
-      return {
-        yMin: 0,
-        yMax: 1,
-        series: [] as Array<{ id: string; label: string; colour: string; points: Array<{ raw: number; t: number }> }>,
-        datumByMs: [] as Array<{ t: number; values: Record<string, number | null> }>,
-      }
+    type SeriesPoint = { t: number; raw: number; y0: number; y1: number }
+    type Series = {
+      id: string
+      label: string
+      colour: string
+      points: SeriesPoint[]
+    }
+    const empty = {
+      yMin: 0,
+      yMax: 1,
+      series: [] as Series[],
+      datumByMs: [] as Array<{ t: number; values: Record<string, number | null> }>,
+    }
+    if (!response) return empty
     const ids = response.metric.series.map((s) => s.id)
-    let lo = Number.POSITIVE_INFINITY
-    let hi = Number.NEGATIVE_INFINITY
-    for (const d of response.data) {
+
+    // Sort rows by t once so the stack accumulator (per-bucket) gets a
+    // deterministic order; the polyline / area renderer also wants them
+    // sorted left-to-right.
+    const rows = response.data
+      .slice()
+      .sort((a, b) => Date.parse(a.t) - Date.parse(b.t))
+
+    // datumByMs is the hover-readout source — it always shows raw values,
+    // regardless of stack mode, so the operator sees the real number.
+    const datumByMs = rows.map((d) => {
+      const values: Record<string, number | null> = {}
       for (const id of ids) {
         const v = (d as MetricDatum)[id]
-        if (typeof v === 'number') {
+        values[id] = typeof v === 'number' ? v : null
+      }
+      return { t: Date.parse(d.t), values }
+    })
+
+    // Build per-series buffers, then layer stacking on top.
+    const seriesOut: Series[] = response.metric.series.map((s, i) => ({
+      id: s.id,
+      label: s.label,
+      colour: s.colour ?? FALLBACK_COLOURS[i % FALLBACK_COLOURS.length]!,
+      points: [],
+    }))
+
+    let lo = Number.POSITIVE_INFINITY
+    let hi = Number.NEGATIVE_INFINITY
+
+    if (stackMode === 'none') {
+      // Raw values only; null cells are skipped (matches the pre-stack
+      // behaviour exactly so 'none' mode is bit-for-bit unchanged).
+      for (const d of rows) {
+        const t = Date.parse(d.t)
+        for (let i = 0; i < seriesOut.length; i++) {
+          const id = ids[i]!
+          const v = (d as MetricDatum)[id]
+          if (typeof v !== 'number') continue
           if (v < lo) lo = v
           if (v > hi) hi = v
+          // y0/y1 placeholders — only y1 is used; the axis baseline
+          // for y0 is filled in below once lo/hi are known.
+          seriesOut[i]!.points.push({ t, raw: v, y0: 0, y1: v })
         }
       }
-    }
-    if (!isFinite(lo) || !isFinite(hi)) {
-      lo = 0
-      hi = 1
-    } else if (lo === hi) {
-      lo -= 1
-      hi += 1
-    } else {
-      const span = hi - lo
-      lo -= span * 0.05
-      hi += span * 0.05
-    }
-    const seriesOut = response.metric.series.map((s, i) => {
-      const colour = s.colour ?? FALLBACK_COLOURS[i % FALLBACK_COLOURS.length]
-      const points: Array<{ raw: number; t: number }> = []
-      for (const d of response.data) {
-        const v = (d as MetricDatum)[s.id]
-        const t = Date.parse(d.t)
-        if (typeof v === 'number') {
-          points.push({ raw: v, t })
-        }
+      if (!isFinite(lo) || !isFinite(hi)) {
+        lo = 0
+        hi = 1
+      } else if (lo === hi) {
+        lo -= 1
+        hi += 1
+      } else {
+        const span = hi - lo
+        lo -= span * 0.05
+        hi += span * 0.05
       }
-      return { id: s.id, label: s.label, colour, points }
-    })
-    const datumByMs = response.data
-      .map((d) => {
-        const values: Record<string, number | null> = {}
-        for (const id of ids) {
-          const v = (d as MetricDatum)[id]
-          values[id] = typeof v === 'number' ? v : null
-        }
-        return { t: Date.parse(d.t), values }
+      // Set y0 = axis bottom so a future "fill under line" affordance
+      // doesn't need a second pass.
+      for (const s of seriesOut) {
+        for (const p of s.points) p.y0 = lo
+      }
+      return { yMin: lo, yMax: hi, series: seriesOut, datumByMs }
+    }
+
+    // Stacked / percent: every bucket contributes ONE column of bands,
+    // ordered by series-declaration index. Null / negative cells are
+    // clamped to 0 so the stack stays monotonic and operators don't see
+    // weird inverted bands.
+    let stackTop = 0
+    for (const d of rows) {
+      const t = Date.parse(d.t)
+      // First pass per bucket: gather values, possibly normalise for
+      // percent mode.
+      const vals = ids.map((id) => {
+        const v = (d as MetricDatum)[id]
+        return typeof v === 'number' && v > 0 ? v : 0
       })
-      .sort((a, b) => a.t - b.t)
+      let scale = 1
+      if (stackMode === 'percent') {
+        const total = vals.reduce((a, b) => a + b, 0)
+        scale = total > 0 ? 100 / total : 0
+      }
+      let cum = 0
+      for (let i = 0; i < seriesOut.length; i++) {
+        const id = ids[i]!
+        const raw = (d as MetricDatum)[id]
+        const v = vals[i]! * scale
+        const y0 = cum
+        const y1 = cum + v
+        cum = y1
+        seriesOut[i]!.points.push({
+          t,
+          raw: typeof raw === 'number' ? raw : 0,
+          y0,
+          y1,
+        })
+      }
+      if (cum > stackTop) stackTop = cum
+    }
+
+    // Y axis: always starts at 0 for stacked; for percent it's 0..100.
+    lo = 0
+    hi = stackMode === 'percent' ? 100 : stackTop > 0 ? stackTop * 1.05 : 1
+
     return { yMin: lo, yMax: hi, series: seriesOut, datumByMs }
-  }, [response])
+  }, [response, stackMode])
 
   const yScale = useCallback(
     (v: number) => marginTop + plotH - ((v - yMin) / (yMax - yMin)) * plotH,
     [yMin, yMax, plotH, marginTop],
   )
 
+  // Path strings for each series. In 'none' mode this is the polyline
+  // at `raw`; in stacked / percent mode it's a closed filled area
+  // between y0 and y1 (top edge L→R, bottom edge R→L, close).
   const seriesPaths = useMemo(() => {
     return series.map((s) => {
-      const d = s.points
+      if (stackMode === 'none') {
+        const d = s.points
+          .map((p, i) => {
+            const x = xScale(p.t)
+            const y = yScale(p.y1)
+            return `${i === 0 ? 'M' : 'L'}${x.toFixed(2)},${y.toFixed(2)}`
+          })
+          .join(' ')
+        return { ...s, d, fill: false as const }
+      }
+      if (s.points.length === 0) {
+        return { ...s, d: '', fill: true as const }
+      }
+      const top = s.points
         .map((p, i) => {
           const x = xScale(p.t)
-          const y = yScale(p.raw)
+          const y = yScale(p.y1)
           return `${i === 0 ? 'M' : 'L'}${x.toFixed(2)},${y.toFixed(2)}`
         })
         .join(' ')
-      return { ...s, d }
+      const bottom = s.points
+        .slice()
+        .reverse()
+        .map((p) => {
+          const x = xScale(p.t)
+          const y = yScale(p.y0)
+          return `L${x.toFixed(2)},${y.toFixed(2)}`
+        })
+        .join(' ')
+      return { ...s, d: `${top} ${bottom} Z`, fill: true as const }
     })
-  }, [series, xScale, yScale])
+  }, [series, xScale, yScale, stackMode])
 
   // Y-axis "nice" gridline ticks (e.g. 0, 0.2, 0.4, 0.6, 0.8, 1.0).
   // Pick fewer intervals on the short card variant so labels don't pack.
@@ -812,9 +976,20 @@ function ChartSvg(props: ChartSvgProps) {
           </>
         ) : null}
 
-        {seriesPaths.map((s) => (
-          <path key={s.id} d={s.d} fill="none" stroke={s.colour} strokeWidth="1.5" />
-        ))}
+        {seriesPaths.map((s) =>
+          s.fill ? (
+            <path
+              key={s.id}
+              d={s.d}
+              fill={s.colour}
+              fillOpacity={0.55}
+              stroke={s.colour}
+              strokeWidth="1"
+            />
+          ) : (
+            <path key={s.id} d={s.d} fill="none" stroke={s.colour} strokeWidth="1.5" />
+          ),
+        )}
 
         {annotations
           .filter((a) => a.tEnd !== null)
@@ -898,14 +1073,19 @@ function ChartSvg(props: ChartSvgProps) {
             />
             {ownsHover
               ? series.map((s, i) => {
-                  const v = nearestForHover.values[s.id]
-                  if (v == null) return null
+                  // In stack mode the hover dot must sit at the top of
+                  // THIS series' band (y1), not at the raw value — the
+                  // band is what's actually drawn at that x. Look up
+                  // the series-local point at the hovered bucket.
+                  const sp = s.points.find((p) => p.t === nearestForHover.t) ?? null
+                  const raw = nearestForHover.values[s.id]
+                  if (sp == null || raw == null) return null
                   const colour = s.colour ?? FALLBACK_COLOURS[i % FALLBACK_COLOURS.length]
                   return (
                     <circle
                       key={`hov-${s.id}`}
                       cx={xScale(nearestForHover.t)}
-                      cy={yScale(v)}
+                      cy={yScale(stackMode === 'none' ? raw : sp.y1)}
                       r={3.5}
                       fill={colour}
                       stroke="#fff"
