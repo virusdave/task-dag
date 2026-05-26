@@ -512,45 +512,65 @@ export function queryPaymentSalesDollars(args: MetricQueryArgs): Promise<MetricR
   })
 }
 
-// ----- Customer-origin map (P6) -----
+// ----- Customer-origin map (P6) + Delivery order-count-by-zone (P5) -----
 //
-// The stub exports a single "orders by NYC borough (Manhattan, Brooklyn,
-// Queens, Bronx, Other)" series. We do the same here, classifying each
-// `delivery_zip` against a known borough-zip list and falling back to
-// 'other' (which captures NJ + non-NYC deliveries).
+// Both metrics bucket each order into a geographic series. The
+// canonical bucketing is by **county** of the resolved address:
+// the five NYC boroughs map 1-to-1 to NY counties, NJ (any
+// county) gets its own bucket, and everything else falls into
+// 'other'.
 //
-// The list below is the official USPS borough → primary ZIP3 mapping,
-// pruned to the NYC service area.
+// Address resolution path (FreshlyBakedNYC/automation#25 wires
+// these in via A1/A4/A5; A6 = this rewrite consuming them):
+//
+//   * For `customers.origin_map` — prefer the customer's primary
+//     address from sweed_customer_addresses (kind='primary'), fall
+//     back to the order's delivery_address_id, then to NULL ('other').
+//   * For `delivery.order_count_by_zone` — only the order's
+//     delivery_address_id, since the metric is about where the
+//     delivery actually went.
+//
+// Counties for the five NYC boroughs (per US Census):
+//
+//   Manhattan   = New York County
+//   Brooklyn    = Kings County
+//   Queens      = Queens County
+//   Bronx       = Bronx County
+//   Staten Is.  = Richmond County
+//
+// We match `addresses.county` case-insensitively against the
+// county basename (Census returns either "New York" or
+// "New York County" depending on response shape — we lower-case
+// and strip a trailing " county" before matching).
 
-const BOROUGH_ZIP_PREFIX: ReadonlyArray<{ prefix: string; series: string }> = [
-  // Manhattan: 100, 101, 102
-  { prefix: '100', series: 'manhattan' },
-  { prefix: '101', series: 'manhattan' },
-  { prefix: '102', series: 'manhattan' },
-  // Bronx: 104
-  { prefix: '104', series: 'bronx' },
-  // Queens: 110, 111, 113, 114, 116
-  { prefix: '110', series: 'queens' },
-  { prefix: '111', series: 'queens' },
-  { prefix: '113', series: 'queens' },
-  { prefix: '114', series: 'queens' },
-  { prefix: '116', series: 'queens' },
-  // Brooklyn: 112
-  { prefix: '112', series: 'brooklyn' },
-  // Staten Island: 103 — folded into 'other' since the stub didn't
-  // declare a Staten Island series. Operator can request a re-cut.
-]
+const NYC_COUNTY_TO_SERIES: ReadonlyMap<string, string> = new Map([
+  ['new york', 'manhattan'],
+  ['kings', 'brooklyn'],
+  ['queens', 'queens'],
+  ['bronx', 'bronx'],
+  ['richmond', 'staten_island'],
+])
 
-function boroughForZip(zip: string | null): string {
-  if (zip === null || zip.length < 3) return 'other'
-  const prefix = zip.substring(0, 3)
-  for (const m of BOROUGH_ZIP_PREFIX) {
-    if (m.prefix === prefix) return m.series
+const ORIGIN_SERIES_IDS = [
+  'manhattan',
+  'brooklyn',
+  'queens',
+  'bronx',
+  'staten_island',
+  'nj',
+  'other',
+] as const
+
+function bucketForAddress(county: string | null, stateCode: string | null): string {
+  const stateUpper = stateCode === null ? null : stateCode.trim().toUpperCase()
+  if (county !== null && stateUpper === 'NY') {
+    const canonical = county.trim().toLowerCase().replace(/\s+county$/, '')
+    const series = NYC_COUNTY_TO_SERIES.get(canonical)
+    if (series !== undefined) return series
   }
+  if (stateUpper === 'NJ') return 'nj'
   return 'other'
 }
-
-const ORIGIN_SERIES_IDS = ['manhattan', 'brooklyn', 'queens', 'bronx', 'other'] as const
 
 // ----- Category sales (P3) -----
 //
@@ -679,8 +699,97 @@ export async function queryCategorySalesStackFraction(args: MetricQueryArgs): Pr
   })
 }
 
-/** customers.origin_map — delivery-order count by NYC borough. */
+/** customers.origin_map — order count by customer-origin borough.
+ *  Prefers the customer's primary address (sweed_customer_addresses
+ *  kind='primary' → addresses), falls back to the delivery_address
+ *  on the order itself, falls back to 'other'. Counts ALL orders
+ *  (delivery + in-store + kiosk) so the origin map reflects where
+ *  our customers live, not just where deliveries went. */
 export async function queryCustomerOriginMap(args: MetricQueryArgs): Promise<MetricRow[]> {
+  const dealerIds = resolveDealerIds(args.sites)
+  const { from, to, truncUnit, buckets } = resolveWindow(args)
+  if (dealerIds.length === 0 || buckets.length === 0) {
+    return buckets.map((b) => {
+      const row: Record<string, string | number | null> = { t: b.toISOString() }
+      for (const sid of ORIGIN_SERIES_IDS) row[sid] = 0
+      return row as MetricRow
+    })
+  }
+  const bucketSelect = bucketSelectExpr(truncUnit)
+  // Resolve each order to ONE address row: prefer the customer's
+  // primary, fall back to the order's delivery address. Both joins
+  // are filtered to addresses we've successfully geocoded so the
+  // bucketing has real county/state to work with — un-geocoded
+  // addresses fall through to 'other' just like missing-address
+  // rows do.
+  const sql = `
+    with resolved as (
+      select so.id,
+             ${bucketSelect} as bucket_start,
+             coalesce(prim.county, deliv.county)     as county,
+             coalesce(prim.state_code, deliv.state_code) as state_code
+        from sweed_orders so
+        left join lateral (
+          select a.county, a.state_code
+            from sweed_customer_addresses sca
+            join addresses a on a.id = sca.address_id
+           where sca.dealer_id = so.dealer_id
+             and sca.customer_id = so.customer_id
+             and sca.kind = 'primary'
+             and a.geocode_status = 'ok'
+           limit 1
+        ) prim on so.customer_id is not null
+        left join addresses deliv
+          on deliv.id = so.delivery_address_id
+         and deliv.geocode_status = 'ok'
+       where so.dealer_id = any($1::bigint[])
+         and so.pay_time >= $2 and so.pay_time < $3
+    )
+    select bucket_start, county, state_code, count(*)::numeric as value
+      from resolved
+     group by bucket_start, county, state_code
+  `
+  const pool = getPool()
+  const result = await pool.query<{
+    bucket_start: string | null
+    county: string | null
+    state_code: string | null
+    value: string | null
+  }>(sql, [dealerIds, from.toISOString(), to.toISOString()])
+  const data = new Map<string, Map<string, number>>()
+  for (const row of result.rows) {
+    const bucketKey =
+      truncUnit === null
+        ? buckets[0]!.toISOString()
+        : row.bucket_start
+          ? new Date(row.bucket_start).toISOString()
+          : null
+    if (bucketKey === null) continue
+    const sid = bucketForAddress(row.county, row.state_code)
+    let inner = data.get(bucketKey)
+    if (!inner) {
+      inner = new Map()
+      data.set(bucketKey, inner)
+    }
+    const num = row.value === null ? 0 : Number(row.value)
+    inner.set(sid, (inner.get(sid) ?? 0) + (Number.isFinite(num) ? num : 0))
+  }
+  return buckets.map((b) => {
+    const inner = data.get(b.toISOString()) ?? new Map<string, number>()
+    const out: Record<string, string | number | null> = { t: b.toISOString() }
+    for (const sid of ORIGIN_SERIES_IDS) out[sid] = inner.get(sid) ?? 0
+    return out as MetricRow
+  })
+}
+
+/** delivery.order_count_by_zone — delivery-only order count by
+ *  delivery-destination borough. Strictly uses the order's
+ *  delivery_address_id (no customer-primary fallback), since the
+ *  metric is about where the delivery actually went. Falls into
+ *  'other' when the order is not delivery-typed, when the
+ *  delivery address hasn't been enriched yet, or when geocoding
+ *  failed. */
+export async function queryDeliveryOrderCountByZone(args: MetricQueryArgs): Promise<MetricRow[]> {
   const dealerIds = resolveDealerIds(args.sites)
   const { from, to, truncUnit, buckets } = resolveWindow(args)
   if (dealerIds.length === 0 || buckets.length === 0) {
@@ -693,19 +802,25 @@ export async function queryCustomerOriginMap(args: MetricQueryArgs): Promise<Met
   const bucketSelect = bucketSelectExpr(truncUnit)
   const sql = `
     select ${bucketSelect} as bucket_start,
-           delivery_zip,
+           a.county     as county,
+           a.state_code as state_code,
            count(*)::numeric as value
-      from sweed_orders
-     where dealer_id = any($1::bigint[])
-       and pay_time >= $2 and pay_time < $3
-       and delivery_zip is not null
-     group by 1, 2
+      from sweed_orders so
+      left join addresses a
+        on a.id = so.delivery_address_id
+       and a.geocode_status = 'ok'
+     where so.dealer_id = any($1::bigint[])
+       and so.pay_time >= $2 and so.pay_time < $3
+       and so.fulfillment_type ~* '^delivery'
+     group by bucket_start, a.county, a.state_code
   `
   const pool = getPool()
-  const result = await pool.query<{ bucket_start: string | null; delivery_zip: string | null; value: string | null }>(
-    sql,
-    [dealerIds, from.toISOString(), to.toISOString()],
-  )
+  const result = await pool.query<{
+    bucket_start: string | null
+    county: string | null
+    state_code: string | null
+    value: string | null
+  }>(sql, [dealerIds, from.toISOString(), to.toISOString()])
   const data = new Map<string, Map<string, number>>()
   for (const row of result.rows) {
     const bucketKey =
@@ -715,7 +830,7 @@ export async function queryCustomerOriginMap(args: MetricQueryArgs): Promise<Met
           ? new Date(row.bucket_start).toISOString()
           : null
     if (bucketKey === null) continue
-    const sid = boroughForZip(row.delivery_zip)
+    const sid = bucketForAddress(row.county, row.state_code)
     let inner = data.get(bucketKey)
     if (!inner) {
       inner = new Map()

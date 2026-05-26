@@ -5,6 +5,7 @@ import {
   queryCategorySalesStackDollars,
   queryCategorySalesStackFraction,
   queryCustomerOriginMap,
+  queryDeliveryOrderCountByZone,
   queryFirstVsReturning,
   queryFulfillmentOrderCount,
   queryFulfillmentSalesDollars,
@@ -386,19 +387,40 @@ export const REAL_METRICS: ReadonlyArray<MetricDef> = [
   {
     id: 'customers.origin_map',
     group: 'Customer origin',
-    title: 'Delivery origin by NYC borough',
+    title: 'Customer origin by NYC borough',
     description:
-      'Count of delivery orders per bucket, classified into NYC borough by the delivery ZIP (Manhattan 100-102, Bronx 104, Queens 110/111/113/114/116, Brooklyn 112). Staten Island and non-NYC ZIPs fall into "Other".',
+      'Count of orders per bucket, classified by where the customer lives. Resolves each order through the addresses table (FreshlyBakedNYC/automation#25): prefers the customer\'s primary address from sweed_customer_addresses (kind=\'primary\'), falls back to the order\'s delivery address. Buckets by US Census county: Manhattan = New York Co., Brooklyn = Kings Co., Queens = Queens Co., Bronx = Bronx Co., Staten Island = Richmond Co.; any NJ county → "NJ"; everything else → "Other".',
     series: [
       { id: 'manhattan', label: 'Manhattan', colour: '#1f77b4' },
       { id: 'brooklyn', label: 'Brooklyn', colour: '#ff7f0e' },
       { id: 'queens', label: 'Queens', colour: '#2ca02c' },
       { id: 'bronx', label: 'Bronx', colour: '#d62728' },
+      { id: 'staten_island', label: 'Staten Island', colour: '#9467bd' },
+      { id: 'nj', label: 'NJ', colour: '#8c564b' },
       { id: 'other', label: 'Other', colour: '#7f7f7f' },
     ],
     defaultAggregation: 'week',
     supportedAggregations: [...SUPPORTED],
     query: queryCustomerOriginMap,
+  },
+  {
+    id: 'delivery.order_count_by_zone',
+    group: 'Delivery',
+    title: 'Delivery order count by zone',
+    description:
+      'Count of delivery-typed orders per bucket, classified by the delivery destination address (via sweed_orders.delivery_address_id → addresses, see FreshlyBakedNYC/automation#25 A4). Buckets by US Census county: Manhattan = New York Co., Brooklyn = Kings Co., Queens = Queens Co., Bronx = Bronx Co., Staten Island = Richmond Co.; any NJ county → "NJ"; everything else → "Other".',
+    series: [
+      { id: 'manhattan', label: 'Manhattan', colour: '#1f77b4' },
+      { id: 'brooklyn', label: 'Brooklyn', colour: '#ff7f0e' },
+      { id: 'queens', label: 'Queens', colour: '#2ca02c' },
+      { id: 'bronx', label: 'Bronx', colour: '#d62728' },
+      { id: 'staten_island', label: 'Staten Island', colour: '#9467bd' },
+      { id: 'nj', label: 'NJ', colour: '#8c564b' },
+      { id: 'other', label: 'Other', colour: '#7f7f7f' },
+    ],
+    defaultAggregation: 'week',
+    supportedAggregations: [...SUPPORTED],
+    query: queryDeliveryOrderCountByZone,
   },
 ]
 

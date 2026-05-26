@@ -12,14 +12,6 @@ import { makeStubMetric } from './stubMetric.js'
 // populated as separate keys, and the chart wrapper picks the
 // scatter renderer based on a flag on the MetricDef.
 
-const DELIVERY_ZONE_SERIES = [
-  { id: 'manhattan', label: 'Manhattan', colour: '#1f77b4' },
-  { id: 'brooklyn', label: 'Brooklyn', colour: '#ff7f0e' },
-  { id: 'queens', label: 'Queens', colour: '#2ca02c' },
-  { id: 'bronx', label: 'Bronx', colour: '#d62728' },
-  { id: 'other', label: 'Other', colour: '#7f7f7f' },
-] as const
-
 export const P5_METRICS: ReadonlyArray<MetricDef> = [
   makeStubMetric({
     id: 'cashier.transactions_per_hour',
@@ -63,15 +55,10 @@ export const P5_METRICS: ReadonlyArray<MetricDef> = [
     range: { lo: 500, hi: 9_000 },
   }),
 
-  makeStubMetric({
-    id: 'delivery.order_count_by_zone',
-    group: 'Delivery',
-    title: 'Delivery order count by zone',
-    description: 'Stacked area: delivery-order count per bucket, split by borough / delivery zone.',
-    series: DELIVERY_ZONE_SERIES.map((s) => ({ ...s })),
-    defaultAggregation: 'week',
-    range: { lo: 2, hi: 120 },
-  }),
+  // delivery.order_count_by_zone is now a real metric backed by
+  // sweed_orders.delivery_address_id → addresses joins (see
+  // FreshlyBakedNYC/automation#25 A6, registered in
+  // _real/realMetrics.ts).
 
   makeStubMetric({
     id: 'delivery.margin_pct',
