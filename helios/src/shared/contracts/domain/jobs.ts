@@ -44,6 +44,7 @@ export const JobTypeSchema = z.enum([
   'config.workers.market_evidence_alarm_scan',
   'config.workers.edible_thc_clamp',
   'config.workers.litalerts_retailer_backfill',
+  'config.workers.enrich_customer_address',
   'config.workers.sweed_orders_ingest',
   'config.workers.sweed_package_snapshots',
   'config.workers.weather_daily_ingest',
@@ -410,6 +411,40 @@ export const ConfigWorkersSweedShiftsIngestJobPayloadSchema = z.object({
 })
 export type ConfigWorkersSweedShiftsIngestJobPayload = z.infer<
   typeof ConfigWorkersSweedShiftsIngestJobPayloadSchema
+>
+
+/**
+ * Customer-of-record address enrichment payload (A5 of
+ * FreshlyBakedNYC/automation#25).
+ *
+ * Each scheduler tick enqueues one job whose handler:
+ *
+ *   1. Selects up to `batchSize` distinct (dealer_id, customer_id)
+ *      pairs from `sweed_orders` that do NOT yet have a primary row
+ *      in `sweed_customer_addresses` AND have not been recorded as a
+ *      "no address" sentinel, ordered by most-recent observed
+ *      `pay_time` first so freshly active customers are enriched
+ *      before long-dormant ones.
+ *   2. Calls `store.customer.get` per row via the Sweed pool session.
+ *   3. Upserts the returned postal address through the shared
+ *      `addresses` helper, then INSERTs the
+ *      `(dealer_id, customer_id, address_id, kind='primary')` join
+ *      row. When Sweed returns the customer record but has no address
+ *      sub-object, the worker writes a sentinel join row pointing at
+ *      the shared "__sentinel:no_address__" address so the same
+ *      customer is not re-polled forever.
+ *   4. Transport / auth errors are logged-and-skipped so the row
+ *      stays eligible for retry on the next tick.
+ */
+export const ConfigWorkersEnrichCustomerAddressJobPayloadSchema = z.object({
+  requestedByUserId: z.number().int().positive().nullable().optional(),
+  siteDealerIds: z.array(z.number().int().positive()).default([]),
+  trigger: z.enum(['manual_run', 'scheduled']).default('scheduled'),
+  /** Per-tick RPC budget. 60 keeps us well under any Sweed ceiling. */
+  batchSize: z.number().int().min(1).max(500).default(60),
+})
+export type ConfigWorkersEnrichCustomerAddressJobPayload = z.infer<
+  typeof ConfigWorkersEnrichCustomerAddressJobPayloadSchema
 >
 
 /**

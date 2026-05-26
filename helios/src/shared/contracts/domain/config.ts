@@ -13,6 +13,7 @@ import { z } from 'zod'
 export const CONFIG_BACKGROUND_TASK_KEYS = [
   'workers.scheduling.catalog',
   'workers.scheduling.edible_thc_clamp',
+  'workers.scheduling.enrich_customer_address',
   'workers.scheduling.litalerts',
   'workers.scheduling.litalerts_retailer_backfill',
   'workers.scheduling.litalerts_rolling',
@@ -113,6 +114,13 @@ export const CONFIG_BACKGROUND_TASKS: ReadonlyArray<ConfigBackgroundTaskDefiniti
     slug: 'sweed-shifts-ingest',
     implemented: true,
     summary: 'Polls store.sale.shift.list every 15 minutes per dealer, materialising open + closed DRAWER/till shifts (one per hardware terminal, with a nested sessions[] array of cashier users that worked that drawer) into the helios-owned sweed_drawer_shifts + sweed_drawer_shift_sessions tables. Maintains a per-dealer highwater mark so worker crashes do not lose rows, walks each dealer\'s history day-by-day back to the store-opening date, and re-upserts open drawer-shifts so their close time + final shape land on a later poll. Unblocks the cashier.transactions_per_hour real metric on /metrics. See automation#27 (Option A redesign).',
+  },
+  {
+    key: 'workers.scheduling.enrich_customer_address',
+    label: 'Enrich customer address',
+    slug: 'enrich-customer-address',
+    implemented: true,
+    summary: 'Every 5 minutes, pulls store.customer.get for distinct (dealer, customer) pairs observed on sweed_orders that do not yet have a primary address row in sweed_customer_addresses, upserting the result via the shared addresses table. The Census geocoder drains addresses with status=pending separately. Backs customers.origin_map (geocode-hierarchy roll-ups) for the non-delivery purchaser path Dave called out on automation#25.',
   },
 ]
 
@@ -445,5 +453,29 @@ export const SWEED_SHIFTS_INGEST_DEFAULT_SCHEDULE_WINDOWS: ReadonlyArray<
     intervalMinutes: 15,
     paused: false,
     notes: 'Forward-poll Sweed for new/updated shifts + one day of historical backfill, every 15 minutes.',
+  },
+]
+
+/**
+ * Default schedule for the customer-of-record address enrichment worker
+ * (A5 of FreshlyBakedNYC/automation#25).
+ *
+ * One job per scheduler tick walks distinct (dealer, customer) pairs
+ * surfaced on sweed_orders that do not yet have a primary
+ * sweed_customer_addresses row, capping the per-tick RPC budget at
+ * `batchSize` (default 60). At 60/tick * 12 ticks/h = ~720 customers/h
+ * per dealer; trailing-90-day non-guest customer counts on the two
+ * operating sites are well under 24h of catch-up at that rate.
+ */
+export const ENRICH_CUSTOMER_ADDRESS_DEFAULT_SCHEDULE_WINDOWS: ReadonlyArray<
+  Omit<ConfigWorkerScheduleWindow, 'id'>
+> = [
+  {
+    weekdayMask: WEEKDAY_MASK_ALL,
+    windowStartMinute: 0,
+    windowEndMinute: 1440,
+    intervalMinutes: 5,
+    paused: false,
+    notes: 'Drain unseen customer ids -> store.customer.get -> addresses upsert, every 5 minutes (rate-limited per tick).',
   },
 ]

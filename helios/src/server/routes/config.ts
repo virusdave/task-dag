@@ -144,6 +144,10 @@ export async function registerConfigRoutes(server: FastifyInstance): Promise<voi
         const jobId = await runNowSweedShiftsIngest(user.id)
         return reply.send(ConfigBackgroundTaskRunNowResponseSchema.parse({ jobId }))
       }
+      if (taskKey === 'workers.scheduling.enrich_customer_address') {
+        const jobId = await runNowEnrichCustomerAddress(user.id)
+        return reply.send(ConfigBackgroundTaskRunNowResponseSchema.parse({ jobId }))
+      }
 
       return reply.status(400).send({
         error: `Background task ${taskKey} has no run-now wiring yet.`,
@@ -453,6 +457,47 @@ async function runNowEdibleThcClamp(userId: number): Promise<number> {
       payload: {
         siteDealerIds,
         taskKey: 'workers.scheduling.edible_thc_clamp',
+        trigger: 'manual_run',
+      },
+      requestId: null,
+      scope: null,
+      undoPayload: null,
+    })
+    return newJobId
+  })
+}
+
+async function runNowEnrichCustomerAddress(userId: number): Promise<number> {
+  const siteDealerIds = HELIOS_PENDING_PURCHASE_SITE_DEALERS.map((site) => site.dealerId)
+  const enqueuedAt = new Date()
+  return withTransaction(async (db) => {
+    const newJobId = await enqueueJob(db, {
+      concurrencyKey: getOptionalSweedSessionConcurrencyKey(true),
+      dedupeKey: `config.workers.enrich_customer_address:manual:${enqueuedAt.toISOString().slice(0, 19)}`,
+      jobType: 'config.workers.enrich_customer_address',
+      module: 'config',
+      payload: {
+        requestedByUserId: userId,
+        siteDealerIds,
+        trigger: 'manual_run',
+        batchSize: 60,
+      },
+      requestedByUserId: userId,
+      runAt: enqueuedAt,
+      scope: null,
+    })
+
+    await recordConfigScheduleEnqueue(db, 'workers.scheduling.enrich_customer_address', newJobId, enqueuedAt)
+    await appendAuditEvent(db, {
+      actorType: 'user',
+      actorUserId: userId,
+      entityId: String(newJobId),
+      entityType: 'job',
+      eventType: 'config.workers.enrich_customer_address.requested',
+      module: 'config',
+      payload: {
+        siteDealerIds,
+        taskKey: 'workers.scheduling.enrich_customer_address',
         trigger: 'manual_run',
       },
       requestId: null,

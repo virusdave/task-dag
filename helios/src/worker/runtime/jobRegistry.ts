@@ -11,6 +11,7 @@ import {
   ConfigWorkersLitalertsRefreshVariantJobPayloadSchema,
   ConfigWorkersLitalertsRetailerBackfillJobPayloadSchema,
   ConfigWorkersMarketEvidenceAlarmScanJobPayloadSchema,
+  ConfigWorkersEnrichCustomerAddressJobPayloadSchema,
   ConfigWorkersStockRefreshJobPayloadSchema,
   ConfigWorkersSweedOrdersIngestJobPayloadSchema,
   ConfigWorkersSweedPackageSnapshotsJobPayloadSchema,
@@ -47,6 +48,7 @@ import { runConfigWorkersLitalertsRefreshVariantJob } from '../jobs/configWorker
 import { runConfigWorkersLitalertsRetailerBackfillJob } from '../jobs/configWorkersLitalertsRetailerBackfillJob.js'
 import { runConfigWorkersMarketEvidenceAlarmScanJob } from '../jobs/configWorkersMarketEvidenceAlarmScanJob.js'
 import { runConfigWorkersStockRefreshJob } from '../jobs/configWorkersStockRefreshJob.js'
+import { runEnrichCustomerAddressJob } from '../jobs/enrichCustomerAddressJob.js'
 import { runConfigWorkersSweedOrdersIngestJob } from '../jobs/configWorkersSweedOrdersIngestJob.js'
 import { runConfigWorkersSweedPackageSnapshotsJob } from '../jobs/configWorkersSweedPackageSnapshotsJob.js'
 import { runIngestWeatherDailyJob } from '../jobs/ingestWeatherDailyJob.js'
@@ -219,6 +221,12 @@ const handlers: Record<JobType, JobHandler> = {
       ConfigWorkersSweedShiftsIngestJobPayloadSchema.parse(context.payload),
     )
   },
+  'config.workers.enrich_customer_address': async (context) => {
+    await runEnrichCustomerAddressJob(
+      context,
+      ConfigWorkersEnrichCustomerAddressJobPayloadSchema.parse(context.payload),
+    )
+  },
 }
 
 /**
@@ -246,6 +254,7 @@ const SWEED_BACKED_JOB_TYPES: ReadonlySet<JobType> = new Set<JobType>([
   'catalog.sync.discover_orphan_groups',
   'config.workers.catalog_refresh',
   'config.workers.edible_thc_clamp',
+  'config.workers.enrich_customer_address',
   'config.workers.stock_refresh',
   'config.workers.sweed_orders_ingest',
   'config.workers.sweed_package_snapshots',

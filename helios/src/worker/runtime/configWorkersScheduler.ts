@@ -87,6 +87,8 @@ export async function tickConfigWorkersScheduler(now: Date = new Date()): Promis
         await enqueueScheduledWeatherDailyIngest(schedule.taskKey, now, activeWindow.intervalMinutes)
       } else if (schedule.taskKey === 'workers.scheduling.sweed_shifts_ingest') {
         await enqueueScheduledSweedShiftsIngest(schedule.taskKey, now, activeWindow.intervalMinutes)
+      } else if (schedule.taskKey === 'workers.scheduling.enrich_customer_address') {
+        await enqueueScheduledEnrichCustomerAddress(schedule.taskKey, now, activeWindow.intervalMinutes)
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown scheduler-task error.'
@@ -707,6 +709,58 @@ async function enqueueScheduledSweedShiftsIngest(
       entityId: String(jobId),
       entityType: 'job',
       eventType: 'config.workers.sweed_shifts_ingest.requested',
+      module: 'config',
+      payload: {
+        intervalMinutes,
+        siteDealerIds,
+        taskKey,
+        trigger: 'scheduled',
+      },
+      requestId: null,
+      scope: null,
+      undoPayload: null,
+    })
+  })
+}
+
+async function enqueueScheduledEnrichCustomerAddress(
+  taskKey: ConfigBackgroundTaskKey,
+  now: Date,
+  intervalMinutes: number,
+): Promise<void> {
+  const siteDealerIds = HELIOS_PENDING_PURCHASE_SITE_DEALERS.map((site) => site.dealerId)
+  const bucketMs = intervalMinutes * 60 * 1000
+  const bucketStartMs = Math.floor(now.getTime() / bucketMs) * bucketMs
+  const bucketIso = new Date(bucketStartMs).toISOString()
+
+  await withTransaction(async (db) => {
+    const jobId = await enqueueJob(db, {
+      priority: JOB_PRIORITY_BEST_EFFORT,
+      concurrencyKey: getOptionalSweedSessionConcurrencyKey(true),
+      dedupeKey: `config.workers.enrich_customer_address:scheduled:${bucketIso}`,
+      jobType: 'config.workers.enrich_customer_address',
+      module: 'config',
+      payload: {
+        siteDealerIds,
+        trigger: 'scheduled',
+        // 60 store.customer.get RPCs/tick * 12 ticks/h = ~720
+        // customers/h per dealer. The trailing-90-day non-guest
+        // customer counts on the two operating sites are well
+        // under 24h of catch-up at that rate.
+        batchSize: 60,
+      },
+      requestedByUserId: null,
+      runAt: now,
+      scope: null,
+    })
+
+    await recordConfigScheduleEnqueue(db, taskKey, jobId, now)
+    await appendAuditEvent(db, {
+      actorType: 'system',
+      actorUserId: null,
+      entityId: String(jobId),
+      entityType: 'job',
+      eventType: 'config.workers.enrich_customer_address.requested',
       module: 'config',
       payload: {
         intervalMinutes,

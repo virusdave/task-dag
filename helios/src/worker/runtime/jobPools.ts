@@ -43,6 +43,7 @@ export const JOB_EXECUTION_POOL_BY_TYPE: Record<JobType, JobPoolMetadata> = {
   'config.workers.stock_refresh': { pool: 'sweed', requiresSweedSession: true },
   'config.workers.catalog_refresh': { pool: 'sweed', requiresSweedSession: true },
   'config.workers.edible_thc_clamp': { pool: 'sweed', requiresSweedSession: true },
+  'config.workers.enrich_customer_address': { pool: 'sweed', requiresSweedSession: true },
   'config.workers.sweed_orders_ingest': { pool: 'sweed', requiresSweedSession: true },
   'config.workers.sweed_package_snapshots': { pool: 'sweed', requiresSweedSession: true },
   'config.workers.sweed_shifts_ingest': { pool: 'sweed', requiresSweedSession: true },
