@@ -72,6 +72,8 @@ export async function tickConfigWorkersScheduler(now: Date = new Date()): Promis
       await enqueueScheduledEdibleThcClamp(schedule.taskKey, now, activeWindow.intervalMinutes)
     } else if (schedule.taskKey === 'workers.scheduling.litalerts_retailer_backfill') {
       await enqueueScheduledLitalertsRetailerBackfill(schedule.taskKey, now, activeWindow.intervalMinutes)
+    } else if (schedule.taskKey === 'workers.scheduling.sweed_orders_ingest') {
+      await enqueueScheduledSweedOrdersIngest(schedule.taskKey, now, activeWindow.intervalMinutes)
     }
   }
 }
@@ -472,6 +474,53 @@ async function enqueueScheduledLitalertsRetailerBackfill(
       module: 'config',
       payload: {
         intervalMinutes,
+        taskKey,
+        trigger: 'scheduled',
+      },
+      requestId: null,
+      scope: null,
+      undoPayload: null,
+    })
+  })
+}
+
+async function enqueueScheduledSweedOrdersIngest(
+  taskKey: ConfigBackgroundTaskKey,
+  now: Date,
+  intervalMinutes: number,
+): Promise<void> {
+  const siteDealerIds = HELIOS_PENDING_PURCHASE_SITE_DEALERS.map((site) => site.dealerId)
+  const bucketMs = intervalMinutes * 60 * 1000
+  const bucketStartMs = Math.floor(now.getTime() / bucketMs) * bucketMs
+  const bucketIso = new Date(bucketStartMs).toISOString()
+
+  await withTransaction(async (db) => {
+    const jobId = await enqueueJob(db, {
+      concurrencyKey: getOptionalSweedSessionConcurrencyKey(true),
+      dedupeKey: `config.workers.sweed_orders_ingest:scheduled:${bucketIso}`,
+      jobType: 'config.workers.sweed_orders_ingest',
+      module: 'config',
+      payload: {
+        siteDealerIds,
+        trigger: 'scheduled',
+        backfillDays: 1,
+      },
+      requestedByUserId: null,
+      runAt: now,
+      scope: null,
+    })
+
+    await recordConfigScheduleEnqueue(db, taskKey, jobId, now)
+    await appendAuditEvent(db, {
+      actorType: 'system',
+      actorUserId: null,
+      entityId: String(jobId),
+      entityType: 'job',
+      eventType: 'config.workers.sweed_orders_ingest.requested',
+      module: 'config',
+      payload: {
+        intervalMinutes,
+        siteDealerIds,
         taskKey,
         trigger: 'scheduled',
       },

@@ -252,6 +252,14 @@ const SENTINELS: MigrationSentinel[] = [
       'metric_annotations table — required so the /metrics page tree (automation#21, satisfying virusdave/top-level#7) can persist operator-authored annotations on metric charts (point + range, soft-deleted, scope=global|metric:<id>).',
     check: (db) => tableExists(db, 'metric_annotations'),
   },
+  {
+    migrationId: '031_sweed_orders',
+    label:
+      'sweed_orders + sweed_orders_ingest_highwater — backs the periodic Sweed orders ingest worker (automation#22, sibling of automation#21). Without this the /metrics page tree continues to render stubs and the worker will fail to start.',
+    check: async (db) =>
+      (await tableExists(db, 'sweed_orders')) &&
+      (await tableExists(db, 'sweed_orders_ingest_highwater')),
+  },
 ]
 
 interface CacheEntry {

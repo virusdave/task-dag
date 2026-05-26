@@ -12,6 +12,7 @@ import {
   ConfigWorkersLitalertsRetailerBackfillJobPayloadSchema,
   ConfigWorkersMarketEvidenceAlarmScanJobPayloadSchema,
   ConfigWorkersStockRefreshJobPayloadSchema,
+  ConfigWorkersSweedOrdersIngestJobPayloadSchema,
   CatalogSyncGroupDetailJobPayloadSchema,
   LlmDebugRerunJobPayloadSchema,
   ProposalGenerateDescriptionBatchJobPayloadSchema,
@@ -43,6 +44,7 @@ import { runConfigWorkersLitalertsRefreshVariantJob } from '../jobs/configWorker
 import { runConfigWorkersLitalertsRetailerBackfillJob } from '../jobs/configWorkersLitalertsRetailerBackfillJob.js'
 import { runConfigWorkersMarketEvidenceAlarmScanJob } from '../jobs/configWorkersMarketEvidenceAlarmScanJob.js'
 import { runConfigWorkersStockRefreshJob } from '../jobs/configWorkersStockRefreshJob.js'
+import { runConfigWorkersSweedOrdersIngestJob } from '../jobs/configWorkersSweedOrdersIngestJob.js'
 import { runProposalImportReviewJsonJob } from '../jobs/importReviewJsonJob.js'
 import { getPool } from '../../server/db/pool.js'
 import { runLlmDebugRerunJob } from '../jobs/llmDebugRerunJob.js'
@@ -187,6 +189,12 @@ const handlers: Record<JobType, JobHandler> = {
       ConfigWorkersLitalertsRetailerBackfillJobPayloadSchema.parse(context.payload),
     )
   },
+  'config.workers.sweed_orders_ingest': async (context) => {
+    await runConfigWorkersSweedOrdersIngestJob(
+      context,
+      ConfigWorkersSweedOrdersIngestJobPayloadSchema.parse(context.payload),
+    )
+  },
 }
 
 /**
@@ -215,6 +223,7 @@ const SWEED_BACKED_JOB_TYPES: ReadonlySet<JobType> = new Set<JobType>([
   'config.workers.catalog_refresh',
   'config.workers.edible_thc_clamp',
   'config.workers.stock_refresh',
+  'config.workers.sweed_orders_ingest',
   'reconcile.group',
   'screens.banner_refresh',
   'screens.banner_health_maintenance',

@@ -18,6 +18,7 @@ export const CONFIG_BACKGROUND_TASK_KEYS = [
   'workers.scheduling.litalerts_rolling',
   'workers.scheduling.market_evidence_alarm',
   'workers.scheduling.stock',
+  'workers.scheduling.sweed_orders_ingest',
 ] as const
 export const ConfigBackgroundTaskKeySchema = z.enum(CONFIG_BACKGROUND_TASK_KEYS)
 export type ConfigBackgroundTaskKey = z.infer<typeof ConfigBackgroundTaskKeySchema>
@@ -81,6 +82,13 @@ export const CONFIG_BACKGROUND_TASKS: ReadonlyArray<ConfigBackgroundTaskDefiniti
     slug: 'stock',
     implemented: true,
     summary: 'Periodic full per-site stock scan including out-of-stock items. Variant transitions from out-of-stock to in-stock auto-enqueue a Lit Alerts refresh for that variant.',
+  },
+  {
+    key: 'workers.scheduling.sweed_orders_ingest',
+    label: 'Sweed orders ingest',
+    slug: 'sweed-orders-ingest',
+    implemented: true,
+    summary: 'Polls store.sale.invoice.list every 5 minutes per dealer, materialising completed invoices into the helios-owned sweed_orders table. Maintains a per-dealer highwater mark so worker crashes do not lose rows, and concurrently walks each dealer\'s history day-by-day back to the store-opening date. Backs the real-data implementations of every P2–P6 metric on the /metrics page tree.',
   },
 ]
 
@@ -261,3 +269,41 @@ export const CATALOG_DEFAULT_SCHEDULE_WINDOWS: ReadonlyArray<Omit<ConfigWorkerSc
     notes: 'Off-hours cadence (02:00 -> 08:00).',
   },
 ]
+
+/**
+ * Default schedule for the Sweed orders ingest worker. Runs every 5
+ * minutes around the clock; each tick does a short forward poll from
+ * the per-dealer highwater AND one day of backwards backfill until
+ * the dealer's store-opening date is reached. See
+ * FreshlyBakedNYC/automation#22.
+ */
+export const SWEED_ORDERS_INGEST_DEFAULT_SCHEDULE_WINDOWS: ReadonlyArray<Omit<ConfigWorkerScheduleWindow, 'id'>> = [
+  {
+    weekdayMask: WEEKDAY_MASK_ALL,
+    windowStartMinute: 0,
+    windowEndMinute: 1440,
+    intervalMinutes: 5,
+    paused: false,
+    notes: 'Forward-poll Sweed for new completed invoices + one day of historical backfill, every 5 minutes.',
+  },
+]
+
+/**
+ * Per-dealer store-opening dates, used by the Sweed orders ingest
+ * worker as the hard floor for the backwards-backfill cursor. Stored
+ * as ISO local-date strings (no time component); the worker
+ * interprets these in America/New_York to compute the day boundary
+ * UTC instants when calling `store.sale.invoice.list`.
+ *
+ * Sourced from operator (Dave) on 2026-05-26:
+ *   * Bronx   opened in Sweed on 2025-07-15
+ *   * Midtown opened on            2026-04-01
+ *
+ * If a new dealer is onboarded, add its entry here; the ingest
+ * worker will pick it up on its next tick (it inserts a highwater
+ * row with `min_pay_time` = this date if none exists).
+ */
+export const HELIOS_SWEED_DEALER_OPENING_DATES: Readonly<Record<number, string>> = {
+  210249: '2025-07-15', // Bronx
+  210705: '2026-04-01', // Midtown
+}

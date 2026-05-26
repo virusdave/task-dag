@@ -44,6 +44,7 @@ export const JobTypeSchema = z.enum([
   'config.workers.market_evidence_alarm_scan',
   'config.workers.edible_thc_clamp',
   'config.workers.litalerts_retailer_backfill',
+  'config.workers.sweed_orders_ingest',
   'catalog.maintenance.upload_group_image',
 ])
 export type JobType = z.infer<typeof JobTypeSchema>
@@ -287,6 +288,38 @@ export const ConfigWorkersLitalertsRetailerBackfillJobPayloadSchema = z.object({
 })
 export type ConfigWorkersLitalertsRetailerBackfillJobPayload = z.infer<
   typeof ConfigWorkersLitalertsRetailerBackfillJobPayloadSchema
+>
+
+/**
+ * Periodic Sweed orders ingest worker payload.
+ *
+ * One job is enqueued per scheduler tick (~every 5 min). The handler
+ * iterates the listed site dealers and, for each one:
+ *
+ *   1. Forward-polls `store.sale.invoice.list` from `highwater -
+ *      OVERLAP` to `now`, inserts new rows into `sweed_orders` via
+ *      `on conflict do nothing`, advances the highwater to
+ *      `max(pay_time)` of the inserted batch.
+ *   2. If the per-dealer `backfill_cursor_day` is non-null, fetches
+ *      one historical day's invoices oldest-first toward the
+ *      `min_pay_time` (the store-opening date), and decrements the
+ *      cursor by one day. When the cursor reaches `min_pay_time` it
+ *      is set to null and backfill stops.
+ *
+ * Operators can override `backfillDays` to do a multi-day catch-up
+ * burst from a manual /config enqueue.
+ *
+ * See FreshlyBakedNYC/automation#22 for the full epic.
+ */
+export const ConfigWorkersSweedOrdersIngestJobPayloadSchema = z.object({
+  requestedByUserId: z.number().int().positive().nullable().optional(),
+  siteDealerIds: z.array(z.number().int().positive()).default([]),
+  trigger: z.enum(['manual_run', 'scheduled']).default('scheduled'),
+  /** How many days of historical backfill to attempt in this single job. */
+  backfillDays: z.number().int().min(0).max(60).default(1),
+})
+export type ConfigWorkersSweedOrdersIngestJobPayload = z.infer<
+  typeof ConfigWorkersSweedOrdersIngestJobPayloadSchema
 >
 
 /**
