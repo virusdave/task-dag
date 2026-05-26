@@ -22,9 +22,12 @@
  */
 
 import {
+  canonicalCategoryNorm,
+  extractSignificantNameTokens,
   hashRawInput,
   parseListingToFuzzy,
   parseSizeProfile,
+  sameSizeFamily,
 } from '../../../shared/marketMatch/listingParse.js'
 import {
   applyVerdictPostFilter,
@@ -351,7 +354,13 @@ export async function loadGroupReview(
   catalogGroupId: number,
   options: { minScore?: number; includeLegacy?: boolean } = {},
 ): Promise<GroupReviewBundle | null> {
-  const minScore = Math.min(1, Math.max(0, options.minScore ?? 0.70))
+  // Clamp the visibility floor to 0.70. Anything below that is treated
+  // as "auto no-match (hidden)" — sub-0.70 candidates require at most
+  // one of {brand, category, size} disagreeing to be misleading, and
+  // the operator has reported (correctly) that the page was unusable
+  // when we let lower-confidence matches through.
+  const MIN_VISIBLE_SCORE = 0.70
+  const minScore = Math.min(1, Math.max(MIN_VISIBLE_SCORE, options.minScore ?? MIN_VISIBLE_SCORE))
   const includeLegacy = options.includeLegacy === true
   const groupResult = await db.query<{
     id: number
@@ -520,47 +529,130 @@ export async function loadGroupReview(
     fuzzyRows.push(...obsFuzzy.rows)
   }
 
+  // Resolve the catalog's effective brand (override-aware) once. Used
+  // both to fetch structured fuzzies (hard brand filter) AND as the
+  // catalog brand we score against, so the scorer doesn't reject a
+  // legitimate override-mapped row just because the raw catalog brand
+  // name (e.g. "Grass Roots") differs from the LitAlerts brand name
+  // (e.g. "Grassroots (Curaleaf)").
+  let effectiveBrandNorm: string | null = group.brand_name
+    ? group.brand_name.toLowerCase().trim()
+    : null
   if (group.brand_name) {
-    // Resolve effective brand-norm via override table; explicit-null
-    // override means "no LitAlerts equivalent" so skip the structured
-    // pull entirely.
     const overrideLookup = await db.query<{ litalerts_brand_id: string | null; litalerts_brand_name: string | null }>(
       `select litalerts_brand_id::text as litalerts_brand_id, litalerts_brand_name
          from catalog_litalerts_brand_overrides
         where catalog_brand_name = $1`,
       [group.brand_name],
     )
-    let effectiveBrandNorm: string | null = group.brand_name.toLowerCase().trim()
     if (overrideLookup.rows.length > 0) {
       const ov = overrideLookup.rows[0]
       if (ov.litalerts_brand_id == null) {
+        // Explicit-null override means "no LitAlerts equivalent"; skip
+        // structured pull entirely and zero brand for scoring.
         effectiveBrandNorm = null
       } else if (ov.litalerts_brand_name) {
         effectiveBrandNorm = ov.litalerts_brand_name.toLowerCase().trim()
       }
     }
-    if (effectiveBrandNorm != null) {
-      // Pre-filter by category when the catalog group has one. This is
-      // the single biggest accuracy win for the reviewer: an ATF
-      // Pre-Rolls catalog group should never even score against
-      // "Accessories" / "Rolling Papers" LitAlerts rows. When the
-      // group has no category_name we fall back to brand-only so we
-      // don't accidentally hide everything.
-      const catNorm = group.category_name ? group.category_name.toLowerCase().trim() : null
-      const structuredFuzzy = await db.query<typeof fuzzyRows[number]>(
-        `select id, source_kind, source_listing_id, raw_input_jsonb, parsed_jsonb,
-                brand_norm, category_norm, subcategory_norm,
-                size_g_norm::text, size_mg_norm::text, pack_count_norm, strain_norm
-         from fuzzy_skus
-         where source_kind = 'litalerts_partner_product'
-           and brand_norm = $1
-           and ($2::text is null or category_norm = $2 or category_norm is null)
-         order by created_at desc
-         limit 1000`,
-        [effectiveBrandNorm, catNorm],
-      )
-      fuzzyRows.push(...structuredFuzzy.rows)
-    }
+  }
+
+  // Canonicalize the catalog group's category to one of {flower,
+  // preroll, vape, edible, accessory, …}. We require the LitAlerts
+  // category to canonicalize to the *same* family below — no more
+  // "category_norm is null" escape hatch that let accessory rows
+  // through into flower review queues.
+  const catalogCategoryCanonical = canonicalCategoryNorm(group.category_name)
+
+  // Variant size families: the SQL pre-filter collects all variant
+  // grams + mgs (after canonical size parsing) so we can fetch only
+  // rows whose size could plausibly belong to one of this group's
+  // variants. When the group has no parseable variants we skip the
+  // size predicate (no families to compare against).
+  const variantGrams = Array.from(
+    new Set(
+      catalogVariants
+        .map((v) => v.sizeGNorm)
+        .filter((g): g is number => typeof g === 'number'),
+    ),
+  )
+  const variantMgs = Array.from(
+    new Set(
+      catalogVariants
+        .map((v) => v.sizeMgNorm)
+        .filter((mg): mg is number => typeof mg === 'number'),
+    ),
+  )
+  const hasAnyVariantSize = variantGrams.length > 0 || variantMgs.length > 0
+
+  if (effectiveBrandNorm != null) {
+    // HARD filters at the SQL layer:
+    //   - brand_norm must match the effective (override-aware) brand
+    //   - if the catalog group has a canonical category, the LitAlerts
+    //     row must canonicalize to that same family (we recompute on
+    //     read so we don't have to re-run the fuzzy backfill to pick
+    //     up alias additions)
+    //   - if the catalog group has any size-bearing variants, the
+    //     LitAlerts row's size must be within ±max(epsilon, 8%) of at
+    //     least one of those sizes (g↔g, mg↔mg; never cross-unit)
+    const structuredFuzzy = await db.query<typeof fuzzyRows[number]>(
+      `select id, source_kind, source_listing_id, raw_input_jsonb, parsed_jsonb,
+              brand_norm, category_norm, subcategory_norm,
+              size_g_norm::text, size_mg_norm::text, pack_count_norm, strain_norm
+       from fuzzy_skus
+       where source_kind = 'litalerts_partner_product'
+         and brand_norm = $1
+         and (
+           -- No catalog category set → don't filter by category.
+           $4::boolean
+           or (
+             category_norm is not null
+             and category_norm = any($2::text[])
+           )
+         )
+         and (
+           -- No variant sizes → don't filter by size.
+           $5::boolean
+           or (
+             cardinality($6::numeric[]) > 0
+             and size_g_norm is not null
+             and exists (
+               select 1
+                 from unnest($6::numeric[]) as t(g)
+                where abs(size_g_norm - t.g) <= greatest(0.05, t.g * 0.08)
+             )
+           )
+           or (
+             cardinality($7::numeric[]) > 0
+             and size_mg_norm is not null
+             and exists (
+               select 1
+                 from unnest($7::numeric[]) as t(mg)
+                where abs(size_mg_norm - t.mg) <= greatest(5, t.mg * 0.08)
+             )
+           )
+         )
+       order by created_at desc
+       limit 1000`,
+      [
+        effectiveBrandNorm,
+        // Category aliases: send every raw LA category string that
+        // canonicalizes to our canonical family. Cheap because the
+        // alias set is tiny; correct because we don't need to
+        // re-backfill category_norm on every alias change.
+        catalogCategoryCanonical
+          ? buildCategoryAliasList(catalogCategoryCanonical)
+          : [],
+        null,
+        // SKIP-CATEGORY-FILTER flag.
+        catalogCategoryCanonical === null,
+        // SKIP-SIZE-FILTER flag.
+        !hasAnyVariantSize,
+        variantGrams,
+        variantMgs,
+      ],
+    )
+    fuzzyRows.push(...structuredFuzzy.rows)
   }
 
   const fuzzyResult = { rows: fuzzyRows }
@@ -608,15 +700,32 @@ export async function loadGroupReview(
     verdictByFuzzy.set(row.fuzzy_sku_id, row.verdict)
   }
 
+  // Use the effective (override-aware) brand for scoring. The scorer
+  // compares this string for case-insensitive equality against the
+  // fuzzy's brand_norm; using the raw catalog name here would zero
+  // the brand factor for legitimate override-mapped rows (the
+  // "Grass Roots → Grassroots (Curaleaf)" case).
   const catalogProfile: CatalogProfile = {
-    brandNorm: group.brand_name,
-    categoryNorm: group.category_name,
+    brandNorm: effectiveBrandNorm ?? group.brand_name,
+    // Score against the canonical category so "Flowers" vs "Flower"
+    // doesn't accidentally zero an otherwise good match.
+    categoryNorm: catalogCategoryCanonical ?? group.category_name,
     subcategoryNorm: group.subcategory_name,
     sizeGNorm: null,
     sizeMgNorm: null,
     packCountNorm: null,
     strainNorm: null,
   }
+
+  // Pre-compute the catalog group's significant-token set once. Each
+  // candidate listing must share at least one of these tokens with
+  // its product/variant name — otherwise it's just "same brand, same
+  // category, same size" which is exactly the failure mode that
+  // surfaced accessories as candidates for ATF.
+  const groupNameTokens = extractSignificantNameTokens(group.group_name, {
+    brandText: effectiveBrandNorm ?? group.brand_name,
+    categoryText: catalogCategoryCanonical ?? group.category_name,
+  })
 
   const liveVerdicts = verdictResult.rows
     .map((row) => {
@@ -651,9 +760,12 @@ export async function loadGroupReview(
   const scoredAll = fuzzies
     .filter((fuzzy) => !verdictByFuzzy.has(fuzzy.id))
     .map((fuzzy) => {
+      // Re-canonicalize the fuzzy's category on read so alias changes
+      // in canonicalCategoryNorm() don't require a backfill rerun.
+      const fuzzyCategoryCanonical = canonicalCategoryNorm(fuzzy.categoryNorm)
       const fuzzyProfile: FuzzyProfile = {
         brandNorm: fuzzy.brandNorm,
-        categoryNorm: fuzzy.categoryNorm,
+        categoryNorm: fuzzyCategoryCanonical ?? fuzzy.categoryNorm,
         subcategoryNorm: fuzzy.subcategoryNorm,
         sizeGNorm: fuzzy.sizeGNorm,
         sizeMgNorm: fuzzy.sizeMgNorm,
@@ -672,6 +784,36 @@ export async function loadGroupReview(
         && typeof listing?.listingName === 'string'
         && listing.listingName.toLowerCase().includes(catalogProfile.brandNorm.toLowerCase())
 
+      // HARD GATE #1 — category. The SQL prefilter already enforces
+      // this for structured rows, but legacy observation rows go
+      // through unfiltered, so we re-check here. Either side null is
+      // tolerated (some legacy listings don't have a parsed category).
+      if (catalogCategoryCanonical && fuzzyCategoryCanonical && fuzzyCategoryCanonical !== catalogCategoryCanonical) {
+        return null
+      }
+
+      // HARD GATE #2 — shared significant name token between the
+      // catalog group/variant and the listing. Stops "Dank by
+      // Definition 3.5g Flower XXX" from matching "Dank by Definition
+      // 3.5g Flower YYY" when the strain names share no characters.
+      // Skipped when the catalog group has zero significant tokens
+      // (e.g. group name is just the brand) — we have nothing to
+      // require a shared token *with*.
+      if (groupNameTokens.size > 0) {
+        const listingTokens = extractSignificantNameTokens(
+          [listing?.listingName, fuzzy.strainNorm].filter((s): s is string => !!s).join(' '),
+          {
+            brandText: effectiveBrandNorm ?? group.brand_name,
+            categoryText: catalogCategoryCanonical ?? group.category_name,
+          },
+        )
+        let shares = false
+        for (const tok of listingTokens) {
+          if (groupNameTokens.has(tok)) { shares = true; break }
+        }
+        if (!shares) return null
+      }
+
       // Per-variant scoring loop. The `sizeKey: 'unsized'` arm is
       // used when the catalog has no parsable variants — keeps the
       // page useful for groups that haven't been fully populated yet.
@@ -684,6 +826,20 @@ export async function loadGroupReview(
         finalScore: number
       } | null = null
       for (const variant of variantTargets) {
+        // HARD GATE #3 — per-variant size family match. A 1g pre-roll
+        // listing should never be scored against a 3.5g flower
+        // variant. SQL already filtered to "could plausibly belong to
+        // SOME variant of this group"; here we enforce per-variant.
+        if (variant
+            && (typeof variant.sizeGNorm === 'number' || typeof variant.sizeMgNorm === 'number')
+            && (typeof fuzzy.sizeGNorm === 'number' || typeof fuzzy.sizeMgNorm === 'number')) {
+          if (!sameSizeFamily(
+            { sizeGNorm: variant.sizeGNorm, sizeMgNorm: variant.sizeMgNorm },
+            { sizeGNorm: fuzzy.sizeGNorm, sizeMgNorm: fuzzy.sizeMgNorm },
+          )) {
+            continue
+          }
+        }
         const profile: CatalogProfile = variant
           ? {
               brandNorm: catalogProfile.brandNorm,
@@ -802,6 +958,52 @@ export async function loadGroupReview(
  * Stable size-group key + display label.
  * "1g", "3.5g", "100mg", "1oz", "unsized" etc.
  */
+/**
+ * Inverse of canonicalCategoryNorm() — every raw LitAlerts/Sweed
+ * category string that we know canonicalizes to the given family.
+ * Used to seed the structured-fuzzy SQL prefilter's category alias
+ * IN-list without having to re-run the fuzzy backfill every time the
+ * canonical alias table changes.
+ */
+function buildCategoryAliasList(canonical: string): string[] {
+  const candidates: string[] = [
+    canonical,
+    `${canonical}s`,
+    canonical.charAt(0).toUpperCase() + canonical.slice(1),
+  ]
+  // Family-specific raw aliases — keep this set conservative; the
+  // scorer's hard category gate re-verifies on read after fetch.
+  const FAMILY_ALIASES: Record<string, string[]> = {
+    flower: ['flower', 'flowers', 'bud', 'buds'],
+    preroll: ['pre-roll', 'pre-rolls', 'pre roll', 'pre rolls', 'preroll', 'prerolls', 'joints', 'joint'],
+    concentrate: [
+      'concentrate', 'concentrates', 'extract', 'extracts',
+      'live resin', 'rosin', 'shatter', 'wax', 'badder', 'budder', 'sauce',
+      'distillate', 'diamonds', 'hash',
+    ],
+    vape: [
+      'vape', 'vapes', 'vaporizer', 'vaporizers', 'cartridge', 'cartridges',
+      'cart', 'carts', 'disposable', 'disposables', 'pod', 'pods', 'vape pen', 'vape pens',
+    ],
+    edible: [
+      'edible', 'edibles', 'gummy', 'gummies', 'chocolate', 'chocolates',
+      'mint', 'mints', 'lozenge', 'lozenges', 'candy', 'candies',
+      'beverage', 'beverages', 'drink', 'drinks',
+    ],
+    tincture: ['tincture', 'tinctures', 'sublingual', 'sublinguals'],
+    topical: ['topical', 'topicals', 'cream', 'creams', 'salve', 'salves', 'balm', 'balms'],
+    accessory: [
+      'accessory', 'accessories', 'rolling paper', 'rolling papers', 'paper', 'papers',
+      'lighter', 'lighters', 'grinder', 'grinders', 'pipe', 'pipes', 'bong', 'bongs',
+      'apparel', 'merch', 'merchandise',
+    ],
+    clone: ['clone', 'clones', 'cutting', 'cuttings'],
+    seed: ['seed', 'seeds'],
+  }
+  const family = FAMILY_ALIASES[canonical] ?? []
+  return Array.from(new Set([...candidates, ...family])).map((s) => s.toLowerCase().trim())
+}
+
 function makeSizeKey(
   sizeGNorm: number | null,
   sizeMgNorm: number | null,
