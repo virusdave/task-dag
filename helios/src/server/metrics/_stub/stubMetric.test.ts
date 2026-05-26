@@ -3,13 +3,10 @@ import { describe, expect, it } from 'vitest'
 import { REAL_METRIC_IDS } from '../_real/realMetrics.js'
 import { allMetricsForTests } from '../registry.js'
 
-describe('stub metrics', () => {
+describe('missing-data (stub) metrics', () => {
   it('every spec-listed metric id is present in the registry', () => {
     const ids = new Set(allMetricsForTests().map((m) => m.id))
     const expected = [
-      // Demo
-      '_demo.flat_line',
-      '_demo.random_walk',
       // P2
       'acquisition.first_vs_returning',
       'margins.effective_gm_pct',
@@ -47,33 +44,33 @@ describe('stub metrics', () => {
     }
   })
 
-  it('every stub query returns at least one row for a 7-day window at agg=date', async () => {
-    const from = new Date('2025-01-01T00:00:00Z')
-    const to = new Date('2025-01-08T00:00:00Z')
+  it('no demo metric ids leak into the registry — operator never wants demo data', () => {
     for (const metric of allMetricsForTests()) {
-      if (!metric.description.startsWith('STUB:')) continue
-      const data = await metric.query({ sites: [], from, to, agg: 'date' })
-      expect(data.length, `metric ${metric.id} emitted no rows`).toBeGreaterThan(0)
-      // Every row has a `t` plus every declared series id as a numeric.
-      for (const row of data) {
-        expect(typeof row.t).toBe('string')
-        for (const s of metric.series) {
-          const v = row[s.id]
-          expect(typeof v, `metric ${metric.id} series ${s.id} non-numeric`).toBe('number')
-        }
-      }
+      expect(metric.id.startsWith('_demo.'), `unexpected demo metric ${metric.id}`).toBe(false)
+      expect(metric.dataStatus, `metric ${metric.id} must not be tagged demo`).not.toBe('demo')
     }
   })
 
-  it('every stub description starts with the STUB prefix so reviewers can tell at a glance', () => {
+  it('every pending metric returns ZERO rows — we do not make data up', async () => {
+    const from = new Date('2025-01-01T00:00:00Z')
+    const to = new Date('2025-01-08T00:00:00Z')
     for (const metric of allMetricsForTests()) {
-      // _demo metrics are the only non-stubs that are also non-real.
-      // They have their own clear demo title and don't need the prefix.
-      if (metric.id.startsWith('_demo.')) continue
-      // Real metrics shipped under automation#22 are NOT stubs and
-      // intentionally carry their own production description.
       if (REAL_METRIC_IDS.has(metric.id)) continue
-      expect(metric.description, `metric ${metric.id} missing STUB prefix`).toMatch(/^STUB:/)
+      const data = await metric.query({ sites: [], from, to, agg: 'date' })
+      expect(data, `pending metric ${metric.id} emitted synthetic rows`).toEqual([])
+    }
+  })
+
+  it('every pending metric carries dataStatus=pending so the UI can label it MISSING DATA', () => {
+    for (const metric of allMetricsForTests()) {
+      if (REAL_METRIC_IDS.has(metric.id)) continue
+      expect(metric.dataStatus, `metric ${metric.id} should be pending`).toBe('pending')
+    }
+  })
+
+  it('no pending metric description leaks the legacy STUB: prefix', () => {
+    for (const metric of allMetricsForTests()) {
+      expect(metric.description.startsWith('STUB:'), `metric ${metric.id} still has STUB prefix`).toBe(false)
     }
   })
 })

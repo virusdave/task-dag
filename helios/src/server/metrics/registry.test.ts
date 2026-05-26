@@ -6,11 +6,20 @@ import { allMetricsForTests, getMetricById, listMetricSummaries } from './regist
 import { toMetricSummary } from './types.js'
 
 describe('metric registry', () => {
-  it('exposes at least the two P0 demo metrics', () => {
+  it('does NOT expose any _demo.* metric — operator directive: no demo data, ever', () => {
     const summaries = listMetricSummaries()
-    const ids = summaries.map((s) => s.id)
-    expect(ids).toContain('_demo.flat_line')
-    expect(ids).toContain('_demo.random_walk')
+    for (const s of summaries) {
+      expect(s.id.startsWith('_demo.'), `unexpected demo metric ${s.id}`).toBe(false)
+    }
+  })
+
+  it('exposes real metrics under their production ids', () => {
+    const ids = new Set(listMetricSummaries().map((s) => s.id))
+    // Spot-check a couple of real metrics so a regression that drops
+    // the registry wiring shows up here, not just in the empty-list
+    // test above.
+    expect(ids).toContain('acquisition.first_vs_returning')
+    expect(ids).toContain('fulfillment.sales_dollars')
   })
 
   it('sorts summaries by group then title for stable nav rendering', () => {

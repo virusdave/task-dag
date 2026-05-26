@@ -39,16 +39,17 @@ export type MetricSeriesDef = z.infer<typeof MetricSeriesDefSchema>
  * Provenance flag for a metric:
  *
  *   - `real`    — backed by real ingest / SQL the operator should trust.
- *   - `pending` — registered but the data source isn't wired yet
- *                 (current implementation returns a synthetic stub
- *                 series). The dashboard renders these as "Data
- *                 pending" placeholders, never as live charts, so the
- *                 operator can't mistake synthetic random walks for
- *                 business signal.
- *   - `demo`    — engineering-only sample metrics (random walk, flat
- *                 line). Hidden from the operator dashboard by default.
+ *   - `pending` — registered as part of the spec but the data source
+ *                 isn't wired up yet; the metric's `query` returns an
+ *                 empty time series and the dashboard renders the
+ *                 metric as an explicit "MISSING DATA" placeholder
+ *                 card. **No synthetic data is ever generated.**
+ *
+ * Demo metrics used to be a third value here. They were deleted
+ * entirely on operator directive (2026-05-26: "i never want demo data")
+ * — see helios/src/server/metrics/registry.ts.
  */
-export const MetricDataStatusSchema = z.enum(['real', 'pending', 'demo'])
+export const MetricDataStatusSchema = z.enum(['real', 'pending'])
 export type MetricDataStatus = z.infer<typeof MetricDataStatusSchema>
 
 // Public summary of a metric — everything the SPA needs to render the

@@ -1,7 +1,5 @@
 import type { MetricDefSummary } from '../../shared/contracts/index.js'
 
-import { metric as demoFlatLine } from './_demo/flat_line.js'
-import { metric as demoRandomWalk } from './_demo/random_walk.js'
 import { P2_METRICS } from './_stub/p2_acquisition_margins.js'
 import { P3_METRICS } from './_stub/p3_basket_category_fulfillment.js'
 import { P4_METRICS } from './_stub/p4_inventory.js'
@@ -47,16 +45,15 @@ const PENDING_FOLLOWUP_URL = 'https://github.com/virusdave/top-level/issues/7'
 function tagAsPending(metric: MetricDef): MetricDef {
   return { ...metric, dataStatus: 'pending', blockedByUrl: PENDING_FOLLOWUP_URL }
 }
-function tagAsDemo(metric: MetricDef): MetricDef {
-  return { ...metric, dataStatus: 'demo' }
-}
 function tagAsReal(metric: MetricDef): MetricDef {
   return { ...metric, dataStatus: 'real' }
 }
 
+// Operator directive (2026-05-26): no demo metrics, no synthetic data.
+// The two engineering sample metrics (random walk + flat line) used to be
+// exposed here for chart-wrapper iteration; they are now deleted entirely
+// so they cannot accidentally leak into the dashboard.
 const METRICS: readonly MetricDef[] = [
-  tagAsDemo(demoFlatLine),
-  tagAsDemo(demoRandomWalk),
   ...STUB_METRICS.filter((m) => !REAL_METRIC_IDS.has(m.id)).map(tagAsPending),
   ...REAL_METRICS.map(tagAsReal),
 ]

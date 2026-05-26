@@ -55,10 +55,11 @@ export function MetricsLayoutPage() {
     toMs: Date.now(),
   }))
 
-  // Operator may opt in to seeing pending stubs (engineering view) but they
-  // are hidden by default so synthetic random walks can't be mistaken for real
-  // business signal.
-  const [showPending, setShowPending] = useState(false)
+  // Missing-data metrics (spec'd but not yet wired to real data) are hidden
+  // by default so the dashboard reads as "what we actually know". Operator
+  // can opt in via the coverage badge toggle to see what's still pending
+  // ingest plumbing.
+  const [showMissing, setShowMissing] = useState(false)
 
   // Annotations are fetched ONCE at the dashboard level and handed to every
   // card. A global annotation creates an event indicator on every chart at
@@ -110,7 +111,7 @@ export function MetricsLayoutPage() {
   // Partition metrics by data status and group.
   const partitioned = useMemo(() => partitionMetrics(metrics), [metrics])
   const realGroups = useMemo(() => groupByMetricGroup(partitioned.real), [partitioned.real])
-  const pendingGroups = useMemo(() => groupByMetricGroup(partitioned.pending), [partitioned.pending])
+  const missingGroups = useMemo(() => groupByMetricGroup(partitioned.missing), [partitioned.missing])
 
   return (
     <TimeAxisProvider initial={initialWindow}>
@@ -122,9 +123,9 @@ export function MetricsLayoutPage() {
           </div>
           <DataCoverageBadge
             realCount={partitioned.real.length}
-            pendingCount={partitioned.pending.length}
-            showPending={showPending}
-            onToggleShowPending={setShowPending}
+            missingCount={partitioned.missing.length}
+            showMissing={showMissing}
+            onToggleShowMissing={setShowMissing}
           />
         </header>
 
@@ -181,20 +182,21 @@ export function MetricsLayoutPage() {
           ))
         )}
 
-        {pendingGroups.length > 0 ? (
-          <details className="metrics-pending-section" open={showPending}>
+        {missingGroups.length > 0 ? (
+          <details className="metrics-pending-section" open={showMissing}>
             <summary>
-              <span className="metrics-section-title">Data pending</span>{' '}
+              <span className="metrics-section-title">Missing data</span>{' '}
               <span className="subtle-copy">
-                ({partitioned.pending.length} metric{partitioned.pending.length === 1 ? '' : 's'} awaiting ingest)
+                ({partitioned.missing.length} metric{partitioned.missing.length === 1 ? '' : 's'} awaiting ingest)
               </span>
             </summary>
             <p className="subtle-copy metrics-pending-explainer">
-              These metrics are part of the spec but their data sources aren't wired up yet. Click any card to
-              read its definition and follow the link to the ingest issue tracking the unblock work.
+              These metrics are part of the spec but their data sources aren't wired up yet — we deliberately do{' '}
+              <strong>not</strong> render synthetic values for them. Each card shows the metric's real definition
+              and a link to the ingest issue tracking the unblock work.
             </p>
-            {pendingGroups.map((g) => (
-              <PendingGroupSection key={`pending-${g.group}`} group={g.group} metrics={g.metrics} />
+            {missingGroups.map((g) => (
+              <MissingGroupSection key={`missing-${g.group}`} group={g.group} metrics={g.metrics} />
             ))}
           </details>
         ) : null}
@@ -220,25 +222,25 @@ export function MetricsLayoutPage() {
 
 interface DataCoverageBadgeProps {
   readonly realCount: number
-  readonly pendingCount: number
-  readonly showPending: boolean
-  readonly onToggleShowPending: (v: boolean) => void
+  readonly missingCount: number
+  readonly showMissing: boolean
+  readonly onToggleShowMissing: (v: boolean) => void
 }
 
-function DataCoverageBadge({ realCount, pendingCount, showPending, onToggleShowPending }: DataCoverageBadgeProps) {
+function DataCoverageBadge({ realCount, missingCount, showMissing, onToggleShowMissing }: DataCoverageBadgeProps) {
   return (
     <div className="metrics-coverage-badge">
       <span className="metrics-coverage-chip metrics-coverage-chip--real">{realCount} live</span>
       <span
         className="metrics-coverage-chip metrics-coverage-chip--pending"
-        title={pendingCount === 0 ? 'No pending metrics' : 'Click to show or hide pending metrics'}
+        title={missingCount === 0 ? 'No metrics are missing data' : 'Toggle below to show missing-data metrics'}
       >
-        {pendingCount} pending
+        {missingCount} missing
       </span>
-      {pendingCount > 0 ? (
+      {missingCount > 0 ? (
         <label className="metrics-coverage-toggle subtle-copy">
-          <input type="checkbox" checked={showPending} onChange={(e) => onToggleShowPending(e.target.checked)} />{' '}
-          show pending
+          <input type="checkbox" checked={showMissing} onChange={(e) => onToggleShowMissing(e.target.checked)} />{' '}
+          show missing
         </label>
       ) : null}
     </div>
@@ -417,38 +419,37 @@ function MetricGroupSection({
   )
 }
 
-interface PendingGroupSectionProps {
+interface MissingGroupSectionProps {
   readonly group: string
   readonly metrics: ReadonlyArray<MetricDefSummary>
 }
 
-function PendingGroupSection({ group, metrics }: PendingGroupSectionProps) {
+function MissingGroupSection({ group, metrics }: MissingGroupSectionProps) {
   return (
     <section className="metrics-group">
       <h4 className="metrics-section-subtitle">{group}</h4>
       <div className="metrics-grid">
         {metrics.map((m) => (
-          <PendingMetricCard key={m.id} metric={m} />
+          <MissingMetricCard key={m.id} metric={m} />
         ))}
       </div>
     </section>
   )
 }
 
-function PendingMetricCard({ metric }: { metric: MetricDefSummary }) {
-  // Strip the "STUB:" prefix that the stub factory bakes into the description;
-  // it's noise here because the whole card is already labelled "Data pending".
-  const friendlyDescription = metric.description.replace(/^STUB:\s*synthetic data — real-data SQL pending\.\s*/i, '')
+function MissingMetricCard({ metric }: { metric: MetricDefSummary }) {
   return (
     <article className="metric-chart-card metric-chart-card--pending">
       <header className="metric-chart-header">
         <div className="metric-chart-titlewrap">
           <h3 className="metric-chart-title">{metric.title}</h3>
-          <span className="metric-chart-pending-badge">Data pending</span>
+          <span className="metric-chart-pending-badge">MISSING DATA</span>
         </div>
       </header>
       <div className="metric-chart-pending-body">
-        <p className="subtle-copy">{friendlyDescription || 'Data source for this metric is not yet wired up.'}</p>
+        <p className="subtle-copy">
+          {metric.description || 'Data source for this metric is not yet wired up.'}
+        </p>
         {metric.blockedByUrl ? (
           <p className="subtle-copy">
             Tracked in{' '}
@@ -468,19 +469,18 @@ function PendingMetricCard({ metric }: { metric: MetricDefSummary }) {
 
 interface PartitionedMetrics {
   readonly real: ReadonlyArray<MetricDefSummary>
-  readonly pending: ReadonlyArray<MetricDefSummary>
+  readonly missing: ReadonlyArray<MetricDefSummary>
 }
 
 function partitionMetrics(metrics: ReadonlyArray<MetricDefSummary>): PartitionedMetrics {
   const real: MetricDefSummary[] = []
-  const pending: MetricDefSummary[] = []
+  const missing: MetricDefSummary[] = []
   for (const m of metrics) {
     const status: MetricDataStatus = m.dataStatus ?? 'real'
     if (status === 'real') real.push(m)
-    else if (status === 'pending') pending.push(m)
-    // 'demo' metrics are hidden from the operator dashboard entirely.
+    else missing.push(m)
   }
-  return { real, pending }
+  return { real, missing }
 }
 
 function groupByMetricGroup(
