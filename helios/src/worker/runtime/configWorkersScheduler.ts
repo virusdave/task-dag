@@ -89,6 +89,8 @@ export async function tickConfigWorkersScheduler(now: Date = new Date()): Promis
         await enqueueScheduledSweedShiftsIngest(schedule.taskKey, now, activeWindow.intervalMinutes)
       } else if (schedule.taskKey === 'workers.scheduling.enrich_customer_address') {
         await enqueueScheduledEnrichCustomerAddress(schedule.taskKey, now, activeWindow.intervalMinutes)
+      } else if (schedule.taskKey === 'workers.scheduling.enrich_delivery_address') {
+        await enqueueScheduledEnrichDeliveryAddress(schedule.taskKey, now, activeWindow.intervalMinutes)
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown scheduler-task error.'
@@ -765,6 +767,54 @@ async function enqueueScheduledEnrichCustomerAddress(
       payload: {
         intervalMinutes,
         siteDealerIds,
+        taskKey,
+        trigger: 'scheduled',
+      },
+      requestId: null,
+      scope: null,
+      undoPayload: null,
+    })
+  })
+}
+
+async function enqueueScheduledEnrichDeliveryAddress(
+  taskKey: ConfigBackgroundTaskKey,
+  now: Date,
+  intervalMinutes: number,
+): Promise<void> {
+  // Bucket dedupe by interval so two scheduler ticks in the same
+  // minute don't double-enqueue, matching the sibling weather /
+  // sweed_shifts / sweed_orders patterns.
+  const bucketMs = intervalMinutes * 60 * 1000
+  const bucketStartMs = Math.floor(now.getTime() / bucketMs) * bucketMs
+  const bucketIso = new Date(bucketStartMs).toISOString()
+
+  await withTransaction(async (db) => {
+    const jobId = await enqueueJob(db, {
+      priority: JOB_PRIORITY_BEST_EFFORT,
+      concurrencyKey: getOptionalSweedSessionConcurrencyKey(true),
+      dedupeKey: `config.workers.enrich_delivery_address:scheduled:${bucketIso}`,
+      jobType: 'config.workers.enrich_delivery_address',
+      module: 'config',
+      payload: {
+        trigger: 'scheduled',
+        batchSize: 60,
+      },
+      requestedByUserId: null,
+      runAt: now,
+      scope: null,
+    })
+
+    await recordConfigScheduleEnqueue(db, taskKey, jobId, now)
+    await appendAuditEvent(db, {
+      actorType: 'system',
+      actorUserId: null,
+      entityId: String(jobId),
+      entityType: 'job',
+      eventType: 'config.workers.enrich_delivery_address.requested',
+      module: 'config',
+      payload: {
+        intervalMinutes,
         taskKey,
         trigger: 'scheduled',
       },

@@ -23,6 +23,7 @@ export const CONFIG_BACKGROUND_TASK_KEYS = [
   'workers.scheduling.sweed_package_snapshots',
   'workers.scheduling.weather_daily_ingest',
   'workers.scheduling.sweed_shifts_ingest',
+  'workers.scheduling.enrich_delivery_address',
 ] as const
 export const ConfigBackgroundTaskKeySchema = z.enum(CONFIG_BACKGROUND_TASK_KEYS)
 export type ConfigBackgroundTaskKey = z.infer<typeof ConfigBackgroundTaskKeySchema>
@@ -121,6 +122,13 @@ export const CONFIG_BACKGROUND_TASKS: ReadonlyArray<ConfigBackgroundTaskDefiniti
     slug: 'enrich-customer-address',
     implemented: true,
     summary: 'Every 5 minutes, pulls store.customer.get for distinct (dealer, customer) pairs observed on sweed_orders that do not yet have a primary address row in sweed_customer_addresses, upserting the result via the shared addresses table. The Census geocoder drains addresses with status=pending separately. Backs customers.origin_map (geocode-hierarchy roll-ups) for the non-delivery purchaser path Dave called out on automation#25.',
+  },
+  {
+    key: 'workers.scheduling.enrich_delivery_address',
+    label: 'Delivery address enrichment',
+    slug: 'enrich-delivery-address',
+    implemented: true,
+    summary: 'Two-phase per tick: (1) walks delivery-typed sweed_orders rows whose delivery address is not yet resolved, calls store.sale.invoice.get per row, and upserts the returned address into the shared addresses table (linking the order + appending a delivery_seen row for the customer when present); (2) drains the addresses geocode queue via the free US Census Geocoder (≈ 1 RPS). Unblocks the customers.origin_map and delivery.order_count_by_zone metrics on /metrics. See FreshlyBakedNYC/automation#25.',
   },
 ]
 
@@ -477,5 +485,28 @@ export const ENRICH_CUSTOMER_ADDRESS_DEFAULT_SCHEDULE_WINDOWS: ReadonlyArray<
     intervalMinutes: 5,
     paused: false,
     notes: 'Drain unseen customer ids -> store.customer.get -> addresses upsert, every 5 minutes (rate-limited per tick).',
+  },
+]
+
+/**
+ * Default schedule for the delivery-address enrichment worker
+ * (FreshlyBakedNYC/automation#25).
+ *
+ * Two phases per tick (Sweed RPCs + Census geocodes), batchSize=60
+ * by default → wall-clock budget around two minutes per tick. A
+ * 5-minute cadence comfortably absorbs that and matches the
+ * sibling sweed_orders_ingest worker so newly-ingested delivery
+ * orders surface on the map within ~10 minutes of pay time.
+ */
+export const ENRICH_DELIVERY_ADDRESS_DEFAULT_SCHEDULE_WINDOWS: ReadonlyArray<
+  Omit<ConfigWorkerScheduleWindow, 'id'>
+> = [
+  {
+    weekdayMask: WEEKDAY_MASK_ALL,
+    windowStartMinute: 0,
+    windowEndMinute: 1440,
+    intervalMinutes: 5,
+    paused: false,
+    notes: 'Per-invoice delivery-address pull + Census geocode drain, every 5 minutes.',
   },
 ]

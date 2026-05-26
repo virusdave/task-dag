@@ -49,6 +49,7 @@ export const JobTypeSchema = z.enum([
   'config.workers.sweed_package_snapshots',
   'config.workers.weather_daily_ingest',
   'config.workers.sweed_shifts_ingest',
+  'config.workers.enrich_delivery_address',
   'catalog.maintenance.upload_group_image',
 ])
 export type JobType = z.infer<typeof JobTypeSchema>
@@ -478,6 +479,32 @@ export const CatalogReviewRerunRowJobPayloadSchema = z.object({
   requestedByUserId: z.number().int().positive().nullable().optional(),
 })
 export type CatalogReviewRerunRowJobPayload = z.infer<typeof CatalogReviewRerunRowJobPayloadSchema>
+
+/**
+ * Delivery-address enrichment worker payload
+ * (FreshlyBakedNYC/automation#25 task A4).
+ *
+ * One scheduler tick = one job. Two-phase per tick:
+ *
+ *   1. Walks delivery-typed sweed_orders rows that still need a
+ *      delivery address, calls `store.sale.invoice.get` per row,
+ *      upserts into `addresses`, and links to the order. Subject
+ *      to a 60-second ingest-grace so we don't fight the
+ *      same-cycle sweed_orders_ingest worker.
+ *   2. Drains the addresses geocode-pending queue via the US
+ *      Census geocoder (~1 RPS internal rate limit).
+ *
+ * `batchSize` caps both phases at the same number of rows so one
+ * tick stays bounded.
+ */
+export const ConfigWorkersEnrichDeliveryAddressJobPayloadSchema = z.object({
+  requestedByUserId: z.number().int().positive().nullable().optional(),
+  trigger: z.enum(['manual_run', 'scheduled']).default('scheduled'),
+  batchSize: z.number().int().min(1).max(500).default(60),
+})
+export type ConfigWorkersEnrichDeliveryAddressJobPayload = z.infer<
+  typeof ConfigWorkersEnrichDeliveryAddressJobPayloadSchema
+>
 
 export {
   ScreensBannerRefreshJobPayloadSchema,
