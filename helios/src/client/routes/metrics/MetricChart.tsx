@@ -226,6 +226,7 @@ export function MetricChart({
           metricId={metric.id}
           onAnnotationsChanged={onAnnotationsChanged}
           interactive={variant === 'expanded'}
+          agg={agg}
         />
       )}
       <ScreenReaderSummary metric={metric} response={response} window={window} loading={loading} />
@@ -245,6 +246,8 @@ interface ChartSvgProps {
   readonly onAnnotationsChanged: () => void
   /** Card variant disables pan/zoom/annotate to keep the dashboard scannable. */
   readonly interactive: boolean
+  /** Effective aggregation (drives X-axis bucket-aligned tick placement). */
+  readonly agg: MetricAggregation
 }
 
 interface DragState {
@@ -277,6 +280,7 @@ function ChartSvg(props: ChartSvgProps) {
     metricId,
     onAnnotationsChanged,
     interactive,
+    agg,
   } = props
   const svgRef = useRef<SVGSVGElement | null>(null)
   const wrapRef = useRef<HTMLDivElement | null>(null)

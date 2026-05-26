@@ -38,8 +38,8 @@ const PREFERRED_BASES: ReadonlyArray<number> = [1, 2, 2.5, 5, 10]
 export interface YTickSet {
   readonly ticks: ReadonlyArray<number>
   readonly step: number
-  readonly /** number of fractional digits the step demands (so labels match). */
-  fractionDigits: number
+  /** number of fractional digits the step demands (so labels match). */
+  readonly fractionDigits: number
 }
 
 /**

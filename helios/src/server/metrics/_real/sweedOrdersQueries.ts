@@ -91,6 +91,47 @@ function bucketSelectExpr(truncUnit: string | null): string {
 }
 
 /**
+ * SQL fragment producing the per-row series id for new-vs-returning
+ * customer splits. **Must** be computed at QUERY time, not read from
+ * the stored `first_time_for_customer` column.
+ *
+ * Why: the ingest worker records `first_time_for_customer` by checking
+ * "does this customer have any prior pay_time row in the table right
+ * now?". Forward polling ingests in ascending pay_time order, which
+ * works fine — but the backfill loop walks **backwards** (newest day
+ * to oldest day). When backfill arrives at a customer's earlier order
+ * AFTER forward polling has already inserted a later one, the EXISTS
+ * check sees no prior row (the only existing row has a *later*
+ * pay_time) and marks the backfilled row as `first_time=true` as
+ * well. Two "firsts" for the same customer. Operator observed this on
+ * 2026-05-26 — Sweed's "new customers / week" was much smaller than
+ * Helios's first_time count.
+ *
+ * Computing at query time via NOT EXISTS over the live table is
+ * always correct regardless of insertion order. The
+ * (customer_id, pay_time) partial index makes the per-row lookup
+ * cheap (it short-circuits at the first prior row).
+ *
+ * Guests (customer_id IS NULL) are counted as 'returning' so the
+ * curve is conservative — same convention the original insert-time
+ * logic used.
+ *
+ * Requires the calling SQL to alias `sweed_orders` as `so`.
+ */
+export const FIRST_TIME_SERIES_EXPR = `
+  case
+    when so.customer_id is not null
+     and not exists (
+       select 1 from sweed_orders prior
+        where prior.customer_id = so.customer_id
+          and prior.pay_time < so.pay_time
+     )
+    then 'first_time'
+    else 'returning'
+  end
+`
+
+/**
  * Run a bucketed query that produces one row per (bucket_start, series_id, value)
  * and shape the result into MetricRow[] with one row per expected bucket.
  *
@@ -147,7 +188,8 @@ async function runBucketedQuery(args: {
 // ----- Concrete metric queries -----
 
 /** acquisition.first_vs_returning — count of completed orders per
- *  bucket, split by whether the buying customer had any prior order. */
+ *  bucket, split by whether THIS PURCHASE was the customer's first
+ *  ever purchase (per-purchase yes/no, not per-customer dedupe). */
 export async function queryFirstVsReturning(args: MetricQueryArgs): Promise<MetricRow[]> {
   const dealerIds = resolveDealerIds(args.sites)
   const { from, to, truncUnit, buckets } = resolveWindow(args)
@@ -156,15 +198,11 @@ export async function queryFirstVsReturning(args: MetricQueryArgs): Promise<Metr
   }
   if (truncUnit === null) {
     const sql = `
-      select case
-               when first_time_for_customer is true then 'first_time'
-               when first_time_for_customer is false then 'returning'
-               else 'returning'  -- guests counted as returning (conservative)
-             end as series_id,
+      select ${FIRST_TIME_SERIES_EXPR} as series_id,
              count(*) as value
-        from sweed_orders
-       where dealer_id = any($1::bigint[])
-         and pay_time >= $2 and pay_time < $3
+        from sweed_orders so
+       where so.dealer_id = any($1::bigint[])
+         and so.pay_time >= $2 and so.pay_time < $3
        group by 1
     `
     return runBucketedQuery({
@@ -177,15 +215,12 @@ export async function queryFirstVsReturning(args: MetricQueryArgs): Promise<Metr
     })
   }
   const sql = `
-    select ${bucketSelectExpr(truncUnit)} as bucket_start,
-           case
-             when first_time_for_customer is true then 'first_time'
-             else 'returning'
-           end as series_id,
+    select (date_trunc('${truncUnit}', so.pay_time at time zone 'UTC')) at time zone 'UTC' as bucket_start,
+           ${FIRST_TIME_SERIES_EXPR} as series_id,
            count(*) as value
-      from sweed_orders
-     where dealer_id = any($1::bigint[])
-       and pay_time >= $2 and pay_time < $3
+      from sweed_orders so
+     where so.dealer_id = any($1::bigint[])
+       and so.pay_time >= $2 and so.pay_time < $3
      group by 1, 2
   `
   return runBucketedQuery({
@@ -267,21 +302,26 @@ export async function queryBasketSizeByFulfillment(args: MetricQueryArgs): Promi
   return queryAvgGroupedByFulfillment(args, 'avg(grand_total_dollars)')
 }
 
-/** basket.size_by_customer_type — avg basket $ split by first/returning. */
+/** basket.size_by_customer_type — avg basket $ split by whether
+ *  THIS PURCHASE was the customer's first ever purchase
+ *  (per-purchase yes/no, not per-customer dedupe). */
 export async function queryBasketSizeByCustomerType(args: MetricQueryArgs): Promise<MetricRow[]> {
   const dealerIds = resolveDealerIds(args.sites)
   const { from, to, truncUnit, buckets } = resolveWindow(args)
   if (dealerIds.length === 0 || buckets.length === 0) {
     return buckets.map((b) => ({ t: b.toISOString(), first_time: 0, returning: 0 }))
   }
-  const bucketSelect = bucketSelectExpr(truncUnit)
+  const bucketSelect =
+    truncUnit === null
+      ? 'null::timestamptz'
+      : `(date_trunc('${truncUnit}', so.pay_time at time zone 'UTC')) at time zone 'UTC'`
   const sql = `
     select ${bucketSelect} as bucket_start,
-           case when first_time_for_customer is true then 'first_time' else 'returning' end as series_id,
-           avg(grand_total_dollars)::numeric as value
-      from sweed_orders
-     where dealer_id = any($1::bigint[])
-       and pay_time >= $2 and pay_time < $3
+           ${FIRST_TIME_SERIES_EXPR} as series_id,
+           avg(so.grand_total_dollars)::numeric as value
+      from sweed_orders so
+     where so.dealer_id = any($1::bigint[])
+       and so.pay_time >= $2 and so.pay_time < $3
      group by 1, 2
   `
   return runBucketedQuery({

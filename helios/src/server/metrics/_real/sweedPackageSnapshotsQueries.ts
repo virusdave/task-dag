@@ -6,6 +6,7 @@ import {
 import { getPool } from '../../db/pool.js'
 import { defaultWindow, walkBuckets } from '../timeBuckets.js'
 import type { MetricQueryArgs, MetricRow } from '../types.js'
+import { FIRST_TIME_SERIES_EXPR } from './sweedOrdersQueries.js'
 
 // ============================================================================
 // Real-data SQL helpers for the COGS / margin / inventory metric stubs
@@ -337,8 +338,10 @@ export async function queryEffectiveGmPct(args: MetricQueryArgs): Promise<Metric
   })
 }
 
-/** margins.stack_new_vs_returning — gross margin $ stacked by
- *  first-time vs returning customer. Guests counted as returning. */
+/** margins.stack_new_vs_returning — gross margin $ stacked by whether
+ *  THIS PURCHASE was the customer's first ever purchase
+ *  (per-purchase yes/no, not per-customer dedupe). Guests counted as
+ *  returning. */
 export async function queryMarginStackNewVsReturning(args: MetricQueryArgs): Promise<MetricRow[]> {
   const dealerIds = resolveDealerIds(args.sites)
   const { from, to, truncUnit, buckets } = resolveWindow(args)
@@ -347,7 +350,7 @@ export async function queryMarginStackNewVsReturning(args: MetricQueryArgs): Pro
   }
   const sql = `
     select ${bucketSelectExpr(truncUnit, 'so.pay_time')} as bucket_start,
-           case when so.first_time_for_customer is true then 'first_time' else 'returning' end as series_id,
+           ${FIRST_TIME_SERIES_EXPR} as series_id,
            sum(${REVENUE_EXPR})::numeric as revenue,
            sum(${COGS_EXPR})::numeric as cogs
       from sweed_orders so,

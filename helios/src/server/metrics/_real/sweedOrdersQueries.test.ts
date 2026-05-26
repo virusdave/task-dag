@@ -66,6 +66,47 @@ describe('sweed-orders metric queries — bucket-key timezone regression', () =>
     expect(first!.returning).toBe(42)
   })
 
+  it('new-vs-returning SQL computes "first ever purchase" at query time, NOT off the stored column', async () => {
+    // Regression: the stored `first_time_for_customer` column is set
+    // at ingest time by checking "does this customer have any prior
+    // pay_time row right now?". Forward polling ingests in ascending
+    // pay_time order so that check is correct — but the backfill loop
+    // walks BACKWARDS (newest day to oldest). When backfill arrives at
+    // a customer's earlier order AFTER forward polling has inserted a
+    // later one, the EXISTS check sees no prior row (the existing row
+    // has a LATER pay_time) and marks the backfilled row first_time=
+    // true ALONGSIDE the previously-flagged later row. Two "firsts"
+    // for the same customer. Operator confirmed mismatch with Sweed's
+    // own "new customers / week" on 2026-05-26.
+    //
+    // The fix is to compute first-time-ness at QUERY time via NOT
+    // EXISTS over the live table. This test guards that future
+    // "simplifications" don't go back to reading the stored column.
+    const captured: string[] = []
+    const fakePool = {
+      query: vi.fn().mockImplementation((sql: string) => {
+        captured.push(sql)
+        return Promise.resolve({ rows: [] })
+      }),
+    }
+    vi.spyOn(poolModule, 'getPool').mockReturnValue(fakePool as unknown as ReturnType<typeof poolModule.getPool>)
+
+    await queryFirstVsReturning({
+      sites: [],
+      from: new Date('2026-05-18T00:00:00.000Z'),
+      to: new Date('2026-05-25T00:00:00.000Z'),
+      agg: 'week',
+    })
+
+    const sql = captured[0]!
+    expect(sql, 'must NOT read first_time_for_customer (backfill-corrupted)').not.toMatch(
+      /first_time_for_customer/,
+    )
+    expect(sql, 'must compute first-time via NOT EXISTS at query time').toMatch(
+      /not\s+exists\s*\(\s*select\s+1\s+from\s+sweed_orders\s+prior/i,
+    )
+  })
+
   it('SQL emitted by the helpers wraps date_trunc back into timestamptz at UTC', async () => {
     // Easiest way to inspect: spy the pool.query call.
     const captured: string[] = []
