@@ -14,7 +14,7 @@
  * weren't refreshed in the last day (i.e. the ones that 5xx'd
  * during the prior run).
  *
- * Subexponential power-law backoff (1.5^n) on 5xx / timeout,
+ * Sub-exponential power-law backoff (n^1.5) on 5xx / timeout,
  * adaptive global cooldown widened on every 5xx so a worker storm
  * doesn't pile on, and a deferred-retry pass that progressively
  * lowers fanout for retailers that still failed after the first
@@ -162,7 +162,12 @@ async function runPass(args: {
 
   async function fetchRetailerProductsWithRetry(retailer: Retailer): Promise<LitAlertsProduct[]> {
     let attempt = 0
-    let backoffMs = 750
+    // Sub-exponential power-law backoff: base * attempt^1.5. Grows
+    // strictly slower than any exponential (a^n) — at attempt 6 this
+    // gives ~750 * 14.7 ≈ 11s, capped at MAX_BACKOFF_MS. Compare
+    // 1.5^n which is still exponential, just with base 1.5.
+    const BASE_MS = 750
+    const MAX_BACKOFF_MS = 30_000
     while (true) {
       attempt += 1
       try {
@@ -173,7 +178,7 @@ async function runPass(args: {
         const is5xx = /HTTP 5\d\d/i.test(msg) || /timeout/i.test(msg) || /aborted/i.test(msg)
         if (!is5xx) throw err
         totals.retries += 1
-        backoffMs = Math.min(15_000, Math.round(backoffMs * 1.5))
+        const backoffMs = Math.min(MAX_BACKOFF_MS, Math.round(BASE_MS * Math.pow(attempt, 1.5)))
         const jitter = Math.round(backoffMs * (Math.random() * 0.4 + 0.8))
         cooldownExpiresAt = Math.max(cooldownExpiresAt, Date.now() + Math.round(backoffMs / 2))
         await sleep(jitter)
