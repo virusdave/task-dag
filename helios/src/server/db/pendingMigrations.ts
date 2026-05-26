@@ -288,6 +288,20 @@ const SENTINELS: MigrationSentinel[] = [
     check: async (db) => tableExists(db, 'litalerts_product_images'),
   },
   {
+    migrationId: '036_sweed_package_cost_as_of_fallback',
+    label:
+      'sweed_package_cost_as_of_or_earliest() — fall-back cost lookup function used by the COGS / margin / inventory metrics (automation#24 wire-up). Without this the /metrics page tree`s margin charts read zero on every pre-2026-05-26 order.',
+    check: async (db) => {
+      const result = await db.query<{ exists: boolean }>(
+        `select exists(
+           select 1 from pg_proc
+            where proname = 'sweed_package_cost_as_of_or_earliest'
+         ) as exists`,
+      )
+      return result.rows[0]?.exists === true
+    },
+  },
+  {
     migrationId: '034_fuzzy_skus_partner_product_idx',
     label:
       'fuzzy_skus_partner_brand_category_idx — partial covering index that turns the per-(brand, category) aggregate the Catalog → Market Data list page runs on every request into an index-only scan. Without it, GET /api/catalog/market-matches takes ~500ms; with it, ~50ms.',
