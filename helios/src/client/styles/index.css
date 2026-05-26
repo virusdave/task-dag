@@ -2734,6 +2734,11 @@ a.tree-nav-branch-label.is-link,
 
 /* ---------------------------------------------------------------------- */
 /* /metrics page tree (automation#21, satisfying virusdave/top-level#7)   */
+/*                                                                        */
+/* Mobile-first: defaults render correctly on a phone (≤480px). The       */
+/* @media (min-width: 720px) block widens to the desktop two-column       */
+/* layout. The chart always renders BEFORE the nav in DOM order so a      */
+/* screen reader / single-column phone view sees the answer first.        */
 /* ---------------------------------------------------------------------- */
 
 .metrics-layout {
@@ -2760,16 +2765,56 @@ a.tree-nav-branch-label.is-link,
   font-size: 0.85rem;
 }
 
-.metrics-body {
-  display: grid;
-  grid-template-columns: 220px 1fr;
-  gap: 0.75rem;
-  min-height: 360px;
+.metrics-controls input,
+.metrics-controls select {
+  font-size: 16px; /* prevents iOS Safari from zooming the page on focus */
 }
 
-@media (max-width: 720px) {
+/* Mobile metric switcher: visible on phone, hidden on desktop where the
+   left-nav serves the same purpose. */
+.metrics-mobile-switcher {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  background: var(--panel);
+  border: 1px solid var(--control-border);
+  border-radius: 6px;
+  font-size: 0.9rem;
+}
+
+.metrics-mobile-switcher select {
+  flex: 1;
+  min-width: 0;
+  font-size: 16px;
+  min-height: 36px;
+}
+
+/* Mobile body: single column, chart first (already first in DOM),
+   nav collapsed underneath with a capped height. */
+.metrics-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+@media (min-width: 720px) {
+  .metrics-mobile-switcher {
+    display: none;
+  }
   .metrics-body {
-    grid-template-columns: 1fr;
+    display: grid;
+    grid-template-columns: 220px 1fr;
+    min-height: 360px;
+  }
+  /* On desktop, the nav goes BACK to the left even though the DOM
+     order is chart-then-nav. CSS grid lets us re-order without
+     touching the screen-reader / mobile DOM. */
+  .metrics-chart-area {
+    order: 2;
+  }
+  .metrics-nav {
+    order: 1;
   }
 }
 
@@ -2779,7 +2824,13 @@ a.tree-nav-branch-label.is-link,
   border-radius: 6px;
   padding: 0.5rem;
   overflow-y: auto;
-  max-height: 70vh;
+  max-height: 32vh;
+}
+
+@media (min-width: 720px) {
+  .metrics-nav {
+    max-height: 70vh;
+  }
 }
 
 .metrics-nav-group {
@@ -2803,11 +2854,20 @@ a.tree-nav-branch-label.is-link,
   border: none;
   text-align: left;
   width: 100%;
-  padding: 0.25rem 0.4rem;
+  padding: 0.5rem 0.5rem;
   border-radius: 4px;
   cursor: pointer;
-  font-size: 0.85rem;
+  font-size: 0.9rem;
+  min-height: 36px;
   color: inherit;
+}
+
+@media (min-width: 720px) {
+  .metrics-nav-leaf {
+    padding: 0.3rem 0.4rem;
+    font-size: 0.85rem;
+    min-height: 28px;
+  }
 }
 
 .metrics-nav-leaf:hover {
@@ -2834,10 +2894,26 @@ a.tree-nav-branch-label.is-link,
 
 .metric-chart-header {
   display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
+  flex-direction: column;
   gap: 0.5rem;
   margin-bottom: 0.5rem;
+}
+
+@media (min-width: 720px) {
+  .metric-chart-header {
+    flex-direction: row;
+    justify-content: space-between;
+    align-items: flex-start;
+  }
+}
+
+.metric-chart-desc-wrap {
+  margin-top: 0.25rem;
+}
+
+.metric-chart-desc-wrap > summary {
+  cursor: pointer;
+  font-size: 0.75rem;
 }
 
 .metric-chart-title {
@@ -2904,20 +2980,62 @@ a.tree-nav-branch-label.is-link,
   border-radius: 2px;
 }
 
+/* On mobile, render the tooltip and create form as a bottom-anchored
+   sheet so the user's tap doesn't get covered by the dialog and so the
+   on-screen keyboard pushes the form into the visible region. On
+   desktop, anchor to the top-right of the chart so it stays close to
+   the data point the user is inspecting. */
 .metric-chart-tooltip,
 .metric-chart-create {
-  position: absolute;
+  position: fixed;
+  left: 0.5rem;
   right: 0.5rem;
-  top: 0.5rem;
+  bottom: 0.5rem;
   z-index: 5;
   background: white;
   border: 1px solid var(--control-border);
   border-radius: 6px;
-  padding: 0.5rem 0.75rem;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
-  min-width: 260px;
-  max-width: 360px;
-  font-size: 0.85rem;
+  padding: 0.75rem;
+  box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.16);
+  font-size: 0.9rem;
+}
+
+.metric-chart-tooltip input,
+.metric-chart-tooltip textarea,
+.metric-chart-tooltip select,
+.metric-chart-create input,
+.metric-chart-create textarea,
+.metric-chart-create select {
+  font-size: 16px; /* prevents iOS Safari zoom-on-focus */
+  width: 100%;
+  box-sizing: border-box;
+  min-height: 36px;
+}
+
+.metric-chart-tooltip textarea,
+.metric-chart-create textarea {
+  min-height: 60px;
+}
+
+.metric-chart-tooltip .ghost-button,
+.metric-chart-create .ghost-button {
+  min-height: 36px;
+  padding: 0.4rem 0.85rem;
+}
+
+@media (min-width: 720px) {
+  .metric-chart-tooltip,
+  .metric-chart-create {
+    position: absolute;
+    left: auto;
+    bottom: auto;
+    right: 0.5rem;
+    top: 0.5rem;
+    min-width: 260px;
+    max-width: 360px;
+    font-size: 0.85rem;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+  }
 }
 
 .metric-chart-tooltip header {

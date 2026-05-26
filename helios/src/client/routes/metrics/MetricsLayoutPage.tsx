@@ -79,8 +79,31 @@ export function MetricsLayoutPage() {
           onAggChange={setPageAgg}
         />
 
+        {/* Mobile-first metric switcher — visible only at narrow widths
+            so the operator never has to scroll past the nav to get to
+            the chart on a phone. The left-nav (below) stays available
+            for desktop browsing. */}
+        <label className="metrics-mobile-switcher">
+          metric{' '}
+          <select
+            value={activeMetricId ?? ''}
+            onChange={(e) => setActiveMetricId(e.target.value)}
+          >
+            {groups.map((g) => (
+              <optgroup key={g.group} label={g.group}>
+                {g.metrics.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.title}
+                  </option>
+                ))}
+              </optgroup>
+            ))}
+          </select>
+        </label>
+
         <div className="metrics-body">
-          <MetricsNav groups={groups} activeMetricId={activeMetricId} onSelect={setActiveMetricId} />
+          {/* Chart area FIRST in DOM order so a screen reader / mobile
+              user encounters the answer before the navigation. */}
           <div className="metrics-chart-area">
             {activeMetric ? (
               <MetricChartWithAnnotations
@@ -92,6 +115,7 @@ export function MetricsLayoutPage() {
               <p className="subtle-copy">No metrics registered.</p>
             )}
           </div>
+          <MetricsNav groups={groups} activeMetricId={activeMetricId} onSelect={setActiveMetricId} />
         </div>
 
         <details className="page-collapsible">
