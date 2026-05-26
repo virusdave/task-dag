@@ -246,6 +246,12 @@ const SENTINELS: MigrationSentinel[] = [
       (await tableExists(db, 'helios_store_locations')) &&
       (await tableExists(db, 'litalerts_retailer_locations')),
   },
+  {
+    migrationId: '030_metric_annotations',
+    label:
+      'metric_annotations table — required so the /metrics page tree (automation#21, satisfying virusdave/top-level#7) can persist operator-authored annotations on metric charts (point + range, soft-deleted, scope=global|metric:<id>).',
+    check: (db) => tableExists(db, 'metric_annotations'),
+  },
 ]
 
 interface CacheEntry {
