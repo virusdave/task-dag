@@ -143,7 +143,22 @@ export interface GroupSummaryRow {
   subcategoryName: string | null
   observationCount: number
   liveVerdictCount: number
+  /**
+   * All `litalerts_partner_product` fuzzy_skus matching the group's
+   * effective (override-aware) brand — the "total records" pool for
+   * this group, regardless of category / size / name agreement.
+   */
   parsedFuzzyCount: number
+  /**
+   * Subset of `parsedFuzzyCount` that ALSO matches the group's
+   * canonical category family — the count surfaced in the
+   * "N/total obs" pill on the review list as a quick "how much
+   * signal does this group have before I even open it" tell.
+   * Size + significant-token gates are NOT applied here (they'd
+   * require per-row snapshot variant extraction); operators can
+   * open the family to see the precise above-threshold count.
+   */
+  highQualityFuzzyCount: number
 }
 
 /**
@@ -185,6 +200,7 @@ export async function listGroupsForReview(
     observation_count: number
     live_verdict_count: number
     parsed_fuzzy_count: number
+    high_quality_fuzzy_count: number
   }>(
     `
       with group_obs as (
@@ -244,6 +260,78 @@ export async function listGroupsForReview(
          and fs.brand_norm = be.effective_brand_norm
         where cg.brand_name is not null and be.effective_brand_norm is not null
         group by cg.id
+      ),
+      -- Map each catalog group's raw category to a canonical alias
+      -- array. Mirrors canonicalCategoryNorm() in shared/marketMatch/
+      -- listingParse.ts — keep these two in sync. Used by the
+      -- high-quality count below so a Flower catalog group only counts
+      -- 'flower'/'flowers'/'bud' rows, not accessories or pre-rolls.
+      catalog_category_aliases as (
+        select cg.id as catalog_group_id,
+               case
+                 when cg.category_name is null then array[]::text[]
+                 when lower(regexp_replace(trim(cg.category_name), '[-_/]+', ' ', 'g'))
+                      in ('flower','flowers','bud','buds')
+                   then array['flower','flowers','bud','buds']
+                 when lower(regexp_replace(trim(cg.category_name), '[-_/]+', ' ', 'g'))
+                      in ('pre roll','pre rolls','preroll','prerolls','joints','joint',
+                          'pre rolled','prerolled','pre rolled joint','prerolled joint')
+                   then array['pre-roll','pre-rolls','pre roll','pre rolls','preroll','prerolls','joints','joint']
+                 when lower(regexp_replace(trim(cg.category_name), '[-_/]+', ' ', 'g'))
+                      in ('vape','vapes','vaporizer','vaporizers','cartridge','cartridges',
+                          'cart','carts','disposable','disposables','pod','pods','vape pen','vape pens')
+                   then array['vape','vapes','vaporizer','vaporizers','cartridge','cartridges',
+                              'cart','carts','disposable','disposables','pod','pods','vape pen','vape pens']
+                 when lower(regexp_replace(trim(cg.category_name), '[-_/]+', ' ', 'g'))
+                      in ('edible','edibles','gummy','gummies','chocolate','chocolates',
+                          'mint','mints','lozenge','lozenges','candy','candies',
+                          'beverage','beverages','drink','drinks')
+                   then array['edible','edibles','gummy','gummies','chocolate','chocolates',
+                              'mint','mints','lozenge','lozenges','candy','candies',
+                              'beverage','beverages','drink','drinks']
+                 when lower(regexp_replace(trim(cg.category_name), '[-_/]+', ' ', 'g'))
+                      in ('concentrate','concentrates','extract','extracts',
+                          'live resin','rosin','shatter','wax','badder','budder','sauce',
+                          'distillate','diamonds','hash')
+                   then array['concentrate','concentrates','extract','extracts',
+                              'live resin','rosin','shatter','wax','badder','budder','sauce',
+                              'distillate','diamonds','hash']
+                 when lower(regexp_replace(trim(cg.category_name), '[-_/]+', ' ', 'g'))
+                      in ('tincture','tinctures','sublingual','sublinguals')
+                   then array['tincture','tinctures','sublingual','sublinguals']
+                 when lower(regexp_replace(trim(cg.category_name), '[-_/]+', ' ', 'g'))
+                      in ('topical','topicals','cream','creams','salve','salves','balm','balms')
+                   then array['topical','topicals','cream','creams','salve','salves','balm','balms']
+                 when lower(regexp_replace(trim(cg.category_name), '[-_/]+', ' ', 'g'))
+                      in ('accessory','accessories','rolling paper','rolling papers','paper','papers',
+                          'lighter','lighters','grinder','grinders','pipe','pipes','bong','bongs',
+                          'apparel','merch','merchandise')
+                   then array['accessory','accessories','rolling paper','rolling papers','paper','papers',
+                              'lighter','lighters','grinder','grinders','pipe','pipes','bong','bongs',
+                              'apparel','merch','merchandise']
+                 when lower(regexp_replace(trim(cg.category_name), '[-_/]+', ' ', 'g'))
+                      in ('clone','clones','cutting','cuttings')
+                   then array['clone','clones','cutting','cuttings']
+                 when lower(regexp_replace(trim(cg.category_name), '[-_/]+', ' ', 'g'))
+                      in ('seed','seeds')
+                   then array['seed','seeds']
+                 else array[lower(trim(cg.category_name))]
+               end as category_aliases
+        from catalog_groups cg
+      ),
+      group_high_quality_fuzzy as (
+        select cg.id as catalog_group_id,
+               count(*) as high_quality_fuzzy_count
+        from catalog_groups cg
+        join brand_effective be on be.catalog_brand_name = cg.brand_name
+        join catalog_category_aliases cca on cca.catalog_group_id = cg.id
+        join fuzzy_skus fs
+          on fs.source_kind = 'litalerts_partner_product'
+         and fs.brand_norm = be.effective_brand_norm
+         and (cardinality(cca.category_aliases) = 0
+              or fs.category_norm = any(cca.category_aliases))
+        where cg.brand_name is not null and be.effective_brand_norm is not null
+        group by cg.id
       )
       select
         cg.id as catalog_group_id,
@@ -253,13 +341,16 @@ export async function listGroupsForReview(
         cg.subcategory_name,
         coalesce(go.observation_count, 0)::int as observation_count,
         coalesce(gms.live_verdict_count, 0)::int as live_verdict_count,
-        coalesce(gsf.structured_fuzzy_count, 0)::int as parsed_fuzzy_count
+        coalesce(gsf.structured_fuzzy_count, 0)::int as parsed_fuzzy_count,
+        coalesce(ghq.high_quality_fuzzy_count, 0)::int as high_quality_fuzzy_count
       from catalog_groups cg
       left join group_obs go on go.catalog_group_id = cg.id
       left join group_match_stats gms on gms.catalog_group_id = cg.id
       left join group_structured_fuzzy gsf on gsf.catalog_group_id = cg.id
+      left join group_high_quality_fuzzy ghq on ghq.catalog_group_id = cg.id
       ${whereSql}
-      order by coalesce(go.observation_count, 0) desc,
+      order by coalesce(ghq.high_quality_fuzzy_count, 0) desc,
+               coalesce(go.observation_count, 0) desc,
                coalesce(gsf.structured_fuzzy_count, 0) desc,
                cg.id asc
       limit $${values.length + 1} offset $${values.length + 2}
@@ -320,6 +411,7 @@ export async function listGroupsForReview(
       observationCount: row.observation_count,
       liveVerdictCount: row.live_verdict_count,
       parsedFuzzyCount: row.parsed_fuzzy_count,
+      highQualityFuzzyCount: row.high_quality_fuzzy_count,
     })),
     totalCount: countResult.rows[0]?.count ?? 0,
   }

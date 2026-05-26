@@ -41,6 +41,7 @@ interface GroupSummaryRow {
   observationCount: number
   liveVerdictCount: number
   parsedFuzzyCount: number
+  highQualityFuzzyCount: number
 }
 
 interface ListResponse {
@@ -391,7 +392,13 @@ function GroupCard({ row, expanded, onToggle, onError }: GroupCardProps): JSX.El
         </div>
         <div className="inline-row" style={{ gap: '0.4rem', alignItems: 'center' }}>
           <Pill tone={row.liveVerdictCount > 0 ? 'success' : 'muted'}>{`${row.liveVerdictCount} verdicts`}</Pill>
-          <Pill tone="muted">{`${row.observationCount} obs`}</Pill>
+          <span
+            title={`${row.highQualityFuzzyCount} brand+category matches of ${row.parsedFuzzyCount} total LitAlerts rows for this brand`}
+          >
+            <Pill tone={row.highQualityFuzzyCount > 0 ? 'success' : 'muted'}>
+              {`${row.highQualityFuzzyCount}/${row.parsedFuzzyCount} obs`}
+            </Pill>
+          </span>
           <button className="ghost-button" onClick={onToggle} type="button">
             {expanded ? 'Collapse' : 'Review'}
           </button>
