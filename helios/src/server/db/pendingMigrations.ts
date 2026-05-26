@@ -322,6 +322,16 @@ const SENTINELS: MigrationSentinel[] = [
       (await tableExists(db, 'sweed_shifts_ingest_highwater')) &&
       (await columnExists(db, 'sweed_orders', 'cashier_user_id')),
   },
+  {
+    migrationId: '037_addresses',
+    label:
+      'addresses + sweed_customer_addresses + sweed_orders.delivery_address_id / invoice_get_status — reusable postal-address + Census-geocode persistence layer that backs the Sweed per-invoice + per-customer address enrichment epic (FreshlyBakedNYC/automation#25). Without this the delivery-address enrichment job (A4) and customer-of-record enrichment job (A5) cannot start, and `customers.origin_map` / `delivery.order_count_by_zone` continue to render the `other` catch-all.',
+    check: async (db) =>
+      (await tableExists(db, 'addresses')) &&
+      (await tableExists(db, 'sweed_customer_addresses')) &&
+      (await columnExists(db, 'sweed_orders', 'delivery_address_id')) &&
+      (await columnExists(db, 'sweed_orders', 'invoice_get_status')),
+  },
 ]
 
 interface CacheEntry {

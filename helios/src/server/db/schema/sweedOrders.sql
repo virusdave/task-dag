@@ -60,11 +60,37 @@ create table if not exists sweed_orders (
   -- For the customer-origin map (P6 of #21). Coalesces the
   -- delivery_address.zip field on the invoice envelope; null when
   -- there is no delivery address (kiosk / pickup / in-store).
+  --
+  -- Historical: this column was the zip-only persistence the
+  -- original #25 design proposed. Migration 037 added
+  -- `delivery_address_id` (FK to the new `addresses` table) as
+  -- the full-resolution successor. `delivery_zip` is left in
+  -- place for backwards compatibility with the existing
+  -- _real/sweedOrdersQueries.ts metric queries; the address-
+  -- enrichment job (helios/src/worker/jobs/
+  -- enrichDeliveryAddressJob.ts) populates both columns.
   delivery_zip       text,
 
   -- Provenance: keep the raw RPC payload so we can re-derive any
   -- field we forgot to normalise without re-fetching from Sweed.
   raw_json           jsonb not null
+
+  -- ----- migration 037 (FreshlyBakedNYC/automation#25) -----
+  --
+  -- delivery_address_id    FK to addresses.id; null until the
+  --                        per-invoice enrichment job has
+  --                        resolved this order's delivery
+  --                        destination.
+  --
+  -- invoice_get_status     NULL | 'ok' | 'no_address' | 'failed'.
+  --                        Lets the per-invoice enrichment job
+  --                        avoid re-polling rows with a known
+  --                        terminal outcome. See
+  --                        helios/src/server/db/migrations/
+  --                        037_addresses.sql.
+  --
+  -- invoice_get_polled_at  timestamptz of the most recent
+  --                        store.sale.invoice.get attempt.
 );
 
 create index if not exists sweed_orders_pay_time_idx          on sweed_orders (pay_time);
