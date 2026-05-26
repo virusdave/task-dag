@@ -293,6 +293,12 @@ const SENTINELS: MigrationSentinel[] = [
       'fuzzy_skus_partner_brand_category_idx — partial covering index that turns the per-(brand, category) aggregate the Catalog → Market Data list page runs on every request into an index-only scan. Without it, GET /api/catalog/market-matches takes ~500ms; with it, ~50ms.',
     check: async (db) => indexExists(db, 'fuzzy_skus_partner_brand_category_idx'),
   },
+  {
+    migrationId: '035_weather_daily',
+    label:
+      'weather_daily — per-site (ZIP) daily weather observations (high/low °F, precipitation in.) backing the three real weather.scatter_* metrics on the /metrics page tree (automation#26, unblocks the P5 weather-correlation stubs from #21). Without this the new daily-ingest worker fails to start and the metrics keep rendering as MISSING DATA placeholders.',
+    check: async (db) => tableExists(db, 'weather_daily'),
+  },
 ]
 
 interface CacheEntry {

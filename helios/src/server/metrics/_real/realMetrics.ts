@@ -11,6 +11,12 @@ import {
   queryPaymentOrderCount,
   queryPaymentSalesDollars,
 } from './sweedOrdersQueries.js'
+import {
+  WEATHER_METRIC_SUPPORTED_AGGS,
+  queryWeatherMarginVsHighTemp,
+  queryWeatherMarginVsLowTemp,
+  queryWeatherMarginVsPrecip,
+} from './weatherQueries.js'
 
 // ============================================================================
 // Real-data MetricDefs. These swap one-for-one with stubs of the same id;
@@ -177,6 +183,48 @@ export const REAL_METRICS: ReadonlyArray<MetricDef> = [
     defaultAggregation: 'week',
     supportedAggregations: [...SUPPORTED],
     query: queryCategorySalesStackFraction,
+  },
+  {
+    id: 'weather.scatter_margin_vs_high_temp',
+    group: 'Weather correlation',
+    title: 'Margin $ vs daily high temperature',
+    description:
+      'One row per (site, day): daily high °F (Open-Meteo ERA5 reanalysis, per-site ZIP) and daily margin $ (sum of grand_total − tax − discount from sweed_orders, joined on ET date). At week / month aggregation both axes collapse to bucket averages. Sites: ZIP 10019 (Midtown) and 10458 (Bronx).',
+    series: [
+      { id: 'weather_value', label: 'Daily high °F', colour: '#d62728' },
+      { id: 'margin_dollars', label: 'Daily margin $', colour: '#1f77b4' },
+    ],
+    defaultAggregation: 'date',
+    supportedAggregations: [...WEATHER_METRIC_SUPPORTED_AGGS],
+    query: queryWeatherMarginVsHighTemp,
+  },
+  {
+    id: 'weather.scatter_margin_vs_low_temp',
+    group: 'Weather correlation',
+    title: 'Margin $ vs daily low temperature',
+    description:
+      'One row per (site, day): daily low °F (Open-Meteo ERA5 reanalysis, per-site ZIP) and daily margin $. Same join semantics as weather.scatter_margin_vs_high_temp.',
+    series: [
+      { id: 'weather_value', label: 'Daily low °F', colour: '#1f77b4' },
+      { id: 'margin_dollars', label: 'Daily margin $', colour: '#2ca02c' },
+    ],
+    defaultAggregation: 'date',
+    supportedAggregations: [...WEATHER_METRIC_SUPPORTED_AGGS],
+    query: queryWeatherMarginVsLowTemp,
+  },
+  {
+    id: 'weather.scatter_margin_vs_precip',
+    group: 'Weather correlation',
+    title: 'Margin $ vs daily precipitation',
+    description:
+      'One row per (site, day): daily precipitation (inches, Open-Meteo ERA5 reanalysis, per-site ZIP) and daily margin $. Same join semantics as weather.scatter_margin_vs_high_temp.',
+    series: [
+      { id: 'weather_value', label: 'Daily precipitation (in)', colour: '#9467bd' },
+      { id: 'margin_dollars', label: 'Daily margin $', colour: '#ff7f0e' },
+    ],
+    defaultAggregation: 'date',
+    supportedAggregations: [...WEATHER_METRIC_SUPPORTED_AGGS],
+    query: queryWeatherMarginVsPrecip,
   },
   {
     id: 'customers.origin_map',

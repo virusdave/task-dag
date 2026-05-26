@@ -83,6 +83,8 @@ export async function tickConfigWorkersScheduler(now: Date = new Date()): Promis
         await enqueueScheduledSweedOrdersIngest(schedule.taskKey, now, activeWindow.intervalMinutes)
       } else if (schedule.taskKey === 'workers.scheduling.sweed_package_snapshots') {
         await enqueueScheduledSweedPackageSnapshots(schedule.taskKey, now, activeWindow.intervalMinutes)
+      } else if (schedule.taskKey === 'workers.scheduling.weather_daily_ingest') {
+        await enqueueScheduledWeatherDailyIngest(schedule.taskKey, now, activeWindow.intervalMinutes)
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown scheduler-task error.'
@@ -601,6 +603,56 @@ async function enqueueScheduledSweedPackageSnapshots(
       payload: {
         intervalMinutes,
         siteDealerIds,
+        taskKey,
+        trigger: 'scheduled',
+      },
+      requestId: null,
+      scope: null,
+      undoPayload: null,
+    })
+  })
+}
+
+async function enqueueScheduledWeatherDailyIngest(
+  taskKey: ConfigBackgroundTaskKey,
+  now: Date,
+  intervalMinutes: number,
+): Promise<void> {
+  // 1440-minute (24h) bucket keeps two scheduler ticks in the same
+  // minute from double-enqueueing. The dedupe key only rotates when
+  // the bucket advances, but per-tick the scheduler also enforces
+  // the elapsed-interval check, so this is belt-and-suspenders.
+  const bucketMs = intervalMinutes * 60 * 1000
+  const bucketStartMs = Math.floor(now.getTime() / bucketMs) * bucketMs
+  const bucketIso = new Date(bucketStartMs).toISOString()
+
+  await withTransaction(async (db) => {
+    const jobId = await enqueueJob(db, {
+      priority: JOB_PRIORITY_BEST_EFFORT,
+      // Open-Meteo is an HTTPS GET to a public endpoint; no Sweed
+      // session needed.
+      concurrencyKey: null,
+      dedupeKey: `config.workers.weather_daily_ingest:scheduled:${bucketIso}`,
+      jobType: 'config.workers.weather_daily_ingest',
+      module: 'config',
+      payload: {
+        trigger: 'scheduled',
+      },
+      requestedByUserId: null,
+      runAt: now,
+      scope: null,
+    })
+
+    await recordConfigScheduleEnqueue(db, taskKey, jobId, now)
+    await appendAuditEvent(db, {
+      actorType: 'system',
+      actorUserId: null,
+      entityId: String(jobId),
+      entityType: 'job',
+      eventType: 'config.workers.weather_daily_ingest.requested',
+      module: 'config',
+      payload: {
+        intervalMinutes,
         taskKey,
         trigger: 'scheduled',
       },

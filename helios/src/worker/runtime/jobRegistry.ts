@@ -14,6 +14,7 @@ import {
   ConfigWorkersStockRefreshJobPayloadSchema,
   ConfigWorkersSweedOrdersIngestJobPayloadSchema,
   ConfigWorkersSweedPackageSnapshotsJobPayloadSchema,
+  ConfigWorkersWeatherDailyIngestJobPayloadSchema,
   CatalogSyncGroupDetailJobPayloadSchema,
   LlmDebugRerunJobPayloadSchema,
   ProposalGenerateDescriptionBatchJobPayloadSchema,
@@ -47,6 +48,7 @@ import { runConfigWorkersMarketEvidenceAlarmScanJob } from '../jobs/configWorker
 import { runConfigWorkersStockRefreshJob } from '../jobs/configWorkersStockRefreshJob.js'
 import { runConfigWorkersSweedOrdersIngestJob } from '../jobs/configWorkersSweedOrdersIngestJob.js'
 import { runConfigWorkersSweedPackageSnapshotsJob } from '../jobs/configWorkersSweedPackageSnapshotsJob.js'
+import { runIngestWeatherDailyJob } from '../jobs/ingestWeatherDailyJob.js'
 import { runProposalImportReviewJsonJob } from '../jobs/importReviewJsonJob.js'
 import { getPool } from '../../server/db/pool.js'
 import { runLlmDebugRerunJob } from '../jobs/llmDebugRerunJob.js'
@@ -201,6 +203,12 @@ const handlers: Record<JobType, JobHandler> = {
     await runConfigWorkersSweedPackageSnapshotsJob(
       context,
       ConfigWorkersSweedPackageSnapshotsJobPayloadSchema.parse(context.payload),
+    )
+  },
+  'config.workers.weather_daily_ingest': async (context) => {
+    await runIngestWeatherDailyJob(
+      context,
+      ConfigWorkersWeatherDailyIngestJobPayloadSchema.parse(context.payload),
     )
   },
 }

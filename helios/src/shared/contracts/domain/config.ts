@@ -20,6 +20,7 @@ export const CONFIG_BACKGROUND_TASK_KEYS = [
   'workers.scheduling.stock',
   'workers.scheduling.sweed_orders_ingest',
   'workers.scheduling.sweed_package_snapshots',
+  'workers.scheduling.weather_daily_ingest',
 ] as const
 export const ConfigBackgroundTaskKeySchema = z.enum(CONFIG_BACKGROUND_TASK_KEYS)
 export type ConfigBackgroundTaskKey = z.infer<typeof ConfigBackgroundTaskKeySchema>
@@ -97,6 +98,13 @@ export const CONFIG_BACKGROUND_TASKS: ReadonlyArray<ConfigBackgroundTaskDefiniti
     slug: 'sweed-package-snapshots',
     implemented: true,
     summary: 'Polls store.inventory.item.list.grouped (with isOnStock:false so sold-through packages remain visible) every 5 minutes per dealer during 08:00–02:00 ET. Versioned snapshot per (dealer, inventory_item_id): inserts a new row whenever the observed shape changes (wholesale cost, qty, lab, expiration, location), otherwise bumps observed_at_max. Unblocks the COGS / margin / inventory metrics on the /metrics page tree because wholesale cost is a per-PACKAGE attribute that Sweed does NOT expose on the invoice envelope. See automation#24.',
+  },
+  {
+    key: 'workers.scheduling.weather_daily_ingest',
+    label: 'Weather daily ingest',
+    slug: 'weather-daily-ingest',
+    implemented: true,
+    summary: 'Pulls daily high/low temperature and precipitation from Open-Meteo\'s free Historical Weather API (ERA5 reanalysis) for each operating site (ZIPs 10019 / 10458). One scheduler tick per day re-fetches a trailing 7-day window per site so late-arriving reanalysis corrections land naturally. Cold-start backfill is self-derived from the earlier of (min(sweed_orders.pay_time)::date, 2024-01-01) on the first run. Backs the three real weather.scatter_* metrics on the /metrics page tree. See automation#26.',
   },
 ]
 
@@ -340,5 +348,69 @@ export const SWEED_PACKAGE_SNAPSHOTS_DEFAULT_SCHEDULE_WINDOWS: ReadonlyArray<
     intervalMinutes: 5,
     paused: false,
     notes: 'Per-dealer package-snapshot sweep via store.inventory.item.list.grouped (isOnStock:false). Quiet 02:00–08:00 ET leaves Sweed budget for overnight historical backfills.',
+  },
+]
+
+/**
+ * Per-site (ZIP) lat/long lookup used by the daily weather ingest
+ * worker. v1 is hard-coded for the two operating sites; if a third
+ * site opens this becomes an operator surface (see automation#26).
+ *
+ * Coordinates pulled from the issue spec (Midtown Manhattan and
+ * Bronx / Fordham centroids).
+ */
+export interface HeliosWeatherSiteCoord {
+  readonly siteZip: string
+  readonly siteLabel: string
+  /** Sweed dealer id; used for the dealer → zip lookup on the metrics-join side. */
+  readonly dealerId: number
+  readonly latitude: number
+  readonly longitude: number
+}
+
+export const HELIOS_WEATHER_SITES: ReadonlyArray<HeliosWeatherSiteCoord> = [
+  {
+    siteZip: '10019',
+    siteLabel: 'Midtown',
+    dealerId: 210705,
+    latitude: 40.7647,
+    longitude: -73.9842,
+  },
+  {
+    siteZip: '10458',
+    siteLabel: 'Bronx',
+    dealerId: 210249,
+    latitude: 40.8623,
+    longitude: -73.887,
+  },
+]
+
+/** Dealer → site ZIP lookup used by the weather-correlation metric joins. */
+export const HELIOS_SITE_ZIP_BY_DEALER: Readonly<Record<number, string>> =
+  Object.fromEntries(HELIOS_WEATHER_SITES.map((s) => [s.dealerId, s.siteZip]))
+
+/**
+ * Default schedule for the daily weather ingest worker.
+ *
+ * Operator-directed cadence (2026-05-26): "Daily at 06:00 ET".
+ * Helios's clock runs in America/Panama (UTC-05:00, no DST), so a
+ * narrow [06:00, 07:00) wall-clock window on the server fires once
+ * per day at ~06:00 EST / ~07:00 EDT in NY. Open-Meteo's ERA5
+ * reanalysis updates with a multi-day lag, so the exact wall-clock
+ * hour does not matter for data freshness; the worker re-pulls a
+ * trailing 7-day window each tick to absorb late corrections.
+ *
+ * See FreshlyBakedNYC/automation#26.
+ */
+export const WEATHER_DAILY_INGEST_DEFAULT_SCHEDULE_WINDOWS: ReadonlyArray<
+  Omit<ConfigWorkerScheduleWindow, 'id'>
+> = [
+  {
+    weekdayMask: WEEKDAY_MASK_ALL,
+    windowStartMinute: 6 * 60,   // 06:00 server local
+    windowEndMinute: 7 * 60,     // 07:00 server local
+    intervalMinutes: 1440,        // once per day
+    paused: false,
+    notes: 'Daily Open-Meteo pull for the two operating sites (~06:00 EST / 07:00 EDT in NY).',
   },
 ]

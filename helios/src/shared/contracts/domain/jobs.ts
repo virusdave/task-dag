@@ -46,6 +46,7 @@ export const JobTypeSchema = z.enum([
   'config.workers.litalerts_retailer_backfill',
   'config.workers.sweed_orders_ingest',
   'config.workers.sweed_package_snapshots',
+  'config.workers.weather_daily_ingest',
   'catalog.maintenance.upload_group_image',
 ])
 export type JobType = z.infer<typeof JobTypeSchema>
@@ -346,6 +347,44 @@ export const ConfigWorkersSweedPackageSnapshotsJobPayloadSchema = z.object({
 })
 export type ConfigWorkersSweedPackageSnapshotsJobPayload = z.infer<
   typeof ConfigWorkersSweedPackageSnapshotsJobPayloadSchema
+>
+
+/**
+ * Daily weather ingest payload (Open-Meteo Historical Weather API).
+ *
+ * One scheduler tick = one job. The handler iterates over the two
+ * operating sites (ZIPs 10019 / 10458), each call covering a trailing
+ * window plus an optional one-shot historical backfill driven by
+ * `backfillStartIsoDate`. Per-site rows are upserted into
+ * `weather_daily` keyed on `(site_zip, date)`; re-fetches are
+ * idempotent and intentionally let Open-Meteo's slow-arriving
+ * reanalysis corrections overwrite older values for the trailing
+ * window.
+ *
+ * See FreshlyBakedNYC/automation#26 (follow-on under #22's umbrella).
+ */
+export const ConfigWorkersWeatherDailyIngestJobPayloadSchema = z.object({
+  requestedByUserId: z.number().int().positive().nullable().optional(),
+  trigger: z.enum(['manual_run', 'scheduled']).default('scheduled'),
+  /**
+   * How many trailing days each tick should re-pull from Open-Meteo.
+   * 7 covers Open-Meteo's typical ERA5 reanalysis lag without a
+   * separate "did the value change" pass.
+   */
+  trailingDays: z.number().int().min(1).max(60).default(7),
+  /**
+   * Optional one-shot historical backfill anchor. When set, the
+   * worker also pulls `[backfillStartIsoDate, today]` for each site
+   * on this tick. The default scheduler enqueue does NOT set this —
+   * the worker self-derives a cold-start backfill on first run based
+   * on the presence/absence of rows in `weather_daily`. Operators
+   * may set this from a manual /config enqueue to force a re-pull
+   * of a specific historical range.
+   */
+  backfillStartIsoDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().default(null),
+})
+export type ConfigWorkersWeatherDailyIngestJobPayload = z.infer<
+  typeof ConfigWorkersWeatherDailyIngestJobPayloadSchema
 >
 
 /**
