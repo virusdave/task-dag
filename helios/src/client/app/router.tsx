@@ -25,6 +25,10 @@ import { ConfigCatalogSchedulePage, configCatalogScheduleLoader } from '../route
 import { ConfigLitalertsSchedulePage, configLitalertsScheduleLoader } from '../routes/config/ConfigLitalertsSchedulePage.js'
 import { ConfigStockSchedulePage, configStockScheduleLoader } from '../routes/config/ConfigStockSchedulePage.js'
 import {
+  ConfigSweedOrdersIngestSchedulePage,
+  configSweedOrdersIngestScheduleLoader,
+} from '../routes/config/ConfigSweedOrdersIngestSchedulePage.js'
+import {
   ConfigParsingLitalertsPage,
   configParsingLitalertsLoader,
 } from '../routes/config/ConfigParsingLitalertsPage.js'
@@ -336,6 +340,11 @@ export const router = createBrowserRouter([
         element: <ConfigStockSchedulePage />,
         loader: configStockScheduleLoader,
         path: 'config/workers/scheduling/stock',
+      },
+      {
+        element: <ConfigSweedOrdersIngestSchedulePage />,
+        loader: configSweedOrdersIngestScheduleLoader,
+        path: 'config/workers/scheduling/sweed-orders-ingest',
       },
       {
         element: <ConfigParsingPendingPurchasesPage />,

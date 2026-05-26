@@ -8,6 +8,7 @@ import {
   ConfigBackgroundTasksListResponseSchema,
   HELIOS_PENDING_PURCHASE_SITE_DEALERS,
   getConfigBackgroundTaskDefinition,
+  type ConfigBackgroundTaskKey,
 } from '../../shared/contracts/index.js'
 import { appendAuditEvent } from '../audit/appendAuditEvent.js'
 import { requireSessionUser } from '../auth/requireSession.js'
@@ -21,6 +22,8 @@ import {
   loadRecentCatalogTaxonomySnapshots,
   loadRecentLitalertsObservations,
   loadRecentStockSnapshots,
+  loadRecentSweedOrdersIngestRuns,
+  loadSweedOrdersIngestDealerStatus,
   recordConfigScheduleEnqueue,
   replaceConfigScheduleWindows,
 } from '../db/queries/configQueries.js'
@@ -45,24 +48,7 @@ export async function registerConfigRoutes(server: FastifyInstance): Promise<voi
     }
     const taskKey = ConfigBackgroundTaskKeySchema.parse(request.params.taskKey)
     await ensureDefaultConfigSchedules()
-    const schedule = await loadConfigSchedule(taskKey)
-    const recentSnapshots = taskKey === 'workers.scheduling.stock'
-      ? await loadRecentStockSnapshots(20)
-      : []
-    const litalerts = taskKey === 'workers.scheduling.litalerts'
-      ? await buildLitalertsTaskDetail()
-      : null
-    const catalog = taskKey === 'workers.scheduling.catalog'
-      ? await buildCatalogTaskDetail()
-      : null
-    return reply.send(
-      ConfigBackgroundTaskDetailResponseSchema.parse({
-        schedule,
-        recentSnapshots,
-        litalerts,
-        catalog,
-      }),
-    )
+    return reply.send(await buildTaskDetailResponse(taskKey))
   })
 
   server.put<{ Params: { taskKey: string } }>('/api/config/workers/schedules/:taskKey', async (request, reply) => {
@@ -111,24 +97,7 @@ export async function registerConfigRoutes(server: FastifyInstance): Promise<voi
       })
     })
 
-    const schedule = await loadConfigSchedule(taskKey)
-    const recentSnapshots = taskKey === 'workers.scheduling.stock'
-      ? await loadRecentStockSnapshots(20)
-      : []
-    const litalerts = taskKey === 'workers.scheduling.litalerts'
-      ? await buildLitalertsTaskDetail()
-      : null
-    const catalog = taskKey === 'workers.scheduling.catalog'
-      ? await buildCatalogTaskDetail()
-      : null
-    return reply.send(
-      ConfigBackgroundTaskDetailResponseSchema.parse({
-        schedule,
-        recentSnapshots,
-        litalerts,
-        catalog,
-      }),
-    )
+    return reply.send(await buildTaskDetailResponse(taskKey))
   })
 
   server.post<{ Params: { taskKey: string } }>(
@@ -167,12 +136,47 @@ export async function registerConfigRoutes(server: FastifyInstance): Promise<voi
         const jobId = await runNowEdibleThcClamp(user.id)
         return reply.send(ConfigBackgroundTaskRunNowResponseSchema.parse({ jobId }))
       }
+      if (taskKey === 'workers.scheduling.sweed_orders_ingest') {
+        const jobId = await runNowSweedOrdersIngest(user.id)
+        return reply.send(ConfigBackgroundTaskRunNowResponseSchema.parse({ jobId }))
+      }
 
       return reply.status(400).send({
         error: `Background task ${taskKey} has no run-now wiring yet.`,
       })
     },
   )
+}
+
+async function buildTaskDetailResponse(taskKey: ConfigBackgroundTaskKey) {
+  const schedule = await loadConfigSchedule(taskKey)
+  const recentSnapshots = taskKey === 'workers.scheduling.stock'
+    ? await loadRecentStockSnapshots(20)
+    : []
+  const litalerts = taskKey === 'workers.scheduling.litalerts'
+    ? await buildLitalertsTaskDetail()
+    : null
+  const catalog = taskKey === 'workers.scheduling.catalog'
+    ? await buildCatalogTaskDetail()
+    : null
+  const sweedOrdersIngest = taskKey === 'workers.scheduling.sweed_orders_ingest'
+    ? await buildSweedOrdersIngestTaskDetail()
+    : null
+  return ConfigBackgroundTaskDetailResponseSchema.parse({
+    schedule,
+    recentSnapshots,
+    litalerts,
+    catalog,
+    sweedOrdersIngest,
+  })
+}
+
+async function buildSweedOrdersIngestTaskDetail() {
+  const [dealers, recentRuns] = await Promise.all([
+    loadSweedOrdersIngestDealerStatus(),
+    loadRecentSweedOrdersIngestRuns(20),
+  ])
+  return { dealers, recentRuns }
 }
 
 async function runNowStockRefresh(userId: number): Promise<number> {
@@ -324,6 +328,50 @@ async function runNowCatalogRefresh(userId: number): Promise<number> {
 async function buildCatalogTaskDetail() {
   const recentSnapshots = await loadRecentCatalogTaxonomySnapshots(20)
   return { recentSnapshots }
+}
+
+async function runNowSweedOrdersIngest(userId: number): Promise<number> {
+  const siteDealerIds = HELIOS_PENDING_PURCHASE_SITE_DEALERS.map((site) => site.dealerId)
+  const enqueuedAt = new Date()
+  return withTransaction(async (db) => {
+    const newJobId = await enqueueJob(db, {
+      concurrencyKey: getOptionalSweedSessionConcurrencyKey(true),
+      dedupeKey: `config.workers.sweed_orders_ingest:manual:${enqueuedAt.toISOString().slice(0, 19)}`,
+      jobType: 'config.workers.sweed_orders_ingest',
+      module: 'config',
+      payload: {
+        requestedByUserId: userId,
+        siteDealerIds,
+        trigger: 'manual_run',
+        // Manual runs default to a single-day backfill burst on top
+        // of the forward poll — the scheduled tick handles the steady-
+        // state cadence, this is just for "fetch what's new right now".
+        backfillDays: 1,
+      },
+      requestedByUserId: userId,
+      runAt: enqueuedAt,
+      scope: null,
+    })
+
+    await recordConfigScheduleEnqueue(db, 'workers.scheduling.sweed_orders_ingest', newJobId, enqueuedAt)
+    await appendAuditEvent(db, {
+      actorType: 'user',
+      actorUserId: userId,
+      entityId: String(newJobId),
+      entityType: 'job',
+      eventType: 'config.workers.sweed_orders_ingest.requested',
+      module: 'config',
+      payload: {
+        siteDealerIds,
+        taskKey: 'workers.scheduling.sweed_orders_ingest',
+        trigger: 'manual_run',
+      },
+      requestId: null,
+      scope: null,
+      undoPayload: null,
+    })
+    return newJobId
+  })
 }
 
 async function runNowEdibleThcClamp(userId: number): Promise<number> {

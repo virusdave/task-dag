@@ -3,6 +3,7 @@ import { Link, useLoaderData } from 'react-router-dom'
 import {
   ConfigBackgroundTasksListResponseSchema,
   buildHeliosModulePath,
+  getConfigBackgroundTaskDefinition,
   type ConfigBackgroundTasksListResponse,
 } from '../../../shared/contracts/index.js'
 import { loadJson } from '../../app/fetchJson.js'
@@ -32,7 +33,10 @@ export function ConfigWorkersSchedulingPage() {
 
       <div className="review-grid">
         {data.schedules.map((schedule) => {
-          const slug = schedule.taskKey.split('.').pop() ?? schedule.taskKey
+          // Use the canonical slug from the task definition (which can
+          // differ from the underscored last segment of taskKey, e.g.
+          // `sweed_orders_ingest` -> `sweed-orders-ingest`).
+          const slug = getConfigBackgroundTaskDefinition(schedule.taskKey).slug
           const detailPath = buildHeliosModulePath('config', `workers/scheduling/${slug}`)
           return (
             <article className="mini-card" key={schedule.taskKey}>

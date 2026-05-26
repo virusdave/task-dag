@@ -4,6 +4,7 @@ import {
   CATALOG_DEFAULT_SCHEDULE_WINDOWS,
   CONFIG_BACKGROUND_TASKS,
   EDIBLE_THC_CLAMP_DEFAULT_SCHEDULE_WINDOWS,
+  HELIOS_PENDING_PURCHASE_SITE_DEALERS,
   LITALERTS_DEFAULT_SCHEDULE_WINDOWS,
   LITALERTS_RETAILER_BACKFILL_DEFAULT_SCHEDULE_WINDOWS,
   LITALERTS_ROLLING_DEFAULT_SCHEDULE_WINDOWS,
@@ -14,6 +15,8 @@ import {
   type ConfigBackgroundTaskKey,
   type ConfigWorkerSchedule,
   type ConfigWorkerScheduleWindow,
+  type RecentSweedOrdersIngestRun,
+  type SweedOrdersIngestDealerStatus,
 } from '../../../shared/contracts/index.js'
 import { getPool, type Queryable } from '../pool.js'
 
@@ -579,5 +582,122 @@ export async function loadRecentCatalogTaxonomySnapshots(
     brandCount: row.brand_count,
     subcategoryCount: row.subcategory_count,
     error: row.error,
+  }))
+}
+
+interface SweedOrdersIngestDealerRow extends QueryResultRow {
+  dealer_id: number | string
+  highwater_pay_time: Date
+  min_pay_time: Date
+  backfill_cursor_day: Date | null
+  last_polled_at: Date
+  last_seen_count: number
+  last_inserted_count: number
+  consecutive_empty_polls: number
+  notes: string | null
+  order_row_count: number | string
+  earliest_pay_time: Date | null
+  latest_pay_time: Date | null
+}
+
+/**
+ * Per-dealer Sweed orders ingest status: joins sweed_orders_ingest_highwater
+ * with sweed_orders to surface (a) the per-dealer cursor + last-poll counters
+ * the worker maintains and (b) the row-count / earliest-pay-time / latest-pay-time
+ * sanity checks an operator needs to confirm the ingest is healthy.
+ *
+ * Site labels (Bronx, Midtown) are decorated from HELIOS_PENDING_PURCHASE_SITE_DEALERS
+ * so the operator sees a friendly name without an extra DB hop.
+ */
+export async function loadSweedOrdersIngestDealerStatus(
+  db: Queryable = getPool(),
+): Promise<SweedOrdersIngestDealerStatus[]> {
+  const result = await db.query<SweedOrdersIngestDealerRow>(
+    `
+      select hw.dealer_id,
+             hw.highwater_pay_time,
+             hw.min_pay_time,
+             hw.backfill_cursor_day,
+             hw.last_polled_at,
+             hw.last_seen_count,
+             hw.last_inserted_count,
+             hw.consecutive_empty_polls,
+             hw.notes,
+             coalesce(orders.order_row_count, 0) as order_row_count,
+             orders.earliest_pay_time,
+             orders.latest_pay_time
+      from sweed_orders_ingest_highwater hw
+      left join (
+        select dealer_id,
+               count(*)::bigint as order_row_count,
+               min(pay_time) as earliest_pay_time,
+               max(pay_time) as latest_pay_time
+          from sweed_orders
+         group by dealer_id
+      ) orders on orders.dealer_id = hw.dealer_id
+      order by hw.dealer_id
+    `,
+  )
+  return result.rows.map((row) => {
+    const dealerId = Number(row.dealer_id)
+    const site = HELIOS_PENDING_PURCHASE_SITE_DEALERS.find((entry) => entry.dealerId === dealerId) ?? null
+    return {
+      dealerId,
+      siteKey: site?.siteKey ?? null,
+      siteLabel: site?.siteLabel ?? null,
+      highwaterPayTime: row.highwater_pay_time.toISOString(),
+      minPayTime: row.min_pay_time.toISOString(),
+      backfillCursorDay: row.backfill_cursor_day ? row.backfill_cursor_day.toISOString() : null,
+      lastPolledAt: row.last_polled_at.toISOString(),
+      lastSeenCount: row.last_seen_count,
+      lastInsertedCount: row.last_inserted_count,
+      consecutiveEmptyPolls: row.consecutive_empty_polls,
+      notes: row.notes,
+      orderRowCount: Number(row.order_row_count),
+      earliestOrderPayTime: row.earliest_pay_time ? row.earliest_pay_time.toISOString() : null,
+      latestOrderPayTime: row.latest_pay_time ? row.latest_pay_time.toISOString() : null,
+    }
+  })
+}
+
+interface SweedOrdersIngestRunDbRow extends QueryResultRow {
+  id: number | string
+  status: 'queued' | 'running' | 'succeeded' | 'failed' | 'dead_letter'
+  run_at: Date
+  started_at: Date | null
+  finished_at: Date | null
+  attempt_count: number
+  payload_json: { trigger?: string | null } | null
+  last_error: string | null
+}
+
+/**
+ * Most-recent N runs of the Sweed orders ingest worker, newest first.
+ * Used by the operator detail page to show ingest health at a glance.
+ */
+export async function loadRecentSweedOrdersIngestRuns(
+  limit: number,
+  db: Queryable = getPool(),
+): Promise<RecentSweedOrdersIngestRun[]> {
+  const result = await db.query<SweedOrdersIngestRunDbRow>(
+    `
+      select id, status, run_at, started_at, finished_at, attempt_count,
+             payload_json, last_error
+        from job_queue
+       where job_type = 'config.workers.sweed_orders_ingest'
+       order by id desc
+       limit $1
+    `,
+    [limit],
+  )
+  return result.rows.map((row) => ({
+    jobId: Number(row.id),
+    status: row.status,
+    runAt: row.run_at.toISOString(),
+    startedAt: row.started_at ? row.started_at.toISOString() : null,
+    finishedAt: row.finished_at ? row.finished_at.toISOString() : null,
+    attemptCount: row.attempt_count,
+    trigger: typeof row.payload_json?.trigger === 'string' ? row.payload_json.trigger : null,
+    error: row.last_error,
   }))
 }

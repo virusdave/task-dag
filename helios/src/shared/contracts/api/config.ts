@@ -87,6 +87,36 @@ const RecentCatalogTaxonomySnapshotSchema = z.object({
 })
 export type RecentCatalogTaxonomySnapshot = z.infer<typeof RecentCatalogTaxonomySnapshotSchema>
 
+const SweedOrdersIngestDealerStatusSchema = z.object({
+  dealerId: z.number().int().positive(),
+  siteKey: z.string().nullable(),
+  siteLabel: z.string().nullable(),
+  highwaterPayTime: z.string(),
+  minPayTime: z.string(),
+  backfillCursorDay: z.string().nullable(),
+  lastPolledAt: z.string(),
+  lastSeenCount: z.number().int().min(0),
+  lastInsertedCount: z.number().int().min(0),
+  consecutiveEmptyPolls: z.number().int().min(0),
+  notes: z.string().nullable(),
+  orderRowCount: z.number().int().min(0),
+  earliestOrderPayTime: z.string().nullable(),
+  latestOrderPayTime: z.string().nullable(),
+})
+export type SweedOrdersIngestDealerStatus = z.infer<typeof SweedOrdersIngestDealerStatusSchema>
+
+const RecentSweedOrdersIngestRunSchema = z.object({
+  jobId: z.number().int().positive(),
+  status: z.enum(['queued', 'running', 'succeeded', 'failed', 'dead_letter']),
+  runAt: z.string(),
+  startedAt: z.string().nullable(),
+  finishedAt: z.string().nullable(),
+  attemptCount: z.number().int().min(0),
+  trigger: z.string().nullable(),
+  error: z.string().nullable(),
+})
+export type RecentSweedOrdersIngestRun = z.infer<typeof RecentSweedOrdersIngestRunSchema>
+
 export const ConfigBackgroundTaskDetailResponseSchema = z.object({
   schedule: ConfigWorkerScheduleSchema,
   recentSnapshots: z.array(RecentStockSnapshotSchema),
@@ -100,6 +130,12 @@ export const ConfigBackgroundTaskDetailResponseSchema = z.object({
   catalog: z
     .object({
       recentSnapshots: z.array(RecentCatalogTaxonomySnapshotSchema),
+    })
+    .nullable(),
+  sweedOrdersIngest: z
+    .object({
+      dealers: z.array(SweedOrdersIngestDealerStatusSchema),
+      recentRuns: z.array(RecentSweedOrdersIngestRunSchema),
     })
     .nullable(),
 })
