@@ -5,6 +5,7 @@ import { getAppBasePath } from './paths.js'
 import { AppShell } from '../components/AppShell.js'
 import { loadSession } from './session.js'
 import { AdsIngestPage } from '../routes/ads/AdsIngestPage.js'
+import { CatalogBrandMappingPage, catalogBrandMappingLoader } from '../routes/catalog/CatalogBrandMappingPage.js'
 import { CatalogEdibleThcClampPage, catalogEdibleThcClampLoader } from '../routes/catalog/CatalogEdibleThcClampPage.js'
 import { CatalogHistoryPage, catalogHistoryLoader } from '../routes/catalog/CatalogHistoryPage.js'
 import { CatalogMaintenanceIndexPage } from '../routes/catalog/CatalogMaintenanceIndexPage.js'
@@ -144,6 +145,11 @@ export const router = createBrowserRouter([
         element: <CatalogMarketDataPage />,
         loader: catalogMarketDataLoader,
         path: 'catalog/market-data',
+      },
+      {
+        element: <CatalogBrandMappingPage />,
+        loader: catalogBrandMappingLoader,
+        path: 'catalog/brand-mapping',
       },
       {
         element: <PendingPurchasesPage />,

@@ -150,6 +150,12 @@ export function buildCatalogSidebarSubtree(options?: CatalogSidebarOptions): Tre
       label: 'Market data',
       to: buildHeliosModulePath('catalog', 'market-data'),
     },
+    {
+      kind: 'leaf',
+      navKey: 'catalog.brand-mapping',
+      label: 'Brand mapping',
+      to: buildHeliosModulePath('catalog', 'brand-mapping'),
+    },
     buildPendingPurchasesNode(pendingPurchases),
     buildImagesAndBarcodesNode(imagesAndBarcodes),
     {

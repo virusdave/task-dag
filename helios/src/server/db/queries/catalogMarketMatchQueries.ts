@@ -112,7 +112,15 @@ export async function listGroupsForReview(
     offset: 0,
   },
 ): Promise<{ rows: GroupSummaryRow[]; totalCount: number }> {
-  const clauses: string[] = ['coalesce(go.observation_count, 0) > 0']
+  // A group qualifies for review if it has either:
+  //   (a) at least one observation linked through its products
+  //       (legacy free-text-parsed evidence path), or
+  //   (b) at least one structured `litalerts_partner_product` fuzzy
+  //       sku whose brand matches the group's brand (the path issue
+  //       #20 cuts over to).
+  // This way groups without observations still show up once the
+  // structured ingest has populated fuzzy_skus for their brand.
+  const clauses: string[] = ['(coalesce(go.observation_count, 0) > 0 or coalesce(gsf.structured_fuzzy_count, 0) > 0)']
   const values: unknown[] = []
   if (options.brandFilter) {
     values.push(options.brandFilter)
@@ -164,6 +172,16 @@ export async function listGroupsForReview(
           count(*) filter (where superseded_by_id is null) as live_verdict_count
         from catalog_market_matches
         group by catalog_group_id
+      ),
+      group_structured_fuzzy as (
+        select cg.id as catalog_group_id,
+               count(*) as structured_fuzzy_count
+        from catalog_groups cg
+        join fuzzy_skus fs
+          on fs.source_kind = 'litalerts_partner_product'
+         and fs.brand_norm = lower(trim(cg.brand_name))
+        where cg.brand_name is not null
+        group by cg.id
       )
       select
         cg.id as catalog_group_id,
@@ -173,12 +191,15 @@ export async function listGroupsForReview(
         cg.subcategory_name,
         coalesce(go.observation_count, 0)::int as observation_count,
         coalesce(gms.live_verdict_count, 0)::int as live_verdict_count,
-        0::int as parsed_fuzzy_count
+        coalesce(gsf.structured_fuzzy_count, 0)::int as parsed_fuzzy_count
       from catalog_groups cg
       left join group_obs go on go.catalog_group_id = cg.id
       left join group_match_stats gms on gms.catalog_group_id = cg.id
+      left join group_structured_fuzzy gsf on gsf.catalog_group_id = cg.id
       ${whereSql}
-      order by coalesce(go.observation_count, 0) desc, cg.id asc
+      order by coalesce(go.observation_count, 0) desc,
+               coalesce(gsf.structured_fuzzy_count, 0) desc,
+               cg.id asc
       limit $${values.length + 1} offset $${values.length + 2}
     `,
     [...values, options.limit, options.offset],
@@ -188,23 +209,32 @@ export async function listGroupsForReview(
     `
       select count(distinct cg.id)::int as count
       from catalog_groups cg
-      left join lateral (
-        select state_json
-        from catalog_group_snapshots cgs
-        where cgs.catalog_group_id = cg.id
-        order by cgs.created_at desc, cgs.id desc
-        limit 1
-      ) latest_snapshot on true
-      cross join lateral jsonb_array_elements(
-        case
-          when jsonb_typeof(latest_snapshot.state_json -> 'products') = 'array'
-            then latest_snapshot.state_json -> 'products'
-          else '[]'::jsonb
-        end
-      ) as product
-      where (product ->> 'productId') ~ '^[0-9]+$'
-        and exists (select 1 from litalerts_competitor_observations o where o.product_id = (product ->> 'productId')::int)
-        ${options.brandFilter ? `and cg.brand_name = $1` : ''}
+      where (
+        -- (a) the group has at least one observation through its products
+        exists (
+          select 1
+          from catalog_group_snapshots cgs,
+               lateral jsonb_array_elements(
+                 case when jsonb_typeof(cgs.state_json -> 'products') = 'array'
+                      then cgs.state_json -> 'products'
+                      else '[]'::jsonb end
+               ) product,
+               litalerts_competitor_observations o
+          where cgs.catalog_group_id = cg.id
+            and (product ->> 'productId') ~ '^[0-9]+$'
+            and o.product_id = (product ->> 'productId')::int
+        )
+        -- (b) or at least one structured fuzzy_sku matches the brand
+        or (
+          cg.brand_name is not null
+          and exists (
+            select 1 from fuzzy_skus fs
+            where fs.source_kind = 'litalerts_partner_product'
+              and fs.brand_norm = lower(trim(cg.brand_name))
+          )
+        )
+      )
+      ${options.brandFilter ? `and cg.brand_name = $1` : ''}
     `,
     options.brandFilter ? [options.brandFilter] : [],
   )
@@ -288,23 +318,33 @@ export async function loadGroupReview(db: Queryable, catalogGroupId: number): Pr
     await upsertFuzzySkusForObservation(db, obs.id, obs.evidence_json, obs.captured_at)
   }
 
-  // Pull fuzzy_skus that came from these observation IDs.
+  // Pull fuzzy_skus from two sources:
+  //   1. observation-derived rows (legacy free-text-parsed path) for
+  //      THIS group's matched observations, and
+  //   2. structured `litalerts_partner_product` rows for the group's
+  //      brand — these come from the LitAlerts partner-API ingest
+  //      (issue #20) and carry pre-parsed brand / category / size
+  //      so they don't need text parsing at all.
+  // Source (2) supersedes (1) in practice; (1) is retained until
+  // the legacy observation-based scoring is decommissioned.
   const obsIds = obsResult.rows.map((row) => String(row.id))
-  const fuzzyResult = obsIds.length > 0
-    ? await db.query<{
-      id: number
-      source_kind: string
-      source_listing_id: string
-      raw_input_jsonb: unknown
-      parsed_jsonb: unknown
-      brand_norm: string | null
-      category_norm: string | null
-      subcategory_norm: string | null
-      size_g_norm: string | null
-      size_mg_norm: string | null
-      pack_count_norm: number | null
-      strain_norm: string | null
-    }>(
+  const fuzzyRows: Array<{
+    id: number
+    source_kind: string
+    source_listing_id: string
+    raw_input_jsonb: unknown
+    parsed_jsonb: unknown
+    brand_norm: string | null
+    category_norm: string | null
+    subcategory_norm: string | null
+    size_g_norm: string | null
+    size_mg_norm: string | null
+    pack_count_norm: number | null
+    strain_norm: string | null
+  }> = []
+
+  if (obsIds.length > 0) {
+    const obsFuzzy = await db.query<typeof fuzzyRows[number]>(
       `select id, source_kind, source_listing_id, raw_input_jsonb, parsed_jsonb,
               brand_norm, category_norm, subcategory_norm,
               size_g_norm::text, size_mg_norm::text, pack_count_norm, strain_norm
@@ -313,7 +353,25 @@ export async function loadGroupReview(db: Queryable, catalogGroupId: number): Pr
          and source_listing_id like any($1::text[])`,
       [obsIds.map((id) => `${id}:%`)],
     )
-    : { rows: [] }
+    fuzzyRows.push(...obsFuzzy.rows)
+  }
+
+  if (group.brand_name) {
+    const structuredFuzzy = await db.query<typeof fuzzyRows[number]>(
+      `select id, source_kind, source_listing_id, raw_input_jsonb, parsed_jsonb,
+              brand_norm, category_norm, subcategory_norm,
+              size_g_norm::text, size_mg_norm::text, pack_count_norm, strain_norm
+       from fuzzy_skus
+       where source_kind = 'litalerts_partner_product'
+         and brand_norm = lower(trim($1))
+       order by created_at desc
+       limit 500`,
+      [group.brand_name],
+    )
+    fuzzyRows.push(...structuredFuzzy.rows)
+  }
+
+  const fuzzyResult = { rows: fuzzyRows }
 
   const fuzzies: FuzzySkuRow[] = fuzzyResult.rows.map((row) => ({
     id: row.id,

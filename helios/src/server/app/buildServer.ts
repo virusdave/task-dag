@@ -19,6 +19,7 @@ import { registerAuthRoutes } from '../routes/auth.js'
 import { registerBrandExpiryOverridesRoutes } from '../routes/brandExpiryOverrides.js'
 import { registerCatalogRoutes } from '../routes/catalog.js'
 import { registerCatalogMaintenanceRoutes } from '../routes/catalogMaintenance.js'
+import { registerCatalogLitalertsBrandOverridesRoutes } from '../routes/catalogLitalertsBrandOverrides.js'
 import { registerCatalogMarketMatchRoutes } from '../routes/catalogMarketMatches.js'
 import { registerCatalogReviewRoutes } from '../routes/catalogReview.js'
 import { registerClientErrorsRoutes } from '../routes/clientErrors.js'
@@ -182,6 +183,7 @@ async function registerApplicationSurface(server: FastifyInstance) {
   await registerCatalogRoutes(server)
   await registerCatalogMaintenanceRoutes(server)
   await registerCatalogMarketMatchRoutes(server)
+  await registerCatalogLitalertsBrandOverridesRoutes(server)
   await registerCatalogReviewRoutes(server)
   await registerClientErrorsRoutes(server)
   await registerCommentsRoutes(server)
