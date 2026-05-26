@@ -37,6 +37,7 @@ import { getOptionalSweedSessionConcurrencyKey } from '../jobs/concurrency.js'
 import { enqueueJob } from '../jobs/enqueueJob.js'
 import { withTransaction } from '../db/tx.js'
 import { loadLiveInStockProductIds } from '../../worker/pricing/productScope.js'
+import { withSweedSession } from '../../worker/sweed/session.js'
 import type { Queryable } from '../db/pool.js'
 
 export async function registerPricingRoutes(server: FastifyInstance): Promise<void> {
@@ -331,11 +332,19 @@ async function resolveSeedProductIds(
   const merged = new Set<number>()
 
   if (filters.stockOnly && selectedDealerIds.length > 0) {
-    // `loadLiveInStockProductIds` doesn't currently expose its own
-    // cache-bypass; `options.forceRefresh` is forwarded for symmetry
-    // with the worker contract and to make future cache hooks easy.
-    void options
-    const liveIds = await loadLiveInStockProductIds(selectedDealerIds)
+    // `loadLiveInStockProductIds` calls Sweed RPC, which requires an
+    // active pool-claimed session (the legacy SWEED_AUTH_TOKEN fallback
+    // is permanently dead — see AGENTS.md "Sweed auth"). The route is
+    // running on the server (not inside a worker job that already
+    // wraps in `withSweedSession`), so we open a session here.
+    //
+    // `loadLiveInStockProductIds` has its own short TTL cache, so
+    // scope-preview page loads within the cache window short-circuit
+    // before ever touching the pool. `options.forceRefresh` (set by
+    // queue-run with `forceLiveRefresh`) bypasses the cache.
+    const liveIds = await withSweedSession(() =>
+      loadLiveInStockProductIds(selectedDealerIds, { forceRefresh: options?.forceRefresh ?? false }),
+    )
     for (const id of liveIds) merged.add(id)
   }
 

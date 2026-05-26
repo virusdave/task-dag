@@ -64,10 +64,28 @@ export interface MidtownReceivedScopeResult {
 let sweedSessionQueue: Promise<void> = Promise.resolve()
 let cachedMidtownReceivedScope: { expiresAt: number; result: MidtownReceivedScopeResult } | null = null
 
-export async function loadLiveInStockProductIds(siteDealerIds: number[]): Promise<number[]> {
+// Short TTL so the pricing scope-preview UI doesn't burn a fresh
+// Sweed session on every page load. Operators still see "now" data
+// to within a few minutes; the queue-run job re-fetches with
+// `forceRefresh: true` so the actual run is never stale.
+const LIVE_IN_STOCK_CACHE_TTL_MS = 5 * 60 * 1000
+const cachedLiveInStockByDealerSet = new Map<string, { expiresAt: number; productIds: number[] }>()
+
+export async function loadLiveInStockProductIds(
+  siteDealerIds: number[],
+  options?: { forceRefresh?: boolean },
+): Promise<number[]> {
   const selectedDealerIds = [...new Set(siteDealerIds)].filter((dealerId) => HELIOS_PENDING_PURCHASE_SITE_DEALERS.some((site) => site.dealerId === dealerId))
   if (selectedDealerIds.length === 0) {
     return []
+  }
+
+  const cacheKey = [...selectedDealerIds].sort((left, right) => left - right).join(',')
+  if (!options?.forceRefresh) {
+    const cached = cachedLiveInStockByDealerSet.get(cacheKey)
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.productIds
+    }
   }
 
   return withSweedSessionLock(async () => {
@@ -97,7 +115,12 @@ export async function loadLiveInStockProductIds(siteDealerIds: number[]): Promis
       }
     }
 
-    return [...productIds].sort((left, right) => left - right)
+    const sorted = [...productIds].sort((left, right) => left - right)
+    cachedLiveInStockByDealerSet.set(cacheKey, {
+      expiresAt: Date.now() + LIVE_IN_STOCK_CACHE_TTL_MS,
+      productIds: sorted,
+    })
+    return sorted
   })
 }
 
