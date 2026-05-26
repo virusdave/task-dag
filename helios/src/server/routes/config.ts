@@ -140,6 +140,10 @@ export async function registerConfigRoutes(server: FastifyInstance): Promise<voi
         const jobId = await runNowSweedOrdersIngest(user.id)
         return reply.send(ConfigBackgroundTaskRunNowResponseSchema.parse({ jobId }))
       }
+      if (taskKey === 'workers.scheduling.sweed_shifts_ingest') {
+        const jobId = await runNowSweedShiftsIngest(user.id)
+        return reply.send(ConfigBackgroundTaskRunNowResponseSchema.parse({ jobId }))
+      }
 
       return reply.status(400).send({
         error: `Background task ${taskKey} has no run-now wiring yet.`,
@@ -364,6 +368,51 @@ async function runNowSweedOrdersIngest(userId: number): Promise<number> {
       payload: {
         siteDealerIds,
         taskKey: 'workers.scheduling.sweed_orders_ingest',
+        trigger: 'manual_run',
+      },
+      requestId: null,
+      scope: null,
+      undoPayload: null,
+    })
+    return newJobId
+  })
+}
+
+async function runNowSweedShiftsIngest(userId: number): Promise<number> {
+  const siteDealerIds = HELIOS_PENDING_PURCHASE_SITE_DEALERS.map((site) => site.dealerId)
+  const enqueuedAt = new Date()
+  return withTransaction(async (db) => {
+    const newJobId = await enqueueJob(db, {
+      concurrencyKey: getOptionalSweedSessionConcurrencyKey(true),
+      dedupeKey: `config.workers.sweed_shifts_ingest:manual:${enqueuedAt.toISOString().slice(0, 19)}`,
+      jobType: 'config.workers.sweed_shifts_ingest',
+      module: 'config',
+      payload: {
+        requestedByUserId: userId,
+        siteDealerIds,
+        trigger: 'manual_run',
+        // Manual runs default to a single-day backfill burst on top
+        // of the forward poll — the scheduled tick handles the steady-
+        // state cadence + the 30-day catch-up window, this is just
+        // for "fetch what's new right now".
+        backfillDays: 1,
+      },
+      requestedByUserId: userId,
+      runAt: enqueuedAt,
+      scope: null,
+    })
+
+    await recordConfigScheduleEnqueue(db, 'workers.scheduling.sweed_shifts_ingest', newJobId, enqueuedAt)
+    await appendAuditEvent(db, {
+      actorType: 'user',
+      actorUserId: userId,
+      entityId: String(newJobId),
+      entityType: 'job',
+      eventType: 'config.workers.sweed_shifts_ingest.requested',
+      module: 'config',
+      payload: {
+        siteDealerIds,
+        taskKey: 'workers.scheduling.sweed_shifts_ingest',
         trigger: 'manual_run',
       },
       requestId: null,

@@ -61,6 +61,23 @@ const InvoiceEnvelopeSchema = z
     taxesAmount: z.coerce.number().nullable().optional(),
     grandTotalDiscountAmount: z.coerce.number().nullable().optional(),
 
+    // Which Sweed user (cashier / pharmacist / kiosk attendant)
+    // rang up this invoice. Joins to `sweed_shifts.employee_id` at
+    // metric-query time so cashier.transactions_per_hour can
+    // divide the cashier's invoice count by their clocked-in
+    // minutes. Field shape varies across Sweed RPC variants — we
+    // try the canonical `createdById` (operator-confirmed for
+    // automation#27) then fall back to a few near-cousins so we
+    // don't lose the join on staging deployments that emit a
+    // different alias.
+    createdById: z.union([z.string(), z.number()]).nullable().optional(),
+    createdBy: z
+      .object({ id: z.union([z.string(), z.number()]).nullable().optional() })
+      .passthrough()
+      .nullable()
+      .optional(),
+    cashierId: z.union([z.string(), z.number()]).nullable().optional(),
+
     // Fulfillment lives on `issuingType.name`. Known values:
     //   * "Kiosk order"
     //   * "Pick-up sale"
@@ -102,7 +119,24 @@ interface NormalisedInvoice {
   fulfillmentType: string | null
   paymentMethod: string | null
   deliveryZip: string | null
+  cashierUserId: number | null
   raw: unknown
+}
+
+function pickCashierUserId(env: z.infer<typeof InvoiceEnvelopeSchema>): number | null {
+  const candidates: Array<string | number | null | undefined> = [
+    env.createdById,
+    env.createdBy?.id,
+    env.cashierId,
+  ]
+  for (const c of candidates) {
+    if (typeof c === 'number' && Number.isFinite(c)) return c
+    if (typeof c === 'string') {
+      const n = Number(c)
+      if (Number.isFinite(n)) return n
+    }
+  }
+  return null
 }
 
 function pickFulfillment(env: z.infer<typeof InvoiceEnvelopeSchema>): string | null {
@@ -157,6 +191,7 @@ function normaliseForIngest(row: SweedInvoiceRow): NormalisedInvoice | null {
     fulfillmentType: pickFulfillment(env),
     paymentMethod: pickPaymentMethod(env),
     deliveryZip: pickDeliveryZip(env),
+    cashierUserId: pickCashierUserId(env),
     raw: row.raw,
   }
 }
@@ -496,9 +531,9 @@ async function fetchAndInsert(
             dealer_id, invoice_id, pay_time, customer_id, is_guest,
             first_time_for_customer, grand_total_dollars, subtotal_dollars,
             tax_dollars, discount_dollars, fulfillment_type, payment_method,
-            delivery_zip, raw_json
+            delivery_zip, cashier_user_id, raw_json
           ) values (
-            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::jsonb
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15::jsonb
           )
           on conflict (dealer_id, invoice_id) do nothing
         `,
@@ -516,6 +551,7 @@ async function fetchAndInsert(
           n.fulfillmentType,
           n.paymentMethod,
           n.deliveryZip,
+          n.cashierUserId,
           JSON.stringify(n.raw),
         ],
       )

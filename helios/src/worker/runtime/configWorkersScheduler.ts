@@ -85,6 +85,8 @@ export async function tickConfigWorkersScheduler(now: Date = new Date()): Promis
         await enqueueScheduledSweedPackageSnapshots(schedule.taskKey, now, activeWindow.intervalMinutes)
       } else if (schedule.taskKey === 'workers.scheduling.weather_daily_ingest') {
         await enqueueScheduledWeatherDailyIngest(schedule.taskKey, now, activeWindow.intervalMinutes)
+      } else if (schedule.taskKey === 'workers.scheduling.sweed_shifts_ingest') {
+        await enqueueScheduledSweedShiftsIngest(schedule.taskKey, now, activeWindow.intervalMinutes)
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown scheduler-task error.'
@@ -653,6 +655,62 @@ async function enqueueScheduledWeatherDailyIngest(
       module: 'config',
       payload: {
         intervalMinutes,
+        taskKey,
+        trigger: 'scheduled',
+      },
+      requestId: null,
+      scope: null,
+      undoPayload: null,
+    })
+  })
+}
+
+async function enqueueScheduledSweedShiftsIngest(
+  taskKey: ConfigBackgroundTaskKey,
+  now: Date,
+  intervalMinutes: number,
+): Promise<void> {
+  const siteDealerIds = HELIOS_PENDING_PURCHASE_SITE_DEALERS.map((site) => site.dealerId)
+  const bucketMs = intervalMinutes * 60 * 1000
+  const bucketStartMs = Math.floor(now.getTime() / bucketMs) * bucketMs
+  const bucketIso = new Date(bucketStartMs).toISOString()
+
+  await withTransaction(async (db) => {
+    const jobId = await enqueueJob(db, {
+      priority: JOB_PRIORITY_BEST_EFFORT,
+      concurrencyKey: getOptionalSweedSessionConcurrencyKey(true),
+      dedupeKey: `config.workers.sweed_shifts_ingest:scheduled:${bucketIso}`,
+      jobType: 'config.workers.sweed_shifts_ingest',
+      module: 'config',
+      payload: {
+        siteDealerIds,
+        trigger: 'scheduled',
+        // Per-tick historical-day burst. At 15-min cadence and ~1 s
+        // per listSaleShifts() call (page size 50 cap, far fewer
+        // rows per dealer-day than invoices), 30 days/tick = ~2880
+        // days/day across both dealers, so Bronx (opens 2025-07-15,
+        // ~315 days) finishes its initial backfill in <1 day and
+        // Midtown (opens 2026-04-01, ~55 days) in <1 tick. Once
+        // both dealers' min_open_time is reached the worker only
+        // polls forward.
+        backfillDays: 30,
+      },
+      requestedByUserId: null,
+      runAt: now,
+      scope: null,
+    })
+
+    await recordConfigScheduleEnqueue(db, taskKey, jobId, now)
+    await appendAuditEvent(db, {
+      actorType: 'system',
+      actorUserId: null,
+      entityId: String(jobId),
+      entityType: 'job',
+      eventType: 'config.workers.sweed_shifts_ingest.requested',
+      module: 'config',
+      payload: {
+        intervalMinutes,
+        siteDealerIds,
         taskKey,
         trigger: 'scheduled',
       },

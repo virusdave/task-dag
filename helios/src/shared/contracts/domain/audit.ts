@@ -98,6 +98,8 @@ export const AuditEventTypeSchema = z.enum([
   'config.workers.sweed_orders_ingest.completed',
   'config.workers.sweed_package_snapshots.requested',
   'config.workers.sweed_package_snapshots.completed',
+  'config.workers.sweed_shifts_ingest.requested',
+  'config.workers.sweed_shifts_ingest.completed',
   'config.workers.weather_daily_ingest.requested',
   'config.workers.weather_daily_ingest.completed',
   'config.workers.market_evidence_alarm.completed',

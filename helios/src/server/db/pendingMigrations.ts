@@ -313,6 +313,15 @@ const SENTINELS: MigrationSentinel[] = [
       'weather_daily — per-site (ZIP) daily weather observations (high/low °F, precipitation in.) backing the three real weather.scatter_* metrics on the /metrics page tree (automation#26, unblocks the P5 weather-correlation stubs from #21). Without this the new daily-ingest worker fails to start and the metrics keep rendering as MISSING DATA placeholders.',
     check: async (db) => tableExists(db, 'weather_daily'),
   },
+  {
+    migrationId: '036_sweed_shifts',
+    label:
+      'sweed_shifts + sweed_shifts_ingest_highwater + sweed_orders.cashier_user_id — backs the periodic Sweed shifts ingest worker (automation#27, follow-on under #22 and unblocker for the cashier-throughput stub in #21 P5). Without this the shifts ingest worker fails to start and the `cashier.transactions_per_hour` metric stays a stub.',
+    check: async (db) =>
+      (await tableExists(db, 'sweed_shifts')) &&
+      (await tableExists(db, 'sweed_shifts_ingest_highwater')) &&
+      (await columnExists(db, 'sweed_orders', 'cashier_user_id')),
+  },
 ]
 
 interface CacheEntry {

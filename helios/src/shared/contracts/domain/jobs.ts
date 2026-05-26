@@ -47,6 +47,7 @@ export const JobTypeSchema = z.enum([
   'config.workers.sweed_orders_ingest',
   'config.workers.sweed_package_snapshots',
   'config.workers.weather_daily_ingest',
+  'config.workers.sweed_shifts_ingest',
   'catalog.maintenance.upload_group_image',
 ])
 export type JobType = z.infer<typeof JobTypeSchema>
@@ -385,6 +386,30 @@ export const ConfigWorkersWeatherDailyIngestJobPayloadSchema = z.object({
 })
 export type ConfigWorkersWeatherDailyIngestJobPayload = z.infer<
   typeof ConfigWorkersWeatherDailyIngestJobPayloadSchema
+>
+
+/**
+ * Periodic Sweed shifts ingest worker payload.
+ *
+ * Shape mirrors `ConfigWorkersSweedOrdersIngestJobPayload`: the
+ * handler iterates `siteDealerIds` (defaulting to the operator's
+ * site list when empty), does a forward poll on
+ * `store.sale.shift.list` from the per-dealer highwater, then walks
+ * `backfillDays` historical days backward toward the dealer's
+ * store-opening date.
+ *
+ * See FreshlyBakedNYC/automation#27 — follow-on under #22 and
+ * remaining blocker for the cashier-throughput stub in #21 P5.
+ */
+export const ConfigWorkersSweedShiftsIngestJobPayloadSchema = z.object({
+  requestedByUserId: z.number().int().positive().nullable().optional(),
+  siteDealerIds: z.array(z.number().int().positive()).default([]),
+  trigger: z.enum(['manual_run', 'scheduled']).default('scheduled'),
+  /** How many days of historical backfill to attempt in this single job. */
+  backfillDays: z.number().int().min(0).max(60).default(1),
+})
+export type ConfigWorkersSweedShiftsIngestJobPayload = z.infer<
+  typeof ConfigWorkersSweedShiftsIngestJobPayloadSchema
 >
 
 /**

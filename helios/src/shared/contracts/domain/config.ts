@@ -21,6 +21,7 @@ export const CONFIG_BACKGROUND_TASK_KEYS = [
   'workers.scheduling.sweed_orders_ingest',
   'workers.scheduling.sweed_package_snapshots',
   'workers.scheduling.weather_daily_ingest',
+  'workers.scheduling.sweed_shifts_ingest',
 ] as const
 export const ConfigBackgroundTaskKeySchema = z.enum(CONFIG_BACKGROUND_TASK_KEYS)
 export type ConfigBackgroundTaskKey = z.infer<typeof ConfigBackgroundTaskKeySchema>
@@ -105,6 +106,13 @@ export const CONFIG_BACKGROUND_TASKS: ReadonlyArray<ConfigBackgroundTaskDefiniti
     slug: 'weather-daily-ingest',
     implemented: true,
     summary: 'Pulls daily high/low temperature and precipitation from Open-Meteo\'s free Historical Weather API (ERA5 reanalysis) for each operating site (ZIPs 10019 / 10458). One scheduler tick per day re-fetches a trailing 7-day window per site so late-arriving reanalysis corrections land naturally. Cold-start backfill is self-derived from the earlier of (min(sweed_orders.pay_time)::date, 2024-01-01) on the first run. Backs the three real weather.scatter_* metrics on the /metrics page tree. See automation#26.',
+  },
+  {
+    key: 'workers.scheduling.sweed_shifts_ingest',
+    label: 'Sweed shifts ingest',
+    slug: 'sweed-shifts-ingest',
+    implemented: true,
+    summary: 'Polls store.sale.shift.list every 15 minutes per dealer, materialising open + closed cashier/employee shifts into the helios-owned sweed_shifts table. Maintains a per-dealer highwater mark so worker crashes do not lose rows, walks each dealer\'s history day-by-day back to the store-opening date, and re-upserts open shifts so their close time + final shape land on a later poll. Unblocks the cashier.transactions_per_hour real metric on /metrics. See automation#27.',
   },
 ]
 
@@ -412,5 +420,30 @@ export const WEATHER_DAILY_INGEST_DEFAULT_SCHEDULE_WINDOWS: ReadonlyArray<
     intervalMinutes: 1440,        // once per day
     paused: false,
     notes: 'Daily Open-Meteo pull for the two operating sites (~06:00 EST / 07:00 EDT in NY).',
+  },
+]
+
+/**
+ * Default schedule for the Sweed shifts ingest worker.
+ *
+ * Shifts mutate far less frequently than invoices (one open/close
+ * pair per employee per day at typical staffing), so a 15-minute
+ * cadence around the clock is sufficient to land both the open and
+ * (eventual) close edges within one polling window of when they
+ * happen at the POS. Each tick also walks one historical day of
+ * backfill until the per-dealer min_open_time is reached.
+ *
+ * See FreshlyBakedNYC/automation#27.
+ */
+export const SWEED_SHIFTS_INGEST_DEFAULT_SCHEDULE_WINDOWS: ReadonlyArray<
+  Omit<ConfigWorkerScheduleWindow, 'id'>
+> = [
+  {
+    weekdayMask: WEEKDAY_MASK_ALL,
+    windowStartMinute: 0,
+    windowEndMinute: 1440,
+    intervalMinutes: 15,
+    paused: false,
+    notes: 'Forward-poll Sweed for new/updated shifts + one day of historical backfill, every 15 minutes.',
   },
 ]
