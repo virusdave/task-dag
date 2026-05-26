@@ -191,17 +191,12 @@ export function CatalogMarketDataPage(): JSX.Element {
 
         {error ? <p className="error-banner">{error}</p> : null}
 
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-          {data.rows.map((row) => (
-            <GroupCard
-              expanded={expanded === row.catalogGroupId}
-              key={row.catalogGroupId}
-              onError={setError}
-              onToggle={() => setExpanded((cur) => (cur === row.catalogGroupId ? null : row.catalogGroupId))}
-              row={row}
-            />
-          ))}
-        </div>
+        <BrandGroupedList
+          expandedGroupId={expanded}
+          onError={setError}
+          onToggleGroup={(gid) => setExpanded((cur) => (cur === gid ? null : gid))}
+          rows={data.rows}
+        />
 
         <div className="inline-row wrap-row" style={{ marginTop: '1rem' }}>
           <button
@@ -245,6 +240,121 @@ export function CatalogMarketDataPage(): JSX.Element {
           </div>
         </details>
       </section>
+    </div>
+  )
+}
+
+interface BrandGroupedListProps {
+  rows: GroupSummaryRow[]
+  expandedGroupId: number | null
+  onToggleGroup: (groupId: number) => void
+  onError: (msg: string | null) => void
+}
+
+/**
+ * Top-level grouping for the review queue: brand → product family
+ * (collapsible card) → variants. Mirrors the Site → Category →
+ * Subcategory → Brand → variant pattern from the Pending Purchases
+ * page so reviewers can sweep a whole brand's families at once
+ * instead of scrolling through a flat list.
+ *
+ * Brand sections collapse independently. The catalog group / family
+ * row inside each brand still expands inline to the per-size-family
+ * review panel (CatalogVariantCard + CandidateTable), so the
+ * "expand a family to see all its variants and act on the whole
+ * batch" workflow lives at the family card layer that already
+ * existed.
+ */
+function BrandGroupedList({ rows, expandedGroupId, onToggleGroup, onError }: BrandGroupedListProps): JSX.Element {
+  const groupedByBrand = useMemo(() => {
+    const map = new Map<string, { brand: string | null; rows: GroupSummaryRow[] }>()
+    for (const row of rows) {
+      const key = row.brandName ?? '(No brand)'
+      const entry = map.get(key) ?? { brand: row.brandName, rows: [] }
+      entry.rows.push(row)
+      map.set(key, entry)
+    }
+    return Array.from(map.entries())
+      .map(([key, entry]) => ({ key, brand: entry.brand, rows: entry.rows }))
+      .sort((a, b) => a.key.localeCompare(b.key))
+  }, [rows])
+
+  const [collapsedBrands, setCollapsedBrands] = useState<Set<string>>(new Set())
+  function toggleBrand(key: string): void {
+    setCollapsedBrands((cur) => {
+      const next = new Set(cur)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+  }
+
+  if (rows.length === 0) {
+    return <p className="subtle-copy" style={{ margin: '0.75rem 0' }}>No catalog groups match the filters.</p>
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+      {groupedByBrand.map(({ key, brand, rows: brandRows }) => {
+        const collapsed = collapsedBrands.has(key)
+        const verdictedCount = brandRows.filter((r) => r.liveVerdictCount > 0).length
+        return (
+          <section
+            key={key}
+            style={{
+              border: '1px solid var(--border-color, #d0d0d0)',
+              borderRadius: '6px',
+              background: 'var(--panel-bg, #fff)',
+              overflow: 'hidden',
+            }}
+          >
+            <button
+              aria-expanded={!collapsed}
+              className="inline-row wrap-row"
+              onClick={() => toggleBrand(key)}
+              style={{
+                width: '100%',
+                background: 'rgba(0,0,0,0.04)',
+                border: 'none',
+                borderBottom: collapsed ? 'none' : '1px solid var(--border-color, #e0e0e0)',
+                padding: '0.55rem 0.75rem',
+                cursor: 'pointer',
+                justifyContent: 'space-between',
+                gap: '0.5rem',
+                textAlign: 'left',
+                position: 'sticky',
+                top: 0,
+                zIndex: 1,
+              }}
+              type="button"
+            >
+              <span style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontWeight: 600 }}>
+                <span style={{ display: 'inline-block', width: '0.85rem' }}>{collapsed ? '▸' : '▾'}</span>
+                {brand ?? '(No brand)'}
+              </span>
+              <span className="inline-row" style={{ gap: '0.4rem' }}>
+                <Pill tone="muted">{`${brandRows.length} ${brandRows.length === 1 ? 'family' : 'families'}`}</Pill>
+                <Pill tone={verdictedCount === brandRows.length ? 'success' : 'muted'}>
+                  {`${verdictedCount}/${brandRows.length} reviewed`}
+                </Pill>
+              </span>
+            </button>
+            {collapsed ? null : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem', padding: '0.5rem 0.6rem' }}>
+                {brandRows.map((row) => (
+                  <GroupCard
+                    expanded={expandedGroupId === row.catalogGroupId}
+                    key={row.catalogGroupId}
+                    onError={onError}
+                    onToggle={() => onToggleGroup(row.catalogGroupId)}
+                    row={row}
+                  />
+                ))}
+              </div>
+            )}
+          </section>
+        )
+      })}
     </div>
   )
 }
