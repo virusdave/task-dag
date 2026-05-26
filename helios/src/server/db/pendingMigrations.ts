@@ -268,6 +268,12 @@ const SENTINELS: MigrationSentinel[] = [
       (await tableExists(db, 'sweed_package_snapshots')) &&
       (await tableExists(db, 'sweed_package_snapshots_ingest_state')),
   },
+  {
+    migrationId: '033_litalerts_product_images',
+    label:
+      'litalerts_product_images — per-product primary image URLs captured from the LitAlerts dashboard backend (POST /Products/menulistings). Needed for image embedding on Catalog → Market Data review rows and proposed catalog entries on Pending Purchases.',
+    check: async (db) => tableExists(db, 'litalerts_product_images'),
+  },
 ]
 
 interface CacheEntry {

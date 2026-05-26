@@ -79,6 +79,13 @@ export interface MarketMatchCandidate {
   liveVerdict: MarketMatchVerdict | null
   listingUrl: string | null
   dispensaryName: string | null
+  /**
+   * LitAlerts dashboard imageUrl for this listing's product, sourced
+   * from `litalerts_product_images` (populated by
+   * `scripts/litalerts-backfill-product-images.mts`). Null if we have
+   * no image captured for this productId yet.
+   */
+  imageUrl: string | null
   /** Which catalog variant this candidate scored best against. */
   matchedCatalogProductId: number | null
   /** Stable key for the size family the matched variant belongs to. */
@@ -965,6 +972,7 @@ export async function loadGroupReview(
         liveVerdict: null,
         listingUrl: listing?.url ?? null,
         dispensaryName: listing?.dispensaryName ?? null,
+        imageUrl: null,
         matchedCatalogProductId: matchedKey.productId,
         matchedSizeKey: matchedKey.sizeKey,
         matchedSizeLabel: matchedKey.sizeLabel,
@@ -972,6 +980,48 @@ export async function loadGroupReview(
       return candidate
     })
     .filter((c): c is MarketMatchCandidate => c !== null)
+
+  // Decorate each candidate with the LitAlerts dashboard imageUrl
+  // we've cached in `litalerts_product_images` (populated by
+  // `scripts/litalerts-backfill-product-images.mts`). Single batch
+  // query keyed on the productId encoded in raw_input_jsonb for
+  // structured `litalerts_partner_product` fuzzies; legacy
+  // `litalerts_competitor_observation` fuzzies don't carry productId
+  // so they stay imageUrl=null until they're re-ingested structured.
+  const productIds: number[] = []
+  for (const c of scoredAll) {
+    const raw = c.fuzzy.rawInputJsonb as { productId?: number | string } | null
+    const pid = typeof raw?.productId === 'number'
+      ? raw.productId
+      : typeof raw?.productId === 'string' && /^\d+$/.test(raw.productId)
+        ? Number.parseInt(raw.productId, 10)
+        : null
+    if (pid !== null && !Number.isNaN(pid)) productIds.push(pid)
+  }
+  if (productIds.length > 0) {
+    const imgResult = await db.query<{ product_id: string; image_url: string }>(
+      `select product_id::text, image_url
+         from litalerts_product_images
+        where state_code = 'NY'
+          and product_id = any($1::bigint[])`,
+      [Array.from(new Set(productIds))],
+    )
+    const imageByPid = new Map<number, string>()
+    for (const r of imgResult.rows) {
+      imageByPid.set(Number.parseInt(r.product_id, 10), r.image_url)
+    }
+    for (const c of scoredAll) {
+      const raw = c.fuzzy.rawInputJsonb as { productId?: number | string } | null
+      const pid = typeof raw?.productId === 'number'
+        ? raw.productId
+        : typeof raw?.productId === 'string' && /^\d+$/.test(raw.productId)
+          ? Number.parseInt(raw.productId, 10)
+          : null
+      if (pid !== null && imageByPid.has(pid)) {
+        c.imageUrl = imageByPid.get(pid) ?? null
+      }
+    }
+  }
 
   // Split visible vs suppressed by threshold.
   const visible: MarketMatchCandidate[] = []

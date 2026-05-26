@@ -70,6 +70,7 @@ interface Candidate {
   factors: { brand: number; category: number; subcategory: number; size: number; pack: number; strain: number }
   listingUrl: string | null
   dispensaryName: string | null
+  imageUrl: string | null
   matchedCatalogProductId: number | null
   matchedSizeKey: string
   matchedSizeLabel: string
@@ -751,19 +752,48 @@ function CandidateRow({
       }}
     >
       <div className="inline-row wrap-row" style={{ justifyContent: 'space-between', gap: '0.5rem' }}>
-        <div style={{ flex: '1 1 14rem', minWidth: 0 }}>
-          <div className="inline-row" style={{ gap: '0.3rem', alignItems: 'center', flexWrap: 'wrap' }}>
-            <Pill tone="muted">{c.matchedSizeLabel || '?'}</Pill>
-            {c.listingUrl ? (
-              <a href={c.listingUrl} rel="noreferrer" target="_blank" style={{ fontWeight: 500 }}>
-                {c.fuzzy.rawInputJsonb?.listingName ?? '—'}
-              </a>
-            ) : (
-              <span style={{ fontWeight: 500 }}>{c.fuzzy.rawInputJsonb?.listingName ?? '—'}</span>
-            )}
-          </div>
-          <div className="subtle-copy" style={{ fontSize: '0.78rem' }}>
-            {c.dispensaryName ?? '—'} · {c.fuzzy.brandNorm ?? '—'} · {c.fuzzy.categoryNorm ?? '—'}
+        <div className="inline-row" style={{ flex: '1 1 14rem', minWidth: 0, gap: '0.5rem', alignItems: 'flex-start' }}>
+          {c.imageUrl ? (
+            <img
+              alt=""
+              loading="lazy"
+              src={c.imageUrl}
+              style={{
+                width: '2.5rem',
+                height: '2.5rem',
+                objectFit: 'cover',
+                borderRadius: '3px',
+                border: '1px solid #ddd',
+                flex: '0 0 auto',
+              }}
+            />
+          ) : (
+            <div
+              aria-hidden="true"
+              style={{
+                width: '2.5rem',
+                height: '2.5rem',
+                background: '#f4f4f4',
+                borderRadius: '3px',
+                border: '1px dashed #ddd',
+                flex: '0 0 auto',
+              }}
+            />
+          )}
+          <div style={{ minWidth: 0, flex: '1 1 auto' }}>
+            <div className="inline-row" style={{ gap: '0.3rem', alignItems: 'center', flexWrap: 'wrap' }}>
+              <Pill tone="muted">{c.matchedSizeLabel || '?'}</Pill>
+              {c.listingUrl ? (
+                <a href={c.listingUrl} rel="noreferrer" target="_blank" style={{ fontWeight: 500 }}>
+                  {c.fuzzy.rawInputJsonb?.listingName ?? '—'}
+                </a>
+              ) : (
+                <span style={{ fontWeight: 500 }}>{c.fuzzy.rawInputJsonb?.listingName ?? '—'}</span>
+              )}
+            </div>
+            <div className="subtle-copy" style={{ fontSize: '0.78rem' }}>
+              {c.dispensaryName ?? '—'} · {c.fuzzy.brandNorm ?? '—'} · {c.fuzzy.categoryNorm ?? '—'}
+            </div>
           </div>
         </div>
         <div className="inline-row" style={{ gap: '0.3rem', alignItems: 'center' }}>
