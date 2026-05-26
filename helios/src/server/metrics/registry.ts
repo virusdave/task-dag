@@ -2,6 +2,11 @@ import type { MetricDefSummary } from '../../shared/contracts/index.js'
 
 import { metric as demoFlatLine } from './_demo/flat_line.js'
 import { metric as demoRandomWalk } from './_demo/random_walk.js'
+import { P2_METRICS } from './_stub/p2_acquisition_margins.js'
+import { P3_METRICS } from './_stub/p3_basket_category_fulfillment.js'
+import { P4_METRICS } from './_stub/p4_inventory.js'
+import { P5_METRICS } from './_stub/p5_cashier_weather_delivery.js'
+import { P6_METRICS } from './_stub/p6_customer_origin_map.js'
 import { toMetricSummary, type MetricDef } from './types.js'
 
 /**
@@ -19,7 +24,15 @@ import { toMetricSummary, type MetricDef } from './types.js'
  * the unit tests. An explicit list is one extra line per metric and
  * has the bonus that grep-for-id Just Works.
  */
-const METRICS: readonly MetricDef[] = [demoFlatLine, demoRandomWalk]
+const METRICS: readonly MetricDef[] = [
+  demoFlatLine,
+  demoRandomWalk,
+  ...P2_METRICS,
+  ...P3_METRICS,
+  ...P4_METRICS,
+  ...P5_METRICS,
+  ...P6_METRICS,
+]
 
 const METRICS_BY_ID = new Map<string, MetricDef>(METRICS.map((m) => [m.id, m]))
 
