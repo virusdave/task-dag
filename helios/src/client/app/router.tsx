@@ -46,6 +46,7 @@ import { HistoryPage, historyLoader } from '../routes/history/HistoryPage.js'
 import { JobDetailPage, jobDetailLoader } from '../routes/jobs/JobDetailPage.js'
 import { JobsPage, jobsLoader } from '../routes/jobs/JobsPage.js'
 import { LoginPage, loginLoader } from '../routes/login/LoginPage.js'
+import { MetricsLayoutPage, metricsLoader } from '../routes/metrics/MetricsLayoutPage.js'
 import { ModuleLandingPage } from '../routes/modules/ModuleLandingPage.js'
 import { PricingGeneratePage, pricingGenerateLoader } from '../routes/pricing/PricingGeneratePage.js'
 import { PricingReviewPage, pricingReviewLoader } from '../routes/pricing/PricingReviewPage.js'
@@ -370,6 +371,11 @@ export const router = createBrowserRouter([
         element: <HistoryPage />,
         loader: historyLoader,
         path: 'history',
+      },
+      {
+        element: <MetricsLayoutPage />,
+        loader: metricsLoader,
+        path: 'metrics',
       },
     ],
     element: <AppShell />,

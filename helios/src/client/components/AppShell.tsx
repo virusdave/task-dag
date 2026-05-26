@@ -138,6 +138,7 @@ function buildPrimarySidebarNodes(
     moduleBranch('utilities'),
     { kind: 'leaf', navKey: 'operations.jobs', label: 'Jobs', to: '/jobs', end: false },
     { kind: 'leaf', navKey: 'operations.history', label: 'Audit history', to: '/history', end: false },
+    { kind: 'leaf', navKey: 'operations.metrics', label: 'Metrics', to: '/metrics', end: false },
     {
       kind: 'branch',
       navKey: 'tasks',
