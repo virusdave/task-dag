@@ -12,6 +12,7 @@ import {
 import { loadJson, mutateJson } from '../../app/fetchJson.js'
 
 import { useTimeAxis, type TimeWindow } from './TimeAxisContext.js'
+import { bucketXTicks, formatXTick, formatYTick, niceYTicks } from './gridlines.js'
 
 // We re-fetch the annotation list after every mutation, so we don't
 // need to consume the response payload — a passthrough schema lets us
@@ -393,6 +394,27 @@ function ChartSvg(props: ChartSvgProps) {
     })
   }, [series, xScale, yScale])
 
+  // Y-axis "nice" gridline ticks (e.g. 0, 0.2, 0.4, 0.6, 0.8, 1.0).
+  // Pick fewer intervals on the short card variant so labels don't pack.
+  const yTicks = useMemo(() => {
+    const target = interactive ? (height < 220 ? 4 : 5) : 3
+    return niceYTicks(yMin, yMax, target)
+  }, [yMin, yMax, interactive, height])
+
+  // X-axis bucket-aligned ticks. Use a smaller targetCount on the short card
+  // variant or on narrow widths so labels don't collide.
+  const xTicks = useMemo(() => {
+    const target = !interactive ? 4 : plotW < 360 ? 4 : plotW < 600 ? 6 : 8
+    return bucketXTicks({ fromMs: window.fromMs, toMs: window.toMs, agg, targetCount: target })
+  }, [window.fromMs, window.toMs, agg, plotW, interactive])
+
+  const xTickStraddlesYear = useMemo(() => {
+    if (xTicks.length === 0) return false
+    const fromY = new Date(window.fromMs).getUTCFullYear()
+    const toY = new Date(window.toMs).getUTCFullYear()
+    return fromY !== toY
+  }, [xTicks, window.fromMs, window.toMs])
+
   const [drag, setDrag] = useState<DragState | null>(null)
   const pinchRef = useRef<PinchState | null>(null)
   const activePointersRef = useRef<Map<number, { clientX: number }>>(new Map())
@@ -686,22 +708,85 @@ function ChartSvg(props: ChartSvgProps) {
           fill="rgba(255,255,255,0.001)"
         />
 
+        {/* Horizontal gridlines + Y-axis tick labels. Gridlines land on
+            "nice" round numbers (least-significant digit 5/0, or even
+            fractions like 0.2). Skip lines that fall outside the plot
+            area (can happen if yMin/yMax span >= the rounded tick range). */}
+        {yTicks.ticks.map((v) => {
+          if (v < yMin || v > yMax) return null
+          const y = yScale(v)
+          if (!Number.isFinite(y)) return null
+          return (
+            <g key={`yt-${v}`} pointerEvents="none">
+              <line
+                x1={marginLeft}
+                x2={width - marginRight}
+                y1={y}
+                y2={y}
+                stroke="#eee"
+                strokeWidth={1}
+              />
+              <text
+                x={marginLeft - 4}
+                y={y + 3}
+                fontSize="10"
+                textAnchor="end"
+                fill="#555"
+              >
+                {formatYTick(v, yTicks.fractionDigits)}
+              </text>
+            </g>
+          )
+        })}
+
+        {/* Vertical gridlines + X-axis tick labels at bucket boundaries.
+            For categorical / total aggregations bucketXTicks returns [] so
+            we fall back to the from/to corner labels below. */}
+        {xTicks.map((t) => {
+          const x = xScale(t)
+          if (!Number.isFinite(x) || x < marginLeft - 0.5 || x > width - marginRight + 0.5) return null
+          const label = formatXTick(t, agg, { straddlesYear: xTickStraddlesYear })
+          return (
+            <g key={`xt-${t}`} pointerEvents="none">
+              <line
+                x1={x}
+                x2={x}
+                y1={marginTop}
+                y2={marginTop + plotH}
+                stroke="#eee"
+                strokeWidth={1}
+              />
+              <text
+                x={x}
+                y={marginTop + plotH + 12}
+                fontSize="10"
+                textAnchor="middle"
+                fill="#555"
+              >
+                {label}
+              </text>
+            </g>
+          )
+        })}
+
+        {/* Plot-area baseline + left axis. Drawn AFTER gridlines so they sit
+            on top, giving a clean frame. */}
         <line x1={marginLeft} x2={width - marginRight} y1={marginTop + plotH} y2={marginTop + plotH} stroke="#ccc" />
         <line x1={marginLeft} x2={marginLeft} y1={marginTop} y2={marginTop + plotH} stroke="#ccc" />
 
-        <text x={marginLeft - 4} y={marginTop + 10} fontSize="10" textAnchor="end" fill="#555">
-          {compactNumber(yMax)}
-        </text>
-        <text x={marginLeft - 4} y={marginTop + plotH} fontSize="10" textAnchor="end" fill="#555">
-          {compactNumber(yMin)}
-        </text>
-
-        <text x={marginLeft} y={height - 8} fontSize="10" fill="#555">
-          {shortDate(window.fromMs)}
-        </text>
-        <text x={width - marginRight} y={height - 8} fontSize="10" textAnchor="end" fill="#555">
-          {shortDate(window.toMs)}
-        </text>
+        {/* From/to range labels — only when bucketXTicks declined to emit
+            ticks (categorical / total aggregations). Otherwise the
+            in-plot ticks already convey the time window. */}
+        {xTicks.length === 0 ? (
+          <>
+            <text x={marginLeft} y={height - 8} fontSize="10" fill="#555">
+              {shortDate(window.fromMs)}
+            </text>
+            <text x={width - marginRight} y={height - 8} fontSize="10" textAnchor="end" fill="#555">
+              {shortDate(window.toMs)}
+            </text>
+          </>
+        ) : null}
 
         {seriesPaths.map((s) => (
           <path key={s.id} d={s.d} fill="none" stroke={s.colour} strokeWidth="1.5" />
