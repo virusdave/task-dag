@@ -314,13 +314,25 @@ const SENTINELS: MigrationSentinel[] = [
     check: async (db) => tableExists(db, 'weather_daily'),
   },
   {
+    // 036 originally created sweed_shifts + sweed_shifts_ingest_highwater
+    // (later dropped by 038 — see below) and added the still-useful
+    // `sweed_orders.cashier_user_id` column. Only the cashier_user_id
+    // column survives 038, so this sentinel narrows to that one
+    // effect; without it the future v2 cashier-throughput metric
+    // (per-transaction attribution) cannot be built.
     migrationId: '036_sweed_shifts',
     label:
-      'sweed_shifts + sweed_shifts_ingest_highwater + sweed_orders.cashier_user_id — backs the periodic Sweed shifts ingest worker (automation#27, follow-on under #22 and unblocker for the cashier-throughput stub in #21 P5). Without this the shifts ingest worker fails to start and the `cashier.transactions_per_hour` metric stays a stub.',
+      'sweed_orders.cashier_user_id column — added by migration 036 and retained after 038\'s drawer-shift redesign; needed so a future v2 of `cashier.transactions_per_hour` can do per-transaction cashier attribution. (The other artefacts of 036 — sweed_shifts / sweed_shifts_ingest_highwater — were intentionally dropped by 038.)',
+    check: (db) => columnExists(db, 'sweed_orders', 'cashier_user_id'),
+  },
+  {
+    migrationId: '038_sweed_drawer_shifts',
+    label:
+      'sweed_drawer_shifts + sweed_drawer_shift_sessions + sweed_drawer_shifts_ingest_highwater — supersedes 036\'s `sweed_shifts` shape after the first live ingest revealed that `store.sale.shift.list` returns DRAWER/till shifts with a nested `sessions[]` cashier-user array, not per-employee shifts (FreshlyBakedNYC/automation#27, Option A). Without this the redesigned shifts ingest worker fails to start and `cashier.transactions_per_hour` stays a stub.',
     check: async (db) =>
-      (await tableExists(db, 'sweed_shifts')) &&
-      (await tableExists(db, 'sweed_shifts_ingest_highwater')) &&
-      (await columnExists(db, 'sweed_orders', 'cashier_user_id')),
+      (await tableExists(db, 'sweed_drawer_shifts')) &&
+      (await tableExists(db, 'sweed_drawer_shift_sessions')) &&
+      (await tableExists(db, 'sweed_drawer_shifts_ingest_highwater')),
   },
   {
     migrationId: '037_addresses',

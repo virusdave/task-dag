@@ -112,7 +112,7 @@ export const CONFIG_BACKGROUND_TASKS: ReadonlyArray<ConfigBackgroundTaskDefiniti
     label: 'Sweed shifts ingest',
     slug: 'sweed-shifts-ingest',
     implemented: true,
-    summary: 'Polls store.sale.shift.list every 15 minutes per dealer, materialising open + closed cashier/employee shifts into the helios-owned sweed_shifts table. Maintains a per-dealer highwater mark so worker crashes do not lose rows, walks each dealer\'s history day-by-day back to the store-opening date, and re-upserts open shifts so their close time + final shape land on a later poll. Unblocks the cashier.transactions_per_hour real metric on /metrics. See automation#27.',
+    summary: 'Polls store.sale.shift.list every 15 minutes per dealer, materialising open + closed DRAWER/till shifts (one per hardware terminal, with a nested sessions[] array of cashier users that worked that drawer) into the helios-owned sweed_drawer_shifts + sweed_drawer_shift_sessions tables. Maintains a per-dealer highwater mark so worker crashes do not lose rows, walks each dealer\'s history day-by-day back to the store-opening date, and re-upserts open drawer-shifts so their close time + final shape land on a later poll. Unblocks the cashier.transactions_per_hour real metric on /metrics. See automation#27 (Option A redesign).',
   },
 ]
 

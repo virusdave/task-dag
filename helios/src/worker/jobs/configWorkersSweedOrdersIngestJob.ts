@@ -62,14 +62,18 @@ const InvoiceEnvelopeSchema = z
     grandTotalDiscountAmount: z.coerce.number().nullable().optional(),
 
     // Which Sweed user (cashier / pharmacist / kiosk attendant)
-    // rang up this invoice. Joins to `sweed_shifts.employee_id` at
-    // metric-query time so cashier.transactions_per_hour can
-    // divide the cashier's invoice count by their clocked-in
-    // minutes. Field shape varies across Sweed RPC variants — we
-    // try the canonical `createdById` (operator-confirmed for
-    // automation#27) then fall back to a few near-cousins so we
-    // don't lose the join on staging deployments that emit a
-    // different alias.
+    // rang up this invoice. Retained from the v1 (pre-038) design
+    // of automation#27 so a future v2 of
+    // `cashier.transactions_per_hour` can divide each cashier's
+    // invoice count by their clocked-in minutes via a join to
+    // `sweed_drawer_shift_sessions.user_id`. The v1 today-metric
+    // does not need this column — it estimates cashier-hours from
+    // drawer-shift duration × session count — but populating it
+    // now keeps the historical record correct. Field shape varies
+    // across Sweed RPC variants; we try the canonical
+    // `createdById` (operator-confirmed for automation#27) then
+    // fall back to a few near-cousins so we don't lose the column
+    // on staging deployments that emit a different alias.
     createdById: z.union([z.string(), z.number()]).nullable().optional(),
     createdBy: z
       .object({ id: z.union([z.string(), z.number()]).nullable().optional() })

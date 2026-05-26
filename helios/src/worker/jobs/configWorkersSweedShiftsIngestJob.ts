@@ -5,30 +5,38 @@ import {
 } from '../../shared/contracts/index.js'
 import { appendAuditEvent } from '../../server/audit/appendAuditEvent.js'
 import { withTransaction } from '../../server/db/tx.js'
-import { listSaleShifts, type SweedShiftRow } from '../sweed/shifts.js'
+import { listSaleShifts, type SweedDrawerShiftRow } from '../sweed/shifts.js'
 import type { JobHandlerContext } from '../runtime/jobRegistry.js'
 
 // ============================================================================
-// Sweed shifts ingest worker (FreshlyBakedNYC/automation#27, follow-on under
-// #22 and remaining blocker for the cashier-throughput stub in #21's P5).
+// Sweed drawer-shifts ingest worker (FreshlyBakedNYC/automation#27,
+// follow-on under #22 and remaining blocker for the cashier-throughput
+// stub in #21's P5).
 //
 // One job per scheduler tick. For each dealer we:
 //
 //   1. **Forward poll** — fetch shifts from `highwater - OVERLAP` to
-//      `now`, upsert into `sweed_shifts`. Re-upsert is harmless and
-//      is what lets the eventual `closeTime` land on rows we first
-//      ingested while they were still open.
+//      `now`, upsert each drawer-shift into `sweed_drawer_shifts`
+//      and each nested `sessions[]` entry into
+//      `sweed_drawer_shift_sessions`. Re-upsert is harmless and is
+//      what lets the eventual `closeDate` + final cash/session
+//      shape land on rows we first ingested while they were still
+//      open.
 //   2. **Backfill one or more days** — if `backfill_cursor_day` is
 //      non-null, fetch that day's shifts, upsert, decrement cursor.
 //      Stops when the cursor reaches the dealer's store-opening
-//      date (`min_open_time`).
+//      date (`min_open_date`).
 //
 // The `OVERLAP` window covers the same failure modes as the sibling
-// orders ingest (#22): mid-tick crashes plus clock-in / clock-out
-// updates that land between two adjacent polls (most importantly,
-// the close-time update on a shift that was open during the
-// previous poll). Idempotent upsert + the overlap window mean the
-// "no row lost" invariant holds even across worker restarts.
+// orders ingest (#22): mid-tick crashes plus drawer open/close
+// updates that land between two adjacent polls. Idempotent upsert
+// + the overlap window mean the "no row lost" invariant holds even
+// across worker restarts.
+//
+// Schema: see migration 038 / `sweedDrawerShifts.sql`. The earlier
+// `sweed_shifts` shape from 036 was abandoned after the first live
+// run revealed that Sweed returns drawer-shifts (with a nested
+// `sessions[]` array) rather than per-employee shifts.
 // ============================================================================
 
 /** Forward-poll overlap window. */
@@ -118,33 +126,33 @@ function decrementIsoDate(iso: string): string {
   return `${String(y).padStart(4, '0')}-${String(m).padStart(2, '0')}-${String(day).padStart(2, '0')}`
 }
 
-interface NormalisedShift {
+interface NormalisedDrawerShift {
   shiftId: string
-  employeeId: number
-  employeeName: string | null
-  role: string
-  openTime: Date
-  closeTime: Date | null
+  shiftNo: number | null
+  hardwareId: number | null
+  hardwareName: string | null
+  openDate: Date
+  closeDate: Date | null
+  salesCount: number | null
+  closeUserId: number | null
+  closeUserName: string | null
+  sessions: SweedDrawerShiftRow['sessions']
   raw: unknown
 }
 
-function normaliseForIngest(row: SweedShiftRow): NormalisedShift | null {
-  if (
-    row.shiftId === null ||
-    row.employeeId === null ||
-    row.openTime === null ||
-    row.role === null ||
-    row.role.length === 0
-  ) {
-    return null
-  }
+function normaliseForIngest(row: SweedDrawerShiftRow): NormalisedDrawerShift | null {
+  if (row.shiftId === null || row.openDate === null) return null
   return {
     shiftId: row.shiftId,
-    employeeId: row.employeeId,
-    employeeName: row.employeeName,
-    role: row.role,
-    openTime: row.openTime,
-    closeTime: row.closeTime,
+    shiftNo: row.shiftNo,
+    hardwareId: row.hardwareId,
+    hardwareName: row.hardwareName,
+    openDate: row.openDate,
+    closeDate: row.closeDate,
+    salesCount: row.salesCount,
+    closeUserId: row.closeUserId,
+    closeUserName: row.closeUserName,
+    sessions: row.sessions,
     raw: row.raw,
   }
 }
@@ -165,8 +173,10 @@ export async function runConfigWorkersSweedShiftsIngestJob(
     dealerId: number
     forwardSeen: number
     forwardUpserted: number
+    forwardSessionsUpserted: number
     backfillDays: number
     backfillUpserted: number
+    backfillSessionsUpserted: number
     backfillCursorRemaining: string | null
     skippedNotShiftShaped: number
     error: string | null
@@ -181,8 +191,10 @@ export async function runConfigWorkersSweedShiftsIngestJob(
         dealerId,
         forwardSeen: 0,
         forwardUpserted: 0,
+        forwardSessionsUpserted: 0,
         backfillDays: 0,
         backfillUpserted: 0,
+        backfillSessionsUpserted: 0,
         backfillCursorRemaining: null,
         skippedNotShiftShaped: 0,
         error: e instanceof Error ? e.message : String(e),
@@ -214,8 +226,10 @@ export async function runConfigWorkersSweedShiftsIngestJob(
 interface DealerResult {
   forwardSeen: number
   forwardUpserted: number
+  forwardSessionsUpserted: number
   backfillDays: number
   backfillUpserted: number
+  backfillSessionsUpserted: number
   backfillCursorRemaining: string | null
   skippedNotShiftShaped: number
 }
@@ -225,29 +239,31 @@ async function ingestDealer(dealerId: number, requestedBackfillDays: number): Pr
 
   // ----- 1. Forward poll -----
   const now = new Date()
-  const fromUtc = new Date(state.highwaterOpenTime.getTime() - FORWARD_POLL_OVERLAP_MS)
+  const fromUtc = new Date(state.highwaterOpenDate.getTime() - FORWARD_POLL_OVERLAP_MS)
   const forward = await fetchAndUpsert(dealerId, fromUtc, now)
-  let newHighwater = state.highwaterOpenTime
+  let newHighwater = state.highwaterOpenDate
   for (const sh of forward.normalised) {
-    if (sh.openTime > newHighwater) newHighwater = sh.openTime
+    if (sh.openDate > newHighwater) newHighwater = sh.openDate
   }
 
   // ----- 2. Backfill -----
   let backfillCursor = state.backfillCursorDay
   let backfillDaysDone = 0
   let backfillUpserted = 0
+  let backfillSessionsUpserted = 0
   let backfillSkipped = 0
   for (let i = 0; i < requestedBackfillDays && backfillCursor !== null; i++) {
     const dayStart = nyDayStartUtc(backfillCursor)
     const dayEnd = new Date(dayStart.getTime() + 24 * 60 * 60 * 1000)
     const day = await fetchAndUpsert(dealerId, dayStart, dayEnd)
     backfillUpserted += day.upsertedCount
+    backfillSessionsUpserted += day.sessionsUpsertedCount
     backfillSkipped += day.skippedCount
     backfillDaysDone++
 
     const prev = decrementIsoDate(backfillCursor)
     const prevStart = nyDayStartUtc(prev)
-    if (prevStart < state.minOpenTime) {
+    if (prevStart < state.minOpenDate) {
       backfillCursor = null
     } else {
       backfillCursor = prev
@@ -258,8 +274,8 @@ async function ingestDealer(dealerId: number, requestedBackfillDays: number): Pr
   await withTransaction(async (db) => {
     await db.query(
       `
-        update sweed_shifts_ingest_highwater
-           set highwater_open_time = greatest(highwater_open_time, $2),
+        update sweed_drawer_shifts_ingest_highwater
+           set highwater_open_date = greatest(highwater_open_date, $2),
                backfill_cursor_day = $3,
                last_polled_at = now(),
                last_seen_count = $4,
@@ -281,41 +297,43 @@ async function ingestDealer(dealerId: number, requestedBackfillDays: number): Pr
   return {
     forwardSeen: forward.normalised.length,
     forwardUpserted: forward.upsertedCount,
+    forwardSessionsUpserted: forward.sessionsUpsertedCount,
     backfillDays: backfillDaysDone,
     backfillUpserted,
+    backfillSessionsUpserted,
     backfillCursorRemaining: backfillCursor,
     skippedNotShiftShaped: forward.skippedCount + backfillSkipped,
   }
 }
 
 interface HighwaterState {
-  highwaterOpenTime: Date
-  minOpenTime: Date
+  highwaterOpenDate: Date
+  minOpenDate: Date
   backfillCursorDay: string | null
 }
 
 async function ensureHighwaterRow(dealerId: number): Promise<HighwaterState> {
   return withTransaction(async (db) => {
     const existing = await db.query<{
-      highwater_open_time: string | Date
-      min_open_time: string | Date
+      highwater_open_date: string | Date
+      min_open_date: string | Date
       backfill_cursor_day: string | Date | null
     }>(
-      `select highwater_open_time, min_open_time, backfill_cursor_day
-         from sweed_shifts_ingest_highwater
+      `select highwater_open_date, min_open_date, backfill_cursor_day
+         from sweed_drawer_shifts_ingest_highwater
         where dealer_id = $1`,
       [dealerId],
     )
     if (existing.rows.length === 1) {
       const r = existing.rows[0]!
       return {
-        highwaterOpenTime: new Date(r.highwater_open_time as string),
-        minOpenTime: new Date(r.min_open_time as string),
+        highwaterOpenDate: new Date(r.highwater_open_date as string),
+        minOpenDate: new Date(r.min_open_date as string),
         backfillCursorDay: coerceCursorToIso(r.backfill_cursor_day),
       }
     }
     const openingIso = HELIOS_SWEED_DEALER_OPENING_DATES[dealerId]
-    const minOpenTime = openingIso ? nyDayStartUtc(openingIso) : new Date(Date.now() - 60 * 60 * 1000)
+    const minOpenDate = openingIso ? nyDayStartUtc(openingIso) : new Date(Date.now() - 60 * 60 * 1000)
     // Seed highwater 1h in the past so the first forward poll picks
     // up shifts from the last hour while the backfill walks history.
     const highwater = new Date(Date.now() - 60 * 60 * 1000)
@@ -323,30 +341,31 @@ async function ensureHighwaterRow(dealerId: number): Promise<HighwaterState> {
     const initialCursor = openingIso ? decrementIsoDate(todayIso) : null
     await db.query(
       `
-        insert into sweed_shifts_ingest_highwater
-          (dealer_id, highwater_open_time, min_open_time, backfill_cursor_day, notes)
+        insert into sweed_drawer_shifts_ingest_highwater
+          (dealer_id, highwater_open_date, min_open_date, backfill_cursor_day, notes)
         values ($1, $2, $3, $4, $5)
         on conflict (dealer_id) do nothing
       `,
       [
         dealerId,
         highwater.toISOString(),
-        minOpenTime.toISOString(),
+        minOpenDate.toISOString(),
         initialCursor,
-        `Seeded by shifts ingest worker; opening=${openingIso ?? 'unknown'}`,
+        `Seeded by drawer-shifts ingest worker; opening=${openingIso ?? 'unknown'}`,
       ],
     )
     return {
-      highwaterOpenTime: highwater,
-      minOpenTime,
+      highwaterOpenDate: highwater,
+      minOpenDate,
       backfillCursorDay: initialCursor,
     }
   })
 }
 
 interface FetchAndUpsertResult {
-  normalised: NormalisedShift[]
+  normalised: NormalisedDrawerShift[]
   upsertedCount: number
+  sessionsUpsertedCount: number
   skippedCount: number
 }
 
@@ -356,7 +375,7 @@ async function fetchAndUpsert(
   toDate: Date,
 ): Promise<FetchAndUpsertResult> {
   const rows = await listSaleShifts({ dealerId, fromDate, toDate })
-  const normalised: NormalisedShift[] = []
+  const normalised: NormalisedDrawerShift[] = []
   let skipped = 0
   for (const r of rows) {
     const n = normaliseForIngest(r)
@@ -367,45 +386,85 @@ async function fetchAndUpsert(
     normalised.push(n)
   }
   if (normalised.length === 0) {
-    return { normalised, upsertedCount: 0, skippedCount: skipped }
+    return { normalised, upsertedCount: 0, sessionsUpsertedCount: 0, skippedCount: skipped }
   }
-  const upsertedCount = await withTransaction(async (db) => {
+  const { upsertedCount, sessionsUpsertedCount } = await withTransaction(async (db) => {
     let upserted = 0
+    let sessionsUpserted = 0
     for (const n of normalised) {
-      // Upsert: on conflict update the mutable fields (close time,
-      // employee name, role, raw_json). We deliberately do NOT update
-      // `shift_open` — that field is immutable once first seen, and
-      // any later poll that "moves" it would be a Sweed-side data
-      // correction we'd want to investigate manually.
+      // Upsert: on conflict update the mutable fields (close
+      // time, hardware, salesCount, closeUser, raw_json). We
+      // deliberately do NOT update `open_date` — that field is
+      // immutable once first seen, and any later poll that
+      // "moves" it would be a Sweed-side data correction we'd
+      // want to investigate manually.
       const result = await db.query(
         `
-          insert into sweed_shifts (
-            dealer_id, shift_id, employee_id, employee_name,
-            role, shift_open, shift_close, raw_json
+          insert into sweed_drawer_shifts (
+            dealer_id, sweed_shift_id, shift_no,
+            hardware_id, hardware_name,
+            open_date, close_date, sales_count,
+            close_user_id, close_user_name, raw_json
           ) values (
-            $1, $2, $3, $4, $5, $6, $7, $8::jsonb
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb
           )
-          on conflict (dealer_id, shift_id) do update set
-            employee_name = excluded.employee_name,
-            role = excluded.role,
-            shift_close = excluded.shift_close,
+          on conflict (dealer_id, sweed_shift_id) do update set
+            shift_no = excluded.shift_no,
+            hardware_id = excluded.hardware_id,
+            hardware_name = excluded.hardware_name,
+            close_date = excluded.close_date,
+            sales_count = excluded.sales_count,
+            close_user_id = excluded.close_user_id,
+            close_user_name = excluded.close_user_name,
             raw_json = excluded.raw_json,
             ingested_at = now()
         `,
         [
           dealerId,
           n.shiftId,
-          n.employeeId,
-          n.employeeName,
-          n.role,
-          n.openTime.toISOString(),
-          n.closeTime?.toISOString() ?? null,
+          n.shiftNo,
+          n.hardwareId,
+          n.hardwareName,
+          n.openDate.toISOString(),
+          n.closeDate?.toISOString() ?? null,
+          n.salesCount,
+          n.closeUserId,
+          n.closeUserName,
           JSON.stringify(n.raw),
         ],
       )
       if ((result.rowCount ?? 0) > 0) upserted++
+
+      for (const s of n.sessions) {
+        const sessionResult = await db.query(
+          `
+            insert into sweed_drawer_shift_sessions (
+              dealer_id, sweed_shift_id, session_id,
+              user_id, user_name, expected_session_cash, raw_json
+            ) values (
+              $1, $2, $3, $4, $5, $6, $7::jsonb
+            )
+            on conflict (dealer_id, sweed_shift_id, session_id) do update set
+              user_id = excluded.user_id,
+              user_name = excluded.user_name,
+              expected_session_cash = excluded.expected_session_cash,
+              raw_json = excluded.raw_json,
+              ingested_at = now()
+          `,
+          [
+            dealerId,
+            n.shiftId,
+            s.sessionId,
+            s.userId,
+            s.userName,
+            s.expectedSessionCash,
+            JSON.stringify(s.raw),
+          ],
+        )
+        if ((sessionResult.rowCount ?? 0) > 0) sessionsUpserted++
+      }
     }
-    return upserted
+    return { upsertedCount: upserted, sessionsUpsertedCount: sessionsUpserted }
   })
-  return { normalised, upsertedCount, skippedCount: skipped }
+  return { normalised, upsertedCount, sessionsUpsertedCount, skippedCount: skipped }
 }
