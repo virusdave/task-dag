@@ -172,9 +172,79 @@ export interface GroupSummaryRow {
  * List catalog groups eligible for market-data review (i.e., have at
  * least one non-expired LitAlerts observation).
  */
+/**
+ * Returns the distinct {brand,category,subcategory} values seen on
+ * any catalog group that's eligible for review (has a LitAlerts
+ * observation or any structured partner_product fuzzy in its
+ * effective brand). Used by the Catalog → Market Data page to back
+ * datalist-driven typeahead filters so reviewers pick from real
+ * values instead of free-typing.
+ *
+ * Cheap because the eligibility predicate is the same one used by
+ * listGroupsForReview, but we only project the three label columns
+ * and group by them.
+ */
+export async function getMarketMatchesFilterOptions(
+  db: Queryable,
+): Promise<{ brands: string[]; categories: string[]; subcategories: string[] }> {
+  // Strict "eligible group" predicate (matches listGroupsForReview)
+  // requires joining ~3k catalog_groups against jsonb-expanded
+  // products + observations, which is too expensive for a typeahead
+  // source. Use the cheaper proxy "group has a brand_name whose
+  // normalized form appears in the partner_product fuzzy index" —
+  // i.e. there's at least one structured fuzzy on the same brand.
+  // That's what 99% of the listGroupsForReview results actually
+  // resolve to, so the dropdown matches what reviewers will see when
+  // they pick a filter.
+  const result = await db.query<{ kind: 'brand' | 'category' | 'subcategory'; value: string }>(
+    `
+      with brand_norms as (
+        select distinct brand_norm
+          from fuzzy_skus
+         where source_kind = 'litalerts_partner_product'
+           and brand_norm is not null
+      ),
+      eligible as (
+        select cg.brand_name, cg.category_name, cg.subcategory_name
+          from catalog_groups cg
+          join brand_norms bn on bn.brand_norm = lower(trim(cg.brand_name))
+         where cg.brand_name is not null
+      )
+      select 'brand'::text as kind, brand_name as value
+        from eligible where brand_name is not null
+       group by brand_name
+       union all
+      select 'category'::text as kind, category_name as value
+        from eligible where category_name is not null
+       group by category_name
+       union all
+      select 'subcategory'::text as kind, subcategory_name as value
+        from eligible where subcategory_name is not null
+       group by subcategory_name
+       order by 1, 2
+    `,
+  )
+  const brands: string[] = []
+  const categories: string[] = []
+  const subcategories: string[] = []
+  for (const row of result.rows) {
+    if (row.kind === 'brand') brands.push(row.value)
+    else if (row.kind === 'category') categories.push(row.value)
+    else if (row.kind === 'subcategory') subcategories.push(row.value)
+  }
+  return { brands, categories, subcategories }
+}
+
 export async function listGroupsForReview(
   db: Queryable,
-  options: { limit: number; offset: number; brandFilter?: string | null; unverdictedOnly?: boolean } = {
+  options: {
+    limit: number
+    offset: number
+    brandFilter?: string | null
+    categoryFilter?: string | null
+    subcategoryFilter?: string | null
+    unverdictedOnly?: boolean
+  } = {
     limit: 50,
     offset: 0,
   },
@@ -192,6 +262,14 @@ export async function listGroupsForReview(
   if (options.brandFilter) {
     values.push(options.brandFilter)
     clauses.push(`cg.brand_name = $${values.length}`)
+  }
+  if (options.categoryFilter) {
+    values.push(options.categoryFilter)
+    clauses.push(`cg.category_name = $${values.length}`)
+  }
+  if (options.subcategoryFilter) {
+    values.push(options.subcategoryFilter)
+    clauses.push(`cg.subcategory_name = $${values.length}`)
   }
   if (options.unverdictedOnly) {
     // Anti-join against the partial index

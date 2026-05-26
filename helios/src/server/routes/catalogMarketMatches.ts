@@ -32,6 +32,7 @@ import { z } from 'zod'
 import { requireSessionUser } from '../auth/requireSession.js'
 import { getPool } from '../db/pool.js'
 import {
+  getMarketMatchesFilterOptions,
   listGroupsForReview,
   loadGroupReview,
   recordVerdict,
@@ -50,6 +51,8 @@ const ListQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(200).default(50),
   offset: z.coerce.number().int().min(0).default(0),
   brand: z.string().trim().min(1).optional(),
+  category: z.string().trim().min(1).optional(),
+  subcategory: z.string().trim().min(1).optional(),
   unverdictedOnly: z.coerce.boolean().default(false),
 })
 
@@ -63,6 +66,8 @@ export async function registerCatalogMarketMatchRoutes(server: FastifyInstance):
       limit: query.limit,
       offset: query.offset,
       brandFilter: query.brand ?? null,
+      categoryFilter: query.category ?? null,
+      subcategoryFilter: query.subcategory ?? null,
       unverdictedOnly: query.unverdictedOnly,
     })
     return reply.send({
@@ -73,6 +78,14 @@ export async function registerCatalogMarketMatchRoutes(server: FastifyInstance):
         totalCount,
       },
     })
+  })
+
+  server.get('/api/catalog/market-matches/filter-options', async (request, reply) => {
+    const user = await requireSessionUser(request, reply, 'viewer')
+    if (!user) return
+
+    const options = await getMarketMatchesFilterOptions(getPool())
+    return reply.send(options)
   })
 
   const BundleQuerySchema = z.object({

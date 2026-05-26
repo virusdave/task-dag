@@ -49,6 +49,17 @@ interface ListResponse {
   pagination: { limit: number; offset: number; totalCount: number }
 }
 
+interface FilterOptionsResponse {
+  brands: string[]
+  categories: string[]
+  subcategories: string[]
+}
+
+interface LoaderData {
+  list: ListResponse
+  filterOptions: FilterOptionsResponse
+}
+
 interface FuzzySku {
   id: number
   sourceKind: string
@@ -128,19 +139,27 @@ interface GroupReviewBundle {
   }>
 }
 
-export async function catalogMarketDataLoader({ request }: { request: Request }): Promise<ListResponse> {
+const FilterOptionsSchema = z.any() as z.ZodType<FilterOptionsResponse>
+
+export async function catalogMarketDataLoader({ request }: { request: Request }): Promise<LoaderData> {
   const url = new URL(request.url)
   const params = url.searchParams
   if (!params.has('limit')) params.set('limit', '50')
-  return loadJson(`/api/catalog/market-matches?${params.toString()}`, ListResponseSchema)
+  const [list, filterOptions] = await Promise.all([
+    loadJson(`/api/catalog/market-matches?${params.toString()}`, ListResponseSchema),
+    loadJson('/api/catalog/market-matches/filter-options', FilterOptionsSchema),
+  ])
+  return { list, filterOptions }
 }
 
 export function CatalogMarketDataPage(): JSX.Element {
   useRegisterCatalogSidebarSubtree()
-  const data = useLoaderData() as ListResponse
+  const { list: data, filterOptions } = useLoaderData() as LoaderData
   const navigate = useNavigate()
   const [params, setParams] = useSearchParams()
   const [brand, setBrand] = useState(params.get('brand') ?? '')
+  const [category, setCategory] = useState(params.get('category') ?? '')
+  const [subcategory, setSubcategory] = useState(params.get('subcategory') ?? '')
   const [unverdictedOnly, setUnverdictedOnly] = useState(params.get('unverdictedOnly') === 'true')
   const [expanded, setExpanded] = useState<number | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -148,11 +167,24 @@ export function CatalogMarketDataPage(): JSX.Element {
   const totalPages = Math.max(1, Math.ceil(data.pagination.totalCount / data.pagination.limit))
   const currentPage = Math.floor(data.pagination.offset / data.pagination.limit) + 1
 
-  function applyFilters(): void {
+  function applyFilters(overrides?: {
+    brand?: string
+    category?: string
+    subcategory?: string
+    unverdictedOnly?: boolean
+  }): void {
+    const nextBrand = (overrides?.brand ?? brand).trim()
+    const nextCategory = (overrides?.category ?? category).trim()
+    const nextSubcategory = (overrides?.subcategory ?? subcategory).trim()
+    const nextUnverdicted = overrides?.unverdictedOnly ?? unverdictedOnly
     const next = new URLSearchParams(params)
-    if (brand.trim()) next.set('brand', brand.trim())
+    if (nextBrand) next.set('brand', nextBrand)
     else next.delete('brand')
-    if (unverdictedOnly) next.set('unverdictedOnly', 'true')
+    if (nextCategory) next.set('category', nextCategory)
+    else next.delete('category')
+    if (nextSubcategory) next.set('subcategory', nextSubcategory)
+    else next.delete('subcategory')
+    if (nextUnverdicted) next.set('unverdictedOnly', 'true')
     else next.delete('unverdictedOnly')
     next.delete('offset')
     setParams(next)
@@ -177,18 +209,55 @@ export function CatalogMarketDataPage(): JSX.Element {
         </div>
 
         <div className="inline-row wrap-row" style={{ marginBottom: '0.75rem' }}>
-          <input
-            onChange={(e) => setBrand(e.currentTarget.value)}
-            onKeyDown={(e) => { if (e.key === 'Enter') applyFilters() }}
-            placeholder="Filter by brand…"
-            style={{ flex: '0 1 16rem' }}
+          <TypeaheadFilter
+            label="brand"
+            listId="catalog-market-brand-options"
+            onApply={(v) => applyFilters({ brand: v })}
+            onChange={setBrand}
+            options={filterOptions.brands}
             value={brand}
           />
+          <TypeaheadFilter
+            label="category"
+            listId="catalog-market-category-options"
+            onApply={(v) => applyFilters({ category: v })}
+            onChange={setCategory}
+            options={filterOptions.categories}
+            value={category}
+          />
+          <TypeaheadFilter
+            label="subcategory"
+            listId="catalog-market-subcategory-options"
+            onApply={(v) => applyFilters({ subcategory: v })}
+            onChange={setSubcategory}
+            options={filterOptions.subcategories}
+            value={subcategory}
+          />
           <label className="inline-row">
-            <input checked={unverdictedOnly} onChange={(e) => setUnverdictedOnly(e.currentTarget.checked)} type="checkbox" />
+            <input
+              checked={unverdictedOnly}
+              onChange={(e) => {
+                const v = e.currentTarget.checked
+                setUnverdictedOnly(v)
+                applyFilters({ unverdictedOnly: v })
+              }}
+              type="checkbox"
+            />
             Only groups with no live verdicts
           </label>
-          <button className="ghost-button" onClick={applyFilters} type="button">Apply</button>
+          <button className="ghost-button" onClick={() => applyFilters()} type="button">Apply</button>
+          {(brand || category || subcategory || unverdictedOnly) && (
+            <button
+              className="ghost-button"
+              onClick={() => {
+                setBrand(''); setCategory(''); setSubcategory(''); setUnverdictedOnly(false)
+                applyFilters({ brand: '', category: '', subcategory: '', unverdictedOnly: false })
+              }}
+              type="button"
+            >
+              Clear all
+            </button>
+          )}
         </div>
 
         {error ? <p className="error-banner">{error}</p> : null}
@@ -243,6 +312,54 @@ export function CatalogMarketDataPage(): JSX.Element {
         </details>
       </section>
     </div>
+  )
+}
+
+interface TypeaheadFilterProps {
+  label: string
+  listId: string
+  value: string
+  options: string[]
+  onChange: (next: string) => void
+  onApply: (committed: string) => void
+}
+
+/**
+ * Free-text input backed by a native <datalist> so the browser
+ * provides type-as-you-go autocomplete against the supplied option
+ * list (no JS popover required). Auto-commits the filter whenever
+ * the typed value exactly matches one of the supplied options (which
+ * is what happens when the user clicks a dropdown entry) and when
+ * the input is cleared, so the reviewer doesn't have to chase an
+ * "Apply" button after each pick. Enter and blur also commit.
+ */
+function TypeaheadFilter({ label, listId, value, options, onChange, onApply }: TypeaheadFilterProps): JSX.Element {
+  const knownSet = useMemo(() => new Set(options), [options])
+  return (
+    <>
+      <input
+        list={listId}
+        onBlur={(e) => {
+          const v = e.currentTarget.value.trim()
+          // Only auto-apply on blur if the value is an exact known
+          // option (or empty). Avoids surprising filters from typos.
+          if (v.length === 0 || knownSet.has(v)) onApply(v)
+        }}
+        onChange={(e) => {
+          const v = e.currentTarget.value
+          onChange(v)
+          const trimmed = v.trim()
+          if (trimmed.length === 0 || knownSet.has(trimmed)) onApply(trimmed)
+        }}
+        onKeyDown={(e) => { if (e.key === 'Enter') onApply(e.currentTarget.value.trim()) }}
+        placeholder={`Filter by ${label}…`}
+        style={{ flex: '0 1 14rem' }}
+        value={value}
+      />
+      <datalist id={listId}>
+        {options.map((opt) => <option key={opt} value={opt} />)}
+      </datalist>
+    </>
   )
 }
 
