@@ -555,6 +555,11 @@ function GroupReviewPanel({ catalogGroupId, onError }: GroupReviewPanelProps): J
       {activeGroup ? (
         <SizeGroupPanel
           group={activeGroup}
+          ourContext={{
+            brand: bundle.brandName,
+            category: bundle.categoryName,
+            subcategory: bundle.subcategoryName,
+          }}
           onVerdict={recordVerdict}
           pendingFuzzyId={pendingFuzzyId}
         />
@@ -563,10 +568,16 @@ function GroupReviewPanel({ catalogGroupId, onError }: GroupReviewPanelProps): J
       {bundle.unmatchedCandidates.length > 0 ? (
         <details style={{ marginTop: '1rem' }}>
           <summary>{`${bundle.unmatchedCandidates.length} candidate(s) without a matched catalog variant`}</summary>
-          <CandidateTable
+          <MarketReviewTable
             candidates={bundle.unmatchedCandidates}
-            onVerdict={(fuzzyId, verdict, conf) => recordVerdict(fuzzyId, verdict, conf, null)}
+            ourContext={{
+              brand: bundle.brandName,
+              category: bundle.categoryName,
+              subcategory: bundle.subcategoryName,
+            }}
+            onVerdict={recordVerdict}
             pendingFuzzyId={pendingFuzzyId}
+            productId={null}
           />
         </details>
       ) : null}
@@ -593,13 +604,21 @@ function GroupReviewPanel({ catalogGroupId, onError }: GroupReviewPanelProps): J
   )
 }
 
+interface OurContext {
+  brand: string | null
+  category: string | null
+  subcategory: string | null
+}
+
 interface SizeGroupPanelProps {
   group: SizeGroup
+  ourContext: OurContext
   onVerdict: (fuzzyId: number, verdict: 'exact' | 'brand_family' | 'no_match', conf: number | null, productId: number | null) => void
   pendingFuzzyId: number | null
 }
 
-function SizeGroupPanel({ group, onVerdict, pendingFuzzyId }: SizeGroupPanelProps): JSX.Element {
+function SizeGroupPanel({ group, ourContext, onVerdict, pendingFuzzyId }: SizeGroupPanelProps): JSX.Element {
+  const firstVariantId = group.variants[0]?.catalogProductId ?? null
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
       <div
@@ -621,27 +640,15 @@ function SizeGroupPanel({ group, onVerdict, pendingFuzzyId }: SizeGroupPanelProp
             : ''}
         </span>
       </div>
-      <div className="inline-row wrap-row" style={{ gap: '0.5rem' }}>
-        {group.variants.map((v) => (
-          <CatalogVariantCard key={v.catalogProductId} variant={v} />
-        ))}
-      </div>
-      {group.candidates.length === 0 ? (
-        <p className="subtle-copy" style={{ margin: '0.5rem 0' }}>
-          No candidates above threshold for {group.sizeLabel}.
-          {group.suppressedCandidateCount > 0
-            ? ` ${group.suppressedCandidateCount} hidden as auto no-match.`
-            : ''}
-        </p>
-      ) : (
-        <CandidateTable
-          candidates={group.candidates}
-          onVerdict={(fuzzyId, verdict, conf) =>
-            onVerdict(fuzzyId, verdict, conf, group.variants[0]?.catalogProductId ?? null)
-          }
-          pendingFuzzyId={pendingFuzzyId}
-        />
-      )}
+      <MarketReviewTable
+        candidates={group.candidates}
+        emptyMessage={`No candidates above threshold for ${group.sizeLabel}.${group.suppressedCandidateCount > 0 ? ` ${group.suppressedCandidateCount} hidden as auto no-match.` : ''}`}
+        onVerdict={onVerdict}
+        ourContext={ourContext}
+        ourVariants={group.variants}
+        pendingFuzzyId={pendingFuzzyId}
+        productId={firstVariantId}
+      />
       {group.suppressedCandidateCount > 0 ? (
         <span className="subtle-copy" style={{ fontSize: '0.78rem' }}>
           {`+${group.suppressedCandidateCount} below threshold (auto no-match)`}
@@ -651,191 +658,279 @@ function SizeGroupPanel({ group, onVerdict, pendingFuzzyId }: SizeGroupPanelProp
   )
 }
 
-function CatalogVariantCard({ variant }: { variant: CatalogVariant }): JSX.Element {
+/* ─────────────────────────────────────────────────────────────────────
+ * Tabular product-review renderer.
+ *
+ * The candidates we get from the scorer are *structured*: every field
+ * (brand / category / subcategory / size / pack / strain) has its own
+ * normalized value AND its own scoring factor in [0, 1]. The original
+ * card-per-candidate layout buried this structure inside two lines of
+ * prose, so a reviewer couldn't tell at a glance which cell was
+ * pulling the score up vs. down — and the most common failure mode
+ * (the parser couldn't extract a brand, so factor=0 nukes the whole
+ * product) was invisible until you opened the "Score factors" detail.
+ *
+ * Now: one HTML <table> per size group. The catalog row ("OURS") sits
+ * directly beneath the headers so the reviewer can scan-compare
+ * column-by-column. Each candidate cell is shaded by its own factor
+ * value, so a row with a red Brand cell screams "no brand match" no
+ * matter what the final score says.
+ * ───────────────────────────────────────────────────────────────── */
+
+const TABLE_TH: React.CSSProperties = {
+  padding: '0.35rem 0.45rem',
+  fontSize: '0.7rem',
+  fontWeight: 600,
+  textAlign: 'left',
+  background: 'rgba(0,0,0,0.05)',
+  borderBottom: '2px solid var(--border-color, #c8c8c8)',
+  textTransform: 'uppercase',
+  letterSpacing: '0.04em',
+  whiteSpace: 'nowrap',
+  position: 'sticky',
+  top: 0,
+  zIndex: 1,
+}
+
+const TABLE_TD: React.CSSProperties = {
+  padding: '0.35rem 0.45rem',
+  fontSize: '0.78rem',
+  verticalAlign: 'top',
+  borderBottom: '1px solid var(--border-color, #ececec)',
+}
+
+/**
+ * Background tint per per-field factor value. The contribution shaping
+ * is intentionally coarse so it pops at a glance:
+ *   - 0       red     (factor zeroed the product; the killer cell)
+ *   - <0.5    orange  (significant drag)
+ *   - <0.85   yellow  (partial / aliasy / one-sided info)
+ *   - <1.0    light-green (close, e.g. gaussian size near miss)
+ *   - 1.0     green   (exact)
+ */
+function factorTone(v: number): React.CSSProperties {
+  if (v <= 0) return { background: 'rgba(220, 53, 69, 0.22)' }
+  if (v < 0.5) return { background: 'rgba(253, 126, 20, 0.20)' }
+  if (v < 0.85) return { background: 'rgba(255, 193, 7, 0.22)' }
+  if (v < 1.0) return { background: 'rgba(40, 167, 69, 0.14)' }
+  return { background: 'rgba(40, 167, 69, 0.28)' }
+}
+
+function scoreTone(score: number): React.CSSProperties {
+  if (score >= 0.85) return { background: 'rgba(40, 167, 69, 0.28)' }
+  if (score >= 0.70) return { background: 'rgba(40, 167, 69, 0.14)' }
+  if (score >= 0.40) return { background: 'rgba(255, 193, 7, 0.22)' }
+  if (score > 0) return { background: 'rgba(253, 126, 20, 0.20)' }
+  return { background: 'rgba(220, 53, 69, 0.22)' }
+}
+
+const OUR_ROW_TINT: React.CSSProperties = { background: 'rgba(0, 123, 255, 0.06)' }
+
+function formatSizeNorm(g: number | null, mg: number | null): string {
+  if (typeof g === 'number') return `${g}g`
+  if (typeof mg === 'number') return `${mg}mg`
+  return '—'
+}
+
+interface MarketReviewTableProps {
+  candidates: Candidate[]
+  ourContext: OurContext
+  ourVariants?: CatalogVariant[]
+  productId: number | null
+  onVerdict: (fuzzyId: number, verdict: 'exact' | 'brand_family' | 'no_match', conf: number | null, productId: number | null) => void
+  pendingFuzzyId: number | null
+  emptyMessage?: string
+}
+
+function MarketReviewTable({
+  candidates,
+  ourContext,
+  ourVariants,
+  productId,
+  onVerdict,
+  pendingFuzzyId,
+  emptyMessage,
+}: MarketReviewTableProps): JSX.Element {
+  const headers = ['Img', 'Listing / Dispensary', 'Brand', 'Category', 'Subcategory', 'Size', 'Pack', 'Strain', 'Score', 'Verdict']
   return (
-    <div
-      style={{
-        display: 'flex',
-        gap: '0.5rem',
-        padding: '0.4rem 0.5rem',
-        border: '1px solid var(--border-color, #d0d0d0)',
-        borderRadius: '4px',
-        background: 'rgba(0,0,0,0.02)',
-        minWidth: '12rem',
-        flex: '1 1 14rem',
-        maxWidth: '20rem',
-      }}
-    >
-      {variant.imageUrl ? (
-        <img
-          alt=""
-          src={variant.imageUrl}
-          style={{ width: '3rem', height: '3rem', objectFit: 'cover', borderRadius: '3px', border: '1px solid #ddd' }}
-        />
-      ) : (
-        <div
-          style={{
-            width: '3rem',
-            height: '3rem',
-            background: '#f1f1f1',
-            borderRadius: '3px',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            color: '#999',
-            fontSize: '0.7rem',
-          }}
-        >
-          no img
-        </div>
-      )}
-      <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0, gap: '0.15rem' }}>
-        <div className="inline-row" style={{ gap: '0.3rem', alignItems: 'center' }}>
-          <Pill tone="muted">{variant.sizeLabel}</Pill>
-          <span
-            style={{
-              fontWeight: 600,
-              fontSize: '0.85rem',
-              overflow: 'hidden',
-              textOverflow: 'ellipsis',
-              whiteSpace: 'nowrap',
-            }}
-          >
+    <div style={{ overflowX: 'auto', border: '1px solid var(--border-color, #d8d8d8)', borderRadius: '4px' }}>
+      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.78rem' }}>
+        <thead>
+          <tr>
+            {headers.map((h) => (
+              <th key={h} style={TABLE_TH}>{h}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {(ourVariants ?? []).map((v) => (
+            <OurVariantRow ctx={ourContext} key={v.catalogProductId} variant={v} />
+          ))}
+          {candidates.length === 0 ? (
+            <tr>
+              <td
+                colSpan={headers.length}
+                style={{ ...TABLE_TD, fontStyle: 'italic', color: 'var(--subtle-text, #777)' }}
+              >
+                {emptyMessage ?? 'No candidates above threshold.'}
+              </td>
+            </tr>
+          ) : (
+            candidates.map((c) => (
+              <CandidateTableRow
+                candidate={c}
+                key={c.fuzzy.id}
+                onVerdict={onVerdict}
+                pendingFuzzyId={pendingFuzzyId}
+                productId={productId}
+              />
+            ))
+          )}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+function OurVariantRow({ variant, ctx }: { variant: CatalogVariant; ctx: OurContext }): JSX.Element {
+  const cell = { ...TABLE_TD, ...OUR_ROW_TINT }
+  return (
+    <tr style={{ borderTop: '2px solid rgba(0,123,255,0.45)' }}>
+      <td style={cell}>
+        {variant.imageUrl ? (
+          <img
+            alt=""
+            src={variant.imageUrl}
+            style={{ width: '2rem', height: '2rem', objectFit: 'cover', borderRadius: '3px', border: '1px solid #ddd', display: 'block' }}
+          />
+        ) : (
+          <span className="subtle-copy" style={{ fontSize: '0.7rem' }}>no img</span>
+        )}
+      </td>
+      <td style={cell}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', flexWrap: 'wrap' }}>
+          <Pill tone="success">OURS</Pill>
+          <span style={{ fontWeight: 600 }}>
             {variant.shortName ?? variant.name ?? `Product ${variant.catalogProductId}`}
           </span>
         </div>
-        <div className="subtle-copy" style={{ fontSize: '0.75rem' }}>
+        <div className="subtle-copy" style={{ fontSize: '0.7rem', marginTop: '0.1rem' }}>
           {variant.sku ? `SKU ${variant.sku}` : '—'}
           {variant.price != null ? ` · $${variant.price.toFixed(2)}` : ''}
         </div>
-      </div>
-    </div>
+      </td>
+      <td style={cell}>{ctx.brand ?? '—'}</td>
+      <td style={cell}>{ctx.category ?? '—'}</td>
+      <td style={cell}>{ctx.subcategory ?? '—'}</td>
+      <td style={cell}>{variant.sizeLabel || formatSizeNorm(variant.sizeGNorm, variant.sizeMgNorm)}</td>
+      <td style={cell}>{variant.packCountNorm ?? '—'}</td>
+      <td style={cell}>—</td>
+      <td style={{ ...cell, textAlign: 'center' }}>
+        <Pill tone="success">target</Pill>
+      </td>
+      <td style={cell}>—</td>
+    </tr>
   )
 }
 
-interface CandidateTableProps {
-  candidates: Candidate[]
-  onVerdict: (fuzzyId: number, verdict: 'exact' | 'brand_family' | 'no_match', conf: number | null) => void
-  pendingFuzzyId: number | null
-}
-
-function CandidateTable({ candidates, onVerdict, pendingFuzzyId }: CandidateTableProps): JSX.Element {
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
-      {candidates.map((c) => (
-        <CandidateRow candidate={c} key={c.fuzzy.id} onVerdict={onVerdict} pendingFuzzyId={pendingFuzzyId} />
-      ))}
-    </div>
-  )
-}
-
-function CandidateRow({
+function CandidateTableRow({
   candidate,
   onVerdict,
   pendingFuzzyId,
+  productId,
 }: {
   candidate: Candidate
-  onVerdict: CandidateTableProps['onVerdict']
+  onVerdict: MarketReviewTableProps['onVerdict']
   pendingFuzzyId: number | null
+  productId: number | null
 }): JSX.Element {
   const c = candidate
   const isPending = pendingFuzzyId === c.fuzzy.id
+  const disabled = isPending || pendingFuzzyId !== null
+  const btnStyle: React.CSSProperties = { padding: '0.15rem 0.4rem', fontSize: '0.72rem', lineHeight: 1.2 }
   return (
-    <div
-      style={{
-        display: 'flex',
-        flexDirection: 'column',
-        gap: '0.25rem',
-        padding: '0.45rem 0.55rem',
-        border: '1px solid var(--border-color, #e0e0e0)',
-        borderRadius: '4px',
-      }}
-    >
-      <div className="inline-row wrap-row" style={{ justifyContent: 'space-between', gap: '0.5rem' }}>
-        <div className="inline-row" style={{ flex: '1 1 14rem', minWidth: 0, gap: '0.5rem', alignItems: 'flex-start' }}>
-          {c.imageUrl ? (
-            <img
-              alt=""
-              loading="lazy"
-              src={c.imageUrl}
-              style={{
-                width: '2.5rem',
-                height: '2.5rem',
-                objectFit: 'cover',
-                borderRadius: '3px',
-                border: '1px solid #ddd',
-                flex: '0 0 auto',
-              }}
-            />
+    <tr>
+      <td style={TABLE_TD}>
+        {c.imageUrl ? (
+          <img
+            alt=""
+            loading="lazy"
+            src={c.imageUrl}
+            style={{ width: '2rem', height: '2rem', objectFit: 'cover', borderRadius: '3px', border: '1px solid #ddd', display: 'block' }}
+          />
+        ) : (
+          <span className="subtle-copy" style={{ fontSize: '0.7rem' }}>—</span>
+        )}
+      </td>
+      <td style={TABLE_TD}>
+        <div>
+          {c.listingUrl ? (
+            <a href={c.listingUrl} rel="noreferrer" target="_blank" style={{ fontWeight: 500 }}>
+              {c.fuzzy.rawInputJsonb?.listingName ?? '—'}
+            </a>
           ) : (
-            <div
-              aria-hidden="true"
-              style={{
-                width: '2.5rem',
-                height: '2.5rem',
-                background: '#f4f4f4',
-                borderRadius: '3px',
-                border: '1px dashed #ddd',
-                flex: '0 0 auto',
-              }}
-            />
+            <span style={{ fontWeight: 500 }}>{c.fuzzy.rawInputJsonb?.listingName ?? '—'}</span>
           )}
-          <div style={{ minWidth: 0, flex: '1 1 auto' }}>
-            <div className="inline-row" style={{ gap: '0.3rem', alignItems: 'center', flexWrap: 'wrap' }}>
-              <Pill tone="muted">{c.matchedSizeLabel || '?'}</Pill>
-              {c.listingUrl ? (
-                <a href={c.listingUrl} rel="noreferrer" target="_blank" style={{ fontWeight: 500 }}>
-                  {c.fuzzy.rawInputJsonb?.listingName ?? '—'}
-                </a>
-              ) : (
-                <span style={{ fontWeight: 500 }}>{c.fuzzy.rawInputJsonb?.listingName ?? '—'}</span>
-              )}
-            </div>
-            <div className="subtle-copy" style={{ fontSize: '0.78rem' }}>
-              {c.dispensaryName ?? '—'} · {c.fuzzy.brandNorm ?? '—'} · {c.fuzzy.categoryNorm ?? '—'}
-            </div>
-          </div>
         </div>
-        <div className="inline-row" style={{ gap: '0.3rem', alignItems: 'center' }}>
-          <Pill tone={c.finalScore >= 0.85 ? 'success' : c.finalScore >= 0.70 ? 'muted' : 'warning'}>
-            {c.finalScore.toFixed(2)}
-          </Pill>
+        <div className="subtle-copy" style={{ fontSize: '0.7rem', marginTop: '0.1rem' }}>
+          {c.dispensaryName ?? '—'}
+        </div>
+      </td>
+      <td style={{ ...TABLE_TD, ...factorTone(c.factors.brand) }} title={`brand factor ${c.factors.brand.toFixed(2)}`}>
+        {c.fuzzy.brandNorm ?? '—'}
+      </td>
+      <td style={{ ...TABLE_TD, ...factorTone(c.factors.category) }} title={`category factor ${c.factors.category.toFixed(2)}`}>
+        {c.fuzzy.categoryNorm ?? '—'}
+      </td>
+      <td style={{ ...TABLE_TD, ...factorTone(c.factors.subcategory) }} title={`subcategory factor ${c.factors.subcategory.toFixed(2)}`}>
+        {c.fuzzy.subcategoryNorm ?? '—'}
+      </td>
+      <td style={{ ...TABLE_TD, ...factorTone(c.factors.size) }} title={`size factor ${c.factors.size.toFixed(2)}`}>
+        {formatSizeNorm(c.fuzzy.sizeGNorm, c.fuzzy.sizeMgNorm)}
+      </td>
+      <td style={{ ...TABLE_TD, ...factorTone(c.factors.pack) }} title={`pack factor ${c.factors.pack.toFixed(2)}`}>
+        {c.fuzzy.packCountNorm ?? '—'}
+      </td>
+      <td style={{ ...TABLE_TD, ...factorTone(c.factors.strain) }} title={`strain factor ${c.factors.strain.toFixed(2)}`}>
+        {c.fuzzy.strainNorm ?? '—'}
+      </td>
+      <td style={{ ...TABLE_TD, ...scoreTone(c.finalScore), textAlign: 'center', fontWeight: 600, fontVariantNumeric: 'tabular-nums' }}>
+        {c.finalScore.toFixed(2)}
+      </td>
+      <td style={TABLE_TD}>
+        <div className="inline-row" style={{ gap: '0.2rem' }}>
           <button
             className="ghost-button"
-            disabled={isPending || pendingFuzzyId !== null}
-            onClick={() => onVerdict(c.fuzzy.id, 'exact', c.finalScore)}
+            disabled={disabled}
+            onClick={() => onVerdict(c.fuzzy.id, 'exact', c.finalScore, productId)}
+            style={btnStyle}
             title="Exact match"
             type="button"
           >
-            ✓ Exact
+            ✓
           </button>
           <button
             className="ghost-button"
-            disabled={isPending || pendingFuzzyId !== null}
-            onClick={() => onVerdict(c.fuzzy.id, 'brand_family', c.finalScore)}
+            disabled={disabled}
+            onClick={() => onVerdict(c.fuzzy.id, 'brand_family', c.finalScore, productId)}
+            style={btnStyle}
             title="Brand/family match"
             type="button"
           >
-            ≈ Family
+            ≈
           </button>
           <button
             className="ghost-button"
-            disabled={isPending || pendingFuzzyId !== null}
-            onClick={() => onVerdict(c.fuzzy.id, 'no_match', c.finalScore)}
+            disabled={disabled}
+            onClick={() => onVerdict(c.fuzzy.id, 'no_match', c.finalScore, productId)}
+            style={btnStyle}
             title="No match"
             type="button"
           >
-            ✗ No
+            ✗
           </button>
         </div>
-      </div>
-      <details style={{ fontSize: '0.75rem' }}>
-        <summary className="subtle-copy">Score factors</summary>
-        <div className="subtle-copy" style={{ marginTop: '0.2rem' }}>
-          brand {c.factors.brand.toFixed(2)} · cat {c.factors.category.toFixed(2)} · sub {c.factors.subcategory.toFixed(2)}
-          {' '}· size {c.factors.size.toFixed(2)} · pack {c.factors.pack.toFixed(2)} · strain {c.factors.strain.toFixed(2)}
-        </div>
-      </details>
-    </div>
+      </td>
+    </tr>
   )
 }
