@@ -1531,6 +1531,10 @@ function buildTransportErrorMessage(requestLabel: string, error: unknown): strin
 }
 
 async function delayPricingMarketRetry(attempt: number, baseDelayMs: number): Promise<void> {
-  const delayMs = Math.min(baseDelayMs * 2 ** attempt, 8000)
+  // Sub-exponential power-law backoff: base * (attempt+1)^1.5
+  // (repo-wide standing rule — see workerLoop.getRetryDelayMs).
+  // `attempt` is 0-indexed at the first failure, so we use
+  // (attempt+1) to keep the first retry at the base delay.
+  const delayMs = Math.min(Math.round(baseDelayMs * Math.pow(attempt + 1, 1.5)), 8000)
   await new Promise((resolve) => setTimeout(resolve, delayMs))
 }

@@ -192,6 +192,22 @@ function delay(milliseconds: number): Promise<void> {
   })
 }
 
+/**
+ * Sub-exponential power-law backoff: base * attempt^1.5.
+ *
+ * Standing rule across the repo: all retry backoffs MUST be
+ * sub-exponential (polynomial growth, e.g. n^1.5) rather than
+ * exponential (a^n for any a > 1). Exponential schedules push the
+ * later retries into multi-hour territory after only a handful of
+ * attempts, which is exactly the "we'll get to it eventually" /
+ * "timed out, gave up" behaviour we've ruled out for live work.
+ * A polynomial schedule still gives the upstream room to breathe
+ * while keeping the worst-case delay bounded and predictable.
+ *
+ * Sample (`baseDelayMs=1000`): 1s, 2.83s, 5.20s, 8s, 11.18s, 14.7s,
+ * …, attempt 30 ≈ 164s — well under the 5-min cap.
+ */
 function getRetryDelayMs(attemptCount: number, baseDelayMs: number): number {
-  return Math.min(baseDelayMs * 2 ** Math.max(attemptCount - 1, 0), 5 * 60 * 1000)
+  const attempt = Math.max(attemptCount, 1)
+  return Math.min(Math.round(baseDelayMs * Math.pow(attempt, 1.5)), 5 * 60 * 1000)
 }

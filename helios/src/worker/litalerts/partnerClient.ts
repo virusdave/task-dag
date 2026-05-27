@@ -215,7 +215,7 @@ async function fetchPartnerJson(path: string): Promise<unknown> {
   const url = `${PARTNER_API_BASE_URL}${path}`
   const requestLabel = `Lit Alerts partner ${path}`
 
-  // Inline retry-with-exponential-backoff loop. Every transient
+  // Inline retry-with-sub-exponential-backoff loop. Every transient
   // condition (timeout, 5xx, 429, abort, socket hang-up, malformed
   // JSON body) used to surface as a single `RetryableWorkerError`,
   // which was correct in principle but, in practice, the caller in
@@ -233,7 +233,9 @@ async function fetchPartnerJson(path: string): Promise<unknown> {
       if (error instanceof RetryableWorkerError) {
         lastTransientError = error
         if (attempt < PARTNER_API_MAX_TRANSPORT_ATTEMPTS) {
-          const delayMs = PARTNER_API_RETRY_BASE_DELAY_MS * 2 ** (attempt - 1)
+          // Sub-exponential power-law backoff: base * attempt^1.5
+          // (repo-wide standing rule — see workerLoop.getRetryDelayMs).
+          const delayMs = Math.round(PARTNER_API_RETRY_BASE_DELAY_MS * Math.pow(attempt, 1.5))
           console.warn(
             `[litalerts.partnerClient] ${requestLabel} attempt ${attempt}/${PARTNER_API_MAX_TRANSPORT_ATTEMPTS} ` +
               `failed transiently (${error.message}); retrying in ${delayMs}ms`,
