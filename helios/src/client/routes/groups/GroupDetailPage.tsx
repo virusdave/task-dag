@@ -124,7 +124,7 @@ export function GroupDetailPage() {
             <div>
               <h3>Recent Sales</h3>
               <p className="subtle-copy">
-                {`Across Bronx + Midtown from ${data.recentSales.reportSource} · ${formatCoverage(data.recentSales.summary)}`}
+                {`Across Bronx + Midtown · last 30 days · ${formatCoverage(data.recentSales.summary)}`}
               </p>
             </div>
             <Pill tone={recentSalesIndicator.tone}>{recentSalesIndicator.detailLabel}</Pill>

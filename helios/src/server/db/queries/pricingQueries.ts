@@ -611,7 +611,7 @@ export async function getPricingRunDetail(
     `,
     [proposalBatchId],
   )
-  const recentSalesResult = await loadPricingRecentSales(reviewItemResult.rows)
+  const recentSalesResult = await loadPricingRecentSales(db, reviewItemResult.rows)
   const reviewItemsByProposalRowId = new Map<number, PricingReviewItem[]>()
   for (const row of reviewItemResult.rows) {
     const reviewItems = reviewItemsByProposalRowId.get(row.proposal_row_id)
@@ -753,7 +753,7 @@ export async function listPricingReviewItems(
     ),
   ])
 
-  const recentSalesResult = await loadPricingRecentSales(itemsResult.rows)
+  const recentSalesResult = await loadPricingRecentSales(db, itemsResult.rows)
 
   return {
     filters: effectiveFilters,
@@ -903,7 +903,10 @@ function mapPricingReviewItem(
   }
 }
 
-async function loadPricingRecentSales(rows: PricingReviewRow[]): Promise<{
+async function loadPricingRecentSales(
+  db: Queryable,
+  rows: PricingReviewRow[],
+): Promise<{
   byGroupId: Map<number, GroupRecentSales>
   fallbackByGroupId: Map<number, GroupRecentSales>
   issue: string | null
@@ -929,6 +932,7 @@ async function loadPricingRecentSales(rows: PricingReviewRow[]): Promise<{
 
   try {
     const byGroupId = await loadRecentSalesForGroups(
+      db,
       [...uniqueGroups.entries()].map(([catalogGroupId, liveState]) => ({ catalogGroupId, liveState })),
     )
     return {

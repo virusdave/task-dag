@@ -59,7 +59,14 @@ export type GroupRecentSalesProductRow = z.infer<typeof GroupRecentSalesProductR
 
 export const GroupRecentSalesSchema = z.object({
   productRows: z.array(GroupRecentSalesProductRowSchema),
-  reportSource: z.literal('store.reports.reorder'),
+  // Provenance of the per-product sales metrics. v1 of this surface
+  // streamed Sweed's `store.reports.reorder` RPC live (and cold-page
+  // for ~24s on /catalog/groups/:id, which is why this label used to
+  // be `store.reports.reorder`). v2 reads the same numbers out of
+  // helios's own `sweed_orders` + `sweed_package_current` mirror in
+  // a single SQL aggregation, so the label now reflects that
+  // helios-local source of truth.
+  reportSource: z.literal('helios.sweed_orders'),
   sites: z.array(
     z.object({
       siteDealerId: z.number().int().positive(),

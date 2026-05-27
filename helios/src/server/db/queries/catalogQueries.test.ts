@@ -21,7 +21,7 @@ import type { Queryable } from '../pool.js'
 vi.mock('../../catalog/liveRecentSales.js', () => ({
   buildEmptyGroupRecentSales: () => ({
     productRows: [],
-    reportSource: 'store.reports.reorder' as const,
+    reportSource: 'helios.sweed_orders' as const,
     sites: [],
     summary: {
       combinationCount: 0,
