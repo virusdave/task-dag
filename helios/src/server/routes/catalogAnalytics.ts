@@ -39,6 +39,7 @@ export async function registerCatalogAnalyticsRoutes(
       subcategoryIds: parsed.subcategoryIds,
       brandIds: parsed.brandIds,
       sizes: parsed.sizes,
+      packCounts: parsed.packCounts,
     })
     return reply.send(CatalogAnalyticsFiltersResponseSchema.parse(result))
   })
@@ -64,6 +65,7 @@ export async function registerCatalogAnalyticsRoutes(
       subcategoryIds: parsed.subcategoryIds,
       brandIds: parsed.brandIds,
       sizes: parsed.sizes,
+      packCounts: parsed.packCounts,
     })
     return reply.send(CatalogAnalyticsPointsResponseSchema.parse(result))
   })

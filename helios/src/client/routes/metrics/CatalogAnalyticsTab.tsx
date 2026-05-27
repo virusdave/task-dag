@@ -16,7 +16,7 @@ import {
   type CatalogAnalyticsPointsResponse,
 } from '../../../shared/contracts/index.js'
 import { loadJson } from '../../app/fetchJson.js'
-import { CatalogFilterBar } from './CatalogFilterBar.js'
+import { CatalogFilterBar, FilterDropdown } from './CatalogFilterBar.js'
 import { HelpIcon } from './MetricChart.js'
 import { computeCompactDomain } from './scatterAutoZoom.js'
 import { useScatterZoom, type ZoomView } from './scatterZoom.js'
@@ -137,6 +137,48 @@ function weeksOfSupplyOnHand(p: CatalogAnalyticsPoint): number | null {
   if (p.currentQty == null || p.salesVelocityUnitsPerDay == null) return null
   if (p.salesVelocityUnitsPerDay <= 0) return null
   return p.currentQty / (p.salesVelocityUnitsPerDay * 7)
+}
+
+// "Total size sold over the window" — grams sold of this variant.
+// units_sold × unit_size_g. Edibles / tinctures use the mg variant.
+function totalGramsSoldWindow(p: CatalogAnalyticsPoint): number | null {
+  if (p.unitsSold == null || p.unitSizeGrams == null) return null
+  return p.unitsSold * p.unitSizeGrams
+}
+function totalMgSoldWindow(p: CatalogAnalyticsPoint): number | null {
+  if (p.unitsSold == null || p.unitSizeMg == null) return null
+  return p.unitsSold * p.unitSizeMg
+}
+
+// Pack-aware total size — pack_count × unit_size_g (e.g. a 5-pack of
+// 0.5g pre-rolls = 2.5g per package). Independent of sales — answers
+// "how much of the active substance does a single package contain?".
+function packTotalGrams(p: CatalogAnalyticsPoint): number | null {
+  if (p.packCount == null || p.unitSizeGrams == null) return null
+  return p.packCount * p.unitSizeGrams
+}
+function packTotalMg(p: CatalogAnalyticsPoint): number | null {
+  if (p.packCount == null || p.unitSizeMg == null) return null
+  return p.packCount * p.unitSizeMg
+}
+
+// "$ below market" — positive = we're cheaper than the median peer
+// listing. Negative = we're more expensive. Compared pre-tax against
+// our list (shelf) price, NOT our OTD price — `marketPricePretaxDollars`
+// is itself pre-tax.
+function dollarsBelowMarket(p: CatalogAnalyticsPoint): number | null {
+  if (p.marketPricePretaxDollars == null || p.listPriceDollars == null) return null
+  return p.marketPricePretaxDollars - p.listPriceDollars
+}
+function percentBelowMarket(p: CatalogAnalyticsPoint): number | null {
+  if (p.marketPricePretaxDollars == null || p.listPriceDollars == null) return null
+  if (p.marketPricePretaxDollars <= 0) return null
+  return ((p.marketPricePretaxDollars - p.listPriceDollars) / p.marketPricePretaxDollars) * 100
+}
+function ourPriceOverMarket(p: CatalogAnalyticsPoint): number | null {
+  if (p.marketPricePretaxDollars == null || p.listPriceDollars == null) return null
+  if (p.marketPricePretaxDollars <= 0) return null
+  return p.listPriceDollars / p.marketPricePretaxDollars
 }
 
 function cohortKey(p: CatalogAnalyticsPoint): string {
@@ -376,6 +418,93 @@ const POINT_AXES: ReadonlyArray<PointAxisDef> = [
     short: 'GM% Δ',
     value: gmPercentIndex,
     format: fmtPctSigned,
+  },
+
+  // --- pack / unit-size axes (added 2026-05-27) ---
+  // packCount, unitSizeGrams, unitSizeMg come straight off the point.
+  // "Total size" variants are derived from sales × unit size; pack
+  // variants are pack × unit size (independent of sales).
+  {
+    id: 'packCount',
+    label: 'Pack size (units per package)',
+    short: 'Pack',
+    value: (p) => p.packCount,
+    format: fmtNum,
+  },
+  {
+    id: 'unitSizeGrams',
+    label: 'Unit size (grams)',
+    short: 'Unit g',
+    value: (p) => p.unitSizeGrams,
+    format: fmtNum,
+  },
+  {
+    id: 'unitSizeMg',
+    label: 'Unit size (mg, edibles / tinctures)',
+    short: 'Unit mg',
+    value: (p) => p.unitSizeMg,
+    format: fmtNum,
+  },
+  {
+    id: 'packTotalGrams',
+    label: 'Total grams per package (pack × unit size)',
+    short: 'Pkg g',
+    value: packTotalGrams,
+    format: fmtNum,
+  },
+  {
+    id: 'packTotalMg',
+    label: 'Total mg per package (pack × unit size, edibles)',
+    short: 'Pkg mg',
+    value: packTotalMg,
+    format: fmtNum,
+  },
+  {
+    id: 'totalGramsSoldWindow',
+    label: 'Total grams sold (units × unit size, window)',
+    short: 'g sold',
+    value: totalGramsSoldWindow,
+    format: fmtNum,
+  },
+  {
+    id: 'totalMgSoldWindow',
+    label: 'Total mg sold (units × unit size, window, edibles)',
+    short: 'mg sold',
+    value: totalMgSoldWindow,
+    format: fmtNum,
+  },
+
+  // --- market-data axes (added 2026-05-27) ---
+  // Driven by live catalog_market_matches × fuzzy_skus listings.
+  // `marketPricePretaxDollars` is null when no live matches exist;
+  // derived axes return null in that case (chart drops the dot).
+  {
+    id: 'marketPricePretaxDollars',
+    label: 'Market price (median pretax, $/unit)',
+    short: 'Mkt $',
+    value: (p) => p.marketPricePretaxDollars,
+    format: fmtMoney,
+  },
+  {
+    id: 'dollarsBelowMarket',
+    label: '$ below market (market − list, pretax; +cheaper / −expensive)',
+    short: '$ <mkt',
+    value: dollarsBelowMarket,
+    format: fmtMoney,
+  },
+  {
+    id: 'percentBelowMarket',
+    label: '% below market (market − list / market; +cheaper / −expensive)',
+    short: '% <mkt',
+    value: percentBelowMarket,
+    format: fmtPctSigned,
+  },
+  {
+    id: 'ourPriceOverMarket',
+    label: 'List ÷ market ratio (1.0 = parity, <1 cheaper)',
+    short: 'List/Mkt',
+    value: ourPriceOverMarket,
+    format: fmtX,
   },
 ]
 
@@ -1356,6 +1485,9 @@ export function CatalogAnalyticsTab() {
     () => new Set<string>(),
   )
   const [selectedSizes, setSelectedSizes] = useState<ReadonlySet<string>>(() => new Set<string>())
+  const [selectedPackCounts, setSelectedPackCounts] = useState<ReadonlySet<string>>(
+    () => new Set<string>(),
+  )
 
   const sitesParam = useMemo(() => Array.from(selectedSites).join(','), [selectedSites])
   const categoryIdsParam = useMemo(
@@ -1373,6 +1505,10 @@ export function CatalogAnalyticsTab() {
   const sizesParam = useMemo(
     () => Array.from(selectedSizes).sort().join(','),
     [selectedSizes],
+  )
+  const packCountsParam = useMemo(
+    () => Array.from(selectedPackCounts).sort().join(','),
+    [selectedPackCounts],
   )
 
   // -------- Page-wide chart controls --------
@@ -1409,6 +1545,7 @@ export function CatalogAnalyticsTab() {
       if (subcategoryIdsParam) qs.set('subcategoryIds', subcategoryIdsParam)
       if (brandIdsParam) qs.set('brandIds', brandIdsParam)
       if (sizesParam) qs.set('sizes', sizesParam)
+      if (packCountsParam) qs.set('packCounts', packCountsParam)
       const url = qs.toString()
         ? `/api/catalog-analytics/filters?${qs.toString()}`
         : '/api/catalog-analytics/filters'
@@ -1419,7 +1556,7 @@ export function CatalogAnalyticsTab() {
         .catch((e) => {
           if (!cancelled) {
             setError(`Failed to load filter options: ${(e as Error).message}`)
-            setFilters({ categories: [], subcategories: [], brands: [], sizes: [] })
+            setFilters({ categories: [], subcategories: [], brands: [], sizes: [], packCounts: [] })
           }
         })
         .finally(() => {
@@ -1430,7 +1567,7 @@ export function CatalogAnalyticsTab() {
       cancelled = true
       clearTimeout(handle)
     }
-  }, [sitesParam, categoryIdsParam, subcategoryIdsParam, brandIdsParam, sizesParam])
+  }, [sitesParam, categoryIdsParam, subcategoryIdsParam, brandIdsParam, sizesParam, packCountsParam])
 
   // Fetch points whenever ANY filter changes. We debounce filter changes
   // by 250ms so multi-select chip-clicks don't trigger N queries.
@@ -1444,6 +1581,7 @@ export function CatalogAnalyticsTab() {
         Array.from(selectedSubcategoryIds).sort().join(','),
         Array.from(selectedBrandIds).sort().join(','),
         Array.from(selectedSizes).sort().join(','),
+        Array.from(selectedPackCounts).sort().join(','),
       ].join('|'),
     [
       range.fromMs,
@@ -1453,6 +1591,7 @@ export function CatalogAnalyticsTab() {
       selectedSubcategoryIds,
       selectedBrandIds,
       selectedSizes,
+      selectedPackCounts,
     ],
   )
   useEffect(() => {
@@ -1471,6 +1610,8 @@ export function CatalogAnalyticsTab() {
         qs.set('subcategoryIds', Array.from(selectedSubcategoryIds).join(','))
       if (selectedBrandIds.size > 0) qs.set('brandIds', Array.from(selectedBrandIds).join(','))
       if (selectedSizes.size > 0) qs.set('sizes', Array.from(selectedSizes).join(','))
+      if (selectedPackCounts.size > 0)
+        qs.set('packCounts', Array.from(selectedPackCounts).join(','))
       loadJson(
         `/api/catalog-analytics/points?${qs.toString()}`,
         CatalogAnalyticsPointsResponseSchema,
@@ -1680,28 +1821,44 @@ export function CatalogAnalyticsTab() {
         </div>
       </div>
 
-      <CatalogFilterBar
-        filters={filters}
-        loading={loadingFilters}
-        selection={{
-          categoryIds: selectedCategoryIds,
-          subcategoryIds: selectedSubcategoryIds,
-          brandIds: selectedBrandIds,
-          sizes: selectedSizes,
-        }}
-        callbacks={{
-          onCategoryToggle: makeSetToggler(setSelectedCategoryIds),
-          onSubcategoryToggle: makeSetToggler(setSelectedSubcategoryIds),
-          onBrandToggle: makeSetToggler(setSelectedBrandIds),
-          onSizeToggle: makeSetToggler(setSelectedSizes),
-          onClearAll: () => {
-            setSelectedCategoryIds(new Set())
-            setSelectedSubcategoryIds(new Set())
-            setSelectedBrandIds(new Set())
-            setSelectedSizes(new Set())
-          },
-        }}
-      />
+      <div className="catalog-analytics-filterbar-row">
+        <CatalogFilterBar
+          filters={filters}
+          loading={loadingFilters}
+          selection={{
+            categoryIds: selectedCategoryIds,
+            subcategoryIds: selectedSubcategoryIds,
+            brandIds: selectedBrandIds,
+            sizes: selectedSizes,
+          }}
+          callbacks={{
+            onCategoryToggle: makeSetToggler(setSelectedCategoryIds),
+            onSubcategoryToggle: makeSetToggler(setSelectedSubcategoryIds),
+            onBrandToggle: makeSetToggler(setSelectedBrandIds),
+            onSizeToggle: makeSetToggler(setSelectedSizes),
+            onClearAll: () => {
+              setSelectedCategoryIds(new Set())
+              setSelectedSubcategoryIds(new Set())
+              setSelectedBrandIds(new Set())
+              setSelectedSizes(new Set())
+              setSelectedPackCounts(new Set())
+            },
+          }}
+        />
+        {/* Pack-count filter lives outside the shared CatalogFilterBar
+            so the sales / inventory pages (which don't carry packOfSize
+            on their metric defs) don't have to widen their dimension
+            enum. Uses the same FilterDropdown chip so it visually
+            joins the row. */}
+        {filters?.packCounts && filters.packCounts.length > 0 ? (
+          <FilterDropdown
+            label="Pack"
+            options={filters.packCounts}
+            selected={selectedPackCounts}
+            onToggle={makeSetToggler(setSelectedPackCounts)}
+          />
+        ) : null}
+      </div>
 
       {error ? (
         <p className="metric-chart-error">{error}</p>

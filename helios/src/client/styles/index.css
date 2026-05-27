@@ -3438,6 +3438,20 @@ span.metric-chart-legend-item {
   padding: 0.4rem 0;
 }
 
+/* Wraps the shared CatalogFilterBar AND any tab-specific extras (e.g.
+   the pack-count chip on /metrics/catalog) so they all sit in one
+   row and wrap together. The bar itself owns its inner padding; this
+   container only contributes flex behaviour. */
+.catalog-analytics-filterbar-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem 0.5rem;
+}
+.catalog-analytics-filterbar-row > .catalog-analytics-filterbar {
+  padding: 0;
+}
+
 .catalog-analytics-filterdrop {
   position: relative;
   display: inline-flex;

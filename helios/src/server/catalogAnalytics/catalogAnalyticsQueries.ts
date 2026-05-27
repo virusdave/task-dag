@@ -55,6 +55,51 @@ function asStr(v: unknown): string | null {
   return s.length > 0 ? s : null
 }
 
+/**
+ * Parse a Sweed `sizeName` string and return its numeric unit size in
+ * grams + milligrams (whichever the input expresses, never both).
+ *
+ *   "1g"     → { grams: 1,    mg: null }
+ *   "3.5g"   → { grams: 3.5,  mg: null }
+ *   "0.5g"   → { grams: 0.5,  mg: null }
+ *   "10mg"   → { grams: null, mg: 10 }
+ *   "100 MG" → { grams: null, mg: 100 }
+ *   "1oz"    → { grams: 28.3495, mg: null }
+ *   "1ct" / "Each" / unparseable → { grams: null, mg: null }
+ *
+ * Returned in a single object so the caller doesn't have to invoke
+ * two regexes per row. `mg` parsing takes precedence — "10mg" must
+ * not be misread as 10g via the `g` branch.
+ */
+function parseUnitSize(sizeLabel: string | null): {
+  grams: number | null
+  mg: number | null
+} {
+  if (!sizeLabel) return { grams: null, mg: null }
+  const s = sizeLabel.trim().toLowerCase()
+  if (s.length === 0) return { grams: null, mg: null }
+  // Try mg first (otherwise "10mg" matches the `g` branch as 10g).
+  const mgMatch = s.match(/(\d+(?:\.\d+)?)\s*mg\b/)
+  if (mgMatch?.[1]) {
+    const n = Number.parseFloat(mgMatch[1])
+    if (Number.isFinite(n) && n > 0) return { grams: null, mg: n }
+  }
+  // Grams — require a word boundary to avoid "mg".
+  const gMatch = s.match(/(\d+(?:\.\d+)?)\s*g\b/)
+  if (gMatch?.[1]) {
+    const n = Number.parseFloat(gMatch[1])
+    if (Number.isFinite(n) && n > 0) return { grams: n, mg: null }
+  }
+  // Ounces — convert to grams (1 oz = 28.3495 g, ish; precise enough
+  // for the scatter / for "total grams sold" aggregates).
+  const ozMatch = s.match(/(\d+(?:\.\d+)?)\s*oz\b/)
+  if (ozMatch?.[1]) {
+    const n = Number.parseFloat(ozMatch[1])
+    if (Number.isFinite(n) && n > 0) return { grams: n * 28.3495, mg: null }
+  }
+  return { grams: null, mg: null }
+}
+
 // ============================ Filters endpoint =============================
 
 export interface CatalogAnalyticsFiltersArgs {
@@ -63,6 +108,7 @@ export interface CatalogAnalyticsFiltersArgs {
   readonly subcategoryIds?: readonly string[]
   readonly brandIds?: readonly string[]
   readonly sizes?: readonly string[]
+  readonly packCounts?: readonly string[]
 }
 
 export async function getCatalogAnalyticsFilters(
@@ -70,7 +116,7 @@ export async function getCatalogAnalyticsFilters(
 ): Promise<CatalogAnalyticsFiltersResponse> {
   const dealerIds = resolveDealerIds(opts.sites)
   if (dealerIds.length === 0) {
-    return { categories: [], subcategories: [], brands: [], sizes: [] }
+    return { categories: [], subcategories: [], brands: [], sizes: [], packCounts: [] }
   }
   const pool = getPool()
 
@@ -78,6 +124,7 @@ export async function getCatalogAnalyticsFilters(
   const subcategoryIds = opts.subcategoryIds ?? []
   const brandIds = opts.brandIds ?? []
   const sizes = opts.sizes ?? []
+  const packCounts = opts.packCounts ?? []
 
   // Restrict filter options to packages currently in sweed_package_current.
   // We keep zero-on-hand packages because they are valid analytics
@@ -100,13 +147,15 @@ export async function getCatalogAnalyticsFilters(
   //   $3 = subcategoryIds text[] (selected subcategories)
   //   $4 = brandIds text[]       (selected brands)
   //   $5 = sizes text[]          (selected sizes)
+  //   $6 = packCounts text[]     (selected pack counts, integers-as-strings)
   const sql = `
     with mapping as (
       select cg.brand_name,
              cg.category_name,
              cg.subcategory_name,
              (prod->>'productId')::bigint as product_id,
-             prod->>'sizeName' as size_name
+             prod->>'sizeName' as size_name,
+             nullif(prod->>'packOfSize', '')::int as pack_of_size
       from catalog_groups cg,
            jsonb_array_elements(cg.live_state_json->'products') as prod
       where cg.deleted_at is null
@@ -117,15 +166,18 @@ export async function getCatalogAnalyticsFilters(
              m.subcategory_name,
              m.brand_name,
              m.size_name,
+             m.pack_of_size,
              coalesce(nullif(m.category_name, ''),    '(uncategorised)')   as category_label,
              coalesce(nullif(m.subcategory_name, ''), '(no subcategory)')  as subcategory_label,
              coalesce(nullif(m.brand_name, ''),       '(no brand)')        as brand_label,
-             coalesce(nullif(m.size_name, ''),        '(no size)')         as size_label
+             coalesce(nullif(m.size_name, ''),        '(no size)')         as size_label,
+             case when m.pack_of_size is null then '(unknown)'
+                  else m.pack_of_size::text end as pack_count_label
       from sweed_package_current spc
         left join mapping m on m.product_id = spc.product_id
       where spc.dealer_id = any($1::bigint[])
     )
-    -- categories: apply subcat + brand + size selections, NOT category
+    -- categories: apply subcat + brand + size + pack-count, NOT category
     select 'category' as kind,
            category_label as id,
            category_label as label,
@@ -135,9 +187,10 @@ export async function getCatalogAnalyticsFilters(
       and (cardinality($3::text[]) = 0 or subcategory_label = any($3::text[]))
       and (cardinality($4::text[]) = 0 or brand_label       = any($4::text[]))
       and (cardinality($5::text[]) = 0 or size_label        = any($5::text[]))
+      and (cardinality($6::text[]) = 0 or pack_count_label  = any($6::text[]))
     group by 1, 2, 3
     union all
-    -- subcategories: apply category + brand + size, NOT subcategory
+    -- subcategories: apply category + brand + size + pack-count, NOT subcategory
     select 'subcategory',
            subcategory_label,
            subcategory_label,
@@ -147,9 +200,10 @@ export async function getCatalogAnalyticsFilters(
       and (cardinality($2::text[]) = 0 or category_label = any($2::text[]))
       and (cardinality($4::text[]) = 0 or brand_label    = any($4::text[]))
       and (cardinality($5::text[]) = 0 or size_label     = any($5::text[]))
+      and (cardinality($6::text[]) = 0 or pack_count_label = any($6::text[]))
     group by 1, 2, 3
     union all
-    -- brands: apply category + subcat + size, NOT brand
+    -- brands: apply category + subcat + size + pack-count, NOT brand
     select 'brand',
            brand_label,
            brand_label,
@@ -159,9 +213,10 @@ export async function getCatalogAnalyticsFilters(
       and (cardinality($2::text[]) = 0 or category_label    = any($2::text[]))
       and (cardinality($3::text[]) = 0 or subcategory_label = any($3::text[]))
       and (cardinality($5::text[]) = 0 or size_label        = any($5::text[]))
+      and (cardinality($6::text[]) = 0 or pack_count_label  = any($6::text[]))
     group by 1, 2, 3
     union all
-    -- sizes: apply category + subcat + brand, NOT size
+    -- sizes: apply category + subcat + brand + pack-count, NOT size
     select 'size',
            size_label,
            size_label,
@@ -171,23 +226,50 @@ export async function getCatalogAnalyticsFilters(
       and (cardinality($2::text[]) = 0 or category_label    = any($2::text[]))
       and (cardinality($3::text[]) = 0 or subcategory_label = any($3::text[]))
       and (cardinality($4::text[]) = 0 or brand_label       = any($4::text[]))
+      and (cardinality($6::text[]) = 0 or pack_count_label  = any($6::text[]))
+    group by 1, 2, 3
+    union all
+    -- pack counts: apply category + subcat + brand + size, NOT pack-count
+    select 'packCount',
+           pack_count_label,
+           pack_count_label,
+           count(distinct inventory_item_id)::int
+    from base
+    where (cardinality($2::text[]) = 0 or category_label    = any($2::text[]))
+      and (cardinality($3::text[]) = 0 or subcategory_label = any($3::text[]))
+      and (cardinality($4::text[]) = 0 or brand_label       = any($4::text[]))
+      and (cardinality($5::text[]) = 0 or size_label        = any($5::text[]))
     group by 1, 2, 3
   `
 
   const result = await pool.query<{
-    kind: 'category' | 'subcategory' | 'brand' | 'size'
+    kind: 'category' | 'subcategory' | 'brand' | 'size' | 'packCount'
     id: string
     label: string
     item_count: number
-  }>(sql, [dealerIds, categoryIds, subcategoryIds, brandIds, sizes])
+  }>(sql, [dealerIds, categoryIds, subcategoryIds, brandIds, sizes, packCounts])
 
   const out: CatalogAnalyticsFiltersResponse = {
     categories: [],
     subcategories: [],
     brands: [],
     sizes: [],
+    packCounts: [],
   }
   for (const row of result.rows) {
+    if (row.kind === 'packCount') {
+      // Pre-display: "1" → "1 per pkg", "5" → "5-pack", unknown → "unknown".
+      // The id stays the raw integer string so the round-trip filter
+      // param matches what the SQL pack_count_label compares against.
+      const n = Number.parseInt(row.id, 10)
+      const label = Number.isFinite(n)
+        ? n === 1
+          ? '1 per pkg'
+          : `${n}-pack`
+        : row.label
+      out.packCounts.push({ id: row.id, label, itemCount: row.item_count })
+      continue
+    }
     const opt: CatalogFilterOption = {
       id: row.id,
       label: row.label,
@@ -205,14 +287,26 @@ export async function getCatalogAnalyticsFilters(
   //  * brands — alphabetical only. There are dozens of comparable
   //    brands; the operator generally knows the brand they're looking
   //    for and wants to find it by name, not by volume.
+  //  * packCounts — numeric ascending; "(unknown)" sinks to the end.
   const sortByCount = (a: CatalogFilterOption, b: CatalogFilterOption) =>
     b.itemCount - a.itemCount || a.label.localeCompare(b.label)
   const sortByLabel = (a: CatalogFilterOption, b: CatalogFilterOption) =>
     a.label.localeCompare(b.label)
+  const sortPackCount = (a: CatalogFilterOption, b: CatalogFilterOption) => {
+    const an = Number.parseInt(a.id, 10)
+    const bn = Number.parseInt(b.id, 10)
+    const aIsNum = Number.isFinite(an)
+    const bIsNum = Number.isFinite(bn)
+    if (aIsNum && bIsNum) return an - bn
+    if (aIsNum) return -1
+    if (bIsNum) return 1
+    return a.label.localeCompare(b.label)
+  }
   out.categories.sort(sortByCount)
   out.subcategories.sort(sortByCount)
   out.sizes.sort(sortByCount)
   out.brands.sort(sortByLabel)
+  out.packCounts.sort(sortPackCount)
   return out
 }
 
@@ -226,6 +320,7 @@ export interface CatalogAnalyticsPointsArgs {
   readonly subcategoryIds: readonly string[]
   readonly brandIds: readonly string[]
   readonly sizes: readonly string[]
+  readonly packCounts: readonly string[]
 }
 
 export async function getCatalogAnalyticsPoints(
@@ -245,6 +340,7 @@ export async function getCatalogAnalyticsPoints(
     subcategoryIds: [...args.subcategoryIds],
     brandIds: [...args.brandIds],
     sizes: [...args.sizes],
+    packCounts: [...args.packCounts],
     windowDays,
   }
 
@@ -262,6 +358,7 @@ export async function getCatalogAnalyticsPoints(
   //   $5 = subcategoryNames text[] (empty = unfiltered) — joined off catalog_groups
   //   $6 = brandNames text[]       (empty = unfiltered) — joined off catalog_groups
   //   $7 = sizes text[]            (empty = unfiltered) — joined off catalog_groups
+  //   $8 = packCounts text[]       (empty = unfiltered) — integers-as-strings; "(unknown)" matches null packOfSize
   const params: unknown[] = [
     dealerIds,
     args.from,
@@ -270,6 +367,7 @@ export async function getCatalogAnalyticsPoints(
     args.subcategoryIds,
     args.brandIds,
     args.sizes,
+    args.packCounts,
   ]
 
   // Effective tax ratio per dealer over the window. NYC cannabis tax is
@@ -319,7 +417,8 @@ export async function getCatalogAnalyticsPoints(
       group by so.dealer_id, item->>'inventoryItemId'
     ),
     mapping as (
-      select cg.brand_name,
+      select cg.id as catalog_group_id,
+             cg.brand_name,
              cg.category_name,
              cg.subcategory_name,
              cg.group_name,
@@ -328,6 +427,7 @@ export async function getCatalogAnalyticsPoints(
              prod->>'name' as product_name,
              prod->>'shortName' as product_short_name,
              prod->>'sku' as product_sku,
+             nullif(prod->>'packOfSize', '')::int as pack_of_size,
              -- Pre-tax list (shelf) price per unit. Catalog groups carry
              -- one product entry per (size) variant, so this is the
              -- shelf price for THIS specific (product_id, size_name).
@@ -337,6 +437,35 @@ export async function getCatalogAnalyticsPoints(
       from catalog_groups cg,
            jsonb_array_elements(cg.live_state_json->'products') as prod
       where cg.deleted_at is null
+    ),
+    -- Median pre-tax market price per matched catalog_group × product.
+    -- Sourced from live (non-superseded) exact / brand_family verdicts
+    -- in catalog_market_matches, joined to the original LitAlerts /
+    -- partner listing's salePrice ?? normalPrice. Only product-scoped
+    -- matches (catalog_product_id not null) are included so different-
+    -- size matches on the same brand/group don't pollute each other.
+    -- Variants with no matches surface as NULL — the chart renderer
+    -- drops null-axis points cleanly.
+    market_price as (
+      select cmm.catalog_group_id,
+             cmm.catalog_product_id,
+             percentile_cont(0.5) within group (order by
+               coalesce(
+                 nullif(fs.raw_input_jsonb->>'salePrice', '')::numeric,
+                 nullif(fs.raw_input_jsonb->>'normalPrice', '')::numeric
+               )
+             ) as median_pretax_price,
+             count(*)::int as sample_count
+      from catalog_market_matches cmm
+        join fuzzy_skus fs on fs.id = cmm.fuzzy_sku_id
+      where cmm.superseded_by_id is null
+        and cmm.verdict in ('exact', 'brand_family')
+        and cmm.catalog_product_id is not null
+        and coalesce(
+              nullif(fs.raw_input_jsonb->>'salePrice', '')::numeric,
+              nullif(fs.raw_input_jsonb->>'normalPrice', '')::numeric
+            ) > 0
+      group by cmm.catalog_group_id, cmm.catalog_product_id
     )
     select cur.dealer_id,
            cur.inventory_item_id,
@@ -348,6 +477,7 @@ export async function getCatalogAnalyticsPoints(
            m.subcategory_name,
            m.brand_name,
            m.size_name as size_label,
+           m.pack_of_size,
            cur.current_qty,
            cur.available_qty,
            cur.is_on_stock,
@@ -355,6 +485,8 @@ export async function getCatalogAnalyticsPoints(
            nullif(cur.raw_json->>'thcPercent', '')::numeric as lab_thc_pct,
            nullif(cur.raw_json->>'cbdPercent', '')::numeric as lab_cbd_pct,
            m.list_price_dollars,
+           mp.median_pretax_price as market_price_pretax_dollars,
+           mp.sample_count        as market_sample_count,
            s.units_sold,
            s.revenue,
            s.cogs,
@@ -363,6 +495,9 @@ export async function getCatalogAnalyticsPoints(
            coalesce(tr.ratio, 1.0) as tax_ratio
     from sweed_package_current cur
       left join mapping m on m.product_id = cur.product_id
+      left join market_price mp
+        on mp.catalog_group_id = m.catalog_group_id
+       and mp.catalog_product_id = cur.product_id
       left join sales s
         on s.dealer_id = cur.dealer_id
        and s.inventory_item_id = cur.inventory_item_id
@@ -372,6 +507,9 @@ export async function getCatalogAnalyticsPoints(
       and (cardinality($5::text[]) = 0 or coalesce(m.subcategory_name, '(no subcategory)') = any($5::text[]))
       and (cardinality($6::text[]) = 0 or coalesce(m.brand_name, '(no brand)')             = any($6::text[]))
       and (cardinality($7::text[]) = 0 or coalesce(m.size_name, '(no size)')               = any($7::text[]))
+      and (cardinality($8::text[]) = 0 or
+           (case when m.pack_of_size is null then '(unknown)'
+                 else m.pack_of_size::text end) = any($8::text[]))
   `
 
   const result = await pool.query(sql, params)
@@ -429,8 +567,14 @@ export async function getCatalogAnalyticsPoints(
       if (existing.point.listPriceDollars == null) {
         existing.point.listPriceDollars = asNum(row.list_price_dollars)
       }
+      if (existing.point.marketPricePretaxDollars == null) {
+        existing.point.marketPricePretaxDollars = asNum(row.market_price_pretax_dollars)
+        existing.point.marketSampleCount = asInt(row.market_sample_count)
+      }
       continue
     }
+    const sizeLabel = asStr(row.size_label)
+    const unitSize = parseUnitSize(sizeLabel)
     byId.set(id, {
       point: {
         inventoryItemId: id,
@@ -444,7 +588,7 @@ export async function getCatalogAnalyticsPoints(
         subcategoryName: asStr(row.subcategory_name),
         brandId: null,
         brandName: asStr(row.brand_name),
-        sizeLabel: asStr(row.size_label),
+        sizeLabel,
         currentQty: null,
         availableQty: null,
         isOnStock: typeof row.is_on_stock === 'boolean' ? row.is_on_stock : null,
@@ -452,6 +596,11 @@ export async function getCatalogAnalyticsPoints(
         labThcPct: asNum(row.lab_thc_pct),
         labCbdPct: asNum(row.lab_cbd_pct),
         listPriceDollars: asNum(row.list_price_dollars),
+        packCount: asInt(row.pack_of_size),
+        unitSizeGrams: unitSize.grams,
+        unitSizeMg: unitSize.mg,
+        marketPricePretaxDollars: asNum(row.market_price_pretax_dollars),
+        marketSampleCount: asInt(row.market_sample_count),
         unitsSold: null,
         revenueDollars: null,
         cogsDollars: null,

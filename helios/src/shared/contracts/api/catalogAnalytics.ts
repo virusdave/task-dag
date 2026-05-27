@@ -45,6 +45,13 @@ export const CatalogAnalyticsFiltersResponseSchema = z.object({
   subcategories: z.array(CatalogFilterOptionSchema),
   brands: z.array(CatalogFilterOptionSchema),
   sizes: z.array(CatalogFilterOptionSchema),
+  /**
+   * Pack counts (units per package) sourced from
+   * catalog_groups.live_state_json->'products'[i].packOfSize. ids are
+   * the integer pack-count rendered as a string (e.g. "1", "5",
+   * "10"); label is "{n}-pack" for n>1 and "1 per pkg" for n=1.
+   */
+  packCounts: z.array(CatalogFilterOptionSchema),
 })
 export type CatalogAnalyticsFiltersResponse = z.infer<
   typeof CatalogAnalyticsFiltersResponseSchema
@@ -74,6 +81,8 @@ export const CatalogAnalyticsFiltersRequestSchema = z.object({
   subcategoryIds: csvList,
   brandIds: csvList,
   sizes: csvList,
+  /** CSV of pack-count ids (integer strings, e.g. "1,5,10"). */
+  packCounts: csvList,
 })
 export type CatalogAnalyticsFiltersRequest = z.infer<
   typeof CatalogAnalyticsFiltersRequestSchema
@@ -89,6 +98,8 @@ export const CatalogAnalyticsPointsRequestSchema = z.object({
   subcategoryIds: csvList,
   brandIds: csvList,
   sizes: csvList,
+  /** CSV of pack-count ids (integer strings, e.g. "1,5,10"). */
+  packCounts: csvList,
 })
 export type CatalogAnalyticsPointsRequest = z.infer<
   typeof CatalogAnalyticsPointsRequestSchema
@@ -128,6 +139,36 @@ export const CatalogAnalyticsPointSchema = z.object({
   // --- catalog-driven (list / shelf state) ---
   /** Pre-tax list (shelf) price per unit, from catalog_groups. */
   listPriceDollars: z.number().nullable(),
+  /**
+   * Units per package — `live_state_json.products[i].packOfSize` on
+   * the matching catalog_group product. 1 for single-unit packages
+   * (one flower jar, one cart). >1 for multi-pack pre-rolls,
+   * gummies-per-tin, etc. Doubles as a filterable dimension.
+   */
+  packCount: z.number().int().nullable(),
+  /**
+   * Numeric unit size in grams parsed from `sizeLabel` (e.g. "1g" →
+   * 1, "3.5g" → 3.5). Null for sizes that don't express grams
+   * (e.g. edibles, tinctures — see `unitSizeMg` for those, or "1ct"
+   * accessories).
+   */
+  unitSizeGrams: z.number().nullable(),
+  /**
+   * Numeric unit size in milligrams parsed from `sizeLabel` (e.g.
+   * "10mg", "100mg"). Used for edibles / tinctures.
+   */
+  unitSizeMg: z.number().nullable(),
+  /**
+   * Median pre-tax market price per unit, derived from
+   * catalog_market_matches × fuzzy_skus (live verdicts of
+   * exact/brand_family). Null if no live market matches exist for
+   * this product or no listing carried a usable price. NOT the
+   * post-tax (OTD) price — compare with `listPriceDollars`, not
+   * with `otdUnitPriceDollars`.
+   */
+  marketPricePretaxDollars: z.number().nullable(),
+  /** Count of live market listings backing `marketPricePretaxDollars`. */
+  marketSampleCount: z.number().int().nonnegative().nullable(),
 
   // --- window-driven (sales over [from, to]) ---
   unitsSold: z.number().nullable(),
@@ -162,6 +203,7 @@ export const CatalogAnalyticsPointsResponseSchema = z.object({
     subcategoryIds: z.array(z.string()),
     brandIds: z.array(z.string()),
     sizes: z.array(z.string()),
+    packCounts: z.array(z.string()),
     windowDays: z.number(),
   }),
   points: z.array(CatalogAnalyticsPointSchema),
