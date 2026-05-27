@@ -17,6 +17,12 @@ import {
 } from '../../../shared/contracts/index.js'
 import { loadJson } from '../../app/fetchJson.js'
 import { CatalogFilterBar, FilterDropdown } from './CatalogFilterBar.js'
+import {
+  buildContinuousScale,
+  continuumColour,
+  type BetterDirection,
+  type ContinuousScale,
+} from './continuousScale.js'
 import { HelpIcon } from './MetricChart.js'
 import { computeCompactDomain } from './scatterAutoZoom.js'
 import { useScatterZoom, type ZoomView } from './scatterZoom.js'
@@ -515,82 +521,164 @@ function axis(id: string): PointAxisDef {
 
 // =========================== Colour-by (cohort) ============================
 
-type ColourByKey =
+// Categorical colour-by id list. Continuous colour-by ids are listed
+// below in CONTINUOUS_COLOUR_BY. Kept as two distinct unions so the
+// pickers and the renderer can branch on `kind` without runtime
+// shenanigans.
+type CategoricalColourByKey =
   | 'none'
   | 'category'
   | 'subcategory'
   | 'brand'
   | 'sizeLabel'
-  | 'priceBand'
-  | 'thcBand'
-  | 'discountBand'
-  | 'gmBand'
+  | 'packCount'
 
-interface ColourByDef {
-  readonly id: ColourByKey
+type ContinuousColourByKey =
+  | 'price'
+  | 'thc'
+  | 'discountDepth'
+  | 'gmPercent'
+  | 'marginDollarsPerUnit'
+  | 'salesVelocity'
+  | 'pctBelowMarket'
+
+type ColourByKey = CategoricalColourByKey | ContinuousColourByKey
+
+interface CategoricalColourByDef {
+  readonly kind: 'categorical'
+  readonly id: CategoricalColourByKey
   readonly label: string
   readonly bucket: (p: CatalogAnalyticsPoint) => string
 }
 
-function priceBand(v: number | null): string {
-  if (v == null) return '(no price)'
-  if (v < 20) return '<$20'
-  if (v < 40) return '$20-$40'
-  if (v < 60) return '$40-$60'
-  if (v < 100) return '$60-$100'
-  return '$100+'
-}
-function thcBand(v: number | null): string {
-  if (v == null) return '(no THC)'
-  if (v < 10) return '<10%'
-  if (v < 20) return '10-20%'
-  if (v < 25) return '20-25%'
-  if (v < 30) return '25-30%'
-  return '30%+'
-}
-function discountBand(v: number | null): string {
-  if (v == null) return '(no list)'
-  if (v < 0.5) return 'at list (<0.5%)'
-  if (v < 5) return '0.5–5%'
-  if (v < 15) return '5–15%'
-  if (v < 30) return '15–30%'
-  if (v < 50) return '30–50%'
-  return '50%+'
-}
-function gmBand(v: number | null): string {
-  // Higher resolution around the operator's "decision zone" (40–65%).
-  // The discount-cliff conversation usually sits inside this band, so a
-  // 5-point grain there is much more useful than the coarse buckets we
-  // started with.
-  if (v == null) return '(no GM)'
-  if (v < 0) return 'negative GM'
-  if (v < 10) return '0–10%'
-  if (v < 20) return '10–20%'
-  if (v < 30) return '20–30%'
-  if (v < 40) return '30–40%'
-  if (v < 45) return '40–45%'
-  if (v < 50) return '45–50%'
-  if (v < 55) return '50–55%'
-  if (v < 60) return '55–60%'
-  if (v < 65) return '60–65%'
-  if (v < 75) return '65–75%'
-  return '75%+'
+interface ContinuousColourByDef {
+  readonly kind: 'continuous'
+  readonly id: ContinuousColourByKey
+  readonly label: string
+  /** Pulled into the dot's colour AFTER the per-card distribution-aware stretch. */
+  readonly value: (p: CatalogAnalyticsPoint, ctx: AxisCtx) => number | null
+  /** Drives which end of the red→green ramp is "good". */
+  readonly betterDirection: BetterDirection
+  /** Used in the legend's min / max labels. */
+  readonly format: (v: number) => string
 }
 
-const COLOUR_BY: ReadonlyArray<ColourByDef> = [
-  { id: 'none', label: 'single colour', bucket: () => 'all' },
-  { id: 'category', label: 'category', bucket: (p) => p.categoryName ?? '(none)' },
-  { id: 'subcategory', label: 'subcategory', bucket: (p) => p.subcategoryName ?? '(none)' },
-  { id: 'brand', label: 'brand', bucket: (p) => p.brandName ?? '(none)' },
-  { id: 'sizeLabel', label: 'size', bucket: (p) => p.sizeLabel ?? '(none)' },
-  { id: 'priceBand', label: 'price band', bucket: (p) => priceBand(p.otdUnitPriceDollars) },
-  { id: 'thcBand', label: 'THC band', bucket: (p) => thcBand(p.labThcPct) },
+type ColourByDef = CategoricalColourByDef | ContinuousColourByDef
+
+const CATEGORICAL_COLOUR_BY: ReadonlyArray<CategoricalColourByDef> = [
+  { kind: 'categorical', id: 'none', label: 'single colour', bucket: () => 'all' },
   {
-    id: 'discountBand',
-    label: 'discount depth band',
-    bucket: (p) => discountBand(discountDepthPercent(p)),
+    kind: 'categorical',
+    id: 'category',
+    label: 'category',
+    bucket: (p) => p.categoryName ?? '(none)',
   },
-  { id: 'gmBand', label: 'effective GM band', bucket: (p) => gmBand(p.gmPercent) },
+  {
+    kind: 'categorical',
+    id: 'subcategory',
+    label: 'subcategory',
+    bucket: (p) => p.subcategoryName ?? '(none)',
+  },
+  {
+    kind: 'categorical',
+    id: 'brand',
+    label: 'brand',
+    bucket: (p) => p.brandName ?? '(none)',
+  },
+  {
+    kind: 'categorical',
+    id: 'sizeLabel',
+    label: 'size',
+    bucket: (p) => p.sizeLabel ?? '(none)',
+  },
+  {
+    kind: 'categorical',
+    id: 'packCount',
+    label: 'pack count',
+    bucket: (p) =>
+      p.packCount == null
+        ? '(no pack)'
+        : p.packCount === 1
+        ? '1 per pkg'
+        : `${p.packCount}-pack`,
+  },
+]
+
+// Continuous colour-by axes drive a red→green diverging ramp where
+// the colour intensity reflects the value's percentile within the
+// current scatter slice — see continuousScale.ts for the per-card
+// stretch logic and ramp definition. `betterDirection` decides which
+// end of the ramp is "good"; mid-band is intentionally dull so
+// outliers in either direction pop visually.
+const CONTINUOUS_COLOUR_BY: ReadonlyArray<ContinuousColourByDef> = [
+  {
+    kind: 'continuous',
+    id: 'gmPercent',
+    label: 'effective GM % (red→green)',
+    value: (p) => p.gmPercent,
+    betterDirection: 'higher',
+    format: fmtPct,
+  },
+  {
+    kind: 'continuous',
+    id: 'marginDollarsPerUnit',
+    label: 'margin $ per unit (red→green)',
+    value: (p) => p.marginDollarsPerUnit,
+    betterDirection: 'higher',
+    format: fmtMoney,
+  },
+  {
+    kind: 'continuous',
+    id: 'salesVelocity',
+    label: 'sales velocity units/day (red→green)',
+    value: (p) => p.salesVelocityUnitsPerDay,
+    betterDirection: 'higher',
+    format: fmtNum,
+  },
+  {
+    kind: 'continuous',
+    id: 'price',
+    label: 'OTD price ($/unit, red→green, higher = pricier)',
+    value: (p) => p.otdUnitPriceDollars,
+    // Neither end is unambiguously "good"; we pick `higher` so dear
+    // SKUs stand out (they're the ones the operator usually wants to
+    // notice — a $200 cart is far more interesting than a $35 8th).
+    betterDirection: 'higher',
+    format: fmtMoney,
+  },
+  {
+    kind: 'continuous',
+    id: 'thc',
+    label: 'lab THC % (red→green)',
+    value: (p) => p.labThcPct,
+    betterDirection: 'higher',
+    format: fmtPct,
+  },
+  {
+    kind: 'continuous',
+    id: 'discountDepth',
+    label: 'discount depth % (lower = greener; higher = redder)',
+    value: (p) => discountDepthPercent(p),
+    // Deeper promo discount = more margin given up. From a merchandising
+    // / pricing-power perspective, lower is healthier. (The
+    // shopper-eye perspective is the opposite, but the operator
+    // looking at this scatter is the merchandiser.)
+    betterDirection: 'lower',
+    format: fmtPct,
+  },
+  {
+    kind: 'continuous',
+    id: 'pctBelowMarket',
+    label: '% below market (higher = greener)',
+    value: percentBelowMarket,
+    betterDirection: 'higher',
+    format: fmtPctSigned,
+  },
+]
+
+const COLOUR_BY: ReadonlyArray<ColourByDef> = [
+  ...CATEGORICAL_COLOUR_BY,
+  ...CONTINUOUS_COLOUR_BY,
 ]
 
 // ============================ Size-by (per-dot) ============================
@@ -614,20 +702,42 @@ interface SizeByDef {
   readonly id: SizeByKey
   readonly label: string
   readonly value: (p: CatalogAnalyticsPoint, ctx: AxisCtx) => number | null
+  /**
+   * Drives the distribution-aware stretch. `higher` (the default)
+   * means bigger dot = bigger raw value; `lower` would flip it
+   * (smaller dot = bigger raw value). Currently every size-by has
+   * `higher` semantics — kept on the def so future "weeks-of-supply
+   * over-stock" / "days-out-of-stock" can flip the encoding without
+   * touching the renderer.
+   */
+  readonly betterDirection?: BetterDirection
+  /** Used by the size legend's min / max labels. */
+  readonly format?: (v: number) => string
 }
 
 const SIZE_BY: ReadonlyArray<SizeByDef> = [
   { id: 'none', label: 'uniform', value: () => null },
-  { id: 'unitsSold', label: 'units sold', value: (p) => p.unitsSold },
-  { id: 'revenueDollars', label: 'revenue $', value: (p) => p.revenueDollars },
-  { id: 'marginDollars', label: 'margin $', value: (p) => p.marginDollars },
-  { id: 'invoiceCount', label: 'invoice count', value: (p) => p.invoiceCount },
-  { id: 'currentQty', label: 'on-hand qty', value: (p) => p.currentQty },
-  { id: 'daysWithSales', label: 'days with sales', value: (p) => p.daysWithSales },
+  { id: 'unitsSold', label: 'units sold', value: (p) => p.unitsSold, format: fmtNum },
+  {
+    id: 'revenueDollars',
+    label: 'revenue $',
+    value: (p) => p.revenueDollars,
+    format: fmtMoneyShort,
+  },
+  { id: 'marginDollars', label: 'margin $', value: (p) => p.marginDollars, format: fmtMoneyShort },
+  { id: 'invoiceCount', label: 'invoice count', value: (p) => p.invoiceCount, format: fmtNum },
+  { id: 'currentQty', label: 'on-hand qty', value: (p) => p.currentQty, format: fmtNum },
+  {
+    id: 'daysWithSales',
+    label: 'days with sales',
+    value: (p) => p.daysWithSales,
+    format: fmtNum,
+  },
   {
     id: 'marginVelocity',
     label: 'margin $/day',
     value: (p) => p.marginVelocityDollarsPerDay,
+    format: fmtMoney,
   },
 ]
 
@@ -655,6 +765,9 @@ interface OpacityByDef {
   readonly id: OpacityByKey
   readonly label: string
   readonly value: (p: CatalogAnalyticsPoint, ctx: AxisCtx) => number | null
+  /** Default: 'higher'. Used by the distribution-aware stretch. */
+  readonly betterDirection?: BetterDirection
+  readonly format?: (v: number) => string
 }
 
 const OPACITY_BY: ReadonlyArray<OpacityByDef> = [
@@ -663,14 +776,16 @@ const OPACITY_BY: ReadonlyArray<OpacityByDef> = [
     id: 'salesDayCoverage',
     label: 'sales-day coverage %',
     value: salesDayCoveragePercent,
+    format: fmtPct,
   },
-  { id: 'invoiceCount', label: 'invoice count', value: (p) => p.invoiceCount },
-  { id: 'unitsSold', label: 'units sold', value: (p) => p.unitsSold },
-  { id: 'gmPercent', label: 'effective GM %', value: (p) => p.gmPercent },
+  { id: 'invoiceCount', label: 'invoice count', value: (p) => p.invoiceCount, format: fmtNum },
+  { id: 'unitsSold', label: 'units sold', value: (p) => p.unitsSold, format: fmtNum },
+  { id: 'gmPercent', label: 'effective GM %', value: (p) => p.gmPercent, format: fmtPct },
   {
     id: 'discountDepth',
     label: 'discount depth %',
     value: (p) => discountDepthPercent(p),
+    format: fmtPct,
   },
 ]
 
@@ -843,7 +958,7 @@ const DEFAULT_CARDS: ReadonlyArray<ScatterCardConfig> = [
       'Diagonal = sell-at-list. Distance below the diagonal = how much per-unit revenue is being given up to promos. Big-volume points far below the line are where promo behaviour materially changes economics.',
     defaultX: 'listOtdPriceDollars',
     defaultY: 'otdUnitPriceDollars',
-    defaultColourBy: 'discountBand',
+    defaultColourBy: 'discountDepth',
     referenceLine: 'diagonal',
     section: SECTION_PROMO,
   },
@@ -875,7 +990,7 @@ const DEFAULT_CARDS: ReadonlyArray<ScatterCardConfig> = [
       'Did the discount create profitable throughput or just cheap volume? Top-right = promo-responsive winners; bottom-right = burning money on volume.',
     defaultX: 'discountDepthPercent',
     defaultY: 'marginVelocityDollarsPerDay',
-    defaultColourBy: 'gmBand',
+    defaultColourBy: 'gmPercent',
     section: SECTION_PROMO,
   },
   {
@@ -885,7 +1000,7 @@ const DEFAULT_CARDS: ReadonlyArray<ScatterCardConfig> = [
       'Promo responsiveness normalised against cat × sub × size peers. High-discount + high-index = promo-responsive winners. High-discount + low-index = bad promos / weak demand.',
     defaultX: 'discountDepthPercent',
     defaultY: 'velocityIndex',
-    defaultColourBy: 'gmBand',
+    defaultColourBy: 'gmPercent',
     referenceLine: 'unit-y',
     section: SECTION_PROMO,
   },
@@ -936,7 +1051,7 @@ const DEFAULT_CARDS: ReadonlyArray<ScatterCardConfig> = [
       'Distinguishes reliable demand from promo-driven spikes. Top-left = organic staple; top-right = promo-dependent staple; bottom-right = event/clearance behaviour; bottom-left = weak visibility.',
     defaultX: 'salesDayCoveragePercent',
     defaultY: 'discountDepthPercent',
-    defaultColourBy: 'gmBand',
+    defaultColourBy: 'gmPercent',
     section: SECTION_BASKET,
   },
   {
@@ -946,7 +1061,7 @@ const DEFAULT_CARDS: ReadonlyArray<ScatterCardConfig> = [
       'Basket role view. SKUs with high units/invoice but low margin/invoice are multi-buy promo magnets that dilute basket economics.',
     defaultX: 'unitsPerInvoice',
     defaultY: 'marginPerInvoiceDollars',
-    defaultColourBy: 'discountBand',
+    defaultColourBy: 'discountDepth',
     section: SECTION_BASKET,
   },
   {
@@ -956,7 +1071,7 @@ const DEFAULT_CARDS: ReadonlyArray<ScatterCardConfig> = [
       'Replenishment + markdown radar. Top-right = high-profit, needs reorder. Bottom-right = dead inventory candidates for markdown.',
     defaultX: 'weeksOfSupplyOnHand',
     defaultY: 'marginVelocityDollarsPerDay',
-    defaultColourBy: 'gmBand',
+    defaultColourBy: 'gmPercent',
     section: SECTION_BASKET,
   },
   {
@@ -994,7 +1109,7 @@ const DEFAULT_CARDS: ReadonlyArray<ScatterCardConfig> = [
       'Throughput-to-profit translation. Slope shows realized margin per unit; outliers above the cloud earn outsized margin per unit.',
     defaultX: 'unitsSold',
     defaultY: 'marginVelocityDollarsPerDay',
-    defaultColourBy: 'gmBand',
+    defaultColourBy: 'gmPercent',
     defaultSizeBy: 'revenueDollars',
     section: SECTION_PROFIT,
   },
@@ -1028,7 +1143,7 @@ const DEFAULT_CARDS: ReadonlyArray<ScatterCardConfig> = [
       'Slope = realized GM%. SKUs above the cloud convert disproportionately well; below = revenue without profit.',
     defaultX: 'revenueDollars',
     defaultY: 'marginDollars',
-    defaultColourBy: 'gmBand',
+    defaultColourBy: 'gmPercent',
     defaultSizeBy: 'unitsSold',
     section: SECTION_PROFIT,
   },
@@ -1039,7 +1154,7 @@ const DEFAULT_CARDS: ReadonlyArray<ScatterCardConfig> = [
       'Price-tier dependence of throughput. Cheap things rack up units; premium things rack up dollars without comparable unit pace.',
     defaultX: 'salesVelocityUnitsPerDay',
     defaultY: 'revenueDollars',
-    defaultColourBy: 'priceBand',
+    defaultColourBy: 'price',
     defaultSizeBy: 'marginDollars',
     section: SECTION_PROFIT,
   },
@@ -1061,7 +1176,7 @@ const DEFAULT_CARDS: ReadonlyArray<ScatterCardConfig> = [
       'Premium-basket vs frequency view. Top-right = wide-reach premium contributors; bottom-right = high reach, thin contribution.',
     defaultX: 'invoiceCount',
     defaultY: 'marginPerInvoiceDollars',
-    defaultColourBy: 'gmBand',
+    defaultColourBy: 'gmPercent',
     defaultSizeBy: 'marginDollars',
     section: SECTION_PROFIT,
   },
@@ -1072,7 +1187,7 @@ const DEFAULT_CARDS: ReadonlyArray<ScatterCardConfig> = [
       'Slope shows margin per unit; the higher above the cloud, the more profit each unit contributes.',
     defaultX: 'unitsSold',
     defaultY: 'marginDollars',
-    defaultColourBy: 'priceBand',
+    defaultColourBy: 'price',
     defaultOpacityBy: 'salesDayCoverage',
     section: SECTION_PROFIT,
   },
@@ -1205,7 +1320,7 @@ const DEFAULT_CARDS: ReadonlyArray<ScatterCardConfig> = [
       'Distinguishes steady-but-shallow from bursty-but-broad demand patterns.',
     defaultX: 'salesDayCoveragePercent',
     defaultY: 'invoiceCount',
-    defaultColourBy: 'gmBand',
+    defaultColourBy: 'gmPercent',
     defaultSizeBy: 'revenueDollars',
     section: SECTION_DEMAND,
   },
@@ -1216,7 +1331,7 @@ const DEFAULT_CARDS: ReadonlyArray<ScatterCardConfig> = [
       'Spot SKUs that sell a lot in a few days (clearance, drops) vs spread evenly across the window.',
     defaultX: 'salesDayCoveragePercent',
     defaultY: 'unitsSold',
-    defaultColourBy: 'discountBand',
+    defaultColourBy: 'discountDepth',
     defaultSizeBy: 'marginDollars',
     section: SECTION_DEMAND,
   },
@@ -1238,7 +1353,7 @@ const DEFAULT_CARDS: ReadonlyArray<ScatterCardConfig> = [
       'Distinguishes wide reach vs basket-multiplier behaviour. SKUs in the top-right move via multi-buy promos.',
     defaultX: 'invoiceCount',
     defaultY: 'unitsPerInvoice',
-    defaultColourBy: 'discountBand',
+    defaultColourBy: 'discountDepth',
     defaultSizeBy: 'unitsSold',
     section: SECTION_DEMAND,
   },
@@ -1272,7 +1387,7 @@ const DEFAULT_CARDS: ReadonlyArray<ScatterCardConfig> = [
       'High basket multiplier + strong GM% = the holy grail; high basket multiplier + thin GM = promo lever pulled too hard.',
     defaultX: 'unitsPerInvoice',
     defaultY: 'gmPercent',
-    defaultColourBy: 'discountBand',
+    defaultColourBy: 'discountDepth',
     defaultSizeBy: 'marginDollars',
     section: SECTION_DEMAND,
   },
@@ -1321,7 +1436,7 @@ const DEFAULT_CARDS: ReadonlyArray<ScatterCardConfig> = [
       'Quadrant view: low stock + high margin/day = reorder; high stock + low margin/day = freeze / markdown.',
     defaultX: 'currentQty',
     defaultY: 'marginVelocityDollarsPerDay',
-    defaultColourBy: 'gmBand',
+    defaultColourBy: 'gmPercent',
     defaultSizeBy: 'marginDollars',
     section: SECTION_TRAPS,
   },
@@ -2122,7 +2237,10 @@ interface PlottedPoint {
   readonly p: CatalogAnalyticsPoint
   readonly x: number
   readonly y: number
+  /** Categorical-colour bucket label. Empty string when the active colour-by is continuous. */
   readonly bucket: string
+  /** Continuous-colour raw value (null for categorical mode). */
+  readonly colourValue: number | null
   readonly sizeValue: number | null
   readonly opacityValue: number | null
 }
@@ -2180,34 +2298,31 @@ function CatalogScatterSvg({
     let xHi = Number.NEGATIVE_INFINITY
     let yLo = Number.POSITIVE_INFINITY
     let yHi = Number.NEGATIVE_INFINITY
-    let sLo = Number.POSITIVE_INFINITY
-    let sHi = Number.NEGATIVE_INFINITY
-    let oLo = Number.POSITIVE_INFINITY
-    let oHi = Number.NEGATIVE_INFINITY
     const bucketSet = new Set<string>()
+    const colourValues: Array<number | null> = []
+    const sizeValuesAll: Array<number | null> = []
+    const opacityValuesAll: Array<number | null> = []
+    const isContinuousColour = colourByDef.kind === 'continuous'
     for (const p of points) {
       const x = xDef.value(p, axisCtx)
       const y = yDef.value(p, axisCtx)
       if (x === null || y === null || !Number.isFinite(x) || !Number.isFinite(y)) continue
-      const bucket = colourByDef.bucket(p)
-      bucketSet.add(bucket)
+      const bucket = isContinuousColour ? '' : colourByDef.bucket(p)
+      if (!isContinuousColour) bucketSet.add(bucket)
+      const colourRaw = isContinuousColour ? colourByDef.value(p, axisCtx) : null
+      const colourValue = colourRaw != null && Number.isFinite(colourRaw) ? colourRaw : null
+      colourValues.push(colourValue)
       const sRaw = sizeByDef.value(p, axisCtx)
       const oRaw = opacityByDef.value(p, axisCtx)
       const sizeValue = sRaw != null && Number.isFinite(sRaw) ? sRaw : null
       const opacityValue = oRaw != null && Number.isFinite(oRaw) ? oRaw : null
-      plotted.push({ p, x, y, bucket, sizeValue, opacityValue })
+      sizeValuesAll.push(sizeValue)
+      opacityValuesAll.push(opacityValue)
+      plotted.push({ p, x, y, bucket, colourValue, sizeValue, opacityValue })
       if (x < xLo) xLo = x
       if (x > xHi) xHi = x
       if (y < yLo) yLo = y
       if (y > yHi) yHi = y
-      if (sizeValue != null) {
-        if (sizeValue < sLo) sLo = sizeValue
-        if (sizeValue > sHi) sHi = sizeValue
-      }
-      if (opacityValue != null) {
-        if (opacityValue < oLo) oLo = opacityValue
-        if (opacityValue > oHi) oHi = opacityValue
-      }
     }
     if (plotted.length === 0) {
       return {
@@ -2217,10 +2332,9 @@ function CatalogScatterSvg({
         xMax: 1,
         yMin: 0,
         yMax: 1,
-        sMin: null as number | null,
-        sMax: null as number | null,
-        oMin: null as number | null,
-        oMax: null as number | null,
+        colourScale: null as ContinuousScale | null,
+        sizeScale: null as ContinuousScale | null,
+        opacityScale: null as ContinuousScale | null,
       }
     }
     if (xLo === xHi) {
@@ -2239,11 +2353,23 @@ function CatalogScatterSvg({
       yLo -= span * 0.05
       yHi += span * 0.05
     }
-    const sMin = Number.isFinite(sLo) ? sLo : null
-    const sMax = Number.isFinite(sHi) ? sHi : null
-    const oMin = Number.isFinite(oLo) ? oLo : null
-    const oMax = Number.isFinite(oHi) ? oHi : null
-    // Sort buckets by count desc so the legend reflects scale.
+    // Build per-card distribution-aware scales. The scales decide
+    // their own linear-vs-rank mode based on whether the sample looks
+    // uniform; betterDirection picks which end of the [0,1] output
+    // is "good". See continuousScale.ts.
+    const colourScale = isContinuousColour
+      ? buildContinuousScale(colourValues, colourByDef.betterDirection)
+      : null
+    const sizeScale =
+      sizeByDef.id === 'none'
+        ? null
+        : buildContinuousScale(sizeValuesAll, sizeByDef.betterDirection ?? 'higher')
+    const opacityScale =
+      opacityByDef.id === 'none'
+        ? null
+        : buildContinuousScale(opacityValuesAll, opacityByDef.betterDirection ?? 'higher')
+
+    // Sort buckets alphabetically for stable legend ordering.
     const buckets = Array.from(bucketSet).sort()
     return {
       plotted,
@@ -2252,14 +2378,14 @@ function CatalogScatterSvg({
       xMax: xHi,
       yMin: yLo,
       yMax: yHi,
-      sMin,
-      sMax,
-      oMin,
-      oMax,
+      colourScale,
+      sizeScale,
+      opacityScale,
     }
   }, [points, xDef, yDef, colourByDef, sizeByDef, opacityByDef, axisCtx])
 
-  const { plotted, buckets, xMin, xMax, yMin, yMax, sMin, sMax, oMin, oMax } = computed
+  const { plotted, buckets, xMin, xMax, yMin, yMax, colourScale, sizeScale, opacityScale } =
+    computed
 
   // Zoom / pan hook. Base domain is the outlier-resistant compact
   // window over the just-computed data extent (densest ~90% per axis),
@@ -2287,36 +2413,53 @@ function CatalogScatterSvg({
   const view = zoom.view ?? baseDomain ?? fullDomain ?? { xMin, xMax, yMin, yMax }
   const clipId = useId()
 
-  // Build a per-point radius/opacity resolver using the card-local
-  // size/opacity domains. Square-root scaling for radius so visible
-  // area (not radius) is proportional to magnitude. We clamp to a
-  // healthy minimum so even tiny values stay visible.
+  // Build per-point radius / opacity / colour resolvers using the
+  // card-local distribution-aware scales. The scale itself does any
+  // rank-stretching (resolution where the data lives); we just map
+  // its [0,1] output to the visual range.
+  //
+  // For size we map the stretched fraction LINEARLY to dot AREA (then
+  // sqrt to radius), so visual weight is proportional to the
+  // stretched value rather than to the raw input. With rank mode this
+  // gives equal-area increments per data percentile — i.e. half the
+  // dots are smaller than the median dot's area.
   const dotRadius = useCallback(
     (sizeValue: number | null): number => {
-      if (sizeByDef.id === 'none' || sMin == null || sMax == null || sMin === sMax) {
-        return UNIFORM_R
-      }
-      if (sizeValue == null) return SIZE_MIN_R
-      // Clamp negatives to the floor so we never sqrt(<0).
-      const lo = Math.max(0, sMin)
-      const hi = Math.max(lo + 1e-9, sMax)
-      const v = Math.max(lo, Math.min(hi, sizeValue))
-      const norm = Math.sqrt((v - lo) / (hi - lo))
-      return SIZE_MIN_R + norm * (SIZE_MAX_R - SIZE_MIN_R)
+      if (sizeScale == null) return UNIFORM_R
+      const frac = sizeScale.toFraction(sizeValue)
+      if (frac == null) return SIZE_MIN_R
+      const minArea = SIZE_MIN_R * SIZE_MIN_R
+      const maxArea = SIZE_MAX_R * SIZE_MAX_R
+      const area = minArea + frac * (maxArea - minArea)
+      return Math.sqrt(area)
     },
-    [sizeByDef, sMin, sMax],
+    [sizeScale],
   )
   const dotOpacity = useCallback(
     (opacityValue: number | null): number => {
-      if (opacityByDef.id === 'none' || oMin == null || oMax == null || oMin === oMax) {
-        return UNIFORM_OPACITY
-      }
-      if (opacityValue == null) return OPACITY_MIN
-      const v = Math.max(oMin, Math.min(oMax, opacityValue))
-      const norm = (v - oMin) / (oMax - oMin)
-      return OPACITY_MIN + norm * (OPACITY_MAX - OPACITY_MIN)
+      if (opacityScale == null) return UNIFORM_OPACITY
+      const frac = opacityScale.toFraction(opacityValue)
+      if (frac == null) return OPACITY_MIN
+      return OPACITY_MIN + frac * (OPACITY_MAX - OPACITY_MIN)
     },
-    [opacityByDef, oMin, oMax],
+    [opacityScale],
+  )
+
+  // Resolve the colour fill for one dot. Branches once on the
+  // colour-by `kind` (cheap; the def reference is stable across the
+  // card render).
+  const dotColour = useCallback(
+    (pp: PlottedPoint): string => {
+      if (colourByDef.kind === 'categorical') {
+        return colourFor(pp.bucket, buckets)
+      }
+      // Continuous mode: rank-stretched / linear fraction → red→green
+      // ramp. Null inputs render in the neutral fallback grey.
+      if (colourScale == null) return '#bdbdbd'
+      const frac = colourScale.toFraction(pp.colourValue)
+      return continuumColour(frac)
+    },
+    [colourByDef, buckets, colourScale],
   )
 
   const xScale = useCallback(
@@ -2646,7 +2789,7 @@ function CatalogScatterSvg({
               cx={xScale(pp.x)}
               cy={yScale(pp.y)}
               r={dotRadius(pp.sizeValue)}
-              fill={colourFor(pp.bucket, buckets)}
+              fill={dotColour(pp)}
               fillOpacity={dotOpacity(pp.opacityValue)}
               stroke="#fff"
               strokeWidth={0.5}
@@ -2719,7 +2862,7 @@ function CatalogScatterSvg({
         />
       ) : null}
 
-      {colourByDef.id !== 'none' && buckets.length > 1 ? (
+      {colourByDef.kind === 'categorical' && colourByDef.id !== 'none' && buckets.length > 1 ? (
         <div className="catalog-analytics-legend">
           {buckets.slice(0, 16).map((b) => (
             <span key={b} className="catalog-analytics-legend-item">
@@ -2736,12 +2879,72 @@ function CatalogScatterSvg({
         </div>
       ) : null}
 
+      {colourByDef.kind === 'continuous' && colourScale ? (
+        <ContinuousLegend
+          label={colourByDef.label}
+          format={colourByDef.format}
+          scale={colourScale}
+        />
+      ) : null}
+
       {plotted.length === 0 && !loading ? (
         <p className="subtle-copy">
           No variants in the current filter slice have values for both axes over the last{' '}
           {axisCtx.windowDays} days.
         </p>
       ) : null}
+    </div>
+  )
+}
+
+// ============================ Continuous legend ============================
+
+interface ContinuousLegendProps {
+  readonly label: string
+  readonly format: (v: number) => string
+  readonly scale: ContinuousScale
+}
+
+/**
+ * Gradient strip with min / max value labels for continuous colour-by
+ * mode. The strip itself is just a CSS gradient through the same
+ * red→green ramp the dots use; we sample a handful of ramp stops so
+ * the gradient visually matches `continuumColour` (no separate
+ * tuning to drift out of sync).
+ *
+ * If the per-card scale ran in rank-stretched mode we also note that
+ * — "rank-stretched" is operator shorthand for "resolution lives
+ * where the data lives, not at fixed band edges".
+ */
+function ContinuousLegend({ label, format, scale }: ContinuousLegendProps) {
+  if (scale.min == null || scale.max == null) return null
+  // Sample the ramp at 11 stops (every 10%) and turn it into a CSS
+  // gradient. The stops use the metric's `betterDirection`-aware
+  // [0,1] mapping so "good" always ends up green regardless of which
+  // direction the metric runs.
+  const stops: string[] = []
+  for (let i = 0; i <= 10; i++) {
+    const p = i / 10
+    stops.push(`${continuumColour(p)} ${(p * 100).toFixed(0)}%`)
+  }
+  const gradient = `linear-gradient(to right, ${stops.join(', ')})`
+  const lowEnd = scale.betterDirection === 'higher' ? scale.min : scale.max
+  const highEnd = scale.betterDirection === 'higher' ? scale.max : scale.min
+  return (
+    <div className="catalog-analytics-legend continuous">
+      <span className="catalog-analytics-legend-label">{label}</span>
+      <span className="continuous-legend-min">{format(lowEnd)}</span>
+      <span
+        className="continuous-legend-strip"
+        style={{ background: gradient }}
+        aria-hidden
+      />
+      <span className="continuous-legend-max">{format(highEnd)}</span>
+      <span className="subtle-copy continuous-legend-mode">
+        {scale.mode === 'rank'
+          ? `rank-stretched (n=${scale.sampleSize})`
+          : `linear (n=${scale.sampleSize})`}
+      </span>
     </div>
   )
 }

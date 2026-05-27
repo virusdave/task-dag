@@ -3438,6 +3438,55 @@ span.metric-chart-legend-item {
   padding: 0.4rem 0;
 }
 
+/* Scatter card legend — categorical chips OR a continuous gradient
+   strip depending on which colour-by mode the operator picked. */
+.catalog-analytics-legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem 0.6rem;
+  padding: 0.35rem 0.5rem 0;
+  font-size: 0.78rem;
+}
+.catalog-analytics-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+.catalog-analytics-legend-swatch {
+  display: inline-block;
+  width: 0.7rem;
+  height: 0.7rem;
+  border-radius: 2px;
+}
+.catalog-analytics-legend.continuous {
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 0.4rem;
+  overflow-x: auto;
+}
+.catalog-analytics-legend-label {
+  font-weight: 600;
+  white-space: nowrap;
+}
+.continuous-legend-strip {
+  flex: 1 1 80px;
+  min-width: 60px;
+  height: 0.55rem;
+  border-radius: 3px;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+}
+.continuous-legend-min,
+.continuous-legend-max {
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.continuous-legend-mode {
+  white-space: nowrap;
+  margin-left: 0.5rem;
+  font-size: 0.7rem;
+}
+
 /* Wraps the shared CatalogFilterBar AND any tab-specific extras (e.g.
    the pack-count chip on /metrics/catalog) so they all sit in one
    row and wrap together. The bar itself owns its inner padding; this
