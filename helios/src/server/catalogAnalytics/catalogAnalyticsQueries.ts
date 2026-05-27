@@ -306,7 +306,11 @@ export async function getCatalogAnalyticsPoints(
              sum(coalesce((item->>'currentQty')::numeric, 0)
                  * coalesce(sweed_package_cost_as_of_or_earliest(
                      so.dealer_id, item->>'inventoryItemId', so.pay_time), 0)) as cogs,
-             count(distinct so.invoice_id) as invoice_count
+             count(distinct so.invoice_id) as invoice_count,
+             -- Distinct calendar days (ET) that this variant sold on.
+             -- Powers the "sales-day coverage" scatter and the
+             -- promo-event vs reliable-demand quadrant analysis.
+             count(distinct date_trunc('day', so.pay_time at time zone 'America/New_York')) as days_with_sales
       from sweed_orders so
         cross join lateral jsonb_array_elements(so.raw_json->'items') as item
       where so.dealer_id = any($1::bigint[])
@@ -323,7 +327,13 @@ export async function getCatalogAnalyticsPoints(
              prod->>'sizeName' as size_name,
              prod->>'name' as product_name,
              prod->>'shortName' as product_short_name,
-             prod->>'sku' as product_sku
+             prod->>'sku' as product_sku,
+             -- Pre-tax list (shelf) price per unit. Catalog groups carry
+             -- one product entry per (size) variant, so this is the
+             -- shelf price for THIS specific (product_id, size_name).
+             -- Powers all of the "list vs effective" promo-erosion
+             -- scatter plots.
+             nullif(prod->>'price', '')::numeric as list_price_dollars
       from catalog_groups cg,
            jsonb_array_elements(cg.live_state_json->'products') as prod
       where cg.deleted_at is null
@@ -344,10 +354,12 @@ export async function getCatalogAnalyticsPoints(
            cur.wholesale_cost_dollars,
            nullif(cur.raw_json->>'thcPercent', '')::numeric as lab_thc_pct,
            nullif(cur.raw_json->>'cbdPercent', '')::numeric as lab_cbd_pct,
+           m.list_price_dollars,
            s.units_sold,
            s.revenue,
            s.cogs,
            s.invoice_count,
+           s.days_with_sales,
            coalesce(tr.ratio, 1.0) as tax_ratio
     from sweed_package_current cur
       left join mapping m on m.product_id = cur.product_id
@@ -375,6 +387,15 @@ export async function getCatalogAnalyticsPoints(
     revenue: number
     cogs: number
     invoiceCount: number
+    /**
+     * Max(distinct-days-sold) across dealers. Strictly, the union of
+     * per-dealer day-sets would be more correct (some days appear at
+     * both stores). Taking the max is a conservative lower bound on
+     * coverage that avoids double-counting. Good enough for the
+     * sales-day-coverage scatter; if it becomes operator-relevant we
+     * can switch to a per-day GROUP-BY round-trip.
+     */
+    daysWithSales: number
     currentQty: number
     availableQty: number
     taxRatio: number
@@ -389,6 +410,7 @@ export async function getCatalogAnalyticsPoints(
     const revenue = asNum(row.revenue) ?? 0
     const cogs = asNum(row.cogs) ?? 0
     const invoiceCount = asInt(row.invoice_count) ?? 0
+    const daysWithSales = asInt(row.days_with_sales) ?? 0
     const currentQty = asNum(row.current_qty) ?? 0
     const availableQty = asNum(row.available_qty) ?? 0
     const taxRatio = asNum(row.tax_ratio) ?? 1.0
@@ -397,10 +419,16 @@ export async function getCatalogAnalyticsPoints(
       existing.revenue += revenue
       existing.cogs += cogs
       existing.invoiceCount += invoiceCount
+      if (daysWithSales > existing.daysWithSales) {
+        existing.daysWithSales = daysWithSales
+      }
       existing.currentQty += currentQty
       existing.availableQty += availableQty
       existing.taxRatio += taxRatio
       existing.taxRatioCount += 1
+      if (existing.point.listPriceDollars == null) {
+        existing.point.listPriceDollars = asNum(row.list_price_dollars)
+      }
       continue
     }
     byId.set(id, {
@@ -423,6 +451,7 @@ export async function getCatalogAnalyticsPoints(
         wholesaleCostDollars: asNum(row.wholesale_cost_dollars),
         labThcPct: asNum(row.lab_thc_pct),
         labCbdPct: asNum(row.lab_cbd_pct),
+        listPriceDollars: asNum(row.list_price_dollars),
         unitsSold: null,
         revenueDollars: null,
         cogsDollars: null,
@@ -434,11 +463,14 @@ export async function getCatalogAnalyticsPoints(
         salesVelocityUnitsPerDay: null,
         marginVelocityDollarsPerDay: null,
         invoiceCount: null,
+        daysWithSales: null,
+        taxRatio: null,
       },
       unitsSold,
       revenue,
       cogs,
       invoiceCount,
+      daysWithSales,
       currentQty,
       availableQty,
       taxRatio,
@@ -452,6 +484,9 @@ export async function getCatalogAnalyticsPoints(
     p.currentQty = acc.currentQty
     p.availableQty = acc.availableQty
     p.invoiceCount = acc.invoiceCount
+    p.daysWithSales = acc.daysWithSales
+    const taxRatio = acc.taxRatioCount > 0 ? acc.taxRatio / acc.taxRatioCount : 1.0
+    p.taxRatio = taxRatio
     if (acc.unitsSold > 0 || acc.revenue > 0) {
       p.unitsSold = acc.unitsSold
       p.revenueDollars = acc.revenue
@@ -462,7 +497,6 @@ export async function getCatalogAnalyticsPoints(
       p.gmPercent = acc.revenue > 0 ? ((acc.revenue - acc.cogs) / acc.revenue) * 100 : null
       p.avgUnitPriceDollars =
         acc.unitsSold > 0 ? acc.revenue / acc.unitsSold : null
-      const taxRatio = acc.taxRatioCount > 0 ? acc.taxRatio / acc.taxRatioCount : 1.0
       p.otdUnitPriceDollars =
         p.avgUnitPriceDollars !== null ? p.avgUnitPriceDollars * taxRatio : null
       p.salesVelocityUnitsPerDay = acc.unitsSold / windowDays

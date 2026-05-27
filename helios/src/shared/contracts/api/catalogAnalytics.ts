@@ -125,6 +125,10 @@ export const CatalogAnalyticsPointSchema = z.object({
   labThcPct: z.number().nullable(),
   labCbdPct: z.number().nullable(),
 
+  // --- catalog-driven (list / shelf state) ---
+  /** Pre-tax list (shelf) price per unit, from catalog_groups. */
+  listPriceDollars: z.number().nullable(),
+
   // --- window-driven (sales over [from, to]) ---
   unitsSold: z.number().nullable(),
   revenueDollars: z.number().nullable(),
@@ -142,6 +146,10 @@ export const CatalogAnalyticsPointSchema = z.object({
   marginVelocityDollarsPerDay: z.number().nullable(),
   /** Distinct invoices that contained this variant in the window. */
   invoiceCount: z.number().int().nonnegative().nullable(),
+  /** Distinct ET-local dates with at least one sale in the window. */
+  daysWithSales: z.number().int().nonnegative().nullable(),
+  /** Dealer-window tax ratio used to derive otdUnitPriceDollars. */
+  taxRatio: z.number().nullable(),
 })
 export type CatalogAnalyticsPoint = z.infer<typeof CatalogAnalyticsPointSchema>
 

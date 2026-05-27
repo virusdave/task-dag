@@ -43,12 +43,131 @@ const DEFAULT_WINDOW_DAYS = 90
  * can serve as the X or Y axis of a scatter card. `format` controls the
  * tooltip / tick formatting.
  */
+/**
+ * Context passed to every axis evaluator. Carries window length so
+ * "per day" metrics can normalise, and per-cohort medians so index
+ * axes (velocity index vs cohort median, etc.) can compute on the
+ * fly. Cohort key is `<category>|<subcategory>|<sizeLabel>` —
+ * picked because operators reason about "this 1g flower vs other 1g
+ * flower", not "this vape vs everything".
+ *
+ * The cohort medians are recomputed once per filter-result set in
+ * the parent component (`useCohortMedians`) and cached, so axis
+ * evaluators are cheap.
+ */
+export interface AxisCtx {
+  readonly windowDays: number
+  readonly cohortMedians: ReadonlyMap<
+    string,
+    {
+      velocityUnitsPerDay: number | null
+      effectiveOtdPriceDollars: number | null
+      gmPercent: number | null
+      marginPerUnitDollars: number | null
+    }
+  >
+}
+
 interface PointAxisDef {
   readonly id: string
   readonly label: string
   readonly short: string
-  readonly value: (p: CatalogAnalyticsPoint) => number | null
+  readonly value: (p: CatalogAnalyticsPoint, ctx: AxisCtx) => number | null
   readonly format: (v: number) => string
+}
+
+// ============================ Derived metrics ==============================
+//
+// All "list vs effective" promo-erosion math lives here so it's
+// expressed once and reused across the axis list, the per-card colour
+// bands, and the tooltip. Each helper takes a raw `CatalogAnalyticsPoint`
+// and returns `null` when the inputs aren't both present — the chart
+// renderer drops null-axis points automatically.
+// ---------------------------------------------------------------------------
+
+function listOtdPriceDollars(p: CatalogAnalyticsPoint): number | null {
+  if (p.listPriceDollars == null) return null
+  const ratio = p.taxRatio ?? 1.0
+  return p.listPriceDollars * ratio
+}
+
+function listGmPercent(p: CatalogAnalyticsPoint): number | null {
+  if (p.listPriceDollars == null || p.wholesaleCostDollars == null) return null
+  if (p.listPriceDollars <= 0) return null
+  return ((p.listPriceDollars - p.wholesaleCostDollars) / p.listPriceDollars) * 100
+}
+
+function discountDollarsPerUnit(p: CatalogAnalyticsPoint): number | null {
+  if (p.listPriceDollars == null || p.avgUnitPriceDollars == null) return null
+  return p.listPriceDollars - p.avgUnitPriceDollars
+}
+
+function discountDepthPercent(p: CatalogAnalyticsPoint): number | null {
+  if (p.listPriceDollars == null || p.avgUnitPriceDollars == null) return null
+  if (p.listPriceDollars <= 0) return null
+  return ((p.listPriceDollars - p.avgUnitPriceDollars) / p.listPriceDollars) * 100
+}
+
+function priceRealizationPercent(p: CatalogAnalyticsPoint): number | null {
+  if (p.listPriceDollars == null || p.avgUnitPriceDollars == null) return null
+  if (p.listPriceDollars <= 0) return null
+  return (p.avgUnitPriceDollars / p.listPriceDollars) * 100
+}
+
+function salesDayCoveragePercent(p: CatalogAnalyticsPoint, ctx: AxisCtx): number | null {
+  if (p.daysWithSales == null || ctx.windowDays <= 0) return null
+  return Math.min(100, (p.daysWithSales / ctx.windowDays) * 100)
+}
+
+function unitsPerInvoice(p: CatalogAnalyticsPoint): number | null {
+  if (p.unitsSold == null || !p.invoiceCount) return null
+  return p.unitsSold / p.invoiceCount
+}
+
+function marginPerInvoiceDollars(p: CatalogAnalyticsPoint): number | null {
+  if (p.marginDollars == null || !p.invoiceCount) return null
+  return p.marginDollars / p.invoiceCount
+}
+
+function weeksOfSupplyOnHand(p: CatalogAnalyticsPoint): number | null {
+  if (p.currentQty == null || p.salesVelocityUnitsPerDay == null) return null
+  if (p.salesVelocityUnitsPerDay <= 0) return null
+  return p.currentQty / (p.salesVelocityUnitsPerDay * 7)
+}
+
+function cohortKey(p: CatalogAnalyticsPoint): string {
+  return `${p.categoryName ?? '(no cat)'}|${p.subcategoryName ?? '(no sub)'}|${
+    p.sizeLabel ?? '(no size)'
+  }`
+}
+
+function velocityIndex(p: CatalogAnalyticsPoint, ctx: AxisCtx): number | null {
+  if (p.salesVelocityUnitsPerDay == null) return null
+  const m = ctx.cohortMedians.get(cohortKey(p))
+  if (!m || !m.velocityUnitsPerDay || m.velocityUnitsPerDay === 0) return null
+  return p.salesVelocityUnitsPerDay / m.velocityUnitsPerDay
+}
+
+function effectivePriceIndex(p: CatalogAnalyticsPoint, ctx: AxisCtx): number | null {
+  if (p.otdUnitPriceDollars == null) return null
+  const m = ctx.cohortMedians.get(cohortKey(p))
+  if (!m || !m.effectiveOtdPriceDollars || m.effectiveOtdPriceDollars === 0) return null
+  return p.otdUnitPriceDollars / m.effectiveOtdPriceDollars
+}
+
+function gmPercentIndex(p: CatalogAnalyticsPoint, ctx: AxisCtx): number | null {
+  if (p.gmPercent == null) return null
+  const m = ctx.cohortMedians.get(cohortKey(p))
+  if (!m || m.gmPercent == null) return null
+  return p.gmPercent - m.gmPercent
+}
+
+function fmtX(v: number): string {
+  if (Math.abs(v) >= 10) return `${v.toFixed(1)}×`
+  return `${v.toFixed(2)}×`
+}
+function fmtPctSigned(v: number): string {
+  return `${v >= 0 ? '+' : ''}${v.toFixed(1)}pp`
 }
 
 function fmtMoney(v: number): string {
@@ -161,6 +280,99 @@ const POINT_AXES: ReadonlyArray<PointAxisDef> = [
     value: (p) => p.currentQty,
     format: fmtNum,
   },
+
+  // --- list / shelf price + promo-aware (added 2026-05-26) ---
+  {
+    id: 'listPriceDollars',
+    label: 'List price ($/unit, pretax)',
+    short: 'List $',
+    value: (p) => p.listPriceDollars,
+    format: fmtMoney,
+  },
+  {
+    id: 'listOtdPriceDollars',
+    label: 'List OTD price ($/unit)',
+    short: 'List OTD',
+    value: (p) => listOtdPriceDollars(p),
+    format: fmtMoney,
+  },
+  {
+    id: 'listGmPercent',
+    label: 'List GM % (if always sold at list)',
+    short: 'List GM%',
+    value: (p) => listGmPercent(p),
+    format: fmtPct,
+  },
+  {
+    id: 'discountDollarsPerUnit',
+    label: 'Discount ($/unit, list − effective)',
+    short: 'Disc $/u',
+    value: (p) => discountDollarsPerUnit(p),
+    format: fmtMoney,
+  },
+  {
+    id: 'discountDepthPercent',
+    label: 'Discount depth % (1 − effective/list)',
+    short: 'Disc %',
+    value: (p) => discountDepthPercent(p),
+    format: fmtPct,
+  },
+  {
+    id: 'priceRealizationPercent',
+    label: 'Price realization % (effective/list)',
+    short: 'Real %',
+    value: (p) => priceRealizationPercent(p),
+    format: fmtPct,
+  },
+  {
+    id: 'salesDayCoveragePercent',
+    label: 'Sales-day coverage % (days sold / window)',
+    short: 'Cov %',
+    value: salesDayCoveragePercent,
+    format: fmtPct,
+  },
+  {
+    id: 'unitsPerInvoice',
+    label: 'Units per invoice (basket multiplier)',
+    short: 'U/inv',
+    value: (p) => unitsPerInvoice(p),
+    format: fmtNum,
+  },
+  {
+    id: 'marginPerInvoiceDollars',
+    label: 'Margin $/invoice',
+    short: 'GM $/inv',
+    value: (p) => marginPerInvoiceDollars(p),
+    format: fmtMoney,
+  },
+  {
+    id: 'weeksOfSupplyOnHand',
+    label: 'Weeks of supply (on-hand / weekly velocity)',
+    short: 'Wks supply',
+    value: (p) => weeksOfSupplyOnHand(p),
+    format: fmtNum,
+  },
+  {
+    id: 'velocityIndex',
+    label: 'Velocity index vs cohort (cat × sub × size)',
+    short: 'Vel idx',
+    value: velocityIndex,
+    format: fmtX,
+  },
+  {
+    id: 'effectivePriceIndex',
+    label: 'Effective price index vs cohort',
+    short: 'Price idx',
+    value: effectivePriceIndex,
+    format: fmtX,
+  },
+  {
+    id: 'gmPercentIndex',
+    label: 'GM% vs cohort median (percentage points)',
+    short: 'GM% Δ',
+    value: gmPercentIndex,
+    format: fmtPctSigned,
+  },
 ]
 
 const POINT_AXES_BY_ID = new Map(POINT_AXES.map((a) => [a.id, a]))
@@ -178,6 +390,8 @@ type ColourByKey =
   | 'sizeLabel'
   | 'priceBand'
   | 'thcBand'
+  | 'discountBand'
+  | 'gmBand'
 
 interface ColourByDef {
   readonly id: ColourByKey
@@ -201,6 +415,24 @@ function thcBand(v: number | null): string {
   if (v < 30) return '25-30%'
   return '30%+'
 }
+function discountBand(v: number | null): string {
+  if (v == null) return '(no list)'
+  if (v < 0.5) return 'at list (<0.5%)'
+  if (v < 5) return '0.5–5%'
+  if (v < 15) return '5–15%'
+  if (v < 30) return '15–30%'
+  if (v < 50) return '30–50%'
+  return '50%+'
+}
+function gmBand(v: number | null): string {
+  if (v == null) return '(no GM)'
+  if (v < 0) return 'negative GM'
+  if (v < 10) return '0–10%'
+  if (v < 25) return '10–25%'
+  if (v < 40) return '25–40%'
+  if (v < 55) return '40–55%'
+  return '55%+'
+}
 
 const COLOUR_BY: ReadonlyArray<ColourByDef> = [
   { id: 'none', label: 'single colour', bucket: () => 'all' },
@@ -210,6 +442,12 @@ const COLOUR_BY: ReadonlyArray<ColourByDef> = [
   { id: 'sizeLabel', label: 'size', bucket: (p) => p.sizeLabel ?? '(none)' },
   { id: 'priceBand', label: 'price band', bucket: (p) => priceBand(p.otdUnitPriceDollars) },
   { id: 'thcBand', label: 'THC band', bucket: (p) => thcBand(p.labThcPct) },
+  {
+    id: 'discountBand',
+    label: 'discount depth band',
+    bucket: (p) => discountBand(discountDepthPercent(p)),
+  },
+  { id: 'gmBand', label: 'effective GM band', bucket: (p) => gmBand(p.gmPercent) },
 ]
 
 // Same palette as the line chart so the look is consistent across the
@@ -243,9 +481,39 @@ interface ScatterCardConfig {
   readonly defaultX: string
   readonly defaultY: string
   readonly defaultColourBy: ColourByKey
+  /**
+   * Optional reference annotation rendered on the plot.
+   *   - 'diagonal'  : y = x line in plot-space (sensible when X / Y
+   *                   units match — e.g. List OTD vs Effective OTD,
+   *                   List GM% vs Effective GM%).
+   *   - 'unit'      : horizontal at y=1 (sensible for index axes
+   *                   where 1.0× = cohort median).
+   */
+  readonly referenceLine?: 'diagonal' | 'unit-y' | 'unit-x'
+  /**
+   * Section header this card appears under. Cards with the same
+   * `section` are grouped together and rendered with a section
+   * heading above them. Defaults to "Core merchandising".
+   */
+  readonly section?: string
 }
 
+// Sections in display order. Each card carries its own `section`; cards
+// without a section default to "Core merchandising".
+const SECTION_CORE = 'Core merchandising'
+const SECTION_PROMO = 'List vs effective (promo erosion)'
+const SECTION_COHORT = 'Cohort-relative (vs same cat × sub × size peers)'
+const SECTION_BASKET = 'Basket / inventory health'
+
+const SECTIONS_IN_ORDER: ReadonlyArray<string> = [
+  SECTION_CORE,
+  SECTION_PROMO,
+  SECTION_COHORT,
+  SECTION_BASKET,
+]
+
 const DEFAULT_CARDS: ReadonlyArray<ScatterCardConfig> = [
+  // ----- Core merchandising -----
   {
     id: 'otd-vs-margin-per-unit',
     title: 'OTD price vs margin $/unit',
@@ -254,6 +522,7 @@ const DEFAULT_CARDS: ReadonlyArray<ScatterCardConfig> = [
     defaultX: 'otdUnitPriceDollars',
     defaultY: 'marginDollarsPerUnit',
     defaultColourBy: 'subcategory',
+    section: SECTION_CORE,
   },
   {
     id: 'otd-vs-velocity',
@@ -262,6 +531,7 @@ const DEFAULT_CARDS: ReadonlyArray<ScatterCardConfig> = [
     defaultX: 'otdUnitPriceDollars',
     defaultY: 'salesVelocityUnitsPerDay',
     defaultColourBy: 'subcategory',
+    section: SECTION_CORE,
   },
   {
     id: 'otd-vs-gm-pct',
@@ -270,6 +540,7 @@ const DEFAULT_CARDS: ReadonlyArray<ScatterCardConfig> = [
     defaultX: 'otdUnitPriceDollars',
     defaultY: 'gmPercent',
     defaultColourBy: 'brand',
+    section: SECTION_CORE,
   },
   {
     id: 'gm-pct-vs-velocity',
@@ -279,6 +550,7 @@ const DEFAULT_CARDS: ReadonlyArray<ScatterCardConfig> = [
     defaultX: 'gmPercent',
     defaultY: 'salesVelocityUnitsPerDay',
     defaultColourBy: 'subcategory',
+    section: SECTION_CORE,
   },
   {
     id: 'velocity-vs-thc',
@@ -287,6 +559,7 @@ const DEFAULT_CARDS: ReadonlyArray<ScatterCardConfig> = [
     defaultX: 'labThcPct',
     defaultY: 'salesVelocityUnitsPerDay',
     defaultColourBy: 'brand',
+    section: SECTION_CORE,
   },
   {
     id: 'margin-vs-thc',
@@ -295,6 +568,7 @@ const DEFAULT_CARDS: ReadonlyArray<ScatterCardConfig> = [
     defaultX: 'labThcPct',
     defaultY: 'marginDollarsPerUnit',
     defaultColourBy: 'brand',
+    section: SECTION_CORE,
   },
   {
     id: 'cost-vs-margin',
@@ -303,6 +577,146 @@ const DEFAULT_CARDS: ReadonlyArray<ScatterCardConfig> = [
     defaultX: 'wholesaleCostDollars',
     defaultY: 'marginDollarsPerUnit',
     defaultColourBy: 'brand',
+    section: SECTION_CORE,
+  },
+  {
+    id: 'thc-vs-otd',
+    title: 'THC % vs OTD price',
+    description: 'Are we capturing a potency premium on shelf price?',
+    defaultX: 'labThcPct',
+    defaultY: 'otdUnitPriceDollars',
+    defaultColourBy: 'brand',
+    section: SECTION_CORE,
+  },
+
+  // ----- List vs effective (promo erosion) -----
+  //
+  // These six expose where shelf price diverges from what the operator
+  // actually receives at checkout — the operator's "are promos earning
+  // their keep?" view. Reference diagonal added where X and Y share
+  // units so eyeballing the spread vs the y=x line tells the story.
+  {
+    id: 'list-otd-vs-effective-otd',
+    title: 'List OTD vs effective OTD price',
+    description:
+      'Diagonal = sell-at-list. Distance below the diagonal = how much per-unit revenue is being given up to promos. Big-volume points far below the line are where promo behaviour materially changes economics.',
+    defaultX: 'listOtdPriceDollars',
+    defaultY: 'otdUnitPriceDollars',
+    defaultColourBy: 'discountBand',
+    referenceLine: 'diagonal',
+    section: SECTION_PROMO,
+  },
+  {
+    id: 'list-gm-vs-effective-gm',
+    title: 'List GM% vs effective GM%',
+    description:
+      'Cleanest "promo margin erosion" view. Points on the diagonal sell at list margin; points below diagonal lose GM% to promos. Healthy-on-paper SKUs that have actually weak realized margin show up bottom-right.',
+    defaultX: 'listGmPercent',
+    defaultY: 'gmPercent',
+    defaultColourBy: 'subcategory',
+    referenceLine: 'diagonal',
+    section: SECTION_PROMO,
+  },
+  {
+    id: 'discount-vs-effective-gm',
+    title: 'Discount depth % vs effective GM %',
+    description:
+      'The margin cliff. Where does the next 5 points of discount destroy 15 points of margin? Brands/SKUs at the bottom-right are most exposed.',
+    defaultX: 'discountDepthPercent',
+    defaultY: 'gmPercent',
+    defaultColourBy: 'subcategory',
+    section: SECTION_PROMO,
+  },
+  {
+    id: 'discount-vs-contribution',
+    title: 'Discount depth % vs contribution $/day',
+    description:
+      'Did the discount create profitable throughput or just cheap volume? Top-right = promo-responsive winners; bottom-right = burning money on volume.',
+    defaultX: 'discountDepthPercent',
+    defaultY: 'marginVelocityDollarsPerDay',
+    defaultColourBy: 'gmBand',
+    section: SECTION_PROMO,
+  },
+  {
+    id: 'discount-vs-velocity-index',
+    title: 'Discount depth % vs velocity index (cohort)',
+    description:
+      'Promo responsiveness normalised against cat × sub × size peers. High-discount + high-index = promo-responsive winners. High-discount + low-index = bad promos / weak demand.',
+    defaultX: 'discountDepthPercent',
+    defaultY: 'velocityIndex',
+    defaultColourBy: 'gmBand',
+    referenceLine: 'unit-y',
+    section: SECTION_PROMO,
+  },
+  {
+    id: 'realization-vs-margin-per-unit',
+    title: 'Price realization % vs margin $/unit',
+    description:
+      'How much list-price leakage can the SKU tolerate before unit economics break? Premium brands may still deliver strong $/unit even with modest discounting.',
+    defaultX: 'priceRealizationPercent',
+    defaultY: 'marginDollarsPerUnit',
+    defaultColourBy: 'brand',
+    section: SECTION_PROMO,
+  },
+
+  // ----- Cohort-relative -----
+  //
+  // Use the in-cohort medians (computed on the loaded filter slice) to
+  // give the operator a "vs peers" lens. The diagonals at 1× / 0pp
+  // anchor the eye on "at-median" cleanly.
+  {
+    id: 'price-index-vs-velocity-index',
+    title: 'Price index vs velocity index (cohort)',
+    description:
+      'World-class merchandising view. Quadrants: premium winners (top-right), value workhorses (top-left), overpriced laggards (bottom-right), cheap-but-slow (bottom-left).',
+    defaultX: 'effectivePriceIndex',
+    defaultY: 'velocityIndex',
+    defaultColourBy: 'subcategory',
+    referenceLine: 'unit-y',
+    section: SECTION_COHORT,
+  },
+  {
+    id: 'gm-delta-vs-velocity-index',
+    title: 'GM% vs cohort median vs velocity index',
+    description:
+      'Margin pricing power view. Top-right = SKUs out-performing peers on BOTH margin and velocity.',
+    defaultX: 'gmPercentIndex',
+    defaultY: 'velocityIndex',
+    defaultColourBy: 'brand',
+    referenceLine: 'unit-y',
+    section: SECTION_COHORT,
+  },
+
+  // ----- Basket / inventory health -----
+  {
+    id: 'coverage-vs-discount',
+    title: 'Sales-day coverage % vs discount depth %',
+    description:
+      'Distinguishes reliable demand from promo-driven spikes. Top-left = organic staple; top-right = promo-dependent staple; bottom-right = event/clearance behaviour; bottom-left = weak visibility.',
+    defaultX: 'salesDayCoveragePercent',
+    defaultY: 'discountDepthPercent',
+    defaultColourBy: 'gmBand',
+    section: SECTION_BASKET,
+  },
+  {
+    id: 'units-per-invoice-vs-margin-per-invoice',
+    title: 'Units per invoice vs margin $/invoice',
+    description:
+      'Basket role view. SKUs with high units/invoice but low margin/invoice are multi-buy promo magnets that dilute basket economics.',
+    defaultX: 'unitsPerInvoice',
+    defaultY: 'marginPerInvoiceDollars',
+    defaultColourBy: 'discountBand',
+    section: SECTION_BASKET,
+  },
+  {
+    id: 'weeks-of-supply-vs-contribution',
+    title: 'Weeks of supply vs contribution $/day',
+    description:
+      'Replenishment + markdown radar. Top-right = high-profit, needs reorder. Bottom-right = dead inventory candidates for markdown.',
+    defaultX: 'weeksOfSupplyOnHand',
+    defaultY: 'marginVelocityDollarsPerDay',
+    defaultColourBy: 'gmBand',
+    section: SECTION_BASKET,
   },
   {
     id: 'onhand-vs-velocity',
@@ -312,16 +726,41 @@ const DEFAULT_CARDS: ReadonlyArray<ScatterCardConfig> = [
     defaultX: 'currentQty',
     defaultY: 'salesVelocityUnitsPerDay',
     defaultColourBy: 'subcategory',
-  },
-  {
-    id: 'thc-vs-otd',
-    title: 'THC % vs OTD price',
-    description: 'Are we capturing a potency premium on shelf price?',
-    defaultX: 'labThcPct',
-    defaultY: 'otdUnitPriceDollars',
-    defaultColourBy: 'brand',
+    section: SECTION_BASKET,
   },
 ]
+
+function sectionOf(c: ScatterCardConfig): string {
+  return c.section ?? SECTION_CORE
+}
+
+function groupCardsBySection(
+  cards: ReadonlyArray<ScatterCardConfig>,
+): ReadonlyArray<{ section: string; cards: ReadonlyArray<ScatterCardConfig> }> {
+  const byName = new Map<string, ScatterCardConfig[]>()
+  for (const c of cards) {
+    const name = sectionOf(c)
+    const arr = byName.get(name) ?? []
+    arr.push(c)
+    byName.set(name, arr)
+  }
+  // Render sections in the order declared in SECTIONS_IN_ORDER, then
+  // any extras alphabetically. (Defensive — current data has no
+  // extras, but keeps drift from breaking the page.)
+  const knownOrder = new Map<string, number>(
+    SECTIONS_IN_ORDER.map((s, i) => [s, i]),
+  )
+  return Array.from(byName.entries())
+    .sort(([a], [b]) => {
+      const oa = knownOrder.get(a)
+      const ob = knownOrder.get(b)
+      if (oa != null && ob != null) return oa - ob
+      if (oa != null) return -1
+      if (ob != null) return 1
+      return a.localeCompare(b)
+    })
+    .map(([section, cs]) => ({ section, cards: cs }))
+}
 
 // =============================== Tab component =============================
 
@@ -476,6 +915,59 @@ export function CatalogAnalyticsTab() {
 
   const points = pointsResp?.points ?? []
 
+  // Cohort medians for the index axes. Recomputed once per filter
+  // result set so axis evaluators downstream are O(1). Cohort key is
+  // (categoryName, subcategoryName, sizeLabel) per cohortKey().
+  //
+  // Only points that have ALL of (velocity, effective OTD price, GM%,
+  // margin/unit) populated participate in their respective medians —
+  // a points-without-sales row shouldn't drag the velocity median
+  // toward zero. Cohorts smaller than MIN_COHORT contribute medians
+  // but the SPA labels them ambiguous via the tooltip.
+  const cohortMedians = useMemo(() => {
+    const groups = new Map<
+      string,
+      { vel: number[]; price: number[]; gm: number[]; mpu: number[] }
+    >()
+    for (const p of points) {
+      const k = cohortKey(p)
+      let g = groups.get(k)
+      if (!g) {
+        g = { vel: [], price: [], gm: [], mpu: [] }
+        groups.set(k, g)
+      }
+      if (p.salesVelocityUnitsPerDay != null) g.vel.push(p.salesVelocityUnitsPerDay)
+      if (p.otdUnitPriceDollars != null) g.price.push(p.otdUnitPriceDollars)
+      if (p.gmPercent != null) g.gm.push(p.gmPercent)
+      if (p.marginDollarsPerUnit != null) g.mpu.push(p.marginDollarsPerUnit)
+    }
+    const out = new Map<
+      string,
+      {
+        velocityUnitsPerDay: number | null
+        effectiveOtdPriceDollars: number | null
+        gmPercent: number | null
+        marginPerUnitDollars: number | null
+      }
+    >()
+    for (const [k, g] of groups) {
+      out.set(k, {
+        velocityUnitsPerDay: median(g.vel),
+        effectiveOtdPriceDollars: median(g.price),
+        gmPercent: median(g.gm),
+        marginPerUnitDollars: median(g.mpu),
+      })
+    }
+    return out
+  }, [points])
+
+  const axisCtx: AxisCtx = useMemo(
+    () => ({ windowDays, cohortMedians }),
+    [windowDays, cohortMedians],
+  )
+
+  const sectionedCards = useMemo(() => groupCardsBySection(DEFAULT_CARDS), [])
+
   return (
     <section className="catalog-analytics-tab">
       <div className="metrics-controls catalog-analytics-controls">
@@ -577,18 +1069,23 @@ export function CatalogAnalyticsTab() {
         </p>
       )}
 
-      <div className="catalog-analytics-grid">
-        {DEFAULT_CARDS.map((cfg) => (
-          <ScatterCard
-            key={cfg.id}
-            config={cfg}
-            points={points}
-            pageColourBy={pageColourBy}
-            loading={loadingPoints}
-            windowDays={windowDays}
-          />
-        ))}
-      </div>
+      {sectionedCards.map(({ section, cards }) => (
+        <div key={section} className="catalog-analytics-section">
+          <h3 className="catalog-analytics-section-title">{section}</h3>
+          <div className="catalog-analytics-grid">
+            {cards.map((cfg) => (
+              <ScatterCard
+                key={cfg.id}
+                config={cfg}
+                points={points}
+                pageColourBy={pageColourBy}
+                loading={loadingPoints}
+                axisCtx={axisCtx}
+              />
+            ))}
+          </div>
+        </div>
+      ))}
     </section>
   )
 }
@@ -755,10 +1252,10 @@ interface ScatterCardProps {
   points: ReadonlyArray<CatalogAnalyticsPoint>
   pageColourBy: ColourByKey | 'per-chart'
   loading: boolean
-  windowDays: number
+  axisCtx: AxisCtx
 }
 
-function ScatterCard({ config, points, pageColourBy, loading, windowDays }: ScatterCardProps) {
+function ScatterCard({ config, points, pageColourBy, loading, axisCtx }: ScatterCardProps) {
   const [xId, setXId] = useState<string>(config.defaultX)
   const [yId, setYId] = useState<string>(config.defaultY)
   const [localColourBy, setLocalColourBy] = useState<ColourByKey>(config.defaultColourBy)
@@ -824,7 +1321,8 @@ function ScatterCard({ config, points, pageColourBy, loading, windowDays }: Scat
         yDef={yDef}
         colourByDef={colourByDef}
         loading={loading}
-        windowDays={windowDays}
+        axisCtx={axisCtx}
+        referenceLine={config.referenceLine}
       />
     </article>
   )
@@ -838,7 +1336,9 @@ interface CatalogScatterSvgProps {
   yDef: PointAxisDef
   colourByDef: ColourByDef
   loading: boolean
-  windowDays: number
+  axisCtx: AxisCtx
+  /** Reference line annotation, see ScatterCardConfig. */
+  referenceLine?: 'diagonal' | 'unit-y' | 'unit-x'
 }
 
 interface PlottedPoint {
@@ -854,7 +1354,8 @@ function CatalogScatterSvg({
   yDef,
   colourByDef,
   loading,
-  windowDays,
+  axisCtx,
+  referenceLine,
 }: CatalogScatterSvgProps) {
   const wrapRef = useRef<HTMLDivElement | null>(null)
   const svgRef = useRef<SVGSVGElement | null>(null)
@@ -887,8 +1388,8 @@ function CatalogScatterSvg({
     let yHi = Number.NEGATIVE_INFINITY
     const bucketSet = new Set<string>()
     for (const p of points) {
-      const x = xDef.value(p)
-      const y = yDef.value(p)
+      const x = xDef.value(p, axisCtx)
+      const y = yDef.value(p, axisCtx)
       if (x === null || y === null || !Number.isFinite(x) || !Number.isFinite(y)) continue
       const bucket = colourByDef.bucket(p)
       bucketSet.add(bucket)
@@ -920,7 +1421,7 @@ function CatalogScatterSvg({
     // Sort buckets by count desc so the legend reflects scale.
     const buckets = Array.from(bucketSet).sort()
     return { plotted, buckets, xMin: xLo, xMax: xHi, yMin: yLo, yMax: yHi }
-  }, [points, xDef, yDef, colourByDef])
+  }, [points, xDef, yDef, colourByDef, axisCtx])
 
   const { plotted, buckets, xMin, xMax, yMin, yMax } = computed
 
@@ -1058,6 +1559,58 @@ function CatalogScatterSvg({
         >
           {yDef.label}
         </text>
+        {/* Reference line annotations.
+            - diagonal:  y = x in axis space (e.g. List OTD vs Effective
+                         OTD — clipped to the overlapping range so the
+                         line stays inside the plot area).
+            - unit-y:    horizontal line at y = 1 (index axes; 1.0× =
+                         cohort median).
+            - unit-x:    vertical line at x = 1. */}
+        {referenceLine === 'diagonal' &&
+        plotted.length > 0 &&
+        Number.isFinite(xMin) &&
+        Number.isFinite(yMin) ? (
+          <>
+            {(() => {
+              const lo = Math.max(xMin, yMin)
+              const hi = Math.min(xMax, yMax)
+              if (!(hi > lo)) return null
+              return (
+                <line
+                  x1={xScale(lo)}
+                  y1={yScale(lo)}
+                  x2={xScale(hi)}
+                  y2={yScale(hi)}
+                  stroke="#999"
+                  strokeDasharray="4 4"
+                  strokeWidth={1}
+                />
+              )
+            })()}
+          </>
+        ) : null}
+        {referenceLine === 'unit-y' && yMin <= 1 && yMax >= 1 ? (
+          <line
+            x1={xScale(xMin)}
+            y1={yScale(1)}
+            x2={xScale(xMax)}
+            y2={yScale(1)}
+            stroke="#999"
+            strokeDasharray="4 4"
+            strokeWidth={1}
+          />
+        ) : null}
+        {referenceLine === 'unit-x' && xMin <= 1 && xMax >= 1 ? (
+          <line
+            x1={xScale(1)}
+            y1={yScale(yMin)}
+            x2={xScale(1)}
+            y2={yScale(yMax)}
+            stroke="#999"
+            strokeDasharray="4 4"
+            strokeWidth={1}
+          />
+        ) : null}
         {/* dots */}
         {plotted.map((pp, idx) => (
           <circle
@@ -1118,7 +1671,7 @@ function CatalogScatterSvg({
       {plotted.length === 0 && !loading ? (
         <p className="subtle-copy">
           No variants in the current filter slice have values for both axes over the last{' '}
-          {windowDays} days.
+          {axisCtx.windowDays} days.
         </p>
       ) : null}
     </div>
@@ -1185,10 +1738,26 @@ function ScatterTooltip(p: ScatterTooltipProps) {
           ) : null}
           {p.point.gmPercent != null ? (
             <tr>
-              <th>GM %</th>
+              <th>eff. GM %</th>
               <td>{fmtPct(p.point.gmPercent)}</td>
             </tr>
           ) : null}
+          {p.point.listPriceDollars != null ? (
+            <tr>
+              <th>list $/u</th>
+              <td>{fmtMoney(p.point.listPriceDollars)}</td>
+            </tr>
+          ) : null}
+          {(() => {
+            const d = discountDepthPercent(p.point)
+            if (d == null) return null
+            return (
+              <tr>
+                <th>discount</th>
+                <td>{fmtPct(d)}</td>
+              </tr>
+            )
+          })()}
           {p.point.labThcPct != null ? (
             <tr>
               <th>THC %</th>
@@ -1211,6 +1780,17 @@ function ScatterTooltip(p: ScatterTooltipProps) {
       </table>
     </div>
   )
+}
+
+// =============================== Math helpers ==============================
+
+/** Population median. Returns null on an empty / all-NaN input. */
+function median(values: ReadonlyArray<number>): number | null {
+  const xs = values.filter((v) => Number.isFinite(v))
+  if (xs.length === 0) return null
+  const sorted = xs.slice().sort((a, b) => a - b)
+  const mid = Math.floor(sorted.length / 2)
+  return sorted.length % 2 === 0 ? (sorted[mid - 1]! + sorted[mid]!) / 2 : sorted[mid]!
 }
 
 // =============================== Tick helpers ==============================
