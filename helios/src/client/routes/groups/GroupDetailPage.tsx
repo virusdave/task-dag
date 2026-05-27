@@ -1,10 +1,11 @@
 import { useState } from 'react'
-import { useLoaderData, useRevalidator } from 'react-router-dom'
+import { Link, useLoaderData, useRevalidator } from 'react-router-dom'
 
 import {
   GroupDetailResponseSchema,
   LlmRunDetailResponseSchema,
   MutationAcceptedResponseSchema,
+  buildHeliosModulePath,
   type GroupDetailResponse,
   type GroupProductMarketEvidence,
   type LlmRunDetailResponse,
@@ -309,18 +310,60 @@ export function GroupDetailPage() {
         <section className="detail-panel">
           <h3>Jobs and Writes</h3>
           <ul className="timeline-list compact-list">
-            {data.recentJobs.map((job) => (
-              <li key={`job-${job.jobId}`}>
-                <strong>{job.jobType}</strong>
-                <div className="subtle-copy">{job.status}{job.lastError ? ` · ${job.lastError}` : ''}</div>
-              </li>
-            ))}
-            {data.writeOperations.map((operation) => (
-              <li key={`write-${operation.writeOperationId}`}>
-                <strong>{operation.operationType}</strong>
-                <div className="subtle-copy">{operation.status}{operation.error ? ` · ${operation.error}` : ''}</div>
-              </li>
-            ))}
+            {data.recentJobs.map((job) => {
+              const principalTimestamp = job.finishedAt ?? job.startedAt ?? job.runAt ?? job.createdAt
+              return (
+                <li
+                  key={`job-${job.jobId}`}
+                  title={buildJobsAndWritesHoverTitle({
+                    createdAt: job.createdAt,
+                    runAt: job.runAt,
+                    startedAt: job.startedAt,
+                    finishedAt: job.finishedAt,
+                  })}
+                >
+                  <strong>
+                    <Link to={`/jobs/${job.jobId}`}>{job.jobType} #{job.jobId}</Link>
+                  </strong>
+                  <div className="subtle-copy">
+                    {`${job.status} · ${formatJobsAndWritesTimestamp(principalTimestamp)}`}
+                    {job.startedAt && job.finishedAt
+                      ? ` (took ${formatJobsAndWritesDuration(job.startedAt, job.finishedAt)})`
+                      : null}
+                    {job.lastError ? ` · ${job.lastError}` : ''}
+                  </div>
+                </li>
+              )
+            })}
+            {data.writeOperations.map((operation) => {
+              const principalTimestamp = operation.finishedAt ?? operation.startedAt ?? operation.createdAt
+              return (
+                <li
+                  key={`write-${operation.writeOperationId}`}
+                  title={buildJobsAndWritesHoverTitle({
+                    createdAt: operation.createdAt,
+                    startedAt: operation.startedAt,
+                    finishedAt: operation.finishedAt,
+                  })}
+                >
+                  <strong>
+                    <Link to={buildHeliosModulePath('catalog', `review-details/write_operation/${operation.writeOperationId}`)}>
+                      {operation.operationType} #{operation.writeOperationId}
+                    </Link>
+                  </strong>
+                  <div className="subtle-copy">
+                    {`${operation.status} · ${formatJobsAndWritesTimestamp(principalTimestamp)}`}
+                    {operation.startedAt && operation.finishedAt
+                      ? ` (took ${formatJobsAndWritesDuration(operation.startedAt, operation.finishedAt)})`
+                      : null}
+                    {operation.error ? ` · ${operation.error}` : ''}
+                  </div>
+                </li>
+              )
+            })}
+            {data.recentJobs.length === 0 && data.writeOperations.length === 0
+              ? <li className="empty-state">No recent jobs or write operations for this group.</li>
+              : null}
           </ul>
         </section>
 
@@ -526,6 +569,76 @@ function describeMarketEvidenceFreshness(entry: GroupProductMarketEvidence): {
     default:
       return { label: 'no cached market evidence', tone: 'muted' }
   }
+}
+
+// Compact "5m ago" / "2h ago" / "3d ago" formatter for the Jobs and
+// Writes panel. The full local timestamp is exposed via `title=` on
+// the wrapping element so an operator can hover for the exact time
+// without us spending vertical space on it.
+function formatJobsAndWritesTimestamp(isoString: string | null): string {
+  if (!isoString) return 'no timestamp'
+  const t = Date.parse(isoString)
+  if (!Number.isFinite(t)) return isoString
+  const deltaMs = Date.now() - t
+  if (deltaMs < 0) {
+    // Future-dated (e.g. job scheduled for later). Show absolute local
+    // time since "in -3s" is more confusing than just the time.
+    return new Date(t).toLocaleString()
+  }
+  const seconds = Math.round(deltaMs / 1000)
+  if (seconds < 60) return `${seconds}s ago`
+  const minutes = Math.round(seconds / 60)
+  if (minutes < 60) return `${minutes}m ago`
+  const hours = Math.round(minutes / 60)
+  if (hours < 48) return `${hours}h ago`
+  const days = Math.round(hours / 24)
+  if (days < 60) return `${days}d ago`
+  return new Date(t).toLocaleDateString()
+}
+
+// Build the hover-tooltip text that exposes every per-stage timestamp
+// for a job or write operation, so the relative "5m ago" surface stays
+// visually compact but the underlying provenance is still one hover
+// away. Keys are presented in chronological order
+// (queued → scheduled → started → finished).
+function buildJobsAndWritesHoverTitle(stages: {
+  createdAt: string
+  runAt?: string | null
+  startedAt?: string | null
+  finishedAt?: string | null
+}): string {
+  const lines: string[] = []
+  const fmt = (iso: string): string => {
+    const t = Date.parse(iso)
+    return Number.isFinite(t) ? new Date(t).toLocaleString() : iso
+  }
+  lines.push(`queued: ${fmt(stages.createdAt)}`)
+  if (stages.runAt && stages.runAt !== stages.createdAt) {
+    lines.push(`scheduled: ${fmt(stages.runAt)}`)
+  }
+  if (stages.startedAt) {
+    lines.push(`started: ${fmt(stages.startedAt)}`)
+  }
+  if (stages.finishedAt) {
+    lines.push(`finished: ${fmt(stages.finishedAt)}`)
+  }
+  return lines.join('\n')
+}
+
+function formatJobsAndWritesDuration(startIso: string, endIso: string): string {
+  const start = Date.parse(startIso)
+  const end = Date.parse(endIso)
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return '?'
+  const ms = end - start
+  if (ms < 1000) return `${ms}ms`
+  const seconds = Math.round(ms / 1000)
+  if (seconds < 60) return `${seconds}s`
+  const minutes = Math.floor(seconds / 60)
+  const remSeconds = seconds % 60
+  if (minutes < 60) return remSeconds === 0 ? `${minutes}m` : `${minutes}m${remSeconds}s`
+  const hours = Math.floor(minutes / 60)
+  const remMinutes = minutes % 60
+  return remMinutes === 0 ? `${hours}h` : `${hours}h${remMinutes}m`
 }
 
 function mapMarketListingsToCompetitorListings(marketListings: PendingPurchaseMarketListing[]): CompetitorListing[] {
