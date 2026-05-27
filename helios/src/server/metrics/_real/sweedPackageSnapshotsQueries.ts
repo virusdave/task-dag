@@ -6,6 +6,7 @@ import {
 import { getPool } from '../../db/pool.js'
 import { defaultWindow, walkBuckets } from '../timeBuckets.js'
 import type { MetricQueryArgs, MetricRow } from '../types.js'
+import { orderItemsCatalogFilterSql } from './catalogFilterSql.js'
 import { FIRST_TIME_SERIES_EXPR } from './sweedOrdersQueries.js'
 
 // ============================================================================
@@ -283,20 +284,24 @@ export async function queryGrossMarginDollars(args: MetricQueryArgs): Promise<Me
   if (dealerIds.length === 0 || buckets.length === 0) {
     return buckets.map((b) => ({ t: b.toISOString(), gm_dollars: 0 }))
   }
+  const cf = orderItemsCatalogFilterSql(args, 4)
   const sql = `
+    ${cf.withPrefix}
     select ${bucketSelectExpr(truncUnit, 'so.pay_time')} as bucket_start,
            'gm_dollars' as series_id,
            sum(${REVENUE_EXPR})::numeric as revenue,
            sum(${COGS_EXPR})::numeric as cogs
-      from sweed_orders so,
-           jsonb_array_elements(so.raw_json->'items') as item
+      from sweed_orders so
+           cross join lateral jsonb_array_elements(so.raw_json->'items') as item
+           ${cf.joinClause}
      where so.dealer_id = any($1::bigint[])
        and so.pay_time >= $2 and so.pay_time < $3
+       ${cf.whereClause}
      group by 1
   `
   return runMarginBucketedQuery({
     sql,
-    params: [dealerIds, from.toISOString(), to.toISOString()],
+    params: [dealerIds, from.toISOString(), to.toISOString(), ...cf.params],
     seriesIds: ['gm_dollars'],
     buckets,
     defaultValue: 0,
@@ -314,22 +319,26 @@ export async function queryEffectiveGmPct(args: MetricQueryArgs): Promise<Metric
   if (dealerIds.length === 0 || buckets.length === 0) {
     return buckets.map((b) => ({ t: b.toISOString(), gm_pct: null }))
   }
+  const cf = orderItemsCatalogFilterSql(args, 4)
   const sql = `
+    ${cf.withPrefix}
     select ${bucketSelectExpr(truncUnit, 'so.pay_time')} as bucket_start,
            'gm_pct' as series_id,
            sum(case when sweed_package_cost_as_of_or_earliest(so.dealer_id, item->>'inventoryItemId', so.pay_time) is not null
                     then ${REVENUE_EXPR} else 0 end)::numeric as revenue,
            sum(case when sweed_package_cost_as_of_or_earliest(so.dealer_id, item->>'inventoryItemId', so.pay_time) is not null
                     then ${COGS_EXPR} else 0 end)::numeric as cogs
-      from sweed_orders so,
-           jsonb_array_elements(so.raw_json->'items') as item
+      from sweed_orders so
+           cross join lateral jsonb_array_elements(so.raw_json->'items') as item
+           ${cf.joinClause}
      where so.dealer_id = any($1::bigint[])
        and so.pay_time >= $2 and so.pay_time < $3
+       ${cf.whereClause}
      group by 1
   `
   return runMarginBucketedQuery({
     sql,
-    params: [dealerIds, from.toISOString(), to.toISOString()],
+    params: [dealerIds, from.toISOString(), to.toISOString(), ...cf.params],
     seriesIds: ['gm_pct'],
     buckets,
     defaultValue: null,
@@ -348,20 +357,24 @@ export async function queryMarginStackNewVsReturning(args: MetricQueryArgs): Pro
   if (dealerIds.length === 0 || buckets.length === 0) {
     return buckets.map((b) => ({ t: b.toISOString(), first_time: 0, returning: 0 }))
   }
+  const cf = orderItemsCatalogFilterSql(args, 4)
   const sql = `
+    ${cf.withPrefix}
     select ${bucketSelectExpr(truncUnit, 'so.pay_time')} as bucket_start,
            ${FIRST_TIME_SERIES_EXPR} as series_id,
            sum(${REVENUE_EXPR})::numeric as revenue,
            sum(${COGS_EXPR})::numeric as cogs
-      from sweed_orders so,
-           jsonb_array_elements(so.raw_json->'items') as item
+      from sweed_orders so
+           cross join lateral jsonb_array_elements(so.raw_json->'items') as item
+           ${cf.joinClause}
      where so.dealer_id = any($1::bigint[])
        and so.pay_time >= $2 and so.pay_time < $3
+       ${cf.whereClause}
      group by 1, 2
   `
   return runMarginBucketedQuery({
     sql,
-    params: [dealerIds, from.toISOString(), to.toISOString()],
+    params: [dealerIds, from.toISOString(), to.toISOString(), ...cf.params],
     seriesIds: ['first_time', 'returning'],
     buckets,
     defaultValue: 0,
@@ -382,21 +395,25 @@ export async function queryCategoryMarginStack(args: MetricQueryArgs): Promise<M
       return row as MetricRow
     })
   }
+  const cf = orderItemsCatalogFilterSql(args, 4)
   const sql = `
+    ${cf.withPrefix}
     select ${bucketSelectExpr(truncUnit, 'so.pay_time')} as bucket_start,
            coalesce(lower(item->'productCategory'->>'name'), '') as cat_value,
            sum(${REVENUE_EXPR})::numeric as revenue,
            sum(${COGS_EXPR})::numeric as cogs
-      from sweed_orders so,
-           jsonb_array_elements(so.raw_json->'items') as item
+      from sweed_orders so
+           cross join lateral jsonb_array_elements(so.raw_json->'items') as item
+           ${cf.joinClause}
      where so.dealer_id = any($1::bigint[])
        and so.pay_time >= $2 and so.pay_time < $3
+       ${cf.whereClause}
      group by 1, 2
   `
   const pool = getPool()
   const result = await pool.query<{ bucket_start: string | Date | null; cat_value: string | null; revenue: string | null; cogs: string | null }>(
     sql,
-    [dealerIds, from.toISOString(), to.toISOString()],
+    [dealerIds, from.toISOString(), to.toISOString(), ...cf.params],
   )
   const data = new Map<string, Map<string, number>>()
   for (const row of result.rows) {
@@ -451,21 +468,25 @@ async function queryFulfillmentMargin(
     })
   }
   const isPct = mode === 'pct'
+  const cf = orderItemsCatalogFilterSql(args, 4)
   const sql = `
+    ${cf.withPrefix}
     select ${bucketSelectExpr(truncUnit, 'so.pay_time')} as bucket_start,
            coalesce(lower(so.fulfillment_type), '') as fulfillment_value,
            sum(${isPct ? `case when sweed_package_cost_as_of_or_earliest(so.dealer_id, item->>'inventoryItemId', so.pay_time) is not null then ${REVENUE_EXPR} else 0 end` : REVENUE_EXPR})::numeric as revenue,
            sum(${isPct ? `case when sweed_package_cost_as_of_or_earliest(so.dealer_id, item->>'inventoryItemId', so.pay_time) is not null then ${COGS_EXPR} else 0 end` : COGS_EXPR})::numeric as cogs
-      from sweed_orders so,
-           jsonb_array_elements(so.raw_json->'items') as item
+      from sweed_orders so
+           cross join lateral jsonb_array_elements(so.raw_json->'items') as item
+           ${cf.joinClause}
      where so.dealer_id = any($1::bigint[])
        and so.pay_time >= $2 and so.pay_time < $3
+       ${cf.whereClause}
      group by 1, 2
   `
   const pool = getPool()
   const result = await pool.query<{ bucket_start: string | Date | null; fulfillment_value: string | null; revenue: string | null; cogs: string | null }>(
     sql,
-    [dealerIds, from.toISOString(), to.toISOString()],
+    [dealerIds, from.toISOString(), to.toISOString(), ...cf.params],
   )
   const data = new Map<string, Map<string, { revenue: number; cogs: number }>>()
   for (const row of result.rows) {
@@ -547,20 +568,30 @@ export async function queryInventoryCostDistribution(args: MetricQueryArgs): Pro
   // bucket end. Each lookup is O(snapshots) and uses the snapshot
   // primary key so the total cost stays linear in (buckets × packages).
   const pool = getPool()
+  // Step 1: per-package category lookup. When catalog filters are
+  // active, narrow the eligible package universe at this step (rather
+  // than per-bucket inside the snapshot loop) so the bucket queries
+  // remain cheap and parallel. Packages whose productId is not in the
+  // filtered catalog mapping simply drop out of categoryByPackage and
+  // therefore contribute nothing to any bucket's series sums.
+  const cf = orderItemsCatalogFilterSql(args, 2)
   const perPackageCategorySql = `
+    ${cf.withPrefix}
     select distinct on (so.dealer_id, item->>'inventoryItemId')
            so.dealer_id,
            item->>'inventoryItemId' as inventory_item_id,
            lower(coalesce(item->'productCategory'->>'name', '')) as category_value
-      from sweed_orders so, jsonb_array_elements(so.raw_json->'items') as item
+      from sweed_orders so
+           cross join lateral jsonb_array_elements(so.raw_json->'items') as item
+           ${cf.joinClause}
      where so.dealer_id = any($1::bigint[])
        and item->>'inventoryItemId' is not null
+       ${cf.whereClause}
      order by so.dealer_id, item->>'inventoryItemId', so.pay_time desc
   `
-  // Step 1: per-package category lookup.
   const catResult = await pool.query<{ dealer_id: string; inventory_item_id: string; category_value: string }>(
     perPackageCategorySql,
-    [dealerIds],
+    [dealerIds, ...cf.params],
   )
   const categoryByPackage = new Map<string, string>()
   for (const row of catResult.rows) {

@@ -1,5 +1,6 @@
 import type {
   MetricAggregation,
+  MetricCatalogFilterDimension,
   MetricDefSummary,
   MetricSeriesDef,
 } from '../../shared/contracts/index.js'
@@ -46,7 +47,10 @@ export type MetricRowValue = string | number | null
  * sanitise them for you.
  */
 export interface MetricDef
-  extends Omit<MetricDefSummary, 'dataStatus' | 'blockedByUrl' | 'chartType'> {
+  extends Omit<
+    MetricDefSummary,
+    'dataStatus' | 'blockedByUrl' | 'chartType' | 'supportedCatalogFilters'
+  > {
   readonly series: MetricSeriesDef[]
   readonly query: MetricQueryFn
   /**
@@ -62,6 +66,14 @@ export interface MetricDef
    * be plotted as X / Y of a scatter chart (e.g. weather correlation).
    */
   readonly chartType?: MetricDefSummary['chartType']
+  /**
+   * Optional — declare which catalog filter dimensions the query
+   * actually honors. Empty / unset means the metric is NOT a
+   * candidate for the shared filter chips (the SPA will badge such
+   * cards as "filters not applied" when filters are active, and the
+   * route rejects filtered requests for unsupported dimensions).
+   */
+  readonly supportedCatalogFilters?: readonly MetricCatalogFilterDimension[]
 }
 
 export interface MetricQueryArgs {
@@ -72,6 +84,19 @@ export interface MetricQueryArgs {
   /** Exclusive upper bound; null means the metric chooses a default. */
   readonly to: Date | null
   readonly agg: MetricAggregation
+  /**
+   * Catalog-scope filters. Each is an array of label values that the
+   * metric query should narrow the universe to. Empty / undefined =
+   * no filter on that dimension. The HTTP route only forwards
+   * filters for dimensions the metric declares as supported; other
+   * dimensions arrive here as empty arrays. These fields are marked
+   * optional so test fixtures (and back-compat callers) can omit
+   * them — queries that consume them should coerce undefined → [].
+   */
+  readonly categoryIds?: readonly string[]
+  readonly subcategoryIds?: readonly string[]
+  readonly brandIds?: readonly string[]
+  readonly sizes?: readonly string[]
 }
 
 export type MetricQueryFn = (args: MetricQueryArgs) => Promise<MetricRow[]>
@@ -93,5 +118,6 @@ export function toMetricSummary(metric: MetricDef): MetricDefSummary {
     dataStatus: metric.dataStatus ?? 'real',
     blockedByUrl: metric.blockedByUrl,
     chartType: metric.chartType ?? 'line',
+    supportedCatalogFilters: [...(metric.supportedCatalogFilters ?? [])],
   }
 }

@@ -6,6 +6,12 @@ import {
 import { getPool } from '../../db/pool.js'
 import { defaultWindow, walkBuckets } from '../timeBuckets.js'
 import type { MetricQueryArgs, MetricRow } from '../types.js'
+import {
+  CATALOG_PRODUCT_MAPPING_CTE,
+  catalogFilterParams,
+  catalogFilterWhere,
+  hasAnyCatalogFilter,
+} from './catalogFilterSql.js'
 
 // ============================================================================
 // Real-data SQL helpers for `/metrics`.
@@ -632,19 +638,41 @@ async function queryCategoryLineItems(args: MetricQueryArgs): Promise<MetricRow[
     })
   }
   const bucketSelect = bucketSelectExpr(truncUnit)
-  const sql = `
-    select ${bucketSelect} as bucket_start,
-           coalesce(lower(item->'productCategory'->>'name'), '') as col_value,
-           sum((item->>'subtotalAmount')::numeric) as value
-      from sweed_orders, jsonb_array_elements(raw_json->'items') as item
-     where dealer_id = any($1::bigint[])
-       and pay_time >= $2 and pay_time < $3
-     group by 1, 2
-  `
+  // Series-binning is always by raw `item->'productCategory'->>'name'`
+  // (mapped to a stable canonical series id below). When catalog
+  // filters are active we narrow which line items participate by
+  // joining catalog_product_mapping on the order item's productId.
+  const filtersActive = hasAnyCatalogFilter(args)
+  const sql = filtersActive
+    ? `
+      with ${CATALOG_PRODUCT_MAPPING_CTE}
+      select ${bucketSelect} as bucket_start,
+             coalesce(lower(item->'productCategory'->>'name'), '') as col_value,
+             sum((item->>'subtotalAmount')::numeric) as value
+        from sweed_orders
+             cross join lateral jsonb_array_elements(raw_json->'items') as item
+             join catalog_product_mapping cpm on cpm.product_id = (item->>'productId')
+       where dealer_id = any($1::bigint[])
+         and pay_time >= $2 and pay_time < $3
+         ${catalogFilterWhere('cpm', 4)}
+       group by 1, 2
+    `
+    : `
+      select ${bucketSelect} as bucket_start,
+             coalesce(lower(item->'productCategory'->>'name'), '') as col_value,
+             sum((item->>'subtotalAmount')::numeric) as value
+        from sweed_orders, jsonb_array_elements(raw_json->'items') as item
+       where dealer_id = any($1::bigint[])
+         and pay_time >= $2 and pay_time < $3
+       group by 1, 2
+    `
   const pool = getPool()
+  const params: unknown[] = filtersActive
+    ? [dealerIds, from.toISOString(), to.toISOString(), ...catalogFilterParams(args)]
+    : [dealerIds, from.toISOString(), to.toISOString()]
   const result = await pool.query<{ bucket_start: string | null; col_value: string | null; value: string | null }>(
     sql,
-    [dealerIds, from.toISOString(), to.toISOString()],
+    params,
   )
   const data = new Map<string, Map<string, number>>()
   for (const row of result.rows) {

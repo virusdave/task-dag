@@ -1,3 +1,4 @@
+import type { MetricCatalogFilterDimension } from '../../../shared/contracts/index.js'
 import type { MetricDef } from '../types.js'
 import {
   queryBasketSizeByCustomerType,
@@ -31,6 +32,15 @@ import {
   queryWeatherMarginVsPrecip,
 } from './weatherQueries.js'
 import { queryCashierTransactionsPerHour } from './cashierThroughputQueries.js'
+
+// Every metric whose SQL has been wired through orderItemsCatalogFilterSql
+// can honour all four catalog-scope filter dimensions.
+const ALL_CATALOG_FILTERS: readonly MetricCatalogFilterDimension[] = [
+  'category',
+  'subcategory',
+  'brand',
+  'size',
+]
 
 // ============================================================================
 // Real-data MetricDefs. These swap one-for-one with stubs of the same id;
@@ -178,6 +188,7 @@ export const REAL_METRICS: ReadonlyArray<MetricDef> = [
     defaultAggregation: 'week',
     supportedAggregations: [...SUPPORTED],
     query: queryCategorySalesStackDollars,
+    supportedCatalogFilters: ALL_CATALOG_FILTERS,
   },
   {
     id: 'category.sales_stack_fraction',
@@ -197,6 +208,7 @@ export const REAL_METRICS: ReadonlyArray<MetricDef> = [
     defaultAggregation: 'week',
     supportedAggregations: [...SUPPORTED],
     query: queryCategorySalesStackFraction,
+    supportedCatalogFilters: ALL_CATALOG_FILTERS,
   },
   // ---- Margin / COGS (P2 + P3) — backed by sweed_package_snapshots ----
   {
@@ -209,6 +221,7 @@ export const REAL_METRICS: ReadonlyArray<MetricDef> = [
     defaultAggregation: 'week',
     supportedAggregations: [...SUPPORTED],
     query: queryGrossMarginDollars,
+    supportedCatalogFilters: ALL_CATALOG_FILTERS,
   },
   {
     id: 'margins.effective_gm_pct',
@@ -220,6 +233,7 @@ export const REAL_METRICS: ReadonlyArray<MetricDef> = [
     defaultAggregation: 'week',
     supportedAggregations: [...SUPPORTED],
     query: queryEffectiveGmPct,
+    supportedCatalogFilters: ALL_CATALOG_FILTERS,
   },
   {
     id: 'margins.stack_new_vs_returning',
@@ -234,6 +248,7 @@ export const REAL_METRICS: ReadonlyArray<MetricDef> = [
     defaultAggregation: 'week',
     supportedAggregations: [...SUPPORTED],
     query: queryMarginStackNewVsReturning,
+    supportedCatalogFilters: ALL_CATALOG_FILTERS,
   },
   {
     id: 'category.margin_dollars_stack',
@@ -253,6 +268,7 @@ export const REAL_METRICS: ReadonlyArray<MetricDef> = [
     defaultAggregation: 'week',
     supportedAggregations: [...SUPPORTED],
     query: queryCategoryMarginStack,
+    supportedCatalogFilters: ALL_CATALOG_FILTERS,
   },
   {
     id: 'fulfillment.margin_dollars',
@@ -270,6 +286,7 @@ export const REAL_METRICS: ReadonlyArray<MetricDef> = [
     defaultAggregation: 'week',
     supportedAggregations: [...SUPPORTED],
     query: queryFulfillmentMarginDollars,
+    supportedCatalogFilters: ALL_CATALOG_FILTERS,
   },
   {
     id: 'fulfillment.effective_gm_pct',
@@ -287,6 +304,7 @@ export const REAL_METRICS: ReadonlyArray<MetricDef> = [
     defaultAggregation: 'week',
     supportedAggregations: [...SUPPORTED],
     query: queryFulfillmentEffectiveGmPct,
+    supportedCatalogFilters: ALL_CATALOG_FILTERS,
   },
   // ---- Inventory (P4) — backed by sweed_package_snapshots ----
   {
@@ -306,6 +324,7 @@ export const REAL_METRICS: ReadonlyArray<MetricDef> = [
     defaultAggregation: 'date',
     supportedAggregations: [...SUPPORTED],
     query: queryInventoryCostDistribution,
+    supportedCatalogFilters: ALL_CATALOG_FILTERS,
   },
   {
     id: 'inventory.misalignment',

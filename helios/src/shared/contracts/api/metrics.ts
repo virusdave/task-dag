@@ -52,6 +52,25 @@ export const MetricChartTypeSchema = z.enum(['line', 'scatter'])
 export type MetricChartType = z.infer<typeof MetricChartTypeSchema>
 
 /**
+ * Which catalog-scope filter dimensions a metric actually honors. The
+ * registry exposes this on the public summary so the SPA knows which
+ * cards to send catalog filters to (and which to badge as "filters not
+ * applied"). The HTTP route REJECTS filter params for dimensions a
+ * metric doesn't declare — silent no-op filters would be a lie.
+ *
+ * Values match the columns produced by the catalog-analytics filters
+ * endpoint (`category_label` / `subcategory_label` / `brand_label` /
+ * `size_label` — i.e. coalesced labels, not numeric ids).
+ */
+export const MetricCatalogFilterDimensionSchema = z.enum([
+  'category',
+  'subcategory',
+  'brand',
+  'size',
+])
+export type MetricCatalogFilterDimension = z.infer<typeof MetricCatalogFilterDimensionSchema>
+
+/**
  * Provenance flag for a metric:
  *
  *   - `real`    — backed by real ingest / SQL the operator should trust.
@@ -91,6 +110,15 @@ export const MetricDefSummarySchema = z.object({
    * with X = `series[0]` value and Y = `series[1]` value.
    */
   chartType: MetricChartTypeSchema.default('line'),
+  /**
+   * Which catalog-scope filter dimensions this metric honors. Empty
+   * (the default) means the metric is NOT a candidate for the shared
+   * category / subcategory / brand / size filter chips on inventory /
+   * sales / catalog tabs — the SPA will badge such cards as "filters
+   * not applied" when those chips are active, and the HTTP route will
+   * reject filtered requests for the unsupported dimensions with 400.
+   */
+  supportedCatalogFilters: z.array(MetricCatalogFilterDimensionSchema).default([]),
 })
 export type MetricDefSummary = z.infer<typeof MetricDefSummarySchema>
 
@@ -99,24 +127,35 @@ export const MetricListResponseSchema = z.object({
 })
 export type MetricListResponse = z.infer<typeof MetricListResponseSchema>
 
+const csvList = z
+  .string()
+  .optional()
+  .transform((value) =>
+    value && value.trim().length > 0
+      ? value
+          .split(',')
+          .map((s) => s.trim())
+          .filter((s) => s.length > 0)
+      : [],
+  )
+
 // `GET /api/metrics/<id>` query params.
 export const MetricQueryRequestSchema = z.object({
   // Comma-separated list of site ids (e.g. `?sites=midtown,bushwick`).
   // Empty / unset = all sites.
-  sites: z
-    .string()
-    .optional()
-    .transform((value) =>
-      value && value.trim().length > 0
-        ? value
-            .split(',')
-            .map((s) => s.trim())
-            .filter((s) => s.length > 0)
-        : [],
-    ),
+  sites: csvList,
   from: z.string().datetime().optional(),
   to: z.string().datetime().optional(),
   agg: MetricAggregationSchema.optional(),
+  // Catalog-scope filters — comma-separated label lists matching the
+  // ids returned by /api/catalog-analytics/filters. Empty / unset =
+  // no filter on that dimension. The route rejects any non-empty list
+  // for a dimension the metric does not declare in
+  // supportedCatalogFilters.
+  categoryIds: csvList,
+  subcategoryIds: csvList,
+  brandIds: csvList,
+  sizes: csvList,
 })
 export type MetricQueryRequest = z.infer<typeof MetricQueryRequestSchema>
 
@@ -143,6 +182,13 @@ export const MetricQueryResponseSchema = z.object({
     from: z.string().nullable(),
     to: z.string().nullable(),
     agg: MetricAggregationSchema,
+    // Echo the catalog-scope filters that were actually applied. The
+    // route only forwards filters for dimensions the metric declares
+    // as supported; other dimensions surface here as empty arrays.
+    categoryIds: z.array(z.string()).default([]),
+    subcategoryIds: z.array(z.string()).default([]),
+    brandIds: z.array(z.string()).default([]),
+    sizes: z.array(z.string()).default([]),
   }),
   data: z.array(MetricDatumSchema),
 })
