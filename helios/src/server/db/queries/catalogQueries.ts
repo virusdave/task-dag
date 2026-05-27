@@ -13,6 +13,10 @@ import { PendingPurchaseMarketListingSchema } from '../../../shared/contracts/in
 import type { Queryable } from '../pool.js'
 import { buildEmptyGroupRecentSales, loadRecentSalesForGroups } from '../../catalog/liveRecentSales.js'
 import { buildTextPreview, jsonValueToPreview, toIsoString } from './helpers.js'
+import {
+  loadEffectiveMarketListingsForGroup,
+  type EffectiveMarketListing,
+} from './catalogMarketMatchQueries.js'
 
 interface CatalogBrowserRow extends QueryResultRow {
   active_desired_field_count: number
@@ -402,7 +406,23 @@ export async function getGroupDetail(db: Queryable, catalogGroupId: number): Pro
           ),
     ])
 
-  const marketEvidence = buildMarketEvidence(liveStateProducts, observationsResult.rows)
+  // Effective marketplace listings = reviewed exact/brand_family
+  // verdicts + auto-promoted unreviewed candidates whose score is
+  // high enough. Loaded in parallel with the rest of the page; if
+  // it fails we fall back silently to observation-only evidence so
+  // the page still renders.
+  const effectiveListings = await loadEffectiveMarketListingsForGroup(db, catalogGroupId).catch(
+    (err: unknown) => {
+      console.warn(`[catalog] effective listings load failed for group ${catalogGroupId}:`, err)
+      return null
+    },
+  )
+
+  const marketEvidence = buildMarketEvidence(
+    liveStateProducts,
+    observationsResult.rows,
+    effectiveListings?.byProductId ?? new Map(),
+  )
 
   // Recent-sales velocity used to be loaded inline here via
   // loadRecentSalesForGroups(), which cold-paginated the entire
@@ -716,6 +736,7 @@ function extractLiveStateProducts(liveState: JsonValue): LiveStateProductEntry[]
 function buildMarketEvidence(
   products: LiveStateProductEntry[],
   observations: LitalertsObservationRow[],
+  effectiveListingsByProductId: Map<number, EffectiveMarketListing[]>,
 ): GroupProductMarketEvidence[] {
   if (products.length === 0) return []
 
@@ -729,25 +750,45 @@ function buildMarketEvidence(
   const now = Date.now()
 
   return products.map((product) => {
+    // Pull auto-promoted / reviewed listings for THIS variant. They're
+    // keyed by Sweed catalog productId (== product.productId here).
+    const effective = effectiveListingsByProductId.get(product.productId) ?? []
+    const effectiveAsMatched: PendingPurchaseMarketListing[] = effective
+      .map((listing) => projectEffectiveListing(listing))
+      .filter((l): l is PendingPurchaseMarketListing => l !== null)
+
     const obs = obsByProductId.get(product.productId)
     if (!obs) {
+      // No live observation, but we may still have auto-promoted /
+      // reviewed structured matches for this variant — surface them
+      // so pricing UI doesn't show "0 listings" for a group that has
+      // a live verdict-set.
+      const eligibleEffective = effectiveAsMatched.filter((l) => l.eligibleForPricing)
+      const ePrices = eligibleEffective.map((l) => l.postTaxPrice).filter((v) => Number.isFinite(v))
+      const avg = ePrices.length > 0 ? ePrices.reduce((s, v) => s + v, 0) / ePrices.length : null
+      let med: number | null = null
+      if (ePrices.length > 0) {
+        const sorted = [...ePrices].sort((a, b) => a - b)
+        const mid = Math.floor(sorted.length / 2)
+        med = sorted.length % 2 === 0 ? (sorted[mid - 1]! + sorted[mid]!) / 2 : sorted[mid]!
+      }
       return {
         productId: product.productId,
         productName: product.name ?? `Product #${product.productId}`,
         productTab: product.tab,
         livePrice: product.price,
         capturedAt: null,
-        freshness: 'absent' as const,
+        freshness: effectiveAsMatched.length > 0 ? ('fresh' as const) : ('absent' as const),
         ageDays: null,
         availability: null,
         searchTermLabel: null,
         notes: null,
         brandName: null,
-        listingCount: 0,
-        eligibleListingCount: 0,
-        averagePostTaxPrice: null,
-        medianPostTaxPrice: null,
-        matchedListings: [],
+        listingCount: effectiveAsMatched.length,
+        eligibleListingCount: eligibleEffective.length,
+        averagePostTaxPrice: avg,
+        medianPostTaxPrice: med,
+        matchedListings: effectiveAsMatched,
       }
     }
 
@@ -764,7 +805,12 @@ function buildMarketEvidence(
             ? 'very_stale'
             : 'expired'
 
-    const matchedListings = extractMatchedListings(obs.evidence_json)
+    // Merge observation-derived matched listings with effective
+    // (reviewed / auto-promoted) ones. Dedupe by listing URL when
+    // present so we don't double-count the same row that appears in
+    // both sources.
+    const obsListings = extractMatchedListings(obs.evidence_json)
+    const matchedListings = mergeMatchedListings(obsListings, effectiveAsMatched)
     const eligible = matchedListings.filter((listing) => listing.eligibleForPricing === true)
     const eligiblePrices = eligible.map((listing) => listing.postTaxPrice).filter((value) => Number.isFinite(value))
 
@@ -797,6 +843,65 @@ function buildMarketEvidence(
       matchedListings,
     }
   })
+}
+
+/**
+ * Coerce an EffectiveMarketListing (the auto-promoted /
+ * reviewed-verdict shape from `catalogMarketMatchQueries`) into the
+ * wire shape used by `GroupProductMarketEvidence.matchedListings`.
+ * Listings whose price could not be parsed are dropped (they
+ * contribute nothing useful to averages and would render as $NaN).
+ */
+function projectEffectiveListing(
+  listing: EffectiveMarketListing,
+): PendingPurchaseMarketListing | null {
+  if (
+    listing.preTaxPrice === null ||
+    listing.postTaxPrice === null ||
+    !Number.isFinite(listing.preTaxPrice) ||
+    !Number.isFinite(listing.postTaxPrice)
+  ) {
+    return null
+  }
+  const normalized = {
+    category: listing.category,
+    distanceBand: listing.distanceBand,
+    distanceMiles: listing.distanceMiles,
+    dispensaryName: listing.dispensaryName || '—',
+    eligibleForPricing: listing.eligibleForPricing,
+    exclusionReason: listing.exclusionReason,
+    listingName: listing.listingName,
+    matchTier: listing.matchTier,
+    postTaxPrice: listing.postTaxPrice,
+    preTaxPrice: listing.preTaxPrice,
+    source: listing.source,
+    url: listing.url,
+  }
+  const parsed = PendingPurchaseMarketListingSchema.safeParse(normalized)
+  return parsed.success ? parsed.data : null
+}
+
+/**
+ * Merge observation-derived listings with effective (auto-promoted /
+ * reviewed) listings. Deduplicate by URL (when both sides have one)
+ * so the same partner-API row landed by both pipelines doesn't
+ * double-count. Effective listings win on conflict because their
+ * matchTier reflects the reviewer's verdict rather than the
+ * heuristic at observation-capture time.
+ */
+function mergeMatchedListings(
+  observationListings: PendingPurchaseMarketListing[],
+  effectiveListings: PendingPurchaseMarketListing[],
+): PendingPurchaseMarketListing[] {
+  if (effectiveListings.length === 0) return observationListings
+  const effectiveUrls = new Set(effectiveListings.map((l) => l.url).filter((u): u is string => !!u))
+  const merged: PendingPurchaseMarketListing[] = []
+  for (const listing of observationListings) {
+    if (listing.url && effectiveUrls.has(listing.url)) continue
+    merged.push(listing)
+  }
+  merged.push(...effectiveListings)
+  return merged
 }
 
 function extractMatchedListings(evidenceJson: JsonValue): PendingPurchaseMarketListing[] {

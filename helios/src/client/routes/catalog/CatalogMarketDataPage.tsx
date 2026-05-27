@@ -608,6 +608,14 @@ interface MinScoreSliderProps {
 }
 
 function MinScoreSlider({ value, onChange, label, inherited, onReset }: MinScoreSliderProps): JSX.Element {
+  // Use a fine 0.01 step so reviewers can dial in around the tight
+  // 0.80–1.00 cluster where most surviving candidates score; the old
+  // 0.05 step made the slider feel like a no-op when nudging it
+  // inside that range. Both onChange and onInput are wired so the
+  // value updates while the thumb is being dragged.
+  const handle = (e: { currentTarget: { value: string } }): void => {
+    onChange(Number.parseFloat(e.currentTarget.value))
+  }
   return (
     <span
       className="inline-row"
@@ -618,9 +626,10 @@ function MinScoreSlider({ value, onChange, label, inherited, onReset }: MinScore
       <input
         max={1}
         min={0}
-        onChange={(e) => onChange(Number.parseFloat(e.currentTarget.value))}
-        step={0.05}
-        style={{ width: '6rem' }}
+        onChange={handle}
+        onInput={handle}
+        step={0.01}
+        style={{ width: '8rem' }}
         type="range"
         value={value}
       />
@@ -947,8 +956,8 @@ function GroupReviewPanel({
             {bundle.subcategoryName ? ` · ${bundle.subcategoryName}` : ''}
           </div>
           <div className="subtle-copy" style={{ fontSize: '0.78rem', marginTop: '0.2rem' }}>
-            {`${visibleTotal} above ${effectiveMinScore.toFixed(2)} · ${suppressedTotal} below (auto no-match; top candidate always shown)`}
-            {` · ${bundle.liveVerdicts.length} live verdict${bundle.liveVerdicts.length === 1 ? '' : 's'}`}
+            {`${visibleTotal} ≥ ${effectiveMinScore.toFixed(2)} · ${suppressedTotal} hidden below threshold`}
+            {` · top candidate per size always shown · ${bundle.liveVerdicts.length} live verdict${bundle.liveVerdicts.length === 1 ? '' : 's'}`}
           </div>
         </div>
         <MinScoreSlider

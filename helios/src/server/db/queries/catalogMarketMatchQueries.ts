@@ -1618,3 +1618,221 @@ export async function recordVerdict(
 }
 
 export { scoreCatalogFuzzy }
+
+/**
+ * Default minimum score for an unreviewed candidate to be auto-
+ * promoted into the "effective" listings set surfaced on the catalog
+ * detail page and (later) in the pricing comp pool.
+ *
+ * Calibrated against the spot-check that "the top page of items being
+ * displayed were either all exact match or family match, which will
+ * generally be good enough to establish pricing on" — i.e. the
+ * existing 0.70 threshold the review UI already uses.
+ */
+export const EFFECTIVE_AUTO_PROMOTE_THRESHOLD = 0.7
+
+/**
+ * One marketplace listing as it should appear to the catalog-detail
+ * page and to downstream pricing aggregation, sourced from a
+ * verdict-applied or auto-promoted catalog_market_matches /
+ * fuzzy_skus row.
+ *
+ * Shape is a strict subset of GroupProductMarketEvidence's
+ * `matchedListings` element so consumers can splice it in without
+ * any per-source translation.
+ */
+export interface EffectiveMarketListing {
+  catalogProductId: number | null
+  dispensaryName: string
+  listingName: string
+  category: string | null
+  preTaxPrice: number | null
+  postTaxPrice: number | null
+  url: string | null
+  matchTier: 'exact' | 'fallback' | 'weak'
+  source: 'nearby' | 'statewide'
+  distanceBand: 'near' | 'mid' | 'far' | 'very_far' | 'unknown'
+  distanceMiles: number | null
+  eligibleForPricing: boolean
+  exclusionReason: string | null
+  /** Why this listing was included (review verdict or auto-promote). */
+  inclusionReason: 'reviewed_exact' | 'reviewed_brand_family' | 'auto_promoted'
+  /** Score used for inclusion (null for hand-reviewed rows). */
+  finalScore: number | null
+}
+
+export interface EffectiveMarketListingsBundle {
+  byProductId: Map<number, EffectiveMarketListing[]>
+  unmatchedListings: EffectiveMarketListing[]
+  autoPromoteThreshold: number
+  reviewedCount: number
+  autoPromotedCount: number
+}
+
+/**
+ * Return the "effective" marketplace listings for a catalog group:
+ *   - Live reviewed exact/brand_family verdicts (never `no_match`).
+ *   - Unreviewed candidates whose finalScore >= autoPromoteThreshold.
+ *
+ * Internally piggy-backs on loadGroupReview so brand-override
+ * expansion, hard category/size/name gates, and scoring stay in one
+ * place — there is exactly one definition of "what counts as a
+ * match for this catalog group" in the system.
+ *
+ * Listings are bucketed by matchedCatalogProductId so callers can
+ * splice them into per-product evidence. Listings whose match had no
+ * associated catalog variant (e.g. groups whose snapshot has no
+ * parseable variants) land in `unmatchedListings`.
+ */
+export async function loadEffectiveMarketListingsForGroup(
+  db: Queryable,
+  catalogGroupId: number,
+  options: { autoPromoteThreshold?: number } = {},
+): Promise<EffectiveMarketListingsBundle | null> {
+  const threshold = Math.min(
+    1,
+    Math.max(0, options.autoPromoteThreshold ?? EFFECTIVE_AUTO_PROMOTE_THRESHOLD),
+  )
+  const bundle = await loadGroupReview(db, catalogGroupId, {})
+  if (!bundle) return null
+
+  const byProductId = new Map<number, EffectiveMarketListing[]>()
+  const unmatchedListings: EffectiveMarketListing[] = []
+  let reviewedCount = 0
+  let autoPromotedCount = 0
+
+  const push = (listing: EffectiveMarketListing): void => {
+    if (listing.catalogProductId === null) {
+      unmatchedListings.push(listing)
+      return
+    }
+    const cur = byProductId.get(listing.catalogProductId) ?? []
+    cur.push(listing)
+    byProductId.set(listing.catalogProductId, cur)
+  }
+
+  // 1) Reviewed exact / brand_family verdicts. `no_match` is the
+  // operator's explicit "this row is junk, never use it" — respect
+  // that even if the scorer thinks it's high quality.
+  for (const v of bundle.liveVerdicts) {
+    if (v.verdict === 'no_match') continue
+    const reason: EffectiveMarketListing['inclusionReason'] =
+      v.verdict === 'exact' ? 'reviewed_exact' : 'reviewed_brand_family'
+    const tier: EffectiveMarketListing['matchTier'] =
+      v.verdict === 'exact' ? 'exact' : 'fallback'
+    const listing = effectiveListingFromFuzzy({
+      fuzzy: v.fuzzy,
+      catalogProductId: v.catalogProductId,
+      matchTier: tier,
+      inclusionReason: reason,
+      finalScore: v.confidenceAtVerdict,
+      listingUrl: v.listingUrl,
+      dispensaryName: v.dispensaryName,
+    })
+    if (listing) {
+      reviewedCount += 1
+      push(listing)
+    }
+  }
+
+  // 2) Unreviewed candidates above the auto-promote threshold.
+  const seenFuzzyIds = new Set(bundle.liveVerdicts.map((v) => v.fuzzySkuId))
+  const allCandidates = [
+    ...bundle.sizeGroups.flatMap((g) => g.candidates),
+    ...bundle.unmatchedCandidates,
+  ]
+  for (const c of allCandidates) {
+    if (seenFuzzyIds.has(c.fuzzy.id)) continue
+    if (!Number.isFinite(c.finalScore) || c.finalScore < threshold) continue
+    const listing = effectiveListingFromFuzzy({
+      fuzzy: c.fuzzy,
+      catalogProductId: c.matchedCatalogProductId,
+      // Auto-promoted candidates land as 'fallback' tier — they're
+      // good enough to feed pricing but they didn't get an explicit
+      // "exact" verdict from a human.
+      matchTier: 'fallback',
+      inclusionReason: 'auto_promoted',
+      finalScore: c.finalScore,
+      listingUrl: c.listingUrl,
+      dispensaryName: c.dispensaryName,
+    })
+    if (listing) {
+      autoPromotedCount += 1
+      push(listing)
+    }
+  }
+
+  return {
+    byProductId,
+    unmatchedListings,
+    autoPromoteThreshold: threshold,
+    reviewedCount,
+    autoPromotedCount,
+  }
+}
+
+/**
+ * Project a fuzzy_sku + verdict/candidate context into the wire
+ * shape used by `GroupProductMarketEvidence.matchedListings`. Falls
+ * back to NaN/null prices when raw_input_jsonb has no usable price
+ * (the caller filters those out before averaging).
+ */
+function effectiveListingFromFuzzy(args: {
+  fuzzy: FuzzySkuRow
+  catalogProductId: number | null
+  matchTier: 'exact' | 'fallback' | 'weak'
+  inclusionReason: EffectiveMarketListing['inclusionReason']
+  finalScore: number | null
+  listingUrl: string | null
+  dispensaryName: string | null
+}): EffectiveMarketListing | null {
+  const raw = (args.fuzzy.rawInputJsonb ?? {}) as {
+    listingName?: string | null
+    category?: string | null
+    salePrice?: number | string | null
+    normalPrice?: number | string | null
+    dispensaryName?: string | null
+    url?: string | null
+  }
+  const listingName = typeof raw.listingName === 'string' ? raw.listingName : null
+  if (!listingName) return null
+
+  const preTaxRaw = parseLooseNumber(raw.salePrice) ?? parseLooseNumber(raw.normalPrice)
+  const preTaxPrice = preTaxRaw !== null && preTaxRaw > 0 ? Math.round(preTaxRaw * 100) / 100 : null
+  // Mirror litAlertsMarket.ts's PRICING_POST_TAX_MULTIPLIER (1.13).
+  const postTaxPrice = preTaxPrice !== null ? Math.round(preTaxPrice * 1.13 * 100) / 100 : null
+
+  return {
+    catalogProductId: args.catalogProductId,
+    dispensaryName: args.dispensaryName ?? (typeof raw.dispensaryName === 'string' ? raw.dispensaryName : '—'),
+    listingName,
+    category: typeof raw.category === 'string' ? raw.category : null,
+    preTaxPrice,
+    postTaxPrice,
+    url: args.listingUrl ?? (typeof raw.url === 'string' ? raw.url : null),
+    matchTier: args.matchTier,
+    // Partner-product fuzzies don't carry geo distance, so we surface
+    // 'statewide' / 'unknown' rather than fabricate a near/mid band.
+    source: 'statewide',
+    distanceBand: 'unknown',
+    distanceMiles: null,
+    // A reviewed exact/family verdict OR an auto-promoted high-score
+    // candidate is eligible for pricing in this surface. Downstream
+    // pricing aggregation can re-gate on its own rules if needed.
+    eligibleForPricing: preTaxPrice !== null && preTaxPrice > 0,
+    exclusionReason: preTaxPrice !== null && preTaxPrice > 0 ? null : 'No usable price on LitAlerts row',
+    inclusionReason: args.inclusionReason,
+    finalScore: args.finalScore,
+  }
+}
+
+function parseLooseNumber(v: unknown): number | null {
+  if (typeof v === 'number' && Number.isFinite(v)) return v
+  if (typeof v === 'string') {
+    const trimmed = v.trim()
+    if (trimmed.length === 0) return null
+    const n = Number.parseFloat(trimmed)
+    return Number.isFinite(n) ? n : null
+  }
+  return null
+}
