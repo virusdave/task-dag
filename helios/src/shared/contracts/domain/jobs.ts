@@ -57,6 +57,83 @@ export type JobType = z.infer<typeof JobTypeSchema>
 export const JobStatusSchema = z.enum(['queued', 'running', 'succeeded', 'failed', 'dead_letter'])
 export type JobStatus = z.infer<typeof JobStatusSchema>
 
+/**
+ * Worker execution pool a job is bound to. Mirrors the values in
+ * `worker/runtime/jobPools.ts#JOB_EXECUTION_POOLS`; kept here in
+ * `shared/` so the SPA can render the pool × priority-band queue
+ * matrix without dragging in worker-internal imports.
+ */
+export const JobExecutionPoolSchema = z.enum(['sweed', 'ads', 'scheduling', 'system'])
+export type JobExecutionPool = z.infer<typeof JobExecutionPoolSchema>
+
+/**
+ * Priority bands surfaced to the operator. Each band is a half-open
+ * range `[minPriority, nextBand.minPriority)`. We classify by range
+ * rather than exact equality so an operator manually nudging a
+ * single row's priority still lands in the right band.
+ *
+ * Order (low → high): `best_effort`, `backfill`, `interactive`,
+ * `live_requested`, `urgent`.
+ */
+export const JobPriorityBandSchema = z.enum([
+  'best_effort',
+  'backfill',
+  'interactive',
+  'live_requested',
+  'urgent',
+])
+export type JobPriorityBand = z.infer<typeof JobPriorityBandSchema>
+
+export interface JobPriorityBandDefinition {
+  code: JobPriorityBand
+  label: string
+  /** Inclusive lower bound. */
+  minPriority: number
+  /** Operator-facing sort order (1 = highest). */
+  sortOrder: number
+  /** Oldest-ready wait threshold (s) where the cell turns warning. */
+  warnAfterSeconds: number
+  /** Oldest-ready wait threshold (s) where the cell turns danger. */
+  dangerAfterSeconds: number
+}
+
+/**
+ * Authoritative band table. Order is high-priority-first; the lease
+ * order in `worker/runtime/leaseJobs.ts` already sorts by `priority
+ * desc`, so this matches the order rows actually come out.
+ */
+export const JOB_PRIORITY_BANDS: readonly JobPriorityBandDefinition[] = [
+  { code: 'urgent', label: 'Urgent', minPriority: 1000, sortOrder: 1, warnAfterSeconds: 15, dangerAfterSeconds: 60 },
+  { code: 'live_requested', label: 'Live requested', minPriority: 500, sortOrder: 2, warnAfterSeconds: 60, dangerAfterSeconds: 300 },
+  { code: 'interactive', label: 'Interactive', minPriority: 100, sortOrder: 3, warnAfterSeconds: 120, dangerAfterSeconds: 600 },
+  { code: 'backfill', label: 'Backfill', minPriority: 10, sortOrder: 4, warnAfterSeconds: 30 * 60, dangerAfterSeconds: 2 * 60 * 60 },
+  { code: 'best_effort', label: 'Best effort', minPriority: 0, sortOrder: 5, warnAfterSeconds: 60 * 60, dangerAfterSeconds: 6 * 60 * 60 },
+] as const
+
+export function classifyJobPriorityBand(priority: number): JobPriorityBand {
+  for (const band of JOB_PRIORITY_BANDS) {
+    if (priority >= band.minPriority) {
+      return band.code
+    }
+  }
+  return 'best_effort'
+}
+
+export function getJobPriorityBandDefinition(band: JobPriorityBand): JobPriorityBandDefinition {
+  const def = JOB_PRIORITY_BANDS.find((entry) => entry.code === band)
+  if (!def) {
+    throw new Error(`Unknown job priority band: ${band}`)
+  }
+  return def
+}
+
+export const JOB_EXECUTION_POOL_LABELS: Record<JobExecutionPool, string> = {
+  sweed: 'Sweed',
+  ads: 'Ads',
+  scheduling: 'Scheduling',
+  system: 'System',
+}
+
 export const JobModuleMetadataSchema = z.object({
   module: HeliosModuleCodeSchema,
   scope: HeliosModuleScopeSchema.nullable(),

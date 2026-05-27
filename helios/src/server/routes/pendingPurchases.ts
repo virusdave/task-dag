@@ -34,7 +34,7 @@ import {
 import { withTransaction } from '../db/tx.js'
 import { getJobStatus } from '../db/queries/jobQueries.js'
 import { getOptionalSweedSessionConcurrencyKey } from '../jobs/concurrency.js'
-import { enqueueJob } from '../jobs/enqueueJob.js'
+import { JOB_PRIORITY_LIVE_REQUESTED, enqueueJob } from '../jobs/enqueueJob.js'
 
 interface PendingPurchaseRowLockRow extends QueryResultRow {
   approval_status: 'approved' | 'pending' | 'rejected'
@@ -136,6 +136,7 @@ export async function registerPendingPurchaseRoutes(server: FastifyInstance): Pr
           filePath: normalizedFilePath,
           requestedByUserId: user.id,
         },
+        priority: JOB_PRIORITY_LIVE_REQUESTED,
         requestedByUserId: user.id,
       })
 
@@ -192,6 +193,7 @@ export async function registerPendingPurchaseRoutes(server: FastifyInstance): Pr
           siteDealerIds,
           toDate: body.toDate,
         },
+        priority: JOB_PRIORITY_LIVE_REQUESTED,
         requestedByUserId: user.id,
       })
 
@@ -507,6 +509,7 @@ export async function registerPendingPurchaseRoutes(server: FastifyInstance): Pr
           pendingPurchaseApplyRequestId,
           requestedByUserId: user.id,
         },
+        priority: JOB_PRIORITY_LIVE_REQUESTED,
         requestedByUserId: user.id,
         scope,
       })

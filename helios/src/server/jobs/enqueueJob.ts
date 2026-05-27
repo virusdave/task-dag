@@ -37,7 +37,7 @@ export interface EnqueueJobInput {
  * Priority bands. Plain numbers so we can layer more bands later
  * without a schema change.
  *
- * Four explicit bands with wide gaps so an operator can manually
+ * Five explicit bands with wide gaps so an operator can manually
  * nudge a single row up or down a few notches without colliding
  * with the next band:
  *
@@ -59,6 +59,13 @@ export interface EnqueueJobInput {
  *   originating from an HTTP request / the Helios UI. The default
  *   for any enqueue happening outside the worker process. These
  *   always beat best-effort backlog.
+ * - `JOB_PRIORITY_LIVE_REQUESTED` (500) — operator clicked a
+ *   button and is actively waiting on the result (e.g. the
+ *   `catalog.pending_purchases.*` flows that block the
+ *   pending-purchases UI). Sits above ambient `INTERACTIVE`
+ *   backlog so a manual click jumps ahead of, say, a routine
+ *   maintenance click queued a few minutes ago. Stays below
+ *   `URGENT` so the fast-lane is reserved for true incidents.
  * - `JOB_PRIORITY_URGENT` (1000) — operator-flagged "must start
  *   immediately" work. The worker process runs a dedicated
  *   fast-lane loop (see `runWorkerLoop`) that polls every
@@ -69,6 +76,7 @@ export interface EnqueueJobInput {
 export const JOB_PRIORITY_BEST_EFFORT = 0
 export const JOB_PRIORITY_BACKFILL = 10
 export const JOB_PRIORITY_INTERACTIVE = 100
+export const JOB_PRIORITY_LIVE_REQUESTED = 500
 export const JOB_PRIORITY_URGENT = 1000
 
 /**

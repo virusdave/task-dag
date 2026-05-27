@@ -8,6 +8,7 @@ import {
   SchedulingRunListResponseSchema,
   SchedulingWeekWindowSchema,
   applySchedulingWeeklyHoursPolicy,
+  classifyJobPriorityBand,
   type SchedulingRunDetailResponse,
   type SchedulingRunListQuery,
   type SchedulingRunListResponse,
@@ -16,6 +17,7 @@ import {
   type SchedulingRunQueueWaitingReason,
 } from '../../../shared/contracts/index.js'
 import type { JsonValue } from '../../../shared/contracts/index.js'
+import { JOB_EXECUTION_POOL_BY_TYPE } from '../../../worker/runtime/jobPools.js'
 import type { Queryable } from '../pool.js'
 import { toIsoString } from './helpers.js'
 
@@ -77,6 +79,7 @@ interface JobDebugRow extends QueryResultRow {
   job_type: JobListItem['jobType']
   last_error: string | null
   module_code: JobListItem['module']
+  priority: number
   requested_by_label: string | null
   requested_by_user_id: number | null
   run_at: Date
@@ -240,6 +243,7 @@ export async function getSchedulingRunDetail(
           jq.finished_at,
           jq.last_error,
           jq.module_code,
+          jq.priority,
           jq.requested_by_user_id,
           u.name as requested_by_label,
           jq.scope_entity_type,
@@ -348,6 +352,7 @@ async function buildQueueDebug(db: Queryable, currentJob: JobListItem | null): P
           jq.finished_at,
           jq.last_error,
           jq.module_code,
+          jq.priority,
           jq.requested_by_user_id,
           u.name as requested_by_label,
           jq.scope_entity_type,
@@ -434,6 +439,7 @@ async function buildQueueDebug(db: Queryable, currentJob: JobListItem | null): P
         jq.finished_at,
         jq.last_error,
         jq.module_code,
+        jq.priority,
         jq.requested_by_user_id,
         u.name as requested_by_label,
         jq.scope_entity_type,
@@ -478,14 +484,18 @@ function determineWaitingReason(input: {
 }
 
 function mapJobDebugRow(row: JobDebugRow): JobListItem {
+  const poolMeta = JOB_EXECUTION_POOL_BY_TYPE[row.job_type]
   return {
     attemptCount: row.attempt_count,
     createdAt: toIsoString(row.created_at) ?? new Date(0).toISOString(),
+    executionPool: poolMeta?.pool ?? 'system',
     finishedAt: toIsoString(row.finished_at),
     jobId: row.id,
     jobType: row.job_type,
     lastError: row.last_error,
     module: row.module_code,
+    priority: row.priority,
+    priorityBand: classifyJobPriorityBand(row.priority),
     requestedByLabel: row.requested_by_label,
     requestedByUserId: row.requested_by_user_id,
     runAt: toIsoString(row.run_at) ?? new Date(0).toISOString(),

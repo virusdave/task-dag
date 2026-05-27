@@ -74,7 +74,9 @@ vi.mock('../../server/jobs/enqueueJob.js', () => ({
   // Mirror the real module's priority band constants so call sites
   // that import them alongside `enqueueJob` resolve at test time.
   JOB_PRIORITY_BEST_EFFORT: 0,
+  JOB_PRIORITY_BACKFILL: 10,
   JOB_PRIORITY_INTERACTIVE: 100,
+  JOB_PRIORITY_LIVE_REQUESTED: 500,
   JOB_PRIORITY_URGENT: 1000,
   JOB_PRIORITY_BACKGROUND: 0,
   JOB_PRIORITY_HIGH: 100,
