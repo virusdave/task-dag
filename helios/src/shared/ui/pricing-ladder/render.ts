@@ -188,23 +188,37 @@ function renderCompetitor(c: LadderCompetitorGeometry): string {
   if (c.dispensaryName) titleParts.push(c.dispensaryName)
   titleParts.push(`Post-tax: ${formatUsd(c.postTaxPrice)}`)
   titleParts.push(c.distanceMiles !== null ? `${c.distanceMiles.toFixed(2)} mi` : 'distance unknown')
+  if (c.matchTier === 'fallback') titleParts.push('brand-family match')
   if (c.listingName) titleParts.push(c.listingName)
   if (c.dispensaryAddress) titleParts.push(c.dispensaryAddress)
   if (!c.eligibleForPricing) titleParts.push('display only (excluded from pricing comps)')
   const title = escapeHtml(titleParts.join(' \u00b7 '))
 
-  const style = `left:${c.leftPercent.toFixed(2)}%; top:${c.topPx.toFixed(1)}px; background:${c.color};`
+  // Fallback (brand-family) comps render at 50% opacity so reviewers can
+  // see at a glance that the dot is a weaker comp tier than exact-match.
+  // Eligibility-based dimming (`data-eligible="false"` → 0.42 opacity in
+  // style.ts) still applies on top via the cascade.
+  const opacity = c.matchTier === 'fallback' ? 0.5 : null
+  const style = [
+    `left:${c.leftPercent.toFixed(2)}%`,
+    `top:${c.topPx.toFixed(1)}px`,
+    `background:${c.color}`,
+    opacity !== null ? `opacity:${opacity}` : null,
+  ]
+    .filter((part): part is string => part !== null)
+    .join('; ') + ';'
   const dataAttrs = [
     `data-canonical-pricing-ladder-competitor=""`,
     `data-band="${escapeHtml(c.bandKey)}"`,
     `data-listing-id="${escapeHtml(String(c.listingId))}"`,
     `data-eligible="${c.eligibleForPricing ? 'true' : 'false'}"`,
+    `data-match-tier="${escapeHtml(c.matchTier)}"`,
     c.distanceMiles !== null ? `data-distance-miles="${c.distanceMiles.toFixed(3)}"` : '',
     `data-proximity="${c.proximity.toFixed(3)}"`,
   ]
     .filter(Boolean)
     .join(' ')
-  const className = `canonical-ladder-competitor band-${c.bandKey}`
+  const className = `canonical-ladder-competitor band-${c.bandKey} match-${c.matchTier}`
 
   if (c.url) {
     return `<a class="${className}" ${dataAttrs} style="${style}" href="${escapeHtml(c.url)}" target="_blank" rel="noopener noreferrer" title="${title}"></a>`

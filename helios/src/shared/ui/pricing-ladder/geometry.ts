@@ -32,7 +32,26 @@ export interface CompetitorListingInput {
   url?: string | null
   /** When false, the dot renders dimmer and is excluded from comp stats. */
   eligibleForPricing?: boolean
+  /**
+   * LitAlerts comp-matcher verdict for this listing:
+   *  - `'exact'`     same brand × category × size × packCount lane.
+   *  - `'fallback'`  brand-family match (same brand × category lane only,
+   *                  size or pack differ).
+   *  - `'weak'`      same brand only; size lane mismatched.
+   * Listings with `'weak'` are filtered out of the ladder. Listings with
+   * `'fallback'` render at 50% opacity to visually de-emphasise the
+   * weaker comp tier without losing the price signal entirely.
+   * Defaults to `'exact'` when omitted (back-compat for callers that
+   * have not yet plumbed matchTier through).
+   */
+  matchTier?: 'exact' | 'fallback' | 'weak'
 }
+
+/**
+ * Alias kept for callers that import `CompetitorListing` rather than
+ * `CompetitorListingInput`. The two are the same shape.
+ */
+export type CompetitorListing = CompetitorListingInput
 
 export interface PricingLadderInput {
   /** Sweed product id (rendered as data-product-id; used by slider script). */
@@ -72,6 +91,14 @@ export interface LadderCompetitorGeometry {
   listingName: string | null
   url: string | null
   eligibleForPricing: boolean
+  /**
+   * Verdict from the LitAlerts comp matcher. `'weak'` listings are
+   * dropped before geometry is built, so this is always `'exact'` or
+   * `'fallback'` here. Drives 50% opacity on the rendered dot for
+   * `'fallback'` so reviewers can see at a glance which dots are
+   * brand-family matches versus exact-match comps.
+   */
+  matchTier: 'exact' | 'fallback'
 }
 
 export interface LadderStats {
@@ -104,7 +131,14 @@ export interface LadderGeometry {
 }
 
 export function buildLadderGeometry(input: PricingLadderInput): LadderGeometry {
-  const eligibleListings = input.competitorListings.filter((l) => l.eligibleForPricing !== false)
+  // Drop `weak` comps before doing anything else: they are same-brand
+  // listings whose size lane doesn't match the SKU we're pricing, so
+  // their price signal is misleading on the ladder. Reviewer sees only
+  // exact-match and brand-family (fallback) comps.
+  const visibleListings = input.competitorListings.filter(
+    (l) => (l.matchTier ?? 'exact') !== 'weak',
+  )
+  const eligibleListings = visibleListings.filter((l) => l.eligibleForPricing !== false)
   const eligiblePostTaxSorted = eligibleListings
     .map((l) => l.postTaxPrice)
     .filter((value): value is number => Number.isFinite(value))
@@ -116,7 +150,7 @@ export function buildLadderGeometry(input: PricingLadderInput): LadderGeometry {
   const min = eligiblePostTaxSorted.length > 0 ? eligiblePostTaxSorted[0] : null
   const max = eligiblePostTaxSorted.length > 0 ? eligiblePostTaxSorted[eligiblePostTaxSorted.length - 1] : null
 
-  // Domain: include every anchor and every listing so nothing clips.
+  // Domain: include every anchor and every (visible) listing so nothing clips.
   const domainAnchors = [
     input.livePrice,
     input.proposedPrice,
@@ -124,7 +158,7 @@ export function buildLadderGeometry(input: PricingLadderInput): LadderGeometry {
     input.marketMedianPostTax,
     q1,
     q3,
-    ...input.competitorListings.map((l) => l.postTaxPrice),
+    ...visibleListings.map((l) => l.postTaxPrice),
   ].filter((value): value is number => value !== null && Number.isFinite(value))
 
   let domainMin: number
@@ -165,11 +199,12 @@ export function buildLadderGeometry(input: PricingLadderInput): LadderGeometry {
     markers.push({ kind: 'proposed', postTaxPrice: input.proposedPrice, leftPercent: positionPercent(input.proposedPrice) })
   }
 
-  const competitors: LadderCompetitorGeometry[] = input.competitorListings
+  const competitors: LadderCompetitorGeometry[] = visibleListings
     .filter((l) => Number.isFinite(l.postTaxPrice))
     .map((l) => {
       const band = bandForDistance(l.distanceMiles)
       const proximity = withinBandProximity(band, l.distanceMiles)
+      const matchTier = (l.matchTier ?? 'exact') as 'exact' | 'fallback'
       return {
         listingId: l.listingId,
         postTaxPrice: l.postTaxPrice,
@@ -184,6 +219,7 @@ export function buildLadderGeometry(input: PricingLadderInput): LadderGeometry {
         listingName: l.listingName ?? null,
         url: l.url ?? null,
         eligibleForPricing: l.eligibleForPricing !== false,
+        matchTier,
       }
     })
 
@@ -221,7 +257,7 @@ export function buildLadderGeometry(input: PricingLadderInput): LadderGeometry {
       minPostTax: min,
       maxPostTax: max,
       pricingCompCount: eligibleListings.length,
-      totalCompCount: input.competitorListings.length,
+      totalCompCount: visibleListings.length,
       bandCounts,
     },
     bandsPresent,

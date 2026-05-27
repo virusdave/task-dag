@@ -14,6 +14,7 @@ export type { DistanceBand, DistanceBandKey } from './bands.js'
 
 export { buildLadderGeometry } from './geometry.js'
 export type {
+  CompetitorListing,
   CompetitorListingInput,
   LadderCompetitorGeometry,
   LadderGeometry,

@@ -649,7 +649,9 @@ function mapMarketListingsToCompetitorListings(marketListings: PendingPurchaseMa
     dispensaryName: listing.dispensaryName,
     dispensaryAddress: null,
     listingName: listing.listingName,
-    url: null,
+    url: listing.url,
     eligibleForPricing: listing.eligibleForPricing,
+    // Drop `weak` from the ladder and dim `fallback` brand-family dots.
+    matchTier: listing.matchTier,
   }))
 }

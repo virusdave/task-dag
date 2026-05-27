@@ -1105,8 +1105,11 @@ function mapToCompetitorListings(marketListings: PendingPurchaseMarketListing[])
     dispensaryName: listing.dispensaryName,
     dispensaryAddress: null,
     listingName: listing.listingName,
-    url: null,
+    url: listing.url,
     eligibleForPricing: listing.eligibleForPricing,
+    // Plumb the comp-matcher verdict through so the ladder can drop
+    // `weak` and dim `fallback` (brand-family) dots.
+    matchTier: listing.matchTier,
   }))
 }
 

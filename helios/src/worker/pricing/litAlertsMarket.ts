@@ -97,6 +97,16 @@ interface RetailerDirectoryEntry {
   id: number
   name: string
   normalizedName: string
+  /**
+   * Great-circle distance in miles from this retailer to the nearest
+   * helios_store_locations row (lat/lng joined out of
+   * `litalerts_retailer_locations` ⨯ `helios_store_locations`).
+   * `null` when the retailer is not yet geocoded, or none of our
+   * stores have lat/lng.
+   */
+  minDistanceMiles: number | null
+  /** site_key of the nearest store, or null when minDistanceMiles is null. */
+  nearestStoreKey: string | null
 }
 
 interface RetailerDirectory {
@@ -558,16 +568,19 @@ function flattenBrandProductsToListingCandidates(
       }
 
       const configWeight = buildConfigWeightText(config.amount, config.units)
-      // TODO(market-data-sweep): the partner API does not expose retailer
-      // lat/lng, so every listing comes back as distanceBand='unknown' /
-      // distanceMiles=null. Geocoding retailer addresses (or sourcing
-      // coordinates from a separate provider) is a follow-on enhancement that
-      // will restore the near/mid/far distance-weighted comp ladder.
+      // Resolve per-listing distance to our nearest store via the
+      // geocoded retailer directory (litalerts_retailer_locations ⨯
+      // helios_store_locations). Retailers we haven't geocoded yet
+      // still come through as distanceBand='unknown' / distanceMiles=null
+      // so they appear on the ladder in the statewide band rather than
+      // disappearing.
+      const distanceMiles = retailerEntry?.minDistanceMiles ?? null
+      const distanceBand = classifyPricingDistanceBand(distanceMiles)
       flattened.push({
         availability: null,
         category,
-        distanceBand: 'unknown',
-        distanceMiles: null,
+        distanceBand,
+        distanceMiles,
         dispensaryName,
         imageUrl,
         listingName,
@@ -593,19 +606,81 @@ function buildConfigWeightText(amount: number | string | null | undefined, units
 }
 
 async function loadRetailerDirectory(): Promise<RetailerDirectory> {
-  const retailers = await listRetailers(LIT_ALERTS_PARTNER_STATE_CODE)
-  return buildRetailerDirectory(retailers)
+  const [retailers, distanceRows] = await Promise.all([
+    listRetailers(LIT_ALERTS_PARTNER_STATE_CODE),
+    loadRetailerNearestStoreMap(),
+  ])
+  return buildRetailerDirectory(retailers, distanceRows)
 }
 
-function buildRetailerDirectory(retailers: LitAlertsRetailer[]): RetailerDirectory {
+/**
+ * For every geocoded retailer in `litalerts_retailer_locations`, find
+ * the nearest of our stores by great-circle (haversine) miles. Returns
+ * a Map keyed by retailer_id. Retailers that have not been geocoded
+ * yet, or that have no helios store within reach (all stores missing
+ * coords), are simply absent from the map.
+ *
+ * The CROSS JOIN cardinality is bounded by retailer_count × store_count
+ * (≈ 555 × 2 today), so it runs in a single millisecond-scale query.
+ */
+async function loadRetailerNearestStoreMap(): Promise<
+  Map<number, { miles: number; nearestStoreKey: string }>
+> {
+  const result = await getPool().query<{
+    retailer_id: string
+    miles: number
+    nearest_store_key: string
+  }>(
+    `
+      with retailer_distances as (
+        select
+          r.retailer_id,
+          s.site_key,
+          3958.7613 * 2 * asin(
+            sqrt(
+              sin(radians((s.latitude - r.latitude) / 2)) ^ 2
+              + cos(radians(r.latitude)) * cos(radians(s.latitude))
+                * sin(radians((s.longitude - r.longitude) / 2)) ^ 2
+            )
+          ) as miles
+        from litalerts_retailer_locations r
+        cross join helios_store_locations s
+        where r.latitude is not null and r.longitude is not null
+          and s.latitude is not null and s.longitude is not null
+      )
+      select distinct on (retailer_id)
+        retailer_id::text as retailer_id,
+        miles,
+        site_key as nearest_store_key
+      from retailer_distances
+      order by retailer_id, miles asc
+    `,
+  )
+  const map = new Map<number, { miles: number; nearestStoreKey: string }>()
+  for (const row of result.rows) {
+    const retailerId = Number(row.retailer_id)
+    if (!Number.isFinite(retailerId)) continue
+    if (typeof row.miles !== 'number' || !Number.isFinite(row.miles)) continue
+    map.set(retailerId, { miles: row.miles, nearestStoreKey: row.nearest_store_key })
+  }
+  return map
+}
+
+function buildRetailerDirectory(
+  retailers: LitAlertsRetailer[],
+  distanceMap: Map<number, { miles: number; nearestStoreKey: string }>,
+): RetailerDirectory {
   const byId = new Map<number, RetailerDirectoryEntry>()
   const byNormalizedName = new Map<string, RetailerDirectoryEntry>()
   for (const retailer of retailers) {
+    const distance = distanceMap.get(retailer.id)
     const entry: RetailerDirectoryEntry = {
       address: normalizeInlineText(retailer.address) || null,
       id: retailer.id,
       name: retailer.name,
       normalizedName: normalizeDispensaryKey(retailer.name),
+      minDistanceMiles: distance?.miles ?? null,
+      nearestStoreKey: distance?.nearestStoreKey ?? null,
     }
     byId.set(entry.id, entry)
     if (entry.normalizedName) {
