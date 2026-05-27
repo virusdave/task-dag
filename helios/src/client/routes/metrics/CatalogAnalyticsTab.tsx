@@ -2064,7 +2064,9 @@ function ScatterCard({
           </label>
         </div>
       </header>
-      <p className="subtle-copy">{config.description}</p>
+      {/* config.description used to render inline here; it's now
+          surfaced via the title's `!` HelpIcon popover so the card's
+          visible chrome stays compact. */}
       <CatalogScatterSvg
         points={points}
         xDef={xDef}
