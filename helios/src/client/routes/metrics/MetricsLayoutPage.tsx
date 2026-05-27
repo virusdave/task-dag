@@ -12,6 +12,7 @@ import {
 } from '../../../shared/contracts/index.js'
 import { loadJson } from '../../app/fetchJson.js'
 
+import { CatalogAnalyticsTab } from './CatalogAnalyticsTab.js'
 import {
   MetricChart,
   METRIC_STACK_MODES,
@@ -55,7 +56,12 @@ const KNOWN_SITES: ReadonlyArray<{ id: string; label: string }> = [
 // Adding a tab is a one-liner here plus matching predicate.
 // ---------------------------------------------------------------------------
 
-export type MetricsTabId = 'sales' | 'geography' | 'inventory' | 'scatter'
+export type MetricsTabId =
+  | 'sales'
+  | 'geography'
+  | 'inventory'
+  | 'scatter'
+  | 'catalog'
 
 const DEFAULT_TAB_ID: MetricsTabId = 'sales'
 
@@ -111,6 +117,24 @@ const METRICS_TABS: ReadonlyArray<MetricsTab> = [
     showAggControl: true,
     showStackControl: true,
     include: (m) => m.chartType !== 'scatter' && INVENTORY_GROUPS.has(m.group),
+  },
+  {
+    id: 'catalog',
+    label: 'Catalog analytics',
+    description:
+      'Per-variant scatter suite over the catalog. Filter by category / subcategory / brand / size, then compare any pair of price / margin / GM% / velocity / THC% / cost / inventory metrics. Hover any dot for the underlying product.',
+    defaultAgg: 'date',
+    defaultStackMode: 'none',
+    // The catalog tab renders its OWN UI (see CatalogAnalyticsTab) — the
+    // shared toolbar agg / stack / range / site controls don't apply to
+    // it. Tab-internal controls drive everything.
+    showAggControl: false,
+    showStackControl: false,
+    // Catalog analytics doesn't pull from the time-series metric registry
+    // at all. Returning `false` for every registry metric means the tab
+    // renders an empty metric list and we short-circuit to the dedicated
+    // CatalogAnalyticsTab below.
+    include: () => false,
   },
   {
     id: 'scatter',
@@ -269,85 +293,33 @@ export function MetricsLayoutPage() {
 
         <MetricsTabsNav activeTabId={activeTab.id} />
 
-        <DashboardControls
-          selectedSites={selectedSites}
-          onSitesChange={setSelectedSites}
-          pageAgg={pageAgg}
-          onAggChange={setPageAgg}
-          pageStackMode={pageStackMode}
-          onStackModeChange={setPageStackMode}
-          showAggControl={activeTab.showAggControl}
-          showStackControl={activeTab.showStackControl}
-        />
-
-        {expandedMetric ? (
-          <div className="metrics-focus-panel" ref={focusPanelRef}>
-            <div className="metrics-focus-panel-toolbar">
-              <span className="subtle-copy">Focus:</span>
-              <strong>
-                {expandedMetric.group} — {expandedMetric.title}
-              </strong>
-              <button
-                type="button"
-                className="ghost-button"
-                onClick={() => setExpandedMetricId(null)}
-                aria-label="Close focus panel"
-              >
-                ✕ close
-              </button>
-            </div>
-            <MetricChart
-              key={`focus-${expandedMetric.id}`}
-              metric={expandedMetric}
-              sitesParam={sitesParam}
-              defaultAgg={pageAgg}
-              defaultStackMode={pageStackMode}
-              annotations={annotations}
-              onAnnotationsChanged={onAnnotationsChanged}
-              variant="expanded"
-            />
-          </div>
-        ) : null}
-
-        {realGroups.length === 0 ? (
-          <p className="subtle-copy">
-            No live metrics on this tab yet. {activeTab.description}
-          </p>
+        {activeTab.id === 'catalog' ? (
+          // Catalog analytics has its own filter bar + scatter grid and does
+          // not share the time-series toolbar (sites / agg / stack / range).
+          // Short-circuit the rest of the dashboard render here.
+          <CatalogAnalyticsTab />
         ) : (
-          realGroups.map((g) => (
-            <MetricGroupSection
-              key={`live-${g.group}`}
-              group={g.group}
-              metrics={g.metrics}
-              sitesParam={sitesParam}
-              pageAgg={pageAgg}
-              pageStackMode={pageStackMode}
-              annotations={annotations}
-              onAnnotationsChanged={onAnnotationsChanged}
-              expandedMetricId={expandedMetricId}
-              onExpand={setExpandedMetricId}
-            />
-          ))
+          <RegistryDashboard
+            activeTab={activeTab}
+            selectedSites={selectedSites}
+            setSelectedSites={setSelectedSites}
+            pageAgg={pageAgg}
+            setPageAgg={setPageAgg}
+            pageStackMode={pageStackMode}
+            setPageStackMode={setPageStackMode}
+            partitioned={partitioned}
+            realGroups={realGroups}
+            missingGroups={missingGroups}
+            sitesParam={sitesParam}
+            annotations={annotations}
+            onAnnotationsChanged={onAnnotationsChanged}
+            expandedMetric={expandedMetric}
+            expandedMetricId={expandedMetricId}
+            setExpandedMetricId={setExpandedMetricId}
+            focusPanelRef={focusPanelRef}
+            showMissing={showMissing}
+          />
         )}
-
-        {missingGroups.length > 0 ? (
-          <details className="metrics-pending-section" open={showMissing}>
-            <summary>
-              <span className="metrics-section-title">Missing data</span>{' '}
-              <span className="subtle-copy">
-                ({partitioned.missing.length} metric{partitioned.missing.length === 1 ? '' : 's'} awaiting ingest)
-              </span>
-            </summary>
-            <p className="subtle-copy metrics-pending-explainer">
-              These metrics are part of the spec but their data sources aren't wired up yet — we deliberately do{' '}
-              <strong>not</strong> render synthetic values for them. Each card shows the metric's real definition
-              and a link to the ingest issue tracking the unblock work.
-            </p>
-            {missingGroups.map((g) => (
-              <MissingGroupSection key={`missing-${g.group}`} group={g.group} metrics={g.metrics} />
-            ))}
-          </details>
-        ) : null}
 
         <details className="page-collapsible metrics-help-collapsible">
           <summary>How this dashboard works</summary>
@@ -357,10 +329,137 @@ export function MetricsLayoutPage() {
             <li>Hover any chart for a per-timestamp readout; other charts dim a crosshair at the same moment so you can compare.</li>
             <li>Annotations created with scope <em>global</em> appear as event indicators on every chart at their timestamp.</li>
             <li>Site filter: leave all chips off for an all-sites view, or pick one or more stores.</li>
+            <li>The <strong>Catalog analytics</strong> tab is its own filterable scatter suite with per-variant performance metrics — independent of the time-series tabs.</li>
           </ul>
         </details>
       </section>
     </TimeAxisProvider>
+  )
+}
+
+interface RegistryDashboardProps {
+  activeTab: MetricsTab
+  selectedSites: ReadonlySet<string>
+  setSelectedSites: (next: ReadonlySet<string>) => void
+  pageAgg: MetricAggregation
+  setPageAgg: (next: MetricAggregation) => void
+  pageStackMode: MetricStackMode
+  setPageStackMode: (next: MetricStackMode) => void
+  partitioned: PartitionedMetrics
+  realGroups: Array<{ group: string; metrics: MetricDefSummary[] }>
+  missingGroups: Array<{ group: string; metrics: MetricDefSummary[] }>
+  sitesParam: string
+  annotations: ReadonlyArray<MetricAnnotationRecord>
+  onAnnotationsChanged: () => void
+  expandedMetric: MetricDefSummary | null
+  expandedMetricId: string | null
+  setExpandedMetricId: (id: string | null) => void
+  focusPanelRef: React.MutableRefObject<HTMLDivElement | null>
+  showMissing: boolean
+}
+
+function RegistryDashboard({
+  activeTab,
+  selectedSites,
+  setSelectedSites,
+  pageAgg,
+  setPageAgg,
+  pageStackMode,
+  setPageStackMode,
+  partitioned,
+  realGroups,
+  missingGroups,
+  sitesParam,
+  annotations,
+  onAnnotationsChanged,
+  expandedMetric,
+  expandedMetricId,
+  setExpandedMetricId,
+  focusPanelRef,
+  showMissing,
+}: RegistryDashboardProps) {
+  return (
+    <>
+      <DashboardControls
+        selectedSites={selectedSites}
+        onSitesChange={setSelectedSites}
+        pageAgg={pageAgg}
+        onAggChange={setPageAgg}
+        pageStackMode={pageStackMode}
+        onStackModeChange={setPageStackMode}
+        showAggControl={activeTab.showAggControl}
+        showStackControl={activeTab.showStackControl}
+      />
+
+      {expandedMetric ? (
+        <div className="metrics-focus-panel" ref={focusPanelRef}>
+          <div className="metrics-focus-panel-toolbar">
+            <span className="subtle-copy">Focus:</span>
+            <strong>
+              {expandedMetric.group} — {expandedMetric.title}
+            </strong>
+            <button
+              type="button"
+              className="ghost-button"
+              onClick={() => setExpandedMetricId(null)}
+              aria-label="Close focus panel"
+            >
+              ✕ close
+            </button>
+          </div>
+          <MetricChart
+            key={`focus-${expandedMetric.id}`}
+            metric={expandedMetric}
+            sitesParam={sitesParam}
+            defaultAgg={pageAgg}
+            defaultStackMode={pageStackMode}
+            annotations={annotations}
+            onAnnotationsChanged={onAnnotationsChanged}
+            variant="expanded"
+          />
+        </div>
+      ) : null}
+
+      {realGroups.length === 0 ? (
+        <p className="subtle-copy">
+          No live metrics on this tab yet. {activeTab.description}
+        </p>
+      ) : (
+        realGroups.map((g) => (
+          <MetricGroupSection
+            key={`live-${g.group}`}
+            group={g.group}
+            metrics={g.metrics}
+            sitesParam={sitesParam}
+            pageAgg={pageAgg}
+            pageStackMode={pageStackMode}
+            annotations={annotations}
+            onAnnotationsChanged={onAnnotationsChanged}
+            expandedMetricId={expandedMetricId}
+            onExpand={setExpandedMetricId}
+          />
+        ))
+      )}
+
+      {missingGroups.length > 0 ? (
+        <details className="metrics-pending-section" open={showMissing}>
+          <summary>
+            <span className="metrics-section-title">Missing data</span>{' '}
+            <span className="subtle-copy">
+              ({partitioned.missing.length} metric{partitioned.missing.length === 1 ? '' : 's'} awaiting ingest)
+            </span>
+          </summary>
+          <p className="subtle-copy metrics-pending-explainer">
+            These metrics are part of the spec but their data sources aren't wired up yet — we deliberately do{' '}
+            <strong>not</strong> render synthetic values for them. Each card shows the metric's real definition
+            and a link to the ingest issue tracking the unblock work.
+          </p>
+          {missingGroups.map((g) => (
+            <MissingGroupSection key={`missing-${g.group}`} group={g.group} metrics={g.metrics} />
+          ))}
+        </details>
+      ) : null}
+    </>
   )
 }
 

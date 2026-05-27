@@ -1,0 +1,1205 @@
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react'
+
+import {
+  CatalogAnalyticsFiltersResponseSchema,
+  CatalogAnalyticsPointsResponseSchema,
+  type CatalogAnalyticsFiltersResponse,
+  type CatalogAnalyticsPoint,
+  type CatalogAnalyticsPointsResponse,
+  type CatalogFilterOption,
+} from '../../../shared/contracts/index.js'
+import { loadJson } from '../../app/fetchJson.js'
+
+// ---------------------------------------------------------------------------
+// Catalog analytics tab — independent of the time-series metric registry.
+//
+// This is its own page-shaped UI under /metrics/catalog:
+//   * Filter bar (date range, sites, category, subcategory, brand, size).
+//   * A grid of preset scatter cards. Each card has its own (X, Y, colour-by)
+//     axis pickers; the operator can swap to any of the per-variant metrics
+//     defined below (`POINT_AXES`).
+//   * Cohort overlay: any non-default colour-by mode (e.g. "brand" or
+//     "subcategory") shades dots into peer groups so the operator can see
+//     "this brand vs same-subcategory peers" at a glance.
+//   * Hover-tooltip showing product / brand / size / sales / margin / etc.
+//
+// All charts share one point set, fetched once when the filters change.
+// ---------------------------------------------------------------------------
+
+const DAY_MS = 86_400_000
+const DEFAULT_WINDOW_DAYS = 90
+
+// ============================ Axis definitions =============================
+
+/**
+ * Each entry describes a numeric field on `CatalogAnalyticsPoint` that
+ * can serve as the X or Y axis of a scatter card. `format` controls the
+ * tooltip / tick formatting.
+ */
+interface PointAxisDef {
+  readonly id: string
+  readonly label: string
+  readonly short: string
+  readonly value: (p: CatalogAnalyticsPoint) => number | null
+  readonly format: (v: number) => string
+}
+
+function fmtMoney(v: number): string {
+  if (!Number.isFinite(v)) return '—'
+  if (Math.abs(v) >= 1000) return `$${v.toLocaleString(undefined, { maximumFractionDigits: 0 })}`
+  return `$${v.toFixed(2)}`
+}
+function fmtMoneyShort(v: number): string {
+  if (!Number.isFinite(v)) return '—'
+  if (Math.abs(v) >= 1000) return `$${(v / 1000).toFixed(1)}k`
+  return `$${v.toFixed(2)}`
+}
+function fmtPct(v: number): string {
+  return `${v.toFixed(1)}%`
+}
+function fmtNum(v: number): string {
+  if (Math.abs(v) >= 100) return v.toLocaleString(undefined, { maximumFractionDigits: 0 })
+  return v.toFixed(2)
+}
+
+const POINT_AXES: ReadonlyArray<PointAxisDef> = [
+  {
+    id: 'otdUnitPriceDollars',
+    label: 'OTD price ($/unit)',
+    short: 'OTD $/u',
+    value: (p) => p.otdUnitPriceDollars,
+    format: fmtMoney,
+  },
+  {
+    id: 'avgUnitPriceDollars',
+    label: 'Avg sold price ($/unit, pretax)',
+    short: 'Avg $/u',
+    value: (p) => p.avgUnitPriceDollars,
+    format: fmtMoney,
+  },
+  {
+    id: 'marginDollarsPerUnit',
+    label: 'Margin ($/unit)',
+    short: 'GM $/u',
+    value: (p) => p.marginDollarsPerUnit,
+    format: fmtMoney,
+  },
+  {
+    id: 'marginDollars',
+    label: 'Margin ($ total over window)',
+    short: 'GM $',
+    value: (p) => p.marginDollars,
+    format: fmtMoneyShort,
+  },
+  {
+    id: 'gmPercent',
+    label: 'GM %',
+    short: 'GM %',
+    value: (p) => p.gmPercent,
+    format: fmtPct,
+  },
+  {
+    id: 'salesVelocityUnitsPerDay',
+    label: 'Sales velocity (units/day)',
+    short: 'Units/d',
+    value: (p) => p.salesVelocityUnitsPerDay,
+    format: fmtNum,
+  },
+  {
+    id: 'marginVelocityDollarsPerDay',
+    label: 'Margin velocity ($/day)',
+    short: 'GM $/d',
+    value: (p) => p.marginVelocityDollarsPerDay,
+    format: fmtMoney,
+  },
+  {
+    id: 'unitsSold',
+    label: 'Units sold (window total)',
+    short: 'Units',
+    value: (p) => p.unitsSold,
+    format: fmtNum,
+  },
+  {
+    id: 'revenueDollars',
+    label: 'Revenue ($ window total)',
+    short: 'Rev $',
+    value: (p) => p.revenueDollars,
+    format: fmtMoneyShort,
+  },
+  {
+    id: 'labThcPct',
+    label: 'Lab THC %',
+    short: 'THC %',
+    value: (p) => p.labThcPct,
+    format: fmtPct,
+  },
+  {
+    id: 'labCbdPct',
+    label: 'Lab CBD %',
+    short: 'CBD %',
+    value: (p) => p.labCbdPct,
+    format: fmtPct,
+  },
+  {
+    id: 'wholesaleCostDollars',
+    label: 'Wholesale cost ($/unit)',
+    short: 'Cost $',
+    value: (p) => p.wholesaleCostDollars,
+    format: fmtMoney,
+  },
+  {
+    id: 'currentQty',
+    label: 'On-hand qty',
+    short: 'On hand',
+    value: (p) => p.currentQty,
+    format: fmtNum,
+  },
+]
+
+const POINT_AXES_BY_ID = new Map(POINT_AXES.map((a) => [a.id, a]))
+function axis(id: string): PointAxisDef {
+  return POINT_AXES_BY_ID.get(id) ?? POINT_AXES[0]!
+}
+
+// =========================== Colour-by (cohort) ============================
+
+type ColourByKey =
+  | 'none'
+  | 'category'
+  | 'subcategory'
+  | 'brand'
+  | 'sizeLabel'
+  | 'priceBand'
+  | 'thcBand'
+
+interface ColourByDef {
+  readonly id: ColourByKey
+  readonly label: string
+  readonly bucket: (p: CatalogAnalyticsPoint) => string
+}
+
+function priceBand(v: number | null): string {
+  if (v == null) return '(no price)'
+  if (v < 20) return '<$20'
+  if (v < 40) return '$20-$40'
+  if (v < 60) return '$40-$60'
+  if (v < 100) return '$60-$100'
+  return '$100+'
+}
+function thcBand(v: number | null): string {
+  if (v == null) return '(no THC)'
+  if (v < 10) return '<10%'
+  if (v < 20) return '10-20%'
+  if (v < 25) return '20-25%'
+  if (v < 30) return '25-30%'
+  return '30%+'
+}
+
+const COLOUR_BY: ReadonlyArray<ColourByDef> = [
+  { id: 'none', label: 'single colour', bucket: () => 'all' },
+  { id: 'category', label: 'category', bucket: (p) => p.categoryName ?? '(none)' },
+  { id: 'subcategory', label: 'subcategory', bucket: (p) => p.subcategoryName ?? '(none)' },
+  { id: 'brand', label: 'brand', bucket: (p) => p.brandName ?? '(none)' },
+  { id: 'sizeLabel', label: 'size', bucket: (p) => p.sizeLabel ?? '(none)' },
+  { id: 'priceBand', label: 'price band', bucket: (p) => priceBand(p.otdUnitPriceDollars) },
+  { id: 'thcBand', label: 'THC band', bucket: (p) => thcBand(p.labThcPct) },
+]
+
+// Same palette as the line chart so the look is consistent across the
+// dashboard. (Picked for legibility on the light theme.)
+const PALETTE = [
+  '#1f77b4',
+  '#d62728',
+  '#2ca02c',
+  '#9467bd',
+  '#ff7f0e',
+  '#8c564b',
+  '#e377c2',
+  '#17becf',
+  '#bcbd22',
+  '#7f7f7f',
+]
+
+function colourFor(bucket: string, allBuckets: ReadonlyArray<string>): string {
+  if (bucket === 'all') return PALETTE[0]!
+  const idx = allBuckets.indexOf(bucket)
+  if (idx < 0) return PALETTE[0]!
+  return PALETTE[idx % PALETTE.length]!
+}
+
+// ============================== Card defaults ==============================
+
+interface ScatterCardConfig {
+  readonly id: string
+  readonly title: string
+  readonly description: string
+  readonly defaultX: string
+  readonly defaultY: string
+  readonly defaultColourBy: ColourByKey
+}
+
+const DEFAULT_CARDS: ReadonlyArray<ScatterCardConfig> = [
+  {
+    id: 'otd-vs-margin-per-unit',
+    title: 'OTD price vs margin $/unit',
+    description:
+      'Where on the shelf-price ladder does each variant land for per-unit margin? Points up and to the right are price-elastic winners.',
+    defaultX: 'otdUnitPriceDollars',
+    defaultY: 'marginDollarsPerUnit',
+    defaultColourBy: 'subcategory',
+  },
+  {
+    id: 'otd-vs-velocity',
+    title: 'OTD price vs sales velocity',
+    description: 'Demand curve view — find the price points the market actually buys.',
+    defaultX: 'otdUnitPriceDollars',
+    defaultY: 'salesVelocityUnitsPerDay',
+    defaultColourBy: 'subcategory',
+  },
+  {
+    id: 'otd-vs-gm-pct',
+    title: 'OTD price vs GM %',
+    description: 'High-margin variants at premium price points cluster in the upper-right.',
+    defaultX: 'otdUnitPriceDollars',
+    defaultY: 'gmPercent',
+    defaultColourBy: 'brand',
+  },
+  {
+    id: 'gm-pct-vs-velocity',
+    title: 'GM % vs sales velocity',
+    description:
+      'Star quadrant (top-right): high-margin AND fast-moving. Lower-left: kill candidates.',
+    defaultX: 'gmPercent',
+    defaultY: 'salesVelocityUnitsPerDay',
+    defaultColourBy: 'subcategory',
+  },
+  {
+    id: 'velocity-vs-thc',
+    title: 'Sales velocity vs THC %',
+    description: 'Does potency drive throughput within this filter slice?',
+    defaultX: 'labThcPct',
+    defaultY: 'salesVelocityUnitsPerDay',
+    defaultColourBy: 'brand',
+  },
+  {
+    id: 'margin-vs-thc',
+    title: 'Margin $/unit vs THC %',
+    description: 'Potency premium check — are we charging more per unit for high-THC SKUs?',
+    defaultX: 'labThcPct',
+    defaultY: 'marginDollarsPerUnit',
+    defaultColourBy: 'brand',
+  },
+  {
+    id: 'cost-vs-margin',
+    title: 'Wholesale cost vs margin $/unit',
+    description: 'Margin lift over cost. A flat line = constant markup; spread = pricing leverage.',
+    defaultX: 'wholesaleCostDollars',
+    defaultY: 'marginDollarsPerUnit',
+    defaultColourBy: 'brand',
+  },
+  {
+    id: 'onhand-vs-velocity',
+    title: 'On-hand qty vs sales velocity',
+    description:
+      'Top-left: low stock fast movers (reorder!). Bottom-right: deep inventory of slow movers.',
+    defaultX: 'currentQty',
+    defaultY: 'salesVelocityUnitsPerDay',
+    defaultColourBy: 'subcategory',
+  },
+  {
+    id: 'thc-vs-otd',
+    title: 'THC % vs OTD price',
+    description: 'Are we capturing a potency premium on shelf price?',
+    defaultX: 'labThcPct',
+    defaultY: 'otdUnitPriceDollars',
+    defaultColourBy: 'brand',
+  },
+]
+
+// =============================== Tab component =============================
+
+const KNOWN_SITES: ReadonlyArray<{ id: string; label: string }> = [
+  { id: 'bronx', label: 'Bronx' },
+  { id: 'midtown', label: 'Midtown' },
+]
+
+export function CatalogAnalyticsTab() {
+  // -------- Filters --------
+  const [windowDays, setWindowDays] = useState<number>(DEFAULT_WINDOW_DAYS)
+  const [selectedSites, setSelectedSites] = useState<ReadonlySet<string>>(() => new Set<string>())
+  const [filters, setFilters] = useState<CatalogAnalyticsFiltersResponse | null>(null)
+  const [selectedCategoryIds, setSelectedCategoryIds] = useState<ReadonlySet<string>>(
+    () => new Set<string>(),
+  )
+  const [selectedSubcategoryIds, setSelectedSubcategoryIds] = useState<ReadonlySet<string>>(
+    () => new Set<string>(),
+  )
+  const [selectedBrandIds, setSelectedBrandIds] = useState<ReadonlySet<string>>(
+    () => new Set<string>(),
+  )
+  const [selectedSizes, setSelectedSizes] = useState<ReadonlySet<string>>(() => new Set<string>())
+
+  const sitesParam = useMemo(() => Array.from(selectedSites).join(','), [selectedSites])
+
+  // -------- Page-wide chart controls --------
+  const [pageColourBy, setPageColourBy] = useState<ColourByKey | 'per-chart'>('per-chart')
+
+  // -------- Data --------
+  const [pointsResp, setPointsResp] = useState<CatalogAnalyticsPointsResponse | null>(null)
+  const [loadingFilters, setLoadingFilters] = useState<boolean>(true)
+  const [loadingPoints, setLoadingPoints] = useState<boolean>(true)
+  const [error, setError] = useState<string | null>(null)
+
+  // Fetch filter options whenever sites change.
+  useEffect(() => {
+    let cancelled = false
+    setLoadingFilters(true)
+    const url = sitesParam
+      ? `/api/catalog-analytics/filters?sites=${encodeURIComponent(sitesParam)}`
+      : '/api/catalog-analytics/filters'
+    loadJson(url, CatalogAnalyticsFiltersResponseSchema)
+      .then((r) => {
+        if (!cancelled) setFilters(r)
+      })
+      .catch((e) => {
+        if (!cancelled) {
+          setError(`Failed to load filter options: ${(e as Error).message}`)
+          setFilters({ categories: [], subcategories: [], brands: [], sizes: [] })
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingFilters(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [sitesParam])
+
+  // Fetch points whenever ANY filter changes. We debounce filter changes
+  // by 250ms so multi-select chip-clicks don't trigger N queries.
+  const pointsKey = useMemo(
+    () =>
+      [
+        windowDays,
+        sitesParam,
+        Array.from(selectedCategoryIds).sort().join(','),
+        Array.from(selectedSubcategoryIds).sort().join(','),
+        Array.from(selectedBrandIds).sort().join(','),
+        Array.from(selectedSizes).sort().join(','),
+      ].join('|'),
+    [
+      windowDays,
+      sitesParam,
+      selectedCategoryIds,
+      selectedSubcategoryIds,
+      selectedBrandIds,
+      selectedSizes,
+    ],
+  )
+  useEffect(() => {
+    let cancelled = false
+    setLoadingPoints(true)
+    setError(null)
+    const handle = setTimeout(() => {
+      const now = Date.now()
+      const from = new Date(now - windowDays * DAY_MS).toISOString()
+      const to = new Date(now).toISOString()
+      const qs = new URLSearchParams()
+      qs.set('from', from)
+      qs.set('to', to)
+      if (sitesParam) qs.set('sites', sitesParam)
+      if (selectedCategoryIds.size > 0) qs.set('categoryIds', Array.from(selectedCategoryIds).join(','))
+      if (selectedSubcategoryIds.size > 0)
+        qs.set('subcategoryIds', Array.from(selectedSubcategoryIds).join(','))
+      if (selectedBrandIds.size > 0) qs.set('brandIds', Array.from(selectedBrandIds).join(','))
+      if (selectedSizes.size > 0) qs.set('sizes', Array.from(selectedSizes).join(','))
+      loadJson(
+        `/api/catalog-analytics/points?${qs.toString()}`,
+        CatalogAnalyticsPointsResponseSchema,
+      )
+        .then((r) => {
+          if (!cancelled) setPointsResp(r)
+        })
+        .catch((e) => {
+          if (!cancelled) setError(`Failed to load catalog points: ${(e as Error).message}`)
+        })
+        .finally(() => {
+          if (!cancelled) setLoadingPoints(false)
+        })
+    }, 250)
+    return () => {
+      cancelled = true
+      clearTimeout(handle)
+    }
+    // pointsKey rolls up everything we depend on.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pointsKey])
+
+  const points = pointsResp?.points ?? []
+
+  return (
+    <section className="catalog-analytics-tab">
+      <div className="metrics-controls catalog-analytics-controls">
+        <div className="metrics-control-group">
+          <span className="subtle-copy">range</span>
+          {[7, 30, 90, 180, 365].map((d) => (
+            <button
+              key={d}
+              type="button"
+              className={
+                windowDays === d
+                  ? 'metrics-site-chip is-active'
+                  : 'metrics-site-chip'
+              }
+              onClick={() => setWindowDays(d)}
+              aria-pressed={windowDays === d}
+            >
+              {d}d
+            </button>
+          ))}
+        </div>
+
+        <div className="metrics-control-group">
+          <span className="subtle-copy">sites</span>
+          <button
+            type="button"
+            className={
+              selectedSites.size === 0 ? 'metrics-site-chip is-active' : 'metrics-site-chip'
+            }
+            onClick={() => setSelectedSites(new Set())}
+          >
+            All
+          </button>
+          {KNOWN_SITES.map((s) => {
+            const active = selectedSites.has(s.id)
+            return (
+              <button
+                key={s.id}
+                type="button"
+                className={active ? 'metrics-site-chip is-active' : 'metrics-site-chip'}
+                onClick={() => {
+                  const next = new Set(selectedSites)
+                  if (active) next.delete(s.id)
+                  else next.add(s.id)
+                  setSelectedSites(next)
+                }}
+                aria-pressed={active}
+              >
+                {s.label}
+              </button>
+            )
+          })}
+        </div>
+
+        <div className="metrics-control-group">
+          <label>
+            colour by{' '}
+            <select
+              value={pageColourBy}
+              onChange={(e) => setPageColourBy(e.target.value as ColourByKey | 'per-chart')}
+            >
+              <option value="per-chart">per chart</option>
+              {COLOUR_BY.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.label}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+      </div>
+
+      <FilterBar
+        filters={filters}
+        loading={loadingFilters}
+        selectedCategoryIds={selectedCategoryIds}
+        onCategoryToggle={makeSetToggler(setSelectedCategoryIds)}
+        selectedSubcategoryIds={selectedSubcategoryIds}
+        onSubcategoryToggle={makeSetToggler(setSelectedSubcategoryIds)}
+        selectedBrandIds={selectedBrandIds}
+        onBrandToggle={makeSetToggler(setSelectedBrandIds)}
+        selectedSizes={selectedSizes}
+        onSizeToggle={makeSetToggler(setSelectedSizes)}
+        onClearAll={() => {
+          setSelectedCategoryIds(new Set())
+          setSelectedSubcategoryIds(new Set())
+          setSelectedBrandIds(new Set())
+          setSelectedSizes(new Set())
+        }}
+      />
+
+      {error ? (
+        <p className="metric-chart-error">{error}</p>
+      ) : (
+        <p className="subtle-copy catalog-analytics-pointcount">
+          {loadingPoints
+            ? `Loading…`
+            : `${points.length} variants in selection over the last ${windowDays} days.`}
+        </p>
+      )}
+
+      <div className="catalog-analytics-grid">
+        {DEFAULT_CARDS.map((cfg) => (
+          <ScatterCard
+            key={cfg.id}
+            config={cfg}
+            points={points}
+            pageColourBy={pageColourBy}
+            loading={loadingPoints}
+            windowDays={windowDays}
+          />
+        ))}
+      </div>
+    </section>
+  )
+}
+
+// ================================ Filter bar ===============================
+
+function makeSetToggler(
+  setter: React.Dispatch<React.SetStateAction<ReadonlySet<string>>>,
+): (id: string) => void {
+  return (id: string) => {
+    setter((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+}
+
+interface FilterBarProps {
+  filters: CatalogAnalyticsFiltersResponse | null
+  loading: boolean
+  selectedCategoryIds: ReadonlySet<string>
+  onCategoryToggle: (id: string) => void
+  selectedSubcategoryIds: ReadonlySet<string>
+  onSubcategoryToggle: (id: string) => void
+  selectedBrandIds: ReadonlySet<string>
+  onBrandToggle: (id: string) => void
+  selectedSizes: ReadonlySet<string>
+  onSizeToggle: (id: string) => void
+  onClearAll: () => void
+}
+
+function FilterBar(p: FilterBarProps) {
+  if (p.loading && !p.filters) {
+    return <p className="subtle-copy">Loading filter options…</p>
+  }
+  const f = p.filters
+  if (!f) return null
+  const anySelected =
+    p.selectedCategoryIds.size +
+      p.selectedSubcategoryIds.size +
+      p.selectedBrandIds.size +
+      p.selectedSizes.size >
+    0
+  return (
+    <div className="catalog-analytics-filterbar">
+      <FilterDropdown
+        label="Category"
+        options={f.categories}
+        selected={p.selectedCategoryIds}
+        onToggle={p.onCategoryToggle}
+      />
+      <FilterDropdown
+        label="Subcategory"
+        options={f.subcategories}
+        selected={p.selectedSubcategoryIds}
+        onToggle={p.onSubcategoryToggle}
+      />
+      <FilterDropdown
+        label="Brand"
+        options={f.brands}
+        selected={p.selectedBrandIds}
+        onToggle={p.onBrandToggle}
+      />
+      <FilterDropdown
+        label="Size"
+        options={f.sizes}
+        selected={p.selectedSizes}
+        onToggle={p.onSizeToggle}
+      />
+      {anySelected ? (
+        <button type="button" className="ghost-button" onClick={p.onClearAll}>
+          clear all filters
+        </button>
+      ) : null}
+    </div>
+  )
+}
+
+interface FilterDropdownProps {
+  label: string
+  options: ReadonlyArray<CatalogFilterOption>
+  selected: ReadonlySet<string>
+  onToggle: (id: string) => void
+}
+
+function FilterDropdown({ label, options, selected, onToggle }: FilterDropdownProps) {
+  const [open, setOpen] = useState(false)
+  const [search, setSearch] = useState('')
+  const ref = useRef<HTMLDivElement | null>(null)
+  useEffect(() => {
+    if (!open) return
+    const onClick = (e: MouseEvent) => {
+      if (!ref.current?.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', onClick)
+    return () => document.removeEventListener('mousedown', onClick)
+  }, [open])
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase()
+    if (!q) return options
+    return options.filter((o) => o.label.toLowerCase().includes(q))
+  }, [options, search])
+  return (
+    <div className="catalog-analytics-filterdrop" ref={ref}>
+      <button
+        type="button"
+        className={
+          selected.size > 0
+            ? 'metrics-site-chip is-active'
+            : 'metrics-site-chip'
+        }
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+      >
+        {label}
+        {selected.size > 0 ? ` (${selected.size})` : ''} ▾
+      </button>
+      {open ? (
+        <div className="catalog-analytics-filterdrop-panel">
+          <input
+            type="text"
+            placeholder={`Filter ${label.toLowerCase()}…`}
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            className="catalog-analytics-filterdrop-search"
+            autoFocus
+          />
+          <ul className="catalog-analytics-filterdrop-list">
+            {filtered.length === 0 ? (
+              <li className="subtle-copy" style={{ padding: '0.4em 0.6em' }}>
+                no matches
+              </li>
+            ) : (
+              filtered.slice(0, 200).map((o) => {
+                const active = selected.has(o.id)
+                return (
+                  <li key={o.id}>
+                    <label className="catalog-analytics-filterdrop-item">
+                      <input
+                        type="checkbox"
+                        checked={active}
+                        onChange={() => onToggle(o.id)}
+                      />{' '}
+                      {o.label}{' '}
+                      <span className="subtle-copy">(n={o.itemCount})</span>
+                    </label>
+                  </li>
+                )
+              })
+            )}
+          </ul>
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
+// ============================== Scatter card ===============================
+
+interface ScatterCardProps {
+  config: ScatterCardConfig
+  points: ReadonlyArray<CatalogAnalyticsPoint>
+  pageColourBy: ColourByKey | 'per-chart'
+  loading: boolean
+  windowDays: number
+}
+
+function ScatterCard({ config, points, pageColourBy, loading, windowDays }: ScatterCardProps) {
+  const [xId, setXId] = useState<string>(config.defaultX)
+  const [yId, setYId] = useState<string>(config.defaultY)
+  const [localColourBy, setLocalColourBy] = useState<ColourByKey>(config.defaultColourBy)
+  const effectiveColourBy: ColourByKey =
+    pageColourBy === 'per-chart' ? localColourBy : pageColourBy
+  const colourByDef = COLOUR_BY.find((c) => c.id === effectiveColourBy) ?? COLOUR_BY[0]!
+  const xDef = axis(xId)
+  const yDef = axis(yId)
+
+  return (
+    <article className="metric-chart-card catalog-analytics-card">
+      <header className="metric-chart-header">
+        <div className="metric-chart-titlewrap">
+          <h3 className="metric-chart-title">{config.title}</h3>
+        </div>
+        <div className="metric-chart-controls">
+          <label>
+            X{' '}
+            <select value={xId} onChange={(e) => setXId(e.target.value)}>
+              {POINT_AXES.map((a) => (
+                <option key={a.id} value={a.id}>
+                  {a.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Y{' '}
+            <select value={yId} onChange={(e) => setYId(e.target.value)}>
+              {POINT_AXES.map((a) => (
+                <option key={a.id} value={a.id}>
+                  {a.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label
+            title={
+              pageColourBy === 'per-chart'
+                ? undefined
+                : 'Page-wide colour-by override is active; this control is disabled.'
+            }
+          >
+            colour{' '}
+            <select
+              value={effectiveColourBy}
+              onChange={(e) => setLocalColourBy(e.target.value as ColourByKey)}
+              disabled={pageColourBy !== 'per-chart'}
+            >
+              {COLOUR_BY.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.label}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+      </header>
+      <p className="subtle-copy">{config.description}</p>
+      <CatalogScatterSvg
+        points={points}
+        xDef={xDef}
+        yDef={yDef}
+        colourByDef={colourByDef}
+        loading={loading}
+        windowDays={windowDays}
+      />
+    </article>
+  )
+}
+
+// =============================== SVG renderer ==============================
+
+interface CatalogScatterSvgProps {
+  points: ReadonlyArray<CatalogAnalyticsPoint>
+  xDef: PointAxisDef
+  yDef: PointAxisDef
+  colourByDef: ColourByDef
+  loading: boolean
+  windowDays: number
+}
+
+interface PlottedPoint {
+  readonly p: CatalogAnalyticsPoint
+  readonly x: number
+  readonly y: number
+  readonly bucket: string
+}
+
+function CatalogScatterSvg({
+  points,
+  xDef,
+  yDef,
+  colourByDef,
+  loading,
+  windowDays,
+}: CatalogScatterSvgProps) {
+  const wrapRef = useRef<HTMLDivElement | null>(null)
+  const svgRef = useRef<SVGSVGElement | null>(null)
+  const [renderedWidthPx, setRenderedWidthPx] = useState<number>(440)
+  useLayoutEffect(() => {
+    const el = wrapRef.current
+    if (!el) return
+    const observer = new ResizeObserver((entries) => {
+      const w = Math.max(220, Math.floor(entries[0]?.contentRect.width ?? 440))
+      setRenderedWidthPx(w)
+    })
+    observer.observe(el)
+    return () => observer.disconnect()
+  }, [])
+
+  const width = renderedWidthPx
+  const height = 320
+  const marginLeft = 64
+  const marginRight = 14
+  const marginTop = 14
+  const marginBottom = 40
+  const plotW = Math.max(50, width - marginLeft - marginRight)
+  const plotH = Math.max(50, height - marginTop - marginBottom)
+
+  const computed = useMemo(() => {
+    const plotted: PlottedPoint[] = []
+    let xLo = Number.POSITIVE_INFINITY
+    let xHi = Number.NEGATIVE_INFINITY
+    let yLo = Number.POSITIVE_INFINITY
+    let yHi = Number.NEGATIVE_INFINITY
+    const bucketSet = new Set<string>()
+    for (const p of points) {
+      const x = xDef.value(p)
+      const y = yDef.value(p)
+      if (x === null || y === null || !Number.isFinite(x) || !Number.isFinite(y)) continue
+      const bucket = colourByDef.bucket(p)
+      bucketSet.add(bucket)
+      plotted.push({ p, x, y, bucket })
+      if (x < xLo) xLo = x
+      if (x > xHi) xHi = x
+      if (y < yLo) yLo = y
+      if (y > yHi) yHi = y
+    }
+    if (plotted.length === 0) {
+      return { plotted, buckets: [] as string[], xMin: 0, xMax: 1, yMin: 0, yMax: 1 }
+    }
+    if (xLo === xHi) {
+      xLo -= 1
+      xHi += 1
+    } else {
+      const span = xHi - xLo
+      xLo -= span * 0.05
+      xHi += span * 0.05
+    }
+    if (yLo === yHi) {
+      yLo -= 1
+      yHi += 1
+    } else {
+      const span = yHi - yLo
+      yLo -= span * 0.05
+      yHi += span * 0.05
+    }
+    // Sort buckets by count desc so the legend reflects scale.
+    const buckets = Array.from(bucketSet).sort()
+    return { plotted, buckets, xMin: xLo, xMax: xHi, yMin: yLo, yMax: yHi }
+  }, [points, xDef, yDef, colourByDef])
+
+  const { plotted, buckets, xMin, xMax, yMin, yMax } = computed
+
+  const xScale = useCallback(
+    (v: number) => marginLeft + ((v - xMin) / (xMax - xMin)) * plotW,
+    [marginLeft, plotW, xMin, xMax],
+  )
+  const yScale = useCallback(
+    (v: number) => marginTop + plotH - ((v - yMin) / (yMax - yMin)) * plotH,
+    [marginTop, plotH, yMin, yMax],
+  )
+
+  const xTicks = useMemo(() => makeTicks(xMin, xMax, 5), [xMin, xMax])
+  const yTicks = useMemo(() => makeTicks(yMin, yMax, 5), [yMin, yMax])
+
+  // Hover
+  const [hover, setHover] = useState<{ idx: number; clientX: number; clientY: number } | null>(
+    null,
+  )
+  const HOVER_PX = 12
+  const HOVER_PX_SQ = HOVER_PX * HOVER_PX
+  const onPointerMove = useCallback(
+    (e: React.PointerEvent<SVGSVGElement>) => {
+      const svg = svgRef.current
+      if (!svg || plotted.length === 0) return
+      const ctm = svg.getScreenCTM()
+      if (!ctm) return
+      const pt = svg.createSVGPoint()
+      pt.x = e.clientX
+      pt.y = e.clientY
+      const local = pt.matrixTransform(ctm.inverse())
+      let bestIdx = -1
+      let bestDistSq = Infinity
+      for (let i = 0; i < plotted.length; i++) {
+        const pp = plotted[i]!
+        const dx = xScale(pp.x) - local.x
+        const dy = yScale(pp.y) - local.y
+        const d = dx * dx + dy * dy
+        if (d < bestDistSq) {
+          bestDistSq = d
+          bestIdx = i
+        }
+      }
+      if (bestIdx >= 0 && bestDistSq <= HOVER_PX_SQ) {
+        setHover({ idx: bestIdx, clientX: e.clientX, clientY: e.clientY })
+      } else {
+        setHover(null)
+      }
+    },
+    [plotted, xScale, yScale, HOVER_PX_SQ],
+  )
+
+  const onPointerLeave = useCallback(() => setHover(null), [])
+
+  const hovered = hover ? plotted[hover.idx] ?? null : null
+
+  return (
+    <div className="metric-chart-svg-wrap catalog-analytics-svg-wrap" ref={wrapRef}>
+      <svg
+        ref={svgRef}
+        viewBox={`0 0 ${width} ${height}`}
+        width="100%"
+        height={height}
+        className="metric-chart-svg"
+        role="img"
+        aria-label={`Scatter: ${yDef.label} (y) vs ${xDef.label} (x)`}
+        onPointerMove={onPointerMove}
+        onPointerLeave={onPointerLeave}
+      >
+        {/* axes */}
+        <line
+          x1={marginLeft}
+          x2={marginLeft + plotW}
+          y1={marginTop + plotH}
+          y2={marginTop + plotH}
+          stroke="#888"
+        />
+        <line
+          x1={marginLeft}
+          x2={marginLeft}
+          y1={marginTop}
+          y2={marginTop + plotH}
+          stroke="#888"
+        />
+        {xTicks.map((t) => (
+          <g key={`x-${t}`}>
+            <line
+              x1={xScale(t)}
+              x2={xScale(t)}
+              y1={marginTop + plotH}
+              y2={marginTop + plotH + 4}
+              stroke="#888"
+            />
+            <text
+              x={xScale(t)}
+              y={marginTop + plotH + 16}
+              fontSize="10"
+              textAnchor="middle"
+              fill="#666"
+            >
+              {xDef.format(t)}
+            </text>
+          </g>
+        ))}
+        {yTicks.map((t) => (
+          <g key={`y-${t}`}>
+            <line x1={marginLeft - 4} x2={marginLeft} y1={yScale(t)} y2={yScale(t)} stroke="#888" />
+            <text
+              x={marginLeft - 6}
+              y={yScale(t) + 3}
+              fontSize="10"
+              textAnchor="end"
+              fill="#666"
+            >
+              {yDef.format(t)}
+            </text>
+          </g>
+        ))}
+        <text
+          x={marginLeft + plotW / 2}
+          y={height - 6}
+          fontSize="11"
+          textAnchor="middle"
+          fill="#444"
+        >
+          {xDef.label}
+        </text>
+        <text
+          transform={`rotate(-90 12 ${marginTop + plotH / 2})`}
+          x={12}
+          y={marginTop + plotH / 2}
+          fontSize="11"
+          textAnchor="middle"
+          fill="#444"
+        >
+          {yDef.label}
+        </text>
+        {/* dots */}
+        {plotted.map((pp, idx) => (
+          <circle
+            key={`${pp.p.inventoryItemId}-${idx}`}
+            cx={xScale(pp.x)}
+            cy={yScale(pp.y)}
+            r={3.5}
+            fill={colourFor(pp.bucket, buckets)}
+            fillOpacity={0.65}
+            stroke="#fff"
+            strokeWidth={0.5}
+          />
+        ))}
+        {/* hovered dot highlight */}
+        {hovered ? (
+          <circle
+            cx={xScale(hovered.x)}
+            cy={yScale(hovered.y)}
+            r={6}
+            fill="none"
+            stroke="#111"
+            strokeWidth={1.5}
+          />
+        ) : null}
+      </svg>
+
+      {hovered ? (
+        <ScatterTooltip
+          point={hovered.p}
+          xDef={xDef}
+          yDef={yDef}
+          xValue={hovered.x}
+          yValue={hovered.y}
+          colourLabel={hovered.bucket}
+          colourByDef={colourByDef}
+          clientX={hover!.clientX}
+          clientY={hover!.clientY}
+        />
+      ) : null}
+
+      {colourByDef.id !== 'none' && buckets.length > 1 ? (
+        <div className="catalog-analytics-legend">
+          {buckets.slice(0, 16).map((b) => (
+            <span key={b} className="catalog-analytics-legend-item">
+              <span
+                className="catalog-analytics-legend-swatch"
+                style={{ background: colourFor(b, buckets) }}
+              />
+              {b}
+            </span>
+          ))}
+          {buckets.length > 16 ? (
+            <span className="subtle-copy">+{buckets.length - 16} more</span>
+          ) : null}
+        </div>
+      ) : null}
+
+      {plotted.length === 0 && !loading ? (
+        <p className="subtle-copy">
+          No variants in the current filter slice have values for both axes over the last{' '}
+          {windowDays} days.
+        </p>
+      ) : null}
+    </div>
+  )
+}
+
+interface ScatterTooltipProps {
+  point: CatalogAnalyticsPoint
+  xDef: PointAxisDef
+  yDef: PointAxisDef
+  xValue: number
+  yValue: number
+  colourLabel: string
+  colourByDef: ColourByDef
+  clientX: number
+  clientY: number
+}
+
+function ScatterTooltip(p: ScatterTooltipProps) {
+  const style: React.CSSProperties = {
+    position: 'fixed',
+    left: Math.min(window.innerWidth - 340, p.clientX + 14),
+    top: Math.min(window.innerHeight - 220, p.clientY + 14),
+    pointerEvents: 'none',
+  }
+  return (
+    <div className="catalog-analytics-tooltip" style={style}>
+      <div className="catalog-analytics-tooltip-title">
+        {p.point.productName}
+        {p.point.sizeLabel ? ` — ${p.point.sizeLabel}` : ''}
+      </div>
+      <div className="catalog-analytics-tooltip-sub subtle-copy">
+        {[p.point.brandName, p.point.subcategoryName, p.point.categoryName]
+          .filter((s) => s)
+          .join(' • ') || '(no classification)'}
+      </div>
+      <table className="catalog-analytics-tooltip-table">
+        <tbody>
+          <tr>
+            <th>{p.xDef.short}</th>
+            <td>{p.xDef.format(p.xValue)}</td>
+          </tr>
+          <tr>
+            <th>{p.yDef.short}</th>
+            <td>{p.yDef.format(p.yValue)}</td>
+          </tr>
+          {p.point.unitsSold != null ? (
+            <tr>
+              <th>units sold</th>
+              <td>{fmtNum(p.point.unitsSold)}</td>
+            </tr>
+          ) : null}
+          {p.point.revenueDollars != null ? (
+            <tr>
+              <th>revenue</th>
+              <td>{fmtMoney(p.point.revenueDollars)}</td>
+            </tr>
+          ) : null}
+          {p.point.marginDollars != null ? (
+            <tr>
+              <th>margin $</th>
+              <td>{fmtMoney(p.point.marginDollars)}</td>
+            </tr>
+          ) : null}
+          {p.point.gmPercent != null ? (
+            <tr>
+              <th>GM %</th>
+              <td>{fmtPct(p.point.gmPercent)}</td>
+            </tr>
+          ) : null}
+          {p.point.labThcPct != null ? (
+            <tr>
+              <th>THC %</th>
+              <td>{fmtPct(p.point.labThcPct)}</td>
+            </tr>
+          ) : null}
+          {p.point.currentQty != null ? (
+            <tr>
+              <th>on hand</th>
+              <td>{fmtNum(p.point.currentQty)}</td>
+            </tr>
+          ) : null}
+          {p.colourByDef.id !== 'none' ? (
+            <tr>
+              <th>{p.colourByDef.label}</th>
+              <td>{p.colourLabel}</td>
+            </tr>
+          ) : null}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+// =============================== Tick helpers ==============================
+
+function makeTicks(min: number, max: number, count: number): number[] {
+  if (!Number.isFinite(min) || !Number.isFinite(max) || min >= max) {
+    return []
+  }
+  const range = max - min
+  const rough = range / count
+  const pow = Math.pow(10, Math.floor(Math.log10(rough)))
+  const norm = rough / pow
+  let step: number
+  if (norm < 1.5) step = pow
+  else if (norm < 3) step = 2 * pow
+  else if (norm < 7) step = 5 * pow
+  else step = 10 * pow
+  const start = Math.ceil(min / step) * step
+  const out: number[] = []
+  for (let v = start; v <= max; v += step) {
+    out.push(v)
+  }
+  return out
+}

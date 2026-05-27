@@ -1,0 +1,146 @@
+import { z } from 'zod'
+
+// ---------------------------------------------------------------------------
+// Catalog analytics — per-variant performance scatter plots.
+//
+// Backs the /metrics → "Catalog analytics" tab. Unlike the time-series
+// metrics endpoint (one dot per bucket, lots of buckets per series),
+// these endpoints return ONE point PER inventory_item (per SKU/variant)
+// aggregated over a date window. The SPA renders the result as a
+// hover-able scatter where the operator picks X and Y from a fixed set
+// of per-variant metrics, and can filter by category / subcategory /
+// brand / size.
+//
+// Why a dedicated API surface rather than another `/api/metrics/<id>`?
+//   * The metric is two-dimensional in the user-picked sense (any pair
+//     of metrics on the X / Y axes), not a fixed (axisX, axisY) pair.
+//   * The natural grain is per-variant, not per-(time-bucket × site).
+//     Bucketing by week is meaningless when each point already
+//     represents a long-window aggregate of one item's lifetime sales.
+//   * Filters (category / subcategory / brand / size / variant) and
+//     cohort overlays don't fit the metric registry shape.
+// ---------------------------------------------------------------------------
+
+// ============================ Filters endpoint =============================
+
+/**
+ * One filter option (category / subcategory / brand / size).
+ *
+ * `id` is the stable join key (e.g. category_id) used by the points
+ * endpoint; `label` is what the SPA shows in the dropdown chip. For
+ * `size`, `id === label` (size_label is the join key).
+ */
+export const CatalogFilterOptionSchema = z.object({
+  id: z.string().min(1),
+  label: z.string().min(1),
+  // How many distinct inventory_item rows currently fall under this
+  // option. Drives the (n=…) hint in the dropdown so the operator
+  // sees at a glance whether filtering will yield a meaningful set.
+  itemCount: z.number().int().nonnegative(),
+})
+export type CatalogFilterOption = z.infer<typeof CatalogFilterOptionSchema>
+
+export const CatalogAnalyticsFiltersResponseSchema = z.object({
+  categories: z.array(CatalogFilterOptionSchema),
+  subcategories: z.array(CatalogFilterOptionSchema),
+  brands: z.array(CatalogFilterOptionSchema),
+  sizes: z.array(CatalogFilterOptionSchema),
+})
+export type CatalogAnalyticsFiltersResponse = z.infer<
+  typeof CatalogAnalyticsFiltersResponseSchema
+>
+
+// =============================== Points endpoint ===========================
+
+const csvList = z
+  .string()
+  .optional()
+  .transform((value) =>
+    value && value.trim().length > 0
+      ? value
+          .split(',')
+          .map((s) => s.trim())
+          .filter((s) => s.length > 0)
+      : [],
+  )
+
+export const CatalogAnalyticsPointsRequestSchema = z.object({
+  from: z.string().datetime().optional(),
+  to: z.string().datetime().optional(),
+  sites: csvList,
+  categoryIds: csvList,
+  subcategoryIds: csvList,
+  brandIds: csvList,
+  sizes: csvList,
+})
+export type CatalogAnalyticsPointsRequest = z.infer<
+  typeof CatalogAnalyticsPointsRequestSchema
+>
+
+/**
+ * One scatter dot. Each numeric metric is optional because not every
+ * variant has data for every dimension (e.g. lab THC is null on
+ * accessories; sales velocity is 0 / null for never-sold packages).
+ * The renderer hides points missing the operator-selected X or Y.
+ *
+ * Identity fields (`inventoryItemId`, `productName`, `sku`, `sizeLabel`,
+ * etc.) drive the hover tooltip and the cohort overlay grouping.
+ */
+export const CatalogAnalyticsPointSchema = z.object({
+  inventoryItemId: z.string().min(1),
+  productId: z.string().nullable(),
+  productName: z.string(),
+  productShortName: z.string().nullable(),
+  sku: z.string().nullable(),
+  categoryId: z.string().nullable(),
+  categoryName: z.string().nullable(),
+  subcategoryId: z.string().nullable(),
+  subcategoryName: z.string().nullable(),
+  brandId: z.string().nullable(),
+  brandName: z.string().nullable(),
+  sizeLabel: z.string().nullable(),
+
+  // --- snapshot-driven (current state) ---
+  currentQty: z.number().nullable(),
+  availableQty: z.number().nullable(),
+  isOnStock: z.boolean().nullable(),
+  wholesaleCostDollars: z.number().nullable(),
+  labThcPct: z.number().nullable(),
+  labCbdPct: z.number().nullable(),
+
+  // --- window-driven (sales over [from, to]) ---
+  unitsSold: z.number().nullable(),
+  revenueDollars: z.number().nullable(),
+  cogsDollars: z.number().nullable(),
+  marginDollars: z.number().nullable(),
+  marginDollarsPerUnit: z.number().nullable(),
+  gmPercent: z.number().nullable(),
+  /** Average sold price per unit ($) — revenue / units. */
+  avgUnitPriceDollars: z.number().nullable(),
+  /** Estimated OTD per unit ($) — avg unit price × dealer's effective tax ratio. */
+  otdUnitPriceDollars: z.number().nullable(),
+  /** Units sold per day over the window (units_sold / window_days). */
+  salesVelocityUnitsPerDay: z.number().nullable(),
+  /** Margin dollars per day over the window. */
+  marginVelocityDollarsPerDay: z.number().nullable(),
+  /** Distinct invoices that contained this variant in the window. */
+  invoiceCount: z.number().int().nonnegative().nullable(),
+})
+export type CatalogAnalyticsPoint = z.infer<typeof CatalogAnalyticsPointSchema>
+
+export const CatalogAnalyticsPointsResponseSchema = z.object({
+  resolved: z.object({
+    from: z.string(),
+    to: z.string(),
+    sites: z.array(z.string()),
+    categoryIds: z.array(z.string()),
+    subcategoryIds: z.array(z.string()),
+    brandIds: z.array(z.string()),
+    sizes: z.array(z.string()),
+    windowDays: z.number(),
+  }),
+  points: z.array(CatalogAnalyticsPointSchema),
+})
+export type CatalogAnalyticsPointsResponse = z.infer<
+  typeof CatalogAnalyticsPointsResponseSchema
+>
