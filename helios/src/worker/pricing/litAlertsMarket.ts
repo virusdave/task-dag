@@ -193,7 +193,36 @@ export async function buildPricingMarketContext(
   // entire statewide product catalog for this brand; we filter it client-side
   // by search term instead of paginating multiple search-filtered API calls
   // like the legacy public-api flow did.
-  const brandProducts = await listBrandProducts(brandMatch.brandId, LIT_ALERTS_PARTNER_STATE_CODE)
+  //
+  // Resilience: the `/v1/brands/:id/products` endpoint has been intermittently
+  // returning 502 / timing out on busy days. Rather than failing the whole
+  // pending-purchase packet (or shipping rows with empty market evidence), we
+  // fall back to the locally-cached `litalerts_products` table, which the
+  // daily `config.workers.litalerts_refresh.variant` jobs keep populated.
+  // The cache is at most ~24h stale — acceptable for "comp evidence" when
+  // the alternative is no evidence at all. We stamp the note so the
+  // reviewer can see which path served the data.
+  let brandProducts: LitAlertsProduct[]
+  let brandSourceNote: string | null = null
+  try {
+    brandProducts = await listBrandProducts(brandMatch.brandId, LIT_ALERTS_PARTNER_STATE_CODE)
+  } catch (error) {
+    if (!(error instanceof RetryableWorkerError)) {
+      throw error
+    }
+    const cached = await loadBrandProductsFromCache(brandMatch.brandId, LIT_ALERTS_PARTNER_STATE_CODE)
+    if (cached.length === 0) {
+      // No cached evidence either — re-throw so the worker retries the whole
+      // job after backoff instead of shipping an empty packet.
+      throw error
+    }
+    brandProducts = cached
+    brandSourceNote =
+      `Lit Alerts /v1/brands/${brandMatch.brandId}/products is currently failing ` +
+      `(${error.message.replace(/\s+/g, ' ').slice(0, 160)}); served comp evidence from ` +
+      `the locally-cached litalerts_products table instead (${cached.length} listings).`
+    console.warn(`[litAlertsMarket] partner brand-products endpoint failed; using local cache fallback: ${brandSourceNote}`)
+  }
   const allBrandListings = flattenBrandProductsToListingCandidates(brandProducts, retailerDirectory)
 
   const categoryId = resolveLitAlertsCategoryId(liveState)
@@ -228,11 +257,14 @@ export async function buildPricingMarketContext(
   }
 
   if (combinedSearchTerms.length === 0) {
+    const noMatchSourcePrefix = brandSourceNote ? `${brandSourceNote} ` : ''
     return {
       availability: 'no_family_matches',
-      note: adaptationSummary
-        ? `${adaptationSummary} No Lit Alerts family listing cluster was found for ${liveState.brand} / ${liveState.groupName}.`
-        : `No Lit Alerts family listing cluster was found for ${liveState.brand} / ${liveState.groupName}.`,
+      note:
+        noMatchSourcePrefix +
+        (adaptationSummary
+          ? `${adaptationSummary} No Lit Alerts family listing cluster was found for ${liveState.brand} / ${liveState.groupName}.`
+          : `No Lit Alerts family listing cluster was found for ${liveState.brand} / ${liveState.groupName}.`),
       productEvidenceById: {},
       searchTerm: null,
     }
@@ -240,7 +272,8 @@ export async function buildPricingMarketContext(
 
   const evidenceEntries = Object.values(evidenceByProductId)
   const searchLabel = buildSearchTermLabel(combinedSearchTerms)
-  const adaptationPrefix = adaptationSummary ? `${adaptationSummary} ` : ''
+  const sourcePrefix = brandSourceNote ? `${brandSourceNote} ` : ''
+  const adaptationPrefix = sourcePrefix + (adaptationSummary ? `${adaptationSummary} ` : '')
   if (evidenceEntries.some((evidence) => evidence.averagePostTaxPrice !== null)) {
     return {
       availability: 'matched',
@@ -603,6 +636,100 @@ function buildConfigWeightText(amount: number | string | null | undefined, units
     return null
   }
   return `${normalizedAmount ?? ''}${normalizedUnits ? `${normalizedAmount ? ' ' : ''}${normalizedUnits}` : ''}`.trim() || null
+}
+
+/**
+ * Fallback path for `buildPricingMarketContext` when the live partner-API
+ * call `listBrandProducts(brandId, state)` fails with a transient
+ * `RetryableWorkerError` (typically 502 / timeout from the upstream).
+ *
+ * We rebuild the per-(retailer, product) listing roster from the locally
+ * cached `litalerts_products` table, which the daily
+ * `config.workers.litalerts_refresh.variant` worker keeps populated.
+ * The output matches `LitAlertsProduct[]` so it is a drop-in substitute
+ * for `listBrandProducts`.
+ *
+ * Staleness: the cache is at most ~24h old in steady state. That is a
+ * worse signal than a live partner-API call, but strictly better than
+ * shipping a packet with no comp evidence at all.
+ */
+async function loadBrandProductsFromCache(
+  brandId: number,
+  stateCode: string,
+): Promise<LitAlertsProduct[]> {
+  const result = await getPool().query<{
+    brand_id: string | null
+    brand_name: string | null
+    retailer_id: string
+    product_id: string
+    config_idx: number
+    product_name: string
+    category: string | null
+    medical_url: string | null
+    recreational_url: string | null
+    raw_product_json: unknown
+    raw_config_json: unknown
+  }>(
+    `
+      with latest as (
+        select distinct on (retailer_id, product_id, config_idx)
+          *
+        from litalerts_products
+        where brand_id = $1
+          and state_code = $2
+        order by retailer_id, product_id, config_idx, observed_at desc
+      )
+      select
+        brand_id::text as brand_id,
+        brand_name,
+        retailer_id::text as retailer_id,
+        product_id::text as product_id,
+        config_idx,
+        product_name,
+        category,
+        medical_url,
+        recreational_url,
+        raw_product_json,
+        raw_config_json
+      from latest
+      order by retailer_id, product_id, config_idx
+    `,
+    [brandId, stateCode],
+  )
+
+  type LitAlertsProductConfig = LitAlertsProduct['configs'][number]
+  const productById = new Map<string, LitAlertsProduct & { configs: LitAlertsProductConfig[] }>()
+  for (const row of result.rows) {
+    const key = `${row.retailer_id}:${row.product_id}`
+    let product = productById.get(key)
+    if (!product) {
+      const rawProduct = (row.raw_product_json ?? {}) as Record<string, unknown>
+      product = {
+        id: Number(row.product_id),
+        name: row.product_name,
+        brand: row.brand_name ?? undefined,
+        brandId: row.brand_id != null ? Number(row.brand_id) : undefined,
+        retailerId: Number(row.retailer_id),
+        medicalURL: row.medical_url ?? undefined,
+        recreationalURL: row.recreational_url ?? undefined,
+        category: row.category ?? undefined,
+        imageURL: typeof rawProduct.imageURL === 'string' ? rawProduct.imageURL : undefined,
+        configs: [],
+      }
+      productById.set(key, product)
+    }
+    const rawConfig = (row.raw_config_json ?? {}) as Record<string, unknown>
+    product.configs.push({
+      amount: (rawConfig.amount ?? null) as LitAlertsProductConfig['amount'],
+      units: (rawConfig.units ?? null) as LitAlertsProductConfig['units'],
+      recreational: (rawConfig.recreational ?? null) as LitAlertsProductConfig['recreational'],
+      medical: (rawConfig.medical ?? null) as LitAlertsProductConfig['medical'],
+      normalPrice: (rawConfig.normalPrice ?? null) as LitAlertsProductConfig['normalPrice'],
+      salePrice: (rawConfig.salePrice ?? null) as LitAlertsProductConfig['salePrice'],
+      currentStock: (rawConfig.currentStock ?? null) as LitAlertsProductConfig['currentStock'],
+    })
+  }
+  return Array.from(productById.values())
 }
 
 async function loadRetailerDirectory(): Promise<RetailerDirectory> {
