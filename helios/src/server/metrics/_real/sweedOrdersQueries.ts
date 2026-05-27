@@ -724,8 +724,11 @@ export async function queryCustomerOriginMap(args: MetricQueryArgs): Promise<Met
   // rows do.
   const sql = `
     with resolved as (
-      select so.id,
-             ${bucketSelect} as bucket_start,
+      -- sweed_orders has a composite PK (dealer_id, invoice_id); there is
+      -- no single 'id' column, so we project only the fields the outer
+      -- aggregation actually reads. Earlier versions selected so.id here
+      -- and produced 500: column so.id does not exist at runtime.
+      select ${bucketSelect} as bucket_start,
              coalesce(prim.county, deliv.county)     as county,
              coalesce(prim.state_code, deliv.state_code) as state_code
         from sweed_orders so

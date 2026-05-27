@@ -307,6 +307,61 @@ function walkCalendarMonths(fromMs: number, toMs: number, targetCount: number): 
  * straddles a year boundary). Week grain emits the week-start date as
  * "MMM DD". Month grain emits "MMM YYYY".
  */
+// =============================================================================
+// Smoothed line paths
+// =============================================================================
+
+/**
+ * Build an SVG path string that draws a smoothed line through a sequence of
+ * already-scaled (x, y) screen-space points. Uses Catmull-Rom-to-Bezier
+ * conversion with tension=0.5, which gives gentle curves that pass through
+ * every data point without spurious oscillations between widely-spaced
+ * points.
+ *
+ *   * `points.length === 0` → returns ''.
+ *   * `points.length === 1` → returns 'M x,y' (degenerate, but valid).
+ *   * `points.length === 2` → returns a single 'M…L…' segment (a curve
+ *     through two points is just a line).
+ *
+ * The returned string is suitable for both `<path d=...>` strokes and, when
+ * the caller appends a closing segment + `Z`, filled areas (stacked charts).
+ */
+export function smoothedPath(points: ReadonlyArray<{ x: number; y: number }>): string {
+  const n = points.length
+  if (n === 0) return ''
+  const p0 = points[0]!
+  if (n === 1) return `M${p0.x.toFixed(2)},${p0.y.toFixed(2)}`
+  if (n === 2) {
+    const p1 = points[1]!
+    return `M${p0.x.toFixed(2)},${p0.y.toFixed(2)} L${p1.x.toFixed(2)},${p1.y.toFixed(2)}`
+  }
+  // Tension: standard Catmull-Rom uses 0.5 (each control point is 1/6 of
+  // the chord). Lower → gentler curves, higher → tighter.
+  const t = 0.5
+  let d = `M${p0.x.toFixed(2)},${p0.y.toFixed(2)}`
+  for (let i = 0; i < n - 1; i += 1) {
+    const p_prev = points[i - 1] ?? points[i]!
+    const p_curr = points[i]!
+    const p_next = points[i + 1]!
+    const p_after = points[i + 2] ?? points[i + 1]!
+    const c1x = p_curr.x + ((p_next.x - p_prev.x) / 6) * t * 2
+    const c1y = p_curr.y + ((p_next.y - p_prev.y) / 6) * t * 2
+    const c2x = p_next.x - ((p_after.x - p_curr.x) / 6) * t * 2
+    const c2y = p_next.y - ((p_after.y - p_curr.y) / 6) * t * 2
+    d += ` C${c1x.toFixed(2)},${c1y.toFixed(2)} ${c2x.toFixed(2)},${c2y.toFixed(2)} ${p_next.x.toFixed(2)},${p_next.y.toFixed(2)}`
+  }
+  return d
+}
+
+/**
+ * Build a small ×-shaped SVG path centred on (x, y) with arm length r.
+ * Cheap to render (one `<path>` per marker) and visually distinct from
+ * dots without competing with annotation circles.
+ */
+export function crossMarkerPath(x: number, y: number, r = 3): string {
+  return `M${(x - r).toFixed(2)},${(y - r).toFixed(2)} L${(x + r).toFixed(2)},${(y + r).toFixed(2)} M${(x + r).toFixed(2)},${(y - r).toFixed(2)} L${(x - r).toFixed(2)},${(y + r).toFixed(2)}`
+}
+
 export function formatXTick(ms: number, agg: MetricAggregation, opts: { straddlesYear: boolean } = { straddlesYear: false }): string {
   const d = new Date(ms)
   const pad = (n: number) => String(n).padStart(2, '0')

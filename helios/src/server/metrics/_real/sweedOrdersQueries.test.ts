@@ -1,7 +1,7 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
 
 import * as poolModule from '../../db/pool.js'
-import { queryFirstVsReturning } from './sweedOrdersQueries.js'
+import { queryCustomerOriginMap, queryFirstVsReturning } from './sweedOrdersQueries.js'
 
 /**
  * Regression test for the 2026-05-26 "all live metrics show zero" bug.
@@ -136,6 +136,40 @@ describe('sweed-orders metric queries — bucket-key timezone regression', () =>
     // Guard against a regression where someone selects the naked
     // date_trunc(...) (no outer timezone wrap) into bucket_start.
     expect(sql).not.toMatch(/date_trunc\([^)]+\)\s+as\s+bucket_start/)
+  })
+
+  it('queryCustomerOriginMap SQL never selects so.id (no such column on sweed_orders)', async () => {
+    // Regression: an earlier customers.origin_map rewrite added
+    // `select so.id, ...` to the resolved CTE. sweed_orders has a
+    // composite primary key (dealer_id, invoice_id) and no `id`
+    // column, so the query crashed at runtime with
+    //   500: column so.id does not exist
+    // on every dashboard load that included this metric.
+    // The fix drops `so.id` from the CTE projection (it was never
+    // read by the outer aggregation).
+    const captured: string[] = []
+    const fakePool = {
+      query: vi.fn().mockImplementation((sql: string) => {
+        captured.push(sql)
+        return Promise.resolve({ rows: [] })
+      }),
+    }
+    vi.spyOn(poolModule, 'getPool').mockReturnValue(fakePool as unknown as ReturnType<typeof poolModule.getPool>)
+
+    await queryCustomerOriginMap({
+      sites: ['midtown'],
+      from: new Date('2026-04-01T00:00:00.000Z'),
+      to: new Date('2026-05-26T00:00:00.000Z'),
+      agg: 'week',
+    })
+
+    expect(captured.length).toBeGreaterThan(0)
+    // Strip SQL line comments before matching so an explanatory comment
+    // containing the literal phrase "so.id" doesn't trip the guard.
+    const sqlExecutable = captured[0]!.replace(/--[^\n]*/g, '')
+    expect(sqlExecutable, 'sweed_orders has no `id` column — composite PK is (dealer_id, invoice_id)').not.toMatch(
+      /\bso\.id\b/,
+    )
   })
 })
 

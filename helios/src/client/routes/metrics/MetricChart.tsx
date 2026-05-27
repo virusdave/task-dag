@@ -20,7 +20,7 @@ import {
 import { loadJson, mutateJson } from '../../app/fetchJson.js'
 
 import { useTimeAxis, type TimeWindow } from './TimeAxisContext.js'
-import { bucketXTicks, formatXTick, formatYTick, niceYTicks } from './gridlines.js'
+import { bucketXTicks, crossMarkerPath, formatXTick, formatYTick, niceYTicks, smoothedPath } from './gridlines.js'
 import { useScatterZoom, type ZoomView } from './scatterZoom.js'
 
 // We re-fetch the annotation list after every mutation, so we don't
@@ -553,41 +553,47 @@ function ChartSvg(props: ChartSvgProps) {
     [yMin, yMax, plotH, marginTop],
   )
 
-  // Path strings for each series. In 'none' mode this is the polyline
-  // at `raw`; in stacked / percent mode it's a closed filled area
-  // between y0 and y1 (top edge L→R, bottom edge R→L, close).
+  // Path strings + per-point marker positions for each series.
+  //
+  // In 'none' mode (single-series line chart) the path is a smoothed
+  // Catmull-Rom curve through every data point, and we emit a small
+  // ×-marker at each point so the reader can tell which positions are
+  // real measurements vs interpolated curve.
+  //
+  // In stacked / percent mode the path is a closed filled area whose
+  // top edge is smoothed and whose bottom edge is smoothed in reverse.
+  // We don't emit markers for stacked series — the stack already shows
+  // where each bucket lives, and an × per point per series would
+  // visually swamp the area.
   const seriesPaths = useMemo(() => {
     return series.map((s) => {
-      if (stackMode === 'none') {
-        const d = s.points
-          .map((p, i) => {
-            const x = xScale(p.t)
-            const y = yScale(p.y1)
-            return `${i === 0 ? 'M' : 'L'}${x.toFixed(2)},${y.toFixed(2)}`
-          })
-          .join(' ')
-        return { ...s, d, fill: false as const }
-      }
       if (s.points.length === 0) {
-        return { ...s, d: '', fill: true as const }
+        return { ...s, d: '', markers: [] as Array<{ x: number; y: number }>, fill: stackMode !== 'none' as const }
       }
-      const top = s.points
-        .map((p, i) => {
-          const x = xScale(p.t)
-          const y = yScale(p.y1)
-          return `${i === 0 ? 'M' : 'L'}${x.toFixed(2)},${y.toFixed(2)}`
-        })
-        .join(' ')
-      const bottom = s.points
+      const topPts = s.points.map((p) => ({ x: xScale(p.t), y: yScale(p.y1) }))
+      if (stackMode === 'none') {
+        return {
+          ...s,
+          d: smoothedPath(topPts),
+          markers: topPts,
+          fill: false as const,
+        }
+      }
+      const bottomPts = s.points
         .slice()
         .reverse()
-        .map((p) => {
-          const x = xScale(p.t)
-          const y = yScale(p.y0)
-          return `L${x.toFixed(2)},${y.toFixed(2)}`
-        })
-        .join(' ')
-      return { ...s, d: `${top} ${bottom} Z`, fill: true as const }
+        .map((p) => ({ x: xScale(p.t), y: yScale(p.y0) }))
+      const top = smoothedPath(topPts)
+      const bottom = smoothedPath(bottomPts)
+      // Stitch the two smoothed edges into a closed area. Replace the
+      // bottom's leading 'M' with 'L' so the path stays continuous.
+      const bottomAsLine = bottom.length > 0 ? 'L' + bottom.slice(1) : ''
+      return {
+        ...s,
+        d: `${top} ${bottomAsLine} Z`,
+        markers: [] as Array<{ x: number; y: number }>,
+        fill: true as const,
+      }
     })
   }, [series, xScale, yScale, stackMode])
 
@@ -1006,7 +1012,23 @@ function ChartSvg(props: ChartSvgProps) {
               strokeWidth="1"
             />
           ) : (
-            <path key={s.id} d={s.d} fill="none" stroke={s.colour} strokeWidth="1.5" />
+            <g key={s.id}>
+              <path d={s.d} fill="none" stroke={s.colour} strokeWidth="1.5" />
+              {/* Data-point markers: small × at every real measurement so the
+                  reader can distinguish points from the interpolated curve
+                  between them. Skipped on stacked / area series (see the
+                  comment on seriesPaths). */}
+              {s.markers.map((m, i) => (
+                <path
+                  key={`${s.id}-m-${i}`}
+                  d={crossMarkerPath(m.x, m.y, 3)}
+                  stroke={s.colour}
+                  strokeWidth={1.25}
+                  fill="none"
+                  pointerEvents="none"
+                />
+              ))}
+            </g>
           ),
         )}
 

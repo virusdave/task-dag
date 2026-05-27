@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { bucketXTicks, formatXTick, formatYTick, niceYTicks } from './gridlines.js'
+import { bucketXTicks, crossMarkerPath, formatXTick, formatYTick, niceYTicks, smoothedPath } from './gridlines.js'
 
 describe('niceYTicks', () => {
   it('splits [0, 100] into round-number ticks (default targetCount=5)', () => {
@@ -201,5 +201,54 @@ describe('formatXTick', () => {
   it('emits MM-DD HH:00 in UTC for hour ticks', () => {
     const t = Date.UTC(2026, 4, 18, 14)
     expect(formatXTick(t, 'hour')).toBe('05-18 14:00')
+  })
+})
+
+describe('smoothedPath', () => {
+  it('returns an empty string for no points', () => {
+    expect(smoothedPath([])).toBe('')
+  })
+
+  it('returns a single M for one point', () => {
+    expect(smoothedPath([{ x: 10, y: 20 }])).toBe('M10.00,20.00')
+  })
+
+  it('returns a straight M…L… line for two points', () => {
+    expect(smoothedPath([{ x: 0, y: 0 }, { x: 10, y: 10 }])).toBe('M0.00,0.00 L10.00,10.00')
+  })
+
+  it('emits cubic Bezier segments between three or more points', () => {
+    const d = smoothedPath([
+      { x: 0, y: 0 },
+      { x: 10, y: 5 },
+      { x: 20, y: 0 },
+    ])
+    expect(d).toMatch(/^M0\.00,0\.00 C/)
+    // One C segment per gap between adjacent points → 2 C segments for 3 points.
+    const cCount = (d.match(/ C/g) ?? []).length
+    expect(cCount).toBe(2)
+  })
+
+  it('passes through every input point (endpoints land exactly on the curve)', () => {
+    // For Catmull-Rom-derived Beziers the curve interpolates through every
+    // control point — the final coord of each C segment IS the next data
+    // point. Assert the path ends at the last point.
+    const d = smoothedPath([
+      { x: 0, y: 0 },
+      { x: 10, y: 5 },
+      { x: 20, y: 0 },
+      { x: 30, y: 7 },
+    ])
+    expect(d).toContain('30.00,7.00')
+  })
+})
+
+describe('crossMarkerPath', () => {
+  it('emits two crossed line segments centred on (x, y)', () => {
+    expect(crossMarkerPath(10, 20, 3)).toBe('M7.00,17.00 L13.00,23.00 M13.00,17.00 L7.00,23.00')
+  })
+
+  it('defaults the arm length to 3 px', () => {
+    expect(crossMarkerPath(0, 0)).toBe('M-3.00,-3.00 L3.00,3.00 M3.00,-3.00 L-3.00,3.00')
   })
 })
