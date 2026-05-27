@@ -1258,6 +1258,85 @@ function validatePendingPurchaseParsedOutput(parsed: ParsedProductName): string[
   return issues
 }
 
+/**
+ * NY adult-use market rule: an edible package can never exceed 100 mg
+ * total THC and a single piece can never exceed 10 mg THC. So a "100 mg
+ * 1 pk" variant is structurally illegal — it must be split into multiple
+ * pieces (commonly 10×10mg, 20×5mg, or 40×2.5mg). When the parser hands
+ * us such a one-piece edible above 10 mg total, infer the canonical
+ * piece-count split here so the pending-purchase proposal does not
+ * propose a SKU that can never legally exist.
+ *
+ * Strategy:
+ *   - assume the maximum allowed per-piece dose (10 mg) and derive
+ *     pieces = totalMg / 10 when totalMg is an integer multiple of 10.
+ *   - when totalMg is not a clean multiple of 10 (uncommon for our
+ *     vendors but possible — e.g. 25 mg), fall back to the smallest
+ *     integer pieces that brings per-piece down to ≤ 10 mg.
+ *   - never invent a split when totalMg > 100 (illegal package) — flag
+ *     it for the reviewer to resolve instead.
+ *
+ * Returns `null` when no adjustment is needed. Otherwise returns the
+ * new size / packCount / tab plus a human-readable note and review
+ * flag the caller appends onto the pending-purchase row.
+ */
+const NY_EDIBLE_CANONICAL_PER_PIECE_MG = 10
+const NY_EDIBLE_PACKAGE_CAP_MG = 100
+const NY_EDIBLE_TOTAL_SIZE_REGEX = /^\s*(\d+(?:\.\d+)?)\s*mg\s*$/i
+
+export function maybeApplyNyEdibleCanonicalSplit(input: {
+  category: string
+  packCount: number
+  size: string
+  tab: string
+}): { packCount: number; size: string; tab: string; reviewerNote: string; reviewFlag: string | null } | null {
+  if (input.category.toLowerCase() !== 'edibles') return null
+  if (input.packCount > 1) return null
+  const sizeMatch = input.size.match(NY_EDIBLE_TOTAL_SIZE_REGEX)
+  if (!sizeMatch) return null
+  const totalMg = Number(sizeMatch[1])
+  if (!Number.isFinite(totalMg) || totalMg <= NY_EDIBLE_CANONICAL_PER_PIECE_MG) return null
+
+  if (totalMg > NY_EDIBLE_PACKAGE_CAP_MG) {
+    // > 100 mg total exceeds the NY package cap; we cannot honestly
+    // split this into a legal SKU. Flag for the reviewer to either
+    // correct the parsed total or reject the proposal entirely.
+    return {
+      packCount: input.packCount,
+      size: input.size,
+      tab: input.tab,
+      reviewerNote:
+        `Parsed total THC of ${totalMg} mg/package exceeds the NY adult-use cap of ` +
+        `${NY_EDIBLE_PACKAGE_CAP_MG} mg/package. Cannot auto-split into a legal SKU; ` +
+        'please correct the parsed size or reject this proposal.',
+      reviewFlag: 'NY edible exceeds 100mg/package cap',
+    }
+  }
+
+  // Canonical split: 10 mg per piece when totalMg divides evenly, else
+  // the smallest integer pieces that brings per-piece below 10 mg.
+  const cleanPieces = totalMg / NY_EDIBLE_CANONICAL_PER_PIECE_MG
+  const pieces = Number.isInteger(cleanPieces)
+    ? cleanPieces
+    : Math.ceil(totalMg / NY_EDIBLE_CANONICAL_PER_PIECE_MG)
+  const mgPerPiece = totalMg / pieces
+  const mgPerPieceLabel = Number.isInteger(mgPerPiece)
+    ? `${mgPerPiece}mg`
+    : `${Number(mgPerPiece.toFixed(2))}mg`
+  const newSize = mgPerPieceLabel
+  const newTab = `${pieces}x${mgPerPieceLabel}`
+  return {
+    packCount: pieces,
+    size: newSize,
+    tab: newTab,
+    reviewerNote:
+      `NY edible canonical split applied: parsed ${totalMg}mg total in 1 piece → ` +
+      `${pieces}x${mgPerPieceLabel} (NY caps edibles at ${NY_EDIBLE_CANONICAL_PER_PIECE_MG}mg/piece, ` +
+      `${NY_EDIBLE_PACKAGE_CAP_MG}mg/package, so a "${totalMg}mg 1pk" variant cannot exist).`,
+    reviewFlag: 'NY edible split inferred — verify pieces',
+  }
+}
+
 function isSafeToAutoPersistPendingPurchaseExactRule(input: {
   candidate: z.infer<typeof PendingPurchaseLlmExactNameRuleCandidateSchema>
   classification: z.infer<typeof PendingPurchaseLlmClassificationSchema>
@@ -1416,7 +1495,7 @@ async function buildGeneratedRow({
     }
   }
 
-  const target = reuse ?? {
+  const rawTarget = reuse ?? {
     allowedSaleType: 'Medical and recreational',
     brand: parsed?.brand ?? '',
     category: parsed?.category ?? '',
@@ -1433,6 +1512,29 @@ async function buildGeneratedRow({
     subcategory: parsed?.subcategory ?? '',
     tab: parsed?.variantTab ?? '',
   }
+  // NY market rule: edibles MUST be ≤ 10 mg per piece and ≤ 100 mg per
+  // package, so a "100mg 1pk" variant cannot legally exist on our shelves
+  // — it has to be split (typically 10x10mg, 20x5mg, or 40x2.5mg). If the
+  // parser handed us a one-piece edible above 10 mg total, infer the
+  // canonical split here so the proposal doesn't propose an illegal SKU.
+  // Only applied to brand-new variants (reuse=null) since existing
+  // catalog rows have already been audited.
+  const nyEdibleAdjustment = reuse
+    ? null
+    : maybeApplyNyEdibleCanonicalSplit({
+        category: rawTarget.category,
+        packCount: rawTarget.packCount,
+        size: rawTarget.size,
+        tab: rawTarget.tab,
+      })
+  const target = nyEdibleAdjustment
+    ? {
+        ...rawTarget,
+        packCount: nyEdibleAdjustment.packCount,
+        size: nyEdibleAdjustment.size,
+        tab: nyEdibleAdjustment.tab,
+      }
+    : rawTarget
   const pricingSupport = await cache.getPendingPurchasePricingSupport({
     brand: target.brand,
     category: target.category,
@@ -1466,6 +1568,7 @@ async function buildGeneratedRow({
     !reuse && anchors.length > 0
       ? `Family anchor median uses ${anchors.length} live ${target.brand} row${anchors.length === 1 ? '' : 's'} in the same size/category lane.`
       : null,
+    nyEdibleAdjustment?.reviewerNote ?? null,
     suggestionNote,
   ])
   const reviewFlags = compactStrings([
@@ -1475,6 +1578,7 @@ async function buildGeneratedRow({
     !reuse && anchors.length === 0 ? 'No live family anchor' : null,
     !primaryImage ? 'Needs image review' : null,
     pricingSupport.marketAvailability === 'error' ? 'Pricing evidence lookup failed' : null,
+    nyEdibleAdjustment?.reviewFlag ?? null,
   ])
 
   return {
