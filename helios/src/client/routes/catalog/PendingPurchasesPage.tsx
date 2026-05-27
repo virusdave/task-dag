@@ -709,6 +709,14 @@ function PendingPurchaseRowCard(
         />
       ) : null}
 
+      <PendingPurchasePictureOptions
+        currentImageUrl={item.effectivePrimaryImageUrl}
+        disabled={editingLocked}
+        draftImageUrl={draftImageUrl}
+        marketListings={item.marketListings}
+        onPick={setDraftImageUrl}
+      />
+
       <div className="inline-row wrap-row" style={{ marginBottom: '0.85rem' }}>
         <Pill tone="muted">{item.actionType}</Pill>
         <Pill tone="muted">{item.expectedCategory ?? 'No category'}</Pill>
@@ -957,6 +965,174 @@ function PendingPurchaseRowCard(
         </div>
       ) : null}
     </article>
+  )
+}
+
+/**
+ * Primary "Picture options" panel surfaced at the top of each pending-purchase
+ * row card. Renders every LitAlerts competitor listing image as a clickable
+ * thumbnail; clicking sets `editedPrimaryImageUrl` (via the parent's
+ * `draftImageUrl` state), which then flows through the existing save path.
+ *
+ * Why this lives above the collapsed "Pricing support details" section:
+ *   - Per the catalog AGENTS.md rule, the primary content the reviewer came
+ *     here to act on must be visible without scrolling past collapsed prose.
+ *     Choosing a primary image from competitor listings is one of the core
+ *     reviewer actions on this page, so the picker stays expanded by default.
+ *   - Exact-match thumbnails get a thick blue border; brand-family
+ *     (`matchTier='fallback'`) thumbnails get a thinner dashed border at 60%
+ *     opacity to mirror the 50% opacity treatment on the price ladder; weak
+ *     matches are filtered out entirely. Reviewers can still see every
+ *     market listing (including weak ones) inside the collapsed details
+ *     panel below.
+ *   - We cap at 24 thumbnails to keep the row card compact; "show more"
+ *     would just shove the rest of the form below the fold.
+ */
+const PENDING_PURCHASE_PICTURE_OPTIONS_LIMIT = 24
+
+function PendingPurchasePictureOptions({
+  currentImageUrl,
+  disabled,
+  draftImageUrl,
+  marketListings,
+  onPick,
+}: {
+  currentImageUrl: string | null
+  disabled: boolean
+  draftImageUrl: string
+  marketListings: PendingPurchaseMarketListing[]
+  onPick: (url: string) => void
+}): JSX.Element | null {
+  const candidates = useMemo(() => {
+    // Filter to listings that actually have an image and aren't `weak`
+    // (same matchTier policy as the price ladder). Fall back to including
+    // weak matches if there are no exact/fallback options with images, so
+    // the reviewer always has SOMETHING to pick from when comp data exists.
+    const withImage = marketListings.filter((listing) => listing.imageUrl)
+    const exactOrFamily = withImage.filter((listing) => listing.matchTier !== 'weak')
+    const pool = exactOrFamily.length > 0 ? exactOrFamily : withImage
+    // Dedupe identical image URLs (different retailers often share the
+    // brand's stock photo). Preserve first occurrence so the picker
+    // surfaces the strongest comp tier first.
+    const seen = new Set<string>()
+    const unique: PendingPurchaseMarketListing[] = []
+    for (const listing of pool) {
+      const url = listing.imageUrl
+      if (!url || seen.has(url)) continue
+      seen.add(url)
+      unique.push(listing)
+      if (unique.length >= PENDING_PURCHASE_PICTURE_OPTIONS_LIMIT) break
+    }
+    return unique
+  }, [marketListings])
+
+  if (candidates.length === 0 && !currentImageUrl) return null
+
+  return (
+    <section style={{ marginBottom: '0.85rem' }}>
+      <div className="inline-row" style={{ gap: '0.5rem', alignItems: 'baseline', marginBottom: '0.4rem' }}>
+        <strong>Picture options</strong>
+        <span className="subtle-copy" style={{ fontSize: '0.78rem' }}>
+          {candidates.length === 0
+            ? 'No competitor images available; the current/edited image is shown below.'
+            : `Click a thumbnail to use it as the primary image. ${candidates.length} option${candidates.length === 1 ? '' : 's'} shown.`}
+        </span>
+      </div>
+      <div className="inline-row wrap-row" style={{ gap: '0.4rem' }}>
+        {currentImageUrl ? (
+          <PendingPurchasePictureOptionThumb
+            altLabel="current"
+            border="2px solid #16a34a"
+            isSelected={currentImageUrl === draftImageUrl}
+            label="current"
+            onPick={() => onPick(currentImageUrl)}
+            opacity={1}
+            url={currentImageUrl}
+            disabled={disabled}
+          />
+        ) : null}
+        {candidates.map((listing) => {
+          const url = listing.imageUrl as string
+          const isFallback = listing.matchTier === 'fallback'
+          const isSelected = url === draftImageUrl
+          const border = isSelected
+            ? '2px solid #2563eb'
+            : isFallback
+              ? '1px dashed #888'
+              : '1px solid #ccc'
+          const opacity = isFallback ? 0.6 : 1
+          const tierLabel = listing.matchTier === 'exact'
+            ? 'exact'
+            : listing.matchTier === 'fallback'
+              ? 'family'
+              : listing.matchTier
+          return (
+            <PendingPurchasePictureOptionThumb
+              key={`${listing.dispensaryName}-${url}`}
+              altLabel={listing.dispensaryName}
+              border={border}
+              isSelected={isSelected}
+              label={`${tierLabel} · ${listing.dispensaryName}`}
+              onPick={() => onPick(url)}
+              opacity={opacity}
+              url={url}
+              disabled={disabled}
+            />
+          )
+        })}
+      </div>
+    </section>
+  )
+}
+
+function PendingPurchasePictureOptionThumb({
+  altLabel,
+  border,
+  isSelected,
+  label,
+  onPick,
+  opacity,
+  url,
+  disabled,
+}: {
+  altLabel: string
+  border: string
+  isSelected: boolean
+  label: string
+  onPick: () => void
+  opacity: number
+  url: string
+  disabled: boolean
+}): JSX.Element {
+  return (
+    <button
+      disabled={disabled || isSelected}
+      onClick={onPick}
+      title={isSelected ? `${label} · selected as primary image` : `${label} · click to use as primary image`}
+      type="button"
+      style={{
+        padding: 0,
+        border,
+        borderRadius: '4px',
+        background: 'transparent',
+        cursor: disabled ? 'not-allowed' : isSelected ? 'default' : 'pointer',
+        opacity,
+        lineHeight: 0,
+      }}
+    >
+      <img
+        alt={altLabel}
+        loading="lazy"
+        src={url}
+        style={{
+          width: '4.5rem',
+          height: '4.5rem',
+          objectFit: 'cover',
+          borderRadius: '2px',
+          display: 'block',
+        }}
+      />
+    </button>
   )
 }
 
