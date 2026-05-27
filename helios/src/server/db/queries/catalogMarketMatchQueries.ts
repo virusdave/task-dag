@@ -48,7 +48,6 @@ export interface FuzzySkuRow {
   sourceKind: string
   sourceListingId: string
   rawInputJsonb: unknown
-  parsedJsonb: unknown
   brandNorm: string | null
   categoryNorm: string | null
   subcategoryNorm: string | null
@@ -602,31 +601,57 @@ export async function loadGroupReview(
   const SUGGESTED_DEFAULT_MIN_SCORE = 0.70
   const minScore = Math.min(1, Math.max(0, options.minScore ?? SUGGESTED_DEFAULT_MIN_SCORE))
   const includeLegacy = options.includeLegacy === true
-  const groupResult = await db.query<{
-    id: number
-    group_name: string
-    brand_name: string | null
-    category_name: string | null
-    subcategory_name: string | null
-  }>(
-    `select id, group_name, brand_name, category_name, subcategory_name
-     from catalog_groups
-     where id = $1`,
-    [catalogGroupId],
-  )
+  // Phase A — parallelise everything that only needs `catalogGroupId`:
+  //   1. the group row itself,
+  //   2. its latest snapshot (for variant metadata + group image),
+  //   3. all live verdicts on the group (for the verdict overlay).
+  // Each one is its own ~32ms Tiger Cloud round-trip; running them
+  // serially used to add ~100ms of pointless wall-clock to every
+  // bundle load. Promise.all collapses them into a single phase.
+  const [groupResult, snapshotResult, verdictResult] = await Promise.all([
+    db.query<{
+      id: number
+      group_name: string
+      brand_name: string | null
+      category_name: string | null
+      subcategory_name: string | null
+    }>(
+      `select id, group_name, brand_name, category_name, subcategory_name
+       from catalog_groups
+       where id = $1`,
+      [catalogGroupId],
+    ),
+    db.query<{ state_json: unknown }>(
+      `select state_json
+         from catalog_group_snapshots
+        where catalog_group_id = $1
+        order by created_at desc, id desc
+        limit 1`,
+      [catalogGroupId],
+    ),
+    db.query<{
+      id: number
+      catalog_group_id: number
+      catalog_product_id: number | null
+      fuzzy_sku_id: number
+      verdict: MarketMatchVerdict
+      verdict_set_at: string
+      verdict_set_by_user_id: string
+      verdict_set_via: 'manual' | 'bulk' | 'imported' | 'system_inferred'
+      confidence_at_verdict: string | null
+      notes: string | null
+    }>(
+      `select id, catalog_group_id, catalog_product_id, fuzzy_sku_id, verdict,
+              verdict_set_at::text, verdict_set_by_user_id, verdict_set_via,
+              confidence_at_verdict::text, notes
+       from catalog_market_matches
+       where catalog_group_id = $1 and superseded_by_id is null
+       order by verdict_set_at desc, id desc`,
+      [catalogGroupId],
+    ),
+  ])
   const group = groupResult.rows[0]
   if (!group) return null
-
-  // Load the latest snapshot's state_json so we can extract product
-  // variants + their imageUrls without a Sweed round-trip.
-  const snapshotResult = await db.query<{ state_json: unknown }>(
-    `select state_json
-       from catalog_group_snapshots
-      where catalog_group_id = $1
-      order by created_at desc, id desc
-      limit 1`,
-    [catalogGroupId],
-  )
   const snapshotState = snapshotResult.rows[0]?.state_json as
     | {
         imageUrl?: string | null
@@ -741,12 +766,23 @@ export async function loadGroupReview(
   // Source (2) supersedes (1) in practice; (1) is retained until
   // the legacy observation-based scoring is decommissioned.
   const obsIds = obsResult.rows.map((row) => String(row.id))
+  // Row shape pulled from `fuzzy_skus`. The on-the-wire payload is
+  // deliberately tight:
+  //   - `parsed_jsonb` was previously selected but never read, so we
+  //     don't pull it any more (saved ~30% of the row bytes on the
+  //     structured-fuzzy hot path).
+  //   - `raw_input_jsonb` is projected at the SQL layer to just the
+  //     6 fields the SPA + scorer actually consume (listingName / url
+  //     / dispensaryName / brand / category / productId). The raw
+  //     LitAlerts JSON has dozens of fields per row we never look at.
+  //   - `image_url` is decorated via a LEFT JOIN against
+  //     `litalerts_product_images` so we don't pay a separate
+  //     round-trip after scoring.
   const fuzzyRows: Array<{
     id: number
     source_kind: string
     source_listing_id: string
     raw_input_jsonb: unknown
-    parsed_jsonb: unknown
     brand_norm: string | null
     category_norm: string | null
     subcategory_norm: string | null
@@ -754,13 +790,23 @@ export async function loadGroupReview(
     size_mg_norm: string | null
     pack_count_norm: number | null
     strain_norm: string | null
+    image_url: string | null
   }> = []
 
   if (obsIds.length > 0) {
     const obsFuzzy = await db.query<typeof fuzzyRows[number]>(
-      `select id, source_kind, source_listing_id, raw_input_jsonb, parsed_jsonb,
+      `select id, source_kind, source_listing_id,
+              jsonb_build_object(
+                'listingName',    raw_input_jsonb->>'listingName',
+                'url',            raw_input_jsonb->>'url',
+                'dispensaryName', raw_input_jsonb->>'dispensaryName',
+                'brand',          raw_input_jsonb->>'brand',
+                'category',       raw_input_jsonb->>'category',
+                'productId',      raw_input_jsonb->>'productId'
+              ) as raw_input_jsonb,
               brand_norm, category_norm, subcategory_norm,
-              size_g_norm::text, size_mg_norm::text, pack_count_norm, strain_norm
+              size_g_norm::text, size_mg_norm::text, pack_count_norm, strain_norm,
+              null::text as image_url
        from fuzzy_skus
        where source_kind = 'litalerts_competitor_observation'
          and source_listing_id like any($1::text[])`,
@@ -792,14 +838,41 @@ export async function loadGroupReview(
     ? group.brand_name.toLowerCase().trim()
     : null
   if (group.brand_name) {
-    const overrideLookup = await db.query<{ litalerts_brand_id: string | null; litalerts_brand_name: string | null }>(
-      `select litalerts_brand_id::text as litalerts_brand_id, litalerts_brand_name
-         from catalog_litalerts_brand_overrides
-        where catalog_brand_name = $1`,
+    // Single round-trip: look up the operator override AND, in the
+    // same response, expand the override's brand_id to every
+    // brand_name spelling we've seen in litalerts_products. The
+    // older code split this across two serial queries (~64ms of
+    // RTT) even though there's no data dependency between them
+    // that postgres can't resolve in one statement.
+    const overrideLookup = await db.query<{
+      has_override: boolean
+      litalerts_brand_id: string | null
+      litalerts_brand_name: string | null
+      brand_norms: string[] | null
+    }>(
+      `
+        with ov as (
+          select litalerts_brand_id, litalerts_brand_name
+            from catalog_litalerts_brand_overrides
+           where catalog_brand_name = $1
+           limit 1
+        )
+        select
+          exists (select 1 from ov) as has_override,
+          (select litalerts_brand_id::text from ov) as litalerts_brand_id,
+          (select litalerts_brand_name from ov) as litalerts_brand_name,
+          (
+            select array_agg(distinct lower(trim(brand_name)))
+              from litalerts_products
+             where brand_id = (select litalerts_brand_id from ov)
+               and brand_name is not null
+               and length(trim(brand_name)) > 0
+          ) as brand_norms
+      `,
       [group.brand_name],
     )
-    if (overrideLookup.rows.length > 0) {
-      const ov = overrideLookup.rows[0]
+    const ov = overrideLookup.rows[0]
+    if (ov?.has_override) {
       if (ov.litalerts_brand_id == null && ov.litalerts_brand_name == null) {
         // Explicit-null override → operator said "no LitAlerts
         // equivalent"; skip structured pull entirely and zero
@@ -807,15 +880,7 @@ export async function loadGroupReview(
         effectiveBrandNorm = null
       } else if (ov.litalerts_brand_id != null) {
         // Pin by id → expand to every spelling for this brand_id.
-        const spread = await db.query<{ brand_norm: string }>(
-          `select distinct lower(trim(brand_name)) as brand_norm
-             from litalerts_products
-            where brand_id = $1
-              and brand_name is not null
-              and length(trim(brand_name)) > 0`,
-          [Number.parseInt(ov.litalerts_brand_id, 10)],
-        )
-        effectiveBrandNorms = spread.rows.map((r) => r.brand_norm)
+        effectiveBrandNorms = ov.brand_norms ?? []
         // Use the override's litalerts_brand_name (or the most
         // common spelling) as the representative for scoring.
         effectiveBrandNorm = ov.litalerts_brand_name
@@ -862,6 +927,24 @@ export async function loadGroupReview(
   )
   const hasAnyVariantSize = variantGrams.length > 0 || variantMgs.length > 0
 
+  // Pre-compute the catalog group's significant-token set once. We
+  // use the same token set both as a server-side hard-gate during
+  // scoring (HARD GATE #2 below) AND as a SQL pre-filter on the
+  // structured fuzzy fetch — having pulled all brand+category+size
+  // matches we'd previously be transferring 1000+ rows over the
+  // wire just to discard ~95% of them at the JS-side token gate.
+  // Pushing the substring filter into SQL turns "brand+category+
+  // size matched rows" from ~1700 → ~40 for a typical brand and
+  // drops the wire payload to a few KB.
+  const groupNameTokens = extractSignificantNameTokens(group.group_name, {
+    brandText: effectiveBrandNorm ?? group.brand_name,
+    categoryText: catalogCategoryCanonical ?? group.category_name,
+  })
+  // ILIKE patterns for the SQL pre-filter. extractSignificantNameTokens
+  // splits on [^a-z0-9]+ so tokens are always plain alphanumerics —
+  // no need to escape LIKE wildcard characters (%/_) in them.
+  const groupNameTokenPatterns = Array.from(groupNameTokens).map((t) => `%${t}%`)
+
   if (effectiveBrandNorms.length > 0) {
     // HARD filters at the SQL layer:
     //   - brand_norm must match ANY of the effective (override-aware)
@@ -875,18 +958,33 @@ export async function loadGroupReview(
     //     LitAlerts row's size must be within ±max(epsilon, 8%) of at
     //     least one of those sizes (g↔g, mg↔mg; never cross-unit)
     const structuredFuzzy = await db.query<typeof fuzzyRows[number]>(
-      `select id, source_kind, source_listing_id, raw_input_jsonb, parsed_jsonb,
-              brand_norm, category_norm, subcategory_norm,
-              size_g_norm::text, size_mg_norm::text, pack_count_norm, strain_norm
-       from fuzzy_skus
-       where source_kind = 'litalerts_partner_product'
-         and brand_norm = any($1::text[])
+      `select fs.id, fs.source_kind, fs.source_listing_id,
+              jsonb_build_object(
+                'listingName',    fs.raw_input_jsonb->>'listingName',
+                'url',            fs.raw_input_jsonb->>'url',
+                'dispensaryName', fs.raw_input_jsonb->>'dispensaryName',
+                'brand',          fs.raw_input_jsonb->>'brand',
+                'category',       fs.raw_input_jsonb->>'category',
+                'productId',      fs.raw_input_jsonb->>'productId'
+              ) as raw_input_jsonb,
+              fs.brand_norm, fs.category_norm, fs.subcategory_norm,
+              fs.size_g_norm::text, fs.size_mg_norm::text, fs.pack_count_norm, fs.strain_norm,
+              lpi.image_url
+       from fuzzy_skus fs
+       left join litalerts_product_images lpi
+         on lpi.state_code = 'NY'
+        and lpi.product_id = case
+              when fs.raw_input_jsonb->>'productId' ~ '^[0-9]+$'
+                then (fs.raw_input_jsonb->>'productId')::bigint
+            end
+       where fs.source_kind = 'litalerts_partner_product'
+         and fs.brand_norm = any($1::text[])
          and (
            -- No catalog category set → don't filter by category.
            $3::boolean
            or (
-             category_norm is not null
-             and category_norm = any($2::text[])
+             fs.category_norm is not null
+             and fs.category_norm = any($2::text[])
            )
          )
          and (
@@ -894,24 +992,33 @@ export async function loadGroupReview(
            $4::boolean
            or (
              cardinality($5::numeric[]) > 0
-             and size_g_norm is not null
+             and fs.size_g_norm is not null
              and exists (
                select 1
                  from unnest($5::numeric[]) as t(g)
-                where abs(size_g_norm - t.g) <= greatest(0.05, t.g * 0.08)
+                where abs(fs.size_g_norm - t.g) <= greatest(0.05, t.g * 0.08)
              )
            )
            or (
              cardinality($6::numeric[]) > 0
-             and size_mg_norm is not null
+             and fs.size_mg_norm is not null
              and exists (
                select 1
                  from unnest($6::numeric[]) as t(mg)
-                where abs(size_mg_norm - t.mg) <= greatest(5, t.mg * 0.08)
+                where abs(fs.size_mg_norm - t.mg) <= greatest(5, t.mg * 0.08)
              )
            )
          )
-       order by created_at desc
+         and (
+           -- Name-token gate (mirrors HARD GATE #2 in the JS scorer
+           -- below). Skipped when the catalog group's name has no
+           -- significant tokens -- same semantics as the JS check
+           -- (groupNameTokens.size greater than 0), so nothing extra
+           -- is filtered.
+           cardinality($7::text[]) = 0
+           or lower(fs.raw_input_jsonb->>'listingName') like any($7::text[])
+         )
+       order by fs.created_at desc
        limit 1000`,
       [
         effectiveBrandNorms,
@@ -928,6 +1035,7 @@ export async function loadGroupReview(
         !hasAnyVariantSize,
         variantGrams,
         variantMgs,
+        groupNameTokenPatterns,
       ],
     )
     fuzzyRows.push(...structuredFuzzy.rows)
@@ -940,7 +1048,6 @@ export async function loadGroupReview(
     sourceKind: row.source_kind,
     sourceListingId: row.source_listing_id,
     rawInputJsonb: row.raw_input_jsonb,
-    parsedJsonb: row.parsed_jsonb,
     brandNorm: row.brand_norm,
     categoryNorm: row.category_norm,
     subcategoryNorm: row.subcategory_norm,
@@ -949,28 +1056,20 @@ export async function loadGroupReview(
     packCountNorm: row.pack_count_norm,
     strainNorm: row.strain_norm,
   }))
+  // Side-map: fuzzy_sku.id → cached LitAlerts image URL, decorated
+  // straight from the SQL LEFT JOIN above so we don't have to issue
+  // a separate `litalerts_product_images` SELECT after scoring.
+  // Legacy `litalerts_competitor_observation` fuzzies always get
+  // null here (the JOIN is keyed on `raw_input_jsonb->>'productId'`
+  // which those rows don't carry).
+  const imageByFuzzyId = new Map<number, string>()
+  for (const row of fuzzyResult.rows) {
+    if (row.image_url != null) imageByFuzzyId.set(row.id, row.image_url)
+  }
 
-  // Load live (non-superseded) verdicts for this group.
-  const verdictResult = await db.query<{
-    id: number
-    catalog_group_id: number
-    catalog_product_id: number | null
-    fuzzy_sku_id: number
-    verdict: MarketMatchVerdict
-    verdict_set_at: string
-    verdict_set_by_user_id: string
-    verdict_set_via: 'manual' | 'bulk' | 'imported' | 'system_inferred'
-    confidence_at_verdict: string | null
-    notes: string | null
-  }>(
-    `select id, catalog_group_id, catalog_product_id, fuzzy_sku_id, verdict,
-            verdict_set_at::text, verdict_set_by_user_id, verdict_set_via,
-            confidence_at_verdict::text, notes
-     from catalog_market_matches
-     where catalog_group_id = $1 and superseded_by_id is null
-     order by verdict_set_at desc, id desc`,
-    [catalogGroupId],
-  )
+  // verdictResult was loaded up-front in Phase A above (parallel
+  // with the group/snapshot reads) so we don't pay an extra RTT
+  // for it here.
 
   const fuzzyById = new Map(fuzzies.map((fuzzy) => [fuzzy.id, fuzzy]))
   const verdictByFuzzy = new Map<number, MarketMatchVerdict>()
@@ -983,15 +1082,9 @@ export async function loadGroupReview(
   // fuzzy's brand_norm; using the raw catalog name here would zero
   // the brand factor for legitimate override-mapped rows (the
   // "Grass Roots → Grassroots (Curaleaf)" case).
-  // Pre-compute the catalog group's significant-token set once. Each
-  // candidate listing must share at least one of these tokens with
-  // its product/variant name — otherwise it's just "same brand, same
-  // category, same size" which is exactly the failure mode that
-  // surfaced accessories as candidates for ATF.
-  const groupNameTokens = extractSignificantNameTokens(group.group_name, {
-    brandText: effectiveBrandNorm ?? group.brand_name,
-    categoryText: catalogCategoryCanonical ?? group.category_name,
-  })
+  // `groupNameTokens` was computed earlier (before the structured
+  // fuzzy fetch) so the same token set could double as a SQL
+  // pre-filter. Reused here as the scorer's HARD GATE #2 input.
 
   const catalogProfile: CatalogProfile = {
     brandNorm: effectiveBrandNorm ?? group.brand_name,
@@ -1208,7 +1301,12 @@ export async function loadGroupReview(
         liveVerdict: null,
         listingUrl: listing?.url ?? null,
         dispensaryName: listing?.dispensaryName ?? null,
-        imageUrl: null,
+        // imageUrl is decorated at the SQL layer via the LEFT JOIN
+        // against `litalerts_product_images` (see structuredFuzzy
+        // query). Legacy `litalerts_competitor_observation` fuzzies
+        // don't have a productId in raw_input_jsonb so they fall
+        // through as null without paying any extra cost.
+        imageUrl: imageByFuzzyId.get(fuzzy.id) ?? null,
         matchedCatalogProductId: matchedKey.productId,
         matchedSizeKey: matchedKey.sizeKey,
         matchedSizeLabel: matchedKey.sizeLabel,
@@ -1216,48 +1314,6 @@ export async function loadGroupReview(
       return candidate
     })
     .filter((c): c is MarketMatchCandidate => c !== null)
-
-  // Decorate each candidate with the LitAlerts dashboard imageUrl
-  // we've cached in `litalerts_product_images` (populated by
-  // `scripts/litalerts-backfill-product-images.mts`). Single batch
-  // query keyed on the productId encoded in raw_input_jsonb for
-  // structured `litalerts_partner_product` fuzzies; legacy
-  // `litalerts_competitor_observation` fuzzies don't carry productId
-  // so they stay imageUrl=null until they're re-ingested structured.
-  const productIds: number[] = []
-  for (const c of scoredAll) {
-    const raw = c.fuzzy.rawInputJsonb as { productId?: number | string } | null
-    const pid = typeof raw?.productId === 'number'
-      ? raw.productId
-      : typeof raw?.productId === 'string' && /^\d+$/.test(raw.productId)
-        ? Number.parseInt(raw.productId, 10)
-        : null
-    if (pid !== null && !Number.isNaN(pid)) productIds.push(pid)
-  }
-  if (productIds.length > 0) {
-    const imgResult = await db.query<{ product_id: string; image_url: string }>(
-      `select product_id::text, image_url
-         from litalerts_product_images
-        where state_code = 'NY'
-          and product_id = any($1::bigint[])`,
-      [Array.from(new Set(productIds))],
-    )
-    const imageByPid = new Map<number, string>()
-    for (const r of imgResult.rows) {
-      imageByPid.set(Number.parseInt(r.product_id, 10), r.image_url)
-    }
-    for (const c of scoredAll) {
-      const raw = c.fuzzy.rawInputJsonb as { productId?: number | string } | null
-      const pid = typeof raw?.productId === 'number'
-        ? raw.productId
-        : typeof raw?.productId === 'string' && /^\d+$/.test(raw.productId)
-          ? Number.parseInt(raw.productId, 10)
-          : null
-      if (pid !== null && imageByPid.has(pid)) {
-        c.imageUrl = imageByPid.get(pid) ?? null
-      }
-    }
-  }
 
   // Rank-then-cap: the SPA needs the full ranked window for the
   // client-side slider to work, but the payload still needs to be
