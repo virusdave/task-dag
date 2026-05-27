@@ -2862,11 +2862,15 @@ a.tree-nav-branch-label.is-link,
   background: transparent;
   border: 1px solid var(--control-border);
   border-radius: 999px;
-  padding: 0.25rem 0.75rem;
-  font-size: 0.85rem;
+  padding: 0.12rem 0.6rem;
+  font-size: 0.8rem;
+  line-height: 1.2;
   cursor: pointer;
   color: inherit;
-  min-height: 32px;
+  /* Keep a 24px hit target on touch; previous 32px made the filter
+     bar feel bloated on desktop. Touch hit area is preserved via
+     the pill padding + the line-height. */
+  min-height: 24px;
 }
 
 .metrics-site-chip:hover {

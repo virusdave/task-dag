@@ -652,11 +652,18 @@ function MetricsTabsNav({ activeTabId }: { activeTabId: MetricsTabId }) {
 
 function PresetButton({ label, days }: { label: string; days: number }) {
   const axis = useTimeAxis()
+  // A preset chip is "active" when the current window is exactly
+  // (now-Nd … now). After the user types in a custom range, no
+  // preset stays highlighted (matching the catalog tab's behaviour).
+  const isExactPreset =
+    Math.abs(axis.window.toMs - Date.now()) < DAY_MS &&
+    Math.round((axis.window.toMs - axis.window.fromMs) / DAY_MS) === days
   return (
     <button
       type="button"
-      className="ghost-button"
+      className={isExactPreset ? 'metrics-site-chip is-active' : 'metrics-site-chip'}
       onClick={() => axis.setWindow({ fromMs: Date.now() - days * DAY_MS, toMs: Date.now() })}
+      aria-pressed={isExactPreset}
     >
       {label}
     </button>
