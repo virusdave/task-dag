@@ -1028,6 +1028,32 @@ function formatCurrency(value: number | null): string {
   return typeof value === 'number' ? `$${value.toFixed(2)}` : '—'
 }
 
+function formatPendingPurchaseDistanceBandLabel(
+  distanceBand: PendingPurchaseMarketListing['distanceBand'],
+  distanceMiles: number | null,
+): string {
+  const distanceText = distanceMiles === null ? null : `${distanceMiles.toFixed(2)}mi`
+  switch (distanceBand) {
+    case 'near':
+      return distanceText ? `Near · ${distanceText}` : 'Near'
+    case 'mid':
+      return distanceText ? `Mid · ${distanceText}` : 'Mid'
+    case 'far':
+      return distanceText ? `Far · ${distanceText}` : 'Far'
+    case 'very_far':
+      return distanceText ? `Very far · ${distanceText}` : 'Very far'
+    default:
+      return distanceText ? `Unknown · ${distanceText}` : 'Unknown distance'
+  }
+}
+
+function buildPendingPurchaseMarketListingKey(
+  listing: PendingPurchaseMarketListing,
+  index: number,
+): string {
+  return `${listing.dispensaryName}-${listing.listingName}-${listing.source}-${index}`
+}
+
 function hasPendingPurchasePricingLadder(item: PendingPurchaseRow, displayedPrice: number | null): boolean {
   const ladderPoints = [
     item.currentPrice,
