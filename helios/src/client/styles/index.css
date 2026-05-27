@@ -3077,6 +3077,70 @@ a.tree-nav-branch-label.is-link,
   font-size: 1rem;
 }
 
+/* Inline "!" help icon next to every chart title. Hover or focus
+   reveals a popover with the metric's longer description; on mobile
+   the icon is tappable and toggles the same popover. */
+.metric-chart-help {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.05rem;
+  height: 1.05rem;
+  margin-left: 0.4rem;
+  border-radius: 50%;
+  background: #e7eef6;
+  color: #1f4e7a;
+  font-size: 0.7rem;
+  font-weight: 700;
+  line-height: 1;
+  cursor: help;
+  user-select: none;
+  vertical-align: middle;
+  outline: none;
+}
+.metric-chart-help:hover,
+.metric-chart-help:focus-visible,
+.metric-chart-help.is-open {
+  background: #c8d8e8;
+  color: #0e3559;
+}
+.metric-chart-help-glyph {
+  display: inline-block;
+  transform: translateY(-0.04em);
+}
+.metric-chart-help-popover {
+  position: absolute;
+  top: calc(100% + 0.4rem);
+  left: 50%;
+  transform: translateX(-50%);
+  min-width: 220px;
+  max-width: 320px;
+  padding: 0.55rem 0.7rem;
+  background: #fff;
+  color: #222;
+  border: 1px solid #c8d2dc;
+  border-radius: 6px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.18);
+  font-size: 0.78rem;
+  font-weight: 400;
+  line-height: 1.35;
+  text-align: left;
+  white-space: normal;
+  z-index: 10;
+  pointer-events: none;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 0.12s ease;
+}
+.metric-chart-help:hover .metric-chart-help-popover,
+.metric-chart-help:focus-visible .metric-chart-help-popover,
+.metric-chart-help.is-open .metric-chart-help-popover {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+}
+
 .metric-chart-desc {
   margin: 0.25rem 0 0;
   font-size: 0.8rem;

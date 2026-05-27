@@ -28,6 +28,53 @@ import { useScatterZoom, type ZoomView } from './scatterZoom.js'
 // stay out of the strict-zod return-type loop.
 const PassthroughSchema = z.unknown()
 
+/**
+ * Small ! help-icon button shown next to a chart title. Hover or
+ * focus reveals a popover with `text`; on touch devices the icon is
+ * clickable and toggles the same popover. The native `title`
+ * attribute is set as an accessible fallback for screen-reader users.
+ */
+export function HelpIcon({ text }: { text: string }): JSX.Element | null {
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLSpanElement | null>(null)
+  useEffect(() => {
+    if (!open) return
+    const onDocClick = (e: MouseEvent): void => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', onDocClick)
+    return () => document.removeEventListener('mousedown', onDocClick)
+  }, [open])
+  if (!text || text.trim() === '') return null
+  return (
+    <span
+      className={`metric-chart-help ${open ? 'is-open' : ''}`}
+      ref={ref}
+      onClick={(e) => {
+        e.stopPropagation()
+        setOpen((v) => !v)
+      }}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault()
+          e.stopPropagation()
+          setOpen((v) => !v)
+        } else if (e.key === 'Escape') {
+          setOpen(false)
+        }
+      }}
+      tabIndex={0}
+      role="button"
+      aria-label="Help: what does this chart show?"
+      aria-expanded={open}
+      title={text}
+    >
+      <span className="metric-chart-help-glyph" aria-hidden="true">!</span>
+      <span className="metric-chart-help-popover" role="tooltip">{text}</span>
+    </span>
+  )
+}
+
 const FALLBACK_COLOURS = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b']
 const TAG_COLOURS: Record<string, string> = {
   incident: '#d62728',
@@ -209,7 +256,10 @@ export function MetricChart({
     >
       <header className="metric-chart-header">
         <div className="metric-chart-titlewrap">
-          <h3 className="metric-chart-title">{metric.title}</h3>
+          <h3 className="metric-chart-title">
+            {metric.title}
+            {metric.description ? <HelpIcon text={metric.description} /> : null}
+          </h3>
           {variant === 'expanded' && metric.description ? (
             <details className="metric-chart-desc-wrap">
               <summary className="subtle-copy">about this metric</summary>

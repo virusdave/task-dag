@@ -17,6 +17,7 @@ import {
   type CatalogFilterOption,
 } from '../../../shared/contracts/index.js'
 import { loadJson } from '../../app/fetchJson.js'
+import { HelpIcon } from './MetricChart.js'
 import { useScatterZoom, type ZoomView } from './scatterZoom.js'
 
 // ---------------------------------------------------------------------------
@@ -1901,7 +1902,10 @@ function ScatterCard({
     <article className="metric-chart-card catalog-analytics-card">
       <header className="metric-chart-header">
         <div className="metric-chart-titlewrap">
-          <h3 className="metric-chart-title">{config.title}</h3>
+          <h3 className="metric-chart-title">
+            {config.title}
+            {config.description ? <HelpIcon text={config.description} /> : null}
+          </h3>
         </div>
         <div className="metric-chart-controls catalog-card-controls">
           {/* Per-card axis / encoding selectors. We deliberately render

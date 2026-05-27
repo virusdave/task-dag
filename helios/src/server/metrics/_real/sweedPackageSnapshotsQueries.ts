@@ -576,26 +576,32 @@ export async function queryInventoryCostDistribution(args: MetricQueryArgs): Pro
   // We issue one query per bucket end — typically <= 90 — and merge
   // the results in JS. Each query is O(snapshots) and uses the
   // (dealer_id, inventory_item_id, observed_at_min DESC) primary key
-  // for fast distinct-on.
+  // for fast distinct-on. Queries are issued in parallel and capped
+  // by the pg pool's connection limit; per-bucket order is preserved
+  // because we await the Promise.all in index order.
+  const snapSql = `
+    select distinct on (dealer_id, inventory_item_id)
+           dealer_id::text as dealer_id,
+           inventory_item_id,
+           current_qty,
+           wholesale_cost_dollars
+      from sweed_package_snapshots
+     where dealer_id = any($1::bigint[])
+       and observed_at_min <= $2
+     order by dealer_id, inventory_item_id, observed_at_min desc
+  `
+  const snapResults = await Promise.all(
+    buckets.map((_, i) =>
+      pool.query<{ dealer_id: string; inventory_item_id: string; current_qty: string | null; wholesale_cost_dollars: string | null }>(
+        snapSql,
+        [dealerIds, bucketEnds[i]!.toISOString()],
+      ),
+    ),
+  )
   const out: MetricRow[] = []
   for (let i = 0; i < buckets.length; i++) {
     const bucketStartIso = buckets[i]!.toISOString()
-    const bucketEndIso = bucketEnds[i]!.toISOString()
-    const snapSql = `
-      select distinct on (dealer_id, inventory_item_id)
-             dealer_id::text as dealer_id,
-             inventory_item_id,
-             current_qty,
-             wholesale_cost_dollars
-        from sweed_package_snapshots
-       where dealer_id = any($1::bigint[])
-         and observed_at_min <= $2
-       order by dealer_id, inventory_item_id, observed_at_min desc
-    `
-    const snapResult = await pool.query<{ dealer_id: string; inventory_item_id: string; current_qty: string | null; wholesale_cost_dollars: string | null }>(
-      snapSql,
-      [dealerIds, bucketEndIso],
-    )
+    const snapResult = snapResults[i]!
     const byCategory = new Map<string, number>()
     for (const row of snapResult.rows) {
       const qty = row.current_qty === null ? 0 : Number(row.current_qty)
@@ -639,51 +645,55 @@ export async function queryInventoryMisalignment(args: MetricQueryArgs): Promise
   // Target supply: 21 days at current run rate (per stub spec).
   const TARGET_DAYS = 21
   const pool = getPool()
+  // Per-package: on-hand cost as of bucket_end, and trailing-30d
+  // run-rate cost (sum cogs / 30) computed against sweed_orders.
+  // Queries are issued in parallel; order is preserved by index.
+  const sql = `
+    with snap as (
+      select distinct on (dealer_id, inventory_item_id)
+             dealer_id, inventory_item_id,
+             coalesce(current_qty, 0) * coalesce(wholesale_cost_dollars, 0) as on_hand_cost
+        from sweed_package_snapshots
+       where dealer_id = any($1::bigint[])
+         and observed_at_min <= $2::timestamptz
+       order by dealer_id, inventory_item_id, observed_at_min desc
+    ),
+    run_rate as (
+      select so.dealer_id,
+             item->>'inventoryItemId' as inventory_item_id,
+             sum(${QTY_EXPR} * coalesce(sweed_package_cost_as_of_or_earliest(so.dealer_id, item->>'inventoryItemId', so.pay_time), 0)) / 30.0
+               as daily_cogs
+        from sweed_orders so, jsonb_array_elements(so.raw_json->'items') as item
+       where so.dealer_id = any($1::bigint[])
+         and so.pay_time >= $2::timestamptz - interval '30 days'
+         and so.pay_time < $2::timestamptz
+         and item->>'inventoryItemId' is not null
+       group by so.dealer_id, item->>'inventoryItemId'
+    )
+    select sum(case
+                 when rr.daily_cogs is null or rr.daily_cogs <= 0
+                   then 0
+                 else (snap.on_hand_cost / rr.daily_cogs) - $3::numeric
+               end) as deviation_total,
+           count(*) as packages
+      from snap
+      left join run_rate rr
+        on rr.dealer_id = snap.dealer_id
+       and rr.inventory_item_id = snap.inventory_item_id
+     where snap.on_hand_cost > 0
+  `
+  const results = await Promise.all(
+    buckets.map((_, i) =>
+      pool.query<{ deviation_total: string | null; packages: string }>(
+        sql,
+        [dealerIds, bucketEnds[i]!.toISOString(), String(TARGET_DAYS)],
+      ),
+    ),
+  )
   const out: MetricRow[] = []
   for (let i = 0; i < buckets.length; i++) {
     const bucketStartIso = buckets[i]!.toISOString()
-    const bucketEndIso = bucketEnds[i]!.toISOString()
-    // Per-package: on-hand cost as of bucket_end, and trailing-30d
-    // run-rate cost (sum cogs / 30) computed against sweed_orders.
-    const sql = `
-      with snap as (
-        select distinct on (dealer_id, inventory_item_id)
-               dealer_id, inventory_item_id,
-               coalesce(current_qty, 0) * coalesce(wholesale_cost_dollars, 0) as on_hand_cost
-          from sweed_package_snapshots
-         where dealer_id = any($1::bigint[])
-           and observed_at_min <= $2::timestamptz
-         order by dealer_id, inventory_item_id, observed_at_min desc
-      ),
-      run_rate as (
-        select so.dealer_id,
-               item->>'inventoryItemId' as inventory_item_id,
-               sum(${QTY_EXPR} * coalesce(sweed_package_cost_as_of_or_earliest(so.dealer_id, item->>'inventoryItemId', so.pay_time), 0)) / 30.0
-                 as daily_cogs
-          from sweed_orders so, jsonb_array_elements(so.raw_json->'items') as item
-         where so.dealer_id = any($1::bigint[])
-           and so.pay_time >= $2::timestamptz - interval '30 days'
-           and so.pay_time < $2::timestamptz
-           and item->>'inventoryItemId' is not null
-         group by so.dealer_id, item->>'inventoryItemId'
-      )
-      select sum(case
-                   when rr.daily_cogs is null or rr.daily_cogs <= 0
-                     then 0
-                   else (snap.on_hand_cost / rr.daily_cogs) - $3::numeric
-                 end) as deviation_total,
-             count(*) as packages
-        from snap
-        left join run_rate rr
-          on rr.dealer_id = snap.dealer_id
-         and rr.inventory_item_id = snap.inventory_item_id
-       where snap.on_hand_cost > 0
-    `
-    const result = await pool.query<{ deviation_total: string | null; packages: string }>(
-      sql,
-      [dealerIds, bucketEndIso, String(TARGET_DAYS)],
-    )
-    const row0 = result.rows[0]
+    const row0 = results[i]!.rows[0]
     const dev = row0?.deviation_total === null || row0?.deviation_total === undefined ? 0 : Number(row0.deviation_total)
     const pkg = row0 ? Number(row0.packages) : 0
     const avgDev = pkg > 0 ? dev / pkg : 0
@@ -707,47 +717,48 @@ export async function querySlowmoversCostAtRisk(args: MetricQueryArgs): Promise<
     return buckets.map((b) => ({ t: b.toISOString(), cost_at_risk_dollars: 0 }))
   }
   const pool = getPool()
+  const sql = `
+    with snap as (
+      select distinct on (dealer_id, inventory_item_id)
+             dealer_id, inventory_item_id,
+             coalesce(current_qty, 0) * coalesce(wholesale_cost_dollars, 0) as on_hand_cost,
+             expiration_date
+        from sweed_package_snapshots
+       where dealer_id = any($1::bigint[])
+         and observed_at_min <= $2::timestamptz
+       order by dealer_id, inventory_item_id, observed_at_min desc
+    ),
+    recent_sales as (
+      select so.dealer_id, item->>'inventoryItemId' as inventory_item_id, sum(${QTY_EXPR}) as qty_sold
+        from sweed_orders so, jsonb_array_elements(so.raw_json->'items') as item
+       where so.dealer_id = any($1::bigint[])
+         and so.pay_time >= $2::timestamptz - interval '30 days'
+         and so.pay_time < $2::timestamptz
+         and item->>'inventoryItemId' is not null
+       group by 1, 2
+    )
+    select coalesce(sum(snap.on_hand_cost) filter (
+             where (rs.qty_sold is null or rs.qty_sold = 0)
+                or (snap.expiration_date is not null
+                    and snap.expiration_date <= ($2::timestamptz + interval '30 days')::date)
+           ), 0) as cost_at_risk
+      from snap
+      left join recent_sales rs
+        on rs.dealer_id = snap.dealer_id
+       and rs.inventory_item_id = snap.inventory_item_id
+     where snap.on_hand_cost > 0
+  `
+  const results = await Promise.all(
+    buckets.map((_, i) =>
+      pool.query<{ cost_at_risk: string | null }>(sql, [dealerIds, bucketEnds[i]!.toISOString()]),
+    ),
+  )
   const out: MetricRow[] = []
   for (let i = 0; i < buckets.length; i++) {
-    const bucketStartIso = buckets[i]!.toISOString()
-    const bucketEndIso = bucketEnds[i]!.toISOString()
-    const sql = `
-      with snap as (
-        select distinct on (dealer_id, inventory_item_id)
-               dealer_id, inventory_item_id,
-               coalesce(current_qty, 0) * coalesce(wholesale_cost_dollars, 0) as on_hand_cost,
-               expiration_date
-          from sweed_package_snapshots
-         where dealer_id = any($1::bigint[])
-           and observed_at_min <= $2::timestamptz
-         order by dealer_id, inventory_item_id, observed_at_min desc
-      ),
-      recent_sales as (
-        select so.dealer_id, item->>'inventoryItemId' as inventory_item_id, sum(${QTY_EXPR}) as qty_sold
-          from sweed_orders so, jsonb_array_elements(so.raw_json->'items') as item
-         where so.dealer_id = any($1::bigint[])
-           and so.pay_time >= $2::timestamptz - interval '30 days'
-           and so.pay_time < $2::timestamptz
-           and item->>'inventoryItemId' is not null
-         group by 1, 2
-      )
-      select coalesce(sum(snap.on_hand_cost) filter (
-               where (rs.qty_sold is null or rs.qty_sold = 0)
-                  or (snap.expiration_date is not null
-                      and snap.expiration_date <= ($2::timestamptz + interval '30 days')::date)
-             ), 0) as cost_at_risk
-        from snap
-        left join recent_sales rs
-          on rs.dealer_id = snap.dealer_id
-         and rs.inventory_item_id = snap.inventory_item_id
-       where snap.on_hand_cost > 0
-    `
-    const result = await pool.query<{ cost_at_risk: string | null }>(
-      sql,
-      [dealerIds, bucketEndIso],
-    )
-    const v = result.rows[0]?.cost_at_risk === null || result.rows[0]?.cost_at_risk === undefined ? 0 : Number(result.rows[0].cost_at_risk)
-    out.push({ t: bucketStartIso, cost_at_risk_dollars: round2(v) })
+    const v = results[i]!.rows[0]?.cost_at_risk === null || results[i]!.rows[0]?.cost_at_risk === undefined
+      ? 0
+      : Number(results[i]!.rows[0]!.cost_at_risk)
+    out.push({ t: buckets[i]!.toISOString(), cost_at_risk_dollars: round2(v) })
   }
   return out
 }
@@ -768,52 +779,53 @@ export async function queryLowstockUpcomingOuts(args: MetricQueryArgs): Promise<
     return buckets.map((b) => ({ t: b.toISOString(), expected_margin_loss_dollars: 0 }))
   }
   const pool = getPool()
+  const sql = `
+    with snap as (
+      select distinct on (dealer_id, inventory_item_id)
+             dealer_id, inventory_item_id,
+             coalesce(available_qty, current_qty, 0) as on_hand_qty,
+             coalesce(wholesale_cost_dollars, 0) as unit_cost
+        from sweed_package_snapshots
+       where dealer_id = any($1::bigint[])
+         and observed_at_min <= $2::timestamptz
+       order by dealer_id, inventory_item_id, observed_at_min desc
+    ),
+    recent as (
+      select so.dealer_id, item->>'inventoryItemId' as inventory_item_id,
+             sum(${QTY_EXPR}) / 21.0 as daily_qty_sold,
+             sum(${REVENUE_EXPR} - ${COGS_EXPR}) / 21.0 as daily_margin
+        from sweed_orders so, jsonb_array_elements(so.raw_json->'items') as item
+       where so.dealer_id = any($1::bigint[])
+         and so.pay_time >= $2::timestamptz - interval '21 days'
+         and so.pay_time < $2::timestamptz
+         and item->>'inventoryItemId' is not null
+       group by 1, 2
+    )
+    select coalesce(sum(
+             case
+               when r.daily_qty_sold is null or r.daily_qty_sold <= 0 then 0
+               when snap.on_hand_qty <= 0 then 2.0 * r.daily_margin
+               when (snap.on_hand_qty / r.daily_qty_sold) <= 2.0
+                 then (2.0 - (snap.on_hand_qty / r.daily_qty_sold)) * r.daily_margin
+               else 0
+             end
+           ), 0) as expected_margin_loss
+      from snap
+      left join recent r
+        on r.dealer_id = snap.dealer_id
+       and r.inventory_item_id = snap.inventory_item_id
+  `
+  const results = await Promise.all(
+    buckets.map((_, i) =>
+      pool.query<{ expected_margin_loss: string | null }>(sql, [dealerIds, bucketEnds[i]!.toISOString()]),
+    ),
+  )
   const out: MetricRow[] = []
   for (let i = 0; i < buckets.length; i++) {
-    const bucketStartIso = buckets[i]!.toISOString()
-    const bucketEndIso = bucketEnds[i]!.toISOString()
-    const sql = `
-      with snap as (
-        select distinct on (dealer_id, inventory_item_id)
-               dealer_id, inventory_item_id,
-               coalesce(available_qty, current_qty, 0) as on_hand_qty,
-               coalesce(wholesale_cost_dollars, 0) as unit_cost
-          from sweed_package_snapshots
-         where dealer_id = any($1::bigint[])
-           and observed_at_min <= $2::timestamptz
-         order by dealer_id, inventory_item_id, observed_at_min desc
-      ),
-      recent as (
-        select so.dealer_id, item->>'inventoryItemId' as inventory_item_id,
-               sum(${QTY_EXPR}) / 21.0 as daily_qty_sold,
-               sum(${REVENUE_EXPR} - ${COGS_EXPR}) / 21.0 as daily_margin
-          from sweed_orders so, jsonb_array_elements(so.raw_json->'items') as item
-         where so.dealer_id = any($1::bigint[])
-           and so.pay_time >= $2::timestamptz - interval '21 days'
-           and so.pay_time < $2::timestamptz
-           and item->>'inventoryItemId' is not null
-         group by 1, 2
-      )
-      select coalesce(sum(
-               case
-                 when r.daily_qty_sold is null or r.daily_qty_sold <= 0 then 0
-                 when snap.on_hand_qty <= 0 then 2.0 * r.daily_margin
-                 when (snap.on_hand_qty / r.daily_qty_sold) <= 2.0
-                   then (2.0 - (snap.on_hand_qty / r.daily_qty_sold)) * r.daily_margin
-                 else 0
-               end
-             ), 0) as expected_margin_loss
-        from snap
-        left join recent r
-          on r.dealer_id = snap.dealer_id
-         and r.inventory_item_id = snap.inventory_item_id
-    `
-    const result = await pool.query<{ expected_margin_loss: string | null }>(
-      sql,
-      [dealerIds, bucketEndIso],
-    )
-    const v = result.rows[0]?.expected_margin_loss === null || result.rows[0]?.expected_margin_loss === undefined ? 0 : Number(result.rows[0].expected_margin_loss)
-    out.push({ t: bucketStartIso, expected_margin_loss_dollars: round2(Math.max(0, v)) })
+    const v = results[i]!.rows[0]?.expected_margin_loss === null || results[i]!.rows[0]?.expected_margin_loss === undefined
+      ? 0
+      : Number(results[i]!.rows[0]!.expected_margin_loss)
+    out.push({ t: buckets[i]!.toISOString(), expected_margin_loss_dollars: round2(Math.max(0, v)) })
   }
   return out
 }
