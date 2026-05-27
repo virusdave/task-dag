@@ -2,10 +2,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { NavLink, useLoaderData, useParams } from 'react-router-dom'
 
 import {
+  CatalogAnalyticsFiltersResponseSchema,
   MetricAnnotationsListResponseSchema,
   MetricListResponseSchema,
+  type CatalogAnalyticsFiltersResponse,
   type MetricAggregation,
   type MetricAnnotationRecord,
+  type MetricCatalogFilterDimension,
   type MetricDataStatus,
   type MetricDefSummary,
   type MetricListResponse,
@@ -14,6 +17,11 @@ import { loadJson } from '../../app/fetchJson.js'
 
 import { CatalogAnalyticsTab } from './CatalogAnalyticsTab.js'
 import {
+  CatalogFilterBar,
+  emptyCatalogFilterSelection,
+  type CatalogFilterSelection,
+} from './CatalogFilterBar.js'
+import {
   MetricChart,
   METRIC_STACK_MODES,
   type MetricStackMode,
@@ -21,6 +29,13 @@ import {
 import { TimeAxisProvider, useTimeAxis, type TimeWindow } from './TimeAxisContext.js'
 
 const DAY_MS = 24 * 60 * 60 * 1000
+
+function toggleInSet(prev: ReadonlySet<string>, id: string): ReadonlySet<string> {
+  const next = new Set(prev)
+  if (next.has(id)) next.delete(id)
+  else next.add(id)
+  return next
+}
 const PRESETS: ReadonlyArray<{ label: string; days: number }> = [
   { label: '7d', days: 7 },
   { label: '30d', days: 30 },
@@ -174,6 +189,72 @@ export function MetricsLayoutPage() {
   const [selectedSites, setSelectedSites] = useState<ReadonlySet<string>>(() => new Set<string>())
   const sitesParam = useMemo(() => Array.from(selectedSites).join(','), [selectedSites])
 
+  // Shared catalog-scope filter selection (category / subcategory /
+  // brand / size). Lifted here so the same compact dropdown-chip UX
+  // can drive the catalog, sales, and inventory tabs — the chip bar
+  // is rendered by DashboardControls on tabs that have at least one
+  // metric declaring supportedCatalogFilters, and by CatalogAnalyticsTab
+  // on its own. The selection persists across tab switches.
+  const [catalogFilterSelection, setCatalogFilterSelection] = useState<CatalogFilterSelection>(
+    emptyCatalogFilterSelection,
+  )
+  const catalogFilterCallbacks = useMemo(
+    () => ({
+      onCategoryToggle: (id: string) =>
+        setCatalogFilterSelection((prev) => ({ ...prev, categoryIds: toggleInSet(prev.categoryIds, id) })),
+      onSubcategoryToggle: (id: string) =>
+        setCatalogFilterSelection((prev) => ({ ...prev, subcategoryIds: toggleInSet(prev.subcategoryIds, id) })),
+      onBrandToggle: (id: string) =>
+        setCatalogFilterSelection((prev) => ({ ...prev, brandIds: toggleInSet(prev.brandIds, id) })),
+      onSizeToggle: (id: string) =>
+        setCatalogFilterSelection((prev) => ({ ...prev, sizes: toggleInSet(prev.sizes, id) })),
+      onClearAll: () => setCatalogFilterSelection(emptyCatalogFilterSelection()),
+    }),
+    [],
+  )
+
+  // Fetch /api/catalog-analytics/filters whenever sites or the
+  // selection itself changes (the endpoint narrows option lists
+  // cumulatively against the OTHER dimensions). Used by both the
+  // catalog tab and the shared filter bar in DashboardControls.
+  const [catalogFilters, setCatalogFilters] = useState<CatalogAnalyticsFiltersResponse | null>(null)
+  const [loadingCatalogFilters, setLoadingCatalogFilters] = useState(false)
+  useEffect(() => {
+    let cancelled = false
+    const params = new URLSearchParams()
+    if (sitesParam) params.set('sites', sitesParam)
+    if (catalogFilterSelection.categoryIds.size > 0)
+      params.set('categoryIds', Array.from(catalogFilterSelection.categoryIds).join(','))
+    if (catalogFilterSelection.subcategoryIds.size > 0)
+      params.set('subcategoryIds', Array.from(catalogFilterSelection.subcategoryIds).join(','))
+    if (catalogFilterSelection.brandIds.size > 0)
+      params.set('brandIds', Array.from(catalogFilterSelection.brandIds).join(','))
+    if (catalogFilterSelection.sizes.size > 0)
+      params.set('sizes', Array.from(catalogFilterSelection.sizes).join(','))
+    const qs = params.toString()
+    const url = `/api/catalog-analytics/filters${qs ? `?${qs}` : ''}`
+    setLoadingCatalogFilters(true)
+    loadJson(url, CatalogAnalyticsFiltersResponseSchema)
+      .then((r) => {
+        if (!cancelled) setCatalogFilters(r)
+      })
+      .catch(() => {
+        if (!cancelled) setCatalogFilters(null)
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingCatalogFilters(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [
+    sitesParam,
+    catalogFilterSelection.categoryIds,
+    catalogFilterSelection.subcategoryIds,
+    catalogFilterSelection.brandIds,
+    catalogFilterSelection.sizes,
+  ])
+
   // Tab-scoped toolbar config. Each tab remembers its own aggregation +
   // stack-mode independently so switching tabs doesn't trample the operator's
   // preferences on the previous one. Defaults come from the tab definition.
@@ -318,6 +399,10 @@ export function MetricsLayoutPage() {
             setExpandedMetricId={setExpandedMetricId}
             focusPanelRef={focusPanelRef}
             showMissing={showMissing}
+            catalogFilters={catalogFilters}
+            loadingCatalogFilters={loadingCatalogFilters}
+            catalogFilterSelection={catalogFilterSelection}
+            catalogFilterCallbacks={catalogFilterCallbacks}
           />
         )}
 
@@ -356,6 +441,16 @@ interface RegistryDashboardProps {
   setExpandedMetricId: (id: string | null) => void
   focusPanelRef: React.MutableRefObject<HTMLDivElement | null>
   showMissing: boolean
+  catalogFilters: CatalogAnalyticsFiltersResponse | null
+  loadingCatalogFilters: boolean
+  catalogFilterSelection: CatalogFilterSelection
+  catalogFilterCallbacks: {
+    readonly onCategoryToggle: (id: string) => void
+    readonly onSubcategoryToggle: (id: string) => void
+    readonly onBrandToggle: (id: string) => void
+    readonly onSizeToggle: (id: string) => void
+    readonly onClearAll: () => void
+  }
 }
 
 function RegistryDashboard({
@@ -377,7 +472,23 @@ function RegistryDashboard({
   setExpandedMetricId,
   focusPanelRef,
   showMissing,
+  catalogFilters,
+  loadingCatalogFilters,
+  catalogFilterSelection,
+  catalogFilterCallbacks,
 }: RegistryDashboardProps) {
+  // The union of dimensions supported by any visible live metric. If
+  // empty (e.g. weather scatter tab today), we omit the filter bar
+  // entirely rather than showing chips no card can honor.
+  const supportedDimensions = useMemo<ReadonlyArray<MetricCatalogFilterDimension>>(() => {
+    const set = new Set<MetricCatalogFilterDimension>()
+    for (const m of partitioned.real) {
+      for (const d of m.supportedCatalogFilters) set.add(d)
+    }
+    return ['category', 'subcategory', 'brand', 'size'].filter((d) =>
+      set.has(d as MetricCatalogFilterDimension),
+    ) as MetricCatalogFilterDimension[]
+  }, [partitioned.real])
   return (
     <>
       <DashboardControls
@@ -389,6 +500,11 @@ function RegistryDashboard({
         onStackModeChange={setPageStackMode}
         showAggControl={activeTab.showAggControl}
         showStackControl={activeTab.showStackControl}
+        catalogFilters={catalogFilters}
+        loadingCatalogFilters={loadingCatalogFilters}
+        catalogFilterSelection={catalogFilterSelection}
+        catalogFilterCallbacks={catalogFilterCallbacks}
+        catalogFilterDimensions={supportedDimensions}
       />
 
       {expandedMetric ? (
@@ -416,6 +532,7 @@ function RegistryDashboard({
             annotations={annotations}
             onAnnotationsChanged={onAnnotationsChanged}
             variant="expanded"
+            catalogFilterSelection={catalogFilterSelection}
           />
         </div>
       ) : null}
@@ -437,6 +554,7 @@ function RegistryDashboard({
             onAnnotationsChanged={onAnnotationsChanged}
             expandedMetricId={expandedMetricId}
             onExpand={setExpandedMetricId}
+            catalogFilterSelection={catalogFilterSelection}
           />
         ))
       )}
@@ -505,6 +623,21 @@ interface DashboardControlsProps {
   readonly showAggControl: boolean
   /** When false the stack-mode dropdown is hidden (scatter tabs etc.). */
   readonly showStackControl: boolean
+  readonly catalogFilters: CatalogAnalyticsFiltersResponse | null
+  readonly loadingCatalogFilters: boolean
+  readonly catalogFilterSelection: CatalogFilterSelection
+  readonly catalogFilterCallbacks: {
+    readonly onCategoryToggle: (id: string) => void
+    readonly onSubcategoryToggle: (id: string) => void
+    readonly onBrandToggle: (id: string) => void
+    readonly onSizeToggle: (id: string) => void
+    readonly onClearAll: () => void
+  }
+  /**
+   * Empty = hide the catalog filter chip bar entirely (no visible
+   * metric on this tab declares any supportedCatalogFilters).
+   */
+  readonly catalogFilterDimensions: ReadonlyArray<MetricCatalogFilterDimension>
 }
 
 const STACK_MODE_PAGE_LABEL: Record<MetricStackMode, string> = {
@@ -522,6 +655,11 @@ function DashboardControls({
   onStackModeChange,
   showAggControl,
   showStackControl,
+  catalogFilters,
+  loadingCatalogFilters,
+  catalogFilterSelection,
+  catalogFilterCallbacks,
+  catalogFilterDimensions,
 }: DashboardControlsProps) {
   return (
     <div className="metrics-controls">
@@ -555,6 +693,24 @@ function DashboardControls({
           )
         })}
       </div>
+
+      {catalogFilterDimensions.length > 0 ? (
+        <div className="metrics-control-group">
+          <span
+            className="subtle-copy"
+            title="Narrow time-series cards by catalog category / subcategory / brand / size. Cards whose query supports these filters re-fetch with the narrowed scope; cards that don't show a 'filters not applied' badge."
+          >
+            catalog
+          </span>
+          <CatalogFilterBar
+            filters={catalogFilters}
+            loading={loadingCatalogFilters}
+            selection={catalogFilterSelection}
+            callbacks={catalogFilterCallbacks}
+            dimensions={catalogFilterDimensions}
+          />
+        </div>
+      ) : null}
 
       {showAggControl || showStackControl ? (
         <div className="metrics-control-group">
@@ -722,6 +878,7 @@ interface MetricGroupSectionProps {
   readonly onAnnotationsChanged: () => void
   readonly expandedMetricId: string | null
   readonly onExpand: (id: string) => void
+  readonly catalogFilterSelection: CatalogFilterSelection
 }
 
 function MetricGroupSection({
@@ -734,6 +891,7 @@ function MetricGroupSection({
   onAnnotationsChanged,
   expandedMetricId,
   onExpand,
+  catalogFilterSelection,
 }: MetricGroupSectionProps) {
   return (
     <section className="metrics-group">
@@ -750,6 +908,7 @@ function MetricGroupSection({
             onAnnotationsChanged={onAnnotationsChanged}
             variant="card"
             onExpand={() => onExpand(m.id === expandedMetricId ? '' : m.id)}
+            catalogFilterSelection={catalogFilterSelection}
           />
         ))}
       </div>

@@ -14,9 +14,9 @@ import {
   type CatalogAnalyticsFiltersResponse,
   type CatalogAnalyticsPoint,
   type CatalogAnalyticsPointsResponse,
-  type CatalogFilterOption,
 } from '../../../shared/contracts/index.js'
 import { loadJson } from '../../app/fetchJson.js'
+import { CatalogFilterBar } from './CatalogFilterBar.js'
 import { HelpIcon } from './MetricChart.js'
 import { computeCompactDomain } from './scatterAutoZoom.js'
 import { useScatterZoom, type ZoomView } from './scatterZoom.js'
@@ -1680,22 +1680,26 @@ export function CatalogAnalyticsTab() {
         </div>
       </div>
 
-      <FilterBar
+      <CatalogFilterBar
         filters={filters}
         loading={loadingFilters}
-        selectedCategoryIds={selectedCategoryIds}
-        onCategoryToggle={makeSetToggler(setSelectedCategoryIds)}
-        selectedSubcategoryIds={selectedSubcategoryIds}
-        onSubcategoryToggle={makeSetToggler(setSelectedSubcategoryIds)}
-        selectedBrandIds={selectedBrandIds}
-        onBrandToggle={makeSetToggler(setSelectedBrandIds)}
-        selectedSizes={selectedSizes}
-        onSizeToggle={makeSetToggler(setSelectedSizes)}
-        onClearAll={() => {
-          setSelectedCategoryIds(new Set())
-          setSelectedSubcategoryIds(new Set())
-          setSelectedBrandIds(new Set())
-          setSelectedSizes(new Set())
+        selection={{
+          categoryIds: selectedCategoryIds,
+          subcategoryIds: selectedSubcategoryIds,
+          brandIds: selectedBrandIds,
+          sizes: selectedSizes,
+        }}
+        callbacks={{
+          onCategoryToggle: makeSetToggler(setSelectedCategoryIds),
+          onSubcategoryToggle: makeSetToggler(setSelectedSubcategoryIds),
+          onBrandToggle: makeSetToggler(setSelectedBrandIds),
+          onSizeToggle: makeSetToggler(setSelectedSizes),
+          onClearAll: () => {
+            setSelectedCategoryIds(new Set())
+            setSelectedSubcategoryIds(new Set())
+            setSelectedBrandIds(new Set())
+            setSelectedSizes(new Set())
+          },
         }}
       />
 
@@ -1780,146 +1784,6 @@ function makeSetToggler(
       return next
     })
   }
-}
-
-interface FilterBarProps {
-  filters: CatalogAnalyticsFiltersResponse | null
-  loading: boolean
-  selectedCategoryIds: ReadonlySet<string>
-  onCategoryToggle: (id: string) => void
-  selectedSubcategoryIds: ReadonlySet<string>
-  onSubcategoryToggle: (id: string) => void
-  selectedBrandIds: ReadonlySet<string>
-  onBrandToggle: (id: string) => void
-  selectedSizes: ReadonlySet<string>
-  onSizeToggle: (id: string) => void
-  onClearAll: () => void
-}
-
-function FilterBar(p: FilterBarProps) {
-  if (p.loading && !p.filters) {
-    return <p className="subtle-copy">Loading filter options…</p>
-  }
-  const f = p.filters
-  if (!f) return null
-  const anySelected =
-    p.selectedCategoryIds.size +
-      p.selectedSubcategoryIds.size +
-      p.selectedBrandIds.size +
-      p.selectedSizes.size >
-    0
-  return (
-    <div className="catalog-analytics-filterbar">
-      <FilterDropdown
-        label="Category"
-        options={f.categories}
-        selected={p.selectedCategoryIds}
-        onToggle={p.onCategoryToggle}
-      />
-      <FilterDropdown
-        label="Subcategory"
-        options={f.subcategories}
-        selected={p.selectedSubcategoryIds}
-        onToggle={p.onSubcategoryToggle}
-      />
-      <FilterDropdown
-        label="Brand"
-        options={f.brands}
-        selected={p.selectedBrandIds}
-        onToggle={p.onBrandToggle}
-      />
-      <FilterDropdown
-        label="Size"
-        options={f.sizes}
-        selected={p.selectedSizes}
-        onToggle={p.onSizeToggle}
-      />
-      {anySelected ? (
-        <button type="button" className="ghost-button" onClick={p.onClearAll}>
-          clear all filters
-        </button>
-      ) : null}
-    </div>
-  )
-}
-
-interface FilterDropdownProps {
-  label: string
-  options: ReadonlyArray<CatalogFilterOption>
-  selected: ReadonlySet<string>
-  onToggle: (id: string) => void
-}
-
-function FilterDropdown({ label, options, selected, onToggle }: FilterDropdownProps) {
-  const [open, setOpen] = useState(false)
-  const [search, setSearch] = useState('')
-  const ref = useRef<HTMLDivElement | null>(null)
-  useEffect(() => {
-    if (!open) return
-    const onClick = (e: MouseEvent) => {
-      if (!ref.current?.contains(e.target as Node)) setOpen(false)
-    }
-    document.addEventListener('mousedown', onClick)
-    return () => document.removeEventListener('mousedown', onClick)
-  }, [open])
-  const filtered = useMemo(() => {
-    const q = search.trim().toLowerCase()
-    if (!q) return options
-    return options.filter((o) => o.label.toLowerCase().includes(q))
-  }, [options, search])
-  return (
-    <div className="catalog-analytics-filterdrop" ref={ref}>
-      <button
-        type="button"
-        className={
-          selected.size > 0
-            ? 'metrics-site-chip is-active'
-            : 'metrics-site-chip'
-        }
-        onClick={() => setOpen((v) => !v)}
-        aria-expanded={open}
-      >
-        {label}
-        {selected.size > 0 ? ` (${selected.size})` : ''} ▾
-      </button>
-      {open ? (
-        <div className="catalog-analytics-filterdrop-panel">
-          <input
-            type="text"
-            placeholder={`Filter ${label.toLowerCase()}…`}
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            className="catalog-analytics-filterdrop-search"
-            autoFocus
-          />
-          <ul className="catalog-analytics-filterdrop-list">
-            {filtered.length === 0 ? (
-              <li className="subtle-copy" style={{ padding: '0.4em 0.6em' }}>
-                no matches
-              </li>
-            ) : (
-              filtered.slice(0, 200).map((o) => {
-                const active = selected.has(o.id)
-                return (
-                  <li key={o.id}>
-                    <label className="catalog-analytics-filterdrop-item">
-                      <input
-                        type="checkbox"
-                        checked={active}
-                        onChange={() => onToggle(o.id)}
-                      />{' '}
-                      {o.label}{' '}
-                      <span className="subtle-copy">(n={o.itemCount})</span>
-                    </label>
-                  </li>
-                )
-              })
-            )}
-          </ul>
-        </div>
-      ) : null}
-    </div>
-  )
 }
 
 // ============================== Scatter card ===============================

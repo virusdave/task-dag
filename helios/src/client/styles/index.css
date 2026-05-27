@@ -3081,6 +3081,24 @@ a.tree-nav-branch-label.is-link,
   font-size: 1rem;
 }
 
+/* Header badge shown next to the title when at least one selected
+   catalog filter (category / subcategory / brand / size) has a
+   dimension the metric's query doesn't honour. Makes the lack of
+   filtering visible on cards that intentionally ignore the chips. */
+.metrics-filter-na-badge {
+  display: inline-block;
+  margin-left: 0.45rem;
+  padding: 0.05rem 0.45rem;
+  border-radius: 999px;
+  background: rgba(214, 162, 39, 0.18);
+  color: #80551a;
+  font-size: 0.7rem;
+  font-weight: 600;
+  line-height: 1.3;
+  vertical-align: middle;
+  cursor: help;
+}
+
 /* Inline "!" help icon next to every chart title. Hover or focus
    reveals a popover with the metric's longer description; on mobile
    the icon is tappable and toggles the same popover. */

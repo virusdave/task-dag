@@ -19,6 +19,7 @@ import {
 } from '../../../shared/contracts/index.js'
 import { loadJson, mutateJson } from '../../app/fetchJson.js'
 
+import type { CatalogFilterSelection } from './CatalogFilterBar.js'
 import { useTimeAxis, type TimeWindow } from './TimeAxisContext.js'
 import { bucketXTicks, crossMarkerPath, formatXTick, formatYTick, niceYTicks, smoothedPath } from './gridlines.js'
 import { computeCompactDomain } from './scatterAutoZoom.js'
@@ -143,6 +144,16 @@ export interface MetricChartProps {
   readonly variant?: 'card' | 'expanded'
   /** Card-only: invoked when the operator clicks/taps to expand the metric. */
   readonly onExpand?: () => void
+  /**
+   * Shared catalog-scope filter selection (category / subcategory /
+   * brand / size). Forwarded as URL params for the dimensions this
+   * metric's `supportedCatalogFilters` declares; dimensions outside
+   * that set are omitted (no silent server-side no-op) AND, if any
+   * are selected, a "filters not applied" badge is rendered in the
+   * chart header so the operator knows this card is intentionally
+   * not narrowed.
+   */
+  readonly catalogFilterSelection?: CatalogFilterSelection
 }
 
 export function MetricChart({
@@ -154,6 +165,7 @@ export function MetricChart({
   onAnnotationsChanged,
   variant = 'expanded',
   onExpand,
+  catalogFilterSelection,
 }: MetricChartProps) {
   const sharedAxis = useTimeAxis()
   const [locked, setLocked] = useState(true)
@@ -188,6 +200,50 @@ export function MetricChart({
   const [error, setError] = useState<string | null>(null)
   const [annotateMode, setAnnotateMode] = useState(false)
 
+  // Per-dimension CSV catalog-filter params. We forward each
+  // dimension ONLY when the metric declares it in
+  // supportedCatalogFilters — the route returns 400 for unsupported
+  // dimensions and silently dropping them client-side would let the
+  // operator believe a card was narrowed when it wasn't.
+  const supportedDims = useMemo(
+    () => new Set(metric.supportedCatalogFilters),
+    [metric.supportedCatalogFilters],
+  )
+  const categoryParam =
+    supportedDims.has('category') && catalogFilterSelection
+      ? Array.from(catalogFilterSelection.categoryIds).join(',')
+      : ''
+  const subcategoryParam =
+    supportedDims.has('subcategory') && catalogFilterSelection
+      ? Array.from(catalogFilterSelection.subcategoryIds).join(',')
+      : ''
+  const brandParam =
+    supportedDims.has('brand') && catalogFilterSelection
+      ? Array.from(catalogFilterSelection.brandIds).join(',')
+      : ''
+  const sizeParam =
+    supportedDims.has('size') && catalogFilterSelection
+      ? Array.from(catalogFilterSelection.sizes).join(',')
+      : ''
+
+  // True when the operator has at least one catalog filter selected
+  // AND this metric ignores at least one of those dimensions. We
+  // render a header badge in that case so the lack of filtering is
+  // visible (rather than the chart looking unfiltered for no reason).
+  const filtersNotApplied = useMemo(() => {
+    if (!catalogFilterSelection) return false
+    const selected: Array<[keyof CatalogFilterSelection, 'category' | 'subcategory' | 'brand' | 'size']> = [
+      ['categoryIds', 'category'],
+      ['subcategoryIds', 'subcategory'],
+      ['brandIds', 'brand'],
+      ['sizes', 'size'],
+    ]
+    for (const [field, dim] of selected) {
+      if (catalogFilterSelection[field].size > 0 && !supportedDims.has(dim)) return true
+    }
+    return false
+  }, [catalogFilterSelection, supportedDims])
+
   useEffect(() => {
     const controller = new AbortController()
     const params = new URLSearchParams()
@@ -195,6 +251,10 @@ export function MetricChart({
     params.set('from', new Date(window.fromMs).toISOString())
     params.set('to', new Date(window.toMs).toISOString())
     params.set('agg', agg)
+    if (categoryParam) params.set('categoryIds', categoryParam)
+    if (subcategoryParam) params.set('subcategoryIds', subcategoryParam)
+    if (brandParam) params.set('brandIds', brandParam)
+    if (sizeParam) params.set('sizes', sizeParam)
     const url = `/api/metrics/${encodeURIComponent(metric.id)}?${params.toString()}`
 
     const timeout = globalThis.setTimeout(() => {
@@ -215,7 +275,17 @@ export function MetricChart({
       controller.abort()
       globalThis.clearTimeout(timeout)
     }
-  }, [metric.id, sitesParam, agg, window.fromMs, window.toMs])
+  }, [
+    metric.id,
+    sitesParam,
+    agg,
+    window.fromMs,
+    window.toMs,
+    categoryParam,
+    subcategoryParam,
+    brandParam,
+    sizeParam,
+  ])
 
   useEffect(() => {
     setResponse(null)
@@ -260,6 +330,14 @@ export function MetricChart({
           <h3 className="metric-chart-title">
             {metric.title}
             {metric.description ? <HelpIcon text={metric.description} /> : null}
+            {filtersNotApplied ? (
+              <span
+                className="metrics-filter-na-badge"
+                title="The catalog filters selected at the top of the page (category / subcategory / brand / size) do not apply to this metric — its query does not honour them, so the chart shows the unfiltered series."
+              >
+                catalog filters not applied
+              </span>
+            ) : null}
           </h3>
           {variant === 'expanded' && metric.description ? (
             <details className="metric-chart-desc-wrap">
