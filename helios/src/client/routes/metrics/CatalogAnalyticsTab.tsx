@@ -18,6 +18,7 @@ import {
 } from '../../../shared/contracts/index.js'
 import { loadJson } from '../../app/fetchJson.js'
 import { HelpIcon } from './MetricChart.js'
+import { computeCompactDomain } from './scatterAutoZoom.js'
 import { useScatterZoom, type ZoomView } from './scatterZoom.js'
 
 // ---------------------------------------------------------------------------
@@ -2237,20 +2238,30 @@ function CatalogScatterSvg({
 
   const { plotted, buckets, xMin, xMax, yMin, yMax, sMin, sMax, oMin, oMax } = computed
 
-  // Zoom / pan hook. Base domain is the just-computed data extent;
-  // the hook owns the visible window (`view`) and the gesture event
-  // handlers. We snap base back to `null` while loading or when the
-  // plot is empty so the hook can no-op without crashing.
-  const baseDomain: ZoomView | null = useMemo(() => {
+  // Zoom / pan hook. Base domain is the outlier-resistant compact
+  // window over the just-computed data extent (densest ~90% per axis),
+  // not the full extent — so a couple of outlier variants don't
+  // squish the rest of the cloud into a corner. Outliers stay
+  // reachable: Ctrl/⌘-wheel or pinch zoom out, or click "Show all
+  // data (N)" to swap base to the full extent. We snap to `null`
+  // while loading / empty so the hook can no-op without crashing.
+  const fullDomain: ZoomView | null = useMemo(() => {
     if (plotted.length === 0) return null
     return { xMin, xMax, yMin, yMax }
   }, [plotted.length, xMin, xMax, yMin, yMax])
+  const autoZoom = useMemo(
+    () => computeCompactDomain(plotted, { fullDomain }),
+    [plotted, fullDomain],
+  )
+  const [fitMode, setFitMode] = useState<'compact' | 'full'>('compact')
+  const baseDomain = fitMode === 'full' ? autoZoom.full : autoZoom.compact
   const zoom = useScatterZoom({
     baseDomain,
+    boundsDomain: autoZoom.full,
     svgRef,
     plot: { left: marginLeft, top: marginTop, width: plotW, height: plotH },
   })
-  const view = zoom.view ?? { xMin, xMax, yMin, yMax }
+  const view = zoom.view ?? baseDomain ?? fullDomain ?? { xMin, xMax, yMin, yMax }
   const clipId = useId()
 
   // Build a per-point radius/opacity resolver using the card-local
@@ -2596,6 +2607,28 @@ function CatalogScatterSvg({
           ) : null}
         </g>
       </svg>
+
+      {autoZoom.hiddenCount > 0 ? (
+        <button
+          type="button"
+          className={
+            fitMode === 'full' ? 'metric-chart-fit-toggle is-active' : 'metric-chart-fit-toggle'
+          }
+          onClick={() => setFitMode((m) => (m === 'compact' ? 'full' : 'compact'))}
+          aria-pressed={fitMode === 'full'}
+          title={
+            fitMode === 'compact'
+              ? `Default view hides ${autoZoom.hiddenCount} outlier point${
+                  autoZoom.hiddenCount === 1 ? '' : 's'
+                } so the rest of the data is more legible. Click to show every point.`
+              : 'Return to compact auto-zoom view (densest ~90% per axis).'
+          }
+        >
+          {fitMode === 'compact'
+            ? `Show all data (${autoZoom.hiddenCount})`
+            : 'Compact view'}
+        </button>
+      ) : null}
 
       {zoom.isZoomed ? (
         <button

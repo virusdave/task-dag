@@ -36,8 +36,23 @@ export interface ZoomView {
 }
 
 export interface UseScatterZoomArgs {
-  /** Base/full data domain. May be `null` while loading. */
+  /**
+   * Reset/default visible domain. Double-click and `resetView()`
+   * return the view to this rectangle. May be `null` while loading.
+   *
+   * When the caller uses outlier-resistant auto-zoom this is the
+   * *compact* (e.g. p5/p95) view, not the full data extent — see
+   * scatterAutoZoom.ts.
+   */
   readonly baseDomain: ZoomView | null
+  /**
+   * Maximum reachable domain for pan / wheel / pinch zoom-out.
+   * Defaults to `baseDomain` for backward compatibility. When the
+   * caller uses auto-zoom this is the *full* padded data extent,
+   * so outliers stay reachable by zooming out past the compact
+   * view.
+   */
+  readonly boundsDomain?: ZoomView | null
   /** Ref to the SVG element that captures gestures. */
   readonly svgRef: React.RefObject<SVGSVGElement | null>
   /** Plot rectangle inside the SVG viewBox (units = viewBox units). */
@@ -172,12 +187,19 @@ function viewsEqual(a: ZoomView | null, b: ZoomView | null): boolean {
 }
 
 export function useScatterZoom(args: UseScatterZoomArgs): UseScatterZoomResult {
-  const { baseDomain, svgRef, plot } = args
+  const { baseDomain, boundsDomain, svgRef, plot } = args
   const [view, setView] = useState<ZoomView | null>(baseDomain)
   const viewRef = useRef<ZoomView | null>(view)
   viewRef.current = view
+  // `baseRef` is the reset/default view (compact view when auto-zoom
+  // is on). `boundsRef` is the maximum reachable view for pan / zoom
+  // (full padded data extent when auto-zoom is on). When the caller
+  // doesn't pass an explicit `boundsDomain`, bounds == base — that
+  // matches the pre-auto-zoom behaviour exactly.
   const baseRef = useRef<ZoomView | null>(baseDomain)
   baseRef.current = baseDomain
+  const boundsRef = useRef<ZoomView | null>(boundsDomain ?? baseDomain)
+  boundsRef.current = boundsDomain ?? baseDomain
   const plotRef = useRef(plot)
   plotRef.current = plot
 
@@ -232,8 +254,8 @@ export function useScatterZoom(args: UseScatterZoomArgs): UseScatterZoomResult {
     const handler = (e: WheelEvent) => {
       if (!e.ctrlKey && !e.metaKey) return // let the page scroll normally
       const currentView = viewRef.current ?? baseRef.current
-      const base = baseRef.current
-      if (!currentView || !base) return
+      const bounds = boundsRef.current ?? baseRef.current
+      if (!currentView || !bounds) return
       const plotNow = plotRef.current
       const local = clientToSvg(svg, e.clientX, e.clientY)
       if (!local) return
@@ -254,7 +276,7 @@ export function useScatterZoom(args: UseScatterZoomArgs): UseScatterZoomResult {
       const xMax = anchorX + (currentView.xMax - anchorX) / factor
       const yMin = anchorY - (anchorY - currentView.yMin) / factor
       const yMax = anchorY + (currentView.yMax - anchorY) / factor
-      const next = clampToBase({ xMin, xMax, yMin, yMax }, base)
+      const next = clampToBase({ xMin, xMax, yMin, yMax }, bounds)
       setView(next)
       // Briefly flag a gesture so any hover tooltip is suppressed
       // during a wheel burst.
@@ -357,8 +379,8 @@ export function useScatterZoom(args: UseScatterZoomArgs): UseScatterZoomResult {
         pointerType: tracked.pointerType,
       })
       const g = gestureRef.current
-      const base = baseRef.current
-      if (!g.kind || !g.startView || !base) return
+      const bounds = boundsRef.current ?? baseRef.current
+      if (!g.kind || !g.startView || !bounds) return
 
       if (g.kind === 'pinch') {
         const [a, b] = Array.from(pointersRef.current.values())
@@ -383,7 +405,7 @@ export function useScatterZoom(args: UseScatterZoomArgs): UseScatterZoomResult {
         const xMax = midDataX + xSpan * (1 - fracX)
         const yMax = midDataY + ySpan * fracY
         const yMin = midDataY - ySpan * (1 - fracY)
-        const next = clampToBase({ xMin, xMax, yMin, yMax }, base)
+        const next = clampToBase({ xMin, xMax, yMin, yMax }, bounds)
         setView(next)
         e.preventDefault()
       } else if (g.kind === 'pan' && g.panStartSvg) {
@@ -402,7 +424,7 @@ export function useScatterZoom(args: UseScatterZoomArgs): UseScatterZoomResult {
             yMin: g.startView.yMin + dyData,
             yMax: g.startView.yMax + dyData,
           },
-          base,
+          bounds,
         )
         setView(next)
         e.preventDefault()

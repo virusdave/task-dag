@@ -3561,6 +3561,35 @@ a.tree-nav-branch-label.is-link,
   background: rgba(155, 74, 34, 0.12);
 }
 
+/* "Show all data (N)" / "Compact view" chip that toggles between the
+   outlier-resistant auto-zoom view (densest ~90% per axis) and the
+   true full data extent. Sits to the LEFT of the reset-zoom chip so
+   the two chips can coexist when the user has zoomed in past the
+   compact view. Active state (`is-active`) = "showing all data". */
+.metric-chart-fit-toggle {
+  position: absolute;
+  top: 0.45rem;
+  right: 6.6rem;
+  z-index: 1;
+  padding: 0.18rem 0.6rem;
+  font-size: 0.74rem;
+  font-weight: 600;
+  color: var(--ink, #17130f);
+  background: rgba(255, 250, 241, 0.92);
+  border: 1px solid var(--control-border);
+  border-radius: 999px;
+  cursor: pointer;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.08);
+}
+.metric-chart-fit-toggle:hover {
+  background: rgba(155, 74, 34, 0.12);
+}
+.metric-chart-fit-toggle.is-active {
+  background: rgba(31, 78, 122, 0.12);
+  border-color: rgba(31, 78, 122, 0.45);
+  color: #0e3559;
+}
+
 /* The chart wrapper needs to be a positioned containing block so the
    reset-zoom button anchors inside the card rather than the page. */
 .metric-chart-svg-wrap {

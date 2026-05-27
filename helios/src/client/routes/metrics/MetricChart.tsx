@@ -21,6 +21,7 @@ import { loadJson, mutateJson } from '../../app/fetchJson.js'
 
 import { useTimeAxis, type TimeWindow } from './TimeAxisContext.js'
 import { bucketXTicks, crossMarkerPath, formatXTick, formatYTick, niceYTicks, smoothedPath } from './gridlines.js'
+import { computeCompactDomain } from './scatterAutoZoom.js'
 import { useScatterZoom, type ZoomView } from './scatterZoom.js'
 
 // We re-fetch the annotation list after every mutation, so we don't
@@ -1415,16 +1416,28 @@ function ScatterSvg({ response, loading, error, window, interactive }: ScatterSv
   // UX are identical across every scatter on the dashboard. Hovering
   // is suppressed during gestures and clipped points are ignored.
   const svgRef = useRef<SVGSVGElement | null>(null)
-  const baseDomain: ZoomView | null = useMemo(() => {
+  // Full padded extent of the data (the legacy "base") — used as the
+  // outer pan/zoom bounds and as the "Show all data" reset target.
+  const fullDomain: ZoomView | null = useMemo(() => {
     if (points.length === 0) return null
     return { xMin, xMax, yMin, yMax }
   }, [points.length, xMin, xMax, yMin, yMax])
+  // Outlier-resistant compact default view (densest ~90% per axis).
+  // Outliers stay reachable: user can Ctrl/⌘-wheel or pinch out, or
+  // click "Show all data" to swap the base view to the full domain.
+  const autoZoom = useMemo(
+    () => computeCompactDomain(points, { fullDomain }),
+    [points, fullDomain],
+  )
+  const [fitMode, setFitMode] = useState<'compact' | 'full'>('compact')
+  const baseDomain = fitMode === 'full' ? autoZoom.full : autoZoom.compact
   const zoom = useScatterZoom({
     baseDomain,
+    boundsDomain: autoZoom.full,
     svgRef,
     plot: { left: marginLeft, top: marginTop, width: plotW, height: plotH },
   })
-  const view = zoom.view ?? { xMin, xMax, yMin, yMax }
+  const view = zoom.view ?? baseDomain ?? fullDomain ?? { xMin, xMax, yMin, yMax }
   const clipId = useId()
 
   const xScale = useCallback(
@@ -1655,6 +1668,28 @@ function ScatterSvg({ response, loading, error, window, interactive }: ScatterSv
           </text>
         ) : null}
       </svg>
+
+      {interactive && autoZoom.hiddenCount > 0 ? (
+        <button
+          type="button"
+          className={
+            fitMode === 'full' ? 'metric-chart-fit-toggle is-active' : 'metric-chart-fit-toggle'
+          }
+          onClick={() => setFitMode((m) => (m === 'compact' ? 'full' : 'compact'))}
+          aria-pressed={fitMode === 'full'}
+          title={
+            fitMode === 'compact'
+              ? `Default view hides ${autoZoom.hiddenCount} outlier point${
+                  autoZoom.hiddenCount === 1 ? '' : 's'
+                } so the rest of the data is more legible. Click to show every point.`
+              : 'Return to compact auto-zoom view (densest ~90% per axis).'
+          }
+        >
+          {fitMode === 'compact'
+            ? `Show all data (${autoZoom.hiddenCount})`
+            : 'Compact view'}
+        </button>
+      ) : null}
 
       {interactive && zoom.isZoomed ? (
         <button
