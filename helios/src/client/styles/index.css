@@ -41,8 +41,8 @@
  * Injected from helios/src/shared/ui/pricing-ladder/style.ts
  * ======================================================================== */
 .canonical-pricing-ladder {
-  --cpl-band-very-near: #1d7a4f;
-  --cpl-band-near: #3aa269;
+  --cpl-band-very-near: #22c55e;
+  --cpl-band-near: #1d7a4f;
   --cpl-band-mid: #caa53a;
   --cpl-band-far: #c87132;
   --cpl-band-statewide: #7d7569;
@@ -79,10 +79,10 @@
   border-radius: 6px;
   background: linear-gradient(
     to bottom,
-    rgba(29, 122, 79, 0.06) 0px,
+    rgba(34, 197, 94, 0.06) 0px,
+    rgba(34, 197, 94, 0.06) 28px,
     rgba(29, 122, 79, 0.06) 28px,
-    rgba(58, 162, 105, 0.06) 28px,
-    rgba(58, 162, 105, 0.06) 50px,
+    rgba(29, 122, 79, 0.06) 50px,
     rgba(202, 165, 58, 0.06) 50px,
     rgba(202, 165, 58, 0.06) 70px,
     rgba(200, 113, 50, 0.06) 70px,

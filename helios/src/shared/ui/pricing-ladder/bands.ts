@@ -39,8 +39,13 @@ export interface DistanceBand {
 }
 
 export const DISTANCE_BANDS: readonly DistanceBand[] = Object.freeze([
-  { key: 'very-near', label: '\u22642 mi',  lowerMiles: 0,  upperMiles: 2,    color: '#1d7a4f', trackTop: 18, microAdjustPx: 8 },
-  { key: 'near',      label: '2\u20135 mi',  lowerMiles: 2,  upperMiles: 5,    color: '#3aa269', trackTop: 36, microAdjustPx: 8 },
+  // Color ramp goes "bright/saturated = very close" → "darker green" →
+  // yellow → orange → grey as distance grows. A previous version had
+  // the two green bands inverted (very-near darker than near), which
+  // made the closest evidence look less prominent than the next ring
+  // out; flipping them back so the ≤2 mi dots pop visually.
+  { key: 'very-near', label: '\u22642 mi',  lowerMiles: 0,  upperMiles: 2,    color: '#22c55e', trackTop: 18, microAdjustPx: 8 },
+  { key: 'near',      label: '2\u20135 mi',  lowerMiles: 2,  upperMiles: 5,    color: '#1d7a4f', trackTop: 36, microAdjustPx: 8 },
   { key: 'mid',       label: '5\u201315 mi', lowerMiles: 5,  upperMiles: 15,   color: '#caa53a', trackTop: 56, microAdjustPx: 8 },
   { key: 'far',       label: '15\u201350 mi', lowerMiles: 15, upperMiles: 50,  color: '#c87132', trackTop: 76, microAdjustPx: 8 },
   { key: 'statewide', label: '>50 mi / unknown', lowerMiles: 50, upperMiles: null, color: '#7d7569', trackTop: 96, microAdjustPx: 4 },
