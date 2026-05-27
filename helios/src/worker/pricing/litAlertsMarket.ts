@@ -8,6 +8,8 @@ import {
   PRICING_NEAR_DISTANCE_WEIGHT,
   PRICING_POST_TAX_MULTIPLIER,
 } from '../../shared/domain/pricingGeneration.js'
+import { getPool } from '../../server/db/pool.js'
+
 import type { NormalizedCatalogGroupLiveState } from '../catalog/liveState.js'
 import { getWorkerEnv } from '../config/env.js'
 import {
@@ -297,6 +299,40 @@ export const __test__ = {
   inferComparableLaneKey,
 }
 
+interface BrandOverrideRow {
+  litalertsBrandId: number | null
+  litalertsBrandName: string | null
+}
+
+async function loadBrandOverrideForCatalogName(brandName: string): Promise<BrandOverrideRow | null> {
+  try {
+    const result = await getPool().query<{
+      litalerts_brand_id: string | null
+      litalerts_brand_name: string | null
+    }>(
+      `select litalerts_brand_id::text as litalerts_brand_id,
+              litalerts_brand_name
+         from catalog_litalerts_brand_overrides
+        where catalog_brand_name = $1
+        limit 1`,
+      [brandName],
+    )
+    const row = result.rows[0]
+    if (!row) return null
+    return {
+      litalertsBrandId: row.litalerts_brand_id != null ? Number(row.litalerts_brand_id) : null,
+      litalertsBrandName: row.litalerts_brand_name,
+    }
+  } catch (err: unknown) {
+    // Don't take pricing offline if the override table is briefly
+    // unavailable — the heuristic match below still covers ~84% of
+    // brands, which is the same behaviour we had before overrides
+    // existed.
+    console.warn(`[litAlertsMarket] override lookup failed for "${brandName}":`, err)
+    return null
+  }
+}
+
 async function resolveBrandMatch(brandName: string): Promise<BrandMatch | null> {
   const normalizedTarget = normalizeBrandKey(brandName)
   const normalizedTargetWithoutParenthetical = stripParentheticalSuffix(normalizedTarget)
@@ -306,6 +342,35 @@ async function resolveBrandMatch(brandName: string): Promise<BrandMatch | null> 
   }
 
   const pendingMatch = (async (): Promise<BrandMatch | null> => {
+    // 1. Operator-confirmed override (`catalog_litalerts_brand_overrides`)
+    //    wins over every heuristic. The /catalog/brand-mapping page
+    //    persists exactly one row per `catalog_groups.brand_name`, so
+    //    looking it up by the *raw* (un-normalized) brand string is the
+    //    correct join — that's the same key the page uses on write.
+    //    A row with `litalerts_brand_id IS NULL` is the explicit
+    //    "no LitAlerts equivalent" verdict; respect it by returning
+    //    null without falling through to the heuristics, otherwise
+    //    we'd undo the operator's review.
+    const override = await loadBrandOverrideForCatalogName(brandName)
+    if (override) {
+      if (override.litalertsBrandId === null) {
+        return null
+      }
+      const brands = await listBrandsForState(LIT_ALERTS_PARTNER_STATE_CODE)
+      const overriden = brands.find((brand) => brand.id === override.litalertsBrandId)
+      if (overriden) {
+        return { brandId: overriden.id, brandName: overriden.name }
+      }
+      // Override pins a brand_id that the partner API no longer returns
+      // for NY (brand deleted / moved out of state). Fall through to
+      // heuristics rather than silently disabling pricing.
+      console.warn(
+        `[litAlertsMarket] override for "${brandName}" -> brand_id=${override.litalertsBrandId} ` +
+          `(${override.litalertsBrandName ?? '?'}) is no longer in the LitAlerts NY brand list; ` +
+          `falling back to heuristic match`,
+      )
+    }
+
     const brands = await listBrandsForState(LIT_ALERTS_PARTNER_STATE_CODE)
     const aliasTarget = BRAND_MANUFACTURER_ALIASES.get(normalizedTarget)
     if (aliasTarget) {
