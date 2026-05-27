@@ -35,6 +35,7 @@ import {
 } from '../../server/pendingPurchases/pendingPurchasePacketImport.js'
 import { getWorkerEnv } from '../config/env.js'
 import type { NormalizedCatalogGroupLiveState } from '../catalog/liveState.js'
+import { isRetryableWorkerError } from '../runtime/errors.js'
 import type { JobHandlerContext } from '../runtime/jobRegistry.js'
 import { readSweedDealerContext } from '../sweed/client.js'
 import {
@@ -734,6 +735,19 @@ async function loadPendingPurchasePricingSupport(input: {
       marketSearchTerm: marketContext.searchTerm,
     }
   } catch (error) {
+    // Transient transport / dependency-unavailable failures from the
+    // Lit Alerts partner API must NEVER silently degrade the row to
+    // `marketAvailability='error'` with empty evidence — that ships a
+    // packet with no comps, which is exactly the "timed out, gave up"
+    // outcome we have explicitly ruled unacceptable. Bubble them up
+    // so the worker loop's per-job retry (with exponential backoff)
+    // re-runs the whole packet generation against a healthy upstream.
+    // The partner client itself already does an inline retry loop
+    // (`PARTNER_API_MAX_TRANSPORT_ATTEMPTS`), so anything still
+    // throwing here has already survived several short retries.
+    if (isRetryableWorkerError(error)) {
+      throw error
+    }
     const message = error instanceof Error ? error.message : 'Unknown Lit Alerts pricing error.'
     return {
       evidence: null,

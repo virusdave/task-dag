@@ -11,6 +11,17 @@ const PARTNER_API_TOKEN_ENV_NAME = 'LITALERTS_PARTNER_API_TOKEN'
 const PARTNER_API_TOKEN_FILE_PATH = join(homedir(), '.secret', 'litalerts', 'partner-api-token')
 const PARTNER_API_REQUEST_TIMEOUT_MS = 30000
 const PARTNER_API_CACHE_TTL_MS = 10 * 60 * 1000
+/**
+ * Transient transport failures (timeouts, 5xx, 429, abort, socket
+ * hang-up) get an inline retry-with-backoff loop here so a single
+ * blip from the partner API doesn't fail the whole packet-generation
+ * job. After `PARTNER_API_MAX_TRANSPORT_ATTEMPTS` retries we still
+ * surface a `RetryableWorkerError` so the queue's own per-job retry
+ * (with much longer backoff) can pick it up. "timed out, gave up"
+ * is never an acceptable end state for live operator-driven work.
+ */
+const PARTNER_API_MAX_TRANSPORT_ATTEMPTS = 4
+const PARTNER_API_RETRY_BASE_DELAY_MS = 750
 
 const BrandSchema = z.object({
   id: z.coerce.number().int().positive(),
@@ -204,6 +215,48 @@ async function fetchPartnerJson(path: string): Promise<unknown> {
   const url = `${PARTNER_API_BASE_URL}${path}`
   const requestLabel = `Lit Alerts partner ${path}`
 
+  // Inline retry-with-exponential-backoff loop. Every transient
+  // condition (timeout, 5xx, 429, abort, socket hang-up, malformed
+  // JSON body) used to surface as a single `RetryableWorkerError`,
+  // which was correct in principle but, in practice, the caller in
+  // `generatePendingPurchasePacketJob` was swallowing every error
+  // into `marketAvailability='error'` for the row and shipping the
+  // packet with empty market evidence. We now retry inline so a
+  // single blip never escalates that far. If we exhaust every
+  // attempt we still throw `RetryableWorkerError` so the worker
+  // loop's outer per-job retry can pick up the slack.
+  let lastTransientError: RetryableWorkerError | null = null
+  for (let attempt = 1; attempt <= PARTNER_API_MAX_TRANSPORT_ATTEMPTS; attempt++) {
+    try {
+      return await attemptFetchPartnerJson({ token, url, requestLabel })
+    } catch (error) {
+      if (error instanceof RetryableWorkerError) {
+        lastTransientError = error
+        if (attempt < PARTNER_API_MAX_TRANSPORT_ATTEMPTS) {
+          const delayMs = PARTNER_API_RETRY_BASE_DELAY_MS * 2 ** (attempt - 1)
+          console.warn(
+            `[litalerts.partnerClient] ${requestLabel} attempt ${attempt}/${PARTNER_API_MAX_TRANSPORT_ATTEMPTS} ` +
+              `failed transiently (${error.message}); retrying in ${delayMs}ms`,
+          )
+          await sleep(delayMs)
+          continue
+        }
+      }
+      throw error
+    }
+  }
+  // Unreachable in practice (the loop either returns or throws),
+  // but TS needs a terminal throw for narrowing.
+  throw lastTransientError ??
+    new RetryableWorkerError(`${requestLabel} exhausted ${PARTNER_API_MAX_TRANSPORT_ATTEMPTS} attempts with no result.`)
+}
+
+async function attemptFetchPartnerJson(input: {
+  requestLabel: string
+  token: string
+  url: string
+}): Promise<unknown> {
+  const { requestLabel, token, url } = input
   let response: Response
   try {
     response = await fetch(url, {
@@ -237,6 +290,10 @@ async function fetchPartnerJson(path: string): Promise<unknown> {
   } catch {
     throw new RetryableWorkerError(`${requestLabel} returned invalid JSON: ${truncate(responseText)}`)
   }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
 function isRetryableStatus(status: number): boolean {
