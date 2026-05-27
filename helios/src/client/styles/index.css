@@ -3376,3 +3376,12 @@ a.tree-nav-branch-label.is-link,
 .catalog-analytics-pointcount {
   margin: 0.4rem 0 0.2rem;
 }
+
+.catalog-analytics-subtabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin: 0.4rem 0 0.8rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.08);
+}

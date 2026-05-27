@@ -425,13 +425,23 @@ function discountBand(v: number | null): string {
   return '50%+'
 }
 function gmBand(v: number | null): string {
+  // Higher resolution around the operator's "decision zone" (40–65%).
+  // The discount-cliff conversation usually sits inside this band, so a
+  // 5-point grain there is much more useful than the coarse buckets we
+  // started with.
   if (v == null) return '(no GM)'
   if (v < 0) return 'negative GM'
   if (v < 10) return '0–10%'
-  if (v < 25) return '10–25%'
-  if (v < 40) return '25–40%'
-  if (v < 55) return '40–55%'
-  return '55%+'
+  if (v < 20) return '10–20%'
+  if (v < 30) return '20–30%'
+  if (v < 40) return '30–40%'
+  if (v < 45) return '40–45%'
+  if (v < 50) return '45–50%'
+  if (v < 55) return '50–55%'
+  if (v < 60) return '55–60%'
+  if (v < 65) return '60–65%'
+  if (v < 75) return '65–75%'
+  return '75%+'
 }
 
 const COLOUR_BY: ReadonlyArray<ColourByDef> = [
@@ -449,6 +459,92 @@ const COLOUR_BY: ReadonlyArray<ColourByDef> = [
   },
   { id: 'gmBand', label: 'effective GM band', bucket: (p) => gmBand(p.gmPercent) },
 ]
+
+// ============================ Size-by (per-dot) ============================
+//
+// Operators kept asking us to "fit more information on the graph", so each
+// scatter dot can be sized by an additional dimension. The renderer scales
+// the radius between MIN_R and MAX_R using sqrt() of the value (since
+// visual weight is area, not linear). 'none' means uniform 3.5px dots.
+
+type SizeByKey =
+  | 'none'
+  | 'unitsSold'
+  | 'revenueDollars'
+  | 'marginDollars'
+  | 'invoiceCount'
+  | 'currentQty'
+  | 'daysWithSales'
+  | 'marginVelocity'
+
+interface SizeByDef {
+  readonly id: SizeByKey
+  readonly label: string
+  readonly value: (p: CatalogAnalyticsPoint, ctx: AxisCtx) => number | null
+}
+
+const SIZE_BY: ReadonlyArray<SizeByDef> = [
+  { id: 'none', label: 'uniform', value: () => null },
+  { id: 'unitsSold', label: 'units sold', value: (p) => p.unitsSold },
+  { id: 'revenueDollars', label: 'revenue $', value: (p) => p.revenueDollars },
+  { id: 'marginDollars', label: 'margin $', value: (p) => p.marginDollars },
+  { id: 'invoiceCount', label: 'invoice count', value: (p) => p.invoiceCount },
+  { id: 'currentQty', label: 'on-hand qty', value: (p) => p.currentQty },
+  { id: 'daysWithSales', label: 'days with sales', value: (p) => p.daysWithSales },
+  {
+    id: 'marginVelocity',
+    label: 'margin $/day',
+    value: (p) => p.marginVelocityDollarsPerDay,
+  },
+]
+
+const SIZE_BY_BY_ID = new Map(SIZE_BY.map((s) => [s.id, s]))
+function sizeBy(id: SizeByKey): SizeByDef {
+  return SIZE_BY_BY_ID.get(id) ?? SIZE_BY[0]!
+}
+
+// ============================ Opacity-by (per-dot) =========================
+//
+// Pairs with size-by so the operator can cram a third (or fourth) data
+// channel onto the scatter — e.g. "color by brand, size by margin $,
+// fade by sales-day coverage" makes promo-driven blips visibly fainter
+// than organic staples.
+
+type OpacityByKey =
+  | 'none'
+  | 'salesDayCoverage'
+  | 'invoiceCount'
+  | 'unitsSold'
+  | 'gmPercent'
+  | 'discountDepth'
+
+interface OpacityByDef {
+  readonly id: OpacityByKey
+  readonly label: string
+  readonly value: (p: CatalogAnalyticsPoint, ctx: AxisCtx) => number | null
+}
+
+const OPACITY_BY: ReadonlyArray<OpacityByDef> = [
+  { id: 'none', label: 'uniform', value: () => null },
+  {
+    id: 'salesDayCoverage',
+    label: 'sales-day coverage %',
+    value: salesDayCoveragePercent,
+  },
+  { id: 'invoiceCount', label: 'invoice count', value: (p) => p.invoiceCount },
+  { id: 'unitsSold', label: 'units sold', value: (p) => p.unitsSold },
+  { id: 'gmPercent', label: 'effective GM %', value: (p) => p.gmPercent },
+  {
+    id: 'discountDepth',
+    label: 'discount depth %',
+    value: (p) => discountDepthPercent(p),
+  },
+]
+
+const OPACITY_BY_BY_ID = new Map(OPACITY_BY.map((o) => [o.id, o]))
+function opacityBy(id: OpacityByKey): OpacityByDef {
+  return OPACITY_BY_BY_ID.get(id) ?? OPACITY_BY[0]!
+}
 
 // Same palette as the line chart so the look is consistent across the
 // dashboard. (Picked for legibility on the light theme.)
@@ -481,6 +577,10 @@ interface ScatterCardConfig {
   readonly defaultX: string
   readonly defaultY: string
   readonly defaultColourBy: ColourByKey
+  /** Per-dot radius encoding (optional; defaults to uniform). */
+  readonly defaultSizeBy?: SizeByKey
+  /** Per-dot opacity encoding (optional; defaults to uniform). */
+  readonly defaultOpacityBy?: OpacityByKey
   /**
    * Optional reference annotation rendered on the plot.
    *   - 'diagonal'  : y = x line in plot-space (sensible when X / Y
@@ -491,25 +591,33 @@ interface ScatterCardConfig {
    */
   readonly referenceLine?: 'diagonal' | 'unit-y' | 'unit-x'
   /**
-   * Section header this card appears under. Cards with the same
-   * `section` are grouped together and rendered with a section
-   * heading above them. Defaults to "Core merchandising".
+   * Sub-tab this card lives under. Cards with the same `section`
+   * are grouped onto the same sub-tab inside the catalog analytics
+   * page. Defaults to "Core merchandising".
    */
   readonly section?: string
 }
 
-// Sections in display order. Each card carries its own `section`; cards
+// Sub-tabs in display order. Each card carries its own `section`; cards
 // without a section default to "Core merchandising".
 const SECTION_CORE = 'Core merchandising'
-const SECTION_PROMO = 'List vs effective (promo erosion)'
-const SECTION_COHORT = 'Cohort-relative (vs same cat × sub × size peers)'
-const SECTION_BASKET = 'Basket / inventory health'
+const SECTION_PROMO = 'Promo erosion'
+const SECTION_COHORT = 'Cohort-relative'
+const SECTION_BASKET = 'Basket / inventory'
+const SECTION_PROFIT = 'Profit engine'
+const SECTION_POTENCY = 'Cannabinoid economics'
+const SECTION_DEMAND = 'Demand quality'
+const SECTION_TRAPS = 'Inventory traps'
 
 const SECTIONS_IN_ORDER: ReadonlyArray<string> = [
   SECTION_CORE,
+  SECTION_PROFIT,
   SECTION_PROMO,
   SECTION_COHORT,
+  SECTION_POTENCY,
+  SECTION_DEMAND,
   SECTION_BASKET,
+  SECTION_TRAPS,
 ]
 
 const DEFAULT_CARDS: ReadonlyArray<ScatterCardConfig> = [
@@ -728,6 +836,432 @@ const DEFAULT_CARDS: ReadonlyArray<ScatterCardConfig> = [
     defaultColourBy: 'subcategory',
     section: SECTION_BASKET,
   },
+
+  // ----- Profit engine -----
+  //
+  // These views answer "what is actually paying the rent right now?"
+  // Most use revenue / margin totals or velocities so size-by/opacity-by
+  // can encode an additional volume signal without burying the geometry.
+  {
+    id: 'margin-velocity-vs-revenue',
+    title: 'Margin $/day vs revenue ($ window)',
+    description:
+      'Profit engine map. Top-right = both high-revenue AND high-profit. Bottom-right = high revenue but thin margin (volume burners).',
+    defaultX: 'revenueDollars',
+    defaultY: 'marginVelocityDollarsPerDay',
+    defaultColourBy: 'subcategory',
+    defaultSizeBy: 'unitsSold',
+    defaultOpacityBy: 'salesDayCoverage',
+    section: SECTION_PROFIT,
+  },
+  {
+    id: 'margin-velocity-vs-units',
+    title: 'Margin $/day vs units sold',
+    description:
+      'Throughput-to-profit translation. Slope shows realized margin per unit; outliers above the cloud earn outsized margin per unit.',
+    defaultX: 'unitsSold',
+    defaultY: 'marginVelocityDollarsPerDay',
+    defaultColourBy: 'gmBand',
+    defaultSizeBy: 'revenueDollars',
+    section: SECTION_PROFIT,
+  },
+  {
+    id: 'margin-velocity-vs-invoice-count',
+    title: 'Margin $/day vs invoice count',
+    description:
+      'How many baskets does it take to make a dollar? Tight cloud = consistent contribution per basket.',
+    defaultX: 'invoiceCount',
+    defaultY: 'marginVelocityDollarsPerDay',
+    defaultColourBy: 'brand',
+    defaultSizeBy: 'marginDollars',
+    section: SECTION_PROFIT,
+  },
+  {
+    id: 'revenue-vs-gm-pct',
+    title: 'Revenue ($) vs effective GM %',
+    description:
+      'Where does the chain make money? Top-right = big-revenue, healthy-margin SKUs. Bottom-right = small but very high-margin niche items.',
+    defaultX: 'revenueDollars',
+    defaultY: 'gmPercent',
+    defaultColourBy: 'subcategory',
+    defaultSizeBy: 'marginDollars',
+    defaultOpacityBy: 'salesDayCoverage',
+    section: SECTION_PROFIT,
+  },
+  {
+    id: 'revenue-vs-margin',
+    title: 'Revenue ($) vs margin ($) — both window totals',
+    description:
+      'Slope = realized GM%. SKUs above the cloud convert disproportionately well; below = revenue without profit.',
+    defaultX: 'revenueDollars',
+    defaultY: 'marginDollars',
+    defaultColourBy: 'gmBand',
+    defaultSizeBy: 'unitsSold',
+    section: SECTION_PROFIT,
+  },
+  {
+    id: 'revenue-vs-velocity',
+    title: 'Revenue ($) vs sales velocity (units/day)',
+    description:
+      'Price-tier dependence of throughput. Cheap things rack up units; premium things rack up dollars without comparable unit pace.',
+    defaultX: 'salesVelocityUnitsPerDay',
+    defaultY: 'revenueDollars',
+    defaultColourBy: 'priceBand',
+    defaultSizeBy: 'marginDollars',
+    section: SECTION_PROFIT,
+  },
+  {
+    id: 'margin-vs-invoice-count',
+    title: 'Margin ($ window) vs invoice count',
+    description:
+      'A linear cloud means margin scales with reach; outliers above earn more per basket than peers.',
+    defaultX: 'invoiceCount',
+    defaultY: 'marginDollars',
+    defaultColourBy: 'subcategory',
+    defaultSizeBy: 'unitsSold',
+    section: SECTION_PROFIT,
+  },
+  {
+    id: 'margin-per-invoice-vs-invoice-count',
+    title: 'Margin $/invoice vs invoice count',
+    description:
+      'Premium-basket vs frequency view. Top-right = wide-reach premium contributors; bottom-right = high reach, thin contribution.',
+    defaultX: 'invoiceCount',
+    defaultY: 'marginPerInvoiceDollars',
+    defaultColourBy: 'gmBand',
+    defaultSizeBy: 'marginDollars',
+    section: SECTION_PROFIT,
+  },
+  {
+    id: 'units-vs-margin',
+    title: 'Units sold vs margin ($ window)',
+    description:
+      'Slope shows margin per unit; the higher above the cloud, the more profit each unit contributes.',
+    defaultX: 'unitsSold',
+    defaultY: 'marginDollars',
+    defaultColourBy: 'priceBand',
+    defaultOpacityBy: 'salesDayCoverage',
+    section: SECTION_PROFIT,
+  },
+
+  // ----- Cannabinoid economics -----
+  //
+  // Potency vs price/margin views. Defaults all set so size-by/opacity-by
+  // can carry volume signal without making low-volume noise dominate.
+  {
+    id: 'thc-vs-gm-pct',
+    title: 'THC % vs effective GM %',
+    description:
+      'Are we capturing margin on potency or giving it back through promos? Top-right = potency premium realized.',
+    defaultX: 'labThcPct',
+    defaultY: 'gmPercent',
+    defaultColourBy: 'subcategory',
+    defaultSizeBy: 'marginDollars',
+    defaultOpacityBy: 'salesDayCoverage',
+    section: SECTION_POTENCY,
+  },
+  {
+    id: 'thc-vs-price-realization',
+    title: 'THC % vs price realization %',
+    description:
+      'High-potency SKUs that nonetheless need deep promos to move show up bottom-right and are pricing-power suspects.',
+    defaultX: 'labThcPct',
+    defaultY: 'priceRealizationPercent',
+    defaultColourBy: 'brand',
+    defaultSizeBy: 'unitsSold',
+    section: SECTION_POTENCY,
+  },
+  {
+    id: 'thc-vs-effective-price-index',
+    title: 'THC % vs effective price index (cohort)',
+    description:
+      'Within cohort, do higher-potency SKUs realize a price premium? Top-right = yes; flat/negative slope = potency is not currently being paid for.',
+    defaultX: 'labThcPct',
+    defaultY: 'effectivePriceIndex',
+    defaultColourBy: 'subcategory',
+    referenceLine: 'unit-y',
+    defaultSizeBy: 'unitsSold',
+    section: SECTION_POTENCY,
+  },
+  {
+    id: 'thc-vs-revenue',
+    title: 'THC % vs revenue ($ window)',
+    description:
+      'How much revenue is concentrated at which potency? Useful for spotting whether assortment depth matches consumer interest.',
+    defaultX: 'labThcPct',
+    defaultY: 'revenueDollars',
+    defaultColourBy: 'subcategory',
+    defaultSizeBy: 'unitsSold',
+    section: SECTION_POTENCY,
+  },
+  {
+    id: 'thc-vs-discount-depth',
+    title: 'THC % vs discount depth %',
+    description:
+      'Are we over-discounting strong-potency stock? Top-right = high potency AND deeply discounted — sometimes a leakage signal, sometimes a clearance signal.',
+    defaultX: 'labThcPct',
+    defaultY: 'discountDepthPercent',
+    defaultColourBy: 'brand',
+    defaultSizeBy: 'unitsSold',
+    section: SECTION_POTENCY,
+  },
+  {
+    id: 'cbd-vs-gm-pct',
+    title: 'CBD % vs effective GM %',
+    description:
+      'CBD-leaning SKUs often serve a different customer; margin profile here helps see whether the segment is paying its way.',
+    defaultX: 'labCbdPct',
+    defaultY: 'gmPercent',
+    defaultColourBy: 'subcategory',
+    defaultSizeBy: 'marginDollars',
+    section: SECTION_POTENCY,
+  },
+  {
+    id: 'cbd-vs-velocity',
+    title: 'CBD % vs sales velocity',
+    description:
+      'Throughput by CBD presence. Tells you whether the high-CBD shelf is doing real work or just sitting.',
+    defaultX: 'labCbdPct',
+    defaultY: 'salesVelocityUnitsPerDay',
+    defaultColourBy: 'brand',
+    defaultSizeBy: 'revenueDollars',
+    section: SECTION_POTENCY,
+  },
+  {
+    id: 'thc-vs-cost',
+    title: 'THC % vs wholesale cost',
+    description:
+      'Where is potency embedded in cost? Steep slope = vendors are charging us for potency; flat = we have headroom.',
+    defaultX: 'labThcPct',
+    defaultY: 'wholesaleCostDollars',
+    defaultColourBy: 'brand',
+    defaultSizeBy: 'currentQty',
+    section: SECTION_POTENCY,
+  },
+  {
+    id: 'thc-vs-list-price',
+    title: 'THC % vs list price',
+    description:
+      'Pricing-discipline view: are our shelf prices already structured to charge for potency?',
+    defaultX: 'labThcPct',
+    defaultY: 'listPriceDollars',
+    defaultColourBy: 'subcategory',
+    defaultSizeBy: 'unitsSold',
+    section: SECTION_POTENCY,
+  },
+
+  // ----- Demand quality -----
+  //
+  // "Is this SKU's demand healthy?" — durability of sales across the
+  // window, basket behaviour, invoice-count vs unit-pace shape.
+  {
+    id: 'coverage-vs-velocity',
+    title: 'Sales-day coverage % vs sales velocity',
+    description:
+      'Steady earners pile up at the upper-right (sells most days, sells fast). Bottom-right is bursty / promo-driven; top-left is consistent low pace.',
+    defaultX: 'salesDayCoveragePercent',
+    defaultY: 'salesVelocityUnitsPerDay',
+    defaultColourBy: 'subcategory',
+    defaultSizeBy: 'marginDollars',
+    section: SECTION_DEMAND,
+  },
+  {
+    id: 'coverage-vs-invoices',
+    title: 'Sales-day coverage % vs invoice count',
+    description:
+      'Distinguishes steady-but-shallow from bursty-but-broad demand patterns.',
+    defaultX: 'salesDayCoveragePercent',
+    defaultY: 'invoiceCount',
+    defaultColourBy: 'gmBand',
+    defaultSizeBy: 'revenueDollars',
+    section: SECTION_DEMAND,
+  },
+  {
+    id: 'coverage-vs-units',
+    title: 'Sales-day coverage % vs units sold',
+    description:
+      'Spot SKUs that sell a lot in a few days (clearance, drops) vs spread evenly across the window.',
+    defaultX: 'salesDayCoveragePercent',
+    defaultY: 'unitsSold',
+    defaultColourBy: 'discountBand',
+    defaultSizeBy: 'marginDollars',
+    section: SECTION_DEMAND,
+  },
+  {
+    id: 'coverage-vs-gm-pct',
+    title: 'Sales-day coverage % vs effective GM %',
+    description:
+      'Reliable demand at healthy margin is the most valuable shelf-space; that quadrant is top-right.',
+    defaultX: 'salesDayCoveragePercent',
+    defaultY: 'gmPercent',
+    defaultColourBy: 'subcategory',
+    defaultSizeBy: 'marginDollars',
+    section: SECTION_DEMAND,
+  },
+  {
+    id: 'invoices-vs-units-per-invoice',
+    title: 'Invoice count vs units per invoice',
+    description:
+      'Distinguishes wide reach vs basket-multiplier behaviour. SKUs in the top-right move via multi-buy promos.',
+    defaultX: 'invoiceCount',
+    defaultY: 'unitsPerInvoice',
+    defaultColourBy: 'discountBand',
+    defaultSizeBy: 'unitsSold',
+    section: SECTION_DEMAND,
+  },
+  {
+    id: 'invoices-vs-units',
+    title: 'Invoice count vs units sold',
+    description:
+      'Above the diagonal = repeated multi-unit baskets; near the diagonal = single-unit baskets.',
+    defaultX: 'invoiceCount',
+    defaultY: 'unitsSold',
+    defaultColourBy: 'subcategory',
+    referenceLine: 'diagonal',
+    defaultSizeBy: 'marginDollars',
+    section: SECTION_DEMAND,
+  },
+  {
+    id: 'units-per-invoice-vs-realization',
+    title: 'Units per invoice vs price realization %',
+    description:
+      'Spot promo-bundled SKUs (high units/invoice + low realization) vs healthy multi-buys (high units/invoice + high realization).',
+    defaultX: 'unitsPerInvoice',
+    defaultY: 'priceRealizationPercent',
+    defaultColourBy: 'brand',
+    defaultSizeBy: 'marginDollars',
+    section: SECTION_DEMAND,
+  },
+  {
+    id: 'units-per-invoice-vs-gm',
+    title: 'Units per invoice vs effective GM %',
+    description:
+      'High basket multiplier + strong GM% = the holy grail; high basket multiplier + thin GM = promo lever pulled too hard.',
+    defaultX: 'unitsPerInvoice',
+    defaultY: 'gmPercent',
+    defaultColourBy: 'discountBand',
+    defaultSizeBy: 'marginDollars',
+    section: SECTION_DEMAND,
+  },
+
+  // ----- Inventory traps -----
+  //
+  // Surface dead stock, over-stocked slow movers, and on-hand mismatches
+  // with realized margin/velocity.
+  {
+    id: 'wos-vs-velocity',
+    title: 'Weeks of supply vs sales velocity',
+    description:
+      'Bottom-right = enormous backstock for trivial pace (markdown candidates). Top-left = stockouts incoming.',
+    defaultX: 'weeksOfSupplyOnHand',
+    defaultY: 'salesVelocityUnitsPerDay',
+    defaultColourBy: 'subcategory',
+    defaultSizeBy: 'currentQty',
+    section: SECTION_TRAPS,
+  },
+  {
+    id: 'wos-vs-gm',
+    title: 'Weeks of supply vs effective GM %',
+    description:
+      'Bottom-right = deep stock with no margin to protect — clear the deck. Top-right = deep stock at healthy margin (consider buy-cycle).',
+    defaultX: 'weeksOfSupplyOnHand',
+    defaultY: 'gmPercent',
+    defaultColourBy: 'brand',
+    defaultSizeBy: 'currentQty',
+    section: SECTION_TRAPS,
+  },
+  {
+    id: 'wos-vs-realization',
+    title: 'Weeks of supply vs price realization %',
+    description:
+      'Identify SKUs that are deeply stocked AND already being discounted hard — the markdown is not yet working.',
+    defaultX: 'weeksOfSupplyOnHand',
+    defaultY: 'priceRealizationPercent',
+    defaultColourBy: 'subcategory',
+    defaultSizeBy: 'currentQty',
+    section: SECTION_TRAPS,
+  },
+  {
+    id: 'onhand-vs-margin-velocity',
+    title: 'On-hand qty vs margin $/day',
+    description:
+      'Quadrant view: low stock + high margin/day = reorder; high stock + low margin/day = freeze / markdown.',
+    defaultX: 'currentQty',
+    defaultY: 'marginVelocityDollarsPerDay',
+    defaultColourBy: 'gmBand',
+    defaultSizeBy: 'marginDollars',
+    section: SECTION_TRAPS,
+  },
+  {
+    id: 'onhand-vs-invoices',
+    title: 'On-hand qty vs invoice count',
+    description:
+      'How many actual customers does the current inventory pile serve? Bottom-right = a lot of stock, very few customers.',
+    defaultX: 'currentQty',
+    defaultY: 'invoiceCount',
+    defaultColourBy: 'subcategory',
+    defaultSizeBy: 'marginDollars',
+    section: SECTION_TRAPS,
+  },
+  {
+    id: 'onhand-vs-coverage',
+    title: 'On-hand qty vs sales-day coverage %',
+    description:
+      'Bottom-right = a lot of stock that almost never sells a day in the window. Top-left = scarce SKU but moves every day.',
+    defaultX: 'currentQty',
+    defaultY: 'salesDayCoveragePercent',
+    defaultColourBy: 'brand',
+    defaultSizeBy: 'marginDollars',
+    section: SECTION_TRAPS,
+  },
+
+  // ----- Cohort outliers (extending existing section) -----
+  {
+    id: 'gm-delta-vs-price-index',
+    title: 'GM% Δ vs price index (cohort)',
+    description:
+      'Top-right = premium-priced AND higher-margin than peers (pricing power realized). Bottom-right = priced premium but margin worse than peers (deal-driven leakage).',
+    defaultX: 'effectivePriceIndex',
+    defaultY: 'gmPercentIndex',
+    defaultColourBy: 'subcategory',
+    referenceLine: 'unit-x',
+    defaultSizeBy: 'marginDollars',
+    section: SECTION_COHORT,
+  },
+  {
+    id: 'gm-delta-vs-effective-price',
+    title: 'GM% Δ vs effective OTD price',
+    description:
+      'Where in the absolute price ladder do we beat / underperform peers on margin?',
+    defaultX: 'otdUnitPriceDollars',
+    defaultY: 'gmPercentIndex',
+    defaultColourBy: 'subcategory',
+    defaultSizeBy: 'marginDollars',
+    section: SECTION_COHORT,
+  },
+  {
+    id: 'velocity-index-vs-coverage',
+    title: 'Velocity index vs sales-day coverage %',
+    description:
+      'Reliable out-performers (top-right) vs bursty out-performers (top-left). Bottom-left = drop the SKU.',
+    defaultX: 'salesDayCoveragePercent',
+    defaultY: 'velocityIndex',
+    defaultColourBy: 'subcategory',
+    referenceLine: 'unit-y',
+    defaultSizeBy: 'marginDollars',
+    section: SECTION_COHORT,
+  },
+  {
+    id: 'price-index-vs-effective-gm',
+    title: 'Price index vs effective GM %',
+    description:
+      'Are we getting paid for premium positioning? Top-right = yes. Bottom-right = we are priced premium and still bleeding margin.',
+    defaultX: 'effectivePriceIndex',
+    defaultY: 'gmPercent',
+    defaultColourBy: 'subcategory',
+    defaultSizeBy: 'marginDollars',
+    section: SECTION_COHORT,
+  },
 ]
 
 function sectionOf(c: ScatterCardConfig): string {
@@ -805,6 +1339,13 @@ export function CatalogAnalyticsTab() {
 
   // -------- Page-wide chart controls --------
   const [pageColourBy, setPageColourBy] = useState<ColourByKey | 'per-chart'>('per-chart')
+  const [pageSizeBy, setPageSizeBy] = useState<SizeByKey | 'per-chart'>('per-chart')
+  const [pageOpacityBy, setPageOpacityBy] = useState<OpacityByKey | 'per-chart'>(
+    'per-chart',
+  )
+
+  // -------- Active sub-tab inside the catalog analytics page --------
+  const [activeSection, setActiveSection] = useState<string>(SECTION_CORE)
 
   // -------- Data --------
   const [pointsResp, setPointsResp] = useState<CatalogAnalyticsPointsResponse | null>(null)
@@ -1037,6 +1578,36 @@ export function CatalogAnalyticsTab() {
               ))}
             </select>
           </label>
+          <label>
+            size by{' '}
+            <select
+              value={pageSizeBy}
+              onChange={(e) => setPageSizeBy(e.target.value as SizeByKey | 'per-chart')}
+            >
+              <option value="per-chart">per chart</option>
+              {SIZE_BY.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            opacity by{' '}
+            <select
+              value={pageOpacityBy}
+              onChange={(e) =>
+                setPageOpacityBy(e.target.value as OpacityByKey | 'per-chart')
+              }
+            >
+              <option value="per-chart">per chart</option>
+              {OPACITY_BY.map((o) => (
+                <option key={o.id} value={o.id}>
+                  {o.label}
+                </option>
+              ))}
+            </select>
+          </label>
         </div>
       </div>
 
@@ -1069,23 +1640,60 @@ export function CatalogAnalyticsTab() {
         </p>
       )}
 
-      {sectionedCards.map(({ section, cards }) => (
-        <div key={section} className="catalog-analytics-section">
-          <h3 className="catalog-analytics-section-title">{section}</h3>
-          <div className="catalog-analytics-grid">
-            {cards.map((cfg) => (
-              <ScatterCard
-                key={cfg.id}
-                config={cfg}
-                points={points}
-                pageColourBy={pageColourBy}
-                loading={loadingPoints}
-                axisCtx={axisCtx}
-              />
-            ))}
-          </div>
-        </div>
-      ))}
+      {(() => {
+        const validSection =
+          sectionedCards.find((s) => s.section === activeSection) ?? sectionedCards[0]
+        const activeName = validSection?.section ?? activeSection
+        return (
+          <>
+            <nav
+              className="catalog-analytics-subtabs"
+              role="tablist"
+              aria-label="Catalog analytics sub-tabs"
+            >
+              {sectionedCards.map(({ section, cards }) => {
+                const isActive = section === activeName
+                return (
+                  <button
+                    key={section}
+                    type="button"
+                    role="tab"
+                    aria-selected={isActive}
+                    className={
+                      isActive
+                        ? 'metrics-site-chip is-active'
+                        : 'metrics-site-chip'
+                    }
+                    onClick={() => setActiveSection(section)}
+                  >
+                    {section}{' '}
+                    <span className="subtle-copy">({cards.length})</span>
+                  </button>
+                )
+              })}
+            </nav>
+
+            {validSection ? (
+              <div className="catalog-analytics-section">
+                <div className="catalog-analytics-grid">
+                  {validSection.cards.map((cfg) => (
+                    <ScatterCard
+                      key={cfg.id}
+                      config={cfg}
+                      points={points}
+                      pageColourBy={pageColourBy}
+                      pageSizeBy={pageSizeBy}
+                      pageOpacityBy={pageOpacityBy}
+                      loading={loadingPoints}
+                      axisCtx={axisCtx}
+                    />
+                  ))}
+                </div>
+              </div>
+            ) : null}
+          </>
+        )
+      })()}
     </section>
   )
 }
@@ -1251,17 +1859,39 @@ interface ScatterCardProps {
   config: ScatterCardConfig
   points: ReadonlyArray<CatalogAnalyticsPoint>
   pageColourBy: ColourByKey | 'per-chart'
+  pageSizeBy: SizeByKey | 'per-chart'
+  pageOpacityBy: OpacityByKey | 'per-chart'
   loading: boolean
   axisCtx: AxisCtx
 }
 
-function ScatterCard({ config, points, pageColourBy, loading, axisCtx }: ScatterCardProps) {
+function ScatterCard({
+  config,
+  points,
+  pageColourBy,
+  pageSizeBy,
+  pageOpacityBy,
+  loading,
+  axisCtx,
+}: ScatterCardProps) {
   const [xId, setXId] = useState<string>(config.defaultX)
   const [yId, setYId] = useState<string>(config.defaultY)
   const [localColourBy, setLocalColourBy] = useState<ColourByKey>(config.defaultColourBy)
+  const [localSizeBy, setLocalSizeBy] = useState<SizeByKey>(
+    config.defaultSizeBy ?? 'none',
+  )
+  const [localOpacityBy, setLocalOpacityBy] = useState<OpacityByKey>(
+    config.defaultOpacityBy ?? 'none',
+  )
   const effectiveColourBy: ColourByKey =
     pageColourBy === 'per-chart' ? localColourBy : pageColourBy
+  const effectiveSizeBy: SizeByKey =
+    pageSizeBy === 'per-chart' ? localSizeBy : pageSizeBy
+  const effectiveOpacityBy: OpacityByKey =
+    pageOpacityBy === 'per-chart' ? localOpacityBy : pageOpacityBy
   const colourByDef = COLOUR_BY.find((c) => c.id === effectiveColourBy) ?? COLOUR_BY[0]!
+  const sizeByDef = sizeBy(effectiveSizeBy)
+  const opacityByDef = opacityBy(effectiveOpacityBy)
   const xDef = axis(xId)
   const yDef = axis(yId)
 
@@ -1312,6 +1942,46 @@ function ScatterCard({ config, points, pageColourBy, loading, axisCtx }: Scatter
               ))}
             </select>
           </label>
+          <label
+            title={
+              pageSizeBy === 'per-chart'
+                ? undefined
+                : 'Page-wide size-by override is active; this control is disabled.'
+            }
+          >
+            size{' '}
+            <select
+              value={effectiveSizeBy}
+              onChange={(e) => setLocalSizeBy(e.target.value as SizeByKey)}
+              disabled={pageSizeBy !== 'per-chart'}
+            >
+              {SIZE_BY.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label
+            title={
+              pageOpacityBy === 'per-chart'
+                ? undefined
+                : 'Page-wide opacity-by override is active; this control is disabled.'
+            }
+          >
+            opacity{' '}
+            <select
+              value={effectiveOpacityBy}
+              onChange={(e) => setLocalOpacityBy(e.target.value as OpacityByKey)}
+              disabled={pageOpacityBy !== 'per-chart'}
+            >
+              {OPACITY_BY.map((o) => (
+                <option key={o.id} value={o.id}>
+                  {o.label}
+                </option>
+              ))}
+            </select>
+          </label>
         </div>
       </header>
       <p className="subtle-copy">{config.description}</p>
@@ -1320,6 +1990,8 @@ function ScatterCard({ config, points, pageColourBy, loading, axisCtx }: Scatter
         xDef={xDef}
         yDef={yDef}
         colourByDef={colourByDef}
+        sizeByDef={sizeByDef}
+        opacityByDef={opacityByDef}
         loading={loading}
         axisCtx={axisCtx}
         referenceLine={config.referenceLine}
@@ -1335,6 +2007,8 @@ interface CatalogScatterSvgProps {
   xDef: PointAxisDef
   yDef: PointAxisDef
   colourByDef: ColourByDef
+  sizeByDef: SizeByDef
+  opacityByDef: OpacityByDef
   loading: boolean
   axisCtx: AxisCtx
   /** Reference line annotation, see ScatterCardConfig. */
@@ -1346,13 +2020,30 @@ interface PlottedPoint {
   readonly x: number
   readonly y: number
   readonly bucket: string
+  readonly sizeValue: number | null
+  readonly opacityValue: number | null
 }
+
+// Per-dot radius bounds when a size-by encoding is active. Linear sqrt
+// scaling between MIN_R and MAX_R so visual weight (area) is the
+// quantity carried.
+const SIZE_MIN_R = 2
+const SIZE_MAX_R = 11
+// Opacity bounds when an opacity-by encoding is active. We bottom-out
+// well above 0 so faint dots remain visible against the white plot
+// area.
+const OPACITY_MIN = 0.18
+const OPACITY_MAX = 0.92
+const UNIFORM_R = 3.5
+const UNIFORM_OPACITY = 0.65
 
 function CatalogScatterSvg({
   points,
   xDef,
   yDef,
   colourByDef,
+  sizeByDef,
+  opacityByDef,
   loading,
   axisCtx,
   referenceLine,
@@ -1386,6 +2077,10 @@ function CatalogScatterSvg({
     let xHi = Number.NEGATIVE_INFINITY
     let yLo = Number.POSITIVE_INFINITY
     let yHi = Number.NEGATIVE_INFINITY
+    let sLo = Number.POSITIVE_INFINITY
+    let sHi = Number.NEGATIVE_INFINITY
+    let oLo = Number.POSITIVE_INFINITY
+    let oHi = Number.NEGATIVE_INFINITY
     const bucketSet = new Set<string>()
     for (const p of points) {
       const x = xDef.value(p, axisCtx)
@@ -1393,14 +2088,37 @@ function CatalogScatterSvg({
       if (x === null || y === null || !Number.isFinite(x) || !Number.isFinite(y)) continue
       const bucket = colourByDef.bucket(p)
       bucketSet.add(bucket)
-      plotted.push({ p, x, y, bucket })
+      const sRaw = sizeByDef.value(p, axisCtx)
+      const oRaw = opacityByDef.value(p, axisCtx)
+      const sizeValue = sRaw != null && Number.isFinite(sRaw) ? sRaw : null
+      const opacityValue = oRaw != null && Number.isFinite(oRaw) ? oRaw : null
+      plotted.push({ p, x, y, bucket, sizeValue, opacityValue })
       if (x < xLo) xLo = x
       if (x > xHi) xHi = x
       if (y < yLo) yLo = y
       if (y > yHi) yHi = y
+      if (sizeValue != null) {
+        if (sizeValue < sLo) sLo = sizeValue
+        if (sizeValue > sHi) sHi = sizeValue
+      }
+      if (opacityValue != null) {
+        if (opacityValue < oLo) oLo = opacityValue
+        if (opacityValue > oHi) oHi = opacityValue
+      }
     }
     if (plotted.length === 0) {
-      return { plotted, buckets: [] as string[], xMin: 0, xMax: 1, yMin: 0, yMax: 1 }
+      return {
+        plotted,
+        buckets: [] as string[],
+        xMin: 0,
+        xMax: 1,
+        yMin: 0,
+        yMax: 1,
+        sMin: null as number | null,
+        sMax: null as number | null,
+        oMin: null as number | null,
+        oMax: null as number | null,
+      }
     }
     if (xLo === xHi) {
       xLo -= 1
@@ -1418,12 +2136,59 @@ function CatalogScatterSvg({
       yLo -= span * 0.05
       yHi += span * 0.05
     }
+    const sMin = Number.isFinite(sLo) ? sLo : null
+    const sMax = Number.isFinite(sHi) ? sHi : null
+    const oMin = Number.isFinite(oLo) ? oLo : null
+    const oMax = Number.isFinite(oHi) ? oHi : null
     // Sort buckets by count desc so the legend reflects scale.
     const buckets = Array.from(bucketSet).sort()
-    return { plotted, buckets, xMin: xLo, xMax: xHi, yMin: yLo, yMax: yHi }
-  }, [points, xDef, yDef, colourByDef, axisCtx])
+    return {
+      plotted,
+      buckets,
+      xMin: xLo,
+      xMax: xHi,
+      yMin: yLo,
+      yMax: yHi,
+      sMin,
+      sMax,
+      oMin,
+      oMax,
+    }
+  }, [points, xDef, yDef, colourByDef, sizeByDef, opacityByDef, axisCtx])
 
-  const { plotted, buckets, xMin, xMax, yMin, yMax } = computed
+  const { plotted, buckets, xMin, xMax, yMin, yMax, sMin, sMax, oMin, oMax } = computed
+
+  // Build a per-point radius/opacity resolver using the card-local
+  // size/opacity domains. Square-root scaling for radius so visible
+  // area (not radius) is proportional to magnitude. We clamp to a
+  // healthy minimum so even tiny values stay visible.
+  const dotRadius = useCallback(
+    (sizeValue: number | null): number => {
+      if (sizeByDef.id === 'none' || sMin == null || sMax == null || sMin === sMax) {
+        return UNIFORM_R
+      }
+      if (sizeValue == null) return SIZE_MIN_R
+      // Clamp negatives to the floor so we never sqrt(<0).
+      const lo = Math.max(0, sMin)
+      const hi = Math.max(lo + 1e-9, sMax)
+      const v = Math.max(lo, Math.min(hi, sizeValue))
+      const norm = Math.sqrt((v - lo) / (hi - lo))
+      return SIZE_MIN_R + norm * (SIZE_MAX_R - SIZE_MIN_R)
+    },
+    [sizeByDef, sMin, sMax],
+  )
+  const dotOpacity = useCallback(
+    (opacityValue: number | null): number => {
+      if (opacityByDef.id === 'none' || oMin == null || oMax == null || oMin === oMax) {
+        return UNIFORM_OPACITY
+      }
+      if (opacityValue == null) return OPACITY_MIN
+      const v = Math.max(oMin, Math.min(oMax, opacityValue))
+      const norm = (v - oMin) / (oMax - oMin)
+      return OPACITY_MIN + norm * (OPACITY_MAX - OPACITY_MIN)
+    },
+    [opacityByDef, oMin, oMax],
+  )
 
   const xScale = useCallback(
     (v: number) => marginLeft + ((v - xMin) / (xMax - xMin)) * plotW,
@@ -1617,9 +2382,9 @@ function CatalogScatterSvg({
             key={`${pp.p.inventoryItemId}-${idx}`}
             cx={xScale(pp.x)}
             cy={yScale(pp.y)}
-            r={3.5}
+            r={dotRadius(pp.sizeValue)}
             fill={colourFor(pp.bucket, buckets)}
-            fillOpacity={0.65}
+            fillOpacity={dotOpacity(pp.opacityValue)}
             stroke="#fff"
             strokeWidth={0.5}
           />
