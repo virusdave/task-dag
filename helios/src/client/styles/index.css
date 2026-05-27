@@ -3386,6 +3386,93 @@ a.tree-nav-branch-label.is-link,
   border-bottom: 1px solid rgba(0, 0, 0, 0.08);
 }
 
+/* Per-card axis / encoding selectors. We cap each <select>'s width so
+   they line up on a single row even when the option labels include
+   long strings like "Sales-day coverage % (days sold / window)". The
+   short axis abbreviation is shown in the <option>; the long form is
+   exposed via the `title` attribute (and as the card description). */
+.catalog-card-controls {
+  gap: 0.35rem 0.4rem;
+}
+.catalog-card-controls label {
+  font-size: 0.72rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+.catalog-card-controls select {
+  font-size: 0.74rem;
+  padding: 0.14rem 0.32rem;
+  max-width: 8.5rem;
+  border: 1px solid var(--control-border);
+  border-radius: 4px;
+  background: var(--panel);
+  color: var(--ink, #17130f);
+}
+
+/* Scatter tooltip. Was completely unstyled before, so the hover panel
+   was rendering as transparent absolutely-positioned text on top of
+   the grid. Background, border, shadow, and padding so it reads as a
+   discrete card overlay; chart-local positioning is set inline by
+   `ScatterTooltip` so it tracks the dot through page scroll, resize,
+   and pan/zoom. */
+.catalog-analytics-tooltip {
+  z-index: 5;
+  background: rgba(255, 250, 241, 0.97);
+  border: 1px solid var(--control-border);
+  border-radius: 8px;
+  padding: 0.55rem 0.7rem;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.18);
+  font-size: 0.78rem;
+  color: var(--ink, #17130f);
+  line-height: 1.35;
+}
+.catalog-analytics-tooltip-title {
+  font-weight: 700;
+  margin-bottom: 0.15rem;
+  padding-right: 1.2rem;
+  position: relative;
+}
+.catalog-analytics-tooltip-close {
+  position: absolute;
+  top: -0.18rem;
+  right: -0.32rem;
+  width: 1.6rem;
+  height: 1.6rem;
+  border: none;
+  background: transparent;
+  font-size: 1.15rem;
+  line-height: 1;
+  color: var(--text-muted-strong);
+  cursor: pointer;
+  border-radius: 999px;
+}
+.catalog-analytics-tooltip-close:hover {
+  background: rgba(155, 74, 34, 0.12);
+}
+.catalog-analytics-tooltip-sub {
+  margin-bottom: 0.4rem;
+  font-size: 0.72rem;
+}
+.catalog-analytics-tooltip-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+.catalog-analytics-tooltip-table th {
+  text-align: left;
+  font-weight: 500;
+  color: var(--text-muted);
+  padding: 0.06rem 0.4rem 0.06rem 0;
+  white-space: nowrap;
+}
+.catalog-analytics-tooltip-table td {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  padding: 0.06rem 0;
+}
+
 /* Reset-zoom chip overlaid on the chart wrapper. Sized to match the
    small-control aesthetic of `metric-chart-controls` and positioned
    top-right above the SVG so it sits inside the card without growing

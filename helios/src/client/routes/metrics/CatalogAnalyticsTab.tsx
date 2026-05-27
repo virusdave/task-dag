@@ -1903,23 +1903,31 @@ function ScatterCard({
         <div className="metric-chart-titlewrap">
           <h3 className="metric-chart-title">{config.title}</h3>
         </div>
-        <div className="metric-chart-controls">
-          <label>
-            X{' '}
-            <select value={xId} onChange={(e) => setXId(e.target.value)}>
+        <div className="metric-chart-controls catalog-card-controls">
+          {/* Per-card axis / encoding selectors. We deliberately render
+              the *short* axis labels in each <option> rather than the
+              long `label`; the long form is exposed on hover via the
+              `title` attribute and is also visible at the top of the
+              card as the axis description. Without this, each <select>
+              auto-sizes to the longest option ("Sales-day coverage %
+              (days sold / window)") which blew the controls onto 3-4
+              rows on mobile. */}
+          <label title={xDef.label}>
+            X:{' '}
+            <select value={xId} onChange={(e) => setXId(e.target.value)} title={xDef.label}>
               {POINT_AXES.map((a) => (
-                <option key={a.id} value={a.id}>
-                  {a.label}
+                <option key={a.id} value={a.id} title={a.label}>
+                  {a.short}
                 </option>
               ))}
             </select>
           </label>
-          <label>
-            Y{' '}
-            <select value={yId} onChange={(e) => setYId(e.target.value)}>
+          <label title={yDef.label}>
+            Y:{' '}
+            <select value={yId} onChange={(e) => setYId(e.target.value)} title={yDef.label}>
               {POINT_AXES.map((a) => (
-                <option key={a.id} value={a.id}>
-                  {a.label}
+                <option key={a.id} value={a.id} title={a.label}>
+                  {a.short}
                 </option>
               ))}
             </select>
@@ -1927,11 +1935,11 @@ function ScatterCard({
           <label
             title={
               pageColourBy === 'per-chart'
-                ? undefined
+                ? colourByDef.label
                 : 'Page-wide colour-by override is active; this control is disabled.'
             }
           >
-            colour{' '}
+            col:{' '}
             <select
               value={effectiveColourBy}
               onChange={(e) => setLocalColourBy(e.target.value as ColourByKey)}
@@ -1947,11 +1955,11 @@ function ScatterCard({
           <label
             title={
               pageSizeBy === 'per-chart'
-                ? undefined
+                ? sizeByDef.label
                 : 'Page-wide size-by override is active; this control is disabled.'
             }
           >
-            size{' '}
+            sz:{' '}
             <select
               value={effectiveSizeBy}
               onChange={(e) => setLocalSizeBy(e.target.value as SizeByKey)}
@@ -1967,11 +1975,11 @@ function ScatterCard({
           <label
             title={
               pageOpacityBy === 'per-chart'
-                ? undefined
+                ? opacityByDef.label
                 : 'Page-wide opacity-by override is active; this control is disabled.'
             }
           >
-            opacity{' '}
+            op:{' '}
             <select
               value={effectiveOpacityBy}
               onChange={(e) => setLocalOpacityBy(e.target.value as OpacityByKey)}
@@ -2220,16 +2228,21 @@ function CatalogScatterSvg({
   const xTicks = useMemo(() => makeTicks(view.xMin, view.xMax, 5), [view.xMin, view.xMax])
   const yTicks = useMemo(() => makeTicks(view.yMin, view.yMax, 5), [view.yMin, view.yMax])
 
-  // Hover. We track the *visible* nearest dot only — anything panned/
-  // zoomed outside the current view is ignored so a clipped offscreen
-  // point near the plot edge can't win the hover search. Hover is
-  // suppressed during an active zoom/pan gesture for the same reason
-  // (the tooltip would flicker and obscure the chart).
-  const [hover, setHover] = useState<{ idx: number; clientX: number; clientY: number } | null>(
+  // Hover. Stored as just the index — we recompute the dot's screen
+  // position from `xScale`/`yScale` each render, so the tooltip
+  // automatically tracks the dot through scrolling, resizing, and
+  // pan/zoom rather than freezing at the touch coordinate.
+  //
+  // On touch, the browser fires `pointerleave` the moment the finger
+  // lifts. We track the originating pointer type so we can keep the
+  // tooltip pinned after a tap on touch (operator must tap elsewhere
+  // or tap the X to dismiss). Mouse retains the old "leave clears
+  // tooltip" behaviour because hover semantics work fine there.
+  const [hover, setHover] = useState<{ idx: number; pointerType: string } | null>(
     null,
   )
   const HOVER_PX = 12
-  const HOVER_PX_SQ = HOVER_PX * HOVER_PX
+  const TOUCH_HOVER_PX = 28 // chubbier hit-radius for fingers
   const onPointerMove = useCallback(
     (e: React.PointerEvent<SVGSVGElement>) => {
       // Forward to the zoom hook first so pinch/pan can run.
@@ -2238,6 +2251,10 @@ function CatalogScatterSvg({
         if (hover) setHover(null)
         return
       }
+      // On touch we only update hover on initial tap / drag; once the
+      // finger lifts (pointerleave) we want the tooltip to stick.
+      // The pointerup handler keeps hover; pointermove on touch still
+      // updates which dot is targeted while the finger is down.
       const svg = svgRef.current
       if (!svg || plotted.length === 0) return
       const ctm = svg.getScreenCTM()
@@ -2248,6 +2265,8 @@ function CatalogScatterSvg({
       const local = pt.matrixTransform(ctm.inverse())
       let bestIdx = -1
       let bestDistSq = Infinity
+      const hitRadius = e.pointerType === 'mouse' ? HOVER_PX : TOUCH_HOVER_PX
+      const hitRadiusSq = hitRadius * hitRadius
       for (let i = 0; i < plotted.length; i++) {
         const pp = plotted[i]!
         // skip points outside the visible view — they're clipped
@@ -2267,18 +2286,78 @@ function CatalogScatterSvg({
           bestIdx = i
         }
       }
-      if (bestIdx >= 0 && bestDistSq <= HOVER_PX_SQ) {
-        setHover({ idx: bestIdx, clientX: e.clientX, clientY: e.clientY })
-      } else {
+      if (bestIdx >= 0 && bestDistSq <= hitRadiusSq) {
+        setHover({ idx: bestIdx, pointerType: e.pointerType })
+      } else if (e.pointerType === 'mouse') {
+        // Only clear on miss for mouse; touch keeps last selection
+        // until the user taps empty space or dismisses.
         setHover(null)
       }
     },
-    [plotted, xScale, yScale, HOVER_PX_SQ, zoom, hover, view.xMin, view.xMax, view.yMin, view.yMax],
+    [plotted, xScale, yScale, zoom, hover, view.xMin, view.xMax, view.yMin, view.yMax],
   )
 
-  const onPointerLeave = useCallback(() => setHover(null), [])
+  // Mouse: pointerleave clears the tooltip. Touch: do NOT clear on
+  // pointerleave — the operator just lifted their finger; they
+  // expect the tooltip to remain so they can read it.
+  const onPointerLeave = useCallback(
+    (_e: React.PointerEvent<SVGSVGElement>) => {
+      setHover((h) => (h && h.pointerType !== 'mouse' ? h : null))
+    },
+    [],
+  )
+
+  // On touch tap (pointerdown) on an empty region, dismiss any pinned
+  // tooltip. We do this in pointerdown so a tap that hits a dot still
+  // triggers the pointermove handler above (which sets a new hover).
+  const onPointerDown = useCallback(
+    (e: React.PointerEvent<SVGSVGElement>) => {
+      zoom.handlers.onPointerDown(e)
+      if (e.pointerType === 'mouse') return
+      // For a single-finger tap, immediately compute nearest dot so
+      // the tooltip appears on tap rather than waiting for a move.
+      if (plotted.length === 0) return
+      const svg = svgRef.current
+      if (!svg) return
+      const ctm = svg.getScreenCTM()
+      if (!ctm) return
+      const pt = svg.createSVGPoint()
+      pt.x = e.clientX
+      pt.y = e.clientY
+      const local = pt.matrixTransform(ctm.inverse())
+      let bestIdx = -1
+      let bestDistSq = Infinity
+      const hitRadiusSq = TOUCH_HOVER_PX * TOUCH_HOVER_PX
+      for (let i = 0; i < plotted.length; i++) {
+        const pp = plotted[i]!
+        if (
+          pp.x < view.xMin ||
+          pp.x > view.xMax ||
+          pp.y < view.yMin ||
+          pp.y > view.yMax
+        ) {
+          continue
+        }
+        const dx = xScale(pp.x) - local.x
+        const dy = yScale(pp.y) - local.y
+        const d = dx * dx + dy * dy
+        if (d < bestDistSq) {
+          bestDistSq = d
+          bestIdx = i
+        }
+      }
+      if (bestIdx >= 0 && bestDistSq <= hitRadiusSq) {
+        setHover({ idx: bestIdx, pointerType: e.pointerType })
+      } else {
+        // tap on empty plot area — dismiss pinned tooltip
+        setHover(null)
+      }
+    },
+    [plotted, xScale, yScale, view.xMin, view.xMax, view.yMin, view.yMax, zoom],
+  )
 
   const hovered = hover ? plotted[hover.idx] ?? null : null
+  const hoveredDotPx = hovered ? { x: xScale(hovered.x), y: yScale(hovered.y) } : null
 
   return (
     <div className="metric-chart-svg-wrap catalog-analytics-svg-wrap" ref={wrapRef}>
@@ -2290,7 +2369,7 @@ function CatalogScatterSvg({
         className="metric-chart-svg"
         role="img"
         aria-label={`Scatter: ${yDef.label} (y) vs ${xDef.label} (x)`}
-        onPointerDown={zoom.handlers.onPointerDown}
+        onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={zoom.handlers.onPointerUp}
         onPointerCancel={zoom.handlers.onPointerCancel}
@@ -2461,7 +2540,7 @@ function CatalogScatterSvg({
         </button>
       ) : null}
 
-      {hovered ? (
+      {hovered && hoveredDotPx ? (
         <ScatterTooltip
           point={hovered.p}
           xDef={xDef}
@@ -2470,8 +2549,13 @@ function CatalogScatterSvg({
           yValue={hovered.y}
           colourLabel={hovered.bucket}
           colourByDef={colourByDef}
-          clientX={hover!.clientX}
-          clientY={hover!.clientY}
+          /* Absolute position in chart-wrapper local pixel space —
+             follows the dot through page scroll, resize, pan/zoom. */
+          dotPx={hoveredDotPx}
+          wrapWidth={width}
+          wrapHeight={height}
+          dismissible={hover?.pointerType !== 'mouse'}
+          onDismiss={() => setHover(null)}
         />
       ) : null}
 
@@ -2510,22 +2594,61 @@ interface ScatterTooltipProps {
   yValue: number
   colourLabel: string
   colourByDef: ColourByDef
-  clientX: number
-  clientY: number
+  /** Hovered dot position, in chart-wrapper-local pixel space. */
+  dotPx: { x: number; y: number }
+  /** Chart wrapper width/height in pixels (== SVG viewBox dimensions). */
+  wrapWidth: number
+  wrapHeight: number
+  /** True on touch — renders a close button so the operator can dismiss. */
+  dismissible: boolean
+  onDismiss: () => void
 }
 
 function ScatterTooltip(p: ScatterTooltipProps) {
+  // Render width is responsive but we want a stable layout for clamp
+  // calculations; treat 280px as the planning width and let CSS
+  // shrink it on tiny viewports.
+  const TOOLTIP_W = 280
+  const TOOLTIP_H_EST = 220
+  // Default: place to the right and below the dot. Flip sides if we'd
+  // overflow the chart wrapper. Clamp to wrap bounds so a tooltip
+  // near the top/left edge isn't pushed off-screen.
+  const wantRight = p.dotPx.x + 14 + TOOLTIP_W <= p.wrapWidth
+  const wantBelow = p.dotPx.y + 14 + TOOLTIP_H_EST <= p.wrapHeight
+  let left = wantRight ? p.dotPx.x + 14 : p.dotPx.x - 14 - TOOLTIP_W
+  let top = wantBelow ? p.dotPx.y + 14 : p.dotPx.y - 14 - TOOLTIP_H_EST
+  left = Math.max(4, Math.min(p.wrapWidth - TOOLTIP_W - 4, left))
+  top = Math.max(4, Math.min(p.wrapHeight - 40, top))
+  // Position is in the wrap's local coords (the wrap is the
+  // positioned containing block; the SVG fills it 100%). This means
+  // the tooltip stays attached to the dot through page scroll,
+  // window resize, pan, and zoom — no scroll listener required.
   const style: React.CSSProperties = {
-    position: 'fixed',
-    left: Math.min(window.innerWidth - 340, p.clientX + 14),
-    top: Math.min(window.innerHeight - 220, p.clientY + 14),
-    pointerEvents: 'none',
+    position: 'absolute',
+    left,
+    top,
+    width: TOOLTIP_W,
+    maxWidth: 'calc(100% - 8px)',
+    pointerEvents: p.dismissible ? 'auto' : 'none',
   }
   return (
-    <div className="catalog-analytics-tooltip" style={style}>
+    <div className="catalog-analytics-tooltip" style={style} role="tooltip">
       <div className="catalog-analytics-tooltip-title">
         {p.point.productName}
         {p.point.sizeLabel ? ` — ${p.point.sizeLabel}` : ''}
+        {p.dismissible ? (
+          <button
+            type="button"
+            className="catalog-analytics-tooltip-close"
+            onClick={(e) => {
+              e.stopPropagation()
+              p.onDismiss()
+            }}
+            aria-label="Dismiss tooltip"
+          >
+            ×
+          </button>
+        ) : null}
       </div>
       <div className="catalog-analytics-tooltip-sub subtle-copy">
         {[p.point.brandName, p.point.subcategoryName, p.point.categoryName]
