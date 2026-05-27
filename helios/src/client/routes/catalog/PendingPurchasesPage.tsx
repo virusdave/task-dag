@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { Form, Link, useLoaderData, useRevalidator, useRouteLoaderData } from 'react-router-dom'
 
 import {
@@ -833,9 +833,8 @@ function PendingPurchaseRowCard(
                               lineHeight: 0,
                             }}
                           >
-                            <img
+                            <HoverZoomImage
                               alt=""
-                              loading="lazy"
                               src={listingImage}
                               style={{ width: '2.25rem', height: '2.25rem', objectFit: 'cover', borderRadius: '2px', display: 'block' }}
                             />
@@ -1122,9 +1121,8 @@ function PendingPurchasePictureOptionThumb({
         lineHeight: 0,
       }}
     >
-      <img
+      <HoverZoomImage
         alt={altLabel}
-        loading="lazy"
         src={url}
         style={{
           width: '4.5rem',
@@ -1135,6 +1133,129 @@ function PendingPurchasePictureOptionThumb({
         }}
       />
     </button>
+  )
+}
+
+/**
+ * <img> wrapper that, after the user hovers for ~5 seconds, pops up a
+ * larger version of the image so they can see detail without leaving
+ * the page. Used by the listing thumbnails and the "Picture options"
+ * panel so the user can pick the best image for a pending purchase.
+ *
+ * The popup is rendered as a viewport-fixed overlay anchored next to
+ * the thumbnail, with edge-detection so it stays on screen near
+ * either side of the viewport. Pointer-events are disabled on the
+ * popup itself so the user can move the mouse through it without
+ * dismissing-then-reshowing the zoom.
+ */
+function HoverZoomImage({
+  alt,
+  src,
+  style,
+  zoomedSize = 320,
+  delayMs = 5000,
+}: {
+  alt: string
+  src: string
+  style?: CSSProperties
+  zoomedSize?: number
+  delayMs?: number
+}): JSX.Element {
+  const ref = useRef<HTMLImageElement | null>(null)
+  const timerRef = useRef<number | null>(null)
+  const [popup, setPopup] = useState<{ left: number; top: number } | null>(null)
+
+  useEffect(() => () => {
+    if (timerRef.current !== null) {
+      window.clearTimeout(timerRef.current)
+      timerRef.current = null
+    }
+  }, [])
+
+  const clearTimer = () => {
+    if (timerRef.current !== null) {
+      window.clearTimeout(timerRef.current)
+      timerRef.current = null
+    }
+  }
+
+  const computePosition = (): { left: number; top: number } => {
+    const el = ref.current
+    const vw = window.innerWidth
+    const vh = window.innerHeight
+    const margin = 8
+    if (!el) {
+      return { left: margin, top: margin }
+    }
+    const rect = el.getBoundingClientRect()
+    // Prefer placing the popup to the right of the thumbnail; fall
+    // back to the left if there isn't room.
+    let left = rect.right + margin
+    if (left + zoomedSize + margin > vw) {
+      left = rect.left - margin - zoomedSize
+    }
+    if (left < margin) {
+      left = Math.max(margin, Math.min(vw - zoomedSize - margin, rect.left))
+    }
+    let top = rect.top
+    if (top + zoomedSize + margin > vh) {
+      top = vh - zoomedSize - margin
+    }
+    if (top < margin) {
+      top = margin
+    }
+    return { left, top }
+  }
+
+  const handleEnter = () => {
+    clearTimer()
+    timerRef.current = window.setTimeout(() => {
+      setPopup(computePosition())
+      timerRef.current = null
+    }, delayMs)
+  }
+
+  const handleLeave = () => {
+    clearTimer()
+    setPopup(null)
+  }
+
+  return (
+    <>
+      <img
+        alt={alt}
+        loading="lazy"
+        onMouseEnter={handleEnter}
+        onMouseLeave={handleLeave}
+        ref={ref}
+        src={src}
+        style={style}
+      />
+      {popup ? (
+        <div
+          style={{
+            position: 'fixed',
+            left: popup.left,
+            top: popup.top,
+            width: zoomedSize,
+            height: zoomedSize,
+            background: '#fff',
+            border: '1px solid #ccc',
+            borderRadius: '4px',
+            boxShadow: '0 8px 24px rgba(0,0,0,0.18)',
+            padding: '4px',
+            zIndex: 1000,
+            pointerEvents: 'none',
+          }}
+        >
+          <img
+            alt={alt}
+            src={src}
+            style={{ width: '100%', height: '100%', objectFit: 'contain', display: 'block' }}
+          />
+        </div>
+      ) : null}
+    </>
   )
 }
 
