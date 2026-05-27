@@ -81,6 +81,16 @@ async function main(): Promise<void> {
             'normalPrice', normal_price,
             'salePrice', sale_price,
             'currentStock', current_stock,
+            -- Per-product image URL from the LitAlerts partner API
+            -- (LAProduct.imageURL, added May 2026). We surface it
+            -- here (lowercase 'imageUrl' to match the rest of our
+            -- snake/camel envelope) so the catalog → market data
+            -- reviewer can render product thumbnails straight off
+            -- the fuzzy row, without paying for the legacy LEFT JOIN
+            -- against `litalerts_product_images` (which is the
+            -- scraped-dashboard table that the new API field
+            -- replaces).
+            'imageUrl', raw_product_json->>'imageURL',
             'raw_config_json', raw_config_json,
             'raw_product_json', raw_product_json
           ) as raw_input_jsonb,

@@ -52,6 +52,19 @@ const ProductSchema = z.object({
   medicalURL: z.string().nullable().optional(),
   recreationalURL: z.string().nullable().optional(),
   category: z.string().nullable().optional(),
+  // Per-product primary image URL. Added by LitAlerts to the
+  // /v1/brands/:id/products response in May 2026; previously we had
+  // to scrape these out of the (Cognito-auth-gated) dashboard
+  // /Products/menulistings endpoint via
+  // `scripts/litalerts-backfill-product-images.mts`. The new
+  // partner-API field is the source of truth going forward, and
+  // we record it onto `litalerts_products.raw_product_json` (via the
+  // structured ingest) and propagate it into
+  // `fuzzy_skus.raw_input_jsonb.imageUrl` (via the
+  // litalerts-products-to-fuzzy-skus backfill) so the catalog
+  // market-data review can decorate candidates without a separate
+  // image-images table JOIN.
+  imageURL: z.string().nullable().optional(),
   configs: z.array(ProductConfigSchema).default([]),
 }).passthrough()
 

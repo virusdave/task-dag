@@ -958,6 +958,16 @@ export async function loadGroupReview(
     //     LitAlerts row's size must be within ±max(epsilon, 8%) of at
     //     least one of those sizes (g↔g, mg↔mg; never cross-unit)
     const structuredFuzzy = await db.query<typeof fuzzyRows[number]>(
+      // `image_url` selection: prefer the per-product imageUrl the
+      // LitAlerts partner API now ships in /v1/brands/:id/products
+      // (recorded onto fuzzy_skus.raw_input_jsonb.imageUrl by the
+      // litalerts-products-to-fuzzy-skus backfill). Fall back to
+      // the legacy scraped table `litalerts_product_images` for
+      // pre-cutover rows that haven't been re-ingested yet — once
+      // the partner-API path has fully replaced the scrape, the
+      // LEFT JOIN here and the scrape script
+      // (scripts/litalerts-backfill-product-images.mts) can both
+      // go away.
       `select fs.id, fs.source_kind, fs.source_listing_id,
               jsonb_build_object(
                 'listingName',    fs.raw_input_jsonb->>'listingName',
@@ -965,11 +975,15 @@ export async function loadGroupReview(
                 'dispensaryName', fs.raw_input_jsonb->>'dispensaryName',
                 'brand',          fs.raw_input_jsonb->>'brand',
                 'category',       fs.raw_input_jsonb->>'category',
-                'productId',      fs.raw_input_jsonb->>'productId'
+                'productId',      fs.raw_input_jsonb->>'productId',
+                'imageUrl',       fs.raw_input_jsonb->>'imageUrl'
               ) as raw_input_jsonb,
               fs.brand_norm, fs.category_norm, fs.subcategory_norm,
               fs.size_g_norm::text, fs.size_mg_norm::text, fs.pack_count_norm, fs.strain_norm,
-              lpi.image_url
+              coalesce(
+                nullif(fs.raw_input_jsonb->>'imageUrl', ''),
+                lpi.image_url
+              ) as image_url
        from fuzzy_skus fs
        left join litalerts_product_images lpi
          on lpi.state_code = 'NY'
