@@ -2469,6 +2469,41 @@ function CatalogScatterSvg({
             />
           </clipPath>
         </defs>
+        {/* Light dashed gridlines at the same "nice" intervals the
+            axis labels use. Drawn before axes/data so they sit
+            beneath everything else. */}
+        <g pointerEvents="none">
+          {xTicks.map((t) => {
+            const x = xScale(t)
+            return (
+              <line
+                key={`xg-${t}`}
+                x1={x}
+                x2={x}
+                y1={marginTop}
+                y2={marginTop + plotH}
+                stroke="#d8d8d8"
+                strokeWidth={0.8}
+                strokeDasharray="3 3"
+              />
+            )
+          })}
+          {yTicks.map((t) => {
+            const y = yScale(t)
+            return (
+              <line
+                key={`yg-${t}`}
+                x1={marginLeft}
+                x2={marginLeft + plotW}
+                y1={y}
+                y2={y}
+                stroke="#d8d8d8"
+                strokeWidth={0.8}
+                strokeDasharray="3 3"
+              />
+            )
+          })}
+        </g>
         {/* axes */}
         <line
           x1={marginLeft}

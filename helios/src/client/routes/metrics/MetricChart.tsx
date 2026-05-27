@@ -1523,11 +1523,12 @@ function ScatterSvg({ response, loading, error, window, interactive }: ScatterSv
 
   const hovered = hover ? points[hover.idx] ?? null : null
 
-  // Axis ticks — five evenly spaced labels per axis is plenty for an
-  // operator scanning a correlation. Matches the data-density of the
-  // line-chart axis labels.
-  const xTicks = useMemo(() => makeTicks(view.xMin, view.xMax, 5), [view.xMin, view.xMax])
-  const yTicks = useMemo(() => makeTicks(view.yMin, view.yMax, 5), [view.yMin, view.yMax])
+  // Axis ticks — pick "nice" values (multiples of 1/2/5 × 10^k) so the
+  // gridline labels land on 0/2/5/10/etc instead of arbitrary 4-sig-fig
+  // floats. Shared `niceYTicks` helper for both axes; matches the
+  // line-chart axis labels exactly.
+  const xTicks = useMemo(() => niceYTicks(view.xMin, view.xMax, 5), [view.xMin, view.xMax])
+  const yTicks = useMemo(() => niceYTicks(view.yMin, view.yMax, 5), [view.yMin, view.yMax])
 
   const hasData = points.length > 0
   const windowLabel = `${shortDate(window.fromMs)} → ${shortDate(window.toMs)}`
@@ -1573,9 +1574,12 @@ function ScatterSvg({ response, loading, error, window, interactive }: ScatterSv
         />
         <line x1={marginLeft} x2={marginLeft} y1={marginTop} y2={marginTop + plotH} stroke="#ccc" />
 
-        {/* gridlines + tick labels */}
+        {/* Light dashed gridlines + tick labels. Gridlines are clipped to
+            the plot area (niceYTicks may pick ticks just outside view if
+            the rounded range straddles the data extent). */}
         {hasData
-          ? yTicks.map((v) => {
+          ? yTicks.ticks.map((v) => {
+              if (v < view.yMin || v > view.yMax) return null
               const y = yScale(v)
               return (
                 <g key={`yt-${v}`}>
@@ -1584,18 +1588,21 @@ function ScatterSvg({ response, loading, error, window, interactive }: ScatterSv
                     x2={width - marginRight}
                     y1={y}
                     y2={y}
-                    stroke="#eee"
+                    stroke="#d8d8d8"
+                    strokeWidth={0.8}
+                    strokeDasharray="3 3"
                     pointerEvents="none"
                   />
                   <text x={marginLeft - 6} y={y + 3} fontSize="10" textAnchor="end" fill="#555">
-                    {compactNumber(v)}
+                    {formatYTick(v, yTicks.fractionDigits)}
                   </text>
                 </g>
               )
             })
           : null}
         {hasData
-          ? xTicks.map((v) => {
+          ? xTicks.ticks.map((v) => {
+              if (v < view.xMin || v > view.xMax) return null
               const x = xScale(v)
               return (
                 <g key={`xt-${v}`}>
@@ -1604,11 +1611,13 @@ function ScatterSvg({ response, loading, error, window, interactive }: ScatterSv
                     x2={x}
                     y1={marginTop}
                     y2={marginTop + plotH}
-                    stroke="#eee"
+                    stroke="#d8d8d8"
+                    strokeWidth={0.8}
+                    strokeDasharray="3 3"
                     pointerEvents="none"
                   />
                   <text x={x} y={marginTop + plotH + 12} fontSize="10" textAnchor="middle" fill="#555">
-                    {compactNumber(v)}
+                    {formatYTick(v, xTicks.fractionDigits)}
                   </text>
                 </g>
               )
