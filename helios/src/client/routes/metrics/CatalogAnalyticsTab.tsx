@@ -1306,9 +1306,43 @@ const KNOWN_SITES: ReadonlyArray<{ id: string; label: string }> = [
   { id: 'midtown', label: 'Midtown' },
 ]
 
+// Initial range mirrors DEFAULT_WINDOW_DAYS so existing snapshots and
+// "over the last N days" copy keep matching what the user sees.
+function initialRange(): { fromMs: number; toMs: number } {
+  const now = Date.now()
+  return { fromMs: now - DEFAULT_WINDOW_DAYS * DAY_MS, toMs: now }
+}
+
+// Format a millisecond timestamp as the `value` expected by an
+// `<input type="datetime-local">`. Local-time on purpose: the input
+// itself is local-time, so we deliberately don't toggle to UTC here
+// (the scatter / sales dashboards do the same in MetricsLayoutPage).
+function toLocalDtInput(ms: number): string {
+  const d = new Date(ms)
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(
+    d.getMinutes(),
+  )}`
+}
+
 export function CatalogAnalyticsTab() {
   // -------- Filters --------
-  const [windowDays, setWindowDays] = useState<number>(DEFAULT_WINDOW_DAYS)
+  // Range is stored as concrete from/to milliseconds so the "custom"
+  // datetime pickers and the preset day buttons share one source of
+  // truth. windowDays is derived for any code that wants "how wide
+  // was the window?" (cohort medians, query-string `from`/`to`,
+  // display copy). Presets set both ends to (now - Nd ... now);
+  // custom inputs set either end independently.
+  const [range, setRange] = useState<{ fromMs: number; toMs: number }>(() => initialRange())
+  const windowDays = useMemo(() => {
+    const d = (range.toMs - range.fromMs) / DAY_MS
+    return d > 0 ? Math.round(d) : 0
+  }, [range.fromMs, range.toMs])
+  const setWindowDays = useCallback((d: number) => {
+    if (!Number.isFinite(d) || d <= 0) return
+    const now = Date.now()
+    setRange({ fromMs: now - d * DAY_MS, toMs: now })
+  }, [])
   const [selectedSites, setSelectedSites] = useState<ReadonlySet<string>>(() => new Set<string>())
   const [filters, setFilters] = useState<CatalogAnalyticsFiltersResponse | null>(null)
   const [selectedCategoryIds, setSelectedCategoryIds] = useState<ReadonlySet<string>>(
@@ -1402,7 +1436,8 @@ export function CatalogAnalyticsTab() {
   const pointsKey = useMemo(
     () =>
       [
-        windowDays,
+        range.fromMs,
+        range.toMs,
         sitesParam,
         Array.from(selectedCategoryIds).sort().join(','),
         Array.from(selectedSubcategoryIds).sort().join(','),
@@ -1410,7 +1445,8 @@ export function CatalogAnalyticsTab() {
         Array.from(selectedSizes).sort().join(','),
       ].join('|'),
     [
-      windowDays,
+      range.fromMs,
+      range.toMs,
       sitesParam,
       selectedCategoryIds,
       selectedSubcategoryIds,
@@ -1423,9 +1459,8 @@ export function CatalogAnalyticsTab() {
     setLoadingPoints(true)
     setError(null)
     const handle = setTimeout(() => {
-      const now = Date.now()
-      const from = new Date(now - windowDays * DAY_MS).toISOString()
-      const to = new Date(now).toISOString()
+      const from = new Date(range.fromMs).toISOString()
+      const to = new Date(range.toMs).toISOString()
       const qs = new URLSearchParams()
       qs.set('from', from)
       qs.set('to', to)
@@ -1517,21 +1552,51 @@ export function CatalogAnalyticsTab() {
       <div className="metrics-controls catalog-analytics-controls">
         <div className="metrics-control-group">
           <span className="subtle-copy">range</span>
-          {[7, 30, 90, 180, 365].map((d) => (
-            <button
-              key={d}
-              type="button"
-              className={
-                windowDays === d
-                  ? 'metrics-site-chip is-active'
-                  : 'metrics-site-chip'
-              }
-              onClick={() => setWindowDays(d)}
-              aria-pressed={windowDays === d}
-            >
-              {d}d
-            </button>
-          ))}
+          {[7, 30, 90, 180, 365].map((d) => {
+            // A preset matches "currently active" only if the range is
+            // exactly (now-Nd ... now); after the user picks custom
+            // dates no preset is highlighted.
+            const isExactPreset =
+              windowDays === d && Math.abs(range.toMs - Date.now()) < DAY_MS
+            return (
+              <button
+                key={d}
+                type="button"
+                className={isExactPreset ? 'metrics-site-chip is-active' : 'metrics-site-chip'}
+                onClick={() => setWindowDays(d)}
+                aria-pressed={isExactPreset}
+              >
+                {d}d
+              </button>
+            )
+          })}
+          <details className="metrics-range-custom">
+            <summary>custom</summary>
+            <div className="metrics-range-custom-inputs">
+              <label className="subtle-copy">
+                from{' '}
+                <input
+                  type="datetime-local"
+                  value={toLocalDtInput(range.fromMs)}
+                  onChange={(e) => {
+                    const ms = Date.parse(e.target.value)
+                    if (!Number.isNaN(ms)) setRange((r) => ({ fromMs: ms, toMs: r.toMs }))
+                  }}
+                />
+              </label>
+              <label className="subtle-copy">
+                to{' '}
+                <input
+                  type="datetime-local"
+                  value={toLocalDtInput(range.toMs)}
+                  onChange={(e) => {
+                    const ms = Date.parse(e.target.value)
+                    if (!Number.isNaN(ms)) setRange((r) => ({ fromMs: r.fromMs, toMs: ms }))
+                  }}
+                />
+              </label>
+            </div>
+          </details>
         </div>
 
         <div className="metrics-control-group">
