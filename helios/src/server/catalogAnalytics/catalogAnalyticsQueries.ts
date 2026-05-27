@@ -57,30 +57,49 @@ function asStr(v: unknown): string | null {
 
 // ============================ Filters endpoint =============================
 
-export async function getCatalogAnalyticsFilters(opts: {
-  sites: readonly string[]
-}): Promise<CatalogAnalyticsFiltersResponse> {
+export interface CatalogAnalyticsFiltersArgs {
+  readonly sites: readonly string[]
+  readonly categoryIds?: readonly string[]
+  readonly subcategoryIds?: readonly string[]
+  readonly brandIds?: readonly string[]
+  readonly sizes?: readonly string[]
+}
+
+export async function getCatalogAnalyticsFilters(
+  opts: CatalogAnalyticsFiltersArgs,
+): Promise<CatalogAnalyticsFiltersResponse> {
   const dealerIds = resolveDealerIds(opts.sites)
   if (dealerIds.length === 0) {
     return { categories: [], subcategories: [], brands: [], sizes: [] }
   }
   const pool = getPool()
 
-  // Restrict filter options to packages that are currently active (on
-  // stock or recently observed) so the dropdowns don't drown the operator
-  // in long-tail historical SKUs. We still keep zero-on-hand packages
-  // because they are part of valid analytics queries (sold through, want
-  // to see how they did).
+  const categoryIds = opts.categoryIds ?? []
+  const subcategoryIds = opts.subcategoryIds ?? []
+  const brandIds = opts.brandIds ?? []
+  const sizes = opts.sizes ?? []
+
+  // Restrict filter options to packages currently in sweed_package_current.
+  // We keep zero-on-hand packages because they are valid analytics
+  // targets (sold-through, want to see how they did).
   //
-  // Taxonomy (brand / category / subcategory) lives on `catalog_groups`,
-  // not on the snapshot row itself — `sweed_package_snapshots.brand_*` /
-  // `category_*` columns are currently NULL because the live grouped
-  // inventory feed doesn't carry them. We join through
-  // `live_state_json->'products'[]` whose `productId` matches
-  // `sweed_package_current.product_id`. (99%+ coverage observed.)
-  // Size label is also carried in the catalog_groups products list as
-  // `sizeName` — the snapshot's `size_label` column is empty for the
-  // same reason.
+  // Taxonomy (brand / category / subcategory / size) lives on
+  // `catalog_groups`, not on the snapshot row itself — those snapshot
+  // columns ship NULL from the grouped inventory feed. We join through
+  // `live_state_json->'products'[]` (productId match). 99%+ coverage.
+  //
+  // Cumulative semantics: each dimension's option list is computed by
+  // applying the OTHER three dimensions' selections, but ignoring its
+  // own. That way the operator can deselect what they just chose, and
+  // selecting category=Flower narrows brand/subcategory/size to peers
+  // within Flower with correct (n=) counts.
+  //
+  // Parameter slots:
+  //   $1 = dealerIds bigint[]
+  //   $2 = categoryIds text[]    (selected categories — coalesced labels)
+  //   $3 = subcategoryIds text[] (selected subcategories)
+  //   $4 = brandIds text[]       (selected brands)
+  //   $5 = sizes text[]          (selected sizes)
   const sql = `
     with mapping as (
       select cg.brand_name,
@@ -92,47 +111,66 @@ export async function getCatalogAnalyticsFilters(opts: {
            jsonb_array_elements(cg.live_state_json->'products') as prod
       where cg.deleted_at is null
     ),
-    cur as (
-      select spc.dealer_id,
-             spc.inventory_item_id,
+    base as (
+      select spc.inventory_item_id,
              m.category_name,
              m.subcategory_name,
              m.brand_name,
-             m.size_name as size_label
+             m.size_name,
+             coalesce(nullif(m.category_name, ''),    '(uncategorised)')   as category_label,
+             coalesce(nullif(m.subcategory_name, ''), '(no subcategory)')  as subcategory_label,
+             coalesce(nullif(m.brand_name, ''),       '(no brand)')        as brand_label,
+             coalesce(nullif(m.size_name, ''),        '(no size)')         as size_label
       from sweed_package_current spc
         left join mapping m on m.product_id = spc.product_id
       where spc.dealer_id = any($1::bigint[])
     )
+    -- categories: apply subcat + brand + size selections, NOT category
     select 'category' as kind,
-           coalesce(nullif(category_name, ''), '(uncategorised)') as id,
-           coalesce(nullif(category_name, ''), '(uncategorised)') as label,
+           category_label as id,
+           category_label as label,
            count(distinct inventory_item_id)::int as item_count
-    from cur
+    from base
     where category_name is not null
+      and (cardinality($3::text[]) = 0 or subcategory_label = any($3::text[]))
+      and (cardinality($4::text[]) = 0 or brand_label       = any($4::text[]))
+      and (cardinality($5::text[]) = 0 or size_label        = any($5::text[]))
     group by 1, 2, 3
     union all
+    -- subcategories: apply category + brand + size, NOT subcategory
     select 'subcategory',
-           coalesce(nullif(subcategory_name, ''), '(no subcategory)'),
-           coalesce(nullif(subcategory_name, ''), '(no subcategory)'),
+           subcategory_label,
+           subcategory_label,
            count(distinct inventory_item_id)::int
-    from cur
+    from base
     where subcategory_name is not null
+      and (cardinality($2::text[]) = 0 or category_label = any($2::text[]))
+      and (cardinality($4::text[]) = 0 or brand_label    = any($4::text[]))
+      and (cardinality($5::text[]) = 0 or size_label     = any($5::text[]))
     group by 1, 2, 3
     union all
+    -- brands: apply category + subcat + size, NOT brand
     select 'brand',
-           coalesce(nullif(brand_name, ''), '(no brand)'),
-           coalesce(nullif(brand_name, ''), '(no brand)'),
+           brand_label,
+           brand_label,
            count(distinct inventory_item_id)::int
-    from cur
+    from base
     where brand_name is not null
+      and (cardinality($2::text[]) = 0 or category_label    = any($2::text[]))
+      and (cardinality($3::text[]) = 0 or subcategory_label = any($3::text[]))
+      and (cardinality($5::text[]) = 0 or size_label        = any($5::text[]))
     group by 1, 2, 3
     union all
+    -- sizes: apply category + subcat + brand, NOT size
     select 'size',
-           coalesce(nullif(size_label, ''), '(no size)'),
-           coalesce(nullif(size_label, ''), '(no size)'),
+           size_label,
+           size_label,
            count(distinct inventory_item_id)::int
-    from cur
-    where size_label is not null
+    from base
+    where size_name is not null
+      and (cardinality($2::text[]) = 0 or category_label    = any($2::text[]))
+      and (cardinality($3::text[]) = 0 or subcategory_label = any($3::text[]))
+      and (cardinality($4::text[]) = 0 or brand_label       = any($4::text[]))
     group by 1, 2, 3
   `
 
@@ -141,7 +179,7 @@ export async function getCatalogAnalyticsFilters(opts: {
     id: string
     label: string
     item_count: number
-  }>(sql, [dealerIds])
+  }>(sql, [dealerIds, categoryIds, subcategoryIds, brandIds, sizes])
 
   const out: CatalogAnalyticsFiltersResponse = {
     categories: [],
@@ -160,14 +198,21 @@ export async function getCatalogAnalyticsFilters(opts: {
     else if (row.kind === 'brand') out.brands.push(opt)
     else out.sizes.push(opt)
   }
-  // Sort each list by item_count desc, then label asc — high-signal
-  // options bubble to the top.
+  // Sort:
+  //  * categories / subcategories / sizes — count desc, label asc.
+  //    These are short, structurally-meaningful enumerations where
+  //    "what's biggest first" is what the operator looks for.
+  //  * brands — alphabetical only. There are dozens of comparable
+  //    brands; the operator generally knows the brand they're looking
+  //    for and wants to find it by name, not by volume.
   const sortByCount = (a: CatalogFilterOption, b: CatalogFilterOption) =>
     b.itemCount - a.itemCount || a.label.localeCompare(b.label)
+  const sortByLabel = (a: CatalogFilterOption, b: CatalogFilterOption) =>
+    a.label.localeCompare(b.label)
   out.categories.sort(sortByCount)
   out.subcategories.sort(sortByCount)
-  out.brands.sort(sortByCount)
   out.sizes.sort(sortByCount)
+  out.brands.sort(sortByLabel)
   return out
 }
 

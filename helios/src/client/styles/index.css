@@ -3297,3 +3297,82 @@ a.tree-nav-branch-label.is-link,
   color: #666;
   padding: 0.25rem 0;
 }
+
+/* ============================================================
+ * Catalog analytics tab — filter bar & dropdown panels
+ * ============================================================
+ *
+ * The filter bar (Category / Subcategory / Brand / Size dropdowns +
+ * "clear all") flows as a horizontal pill row that wraps at narrow
+ * widths. Each filter pill anchors a click-to-open absolute panel that
+ * holds a search box and a scrollable checkbox list.
+ */
+.catalog-analytics-filterbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem 0.5rem;
+  padding: 0.4rem 0;
+}
+
+.catalog-analytics-filterdrop {
+  position: relative;
+  display: inline-flex;
+}
+
+.catalog-analytics-filterdrop-panel {
+  position: absolute;
+  top: calc(100% + 0.25rem);
+  left: 0;
+  z-index: 20;
+  min-width: 220px;
+  max-width: min(360px, 90vw);
+  background: var(--panel);
+  border: 1px solid var(--control-border);
+  border-radius: 6px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.12);
+  padding: 0.4rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.catalog-analytics-filterdrop-search {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 0.3rem 0.45rem;
+  border: 1px solid var(--control-border);
+  border-radius: 4px;
+  font-size: 0.9rem;
+}
+
+.catalog-analytics-filterdrop-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.catalog-analytics-filterdrop-list > li {
+  margin: 0;
+  padding: 0;
+}
+
+.catalog-analytics-filterdrop-item {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.2rem 0.4rem;
+  font-size: 0.88rem;
+  cursor: pointer;
+  border-radius: 4px;
+}
+
+.catalog-analytics-filterdrop-item:hover {
+  background: rgba(155, 74, 34, 0.06);
+}
+
+.catalog-analytics-pointcount {
+  margin: 0.4rem 0 0.2rem;
+}

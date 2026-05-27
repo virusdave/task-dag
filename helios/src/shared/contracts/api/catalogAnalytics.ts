@@ -50,8 +50,6 @@ export type CatalogAnalyticsFiltersResponse = z.infer<
   typeof CatalogAnalyticsFiltersResponseSchema
 >
 
-// =============================== Points endpoint ===========================
-
 const csvList = z
   .string()
   .optional()
@@ -63,6 +61,25 @@ const csvList = z
           .filter((s) => s.length > 0)
       : [],
   )
+
+/**
+ * Cumulative-filter request. Each selected-dimension list narrows the
+ * options/counts returned for the OTHER dimensions (the dimension's
+ * own selection is intentionally ignored when computing its own list
+ * — otherwise the user could only ever see what they already picked).
+ */
+export const CatalogAnalyticsFiltersRequestSchema = z.object({
+  sites: csvList,
+  categoryIds: csvList,
+  subcategoryIds: csvList,
+  brandIds: csvList,
+  sizes: csvList,
+})
+export type CatalogAnalyticsFiltersRequest = z.infer<
+  typeof CatalogAnalyticsFiltersRequestSchema
+>
+
+// =============================== Points endpoint ===========================
 
 export const CatalogAnalyticsPointsRequestSchema = z.object({
   from: z.string().datetime().optional(),

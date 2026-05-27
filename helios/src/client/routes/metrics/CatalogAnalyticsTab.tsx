@@ -347,6 +347,22 @@ export function CatalogAnalyticsTab() {
   const [selectedSizes, setSelectedSizes] = useState<ReadonlySet<string>>(() => new Set<string>())
 
   const sitesParam = useMemo(() => Array.from(selectedSites).join(','), [selectedSites])
+  const categoryIdsParam = useMemo(
+    () => Array.from(selectedCategoryIds).sort().join(','),
+    [selectedCategoryIds],
+  )
+  const subcategoryIdsParam = useMemo(
+    () => Array.from(selectedSubcategoryIds).sort().join(','),
+    [selectedSubcategoryIds],
+  )
+  const brandIdsParam = useMemo(
+    () => Array.from(selectedBrandIds).sort().join(','),
+    [selectedBrandIds],
+  )
+  const sizesParam = useMemo(
+    () => Array.from(selectedSizes).sort().join(','),
+    [selectedSizes],
+  )
 
   // -------- Page-wide chart controls --------
   const [pageColourBy, setPageColourBy] = useState<ColourByKey | 'per-chart'>('per-chart')
@@ -357,30 +373,46 @@ export function CatalogAnalyticsTab() {
   const [loadingPoints, setLoadingPoints] = useState<boolean>(true)
   const [error, setError] = useState<string | null>(null)
 
-  // Fetch filter options whenever sites change.
+  // Fetch filter options whenever sites OR any selected filter changes.
+  // The server applies the OTHER dimensions' selections (cumulative
+  // narrowing) so the n=… counts and dropdown contents always reflect
+  // what would actually be in scope if the operator added one more
+  // pick. The current dimension's own selection is intentionally not
+  // applied to itself (so the user can still see/deselect their picks).
+  //
+  // Debounced so rapid-fire chip-clicks don't fire N requests.
   useEffect(() => {
     let cancelled = false
     setLoadingFilters(true)
-    const url = sitesParam
-      ? `/api/catalog-analytics/filters?sites=${encodeURIComponent(sitesParam)}`
-      : '/api/catalog-analytics/filters'
-    loadJson(url, CatalogAnalyticsFiltersResponseSchema)
-      .then((r) => {
-        if (!cancelled) setFilters(r)
-      })
-      .catch((e) => {
-        if (!cancelled) {
-          setError(`Failed to load filter options: ${(e as Error).message}`)
-          setFilters({ categories: [], subcategories: [], brands: [], sizes: [] })
-        }
-      })
-      .finally(() => {
-        if (!cancelled) setLoadingFilters(false)
-      })
+    const handle = setTimeout(() => {
+      const qs = new URLSearchParams()
+      if (sitesParam) qs.set('sites', sitesParam)
+      if (categoryIdsParam) qs.set('categoryIds', categoryIdsParam)
+      if (subcategoryIdsParam) qs.set('subcategoryIds', subcategoryIdsParam)
+      if (brandIdsParam) qs.set('brandIds', brandIdsParam)
+      if (sizesParam) qs.set('sizes', sizesParam)
+      const url = qs.toString()
+        ? `/api/catalog-analytics/filters?${qs.toString()}`
+        : '/api/catalog-analytics/filters'
+      loadJson(url, CatalogAnalyticsFiltersResponseSchema)
+        .then((r) => {
+          if (!cancelled) setFilters(r)
+        })
+        .catch((e) => {
+          if (!cancelled) {
+            setError(`Failed to load filter options: ${(e as Error).message}`)
+            setFilters({ categories: [], subcategories: [], brands: [], sizes: [] })
+          }
+        })
+        .finally(() => {
+          if (!cancelled) setLoadingFilters(false)
+        })
+    }, 250)
     return () => {
       cancelled = true
+      clearTimeout(handle)
     }
-  }, [sitesParam])
+  }, [sitesParam, categoryIdsParam, subcategoryIdsParam, brandIdsParam, sizesParam])
 
   // Fetch points whenever ANY filter changes. We debounce filter changes
   // by 250ms so multi-select chip-clicks don't trigger N queries.

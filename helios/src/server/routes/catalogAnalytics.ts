@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify'
 
 import {
+  CatalogAnalyticsFiltersRequestSchema,
   CatalogAnalyticsFiltersResponseSchema,
   CatalogAnalyticsPointsRequestSchema,
   CatalogAnalyticsPointsResponseSchema,
@@ -17,21 +18,28 @@ const DAY_MS = 86_400_000
 export async function registerCatalogAnalyticsRoutes(
   server: FastifyInstance,
 ): Promise<void> {
-  // GET /api/catalog-analytics/filters?sites=…
+  // GET /api/catalog-analytics/filters?sites=&categoryIds=&subcategoryIds=&brandIds=&sizes=
   // Returns the available dropdown options (categories / subcategories /
   // brands / sizes) for the filter bar on the /metrics → Catalog
   // analytics tab. Restricted to packages currently visible on
   // sweed_package_current.
+  //
+  // Cumulative semantics: passing any non-empty dimension list narrows
+  // the OTHER dimensions' option sets / counts to items matching those
+  // selections. A dimension's own selection is intentionally not
+  // applied to itself (so the user always sees the full peer set in
+  // its own dropdown).
   server.get('/api/catalog-analytics/filters', async (request, reply) => {
     const user = await requireSessionUser(request, reply, 'viewer')
     if (!user) return
-    const q = request.query as Record<string, unknown>
-    const sitesRaw = typeof q.sites === 'string' ? q.sites : ''
-    const sites = sitesRaw
-      .split(',')
-      .map((s) => s.trim())
-      .filter((s) => s.length > 0)
-    const result = await getCatalogAnalyticsFilters({ sites })
+    const parsed = CatalogAnalyticsFiltersRequestSchema.parse(request.query ?? {})
+    const result = await getCatalogAnalyticsFilters({
+      sites: parsed.sites,
+      categoryIds: parsed.categoryIds,
+      subcategoryIds: parsed.subcategoryIds,
+      brandIds: parsed.brandIds,
+      sizes: parsed.sizes,
+    })
     return reply.send(CatalogAnalyticsFiltersResponseSchema.parse(result))
   })
 
