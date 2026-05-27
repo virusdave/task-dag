@@ -177,7 +177,16 @@ function AppShellInner() {
     if (typeof window === 'undefined') {
       return false
     }
-    return window.localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY) === 'true'
+    // On mobile, default to *collapsed* regardless of the desktop
+    // preference — otherwise an operator who set the sidebar to
+    // expanded on desktop lands on their phone and sees a giant
+    // nav drawer hiding the content. They can still tap "Show
+    // nav" to re-open it; we just don't impose the desktop default.
+    const stored = window.localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY)
+    if (window.matchMedia(MOBILE_BREAKPOINT_QUERY).matches) {
+      return true
+    }
+    return stored === 'true'
   })
   const runtimeWarnings = session.runtimeDependencies.filter((dependency) => dependency.status !== 'configured')
 

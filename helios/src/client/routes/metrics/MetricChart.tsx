@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react'
 import { z } from 'zod'
 
 import {
@@ -13,6 +21,7 @@ import { loadJson, mutateJson } from '../../app/fetchJson.js'
 
 import { useTimeAxis, type TimeWindow } from './TimeAxisContext.js'
 import { bucketXTicks, formatXTick, formatYTick, niceYTicks } from './gridlines.js'
+import { useScatterZoom, type ZoomView } from './scatterZoom.js'
 
 // We re-fetch the annotation list after every mutation, so we don't
 // need to consume the response payload — a passthrough schema lets us
@@ -1313,13 +1322,30 @@ function ScatterSvg({ response, loading, error, window, interactive }: ScatterSv
     }
   }, [response, xSeries, ySeries])
 
+  // Zoom / pan: shares the same hook with `CatalogScatterSvg`, so
+  // gestures (Ctrl/⌘+wheel, pinch, double-click reset) and reset-chip
+  // UX are identical across every scatter on the dashboard. Hovering
+  // is suppressed during gestures and clipped points are ignored.
+  const svgRef = useRef<SVGSVGElement | null>(null)
+  const baseDomain: ZoomView | null = useMemo(() => {
+    if (points.length === 0) return null
+    return { xMin, xMax, yMin, yMax }
+  }, [points.length, xMin, xMax, yMin, yMax])
+  const zoom = useScatterZoom({
+    baseDomain,
+    svgRef,
+    plot: { left: marginLeft, top: marginTop, width: plotW, height: plotH },
+  })
+  const view = zoom.view ?? { xMin, xMax, yMin, yMax }
+  const clipId = useId()
+
   const xScale = useCallback(
-    (v: number) => marginLeft + ((v - xMin) / (xMax - xMin)) * plotW,
-    [marginLeft, plotW, xMin, xMax],
+    (v: number) => marginLeft + ((v - view.xMin) / (view.xMax - view.xMin)) * plotW,
+    [marginLeft, plotW, view.xMin, view.xMax],
   )
   const yScale = useCallback(
-    (v: number) => marginTop + plotH - ((v - yMin) / (yMax - yMin)) * plotH,
-    [marginTop, plotH, yMin, yMax],
+    (v: number) => marginTop + plotH - ((v - view.yMin) / (view.yMax - view.yMin)) * plotH,
+    [marginTop, plotH, view.yMin, view.yMax],
   )
 
   const colourForSite = useCallback(
@@ -1332,15 +1358,19 @@ function ScatterSvg({ response, loading, error, window, interactive }: ScatterSv
     [sites],
   )
 
-  // Hover: track which dot (if any) is closest to the pointer, in
-  // squared-pixel distance. We bail early outside a small radius so
-  // moving across empty space doesn't show a stale tooltip.
-  const svgRef = useRef<SVGSVGElement | null>(null)
+  // Hover: track which visible dot (if any) is closest to the pointer.
+  // Points panned/zoomed off-plot are ignored. Hover is also disabled
+  // while a pan/pinch/wheel gesture is in flight.
   const [hover, setHover] = useState<{ idx: number; clientX: number; clientY: number } | null>(null)
   const HOVER_PX = 18
   const HOVER_PX_SQ = HOVER_PX * HOVER_PX
   const onPointerMove = useCallback(
     (e: React.PointerEvent<SVGSVGElement>) => {
+      zoom.handlers.onPointerMove(e)
+      if (zoom.gestureActive) {
+        if (hover) setHover(null)
+        return
+      }
       const svg = svgRef.current
       if (!svg || points.length === 0) return
       const ctm = svg.getScreenCTM()
@@ -1353,6 +1383,14 @@ function ScatterSvg({ response, loading, error, window, interactive }: ScatterSv
       let bestDistSq = Infinity
       for (let i = 0; i < points.length; i++) {
         const p = points[i]!
+        if (
+          p.x < view.xMin ||
+          p.x > view.xMax ||
+          p.y < view.yMin ||
+          p.y > view.yMax
+        ) {
+          continue
+        }
         const dx = xScale(p.x) - local.x
         const dy = yScale(p.y) - local.y
         const dsq = dx * dx + dy * dy
@@ -1367,7 +1405,18 @@ function ScatterSvg({ response, loading, error, window, interactive }: ScatterSv
         setHover(null)
       }
     },
-    [points, xScale, yScale, HOVER_PX_SQ],
+    [
+      points,
+      xScale,
+      yScale,
+      HOVER_PX_SQ,
+      zoom,
+      hover,
+      view.xMin,
+      view.xMax,
+      view.yMin,
+      view.yMax,
+    ],
   )
   const onPointerLeave = useCallback(() => setHover(null), [])
 
@@ -1376,8 +1425,8 @@ function ScatterSvg({ response, loading, error, window, interactive }: ScatterSv
   // Axis ticks — five evenly spaced labels per axis is plenty for an
   // operator scanning a correlation. Matches the data-density of the
   // line-chart axis labels.
-  const xTicks = useMemo(() => makeTicks(xMin, xMax, 5), [xMin, xMax])
-  const yTicks = useMemo(() => makeTicks(yMin, yMax, 5), [yMin, yMax])
+  const xTicks = useMemo(() => makeTicks(view.xMin, view.xMax, 5), [view.xMin, view.xMax])
+  const yTicks = useMemo(() => makeTicks(view.yMin, view.yMax, 5), [view.yMin, view.yMax])
 
   const hasData = points.length > 0
   const windowLabel = `${shortDate(window.fromMs)} → ${shortDate(window.toMs)}`
@@ -1396,10 +1445,23 @@ function ScatterSvg({ response, loading, error, window, interactive }: ScatterSv
             ? `Scatter chart: ${ySeries.label} (y) vs ${xSeries.label} (x), ${windowLabel}`
             : 'Scatter chart'
         }
+        onPointerDown={interactive ? zoom.handlers.onPointerDown : undefined}
         onPointerMove={interactive ? onPointerMove : undefined}
+        onPointerUp={interactive ? zoom.handlers.onPointerUp : undefined}
+        onPointerCancel={interactive ? zoom.handlers.onPointerCancel : undefined}
         onPointerLeave={interactive ? onPointerLeave : undefined}
-        style={{ touchAction: 'auto', cursor: interactive ? 'crosshair' : 'pointer' }}
+        onDoubleClick={interactive ? zoom.handlers.onDoubleClick : undefined}
+        style={{
+          touchAction: interactive ? zoom.svgStyle.touchAction : 'auto',
+          cursor: interactive ? 'crosshair' : 'pointer',
+        }}
       >
+        {/* Clip dots so zoom/pan can't draw over the axis frame. */}
+        <defs>
+          <clipPath id={clipId}>
+            <rect x={marginLeft} y={marginTop} width={plotW} height={plotH} />
+          </clipPath>
+        </defs>
         {/* axis frame */}
         <line
           x1={marginLeft}
@@ -1475,20 +1537,23 @@ function ScatterSvg({ response, loading, error, window, interactive }: ScatterSv
           </text>
         ) : null}
 
-        {/* dots */}
-        {points.map((p, i) => (
-          <circle
-            key={i}
-            cx={xScale(p.x)}
-            cy={yScale(p.y)}
-            r={hover?.idx === i ? 5 : 3}
-            fill={colourForSite(p.site)}
-            fillOpacity={hover?.idx === i ? 1 : 0.55}
-            stroke={hover?.idx === i ? '#000' : 'none'}
-            strokeWidth={hover?.idx === i ? 1 : 0}
-            pointerEvents="none"
-          />
-        ))}
+        {/* dots (clipped to the plot rect so panned points can't draw
+            over the axis labels or chart frame) */}
+        <g clipPath={`url(#${clipId})`}>
+          {points.map((p, i) => (
+            <circle
+              key={i}
+              cx={xScale(p.x)}
+              cy={yScale(p.y)}
+              r={hover?.idx === i ? 5 : 3}
+              fill={colourForSite(p.site)}
+              fillOpacity={hover?.idx === i ? 1 : 0.55}
+              stroke={hover?.idx === i ? '#000' : 'none'}
+              strokeWidth={hover?.idx === i ? 1 : 0}
+              pointerEvents="none"
+            />
+          ))}
+        </g>
 
         {loading && !response ? (
           <text x={width / 2} y={marginTop + plotH / 2} textAnchor="middle" fontSize="12" fill="#999">
@@ -1502,6 +1567,18 @@ function ScatterSvg({ response, loading, error, window, interactive }: ScatterSv
           </text>
         ) : null}
       </svg>
+
+      {interactive && zoom.isZoomed ? (
+        <button
+          type="button"
+          className="metric-chart-zoom-reset"
+          onClick={zoom.resetView}
+          aria-label="Reset zoom"
+          title="Reset zoom (double-click chart)"
+        >
+          Reset zoom
+        </button>
+      ) : null}
 
       <ScatterLegend sites={sites} colourFor={colourForSite} />
 

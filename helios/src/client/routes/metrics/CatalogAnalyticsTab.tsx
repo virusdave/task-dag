@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useId,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -16,6 +17,7 @@ import {
   type CatalogFilterOption,
 } from '../../../shared/contracts/index.js'
 import { loadJson } from '../../app/fetchJson.js'
+import { useScatterZoom, type ZoomView } from './scatterZoom.js'
 
 // ---------------------------------------------------------------------------
 // Catalog analytics tab — independent of the time-series metric registry.
@@ -2158,6 +2160,22 @@ function CatalogScatterSvg({
 
   const { plotted, buckets, xMin, xMax, yMin, yMax, sMin, sMax, oMin, oMax } = computed
 
+  // Zoom / pan hook. Base domain is the just-computed data extent;
+  // the hook owns the visible window (`view`) and the gesture event
+  // handlers. We snap base back to `null` while loading or when the
+  // plot is empty so the hook can no-op without crashing.
+  const baseDomain: ZoomView | null = useMemo(() => {
+    if (plotted.length === 0) return null
+    return { xMin, xMax, yMin, yMax }
+  }, [plotted.length, xMin, xMax, yMin, yMax])
+  const zoom = useScatterZoom({
+    baseDomain,
+    svgRef,
+    plot: { left: marginLeft, top: marginTop, width: plotW, height: plotH },
+  })
+  const view = zoom.view ?? { xMin, xMax, yMin, yMax }
+  const clipId = useId()
+
   // Build a per-point radius/opacity resolver using the card-local
   // size/opacity domains. Square-root scaling for radius so visible
   // area (not radius) is proportional to magnitude. We clamp to a
@@ -2191,18 +2209,22 @@ function CatalogScatterSvg({
   )
 
   const xScale = useCallback(
-    (v: number) => marginLeft + ((v - xMin) / (xMax - xMin)) * plotW,
-    [marginLeft, plotW, xMin, xMax],
+    (v: number) => marginLeft + ((v - view.xMin) / (view.xMax - view.xMin)) * plotW,
+    [marginLeft, plotW, view.xMin, view.xMax],
   )
   const yScale = useCallback(
-    (v: number) => marginTop + plotH - ((v - yMin) / (yMax - yMin)) * plotH,
-    [marginTop, plotH, yMin, yMax],
+    (v: number) => marginTop + plotH - ((v - view.yMin) / (view.yMax - view.yMin)) * plotH,
+    [marginTop, plotH, view.yMin, view.yMax],
   )
 
-  const xTicks = useMemo(() => makeTicks(xMin, xMax, 5), [xMin, xMax])
-  const yTicks = useMemo(() => makeTicks(yMin, yMax, 5), [yMin, yMax])
+  const xTicks = useMemo(() => makeTicks(view.xMin, view.xMax, 5), [view.xMin, view.xMax])
+  const yTicks = useMemo(() => makeTicks(view.yMin, view.yMax, 5), [view.yMin, view.yMax])
 
-  // Hover
+  // Hover. We track the *visible* nearest dot only — anything panned/
+  // zoomed outside the current view is ignored so a clipped offscreen
+  // point near the plot edge can't win the hover search. Hover is
+  // suppressed during an active zoom/pan gesture for the same reason
+  // (the tooltip would flicker and obscure the chart).
   const [hover, setHover] = useState<{ idx: number; clientX: number; clientY: number } | null>(
     null,
   )
@@ -2210,6 +2232,12 @@ function CatalogScatterSvg({
   const HOVER_PX_SQ = HOVER_PX * HOVER_PX
   const onPointerMove = useCallback(
     (e: React.PointerEvent<SVGSVGElement>) => {
+      // Forward to the zoom hook first so pinch/pan can run.
+      zoom.handlers.onPointerMove(e)
+      if (zoom.gestureActive) {
+        if (hover) setHover(null)
+        return
+      }
       const svg = svgRef.current
       if (!svg || plotted.length === 0) return
       const ctm = svg.getScreenCTM()
@@ -2222,6 +2250,15 @@ function CatalogScatterSvg({
       let bestDistSq = Infinity
       for (let i = 0; i < plotted.length; i++) {
         const pp = plotted[i]!
+        // skip points outside the visible view — they're clipped
+        if (
+          pp.x < view.xMin ||
+          pp.x > view.xMax ||
+          pp.y < view.yMin ||
+          pp.y > view.yMax
+        ) {
+          continue
+        }
         const dx = xScale(pp.x) - local.x
         const dy = yScale(pp.y) - local.y
         const d = dx * dx + dy * dy
@@ -2236,7 +2273,7 @@ function CatalogScatterSvg({
         setHover(null)
       }
     },
-    [plotted, xScale, yScale, HOVER_PX_SQ],
+    [plotted, xScale, yScale, HOVER_PX_SQ, zoom, hover, view.xMin, view.xMax, view.yMin, view.yMax],
   )
 
   const onPointerLeave = useCallback(() => setHover(null), [])
@@ -2253,9 +2290,26 @@ function CatalogScatterSvg({
         className="metric-chart-svg"
         role="img"
         aria-label={`Scatter: ${yDef.label} (y) vs ${xDef.label} (x)`}
+        onPointerDown={zoom.handlers.onPointerDown}
         onPointerMove={onPointerMove}
+        onPointerUp={zoom.handlers.onPointerUp}
+        onPointerCancel={zoom.handlers.onPointerCancel}
         onPointerLeave={onPointerLeave}
+        onDoubleClick={zoom.handlers.onDoubleClick}
+        style={zoom.svgStyle}
       >
+        {/* Clip dots / reference lines so panned content can't leak
+            over the axes, tick labels, or the chart frame. */}
+        <defs>
+          <clipPath id={clipId}>
+            <rect
+              x={marginLeft}
+              y={marginTop}
+              width={plotW}
+              height={plotH}
+            />
+          </clipPath>
+        </defs>
         {/* axes */}
         <line
           x1={marginLeft}
@@ -2324,83 +2378,88 @@ function CatalogScatterSvg({
         >
           {yDef.label}
         </text>
-        {/* Reference line annotations.
-            - diagonal:  y = x in axis space (e.g. List OTD vs Effective
-                         OTD — clipped to the overlapping range so the
-                         line stays inside the plot area).
-            - unit-y:    horizontal line at y = 1 (index axes; 1.0× =
-                         cohort median).
-            - unit-x:    vertical line at x = 1. */}
-        {referenceLine === 'diagonal' &&
-        plotted.length > 0 &&
-        Number.isFinite(xMin) &&
-        Number.isFinite(yMin) ? (
-          <>
-            {(() => {
-              const lo = Math.max(xMin, yMin)
-              const hi = Math.min(xMax, yMax)
-              if (!(hi > lo)) return null
-              return (
-                <line
-                  x1={xScale(lo)}
-                  y1={yScale(lo)}
-                  x2={xScale(hi)}
-                  y2={yScale(hi)}
-                  stroke="#999"
-                  strokeDasharray="4 4"
-                  strokeWidth={1}
-                />
-              )
-            })()}
-          </>
-        ) : null}
-        {referenceLine === 'unit-y' && yMin <= 1 && yMax >= 1 ? (
-          <line
-            x1={xScale(xMin)}
-            y1={yScale(1)}
-            x2={xScale(xMax)}
-            y2={yScale(1)}
-            stroke="#999"
-            strokeDasharray="4 4"
-            strokeWidth={1}
-          />
-        ) : null}
-        {referenceLine === 'unit-x' && xMin <= 1 && xMax >= 1 ? (
-          <line
-            x1={xScale(1)}
-            y1={yScale(yMin)}
-            x2={xScale(1)}
-            y2={yScale(yMax)}
-            stroke="#999"
-            strokeDasharray="4 4"
-            strokeWidth={1}
-          />
-        ) : null}
-        {/* dots */}
-        {plotted.map((pp, idx) => (
-          <circle
-            key={`${pp.p.inventoryItemId}-${idx}`}
-            cx={xScale(pp.x)}
-            cy={yScale(pp.y)}
-            r={dotRadius(pp.sizeValue)}
-            fill={colourFor(pp.bucket, buckets)}
-            fillOpacity={dotOpacity(pp.opacityValue)}
-            stroke="#fff"
-            strokeWidth={0.5}
-          />
-        ))}
-        {/* hovered dot highlight */}
-        {hovered ? (
-          <circle
-            cx={xScale(hovered.x)}
-            cy={yScale(hovered.y)}
-            r={6}
-            fill="none"
-            stroke="#111"
-            strokeWidth={1.5}
-          />
-        ) : null}
+        {/* Everything that lives inside the plot rectangle — reference
+            lines, dots, hover highlight — is clipped so zoom/pan can't
+            paint over the axis, ticks, or chart frame. */}
+        <g clipPath={`url(#${clipId})`}>
+          {/* Reference line annotations.
+              - diagonal:  y = x in axis space (clipped naturally by the
+                           plot rect — we no longer need to manually
+                           intersect with the visible range, since the
+                           clipPath does it for us regardless of zoom).
+              - unit-y:    horizontal line at y = 1 (index axes).
+              - unit-x:    vertical line at x = 1. */}
+          {referenceLine === 'diagonal' && plotted.length > 0 ? (
+            <line
+              x1={xScale(Math.min(view.xMin, view.yMin) - 1)}
+              y1={yScale(Math.min(view.xMin, view.yMin) - 1)}
+              x2={xScale(Math.max(view.xMax, view.yMax) + 1)}
+              y2={yScale(Math.max(view.xMax, view.yMax) + 1)}
+              stroke="#999"
+              strokeDasharray="4 4"
+              strokeWidth={1}
+            />
+          ) : null}
+          {referenceLine === 'unit-y' ? (
+            <line
+              x1={xScale(view.xMin)}
+              y1={yScale(1)}
+              x2={xScale(view.xMax)}
+              y2={yScale(1)}
+              stroke="#999"
+              strokeDasharray="4 4"
+              strokeWidth={1}
+            />
+          ) : null}
+          {referenceLine === 'unit-x' ? (
+            <line
+              x1={xScale(1)}
+              y1={yScale(view.yMin)}
+              x2={xScale(1)}
+              y2={yScale(view.yMax)}
+              stroke="#999"
+              strokeDasharray="4 4"
+              strokeWidth={1}
+            />
+          ) : null}
+          {/* dots */}
+          {plotted.map((pp, idx) => (
+            <circle
+              key={`${pp.p.inventoryItemId}-${idx}`}
+              cx={xScale(pp.x)}
+              cy={yScale(pp.y)}
+              r={dotRadius(pp.sizeValue)}
+              fill={colourFor(pp.bucket, buckets)}
+              fillOpacity={dotOpacity(pp.opacityValue)}
+              stroke="#fff"
+              strokeWidth={0.5}
+            />
+          ))}
+          {/* hovered dot highlight */}
+          {hovered ? (
+            <circle
+              cx={xScale(hovered.x)}
+              cy={yScale(hovered.y)}
+              r={6}
+              fill="none"
+              stroke="#111"
+              strokeWidth={1.5}
+            />
+          ) : null}
+        </g>
       </svg>
+
+      {zoom.isZoomed ? (
+        <button
+          type="button"
+          className="metric-chart-zoom-reset"
+          onClick={zoom.resetView}
+          aria-label="Reset zoom"
+          title="Reset zoom (double-click chart)"
+        >
+          Reset zoom
+        </button>
+      ) : null}
 
       {hovered ? (
         <ScatterTooltip

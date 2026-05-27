@@ -3385,3 +3385,88 @@ a.tree-nav-branch-label.is-link,
   padding-bottom: 0.5rem;
   border-bottom: 1px solid rgba(0, 0, 0, 0.08);
 }
+
+/* Reset-zoom chip overlaid on the chart wrapper. Sized to match the
+   small-control aesthetic of `metric-chart-controls` and positioned
+   top-right above the SVG so it sits inside the card without growing
+   the card's overall height. */
+.metric-chart-zoom-reset {
+  position: absolute;
+  top: 0.45rem;
+  right: 0.55rem;
+  z-index: 1;
+  padding: 0.18rem 0.6rem;
+  font-size: 0.74rem;
+  font-weight: 600;
+  color: var(--ink, #17130f);
+  background: rgba(255, 250, 241, 0.92);
+  border: 1px solid var(--control-border);
+  border-radius: 999px;
+  cursor: pointer;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.08);
+}
+
+.metric-chart-zoom-reset:hover {
+  background: rgba(155, 74, 34, 0.12);
+}
+
+/* The chart wrapper needs to be a positioned containing block so the
+   reset-zoom button anchors inside the card rather than the page. */
+.metric-chart-svg-wrap {
+  position: relative;
+}
+
+/* ---------------- Mobile chrome -------------------- */
+@media (max-width: 720px) {
+  /* Compact top header: shrink the "Helios" headline, hide the
+     decorative "Freshly Baked NYC" eyebrow, and tighten meta gaps so
+     the H1 + nav-toggle + sign-out fit on a single row without
+     consuming half the viewport. Addresses operator complaint:
+     "too much of the screen is hidden by the always-visible top nav
+     header on mobile". */
+  .topbar {
+    margin-bottom: 0.65rem;
+    gap: 0.5rem;
+  }
+  .topbar h1 {
+    font-size: 1.25rem;
+    line-height: 1;
+  }
+  .topbar .eyebrow {
+    display: none;
+  }
+  .topbar-meta {
+    gap: 0.4rem;
+  }
+  /* The Name+Role pill is non-essential on mobile and crowds the
+     header. The Sign-out button is enough identity for an operator. */
+  .topbar-meta .user-chip {
+    display: none;
+  }
+
+  /* Metrics controls and catalog-controls strip: on desktop these are
+     sticky so the date range / sites / colour-by selectors follow the
+     operator as they scroll. On mobile, the bar wraps to many rows
+     (5 selects + chip row + sites row) and the sticky behavior eats
+     so much viewport that no chart is visible. Make it non-sticky on
+     mobile. */
+  .metrics-controls {
+    position: static;
+    padding: 0.4rem 0.5rem;
+    gap: 0.5rem;
+  }
+
+  /* Sub-tabs row inside catalog analytics: allow horizontal scroll
+     instead of wrapping into 3+ rows. Keeps each tab tappable while
+     hiding the rest off-screen behind a scrollbar — a familiar
+     mobile pattern. */
+  .catalog-analytics-subtabs {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    padding-bottom: 0.4rem;
+    -webkit-overflow-scrolling: touch;
+  }
+  .catalog-analytics-subtabs > button {
+    flex-shrink: 0;
+  }
+}
