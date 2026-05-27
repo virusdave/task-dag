@@ -706,6 +706,7 @@ function PendingPurchaseRowCard(
           marketMedianPostTax={item.marketMedianPostTaxPrice}
           competitorListings={mapToCompetitorListings(item.marketListings)}
           variant="compact"
+          onProposedPriceChange={editingLocked ? undefined : (next) => setDraftPrice(next.toFixed(2))}
         />
       ) : null}
 
@@ -802,6 +803,7 @@ function PendingPurchaseRowCard(
                 marketMedianPostTax={item.marketMedianPostTaxPrice}
                 competitorListings={mapToCompetitorListings(item.marketListings)}
                 variant="compact"
+                onProposedPriceChange={editingLocked ? undefined : (next) => setDraftPrice(next.toFixed(2))}
               />
             ) : null}
             {item.marketNote ? <p className="subtle-copy">{item.marketNote}</p> : null}
