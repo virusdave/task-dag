@@ -38,6 +38,11 @@ export interface ProductPricingMarketEvidence {
     dispensaryName: string
     eligibleForPricing: boolean
     exclusionReason: string | null
+    // Per-listing product image returned by the LitAlerts partner API
+    // on /v1/brands/:id/products. Populated for ~28% of NY products
+    // (May 2026). Surfaced to the pending-purchase review page so the
+    // operator can pick a competitor image as the catalog primary.
+    imageUrl: string | null
     listingName: string
     matchTier: 'exact' | 'fallback' | 'weak'
     postTaxPrice: number

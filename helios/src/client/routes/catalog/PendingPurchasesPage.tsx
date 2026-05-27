@@ -802,27 +802,60 @@ function PendingPurchaseRowCard(
               <div>
                 <h4 style={{ marginBottom: '0.5rem' }}>Lit Alerts competitor listings</h4>
                 <ul className="timeline-list compact-list">
-                  {item.marketListings.map((listing, index) => (
-                    <li key={buildPendingPurchaseMarketListingKey(listing, index)} style={{ display: 'flex', gap: '0.5rem', alignItems: 'flex-start' }}>
-                      {listing.imageUrl ? (
-                        <img
-                          alt=""
-                          loading="lazy"
-                          src={listing.imageUrl}
-                          style={{ width: '2.25rem', height: '2.25rem', objectFit: 'cover', borderRadius: '3px', border: '1px solid #ddd', flex: '0 0 auto' }}
-                        />
-                      ) : null}
-                      <div style={{ flex: 1, minWidth: 0 }}>
-                        <strong>{listing.dispensaryName}</strong>
-                        <div className="subtle-copy">{listing.listingName}</div>
-                        <div className="subtle-copy">
-                          {formatCurrency(listing.postTaxPrice)} post-tax · {formatCurrency(listing.preTaxPrice)} pre-tax · {formatPendingPurchaseDistanceBandLabel(listing.distanceBand, listing.distanceMiles)} · {listing.source}
+                  {item.marketListings.map((listing, index) => {
+                    const listingImage = listing.imageUrl ?? null
+                    const isSelectedImage = listingImage !== null && listingImage === draftImageUrl
+                    return (
+                      <li key={buildPendingPurchaseMarketListingKey(listing, index)} style={{ display: 'flex', gap: '0.5rem', alignItems: 'flex-start' }}>
+                        {listingImage ? (
+                          <button
+                            disabled={editingLocked}
+                            onClick={() => setDraftImageUrl(listingImage)}
+                            title={isSelectedImage ? 'This is the selected primary image' : 'Use this listing image as the primary image'}
+                            type="button"
+                            style={{
+                              padding: 0,
+                              border: isSelectedImage ? '2px solid #2563eb' : '1px solid #ddd',
+                              borderRadius: '3px',
+                              background: 'transparent',
+                              cursor: editingLocked ? 'not-allowed' : 'pointer',
+                              flex: '0 0 auto',
+                              lineHeight: 0,
+                            }}
+                          >
+                            <img
+                              alt=""
+                              loading="lazy"
+                              src={listingImage}
+                              style={{ width: '2.25rem', height: '2.25rem', objectFit: 'cover', borderRadius: '2px', display: 'block' }}
+                            />
+                          </button>
+                        ) : null}
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <strong>{listing.dispensaryName}</strong>
+                          <div className="subtle-copy">{listing.listingName}</div>
+                          <div className="subtle-copy">
+                            {formatCurrency(listing.postTaxPrice)} post-tax · {formatCurrency(listing.preTaxPrice)} pre-tax · {formatPendingPurchaseDistanceBandLabel(listing.distanceBand, listing.distanceMiles)} · {listing.source}
+                          </div>
+                          {!listing.eligibleForPricing && listing.exclusionReason ? <div className="subtle-copy">{listing.exclusionReason}</div> : null}
+                          {listing.url ? <a href={listing.url} rel="noreferrer" target="_blank">Open source listing</a> : null}
+                          {listingImage ? (
+                            <div>
+                              <button
+                                className="ghost-button"
+                                disabled={editingLocked || isSelectedImage}
+                                onClick={() => setDraftImageUrl(listingImage)}
+                                type="button"
+                                style={{ marginTop: '0.25rem', fontSize: '0.78rem', padding: '0.1rem 0.4rem' }}
+                              >
+                                {isSelectedImage ? 'Selected as primary image' : 'Use this image'}
+                              </button>
+                            </div>
+                          ) : null}
                         </div>
-                        {!listing.eligibleForPricing && listing.exclusionReason ? <div className="subtle-copy">{listing.exclusionReason}</div> : null}
-                        {listing.url ? <a href={listing.url} rel="noreferrer" target="_blank">Open source listing</a> : null}
-                      </div>
-                    </li>
-                  ))}
+                      </li>
+                    )
+                  })}
                 </ul>
               </div>
             ) : item.publicSources.length > 0 ? (

@@ -59,6 +59,26 @@ export function buildConfigSidebarSubtree(): TreeNavNode[] {
       ],
     },
     {
+      kind: 'branch',
+      navKey: 'config.litalerts',
+      label: 'LitAlerts',
+      to: buildHeliosModulePath('catalog', 'brand-mapping'),
+      children: [
+        {
+          // Brand-mapping page is physically routed under /catalog/brand-mapping
+          // because the data lives in `catalog_litalerts_brand_overrides` and
+          // the page was originally introduced under Catalog. We expose it
+          // here too so operators discover it where they expect (Config →
+          // LitAlerts → Brands), matching the place where other LitAlerts
+          // settings live.
+          kind: 'leaf',
+          navKey: 'config.litalerts.brands',
+          label: 'Brands',
+          to: buildHeliosModulePath('catalog', 'brand-mapping'),
+        },
+      ],
+    },
+    {
       kind: 'leaf',
       navKey: 'config.users',
       label: 'Users',

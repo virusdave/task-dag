@@ -1501,6 +1501,12 @@ async function buildGeneratedRow({
     gmPercent: computeGmPercent(resolvedCost.value, proposedPrice),
     marketAdvicePosture: pricingSupport.marketAvailability,
     marketAdviceSummary: pricingSupport.marketNote,
+    // Surface LitAlerts matched listings on the row so the pending-purchase
+    // review page can show competitor listings (and their images) directly.
+    // The shape matches `PendingPurchaseMarketListingSchema`; the reader in
+    // `pendingPurchaseQueries.ts:readMarketListings` will pull it out of
+    // `raw_row_json` and validate field-by-field.
+    marketListings: pricingSupport.evidence?.matchedListings ?? [],
     marketNote: pricingSupport.marketNote,
     marketSearchTerm: pricingSupport.marketSearchTerm,
     notes: reviewerNotes,
