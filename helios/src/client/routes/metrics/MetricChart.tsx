@@ -638,10 +638,13 @@ function ChartSvg(props: ChartSvgProps) {
       // Stitch the two smoothed edges into a closed area. Replace the
       // bottom's leading 'M' with 'L' so the path stays continuous.
       const bottomAsLine = bottom.length > 0 ? 'L' + bottom.slice(1) : ''
+      // Even in stacked mode we still mark the top edge of each real
+      // bucket sample so the reader can tell where the actual data
+      // points are (vs the smoothed interpolation between them).
       return {
         ...s,
         d: `${top} ${bottomAsLine} Z`,
-        markers: [] as Array<{ x: number; y: number }>,
+        markers: topPts,
         fill: true as const,
       }
     })
@@ -1053,21 +1056,34 @@ function ChartSvg(props: ChartSvgProps) {
 
         {seriesPaths.map((s) =>
           s.fill ? (
-            <path
-              key={s.id}
-              d={s.d}
-              fill={s.colour}
-              fillOpacity={0.55}
-              stroke={s.colour}
-              strokeWidth="1"
-            />
+            <g key={s.id}>
+              <path
+                d={s.d}
+                fill={s.colour}
+                fillOpacity={0.55}
+                stroke={s.colour}
+                strokeWidth="1"
+              />
+              {/* Smaller markers on the top edge of each stacked sample
+                  so the reader can see where the real bucket points are
+                  vs the smoothed interpolation between them. */}
+              {s.markers.map((m, i) => (
+                <path
+                  key={`${s.id}-m-${i}`}
+                  d={crossMarkerPath(m.x, m.y, 2.25)}
+                  stroke={s.colour}
+                  strokeWidth={1}
+                  fill="none"
+                  pointerEvents="none"
+                />
+              ))}
+            </g>
           ) : (
             <g key={s.id}>
               <path d={s.d} fill="none" stroke={s.colour} strokeWidth="1.5" />
               {/* Data-point markers: small × at every real measurement so the
                   reader can distinguish points from the interpolated curve
-                  between them. Skipped on stacked / area series (see the
-                  comment on seriesPaths). */}
+                  between them. */}
               {s.markers.map((m, i) => (
                 <path
                   key={`${s.id}-m-${i}`}
@@ -1949,16 +1965,20 @@ function compactNumber(v: number): string {
   return COMPACT_FMT.format(v)
 }
 
+// Hover-readout / range-label timestamps are deliberately UTC so they
+// agree with the X-axis tick labels (gridlines.ts formats ticks in UTC
+// too). Mixing local-time tooltips with UTC ticks confuses bucket
+// interpretation around midnight / week boundaries.
 function shortDate(ms: number): string {
   const d = new Date(ms)
   const pad = (n: number) => String(n).padStart(2, '0')
-  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+  return `${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`
 }
 
 function shortDateLong(ms: number): string {
   const d = new Date(ms)
   const pad = (n: number) => String(n).padStart(2, '0')
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(
-    d.getMinutes(),
+  return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(
+    d.getUTCMinutes(),
   )}`
 }
