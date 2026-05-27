@@ -69,6 +69,7 @@ import { EpicDagPage } from '../routes/tasks/EpicDagPage.js'
 import { TaskDetailPage } from '../routes/tasks/TaskDetailPage.js'
 import { UtilitiesLandingPage } from '../routes/utilities/UtilitiesLandingPage.js'
 import { UtilitiesStaffPage, utilitiesStaffLoader } from '../routes/utilities/UtilitiesStaffPage.js'
+import { VisitorScansPage, visitorScansLoader } from '../routes/visitors/VisitorScansPage.js'
 import {
   CustomerReviewsListPage,
   customerReviewsListLoader,
@@ -307,6 +308,11 @@ export const router = createBrowserRouter([
       {
         element: <TaskDetailPage />,
         path: 'tasks/task/:sha',
+      },
+      {
+        element: <VisitorScansPage />,
+        loader: visitorScansLoader,
+        path: 'admin/visitors/scans',
       },
       {
         element: <ConfigModulePage />,

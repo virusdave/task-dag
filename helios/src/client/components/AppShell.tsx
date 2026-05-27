@@ -155,6 +155,17 @@ function buildPrimarySidebarNodes(
       label: 'CRM & Segments',
       to: buildHeliosModulePath('crm'),
     },
+    // Customer / visitor scan ingest surface
+    // (virusdave/top-level#9 / FreshlyBakedNYC/automation#31 A3). The
+    // Customers UX child epic (#33) plans to fold this under
+    // /admin/customers/check-ins with a URL alias; until then it
+    // lives at /admin/visitors/scans per the parent EPIC_PLAN.md.
+    {
+      kind: 'leaf',
+      navKey: 'admin.visitors.scans',
+      label: 'Visitor Scans',
+      to: '/admin/visitors/scans',
+    },
   ]
 }
 
