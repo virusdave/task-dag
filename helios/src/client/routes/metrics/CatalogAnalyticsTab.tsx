@@ -187,6 +187,50 @@ function ourPriceOverMarket(p: CatalogAnalyticsPoint): number | null {
   return p.listPriceDollars / p.marketPricePretaxDollars
 }
 
+/**
+ * Build a matcher predicate from a free-text highlight query. Returns
+ * `null` when the query is empty / whitespace (caller should treat
+ * highlight as inactive). The predicate is case-insensitive substring
+ * match against:
+ *   * brand / category / subcategory name
+ *   * size label, pack-count synthetic label ("1 per pkg" / "5-pack")
+ *   * product name + short name, sku
+ *
+ * Multiple whitespace-separated terms are ALL-required (AND semantics)
+ * so the operator can type "blue dream 1g" to narrow to a specific
+ * strain × size.
+ */
+export function buildHighlightMatcher(
+  query: string,
+): ((p: CatalogAnalyticsPoint) => boolean) | null {
+  const q = query.trim().toLowerCase()
+  if (q.length === 0) return null
+  const terms = q.split(/\s+/).filter((t) => t.length > 0)
+  if (terms.length === 0) return null
+  return (p) => {
+    const packLabel =
+      p.packCount == null
+        ? ''
+        : p.packCount === 1
+        ? '1 per pkg'
+        : `${p.packCount}-pack`
+    const haystack = [
+      p.brandName,
+      p.categoryName,
+      p.subcategoryName,
+      p.sizeLabel,
+      p.productName,
+      p.productShortName,
+      p.sku,
+      packLabel,
+    ]
+      .filter((s) => s)
+      .join(' ')
+      .toLowerCase()
+    return terms.every((t) => haystack.includes(t))
+  }
+}
+
 function cohortKey(p: CatalogAnalyticsPoint): string {
   return `${p.categoryName ?? '(no cat)'}|${p.subcategoryName ?? '(no sub)'}|${
     p.sizeLabel ?? '(no size)'
@@ -1632,6 +1676,14 @@ export function CatalogAnalyticsTab() {
   const [pageOpacityBy, setPageOpacityBy] = useState<OpacityByKey | 'per-chart'>(
     'per-chart',
   )
+  // Free-text "highlight subset" query. Lower-cased substring match
+  // against the point's text-y fields (brand / category / subcategory
+  // / size / product name / sku / pack count). When non-empty:
+  //   * matching dots: full opacity, thicker stroke ring
+  //   * non-matching dots: heavily dimmed so the highlighted subset
+  //     pops out of the rest of the cloud.
+  // Stored on the page so it applies to every card in the grid.
+  const [highlightQuery, setHighlightQuery] = useState<string>('')
 
   // -------- Active sub-tab inside the catalog analytics page --------
   const [activeSection, setActiveSection] = useState<string>(SECTION_CORE)
@@ -1802,6 +1854,17 @@ export function CatalogAnalyticsTab() {
     [windowDays, cohortMedians],
   )
 
+  const highlightMatcher = useMemo(
+    () => buildHighlightMatcher(highlightQuery),
+    [highlightQuery],
+  )
+  const highlightCount = useMemo(() => {
+    if (!highlightMatcher) return 0
+    let n = 0
+    for (const p of points) if (highlightMatcher(p)) n += 1
+    return n
+  }, [highlightMatcher, points])
+
   const sectionedCards = useMemo(() => groupCardsBySection(DEFAULT_CARDS), [])
 
   return (
@@ -1918,23 +1981,46 @@ export function CatalogAnalyticsTab() {
             </select>
           </label>
           <label>
-            opacity by{' '}
-            <select
-              value={pageOpacityBy}
-              onChange={(e) =>
-                setPageOpacityBy(e.target.value as OpacityByKey | 'per-chart')
-              }
-            >
-              <option value="per-chart">per chart</option>
-              {OPACITY_BY.map((o) => (
-                <option key={o.id} value={o.id}>
-                  {o.label}
-                </option>
-              ))}
-            </select>
+           opacity by{' '}
+           <select
+             value={pageOpacityBy}
+             onChange={(e) =>
+               setPageOpacityBy(e.target.value as OpacityByKey | 'per-chart')
+             }
+           >
+             <option value="per-chart">per chart</option>
+             {OPACITY_BY.map((o) => (
+               <option key={o.id} value={o.id}>
+                 {o.label}
+               </option>
+             ))}
+           </select>
           </label>
-        </div>
-      </div>
+          <label
+           className="catalog-highlight-label"
+           title={
+             'Free-text filter that visually highlights matching points. ' +
+             'Case-insensitive substring match against brand, category, ' +
+             'subcategory, size, pack-count, product name, and SKU. ' +
+             'Multiple words narrow further (e.g. "blue dream 1g").'
+           }
+          >
+           highlight{' '}
+           <input
+             type="search"
+             value={highlightQuery}
+             placeholder="brand / strain / size…"
+             onChange={(e) => setHighlightQuery(e.target.value)}
+             className="catalog-highlight-input"
+           />
+           {highlightMatcher ? (
+             <span className="subtle-copy catalog-highlight-count">
+               {highlightCount}/{points.length}
+             </span>
+           ) : null}
+          </label>
+          </div>
+          </div>
 
       <div className="catalog-analytics-filterbar-row">
         <CatalogFilterBar
@@ -2022,16 +2108,17 @@ export function CatalogAnalyticsTab() {
               <div className="catalog-analytics-section">
                 <div className="catalog-analytics-grid">
                   {validSection.cards.map((cfg) => (
-                    <ScatterCard
-                      key={cfg.id}
-                      config={cfg}
-                      points={points}
-                      pageColourBy={pageColourBy}
-                      pageSizeBy={pageSizeBy}
-                      pageOpacityBy={pageOpacityBy}
-                      loading={loadingPoints}
-                      axisCtx={axisCtx}
-                    />
+                   <ScatterCard
+                     key={cfg.id}
+                     config={cfg}
+                     points={points}
+                     pageColourBy={pageColourBy}
+                     pageSizeBy={pageSizeBy}
+                     pageOpacityBy={pageOpacityBy}
+                     loading={loadingPoints}
+                     axisCtx={axisCtx}
+                     highlightMatcher={highlightMatcher}
+                   />
                   ))}
                 </div>
               </div>
@@ -2068,6 +2155,9 @@ interface ScatterCardProps {
   pageOpacityBy: OpacityByKey | 'per-chart'
   loading: boolean
   axisCtx: AxisCtx
+  /** When non-null, points matching the predicate are rendered at
+   *  full strength and non-matching points are heavily dimmed. */
+  highlightMatcher: ((p: CatalogAnalyticsPoint) => boolean) | null
 }
 
 function ScatterCard({
@@ -2078,6 +2168,7 @@ function ScatterCard({
   pageOpacityBy,
   loading,
   axisCtx,
+  highlightMatcher,
 }: ScatterCardProps) {
   const [xId, setXId] = useState<string>(config.defaultX)
   const [yId, setYId] = useState<string>(config.defaultY)
@@ -2204,15 +2295,16 @@ function ScatterCard({
           surfaced via the title's `!` HelpIcon popover so the card's
           visible chrome stays compact. */}
       <CatalogScatterSvg
-        points={points}
-        xDef={xDef}
-        yDef={yDef}
-        colourByDef={colourByDef}
-        sizeByDef={sizeByDef}
-        opacityByDef={opacityByDef}
-        loading={loading}
-        axisCtx={axisCtx}
-        referenceLine={config.referenceLine}
+       points={points}
+       xDef={xDef}
+       yDef={yDef}
+       colourByDef={colourByDef}
+       sizeByDef={sizeByDef}
+       opacityByDef={opacityByDef}
+       loading={loading}
+       axisCtx={axisCtx}
+       referenceLine={config.referenceLine}
+       highlightMatcher={highlightMatcher}
       />
     </article>
   )
@@ -2231,6 +2323,10 @@ interface CatalogScatterSvgProps {
   axisCtx: AxisCtx
   /** Reference line annotation, see ScatterCardConfig. */
   referenceLine?: 'diagonal' | 'unit-y' | 'unit-x'
+  /** Optional highlight predicate. When supplied, matching points
+   *  render at full opacity with a thicker stroke ring; non-matching
+   *  points are heavily dimmed so the subset visually pops. */
+  highlightMatcher?: ((p: CatalogAnalyticsPoint) => boolean) | null
 }
 
 interface PlottedPoint {
@@ -2268,6 +2364,7 @@ function CatalogScatterSvg({
   loading,
   axisCtx,
   referenceLine,
+  highlightMatcher,
 }: CatalogScatterSvgProps) {
   const wrapRef = useRef<HTMLDivElement | null>(null)
   const svgRef = useRef<SVGSVGElement | null>(null)
@@ -2782,19 +2879,70 @@ function CatalogScatterSvg({
               strokeWidth={1}
             />
           ) : null}
-          {/* dots */}
-          {plotted.map((pp, idx) => (
-            <circle
-              key={`${pp.p.inventoryItemId}-${idx}`}
-              cx={xScale(pp.x)}
-              cy={yScale(pp.y)}
-              r={dotRadius(pp.sizeValue)}
-              fill={dotColour(pp)}
-              fillOpacity={dotOpacity(pp.opacityValue)}
-              stroke="#fff"
-              strokeWidth={0.5}
-            />
-          ))}
+          {/* dots — when a highlight predicate is active we render
+              non-matching points first (heavily dimmed, slightly
+              shrunk) and matching points last so they paint on top
+              with a stronger ring. Without the explicit z-order
+              split, the highlighted subset can be buried under the
+              dimmed cloud and the visual effect is lost. */}
+          {(() => {
+            const matched: Array<[PlottedPoint, number]> = []
+            const dimmed: Array<[PlottedPoint, number]> = []
+            const hasHighlight = !!highlightMatcher
+            plotted.forEach((pp, idx) => {
+              if (hasHighlight && highlightMatcher!(pp.p)) matched.push([pp, idx])
+              else if (hasHighlight) dimmed.push([pp, idx])
+              else matched.push([pp, idx])
+            })
+            const renderDot = (pp: PlottedPoint, idx: number, isMatch: boolean): JSX.Element => {
+              const r = dotRadius(pp.sizeValue)
+              if (hasHighlight && !isMatch) {
+                return (
+                  <circle
+                    key={`dim-${pp.p.inventoryItemId}-${idx}`}
+                    cx={xScale(pp.x)}
+                    cy={yScale(pp.y)}
+                    r={Math.max(1.5, r - 0.5)}
+                    fill={dotColour(pp)}
+                    fillOpacity={Math.min(0.18, dotOpacity(pp.opacityValue))}
+                    stroke="none"
+                  />
+                )
+              }
+              if (hasHighlight && isMatch) {
+                return (
+                  <circle
+                    key={`hl-${pp.p.inventoryItemId}-${idx}`}
+                    cx={xScale(pp.x)}
+                    cy={yScale(pp.y)}
+                    r={r + 0.5}
+                    fill={dotColour(pp)}
+                    fillOpacity={Math.max(0.9, dotOpacity(pp.opacityValue))}
+                    stroke="#111"
+                    strokeWidth={1.25}
+                  />
+                )
+              }
+              return (
+                <circle
+                  key={`${pp.p.inventoryItemId}-${idx}`}
+                  cx={xScale(pp.x)}
+                  cy={yScale(pp.y)}
+                  r={r}
+                  fill={dotColour(pp)}
+                  fillOpacity={dotOpacity(pp.opacityValue)}
+                  stroke="#fff"
+                  strokeWidth={0.5}
+                />
+              )
+            }
+            return (
+              <>
+                {dimmed.map(([pp, idx]) => renderDot(pp, idx, false))}
+                {matched.map(([pp, idx]) => renderDot(pp, idx, true))}
+              </>
+            )
+          })()}
           {/* hovered dot highlight */}
           {hovered ? (
             <circle
@@ -2974,10 +3122,15 @@ interface ScatterTooltipProps {
 }
 
 function ScatterTooltip(p: ScatterTooltipProps) {
-  // Render width is responsive but we want a stable layout for clamp
-  // calculations; treat 280px as the planning width and let CSS
-  // shrink it on tiny viewports.
-  const TOOLTIP_W = 280
+  // Plan width is the IDEAL tooltip width; CSS narrows it if the
+  // viewport (not just the wrapper) is smaller — on mobile the
+  // wrapper can extend beyond the visible viewport when the page is
+  // horizontally scrollable, so wrapWidth alone is not a safe clamp.
+  const viewportW =
+    typeof window !== 'undefined' && window.innerWidth > 0
+      ? window.innerWidth
+      : p.wrapWidth
+  const TOOLTIP_W = Math.min(280, Math.max(180, viewportW - 16))
   const TOOLTIP_H_EST = 220
   // Default: place to the right and below the dot. Flip sides if we'd
   // overflow the chart wrapper. Clamp to wrap bounds so a tooltip
@@ -2997,7 +3150,7 @@ function ScatterTooltip(p: ScatterTooltipProps) {
     left,
     top,
     width: TOOLTIP_W,
-    maxWidth: 'calc(100% - 8px)',
+    maxWidth: 'calc(100vw - 16px)',
     pointerEvents: p.dismissible ? 'auto' : 'none',
   }
   return (

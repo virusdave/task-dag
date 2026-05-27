@@ -3081,6 +3081,58 @@ a.tree-nav-branch-label.is-link,
   font-size: 1rem;
 }
 
+/* On phone-width viewports the chart title takes up valuable vertical
+   space AND collides with the per-chart control bar (X/Y/col/sz/op
+   selects). The "!" help icon still surfaces the full description on
+   tap, which is much more useful, so we hide the title text entirely
+   below 640px — we strip layout off the <h3> so the controls can
+   reclaim that row, and we promote the `.metric-chart-help` icon to
+   its own row so it stays tappable. */
+@media (max-width: 640px) {
+  .metric-chart-title {
+    /* h3 still rendered so its children (the HelpIcon span) keep
+       working; we just remove its visual weight + the title text. */
+    font-size: 0;
+    line-height: 0;
+    color: transparent;
+    /* Keep enough height for the HelpIcon to still render */
+    min-height: 1.05rem;
+  }
+  .metric-chart-title .metric-chart-help {
+    font-size: 0.7rem;
+    line-height: 1;
+    color: #1f4e7a;
+    margin-left: 0;
+  }
+}
+
+/* Free-text "highlight subset" input on the catalog analytics page.
+   Sits at the end of the page-level encoding-override label row
+   (color/size/opacity selects). The input is intentionally narrow on
+   desktop so it doesn't dominate the row, and grows on mobile so the
+   operator can still see the full query they typed. */
+.catalog-highlight-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.catalog-highlight-input {
+  width: 14rem;
+  max-width: 32vw;
+  padding: 2px 6px;
+  font-size: 0.85rem;
+}
+.catalog-highlight-count {
+  margin-left: 4px;
+  font-variant-numeric: tabular-nums;
+}
+@media (max-width: 640px) {
+  .catalog-highlight-input {
+    width: 10rem;
+    max-width: 60vw;
+  }
+}
+
 /* Header badge shown next to the title when at least one selected
    catalog filter (category / subcategory / brand / size) has a
    dimension the metric's query doesn't honour. Makes the lack of

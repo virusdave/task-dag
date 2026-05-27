@@ -35,26 +35,53 @@ const PassthroughSchema = z.unknown()
  * focus reveals a popover with `text`; on touch devices the icon is
  * clickable and toggles the same popover. The native `title`
  * attribute is set as an accessible fallback for screen-reader users.
+ *
+ * The popover uses `position: fixed` with a JS-driven viewport-aware
+ * layout (see `useViewportClampedPopover`) so it never clips off the
+ * edge of a mobile screen — which the pure-CSS `translateX(-50%)`
+ * approach was doing on narrow viewports.
  */
 export function HelpIcon({ text }: { text: string }): JSX.Element | null {
   const [open, setOpen] = useState(false)
-  const ref = useRef<HTMLSpanElement | null>(null)
+  const anchorRef = useRef<HTMLSpanElement | null>(null)
+  const popRef = useRef<HTMLSpanElement | null>(null)
+  const hoverInsideRef = useRef<boolean>(false)
   useEffect(() => {
     if (!open) return
     const onDocClick = (e: MouseEvent): void => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
+      if (
+        anchorRef.current &&
+        !anchorRef.current.contains(e.target as Node) &&
+        popRef.current &&
+        !popRef.current.contains(e.target as Node)
+      ) {
+        setOpen(false)
+      }
     }
     document.addEventListener('mousedown', onDocClick)
     return () => document.removeEventListener('mousedown', onDocClick)
   }, [open])
+  useViewportClampedPopover(open, anchorRef, popRef)
   if (!text || text.trim() === '') return null
   return (
     <span
       className={`metric-chart-help ${open ? 'is-open' : ''}`}
-      ref={ref}
+      ref={anchorRef}
       onClick={(e) => {
         e.stopPropagation()
         setOpen((v) => !v)
+      }}
+      onMouseEnter={() => {
+        hoverInsideRef.current = true
+        setOpen(true)
+      }}
+      onMouseLeave={() => {
+        hoverInsideRef.current = false
+        // Only auto-close on mouse-leave; touch-tap toggles persist
+        // until the operator taps elsewhere (handled by onDocClick).
+        setTimeout(() => {
+          if (!hoverInsideRef.current) setOpen(false)
+        }, 80)
       }}
       onKeyDown={(e) => {
         if (e.key === 'Enter' || e.key === ' ') {
@@ -72,9 +99,91 @@ export function HelpIcon({ text }: { text: string }): JSX.Element | null {
       title={text}
     >
       <span className="metric-chart-help-glyph" aria-hidden="true">!</span>
-      <span className="metric-chart-help-popover" role="tooltip">{text}</span>
+      <span
+        className="metric-chart-help-popover"
+        role="tooltip"
+        ref={popRef}
+        // Inline default: hidden until useViewportClampedPopover writes
+        // a real top/left after measuring the anchor. Without this
+        // the popover briefly flashes at (0,0) on first open.
+        style={{ visibility: open ? undefined : 'hidden' }}
+      >
+        {text}
+      </span>
     </span>
   )
+}
+
+/**
+ * Positions a `position: fixed` popover near the anchor element,
+ * clamped to the visible viewport so neither edge of the popover ever
+ * extends off-screen.
+ *
+ * Algorithm:
+ *   * Default: place the popover BELOW the anchor and centered on it.
+ *   * If that would extend past the bottom edge by more than the
+ *     anchor's own height, flip to ABOVE the anchor instead.
+ *   * Clamp horizontally so a `margin` of 8px is kept from both
+ *     viewport edges. The arrow / pointer-style chrome therefore has
+ *     to be drawn via CSS pseudo-elements anchored to the popover
+ *     body, not absolutely on the anchor — easier for the operator
+ *     to read on a phone than a pointer that drifts off-side.
+ *
+ * Repositioned on `open` flip, window resize, and `scroll` (capture
+ * phase, so internal scroll containers also re-trigger).
+ */
+function useViewportClampedPopover(
+  open: boolean,
+  anchorRef: React.RefObject<HTMLElement>,
+  popRef: React.RefObject<HTMLElement>,
+): void {
+  useLayoutEffect(() => {
+    if (!open) return
+    const anchor = anchorRef.current
+    const pop = popRef.current
+    if (!anchor || !pop) return
+    const place = (): void => {
+      const aRect = anchor.getBoundingClientRect()
+      // Force `position: fixed` for the duration of the popover's life.
+      // Done inline so the CSS rule can stay opt-in (other call-sites
+      // of `.metric-chart-help-popover` keep their nicer hover-only
+      // behaviour if they ever come back).
+      pop.style.position = 'fixed'
+      pop.style.transform = 'none'
+      pop.style.left = '0px'
+      pop.style.top = '0px'
+      pop.style.maxWidth = `${Math.min(320, window.innerWidth - 16)}px`
+      // Measure AFTER setting maxWidth so wrapping reflects the
+      // actual rendered width.
+      const pRect = pop.getBoundingClientRect()
+      const margin = 8
+      let top = aRect.bottom + 6
+      // Flip above if it would extend past the bottom edge.
+      if (top + pRect.height > window.innerHeight - margin) {
+        const aboveTop = aRect.top - pRect.height - 6
+        if (aboveTop >= margin) top = aboveTop
+      }
+      let left = aRect.left + aRect.width / 2 - pRect.width / 2
+      if (left < margin) left = margin
+      if (left + pRect.width > window.innerWidth - margin) {
+        left = window.innerWidth - margin - pRect.width
+      }
+      pop.style.top = `${top}px`
+      pop.style.left = `${left}px`
+      pop.style.visibility = 'visible'
+    }
+    place()
+    const onResize = (): void => place()
+    const onScroll = (): void => place()
+    window.addEventListener('resize', onResize)
+    // Capture-phase scroll so nested scrollable parents also reposition.
+    window.addEventListener('scroll', onScroll, true)
+    return () => {
+      window.removeEventListener('resize', onResize)
+      window.removeEventListener('scroll', onScroll, true)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open])
 }
 
 const FALLBACK_COLOURS = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b']
