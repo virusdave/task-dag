@@ -84,11 +84,11 @@ async function main(): Promise<void> {
             -- Per-product image URL from the LitAlerts partner API
             -- (LAProduct.imageURL, added May 2026). We surface it
             -- here (lowercase 'imageUrl' to match the rest of our
-            -- snake/camel envelope) so the catalog → market data
+            -- snake/camel envelope) so the catalog -> market data
             -- reviewer can render product thumbnails straight off
             -- the fuzzy row, without paying for the legacy LEFT JOIN
-            -- against `litalerts_product_images` (which is the
-            -- scraped-dashboard table that the new API field
+            -- against the legacy litalerts_product_images table
+            -- (the scraped-dashboard table that the new API field
             -- replaces).
             'imageUrl', raw_product_json->>'imageURL',
             'raw_config_json', raw_config_json,
