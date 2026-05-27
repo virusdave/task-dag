@@ -13,7 +13,7 @@ import {
   recordConfigScheduleEnqueue,
 } from '../../server/db/queries/configQueries.js'
 import { getOptionalSweedSessionConcurrencyKey } from '../../server/jobs/concurrency.js'
-import { enqueueJob, JOB_PRIORITY_BEST_EFFORT } from '../../server/jobs/enqueueJob.js'
+import { enqueueJob, JOB_PRIORITY_BACKFILL, JOB_PRIORITY_BEST_EFFORT } from '../../server/jobs/enqueueJob.js'
 import {
   enqueueMarketRefreshForProducts,
   rollingRefreshJitterSecondsForProduct,
@@ -480,7 +480,11 @@ async function enqueueScheduledLitalertsRetailerBackfill(
 
   await withTransaction(async (db) => {
     const jobId = await enqueueJob(db, {
-      priority: JOB_PRIORITY_BEST_EFFORT,
+      // Backfill priority: see JOB_PRIORITY_BACKFILL doc. Sits 10
+      // points above routine refresh / ingest batch jobs so the
+      // per-tick backfill enqueue isn't starved behind a multi-hour
+      // best-effort backlog.
+      priority: JOB_PRIORITY_BACKFILL,
       // Does not touch Sweed; no shared session lane needed.
       concurrencyKey: null,
       dedupeKey: `config.workers.litalerts_retailer_backfill:scheduled:${bucketIso}`,
@@ -737,7 +741,12 @@ async function enqueueScheduledEnrichCustomerAddress(
 
   await withTransaction(async (db) => {
     const jobId = await enqueueJob(db, {
-      priority: JOB_PRIORITY_BEST_EFFORT,
+      // Backfill priority: see JOB_PRIORITY_BACKFILL doc. Sits 10
+      // points above routine refresh / ingest batch jobs so the
+      // per-tick enrichment enqueue isn't starved behind the
+      // sweed-pool's multi-hour best-effort backlog (catalog_refresh,
+      // stock_refresh, sweed_package_snapshots, etc).
+      priority: JOB_PRIORITY_BACKFILL,
       concurrencyKey: getOptionalSweedSessionConcurrencyKey(true),
       dedupeKey: `config.workers.enrich_customer_address:scheduled:${bucketIso}`,
       jobType: 'config.workers.enrich_customer_address',
@@ -791,7 +800,12 @@ async function enqueueScheduledEnrichDeliveryAddress(
 
   await withTransaction(async (db) => {
     const jobId = await enqueueJob(db, {
-      priority: JOB_PRIORITY_BEST_EFFORT,
+      // Backfill priority: see JOB_PRIORITY_BACKFILL doc. Sits 10
+      // points above routine refresh / ingest batch jobs so the
+      // per-tick enrichment enqueue isn't starved behind the
+      // sweed-pool's multi-hour best-effort backlog (catalog_refresh,
+      // stock_refresh, sweed_package_snapshots, etc).
+      priority: JOB_PRIORITY_BACKFILL,
       concurrencyKey: getOptionalSweedSessionConcurrencyKey(true),
       dedupeKey: `config.workers.enrich_delivery_address:scheduled:${bucketIso}`,
       jobType: 'config.workers.enrich_delivery_address',

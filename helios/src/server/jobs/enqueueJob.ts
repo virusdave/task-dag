@@ -37,7 +37,7 @@ export interface EnqueueJobInput {
  * Priority bands. Plain numbers so we can layer more bands later
  * without a schema change.
  *
- * Three explicit bands with wide gaps so an operator can manually
+ * Four explicit bands with wide gaps so an operator can manually
  * nudge a single row up or down a few notches without colliding
  * with the next band:
  *
@@ -46,6 +46,15 @@ export interface EnqueueJobInput {
  *   package snapshots, etc). The default for enqueues that
  *   originate inside the worker process. These run only when no
  *   higher-priority work is waiting.
+ * - `JOB_PRIORITY_BACKFILL` (10) — slightly above best-effort, used
+ *   for short, system-scheduled "walk historical rows and enrich"
+ *   jobs (the address-enrichment jobs, the litalerts retailer
+ *   backfill, etc). The narrow lift over best-effort lets backfills
+ *   slip ahead of routine refresh / ingest batch jobs in the same
+ *   execution pool, so a multi-hour ingest backlog doesn't starve
+ *   the per-tick backfill enqueues that the scheduler is depositing.
+ *   The 100-point gap to interactive means operator clicks still
+ *   always preempt a backfill.
  * - `JOB_PRIORITY_INTERACTIVE` (100) — live operator-driven work
  *   originating from an HTTP request / the Helios UI. The default
  *   for any enqueue happening outside the worker process. These
@@ -58,6 +67,7 @@ export interface EnqueueJobInput {
  *   never gets stuck behind a fully-occupied main loop.
  */
 export const JOB_PRIORITY_BEST_EFFORT = 0
+export const JOB_PRIORITY_BACKFILL = 10
 export const JOB_PRIORITY_INTERACTIVE = 100
 export const JOB_PRIORITY_URGENT = 1000
 
