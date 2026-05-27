@@ -239,15 +239,22 @@ export async function queryFirstVsReturning(args: MetricQueryArgs): Promise<Metr
   })
 }
 
-/** Generic "count or sum by some categorical column" bucketed query. */
+/** Generic "count or sum by some categorical column / expression" bucketed
+ *  query. `colExpr` is interpolated unparsed — callers MUST use only
+ *  whitelisted column names + literal CASE expressions, never user input.
+ */
 async function queryGroupedByColumn(args: {
   args: MetricQueryArgs
-  /** sweed_orders column name to group by (caller pre-validated). */
-  column: 'fulfillment_type' | 'payment_method' | 'delivery_zip'
+  /** SQL expression evaluated per row whose value names the series.
+   *  Either a plain whitelisted column name (e.g. `lower(payment_method)`)
+   *  or a derived CASE expression (e.g. FULFILLMENT_SERIES_SQL_EXPR). */
+  colExpr: string
   /** SQL aggregate expression, e.g. 'count(*)' or 'sum(grand_total_dollars)'. */
   aggExpr: string
   /** Mapping from canonical column value to series id. Values not in
-   *  this map fall into `unknownSeriesId` (e.g. 'other'). */
+   *  this map fall into `unknownSeriesId` (e.g. 'other'). Pass an
+   *  identity-style map (`Map([['delivery_prepaid','delivery_prepaid'],…])`)
+   *  when colExpr already returns a series id. */
   seriesByValue: ReadonlyMap<string, string>
   seriesIds: readonly string[]
   unknownSeriesId: string
@@ -264,7 +271,7 @@ async function queryGroupedByColumn(args: {
   const bucketSelect = bucketSelectExpr(truncUnit)
   const sql = `
     select ${bucketSelect} as bucket_start,
-           coalesce(lower(${args.column}), '') as col_value,
+           coalesce(${args.colExpr}, '') as col_value,
            ${args.aggExpr}::numeric as value
       from sweed_orders
      where dealer_id = any($1::bigint[])
@@ -341,35 +348,91 @@ export async function queryBasketSizeByCustomerType(args: MetricQueryArgs): Prom
 }
 
 // Sweed's canonical `issuingType.name` values, as observed in live
-// Bronx + Midtown invoices on 2026-05-26. The COD vs prepaid split is
-// not directly available on `store.sale.invoice.list` — every
-// "Delivery sale" today lands in `delivery_prepaid` until a follow-on
-// adds the per-invoice get-call to distinguish.
+// Bronx + Midtown invoices on 2026-05-26.
+//
+// Per-purchase prepaid-vs-COD classification (operator directive
+// 2026-05-27): we derive this from BOTH `fulfillment_type` AND
+// `payment_method`, server-side at query time, so the classification
+// always reflects the latest rule without a historical reclass
+// backfill being necessary.
+//
+//   * Delivery payment = aeropay   → 'delivery_prepaid'
+//     Delivery payment = anything  → 'delivery_cod'   (cash / debit /
+//                                                       credit / unknown)
+//   * Pickup   payment = aeropay   → 'pickup_prepaid'
+//     Pickup   payment = anything  → 'pickup'
+//   * Kiosk                        → 'kiosk'
+//   * Walk-in / pharmacy / pos / unknown → 'in_store'
+//
+// The split anticipates Sweed exposing additional integrated payment
+// rails (integrated debit / credit) as "prepaid": when that lands,
+// extend the aeropay membership test below.
+
+const PREPAID_PAYMENT_METHODS_SQL = `lower(coalesce(payment_method, '')) in ('aeropay')`
+
+const DELIVERY_FULFILLMENT_VALUES_SQL = `(
+  'delivery sale',
+  'delivery (prepaid)',
+  'delivery prepaid',
+  'delivery (cod)',
+  'delivery cod',
+  'delivery',
+  'website'
+)`
+
+const PICKUP_FULFILLMENT_VALUES_SQL = `(
+  'pick-up sale',
+  'pickup sale',
+  'pickup'
+)`
+
+const KIOSK_FULFILLMENT_VALUES_SQL = `(
+  'kiosk order',
+  'kiosk'
+)`
+
+/** SQL expression returning the canonical series id directly.
+ *  Use as `colExpr` to queryGroupedByColumn / inline in other SQL.
+ *
+ *  IMPORTANT: keep the membership lists in sync with the per-purchase
+ *  classification rule documented above. */
+const FULFILLMENT_SERIES_SQL_EXPR = `
+  case
+    when lower(coalesce(fulfillment_type, '')) in ${DELIVERY_FULFILLMENT_VALUES_SQL}
+      then case when ${PREPAID_PAYMENT_METHODS_SQL} then 'delivery_prepaid' else 'delivery_cod' end
+    when lower(coalesce(fulfillment_type, '')) in ${PICKUP_FULFILLMENT_VALUES_SQL}
+      then case when ${PREPAID_PAYMENT_METHODS_SQL} then 'pickup_prepaid' else 'pickup' end
+    when lower(coalesce(fulfillment_type, '')) in ${KIOSK_FULFILLMENT_VALUES_SQL}
+      then 'kiosk'
+    else 'in_store'
+  end
+`
+/** Same expression but for SQL that aliases sweed_orders as `so`. */
+const FULFILLMENT_SERIES_SQL_EXPR_SO = FULFILLMENT_SERIES_SQL_EXPR
+  .replaceAll('fulfillment_type', 'so.fulfillment_type')
+  .replaceAll('payment_method', 'so.payment_method')
+
+// Identity map — the SQL expression above already emits the canonical
+// series id, so JS-side mapping is just a passthrough.
 const FULFILLMENT_SERIES_BY_VALUE: ReadonlyMap<string, string> = new Map([
-  ['kiosk order', 'kiosk'],
+  ['delivery_prepaid', 'delivery_prepaid'],
+  ['delivery_cod', 'delivery_cod'],
   ['kiosk', 'kiosk'],
-  ['pick-up sale', 'pickup'],
-  ['pickup sale', 'pickup'],
   ['pickup', 'pickup'],
-  ['delivery sale', 'delivery_prepaid'],
-  ['delivery (prepaid)', 'delivery_prepaid'],
-  ['delivery prepaid', 'delivery_prepaid'],
-  ['delivery (cod)', 'delivery_cod'],
-  ['delivery cod', 'delivery_cod'],
-  ['delivery', 'delivery_prepaid'],
-  ['pharmacy order', 'in_store'],
-  ['walk-in sale', 'in_store'],
-  ['walk in sale', 'in_store'],
-  ['walk-in refund/exchange', 'in_store'],
-  ['in-store sale', 'in_store'],
-  ['in-store', 'in_store'],
-  ['in store', 'in_store'],
-  ['pos', 'in_store'],
-  ['website', 'delivery_prepaid'], // salesChannel fallback for online orders
-  ['', 'in_store'],
+  ['pickup_prepaid', 'pickup_prepaid'],
+  ['in_store', 'in_store'],
 ])
 
-const FULFILLMENT_SERIES_IDS = ['delivery_prepaid', 'delivery_cod', 'kiosk', 'pickup', 'in_store'] as const
+const FULFILLMENT_SERIES_IDS = [
+  'delivery_prepaid',
+  'delivery_cod',
+  'kiosk',
+  'pickup_prepaid',
+  'pickup',
+  'in_store',
+] as const
+
+export { FULFILLMENT_SERIES_SQL_EXPR, FULFILLMENT_SERIES_SQL_EXPR_SO }
 
 async function queryAvgGroupedByFulfillment(args: MetricQueryArgs, aggExpr: string): Promise<MetricRow[]> {
   const dealerIds = resolveDealerIds(args.sites)
@@ -384,7 +447,7 @@ async function queryAvgGroupedByFulfillment(args: MetricQueryArgs, aggExpr: stri
   const bucketSelect = bucketSelectExpr(truncUnit)
   const sql = `
     select ${bucketSelect} as bucket_start,
-           coalesce(lower(fulfillment_type), '') as col_value,
+           coalesce(${FULFILLMENT_SERIES_SQL_EXPR}, '') as col_value,
            ${aggExpr}::numeric as value
       from sweed_orders
      where dealer_id = any($1::bigint[])
@@ -401,7 +464,7 @@ async function queryAvgGroupedByFulfillment(args: MetricQueryArgs, aggExpr: stri
   // Re-issue the query so we get both sum and count per (bucket, value).
   const sql2 = `
     select ${bucketSelect} as bucket_start,
-           coalesce(lower(fulfillment_type), '') as col_value,
+           coalesce(${FULFILLMENT_SERIES_SQL_EXPR}, '') as col_value,
            sum(grand_total_dollars)::numeric as sum_value,
            count(*) as cnt
       from sweed_orders
@@ -450,11 +513,13 @@ function round2(n: number): number {
   return Math.round(n * 100) / 100
 }
 
-/** fulfillment.order_count — order count split by fulfillment type. */
+/** fulfillment.order_count — order count split by fulfillment type
+ *  (delivery / pickup are further split prepaid-vs-COD by payment
+ *  method; see FULFILLMENT_SERIES_SQL_EXPR). */
 export function queryFulfillmentOrderCount(args: MetricQueryArgs): Promise<MetricRow[]> {
   return queryGroupedByColumn({
     args,
-    column: 'fulfillment_type',
+    colExpr: FULFILLMENT_SERIES_SQL_EXPR,
     aggExpr: 'count(*)',
     seriesByValue: FULFILLMENT_SERIES_BY_VALUE,
     seriesIds: FULFILLMENT_SERIES_IDS,
@@ -462,11 +527,12 @@ export function queryFulfillmentOrderCount(args: MetricQueryArgs): Promise<Metri
   })
 }
 
-/** fulfillment.sales_dollars — sum(grand_total) split by fulfillment. */
+/** fulfillment.sales_dollars — sum(grand_total) split by fulfillment type
+ *  (with prepaid/COD split, same as above). */
 export function queryFulfillmentSalesDollars(args: MetricQueryArgs): Promise<MetricRow[]> {
   return queryGroupedByColumn({
     args,
-    column: 'fulfillment_type',
+    colExpr: FULFILLMENT_SERIES_SQL_EXPR,
     aggExpr: 'sum(grand_total_dollars)',
     seriesByValue: FULFILLMENT_SERIES_BY_VALUE,
     seriesIds: FULFILLMENT_SERIES_IDS,
@@ -498,7 +564,7 @@ const PAYMENT_SERIES_IDS = ['cash', 'debit', 'credit', 'aeropay', 'other'] as co
 export function queryPaymentOrderCount(args: MetricQueryArgs): Promise<MetricRow[]> {
   return queryGroupedByColumn({
     args,
-    column: 'payment_method',
+    colExpr: 'lower(payment_method)',
     aggExpr: 'count(*)',
     seriesByValue: PAYMENT_SERIES_BY_VALUE,
     seriesIds: PAYMENT_SERIES_IDS,
@@ -510,7 +576,7 @@ export function queryPaymentOrderCount(args: MetricQueryArgs): Promise<MetricRow
 export function queryPaymentSalesDollars(args: MetricQueryArgs): Promise<MetricRow[]> {
   return queryGroupedByColumn({
     args,
-    column: 'payment_method',
+    colExpr: 'lower(payment_method)',
     aggExpr: 'sum(grand_total_dollars)',
     seriesByValue: PAYMENT_SERIES_BY_VALUE,
     seriesIds: PAYMENT_SERIES_IDS,

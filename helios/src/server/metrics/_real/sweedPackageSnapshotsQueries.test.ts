@@ -123,9 +123,14 @@ describe('sweed-package-snapshot metric queries', () => {
   })
 
   it('queryFulfillmentMarginDollars bins live fulfillment values into the declared series', async () => {
+    // The SQL now emits the canonical series id directly via
+    // FULFILLMENT_SERIES_SQL_EXPR_SO (kiosk / in_store / delivery_prepaid
+    // / delivery_cod / pickup_prepaid / pickup), so the mocked rows
+    // simulate the post-derivation value rather than the raw
+    // sweed_orders.fulfillment_type text.
     mockPool([
-      { bucket_start: new Date('2026-05-18T00:00:00.000Z'), fulfillment_value: 'kiosk order', revenue: '500', cogs: '200' },
-      { bucket_start: new Date('2026-05-18T00:00:00.000Z'), fulfillment_value: 'walk-in sale', revenue: '300', cogs: '150' },
+      { bucket_start: new Date('2026-05-18T00:00:00.000Z'), fulfillment_value: 'kiosk', revenue: '500', cogs: '200' },
+      { bucket_start: new Date('2026-05-18T00:00:00.000Z'), fulfillment_value: 'in_store', revenue: '300', cogs: '150' },
     ])
     const rows = await queryFulfillmentMarginDollars({
       sites: [],
@@ -140,8 +145,10 @@ describe('sweed-package-snapshot metric queries', () => {
   })
 
   it('queryFulfillmentEffectiveGmPct returns null for series with zero revenue', async () => {
+    // Mocked rows simulate the post-derivation series id (see comment
+    // on queryFulfillmentMarginDollars test above).
     mockPool([
-      { bucket_start: new Date('2026-05-18T00:00:00.000Z'), fulfillment_value: 'kiosk order', revenue: '500', cogs: '200' },
+      { bucket_start: new Date('2026-05-18T00:00:00.000Z'), fulfillment_value: 'kiosk', revenue: '500', cogs: '200' },
     ])
     const rows = await queryFulfillmentEffectiveGmPct({
       sites: [],

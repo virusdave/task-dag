@@ -76,11 +76,12 @@ export const REAL_METRICS: ReadonlyArray<MetricDef> = [
     group: 'Basket size',
     title: 'Avg basket $ by fulfillment type',
     description:
-      'Average basket $ per completed order in the bucket, grouped by fulfillment type (delivery prepaid, delivery COD, kiosk, pickup, in-store). Unknown / NULL fulfillment values are classified as in-store.',
+      'Average basket $ per completed order in the bucket, grouped by fulfillment type. Delivery orders are further split prepaid-vs-COD by payment method (aeropay = prepaid; cash / debit / credit = COD); pickup orders are split into "pickup (prepaid)" for aeropay and plain "pickup" for everything else. Kiosk and walk-in / pharmacy / pos / unknown fulfillment land in kiosk and in-store respectively.',
     series: [
       { id: 'delivery_prepaid', label: 'Delivery (prepaid)', colour: '#1f77b4' },
       { id: 'delivery_cod', label: 'Delivery (COD)', colour: '#aec7e8' },
       { id: 'kiosk', label: 'Kiosk', colour: '#2ca02c' },
+      { id: 'pickup_prepaid', label: 'Pickup (prepaid)', colour: '#e377c2' },
       { id: 'pickup', label: 'Pickup', colour: '#ff7f0e' },
       { id: 'in_store', label: 'In-store', colour: '#9467bd' },
     ],
@@ -107,11 +108,12 @@ export const REAL_METRICS: ReadonlyArray<MetricDef> = [
     group: 'Fulfillment',
     title: 'Order count by fulfillment type',
     description:
-      'Stacked count of completed orders per bucket, grouped by fulfillment type. Unknown / NULL fulfillment values are classified as in-store.',
+      'Stacked count of completed orders per bucket, grouped by fulfillment type. Delivery and pickup are further split prepaid-vs-COD by payment method (aeropay = prepaid; everything else = COD / non-prepaid pickup); see basket.size_by_fulfillment for the full rule. Unknown / NULL fulfillment classifies as in-store.',
     series: [
       { id: 'delivery_prepaid', label: 'Delivery (prepaid)', colour: '#1f77b4' },
       { id: 'delivery_cod', label: 'Delivery (COD)', colour: '#aec7e8' },
       { id: 'kiosk', label: 'Kiosk', colour: '#2ca02c' },
+      { id: 'pickup_prepaid', label: 'Pickup (prepaid)', colour: '#e377c2' },
       { id: 'pickup', label: 'Pickup', colour: '#ff7f0e' },
       { id: 'in_store', label: 'In-store', colour: '#9467bd' },
     ],
@@ -124,11 +126,12 @@ export const REAL_METRICS: ReadonlyArray<MetricDef> = [
     group: 'Fulfillment',
     title: 'Sales $ by fulfillment type',
     description:
-      'Stacked sum of grand-total $ per bucket, grouped by fulfillment type.',
+      'Stacked sum of grand-total $ per bucket, grouped by fulfillment type. Delivery and pickup are further split prepaid-vs-COD by payment method (aeropay = prepaid; everything else = COD / non-prepaid pickup); see basket.size_by_fulfillment for the full rule.',
     series: [
       { id: 'delivery_prepaid', label: 'Delivery (prepaid)', colour: '#1f77b4' },
       { id: 'delivery_cod', label: 'Delivery (COD)', colour: '#aec7e8' },
       { id: 'kiosk', label: 'Kiosk', colour: '#2ca02c' },
+      { id: 'pickup_prepaid', label: 'Pickup (prepaid)', colour: '#e377c2' },
       { id: 'pickup', label: 'Pickup', colour: '#ff7f0e' },
       { id: 'in_store', label: 'In-store', colour: '#9467bd' },
     ],
@@ -275,11 +278,12 @@ export const REAL_METRICS: ReadonlyArray<MetricDef> = [
     group: 'Fulfillment',
     title: 'Margin $ by fulfillment type',
     description:
-      'Stacked sum of (revenue - wholesale cost) per bucket, grouped by fulfillment type. Cost lookups use the same `sweed_package_cost_as_of_or_earliest()` path as margins.gross_margin_dollars.',
+      'Stacked sum of (revenue - wholesale cost) per bucket, grouped by fulfillment type. Delivery and pickup are further split prepaid-vs-COD by payment method (aeropay = prepaid; everything else = COD / non-prepaid pickup); see basket.size_by_fulfillment for the full rule. Cost lookups use the same `sweed_package_cost_as_of_or_earliest()` path as margins.gross_margin_dollars.',
     series: [
       { id: 'delivery_prepaid', label: 'Delivery (prepaid)', colour: '#1f77b4' },
       { id: 'delivery_cod', label: 'Delivery (COD)', colour: '#aec7e8' },
       { id: 'kiosk', label: 'Kiosk', colour: '#2ca02c' },
+      { id: 'pickup_prepaid', label: 'Pickup (prepaid)', colour: '#e377c2' },
       { id: 'pickup', label: 'Pickup', colour: '#ff7f0e' },
       { id: 'in_store', label: 'In-store', colour: '#9467bd' },
     ],
@@ -298,6 +302,7 @@ export const REAL_METRICS: ReadonlyArray<MetricDef> = [
       { id: 'delivery_prepaid', label: 'Delivery (prepaid)', colour: '#1f77b4' },
       { id: 'delivery_cod', label: 'Delivery (COD)', colour: '#aec7e8' },
       { id: 'kiosk', label: 'Kiosk', colour: '#2ca02c' },
+      { id: 'pickup_prepaid', label: 'Pickup (prepaid)', colour: '#e377c2' },
       { id: 'pickup', label: 'Pickup', colour: '#ff7f0e' },
       { id: 'in_store', label: 'In-store', colour: '#9467bd' },
     ],

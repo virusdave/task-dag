@@ -7,7 +7,10 @@ import { getPool } from '../../db/pool.js'
 import { defaultWindow, walkBuckets } from '../timeBuckets.js'
 import type { MetricQueryArgs, MetricRow } from '../types.js'
 import { orderItemsCatalogFilterSql } from './catalogFilterSql.js'
-import { FIRST_TIME_SERIES_EXPR } from './sweedOrdersQueries.js'
+import {
+  FIRST_TIME_SERIES_EXPR,
+  FULFILLMENT_SERIES_SQL_EXPR_SO,
+} from './sweedOrdersQueries.js'
 
 // ============================================================================
 // Real-data SQL helpers for the COGS / margin / inventory metric stubs
@@ -170,34 +173,27 @@ const INVENTORY_CATEGORY_SERIES_IDS = [
   'accessory',
 ] as const
 
-// Same canonical mapping the orders queries use for `issuingType.name`;
-// duplicated here so the two files stay independently editable when
-// Sweed adds a new fulfillment value.
+// Identity mapping — the FULFILLMENT_SERIES_SQL_EXPR_SO expression
+// imported from sweedOrdersQueries emits the canonical series id
+// directly (including the per-payment-method prepaid/COD/pickup-prepaid
+// split), so JS-side bucketing is just a passthrough.
 const FULFILLMENT_SERIES_BY_VALUE: ReadonlyMap<string, string> = new Map([
-  ['kiosk order', 'kiosk'],
+  ['delivery_prepaid', 'delivery_prepaid'],
+  ['delivery_cod', 'delivery_cod'],
   ['kiosk', 'kiosk'],
-  ['pick-up sale', 'pickup'],
-  ['pickup sale', 'pickup'],
   ['pickup', 'pickup'],
-  ['delivery sale', 'delivery_prepaid'],
-  ['delivery (prepaid)', 'delivery_prepaid'],
-  ['delivery prepaid', 'delivery_prepaid'],
-  ['delivery (cod)', 'delivery_cod'],
-  ['delivery cod', 'delivery_cod'],
-  ['delivery', 'delivery_prepaid'],
-  ['pharmacy order', 'in_store'],
-  ['walk-in sale', 'in_store'],
-  ['walk in sale', 'in_store'],
-  ['walk-in refund/exchange', 'in_store'],
-  ['in-store sale', 'in_store'],
-  ['in-store', 'in_store'],
-  ['in store', 'in_store'],
-  ['pos', 'in_store'],
-  ['website', 'delivery_prepaid'],
-  ['', 'in_store'],
+  ['pickup_prepaid', 'pickup_prepaid'],
+  ['in_store', 'in_store'],
 ])
 
-const FULFILLMENT_SERIES_IDS = ['delivery_prepaid', 'delivery_cod', 'kiosk', 'pickup', 'in_store'] as const
+const FULFILLMENT_SERIES_IDS = [
+  'delivery_prepaid',
+  'delivery_cod',
+  'kiosk',
+  'pickup_prepaid',
+  'pickup',
+  'in_store',
+] as const
 
 // ============================================================================
 // Margin / COGS metrics
@@ -472,7 +468,7 @@ async function queryFulfillmentMargin(
   const sql = `
     ${cf.withPrefix}
     select ${bucketSelectExpr(truncUnit, 'so.pay_time')} as bucket_start,
-           coalesce(lower(so.fulfillment_type), '') as fulfillment_value,
+           coalesce(${FULFILLMENT_SERIES_SQL_EXPR_SO}, '') as fulfillment_value,
            sum(${isPct ? `case when sweed_package_cost_as_of_or_earliest(so.dealer_id, item->>'inventoryItemId', so.pay_time) is not null then ${REVENUE_EXPR} else 0 end` : REVENUE_EXPR})::numeric as revenue,
            sum(${isPct ? `case when sweed_package_cost_as_of_or_earliest(so.dealer_id, item->>'inventoryItemId', so.pay_time) is not null then ${COGS_EXPR} else 0 end` : COGS_EXPR})::numeric as cogs
       from sweed_orders so
