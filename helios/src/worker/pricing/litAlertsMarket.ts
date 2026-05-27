@@ -108,6 +108,13 @@ interface ListingPriceCandidate {
   distanceBand: PricingDistanceBand
   distanceMiles: number | null
   dispensaryName: string
+  /**
+   * Per-product image URL the LitAlerts partner API now returns on
+   * `/v1/brands/:id/products` (May 2026). Surfaced to the reviewer
+   * alongside each comp listing so we don't need a separate image
+   * fetch / scrape pass.
+   */
+  imageUrl: string | null
   listingName: string
   postTaxPrice: number
   preTaxPrice: number
@@ -411,6 +418,7 @@ function collectProductEvidence(
               bestLaneTier,
               bestSizeTier,
             }),
+        imageUrl: assessment.listing.imageUrl,
         listingName: assessment.listing.listingName,
         matchTier: assessment.matchTier,
         postTaxPrice: assessment.listing.postTaxPrice,
@@ -476,6 +484,7 @@ function flattenBrandProductsToListingCandidates(
 
     const url = normalizeInlineText(product.recreationalURL) || normalizeInlineText(product.medicalURL) || null
     const category = normalizeInlineText(product.category)
+    const imageUrl = normalizeInlineText(product.imageURL) || null
 
     for (const config of product.configs) {
       const preTaxPrice = parseLitAlertsPrice(config.salePrice) ?? parseLitAlertsPrice(config.normalPrice)
@@ -495,6 +504,7 @@ function flattenBrandProductsToListingCandidates(
         distanceBand: 'unknown',
         distanceMiles: null,
         dispensaryName,
+        imageUrl,
         listingName,
         postTaxPrice: roundCurrency(preTaxPrice * PRICING_POST_TAX_MULTIPLIER),
         preTaxPrice: roundCurrency(preTaxPrice),

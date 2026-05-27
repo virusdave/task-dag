@@ -469,6 +469,14 @@ function MarketResearchProductCard({ entry, acknowledgeExpired, onToggleAcknowle
             <ul className="stacked-list compact-list" style={{ marginTop: '0.5rem' }}>
               {visibleListings.map((listing, index) => (
                 <li key={`${listing.dispensaryName}-${listing.listingName}-${listing.source}-${index}`} className="mini-card-row">
+                  {listing.imageUrl ? (
+                    <img
+                      alt=""
+                      loading="lazy"
+                      src={listing.imageUrl}
+                      style={{ width: '2.25rem', height: '2.25rem', objectFit: 'cover', borderRadius: '3px', border: '1px solid #ddd', flex: '0 0 auto' }}
+                    />
+                  ) : null}
                   <div>
                     <strong>{listing.dispensaryName}</strong>
                     <div className="subtle-copy">{listing.listingName}</div>

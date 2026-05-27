@@ -1421,6 +1421,7 @@ function readMatchedListings(value: JsonValue | undefined): PricingRunMarketList
       dispensaryName,
       eligibleForPricing,
       exclusionReason,
+      imageUrl: readString(objectValue.imageUrl),
       listingName,
       matchTier,
       postTaxPrice,

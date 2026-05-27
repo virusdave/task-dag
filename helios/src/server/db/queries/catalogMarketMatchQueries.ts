@@ -127,7 +127,7 @@ export interface GroupReviewBundle {
   subcategoryName: string | null
   groupImageUrl: string | null
   catalogProfile: CatalogProfile
-  liveVerdicts: Array<MarketMatchRow & { fuzzy: FuzzySkuRow; listingUrl: string | null; dispensaryName: string | null }>
+  liveVerdicts: Array<MarketMatchRow & { fuzzy: FuzzySkuRow; listingUrl: string | null; dispensaryName: string | null; imageUrl: string | null }>
   /** Size-grouped candidates (the new reviewer-efficient shape). */
   sizeGroups: SizeGroup[]
   /** Candidates whose best match had no associated catalog variant. */
@@ -1147,6 +1147,12 @@ export async function loadGroupReview(
         fuzzy,
         listingUrl: listing?.url ?? null,
         dispensaryName: listing?.dispensaryName ?? null,
+        // Decorate the verdict row with the per-product image too, so
+        // downstream consumers (effectiveListingFromFuzzy in
+        // loadEffectiveMarketListingsForGroup, the catalog/market-data
+        // SPA) don't have to re-issue the LEFT JOIN they already ran
+        // alongside the fuzzy fetch.
+        imageUrl: imageByFuzzyId.get(row.fuzzy_sku_id) ?? null,
       }
     })
     .filter((row): row is NonNullable<typeof row> => row !== null)
@@ -1663,6 +1669,15 @@ export interface EffectiveMarketListing {
   preTaxPrice: number | null
   postTaxPrice: number | null
   url: string | null
+  /**
+   * Per-product image URL, sourced (in order of preference) from the
+   * LitAlerts partner-API `imageURL` field on the originating
+   * `/v1/brands/:id/products` row, or — for legacy scraped rows that
+   * predate the partner-API cutover — from the
+   * `litalerts_product_images` LEFT JOIN. Null when neither source
+   * has an image for this productId.
+   */
+  imageUrl: string | null
   matchTier: 'exact' | 'fallback' | 'weak'
   source: 'nearby' | 'statewide'
   distanceBand: 'near' | 'mid' | 'far' | 'very_far' | 'unknown'
@@ -1742,6 +1757,7 @@ export async function loadEffectiveMarketListingsForGroup(
       finalScore: v.confidenceAtVerdict,
       listingUrl: v.listingUrl,
       dispensaryName: v.dispensaryName,
+      imageUrl: v.imageUrl,
     })
     if (listing) {
       reviewedCount += 1
@@ -1769,6 +1785,7 @@ export async function loadEffectiveMarketListingsForGroup(
       finalScore: c.finalScore,
       listingUrl: c.listingUrl,
       dispensaryName: c.dispensaryName,
+      imageUrl: c.imageUrl,
     })
     if (listing) {
       autoPromotedCount += 1
@@ -1799,6 +1816,14 @@ function effectiveListingFromFuzzy(args: {
   finalScore: number | null
   listingUrl: string | null
   dispensaryName: string | null
+  /**
+   * Per-product image URL, already coalesced from
+   * raw_input_jsonb.imageUrl OR the litalerts_product_images LEFT
+   * JOIN by the upstream fuzzy fetch (see imageByFuzzyId in
+   * loadGroupReview). Null when no image is available for this
+   * productId.
+   */
+  imageUrl: string | null
 }): EffectiveMarketListing | null {
   const raw = (args.fuzzy.rawInputJsonb ?? {}) as {
     listingName?: string | null
@@ -1807,6 +1832,7 @@ function effectiveListingFromFuzzy(args: {
     normalPrice?: number | string | null
     dispensaryName?: string | null
     url?: string | null
+    imageUrl?: string | null
   }
   const listingName = typeof raw.listingName === 'string' ? raw.listingName : null
   if (!listingName) return null
@@ -1816,6 +1842,14 @@ function effectiveListingFromFuzzy(args: {
   // Mirror litAlertsMarket.ts's PRICING_POST_TAX_MULTIPLIER (1.13).
   const postTaxPrice = preTaxPrice !== null ? Math.round(preTaxPrice * 1.13 * 100) / 100 : null
 
+  // Prefer the coalesced upstream value (which already considered the
+  // legacy scrape-table fallback); fall back to raw.imageUrl as a
+  // belt-and-suspenders default for code paths that bypass the
+  // upstream decoration.
+  const imageUrl =
+    args.imageUrl
+    ?? (typeof raw.imageUrl === 'string' && raw.imageUrl.length > 0 ? raw.imageUrl : null)
+
   return {
     catalogProductId: args.catalogProductId,
     dispensaryName: args.dispensaryName ?? (typeof raw.dispensaryName === 'string' ? raw.dispensaryName : '—'),
@@ -1824,6 +1858,7 @@ function effectiveListingFromFuzzy(args: {
     preTaxPrice,
     postTaxPrice,
     url: args.listingUrl ?? (typeof raw.url === 'string' ? raw.url : null),
+    imageUrl,
     matchTier: args.matchTier,
     // Partner-product fuzzies don't carry geo distance, so we surface
     // 'statewide' / 'unknown' rather than fabricate a near/mid band.

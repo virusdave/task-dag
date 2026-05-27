@@ -452,6 +452,7 @@ function extractMatchedListings(evidenceJson: JsonValue): PendingPurchaseMarketL
       dispensaryName: typeof record.dispensaryName === 'string' ? record.dispensaryName : '',
       eligibleForPricing: typeof record.eligibleForPricing === 'boolean' ? record.eligibleForPricing : false,
       exclusionReason: typeof record.exclusionReason === 'string' ? record.exclusionReason : null,
+      imageUrl: typeof record.imageUrl === 'string' && record.imageUrl ? record.imageUrl : null,
       listingName: typeof record.listingName === 'string' ? record.listingName : '',
       matchTier: record.matchTier ?? 'weak',
       postTaxPrice: typeof record.postTaxPrice === 'number' ? record.postTaxPrice : Number.NaN,

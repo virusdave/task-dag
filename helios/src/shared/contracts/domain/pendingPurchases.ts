@@ -121,6 +121,10 @@ export const PendingPurchaseMarketListingSchema = z.object({
   dispensaryName: z.string(),
   eligibleForPricing: z.boolean(),
   exclusionReason: z.string().nullable(),
+  // Per-listing product image URL the LitAlerts partner API returns
+  // on /v1/brands/:id/products (May 2026). Optional so evidence_json
+  // rows captured before this field was wired through still parse.
+  imageUrl: z.string().nullable().optional().default(null),
   listingName: z.string(),
   matchTier: z.enum(['exact', 'fallback', 'weak']),
   postTaxPrice: z.number().finite(),

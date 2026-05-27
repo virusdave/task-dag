@@ -404,6 +404,7 @@ function readMarketListings(value: unknown): PendingPurchaseMarketListing[] {
       dispensaryName,
       eligibleForPricing: record.eligibleForPricing === true,
       exclusionReason: typeof record.exclusionReason === 'string' ? record.exclusionReason : null,
+      imageUrl: typeof record.imageUrl === 'string' && record.imageUrl ? record.imageUrl : null,
       listingName,
       matchTier,
       postTaxPrice,

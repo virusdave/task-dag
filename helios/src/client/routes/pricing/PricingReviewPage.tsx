@@ -496,11 +496,21 @@ export function PricingReviewPage() {
                   <h4>Supporting market listings</h4>
                   <ul className="timeline-list compact-list">
                     {selectedItem.pricingContext.marketListings.map((listing, index) => (
-                      <li key={`${listing.dispensaryName}-${listing.listingName}-${index}`}>
-                        <strong>{listing.dispensaryName}</strong>
-                        <div className="subtle-copy">{listing.listingName}</div>
-                        <div className="subtle-copy">{formatMoney(listing.postTaxPrice)} post-tax · {formatDistanceBandLabel(listing.distanceBand, listing.distanceMiles)} · {listing.source}</div>
-                        {listing.url ? <a href={listing.url} rel="noreferrer" target="_blank">Open source listing</a> : null}
+                      <li key={`${listing.dispensaryName}-${listing.listingName}-${index}`} style={{ display: 'flex', gap: '0.5rem', alignItems: 'flex-start' }}>
+                        {listing.imageUrl ? (
+                          <img
+                            alt=""
+                            loading="lazy"
+                            src={listing.imageUrl}
+                            style={{ width: '2.25rem', height: '2.25rem', objectFit: 'cover', borderRadius: '3px', border: '1px solid #ddd', flex: '0 0 auto' }}
+                          />
+                        ) : null}
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <strong>{listing.dispensaryName}</strong>
+                          <div className="subtle-copy">{listing.listingName}</div>
+                          <div className="subtle-copy">{formatMoney(listing.postTaxPrice)} post-tax · {formatDistanceBandLabel(listing.distanceBand, listing.distanceMiles)} · {listing.source}</div>
+                          {listing.url ? <a href={listing.url} rel="noreferrer" target="_blank">Open source listing</a> : null}
+                        </div>
                       </li>
                     ))}
                   </ul>
