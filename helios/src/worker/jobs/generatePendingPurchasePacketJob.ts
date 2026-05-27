@@ -2686,6 +2686,101 @@ function stripTrailingContainerTokens(value: string): string {
   }
 }
 
+/**
+ * Known strain-class words the LLM occasionally drops into the wrong
+ * field. Anything in here is a *classification* label (Sativa / Indica /
+ * Hybrid family) — never a cultivar / flavor / variant.
+ *
+ * Matched case-insensitively. Multi-word combinations (e.g.
+ * "Indica Hybrid") are normalized via `pickTrailingStrainLabel` below.
+ */
+const STRAIN_LABEL_WORDS = new Set<string>([
+  'indica',
+  'sativa',
+  'hybrid',
+  'indica-dominant',
+  'sativa-dominant',
+])
+
+/**
+ * If the value's trailing word(s) are a strain-class label
+ * (e.g. "… Blueberry Indica" → "Indica"), return the matched label in
+ * canonical title-case along with the value with those words stripped
+ * off. Returns null if the value does not end in a strain label.
+ *
+ * Recognized trailing patterns (last 1 or 2 whitespace-delimited words,
+ * lowercased and punctuation-trimmed):
+ *   - "indica" / "sativa" / "hybrid"
+ *   - "indica hybrid" / "sativa hybrid"  → normalized to e.g. "Indica Hybrid"
+ *   - hyphenated variants ("indica-dominant")
+ */
+function pickTrailingStrainLabel(value: string): { stripped: string; strain: string } | null {
+  const trimmed = value.trim()
+  if (trimmed.length === 0) return null
+  const tokens = trimmed.split(/\s+/)
+  const last = tokens[tokens.length - 1].toLowerCase().replace(/[.,;:]+$/u, '')
+  const penultimate = tokens.length >= 2
+    ? tokens[tokens.length - 2].toLowerCase().replace(/[.,;:]+$/u, '')
+    : null
+
+  // "Indica Hybrid" / "Sativa Hybrid"
+  if (penultimate !== null
+    && (penultimate === 'indica' || penultimate === 'sativa')
+    && last === 'hybrid') {
+    const stripped = tokens.slice(0, tokens.length - 2).join(' ').trim()
+    const strain = `${penultimate.charAt(0).toUpperCase()}${penultimate.slice(1)} Hybrid`
+    return { stripped, strain }
+  }
+
+  if (STRAIN_LABEL_WORDS.has(last)) {
+    const stripped = tokens.slice(0, tokens.length - 1).join(' ').trim()
+    // Title-case ("indica-dominant" → "Indica-dominant"); good enough
+    // for downstream display where strain is a label, not a slug.
+    const strain = `${last.charAt(0).toUpperCase()}${last.slice(1)}`
+    return { stripped, strain }
+  }
+
+  return null
+}
+
+/**
+ * Some LLM classifications stuff a strain-class label (Indica / Sativa
+ * / Hybrid) into the variantName (and occasionally swap it with the
+ * actual flavor in strainName). Example seen in prod for
+ *   "Flav - Candy - Belt - 100mg - Live Resin - Blueberry - Indica"
+ * the LLM returned `variantName="Blueberry Indica"`, `strainName="Blueberry"`
+ * even though its own rationale correctly identified "'Indica' is a
+ * strain indicator." This repair detects that trailing strain label
+ * and moves it into strainName, leaving the flavor / cultivar in
+ * variantName.
+ *
+ * Conservative: only fires when the trailing token of variantName is a
+ * recognized strain label AND the LLM's strainName is empty OR is itself
+ * not a strain label (i.e. the LLM almost certainly swapped them).
+ */
+function repairLlmStrainPlacement(input: {
+  variantName: string
+  strainName: string
+}): { variantName: string; strainName: string } {
+  const picked = pickTrailingStrainLabel(input.variantName)
+  if (!picked) return input
+  if (picked.stripped.length === 0) return input
+
+  const currentStrainTokens = input.strainName.trim().split(/\s+/).filter((t) => t.length > 0)
+  const currentStrainLooksLikeLabel = currentStrainTokens.length === 1
+    && STRAIN_LABEL_WORDS.has(currentStrainTokens[0].toLowerCase())
+  if (input.strainName.trim().length > 0 && currentStrainLooksLikeLabel) {
+    // LLM already correctly put a strain label in strainName; leave
+    // variantName alone (it presumably intended the trailing word).
+    return input
+  }
+
+  return {
+    variantName: picked.stripped,
+    strainName: picked.strain,
+  }
+}
+
 function normalizePendingPurchaseLlmClassification(
   classification: z.infer<typeof PendingPurchaseLlmClassificationSchema>,
 ): ParsedProductName | null {
@@ -2717,6 +2812,18 @@ function normalizePendingPurchaseLlmClassification(
     repairedTab,
   )
 
+  // The LLM teacher routinely mis-files strain-class labels (Indica /
+  // Sativa / Hybrid) by appending them to variantName instead of
+  // strainName — sometimes also swapping them with the actual flavor.
+  // `repairLlmStrainPlacement` detects a trailing strain label and
+  // moves it back into strainName so reviewers don't see "Create new
+  // Blueberry Indica" when the variant is actually a Blueberry candy
+  // belt with an Indica strain.
+  const strainRepair = repairLlmStrainPlacement({
+    variantName: repairedVariantName,
+    strainName: normalizeNonEmptyString(classification.strainName) ?? '',
+  })
+
   const draft: ParsedProductName = {
     brand: classification.brand,
     category: classification.category,
@@ -2725,9 +2832,9 @@ function normalizePendingPurchaseLlmClassification(
     prevalence: normalizeNonEmptyString(classification.prevalence),
     searchTerm: classification.groupName,
     size: normalizedSize,
-    strainName: normalizeNonEmptyString(classification.strainName) ?? '',
+    strainName: strainRepair.strainName,
     subcategory: normalizeNonEmptyString(classification.subcategory) ?? '',
-    variantName: repairedVariantName,
+    variantName: strainRepair.variantName,
     variantTab: repairedTab,
   }
 
