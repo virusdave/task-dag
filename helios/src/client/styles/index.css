@@ -3252,15 +3252,46 @@ a.tree-nav-branch-label.is-link,
 .metric-chart-legend {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.75rem;
+  gap: 0.35rem 0.4rem;
   margin-top: 0.5rem;
-  font-size: 0.8rem;
+  font-size: 0.78rem;
 }
 
+/* Each legend entry is a click-to-toggle chip — clicking hides that
+   series from the chart (and the y-axis re-scales without it).
+   Reset-style padded pill so chips read as separate clickable
+   controls instead of a run-on text string. */
 .metric-chart-legend-item {
   display: inline-flex;
   align-items: center;
   gap: 0.35rem;
+  padding: 0.18rem 0.55rem;
+  border: 1px solid var(--control-border, #c8d2dc);
+  border-radius: 999px;
+  background: rgba(255, 250, 241, 0.92);
+  color: var(--ink, #17130f);
+  font: inherit;
+  cursor: pointer;
+  line-height: 1.15;
+  white-space: nowrap;
+  transition: background 0.12s ease, opacity 0.12s ease;
+}
+/* Hover affordance only on real buttons (toggleable legend). The
+   scatter legend still uses a non-clickable <span> so we don't want
+   to suggest interactivity there. */
+button.metric-chart-legend-item:hover {
+  background: rgba(155, 74, 34, 0.10);
+}
+button.metric-chart-legend-item:focus-visible {
+  outline: 2px solid #1f4e7a;
+  outline-offset: 1px;
+}
+span.metric-chart-legend-item {
+  cursor: default;
+}
+.metric-chart-legend-item.is-hidden {
+  opacity: 0.55;
+  text-decoration: line-through;
 }
 
 .metric-chart-legend-swatch {
@@ -3268,6 +3299,12 @@ a.tree-nav-branch-label.is-link,
   width: 10px;
   height: 10px;
   border-radius: 2px;
+  border: 1px solid transparent;
+  box-sizing: border-box;
+}
+
+.metric-chart-legend-label {
+  display: inline-block;
 }
 
 /* On mobile, render the tooltip and create form as a bottom-anchored

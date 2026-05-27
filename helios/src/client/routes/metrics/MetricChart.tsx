@@ -421,6 +421,20 @@ function ChartSvg(props: ChartSvgProps) {
   const wrapRef = useRef<HTMLDivElement | null>(null)
   const sharedAxis = useTimeAxis()
 
+  // Per-card hidden series. Clicking a legend chip toggles its id in
+  // and out of this Set; the chart re-computes its y-range and skips
+  // the hidden series in rendering, so e.g. hiding one giant series
+  // lets the others re-fit the y-axis.
+  const [hiddenSeries, setHiddenSeries] = useState<ReadonlySet<string>>(() => new Set<string>())
+  const toggleSeries = useCallback((id: string) => {
+    setHiddenSeries((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }, [])
+
   const [renderedWidthPx, setRenderedWidthPx] = useState<number>(600)
   useLayoutEffect(() => {
     const el = wrapRef.current
@@ -490,7 +504,12 @@ function ChartSvg(props: ChartSvgProps) {
       datumByMs: [] as Array<{ t: number; values: Record<string, number | null> }>,
     }
     if (!response) return empty
-    const ids = response.metric.series.map((s) => s.id)
+    // Only visible (i.e. not legend-toggled-off) series participate
+    // in the y-range, stacking, and rendering. Hidden series are
+    // still iterable in the legend (so the operator can toggle them
+    // back on) but contribute nothing to the chart.
+    const visibleSeriesDefs = response.metric.series.filter((s) => !hiddenSeries.has(s.id))
+    const ids = visibleSeriesDefs.map((s) => s.id)
 
     // Sort rows by t once so the stack accumulator (per-bucket) gets a
     // deterministic order; the polyline / area renderer also wants them
@@ -510,13 +529,18 @@ function ChartSvg(props: ChartSvgProps) {
       return { t: Date.parse(d.t), values }
     })
 
-    // Build per-series buffers, then layer stacking on top.
-    const seriesOut: Series[] = response.metric.series.map((s, i) => ({
-      id: s.id,
-      label: s.label,
-      colour: s.colour ?? FALLBACK_COLOURS[i % FALLBACK_COLOURS.length]!,
-      points: [],
-    }))
+    // Build per-series buffers, then layer stacking on top. Use the
+    // ORIGINAL series-declaration index for colour fallback so series
+    // colours stay stable as the legend toggles items on/off.
+    const seriesOut: Series[] = visibleSeriesDefs.map((s) => {
+      const origIdx = response.metric.series.findIndex((x) => x.id === s.id)
+      return {
+        id: s.id,
+        label: s.label,
+        colour: s.colour ?? FALLBACK_COLOURS[origIdx % FALLBACK_COLOURS.length]!,
+        points: [],
+      }
+    })
 
     let lo = Number.POSITIVE_INFINITY
     let hi = Number.NEGATIVE_INFINITY
@@ -597,7 +621,7 @@ function ChartSvg(props: ChartSvgProps) {
     hi = stackMode === 'percent' ? 100 : stackTop > 0 ? stackTop * 1.05 : 1
 
     return { yMin: lo, yMax: hi, series: seriesOut, datumByMs }
-  }, [response, stackMode])
+  }, [response, stackMode, hiddenSeries])
 
   const yScale = useCallback(
     (v: number) => marginTop + plotH - ((v - yMin) / (yMax - yMin)) * plotH,
@@ -1218,7 +1242,11 @@ function ChartSvg(props: ChartSvgProps) {
         ) : null}
       </svg>
 
-      <ChartLegend series={response?.metric.series ?? []} />
+      <ChartLegend
+        series={response?.metric.series ?? []}
+        hiddenSeries={hiddenSeries}
+        onToggle={toggleSeries}
+      />
 
       {error ? <div className="metric-chart-error">⚠ {error}</div> : null}
 
@@ -1786,17 +1814,39 @@ function makeTicks(lo: number, hi: number, n: number): number[] {
   return out
 }
 
-function ChartLegend({ series }: { series: ReadonlyArray<{ id: string; label: string; colour?: string }> }) {
+function ChartLegend({
+  series,
+  hiddenSeries,
+  onToggle,
+}: {
+  series: ReadonlyArray<{ id: string; label: string; colour?: string }>
+  hiddenSeries: ReadonlySet<string>
+  onToggle: (id: string) => void
+}) {
   if (series.length === 0) return null
   return (
-    <div className="metric-chart-legend">
+    <div className="metric-chart-legend" role="group" aria-label="Series visibility">
       {series.map((s, i) => {
         const colour = s.colour ?? FALLBACK_COLOURS[i % FALLBACK_COLOURS.length]
+        const hidden = hiddenSeries.has(s.id)
         return (
-          <span className="metric-chart-legend-item" key={s.id}>
-            <span className="metric-chart-legend-swatch" style={{ background: colour }} />
-            {s.label}
-          </span>
+          <button
+            type="button"
+            className={`metric-chart-legend-item${hidden ? ' is-hidden' : ''}`}
+            key={s.id}
+            onClick={(e) => {
+              e.stopPropagation()
+              onToggle(s.id)
+            }}
+            aria-pressed={!hidden}
+            title={hidden ? `Show ${s.label}` : `Hide ${s.label}`}
+          >
+            <span
+              className="metric-chart-legend-swatch"
+              style={{ background: hidden ? 'transparent' : colour, borderColor: colour }}
+            />
+            <span className="metric-chart-legend-label">{s.label}</span>
+          </button>
         )
       })}
     </div>
