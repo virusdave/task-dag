@@ -366,22 +366,34 @@ export async function getPendingMigrations(db: Queryable): Promise<PendingMigrat
 
   inflight = (async () => {
     try {
+      // Run every sentinel in parallel. The sentinels are independent
+      // information_schema / pg_indexes lookups against unrelated
+      // tables; serializing them (as the original implementation did)
+      // turned the cold-cache refresh into ~33 sequential DB round
+      // trips. On Tiger Cloud that's ~1.5–2s of network latency that
+      // every authenticated request paid every 30s (the cache TTL),
+      // dominating endpoints like GET /api/catalog/groups whose own
+      // SQL is sub-100ms. Promise.all collapses the same 33 lookups
+      // into a single ~30–80ms parallel round-trip.
+      const results = await Promise.all(
+        SENTINELS.map(async (sentinel) => {
+          try {
+            return { sentinel, isApplied: await sentinel.check(db) }
+          } catch (error) {
+            // A sentinel that throws (e.g. underlying table itself
+            // doesn't exist yet) means the migration definitely
+            // isn't applied. Treat as pending rather than blowing up
+            // the whole session response.
+            console.warn(
+              `[pendingMigrations] sentinel for ${sentinel.migrationId} threw; treating as pending:`,
+              error,
+            )
+            return { sentinel, isApplied: false }
+          }
+        }),
+      )
       const pending: PendingMigration[] = []
-      for (const sentinel of SENTINELS) {
-        let isApplied = false
-        try {
-          isApplied = await sentinel.check(db)
-        } catch (error) {
-          // A sentinel that throws (e.g. underlying table itself
-          // doesn't exist yet) means the migration definitely isn't
-          // applied. Treat as pending rather than blowing up the
-          // whole session response.
-          isApplied = false
-          console.warn(
-            `[pendingMigrations] sentinel for ${sentinel.migrationId} threw; treating as pending:`,
-            error,
-          )
-        }
+      for (const { sentinel, isApplied } of results) {
         if (!isApplied) {
           pending.push({
             migrationId: sentinel.migrationId,
