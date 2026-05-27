@@ -47,6 +47,10 @@ import { registerStaffRoutes } from '../routes/staff.js'
 import { registerSweedAuthEventsRoutes } from '../routes/sweedAuthEvents.js'
 import { registerTaskDagRoutes } from '../routes/taskDag.js'
 import { registerUsersRoutes } from '../routes/users.js'
+import {
+  registerVisitorScansAdminRoutes,
+  registerVisitorScansWebhookRoutes,
+} from '../routes/visitorScans.js'
 import { registerWhiteglovePricingRoutes } from '../routes/whiteglovePricing.js'
 import { joinBasePath } from '../../shared/config/appBasePath.js'
 
@@ -159,6 +163,16 @@ export async function buildServer() {
     reply.type('text/plain').send('okzz\n'),
   )
 
+  // VeriScan webhook receivers (POST /wh/{bx,mh}/veriscan/checkin).
+  // Mounted at the absolute root — NOT under appBasePath — because
+  // VeriScan's webhook configuration points at fixed absolute URLs
+  // (`https://helios.freshlybaked.us/wh/...`). The handlers do their
+  // own `Authorization: Bearer` constant-time check against
+  // VERISCAN_WEBHOOK_TOKEN and are explicitly exempted from the SPA
+  // session-cookie gate in authGate.ts. See
+  // virusdave/top-level#9 / FreshlyBakedNYC/automation#31 (A1).
+  registerVisitorScansWebhookRoutes(server)
+
   if (env.appBasePath === '/') {
     await registerApplicationSurface(server)
   } else {
@@ -213,6 +227,7 @@ async function registerApplicationSurface(server: FastifyInstance) {
   await registerJobRoutes(server)
   await registerTaskDagRoutes(server)
   await registerUsersRoutes(server)
+  await registerVisitorScansAdminRoutes(server)
   await registerWhiteglovePricingRoutes(server)
 
   const clientDistPath = resolve(__dirname, '../../../client')

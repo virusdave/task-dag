@@ -76,6 +76,17 @@ export function registerAuthGate(server: FastifyInstance): void {
       return
     }
 
+    // VeriScan webhook receivers (POST /wh/{bx,mh}/veriscan/checkin)
+    // are also mounted at the absolute server root and must never
+    // require the SPA session cookie. They do their own
+    // `Authorization: Bearer` constant-time check against
+    // VERISCAN_WEBHOOK_TOKEN inside the handler — see
+    // routes/visitorScans.ts and
+    // virusdave/top-level#9 / FreshlyBakedNYC/automation#31.
+    if (request.method === 'POST' && stripQuery(request.url).startsWith('/wh/')) {
+      return
+    }
+
     const appPath = stripAppBasePath(stripQuery(request.url), env.appBasePath)
 
     if (isLoginFlowRequest(request.method, appPath)) {

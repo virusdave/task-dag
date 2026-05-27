@@ -344,6 +344,18 @@ const SENTINELS: MigrationSentinel[] = [
       (await columnExists(db, 'sweed_orders', 'delivery_address_id')) &&
       (await columnExists(db, 'sweed_orders', 'invoice_get_status')),
   },
+  {
+    // visitor_scans + indices — Customer / Visitor Address Ingestion
+    // (virusdave/top-level#9 child FreshlyBakedNYC/automation#31, A1).
+    // Without this the webhook handlers at POST /wh/{bx,mh}/veriscan/checkin
+    // and the helios visitor-scans-backfill CLI both fail at the insert
+    // step, and the /admin/visitors/scans operator page renders empty
+    // forever.
+    migrationId: '039_visitor_scans',
+    label:
+      'visitor_scans table + (provider, hash_id) idempotency unique + scanned_at / site / postal / state indices — backs the VeriScan webhook handler at POST /wh/{bx,mh}/veriscan/checkin, the helios visitor-scans-backfill CLI, and the /admin/visitors/scans operator page (FreshlyBakedNYC/automation#31, virusdave/top-level#9).',
+    check: (db) => tableExists(db, 'visitor_scans'),
+  },
 ]
 
 interface CacheEntry {

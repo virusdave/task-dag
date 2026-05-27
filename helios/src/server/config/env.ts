@@ -27,6 +27,22 @@ const GOOGLE_OAUTH_REDIRECT_URI_SECRET_FILE_PATHS = buildDefaultSecretFilePaths(
 
 const SWEED_AUTH_TOKEN_SECRET_FILE_PATHS = buildDefaultSecretFilePaths('sweed/auth-token', 'sweed/auth-token.env')
 
+// VeriScan webhook bearer token. Generated once by the operator
+// (`openssl rand -hex 32`), pasted into VeriScan's webhook
+// `Authorization: Bearer <token>` custom header on both Bronx and
+// Midtown sites, and stored as an agenix-encrypted secret on
+// vps-nixos-3 (Nicponskis/nixos-sbc N1). Exposed to helios-server via
+// the systemd EnvironmentFile as `VERISCAN_WEBHOOK_TOKEN`. The
+// helios webhook handler refuses any POST whose bearer doesn't
+// constant-time match this value; an unset env var means every
+// /wh/{bx,mh}/veriscan/checkin POST is rejected as 503 (server has
+// no configured bearer to compare against). See
+// virusdave/top-level#9 / FreshlyBakedNYC/automation#31 A1.
+const VERISCAN_WEBHOOK_TOKEN_SECRET_FILE_PATHS = buildDefaultSecretFilePaths(
+  'veriscan/webhook-token',
+  'veriscan/webhook-token.env',
+)
+
 // Private-LLM gateway (Bedrock-mantle) credentials, mirrored from
 // the worker-side env so the server-side review-sentiment gate
 // (issue #13 / A2) can call the OpenAI-compatible /chat/completions
@@ -55,6 +71,12 @@ export interface ServerEnv {
   sweedApiUrl: string
   sweedAuthToken: string | null
   sweedStateDealerId: number
+  // VeriScan webhook bearer token. See
+  // VERISCAN_WEBHOOK_TOKEN_SECRET_FILE_PATHS above for the
+  // why/where; null when unset (server-side fail-closed default —
+  // every webhook POST returns 503 in that state, see
+  // helios/src/server/routes/visitorScans.ts).
+  veriscanWebhookToken: string | null
   communicationsPolicyPacketDir: string
   // Customer-Sentiment Capture (issue #13).  Default off so a deploy
   // can't accidentally start accepting public POST /v1/reviews/submit
@@ -121,6 +143,9 @@ export function getServerEnv(): ServerEnv {
       defaultFilePaths: SWEED_AUTH_TOKEN_SECRET_FILE_PATHS,
     }),
     sweedStateDealerId: readNumberEnv('SWEED_STATE_DEALER_ID', 210248),
+    veriscanWebhookToken: readOptionalSecretEnv('VERISCAN_WEBHOOK_TOKEN', {
+      defaultFilePaths: VERISCAN_WEBHOOK_TOKEN_SECRET_FILE_PATHS,
+    }),
     communicationsPolicyPacketDir:
       readOptionalEnv('COMMUNICATIONS_POLICY_PACKET_DIR') ??
       '/Users/dave/tmp/scratch/fbnyc/sweed/automation/ads/google/policy',
