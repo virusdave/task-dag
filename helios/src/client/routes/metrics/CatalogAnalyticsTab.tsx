@@ -2850,7 +2850,13 @@ function CatalogScatterSvg({
           yDef={yDef}
           xValue={hovered.x}
           yValue={hovered.y}
-          colourLabel={hovered.bucket}
+          colourLabel={
+            colourByDef.kind === 'categorical'
+              ? hovered.bucket
+              : hovered.colourValue != null
+              ? colourByDef.format(hovered.colourValue)
+              : '—'
+          }
           colourByDef={colourByDef}
           /* Absolute position in chart-wrapper local pixel space —
              follows the dot through page scroll, resize, pan/zoom. */
