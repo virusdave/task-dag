@@ -27,13 +27,23 @@ const JOB_POOL_TUPLES: Array<[string, JobExecutionPool]> = Object.entries(
  * Build a `(values …) as t(job_type, execution_pool)` CTE so SQL
  * aggregates can join job rows to their execution pool without
  * hard-coding the mapping in two places.
+ *
+ * `priorParamCount` is the number of `$N` placeholders the caller
+ * already plans to bind BEFORE this builder's values. So 0 = no
+ * leading params (the values produced here are `$1, $2, $3, …`),
+ * 5 = caller has 5 leading params (the values produced here are
+ * `$6, $7, $8, …`). Misclaiming this offset (e.g. passing 1 when
+ * the caller actually has zero leading params) silently shifts
+ * every placeholder up by one and the unbound `$1` blows up with
+ * Postgres' "could not determine data type of parameter $1" at
+ * analyze time.
  */
-function buildPoolMapSql(paramOffset: number): { sql: string; values: unknown[] } {
+function buildPoolMapSql(priorParamCount: number): { sql: string; values: unknown[] } {
   const values: unknown[] = []
   const rows: string[] = []
   for (const [jobType, pool] of JOB_POOL_TUPLES) {
     values.push(jobType, pool)
-    rows.push(`($${paramOffset + values.length - 1}::text, $${paramOffset + values.length}::text)`)
+    rows.push(`($${priorParamCount + values.length - 1}::text, $${priorParamCount + values.length}::text)`)
   }
   return {
     sql: `(values ${rows.join(', ')}) as pool_map(job_type, execution_pool)`,
@@ -434,7 +444,9 @@ function toIntOrNull(value: string | number | null | undefined): number | null {
  * can render a stable grid.
  */
 export async function getJobQueueMetrics(db: Queryable): Promise<JobQueueMetricsResponse> {
-  const poolMap = buildPoolMapSql(1)
+  // 0 = no leading params; the values produced by buildPoolMapSql
+  // are the only bound parameters in `aggregateSql` / `poolHealthSql`.
+  const poolMap = buildPoolMapSql(0)
 
   // Cell + pool aggregator. Single query so both views share the
   // same `classified` snapshot (no risk of drift between calls).
