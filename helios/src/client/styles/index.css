@@ -581,6 +581,20 @@ pre {
   padding: 1rem;
 }
 
+/*
+ * Collapse-on-decision (issue #35): finalized pending-purchase rows
+ * fold down to a one-line header, so we tighten the padding and
+ * mute the background slightly so the reviewer can visually skim
+ * past 50 finished decisions in one viewport.
+ */
+.review-card--collapsed {
+  padding: 0.5rem 1rem;
+  background: var(--surface-muted, rgba(0, 0, 0, 0.02));
+}
+.review-card--collapsed .review-card-header {
+  margin: 0;
+}
+
 .comparison-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));

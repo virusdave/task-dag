@@ -943,6 +943,17 @@ function PendingPurchaseRowCard(
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [isApproving, setIsApproving] = useState(false)
   const [isSaving, setIsSaving] = useState(false)
+  // Collapse-on-decision (issue #35): once the reviewer approves or
+  // rejects a row, fold the card down to a one-line summary so they
+  // can scroll past 50 finished decisions in a single viewport. The
+  // reviewer can still reopen any row with a single click. The local
+  // collapsed state is re-seeded from `isFinalized` whenever the row
+  // version bumps (i.e. after a server-side state change), so a row
+  // that flips back to pending auto-expands and a row that was just
+  // approved auto-collapses without the approve handler having to
+  // poke a separate setState.
+  const isFinalized = item.approvalStatus === 'approved' || item.approvalStatus === 'rejected'
+  const [isCollapsed, setIsCollapsed] = useState(isFinalized)
   const isApplyLocked = item.lastApplyStatus === 'queued' || item.lastApplyStatus === 'running'
   const editingLocked = item.approvalStatus === 'approved' || isApplyLocked
   const applySummaryText = readLastApplySummaryText(item)
@@ -957,6 +968,12 @@ function PendingPurchaseRowCard(
     setDraftImageUrl(item.editedPrimaryImageUrl ?? item.primaryImageUrl ?? '')
     setDraftNotes(item.notes ?? '')
     setDraftStructured(readInitialDraftStructured(item))
+    // Re-sync the collapsed-after-decision state with the freshest
+    // approval status. Without this, a row the reviewer manually
+    // reopened would stay open after a backend revalidate that
+    // didn't change the status, but a server-side flip back to
+    // pending wouldn't auto-expand the card.
+    setIsCollapsed(item.approvalStatus === 'approved' || item.approvalStatus === 'rejected')
   }, [item])
 
   async function handleSave() {
@@ -1038,13 +1055,20 @@ function PendingPurchaseRowCard(
   )
   const reviewDetailsHref = buildHeliosModulePath('catalog', `review-details/pending_purchase_row/${item.rowId}`)
 
+  // Effective price chip used in the collapsed one-line summary
+  // (issue #35). Shows the price that would actually be written on
+  // apply (override ?? proposal), so a finalized card communicates
+  // the decision the reviewer made at a glance.
+  const collapsedSummaryPrice = formatCurrency(item.effectiveProposedPrice)
+
   return (
-    <article className="review-card">
+    <article className={`review-card${isCollapsed ? ' review-card--collapsed' : ''}`}>
       <div className="review-card-header">
         <div>
           <strong>{item.distributorProductName}</strong>
           <p className="subtle-copy">
             {item.siteLabel} · {item.targetBrand ?? 'No brand'} · {item.targetVariantName ?? item.targetGroupName ?? 'No target variant'}
+            {isCollapsed ? ` · ${collapsedSummaryPrice}` : ''}
           </p>
         </div>
         <div className="inline-row wrap-row" style={{ gap: '0.4rem', alignItems: 'center' }}>
@@ -1052,6 +1076,20 @@ function PendingPurchaseRowCard(
           <Pill tone={applyStatusTone(item.lastApplyStatus)}>{item.lastApplyStatus.replaceAll('_', ' ')}</Pill>
           <Pill tone={mappingStatusTone(item.mappingStatus)}>{item.mappingStatus.replaceAll('_', ' ')}</Pill>
           <Pill tone="muted">{`v${item.version}`}</Pill>
+          {isFinalized ? (
+            <button
+              className="ghost-button"
+              onClick={() => setIsCollapsed((prev) => !prev)}
+              title={
+                isCollapsed
+                  ? 'Reopen this finalized row to inspect or change the decision.'
+                  : 'Collapse this finalized row to a one-line summary.'
+              }
+              type="button"
+            >
+              {isCollapsed ? 'Reopen ▾' : 'Collapse ▴'}
+            </button>
+          ) : null}
           <a
             className="ghost-button review-card-open-details"
             href={reviewDetailsHref}
@@ -1063,6 +1101,7 @@ function PendingPurchaseRowCard(
           </a>
         </div>
       </div>
+      {isCollapsed ? null : (<>
 
       <div className="comparison-grid">
         <PendingValuePanel label="Current price" value={formatCurrency(item.currentPrice)} />
@@ -1462,6 +1501,8 @@ function PendingPurchaseRowCard(
           ) : null}
         </div>
       ) : null}
+
+      </>)}
     </article>
   )
 }
