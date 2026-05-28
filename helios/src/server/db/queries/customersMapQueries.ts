@@ -38,6 +38,7 @@ interface PointRow {
   checked_in_at: Date
   lat: string | number
   lng: string | number
+  coord_source: 'document' | 'scan'
   first_name: string | null
   middle_name: string | null
   last_name: string | null
@@ -74,9 +75,16 @@ export async function listCustomersMapPoints(
     conditions.push(sql(`$${params.length}`))
   }
 
-  // Hard floors — we only render points that actually have coords.
-  conditions.push('vs.latitude is not null')
-  conditions.push('vs.longitude is not null')
+  // Hard floor — we only render points that have *some* usable
+  // coordinate. We prefer the customer's document-address coords
+  // (where they live), but fall back to the kiosk scan coords
+  // (where they scanned) so a thin stream of doc-coord-less rows
+  // still produces visible dots. `coord_source` flags which path
+  // each row used.
+  conditions.push(
+    '((vs.latitude is not null and vs.longitude is not null)' +
+      ' or (vs.scan_latitude is not null and vs.scan_longitude is not null))',
+  )
 
   if (filter.siteSlugs !== null && filter.siteSlugs.length > 0) {
     add((p) => `vs.site_slug = any(${p})`, filter.siteSlugs)
@@ -106,11 +114,15 @@ export async function listCustomersMapPoints(
 
   const pointSql = `
     select
-      vs.id              as scan_id,
+      vs.id                                    as scan_id,
       vs.site_slug,
-      coalesce(vs.scanned_at, vs.ingested_at) as checked_in_at,
-      vs.latitude        as lat,
-      vs.longitude       as lng,
+      coalesce(vs.scanned_at, vs.ingested_at)  as checked_in_at,
+      coalesce(vs.latitude, vs.scan_latitude)  as lat,
+      coalesce(vs.longitude, vs.scan_longitude) as lng,
+      case
+        when vs.latitude is not null and vs.longitude is not null then 'document'
+        else 'scan'
+      end                                      as coord_source,
       vs.first_name,
       vs.middle_name,
       vs.last_name,
@@ -140,6 +152,7 @@ export async function listCustomersMapPoints(
         checkedInAt: toIso(row.checked_in_at),
         lat,
         lng,
+        coordSource: row.coord_source,
         displayName: formatName(row),
         city: row.city,
         state: row.state,

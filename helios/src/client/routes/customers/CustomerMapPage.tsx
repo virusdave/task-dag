@@ -1,19 +1,26 @@
 // /admin/customers/map — customer-origin map.
 //
-// FreshlyBakedNYC/automation#33, phase C4 v1.
+// FreshlyBakedNYC/automation#33, phase C4.
 //
-// Renders one MapLibre dot per visitor_scan that carries a
-// non-null document-address coordinate, plus a pin for each of our
-// two retail sites. Filters (site, check-in date range) shared
-// with /admin/customers/check-ins land in C4-v2; v1 reads them
-// from the URL search params and immediately re-fetches on change.
+// Renders one MapLibre circle per visitor_scan with a non-null
+// document-address coordinate, plus a pin for each retail site.
+// The base map is heavily desaturated and faded — it exists to
+// provide geographic framing, not road navigation.
 //
-// MapLibre is loaded lazily inside the effect so it never enters
-// the initial SSR/test bundle path, and the marker layer is a
-// CircleLayer over a GeoJSON source — NOT thousands of DOM nodes
-// — so the page stays smooth even at the 2.5k-point default cap.
+// Filters:
+//   * site (bx / mh / all)
+//   * checkedInAfter / checkedInBefore — driven by a dual-handle
+//     range slider over a rolling 30-day window. The slider is the
+//     primary control and writes directly to URL params (debounced
+//     ~200ms) so the map refetches as the operator drags.
+//   * maxPoints — cap on the result set; default 2,500.
+//
+// Default window when the page is loaded with no explicit filter
+// state: "yesterday 6am → today 3am" in the operator's local time
+// zone (i.e. the prior business overnight). This matches the
+// operator's mental model of "today's customers".
 
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useLoaderData, useSearchParams } from 'react-router-dom'
 
 import {
@@ -24,10 +31,12 @@ import { loadJson } from '../../app/fetchJson.js'
 import { buildAppPath } from '../../app/paths.js'
 import { Pill } from '../../components/Pill.js'
 
-// Free, key-less raster style. CARTO/OSM/Stamen would also work;
-// OSM raster tiles are the cheapest immediate option for a low-
-// volume operator-only page. If the OSM project ever tightens its
-// usage policy, swap this style URL for a hosted vector style.
+import type maplibregl from 'maplibre-gl'
+
+// ---------------------------------------------------------------------
+// Map style
+// ---------------------------------------------------------------------
+
 const MAP_STYLE: maplibregl.StyleSpecification = {
   version: 8,
   sources: {
@@ -44,30 +53,89 @@ const MAP_STYLE: maplibregl.StyleSpecification = {
       id: 'osm-tiles',
       type: 'raster',
       source: 'osm',
+      paint: {
+        // Heavy desaturation + a tinge of opacity so the base map
+        // recedes behind the points. The operator scans for
+        // geographic framing (boroughs, the rivers), not for street
+        // names.
+        'raster-opacity': 0.55,
+        'raster-saturation': -0.85,
+        'raster-contrast': -0.15,
+        'raster-brightness-max': 0.95,
+      },
     },
   ],
 }
 
-// NYC-centric default viewport — the operator can drag elsewhere
-// but the first paint should show our two stores.
 const DEFAULT_CENTER: [number, number] = [-73.95, 40.78]
 const DEFAULT_ZOOM = 10.5
+const DEFAULT_MAX_POINTS = 2500
 
-// Type-only import lets us reference maplibregl namespace types
-// without forcing it into the initial bundle. The actual module
-// loads dynamically inside the effect.
-import type maplibregl from 'maplibre-gl'
+// ---------------------------------------------------------------------
+// Default-window helpers
+// ---------------------------------------------------------------------
 
-export async function customerMapLoader({
-  request,
-}: {
-  request: Request
-}): Promise<CustomersMapResponse> {
-  const url = new URL(request.url)
-  return loadJson(`/api/admin/customers/map${url.search}`, CustomersMapResponseSchema)
+/** "Yesterday 6am" in the operator's local timezone, as ISO. */
+function defaultCheckedInAfter(now: Date = new Date()): string {
+  const d = new Date(now)
+  d.setDate(d.getDate() - 1)
+  d.setHours(6, 0, 0, 0)
+  return d.toISOString()
 }
 
-function formatTime(iso: string): string {
+/** "Today 3am" in the operator's local timezone, as ISO. */
+function defaultCheckedInBefore(now: Date = new Date()): string {
+  const d = new Date(now)
+  d.setHours(3, 0, 0, 0)
+  return d.toISOString()
+}
+
+// ---------------------------------------------------------------------
+// Slider helpers — operate over a fixed 30-day rolling window ending
+// "now". Two slider handles map to checkedInAfter / checkedInBefore.
+// ---------------------------------------------------------------------
+
+const SLIDER_WINDOW_MS = 30 * 24 * 60 * 60 * 1000
+const SLIDER_STEPS = 720 // 30 days * 24h = 720 — one tick per hour
+
+interface SliderRange {
+  /** Start of the rolling window. */
+  windowStart: Date
+  /** End of the rolling window (= now, fixed at mount). */
+  windowEnd: Date
+}
+
+function buildSliderRange(): SliderRange {
+  const end = new Date()
+  const start = new Date(end.getTime() - SLIDER_WINDOW_MS)
+  return { windowStart: start, windowEnd: end }
+}
+
+function clampDateToWindow(iso: string | null, win: SliderRange, fallback: Date): Date {
+  if (iso === null) return fallback
+  const t = new Date(iso).getTime()
+  if (!Number.isFinite(t)) return fallback
+  if (t < win.windowStart.getTime()) return win.windowStart
+  if (t > win.windowEnd.getTime()) return win.windowEnd
+  return new Date(t)
+}
+
+function dateToTick(date: Date, win: SliderRange): number {
+  const ratio =
+    (date.getTime() - win.windowStart.getTime()) /
+    (win.windowEnd.getTime() - win.windowStart.getTime())
+  return Math.round(Math.max(0, Math.min(1, ratio)) * SLIDER_STEPS)
+}
+
+function tickToDate(tick: number, win: SliderRange): Date {
+  const ratio = tick / SLIDER_STEPS
+  return new Date(
+    win.windowStart.getTime() + ratio * (win.windowEnd.getTime() - win.windowStart.getTime()),
+  )
+}
+
+function formatTime(iso: string | null): string {
+  if (iso === null) return '—'
   try {
     return new Date(iso).toLocaleString(undefined, { hour12: false })
   } catch {
@@ -75,9 +143,66 @@ function formatTime(iso: string): string {
   }
 }
 
+function formatShortRange(after: Date, before: Date): string {
+  const sameDay =
+    after.toDateString() === before.toDateString()
+  if (sameDay) {
+    return `${after.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })} ` +
+      `${after.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', hour12: false })} – ` +
+      `${before.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', hour12: false })}`
+  }
+  return `${after.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false })} – ` +
+    `${before.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false })}`
+}
+
+// ---------------------------------------------------------------------
+// Loader
+// ---------------------------------------------------------------------
+
+export async function customerMapLoader({
+  request,
+}: {
+  request: Request
+}): Promise<CustomersMapResponse> {
+  const url = new URL(request.url)
+  // If the loader is hit with no filter params, apply the default
+  // window so the very first paint isn't an empty map.
+  if (!url.searchParams.has('checkedInAfter') && !url.searchParams.has('checkedInBefore')) {
+    url.searchParams.set('checkedInAfter', defaultCheckedInAfter())
+    url.searchParams.set('checkedInBefore', defaultCheckedInBefore())
+  }
+  if (!url.searchParams.has('maxPoints')) {
+    url.searchParams.set('maxPoints', String(DEFAULT_MAX_POINTS))
+  }
+  return loadJson(`/api/admin/customers/map${url.search}`, CustomersMapResponseSchema)
+}
+
+// ---------------------------------------------------------------------
+// Page
+// ---------------------------------------------------------------------
+
 export function CustomerMapPage(): JSX.Element {
   const initialData = useLoaderData() as CustomersMapResponse
   const [searchParams, setSearchParams] = useSearchParams()
+
+  // First-visit defaulting: if the page mounts without any
+  // checkedInAfter/Before, set the canonical window. We let React-
+  // Router pick this up and re-fetch via the slider effect below.
+  useEffect(() => {
+    if (
+      !searchParams.has('checkedInAfter') &&
+      !searchParams.has('checkedInBefore')
+    ) {
+      const next = new URLSearchParams(searchParams)
+      next.set('checkedInAfter', defaultCheckedInAfter())
+      next.set('checkedInBefore', defaultCheckedInBefore())
+      if (!next.has('maxPoints')) next.set('maxPoints', String(DEFAULT_MAX_POINTS))
+      setSearchParams(next, { replace: true })
+    }
+    // run once on mount only
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   const [data, setData] = useState<CustomersMapResponse>(initialData)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
@@ -109,13 +234,13 @@ export function CustomerMapPage(): JSX.Element {
     }
   }, [searchParams])
 
+  // -----------------------------------------------------------------
+  // Map instance lifecycle.
+  // -----------------------------------------------------------------
   const containerRef = useRef<HTMLDivElement | null>(null)
   const mapRef = useRef<maplibregl.Map | null>(null)
   const popupRef = useRef<maplibregl.Popup | null>(null)
 
-  // Materialise the GeoJSON the map renders. Memoised so we only
-  // rebuild on data change, and so the effect that pushes it into
-  // the map source has a stable dep.
   const pointsGeoJson = useMemo(
     () => ({
       type: 'FeatureCollection' as const,
@@ -126,6 +251,7 @@ export function CustomerMapPage(): JSX.Element {
           scanId: p.scanId,
           siteSlug: p.siteSlug,
           checkedInAt: p.checkedInAt,
+          coordSource: p.coordSource,
           displayName: p.displayName ?? 'Unknown visitor',
           city: p.city ?? '',
           state: p.state ?? '',
@@ -152,8 +278,6 @@ export function CustomerMapPage(): JSX.Element {
     [data.sitePins],
   )
 
-  // Mount the MapLibre instance once on mount; tear it down on
-  // unmount. The data-source updates live in a second effect.
   useEffect(() => {
     const container = containerRef.current
     if (container === null) return
@@ -169,7 +293,6 @@ export function CustomerMapPage(): JSX.Element {
         style: MAP_STYLE,
         center: DEFAULT_CENTER,
         zoom: DEFAULT_ZOOM,
-        // Disable map rotation — it's confusing on a 2-D origin map.
         dragRotate: false,
         pitchWithRotate: false,
         touchPitch: false,
@@ -183,55 +306,65 @@ export function CustomerMapPage(): JSX.Element {
 
       mapInstance.on('load', () => {
         if (!mapInstance) return
-        // Visitor-scan dots.
-        mapInstance.addSource('scans', {
-          type: 'geojson',
-          data: pointsGeoJson,
-        })
+        mapInstance.addSource('scans', { type: 'geojson', data: pointsGeoJson })
         mapInstance.addLayer({
           id: 'scans-circles',
           type: 'circle',
           source: 'scans',
           paint: {
+            // BIG, BRIGHT, halo-stroked so they pop against the
+            // faded base. Zoom-interpolated so dots stay legible
+            // even at the citywide default zoom.
             'circle-radius': [
               'interpolate',
               ['linear'],
               ['zoom'],
-              8,
-              3,
-              13,
-              6,
-              18,
-              10,
+              7, 6,
+              10, 9,
+              13, 13,
+              16, 18,
+              19, 24,
             ],
             'circle-color': [
               'match',
               ['get', 'siteSlug'],
-              'bx',
-              '#1f5db8',
-              'mh',
-              '#b95f25',
-              '#555555',
+              'bx', '#0d47ff',
+              'mh', '#f25c1c',
+              '#444444',
             ],
-            'circle-opacity': 0.78,
-            'circle-stroke-color': '#fffaf1',
-            'circle-stroke-width': 1,
+            // Slightly faded + dashed-feeling for scan-coord
+            // fallbacks so reviewers can tell at a glance whether
+            // a dot reflects "where the customer lives" (filled,
+            // opaque) or "where they scanned" (lower opacity,
+            // dark halo).
+            'circle-opacity': [
+              'match',
+              ['get', 'coordSource'],
+              'document', 0.92,
+              'scan', 0.55,
+              0.92,
+            ],
+            'circle-stroke-color': [
+              'match',
+              ['get', 'coordSource'],
+              'document', '#ffffff',
+              'scan', '#1a0d04',
+              '#ffffff',
+            ],
+            'circle-stroke-width': 2,
+            'circle-stroke-opacity': 0.95,
           },
         })
 
-        // Site pins — render as larger, white-filled stars.
-        mapInstance.addSource('sites', {
-          type: 'geojson',
-          data: sitesGeoJson,
-        })
+        mapInstance.addSource('sites', { type: 'geojson', data: sitesGeoJson })
         mapInstance.addLayer({
           id: 'sites-outer',
           type: 'circle',
           source: 'sites',
           paint: {
-            'circle-radius': 14,
-            'circle-color': '#fffaf1',
-            'circle-stroke-color': '#3b1f0d',
+            'circle-radius': 16,
+            'circle-color': '#ffffff',
+            'circle-stroke-color': '#1a0d04',
             'circle-stroke-width': 3,
           },
         })
@@ -240,8 +373,8 @@ export function CustomerMapPage(): JSX.Element {
           type: 'circle',
           source: 'sites',
           paint: {
-            'circle-radius': 5,
-            'circle-color': '#3b1f0d',
+            'circle-radius': 6,
+            'circle-color': '#1a0d04',
           },
         })
         mapInstance.addLayer({
@@ -250,15 +383,16 @@ export function CustomerMapPage(): JSX.Element {
           source: 'sites',
           layout: {
             'text-field': ['get', 'label'],
-            'text-size': 12,
-            'text-offset': [0, 1.4],
+            'text-size': 13,
+            'text-offset': [0, 1.6],
             'text-anchor': 'top',
             'text-allow-overlap': false,
+            'text-font': ['Open Sans Regular'],
           },
           paint: {
-            'text-color': '#3b1f0d',
+            'text-color': '#1a0d04',
             'text-halo-color': '#fffaf1',
-            'text-halo-width': 1.5,
+            'text-halo-width': 2,
           },
         })
 
@@ -267,6 +401,10 @@ export function CustomerMapPage(): JSX.Element {
           if (!feature || feature.geometry.type !== 'Point') return
           const props = feature.properties ?? {}
           const [lng, lat] = feature.geometry.coordinates as [number, number]
+          const sourceLabel =
+            String(props.coordSource ?? '') === 'scan'
+              ? 'scan location (no address coords)'
+              : 'home address'
           const html = `
             <div class="cm-popup">
               <div class="cm-popup-name">${escapeHtml(String(props.displayName ?? 'Unknown'))}</div>
@@ -277,6 +415,7 @@ export function CustomerMapPage(): JSX.Element {
               <div class="cm-popup-addr">
                 ${escapeHtml([props.city, props.state, props.postalCode].filter(Boolean).join(', '))}
               </div>
+              <div class="cm-popup-source">${escapeHtml(sourceLabel)}</div>
               <a
                 class="cm-popup-link"
                 href="${buildAppPath(String(props.customerUrl ?? ''))}"
@@ -307,13 +446,11 @@ export function CustomerMapPage(): JSX.Element {
       mapRef.current?.remove()
       mapRef.current = null
     }
-    // Intentionally empty dep array: we want a single map instance
-    // for the life of the page; data-source updates happen in the
-    // next effect.
+    // single instance for the page lifetime; data pushes happen in
+    // the next effect.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // Push new data into the sources when it arrives.
   useEffect(() => {
     const map = mapRef.current
     if (map === null) return
@@ -334,24 +471,115 @@ export function CustomerMapPage(): JSX.Element {
     }
   }, [pointsGeoJson, sitesGeoJson])
 
-  function handleFilterSubmit(event: React.FormEvent<HTMLFormElement>): void {
-    event.preventDefault()
-    const form = new FormData(event.currentTarget)
+  // -----------------------------------------------------------------
+  // Live date-range slider state
+  // -----------------------------------------------------------------
+  // We hold a stable window range for the page lifetime so dragging
+  // doesn't shift the slider geometry mid-interaction.
+  const sliderWindow = useMemo(() => buildSliderRange(), [])
+
+  const currentAfter = clampDateToWindow(
+    searchParams.get('checkedInAfter'),
+    sliderWindow,
+    sliderWindow.windowStart,
+  )
+  const currentBefore = clampDateToWindow(
+    searchParams.get('checkedInBefore'),
+    sliderWindow,
+    sliderWindow.windowEnd,
+  )
+
+  // Local slider state so the handles render smoothly while we
+  // debounce the URL write.
+  const [sliderAfterTick, setSliderAfterTick] = useState(() =>
+    dateToTick(currentAfter, sliderWindow),
+  )
+  const [sliderBeforeTick, setSliderBeforeTick] = useState(() =>
+    dateToTick(currentBefore, sliderWindow),
+  )
+
+  // Keep the local handles in sync if the URL changes from outside
+  // (browser back/forward, preset button, etc.).
+  useEffect(() => {
+    setSliderAfterTick(dateToTick(currentAfter, sliderWindow))
+    setSliderBeforeTick(dateToTick(currentBefore, sliderWindow))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams])
+
+  const writeRangeTimer = useRef<number | null>(null)
+  const commitRangeToUrl = useCallback(
+    (afterTick: number, beforeTick: number): void => {
+      const lo = Math.min(afterTick, beforeTick)
+      const hi = Math.max(afterTick, beforeTick)
+      if (writeRangeTimer.current !== null) {
+        window.clearTimeout(writeRangeTimer.current)
+      }
+      writeRangeTimer.current = window.setTimeout(() => {
+        const next = new URLSearchParams(searchParams)
+        next.set('checkedInAfter', tickToDate(lo, sliderWindow).toISOString())
+        next.set('checkedInBefore', tickToDate(hi, sliderWindow).toISOString())
+        setSearchParams(next, { replace: true })
+      }, 220)
+    },
+    [searchParams, setSearchParams, sliderWindow],
+  )
+
+  function handleAfterChange(value: number): void {
+    const v = Math.min(value, sliderBeforeTick)
+    setSliderAfterTick(v)
+    commitRangeToUrl(v, sliderBeforeTick)
+  }
+  function handleBeforeChange(value: number): void {
+    const v = Math.max(value, sliderAfterTick)
+    setSliderBeforeTick(v)
+    commitRangeToUrl(sliderAfterTick, v)
+  }
+
+  // Quick presets — set both handles + URL at once.
+  function applyPreset(after: Date, before: Date): void {
+    const a = dateToTick(after, sliderWindow)
+    const b = dateToTick(before, sliderWindow)
+    setSliderAfterTick(a)
+    setSliderBeforeTick(b)
+    const next = new URLSearchParams(searchParams)
+    next.set('checkedInAfter', after.toISOString())
+    next.set('checkedInBefore', before.toISOString())
+    setSearchParams(next, { replace: true })
+  }
+
+  const previewAfter = tickToDate(Math.min(sliderAfterTick, sliderBeforeTick), sliderWindow)
+  const previewBefore = tickToDate(Math.max(sliderAfterTick, sliderBeforeTick), sliderWindow)
+
+  // -----------------------------------------------------------------
+  // Other filter controls
+  // -----------------------------------------------------------------
+  function handleSiteChange(siteSlugs: string): void {
+    const next = new URLSearchParams(searchParams)
+    if (siteSlugs === '') next.delete('siteSlugs')
+    else next.set('siteSlugs', siteSlugs)
+    setSearchParams(next, { replace: true })
+  }
+  function handleMaxPointsChange(maxPoints: string): void {
+    const next = new URLSearchParams(searchParams)
+    if (maxPoints === '') next.delete('maxPoints')
+    else next.set('maxPoints', maxPoints)
+    setSearchParams(next, { replace: true })
+  }
+
+  function handleResetFilters(): void {
     const next = new URLSearchParams()
-    for (const [k, v] of form.entries()) {
-      if (typeof v === 'string' && v.trim().length > 0) next.set(k, v.trim())
-    }
-    setSearchParams(next)
+    next.set('checkedInAfter', defaultCheckedInAfter())
+    next.set('checkedInBefore', defaultCheckedInBefore())
+    next.set('maxPoints', String(DEFAULT_MAX_POINTS))
+    setSearchParams(next, { replace: true })
   }
 
-  function handleClearFilters(): void {
-    setSearchParams(new URLSearchParams())
-  }
-
-  const filtersActive =
-    (searchParams.get('siteSlugs') ?? '').length > 0 ||
-    (searchParams.get('checkedInAfter') ?? '').length > 0 ||
-    (searchParams.get('checkedInBefore') ?? '').length > 0
+  const now = sliderWindow.windowEnd
+  const sixAmYesterday = new Date(now)
+  sixAmYesterday.setDate(sixAmYesterday.getDate() - 1)
+  sixAmYesterday.setHours(6, 0, 0, 0)
+  const threeAmToday = new Date(now)
+  threeAmToday.setHours(3, 0, 0, 0)
 
   return (
     <section className="customer-map-page">
@@ -359,8 +587,9 @@ export function CustomerMapPage(): JSX.Element {
         <div>
           <h2 className="cm-title">Customer Origin Map</h2>
           <p className="subtle-copy cm-sub">
-            One dot per VeriScan check-in with a document address on file. Bronx blue,
-            Midtown orange. Click a dot to open the customer details page in a new tab.
+            One dot per VeriScan check-in with a document address on file.
+            <strong> Bronx blue, Midtown orange.</strong> Drag the time range
+            below to update the map live.
           </p>
         </div>
         <div className="cm-stats">
@@ -372,62 +601,128 @@ export function CustomerMapPage(): JSX.Element {
         </div>
       </header>
 
-      <details className="cm-filters" open={filtersActive}>
-        <summary>
-          <span>Filters</span>
-          {filtersActive ? <Pill tone="success">active</Pill> : null}
-        </summary>
-        <form className="cm-filter-form" method="get" onSubmit={handleFilterSubmit}>
-          <label className="cm-field">
+      {/* Always-visible primary controls: site, date slider, presets. */}
+      <div className="cm-controls">
+        <div className="cm-controls-row">
+          <label className="cm-field cm-field-inline">
             <span>Site</span>
-            <select defaultValue={searchParams.get('siteSlugs') ?? ''} name="siteSlugs">
-              <option value="">All sites</option>
+            <select
+              value={searchParams.get('siteSlugs') ?? ''}
+              onChange={(e) => handleSiteChange(e.target.value)}
+            >
+              <option value="">All</option>
               <option value="bx">Bronx (bx)</option>
               <option value="mh">Midtown (mh)</option>
             </select>
           </label>
-          <label className="cm-field">
-            <span>Checked in after</span>
-            <input
-              defaultValue={searchParams.get('checkedInAfter') ?? ''}
-              name="checkedInAfter"
-              type="datetime-local"
-            />
-          </label>
-          <label className="cm-field">
-            <span>Checked in before</span>
-            <input
-              defaultValue={searchParams.get('checkedInBefore') ?? ''}
-              name="checkedInBefore"
-              type="datetime-local"
-            />
-          </label>
-          <label className="cm-field">
+          <label className="cm-field cm-field-inline">
             <span>Max points</span>
             <input
-              defaultValue={searchParams.get('maxPoints') ?? '2500'}
-              name="maxPoints"
               type="number"
               min={1}
-              max={10000}
+              max={10_000}
               step={100}
+              value={searchParams.get('maxPoints') ?? String(DEFAULT_MAX_POINTS)}
+              onChange={(e) => handleMaxPointsChange(e.target.value)}
             />
           </label>
-          <div className="cm-filter-actions">
-            <button className="primary-button cm-action" type="submit">
-              Apply
+          <button
+            type="button"
+            className="ghost-button cm-action cm-reset-action"
+            onClick={handleResetFilters}
+          >
+            Reset to last shift
+          </button>
+        </div>
+
+        <div className="cm-range">
+          <div className="cm-range-labels">
+            <span className="cm-range-label">
+              <strong>{formatShortRange(previewAfter, previewBefore)}</strong>
+            </span>
+            <span className="cm-range-sub subtle-copy">
+              window: {sliderWindow.windowStart.toLocaleDateString()} →{' '}
+              {sliderWindow.windowEnd.toLocaleDateString()}
+            </span>
+          </div>
+          <div className="cm-range-sliders">
+            <input
+              type="range"
+              min={0}
+              max={SLIDER_STEPS}
+              step={1}
+              value={sliderAfterTick}
+              onChange={(e) => handleAfterChange(Number(e.target.value))}
+              aria-label="Range start"
+              className="cm-range-input cm-range-input-low"
+            />
+            <input
+              type="range"
+              min={0}
+              max={SLIDER_STEPS}
+              step={1}
+              value={sliderBeforeTick}
+              onChange={(e) => handleBeforeChange(Number(e.target.value))}
+              aria-label="Range end"
+              className="cm-range-input cm-range-input-high"
+            />
+            <div className="cm-range-track">
+              <div
+                className="cm-range-fill"
+                style={{
+                  left: `${(Math.min(sliderAfterTick, sliderBeforeTick) / SLIDER_STEPS) * 100}%`,
+                  width: `${(Math.abs(sliderBeforeTick - sliderAfterTick) / SLIDER_STEPS) * 100}%`,
+                }}
+              />
+            </div>
+          </div>
+          <div className="cm-presets">
+            <button
+              type="button"
+              className="ghost-button cm-preset-btn"
+              onClick={() =>
+                applyPreset(new Date(now.getTime() - 60 * 60 * 1000), now)
+              }
+            >
+              Last 1h
             </button>
             <button
-              className="ghost-button cm-action"
               type="button"
-              onClick={handleClearFilters}
-              disabled={!filtersActive}
+              className="ghost-button cm-preset-btn"
+              onClick={() =>
+                applyPreset(new Date(now.getTime() - 4 * 60 * 60 * 1000), now)
+              }
             >
-              Clear
+              Last 4h
+            </button>
+            <button
+              type="button"
+              className="ghost-button cm-preset-btn"
+              onClick={() => applyPreset(sixAmYesterday, threeAmToday)}
+            >
+              Yesterday 6a–3a
+            </button>
+            <button
+              type="button"
+              className="ghost-button cm-preset-btn"
+              onClick={() =>
+                applyPreset(new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000), now)
+              }
+            >
+              Last 7d
+            </button>
+            <button
+              type="button"
+              className="ghost-button cm-preset-btn"
+              onClick={() =>
+                applyPreset(new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000), now)
+              }
+            >
+              Last 30d
             </button>
           </div>
-        </form>
-      </details>
+        </div>
+      </div>
 
       {error ? (
         <div className="runtime-status-strip cm-error">
@@ -447,16 +742,13 @@ export function CustomerMapPage(): JSX.Element {
         <div className="subtle-copy cm-about-body">
           <p>
             Data source: <code>visitor_scans</code>. Each dot is the printed
-            address coordinate (<code>Data.Latitude</code> /{' '}
-            <code>Data.Longitude</code>) from one VeriScan check-in — no
-            external geocoder is in the loop. Scans without document address
-            coords are skipped (visible as a smaller dot in the per-row mini
-            map on <code>/admin/customers/check-ins</code>).
+            address coordinate from one VeriScan check-in — no geocoder is in
+            the loop. Scans without document address coords are not shown.
           </p>
           <p>
-            Phase C4 v1 ships raw points. Grid aggregation, encoding panel,
-            and timeline replay (phase C5) ship in follow-on slices. Map
-            tiles courtesy of OpenStreetMap.
+            Default window is <strong>yesterday 6am → today 3am</strong> in
+            your local time so the page opens to "today's traffic". Drag the
+            handles to widen / narrow the window; the map updates live.
           </p>
         </div>
       </details>

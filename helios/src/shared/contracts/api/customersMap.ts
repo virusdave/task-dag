@@ -46,10 +46,14 @@ export const CustomersMapPointSchema = z.object({
   // `checked_in_at` per parent design §11 — coalesce(scanned_at,
   // ingested_at). Always present.
   checkedInAt: z.string(),
-  // The customer's document-address coords (where they live, not
-  // where they scanned). Filtered to non-null on the server.
+  // Coordinates we'll plot the dot at. Prefer the customer's
+  // document-address coords; fall back to the scan-time coords from
+  // the kiosk when the doc address has no usable coordinate. The
+  // `coordSource` field tells the client which one it got so the
+  // marker can be styled differently and the popup can disclose it.
   lat: z.number(),
   lng: z.number(),
+  coordSource: z.enum(['document', 'scan']),
   // Soft display fields so the popup doesn't need a second round trip.
   displayName: z.string().nullable(),
   city: z.string().nullable(),
