@@ -426,9 +426,26 @@ export function PendingPurchasesPage() {
               <header>
                 <strong>{data.activePacket.packetTitle}</strong>
                 <div className="inline-row wrap-row">
-                  <Pill tone={data.activePacket.source === 'generated' ? 'success' : 'warning'}>{data.activePacket.source}</Pill>
+                  {/*
+                    A non-terminal generation job means this active
+                    packet is about to be superseded by the in-flight
+                    generation. Surface that loudly so the green
+                    'ready' / 'live' pill doesn't read as 'fresh'.
+                    The full generation progress panel above (when
+                    expanded) still carries the detail; this is the
+                    at-a-glance flag on the packet itself.
+                  */}
+                  {generationJobStatus && !isJobTerminal(generationJobStatus.job.status) ? (
+                    <Pill tone="warning">{`regenerating · ${generationJobStatus.job.status.replaceAll('_', ' ')}`}</Pill>
+                  ) : null}
                   <Pill tone={data.activePacket.status === 'ready' ? 'success' : 'muted'}>{data.activePacket.status}</Pill>
                   <Pill tone="muted">{`${data.activePacket.rowCount} rows`}</Pill>
+                  {/*
+                    Source ('generated' vs 'import') is metadata, not a
+                    status — render it muted so it doesn't look like a
+                    green 'all good' badge.
+                  */}
+                  <Pill tone="muted">{`source: ${data.activePacket.source}`}</Pill>
                 </div>
               </header>
               <p className="subtle-copy">
@@ -804,7 +821,12 @@ function PendingPurchasePacketCard({ filters, packet }: PendingPurchasePacketCar
         </div>
         <div className="inline-row wrap-row pp-packet-card-status">
           <Pill tone={packet.status === 'ready' ? 'success' : 'muted'}>{packet.status === 'ready' ? 'live' : packet.status}</Pill>
-          <Pill tone={packet.source === 'generated' ? 'success' : 'warning'}>{packet.source}</Pill>
+          {/*
+            Source is metadata, not a status — muted so it doesn't
+            look like a green 'all good' badge alongside the actual
+            status pill.
+          */}
+          <Pill tone="muted">{`source: ${packet.source}`}</Pill>
           {packet.siteLabels.map((label) => <Pill key={label} tone="muted">{label}</Pill>)}
         </div>
       </header>
