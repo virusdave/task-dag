@@ -4907,3 +4907,193 @@ span.metric-chart-legend-item {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }
+/* =====================================================================
+ * Budtender performance tab (/metrics/budtenders).
+ *
+ * Compact KPI strip + leaderboard + diverging-bar lift card + per-
+ * cashier mix bar + drawer-shift productivity table + scatter card.
+ * All cards reuse the .metric-chart-card chrome so they sit naturally
+ * inside the existing /metrics dashboard look-and-feel.
+ * ===================================================================== */
+
+.budtender-perf-tab {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.budtender-perf-subtabs {
+  display: inline-flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.budtender-perf-core,
+.budtender-perf-advanced {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+/* ---------- KPI strip ---------- */
+
+.budtender-totals-strip {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px;
+  margin-bottom: 4px;
+}
+
+.budtender-kpi {
+  padding: 8px 10px;
+  background: #f4f7fb;
+  border: 1px solid #d8dde6;
+  border-radius: 4px;
+}
+
+.budtender-kpi.is-warn {
+  background: #fff6e8;
+  border-color: #e6c388;
+}
+
+.budtender-kpi-value {
+  font-size: 1.2rem;
+  font-weight: 600;
+  color: #1d2940;
+}
+
+.budtender-kpi-label {
+  font-size: 0.78rem;
+  margin-top: 2px;
+}
+
+/* ---------- Leaderboard table ---------- */
+
+.budtender-leaderboard,
+.budtender-lift-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+
+.budtender-leaderboard th,
+.budtender-leaderboard td,
+.budtender-lift-table th,
+.budtender-lift-table td {
+  padding: 4px 6px;
+  border-bottom: 1px solid #ececec;
+  text-align: left;
+}
+
+.budtender-leaderboard th.num,
+.budtender-leaderboard td.num,
+.budtender-lift-table th.num,
+.budtender-lift-table td.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.budtender-leaderboard td.bar,
+.budtender-leaderboard th.bar,
+.budtender-lift-table td.bar,
+.budtender-lift-table th.bar {
+  width: 30%;
+  min-width: 120px;
+}
+
+.budtender-leaderboard tr.is-low-sample td {
+  opacity: 0.55;
+}
+
+.budtender-leaderboard-bar {
+  width: 100%;
+  height: 8px;
+  background: #eef0f4;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.budtender-leaderboard-bar-fill {
+  height: 100%;
+  background: #3c8a4a;
+}
+
+.budtender-disabled-pill {
+  display: inline-block;
+  font-size: 0.65rem;
+  font-weight: 600;
+  background: #c4445a;
+  color: white;
+  padding: 1px 5px;
+  border-radius: 3px;
+  letter-spacing: 0.04em;
+  margin-left: 4px;
+  vertical-align: middle;
+}
+
+/* ---------- Diverging upsell-lift bar ---------- */
+
+.budtender-diverging-bar {
+  position: relative;
+  width: 100%;
+  height: 10px;
+  background: #f0f2f5;
+  border-radius: 4px;
+}
+
+.budtender-diverging-bar-axis {
+  position: absolute;
+  left: 50%;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: #b5bcc8;
+}
+
+.budtender-diverging-bar-fill {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  border-radius: 2px;
+}
+
+/* ---------- Mix list ---------- */
+
+.budtender-mix-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.budtender-mix-row {
+  display: grid;
+  grid-template-columns: minmax(160px, 22%) 1fr;
+  gap: 10px;
+  align-items: center;
+}
+
+.budtender-mix-name {
+  font-size: 0.85rem;
+}
+
+.budtender-mix-bar {
+  display: flex;
+  height: 14px;
+  width: 100%;
+  border-radius: 3px;
+  overflow: hidden;
+  background: #f0f2f5;
+}
+
+/* ---------- Sparkline / scatter SVGs ---------- */
+
+.budtender-sparkline,
+.budtender-scatter-svg {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+

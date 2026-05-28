@@ -27,6 +27,7 @@ import { registerCommentsRoutes } from '../routes/comments.js'
 import { registerCommunicationsRoutes } from '../routes/communications.js'
 import { registerConfigRoutes } from '../routes/config.js'
 import { registerConfigLitalertsParsingRoutes } from '../routes/configLitalertsParsing.js'
+import { registerBudtenderAnalyticsRoutes } from '../routes/budtenderAnalytics.js'
 import { registerCatalogAnalyticsRoutes } from '../routes/catalogAnalytics.js'
 import { registerConfigParsingRoutes } from '../routes/configParsing.js'
 import { registerCustomerReviewsRoutes } from '../routes/customerReviews.js'
@@ -223,6 +224,7 @@ async function registerApplicationSurface(server: FastifyInstance) {
   await registerLlmRoutes(server)
   await registerMetricAnnotationsRoutes(server)
   await registerMetricsRoutes(server)
+  await registerBudtenderAnalyticsRoutes(server)
   await registerCatalogAnalyticsRoutes(server)
   await registerJobRoutes(server)
   await registerTaskDagRoutes(server)

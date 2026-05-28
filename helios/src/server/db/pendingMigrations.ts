@@ -356,6 +356,19 @@ const SENTINELS: MigrationSentinel[] = [
       'visitor_scans table + (provider, hash_id) idempotency unique + scanned_at / site / postal / state indices — backs the VeriScan webhook handler at POST /wh/{bx,mh}/veriscan/checkin, the helios visitor-scans-backfill CLI, and the /admin/visitors/scans operator page (FreshlyBakedNYC/automation#31, virusdave/top-level#9).',
     check: (db) => tableExists(db, 'visitor_scans'),
   },
+  {
+    // Covering indexes for the /metrics/budtenders endpoint
+    // (virusdave/top-level#7). Without these the per-cashier
+    // aggregate CTE in /api/budtender-analytics falls back to
+    // heap-fetching every order row — visibly slow at the
+    // 90-day default window. Sentinel checks the covering
+    // (dealer_id, cashier_user_id, pay_time) index by name.
+    migrationId: '040_budtender_perf_indexes',
+    label:
+      'sweed_orders_budtender_* + sweed_drawer_shift_sessions_user_join_cover_idx covering indexes — keep the /metrics/budtenders endpoint snappy under default 90-day windows.',
+    check: async (db) =>
+      indexExists(db, 'sweed_orders_budtender_cashier_range_cover_idx'),
+  },
 ]
 
 interface CacheEntry {

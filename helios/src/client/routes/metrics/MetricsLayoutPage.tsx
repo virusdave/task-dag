@@ -15,6 +15,7 @@ import {
 } from '../../../shared/contracts/index.js'
 import { loadJson } from '../../app/fetchJson.js'
 
+import { BudtenderPerformanceTab } from './BudtenderPerformanceTab.js'
 import { CatalogAnalyticsTab } from './CatalogAnalyticsTab.js'
 import {
   CatalogFilterBar,
@@ -77,6 +78,7 @@ export type MetricsTabId =
   | 'inventory'
   | 'scatter'
   | 'catalog'
+  | 'budtenders'
 
 const DEFAULT_TAB_ID: MetricsTabId = 'sales'
 
@@ -132,6 +134,20 @@ const METRICS_TABS: ReadonlyArray<MetricsTab> = [
     showAggControl: true,
     showStackControl: true,
     include: (m) => m.chartType !== 'scatter' && INVENTORY_GROUPS.has(m.group),
+  },
+  {
+    id: 'budtenders',
+    label: 'Budtender performance',
+    description:
+      'Per-cashier sales / discount / customer-mix / shift-productivity dashboard. Core sub-tab has KPIs + leaderboard + dollar-basket upsell lift + customer / fulfillment mix; Advanced sub-tab is a one-dot-per-cashier scatter with switchable axes, peer-percentile colour, and a highlight subset query. MISSING DATA cards mark per-product subset comparison, returns, drawer cash +/-, and cashier-attributed reviews until those sources are ingested.',
+    defaultAgg: 'date',
+    defaultStackMode: 'none',
+    // Like the catalog tab, this tab owns its full UI (sites / range /
+    // sub-tabs / cards) so the shared toolbar's agg / stack controls
+    // don't apply.
+    showAggControl: false,
+    showStackControl: false,
+    include: () => false,
   },
   {
     id: 'catalog',
@@ -379,6 +395,11 @@ export function MetricsLayoutPage() {
           // not share the time-series toolbar (sites / agg / stack / range).
           // Short-circuit the rest of the dashboard render here.
           <CatalogAnalyticsTab />
+        ) : activeTab.id === 'budtenders' ? (
+          // Budtender performance has its own sites/range/sub-tabs UI
+          // and a single consolidated /api/budtender-analytics fetch.
+          // Same short-circuit pattern as catalog.
+          <BudtenderPerformanceTab />
         ) : (
           <RegistryDashboard
             activeTab={activeTab}
