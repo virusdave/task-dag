@@ -227,6 +227,27 @@ const LlmSizeSchema = z.preprocess((value) => {
   return value
 }, z.string().trim().min(1))
 
+/**
+ * Many of the classification fields are typed as `string | null`
+ * ("not applicable" → null), but the LLM occasionally emits a number
+ * (e.g. `prevalence: 0.5`, `strainName: 3`, `variantTab: 1`) — a
+ * single off-shape value used to nuke the entire envelope and dump
+ * the row into manual review. Treat any non-string non-null shape as
+ * `null` ("the model couldn't name this; let downstream fall back").
+ * Empty / whitespace-only strings also collapse to null.
+ */
+const LlmLooseNullableStringSchema = z.preprocess((value) => {
+  if (value === null || value === undefined) return null
+  if (typeof value === 'string') {
+    const trimmed = value.trim()
+    return trimmed.length > 0 ? trimmed : null
+  }
+  // numbers, booleans, objects, arrays — the LLM picked the wrong
+  // type for a nullable-string field. Don't crash the row; treat as
+  // "no value" so the downstream normalizer can fall back.
+  return null
+}, z.string().nullable())
+
 const PendingPurchaseLlmClassificationSchema = z.object({
   brand: z.string().trim().min(1),
   category: z.string().trim().min(1),
@@ -234,11 +255,11 @@ const PendingPurchaseLlmClassificationSchema = z.object({
   groupName: z.string().trim().min(1),
   packCount: z.coerce.number().int().positive(),
   parserFeasibility: z.enum(['easy-rule-based', 'likely-llm-only', 'needs-more-context']),
-  prevalence: z.string().trim().min(1).nullable().optional(),
+  prevalence: LlmLooseNullableStringSchema,
   rationale: z.string().trim().min(1),
   size: LlmSizeSchema,
-  strainName: z.string().trim().nullable().optional(),
-  subcategory: z.string().trim().min(1).nullable().optional(),
+  strainName: LlmLooseNullableStringSchema,
+  subcategory: LlmLooseNullableStringSchema,
   /**
    * The LLM frequently emits `variantName: null` for canonical-size
    * categories like Flower where the variant name is "just the size"
@@ -246,8 +267,8 @@ const PendingPurchaseLlmClassificationSchema = z.object({
    * of "3.5g"). Accept null/missing here; the downstream normalizer
    * derives the canonical variant name from variantTab/size + category.
    */
-  variantName: z.string().trim().min(1).nullable().optional(),
-  variantTab: z.string().trim().min(1).nullable().optional(),
+  variantName: LlmLooseNullableStringSchema,
+  variantTab: LlmLooseNullableStringSchema,
   warningFlags: z.array(z.string().trim().min(1)).default([]),
 }).passthrough()
 
