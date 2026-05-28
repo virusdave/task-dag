@@ -1153,10 +1153,19 @@ function PendingPurchaseRowCard(
   // that flips back to pending auto-expands and a row that was just
   // approved auto-collapses without the approve handler having to
   // poke a separate setState.
-  const isFinalized = item.approvalStatus === 'approved' || item.approvalStatus === 'rejected'
+  // Optimistic approval state. Reviewers were waiting on the
+  // PATCH → revalidate round-trip before the UI updated, which made
+  // approve/reject feel laggy on a multi-row packet. We now apply
+  // the new status locally the instant the button is clicked and
+  // fire the backend call in the background; if the call fails we
+  // roll back and surface the error.
+  const [optimisticApprovalStatus, setOptimisticApprovalStatus] =
+    useState<PendingPurchaseRow['approvalStatus'] | null>(null)
+  const effectiveApprovalStatus = optimisticApprovalStatus ?? item.approvalStatus
+  const isFinalized = effectiveApprovalStatus === 'approved' || effectiveApprovalStatus === 'rejected'
   const [isCollapsed, setIsCollapsed] = useState(isFinalized)
   const isApplyLocked = item.lastApplyStatus === 'queued' || item.lastApplyStatus === 'running'
-  const editingLocked = item.approvalStatus === 'approved' || isApplyLocked
+  const editingLocked = effectiveApprovalStatus === 'approved' || isApplyLocked
 
   // Register this row's draft-price setter with the family-bulk
   // registry so the family-header's "Apply to family" button can
@@ -1259,6 +1268,13 @@ function PendingPurchaseRowCard(
     // didn't change the status, but a server-side flip back to
     // pending wouldn't auto-expand the card.
     setIsCollapsed(item.approvalStatus === 'approved' || item.approvalStatus === 'rejected')
+
+    // If the server has now caught up with (or diverged from) the
+    // optimistic approval status, drop the local override so the
+    // server value becomes the source of truth again.
+    setOptimisticApprovalStatus((current) =>
+      current !== null && current === item.approvalStatus ? null : current,
+    )
   }, [item])
 
   async function handleSave() {
@@ -1302,26 +1318,47 @@ function PendingPurchaseRowCard(
     }
   }
 
-  async function handleApprovalChange(approvalStatus: PendingPurchaseRow['approvalStatus']) {
+  function handleApprovalChange(approvalStatus: PendingPurchaseRow['approvalStatus']) {
+    // Optimistic UI update: flip the visible status + collapse state
+    // synchronously so the reviewer sees the result the instant they
+    // click. The backend mutation + revalidation runs in the
+    // background; on failure we roll the optimistic state back and
+    // surface the error. The reviewer can keep clicking other rows
+    // without waiting for any round-trip.
+    const previousOptimistic = optimisticApprovalStatus
+    setOptimisticApprovalStatus(approvalStatus)
+    setIsCollapsed(approvalStatus === 'approved' || approvalStatus === 'rejected')
     setIsApproving(true)
     setErrorMessage(null)
 
-    try {
-      const payload = UpdatePendingPurchaseRowApprovalRequestSchema.parse({
-        approvalStatus,
-        expectedVersion: item.version,
-      })
+    void (async () => {
+      try {
+        const payload = UpdatePendingPurchaseRowApprovalRequestSchema.parse({
+          approvalStatus,
+          expectedVersion: item.version,
+        })
 
-      await mutateJson(`/api/catalog/pending-purchases/${item.rowId}/approval`, MutationAcceptedResponseSchema, {
-        body: JSON.stringify(payload),
-        method: 'POST',
-      })
-      await revalidator.revalidate()
-    } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : 'Could not update the pending-purchase approval state.')
-    } finally {
-      setIsApproving(false)
-    }
+        await mutateJson(`/api/catalog/pending-purchases/${item.rowId}/approval`, MutationAcceptedResponseSchema, {
+          body: JSON.stringify(payload),
+          method: 'POST',
+        })
+        // Refresh from the server so other derived fields (e.g.
+        // approvedByUser, version) catch up. The `[item]` effect
+        // above clears `optimisticApprovalStatus` once the server
+        // value matches; until then the optimistic value wins.
+        await revalidator.revalidate()
+      } catch (error) {
+        // Roll back the optimistic flip so the row reflects reality.
+        setOptimisticApprovalStatus(previousOptimistic)
+        setIsCollapsed(
+          (previousOptimistic ?? item.approvalStatus) === 'approved' ||
+            (previousOptimistic ?? item.approvalStatus) === 'rejected',
+        )
+        setErrorMessage(error instanceof Error ? error.message : 'Could not update the pending-purchase approval state.')
+      } finally {
+        setIsApproving(false)
+      }
+    })()
   }
 
   // Detect whether the reviewer has any in-flight override drafts so we
@@ -1376,7 +1413,7 @@ function PendingPurchaseRowCard(
 
   const statusPills = (
     <>
-      <Pill tone={approvalTone(item.approvalStatus)}>{item.approvalStatus}</Pill>
+      <Pill tone={approvalTone(effectiveApprovalStatus)}>{effectiveApprovalStatus}</Pill>
       <Pill tone={applyStatusTone(item.lastApplyStatus)}>{item.lastApplyStatus.replaceAll('_', ' ')}</Pill>
       <Pill tone={mappingStatusTone(item.mappingStatus)}>{item.mappingStatus.replaceAll('_', ' ')}</Pill>
       <Pill tone="muted">{`v${item.version}`}</Pill>
@@ -1669,7 +1706,7 @@ function PendingPurchaseRowCard(
           </ul>
         </details>
       ) : null}
-      {canApprove && item.approvalStatus === 'approved' && item.lastApplyStatus !== 'applied' ? (
+      {canApprove && effectiveApprovalStatus === 'approved' && item.lastApplyStatus !== 'applied' ? (
         <label className="inline-row" style={{ gap: '0.5rem', marginBottom: '0.75rem' }}>
           <input checked={isSelected} disabled={isApplyLocked} onChange={onToggleSelected} type="checkbox" />
           <span>Select for the next apply request</span>
@@ -1870,18 +1907,18 @@ function PendingPurchaseRowCard(
           {isSaving ? 'Saving…' : 'Save overrides'}
         </button>
       ) : null}
-      {canApprove && item.approvalStatus !== 'approved' ? (
-        <button className="primary-button" disabled={isApproving || isApplyLocked} onClick={() => void handleApprovalChange('approved')} type="button">
-          {isApproving ? 'Updating…' : 'Approve'}
+      {canApprove && effectiveApprovalStatus !== 'approved' ? (
+        <button className="primary-button" disabled={isApproving || isApplyLocked} onClick={() => handleApprovalChange('approved')} type="button">
+          Approve
         </button>
       ) : null}
-      {canApprove && item.approvalStatus !== 'rejected' ? (
-        <button className="ghost-button" disabled={isApproving || isApplyLocked} onClick={() => void handleApprovalChange('rejected')} type="button">
+      {canApprove && effectiveApprovalStatus !== 'rejected' ? (
+        <button className="ghost-button" disabled={isApproving || isApplyLocked} onClick={() => handleApprovalChange('rejected')} type="button">
           Reject
         </button>
       ) : null}
-      {canApprove && item.approvalStatus !== 'pending' ? (
-        <button className="ghost-button" disabled={isApproving || isApplyLocked} onClick={() => void handleApprovalChange('pending')} type="button">
+      {canApprove && effectiveApprovalStatus !== 'pending' ? (
+        <button className="ghost-button" disabled={isApproving || isApplyLocked} onClick={() => handleApprovalChange('pending')} type="button">
           Mark pending
         </button>
       ) : null}
