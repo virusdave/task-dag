@@ -1170,6 +1170,28 @@ function PendingPurchaseRowCard(
     return draftPriceRegistry.register(item.rowId, setDraftPrice)
   }, [draftPriceRegistry, editingLocked, item.rowId])
 
+  // Refs that remember the most recently-synced server values for each
+  // drafted field. The reset effect below uses them to detect whether
+  // the reviewer has edited a field since the last sync — if so, the
+  // user's draft is preserved across React-Router revalidations.
+  //
+  // WHY THIS EXISTS (regression discovered May 2026):
+  // Previously, the `[item]` reset effect unconditionally re-seeded
+  // every draft field on every revalidation. That clobbered any
+  // unsaved drafts the moment another card's save triggered a router
+  // revalidate — which is exactly the path the "Apply to family" bulk
+  // price action hit: row 1 saves, revalidates, and rows 2..N silently
+  // lose the bulk-set price they had received seconds earlier. The
+  // user observed this as "Apply to family only TRULY applies to the
+  // first item in the family." With these refs, drafts persist until
+  // the reviewer themselves saves them (which is when handleSave
+  // updates the refs).
+  const lastSyncedPriceRef = useRef<string>(readDraftPrice(item))
+  const lastSyncedDescriptionRef = useRef<string>(item.editedProposedDescription ?? item.proposedDescription ?? '')
+  const lastSyncedImageRef = useRef<string>(item.editedPrimaryImageUrl ?? item.primaryImageUrl ?? '')
+  const lastSyncedNotesRef = useRef<string>(item.notes ?? '')
+  const lastSyncedStructuredRef = useRef<string>(JSON.stringify(readInitialDraftStructured(item)))
+
   const applySummaryText = readLastApplySummaryText(item)
   const verificationSummaryText = readVerificationSummaryText(item)
   const displayedPrice = resolvePendingPurchaseDisplayedPrice(draftPrice, item)
@@ -1191,11 +1213,46 @@ function PendingPurchaseRowCard(
   const hasPricingLadder = hasPendingPurchasePricingLadder(item, displayedPrice)
 
   useEffect(() => {
-    setDraftDescription(item.editedProposedDescription ?? item.proposedDescription ?? '')
-    setDraftPrice(readDraftPrice(item))
-    setDraftImageUrl(item.editedPrimaryImageUrl ?? item.primaryImageUrl ?? '')
-    setDraftNotes(item.notes ?? '')
-    setDraftStructured(readInitialDraftStructured(item))
+    // Per-field "preserve user edits across revalidation" pattern.
+    // For each drafted field, only re-seed from the server-derived
+    // value if the local draft still matches the last-synced server
+    // value (i.e. the reviewer didn't touch it since last sync). If
+    // it differs, the reviewer has an unsaved edit — keep it.
+    //
+    // The refs are then updated to the new server-derived values so
+    // subsequent revalidations can detect dirtiness against the
+    // freshest baseline.
+    const nextDescription = item.editedProposedDescription ?? item.proposedDescription ?? ''
+    setDraftDescription((current) =>
+      current === lastSyncedDescriptionRef.current ? nextDescription : current,
+    )
+    lastSyncedDescriptionRef.current = nextDescription
+
+    const nextPrice = readDraftPrice(item)
+    setDraftPrice((current) =>
+      current === lastSyncedPriceRef.current ? nextPrice : current,
+    )
+    lastSyncedPriceRef.current = nextPrice
+
+    const nextImage = item.editedPrimaryImageUrl ?? item.primaryImageUrl ?? ''
+    setDraftImageUrl((current) =>
+      current === lastSyncedImageRef.current ? nextImage : current,
+    )
+    lastSyncedImageRef.current = nextImage
+
+    const nextNotes = item.notes ?? ''
+    setDraftNotes((current) =>
+      current === lastSyncedNotesRef.current ? nextNotes : current,
+    )
+    lastSyncedNotesRef.current = nextNotes
+
+    const nextStructured = readInitialDraftStructured(item)
+    const nextStructuredJson = JSON.stringify(nextStructured)
+    setDraftStructured((current) =>
+      JSON.stringify(current) === lastSyncedStructuredRef.current ? nextStructured : current,
+    )
+    lastSyncedStructuredRef.current = nextStructuredJson
+
     // Re-sync the collapsed-after-decision state with the freshest
     // approval status. Without this, a row the reviewer manually
     // reopened would stay open after a backend revalidate that
@@ -1592,7 +1649,12 @@ function PendingPurchaseRowCard(
           </div>
         </details>
       ) : null}
-      {item.reviewerNotes ? <p className="subtle-copy">Source notes: {item.reviewerNotes}</p> : null}
+      {item.reviewerNotes ? (
+        <details className="pending-purchase-source-notes">
+          <summary>Source notes</summary>
+          <p className="subtle-copy" style={{ marginTop: '0.35rem' }}>{item.reviewerNotes}</p>
+        </details>
+      ) : null}
       {item.suggestionCandidates.length > 0 ? (
         <details>
           <summary>Suggestion candidates</summary>
@@ -1657,20 +1719,30 @@ function PendingPurchaseRowCard(
           </span>
         </label>
 
-        <label className="stack-field">
-          <span>Override proposed description</span>
-          <textarea disabled={editingLocked} onChange={(event) => setDraftDescription(event.currentTarget.value)} rows={5} value={draftDescription} />
-        </label>
+        <details className="pending-purchase-override-description">
+          <summary>Override proposed description</summary>
+          <textarea
+            disabled={editingLocked}
+            onChange={(event) => setDraftDescription(event.currentTarget.value)}
+            rows={5}
+            style={{ width: '100%', marginTop: '0.35rem' }}
+            value={draftDescription}
+          />
+        </details>
 
         <label className="stack-field">
           <span>Override primary image URL</span>
           <input disabled={editingLocked} onChange={(event) => setDraftImageUrl(event.currentTarget.value)} value={draftImageUrl} />
         </label>
 
-        <label className="stack-field">
-          <span>Operator notes override</span>
-          <textarea disabled={editingLocked} onChange={(event) => setDraftNotes(event.currentTarget.value)} rows={2} value={draftNotes} />
-        </label>
+        {/*
+          Operator notes override removed from the row card — per
+          reviewer feedback it was noise here and is only useful on
+          the per-row details view. `draftNotes` is still initialised
+          and PATCHed (it just defaults to the existing item.notes so
+          the round-trip is a no-op), preserving the contract without
+          eating row-card real estate.
+        */}
 
         {editingLocked ? (
           <p className="subtle-copy">
@@ -1685,14 +1757,6 @@ function PendingPurchaseRowCard(
             Effective image: <a href={item.effectivePrimaryImageUrl} rel="noreferrer" target="_blank">Open image</a>
             {item.primaryImageSource ? ` · ${item.primaryImageSource}` : ''}
           </p>
-        ) : null}
-
-        {canEdit ? (
-          <div className="inline-row wrap-row review-actions">
-            <button className="primary-button" disabled={isSaving || editingLocked} onClick={() => void handleSave()} type="button">
-              {isSaving ? 'Saving…' : 'Save overrides'}
-            </button>
-          </div>
         ) : null}
       </details>
 
@@ -1778,31 +1842,45 @@ function PendingPurchaseRowCard(
             value={draftStructured.targetStrainName}
           />
         </div>
-
-        {canEdit ? (
-          <div className="inline-row wrap-row review-actions">
-            <button className="primary-button" disabled={isSaving || editingLocked} onClick={() => void handleSave()} type="button">
-              {isSaving ? 'Saving…' : 'Save overrides'}
-            </button>
-          </div>
-        ) : null}
+        {/*
+          The Save Overrides button used to live here (and in the
+          sibling Overrides details). Per reviewer feedback it now
+          lives ONCE, in the decisions row next to Approve — that's
+          where the reviewer's hand already is when they want to
+          save edits and then approve.
+        */}
       </details>
     </>
   )
 
-  const decisionsSlot = canApprove ? (
+  // Save Overrides lives in the decisions row (adjacent to Approve)
+  // per reviewer feedback. We render the decisions slot whenever the
+  // reviewer can either edit OR approve so the Save button is reachable
+  // for edit-only roles too.
+  const decisionsSlot = (canApprove || canEdit) ? (
     <div className="inline-row wrap-row review-actions">
-      {item.approvalStatus !== 'approved' ? (
+      {canEdit ? (
+        <button
+          className={hasDraftOverrides ? 'primary-button' : 'ghost-button'}
+          disabled={isSaving || editingLocked || !hasDraftOverrides}
+          onClick={() => void handleSave()}
+          type="button"
+          title={hasDraftOverrides ? 'Save edited overrides' : 'No unsaved override changes'}
+        >
+          {isSaving ? 'Saving…' : 'Save overrides'}
+        </button>
+      ) : null}
+      {canApprove && item.approvalStatus !== 'approved' ? (
         <button className="primary-button" disabled={isApproving || isApplyLocked} onClick={() => void handleApprovalChange('approved')} type="button">
           {isApproving ? 'Updating…' : 'Approve'}
         </button>
       ) : null}
-      {item.approvalStatus !== 'rejected' ? (
+      {canApprove && item.approvalStatus !== 'rejected' ? (
         <button className="ghost-button" disabled={isApproving || isApplyLocked} onClick={() => void handleApprovalChange('rejected')} type="button">
           Reject
         </button>
       ) : null}
-      {item.approvalStatus !== 'pending' ? (
+      {canApprove && item.approvalStatus !== 'pending' ? (
         <button className="ghost-button" disabled={isApproving || isApplyLocked} onClick={() => void handleApprovalChange('pending')} type="button">
           Mark pending
         </button>
