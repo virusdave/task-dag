@@ -26,6 +26,28 @@ const SUBCATEGORY_ALIASES = new Map<string, string>([
 
 const PENDING_PURCHASE_SOURCE_SYSTEM = 'metrc'
 
+// Sweed UOM id 16 = "Milligram". Used for THC/CBD content fields on
+// edibles, tinctures, etc. — categories whose limitType requires
+// thc/cbd ("Forbidden to create product without thc&cbd" if omitted).
+const MILLIGRAM_UOM_ID = 16
+
+// Job-detail page reads payload_json.progressLog; cap at 5000 entries
+// per job to keep the row from ballooning under retry storms. Matches
+// MAX_JOB_PROGRESS_LOG_ENTRIES in generatePendingPurchasePacketJob.ts.
+const MAX_JOB_PROGRESS_LOG_ENTRIES = 5000
+
+// Categories whose Sweed `limitType.isThcAndCbdRequired === true`.
+// (We cannot read limitType from the catalog dictionary loader, so
+// keeping a small allow-list is the simplest correct option until
+// the dictionary is enriched.) Edibles fail without these fields,
+// Vapes / Flower / Pre-Rolls do not.
+const CATEGORIES_REQUIRING_CANNABINOID_FIELDS = new Set<string>([
+  'edibles',
+  'tinctures',
+  'topicals',
+  'oral & nasal',
+])
+
 const NamedIdSchema = z.object({
   id: z.coerce.number().int(),
   name: z.string().trim().min(1),
@@ -236,6 +258,77 @@ interface PendingPurchaseSuggestionVerification {
 
 class PendingPurchaseBlockedError extends Error {}
 
+// Append one entry to the worker job's progressLog so the
+// /jobs/<id> page renders a per-mutation audit trail. Mirrors the
+// SQL pattern used by generatePendingPurchasePacketJob.updateJobProgress
+// (trims to MAX_JOB_PROGRESS_LOG_ENTRIES newest entries on each write).
+async function appendApplyJobProgressLog(
+  jobId: number,
+  message: string,
+  data?: Record<string, unknown>,
+): Promise<void> {
+  const entry = {
+    createdAt: new Date().toISOString(),
+    message,
+    ...(data && Object.keys(data).length > 0 ? { data } : {}),
+  }
+  try {
+    await getPool().query(
+      `
+        update job_queue
+        set payload_json = jsonb_set(
+              coalesce(payload_json, '{}'::jsonb),
+              '{progressLog}',
+              (
+                select coalesce(jsonb_agg(entry order by ordinality asc), '[]'::jsonb)
+                from (
+                  select entry, ordinality
+                  from jsonb_array_elements(
+                    coalesce(payload_json->'progressLog', '[]'::jsonb) || $2::jsonb
+                  ) with ordinality as log_entries(entry, ordinality)
+                  order by ordinality desc
+                  limit ${MAX_JOB_PROGRESS_LOG_ENTRIES}
+                ) trimmed
+              ),
+              true
+            ),
+            updated_at = now()
+        where id = $1
+      `,
+      [jobId, JSON.stringify([entry])],
+    )
+  } catch (error) {
+    // Never let a logging failure abort the apply itself.
+    console.warn(`[applyPendingPurchaseRequestJob] progressLog write failed: ${error instanceof Error ? error.message : error}`)
+  }
+}
+
+// Compute the THC/CBD payload for a `store.product.add` call when the
+// row's category requires it (e.g. Edibles). We derive the per-unit
+// THC from the targetSize when it is expressed in milligrams (e.g.
+// "10mg"); total per-product is per-unit × packCount. CBD defaults to
+// 0 because we do not currently capture per-row CBD content. If the
+// size is not mg-shaped we still emit zeros + the Milligram UOM —
+// Sweed only rejects when the fields are completely absent.
+function buildCannabinoidPayload(row: LoadedPendingPurchaseRow): Record<string, unknown> {
+  const categoryName = (row.expectedCategory ?? '').trim().toLowerCase()
+  if (!CATEGORIES_REQUIRING_CANNABINOID_FIELDS.has(categoryName)) {
+    return {}
+  }
+  const sizeName = (row.targetSize ?? '').trim()
+  const mgMatch = /^(\d+(?:\.\d+)?)\s*mg$/i.exec(sizeName)
+  const thcPerUnitMg = mgMatch ? Number(mgMatch[1]) : 0
+  const packCount = row.targetPackCount ?? 1
+  return {
+    cbdContentPerProduct: 0,
+    cbdContentPerUnit: 0,
+    cbdContentUomId: MILLIGRAM_UOM_ID,
+    thcContentPerProduct: thcPerUnitMg * packCount,
+    thcContentPerUnit: thcPerUnitMg,
+    thcContentUomId: MILLIGRAM_UOM_ID,
+  }
+}
+
 export async function runCatalogPendingPurchasesApplyJob(
   context: JobHandlerContext,
   payload: CatalogPendingPurchasesApplyJobPayload,
@@ -309,9 +402,22 @@ async function runPendingPurchaseApplyJob(
     }
 
     const row = loadPendingPurchaseRow(rowRecord)
+    await appendApplyJobProgressLog(context.id, `Row ${row.rowId} apply starting`, {
+      rowId: row.rowId,
+      brand: row.targetBrand,
+      groupName: row.targetGroupName,
+      variantName: row.targetVariantName,
+      category: row.expectedCategory,
+      subcategory: row.expectedSubcategory,
+    })
     try {
-      const rowSummary = await applyPendingPurchaseRow(row, env.sweedStateDealerId, dictionaries)
+      const rowSummary = await applyPendingPurchaseRow(row, env.sweedStateDealerId, dictionaries, context.id)
       await markPendingPurchaseRowApplied(row, payload.pendingPurchaseApplyRequestId, rowSummary)
+      await appendApplyJobProgressLog(context.id, `Row ${row.rowId} applied`, {
+        rowId: row.rowId,
+        createdGroupId: (rowSummary as { createdGroupId?: number | null }).createdGroupId ?? null,
+        createdProductId: (rowSummary as { createdProductId?: number | null }).createdProductId ?? null,
+      })
     } catch (error) {
       if (error instanceof RetryableWorkerError) {
         throw error
@@ -324,6 +430,10 @@ async function runPendingPurchaseApplyJob(
         summaryText: error instanceof Error ? error.message : 'Pending-purchase apply failed.',
       }
       await markPendingPurchaseRowFailed(row, payload.pendingPurchaseApplyRequestId, failureStatus, failureSummary)
+      await appendApplyJobProgressLog(context.id, `Row ${row.rowId} ${failureStatus}`, {
+        rowId: row.rowId,
+        error: failureSummary.summaryText,
+      })
     }
   }
 
@@ -365,6 +475,7 @@ async function applyPendingPurchaseRow(
   row: LoadedPendingPurchaseRow,
   stateDealerId: number,
   dictionaries: StateDictionaries,
+  jobId: number,
 ): Promise<Record<string, unknown>> {
   if (row.siteDealerId === null) {
     throw new Error(`Pending-purchase row ${row.rowId} is missing a site dealer id.`)
@@ -372,6 +483,9 @@ async function applyPendingPurchaseRow(
   if (!row.targetVariantName?.trim()) {
     throw new Error(`Pending-purchase row ${row.rowId} is missing a target variant name.`)
   }
+
+  const logMutation = (op: string, data?: Record<string, unknown>): Promise<void> =>
+    appendApplyJobProgressLog(jobId, `row ${row.rowId}: ${op}`, data)
 
   const normalizedDescription = row.effectiveProposedDescription
     ? normalizeDescriptionText(row.effectiveProposedDescription)
@@ -406,37 +520,61 @@ async function applyPendingPurchaseRow(
     const categoryContext = resolveCategoryContext(row, dictionaries)
     const brand = await ensureBrand(stateDealerId, dictionaries, requireNonEmptyString(row.targetBrand, 'target brand'))
     const productPrice = requirePendingPurchasePrice(row)
-    createdBlobId = row.effectivePrimaryImageUrl ? await uploadImage(row.effectivePrimaryImageUrl) : null
+    if (row.effectivePrimaryImageUrl) {
+      createdBlobId = await uploadImage(row.effectivePrimaryImageUrl)
+      await logMutation('uploaded image', { blobId: createdBlobId, url: row.effectivePrimaryImageUrl })
+    }
 
+    const groupName = requireNonEmptyString(row.targetGroupName ?? row.targetVariantName, 'target group name')
+    const groupAddPayload = {
+      brandId: brand.id,
+      categoryId: categoryContext.category.id,
+      description: normalizedDescription ?? undefined,
+      imagesIds: createdBlobId ? [createdBlobId] : undefined,
+      isFinishedProduct: true,
+      name: groupName,
+      subcategoryId: categoryContext.subcategory?.id,
+    }
     const groupResult = z.object({ id: z.coerce.number().int() }).passthrough().parse(
-      await callSweedRpcForDealer(stateDealerId, 'store.product.group.add', {
-        brandId: brand.id,
-        categoryId: categoryContext.category.id,
-        description: normalizedDescription ?? undefined,
-        imagesIds: createdBlobId ? [createdBlobId] : undefined,
-        isFinishedProduct: true,
-        name: requireNonEmptyString(row.targetGroupName ?? row.targetVariantName, 'target group name'),
-        subcategoryId: categoryContext.subcategory?.id,
-      }),
+      await callSweedRpcForDealer(stateDealerId, 'store.product.group.add', groupAddPayload),
     )
     createdGroupId = groupResult.id
+    await logMutation('store.product.group.add', {
+      groupId: createdGroupId,
+      name: groupName,
+      brandId: brand.id,
+      categoryId: categoryContext.category.id,
+      subcategoryId: categoryContext.subcategory?.id ?? null,
+    })
     group = ProductGroupDetailSchema.parse(
       await callSweedRpcForDealer(stateDealerId, 'store.product.group.get', { id: createdGroupId }),
     )
 
+    const cannabinoidPayload = buildCannabinoidPayload(row)
+    const productAddPayload = {
+      allowedSaleTypeId: ALLOWED_SALE_TYPE_ID,
+      displayInEcommerce: true,
+      isPacked: true,
+      packOfSize: row.targetPackCount ?? 1,
+      price: productPrice,
+      productGroupId: createdGroupId,
+      sizeId: resolveSizeId(row, dictionaries),
+      tab: row.targetVariantTab ?? '',
+      ...cannabinoidPayload,
+    }
     const productResult = z.object({ id: z.coerce.number().int() }).passthrough().parse(
-      await callSweedRpcForDealer(stateDealerId, 'store.product.add', {
-        allowedSaleTypeId: ALLOWED_SALE_TYPE_ID,
-        displayInEcommerce: true,
-        isPacked: true,
-        packOfSize: row.targetPackCount ?? 1,
-        price: productPrice,
-        productGroupId: createdGroupId,
-        sizeId: resolveSizeId(row, dictionaries),
-        tab: row.targetVariantTab ?? '',
-      }),
+      await callSweedRpcForDealer(stateDealerId, 'store.product.add', productAddPayload),
     )
     createdProductId = productResult.id
+    await logMutation('store.product.add', {
+      productId: createdProductId,
+      groupId: createdGroupId,
+      sizeId: productAddPayload.sizeId,
+      packOfSize: productAddPayload.packOfSize,
+      tab: productAddPayload.tab,
+      price: productPrice,
+      cannabinoidFieldsIncluded: Object.keys(cannabinoidPayload).length > 0,
+    })
 
     const waitResult = await waitForProductInGroup(stateDealerId, createdGroupId, createdProductId)
     group = waitResult.group
@@ -447,6 +585,10 @@ async function applyPendingPurchaseRow(
   const groupEditPayload = buildGroupEditPayload(group, row, normalizedDescription, strainRow?.id ?? null)
   if (Object.keys(groupEditPayload).length > 1) {
     await callSweedRpcForDealer(stateDealerId, 'store.product.group.edit', groupEditPayload)
+    await logMutation('store.product.group.edit', {
+      groupId: group.id,
+      fieldsUpdated: Object.keys(groupEditPayload).filter((k) => k !== 'id'),
+    })
     group = ProductGroupDetailSchema.parse(
       await callSweedRpcForDealer(stateDealerId, 'store.product.group.get', { id: group.id }),
     )
@@ -455,6 +597,10 @@ async function applyPendingPurchaseRow(
   const productEditPayload = buildProductEditPayload(product, row, dictionaries)
   if (Object.keys(productEditPayload).length > 1) {
     await callSweedRpcForDealer(stateDealerId, 'store.product.edit', productEditPayload)
+    await logMutation('store.product.edit', {
+      productId: product.id,
+      fieldsUpdated: Object.keys(productEditPayload).filter((k) => k !== 'id'),
+    })
     const refreshed = await waitForProductInGroup(stateDealerId, group.id, product.id)
     group = refreshed.group
     product = refreshed.product
@@ -467,6 +613,7 @@ async function applyPendingPurchaseRow(
     row,
     product.id,
   )
+  await logMutation('distributor link', distributorLink)
   // Verification is intentionally non-fatal. Every Sweed write above
   // (group add, product add, group/product edit, distributor link)
   // has already succeeded by this point; if Sweed's suggestion RPC
