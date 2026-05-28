@@ -208,6 +208,55 @@ export function areStructuredOverridesEqual(
   return true
 }
 
+// Subset of `StructuredOverrideKey` that resolves to a string-typed
+// effective value. Excludes `targetPackCount` which has its own
+// numeric accessor below.
+export type StructuredOverrideStringKey = Exclude<StructuredOverrideKey, 'targetPackCount'>
+
+// Returns the EFFECTIVE value for a structured field — i.e. the
+// reviewer override when one is present (including explicit
+// `null` for "cleared"), otherwise the parser-side value. Mirrors
+// `pickEffectiveString` in
+// `worker/jobs/applyPendingPurchaseRequestJob.ts` so the row card
+// display reflects exactly what apply would write to Sweed.
+export function effectiveStructured(
+  item: ParsedStructuredValues,
+  key: StructuredOverrideStringKey,
+): string | null {
+  const o = item.editedStructuredFields
+  if (o && key in o) {
+    const v = (o as Record<string, unknown>)[key]
+    return typeof v === 'string' && v.length > 0 ? v : null
+  }
+  // The override-side key for strain is `targetStrainName`; the
+  // parser-side row field is `targetStrain` (kept as-is to avoid
+  // churning every consumer of PendingPurchaseRow).
+  if (key === 'targetStrainName') return item.targetStrain
+  return (item as unknown as Record<string, string | null>)[key]
+}
+
+export function effectiveStructuredPackCount(item: ParsedStructuredValues): number | null {
+  const o = item.editedStructuredFields
+  if (o && 'targetPackCount' in o) {
+    const v = (o as Record<string, unknown>).targetPackCount
+    return typeof v === 'number' && Number.isInteger(v) && v > 0 ? v : null
+  }
+  return item.targetPackCount
+}
+
+// Whether the reviewer has explicitly set this key in the JSONB
+// override map. Drives the amber `value-panel--overridden`
+// background + "edited" pill on display cells in the row-card
+// Product Hierarchy grid (issue #35).
+export function hasStructuredOverride(
+  item: ParsedStructuredValues,
+  key: StructuredOverrideKey,
+): boolean {
+  const o = item.editedStructuredFields
+  if (!o) return false
+  return key in o
+}
+
 // Reviewer-facing input for a single structured-override key.
 // Pre-populated with the effective merged value; the parser's
 // original value is shown as a `parser: ...` hint and an "override"

@@ -31,9 +31,13 @@ export {
   StructuredOverrideField,
   areStructuredOverridesEqual,
   buildStructuredOverridePayload,
+  effectiveStructured,
+  effectiveStructuredPackCount,
+  hasStructuredOverride,
   readInitialDraftStructured,
   readParsedStructuredValue,
   type ParsedStructuredValues,
   type StructuredOverrideDraft,
   type StructuredOverrideKey,
+  type StructuredOverrideStringKey,
 } from './structuredOverrides.js'

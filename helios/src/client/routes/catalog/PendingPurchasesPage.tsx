@@ -26,6 +26,9 @@ import {
   StructuredOverrideField,
   areStructuredOverridesEqual,
   buildStructuredOverridePayload,
+  effectiveStructured,
+  effectiveStructuredPackCount,
+  hasStructuredOverride,
   readInitialDraftStructured,
   type StructuredOverrideKey,
 } from '../../components/canonicalProductRow/index.js'
@@ -1293,15 +1296,66 @@ function PendingPurchaseRowCard(
           ) : null}
         </summary>
         <div className="pending-purchase-hierarchy-grid">
-          <PendingValuePanel label="Brand" value={item.targetBrand ?? '—'} highlight={item.needsNewBrand} />
-          <PendingValuePanel label="Group" value={item.targetGroupName ?? '—'} highlight={item.needsNewGroup} />
-          <PendingValuePanel label="Variant" value={item.targetVariantName ?? '—'} highlight={item.needsNewVariant} />
-          <PendingValuePanel label="Variant tab" value={item.targetVariantTab ?? '—'} />
-          <PendingValuePanel label="Category" value={item.expectedCategory ?? '—'} />
-          <PendingValuePanel label="Subcategory" value={item.expectedSubcategory ?? '—'} />
-          <PendingValuePanel label="Size" value={item.targetSize ?? '—'} />
-          <PendingValuePanel label="Pack count" value={item.targetPackCount ? String(item.targetPackCount) : '—'} />
-          <PendingValuePanel label="Strain" value={item.targetStrain ?? '—'} />
+          {/*
+            * Issue #35: when the reviewer has overridden a structured
+            * field via the "Override structured data" panel below, the
+            * displayed value here is the EFFECTIVE value (override
+            * wins) and the cell gets the amber `--overridden`
+            * background + `edited` pill. The original parser value is
+            * still visible in the override-edit panel as the
+            * `parser: …` hint.
+            */}
+          <PendingValuePanel
+            label="Brand"
+            value={effectiveStructured(item, 'targetBrand') ?? '—'}
+            highlight={item.needsNewBrand}
+            overridden={hasStructuredOverride(item, 'targetBrand')}
+          />
+          <PendingValuePanel
+            label="Group"
+            value={effectiveStructured(item, 'targetGroupName') ?? '—'}
+            highlight={item.needsNewGroup}
+            overridden={hasStructuredOverride(item, 'targetGroupName')}
+          />
+          <PendingValuePanel
+            label="Variant"
+            value={effectiveStructured(item, 'targetVariantName') ?? '—'}
+            highlight={item.needsNewVariant}
+            overridden={hasStructuredOverride(item, 'targetVariantName')}
+          />
+          <PendingValuePanel
+            label="Variant tab"
+            value={effectiveStructured(item, 'targetVariantTab') ?? '—'}
+            overridden={hasStructuredOverride(item, 'targetVariantTab')}
+          />
+          <PendingValuePanel
+            label="Category"
+            value={effectiveStructured(item, 'expectedCategory') ?? '—'}
+            overridden={hasStructuredOverride(item, 'expectedCategory')}
+          />
+          <PendingValuePanel
+            label="Subcategory"
+            value={effectiveStructured(item, 'expectedSubcategory') ?? '—'}
+            overridden={hasStructuredOverride(item, 'expectedSubcategory')}
+          />
+          <PendingValuePanel
+            label="Size"
+            value={effectiveStructured(item, 'targetSize') ?? '—'}
+            overridden={hasStructuredOverride(item, 'targetSize')}
+          />
+          <PendingValuePanel
+            label="Pack count"
+            value={(() => {
+              const v = effectiveStructuredPackCount(item)
+              return v === null ? '—' : String(v)
+            })()}
+            overridden={hasStructuredOverride(item, 'targetPackCount')}
+          />
+          <PendingValuePanel
+            label="Strain"
+            value={effectiveStructured(item, 'targetStrainName') ?? '—'}
+            overridden={hasStructuredOverride(item, 'targetStrainName')}
+          />
           <PendingValuePanel label="Prevalence" value={item.targetPrevalence ?? '—'} />
           <PendingValuePanel label="Reuse variant" value={item.reuseProductName ?? '—'} />
           <PendingValuePanel label="Reuse product id" value={item.reuseProductId ? String(item.reuseProductId) : '—'} />
@@ -1431,8 +1485,16 @@ function PendingPurchaseRowCard(
    * effective overrides feed the apply pipeline through the same
    * shadow-column path as the other override fields.
    */
+  // Issue #35 follow-up: structured-data overrides used to live nested
+  // inside the "Overrides" details, which made them feel demoted and
+  // hid the most operationally-impactful overrides one click deeper.
+  // The two panels are now SIBLINGS in the overrides slot — each with
+  // its own Save button so the reviewer can save from whichever panel
+  // they're currently working in. `handleSave` PATCHes everything
+  // atomically regardless of which button was pressed.
   const overridesSlot = (
-    <details className="pending-purchase-overrides" open={hasDraftOverrides}>
+    <>
+      <details className="pending-purchase-overrides" open={hasDraftOverrides}>
         <summary>Overrides{hasDraftOverrides ? ' · unsaved changes' : ''}</summary>
 
         <label className="stack-field">
@@ -1485,89 +1547,100 @@ function PendingPurchaseRowCard(
             </button>
           </div>
         ) : null}
-
-        <details className="pending-purchase-overrides-structured" open={hasDraftStructuredOverrides}>
-          <summary>
-            Override structured data (brand, variant, pack size…)
-            {hasDraftStructuredOverrides ? <Pill tone="warning">unsaved</Pill> : null}
-          </summary>
-          <p className="subtle-copy">
-            Edit any field below and click <strong>Save overrides</strong>. The parser's
-            original value stays visible as a placeholder + “parser:” hint so reviewers
-            can see what changed. Clearing a field removes its value at apply time.
-            Persistent parser issues should still be fed back via{' '}
-            <a href={buildHeliosModulePath('config', 'parsing/pending-purchases')} target="_blank" rel="noopener noreferrer">
-              Config → Parsing → Pending purchases
-            </a>.
-          </p>
-          <div className="pending-purchase-hierarchy-grid">
-            <StructuredOverrideField
-              disabled={editingLocked}
-              label="Brand"
-              onChange={(value) => setDraftStructured((prev) => ({ ...prev, targetBrand: value }))}
-              parsedValue={item.targetBrand}
-              value={draftStructured.targetBrand}
-            />
-            <StructuredOverrideField
-              disabled={editingLocked}
-              label="Group / line"
-              onChange={(value) => setDraftStructured((prev) => ({ ...prev, targetGroupName: value }))}
-              parsedValue={item.targetGroupName}
-              value={draftStructured.targetGroupName}
-            />
-            <StructuredOverrideField
-              disabled={editingLocked}
-              label="Variant"
-              onChange={(value) => setDraftStructured((prev) => ({ ...prev, targetVariantName: value }))}
-              parsedValue={item.targetVariantName}
-              value={draftStructured.targetVariantName}
-            />
-            <StructuredOverrideField
-              disabled={editingLocked}
-              label="Variant tab"
-              onChange={(value) => setDraftStructured((prev) => ({ ...prev, targetVariantTab: value }))}
-              parsedValue={item.targetVariantTab}
-              value={draftStructured.targetVariantTab}
-            />
-            <StructuredOverrideField
-              disabled={editingLocked}
-              label="Category"
-              onChange={(value) => setDraftStructured((prev) => ({ ...prev, expectedCategory: value }))}
-              parsedValue={item.expectedCategory}
-              value={draftStructured.expectedCategory}
-            />
-            <StructuredOverrideField
-              disabled={editingLocked}
-              label="Subcategory"
-              onChange={(value) => setDraftStructured((prev) => ({ ...prev, expectedSubcategory: value }))}
-              parsedValue={item.expectedSubcategory}
-              value={draftStructured.expectedSubcategory}
-            />
-            <StructuredOverrideField
-              disabled={editingLocked}
-              label="Size"
-              onChange={(value) => setDraftStructured((prev) => ({ ...prev, targetSize: value }))}
-              parsedValue={item.targetSize}
-              value={draftStructured.targetSize}
-            />
-            <StructuredOverrideField
-              disabled={editingLocked}
-              inputMode="numeric"
-              label="Pack count"
-              onChange={(value) => setDraftStructured((prev) => ({ ...prev, targetPackCount: value }))}
-              parsedValue={item.targetPackCount === null ? null : String(item.targetPackCount)}
-              value={draftStructured.targetPackCount}
-            />
-            <StructuredOverrideField
-              disabled={editingLocked}
-              label="Strain"
-              onChange={(value) => setDraftStructured((prev) => ({ ...prev, targetStrainName: value }))}
-              parsedValue={item.targetStrain}
-              value={draftStructured.targetStrainName}
-            />
-          </div>
-        </details>
       </details>
+
+      <details className="pending-purchase-overrides-structured" open={hasDraftStructuredOverrides}>
+        <summary>
+          Override structured data (brand, variant, pack size…)
+          {hasDraftStructuredOverrides ? <Pill tone="warning">unsaved</Pill> : null}
+        </summary>
+        <p className="subtle-copy">
+          Edit any field below and click <strong>Save overrides</strong>. The parser's
+          original value stays visible as a placeholder + “parser:” hint so reviewers
+          can see what changed. Once saved, overridden values are shown on the row
+          card with an amber background and an <strong>edited</strong> pill so they
+          stand out at a glance. Clearing a field removes its value at apply time.
+          Persistent parser issues should still be fed back via{' '}
+          <a href={buildHeliosModulePath('config', 'parsing/pending-purchases')} target="_blank" rel="noopener noreferrer">
+            Config → Parsing → Pending purchases
+          </a>.
+        </p>
+        <div className="pending-purchase-hierarchy-grid">
+          <StructuredOverrideField
+            disabled={editingLocked}
+            label="Brand"
+            onChange={(value) => setDraftStructured((prev) => ({ ...prev, targetBrand: value }))}
+            parsedValue={item.targetBrand}
+            value={draftStructured.targetBrand}
+          />
+          <StructuredOverrideField
+            disabled={editingLocked}
+            label="Group / line"
+            onChange={(value) => setDraftStructured((prev) => ({ ...prev, targetGroupName: value }))}
+            parsedValue={item.targetGroupName}
+            value={draftStructured.targetGroupName}
+          />
+          <StructuredOverrideField
+            disabled={editingLocked}
+            label="Variant"
+            onChange={(value) => setDraftStructured((prev) => ({ ...prev, targetVariantName: value }))}
+            parsedValue={item.targetVariantName}
+            value={draftStructured.targetVariantName}
+          />
+          <StructuredOverrideField
+            disabled={editingLocked}
+            label="Variant tab"
+            onChange={(value) => setDraftStructured((prev) => ({ ...prev, targetVariantTab: value }))}
+            parsedValue={item.targetVariantTab}
+            value={draftStructured.targetVariantTab}
+          />
+          <StructuredOverrideField
+            disabled={editingLocked}
+            label="Category"
+            onChange={(value) => setDraftStructured((prev) => ({ ...prev, expectedCategory: value }))}
+            parsedValue={item.expectedCategory}
+            value={draftStructured.expectedCategory}
+          />
+          <StructuredOverrideField
+            disabled={editingLocked}
+            label="Subcategory"
+            onChange={(value) => setDraftStructured((prev) => ({ ...prev, expectedSubcategory: value }))}
+            parsedValue={item.expectedSubcategory}
+            value={draftStructured.expectedSubcategory}
+          />
+          <StructuredOverrideField
+            disabled={editingLocked}
+            label="Size"
+            onChange={(value) => setDraftStructured((prev) => ({ ...prev, targetSize: value }))}
+            parsedValue={item.targetSize}
+            value={draftStructured.targetSize}
+          />
+          <StructuredOverrideField
+            disabled={editingLocked}
+            inputMode="numeric"
+            label="Pack count"
+            onChange={(value) => setDraftStructured((prev) => ({ ...prev, targetPackCount: value }))}
+            parsedValue={item.targetPackCount === null ? null : String(item.targetPackCount)}
+            value={draftStructured.targetPackCount}
+          />
+          <StructuredOverrideField
+            disabled={editingLocked}
+            label="Strain"
+            onChange={(value) => setDraftStructured((prev) => ({ ...prev, targetStrainName: value }))}
+            parsedValue={item.targetStrain}
+            value={draftStructured.targetStrainName}
+          />
+        </div>
+
+        {canEdit ? (
+          <div className="inline-row wrap-row review-actions">
+            <button className="primary-button" disabled={isSaving || editingLocked} onClick={() => void handleSave()} type="button">
+              {isSaving ? 'Saving…' : 'Save overrides'}
+            </button>
+          </div>
+        ) : null}
+      </details>
+    </>
   )
 
   const decisionsSlot = canApprove ? (
@@ -1924,16 +1997,32 @@ function PendingValuePanel({
   label,
   value,
   highlight,
+  overridden,
 }: {
   label: string
   value: string
   highlight?: boolean
+  // True when this value reflects a reviewer-authored override
+  // (issue #35). The amber `value-panel--overridden` background
+  // makes it scannable at a glance while leaving the red
+  // `value-panel-new-attribute` highlight to dominate when both
+  // would apply.
+  overridden?: boolean
 }) {
+  // `highlight` (would-create-new-entity, red) wins when both are
+  // true so the apply-side warning isn't masked by the override pill.
+  const classes = ['value-panel']
+  if (highlight) {
+    classes.push('value-panel-new-attribute')
+  } else if (overridden) {
+    classes.push('value-panel--overridden')
+  }
   return (
-    <div className={highlight ? 'value-panel value-panel-new-attribute' : 'value-panel'}>
+    <div className={classes.join(' ')}>
       <span>
         {label}
         {highlight ? <Pill tone="danger">NEW</Pill> : null}
+        {!highlight && overridden ? <Pill tone="warning">edited</Pill> : null}
       </span>
       <p>{value}</p>
     </div>

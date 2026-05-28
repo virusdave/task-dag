@@ -1278,6 +1278,27 @@ pre {
   vertical-align: middle;
 }
 
+/* Reviewer-authored structured-field override (issue #35).
+ * Distinct warm-amber background so an operator scanning the row
+ * card can see at a glance which displayed taxonomy values came
+ * from their manual override vs. the parser. Intentionally
+ * different colour from `value-panel-new-attribute` so the
+ * "would create new entity" warning still pops on its own. */
+.value-panel--overridden {
+  background: rgba(244, 196, 89, 0.22);
+  border-color: #c79121;
+  box-shadow: 0 0 0 2px rgba(199, 145, 33, 0.28);
+}
+
+.value-panel--overridden span {
+  color: #6c4a05;
+}
+
+.value-panel--overridden span .pill {
+  margin-left: 0.4rem;
+  vertical-align: middle;
+}
+
 .value-panel span {
   display: block;
   margin-bottom: 0.35rem;
