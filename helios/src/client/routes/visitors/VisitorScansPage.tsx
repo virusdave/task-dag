@@ -349,10 +349,10 @@ export function VisitorScansPage() {
                 <colgroup>
                   <col className="vs-col-time" />
                   <col className="vs-col-site" />
+                  <col className="vs-col-mini" />
                   <col className="vs-col-visitor" />
                   <col className="vs-col-status" />
                   <col className="vs-col-status" />
-                  <col className="vs-col-mini" />
                   <col className="vs-col-state" />
                   <col className="vs-col-postal" />
                   <col className="vs-col-city" />
@@ -364,10 +364,10 @@ export function VisitorScansPage() {
                   <tr>
                     <th>Scanned</th>
                     <th>Site</th>
+                    <th>Map</th>
                     <th>Visitor</th>
                     <th>Customer</th>
                     <th>Scans</th>
-                    <th>Map</th>
                     <th>St</th>
                     <th>Zip</th>
                     <th>City</th>
@@ -386,7 +386,19 @@ export function VisitorScansPage() {
                         <td className="vs-cell-time">
                           {formatTime(item.scannedAt ?? item.ingestedAt)}
                         </td>
-                        <td>{item.siteSlug}</td>
+                        <td>
+                          <Pill tone={item.siteSlug === 'bx' ? 'success' : 'warning'}>
+                            {item.siteSlug}
+                          </Pill>
+                        </td>
+                        <td>
+                          <MiniGeoMarker
+                            marker={item.miniMarker}
+                            siteSlug={item.siteSlug}
+                            href={buildAppPath(item.customerUrl)}
+                            ariaLabelPrefix={formatName(item)}
+                          />
+                        </td>
                         <td>
                           <a
                             className="vs-visitor-link"
@@ -408,13 +420,6 @@ export function VisitorScansPage() {
                         </td>
                         <td>
                           <span className="vs-first-badge">{firstBadge.label}</span>
-                        </td>
-                        <td>
-                          <MiniGeoMarker
-                            marker={item.miniMarker}
-                            href={buildAppPath(item.customerUrl)}
-                            ariaLabelPrefix={formatName(item)}
-                          />
                         </td>
                         <td>{item.state ?? '—'}</td>
                         <td>{item.postalCode ?? '—'}</td>
@@ -446,7 +451,7 @@ export function VisitorScansPage() {
                 return (
                   <li key={`card-${item.id}`}>
                     <article className="vs-card">
-                      <header className="vs-card-top">
+                      <div className="vs-card-body">
                         <a
                           className="vs-card-name vs-visitor-link"
                           href={buildAppPath(item.customerUrl)}
@@ -455,53 +460,63 @@ export function VisitorScansPage() {
                         >
                           {formatName(item)}
                         </a>
-                        <MiniGeoMarker
-                          marker={item.miniMarker}
-                          href={buildAppPath(item.customerUrl)}
-                          ariaLabelPrefix={formatName(item)}
-                          className="vs-card-mini"
-                        />
-                      </header>
-                      <div className="vs-card-pills">
-                        {newPill !== null ? (
-                          <Pill tone={newPill.tone}>{newPill.label}</Pill>
-                        ) : null}
-                        {crm !== null ? <Pill tone={crm.tone}>{crm.label}</Pill> : null}
-                        <span className="vs-first-badge">{firstBadge.label}</span>
-                        <Pill tone="muted">{item.siteSlug}</Pill>
+                        <div className="vs-card-pills">
+                          {newPill !== null ? (
+                            <Pill tone={newPill.tone}>{newPill.label}</Pill>
+                          ) : null}
+                          {crm !== null ? <Pill tone={crm.tone}>{crm.label}</Pill> : null}
+                          <span className="vs-first-badge">{firstBadge.label}</span>
+                          <Pill tone={item.siteSlug === 'bx' ? 'success' : 'warning'}>
+                            {item.siteSlug}
+                          </Pill>
+                        </div>
+                        <div className="vs-card-time">
+                          {formatTime(item.scannedAt ?? item.ingestedAt)}
+                        </div>
+                        <dl className="vs-card-grid">
+                          <dt>State</dt>
+                          <dd>{item.state ?? '—'}</dd>
+                          <dt>Postal</dt>
+                          <dd>{item.postalCode ?? '—'}</dd>
+                          <dt>City</dt>
+                          <dd>{item.city ?? '—'}</dd>
+                          <dt>Doc</dt>
+                          <dd>{item.documentType ?? '—'}</dd>
+                          <dt>Status</dt>
+                          <dd>{item.scanStatus ?? '—'}</dd>
+                        </dl>
+                        <div className="vs-card-actions">
+                          <a
+                            className="primary-button vs-action"
+                            href={buildAppPath(item.customerUrl)}
+                            target="_blank"
+                            rel="noreferrer"
+                          >
+                            Open customer
+                          </a>
+                          <button
+                            type="button"
+                            className="ghost-button vs-action"
+                            onClick={() => setSelected(item)}
+                          >
+                            Raw
+                          </button>
+                        </div>
                       </div>
-                      <div className="vs-card-time">
-                        {formatTime(item.scannedAt ?? item.ingestedAt)}
-                      </div>
-                      <dl className="vs-card-grid">
-                        <dt>State</dt>
-                        <dd>{item.state ?? '—'}</dd>
-                        <dt>Postal</dt>
-                        <dd>{item.postalCode ?? '—'}</dd>
-                        <dt>City</dt>
-                        <dd>{item.city ?? '—'}</dd>
-                        <dt>Doc</dt>
-                        <dd>{item.documentType ?? '—'}</dd>
-                        <dt>Status</dt>
-                        <dd>{item.scanStatus ?? '—'}</dd>
-                      </dl>
-                      <div className="vs-card-actions">
-                        <a
-                          className="primary-button vs-action"
-                          href={buildAppPath(item.customerUrl)}
-                          target="_blank"
-                          rel="noreferrer"
-                        >
-                          Open customer
-                        </a>
-                        <button
-                          type="button"
-                          className="ghost-button vs-action"
-                          onClick={() => setSelected(item)}
-                        >
-                          Raw
-                        </button>
-                      </div>
+                      {/* Bigger map on the right side fills the
+                          previously-wasted whitespace next to the
+                          short tabular values. Same component as the
+                          desktop thumbnail — scales because the SVG
+                          uses preserveAspectRatio="none" and the
+                          marker projection re-derives from the bbox
+                          on every render. */}
+                      <MiniGeoMarker
+                        marker={item.miniMarker}
+                        siteSlug={item.siteSlug}
+                        href={buildAppPath(item.customerUrl)}
+                        ariaLabelPrefix={formatName(item)}
+                        className="vs-card-mini"
+                      />
                     </article>
                   </li>
                 )

@@ -1,91 +1,145 @@
 #!/usr/bin/env python3
-"""Build a single static OSM thumbnail of the NYC-metro bbox used by
-MiniGeoMarker.tsx, shipped as a committed PNG asset.
+"""Build per-site mini-map basemaps for the visitor-scans thumbnails.
 
-BOUNDS (mirrored from helios/src/client/routes/visitors/MiniGeoMarker.tsx):
-  minLat: 40.35, maxLat: 41.05, minLng: -74.35, maxLng: -73.45
+Generates ONE PNG per retail site, each covering a ~2-mile-radius
+neighborhood box centered on the store. The PNGs are committed to
+helios/src/client/assets/ and referenced by MiniGeoMarker.tsx — the
+component chooses the right basemap (and matching BOUNDS) based on
+which site the scan came from.
 
-Output: helios/src/client/assets/nyc-mini-map.png at ~320x220 for crisp
-display at the 64x44 thumbnail rendering size (covers 1x, 2x, 3x DPI).
+Usage:
+  python3 make-mini-map.py <out-dir>
+
+Writes:
+  <out-dir>/nyc-bx-mini-map.png
+  <out-dir>/nyc-mh-mini-map.png
+
+Also prints, on stdout, the bbox + display-size constants the
+component must use, so the JS side stays in lock-step with the
+asset.
 """
 import math
-import urllib.request
 import sys
+import urllib.request
 from io import BytesIO
-from PIL import Image
 
-MIN_LAT = 40.35
-MAX_LAT = 41.05
-MIN_LNG = -74.35
-MAX_LNG = -73.45
-Z = 10
+from PIL import Image, ImageEnhance
+
+# (siteSlug, center lat, center lng). Coords copied from
+# helios/src/server/db/queries/customersMapQueries.ts.
+SITES = [
+    ('bx', 40.86494, -73.88488),
+    ('mh', 40.76232, -73.97661),
+]
+
+# ~2 miles radius. We use a slightly generous buffer (2.25 mi) so the
+# store dot doesn't sit at the very edge of the basemap when the scan
+# happens at the device's exact GPS.
+RADIUS_MI = 2.25
+KM_PER_MILE = 1.60934
+RADIUS_KM = RADIUS_MI * KM_PER_MILE  # ≈ 3.62 km
+
+# OSM zoom level — z=13 gives one tile ≈ 3.7 km wide at lat 40.8, so
+# a 4.5-km-diameter bbox fits comfortably in 2×2 tiles.
+Z = 13
 TILE = 256
-TARGET_W = 320
-TARGET_H = 220
-OUT_PATH = sys.argv[1] if len(sys.argv) > 1 else 'nyc-mini-map.png'
 
-def tile_xy(lat, lng, z):
-    """Returns FRACTIONAL tile coords (units of tiles, not pixels)."""
+# Final raster size. 480×480 is enough resolution for the desktop
+# 64×44 thumbnail (8× downsample) and the mobile expanded card view
+# (~200–260px wide, 2× downsample) without obvious pixelation.
+TARGET_W = 480
+TARGET_H = 480
+
+
+def lng_per_degree_km(lat_deg: float) -> float:
+    return 111.32 * math.cos(math.radians(lat_deg))
+
+
+def tile_xy(lat: float, lng: float, z: int) -> tuple[float, float]:
+    """Fractional tile coordinates (units of tiles)."""
     n = 2 ** z
     x = (lng + 180.0) / 360.0 * n
     lat_rad = math.radians(lat)
     y = (1 - math.log(math.tan(lat_rad) + 1 / math.cos(lat_rad)) / math.pi) / 2 * n
     return x, y
 
-# Fractional tile coords (units of TILE, not pixels).
-x_min_t, y_max_t = tile_xy(MAX_LAT, MIN_LNG, Z)  # top-left
-x_max_t, y_min_t = tile_xy(MIN_LAT, MAX_LNG, Z)  # bottom-right
-left_t = min(x_min_t, x_max_t)
-right_t = max(x_min_t, x_max_t)
-top_t = min(y_max_t, y_min_t)
-bot_t = max(y_max_t, y_min_t)
 
-# Whole-tile range that covers the bbox.
-tx0 = int(math.floor(left_t))
-ty0 = int(math.floor(top_t))
-tx1 = int(math.floor(right_t - 1e-9))
-ty1 = int(math.floor(bot_t - 1e-9))
+def build_basemap(center_lat: float, center_lng: float) -> tuple[Image.Image, dict]:
+    # Convert the km radius into a degree-bbox at this latitude.
+    delta_lat = RADIUS_KM / 111.32
+    delta_lng = RADIUS_KM / lng_per_degree_km(center_lat)
 
-# In the stitched canvas, the bbox occupies these pixel coordinates.
-left = (left_t - tx0) * TILE
-right = (right_t - tx0) * TILE
-top = (top_t - ty0) * TILE
-bot = (bot_t - ty0) * TILE
+    min_lat = center_lat - delta_lat
+    max_lat = center_lat + delta_lat
+    min_lng = center_lng - delta_lng
+    max_lng = center_lng + delta_lng
 
-tiles_w = tx1 - tx0 + 1
-tiles_h = ty1 - ty0 + 1
-print(f"bbox px (z={Z}): left={left:.1f} top={top:.1f} right={right:.1f} bot={bot:.1f}", file=sys.stderr)
-print(f"tile range: x={tx0}..{tx1} ({tiles_w} cols), y={ty0}..{ty1} ({tiles_h} rows) = {tiles_w*tiles_h} tiles", file=sys.stderr)
+    # Fractional tile coords of the bbox corners.
+    x_left, y_top = tile_xy(max_lat, min_lng, Z)  # top-left
+    x_right, y_bot = tile_xy(min_lat, max_lng, Z)  # bottom-right
 
-canvas = Image.new('RGB', (tiles_w * TILE, tiles_h * TILE), (200, 200, 200))
-opener = urllib.request.build_opener()
-opener.addheaders = [('User-Agent', 'helios-build/1.0 (https://github.com/freshlybakednyc/automation)')]
+    tx0 = int(math.floor(x_left))
+    ty0 = int(math.floor(y_top))
+    tx1 = int(math.floor(x_right - 1e-9))
+    ty1 = int(math.floor(y_bot - 1e-9))
 
-for ty in range(ty0, ty1 + 1):
-    for tx in range(tx0, tx1 + 1):
-        url = f'https://tile.openstreetmap.org/{Z}/{tx}/{ty}.png'
-        print(f'fetch {url}', file=sys.stderr)
-        req = opener.open(url, timeout=20)
-        tile_img = Image.open(BytesIO(req.read())).convert('RGB')
-        canvas.paste(tile_img, ((tx - tx0) * TILE, (ty - ty0) * TILE))
+    tiles_w = tx1 - tx0 + 1
+    tiles_h = ty1 - ty0 + 1
 
-# crop to bbox pixel rectangle, in the canvas's local pixel space.
-crop_box = (int(round(left)), int(round(top)), int(round(right)), int(round(bot)))
-print(f'crop {crop_box}', file=sys.stderr)
-cropped = canvas.crop(crop_box)
+    # Stitch tiles into a single canvas at native resolution.
+    canvas = Image.new('RGB', (tiles_w * TILE, tiles_h * TILE), (220, 220, 220))
+    opener = urllib.request.build_opener()
+    opener.addheaders = [
+        ('User-Agent', 'helios-build/1.0 (https://github.com/freshlybakednyc/automation)'),
+    ]
+    for ty in range(ty0, ty1 + 1):
+        for tx in range(tx0, tx1 + 1):
+            url = f'https://tile.openstreetmap.org/{Z}/{tx}/{ty}.png'
+            print(f'    fetch {url}', file=sys.stderr)
+            tile_img = Image.open(BytesIO(opener.open(url, timeout=20).read())).convert('RGB')
+            canvas.paste(tile_img, ((tx - tx0) * TILE, (ty - ty0) * TILE))
 
-# downscale to target, preserving the bbox aspect ratio. The MiniGeoMarker
-# SVG (64x44) will stretch the asset with preserveAspectRatio="none"; the
-# linear lat/lng→pixel projection used for the dot is consistent with that
-# stretch, so the dot lands in the right relative spot even when the
-# image is squished slightly from its bbox-native aspect.
-resized = cropped.resize((TARGET_W, TARGET_H), Image.LANCZOS)
+    # Bbox pixel rectangle inside the stitched canvas.
+    left = (x_left - tx0) * TILE
+    right = (x_right - tx0) * TILE
+    top = (y_top - ty0) * TILE
+    bot = (y_bot - ty0) * TILE
+    cropped = canvas.crop((int(round(left)), int(round(top)), int(round(right)), int(round(bot))))
+    resized = cropped.resize((TARGET_W, TARGET_H), Image.LANCZOS)
 
-# Mildly desaturate + lift brightness so the dot pops against the base.
-from PIL import ImageEnhance
-resized = ImageEnhance.Color(resized).enhance(0.55)
-resized = ImageEnhance.Brightness(resized).enhance(1.08)
-resized = ImageEnhance.Contrast(resized).enhance(0.9)
+    # Mild desaturation + lift brightness so the marker dot pops.
+    resized = ImageEnhance.Color(resized).enhance(0.55)
+    resized = ImageEnhance.Brightness(resized).enhance(1.08)
+    resized = ImageEnhance.Contrast(resized).enhance(0.9)
 
-resized.save(OUT_PATH, 'PNG', optimize=True)
-print(f'wrote {OUT_PATH} ({resized.size[0]}x{resized.size[1]})', file=sys.stderr)
+    meta = {
+        'min_lat': min_lat, 'max_lat': max_lat,
+        'min_lng': min_lng, 'max_lng': max_lng,
+        'center_lat': center_lat, 'center_lng': center_lng,
+        'tile_zoom': Z,
+        'final_size': (TARGET_W, TARGET_H),
+    }
+    return resized, meta
+
+
+def main() -> None:
+    if len(sys.argv) != 2:
+        print('usage: make-mini-map.py <out-dir>', file=sys.stderr)
+        sys.exit(2)
+    out_dir = sys.argv[1]
+    for slug, lat, lng in SITES:
+        print(f'\n=== {slug} (center {lat}, {lng}) ===', file=sys.stderr)
+        img, meta = build_basemap(lat, lng)
+        out_path = f'{out_dir}/nyc-{slug}-mini-map.png'
+        # Quantize to 128-color palette for a small final PNG.
+        pal = img.convert('P', palette=Image.ADAPTIVE, colors=128)
+        pal.save(out_path, 'PNG', optimize=True)
+        print(f'wrote {out_path}', file=sys.stderr)
+        print(
+            f'  bbox: {meta["min_lat"]:.6f}..{meta["max_lat"]:.6f} lat, '
+            f'{meta["min_lng"]:.6f}..{meta["max_lng"]:.6f} lng'
+        )
+
+
+if __name__ == '__main__':
+    main()

@@ -4641,12 +4641,16 @@ span.metric-chart-legend-item {
 }
 
 .visitor-scans-page .vs-card {
-  display: flex;
-  flex-direction: column;
-  gap: 0.45rem;
+  /* Two-column layout: left text column gets the leftover width, right
+     column hosts a big map thumbnail filling the previously-wasted
+     whitespace next to the short dl-grid values. */
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 9rem;
+  align-items: stretch;
+  gap: 0.75rem;
   width: 100%;
   text-align: left;
-  padding: 0.85rem 0.95rem;
+  padding: 0.75rem 0.85rem;
   border: 1px solid var(--panel-border);
   border-radius: 10px;
   background: var(--surface, #fff);
@@ -4659,11 +4663,13 @@ span.metric-chart-legend-item {
   background: rgba(120, 86, 48, 0.06);
 }
 
-.visitor-scans-page .vs-card-top {
+.visitor-scans-page .vs-card-body {
+  /* All text data — name, pills, time, dl-grid, action buttons —
+     stacks vertically in the left column. */
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.5rem;
+  flex-direction: column;
+  gap: 0.45rem;
+  min-width: 0;
 }
 
 .visitor-scans-page .vs-card-name {
@@ -4920,8 +4926,24 @@ span.metric-chart-legend-item {
   gap: 0.35rem;
 }
 
+/* Mobile-card map: takes the full right column of the .vs-card grid
+   and stretches its SVG to fill the available height. The SVG uses
+   preserveAspectRatio="none" so both the per-site basemap image AND
+   the lat/lng→pixel marker projection scale together — the dot lands
+   in the right relative spot regardless of the rendered aspect. */
 .visitor-scans-page .vs-card-mini {
-  flex: 0 0 auto;
+  display: block;
+  width: 100%;
+  height: 100%;
+  min-height: 9rem;
+  align-self: stretch;
+  border-radius: 8px;
+  overflow: hidden;
+}
+.visitor-scans-page .vs-card-mini .mini-geo-marker-svg {
+  width: 100%;
+  height: 100%;
+  display: block;
 }
 
 .visitor-scans-page .vs-card-actions {
@@ -5466,7 +5488,7 @@ span.metric-chart-legend-item {
   text-overflow: ellipsis;
 }
 .visitor-scans-page .vs-col-time   { width: 11rem; }
-.visitor-scans-page .vs-col-site   { width: 2.5rem; }
+.visitor-scans-page .vs-col-site   { width: 4.5rem; }
 .visitor-scans-page .vs-col-visitor{ width: auto; min-width: 14ch; }
 .visitor-scans-page .vs-col-status { width: 9.5rem; }
 .visitor-scans-page .vs-col-mini   { width: 4.5rem; }
