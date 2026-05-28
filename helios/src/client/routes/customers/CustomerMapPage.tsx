@@ -182,6 +182,41 @@ function nearMs(a: Date, b: Date, tolMs = 60 * 60 * 1000): boolean {
   return Math.abs(a.getTime() - b.getTime()) <= tolMs
 }
 
+// FNV-1a 32-bit hash → unsigned int. Deterministic, branch-free,
+// fine for a stable per-scan jitter seed.
+function fnv1a(str: string): number {
+  let h = 0x811c9dc5
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i)
+    h = Math.imul(h, 0x01000193)
+  }
+  return h >>> 0
+}
+
+// ~400 ft jitter, in meters, applied as a uniform offset within a
+// disk centered on the geocode. Seeded off the scanId so a given
+// scan always lands at the same jittered spot across re-renders.
+const JITTER_RADIUS_M = 400 * 0.3048 // ~121.92 m
+function jitterCoord(
+  lng: number,
+  lat: number,
+  seed: string | number,
+): [number, number] {
+  const h = fnv1a(String(seed))
+  // Split the 32-bit hash into two 16-bit pseudo-randoms in [0, 1).
+  const u1 = (h & 0xffff) / 0x10000
+  const u2 = ((h >>> 16) & 0xffff) / 0x10000
+  // Uniform sampling within a disk: r = R * sqrt(u), θ = 2π u'.
+  const radius = JITTER_RADIUS_M * Math.sqrt(u1)
+  const angle = 2 * Math.PI * u2
+  const dN = radius * Math.cos(angle) // north (m)
+  const dE = radius * Math.sin(angle) // east (m)
+  // 1° latitude ≈ 111,320 m; 1° longitude ≈ 111,320·cos(lat) m.
+  const dLat = dN / 111_320
+  const dLng = dE / (111_320 * Math.cos((lat * Math.PI) / 180))
+  return [lng + dLng, lat + dLat]
+}
+
 // ---------------------------------------------------------------------
 // Loader
 // ---------------------------------------------------------------------
@@ -271,21 +306,29 @@ export function CustomerMapPage(): JSX.Element {
   const pointsGeoJson = useMemo(
     () => ({
       type: 'FeatureCollection' as const,
-      features: data.points.map((p) => ({
-        type: 'Feature' as const,
-        geometry: { type: 'Point' as const, coordinates: [p.lng, p.lat] },
-        properties: {
-          scanId: p.scanId,
-          siteSlug: p.siteSlug,
-          checkedInAt: p.checkedInAt,
-          coordSource: p.coordSource,
-          displayName: p.displayName ?? 'Unknown visitor',
-          city: p.city ?? '',
-          state: p.state ?? '',
-          postalCode: p.postalCode ?? '',
-          customerUrl: p.customerUrl,
-        },
-      })),
+      features: data.points.map((p) => {
+        // Jitter the marker up to ~400 ft from the geocode so that
+        // coarse geocodes like "New York, NY" don't stack thousands
+        // of pins on a single pixel. Seeded off scanId so the same
+        // scan always lands at the same jittered spot across
+        // re-renders (no flicker, no shuffling on data refresh).
+        const [jLng, jLat] = jitterCoord(p.lng, p.lat, p.scanId)
+        return {
+          type: 'Feature' as const,
+          geometry: { type: 'Point' as const, coordinates: [jLng, jLat] },
+          properties: {
+            scanId: p.scanId,
+            siteSlug: p.siteSlug,
+            checkedInAt: p.checkedInAt,
+            coordSource: p.coordSource,
+            displayName: p.displayName ?? 'Unknown visitor',
+            city: p.city ?? '',
+            state: p.state ?? '',
+            postalCode: p.postalCode ?? '',
+            customerUrl: p.customerUrl,
+          },
+        }
+      }),
     }),
     [data.points],
   )
@@ -325,6 +368,11 @@ export function CustomerMapPage(): JSX.Element {
         touchPitch: false,
       })
       mapInstance.addControl(new maplibre.NavigationControl({ showCompass: false }), 'top-right')
+      // Browser-fullscreen toggle next to zoom controls. Built-in
+      // MapLibre control; standard ⛶ icon. Hooks the browser
+      // Fullscreen API on supported browsers and falls back to a
+      // CSS-positioned overlay otherwise.
+      mapInstance.addControl(new maplibre.FullscreenControl(), 'top-right')
       mapInstance.addControl(
         new maplibre.AttributionControl({ compact: true }),
         'bottom-right',
@@ -335,10 +383,9 @@ export function CustomerMapPage(): JSX.Element {
         if (!mapInstance) return
 
         // Store-location pins go in FIRST so they sit at the BOTTOM
-        // of the stack — customer pins / clusters / heatmap always
-        // render above them. They're also much smaller than before
-        // so they don't compete with customer data visually; the
-        // text label keeps them identifiable.
+        // of the stack — customer dots always render above them.
+        // Kept small + label-anchored so they don't compete with
+        // customer data visually.
         mapInstance.addSource('sites', { type: 'geojson', data: sitesGeoJson })
         mapInstance.addLayer({
           id: 'sites-outer',
@@ -361,131 +408,32 @@ export function CustomerMapPage(): JSX.Element {
           },
         })
 
-        // Customer scans — clustered. When zoomed out enough that
-        // several pins overlap, nearby points collapse into a
-        // numbered cluster pin. The same source feeds a heatmap
-        // layer (weighted by cluster size, so a cluster of N
-        // contributes as N points to local density).
-        mapInstance.addSource('scans', {
-          type: 'geojson',
-          data: pointsGeoJson,
-          cluster: true,
-          clusterRadius: 40,
-          // Need at least 4 nearby points before we collapse — fewer
-          // than that is "a small number of overlapping pins" which
-          // the user wants to see individually.
-          clusterMinPoints: 4,
-          clusterMaxZoom: 15,
-        })
-
-        mapInstance.addLayer({
-          id: 'scans-heat',
-          type: 'heatmap',
-          source: 'scans',
-          paint: {
-            // Each cluster feature counts for its full member count
-            // so density reflects the true number of *hidden* pins.
-            'heatmap-weight': [
-              'case',
-              ['has', 'point_count'],
-              ['get', 'point_count'],
-              1,
-            ],
-            'heatmap-intensity': [
-              'interpolate', ['linear'], ['zoom'],
-              7, 0.7,
-              12, 1.0,
-              16, 1.4,
-            ],
-            // Transparent at zero density → progressively greener
-            // as the number of overlapping pins increases.
-            'heatmap-color': [
-              'interpolate', ['linear'], ['heatmap-density'],
-              0,    'rgba(0, 0, 0, 0)',
-              0.1,  'rgba(199, 233, 180, 0.35)',
-              0.3,  'rgba(120, 198, 121, 0.55)',
-              0.6,  'rgba(49,  163,  84, 0.75)',
-              1.0,  'rgba(0,   104,  55, 0.90)',
-            ],
-            'heatmap-radius': [
-              'interpolate', ['linear'], ['zoom'],
-              7,  14,
-              12, 24,
-              16, 36,
-            ],
-            // Fade the heatmap out as we zoom in past the cluster
-            // break-apart zoom — by then individual dots take over.
-            'heatmap-opacity': [
-              'interpolate', ['linear'], ['zoom'],
-              9,  1.0,
-              14, 0.7,
-              16, 0.0,
-            ],
-          },
-        })
-
-        mapInstance.addLayer({
-          id: 'scans-clusters',
-          type: 'circle',
-          source: 'scans',
-          filter: ['has', 'point_count'],
-          paint: {
-            'circle-color': [
-              'step', ['get', 'point_count'],
-              '#a5d8a5',  10,
-              '#52b552',  50,
-              '#1a8a3a', 200,
-              '#0e5c25',
-            ],
-            'circle-radius': [
-              'step', ['get', 'point_count'],
-              14,  10,
-              18,  50,
-              22, 200,
-              28,
-            ],
-            'circle-stroke-color': '#ffffff',
-            'circle-stroke-width': 2,
-            'circle-opacity': 0.9,
-          },
-        })
-
-        mapInstance.addLayer({
-          id: 'scans-cluster-count',
-          type: 'symbol',
-          source: 'scans',
-          filter: ['has', 'point_count'],
-          layout: {
-            'text-field': ['get', 'point_count_abbreviated'],
-            'text-font': ['Open Sans Regular'],
-            'text-size': 12,
-            'text-allow-overlap': true,
-          },
-          paint: {
-            'text-color': '#0d2e15',
-            'text-halo-color': '#ffffff',
-            'text-halo-width': 1.2,
-          },
-        })
+        // Customer scans — one dot per check-in. No clustering, no
+        // heatmap (the previous heatmap/cluster pass wasn't what the
+        // operator meant by "heatmap"; left as dots, smaller than
+        // before so dense neighborhoods stay legible).
+        mapInstance.addSource('scans', { type: 'geojson', data: pointsGeoJson })
 
         mapInstance.addLayer({
           id: 'scans-circles',
           type: 'circle',
           source: 'scans',
-          filter: ['!', ['has', 'point_count']],
           paint: {
-            // BIG, BRIGHT, halo-stroked so they pop against the
-            // faded base. Zoom-interpolated so dots stay legible
-            // even at the citywide default zoom.
+            // VERY small dots — the city-wide view needs to hold
+            // thousands of scans simultaneously without blobbing
+            // into a solid mass. Combined with the per-scan jitter
+            // applied to the geocode, this keeps individual visits
+            // visible even when coarse "NY, NY"-style geocodes
+            // collide on the same address.
             'circle-radius': [
               'interpolate',
               ['linear'],
               ['zoom'],
-              7, 6,
-              10, 9,
-              13, 13,
-              16, 18,
-              19, 24,
+              7, 0.8,
+              10, 1.2,
+              13, 1.8,
+              16, 2.6,
+              19, 4,
             ],
             'circle-color': [
               'match',
@@ -513,13 +461,15 @@ export function CustomerMapPage(): JSX.Element {
               'scan', '#1a0d04',
               '#ffffff',
             ],
-            'circle-stroke-width': 2,
-            'circle-stroke-opacity': 0.95,
+            // Hairline halo only — anything thicker is bigger than
+            // the dot itself at default zoom.
+            'circle-stroke-width': 0.5,
+            'circle-stroke-opacity': 0.85,
           },
         })
 
         // Store labels last so they sit on top and stay legible
-        // over both customer dots and clusters.
+        // over the customer dots.
         mapInstance.addLayer({
           id: 'sites-labels',
           type: 'symbol',
@@ -537,32 +487,6 @@ export function CustomerMapPage(): JSX.Element {
             'text-halo-color': '#fffaf1',
             'text-halo-width': 2,
           },
-        })
-
-        // Click a cluster → zoom in until it breaks apart.
-        mapInstance.on('click', 'scans-clusters', (event) => {
-          const feature = event.features?.[0]
-          if (!feature || feature.geometry.type !== 'Point') return
-          const clusterId = feature.properties?.cluster_id as number | undefined
-          if (clusterId === undefined) return
-          const source = mapInstance!.getSource('scans') as maplibregl.GeoJSONSource
-          const [lng, lat] = feature.geometry.coordinates as [number, number]
-          void source
-            .getClusterExpansionZoom(clusterId)
-            .then((zoom) => {
-              mapInstance!.easeTo({ center: [lng, lat], zoom })
-            })
-            .catch(() => {
-              // If expansion zoom isn't available for some reason
-              // (e.g. source not yet ready), just nudge in by one.
-              mapInstance!.easeTo({ center: [lng, lat], zoom: mapInstance!.getZoom() + 1 })
-            })
-        })
-        mapInstance.on('mouseenter', 'scans-clusters', () => {
-          mapInstance!.getCanvas().style.cursor = 'pointer'
-        })
-        mapInstance.on('mouseleave', 'scans-clusters', () => {
-          mapInstance!.getCanvas().style.cursor = ''
         })
 
         mapInstance.on('click', 'scans-circles', (event) => {

@@ -729,6 +729,10 @@ function CustomerVisitorMap({
       attributionControl: { compact: true },
     })
     map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-right')
+    // Browser-fullscreen toggle so the reviewer can blow this map
+    // up to the full viewport without having to leave the details
+    // page. Built-in MapLibre control; standard ⛶ icon.
+    map.addControl(new maplibregl.FullscreenControl(), 'top-right')
     mapRef.current = map
     return () => {
       popupRef.current?.remove()
