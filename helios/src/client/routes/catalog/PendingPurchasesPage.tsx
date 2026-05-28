@@ -1914,9 +1914,11 @@ function HoverZoomImage({
 // `client/components/canonicalProductRow/structuredOverrides.tsx` as of
 // issue #35 slice 4b.2. They're imported above and used by
 // `PendingPurchaseRowCard` exactly as before — extraction is a pure
-// move with no behavior change. The canonical-product-row module is
-// where the row + overrides panel will both live once slice 4b.3
-// migrates `PendingPurchaseRowCard` to consume `CanonicalProductRow`.
+// move with no behavior change. `PendingPurchaseRowCard` now renders
+// through the shared `CanonicalProductRow` shell (slice 4b.3 / 4b.4,
+// commit 654a17e), so both `/catalog/review` and
+// `/catalog/pending-purchases` share the same row layout and override
+// editor.
 
 function PendingValuePanel({
   label,
