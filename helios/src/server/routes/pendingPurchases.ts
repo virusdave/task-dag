@@ -5,6 +5,7 @@ import type { FastifyInstance } from 'fastify'
 import type { PoolClient, QueryResultRow } from 'pg'
 
 import {
+  type EditedStructuredFields,
   HELIOS_PENDING_PURCHASE_SITE_DEALERS,
   type JsonValue,
   MutationAcceptedResponseSchema,
@@ -44,6 +45,7 @@ interface PendingPurchaseRowLockRow extends QueryResultRow {
   edited_primary_image_url: string | null
   edited_proposed_description: string | null
   edited_proposed_price: number | null
+  edited_structured_fields: JsonValue
   id: number
   last_apply_status: 'applied' | 'blocked' | 'failed' | 'not_requested' | 'queued' | 'running'
   notes: string | null
@@ -287,11 +289,16 @@ export async function registerPendingPurchaseRoutes(server: FastifyInstance): Pr
       const nextEditedPrimaryImageUrl = body.editedPrimaryImageUrl !== undefined
         ? body.editedPrimaryImageUrl
         : current.edited_primary_image_url
+      const previousEditedStructuredFields = readEditedStructuredFieldsFromJson(current.edited_structured_fields)
+      const nextEditedStructuredFields = body.editedStructuredFields !== undefined
+        ? body.editedStructuredFields
+        : previousEditedStructuredFields
       const nextNotes = body.notes !== undefined ? body.notes : current.notes
       if (
         nextEditedProposedDescription === current.edited_proposed_description &&
         nextEditedProposedPrice === current.edited_proposed_price &&
         nextEditedPrimaryImageUrl === current.edited_primary_image_url &&
+        editedStructuredFieldsEqual(nextEditedStructuredFields, previousEditedStructuredFields) &&
         nextNotes === current.notes
       ) {
         return { auditEventId: null }
@@ -305,12 +312,13 @@ export async function registerPendingPurchaseRoutes(server: FastifyInstance): Pr
           set edited_proposed_description = $2,
               edited_proposed_price = $3,
               edited_primary_image_url = $4,
-              notes = $5,
+              edited_structured_fields = $5::jsonb,
+              notes = $6,
               last_apply_request_id = null,
               last_apply_status = 'not_requested',
               last_apply_error = null,
               last_apply_summary_json = '{}'::jsonb,
-              version = $6,
+              version = $7,
               updated_at = now()
           where id = $1
         `,
@@ -319,6 +327,7 @@ export async function registerPendingPurchaseRoutes(server: FastifyInstance): Pr
           nextEditedProposedDescription,
           nextEditedProposedPrice,
           nextEditedPrimaryImageUrl,
+          nextEditedStructuredFields === null ? null : JSON.stringify(nextEditedStructuredFields),
           nextNotes,
           nextVersion,
         ],
@@ -335,6 +344,7 @@ export async function registerPendingPurchaseRoutes(server: FastifyInstance): Pr
           nextEditedPrimaryImageUrl,
           nextEditedProposedDescription,
           nextEditedProposedPrice,
+          nextEditedStructuredFields,
           nextNotes,
           nextVersion,
           packetId: current.packet_id,
@@ -342,6 +352,7 @@ export async function registerPendingPurchaseRoutes(server: FastifyInstance): Pr
           previousEditedPrimaryImageUrl: current.edited_primary_image_url,
           previousEditedProposedDescription: current.edited_proposed_description,
           previousEditedProposedPrice: current.edited_proposed_price,
+          previousEditedStructuredFields,
           previousNotes: current.notes,
           previousVersion: current.version,
           summary: `Updated pending-purchase row for ${current.distributor_product_name}.`,
@@ -611,6 +622,7 @@ async function lockPendingPurchaseRow(db: PoolClient, rowId: number): Promise<Pe
         edited_proposed_description,
         edited_proposed_price::double precision as edited_proposed_price,
         edited_primary_image_url,
+        edited_structured_fields,
         last_apply_status,
         notes,
         raw_row_json,
@@ -716,4 +728,44 @@ function readOptionalStringFromJson(value: JsonValue, key: string): string | nul
   }
   const rawValue = (value as Record<string, JsonValue>)[key]
   return typeof rawValue === 'string' && rawValue.trim().length > 0 ? rawValue.trim() : null
+}
+
+/**
+ * Decodes the JSONB `edited_structured_fields` column into the
+ * `EditedStructuredFields` contract type. Returns `null` (== "no
+ * override map at all") when the column is null / missing / a
+ * non-object — the apply worker treats null and `{}` identically
+ * (both mean "no overrides; use the parsed values"), but
+ * round-tripping the column through `null` keeps the audit-event
+ * payload faithful to the DB state.
+ */
+function readEditedStructuredFieldsFromJson(value: JsonValue): EditedStructuredFields | null {
+  if (value === null || value === undefined) return null
+  if (typeof value !== 'object' || Array.isArray(value)) return null
+  return value as EditedStructuredFields
+}
+
+/**
+ * Cheap structural equality on the override map. The shape is small
+ * (<= 9 keys, scalar values), so JSON-string-compare on sorted keys
+ * is fine and avoids depending on a deep-equal helper.
+ */
+function editedStructuredFieldsEqual(
+  left: EditedStructuredFields | null,
+  right: EditedStructuredFields | null,
+): boolean {
+  if (left === right) return true
+  if (left === null || right === null) return false
+  const leftKeys = Object.keys(left).sort()
+  const rightKeys = Object.keys(right).sort()
+  if (leftKeys.length !== rightKeys.length) return false
+  for (let i = 0; i < leftKeys.length; i += 1) {
+    if (leftKeys[i] !== rightKeys[i]) return false
+  }
+  for (const k of leftKeys) {
+    const lv = (left as Record<string, unknown>)[k]
+    const rv = (right as Record<string, unknown>)[k]
+    if (lv !== rv) return false
+  }
+  return true
 }

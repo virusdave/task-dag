@@ -112,11 +112,49 @@ export const UpdatePendingPurchaseRowApprovalRequestSchema = z.object({
 })
 export type UpdatePendingPurchaseRowApprovalRequest = z.infer<typeof UpdatePendingPurchaseRowApprovalRequestSchema>
 
+/**
+ * Reviewer overrides for the LLM/parser-supplied structured taxonomy
+ * on a pending-purchase row (issue #35).
+ *
+ * Every field is optional + nullable so the override payload is
+ * sparse: a key being **present** means "the reviewer set this to
+ * the given value" (including explicit `null` to clear); a key being
+ * **absent** means "no override — fall back to the parsed value".
+ *
+ * Persisted as the JSONB column `pending_purchase_rows.edited_structured_fields`.
+ * Read by `applyPendingPurchaseRequestJob` via the
+ * `effectiveStructuredFields` helper, which mirrors how
+ * `effective_proposed_price` / `effective_proposed_description` work
+ * today for price / description / image overrides.
+ */
+export const EditedStructuredFieldsSchema = z
+  .object({
+    expectedCategory: z.string().trim().max(200).nullable().optional(),
+    expectedSubcategory: z.string().trim().max(200).nullable().optional(),
+    targetBrand: z.string().trim().max(200).nullable().optional(),
+    targetGroupName: z.string().trim().max(500).nullable().optional(),
+    targetPackCount: z.number().int().positive().max(1000).nullable().optional(),
+    targetSize: z.string().trim().max(100).nullable().optional(),
+    targetStrainName: z.string().trim().max(200).nullable().optional(),
+    targetVariantName: z.string().trim().max(200).nullable().optional(),
+    targetVariantTab: z.string().trim().max(200).nullable().optional(),
+  })
+  .strict()
+export type EditedStructuredFields = z.infer<typeof EditedStructuredFieldsSchema>
+
 export const UpdatePendingPurchaseRowRequestSchema = z
   .object({
     editedPrimaryImageUrl: z.string().trim().url().max(4096).nullable().optional(),
     editedProposedDescription: z.string().trim().max(20000).nullable().optional(),
     editedProposedPrice: z.number().finite().min(0).max(100000).nullable().optional(),
+    /**
+     * Sparse reviewer overrides for the 9 structured-taxonomy fields.
+     *
+     * `null` clears every override; an object replaces the entire
+     * sparse override map (call sites that want to merge should do so
+     * client-side before sending). Issue #35.
+     */
+    editedStructuredFields: EditedStructuredFieldsSchema.nullable().optional(),
     expectedVersion: z.number().int().positive(),
     notes: z.string().trim().max(5000).nullable().optional(),
   })
@@ -125,6 +163,7 @@ export const UpdatePendingPurchaseRowRequestSchema = z
       value.editedPrimaryImageUrl !== undefined ||
       value.editedProposedDescription !== undefined ||
       value.editedProposedPrice !== undefined ||
+      value.editedStructuredFields !== undefined ||
       value.notes !== undefined
     ),
     'At least one pending-purchase field must be updated.',

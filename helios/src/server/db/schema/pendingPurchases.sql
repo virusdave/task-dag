@@ -94,6 +94,13 @@ CREATE TABLE IF NOT EXISTS pending_purchase_rows (
   UNIQUE(packet_id, row_index)
 );
 
+-- Reviewer overrides for the LLM/parser-supplied structured taxonomy.
+-- See migration 041 / issue #35 for the override-shape contract; the
+-- canonical typed view lives in
+-- shared/contracts/api/pendingPurchases.ts:EditedStructuredFieldsSchema.
+ALTER TABLE pending_purchase_rows
+  ADD COLUMN IF NOT EXISTS edited_structured_fields JSONB;
+
 CREATE INDEX IF NOT EXISTS idx_pp_rows_packet ON pending_purchase_rows(packet_id);
 CREATE INDEX IF NOT EXISTS idx_pp_rows_approval_status ON pending_purchase_rows(approval_status) WHERE approval_status != 'rejected';
 CREATE INDEX IF NOT EXISTS idx_pp_rows_apply_status ON pending_purchase_rows(apply_status);

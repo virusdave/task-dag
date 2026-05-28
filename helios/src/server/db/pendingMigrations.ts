@@ -369,6 +369,24 @@ const SENTINELS: MigrationSentinel[] = [
     check: async (db) =>
       indexExists(db, 'sweed_orders_budtender_cashier_range_cover_idx'),
   },
+  {
+    // pending_purchase_rows.edited_structured_fields (FreshlyBakedNYC/automation#35).
+    // Without this column the PATCH /api/catalog/pending-purchases/:rowId
+    // endpoint can't persist the new editable-taxonomy overrides
+    // (targetBrand / targetGroupName / expectedCategory /
+    // expectedSubcategory / targetSize / targetPackCount /
+    // targetVariantName / targetVariantTab / targetStrainName), and
+    // applyPendingPurchaseRequestJob keeps writing the parser's
+    // misclassified taxonomy to Sweed even after the reviewer fixes
+    // it inline.
+    migrationId: '041_pending_purchase_edited_structured_fields',
+    label:
+      'pending_purchase_rows.edited_structured_fields (JSONB) — reviewer ' +
+      'overrides for LLM/parser-misclassified taxonomy on pending-purchase ' +
+      'rows; consumed by the apply worker\'s effectiveStructuredFields ' +
+      'helper. See issue #35.',
+    check: (db) => columnExists(db, 'pending_purchase_rows', 'edited_structured_fields'),
+  },
 ]
 
 interface CacheEntry {

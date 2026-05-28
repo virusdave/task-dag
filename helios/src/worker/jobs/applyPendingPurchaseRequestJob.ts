@@ -125,6 +125,7 @@ interface PendingPurchaseApplyWorkRow extends QueryResultRow {
   edited_primary_image_url: string | null
   edited_proposed_description: string | null
   edited_proposed_price: number | null
+  edited_structured_fields: JsonValue
   expected_category: string | null
   expected_subcategory: string | null
   id: number
@@ -988,6 +989,7 @@ async function listPendingPurchaseApplyRows(applyRequest: PendingPurchaseApplyRe
         edited_proposed_description,
         primary_image_url,
         edited_primary_image_url,
+        edited_structured_fields,
         catalog_action,
         raw_row_json,
         version
@@ -1023,6 +1025,12 @@ async function listPendingPurchaseApplyRows(applyRequest: PendingPurchaseApplyRe
 
 function loadPendingPurchaseRow(row: PendingPurchaseApplyWorkRow): LoadedPendingPurchaseRow {
   const rawRow = readRecord(row.raw_row_json)
+  const overrides = readEditedStructuredFields(row.edited_structured_fields)
+  // `effectiveStructuredFields` mirrors how
+  // `effective_proposed_price` / `effective_proposed_description` /
+  // `effective_primary_image_url` work above: take the override when
+  // present (even an explicit null clears the field), otherwise fall
+  // back to the parser/LLM value carried on the row. Issue #35.
   return {
     actionType: row.action_type,
     catalogAction: row.catalog_action,
@@ -1032,8 +1040,8 @@ function loadPendingPurchaseRow(row: PendingPurchaseApplyWorkRow): LoadedPending
     effectiveProposedDescription: row.edited_proposed_description ?? row.proposed_description,
     effectiveProposedPrice: row.edited_proposed_price ?? row.proposed_price,
     effectiveUnitCost: readOptionalNumber(rawRow.effectiveUnitCost),
-    expectedCategory: row.expected_category,
-    expectedSubcategory: row.expected_subcategory,
+    expectedCategory: pickEffectiveString(overrides, 'expectedCategory', row.expected_category),
+    expectedSubcategory: pickEffectiveString(overrides, 'expectedSubcategory', row.expected_subcategory),
     orderIds: row.order_ids_json,
     packetId: row.packet_id,
     positionIds: row.position_ids_json,
@@ -1042,15 +1050,79 @@ function loadPendingPurchaseRow(row: PendingPurchaseApplyWorkRow): LoadedPending
     rowId: row.id,
     siteDealerId: row.site_dealer_id,
     siteDealerName: row.site_dealer_name,
-    targetBrand: row.target_brand,
-    targetGroupName: row.target_group_name,
-    targetPackCount: readOptionalInt(rawRow.targetPackCount),
+    targetBrand: pickEffectiveString(overrides, 'targetBrand', row.target_brand),
+    targetGroupName: pickEffectiveString(overrides, 'targetGroupName', row.target_group_name),
+    targetPackCount: pickEffectiveInt(overrides, 'targetPackCount', readOptionalInt(rawRow.targetPackCount)),
     targetPrevalence: readOptionalString(rawRow.targetPrevalence),
-    targetSize: readOptionalString(rawRow.targetSize),
-    targetStrain: readOptionalString(rawRow.targetStrain),
-    targetVariantName: row.target_variant_name,
-    targetVariantTab: readOptionalString(rawRow.targetVariantTab),
+    targetSize: pickEffectiveString(overrides, 'targetSize', readOptionalString(rawRow.targetSize)),
+    // The DB / JSONB override key is `targetStrainName` (matches the
+    // canonical UI label); the in-memory field stays `targetStrain` to
+    // avoid churning every consumer site of `LoadedPendingPurchaseRow`.
+    targetStrain: pickEffectiveString(overrides, 'targetStrainName', readOptionalString(rawRow.targetStrain)),
+    targetVariantName: pickEffectiveString(overrides, 'targetVariantName', row.target_variant_name),
+    targetVariantTab: pickEffectiveString(overrides, 'targetVariantTab', readOptionalString(rawRow.targetVariantTab)),
   }
+}
+
+/**
+ * Reviewer-supplied overrides for the structured taxonomy fields,
+ * persisted as the JSONB `pending_purchase_rows.edited_structured_fields`
+ * column. Shape mirrors `EditedStructuredFields` in
+ * `shared/contracts/api/pendingPurchases.ts`; we decode loosely here
+ * rather than re-importing the zod schema so the worker keeps the
+ * "trust DB shape" pattern used for the rest of this row loader.
+ */
+type EditedStructuredFieldOverrides = Partial<{
+  expectedCategory: string | null
+  expectedSubcategory: string | null
+  targetBrand: string | null
+  targetGroupName: string | null
+  targetPackCount: number | null
+  targetSize: string | null
+  targetStrainName: string | null
+  targetVariantName: string | null
+  targetVariantTab: string | null
+}>
+
+function readEditedStructuredFields(value: JsonValue): EditedStructuredFieldOverrides {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    return {}
+  }
+  return value as EditedStructuredFieldOverrides
+}
+
+/**
+ * Returns the reviewer's override when it's been explicitly set in
+ * the JSONB payload (key present — including `null`, which means
+ * "clear the field"); otherwise returns the parsed/LLM fallback.
+ */
+function pickEffectiveString<K extends keyof EditedStructuredFieldOverrides>(
+  overrides: EditedStructuredFieldOverrides,
+  key: K,
+  fallback: string | null,
+): string | null {
+  if (!Object.prototype.hasOwnProperty.call(overrides, key)) {
+    return fallback
+  }
+  const raw = overrides[key]
+  if (raw === null || raw === undefined) return null
+  if (typeof raw !== 'string') return fallback
+  const trimmed = raw.trim()
+  return trimmed.length > 0 ? trimmed : null
+}
+
+function pickEffectiveInt<K extends keyof EditedStructuredFieldOverrides>(
+  overrides: EditedStructuredFieldOverrides,
+  key: K,
+  fallback: number | null,
+): number | null {
+  if (!Object.prototype.hasOwnProperty.call(overrides, key)) {
+    return fallback
+  }
+  const raw = overrides[key]
+  if (raw === null || raw === undefined) return null
+  if (typeof raw !== 'number' || !Number.isFinite(raw) || !Number.isInteger(raw) || raw <= 0) return fallback
+  return raw
 }
 
 async function lockPendingPurchaseApplyRequest(
