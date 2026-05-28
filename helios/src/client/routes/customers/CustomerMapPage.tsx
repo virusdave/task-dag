@@ -658,11 +658,35 @@ export function CustomerMapPage(): JSX.Element {
   // -----------------------------------------------------------------
   // Other filter controls
   // -----------------------------------------------------------------
-  function handleSiteChange(siteSlugs: string): void {
+
+  // Generic "set or clear" URL-param mutator for the simple
+  // single-value selects (site, visit type, age, home state, link
+  // status, coord source). Empty string clears the param so the
+  // server falls back to "no filter on this dimension".
+  function setParam(key: string, value: string): void {
     const next = new URLSearchParams(searchParams)
-    if (siteSlugs === '') next.delete('siteSlugs')
-    else next.set('siteSlugs', siteSlugs)
+    if (value === '') next.delete(key)
+    else next.set(key, value)
     setSearchParams(next, { replace: true })
+  }
+  function handleSiteChange(siteSlugs: string): void {
+    setParam('siteSlugs', siteSlugs)
+  }
+
+  // ZIP prefix has the same draft/commit pattern as Max Points —
+  // we don't churn the URL on every keystroke, and we only push a
+  // value that passes the server's `^[0-9]*$` schema (so a partial
+  // "1" doesn't cause a 400 on the way to "104").
+  const [postalPrefixDraft, setPostalPrefixDraft] = useState<string>(
+    () => searchParams.get('postalPrefix') ?? '',
+  )
+  useEffect(() => {
+    setPostalPrefixDraft(searchParams.get('postalPrefix') ?? '')
+  }, [searchParams])
+  function commitPostalPrefixDraft(): void {
+    const cleaned = postalPrefixDraft.replace(/\D+/g, '').slice(0, 10)
+    setPostalPrefixDraft(cleaned)
+    setParam('postalPrefix', cleaned)
   }
   // Local-state mirror for the max-points input so intermediate typing
   // ("", "2", "25", "250", "2500") doesn't churn the URL — and so we
@@ -730,7 +754,10 @@ export function CustomerMapPage(): JSX.Element {
         </div>
       </header>
 
-      {/* Always-visible primary controls: site, date slider, presets. */}
+      {/* Always-visible primary controls: site, dimensional
+          filters, date slider, presets. Wrap freely on narrow
+          viewports — every label/select is the same height so the
+          rows pack neatly when they fold. */}
       <div className="cm-controls">
         <div className="cm-controls-row">
           <label className="cm-field cm-field-inline">
@@ -742,6 +769,79 @@ export function CustomerMapPage(): JSX.Element {
               <option value="">All</option>
               <option value="bx">Bronx (bx)</option>
               <option value="mh">Midtown (mh)</option>
+            </select>
+          </label>
+          <label className="cm-field cm-field-inline">
+            <span>Visit</span>
+            <select
+              value={searchParams.get('visitType') ?? ''}
+              onChange={(e) => setParam('visitType', e.target.value)}
+            >
+              <option value="">All</option>
+              <option value="first">First-time</option>
+              <option value="returning">Returning</option>
+              <option value="unknown">Unknown</option>
+            </select>
+          </label>
+          <label className="cm-field cm-field-inline">
+            <span>Age</span>
+            <select
+              value={searchParams.get('ageBand') ?? ''}
+              onChange={(e) => setParam('ageBand', e.target.value)}
+            >
+              <option value="">All</option>
+              <option value="21-24">21–24</option>
+              <option value="25-34">25–34</option>
+              <option value="35-44">35–44</option>
+              <option value="45-54">45–54</option>
+              <option value="55-plus">55+</option>
+              <option value="unknown">Unknown</option>
+            </select>
+          </label>
+          <label className="cm-field cm-field-inline">
+            <span>Home state</span>
+            <select
+              value={searchParams.get('homeState') ?? ''}
+              onChange={(e) => setParam('homeState', e.target.value)}
+            >
+              <option value="">All</option>
+              <option value="NY">NY</option>
+              <option value="NJ">NJ</option>
+              <option value="CT">CT</option>
+              <option value="other">Other (non-NY/NJ/CT)</option>
+              <option value="missing">Missing</option>
+            </select>
+          </label>
+          <label className="cm-field cm-field-inline">
+            <span>ZIP prefix</span>
+            <input
+              type="text"
+              inputMode="numeric"
+              pattern="[0-9]*"
+              maxLength={10}
+              size={6}
+              placeholder="e.g. 104"
+              value={postalPrefixDraft}
+              onChange={(e) => setPostalPrefixDraft(e.target.value)}
+              onBlur={commitPostalPrefixDraft}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault()
+                  commitPostalPrefixDraft()
+                }
+              }}
+            />
+          </label>
+          <label className="cm-field cm-field-inline">
+            <span>Coord</span>
+            <select
+              value={searchParams.get('coordSource') ?? ''}
+              onChange={(e) => setParam('coordSource', e.target.value)}
+              title="Dot location: home address (document) vs kiosk fallback (scan)"
+            >
+              <option value="">All</option>
+              <option value="document">Home address</option>
+              <option value="scan">Kiosk fallback</option>
             </select>
           </label>
           <label className="cm-field cm-field-inline">
@@ -771,6 +871,26 @@ export function CustomerMapPage(): JSX.Element {
             Reset to last shift
           </button>
         </div>
+
+        <details className="cm-more-filters">
+          <summary>More filters</summary>
+          <div className="cm-controls-row">
+            <label className="cm-field cm-field-inline">
+              <span>CRM link</span>
+              <select
+                value={searchParams.get('linkStatus') ?? ''}
+                onChange={(e) => setParam('linkStatus', e.target.value)}
+                title="Filter by Sweed CRM link state for the scan"
+              >
+                <option value="">All</option>
+                <option value="linked">Linked</option>
+                <option value="ambiguous">Ambiguous (needs review)</option>
+                <option value="no_match,rejected,insufficient_data">No match</option>
+                <option value="pending,failed">Pending / retrying</option>
+              </select>
+            </label>
+          </div>
+        </details>
 
         <div className="cm-range">
           <div className="cm-range-labels">

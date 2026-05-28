@@ -11,16 +11,37 @@
 
 import type { Queryable } from '../pool.js'
 import type {
+  AgeBand,
+  CoordSourceFilter,
   CustomersMapPoint,
   CustomersMapResponse,
   CustomersMapSitePin,
+  HomeStateBucket,
+  LinkStatus,
+  VisitType,
 } from '../../../shared/contracts/index.js'
 
 export interface ListCustomersMapPointsFilter {
   siteSlugs: readonly string[] | null
   checkedInAfter: string | null
   checkedInBefore: string | null
+  visitType: VisitType | null
+  ageBand: AgeBand | null
+  homeState: HomeStateBucket | null
+  postalPrefix: string | null
+  linkStatus: readonly LinkStatus[] | null
+  coordSource: CoordSourceFilter | null
   maxPoints: number
+}
+
+// Age-band bounds in years, inclusive low / exclusive high.
+// `unknown` is handled separately as `birth_date IS NULL`.
+const AGE_BAND_BOUNDS: Readonly<Record<Exclude<AgeBand, 'unknown'>, [number, number]>> = {
+  '21-24': [21, 25],
+  '25-34': [25, 35],
+  '35-44': [35, 45],
+  '45-54': [45, 55],
+  '55-plus': [55, 200],
 }
 
 // Static site-pin coordinates for our two retail locations. Kept
@@ -76,15 +97,25 @@ export async function listCustomersMapPoints(
   }
 
   // Hard floor — we only render points that have *some* usable
-  // coordinate. We prefer the customer's document-address coords
-  // (where they live), but fall back to the kiosk scan coords
-  // (where they scanned) so a thin stream of doc-coord-less rows
-  // still produces visible dots. `coord_source` flags which path
-  // each row used.
-  conditions.push(
-    '((vs.latitude is not null and vs.longitude is not null)' +
-      ' or (vs.scan_latitude is not null and vs.scan_longitude is not null))',
-  )
+  // coordinate. The `coordSource` filter narrows this further:
+  // `document` requires latitude/longitude, `scan` requires
+  // scan_latitude/scan_longitude, `all`/absent keeps the union.
+  if (filter.coordSource === 'document') {
+    conditions.push('(vs.latitude is not null and vs.longitude is not null)')
+  } else if (filter.coordSource === 'scan') {
+    // We want dots plotted from the kiosk fallback only — so the
+    // document coords must be missing (otherwise coord_source resolves
+    // to 'document') AND the scan coords must be present.
+    conditions.push(
+      '((vs.latitude is null or vs.longitude is null)' +
+        ' and (vs.scan_latitude is not null and vs.scan_longitude is not null))',
+    )
+  } else {
+    conditions.push(
+      '((vs.latitude is not null and vs.longitude is not null)' +
+        ' or (vs.scan_latitude is not null and vs.scan_longitude is not null))',
+    )
+  }
 
   if (filter.siteSlugs !== null && filter.siteSlugs.length > 0) {
     add((p) => `vs.site_slug = any(${p})`, filter.siteSlugs)
@@ -101,6 +132,94 @@ export async function listCustomersMapPoints(
       filter.checkedInBefore,
     )
   }
+
+  // Home-state bucket.
+  //   NY/NJ/CT → exact match on upper(trim(state))
+  //   other    → non-null state not in (NY, NJ, CT)
+  //   missing  → state is null OR blank
+  if (filter.homeState === 'NY' || filter.homeState === 'NJ' || filter.homeState === 'CT') {
+    add(
+      (p) => `upper(nullif(trim(vs.state), '')) = ${p}`,
+      filter.homeState,
+    )
+  } else if (filter.homeState === 'other') {
+    conditions.push(
+      "upper(nullif(trim(vs.state), '')) is not null" +
+        " and upper(nullif(trim(vs.state), '')) not in ('NY', 'NJ', 'CT')",
+    )
+  } else if (filter.homeState === 'missing') {
+    conditions.push("nullif(trim(coalesce(vs.state, '')), '') is null")
+  }
+
+  // ZIP prefix — match against postal_code as a string prefix. We
+  // strip whitespace but otherwise pass digits straight through.
+  if (filter.postalPrefix !== null && filter.postalPrefix.length > 0) {
+    add(
+      (p) => `vs.postal_code like ${p} || '%'`,
+      filter.postalPrefix,
+    )
+  }
+
+  // Age band. `unknown` matches birth_date is null; the numeric
+  // bands compare against the age at scan time so a customer's
+  // bucket reflects how old they were when they walked in, not
+  // their age today. Out-of-bucket years (e.g. <21, which should
+  // never appear here in practice) fall out.
+  if (filter.ageBand === 'unknown') {
+    conditions.push('vs.birth_date is null')
+  } else if (filter.ageBand !== null) {
+    const [lo, hi] = AGE_BAND_BOUNDS[filter.ageBand]
+    params.push(lo)
+    const loP = `$${params.length}`
+    params.push(hi)
+    const hiP = `$${params.length}`
+    conditions.push(
+      `vs.birth_date is not null` +
+        ` and extract(year from age(coalesce(vs.scanned_at, vs.ingested_at), vs.birth_date)) >= ${loP}` +
+        ` and extract(year from age(coalesce(vs.scanned_at, vs.ingested_at), vs.birth_date)) < ${hiP}`,
+    )
+  }
+
+  // Visit type — first/returning is computed against the FULL
+  // person_key history on visitor_scans (not just the date window),
+  // so a returning visitor whose first appearance is 18 months ago
+  // still counts as "returning" inside a 1-day slider window.
+  // `unknown` covers rows with no person_key.
+  if (filter.visitType === 'unknown') {
+    conditions.push('vs.person_key is null')
+  } else if (filter.visitType === 'first') {
+    conditions.push(
+      'vs.person_key is not null and not exists (' +
+        'select 1 from visitor_scans prior' +
+        ' where prior.provider = vs.provider' +
+        ' and prior.person_key = vs.person_key' +
+        ' and (coalesce(prior.scanned_at, prior.ingested_at), prior.id)' +
+        ' < (coalesce(vs.scanned_at, vs.ingested_at), vs.id)' +
+        ')',
+    )
+  } else if (filter.visitType === 'returning') {
+    conditions.push(
+      'vs.person_key is not null and exists (' +
+        'select 1 from visitor_scans prior' +
+        ' where prior.provider = vs.provider' +
+        ' and prior.person_key = vs.person_key' +
+        ' and (coalesce(prior.scanned_at, prior.ingested_at), prior.id)' +
+        ' < (coalesce(vs.scanned_at, vs.ingested_at), vs.id)' +
+        ')',
+    )
+  }
+
+  // CRM-link status filter is the only one that requires a JOIN.
+  // We left-join unconditionally only when this filter is set so
+  // the base query doesn't pay for the join on every load.
+  const needsLinkJoin =
+    filter.linkStatus !== null && filter.linkStatus.length > 0
+  if (needsLinkJoin) {
+    add((p) => `vsl.link_status = any(${p})`, filter.linkStatus)
+  }
+  const joinSql = needsLinkJoin
+    ? 'left join visitor_scan_links vsl on vsl.scan_id = vs.id'
+    : ''
 
   const whereSql = `where ${conditions.join(' and ')}`
 
@@ -130,6 +249,7 @@ export async function listCustomersMapPoints(
       vs.state,
       vs.postal_code
     from visitor_scans vs
+    ${joinSql}
     ${whereSql}
     order by coalesce(vs.scanned_at, vs.ingested_at) desc, vs.id desc
     limit ${limitPlaceholder}
@@ -170,7 +290,7 @@ export async function listCustomersMapPoints(
     // one we pushed). pg ignores extras only when placeholders match,
     // so re-build the params array without it.
     const countParams = params.slice(0, params.length - 1)
-    const countSql = `select count(*)::bigint as n from visitor_scans vs ${whereSql}`
+    const countSql = `select count(*)::bigint as n from visitor_scans vs ${joinSql} ${whereSql}`
     const countResult = await db.query<{ n: string | number }>(countSql, countParams)
     const n = countResult.rows[0]?.n
     totalMatching = typeof n === 'number' ? n : Number(n ?? 0)

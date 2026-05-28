@@ -23,6 +23,12 @@ export async function registerCustomersMapRoutes(server: FastifyInstance): Promi
         siteSlugs: query.siteSlugs ?? null,
         checkedInAfter: query.checkedInAfter ?? null,
         checkedInBefore: query.checkedInBefore ?? null,
+        visitType: query.visitType ?? null,
+        ageBand: query.ageBand ?? null,
+        homeState: query.homeState ?? null,
+        postalPrefix: query.postalPrefix ?? null,
+        linkStatus: query.linkStatus ?? null,
+        coordSource: query.coordSource ?? null,
         maxPoints: query.maxPoints,
       })
       return reply.send(CustomersMapResponseSchema.parse(result))

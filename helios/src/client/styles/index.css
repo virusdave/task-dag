@@ -5787,6 +5787,26 @@ span.metric-chart-legend-item {
   min-height: 38px;
 }
 
+/* Collapsed "More filters" disclosure — keeps low-priority
+   controls (CRM link status today) out of the reviewer's way by
+   default but available with one click. */
+.customer-map-page .cm-more-filters {
+  border-top: 1px dashed var(--panel-border);
+  padding-top: 0.4rem;
+}
+
+.customer-map-page .cm-more-filters > summary {
+  cursor: pointer;
+  font-size: 0.82rem;
+  color: var(--muted, #6b5b48);
+  user-select: none;
+  list-style: revert;
+}
+
+.customer-map-page .cm-more-filters[open] > summary {
+  margin-bottom: 0.5rem;
+}
+
 /* Dual-handle range slider — two native <input type=range> stacked
    so each thumb is reachable; track + fill are rendered below them
    via z-index. Keyboard accessible by default. */
