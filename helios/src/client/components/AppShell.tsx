@@ -149,22 +149,37 @@ function buildPrimarySidebarNodes(
       children: TASKS_SIDEBAR_SUBTREE,
     },
     moduleBranch('config'),
+    // Customers branch — collapsed by default. TreeNav auto-expands
+    // the ancestor chain to whatever leaf the operator is on, so
+    // visiting /admin/visitors/scans opens this branch automatically
+    // without leaving every other branch flapping open.
+    //
+    // Houses the existing CRM & Segments leaf plus the new
+    // /admin/visitors/scans page from FreshlyBakedNYC/automation#31.
+    // The Customers UX child epic (#33, phases C1..C5) will add Check-ins,
+    // Origin Map, and Replay leaves here once they ship; until then the
+    // single anchor is Visitor Scans (the ingest table) and the existing
+    // CRM & Segments URL.
     {
-      kind: 'leaf',
-      navKey: 'module.crm',
-      label: 'CRM & Segments',
-      to: buildHeliosModulePath('crm'),
-    },
-    // Customer / visitor scan ingest surface
-    // (virusdave/top-level#9 / FreshlyBakedNYC/automation#31 A3). The
-    // Customers UX child epic (#33) plans to fold this under
-    // /admin/customers/check-ins with a URL alias; until then it
-    // lives at /admin/visitors/scans per the parent EPIC_PLAN.md.
-    {
-      kind: 'leaf',
-      navKey: 'admin.visitors.scans',
-      label: 'Visitor Scans',
-      to: '/admin/visitors/scans',
+      kind: 'branch',
+      navKey: 'customers',
+      label: 'Customers',
+      defaultOpen: false,
+      end: false,
+      children: [
+        {
+          kind: 'leaf',
+          navKey: 'admin.visitors.scans',
+          label: 'Visitor Scans',
+          to: '/admin/visitors/scans',
+        },
+        {
+          kind: 'leaf',
+          navKey: 'module.crm',
+          label: 'CRM & Segments',
+          to: buildHeliosModulePath('crm'),
+        },
+      ],
     },
   ]
 }
