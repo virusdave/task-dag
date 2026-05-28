@@ -582,3 +582,291 @@ export async function getLatestPendingPurchaseApplyRequest(
     updatedAt: toIso(row.updated_at),
   }
 }
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Packet list (cross-packet) — powers the reviewer-first archive view at the
+// top of /catalog/pending-purchases. Returns a paginated slice of every
+// produced packet (generated or imported), each enriched with the row-level
+// approval / apply counts that drive the status chips on each packet card.
+// ──────────────────────────────────────────────────────────────────────────────
+
+export interface PendingPurchasePacketListFilters {
+  after: string | null
+  before: string | null
+  search: string | null
+  siteKey: string | null
+  source: PendingPurchasePacketSource | null
+  status: PendingPurchasePacketStatus | null
+}
+
+export interface PendingPurchasePacketListItemRow {
+  applyCounts: {
+    applied: number
+    blocked: number
+    failed: number
+    notRequested: number
+    queued: number
+    running: number
+  }
+  approvalCounts: {
+    approved: number
+    pending: number
+    rejected: number
+  }
+  createdAt: string
+  generatedAt: string
+  importFileName: string | null
+  latestApplyRequest: PendingPurchaseApplyRequestSummary | null
+  packetId: number
+  packetTitle: string
+  rowCount: number
+  siteKeys: string[]
+  siteLabels: string[]
+  source: PendingPurchasePacketSource
+  sourcePath: string | null
+  stateContext: JsonValue
+  status: PendingPurchasePacketStatus
+  summary: JsonValue
+  updatedAt: string
+}
+
+export interface PendingPurchasePacketListPage {
+  items: PendingPurchasePacketListItemRow[]
+  totalCount: number
+}
+
+interface PendingPurchasePacketListDbRow extends QueryResultRow {
+  apply_applied: string
+  apply_blocked: string
+  apply_failed: string
+  apply_not_requested: string
+  apply_queued: string
+  apply_running: string
+  approval_approved: string
+  approval_pending: string
+  approval_rejected: string
+  created_at: Date
+  generated_at: Date
+  id: string
+  import_file_name: string | null
+  latest_apply_applied: number | null
+  latest_apply_blocked: number | null
+  latest_apply_failed: number | null
+  latest_apply_finished_at: Date | null
+  latest_apply_id: string | null
+  latest_apply_job_id: string | null
+  latest_apply_request_created_at: Date | null
+  latest_apply_request_updated_at: Date | null
+  latest_apply_requested_by_user_name: string | null
+  latest_apply_selected: number | null
+  latest_apply_started_at: Date | null
+  latest_apply_status: string | null
+  latest_apply_summary_json: JsonValue
+  packet_title: string
+  row_count: string
+  site_keys_json: JsonValue
+  site_labels_json: JsonValue
+  source: string
+  source_path: string | null
+  state_context_json: JsonValue
+  status: string
+  summary_json: JsonValue
+  total_count: string
+  updated_at: Date
+}
+
+export async function listPendingPurchasePacketListPage(
+  pool: Pool,
+  options: {
+    filters: PendingPurchasePacketListFilters
+    limit: number
+    offset: number
+  },
+): Promise<PendingPurchasePacketListPage> {
+  const { filters, limit, offset } = options
+  const siteKeyJson = filters.siteKey ? JSON.stringify([filters.siteKey]) : null
+  const searchPattern = filters.search ? `%${filters.search.replace(/[%_\\]/g, (m) => `\\${m}`)}%` : null
+
+  const result = await pool.query<PendingPurchasePacketListDbRow>(
+    `
+      with filtered as (
+        select p.*
+        from pending_purchase_packets p
+        where ($1::text is null or p.status = $1::text)
+          and ($2::text is null or p.source = $2::text)
+          and ($3::text is null or p.site_keys_json @> $3::jsonb)
+          and ($4::text is null or p.packet_title ilike $4::text)
+          and ($5::text is null or p.generated_at >= $5::date)
+          and ($6::text is null or p.generated_at < ($6::date + interval '1 day'))
+      ),
+      counted as (
+        select f.*,
+               (select count(*) from filtered) as total_count
+        from filtered f
+        order by f.generated_at desc, f.id desc
+        limit $7
+        offset $8
+      )
+      select
+        c.id,
+        c.packet_title,
+        c.source,
+        c.source_path,
+        c.import_file_name,
+        c.status,
+        c.state_context_json,
+        c.summary_json,
+        c.site_keys_json,
+        c.site_labels_json,
+        c.generated_at,
+        c.created_at,
+        c.updated_at,
+        c.total_count,
+        coalesce(rc.row_count, 0)::text as row_count,
+        coalesce(rc.approval_approved, 0)::text as approval_approved,
+        coalesce(rc.approval_pending, 0)::text as approval_pending,
+        coalesce(rc.approval_rejected, 0)::text as approval_rejected,
+        coalesce(rc.apply_applied, 0)::text as apply_applied,
+        coalesce(rc.apply_blocked, 0)::text as apply_blocked,
+        coalesce(rc.apply_failed, 0)::text as apply_failed,
+        coalesce(rc.apply_not_requested, 0)::text as apply_not_requested,
+        coalesce(rc.apply_queued, 0)::text as apply_queued,
+        coalesce(rc.apply_running, 0)::text as apply_running,
+        la.id as latest_apply_id,
+        la.status as latest_apply_status,
+        la.job_id as latest_apply_job_id,
+        la.created_at as latest_apply_request_created_at,
+        la.updated_at as latest_apply_request_updated_at,
+        la.started_at as latest_apply_started_at,
+        la.finished_at as latest_apply_finished_at,
+        la.requested_by_user_name as latest_apply_requested_by_user_name,
+        la.selected_row_count as latest_apply_selected,
+        la.applied_row_count as latest_apply_applied,
+        la.failed_row_count as latest_apply_failed,
+        la.blocked_row_count as latest_apply_blocked,
+        la.summary_json as latest_apply_summary_json
+      from counted c
+      left join lateral (
+        select
+          count(*) as row_count,
+          count(*) filter (where r.approval_status = 'approved') as approval_approved,
+          count(*) filter (where r.approval_status = 'pending') as approval_pending,
+          count(*) filter (where r.approval_status = 'rejected') as approval_rejected,
+          count(*) filter (where r.last_apply_status = 'applied') as apply_applied,
+          count(*) filter (where r.last_apply_status = 'blocked') as apply_blocked,
+          count(*) filter (where r.last_apply_status = 'failed') as apply_failed,
+          count(*) filter (where r.last_apply_status = 'not_requested') as apply_not_requested,
+          count(*) filter (where r.last_apply_status = 'queued') as apply_queued,
+          count(*) filter (where r.last_apply_status = 'running') as apply_running
+        from pending_purchase_rows r
+        where r.packet_id = c.id
+      ) rc on true
+      left join lateral (
+        select a.id, a.status, a.job_id, a.created_at, a.updated_at, a.started_at, a.finished_at,
+               a.selected_row_count, a.applied_row_count, a.failed_row_count, a.blocked_row_count,
+               a.summary_json, u.name as requested_by_user_name
+        from pending_purchase_apply_requests a
+        left join users u on u.id = a.requested_by_user_id
+        where a.packet_id = c.id
+        order by a.created_at desc, a.id desc
+        limit 1
+      ) la on true
+      order by c.generated_at desc, c.id desc
+    `,
+    [
+      filters.status,
+      filters.source,
+      siteKeyJson,
+      searchPattern,
+      filters.after,
+      filters.before,
+      limit,
+      offset,
+    ],
+  )
+
+  const totalCount = result.rows[0] ? Number.parseInt(result.rows[0].total_count, 10) : 0
+  const items = result.rows.map((row) => mapPendingPurchasePacketListItem(row))
+  return { items, totalCount }
+}
+
+export async function countPendingPurchasePacketsMatching(
+  pool: Pool,
+  filters: PendingPurchasePacketListFilters,
+): Promise<number> {
+  const siteKeyJson = filters.siteKey ? JSON.stringify([filters.siteKey]) : null
+  const searchPattern = filters.search ? `%${filters.search.replace(/[%_\\]/g, (m) => `\\${m}`)}%` : null
+  const result = await pool.query<{ total: string }>(
+    `
+      select count(*)::text as total
+      from pending_purchase_packets p
+      where ($1::text is null or p.status = $1::text)
+        and ($2::text is null or p.source = $2::text)
+        and ($3::text is null or p.site_keys_json @> $3::jsonb)
+        and ($4::text is null or p.packet_title ilike $4::text)
+        and ($5::text is null or p.generated_at >= $5::date)
+        and ($6::text is null or p.generated_at < ($6::date + interval '1 day'))
+    `,
+    [filters.status, filters.source, siteKeyJson, searchPattern, filters.after, filters.before],
+  )
+  return Number.parseInt(result.rows[0]?.total ?? '0', 10)
+}
+
+function mapPendingPurchasePacketListItem(row: PendingPurchasePacketListDbRow): PendingPurchasePacketListItemRow {
+  const latestApplyRequest: PendingPurchaseApplyRequestSummary | null = row.latest_apply_id
+    ? {
+        appliedRowCount: Number(row.latest_apply_applied ?? 0),
+        blockedRowCount: Number(row.latest_apply_blocked ?? 0),
+        failedRowCount: Number(row.latest_apply_failed ?? 0),
+        finishedAt: toIsoOrNull(row.latest_apply_finished_at),
+        jobId: readOptionalIntFromString(row.latest_apply_job_id),
+        packetId: readIntFromString(row.id),
+        requestId: readIntFromString(row.latest_apply_id),
+        requestedAt: row.latest_apply_request_created_at ? toIso(row.latest_apply_request_created_at) : toIso(row.created_at),
+        requestedByUser: row.latest_apply_requested_by_user_name,
+        selectedRowCount: Number(row.latest_apply_selected ?? 0),
+        startedAt: toIsoOrNull(row.latest_apply_started_at),
+        status: (row.latest_apply_status ?? 'queued') as PendingPurchaseApplyRequestStatus,
+        summary: row.latest_apply_summary_json ?? {},
+        summaryText:
+          typeof row.latest_apply_summary_json === 'object'
+          && row.latest_apply_summary_json !== null
+          && !Array.isArray(row.latest_apply_summary_json)
+          && typeof (row.latest_apply_summary_json as Record<string, unknown>).summaryText === 'string'
+            ? ((row.latest_apply_summary_json as Record<string, unknown>).summaryText as string)
+            : null,
+        updatedAt: row.latest_apply_request_updated_at ? toIso(row.latest_apply_request_updated_at) : toIso(row.updated_at),
+      }
+    : null
+
+  return {
+    applyCounts: {
+      applied: Number.parseInt(row.apply_applied, 10),
+      blocked: Number.parseInt(row.apply_blocked, 10),
+      failed: Number.parseInt(row.apply_failed, 10),
+      notRequested: Number.parseInt(row.apply_not_requested, 10),
+      queued: Number.parseInt(row.apply_queued, 10),
+      running: Number.parseInt(row.apply_running, 10),
+    },
+    approvalCounts: {
+      approved: Number.parseInt(row.approval_approved, 10),
+      pending: Number.parseInt(row.approval_pending, 10),
+      rejected: Number.parseInt(row.approval_rejected, 10),
+    },
+    createdAt: toIso(row.created_at),
+    generatedAt: toIso(row.generated_at),
+    importFileName: row.import_file_name,
+    latestApplyRequest,
+    packetId: readIntFromString(row.id),
+    packetTitle: row.packet_title,
+    rowCount: Number.parseInt(row.row_count, 10),
+    siteKeys: readStringArray(row.site_keys_json),
+    siteLabels: readStringArray(row.site_labels_json),
+    source: row.source as PendingPurchasePacketSource,
+    sourcePath: row.source_path,
+    stateContext: row.state_context_json,
+    status: row.status as PendingPurchasePacketStatus,
+    summary: row.summary_json,
+    updatedAt: toIso(row.updated_at),
+  }
+}

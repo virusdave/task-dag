@@ -14,6 +14,7 @@ import {
   type JobStatusResponse,
   type PendingPurchaseListResponse,
   type PendingPurchaseMarketListing,
+  type PendingPurchasePacketListItem,
   type PendingPurchaseRow,
   type SessionEnvelope,
 } from '../../../shared/contracts/index.js'
@@ -29,7 +30,6 @@ export async function pendingPurchasesLoader({ request }: { request: Request }) 
   const url = new URL(request.url)
   return loadJson(`/api/catalog/pending-purchases${url.search}`, PendingPurchaseListResponseSchema)
 }
-
 export function PendingPurchasesPage() {
   const data = useLoaderData() as PendingPurchaseListResponse
   const session = useRouteLoaderData('root') as SessionEnvelope
@@ -51,47 +51,18 @@ export function PendingPurchasesPage() {
   const [selectedRowIds, setSelectedRowIds] = useState<number[]>([])
 
   const canApprove = session.permissions.canApprove
+  const isAdmin = session.user?.role === 'admin'
+  const mode = data.mode
+  const filters = data.filters
 
-  const actionOptions = useMemo(() => {
-    const options = new Set<string>()
-    for (const item of data.items) {
-      options.add(item.actionType)
-    }
-    if (data.filters.actionType) {
-      options.add(data.filters.actionType)
-    }
-    return [...options].sort()
-  }, [data.filters.actionType, data.items])
+  // Keep the sidebar-subtree registration but as a leaf only; the deep
+  // packet/site/category/brand hierarchy that used to live in the catalog
+  // sidebar has been removed in the redesign — the reviewer scrolls and
+  // filters in-page now instead of jumping via a sidebar tree.
+  useRegisterCatalogSidebarSubtree(undefined)
 
-  const approvedVisibleRows = useMemo(
-    () => data.items.filter((item) => item.approvalStatus === 'approved' && item.lastApplyStatus !== 'applied'),
-    [data.items],
-  )
-
-  const selectedApprovedRowIds = useMemo(
-    () => selectedRowIds.filter((rowId) => approvedVisibleRows.some((item) => item.rowId === rowId)),
-    [approvedVisibleRows, selectedRowIds],
-  )
-  const hierarchy = useMemo(() => buildPendingPurchaseHierarchy(data.items), [data.items])
-  const sidebarPacketHierarchy = useMemo(
-    () => buildPendingPurchaseSidebarNodes(hierarchy),
-    [hierarchy],
-  )
-  // Memoize the options object passed to the catalog-sidebar hook —
-  // without this, every render produces a fresh `{ pendingPurchases: {
-  // packetHierarchy } }` literal whose reference change cascades into
-  // the hook's internal `useMemo([... pendingPurchases])` and then the
-  // `useEffect([... nodes])` inside `useRegisterSidebarSubtree`, which
-  // calls `setSubtree` on every render → SidebarNavProvider state
-  // update → AppShell re-render → PendingPurchasesPage re-render →
-  // loop, causing React to bail with "Maximum update depth exceeded"
-  // and leaving the reviewer staring at an empty page.
-  const catalogSidebarOptions = useMemo(
-    () => ({ pendingPurchases: { packetHierarchy: sidebarPacketHierarchy } }),
-    [sidebarPacketHierarchy],
-  )
-  useRegisterCatalogSidebarSubtree(catalogSidebarOptions)
-
+  // Selection housekeeping: drop any selected row that's no longer visible
+  // in the current row page (filter change, packet switch, pagination).
   useEffect(() => {
     const visibleRowIds = new Set(data.items.map((item) => item.rowId))
     setSelectedRowIds((current) => current.filter((rowId) => visibleRowIds.has(rowId)))
@@ -157,6 +128,31 @@ export function PendingPurchasesPage() {
       }
     }
   }, [generationJobStatus, revalidator])
+
+  const approvedVisibleRows = useMemo(
+    () => data.items.filter((item) => item.approvalStatus === 'approved' && item.lastApplyStatus !== 'applied'),
+    [data.items],
+  )
+
+  const selectedApprovedRowIds = useMemo(
+    () => selectedRowIds.filter((rowId) => approvedVisibleRows.some((item) => item.rowId === rowId)),
+    [approvedVisibleRows, selectedRowIds],
+  )
+
+  // Flat grouping for rows mode: a single header row per site, then the
+  // PendingPurchaseRowCard list. Replaces the prior 4-level
+  // Site → Category → Subcategory → Brand `<details>` tree which was
+  // hostile on phones and had no purpose beyond visual grouping.
+  const rowsBySite = useMemo(() => {
+    const groups = new Map<string, { siteLabel: string; rows: PendingPurchaseRow[] }>()
+    for (const item of data.items) {
+      const key = item.siteLabel
+      const existing = groups.get(key) ?? { siteLabel: key, rows: [] }
+      existing.rows.push(item)
+      groups.set(key, existing)
+    }
+    return [...groups.values()].sort((a, b) => a.siteLabel.localeCompare(b.siteLabel))
+  }, [data.items])
 
   async function handleImport() {
     setIsImporting(true)
@@ -314,269 +310,584 @@ export function PendingPurchasesPage() {
     ))
   }
 
-  return (
-    <section>
-      <div className="page-header">
-        <div>
-          <p className="eyebrow">Pending Purchases</p>
-          <h2>Purchase-driven catalog work queued for review</h2>
-          <p className="subtle-copy">
-            Helios stores operator edits here first so the later apply path can stay asynchronous, audited, and worker-driven. This page is the service-backed replacement for the older packet review HTMLs.
-          </p>
-        </div>
-        <Form className="filter-row" method="get">
-          <select defaultValue={data.filters.packetId ?? ''} name="packetId">
-            <option value="">Latest active packet</option>
-            {data.packets.map((packet) => (
-              <option key={packet.packetId} value={packet.packetId}>{packet.packetTitle}</option>
-            ))}
-          </select>
-          <select defaultValue={data.filters.siteKey ?? ''} name="siteKey">
-            <option value="">All sites</option>
-            {(data.activePacket?.siteKeys ?? []).map((siteKey, index) => (
-              <option key={siteKey} value={siteKey}>{data.activePacket?.siteLabels[index] ?? siteKey}</option>
-            ))}
-          </select>
-          <select defaultValue={data.filters.actionType ?? ''} name="actionType">
-            <option value="">All actions</option>
-            {actionOptions.map((actionType) => (
-              <option key={actionType} value={actionType}>{actionType}</option>
-            ))}
-          </select>
-          <input defaultValue={data.filters.search ?? ''} name="search" placeholder="Search distributor, brand, or target variant" />
-          <button className="ghost-button" type="submit">Filter</button>
-        </Form>
-      </div>
-      {errorMessage ? <p className="error-text">{errorMessage}</p> : null}
-      {applySuccessMessage ? <p>{applySuccessMessage}</p> : null}
-      {generateSuccessMessage ? <p>{generateSuccessMessage}</p> : null}
-      {importSuccessMessage ? <p>{importSuccessMessage}</p> : null}
-      {generationJobStatus ? <PendingPurchaseGenerationStatusPanel jobStatus={generationJobStatus} /> : null}
-      {data.activePacket ? (
-        <article className="mini-card" style={{ marginBottom: '1rem' }}>
-          <header>
-            <strong>{data.activePacket.packetTitle}</strong>
-            <div className="inline-row wrap-row">
-              <Pill tone={data.activePacket.source === 'generated' ? 'success' : 'warning'}>{data.activePacket.source}</Pill>
-              <Pill tone={data.activePacket.status === 'ready' ? 'success' : 'muted'}>{data.activePacket.status}</Pill>
-              <Pill tone="muted">{`${data.activePacket.rowCount} rows`}</Pill>
-            </div>
-          </header>
-          <p className="subtle-copy">
-            Generated {new Date(data.activePacket.generatedAt).toLocaleString()}
-            {data.activePacket.importFileName ? ` · ${data.activePacket.importFileName}` : ''}
-          </p>
-          {data.activePacket.sourcePath ? <p className="subtle-copy">{data.activePacket.sourcePath}</p> : null}
-          <div className="inline-row wrap-row module-card-links">
-            <Link to={`/catalog/history?sectionLimit=8`}>Open catalog history</Link>
-          </div>
-        </article>
-      ) : (
-        <p className="empty-state">Import a pending-purchase packet to start reviewing purchase-driven catalog candidates in Helios.</p>
-      )}
-      {data.latestApplyRequest ? (
-        <article className="mini-card" style={{ marginBottom: '1rem' }}>
-          <header>
-            <strong>{`Latest apply request #${data.latestApplyRequest.requestId}`}</strong>
-            <div className="inline-row wrap-row">
-              <Pill tone={applyRequestTone(data.latestApplyRequest.status)}>{data.latestApplyRequest.status.replaceAll('_', ' ')}</Pill>
-              <Pill tone="muted">{`${data.latestApplyRequest.appliedRowCount}/${data.latestApplyRequest.selectedRowCount} applied`}</Pill>
-            </div>
-          </header>
-          <p className="subtle-copy">
-            Requested {new Date(data.latestApplyRequest.requestedAt).toLocaleString()}
-            {data.latestApplyRequest.finishedAt ? ` · Finished ${new Date(data.latestApplyRequest.finishedAt).toLocaleString()}` : ''}
-            {data.latestApplyRequest.requestedByUser ? ` · ${data.latestApplyRequest.requestedByUser}` : ''}
-          </p>
-          <p className="subtle-copy">
-            {data.latestApplyRequest.summaryText ?? 'No structured apply summary has been recorded yet.'}
-          </p>
-          <div className="inline-row wrap-row module-card-links">
-            <Link to={`/catalog/history?sectionLimit=8`}>See apply history</Link>
-          </div>
-        </article>
-      ) : null}
-      {session.user?.role === 'admin' ? (
-        <>
-          <article className="mini-card" style={{ marginBottom: '1rem' }}>
-            <header>
-              <strong>Generate live pending-purchase packet</strong>
-              <Pill tone="warning">admin</Pill>
-            </header>
-            <p className="subtle-copy">
-              Read the current Sweed outstanding PO queue directly and persist a generated Helios review packet. This supersedes the prior ready packet without writing to Sweed synchronously.
-            </p>
-            <div className="filter-row" style={{ alignItems: 'center' }}>
-              <label className="stack-field" style={{ minWidth: '11rem' }}>
-                <span>From</span>
-                <input onChange={(event) => setGenerateFromDate(event.currentTarget.value)} type="date" value={generateFromDate} />
-              </label>
-              <label className="stack-field" style={{ minWidth: '11rem' }}>
-                <span>To</span>
-                <input onChange={(event) => setGenerateToDate(event.currentTarget.value)} type="date" value={generateToDate} />
-              </label>
-              <div className="stack-field">
-                <span>Sites</span>
-                <div className="inline-row wrap-row">
-                  {HELIOS_PENDING_PURCHASE_SITE_DEALERS.map((dealer) => (
-                    <label className="inline-row" key={dealer.dealerId} style={{ gap: '0.35rem' }}>
-                      <input
-                        checked={generateSiteDealerIds.includes(dealer.dealerId)}
-                        onChange={() => toggleGenerateSiteDealer(dealer.dealerId)}
-                        type="checkbox"
-                      />
-                      <span>{dealer.siteLabel}</span>
-                    </label>
-                  ))}
-                </div>
-              </div>
-              <button
-                className="primary-button"
-                disabled={isGenerating || generateSiteDealerIds.length === 0}
-                onClick={() => void handleGenerate()}
-                type="button"
-              >
-                {isGenerating ? 'Generating live packet…' : 'Generate live packet'}
-              </button>
-            </div>
-          </article>
+  const packetsHref = buildPendingPurchasesHref(filters, { mode: 'packets', packetId: null, page: 1 })
+  const rowsHref = data.activePacket
+    ? buildPendingPurchasesHref(filters, { mode: 'rows', packetId: data.activePacket.packetId, page: 1 })
+    : null
 
-          <article className="mini-card" style={{ marginBottom: '1rem' }}>
-            <header>
-              <strong>Import pending-purchase packet</strong>
-              <Pill tone="warning">admin</Pill>
-            </header>
-            <p className="subtle-copy">
-              Keep the legacy JSON import path as a fallback when you need to replay an existing packet or compare against older generated artifacts.
-            </p>
-            <div className="filter-row">
-              <input
-                onChange={(event) => setImportFilePath(event.currentTarget.value)}
-                placeholder="/absolute/path/to/pending_catalog_update_candidates.json"
-                value={importFilePath}
-              />
-              <button
-                className="primary-button"
-                disabled={isImporting || importFilePath.trim().length === 0}
-                onClick={() => void handleImport()}
-                type="button"
-              >
-                {isImporting ? 'Importing packet…' : 'Import packet'}
-              </button>
-            </div>
-          </article>
-        </>
-      ) : null}
-      {canApprove && data.activePacket ? (
-        <article className="mini-card" style={{ marginBottom: '1rem' }}>
-          <header>
-            <strong>Approve and queue apply</strong>
-            <Pill tone="success">approver</Pill>
-          </header>
+  const totalLabel = mode === 'packets'
+    ? `${data.totalCount} packet${data.totalCount === 1 ? '' : 's'}`
+    : `${data.totalCount} row${data.totalCount === 1 ? '' : 's'}`
+
+  return (
+    <section className="pending-purchases-page">
+      {/* Reviewer-first chrome: tight title, the canonical answer (packets
+          archive or rows for a packet) is the only thing prominent at the
+          top. Generation / import / job status / methodology all live in
+          the collapsed "Admin & methodology" block at the bottom. */}
+      <header className="pp-header">
+        <div>
+          <p className="eyebrow">Catalog</p>
+          <h2 className="pp-title">Pending purchases</h2>
+        </div>
+        <div className="pp-header-meta inline-row wrap-row">
+          <span className="subtle-copy">{totalLabel}</span>
+          {generationJobStatus && !isJobTerminal(generationJobStatus.job.status) ? (
+            <Pill tone="warning">
+              {`Generation ${generationJobStatus.job.status.replaceAll('_', ' ')}`}
+            </Pill>
+          ) : null}
+          {isAdmin ? <a className="ghost-button" href="#pp-admin">Admin</a> : null}
+        </div>
+      </header>
+
+      <nav className="pp-mode-tabs" aria-label="Pending purchases view">
+        <Link
+          className={`pp-mode-tab ${mode === 'packets' ? 'pp-mode-tab-active' : ''}`}
+          to={packetsHref}
+        >
+          Packets
+        </Link>
+        {rowsHref ? (
+          <Link
+            className={`pp-mode-tab ${mode === 'rows' ? 'pp-mode-tab-active' : ''}`}
+            to={rowsHref}
+          >
+            Rows
+            {data.activePacket ? <span className="pp-mode-tab-meta">{` · packet #${data.activePacket.packetId}`}</span> : null}
+          </Link>
+        ) : (
+          <span className="pp-mode-tab pp-mode-tab-disabled" title="Open a packet to review rows">Rows</span>
+        )}
+      </nav>
+
+      {applySuccessMessage ? <p className="pp-toast pp-toast-success">{applySuccessMessage}</p> : null}
+      {generateSuccessMessage ? <p className="pp-toast pp-toast-success">{generateSuccessMessage}</p> : null}
+      {importSuccessMessage ? <p className="pp-toast pp-toast-success">{importSuccessMessage}</p> : null}
+      {errorMessage ? <p className="pp-toast pp-toast-error">{errorMessage}</p> : null}
+
+      {mode === 'packets' ? (
+        <PendingPurchasesPacketsView
+          data={data}
+        />
+      ) : (
+        <PendingPurchasesRowsView
+          canApprove={canApprove}
+          canEdit={session.permissions.canEditProposals}
+          data={data}
+          isApplying={isApplying}
+          onClearSelection={() => setSelectedRowIds([])}
+          onQueueApply={() => void handleApplySelectedRows()}
+          onSelectApprovedVisible={() => setSelectedRowIds(approvedVisibleRows.map((item) => item.rowId))}
+          onToggleSelected={toggleSelectedRow}
+          rowsBySite={rowsBySite}
+          approvedVisibleRowCount={approvedVisibleRows.length}
+          selectedApprovedRowIds={selectedApprovedRowIds}
+          selectedRowIds={selectedRowIds}
+        />
+      )}
+
+      <details className="pp-admin-details" id="pp-admin">
+        <summary>Admin &amp; methodology</summary>
+        <div className="pp-admin-body stacked-list">
           <p className="subtle-copy">
-            Approval is the V1 gate to live execution. Select approved rows here to queue the worker-driven catalog-side apply pass without writing to Sweed from the UI.
+            Helios stores operator edits here first so the later apply path stays asynchronous, audited, and worker-driven. This page is the service-backed replacement for the older packet review HTMLs. Generate or import a packet to populate the archive above; queue apply from inside a packet's row review.
           </p>
+
+          {generationJobStatus ? (
+            <PendingPurchaseGenerationStatusPanel jobStatus={generationJobStatus} />
+          ) : null}
+
+          {data.latestApplyRequest ? (
+            <article className="mini-card">
+              <header>
+                <strong>{`Latest apply request #${data.latestApplyRequest.requestId}`}</strong>
+                <div className="inline-row wrap-row">
+                  <Pill tone={applyRequestTone(data.latestApplyRequest.status)}>{data.latestApplyRequest.status.replaceAll('_', ' ')}</Pill>
+                  <Pill tone="muted">{`${data.latestApplyRequest.appliedRowCount}/${data.latestApplyRequest.selectedRowCount} applied`}</Pill>
+                </div>
+              </header>
+              <p className="subtle-copy">
+                Requested {new Date(data.latestApplyRequest.requestedAt).toLocaleString()}
+                {data.latestApplyRequest.finishedAt ? ` · Finished ${new Date(data.latestApplyRequest.finishedAt).toLocaleString()}` : ''}
+                {data.latestApplyRequest.requestedByUser ? ` · ${data.latestApplyRequest.requestedByUser}` : ''}
+              </p>
+              <p className="subtle-copy">
+                {data.latestApplyRequest.summaryText ?? 'No structured apply summary has been recorded yet.'}
+              </p>
+              <div className="inline-row wrap-row module-card-links">
+                <Link to={`/catalog/history?sectionLimit=8`}>See apply history</Link>
+              </div>
+            </article>
+          ) : null}
+
+          {data.activePacket ? (
+            <article className="mini-card">
+              <header>
+                <strong>{data.activePacket.packetTitle}</strong>
+                <div className="inline-row wrap-row">
+                  <Pill tone={data.activePacket.source === 'generated' ? 'success' : 'warning'}>{data.activePacket.source}</Pill>
+                  <Pill tone={data.activePacket.status === 'ready' ? 'success' : 'muted'}>{data.activePacket.status}</Pill>
+                  <Pill tone="muted">{`${data.activePacket.rowCount} rows`}</Pill>
+                </div>
+              </header>
+              <p className="subtle-copy">
+                Generated {new Date(data.activePacket.generatedAt).toLocaleString()}
+                {data.activePacket.importFileName ? ` · ${data.activePacket.importFileName}` : ''}
+              </p>
+              {data.activePacket.sourcePath ? <p className="subtle-copy">{data.activePacket.sourcePath}</p> : null}
+              <div className="inline-row wrap-row module-card-links">
+                <Link to={`/catalog/history?sectionLimit=8`}>Open catalog history</Link>
+              </div>
+            </article>
+          ) : null}
+
+          {isAdmin ? (
+            <article className="mini-card">
+              <header>
+                <strong>Generate live pending-purchase packet</strong>
+                <Pill tone="warning">admin</Pill>
+              </header>
+              <p className="subtle-copy">
+                Read the current Sweed outstanding PO queue directly and persist a generated Helios review packet. This supersedes the prior ready packet without writing to Sweed synchronously.
+              </p>
+              <div className="filter-row" style={{ alignItems: 'center' }}>
+                <label className="stack-field" style={{ minWidth: '11rem' }}>
+                  <span>From</span>
+                  <input onChange={(event) => setGenerateFromDate(event.currentTarget.value)} type="date" value={generateFromDate} />
+                </label>
+                <label className="stack-field" style={{ minWidth: '11rem' }}>
+                  <span>To</span>
+                  <input onChange={(event) => setGenerateToDate(event.currentTarget.value)} type="date" value={generateToDate} />
+                </label>
+                <div className="stack-field">
+                  <span>Sites</span>
+                  <div className="inline-row wrap-row">
+                    {HELIOS_PENDING_PURCHASE_SITE_DEALERS.map((dealer) => (
+                      <label className="inline-row" key={dealer.dealerId} style={{ gap: '0.35rem' }}>
+                        <input
+                          checked={generateSiteDealerIds.includes(dealer.dealerId)}
+                          onChange={() => toggleGenerateSiteDealer(dealer.dealerId)}
+                          type="checkbox"
+                        />
+                        <span>{dealer.siteLabel}</span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+                <button
+                  className="primary-button"
+                  disabled={isGenerating || generateSiteDealerIds.length === 0}
+                  onClick={() => void handleGenerate()}
+                  type="button"
+                >
+                  {isGenerating ? 'Generating live packet…' : 'Generate live packet'}
+                </button>
+              </div>
+            </article>
+          ) : null}
+
+          {isAdmin ? (
+            <article className="mini-card">
+              <header>
+                <strong>Import pending-purchase packet</strong>
+                <Pill tone="warning">admin</Pill>
+              </header>
+              <p className="subtle-copy">
+                Keep the legacy JSON import path as a fallback when you need to replay an existing packet or compare against older generated artifacts.
+              </p>
+              <div className="filter-row">
+                <input
+                  onChange={(event) => setImportFilePath(event.currentTarget.value)}
+                  placeholder="/absolute/path/to/pending_catalog_update_candidates.json"
+                  value={importFilePath}
+                />
+                <button
+                  className="primary-button"
+                  disabled={isImporting || importFilePath.trim().length === 0}
+                  onClick={() => void handleImport()}
+                  type="button"
+                >
+                  {isImporting ? 'Importing packet…' : 'Import packet'}
+                </button>
+              </div>
+            </article>
+          ) : null}
+        </div>
+      </details>
+    </section>
+  )
+}
+
+interface PendingPurchasesPacketsViewProps {
+  data: PendingPurchaseListResponse
+}
+
+function PendingPurchasesPacketsView({ data }: PendingPurchasesPacketsViewProps) {
+  const filters = data.filters
+  const prevHref = data.page > 1
+    ? buildPendingPurchasesHref(filters, { mode: 'packets', page: data.page - 1 })
+    : null
+  const nextHref = data.hasNextPage
+    ? buildPendingPurchasesHref(filters, { mode: 'packets', page: data.page + 1 })
+    : null
+
+  return (
+    <>
+      <PendingPurchasesFilterBar mode="packets" filters={filters} />
+
+      {data.packets.length === 0 ? (
+        <p className="empty-state">No packets match the current filters. Generate or import a packet from the admin section below.</p>
+      ) : (
+        <div className="pp-packet-list">
+          {data.packets.map((packet) => (
+            <PendingPurchasePacketCard key={packet.packetId} filters={filters} packet={packet} />
+          ))}
+        </div>
+      )}
+
+      <nav className="pp-pager" aria-label="Pagination">
+        {prevHref ? <Link className="ghost-button" to={prevHref}>← Previous</Link> : <span />}
+        <span className="subtle-copy">Page {data.page}</span>
+        {nextHref ? <Link className="ghost-button" to={nextHref}>Next →</Link> : <span />}
+      </nav>
+    </>
+  )
+}
+
+interface PendingPurchasesRowsViewProps {
+  approvedVisibleRowCount: number
+  canApprove: boolean
+  canEdit: boolean
+  data: PendingPurchaseListResponse
+  isApplying: boolean
+  onClearSelection: () => void
+  onQueueApply: () => void
+  onSelectApprovedVisible: () => void
+  onToggleSelected: (rowId: number) => void
+  rowsBySite: { siteLabel: string; rows: PendingPurchaseRow[] }[]
+  selectedApprovedRowIds: number[]
+  selectedRowIds: number[]
+}
+
+function PendingPurchasesRowsView({
+  approvedVisibleRowCount,
+  canApprove,
+  canEdit,
+  data,
+  isApplying,
+  onClearSelection,
+  onQueueApply,
+  onSelectApprovedVisible,
+  onToggleSelected,
+  rowsBySite,
+  selectedApprovedRowIds,
+  selectedRowIds,
+}: PendingPurchasesRowsViewProps) {
+  const filters = data.filters
+  const packetsHref = buildPendingPurchasesHref(filters, { mode: 'packets', packetId: null, page: 1 })
+  const activePacket = data.activePacket
+
+  return (
+    <>
+      <div className="pp-breadcrumb inline-row wrap-row">
+        <Link className="ghost-button" to={packetsHref}>← All packets</Link>
+        {activePacket ? (
+          <span className="subtle-copy">
+            Packet #{activePacket.packetId} · {activePacket.packetTitle}
+          </span>
+        ) : null}
+      </div>
+
+      <PendingPurchasesFilterBar mode="rows" filters={filters} />
+
+      {data.items.length === 0 ? (
+        <p className="empty-state">No rows in this packet match the current filters.</p>
+      ) : (
+        <div className="pp-rows-list stacked-list">
+          {rowsBySite.map((group) => (
+            <section key={group.siteLabel} className="pp-rows-site-group">
+              <header className="pp-rows-site-header">
+                <strong>{group.siteLabel}</strong>
+                <Pill tone="muted">{`${group.rows.length} row${group.rows.length === 1 ? '' : 's'}`}</Pill>
+              </header>
+              <div className="stacked-list">
+                {group.rows.map((item) => (
+                  <PendingPurchaseRowCard
+                    canApprove={canApprove}
+                    canEdit={canEdit}
+                    isSelected={selectedApprovedRowIds.includes(item.rowId)}
+                    item={item}
+                    key={item.rowId}
+                    onToggleSelected={() => onToggleSelected(item.rowId)}
+                  />
+                ))}
+              </div>
+            </section>
+          ))}
+        </div>
+      )}
+
+      {canApprove && activePacket && (selectedRowIds.length > 0 || approvedVisibleRowCount > 0) ? (
+        <div className="pp-apply-bar" role="region" aria-label="Queue apply">
+          <div className="inline-row wrap-row pp-apply-bar-meta">
+            <Pill tone="muted">{`${approvedVisibleRowCount} approved visible`}</Pill>
+            <Pill tone={selectedApprovedRowIds.length > 0 ? 'success' : 'muted'}>{`${selectedApprovedRowIds.length} selected`}</Pill>
+          </div>
           <div className="inline-row wrap-row">
-            <Pill tone="muted">{`${approvedVisibleRows.length} approved visible`}</Pill>
-            <Pill tone="muted">{`${selectedApprovedRowIds.length} selected`}</Pill>
-            <button className="ghost-button" onClick={() => setSelectedRowIds(approvedVisibleRows.map((item) => item.rowId))} type="button">
-              Select approved visible rows
+            <button className="ghost-button" onClick={onSelectApprovedVisible} type="button">
+              Select approved visible
             </button>
-            <button className="ghost-button" onClick={() => setSelectedRowIds([])} type="button">
-              Clear selection
+            <button className="ghost-button" onClick={onClearSelection} type="button" disabled={selectedRowIds.length === 0}>
+              Clear
             </button>
             <button
               className="primary-button"
               disabled={isApplying || selectedApprovedRowIds.length === 0}
-              onClick={() => void handleApplySelectedRows()}
+              onClick={onQueueApply}
               type="button"
             >
-              {isApplying ? 'Applying approved rows…' : 'Queue apply for selected rows'}
+              {isApplying ? 'Applying…' : 'Queue apply'}
             </button>
           </div>
-        </article>
-      ) : null}
-      {data.items.length === 0 ? (
-        <p className="empty-state">No rows match the current filters.</p>
-      ) : (
-        <div className="pending-purchase-content stacked-list">
-          {/*
-            Packet hierarchy (site → category → subcategory → brand)
-            now lives in the main Helios sidebar under
-            Catalog → Pending purchases instead of as a second in-page
-            nav rail, so it appears/disappears with the rest of the
-            primary nav when the operator hits Escape. See
-            catalogSidebarSubtree.ts and the `pendingPurchases` option
-            on `useRegisterCatalogSidebarSubtree` for the wiring.
-          */}
-          <div className="pending-purchase-content-inner stacked-list">
-            {hierarchy.map((siteGroup) => (
-              <details className="pending-purchase-group" id={siteGroup.id} key={siteGroup.id} open>
-                <summary className="pending-purchase-summary">
-                  <span>
-                    <strong>{siteGroup.siteLabel}</strong>
-                    <span className="subtle-copy">{`${siteGroup.categories.length} catalog lanes`}</span>
-                  </span>
-                  <Pill tone="muted">{`${siteGroup.rowCount} rows`}</Pill>
-                </summary>
-                <div className="pending-purchase-group-body">
-                  {siteGroup.categories.map((categoryGroup) => (
-                    <details className="pending-purchase-group pending-purchase-group-level-2" id={categoryGroup.id} key={categoryGroup.id} open>
-                      <summary className="pending-purchase-summary">
-                        <span>
-                          <strong>{categoryGroup.categoryLabel}</strong>
-                          <span className="subtle-copy">{`${categoryGroup.subcategories.length} sub-lanes`}</span>
-                        </span>
-                        <Pill tone="muted">{`${categoryGroup.rowCount} rows`}</Pill>
-                      </summary>
-                      <div className="pending-purchase-group-body">
-                        {categoryGroup.subcategories.map((subcategoryGroup) => (
-                          <details className="pending-purchase-group pending-purchase-group-level-3" id={subcategoryGroup.id} key={subcategoryGroup.id} open>
-                            <summary className="pending-purchase-summary">
-                              <span>
-                                <strong>{subcategoryGroup.subcategoryLabel}</strong>
-                                <span className="subtle-copy">{`${subcategoryGroup.brands.length} brands`}</span>
-                              </span>
-                              <Pill tone="muted">{`${subcategoryGroup.rowCount} rows`}</Pill>
-                            </summary>
-                            <div className="pending-purchase-group-body">
-                              {subcategoryGroup.brands.map((brandGroup) => (
-                                <details className="pending-purchase-group pending-purchase-group-level-4" id={brandGroup.id} key={brandGroup.id} open>
-                                  <summary className="pending-purchase-summary">
-                                    <span>
-                                      <strong>{brandGroup.brandLabel}</strong>
-                                      <span className="subtle-copy">{brandGroup.variantNames.join(' · ')}</span>
-                                    </span>
-                                    <Pill tone="muted">{`${brandGroup.rowCount} rows`}</Pill>
-                                  </summary>
-                                  <div className="pending-purchase-group-body stacked-list">
-                                    {brandGroup.items.map((item) => (
-                                      <PendingPurchaseRowCard
-                                        canApprove={canApprove}
-                                        canEdit={session.permissions.canEditProposals}
-                                        isSelected={selectedApprovedRowIds.includes(item.rowId)}
-                                        item={item}
-                                        key={item.rowId}
-                                        onToggleSelected={() => toggleSelectedRow(item.rowId)}
-                                      />
-                                    ))}
-                                  </div>
-                                </details>
-                              ))}
-                            </div>
-                          </details>
-                        ))}
-                      </div>
-                    </details>
-                  ))}
-                </div>
-              </details>
-            ))}
-          </div>
         </div>
-      )}
-    </section>
+      ) : null}
+    </>
   )
+}
+
+interface PendingPurchasesFilterBarProps {
+  filters: PendingPurchaseListResponse['filters']
+  mode: 'packets' | 'rows'
+}
+
+function PendingPurchasesFilterBar({ filters, mode }: PendingPurchasesFilterBarProps) {
+  return (
+    <Form className="pp-filter-bar" method="get">
+      {/* Preserve mode + packetId across filter changes via hidden inputs.
+          Reset to page=1 on any submission (omitted = default 1). */}
+      <input type="hidden" name="mode" value={mode} />
+      {mode === 'rows' && filters.packetId != null ? (
+        <input type="hidden" name="packetId" value={String(filters.packetId)} />
+      ) : null}
+      <div className="pp-filter-row">
+        <input
+          className="pp-filter-search"
+          defaultValue={filters.search ?? ''}
+          name="search"
+          placeholder={mode === 'packets' ? 'Search packet title' : 'Search distributor, brand, or target variant'}
+        />
+        <button className="ghost-button" type="submit">Filter</button>
+      </div>
+      <details className="pp-filter-advanced" open={hasAdvancedFilters(filters, mode)}>
+        <summary>Filters</summary>
+        <div className="pp-filter-grid">
+          <label className="stack-field">
+            <span>Site</span>
+            <select defaultValue={filters.siteKey ?? ''} name="siteKey">
+              <option value="">All sites</option>
+              {HELIOS_PENDING_PURCHASE_SITE_DEALERS.map((dealer) => (
+                <option key={dealer.siteKey} value={dealer.siteKey}>{dealer.siteLabel}</option>
+              ))}
+            </select>
+          </label>
+          {mode === 'packets' ? (
+            <>
+              <label className="stack-field">
+                <span>Status</span>
+                <select defaultValue={filters.status ?? ''} name="status">
+                  <option value="">All</option>
+                  <option value="ready">Ready (live)</option>
+                  <option value="superseded">Superseded</option>
+                </select>
+              </label>
+              <label className="stack-field">
+                <span>Source</span>
+                <select defaultValue={filters.source ?? ''} name="source">
+                  <option value="">All</option>
+                  <option value="generated">Generated</option>
+                  <option value="import">Imported</option>
+                </select>
+              </label>
+              <label className="stack-field">
+                <span>Generated on or after</span>
+                <input defaultValue={filters.after ?? ''} name="after" type="date" />
+              </label>
+              <label className="stack-field">
+                <span>Generated on or before</span>
+                <input defaultValue={filters.before ?? ''} name="before" type="date" />
+              </label>
+              <label className="stack-field">
+                <span>Per page</span>
+                <select defaultValue={String(filters.pageSize)} name="pageSize">
+                  <option value="25">25</option>
+                  <option value="50">50</option>
+                  <option value="100">100</option>
+                </select>
+              </label>
+            </>
+          ) : null}
+          {mode === 'rows' ? (
+            <>
+              <label className="stack-field">
+                <span>Approval</span>
+                <select defaultValue={filters.approvalStatus ?? ''} name="approvalStatus">
+                  <option value="">All</option>
+                  <option value="pending">Pending</option>
+                  <option value="approved">Approved</option>
+                  <option value="rejected">Rejected</option>
+                </select>
+              </label>
+              <label className="stack-field">
+                <span>Apply</span>
+                <select defaultValue={filters.applyStatus ?? ''} name="applyStatus">
+                  <option value="">All</option>
+                  <option value="not_requested">Not requested</option>
+                  <option value="queued">Queued</option>
+                  <option value="running">Running</option>
+                  <option value="applied">Applied</option>
+                  <option value="failed">Failed</option>
+                  <option value="blocked">Blocked</option>
+                </select>
+              </label>
+              <label className="stack-field">
+                <span>Mapping</span>
+                <select defaultValue={filters.mappingStatus ?? ''} name="mappingStatus">
+                  <option value="">All</option>
+                  <option value="mapped_variant_ready_for_link">Mapped (ready for link)</option>
+                  <option value="needs_catalog_create">Needs catalog create</option>
+                  <option value="needs_review">Needs review</option>
+                </select>
+              </label>
+              <label className="stack-field">
+                <span>Action</span>
+                <input defaultValue={filters.actionType ?? ''} name="actionType" placeholder="e.g. price_change" />
+              </label>
+            </>
+          ) : null}
+        </div>
+        <div className="inline-row wrap-row pp-filter-actions">
+          <button className="primary-button" type="submit">Apply filters</button>
+          <Link className="ghost-button" to={buildPendingPurchasesHref(
+            { actionType: undefined, after: undefined, applyStatus: undefined, approvalStatus: undefined, before: undefined, mappingStatus: undefined, mode: undefined, packetId: undefined, page: 1, pageSize: 25, search: undefined, siteKey: undefined, source: undefined, status: undefined },
+            { mode, packetId: mode === 'rows' ? filters.packetId : null, page: 1 },
+          )}>Reset</Link>
+        </div>
+      </details>
+    </Form>
+  )
+}
+
+interface PendingPurchasePacketCardProps {
+  filters: PendingPurchaseListResponse['filters']
+  packet: PendingPurchasePacketListItem
+}
+
+function PendingPurchasePacketCard({ filters, packet }: PendingPurchasePacketCardProps) {
+  const openHref = buildPendingPurchasesHref(filters, { mode: 'rows', packetId: packet.packetId, page: 1 })
+  const generated = new Date(packet.generatedAt)
+  const generatedAbs = generated.toLocaleString()
+  const apply = packet.applyCounts
+  const approval = packet.approvalCounts
+  const inFlightApply = apply.queued + apply.running
+  const remainingApply = apply.notRequested + apply.failed + apply.blocked
+  const latestApply = packet.latestApplyRequest
+
+  return (
+    <article className="pp-packet-card">
+      <header className="pp-packet-card-header">
+        <div className="pp-packet-card-title">
+          <Link to={openHref} className="pp-packet-card-title-link">
+            <strong>{packet.packetTitle}</strong>
+          </Link>
+          <span className="subtle-copy">Packet #{packet.packetId} · generated {generatedAbs}</span>
+        </div>
+        <div className="inline-row wrap-row pp-packet-card-status">
+          <Pill tone={packet.status === 'ready' ? 'success' : 'muted'}>{packet.status === 'ready' ? 'live' : packet.status}</Pill>
+          <Pill tone={packet.source === 'generated' ? 'success' : 'warning'}>{packet.source}</Pill>
+          {packet.siteLabels.map((label) => <Pill key={label} tone="muted">{label}</Pill>)}
+        </div>
+      </header>
+      <div className="pp-packet-card-grid">
+        <PendingPurchaseCountStat label="Rows" value={packet.rowCount} />
+        <PendingPurchaseCountStat label="Approved" value={approval.approved} tone={approval.approved > 0 ? 'success' : 'muted'} />
+        <PendingPurchaseCountStat label="Pending" value={approval.pending} tone={approval.pending > 0 ? 'warning' : 'muted'} />
+        <PendingPurchaseCountStat label="Rejected" value={approval.rejected} tone="muted" />
+        <PendingPurchaseCountStat label="Applied" value={apply.applied} tone={apply.applied > 0 ? 'success' : 'muted'} />
+        <PendingPurchaseCountStat label="In-flight" value={inFlightApply} tone={inFlightApply > 0 ? 'warning' : 'muted'} />
+        <PendingPurchaseCountStat label="Not applied" value={remainingApply} tone="muted" />
+      </div>
+      {latestApply ? (
+        <p className="subtle-copy pp-packet-card-apply">
+          Latest apply: <Pill tone={applyRequestTone(latestApply.status)}>{latestApply.status.replaceAll('_', ' ')}</Pill>
+          {` · ${latestApply.appliedRowCount}/${latestApply.selectedRowCount} applied`}
+          {latestApply.requestedByUser ? ` · ${latestApply.requestedByUser}` : ''}
+          {latestApply.finishedAt ? ` · finished ${new Date(latestApply.finishedAt).toLocaleString()}` : ''}
+        </p>
+      ) : null}
+      <div className="inline-row wrap-row pp-packet-card-actions">
+        <Link className="primary-button" to={openHref}>Review rows</Link>
+        {packet.importFileName ? <span className="subtle-copy">{packet.importFileName}</span> : null}
+      </div>
+    </article>
+  )
+}
+
+interface PendingPurchaseCountStatProps {
+  label: string
+  tone?: 'muted' | 'success' | 'warning'
+  value: number
+}
+
+function PendingPurchaseCountStat({ label, tone = 'muted', value }: PendingPurchaseCountStatProps) {
+  const valueColor = tone === 'success'
+    ? 'var(--accent-strong, #0a7a35)'
+    : tone === 'warning'
+      ? 'var(--warning-strong, #b06800)'
+      : 'inherit'
+  return (
+    <div className="pp-count-stat">
+      <span className="pp-count-stat-value" style={{ color: valueColor }}>{value}</span>
+      <span className="pp-count-stat-label subtle-copy">{label}</span>
+    </div>
+  )
+}
+
+function hasAdvancedFilters(filters: PendingPurchaseListResponse['filters'], mode: 'packets' | 'rows'): boolean {
+  if (mode === 'packets') {
+    return Boolean(filters.siteKey || filters.status || filters.source || filters.after || filters.before)
+  }
+  return Boolean(filters.siteKey || filters.approvalStatus || filters.applyStatus || filters.mappingStatus || filters.actionType)
+}
+
+function buildPendingPurchasesHref(
+  filters: PendingPurchaseListResponse['filters'],
+  overrides: Partial<{
+    mode: 'packets' | 'rows' | null
+    packetId: number | null
+    page: number | null
+  }> = {},
+): string {
+  const params = new URLSearchParams()
+  const mode = overrides.mode === undefined ? filters.mode : overrides.mode
+  if (mode) params.set('mode', mode)
+  const packetId = overrides.packetId === undefined ? filters.packetId : overrides.packetId
+  if (packetId != null) params.set('packetId', String(packetId))
+  if (filters.status) params.set('status', filters.status)
+  if (filters.source) params.set('source', filters.source)
+  if (filters.siteKey) params.set('siteKey', filters.siteKey)
+  if (filters.search) params.set('search', filters.search)
+  if (filters.after) params.set('after', filters.after)
+  if (filters.before) params.set('before', filters.before)
+  if (filters.approvalStatus) params.set('approvalStatus', filters.approvalStatus)
+  if (filters.applyStatus) params.set('applyStatus', filters.applyStatus)
+  if (filters.mappingStatus) params.set('mappingStatus', filters.mappingStatus)
+  if (filters.actionType) params.set('actionType', filters.actionType)
+  const page = overrides.page === undefined ? filters.page : overrides.page
+  if (page && page > 1) params.set('page', String(page))
+  if (filters.pageSize && filters.pageSize !== 25) params.set('pageSize', String(filters.pageSize))
+  const query = params.toString()
+  return query.length > 0 ? `/catalog/pending-purchases?${query}` : '/catalog/pending-purchases'
 }
 
 function PendingPurchaseRowCard(

@@ -24,6 +24,7 @@ import { getPool } from '../db/pool.js'
 import {
   getLatestPendingPurchaseApplyRequest,
   getPendingPurchasePacketSummary,
+  listPendingPurchasePacketListPage,
   listPendingPurchaseRows,
 } from '../db/queries/pendingPurchaseQueries.js'
 import {
@@ -78,8 +79,28 @@ export async function registerPendingPurchaseRoutes(server: FastifyInstance): Pr
 
     const query = PendingPurchaseListQuerySchema.parse(request.query)
     const db = getPool()
-    const [items, activeGenerationJobIdResult, activePacket, latestApplyRequest] = await Promise.all([
-      query.packetId != null
+    // mode default: 'rows' when a specific packetId is asked for, otherwise
+    // 'packets' so the reviewer always lands on the all-packets archive.
+    const mode: 'packets' | 'rows' = query.mode ?? (query.packetId != null ? 'rows' : 'packets')
+    const page = query.page
+    const pageSize = query.pageSize
+
+    const [packetsPage, items, activeGenerationJobIdResult, activePacket, latestApplyRequest] = await Promise.all([
+      mode === 'packets'
+        ? listPendingPurchasePacketListPage(db, {
+            filters: {
+              after: query.after ?? null,
+              before: query.before ?? null,
+              search: query.search ?? null,
+              siteKey: query.siteKey ?? null,
+              source: query.source ?? null,
+              status: query.status ?? null,
+            },
+            limit: pageSize,
+            offset: (page - 1) * pageSize,
+          })
+        : Promise.resolve({ items: [], totalCount: 0 }),
+      mode === 'rows' && query.packetId != null
         ? listPendingPurchaseRows(db, query.packetId)
         : Promise.resolve([] as Awaited<ReturnType<typeof listPendingPurchaseRows>>),
       db.query<JobIdRow>(
@@ -101,14 +122,19 @@ export async function registerPendingPurchaseRoutes(server: FastifyInstance): Pr
     ])
     const activeGenerationJobId = activeGenerationJobIdResult.rows[0]?.id ?? null
     const activeGenerationJob = activeGenerationJobId ? await getJobStatus(db, activeGenerationJobId) : null
+    const totalCount = mode === 'packets' ? packetsPage.totalCount : items.length
     return reply.send(PendingPurchaseListResponseSchema.parse({
       activePacket,
       activeGenerationJob,
       filters: query,
+      hasNextPage: mode === 'packets' ? page * pageSize < packetsPage.totalCount : false,
       items,
       latestApplyRequest,
-      packets: activePacket ? [activePacket] : [],
-      totalCount: items.length,
+      mode,
+      packets: packetsPage.items,
+      page,
+      pageSize,
+      totalCount,
     }))
   })
 

@@ -2,8 +2,14 @@ import { z } from 'zod'
 
 import {
   PendingPurchaseApprovalStatusSchema,
+  PendingPurchaseApplyRequestStatusSchema,
   PendingPurchaseApplyRequestSummarySchema,
+  PendingPurchasePacketListItemSchema,
+  PendingPurchasePacketSourceSchema,
+  PendingPurchasePacketStatusSchema,
   PendingPurchasePacketSummarySchema,
+  PendingPurchaseMappingStatusSchema,
+  PendingPurchaseRowApplyStatusSchema,
   PendingPurchaseRowSchema,
 } from '../domain/pendingPurchases.js'
 import { JobStatusResponseSchema } from './jobs.js'
@@ -23,13 +29,42 @@ export const PendingPurchaseRowRouteParamsSchema = z.object({
 })
 export type PendingPurchaseRowRouteParams = z.infer<typeof PendingPurchaseRowRouteParamsSchema>
 
+const PendingPurchaseListModeSchema = z.enum(['packets', 'rows'])
+export type PendingPurchaseListMode = z.infer<typeof PendingPurchaseListModeSchema>
+
 export const PendingPurchaseListQuerySchema = z.object({
   actionType: BlankStringSchema,
+  after: BlankStringSchema,
+  applyStatus: z.preprocess(
+    (value) => (typeof value === 'string' && value.trim().length === 0 ? undefined : value),
+    PendingPurchaseRowApplyStatusSchema.optional(),
+  ),
+  approvalStatus: z.preprocess(
+    (value) => (typeof value === 'string' && value.trim().length === 0 ? undefined : value),
+    PendingPurchaseApprovalStatusSchema.optional(),
+  ),
+  before: BlankStringSchema,
+  mappingStatus: z.preprocess(
+    (value) => (typeof value === 'string' && value.trim().length === 0 ? undefined : value),
+    PendingPurchaseMappingStatusSchema.optional(),
+  ),
+  mode: z.preprocess(
+    (value) => (typeof value === 'string' && value.trim().length === 0 ? undefined : value),
+    PendingPurchaseListModeSchema.optional(),
+  ),
   packetId: BlankNumberSchema,
   page: z.coerce.number().int().min(1).default(1),
   pageSize: z.coerce.number().int().min(1).max(100).default(25),
   search: BlankStringSchema,
   siteKey: BlankStringSchema,
+  source: z.preprocess(
+    (value) => (typeof value === 'string' && value.trim().length === 0 ? undefined : value),
+    PendingPurchasePacketSourceSchema.optional(),
+  ),
+  status: z.preprocess(
+    (value) => (typeof value === 'string' && value.trim().length === 0 ? undefined : value),
+    PendingPurchasePacketStatusSchema.optional(),
+  ),
 })
 export type PendingPurchaseListQuery = z.infer<typeof PendingPurchaseListQuerySchema>
 
@@ -37,9 +72,13 @@ export const PendingPurchaseListResponseSchema = z.object({
   activePacket: PendingPurchasePacketSummarySchema.nullable(),
   activeGenerationJob: JobStatusResponseSchema.nullable(),
   filters: PendingPurchaseListQuerySchema,
+  hasNextPage: z.boolean(),
   items: z.array(PendingPurchaseRowSchema),
   latestApplyRequest: PendingPurchaseApplyRequestSummarySchema.nullable(),
-  packets: z.array(PendingPurchasePacketSummarySchema),
+  mode: PendingPurchaseListModeSchema,
+  packets: z.array(PendingPurchasePacketListItemSchema),
+  page: z.number().int().min(1),
+  pageSize: z.number().int().min(1).max(100),
   totalCount: z.number().int().min(0),
 })
 export type PendingPurchaseListResponse = z.infer<typeof PendingPurchaseListResponseSchema>

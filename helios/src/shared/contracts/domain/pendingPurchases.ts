@@ -88,6 +88,23 @@ export function normalizeHeliosPendingPurchaseSiteDealerIds(dealerIds: number[])
     .filter((dealerId) => getHeliosPendingPurchaseSiteDealer(dealerId) !== null)
 }
 
+export const PendingPurchaseApprovalCountsSchema = z.object({
+  approved: z.number().int().min(0),
+  pending: z.number().int().min(0),
+  rejected: z.number().int().min(0),
+})
+export type PendingPurchaseApprovalCounts = z.infer<typeof PendingPurchaseApprovalCountsSchema>
+
+export const PendingPurchaseApplyCountsSchema = z.object({
+  applied: z.number().int().min(0),
+  blocked: z.number().int().min(0),
+  failed: z.number().int().min(0),
+  notRequested: z.number().int().min(0),
+  queued: z.number().int().min(0),
+  running: z.number().int().min(0),
+})
+export type PendingPurchaseApplyCounts = z.infer<typeof PendingPurchaseApplyCountsSchema>
+
 export const PendingPurchaseApplyRequestSummarySchema = z.object({
   appliedRowCount: z.number().int().min(0),
   blockedRowCount: z.number().int().min(0),
@@ -106,6 +123,13 @@ export const PendingPurchaseApplyRequestSummarySchema = z.object({
   updatedAt: z.iso.datetime(),
 })
 export type PendingPurchaseApplyRequestSummary = z.infer<typeof PendingPurchaseApplyRequestSummarySchema>
+
+export const PendingPurchasePacketListItemSchema = PendingPurchasePacketSummarySchema.extend({
+  applyCounts: PendingPurchaseApplyCountsSchema,
+  approvalCounts: PendingPurchaseApprovalCountsSchema,
+  latestApplyRequest: PendingPurchaseApplyRequestSummarySchema.nullable(),
+})
+export type PendingPurchasePacketListItem = z.infer<typeof PendingPurchasePacketListItemSchema>
 
 export const PendingPurchaseSuggestionCandidateSchema = z.object({
   productId: z.number().int().positive().nullable(),
