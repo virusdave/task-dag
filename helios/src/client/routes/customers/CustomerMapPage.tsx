@@ -54,17 +54,16 @@ const MAP_STYLE: maplibregl.StyleSpecification = {
       type: 'raster',
       source: 'osm',
       paint: {
-        // Push the basemap WAY into the background so the customer
-        // dots are unambiguously the figure and the basemap is just
-        // ghosted ground. Fully desaturated, very low opacity,
-        // brightness lifted so the darkest features (roads, river
-        // outlines) read as light grey rather than competing with
-        // the bright marker colors.
-        'raster-opacity': 0.3,
-        'raster-saturation': -1,
-        'raster-contrast': -0.55,
-        'raster-brightness-min': 0.55,
-        'raster-brightness-max': 1,
+        // Basemap-as-ground tuning, halfway between the original
+        // (too crisp, dots disappeared into it) and the fully
+        // ghosted pass (too washed-out to read borough shapes).
+        // Roads and coastlines are still legible; the dots are
+        // still unambiguously the figure.
+        'raster-opacity': 0.42,
+        'raster-saturation': -0.92,
+        'raster-contrast': -0.35,
+        'raster-brightness-min': 0.28,
+        'raster-brightness-max': 0.98,
       },
     },
   ],
