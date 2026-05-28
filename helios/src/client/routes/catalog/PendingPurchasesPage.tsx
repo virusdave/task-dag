@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { Form, Link, useLoaderData, useRevalidator, useRouteLoaderData } from 'react-router-dom'
 
 import {
@@ -35,6 +35,7 @@ import {
 import { Pill } from '../../components/Pill.js'
 import type { TreeNavNode } from '../../components/TreeNav.js'
 import { type CompetitorListing } from '../../../shared/ui/pricing-ladder/index.js'
+import { calculateGmPercent, PRICING_GM_FORMULA } from '../../../shared/domain/pricingGeneration.js'
 import { useRegisterCatalogSidebarSubtree } from './catalogSidebarSubtree.js'
 
 export async function pendingPurchasesLoader({ request }: { request: Request }) {
@@ -52,6 +53,56 @@ export async function pendingPurchasesLoader({ request }: { request: Request }) 
 // write. Empty string is the placeholder for an unknown field;
 // it sorts before populated values so unattributed rows surface
 // at the top of the queue.
+// Family-level bulk price set (Issue follow-up: "set the price on an
+// entire variant brand family at once"). Each row registers its
+// `setDraftPrice` setter into this registry on mount and unregisters
+// on unmount. The family-header bulk-set widget iterates over the
+// row IDs in its group and applies the same draft price string to
+// each, so the reviewer can set/snap a whole brand-family in one
+// click and then fine-tune individual rows from there.
+//
+// Locked rows (approved or apply-queued) intentionally do NOT register
+// — bulk-set silently skips them, matching the per-row override input
+// which is disabled in those states.
+interface PendingPurchaseDraftPriceRegistry {
+  register(rowId: number, setDraftPrice: (price: string) => void): () => void
+  setForRows(rowIds: readonly number[], price: string): number
+}
+
+const PendingPurchaseDraftPriceRegistryContext =
+  createContext<PendingPurchaseDraftPriceRegistry | null>(null)
+
+function usePendingPurchaseDraftPriceRegistry(): PendingPurchaseDraftPriceRegistry {
+  const settersRef = useRef(new Map<number, (price: string) => void>())
+  return useMemo<PendingPurchaseDraftPriceRegistry>(
+    () => ({
+      register(rowId, setDraftPrice) {
+        settersRef.current.set(rowId, setDraftPrice)
+        return () => {
+          // Only delete if it's still the same setter — guards against
+          // a stale cleanup deleting a fresh registration if the row
+          // remounts with the same ID.
+          if (settersRef.current.get(rowId) === setDraftPrice) {
+            settersRef.current.delete(rowId)
+          }
+        }
+      },
+      setForRows(rowIds, price) {
+        let applied = 0
+        for (const rowId of rowIds) {
+          const setter = settersRef.current.get(rowId)
+          if (setter) {
+            setter(price)
+            applied += 1
+          }
+        }
+        return applied
+      },
+    }),
+    [],
+  )
+}
+
 interface FamilyKey {
   brand: string
   category: string
@@ -691,9 +742,10 @@ function PendingPurchasesRowsView({
   const filters = data.filters
   const packetsHref = buildPendingPurchasesHref(filters, { mode: 'packets', packetId: null, page: 1 })
   const activePacket = data.activePacket
+  const draftPriceRegistry = usePendingPurchaseDraftPriceRegistry()
 
   return (
-    <>
+    <PendingPurchaseDraftPriceRegistryContext.Provider value={draftPriceRegistry}>
       <div className="pp-breadcrumb inline-row wrap-row">
         <Link className="ghost-button" to={packetsHref}>← All packets</Link>
         {activePacket ? (
@@ -716,6 +768,11 @@ function PendingPurchasesRowsView({
                   <strong>{group.familyLabel}</strong>
                   <Pill tone="muted">{`${group.rows.length} row${group.rows.length === 1 ? '' : 's'}`}</Pill>
                 </div>
+                {canEdit ? (
+                  <FamilyBulkPriceControl
+                    rowIds={group.rows.map((row) => row.rowId)}
+                  />
+                ) : null}
               </header>
               <div className="stacked-list">
                 {group.rows.map((item) => (
@@ -758,7 +815,63 @@ function PendingPurchasesRowsView({
           </div>
         </div>
       ) : null}
-    </>
+    </PendingPurchaseDraftPriceRegistryContext.Provider>
+  )
+}
+
+function FamilyBulkPriceControl({ rowIds }: { rowIds: readonly number[] }) {
+  const registry = useContext(PendingPurchaseDraftPriceRegistryContext)
+  const [value, setValue] = useState('')
+  const [feedback, setFeedback] = useState<string | null>(null)
+
+  const apply = useCallback(() => {
+    if (!registry) return
+    const trimmed = value.trim()
+    if (!trimmed) {
+      setFeedback('Enter a price first')
+      return
+    }
+    const parsed = Number.parseFloat(trimmed)
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      setFeedback('Price must be a positive number')
+      return
+    }
+    // Snap to quarter-dollar to match the ladder & override input step.
+    const snapped = Math.round(parsed * 4) / 4
+    const applied = registry.setForRows(rowIds, snapped.toFixed(2))
+    const skipped = rowIds.length - applied
+    setFeedback(
+      `Set $${snapped.toFixed(2)} on ${applied} row${applied === 1 ? '' : 's'}` +
+        (skipped > 0 ? ` · skipped ${skipped} locked` : ''),
+    )
+  }, [registry, rowIds, value])
+
+  return (
+    <div className="pp-rows-family-bulk-price inline-row wrap-row" style={{ gap: '0.4rem' }}>
+      <label className="inline-row" style={{ gap: '0.35rem', alignItems: 'center' }}>
+        <span className="subtle-copy">Set whole family →</span>
+        <input
+          inputMode="decimal"
+          min={0}
+          onChange={(event) => setValue(event.currentTarget.value)}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter') {
+              event.preventDefault()
+              apply()
+            }
+          }}
+          placeholder="$"
+          step={0.25}
+          style={{ width: '5.5rem' }}
+          type="number"
+          value={value}
+        />
+      </label>
+      <button className="ghost-button" onClick={apply} type="button">
+        Apply to family
+      </button>
+      {feedback ? <span className="subtle-copy">{feedback}</span> : null}
+    </div>
   )
 }
 
@@ -1044,10 +1157,37 @@ function PendingPurchaseRowCard(
   const [isCollapsed, setIsCollapsed] = useState(isFinalized)
   const isApplyLocked = item.lastApplyStatus === 'queued' || item.lastApplyStatus === 'running'
   const editingLocked = item.approvalStatus === 'approved' || isApplyLocked
+
+  // Register this row's draft-price setter with the family-bulk
+  // registry so the family-header's "Apply to family" button can
+  // drive every editable row's draft price in one click. Locked
+  // rows skip registration so bulk-set never overwrites a queued
+  // or approved row's price.
+  const draftPriceRegistry = useContext(PendingPurchaseDraftPriceRegistryContext)
+  useEffect(() => {
+    if (!draftPriceRegistry) return
+    if (editingLocked) return
+    return draftPriceRegistry.register(item.rowId, setDraftPrice)
+  }, [draftPriceRegistry, editingLocked, item.rowId])
+
   const applySummaryText = readLastApplySummaryText(item)
   const verificationSummaryText = readVerificationSummaryText(item)
   const displayedPrice = resolvePendingPurchaseDisplayedPrice(draftPrice, item)
   const priceMarkerLabel = hasPendingPurchaseDraftPriceOverride(draftPrice, item) ? 'Draft' : 'Reviewed'
+  // Live GM% — recomputed from `displayedPrice` (which already reflects
+  // the reviewer's draft override) and `effectiveUnitCost` (server-side
+  // wholesale unit cost, family-average fallback already applied per
+  // pricingGeneration). Reviewers need this to update INSTANTLY as they
+  // drag the pricing ladder slider or edit the override price input,
+  // not just after a Save round-trip — that's the missing piece called
+  // out in the issue.
+  const liveGmPercent = calculateGmPercent(item.effectiveUnitCost, displayedPrice)
+  const liveGmDisplay = liveGmPercent === null ? '—' : `${liveGmPercent.toFixed(1)}%`
+  const liveGmTitle = `${PRICING_GM_FORMULA}` + (
+    item.effectiveUnitCost === null
+      ? ' · no wholesale cost available'
+      : ` · cost ${formatCurrency(item.effectiveUnitCost)}/unit${item.effectiveUnitCostSource ? ` (${item.effectiveUnitCostSource})` : ''}`
+  )
   const hasPricingLadder = hasPendingPurchasePricingLadder(item, displayedPrice)
 
   useEffect(() => {
@@ -1191,6 +1331,7 @@ function PendingPurchaseRowCard(
       <PendingValuePanel label="Current price" value={formatCurrency(item.currentPrice)} />
       <PendingValuePanel label="Imported proposal" value={formatCurrency(item.proposedPrice)} />
       <PendingValuePanel label="Effective proposal" value={formatCurrency(item.effectiveProposedPrice)} />
+      <PendingValuePanel label={`GM% @ ${formatCurrency(displayedPrice)}`} value={liveGmDisplay} />
     </>
   )
 
@@ -1362,7 +1503,7 @@ function PendingPurchaseRowCard(
         </div>
       </details>
       {(item.marketListings.length > 0 || item.marketNote || item.marketSearchTerm || item.publicSources.length > 0) ? (
-        <details open className="pending-purchase-market-table-details">
+        <details className="pending-purchase-market-table-details">
           <summary>Top competitor listings ({item.marketListings.length})</summary>
           <div className="pending-purchase-pricing-support">
             <div className="pricing-metric-grid">
@@ -1508,6 +1649,12 @@ function PendingPurchaseRowCard(
             type="number"
             value={draftPrice}
           />
+          <span className="subtle-copy" title={liveGmTitle}>
+            Live GM @ {formatCurrency(displayedPrice)}: <strong>{liveGmDisplay}</strong>
+            {item.effectiveUnitCost !== null
+              ? ` · cost ${formatCurrency(item.effectiveUnitCost)}/unit${item.effectiveUnitCostSource ? ` (${item.effectiveUnitCostSource})` : ''}`
+              : ' · no wholesale cost available'}
+          </span>
         </label>
 
         <label className="stack-field">
