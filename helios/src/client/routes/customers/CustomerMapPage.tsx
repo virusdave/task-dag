@@ -74,6 +74,135 @@ const DEFAULT_ZOOM = 10.5
 const DEFAULT_MAX_POINTS = 2500
 
 // ---------------------------------------------------------------------
+// Replay (C5) defaults
+// ---------------------------------------------------------------------
+// Per parent design §9 and operator clarification on issue #33:
+//
+//  * Playback duration default: "5 seconds per 24h in the time range,
+//    minimum 5 seconds." A 24h window plays back in 5s; a 7d window
+//    plays back in 35s; a 1h window plays back in the 5s floor.
+//
+//  * Lifetime / fade default: "10% of the time range, max 1 week."
+//    A 24h window keeps each dot visible for ~2.4h of virtual time,
+//    fading from full opacity to zero across that span. A 30d window
+//    caps lifetime at 7d so old dots don't linger forever.
+//
+//  * Loop on by default — the operator explicitly asked for "optionally
+//    in a loop" and the playback is the primary use of the page when
+//    open in a live-ops context. We use `tail=clear` (reset both
+//    cursor and faded-dot state at loop boundaries) per parent §9.6,
+//    with a small visual pause at reset.
+//
+// The replay state lives entirely client-side. It does not refetch
+// from the server — it animates over the points already loaded for
+// the current filter window. Rendering uses the existing MapLibre
+// circle layer with a data-driven opacity expression keyed off each
+// point's `checkedInAtMs` property and the current `cursorMs`, so
+// we hit the 30–60fps target via WebGL even on the full 10k-point
+// max-points cap (no DOM markers).
+
+const REPLAY_MIN_DURATION_MS = 5_000
+const REPLAY_SECONDS_PER_24H = 5
+const REPLAY_DEFAULT_LIFETIME_FRACTION = 0.1 // 10% of window
+const REPLAY_MAX_LIFETIME_MS = 7 * 24 * 60 * 60 * 1000 // 1 week
+const REPLAY_MIN_LIFETIME_MS = 1_000 // never fade in less than 1s
+const REPLAY_LOOP_PAUSE_MS = 350 // small black-frame at loop reset
+
+/** Replay playback total duration (real ms) for a given virtual window span. */
+function defaultPlaybackDurationMs(windowMs: number): number {
+  const scaled = REPLAY_SECONDS_PER_24H * 1000 * (windowMs / (24 * 60 * 60 * 1000))
+  return Math.max(REPLAY_MIN_DURATION_MS, Math.round(scaled))
+}
+
+/** Per-dot lifetime (virtual ms) — how long each dot stays visible before fully fading. */
+function defaultLifetimeMs(windowMs: number): number {
+  const scaled = Math.round(windowMs * REPLAY_DEFAULT_LIFETIME_FRACTION)
+  return Math.max(REPLAY_MIN_LIFETIME_MS, Math.min(REPLAY_MAX_LIFETIME_MS, scaled))
+}
+
+// Base per-dot opacity expression — fill and stroke, keyed off
+// coordSource. Document-coord dots are crisp; scan fallbacks are
+// faded so the operator can tell which dots reflect "where the
+// customer lives" vs "where they scanned".
+const BASE_FILL_OPACITY: maplibregl.ExpressionSpecification = [
+  'match',
+  ['get', 'coordSource'],
+  'document', 0.92,
+  'scan', 0.55,
+  0.92,
+]
+const BASE_STROKE_OPACITY = 0.9
+
+// Replay opacity expression — modulates the base opacity by a fade
+// factor that depends on (cursorMs - checkedInAtMs):
+//
+//   age <  0           → 0     (point is in the future relative to cursor)
+//   age >= lifetimeMs  → 0     (point fully faded out)
+//   else               → base * (1 - age / lifetimeMs)
+//
+// Built fresh each animation frame and pushed via setPaintProperty.
+// This is cheap — MapLibre keeps the expression compiled and we
+// only mutate two literals (cursor + lifetime).
+function replayFillOpacityExpr(
+  cursorMs: number,
+  lifetimeMs: number,
+): maplibregl.ExpressionSpecification {
+  const fadeStart = cursorMs - lifetimeMs
+  return [
+    'case',
+    ['>', ['get', 'checkedInAtMs'], cursorMs], 0,
+    ['<=', ['get', 'checkedInAtMs'], fadeStart], 0,
+    [
+      '*',
+      BASE_FILL_OPACITY,
+      [
+        '-',
+        1,
+        ['/', ['-', cursorMs, ['get', 'checkedInAtMs']], lifetimeMs],
+      ],
+    ],
+  ]
+}
+function replayStrokeOpacityExpr(
+  cursorMs: number,
+  lifetimeMs: number,
+): maplibregl.ExpressionSpecification {
+  const fadeStart = cursorMs - lifetimeMs
+  return [
+    'case',
+    ['>', ['get', 'checkedInAtMs'], cursorMs], 0,
+    ['<=', ['get', 'checkedInAtMs'], fadeStart], 0,
+    [
+      '*',
+      BASE_STROKE_OPACITY,
+      [
+        '-',
+        1,
+        ['/', ['-', cursorMs, ['get', 'checkedInAtMs']], lifetimeMs],
+      ],
+    ],
+  ]
+}
+
+/** Human-readable duration ("5s", "1m 30s", "2h 15m"). */
+function formatDurationMs(ms: number): string {
+  if (ms < 1_000) return `${ms}ms`
+  const totalSec = Math.round(ms / 1000)
+  if (totalSec < 60) return `${totalSec}s`
+  const totalMin = Math.round(totalSec / 60)
+  if (totalMin < 60) {
+    const s = totalSec % 60
+    return s === 0 ? `${totalMin}m` : `${totalMin}m ${s}s`
+  }
+  const h = Math.floor(totalMin / 60)
+  const m = totalMin % 60
+  if (h < 24) return m === 0 ? `${h}h` : `${h}h ${m}m`
+  const d = Math.floor(h / 24)
+  const hr = h % 24
+  return hr === 0 ? `${d}d` : `${d}d ${hr}h`
+}
+
+// ---------------------------------------------------------------------
 // Default-window helpers
 // ---------------------------------------------------------------------
 
@@ -315,6 +444,12 @@ export function CustomerMapPage(): JSX.Element {
         // scan always lands at the same jittered spot across
         // re-renders (no flicker, no shuffling on data refresh).
         const [jLng, jLat] = jitterCoord(p.lng, p.lat, p.scanId)
+        // checkedInAtMs as a numeric property so MapLibre's
+        // data-driven expressions (replay opacity) can compare it
+        // arithmetically against the current cursor. Defaults to 0
+        // on unparseable timestamps so such points stay hidden
+        // throughout replay rather than blinking randomly.
+        const tMs = Date.parse(p.checkedInAt)
         return {
           type: 'Feature' as const,
           geometry: { type: 'Point' as const, coordinates: [jLng, jLat] },
@@ -322,6 +457,7 @@ export function CustomerMapPage(): JSX.Element {
             scanId: p.scanId,
             siteSlug: p.siteSlug,
             checkedInAt: p.checkedInAt,
+            checkedInAtMs: Number.isFinite(tMs) ? tMs : 0,
             coordSource: p.coordSource,
             displayName: p.displayName ?? 'Unknown visitor',
             city: p.city ?? '',
@@ -449,14 +585,10 @@ export function CustomerMapPage(): JSX.Element {
             // fallbacks so reviewers can tell at a glance whether
             // a dot reflects "where the customer lives" (filled,
             // opaque) or "where they scanned" (lower opacity,
-            // dark halo).
-            'circle-opacity': [
-              'match',
-              ['get', 'coordSource'],
-              'document', 0.92,
-              'scan', 0.55,
-              0.92,
-            ],
+            // dark halo). When replay (C5) is playing, the page-
+            // level animation effect swaps these for a fade
+            // expression keyed off cursor + lifetime.
+            'circle-opacity': BASE_FILL_OPACITY,
             'circle-stroke-color': [
               'match',
               ['get', 'coordSource'],
@@ -467,7 +599,7 @@ export function CustomerMapPage(): JSX.Element {
             // Thin halo for separation against the ghosted basemap
             // and against other dots in dense areas.
             'circle-stroke-width': 1,
-            'circle-stroke-opacity': 0.9,
+            'circle-stroke-opacity': BASE_STROKE_OPACITY,
           },
         })
 
@@ -721,6 +853,173 @@ export function CustomerMapPage(): JSX.Element {
     setMaxPointsDraft(String(clamped))
     setSearchParams(next, { replace: true })
   }
+
+  // -----------------------------------------------------------------
+  // Replay (C5) — client-side animation over already-loaded points
+  // -----------------------------------------------------------------
+  // The map's circle layer renders all points up-front; replay just
+  // modulates per-point opacity via a data-driven MapLibre expression
+  // that fades each dot in at its checked-in timestamp and out over
+  // the configured lifetime. No new server endpoint, no per-frame
+  // refetch — the operator drags the window to choose what to replay
+  // and the animation works against that bounded set.
+  //
+  // State:
+  //   replayPlaying — true while animating
+  //   replayCursorMs — current virtual time (epoch ms) within the
+  //     [previewAfter, previewBefore] window
+  //   replayDurationMs — total real-time length of the playback
+  //   replayLifetimeMs — virtual-time lifetime each dot stays visible
+  //   replayLoop — if true, jumps back to start after each pass
+  //   `prefers-reduced-motion` → page loads paused (default state).
+
+  const windowAfterMs = previewAfter.getTime()
+  const windowBeforeMs = previewBefore.getTime()
+  const windowSpanMs = Math.max(1, windowBeforeMs - windowAfterMs)
+  const defaultDurMs = defaultPlaybackDurationMs(windowSpanMs)
+  const defaultLifeMs = defaultLifetimeMs(windowSpanMs)
+
+  const [replayPlaying, setReplayPlaying] = useState(false)
+  const [replayCursorMs, setReplayCursorMs] = useState<number>(windowAfterMs)
+  const [replayDurationMs, setReplayDurationMs] = useState<number>(defaultDurMs)
+  const [replayLifetimeMs, setReplayLifetimeMs] = useState<number>(defaultLifeMs)
+  const [replayLoop, setReplayLoop] = useState<boolean>(true)
+  // True while the loop is in its black-frame pause between passes.
+  const [replayPausing, setReplayPausing] = useState<boolean>(false)
+
+  // When the window changes (operator dragged the slider, or
+  // applied a preset), reset the replay cursor + defaults so we
+  // don't try to animate against a stale virtual time.
+  useEffect(() => {
+    setReplayCursorMs(windowAfterMs)
+    setReplayDurationMs(defaultPlaybackDurationMs(windowSpanMs))
+    setReplayLifetimeMs(defaultLifetimeMs(windowSpanMs))
+    // We deliberately do NOT toggle replayPlaying — if the operator
+    // was actively playing and nudged the slider, they probably want
+    // to keep playing on the new window.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [windowAfterMs, windowBeforeMs])
+
+  // Animation loop. Runs only while replayPlaying is true.
+  const rafRef = useRef<number | null>(null)
+  const lastTickRef = useRef<number | null>(null)
+  useEffect(() => {
+    if (!replayPlaying) {
+      if (rafRef.current !== null) {
+        cancelAnimationFrame(rafRef.current)
+        rafRef.current = null
+      }
+      lastTickRef.current = null
+      return
+    }
+    // virtual-ms-per-real-ms ratio: windowSpan virtual ms covers
+    // replayDurationMs of real time.
+    const ratio = windowSpanMs / Math.max(1, replayDurationMs)
+    function tick(now: number): void {
+      if (lastTickRef.current === null) lastTickRef.current = now
+      const elapsedReal = now - lastTickRef.current
+      lastTickRef.current = now
+      setReplayCursorMs((prev) => {
+        const next = prev + elapsedReal * ratio
+        if (next >= windowBeforeMs) {
+          if (replayLoop) {
+            // Black-frame pause at the loop boundary so the eye
+            // can register the reset rather than smearing across it.
+            setReplayPausing(true)
+            window.setTimeout(() => {
+              setReplayPausing(false)
+              lastTickRef.current = null
+            }, REPLAY_LOOP_PAUSE_MS)
+            return windowAfterMs
+          }
+          // Single-pass: stop at the end.
+          setReplayPlaying(false)
+          return windowBeforeMs
+        }
+        return next
+      })
+      rafRef.current = requestAnimationFrame(tick)
+    }
+    rafRef.current = requestAnimationFrame(tick)
+    return () => {
+      if (rafRef.current !== null) cancelAnimationFrame(rafRef.current)
+      rafRef.current = null
+      lastTickRef.current = null
+    }
+  }, [
+    replayPlaying,
+    replayLoop,
+    replayDurationMs,
+    windowSpanMs,
+    windowAfterMs,
+    windowBeforeMs,
+  ])
+
+  // Push the replay opacity expressions to the live circle layer.
+  // When replay is off, restore the static base opacity.
+  useEffect(() => {
+    const map = mapRef.current
+    if (map === null) return
+    function apply(): void {
+      if (map!.getLayer('scans-circles') === undefined) return
+      if (replayPlaying || replayCursorMs !== windowAfterMs) {
+        // While pausing at the loop boundary, hide all dots.
+        const fill = replayPausing
+          ? 0
+          : replayFillOpacityExpr(replayCursorMs, replayLifetimeMs)
+        const stroke = replayPausing
+          ? 0
+          : replayStrokeOpacityExpr(replayCursorMs, replayLifetimeMs)
+        map!.setPaintProperty('scans-circles', 'circle-opacity', fill)
+        map!.setPaintProperty('scans-circles', 'circle-stroke-opacity', stroke)
+      } else {
+        map!.setPaintProperty('scans-circles', 'circle-opacity', BASE_FILL_OPACITY)
+        map!.setPaintProperty(
+          'scans-circles',
+          'circle-stroke-opacity',
+          BASE_STROKE_OPACITY,
+        )
+      }
+    }
+    if (map.isStyleLoaded()) {
+      apply()
+    } else {
+      map.once('load', apply)
+    }
+  }, [replayPlaying, replayPausing, replayCursorMs, replayLifetimeMs, windowAfterMs])
+
+  function handleReplayToggle(): void {
+    setReplayPlaying((p) => {
+      if (p) return false
+      // Resuming from a finished single-pass: rewind to start.
+      if (replayCursorMs >= windowBeforeMs) {
+        setReplayCursorMs(windowAfterMs)
+      }
+      return true
+    })
+  }
+  function handleReplayReset(): void {
+    setReplayPlaying(false)
+    setReplayCursorMs(windowAfterMs)
+    setReplayPausing(false)
+  }
+  function handleReplayScrub(virtMs: number): void {
+    setReplayPlaying(false)
+    setReplayCursorMs(Math.max(windowAfterMs, Math.min(windowBeforeMs, virtMs)))
+  }
+  function handleReplayDurationChange(realSec: number): void {
+    if (!Number.isFinite(realSec)) return
+    setReplayDurationMs(Math.max(REPLAY_MIN_DURATION_MS, Math.round(realSec * 1000)))
+  }
+  function handleReplayLifetimeChange(virtSec: number): void {
+    if (!Number.isFinite(virtSec)) return
+    const ms = Math.round(virtSec * 1000)
+    setReplayLifetimeMs(Math.max(REPLAY_MIN_LIFETIME_MS, Math.min(REPLAY_MAX_LIFETIME_MS, ms)))
+  }
+
+  const replayProgress =
+    windowSpanMs > 0 ? (replayCursorMs - windowAfterMs) / windowSpanMs : 0
+  const replayCursorLabel = formatTime(new Date(replayCursorMs).toISOString())
 
   function handleResetFilters(): void {
     const next = new URLSearchParams()
@@ -980,6 +1279,96 @@ export function CustomerMapPage(): JSX.Element {
             >
               Last 30d
             </button>
+          </div>
+        </div>
+
+        {/* Replay (C5) controls. Plays the currently-filtered window
+            as a time-lapse with dots fading in at their check-in
+            time and out over the configured lifetime. Defaults per
+            operator: 5s per 24h of window (min 5s), lifetime 10%
+            of window (capped at 1 week), loop on. */}
+        <div className="cm-replay">
+          <div className="cm-replay-row">
+            <button
+              type="button"
+              className="ghost-button cm-replay-play"
+              onClick={handleReplayToggle}
+              aria-label={replayPlaying ? 'Pause replay' : 'Play replay'}
+              title={replayPlaying ? 'Pause replay' : 'Play replay'}
+            >
+              {replayPlaying ? '❚❚ Pause' : '▶ Play'}
+            </button>
+            <button
+              type="button"
+              className="ghost-button cm-replay-reset"
+              onClick={handleReplayReset}
+              title="Reset replay to start of window"
+            >
+              ↺ Reset
+            </button>
+            <label className="cm-replay-loop">
+              <input
+                type="checkbox"
+                checked={replayLoop}
+                onChange={(e) => setReplayLoop(e.target.checked)}
+              />
+              <span>Loop</span>
+            </label>
+            <span className="cm-replay-cursor subtle-copy">
+              {replayCursorLabel}
+            </span>
+          </div>
+          <input
+            type="range"
+            min={windowAfterMs}
+            max={windowBeforeMs}
+            step={Math.max(1, Math.round(windowSpanMs / 1000))}
+            value={Math.round(replayCursorMs)}
+            onChange={(e) => handleReplayScrub(Number(e.target.value))}
+            className="cm-replay-scrub"
+            aria-label="Replay scrubber"
+          />
+          <div className="cm-replay-bar">
+            <div
+              className="cm-replay-fill"
+              style={{ width: `${Math.max(0, Math.min(1, replayProgress)) * 100}%` }}
+            />
+          </div>
+          <div className="cm-replay-row cm-replay-row-tight">
+            <label className="cm-field cm-field-inline">
+              <span title="Total real-world seconds the playback should take">
+                Duration
+              </span>
+              <input
+                type="number"
+                inputMode="numeric"
+                min={REPLAY_MIN_DURATION_MS / 1000}
+                step={1}
+                value={Math.round(replayDurationMs / 1000)}
+                onChange={(e) => handleReplayDurationChange(Number(e.target.value))}
+              />
+              <span className="cm-replay-unit">s</span>
+            </label>
+            <label className="cm-field cm-field-inline">
+              <span title="How long (in virtual seconds) each dot stays visible before fading out">
+                Lifetime
+              </span>
+              <input
+                type="number"
+                inputMode="numeric"
+                min={REPLAY_MIN_LIFETIME_MS / 1000}
+                max={REPLAY_MAX_LIFETIME_MS / 1000}
+                step={1}
+                value={Math.round(replayLifetimeMs / 1000)}
+                onChange={(e) => handleReplayLifetimeChange(Number(e.target.value))}
+              />
+              <span className="cm-replay-unit">s virt</span>
+            </label>
+            <span className="subtle-copy cm-replay-meta">
+              {`${formatDurationMs(replayDurationMs)} real · ` +
+                `${formatDurationMs(replayLifetimeMs)} virtual lifetime · ` +
+                `window ${formatDurationMs(windowSpanMs)}`}
+            </span>
           </div>
         </div>
       </div>
