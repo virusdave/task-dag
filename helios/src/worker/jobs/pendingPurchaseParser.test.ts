@@ -2,6 +2,30 @@ import { describe, expect, it } from 'vitest'
 
 import { parseProductName } from './generatePendingPurchasePacketJob.js'
 
+describe('TTM deterministic parser', () => {
+  it('parses TTM Flight multi-strain 3.0g flower', () => {
+    const parsed = parseProductName(
+      'TTM - Flower - Packaged - Flight - 3.0g - Cyber Diesel x Peanut Butter N Jealousy x Skywalker',
+    )
+    expect(parsed.brand).toBe('TTM')
+    expect(parsed.category).toBe('Flower')
+    expect(parsed.size).toBe('3g')
+    expect(parsed.variantTab).toBe('3g')
+    expect(parsed.variantName).toBe('3g')
+    expect(parsed.groupName).toBe('Flight: Cyber Diesel × Peanut Butter N Jealousy × Skywalker')
+    expect(parsed.strainName).toBe('Cyber Diesel × Peanut Butter N Jealousy × Skywalker')
+  })
+
+  it('parses a plain TTM flower 3.5g eighth without a Flight qualifier', () => {
+    const parsed = parseProductName('TTM - Flower - Packaged - 3.5g - Pineapple Express')
+    expect(parsed.brand).toBe('TTM')
+    expect(parsed.category).toBe('Flower')
+    expect(parsed.size).toBe('3.5g')
+    expect(parsed.groupName).toBe('Pineapple Express')
+    expect(parsed.strainName).toBe('Pineapple Express')
+  })
+})
+
 describe("Jenny's pre-roll deterministic parser", () => {
   it("parses Jenny's J 1g <cultivar> Pre-Roll", () => {
     const parsed = parseProductName("Jenny's J 1g Acapulco Gold Pre-Roll")

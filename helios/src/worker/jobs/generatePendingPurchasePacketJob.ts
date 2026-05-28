@@ -2203,6 +2203,9 @@ export function parseProductNameLegacy(name: string): ParsedProductName {
   if (lowered.startsWith('cannabals')) {
     return normalizeAndValidateParsedProductName(parseCannabalsName(normalized), normalized)
   }
+  if (/^ttm\s*[-:]/i.test(normalized)) {
+    return normalizeAndValidateParsedProductName(parseTtmName(normalized), normalized)
+  }
   return normalizeAndValidateParsedProductName(parseHrBotanicalName(normalized), normalized)
 }
 
@@ -2578,7 +2581,10 @@ async function classifyPendingPurchaseNameWithLlmFallback(input: {
 
     const content = extractChatCompletionContent(rawResponseText)
     const parsedEnvelope = PendingPurchaseLlmTeachingEnvelopeSchema.parse(JSON.parse(content))
-    const normalizedClassification = normalizePendingPurchaseLlmClassification(parsedEnvelope.classification)
+    const normalizedClassification = normalizePendingPurchaseLlmClassification(
+      parsedEnvelope.classification,
+      input.group.distributorProductName,
+    )
     if (!normalizedClassification) {
       await withTransaction(async (db) => {
         await insertPendingPurchaseParseObservation(db, {
@@ -2974,8 +2980,37 @@ function repairLlmStrainPlacement(input: {
   }
 }
 
+// Extraction-method tokens the LLM teacher often glues onto the front of
+// variantName when the distributor name interleaves the method with the
+// flavor (e.g. "Mega Ring - Gummy - 100mg - Distillate - Peach - 10x10mg"
+// is misclassified as variantName="Distillate Peach"). These are
+// process / formulation modifiers, not part of the customer-facing
+// variant name. Stripped from the LEADING positions of variantName only —
+// they can legitimately appear later in a name (e.g. "Live Resin
+// Diamonds").
+const LEADING_EXTRACTION_METHOD_TOKENS_RE =
+  /^\s*(?:(?:live\s+resin|live\s+rosin|rosin|solventless|distillate|full\s+spectrum|broad\s+spectrum|rso|fso|co2|hash\s+rosin)\s*[-:·]?\s+)+/i
+
+// Categories for which an "AIO" / "All-in-One" token in the raw
+// distributor name strongly implies the All-in-One disposable
+// subcategory. The catalog uses `All In One / Disposable` for these.
+const ALL_IN_ONE_VAPE_SUBCATEGORY = 'All In One / Disposable'
+const AIO_TOKEN_RE = /(?:^|[\s\-·.,/(])aio(?:[\s\-·.,/)$]|$)/i
+
+function stripLeadingExtractionMethods(value: string): string {
+  return value.replace(LEADING_EXTRACTION_METHOD_TOKENS_RE, '').trim()
+}
+
+function looksLikeStrainLabel(value: string): boolean {
+  const trimmed = value.trim().toLowerCase()
+  return STRAIN_LABEL_WORDS.has(trimmed)
+    || trimmed === 'indica hybrid'
+    || trimmed === 'sativa hybrid'
+}
+
 function normalizePendingPurchaseLlmClassification(
   classification: z.infer<typeof PendingPurchaseLlmClassificationSchema>,
+  rawDistributorProductName?: string,
 ): ParsedProductName | null {
   if (!AUTO_CLASSIFIABLE_PENDING_PURCHASE_CATEGORIES.has(classification.category)) {
     return null
@@ -2988,8 +3023,18 @@ function normalizePendingPurchaseLlmClassification(
   }
 
   const normalizedSize = normalizeSizeText(classification.size) ?? classification.size
-  const repairedTab = normalizeNonEmptyString(classification.variantTab)
-    ?? (classification.packCount > 1 ? `${classification.packCount}x ${normalizedSize}` : normalizedSize)
+  const llmTab = normalizeNonEmptyString(classification.variantTab)
+
+  // variantTab is structural metadata: it encodes pack-count × unit
+  // size (e.g. "1g", "0.5g", "10x 10mg"). The LLM teacher occasionally
+  // drops a prevalence label ("Indica" / "Sativa" / "Hybrid") into
+  // variantTab when the source name's last dashed segment is the
+  // strain class. Replace any such mis-tagged variantTab with the
+  // canonical size-based tab. If the LLM also mis-routed the real size
+  // into variantTab, normalizeSizeText below will salvage the size.
+  const repairedTab = (llmTab !== null && !looksLikeStrainLabel(llmTab))
+    ? llmTab
+    : (classification.packCount > 1 ? `${classification.packCount}x ${normalizedSize}` : normalizedSize)
 
   // The LLM teacher sometimes echoes container nouns from the
   // distributor product name into `variantName` (e.g. "3.5g Jar" for a
@@ -2997,13 +3042,26 @@ function normalizePendingPurchaseLlmClassification(
   // trailing container tokens and, for Flower in particular, override
   // the variant name with the canonical size — the variant name for a
   // flower variant is the size, not the container.
-  const repairedVariantName = repairLlmVariantName(
+  let repairedVariantName = repairLlmVariantName(
     classification.variantName,
     classification.category,
     classification.packCount,
     normalizedSize,
     repairedTab,
   )
+
+  // Strip leading extraction-method / formulation tokens. The LLM teacher
+  // routinely keeps tokens like "Distillate" or "Live Resin" attached to
+  // variantName when they should be process modifiers (e.g.
+  // "Mega Ring - Gummy - 100mg - Distillate - Peach - 10x10mg" should be
+  // variantName="Peach", not "Distillate Peach"). Skip for Flower, where
+  // variantName is already canonicalized to the size.
+  if (classification.category !== 'Flower') {
+    const stripped = stripLeadingExtractionMethods(repairedVariantName)
+    if (stripped.length > 0) {
+      repairedVariantName = stripped
+    }
+  }
 
   // The LLM teacher routinely mis-files strain-class labels (Indica /
   // Sativa / Hybrid) by appending them to variantName instead of
@@ -3017,6 +3075,19 @@ function normalizePendingPurchaseLlmClassification(
     strainName: normalizeNonEmptyString(classification.strainName) ?? '',
   })
 
+  // AIO / All-in-One subcategory inference. If the raw distributor
+  // product name carries an `AIO` token (case-insensitive, word-bounded)
+  // and the LLM classified this as a vape but missed the subcategory
+  // (or chose something inconsistent), force the catalog's canonical
+  // "All In One / Disposable" subcategory. This matches what the
+  // hardcoded parsers do for Posh Puff / Cannabals Chubby Puff and
+  // keeps Flav AIO vapes from being filed without a subcategory.
+  let resolvedSubcategory = normalizeNonEmptyString(classification.subcategory) ?? ''
+  const distributorMatchesAio = rawDistributorProductName !== undefined && AIO_TOKEN_RE.test(rawDistributorProductName)
+  if (distributorMatchesAio && classification.category === 'Vapes' && resolvedSubcategory !== ALL_IN_ONE_VAPE_SUBCATEGORY) {
+    resolvedSubcategory = ALL_IN_ONE_VAPE_SUBCATEGORY
+  }
+
   const draft: ParsedProductName = {
     brand: classification.brand,
     category: classification.category,
@@ -3026,7 +3097,7 @@ function normalizePendingPurchaseLlmClassification(
     searchTerm: classification.groupName,
     size: normalizedSize,
     strainName: strainRepair.strainName,
-    subcategory: normalizeNonEmptyString(classification.subcategory) ?? '',
+    subcategory: resolvedSubcategory,
     variantName: strainRepair.variantName,
     variantTab: repairedTab,
   }
@@ -3452,6 +3523,93 @@ function parseLayUpName(name: string): ParsedProductName {
     subcategory: '',
     variantName: `LayUp ${flavor} ${size}`,
     variantTab: size,
+  }
+}
+
+/**
+ * TTM (Terps to Mountains / "TTM") names ship as
+ *   `TTM - <Category> - <Format> - [Lineage] - <Size> - <Strain(s)>`
+ *
+ * Examples this parser handles:
+ *   - "TTM - Flower - Packaged - Flight - 3.0g - Cyber Diesel x Peanut Butter N Jealousy x Skywalker"
+ *     → brand=TTM, category=Flower, groupName="Flight: Cyber Diesel × Peanut Butter N Jealousy × Skywalker",
+ *       strainName same, size="3g", variantTab="3g"
+ *   - "TTM - Flower - Packaged - 3.5g - Pineapple Express"
+ *     → brand=TTM, category=Flower, groupName="Pineapple Express", size="3.5g"
+ *   - "TTM - Pre-Roll - 1g - Sour Diesel"
+ *     → brand=TTM, category=Pre-Rolls, groupName="Sour Diesel"
+ *
+ * `Flight` is TTM's multi-strain bundle line: when present, the trailing
+ * strain segment may contain ` x ` separators that join multiple
+ * cultivars in one pack. Normalize those to ` × ` (Unicode multiplication
+ * sign) for display so the reviewer can tell at a glance this is a
+ * blended-strain pack rather than a strain literally named "x".
+ */
+function parseTtmName(name: string): ParsedProductName {
+  const parts = name.split(/\s*-\s*/).map((part) => part.trim()).filter((part) => part.length > 0)
+  if (parts.length < 4 || !/^ttm$/i.test(parts[0])) {
+    throw new Error(`Unhandled TTM product name: ${name}`)
+  }
+
+  const rawCategory = parts[1].toLowerCase()
+  let category: string
+  if (rawCategory === 'flower') {
+    category = 'Flower'
+  } else if (rawCategory === 'pre-roll' || rawCategory === 'preroll' || rawCategory === 'pre-rolls') {
+    category = 'Pre-Rolls'
+  } else if (rawCategory === 'vape' || rawCategory === 'vapes') {
+    category = 'Vapes'
+  } else {
+    throw new Error(`Unhandled TTM category "${parts[1]}" in: ${name}`)
+  }
+
+  // Find the size token — the FIRST part (after position 1) that looks
+  // like an explicit weight/dose. Anything before it (between category
+  // and size) is treated as format/lineage qualifiers; anything after
+  // it is the strain (possibly multi-strain).
+  const sizeIndex = parts.findIndex((part, index) => index >= 2 && /^\.?\d+(?:\.\d+)?\s*(?:g|mg)$/i.test(part))
+  if (sizeIndex < 0 || sizeIndex >= parts.length - 1) {
+    throw new Error(`Unhandled TTM product name (no size token / no trailing strain): ${name}`)
+  }
+  const sizeText = parts[sizeIndex]
+  const size = normalizeSizeText(sizeText) ?? sizeText
+  const qualifiers = parts.slice(2, sizeIndex).map((q) => q.trim()).filter((q) => q.length > 0)
+  const strainSegment = parts.slice(sizeIndex + 1).join(' - ').trim()
+
+  // Multi-strain "Flight": replace ` x ` (lowercase, whitespace-bounded)
+  // with the proper multiplication sign so display reads cleanly. Don't
+  // touch capital X or strain-internal "x" tokens (e.g. "TenX").
+  const normalizedStrain = strainSegment
+    .replace(/\s+[x×]\s+/g, ' × ')
+    .replace(/\s{2,}/g, ' ')
+    .trim()
+  if (normalizedStrain.length === 0) {
+    throw new Error(`Unhandled TTM product name (empty strain segment): ${name}`)
+  }
+  const isFlight = qualifiers.some((q) => /^flight$/i.test(q))
+
+  const groupName = isFlight ? `Flight: ${normalizedStrain}` : normalizedStrain
+  const packCount = 1
+  const variantTab = size
+  const variantName = category === 'Flower'
+    ? size
+    : `TTM ${groupName} ${size}`
+  // Flower's strainName is the strain itself; treat the joined multi-
+  // strain string as a single strainName for downstream catalog use.
+  const strainName = category === 'Flower' || category === 'Pre-Rolls' ? normalizedStrain : ''
+
+  return {
+    brand: 'TTM',
+    category,
+    groupName,
+    packCount,
+    prevalence: derivePrevalence(name),
+    searchTerm: normalizedStrain,
+    size,
+    strainName,
+    subcategory: '',
+    variantName,
+    variantTab,
   }
 }
 
