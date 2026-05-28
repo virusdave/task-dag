@@ -22,6 +22,7 @@ import { loadJson, mutateJson } from '../../app/fetchJson.js'
 import { isJobTerminal, loadJobStatus, waitForJob } from '../../app/jobPolling.js'
 import { CanonicalPricingLadder } from '../../components/CanonicalPricingLadder.js'
 import {
+  CanonicalProductRow,
   StructuredOverrideField,
   areStructuredOverridesEqual,
   buildStructuredOverridePayload,
@@ -1145,67 +1146,66 @@ function PendingPurchaseRowCard(
   // the decision the reviewer made at a glance.
   const collapsedSummaryPrice = formatCurrency(item.effectiveProposedPrice)
 
-  return (
-    <article className={`review-card${isCollapsed ? ' review-card--collapsed' : ''}`}>
-      <div className="review-card-header">
-        <div>
-          <strong>{item.distributorProductName}</strong>
-          <p className="subtle-copy">
-            {item.siteLabel} · {item.targetBrand ?? 'No brand'} · {item.targetVariantName ?? item.targetGroupName ?? 'No target variant'}
-            {isCollapsed ? ` · ${collapsedSummaryPrice}` : ''}
-          </p>
-        </div>
-        <div className="inline-row wrap-row" style={{ gap: '0.4rem', alignItems: 'center' }}>
-          <Pill tone={approvalTone(item.approvalStatus)}>{item.approvalStatus}</Pill>
-          <Pill tone={applyStatusTone(item.lastApplyStatus)}>{item.lastApplyStatus.replaceAll('_', ' ')}</Pill>
-          <Pill tone={mappingStatusTone(item.mappingStatus)}>{item.mappingStatus.replaceAll('_', ' ')}</Pill>
-          <Pill tone="muted">{`v${item.version}`}</Pill>
-          {isFinalized ? (
-            <button
-              className="ghost-button"
-              onClick={() => setIsCollapsed((prev) => !prev)}
-              title={
-                isCollapsed
-                  ? 'Reopen this finalized row to inspect or change the decision.'
-                  : 'Collapse this finalized row to a one-line summary.'
-              }
-              type="button"
-            >
-              {isCollapsed ? 'Reopen ▾' : 'Collapse ▴'}
-            </button>
-          ) : null}
-          <a
-            className="ghost-button review-card-open-details"
-            href={reviewDetailsHref}
-            target="_blank"
-            rel="noopener noreferrer"
-            title="Open the full per-row details page (comments, annotations, re-run, fail) in a new tab"
-          >
-            Open details ↗
-          </a>
-        </div>
-      </div>
-      {isCollapsed ? null : (<>
-
-      <div className="comparison-grid">
-        <PendingValuePanel label="Current price" value={formatCurrency(item.currentPrice)} />
-        <PendingValuePanel label="Imported proposal" value={formatCurrency(item.proposedPrice)} />
-        <PendingValuePanel label="Effective proposal" value={formatCurrency(item.effectiveProposedPrice)} />
-      </div>
-
-      {hasPricingLadder ? (
-        <CanonicalPricingLadder
-          productId={item.rowId}
-          livePrice={item.currentPrice}
-          proposedPrice={displayedPrice}
-          marketAveragePostTax={item.averageCompetitorPostTaxPrice}
-          marketMedianPostTax={item.marketMedianPostTaxPrice}
-          competitorListings={mapToCompetitorListings(item.marketListings)}
-          variant="compact"
-          onProposedPriceChange={editingLocked ? undefined : (next) => setDraftPrice(next.toFixed(2))}
-        />
+  const headerActions = (
+    <>
+      {isFinalized ? (
+        <button
+          className="ghost-button"
+          onClick={() => setIsCollapsed((prev) => !prev)}
+          title={
+            isCollapsed
+              ? 'Reopen this finalized row to inspect or change the decision.'
+              : 'Collapse this finalized row to a one-line summary.'
+          }
+          type="button"
+        >
+          {isCollapsed ? 'Reopen ▾' : 'Collapse ▴'}
+        </button>
       ) : null}
+      <a
+        className="ghost-button review-card-open-details"
+        href={reviewDetailsHref}
+        target="_blank"
+        rel="noopener noreferrer"
+        title="Open the full per-row details page (comments, annotations, re-run, fail) in a new tab"
+      >
+        Open details ↗
+      </a>
+    </>
+  )
 
+  const statusPills = (
+    <>
+      <Pill tone={approvalTone(item.approvalStatus)}>{item.approvalStatus}</Pill>
+      <Pill tone={applyStatusTone(item.lastApplyStatus)}>{item.lastApplyStatus.replaceAll('_', ' ')}</Pill>
+      <Pill tone={mappingStatusTone(item.mappingStatus)}>{item.mappingStatus.replaceAll('_', ' ')}</Pill>
+      <Pill tone="muted">{`v${item.version}`}</Pill>
+    </>
+  )
+
+  const summaryTiles = (
+    <>
+      <PendingValuePanel label="Current price" value={formatCurrency(item.currentPrice)} />
+      <PendingValuePanel label="Imported proposal" value={formatCurrency(item.proposedPrice)} />
+      <PendingValuePanel label="Effective proposal" value={formatCurrency(item.effectiveProposedPrice)} />
+    </>
+  )
+
+  const pricingLadderSlot = hasPricingLadder ? (
+    <CanonicalPricingLadder
+      productId={item.rowId}
+      livePrice={item.currentPrice}
+      proposedPrice={displayedPrice}
+      marketAveragePostTax={item.averageCompetitorPostTaxPrice}
+      marketMedianPostTax={item.marketMedianPostTaxPrice}
+      competitorListings={mapToCompetitorListings(item.marketListings)}
+      variant="compact"
+      onProposedPriceChange={editingLocked ? undefined : (next) => setDraftPrice(next.toFixed(2))}
+    />
+  ) : null
+
+  const bodyExtras = (
+    <>
       <PendingPurchasePictureOptions
         currentImageUrl={item.effectivePrimaryImageUrl}
         disabled={editingLocked}
@@ -1418,17 +1418,21 @@ function PendingPurchaseRowCard(
           <span>Select for the next apply request</span>
         </label>
       ) : null}
+    </>
+  )
 
-      {/* All manual overrides live in one collapsed disclosure so the
-          row stays scannable by default. Default-opens when the reviewer
-          already has unsaved draft overrides queued, so they don't lose
-          sight of their work after a re-render. The "Override structured
-          data" section is informational for now — editing parsed brand /
-          variant / pack-size etc. against the existing apply pipeline
-          needs new `edited_target_*` shadow columns + a migration, so
-          for the moment the inputs are disabled with an explanatory
-          message. */}
-      <details className="pending-purchase-overrides" open={hasDraftOverrides}>
+  /*
+   * All manual overrides live in one collapsed disclosure so the
+   * row stays scannable by default. Default-opens when the reviewer
+   * already has unsaved draft overrides queued, so they don't lose
+   * sight of their work after a re-render. The structured-data
+   * sub-details (issue #35) lets reviewers correct mis-parsed
+   * brand / variant / pack-size / category / etc. inline; the
+   * effective overrides feed the apply pipeline through the same
+   * shadow-column path as the other override fields.
+   */
+  const overridesSlot = (
+    <details className="pending-purchase-overrides" open={hasDraftOverrides}>
         <summary>Overrides{hasDraftOverrides ? ' · unsaved changes' : ''}</summary>
 
         <label className="stack-field">
@@ -1564,30 +1568,49 @@ function PendingPurchaseRowCard(
           </div>
         </details>
       </details>
+  )
 
-      {errorMessage ? <p className="error-text">{errorMessage}</p> : null}
-      {canApprove ? (
-        <div className="inline-row wrap-row review-actions">
-          {item.approvalStatus !== 'approved' ? (
-            <button className="primary-button" disabled={isApproving || isApplyLocked} onClick={() => void handleApprovalChange('approved')} type="button">
-              {isApproving ? 'Updating…' : 'Approve'}
-            </button>
-          ) : null}
-          {item.approvalStatus !== 'rejected' ? (
-            <button className="ghost-button" disabled={isApproving || isApplyLocked} onClick={() => void handleApprovalChange('rejected')} type="button">
-              Reject
-            </button>
-          ) : null}
-          {item.approvalStatus !== 'pending' ? (
-            <button className="ghost-button" disabled={isApproving || isApplyLocked} onClick={() => void handleApprovalChange('pending')} type="button">
-              Mark pending
-            </button>
-          ) : null}
-        </div>
+  const decisionsSlot = canApprove ? (
+    <div className="inline-row wrap-row review-actions">
+      {item.approvalStatus !== 'approved' ? (
+        <button className="primary-button" disabled={isApproving || isApplyLocked} onClick={() => void handleApprovalChange('approved')} type="button">
+          {isApproving ? 'Updating…' : 'Approve'}
+        </button>
       ) : null}
+      {item.approvalStatus !== 'rejected' ? (
+        <button className="ghost-button" disabled={isApproving || isApplyLocked} onClick={() => void handleApprovalChange('rejected')} type="button">
+          Reject
+        </button>
+      ) : null}
+      {item.approvalStatus !== 'pending' ? (
+        <button className="ghost-button" disabled={isApproving || isApplyLocked} onClick={() => void handleApprovalChange('pending')} type="button">
+          Mark pending
+        </button>
+      ) : null}
+    </div>
+  ) : null
 
-      </>)}
-    </article>
+  return (
+    <CanonicalProductRow
+      className={`review-card${isCollapsed ? ' review-card--collapsed' : ''}`}
+      headerClassName="review-card-header"
+      title={<strong>{item.distributorProductName}</strong>}
+      subtitle={
+        <>
+          {item.siteLabel} · {item.targetBrand ?? 'No brand'} · {item.targetVariantName ?? item.targetGroupName ?? 'No target variant'}
+          {isCollapsed ? ` · ${collapsedSummaryPrice}` : ''}
+        </>
+      }
+      statusPills={statusPills}
+      headerActions={headerActions}
+      collapsed={isCollapsed}
+      comparisonsContent={summaryTiles}
+      pricingLadder={pricingLadderSlot}
+      bodyExtras={bodyExtras}
+      overrides={overridesSlot}
+      errorMessage={errorMessage}
+      decisions={decisionsSlot}
+    />
   )
 }
 

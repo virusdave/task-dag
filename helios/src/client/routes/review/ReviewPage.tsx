@@ -10,21 +10,36 @@
  * side-by-side, the canonical pricing-ladder prepopulated with the
  * latest cached LitAlerts evidence, and an attached slider for proposed
  * price (snapped to $0.25). Family headers carry roll-up approve/reject.
+ *
+ * Issue #35 (slice 4b.1): the per-row layout is now provided by the
+ * shared model-agnostic `CanonicalProductRow` shell. The Review-
+ * specific row state (proposed-price draft, operator note, approve /
+ * reject mutations) lives in `ReviewRowCard` below, which adapts the
+ * ReviewRow contract into shell props + slot content.
  */
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Form, Link, useLoaderData, useRevalidator } from 'react-router-dom'
 
 import {
   MutationAcceptedResponseSchema,
   ReviewFamilyQueueResponseSchema,
-  reviewRowToCanonicalRow,
+  buildHeliosModulePath,
   type ReviewFamily,
   type ReviewFamilyQueueResponse,
+  type ReviewRow,
   type ReviewRowLineItemHandle,
+  type ReviewRowPricingLadder,
 } from '../../../shared/contracts/index.js'
 import { loadJson, mutateJson } from '../../app/fetchJson.js'
 import { waitForJob } from '../../app/jobPolling.js'
-import { CanonicalProductRow, formatCurrency } from '../../components/canonicalProductRow/index.js'
+import {
+  CanonicalProductRow,
+  formatCurrency,
+  rollupTone,
+  type CanonicalProductRowComparisonCell,
+  type CanonicalProductRowValidationIssue,
+} from '../../components/canonicalProductRow/index.js'
+import { CanonicalPricingLadder } from '../../components/CanonicalPricingLadder.js'
 import { Pill } from '../../components/Pill.js'
 import { useRegisterCatalogSidebarSubtree } from '../catalog/catalogSidebarSubtree.js'
 
@@ -194,12 +209,225 @@ function FamilyPanel({ family }: { family: ReviewFamily }) {
       {error ? <p className="error-text">{error}</p> : null}
       <div className="review-row-stack">
         {family.rows.map((row) => (
-          <CanonicalProductRow
-            key={row.proposalRowId}
-            row={reviewRowToCanonicalRow(row, family.familyKey, family.mso)}
-          />
+          <ReviewRowCard key={row.proposalRowId} row={row} />
         ))}
       </div>
     </article>
+  )
+}
+
+/**
+ * Review-specific adapter that holds per-row state (proposed-price
+ * draft, operator note) and the approve / reject mutation handlers,
+ * then renders the model-agnostic `CanonicalProductRow` shell with
+ * the appropriate slots.
+ *
+ * Issue #35 slice 4b.1: this used to be `CanonicalProductRow` itself
+ * — that component is now a slot-based layout shell, with the
+ * Review-specific behaviour moved here so `/catalog/pending-purchases`
+ * can adopt the same shell with its own state shape.
+ */
+function ReviewRowCard({ row }: { row: ReviewRow }): JSX.Element {
+  const revalidator = useRevalidator()
+  const [proposedPrice, setProposedPrice] = useState<number | null>(row.pricingLadder?.proposedPrice ?? null)
+  const [draftNote, setDraftNote] = useState<string>(row.operatorNote ?? '')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    setProposedPrice(row.pricingLadder?.proposedPrice ?? null)
+    setDraftNote(row.operatorNote ?? '')
+  }, [row.proposalRowId, row.pricingLadder?.proposedPrice, row.operatorNote])
+
+  const pricingLine = row.lineItems.find((li) => li.fieldPath === 'products.price') ?? null
+
+  async function handleSavePrice() {
+    if (!pricingLine || proposedPrice === null) return
+    setBusy(true)
+    setError(null)
+    try {
+      await mutateJson(
+        `/api/proposal-line-items/${pricingLine.lineItemId}/edit`,
+        MutationAcceptedResponseSchema,
+        {
+          body: JSON.stringify({ editedValue: proposedPrice, expectedVersion: pricingLine.version }),
+          method: 'PATCH',
+        },
+      )
+      await revalidator.revalidate()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not save the edit.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function handleSaveNote() {
+    // Notes are per-line-item; write to the first one so it's surfaced.
+    const first = row.lineItems[0]
+    if (!first) return
+    setBusy(true)
+    setError(null)
+    try {
+      await mutateJson(
+        `/api/proposal-line-items/${first.lineItemId}/note`,
+        MutationAcceptedResponseSchema,
+        { body: JSON.stringify({ note: draftNote.trim().length === 0 ? null : draftNote }), method: 'PATCH' },
+      )
+      await revalidator.revalidate()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not save the note.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function handleDecision(decision: 'approve' | 'reject') {
+    setBusy(true)
+    setError(null)
+    try {
+      for (const li of row.lineItems) {
+        if (li.approvalStatus !== 'pending') continue
+        const response = await mutateJson(
+          `/api/proposal-line-items/${li.lineItemId}/${decision}`,
+          MutationAcceptedResponseSchema,
+          { body: JSON.stringify({ expectedVersion: li.version }), method: 'POST' },
+        )
+        if (response.jobId) await waitForJob(response.jobId)
+      }
+      await revalidator.revalidate()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : `Could not ${decision}.`)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const comparisons: CanonicalProductRowComparisonCell[] = row.comparisons.map((cmp) => ({
+    key: cmp.lineItemId,
+    label: cmp.label,
+    liveText: cmp.liveValueText,
+    proposedText: cmp.proposedValueText,
+    changeKind: cmp.changeKind,
+  }))
+
+  const validationIssues: CanonicalProductRowValidationIssue[] = row.validationIssues.map((issue) => ({
+    key: `${issue.code}-${issue.detail}`,
+    code: issue.code,
+    severity: issue.severity,
+  }))
+
+  return (
+    <CanonicalProductRow
+      title={
+        <Link
+          className="review-group-link"
+          to={buildHeliosModulePath('catalog', `groups/${row.catalogGroupId}`)}
+        >
+          {row.rowTitle}
+        </Link>
+      }
+      subtitle={`${row.comparisons.map((c) => c.label).join(' · ')} · catalog group #${row.catalogGroupId}`}
+      statusPills={
+        <>
+          <Pill tone={rollupTone(row.approvalRollup)}>{row.approvalRollup}</Pill>
+          <Pill tone={row.reconcileStatus === 'drifted' ? 'danger' : 'muted'}>{row.reconcileStatus}</Pill>
+        </>
+      }
+      comparisons={comparisons}
+      pricingLadder={
+        row.pricingLadder ? (
+          <PricingLadderBlock
+            ladder={row.pricingLadder}
+            onPriceChange={pricingLine ? setProposedPrice : undefined}
+          />
+        ) : (
+          <p className="subtle-copy">No LitAlerts evidence cached for this SKU yet.</p>
+        )
+      }
+      overrides={
+        <label className="stack-field">
+          <span>Operator note</span>
+          <textarea onChange={(e) => setDraftNote(e.target.value)} rows={2} value={draftNote} />
+        </label>
+      }
+      validationIssues={validationIssues}
+      errorMessage={error}
+      decisions={
+        <div className="inline-row wrap-row review-actions">
+          {pricingLine && proposedPrice !== null ? (
+            <button
+              className="ghost-button"
+              disabled={busy || proposedPrice === (row.pricingLadder?.proposedPrice ?? null)}
+              onClick={() => void handleSavePrice()}
+              type="button"
+            >
+              Save edit ({formatCurrency(proposedPrice)})
+            </button>
+          ) : null}
+          <button className="ghost-button" disabled={busy} onClick={() => void handleSaveNote()} type="button">
+            Save note
+          </button>
+          <button className="primary-button" disabled={busy} onClick={() => void handleDecision('approve')} type="button">
+            Approve
+          </button>
+          <button className="danger-button" disabled={busy} onClick={() => void handleDecision('reject')} type="button">
+            Reject
+          </button>
+          <Link to={buildHeliosModulePath('catalog', `review-details/proposal_row/${row.proposalRowId}`)}>
+            Open details
+          </Link>
+        </div>
+      }
+      footer={
+        <details className="review-row-details">
+          <summary>Raw line items ({row.lineItems.length})</summary>
+          <ul className="timeline-list compact-list">
+            {row.lineItems.map((li) => (
+              <li key={li.lineItemId}>
+                <code>{li.fieldPath}</code> · v{li.version} · <em>{li.approvalStatus}</em>
+              </li>
+            ))}
+          </ul>
+        </details>
+      }
+    />
+  )
+}
+
+function PricingLadderBlock({
+  ladder,
+  onPriceChange,
+}: {
+  ladder: ReviewRowPricingLadder
+  onPriceChange?: (next: number) => void
+}) {
+  const headHtml = ladder.livePrice !== null
+    ? `<span class="metric">Live ${formatCurrency(ladder.livePrice)}</span>`
+    : ''
+  return (
+    <div className="review-pricing-ladder-block">
+      <CanonicalPricingLadder
+        productId={ladder.productId}
+        livePrice={ladder.livePrice}
+        proposedPrice={ladder.proposedPrice}
+        marketAveragePostTax={ladder.marketAveragePostTax}
+        marketMedianPostTax={ladder.marketMedianPostTax}
+        competitorListings={ladder.competitorListings.map((l, i) => ({
+          listingId: `${l.dispensaryName}-${l.listingName}-${i}`,
+          postTaxPrice: l.postTaxPrice,
+          distanceMiles: l.distanceMiles,
+          dispensaryName: l.dispensaryName,
+          listingName: l.listingName,
+          dispensaryAddress: null,
+          url: l.url,
+          eligibleForPricing: l.eligibleForPricing,
+        }))}
+        variant="detail"
+        headHtml={headHtml}
+        freshness={ladder.evidenceFreshness}
+        onProposedPriceChange={onPriceChange}
+      />
+    </div>
   )
 }

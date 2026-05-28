@@ -1,20 +1,25 @@
-// Issue #35 (slice 5) — shared canonical-product-row module.
+// Issue #35 (slice 4b.1) — shared canonical-product-row module.
 //
-// `/catalog/review` (ReviewPage.tsx) was the first surface to render
-// the canonical row contract (issue #15). This module is the durable
-// home for that row + its sub-components, extracted verbatim from
-// ReviewPage so the next reviewer surface that needs the same
-// before/after comparator + pricing ladder + decision bar — currently
-// `/catalog/pending-purchases`, and later /catalog/repricing,
-// /catalog/market-data, /catalog/promos — can import from one place
-// instead of forking the implementation.
+// Reviewer surfaces (`/catalog/review`, `/catalog/pending-purchases`,
+// and later /catalog/repricing, /catalog/market-data, /catalog/promos)
+// render a common "live → proposed" canonical product row with status
+// pills, comparisons, a pricing-ladder block, an overrides panel and a
+// decision bar. This module provides the model-agnostic layout shell
+// that holds those pieces in a consistent layout, plus the shared
+// helpers (formatters, structured-overrides field + helpers) the
+// surfaces all need.
 //
-// Public surface kept minimal: the row card itself + the formatters
-// the row uses for any caller (currency, tooltip / preview truncation,
-// rollup-tone). Sub-components stay encapsulated; if a caller needs
-// a comparison panel or pricing ladder block in isolation we can
-// promote them then.
-export { CanonicalProductRow } from './CanonicalProductRow.js'
+// The shell itself takes primitive / slot props (title, statusPills,
+// comparisons cells, slots for pricingLadder / overrides / decisions
+// / bodyExtras / footer). Each calling surface adapts its own row
+// schema at the boundary instead of being forced through a single
+// shared row type.
+export {
+  CanonicalProductRow,
+  type CanonicalProductRowComparisonCell,
+  type CanonicalProductRowProps,
+  type CanonicalProductRowValidationIssue,
+} from './CanonicalProductRow.js'
 export {
   formatCurrency,
   rollupTone,

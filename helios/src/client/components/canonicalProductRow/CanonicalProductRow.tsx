@@ -1,255 +1,235 @@
-// Canonical product-review row — UI component.
+// Issue #35 (slice 4b.1) — canonical product-review row, model-agnostic.
 //
-// Renders one CanonicalProductRow (see
-// helios/src/shared/contracts/domain/canonicalProductRow.ts).
+// This component is a *layout shell* for the family of reviewer
+// surfaces that render a "before → after" canonical product row
+// (currently `/catalog/review` and `/catalog/pending-purchases`, with
+// repricing, market-data and promos to follow). It deliberately takes
+// model-agnostic, primitive props (title, comparison cells, slots for
+// pricing ladder / overrides / decisions / bespoke extras) rather than
+// a fixed row schema, so each calling surface can adapt its own row
+// type at the boundary instead of forcing a single union shape.
 //
-// Source-agnostic: this component does NOT know whether the row
-// came from /catalog/review's proposal pipeline, /catalog/pending-
-// purchases, market-drift detection, or operator repricing. All
-// approve / reject / edit / note dispatches go to URLs the row's
-// `actions` object supplied, so each pipeline's server-side adapter
-// chooses the right executor.
+// Each caller is responsible for:
+//   - Loading and editing its own row model (ReviewRow,
+//     PendingPurchaseRow, …) and persisting changes.
+//   - Building primitive `comparisons` cells.
+//   - Providing surface-specific extras (picture options, hierarchy
+//     details, market-listings tables, …) via the `bodyExtras` slot.
+//   - Wiring up the decision bar in the `decisions` slot.
 //
-// State held locally:
-//   - draftPrice: the proposed price the reviewer is editing via
-//     the canonical pricing-ladder slider (snapped to $0.25 by the
-//     slider itself). Reverted to row.pricingLadder.proposedPrice
-//     whenever the row identity changes.
-//   - draftNote: the operator note text the reviewer is typing.
-//
-// Save flows:
-//   - 'Save edit' PATCHes the pricing field's editUrl (when present)
-//     with { editedValue: draftPrice, expectedVersion }.
-//   - 'Save note' PATCHes actions.saveNote.url (when present).
-//   - 'Approve' / 'Reject' POSTs to each entry in actions.{approve,reject}Ops
-//     in order, until all succeed or one fails.
-import { useEffect, useState } from 'react'
-import { Link, useRevalidator } from 'react-router-dom'
+// The shell owns ONLY the shared layout: article wrapper + header
+// (title / subtitle / status pills / header actions), the comparison
+// grid, the pricing-ladder cradle, the validation-pill row, error
+// text and the decisions / footer ordering. That's enough to keep
+// all reviewer surfaces visually consistent without forcing them
+// through a single data model.
+import type { ReactNode } from 'react'
 
-import {
-  MutationAcceptedResponseSchema,
-  type CanonicalFieldProposal,
-  type CanonicalPricingLadder as CanonicalPricingLadderShape,
-  type CanonicalProductRow as CanonicalProductRowType,
-  type CanonicalRowApplyOp,
-} from '../../../shared/contracts/index.js'
-import { mutateJson } from '../../app/fetchJson.js'
-import { waitForJob } from '../../app/jobPolling.js'
-import { CanonicalPricingLadder } from '../CanonicalPricingLadder.js'
 import { Pill } from '../Pill.js'
 
-import { formatCurrency, rollupTone, truncateForTooltip, truncatePreview } from './formatters.js'
+import { truncateForTooltip, truncatePreview } from './formatters.js'
 
-export interface CanonicalProductRowProps {
-  row: CanonicalProductRowType
+/**
+ * One live → proposed comparison cell.
+ *
+ * `changeKind` controls layout: `'description'` (or any value with
+ * very long text) renders in a full-row long-form cell with the
+ * before/after available in a `<details>` summary; everything else
+ * renders inline in a small three-column-style cell.
+ *
+ * Callers should pass plain strings (already rendered for human
+ * consumption, including '—' for empty values). The shell does not
+ * format values.
+ */
+export interface CanonicalProductRowComparisonCell {
+  key: string | number
+  label: string
+  liveText: string
+  proposedText: string
+  changeKind: 'pricing' | 'description' | 'taxonomy' | 'attribute' | 'other'
 }
 
-export function CanonicalProductRow({ row }: CanonicalProductRowProps): JSX.Element {
-  const revalidator = useRevalidator()
-  const [proposedPrice, setProposedPrice] = useState<number | null>(row.pricingLadder?.proposedPrice ?? null)
-  const [draftNote, setDraftNote] = useState<string>(row.operatorNote ?? '')
-  const [busy, setBusy] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+export interface CanonicalProductRowValidationIssue {
+  key: string
+  code: string
+  severity: 'error' | 'warning' | 'info'
+}
 
-  useEffect(() => {
-    setProposedPrice(row.pricingLadder?.proposedPrice ?? null)
-    setDraftNote(row.operatorNote ?? '')
-  }, [row.rowId, row.pricingLadder?.proposedPrice, row.operatorNote])
+export interface CanonicalProductRowProps {
+  /**
+   * Outer-card CSS class. Defaults to `'review-row-card'`. Pages that
+   * want a different visual treatment (e.g., the `review-card` class
+   * used by `/catalog/pending-purchases` with its collapse-on-decision
+   * `review-card--collapsed` modifier) can override it.
+   */
+  className?: string
+  /**
+   * Header CSS class. Defaults to `'review-row-header'`. PendingPurchase
+   * passes `'review-card-header'` to keep its existing flex layout
+   * (title on the left, status pills + actions on the right).
+   */
+  headerClassName?: string
+  /** Primary title rendered in the header (typically a Link). */
+  title: ReactNode
+  /** Optional secondary line under the title. */
+  subtitle?: ReactNode
+  /** Status pills rendered on the right side of the header. */
+  statusPills?: ReactNode
+  /** Extra buttons / actions rendered alongside the status pills. */
+  headerActions?: ReactNode
+  /**
+   * When true, only the header is rendered. The body (comparisons,
+   * ladder, extras, overrides, decisions, footer) is hidden until the
+   * caller toggles it back on. The header pills + actions stay
+   * visible so the reviewer can still see the decision and re-open
+   * the row with a single click.
+   */
+  collapsed?: boolean
+  /** Live → proposed comparison cells. */
+  comparisons?: readonly CanonicalProductRowComparisonCell[]
+  /**
+   * Custom content rendered inside the comparison-grid container,
+   * as an alternative to mapping `comparisons`. Useful for surfaces
+   * (like `/catalog/pending-purchases`) whose top summary band is a
+   * row of single-value tiles rather than live → proposed cells.
+   * Takes precedence over `comparisons` when both are provided.
+   */
+  comparisonsContent?: ReactNode
+  /** Shown when neither `comparisons` nor `comparisonsContent` is provided. */
+  comparisonsEmptyLabel?: ReactNode
+  /** Slot for whichever pricing-ladder variant the caller wants. */
+  pricingLadder?: ReactNode
+  /**
+   * Surface-specific content rendered between the pricing ladder and
+   * the overrides slot (e.g., picture-options grid, hierarchy details,
+   * market listings table).
+   */
+  bodyExtras?: ReactNode
+  /**
+   * Slot for the overrides panel (price / description / image / notes
+   * / structured-data overrides + their save button).
+   */
+  overrides?: ReactNode
+  /** Optional inline error text rendered above the decisions slot. */
+  errorMessage?: string | null
+  /** Optional validation-issue pills. */
+  validationIssues?: readonly CanonicalProductRowValidationIssue[]
+  /** Slot for the decision buttons (Approve / Reject / …). */
+  decisions?: ReactNode
+  /** Slot for any final content after the decisions row. */
+  footer?: ReactNode
+}
 
-  const pricingField = row.fields.find((f) => f.changeKind === 'pricing' && f.editUrl !== null) ?? null
+export function CanonicalProductRow(props: CanonicalProductRowProps): JSX.Element {
+  const {
+    className = 'review-row-card',
+    headerClassName = 'review-row-header',
+    title,
+    subtitle,
+    statusPills,
+    headerActions,
+    collapsed = false,
+    comparisons,
+    comparisonsContent,
+    comparisonsEmptyLabel,
+    pricingLadder,
+    bodyExtras,
+    overrides,
+    errorMessage,
+    validationIssues,
+    decisions,
+    footer,
+  } = props
 
-  async function handleSavePrice() {
-    if (!pricingField || pricingField.editUrl === null || proposedPrice === null) return
-    setBusy(true)
-    setError(null)
-    try {
-      await mutateJson(
-        pricingField.editUrl,
-        MutationAcceptedResponseSchema,
-        {
-          body: JSON.stringify({ editedValue: proposedPrice, expectedVersion: pricingField.expectedVersion }),
-          method: 'PATCH',
-        },
-      )
-      await revalidator.revalidate()
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Could not save the edit.')
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  async function handleSaveNote() {
-    const saveNote = row.actions.saveNote
-    if (!saveNote) return
-    setBusy(true)
-    setError(null)
-    try {
-      await mutateJson(
-        saveNote.url,
-        MutationAcceptedResponseSchema,
-        {
-          body: JSON.stringify({
-            note: draftNote.trim().length === 0 ? null : draftNote,
-            expectedVersion: saveNote.expectedVersion,
-          }),
-          method: 'PATCH',
-        },
-      )
-      await revalidator.revalidate()
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Could not save the note.')
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  async function handleDecision(decision: 'approve' | 'reject') {
-    const ops: CanonicalRowApplyOp[] = decision === 'approve' ? row.actions.approveOps : row.actions.rejectOps
-    if (ops.length === 0) return
-    setBusy(true)
-    setError(null)
-    try {
-      for (const op of ops) {
-        const response = await mutateJson(
-          op.url,
-          MutationAcceptedResponseSchema,
-          { body: JSON.stringify({ expectedVersion: op.expectedVersion }), method: 'POST' },
-        )
-        if (response.jobId) await waitForJob(response.jobId)
-      }
-      await revalidator.revalidate()
-    } catch (e) {
-      setError(e instanceof Error ? e.message : `Could not ${decision}.`)
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  const headerSubtitle =
-    row.fields.map((f) => f.label).join(' · ') +
-    (row.catalogGroupId !== null ? ` · catalog group #${row.catalogGroupId}` : '')
+  const hasComparisons = comparisons !== undefined && comparisons.length > 0
+  const hasValidationIssues = validationIssues !== undefined && validationIssues.length > 0
 
   return (
-    <article className="review-row-card">
-      <header className="review-row-header">
+    <article className={className}>
+      <header className={headerClassName}>
         <div>
-          {row.catalogGroupId !== null ? (
-            <Link className="review-group-link" to={`/catalog/groups/${row.catalogGroupId}`}>
-              {row.rowTitle}
-            </Link>
-          ) : (
-            <strong>{row.rowTitle}</strong>
-          )}
-          <p className="subtle-copy">{headerSubtitle}</p>
+          {title}
+          {subtitle ? <p className="subtle-copy">{subtitle}</p> : null}
         </div>
-        <div className="inline-row wrap-row">
-          <Pill tone={rollupTone(row.approvalRollup)}>{row.approvalRollup}</Pill>
-          <Pill tone={row.reconcileStatus === 'drifted' ? 'danger' : 'muted'}>{row.reconcileStatus}</Pill>
-          {row.mso?.isMSOBrand ? <Pill tone="warning">MSO</Pill> : null}
-        </div>
+        {statusPills !== undefined || headerActions !== undefined ? (
+          <div className="inline-row wrap-row" style={{ gap: '0.4rem', alignItems: 'center' }}>
+            {statusPills}
+            {headerActions}
+          </div>
+        ) : null}
       </header>
 
-      <div className="comparison-grid">
-        {row.fields.map((field) => (
-          <FieldComparisonPanel field={field} key={`${row.rowId}-${field.fieldPath}-${field.label}`} />
-        ))}
-      </div>
+      {collapsed ? null : (
+        <>
+          {comparisonsContent !== undefined ? (
+            <div className="comparison-grid">{comparisonsContent}</div>
+          ) : hasComparisons ? (
+            <div className="comparison-grid">
+              {comparisons!.map((cell) => (
+                <ComparisonPanel cell={cell} key={cell.key} />
+              ))}
+            </div>
+          ) : comparisonsEmptyLabel !== undefined ? (
+            <p className="subtle-copy">{comparisonsEmptyLabel}</p>
+          ) : null}
 
-      {row.pricingLadder ? (
-        <PricingLadderBlock
-          ladder={row.pricingLadder}
-          onPriceChange={pricingField ? setProposedPrice : undefined}
-        />
-      ) : (
-        <p className="subtle-copy">No LitAlerts evidence cached for this SKU yet.</p>
+          {pricingLadder}
+
+          {bodyExtras}
+
+          {hasValidationIssues ? (
+            <div className="inline-row wrap-row">
+              {validationIssues!.map((issue) => (
+                <Pill key={issue.key} tone={issue.severity === 'error' ? 'danger' : 'warning'}>
+                  {issue.code}
+                </Pill>
+              ))}
+            </div>
+          ) : null}
+
+          {overrides}
+
+          {errorMessage ? <p className="error-text">{errorMessage}</p> : null}
+
+          {decisions}
+
+          {footer}
+        </>
       )}
-
-      {row.actions.saveNote !== null ? (
-        <label className="stack-field">
-          <span>Operator note</span>
-          <textarea onChange={(e) => setDraftNote(e.target.value)} rows={2} value={draftNote} />
-        </label>
-      ) : null}
-
-      <ExecutionPreviewPanel preview={row.executionPreview} />
-
-      <div className="inline-row wrap-row">
-        {row.validationIssues.map((issue) => (
-          <Pill key={`${issue.code}-${issue.detail}`} tone={issue.severity === 'error' ? 'danger' : 'warning'}>
-            {issue.code}
-          </Pill>
-        ))}
-      </div>
-
-      {error ? <p className="error-text">{error}</p> : null}
-
-      <div className="inline-row wrap-row review-actions">
-        {pricingField && proposedPrice !== null ? (
-          <button
-            className="ghost-button"
-            disabled={busy || proposedPrice === (row.pricingLadder?.proposedPrice ?? null)}
-            onClick={() => void handleSavePrice()}
-            type="button"
-          >
-            Save edit ({formatCurrency(proposedPrice)})
-          </button>
-        ) : null}
-        {row.actions.saveNote !== null ? (
-          <button className="ghost-button" disabled={busy} onClick={() => void handleSaveNote()} type="button">
-            Save note
-          </button>
-        ) : null}
-        {row.actions.approveOps.length > 0 ? (
-          <button className="primary-button" disabled={busy} onClick={() => void handleDecision('approve')} type="button">
-            Approve
-          </button>
-        ) : null}
-        {row.actions.rejectOps.length > 0 ? (
-          <button className="danger-button" disabled={busy} onClick={() => void handleDecision('reject')} type="button">
-            Reject
-          </button>
-        ) : null}
-        {row.actions.detailsUrl !== null ? (
-          <Link to={row.actions.detailsUrl}>Open details</Link>
-        ) : null}
-      </div>
-
-      <details className="review-row-details">
-        <summary>Row provenance ({row.source.kind})</summary>
-        <ul className="timeline-list compact-list">
-          <li><code>row.id</code> · {row.rowId}</li>
-          <li><code>source</code> · {JSON.stringify(row.source)}</li>
-          {row.fields.map((f) => (
-            <li key={`${f.fieldPath}-${f.label}`}>
-              <code>{f.fieldPath}</code> · v{f.expectedVersion} · <em>{f.approvalStatus}</em>
-            </li>
-          ))}
-        </ul>
-      </details>
     </article>
   )
 }
 
 /**
- * One live → proposed comparison cell. See the older inline doc in
- * ReviewPage history for the long-form / short-form rationale.
+ * Renders one live → proposed comparison cell.
+ *
+ * Short text values (price, taxonomy, attribute strings) render inline in a
+ * three-column grid cell.
+ *
+ * Long-form text values (currently `changeKind === 'description'`, or any
+ * very long text) span the full grid row width on desktop, collapse into a
+ * `<details>` summary on mobile, and keep the full before/after available
+ * inside the open detail body so the reviewer can scan rows without
+ * scrolling past 500-word descriptions.
+ *
+ * The browser `title` tooltip is set to a useful "Live: … → Proposed: …"
+ * preview so hovering a row gives a quick before/after even when collapsed.
  */
-function FieldComparisonPanel({ field }: { field: CanonicalFieldProposal }): JSX.Element {
-  const liveText = field.liveValueText || '—'
-  const proposedText = field.proposedValueText || '—'
+function ComparisonPanel({ cell }: { cell: CanonicalProductRowComparisonCell }): JSX.Element {
+  const liveText = cell.liveText || '—'
+  const proposedText = cell.proposedText || '—'
 
   const isLongForm =
-    field.changeKind === 'description' ||
+    cell.changeKind === 'description' ||
     liveText.length > 220 ||
     proposedText.length > 220
 
-  const tooltip = `${field.label}\n\nLive:\n${truncateForTooltip(liveText)}\n\nProposed:\n${truncateForTooltip(proposedText)}`
+  const tooltip = `${cell.label}\n\nLive:\n${truncateForTooltip(liveText)}\n\nProposed:\n${truncateForTooltip(proposedText)}`
 
   if (!isLongForm) {
     return (
       <div className="value-panel" title={tooltip}>
-        <span>{field.label} · live → proposed</span>
+        <span>{cell.label} · live → proposed</span>
         <p>
           <span className="subtle-copy">{liveText}</span>{' '}
           →{' '}
@@ -262,7 +242,7 @@ function FieldComparisonPanel({ field }: { field: CanonicalFieldProposal }): JSX
   return (
     <details className="value-panel value-panel--full-row value-panel--long-form" title={tooltip}>
       <summary>
-        <span className="value-panel__label">{field.label} · live → proposed</span>
+        <span className="value-panel__label">{cell.label} · live → proposed</span>
         <span className="value-panel__preview">
           <span className="subtle-copy">{truncatePreview(liveText)}</span>{' '}
           →{' '}
@@ -281,82 +261,4 @@ function FieldComparisonPanel({ field }: { field: CanonicalFieldProposal }): JSX
       </div>
     </details>
   )
-}
-
-function PricingLadderBlock({
-  ladder,
-  onPriceChange,
-}: {
-  ladder: CanonicalPricingLadderShape
-  onPriceChange?: (next: number) => void
-}) {
-  const headHtml = ladder.livePrice !== null
-    ? `<span class="metric">Live ${formatCurrency(ladder.livePrice)}</span>`
-    : ''
-  return (
-    <div className="review-pricing-ladder-block">
-      <CanonicalPricingLadder
-        productId={ladder.productId}
-        livePrice={ladder.livePrice}
-        proposedPrice={ladder.proposedPrice}
-        marketAveragePostTax={ladder.marketAveragePostTax}
-        marketMedianPostTax={ladder.marketMedianPostTax}
-        competitorListings={ladder.competitorListings.map((l, i) => ({
-          listingId: `${l.dispensaryName}-${l.listingName}-${i}`,
-          postTaxPrice: l.postTaxPrice,
-          distanceMiles: l.distanceMiles,
-          dispensaryName: l.dispensaryName,
-          listingName: l.listingName,
-          dispensaryAddress: null,
-          url: l.url,
-          eligibleForPricing: l.eligibleForPricing,
-        }))}
-        variant="detail"
-        headHtml={headHtml}
-        freshness={ladder.evidenceFreshness}
-        onProposedPriceChange={onPriceChange}
-      />
-    </div>
-  )
-}
-
-// Tiny preview chip strip — surfaces what 'approve + apply' would
-// actually do so the reviewer isn't surprised. Source-pipeline-
-// supplied via ExecutionPreviewSchema.
-function ExecutionPreviewPanel({ preview }: { preview: CanonicalProductRowType['executionPreview'] }): JSX.Element | null {
-  const hasContent =
-    preview.mechanism !== 'no_op' ||
-    preview.warnings.length > 0 ||
-    preview.needsNewBrand ||
-    preview.needsNewGroup ||
-    preview.needsNewVariant
-  if (!hasContent) return null
-
-  return (
-    <div className="inline-row wrap-row execution-preview" title={preview.summary}>
-      <Pill tone="muted">{mechanismLabel(preview.mechanism)}</Pill>
-      {preview.needsNewBrand ? <Pill tone="warning">new brand</Pill> : null}
-      {preview.needsNewGroup ? <Pill tone="warning">new group</Pill> : null}
-      {preview.needsNewVariant ? <Pill tone="warning">new variant</Pill> : null}
-      {preview.warnings.map((w) => (
-        <Pill key={w} tone="danger">{w}</Pill>
-      ))}
-      <span className="subtle-copy">{preview.summary}</span>
-    </div>
-  )
-}
-
-function mechanismLabel(m: CanonicalProductRowType['executionPreview']['mechanism']): string {
-  switch (m) {
-    case 'direct_catalog_write':
-      return 'catalog write'
-    case 'price_via_promo_action':
-      return 'promo action'
-    case 'create_new_catalog_entities':
-      return 'create catalog entities'
-    case 'mixed':
-      return 'mixed executors'
-    case 'no_op':
-      return 'no-op'
-  }
 }
