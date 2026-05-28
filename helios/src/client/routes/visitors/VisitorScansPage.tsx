@@ -5,14 +5,18 @@
 // Paginated newest-first table backed by GET /api/visitors/scans;
 // supports site / state / postal-prefix / scan-status / document-type
 // / ingest-source / date-range filters. Clicking a row opens a
-// drawer with the full normalised row plus a syntax-highlit JSON
-// view of `raw_envelope`. "Export CSV" hits
-// /api/visitors/scans.csv with the *current* filter — single source
-// of truth, no second query.
+// drawer with the full normalised row plus a JSON view of
+// `raw_envelope`. "Export CSV" hits /api/visitors/scans.csv with
+// the *current* filter — single source of truth, no second query.
 //
-// Per helios AGENTS.md: the table is the answer the page exists to
-// show, so the table is visible by default. Methodology / dev notes
-// live inside a collapsed <details>.
+// Per helios AGENTS.md the table IS the answer, so:
+//   * the table is first/visible by default;
+//   * filters, methodology, and stats are inside collapsed
+//     <details> so they don't shove the table off-screen,
+//     especially on mobile;
+//   * on narrow viewports (≤720px) the table reflows to a
+//     stacked card-list so it stays usable on a phone instead
+//     of forcing a horizontal scroll across 10 columns.
 
 import { useEffect, useMemo, useState } from 'react'
 import { useLoaderData, useSearchParams } from 'react-router-dom'
@@ -44,6 +48,28 @@ function formatName(item: VisitorScanItem): string {
     (p): p is string => p !== null && p.length > 0,
   )
   return parts.length === 0 ? '—' : parts.join(' ')
+}
+
+const FILTER_KEYS = [
+  'siteSlugs',
+  'ingestSources',
+  'states',
+  'postalPrefix',
+  'documentType',
+  'scanStatus',
+  'scannedAfter',
+  'scannedBefore',
+  'limit',
+] as const
+
+function hasActiveFilter(params: URLSearchParams): boolean {
+  for (const key of FILTER_KEYS) {
+    const v = params.get(key)
+    if (v !== null && v.trim().length > 0 && !(key === 'limit' && v === '100')) {
+      return true
+    }
+  }
+  return false
 }
 
 export function VisitorScansPage() {
@@ -89,6 +115,7 @@ export function VisitorScansPage() {
   }, [data.items])
 
   const csvHref = `api/visitors/scans.csv?${searchParams.toString()}`
+  const filtersActive = hasActiveFilter(searchParams)
 
   function handleFilterSubmit(event: React.FormEvent<HTMLFormElement>): void {
     event.preventDefault()
@@ -102,85 +129,140 @@ export function VisitorScansPage() {
     setSearchParams(next)
   }
 
+  function handleClearFilters(): void {
+    setSearchParams(new URLSearchParams())
+  }
+
   return (
-    <section>
-      <div className="page-header">
-        <div>
-          <h2>Visitor Scans</h2>
-          <p className="subtle-copy">
-            Customer / visitor ID check-ins captured by VeriScan at the Bronx and Midtown sites.
-            Newest first. Click a row to inspect the raw envelope.
-          </p>
+    <section className="visitor-scans-page">
+      <header className="vs-header">
+        <h2 className="vs-title">Visitor Scans</h2>
+        <div className="vs-actions">
+          <a className="ghost-button vs-action" href={csvHref}>
+            Export CSV
+          </a>
         </div>
-        <div className="inline-row wrap-row">
-          <Pill tone="muted">{`${data.items.length} shown`}</Pill>
-          {[...counts.bySite.entries()].map(([slug, n]) => (
-            <Pill key={`site-${slug}`} tone="muted">{`${slug}: ${n}`}</Pill>
-          ))}
-          {[...counts.byIngest.entries()].map(([src, n]) => (
-            <Pill key={`src-${src}`} tone={src === 'webhook' ? 'success' : 'muted'}>{`${src}: ${n}`}</Pill>
-          ))}
-          {data.hasMore ? <Pill tone="warning">more rows — narrow filter or page</Pill> : null}
-          <a className="ghost-button" href={csvHref}>Export CSV</a>
-        </div>
+      </header>
+
+      <div className="vs-stats">
+        <Pill tone="muted">{`${data.items.length} shown`}</Pill>
+        {[...counts.bySite.entries()].map(([slug, n]) => (
+          <Pill key={`site-${slug}`} tone="muted">{`${slug}: ${n}`}</Pill>
+        ))}
+        {[...counts.byIngest.entries()].map(([src, n]) => (
+          <Pill
+            key={`src-${src}`}
+            tone={src === 'webhook' ? 'success' : 'muted'}
+          >{`${src}: ${n}`}</Pill>
+        ))}
+        {data.hasMore ? <Pill tone="warning">more rows — narrow filter</Pill> : null}
       </div>
 
-      <form className="filter-row" method="get" onSubmit={handleFilterSubmit}>
-        <select defaultValue={searchParams.get('siteSlugs') ?? ''} name="siteSlugs">
-          <option value="">All sites</option>
-          <option value="bx">Bronx (bx)</option>
-          <option value="mh">Midtown (mh)</option>
-        </select>
-        <select defaultValue={searchParams.get('ingestSources') ?? ''} name="ingestSources">
-          <option value="">Any source</option>
-          <option value="webhook">webhook</option>
-          <option value="backfill">backfill</option>
-        </select>
-        <input
-          defaultValue={searchParams.get('states') ?? ''}
-          name="states"
-          placeholder="State (NY, NJ, …)"
-          maxLength={32}
-        />
-        <input
-          defaultValue={searchParams.get('postalPrefix') ?? ''}
-          name="postalPrefix"
-          placeholder="Postal prefix (100, 112…)"
-          maxLength={10}
-        />
-        <input
-          defaultValue={searchParams.get('documentType') ?? ''}
-          name="documentType"
-          placeholder="Document type"
-        />
-        <input
-          defaultValue={searchParams.get('scanStatus') ?? ''}
-          name="scanStatus"
-          placeholder="Scan status"
-        />
-        <input
-          defaultValue={searchParams.get('scannedAfter') ?? ''}
-          name="scannedAfter"
-          placeholder="Scanned after (ISO)"
-          type="datetime-local"
-        />
-        <input
-          defaultValue={searchParams.get('scannedBefore') ?? ''}
-          name="scannedBefore"
-          placeholder="Scanned before (ISO)"
-          type="datetime-local"
-        />
-        <select defaultValue={searchParams.get('limit') ?? '100'} name="limit">
-          <option value="50">50</option>
-          <option value="100">100</option>
-          <option value="250">250</option>
-          <option value="500">500</option>
-        </select>
-        <button className="ghost-button" type="submit">Filter</button>
-      </form>
+      <details className="vs-filters" open={filtersActive}>
+        <summary>
+          <span>Filters</span>
+          {filtersActive ? <Pill tone="success">active</Pill> : null}
+        </summary>
+        <form className="vs-filter-form" method="get" onSubmit={handleFilterSubmit}>
+          <label className="vs-field">
+            <span>Site</span>
+            <select defaultValue={searchParams.get('siteSlugs') ?? ''} name="siteSlugs">
+              <option value="">All sites</option>
+              <option value="bx">Bronx (bx)</option>
+              <option value="mh">Midtown (mh)</option>
+            </select>
+          </label>
+          <label className="vs-field">
+            <span>Source</span>
+            <select
+              defaultValue={searchParams.get('ingestSources') ?? ''}
+              name="ingestSources"
+            >
+              <option value="">Any source</option>
+              <option value="webhook">webhook</option>
+              <option value="backfill">backfill</option>
+            </select>
+          </label>
+          <label className="vs-field">
+            <span>State</span>
+            <input
+              defaultValue={searchParams.get('states') ?? ''}
+              name="states"
+              placeholder="NY, NJ, …"
+              maxLength={32}
+              inputMode="text"
+              autoCapitalize="characters"
+            />
+          </label>
+          <label className="vs-field">
+            <span>Postal prefix</span>
+            <input
+              defaultValue={searchParams.get('postalPrefix') ?? ''}
+              name="postalPrefix"
+              placeholder="100, 112…"
+              maxLength={10}
+              inputMode="numeric"
+            />
+          </label>
+          <label className="vs-field">
+            <span>Document type</span>
+            <input
+              defaultValue={searchParams.get('documentType') ?? ''}
+              name="documentType"
+              placeholder="any"
+            />
+          </label>
+          <label className="vs-field">
+            <span>Scan status</span>
+            <input
+              defaultValue={searchParams.get('scanStatus') ?? ''}
+              name="scanStatus"
+              placeholder="any"
+            />
+          </label>
+          <label className="vs-field">
+            <span>Scanned after</span>
+            <input
+              defaultValue={searchParams.get('scannedAfter') ?? ''}
+              name="scannedAfter"
+              type="datetime-local"
+            />
+          </label>
+          <label className="vs-field">
+            <span>Scanned before</span>
+            <input
+              defaultValue={searchParams.get('scannedBefore') ?? ''}
+              name="scannedBefore"
+              type="datetime-local"
+            />
+          </label>
+          <label className="vs-field">
+            <span>Page size</span>
+            <select defaultValue={searchParams.get('limit') ?? '100'} name="limit">
+              <option value="50">50</option>
+              <option value="100">100</option>
+              <option value="250">250</option>
+              <option value="500">500</option>
+            </select>
+          </label>
+          <div className="vs-filter-actions">
+            <button className="primary-button vs-action" type="submit">
+              Apply filters
+            </button>
+            <button
+              className="ghost-button vs-action"
+              type="button"
+              onClick={handleClearFilters}
+              disabled={!filtersActive}
+            >
+              Clear
+            </button>
+          </div>
+        </form>
+      </details>
 
       {error ? (
-        <div className="runtime-status-strip" style={{ marginTop: 12 }}>
+        <div className="runtime-status-strip vs-error">
           <div className="runtime-status-item">
             <Pill tone="danger">load failed</Pill>
             <span className="subtle-copy">{error}</span>
@@ -188,63 +270,105 @@ export function VisitorScansPage() {
         </div>
       ) : null}
 
-      <div style={{ marginTop: 12, overflowX: 'auto' }}>
-        <table className="data-table" style={{ width: '100%', borderCollapse: 'collapse' }}>
-          <thead>
-            <tr>
-              <th>Scanned</th>
-              <th>Site</th>
-              <th>Source</th>
-              <th>Name</th>
-              <th>State</th>
-              <th>Postal</th>
-              <th>City</th>
-              <th>Doc type</th>
-              <th>Auth</th>
-              <th>Status</th>
-            </tr>
-          </thead>
-          <tbody>
-            {data.items.length === 0 ? (
-              <tr>
-                <td colSpan={10} className="subtle-copy" style={{ padding: 16, textAlign: 'center' }}>
-                  No matching visitor scans.
-                </td>
-              </tr>
-            ) : (
-              data.items.map((item) => (
-                <tr
-                  key={item.id}
-                  onClick={() => setSelected(item)}
-                  style={{ cursor: 'pointer' }}
-                >
-                  <td>{formatTime(item.scannedAt ?? item.ingestedAt)}</td>
-                  <td>{item.siteSlug}</td>
-                  <td>{item.ingestSource}</td>
-                  <td>{formatName(item)}</td>
-                  <td>{item.state ?? '—'}</td>
-                  <td>{item.postalCode ?? '—'}</td>
-                  <td>{item.city ?? '—'}</td>
-                  <td>{item.documentType ?? '—'}</td>
-                  <td>{item.authenticationStatus ?? '—'}</td>
-                  <td>{item.scanStatus ?? '—'}</td>
-                </tr>
-              ))
-            )}
-          </tbody>
-        </table>
+      <div className="vs-list">
+        {data.items.length === 0 ? (
+          <div className="vs-empty subtle-copy">No matching visitor scans.</div>
+        ) : (
+          <>
+            {/* Wide-viewport: dense table. */}
+            <div className="vs-table-wrap">
+              <table className="data-table vs-table">
+                <thead>
+                  <tr>
+                    <th>Scanned</th>
+                    <th>Site</th>
+                    <th>Source</th>
+                    <th>Name</th>
+                    <th>State</th>
+                    <th>Postal</th>
+                    <th>City</th>
+                    <th>Doc type</th>
+                    <th>Auth</th>
+                    <th>Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {data.items.map((item) => (
+                    <tr
+                      key={item.id}
+                      onClick={() => setSelected(item)}
+                      style={{ cursor: 'pointer' }}
+                    >
+                      <td>{formatTime(item.scannedAt ?? item.ingestedAt)}</td>
+                      <td>{item.siteSlug}</td>
+                      <td>{item.ingestSource}</td>
+                      <td>{formatName(item)}</td>
+                      <td>{item.state ?? '—'}</td>
+                      <td>{item.postalCode ?? '—'}</td>
+                      <td>{item.city ?? '—'}</td>
+                      <td>{item.documentType ?? '—'}</td>
+                      <td>{item.authenticationStatus ?? '—'}</td>
+                      <td>{item.scanStatus ?? '—'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            {/* Narrow-viewport: card list. Same data, no horizontal scroll. */}
+            <ul className="vs-cards">
+              {data.items.map((item) => (
+                <li key={`card-${item.id}`}>
+                  <button
+                    type="button"
+                    className="vs-card"
+                    onClick={() => setSelected(item)}
+                  >
+                    <div className="vs-card-top">
+                      <span className="vs-card-name">{formatName(item)}</span>
+                      <Pill tone={item.ingestSource === 'webhook' ? 'success' : 'muted'}>
+                        {item.siteSlug}
+                      </Pill>
+                    </div>
+                    <div className="vs-card-time">
+                      {formatTime(item.scannedAt ?? item.ingestedAt)}
+                    </div>
+                    <dl className="vs-card-grid">
+                      <dt>State</dt>
+                      <dd>{item.state ?? '—'}</dd>
+                      <dt>Postal</dt>
+                      <dd>{item.postalCode ?? '—'}</dd>
+                      <dt>City</dt>
+                      <dd>{item.city ?? '—'}</dd>
+                      <dt>Doc</dt>
+                      <dd>{item.documentType ?? '—'}</dd>
+                      <dt>Auth</dt>
+                      <dd>{item.authenticationStatus ?? '—'}</dd>
+                      <dt>Status</dt>
+                      <dd>{item.scanStatus ?? '—'}</dd>
+                      <dt>Source</dt>
+                      <dd>{item.ingestSource}</dd>
+                    </dl>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </>
+        )}
       </div>
 
-      <details style={{ marginTop: 24 }}>
+      <details className="vs-about">
         <summary className="subtle-copy">About this page</summary>
-        <div className="subtle-copy" style={{ marginTop: 8 }}>
+        <div className="subtle-copy vs-about-body">
           <p>
             Backed by the <code>visitor_scans</code> table. Live rows arrive via{' '}
-            <code>POST /wh/bx/veriscan/checkin</code> and <code>POST /wh/mh/veriscan/checkin</code>{' '}
-            (handlers in <code>helios/src/server/routes/visitorScans.ts</code>). Historical rows
-            are ingested by the <code>visitor-scans-backfill</code> CLI under{' '}
-            <code>helios/scripts/</code>. The unique <code>(provider, hash_id)</code> constraint
-            collapses webhook + backfill duplicates to one row.
+            <code>POST /wh/bx/veriscan/checkin</code> and{' '}
+            <code>POST /wh/mh/veriscan/checkin</code> (handlers in{' '}
+            <code>helios/src/server/routes/visitorScans.ts</code>). Historical rows are
+            ingested by the <code>visitor-scans-backfill</code> CLI under{' '}
+            <code>helios/scripts/</code>. The unique{' '}
+            <code>(provider, hash_id)</code> constraint collapses webhook + backfill
+            duplicates to one row.
           </p>
           <p>
             Coordinates in this table are <em>not</em> reverse-geocoded — the v1 epic
@@ -268,51 +392,49 @@ interface DrawerProps {
 
 function VisitorScanDrawer({ item, onClose }: DrawerProps): JSX.Element {
   return (
-    <div
-      onClick={onClose}
-      style={{
-        position: 'fixed',
-        inset: 0,
-        background: 'rgba(0,0,0,0.4)',
-        zIndex: 1000,
-        display: 'flex',
-        justifyContent: 'flex-end',
-      }}
-    >
+    <div className="vs-drawer-scrim" onClick={onClose} role="presentation">
       <aside
+        className="vs-drawer"
         onClick={(e) => e.stopPropagation()}
-        style={{
-          background: 'var(--surface, #fff)',
-          width: 'min(800px, 96vw)',
-          padding: 24,
-          overflowY: 'auto',
-          boxShadow: '-4px 0 16px rgba(0,0,0,0.2)',
-        }}
+        role="dialog"
+        aria-label={`Visitor scan ${item.id}`}
       >
-        <div className="page-header" style={{ marginBottom: 12 }}>
+        <div className="vs-drawer-header">
           <div>
-            <h3 style={{ margin: 0 }}>Visitor scan #{item.id}</h3>
-            <p className="subtle-copy" style={{ margin: 0 }}>
-              {item.siteSlug} · {item.ingestSource} · scanned {formatTime(item.scannedAt)}
+            <h3 className="vs-drawer-title">Visitor scan #{item.id}</h3>
+            <p className="subtle-copy vs-drawer-sub">
+              {item.siteSlug} · {item.ingestSource} · scanned{' '}
+              {formatTime(item.scannedAt)}
             </p>
           </div>
-          <button className="ghost-button" type="button" onClick={onClose}>
+          <button className="ghost-button vs-action" type="button" onClick={onClose}>
             Close
           </button>
         </div>
 
-        <dl className="kv-grid" style={{ display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '4px 12px' }}>
-          <dt>hash_id</dt><dd><code>{item.hashId}</code></dd>
-          <dt>name</dt><dd>{formatName(item)}</dd>
-          <dt>address</dt><dd>{item.address ?? '—'}</dd>
+        <dl className="vs-drawer-grid">
+          <dt>hash_id</dt>
+          <dd>
+            <code>{item.hashId}</code>
+          </dd>
+          <dt>name</dt>
+          <dd>{formatName(item)}</dd>
+          <dt>address</dt>
+          <dd>{item.address ?? '—'}</dd>
           <dt>city / state / postal</dt>
           <dd>
-            {[item.city, item.state, item.postalCode].filter((p) => p && p.length > 0).join(', ') || '—'}
+            {[item.city, item.state, item.postalCode]
+              .filter((p) => p && p.length > 0)
+              .join(', ') || '—'}
           </dd>
-          <dt>country</dt><dd>{item.country ?? '—'}</dd>
-          <dt>document type</dt><dd>{item.documentType ?? '—'}</dd>
-          <dt>auth status</dt><dd>{item.authenticationStatus ?? '—'}</dd>
-          <dt>scan status</dt><dd>{item.scanStatus ?? '—'}</dd>
+          <dt>country</dt>
+          <dd>{item.country ?? '—'}</dd>
+          <dt>document type</dt>
+          <dd>{item.documentType ?? '—'}</dd>
+          <dt>auth status</dt>
+          <dd>{item.authenticationStatus ?? '—'}</dd>
+          <dt>scan status</dt>
+          <dd>{item.scanStatus ?? '—'}</dd>
           <dt>document lat/lon</dt>
           <dd>
             {item.latitude !== null && item.longitude !== null
@@ -325,23 +447,18 @@ function VisitorScanDrawer({ item, onClose }: DrawerProps): JSX.Element {
               ? `${item.scanLatitude}, ${item.scanLongitude}`
               : '—'}
           </dd>
-          <dt>ingested at</dt><dd>{formatTime(item.ingestedAt)}</dd>
-          <dt>webhook type</dt><dd>{item.webhookType ?? '—'}</dd>
+          <dt>ingested at</dt>
+          <dd>{formatTime(item.ingestedAt)}</dd>
+          <dt>webhook type</dt>
+          <dd>{item.webhookType ?? '—'}</dd>
         </dl>
 
-        <h4 style={{ marginTop: 20 }}>raw_envelope</h4>
-        <pre
-          style={{
-            background: 'rgba(0,0,0,0.04)',
-            padding: 12,
-            borderRadius: 4,
-            whiteSpace: 'pre-wrap',
-            wordBreak: 'break-word',
-            fontSize: '12px',
-          }}
-        >
-          {JSON.stringify(item.rawEnvelope, null, 2)}
-        </pre>
+        <details className="vs-envelope">
+          <summary>raw_envelope (JSON)</summary>
+          <pre className="vs-envelope-pre">
+            {JSON.stringify(item.rawEnvelope, null, 2)}
+          </pre>
+        </details>
       </aside>
     </div>
   )

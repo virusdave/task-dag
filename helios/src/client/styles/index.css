@@ -4013,3 +4013,377 @@ span.metric-chart-legend-item {
     width: 6rem;
   }
 }
+
+/* =========================================================================
+   /admin/visitors/scans  — VisitorScansPage
+   Mobile-first. The default rules size everything for a phone; a single
+   @media (min-width: 720px) block promotes the layout to the dense desktop
+   table. The table is the answer the page exists to show, so filters and
+   methodology live inside <details> and never displace it above the fold.
+   ========================================================================= */
+.visitor-scans-page {
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+  max-width: 100%;
+}
+
+.visitor-scans-page .vs-header {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.visitor-scans-page .vs-title {
+  margin: 0;
+  font-size: 1.4rem;
+  line-height: 1.2;
+}
+
+.visitor-scans-page .vs-actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+/* Buttons / links inside the page get phone-friendly hit targets without
+   ballooning on desktop. */
+.visitor-scans-page .vs-action {
+  min-height: 44px;
+  padding: 0.55rem 0.95rem;
+  border-radius: 8px;
+  font-size: 0.95rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-decoration: none;
+}
+
+.visitor-scans-page .vs-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 0.5rem;
+}
+
+/* Filter card */
+.visitor-scans-page .vs-filters {
+  border: 1px solid var(--panel-border);
+  border-radius: 10px;
+  background: var(--surface, rgba(255, 250, 241, 0.55));
+  padding: 0;
+  overflow: hidden;
+}
+
+.visitor-scans-page .vs-filters > summary {
+  list-style: none;
+  cursor: pointer;
+  padding: 0.85rem 1rem;
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  font-weight: 600;
+  min-height: 48px;
+  user-select: none;
+}
+
+.visitor-scans-page .vs-filters > summary::-webkit-details-marker {
+  display: none;
+}
+
+.visitor-scans-page .vs-filters > summary::before {
+  content: '▸';
+  display: inline-block;
+  transition: transform 0.15s ease;
+  color: var(--text-muted);
+  font-size: 0.9rem;
+}
+
+.visitor-scans-page .vs-filters[open] > summary::before {
+  transform: rotate(90deg);
+}
+
+.visitor-scans-page .vs-filter-form {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 0.65rem;
+  padding: 0.25rem 1rem 1rem;
+  border-top: 1px solid var(--panel-border);
+}
+
+.visitor-scans-page .vs-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+.visitor-scans-page .vs-field > input,
+.visitor-scans-page .vs-field > select {
+  min-height: 44px;
+  width: 100%;
+  padding: 0.55rem 0.7rem;
+  font-size: 1rem;
+  border: 1px solid var(--control-border);
+  border-radius: 8px;
+  background: var(--surface, #fff);
+  color: inherit;
+  box-sizing: border-box;
+}
+
+.visitor-scans-page .vs-filter-actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-top: 0.5rem;
+}
+
+.visitor-scans-page .vs-filter-actions .vs-action {
+  flex: 1 1 140px;
+}
+
+.visitor-scans-page .vs-error {
+  margin-top: 0;
+}
+
+/* Empty state */
+.visitor-scans-page .vs-empty {
+  padding: 1.5rem;
+  text-align: center;
+  border: 1px dashed var(--panel-border);
+  border-radius: 10px;
+}
+
+/* Mobile: card list visible, table hidden. */
+.visitor-scans-page .vs-table-wrap {
+  display: none;
+}
+
+.visitor-scans-page .vs-cards {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.55rem;
+}
+
+.visitor-scans-page .vs-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  width: 100%;
+  text-align: left;
+  padding: 0.85rem 0.95rem;
+  border: 1px solid var(--panel-border);
+  border-radius: 10px;
+  background: var(--surface, #fff);
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+}
+
+.visitor-scans-page .vs-card:active {
+  background: rgba(120, 86, 48, 0.06);
+}
+
+.visitor-scans-page .vs-card-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.visitor-scans-page .vs-card-name {
+  font-weight: 600;
+  font-size: 1rem;
+  line-height: 1.25;
+}
+
+.visitor-scans-page .vs-card-time {
+  font-size: 0.82rem;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.visitor-scans-page .vs-card-grid {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  column-gap: 0.6rem;
+  row-gap: 0.18rem;
+  margin: 0;
+  font-size: 0.88rem;
+}
+
+.visitor-scans-page .vs-card-grid > dt {
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.visitor-scans-page .vs-card-grid > dd {
+  margin: 0;
+  word-break: break-word;
+}
+
+/* About-this-page */
+.visitor-scans-page .vs-about {
+  margin-top: 0.5rem;
+  border-top: 1px dashed var(--panel-border);
+  padding-top: 0.75rem;
+}
+
+.visitor-scans-page .vs-about > summary {
+  cursor: pointer;
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+}
+
+.visitor-scans-page .vs-about-body {
+  margin-top: 0.5rem;
+}
+
+/* Drawer — mobile defaults to a full-height bottom-anchored sheet that
+   leaves a strip of scrim at top so the operator can dismiss with one
+   tap; ≥720px it becomes a right-anchored side drawer. */
+.visitor-scans-page .vs-drawer-scrim,
+.vs-drawer-scrim {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  z-index: 1000;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+}
+
+.vs-drawer {
+  background: var(--surface, #fff);
+  color: inherit;
+  width: 100%;
+  max-height: 92vh;
+  padding: 1rem 1rem 1.25rem;
+  overflow-y: auto;
+  border-top-left-radius: 16px;
+  border-top-right-radius: 16px;
+  box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.25);
+  box-sizing: border-box;
+}
+
+.vs-drawer-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 0.75rem;
+  margin-bottom: 0.85rem;
+}
+
+.vs-drawer-title {
+  margin: 0;
+  font-size: 1.1rem;
+}
+
+.vs-drawer-sub {
+  margin: 0.15rem 0 0;
+}
+
+.vs-drawer-grid {
+  display: grid;
+  grid-template-columns: minmax(110px, auto) 1fr;
+  gap: 0.35rem 0.85rem;
+  margin: 0;
+  font-size: 0.92rem;
+}
+
+.vs-drawer-grid > dt {
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.vs-drawer-grid > dd {
+  margin: 0;
+  word-break: break-word;
+}
+
+.vs-envelope {
+  margin-top: 1rem;
+}
+
+.vs-envelope > summary {
+  cursor: pointer;
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  font-weight: 600;
+}
+
+.vs-envelope-pre {
+  background: rgba(0, 0, 0, 0.05);
+  padding: 0.75rem;
+  border-radius: 6px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 0.78rem;
+  max-height: 50vh;
+  overflow: auto;
+  margin: 0.5rem 0 0;
+}
+
+/* ------- Desktop / tablet promotions ------- */
+@media (min-width: 720px) {
+  .visitor-scans-page {
+    gap: 1rem;
+  }
+  .visitor-scans-page .vs-title {
+    font-size: 1.6rem;
+  }
+  .visitor-scans-page .vs-filter-form {
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    align-items: end;
+  }
+  .visitor-scans-page .vs-filter-actions {
+    grid-column: 1 / -1;
+    justify-content: flex-end;
+    margin-top: 0;
+  }
+  .visitor-scans-page .vs-filter-actions .vs-action {
+    flex: 0 0 auto;
+  }
+  .visitor-scans-page .vs-cards {
+    display: none;
+  }
+  .visitor-scans-page .vs-table-wrap {
+    display: block;
+    overflow-x: auto;
+    border: 1px solid var(--panel-border);
+    border-radius: 10px;
+  }
+  .visitor-scans-page .vs-table {
+    margin: 0;
+  }
+  .visitor-scans-page .vs-table th,
+  .visitor-scans-page .vs-table td {
+    padding: 0.7rem 0.85rem;
+  }
+  .visitor-scans-page .vs-table tbody tr:hover {
+    background: rgba(120, 86, 48, 0.05);
+  }
+
+  /* Side-drawer on wide screens. */
+  .visitor-scans-page .vs-drawer-scrim,
+  .vs-drawer-scrim {
+    justify-content: flex-end;
+    align-items: stretch;
+  }
+  .vs-drawer {
+    width: min(720px, 92vw);
+    max-height: none;
+    height: 100vh;
+    border-top-left-radius: 0;
+    border-top-right-radius: 0;
+    padding: 1.5rem;
+    box-shadow: -4px 0 20px rgba(0, 0, 0, 0.25);
+  }
+}
