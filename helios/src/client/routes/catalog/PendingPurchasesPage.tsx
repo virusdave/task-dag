@@ -1002,6 +1002,17 @@ function PendingPurchaseRowCard(
     }
   }
 
+  // Detect whether the reviewer has any in-flight override drafts so we
+  // can default the "Overrides" details to open in that case (otherwise
+  // it stays collapsed to keep the row scannable on mobile).
+  const hasDraftOverrides = (
+    draftPrice !== readDraftPrice(item)
+    || draftDescription !== (item.editedProposedDescription ?? item.proposedDescription ?? '')
+    || draftImageUrl !== (item.editedPrimaryImageUrl ?? item.primaryImageUrl ?? '')
+    || draftNotes !== (item.notes ?? '')
+  )
+  const reviewDetailsHref = buildHeliosModulePath('catalog', `review-details/pending_purchase_row/${item.rowId}`)
+
   return (
     <article className="review-card">
       <div className="review-card-header">
@@ -1010,17 +1021,21 @@ function PendingPurchaseRowCard(
           <p className="subtle-copy">
             {item.siteLabel} · {item.targetBrand ?? 'No brand'} · {item.targetVariantName ?? item.targetGroupName ?? 'No target variant'}
           </p>
-          <p className="subtle-copy">
-            <Link to={buildHeliosModulePath('catalog', `review-details/pending_purchase_row/${item.rowId}`)} target="_blank" rel="noopener noreferrer">
-              Review details (comments, annotations, re-run, fail)
-            </Link>
-          </p>
         </div>
-        <div className="inline-row wrap-row">
+        <div className="inline-row wrap-row" style={{ gap: '0.4rem', alignItems: 'center' }}>
           <Pill tone={approvalTone(item.approvalStatus)}>{item.approvalStatus}</Pill>
           <Pill tone={applyStatusTone(item.lastApplyStatus)}>{item.lastApplyStatus.replaceAll('_', ' ')}</Pill>
           <Pill tone={mappingStatusTone(item.mappingStatus)}>{item.mappingStatus.replaceAll('_', ' ')}</Pill>
           <Pill tone="muted">{`v${item.version}`}</Pill>
+          <a
+            className="ghost-button review-card-open-details"
+            href={reviewDetailsHref}
+            target="_blank"
+            rel="noopener noreferrer"
+            title="Open the full per-row details page (comments, annotations, re-run, fail) in a new tab"
+          >
+            Open details ↗
+          </a>
         </div>
       </div>
 
@@ -1144,9 +1159,9 @@ function PendingPurchaseRowCard(
           <PendingValuePanel label="Reuse product id" value={item.reuseProductId ? String(item.reuseProductId) : '—'} />
         </div>
       </details>
-      {(hasPricingLadder || item.marketListings.length > 0 || item.marketNote || item.publicSources.length > 0) ? (
-        <details>
-          <summary>Pricing support details</summary>
+      {(item.marketListings.length > 0 || item.marketNote || item.marketSearchTerm || item.publicSources.length > 0) ? (
+        <details open className="pending-purchase-market-table-details">
+          <summary>Top competitor listings ({item.marketListings.length})</summary>
           <div className="pending-purchase-pricing-support">
             <div className="pricing-metric-grid">
               <PendingValuePanel label="Reviewed price" value={formatCurrency(displayedPrice)} />
@@ -1154,78 +1169,70 @@ function PendingPurchaseRowCard(
               <PendingValuePanel label="Market avg" value={formatCurrency(item.averageCompetitorPostTaxPrice)} />
               <PendingValuePanel label="Market median" value={formatCurrency(item.marketMedianPostTaxPrice)} />
             </div>
-            {hasPricingLadder ? (
-              <CanonicalPricingLadder
-                productId={item.rowId}
-                livePrice={item.currentPrice}
-                proposedPrice={displayedPrice}
-                marketAveragePostTax={item.averageCompetitorPostTaxPrice}
-                marketMedianPostTax={item.marketMedianPostTaxPrice}
-                competitorListings={mapToCompetitorListings(item.marketListings)}
-                variant="compact"
-                onProposedPriceChange={editingLocked ? undefined : (next) => setDraftPrice(next.toFixed(2))}
-              />
-            ) : null}
             {item.marketNote ? <p className="subtle-copy">{item.marketNote}</p> : null}
             {item.marketSearchTerm ? <p className="subtle-copy">Lit Alerts search: {item.marketSearchTerm}</p> : null}
             {item.marketListings.length > 0 ? (
-              <div>
-                <h4 style={{ marginBottom: '0.5rem' }}>Lit Alerts competitor listings</h4>
-                <ul className="timeline-list compact-list">
-                  {item.marketListings.map((listing, index) => {
-                    const listingImage = listing.imageUrl ?? null
-                    const isSelectedImage = listingImage !== null && listingImage === draftImageUrl
-                    return (
-                      <li key={buildPendingPurchaseMarketListingKey(listing, index)} style={{ display: 'flex', gap: '0.5rem', alignItems: 'flex-start' }}>
-                        {listingImage ? (
-                          <button
-                            disabled={editingLocked}
-                            onClick={() => setDraftImageUrl(listingImage)}
-                            title={isSelectedImage ? 'This is the selected primary image' : 'Use this listing image as the primary image'}
-                            type="button"
-                            style={{
-                              padding: 0,
-                              border: isSelectedImage ? '2px solid #2563eb' : '1px solid #ddd',
-                              borderRadius: '3px',
-                              background: 'transparent',
-                              cursor: editingLocked ? 'not-allowed' : 'pointer',
-                              flex: '0 0 auto',
-                              lineHeight: 0,
-                            }}
-                          >
-                            <HoverZoomImage
-                              alt=""
-                              src={listingImage}
-                              style={{ width: '2.25rem', height: '2.25rem', objectFit: 'cover', borderRadius: '2px', display: 'block' }}
-                            />
-                          </button>
-                        ) : null}
-                        <div style={{ flex: 1, minWidth: 0 }}>
-                          <strong>{listing.dispensaryName}</strong>
-                          <div className="subtle-copy">{listing.listingName}</div>
-                          <div className="subtle-copy">
-                            {formatCurrency(listing.postTaxPrice)} post-tax · {formatCurrency(listing.preTaxPrice)} pre-tax · {formatPendingPurchaseDistanceBandLabel(listing.distanceBand, listing.distanceMiles)} · {listing.source}
-                          </div>
-                          {!listing.eligibleForPricing && listing.exclusionReason ? <div className="subtle-copy">{listing.exclusionReason}</div> : null}
-                          {listing.url ? <a href={listing.url} rel="noreferrer" target="_blank">Open source listing</a> : null}
-                          {listingImage ? (
-                            <div>
+              <div className="pending-purchase-listings-table-wrap">
+                <table className="pending-purchase-listings-table">
+                  <thead>
+                    <tr>
+                      <th scope="col" className="pp-col-image" />
+                      <th scope="col">Dispensary / listing</th>
+                      <th scope="col" className="pp-col-num">Post-tax</th>
+                      <th scope="col" className="pp-col-num">Pre-tax</th>
+                      <th scope="col">Distance</th>
+                      <th scope="col">Match</th>
+                      <th scope="col" className="pp-col-source"></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {item.marketListings.map((listing, index) => {
+                      const listingImage = listing.imageUrl ?? null
+                      const isSelectedImage = listingImage !== null && listingImage === draftImageUrl
+                      return (
+                        <tr key={buildPendingPurchaseMarketListingKey(listing, index)} className={!listing.eligibleForPricing ? 'pp-listing-row-excluded' : ''}>
+                          <td className="pp-col-image">
+                            {listingImage ? (
                               <button
-                                className="ghost-button"
-                                disabled={editingLocked || isSelectedImage}
+                                disabled={editingLocked}
                                 onClick={() => setDraftImageUrl(listingImage)}
+                                title={isSelectedImage ? 'Selected as primary image' : 'Click to use as primary image'}
                                 type="button"
-                                style={{ marginTop: '0.25rem', fontSize: '0.78rem', padding: '0.1rem 0.4rem' }}
+                                className="pp-listing-thumb-button"
+                                style={{
+                                  border: isSelectedImage ? '2px solid #2563eb' : '1px solid #ddd',
+                                  cursor: editingLocked ? 'not-allowed' : isSelectedImage ? 'default' : 'pointer',
+                                }}
                               >
-                                {isSelectedImage ? 'Selected as primary image' : 'Use this image'}
+                                <HoverZoomImage
+                                  alt=""
+                                  src={listingImage}
+                                  style={{ width: '2.6rem', height: '2.6rem', objectFit: 'cover', borderRadius: '2px', display: 'block' }}
+                                />
                               </button>
-                            </div>
-                          ) : null}
-                        </div>
-                      </li>
-                    )
-                  })}
-                </ul>
+                            ) : null}
+                          </td>
+                          <td>
+                            <div><strong>{listing.dispensaryName}</strong></div>
+                            <div className="subtle-copy">{listing.listingName}</div>
+                            {!listing.eligibleForPricing && listing.exclusionReason ? (
+                              <div className="subtle-copy">{listing.exclusionReason}</div>
+                            ) : null}
+                          </td>
+                          <td className="pp-col-num">{formatCurrency(listing.postTaxPrice)}</td>
+                          <td className="pp-col-num">{formatCurrency(listing.preTaxPrice)}</td>
+                          <td>{formatPendingPurchaseDistanceBandLabel(listing.distanceBand, listing.distanceMiles)}</td>
+                          <td><span className={`pp-listing-match-tier pp-listing-match-${listing.matchTier}`}>{listing.matchTier}</span> · {listing.source}</td>
+                          <td className="pp-col-source">
+                            {listing.url ? (
+                              <a href={listing.url} rel="noreferrer" target="_blank" title="Open source listing in a new tab">↗</a>
+                            ) : null}
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
               </div>
             ) : item.publicSources.length > 0 ? (
               <div>
@@ -1264,48 +1271,93 @@ function PendingPurchaseRowCard(
         </label>
       ) : null}
 
-      <label className="stack-field">
-        <span>Override proposed price</span>
-        <input disabled={editingLocked} inputMode="decimal" onChange={(event) => setDraftPrice(event.currentTarget.value)} type="number" value={draftPrice} />
-      </label>
+      {/* All manual overrides live in one collapsed disclosure so the
+          row stays scannable by default. Default-opens when the reviewer
+          already has unsaved draft overrides queued, so they don't lose
+          sight of their work after a re-render. The "Override structured
+          data" section is informational for now — editing parsed brand /
+          variant / pack-size etc. against the existing apply pipeline
+          needs new `edited_target_*` shadow columns + a migration, so
+          for the moment the inputs are disabled with an explanatory
+          message. */}
+      <details className="pending-purchase-overrides" open={hasDraftOverrides}>
+        <summary>Overrides{hasDraftOverrides ? ' · unsaved changes' : ''}</summary>
 
-      <label className="stack-field">
-        <span>Override proposed description</span>
-        <textarea disabled={editingLocked} onChange={(event) => setDraftDescription(event.currentTarget.value)} rows={5} value={draftDescription} />
-      </label>
+        <label className="stack-field">
+          <span>Override proposed price</span>
+          <input
+            disabled={editingLocked}
+            inputMode="decimal"
+            min={0}
+            onChange={(event) => setDraftPrice(event.currentTarget.value)}
+            step={0.25}
+            type="number"
+            value={draftPrice}
+          />
+        </label>
 
-      <label className="stack-field">
-        <span>Override primary image URL</span>
-        <input disabled={editingLocked} onChange={(event) => setDraftImageUrl(event.currentTarget.value)} value={draftImageUrl} />
-      </label>
+        <label className="stack-field">
+          <span>Override proposed description</span>
+          <textarea disabled={editingLocked} onChange={(event) => setDraftDescription(event.currentTarget.value)} rows={5} value={draftDescription} />
+        </label>
 
-      <label className="stack-field">
-        <span>Operator notes override</span>
-        <textarea disabled={editingLocked} onChange={(event) => setDraftNotes(event.currentTarget.value)} rows={2} value={draftNotes} />
-      </label>
-      {editingLocked ? (
-        <p className="subtle-copy">
-          {isApplyLocked
-            ? 'This row is already queued in an apply request. Wait for that request to finish before editing it again.'
-            : 'Return this approved row to pending review before editing its overrides.'}
-        </p>
-      ) : null}
+        <label className="stack-field">
+          <span>Override primary image URL</span>
+          <input disabled={editingLocked} onChange={(event) => setDraftImageUrl(event.currentTarget.value)} value={draftImageUrl} />
+        </label>
 
-      {item.effectivePrimaryImageUrl ? (
-        <p className="subtle-copy">
-          Effective image: <a href={item.effectivePrimaryImageUrl} rel="noreferrer" target="_blank">Open image</a>
-          {item.primaryImageSource ? ` · ${item.primaryImageSource}` : ''}
-        </p>
-      ) : null}
+        <label className="stack-field">
+          <span>Operator notes override</span>
+          <textarea disabled={editingLocked} onChange={(event) => setDraftNotes(event.currentTarget.value)} rows={2} value={draftNotes} />
+        </label>
+
+        {editingLocked ? (
+          <p className="subtle-copy">
+            {isApplyLocked
+              ? 'This row is already queued in an apply request. Wait for that request to finish before editing it again.'
+              : 'Return this approved row to pending review before editing its overrides.'}
+          </p>
+        ) : null}
+
+        {item.effectivePrimaryImageUrl ? (
+          <p className="subtle-copy">
+            Effective image: <a href={item.effectivePrimaryImageUrl} rel="noreferrer" target="_blank">Open image</a>
+            {item.primaryImageSource ? ` · ${item.primaryImageSource}` : ''}
+          </p>
+        ) : null}
+
+        {canEdit ? (
+          <div className="inline-row wrap-row review-actions">
+            <button className="primary-button" disabled={isSaving || editingLocked} onClick={() => void handleSave()} type="button">
+              {isSaving ? 'Saving…' : 'Save overrides'}
+            </button>
+          </div>
+        ) : null}
+
+        <details className="pending-purchase-overrides-structured">
+          <summary>Override structured data (brand, variant, pack size…)</summary>
+          <p className="subtle-copy">
+            Editing parsed brand / target variant / pack size / pack count / strain in-place
+            requires <code>edited_target_*</code> shadow columns and a migration on
+            <code> pending_purchase_rows</code> so the existing apply pipeline can read the
+            override without losing the parser's original guess. The inputs below preview the
+            current parsed values and are intentionally disabled until that migration ships.
+            For now, structured fixes must go through the parser-rules path
+            (<a href={buildHeliosModulePath('config', 'parsing/pending-purchases')} target="_blank" rel="noopener noreferrer">Config → Parsing → Pending purchases</a>)
+            so the correction is replayable.
+          </p>
+          <div className="pending-purchase-hierarchy-grid">
+            <StructuredOverrideField label="Brand" value={item.targetBrand} />
+            <StructuredOverrideField label="Group / line" value={item.targetGroupName} />
+            <StructuredOverrideField label="Variant" value={item.targetVariantName} />
+            <StructuredOverrideField label="Size" value={item.targetSize} />
+            <StructuredOverrideField label="Pack count" value={item.targetPackCount ? String(item.targetPackCount) : null} />
+            <StructuredOverrideField label="Strain" value={item.targetStrain} />
+          </div>
+        </details>
+      </details>
+
       {errorMessage ? <p className="error-text">{errorMessage}</p> : null}
-
-      {canEdit ? (
-        <div className="inline-row wrap-row review-actions">
-          <button className="primary-button" disabled={isSaving || editingLocked} onClick={() => void handleSave()} type="button">
-            {isSaving ? 'Saving…' : 'Save overrides'}
-          </button>
-        </div>
-      ) : null}
       {canApprove ? (
         <div className="inline-row wrap-row review-actions">
           {item.approvalStatus !== 'approved' ? (
@@ -1512,8 +1564,11 @@ function HoverZoomImage({
   alt,
   src,
   style,
-  zoomedSize = 320,
-  delayMs = 5000,
+  zoomedSize = 360,
+  // Short delay so reviewers actually see the zoom on a brief hover
+  // (the previous 5s threshold was effectively invisible — the user
+  // would move off the thumbnail long before the popup ever showed).
+  delayMs = 350,
 }: {
   alt: string
   src: string
@@ -1616,6 +1671,20 @@ function HoverZoomImage({
         </div>
       ) : null}
     </>
+  )
+}
+
+function StructuredOverrideField({ label, value }: { label: string; value: string | null }): JSX.Element {
+  return (
+    <label className="stack-field">
+      <span>{label}</span>
+      <input
+        disabled
+        defaultValue={value ?? ''}
+        placeholder={value === null ? '—' : ''}
+        title="Editing structured fields is gated on the edited_target_* migration — see the explainer above."
+      />
+    </label>
   )
 }
 

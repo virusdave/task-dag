@@ -719,6 +719,115 @@ pre {
   margin-top: 0.85rem;
 }
 
+/* Competitor listings table — used inside the "Top competitor listings"
+ * <details> on every PendingPurchaseRowCard. Replaces the prior
+ * bullet-list display so reviewers can scan dispensary, prices,
+ * distance, and source in tabular columns and click thumbnails to
+ * adopt them as the primary image. */
+.pending-purchase-listings-table-wrap {
+  overflow-x: auto;
+  margin-top: 0.5rem;
+}
+
+.pending-purchase-listings-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.92rem;
+}
+
+.pending-purchase-listings-table thead th {
+  text-align: left;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  padding: 0.35rem 0.5rem;
+  border-bottom: 1px solid var(--panel-border);
+}
+
+.pending-purchase-listings-table tbody td {
+  padding: 0.45rem 0.5rem;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.05);
+  vertical-align: top;
+}
+
+.pending-purchase-listings-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.pending-purchase-listings-table .pp-col-num {
+  text-align: right;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.pending-purchase-listings-table .pp-col-image {
+  width: 3rem;
+  padding-right: 0.3rem;
+}
+
+.pending-purchase-listings-table .pp-col-source {
+  width: 1.6rem;
+  text-align: center;
+}
+
+.pending-purchase-listings-table .pp-listing-row-excluded {
+  opacity: 0.55;
+}
+
+.pp-listing-thumb-button {
+  padding: 0;
+  border-radius: 4px;
+  background: transparent;
+  line-height: 0;
+}
+
+.pp-listing-match-tier {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.pp-listing-match-exact { color: var(--accent-strong, #0a7a35); }
+.pp-listing-match-fallback { color: var(--text-muted); }
+.pp-listing-match-weak { color: var(--warning-strong, #b06800); }
+
+/* Per-row "Overrides" disclosure: keeps the 4 manual-override fields
+ * (price, description, image URL, notes) tucked away by default so the
+ * row card stays scannable. Defaults open whenever the reviewer has
+ * unsaved drafts. */
+.pending-purchase-overrides {
+  border-top: 1px solid var(--panel-border);
+  padding-top: 0.6rem;
+  margin-top: 0.6rem;
+}
+
+.pending-purchase-overrides > summary {
+  cursor: pointer;
+  font-weight: 600;
+  padding: 0.3rem 0;
+}
+
+.pending-purchase-overrides .stack-field {
+  margin-bottom: 0.6rem;
+}
+
+.pending-purchase-overrides-structured {
+  margin-top: 0.6rem;
+  padding-top: 0.4rem;
+  border-top: 1px dashed var(--panel-border);
+}
+
+.pending-purchase-overrides-structured > summary {
+  cursor: pointer;
+  padding: 0.25rem 0;
+}
+
+.review-card-open-details {
+  font-size: 0.78rem;
+  padding: 0.3rem 0.55rem;
+  white-space: nowrap;
+}
+
 /* ───────────────────────────────────────────────────────────────────────────
  * Redesigned pending-purchases page (catalog/pending-purchases). Reviewer
  * lands directly on a scrollable, filterable archive of every produced
