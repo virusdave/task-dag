@@ -1,15 +1,48 @@
 # Canonical product-review row
 
 This document defines the **structural + visual contract** of "a product
-being reviewed" in helios. It is the cross-surface contract for the new
-`/catalog/review` family-grouped queue (issue #15) and for every future
-review surface we expect to share the same row (pending purchases,
-repricing runs, market-data matches, promo previews).
+being reviewed" in helios. It is the cross-surface contract for
+`/catalog/review` (issue #15, family-grouped queue), for
+`/catalog/pending-purchases` (issue #35), and for every future reviewer
+surface we expect to share the same row (operator-selected repricing,
+market-drift detection, promo previews, …).
 
 If you are building a new reviewer surface that shows "here is a SKU and
 the proposed change to it", this is the row you render. If you find
 yourself reinventing the visual or the data shape, stop and reuse this
 contract instead.
+
+## Where the canonical row sits
+
+```diagram
+   ╭────────────────────────────╮              ╭────────────────────────────╮
+   │ Ingestion pipelines        │              │ Execution mechanisms       │
+   │ (produce 'before' +        │   ╭──────╮   │ (apply 'approved' rows)    │
+   │  'proposed' state)         │──▶│ ROW  │──▶│                            │
+   │                            │   ╰──────╯   │                            │
+   │  • new purchases           │              │  • direct catalog write    │
+   │  • operator-selected       │              │  • price via promo action  │
+   │    repricing               │              │  • create new catalog      │
+   │  • market-drift detection  │              │    entities                │
+   │  • …                       │              │  • mixed                   │
+   ╰────────────────────────────╯              ╰────────────────────────────╯
+```
+
+The canonical row is the **source-agnostic** shape that sits in the
+middle. Each ingestion pipeline's server-side adapter converts its
+own records into `CanonicalProductRow` values; each row's `actions.*`
+URLs and `executionPreview.mechanism` tell the reviewer (and the
+apply layer) which executor would fire on approve. The UI doesn't
+know — and doesn't need to know — which pipeline produced the row.
+
+The implementation lives at:
+
+- Domain schema:
+  [`helios/src/shared/contracts/domain/canonicalProductRow.ts`](../../../helios/src/shared/contracts/domain/canonicalProductRow.ts)
+- Adapter pattern (proposal-row pipeline → canonical):
+  [`helios/src/shared/contracts/domain/canonicalProductRow.proposalAdapter.ts`](../../../helios/src/shared/contracts/domain/canonicalProductRow.proposalAdapter.ts)
+- React component:
+  [`helios/src/client/components/canonicalProductRow/`](../../../helios/src/client/components/canonicalProductRow/)
 
 ## TL;DR
 
@@ -66,7 +99,50 @@ display surfaces the SKU that is actually being reviewed.
 
 ## Data contract
 
-The server emits, per family panel:
+The authoritative shape lives in
+[`helios/src/shared/contracts/domain/canonicalProductRow.ts`](../../../helios/src/shared/contracts/domain/canonicalProductRow.ts)
+as Zod schemas (`CanonicalProductRowSchema`, `CanonicalFieldProposalSchema`,
+`RowSourceSchema`, `ExecutionPreviewSchema`, etc.). The diagram below
+is a hand-rolled reference for orientation; the schemas are the source
+of truth.
+
+### Wiring a new ingestion pipeline
+
+1. Add a variant to `RowSourceSchema`'s discriminated union (e.g.
+   `{ kind: 'operator_repricing', sessionId, userId }`).
+2. Write a server-side mapper that produces `CanonicalProductRow`
+   values from the pipeline's records — populate `actions.approveOps`
+   / `actions.rejectOps` / `actions.saveNote` / `actions.detailsUrl`
+   with the URLs for the executor you want to dispatch to, and set
+   `executionPreview.mechanism` so the reviewer sees what would
+   happen on apply.
+3. The reviewer UI needs no changes — it consumes
+   `CanonicalProductRow` and POSTs/PATCHes to the URLs the row
+   supplied.
+
+`canonicalProductRow.proposalAdapter.ts` is the reference adapter,
+converting the existing `ReviewRow` proposal-pipeline shape into the
+canonical row. Use it as a template for new pipelines.
+
+### Wiring a new executor
+
+1. Add a variant to `ExecutionMechanismSchema` (e.g.
+   `'price_via_promo_action'`).
+2. Pipeline mappers that want to dispatch to it set
+   `executionPreview.mechanism` accordingly.
+3. The apply layer's source-specific writers branch on
+   `source.kind` to look the row's source records back up, and on
+   `executionPreview.mechanism` to pick which side-effect to run.
+
+### Legacy proposal-only shape (server-side, today)
+
+`/api/review/family-queue` still returns `ReviewFamilyQueueResponseSchema`
+(proposal-row-shaped) for backward compatibility. `ReviewPage.tsx`
+adapts each row at the render boundary via `reviewRowToCanonicalRow`;
+the eventual cleanup is to have the server emit `CanonicalProductRow`
+directly so the adapter step disappears.
+
+The legacy per-family wire shape, kept here for reference:
 
 ```ts
 interface CanonicalReviewFamily {
@@ -226,13 +302,13 @@ first, then by spread).
 
 ## Surfaces that share this contract
 
-| Surface                            | Where it lives today                            |
-|------------------------------------|--------------------------------------------------|
-| `/catalog/review` (this issue)     | `helios/src/client/routes/review/`               |
-| Pending-purchases review queue     | `helios/src/client/routes/catalog/PendingPurchasesPage.tsx` |
-| Repricing run review (planned)     | n/a (will land via this contract)                |
-| Market-data match preview (planned)| n/a                                              |
-| Promo preview (planned, out-of-scope for v1) | n/a                                  |
+| Surface                            | Status                                                                   | Where it lives today                            |
+|------------------------------------|--------------------------------------------------------------------------|--------------------------------------------------|
+| `/catalog/review` (issue #15)      | ✅ rendered via `CanonicalProductRow` (proposal adapter)                | `helios/src/client/routes/review/ReviewPage.tsx` |
+| `/catalog/pending-purchases` (#35) | 🔜 still on its bespoke `PendingPurchaseRowCard`; needs a pp→canonical adapter | `helios/src/client/routes/catalog/PendingPurchasesPage.tsx` |
+| Operator-selected repricing        | 🔜 add a `RowSource.kind: 'operator_repricing'` variant + adapter        | n/a (will land via this contract)               |
+| Market-drift detection             | 🔜 add a `RowSource.kind: 'market_drift_detection'` variant + adapter    | n/a                                             |
+| Promo preview                      | 🔜 likely the `price_via_promo_action` executor; pipeline TBD            | n/a                                             |
 
 When you add a new review surface, render the rows from this contract;
 do **not** spin up a parallel "compact card" UI. The contract is what

@@ -17,6 +17,7 @@ import { Form, Link, useLoaderData, useRevalidator } from 'react-router-dom'
 import {
   MutationAcceptedResponseSchema,
   ReviewFamilyQueueResponseSchema,
+  reviewRowToCanonicalRow,
   type ReviewFamily,
   type ReviewFamilyQueueResponse,
   type ReviewRowLineItemHandle,
@@ -193,7 +194,10 @@ function FamilyPanel({ family }: { family: ReviewFamily }) {
       {error ? <p className="error-text">{error}</p> : null}
       <div className="review-row-stack">
         {family.rows.map((row) => (
-          <CanonicalProductRow key={row.proposalRowId} row={row} />
+          <CanonicalProductRow
+            key={row.proposalRowId}
+            row={reviewRowToCanonicalRow(row, family.familyKey, family.mso)}
+          />
         ))}
       </div>
     </article>
