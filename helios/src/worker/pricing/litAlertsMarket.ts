@@ -1,6 +1,8 @@
 import { z } from 'zod'
 
 import {
+  PRICING_EXACT_TIER_WEIGHT,
+  PRICING_FALLBACK_TIER_WEIGHT,
   PRICING_FAR_DISTANCE_MAX_MILES,
   PRICING_MID_DISTANCE_MAX_MILES,
   PRICING_MID_DISTANCE_WEIGHT,
@@ -147,7 +149,11 @@ interface ListingMatchAssessment {
   sizeTier: 0 | 1 | 2 | 3
 }
 
-type WeightedPriceListing = Pick<ListingPriceCandidate, 'distanceBand' | 'postTaxPrice' | 'preTaxPrice'>
+type WeightedPriceListing = Pick<ListingPriceCandidate, 'distanceBand' | 'postTaxPrice' | 'preTaxPrice'> & {
+  // Optional so existing callers (and tests) that only have distance
+  // information still work — they implicitly behave as 'exact'.
+  matchTier?: 'exact' | 'fallback' | 'weak'
+}
 type EvidenceSourceListing = Pick<ListingPriceCandidate, 'source'>
 
 const PricingSearchAdaptationEnvelopeSchema = z.object({
@@ -506,11 +512,14 @@ function collectProductEvidence(
       0,
     )
     const matchedListings = assessedListings.map((assessment) => {
-      const tierEligible = bestLaneTier > 0
-        && bestSizeTier > 0
-        && assessment.laneTier === bestLaneTier
-        && assessment.sizeTier === bestSizeTier
-      const eligibleForPricing = tierEligible
+      // Both exact-SKU matches AND brand-family ("fallback") matches
+      // participate in the pricing math now, with the fallback tier
+      // weighted noticeably lower in `buildWeightedAveragePrice` (see
+      // PRICING_FALLBACK_TIER_WEIGHT). Weak matches are still excluded
+      // from pricing math, but remain on the ladder as display-only
+      // context. The old "only best-of-best lane × best-of-best size"
+      // gate was too narrow and starved the proposed price of comps.
+      const eligibleForPricing = (assessment.matchTier === 'exact' || assessment.matchTier === 'fallback')
         && (assessment.listing.distanceBand === 'near' || assessment.listing.distanceBand === 'mid')
 
       return {
@@ -845,11 +854,25 @@ export function buildWeightedAveragePrice<TListing extends WeightedPriceListing>
   let totalWeight = 0
 
   for (const listing of listings) {
-    const weight = listing.distanceBand === 'near'
+    const distanceWeight = listing.distanceBand === 'near'
       ? PRICING_NEAR_DISTANCE_WEIGHT
       : listing.distanceBand === 'mid'
         ? PRICING_MID_DISTANCE_WEIGHT
         : 0
+    if (distanceWeight <= 0) {
+      continue
+    }
+    // Tier weight de-emphasises brand-family ("fallback") comps relative
+    // to exact-SKU comps in the proposed-price math, even though they
+    // are both rendered on the pricing ladder. Listings without an
+    // explicit matchTier (legacy callers, unit tests) are treated as
+    // 'exact' so their behaviour is unchanged.
+    const tierWeight = listing.matchTier === 'fallback'
+      ? PRICING_FALLBACK_TIER_WEIGHT
+      : listing.matchTier === 'weak'
+        ? 0
+        : PRICING_EXACT_TIER_WEIGHT
+    const weight = distanceWeight * tierWeight
     if (weight <= 0) {
       continue
     }
