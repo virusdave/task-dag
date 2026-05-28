@@ -68,6 +68,7 @@ import { TaskFrontierPage } from '../routes/tasks/TaskFrontierPage.js'
 import { EpicDagPage } from '../routes/tasks/EpicDagPage.js'
 import { TaskDetailPage } from '../routes/tasks/TaskDetailPage.js'
 import { UtilitiesLandingPage } from '../routes/utilities/UtilitiesLandingPage.js'
+import { UtilitiesPromoNamesPage, utilitiesPromoNamesLoader } from '../routes/utilities/UtilitiesPromoNamesPage.js'
 import { UtilitiesStaffPage, utilitiesStaffLoader } from '../routes/utilities/UtilitiesStaffPage.js'
 import { VisitorScansPage, visitorScansLoader } from '../routes/visitors/VisitorScansPage.js'
 import {
@@ -285,6 +286,11 @@ export const router = createBrowserRouter([
         element: <UtilitiesStaffPage />,
         loader: utilitiesStaffLoader,
         path: 'utilities/staff',
+      },
+      {
+        element: <UtilitiesPromoNamesPage />,
+        loader: utilitiesPromoNamesLoader,
+        path: 'utilities/promo-names',
       },
       {
         element: <CustomerReviewsListPage />,

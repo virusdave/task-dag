@@ -36,6 +36,21 @@ export function UtilitiesLandingPage() {
             <Link to="/utilities/staff">Open Staff editor</Link>
           </div>
         </article>
+
+        <article className="mini-card">
+          <header>
+            <strong>Promo Names</strong>
+            <Pill tone="success">live</Pill>
+          </header>
+          <p className="subtle-copy">
+            Rename a Sweed promo action&rsquo;s <code>shortName</code> past the
+            16-20 char limit the Sweed Discounts UI form imposes. Wraps
+            <code> store.promo.action.edit</code>.
+          </p>
+          <div className="inline-row wrap-row module-card-links">
+            <Link to="/utilities/promo-names">Open Promo Names editor</Link>
+          </div>
+        </article>
       </div>
     </section>
   )

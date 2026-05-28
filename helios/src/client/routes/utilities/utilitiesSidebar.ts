@@ -13,4 +13,10 @@ export const UTILITIES_SIDEBAR_SUBTREE: TreeNavNode[] = [
     label: 'Staff',
     to: '/utilities/staff',
   },
+  {
+    kind: 'leaf',
+    navKey: 'utilities.promoNames',
+    label: 'Promo Names',
+    to: '/utilities/promo-names',
+  },
 ]

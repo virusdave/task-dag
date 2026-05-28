@@ -46,6 +46,7 @@ import { registerScreensRoutes } from '../routes/screens.js'
 import { registerSessionRoutes } from '../routes/session.js'
 import { registerStaffRoutes } from '../routes/staff.js'
 import { registerSweedAuthEventsRoutes } from '../routes/sweedAuthEvents.js'
+import { registerUtilitiesPromoNamesRoutes } from '../routes/utilitiesPromoNames.js'
 import { registerTaskDagRoutes } from '../routes/taskDag.js'
 import { registerUsersRoutes } from '../routes/users.js'
 import {
@@ -221,6 +222,7 @@ async function registerApplicationSurface(server: FastifyInstance) {
   await registerScreensRoutes(server)
   await registerStaffRoutes(server)
   await registerSweedAuthEventsRoutes(server)
+  await registerUtilitiesPromoNamesRoutes(server)
   await registerHistoryRoutes(server)
   await registerLlmRoutes(server)
   await registerMetricAnnotationsRoutes(server)
