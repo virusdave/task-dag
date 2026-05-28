@@ -158,6 +158,26 @@ export const PendingPurchaseMarketListingSchema = z.object({
 })
 export type PendingPurchaseMarketListing = z.infer<typeof PendingPurchaseMarketListingSchema>
 
+// Mirrors `EditedStructuredFieldsSchema` from
+// ./api/pendingPurchases.ts. Kept here as a separate (permissive)
+// schema so the domain row schema doesn't need to reach back into
+// the api/ layer. The api-side schema remains the strict server-side
+// validator; this one only has to round-trip what the server stored
+// without trusting / re-validating, since the loader already saw it.
+const RowEditedStructuredFieldsSchema = z
+  .object({
+    expectedCategory: z.string().nullable().optional(),
+    expectedSubcategory: z.string().nullable().optional(),
+    targetBrand: z.string().nullable().optional(),
+    targetGroupName: z.string().nullable().optional(),
+    targetPackCount: z.number().int().nullable().optional(),
+    targetSize: z.string().nullable().optional(),
+    targetStrainName: z.string().nullable().optional(),
+    targetVariantName: z.string().nullable().optional(),
+    targetVariantTab: z.string().nullable().optional(),
+  })
+  .strict()
+
 export const PendingPurchaseRowSchema = z.object({
   actionType: z.string().min(1),
   approvalStatus: PendingPurchaseApprovalStatusSchema,
@@ -177,6 +197,12 @@ export const PendingPurchaseRowSchema = z.object({
   editedPrimaryImageUrl: z.string().nullable(),
   editedProposedDescription: z.string().nullable(),
   editedProposedPrice: z.number().nullable(),
+  // Reviewer-authored sparse override of the structured taxonomy
+  // (brand / group / category / subcategory / size / pack count /
+  // variant name / variant tab / strain). `null` = no overrides at
+  // all. See `EditedStructuredFieldsSchema` in
+  // ./api/pendingPurchases.ts and migration 041. Issue #35.
+  editedStructuredFields: RowEditedStructuredFieldsSchema.nullable().default(null),
   effectivePrimaryImageUrl: z.string().nullable(),
   effectiveProposedDescription: z.string().nullable(),
   effectiveProposedPrice: z.number().nullable(),

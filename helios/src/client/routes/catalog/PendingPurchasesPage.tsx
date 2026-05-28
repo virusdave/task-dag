@@ -8,6 +8,7 @@ import {
   QueuePendingPurchaseApplyRequestSchema,
   QueuePendingPurchasePacketGenerationRequestSchema,
   QueuePendingPurchasePacketImportRequestSchema,
+  type EditedStructuredFields,
   UpdatePendingPurchaseRowApprovalRequestSchema,
   UpdatePendingPurchaseRowRequestSchema,
   buildHeliosModulePath,
@@ -932,6 +933,13 @@ function PendingPurchaseRowCard(
   const [draftPrice, setDraftPrice] = useState(readDraftPrice(item))
   const [draftImageUrl, setDraftImageUrl] = useState(item.editedPrimaryImageUrl ?? item.primaryImageUrl ?? '')
   const [draftNotes, setDraftNotes] = useState(item.notes ?? '')
+  // Issue #35: structured-taxonomy overrides drafted by the reviewer.
+  // The display value for each field is initialised to the effective
+  // value (override-when-present ?? parsed) and the diff against the
+  // parsed value is what gets PATCHed back to the server.
+  const [draftStructured, setDraftStructured] = useState<Record<StructuredOverrideKey, string>>(
+    () => readInitialDraftStructured(item),
+  )
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [isApproving, setIsApproving] = useState(false)
   const [isSaving, setIsSaving] = useState(false)
@@ -948,6 +956,7 @@ function PendingPurchaseRowCard(
     setDraftPrice(readDraftPrice(item))
     setDraftImageUrl(item.editedPrimaryImageUrl ?? item.primaryImageUrl ?? '')
     setDraftNotes(item.notes ?? '')
+    setDraftStructured(readInitialDraftStructured(item))
   }, [item])
 
   async function handleSave() {
@@ -960,10 +969,21 @@ function PendingPurchaseRowCard(
 
     try {
       const parsedPrice = parseDraftPrice(draftPrice)
+      const nextStructured = buildStructuredOverridePayload(item, draftStructured)
+      const structuredChanged = !areStructuredOverridesEqual(
+        item.editedStructuredFields ?? null,
+        nextStructured,
+      )
       const payload = UpdatePendingPurchaseRowRequestSchema.parse({
         editedPrimaryImageUrl: normalizeOptionalString(draftImageUrl),
         editedProposedDescription: normalizeOptionalString(draftDescription),
         editedProposedPrice: parsedPrice,
+        // Only include `editedStructuredFields` when the reviewer
+        // actually changed something — otherwise the route would treat
+        // the unchanged blob as a write and re-validate, churning the
+        // audit log. The PATCH route does a FULL replace when the key
+        // is present (sparse merging is the caller's responsibility).
+        ...(structuredChanged ? { editedStructuredFields: nextStructured } : {}),
         expectedVersion: item.version,
         notes: normalizeOptionalString(draftNotes),
       })
@@ -1005,11 +1025,16 @@ function PendingPurchaseRowCard(
   // Detect whether the reviewer has any in-flight override drafts so we
   // can default the "Overrides" details to open in that case (otherwise
   // it stays collapsed to keep the row scannable on mobile).
+  const hasDraftStructuredOverrides = !areStructuredOverridesEqual(
+    item.editedStructuredFields ?? null,
+    buildStructuredOverridePayload(item, draftStructured),
+  )
   const hasDraftOverrides = (
     draftPrice !== readDraftPrice(item)
     || draftDescription !== (item.editedProposedDescription ?? item.proposedDescription ?? '')
     || draftImageUrl !== (item.editedPrimaryImageUrl ?? item.primaryImageUrl ?? '')
     || draftNotes !== (item.notes ?? '')
+    || hasDraftStructuredOverrides
   )
   const reviewDetailsHref = buildHeliosModulePath('catalog', `review-details/pending_purchase_row/${item.rowId}`)
 
@@ -1334,25 +1359,85 @@ function PendingPurchaseRowCard(
           </div>
         ) : null}
 
-        <details className="pending-purchase-overrides-structured">
-          <summary>Override structured data (brand, variant, pack size…)</summary>
+        <details className="pending-purchase-overrides-structured" open={hasDraftStructuredOverrides}>
+          <summary>
+            Override structured data (brand, variant, pack size…)
+            {hasDraftStructuredOverrides ? <Pill tone="warning">unsaved</Pill> : null}
+          </summary>
           <p className="subtle-copy">
-            Editing parsed brand / target variant / pack size / pack count / strain in-place
-            requires <code>edited_target_*</code> shadow columns and a migration on
-            <code> pending_purchase_rows</code> so the existing apply pipeline can read the
-            override without losing the parser's original guess. The inputs below preview the
-            current parsed values and are intentionally disabled until that migration ships.
-            For now, structured fixes must go through the parser-rules path
-            (<a href={buildHeliosModulePath('config', 'parsing/pending-purchases')} target="_blank" rel="noopener noreferrer">Config → Parsing → Pending purchases</a>)
-            so the correction is replayable.
+            Edit any field below and click <strong>Save overrides</strong>. The parser's
+            original value stays visible as a placeholder + “parser:” hint so reviewers
+            can see what changed. Clearing a field removes its value at apply time.
+            Persistent parser issues should still be fed back via{' '}
+            <a href={buildHeliosModulePath('config', 'parsing/pending-purchases')} target="_blank" rel="noopener noreferrer">
+              Config → Parsing → Pending purchases
+            </a>.
           </p>
           <div className="pending-purchase-hierarchy-grid">
-            <StructuredOverrideField label="Brand" value={item.targetBrand} />
-            <StructuredOverrideField label="Group / line" value={item.targetGroupName} />
-            <StructuredOverrideField label="Variant" value={item.targetVariantName} />
-            <StructuredOverrideField label="Size" value={item.targetSize} />
-            <StructuredOverrideField label="Pack count" value={item.targetPackCount ? String(item.targetPackCount) : null} />
-            <StructuredOverrideField label="Strain" value={item.targetStrain} />
+            <StructuredOverrideField
+              disabled={editingLocked}
+              label="Brand"
+              onChange={(value) => setDraftStructured((prev) => ({ ...prev, targetBrand: value }))}
+              parsedValue={item.targetBrand}
+              value={draftStructured.targetBrand}
+            />
+            <StructuredOverrideField
+              disabled={editingLocked}
+              label="Group / line"
+              onChange={(value) => setDraftStructured((prev) => ({ ...prev, targetGroupName: value }))}
+              parsedValue={item.targetGroupName}
+              value={draftStructured.targetGroupName}
+            />
+            <StructuredOverrideField
+              disabled={editingLocked}
+              label="Variant"
+              onChange={(value) => setDraftStructured((prev) => ({ ...prev, targetVariantName: value }))}
+              parsedValue={item.targetVariantName}
+              value={draftStructured.targetVariantName}
+            />
+            <StructuredOverrideField
+              disabled={editingLocked}
+              label="Variant tab"
+              onChange={(value) => setDraftStructured((prev) => ({ ...prev, targetVariantTab: value }))}
+              parsedValue={item.targetVariantTab}
+              value={draftStructured.targetVariantTab}
+            />
+            <StructuredOverrideField
+              disabled={editingLocked}
+              label="Category"
+              onChange={(value) => setDraftStructured((prev) => ({ ...prev, expectedCategory: value }))}
+              parsedValue={item.expectedCategory}
+              value={draftStructured.expectedCategory}
+            />
+            <StructuredOverrideField
+              disabled={editingLocked}
+              label="Subcategory"
+              onChange={(value) => setDraftStructured((prev) => ({ ...prev, expectedSubcategory: value }))}
+              parsedValue={item.expectedSubcategory}
+              value={draftStructured.expectedSubcategory}
+            />
+            <StructuredOverrideField
+              disabled={editingLocked}
+              label="Size"
+              onChange={(value) => setDraftStructured((prev) => ({ ...prev, targetSize: value }))}
+              parsedValue={item.targetSize}
+              value={draftStructured.targetSize}
+            />
+            <StructuredOverrideField
+              disabled={editingLocked}
+              inputMode="numeric"
+              label="Pack count"
+              onChange={(value) => setDraftStructured((prev) => ({ ...prev, targetPackCount: value }))}
+              parsedValue={item.targetPackCount === null ? null : String(item.targetPackCount)}
+              value={draftStructured.targetPackCount}
+            />
+            <StructuredOverrideField
+              disabled={editingLocked}
+              label="Strain"
+              onChange={(value) => setDraftStructured((prev) => ({ ...prev, targetStrainName: value }))}
+              parsedValue={item.targetStrain}
+              value={draftStructured.targetStrainName}
+            />
           </div>
         </details>
       </details>
@@ -1674,18 +1759,206 @@ function HoverZoomImage({
   )
 }
 
-function StructuredOverrideField({ label, value }: { label: string; value: string | null }): JSX.Element {
+function StructuredOverrideField({
+  disabled,
+  inputMode,
+  label,
+  onChange,
+  parsedValue,
+  value,
+}: {
+  disabled: boolean
+  inputMode?: 'numeric'
+  label: string
+  onChange: (value: string) => void
+  parsedValue: string | null
+  value: string
+}): JSX.Element {
+  const trimmed = value.trim()
+  const parsedTrimmed = (parsedValue ?? '').trim()
+  const isOverridden = trimmed !== parsedTrimmed
   return (
     <label className="stack-field">
-      <span>{label}</span>
+      <span>
+        {label}
+        {isOverridden ? <Pill tone="warning">override</Pill> : null}
+      </span>
       <input
-        disabled
-        defaultValue={value ?? ''}
-        placeholder={value === null ? '—' : ''}
-        title="Editing structured fields is gated on the edited_target_* migration — see the explainer above."
+        disabled={disabled}
+        inputMode={inputMode}
+        onChange={(event) => onChange(event.currentTarget.value)}
+        placeholder={parsedValue ?? '—'}
+        value={value}
       />
+      {isOverridden && parsedValue !== null ? (
+        <span className="subtle-copy">parser: {parsedValue}</span>
+      ) : null}
     </label>
   )
+}
+
+// Issue #35 — reviewer-facing editable structured taxonomy fields.
+//
+// `StructuredOverrideKey` mirrors the keys of
+// `EditedStructuredFieldsSchema` in shared/contracts/api/. We define
+// it locally rather than importing a const array because the api
+// contract only exports the Zod schema + inferred type (no key
+// tuple), and inflating a const tuple just for ordering felt heavier
+// than the local enum-like union.
+type StructuredOverrideKey =
+  | 'expectedCategory'
+  | 'expectedSubcategory'
+  | 'targetBrand'
+  | 'targetGroupName'
+  | 'targetPackCount'
+  | 'targetSize'
+  | 'targetStrainName'
+  | 'targetVariantName'
+  | 'targetVariantTab'
+
+const STRUCTURED_OVERRIDE_KEYS: readonly StructuredOverrideKey[] = [
+  'expectedCategory',
+  'expectedSubcategory',
+  'targetBrand',
+  'targetGroupName',
+  'targetPackCount',
+  'targetSize',
+  'targetStrainName',
+  'targetVariantName',
+  'targetVariantTab',
+]
+
+// Initial draft values for the structured-overrides panel. Each
+// field is seeded with the EFFECTIVE value (override-when-present
+// ?? parsed) so the input behaves as "edit in place." Pack count is
+// rendered as a string so the same generic StructuredOverrideField
+// can handle every key.
+function readInitialDraftStructured(
+  item: PendingPurchaseRow,
+): Record<StructuredOverrideKey, string> {
+  const o = item.editedStructuredFields ?? null
+  const pickStr = (override: string | null | undefined, parsed: string | null): string => {
+    if (override === null) return '' // explicit clear
+    if (override === undefined) return parsed ?? ''
+    return override
+  }
+  const overridePackCount =
+    o && 'targetPackCount' in o ? (o.targetPackCount as number | null | undefined) : undefined
+  return {
+    expectedCategory: pickStr(o?.expectedCategory, item.expectedCategory),
+    expectedSubcategory: pickStr(o?.expectedSubcategory, item.expectedSubcategory),
+    targetBrand: pickStr(o?.targetBrand, item.targetBrand),
+    targetGroupName: pickStr(o?.targetGroupName, item.targetGroupName),
+    targetPackCount:
+      overridePackCount === null
+        ? ''
+        : overridePackCount === undefined
+          ? item.targetPackCount === null
+            ? ''
+            : String(item.targetPackCount)
+          : String(overridePackCount),
+    targetSize: pickStr(o?.targetSize, item.targetSize),
+    targetStrainName: pickStr(o?.targetStrainName, item.targetStrain),
+    targetVariantName: pickStr(o?.targetVariantName, item.targetVariantName),
+    targetVariantTab: pickStr(o?.targetVariantTab, item.targetVariantTab),
+  }
+}
+
+// Map an override key to its parsed (parser/LLM) value on the row.
+// Used to decide whether a draft value represents an override or
+// just mirrors the parsed value (no override needed).
+function readParsedStructuredValue(item: PendingPurchaseRow, key: StructuredOverrideKey): string {
+  switch (key) {
+    case 'expectedCategory':
+      return (item.expectedCategory ?? '').trim()
+    case 'expectedSubcategory':
+      return (item.expectedSubcategory ?? '').trim()
+    case 'targetBrand':
+      return (item.targetBrand ?? '').trim()
+    case 'targetGroupName':
+      return (item.targetGroupName ?? '').trim()
+    case 'targetPackCount':
+      return item.targetPackCount === null ? '' : String(item.targetPackCount)
+    case 'targetSize':
+      return (item.targetSize ?? '').trim()
+    case 'targetStrainName':
+      return (item.targetStrain ?? '').trim()
+    case 'targetVariantName':
+      return (item.targetVariantName ?? '').trim()
+    case 'targetVariantTab':
+      return (item.targetVariantTab ?? '').trim()
+  }
+}
+
+// Build the full structured-overrides payload that the PATCH route
+// expects. The route does a FULL replace when `editedStructuredFields`
+// is present, so we always send a complete desired override map:
+//   - draft == parsed       → key omitted (no override)
+//   - draft != parsed       → key present with the new value
+//   - draft empty (parsed nonempty) → key present as `null` to clear
+// Returns `null` when no fields are overridden so the route can
+// store a NULL column.
+function buildStructuredOverridePayload(
+  item: PendingPurchaseRow,
+  draft: Record<StructuredOverrideKey, string>,
+): EditedStructuredFields | null {
+  const result: Record<string, string | number | null> = {}
+  let anyOverride = false
+  for (const key of STRUCTURED_OVERRIDE_KEYS) {
+    const parsed = readParsedStructuredValue(item, key)
+    const draftValue = draft[key].trim()
+    if (draftValue === parsed) {
+      continue
+    }
+    if (draftValue === '') {
+      // Reviewer explicitly cleared a field that the parser had populated.
+      result[key] = null
+      anyOverride = true
+      continue
+    }
+    if (key === 'targetPackCount') {
+      const n = Number.parseInt(draftValue, 10)
+      if (!Number.isInteger(n) || n <= 0 || n > 1000) {
+        // Invalid input — skip rather than emit garbage; the user
+        // sees no diff so they'll notice their input was ignored.
+        continue
+      }
+      result[key] = n
+      anyOverride = true
+      continue
+    }
+    result[key] = draftValue
+    anyOverride = true
+  }
+  if (!anyOverride) {
+    return null
+  }
+  return result as EditedStructuredFields
+}
+
+// Cheap structural equality on the override map for change-detection.
+// Treats `null` and `{}` as the SAME state (= "no overrides at all"),
+// matching how the server normalises the column on read.
+function areStructuredOverridesEqual(
+  a: EditedStructuredFields | null,
+  b: EditedStructuredFields | null,
+): boolean {
+  const aNorm = a && Object.keys(a).length === 0 ? null : a
+  const bNorm = b && Object.keys(b).length === 0 ? null : b
+  if (aNorm === bNorm) return true
+  if (aNorm === null || bNorm === null) return false
+  const aKeys = Object.keys(aNorm).sort()
+  const bKeys = Object.keys(bNorm).sort()
+  if (aKeys.length !== bKeys.length) return false
+  for (let i = 0; i < aKeys.length; i += 1) {
+    if (aKeys[i] !== bKeys[i]) return false
+  }
+  for (const k of aKeys) {
+    if ((aNorm as Record<string, unknown>)[k] !== (bNorm as Record<string, unknown>)[k]) {
+      return false
+    }
+  }
+  return true
 }
 
 function PendingValuePanel({

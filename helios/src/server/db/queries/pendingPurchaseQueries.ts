@@ -43,6 +43,10 @@ interface PendingPurchaseRowDbRow extends QueryResultRow {
   edited_primary_image_url: string | null
   edited_proposed_description: string | null
   edited_proposed_price: string | null
+  // Sparse reviewer-authored structured-taxonomy overrides (issue
+  // #35). See `EditedStructuredFieldsSchema` in
+  // `shared/contracts/api/pendingPurchases.ts`. NULL = no overrides.
+  edited_structured_fields: JsonValue
   expected_category: string | null
   expected_subcategory: string | null
   id: string
@@ -132,6 +136,7 @@ export async function listPendingPurchaseRows(
         r.edited_primary_image_url,
         r.edited_proposed_description,
         r.edited_proposed_price,
+        r.edited_structured_fields,
         r.expected_category,
         r.expected_subcategory,
         r.last_apply_error,
@@ -230,6 +235,7 @@ function mapPendingPurchaseRow(
     editedPrimaryImageUrl: row.edited_primary_image_url,
     editedProposedDescription: row.edited_proposed_description,
     editedProposedPrice,
+    editedStructuredFields: readEditedStructuredFieldsForRow(row.edited_structured_fields),
     effectivePrimaryImageUrl,
     effectiveProposedDescription,
     effectiveProposedPrice,
@@ -295,6 +301,26 @@ function mapPendingPurchaseRow(
     updatedAt: toIso(row.updated_at),
     version: row.version,
   }
+}
+
+// Pass-through for the `edited_structured_fields` JSONB column on
+// pending_purchase_rows. The api-side `EditedStructuredFieldsSchema`
+// already gated whatever the reviewer PATCHed, and the row contract
+// has its own permissive schema (`RowEditedStructuredFieldsSchema`)
+// that re-validates on parse — we just need to convert
+// `{ }` / non-object / null into `null` so the optional contract
+// field doesn't flicker between "no overrides at all" (null) and
+// "empty override map" ({}).
+function readEditedStructuredFieldsForRow(
+  value: JsonValue,
+): PendingPurchaseRow['editedStructuredFields'] {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    return null
+  }
+  if (Object.keys(value).length === 0) {
+    return null
+  }
+  return value as PendingPurchaseRow['editedStructuredFields']
 }
 
 function readRecord(value: JsonValue): Record<string, JsonValue> {
