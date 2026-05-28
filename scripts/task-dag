@@ -120,6 +120,22 @@ task_is_claimed_on_remote() {
         >/dev/null 2>&1 && echo "yes" || echo "no"
 }
 
+# Helper: read the SHA that origin currently has at tasks/active/<short>,
+# bypassing every local cache (no fetch + no use of local refs). Empty
+# string means "ref does not exist on origin".
+#
+# Used by the post-push double-check in `cmd_claim` / `cmd_release` /
+# `cmd_complete` so we can verify our git-push-CAS actually landed
+# OUR commit on origin and wasn't immediately overwritten by a
+# concurrent worker. This is the "verify" in "double-checked
+# locking": the lease check on push is the lock; this ls-remote
+# round-trip is the readback that confirms the lock is still ours.
+task_active_sha_on_remote() {
+    local short_sha="$1"
+    git ls-remote origin "refs/heads/tasks/active/$short_sha" 2>/dev/null \
+        | awk '{print $1; exit}'
+}
+
 # Helper: print 'yes' iff the remote currently has a tasks/frontier/<short>
 # ref pointing at the expected task SHA.
 task_frontier_on_remote() {
@@ -467,6 +483,53 @@ JSON
         $lease_frontier \
         "${claim_commit}:refs/heads/tasks/active/$short_sha" \
         ":refs/heads/tasks/frontier/$short_sha" 2>&1); then
+
+        # ── Double-checked locking ────────────────────────────────────
+        # The push reported success, which means the git remote
+        # accepted our --force-with-lease CAS. That is *normally*
+        # enough — GitHub is the single source of truth and atomic
+        # CAS prevents two simultaneous claims from both landing.
+        #
+        # But we've still observed agents wasting hours implementing
+        # the same issue in parallel because:
+        #   - claims happen in subscribed/ahead-of-claim agents (the
+        #     issue isn't broken into claim-able tasks);
+        #   - a forgotten `git fetch` on the caller can hide the
+        #     fact that someone else has been working too;
+        #   - in pathological CI/CD topologies (mirror, proxy, push
+        #     replication) a successful push to one endpoint can be
+        #     overwritten by a concurrent push to another before
+        #     the workers see each other.
+        #
+        # So: re-read the active ref straight off origin (no fetch,
+        # no local-ref shortcut) and confirm it actually points at
+        # OUR claim commit. If it doesn't — somebody overwrote us in
+        # the few milliseconds between push-ack and readback — treat
+        # this as a lost race and bail out with the same exit code
+        # the caller would see for any other race-loss, so the
+        # SCRIPT BEHAVIOR is identical to "we got there too late".
+        #
+        # Cost: one extra ls-remote round-trip per successful claim
+        # (~30–80 ms vs GitHub). Cheap insurance against the kind of
+        # silent duplicate work we've burned 3+ agent-runs on in the
+        # last 12 hours.
+        local readback_sha
+        readback_sha=$(task_active_sha_on_remote "$short_sha")
+        if [ "$readback_sha" != "$claim_commit" ]; then
+            # Refresh local refs so we don't keep stale state on disk.
+            fetch_task_refs >/dev/null 2>&1 || true
+            if [ "$json" = true ]; then
+                cat <<JSON
+{"ok":false,"reason":"claim-not-confirmed","sha":"$task_sha","shortSha":"$short_sha","attemptedClaimCommit":"$claim_commit","actualActiveSha":"${readback_sha:-}"}
+JSON
+            else
+                printf "${RED}✗ Claim push appeared to succeed but origin readback shows tasks/active/%s = %s (expected %s).${RESET}\n" \
+                    "$short_sha" "${readback_sha:-<missing>}" "$claim_commit" >&2
+                printf "${YELLOW}Treating as race-lost; another worker overwrote our claim.${RESET}\n" >&2
+            fi
+            return 2
+        fi
+
         # Mirror the remote into local refs so subsequent commands see them.
         git update-ref "$active_local_ref" "$claim_commit"
         if git show-ref --verify --quiet "$frontier_local_ref"; then
@@ -477,7 +540,7 @@ JSON
 {"ok":true,"sha":"$task_sha","shortSha":"$short_sha","claimCommit":"$claim_commit","claimer":"$claimer","claimerHost":"$claimer_host","ttlHours":$ttl_hours}
 JSON
         else
-            printf "${GREEN}✓ Claimed task %s as %s@%s (TTL %sh)${RESET}\n" \
+            printf "${GREEN}✓ Claimed task %s as %s@%s (TTL %sh, verified on origin)${RESET}\n" \
                 "$short_sha" "$claimer" "$claimer_host" "$ttl_hours"
         fi
         return 0
@@ -588,6 +651,29 @@ EOF
         $lease_frontier \
         "${task_sha}:refs/heads/tasks/frontier/$short_sha" \
         ":refs/heads/tasks/active/$short_sha" 2>&1); then
+
+        # Double-checked locking, mirroring cmd_claim: after the push
+        # reports success, re-read origin to confirm the active ref
+        # is actually gone. If it isn't (concurrent worker re-claimed
+        # before our readback, replication artifact, etc.), we are
+        # NOT released and the caller must NOT proceed as if they
+        # had freed the task.
+        local readback_sha
+        readback_sha=$(task_active_sha_on_remote "$short_sha")
+        if [ -n "$readback_sha" ]; then
+            fetch_task_refs >/dev/null 2>&1 || true
+            if [ "$json" = true ]; then
+                cat <<JSON
+{"ok":false,"reason":"release-not-confirmed","sha":"$task_sha","shortSha":"$short_sha","actualActiveSha":"$readback_sha"}
+JSON
+            else
+                printf "${RED}✗ Release push appeared to succeed but origin readback shows tasks/active/%s still present (%s).${RESET}\n" \
+                    "$short_sha" "$readback_sha" >&2
+                printf "${YELLOW}Treating as unreleased; another worker may have re-claimed before our readback.${RESET}\n" >&2
+            fi
+            return 4
+        fi
+
         git update-ref "$frontier_local_ref" "$task_sha"
         if git show-ref --verify --quiet "$active_local_ref"; then
             git update-ref -d "$active_local_ref"
@@ -595,7 +681,7 @@ EOF
         if [ "$json" = true ]; then
             echo "{\"ok\":true,\"sha\":\"$task_sha\"}"
         else
-            printf "${GREEN}✓ Released %s back to frontier${RESET}\n" "$short_sha"
+            printf "${GREEN}✓ Released %s back to frontier (verified on origin)${RESET}\n" "$short_sha"
         fi
         return 0
     fi
