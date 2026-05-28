@@ -333,11 +333,146 @@ export function CustomerMapPage(): JSX.Element {
 
       mapInstance.on('load', () => {
         if (!mapInstance) return
-        mapInstance.addSource('scans', { type: 'geojson', data: pointsGeoJson })
+
+        // Store-location pins go in FIRST so they sit at the BOTTOM
+        // of the stack — customer pins / clusters / heatmap always
+        // render above them. They're also much smaller than before
+        // so they don't compete with customer data visually; the
+        // text label keeps them identifiable.
+        mapInstance.addSource('sites', { type: 'geojson', data: sitesGeoJson })
+        mapInstance.addLayer({
+          id: 'sites-outer',
+          type: 'circle',
+          source: 'sites',
+          paint: {
+            'circle-radius': 5,
+            'circle-color': '#ffffff',
+            'circle-stroke-color': '#1a0d04',
+            'circle-stroke-width': 1.5,
+          },
+        })
+        mapInstance.addLayer({
+          id: 'sites-inner',
+          type: 'circle',
+          source: 'sites',
+          paint: {
+            'circle-radius': 2,
+            'circle-color': '#1a0d04',
+          },
+        })
+
+        // Customer scans — clustered. When zoomed out enough that
+        // several pins overlap, nearby points collapse into a
+        // numbered cluster pin. The same source feeds a heatmap
+        // layer (weighted by cluster size, so a cluster of N
+        // contributes as N points to local density).
+        mapInstance.addSource('scans', {
+          type: 'geojson',
+          data: pointsGeoJson,
+          cluster: true,
+          clusterRadius: 40,
+          // Need at least 4 nearby points before we collapse — fewer
+          // than that is "a small number of overlapping pins" which
+          // the user wants to see individually.
+          clusterMinPoints: 4,
+          clusterMaxZoom: 15,
+        })
+
+        mapInstance.addLayer({
+          id: 'scans-heat',
+          type: 'heatmap',
+          source: 'scans',
+          paint: {
+            // Each cluster feature counts for its full member count
+            // so density reflects the true number of *hidden* pins.
+            'heatmap-weight': [
+              'case',
+              ['has', 'point_count'],
+              ['get', 'point_count'],
+              1,
+            ],
+            'heatmap-intensity': [
+              'interpolate', ['linear'], ['zoom'],
+              7, 0.7,
+              12, 1.0,
+              16, 1.4,
+            ],
+            // Transparent at zero density → progressively greener
+            // as the number of overlapping pins increases.
+            'heatmap-color': [
+              'interpolate', ['linear'], ['heatmap-density'],
+              0,    'rgba(0, 0, 0, 0)',
+              0.1,  'rgba(199, 233, 180, 0.35)',
+              0.3,  'rgba(120, 198, 121, 0.55)',
+              0.6,  'rgba(49,  163,  84, 0.75)',
+              1.0,  'rgba(0,   104,  55, 0.90)',
+            ],
+            'heatmap-radius': [
+              'interpolate', ['linear'], ['zoom'],
+              7,  14,
+              12, 24,
+              16, 36,
+            ],
+            // Fade the heatmap out as we zoom in past the cluster
+            // break-apart zoom — by then individual dots take over.
+            'heatmap-opacity': [
+              'interpolate', ['linear'], ['zoom'],
+              9,  1.0,
+              14, 0.7,
+              16, 0.0,
+            ],
+          },
+        })
+
+        mapInstance.addLayer({
+          id: 'scans-clusters',
+          type: 'circle',
+          source: 'scans',
+          filter: ['has', 'point_count'],
+          paint: {
+            'circle-color': [
+              'step', ['get', 'point_count'],
+              '#a5d8a5',  10,
+              '#52b552',  50,
+              '#1a8a3a', 200,
+              '#0e5c25',
+            ],
+            'circle-radius': [
+              'step', ['get', 'point_count'],
+              14,  10,
+              18,  50,
+              22, 200,
+              28,
+            ],
+            'circle-stroke-color': '#ffffff',
+            'circle-stroke-width': 2,
+            'circle-opacity': 0.9,
+          },
+        })
+
+        mapInstance.addLayer({
+          id: 'scans-cluster-count',
+          type: 'symbol',
+          source: 'scans',
+          filter: ['has', 'point_count'],
+          layout: {
+            'text-field': ['get', 'point_count_abbreviated'],
+            'text-font': ['Open Sans Regular'],
+            'text-size': 12,
+            'text-allow-overlap': true,
+          },
+          paint: {
+            'text-color': '#0d2e15',
+            'text-halo-color': '#ffffff',
+            'text-halo-width': 1.2,
+          },
+        })
+
         mapInstance.addLayer({
           id: 'scans-circles',
           type: 'circle',
           source: 'scans',
+          filter: ['!', ['has', 'point_count']],
           paint: {
             // BIG, BRIGHT, halo-stroked so they pop against the
             // faded base. Zoom-interpolated so dots stay legible
@@ -383,35 +518,16 @@ export function CustomerMapPage(): JSX.Element {
           },
         })
 
-        mapInstance.addSource('sites', { type: 'geojson', data: sitesGeoJson })
-        mapInstance.addLayer({
-          id: 'sites-outer',
-          type: 'circle',
-          source: 'sites',
-          paint: {
-            'circle-radius': 16,
-            'circle-color': '#ffffff',
-            'circle-stroke-color': '#1a0d04',
-            'circle-stroke-width': 3,
-          },
-        })
-        mapInstance.addLayer({
-          id: 'sites-inner',
-          type: 'circle',
-          source: 'sites',
-          paint: {
-            'circle-radius': 6,
-            'circle-color': '#1a0d04',
-          },
-        })
+        // Store labels last so they sit on top and stay legible
+        // over both customer dots and clusters.
         mapInstance.addLayer({
           id: 'sites-labels',
           type: 'symbol',
           source: 'sites',
           layout: {
             'text-field': ['get', 'label'],
-            'text-size': 13,
-            'text-offset': [0, 1.6],
+            'text-size': 12,
+            'text-offset': [0, 1.0],
             'text-anchor': 'top',
             'text-allow-overlap': false,
             'text-font': ['Open Sans Regular'],
@@ -421,6 +537,32 @@ export function CustomerMapPage(): JSX.Element {
             'text-halo-color': '#fffaf1',
             'text-halo-width': 2,
           },
+        })
+
+        // Click a cluster → zoom in until it breaks apart.
+        mapInstance.on('click', 'scans-clusters', (event) => {
+          const feature = event.features?.[0]
+          if (!feature || feature.geometry.type !== 'Point') return
+          const clusterId = feature.properties?.cluster_id as number | undefined
+          if (clusterId === undefined) return
+          const source = mapInstance!.getSource('scans') as maplibregl.GeoJSONSource
+          const [lng, lat] = feature.geometry.coordinates as [number, number]
+          void source
+            .getClusterExpansionZoom(clusterId)
+            .then((zoom) => {
+              mapInstance!.easeTo({ center: [lng, lat], zoom })
+            })
+            .catch(() => {
+              // If expansion zoom isn't available for some reason
+              // (e.g. source not yet ready), just nudge in by one.
+              mapInstance!.easeTo({ center: [lng, lat], zoom: mapInstance!.getZoom() + 1 })
+            })
+        })
+        mapInstance.on('mouseenter', 'scans-clusters', () => {
+          mapInstance!.getCanvas().style.cursor = 'pointer'
+        })
+        mapInstance.on('mouseleave', 'scans-clusters', () => {
+          mapInstance!.getCanvas().style.cursor = ''
         })
 
         mapInstance.on('click', 'scans-circles', (event) => {
