@@ -1046,25 +1046,52 @@ function PendingPurchaseRowCard(
       {item.lastApplyError ? <p className="error-text">{item.lastApplyError}</p> : null}
 
       <p>{item.catalogAction}</p>
-      {item.pricingReason ? <p className="subtle-copy">{item.pricingReason}</p> : null}
-      {item.marketAdviceSummary ? <p className="subtle-copy">{item.marketAdviceSummary}</p> : null}
-      {formatPendingPurchaseMarketReferenceText(
-        item.averageCompetitorPostTaxPrice,
-        item.marketMedianPostTaxPrice,
-        item.averageCompetitorPrice,
+      {/*
+        Reviewer-efficiency: the per-row "why this price" rationale,
+        market-reference numbers, existing distributor links, and the
+        order/position id trail are all useful AT MOST once per row
+        (per helios/AGENTS.md guidance) — the rest of the time they
+        eat reviewer screen space above the pricing ladder. Tuck them
+        into a single collapsed "Rationale & references" disclosure
+        so the default view stays focused on the action / ladder /
+        picture choice.
+      */}
+      {(item.pricingReason
+        || item.marketAdviceSummary
+        || formatPendingPurchaseMarketReferenceText(
+            item.averageCompetitorPostTaxPrice,
+            item.marketMedianPostTaxPrice,
+            item.averageCompetitorPrice,
+          )
+        || item.existingDistributorLinks
+        || item.orderIds.length > 0
+        || item.positionIds.length > 0
       ) ? (
-        <p className="subtle-copy">
+        <details className="pending-purchase-rationale">
+          <summary>Rationale &amp; references</summary>
+          {item.pricingReason ? <p className="subtle-copy">{item.pricingReason}</p> : null}
+          {item.marketAdviceSummary ? <p className="subtle-copy">{item.marketAdviceSummary}</p> : null}
           {formatPendingPurchaseMarketReferenceText(
             item.averageCompetitorPostTaxPrice,
             item.marketMedianPostTaxPrice,
             item.averageCompetitorPrice,
-          )}
-        </p>
+          ) ? (
+            <p className="subtle-copy">
+              {formatPendingPurchaseMarketReferenceText(
+                item.averageCompetitorPostTaxPrice,
+                item.marketMedianPostTaxPrice,
+                item.averageCompetitorPrice,
+              )}
+            </p>
+          ) : null}
+          {item.existingDistributorLinks ? <p className="subtle-copy">Existing distributor links: {item.existingDistributorLinks}</p> : null}
+          {(item.orderIds.length > 0 || item.positionIds.length > 0) ? (
+            <p className="subtle-copy">
+              Orders: {item.orderIds.join(', ') || '—'} · Positions: {item.positionIds.join(', ') || '—'}
+            </p>
+          ) : null}
+        </details>
       ) : null}
-      {item.existingDistributorLinks ? <p className="subtle-copy">Existing distributor links: {item.existingDistributorLinks}</p> : null}
-      <p className="subtle-copy">
-        Orders: {item.orderIds.join(', ') || '—'} · Positions: {item.positionIds.join(', ') || '—'}
-      </p>
       <details open={item.needsNewBrand || item.needsNewGroup || item.needsNewVariant}>
         <summary>
           Product hierarchy{' '}
