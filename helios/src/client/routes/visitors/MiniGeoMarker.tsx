@@ -4,14 +4,32 @@
 // a document-address lat/lng or a scan-location lat/lng — the server
 // hands us the chosen one as `marker`. We render that as a single dot
 // positioned inside a fixed NYC-metro bounding box on a small SVG
-// canvas. No OSM tiles, no Leaflet bundle, no per-row HTTP requests
-// — important because a 100-row list on a phone would otherwise fire
-// 100 map-tile sessions on every page load.
+// canvas, on top of ONE shared NYC-metro raster background asset
+// (`assets/nyc-mini-map.png`).
 //
-// Wrapped in an `<a>` so a tap opens the customer details page in a
-// new tab, where the full interactive Leaflet map ships in phase 2.
+// Why one shared asset, not per-row OSM tiles: a 100-row list on a
+// phone would otherwise fire 100 map-tile sessions on every page
+// load. The committed PNG asset is fingerprinted by Vite, served
+// once, and reused by every row from the HTTP cache — recognizable
+// borough / coastline framing without the per-row request storm.
+//
+// The asset is a pre-rendered, mildly-desaturated stitch of OSM
+// tiles covering exactly the BOUNDS bbox below; see
+// scripts/make-mini-map.py for the source recipe and OSM
+// attribution requirements.
+//
+// Wrapped in an `<a>` so a tap opens the customer details page,
+// which renders the same data on a full-size MapLibre canvas.
 
 import type { VisitorScanMiniMarker } from '../../../shared/contracts/index.js'
+
+// Vite-fingerprinted URL to the shared NYC-metro background. Resolved
+// once at module load; every <MiniGeoMarker /> instance references the
+// same URL so the browser serves it from cache after the first row.
+const MINI_MAP_URL = new URL(
+  '../../assets/nyc-mini-map.png',
+  import.meta.url,
+).href
 
 // Loose bounding box covering the five boroughs + close suburbs where
 // our two stores draw the bulk of their walk-ins. Out-of-bounds dots
@@ -63,7 +81,23 @@ function MarkerSvg({
       aria-label={ariaLabel}
       className="mini-geo-marker-svg"
     >
-      {/* Background panel: more visible than a tile-faint hint. */}
+      {/* Shared NYC-metro raster basemap. Stretched to the SVG canvas
+          with preserveAspectRatio="none"; the linear lat/lng→pixel
+          projection used for the dot is consistent with that stretch
+          (both pin themselves to the same BOUNDS rectangle), so the
+          dot lands in the right relative place even when the basemap
+          is slightly squished from its bbox-native aspect ratio. */}
+      <image
+        href={MINI_MAP_URL}
+        x={0}
+        y={0}
+        width={WIDTH}
+        height={HEIGHT}
+        preserveAspectRatio="none"
+        className="mini-geo-marker-base"
+      />
+      {/* Subtle inset frame so the thumbnail reads as a tile in the
+          row, not as part of the surrounding cell. */}
       <rect
         x={0.5}
         y={0.5}
@@ -71,22 +105,7 @@ function MarkerSvg({
         height={HEIGHT - 1}
         rx={4}
         ry={4}
-        className="mini-geo-marker-bg"
-      />
-      {/* Crosshair to suggest a map without burning pixels on tiles. */}
-      <line
-        x1={0}
-        y1={HEIGHT / 2}
-        x2={WIDTH}
-        y2={HEIGHT / 2}
-        className="mini-geo-marker-grid"
-      />
-      <line
-        x1={WIDTH / 2}
-        y1={0}
-        x2={WIDTH / 2}
-        y2={HEIGHT}
-        className="mini-geo-marker-grid"
+        className="mini-geo-marker-frame"
       />
       {marker === null ? (
         <text

@@ -4855,18 +4855,6 @@ span.metric-chart-legend-item {
   display: block;
 }
 
-.mini-geo-marker .mini-geo-marker-bg {
-  fill: rgba(120, 86, 48, 0.05);
-  stroke: var(--panel-border, rgba(120, 86, 48, 0.18));
-  stroke-width: 1;
-  rx: 4;
-}
-
-.mini-geo-marker .mini-geo-marker-grid {
-  stroke: rgba(120, 86, 48, 0.16);
-  stroke-width: 0.5;
-}
-
 .mini-geo-marker .mini-geo-marker-dot {
   opacity: 0.95;
 }
@@ -5039,8 +5027,191 @@ span.metric-chart-legend-item {
     font-size: 1.6rem;
   }
   .customer-details-page .cd-answer-row {
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+  }
+}
+
+/* ---- phase-2 customer-details additions: map, grid, tables ---- */
+
+.customer-details-page .cd-section-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin: 0 0 0.5rem;
+}
+.customer-details-page .cd-section-head h3 {
+  margin: 0;
+  font-size: 1.05rem;
+}
+
+.customer-details-page .cd-empty {
+  margin: 0;
+}
+
+.customer-details-page .cd-map-card {
+  padding: 0.75rem;
+  border: 1px solid var(--panel-border);
+  border-radius: 10px;
+  background: var(--surface, #fff);
+}
+.customer-details-page .cd-map {
+  width: 100%;
+  height: 380px;
+  border-radius: 8px;
+  overflow: hidden;
+}
+.customer-details-page .cd-map-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+.customer-details-page .cd-map-legend li {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+.customer-details-page .cd-map-dot {
+  display: inline-block;
+  width: 0.7rem;
+  height: 0.7rem;
+  border-radius: 50%;
+  border: 1px solid rgba(0, 0, 0, 0.15);
+}
+
+/* Map popup styling. The popup HTML is built in JS so the selectors
+   here have to match the literal class strings in renderPopup(). */
+.maplibregl-popup-content .cd-popup-kind {
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 0.15rem;
+}
+.maplibregl-popup-content .cd-popup-label {
+  font-weight: 600;
+  margin-bottom: 0.1rem;
+}
+.maplibregl-popup-content .cd-popup-addr {
+  font-size: 0.82rem;
+  margin-bottom: 0.15rem;
+}
+.maplibregl-popup-content .cd-popup-meta {
+  font-size: 0.78rem;
+}
+
+.customer-details-page .cd-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 0.75rem;
+}
+@media (min-width: 720px) {
+  .customer-details-page .cd-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+@media (min-width: 1120px) {
+  .customer-details-page .cd-grid {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
+}
+
+.customer-details-page .cd-card {
+  padding: 0.85rem 1rem;
+  border: 1px solid var(--panel-border);
+  border-radius: 10px;
+  background: var(--surface, #fff);
+}
+.customer-details-page .cd-card-title {
+  margin: 0 0 0.55rem;
+  font-size: 0.92rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+}
+
+.customer-details-page .cd-dl {
+  display: grid;
+  grid-template-columns: minmax(8rem, max-content) 1fr;
+  gap: 0.25rem 0.75rem;
+  margin: 0;
+  font-size: 0.88rem;
+}
+.customer-details-page .cd-dl-row {
+  display: contents;
+}
+.customer-details-page .cd-dl dt {
+  color: var(--text-muted);
+}
+.customer-details-page .cd-dl dd {
+  margin: 0;
+  word-break: break-word;
+}
+
+.customer-details-page .cd-table-card {
+  padding: 0.75rem;
+  border: 1px solid var(--panel-border);
+  border-radius: 10px;
+  background: var(--surface, #fff);
+}
+.customer-details-page .cd-table-scroll {
+  overflow-x: auto;
+}
+.customer-details-page .cd-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+.customer-details-page .cd-table th,
+.customer-details-page .cd-table td {
+  text-align: left;
+  padding: 0.45rem 0.55rem;
+  border-bottom: 1px solid var(--panel-border-faint, rgba(0, 0, 0, 0.06));
+  vertical-align: top;
+}
+.customer-details-page .cd-table thead th {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--panel-border);
+}
+.customer-details-page .cd-cell-time {
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.customer-details-page .cd-cell-num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.customer-details-page .cd-cell-truncate {
+  max-width: 16rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.customer-details-page .cd-invoice-code {
+  font-size: 0.78rem;
+  word-break: break-all;
+}
+.customer-details-page .cd-row-open {
+  font-size: 0.78rem;
+  padding: 0.2rem 0.55rem;
+}
+.customer-details-page .cd-lineitems-note {
+  margin-top: 0.5rem;
+}
+.customer-details-page .cd-lineitems-note > summary {
+  cursor: pointer;
+  font-size: 0.82rem;
+  color: var(--text-muted);
 }
 /* =====================================================================
  * Budtender performance tab (/metrics/budtenders).
@@ -5325,15 +5496,15 @@ span.metric-chart-legend-item {
   width: 64px;
   height: 44px;
 }
-.mini-geo-marker .mini-geo-marker-bg {
-  /* Solid map-y backdrop instead of the previous near-invisible wash. */
-  fill: #f5efe3;
-  stroke: rgba(120, 86, 48, 0.45);
-  stroke-width: 1;
+.mini-geo-marker .mini-geo-marker-base {
+  /* Shared NYC-metro raster basemap; dim it slightly so the marker
+     dot pops without losing the borough/coastline framing. */
+  opacity: 0.92;
 }
-.mini-geo-marker .mini-geo-marker-grid {
-  stroke: rgba(120, 86, 48, 0.28);
-  stroke-width: 0.5;
+.mini-geo-marker .mini-geo-marker-frame {
+  fill: none;
+  stroke: rgba(120, 86, 48, 0.55);
+  stroke-width: 1;
 }
 .mini-geo-marker .mini-geo-marker-halo {
   fill: #fffaf1;

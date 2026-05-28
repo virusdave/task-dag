@@ -41,11 +41,13 @@ import {
   listVisitorScans,
   type VisitorScanListItem,
 } from '../db/queries/visitorScansQueries.js'
+import { getCustomerVisitorDetails } from '../db/queries/customerVisitorDetailsQueries.js'
 import {
   VeriScanEnvelopeSchema,
   envelopeToRowInput,
 } from '../visitorScans/envelope.js'
 import {
+  CustomerVisitorDetailsResponseSchema,
   VisitorScansQuerySchema,
   VisitorScansResponseSchema,
 } from '../../shared/contracts/index.js'
@@ -242,6 +244,37 @@ export async function registerVisitorScansAdminRoutes(server: FastifyInstance): 
         return reply
           .status(503)
           .send({ error: 'visitor_scans table missing. Apply migration 039_visitor_scans.sql.' })
+      }
+      throw error
+    }
+  })
+
+  server.get('/api/admin/customers/visitors/:scanId', async (request, reply) => {
+    const user = await requireSessionUser(request, reply, 'viewer')
+    if (!user) return
+
+    const params = request.params as { scanId?: string }
+    const scanId = Number(params.scanId)
+    if (!Number.isFinite(scanId) || scanId <= 0 || !Number.isInteger(scanId)) {
+      return reply.status(400).send({ error: 'Invalid scanId.' })
+    }
+    try {
+      const details = await getCustomerVisitorDetails(getPool(), scanId)
+      if (details === null) {
+        return reply.status(404).send({ error: 'Visitor scan not found.' })
+      }
+      return reply.send(CustomerVisitorDetailsResponseSchema.parse(details))
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      if (/relation .*visitor_scans.* does not exist/i.test(message)) {
+        return reply
+          .status(503)
+          .send({ error: 'visitor_scans table missing. Apply migration 039_visitor_scans.sql.' })
+      }
+      if (/relation .*visitor_scan_links.* does not exist/i.test(message)) {
+        return reply
+          .status(503)
+          .send({ error: 'visitor_scan_links table missing. Apply migration 040_visitor_scan_links.sql.' })
       }
       throw error
     }
