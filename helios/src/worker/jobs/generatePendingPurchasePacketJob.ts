@@ -527,6 +527,12 @@ export async function runCatalogPendingPurchasesGenerateJob(
     }
   }
 
+  // Wave 2: substitute family-average wholesale cost into any row whose own
+  // cost basis was a trade sample or sub-$1 nominal reference. Must run after
+  // every row's brand/category/size/pack-count is known so the family-key
+  // bucketing has a complete population to draw from.
+  applyFamilyAverageCostFallback(rows)
+
   rows.sort((left, right) => {
     const siteComparison = left.siteLabel.localeCompare(right.siteLabel)
     if (siteComparison !== 0) {
@@ -1821,13 +1827,32 @@ async function familyAnchorProducts(cache: CatalogCache, parsed: ParsedProductNa
   return anchors
 }
 
+// Pricing proposals must never use cost basis of trade samples or anything
+// under $1 — those are not real wholesale prices. Anything below this floor
+// is treated as a weak reference for traceability only; pricing falls back to
+// the family-average wholesale cost computed across peer pending-purchase
+// rows in the same brand/category/size/pack lane (see
+// `applyFamilyAverageCostFallback` below).
+const MIN_TRUSTWORTHY_UNIT_COST_USD = 1.0
+
+function isTrustworthyUnitCost(value: number | null): value is number {
+  return value !== null && value >= MIN_TRUSTWORTHY_UNIT_COST_USD
+}
+
 function resolveEffectiveUnitCost(
   positions: z.infer<typeof PurchaseOrderPositionSchema>[],
   stateDistributorProductRow: ExactDistributorProductRow | null,
 ): ResolvedCost {
+  // Trustworthy pass: skip trade-sample positions entirely, require the cost
+  // basis to be at least $1. Anything cheaper is a nominal / sample reference
+  // and gets handled by the weak-reference branch below + family-average
+  // post-pass.
   for (const position of positions) {
+    if (isSampleLike(position)) {
+      continue
+    }
     const directCost = normalizePrice(position.discountProductPrice)
-    if (directCost !== null && directCost > 0.05) {
+    if (isTrustworthyUnitCost(directCost)) {
       return {
         reason: 'Effective cost comes from the live purchase unit price on a paid companion line.',
         source: 'purchase-order',
@@ -1836,7 +1861,7 @@ function resolveEffectiveUnitCost(
     }
 
     const metrcCost = readMetrcUnitCost(position)
-    if (metrcCost !== null && metrcCost > 0.05) {
+    if (isTrustworthyUnitCost(metrcCost)) {
       return {
         reason: 'Effective cost comes from live Metrc wholesale on a paid companion line.',
         source: 'purchase-order-metrc',
@@ -1846,7 +1871,7 @@ function resolveEffectiveUnitCost(
   }
 
   const distributorProductPrice = stateDistributorProductRow?.price ?? null
-  if (distributorProductPrice !== null) {
+  if (isTrustworthyUnitCost(distributorProductPrice)) {
     return {
       reason: `Falling back to existing distributor-product price on row ${stateDistributorProductRow?.distributorProductId ?? 'unknown'}.`,
       source: 'distributor-product',
@@ -1854,11 +1879,14 @@ function resolveEffectiveUnitCost(
     }
   }
 
+  // Weak reference: capture nominal / trade-sample numbers so the reviewer
+  // sees what was rejected, but flag the source so the family-average
+  // post-pass replaces this value before pricing.
   for (const position of positions) {
     const directCost = normalizePrice(position.discountProductPrice)
     if (directCost !== null) {
       return {
-        reason: 'Only nominal sample pricing was visible on the live purchase row, so the packet keeps that as a weak cost reference.',
+        reason: `Only ${formatCurrency(directCost)} sample / sub-$1 unit pricing was visible on the live purchase row — excluded from pricing; pricing falls back to family-average wholesale cost.`,
         source: 'sample-reference',
         value: directCost,
       }
@@ -1867,7 +1895,7 @@ function resolveEffectiveUnitCost(
     const metrcCost = readMetrcUnitCost(position)
     if (metrcCost !== null) {
       return {
-        reason: 'Only nominal Metrc wholesale was visible on the live purchase row, so the packet keeps that as a weak cost reference.',
+        reason: `Only ${formatCurrency(metrcCost)} sample / sub-$1 Metrc wholesale was visible on the live purchase row — excluded from pricing; pricing falls back to family-average wholesale cost.`,
         source: 'sample-reference-metrc',
         value: metrcCost,
       }
@@ -1878,6 +1906,171 @@ function resolveEffectiveUnitCost(
     reason: 'Current live purchase rows did not expose a usable wholesale cost, and no linked distributor-product price was available.',
     source: null,
     value: null,
+  }
+}
+
+const TRUSTWORTHY_COST_SOURCES = new Set<string>([
+  'purchase-order',
+  'purchase-order-metrc',
+  'distributor-product',
+])
+
+// The packet row type is `.passthrough()` so the extra cost-pricing fields we
+// set in `buildGeneratedRow` are typed as `unknown`/`{}` on the schema-derived
+// `GeneratedPendingPurchaseRow`. This local view spells out the fields the
+// family-average post-pass needs to read and write so the calls stay typed.
+interface MutableRowForFamilyCostPostPass {
+  anchorPrice?: number | null
+  currentGmPercent?: number | null
+  currentPrice?: number | null
+  currentPriceBasis?: string | null
+  effectiveUnitCost?: number | null
+  effectiveUnitCostReason?: string | null
+  effectiveUnitCostSource?: string | null
+  expectedCategory?: string | null
+  expectedSubcategory?: string | null
+  gmPercent?: number | null
+  pricingAction?: string | null
+  pricingReason?: string | null
+  proposedPrice?: number | null
+  reuseProductId?: number | null
+  targetBrand?: string | null
+  targetPackCount?: number | null
+  targetSize?: string | null
+}
+
+function asMutableRow(row: GeneratedPendingPurchaseRow): MutableRowForFamilyCostPostPass {
+  return row as unknown as MutableRowForFamilyCostPostPass
+}
+
+function familyCostKeyFromRow(row: MutableRowForFamilyCostPostPass): string | null {
+  const brand = (row.targetBrand ?? '').trim().toLowerCase()
+  const category = (row.expectedCategory ?? '').trim().toLowerCase()
+  if (!brand || !category) {
+    return null
+  }
+  const subcategory = (row.expectedSubcategory ?? '').trim().toLowerCase()
+  const size = (row.targetSize ?? '').trim().toLowerCase()
+  const packCount = row.targetPackCount ?? 1
+  return `${brand}|${category}|${subcategory}|${size}|${packCount}`
+}
+
+function rowHasTrustworthyCost(row: MutableRowForFamilyCostPostPass): boolean {
+  return TRUSTWORTHY_COST_SOURCES.has(row.effectiveUnitCostSource ?? '')
+    && isTrustworthyUnitCost(row.effectiveUnitCost ?? null)
+}
+
+function medianOfNumbers(values: number[]): number | null {
+  if (values.length === 0) {
+    return null
+  }
+  const sorted = [...values].sort((left, right) => left - right)
+  const mid = Math.floor(sorted.length / 2)
+  if (sorted.length % 2 === 1) {
+    return sorted[mid]
+  }
+  return roundMoney((sorted[mid - 1] + sorted[mid]) / 2)
+}
+
+// Wave-2 pass over the rows produced by `buildGeneratedRow`. The user rule is:
+//   "Pricing proposals must never use cost basis of trade samples or anything
+//    under $1, those aren't real prices. Use the family average cost instead."
+// So we collect every row that DOES have a trustworthy (>= $1, non-sample)
+// unit cost, bucket those by brand/category/subcategory/size/pack-count, and
+// substitute the family-median cost into any row whose own cost was rejected
+// (sample-reference, sample-reference-metrc, or simply absent). Pricing is
+// then recomputed off the family-average cost so proposedPrice and gmPercent
+// are no longer skewed by a $0.05 trade-sample line item.
+function applyFamilyAverageCostFallback(rows: GeneratedPendingPurchaseRow[]): void {
+  const mutableRows = rows.map(asMutableRow)
+  const costsByFamily = new Map<string, number[]>()
+  for (const row of mutableRows) {
+    if (!rowHasTrustworthyCost(row)) {
+      continue
+    }
+    const key = familyCostKeyFromRow(row)
+    if (!key) {
+      continue
+    }
+    const cost = row.effectiveUnitCost
+    if (cost === null || cost === undefined) {
+      continue
+    }
+    const bucket = costsByFamily.get(key)
+    if (bucket) {
+      bucket.push(cost)
+    } else {
+      costsByFamily.set(key, [cost])
+    }
+  }
+
+  for (const row of mutableRows) {
+    if (rowHasTrustworthyCost(row)) {
+      continue
+    }
+    const previousSource = row.effectiveUnitCostSource ?? null
+    const previousValue = row.effectiveUnitCost ?? null
+    const wasSampleReference = previousSource === 'sample-reference' || previousSource === 'sample-reference-metrc'
+    const originalNote = wasSampleReference && previousValue !== null
+      ? `Original live cost ${formatCurrency(previousValue)} was a trade-sample / sub-$1 reference and is excluded from pricing.`
+      : null
+
+    const key = familyCostKeyFromRow(row)
+    const peerCosts = (key ? costsByFamily.get(key) ?? [] : []).filter((value): value is number => isTrustworthyUnitCost(value))
+    const familyAverageCost = medianOfNumbers(peerCosts)
+
+    let newCost: number | null = null
+    let newSource: string | null = null
+    let newReason: string
+
+    if (familyAverageCost !== null) {
+      newCost = familyAverageCost
+      newSource = 'family-average-cost'
+      const lane = compactStrings([
+        row.targetBrand ?? null,
+        row.expectedCategory ?? null,
+        row.expectedSubcategory ?? null,
+        row.targetSize ?? null,
+        row.targetPackCount ? `${row.targetPackCount}pk` : null,
+      ]).join(' · ')
+      newReason = compactStrings([
+        `Family-average wholesale cost ${formatCurrency(familyAverageCost)} drawn from ${peerCosts.length} peer pending-purchase row${peerCosts.length === 1 ? '' : 's'} in the same ${lane || 'family'} lane.`,
+        originalNote,
+      ]).join(' ')
+    } else {
+      newReason = compactStrings([
+        originalNote,
+        previousValue === null && !wasSampleReference
+          ? 'No usable wholesale cost was visible on the live purchase rows.'
+          : null,
+        'No peer pending-purchase rows in the same brand/category/size lane carried a trustworthy (>= $1, non-sample) wholesale cost to derive a family-average from.',
+      ]).join(' ')
+    }
+
+    row.effectiveUnitCost = newCost
+    row.effectiveUnitCostSource = newSource
+    row.effectiveUnitCostReason = newReason
+
+    // Only recompute proposedPrice when it was not pinned from an exact live
+    // catalog reuse (reuseProductId truthy => proposedPrice = reuse.price).
+    const reusePinned = (row.reuseProductId ?? null) !== null
+    if (!reusePinned) {
+      const recomputedProposed = recommendPendingPurchasePrice(newCost, row.anchorPrice ?? null)
+      row.proposedPrice = recomputedProposed
+      if ((row.currentPrice ?? null) === null) {
+        row.currentPrice = row.anchorPrice ?? recomputedProposed
+      }
+      row.pricingAction = classifyPricingAction(row.currentPrice ?? null, recomputedProposed)
+    }
+
+    row.gmPercent = computeGmPercent(newCost, row.proposedPrice ?? null)
+    row.currentGmPercent = computeGmPercent(newCost, row.currentPrice ?? null)
+    row.pricingReason = buildPricingReason({
+      anchorPrice: row.anchorPrice ?? null,
+      currentPriceBasis: row.currentPriceBasis ?? null,
+      proposedPrice: row.proposedPrice ?? null,
+      resolvedCost: newCost,
+    })
   }
 }
 
