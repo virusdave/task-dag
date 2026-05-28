@@ -268,6 +268,58 @@ function AppShellInner() {
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [toggleSidebar])
 
+  // Mobile-only "Top" pill: shown once the page has been scrolled at
+  // least one full viewport down, regardless of whether the nav is
+  // currently expanded or collapsed. The threshold uses hysteresis
+  // (show ≥1vh, hide <0.5vh) so the chip doesn't flicker on/off when
+  // the user is scrolling right around the boundary.
+  const [showScrollTopChip, setShowScrollTopChip] = useState<boolean>(false)
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return
+    }
+    let ticking = false
+    function evaluate() {
+      const vh = window.innerHeight || 1
+      const y = window.scrollY
+      // Snapshot the current visibility off the DOM rather than off
+      // state to avoid stale-closure problems with the rAF callback.
+      setShowScrollTopChip((current) => {
+        if (current) {
+          // Already visible — only hide once scrolled back above the
+          // lower hysteresis threshold.
+          return y >= vh * 0.5
+        }
+        // Not yet visible — wait for a full viewport of scroll.
+        return y >= vh
+      })
+      ticking = false
+    }
+    function onScroll() {
+      if (ticking) return
+      ticking = true
+      window.requestAnimationFrame(evaluate)
+    }
+    window.addEventListener('scroll', onScroll, { passive: true })
+    window.addEventListener('resize', evaluate)
+    // Initial evaluation in case the route already loaded scrolled.
+    evaluate()
+    return () => {
+      window.removeEventListener('scroll', onScroll)
+      window.removeEventListener('resize', evaluate)
+    }
+  }, [])
+
+  const handleScrollToTop = useCallback(() => {
+    if (typeof window !== 'undefined') {
+      window.scrollTo({ top: 0, behavior: 'smooth' })
+    }
+    // If the nav is currently hidden, surface it as part of "going
+    // back home" so the reviewer doesn't need a second tap to expand
+    // the sidebar after returning to the top.
+    setIsSidebarCollapsed((current) => (current ? false : current))
+  }, [])
+
   async function handleLogout() {
     await fetch(buildAppPath('/api/session/logout'), {
       credentials: 'same-origin',
@@ -321,15 +373,25 @@ function AppShellInner() {
           <Outlet />
         </main>
       </div>
-      {isSidebarCollapsed ? (
+      {/*
+        Mobile-only floating chip. Used to be a 'Show nav' shortcut
+        that appeared only when the sidebar was collapsed; it has
+        been repurposed as a 'Top' shortcut that appears whenever the
+        page has scrolled at least one viewport down, regardless of
+        whether the nav is currently expanded. Pressing it scrolls
+        smoothly to the top AND expands the nav (so the reviewer
+        returning to the page-top from deep in a long list lands on
+        a familiar fully-expanded shell).
+      */}
+      {showScrollTopChip ? (
         <button
           type="button"
-          className="sidebar-reopen-chip"
-          onClick={toggleSidebar}
-          title="Show nav (Esc)"
-          aria-label="Show nav"
+          className="scroll-top-chip"
+          onClick={handleScrollToTop}
+          title="Scroll to top"
+          aria-label="Scroll to top"
         >
-          ☰ Nav
+          ↑ Top
         </button>
       ) : null}
     </div>
