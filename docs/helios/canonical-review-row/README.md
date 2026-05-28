@@ -70,10 +70,12 @@ review system works".
 - [`helios/src/shared/ui/pricing-ladder/`](../../../helios/src/shared/ui/pricing-ladder/README.md) —
   canonical pricing-ladder UI (visual + optional slider). Treat as
   read-only; consume via its public API.
-- [`helios/src/catalogUpdateEngine/`](../../../helios/src/catalogUpdateEngine/) —
-  `PricingLadder`, `CatalogProposalRow*`, `MSOBrandAnnotation`,
-  `CatalogChangeLineItem*` types. The row contract reuses these for
-  cross-surface portability.
+
+> Historical note: an earlier `helios/src/catalogUpdateEngine/` prototype
+> (issue #5) defined `PricingLadder`, `CatalogProposalRow*`,
+> `MSOBrandAnnotation`, and `CatalogChangeLineItem*` types intended for
+> cross-surface reuse. That prototype was never wired up and was deleted
+> as orphaned code; the canonical row contract supersedes it.
 
 ## Why "family"
 
