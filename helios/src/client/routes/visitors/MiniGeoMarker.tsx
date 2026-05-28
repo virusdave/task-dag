@@ -77,8 +77,15 @@ const SITE_BASEMAPS: Record<string, SiteBasemap> = {
 // sites should ship their own asset via make-mini-map.py.
 const FALLBACK_BASEMAP: SiteBasemap = SITE_BASEMAPS.bx
 
+// The SVG viewBox is square because both the underlying geographic
+// bbox (~2-mile-radius around each site center) and the basemap PNG
+// asset (480×480) are square. A square viewBox means the linear
+// lat/lng → pixel projection produces undistorted positions, and
+// `preserveAspectRatio="none"` only stretches uniformly when the
+// rendered container is also square — which the CSS for the
+// desktop thumbnail and the mobile card both enforce.
 const WIDTH = 64
-const HEIGHT = 44
+const HEIGHT = 64
 
 interface MiniGeoMarkerProps {
   marker: VisitorScanMiniMarker | null
