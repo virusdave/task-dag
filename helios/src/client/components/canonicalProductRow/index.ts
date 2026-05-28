@@ -21,3 +21,14 @@ export {
   truncateForTooltip,
   truncatePreview,
 } from './formatters.js'
+export {
+  STRUCTURED_OVERRIDE_KEYS,
+  StructuredOverrideField,
+  areStructuredOverridesEqual,
+  buildStructuredOverridePayload,
+  readInitialDraftStructured,
+  readParsedStructuredValue,
+  type ParsedStructuredValues,
+  type StructuredOverrideDraft,
+  type StructuredOverrideKey,
+} from './structuredOverrides.js'
