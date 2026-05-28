@@ -75,6 +75,10 @@ import {
   customerVisitorDetailsLoader,
 } from '../routes/customers/CustomerVisitorDetailsPage.js'
 import {
+  CustomerMapPage,
+  customerMapLoader,
+} from '../routes/customers/CustomerMapPage.js'
+import {
   CustomerReviewsListPage,
   customerReviewsListLoader,
 } from '../routes/customerReviews/CustomerReviewsListPage.js'
@@ -318,10 +322,23 @@ export const router = createBrowserRouter([
         loader: visitorScansLoader,
         path: 'admin/visitors/scans',
       },
+      // Canonical C1 route per parent design (#33).
+      // Same component + loader; both URLs remain valid.
+      {
+        element: <VisitorScansPage />,
+        loader: visitorScansLoader,
+        path: 'admin/customers/check-ins',
+      },
       {
         element: <CustomerVisitorDetailsPage />,
         loader: customerVisitorDetailsLoader,
         path: 'admin/customers/visitors/:scanId',
+      },
+      // C4: customer-origin map.
+      {
+        element: <CustomerMapPage />,
+        loader: customerMapLoader,
+        path: 'admin/customers/map',
       },
       {
         element: <ConfigModulePage />,

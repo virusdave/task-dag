@@ -139,7 +139,11 @@ export function VisitorScansPage() {
   const [error, setError] = useState<string | null>(null)
   const [selected, setSelected] = useState<VisitorScanItem | null>(null)
 
-  // Re-fetch whenever the filter changes.
+  // Re-fetch whenever the filter changes, AND on a 20-second tick
+  // so the page stays effectively-live for the operator behind the
+  // counter (FreshlyBakedNYC/automation#33 phase C1). The interval
+  // tears down on filter change so we never stack multiple
+  // overlapping timers.
   useEffect(() => {
     let cancelled = false
     async function refresh(): Promise<void> {
@@ -159,8 +163,12 @@ export function VisitorScansPage() {
       }
     }
     void refresh()
+    const id = window.setInterval(() => {
+      void refresh()
+    }, 20_000)
     return () => {
       cancelled = true
+      window.clearInterval(id)
     }
   }, [searchParams])
 

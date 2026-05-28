@@ -5331,3 +5331,179 @@ span.metric-chart-legend-item {
   fill: rgba(120, 86, 48, 0.7);
   font-weight: 700;
 }
+
+/* =========================================================================
+   /admin/customers/map  — CustomerMapPage (Customers UX C4 v1)
+   ========================================================================= */
+.customer-map-page {
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+  max-width: 100%;
+}
+
+.customer-map-page .cm-header {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  align-items: flex-start;
+}
+
+.customer-map-page .cm-title {
+  margin: 0;
+  font-size: 1.4rem;
+  line-height: 1.2;
+}
+
+.customer-map-page .cm-sub {
+  margin: 0.2rem 0 0;
+}
+
+.customer-map-page .cm-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.customer-map-page .cm-filters {
+  border: 1px solid var(--panel-border);
+  border-radius: 10px;
+  background: var(--surface, rgba(255, 250, 241, 0.55));
+  padding: 0;
+  overflow: hidden;
+}
+.customer-map-page .cm-filters > summary {
+  list-style: none;
+  cursor: pointer;
+  padding: 0.7rem 0.9rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-weight: 600;
+  min-height: 44px;
+}
+.customer-map-page .cm-filters > summary::-webkit-details-marker {
+  display: none;
+}
+.customer-map-page .cm-filters > summary::before {
+  content: '▸';
+  color: var(--text-muted);
+  font-size: 0.9rem;
+  transition: transform 0.15s ease;
+}
+.customer-map-page .cm-filters[open] > summary::before {
+  transform: rotate(90deg);
+}
+.customer-map-page .cm-filter-form {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 0.6rem;
+  padding: 0.5rem 0.9rem 0.9rem;
+  border-top: 1px solid var(--panel-border);
+}
+.customer-map-page .cm-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+.customer-map-page .cm-field > input,
+.customer-map-page .cm-field > select {
+  min-height: 44px;
+  width: 100%;
+  padding: 0.5rem 0.65rem;
+  font-size: 1rem;
+  border: 1px solid var(--control-border);
+  border-radius: 8px;
+  background: var(--surface, #fff);
+  color: inherit;
+  box-sizing: border-box;
+}
+.customer-map-page .cm-filter-actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+.customer-map-page .cm-action {
+  min-height: 44px;
+  padding: 0.55rem 0.95rem;
+  border-radius: 8px;
+  font-size: 0.95rem;
+}
+
+/* Map canvas — square-ish on mobile, generous on desktop. */
+.customer-map-page .cm-map-wrap {
+  border: 1px solid var(--panel-border);
+  border-radius: 10px;
+  overflow: hidden;
+  background: #f5efe3;
+}
+.customer-map-page .cm-map {
+  width: 100%;
+  height: 65vh;
+  min-height: 360px;
+}
+
+.customer-map-page .cm-about > summary {
+  cursor: pointer;
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+}
+.customer-map-page .cm-about-body {
+  margin-top: 0.5rem;
+}
+
+/* Popup styling — scoped via .cm-popup wrapper in the HTML payload. */
+.cm-popup {
+  font-family: inherit;
+  min-width: 180px;
+}
+.cm-popup .cm-popup-name {
+  font-weight: 700;
+  font-size: 0.95rem;
+  margin-bottom: 0.2rem;
+}
+.cm-popup .cm-popup-meta {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+.cm-popup .cm-popup-addr {
+  font-size: 0.85rem;
+  margin: 0.25rem 0 0.4rem;
+}
+.cm-popup .cm-popup-link {
+  display: inline-block;
+  font-weight: 600;
+  text-decoration: none;
+  color: var(--accent-strong, #b95f25);
+  font-size: 0.9rem;
+}
+.cm-popup .cm-popup-link:hover,
+.cm-popup .cm-popup-link:focus-visible {
+  text-decoration: underline;
+}
+
+@media (min-width: 720px) {
+  .customer-map-page .cm-header {
+    flex-direction: row;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .customer-map-page .cm-title {
+    font-size: 1.6rem;
+  }
+  .customer-map-page .cm-filter-form {
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    align-items: end;
+  }
+  .customer-map-page .cm-filter-actions {
+    grid-column: 1 / -1;
+    justify-content: flex-end;
+  }
+  .customer-map-page .cm-map {
+    height: 70vh;
+    min-height: 500px;
+  }
+}

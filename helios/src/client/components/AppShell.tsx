@@ -151,15 +151,17 @@ function buildPrimarySidebarNodes(
     moduleBranch('config'),
     // Customers branch — collapsed by default. TreeNav auto-expands
     // the ancestor chain to whatever leaf the operator is on, so
-    // visiting /admin/visitors/scans opens this branch automatically
-    // without leaving every other branch flapping open.
+    // visiting any /admin/customers/* page opens this branch
+    // automatically without leaving every other branch flapping
+    // open.
     //
-    // Houses the existing CRM & Segments leaf plus the new
-    // /admin/visitors/scans page from FreshlyBakedNYC/automation#31.
-    // The Customers UX child epic (#33, phases C1..C5) will add Check-ins,
-    // Origin Map, and Replay leaves here once they ship; until then the
-    // single anchor is Visitor Scans (the ingest table) and the existing
-    // CRM & Segments URL.
+    // FreshlyBakedNYC/automation#33 (Customers UX epic):
+    //   - C1 Check-ins  → /admin/customers/check-ins (alias of the
+    //                     ingestion epic's /admin/visitors/scans;
+    //                     both URLs remain valid).
+    //   - C4 Map        → /admin/customers/map.
+    //   - CRM / Segments stay on the existing module URL until the
+    //     C3 IA-relocation slice lands.
     {
       kind: 'branch',
       navKey: 'customers',
@@ -169,9 +171,15 @@ function buildPrimarySidebarNodes(
       children: [
         {
           kind: 'leaf',
-          navKey: 'admin.visitors.scans',
-          label: 'Visitor Scans',
-          to: '/admin/visitors/scans',
+          navKey: 'admin.customers.checkins',
+          label: 'Check-ins',
+          to: '/admin/customers/check-ins',
+        },
+        {
+          kind: 'leaf',
+          navKey: 'admin.customers.map',
+          label: 'Origin Map',
+          to: '/admin/customers/map',
         },
         {
           kind: 'leaf',

@@ -52,6 +52,7 @@ import {
   registerVisitorScansAdminRoutes,
   registerVisitorScansWebhookRoutes,
 } from '../routes/visitorScans.js'
+import { registerCustomersMapRoutes } from '../routes/customersMap.js'
 import { registerWhiteglovePricingRoutes } from '../routes/whiteglovePricing.js'
 import { joinBasePath } from '../../shared/config/appBasePath.js'
 
@@ -230,6 +231,7 @@ async function registerApplicationSurface(server: FastifyInstance) {
   await registerTaskDagRoutes(server)
   await registerUsersRoutes(server)
   await registerVisitorScansAdminRoutes(server)
+  await registerCustomersMapRoutes(server)
   await registerWhiteglovePricingRoutes(server)
 
   const clientDistPath = resolve(__dirname, '../../../client')
