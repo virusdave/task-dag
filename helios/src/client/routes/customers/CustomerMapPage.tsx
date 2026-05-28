@@ -54,14 +54,17 @@ const MAP_STYLE: maplibregl.StyleSpecification = {
       type: 'raster',
       source: 'osm',
       paint: {
-        // Heavy desaturation + a tinge of opacity so the base map
-        // recedes behind the points. The operator scans for
-        // geographic framing (boroughs, the rivers), not for street
-        // names.
-        'raster-opacity': 0.55,
-        'raster-saturation': -0.85,
-        'raster-contrast': -0.15,
-        'raster-brightness-max': 0.95,
+        // Push the basemap WAY into the background so the customer
+        // dots are unambiguously the figure and the basemap is just
+        // ghosted ground. Fully desaturated, very low opacity,
+        // brightness lifted so the darkest features (roads, river
+        // outlines) read as light grey rather than competing with
+        // the bright marker colors.
+        'raster-opacity': 0.3,
+        'raster-saturation': -1,
+        'raster-contrast': -0.55,
+        'raster-brightness-min': 0.55,
+        'raster-brightness-max': 1,
       },
     },
   ],
@@ -419,21 +422,22 @@ export function CustomerMapPage(): JSX.Element {
           type: 'circle',
           source: 'scans',
           paint: {
-            // VERY small dots — the city-wide view needs to hold
-            // thousands of scans simultaneously without blobbing
-            // into a solid mass. Combined with the per-scan jitter
-            // applied to the geocode, this keeps individual visits
-            // visible even when coarse "NY, NY"-style geocodes
-            // collide on the same address.
+            // Small-ish dots — the city-wide view still needs to
+            // hold thousands of scans without blobbing into a solid
+            // mass, but the previous pass shrank them to the point
+            // of disappearing against the basemap. With the basemap
+            // now ghosted to a near-white background, these radii
+            // pop clearly while still revealing density via the
+            // per-scan jitter (~400 ft).
             'circle-radius': [
               'interpolate',
               ['linear'],
               ['zoom'],
-              7, 0.8,
-              10, 1.2,
-              13, 1.8,
-              16, 2.6,
-              19, 4,
+              7, 2,
+              10, 3,
+              13, 4.5,
+              16, 6.5,
+              19, 9,
             ],
             'circle-color': [
               'match',
@@ -461,10 +465,10 @@ export function CustomerMapPage(): JSX.Element {
               'scan', '#1a0d04',
               '#ffffff',
             ],
-            // Hairline halo only — anything thicker is bigger than
-            // the dot itself at default zoom.
-            'circle-stroke-width': 0.5,
-            'circle-stroke-opacity': 0.85,
+            // Thin halo for separation against the ghosted basemap
+            // and against other dots in dense areas.
+            'circle-stroke-width': 1,
+            'circle-stroke-opacity': 0.9,
           },
         })
 
