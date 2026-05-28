@@ -31,6 +31,84 @@ export async function pendingPurchasesLoader({ request }: { request: Request }) 
   const url = new URL(request.url)
   return loadJson(`/api/catalog/pending-purchases${url.search}`, PendingPurchaseListResponseSchema)
 }
+
+// Issue #35 — family-grouped pending-purchase rows.
+//
+// A "family" is the (brand × category × subcategory × size) tuple
+// /catalog/review uses as its grouping unit. We use the EFFECTIVE
+// values (reviewer override ?? parser value) so a row regroups
+// under the corrected family the moment the reviewer fixes a
+// mis-parsed brand or size — matching what apply will actually
+// write. Empty string is the placeholder for an unknown field;
+// it sorts before populated values so unattributed rows surface
+// at the top of the queue.
+interface FamilyKey {
+  brand: string
+  category: string
+  subcategory: string
+  size: string
+}
+
+interface FamilyGroup {
+  familyKey: FamilyKey
+  familyKeyString: string
+  familyLabel: string
+  rows: PendingPurchaseRow[]
+}
+
+function resolveEffectiveFamilyKey(item: PendingPurchaseRow): FamilyKey {
+  const o = item.editedStructuredFields ?? null
+  const pick = (override: string | null | undefined, parsed: string | null): string => {
+    // `null` override = explicit clear; `undefined` = no override.
+    if (override === null) return ''
+    if (override === undefined) return (parsed ?? '').trim()
+    return override.trim()
+  }
+  return {
+    brand: pick(o?.targetBrand, item.targetBrand),
+    category: pick(o?.expectedCategory, item.expectedCategory),
+    subcategory: pick(o?.expectedSubcategory, item.expectedSubcategory),
+    size: pick(o?.targetSize, item.targetSize),
+  }
+}
+
+function buildFamilyKeyString(key: FamilyKey): string {
+  return [key.brand || '∅', key.category || '∅', key.subcategory || '∅', key.size || '∅'].join('|')
+}
+
+function buildFamilyLabel(key: FamilyKey): string {
+  const parts = [key.brand, key.category, key.subcategory, key.size].filter(
+    (v): v is string => !!v && v.length > 0,
+  )
+  return parts.length > 0 ? parts.join(' · ') : 'Unattributed family'
+}
+
+function buildFamilyGroups(items: readonly PendingPurchaseRow[]): FamilyGroup[] {
+  const groups = new Map<string, FamilyGroup>()
+  for (const item of items) {
+    const familyKey = resolveEffectiveFamilyKey(item)
+    const familyKeyString = buildFamilyKeyString(familyKey)
+    const existing = groups.get(familyKeyString)
+    if (existing) {
+      existing.rows.push(item)
+    } else {
+      groups.set(familyKeyString, {
+        familyKey,
+        familyKeyString,
+        familyLabel: buildFamilyLabel(familyKey),
+        rows: [item],
+      })
+    }
+  }
+  // Sort: unattributed (empty brand) first so they don't get buried,
+  // then alphabetical by familyLabel for stable, scannable ordering.
+  return [...groups.values()].sort((a, b) => {
+    const aEmpty = a.familyKey.brand === '' ? 0 : 1
+    const bEmpty = b.familyKey.brand === '' ? 0 : 1
+    if (aEmpty !== bEmpty) return aEmpty - bEmpty
+    return a.familyLabel.localeCompare(b.familyLabel)
+  })
+}
 export function PendingPurchasesPage() {
   const data = useLoaderData() as PendingPurchaseListResponse
   const session = useRouteLoaderData('root') as SessionEnvelope
@@ -140,20 +218,18 @@ export function PendingPurchasesPage() {
     [approvedVisibleRows, selectedRowIds],
   )
 
-  // Flat grouping for rows mode: a single header row per site, then the
-  // PendingPurchaseRowCard list. Replaces the prior 4-level
-  // Site → Category → Subcategory → Brand `<details>` tree which was
-  // hostile on phones and had no purpose beyond visual grouping.
-  const rowsBySite = useMemo(() => {
-    const groups = new Map<string, { siteLabel: string; rows: PendingPurchaseRow[] }>()
-    for (const item of data.items) {
-      const key = item.siteLabel
-      const existing = groups.get(key) ?? { siteLabel: key, rows: [] }
-      existing.rows.push(item)
-      groups.set(key, existing)
-    }
-    return [...groups.values()].sort((a, b) => a.siteLabel.localeCompare(b.siteLabel))
-  }, [data.items])
+  // Family grouping for rows mode (issue #35): group rows by
+  // (brand × category × subcategory × size) — the same family-key
+  // shape /catalog/review uses. The reviewer can scan all rows for
+  // "Cookies · flower · indica · 3.5g" in one panel rather than
+  // hunting them across the per-site site-label sections. Each row
+  // card still carries its own site-label chip so per-distributor
+  // context isn't lost. Replaces the prior site-only grouping.
+  //
+  // Effective values are used (override-when-present ?? parsed) so a
+  // reviewer-corrected row regroups under the corrected family
+  // immediately, matching what apply will actually write.
+  const rowsByFamily = useMemo(() => buildFamilyGroups(data.items), [data.items])
 
   async function handleImport() {
     setIsImporting(true)
@@ -381,7 +457,7 @@ export function PendingPurchasesPage() {
           onQueueApply={() => void handleApplySelectedRows()}
           onSelectApprovedVisible={() => setSelectedRowIds(approvedVisibleRows.map((item) => item.rowId))}
           onToggleSelected={toggleSelectedRow}
-          rowsBySite={rowsBySite}
+          rowsByFamily={rowsByFamily}
           approvedVisibleRowCount={approvedVisibleRows.length}
           selectedApprovedRowIds={selectedApprovedRowIds}
           selectedRowIds={selectedRowIds}
@@ -583,7 +659,7 @@ interface PendingPurchasesRowsViewProps {
   onQueueApply: () => void
   onSelectApprovedVisible: () => void
   onToggleSelected: (rowId: number) => void
-  rowsBySite: { siteLabel: string; rows: PendingPurchaseRow[] }[]
+  rowsByFamily: FamilyGroup[]
   selectedApprovedRowIds: number[]
   selectedRowIds: number[]
 }
@@ -598,7 +674,7 @@ function PendingPurchasesRowsView({
   onQueueApply,
   onSelectApprovedVisible,
   onToggleSelected,
-  rowsBySite,
+  rowsByFamily,
   selectedApprovedRowIds,
   selectedRowIds,
 }: PendingPurchasesRowsViewProps) {
@@ -623,11 +699,13 @@ function PendingPurchasesRowsView({
         <p className="empty-state">No rows in this packet match the current filters.</p>
       ) : (
         <div className="pp-rows-list stacked-list">
-          {rowsBySite.map((group) => (
-            <section key={group.siteLabel} className="pp-rows-site-group">
-              <header className="pp-rows-site-header">
-                <strong>{group.siteLabel}</strong>
-                <Pill tone="muted">{`${group.rows.length} row${group.rows.length === 1 ? '' : 's'}`}</Pill>
+          {rowsByFamily.map((group) => (
+            <section key={group.familyKeyString} className="pp-rows-family-group">
+              <header className="pp-rows-family-header">
+                <div className="pp-rows-family-title">
+                  <strong>{group.familyLabel}</strong>
+                  <Pill tone="muted">{`${group.rows.length} row${group.rows.length === 1 ? '' : 's'}`}</Pill>
+                </div>
               </header>
               <div className="stacked-list">
                 {group.rows.map((item) => (

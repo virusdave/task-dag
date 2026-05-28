@@ -1074,18 +1074,29 @@ pre {
   gap: 1rem;
 }
 
-.pp-rows-site-group {
+/* Issue #35 — family-panel grouping for /catalog/pending-purchases.
+   The (brand × category × subcategory × size) family heading is the
+   primary visual landmark a reviewer scans down, so it gets a
+   slightly heavier rule than the prior per-site header. */
+.pp-rows-family-group {
   display: grid;
   gap: 0.6rem;
 }
 
-.pp-rows-site-header {
+.pp-rows-family-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
   gap: 0.5rem;
-  padding: 0.4rem 0.1rem;
-  border-bottom: 1px solid var(--panel-border);
+  padding: 0.45rem 0.1rem 0.35rem;
+  border-bottom: 2px solid var(--panel-border);
+}
+
+.pp-rows-family-title {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
 }
 
 .pp-pager {
