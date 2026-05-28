@@ -106,7 +106,15 @@ interface SliderRange {
 }
 
 function buildSliderRange(): SliderRange {
-  const end = new Date()
+  // Snap the window edges to the top of the hour so each slider
+  // tick maps to a clean wall-clock hour. Without this, dragging the
+  // slider produces times like "06:27" that just reflect whatever
+  // minute/sec it happened to be when the page mounted, which is
+  // exactly the "weird minutes" complaint from the operator.
+  const now = new Date()
+  const end = new Date(now)
+  end.setMinutes(0, 0, 0)
+  end.setHours(end.getHours() + 1) // ceil to next top-of-hour
   const start = new Date(end.getTime() - SLIDER_WINDOW_MS)
   return { windowStart: start, windowEnd: end }
 }
@@ -153,6 +161,25 @@ function formatShortRange(after: Date, before: Date): string {
   }
   return `${after.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false })} – ` +
     `${before.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false })}`
+}
+
+/**
+ * Convenience preset: returns the canonical "yesterday 6am → today 3am"
+ * range anchored to `now`. Uses 0-second/minute precision so it matches
+ * `defaultCheckedIn{After,Before}` exactly.
+ */
+function yesterdayShiftRange(now: Date = new Date()): { after: Date; before: Date } {
+  const after = new Date(now)
+  after.setDate(after.getDate() - 1)
+  after.setHours(6, 0, 0, 0)
+  const before = new Date(now)
+  before.setHours(3, 0, 0, 0)
+  return { after, before }
+}
+
+/** True when `a` and `b` are within `tolMs` of each other. */
+function nearMs(a: Date, b: Date, tolMs = 60 * 60 * 1000): boolean {
+  return Math.abs(a.getTime() - b.getTime()) <= tolMs
 }
 
 // ---------------------------------------------------------------------
@@ -550,6 +577,18 @@ export function CustomerMapPage(): JSX.Element {
   const previewAfter = tickToDate(Math.min(sliderAfterTick, sliderBeforeTick), sliderWindow)
   const previewBefore = tickToDate(Math.max(sliderAfterTick, sliderBeforeTick), sliderWindow)
 
+  // Friendly label: when the current window matches the canonical
+  // "yesterday 6am → today 3am" preset (within an hour, since slider
+  // ticks are 1h apart), show "Yesterday" instead of digits. Otherwise
+  // fall through to formatShortRange.
+  const yesterdayPreset = yesterdayShiftRange(sliderWindow.windowEnd)
+  const isYesterdayPreset =
+    nearMs(previewAfter, yesterdayPreset.after) &&
+    nearMs(previewBefore, yesterdayPreset.before)
+  const rangeLabel = isYesterdayPreset
+    ? 'Yesterday'
+    : formatShortRange(previewAfter, previewBefore)
+
   // -----------------------------------------------------------------
   // Other filter controls
   // -----------------------------------------------------------------
@@ -559,10 +598,34 @@ export function CustomerMapPage(): JSX.Element {
     else next.set('siteSlugs', siteSlugs)
     setSearchParams(next, { replace: true })
   }
-  function handleMaxPointsChange(maxPoints: string): void {
+  // Local-state mirror for the max-points input so intermediate typing
+  // ("", "2", "25", "250", "2500") doesn't churn the URL — and so we
+  // never push a value that would fail the server schema (min=1,
+  // max=10_000). We commit on blur or Enter, clamping to the legal
+  // band. Empty / non-numeric → restore the default 2,500.
+  const [maxPointsDraft, setMaxPointsDraft] = useState<string>(
+    () => searchParams.get('maxPoints') ?? String(DEFAULT_MAX_POINTS),
+  )
+  useEffect(() => {
+    setMaxPointsDraft(searchParams.get('maxPoints') ?? String(DEFAULT_MAX_POINTS))
+  }, [searchParams])
+  function commitMaxPointsDraft(): void {
+    const raw = maxPointsDraft.trim()
     const next = new URLSearchParams(searchParams)
-    if (maxPoints === '') next.delete('maxPoints')
-    else next.set('maxPoints', maxPoints)
+    if (raw === '') {
+      next.delete('maxPoints')
+      setSearchParams(next, { replace: true })
+      return
+    }
+    const parsed = Number(raw)
+    if (!Number.isFinite(parsed)) {
+      // garbage; revert draft and keep URL.
+      setMaxPointsDraft(searchParams.get('maxPoints') ?? String(DEFAULT_MAX_POINTS))
+      return
+    }
+    const clamped = Math.max(1, Math.min(10_000, Math.round(parsed)))
+    next.set('maxPoints', String(clamped))
+    setMaxPointsDraft(String(clamped))
     setSearchParams(next, { replace: true })
   }
 
@@ -619,11 +682,19 @@ export function CustomerMapPage(): JSX.Element {
             <span>Max points</span>
             <input
               type="number"
+              inputMode="numeric"
               min={1}
               max={10_000}
               step={100}
-              value={searchParams.get('maxPoints') ?? String(DEFAULT_MAX_POINTS)}
-              onChange={(e) => handleMaxPointsChange(e.target.value)}
+              value={maxPointsDraft}
+              onChange={(e) => setMaxPointsDraft(e.target.value)}
+              onBlur={commitMaxPointsDraft}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault()
+                  commitMaxPointsDraft()
+                }
+              }}
             />
           </label>
           <button
@@ -638,7 +709,7 @@ export function CustomerMapPage(): JSX.Element {
         <div className="cm-range">
           <div className="cm-range-labels">
             <span className="cm-range-label">
-              <strong>{formatShortRange(previewAfter, previewBefore)}</strong>
+              <strong>{rangeLabel}</strong>
             </span>
             <span className="cm-range-sub subtle-copy">
               window: {sliderWindow.windowStart.toLocaleDateString()} →{' '}

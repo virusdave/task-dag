@@ -2088,17 +2088,18 @@ pre {
   padding-top: 0.55rem;
 }
 
-/* Floating "show nav" chip — only appears on mobile, only when the
- * sidebar is collapsed. Desktop has the "Show nav" button up in the
- * topbar, which is reachable without scrolling. On mobile the topbar
- * scrolls away as soon as the user moves down the page, so we need
- * a persistent fixed-position handle to bring the nav back. */
-.sidebar-reopen-chip {
+/* Floating "Top" chip — only appears on mobile, only after the page
+ * has scrolled at least one viewport down (visibility is driven from
+ * AppShell). Used to be a "Show nav" affordance, but reviewers on long
+ * pending-purchase / pricing pages benefit more from a one-tap return
+ * to the top (which also re-expands the nav for them) than from a
+ * dedicated nav-reopener that requires extra scrolling-back-up. */
+.scroll-top-chip {
   display: none;
 }
 
 @media (max-width: 960px) {
-  .sidebar-reopen-chip {
+  .scroll-top-chip {
     display: inline-flex;
     align-items: center;
     gap: 0.35rem;
@@ -2119,7 +2120,7 @@ pre {
     min-height: 44px;
   }
 
-  .sidebar-reopen-chip:active {
+  .scroll-top-chip:active {
     transform: translateY(1px);
   }
 }
