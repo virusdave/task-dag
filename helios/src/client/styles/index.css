@@ -4701,3 +4701,209 @@ span.metric-chart-legend-item {
     box-shadow: -4px 0 20px rgba(0, 0, 0, 0.25);
   }
 }
+
+/* =========================================================================
+   A4 enrichment styles (FreshlyBakedNYC/automation#31)
+   - MiniGeoMarker: per-row geo thumbnail (no map tiles)
+   - Visitor link in list rows/cards
+   - vs-card-pills / vs-card-actions for the mobile card additions
+   - .customer-details-page (stub; full styling lands with phase-2 page)
+   ========================================================================= */
+
+.mini-geo-marker {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.mini-geo-marker svg {
+  display: block;
+}
+
+.mini-geo-marker .mini-geo-marker-bg {
+  fill: rgba(120, 86, 48, 0.05);
+  stroke: var(--panel-border, rgba(120, 86, 48, 0.18));
+  stroke-width: 1;
+  rx: 4;
+}
+
+.mini-geo-marker .mini-geo-marker-grid {
+  stroke: rgba(120, 86, 48, 0.16);
+  stroke-width: 0.5;
+}
+
+.mini-geo-marker .mini-geo-marker-dot {
+  opacity: 0.95;
+}
+
+.mini-geo-marker .mini-geo-marker-dot.is-document {
+  fill: #2c6ed1;
+}
+
+.mini-geo-marker .mini-geo-marker-dot.is-scan {
+  fill: #c97a3e;
+}
+
+.mini-geo-marker .mini-geo-marker-dot-core {
+  fill: #fffaf1;
+}
+
+.mini-geo-marker .mini-geo-marker-empty-text {
+  font-size: 14px;
+  fill: var(--text-muted, #777);
+}
+
+/* List visitor link — emphasize it as the primary action. */
+.visitor-scans-page .vs-visitor-link {
+  color: var(--accent-strong, #b95f25);
+  font-weight: 600;
+  text-decoration: none;
+}
+.visitor-scans-page .vs-visitor-link:hover,
+.visitor-scans-page .vs-visitor-link:focus-visible {
+  text-decoration: underline;
+}
+
+.visitor-scans-page .vs-row-raw {
+  padding: 0.3rem 0.65rem;
+  min-height: 34px;
+  font-size: 0.85rem;
+}
+
+.visitor-scans-page .vs-card-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.visitor-scans-page .vs-card-mini {
+  flex: 0 0 auto;
+}
+
+.visitor-scans-page .vs-card-actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-top: 0.25rem;
+}
+
+.visitor-scans-page .vs-card-actions .vs-action {
+  flex: 1 1 140px;
+}
+
+/* Disable the previous "card is a button" affordance, since the card
+   is now a regular article with an explicit Open / Raw action row. */
+.visitor-scans-page .vs-card {
+  cursor: default;
+}
+.visitor-scans-page .vs-card:active {
+  background: var(--surface, #fff);
+}
+
+/* =========================================================================
+   Customer details page — phase-1 stub layout
+   ========================================================================= */
+.customer-details-page {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  max-width: 100%;
+}
+
+.customer-details-page .cd-header {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  align-items: flex-start;
+}
+
+.customer-details-page .cd-title {
+  margin: 0;
+  font-size: 1.4rem;
+  line-height: 1.2;
+}
+
+.customer-details-page .cd-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.customer-details-page .cd-answer-card {
+  padding: 1rem;
+  border: 1px solid var(--panel-border);
+  border-radius: 10px;
+  background: var(--surface, #fff);
+}
+
+.customer-details-page .cd-answer-row {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 0.85rem;
+}
+
+.customer-details-page .cd-answer-label {
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+}
+
+.customer-details-page .cd-answer-value {
+  font-size: 1.25rem;
+  font-weight: 700;
+  line-height: 1.2;
+  margin: 0.15rem 0;
+}
+
+.customer-details-page .cd-placeholder {
+  padding: 1rem;
+  border: 1px dashed var(--panel-border);
+  border-radius: 10px;
+  background: rgba(255, 250, 241, 0.4);
+}
+.customer-details-page .cd-placeholder h3 {
+  margin: 0 0 0.5rem;
+  font-size: 1rem;
+}
+.customer-details-page .cd-placeholder ul {
+  margin: 0;
+  padding-left: 1.2rem;
+}
+.customer-details-page .cd-placeholder li {
+  margin: 0.15rem 0;
+}
+
+.customer-details-page .cd-debug > summary {
+  cursor: pointer;
+  font-weight: 600;
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+}
+
+.customer-details-page .cd-debug-pre {
+  background: rgba(0, 0, 0, 0.05);
+  padding: 0.75rem;
+  border-radius: 6px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 0.78rem;
+  max-height: 60vh;
+  overflow: auto;
+  margin: 0.5rem 0 0;
+}
+
+@media (min-width: 720px) {
+  .customer-details-page .cd-header {
+    flex-direction: row;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .customer-details-page .cd-title {
+    font-size: 1.6rem;
+  }
+  .customer-details-page .cd-answer-row {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}

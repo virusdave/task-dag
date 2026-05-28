@@ -34,6 +34,59 @@ export const VisitorScansQuerySchema = z.object({
 })
 export type VisitorScansQuery = z.infer<typeof VisitorScansQuerySchema>
 
+export const VisitorScanLinkStatusSchema = z.enum([
+  'pending',
+  'ambiguous',
+  'linked',
+  'no_match',
+  'failed',
+  'rejected',
+  'insufficient_data',
+])
+export type VisitorScanLinkStatus = z.infer<typeof VisitorScanLinkStatusSchema>
+
+export const VisitorScanIdentitySchema = z.object({
+  personKey: z.string().nullable(),
+  priorLocalScanCount: z.number().int().nonnegative(),
+  firstLocalScanAt: z.string().nullable(),
+  latestLocalScanAt: z.string().nullable(),
+  isFirstLocalScan: z.boolean(),
+})
+export type VisitorScanIdentity = z.infer<typeof VisitorScanIdentitySchema>
+
+export const VisitorScanSweedLinkSchema = z.object({
+  dealerId: z.number().int(),
+  customerId: z.number().int().nullable(),
+  status: VisitorScanLinkStatusSchema,
+  method: z.string().nullable(),
+  confidence: z.number().nullable(),
+  linkedAt: z.string().nullable(),
+  lastProbedAt: z.string().nullable(),
+  nextProbeAt: z.string().nullable(),
+  candidateCount: z.number().int().nonnegative(),
+})
+export type VisitorScanSweedLink = z.infer<typeof VisitorScanSweedLinkSchema>
+
+export const VisitorScanSweedPurchaseSummarySchema = z.object({
+  priorPurchaseCount: z.number().int().nonnegative(),
+  totalPurchaseCount: z.number().int().nonnegative(),
+  firstPurchaseAt: z.string().nullable(),
+  firstPurchaseTotalDollars: z.number().nullable(),
+  latestPurchaseAt: z.string().nullable(),
+  lifetimeSpendDollars: z.number(),
+  hasPriorPurchaseBeforeScan: z.boolean(),
+})
+export type VisitorScanSweedPurchaseSummary = z.infer<
+  typeof VisitorScanSweedPurchaseSummarySchema
+>
+
+export const VisitorScanMiniMarkerSchema = z.object({
+  lat: z.number(),
+  lng: z.number(),
+  source: z.enum(['document_address', 'scan_location']),
+})
+export type VisitorScanMiniMarker = z.infer<typeof VisitorScanMiniMarkerSchema>
+
 export const VisitorScanItemSchema = z.object({
   id: z.coerce.number().int(),
   ingestedAt: z.string(),
@@ -60,6 +113,12 @@ export const VisitorScanItemSchema = z.object({
   scanLatitude: z.number().nullable(),
   scanLongitude: z.number().nullable(),
   rawEnvelope: z.unknown(),
+  // ---- A4 enrichment (FreshlyBakedNYC/automation#31) ----
+  customerUrl: z.string(),
+  identity: VisitorScanIdentitySchema,
+  sweedLink: VisitorScanSweedLinkSchema.nullable(),
+  sweedPurchaseSummary: VisitorScanSweedPurchaseSummarySchema.nullable(),
+  miniMarker: VisitorScanMiniMarkerSchema.nullable(),
 })
 export type VisitorScanItem = z.infer<typeof VisitorScanItemSchema>
 

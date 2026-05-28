@@ -11,6 +11,8 @@
 
 import type { Queryable } from '../pool.js'
 import type { VisitorScanRowInput } from '../../visitorScans/envelope.js'
+import { computePersonKey } from '../../visitorScans/personKey.js'
+import { seedVisitorScanLink } from './visitorScanLinkQueries.js'
 
 export interface InsertVisitorScanResult {
   inserted: boolean
@@ -30,6 +32,13 @@ export async function insertVisitorScan(
   db: Queryable,
   row: VisitorScanRowInput,
 ): Promise<InsertVisitorScanResult> {
+  const personKey = computePersonKey({
+    firstName: row.firstName,
+    lastName: row.lastName,
+    birthDate: row.birthDate,
+    state: row.state,
+    postalCode: row.postalCode,
+  })
   const result = await db.query<{ id: string | number }>(
     `
       insert into visitor_scans (
@@ -46,7 +55,8 @@ export async function insertVisitorScan(
         document_type, document_is_valid,
         authentication_status, scan_status,
         comments, profile_comments, tags, user_agent,
-        image_link, signature_link, attachment_links
+        image_link, signature_link, attachment_links,
+        person_key
       )
       values (
         $1, $2, $3, $4::jsonb,
@@ -62,7 +72,8 @@ export async function insertVisitorScan(
         $42, $43,
         $44, $45,
         $46, $47, $48, $49,
-        $50, $51, $52::jsonb
+        $50, $51, $52::jsonb,
+        $53
       )
       on conflict (provider, hash_id) do nothing
       returning id
@@ -133,14 +144,83 @@ export async function insertVisitorScan(
       row.imageLink,
       row.signatureLink,
       row.attachmentLinks === null ? null : JSON.stringify(row.attachmentLinks),
+      personKey,
     ],
   )
-  return { inserted: result.rows.length > 0 }
+  const inserted = result.rows.length > 0
+  if (inserted) {
+    // Seed the Sweed-link row so the background worker can probe it.
+    // Best-effort: a failure here must not break the webhook path.
+    try {
+      await seedVisitorScanLink(db, {
+        scanId: Number(result.rows[0].id),
+        siteSlug: row.siteSlug,
+        idNum: row.idNum,
+        firstName: row.firstName,
+        lastName: row.lastName,
+      })
+    } catch (cause) {
+      // Swallow — the migration's backfill query also covers historic
+      // rows, and the worker can retry on its own. We still log loudly
+      // so a repeated failure is visible in the server logs.
+      // eslint-disable-next-line no-console
+      console.warn('[visitor-scans] seedVisitorScanLink failed', {
+        scanId: Number(result.rows[0].id),
+        cause: cause instanceof Error ? cause.message : String(cause),
+      })
+    }
+  }
+  return { inserted }
 }
 
 // ---------------------------------------------------------------------
 // Listing / drawer fetch for the /admin/visitors/scans page.
 // ---------------------------------------------------------------------
+
+export interface VisitorScanListIdentity {
+  personKey: string | null
+  priorLocalScanCount: number
+  firstLocalScanAt: string | null
+  latestLocalScanAt: string | null
+  isFirstLocalScan: boolean
+}
+
+export type VisitorScanLinkStatusListItem =
+  | 'pending'
+  | 'ambiguous'
+  | 'linked'
+  | 'no_match'
+  | 'failed'
+  | 'rejected'
+  | 'insufficient_data'
+
+export interface VisitorScanListSweedLink {
+  dealerId: number
+  customerId: number | null
+  status: VisitorScanLinkStatusListItem
+  method: string | null
+  confidence: number | null
+  linkedAt: string | null
+  lastProbedAt: string | null
+  nextProbeAt: string | null
+  candidateCount: number
+}
+
+export interface VisitorScanListSweedSummary {
+  priorPurchaseCount: number
+  totalPurchaseCount: number
+  firstPurchaseAt: string | null
+  firstPurchaseTotalDollars: number | null
+  latestPurchaseAt: string | null
+  lifetimeSpendDollars: number
+  hasPriorPurchaseBeforeScan: boolean
+}
+
+export interface VisitorScanListMiniMarker {
+  lat: number
+  lng: number
+  source: 'document_address' | 'scan_location'
+}
 
 export interface VisitorScanListItem {
   id: number
@@ -168,6 +248,13 @@ export interface VisitorScanListItem {
   scanLatitude: number | null
   scanLongitude: number | null
   rawEnvelope: unknown
+
+  // ---- enrichment from A4 (FreshlyBakedNYC/automation#31) ----
+  customerUrl: string
+  identity: VisitorScanListIdentity
+  sweedLink: VisitorScanListSweedLink | null
+  sweedPurchaseSummary: VisitorScanListSweedSummary | null
+  miniMarker: VisitorScanListMiniMarker | null
 }
 
 interface VisitorScanRow {
@@ -196,25 +283,112 @@ interface VisitorScanRow {
   scan_latitude: string | number | null
   scan_longitude: string | number | null
   raw_envelope: unknown
+
+  person_key: string | null
+  prior_local_scan_count: string | number | null
+  first_local_scan_at: Date | null
+  latest_local_scan_at: Date | null
+
+  link_dealer_id: string | number | null
+  link_customer_id: string | number | null
+  link_status: string | null
+  link_method: string | null
+  link_confidence: string | number | null
+  link_linked_at: Date | null
+  link_last_probed_at: Date | null
+  link_next_probe_at: Date | null
+  link_candidate_count: string | number | null
+
+  sweed_total_purchase_count: string | number | null
+  sweed_prior_purchase_count: string | number | null
+  sweed_first_purchase_at: Date | null
+  sweed_first_purchase_total: string | number | null
+  sweed_latest_purchase_at: Date | null
+  sweed_lifetime_spend: string | number | null
 }
 
+function toIsoNullable(value: Date | null): string | null {
+  return value === null ? null : value instanceof Date ? value.toISOString() : String(value)
+}
+
+function numOrNullValue(value: string | number | null): number | null {
+  if (value === null) return null
+  const n = typeof value === 'number' ? value : Number(value)
+  return Number.isFinite(n) ? n : null
+}
+
+function intOrZero(value: string | number | null): number {
+  const n = numOrNullValue(value)
+  return n === null ? 0 : Math.trunc(n)
+}
+
+const KNOWN_LINK_STATUSES: ReadonlySet<VisitorScanLinkStatusListItem> = new Set([
+  'pending',
+  'ambiguous',
+  'linked',
+  'no_match',
+  'failed',
+  'rejected',
+  'insufficient_data',
+])
+
 function rowToItem(row: VisitorScanRow): VisitorScanListItem {
-  function toIso(value: Date | null): string | null {
-    return value === null ? null : value instanceof Date ? value.toISOString() : String(value)
+  const latitude = numOrNullValue(row.latitude)
+  const longitude = numOrNullValue(row.longitude)
+  const scanLat = numOrNullValue(row.scan_latitude)
+  const scanLng = numOrNullValue(row.scan_longitude)
+
+  let miniMarker: VisitorScanListMiniMarker | null = null
+  if (latitude !== null && longitude !== null) {
+    miniMarker = { lat: latitude, lng: longitude, source: 'document_address' }
+  } else if (scanLat !== null && scanLng !== null) {
+    miniMarker = { lat: scanLat, lng: scanLng, source: 'scan_location' }
   }
-  function numOrNull(value: string | number | null): number | null {
-    if (value === null) return null
-    const n = typeof value === 'number' ? value : Number(value)
-    return Number.isFinite(n) ? n : null
+
+  const linkDealerId = numOrNullValue(row.link_dealer_id)
+  let sweedLink: VisitorScanListSweedLink | null = null
+  if (linkDealerId !== null && row.link_status !== null) {
+    const status = KNOWN_LINK_STATUSES.has(row.link_status as VisitorScanLinkStatusListItem)
+      ? (row.link_status as VisitorScanLinkStatusListItem)
+      : 'pending'
+    sweedLink = {
+      dealerId: linkDealerId,
+      customerId: numOrNullValue(row.link_customer_id),
+      status,
+      method: row.link_method,
+      confidence: numOrNullValue(row.link_confidence),
+      linkedAt: toIsoNullable(row.link_linked_at),
+      lastProbedAt: toIsoNullable(row.link_last_probed_at),
+      nextProbeAt: toIsoNullable(row.link_next_probe_at),
+      candidateCount: intOrZero(row.link_candidate_count),
+    }
   }
+
+  let sweedPurchaseSummary: VisitorScanListSweedSummary | null = null
+  if (sweedLink !== null && sweedLink.customerId !== null) {
+    const totalPurchaseCount = intOrZero(row.sweed_total_purchase_count)
+    const priorPurchaseCount = intOrZero(row.sweed_prior_purchase_count)
+    sweedPurchaseSummary = {
+      totalPurchaseCount,
+      priorPurchaseCount,
+      firstPurchaseAt: toIsoNullable(row.sweed_first_purchase_at),
+      firstPurchaseTotalDollars: numOrNullValue(row.sweed_first_purchase_total),
+      latestPurchaseAt: toIsoNullable(row.sweed_latest_purchase_at),
+      lifetimeSpendDollars: numOrNullValue(row.sweed_lifetime_spend) ?? 0,
+      hasPriorPurchaseBeforeScan: priorPurchaseCount > 0,
+    }
+  }
+
+  const priorLocalScanCount = intOrZero(row.prior_local_scan_count)
+
   return {
     id: Number(row.id),
-    ingestedAt: toIso(row.ingested_at) ?? '',
+    ingestedAt: toIsoNullable(row.ingested_at) ?? '',
     ingestSource: row.ingest_source,
     siteSlug: row.site_slug,
     provider: row.provider,
-    scannedAt: toIso(row.scanned_at),
-    createdAt: toIso(row.created_at),
+    scannedAt: toIsoNullable(row.scanned_at),
+    createdAt: toIsoNullable(row.created_at),
     webhookType: row.webhook_type,
     hashId: row.hash_id,
     firstName: row.first_name,
@@ -228,11 +402,22 @@ function rowToItem(row: VisitorScanRow): VisitorScanListItem {
     documentType: row.document_type,
     authenticationStatus: row.authentication_status,
     scanStatus: row.scan_status,
-    latitude: numOrNull(row.latitude),
-    longitude: numOrNull(row.longitude),
-    scanLatitude: numOrNull(row.scan_latitude),
-    scanLongitude: numOrNull(row.scan_longitude),
+    latitude,
+    longitude,
+    scanLatitude: scanLat,
+    scanLongitude: scanLng,
     rawEnvelope: row.raw_envelope,
+    customerUrl: `/admin/customers/visitors/${Number(row.id)}`,
+    identity: {
+      personKey: row.person_key,
+      priorLocalScanCount,
+      firstLocalScanAt: toIsoNullable(row.first_local_scan_at),
+      latestLocalScanAt: toIsoNullable(row.latest_local_scan_at),
+      isFirstLocalScan: priorLocalScanCount === 0,
+    },
+    sweedLink,
+    sweedPurchaseSummary,
+    miniMarker,
   }
 }
 
@@ -265,34 +450,34 @@ export async function listVisitorScans(
   }
 
   if (filter.siteSlugs !== null && filter.siteSlugs.length > 0) {
-    add((p) => `site_slug = any(${p})`, filter.siteSlugs)
+    add((p) => `vs.site_slug = any(${p})`, filter.siteSlugs)
   }
   if (filter.ingestSources !== null && filter.ingestSources.length > 0) {
-    add((p) => `ingest_source = any(${p})`, filter.ingestSources)
+    add((p) => `vs.ingest_source = any(${p})`, filter.ingestSources)
   }
   if (filter.states !== null && filter.states.length > 0) {
-    add((p) => `state = any(${p})`, filter.states)
+    add((p) => `vs.state = any(${p})`, filter.states)
   }
   if (filter.postalPrefix !== null && filter.postalPrefix.length > 0) {
-    add((p) => `postal_code like ${p}`, `${filter.postalPrefix}%`)
+    add((p) => `vs.postal_code like ${p}`, `${filter.postalPrefix}%`)
   }
   if (filter.documentType !== null && filter.documentType.length > 0) {
-    add((p) => `document_type = ${p}`, filter.documentType)
+    add((p) => `vs.document_type = ${p}`, filter.documentType)
   }
   if (filter.authenticationStatus !== null && filter.authenticationStatus.length > 0) {
-    add((p) => `authentication_status = ${p}`, filter.authenticationStatus)
+    add((p) => `vs.authentication_status = ${p}`, filter.authenticationStatus)
   }
   if (filter.scanStatus !== null && filter.scanStatus.length > 0) {
-    add((p) => `scan_status = ${p}`, filter.scanStatus)
+    add((p) => `vs.scan_status = ${p}`, filter.scanStatus)
   }
   if (filter.scannedAfter !== null) {
-    add((p) => `(scanned_at is not null and scanned_at >= ${p})`, filter.scannedAfter)
+    add((p) => `(vs.scanned_at is not null and vs.scanned_at >= ${p})`, filter.scannedAfter)
   }
   if (filter.scannedBefore !== null) {
-    add((p) => `(scanned_at is not null and scanned_at < ${p})`, filter.scannedBefore)
+    add((p) => `(vs.scanned_at is not null and vs.scanned_at < ${p})`, filter.scannedBefore)
   }
   if (filter.beforeId !== null) {
-    add((p) => `id < ${p}`, filter.beforeId)
+    add((p) => `vs.id < ${p}`, filter.beforeId)
   }
 
   const whereSql = conditions.length > 0 ? `where ${conditions.join(' and ')}` : ''
@@ -301,19 +486,92 @@ export async function listVisitorScans(
   params.push(fetchLimit)
   const limitPlaceholder = `$${params.length}`
 
+  // The lateral joins below are scoped to a tiny set of rows (one
+  // per item being returned, capped at limit+1) so the per-row cost
+  // stays modest. The two key inputs (`person_key`,
+  // `(dealer_id, sweed_customer_id)`) are indexed.
   const sql = `
     select
-      id, ingested_at, ingest_source, site_slug, provider,
-      scanned_at, created_at, webhook_type,
-      hash_id,
-      first_name, middle_name, last_name,
-      state, postal_code, city, address, country,
-      document_type, authentication_status, scan_status,
-      latitude, longitude, scan_latitude, scan_longitude,
-      raw_envelope
-    from visitor_scans
+      vs.id, vs.ingested_at, vs.ingest_source, vs.site_slug, vs.provider,
+      vs.scanned_at, vs.created_at, vs.webhook_type,
+      vs.hash_id,
+      vs.first_name, vs.middle_name, vs.last_name,
+      vs.state, vs.postal_code, vs.city, vs.address, vs.country,
+      vs.document_type, vs.authentication_status, vs.scan_status,
+      vs.latitude, vs.longitude, vs.scan_latitude, vs.scan_longitude,
+      vs.raw_envelope,
+      vs.person_key,
+
+      coalesce(ident.prior_count, 0)        as prior_local_scan_count,
+      ident.first_local_scan_at,
+      ident.latest_local_scan_at,
+
+      l.dealer_id                            as link_dealer_id,
+      l.sweed_customer_id                    as link_customer_id,
+      l.link_status                          as link_status,
+      l.link_method                          as link_method,
+      l.confidence                           as link_confidence,
+      l.linked_at                            as link_linked_at,
+      l.last_probed_at                       as link_last_probed_at,
+      l.next_probe_at                        as link_next_probe_at,
+      coalesce(candidate_counts.candidate_count, 0) as link_candidate_count,
+
+      sweed_summary.total_count              as sweed_total_purchase_count,
+      sweed_summary.prior_count              as sweed_prior_purchase_count,
+      sweed_summary.first_purchase_at        as sweed_first_purchase_at,
+      sweed_summary.first_purchase_total     as sweed_first_purchase_total,
+      sweed_summary.latest_purchase_at       as sweed_latest_purchase_at,
+      sweed_summary.lifetime_spend           as sweed_lifetime_spend
+
+    from visitor_scans vs
+
+    left join visitor_scan_links l on l.scan_id = vs.id
+
+    left join lateral (
+      select
+        count(*)::bigint                                as prior_count,
+        min(coalesce(prior.scanned_at, prior.ingested_at)) as first_local_scan_at,
+        max(coalesce(prior.scanned_at, prior.ingested_at)) as latest_local_scan_at
+      from visitor_scans prior
+      where vs.person_key is not null
+        and prior.provider = vs.provider
+        and prior.person_key = vs.person_key
+        and prior.id <> vs.id
+        and coalesce(prior.scanned_at, prior.ingested_at)
+              < coalesce(vs.scanned_at, vs.ingested_at)
+    ) ident on true
+
+    left join lateral (
+      select count(*)::bigint as candidate_count
+      from visitor_scan_link_candidates c
+      where c.scan_id = vs.id and c.candidate_status = 'open'
+    ) candidate_counts on true
+
+    left join lateral (
+      select
+        count(*)::bigint                              as total_count,
+        count(*) filter (
+          where so.pay_time < coalesce(vs.scanned_at, vs.ingested_at)
+        )::bigint                                     as prior_count,
+        min(so.pay_time)                              as first_purchase_at,
+        (
+          select so2.grand_total_dollars
+          from sweed_orders so2
+          where so2.dealer_id = l.dealer_id
+            and so2.customer_id = l.sweed_customer_id
+          order by so2.pay_time asc
+          limit 1
+        )                                             as first_purchase_total,
+        max(so.pay_time)                              as latest_purchase_at,
+        coalesce(sum(so.grand_total_dollars), 0)      as lifetime_spend
+      from sweed_orders so
+      where l.sweed_customer_id is not null
+        and so.dealer_id = l.dealer_id
+        and so.customer_id = l.sweed_customer_id
+    ) sweed_summary on l.sweed_customer_id is not null
+
     ${whereSql}
-    order by coalesce(scanned_at, ingested_at) desc, id desc
+    order by coalesce(vs.scanned_at, vs.ingested_at) desc, vs.id desc
     limit ${limitPlaceholder}
   `
 

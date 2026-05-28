@@ -71,6 +71,10 @@ import { UtilitiesLandingPage } from '../routes/utilities/UtilitiesLandingPage.j
 import { UtilitiesStaffPage, utilitiesStaffLoader } from '../routes/utilities/UtilitiesStaffPage.js'
 import { VisitorScansPage, visitorScansLoader } from '../routes/visitors/VisitorScansPage.js'
 import {
+  CustomerVisitorDetailsPage,
+  customerVisitorDetailsLoader,
+} from '../routes/customers/CustomerVisitorDetailsPage.js'
+import {
   CustomerReviewsListPage,
   customerReviewsListLoader,
 } from '../routes/customerReviews/CustomerReviewsListPage.js'
@@ -313,6 +317,11 @@ export const router = createBrowserRouter([
         element: <VisitorScansPage />,
         loader: visitorScansLoader,
         path: 'admin/visitors/scans',
+      },
+      {
+        element: <CustomerVisitorDetailsPage />,
+        loader: customerVisitorDetailsLoader,
+        path: 'admin/customers/visitors/:scanId',
       },
       {
         element: <ConfigModulePage />,

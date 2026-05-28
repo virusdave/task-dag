@@ -27,7 +27,40 @@ import {
   type VisitorScansResponse,
 } from '../../../shared/contracts/index.js'
 import { loadJson } from '../../app/fetchJson.js'
+import { buildAppPath } from '../../app/paths.js'
 import { Pill } from '../../components/Pill.js'
+import { MiniGeoMarker } from './MiniGeoMarker.js'
+
+type PillTone = 'success' | 'warning' | 'danger' | 'muted'
+
+/** Primary "have we seen them" + "are they a paying customer" pill.  */
+function firstTimePill(item: VisitorScanItem): { label: string; tone: PillTone } {
+  if (item.sweedPurchaseSummary?.hasPriorPurchaseBeforeScan === true) {
+    return { label: 'Known purchaser', tone: 'success' }
+  }
+  if (!item.identity.isFirstLocalScan) {
+    return { label: 'Returning', tone: 'success' }
+  }
+  return { label: 'First scan', tone: 'warning' }
+}
+
+/** CRM lookup status pill — secondary, only shown when meaningful. */
+function crmPill(item: VisitorScanItem): { label: string; tone: PillTone } | null {
+  const sweed = item.sweedLink
+  if (sweed === null) return null
+  if (sweed.status === 'linked' && sweed.customerId !== null) {
+    return { label: `Linked #${sweed.customerId}`, tone: 'success' }
+  }
+  if (sweed.status === 'ambiguous') {
+    return { label: `Review (${sweed.candidateCount})`, tone: 'warning' }
+  }
+  if (sweed.status === 'pending') return { label: 'CRM pending', tone: 'muted' }
+  if (sweed.status === 'no_match') return { label: 'No CRM', tone: 'muted' }
+  if (sweed.status === 'insufficient_data') return { label: 'CRM skipped', tone: 'muted' }
+  if (sweed.status === 'failed') return { label: 'CRM failed', tone: 'danger' }
+  if (sweed.status === 'rejected') return { label: 'CRM rejected', tone: 'muted' }
+  return null
+}
 
 export async function visitorScansLoader({ request }: { request: Request }) {
   const url = new URL(request.url)
@@ -282,76 +315,126 @@ export function VisitorScansPage() {
                   <tr>
                     <th>Scanned</th>
                     <th>Site</th>
-                    <th>Source</th>
-                    <th>Name</th>
+                    <th>Visitor</th>
+                    <th>First?</th>
+                    <th>CRM</th>
+                    <th>Origin</th>
                     <th>State</th>
                     <th>Postal</th>
                     <th>City</th>
                     <th>Doc type</th>
-                    <th>Auth</th>
                     <th>Status</th>
+                    <th>Raw</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {data.items.map((item) => (
-                    <tr
-                      key={item.id}
-                      onClick={() => setSelected(item)}
-                      style={{ cursor: 'pointer' }}
-                    >
-                      <td>{formatTime(item.scannedAt ?? item.ingestedAt)}</td>
-                      <td>{item.siteSlug}</td>
-                      <td>{item.ingestSource}</td>
-                      <td>{formatName(item)}</td>
-                      <td>{item.state ?? '—'}</td>
-                      <td>{item.postalCode ?? '—'}</td>
-                      <td>{item.city ?? '—'}</td>
-                      <td>{item.documentType ?? '—'}</td>
-                      <td>{item.authenticationStatus ?? '—'}</td>
-                      <td>{item.scanStatus ?? '—'}</td>
-                    </tr>
-                  ))}
+                  {data.items.map((item) => {
+                    const ft = firstTimePill(item)
+                    const crm = crmPill(item)
+                    return (
+                      <tr key={item.id}>
+                        <td>{formatTime(item.scannedAt ?? item.ingestedAt)}</td>
+                        <td>{item.siteSlug}</td>
+                        <td>
+                          <a
+                            className="vs-visitor-link"
+                            href={buildAppPath(item.customerUrl)}
+                            target="_blank"
+                            rel="noreferrer"
+                          >
+                            {formatName(item)}
+                          </a>
+                        </td>
+                        <td>
+                          <Pill tone={ft.tone}>{ft.label}</Pill>
+                        </td>
+                        <td>
+                          {crm === null ? '—' : <Pill tone={crm.tone}>{crm.label}</Pill>}
+                        </td>
+                        <td>
+                          <MiniGeoMarker marker={item.miniMarker} />
+                        </td>
+                        <td>{item.state ?? '—'}</td>
+                        <td>{item.postalCode ?? '—'}</td>
+                        <td>{item.city ?? '—'}</td>
+                        <td>{item.documentType ?? '—'}</td>
+                        <td>{item.scanStatus ?? '—'}</td>
+                        <td>
+                          <button
+                            type="button"
+                            className="ghost-button vs-row-raw"
+                            onClick={() => setSelected(item)}
+                          >
+                            Raw
+                          </button>
+                        </td>
+                      </tr>
+                    )
+                  })}
                 </tbody>
               </table>
             </div>
 
             {/* Narrow-viewport: card list. Same data, no horizontal scroll. */}
             <ul className="vs-cards">
-              {data.items.map((item) => (
-                <li key={`card-${item.id}`}>
-                  <button
-                    type="button"
-                    className="vs-card"
-                    onClick={() => setSelected(item)}
-                  >
-                    <div className="vs-card-top">
-                      <span className="vs-card-name">{formatName(item)}</span>
-                      <Pill tone={item.ingestSource === 'webhook' ? 'success' : 'muted'}>
-                        {item.siteSlug}
-                      </Pill>
-                    </div>
-                    <div className="vs-card-time">
-                      {formatTime(item.scannedAt ?? item.ingestedAt)}
-                    </div>
-                    <dl className="vs-card-grid">
-                      <dt>State</dt>
-                      <dd>{item.state ?? '—'}</dd>
-                      <dt>Postal</dt>
-                      <dd>{item.postalCode ?? '—'}</dd>
-                      <dt>City</dt>
-                      <dd>{item.city ?? '—'}</dd>
-                      <dt>Doc</dt>
-                      <dd>{item.documentType ?? '—'}</dd>
-                      <dt>Auth</dt>
-                      <dd>{item.authenticationStatus ?? '—'}</dd>
-                      <dt>Status</dt>
-                      <dd>{item.scanStatus ?? '—'}</dd>
-                      <dt>Source</dt>
-                      <dd>{item.ingestSource}</dd>
-                    </dl>
-                  </button>
-                </li>
-              ))}
+              {data.items.map((item) => {
+                const ft = firstTimePill(item)
+                const crm = crmPill(item)
+                return (
+                  <li key={`card-${item.id}`}>
+                    <article className="vs-card">
+                      <header className="vs-card-top">
+                        <a
+                          className="vs-card-name vs-visitor-link"
+                          href={buildAppPath(item.customerUrl)}
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          {formatName(item)}
+                        </a>
+                        <MiniGeoMarker marker={item.miniMarker} className="vs-card-mini" />
+                      </header>
+                      <div className="vs-card-pills">
+                        <Pill tone={ft.tone}>{ft.label}</Pill>
+                        {crm !== null ? <Pill tone={crm.tone}>{crm.label}</Pill> : null}
+                        <Pill tone="muted">{item.siteSlug}</Pill>
+                      </div>
+                      <div className="vs-card-time">
+                        {formatTime(item.scannedAt ?? item.ingestedAt)}
+                      </div>
+                      <dl className="vs-card-grid">
+                        <dt>State</dt>
+                        <dd>{item.state ?? '—'}</dd>
+                        <dt>Postal</dt>
+                        <dd>{item.postalCode ?? '—'}</dd>
+                        <dt>City</dt>
+                        <dd>{item.city ?? '—'}</dd>
+                        <dt>Doc</dt>
+                        <dd>{item.documentType ?? '—'}</dd>
+                        <dt>Status</dt>
+                        <dd>{item.scanStatus ?? '—'}</dd>
+                      </dl>
+                      <div className="vs-card-actions">
+                        <a
+                          className="primary-button vs-action"
+                          href={buildAppPath(item.customerUrl)}
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          Open customer
+                        </a>
+                        <button
+                          type="button"
+                          className="ghost-button vs-action"
+                          onClick={() => setSelected(item)}
+                        >
+                          Raw
+                        </button>
+                      </div>
+                    </article>
+                  </li>
+                )
+              })}
             </ul>
           </>
         )}
