@@ -5206,3 +5206,128 @@ span.metric-chart-legend-item {
   display: block;
 }
 
+
+/* =========================================================================
+   A4 phase-1.1 — operator feedback: compact table, brighter mini map
+   ========================================================================= */
+
+/* ---- Compact, tabular-numeric table on /admin/visitors/scans ---- */
+.visitor-scans-page .vs-table {
+  font-size: 0.82rem;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
+}
+.visitor-scans-page .vs-table th,
+.visitor-scans-page .vs-table td {
+  padding: 0.32rem 0.5rem;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+.visitor-scans-page .vs-table thead th {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  font-weight: 600;
+  border-bottom: 1px solid var(--panel-border);
+}
+.visitor-scans-page .vs-table tbody tr {
+  border-bottom: 1px solid rgba(120, 86, 48, 0.08);
+}
+.visitor-scans-page .vs-table tbody tr:hover {
+  background: rgba(120, 86, 48, 0.04);
+}
+.visitor-scans-page .vs-cell-time {
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+  font-size: 0.78rem;
+}
+.visitor-scans-page .vs-cell-truncate {
+  max-width: 14ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.visitor-scans-page .vs-col-time   { width: 11rem; }
+.visitor-scans-page .vs-col-site   { width: 2.5rem; }
+.visitor-scans-page .vs-col-visitor{ width: auto; min-width: 14ch; }
+.visitor-scans-page .vs-col-status { width: 9.5rem; }
+.visitor-scans-page .vs-col-mini   { width: 4.5rem; }
+.visitor-scans-page .vs-col-state  { width: 3rem; }
+.visitor-scans-page .vs-col-postal { width: 5rem; }
+.visitor-scans-page .vs-col-city   { width: 11ch; }
+.visitor-scans-page .vs-col-doc    { width: 11ch; }
+.visitor-scans-page .vs-col-scan   { width: 9ch; }
+.visitor-scans-page .vs-col-raw    { width: 3.5rem; }
+
+/* Per AGENTS.md: even pills should be compact and not balloon the
+   row height inside this dense table view. */
+.visitor-scans-page .vs-table .pill {
+  font-size: 0.68rem;
+  padding: 0.18rem 0.5rem;
+  letter-spacing: 0.04em;
+}
+
+.visitor-scans-page .vs-first-badge {
+  display: inline-block;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.visitor-scans-page .vs-row-raw {
+  padding: 0.18rem 0.55rem;
+  min-height: 24px;
+  font-size: 0.72rem;
+  border-radius: 4px;
+}
+
+/* ---- Mini marker — actually visible now ---- */
+.mini-geo-marker {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-decoration: none;
+  border-radius: 5px;
+}
+.mini-geo-marker:focus-visible {
+  outline: 2px solid var(--accent-strong, #b95f25);
+  outline-offset: 1px;
+}
+.mini-geo-marker .mini-geo-marker-svg {
+  display: block;
+  width: 64px;
+  height: 44px;
+}
+.mini-geo-marker .mini-geo-marker-bg {
+  /* Solid map-y backdrop instead of the previous near-invisible wash. */
+  fill: #f5efe3;
+  stroke: rgba(120, 86, 48, 0.45);
+  stroke-width: 1;
+}
+.mini-geo-marker .mini-geo-marker-grid {
+  stroke: rgba(120, 86, 48, 0.28);
+  stroke-width: 0.5;
+}
+.mini-geo-marker .mini-geo-marker-halo {
+  fill: #fffaf1;
+  opacity: 0.95;
+}
+.mini-geo-marker .mini-geo-marker-dot.is-document {
+  fill: #1f5db8;
+}
+.mini-geo-marker .mini-geo-marker-dot.is-scan {
+  fill: #b95f25;
+}
+.mini-geo-marker .mini-geo-marker-dot-core {
+  fill: #fffaf1;
+}
+.mini-geo-marker .mini-geo-marker-empty-text {
+  font-size: 14px;
+  fill: rgba(120, 86, 48, 0.55);
+}
+.mini-geo-marker .mini-geo-marker-flag {
+  font-size: 8px;
+  fill: rgba(120, 86, 48, 0.7);
+  font-weight: 700;
+}

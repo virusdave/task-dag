@@ -179,6 +179,16 @@ export async function insertVisitorScan(
 
 export interface VisitorScanListIdentity {
   personKey: string | null
+  // Strong id_num-based "have we scanned this specific ID before?"
+  // The /admin/visitors/scans pill called "First scan" reads from
+  // `isFirstScanByIdNum`. Computed with a NOT EXISTS-equivalent
+  // lateral join scoped on (provider, id_num).
+  priorIdNumScanCount: number
+  isFirstScanByIdNum: boolean
+  // Looser person_key-based grouping (name+DOB+state+zip5). Surfaced
+  // on the details page so an operator can spot returning visitors
+  // even when an id_num was missing or mistyped. NOT used for the
+  // primary list pill anymore.
   priorLocalScanCount: number
   firstLocalScanAt: string | null
   latestLocalScanAt: string | null
@@ -285,6 +295,7 @@ interface VisitorScanRow {
   raw_envelope: unknown
 
   person_key: string | null
+  prior_id_num_scan_count: string | number | null
   prior_local_scan_count: string | number | null
   first_local_scan_at: Date | null
   latest_local_scan_at: Date | null
@@ -380,6 +391,7 @@ function rowToItem(row: VisitorScanRow): VisitorScanListItem {
   }
 
   const priorLocalScanCount = intOrZero(row.prior_local_scan_count)
+  const priorIdNumScanCount = intOrZero(row.prior_id_num_scan_count)
 
   return {
     id: Number(row.id),
@@ -410,6 +422,8 @@ function rowToItem(row: VisitorScanRow): VisitorScanListItem {
     customerUrl: `/admin/customers/visitors/${Number(row.id)}`,
     identity: {
       personKey: row.person_key,
+      priorIdNumScanCount,
+      isFirstScanByIdNum: priorIdNumScanCount === 0,
       priorLocalScanCount,
       firstLocalScanAt: toIsoNullable(row.first_local_scan_at),
       latestLocalScanAt: toIsoNullable(row.latest_local_scan_at),
@@ -505,6 +519,7 @@ export async function listVisitorScans(
       coalesce(ident.prior_count, 0)        as prior_local_scan_count,
       ident.first_local_scan_at,
       ident.latest_local_scan_at,
+      coalesce(id_num_ident.prior_count, 0) as prior_id_num_scan_count,
 
       l.dealer_id                            as link_dealer_id,
       l.sweed_customer_id                    as link_customer_id,
@@ -540,6 +555,20 @@ export async function listVisitorScans(
         and coalesce(prior.scanned_at, prior.ingested_at)
               < coalesce(vs.scanned_at, vs.ingested_at)
     ) ident on true
+
+    -- Strict "First scan" indicator: is this the first time this exact
+    -- id_num shows up under this provider? Cheap because of the
+    -- visitor_scans_id_num_idx partial index added in migration 040.
+    left join lateral (
+      select count(*)::bigint as prior_count
+      from visitor_scans prior_id
+      where vs.id_num is not null
+        and prior_id.provider = vs.provider
+        and prior_id.id_num = vs.id_num
+        and prior_id.id <> vs.id
+        and coalesce(prior_id.scanned_at, prior_id.ingested_at)
+              < coalesce(vs.scanned_at, vs.ingested_at)
+    ) id_num_ident on true
 
     left join lateral (
       select count(*)::bigint as candidate_count

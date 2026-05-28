@@ -33,26 +33,53 @@ import { MiniGeoMarker } from './MiniGeoMarker.js'
 
 type PillTone = 'success' | 'warning' | 'danger' | 'muted'
 
-/** Primary "have we seen them" + "are they a paying customer" pill.  */
-function firstTimePill(item: VisitorScanItem): { label: string; tone: PillTone } {
-  if (item.sweedPurchaseSummary?.hasPriorPurchaseBeforeScan === true) {
-    return { label: 'Known purchaser', tone: 'success' }
+/**
+ * COLOR-CODED primary indicator. We can only answer the actionable
+ * question — "is this a brand-new paying customer or a returning
+ * one?" — once the Sweed CRM link is resolved.
+ *
+ *   'New'        — Sweed-linked + no prior purchases. Warning tone:
+ *                  this is the on-floor moment to capture them.
+ *   'Returning'  — Sweed-linked + ≥1 prior purchase. Success tone.
+ *   null         — link not yet resolved; the CRM-status pill carries
+ *                  the explanation. We don't fake a 'New' label when
+ *                  we don't actually know.
+ */
+function newOrReturningPill(
+  item: VisitorScanItem,
+): { label: string; tone: PillTone } | null {
+  const sweed = item.sweedLink
+  const summary = item.sweedPurchaseSummary
+  if (sweed === null || sweed.status !== 'linked' || sweed.customerId === null) {
+    return null
   }
-  if (!item.identity.isFirstLocalScan) {
+  if (summary !== null && summary.hasPriorPurchaseBeforeScan) {
     return { label: 'Returning', tone: 'success' }
   }
-  return { label: 'First scan', tone: 'warning' }
+  return { label: 'New', tone: 'warning' }
 }
 
-/** CRM lookup status pill — secondary, only shown when meaningful. */
+/**
+ * Independent of CRM matching — strict NOT EXISTS check over
+ * `visitor_scans` rows with the same `(provider, id_num)`. Just a
+ * neutral count badge; not color-coded by design.
+ */
+function firstScanBadge(item: VisitorScanItem): { label: string; tone: PillTone } {
+  if (item.identity.priorIdNumScanCount === 0) {
+    return { label: 'First scan', tone: 'muted' }
+  }
+  return { label: `${item.identity.priorIdNumScanCount}× scanned`, tone: 'muted' }
+}
+
+/** CRM lookup status. Always present once a link row exists. */
 function crmPill(item: VisitorScanItem): { label: string; tone: PillTone } | null {
   const sweed = item.sweedLink
   if (sweed === null) return null
   if (sweed.status === 'linked' && sweed.customerId !== null) {
-    return { label: `Linked #${sweed.customerId}`, tone: 'success' }
+    return { label: `#${sweed.customerId}`, tone: 'success' }
   }
   if (sweed.status === 'ambiguous') {
-    return { label: `Review (${sweed.candidateCount})`, tone: 'warning' }
+    return { label: `Review ${sweed.candidateCount}`, tone: 'warning' }
   }
   if (sweed.status === 'pending') return { label: 'CRM pending', tone: 'muted' }
   if (sweed.status === 'no_match') return { label: 'No CRM', tone: 'muted' }
@@ -308,32 +335,49 @@ export function VisitorScansPage() {
           <div className="vs-empty subtle-copy">No matching visitor scans.</div>
         ) : (
           <>
-            {/* Wide-viewport: dense table. */}
+            {/* Wide-viewport: dense, tabular-numeric table. */}
             <div className="vs-table-wrap">
               <table className="data-table vs-table">
+                <colgroup>
+                  <col className="vs-col-time" />
+                  <col className="vs-col-site" />
+                  <col className="vs-col-visitor" />
+                  <col className="vs-col-status" />
+                  <col className="vs-col-status" />
+                  <col className="vs-col-mini" />
+                  <col className="vs-col-state" />
+                  <col className="vs-col-postal" />
+                  <col className="vs-col-city" />
+                  <col className="vs-col-doc" />
+                  <col className="vs-col-scan" />
+                  <col className="vs-col-raw" />
+                </colgroup>
                 <thead>
                   <tr>
                     <th>Scanned</th>
                     <th>Site</th>
                     <th>Visitor</th>
-                    <th>First?</th>
-                    <th>CRM</th>
-                    <th>Origin</th>
-                    <th>State</th>
-                    <th>Postal</th>
+                    <th>Customer</th>
+                    <th>Scans</th>
+                    <th>Map</th>
+                    <th>St</th>
+                    <th>Zip</th>
                     <th>City</th>
-                    <th>Doc type</th>
+                    <th>Doc</th>
                     <th>Status</th>
-                    <th>Raw</th>
+                    <th></th>
                   </tr>
                 </thead>
                 <tbody>
                   {data.items.map((item) => {
-                    const ft = firstTimePill(item)
+                    const newPill = newOrReturningPill(item)
+                    const firstBadge = firstScanBadge(item)
                     const crm = crmPill(item)
                     return (
                       <tr key={item.id}>
-                        <td>{formatTime(item.scannedAt ?? item.ingestedAt)}</td>
+                        <td className="vs-cell-time">
+                          {formatTime(item.scannedAt ?? item.ingestedAt)}
+                        </td>
                         <td>{item.siteSlug}</td>
                         <td>
                           <a
@@ -346,19 +390,29 @@ export function VisitorScansPage() {
                           </a>
                         </td>
                         <td>
-                          <Pill tone={ft.tone}>{ft.label}</Pill>
+                          {newPill !== null ? (
+                            <Pill tone={newPill.tone}>{newPill.label}</Pill>
+                          ) : crm !== null ? (
+                            <Pill tone={crm.tone}>{crm.label}</Pill>
+                          ) : (
+                            <span className="subtle-copy">—</span>
+                          )}
                         </td>
                         <td>
-                          {crm === null ? '—' : <Pill tone={crm.tone}>{crm.label}</Pill>}
+                          <span className="vs-first-badge">{firstBadge.label}</span>
                         </td>
                         <td>
-                          <MiniGeoMarker marker={item.miniMarker} />
+                          <MiniGeoMarker
+                            marker={item.miniMarker}
+                            href={buildAppPath(item.customerUrl)}
+                            ariaLabelPrefix={formatName(item)}
+                          />
                         </td>
                         <td>{item.state ?? '—'}</td>
                         <td>{item.postalCode ?? '—'}</td>
-                        <td>{item.city ?? '—'}</td>
-                        <td>{item.documentType ?? '—'}</td>
-                        <td>{item.scanStatus ?? '—'}</td>
+                        <td className="vs-cell-truncate">{item.city ?? '—'}</td>
+                        <td className="vs-cell-truncate">{item.documentType ?? '—'}</td>
+                        <td className="vs-cell-truncate">{item.scanStatus ?? '—'}</td>
                         <td>
                           <button
                             type="button"
@@ -378,7 +432,8 @@ export function VisitorScansPage() {
             {/* Narrow-viewport: card list. Same data, no horizontal scroll. */}
             <ul className="vs-cards">
               {data.items.map((item) => {
-                const ft = firstTimePill(item)
+                const newPill = newOrReturningPill(item)
+                const firstBadge = firstScanBadge(item)
                 const crm = crmPill(item)
                 return (
                   <li key={`card-${item.id}`}>
@@ -392,11 +447,19 @@ export function VisitorScansPage() {
                         >
                           {formatName(item)}
                         </a>
-                        <MiniGeoMarker marker={item.miniMarker} className="vs-card-mini" />
+                        <MiniGeoMarker
+                          marker={item.miniMarker}
+                          href={buildAppPath(item.customerUrl)}
+                          ariaLabelPrefix={formatName(item)}
+                          className="vs-card-mini"
+                        />
                       </header>
                       <div className="vs-card-pills">
-                        <Pill tone={ft.tone}>{ft.label}</Pill>
+                        {newPill !== null ? (
+                          <Pill tone={newPill.tone}>{newPill.label}</Pill>
+                        ) : null}
                         {crm !== null ? <Pill tone={crm.tone}>{crm.label}</Pill> : null}
+                        <span className="vs-first-badge">{firstBadge.label}</span>
                         <Pill tone="muted">{item.siteSlug}</Pill>
                       </div>
                       <div className="vs-card-time">

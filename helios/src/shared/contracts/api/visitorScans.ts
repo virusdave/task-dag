@@ -47,6 +47,13 @@ export type VisitorScanLinkStatus = z.infer<typeof VisitorScanLinkStatusSchema>
 
 export const VisitorScanIdentitySchema = z.object({
   personKey: z.string().nullable(),
+  // Strict, id_num-anchored "first scan" indicator. The
+  // /admin/visitors/scans pill labelled "First scan" reads from
+  // `isFirstScanByIdNum`.
+  priorIdNumScanCount: z.number().int().nonnegative(),
+  isFirstScanByIdNum: z.boolean(),
+  // Looser, person_key-based grouping (name+DOB+state+zip5),
+  // useful on the details page for the missing-id_num edge case.
   priorLocalScanCount: z.number().int().nonnegative(),
   firstLocalScanAt: z.string().nullable(),
   latestLocalScanAt: z.string().nullable(),
