@@ -69,11 +69,20 @@ const InvoiceEnvelopeSchema = z
     // `sweed_drawer_shift_sessions.user_id`. The v1 today-metric
     // does not need this column — it estimates cashier-hours from
     // drawer-shift duration × session count — but populating it
-    // now keeps the historical record correct. Field shape varies
-    // across Sweed RPC variants; we try the canonical
-    // `createdById` (operator-confirmed for automation#27) then
-    // fall back to a few near-cousins so we don't lose the column
-    // on staging deployments that emit a different alias.
+    // now keeps the historical record correct.
+    //
+    // Field shape varies across Sweed RPC variants; we try every
+    // alias we've seen in the wild. The canonical (and operator-
+    // verified, 2026-05-28) field on `store.sale.invoice.list` is
+    // `creatorId` (+ `creatorType=1` for User); the older
+    // `createdById` / `createdBy.id` / `cashierId` aliases are
+    // retained as fallbacks because we don't want to lose
+    // attribution on a staging deployment that emits a different
+    // name. `creatorType` is taken alongside `creatorId` so
+    // `pickCashierUserId` can ignore non-User creators (system
+    // / API / kiosk batch jobs).
+    creatorId: z.union([z.string(), z.number()]).nullable().optional(),
+    creatorType: z.union([z.string(), z.number()]).nullable().optional(),
     createdById: z.union([z.string(), z.number()]).nullable().optional(),
     createdBy: z
       .object({ id: z.union([z.string(), z.number()]).nullable().optional() })
@@ -128,7 +137,25 @@ interface NormalisedInvoice {
 }
 
 function pickCashierUserId(env: z.infer<typeof InvoiceEnvelopeSchema>): number | null {
+  // creatorId is the canonical Sweed field (verified 2026-05-28
+  // against live store.sale.invoice.list output). We only accept
+  // it when creatorType is the User-type sentinel (1) so non-user
+  // creators — API integrations, system batch jobs — don't get
+  // mis-attributed as a cashier. Other Sweed variants emit the
+  // older `createdById` / `createdBy.id` / `cashierId` aliases;
+  // those are accepted unconditionally because they're explicit
+  // user references and the older RPC variants don't carry a
+  // creator-type discriminator at all.
+  const creatorTypeRaw = env.creatorType
+  const creatorTypeNum =
+    typeof creatorTypeRaw === 'number'
+      ? creatorTypeRaw
+      : typeof creatorTypeRaw === 'string'
+        ? Number(creatorTypeRaw)
+        : null
+  const creatorIsUser = creatorTypeNum === 1
   const candidates: Array<string | number | null | undefined> = [
+    creatorIsUser ? env.creatorId : null,
     env.createdById,
     env.createdBy?.id,
     env.cashierId,

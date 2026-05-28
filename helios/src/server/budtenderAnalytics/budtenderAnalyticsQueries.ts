@@ -93,11 +93,32 @@ export async function getBudtenderAnalytics(
   const pool = getPool()
 
   // ---- query 1: totals + daily series in a single round-trip ----------
+  // NOTE on cashier identity: the schema for sweed_orders carries a
+  // dedicated `cashier_user_id` bigint column, but the ingest worker
+  // initially looked at the wrong Sweed envelope field (`createdById`
+  // / `cashierId`) — Sweed actually exposes the cashier as
+  // top-level `creatorId` (+ `creatorType=1` for User). Until the
+  // ingest is fixed AND backfilled, the column is NULL for every
+  // existing row.  Reading from raw_json->>'creatorId' as a fallback
+  // means the page works for ALL historical and future data without
+  // waiting on the backfill. We filter `creatorType = '1'` so
+  // non-user creators (API / system) don't masquerade as a cashier.
+  const CASHIER_EXPR = `
+    coalesce(
+      cashier_user_id,
+      case
+        when (raw_json->>'creatorType') = '1'
+          then nullif(raw_json->>'creatorId', '')::bigint
+        else null
+      end
+    )
+  `
+
   const dailyAndTotalsSql = `
     with orders as (
       select
         pay_time,
-        cashier_user_id,
+        ${CASHIER_EXPR}                          as cashier_user_id,
         coalesce(grand_total_dollars, 0)::float8  as grand_total,
         coalesce(subtotal_dollars, 0)::float8     as subtotal,
         coalesce(discount_dollars, 0)::float8     as discount
@@ -175,7 +196,7 @@ export async function getBudtenderAnalytics(
       select
         invoice_id,
         pay_time,
-        cashier_user_id,
+        ${CASHIER_EXPR}                           as cashier_user_id,
         customer_id,
         coalesce(is_guest, false) as is_guest,
         coalesce(first_time_for_customer, false) as first_time_for_customer,
@@ -189,7 +210,11 @@ export async function getBudtenderAnalytics(
       where dealer_id = any($1::bigint[])
         and pay_time >= $2
         and pay_time <  $3
-        and cashier_user_id is not null
+    ),
+    -- Drop unattributed rows AFTER the projection so the CASHIER_EXPR
+    -- fallback from raw_json gets a chance.
+    orders_attrib as (
+      select * from orders where cashier_user_id is not null
     ),
     cashier_agg as (
       select
@@ -213,7 +238,7 @@ export async function getBudtenderAnalytics(
         avg(case when fulfillment_type ilike 'pickup%'               then 1.0 else 0.0 end) as pickup_rate,
         avg(case when payment_method  ilike 'cash%'                  then 1.0 else 0.0 end) as cash_payment_rate,
         count(distinct date_trunc('day', pay_time))                                       as active_days
-      from orders
+      from orders_attrib
       group by cashier_user_id
     ),
     -- same-customer baseline: leave-one-out mean over a single customer's other orders
@@ -228,7 +253,7 @@ export async function getBudtenderAnalytics(
             (sum(grand_total) over (partition by customer_id) - grand_total)
               / nullif(count(*) over (partition by customer_id) - 1, 0)
         end as baseline
-      from orders
+      from orders_attrib
     ),
     -- similar-customer baseline: same idea but partitioned by cohort
     -- (is_guest, first_time_for_customer, fulfillment_type, payment_method)
@@ -239,7 +264,7 @@ export async function getBudtenderAnalytics(
         grand_total,
         (sum(grand_total) over w - grand_total)
           / nullif(count(*) over w - 1, 0) as baseline
-      from orders
+      from orders_attrib
       window w as (partition by is_guest, first_time_for_customer, fulfillment_type, payment_method)
     ),
     same_agg as (
@@ -305,11 +330,26 @@ export async function getBudtenderAnalytics(
       left join similar_agg  sb on sb.cashier_user_id = ca.cashier_user_id
       left join drawer_overlap dr on dr.cashier_user_id = ca.cashier_user_id
     ),
-    -- peer percentiles across all cashiers in the response. Computed
-    -- in SQL so the SPA doesn't have to re-derive medians every
-    -- render and so the values remain stable across pagination.
-    -- percent_rank() returns NULL for a single-row partition (no
-    -- "peers" to compare against) — the contract makes those nullable.
+    -- peer medians across all cashiers in the response. Computed
+    -- in a separate single-row CTE because Postgres does NOT allow
+    -- ordered-set aggregates (percentile_cont WITHIN GROUP) inside
+    -- a window OVER clause — that errors with
+    -- "OVER is not supported for ordered-set aggregate
+    -- percentile_cont". Cross-join the one-row CTE in instead.
+    peer_medians as (
+      select
+        percentile_cont(0.5) within group (order by avg_order_value)  as peer_median_aov,
+        percentile_cont(0.5) within group (order by discount_rate)    as peer_median_disc,
+        percentile_cont(0.5) within group (
+          order by case when drawer_minutes > 0 then transactions / (drawer_minutes / 60.0) end
+        )                                                             as peer_median_txn_per_hr,
+        percentile_cont(0.5) within group (order by same_lift_dollars) as peer_median_same_lift
+      from joined
+    ),
+    -- peer percentiles across all cashiers in the response. Window
+    -- functions on percent_rank() ARE supported and cheap. They
+    -- return NULL for a single-row partition (no "peers") — the
+    -- contract makes those nullable.
     ranked as (
       select
         j.*,
@@ -320,23 +360,19 @@ export async function getBudtenderAnalytics(
           order by case when drawer_minutes > 0 then transactions / (drawer_minutes / 60.0) end
         )                                                          as txn_per_hr_pct,
         percent_rank() over (order by same_lift_dollars)           as same_lift_pct_rank,
-        percent_rank() over (order by similar_lift_dollars)        as similar_lift_pct_rank,
-        percentile_cont(0.5) within group (order by avg_order_value)
-          over ()                                                  as peer_median_aov,
-        percentile_cont(0.5) within group (order by discount_rate)
-          over ()                                                  as peer_median_disc,
-        percentile_cont(0.5) within group (
-          order by case when drawer_minutes > 0 then transactions / (drawer_minutes / 60.0) end
-        ) over ()                                                  as peer_median_txn_per_hr,
-        percentile_cont(0.5) within group (order by same_lift_dollars)
-          over ()                                                  as peer_median_same_lift
+        percent_rank() over (order by similar_lift_dollars)        as similar_lift_pct_rank
       from joined j
     )
     select
       r.*,
+      pm.peer_median_aov,
+      pm.peer_median_disc,
+      pm.peer_median_txn_per_hr,
+      pm.peer_median_same_lift,
       sd.full_name        as cashier_full_name,
       sd.user_status      as cashier_user_status
     from ranked r
+    cross join peer_medians pm
     left join staff_directory_cache sd
       on sd.staff_id = r.cashier_user_id::text
     order by transactions desc
