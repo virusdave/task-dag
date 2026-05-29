@@ -54,16 +54,15 @@ const MAP_STYLE: maplibregl.StyleSpecification = {
       type: 'raster',
       source: 'osm',
       paint: {
-        // Basemap-as-ground tuning, halfway between the original
-        // (too crisp, dots disappeared into it) and the fully
-        // ghosted pass (too washed-out to read borough shapes).
-        // Roads and coastlines are still legible; the dots are
-        // still unambiguously the figure.
-        'raster-opacity': 0.42,
-        'raster-saturation': -0.92,
-        'raster-contrast': -0.35,
-        'raster-brightness-min': 0.28,
-        'raster-brightness-max': 0.98,
+        // Basemap-as-ground tuning. Dialed back toward the
+        // original crisper rendering so borough outlines / arteries
+        // read at a glance, while still keeping the dots as the
+        // clear figure.
+        'raster-opacity': 0.5,
+        'raster-saturation': -0.88,
+        'raster-contrast': -0.22,
+        'raster-brightness-min': 0.18,
+        'raster-brightness-max': 1,
       },
     },
   ],
@@ -182,6 +181,53 @@ function replayStrokeOpacityExpr(
       ],
     ],
   ]
+}
+
+// Static base-radius expression — keep this in sync with the
+// equivalent literal inside the `scans-circles` layer's paint
+// (the live expression below multiplies the same base radius by a
+// replay-grow factor when playback is active).
+const BASE_RADIUS_EXPR: maplibregl.ExpressionSpecification = [
+  'interpolate',
+  ['linear'],
+  ['zoom'],
+  7, 2,
+  10, 3,
+  13, 4.5,
+  16, 6.5,
+  19, 9,
+]
+
+// Replay radius expression — same zoom-interpolated base, scaled
+// by a per-dot "grow then settle" factor:
+//
+//   age < 0 (future)            → 0   (point hidden until cursor reaches it)
+//   age in [0, lifetimeMs]      → 1.5 → 1.0 (linearly shrinks to base)
+//   age > lifetimeMs (fully old) → 1.0 (steady — opacity is 0 anyway)
+//
+// The brief pop-then-shrink helps the operator catch new dots as
+// they appear, particularly when dozens land per second on a busy
+// shift; the dot is at 1× by the time it starts fading out.
+function replayRadiusExpr(
+  cursorMs: number,
+  lifetimeMs: number,
+): maplibregl.ExpressionSpecification {
+  const fadeStart = cursorMs - lifetimeMs
+  const multiplier: maplibregl.ExpressionSpecification = [
+    'case',
+    ['>', ['get', 'checkedInAtMs'], cursorMs], 0,
+    ['<=', ['get', 'checkedInAtMs'], fadeStart], 1,
+    [
+      '+',
+      1,
+      [
+        '*',
+        0.5,
+        ['-', 1, ['/', ['-', cursorMs, ['get', 'checkedInAtMs']], lifetimeMs]],
+      ],
+    ],
+  ]
+  return ['*', BASE_RADIUS_EXPR, multiplier]
 }
 
 /** Human-readable duration ("5s", "1m 30s", "2h 15m"). */
@@ -556,6 +602,13 @@ export function CustomerMapPage(): JSX.Element {
           id: 'scans-circles',
           type: 'circle',
           source: 'scans',
+          layout: {
+            // Newer dots render on top of older ones — both in the
+            // static view and during replay, where this guarantees
+            // the just-appeared (bigger, brighter) dot sits over
+            // the fading older ones.
+            'circle-sort-key': ['get', 'checkedInAtMs'],
+          },
           paint: {
             // Small-ish dots — the city-wide view still needs to
             // hold thousands of scans without blobbing into a solid
@@ -564,16 +617,7 @@ export function CustomerMapPage(): JSX.Element {
             // now ghosted to a near-white background, these radii
             // pop clearly while still revealing density via the
             // per-scan jitter (~400 ft).
-            'circle-radius': [
-              'interpolate',
-              ['linear'],
-              ['zoom'],
-              7, 2,
-              10, 3,
-              13, 4.5,
-              16, 6.5,
-              19, 9,
-            ],
+            'circle-radius': BASE_RADIUS_EXPR,
             'circle-color': [
               'match',
               ['get', 'siteSlug'],
@@ -970,8 +1014,15 @@ export function CustomerMapPage(): JSX.Element {
         const stroke = replayPausing
           ? 0
           : replayStrokeOpacityExpr(replayCursorMs, replayLifetimeMs)
+        // During replay the radius is also data-driven so dots
+        // appear 50% larger and shrink to base over their lifetime
+        // (see replayRadiusExpr for the multiplier shape).
+        const radius = replayPausing
+          ? BASE_RADIUS_EXPR
+          : replayRadiusExpr(replayCursorMs, replayLifetimeMs)
         map!.setPaintProperty('scans-circles', 'circle-opacity', fill)
         map!.setPaintProperty('scans-circles', 'circle-stroke-opacity', stroke)
+        map!.setPaintProperty('scans-circles', 'circle-radius', radius)
       } else {
         map!.setPaintProperty('scans-circles', 'circle-opacity', BASE_FILL_OPACITY)
         map!.setPaintProperty(
@@ -979,6 +1030,7 @@ export function CustomerMapPage(): JSX.Element {
           'circle-stroke-opacity',
           BASE_STROKE_OPACITY,
         )
+        map!.setPaintProperty('scans-circles', 'circle-radius', BASE_RADIUS_EXPR)
       }
     }
     if (map.isStyleLoaded()) {
