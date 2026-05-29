@@ -221,14 +221,16 @@ export async function getCustomerValueAnalytics(
              and customer_id is not null
              ${cohortScopeProbeFilter(args.cohortScope, '$3', '$4')}
            group by dealer_id, customer_id
+        ), per_n as (
+          -- One row per distinct total_purchases value; we want the
+          -- LARGEST such value whose bucket still holds ≥2 customers
+          -- (above that the histogram is just a one-off long tail).
+          select total_purchases, count(*)::int as customers
+            from cr
+           group by total_purchases
         )
         select coalesce(
-          (
-            select max(total_purchases)::int
-              from cr
-             group by total_purchases
-            having count(*) >= 2
-          ),
+          (select max(total_purchases)::int from per_n where customers >= 2),
           2
         ) as max_n_with_ge2
       `
