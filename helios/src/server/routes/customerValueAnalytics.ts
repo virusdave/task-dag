@@ -6,7 +6,6 @@ import {
 } from '../../shared/contracts/index.js'
 import { requireSessionUser } from '../auth/requireSession.js'
 import {
-  CUSTOMER_VALUE_ANALYTICS_DEFAULT_MAX_N,
   CUSTOMER_VALUE_ANALYTICS_DEFAULT_WINDOW_DAYS,
   getCustomerValueAnalytics,
 } from '../customerValueAnalytics/customerValueAnalyticsQueries.js'
@@ -32,7 +31,9 @@ export async function registerCustomerValueAnalyticsRoutes(
       from,
       to,
       sites: parsed.sites,
-      maxPurchaseNumber: parsed.maxPurchaseNumber ?? CUSTOMER_VALUE_ANALYTICS_DEFAULT_MAX_N,
+      // Default is 'auto' — server picks the long-tail cliff, capped
+      // at the visual hard-cap. Operator can override with a number.
+      maxPurchaseNumber: parsed.maxPurchaseNumber ?? 'auto',
       cohortScope: parsed.cohortScope ?? 'all_as_of_end',
     })
     return reply.send(CustomerValueAnalyticsResponseSchema.parse(result))

@@ -43,7 +43,7 @@ import { getPool } from '../db/pool.js'
 // ============================================================================
 
 export const CUSTOMER_VALUE_ANALYTICS_DEFAULT_WINDOW_DAYS = 90
-export const CUSTOMER_VALUE_ANALYTICS_DEFAULT_MAX_N = 20
+export const CUSTOMER_VALUE_ANALYTICS_MAX_N_HARD_CAP = 50
 
 function resolveDealerIds(sites: readonly string[]): number[] {
   if (sites.length === 0) {
@@ -71,11 +71,52 @@ function asReqInt(v: unknown): number {
 
 export type CustomerValueCohortScope = 'all_as_of_end' | 'active_in_range' | 'acquired_in_range'
 
+/** SQL fragment used by the 'auto' max-N probe — narrows the
+ *  customer set to the same scope the main query will then apply. */
+function cohortScopeProbeFilter(
+  scope: CustomerValueCohortScope,
+  fromParam: string,
+  toParam: string,
+): string {
+  switch (scope) {
+    case 'acquired_in_range':
+      // First-ever order in range. We approximate via min() at the
+      // outer scope so we still benefit from the (dealer, pay_time)
+      // index — for the probe we just need to know which customers
+      // have ≥2 orders, so a HAVING on the first purchase suffices.
+      return `and (
+        select min(pay_time) from sweed_orders so2
+         where so2.dealer_id = sweed_orders.dealer_id
+           and so2.customer_id = sweed_orders.customer_id
+      ) >= ${fromParam}::timestamptz and (
+        select min(pay_time) from sweed_orders so2
+         where so2.dealer_id = sweed_orders.dealer_id
+           and so2.customer_id = sweed_orders.customer_id
+      ) < ${toParam}::timestamptz`
+    case 'active_in_range':
+      // Customer must have at least one order inside the range.
+      return `and exists (
+        select 1 from sweed_orders so2
+         where so2.dealer_id = sweed_orders.dealer_id
+           and so2.customer_id = sweed_orders.customer_id
+           and so2.pay_time >= ${fromParam}::timestamptz
+           and so2.pay_time < ${toParam}::timestamptz
+      )`
+    case 'all_as_of_end':
+    default:
+      return ''
+  }
+}
+
 interface QueryArgs {
   from: Date
   to: Date
   sites: readonly string[]
-  maxPurchaseNumber: number
+  /** Either a fixed bucket cap (2..MAX_N_HARD_CAP) or 'auto' to let
+   *  the server choose. 'auto' picks the smallest N such that all
+   *  total-purchase buckets > N hold ≤1 customer (the long-tail
+   *  cliff), capped at MAX_N_HARD_CAP. Default is 'auto'. */
+  maxPurchaseNumber: number | 'auto'
   cohortScope: CustomerValueCohortScope
 }
 
@@ -159,11 +200,59 @@ export async function getCustomerValueAnalytics(
   const pool = getPool()
   const generatedAt = new Date()
 
+  // Resolve the maxPurchaseNumber:
+  //   * numeric         → use as-is (clamped to [2, MAX_N_HARD_CAP])
+  //   * 'auto' (default) → run a cheap probe that returns the largest
+  //     total_purchases value held by ≥2 in-scope customers; that's
+  //     the cliff above which the histogram is just one-off long
+  //     tail. Cap at MAX_N_HARD_CAP so the rendered bar count never
+  //     exceeds the operator-agreed visual budget.
+  let effectiveMaxN: number
+  if (args.maxPurchaseNumber === 'auto') {
+    if (dealerIds.length === 0) {
+      effectiveMaxN = 20
+    } else {
+      const probeSql = `
+        with cr as (
+          select customer_id, count(*) as total_purchases
+            from sweed_orders
+           where dealer_id = any($1::bigint[])
+             and pay_time < $2::timestamptz
+             and customer_id is not null
+             ${cohortScopeProbeFilter(args.cohortScope, '$3', '$4')}
+           group by dealer_id, customer_id
+        )
+        select coalesce(
+          (
+            select max(total_purchases)::int
+              from cr
+             group by total_purchases
+            having count(*) >= 2
+          ),
+          2
+        ) as max_n_with_ge2
+      `
+      const probeParams: unknown[] = [dealerIds, args.to.toISOString()]
+      if (args.cohortScope !== 'all_as_of_end') {
+        probeParams.push(args.from.toISOString(), args.to.toISOString())
+      }
+      const probe = await pool.query<{ max_n_with_ge2: string | number | null }>(
+        probeSql,
+        probeParams,
+      )
+      const raw = asNum(probe.rows[0]?.max_n_with_ge2) ?? 20
+      // Clamp into [2, hard cap]. Auto can never exceed the cap.
+      effectiveMaxN = Math.max(2, Math.min(CUSTOMER_VALUE_ANALYTICS_MAX_N_HARD_CAP, Math.trunc(raw)))
+    }
+  } else {
+    effectiveMaxN = Math.max(2, Math.min(CUSTOMER_VALUE_ANALYTICS_MAX_N_HARD_CAP, args.maxPurchaseNumber))
+  }
+
   const emptyResp: CustomerValueAnalyticsResponse = {
     range: { from: args.from.toISOString(), to: args.to.toISOString() },
     generatedAt: generatedAt.toISOString(),
     sites: [...args.sites],
-    maxPurchaseNumber: args.maxPurchaseNumber,
+    maxPurchaseNumber: effectiveMaxN,
     cohortScope: args.cohortScope,
     summary: {
       knownCustomers: 0,
@@ -381,7 +470,7 @@ export async function getCustomerValueAnalytics(
     dealerIds,
     args.from.toISOString(),
     args.to.toISOString(),
-    args.maxPurchaseNumber,
+    effectiveMaxN,
     args.cohortScope,
   ])
 
@@ -497,7 +586,7 @@ export async function getCustomerValueAnalytics(
     range: { from: args.from.toISOString(), to: args.to.toISOString() },
     generatedAt: generatedAt.toISOString(),
     sites: [...args.sites],
-    maxPurchaseNumber: args.maxPurchaseNumber,
+    maxPurchaseNumber: effectiveMaxN,
     cohortScope: args.cohortScope,
     summary,
     purchaseCountHistogram,

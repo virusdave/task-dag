@@ -86,7 +86,8 @@ const MONEY_BASES: ReadonlyArray<{ id: MoneyBasis; label: string; help: string }
   },
 ]
 
-const MAX_N_OPTIONS: ReadonlyArray<number> = [10, 20, 30, 50]
+type MaxNChoice = 'auto' | 10 | 20 | 30 | 50
+const MAX_N_OPTIONS: ReadonlyArray<MaxNChoice> = ['auto', 10, 20, 30, 50]
 
 export function CustomerValueTab(): JSX.Element {
   const [windowDays, setWindowDays] = useState<number>(90)
@@ -95,7 +96,7 @@ export function CustomerValueTab(): JSX.Element {
   const [customToMs, setCustomToMs] = useState<number>(Date.now())
   const [selectedSites, setSelectedSites] = useState<ReadonlySet<string>>(() => new Set())
   const [cohortScope, setCohortScope] = useState<CohortScope>('all_as_of_end')
-  const [maxN, setMaxN] = useState<number>(20)
+  const [maxN, setMaxN] = useState<MaxNChoice>('auto')
 
   const [data, setData] = useState<CustomerValueAnalyticsResponse | null>(null)
   const [loading, setLoading] = useState<boolean>(true)
@@ -116,6 +117,9 @@ export function CustomerValueTab(): JSX.Element {
     params.set('to', new Date(toMs).toISOString())
     if (sitesParam) params.set('sites', sitesParam)
     params.set('cohortScope', cohortScope)
+    // 'auto' passes through to the server, which probes for the
+    // long-tail cliff and returns the resolved value as
+    // `maxPurchaseNumber` in the response.
     params.set('maxPurchaseNumber', String(maxN))
     setLoading(true)
     setError(null)
@@ -244,16 +248,25 @@ export function CustomerValueTab(): JSX.Element {
           </label>
           <label
             className="subtle-copy"
-            title="Customers with more purchases than this are bucketed into an overflow 'max+' bucket so the long tail doesn't sparsify the histogram."
+            title="Customers with more purchases than this are bucketed into an overflow 'N+' bucket so the long tail doesn't sparsify the histogram. 'auto' lets the server pick the smallest N such that every higher bucket holds ≤1 customer — i.e. the long-tail cliff — capped at 50 bars."
           >
             max N{' '}
-            <select value={maxN} onChange={(e) => setMaxN(Number(e.target.value))}>
+            <select
+              value={String(maxN)}
+              onChange={(e) => {
+                const v = e.target.value
+                setMaxN(v === 'auto' ? 'auto' : (Number(v) as MaxNChoice))
+              }}
+            >
               {MAX_N_OPTIONS.map((n) => (
-                <option key={n} value={n}>
-                  {n}
+                <option key={String(n)} value={String(n)}>
+                  {n === 'auto' ? 'auto' : n}
                 </option>
               ))}
             </select>
+            {maxN === 'auto' && data ? (
+              <span className="subtle-copy"> ({data.maxPurchaseNumber})</span>
+            ) : null}
           </label>
         </div>
       </div>
@@ -544,9 +557,9 @@ function LifetimeByTotalPurchasesCard({
     <article className="metric-chart-card customer-value-card">
       <header className="metric-chart-header">
         <div className="metric-chart-titlewrap">
-          <h3 className="metric-chart-title">Lifetime $ by total purchase count</h3>
+          <h3 className="metric-chart-title">Avg lifetime $ for customers who end up at N purchases</h3>
           <HelpIcon
-            text={`For each total-purchases bucket, the ${aggKind === 'avg' ? 'average' : 'median'} lifetime-to-date ${basisLabel.toLowerCase()} of customers in that bucket. Reads as "if a customer becomes a 3x customer, they're worth $X total". The slope tells you the marginal value of converting an N-time customer into an N+1-time customer. Receipt basis is not computed here (use the other cards for receipts).`}
+            text={`For each total-purchases bucket N, compute lifetime-to-date ${basisLabel.toLowerCase()} per customer, then ${aggKind === 'avg' ? 'average' : 'take the median'} across all customers whose CURRENT total purchase count is exactly N (or ${maxN}+ for the last bucket). This is a cohort statistic, NOT a cumulative one — bucket N and bucket N+1 contain different customers, so the line is not guaranteed to be monotone. Small dips between adjacent buckets are real cohort variance (e.g., the 10-purchase cohort may happen to skew lower-AOV than the 9-purchase cohort) and not a bug. Use this to ask "if a customer becomes a 3x customer, how much money have they generally spent with us by then?". Receipt basis is not computed here (use the contribution card for receipts).`}
           />
         </div>
         <label className="subtle-copy customer-value-card-control">
@@ -577,6 +590,11 @@ function ContributionByPurchaseNumberCard({
   basis: MoneyBasis
   basisLabel: string
 }) {
+  // Default log-Y: the contribution histogram is dominated by the
+  // 1st-purchase bar (everybody contributes a 1st purchase, only a
+  // shrinking fraction make it to the Nth), so a linear scale buries
+  // every bar past N=3 in the floor.
+  const [logScale, setLogScale] = useState<boolean>(true)
   const bars: BarPoint[] = data.map((b) => {
     const y =
       basis === 'gross_sales'
@@ -609,8 +627,16 @@ function ContributionByPurchaseNumberCard({
         <span className="subtle-copy customer-value-card-control">
           total: {fmtMoney(totalDollars)}
         </span>
+        <label className="subtle-copy customer-value-card-control">
+          <input
+            type="checkbox"
+            checked={logScale}
+            onChange={(e) => setLogScale(e.target.checked)}
+          />{' '}
+          log Y
+        </label>
       </header>
-      <BarChart bars={bars} logScale={false} yLabel="$" yFormatter={(v) => fmtMoney(v)} />
+      <BarChart bars={bars} logScale={logScale} yLabel="$" yFormatter={(v) => fmtMoney(v)} />
     </article>
   )
 }

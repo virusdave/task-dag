@@ -20,11 +20,21 @@ const csvList = z
   .optional()
   .transform((v) => (v ? v.split(',').filter((s) => s.length > 0) : []))
 
+// `maxPurchaseNumber` is either a number 2..50 or the string 'auto'.
+// On 'auto' the server picks the smallest N such that all buckets > N
+// hold ≤1 customer, capped at 50 (so the long tail collapses into the
+// overflow bucket without losing visible-bucket detail). Default if
+// not specified is 'auto'.
+const MaxPurchaseNumberParam = z.union([
+  z.coerce.number().int().min(2).max(50),
+  z.literal('auto'),
+])
+
 export const CustomerValueAnalyticsRequestSchema = z.object({
   from: z.string().datetime().optional(),
   to: z.string().datetime().optional(),
   sites: csvList,
-  maxPurchaseNumber: z.coerce.number().int().min(2).max(50).optional(),
+  maxPurchaseNumber: MaxPurchaseNumberParam.optional(),
   cohortScope: z.enum(['all_as_of_end', 'active_in_range', 'acquired_in_range']).optional(),
 })
 export type CustomerValueAnalyticsRequest = z.infer<typeof CustomerValueAnalyticsRequestSchema>
