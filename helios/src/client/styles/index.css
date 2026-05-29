@@ -5683,11 +5683,83 @@ span.metric-chart-legend-item {
   border-radius: 10px;
   overflow: hidden;
   background: #f5efe3;
+  /* Anchor for the floating replay pill (.cm-replay-pill, absolute). */
+  position: relative;
 }
 .customer-map-page .cm-map {
   width: 100%;
   height: 65vh;
   min-height: 360px;
+}
+
+/* When the wrap is fullscreened (we hand the wrap, not the inner
+   canvas, to MapLibre's FullscreenControl so the floating replay
+   pill stays visible), make the inner map fill the entire fullscreen
+   viewport instead of staying clamped at 65vh. */
+.customer-map-page .cm-map-wrap:fullscreen {
+  border-radius: 0;
+}
+.customer-map-page .cm-map-wrap:fullscreen .cm-map {
+  width: 100%;
+  height: 100%;
+}
+
+/* Floating, draggable replay control pill — always visible inside
+   the map wrap so it survives the fullscreen toggle (which targets
+   the wrap, not the inner canvas). Designed to be unmistakably a
+   widget: light cream background, dark text, soft shadow + halo so
+   it reads against both bright basemap tiles and the desaturated
+   ghost basemap during replay. */
+.customer-map-page .cm-replay-pill {
+  position: absolute;
+  z-index: 5;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.3rem 0.55rem 0.3rem 0.4rem;
+  border-radius: 999px;
+  background: rgba(255, 250, 241, 0.94);
+  color: #1a0d04;
+  border: 1px solid rgba(26, 13, 4, 0.18);
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.18),
+    0 4px 12px rgba(0, 0, 0, 0.16);
+  /* The whole pill is the drag handle. */
+  cursor: grab;
+  user-select: none;
+  touch-action: none;
+  font-size: 0.85rem;
+  line-height: 1;
+}
+.customer-map-page .cm-replay-pill:active {
+  cursor: grabbing;
+}
+.customer-map-page .cm-replay-pill-btn {
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  border-radius: 999px;
+  border: none;
+  background: #1a0d04;
+  color: #fffaf1;
+  font-size: 0.8rem;
+  font-weight: 700;
+  line-height: 28px;
+  text-align: center;
+  cursor: pointer;
+  padding: 0;
+  /* Keep the button visually clickable even if the parent gets
+     `cursor: grabbing` while dragging. */
+}
+.customer-map-page .cm-replay-pill-btn:focus-visible {
+  outline: 2px solid #b95f25;
+  outline-offset: 1px;
+}
+.customer-map-page .cm-replay-pill-time {
+  flex: 0 0 auto;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  padding-right: 0.15rem;
 }
 
 .customer-map-page .cm-about > summary {

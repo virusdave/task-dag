@@ -518,6 +518,13 @@ export function CustomerMapPage(): JSX.Element {
   // Map instance lifecycle.
   // -----------------------------------------------------------------
   const containerRef = useRef<HTMLDivElement | null>(null)
+  // The outer wrap is what we hand to MapLibre's FullscreenControl
+  // so that absolutely-positioned overlays inside it (the floating
+  // replay pill) are part of the fullscreen view. If we let
+  // FullscreenControl default to fullscreening just the map's own
+  // container, our overlay sits OUTSIDE the fullscreen element and
+  // disappears the moment the operator hits ⛶.
+  const wrapRef = useRef<HTMLDivElement | null>(null)
   const mapRef = useRef<maplibregl.Map | null>(null)
   const popupRef = useRef<maplibregl.Popup | null>(null)
 
@@ -597,7 +604,15 @@ export function CustomerMapPage(): JSX.Element {
       // MapLibre control; standard ⛶ icon. Hooks the browser
       // Fullscreen API on supported browsers and falls back to a
       // CSS-positioned overlay otherwise.
-      mapInstance.addControl(new maplibre.FullscreenControl(), 'top-right')
+      // Pass `container: wrapRef.current` so the FullscreenControl
+      // fullscreens our wrap div (and therefore includes the floating
+      // replay pill overlay), not just the map's own container.
+      mapInstance.addControl(
+        new maplibre.FullscreenControl({
+          container: wrapRef.current ?? undefined,
+        }),
+        'top-right',
+      )
       mapInstance.addControl(
         new maplibre.AttributionControl({ compact: true }),
         'bottom-right',
@@ -1517,8 +1532,14 @@ export function CustomerMapPage(): JSX.Element {
         </div>
       ) : null}
 
-      <div className="cm-map-wrap">
+      <div className="cm-map-wrap" ref={wrapRef}>
         <div ref={containerRef} className="cm-map" />
+        <ReplayPill
+          playing={replayPlaying}
+          onToggle={handleReplayToggle}
+          cursorMs={replayCursorMs}
+          wrapRef={wrapRef}
+        />
       </div>
 
       <details className="cm-about">
@@ -1537,6 +1558,126 @@ export function CustomerMapPage(): JSX.Element {
         </div>
       </details>
     </section>
+  )
+}
+
+// ---------------------------------------------------------------------
+// Floating, draggable always-visible replay control pill.
+//
+// Lives inside the `.cm-map-wrap` element (which is also what we
+// hand to MapLibre's FullscreenControl), so it stays visible AND
+// usable when the operator pops the map fullscreen — at which point
+// the bottom-of-page replay control row is completely off-screen.
+//
+// Minimum content: play/pause button + current playback timestamp.
+// Drag handle = the pill itself; we save the position as
+// percentage-of-wrap so a fullscreen-vs-windowed swap still keeps
+// the pill in the right relative spot.
+//
+// The pill is intentionally NON-essential in the windowed view (the
+// full replay control row below the map already covers everything),
+// but it makes fullscreen replay actually controllable.
+// ---------------------------------------------------------------------
+
+interface ReplayPillProps {
+  playing: boolean
+  cursorMs: number
+  onToggle: () => void
+  wrapRef: React.RefObject<HTMLDivElement | null>
+}
+
+function ReplayPill({ playing, cursorMs, onToggle, wrapRef }: ReplayPillProps): JSX.Element {
+  // Position is percent-of-wrap so the pill stays at the same
+  // relative spot when the wrap resizes (fullscreen toggle).
+  // Default lower-left so it doesn't fight MapLibre's top-right
+  // control stack or the bottom-right attribution.
+  const [posPct, setPosPct] = useState<{ leftPct: number; topPct: number }>(
+    () => ({ leftPct: 2, topPct: 88 }),
+  )
+  const dragRef = useRef<{
+    startX: number
+    startY: number
+    startLeftPct: number
+    startTopPct: number
+    moved: boolean
+  } | null>(null)
+
+  function onPointerDown(e: React.PointerEvent<HTMLDivElement>): void {
+    // Drag from the pill background, but let the inner play/pause
+    // button receive its own click. Buttons stopPropagation below.
+    const wrap = wrapRef.current
+    if (wrap === null) return
+    const wrapRect = wrap.getBoundingClientRect()
+    if (wrapRect.width === 0 || wrapRect.height === 0) return
+    dragRef.current = {
+      startX: e.clientX,
+      startY: e.clientY,
+      startLeftPct: posPct.leftPct,
+      startTopPct: posPct.topPct,
+      moved: false,
+    }
+    ;(e.currentTarget as HTMLDivElement).setPointerCapture(e.pointerId)
+  }
+  function onPointerMove(e: React.PointerEvent<HTMLDivElement>): void {
+    const drag = dragRef.current
+    const wrap = wrapRef.current
+    if (drag === null || wrap === null) return
+    const rect = wrap.getBoundingClientRect()
+    if (rect.width === 0 || rect.height === 0) return
+    const dxPct = ((e.clientX - drag.startX) / rect.width) * 100
+    const dyPct = ((e.clientY - drag.startY) / rect.height) * 100
+    if (Math.abs(e.clientX - drag.startX) > 2 || Math.abs(e.clientY - drag.startY) > 2) {
+      drag.moved = true
+    }
+    // Clamp so the pill never escapes the wrap.
+    const nextLeft = Math.max(0, Math.min(95, drag.startLeftPct + dxPct))
+    const nextTop = Math.max(0, Math.min(95, drag.startTopPct + dyPct))
+    setPosPct({ leftPct: nextLeft, topPct: nextTop })
+  }
+  function onPointerUp(e: React.PointerEvent<HTMLDivElement>): void {
+    const drag = dragRef.current
+    dragRef.current = null
+    ;(e.currentTarget as HTMLDivElement).releasePointerCapture?.(e.pointerId)
+    // If the pointer never moved, treat as a tap on the play/pause
+    // button so the pill is itself a control even without precise
+    // pointer aim on a phone screen.
+    if (drag !== null && !drag.moved) {
+      onToggle()
+    }
+  }
+
+  return (
+    <div
+      className="cm-replay-pill"
+      role="group"
+      aria-label="Replay quick controls"
+      style={{
+        left: `${posPct.leftPct}%`,
+        top: `${posPct.topPct}%`,
+      }}
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={onPointerUp}
+      onPointerCancel={onPointerUp}
+    >
+      <button
+        type="button"
+        className="cm-replay-pill-btn"
+        aria-label={playing ? 'Pause replay' : 'Play replay'}
+        title={playing ? 'Pause replay' : 'Play replay'}
+        onClick={(e) => {
+          // Prevent the pointer-up tap-handler from firing twice.
+          e.stopPropagation()
+          onToggle()
+        }}
+        onPointerDown={(e) => e.stopPropagation()}
+      >
+        {playing ? '❚❚' : '▶'}
+      </button>
+      <span className="cm-replay-pill-time" aria-live="off">
+        {formatTime(new Date(cursorMs).toISOString())}
+      </span>
+    </div>
   )
 }
 
