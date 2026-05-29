@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 
 import {
   CustomerValueAnalyticsResponseSchema,
@@ -637,7 +637,28 @@ function BarChart({
   yLabel: string
   yFormatter?: (v: number) => string
 }) {
-  const [hover, setHover] = useState<number | null>(null)
+  // Hover state carries the bar index AND the most recent pointer
+  // position so the tooltip can be rendered as a viewport-clamped
+  // fixed-position panel that follows the mouse instead of sitting
+  // pinned over a fixed corner of the chart (which on desktop
+  // happens to cover whichever bar the operator was inspecting).
+  const [hover, setHover] = useState<
+    { idx: number; clientX: number; clientY: number } | null
+  >(null)
+
+  // Sticky-tooltip plumbing for touch — pattern matches MetricChart.
+  // Mouse pointerleave clears immediately; touch/pen pointerleave
+  // delays the clear by 3500ms so the browser's long-press handler
+  // doesn't eat the touch and scroll the page.
+  const lastPointerTypeRef = useRef<string>('mouse')
+  const stickyTimerRef = useRef<number | null>(null)
+  const cancelStickyClear = useCallback(() => {
+    if (stickyTimerRef.current !== null) {
+      globalThis.clearTimeout(stickyTimerRef.current)
+      stickyTimerRef.current = null
+    }
+  }, [])
+  useEffect(() => () => cancelStickyClear(), [cancelStickyClear])
 
   if (bars.length === 0) {
     return <p className="customer-value-no-data">No data in range.</p>
@@ -691,7 +712,7 @@ function BarChart({
 
   const labelEveryN = Math.max(1, Math.ceil(barCount / 14))
 
-  const hoveredBar = hover === null ? null : bars[hover] ?? null
+  const hoveredBar = hover === null ? null : bars[hover.idx] ?? null
 
   return (
     <div className="metric-chart-svg-wrap customer-value-chart-wrap">
@@ -745,7 +766,7 @@ function BarChart({
           const h = Math.max(0, bottom - top)
           const x = cx - barW / 2
           const fill = b.overflow ? '#9467bd' : '#1f77b4'
-          const isHover = hover === i
+          const isHover = hover?.idx === i
           return (
             <g key={`b-${i}`}>
               <rect
@@ -776,11 +797,34 @@ function BarChart({
                 width={bandW}
                 height={plotH}
                 fill="transparent"
-                onPointerEnter={() => setHover(i)}
-                onPointerDown={() => setHover(i)}
+                onPointerEnter={(e) => {
+                  lastPointerTypeRef.current = e.pointerType
+                  cancelStickyClear()
+                  setHover({ idx: i, clientX: e.clientX, clientY: e.clientY })
+                }}
+                onPointerDown={(e) => {
+                  lastPointerTypeRef.current = e.pointerType
+                  cancelStickyClear()
+                  setHover({ idx: i, clientX: e.clientX, clientY: e.clientY })
+                }}
+                onPointerMove={(e) => {
+                  lastPointerTypeRef.current = e.pointerType
+                  cancelStickyClear()
+                  setHover({ idx: i, clientX: e.clientX, clientY: e.clientY })
+                }}
                 onPointerLeave={() => {
-                  // Sticky on touch: 3.5s; immediate on mouse.
-                  setHover((cur) => (cur === i ? cur : cur))
+                  if (
+                    lastPointerTypeRef.current === 'touch' ||
+                    lastPointerTypeRef.current === 'pen'
+                  ) {
+                    cancelStickyClear()
+                    stickyTimerRef.current = globalThis.setTimeout(() => {
+                      stickyTimerRef.current = null
+                      setHover(null)
+                    }, 3500)
+                    return
+                  }
+                  setHover(null)
                 }}
               />
             </g>
@@ -826,13 +870,64 @@ function BarChart({
           </pattern>
         </defs>
       </svg>
-      {hoveredBar ? (
-        <div className="customer-value-tooltip">
-          {hoveredBar.tooltipLines.map((l, i) => (
-            <div key={i}>{l}</div>
-          ))}
-        </div>
+      {hoveredBar && hover ? (
+        <FollowTooltip
+          lines={hoveredBar.tooltipLines}
+          clientX={hover.clientX}
+          clientY={hover.clientY}
+        />
       ) : null}
+    </div>
+  )
+}
+
+/**
+ * Tooltip rendered as a viewport-clamped fixed-position panel that
+ * follows the cursor. Offset 14px from the pointer so the cursor
+ * itself isn't covered; flipped to the left / above when the
+ * default placement would clip past the right / bottom edge.
+ */
+function FollowTooltip({
+  lines,
+  clientX,
+  clientY,
+}: {
+  lines: ReadonlyArray<string>
+  clientX: number
+  clientY: number
+}) {
+  const ref = useRef<HTMLDivElement | null>(null)
+  const [pos, setPos] = useState<{ left: number; top: number } | null>(null)
+  useLayoutEffect(() => {
+    const el = ref.current
+    if (!el) return
+    const rect = el.getBoundingClientRect()
+    const vw = window.innerWidth
+    const vh = window.innerHeight
+    const margin = 6
+    const offset = 14
+    // Default: place below-right of the pointer.
+    let left = clientX + offset
+    let top = clientY + offset
+    if (left + rect.width + margin > vw) left = clientX - offset - rect.width
+    if (top + rect.height + margin > vh) top = clientY - offset - rect.height
+    // Final clamp so nothing pokes off-screen on small viewports.
+    if (left < margin) left = margin
+    if (top < margin) top = margin
+    setPos({ left, top })
+  }, [clientX, clientY, lines])
+  return (
+    <div
+      ref={ref}
+      className="customer-value-tooltip"
+      // Hide until the layout pass writes a real position to avoid
+      // a brief flash at (0,0) on first render.
+      style={pos ? { left: pos.left, top: pos.top } : { visibility: 'hidden' }}
+      role="tooltip"
+    >
+      {lines.map((l, i) => (
+        <div key={i}>{l}</div>
+      ))}
     </div>
   )
 }
