@@ -2209,9 +2209,11 @@ function ScatterCard({
               auto-sizes to the longest option ("Sales-day coverage %
               (days sold / window)") which blew the controls onto 3-4
               rows on mobile. */}
-          <label title={xDef.label}>
-            X:{' '}
-            <select value={xId} onChange={(e) => setXId(e.target.value)} title={xDef.label}>
+          {/* Y comes BEFORE X so the control order matches reading order:
+              the Y label sits to the LEFT of the X label on the plot. */}
+          <label title={yDef.label}>
+            Y:{' '}
+            <select value={yId} onChange={(e) => setYId(e.target.value)} title={yDef.label}>
               {POINT_AXES.map((a) => (
                 <option key={a.id} value={a.id} title={a.label}>
                   {a.short}
@@ -2219,9 +2221,9 @@ function ScatterCard({
               ))}
             </select>
           </label>
-          <label title={yDef.label}>
-            Y:{' '}
-            <select value={yId} onChange={(e) => setYId(e.target.value)} title={yDef.label}>
+          <label title={xDef.label}>
+            X:{' '}
+            <select value={xId} onChange={(e) => setXId(e.target.value)} title={xDef.label}>
               {POINT_AXES.map((a) => (
                 <option key={a.id} value={a.id} title={a.label}>
                   {a.short}

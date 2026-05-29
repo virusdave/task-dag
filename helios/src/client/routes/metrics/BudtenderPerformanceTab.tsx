@@ -967,9 +967,11 @@ function CashierScatterCard({ data }: { data: BudtenderAnalyticsResponse }) {
           </h3>
         </div>
         <div className="metric-chart-controls catalog-card-controls">
-          <label title={xDef.label}>
-            X:{' '}
-            <select value={xId} onChange={(e) => setXId(e.target.value)} title={xDef.label}>
+          {/* Y before X — matches the reading order on the plot (Y label
+              sits to the LEFT of the X label). */}
+          <label title={yDef.label}>
+            Y:{' '}
+            <select value={yId} onChange={(e) => setYId(e.target.value)} title={yDef.label}>
               {SCATTER_AXES.map((a) => (
                 <option key={a.id} value={a.id} title={a.label}>
                   {a.short}
@@ -977,9 +979,9 @@ function CashierScatterCard({ data }: { data: BudtenderAnalyticsResponse }) {
               ))}
             </select>
           </label>
-          <label title={yDef.label}>
-            Y:{' '}
-            <select value={yId} onChange={(e) => setYId(e.target.value)} title={yDef.label}>
+          <label title={xDef.label}>
+            X:{' '}
+            <select value={xId} onChange={(e) => setXId(e.target.value)} title={xDef.label}>
               {SCATTER_AXES.map((a) => (
                 <option key={a.id} value={a.id} title={a.label}>
                   {a.short}
