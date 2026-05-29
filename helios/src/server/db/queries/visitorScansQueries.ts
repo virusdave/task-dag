@@ -13,6 +13,7 @@ import type { Queryable } from '../pool.js'
 import type { VisitorScanRowInput } from '../../visitorScans/envelope.js'
 import { computePersonKey } from '../../visitorScans/personKey.js'
 import { seedVisitorScanLink } from './visitorScanLinkQueries.js'
+import { upsertAddress } from '../../../worker/geocoder/index.js'
 
 export interface InsertVisitorScanResult {
   inserted: boolean
@@ -165,6 +166,38 @@ export async function insertVisitorScan(
       // so a repeated failure is visible in the server logs.
       // eslint-disable-next-line no-console
       console.warn('[visitor-scans] seedVisitorScanLink failed', {
+        scanId: Number(result.rows[0].id),
+        cause: cause instanceof Error ? cause.message : String(cause),
+      })
+    }
+    // Forward-flow address link: feed the shared `addresses` /
+    // Census-geocoder pipeline so the customer-origin map can plot
+    // the customer's real home coords (NOT vs.latitude, which is
+    // actually the scanner-kiosk location per the VeriScan
+    // envelope). Best-effort: the backfill script
+    // helios/scripts/backfill-visitor-scan-geocodes.ts catches any
+    // gaps and a re-run is a no-op.
+    try {
+      const scanId = Number(result.rows[0].id)
+      const upserted = await upsertAddress(db, {
+        line1: row.address,
+        line2: null,
+        city: row.city,
+        state: row.state,
+        zip: row.postalCode,
+      })
+      if (upserted !== null) {
+        await db.query(
+          `update visitor_scans
+              set address_id = $1
+            where id = $2
+              and address_id is null`,
+          [upserted.addressId, scanId],
+        )
+      }
+    } catch (cause) {
+      // eslint-disable-next-line no-console
+      console.warn('[visitor-scans] address linking failed', {
         scanId: Number(result.rows[0].id),
         cause: cause instanceof Error ? cause.message : String(cause),
       })

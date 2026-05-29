@@ -21,7 +21,7 @@ export async function registerBudtenderAnalyticsRoutes(
   // strategy. The response is small (one row per cashier + a daily
   // series) so we hand the whole thing to the SPA in one round-trip.
   server.get('/api/budtender-analytics', async (request, reply) => {
-    const user = await requireSessionUser(request, reply, 'viewer')
+    const user = await requireSessionUser(request, reply, 'admin')
     if (!user) return
     const parsed = BudtenderAnalyticsRequestSchema.parse(request.query ?? {})
     const to = parsed.to ? new Date(parsed.to) : new Date()

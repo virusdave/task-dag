@@ -104,6 +104,8 @@ export const AuditEventTypeSchema = z.enum([
   'config.workers.enrich_customer_address.completed',
   'config.workers.enrich_delivery_address.requested',
   'config.workers.enrich_delivery_address.completed',
+  'config.workers.enrich_visitor_scan_address.requested',
+  'config.workers.enrich_visitor_scan_address.completed',
   'config.workers.weather_daily_ingest.requested',
   'config.workers.weather_daily_ingest.completed',
   'config.workers.market_evidence_alarm.completed',

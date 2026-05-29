@@ -24,6 +24,7 @@ export const CONFIG_BACKGROUND_TASK_KEYS = [
   'workers.scheduling.weather_daily_ingest',
   'workers.scheduling.sweed_shifts_ingest',
   'workers.scheduling.enrich_delivery_address',
+  'workers.scheduling.enrich_visitor_scan_address',
 ] as const
 export const ConfigBackgroundTaskKeySchema = z.enum(CONFIG_BACKGROUND_TASK_KEYS)
 export type ConfigBackgroundTaskKey = z.infer<typeof ConfigBackgroundTaskKeySchema>
@@ -129,6 +130,13 @@ export const CONFIG_BACKGROUND_TASKS: ReadonlyArray<ConfigBackgroundTaskDefiniti
     slug: 'enrich-delivery-address',
     implemented: true,
     summary: 'Two-phase per tick: (1) walks delivery-typed sweed_orders rows whose delivery address is not yet resolved, calls store.sale.invoice.get per row, and upserts the returned address into the shared addresses table (linking the order + appending a delivery_seen row for the customer when present); (2) drains the addresses geocode queue via the free US Census Geocoder (≈ 1 RPS). Unblocks the customers.origin_map and delivery.order_count_by_zone metrics on /metrics. See FreshlyBakedNYC/automation#25.',
+  },
+  {
+    key: 'workers.scheduling.enrich_visitor_scan_address',
+    label: 'Visitor-scan address enrichment',
+    slug: 'enrich-visitor-scan-address',
+    implemented: true,
+    summary: 'Two-phase per tick at backfill priority: (1) links up to batchSize (default 5000) visitor_scans rows that have address text but no address_id to a row in the shared addresses table; (2) drains the addresses geocode queue via the free US Census Geocoder (≈ 1 RPS, so the per-tick drain is naturally rate-limited). Customer-of-record geocodes back the /admin/customers/map customer-origin map. Webhook handlers also enqueue a single follow-up of this job per incoming scan whose VeriScan lat/lng is missing or within 500ft of either store (i.e. is actually the scanner kiosk location, not a real home).',
   },
 ]
 
@@ -508,5 +516,27 @@ export const ENRICH_DELIVERY_ADDRESS_DEFAULT_SCHEDULE_WINDOWS: ReadonlyArray<
     intervalMinutes: 5,
     paused: false,
     notes: 'Per-invoice delivery-address pull + Census geocode drain, every 5 minutes.',
+  },
+]
+
+/**
+ * Default schedule for the visitor-scan address enrichment worker.
+ *
+ * Phase 1 (linking) is a pure SQL upsert sweep and is bounded by
+ * batchSize=5000; phase 2 (Census geocode drain) is bounded by the
+ * shared Census client's ~1 RPS rate limit. A 5-minute cadence
+ * matches the other Census-draining workers so the queue stays
+ * level instead of bursty.
+ */
+export const ENRICH_VISITOR_SCAN_ADDRESS_DEFAULT_SCHEDULE_WINDOWS: ReadonlyArray<
+  Omit<ConfigWorkerScheduleWindow, 'id'>
+> = [
+  {
+    weekdayMask: WEEKDAY_MASK_ALL,
+    windowStartMinute: 0,
+    windowEndMinute: 1440,
+    intervalMinutes: 5,
+    paused: false,
+    notes: 'Visitor-scan address linking (batch=5000) + Census geocode drain, every 5 minutes at backfill priority.',
   },
 ]

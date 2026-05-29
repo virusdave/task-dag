@@ -24,6 +24,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useLoaderData, useSearchParams } from 'react-router-dom'
 
 import {
+  CustomersMapEarliestResponseSchema,
   CustomersMapResponseSchema,
   type CustomersMapResponse,
 } from '../../../shared/contracts/index.js'
@@ -111,6 +112,26 @@ const REPLAY_LOOP_PAUSE_MS = 350 // small black-frame at loop reset
 function defaultPlaybackDurationMs(windowMs: number): number {
   const scaled = REPLAY_SECONDS_PER_24H * 1000 * (windowMs / (24 * 60 * 60 * 1000))
   return Math.max(REPLAY_MIN_DURATION_MS, Math.round(scaled))
+}
+
+// Wall-clock skip window during replay. The store is closed and no
+// scans land between 3am and 7am local time, so we skip the cursor
+// straight from 3:00 to 7:00 to avoid dead air. If the cursor falls
+// inside `[3am, 7am)` (in the operator's local time), advance it to
+// the next 7:00 on the same day. Caller still bounds the result by
+// the replay window.
+const REPLAY_QUIET_START_HOUR = 3
+const REPLAY_QUIET_END_HOUR = 7
+
+function skipReplayQuietHours(virtMs: number): number {
+  const d = new Date(virtMs)
+  const h = d.getHours()
+  if (h >= REPLAY_QUIET_START_HOUR && h < REPLAY_QUIET_END_HOUR) {
+    const jumped = new Date(d)
+    jumped.setHours(REPLAY_QUIET_END_HOUR, 0, 0, 0)
+    return jumped.getTime()
+  }
+  return virtMs
 }
 
 /** Per-dot lifetime (virtual ms) — how long each dot stays visible before fully fading. */
@@ -268,32 +289,52 @@ function defaultCheckedInBefore(now: Date = new Date()): string {
 }
 
 // ---------------------------------------------------------------------
-// Slider helpers — operate over a fixed 30-day rolling window ending
-// "now". Two slider handles map to checkedInAfter / checkedInBefore.
+// Slider helpers — operate over an arbitrary range from the earliest
+// scan in `visitor_scans` through "now". Two slider handles map to
+// checkedInAfter / checkedInBefore. Tick count scales with the window
+// width so per-tick resolution stays at roughly one hour regardless
+// of how long the window is. The earliest-scan timestamp is fetched
+// asynchronously by the page; until it arrives we use a 30-day
+// fallback so the slider has *something* to render.
 // ---------------------------------------------------------------------
 
-const SLIDER_WINDOW_MS = 30 * 24 * 60 * 60 * 1000
-const SLIDER_STEPS = 720 // 30 days * 24h = 720 — one tick per hour
+// Per-tick hour granularity. Slider tick count = windowHours, capped
+// at a hard ceiling so DOM-range step counts stay reasonable on
+// multi-year windows.
+const SLIDER_HOUR_TICK_MS = 60 * 60 * 1000
+const SLIDER_MAX_TICKS = 20_000 // generous; 20k hours = ~2.3 years
 
 interface SliderRange {
-  /** Start of the rolling window. */
+  /** Start of the slider window — earliest scan or a fallback. */
   windowStart: Date
-  /** End of the rolling window (= now, fixed at mount). */
+  /** End of the slider window (= now, fixed at mount). */
   windowEnd: Date
+  /** Total tick count for the underlying DOM range inputs. */
+  ticks: number
 }
 
-function buildSliderRange(): SliderRange {
-  // Snap the window edges to the top of the hour so each slider
-  // tick maps to a clean wall-clock hour. Without this, dragging the
-  // slider produces times like "06:27" that just reflect whatever
-  // minute/sec it happened to be when the page mounted, which is
-  // exactly the "weird minutes" complaint from the operator.
-  const now = new Date()
-  const end = new Date(now)
+function buildSliderRange(earliest: Date | null): SliderRange {
+  // End: ceiling to next top-of-hour so a tick maps to a clean
+  // wall-clock hour.
+  const end = new Date()
   end.setMinutes(0, 0, 0)
-  end.setHours(end.getHours() + 1) // ceil to next top-of-hour
-  const start = new Date(end.getTime() - SLIDER_WINDOW_MS)
-  return { windowStart: start, windowEnd: end }
+  end.setHours(end.getHours() + 1)
+  // Start: provided earliest (floored to top-of-hour) OR fall back
+  // to "30 days ago" until the meta endpoint resolves.
+  let start: Date
+  if (earliest !== null) {
+    start = new Date(earliest)
+    start.setMinutes(0, 0, 0)
+  } else {
+    start = new Date(end.getTime() - 30 * 24 * 60 * 60 * 1000)
+  }
+  // Floor — don't ever let start get after end.
+  if (start.getTime() >= end.getTime()) {
+    start = new Date(end.getTime() - 60 * 60 * 1000)
+  }
+  const hours = Math.ceil((end.getTime() - start.getTime()) / SLIDER_HOUR_TICK_MS)
+  const ticks = Math.max(1, Math.min(SLIDER_MAX_TICKS, hours))
+  return { windowStart: start, windowEnd: end, ticks }
 }
 
 function clampDateToWindow(iso: string | null, win: SliderRange, fallback: Date): Date {
@@ -309,11 +350,11 @@ function dateToTick(date: Date, win: SliderRange): number {
   const ratio =
     (date.getTime() - win.windowStart.getTime()) /
     (win.windowEnd.getTime() - win.windowStart.getTime())
-  return Math.round(Math.max(0, Math.min(1, ratio)) * SLIDER_STEPS)
+  return Math.round(Math.max(0, Math.min(1, ratio)) * win.ticks)
 }
 
 function tickToDate(tick: number, win: SliderRange): Date {
-  const ratio = tick / SLIDER_STEPS
+  const ratio = tick / win.ticks
   return new Date(
     win.windowStart.getTime() + ratio * (win.windowEnd.getTime() - win.windowStart.getTime()),
   )
@@ -746,9 +787,36 @@ export function CustomerMapPage(): JSX.Element {
   // -----------------------------------------------------------------
   // Live date-range slider state
   // -----------------------------------------------------------------
-  // We hold a stable window range for the page lifetime so dragging
-  // doesn't shift the slider geometry mid-interaction.
-  const sliderWindow = useMemo(() => buildSliderRange(), [])
+  // Earliest-scan timestamp drives the slider's left edge. Fetched
+  // once on mount; until it resolves we use a 30-day fallback. The
+  // slider window is rebuilt whenever earliest changes so the operator
+  // can scroll all the way back to the first record.
+  const [earliestCheckedInAt, setEarliestCheckedInAt] = useState<Date | null>(null)
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      try {
+        const meta = await loadJson(
+          '/api/admin/customers/map/earliest',
+          CustomersMapEarliestResponseSchema,
+        )
+        if (!cancelled && meta.earliestCheckedInAt !== null) {
+          const t = new Date(meta.earliestCheckedInAt)
+          if (Number.isFinite(t.getTime())) setEarliestCheckedInAt(t)
+        }
+      } catch {
+        // best-effort; fall back to the 30-day window.
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  const sliderWindow = useMemo(
+    () => buildSliderRange(earliestCheckedInAt),
+    [earliestCheckedInAt],
+  )
 
   const currentAfter = clampDateToWindow(
     searchParams.get('checkedInAfter'),
@@ -964,7 +1032,13 @@ export function CustomerMapPage(): JSX.Element {
       const elapsedReal = now - lastTickRef.current
       lastTickRef.current = now
       setReplayCursorMs((prev) => {
-        const next = prev + elapsedReal * ratio
+        // Skip 3am–7am (operator's local time) entirely during
+        // replay — there's effectively no scan activity in those
+        // hours, so dwelling there is just dead air. Jump the cursor
+        // forward to the next 7am whenever it lands inside the
+        // skip window.
+        const skipped = skipReplayQuietHours(prev + elapsedReal * ratio)
+        const next = skipped
         if (next >= windowBeforeMs) {
           if (replayLoop) {
             // Black-frame pause at the loop boundary so the eye
@@ -1103,6 +1177,15 @@ export function CustomerMapPage(): JSX.Element {
           <Pill tone="muted">{`${data.points.length.toLocaleString()} shown`}</Pill>
           {data.clipped ? (
             <Pill tone="warning">{`${data.totalMatching.toLocaleString()} total — narrow filter`}</Pill>
+          ) : null}
+          {data.unknownCount > 0 ? (
+            <span
+              title="Scans matching the current filter that have no usable home geocode yet — not plotted (we no longer fall back to the store location). The visitor-scan address-enrichment worker will resolve these in the background."
+            >
+              <Pill tone="muted">
+                {`Unknown: ${data.unknownCount.toLocaleString()}`}
+              </Pill>
+            </span>
           ) : null}
           {loading ? <Pill tone="muted">refreshing…</Pill> : null}
         </div>
@@ -1260,7 +1343,7 @@ export function CustomerMapPage(): JSX.Element {
             <input
               type="range"
               min={0}
-              max={SLIDER_STEPS}
+              max={sliderWindow.ticks}
               step={1}
               value={sliderAfterTick}
               onChange={(e) => handleAfterChange(Number(e.target.value))}
@@ -1270,7 +1353,7 @@ export function CustomerMapPage(): JSX.Element {
             <input
               type="range"
               min={0}
-              max={SLIDER_STEPS}
+              max={sliderWindow.ticks}
               step={1}
               value={sliderBeforeTick}
               onChange={(e) => handleBeforeChange(Number(e.target.value))}
@@ -1281,8 +1364,8 @@ export function CustomerMapPage(): JSX.Element {
               <div
                 className="cm-range-fill"
                 style={{
-                  left: `${(Math.min(sliderAfterTick, sliderBeforeTick) / SLIDER_STEPS) * 100}%`,
-                  width: `${(Math.abs(sliderBeforeTick - sliderAfterTick) / SLIDER_STEPS) * 100}%`,
+                  left: `${(Math.min(sliderAfterTick, sliderBeforeTick) / sliderWindow.ticks) * 100}%`,
+                  width: `${(Math.abs(sliderBeforeTick - sliderAfterTick) / sliderWindow.ticks) * 100}%`,
                 }}
               />
             </div>

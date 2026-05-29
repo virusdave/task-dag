@@ -33,7 +33,7 @@ function sendMigrationMissing(reply: import('fastify').FastifyReply): void {
 
 export async function registerMetricAnnotationsRoutes(server: FastifyInstance): Promise<void> {
   server.get('/api/metric-annotations', async (request, reply) => {
-    const user = await requireSessionUser(request, reply, 'viewer')
+    const user = await requireSessionUser(request, reply, 'admin')
     if (!user) {
       return
     }
@@ -55,7 +55,7 @@ export async function registerMetricAnnotationsRoutes(server: FastifyInstance): 
   })
 
   server.post('/api/metric-annotations', async (request, reply) => {
-    const user = await requireSessionUser(request, reply, 'editor')
+    const user = await requireSessionUser(request, reply, 'admin')
     if (!user) {
       return
     }
@@ -82,7 +82,7 @@ export async function registerMetricAnnotationsRoutes(server: FastifyInstance): 
   })
 
   server.patch('/api/metric-annotations/:annotationId', async (request, reply) => {
-    const user = await requireSessionUser(request, reply, 'editor')
+    const user = await requireSessionUser(request, reply, 'admin')
     if (!user) {
       return
     }
@@ -110,7 +110,7 @@ export async function registerMetricAnnotationsRoutes(server: FastifyInstance): 
   })
 
   server.delete('/api/metric-annotations/:annotationId', async (request, reply) => {
-    const user = await requireSessionUser(request, reply, 'editor')
+    const user = await requireSessionUser(request, reply, 'admin')
     if (!user) {
       return
     }

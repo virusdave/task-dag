@@ -96,25 +96,23 @@ export async function listCustomersMapPoints(
     conditions.push(sql(`$${params.length}`))
   }
 
-  // Hard floor — we only render points that have *some* usable
-  // coordinate. The `coordSource` filter narrows this further:
-  // `document` requires latitude/longitude, `scan` requires
-  // scan_latitude/scan_longitude, `all`/absent keeps the union.
-  if (filter.coordSource === 'document') {
-    conditions.push('(vs.latitude is not null and vs.longitude is not null)')
-  } else if (filter.coordSource === 'scan') {
-    // We want dots plotted from the kiosk fallback only — so the
-    // document coords must be missing (otherwise coord_source resolves
-    // to 'document') AND the scan coords must be present.
-    conditions.push(
-      '((vs.latitude is null or vs.longitude is null)' +
-        ' and (vs.scan_latitude is not null and vs.scan_longitude is not null))',
-    )
+  // Hard floor — we ONLY render scans whose document address has
+  // been successfully geocoded via the shared `addresses` /
+  // Census-geocoder pipeline. Per operator direction we deliberately
+  // do NOT fall back to `visitor_scans.scan_latitude / scan_longitude`
+  // (which is the SCANNER kiosk location) — falling back would
+  // mass-pile dots on top of each store, which is misleading. Scans
+  // without a usable home geocode are counted separately as
+  // `unknownCount` and surfaced in the UI as a "Unknown: N" badge.
+  //
+  // `coordSource` is kept as a filter for backward compatibility:
+  //   `document` / absent / `all` → home-geocoded points only
+  //   `scan`                      → no rows (we no longer plot kiosks)
+  if (filter.coordSource === 'scan') {
+    // Plot nothing — explicit kiosk-only mode is now a no-op.
+    conditions.push('false')
   } else {
-    conditions.push(
-      '((vs.latitude is not null and vs.longitude is not null)' +
-        ' or (vs.scan_latitude is not null and vs.scan_longitude is not null))',
-    )
+    conditions.push('(addr.latitude is not null and addr.longitude is not null)')
   }
 
   if (filter.siteSlugs !== null && filter.siteSlugs.length > 0) {
@@ -231,17 +229,18 @@ export async function listCustomersMapPoints(
   params.push(fetchLimit)
   const limitPlaceholder = `$${params.length}`
 
+  // Always include the addresses-LEFT-JOIN so the document/scan
+  // coalesce works the same regardless of whether the link-status
+  // join is also in play. addr.* is NULL for any scan whose
+  // address_id is NULL or whose geocode hasn't completed yet.
   const pointSql = `
     select
-      vs.id                                    as scan_id,
+      vs.id                                       as scan_id,
       vs.site_slug,
-      coalesce(vs.scanned_at, vs.ingested_at)  as checked_in_at,
-      coalesce(vs.latitude, vs.scan_latitude)  as lat,
-      coalesce(vs.longitude, vs.scan_longitude) as lng,
-      case
-        when vs.latitude is not null and vs.longitude is not null then 'document'
-        else 'scan'
-      end                                      as coord_source,
+      coalesce(vs.scanned_at, vs.ingested_at)     as checked_in_at,
+      addr.latitude                               as lat,
+      addr.longitude                              as lng,
+      'document'::text                            as coord_source,
       vs.first_name,
       vs.middle_name,
       vs.last_name,
@@ -249,6 +248,7 @@ export async function listCustomersMapPoints(
       vs.state,
       vs.postal_code
     from visitor_scans vs
+    left join addresses addr on addr.id = vs.address_id
     ${joinSql}
     ${whereSql}
     order by coalesce(vs.scanned_at, vs.ingested_at) desc, vs.id desc
@@ -290,16 +290,147 @@ export async function listCustomersMapPoints(
     // one we pushed). pg ignores extras only when placeholders match,
     // so re-build the params array without it.
     const countParams = params.slice(0, params.length - 1)
-    const countSql = `select count(*)::bigint as n from visitor_scans vs ${joinSql} ${whereSql}`
+    const countSql = `select count(*)::bigint as n from visitor_scans vs left join addresses addr on addr.id = vs.address_id ${joinSql} ${whereSql}`
     const countResult = await db.query<{ n: string | number }>(countSql, countParams)
     const n = countResult.rows[0]?.n
     totalMatching = typeof n === 'number' ? n : Number(n ?? 0)
   }
 
+  // Unknown count = scans matching the same time-range / dimensional
+  // filters (site, age, home state, ZIP, visit type, link status,
+  // checkedInAfter/Before) but that have NO usable home geocode —
+  // i.e. addr.latitude / addr.longitude is null. Surfaced in the
+  // map UI as a small "Unknown: N" badge rather than plotted at the
+  // store as a misleading fallback.
+  //
+  // We re-build a fresh params/conditions list because the geocode
+  // floor in the main query is inverted here.
+  const unknownCount = await countUnknown(db, filter)
+
   return {
     points,
     sitePins: [...SITE_PINS],
     totalMatching,
+    unknownCount,
     clipped,
   }
+}
+
+/**
+ * Earliest scan timestamp anywhere in `visitor_scans`. Drives the
+ * SPA's replay slider so it can span all of history, not just a
+ * hard-coded rolling 30-day window. Returns null if there are no
+ * scans yet.
+ */
+export async function getEarliestScanTimestamp(
+  db: Queryable,
+): Promise<string | null> {
+  const result = await db.query<{ earliest: Date | null }>(
+    `select min(coalesce(scanned_at, ingested_at)) as earliest from visitor_scans`,
+  )
+  const v = result.rows[0]?.earliest ?? null
+  if (v === null) return null
+  return v instanceof Date ? v.toISOString() : String(v)
+}
+
+async function countUnknown(
+  db: Queryable,
+  filter: ListCustomersMapPointsFilter,
+): Promise<number> {
+  // Mirror every WHERE clause from listCustomersMapPoints EXCEPT
+  // the geocode-present floor — here we want the count of scans
+  // that the user is implicitly asking about (same filters) but
+  // which the map can't render because no home geocode exists yet.
+  //
+  // Kiosk-only mode (coordSource === 'scan') returns 0 — there's no
+  // notion of "unknown" in that mode since the page renders nothing.
+  if (filter.coordSource === 'scan') return 0
+
+  const conditions: string[] = []
+  const params: unknown[] = []
+  function add(sql: (placeholder: string) => string, value: unknown): void {
+    params.push(value)
+    conditions.push(sql(`$${params.length}`))
+  }
+
+  conditions.push('(addr.latitude is null or addr.longitude is null)')
+
+  if (filter.siteSlugs !== null && filter.siteSlugs.length > 0) {
+    add((p) => `vs.site_slug = any(${p})`, filter.siteSlugs)
+  }
+  if (filter.checkedInAfter !== null) {
+    add(
+      (p) => `coalesce(vs.scanned_at, vs.ingested_at) >= ${p}`,
+      filter.checkedInAfter,
+    )
+  }
+  if (filter.checkedInBefore !== null) {
+    add(
+      (p) => `coalesce(vs.scanned_at, vs.ingested_at) < ${p}`,
+      filter.checkedInBefore,
+    )
+  }
+  if (filter.homeState === 'NY' || filter.homeState === 'NJ' || filter.homeState === 'CT') {
+    add((p) => `upper(nullif(trim(vs.state), '')) = ${p}`, filter.homeState)
+  } else if (filter.homeState === 'other') {
+    conditions.push(
+      "upper(nullif(trim(vs.state), '')) is not null" +
+        " and upper(nullif(trim(vs.state), '')) not in ('NY', 'NJ', 'CT')",
+    )
+  } else if (filter.homeState === 'missing') {
+    conditions.push("nullif(trim(coalesce(vs.state, '')), '') is null")
+  }
+  if (filter.postalPrefix !== null && filter.postalPrefix.length > 0) {
+    add((p) => `vs.postal_code like ${p} || '%'`, filter.postalPrefix)
+  }
+  if (filter.ageBand === 'unknown') {
+    conditions.push('vs.birth_date is null')
+  } else if (filter.ageBand !== null) {
+    const [lo, hi] = AGE_BAND_BOUNDS[filter.ageBand]
+    params.push(lo)
+    const loP = `$${params.length}`
+    params.push(hi)
+    const hiP = `$${params.length}`
+    conditions.push(
+      `vs.birth_date is not null` +
+        ` and extract(year from age(coalesce(vs.scanned_at, vs.ingested_at), vs.birth_date)) >= ${loP}` +
+        ` and extract(year from age(coalesce(vs.scanned_at, vs.ingested_at), vs.birth_date)) < ${hiP}`,
+    )
+  }
+  if (filter.visitType === 'unknown') {
+    conditions.push('vs.person_key is null')
+  } else if (filter.visitType === 'first') {
+    conditions.push(
+      'vs.person_key is not null and not exists (' +
+        'select 1 from visitor_scans prior' +
+        ' where prior.provider = vs.provider' +
+        ' and prior.person_key = vs.person_key' +
+        ' and (coalesce(prior.scanned_at, prior.ingested_at), prior.id)' +
+        ' < (coalesce(vs.scanned_at, vs.ingested_at), vs.id)' +
+        ')',
+    )
+  } else if (filter.visitType === 'returning') {
+    conditions.push(
+      'vs.person_key is not null and exists (' +
+        'select 1 from visitor_scans prior' +
+        ' where prior.provider = vs.provider' +
+        ' and prior.person_key = vs.person_key' +
+        ' and (coalesce(prior.scanned_at, prior.ingested_at), prior.id)' +
+        ' < (coalesce(vs.scanned_at, vs.ingested_at), vs.id)' +
+        ')',
+    )
+  }
+  const needsLinkJoin =
+    filter.linkStatus !== null && filter.linkStatus.length > 0
+  if (needsLinkJoin) {
+    add((p) => `vsl.link_status = any(${p})`, filter.linkStatus)
+  }
+  const joinSql = needsLinkJoin
+    ? 'left join visitor_scan_links vsl on vsl.scan_id = vs.id'
+    : ''
+  const whereSql = `where ${conditions.join(' and ')}`
+  const sql = `select count(*)::bigint as n from visitor_scans vs left join addresses addr on addr.id = vs.address_id ${joinSql} ${whereSql}`
+  const result = await db.query<{ n: string | number }>(sql, params)
+  const n = result.rows[0]?.n
+  return typeof n === 'number' ? n : Number(n ?? 0)
 }

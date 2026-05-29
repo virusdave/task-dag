@@ -18,6 +18,7 @@ import {
   ConfigWorkersWeatherDailyIngestJobPayloadSchema,
   ConfigWorkersSweedShiftsIngestJobPayloadSchema,
   ConfigWorkersEnrichDeliveryAddressJobPayloadSchema,
+  ConfigWorkersEnrichVisitorScanAddressJobPayloadSchema,
   CatalogSyncGroupDetailJobPayloadSchema,
   LlmDebugRerunJobPayloadSchema,
   ProposalGenerateDescriptionBatchJobPayloadSchema,
@@ -55,6 +56,7 @@ import { runConfigWorkersSweedPackageSnapshotsJob } from '../jobs/configWorkersS
 import { runIngestWeatherDailyJob } from '../jobs/ingestWeatherDailyJob.js'
 import { runConfigWorkersSweedShiftsIngestJob } from '../jobs/configWorkersSweedShiftsIngestJob.js'
 import { runConfigWorkersEnrichDeliveryAddressJob } from '../jobs/enrichDeliveryAddressJob.js'
+import { runConfigWorkersEnrichVisitorScanAddressJob } from '../jobs/enrichVisitorScanAddressJob.js'
 import { runProposalImportReviewJsonJob } from '../jobs/importReviewJsonJob.js'
 import { getPool } from '../../server/db/pool.js'
 import { runLlmDebugRerunJob } from '../jobs/llmDebugRerunJob.js'
@@ -233,6 +235,12 @@ const handlers: Record<JobType, JobHandler> = {
     await runConfigWorkersEnrichDeliveryAddressJob(
       context,
       ConfigWorkersEnrichDeliveryAddressJobPayloadSchema.parse(context.payload),
+    )
+  },
+  'config.workers.enrich_visitor_scan_address': async (context) => {
+    await runConfigWorkersEnrichVisitorScanAddressJob(
+      context,
+      ConfigWorkersEnrichVisitorScanAddressJobPayloadSchema.parse(context.payload),
     )
   },
 }

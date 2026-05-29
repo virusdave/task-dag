@@ -41,6 +41,12 @@ import {
   listVisitorScans,
   type VisitorScanListItem,
 } from '../db/queries/visitorScansQueries.js'
+import { withTransaction } from '../db/tx.js'
+import {
+  enqueueJob,
+  JOB_PRIORITY_BACKFILL,
+} from '../jobs/enqueueJob.js'
+import { appendAuditEvent } from '../audit/appendAuditEvent.js'
 import { getCustomerVisitorDetails } from '../db/queries/customerVisitorDetailsQueries.js'
 import {
   VeriScanEnvelopeSchema,
@@ -58,6 +64,53 @@ import {
 // construction.
 const SUPPORTED_SITES = ['bx', 'mh'] as const
 type SupportedSite = (typeof SUPPORTED_SITES)[number]
+
+// Site centroids used to decide whether an incoming VeriScan
+// envelope's lat/lng pair is actually a real customer-home geocode
+// or just the scanner kiosk's location. Kept in sync with the
+// `SITE_PINS` constant in customersMapQueries.ts.
+const STORE_COORDS: ReadonlyArray<{ lat: number; lng: number }> = [
+  { lat: 40.86494, lng: -73.88488 }, // Bronx
+  { lat: 40.76232, lng: -73.97661 }, // Midtown
+]
+// 500 ft in meters. The user's spec for "is this lat/lng really the
+// scanner kiosk?" — if a scan's reported lat/lng falls within 500ft
+// of EITHER store, we treat it as the kiosk and trigger the
+// background geocode job for the customer's home address text.
+const STORE_KIOSK_RADIUS_M = 500 * 0.3048
+
+/**
+ * True if the (lat, lng) pair is "near the scanner kiosk", meaning
+ * the VeriScan envelope's reported geocode is almost certainly the
+ * store and NOT a real customer-home geocode. Used by the webhook
+ * handler to decide whether to enqueue a follow-up backfill job
+ * for this scan's address text.
+ *
+ * Returns true when lat/lng is missing too — a null geocode is also
+ * a reason to queue the worker.
+ */
+function isStoreOrUnknownGeocode(lat: number | null, lng: number | null): boolean {
+  if (lat === null || lng === null || !Number.isFinite(lat) || !Number.isFinite(lng)) {
+    return true
+  }
+  for (const store of STORE_COORDS) {
+    const meters = haversineMeters(lat, lng, store.lat, store.lng)
+    if (meters <= STORE_KIOSK_RADIUS_M) return true
+  }
+  return false
+}
+
+function haversineMeters(lat1: number, lng1: number, lat2: number, lng2: number): number {
+  // Equirectangular approximation is plenty accurate at the
+  // sub-mile scale of this check and avoids the trig cost.
+  const R = 6_371_000
+  const dLat = ((lat2 - lat1) * Math.PI) / 180
+  const dLng = ((lng2 - lng1) * Math.PI) / 180
+  const meanLat = ((lat1 + lat2) * Math.PI) / 360
+  const x = dLng * Math.cos(meanLat)
+  const y = dLat
+  return Math.sqrt(x * x + y * y) * R
+}
 
 /**
  * Webhook routes at the absolute server root. Mounted from
@@ -165,6 +218,62 @@ async function handleVeriScanCheckin(
         { siteSlug, hashId: rowInput.hashId },
         'veriscan webhook duplicate (provider, hash_id) — no-op',
       )
+    } else if (isStoreOrUnknownGeocode(rowInput.latitude, rowInput.longitude)) {
+      // Webhook arrived with NO usable home geocode (either lat/lng
+      // is null, or it's the scanner kiosk's location within 500ft
+      // of one of our stores). Queue a backfill-priority batch job
+      // to geocode this scan's address text through the shared
+      // Census pipeline. Dedupe to 1 enqueue per minute so a busy
+      // shift doesn't pile up dozens of redundant jobs — the worker
+      // is batch-sized (5000) so one job per minute is plenty.
+      try {
+        const bucketIso = new Date(Math.floor(Date.now() / 60_000) * 60_000).toISOString()
+        await withTransaction(async (db) => {
+          const jobId = await enqueueJob(db, {
+            priority: JOB_PRIORITY_BACKFILL,
+            concurrencyKey: null,
+            dedupeKey: `config.workers.enrich_visitor_scan_address:webhook:${bucketIso}`,
+            jobType: 'config.workers.enrich_visitor_scan_address',
+            module: 'config',
+            payload: {
+              trigger: 'webhook_followup',
+              batchSize: 5000,
+            },
+            requestedByUserId: null,
+            runAt: new Date(),
+            scope: null,
+          })
+          await appendAuditEvent(db, {
+            actorType: 'system',
+            actorUserId: null,
+            entityId: String(jobId),
+            entityType: 'job',
+            eventType: 'config.workers.enrich_visitor_scan_address.requested',
+            module: 'config',
+            payload: {
+              trigger: 'webhook_followup',
+              siteSlug,
+              hashId: rowInput.hashId,
+              hadLatLng: rowInput.latitude !== null && rowInput.longitude !== null,
+              batchSize: 5000,
+            },
+            requestId: null,
+            scope: null,
+            undoPayload: null,
+          })
+        })
+      } catch (cause) {
+        // Best-effort: a missed enqueue is harmless; the scheduled
+        // worker will pick this row up on its next tick.
+        request.log.warn(
+          {
+            siteSlug,
+            hashId: rowInput.hashId,
+            cause: cause instanceof Error ? cause.message : String(cause),
+          },
+          'veriscan webhook geocode-followup enqueue failed (will fall through to scheduled worker)',
+        )
+      }
     }
     return reply.status(200).send()
   } catch (error) {
@@ -219,7 +328,7 @@ function constantTimeEqual(a: string, b: string): boolean {
 
 export async function registerVisitorScansAdminRoutes(server: FastifyInstance): Promise<void> {
   server.get('/api/visitors/scans', async (request, reply) => {
-    const user = await requireSessionUser(request, reply, 'viewer')
+    const user = await requireSessionUser(request, reply, 'admin')
     if (!user) return
 
     const query = VisitorScansQuerySchema.parse(request.query)
@@ -250,7 +359,7 @@ export async function registerVisitorScansAdminRoutes(server: FastifyInstance): 
   })
 
   server.get('/api/admin/customers/visitors/:scanId', async (request, reply) => {
-    const user = await requireSessionUser(request, reply, 'viewer')
+    const user = await requireSessionUser(request, reply, 'admin')
     if (!user) return
 
     const params = request.params as { scanId?: string }
@@ -281,7 +390,7 @@ export async function registerVisitorScansAdminRoutes(server: FastifyInstance): 
   })
 
   server.get('/api/visitors/scans.csv', async (request, reply) => {
-    const user = await requireSessionUser(request, reply, 'viewer')
+    const user = await requireSessionUser(request, reply, 'admin')
     if (!user) return
 
     const query = VisitorScansQuerySchema.parse(request.query)

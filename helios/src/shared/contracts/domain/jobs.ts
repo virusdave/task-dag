@@ -50,6 +50,7 @@ export const JobTypeSchema = z.enum([
   'config.workers.weather_daily_ingest',
   'config.workers.sweed_shifts_ingest',
   'config.workers.enrich_delivery_address',
+  'config.workers.enrich_visitor_scan_address',
   'catalog.maintenance.upload_group_image',
 ])
 export type JobType = z.infer<typeof JobTypeSchema>
@@ -581,6 +582,37 @@ export const ConfigWorkersEnrichDeliveryAddressJobPayloadSchema = z.object({
 })
 export type ConfigWorkersEnrichDeliveryAddressJobPayload = z.infer<
   typeof ConfigWorkersEnrichDeliveryAddressJobPayloadSchema
+>
+
+/**
+ * Visitor-scan home-address enrichment worker payload.
+ *
+ * Drives the per-tick batch backfill of `visitor_scans.address_id`
+ * and a subsequent drain of the Census geocoder queue. Same pattern
+ * as `enrich_delivery_address`, but for the VeriScan-ingestion side
+ * (`visitor_scans` rather than `sweed_orders`):
+ *
+ *   1. Link up to `batchSize` (default 5000) visitor_scans rows
+ *      that have address text but no `address_id` to a row in the
+ *      shared `addresses` table (creating one if needed). New
+ *      addresses arrive with `geocode_status='pending'`.
+ *
+ *   2. Drain up to `batchSize` rows from the Census geocoder queue
+ *      (`addresses.geocode_status='pending'`).
+ *
+ * Default `batchSize=5000` per operator direction so the backfill
+ * burns through the ~55k unlinked-with-text scans within a few
+ * scheduler ticks. The drain step is naturally rate-limited by the
+ * shared Census client (~1 RPS) — `batchSize` is an upper bound on
+ * how many rows one tick CAN write, not a guarantee.
+ */
+export const ConfigWorkersEnrichVisitorScanAddressJobPayloadSchema = z.object({
+  requestedByUserId: z.number().int().positive().nullable().optional(),
+  trigger: z.enum(['manual_run', 'scheduled', 'webhook_followup']).default('scheduled'),
+  batchSize: z.number().int().min(1).max(10_000).default(5000),
+})
+export type ConfigWorkersEnrichVisitorScanAddressJobPayload = z.infer<
+  typeof ConfigWorkersEnrichVisitorScanAddressJobPayloadSchema
 >
 
 export {

@@ -57,7 +57,12 @@ describe('insertVisitorScan', () => {
     })
     const result = await insertVisitorScan(db, row)
     expect(result.inserted).toBe(true)
-    expect(calls).toHaveLength(1)
+    // The first query MUST be the visitor_scans insert with the
+    // (provider, hash_id) ON CONFLICT idempotency clause. Helper
+    // best-effort calls (visitor_scan_link seed, addresses upsert,
+    // visitor_scans.address_id link) follow it but are out-of-scope
+    // for this assertion.
+    expect(calls.length).toBeGreaterThanOrEqual(1)
     expect(calls[0].text).toMatch(/on conflict \(provider, hash_id\) do nothing/i)
     expect(calls[0].text).toMatch(/insert into visitor_scans/i)
     expect(calls[0].text).toMatch(/returning id/i)

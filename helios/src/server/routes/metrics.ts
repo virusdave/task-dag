@@ -14,7 +14,7 @@ import { toMetricSummary } from '../metrics/types.js'
 export async function registerMetricsRoutes(server: FastifyInstance): Promise<void> {
   // List every registered metric (summary only — no `query`).
   server.get('/api/metrics', async (request, reply) => {
-    const user = await requireSessionUser(request, reply, 'viewer')
+    const user = await requireSessionUser(request, reply, 'admin')
     if (!user) {
       return
     }
@@ -25,7 +25,7 @@ export async function registerMetricsRoutes(server: FastifyInstance): Promise<vo
 
   // Run a metric's query and return the resulting time series.
   server.get('/api/metrics/:metricId', async (request, reply) => {
-    const user = await requireSessionUser(request, reply, 'viewer')
+    const user = await requireSessionUser(request, reply, 'admin')
     if (!user) {
       return
     }

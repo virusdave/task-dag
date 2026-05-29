@@ -150,9 +150,27 @@ export const CustomersMapResponseSchema = z.object({
   points: z.array(CustomersMapPointSchema),
   sitePins: z.array(CustomersMapSitePinSchema),
   totalMatching: z.number().int().nonnegative(),
+  // Scans matching the current filter (time range, site, dimensional
+  // filters) that have NO usable home geocode — i.e. we cannot
+  // place a dot for them. Surfaced in the UI as a small "Unknown: N"
+  // badge. We deliberately do NOT fall back to plotting these at the
+  // store kiosk location.
+  unknownCount: z.number().int().nonnegative(),
   // True when `points.length === query.maxPoints && totalMatching >
   // points.length` — the client uses this to render the "clipped"
   // banner per parent design §11.
   clipped: z.boolean(),
 })
 export type CustomersMapResponse = z.infer<typeof CustomersMapResponseSchema>
+
+/**
+ * Earliest-record meta endpoint for the customer-origin map.
+ *
+ * Returns the timestamp of the earliest visitor_scan (so the SPA's
+ * replay slider can span all of history rather than a hard-coded
+ * rolling 30-day window). `null` means "no scans at all yet".
+ */
+export const CustomersMapEarliestResponseSchema = z.object({
+  earliestCheckedInAt: z.string().nullable(),
+})
+export type CustomersMapEarliestResponse = z.infer<typeof CustomersMapEarliestResponseSchema>

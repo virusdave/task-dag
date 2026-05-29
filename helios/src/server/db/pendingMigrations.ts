@@ -387,6 +387,21 @@ const SENTINELS: MigrationSentinel[] = [
       'helper. See issue #35.',
     check: (db) => columnExists(db, 'pending_purchase_rows', 'edited_structured_fields'),
   },
+  {
+    // visitor_scans.address_id (FK -> addresses.id) plus a partial
+    // reverse index. Without this column the customer-origin map's
+    // server query (customersMapQueries.ts) can't pull the real
+    // geocoded customer-home lat/lng — it falls back to plotting
+    // every dot at the store. See chat thread that landed the
+    // backfill-visitor-scan-geocodes.ts script.
+    migrationId: '042_visitor_scan_address_link',
+    label:
+      'visitor_scans.address_id (FK → addresses.id) + reverse index — wires ' +
+      'each scan into the shared Census-geocoder pipeline so the customer-origin ' +
+      'map can plot real customer-home coords instead of the scanner-location ' +
+      'data we were mistakenly treating as document coords.',
+    check: (db) => columnExists(db, 'visitor_scans', 'address_id'),
+  },
 ]
 
 interface CacheEntry {

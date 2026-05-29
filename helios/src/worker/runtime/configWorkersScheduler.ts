@@ -91,6 +91,8 @@ export async function tickConfigWorkersScheduler(now: Date = new Date()): Promis
         await enqueueScheduledEnrichCustomerAddress(schedule.taskKey, now, activeWindow.intervalMinutes)
       } else if (schedule.taskKey === 'workers.scheduling.enrich_delivery_address') {
         await enqueueScheduledEnrichDeliveryAddress(schedule.taskKey, now, activeWindow.intervalMinutes)
+      } else if (schedule.taskKey === 'workers.scheduling.enrich_visitor_scan_address') {
+        await enqueueScheduledEnrichVisitorScanAddress(schedule.taskKey, now, activeWindow.intervalMinutes)
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown scheduler-task error.'
@@ -831,6 +833,58 @@ async function enqueueScheduledEnrichDeliveryAddress(
         intervalMinutes,
         taskKey,
         trigger: 'scheduled',
+      },
+      requestId: null,
+      scope: null,
+      undoPayload: null,
+    })
+  })
+}
+
+/**
+ * Per-tick enqueue for the visitor-scan address-enrichment worker.
+ * Backfill-priority dedupe-keyed by interval bucket so a paused
+ * tick that catches up doesn't double-fire.
+ */
+async function enqueueScheduledEnrichVisitorScanAddress(
+  taskKey: ConfigBackgroundTaskKey,
+  now: Date,
+  intervalMinutes: number,
+): Promise<void> {
+  const bucketMs = intervalMinutes * 60 * 1000
+  const bucketStartMs = Math.floor(now.getTime() / bucketMs) * bucketMs
+  const bucketIso = new Date(bucketStartMs).toISOString()
+
+  await withTransaction(async (db) => {
+    const jobId = await enqueueJob(db, {
+      priority: JOB_PRIORITY_BACKFILL,
+      // No Sweed RPC — no concurrency-key needed.
+      concurrencyKey: null,
+      dedupeKey: `config.workers.enrich_visitor_scan_address:scheduled:${bucketIso}`,
+      jobType: 'config.workers.enrich_visitor_scan_address',
+      module: 'config',
+      payload: {
+        trigger: 'scheduled',
+        batchSize: 5000,
+      },
+      requestedByUserId: null,
+      runAt: now,
+      scope: null,
+    })
+
+    await recordConfigScheduleEnqueue(db, taskKey, jobId, now)
+    await appendAuditEvent(db, {
+      actorType: 'system',
+      actorUserId: null,
+      entityId: String(jobId),
+      entityType: 'job',
+      eventType: 'config.workers.enrich_visitor_scan_address.requested',
+      module: 'config',
+      payload: {
+        intervalMinutes,
+        taskKey,
+        trigger: 'scheduled',
+        batchSize: 5000,
       },
       requestId: null,
       scope: null,

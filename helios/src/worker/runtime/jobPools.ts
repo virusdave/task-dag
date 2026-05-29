@@ -68,6 +68,10 @@ export const JOB_EXECUTION_POOL_BY_TYPE: Record<JobType, JobPoolMetadata> = {
   'config.workers.litalerts_retailer_backfill': { pool: 'system', requiresSweedSession: false },
   'config.workers.market_evidence_alarm_scan': { pool: 'system', requiresSweedSession: false },
   'config.workers.weather_daily_ingest': { pool: 'system', requiresSweedSession: false },
+  // Visitor-scan address enrichment hits only Postgres + Census
+  // (no Sweed), so it lives in the system pool — keeps the Sweed
+  // pool free for catalog / orders / shifts / etc.
+  'config.workers.enrich_visitor_scan_address': { pool: 'system', requiresSweedSession: false },
   'llm.debug.rerun': { pool: 'system', requiresSweedSession: false },
   'proposal.generate.description_batch': { pool: 'system', requiresSweedSession: false },
   'proposal.generate.pricing_batch': { pool: 'system', requiresSweedSession: false },
