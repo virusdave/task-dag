@@ -17,6 +17,7 @@ import { loadJson } from '../../app/fetchJson.js'
 
 import { BudtenderPerformanceTab } from './BudtenderPerformanceTab.js'
 import { CatalogAnalyticsTab } from './CatalogAnalyticsTab.js'
+import { CustomerValueTab } from './CustomerValueTab.js'
 import {
   CatalogFilterBar,
   emptyCatalogFilterSelection,
@@ -73,14 +74,16 @@ const KNOWN_SITES: ReadonlyArray<{ id: string; label: string }> = [
 // ---------------------------------------------------------------------------
 
 export type MetricsTabId =
+  | 'essentials'
   | 'sales'
   | 'geography'
   | 'inventory'
   | 'scatter'
   | 'catalog'
   | 'budtenders'
+  | 'customer-value'
 
-const DEFAULT_TAB_ID: MetricsTabId = 'sales'
+const DEFAULT_TAB_ID: MetricsTabId = 'essentials'
 
 interface MetricsTab {
   readonly id: MetricsTabId
@@ -100,8 +103,35 @@ interface MetricsTab {
 // can re-home it later by editing this map.
 const GEOGRAPHY_GROUPS = new Set(['Customer origin', 'Delivery'])
 const INVENTORY_GROUPS = new Set(['Inventory', 'Running low', 'Slow movers'])
+// "Essentials" is a curated, top-of-house view of revenue / margin /
+// customer-acquisition fundamentals. Membership is by metric id (not
+// group) so we can pull select cards from across the registry. The
+// Essentials cards ALSO render on the Sales & ops tab — they're meant
+// to be the first thing the operator sees, but they're not removed
+// from the deeper tab.
+const ESSENTIALS_METRIC_IDS = new Set<string>([
+  'essentials.gross_receipts',
+  'essentials.gross_sales',
+  'essentials.net_sales',
+  'margins.gross_margin_dollars',
+  'margins.effective_gm_pct',
+  'acquisition.first_vs_returning',
+  'basket.size_by_customer_type',
+  'margins.stack_new_vs_returning',
+])
 
 const METRICS_TABS: ReadonlyArray<MetricsTab> = [
+  {
+    id: 'essentials',
+    label: 'Essentials',
+    description:
+      'Top-of-house: gross sales / gross receipts / net sales / margin $ / effective GM%, plus new-vs-returning customer mix. Same cards also live in Sales & ops.',
+    defaultAgg: 'week',
+    defaultStackMode: 'none',
+    showAggControl: true,
+    showStackControl: true,
+    include: (m) => ESSENTIALS_METRIC_IDS.has(m.id),
+  },
   {
     id: 'sales',
     label: 'Sales & ops',
@@ -134,6 +164,17 @@ const METRICS_TABS: ReadonlyArray<MetricsTab> = [
     showAggControl: true,
     showStackControl: true,
     include: (m) => m.chartType !== 'scatter' && INVENTORY_GROUPS.has(m.group),
+  },
+  {
+    id: 'customer-value',
+    label: 'Customer value',
+    description:
+      'Short- and long-term value of customers. Top grid shows the four mandatory LTV histograms (customer count by purchase number, basket-size escalation, lifetime $ by total purchases, revenue mix by purchase ordinal). Configurable metric basis (gross sales / margin $). Drives CAC / spend-to-convert / repeat-vs-tourist decisions.',
+    defaultAgg: 'week',
+    defaultStackMode: 'none',
+    showAggControl: false,
+    showStackControl: false,
+    include: () => false,
   },
   {
     id: 'budtenders',
@@ -400,6 +441,8 @@ export function MetricsLayoutPage() {
           // and a single consolidated /api/budtender-analytics fetch.
           // Same short-circuit pattern as catalog.
           <BudtenderPerformanceTab />
+        ) : activeTab.id === 'customer-value' ? (
+          <CustomerValueTab />
         ) : (
           <RegistryDashboard
             activeTab={activeTab}

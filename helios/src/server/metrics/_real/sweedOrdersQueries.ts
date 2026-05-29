@@ -943,3 +943,77 @@ export async function queryDeliveryOrderCountByZone(args: MetricQueryArgs): Prom
     return out as MetricRow
   })
 }
+
+// ============================================================================
+// Essentials — header-only time-series for top-of-house revenue numbers.
+//
+// Three single-series metrics derived directly from sweed_orders header
+// columns; no line-item math, no joins. Used both by the Essentials tab
+// and the Sales & ops tab (per the operator's spec, these belong in both).
+//
+// Definitions (matching Sweed invoice envelope fields):
+//   * Gross Sales (ex-tax)            = subtotal_dollars + discount_dollars
+//     [Sweed's `subtotalAmount` is post-discount; adding the discount
+//     back gives the pre-discount, pre-tax line total — i.e. "gross
+//     sales before promos/discounts"]
+//   * Gross Receipts (incl tax)       = grand_total_dollars
+//   * Net Sales (ex-tax, ex-discounts)= subtotal_dollars
+//     [Already net of promos/discounts in Sweed's totals]
+// ============================================================================
+
+async function querySingleSumPerBucket(
+  args: MetricQueryArgs,
+  seriesId: string,
+  sumExpr: string,
+): Promise<MetricRow[]> {
+  const dealerIds = resolveDealerIds(args.sites)
+  const { from, to, truncUnit, buckets } = resolveWindow(args)
+  if (dealerIds.length === 0 || buckets.length === 0) {
+    return buckets.map((b) => ({ t: b.toISOString(), [seriesId]: 0 } as MetricRow))
+  }
+  const bucketSelect = bucketSelectExpr(truncUnit)
+  const sql = `
+    select ${bucketSelect} as bucket_start,
+           '${seriesId}'::text as series_id,
+           coalesce(${sumExpr}, 0)::numeric as value
+      from sweed_orders
+     where dealer_id = any($1::bigint[])
+       and pay_time >= $2 and pay_time < $3
+     group by 1
+  `
+  return runBucketedQuery({
+    sql,
+    params: [dealerIds, from.toISOString(), to.toISOString()],
+    seriesIds: [seriesId],
+    buckets,
+    defaultValue: 0,
+    collapseToSingleBucket: truncUnit === null,
+  })
+}
+
+/** essentials.gross_sales — sum(subtotal + discount) per bucket, pre-tax. */
+export function queryGrossSalesDollars(args: MetricQueryArgs): Promise<MetricRow[]> {
+  return querySingleSumPerBucket(
+    args,
+    'gross_sales',
+    'sum(coalesce(subtotal_dollars, 0) + coalesce(discount_dollars, 0))',
+  )
+}
+
+/** essentials.gross_receipts — sum(grand_total) per bucket, incl. tax. */
+export function queryGrossReceiptsDollars(args: MetricQueryArgs): Promise<MetricRow[]> {
+  return querySingleSumPerBucket(
+    args,
+    'gross_receipts',
+    'sum(coalesce(grand_total_dollars, 0))',
+  )
+}
+
+/** essentials.net_sales — sum(subtotal) per bucket, pre-tax, post-discount. */
+export function queryNetSalesDollars(args: MetricQueryArgs): Promise<MetricRow[]> {
+  return querySingleSumPerBucket(
+    args,
+    'net_sales',
+    'sum(coalesce(subtotal_dollars, 0))',
+  )
+}

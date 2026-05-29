@@ -402,6 +402,17 @@ const SENTINELS: MigrationSentinel[] = [
       'data we were mistakenly treating as document coords.',
     check: (db) => columnExists(db, 'visitor_scans', 'address_id'),
   },
+  {
+    // Customer Value analytics covering index on sweed_orders for the
+    // per-customer ROW_NUMBER() partition. Without this, the LTV
+    // CTEs do a sequential heap scan over every known-customer order.
+    migrationId: '043_customer_value_perf_indexes',
+    label:
+      'sweed_orders_dealer_customer_pay_invoice_idx — covering index for ' +
+      'the /metrics/customer-value endpoint\'s per-customer purchase-ordinal ' +
+      'window function.',
+    check: (db) => indexExists(db, 'sweed_orders_dealer_customer_pay_invoice_idx'),
+  },
 ]
 
 interface CacheEntry {

@@ -10,6 +10,9 @@ import {
   queryFirstVsReturning,
   queryFulfillmentOrderCount,
   queryFulfillmentSalesDollars,
+  queryGrossReceiptsDollars,
+  queryGrossSalesDollars,
+  queryNetSalesDollars,
   queryPaymentOrderCount,
   queryPaymentSalesDollars,
 } from './sweedOrdersQueries.js'
@@ -57,6 +60,39 @@ const ALL_CATALOG_FILTERS: readonly MetricCatalogFilterDimension[] = [
 const SUPPORTED = ['total', 'month', 'week', 'date', 'hour'] as const
 
 export const REAL_METRICS: ReadonlyArray<MetricDef> = [
+  {
+    id: 'essentials.gross_sales',
+    group: 'Essentials',
+    title: 'Gross sales $ (ex-tax)',
+    description:
+      'Sum of pre-discount, pre-tax line totals per bucket. Computed as Sweed `subtotalAmount` + `grandTotalDiscountAmount` — i.e. what would have been billed before promos/discounts were applied, with sales tax excluded. Use this when you want to see how much business the store actually drove, regardless of how aggressive the discounting was.',
+    series: [{ id: 'gross_sales', label: 'Gross sales $ (ex-tax)', colour: '#2ca02c' }],
+    defaultAggregation: 'week',
+    supportedAggregations: [...SUPPORTED],
+    query: queryGrossSalesDollars,
+  },
+  {
+    id: 'essentials.gross_receipts',
+    group: 'Essentials',
+    title: 'Gross receipts $ (incl. tax)',
+    description:
+      'Sum of `grand_total_dollars` per bucket — every dollar that came in, including tax collected and net of promos/discounts. This is the "money in the drawer" number; reconciliation friendly.',
+    series: [{ id: 'gross_receipts', label: 'Gross receipts $ (incl. tax)', colour: '#1f77b4' }],
+    defaultAggregation: 'week',
+    supportedAggregations: [...SUPPORTED],
+    query: queryGrossReceiptsDollars,
+  },
+  {
+    id: 'essentials.net_sales',
+    group: 'Essentials',
+    title: 'Net sales $ (ex-tax, net of discounts)',
+    description:
+      'Sum of `subtotal_dollars` per bucket — the pre-tax line total after promos/discounts have already been applied. This is the "revenue you actually booked" number; the difference between Gross Sales and Net Sales is what discounting cost you.',
+    series: [{ id: 'net_sales', label: 'Net sales $ (ex-tax, net of discounts)', colour: '#9467bd' }],
+    defaultAggregation: 'week',
+    supportedAggregations: [...SUPPORTED],
+    query: queryNetSalesDollars,
+  },
   {
     id: 'acquisition.first_vs_returning',
     group: 'Customer acquisition',

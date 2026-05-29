@@ -900,6 +900,20 @@ function ChartSvg(props: ChartSvgProps) {
   // timestamp to the shared TimeAxisContext so other locked charts can
   // draw their faint synchronised crosshairs.
   const [hoverMs, setHoverMs] = useState<number | null>(null)
+  // Track whether the most recent pointer interaction was a touch so we
+  // can keep the hover readout sticky for a few seconds after release
+  // (otherwise the browser's long-press handler eats the touch and
+  // scrolls the page, killing the tooltip immediately). Mouse hover
+  // still clears on leave, as it always has.
+  const lastPointerTypeRef = useRef<string>('mouse')
+  const stickyHoverTimerRef = useRef<number | null>(null)
+  const cancelStickyHoverClear = useCallback(() => {
+    if (stickyHoverTimerRef.current !== null) {
+      globalThis.clearTimeout(stickyHoverTimerRef.current)
+      stickyHoverTimerRef.current = null
+    }
+  }, [])
+  useEffect(() => () => cancelStickyHoverClear(), [cancelStickyHoverClear])
   // External (other-chart-originated) hover so we can render the faint
   // synchronised crosshair when *some other* card is being hovered.
   const [externalHoverMs, setExternalHoverMs] = useState<number | null>(sharedAxis.getHoverMs())
@@ -914,23 +928,48 @@ function ChartSvg(props: ChartSvgProps) {
 
   const onPointerEnter = useCallback(
     (e: React.PointerEvent<SVGSVGElement>) => {
+      lastPointerTypeRef.current = e.pointerType
+      cancelStickyHoverClear()
       const t = clientXToTime(e.clientX)
       if (t === null) return
       setHoverMs(t)
       sharedAxis.publishHover(t)
     },
-    [clientXToTime, sharedAxis],
+    [cancelStickyHoverClear, clientXToTime, sharedAxis],
   )
 
   const onPointerLeave = useCallback(() => {
+    // On touch devices, browsers fire pointerleave the instant the
+    // finger lifts; clearing immediately makes the tooltip useless
+    // and lets a delayed long-press trigger context menus / scroll.
+    // Keep the readout visible for a few seconds, then auto-clear.
+    if (lastPointerTypeRef.current === 'touch' || lastPointerTypeRef.current === 'pen') {
+      cancelStickyHoverClear()
+      stickyHoverTimerRef.current = globalThis.setTimeout(() => {
+        stickyHoverTimerRef.current = null
+        setHoverMs(null)
+        sharedAxis.publishHover(null)
+      }, 3500)
+      return
+    }
     setHoverMs(null)
     sharedAxis.publishHover(null)
-  }, [sharedAxis])
+  }, [cancelStickyHoverClear, sharedAxis])
 
   const onPointerDown = useCallback(
     (e: React.PointerEvent<SVGSVGElement>) => {
       if (!interactive) return
       if (e.button !== 0 && e.pointerType === 'mouse') return
+      lastPointerTypeRef.current = e.pointerType
+      cancelStickyHoverClear()
+      // Touch interactions should immediately show the hover readout
+      // even though pointerenter didn't fire (some browsers only fire
+      // pointerenter for hover-capable devices).
+      const tNow = clientXToTime(e.clientX)
+      if (tNow !== null) {
+        setHoverMs(tNow)
+        sharedAxis.publishHover(tNow)
+      }
       const t = clientXToTime(e.clientX)
       if (t === null) return
       activePointersRef.current.set(e.pointerId, { clientX: e.clientX })
@@ -977,7 +1016,7 @@ function ChartSvg(props: ChartSvgProps) {
       }
       svgRef.current?.setPointerCapture(e.pointerId)
     },
-    [annotateMode, clientXToTime, interactive, window],
+    [annotateMode, cancelStickyHoverClear, clientXToTime, interactive, sharedAxis, window],
   )
 
   const onPointerMove = useCallback(
@@ -986,6 +1025,8 @@ function ChartSvg(props: ChartSvgProps) {
       if (tracked) {
         tracked.clientX = e.clientX
       }
+      lastPointerTypeRef.current = e.pointerType
+      cancelStickyHoverClear()
 
       // Always update hover for the readout, even mid-drag — the operator
       // wants to see "what value was here" while panning.
@@ -1022,7 +1063,7 @@ function ChartSvg(props: ChartSvgProps) {
         setDrag({ ...drag, currentMs: t, currentClientX: e.clientX })
       }
     },
-    [clientXToTime, drag, plotW, setWindow, sharedAxis],
+    [cancelStickyHoverClear, clientXToTime, drag, plotW, setWindow, sharedAxis],
   )
 
   const finishPointer = useCallback(
@@ -1678,11 +1719,26 @@ function ScatterSvg({ response, loading, error, window, interactive }: ScatterSv
   // Points panned/zoomed off-plot are ignored. Hover is also disabled
   // while a pan/pinch/wheel gesture is in flight.
   const [hover, setHover] = useState<{ idx: number; clientX: number; clientY: number } | null>(null)
+  // Sticky-tooltip plumbing for touch — see MetricChart's matching block
+  // for rationale. On touch / pen we delay the hover clear by 3500ms so
+  // a finger lift doesn't immediately destroy the data readout (and we
+  // duck under the long-press window).
+  const lastPointerTypeRef = useRef<string>('mouse')
+  const stickyHoverTimerRef = useRef<number | null>(null)
+  const cancelStickyHoverClear = useCallback(() => {
+    if (stickyHoverTimerRef.current !== null) {
+      globalThis.clearTimeout(stickyHoverTimerRef.current)
+      stickyHoverTimerRef.current = null
+    }
+  }, [])
+  useEffect(() => () => cancelStickyHoverClear(), [cancelStickyHoverClear])
   const HOVER_PX = 18
   const HOVER_PX_SQ = HOVER_PX * HOVER_PX
   const onPointerMove = useCallback(
     (e: React.PointerEvent<SVGSVGElement>) => {
       zoom.handlers.onPointerMove(e)
+      lastPointerTypeRef.current = e.pointerType
+      cancelStickyHoverClear()
       if (zoom.gestureActive) {
         if (hover) setHover(null)
         return
@@ -1722,6 +1778,7 @@ function ScatterSvg({ response, loading, error, window, interactive }: ScatterSv
       }
     },
     [
+      cancelStickyHoverClear,
       points,
       xScale,
       yScale,
@@ -1734,7 +1791,17 @@ function ScatterSvg({ response, loading, error, window, interactive }: ScatterSv
       view.yMax,
     ],
   )
-  const onPointerLeave = useCallback(() => setHover(null), [])
+  const onPointerLeave = useCallback(() => {
+    if (lastPointerTypeRef.current === 'touch' || lastPointerTypeRef.current === 'pen') {
+      cancelStickyHoverClear()
+      stickyHoverTimerRef.current = globalThis.setTimeout(() => {
+        stickyHoverTimerRef.current = null
+        setHover(null)
+      }, 3500)
+      return
+    }
+    setHover(null)
+  }, [cancelStickyHoverClear])
 
   const hovered = hover ? points[hover.idx] ?? null : null
 

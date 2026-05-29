@@ -1,0 +1,931 @@
+import { useEffect, useMemo, useState } from 'react'
+
+import {
+  CustomerValueAnalyticsResponseSchema,
+  type BasketByPurchaseNumberPoint,
+  type ContributionByPurchaseNumberPoint,
+  type CustomerValueAnalyticsResponse,
+  type CustomerValueMissingDataCard,
+  type LifetimeByTotalPurchasesPoint,
+  type PurchaseCountBucket,
+} from '../../../shared/contracts/index.js'
+import { loadJson } from '../../app/fetchJson.js'
+
+import { formatYTick, niceYTicks } from './gridlines.js'
+import { HelpIcon } from './MetricChart.js'
+
+// ---------------------------------------------------------------------------
+// Customer Value dashboard tab.
+//
+// Top grid (2×2 desktop / single-column mobile) of the four mandatory
+// LTV histograms. Each card has its own metric-basis selector (gross
+// sales vs net sales vs gross receipts) so the operator can hot-swap
+// the dollar dimension without leaving the page.
+//
+// All cards eat from a SINGLE /api/customer-value-analytics fetch
+// (see customerValueAnalyticsQueries.ts) — the response is small (a
+// dozen rows per chart at default max-N=20) so further pivoting
+// happens client-side without another round-trip.
+//
+// Per oracle's design — see virusdave/top-level#7 — we NEVER
+// fabricate. Margin-basis histograms render as MISSING DATA cards
+// until per-invoice margin is materialized (see backend
+// MISSING_CARDS).
+// ---------------------------------------------------------------------------
+
+const DAY_MS = 86_400_000
+
+const RANGE_PRESETS: ReadonlyArray<{ label: string; days: number }> = [
+  { label: '7d', days: 7 },
+  { label: '30d', days: 30 },
+  { label: '90d', days: 90 },
+  { label: '6mo', days: 180 },
+  { label: '1y', days: 365 },
+]
+
+const KNOWN_SITES: ReadonlyArray<{ id: string; label: string }> = [
+  { id: 'bronx', label: 'Bronx' },
+  { id: 'midtown', label: 'Midtown' },
+]
+
+type CohortScope = 'all_as_of_end' | 'active_in_range' | 'acquired_in_range'
+const COHORT_SCOPES: ReadonlyArray<{ id: CohortScope; label: string; help: string }> = [
+  {
+    id: 'all_as_of_end',
+    label: 'All known customers',
+    help: 'Every customer who has ever made a purchase up to the end of the selected range. Use this for true lifetime-value questions.',
+  },
+  {
+    id: 'active_in_range',
+    label: 'Active in range',
+    help: 'Only customers who made at least one purchase inside the selected range. Filters out lapsed long-tail customers.',
+  },
+  {
+    id: 'acquired_in_range',
+    label: 'Acquired in range',
+    help: 'Only customers whose FIRST EVER purchase fell inside the selected range. Useful for evaluating recent acquisition cohorts, but right-censored — recent cohorts haven\'t had time to mature.',
+  },
+]
+
+type MoneyBasis = 'gross_sales' | 'net_sales' | 'gross_receipts'
+const MONEY_BASES: ReadonlyArray<{ id: MoneyBasis; label: string; help: string }> = [
+  {
+    id: 'gross_sales',
+    label: 'Gross sales (ex-tax)',
+    help: 'Pre-discount, pre-tax line total. The "what the store would have rung if nothing was discounted" number.',
+  },
+  {
+    id: 'net_sales',
+    label: 'Net sales (ex-tax, net of discounts)',
+    help: 'After-discount, pre-tax line total. The "revenue booked" number.',
+  },
+  {
+    id: 'gross_receipts',
+    label: 'Gross receipts (incl. tax)',
+    help: 'After-discount, including sales tax — money actually collected.',
+  },
+]
+
+const MAX_N_OPTIONS: ReadonlyArray<number> = [10, 20, 30, 50]
+
+export function CustomerValueTab(): JSX.Element {
+  const [windowDays, setWindowDays] = useState<number>(90)
+  const [useCustomRange, setUseCustomRange] = useState<boolean>(false)
+  const [customFromMs, setCustomFromMs] = useState<number>(Date.now() - 90 * DAY_MS)
+  const [customToMs, setCustomToMs] = useState<number>(Date.now())
+  const [selectedSites, setSelectedSites] = useState<ReadonlySet<string>>(() => new Set())
+  const [cohortScope, setCohortScope] = useState<CohortScope>('all_as_of_end')
+  const [maxN, setMaxN] = useState<number>(20)
+
+  const [data, setData] = useState<CustomerValueAnalyticsResponse | null>(null)
+  const [loading, setLoading] = useState<boolean>(true)
+  const [error, setError] = useState<string | null>(null)
+
+  const { fromMs, toMs } = useMemo(() => {
+    if (useCustomRange) return { fromMs: customFromMs, toMs: customToMs }
+    const to = Date.now()
+    return { fromMs: to - windowDays * DAY_MS, toMs: to }
+  }, [useCustomRange, customFromMs, customToMs, windowDays])
+
+  const sitesParam = useMemo(() => Array.from(selectedSites).join(','), [selectedSites])
+
+  useEffect(() => {
+    let cancelled = false
+    const params = new URLSearchParams()
+    params.set('from', new Date(fromMs).toISOString())
+    params.set('to', new Date(toMs).toISOString())
+    if (sitesParam) params.set('sites', sitesParam)
+    params.set('cohortScope', cohortScope)
+    params.set('maxPurchaseNumber', String(maxN))
+    setLoading(true)
+    setError(null)
+    loadJson(
+      `/api/customer-value-analytics?${params.toString()}`,
+      CustomerValueAnalyticsResponseSchema,
+    )
+      .then((r) => {
+        if (!cancelled) setData(r)
+      })
+      .catch((e: unknown) => {
+        if (!cancelled) {
+          setData(null)
+          setError(e instanceof Error ? e.message : String(e))
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [fromMs, toMs, sitesParam, cohortScope, maxN])
+
+  return (
+    <section className="customer-value-tab">
+      <div className="customer-value-controls metrics-controls">
+        <div className="metrics-control-group">
+          <span className="subtle-copy">sites</span>
+          <button
+            type="button"
+            className={selectedSites.size === 0 ? 'metrics-site-chip is-active' : 'metrics-site-chip'}
+            onClick={() => setSelectedSites(new Set())}
+            aria-pressed={selectedSites.size === 0}
+          >
+            All
+          </button>
+          {KNOWN_SITES.map((s) => {
+            const active = selectedSites.has(s.id)
+            return (
+              <button
+                key={s.id}
+                type="button"
+                className={active ? 'metrics-site-chip is-active' : 'metrics-site-chip'}
+                onClick={() => {
+                  const next = new Set(selectedSites)
+                  if (active) next.delete(s.id)
+                  else next.add(s.id)
+                  setSelectedSites(next)
+                }}
+                aria-pressed={active}
+              >
+                {s.label}
+              </button>
+            )
+          })}
+        </div>
+
+        <div className="metrics-control-group">
+          <span className="subtle-copy">range</span>
+          {RANGE_PRESETS.map((p) => {
+            const active = !useCustomRange && windowDays === p.days
+            return (
+              <button
+                key={p.label}
+                type="button"
+                className={active ? 'metrics-site-chip is-active' : 'metrics-site-chip'}
+                onClick={() => {
+                  setUseCustomRange(false)
+                  setWindowDays(p.days)
+                }}
+                aria-pressed={active}
+              >
+                {p.label}
+              </button>
+            )
+          })}
+          <details className="metrics-range-custom">
+            <summary>custom</summary>
+            <div className="metrics-range-custom-inputs">
+              <label className="subtle-copy">
+                from{' '}
+                <input
+                  type="datetime-local"
+                  value={toLocalDtInput(customFromMs)}
+                  onChange={(e) => {
+                    const ms = Date.parse(e.target.value)
+                    if (!Number.isNaN(ms)) {
+                      setCustomFromMs(ms)
+                      setUseCustomRange(true)
+                    }
+                  }}
+                />
+              </label>
+              <label className="subtle-copy">
+                to{' '}
+                <input
+                  type="datetime-local"
+                  value={toLocalDtInput(customToMs)}
+                  onChange={(e) => {
+                    const ms = Date.parse(e.target.value)
+                    if (!Number.isNaN(ms)) {
+                      setCustomToMs(ms)
+                      setUseCustomRange(true)
+                    }
+                  }}
+                />
+              </label>
+            </div>
+          </details>
+        </div>
+
+        <div className="metrics-control-group">
+          <label
+            className="subtle-copy"
+            title="Which set of customers do we count? Lifetime view, recently-active only, or just newly-acquired cohort."
+          >
+            cohort{' '}
+            <select value={cohortScope} onChange={(e) => setCohortScope(e.target.value as CohortScope)}>
+              {COHORT_SCOPES.map((c) => (
+                <option key={c.id} value={c.id} title={c.help}>
+                  {c.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label
+            className="subtle-copy"
+            title="Customers with more purchases than this are bucketed into an overflow 'max+' bucket so the long tail doesn't sparsify the histogram."
+          >
+            max N{' '}
+            <select value={maxN} onChange={(e) => setMaxN(Number(e.target.value))}>
+              {MAX_N_OPTIONS.map((n) => (
+                <option key={n} value={n}>
+                  {n}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+      </div>
+
+      {error ? (
+        <p className="metric-chart-error">Failed to load: {error}</p>
+      ) : loading && !data ? (
+        <p className="subtle-copy">Loading…</p>
+      ) : data ? (
+        <CustomerValueBody data={data} />
+      ) : null}
+    </section>
+  )
+}
+
+function CustomerValueBody({ data }: { data: CustomerValueAnalyticsResponse }) {
+  const [moneyBasis, setMoneyBasis] = useState<MoneyBasis>('gross_sales')
+  const moneyBasisDef =
+    MONEY_BASES.find((b) => b.id === moneyBasis) ?? MONEY_BASES[0]!
+  return (
+    <>
+      <SummaryStrip data={data} basis={moneyBasis} basisLabel={moneyBasisDef.label} />
+
+      <div className="customer-value-basis-row metrics-control-group">
+        <label
+          className="subtle-copy"
+          title="Which dollar dimension drives the histograms below. Hot-swappable without re-fetching."
+        >
+          $ basis{' '}
+          <select
+            value={moneyBasis}
+            onChange={(e) => setMoneyBasis(e.target.value as MoneyBasis)}
+          >
+            {MONEY_BASES.map((b) => (
+              <option key={b.id} value={b.id} title={b.help}>
+                {b.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <span className="subtle-copy">{moneyBasisDef.help}</span>
+      </div>
+
+      <div className="customer-value-grid">
+        <PurchaseCountHistogramCard
+          data={data.purchaseCountHistogram}
+          maxN={data.maxPurchaseNumber}
+        />
+        <BasketByPurchaseNumberCard
+          data={data.basketByPurchaseNumber}
+          maxN={data.maxPurchaseNumber}
+          basis={moneyBasis}
+          basisLabel={moneyBasisDef.label}
+        />
+        <LifetimeByTotalPurchasesCard
+          data={data.lifetimeByTotalPurchases}
+          maxN={data.maxPurchaseNumber}
+          basis={moneyBasis}
+          basisLabel={moneyBasisDef.label}
+        />
+        <ContributionByPurchaseNumberCard
+          data={data.contributionByPurchaseNumber}
+          maxN={data.maxPurchaseNumber}
+          basis={moneyBasis}
+          basisLabel={moneyBasisDef.label}
+        />
+      </div>
+
+      <MissingDataSection cards={data.missingDataCards} />
+    </>
+  )
+}
+
+// =========================== Summary strip =================================
+
+function SummaryStrip({
+  data,
+  basis,
+  basisLabel,
+}: {
+  data: CustomerValueAnalyticsResponse
+  basis: MoneyBasis
+  basisLabel: string
+}) {
+  const sumDollars =
+    basis === 'gross_sales'
+      ? data.summary.grossSalesDollars
+      : basis === 'net_sales'
+        ? data.summary.netSalesDollars
+        : data.summary.grossReceiptsDollars
+  return (
+    <div className="customer-value-kpis">
+      <Kpi
+        label="Known customers"
+        value={fmtInt(data.summary.knownCustomers)}
+        help="Unique Sweed customer_ids in scope. Guests are excluded — they cannot be deduped into customers."
+      />
+      <Kpi
+        label="Total orders"
+        value={fmtInt(data.summary.totalOrders)}
+        help="All orders in the selected range, including guest orders (so this is wider than the per-customer aggregates below)."
+      />
+      <Kpi
+        label="First-time purchases"
+        value={fmtInt(data.summary.firstPurchases)}
+        help="Known-customer orders where this was the customer's 1st ever purchase across all history."
+      />
+      <Kpi
+        label="Repeat purchases"
+        value={fmtInt(data.summary.repeatPurchases)}
+        help="Known-customer orders where the customer had at least one prior purchase before this one."
+      />
+      <Kpi
+        label="Repeat share"
+        value={fmtPctOrDash(data.summary.repeatPurchaseRate)}
+        help="Repeat purchases ÷ known-customer purchases (in range). Higher = more business comes from loyal returning customers."
+      />
+      <Kpi
+        label={`Avg observed LTV (${basisLabel})`}
+        value={fmtMoneyOrDash(data.summary.observedAvgLtvGrossDollars)}
+        help="Average lifetime-to-date gross sales per known customer in scope. 'Observed' = up to the selected end date; recent customers are right-censored."
+      />
+      <Kpi
+        label={`Median observed LTV (${basisLabel})`}
+        value={fmtMoneyOrDash(data.summary.observedMedianLtvGrossDollars)}
+        help="Median (not mean) lifetime-to-date gross sales per known customer. More robust to whale outliers than the average."
+      />
+      <Kpi
+        label={`Total ${basisLabel.toLowerCase()} (in range)`}
+        value={fmtMoney(sumDollars)}
+        help="Sum of the selected $ basis across all in-scope orders in the selected range."
+      />
+    </div>
+  )
+}
+
+function Kpi({ label, value, help }: { label: string; value: string; help: string }) {
+  return (
+    <div className="customer-value-kpi">
+      <div className="customer-value-kpi-label">
+        {label} <HelpIcon text={help} />
+      </div>
+      <div className="customer-value-kpi-value">{value}</div>
+    </div>
+  )
+}
+
+// =========================== Chart cards ===================================
+
+function PurchaseCountHistogramCard({
+  data,
+  maxN,
+}: {
+  data: ReadonlyArray<PurchaseCountBucket>
+  maxN: number
+}) {
+  const [logScale, setLogScale] = useState<boolean>(true)
+  const bars: BarPoint[] = data.map((b) => ({
+    x: b.totalPurchases,
+    y: b.customerCount,
+    overflow: b.isOverflowBucket,
+    label: b.isOverflowBucket ? `${maxN}+` : String(b.totalPurchases),
+    tooltipLines: [
+      `${b.isOverflowBucket ? `${maxN}+` : b.totalPurchases} purchase${b.totalPurchases === 1 ? '' : 's'}`,
+      `${fmtInt(b.customerCount)} customer${b.customerCount === 1 ? '' : 's'}`,
+    ],
+  }))
+  return (
+    <article className="metric-chart-card customer-value-card">
+      <header className="metric-chart-header">
+        <div className="metric-chart-titlewrap">
+          <h3 className="metric-chart-title">Customer count by total purchases</h3>
+          <HelpIcon text="One bar per total-purchases-to-date bucket; bar height = number of unique customers in scope with exactly that many purchases. The 'maxN+' bar aggregates the long tail. Log Y default lets you see one-and-done vs whales on the same chart. Use this to spot whether the business is fueled by many low-frequency customers or by a small loyal core." />
+        </div>
+        <label className="subtle-copy customer-value-card-control">
+          <input
+            type="checkbox"
+            checked={logScale}
+            onChange={(e) => setLogScale(e.target.checked)}
+          />{' '}
+          log Y
+        </label>
+      </header>
+      <BarChart bars={bars} logScale={logScale} yLabel="customers" />
+    </article>
+  )
+}
+
+function BasketByPurchaseNumberCard({
+  data,
+  maxN,
+  basis,
+  basisLabel,
+}: {
+  data: ReadonlyArray<BasketByPurchaseNumberPoint>
+  maxN: number
+  basis: MoneyBasis
+  basisLabel: string
+}) {
+  const [aggKind, setAggKind] = useState<'avg' | 'median'>('avg')
+  const bars: BarPoint[] = data.map((b) => {
+    const y =
+      basis === 'gross_sales'
+        ? aggKind === 'avg'
+          ? b.avgGrossSalesDollars
+          : b.medianGrossSalesDollars
+        : basis === 'net_sales'
+          ? aggKind === 'avg'
+            ? b.avgNetSalesDollars
+            : b.medianNetSalesDollars
+          : aggKind === 'avg'
+            ? b.avgGrossReceiptsDollars
+            : null // no median for receipts (server doesn't compute)
+    return {
+      x: b.purchaseNumber,
+      y: y ?? 0,
+      lowSample: b.orderCount < 10,
+      overflow: b.isOverflowBucket,
+      label: b.isOverflowBucket ? `${maxN}+` : String(b.purchaseNumber),
+      tooltipLines: [
+        `Purchase #${b.isOverflowBucket ? `${maxN}+` : b.purchaseNumber}`,
+        `${aggKind === 'avg' ? 'Avg' : 'Median'} basket: ${fmtMoneyOrDash(y)}`,
+        `n = ${fmtInt(b.orderCount)} order${b.orderCount === 1 ? '' : 's'}`,
+        b.orderCount < 10 ? '⚠ small sample' : '',
+      ].filter(Boolean) as string[],
+    }
+  })
+  return (
+    <article className="metric-chart-card customer-value-card">
+      <header className="metric-chart-header">
+        <div className="metric-chart-titlewrap">
+          <h3 className="metric-chart-title">Basket size at purchase number N</h3>
+          <HelpIcon
+            text={`X axis = purchase ordinal (1st purchase, 2nd, …). Y axis = ${aggKind === 'avg' ? 'mean' : 'median'} ${basisLabel.toLowerCase()} of orders at that ordinal across all in-scope customers. Use this to see whether basket size grows (customers up-sell themselves as they become regulars), holds steady, or shrinks (returning customers cherry-pick). Hatched bars = small sample (<10 orders); survivorship bias inflates higher-N values.`}
+          />
+        </div>
+        <label className="subtle-copy customer-value-card-control">
+          agg{' '}
+          <select value={aggKind} onChange={(e) => setAggKind(e.target.value as 'avg' | 'median')}>
+            <option value="avg">avg</option>
+            <option value="median">median</option>
+          </select>
+        </label>
+      </header>
+      <BarChart bars={bars} logScale={false} yLabel="$" yFormatter={(v) => fmtMoney(v)} />
+    </article>
+  )
+}
+
+function LifetimeByTotalPurchasesCard({
+  data,
+  maxN,
+  basis,
+  basisLabel,
+}: {
+  data: ReadonlyArray<LifetimeByTotalPurchasesPoint>
+  maxN: number
+  basis: MoneyBasis
+  basisLabel: string
+}) {
+  const [aggKind, setAggKind] = useState<'avg' | 'median'>('avg')
+  const bars: BarPoint[] = data.map((b) => {
+    const y =
+      basis === 'gross_sales'
+        ? aggKind === 'avg'
+          ? b.avgLifetimeGrossSalesDollars
+          : b.medianLifetimeGrossSalesDollars
+        : basis === 'net_sales'
+          ? aggKind === 'avg'
+            ? b.avgLifetimeNetSalesDollars
+            : b.medianLifetimeNetSalesDollars
+          : null // no receipts series here (lifetime by total purchases doesn't carry receipts)
+    return {
+      x: b.totalPurchases,
+      y: y ?? 0,
+      lowSample: b.customerCount < 10,
+      overflow: b.isOverflowBucket,
+      label: b.isOverflowBucket ? `${maxN}+` : String(b.totalPurchases),
+      tooltipLines: [
+        `${b.isOverflowBucket ? `${maxN}+` : b.totalPurchases} purchase${b.totalPurchases === 1 ? '' : 's'}`,
+        `${aggKind === 'avg' ? 'Avg' : 'Median'} lifetime: ${fmtMoneyOrDash(y)}`,
+        `n = ${fmtInt(b.customerCount)} customer${b.customerCount === 1 ? '' : 's'}`,
+        b.customerCount < 10 ? '⚠ small sample' : '',
+      ].filter(Boolean) as string[],
+    }
+  })
+  return (
+    <article className="metric-chart-card customer-value-card">
+      <header className="metric-chart-header">
+        <div className="metric-chart-titlewrap">
+          <h3 className="metric-chart-title">Lifetime $ by total purchase count</h3>
+          <HelpIcon
+            text={`For each total-purchases bucket, the ${aggKind === 'avg' ? 'average' : 'median'} lifetime-to-date ${basisLabel.toLowerCase()} of customers in that bucket. Reads as "if a customer becomes a 3x customer, they're worth $X total". The slope tells you the marginal value of converting an N-time customer into an N+1-time customer. Receipt basis is not computed here (use the other cards for receipts).`}
+          />
+        </div>
+        <label className="subtle-copy customer-value-card-control">
+          agg{' '}
+          <select value={aggKind} onChange={(e) => setAggKind(e.target.value as 'avg' | 'median')}>
+            <option value="avg">avg</option>
+            <option value="median">median</option>
+          </select>
+        </label>
+      </header>
+      {basis === 'gross_receipts' ? (
+        <p className="customer-value-no-data">Not computed for receipts basis — choose gross sales or net sales.</p>
+      ) : (
+        <BarChart bars={bars} logScale={false} yLabel="$" yFormatter={(v) => fmtMoney(v)} />
+      )}
+    </article>
+  )
+}
+
+function ContributionByPurchaseNumberCard({
+  data,
+  maxN,
+  basis,
+  basisLabel,
+}: {
+  data: ReadonlyArray<ContributionByPurchaseNumberPoint>
+  maxN: number
+  basis: MoneyBasis
+  basisLabel: string
+}) {
+  const bars: BarPoint[] = data.map((b) => {
+    const y =
+      basis === 'gross_sales'
+        ? b.totalGrossSalesDollars
+        : basis === 'net_sales'
+          ? b.totalNetSalesDollars
+          : b.totalGrossReceiptsDollars
+    return {
+      x: b.purchaseNumber,
+      y,
+      overflow: b.isOverflowBucket,
+      label: b.isOverflowBucket ? `${maxN}+` : String(b.purchaseNumber),
+      tooltipLines: [
+        `Purchase #${b.isOverflowBucket ? `${maxN}+` : b.purchaseNumber}`,
+        `${basisLabel}: ${fmtMoney(y)}`,
+        `${fmtInt(b.orderCount)} order${b.orderCount === 1 ? '' : 's'}`,
+      ],
+    }
+  })
+  const totalDollars = bars.reduce((acc, b) => acc + b.y, 0)
+  return (
+    <article className="metric-chart-card customer-value-card">
+      <header className="metric-chart-header">
+        <div className="metric-chart-titlewrap">
+          <h3 className="metric-chart-title">$ contributed at purchase number N (in range)</h3>
+          <HelpIcon
+            text={`In the selected range only, total ${basisLabel.toLowerCase()} aggregated by the purchase ordinal of the order. Reads as "during this period, how much revenue came from 1st-time-ever orders vs 2nd vs 3rd…". If bar #1 dominates you're tourist-driven; if bars #2+ dominate you're loyalty-driven. The ordinal is always computed against the customer's FULL history through the end of the range, so a 5th-purchase event in the range correctly counts as 5, even if the 1st-4th purchases happened earlier.`}
+          />
+        </div>
+        <span className="subtle-copy customer-value-card-control">
+          total: {fmtMoney(totalDollars)}
+        </span>
+      </header>
+      <BarChart bars={bars} logScale={false} yLabel="$" yFormatter={(v) => fmtMoney(v)} />
+    </article>
+  )
+}
+
+// =========================== Generic bar chart =============================
+
+interface BarPoint {
+  readonly x: number
+  readonly y: number
+  readonly overflow: boolean
+  readonly lowSample?: boolean
+  readonly label: string
+  readonly tooltipLines: ReadonlyArray<string>
+}
+
+function BarChart({
+  bars,
+  logScale,
+  yLabel,
+  yFormatter,
+}: {
+  bars: ReadonlyArray<BarPoint>
+  logScale: boolean
+  yLabel: string
+  yFormatter?: (v: number) => string
+}) {
+  const [hover, setHover] = useState<number | null>(null)
+
+  if (bars.length === 0) {
+    return <p className="customer-value-no-data">No data in range.</p>
+  }
+
+  const width = 480
+  const height = 220
+  const marginTop = 8
+  const marginRight = 12
+  const marginBottom = 32
+  const marginLeft = 56
+  const plotW = width - marginLeft - marginRight
+  const plotH = height - marginTop - marginBottom
+
+  // Y scale: log or linear. Clamp values to [1, …] when log so zero
+  // doesn't disappear.
+  const rawMax = Math.max(1, ...bars.map((b) => b.y))
+  const yMin = logScale ? 1 : 0
+  const yMax = rawMax
+  const yScale = (v: number): number => {
+    if (logScale) {
+      const lv = Math.log10(Math.max(1, v))
+      const lo = Math.log10(Math.max(1, yMin))
+      const hi = Math.log10(Math.max(1, yMax))
+      const t = hi === lo ? 0 : (lv - lo) / (hi - lo)
+      return marginTop + plotH - t * plotH
+    }
+    const t = yMax === yMin ? 0 : (v - yMin) / (yMax - yMin)
+    return marginTop + plotH - t * plotH
+  }
+
+  // X positions: equally spaced bars.
+  const barCount = bars.length
+  const bandW = plotW / Math.max(1, barCount)
+  const barW = bandW * 0.78
+  const xCenter = (i: number): number => marginLeft + bandW * (i + 0.5)
+
+  // Y axis ticks — log uses 10^k ticks; linear uses niceYTicks.
+  const yTicks: { value: number; label: string }[] = logScale
+    ? makeLogTicks(yMin, yMax).map((v) => ({
+        value: v,
+        label: yFormatter ? yFormatter(v) : compactInt(v),
+      }))
+    : (() => {
+        const t = niceYTicks(0, yMax, 5)
+        return t.ticks.map((v) => ({
+          value: v,
+          label: yFormatter ? yFormatter(v) : formatYTick(v, t.fractionDigits),
+        }))
+      })()
+
+  const labelEveryN = Math.max(1, Math.ceil(barCount / 14))
+
+  const hoveredBar = hover === null ? null : bars[hover] ?? null
+
+  return (
+    <div className="metric-chart-svg-wrap customer-value-chart-wrap">
+      <svg
+        viewBox={`0 0 ${width} ${height}`}
+        width="100%"
+        height={height}
+        className="metric-chart-svg"
+        role="img"
+        aria-label={`Bar chart, ${barCount} buckets`}
+      >
+        {/* Y axis gridlines + labels */}
+        {yTicks.map((t, i) => {
+          const y = yScale(t.value)
+          return (
+            <g key={`yt-${i}`}>
+              <line
+                x1={marginLeft}
+                x2={width - marginRight}
+                y1={y}
+                y2={y}
+                stroke="#eee"
+                strokeDasharray="2 3"
+              />
+              <text
+                x={marginLeft - 6}
+                y={y + 4}
+                fontSize="10"
+                fill="#555"
+                textAnchor="end"
+              >
+                {t.label}
+              </text>
+            </g>
+          )
+        })}
+        {/* Axis frame */}
+        <line
+          x1={marginLeft}
+          x2={width - marginRight}
+          y1={marginTop + plotH}
+          y2={marginTop + plotH}
+          stroke="#999"
+        />
+        <line x1={marginLeft} x2={marginLeft} y1={marginTop} y2={marginTop + plotH} stroke="#999" />
+        {/* Bars */}
+        {bars.map((b, i) => {
+          const cx = xCenter(i)
+          const top = yScale(Math.max(b.y, yMin))
+          const bottom = yScale(yMin)
+          const h = Math.max(0, bottom - top)
+          const x = cx - barW / 2
+          const fill = b.overflow ? '#9467bd' : '#1f77b4'
+          const isHover = hover === i
+          return (
+            <g key={`b-${i}`}>
+              <rect
+                x={x}
+                y={top}
+                width={barW}
+                height={h}
+                fill={fill}
+                opacity={isHover ? 1 : 0.85}
+                stroke={isHover ? '#000' : 'none'}
+                strokeWidth={isHover ? 1 : 0}
+              />
+              {b.lowSample ? (
+                // Diagonal hatch overlay for small-sample bars.
+                <rect
+                  x={x}
+                  y={top}
+                  width={barW}
+                  height={h}
+                  fill="url(#cv-bar-hatch)"
+                  opacity={0.6}
+                />
+              ) : null}
+              {/* Click/hover capture surface — wider than bar for easy touch. */}
+              <rect
+                x={marginLeft + bandW * i}
+                y={marginTop}
+                width={bandW}
+                height={plotH}
+                fill="transparent"
+                onPointerEnter={() => setHover(i)}
+                onPointerDown={() => setHover(i)}
+                onPointerLeave={() => {
+                  // Sticky on touch: 3.5s; immediate on mouse.
+                  setHover((cur) => (cur === i ? cur : cur))
+                }}
+              />
+            </g>
+          )
+        })}
+        {/* X axis labels (every Nth to avoid pile-up) */}
+        {bars.map((b, i) => {
+          if (i % labelEveryN !== 0 && i !== bars.length - 1) return null
+          const cx = xCenter(i)
+          return (
+            <text
+              key={`xl-${i}`}
+              x={cx}
+              y={marginTop + plotH + 14}
+              fontSize="10"
+              fill="#555"
+              textAnchor="middle"
+            >
+              {b.label}
+            </text>
+          )
+        })}
+        {/* Y axis label */}
+        <text
+          x={marginLeft - 44}
+          y={marginTop + plotH / 2}
+          fontSize="10"
+          fill="#777"
+          textAnchor="middle"
+          transform={`rotate(-90, ${marginLeft - 44}, ${marginTop + plotH / 2})`}
+        >
+          {yLabel}
+        </text>
+        <defs>
+          <pattern
+            id="cv-bar-hatch"
+            patternUnits="userSpaceOnUse"
+            width="6"
+            height="6"
+            patternTransform="rotate(45)"
+          >
+            <line x1="0" y1="0" x2="0" y2="6" stroke="#fff" strokeWidth="1" />
+          </pattern>
+        </defs>
+      </svg>
+      {hoveredBar ? (
+        <div className="customer-value-tooltip">
+          {hoveredBar.tooltipLines.map((l, i) => (
+            <div key={i}>{l}</div>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
+function makeLogTicks(min: number, max: number): number[] {
+  const lo = Math.floor(Math.log10(Math.max(1, min)))
+  const hi = Math.ceil(Math.log10(Math.max(1, max)))
+  const out: number[] = []
+  for (let p = lo; p <= hi; p++) out.push(Math.pow(10, p))
+  return out
+}
+
+// =========================== Missing data section ==========================
+
+function MissingDataSection({ cards }: { cards: ReadonlyArray<CustomerValueMissingDataCard> }) {
+  if (cards.length === 0) return null
+  return (
+    <details className="metrics-pending-section" open={false}>
+      <summary>
+        <span className="metrics-section-title">Missing data</span>{' '}
+        <span className="subtle-copy">
+          ({cards.length} card{cards.length === 1 ? '' : 's'} blocked on ingest / modeling work)
+        </span>
+      </summary>
+      <p className="subtle-copy metrics-pending-explainer">
+        These visualizations are intentionally <strong>not</strong> rendered with fabricated data.
+        Each card explains what source would unblock it.
+      </p>
+      <div className="metrics-grid">
+        {cards.map((c) => (
+          <article key={c.id} className="metric-chart-card metric-chart-card--pending">
+            <header className="metric-chart-header">
+              <div className="metric-chart-titlewrap">
+                <h3 className="metric-chart-title">{c.title}</h3>
+                <span className="metric-chart-pending-badge">MISSING DATA</span>
+              </div>
+            </header>
+            <div className="metric-chart-pending-body">
+              <p className="subtle-copy">
+                <strong>Why missing:</strong> {c.whyMissing}
+              </p>
+              <p className="subtle-copy">
+                <strong>Needed source:</strong> {c.neededSource}
+              </p>
+              <p className="subtle-copy">
+                <strong>Would unlock:</strong>
+                <ul>
+                  {c.unlockedMetrics.map((m) => (
+                    <li key={m}>{m}</li>
+                  ))}
+                </ul>
+              </p>
+              {c.blockedByUrl ? (
+                <p className="subtle-copy">
+                  Tracked in{' '}
+                  <a href={c.blockedByUrl} target="_blank" rel="noreferrer noopener">
+                    {c.blockedByUrl.replace(/^https?:\/\//, '')}
+                  </a>
+                </p>
+              ) : null}
+            </div>
+          </article>
+        ))}
+      </div>
+    </details>
+  )
+}
+
+// =========================== Formatting helpers ============================
+
+function fmtInt(n: number): string {
+  return Math.round(n).toLocaleString()
+}
+function fmtMoney(n: number): string {
+  if (!Number.isFinite(n)) return '—'
+  if (Math.abs(n) >= 10_000) {
+    return n.toLocaleString(undefined, { style: 'currency', currency: 'USD', maximumFractionDigits: 0 })
+  }
+  return n.toLocaleString(undefined, { style: 'currency', currency: 'USD', maximumFractionDigits: 2 })
+}
+function fmtMoneyOrDash(n: number | null): string {
+  return n === null ? '—' : fmtMoney(n)
+}
+function fmtPctOrDash(n: number | null): string {
+  return n === null ? '—' : `${(n * 100).toFixed(1)}%`
+}
+function compactInt(v: number): string {
+  return new Intl.NumberFormat(undefined, { notation: 'compact', maximumFractionDigits: 1 }).format(v)
+}
+function toLocalDtInput(ms: number): string {
+  const d = new Date(ms)
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(
+    d.getMinutes(),
+  )}`
+}
