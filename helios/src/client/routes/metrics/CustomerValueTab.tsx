@@ -1,11 +1,15 @@
+import * as React from 'react'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 
 import {
   CustomerValueAnalyticsResponseSchema,
   type BasketByPurchaseNumberPoint,
+  type CohortRetentionRow,
   type ContributionByPurchaseNumberPoint,
   type CustomerValueAnalyticsResponse,
+  type CustomerValueCohortGranularity,
   type CustomerValueMissingDataCard,
+  type FirstSecondConversionRow,
   type LifetimeByTotalPurchasesPoint,
   type PurchaseCountBucket,
 } from '../../../shared/contracts/index.js'
@@ -97,6 +101,11 @@ export function CustomerValueTab(): JSX.Element {
   const [selectedSites, setSelectedSites] = useState<ReadonlySet<string>>(() => new Set())
   const [cohortScope, setCohortScope] = useState<CohortScope>('all_as_of_end')
   const [maxN, setMaxN] = useState<MaxNChoice>('auto')
+  // v1.4 V4'3: cohort retention granularity (week / month). Default
+  // 'week' matches the parent epic spec — gives ~12 useful weekly
+  // cohorts in a default 90-day window.
+  const [cohortGranularity, setCohortGranularity] =
+    useState<CustomerValueCohortGranularity>('week')
 
   const [data, setData] = useState<CustomerValueAnalyticsResponse | null>(null)
   const [loading, setLoading] = useState<boolean>(true)
@@ -121,6 +130,10 @@ export function CustomerValueTab(): JSX.Element {
     // long-tail cliff and returns the resolved value as
     // `maxPurchaseNumber` in the response.
     params.set('maxPurchaseNumber', String(maxN))
+    // v1.4 V4'3: opt in to retention sections on the consolidated
+    // endpoint. Granularity also forwarded; server defaults to 'week'.
+    params.set('include', 'retention')
+    params.set('cohortGranularity', cohortGranularity)
     setLoading(true)
     setError(null)
     loadJson(
@@ -142,7 +155,7 @@ export function CustomerValueTab(): JSX.Element {
     return () => {
       cancelled = true
     }
-  }, [fromMs, toMs, sitesParam, cohortScope, maxN])
+  }, [fromMs, toMs, sitesParam, cohortScope, maxN, cohortGranularity])
 
   return (
     <section className="customer-value-tab">
@@ -268,6 +281,21 @@ export function CustomerValueTab(): JSX.Element {
               <span className="subtle-copy"> ({data.maxPurchaseNumber})</span>
             ) : null}
           </label>
+          <label
+            className="subtle-copy"
+            title="Cohort granularity for the retention curve panel below. Weekly cohorts react faster and resolve ~12 cohorts in a 90-day window; monthly cohorts smooth out same-day-of-week noise but need a longer window to resolve."
+          >
+            cohort granularity{' '}
+            <select
+              value={cohortGranularity}
+              onChange={(e) =>
+                setCohortGranularity(e.target.value as CustomerValueCohortGranularity)
+              }
+            >
+              <option value="week">week</option>
+              <option value="month">month</option>
+            </select>
+          </label>
         </div>
       </div>
 
@@ -333,6 +361,15 @@ function CustomerValueBody({ data }: { data: CustomerValueAnalyticsResponse }) {
           basis={moneyBasis}
           basisLabel={moneyBasisDef.label}
         />
+      </div>
+
+      {/* v1.4 V4'3: cohort retention curves + first-to-second sparkline. */}
+      <div className="customer-value-retention-row">
+        <CohortRetentionCard
+          rows={data.cohortRetention}
+          granularity={data.cohortGranularity}
+        />
+        <FirstSecondConversionCard rows={data.firstSecondConversion} />
       </div>
 
       <MissingDataSection cards={data.missingDataCards} />
@@ -641,6 +678,371 @@ function ContributionByPurchaseNumberCard({
   )
 }
 
+// =========================== Cohort retention (v1.4 V4'3) =================
+
+const DEFAULT_VISIBLE_COHORTS = 12
+
+function CohortRetentionCard({
+  rows,
+  granularity,
+}: {
+  rows: ReadonlyArray<CohortRetentionRow>
+  granularity: CustomerValueCohortGranularity
+}) {
+  const [showAll, setShowAll] = useState<boolean>(false)
+  const [hover, setHover] = useState<
+    { cohortKey: string; periodIndex: number; clientX: number; clientY: number } | null
+  >(null)
+
+  // Group rows by cohort, then sort cohorts oldest → newest so we
+  // can pick the most recent N for the default view.
+  const byCohort = useMemo(() => {
+    const m = new Map<string, CohortRetentionRow[]>()
+    for (const r of rows) {
+      const list = m.get(r.cohortKey) ?? []
+      list.push(r)
+      m.set(r.cohortKey, list)
+    }
+    for (const list of m.values()) {
+      list.sort((a, b) => a.periodIndex - b.periodIndex)
+    }
+    return Array.from(m.entries())
+      .map(([cohortKey, points]) => ({ cohortKey, points }))
+      .sort((a, b) => a.cohortKey.localeCompare(b.cohortKey))
+  }, [rows])
+
+  const visibleCohorts = useMemo(() => {
+    if (showAll || byCohort.length <= DEFAULT_VISIBLE_COHORTS) return byCohort
+    return byCohort.slice(byCohort.length - DEFAULT_VISIBLE_COHORTS)
+  }, [byCohort, showAll])
+
+  const periodLabel = granularity === 'week' ? 'weeks' : 'months'
+
+  return (
+    <article className="metric-chart-card customer-value-card">
+      <header className="metric-chart-header">
+        <div className="metric-chart-titlewrap">
+          <h3 className="metric-chart-title">Cohort retention</h3>
+          <HelpIcon
+            text={`Each line is one acquisition cohort (customers whose 1st-ever purchase fell in that ${granularity}); Y axis = fraction of that cohort that purchased again in period N. Period 0 is the acquisition ${granularity} itself (always 100%). Most-recent cohort = most opaque; older cohorts fade. Lines that flatten high mean the cohort is sticking; lines that decay sharply mean churn. Cohort scope (top of page) filters which cohorts are considered.`}
+          />
+        </div>
+        {byCohort.length > DEFAULT_VISIBLE_COHORTS ? (
+          <label className="subtle-copy customer-value-card-control">
+            <input
+              type="checkbox"
+              checked={showAll}
+              onChange={(e) => setShowAll(e.target.checked)}
+            />{' '}
+            show all {byCohort.length} cohorts
+          </label>
+        ) : null}
+      </header>
+      {visibleCohorts.length === 0 ? (
+        <p className="customer-value-no-data">No cohorts in range.</p>
+      ) : (
+        <CohortRetentionChart
+          cohorts={visibleCohorts}
+          periodLabel={periodLabel}
+          hover={hover}
+          setHover={setHover}
+        />
+      )}
+    </article>
+  )
+}
+
+function CohortRetentionChart({
+  cohorts,
+  periodLabel,
+  hover,
+  setHover,
+}: {
+  cohorts: ReadonlyArray<{ cohortKey: string; points: ReadonlyArray<CohortRetentionRow> }>
+  periodLabel: string
+  hover:
+    | { cohortKey: string; periodIndex: number; clientX: number; clientY: number }
+    | null
+  setHover: (
+    h: { cohortKey: string; periodIndex: number; clientX: number; clientY: number } | null,
+  ) => void
+}) {
+  const width = 480
+  const height = 220
+  const marginTop = 8
+  const marginRight = 12
+  const marginBottom = 32
+  const marginLeft = 56
+  const plotW = width - marginLeft - marginRight
+  const plotH = height - marginTop - marginBottom
+
+  // X axis: 0..maxPeriod across all visible cohorts.
+  // Y axis: 0..1 (pct). Tick at every 0.25.
+  const maxPeriod = Math.max(
+    1,
+    ...cohorts.flatMap((c) => c.points.map((p) => p.periodIndex)),
+  )
+  const xTicks = niceXTicksLocal(0, maxPeriod)
+  const yTicks = [0, 0.25, 0.5, 0.75, 1]
+
+  const xScale = (v: number) => marginLeft + (v / Math.max(1, maxPeriod)) * plotW
+  const yScale = (v: number) => marginTop + (1 - Math.min(1, Math.max(0, v))) * plotH
+
+  // Most-recent cohort fully opaque; older cohorts fade. Linear ramp.
+  const opacityFor = (idx: number, n: number) => {
+    if (n === 1) return 1
+    const t = idx / (n - 1) // oldest = 0, newest = 1
+    return 0.25 + 0.75 * t
+  }
+
+  // Hover hit-target: nearest cohort point to the pointer.
+  const onPointerMove = (e: React.PointerEvent<SVGSVGElement>): void => {
+    const svg = e.currentTarget
+    const rect = svg.getBoundingClientRect()
+    const px = ((e.clientX - rect.left) / rect.width) * width
+    const py = ((e.clientY - rect.top) / rect.height) * height
+    let best: { cohortKey: string; periodIndex: number; dist: number } | null = null
+    for (const c of cohorts) {
+      for (const p of c.points) {
+        const dx = xScale(p.periodIndex) - px
+        const dy = yScale(p.retentionPct) - py
+        const dist = dx * dx + dy * dy
+        if (best === null || dist < best.dist) {
+          best = { cohortKey: c.cohortKey, periodIndex: p.periodIndex, dist }
+        }
+      }
+    }
+    if (best && best.dist < 400) {
+      setHover({
+        cohortKey: best.cohortKey,
+        periodIndex: best.periodIndex,
+        clientX: e.clientX,
+        clientY: e.clientY,
+      })
+    } else {
+      setHover(null)
+    }
+  }
+
+  const hoveredRow = hover
+    ? cohorts
+        .find((c) => c.cohortKey === hover.cohortKey)
+        ?.points.find((p) => p.periodIndex === hover.periodIndex) ?? null
+    : null
+  const hoveredCohortLabel = hover ? fmtCohortLabel(hover.cohortKey) : null
+
+  return (
+    <div className="customer-value-chart-wrap">
+      <svg
+        viewBox={`0 0 ${width} ${height}`}
+        preserveAspectRatio="none"
+        role="img"
+        className="customer-value-chart-svg"
+        onPointerMove={onPointerMove}
+        onPointerLeave={() => setHover(null)}
+      >
+        {/* Y gridlines + labels */}
+        {yTicks.map((t) => (
+          <g key={`y-${t}`}>
+            <line
+              x1={marginLeft}
+              x2={marginLeft + plotW}
+              y1={yScale(t)}
+              y2={yScale(t)}
+              stroke="currentColor"
+              opacity="0.12"
+              strokeDasharray="4 4"
+            />
+            <text
+              x={marginLeft - 6}
+              y={yScale(t)}
+              dy="0.32em"
+              textAnchor="end"
+              fontSize="10"
+              fill="currentColor"
+              opacity="0.7"
+            >
+              {`${Math.round(t * 100)}%`}
+            </text>
+          </g>
+        ))}
+        {/* X gridlines + labels */}
+        {xTicks.map((t) => (
+          <g key={`x-${t}`}>
+            <line
+              x1={xScale(t)}
+              x2={xScale(t)}
+              y1={marginTop}
+              y2={marginTop + plotH}
+              stroke="currentColor"
+              opacity="0.08"
+              strokeDasharray="4 4"
+            />
+            <text
+              x={xScale(t)}
+              y={marginTop + plotH + 14}
+              textAnchor="middle"
+              fontSize="10"
+              fill="currentColor"
+              opacity="0.7"
+            >
+              {t}
+            </text>
+          </g>
+        ))}
+        <text
+          x={marginLeft + plotW / 2}
+          y={height - 4}
+          textAnchor="middle"
+          fontSize="10"
+          fill="currentColor"
+          opacity="0.6"
+        >
+          {periodLabel} since acquisition
+        </text>
+
+        {/* Cohort lines */}
+        {cohorts.map((c, idx) => {
+          const path = c.points
+            .map((p, i) => `${i === 0 ? 'M' : 'L'} ${xScale(p.periodIndex)} ${yScale(p.retentionPct)}`)
+            .join(' ')
+          const isHovered = hover?.cohortKey === c.cohortKey
+          return (
+            <g key={c.cohortKey}>
+              <path
+                d={path}
+                fill="none"
+                stroke="currentColor"
+                strokeWidth={isHovered ? 2 : 1}
+                opacity={opacityFor(idx, cohorts.length)}
+              />
+            </g>
+          )
+        })}
+      </svg>
+      {hover && hoveredRow && hoveredCohortLabel ? (
+        <FollowTooltip
+          lines={[
+            `Cohort: ${hoveredCohortLabel}`,
+            `${periodLabel} since acquisition: ${hoveredRow.periodIndex}`,
+            `Retained: ${fmtInt(hoveredRow.retainedCount)} / ${fmtInt(hoveredRow.cohortSize)}`,
+            `Retention: ${(hoveredRow.retentionPct * 100).toFixed(1)}%`,
+          ]}
+          clientX={hover.clientX}
+          clientY={hover.clientY}
+        />
+      ) : null}
+    </div>
+  )
+}
+
+function FirstSecondConversionCard({
+  rows,
+}: {
+  rows: ReadonlyArray<FirstSecondConversionRow>
+}) {
+  // Pick which series the bars represent. Default = "within 30d" — the
+  // operator's primary KPI for activation. Hover reveals all four.
+  type Series = 'ever' | 'within30d' | 'within60d' | 'within90d'
+  const [series, setSeries] = useState<Series>('within30d')
+
+  const sortedRows = useMemo(
+    () => [...rows].sort((a, b) => a.cohortKey.localeCompare(b.cohortKey)),
+    [rows],
+  )
+
+  // Show every cohort (no max-12 cap — the sparkline is small and one
+  // bar per cohort scans fine even with 26 weekly cohorts).
+  const bars: BarPoint[] = sortedRows.map((r) => {
+    const pct =
+      series === 'ever'
+        ? r.everPct
+        : series === 'within30d'
+          ? r.within30dPct
+          : series === 'within60d'
+            ? r.within60dPct
+            : r.within90dPct
+    return {
+      x: 0, // unused for label-keyed bar chart
+      y: pct,
+      overflow: false,
+      lowSample: r.cohortSize < 10,
+      label: fmtCohortShortLabel(r.cohortKey),
+      tooltipLines: [
+        `Cohort: ${fmtCohortLabel(r.cohortKey)}`,
+        `Cohort size: ${fmtInt(r.cohortSize)}`,
+        `Ever → 2nd: ${fmtInt(r.everCount)} (${(r.everPct * 100).toFixed(1)}%)`,
+        `Within 30d: ${fmtInt(r.within30dCount)} (${(r.within30dPct * 100).toFixed(1)}%)`,
+        `Within 60d: ${fmtInt(r.within60dCount)} (${(r.within60dPct * 100).toFixed(1)}%)`,
+        `Within 90d: ${fmtInt(r.within90dCount)} (${(r.within90dPct * 100).toFixed(1)}%)`,
+        r.cohortSize < 10 ? '⚠ small cohort' : '',
+      ].filter(Boolean) as string[],
+    }
+  })
+
+  return (
+    <article className="metric-chart-card customer-value-card">
+      <header className="metric-chart-header">
+        <div className="metric-chart-titlewrap">
+          <h3 className="metric-chart-title">First → second purchase conversion</h3>
+          <HelpIcon
+            text="One bar per acquisition cohort. Bar height = fraction of cohort whose 2nd-ever purchase landed within the selected window (or ever, before the end of the date range). Hover any bar to see all four windows (ever / 30d / 60d / 90d). The strongest leading indicator of cohort LTV — 30d in particular is the operator's primary activation KPI. Hatched bars = small cohort (<10 customers); ratios may be noisy."
+          />
+        </div>
+        <label className="subtle-copy customer-value-card-control">
+          window{' '}
+          <select value={series} onChange={(e) => setSeries(e.target.value as Series)}>
+            <option value="within30d">within 30d</option>
+            <option value="within60d">within 60d</option>
+            <option value="within90d">within 90d</option>
+            <option value="ever">ever</option>
+          </select>
+        </label>
+      </header>
+      {bars.length === 0 ? (
+        <p className="customer-value-no-data">No cohorts in range.</p>
+      ) : (
+        <BarChart
+          bars={bars}
+          logScale={false}
+          yLabel=""
+          yFormatter={(v) => `${Math.round(v * 100)}%`}
+          yDomainMax={1}
+        />
+      )}
+    </article>
+  )
+}
+
+/** Minimal local X-tick helper for the retention chart — we don't pull
+ *  in `niceXTicks` because the retention X axis is a strict integer
+ *  period index (0..N) and we want tick-at-each-integer behaviour up
+ *  to 12, then every 2nd beyond that. */
+function niceXTicksLocal(min: number, max: number): number[] {
+  const span = Math.max(1, max - min)
+  const step = span <= 12 ? 1 : span <= 26 ? 2 : Math.ceil(span / 12)
+  const out: number[] = []
+  for (let v = Math.ceil(min); v <= Math.floor(max); v += step) out.push(v)
+  if (out.length === 0) out.push(min)
+  return out
+}
+
+function fmtCohortLabel(iso: string): string {
+  // e.g. 2025-W47 (Mon 2025-11-17) for weekly, 2025-11 for monthly.
+  // We don't know granularity from the row itself, so we format the
+  // ISO date in a human-friendly way that works for both.
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return iso
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(
+    d.getUTCDate(),
+  ).padStart(2, '0')}`
+}
+function fmtCohortShortLabel(iso: string): string {
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return iso
+  return `${String(d.getUTCMonth() + 1).padStart(2, '0')}/${String(d.getUTCDate()).padStart(2, '0')}`
+}
+
 // =========================== Generic bar chart =============================
 
 interface BarPoint {
@@ -657,11 +1059,19 @@ function BarChart({
   logScale,
   yLabel,
   yFormatter,
+  yDomainMax,
 }: {
   bars: ReadonlyArray<BarPoint>
   logScale: boolean
   yLabel: string
   yFormatter?: (v: number) => string
+  /**
+   * Optional fixed upper bound for the linear Y domain. Used by the
+   * v1.4 V4'3 first→second conversion sparkline so the bars always
+   * scale against 100% (the natural percentage ceiling) instead of
+   * the largest observed value. Ignored for log-scale.
+   */
+  yDomainMax?: number
 }) {
   // Hover state carries the bar index AND the most recent pointer
   // position so the tooltip can be rendered as a viewport-clamped
@@ -701,7 +1111,9 @@ function BarChart({
 
   // Y scale: log or linear. Clamp values to [1, …] when log so zero
   // doesn't disappear.
-  const rawMax = Math.max(1, ...bars.map((b) => b.y))
+  const observedMax = Math.max(1, ...bars.map((b) => b.y))
+  const rawMax =
+    logScale || yDomainMax === undefined ? observedMax : Math.max(yDomainMax, observedMax)
   const yMin = logScale ? 1 : 0
   const yMax = rawMax
   const yScale = (v: number): number => {

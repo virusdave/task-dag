@@ -1,10 +1,13 @@
 import {
   HELIOS_PENDING_PURCHASE_SITE_DEALERS,
   type BasketByPurchaseNumberPoint,
+  type CohortRetentionRow,
   type ContributionByPurchaseNumberPoint,
   type CustomerValueAnalyticsResponse,
+  type CustomerValueCohortGranularity,
   type CustomerValueMissingDataCard,
   type CustomerValueSummary,
+  type FirstSecondConversionRow,
   type LifetimeByTotalPurchasesPoint,
   type PurchaseCountBucket,
 } from '../../shared/contracts/index.js'
@@ -118,15 +121,33 @@ interface QueryArgs {
    *  cliff), capped at MAX_N_HARD_CAP. Default is 'auto'. */
   maxPurchaseNumber: number | 'auto'
   cohortScope: CustomerValueCohortScope
+  /**
+   * v1.4 V4'3: when `true`, the response gains `cohortRetention[]`
+   * and `firstSecondConversion[]` (extra SQL pass under the same
+   * `customers_in_scope` + `purchase_events` CTE set; one round
+   * trip with `Promise.all`). When `false`, both arrays are empty
+   * and the existing callers pay zero extra cost.
+   */
+  includeRetention: boolean
+  /**
+   * v1.4 V4'3: cohort granularity for retention bucketing. Default
+   * `'week'`. Only meaningful when `includeRetention === true`.
+   */
+  cohortGranularity: CustomerValueCohortGranularity
 }
 
 const MISSING_CARDS: ReadonlyArray<CustomerValueMissingDataCard> = [
   {
     id: 'customer-value.margin',
     title: 'Lifetime margin $ histograms',
+    // v1.4 V4'2 attempted to land sweed_order_margin_mv but the
+    // line-items ingest prerequisite (sweed_order_line_items +
+    // product_cost_history) is not live on prod. Card stays until
+    // that ingest lands; V4'2 ships as a separate commit once it
+    // does. See top-level#7's v1.4 status comment.
     whyMissing:
-      'Margin requires per-line-item revenue minus per-line-item wholesale cost via sweed_package_snapshots. Doing that join on every order in a 1+ year LTV window blows past our request budget; needs a materialized per-invoice margin view.',
-    neededSource: 'sweed_order_margin_mv (materialized view, one row per invoice) or per-line-item table',
+      'Margin requires per-line-item revenue minus per-line-item wholesale cost. v1.4 V4\'2 planned a materialized sweed_order_margin_mv view but the prerequisite line-items ingest (sweed_order_line_items + product_cost_history) is not yet live on the prod warehouse. No stubs — the card stays until the ingest lands.',
+    neededSource: 'sweed_order_line_items + product_cost_history ingest on prod, then sweed_order_margin_mv',
     unlockedMetrics: [
       'Avg lifetime margin $ by total purchases',
       'Total margin $ contributed by purchase ordinal',
@@ -147,19 +168,9 @@ const MISSING_CARDS: ReadonlyArray<CustomerValueMissingDataCard> = [
     ],
     blockedByUrl: null,
   },
-  {
-    id: 'customer-value.cohort-retention',
-    title: 'Cohort retention curves',
-    whyMissing:
-      'Acquisition-cohort retention curves (Month-0 acquired, % returning by month) are computable but deliberately deferred to P1 to keep the v1 endpoint cheap. The shared per-customer rollup CTE already produces first_purchase_at — adding the cohort × age-month grid is straight-forward follow-on.',
-    neededSource: 'P1 endpoint extension; data is available',
-    unlockedMetrics: [
-      'Retention curves by acquisition cohort month',
-      'First-to-second conversion rate by cohort',
-      'Days-between-purchases distribution',
-    ],
-    blockedByUrl: null,
-  },
+  // The "customer-value.cohort-retention" MISSING DATA card is removed in
+  // v1.4 V4'3 — cohort retention curves + first-to-second conversion
+  // sparkline now ship as real panels gated behind `?include=retention`.
   {
     id: 'customer-value.marketing-attribution',
     title: 'Marketing-spend / CAC attribution',
@@ -256,6 +267,7 @@ export async function getCustomerValueAnalytics(
     sites: [...args.sites],
     maxPurchaseNumber: effectiveMaxN,
     cohortScope: args.cohortScope,
+    cohortGranularity: args.cohortGranularity,
     summary: {
       knownCustomers: 0,
       totalOrders: 0,
@@ -272,6 +284,8 @@ export async function getCustomerValueAnalytics(
     basketByPurchaseNumber: [],
     lifetimeByTotalPurchases: [],
     contributionByPurchaseNumber: [],
+    cohortRetention: [],
+    firstSecondConversion: [],
     missingDataCards: [...MISSING_CARDS],
   }
 
@@ -468,15 +482,10 @@ export async function getCustomerValueAnalytics(
     group by purchase_n_bucket
   `
 
-  const result = await pool.query<UnionRow>(sql, [
-    dealerIds,
-    args.from.toISOString(),
-    args.to.toISOString(),
-    effectiveMaxN,
-    args.cohortScope,
-  ])
-
-  // Pull guest order count separately (summary.totalOrders = known + guest).
+  // v1.4 V4'3: when ?include=retention is set, run the retention SQL in
+  // parallel with the main union — one round-trip, two independent
+  // queries. The existing main query is unaffected; existing callers
+  // without ?include=retention pay zero extra cost.
   const guestSql = `
     select count(*)::int as n
       from sweed_orders
@@ -485,11 +494,32 @@ export async function getCustomerValueAnalytics(
        and pay_time < $3::timestamptz
        and customer_id is null
   `
-  const guestRes = await pool.query<{ n: string | number }>(guestSql, [
-    dealerIds,
-    args.from.toISOString(),
-    args.to.toISOString(),
+  const [result, guestRes, retentionRes] = await Promise.all([
+    pool.query<UnionRow>(sql, [
+      dealerIds,
+      args.from.toISOString(),
+      args.to.toISOString(),
+      effectiveMaxN,
+      args.cohortScope,
+    ]),
+    // Pull guest order count separately (summary.totalOrders = known + guest).
+    pool.query<{ n: string | number }>(guestSql, [
+      dealerIds,
+      args.from.toISOString(),
+      args.to.toISOString(),
+    ]),
+    args.includeRetention
+      ? runRetentionQueries({
+          pool,
+          dealerIds,
+          from: args.from,
+          to: args.to,
+          cohortScope: args.cohortScope,
+          cohortGranularity: args.cohortGranularity,
+        })
+      : Promise.resolve({ cohortRetention: [], firstSecondConversion: [] } as RetentionPayload),
   ])
+
   const guestCount = asReqInt(guestRes.rows[0]?.n)
 
   const summary: CustomerValueSummary = {
@@ -590,11 +620,245 @@ export async function getCustomerValueAnalytics(
     sites: [...args.sites],
     maxPurchaseNumber: effectiveMaxN,
     cohortScope: args.cohortScope,
+    cohortGranularity: args.cohortGranularity,
     summary,
     purchaseCountHistogram,
     basketByPurchaseNumber,
     lifetimeByTotalPurchases,
     contributionByPurchaseNumber,
+    cohortRetention: retentionRes.cohortRetention,
+    firstSecondConversion: retentionRes.firstSecondConversion,
     missingDataCards: [...MISSING_CARDS],
   }
+}
+
+// ============================================================================
+// v1.4 V4'3 — cohort retention + first-to-second conversion
+//
+// Acquisition cohort = `date_trunc(<granularity>, first_purchase_at)`,
+// computed per-customer via the same per-customer rollup the main query
+// uses. We rerun the rollup inline (rather than sharing CTEs across two
+// pool.query calls) so the retention SQL is self-contained — the pool
+// can't share CTEs across statements, so factoring them out via a temp
+// table would actually be slower than re-deriving in a CTE.
+//
+// Two output rowsets:
+//
+//   * cohort_retention: one row per (cohort_key, period_index) where
+//     period_index = 0 is the acquisition period. retained_count =
+//     distinct customers in the cohort with at least one purchase in
+//     period [cohort_key + period_index * granularity,
+//     cohort_key + (period_index + 1) * granularity).
+//   * first_second_conversion: one row per cohort_key with counts of
+//     customers whose second-ever purchase landed within 30/60/90 days
+//     of their first, plus an "ever" total.
+//
+// Both rowsets honour the existing site filter (via dealerIds) and
+// cohort scope filter (via `customers_in_scope`-equivalent inline SQL).
+// Server returns ALL cohorts in the range — the client picks the
+// most recent 12 to display by default, with a "show all" toggle.
+// ============================================================================
+
+interface RetentionPayload {
+  readonly cohortRetention: CohortRetentionRow[]
+  readonly firstSecondConversion: FirstSecondConversionRow[]
+}
+
+interface RetentionQueryArgs {
+  pool: ReturnType<typeof getPool>
+  dealerIds: number[]
+  from: Date
+  to: Date
+  cohortScope: CustomerValueCohortScope
+  cohortGranularity: CustomerValueCohortGranularity
+}
+
+async function runRetentionQueries(args: RetentionQueryArgs): Promise<RetentionPayload> {
+  const { pool, dealerIds, from, to, cohortScope, cohortGranularity } = args
+  if (dealerIds.length === 0) {
+    return { cohortRetention: [], firstSecondConversion: [] }
+  }
+
+  // The retention SQL re-derives the per-customer rollup (first
+  // purchase time, total purchases, second purchase time) under
+  // the same cohort-scope filter the main query uses. We use a
+  // single statement that returns both rowsets via UNION ALL with
+  // a `kind` discriminator — keeps the round-trip count to one.
+  //
+  // $1 = dealerIds (bigint[])
+  // $2 = from (timestamptz, inclusive)
+  // $3 = to   (timestamptz, exclusive — also the upper bound for cohort assignment)
+  // $4 = cohortScope (text)
+  // $5 = cohortGranularity (text — 'week' or 'month')
+  const sql = `
+    with orders as (
+      select so.dealer_id, so.invoice_id, so.pay_time, so.customer_id
+        from sweed_orders so
+       where so.dealer_id = any($1::bigint[])
+         and so.pay_time < $3::timestamptz
+         and so.customer_id is not null
+    ),
+    purchase_events as (
+      select o.*,
+        row_number() over (
+          partition by o.dealer_id, o.customer_id
+          order by o.pay_time, o.invoice_id
+        )::int as purchase_n
+      from orders o
+    ),
+    customer_rollup as (
+      select dealer_id, customer_id,
+        min(pay_time) as first_purchase_at,
+        max(pay_time) as last_purchase_at,
+        count(*)::int as total_purchases,
+        min(pay_time) filter (where purchase_n >= 2) as second_purchase_at
+      from purchase_events
+      group by dealer_id, customer_id
+    ),
+    customers_in_scope as (
+      select cr.*,
+        date_trunc($5::text, cr.first_purchase_at) as cohort_key
+      from customer_rollup cr
+      where case $4::text
+        when 'acquired_in_range' then
+          cr.first_purchase_at >= $2::timestamptz
+          and cr.first_purchase_at < $3::timestamptz
+        when 'active_in_range' then exists (
+          select 1 from purchase_events pe
+           where pe.dealer_id = cr.dealer_id
+             and pe.customer_id = cr.customer_id
+             and pe.pay_time >= $2::timestamptz
+             and pe.pay_time < $3::timestamptz
+        )
+        else true
+      end
+    ),
+    cohort_sizes as (
+      select cohort_key, count(*)::int as cohort_size
+        from customers_in_scope
+       group by cohort_key
+    ),
+    -- retention: customer counted at period N if they have ≥1 purchase
+    -- in [cohort_key + N * granularity, cohort_key + (N+1) * granularity).
+    -- We compute period_index by floor-dividing seconds for 'week' and
+    -- by month-difference for 'month' (calendar-aware).
+    retention_events as (
+      select cis.cohort_key, cis.cohort_size, pe.customer_id,
+        case when $5::text = 'week'
+          then floor(extract(epoch from (pe.pay_time - cis.cohort_key)) / (7 * 86400))::int
+          else (
+            (extract(year from pe.pay_time)::int - extract(year from cis.cohort_key)::int) * 12
+            + (extract(month from pe.pay_time)::int - extract(month from cis.cohort_key)::int)
+          )
+        end as period_index
+      from customers_in_scope cis
+      join purchase_events pe
+        on pe.dealer_id = cis.dealer_id and pe.customer_id = cis.customer_id
+      where pe.pay_time >= cis.cohort_key
+        and pe.pay_time < $3::timestamptz
+    ),
+    retention_grid as (
+      select cohort_key,
+        count(distinct customer_id) filter (where true) as cohort_size_chk,
+        period_index,
+        count(distinct customer_id)::int as retained_count
+      from retention_events
+      group by cohort_key, period_index
+    )
+    select 'retention'::text as kind,
+      cohort_key as cohort_key,
+      cs.cohort_size as cohort_size,
+      rg.period_index as period_index,
+      rg.retained_count as retained_count,
+      null::numeric as f0,
+      null::numeric as f1,
+      null::numeric as f2,
+      null::numeric as f3
+    from retention_grid rg
+    join cohort_sizes cs using (cohort_key)
+    union all
+    select 'first_second'::text,
+      cis.cohort_key,
+      cs.cohort_size,
+      0,
+      0,
+      count(*) filter (where cis.second_purchase_at is not null)::numeric as ever,
+      count(*) filter (where cis.second_purchase_at is not null
+                       and cis.second_purchase_at <= cis.first_purchase_at + interval '30 days')::numeric as w30,
+      count(*) filter (where cis.second_purchase_at is not null
+                       and cis.second_purchase_at <= cis.first_purchase_at + interval '60 days')::numeric as w60,
+      count(*) filter (where cis.second_purchase_at is not null
+                       and cis.second_purchase_at <= cis.first_purchase_at + interval '90 days')::numeric as w90
+    from customers_in_scope cis
+    join cohort_sizes cs using (cohort_key)
+    group by cis.cohort_key, cs.cohort_size
+  `
+
+  const res = await pool.query<{
+    kind: string
+    cohort_key: string | Date | null
+    cohort_size: string | number | null
+    period_index: string | number | null
+    retained_count: string | number | null
+    f0: string | number | null
+    f1: string | number | null
+    f2: string | number | null
+    f3: string | number | null
+  }>(sql, [
+    dealerIds,
+    from.toISOString(),
+    to.toISOString(),
+    cohortScope,
+    cohortGranularity,
+  ])
+
+  const retention: CohortRetentionRow[] = []
+  const conversion: FirstSecondConversionRow[] = []
+  for (const r of res.rows) {
+    const cohortKey =
+      r.cohort_key == null
+        ? null
+        : r.cohort_key instanceof Date
+          ? r.cohort_key.toISOString()
+          : new Date(r.cohort_key).toISOString()
+    if (cohortKey == null) continue
+    const cohortSize = asReqInt(r.cohort_size)
+    if (r.kind === 'retention') {
+      const periodIndex = asReqInt(r.period_index)
+      const retainedCount = asReqInt(r.retained_count)
+      retention.push({
+        cohortKey,
+        cohortSize,
+        periodIndex,
+        retainedCount,
+        retentionPct: cohortSize > 0 ? retainedCount / cohortSize : 0,
+      })
+    } else if (r.kind === 'first_second') {
+      const everCount = asReqInt(r.f0)
+      const within30dCount = asReqInt(r.f1)
+      const within60dCount = asReqInt(r.f2)
+      const within90dCount = asReqInt(r.f3)
+      conversion.push({
+        cohortKey,
+        cohortSize,
+        everCount,
+        within30dCount,
+        within60dCount,
+        within90dCount,
+        everPct: cohortSize > 0 ? everCount / cohortSize : 0,
+        within30dPct: cohortSize > 0 ? within30dCount / cohortSize : 0,
+        within60dPct: cohortSize > 0 ? within60dCount / cohortSize : 0,
+        within90dPct: cohortSize > 0 ? within90dCount / cohortSize : 0,
+      })
+    }
+  }
+
+  retention.sort((a, b) =>
+    a.cohortKey === b.cohortKey
+      ? a.periodIndex - b.periodIndex
+      : a.cohortKey.localeCompare(b.cohortKey),
+  )
+  conversion.sort((a, b) => a.cohortKey.localeCompare(b.cohortKey))
+
+  return { cohortRetention: retention, firstSecondConversion: conversion }
 }

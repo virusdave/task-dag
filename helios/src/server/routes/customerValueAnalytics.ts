@@ -35,6 +35,11 @@ export async function registerCustomerValueAnalyticsRoutes(
       // at the visual hard-cap. Operator can override with a number.
       maxPurchaseNumber: parsed.maxPurchaseNumber ?? 'auto',
       cohortScope: parsed.cohortScope ?? 'all_as_of_end',
+      // v1.4 V4'3: opt-in retention sections via `?include=retention`
+      // (V4'0 decision — retention lives on the consolidated endpoint).
+      // Default granularity is `week`.
+      includeRetention: parsed.include.includes('retention'),
+      cohortGranularity: parsed.cohortGranularity ?? 'week',
     })
     return reply.send(CustomerValueAnalyticsResponseSchema.parse(result))
   })
