@@ -413,6 +413,18 @@ const SENTINELS: MigrationSentinel[] = [
       'window function.',
     check: (db) => indexExists(db, 'sweed_orders_dealer_customer_pay_invoice_idx'),
   },
+  {
+    // Google Ads -> landing-page observations for mostly-static-sites.
+    // This table intentionally stores the evidence/performance scope
+    // alongside each signal because Ads Editor exports do not always
+    // include ad/final-URL-level metrics. Consumers must not treat
+    // campaign-level context as landing-page conversion proof.
+    migrationId: '044_landingpage_ad_outcomes',
+    label:
+      'landingpage_ad_outcomes table — source-scoped Google Ads policy / ' +
+      'landing-page observations for MSS landing-page evolution jobs.',
+    check: (db) => tableExists(db, 'landingpage_ad_outcomes'),
+  },
 ]
 
 interface CacheEntry {
