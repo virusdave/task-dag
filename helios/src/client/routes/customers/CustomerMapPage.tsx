@@ -205,21 +205,6 @@ function replayStrokeOpacityExpr(
   ]
 }
 
-// Static base-radius expression — keep this in sync with the
-// equivalent literal inside the `scans-circles` layer's paint
-// (the live expression below multiplies the same base radius by a
-// replay-grow factor when playback is active).
-const BASE_RADIUS_EXPR: maplibregl.ExpressionSpecification = [
-  'interpolate',
-  ['linear'],
-  ['zoom'],
-  7, 2,
-  10, 3,
-  13, 4.5,
-  16, 6.5,
-  19, 9,
-]
-
 // Per-feature size multiplier (computed client-side by the
 // encoding pipeline above and stuffed into each feature's
 // `sizeMul` property). Coalesce to 1 so dots with no encoded
@@ -230,14 +215,59 @@ const SIZE_MUL_EXPR: maplibregl.ExpressionSpecification = [
   1,
 ]
 
+// MapLibre constraint: `['zoom']` may ONLY appear as input to a
+// TOP-LEVEL `interpolate` or `step`. Wrapping `interpolate(zoom,...)`
+// inside `['*', ...]` silently invalidates the entire paint property
+// (the layer renders nothing). So instead of `radius = baseInterp *
+// sizeMul * replayMul`, we push every per-feature multiplier INSIDE
+// the interpolate's output values. The interpolate stays at the top.
+//
+// The stops below are the same numbers the previous BASE_RADIUS_EXPR
+// used (2/3/4.5/6.5/9 across zooms 7/10/13/16/19). The helpers below
+// scale each stop by per-feature `sizeMul` (always) and an optional
+// replay grow-then-shrink factor.
+const RADIUS_ZOOMS: readonly number[] = [7, 10, 13, 16, 19]
+const RADIUS_STOPS: readonly number[] = [2, 3, 4.5, 6.5, 9]
+
+// Static base-radius (no encoding, no replay) — kept for the
+// legend reference dots only. The on-map layers use the helpers
+// below so the `['zoom']` stays at the top of the expression.
+const BASE_RADIUS_EXPR: maplibregl.ExpressionSpecification = [
+  'interpolate',
+  ['linear'],
+  ['zoom'],
+  RADIUS_ZOOMS[0]!, RADIUS_STOPS[0]!,
+  RADIUS_ZOOMS[1]!, RADIUS_STOPS[1]!,
+  RADIUS_ZOOMS[2]!, RADIUS_STOPS[2]!,
+  RADIUS_ZOOMS[3]!, RADIUS_STOPS[3]!,
+  RADIUS_ZOOMS[4]!, RADIUS_STOPS[4]!,
+]
+
+// Builds an `interpolate(['zoom'], ...)` whose per-stop output is
+// `RADIUS_STOPS[i] * SIZE_MUL_EXPR * extra`. `extra` is e.g. the
+// replay grow factor; pass undefined for plain "sized" radius.
+function buildRadiusExpr(
+  extra: maplibregl.ExpressionSpecification | null,
+): maplibregl.ExpressionSpecification {
+  const stops: unknown[] = []
+  for (let i = 0; i < RADIUS_ZOOMS.length; i++) {
+    stops.push(RADIUS_ZOOMS[i]!)
+    const factors: unknown[] = ['*', RADIUS_STOPS[i]!, SIZE_MUL_EXPR]
+    if (extra !== null) factors.push(extra)
+    stops.push(factors as maplibregl.ExpressionSpecification)
+  }
+  return [
+    'interpolate',
+    ['linear'],
+    ['zoom'],
+    ...stops,
+  ] as maplibregl.ExpressionSpecification
+}
+
 // Static layer radius: zoom-interp base × per-feature size mul.
 // Replay multiplies this by the additional grow-then-shrink factor
-// from replayRadiusExpr.
-const SIZED_RADIUS_EXPR: maplibregl.ExpressionSpecification = [
-  '*',
-  BASE_RADIUS_EXPR,
-  SIZE_MUL_EXPR,
-]
+// from replayRadiusExpr — also built so `['zoom']` stays top-level.
+const SIZED_RADIUS_EXPR: maplibregl.ExpressionSpecification = buildRadiusExpr(null)
 
 // Replay radius expression — same zoom-interpolated base, scaled
 // by a per-dot "grow then settle" factor:
@@ -268,8 +298,11 @@ function replayRadiusExpr(
       ],
     ],
   ]
-  // base × per-feature size-mul × replay grow-then-shrink factor
-  return ['*', SIZED_RADIUS_EXPR, multiplier]
+  // Per-zoom-stop output = baseStop × sizeMul × replayMultiplier.
+  // Built so `['zoom']` stays at the top level of the interpolate;
+  // wrapping the interpolate inside an outer `*` makes MapLibre
+  // silently invalidate the entire paint property.
+  return buildRadiusExpr(multiplier)
 }
 
 /** Human-readable duration ("5s", "1m 30s", "2h 15m"). */
