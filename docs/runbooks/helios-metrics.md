@@ -525,7 +525,10 @@ runbook refresh + page Dave at p4 before adding the trigger.
 - **V4'4 (drill-clicks):** revert the V4'4 commit. Every
   histogram bucket + scatter dot reverts to the read-only
   hover behaviour from v1.3 / v1.3-slice. The `selection`
-  param on `/rows` becomes a no-op (tolerated by Zod).
+  param on `/api/metrics/<id>` becomes a no-op (Zod still
+  parses it, and the route still rejects payloads for metrics
+  that don't declare `supports.drillSelection`, but no metric
+  query honours the parsed payload after the revert).
   `MetricDef.supports.drillSelection` remains in the schema
   (defaults to `undefined`); reverting V4'0 separately is the
   way to drop the contract entirely.
@@ -533,6 +536,72 @@ runbook refresh + page Dave at p4 before adding the trigger.
   Customer Value tab header loses the `N% linked` badge and
   the disabled toggle. `meta.veriscanCoverage` disappears
   from the consolidated payload.
+
+### Drill-selection contract — wire shape (v1.4 V4'4)
+
+A drill-selection is a discriminated union over `kind`:
+
+```ts
+type MetricSelection =
+  | { kind: 'histogramBucket'; metricId: string; bucketKey: string }
+  | { kind: 'scatterDot';      metricId: string; dotId: string }
+```
+
+Encoded as a JSON-encoded string in the URL's `?selection=…` query
+param so share-links reproduce the drilled state:
+
+```
+/metrics/customer-value?selection=%7B%22kind%22%3A%22histogramBucket%22%2C%22metricId%22%3A%22customer-value.purchase-count-histogram%22%2C%22bucketKey%22%3A%223%22%7D
+```
+
+When forwarded to `/api/metrics/<id>?selection=…`, the route handler:
+
+1. Parses + validates the payload (`MetricSelectionSchema` — the same
+   schema the SPA uses to write the URL).
+2. Confirms `selection.metricId === <route :metricId>` (mismatch ⇒ 400).
+3. Confirms `selection.kind` is in `metric.supports.drillSelection`
+   (mismatch / unsupported ⇒ 400 — silently dropping the selection
+   would lie to the operator about what's been narrowed).
+4. Forwards the parsed object to `metric.query({ …, selection })`.
+   Existing queries can ignore the field; new queries opt in by
+   reading it.
+
+Frontend usage pattern (every drillable card uses the same hook):
+
+- `useMetricSelection()` (in
+  `helios/src/client/routes/metrics/useMetricSelection.ts`) reads /
+  writes the URL via `history.replaceState` (no new history entries —
+  drills are in-place navigation; the operator can keep tabbing
+  without bloating the back stack).
+- Each chart element is rendered with `role="button"`, `tabindex=0`,
+  an `aria-pressed` reflecting the selected state, and an Enter /
+  Space `onKeyDown` handler that toggles the selection.
+- Escape (handled at each tab's body) clears the selection — even when
+  a non-drillable input has focus, hitting Escape collapses the drill.
+- Selected element gets a 2px black `stroke` (overrides any highlight
+  or hover stroke).
+- Re-clicking a selected element toggles it off (so a single
+  click-then-click round trip is a no-op).
+
+Synthetic metricIds — the V4'4 drillable panels are NOT all in the
+server's metric registry. They use stable synthetic ids so the URL
+selection contract still routes:
+
+| Tab / panel | Synthetic metricId |
+| --- | --- |
+| Customer Value, "Customer count by total purchases" | `customer-value.purchase-count-histogram` |
+| Customer Value, "Basket size at purchase number N" | `customer-value.basket-by-purchase-number` |
+| Customer Value, "Avg lifetime $ by total purchases" | `customer-value.lifetime-by-total-purchases` |
+| Customer Value, "$ contributed at purchase number N" | `customer-value.contribution-by-purchase-number` |
+| Budtenders Advanced, cashier scatter | `budtender.cashier-scatter` |
+| Catalog Analytics scatter `<config.id>` | `catalog.<config.id>` |
+| Registry-backed scatter metrics (weather correlation) | their real `metric.id` |
+
+For the synthetic-id panels, no `/api/metrics/<id>` round-trip
+happens — the drill state lives only in the URL and the panel's own
+in-memory render. Promoting any of these to per-row drill (Table tab
++ `/rows`) is a follow-on; v1.4 V4'4 ships the operator-visible
+"click → highlight + URL" loop only.
 
 ### Canonical metric list — v1.4 changes
 

@@ -11,12 +11,14 @@ import {
   type CustomerValueMissingDataCard,
   type FirstSecondConversionRow,
   type LifetimeByTotalPurchasesPoint,
+  type MetricSelection,
   type PurchaseCountBucket,
 } from '../../../shared/contracts/index.js'
 import { loadJson } from '../../app/fetchJson.js'
 
 import { formatYTick, niceYTicks } from './gridlines.js'
 import { HelpIcon } from './MetricChart.js'
+import { useMetricSelection } from './useMetricSelection.js'
 
 // ---------------------------------------------------------------------------
 // Customer Value dashboard tab.
@@ -310,10 +312,38 @@ export function CustomerValueTab(): JSX.Element {
   )
 }
 
+// v1.4 V4'4: synthetic metric ids for the customer-value histograms.
+// These are NOT registered with the server metric registry (the data
+// flows through /api/customer-value-analytics, not /api/metrics/<id>),
+// but the URL selection contract still keys off them so that future
+// drill targets can route on metricId without ambiguity.
+const CUSTOMER_VALUE_METRIC_IDS = {
+  purchaseCount: 'customer-value.purchase-count-histogram',
+  basketByN: 'customer-value.basket-by-purchase-number',
+  lifetimeByTotal: 'customer-value.lifetime-by-total-purchases',
+  contributionByN: 'customer-value.contribution-by-purchase-number',
+} as const
+
 function CustomerValueBody({ data }: { data: CustomerValueAnalyticsResponse }) {
   const [moneyBasis, setMoneyBasis] = useState<MoneyBasis>('gross_sales')
   const moneyBasisDef =
     MONEY_BASES.find((b) => b.id === moneyBasis) ?? MONEY_BASES[0]!
+
+  // v1.4 V4'4: drill selection lives in the URL so share-link
+  // parity holds. Escape key clears at the body level so any focused
+  // bar can be deselected without re-clicking.
+  const [selection, setSelection] = useMetricSelection()
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape' && selection != null) {
+        setSelection(null)
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [selection, setSelection])
+
   return (
     <>
       <SummaryStrip data={data} basis={moneyBasis} basisLabel={moneyBasisDef.label} />
@@ -338,28 +368,43 @@ function CustomerValueBody({ data }: { data: CustomerValueAnalyticsResponse }) {
         <span className="subtle-copy">{moneyBasisDef.help}</span>
       </div>
 
+      {/* v1.4 V4'4: selection callout — visible iff a histogram bucket
+          is currently selected via URL state. Click ✕ or press Escape
+          (anywhere) to clear. */}
+      {selection != null && selection.kind === 'histogramBucket' ? (
+        <SelectionCallout selection={selection} onClear={() => setSelection(null)} />
+      ) : null}
+
       <div className="customer-value-grid">
         <PurchaseCountHistogramCard
           data={data.purchaseCountHistogram}
           maxN={data.maxPurchaseNumber}
+          selection={selection}
+          onSelect={setSelection}
         />
         <BasketByPurchaseNumberCard
           data={data.basketByPurchaseNumber}
           maxN={data.maxPurchaseNumber}
           basis={moneyBasis}
           basisLabel={moneyBasisDef.label}
+          selection={selection}
+          onSelect={setSelection}
         />
         <LifetimeByTotalPurchasesCard
           data={data.lifetimeByTotalPurchases}
           maxN={data.maxPurchaseNumber}
           basis={moneyBasis}
           basisLabel={moneyBasisDef.label}
+          selection={selection}
+          onSelect={setSelection}
         />
         <ContributionByPurchaseNumberCard
           data={data.contributionByPurchaseNumber}
           maxN={data.maxPurchaseNumber}
           basis={moneyBasis}
           basisLabel={moneyBasisDef.label}
+          selection={selection}
+          onSelect={setSelection}
         />
       </div>
 
@@ -451,16 +496,66 @@ function Kpi({ label, value, help }: { label: string; value: string; help: strin
   )
 }
 
+// =========================== Selection callout (v1.4 V4'4) ================
+
+/** Inline banner that surfaces the current drill-selection plus a clear
+ *  affordance. Rendered when the URL carries a `histogramBucket`
+ *  selection so the operator never lands on a "why is this chart
+ *  highlighted?" question without an obvious next action. */
+function SelectionCallout({
+  selection,
+  onClear,
+}: {
+  selection: Extract<MetricSelection, { kind: 'histogramBucket' }>
+  onClear: () => void
+}) {
+  // Map the synthetic metricId back to a human label.
+  const friendly =
+    selection.metricId === CUSTOMER_VALUE_METRIC_IDS.purchaseCount
+      ? 'Customer count by total purchases'
+      : selection.metricId === CUSTOMER_VALUE_METRIC_IDS.basketByN
+        ? 'Basket size at purchase number N'
+        : selection.metricId === CUSTOMER_VALUE_METRIC_IDS.lifetimeByTotal
+          ? 'Avg lifetime $ by total purchases'
+          : selection.metricId === CUSTOMER_VALUE_METRIC_IDS.contributionByN
+            ? '$ contributed at purchase number N'
+            : selection.metricId
+  return (
+    <aside
+      className="customer-value-selection-callout"
+      role="status"
+      aria-live="polite"
+    >
+      <strong>Drilled:</strong> {friendly} → bucket{' '}
+      <code>{selection.bucketKey}</code>{' '}
+      <button
+        type="button"
+        className="ghost-button"
+        onClick={onClear}
+        aria-label="Clear drill selection"
+        title="Clear drill selection (Escape)"
+      >
+        ✕
+      </button>
+    </aside>
+  )
+}
+
 // =========================== Chart cards ===================================
 
 function PurchaseCountHistogramCard({
   data,
   maxN,
+  selection,
+  onSelect,
 }: {
   data: ReadonlyArray<PurchaseCountBucket>
   maxN: number
+  selection: MetricSelection | null
+  onSelect: (next: MetricSelection | null) => void
 }) {
   const [logScale, setLogScale] = useState<boolean>(true)
+  const metricId = CUSTOMER_VALUE_METRIC_IDS.purchaseCount
   const bars: BarPoint[] = data.map((b) => ({
     x: b.totalPurchases,
     y: b.customerCount,
@@ -470,13 +565,20 @@ function PurchaseCountHistogramCard({
       `${b.isOverflowBucket ? `${maxN}+` : b.totalPurchases} purchase${b.totalPurchases === 1 ? '' : 's'}`,
       `${fmtInt(b.customerCount)} customer${b.customerCount === 1 ? '' : 's'}`,
     ],
+    selectionKey: b.isOverflowBucket ? 'overflow' : String(b.totalPurchases),
   }))
+  const selectedKey =
+    selection != null &&
+    selection.kind === 'histogramBucket' &&
+    selection.metricId === metricId
+      ? selection.bucketKey
+      : null
   return (
     <article className="metric-chart-card customer-value-card">
       <header className="metric-chart-header">
         <div className="metric-chart-titlewrap">
           <h3 className="metric-chart-title">Customer count by total purchases</h3>
-          <HelpIcon text="One bar per total-purchases-to-date bucket; bar height = number of unique customers in scope with exactly that many purchases. The 'maxN+' bar aggregates the long tail. Log Y default lets you see one-and-done vs whales on the same chart. Use this to spot whether the business is fueled by many low-frequency customers or by a small loyal core." />
+          <HelpIcon text="One bar per total-purchases-to-date bucket; bar height = number of unique customers in scope with exactly that many purchases. The 'maxN+' bar aggregates the long tail. Log Y default lets you see one-and-done vs whales on the same chart. Use this to spot whether the business is fueled by many low-frequency customers or by a small loyal core. Click a bar (or Tab + Enter) to drill — the URL carries the selection so you can share the drilled state." />
         </div>
         <label className="subtle-copy customer-value-card-control">
           <input
@@ -487,7 +589,13 @@ function PurchaseCountHistogramCard({
           log Y
         </label>
       </header>
-      <BarChart bars={bars} logScale={logScale} yLabel="customers" />
+      <BarChart
+        bars={bars}
+        logScale={logScale}
+        yLabel="customers"
+        selectedKey={selectedKey}
+        onSelect={(key) => onSelect(key == null ? null : { kind: 'histogramBucket', metricId, bucketKey: key })}
+      />
     </article>
   )
 }
@@ -497,13 +605,18 @@ function BasketByPurchaseNumberCard({
   maxN,
   basis,
   basisLabel,
+  selection,
+  onSelect,
 }: {
   data: ReadonlyArray<BasketByPurchaseNumberPoint>
   maxN: number
   basis: MoneyBasis
   basisLabel: string
+  selection: MetricSelection | null
+  onSelect: (next: MetricSelection | null) => void
 }) {
   const [aggKind, setAggKind] = useState<'avg' | 'median'>('avg')
+  const metricId = CUSTOMER_VALUE_METRIC_IDS.basketByN
   const bars: BarPoint[] = data.map((b) => {
     const y =
       basis === 'gross_sales'
@@ -529,15 +642,22 @@ function BasketByPurchaseNumberCard({
         `n = ${fmtInt(b.orderCount)} order${b.orderCount === 1 ? '' : 's'}`,
         b.orderCount < 10 ? '⚠ small sample' : '',
       ].filter(Boolean) as string[],
+      selectionKey: b.isOverflowBucket ? 'overflow' : String(b.purchaseNumber),
     }
   })
+  const selectedKey =
+    selection != null &&
+    selection.kind === 'histogramBucket' &&
+    selection.metricId === metricId
+      ? selection.bucketKey
+      : null
   return (
     <article className="metric-chart-card customer-value-card">
       <header className="metric-chart-header">
         <div className="metric-chart-titlewrap">
           <h3 className="metric-chart-title">Basket size at purchase number N</h3>
           <HelpIcon
-            text={`X axis = purchase ordinal (1st purchase, 2nd, …). Y axis = ${aggKind === 'avg' ? 'mean' : 'median'} ${basisLabel.toLowerCase()} of orders at that ordinal across all in-scope customers. Use this to see whether basket size grows (customers up-sell themselves as they become regulars), holds steady, or shrinks (returning customers cherry-pick). Hatched bars = small sample (<10 orders); survivorship bias inflates higher-N values.`}
+            text={`X axis = purchase ordinal (1st purchase, 2nd, …). Y axis = ${aggKind === 'avg' ? 'mean' : 'median'} ${basisLabel.toLowerCase()} of orders at that ordinal across all in-scope customers. Use this to see whether basket size grows (customers up-sell themselves as they become regulars), holds steady, or shrinks (returning customers cherry-pick). Hatched bars = small sample (<10 orders); survivorship bias inflates higher-N values. Click a bar (or Tab + Enter) to drill — the URL carries the selection so you can share the drilled state.`}
           />
         </div>
         <label className="subtle-copy customer-value-card-control">
@@ -548,7 +668,14 @@ function BasketByPurchaseNumberCard({
           </select>
         </label>
       </header>
-      <BarChart bars={bars} logScale={false} yLabel="$" yFormatter={(v) => fmtMoney(v)} />
+      <BarChart
+        bars={bars}
+        logScale={false}
+        yLabel="$"
+        yFormatter={(v) => fmtMoney(v)}
+        selectedKey={selectedKey}
+        onSelect={(key) => onSelect(key == null ? null : { kind: 'histogramBucket', metricId, bucketKey: key })}
+      />
     </article>
   )
 }
@@ -558,13 +685,18 @@ function LifetimeByTotalPurchasesCard({
   maxN,
   basis,
   basisLabel,
+  selection,
+  onSelect,
 }: {
   data: ReadonlyArray<LifetimeByTotalPurchasesPoint>
   maxN: number
   basis: MoneyBasis
   basisLabel: string
+  selection: MetricSelection | null
+  onSelect: (next: MetricSelection | null) => void
 }) {
   const [aggKind, setAggKind] = useState<'avg' | 'median'>('avg')
+  const metricId = CUSTOMER_VALUE_METRIC_IDS.lifetimeByTotal
   const bars: BarPoint[] = data.map((b) => {
     const y =
       basis === 'gross_sales'
@@ -588,15 +720,22 @@ function LifetimeByTotalPurchasesCard({
         `n = ${fmtInt(b.customerCount)} customer${b.customerCount === 1 ? '' : 's'}`,
         b.customerCount < 10 ? '⚠ small sample' : '',
       ].filter(Boolean) as string[],
+      selectionKey: b.isOverflowBucket ? 'overflow' : String(b.totalPurchases),
     }
   })
+  const selectedKey =
+    selection != null &&
+    selection.kind === 'histogramBucket' &&
+    selection.metricId === metricId
+      ? selection.bucketKey
+      : null
   return (
     <article className="metric-chart-card customer-value-card">
       <header className="metric-chart-header">
         <div className="metric-chart-titlewrap">
           <h3 className="metric-chart-title">Avg lifetime $ for customers who end up at N purchases</h3>
           <HelpIcon
-            text={`For each total-purchases bucket N, compute lifetime-to-date ${basisLabel.toLowerCase()} per customer, then ${aggKind === 'avg' ? 'average' : 'take the median'} across all customers whose CURRENT total purchase count is exactly N (or ${maxN}+ for the last bucket). This is a cohort statistic, NOT a cumulative one — bucket N and bucket N+1 contain different customers, so the line is not guaranteed to be monotone. Small dips between adjacent buckets are real cohort variance (e.g., the 10-purchase cohort may happen to skew lower-AOV than the 9-purchase cohort) and not a bug. Use this to ask "if a customer becomes a 3x customer, how much money have they generally spent with us by then?". Receipt basis is not computed here (use the contribution card for receipts).`}
+            text={`For each total-purchases bucket N, compute lifetime-to-date ${basisLabel.toLowerCase()} per customer, then ${aggKind === 'avg' ? 'average' : 'take the median'} across all customers whose CURRENT total purchase count is exactly N (or ${maxN}+ for the last bucket). This is a cohort statistic, NOT a cumulative one — bucket N and bucket N+1 contain different customers, so the line is not guaranteed to be monotone. Small dips between adjacent buckets are real cohort variance (e.g., the 10-purchase cohort may happen to skew lower-AOV than the 9-purchase cohort) and not a bug. Use this to ask "if a customer becomes a 3x customer, how much money have they generally spent with us by then?". Receipt basis is not computed here (use the contribution card for receipts). Click a bar (or Tab + Enter) to drill — the URL carries the selection.`}
           />
         </div>
         <label className="subtle-copy customer-value-card-control">
@@ -610,7 +749,14 @@ function LifetimeByTotalPurchasesCard({
       {basis === 'gross_receipts' ? (
         <p className="customer-value-no-data">Not computed for receipts basis — choose gross sales or net sales.</p>
       ) : (
-        <BarChart bars={bars} logScale={false} yLabel="$" yFormatter={(v) => fmtMoney(v)} />
+        <BarChart
+          bars={bars}
+          logScale={false}
+          yLabel="$"
+          yFormatter={(v) => fmtMoney(v)}
+          selectedKey={selectedKey}
+          onSelect={(key) => onSelect(key == null ? null : { kind: 'histogramBucket', metricId, bucketKey: key })}
+        />
       )}
     </article>
   )
@@ -621,17 +767,22 @@ function ContributionByPurchaseNumberCard({
   maxN,
   basis,
   basisLabel,
+  selection,
+  onSelect,
 }: {
   data: ReadonlyArray<ContributionByPurchaseNumberPoint>
   maxN: number
   basis: MoneyBasis
   basisLabel: string
+  selection: MetricSelection | null
+  onSelect: (next: MetricSelection | null) => void
 }) {
   // Default log-Y: the contribution histogram is dominated by the
   // 1st-purchase bar (everybody contributes a 1st purchase, only a
   // shrinking fraction make it to the Nth), so a linear scale buries
   // every bar past N=3 in the floor.
   const [logScale, setLogScale] = useState<boolean>(true)
+  const metricId = CUSTOMER_VALUE_METRIC_IDS.contributionByN
   const bars: BarPoint[] = data.map((b) => {
     const y =
       basis === 'gross_sales'
@@ -649,16 +800,23 @@ function ContributionByPurchaseNumberCard({
         `${basisLabel}: ${fmtMoney(y)}`,
         `${fmtInt(b.orderCount)} order${b.orderCount === 1 ? '' : 's'}`,
       ],
+      selectionKey: b.isOverflowBucket ? 'overflow' : String(b.purchaseNumber),
     }
   })
   const totalDollars = bars.reduce((acc, b) => acc + b.y, 0)
+  const selectedKey =
+    selection != null &&
+    selection.kind === 'histogramBucket' &&
+    selection.metricId === metricId
+      ? selection.bucketKey
+      : null
   return (
     <article className="metric-chart-card customer-value-card">
       <header className="metric-chart-header">
         <div className="metric-chart-titlewrap">
           <h3 className="metric-chart-title">$ contributed at purchase number N (in range)</h3>
           <HelpIcon
-            text={`In the selected range only, total ${basisLabel.toLowerCase()} aggregated by the purchase ordinal of the order. Reads as "during this period, how much revenue came from 1st-time-ever orders vs 2nd vs 3rd…". If bar #1 dominates you're tourist-driven; if bars #2+ dominate you're loyalty-driven. The ordinal is always computed against the customer's FULL history through the end of the range, so a 5th-purchase event in the range correctly counts as 5, even if the 1st-4th purchases happened earlier.`}
+            text={`In the selected range only, total ${basisLabel.toLowerCase()} aggregated by the purchase ordinal of the order. Reads as "during this period, how much revenue came from 1st-time-ever orders vs 2nd vs 3rd…". If bar #1 dominates you're tourist-driven; if bars #2+ dominate you're loyalty-driven. The ordinal is always computed against the customer's FULL history through the end of the range, so a 5th-purchase event in the range correctly counts as 5, even if the 1st-4th purchases happened earlier. Click a bar (or Tab + Enter) to drill — the URL carries the selection.`}
           />
         </div>
         <span className="subtle-copy customer-value-card-control">
@@ -673,7 +831,14 @@ function ContributionByPurchaseNumberCard({
           log Y
         </label>
       </header>
-      <BarChart bars={bars} logScale={logScale} yLabel="$" yFormatter={(v) => fmtMoney(v)} />
+      <BarChart
+        bars={bars}
+        logScale={logScale}
+        yLabel="$"
+        yFormatter={(v) => fmtMoney(v)}
+        selectedKey={selectedKey}
+        onSelect={(key) => onSelect(key == null ? null : { kind: 'histogramBucket', metricId, bucketKey: key })}
+      />
     </article>
   )
 }
@@ -1052,6 +1217,14 @@ interface BarPoint {
   readonly lowSample?: boolean
   readonly label: string
   readonly tooltipLines: ReadonlyArray<string>
+  /**
+   * v1.4 V4'4: optional stable key for the drill-selection URL state.
+   * When set together with the chart's `onSelect`, this bar becomes
+   * keyboard-focusable, clicking emits this key, and the bar gets a
+   * 2px stroke when `selectedKey === selectionKey`. Per-bar so the
+   * histogram card can encode the bucket identity (e.g. "3" / "overflow").
+   */
+  readonly selectionKey?: string
 }
 
 function BarChart({
@@ -1060,6 +1233,8 @@ function BarChart({
   yLabel,
   yFormatter,
   yDomainMax,
+  selectedKey,
+  onSelect,
 }: {
   bars: ReadonlyArray<BarPoint>
   logScale: boolean
@@ -1072,6 +1247,19 @@ function BarChart({
    * the largest observed value. Ignored for log-scale.
    */
   yDomainMax?: number
+  /**
+   * v1.4 V4'4: currently-selected bar key (matches one of
+   * `bars[i].selectionKey`); `null` = no selection. When set, the
+   * matching bar renders with a 2px stroke + label.
+   */
+  selectedKey?: string | null
+  /**
+   * v1.4 V4'4: click/Enter/Space handler. Receives the bar's
+   * `selectionKey`; pass `null` to deselect (BarChart calls this with
+   * the same key on a re-click to toggle off). Bars without a
+   * `selectionKey` are NOT focusable / clickable regardless.
+   */
+  onSelect?: (selectionKey: string | null) => void
 }) {
   // Hover state carries the bar index AND the most recent pointer
   // position so the tooltip can be rendered as a viewport-clamped
@@ -1205,6 +1393,18 @@ function BarChart({
           const x = cx - barW / 2
           const fill = b.overflow ? '#9467bd' : '#1f77b4'
           const isHover = hover?.idx === i
+          // v1.4 V4'4: selection wiring. A bar is "drillable" when it
+          // carries a selectionKey AND the chart has an onSelect cb.
+          // Selected bars render a 2px stroke (regardless of hover).
+          const drillable = onSelect != null && b.selectionKey != null
+          const isSelected = drillable && selectedKey != null && selectedKey === b.selectionKey
+          const strokeColour = isSelected ? '#000' : isHover ? '#000' : 'none'
+          const strokeWidth = isSelected ? 2 : isHover ? 1 : 0
+          const onActivate = (): void => {
+            if (!drillable || b.selectionKey === undefined) return
+            // Toggle: re-clicking the selected bar clears the selection.
+            onSelect!(isSelected ? null : b.selectionKey)
+          }
           return (
             <g key={`b-${i}`}>
               <rect
@@ -1213,9 +1413,9 @@ function BarChart({
                 width={barW}
                 height={h}
                 fill={fill}
-                opacity={isHover ? 1 : 0.85}
-                stroke={isHover ? '#000' : 'none'}
-                strokeWidth={isHover ? 1 : 0}
+                opacity={isHover || isSelected ? 1 : 0.85}
+                stroke={strokeColour}
+                strokeWidth={strokeWidth}
               />
               {b.lowSample ? (
                 // Diagonal hatch overlay for small-sample bars.
@@ -1228,13 +1428,36 @@ function BarChart({
                   opacity={0.6}
                 />
               ) : null}
-              {/* Click/hover capture surface — wider than bar for easy touch. */}
+              {/* Click/hover capture surface — wider than bar for easy
+                  touch. When the chart is drillable AND this bar
+                  carries a selectionKey, the rect becomes a focusable
+                  button (role + tabindex + key handler) so keyboard
+                  users can Tab → Enter → drill. Escape clears at the
+                  card level (see CustomerValueBody). */}
               <rect
                 x={marginLeft + bandW * i}
                 y={marginTop}
                 width={bandW}
                 height={plotH}
                 fill="transparent"
+                role={drillable ? 'button' : undefined}
+                tabIndex={drillable ? 0 : undefined}
+                aria-pressed={drillable ? isSelected : undefined}
+                aria-label={
+                  drillable ? `Drill into bucket ${b.label}` : undefined
+                }
+                style={drillable ? { cursor: 'pointer', outline: 'none' } : undefined}
+                onClick={drillable ? onActivate : undefined}
+                onKeyDown={
+                  drillable
+                    ? (e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault()
+                          onActivate()
+                        }
+                      }
+                    : undefined
+                }
                 onPointerEnter={(e) => {
                   lastPointerTypeRef.current = e.pointerType
                   cancelStickyClear()

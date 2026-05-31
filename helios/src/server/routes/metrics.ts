@@ -79,6 +79,31 @@ export async function registerMetricsRoutes(server: FastifyInstance): Promise<vo
     const brandIds = supportedSet.has('brand') ? queryArgs.brandIds : []
     const sizes = supportedSet.has('size') ? queryArgs.sizes : []
 
+    // v1.4 V4'4: drill-selection validation. We only forward the
+    // selection to `metric.query` when (a) the caller actually passed
+    // one and (b) the kind is in this metric's declared
+    // `supports.drillSelection`. A caller passing a selection for a
+    // metric that doesn't declare drillSelection gets a 400 — silently
+    // dropping it would lie to the operator (they'd see an
+    // un-narrowed dataset behind a URL that implies a drill is active).
+    let selection = queryArgs.selection
+    if (selection) {
+      if (selection.metricId !== metric.id) {
+        return reply.status(400).send({
+          error:
+            `selection.metricId ${JSON.stringify(selection.metricId)} does not match route metric ${JSON.stringify(metric.id)}.`,
+        })
+      }
+      const supported = metric.supports?.drillSelection ?? []
+      if (!supported.includes(selection.kind)) {
+        return reply.status(400).send({
+          error:
+            `Metric ${JSON.stringify(metric.id)} does not support drillSelection kind ${JSON.stringify(selection.kind)}. ` +
+            `Supported: ${supported.length === 0 ? '(none)' : supported.join(', ')}.`,
+        })
+      }
+    }
+
     const data = await metric.query({
       sites: queryArgs.sites,
       from,
@@ -88,6 +113,7 @@ export async function registerMetricsRoutes(server: FastifyInstance): Promise<vo
       subcategoryIds,
       brandIds,
       sizes,
+      selection,
     })
 
     return reply.send(

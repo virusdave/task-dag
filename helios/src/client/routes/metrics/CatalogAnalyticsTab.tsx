@@ -27,6 +27,14 @@ import {
 import { HelpIcon } from './MetricChart.js'
 import { computeCompactDomain } from './scatterAutoZoom.js'
 import { useScatterZoom, type ZoomView } from './scatterZoom.js'
+import { useMetricSelection } from './useMetricSelection.js'
+
+// v1.4 V4'4: per-card synthetic metricId prefix. Catalog scatters are
+// served by /api/catalog-analytics/points (not the metric registry),
+// but the URL `?selection=…` payload still keys off a stable
+// metricId so share-links reproduce the drilled dot. metricId =
+// `catalog.<scatter-card-config-id>`.
+const CATALOG_SCATTER_METRIC_ID_PREFIX = 'catalog.'
 
 // ---------------------------------------------------------------------------
 // Catalog analytics tab — independent of the time-series metric registry.
@@ -2173,6 +2181,36 @@ function ScatterCard({
 }: ScatterCardProps) {
   const [xId, setXId] = useState<string>(config.defaultX)
   const [yId, setYId] = useState<string>(config.defaultY)
+
+  // v1.4 V4'4: URL-backed scatter-dot drill selection. metricId is
+  // synthetic but stable per card-config — share-links reproduce the
+  // drilled dot. Escape clears at the window level (handled here so
+  // every scatter card has the same behaviour without a tab-level
+  // listener).
+  const metricId = `${CATALOG_SCATTER_METRIC_ID_PREFIX}${config.id}`
+  const [selection, setSelection] = useMetricSelection()
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape' && selection != null) setSelection(null)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [selection, setSelection])
+  const selectedDotId =
+    selection != null &&
+    selection.kind === 'scatterDot' &&
+    selection.metricId === metricId
+      ? selection.dotId
+      : null
+  const onSelectDot = (dotId: string | null): void => {
+    setSelection(
+      dotId == null
+        ? null
+        : { kind: 'scatterDot', metricId, dotId },
+    )
+  }
+
   const [localColourBy, setLocalColourBy] = useState<ColourByKey>(config.defaultColourBy)
   const [localSizeBy, setLocalSizeBy] = useState<SizeByKey>(
     config.defaultSizeBy ?? 'none',
@@ -2308,6 +2346,8 @@ function ScatterCard({
        axisCtx={axisCtx}
        referenceLine={config.referenceLine}
        highlightMatcher={highlightMatcher}
+       selectedDotId={selectedDotId}
+       onSelectDot={onSelectDot}
       />
     </article>
   )
@@ -2330,6 +2370,10 @@ interface CatalogScatterSvgProps {
    *  render at full opacity with a thicker stroke ring; non-matching
    *  points are heavily dimmed so the subset visually pops. */
   highlightMatcher?: ((p: CatalogAnalyticsPoint) => boolean) | null
+  /** v1.4 V4'4: currently-selected dot's inventoryItemId (or null). */
+  selectedDotId?: string | null
+  /** v1.4 V4'4: click/keyboard activation handler. */
+  onSelectDot?: (dotId: string | null) => void
 }
 
 interface PlottedPoint {
@@ -2368,6 +2412,8 @@ function CatalogScatterSvg({
   axisCtx,
   referenceLine,
   highlightMatcher,
+  selectedDotId,
+  onSelectDot,
 }: CatalogScatterSvgProps) {
   const wrapRef = useRef<HTMLDivElement | null>(null)
   const svgRef = useRef<SVGSVGElement | null>(null)
@@ -2905,6 +2951,32 @@ function CatalogScatterSvg({
             })
             const renderDot = (pp: PlottedPoint, idx: number, isMatch: boolean): JSX.Element => {
               const r = dotRadius(pp.sizeValue)
+              // v1.4 V4'4: selected dots get a 2px black stroke that
+              // overrides every other stroke. Drill is wired only
+              // when onSelectDot is provided.
+              const drillable = onSelectDot != null
+              const isSelected =
+                drillable && selectedDotId != null && selectedDotId === pp.p.inventoryItemId
+              const onActivate = (): void => {
+                if (!drillable) return
+                onSelectDot!(isSelected ? null : pp.p.inventoryItemId)
+              }
+              const drillAttrs = drillable
+                ? {
+                    role: 'button' as const,
+                    tabIndex: 0,
+                    'aria-pressed': isSelected,
+                    'aria-label': `Drill into ${pp.p.productName ?? pp.p.inventoryItemId}`,
+                    style: { cursor: 'pointer', outline: 'none' },
+                    onClick: onActivate,
+                    onKeyDown: (e: React.KeyboardEvent<SVGCircleElement>) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault()
+                        onActivate()
+                      }
+                    },
+                  }
+                : {}
               if (hasHighlight && !isMatch) {
                 return (
                   <circle
@@ -2914,7 +2986,9 @@ function CatalogScatterSvg({
                     r={Math.max(1.5, r - 0.5)}
                     fill={dotColour(pp)}
                     fillOpacity={Math.min(0.18, dotOpacity(pp.opacityValue))}
-                    stroke="none"
+                    stroke={isSelected ? '#000' : 'none'}
+                    strokeWidth={isSelected ? 2 : 0}
+                    {...drillAttrs}
                   />
                 )
               }
@@ -2927,8 +3001,9 @@ function CatalogScatterSvg({
                     r={r + 0.5}
                     fill={dotColour(pp)}
                     fillOpacity={Math.max(0.9, dotOpacity(pp.opacityValue))}
-                    stroke="#111"
-                    strokeWidth={1.25}
+                    stroke={isSelected ? '#000' : '#111'}
+                    strokeWidth={isSelected ? 2 : 1.25}
+                    {...drillAttrs}
                   />
                 )
               }
@@ -2940,8 +3015,9 @@ function CatalogScatterSvg({
                   r={r}
                   fill={dotColour(pp)}
                   fillOpacity={dotOpacity(pp.opacityValue)}
-                  stroke="#fff"
-                  strokeWidth={0.5}
+                  stroke={isSelected ? '#000' : '#fff'}
+                  strokeWidth={isSelected ? 2 : 0.5}
+                  {...drillAttrs}
                 />
               )
             }

@@ -9,6 +9,13 @@ import {
 import { loadJson } from '../../app/fetchJson.js'
 import { niceXTicks, niceYTicks } from './gridlines.js'
 import { HelpIcon } from './MetricChart.js'
+import { useMetricSelection } from './useMetricSelection.js'
+
+// v1.4 V4'4: synthetic metric id for the Budtender Advanced cashier
+// scatter (this panel is served by /api/budtender-analytics, not the
+// /api/metrics registry). The URL `?selection=…` payload keys off
+// this so share-links reproduce the drilled cashier dot.
+const BUDTENDER_CASHIER_SCATTER_METRIC_ID = 'budtender.cashier-scatter'
 
 // ---------------------------------------------------------------------------
 // Budtender Performance dashboard tab.
@@ -956,6 +963,44 @@ function CashierScatterCard({ data }: { data: BudtenderAnalyticsResponse }) {
   const [colourId, setColourId] = useState<string>('samePctRank')
   const [sizeId, setSizeId] = useState<string>('transactions')
   const [highlight, setHighlight] = useState<string>('')
+
+  // v1.4 V4'4: URL-backed drill selection. Escape clears at the
+  // window level. The scatter dot click handler writes
+  // ?selection={kind:'scatterDot', metricId, dotId:cashierId} to the
+  // URL so the drilled state survives a copy-paste of the address bar.
+  const [selection, setSelection] = useMetricSelection()
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape' && selection != null) setSelection(null)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [selection, setSelection])
+  const selectedCashierId =
+    selection != null &&
+    selection.kind === 'scatterDot' &&
+    selection.metricId === BUDTENDER_CASHIER_SCATTER_METRIC_ID
+      ? selection.dotId
+      : null
+  const onSelectCashier = (cashierId: string | null): void => {
+    setSelection(
+      cashierId == null
+        ? null
+        : {
+            kind: 'scatterDot',
+            metricId: BUDTENDER_CASHIER_SCATTER_METRIC_ID,
+            dotId: cashierId,
+          },
+    )
+  }
+  const selectedCashier = useMemo(
+    () =>
+      selectedCashierId == null
+        ? null
+        : data.cashiers.find((c) => c.cashierId === selectedCashierId) ?? null,
+    [data.cashiers, selectedCashierId],
+  )
   const xDef = useMemo(() => SCATTER_AXES.find((a) => a.id === xId) ?? SCATTER_AXES[0]!, [xId])
   const yDef = useMemo(() => SCATTER_AXES.find((a) => a.id === yId) ?? SCATTER_AXES[2]!, [yId])
   const colourDef = useMemo(
@@ -1028,6 +1073,31 @@ function CashierScatterCard({ data }: { data: BudtenderAnalyticsResponse }) {
           </label>
         </div>
       </header>
+      {/* v1.4 V4'4: surface the currently-drilled cashier directly
+          under the scatter so the operator never sees the 2px stroke
+          highlight without an explanatory readout + clear button. */}
+      {selectedCashier ? (
+        <aside
+          className="budtender-scatter-selection-callout"
+          role="status"
+          aria-live="polite"
+        >
+          <strong>Drilled:</strong>{' '}
+          {selectedCashier.cashierName || `Cashier ${selectedCashier.cashierId}`}{' '}
+          <span className="subtle-copy">
+            ({fmtInt(selectedCashier.transactions)} txns · {fmtMoney(selectedCashier.sales)} sales)
+          </span>{' '}
+          <button
+            type="button"
+            className="ghost-button"
+            onClick={() => onSelectCashier(null)}
+            aria-label="Clear drill selection"
+            title="Clear drill selection (Escape)"
+          >
+            ✕
+          </button>
+        </aside>
+      ) : null}
       <CashierScatterSvg
         cashiers={data.cashiers}
         xDef={xDef}
@@ -1035,6 +1105,8 @@ function CashierScatterCard({ data }: { data: BudtenderAnalyticsResponse }) {
         colourDef={colourDef}
         sizeDef={sizeDef}
         matcher={matcher}
+        selectedCashierId={selectedCashierId}
+        onSelectCashier={onSelectCashier}
       />
     </article>
   )
@@ -1059,6 +1131,10 @@ interface ScatterSvgProps {
   colourDef: AxisDef & { betterDir: 'high' | 'low' }
   sizeDef: AxisDef
   matcher: ((c: BudtenderCashierRow) => boolean) | null
+  /** v1.4 V4'4: currently-selected cashierId (URL drill). */
+  selectedCashierId: string | null
+  /** v1.4 V4'4: callback when a dot is clicked/keyboard-activated. */
+  onSelectCashier: (cashierId: string | null) => void
 }
 
 function CashierScatterSvg(p: ScatterSvgProps) {
@@ -1220,6 +1296,16 @@ function CashierScatterSvg(p: ScatterSvgProps) {
         {matched.map((i) => {
           const d = plotted[i]!
           const r = dotR(d.size)
+          // v1.4 V4'4: selected cashier gets a 2px black stroke that
+          // overrides the highlight/matched stroke. Toggle on
+          // re-click. Tab + Enter / Space activate via the SVG <a>
+          // wrapper (role=button + tabindex=0).
+          const isSelected = p.selectedCashierId === d.c.cashierId
+          const baseStroke = p.matcher ? '#111' : '#fff'
+          const baseStrokeW = p.matcher ? 1.25 : 0.5
+          const onActivate = (): void => {
+            p.onSelectCashier(isSelected ? null : d.c.cashierId)
+          }
           return (
             <circle
               key={`pt-${i}`}
@@ -1227,9 +1313,21 @@ function CashierScatterSvg(p: ScatterSvgProps) {
               cy={yScale(d.y)}
               r={r}
               fill={colourFor(d.colour)}
-              fillOpacity={p.matcher ? 0.95 : 0.7}
-              stroke={p.matcher ? '#111' : '#fff'}
-              strokeWidth={p.matcher ? 1.25 : 0.5}
+              fillOpacity={p.matcher || isSelected ? 0.95 : 0.7}
+              stroke={isSelected ? '#000' : baseStroke}
+              strokeWidth={isSelected ? 2 : baseStrokeW}
+              role="button"
+              tabIndex={0}
+              aria-label={`Drill into cashier ${d.c.cashierName || d.c.cashierId}`}
+              aria-pressed={isSelected}
+              style={{ cursor: 'pointer', outline: 'none' }}
+              onClick={onActivate}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault()
+                  onActivate()
+                }
+              }}
               onMouseEnter={() => setHovered({ idx: i, xpx: xScale(d.x), ypx: yScale(d.y) })}
               onMouseLeave={() => setHovered(null)}
             />

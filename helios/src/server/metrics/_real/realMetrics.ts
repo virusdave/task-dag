@@ -413,6 +413,11 @@ export const REAL_METRICS: ReadonlyArray<MetricDef> = [
     defaultAggregation: 'date',
     supportedAggregations: [...WEATHER_METRIC_SUPPORTED_AGGS],
     chartType: 'scatter',
+    // v1.4 V4'4: every weather scatter dot is one (site, day) pair —
+    // declare scatterDot drill so the SPA can offer click-to-drill to
+    // the underlying per-day row (the query itself ignores selection
+    // today; backend narrowing follows once a Table tab consumes it).
+    supports: { drillSelection: ['scatterDot'] },
     query: queryWeatherMarginVsHighTemp,
   },
   {
@@ -428,6 +433,8 @@ export const REAL_METRICS: ReadonlyArray<MetricDef> = [
     defaultAggregation: 'date',
     supportedAggregations: [...WEATHER_METRIC_SUPPORTED_AGGS],
     chartType: 'scatter',
+    // v1.4 V4'4 — see weather.scatter_margin_vs_high_temp.
+    supports: { drillSelection: ['scatterDot'] },
     query: queryWeatherMarginVsLowTemp,
   },
   {
@@ -443,6 +450,8 @@ export const REAL_METRICS: ReadonlyArray<MetricDef> = [
     defaultAggregation: 'date',
     supportedAggregations: [...WEATHER_METRIC_SUPPORTED_AGGS],
     chartType: 'scatter',
+    // v1.4 V4'4 — see weather.scatter_margin_vs_high_temp.
+    supports: { drillSelection: ['scatterDot'] },
     query: queryWeatherMarginVsPrecip,
   },
   {

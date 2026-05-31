@@ -2,6 +2,7 @@ import type {
   MetricAggregation,
   MetricCatalogFilterDimension,
   MetricDefSummary,
+  MetricSelection,
   MetricSeriesDef,
   MetricSupports,
 } from '../../shared/contracts/index.js'
@@ -111,6 +112,14 @@ export interface MetricQueryArgs {
   readonly subcategoryIds?: readonly string[]
   readonly brandIds?: readonly string[]
   readonly sizes?: readonly string[]
+  /**
+   * v1.4 V4'4: optional drill-selection forwarded by the route
+   * handler when the caller passes a `?selection=…` query param AND
+   * the kind is in this metric's `supports.drillSelection`. Queries
+   * may use it to narrow their row set; queries that don't honour
+   * selection can safely ignore the field.
+   */
+  readonly selection?: MetricSelection
 }
 
 export type MetricQueryFn = (args: MetricQueryArgs) => Promise<MetricRow[]>

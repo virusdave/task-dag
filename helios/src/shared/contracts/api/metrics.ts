@@ -95,6 +95,45 @@ export const MetricDrillSelectionKindSchema = z.enum(['histogramBucket', 'scatte
 export type MetricDrillSelectionKind = z.infer<typeof MetricDrillSelectionKindSchema>
 
 /**
+ * Drill-selection payload that a metric / panel emits when one of its
+ * chart elements is clicked (v1.4 V4'4). Travels in the URL as a
+ * JSON-encoded `?selection=…` query param so share-links reproduce
+ * the drilled state, and (when applicable) gets forwarded to
+ * `/api/metrics/<id>` so the metric query can narrow the row set.
+ *
+ * Discriminated union — the `kind` field selects the meta shape:
+ *
+ *   - `histogramBucket` → `{ kind, metricId, bucketKey }`
+ *     `bucketKey` is the histogram's own bucket identifier (the
+ *     stringified `purchaseNumber` / `totalPurchases` for the
+ *     customer-value histograms, with `'overflow'` for the long-tail
+ *     `N+` bucket).
+ *
+ *   - `scatterDot` → `{ kind, metricId, dotId }`
+ *     `dotId` is the scatter's natural dot identifier (cashierId for
+ *     the budtender scatter, product/listing id for catalog
+ *     analytics, ISO date for the weather scatters).
+ *
+ * The route handler rejects any `selection` whose `kind` is not in
+ * the target metric's `supports.drillSelection`. Metrics that don't
+ * declare `drillSelection` are not drillable and reject *all*
+ * `selection` payloads with HTTP 400.
+ */
+export const MetricSelectionSchema = z.discriminatedUnion('kind', [
+  z.object({
+    kind: z.literal('histogramBucket'),
+    metricId: z.string().min(1),
+    bucketKey: z.string().min(1),
+  }),
+  z.object({
+    kind: z.literal('scatterDot'),
+    metricId: z.string().min(1),
+    dotId: z.string().min(1),
+  }),
+])
+export type MetricSelection = z.infer<typeof MetricSelectionSchema>
+
+/**
  * Optional capability bag a metric may declare to opt in to additional
  * dashboard behaviour. Kept additive — every field is optional and
  * absent ⇒ unchanged behaviour (so existing metrics get no new
@@ -211,6 +250,41 @@ export const MetricQueryRequestSchema = z.object({
   subcategoryIds: csvList,
   brandIds: csvList,
   sizes: csvList,
+  /**
+   * v1.4 V4'4: optional drill-selection. Travels as a JSON-encoded
+   * string in the URL (`?selection={"kind":"scatterDot",…}`); the
+   * route handler validates it against the target metric's
+   * `supports.drillSelection` and forwards the parsed object to
+   * `metric.query` so the query can narrow the row set.
+   *
+   * Empty / unset = no selection (the default — every existing
+   * caller stays on the unfiltered code path).
+   */
+  selection: z
+    .string()
+    .optional()
+    .transform((raw, ctx) => {
+      if (raw === undefined || raw === '') return undefined
+      let parsed: unknown
+      try {
+        parsed = JSON.parse(raw)
+      } catch (err) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `selection must be JSON: ${(err as Error).message}`,
+        })
+        return z.NEVER
+      }
+      const result = MetricSelectionSchema.safeParse(parsed)
+      if (!result.success) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `selection does not match MetricSelectionSchema: ${result.error.message}`,
+        })
+        return z.NEVER
+      }
+      return result.data
+    }),
 })
 export type MetricQueryRequest = z.infer<typeof MetricQueryRequestSchema>
 
