@@ -2227,7 +2227,148 @@ export function parseProductNameLegacy(name: string): ParsedProductName {
   if (/^ttm\s*[-:]/i.test(normalized)) {
     return normalizeAndValidateParsedProductName(parseTtmName(normalized), normalized)
   }
+  // Pipe-delimited supplier format: `Brand | Category | Strain | Size`.
+  // Used by multiple distributors that submit catalog rows with that
+  // exact, uniform 4-part shape (e.g. Platinum Reserve, Dank, Her
+  // Highness). The previous waterfall fell through to the HR Botanical
+  // brand-startsWith parser, which throws "Unhandled HR Botanical
+  // product name" on anything outside its 8 hard-coded brands — every
+  // 4-part pipe row therefore landed in the LLM fallback path and
+  // mostly in needs-manual-review. This branch handles the entire
+  // 4-part pipe shape in one place so the reviewer gets a fully
+  // populated row out of the box.
+  if (PIPE_DELIMITED_FOUR_PART_REGEX.test(normalized)) {
+    const parsed = parsePipeDelimitedFourPartName(normalized)
+    if (parsed !== null) {
+      return normalizeAndValidateParsedProductName(parsed, normalized)
+    }
+  }
   return normalizeAndValidateParsedProductName(parseHrBotanicalName(normalized), normalized)
+}
+
+// Matches `something | something | something | something` with 4 non-empty
+// parts. Keeps the parse path cheap (the regex is the gatekeeper before
+// any of the per-token classification work runs).
+const PIPE_DELIMITED_FOUR_PART_REGEX = /^[^|]+\|[^|]+\|[^|]+\|[^|]+$/
+
+function parsePipeDelimitedFourPartName(name: string): ParsedProductName | null {
+  const parts = name.split('|').map((part) => part.trim())
+  if (parts.length !== 4) return null
+  if (parts.some((part) => part.length === 0)) return null
+
+  const [brandRaw, categoryRaw, strainRaw, sizeRaw] = parts
+  const brand = brandRaw
+  const strain = cleanCultivar(strainRaw)
+
+  const classification = classifyPipeDelimitedCategoryToken(categoryRaw)
+  if (classification === null) return null
+
+  const sized = derivePipeDelimitedSize(sizeRaw)
+  if (sized === null) return null
+
+  const { packCount, size } = sized
+  const prevalence = derivePrevalence(strainRaw)
+  const variantTab = packCount > 1 ? `${packCount}x ${size}` : size
+  const variantName = packCount > 1
+    ? `${brand} ${strain} ${variantTab}`
+    : `${brand} ${strain} ${size}`
+
+  return {
+    brand,
+    category: classification.category,
+    groupName: strain,
+    packCount,
+    prevalence,
+    searchTerm: strain,
+    size,
+    strainName: strain,
+    subcategory: classification.subcategory,
+    variantName,
+    variantTab,
+  }
+}
+
+// Maps the free-form category token from the 2nd pipe segment to the
+// canonical (category, subcategory) tuple Helios expects. Returns null
+// when the token doesn't look like anything we know how to auto-place;
+// the caller then falls through to the LLM fallback / manual review.
+function classifyPipeDelimitedCategoryToken(
+  token: string,
+): { category: string; subcategory: string } | null {
+  const lowered = token.toLowerCase().trim()
+  const isInfused = /\binfused\b|\blive\s*resin\b|\brosin\b|\bdistillate\b/.test(lowered)
+
+  // Pre-Rolls: "Preroll", "Pre-Roll", "Pre Roll", optionally with
+  // "Infused" / "Live Resin" / etc. prefix or "Pack" suffix.
+  if (/\bpre[\s-]?rolls?\b|\bjoints?\b/.test(lowered)) {
+    return { category: 'Pre-Rolls', subcategory: isInfused ? 'Infused' : '' }
+  }
+
+  // Flower variants: bare "Flower", "Pre-Ground Flower",
+  // "Ready to Roll Flower", "Packaged Flower", etc. All map to
+  // category Flower; the "Infused" subcategory marker carries through.
+  if (/\bflower\b|\bbud\b|\bnug\b/.test(lowered)) {
+    return { category: 'Flower', subcategory: isInfused ? 'Infused' : '' }
+  }
+
+  // Vapes & cartridges.
+  if (/\bvape\b|\bcart(?:ridge)?\b|\baio\b|\ball[\s-]?in[\s-]?one\b|\bdisposable\b/.test(lowered)) {
+    return { category: 'Vapes', subcategory: /\baio\b|\ball[\s-]?in[\s-]?one\b|\bdisposable\b/.test(lowered) ? 'All-in-One' : '' }
+  }
+
+  // Edibles family.
+  if (/\bgumm(?:y|ies)\b|\bchew\b|\bchocolate\b|\bcandy\b|\bmint\b|\btablets?\b/.test(lowered)) {
+    return { category: 'Edibles', subcategory: 'Chews/Gummies' }
+  }
+  if (/\bbeverage\b|\bdrink\b|\bsoda\b|\bseltzer\b|\bjuice\b/.test(lowered)) {
+    return { category: 'Beverages', subcategory: '' }
+  }
+  if (/\bedibles?\b/.test(lowered)) {
+    return { category: 'Edibles', subcategory: '' }
+  }
+
+  // Concentrates.
+  if (/\bconcentrate\b|\bwax\b|\bshatter\b|\bbadder\b|\bbudder\b|\brosin\b|\bhash\b|\bdab\b/.test(lowered)) {
+    return { category: 'Concentrates', subcategory: '' }
+  }
+
+  // Tinctures / topicals.
+  if (/\btincture\b|\bsublingual\b/.test(lowered)) {
+    return { category: 'Tinctures', subcategory: '' }
+  }
+  if (/\btopical\b|\bbalm\b|\bsalve\b|\blotion\b|\bcream\b/.test(lowered)) {
+    return { category: 'Topicals', subcategory: '' }
+  }
+
+  return null
+}
+
+// Derives (packCount, size) from the 4th pipe segment.
+//
+// Accepted shapes (case-insensitive, whitespace-tolerant):
+//   1g, 3.5g, 14g, 28g, 1.1g, 0.5g, .5g       → packCount 1
+//   100mg, 10mg                                → packCount 1
+//   10x 10mg, 2x 1g, 5pk 0.5g, 4-pack 1g       → multi-pack
+function derivePipeDelimitedSize(raw: string): { packCount: number; size: string } | null {
+  const text = raw.trim()
+  if (text.length === 0) return null
+
+  // Multi-pack: leading count, separator (x|pk|pack|-pack|×), then size.
+  const multiPack = /^(\d+)\s*(?:x|×|pk|-?\s*pack)\s+(.+)$/i.exec(text)
+  if (multiPack) {
+    const packCount = Number.parseInt(multiPack[1], 10)
+    const sizePart = normalizeSizeText(multiPack[2])
+    if (Number.isFinite(packCount) && packCount > 0 && sizePart) {
+      return { packCount, size: sizePart }
+    }
+  }
+
+  // Single-unit: just a size literal (1g / 3.5g / 100mg / .5g).
+  const single = normalizeSizeText(text)
+  if (single && /\d/.test(single)) {
+    return { packCount: 1, size: single }
+  }
+  return null
 }
 
 /**
