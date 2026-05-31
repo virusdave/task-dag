@@ -1440,6 +1440,13 @@ async function buildGeneratedRow({
   })
   const parsed = parseResolution.parsed
 
+  // Compute family anchors UP FRONT so the reuse waterfall below can
+  // use them as a fallback match source. Anchors are the set of live
+  // catalog products that already match parsed.brand + category +
+  // subcategory + size + packCount — i.e. they're in the same "lane"
+  // and the only remaining axis is the strain / group name.
+  const anchors = parsed ? await familyAnchorProducts(cache, parsed) : []
+
   let reuse: LiveProductSummary | null = null
   let reuseReason: string | null = null
   if (stateDistributorProductRow?.productId) {
@@ -1448,13 +1455,39 @@ async function buildGeneratedRow({
       ? `Current distributor product row ${stateDistributorProductRow.distributorProductId} already links to ${stateDistributorProductRow.productName}.`
       : `Current distributor product row ${stateDistributorProductRow.distributorProductId} already links to an existing variant.`
   } else if (parsed) {
+    // 1. Exact variantName compactText equality (legacy strict path).
     reuse = await exactReuseSummary(cache, group.distributorProductName, parsed)
     if (reuse) {
       reuseReason = `Exact live variant match found for ${reuse.productName}.`
     }
+    // 2. Sweed pre-computed suggestion candidates: if Sweed itself
+    //    nominated a productId AND that product's structured shape
+    //    matches our parsed lane, treat it as a reuse. This catches
+    //    the very common case where the LLM teacher returned a
+    //    partial / non-canonical variantName (e.g. "3.5g" instead of
+    //    "Dank Purple Panty Dropper 3.5g") so exactReuseSummary's
+    //    strict compact-equality failed.
+    if (!reuse) {
+      const matched = await pickReuseFromSuggestionCandidates(cache, parsed, suggestionCandidates)
+      if (matched) {
+        reuse = matched.summary
+        reuseReason = `Sweed-suggested catalog match: ${matched.summary.productName}` +
+          (matched.score !== null ? ` (score ${matched.score}).` : '.')
+      }
+    }
+    // 3. Strain/group fuzzy match within family anchors. Anchors
+    //    already share brand+category+subcategory+size+packCount, so
+    //    the only remaining ambiguity is the strain / group name. If
+    //    a single anchor has a strain or group name matching the
+    //    parsed strain/group (compactText), reuse it.
+    if (!reuse) {
+      const matched = pickReuseFromAnchorsByStrain(anchors, parsed)
+      if (matched) {
+        reuse = matched
+        reuseReason = `Live family-anchor strain match: ${matched.productName}.`
+      }
+    }
   }
-
-  const anchors = parsed ? await familyAnchorProducts(cache, parsed) : []
   const anchorPrice = medianPrice(anchors)
   const primaryImage = reuse?.imageUrl ?? anchors.find((anchor) => anchor.imageUrl)?.imageUrl ?? null
   const currentDescription = reuse?.description ?? null
@@ -1846,6 +1879,90 @@ async function familyAnchorProducts(cache: CatalogCache, parsed: ParsedProductNa
   }
 
   return anchors
+}
+
+// Returns true when a live catalog product summary structurally matches
+// the parsed pending-purchase lane (brand/category/subcategory/size/
+// packCount). Used by the reuse waterfall's suggestion-candidate path
+// to confirm a Sweed-nominated productId is actually the same SKU
+// shape we're trying to reuse — without that check, a Sweed candidate
+// for the wrong size (e.g. 0.5g vs 3.5g) could be reused incorrectly.
+function liveSummaryMatchesParsedLane(
+  summary: LiveProductSummary,
+  parsed: ParsedProductName,
+): boolean {
+  if (compactText(summary.brand) !== compactText(parsed.brand)) return false
+  if (summary.category !== parsed.category) return false
+  if ((summary.subcategory || '') !== parsed.subcategory) return false
+  if (summary.size !== parsed.size) return false
+  if ((summary.packCount || 1) !== parsed.packCount) return false
+  return true
+}
+
+// Walk the (already-sorted-by-score) suggestionCandidates from Sweed
+// and return the first one whose productId resolves to a live product
+// summary that matches our parsed lane. This is the second tier of the
+// reuse waterfall: it fires when exactReuseSummary's strict compactText
+// equality misses because the LLM teacher returned a non-canonical
+// variantName (very common: "3.5g" or "Flower 3.5g" instead of
+// "Dank Purple Panty Dropper 3.5g").
+async function pickReuseFromSuggestionCandidates(
+  cache: CatalogCache,
+  parsed: ParsedProductName,
+  suggestionCandidates: readonly SuggestedProductCandidate[],
+): Promise<{ summary: LiveProductSummary; score: number | null } | null> {
+  for (const candidate of suggestionCandidates) {
+    if (candidate.productId === null) continue
+    try {
+      const summary = await cache.getProductSummary(candidate.productId)
+      if (liveSummaryMatchesParsedLane(summary, parsed)) {
+        return { summary, score: candidate.score }
+      }
+    } catch {
+      // A suggestion candidate may point at a product that's been
+      // deleted / made invisible upstream; skip and keep walking
+      // rather than letting a stale Sweed suggestion crash the row.
+      continue
+    }
+  }
+  return null
+}
+
+// Third tier of the reuse waterfall: pick the anchor whose strain or
+// groupName matches the parsed strain/groupName (compactText). Anchors
+// already share brand+category+subcategory+size+packCount, so this is
+// the final identity axis. Returns null when nothing matches OR when
+// multiple anchors tie (ambiguous → safer to fall through to
+// catalog-create with the reviewer in the loop). This catches the
+// real-world case where Sweed didn't surface a suggestion candidate
+// AND exactReuseSummary missed because variantName didn't compact-
+// equal the catalog row name.
+function pickReuseFromAnchorsByStrain(
+  anchors: readonly LiveProductSummary[],
+  parsed: ParsedProductName,
+): LiveProductSummary | null {
+  const targetStrain = compactText(parsed.strainName)
+  const targetGroup = compactText(parsed.groupName)
+  if (targetStrain.length === 0 && targetGroup.length === 0) return null
+
+  const matches: LiveProductSummary[] = []
+  for (const anchor of anchors) {
+    const anchorStrain = compactText(anchor.strain)
+    const anchorGroup = compactText(anchor.groupName)
+    if (
+      (targetStrain.length > 0 && anchorStrain === targetStrain) ||
+      (targetGroup.length > 0 && anchorGroup === targetGroup)
+    ) {
+      matches.push(anchor)
+    }
+  }
+
+  if (matches.length === 1) return matches[0]
+  // Ambiguous (0 or 2+ matches): defer to the reviewer rather than
+  // guess. With 2+ matches the catalog has a duplicate problem that
+  // a human should resolve; with 0 matches this is a genuinely new
+  // strain in the family and catalog-create is the right action.
+  return null
 }
 
 // Pricing proposals must never use cost basis of trade samples or anything
