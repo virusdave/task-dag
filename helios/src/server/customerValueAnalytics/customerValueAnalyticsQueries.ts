@@ -783,7 +783,15 @@ async function runRetentionQueries(args: RetentionQueryArgs): Promise<RetentionP
     -- We compute period_index by floor-dividing seconds for 'week' and
     -- by month-difference for 'month' (calendar-aware).
     retention_events as (
-      select cis.cohort_key, cis.cohort_size, pe.customer_id,
+      -- v1.4 V4'6 oracle-review fix: previously
+      --   select cis.cohort_key, cis.cohort_size, pe.customer_id, ...
+      -- but cohort_size is NOT a column on customers_in_scope --- it
+      -- lives only on the separate cohort_sizes CTE that the final
+      -- union joins via "using (cohort_key)". The reference would
+      -- have failed ?include=retention at runtime; contract-only
+      -- zod tests can't catch SQL-column drift. Field was unused
+      -- downstream so the fix is to delete it.
+      select cis.cohort_key, pe.customer_id,
         case when $5::text = 'week'
           then floor(extract(epoch from (pe.pay_time - cis.cohort_key)) / (7 * 86400))::int
           else (

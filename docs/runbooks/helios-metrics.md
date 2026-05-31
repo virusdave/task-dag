@@ -676,6 +676,169 @@ listings the parent EPIC AC references). v1.4 changes:
   customers" toggle (V4'5). The toggle becoming functional
   is explicitly v1.4.1 scope.
 
+### Perf measurement (v1.4 V4'6 — pre-deploy baseline)
+
+Measured against the production read-replica via
+`PGSERVICE=db-94793 psql` from `vps-nixos-3` on 2026-05-31 (the v1.4
+code has not been deployed yet — the deploy is held until the close
+commit lands). Numbers below include the psql roundtrip (~38 ms
+floor measured against a trivial `select count(*)`), so the actual
+in-process query cost is roughly the reported number minus the
+network roundtrip.
+
+#### `/api/customer-value-analytics?include=retention`
+
+Targets (from V4'2's spec / V4'3's exit criteria): P50 < 700 ms warm,
+P95 < 1.5 s cold on typical windows (4w / 12w / all-time).
+
+Per-query timings, 10 samples each, sorted, all in milliseconds via
+psql roundtrip:
+
+| Query | Window | p50 | p95 |
+| --- | --- | --- | --- |
+| Veriscan coverage (V4'5) | 12w | 53.7 | 55.4 |
+| Cohort retention (V4'3) | all-time | 111.5 | 113.4 |
+
+`EXPLAIN ANALYZE` for the V4'5 coverage query (28-day window):
+
+- Aggregate over `sweed_orders` index-only scan on
+  `sweed_orders_budtender_range_cover_idx` (~495 buffer hits, 4286
+  rows in the 28-day window).
+- `EXISTS` sub-plan against `visitor_scan_links` uses
+  `visitor_scan_links_status_idx` for now (the planner prefers it
+  because `linked` rows are sparse today); as coverage grows the
+  partial index `visitor_scan_links_sweed_customer_idx` will become
+  the preferred path.
+- Total execution time: 8.9 ms (cold-from-pool); 38 ms via psql
+  roundtrip warm.
+
+`EXPLAIN ANALYZE` for the V4'3 retention query (all-time, no `from`
+cutoff — the worst case the SPA can request):
+
+- Index-only scan over `sweed_orders` driven by
+  `sweed_orders_budtender_range_cover_idx`; window functions over
+  ~40 k events to compute `purchase_n`; hash aggregate to
+  `customer_rollup` (~10 k customers).
+- Total execution time: 98.5 ms; 113 ms via psql roundtrip warm.
+
+The consolidated endpoint runs the main UNION-ALL, the guest
+count, the retention block, and the veriscan coverage in a single
+`Promise.all`, so wall-clock for the response is bounded by the
+slowest constituent — currently ~115 ms warm on the all-time
+retention path, well under both targets.
+
+Conclusion: **no perf regression vs the v1.3-slice baseline (which
+had no retention pass).** The retention CTEs land under the cold
+P95 target by a >10× margin and under the warm P50 target by a
+>6× margin. No escape-valve refactor (sibling
+`/api/customer-retention` endpoint) is needed.
+
+#### `REFRESH MATERIALIZED VIEW CONCURRENTLY sweed_order_margin_mv`
+
+**N/A — V4'2 is BLOCKED.** The line-items ingest prerequisite
+(`sweed_order_line_items` + `product_cost_history`) is not live on
+production; `sweed_order_margin_mv` therefore does not exist. The
+margin MV refresh measurement will be re-run once V4'2 ships as a
+follow-on commit. See the V4'2 hard-precheck page on
+[virusdave/top-level#7](https://github.com/virusdave/top-level/issues/7).
+
+#### `/api/metrics/<id>/rows?selection=…`
+
+The V4'4 `selection` query param goes through
+`MetricSelectionSchema.parse(JSON.parse(value))` once per request
+(<0.1 ms per the zod profiling done in v1.2). No metric query in
+v1.4 actually reads `selection` from the args object — the
+drillable panels are all synthetic-id panels (Customer Value,
+Budtender, Catalog scatter) whose drill state lives in the URL +
+client only. Conclusion: **`/rows` perf is unchanged.** Per-row
+drill that consumes `selection` server-side is a v1.4.1+ scope item.
+
+### Validation evidence (v1.4 V4'6)
+
+Pre-deploy validation that *can* be done without a running deploy
+is captured here. Post-deploy screenshot evidence is owned by the
+operator and lands in the close commit on
+[virusdave/top-level#7](https://github.com/virusdave/top-level/issues/7).
+
+| AC | What | Where it's validated |
+| --- | --- | --- |
+| 1 (scatter gridlines) | V4'1 build + targeted vitest | `helios/src/client/routes/metrics/gridlines.test.ts` |
+| 2 (margin-$ basis) | **N/A** — V4'2 BLOCKED on line-items ingest | (deferred follow-on) |
+| 3 (cohort retention + first-to-second) | V4'3 build + manual SQL probe against prod | `customerValueAnalyticsQueries.ts` `runRetentionQueries` |
+| 4 (histogram + scatter drill click) | V4'4 contract + zod test | `helios/src/shared/contracts/api/metrics.test.ts` (12 cases) |
+| 5 (VeriScan badge + gated toggle) | V4'5 contract + manual SQL probe against prod | `customerValueAnalyticsQueries.ts` veriscan block |
+| 6 (oracle review) | V4'6 oracle verdict captured in the closure-status comment | top-level#7 |
+| 7 (live on prod) | **PENDING DEPLOY** — operator's post-deploy systemd restart + smoke | (deferred to close commit) |
+
+Pre-deploy build green: `npm run build` (vite + tsc -p
+`tsconfig.server.json`) passes. Pre-commit smoke (`server boots; /
+serves SPA shell; /assets/<hash>.js serves real bundle`) passes on
+every V4'<n> commit landed in this epic.
+
+Post-deploy screenshot evidence (operator captures these and
+attaches to the close commit on top-level#7):
+
+- Scatter with gridlines on Budtender Advanced cashier scatter
+  (desktop + 412 px mobile).
+- Scatter with gridlines on Catalog Analytics scatter (desktop +
+  412 px mobile).
+- Cohort retention curve in default (max-12) and "show all" modes.
+- First-to-second conversion sparkline with hover open showing the
+  30 d / 60 d / 90 d readouts.
+- VeriScan coverage badge with the operator-approved tooltip open.
+- Histogram bucket drill landed in URL (`?selection=…`) — for v1.4
+  the four Customer Value histograms are synthetic-id panels, so
+  the operator-visible evidence is the URL update + the inline
+  Selection Callout banner, not a server `/rows` round-trip (the
+  per-row drill into the Table tab for synthetic-id panels is a
+  v1.4.1+ follow-on; this is documented in
+  "Drill-selection contract — wire shape (v1.4 V4'4)" above).
+
+### Oracle review verdict (v1.4 V4'6)
+
+The oracle tool reviewed the V4'0..V4'5 diff against the v1.4 plan
+on 2026-05-31. Verdict:
+
+- **One deployment blocker found in V4'3:** the retention SQL
+  in `runRetentionQueries` referenced `cis.cohort_size`, which is
+  not a column on the `customers_in_scope` CTE (it lives on the
+  separate `cohort_sizes` CTE that the final union joins via
+  `using (cohort_key)`). The reference was unused downstream, so
+  the fix was to delete it. Since `CustomerValueTab.tsx`
+  unconditionally sends `?include=retention`, this would have
+  failed the entire Customer Value tab on first load after deploy.
+  **Fixed in this V4'6 commit** and verified against the prod
+  read-replica with both `'week'` and `'month'` granularity and
+  both `'all_as_of_end'` and `'active_in_range'` cohort scopes —
+  the query now returns real retention curves (e.g. the
+  2025-07-01 monthly cohort: 100% → 76.8% → 72.8% → 69.8% → 65.5%
+  retention over months 0..4).
+- **V4'5 SQL clean.** `total` correctly includes guests; `linked`
+  uses `EXISTS` to avoid customer-with-multiple-scans double-count;
+  parametrized via `$1::bigint[]` / `$2/$3::timestamptz`; sensible
+  index usage; `pct` is functionally `[0, 1]` and additionally
+  schema-clamped.
+- **V4'5 frontend gating correct.** Below 25% the toggle is
+  disabled and unchecked; at or above it's enabled but local-only.
+  No API param or data transformation is wired to `veriscanOnly` —
+  the v1.4.1 follow-on does the wiring.
+- **Test-coverage gap (acknowledged, deferred to v1.4.1):** the
+  consolidated `/api/customer-value-analytics` endpoint has Zod
+  contract tests for request / response shape, but no integration
+  test that actually executes the SQL — that's how the V4'3
+  `cis.cohort_size` typo survived to V4'6. A follow-on integration
+  smoke that runs the retention SQL against a DB fixture is filed
+  against v1.4.1 (capture the gap in the v1.4 closure comment so
+  it isn't lost).
+- Timezone caveat: `date_trunc('week'|'month', timestamptz)` is
+  session-timezone-dependent. Production runs UTC, so the cohort
+  boundaries align with the ISO UTC labels the contract emits.
+  If we ever switch the DB session timezone, retention cohort
+  boundaries will need explicit `at time zone 'UTC'` normalisation.
+
+**No further regression flagged.** With the V4'3 fix landed in
+V4'6, the v1.4 surface is cleared for deploy.
+
 ### Acceptance criteria pointer
 
 v1.4 closure requires v1.1 AC §1–10, v1.2 AC §1–8, v1.3 AC
