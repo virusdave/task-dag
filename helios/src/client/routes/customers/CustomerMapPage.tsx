@@ -26,6 +26,7 @@ import { useLoaderData, useSearchParams } from 'react-router-dom'
 import {
   CustomersMapEarliestResponseSchema,
   CustomersMapResponseSchema,
+  type CustomersMapPoint,
   type CustomersMapResponse,
 } from '../../../shared/contracts/index.js'
 import { loadJson } from '../../app/fetchJson.js'
@@ -219,6 +220,25 @@ const BASE_RADIUS_EXPR: maplibregl.ExpressionSpecification = [
   19, 9,
 ]
 
+// Per-feature size multiplier (computed client-side by the
+// encoding pipeline above and stuffed into each feature's
+// `sizeMul` property). Coalesce to 1 so dots with no encoded
+// value still render at base size.
+const SIZE_MUL_EXPR: maplibregl.ExpressionSpecification = [
+  'to-number',
+  ['get', 'sizeMul'],
+  1,
+]
+
+// Static layer radius: zoom-interp base × per-feature size mul.
+// Replay multiplies this by the additional grow-then-shrink factor
+// from replayRadiusExpr.
+const SIZED_RADIUS_EXPR: maplibregl.ExpressionSpecification = [
+  '*',
+  BASE_RADIUS_EXPR,
+  SIZE_MUL_EXPR,
+]
+
 // Replay radius expression — same zoom-interpolated base, scaled
 // by a per-dot "grow then settle" factor:
 //
@@ -248,7 +268,8 @@ function replayRadiusExpr(
       ],
     ],
   ]
-  return ['*', BASE_RADIUS_EXPR, multiplier]
+  // base × per-feature size-mul × replay grow-then-shrink factor
+  return ['*', SIZED_RADIUS_EXPR, multiplier]
 }
 
 /** Human-readable duration ("5s", "1m 30s", "2h 15m"). */
@@ -436,6 +457,421 @@ function jitterCoord(
 }
 
 // ---------------------------------------------------------------------
+// Encoding axes (color / size) — mirrors the per-card encoding
+// selectors on the catalog-analytics scatter plots.
+//
+// Per operator: stop hard-coding color on `siteSlug` (we typically
+// view one site at a time anyway) and instead let the operator pick
+// what each per-dot axis means. Opacity stays driven by the replay
+// cursor's "check-in age" fade (see replay*OpacityExpr above).
+//
+// All encoding work is done client-side. We pre-compute `color`
+// (hex string) and `sizeMul` (radius multiplier) into each GeoJSON
+// feature's properties, and the MapLibre paint expressions just
+// `['get', 'color']` / multiply BASE_RADIUS_EXPR by `['get',
+// 'sizeMul']`. Much simpler than maintaining one expression tree
+// per encoding, and trivial at 2.5–10k points.
+//
+// Caveats:
+//   * lifetimeSpend / lifetimeOrderCount are NULL when the scan is
+//     not CRM-linked → those dots fall into a neutral "no data"
+//     swatch.
+//   * lifetime metrics are "current lifetime as of right now", not
+//     "as of scan time"; the legend says so.
+// ---------------------------------------------------------------------
+
+type ColorByKey =
+  | 'visitType'
+  | 'site'
+  | 'gender'
+  | 'ageYears'
+  | 'lifetimeSpend'
+  | 'lifetimeVisits'
+  | 'lifetimeOrders'
+
+const COLOR_BY_KEYS: readonly ColorByKey[] = [
+  'visitType',
+  'site',
+  'gender',
+  'ageYears',
+  'lifetimeSpend',
+  'lifetimeVisits',
+  'lifetimeOrders',
+]
+
+function isColorByKey(value: string): value is ColorByKey {
+  return (COLOR_BY_KEYS as readonly string[]).includes(value)
+}
+
+type SizeByKey =
+  | 'uniform'
+  | 'lifetimeSpend'
+  | 'lifetimeVisits'
+  | 'lifetimeOrders'
+  | 'ageYears'
+
+const SIZE_BY_KEYS: readonly SizeByKey[] = [
+  'uniform',
+  'lifetimeSpend',
+  'lifetimeVisits',
+  'lifetimeOrders',
+  'ageYears',
+]
+
+function isSizeByKey(value: string): value is SizeByKey {
+  return (SIZE_BY_KEYS as readonly string[]).includes(value)
+}
+
+interface CategoricalBucket {
+  /** Stable string key for the bucket (e.g. 'first', 'M', 'bx'). */
+  readonly key: string
+  /** Human-readable legend label. */
+  readonly label: string
+  /** Base color before per-dot saturation modulation. */
+  readonly color: string
+}
+
+interface CategoricalColorByDef {
+  readonly kind: 'categorical'
+  readonly id: ColorByKey
+  readonly label: string
+  readonly buckets: ReadonlyArray<CategoricalBucket>
+  /** Returns the bucket key for a given point, or null for "no data". */
+  readonly bucketFor: (p: CustomersMapPoint) => string | null
+  /** Color for points whose value doesn't match any bucket. */
+  readonly nullColor: string
+  readonly nullLabel: string
+}
+
+interface ContinuousColorByDef {
+  readonly kind: 'continuous'
+  readonly id: ColorByKey
+  readonly label: string
+  /** Numeric value or null when missing. */
+  readonly value: (p: CustomersMapPoint) => number | null
+  /** Formatter for legend min/max labels. */
+  readonly format: (n: number) => string
+  /** Color for null-value points. */
+  readonly nullColor: string
+  readonly nullLabel: string
+}
+
+type ColorByDef = CategoricalColorByDef | ContinuousColorByDef
+
+// Categorical palettes. Picked for legibility on the ghosted
+// basemap; first-time scans land on the brand-orange so the
+// saturation boost (see modulateColor below) makes them really pop.
+const NULL_COLOR = '#9a9a9a'
+
+const COLOR_BY_DEFS: ReadonlyArray<ColorByDef> = [
+  {
+    kind: 'categorical',
+    id: 'visitType',
+    label: 'Visit type (first / returning)',
+    buckets: [
+      { key: 'first', label: 'First-time', color: '#f25c1c' },
+      { key: 'returning', label: 'Returning', color: '#0d47ff' },
+      { key: 'unknown', label: 'Unknown (no person key)', color: NULL_COLOR },
+    ],
+    bucketFor: (p) => p.visitType,
+    nullColor: NULL_COLOR,
+    nullLabel: 'No data',
+  },
+  {
+    kind: 'categorical',
+    id: 'site',
+    label: 'Site (Bronx / Midtown)',
+    buckets: [
+      { key: 'bx', label: 'Bronx (bx)', color: '#0d47ff' },
+      { key: 'mh', label: 'Midtown (mh)', color: '#f25c1c' },
+    ],
+    bucketFor: (p) => p.siteSlug,
+    nullColor: NULL_COLOR,
+    nullLabel: 'Other',
+  },
+  {
+    kind: 'categorical',
+    id: 'gender',
+    label: 'Sex (ID-document marker)',
+    buckets: [
+      { key: 'M', label: 'Male (M)', color: '#1c6ef2' },
+      { key: 'F', label: 'Female (F)', color: '#e84a78' },
+      { key: 'X', label: 'X / non-binary', color: '#6c5ce7' },
+    ],
+    bucketFor: (p) => {
+      if (p.gender === null) return null
+      const g = p.gender.trim().toUpperCase()
+      if (g === 'M' || g === 'F' || g === 'X') return g
+      return null
+    },
+    nullColor: NULL_COLOR,
+    nullLabel: 'Missing / other',
+  },
+  {
+    kind: 'continuous',
+    id: 'ageYears',
+    label: 'Age at scan',
+    value: (p) => (p.ageYears === null ? null : p.ageYears),
+    format: (n) => `${Math.round(n)}y`,
+    nullColor: NULL_COLOR,
+    nullLabel: 'Unknown age',
+  },
+  {
+    kind: 'continuous',
+    id: 'lifetimeSpend',
+    label: 'Lifetime spend $ (current, CRM-linked only)',
+    value: (p) => p.lifetimeSpendDollars,
+    format: (n) =>
+      n >= 1000
+        ? `$${(n / 1000).toFixed(n >= 10_000 ? 0 : 1)}k`
+        : `$${Math.round(n)}`,
+    nullColor: NULL_COLOR,
+    nullLabel: 'Not linked',
+  },
+  {
+    kind: 'continuous',
+    id: 'lifetimeVisits',
+    label: 'Lifetime visits (all-time scans)',
+    value: (p) => p.lifetimeVisitCount,
+    format: (n) => `${Math.round(n)}`,
+    nullColor: NULL_COLOR,
+    nullLabel: 'Unknown',
+  },
+  {
+    kind: 'continuous',
+    id: 'lifetimeOrders',
+    label: 'Lifetime order count (CRM-linked only)',
+    value: (p) => p.lifetimeOrderCount,
+    format: (n) => `${Math.round(n)}`,
+    nullColor: NULL_COLOR,
+    nullLabel: 'Not linked',
+  },
+]
+
+const COLOR_BY_BY_ID = new Map(COLOR_BY_DEFS.map((d) => [d.id, d] as const))
+
+function colorByDef(id: ColorByKey): ColorByDef {
+  return COLOR_BY_BY_ID.get(id) ?? COLOR_BY_DEFS[0]!
+}
+
+interface SizeByDef {
+  readonly id: SizeByKey
+  readonly label: string
+  /** Numeric value or null when missing. `null` for `uniform`. */
+  readonly value: (p: CustomersMapPoint) => number | null
+  /** Formatter for legend reference dots. */
+  readonly format?: (n: number) => string
+}
+
+const SIZE_BY_DEFS: ReadonlyArray<SizeByDef> = [
+  { id: 'uniform', label: 'Uniform', value: () => null },
+  {
+    id: 'lifetimeSpend',
+    label: 'Lifetime spend $',
+    value: (p) => p.lifetimeSpendDollars,
+    format: (n) =>
+      n >= 1000
+        ? `$${(n / 1000).toFixed(n >= 10_000 ? 0 : 1)}k`
+        : `$${Math.round(n)}`,
+  },
+  {
+    id: 'lifetimeVisits',
+    label: 'Lifetime visits',
+    value: (p) => p.lifetimeVisitCount,
+    format: (n) => `${Math.round(n)}`,
+  },
+  {
+    id: 'lifetimeOrders',
+    label: 'Lifetime orders',
+    value: (p) => p.lifetimeOrderCount,
+    format: (n) => `${Math.round(n)}`,
+  },
+  {
+    id: 'ageYears',
+    label: 'Age',
+    value: (p) => p.ageYears,
+    format: (n) => `${Math.round(n)}y`,
+  },
+]
+
+const SIZE_BY_BY_ID = new Map(SIZE_BY_DEFS.map((d) => [d.id, d] as const))
+
+function sizeByDef(id: SizeByKey): SizeByDef {
+  return SIZE_BY_BY_ID.get(id) ?? SIZE_BY_DEFS[0]!
+}
+
+// 5-stop viridis-ish ramp for continuous color scales. Bottom is
+// dark purple, top is yellow — accessibility-friendly and reads
+// well against the desaturated basemap.
+const CONTINUOUS_PALETTE: readonly string[] = [
+  '#440154',
+  '#3b528b',
+  '#21918c',
+  '#5ec962',
+  '#fde725',
+]
+
+function rampColor(t: number): string {
+  if (!Number.isFinite(t)) return NULL_COLOR
+  const clamped = Math.max(0, Math.min(1, t))
+  const last = CONTINUOUS_PALETTE.length - 1
+  const idx = clamped * last
+  const lo = Math.floor(idx)
+  const hi = Math.min(last, lo + 1)
+  const f = idx - lo
+  return mixHex(CONTINUOUS_PALETTE[lo]!, CONTINUOUS_PALETTE[hi]!, f)
+}
+
+// --- color math (hex <-> rgb <-> hsl) ---
+
+function hexToRgb(hex: string): { r: number; g: number; b: number } {
+  const h = hex.replace('#', '')
+  const full =
+    h.length === 3
+      ? h.split('').map((c) => c + c).join('')
+      : h.padEnd(6, '0').slice(0, 6)
+  return {
+    r: parseInt(full.slice(0, 2), 16),
+    g: parseInt(full.slice(2, 4), 16),
+    b: parseInt(full.slice(4, 6), 16),
+  }
+}
+function rgbToHex(r: number, g: number, b: number): string {
+  const clamp = (n: number): number => Math.max(0, Math.min(255, Math.round(n)))
+  const hex = (n: number): string => clamp(n).toString(16).padStart(2, '0')
+  return `#${hex(r)}${hex(g)}${hex(b)}`
+}
+function mixHex(a: string, b: string, t: number): string {
+  const ra = hexToRgb(a)
+  const rb = hexToRgb(b)
+  return rgbToHex(
+    ra.r + (rb.r - ra.r) * t,
+    ra.g + (rb.g - ra.g) * t,
+    ra.b + (rb.b - ra.b) * t,
+  )
+}
+
+function rgbToHsl(
+  r: number,
+  g: number,
+  b: number,
+): { h: number; s: number; l: number } {
+  const rN = r / 255, gN = g / 255, bN = b / 255
+  const max = Math.max(rN, gN, bN), min = Math.min(rN, gN, bN)
+  const l = (max + min) / 2
+  let h = 0, s = 0
+  if (max !== min) {
+    const d = max - min
+    s = l > 0.5 ? d / (2 - max - min) : d / (max + min)
+    switch (max) {
+      case rN: h = ((gN - bN) / d + (gN < bN ? 6 : 0)); break
+      case gN: h = ((bN - rN) / d + 2); break
+      case bN: h = ((rN - gN) / d + 4); break
+    }
+    h /= 6
+  }
+  return { h, s, l }
+}
+function hslToRgb(
+  h: number,
+  s: number,
+  l: number,
+): { r: number; g: number; b: number } {
+  if (s === 0) {
+    const v = l * 255
+    return { r: v, g: v, b: v }
+  }
+  const q = l < 0.5 ? l * (1 + s) : l + s - l * s
+  const p = 2 * l - q
+  const hue2rgb = (t: number): number => {
+    if (t < 0) t += 1
+    if (t > 1) t -= 1
+    if (t < 1 / 6) return p + (q - p) * 6 * t
+    if (t < 1 / 2) return q
+    if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6
+    return p
+  }
+  return {
+    r: hue2rgb(h + 1 / 3) * 255,
+    g: hue2rgb(h) * 255,
+    b: hue2rgb(h - 1 / 3) * 255,
+  }
+}
+
+// First-time scans stay at full saturation; returning visitors
+// drop to ~half saturation and shift slightly lighter so they
+// recede visually. Unknown sits in the middle. Applied AFTER the
+// color encoding pick so every colorBy mode benefits from the
+// distinction.
+// SAT_FACTOR_FIRST is intentionally documented as 1.0 (full
+// saturation, no change) — the function short-circuits before
+// referencing it because hex→hsl→hex on the same color is lossy
+// at the byte level.
+const SAT_FACTOR_RETURNING = 0.5
+const SAT_FACTOR_UNKNOWN = 0.75
+const LIGHTNESS_BOOST_RETURNING = 0.12
+
+function modulateSaturation(hex: string, visitType: 'first' | 'returning' | 'unknown'): string {
+  // First-time scans keep the encoding's full vibrancy so they
+  // pop against the muted returning/unknown dots — that visual
+  // distinction is the whole point of this modulation.
+  if (visitType === 'first') return hex
+  const { r, g, b } = hexToRgb(hex)
+  const { h, s, l } = rgbToHsl(r, g, b)
+  const satFactor = visitType === 'returning' ? SAT_FACTOR_RETURNING : SAT_FACTOR_UNKNOWN
+  const lAdd = visitType === 'returning' ? LIGHTNESS_BOOST_RETURNING : 0
+  const newS = Math.max(0, Math.min(1, s * satFactor))
+  const newL = Math.max(0, Math.min(0.9, l + lAdd))
+  const out = hslToRgb(h, newS, newL)
+  return rgbToHex(out.r, out.g, out.b)
+}
+
+// Size scaling: sqrt-stretch numeric values into a bounded radius
+// multiplier range so one whale customer doesn't blow up the map.
+// Returns `1` for `uniform` mode and for points where the value is
+// null (we treat "no data" as average size, not invisibly small).
+const SIZE_MUL_MIN = 0.7
+const SIZE_MUL_MAX = 2.6
+const SIZE_MUL_NULL = 1.0
+
+function computeSizeMul(
+  value: number | null,
+  domain: { min: number; max: number } | null,
+): number {
+  if (value === null || domain === null) return SIZE_MUL_NULL
+  if (!Number.isFinite(value)) return SIZE_MUL_NULL
+  if (domain.max <= domain.min) return SIZE_MUL_NULL
+  const t = Math.max(0, Math.min(1, (value - domain.min) / (domain.max - domain.min)))
+  // sqrt to soften the upper end; visual weight is area, not linear.
+  const stretched = Math.sqrt(t)
+  return SIZE_MUL_MIN + stretched * (SIZE_MUL_MAX - SIZE_MUL_MIN)
+}
+
+interface ContinuousDomain {
+  min: number
+  max: number
+  /** 5th / 95th percentile so outliers don't crush the visible range. */
+  p05: number
+  p95: number
+}
+
+function computeDomain(values: ReadonlyArray<number>): ContinuousDomain | null {
+  const finite = values.filter((v) => Number.isFinite(v))
+  if (finite.length === 0) return null
+  const sorted = [...finite].sort((a, b) => a - b)
+  const at = (frac: number): number => {
+    const idx = Math.max(0, Math.min(sorted.length - 1, Math.floor(frac * (sorted.length - 1))))
+    return sorted[idx]!
+  }
+  return {
+    min: sorted[0]!,
+    max: sorted[sorted.length - 1]!,
+    p05: at(0.05),
+    p95: at(0.95),
+  }
+}
+
+// ---------------------------------------------------------------------
 // Loader
 // ---------------------------------------------------------------------
 
@@ -528,6 +964,79 @@ export function CustomerMapPage(): JSX.Element {
   const mapRef = useRef<maplibregl.Map | null>(null)
   const popupRef = useRef<maplibregl.Popup | null>(null)
 
+  // ---------------- Encoding-axis selectors (color / size) ----------
+  // URL-driven so a deep-link captures the operator's chosen view.
+  const colorByRaw = searchParams.get('colorBy') ?? ''
+  const sizeByRaw = searchParams.get('sizeBy') ?? ''
+  const colorByKey: ColorByKey = isColorByKey(colorByRaw) ? colorByRaw : 'visitType'
+  const sizeByKey: SizeByKey = isSizeByKey(sizeByRaw) ? sizeByRaw : 'uniform'
+  const colorDef = colorByDef(colorByKey)
+  const sizeDef = sizeByDef(sizeByKey)
+
+  // Continuous color/size domains computed off the current data
+  // batch — clipped to 5th/95th percentile so a single outlier
+  // doesn't crush the legible range. (Categorical color has no
+  // domain to compute.)
+  const colorDomain = useMemo<ContinuousDomain | null>(() => {
+    if (colorDef.kind !== 'continuous') return null
+    const values: number[] = []
+    for (const p of data.points) {
+      const v = colorDef.value(p)
+      if (v !== null && Number.isFinite(v)) values.push(v)
+    }
+    return computeDomain(values)
+  }, [data.points, colorDef])
+
+  const sizeDomain = useMemo<ContinuousDomain | null>(() => {
+    if (sizeDef.id === 'uniform') return null
+    const values: number[] = []
+    for (const p of data.points) {
+      const v = sizeDef.value(p)
+      if (v !== null && Number.isFinite(v)) values.push(v)
+    }
+    return computeDomain(values)
+  }, [data.points, sizeDef])
+
+  // Per-point color resolver: pick the encoded color, then apply the
+  // first-time saturation boost (returning + unknown desaturated).
+  const colorForPoint = useCallback(
+    (p: CustomersMapPoint): string => {
+      let base: string
+      if (colorDef.kind === 'categorical') {
+        const k = colorDef.bucketFor(p)
+        const match = k === null ? null : colorDef.buckets.find((b) => b.key === k)
+        base = match?.color ?? colorDef.nullColor
+      } else {
+        const v = colorDef.value(p)
+        if (v === null || colorDomain === null || !Number.isFinite(v)) {
+          base = colorDef.nullColor
+        } else {
+          // Use p05/p95 as the visible range so outliers don't
+          // collapse the gradient onto a single color.
+          const lo = colorDomain.p05
+          const hi = colorDomain.p95
+          const span = hi - lo
+          const t = span <= 0 ? 0.5 : Math.max(0, Math.min(1, (v - lo) / span))
+          base = rampColor(t)
+        }
+      }
+      return modulateSaturation(base, p.visitType)
+    },
+    [colorDef, colorDomain],
+  )
+
+  // Per-point size resolver: read raw value through the chosen
+  // size-by def, then sqrt-stretch over the p05/p95 range so whales
+  // don't dominate. Uniform mode returns 1.
+  const sizeForPoint = useCallback(
+    (p: CustomersMapPoint): number => {
+      if (sizeDef.id === 'uniform' || sizeDomain === null) return SIZE_MUL_NULL
+      const v = sizeDef.value(p)
+      return computeSizeMul(v, { min: sizeDomain.p05, max: sizeDomain.p95 })
+    },
+    [sizeDef, sizeDomain],
+  )
+
   const pointsGeoJson = useMemo(
     () => ({
       type: 'FeatureCollection' as const,
@@ -558,11 +1067,22 @@ export function CustomerMapPage(): JSX.Element {
             state: p.state ?? '',
             postalCode: p.postalCode ?? '',
             customerUrl: p.customerUrl,
+            visitType: p.visitType,
+            ageYears: p.ageYears,
+            gender: p.gender,
+            lifetimeVisitCount: p.lifetimeVisitCount,
+            lifetimeSpendDollars: p.lifetimeSpendDollars,
+            lifetimeOrderCount: p.lifetimeOrderCount,
+            // Per-feature encoded color (after saturation modulation)
+            // and size multiplier. Both read by MapLibre paint
+            // expressions via `['get', ...]`.
+            color: colorForPoint(p),
+            sizeMul: sizeForPoint(p),
           },
         }
       }),
     }),
-    [data.points],
+    [data.points, colorForPoint, sizeForPoint],
   )
 
   const sitesGeoJson = useMemo(
@@ -673,13 +1193,17 @@ export function CustomerMapPage(): JSX.Element {
             // now ghosted to a near-white background, these radii
             // pop clearly while still revealing density via the
             // per-scan jitter (~400 ft).
-            'circle-radius': BASE_RADIUS_EXPR,
+            //
+            // Radius = zoom-interp base × per-feature size mul (from
+            // the encoding pipeline above). Color is also per-feature
+            // (computed client-side from the chosen colorBy and then
+            // saturation-modulated by visit type so first-timers pop
+            // brighter than returning visitors).
+            'circle-radius': SIZED_RADIUS_EXPR,
             'circle-color': [
-              'match',
-              ['get', 'siteSlug'],
-              'bx', '#0d47ff',
-              'mh', '#f25c1c',
-              '#444444',
+              'coalesce',
+              ['get', 'color'],
+              '#9a9a9a',
             ],
             // Slightly faded + dashed-feeling for scan-coord
             // fallbacks so reviewers can tell at a glance whether
@@ -733,6 +1257,37 @@ export function CustomerMapPage(): JSX.Element {
             String(props.coordSource ?? '') === 'scan'
               ? 'scan location (no address coords)'
               : 'home address'
+          // Encoding-axis values shown in the popup so reviewers can
+          // map "this dot" back to the dimension(s) currently colored
+          // / sized. Null-safe — empty values just collapse.
+          const visitTypeRaw = String(props.visitType ?? '')
+          const visitTypeLabel =
+            visitTypeRaw === 'first'
+              ? 'First-time'
+              : visitTypeRaw === 'returning'
+                ? 'Returning'
+                : visitTypeRaw === 'unknown'
+                  ? 'Visit type unknown'
+                  : ''
+          const ageRaw = props.ageYears
+          const ageLabel =
+            ageRaw === null || ageRaw === undefined || ageRaw === '' ? '' : `${ageRaw}y`
+          const gender = props.gender ?? ''
+          const lifetimeVisits = props.lifetimeVisitCount ?? ''
+          const lifetimeSpendRaw = props.lifetimeSpendDollars
+          const lifetimeOrdersRaw = props.lifetimeOrderCount
+          const spendLabel =
+            lifetimeSpendRaw === null || lifetimeSpendRaw === undefined || lifetimeSpendRaw === ''
+              ? ''
+              : `$${Number(lifetimeSpendRaw).toLocaleString(undefined, { maximumFractionDigits: 0 })} lifetime`
+          const ordersLabel =
+            lifetimeOrdersRaw === null || lifetimeOrdersRaw === undefined || lifetimeOrdersRaw === ''
+              ? ''
+              : `${lifetimeOrdersRaw} orders`
+          const lifetimeCells = [spendLabel, ordersLabel].filter(Boolean).join(' · ')
+          const demoCells = [visitTypeLabel, ageLabel, gender ? `sex ${gender}` : '']
+            .filter(Boolean)
+            .join(' · ')
           const html = `
             <div class="cm-popup">
               <div class="cm-popup-name">${escapeHtml(String(props.displayName ?? 'Unknown'))}</div>
@@ -744,6 +1299,12 @@ export function CustomerMapPage(): JSX.Element {
                 ${escapeHtml([props.city, props.state, props.postalCode].filter(Boolean).join(', '))}
               </div>
               <div class="cm-popup-source">${escapeHtml(sourceLabel)}</div>
+              ${demoCells ? `<div class="cm-popup-demo">${escapeHtml(demoCells)}</div>` : ''}
+              ${
+                lifetimeCells
+                  ? `<div class="cm-popup-lifetime">${escapeHtml(lifetimeCells)} · ${escapeHtml(String(lifetimeVisits))} scans</div>`
+                  : `<div class="cm-popup-lifetime">${escapeHtml(String(lifetimeVisits))} scans (not CRM-linked)</div>`
+              }
               <a
                 class="cm-popup-link"
                 href="${buildAppPath(String(props.customerUrl ?? ''))}"
@@ -1105,9 +1666,11 @@ export function CustomerMapPage(): JSX.Element {
           : replayStrokeOpacityExpr(replayCursorMs, replayLifetimeMs)
         // During replay the radius is also data-driven so dots
         // appear 50% larger and shrink to base over their lifetime
-        // (see replayRadiusExpr for the multiplier shape).
+        // (see replayRadiusExpr for the multiplier shape). Both the
+        // replay multiplier and the static fallback honor the
+        // per-feature `sizeMul` (the encoding size axis).
         const radius = replayPausing
-          ? BASE_RADIUS_EXPR
+          ? SIZED_RADIUS_EXPR
           : replayRadiusExpr(replayCursorMs, replayLifetimeMs)
         map!.setPaintProperty('scans-circles', 'circle-opacity', fill)
         map!.setPaintProperty('scans-circles', 'circle-stroke-opacity', stroke)
@@ -1119,7 +1682,7 @@ export function CustomerMapPage(): JSX.Element {
           'circle-stroke-opacity',
           BASE_STROKE_OPACITY,
         )
-        map!.setPaintProperty('scans-circles', 'circle-radius', BASE_RADIUS_EXPR)
+        map!.setPaintProperty('scans-circles', 'circle-radius', SIZED_RADIUS_EXPR)
       }
     }
     if (map.isStyleLoaded()) {
@@ -1183,9 +1746,11 @@ export function CustomerMapPage(): JSX.Element {
         <div>
           <h2 className="cm-title">Customer Origin Map</h2>
           <p className="subtle-copy cm-sub">
-            One dot per VeriScan check-in with a document address on file.
-            <strong> Bronx blue, Midtown orange.</strong> Drag the time range
-            below to update the map live.
+            One dot per VeriScan check-in with a geocoded home address.
+            Color and size encode whichever dimension you pick below;{' '}
+            <strong>first-time scans render at full saturation</strong> so
+            new customers stand out from returning ones. Drag the time
+            range below to update the map live.
           </p>
         </div>
         <div className="cm-stats">
@@ -1343,6 +1908,49 @@ export function CustomerMapPage(): JSX.Element {
             </label>
           </div>
         </details>
+
+        {/* Encoding-axis selectors: what does color / size MEAN?
+            URL-driven so a deep-link captures the chosen view. */}
+        <div className="cm-controls-row cm-encoding-row">
+          <label className="cm-field cm-field-inline" title={colorDef.label}>
+            <span>Color by</span>
+            <select
+              value={colorByKey}
+              onChange={(e) => setParam('colorBy', e.target.value)}
+            >
+              {COLOR_BY_DEFS.map((d) => (
+                <option key={d.id} value={d.id} title={d.label}>
+                  {d.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="cm-field cm-field-inline" title={sizeDef.label}>
+            <span>Size by</span>
+            <select
+              value={sizeByKey}
+              onChange={(e) => setParam('sizeBy', e.target.value)}
+            >
+              {SIZE_BY_DEFS.map((d) => (
+                <option key={d.id} value={d.id} title={d.label}>
+                  {d.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <span className="cm-encoding-hint subtle-copy">
+            First-time scans are full saturation; returning visitors are
+            muted. Opacity fades by check-in age during replay.
+          </span>
+        </div>
+
+        {/* Legend row — categorical swatches or a continuous gradient
+            depending on the chosen color encoding, plus a size-by
+            reference dot strip when size encoding is active. */}
+        <ColorLegend def={colorDef} domain={colorDomain} />
+        {sizeDef.id !== 'uniform' ? (
+          <SizeLegend def={sizeDef} domain={sizeDomain} />
+        ) : null}
 
         <div className="cm-range">
           <div className="cm-range-labels">
@@ -1558,6 +2166,127 @@ export function CustomerMapPage(): JSX.Element {
         </div>
       </details>
     </section>
+  )
+}
+
+// ---------------------------------------------------------------------
+// Encoding legend components — categorical swatches or continuous
+// gradient (color) + reference-dot strip (size). Live just under the
+// encoding selectors so the operator can ground what the dots mean
+// without leaving the map.
+// ---------------------------------------------------------------------
+
+interface ColorLegendProps {
+  def: ColorByDef
+  domain: ContinuousDomain | null
+}
+
+function ColorLegend({ def, domain }: ColorLegendProps): JSX.Element | null {
+  if (def.kind === 'categorical') {
+    const items = [
+      ...def.buckets,
+      { key: '__null__', label: def.nullLabel, color: def.nullColor },
+    ]
+    return (
+      <div className="cm-legend cm-legend-categorical">
+        <span className="cm-legend-title subtle-copy">Color:</span>
+        {items.map((b) => (
+          <span key={b.key} className="cm-legend-item" title={b.label}>
+            <span
+              className="cm-legend-swatch"
+              style={{ background: b.color }}
+              aria-hidden="true"
+            />
+            <span className="cm-legend-label">{b.label}</span>
+          </span>
+        ))}
+      </div>
+    )
+  }
+  // Continuous: gradient strip + min/max labels.
+  if (domain === null) {
+    return (
+      <div className="cm-legend cm-legend-continuous">
+        <span className="cm-legend-title subtle-copy">Color:</span>
+        <span className="cm-legend-label">
+          {def.label} — no data in current window
+        </span>
+      </div>
+    )
+  }
+  const gradient = `linear-gradient(to right, ${CONTINUOUS_PALETTE.join(', ')})`
+  return (
+    <div className="cm-legend cm-legend-continuous">
+      <span className="cm-legend-title subtle-copy">Color:</span>
+      <span className="cm-legend-label">{def.label}</span>
+      <span className="cm-legend-gradient-wrap">
+        <span className="cm-legend-tick">{def.format(domain.p05)}</span>
+        <span
+          className="cm-legend-gradient"
+          style={{ background: gradient }}
+          aria-hidden="true"
+        />
+        <span className="cm-legend-tick">{def.format(domain.p95)}</span>
+      </span>
+      <span className="cm-legend-item" title={def.nullLabel}>
+        <span
+          className="cm-legend-swatch"
+          style={{ background: def.nullColor }}
+          aria-hidden="true"
+        />
+        <span className="cm-legend-label">{def.nullLabel}</span>
+      </span>
+    </div>
+  )
+}
+
+interface SizeLegendProps {
+  def: SizeByDef
+  domain: ContinuousDomain | null
+}
+
+function SizeLegend({ def, domain }: SizeLegendProps): JSX.Element | null {
+  if (domain === null) {
+    return (
+      <div className="cm-legend cm-legend-size">
+        <span className="cm-legend-title subtle-copy">Size:</span>
+        <span className="cm-legend-label">
+          {def.label} — no data in current window
+        </span>
+      </div>
+    )
+  }
+  // Three reference dots at p05 / median / p95 of the visible range.
+  const stops: ReadonlyArray<{ value: number; mul: number }> = [
+    { value: domain.p05, mul: computeSizeMul(domain.p05, { min: domain.p05, max: domain.p95 }) },
+    {
+      value: (domain.p05 + domain.p95) / 2,
+      mul: computeSizeMul((domain.p05 + domain.p95) / 2, { min: domain.p05, max: domain.p95 }),
+    },
+    { value: domain.p95, mul: computeSizeMul(domain.p95, { min: domain.p05, max: domain.p95 }) },
+  ]
+  // Base radius at mid-zoom (≈ z11 → ~3.5px) so the legend dots
+  // have a sensible reference size. Scale by sizeMul.
+  const baseRadius = 5
+  const fmt = def.format ?? ((n: number) => `${Math.round(n)}`)
+  return (
+    <div className="cm-legend cm-legend-size">
+      <span className="cm-legend-title subtle-copy">Size:</span>
+      <span className="cm-legend-label">{def.label}</span>
+      {stops.map((s, i) => {
+        const px = Math.max(4, Math.round(baseRadius * s.mul * 2))
+        return (
+          <span key={i} className="cm-legend-size-item">
+            <span
+              className="cm-legend-size-dot"
+              style={{ width: `${px}px`, height: `${px}px` }}
+              aria-hidden="true"
+            />
+            <span className="cm-legend-tick">{fmt(s.value)}</span>
+          </span>
+        )
+      })}
+    </div>
   )
 }
 

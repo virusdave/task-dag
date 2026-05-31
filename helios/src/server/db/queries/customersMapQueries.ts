@@ -66,6 +66,13 @@ interface PointRow {
   city: string | null
   state: string | null
   postal_code: string | null
+  // Encoding-axis enrichment columns (see contract).
+  visit_type: 'first' | 'returning' | 'unknown'
+  age_years: string | number | null
+  gender: string | null
+  lifetime_visit_count: string | number
+  lifetime_spend_dollars: string | number | null
+  lifetime_order_count: string | number | null
 }
 
 function toIso(value: Date | null): string {
@@ -233,26 +240,125 @@ export async function listCustomersMapPoints(
   // coalesce works the same regardless of whether the link-status
   // join is also in play. addr.* is NULL for any scan whose
   // address_id is NULL or whose geocode hasn't completed yet.
+  //
+  // The query is structured as `with base as (... limit) select
+  // ... from base left join lateral (...)` so the heavy enrichment
+  // joins (lifetime visit-count over visitor_scans, lifetime spend
+  // over sweed_orders) only fan out across the trimmed point set,
+  // not across every matching scan in the time window.
+  //
+  // Encoding-axis enrichment (added with the colorBy/sizeBy
+  // selectors on the SPA):
+  //   * visit_type           — first / returning / unknown
+  //   * age_years            — age at scan time (years, integer)
+  //   * gender               — raw VeriScan marker (M / F / X / null)
+  //   * lifetime_visit_count — total visitor_scans rows in the same
+  //                            (provider, person_key) cohort
+  //   * lifetime_spend_dollars / lifetime_order_count — from
+  //                            sweed_orders, only when the scan is
+  //                            CRM-linked
   const pointSql = `
+    with base as (
+      select
+        vs.id                                     as scan_id,
+        vs.site_slug,
+        coalesce(vs.scanned_at, vs.ingested_at)   as checked_in_at,
+        addr.latitude                             as lat,
+        addr.longitude                            as lng,
+        'document'::text                          as coord_source,
+        vs.first_name,
+        vs.middle_name,
+        vs.last_name,
+        vs.city,
+        vs.state,
+        vs.postal_code,
+        vs.provider,
+        vs.person_key,
+        vs.birth_date,
+        vs.gender
+      from visitor_scans vs
+      left join addresses addr on addr.id = vs.address_id
+      ${joinSql}
+      ${whereSql}
+      order by coalesce(vs.scanned_at, vs.ingested_at) desc, vs.id desc
+      limit ${limitPlaceholder}
+    )
     select
-      vs.id                                       as scan_id,
-      vs.site_slug,
-      coalesce(vs.scanned_at, vs.ingested_at)     as checked_in_at,
-      addr.latitude                               as lat,
-      addr.longitude                              as lng,
-      'document'::text                            as coord_source,
-      vs.first_name,
-      vs.middle_name,
-      vs.last_name,
-      vs.city,
-      vs.state,
-      vs.postal_code
-    from visitor_scans vs
-    left join addresses addr on addr.id = vs.address_id
-    ${joinSql}
-    ${whereSql}
-    order by coalesce(vs.scanned_at, vs.ingested_at) desc, vs.id desc
-    limit ${limitPlaceholder}
+      b.scan_id,
+      b.site_slug,
+      b.checked_in_at,
+      b.lat,
+      b.lng,
+      b.coord_source,
+      b.first_name,
+      b.middle_name,
+      b.last_name,
+      b.city,
+      b.state,
+      b.postal_code,
+
+      case
+        when b.person_key is null then 'unknown'
+        when coalesce(vh.prior_count, 0) = 0 then 'first'
+        else 'returning'
+      end                                          as visit_type,
+
+      case
+        when b.birth_date is null then null
+        else extract(year from age(b.checked_in_at, b.birth_date))::int
+      end                                          as age_years,
+
+      nullif(trim(b.gender), '')                   as gender,
+
+      case
+        when b.person_key is null then 1
+        else coalesce(vh.lifetime_visit_count, 1)
+      end                                          as lifetime_visit_count,
+
+      -- NULL when no Sweed link; 0 when linked but no mirrored orders.
+      case
+        when link.sweed_customer_id is null then null
+        else coalesce(spend.lifetime_spend_dollars, 0)
+      end                                          as lifetime_spend_dollars,
+      case
+        when link.sweed_customer_id is null then null
+        else coalesce(spend.lifetime_order_count, 0)
+      end                                          as lifetime_order_count
+
+    from base b
+
+    -- Lifetime visits + prior-count for visit_type, scoped to
+    -- (provider, person_key). The single LATERAL computes both
+    -- counters with one index scan; visitor_scans_person_key_time_idx
+    -- (provider, person_key, coalesce(...) desc) covers it.
+    left join lateral (
+      select
+        count(*)::bigint                                          as lifetime_visit_count,
+        count(*) filter (
+          where (coalesce(hist.scanned_at, hist.ingested_at), hist.id)
+              < (b.checked_in_at, b.scan_id)
+        )::bigint                                                 as prior_count
+      from visitor_scans hist
+      where b.person_key is not null
+        and hist.provider = b.provider
+        and hist.person_key = b.person_key
+    ) vh on true
+
+    left join visitor_scan_links link on link.scan_id = b.scan_id
+
+    -- Lifetime spend over sweed_orders, only fired when the scan has
+    -- a Sweed CRM link. Uses sweed_orders_customer_pay_time_idx.
+    left join lateral (
+      select
+        count(*)::bigint                                          as lifetime_order_count,
+        coalesce(sum(so.grand_total_dollars), 0)::numeric         as lifetime_spend_dollars
+      from sweed_orders so
+      where link.sweed_customer_id is not null
+        and so.dealer_id   = link.dealer_id
+        and so.customer_id = link.sweed_customer_id
+    ) spend on true
+
+    order by b.checked_in_at desc, b.scan_id desc
   `
 
   const result = await db.query<PointRow>(pointSql, params)
@@ -266,6 +372,30 @@ export async function listCustomersMapPoints(
       const lng = toNum(row.lng)
       if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null
       const scanId = Number(row.scan_id)
+      const ageYears =
+        row.age_years === null
+          ? null
+          : Number.isFinite(toNum(row.age_years))
+            ? Math.trunc(toNum(row.age_years))
+            : null
+      const lifetimeVisitCount = Math.max(
+        1,
+        Number.isFinite(toNum(row.lifetime_visit_count))
+          ? Math.trunc(toNum(row.lifetime_visit_count))
+          : 1,
+      )
+      const lifetimeSpendDollars =
+        row.lifetime_spend_dollars === null
+          ? null
+          : Number.isFinite(toNum(row.lifetime_spend_dollars))
+            ? toNum(row.lifetime_spend_dollars)
+            : null
+      const lifetimeOrderCount =
+        row.lifetime_order_count === null
+          ? null
+          : Number.isFinite(toNum(row.lifetime_order_count))
+            ? Math.trunc(toNum(row.lifetime_order_count))
+            : null
       return {
         scanId,
         siteSlug: row.site_slug,
@@ -278,6 +408,12 @@ export async function listCustomersMapPoints(
         state: row.state,
         postalCode: row.postal_code,
         customerUrl: `/admin/customers/visitors/${scanId}`,
+        visitType: row.visit_type,
+        ageYears,
+        gender: row.gender,
+        lifetimeVisitCount,
+        lifetimeSpendDollars,
+        lifetimeOrderCount,
       }
     })
     .filter((p): p is CustomersMapPoint => p !== null)

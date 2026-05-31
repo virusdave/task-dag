@@ -5884,6 +5884,77 @@ span.metric-chart-legend-item {
   margin-bottom: 0.5rem;
 }
 
+/* ----- Encoding-axis selectors (color by / size by) + legend ------ */
+.customer-map-page .cm-encoding-row {
+  border-top: 1px dashed var(--panel-border);
+  padding-top: 0.5rem;
+}
+.customer-map-page .cm-encoding-row .cm-field-inline {
+  min-width: 14rem;
+}
+.customer-map-page .cm-encoding-hint {
+  flex: 1 1 240px;
+  align-self: center;
+  font-size: 0.78rem;
+  line-height: 1.25;
+}
+
+.customer-map-page .cm-legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.3rem 0.75rem;
+  padding: 0.25rem 0;
+  font-size: 0.78rem;
+}
+.customer-map-page .cm-legend-title {
+  font-weight: 600;
+  margin-right: 0.15rem;
+}
+.customer-map-page .cm-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  white-space: nowrap;
+}
+.customer-map-page .cm-legend-swatch {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(26, 13, 4, 0.25);
+}
+.customer-map-page .cm-legend-label {
+  white-space: nowrap;
+}
+.customer-map-page .cm-legend-gradient-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+.customer-map-page .cm-legend-gradient {
+  display: inline-block;
+  width: 120px;
+  height: 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(26, 13, 4, 0.25);
+}
+.customer-map-page .cm-legend-tick {
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted, #6b5b48);
+}
+.customer-map-page .cm-legend-size-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+.customer-map-page .cm-legend-size-dot {
+  display: inline-block;
+  border-radius: 999px;
+  background: #1a0d04;
+  opacity: 0.55;
+}
+
 /* Dual-handle range slider — two native <input type=range> stacked
    so each thumb is reachable; track + fill are rendered below them
    via z-index. Keyboard accessible by default. */

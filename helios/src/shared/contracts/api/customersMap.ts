@@ -135,6 +135,37 @@ export const CustomersMapPointSchema = z.object({
   state: z.string().nullable(),
   postalCode: z.string().nullable(),
   customerUrl: z.string(),
+  // ----------------- Encoding axes (color / size) -----------------
+  // Per-point dimensions the operator can map to color and size on
+  // the front-end. All optional from the server's perspective (the
+  // map degrades gracefully on missing values).
+  //
+  // first-vs-returning is computed against the FULL person_key
+  // history on visitor_scans, NOT the date window — so the saturation
+  // boost for first-timers reflects whether THIS is the customer's
+  // very first scan ever, even when the slider only covers yesterday.
+  visitType: VisitTypeSchema,
+  // Age in whole years at the moment of scan. NULL when birth_date
+  // is missing.
+  ageYears: z.number().int().nullable(),
+  // Raw VeriScan-reported sex marker ("M" / "F" / "X" / …). NULL
+  // when missing or blank. We deliberately do not coerce to a fixed
+  // enum here — government-document gender markers vary by issuing
+  // jurisdiction and we want the dot to reflect what we got.
+  gender: z.string().nullable(),
+  // Lifetime visits = total visitor_scans rows sharing the same
+  // (provider, person_key) cohort, regardless of date. 1 when
+  // person_key is NULL (we treat this single anonymous scan as a
+  // lifetime-of-one for ranking purposes).
+  lifetimeVisitCount: z.number().int().nonnegative(),
+  // "Current" lifetime spend / order count from the linked Sweed
+  // CRM customer. NULL when the scan is NOT linked to a Sweed
+  // customer; 0 when linked but no mirrored orders. NOT
+  // as-of-scan-time — these reflect today's running total, so a
+  // 2022 first scan can be colored by a 2024 purchase. Labelled
+  // accordingly in the legend.
+  lifetimeSpendDollars: z.number().nullable(),
+  lifetimeOrderCount: z.number().int().nullable(),
 })
 export type CustomersMapPoint = z.infer<typeof CustomersMapPointSchema>
 
