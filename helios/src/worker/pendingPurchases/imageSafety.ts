@@ -58,18 +58,29 @@ export async function downloadValidatedImageAsset(
       throw new Error(`Image download failed for ${currentUrl.toString()}: HTTP ${response.status}.`)
     }
 
-    const contentType = validatePendingPurchaseImageContentType(response.headers.get('content-type'))
+    // Reject hard-no content types (HTML, JSON, plain text) early, but tolerate
+    // missing / `application/octet-stream` / non-standard mime values like
+    // `media/webp` — many image hosts emit the wrong header. Final answer comes
+    // from sniffing the actual bytes below.
+    assertContentTypeIsPlausibleImage(response.headers.get('content-type'))
+
     const contentLength = readContentLength(response.headers.get('content-length'))
     if (contentLength !== null && contentLength > MAX_IMAGE_BYTES) {
       throw new Error(`Image download exceeded the ${MAX_IMAGE_BYTES} byte limit.`)
     }
 
     const bytes = await readResponseBytesWithLimit(response, MAX_IMAGE_BYTES)
-    validatePendingPurchaseImageBytes(bytes, contentType)
+    const detectedContentType = detectImageContentTypeFromBytes(bytes)
+    if (!detectedContentType) {
+      const headerHint = response.headers.get('content-type') ?? 'unknown'
+      throw new Error(
+        `Image download bytes did not match any supported image format (header was ${headerHint}).`,
+      )
+    }
 
     return {
       bytes,
-      contentType,
+      contentType: detectedContentType,
       finalUrl: currentUrl.toString(),
     }
   }
@@ -109,6 +120,44 @@ export function validatePendingPurchaseImageBytes(bytes: Uint8Array, contentType
 
   if (!matchesImageSignature(bytes, contentType)) {
     throw new Error(`Image download bytes did not match ${contentType}.`)
+  }
+}
+
+// Detect the actual image format from the file's magic bytes, regardless of
+// what (possibly wrong) MIME type the server advertised. Returns null when no
+// supported format matches.
+export function detectImageContentTypeFromBytes(bytes: Uint8Array): string | null {
+  if (bytes.byteLength === 0) {
+    return null
+  }
+  for (const contentType of ALLOWED_IMAGE_CONTENT_TYPES) {
+    if (matchesImageSignature(bytes, contentType)) {
+      return contentType
+    }
+  }
+  return null
+}
+
+// Servers don't always set image/* on image responses — we've observed:
+//   - missing content-type header
+//   - `application/octet-stream`
+//   - `media/webp` (instead of `image/webp`)
+// Treat all of those as "maybe an image, sniff the bytes". Only reject up
+// front when the header clearly indicates something we know is not an image
+// (HTML error pages, JSON error payloads, plain text).
+function assertContentTypeIsPlausibleImage(contentTypeHeader: string | null): void {
+  if (!contentTypeHeader) {
+    return
+  }
+  const normalized = contentTypeHeader.split(';', 1)[0]?.trim().toLowerCase() ?? ''
+  if (normalized.length === 0) {
+    return
+  }
+  if (normalized.startsWith('text/')) {
+    throw new Error(`Image download returned a non-image content type: ${contentTypeHeader}.`)
+  }
+  if (normalized === 'application/json' || normalized === 'application/xml' || normalized === 'application/xhtml+xml') {
+    throw new Error(`Image download returned a non-image content type: ${contentTypeHeader}.`)
   }
 }
 

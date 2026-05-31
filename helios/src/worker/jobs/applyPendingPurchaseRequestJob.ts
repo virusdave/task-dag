@@ -469,6 +469,18 @@ async function runPendingPurchaseApplyJob(
       undoPayload: null,
     })
   })
+
+  // Job-level success requires every approved/selected row to have been
+  // applied. If any row failed or was blocked, surface that as a job failure
+  // so the worker run shows up as `failed` (with `last_error` describing
+  // the partial outcome) rather than silently `succeeded`. The apply
+  // request row itself already records the partial status; the wrapping
+  // catch-block's after-crash finalize is a no-op for finalized requests.
+  if (requestSummary.status !== 'succeeded') {
+    throw new Error(
+      `Pending-purchase apply finished as ${requestSummary.status}: ${requestSummary.summaryText}`,
+    )
+  }
 }
 
 async function applyPendingPurchaseRow(
