@@ -6168,6 +6168,25 @@ span.metric-chart-legend-item {
   gap: 16px;
 }
 
+/* v1.4 V4'5: VeriScan coverage badge + gated toggle row above the
+   KPI strip. Stays on one row on desktop; wraps under the badge on
+   narrow viewports. */
+.customer-value-tab-header {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  padding: 0.35rem 0.5rem;
+  border: 1px solid #eee;
+  border-radius: 6px;
+  background: #fafafa;
+}
+
+.customer-value-veriscan-followon {
+  font-size: 11px;
+  color: #666;
+}
+
 .customer-value-kpis {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));

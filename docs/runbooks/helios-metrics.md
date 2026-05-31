@@ -603,6 +603,50 @@ in-memory render. Promoting any of these to per-row drill (Table tab
 + `/rows`) is a follow-on; v1.4 V4'4 ships the operator-visible
 "click → highlight + URL" loop only.
 
+### VeriScan link coverage badge — wire shape (v1.4 V4'5)
+
+The consolidated `/api/customer-value-analytics` payload carries a
+`meta.veriscanCoverage` block on every response (no opt-in flag —
+the query is one cheap COUNT against `sweed_orders` with an EXISTS
+probe over the `visitor_scan_links_sweed_customer_idx` partial
+index):
+
+```ts
+meta: {
+  veriscanCoverage: {
+    linked: number   // sweed_orders rows in window whose customer_id
+                     // matches a visitor_scan_links row in 'linked'
+                     // status for the same dealer.
+    total:  number   // total sweed_orders rows in window for the
+                     // selected dealers (known + guest).
+    pct:    number   // linked / total, in [0, 1]; 0 when total === 0.
+  }
+}
+```
+
+The Customer Value tab header renders the badge `N.N% linked`,
+coloured green when `pct >= 0.25` and amber/red below. A `<HelpIcon>`
+exposes the operator-approved tooltip text — see
+`VERISCAN_BADGE_TOOLTIP_TEMPLATE` in
+`helios/src/client/routes/metrics/CustomerValueTab.tsx`. **Do not
+change the tooltip wording without re-paging Dave at p4** for
+re-approval; the approval that landed for v1.4 V4'5 covers only the
+exact template recorded in that constant.
+
+Beside the badge sits the gated toggle "Show only VeriScan-linked
+customers (gated on ≥ 25% coverage)":
+- below 25%: disabled, with a `title=` explaining why;
+- at or above 25%: enabled but **no-op in v1.4**. Local state flips
+  so the operator sees the affordance respond, and the v1.4.1
+  follow-on dispatched once coverage crosses the threshold wires the
+  toggle to a real per-customer filter. The on-screen inline note
+  links back to top-level#7 so the operator can find the v1.4.1
+  thread.
+
+Rollback (same as the rest of v1.4): revert the V4'5 commit and the
+badge / toggle / `meta.veriscanCoverage` disappear together; no
+schema or migration changes to undo.
+
 ### Canonical metric list — v1.4 changes
 
 The canonical metric list lives in this runbook (the "Real

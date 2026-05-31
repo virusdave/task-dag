@@ -95,6 +95,26 @@ const MONEY_BASES: ReadonlyArray<{ id: MoneyBasis; label: string; help: string }
 type MaxNChoice = 'auto' | 10 | 20 | 30 | 50
 const MAX_N_OPTIONS: ReadonlyArray<MaxNChoice> = ['auto', 10, 20, 30, 50]
 
+// v1.4 V4'5: operator-set threshold (top-level#7) for promoting
+// VeriScan-keyed views from MISSING DATA to real. Below this, the
+// "Show only VeriScan-linked customers" toggle is disabled; at or
+// above, the toggle is enabled but is a no-op in v1.4 (full filtering
+// behaviour ships in the v1.4.1 follow-on dispatched once coverage
+// crosses the threshold).
+const VERISCAN_COVERAGE_THRESHOLD_PCT = 0.25
+// v1.4 V4'5: operator-approved tooltip text (see virusdave/top-level#7
+// approval comment from 2026-05-31). The `{linked}` / `{total}` /
+// `{thresholdPct}` placeholders are filled in at render time. Any
+// non-trivial wording change requires re-paging Dave at p4 for
+// re-approval before merging.
+const VERISCAN_BADGE_TOOLTIP_TEMPLATE =
+  '{linked} of {total} purchases in this window are attributed to a ' +
+  'VeriScan-known identity. Cohort retention, basket size at purchase ' +
+  'N, and lifetime $ histograms key off `customer_id` from ' +
+  '`sweed_orders` and are unaffected. VeriScan-keyed views are MISSING ' +
+  'DATA until coverage crosses the operator-set threshold (today: ' +
+  '{thresholdPct}%).'
+
 export function CustomerValueTab(): JSX.Element {
   const [windowDays, setWindowDays] = useState<number>(90)
   const [useCustomRange, setUseCustomRange] = useState<boolean>(false)
@@ -346,6 +366,11 @@ function CustomerValueBody({ data }: { data: CustomerValueAnalyticsResponse }) {
 
   return (
     <>
+      {/* v1.4 V4'5: tab header — VeriScan coverage badge + gated
+          toggle. Sits above the KPI strip so the badge is visible
+          before any chart resolves. */}
+      <VeriscanCoverageHeader meta={data.meta} />
+
       <SummaryStrip data={data} basis={moneyBasis} basisLabel={moneyBasisDef.label} />
 
       <div className="customer-value-basis-row metrics-control-group">
@@ -419,6 +444,90 @@ function CustomerValueBody({ data }: { data: CustomerValueAnalyticsResponse }) {
 
       <MissingDataSection cards={data.missingDataCards} />
     </>
+  )
+}
+
+// =========================== VeriScan coverage header (v1.4 V4'5) ==========
+
+/**
+ * Renders the VeriScan link-coverage badge `N% linked` plus the gated
+ * "Show only VeriScan-linked customers" toggle. Tooltip wording was
+ * operator-approved on virusdave/top-level#7 (2026-05-31) — see
+ * `VERISCAN_BADGE_TOOLTIP_TEMPLATE`.
+ *
+ * The toggle:
+ *   * is *disabled* while `pct < 25%` — affordance is present so the
+ *     operator can see what's coming, but it's not actionable until
+ *     coverage crosses the threshold;
+ *   * becomes *enabled* at `pct >= 25%` but is still a no-op in v1.4
+ *     (full VeriScan-only filtering ships in the v1.4.1 follow-on).
+ */
+function VeriscanCoverageHeader({
+  meta,
+}: {
+  meta: CustomerValueAnalyticsResponse['meta']
+}) {
+  const [veriscanOnly, setVeriscanOnly] = useState<boolean>(false)
+  const { linked, total, pct } = meta.veriscanCoverage
+  const pctRounded = Math.round(pct * 1000) / 10 // one decimal
+  const aboveThreshold = pct >= VERISCAN_COVERAGE_THRESHOLD_PCT
+  const tooltip = VERISCAN_BADGE_TOOLTIP_TEMPLATE
+    .replace('{linked}', linked.toLocaleString())
+    .replace('{total}', total.toLocaleString())
+    .replace('{thresholdPct}', String(Math.round(VERISCAN_COVERAGE_THRESHOLD_PCT * 100)))
+  const badgeText = `${pctRounded.toFixed(1)}% linked`
+  return (
+    <div className="customer-value-tab-header" role="group" aria-label="VeriScan coverage">
+      <div className="metrics-coverage-badge">
+        <span
+          className={
+            aboveThreshold
+              ? 'metrics-coverage-chip metrics-coverage-chip--real'
+              : 'metrics-coverage-chip metrics-coverage-chip--pending'
+          }
+          title={tooltip}
+          aria-label={`${badgeText}. ${tooltip}`}
+        >
+          {badgeText}
+        </span>
+        <HelpIcon text={tooltip} />
+      </div>
+      <label
+        className="metrics-coverage-toggle subtle-copy"
+        title={
+          aboveThreshold
+            ? 'Coverage is above the 25% threshold; the affordance is enabled. Full VeriScan-only filtering ships in the v1.4.1 follow-on dispatched once coverage crosses the threshold.'
+            : `Disabled — VeriScan link coverage (${pctRounded.toFixed(1)}%) is below the operator-set 25% threshold. Affordance becomes enabled once coverage crosses 25%.`
+        }
+      >
+        <input
+          type="checkbox"
+          checked={aboveThreshold ? veriscanOnly : false}
+          disabled={!aboveThreshold}
+          onChange={(e) => {
+            // No-op in v1.4 — the v1.4.1 follow-on wires this to a
+            // per-customer filter. We still flip the local state so the
+            // operator can see the toggle moves and so a future bind
+            // is a one-line change.
+            setVeriscanOnly(e.target.checked)
+          }}
+        />{' '}
+        Show only VeriScan-linked customers (gated on ≥ 25% coverage)
+        {aboveThreshold ? (
+          <span className="subtle-copy customer-value-veriscan-followon">
+            {' '}(no-op in v1.4 — full filtering ships in v1.4.1; see{' '}
+            <a
+              href="https://github.com/virusdave/top-level/issues/7"
+              target="_blank"
+              rel="noreferrer noopener"
+            >
+              top-level#7
+            </a>
+            )
+          </span>
+        ) : null}
+      </label>
+    </div>
   )
 }
 

@@ -189,6 +189,45 @@ export const FirstSecondConversionRowSchema = z.object({
 })
 export type FirstSecondConversionRow = z.infer<typeof FirstSecondConversionRowSchema>
 
+// =========================== VeriScan coverage (v1.4 V4'5) ================
+
+/**
+ * Window-scoped VeriScan link coverage (v1.4 V4'5). Counts the rows
+ * of `sweed_orders` whose `customer_id` is linked to a VeriScan-known
+ * identity via `visitor_scan_links` (`link_status = 'linked'`) over
+ * the visible window. Always present on the consolidated payload —
+ * the badge is in the tab header and the query is cheap.
+ *
+ *   * `linked` — sweed_orders rows in window whose customer_id has a
+ *     linked visitor_scan_links row for the same dealer.
+ *   * `total`  — total sweed_orders rows in window for the selected
+ *     dealers (known + guest).
+ *   * `pct`    — `linked / total`, fraction in `[0, 1]`. `0` when
+ *     `total === 0` (no orders in window).
+ *
+ * Operator-set threshold for promoting VeriScan-keyed views from
+ * MISSING DATA to real is 25% (`pct >= 0.25`); see the
+ * "Show only VeriScan-linked customers" toggle on the Customer Value
+ * tab header. Full VeriScan-keyed views are v1.4.1 scope.
+ */
+export const VeriscanCoverageSchema = z.object({
+  linked: z.number().int().nonnegative(),
+  total: z.number().int().nonnegative(),
+  pct: z.number().min(0).max(1),
+})
+export type VeriscanCoverage = z.infer<typeof VeriscanCoverageSchema>
+
+/**
+ * Per-response metadata bag (v1.4 V4'5). Today only carries
+ * `veriscanCoverage`; future sections (e.g. data-freshness stamps,
+ * upstream-ingest health) attach here without expanding the
+ * top-level response shape.
+ */
+export const CustomerValueMetaSchema = z.object({
+  veriscanCoverage: VeriscanCoverageSchema,
+})
+export type CustomerValueMeta = z.infer<typeof CustomerValueMetaSchema>
+
 // =========================== Missing-data card =============================
 
 export const CustomerValueMissingDataCardSchema = z.object({
@@ -231,6 +270,12 @@ export const CustomerValueAnalyticsResponseSchema = z.object({
    * `cohortKey`.
    */
   firstSecondConversion: z.array(FirstSecondConversionRowSchema).default([]),
+  /**
+   * Per-response metadata (v1.4 V4'5). Carries the window-scoped
+   * `veriscanCoverage` triple used by the Customer Value tab header
+   * badge + the gated "VeriScan-linked only" toggle. Always present.
+   */
+  meta: CustomerValueMetaSchema,
   missingDataCards: z.array(CustomerValueMissingDataCardSchema),
 })
 export type CustomerValueAnalyticsResponse = z.infer<typeof CustomerValueAnalyticsResponseSchema>

@@ -10,6 +10,7 @@ import {
   type FirstSecondConversionRow,
   type LifetimeByTotalPurchasesPoint,
   type PurchaseCountBucket,
+  type VeriscanCoverage,
 } from '../../shared/contracts/index.js'
 import { getPool } from '../db/pool.js'
 
@@ -286,6 +287,11 @@ export async function getCustomerValueAnalytics(
     contributionByPurchaseNumber: [],
     cohortRetention: [],
     firstSecondConversion: [],
+    // v1.4 V4'5: empty-state coverage. `pct = 0` is the correct
+    // value when there are no orders in window; the client will
+    // render "0% linked" rather than "—%" so the operator can tell
+    // "no orders" from "real but zero coverage".
+    meta: { veriscanCoverage: { linked: 0, total: 0, pct: 0 } },
     missingDataCards: [...MISSING_CARDS],
   }
 
@@ -494,7 +500,28 @@ export async function getCustomerValueAnalytics(
        and pay_time < $3::timestamptz
        and customer_id is null
   `
-  const [result, guestRes, retentionRes] = await Promise.all([
+  // v1.4 V4'5: VeriScan link coverage over the visible window.
+  // `total` = all sweed_orders in window for the selected dealers
+  // (known + guest); `linked` = subset whose customer_id matches a
+  // `visitor_scan_links` row in `'linked'` status for the same dealer.
+  // EXISTS (not JOIN) so a customer with multiple scans doesn't
+  // double-count their orders. The partial index
+  // `visitor_scan_links_sweed_customer_idx` makes the EXISTS cheap.
+  const veriscanSql = `
+    select
+      count(*)::int as total,
+      count(*) filter (where exists (
+        select 1 from visitor_scan_links vsl
+         where vsl.dealer_id = so.dealer_id
+           and vsl.sweed_customer_id = so.customer_id
+           and vsl.link_status = 'linked'
+      ))::int as linked
+    from sweed_orders so
+    where so.dealer_id = any($1::bigint[])
+      and so.pay_time >= $2::timestamptz
+      and so.pay_time < $3::timestamptz
+  `
+  const [result, guestRes, retentionRes, veriscanRes] = await Promise.all([
     pool.query<UnionRow>(sql, [
       dealerIds,
       args.from.toISOString(),
@@ -518,9 +545,21 @@ export async function getCustomerValueAnalytics(
           cohortGranularity: args.cohortGranularity,
         })
       : Promise.resolve({ cohortRetention: [], firstSecondConversion: [] } as RetentionPayload),
+    pool.query<{ total: string | number; linked: string | number }>(veriscanSql, [
+      dealerIds,
+      args.from.toISOString(),
+      args.to.toISOString(),
+    ]),
   ])
 
   const guestCount = asReqInt(guestRes.rows[0]?.n)
+  const veriscanTotal = asReqInt(veriscanRes.rows[0]?.total)
+  const veriscanLinked = asReqInt(veriscanRes.rows[0]?.linked)
+  const veriscanCoverage: VeriscanCoverage = {
+    linked: veriscanLinked,
+    total: veriscanTotal,
+    pct: veriscanTotal > 0 ? veriscanLinked / veriscanTotal : 0,
+  }
 
   const summary: CustomerValueSummary = {
     knownCustomers: 0,
@@ -628,6 +667,7 @@ export async function getCustomerValueAnalytics(
     contributionByPurchaseNumber,
     cohortRetention: retentionRes.cohortRetention,
     firstSecondConversion: retentionRes.firstSecondConversion,
+    meta: { veriscanCoverage },
     missingDataCards: [...MISSING_CARDS],
   }
 }
