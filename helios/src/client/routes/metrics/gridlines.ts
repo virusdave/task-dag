@@ -23,7 +23,7 @@ const HOUR_MS = 60 * MINUTE_MS
 const DAY_MS = 24 * HOUR_MS
 
 // =============================================================================
-// Y axis
+// Y axis (and numeric X axis — see niceXTicks at the bottom of this section)
 // =============================================================================
 
 /**
@@ -35,7 +35,7 @@ const DAY_MS = 24 * HOUR_MS
  */
 const PREFERRED_BASES: ReadonlyArray<number> = [1, 2, 2.5, 5, 10]
 
-export interface YTickSet {
+export interface NumericTickSet {
   readonly ticks: ReadonlyArray<number>
   readonly step: number
   /** number of fractional digits the step demands (so labels match). */
@@ -43,20 +43,32 @@ export interface YTickSet {
 }
 
 /**
- * Compute a set of "nice" round-number Y-axis ticks covering [min, max].
- *
- * @param min            Lower bound of the data range.
- * @param max            Upper bound of the data range.
- * @param targetCount    Approximate desired number of intervals (default 5).
- *                       The actual number of ticks is usually within ±2 of this.
+ * Back-compat alias retained for callers that imported the old name; new
+ * code (especially numeric X-axis callers — see `niceXTicks`) should use
+ * `NumericTickSet`.
  */
-export function niceYTicks(min: number, max: number, targetCount = 5): YTickSet {
+export type YTickSet = NumericTickSet
+
+/**
+ * Shared "loose labels" tick generator used by both the Y axis
+ * (`niceYTicks`) and the numeric X axis (`niceXTicks`). Both axes use
+ * the identical `{1, 2, 2.5, 5, 10} × 10^k` step ladder and the same
+ * `stepFractionDigits` discipline so labels never drift to 3/7/9 in
+ * the least-significant digit.
+ *
+ * Kept as a private helper rather than a third export so the operator-
+ * facing API stays small (one helper per axis) while the math lives in
+ * one place — see the v1.2 R5 oracle-flagged regression case in
+ * `gridlines.test.ts` ("clean 2.5-step ticks", "clean 0.25-step ticks",
+ * "clean 0.025-step ticks") for the discipline this enforces.
+ */
+function niceNumericTicks(min: number, max: number, targetCount: number): NumericTickSet {
   // Degenerate range: emit a single tick at min.
   if (!Number.isFinite(min) || !Number.isFinite(max) || min === max) {
     return { ticks: [min], step: 0, fractionDigits: 0 }
   }
   if (min > max) {
-    return niceYTicks(max, min, targetCount)
+    return niceNumericTicks(max, min, targetCount)
   }
   const range = max - min
   const targetStep = range / Math.max(1, targetCount)
@@ -85,6 +97,43 @@ export function niceYTicks(min: number, max: number, targetCount = 5): YTickSet 
     ticks.push(Math.round(v * factor) / factor)
   }
   return { ticks, step, fractionDigits }
+}
+
+/**
+ * Compute a set of "nice" round-number Y-axis ticks covering [min, max].
+ *
+ * @param min            Lower bound of the data range.
+ * @param max            Upper bound of the data range.
+ * @param targetCount    Approximate desired number of intervals (default 5).
+ *                       The actual number of ticks is usually within ±2 of this.
+ */
+export function niceYTicks(min: number, max: number, targetCount = 5): NumericTickSet {
+  return niceNumericTicks(min, max, targetCount)
+}
+
+/**
+ * Compute a set of "nice" round-number X-axis ticks covering [min, max]
+ * for **numeric** (non-time-bucketed) X axes — e.g. the cashier
+ * scatter's `discount %`, `same-customer lift %`, the catalog scatter's
+ * `cost $`, `unit price $`, etc.
+ *
+ * Uses the same `{1, 2, 2.5, 5, 10} × 10^k` ladder and the same
+ * `stepFractionDigits` discipline as `niceYTicks` so a scatter's X and
+ * Y axes render visually consistent ticks (and so the v1.2 R5 oracle-
+ * flagged regression — `niceYTicks(0, 12)` emitting `[0, 3, 5, 8, 10,
+ * 13]` because `step=2.5` was being rounded to integer precision — is
+ * impossible on the X axis too).
+ *
+ * Note: this is the helper for **numeric** X axes. **Time-bucketed**
+ * X axes (the time-series `MetricChart`) use `bucketXTicks` below,
+ * which snaps to bucket boundaries rather than nice numbers.
+ *
+ * @param min            Lower bound of the data range.
+ * @param max            Upper bound of the data range.
+ * @param targetCount    Approximate desired number of intervals (default 5).
+ */
+export function niceXTicks(min: number, max: number, targetCount = 5): NumericTickSet {
+  return niceNumericTicks(min, max, targetCount)
 }
 
 /**

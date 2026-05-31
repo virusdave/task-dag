@@ -71,6 +71,53 @@ export const MetricCatalogFilterDimensionSchema = z.enum([
 export type MetricCatalogFilterDimension = z.infer<typeof MetricCatalogFilterDimensionSchema>
 
 /**
+ * Kinds of "drill selection" a chart element on this metric may produce.
+ *
+ * v1.4 V4'0 introduces this as the type vehicle for the click-to-drill
+ * feature landing in V4'4. Today (V4'0) no metric declares it; V4'4 will
+ * opt-in every histogram + scatter in scope by declaring the matching
+ * kinds on its MetricDef.
+ *
+ *   - `histogramBucket` — every bar in a histogram becomes click-to-drill.
+ *     The click navigates to the routable detail route with
+ *     `?selection={ kind: 'histogramBucket', metricId, bucketKey }` in the
+ *     URL; the detail route's Table tab populates with the rows
+ *     contributing to that bucket (rows-endpoint extension also lands
+ *     in V4'4).
+ *
+ *   - `scatterDot` — every dot in a scatter becomes click-to-drill. The
+ *     click navigates to the routable detail route with
+ *     `?selection={ kind: 'scatterDot', cashierId }` (or other per-metric
+ *     id) in the URL; the detail route's Table tab populates with the
+ *     dot's underlying per-day rows.
+ */
+export const MetricDrillSelectionKindSchema = z.enum(['histogramBucket', 'scatterDot'])
+export type MetricDrillSelectionKind = z.infer<typeof MetricDrillSelectionKindSchema>
+
+/**
+ * Optional capability bag a metric may declare to opt in to additional
+ * dashboard behaviour. Kept additive — every field is optional and
+ * absent ⇒ unchanged behaviour (so existing metrics get no new
+ * affordances until they explicitly opt in).
+ *
+ * v1.4 V4'0 introduces the bag with one field (`drillSelection`); future
+ * iterations may add more capability flags here (e.g. `download`,
+ * `share`, `annotation`) without breaking existing MetricDef sources.
+ */
+export const MetricSupportsSchema = z
+  .object({
+    /**
+     * Drill-selection kinds this metric's chart elements emit when
+     * clicked. v1.4 V4'4 will opt-in every histogram + scatter in
+     * scope; V4'0 lands the type vehicle only (no metric declares it
+     * yet, so no behavioural change).
+     */
+    drillSelection: z.array(MetricDrillSelectionKindSchema).optional(),
+  })
+  .strict()
+export type MetricSupports = z.infer<typeof MetricSupportsSchema>
+
+/**
  * Provenance flag for a metric:
  *
  *   - `real`    — backed by real ingest / SQL the operator should trust.
@@ -119,6 +166,14 @@ export const MetricDefSummarySchema = z.object({
    * reject filtered requests for the unsupported dimensions with 400.
    */
   supportedCatalogFilters: z.array(MetricCatalogFilterDimensionSchema).default([]),
+  /**
+   * Optional opt-in capability bag — see `MetricSupportsSchema`.
+   * Defaults to an empty object so existing metrics behave unchanged.
+   *
+   * v1.4 V4'0 introduces this with one field (`drillSelection`); V4'4
+   * will opt-in every histogram + scatter in scope to click-to-drill.
+   */
+  supports: MetricSupportsSchema.default({}),
 })
 export type MetricDefSummary = z.infer<typeof MetricDefSummarySchema>
 

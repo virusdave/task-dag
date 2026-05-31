@@ -1,6 +1,14 @@
 import { describe, expect, it } from 'vitest'
 
-import { bucketXTicks, crossMarkerPath, formatXTick, formatYTick, niceYTicks, smoothedPath } from './gridlines.js'
+import {
+  bucketXTicks,
+  crossMarkerPath,
+  formatXTick,
+  formatYTick,
+  niceXTicks,
+  niceYTicks,
+  smoothedPath,
+} from './gridlines.js'
 
 describe('niceYTicks', () => {
   it('splits [0, 100] into round-number ticks (default targetCount=5)', () => {
@@ -73,6 +81,73 @@ describe('niceYTicks', () => {
     expect(step).toBe(0.025)
     expect(fractionDigits).toBe(3)
     expect(ticks).toEqual([0, 0.025, 0.05, 0.075, 0.1, 0.125])
+  })
+})
+
+describe('niceXTicks (numeric X-axis — peer of niceYTicks)', () => {
+  // niceXTicks shares the underlying tick-generation math with niceYTicks
+  // (same `{1, 2, 2.5, 5, 10} × 10^k` ladder; same `stepFractionDigits`
+  // discipline). v1.4 V4'1 wires niceXTicks into the Budtender Advanced
+  // and Catalog Analytics scatter renderers; this block protects the
+  // helper from drifting away from niceYTicks via copy-paste edits.
+  //
+  // The 2.5 / 0.25 / 0.025 cases are the same regression the v1.2 R5
+  // oracle review caught on niceYTicks ("least-significant digit must
+  // be in {0, 2, 5}, never 3/7/9"). The plan calls them out explicitly
+  // for niceXTicks too — see v1.4 EPIC §"data contract addenda" item 6.
+  it('matches niceYTicks output for identical inputs (single shared math)', () => {
+    for (const [min, max] of [
+      [0, 100],
+      [0, 1],
+      [3, 47],
+      [0.998, 1.002],
+      [-50, 50],
+    ] as const) {
+      const x = niceXTicks(min, max)
+      const y = niceYTicks(min, max)
+      expect(x.step).toBe(y.step)
+      expect(x.fractionDigits).toBe(y.fractionDigits)
+      expect(x.ticks).toEqual(y.ticks)
+    }
+  })
+
+  it('produces clean 2.5-step ticks for [0, 12] (regression: was 0/3/5/8/10/13)', () => {
+    const { ticks, step, fractionDigits } = niceXTicks(0, 12)
+    expect(step).toBe(2.5)
+    expect(fractionDigits).toBe(1)
+    expect(ticks).toEqual([0, 2.5, 5, 7.5, 10, 12.5])
+  })
+
+  it('produces clean 0.25-step ticks for [0, 1.2]', () => {
+    const { ticks, step, fractionDigits } = niceXTicks(0, 1.2)
+    expect(step).toBe(0.25)
+    expect(fractionDigits).toBe(2)
+    expect(ticks).toEqual([0, 0.25, 0.5, 0.75, 1, 1.25])
+  })
+
+  it('produces clean 0.025-step ticks for [0, 0.12]', () => {
+    const { ticks, step, fractionDigits } = niceXTicks(0, 0.12)
+    expect(step).toBe(0.025)
+    expect(fractionDigits).toBe(3)
+    expect(ticks).toEqual([0, 0.025, 0.05, 0.075, 0.1, 0.125])
+  })
+
+  it('never emits a step whose least-significant digit is 3, 7, or 9', () => {
+    // Same sweep as the niceYTicks coverage, extended to the X axis.
+    const validBases = [1, 2, 2.5, 5, 10]
+    for (let max = 1; max <= 1000; max += 7) {
+      const { step } = niceXTicks(0, max, 5)
+      if (step === 0) continue
+      const mag = Math.pow(10, Math.floor(Math.log10(step)))
+      const base = step / mag
+      const ok = validBases.some((b) => Math.abs(b - base) < 1e-9)
+      expect(ok, `bad step ${step} for max=${max} (base=${base})`).toBe(true)
+    }
+  })
+
+  it('returns a degenerate single tick when min === max', () => {
+    const { ticks } = niceXTicks(7, 7, 5)
+    expect(ticks).toEqual([7])
   })
 })
 

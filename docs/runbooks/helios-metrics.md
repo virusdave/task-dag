@@ -439,6 +439,138 @@ dropped from the description. The page-tree IA, the left-nav, the
 operator's bookmarks, and the historical annotations all survive
 untouched.
 
+## v1.4 rework — decisions (V4'0)
+
+The v1.4 rework adds: scatter gridlines (V4'1), per-invoice
+margin MV + margin-$ basis on LTV histograms (V4'2), cohort
+retention + first-to-second-conversion (V4'3), histogram /
+scatter click-to-drill (V4'4), VeriScan link coverage badge
+(V4'5), perf + closure (V4'6). Full plan in
+[`docs/epics/business-metrics/child-epics/automation/EPIC_PLAN_v1_4.md`](https://github.com/virusdave/top-level/blob/master/docs/epics/business-metrics/child-epics/automation/EPIC_PLAN_v1_4.md)
+in the top-level repo.
+
+V4'0 records the two design decisions the per-phase work
+needs locked in before it can land:
+
+### Retention payload placement — consolidated endpoint with `?include=retention`
+
+The v1.3-slice `/api/customer-value-analytics` endpoint already
+shapes per-purchase-ordinal rows + envelope metadata in one
+round trip. V4'3 will extend it with two new top-level fields
+gated behind a query-param toggle:
+
+```
+GET /api/customer-value-analytics
+    ?include=retention                ← new in V4'3; absent ⇒ no retention payload
+    &…existing params…
+
+response.cohort_retention        : Cohort[]
+response.first_second_conversion : ConversionRow[]
+```
+
+Rationale: existing callers don't pay the retention-CTE cost
+(strict opt-in); a single warm cache key per window covers
+both the histograms and the retention curves; one HTTP round
+trip keeps the SPA fast on the Customer Value tab.
+
+Escape valve: if V4'6 perf measurement shows P95 cold > 1.5 s
+with `?include=retention` set, V4'3 will be re-spec'd to a
+sibling `/api/customer-retention` endpoint, separately cached.
+The endpoint shape decision is **the operator's call** if
+perf forces it — note it in the V4'3 commit and page Dave at
+p4 with the timing numbers before refactoring.
+
+### `sweed_order_margin_mv` refresh cadence — incremental on the helios refresh job
+
+V4'2 introduces `sweed_order_margin_mv` (PK
+`(dealer_id, invoice_id)`, columns
+`(customer_id, pay_time, gross_margin)`) sourced from
+`sweed_orders ⋈ sweed_order_line_items ⋈ product_cost_history`.
+
+Refresh cadence: the existing helios refresh job picks the MV
+up at its standard cadence (no new scheduler entry). The PK
+is unique so `REFRESH MATERIALIZED VIEW CONCURRENTLY` is
+acceptable and avoids blocking reads.
+
+Rationale: per-invoice margin moves slowly (margin per invoice
+doesn't change after an invoice closes; only new invoices
+arrive). The LTV histograms render an aggregate over a window
+the operator scopes by date, so the practical staleness window
+on margin-$ histograms is bounded by the helios refresh
+cadence — typically a few minutes, well below the operator's
+"fit for purpose" threshold.
+
+Escape valve: if measurement shows the helios refresh job's
+cadence introduces > 1 h staleness on the margin-$ histograms
+during the operator's typical workday, V4'2 will be re-spec'd
+to add a per-trigger refresh on `sweed_orders` insert (a
+small Postgres trigger that calls `REFRESH MATERIALIZED VIEW
+CONCURRENTLY` after each ingest batch). Note in the V4'6
+runbook refresh + page Dave at p4 before adding the trigger.
+
+### Rollback procedure (recorded here so V4'2 / V4'3 / V4'4 / V4'5 can refer back)
+
+- **V4'1 (scatter gridlines):** revert the V4'1 commit. No
+  schema, no migration; pure UI.
+- **V4'2 (margin MV):** `DROP MATERIALIZED VIEW
+  sweed_order_margin_mv;`, revert the V4'2 commit. The Gross
+  Margin basis selector disappears, the "Lifetime margin $
+  histograms" MISSING DATA card is restored.
+- **V4'3 (retention):** revert the V4'3 commit. The Customer
+  Value tab loses the cohort retention curve + first-to-second
+  conversion sparkline panels; the "Cohort retention curves"
+  MISSING DATA card is restored. The
+  `/api/customer-value-analytics?include=retention` toggle
+  becomes a no-op (extra param tolerated by Zod).
+- **V4'4 (drill-clicks):** revert the V4'4 commit. Every
+  histogram bucket + scatter dot reverts to the read-only
+  hover behaviour from v1.3 / v1.3-slice. The `selection`
+  param on `/rows` becomes a no-op (tolerated by Zod).
+  `MetricDef.supports.drillSelection` remains in the schema
+  (defaults to `undefined`); reverting V4'0 separately is the
+  way to drop the contract entirely.
+- **V4'5 (VeriScan badge):** revert the V4'5 commit. The
+  Customer Value tab header loses the `N% linked` badge and
+  the disabled toggle. `meta.veriscanCoverage` disappears
+  from the consolidated payload.
+
+### Canonical metric list — v1.4 changes
+
+The canonical metric list lives in this runbook (the "Real
+today" / "Still stubs" tables above, plus the per-tab metric
+listings the parent EPIC AC references). v1.4 changes:
+
+- The four mandatory LTV histograms on
+  `/metrics/customer-value` gain a fourth `bases` entry:
+  `[gross_sales, net_sales, gross_receipts, gross_margin]`
+  (V4'2; the three pre-existing entries are unchanged).
+- The Customer Value tab gains two metric entries:
+  `customer_value.cohort_retention` and
+  `customer_value.first_second_conversion` (V4'3).
+- The MISSING DATA card registry on Customer Value shrinks
+  by two cards: "Lifetime margin $ histograms" (V4'2 removes)
+  and "Cohort retention curves" (V4'3 removes). Two cards
+  remain: "Scan-to-purchase funnel" and "Marketing spend / CAC
+  attribution" (both still blocked on prior ingest dependencies
+  outside v1.4 scope).
+- Every histogram and every scatter in scope (Budtender
+  Advanced cashier scatter; Catalog Analytics scatter cards;
+  the four mandatory LTV histograms) declares
+  `MetricDef.supports.drillSelection` (V4'4; the type vehicle
+  itself lands in V4'0).
+- The Customer Value tab header gains the VeriScan link
+  coverage badge + disabled "Show only VeriScan-linked
+  customers" toggle (V4'5). The toggle becoming functional
+  is explicitly v1.4.1 scope.
+
+### Acceptance criteria pointer
+
+v1.4 closure requires v1.1 AC §1–10, v1.2 AC §1–8, v1.3 AC
+§1–9, and the new v1.4 AC §1–7 to all hold on the live
+production deploy. AC §7 (oracle-approved closure evidence)
+is satisfied by the V4'6 closure-status comment posted on
+[virusdave/top-level#7](https://github.com/virusdave/top-level/issues/7).
+
 ## v2 follow-ons (deferred from this epic)
 
 Per the parent EPIC plan, the following are explicitly **out of v1

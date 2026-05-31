@@ -3,6 +3,7 @@ import type {
   MetricCatalogFilterDimension,
   MetricDefSummary,
   MetricSeriesDef,
+  MetricSupports,
 } from '../../shared/contracts/index.js'
 
 /**
@@ -49,7 +50,11 @@ export type MetricRowValue = string | number | null
 export interface MetricDef
   extends Omit<
     MetricDefSummary,
-    'dataStatus' | 'blockedByUrl' | 'chartType' | 'supportedCatalogFilters'
+    | 'dataStatus'
+    | 'blockedByUrl'
+    | 'chartType'
+    | 'supportedCatalogFilters'
+    | 'supports'
   > {
   readonly series: MetricSeriesDef[]
   readonly query: MetricQueryFn
@@ -74,6 +79,15 @@ export interface MetricDef
    * route rejects filtered requests for unsupported dimensions).
    */
   readonly supportedCatalogFilters?: readonly MetricCatalogFilterDimension[]
+  /**
+   * Optional capability bag (v1.4 V4'0). Today only `drillSelection`
+   * is defined; future capability flags will be added here without
+   * breaking existing MetricDef sources. Omit ⇒ default behaviour
+   * (no click-to-drill, etc.). See
+   * [`shared/contracts/api/metrics.ts`](../../shared/contracts/api/metrics.ts)
+   * `MetricSupports` for the canonical definition.
+   */
+  readonly supports?: MetricSupports
 }
 
 export interface MetricQueryArgs {
@@ -119,5 +133,14 @@ export function toMetricSummary(metric: MetricDef): MetricDefSummary {
     blockedByUrl: metric.blockedByUrl,
     chartType: metric.chartType ?? 'line',
     supportedCatalogFilters: [...(metric.supportedCatalogFilters ?? [])],
+    // v1.4 V4'0: opt-in capability bag. Defaults to `{}` so metrics
+    // that don't declare any new affordances behave exactly as before.
+    supports: metric.supports
+      ? {
+          ...(metric.supports.drillSelection !== undefined
+            ? { drillSelection: [...metric.supports.drillSelection] }
+            : {}),
+        }
+      : {},
   }
 }
