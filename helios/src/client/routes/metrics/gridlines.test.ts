@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import {
   bucketXTicks,
   crossMarkerPath,
+  formatAxisValue,
   formatXTick,
   formatYTick,
   niceXTicks,
@@ -165,6 +166,93 @@ describe('formatYTick', () => {
 
   it('emits plain integers when step is whole', () => {
     expect(formatYTick(42, 0)).toBe('42')
+  })
+})
+
+describe('formatAxisValue (v1.4 V4\'1 — kind-aware tick formatter)', () => {
+  describe('$', () => {
+    it('renders whole-dollar values without cents', () => {
+      expect(formatAxisValue(42, '$')).toBe('$42')
+      expect(formatAxisValue(0, '$')).toBe('$0')
+    })
+    it('renders fractional dollar values with two decimals', () => {
+      expect(formatAxisValue(42.5, '$')).toBe('$42.50')
+    })
+    it('renders sub-dollar values with two decimals', () => {
+      expect(formatAxisValue(0.42, '$')).toBe('$0.42')
+    })
+    it('uses compact currency notation for $1k+', () => {
+      // Intl.NumberFormat's compact currency renders differently per
+      // locale; we just assert it begins with `$` and contains a
+      // K/M magnitude marker so a locale-default tweak doesn't break
+      // the test.
+      expect(formatAxisValue(1500, '$')).toMatch(/^\$\d/)
+      expect(formatAxisValue(1500, '$')).toMatch(/[KM]$/i)
+      expect(formatAxisValue(1_250_000, '$')).toMatch(/M$/i)
+    })
+  })
+
+  describe('int', () => {
+    it('renders small integers as plain numerals', () => {
+      expect(formatAxisValue(42, 'int')).toBe('42')
+      expect(formatAxisValue(0, 'int')).toBe('0')
+    })
+    it('rounds non-integer inputs', () => {
+      expect(formatAxisValue(42.6, 'int')).toBe('43')
+    })
+    it('uses compact notation for thousands+', () => {
+      expect(formatAxisValue(1500, 'int')).toBe('1.5K')
+      expect(formatAxisValue(1_250_000, 'int')).toBe('1.25M')
+    })
+  })
+
+  describe('pct', () => {
+    it('multiplies fraction by 100 and appends %', () => {
+      expect(formatAxisValue(0.05, 'pct')).toBe('5.0%')
+      expect(formatAxisValue(0.42, 'pct')).toBe('42.0%')
+      expect(formatAxisValue(1, 'pct')).toBe('100.0%')
+    })
+    it('renders 0 as 0.0%', () => {
+      expect(formatAxisValue(0, 'pct')).toBe('0.0%')
+    })
+    it('handles values > 1 (e.g. retention overshoot)', () => {
+      expect(formatAxisValue(1.5, 'pct')).toBe('150.0%')
+    })
+  })
+
+  describe('ratio', () => {
+    it('renders ratios with a ×-suffix', () => {
+      expect(formatAxisValue(1, 'ratio')).toBe('1.00×')
+      expect(formatAxisValue(1.5, 'ratio')).toBe('1.50×')
+      expect(formatAxisValue(0.75, 'ratio')).toBe('0.75×')
+    })
+    it('drops precision for larger ratios', () => {
+      expect(formatAxisValue(12, 'ratio')).toBe('12.0×')
+      expect(formatAxisValue(125, 'ratio')).toBe('125×')
+    })
+  })
+
+  describe('minutes', () => {
+    it('renders sub-hour as Nm', () => {
+      expect(formatAxisValue(0, 'minutes')).toBe('0m')
+      expect(formatAxisValue(12, 'minutes')).toBe('12m')
+      expect(formatAxisValue(59, 'minutes')).toBe('59m')
+    })
+    it('renders single-hour as 1h with zero-padded minutes', () => {
+      expect(formatAxisValue(60, 'minutes')).toBe('1h')
+      expect(formatAxisValue(83, 'minutes')).toBe('1h 23m')
+    })
+    it('renders multi-hour same as single-hour', () => {
+      expect(formatAxisValue(125, 'minutes')).toBe('2h 05m')
+    })
+    it('renders > 1 day as Nd HHh MMm', () => {
+      expect(formatAxisValue(24 * 60 + 60 + 5, 'minutes')).toBe('1d 01h 05m')
+    })
+  })
+
+  it('falls back to String(value) for non-finite inputs', () => {
+    expect(formatAxisValue(Number.NaN, '$')).toBe('NaN')
+    expect(formatAxisValue(Number.POSITIVE_INFINITY, 'int')).toBe('Infinity')
   })
 })
 

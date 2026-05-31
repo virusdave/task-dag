@@ -7,6 +7,7 @@ import {
   type BudtenderMissingDataCard,
 } from '../../../shared/contracts/index.js'
 import { loadJson } from '../../app/fetchJson.js'
+import { niceXTicks, niceYTicks } from './gridlines.js'
 import { HelpIcon } from './MetricChart.js'
 
 // ---------------------------------------------------------------------------
@@ -381,7 +382,11 @@ function Sparkline({
   if (n === 0) return null
   const minV = Math.min(0, ...values)
   const maxV = Math.max(...values, 1)
-  const ticks = niceTicks(minV, maxV, 5)
+  // v1.4 V4'1: shared niceYTicks helper from gridlines.ts so the
+  // sparkline's Y-axis ticks match the rest of the dashboard
+  // (1 / 2 / 2.5 / 5 / 10 × 10^k ladder; least-significant digit
+  // never 3/7/9 — v1.2 R5 oracle-flagged regression guard).
+  const ticks = niceYTicks(minV, maxV, 5).ticks
   const yScale = (v: number) =>
     PAD_T + plotH - ((v - ticks[0]!) / Math.max(1e-9, ticks[ticks.length - 1]! - ticks[0]!)) * plotH
   const xScale = (i: number) => PAD_L + (n <= 1 ? plotW / 2 : (i / (n - 1)) * plotW)
@@ -408,8 +413,10 @@ function Sparkline({
             x2={W - PAD_R}
             y1={yScale(t)}
             y2={yScale(t)}
-            stroke="#e2e2e2"
-            strokeDasharray={i === 0 ? '' : '3 3'}
+            stroke="#d8d8d8"
+            strokeWidth={0.8}
+            strokeDasharray="3 3"
+            pointerEvents="none"
           />
           <text x={PAD_L - 6} y={yScale(t)} textAnchor="end" dominantBaseline="central" fontSize={10} fill="#666">
             {format(t)}
@@ -1093,8 +1100,14 @@ function CashierScatterSvg(p: ScatterSvgProps) {
 
   const xs = plotted.map((d) => d.x)
   const ys = plotted.map((d) => d.y)
-  const xTicks = niceTicks(Math.min(...xs), Math.max(...xs), 5)
-  const yTicks = niceTicks(Math.min(...ys), Math.max(...ys), 5)
+  // v1.4 V4'1: shared niceXTicks / niceYTicks helpers from
+  // gridlines.ts. Same `{1, 2, 2.5, 5, 10} × 10^k` ladder as the
+  // time-series MetricChart so scatter axes feel like the rest of
+  // the dashboard (operator wishlist #1 — "scatter feels different
+  // from the rest of the dashboard"); CI guardrail in gridlines.test
+  // covers the 2.5 / 0.25 / 0.025 regression cases.
+  const xTicks = niceXTicks(Math.min(...xs), Math.max(...xs), 5).ticks
+  const yTicks = niceYTicks(Math.min(...ys), Math.max(...ys), 5).ticks
   const xLo = xTicks[0]!
   const xHi = xTicks[xTicks.length - 1]!
   const yLo = yTicks[0]!
@@ -1140,6 +1153,10 @@ function CashierScatterSvg(p: ScatterSvgProps) {
         aria-label="Cashier scatter"
         className="budtender-scatter-svg"
       >
+        {/* Light dashed gridlines + Y tick labels at nice values.
+            Visual treatment (`#d8d8d8`, 0.8px, dashed) matches the
+            time-series MetricChart scatter so the operator sees the
+            same gridline density on every scatter (v1.4 V4'1). */}
         {yTicks.map((t, i) => (
           <g key={`yt-${i}`}>
             <line
@@ -1147,8 +1164,10 @@ function CashierScatterSvg(p: ScatterSvgProps) {
               x2={W - PAD_R}
               y1={yScale(t)}
               y2={yScale(t)}
-              stroke="#e2e2e2"
-              strokeDasharray={i === 0 ? '' : '3 3'}
+              stroke="#d8d8d8"
+              strokeWidth={0.8}
+              strokeDasharray="3 3"
+              pointerEvents="none"
             />
             <text
               x={PAD_L - 6}
@@ -1169,8 +1188,10 @@ function CashierScatterSvg(p: ScatterSvgProps) {
               x2={xScale(t)}
               y1={PAD_T}
               y2={PAD_T + plotH}
-              stroke="#e2e2e2"
-              strokeDasharray={i === 0 ? '' : '3 3'}
+              stroke="#d8d8d8"
+              strokeWidth={0.8}
+              strokeDasharray="3 3"
+              pointerEvents="none"
             />
             <text
               x={xScale(t)}
@@ -1376,24 +1397,6 @@ function toLocalDtInput(ms: number): string {
   const d = new Date(ms)
   const pad = (n: number) => String(n).padStart(2, '0')
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
-}
-function niceTicks(lo: number, hi: number, n: number): number[] {
-  if (!Number.isFinite(lo) || !Number.isFinite(hi) || lo === hi) {
-    return [lo, hi]
-  }
-  const span = hi - lo
-  const raw = span / Math.max(1, n - 1)
-  const mag = Math.pow(10, Math.floor(Math.log10(raw)))
-  const norm = raw / mag
-  const stepN = norm >= 5 ? 5 : norm >= 2 ? 2 : 1
-  const step = stepN * mag
-  const start = Math.floor(lo / step) * step
-  const end = Math.ceil(hi / step) * step
-  const out: number[] = []
-  for (let v = start; v <= end + 1e-9 * step; v += step) {
-    out.push(Number(v.toFixed(10)))
-  }
-  return out
 }
 function interpRedGreen(t: number): string {
   // 0 = bright red, 0.5 = neutral gray, 1 = bright green

@@ -17,6 +17,7 @@ import {
 } from '../../../shared/contracts/index.js'
 import { loadJson } from '../../app/fetchJson.js'
 import { CatalogFilterBar, FilterDropdown } from './CatalogFilterBar.js'
+import { niceXTicks, niceYTicks } from './gridlines.js'
 import {
   buildContinuousScale,
   continuumColour,
@@ -2570,8 +2571,14 @@ function CatalogScatterSvg({
     [marginTop, plotH, view.yMin, view.yMax],
   )
 
-  const xTicks = useMemo(() => makeTicks(view.xMin, view.xMax, 5), [view.xMin, view.xMax])
-  const yTicks = useMemo(() => makeTicks(view.yMin, view.yMax, 5), [view.yMin, view.yMax])
+  // v1.4 V4'1: shared niceXTicks / niceYTicks helpers from
+  // gridlines.ts so scatter axes use the same `{1, 2, 2.5, 5, 10} × 10^k`
+  // ladder as the time-series MetricChart (operator wishlist #1 —
+  // "scatter feels different from the rest of the dashboard"). The CI
+  // guardrail in `gridlines.test.ts` covers the 2.5 / 0.25 / 0.025
+  // regression cases on both axes.
+  const xTicks = useMemo(() => niceXTicks(view.xMin, view.xMax, 5).ticks, [view.xMin, view.xMax])
+  const yTicks = useMemo(() => niceYTicks(view.yMin, view.yMax, 5).ticks, [view.yMin, view.yMax])
 
   // Hover. Stored as just the index — we recompute the dot's screen
   // position from `xScale`/`yScale` each render, so the tooltip
@@ -3265,24 +3272,11 @@ function median(values: ReadonlyArray<number>): number | null {
 }
 
 // =============================== Tick helpers ==============================
-
-function makeTicks(min: number, max: number, count: number): number[] {
-  if (!Number.isFinite(min) || !Number.isFinite(max) || min >= max) {
-    return []
-  }
-  const range = max - min
-  const rough = range / count
-  const pow = Math.pow(10, Math.floor(Math.log10(rough)))
-  const norm = rough / pow
-  let step: number
-  if (norm < 1.5) step = pow
-  else if (norm < 3) step = 2 * pow
-  else if (norm < 7) step = 5 * pow
-  else step = 10 * pow
-  const start = Math.ceil(min / step) * step
-  const out: number[] = []
-  for (let v = start; v <= max; v += step) {
-    out.push(v)
-  }
-  return out
-}
+//
+// v1.4 V4'1: scatter tick computation has been unified across the
+// dashboard. The local `makeTicks` (linear interpolation) was removed
+// in favour of the shared `niceXTicks` / `niceYTicks` helpers from
+// `gridlines.ts`, which use the same `{1, 2, 2.5, 5, 10} × 10^k`
+// ladder as the time-series `MetricChart`. The CI guardrail in
+// `gridlines.test.ts` covers the 2.5 / 0.25 / 0.025 regression cases
+// on both axes.

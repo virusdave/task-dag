@@ -182,6 +182,108 @@ const COMPACT_FMT = new Intl.NumberFormat(undefined, {
 })
 
 // =============================================================================
+// formatAxisValue — kind-aware single-value formatter
+// =============================================================================
+
+/**
+ * Declared "kind" of an axis. Drives how `formatAxisValue` renders a
+ * tick label so visual conventions (currency symbol, `%`, `1.0×`, etc.)
+ * stay consistent across every scatter, sparkline, and histogram in
+ * the dashboard.
+ *
+ *   - `$`        — currency. Compact-notation for $1k+ (`$1.5k`,
+ *                  `$1.25M`); two-decimal cents for sub-dollar
+ *                  (`$0.42`); whole-dollar for [1, 1000) (`$42`).
+ *   - `int`      — whole-number count. Compact for thousands+.
+ *   - `pct`      — fraction in [0, 1] rendered as a percentage:
+ *                  `0.05 → 5.0%`, `0.42 → 42.0%`, `1 → 100%`.
+ *                  Use this when the value is a true fraction; use
+ *                  `pct-points` (TODO if needed) for pre-multiplied
+ *                  percentage-point deltas.
+ *   - `ratio`    — multiplicative ratio (`1.0` = neutral). Renders
+ *                  as `1.5×`, `0.75×`.
+ *   - `minutes`  — duration in minutes. Renders as `12m`, `1h 23m`,
+ *                  `1d 02h 15m`.
+ *
+ * Each kind has a unit test in `gridlines.test.ts` (v1.4 V4'1
+ * exit-criterion).
+ */
+export type AxisValueKind = '$' | 'int' | 'pct' | 'ratio' | 'minutes'
+
+const MONEY_COMPACT_FMT = new Intl.NumberFormat(undefined, {
+  notation: 'compact',
+  maximumFractionDigits: 2,
+  style: 'currency',
+  currency: 'USD',
+})
+
+const PCT_DIGITS = 1
+
+/**
+ * Render a numeric tick / axis value according to its declared kind.
+ *
+ * Returns a small string suitable for an SVG `<text>` tick label.
+ * Falls back to `String(value)` for non-finite inputs so a NaN doesn't
+ * leak through as "NaN%".
+ *
+ * This helper exists so V4'1's scatter renderers (Budtender Advanced,
+ * Catalog Analytics) — and any V4'4 click-to-drill detail-tab table
+ * columns — render axis labels with the same visual conventions as
+ * the rest of the dashboard. The existing per-axis `AxisDef.format`
+ * functions in `BudtenderPerformanceTab.tsx` / `CatalogAnalyticsTab.tsx`
+ * are unchanged; this helper is the canonical implementation new
+ * callers should reach for.
+ */
+export function formatAxisValue(value: number, kind: AxisValueKind): string {
+  if (!Number.isFinite(value)) return String(value)
+  switch (kind) {
+    case '$':
+      if (Math.abs(value) >= 1000) {
+        return MONEY_COMPACT_FMT.format(value)
+      }
+      if (Math.abs(value) > 0 && Math.abs(value) < 1) {
+        return `$${value.toFixed(2)}`
+      }
+      // Whole-dollar range. Drop the cents when the value is already
+      // an integer so we don't render "$42.00" where "$42" suffices.
+      if (Number.isInteger(value)) return `$${value}`
+      return `$${value.toFixed(2)}`
+    case 'int':
+      if (Math.abs(value) >= 1000) return COMPACT_FMT.format(value)
+      return String(Math.round(value))
+    case 'pct':
+      // Operator convention: 1.0 = 100%. We render to 1 decimal place
+      // so 0.05 reads as "5.0%" (matches the rest of the dashboard's
+      // discount %, retention %, etc. labels) but round-trips cleanly
+      // for whole-percent values too.
+      return `${(value * 100).toFixed(PCT_DIGITS)}%`
+    case 'ratio':
+      // Ratio is a small floating-point multiplier; we render to 2
+      // significant digits past the decimal so 1.0 = "1.0×" and
+      // 1.25 = "1.25×".
+      if (Math.abs(value) >= 100) return `${value.toFixed(0)}×`
+      if (Math.abs(value) >= 10) return `${value.toFixed(1)}×`
+      return `${value.toFixed(2)}×`
+    case 'minutes': {
+      const m = Math.round(value)
+      if (m < 60) return `${m}m`
+      if (m < 24 * 60) {
+        const h = Math.floor(m / 60)
+        const rem = m - h * 60
+        return rem === 0 ? `${h}h` : `${h}h ${String(rem).padStart(2, '0')}m`
+      }
+      const d = Math.floor(m / (24 * 60))
+      const remH = Math.floor((m - d * 24 * 60) / 60)
+      const remM = m - d * 24 * 60 - remH * 60
+      const parts = [`${d}d`]
+      if (remH > 0 || remM > 0) parts.push(`${String(remH).padStart(2, '0')}h`)
+      if (remM > 0) parts.push(`${String(remM).padStart(2, '0')}m`)
+      return parts.join(' ')
+    }
+  }
+}
+
+// =============================================================================
 // X axis
 // =============================================================================
 
