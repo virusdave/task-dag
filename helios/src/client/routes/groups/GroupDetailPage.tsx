@@ -15,6 +15,7 @@ import type { CompetitorListing } from '../../../shared/ui/pricing-ladder/index.
 import { loadJson, mutateJson } from '../../app/fetchJson.js'
 import { waitForJob } from '../../app/jobPolling.js'
 import { CanonicalPricingLadder } from '../../components/CanonicalPricingLadder.js'
+import { HoverZoomImage } from '../../components/HoverZoomImage.js'
 import { Pill } from '../../components/Pill.js'
 import { useRegisterCatalogSidebarSubtree } from '../catalog/catalogSidebarSubtree.js'
 import { describeRecentSales, formatCount, formatCoverage, formatCurrency } from '../catalog/recentSales.js'
@@ -513,9 +514,10 @@ function MarketResearchProductCard({ entry, acknowledgeExpired, onToggleAcknowle
               {visibleListings.map((listing, index) => (
                 <li key={`${listing.dispensaryName}-${listing.listingName}-${listing.source}-${index}`} className="mini-card-row">
                   {listing.imageUrl ? (
-                    <img
+                    <HoverZoomImage
                       alt=""
-                      loading="lazy"
+                      openHref={listing.url ?? listing.imageUrl}
+                      openTitle={listing.url ? 'Open source listing in a new tab' : 'Open image in a new tab'}
                       src={listing.imageUrl}
                       style={{ width: '2.25rem', height: '2.25rem', objectFit: 'cover', borderRadius: '3px', border: '1px solid #ddd', flex: '0 0 auto' }}
                     />

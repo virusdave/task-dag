@@ -13,6 +13,7 @@ import {
 } from '../../../shared/contracts/index.js'
 import { loadJson, mutateJson } from '../../app/fetchJson.js'
 import { waitForJob } from '../../app/jobPolling.js'
+import { HoverZoomImage } from '../../components/HoverZoomImage.js'
 import { Pill } from '../../components/Pill.js'
 import { useRegisterCatalogSidebarSubtree } from '../catalog/catalogSidebarSubtree.js'
 import { describeRecentSales, formatCount, formatCoverage, formatCurrency } from '../catalog/recentSales.js'
@@ -498,9 +499,10 @@ export function PricingReviewPage() {
                     {selectedItem.pricingContext.marketListings.map((listing, index) => (
                       <li key={`${listing.dispensaryName}-${listing.listingName}-${index}`} style={{ display: 'flex', gap: '0.5rem', alignItems: 'flex-start' }}>
                         {listing.imageUrl ? (
-                          <img
+                          <HoverZoomImage
                             alt=""
-                            loading="lazy"
+                            openHref={listing.url ?? listing.imageUrl}
+                            openTitle={listing.url ? 'Open source listing in a new tab' : 'Open image in a new tab'}
                             src={listing.imageUrl}
                             style={{ width: '2.25rem', height: '2.25rem', objectFit: 'cover', borderRadius: '3px', border: '1px solid #ddd', flex: '0 0 auto' }}
                           />

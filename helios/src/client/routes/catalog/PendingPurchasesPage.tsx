@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { Form, Link, useLoaderData, useRevalidator, useRouteLoaderData } from 'react-router-dom'
 
 import {
@@ -21,6 +21,7 @@ import {
 import { loadJson, mutateJson } from '../../app/fetchJson.js'
 import { isJobTerminal, loadJobStatus, waitForJob } from '../../app/jobPolling.js'
 import { CanonicalPricingLadder } from '../../components/CanonicalPricingLadder.js'
+import { HoverZoomImage } from '../../components/HoverZoomImage.js'
 import {
   CanonicalProductRow,
   StructuredOverrideField,
@@ -2116,131 +2117,13 @@ function PendingPurchasePictureOptionThumb({
   )
 }
 
-/**
- * <img> wrapper that, after the user hovers for ~5 seconds, pops up a
- * larger version of the image so they can see detail without leaving
- * the page. Used by the listing thumbnails and the "Picture options"
- * panel so the user can pick the best image for a pending purchase.
- *
- * The popup is rendered as a viewport-fixed overlay anchored next to
- * the thumbnail, with edge-detection so it stays on screen near
- * either side of the viewport. Pointer-events are disabled on the
- * popup itself so the user can move the mouse through it without
- * dismissing-then-reshowing the zoom.
- */
-function HoverZoomImage({
-  alt,
-  src,
-  style,
-  zoomedSize = 360,
-  // Short delay so reviewers actually see the zoom on a brief hover
-  // (the previous 5s threshold was effectively invisible — the user
-  // would move off the thumbnail long before the popup ever showed).
-  delayMs = 350,
-}: {
-  alt: string
-  src: string
-  style?: CSSProperties
-  zoomedSize?: number
-  delayMs?: number
-}): JSX.Element {
-  const ref = useRef<HTMLImageElement | null>(null)
-  const timerRef = useRef<number | null>(null)
-  const [popup, setPopup] = useState<{ left: number; top: number } | null>(null)
+// The `HoverZoomImage` thumbnail+hover-popup component used by the
+// listing thumbnails and "Picture options" panel originally lived
+// here. It was extracted into
+// `client/components/HoverZoomImage.tsx` so `/pricing/review` and
+// `/catalog/groups/:id` can share the exact same hover-zoom UX on
+// their competitor-listing thumbnails. No behavior change here.
 
-  useEffect(() => () => {
-    if (timerRef.current !== null) {
-      window.clearTimeout(timerRef.current)
-      timerRef.current = null
-    }
-  }, [])
-
-  const clearTimer = () => {
-    if (timerRef.current !== null) {
-      window.clearTimeout(timerRef.current)
-      timerRef.current = null
-    }
-  }
-
-  const computePosition = (): { left: number; top: number } => {
-    const el = ref.current
-    const vw = window.innerWidth
-    const vh = window.innerHeight
-    const margin = 8
-    if (!el) {
-      return { left: margin, top: margin }
-    }
-    const rect = el.getBoundingClientRect()
-    // Prefer placing the popup to the right of the thumbnail; fall
-    // back to the left if there isn't room.
-    let left = rect.right + margin
-    if (left + zoomedSize + margin > vw) {
-      left = rect.left - margin - zoomedSize
-    }
-    if (left < margin) {
-      left = Math.max(margin, Math.min(vw - zoomedSize - margin, rect.left))
-    }
-    let top = rect.top
-    if (top + zoomedSize + margin > vh) {
-      top = vh - zoomedSize - margin
-    }
-    if (top < margin) {
-      top = margin
-    }
-    return { left, top }
-  }
-
-  const handleEnter = () => {
-    clearTimer()
-    timerRef.current = window.setTimeout(() => {
-      setPopup(computePosition())
-      timerRef.current = null
-    }, delayMs)
-  }
-
-  const handleLeave = () => {
-    clearTimer()
-    setPopup(null)
-  }
-
-  return (
-    <>
-      <img
-        alt={alt}
-        loading="lazy"
-        onMouseEnter={handleEnter}
-        onMouseLeave={handleLeave}
-        ref={ref}
-        src={src}
-        style={style}
-      />
-      {popup ? (
-        <div
-          style={{
-            position: 'fixed',
-            left: popup.left,
-            top: popup.top,
-            width: zoomedSize,
-            height: zoomedSize,
-            background: '#fff',
-            border: '1px solid #ccc',
-            borderRadius: '4px',
-            boxShadow: '0 8px 24px rgba(0,0,0,0.18)',
-            padding: '4px',
-            zIndex: 1000,
-            pointerEvents: 'none',
-          }}
-        >
-          <img
-            alt={alt}
-            src={src}
-            style={{ width: '100%', height: '100%', objectFit: 'contain', display: 'block' }}
-          />
-        </div>
-      ) : null}
-    </>
-  )
-}
 
 // `StructuredOverrideField`, `StructuredOverrideKey`, the helper
 // functions (`readInitialDraftStructured`, `readParsedStructuredValue`,
