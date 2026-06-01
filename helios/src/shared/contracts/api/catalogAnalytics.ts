@@ -71,6 +71,18 @@ const csvList = z
       : [],
   )
 
+// Distributor names are business names, not stable machine IDs, and can
+// contain commas. Accept repeated query params (`?distributorNames=A&…=B`)
+// without CSV-splitting the values so names round-trip exactly.
+const repeatedStringList = z.preprocess((value) => {
+  if (value === undefined || value === null) return []
+  const rawValues = Array.isArray(value) ? value : [value]
+  const cleaned = rawValues
+    .flatMap((item) => (typeof item === 'string' ? [item.trim()] : []))
+    .filter((item) => item.length > 0)
+  return [...new Set(cleaned)]
+}, z.array(z.string().min(1)))
+
 /**
  * Cumulative-filter request. Each selected-dimension list narrows the
  * options/counts returned for the OTHER dimensions (the dimension's
@@ -82,7 +94,7 @@ export const CatalogAnalyticsFiltersRequestSchema = z.object({
   categoryIds: csvList,
   subcategoryIds: csvList,
   brandIds: csvList,
-  distributorNames: csvList,
+  distributorNames: repeatedStringList,
   sizes: csvList,
   /** CSV of pack-count ids (integer strings, e.g. "1,5,10"). */
   packCounts: csvList,
@@ -100,7 +112,7 @@ export const CatalogAnalyticsPointsRequestSchema = z.object({
   categoryIds: csvList,
   subcategoryIds: csvList,
   brandIds: csvList,
-  distributorNames: csvList,
+  distributorNames: repeatedStringList,
   sizes: csvList,
   /** CSV of pack-count ids (integer strings, e.g. "1,5,10"). */
   packCounts: csvList,

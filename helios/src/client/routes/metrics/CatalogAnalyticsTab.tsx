@@ -1682,10 +1682,6 @@ export function CatalogAnalyticsTab() {
     () => Array.from(selectedBrandIds).sort().join(','),
     [selectedBrandIds],
   )
-  const distributorNamesParam = useMemo(
-    () => Array.from(selectedDistributorNames).sort().join(','),
-    [selectedDistributorNames],
-  )
   const sizesParam = useMemo(
     () => Array.from(selectedSizes).sort().join(','),
     [selectedSizes],
@@ -1736,7 +1732,9 @@ export function CatalogAnalyticsTab() {
       if (categoryIdsParam) qs.set('categoryIds', categoryIdsParam)
       if (subcategoryIdsParam) qs.set('subcategoryIds', subcategoryIdsParam)
       if (brandIdsParam) qs.set('brandIds', brandIdsParam)
-      if (distributorNamesParam) qs.set('distributorNames', distributorNamesParam)
+      for (const name of Array.from(selectedDistributorNames).sort()) {
+        qs.append('distributorNames', name)
+      }
       if (sizesParam) qs.set('sizes', sizesParam)
       if (packCountsParam) qs.set('packCounts', packCountsParam)
       const url = qs.toString()
@@ -1772,7 +1770,7 @@ export function CatalogAnalyticsTab() {
     categoryIdsParam,
     subcategoryIdsParam,
     brandIdsParam,
-    distributorNamesParam,
+    selectedDistributorNames,
     sizesParam,
     packCountsParam,
   ])
@@ -1819,8 +1817,11 @@ export function CatalogAnalyticsTab() {
       if (selectedSubcategoryIds.size > 0)
         qs.set('subcategoryIds', Array.from(selectedSubcategoryIds).join(','))
       if (selectedBrandIds.size > 0) qs.set('brandIds', Array.from(selectedBrandIds).join(','))
-      if (selectedDistributorNames.size > 0)
-        qs.set('distributorNames', Array.from(selectedDistributorNames).join(','))
+      if (selectedDistributorNames.size > 0) {
+        for (const name of Array.from(selectedDistributorNames).sort()) {
+          qs.append('distributorNames', name)
+        }
+      }
       if (selectedSizes.size > 0) qs.set('sizes', Array.from(selectedSizes).join(','))
       if (selectedPackCounts.size > 0)
         qs.set('packCounts', Array.from(selectedPackCounts).join(','))
