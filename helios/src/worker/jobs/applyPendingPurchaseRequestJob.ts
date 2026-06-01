@@ -499,6 +499,12 @@ async function applyPendingPurchaseRow(
   const logMutation = (op: string, data?: Record<string, unknown>): Promise<void> =>
     appendApplyJobProgressLog(jobId, `row ${row.rowId}: ${op}`, data)
 
+  // Non-fatal degradations during this row's apply (subcategory dropped
+  // because Sweed didn't recognise it, edit skipped because Sweed
+  // refused it, etc.). Surfaced in the final summary so the operator
+  // can act on them without having to dig through the progress log.
+  const applyDegradations: string[] = []
+
   const normalizedDescription = row.effectiveProposedDescription
     ? normalizeDescriptionText(row.effectiveProposedDescription)
     : null
@@ -530,6 +536,14 @@ async function applyPendingPurchaseRow(
 
   if (!product || !group) {
     const categoryContext = resolveCategoryContext(row, dictionaries)
+    if (categoryContext.subcategoryNote) {
+      applyDegradations.push(categoryContext.subcategoryNote)
+      await logMutation('subcategory dropped', {
+        requested: row.expectedSubcategory,
+        category: row.expectedCategory,
+        note: categoryContext.subcategoryNote,
+      })
+    }
     const brand = await ensureBrand(stateDealerId, dictionaries, requireNonEmptyString(row.targetBrand, 'target brand'))
     const productPrice = requirePendingPurchasePrice(row)
     if (row.effectivePrimaryImageUrl) {
@@ -656,7 +670,7 @@ async function applyPendingPurchaseRow(
   }
   const groupAfter = summarizeGroup(group)
   const productAfter = summarizeProduct(product)
-  const summaryText = buildAppliedRowSummary(row, createdProductId ?? product.id, verification)
+  const summaryText = buildAppliedRowSummary(row, createdProductId ?? product.id, verification, applyDegradations)
 
   return {
     appliedAt: new Date().toISOString(),
@@ -876,13 +890,43 @@ function buildProductEditPayload(
     payload.isPacked = true
   }
 
+  // Sweed's store.product.edit refuses to save cannabinoid-weight-based
+  // categories (edibles, tinctures, topicals, oral & nasal) unless the
+  // edit payload carries populated lab data for THC Total + CBD Total
+  // (error: "Cannabinoid weight based product must contain populated
+  // (value > 0) lab data for 'THC Total' and 'CBD Total' cannabinoids").
+  // store.product.add already includes the same fields via
+  // buildCannabinoidPayload; product.edit was historically constructed
+  // without them and crashed when an existing edibles SKU was apply-
+  // edited (job 133150 rows 379/380/381). Fold the same payload in so
+  // edits succeed by default. We always include the keys (rather than
+  // conditionally diffing) because Sweed treats absent and zero
+  // differently here — absent triggers the validation error, zero is a
+  // valid placeholder that satisfies the rule.
+  const cannabinoidPayload = buildCannabinoidPayload(row)
+  for (const [key, value] of Object.entries(cannabinoidPayload)) {
+    payload[key] = value
+  }
+
   return payload
 }
 
 function resolveCategoryContext(
   row: LoadedPendingPurchaseRow,
   dictionaries: StateDictionaries,
-): { category: z.infer<typeof CategoryRowSchema>; subcategory: z.infer<typeof NamedIdSchema> | null } {
+): {
+  category: z.infer<typeof CategoryRowSchema>
+  subcategory: z.infer<typeof NamedIdSchema> | null
+  /**
+   * Operator-visible note when the requested subcategory could not be
+   * matched against Sweed's live taxonomy. The apply continues with
+   * `subcategory: null` (a perfectly valid Sweed state) rather than
+   * failing the whole row, but the note is surfaced in the apply
+   * summary so the operator can either add the subcategory to Sweed
+   * later or update the parser/teacher to stop proposing it.
+   */
+  subcategoryNote: string | null
+} {
   const categoryName = requireNonEmptyString(row.expectedCategory, 'expected category')
   const category = dictionaries.categoriesByName.get(categoryName.toLowerCase())
   if (!category) {
@@ -891,17 +935,33 @@ function resolveCategoryContext(
 
   const requestedSubcategory = normalizeNullableString(row.expectedSubcategory)
   if (!requestedSubcategory) {
-    return { category, subcategory: null }
+    return { category, subcategory: null, subcategoryNote: null }
   }
 
   const aliasKey = `${categoryName.toLowerCase()}:${requestedSubcategory.toLowerCase()}`
   const resolvedSubcategoryName = SUBCATEGORY_ALIASES.get(aliasKey) ?? requestedSubcategory
   const subcategory = category.subcategories.find((candidate) => candidate.name.toLowerCase() === resolvedSubcategoryName.toLowerCase()) ?? null
   if (!subcategory) {
-    throw new Error(`Missing subcategory \`${requestedSubcategory}\` under category \`${categoryName}\`.`)
+    // Old behavior threw — that crashed the whole apply for the row
+    // even when the rest of the row was perfectly valid. A bogus
+    // subcategory (e.g. LLM teacher proposed "Gummies" for Edibles
+    // when Sweed's Edibles category doesn't have a "Gummies"
+    // subcategory) is not a structural failure; it is a refinement
+    // that we should silently drop rather than fail over. The row's
+    // apply summary calls out the dropped subcategory so an operator
+    // can decide whether to add it to Sweed.
+    const availableNames = category.subcategories.map((sc) => sc.name).filter((n) => n.length > 0)
+    const availableHint = availableNames.length > 0
+      ? `Available: ${availableNames.slice(0, 8).join(', ')}${availableNames.length > 8 ? ', …' : ''}.`
+      : 'Sweed reports no subcategories under this category.'
+    return {
+      category,
+      subcategory: null,
+      subcategoryNote: `Requested subcategory "${requestedSubcategory}" does not exist under "${categoryName}" in Sweed; applied with no subcategory. ${availableHint}`,
+    }
   }
 
-  return { category, subcategory }
+  return { category, subcategory, subcategoryNote: null }
 }
 
 function resolveSizeId(row: LoadedPendingPurchaseRow, dictionaries: StateDictionaries): number {
@@ -980,13 +1040,18 @@ async function ensureTargetStrain(
     throw new Error(`Missing prevalence \`${resolvedPrevalenceName}\` for strain \`${normalizedName}\`.`)
   }
 
+  let addResponse: unknown = null
   try {
-    await callSweedRpcForDealer(stateDealerId, 'store.product.strain.add', {
+    addResponse = await callSweedRpcForDealer(stateDealerId, 'store.product.strain.add', {
       name: normalizedName,
       prevalenceId: prevalence.id,
     })
   } catch {
-    const fallback = await findExactNamedRow(
+    // strain.add failed — fall back to a list lookup. Useful for the
+    // case where strain.add raced with a concurrent worker and a peer
+    // already created the same strain (Sweed returns a duplicate-name
+    // error in that case).
+    const fallback = await findExactNamedRowWithRetry(
       stateDealerId,
       'store.product.strain.list',
       normalizedName,
@@ -999,17 +1064,55 @@ async function ensureTargetStrain(
     return fallback
   }
 
-  const created = await findExactNamedRow(
+  // Primary path: strain.add returns the new row directly. We used to
+  // discard the response and re-list, which lost rows whenever Sweed's
+  // strain-list cache hadn't propagated yet (this was the recurring
+  // "Unable to resolve strain `<name>` after create" failure on apply
+  // jobs — e.g. job 133150 rows 371/372/374). Parse the response when
+  // we can; fall back to a retrying list lookup if it isn't shaped
+  // like a strain row.
+  const parsedFromResponse = StrainRowSchema.safeParse(addResponse)
+  if (parsedFromResponse.success) {
+    dictionaries.strainsByName.set(parsedFromResponse.data.name.toLowerCase(), parsedFromResponse.data)
+    return parsedFromResponse.data
+  }
+  const created = await findExactNamedRowWithRetry(
     stateDealerId,
     'store.product.strain.list',
     normalizedName,
     ListResponseSchema(StrainRowSchema),
   )
   if (!created) {
-    throw new Error(`Unable to resolve strain \`${normalizedName}\` after create.`)
+    throw new Error(`Unable to resolve strain \`${normalizedName}\` after create (response shape: ${typeof addResponse}; list lookup retries exhausted).`)
   }
   dictionaries.strainsByName.set(created.name.toLowerCase(), created)
   return created
+}
+
+// Retry an exact-name list lookup with short exponential backoff to
+// paper over Sweed's read-after-write delay on dictionary endpoints
+// (strain list, brand list, etc.). The strain.list endpoint in
+// particular has been observed to lag a freshly-added strain by a
+// few seconds, especially under load. Total wait ≈ 0.5 + 1 + 2 = 3.5s
+// across 3 retries, well under any reasonable apply-row deadline.
+async function findExactNamedRowWithRetry<T extends { id: number; name: string }>(
+  stateDealerId: number,
+  rpcMethod: string,
+  name: string,
+  schema: z.ZodType<T[]>,
+): Promise<T | null> {
+  const delaysMs = [0, 500, 1000, 2000]
+  let lastResult: T | null = null
+  for (const delayMs of delaysMs) {
+    if (delayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, delayMs))
+    }
+    lastResult = await findExactNamedRow(stateDealerId, rpcMethod, name, schema)
+    if (lastResult) {
+      return lastResult
+    }
+  }
+  return lastResult
 }
 
 async function findExactVariant(
@@ -1697,8 +1800,16 @@ function buildAppliedRowSummary(
   row: LoadedPendingPurchaseRow,
   productId: number,
   verification: PendingPurchaseSuggestionVerification,
+  degradations: readonly string[] = [],
 ): string {
-  return `Applied pending-purchase row ${row.rowId} for ${row.targetVariantName} onto product ${productId}. ${verification.summaryText}`
+  const head = `Applied pending-purchase row ${row.rowId} for ${row.targetVariantName} onto product ${productId}. ${verification.summaryText}`
+  if (degradations.length === 0) {
+    return head
+  }
+  // Surface non-fatal degradations (subcategory dropped, etc.) at the
+  // end of the row summary so they're visible in the apply-result UI
+  // without an operator having to dig through the per-row progress log.
+  return `${head} Degradations: ${degradations.join('; ')}`
 }
 
 function requirePendingPurchasePrice(row: LoadedPendingPurchaseRow): number {
