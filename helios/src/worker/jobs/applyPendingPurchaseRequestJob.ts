@@ -215,7 +215,25 @@ interface LoadedPendingPurchaseRow {
   packetId: number
   positionIds: number[]
   rawRow: Record<string, JsonValue>
+  /**
+   * Effective product-id this row should link to in Sweed.
+   *  - `null` + `reuseProductIdOverridePresent=false`: catalog-create
+   *    path (no reuse).
+   *  - `positive int` + `reuseProductIdOverridePresent=false`: legacy
+   *    parser-derived reuse via `raw_row_json.reuseProductId`. Apply
+   *    may still rewrite the product's identity fields from parser
+   *    text (variant name, group name, size, etc.).
+   *  - `positive int` + `reuseProductIdOverridePresent=true`: reviewer
+   *    explicitly chose this Sweed product via the link-override
+   *    picker. Apply MUST link to this product and MUST NOT rewrite
+   *    any of its Sweed identity fields. The reviewer asserted that
+   *    the chosen variant is already correct as-is.
+   *  - `null` + `reuseProductIdOverridePresent=true`: reviewer
+   *    explicitly cleared the parser-proposed reuse; apply falls
+   *    through to the catalog-create branch.
+   */
   reuseProductId: number | null
+  reuseProductIdOverridePresent: boolean
   rowId: number
   siteDealerId: number | null
   siteDealerName: string | null
@@ -532,9 +550,31 @@ async function applyPendingPurchaseRow(
   }
 
   const distributor = await resolveRowDistributor(row)
-  const exactVariant = row.reuseProductId
-    ? { id: row.reuseProductId, name: row.targetVariantName }
-    : await findExactVariant(stateDealerId, row.targetVariantName)
+  // Variant resolution waterfall:
+  //  1. If the reviewer set the link-override (`targetReuseProductId`
+  //     present in edited_structured_fields), trust it absolutely:
+  //     - positive int → link to that exact Sweed product, do NOT
+  //       fall back to findExactVariant by name (the override exists
+  //       precisely because the parser's name didn't match).
+  //     - explicit null → reviewer cleared the parser-proposed reuse;
+  //       skip findExactVariant too (the operator has decided this
+  //       row must take the catalog-create branch).
+  //  2. Otherwise prefer `row.reuseProductId` from the generator.
+  //  3. Otherwise look up by exact target variant name (legacy).
+  const exactVariant = row.reuseProductIdOverridePresent
+    ? (row.reuseProductId !== null
+      ? { id: row.reuseProductId, name: row.targetVariantName }
+      : null)
+    : (row.reuseProductId
+      ? { id: row.reuseProductId, name: row.targetVariantName }
+      : await findExactVariant(stateDealerId, row.targetVariantName))
+  // When the reviewer forced a specific Sweed product id, the chosen
+  // variant is identity-authoritative: we must not rewrite its name,
+  // tab, size, pack-of-size, group name, or strain from parser text
+  // (which is exactly what was wrong in the first place — see job
+  // 133150 / packet 36 rows 389-390). Apply still updates operational
+  // fields (price, ecommerce visibility, distributor link).
+  const preserveLinkedVariantIdentity = row.reuseProductIdOverridePresent && row.reuseProductId !== null
 
   let createdBlobId: string | null = null
   let createdGroupId: number | null = null
@@ -623,20 +663,41 @@ async function applyPendingPurchaseRow(
     product = waitResult.product
   }
 
-  const strainRow = await ensureTargetStrain(stateDealerId, dictionaries, row.targetStrain, row.targetPrevalence)
-  const groupEditPayload = buildGroupEditPayload(group, row, normalizedDescription, strainRow?.id ?? null)
-  if (Object.keys(groupEditPayload).length > 1) {
-    await callSweedRpcForDealer(stateDealerId, 'store.product.group.edit', groupEditPayload)
-    await logMutation('store.product.group.edit', {
-      groupId: group.id,
-      fieldsUpdated: Object.keys(groupEditPayload).filter((k) => k !== 'id'),
-    })
-    group = ProductGroupDetailSchema.parse(
-      await callSweedRpcForDealer(stateDealerId, 'store.product.group.get', { id: group.id }),
+  // When the reviewer forced a specific Sweed product id, skip the
+  // identity-mutating steps (strain resolution, group rename/strain
+  // re-link, product rename/size/pack/tab edit). The reviewer's
+  // assertion is "this Sweed variant is already correct; just link
+  // to it" — we only need the operational edits below (price,
+  // ecommerce visibility, distributor link), which buildProductEditPayload
+  // still produces because they're orthogonal to identity.
+  const strainRow = preserveLinkedVariantIdentity
+    ? null
+    : await ensureTargetStrain(stateDealerId, dictionaries, row.targetStrain, row.targetPrevalence)
+  if (!preserveLinkedVariantIdentity) {
+    const groupEditPayload = buildGroupEditPayload(group, row, normalizedDescription, strainRow?.id ?? null)
+    if (Object.keys(groupEditPayload).length > 1) {
+      await callSweedRpcForDealer(stateDealerId, 'store.product.group.edit', groupEditPayload)
+      await logMutation('store.product.group.edit', {
+        groupId: group.id,
+        fieldsUpdated: Object.keys(groupEditPayload).filter((k) => k !== 'id'),
+      })
+      group = ProductGroupDetailSchema.parse(
+        await callSweedRpcForDealer(stateDealerId, 'store.product.group.get', { id: group.id }),
+      )
+    }
+  } else {
+    applyDegradations.push(
+      `Reviewer-forced link to existing product ${product.id} ("${product.name ?? ''}") — preserved Sweed identity; parser-derived name/group/strain/size/tab/pack values were ignored.`,
     )
+    await logMutation('preserved linked variant identity', {
+      productId: product.id,
+      groupId: group.id,
+      productName: product.name,
+      groupName: group.name,
+    })
   }
 
-  const productEditPayload = buildProductEditPayload(product, row, dictionaries)
+  const productEditPayload = buildProductEditPayload(product, row, dictionaries, { preserveIdentity: preserveLinkedVariantIdentity })
   if (Object.keys(productEditPayload).length > 1) {
     await callSweedRpcForDealer(stateDealerId, 'store.product.edit', productEditPayload)
     await logMutation('store.product.edit', {
@@ -874,27 +935,39 @@ function buildProductEditPayload(
   product: z.infer<typeof ProductSummarySchema>,
   row: LoadedPendingPurchaseRow,
   dictionaries: StateDictionaries,
+  options: { preserveIdentity: boolean } = { preserveIdentity: false },
 ): Record<string, unknown> {
   const payload: Record<string, unknown> = { id: product.id }
-  const targetSizeId = resolveSizeId(row, dictionaries)
 
-  if (row.targetVariantName && product.name !== row.targetVariantName) {
-    payload.name = row.targetVariantName
+  // Identity fields (name / shortName / tab / packOfSize / sizeId)
+  // come from parser text and the reviewer's structured overrides.
+  // When the reviewer forced a specific Sweed product id via the
+  // link-override picker, the chosen variant is identity-authoritative
+  // — we leave all of these as Sweed already has them. Apply still
+  // updates the operational fields below (price, ecommerce visibility,
+  // packed state) because those are orthogonal to identity and
+  // continue to be the apply's responsibility.
+  if (!options.preserveIdentity) {
+    const targetSizeId = resolveSizeId(row, dictionaries)
+    if (row.targetVariantName && product.name !== row.targetVariantName) {
+      payload.name = row.targetVariantName
+    }
+    if (row.targetVariantName && product.shortName !== row.targetVariantName) {
+      payload.shortName = row.targetVariantName
+    }
+    if ((product.tab ?? '') !== (row.targetVariantTab ?? '')) {
+      payload.tab = row.targetVariantTab ?? ''
+    }
+    if ((product.packOfSize ?? 0) !== (row.targetPackCount ?? 1)) {
+      payload.packOfSize = row.targetPackCount ?? 1
+    }
+    if ((product.size?.id ?? null) !== targetSizeId) {
+      payload.sizeId = targetSizeId
+    }
   }
-  if (row.targetVariantName && product.shortName !== row.targetVariantName) {
-    payload.shortName = row.targetVariantName
-  }
-  if ((product.tab ?? '') !== (row.targetVariantTab ?? '')) {
-    payload.tab = row.targetVariantTab ?? ''
-  }
+
   if (typeof row.effectiveProposedPrice === 'number' && Math.abs((product.price ?? 0) - row.effectiveProposedPrice) >= 0.01) {
     payload.price = row.effectiveProposedPrice
-  }
-  if ((product.packOfSize ?? 0) !== (row.targetPackCount ?? 1)) {
-    payload.packOfSize = row.targetPackCount ?? 1
-  }
-  if ((product.size?.id ?? null) !== targetSizeId) {
-    payload.sizeId = targetSizeId
   }
   if ((product.allowedSaleType?.id ?? null) !== ALLOWED_SALE_TYPE_ID) {
     payload.allowedSaleTypeId = ALLOWED_SALE_TYPE_ID
@@ -1316,6 +1389,18 @@ function loadPendingPurchaseRow(row: PendingPurchaseApplyWorkRow): LoadedPending
   // `effective_primary_image_url` work above: take the override when
   // present (even an explicit null clears the field), otherwise fall
   // back to the parser/LLM value carried on the row. Issue #35.
+  //
+  // For the link-override (`targetReuseProductId`) we deliberately
+  // use key-presence semantics (NOT `??`): an explicit `null` in the
+  // JSONB clears the parser-proposed reuse, an absent key falls
+  // through to the parser, a positive integer forces apply onto that
+  // exact Sweed product. See LoadedPendingPurchaseRow.reuseProductId
+  // / reuseProductIdOverridePresent for the contract apply consumes.
+  const reuseOverridePresent = Object.prototype.hasOwnProperty.call(overrides, 'targetReuseProductId')
+  const reuseOverrideValue = reuseOverridePresent ? overrides.targetReuseProductId ?? null : null
+  const effectiveReuseProductId = reuseOverridePresent
+    ? reuseOverrideValue
+    : readOptionalInt(rawRow.reuseProductId)
   return {
     actionType: row.action_type,
     catalogAction: row.catalog_action,
@@ -1331,7 +1416,8 @@ function loadPendingPurchaseRow(row: PendingPurchaseApplyWorkRow): LoadedPending
     packetId: row.packet_id,
     positionIds: row.position_ids_json,
     rawRow,
-    reuseProductId: readOptionalInt(rawRow.reuseProductId),
+    reuseProductId: effectiveReuseProductId,
+    reuseProductIdOverridePresent: reuseOverridePresent,
     rowId: row.id,
     siteDealerId: row.site_dealer_id,
     siteDealerName: row.site_dealer_name,
@@ -1363,6 +1449,10 @@ type EditedStructuredFieldOverrides = Partial<{
   targetBrand: string | null
   targetGroupName: string | null
   targetPackCount: number | null
+  // Reviewer-forced link to an existing Sweed product id. See the
+  // LoadedPendingPurchaseRow.reuseProductId comment for the three-state
+  // semantics (absent / positive int / explicit null).
+  targetReuseProductId: number | null
   targetSize: string | null
   targetStrainName: string | null
   targetVariantName: string | null

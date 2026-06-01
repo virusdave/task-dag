@@ -376,26 +376,42 @@ async function loadPendingPurchaseProductIds(db: Queryable, siteKeys: PricingSit
   }
   // Pending purchases that are still "live" — i.e. on a packet that
   // hasn't been superseded — and that have already been mapped to an
-  // existing catalog product (raw_row_json.reuseProductId). Rows
-  // creating new catalog entries can't contribute to a pricing run
-  // because the product doesn't exist yet.
+  // existing catalog product. Rows creating new catalog entries can't
+  // contribute to a pricing run because the product doesn't exist yet.
+  //
+  // Effective product id resolution (mirrors mapPendingPurchaseRow()
+  // in pendingPurchaseQueries.ts AND loadPendingPurchaseRow() in
+  // applyPendingPurchaseRequestJob.ts):
+  //   - If `edited_structured_fields` has the key `targetReuseProductId`,
+  //     that value wins (positive int = reviewer's forced link;
+  //     explicit null = reviewer cleared the parser-proposed reuse,
+  //     so the row contributes nothing here).
+  //   - Otherwise fall back to `raw_row_json.reuseProductId`.
   //
   // Schema notes (the .sql files in db/schema are out of date — read
   // information_schema for ground truth):
   //   - pending_purchase_packets PK is `id` (not `packet_id`)
   //   - pending_purchase_rows.packet_id → pending_purchase_packets.id
-  //   - There is no `matched_product_id` column; the mapped product
-  //     id is carried in raw_row_json.reuseProductId, mirroring
-  //     mapPendingPurchaseRow() in pendingPurchaseQueries.ts.
+  //   - There is no `matched_product_id` column.
   const result = await db.query<{ product_id: number }>(
     `
-      select distinct (ppr.raw_row_json ->> 'reuseProductId')::int as product_id
-      from pending_purchase_rows ppr
-      inner join pending_purchase_packets ppp on ppp.id = ppr.packet_id
-      where ppp.status = 'ready'
-        and ppr.site_key = any($1::text[])
-        and (ppr.raw_row_json ->> 'reuseProductId') ~ '^[0-9]+$'
-        and (ppr.raw_row_json ->> 'reuseProductId')::int > 0
+      with resolved as (
+        select
+          case
+            when ppr.edited_structured_fields ? 'targetReuseProductId'
+              then nullif(ppr.edited_structured_fields ->> 'targetReuseProductId', '')
+            else ppr.raw_row_json ->> 'reuseProductId'
+          end as raw_id
+        from pending_purchase_rows ppr
+        inner join pending_purchase_packets ppp on ppp.id = ppr.packet_id
+        where ppp.status = 'ready'
+          and ppr.site_key = any($1::text[])
+      )
+      select distinct raw_id::int as product_id
+      from resolved
+      where raw_id is not null
+        and raw_id ~ '^[0-9]+$'
+        and raw_id::int > 0
       order by product_id asc
     `,
     [siteKeys],

@@ -171,6 +171,10 @@ const RowEditedStructuredFieldsSchema = z
     targetBrand: z.string().nullable().optional(),
     targetGroupName: z.string().nullable().optional(),
     targetPackCount: z.number().int().nullable().optional(),
+    // Reviewer-forced link to an existing Sweed product id; see
+    // EditedStructuredFieldsSchema in ./api/pendingPurchases.ts for the
+    // key-presence semantics (absent / positive int / null).
+    targetReuseProductId: z.number().int().positive().nullable().optional(),
     targetSize: z.string().nullable().optional(),
     targetStrainName: z.string().nullable().optional(),
     targetVariantName: z.string().nullable().optional(),

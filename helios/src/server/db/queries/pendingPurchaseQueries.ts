@@ -199,7 +199,25 @@ function mapPendingPurchaseRow(
   const targetBrand = row.target_brand ?? readOptionalString(raw.targetBrand)
   const targetGroupName = row.target_group_name ?? readOptionalString(raw.targetGroupName)
   const reuseGroupId = readOptionalPositiveInt(raw.reuseGroupId)
-  const reuseProductId = readOptionalPositiveInt(raw.reuseProductId)
+  // Effective reuse product id (key-presence semantics — see
+  // EditedStructuredFieldsSchema.targetReuseProductId in
+  // shared/contracts/api/pendingPurchases.ts):
+  //   - reviewer override key present + positive int → that id wins
+  //   - reviewer override key present + null         → reuse cleared
+  //   - reviewer override key absent                 → parser fallback
+  // The list/listing UI surfaces this single resolved value so the
+  // "linked variant", "needs new variant", and the pricing pending-
+  // scope SQL below all agree with what apply will actually do.
+  const structuredOverrides = readEditedStructuredFieldsForRow(row.edited_structured_fields)
+  const reuseOverridePresent =
+    structuredOverrides !== null &&
+    Object.prototype.hasOwnProperty.call(structuredOverrides, 'targetReuseProductId')
+  const reuseOverrideValue = reuseOverridePresent
+    ? readOptionalPositiveInt(structuredOverrides?.targetReuseProductId ?? null)
+    : null
+  const reuseProductId = reuseOverridePresent
+    ? reuseOverrideValue
+    : readOptionalPositiveInt(raw.reuseProductId)
   const isCatalogCreate = row.mapping_status === 'needs_catalog_create'
   const normalizedBrand = targetBrand?.trim().toLowerCase() ?? ''
   const normalizedGroup = targetGroupName?.trim().toLowerCase() ?? ''
@@ -235,7 +253,7 @@ function mapPendingPurchaseRow(
     editedPrimaryImageUrl: row.edited_primary_image_url,
     editedProposedDescription: row.edited_proposed_description,
     editedProposedPrice,
-    editedStructuredFields: readEditedStructuredFieldsForRow(row.edited_structured_fields),
+    editedStructuredFields: structuredOverrides,
     effectivePrimaryImageUrl,
     effectiveProposedDescription,
     effectiveProposedPrice,

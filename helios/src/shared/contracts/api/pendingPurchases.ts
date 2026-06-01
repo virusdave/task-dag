@@ -152,6 +152,21 @@ export const EditedStructuredFieldsSchema = z
     targetBrand: z.string().trim().max(200).nullable().optional(),
     targetGroupName: z.string().trim().max(500).nullable().optional(),
     targetPackCount: z.number().int().positive().max(1000).nullable().optional(),
+    /**
+     * Reviewer-forced link to an existing Sweed product (variant) id.
+     * Three states (key-presence semantics, NOT `??`):
+     *   - key absent: fall back to the parser-derived
+     *     `raw_row_json.reuseProductId` (the legacy behavior).
+     *   - positive integer: override the parser; apply MUST link the
+     *     pending row to this exact Sweed product and MUST NOT rewrite
+     *     the product's identity fields (name / shortName / tab /
+     *     packOfSize / sizeId / strainId / group name) from the
+     *     parser's text. This is the "operator already found the
+     *     right existing variant; just link to it" path.
+     *   - null: clear / disable any generator-proposed reuse for this
+     *     row (apply will fall through to the catalog-create branch).
+     */
+    targetReuseProductId: z.number().int().positive().nullable().optional(),
     targetSize: z.string().trim().max(100).nullable().optional(),
     targetStrainName: z.string().trim().max(200).nullable().optional(),
     targetVariantName: z.string().trim().max(200).nullable().optional(),
@@ -187,3 +202,54 @@ export const UpdatePendingPurchaseRowRequestSchema = z
     'At least one pending-purchase field must be updated.',
   )
 export type UpdatePendingPurchaseRowRequest = z.infer<typeof UpdatePendingPurchaseRowRequestSchema>
+
+/**
+ * Reviewer-facing live Sweed variant picker (powering the
+ * `targetReuseProductId` link-override on a pending-purchase row).
+ *
+ * Caller passes the row's site dealer id + a free-text query (or a
+ * numeric Sweed product id pasted directly). The server proxies a
+ * single `store.product.list.short` and enriches the top hits with
+ * `store.product.get` + `store.product.group.get` so the reviewer
+ * can verify their pick before committing.
+ */
+export const SweedVariantSearchQuerySchema = z.object({
+  /** Sweed state-dealer id (one of HELIOS_PENDING_PURCHASE_SITE_DEALERS). */
+  siteDealerId: z.coerce.number().int().positive(),
+  /** Free-text query OR an exact numeric Sweed product id. */
+  q: z.string().trim().min(1).max(200),
+})
+export type SweedVariantSearchQuery = z.infer<typeof SweedVariantSearchQuerySchema>
+
+export const SweedVariantSearchHitSchema = z.object({
+  productId: z.number().int().positive(),
+  productName: z.string(),
+  shortName: z.string().nullable(),
+  tab: z.string().nullable(),
+  packOfSize: z.number().int().min(0).nullable(),
+  sizeName: z.string().nullable(),
+  price: z.number().nullable(),
+  imageUrl: z.string().nullable(),
+  groupId: z.number().int().positive().nullable(),
+  groupName: z.string().nullable(),
+  brandName: z.string().nullable(),
+  categoryName: z.string().nullable(),
+  subcategoryName: z.string().nullable(),
+  strainName: z.string().nullable(),
+  /**
+   * True when the candidate is `enabled: false` in Sweed, or its
+   * name starts with one of the DEAD-marker prefixes per
+   * `helios/AGENTS.md`. UI should grey these out / require explicit
+   * confirmation before letting the reviewer pick them.
+   */
+  isDisabled: z.boolean(),
+})
+export type SweedVariantSearchHit = z.infer<typeof SweedVariantSearchHitSchema>
+
+export const SweedVariantSearchResponseSchema = z.object({
+  hits: z.array(SweedVariantSearchHitSchema),
+  totalCount: z.number().int().min(0),
+  /** Echoed back so the client can correlate stale async responses. */
+  query: SweedVariantSearchQuerySchema,
+})
+export type SweedVariantSearchResponse = z.infer<typeof SweedVariantSearchResponseSchema>

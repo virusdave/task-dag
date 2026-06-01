@@ -3,6 +3,7 @@ import { isAbsolute, resolve } from 'node:path'
 
 import type { FastifyInstance } from 'fastify'
 import type { PoolClient, QueryResultRow } from 'pg'
+import { z } from 'zod'
 
 import {
   type EditedStructuredFields,
@@ -15,6 +16,9 @@ import {
   QueuePendingPurchaseApplyRequestSchema,
   QueuePendingPurchasePacketGenerationRequestSchema,
   QueuePendingPurchasePacketImportRequestSchema,
+  type SweedVariantSearchHit,
+  SweedVariantSearchQuerySchema,
+  SweedVariantSearchResponseSchema,
   UpdatePendingPurchaseRowApprovalRequestSchema,
   UpdatePendingPurchaseRowRequestSchema,
 } from '../../shared/contracts/index.js'
@@ -38,6 +42,8 @@ import { withTransaction } from '../db/tx.js'
 import { getJobStatus } from '../db/queries/jobQueries.js'
 import { getOptionalSweedSessionConcurrencyKey } from '../jobs/concurrency.js'
 import { JOB_PRIORITY_LIVE_REQUESTED, enqueueJob } from '../jobs/enqueueJob.js'
+import { callSweedRpc } from '../../worker/sweed/rpc.js'
+import { withSweedSession } from '../../worker/sweed/session.js'
 
 interface PendingPurchaseRowLockRow extends QueryResultRow {
   approval_status: 'approved' | 'pending' | 'rejected'
@@ -381,6 +387,36 @@ export async function registerPendingPurchaseRoutes(server: FastifyInstance): Pr
     })
 
     return reply.send(MutationAcceptedResponseSchema.parse({ auditEventId: result.auditEventId, jobId: null, requestId }))
+  })
+
+  // Live Sweed variant picker (powers the `targetReuseProductId`
+  // link-override). Reviewer sees a row whose parser-chosen variant
+  // looks wrong, opens this picker, types a few characters (or pastes
+  // an exact product id), then clicks a hit. The PATCH route above
+  // persists the chosen id in `edited_structured_fields.targetReuseProductId`.
+  //
+  // This endpoint is deliberately pending-purchases-specific (rather
+  // than a generic catalog lookup) because the response shape is
+  // tuned for reviewer-verification: it carries the image, price,
+  // group, brand, strain — every signal the reviewer needs to confirm
+  // they picked the right variant. Build a generic endpoint when
+  // another page wants the same picker.
+  server.get('/api/catalog/pending-purchases/sweed-variant-search', async (request, reply) => {
+    const user = await requireSessionUser(request, reply, 'editor')
+    if (!user) {
+      return
+    }
+    const query = SweedVariantSearchQuerySchema.parse(request.query)
+    const dealer = HELIOS_PENDING_PURCHASE_SITE_DEALERS.find((candidate) => candidate.dealerId === query.siteDealerId)
+    if (!dealer) {
+      return reply.code(400).send({
+        error: `Unknown siteDealerId ${query.siteDealerId}. Must be one of ${HELIOS_PENDING_PURCHASE_SITE_DEALERS.map((d) => d.dealerId).join(', ')}.`,
+      })
+    }
+    const result = await withSweedSession(async () => {
+      return runSweedVariantSearch(dealer.dealerId, query.q)
+    })
+    return reply.send(SweedVariantSearchResponseSchema.parse({ ...result, query }))
   })
 
   server.post('/api/catalog/pending-purchases/:rowId/approval', async (request, reply) => {
@@ -776,4 +812,144 @@ function editedStructuredFieldsEqual(
     if (lv !== rv) return false
   }
   return true
+}
+
+// --- Live Sweed variant picker -----------------------------------------------
+
+const SWEED_VARIANT_SEARCH_PAGE_SIZE = 20
+// `helios/AGENTS.md`: anything Sweed marks `enabled: false`, or whose
+// name starts with a DEAD/RETIRED/DELETED marker (operator convention
+// for soft-retired records), should be filtered out of reviewer lists
+// — we keep it visible (with a `isDisabled: true` flag) so the
+// reviewer notices stale rows but can still see them.
+const DISABLED_NAME_MARKER_RE = /^\s*(?:DEAD\b|DELETED\b|RETIRED\b)/i
+
+const SweedShortProductRowSchema = z.object({
+  id: z.union([z.coerce.number().int().positive(), z.string().trim().min(1)]),
+  name: z.string().nullable().optional(),
+  enabled: z.boolean().nullable().optional(),
+}).passthrough()
+
+const SweedShortProductListResponseSchema = z.union([
+  z.object({
+    data: z.array(SweedShortProductRowSchema).default([]),
+    totalCount: z.coerce.number().int().min(0).optional(),
+  }).passthrough(),
+  z.array(SweedShortProductRowSchema),
+])
+
+const SweedProductDetailWrappedSchema = z.object({
+  product: z.object({
+    id: z.coerce.number().int().positive(),
+    name: z.string().nullable().optional(),
+    shortName: z.string().nullable().optional(),
+    tab: z.string().nullable().optional(),
+    packOfSize: z.coerce.number().int().nullable().optional(),
+    price: z.coerce.number().nullable().optional(),
+    productGroupId: z.union([z.coerce.number().int(), z.string().trim().min(1)]).nullable().optional(),
+    enabled: z.boolean().nullable().optional(),
+    images: z.array(z.object({ url: z.string().nullable().optional() }).passthrough()).default([]),
+    size: z.object({ name: z.string().nullable().optional() }).passthrough().nullable().optional(),
+  }).passthrough(),
+}).passthrough()
+
+const SweedProductGroupWrappedSchema = z.object({
+  id: z.coerce.number().int().positive().nullable().optional(),
+  name: z.string().nullable().optional(),
+  enabled: z.boolean().nullable().optional(),
+  brand: z.object({ name: z.string().nullable().optional() }).passthrough().nullable().optional(),
+  category: z.object({ name: z.string().nullable().optional() }).passthrough().nullable().optional(),
+  subcategory: z.object({ name: z.string().nullable().optional() }).passthrough().nullable().optional(),
+  strain: z.object({ name: z.string().nullable().optional() }).passthrough().nullable().optional(),
+  images: z.array(z.object({ url: z.string().nullable().optional() }).passthrough()).default([]),
+}).passthrough()
+
+async function runSweedVariantSearch(
+  stateDealerId: number,
+  q: string,
+): Promise<{ hits: SweedVariantSearchHit[]; totalCount: number }> {
+  // Numeric paste: skip the list call and look the product up directly.
+  // Reviewers will paste `338655` from a debugging session — this
+  // path needs to keep working even if the catalog's short-list search
+  // tokenizer doesn't index pure numeric ids.
+  const trimmed = q.trim()
+  if (/^\d+$/.test(trimmed)) {
+    const productId = Number.parseInt(trimmed, 10)
+    if (Number.isInteger(productId) && productId > 0) {
+      const hit = await enrichSweedSearchHit(stateDealerId, productId)
+      if (hit) {
+        return { hits: [hit], totalCount: 1 }
+      }
+      return { hits: [], totalCount: 0 }
+    }
+  }
+  const rawList = await callSweedRpc<unknown>(stateDealerId, 'store.product.list.short', {
+    page: 1,
+    pageSize: SWEED_VARIANT_SEARCH_PAGE_SIZE,
+    query: trimmed,
+  })
+  const parsedList = SweedShortProductListResponseSchema.parse(rawList)
+  const rows = Array.isArray(parsedList) ? parsedList : parsedList.data
+  const totalCount = Array.isArray(parsedList) ? rows.length : (parsedList.totalCount ?? rows.length)
+  const productIds = rows
+    .map((row) => Number(row.id))
+    .filter((id) => Number.isInteger(id) && id > 0)
+  const enriched = await Promise.all(productIds.map((id) => enrichSweedSearchHit(stateDealerId, id)))
+  const hits = enriched.filter((value): value is SweedVariantSearchHit => value !== null)
+  return { hits, totalCount }
+}
+
+async function enrichSweedSearchHit(
+  stateDealerId: number,
+  productId: number,
+): Promise<SweedVariantSearchHit | null> {
+  try {
+    const productResult = SweedProductDetailWrappedSchema.parse(
+      await callSweedRpc<unknown>(stateDealerId, 'store.product.get', { id: String(productId) }),
+    )
+    const product = productResult.product
+    const groupId = product.productGroupId ? Number(product.productGroupId) : null
+    const group = groupId
+      ? SweedProductGroupWrappedSchema.parse(
+        await callSweedRpc<unknown>(stateDealerId, 'store.product.group.get', { id: groupId }),
+      )
+      : null
+    const productName = (product.name ?? '').trim()
+    const groupName = (group?.name ?? '').trim()
+    const productDisabled = product.enabled === false
+    const groupDisabled = group?.enabled === false
+    const nameLooksDisabled = DISABLED_NAME_MARKER_RE.test(productName) || DISABLED_NAME_MARKER_RE.test(groupName)
+    return {
+      productId,
+      productName,
+      shortName: normalizeNonEmpty(product.shortName ?? null),
+      tab: normalizeNonEmpty(product.tab ?? null),
+      packOfSize: typeof product.packOfSize === 'number' && Number.isInteger(product.packOfSize) ? product.packOfSize : null,
+      sizeName: normalizeNonEmpty(product.size?.name ?? null),
+      price: typeof product.price === 'number' && Number.isFinite(product.price) ? product.price : null,
+      imageUrl: normalizeNonEmpty(product.images[0]?.url ?? null),
+      groupId,
+      groupName: normalizeNonEmpty(groupName) ?? normalizeNonEmpty(group?.name ?? null),
+      brandName: normalizeNonEmpty(group?.brand?.name ?? null),
+      categoryName: normalizeNonEmpty(group?.category?.name ?? null),
+      subcategoryName: normalizeNonEmpty(group?.subcategory?.name ?? null),
+      strainName: normalizeNonEmpty(group?.strain?.name ?? null),
+      isDisabled: productDisabled || groupDisabled || nameLooksDisabled,
+    }
+  } catch (err) {
+    // Per helios/AGENTS.md: one disabled/deleted hit must not nuke the
+    // whole batch. Sweed's misleading "Action does not exist" subcode
+    // 14002 is the canonical "you asked for a soft-retired record"
+    // signal here. Skip and continue.
+    if (err instanceof Error && /14002|does not exist or you do not have permission/i.test(err.message)) {
+      return null
+    }
+    throw err
+  }
+}
+
+function normalizeNonEmpty(value: string | null | undefined): string | null {
+  if (typeof value !== 'string') return null
+  const trimmed = value.trim()
+  return trimmed.length > 0 ? trimmed : null
 }

@@ -11,6 +11,7 @@ import {
   UpdatePendingPurchaseRowApprovalRequestSchema,
   UpdatePendingPurchaseRowRequestSchema,
   buildHeliosModulePath,
+  type EditedStructuredFields,
   type JobStatusResponse,
   type PendingPurchaseListResponse,
   type PendingPurchaseMarketListing,
@@ -38,6 +39,12 @@ import type { TreeNavNode } from '../../components/TreeNav.js'
 import { type CompetitorListing } from '../../../shared/ui/pricing-ladder/index.js'
 import { calculateGmPercent, PRICING_GM_FORMULA } from '../../../shared/domain/pricingGeneration.js'
 import { useRegisterCatalogSidebarSubtree } from './catalogSidebarSubtree.js'
+import {
+  PendingPurchaseVariantLinkOverride,
+  buildLinkOverridePayloadKey,
+  readInitialLinkOverrideState,
+  type VariantLinkOverrideState,
+} from './PendingPurchaseVariantLinkOverride.js'
 
 export async function pendingPurchasesLoader({ request }: { request: Request }) {
   const url = new URL(request.url)
@@ -492,6 +499,51 @@ export function PendingPurchasesPage() {
         </div>
       </header>
 
+      {isAdmin ? (
+        <details className="pp-generate-packet-top" open>
+          <summary>
+            <strong>Generate live pending-purchase packet</strong>
+            <Pill tone="warning">admin</Pill>
+          </summary>
+          <p className="subtle-copy">
+            Read the current Sweed outstanding PO queue directly and persist a generated Helios review packet. This supersedes the prior ready packet without writing to Sweed synchronously.
+          </p>
+          <div className="filter-row" style={{ alignItems: 'center' }}>
+            <label className="stack-field" style={{ minWidth: '11rem' }}>
+              <span>From</span>
+              <input onChange={(event) => setGenerateFromDate(event.currentTarget.value)} type="date" value={generateFromDate} />
+            </label>
+            <label className="stack-field" style={{ minWidth: '11rem' }}>
+              <span>To</span>
+              <input onChange={(event) => setGenerateToDate(event.currentTarget.value)} type="date" value={generateToDate} />
+            </label>
+            <div className="stack-field">
+              <span>Sites</span>
+              <div className="inline-row wrap-row">
+                {HELIOS_PENDING_PURCHASE_SITE_DEALERS.map((dealer) => (
+                  <label className="inline-row" key={dealer.dealerId} style={{ gap: '0.35rem' }}>
+                    <input
+                      checked={generateSiteDealerIds.includes(dealer.dealerId)}
+                      onChange={() => toggleGenerateSiteDealer(dealer.dealerId)}
+                      type="checkbox"
+                    />
+                    <span>{dealer.siteLabel}</span>
+                  </label>
+                ))}
+              </div>
+            </div>
+            <button
+              className="primary-button"
+              disabled={isGenerating || generateSiteDealerIds.length === 0}
+              onClick={() => void handleGenerate()}
+              type="button"
+            >
+              {isGenerating ? 'Generating live packet…' : 'Generate live packet'}
+            </button>
+          </div>
+        </details>
+      ) : null}
+
       <nav className="pp-mode-tabs" aria-label="Pending purchases view">
         <Link
           className={`pp-mode-tab ${mode === 'packets' ? 'pp-mode-tab-active' : ''}`}
@@ -610,50 +662,12 @@ export function PendingPurchasesPage() {
             </article>
           ) : null}
 
-          {isAdmin ? (
-            <article className="mini-card">
-              <header>
-                <strong>Generate live pending-purchase packet</strong>
-                <Pill tone="warning">admin</Pill>
-              </header>
-              <p className="subtle-copy">
-                Read the current Sweed outstanding PO queue directly and persist a generated Helios review packet. This supersedes the prior ready packet without writing to Sweed synchronously.
-              </p>
-              <div className="filter-row" style={{ alignItems: 'center' }}>
-                <label className="stack-field" style={{ minWidth: '11rem' }}>
-                  <span>From</span>
-                  <input onChange={(event) => setGenerateFromDate(event.currentTarget.value)} type="date" value={generateFromDate} />
-                </label>
-                <label className="stack-field" style={{ minWidth: '11rem' }}>
-                  <span>To</span>
-                  <input onChange={(event) => setGenerateToDate(event.currentTarget.value)} type="date" value={generateToDate} />
-                </label>
-                <div className="stack-field">
-                  <span>Sites</span>
-                  <div className="inline-row wrap-row">
-                    {HELIOS_PENDING_PURCHASE_SITE_DEALERS.map((dealer) => (
-                      <label className="inline-row" key={dealer.dealerId} style={{ gap: '0.35rem' }}>
-                        <input
-                          checked={generateSiteDealerIds.includes(dealer.dealerId)}
-                          onChange={() => toggleGenerateSiteDealer(dealer.dealerId)}
-                          type="checkbox"
-                        />
-                        <span>{dealer.siteLabel}</span>
-                      </label>
-                    ))}
-                  </div>
-                </div>
-                <button
-                  className="primary-button"
-                  disabled={isGenerating || generateSiteDealerIds.length === 0}
-                  onClick={() => void handleGenerate()}
-                  type="button"
-                >
-                  {isGenerating ? 'Generating live packet…' : 'Generate live packet'}
-                </button>
-              </div>
-            </article>
-          ) : null}
+          {/*
+            "Generate live pending-purchase packet" used to live here; it
+            was moved to the top of the page (above the mode tabs) per
+            reviewer feedback so the most common admin action — kicking
+            off a fresh packet — isn't buried at the bottom.
+          */}
 
           {isAdmin ? (
             <article className="mini-card">
@@ -1130,6 +1144,65 @@ function buildPendingPurchasesHref(
   return query.length > 0 ? `/catalog/pending-purchases?${query}` : '/catalog/pending-purchases'
 }
 
+/**
+ * Pull the reviewer-link-override state off a row's
+ * `editedStructuredFields` blob. Uses key-presence semantics for
+ * `targetReuseProductId`:
+ *   - key absent       → 'inherit' (use the parser's reuse pick)
+ *   - positive integer → 'forced'  (link to this exact Sweed product id)
+ *   - explicit null    → 'cleared' (suppress the parser's reuse pick)
+ *
+ * Since the row only carries the EFFECTIVE `reuseProductId` /
+ * `reuseProductName` (the queries layer already collapses parser-side
+ * vs. override into a single value), when the reviewer has forced an
+ * id we treat the row's reuseProductName as that override's display
+ * name — which is exactly what the picker needs to show "currently
+ * linked: #X — Name" without re-fetching from Sweed.
+ */
+function readInitialLinkOverrideStateFromRow(item: PendingPurchaseRow): VariantLinkOverrideState {
+  const overrides = item.editedStructuredFields as { targetReuseProductId?: number | null } | null
+  const overrideKeyPresent =
+    overrides !== null &&
+    Object.prototype.hasOwnProperty.call(overrides, 'targetReuseProductId')
+  const overrideValue = overrideKeyPresent
+    ? (typeof overrides?.targetReuseProductId === 'number' ? overrides.targetReuseProductId : null)
+    : null
+  return readInitialLinkOverrideState({
+    parserReuseProductId: item.reuseProductId,
+    parserReuseProductName: item.reuseProductName,
+    overrideKeyPresent,
+    overrideValue,
+  })
+}
+
+/**
+ * Merge the link-override `targetReuseProductId` key into the
+ * structured-overrides payload built by `buildStructuredOverridePayload`.
+ *
+ * `buildStructuredOverridePayload` returns `null` when no structured
+ * field is overridden. Once we add a `targetReuseProductId` we have to
+ * promote that null back to an object containing just that key.
+ *
+ * The PATCH route does a FULL replace when `editedStructuredFields` is
+ * present, so we must always emit the complete desired override map
+ * (structured fields + link override) in one shot.
+ */
+function mergeLinkOverrideIntoStructuredPayload(
+  structured: EditedStructuredFields | null,
+  linkOverride: VariantLinkOverrideState,
+): EditedStructuredFields | null {
+  const linkKey = buildLinkOverridePayloadKey(linkOverride)
+  if (linkKey === undefined) {
+    // Reviewer left the link override on "inherit" — don't add the
+    // key. Structured payload (or its absence) wins.
+    return structured
+  }
+  // Reviewer explicitly chose either a forced product id or "cleared"
+  // (null). Merge it on top of the structured payload, promoting from
+  // null if there were no other structured overrides.
+  return { ...(structured ?? {}), ...linkKey }
+}
+
 function PendingPurchaseRowCard(
   {
     canApprove,
@@ -1157,6 +1230,13 @@ function PendingPurchaseRowCard(
   // parsed value is what gets PATCHed back to the server.
   const [draftStructured, setDraftStructured] = useState<Record<StructuredOverrideKey, string>>(
     () => readInitialDraftStructured(item),
+  )
+  // Reviewer-forced link to an existing Sweed product id, stored as
+  // `editedStructuredFields.targetReuseProductId` via key-presence
+  // semantics. Three states: inherit (key absent), forced (positive
+  // int), cleared (explicit null). See PendingPurchaseVariantLinkOverride.
+  const [draftLinkOverride, setDraftLinkOverride] = useState<VariantLinkOverrideState>(
+    () => readInitialLinkOverrideStateFromRow(item),
   )
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [isApproving, setIsApproving] = useState(false)
@@ -1217,6 +1297,9 @@ function PendingPurchaseRowCard(
   const lastSyncedImageRef = useRef<string>(item.editedPrimaryImageUrl ?? item.primaryImageUrl ?? '')
   const lastSyncedNotesRef = useRef<string>(item.notes ?? '')
   const lastSyncedStructuredRef = useRef<string>(JSON.stringify(readInitialDraftStructured(item)))
+  const lastSyncedLinkOverrideRef = useRef<string>(
+    JSON.stringify(readInitialLinkOverrideStateFromRow(item)),
+  )
 
   const applySummaryText = readLastApplySummaryText(item)
   const verificationSummaryText = readVerificationSummaryText(item)
@@ -1279,6 +1362,13 @@ function PendingPurchaseRowCard(
     )
     lastSyncedStructuredRef.current = nextStructuredJson
 
+    const nextLinkOverride = readInitialLinkOverrideStateFromRow(item)
+    const nextLinkOverrideJson = JSON.stringify(nextLinkOverride)
+    setDraftLinkOverride((current) =>
+      JSON.stringify(current) === lastSyncedLinkOverrideRef.current ? nextLinkOverride : current,
+    )
+    lastSyncedLinkOverrideRef.current = nextLinkOverrideJson
+
     // Re-sync the collapsed-after-decision state with the freshest
     // approval status. Without this, a row the reviewer manually
     // reopened would stay open after a backend revalidate that
@@ -1304,7 +1394,11 @@ function PendingPurchaseRowCard(
 
     try {
       const parsedPrice = parseDraftPrice(draftPrice)
-      const nextStructured = buildStructuredOverridePayload(item, draftStructured)
+      const baseStructured = buildStructuredOverridePayload(item, draftStructured)
+      const nextStructured = mergeLinkOverrideIntoStructuredPayload(
+        baseStructured,
+        draftLinkOverride,
+      )
       const structuredChanged = !areStructuredOverridesEqual(
         item.editedStructuredFields ?? null,
         nextStructured,
@@ -1383,7 +1477,10 @@ function PendingPurchaseRowCard(
   // it stays collapsed to keep the row scannable on mobile).
   const hasDraftStructuredOverrides = !areStructuredOverridesEqual(
     item.editedStructuredFields ?? null,
-    buildStructuredOverridePayload(item, draftStructured),
+    mergeLinkOverrideIntoStructuredPayload(
+      buildStructuredOverridePayload(item, draftStructured),
+      draftLinkOverride,
+    ),
   )
   const hasDraftOverrides = (
     draftPrice !== readDraftPrice(item)
@@ -1899,6 +1996,22 @@ function PendingPurchaseRowCard(
             value={draftStructured.targetStrainName}
           />
         </div>
+        {/*
+          Link-existing-variant override (issue: "The correct variant
+          already exists, but you've misidentified it"). Lets the
+          reviewer pin this row to a specific Sweed product id by
+          searching Sweed live, instead of having to fix every
+          structured field one by one and hope the generator's
+          name-matching converges on the right variant on apply.
+        */}
+        <PendingPurchaseVariantLinkOverride
+          disabled={editingLocked}
+          onChange={setDraftLinkOverride}
+          parserReuseProductId={item.reuseProductId}
+          parserReuseProductName={item.reuseProductName}
+          siteDealerId={item.siteDealerId}
+          state={draftLinkOverride}
+        />
         {/*
           The Save Overrides button used to live here (and in the
           sibling Overrides details). Per reviewer feedback it now
