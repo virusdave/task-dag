@@ -57,35 +57,45 @@ certainly "no, run it directly here."
 
 ## Deploying changes (helios on vps-nixos-3)
 
+**Use `self-deploy-helios`. Never restart helios systemd units by hand.**
+
 You are running on `vps-nixos-3`. After `git push origin HEAD:master`,
-redeploy helios by running systemctl **directly, locally** — no SSH:
+roll helios with the canonical mirror-aware wrapper, run locally
+(no SSH):
 
 ```sh
-sudo -n /nix/store/9rpism89x6lyjcwzzkp6kana25rs03nn-systemd-260.1/bin/systemctl restart helios-prep.service helios-server.service helios-worker.service
+self-deploy-helios
 ```
 
-`helios-prep` fetches/builds master into `/var/lib/helios/automation/`,
-so this command picks up anything you pushed to master — including
-files outside `helios/` (e.g. `ads/google/scripts/*.ts`) that helios
-imports or shells out to at runtime.
+`self-deploy-helios` orchestrates the whole rollout — refreshing the
+peer first while it stays in mirror mode, flipping the local nginx
+to proxy at the peer for the restart window, running
+`reset-failed` + `restart helios-prep.service helios-server.service
+helios-worker.service`, waiting for three consecutive 2xx on
+`/healthzz`, then clearing the mirror flag. It is the **only**
+sanctioned way to roll helios. A raw
+`sudo systemctl restart helios-prep.service helios-server.service
+helios-worker.service` (or any subset of those three) bypasses the
+mirror flip and produces user-visible 5xxs plus a half-deployed peer.
+That is exactly the failure mode the wrapper exists to prevent — see
+canon §1.
 
-The `/nix/store/.../systemctl` path is what sudo NOPASSWD whitelists
-for the `amp-local` user; bare `systemctl` requires a password.
-Re-resolve the current path on the host with `sudo -nl` whenever a
-new system closure may have changed it.
+If `self-deploy-helios` itself errors out, **stop and report** to the
+operator with the exact output. Do not "remediate" by manually
+restarting the units.
 
-To verify the restart landed, again **run locally** rather than
+To verify after the wrapper exits, again **run locally** rather than
 SSHing:
 
 ```sh
 systemctl is-active helios-prep.service helios-server.service helios-worker.service
 journalctl -u helios-prep.service -n 50 --no-pager
-curl -sSI http://127.0.0.1:<helios-port>/healthzz   # or via the public URL
+curl -sSI https://helios.freshlybaked.us/healthzz
 ```
 
 Use `nix-shell` / `nix run` / `nix develop` directly in the local
-shell if a deploy or verification command needs a tool that isn't on
-the default `$PATH`. Do **not** wrap any of that in `ssh
+shell if a verification command needs a tool that isn't on the
+default `$PATH`. Do **not** wrap any of that in `ssh
 vps-nixos-3 '…'`.
 
 ## MANDATORY: develop in an ephemeral checkout, not the shared `~/src` tree
