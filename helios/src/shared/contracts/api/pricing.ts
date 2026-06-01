@@ -105,6 +105,7 @@ export type PricingRunTriggerSource = z.infer<typeof PricingRunTriggerSourceSche
 export const PricingSelectionFiltersSchema = z.object({
   brands: QueryStringArraySchema,
   categories: QueryStringArraySchema,
+  distributorNames: QueryStringArraySchema,
   includePending: QueryBooleanSchema.default(true),
   packSizes: QueryStringArraySchema,
   search: BlankStringSchema,
@@ -121,7 +122,7 @@ export const PricingScopePreviewQuerySchema = PricingSelectionFiltersSchema.exte
 })
 export type PricingScopePreviewQuery = z.infer<typeof PricingScopePreviewQuerySchema>
 
-export const PricingFacetFieldSchema = z.enum(['brand', 'category', 'subcategory', 'unitSize', 'packSize'])
+export const PricingFacetFieldSchema = z.enum(['brand', 'category', 'subcategory', 'unitSize', 'packSize', 'distributor'])
 export type PricingFacetField = z.infer<typeof PricingFacetFieldSchema>
 
 export const PricingFacetsQuerySchema = PricingSelectionFiltersSchema.extend({

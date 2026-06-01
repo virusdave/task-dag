@@ -38,6 +38,7 @@ describe('resolvePricingRunScope', () => {
     const filters: PricingScopePreviewQuery = {
       brands: [],
       categories: [],
+      distributorNames: [],
       includePending: false,
       packSizes: [],
       scopeKind: 'filtered_catalog',
@@ -62,6 +63,7 @@ describe('resolvePricingRunScope', () => {
     const filters: PricingScopePreviewQuery = {
       brands: ['BrandA', 'BrandB'],
       categories: ['Flower'],
+      distributorNames: [],
       includePending: false,
       packSizes: [],
       scopeKind: 'filtered_catalog',
@@ -91,6 +93,7 @@ describe('resolvePricingRunScope', () => {
     const filters: PricingScopePreviewQuery = {
       brands: [],
       categories: [],
+      distributorNames: [],
       includePending: true,
       packSizes: [],
       scopeKind: 'family_expansion_from_stock_or_pending',
@@ -118,6 +121,7 @@ describe('resolvePricingRunScope', () => {
     const filters: PricingScopePreviewQuery = {
       brands: [],
       categories: [],
+      distributorNames: [],
       includePending: true,
       packSizes: [],
       scopeKind: 'family_expansion_from_stock_or_pending',
@@ -141,6 +145,7 @@ describe('resolvePricingRunScope', () => {
     const filters: PricingScopePreviewQuery = {
       brands: [],
       categories: [],
+      distributorNames: [],
       includePending: false,
       packSizes: [],
       scopeKind: 'full_catalog',
@@ -163,6 +168,7 @@ describe('resolvePricingRunScope', () => {
     const filters: PricingScopePreviewQuery = {
       brands: [],
       categories: [],
+      distributorNames: [],
       includePending: true,
       packSizes: [],
       scopeKind: 'family_expansion_from_stock_or_pending',
@@ -177,5 +183,31 @@ describe('resolvePricingRunScope', () => {
     const result = await resolvePricingRunScope(db, filters)
     expect(result.catalogGroupIds).toEqual([])
     expect(result.scopedProductIds).toEqual([])
+  })
+
+  it('filters catalog products by distributor names from current package snapshots', async () => {
+    const { db, capturedQueryText, capturedValues } = captureQuery()
+
+    const filters: PricingScopePreviewQuery = {
+      brands: ['MFNY'],
+      categories: [],
+      distributorNames: ['MFUSED LLC'],
+      includePending: false,
+      packSizes: [],
+      scopeKind: 'filtered_catalog',
+      search: undefined,
+      sites: [],
+      stockOnly: false,
+      strict: false,
+      subcategories: [],
+      unitSizes: [],
+    }
+
+    await resolvePricingRunScope(db, filters)
+
+    expect(capturedValues()).toContainEqual(['MFUSED LLC'])
+    expect(capturedQueryText()).toContain('sweed_package_current')
+    expect(capturedQueryText()).toContain('product_distributors')
+    expect(capturedQueryText()).toContain('pd.distributor_name = any')
   })
 })

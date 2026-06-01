@@ -828,6 +828,9 @@ function buildSelectionFilterSummary(selectionFilters: PricingRunDetailResponse[
   if (selectionFilters.brands.length > 0) {
     parts.push(`Brands: ${selectionFilters.brands.join(', ')}`)
   }
+  if (selectionFilters.distributorNames.length > 0) {
+    parts.push(`Distributors: ${selectionFilters.distributorNames.join(', ')}`)
+  }
   if (selectionFilters.categories.length > 0) {
     parts.push(`Categories: ${selectionFilters.categories.join(', ')}`)
   }

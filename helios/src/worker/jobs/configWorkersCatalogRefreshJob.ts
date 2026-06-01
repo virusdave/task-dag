@@ -265,7 +265,8 @@ async function collectDistributors(stateDealerId: number): Promise<CatalogEntity
   const seenIds = new Set<number>()
   let page = 1
   while (true) {
-    const raw = await callSweedRpcForDealer(stateDealerId, 'store.distributor.list', {
+    const raw = await callSweedRpcForDealer(stateDealerId, 'store.distributor.search', {
+      enabled: true,
       page,
       pageSize: LIST_PAGE_SIZE,
     })

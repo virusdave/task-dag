@@ -39,6 +39,7 @@ export function PricingGeneratePage() {
   const [scopeKind, setScopeKind] = useState<PricingNewRunScopeKind>(preview.filters.scopeKind)
   const [search, setSearch] = useState(preview.filters.search ?? '')
   const [brands, setBrands] = useState<string[]>(preview.filters.brands)
+  const [distributorNames, setDistributorNames] = useState<string[]>(preview.filters.distributorNames)
   const [categories, setCategories] = useState<string[]>(preview.filters.categories)
   const [subcategories, setSubcategories] = useState<string[]>(preview.filters.subcategories)
   const [unitSizes, setUnitSizes] = useState<string[]>(preview.filters.unitSizes)
@@ -59,6 +60,7 @@ export function PricingGeneratePage() {
     setScopeKind(preview.filters.scopeKind)
     setSearch(preview.filters.search ?? '')
     setBrands(preview.filters.brands)
+    setDistributorNames(preview.filters.distributorNames)
     setCategories(preview.filters.categories)
     setSubcategories(preview.filters.subcategories)
     setUnitSizes(preview.filters.unitSizes)
@@ -80,6 +82,7 @@ export function PricingGeneratePage() {
       parts.push('Full catalog')
     }
     if (brands.length > 0) parts.push(brands.join(', '))
+    if (distributorNames.length > 0) parts.push(distributorNames.join(', '))
     if (categories.length > 0) parts.push(categories.join(', '))
     if (subcategories.length > 0) parts.push(subcategories.join(', '))
     if (unitSizes.length > 0) parts.push(unitSizes.join(', '))
@@ -88,7 +91,7 @@ export function PricingGeneratePage() {
     const sourceLabels = buildSourceLabels({ sites, stockOnly, includePending })
     if (sourceLabels.length > 0) parts.push(...sourceLabels)
     return parts.length > 0 ? parts.join(' · ') : 'Filtered catalog'
-  }, [brands, categories, includePending, packSizes, scopeKind, scopeLabel, search, sites, stockOnly, strict, subcategories, unitSizes])
+  }, [brands, categories, distributorNames, includePending, packSizes, scopeKind, scopeLabel, search, sites, stockOnly, strict, subcategories, unitSizes])
 
   async function handleQueueRun() {
     setIsQueueing(true)
@@ -98,6 +101,7 @@ export function PricingGeneratePage() {
       const body = QueuePricingRunRequestSchema.parse({
         brands,
         categories,
+        distributorNames,
         forceLiveRefresh,
         includePending,
         packSizes,
@@ -227,7 +231,7 @@ export function PricingGeneratePage() {
             <FacetMultiSelect
               facet="brand"
               filters={{
-                brands, categories, subcategories, sites, scopeKind,
+                brands, categories, distributorNames, subcategories, sites, scopeKind,
                 unitSizes, packSizes,
                 stockOnly, includePending, strict, search: search.trim() || undefined,
               }}
@@ -236,9 +240,20 @@ export function PricingGeneratePage() {
               value={brands}
             />
             <FacetMultiSelect
+              facet="distributor"
+              filters={{
+                brands, categories, distributorNames, subcategories, sites, scopeKind,
+                unitSizes, packSizes,
+                stockOnly, includePending, strict, search: search.trim() || undefined,
+              }}
+              label="Distributors"
+              onChange={setDistributorNames}
+              value={distributorNames}
+            />
+            <FacetMultiSelect
               facet="category"
               filters={{
-                brands, categories, subcategories, sites, scopeKind,
+                brands, categories, distributorNames, subcategories, sites, scopeKind,
                 unitSizes, packSizes,
                 stockOnly, includePending, strict, search: search.trim() || undefined,
               }}
@@ -249,7 +264,7 @@ export function PricingGeneratePage() {
             <FacetMultiSelect
               facet="subcategory"
               filters={{
-                brands, categories, subcategories, sites, scopeKind,
+                brands, categories, distributorNames, subcategories, sites, scopeKind,
                 unitSizes, packSizes,
                 stockOnly, includePending, strict, search: search.trim() || undefined,
               }}
@@ -260,7 +275,7 @@ export function PricingGeneratePage() {
             <FacetMultiSelect
               facet="unitSize"
               filters={{
-                brands, categories, subcategories, sites, scopeKind,
+                brands, categories, distributorNames, subcategories, sites, scopeKind,
                 unitSizes, packSizes,
                 stockOnly, includePending, strict, search: search.trim() || undefined,
               }}
@@ -271,7 +286,7 @@ export function PricingGeneratePage() {
             <FacetMultiSelect
               facet="packSize"
               filters={{
-                brands, categories, subcategories, sites, scopeKind,
+                brands, categories, distributorNames, subcategories, sites, scopeKind,
                 unitSizes, packSizes,
                 stockOnly, includePending, strict, search: search.trim() || undefined,
               }}
@@ -293,6 +308,7 @@ export function PricingGeneratePage() {
             {/* Repeated hidden inputs let the GET-form preview reload the
                 same multiselect arrays without JS state-loss. */}
             {brands.map((value) => <input key={`brand-${value}`} name="brands" type="hidden" value={value} />)}
+            {distributorNames.map((value) => <input key={`distributor-${value}`} name="distributorNames" type="hidden" value={value} />)}
             {categories.map((value) => <input key={`category-${value}`} name="categories" type="hidden" value={value} />)}
             {subcategories.map((value) => <input key={`subcategory-${value}`} name="subcategories" type="hidden" value={value} />)}
             {unitSizes.map((value) => <input key={`unitSize-${value}`} name="unitSizes" type="hidden" value={value} />)}
@@ -393,6 +409,7 @@ interface FacetMultiSelectProps {
   filters: {
     brands: string[]
     categories: string[]
+    distributorNames: string[]
     subcategories: string[]
     unitSizes: string[]
     packSizes: string[]
@@ -430,6 +447,7 @@ function FacetMultiSelect({ facet, filters, label, onChange, value }: FacetMulti
       params.set('strict', filters.strict ? 'true' : 'false')
       for (const brand of filters.brands) params.append('brands', brand)
       for (const cat of filters.categories) params.append('categories', cat)
+      for (const distributor of filters.distributorNames) params.append('distributorNames', distributor)
       for (const sub of filters.subcategories) params.append('subcategories', sub)
       for (const unitSize of filters.unitSizes) params.append('unitSizes', unitSize)
       for (const packSize of filters.packSizes) params.append('packSizes', packSize)
@@ -441,7 +459,7 @@ function FacetMultiSelect({ facet, filters, label, onChange, value }: FacetMulti
     } finally {
       setLoading(false)
     }
-  }, [facet, filters.brands, filters.categories, filters.includePending, filters.packSizes, filters.scopeKind, filters.search, filters.sites, filters.stockOnly, filters.strict, filters.subcategories, filters.unitSizes, searchInPicker])
+  }, [facet, filters.brands, filters.categories, filters.distributorNames, filters.includePending, filters.packSizes, filters.scopeKind, filters.search, filters.sites, filters.stockOnly, filters.strict, filters.subcategories, filters.unitSizes, searchInPicker])
 
   useEffect(() => {
     if (!expanded) return

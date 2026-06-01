@@ -92,6 +92,7 @@ export async function registerPricingRoutes(server: FastifyInstance): Promise<vo
       && !body.search
       && body.brands.length === 0
       && body.categories.length === 0
+      && body.distributorNames.length === 0
       && body.subcategories.length === 0
       && body.unitSizes.length === 0
       && body.packSizes.length === 0
@@ -271,6 +272,7 @@ function selectionFiltersForPersistence(body: QueuePricingRunRequest): PricingSe
   return {
     brands: body.brands,
     categories: body.categories,
+    distributorNames: body.distributorNames,
     includePending: body.includePending,
     packSizes: body.packSizes,
     search: body.search,
@@ -288,6 +290,7 @@ function buildScopeLabel(body: QueuePricingRunRequest): string {
     parts.push(body.strict ? 'Stock+pending (strict)' : 'Family expansion')
   }
   if (body.brands.length > 0) parts.push(body.brands.join(', '))
+  if (body.distributorNames.length > 0) parts.push(body.distributorNames.join(', '))
   if (body.categories.length > 0) parts.push(body.categories.join(', '))
   if (body.subcategories.length > 0) parts.push(body.subcategories.join(', '))
   if (body.unitSizes.length > 0) parts.push(body.unitSizes.join(', '))

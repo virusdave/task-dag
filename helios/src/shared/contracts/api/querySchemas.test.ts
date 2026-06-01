@@ -33,6 +33,7 @@ describe('query schemas', () => {
     })).toEqual({
       brands: ['BrandA', 'BrandB'],
       categories: ['Flower'],
+      distributorNames: [],
       includePending: true,
       packSizes: [],
       scopeKind: 'family_expansion_from_stock_or_pending',
