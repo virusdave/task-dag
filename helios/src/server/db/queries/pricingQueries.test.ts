@@ -39,12 +39,14 @@ describe('resolvePricingRunScope', () => {
       brands: [],
       categories: [],
       includePending: false,
+      packSizes: [],
       scopeKind: 'filtered_catalog',
       search: 'Roapz',
       sites: [],
       stockOnly: false,
       strict: false,
       subcategories: [],
+      unitSizes: [],
     }
 
     await resolvePricingRunScope(db, filters)
@@ -61,12 +63,14 @@ describe('resolvePricingRunScope', () => {
       brands: ['BrandA', 'BrandB'],
       categories: ['Flower'],
       includePending: false,
+      packSizes: [],
       scopeKind: 'filtered_catalog',
       search: undefined,
       sites: [],
       stockOnly: false,
       strict: false,
       subcategories: ['Infused'],
+      unitSizes: [],
     }
 
     await resolvePricingRunScope(db, filters)
@@ -88,12 +92,14 @@ describe('resolvePricingRunScope', () => {
       brands: [],
       categories: [],
       includePending: true,
+      packSizes: [],
       scopeKind: 'family_expansion_from_stock_or_pending',
       search: undefined,
       sites: ['bronx'],
       stockOnly: true,
       strict: false,
       subcategories: [],
+      unitSizes: [],
     }
 
     await resolvePricingRunScope(db, filters, { seedProductIds: [101, 202] })
@@ -113,12 +119,14 @@ describe('resolvePricingRunScope', () => {
       brands: [],
       categories: [],
       includePending: true,
+      packSizes: [],
       scopeKind: 'family_expansion_from_stock_or_pending',
       search: undefined,
       sites: ['bronx', 'midtown'],
       stockOnly: true,
       strict: true,
       subcategories: [],
+      unitSizes: [],
     }
 
     await resolvePricingRunScope(db, filters, { seedProductIds: [101] })
@@ -134,12 +142,14 @@ describe('resolvePricingRunScope', () => {
       brands: [],
       categories: [],
       includePending: false,
+      packSizes: [],
       scopeKind: 'full_catalog',
       search: undefined,
       sites: [],
       stockOnly: false,
       strict: false,
       subcategories: [],
+      unitSizes: [],
     }
 
     await resolvePricingRunScope(db, filters)
@@ -154,12 +164,14 @@ describe('resolvePricingRunScope', () => {
       brands: [],
       categories: [],
       includePending: true,
+      packSizes: [],
       scopeKind: 'family_expansion_from_stock_or_pending',
       search: undefined,
       sites: ['bronx'],
       stockOnly: true,
       strict: false,
       subcategories: [],
+      unitSizes: [],
     }
 
     const result = await resolvePricingRunScope(db, filters)

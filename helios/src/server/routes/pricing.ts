@@ -93,6 +93,8 @@ export async function registerPricingRoutes(server: FastifyInstance): Promise<vo
       && body.brands.length === 0
       && body.categories.length === 0
       && body.subcategories.length === 0
+      && body.unitSizes.length === 0
+      && body.packSizes.length === 0
       && !body.stockOnly
       && !body.includePending
     ) {
@@ -270,11 +272,13 @@ function selectionFiltersForPersistence(body: QueuePricingRunRequest): PricingSe
     brands: body.brands,
     categories: body.categories,
     includePending: body.includePending,
+    packSizes: body.packSizes,
     search: body.search,
     sites: body.sites,
     stockOnly: body.stockOnly,
     strict: body.strict,
     subcategories: body.subcategories,
+    unitSizes: body.unitSizes,
   }
 }
 
@@ -286,6 +290,8 @@ function buildScopeLabel(body: QueuePricingRunRequest): string {
   if (body.brands.length > 0) parts.push(body.brands.join(', '))
   if (body.categories.length > 0) parts.push(body.categories.join(', '))
   if (body.subcategories.length > 0) parts.push(body.subcategories.join(', '))
+  if (body.unitSizes.length > 0) parts.push(body.unitSizes.join(', '))
+  if (body.packSizes.length > 0) parts.push(body.packSizes.map(formatPackSizeLabel).join(', '))
   if (body.search) parts.push(body.search)
   const productScopeLabels = buildProductScopeLabels(body)
   if (productScopeLabels.length > 0) {
@@ -310,6 +316,14 @@ function buildProductScopeLabels(filters: { sites: PricingSiteKey[]; stockOnly: 
     labels.push(siteSummary ? `${siteSummary} pending purchases` : 'Pending purchases')
   }
   return labels
+}
+
+function formatPackSizeLabel(value: string): string {
+  const numeric = Number(value)
+  if (Number.isInteger(numeric) && numeric > 0) {
+    return numeric === 1 ? '1 per pkg' : `${numeric}-pack`
+  }
+  return value
 }
 
 async function resolveSeedProductIds(

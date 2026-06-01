@@ -41,6 +41,8 @@ export function PricingGeneratePage() {
   const [brands, setBrands] = useState<string[]>(preview.filters.brands)
   const [categories, setCategories] = useState<string[]>(preview.filters.categories)
   const [subcategories, setSubcategories] = useState<string[]>(preview.filters.subcategories)
+  const [unitSizes, setUnitSizes] = useState<string[]>(preview.filters.unitSizes)
+  const [packSizes, setPackSizes] = useState<string[]>(preview.filters.packSizes)
   const [sites, setSites] = useState<PricingSiteKey[]>(preview.filters.sites)
   const [stockOnly, setStockOnly] = useState<boolean>(preview.filters.stockOnly)
   const [includePending, setIncludePending] = useState<boolean>(preview.filters.includePending)
@@ -59,6 +61,8 @@ export function PricingGeneratePage() {
     setBrands(preview.filters.brands)
     setCategories(preview.filters.categories)
     setSubcategories(preview.filters.subcategories)
+    setUnitSizes(preview.filters.unitSizes)
+    setPackSizes(preview.filters.packSizes)
     setSites(preview.filters.sites)
     setStockOnly(preview.filters.stockOnly)
     setIncludePending(preview.filters.includePending)
@@ -78,11 +82,13 @@ export function PricingGeneratePage() {
     if (brands.length > 0) parts.push(brands.join(', '))
     if (categories.length > 0) parts.push(categories.join(', '))
     if (subcategories.length > 0) parts.push(subcategories.join(', '))
+    if (unitSizes.length > 0) parts.push(unitSizes.join(', '))
+    if (packSizes.length > 0) parts.push(packSizes.map(formatPackSizeLabel).join(', '))
     if (search.trim().length > 0) parts.push(search.trim())
     const sourceLabels = buildSourceLabels({ sites, stockOnly, includePending })
     if (sourceLabels.length > 0) parts.push(...sourceLabels)
     return parts.length > 0 ? parts.join(' · ') : 'Filtered catalog'
-  }, [brands, categories, includePending, scopeKind, scopeLabel, search, sites, stockOnly, strict, subcategories])
+  }, [brands, categories, includePending, packSizes, scopeKind, scopeLabel, search, sites, stockOnly, strict, subcategories, unitSizes])
 
   async function handleQueueRun() {
     setIsQueueing(true)
@@ -94,6 +100,7 @@ export function PricingGeneratePage() {
         categories,
         forceLiveRefresh,
         includePending,
+        packSizes,
         reason: `Queue pricing run for ${derivedScopeLabel}`,
         scopeKind,
         scopeLabel: derivedScopeLabel,
@@ -102,6 +109,7 @@ export function PricingGeneratePage() {
         stockOnly,
         strict,
         subcategories,
+        unitSizes,
       })
 
       const response = await mutateJson('/api/pricing/runs', QueuePricingRunAcceptedResponseSchema, {
@@ -220,6 +228,7 @@ export function PricingGeneratePage() {
               facet="brand"
               filters={{
                 brands, categories, subcategories, sites, scopeKind,
+                unitSizes, packSizes,
                 stockOnly, includePending, strict, search: search.trim() || undefined,
               }}
               label="Brands"
@@ -230,6 +239,7 @@ export function PricingGeneratePage() {
               facet="category"
               filters={{
                 brands, categories, subcategories, sites, scopeKind,
+                unitSizes, packSizes,
                 stockOnly, includePending, strict, search: search.trim() || undefined,
               }}
               label="Categories"
@@ -240,11 +250,34 @@ export function PricingGeneratePage() {
               facet="subcategory"
               filters={{
                 brands, categories, subcategories, sites, scopeKind,
+                unitSizes, packSizes,
                 stockOnly, includePending, strict, search: search.trim() || undefined,
               }}
               label="Subcategories"
               onChange={setSubcategories}
               value={subcategories}
+            />
+            <FacetMultiSelect
+              facet="unitSize"
+              filters={{
+                brands, categories, subcategories, sites, scopeKind,
+                unitSizes, packSizes,
+                stockOnly, includePending, strict, search: search.trim() || undefined,
+              }}
+              label="Variant sizes"
+              onChange={setUnitSizes}
+              value={unitSizes}
+            />
+            <FacetMultiSelect
+              facet="packSize"
+              filters={{
+                brands, categories, subcategories, sites, scopeKind,
+                unitSizes, packSizes,
+                stockOnly, includePending, strict, search: search.trim() || undefined,
+              }}
+              label="Pack sizes"
+              onChange={setPackSizes}
+              value={packSizes}
             />
 
             <label className="stack-field">
@@ -262,11 +295,16 @@ export function PricingGeneratePage() {
             {brands.map((value) => <input key={`brand-${value}`} name="brands" type="hidden" value={value} />)}
             {categories.map((value) => <input key={`category-${value}`} name="categories" type="hidden" value={value} />)}
             {subcategories.map((value) => <input key={`subcategory-${value}`} name="subcategories" type="hidden" value={value} />)}
+            {unitSizes.map((value) => <input key={`unitSize-${value}`} name="unitSizes" type="hidden" value={value} />)}
+            {packSizes.map((value) => <input key={`packSize-${value}`} name="packSizes" type="hidden" value={value} />)}
 
             <div className="inline-row wrap-row">
               <button className="ghost-button" type="submit">
                 {isPreviewLoading ? 'Updating preview…' : 'Preview matches'}
               </button>
+              <Link className="ghost-button like-button" to={pricingGeneratePath}>
+                Reset filters
+              </Link>
               <Link className="ghost-button like-button" to={buildHeliosModulePath('catalog', 'browser')}>
                 Browse catalog
               </Link>
@@ -356,6 +394,8 @@ interface FacetMultiSelectProps {
     brands: string[]
     categories: string[]
     subcategories: string[]
+    unitSizes: string[]
+    packSizes: string[]
     sites: PricingSiteKey[]
     scopeKind: PricingNewRunScopeKind
     stockOnly: boolean
@@ -391,6 +431,8 @@ function FacetMultiSelect({ facet, filters, label, onChange, value }: FacetMulti
       for (const brand of filters.brands) params.append('brands', brand)
       for (const cat of filters.categories) params.append('categories', cat)
       for (const sub of filters.subcategories) params.append('subcategories', sub)
+      for (const unitSize of filters.unitSizes) params.append('unitSizes', unitSize)
+      for (const packSize of filters.packSizes) params.append('packSizes', packSize)
       for (const site of filters.sites) params.append('sites', site)
       const data = await loadJson(`/api/pricing/facets?${params.toString()}`, PricingFacetsResponseSchema)
       setOptions(data.options)
@@ -399,7 +441,7 @@ function FacetMultiSelect({ facet, filters, label, onChange, value }: FacetMulti
     } finally {
       setLoading(false)
     }
-  }, [facet, filters.brands, filters.categories, filters.includePending, filters.scopeKind, filters.search, filters.sites, filters.stockOnly, filters.strict, filters.subcategories, searchInPicker])
+  }, [facet, filters.brands, filters.categories, filters.includePending, filters.packSizes, filters.scopeKind, filters.search, filters.sites, filters.stockOnly, filters.strict, filters.subcategories, filters.unitSizes, searchInPicker])
 
   useEffect(() => {
     if (!expanded) return
@@ -464,7 +506,7 @@ function FacetMultiSelect({ facet, filters, label, onChange, value }: FacetMulti
                       onChange={() => toggle(option.value)}
                       type="checkbox"
                     />
-                    <span style={{ flex: 1 }}>{option.value}</span>
+                    <span style={{ flex: 1 }}>{facet === 'packSize' ? formatPackSizeLabel(option.value) : option.value}</span>
                     <span className="subtle-copy">{option.rowCount}</span>
                   </label>
                 </li>
@@ -484,4 +526,12 @@ function buildSourceLabels(input: { sites: PricingSiteKey[]; stockOnly: boolean;
   if (input.stockOnly) labels.push(siteSummary ? `${siteSummary} in stock` : 'In stock')
   if (input.includePending) labels.push(siteSummary ? `${siteSummary} pending purchases` : 'Pending purchases')
   return labels
+}
+
+function formatPackSizeLabel(value: string): string {
+  const numeric = Number(value)
+  if (Number.isInteger(numeric) && numeric > 0) {
+    return numeric === 1 ? '1 per pkg' : `${numeric}-pack`
+  }
+  return value
 }

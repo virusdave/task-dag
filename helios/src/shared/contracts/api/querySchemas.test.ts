@@ -34,12 +34,14 @@ describe('query schemas', () => {
       brands: ['BrandA', 'BrandB'],
       categories: ['Flower'],
       includePending: true,
+      packSizes: [],
       scopeKind: 'family_expansion_from_stock_or_pending',
       search: undefined,
       sites: ['bronx', 'midtown'],
       stockOnly: true,
       strict: false,
       subcategories: [],
+      unitSizes: [],
     })
   })
 

@@ -7,6 +7,7 @@ import {
   buildHeliosModulePath,
   type PricingReviewItem,
   type PricingRunDetailResponse,
+  type PricingRunGroupSummary,
   type PricingRunMarketListing,
 } from '../../../shared/contracts/index.js'
 import { loadJson, mutateJson } from '../../app/fetchJson.js'
@@ -44,33 +45,10 @@ export function PricingRunDetailPage() {
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [feedbackMessage, setFeedbackMessage] = useState<string | null>(null)
 
-  const brandSections = useMemo(() => {
-    const sections = new Map<string, {
-      brandName: string
-      groups: PricingRunDetailResponse['groups']
-      key: string
-      reviewItems: PricingReviewItem[]
-    }>()
-
-    for (const group of data.groups) {
-      const brandName = group.brandName ?? 'Unbranded'
-      const key = brandName.toLowerCase()
-      const existing = sections.get(key)
-      if (existing) {
-        existing.groups.push(group)
-        existing.reviewItems.push(...group.reviewItems)
-      } else {
-        sections.set(key, {
-          brandName,
-          groups: [group],
-          key,
-          reviewItems: [...group.reviewItems],
-        })
-      }
-    }
-
-    return [...sections.values()].sort((left, right) => left.brandName.localeCompare(right.brandName))
+  const categorySections = useMemo(() => {
+    return buildPricingReviewHierarchy(data.groups)
   }, [data.groups])
+  const brandFamilyLeaves = useMemo(() => flattenBrandFamilyLeaves(categorySections), [categorySections])
 
   useEffect(() => {
     if (!isBuildInProgress) {
@@ -101,7 +79,7 @@ export function PricingRunDetailPage() {
   useEffect(() => {
     setCollapsedGroupIds((current) => {
       const next = new Set(current)
-      for (const group of data.groups) {
+      for (const group of brandFamilyLeaves.flatMap((leaf) => leaf.groups)) {
         if (countPendingItems(group.reviewItems) === 0) {
           next.add(group.proposalRowId)
         }
@@ -110,14 +88,14 @@ export function PricingRunDetailPage() {
     })
     setCollapsedBrandKeys((current) => {
       const next = new Set(current)
-      for (const brand of brandSections) {
-        if (countPendingItems(brand.reviewItems) === 0) {
-          next.add(brand.key)
+      for (const leaf of brandFamilyLeaves) {
+        if (countPendingItems(leaf.reviewItems) === 0) {
+          next.add(leaf.key)
         }
       }
       return next
     })
-  }, [brandSections, data.groups])
+  }, [brandFamilyLeaves])
 
   async function handleSaveEdit(item: PricingReviewItem) {
     setIsSaving(true)
@@ -200,14 +178,30 @@ export function PricingRunDetailPage() {
     setFeedbackMessage(null)
     try {
       const normalizedPrice = roundCurrency(editedValue)
+      const failures: string[] = []
+      let successCount = 0
       for (const item of editableItems) {
-        await mutateJson(`/api/proposal-line-items/${item.lineItem.lineItemId}/edit`, MutationAcceptedResponseSchema, {
-          body: JSON.stringify({ editedValue: normalizedPrice, expectedVersion: item.lineItem.version }),
-          method: 'PATCH',
-        })
+        try {
+          await mutateJson(`/api/proposal-line-items/${item.lineItem.lineItemId}/edit`, MutationAcceptedResponseSchema, {
+            body: JSON.stringify({ editedValue: normalizedPrice, expectedVersion: item.lineItem.version }),
+            method: 'PATCH',
+          })
+          successCount += 1
+        } catch (error) {
+          const message = error instanceof Error ? error.message : 'Unknown error'
+          console.warn('[pricing] family price edit failed', {
+            lineItemId: item.lineItem.lineItemId,
+            productId: item.lineItem.targetEntityId,
+            message,
+          })
+          failures.push(`${productLabel(item)}: ${message}`)
+        }
       }
       await revalidator.revalidate()
-      setFeedbackMessage(`Saved ${formatMoney(normalizedPrice)} across ${editableItems.length} pending row${editableItems.length === 1 ? '' : 's'} in ${label}.`)
+      setFeedbackMessage(`Saved ${formatMoney(normalizedPrice)} across ${successCount}/${editableItems.length} pending row${editableItems.length === 1 ? '' : 's'} in ${label}.`)
+      if (failures.length > 0) {
+        setErrorMessage(`Failed ${failures.length} row${failures.length === 1 ? '' : 's'}; page state was refreshed. First failure: ${failures[0]}`)
+      }
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : `Could not apply the batch price for ${label}.`)
     } finally {
@@ -227,20 +221,37 @@ export function PricingRunDetailPage() {
     setFeedbackMessage(null)
     try {
       const jobIds: number[] = []
+      const failures: string[] = []
+      let successCount = 0
       for (const item of pendingItems) {
-        const response = await mutateJson(`/api/proposal-line-items/${item.lineItem.lineItemId}/${decision}`, MutationAcceptedResponseSchema, {
-          body: JSON.stringify({ expectedVersion: item.lineItem.version }),
-          method: 'POST',
-        })
-        if (response.jobId) {
-          jobIds.push(response.jobId)
+        try {
+          const response = await mutateJson(`/api/proposal-line-items/${item.lineItem.lineItemId}/${decision}`, MutationAcceptedResponseSchema, {
+            body: JSON.stringify({ expectedVersion: item.lineItem.version }),
+            method: 'POST',
+          })
+          successCount += 1
+          if (response.jobId) {
+            jobIds.push(response.jobId)
+          }
+        } catch (error) {
+          const message = error instanceof Error ? error.message : 'Unknown error'
+          console.warn('[pricing] family decision failed', {
+            decision,
+            lineItemId: item.lineItem.lineItemId,
+            productId: item.lineItem.targetEntityId,
+            message,
+          })
+          failures.push(`${productLabel(item)}: ${message}`)
         }
       }
       for (const jobId of jobIds) {
         await waitForJob(jobId)
       }
       await revalidator.revalidate()
-      setFeedbackMessage(`${decision === 'approve' ? 'Approved' : 'Excluded'} ${pendingItems.length} pending row${pendingItems.length === 1 ? '' : 's'} in ${label}.`)
+      setFeedbackMessage(`${decision === 'approve' ? 'Approved' : 'Excluded'} ${successCount}/${pendingItems.length} pending row${pendingItems.length === 1 ? '' : 's'} in ${label}.`)
+      if (failures.length > 0) {
+        setErrorMessage(`Failed ${failures.length} row${failures.length === 1 ? '' : 's'}; page state was refreshed. First failure: ${failures[0]}`)
+      }
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : `Could not update the pending rows in ${label}.`)
     } finally {
@@ -339,45 +350,68 @@ export function PricingRunDetailPage() {
       </details>
 
       <div className="stacked-list">
-        {brandSections.map((brand) => {
-          const brandCollapsed = collapsedBrandKeys.has(brand.key)
-          const brandPendingCount = countPendingItems(brand.reviewItems)
-          const brandApprovedCount = countItemsWithStatus(brand.reviewItems, 'approved')
-          const brandRejectedCount = countItemsWithStatus(brand.reviewItems, 'rejected')
-
-          return (
-            <article className="detail-panel" key={brand.key}>
-              <div className="page-header" style={{ alignItems: 'flex-start', gap: '1rem', marginBottom: brandCollapsed ? 0 : '1rem' }}>
-                <div>
-                  <h3 style={{ margin: 0 }}>{brand.brandName}</h3>
-                  <p className="subtle-copy">{compactCountsText(brandPendingCount, brandApprovedCount, brandRejectedCount)}</p>
-                </div>
-                <div className="inline-row wrap-row" style={{ justifyContent: 'flex-end' }}>
-                  <input
-                    inputMode="decimal"
-                    onChange={(event) => setBrandDrafts((current) => ({ ...current, [brand.key]: event.currentTarget.value }))}
-                    placeholder="Brand price"
-                    type="text"
-                    value={brandDrafts[brand.key] ?? ''}
-                  />
-                  <button className="ghost-button" disabled={isSaving} onClick={() => void handleBatchPriceApply(brand.reviewItems, brandDrafts[brand.key] ?? '', `${brand.brandName} brand batch`)} type="button">
-                    Apply brand price
-                  </button>
-                  <button className="ghost-button" disabled={isSaving || brandPendingCount === 0} onClick={() => void handleGroupDecision(brand.reviewItems, 'approve', `${brand.brandName} brand batch`)} type="button">
-                    Approve brand
-                  </button>
-                  <button className="danger-button" disabled={isSaving || brandPendingCount === 0} onClick={() => void handleGroupDecision(brand.reviewItems, 'reject', `${brand.brandName} brand batch`)} type="button">
-                    Exclude brand
-                  </button>
-                  <button className="ghost-button" onClick={() => toggleBrandCollapsed(brand.key)} type="button">
-                    {brandCollapsed ? 'Expand brand' : 'Collapse brand'}
-                  </button>
-                </div>
+        {categorySections.map((category) => (
+          <article className="detail-panel" key={category.key}>
+            <div className="page-header" style={{ alignItems: 'flex-start', gap: '1rem', marginBottom: '1rem' }}>
+              <div>
+                <h3 style={{ margin: 0 }}>{category.categoryName}</h3>
+                <p className="subtle-copy">{compactCountsText(category.pendingCount, category.approvedCount, category.rejectedCount)}</p>
               </div>
+            </div>
 
-              {brandCollapsed ? null : (
-                <div className="stacked-list">
-                  {brand.groups.map((group) => {
+            <div className="stacked-list">
+              {category.subcategories.map((subcategory) => (
+                <section className="detail-panel" key={subcategory.key} style={{ borderStyle: 'solid', borderWidth: '1px', margin: 0 }}>
+                  <h4 style={{ margin: '0 0 0.35rem' }}>{subcategory.subcategoryName}</h4>
+                  <p className="subtle-copy" style={{ marginTop: 0 }}>{compactCountsText(subcategory.pendingCount, subcategory.approvedCount, subcategory.rejectedCount)}</p>
+
+                  <div className="stacked-list">
+                    {subcategory.tabs.map((tabSection) => (
+                      <section className="detail-panel" key={tabSection.key} style={{ borderStyle: 'solid', borderWidth: '1px', margin: 0 }}>
+                        <h5 style={{ margin: '0 0 0.35rem' }}>{tabSection.tab}</h5>
+                        <p className="subtle-copy" style={{ marginTop: 0 }}>{compactCountsText(tabSection.pendingCount, tabSection.approvedCount, tabSection.rejectedCount)}</p>
+
+                        <div className="stacked-list">
+                          {tabSection.brands.map((brand) => {
+                            const brandCollapsed = collapsedBrandKeys.has(brand.key)
+                            const brandPendingCount = countPendingItems(brand.reviewItems)
+                            const brandApprovedCount = countItemsWithStatus(brand.reviewItems, 'approved')
+                            const brandRejectedCount = countItemsWithStatus(brand.reviewItems, 'rejected')
+                            const leafLabel = `${brand.categoryName} · ${brand.subcategoryName} · ${brand.tab} · ${brand.brandName}`
+
+                            return (
+                              <article className="detail-panel" key={brand.key} style={{ borderStyle: 'solid', borderWidth: '1px', margin: 0 }}>
+                                <div className="page-header" style={{ alignItems: 'flex-start', gap: '1rem', marginBottom: brandCollapsed ? 0 : '1rem' }}>
+                                  <div>
+                                    <h5 style={{ margin: 0 }}>{brand.brandName}</h5>
+                                    <p className="subtle-copy">{compactCountsText(brandPendingCount, brandApprovedCount, brandRejectedCount)} · {marketSummaryForItems(brand.reviewItems)}</p>
+                                  </div>
+                                  <div className="inline-row wrap-row" style={{ justifyContent: 'flex-end' }}>
+                                    <input
+                                      inputMode="decimal"
+                                      onChange={(event) => setBrandDrafts((current) => ({ ...current, [brand.key]: event.currentTarget.value }))}
+                                      placeholder="Family price"
+                                      type="text"
+                                      value={brandDrafts[brand.key] ?? ''}
+                                    />
+                                    <button className="ghost-button" disabled={isSaving} onClick={() => void handleBatchPriceApply(brand.reviewItems, brandDrafts[brand.key] ?? '', leafLabel)} type="button">
+                                      Apply family price
+                                    </button>
+                                    <button className="ghost-button" disabled={isSaving || brandPendingCount === 0} onClick={() => void handleGroupDecision(brand.reviewItems, 'approve', leafLabel)} type="button">
+                                      Approve family
+                                    </button>
+                                    <button className="danger-button" disabled={isSaving || brandPendingCount === 0} onClick={() => void handleGroupDecision(brand.reviewItems, 'reject', leafLabel)} type="button">
+                                      Exclude family
+                                    </button>
+                                    <button className="ghost-button" onClick={() => toggleBrandCollapsed(brand.key)} type="button">
+                                      {brandCollapsed ? 'Expand family' : 'Collapse family'}
+                                    </button>
+                                  </div>
+                                </div>
+
+                                {brandCollapsed ? null : (
+                                  <div className="stacked-list">
+                                    {brand.groups.map((group) => {
                     const groupCollapsed = collapsedGroupIds.has(group.proposalRowId)
                     const pendingCount = countPendingItems(group.reviewItems)
                     const approvedCount = countItemsWithStatus(group.reviewItems, 'approved')
@@ -409,8 +443,8 @@ export function PricingRunDetailPage() {
                             <button className="danger-button" disabled={isSaving || pendingCount === 0} onClick={() => void handleGroupDecision(group.reviewItems, 'reject', group.groupName)} type="button">
                               Exclude group
                             </button>
-                            <Link className="ghost-button like-button" to={buildHeliosModulePath('catalog', `groups/${group.catalogGroupId}`)}>
-                              Catalog debug page
+                            <Link className="ghost-button like-button" rel="noreferrer" target="_blank" to={buildHeliosModulePath('catalog', `groups/${group.catalogGroupId}`)}>
+                              Open catalog
                             </Link>
                             <button className="ghost-button" onClick={() => toggleGroupCollapsed(group.proposalRowId)} type="button">
                               {groupCollapsed ? 'Expand group' : 'Collapse group'}
@@ -497,6 +531,27 @@ export function PricingRunDetailPage() {
                                       {item.pricingContext.marketListings.length > 0 ? <span className="subtle-copy">{summarizeListingBands(item.pricingContext.marketListings)}</span> : null}
                                     </div>
 
+                                    {item.pricingContext.marketListings.length > 0 ? (
+                                      <details style={{ marginTop: '0.75rem' }}>
+                                        <summary>Market listings ({item.pricingContext.marketListings.length})</summary>
+                                        <ul className="timeline-list" style={{ marginTop: '0.75rem' }}>
+                                          {item.pricingContext.marketListings.map((listing, index) => (
+                                            <li key={`${listing.dispensaryName}-${listing.listingName}-${index}`}>
+                                              {listing.url ? (
+                                                <a href={listing.url} rel="noreferrer" target="_blank"><strong>{listing.dispensaryName}</strong></a>
+                                              ) : (
+                                                <strong>{listing.dispensaryName}</strong>
+                                              )}
+                                              <div className="subtle-copy">
+                                                {listing.listingName} · {formatMoney(listing.postTaxPrice)} post-tax · {formatDistanceBandLabel(listing.distanceBand, listing.distanceMiles)} · {formatMatchTierLabel(listing.matchTier)} match
+                                              </div>
+                                              {!listing.eligibleForPricing ? <p className="subtle-copy">Display only: {listing.exclusionReason ?? 'not pricing eligible'}</p> : null}
+                                            </li>
+                                          ))}
+                                        </ul>
+                                      </details>
+                                    ) : null}
+
                                     <div style={{ marginTop: '0.9rem' }}>
                                       <div className="sales-site-grid">
                                         {item.pricingContext.recentSales.sites.map((site) => {
@@ -548,15 +603,208 @@ export function PricingRunDetailPage() {
                         )}
                       </section>
                     )
-                  })}
-                </div>
-              )}
-            </article>
-          )
-        })}
+                                    })}
+                                  </div>
+                                )}
+                              </article>
+                            )
+                          })}
+                        </div>
+                      </section>
+                    ))}
+                  </div>
+                </section>
+              ))}
+            </div>
+          </article>
+        ))}
       </div>
     </section>
   )
+}
+
+interface PricingReviewGroupSlice extends Omit<PricingRunGroupSummary, 'reviewItems'> {
+  key: string
+  reviewItems: PricingReviewItem[]
+}
+
+interface BrandFamilySection {
+  approvedCount: number
+  brandName: string
+  categoryName: string
+  groups: PricingReviewGroupSlice[]
+  key: string
+  pendingCount: number
+  rejectedCount: number
+  reviewItems: PricingReviewItem[]
+  subcategoryName: string
+  tab: string
+}
+
+interface TabSection {
+  approvedCount: number
+  brands: BrandFamilySection[]
+  key: string
+  pendingCount: number
+  rejectedCount: number
+  tab: string
+}
+
+interface SubcategorySection {
+  approvedCount: number
+  key: string
+  pendingCount: number
+  rejectedCount: number
+  subcategoryName: string
+  tabs: TabSection[]
+}
+
+interface CategorySection {
+  approvedCount: number
+  categoryName: string
+  key: string
+  pendingCount: number
+  rejectedCount: number
+  subcategories: SubcategorySection[]
+}
+
+function buildPricingReviewHierarchy(groups: PricingRunDetailResponse['groups']): CategorySection[] {
+  const categoryMap = new Map<string, CategorySection>()
+
+  for (const group of groups) {
+    const categoryName = group.categoryName ?? 'No category'
+    const subcategoryName = group.subcategoryName ?? 'No subcategory'
+    const brandName = group.brandName ?? 'Unbranded'
+
+    for (const item of group.reviewItems) {
+      const tab = variantTabLabel(item)
+      const category = getOrInsert(categoryMap, categoryName, () => ({
+        approvedCount: 0,
+        categoryName,
+        key: categoryName,
+        pendingCount: 0,
+        rejectedCount: 0,
+        subcategories: [],
+      }))
+      const subcategoryKey = `${category.key}|${subcategoryName}`
+      const subcategory = getOrInsertSection(category.subcategories, subcategoryKey, () => ({
+        approvedCount: 0,
+        key: subcategoryKey,
+        pendingCount: 0,
+        rejectedCount: 0,
+        subcategoryName,
+        tabs: [],
+      }))
+      const tabKey = `${subcategory.key}|${tab}`
+      const tabSection = getOrInsertSection(subcategory.tabs, tabKey, () => ({
+        approvedCount: 0,
+        brands: [],
+        key: tabKey,
+        pendingCount: 0,
+        rejectedCount: 0,
+        tab,
+      }))
+      const brandKey = `${tabSection.key}|${brandName}`
+      const brand = getOrInsertSection(tabSection.brands, brandKey, () => ({
+        approvedCount: 0,
+        brandName,
+        categoryName,
+        groups: [],
+        key: brandKey,
+        pendingCount: 0,
+        rejectedCount: 0,
+        reviewItems: [],
+        subcategoryName,
+        tab,
+      }))
+      const groupSlice = getOrInsertSection(brand.groups, `${brand.key}|${group.proposalRowId}`, () => ({
+        ...group,
+        key: `${brand.key}|${group.proposalRowId}`,
+        reviewItems: [],
+      }))
+
+      brand.reviewItems.push(item)
+      groupSlice.reviewItems.push(item)
+    }
+  }
+
+  for (const category of categoryMap.values()) {
+    for (const subcategory of category.subcategories) {
+      for (const tab of subcategory.tabs) {
+        for (const brand of tab.brands) {
+          applyCounts(brand, brand.reviewItems)
+        }
+        tab.brands.sort(comparePendingThenLabel((section) => section.brandName))
+        rollupCounts(tab, tab.brands)
+      }
+      subcategory.tabs.sort(comparePendingThenLabel((section) => section.tab))
+      rollupCounts(subcategory, subcategory.tabs)
+    }
+    category.subcategories.sort(comparePendingThenLabel((section) => section.subcategoryName))
+    rollupCounts(category, category.subcategories)
+  }
+
+  return [...categoryMap.values()].sort(comparePendingThenLabel((section) => section.categoryName))
+}
+
+function flattenBrandFamilyLeaves(categorySections: CategorySection[]): BrandFamilySection[] {
+  return categorySections.flatMap((category) =>
+    category.subcategories.flatMap((subcategory) =>
+      subcategory.tabs.flatMap((tab) => tab.brands),
+    ),
+  )
+}
+
+function getOrInsert<K, V>(map: Map<K, V>, key: K, build: () => V): V {
+  const existing = map.get(key)
+  if (existing) return existing
+  const next = build()
+  map.set(key, next)
+  return next
+}
+
+function getOrInsertSection<T extends { key: string }>(sections: T[], key: string, build: () => T): T {
+  const existing = sections.find((section) => section.key === key)
+  if (existing) return existing
+  const next = build()
+  sections.push(next)
+  return next
+}
+
+function applyCounts(target: { approvedCount: number; pendingCount: number; rejectedCount: number }, items: PricingReviewItem[]): void {
+  target.pendingCount = countPendingItems(items)
+  target.approvedCount = countItemsWithStatus(items, 'approved')
+  target.rejectedCount = countItemsWithStatus(items, 'rejected')
+}
+
+function rollupCounts(target: { approvedCount: number; pendingCount: number; rejectedCount: number }, children: Array<{ approvedCount: number; pendingCount: number; rejectedCount: number }>): void {
+  target.pendingCount = children.reduce((sum, child) => sum + child.pendingCount, 0)
+  target.approvedCount = children.reduce((sum, child) => sum + child.approvedCount, 0)
+  target.rejectedCount = children.reduce((sum, child) => sum + child.rejectedCount, 0)
+}
+
+function comparePendingThenLabel<T>(label: (value: T) => string): (left: T & { pendingCount: number }, right: T & { pendingCount: number }) => number {
+  return (left, right) => {
+    if (right.pendingCount !== left.pendingCount) return right.pendingCount - left.pendingCount
+    return label(left).localeCompare(label(right))
+  }
+}
+
+function variantTabLabel(item: PricingReviewItem): string {
+  return item.pricingContext.tab ?? 'Unknown variant tab'
+}
+
+function marketSummaryForItems(items: PricingReviewItem[]): string {
+  const listingCount = items.reduce((sum, item) => sum + (item.pricingContext.marketListingCount ?? item.pricingContext.marketListings.length), 0)
+  const eligibleCount = items.reduce((sum, item) => sum + (item.pricingContext.marketEligibleListingCount ?? 0), 0)
+  const prices = items
+    .map((item) => item.pricingContext.marketMedianPostTaxPrice ?? item.pricingContext.marketAveragePostTaxPrice)
+    .filter((value): value is number => value !== null)
+  const marketText = prices.length > 0
+    ? `market ${formatMoney(roundCurrency(prices.reduce((sum, value) => sum + value, 0) / prices.length))}`
+    : 'no market average'
+  const thinCompText = eligibleCount > 0 && eligibleCount < Math.max(3, items.length) ? ' · thin comps' : ''
+  return `${marketText} · ${eligibleCount}/${listingCount} pricing comps${thinCompText}`
 }
 
 function countPendingItems(items: PricingReviewItem[]): number {
@@ -585,6 +833,12 @@ function buildSelectionFilterSummary(selectionFilters: PricingRunDetailResponse[
   }
   if (selectionFilters.subcategories.length > 0) {
     parts.push(`Subcategories: ${selectionFilters.subcategories.join(', ')}`)
+  }
+  if (selectionFilters.unitSizes.length > 0) {
+    parts.push(`Variant sizes: ${selectionFilters.unitSizes.join(', ')}`)
+  }
+  if (selectionFilters.packSizes.length > 0) {
+    parts.push(`Pack sizes: ${selectionFilters.packSizes.map(formatPackSizeLabel).join(', ')}`)
   }
   if (selectionFilters.search) {
     parts.push(`Search: ${selectionFilters.search}`)
@@ -638,6 +892,14 @@ function formatMoney(value: number | null): string {
 
 function formatPercent(value: number | null): string {
   return value === null ? '—' : `${value.toFixed(2)}%`
+}
+
+function formatPackSizeLabel(value: string): string {
+  const numeric = Number(value)
+  if (Number.isInteger(numeric) && numeric > 0) {
+    return numeric === 1 ? '1 per pkg' : `${numeric}-pack`
+  }
+  return value
 }
 
 function roundCurrency(value: number): number {

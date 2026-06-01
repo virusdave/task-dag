@@ -203,6 +203,10 @@ function buildResolvePricingRunScopeSql(
   const categoriesParam = `$${values.length}::text[]`
   values.push(filters.subcategories)
   const subcategoriesParam = `$${values.length}::text[]`
+  values.push(filters.unitSizes)
+  const unitSizesParam = `$${values.length}::text[]`
+  values.push(filters.packSizes)
+  const packSizesParam = `$${values.length}::text[]`
   values.push(filters.search ?? null)
   const searchParam = `$${values.length}::text`
   values.push(mode)
@@ -248,6 +252,7 @@ function buildResolvePricingRunScopeSql(
         cg.category_name,
         cg.subcategory_name,
         (product ->> 'productId')::int as product_id,
+        nullif(trim(product ->> 'packOfSize'), '') as pack_size,
         nullif(trim(product ->> 'sizeName'), '') as size_name
       from candidate_groups cg
       cross join lateral jsonb_array_elements(cg.products_json) as product
@@ -271,18 +276,24 @@ function buildResolvePricingRunScopeSql(
       select * from catalog_products where ${modeParam} = 'seed_only' and product_id = any(${seedParam})
       union all
       select * from family_expanded_products where ${modeParam} = 'family_expanded'
+    ),
+    filtered_selected_products as (
+      select *
+      from selected_products
+      where (cardinality(${unitSizesParam}) = 0 or size_name = any(${unitSizesParam}))
+        and (cardinality(${packSizesParam}) = 0 or pack_size = any(${packSizesParam}))
     )
     select
-      sp.catalog_group_id,
-      sp.group_name,
-      sp.brand_name,
-      sp.category_name,
-      sp.subcategory_name,
-      count(distinct sp.product_id)::int as product_count,
-      array_agg(distinct sp.product_id order by sp.product_id) as product_ids
-    from selected_products sp
-    group by sp.catalog_group_id, sp.group_name, sp.brand_name, sp.category_name, sp.subcategory_name
-    order by sp.catalog_group_id asc
+      fsp.catalog_group_id,
+      fsp.group_name,
+      fsp.brand_name,
+      fsp.category_name,
+      fsp.subcategory_name,
+      count(distinct fsp.product_id)::int as product_count,
+      array_agg(distinct fsp.product_id order by fsp.product_id) as product_ids
+    from filtered_selected_products fsp
+    group by fsp.catalog_group_id, fsp.group_name, fsp.brand_name, fsp.category_name, fsp.subcategory_name
+    order by fsp.catalog_group_id asc
   `
 
   return { sql, values }
@@ -294,7 +305,15 @@ export async function listPricingFacetOptions(
   options?: { seedProductIds?: number[] },
 ): Promise<PricingFacetsResponse> {
   const facet = query.facet
-  const facetColumn = facet === 'brand' ? 'brand_name' : facet === 'category' ? 'category_name' : 'subcategory_name'
+  const facetColumn = facet === 'brand'
+    ? 'brand_name'
+    : facet === 'category'
+      ? 'category_name'
+      : facet === 'subcategory'
+        ? 'subcategory_name'
+        : facet === 'unitSize'
+          ? 'size_name'
+          : 'pack_size'
   // For the requested facet, ignore that facet's selected array when
   // counting candidates — so toggling a brand on doesn't hide the
   // other brands the reviewer might still want to pick. Other filters
@@ -303,12 +322,14 @@ export async function listPricingFacetOptions(
     brands: facet === 'brand' ? [] : query.brands,
     categories: facet === 'category' ? [] : query.categories,
     includePending: query.includePending,
+    packSizes: facet === 'packSize' ? [] : query.packSizes,
     scopeKind: query.scopeKind,
     search: query.search,
     sites: query.sites,
     stockOnly: query.stockOnly,
     strict: query.strict,
     subcategories: facet === 'subcategory' ? [] : query.subcategories,
+    unitSizes: facet === 'unitSize' ? [] : query.unitSizes,
   }
 
   const seedProductIds = options?.seedProductIds ?? null
@@ -328,6 +349,10 @@ export async function listPricingFacetOptions(
   const categoriesParam = `$${values.length}::text[]`
   values.push(previewFilters.subcategories)
   const subcategoriesParam = `$${values.length}::text[]`
+  values.push(previewFilters.unitSizes)
+  const unitSizesParam = `$${values.length}::text[]`
+  values.push(previewFilters.packSizes)
+  const packSizesParam = `$${values.length}::text[]`
   values.push(previewFilters.search ?? null)
   const searchParam = `$${values.length}::text`
   values.push(mode)
@@ -374,8 +399,11 @@ export async function listPricingFacetOptions(
     catalog_products as (
       select
         cg.id as catalog_group_id,
-        cg.${facetColumn} as facet_value,
+        cg.brand_name,
+        cg.category_name,
+        cg.subcategory_name,
         (product ->> 'productId')::int as product_id,
+        nullif(trim(product ->> 'packOfSize'), '') as pack_size,
         nullif(trim(product ->> 'sizeName'), '') as size_name
       from candidate_groups cg
       cross join lateral jsonb_array_elements(cg.products_json) as product
@@ -399,15 +427,21 @@ export async function listPricingFacetOptions(
       select * from catalog_products where ${modeParam} = 'seed_only' and product_id = any(${seedParam})
       union all
       select * from family_expanded_products where ${modeParam} = 'family_expanded'
+    ),
+    filtered_selected_products as (
+      select *
+      from selected_products
+      where (cardinality(${unitSizesParam}) = 0 or size_name = any(${unitSizesParam}))
+        and (cardinality(${packSizesParam}) = 0 or pack_size = any(${packSizesParam}))
     )
     select
-      sp.facet_value as value,
+      sp.${facetColumn} as value,
       count(distinct sp.catalog_group_id)::int as row_count
-    from selected_products sp
-    where sp.facet_value is not null
-      and btrim(sp.facet_value) <> ''
-      and (${facetSearchParam} is null or sp.facet_value ilike '%' || ${facetSearchParam} || '%')
-    group by sp.facet_value
+    from filtered_selected_products sp
+    where sp.${facetColumn} is not null
+      and btrim(sp.${facetColumn}) <> ''
+      and (${facetSearchParam} is null or sp.${facetColumn} ilike '%' || ${facetSearchParam} || '%')
+    group by sp.${facetColumn}
     order by row_count desc, value asc
     limit ${limitParam}
   `
@@ -420,7 +454,15 @@ export async function listPricingFacetOptions(
   const result = await db.query<FacetRow>(sql, values)
 
   const selectedSet = new Set(
-    facet === 'brand' ? query.brands : facet === 'category' ? query.categories : query.subcategories,
+    facet === 'brand'
+      ? query.brands
+      : facet === 'category'
+        ? query.categories
+        : facet === 'subcategory'
+          ? query.subcategories
+          : facet === 'unitSize'
+            ? query.unitSizes
+            : query.packSizes,
   )
 
   const facetOptions: PricingFacetOption[] = result.rows.map((row) => ({
@@ -1127,6 +1169,8 @@ function readSelectionFilters(value: JsonValue | undefined): PricingRunDetailRes
   const brands = readStringArray(objectValue.brands)
   const categories = readStringArray(objectValue.categories)
   const subcategories = readStringArray(objectValue.subcategories)
+  const unitSizes = readStringArray(objectValue.unitSizes)
+  const packSizes = readStringArray(objectValue.packSizes)
   if (legacyBrand && !brands.includes(legacyBrand)) brands.push(legacyBrand)
   if (legacyCategory && !categories.includes(legacyCategory)) categories.push(legacyCategory)
   if (legacySubcategory && !subcategories.includes(legacySubcategory)) subcategories.push(legacySubcategory)
@@ -1152,6 +1196,8 @@ function readSelectionFilters(value: JsonValue | undefined): PricingRunDetailRes
     stockOnly,
     strict,
     subcategories,
+    unitSizes,
+    packSizes,
   }
 }
 
@@ -1197,6 +1243,8 @@ function deriveScopeLabel(scopeKind: PricingRunScopeKind, config: Record<string,
     if (selectionFilters.brands.length > 0) parts.push(selectionFilters.brands.join(', '))
     if (selectionFilters.categories.length > 0) parts.push(selectionFilters.categories.join(', '))
     if (selectionFilters.subcategories.length > 0) parts.push(selectionFilters.subcategories.join(', '))
+    if (selectionFilters.unitSizes.length > 0) parts.push(selectionFilters.unitSizes.join(', '))
+    if (selectionFilters.packSizes.length > 0) parts.push(selectionFilters.packSizes.map(formatPackSizeLabel).join(', '))
     if (selectionFilters.search) parts.push(selectionFilters.search)
     const productScopeLabels = buildProductScopeLabels(selectionFilters)
     if (productScopeLabels.length > 0) {
@@ -1232,6 +1280,14 @@ function buildProductScopeLabels(selectionFilters: PricingRunDetailResponse['run
     labels.push(siteSummary ? `${siteSummary} pending purchases` : 'Pending purchases')
   }
   return labels
+}
+
+function formatPackSizeLabel(value: string): string {
+  const numeric = Number(value)
+  if (Number.isInteger(numeric) && numeric > 0) {
+    return numeric === 1 ? '1 per pkg' : `${numeric}-pack`
+  }
+  return value
 }
 
 function buildPricingRunSummaryText(input: {

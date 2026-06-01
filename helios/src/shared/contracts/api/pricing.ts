@@ -106,11 +106,13 @@ export const PricingSelectionFiltersSchema = z.object({
   brands: QueryStringArraySchema,
   categories: QueryStringArraySchema,
   includePending: QueryBooleanSchema.default(true),
+  packSizes: QueryStringArraySchema,
   search: BlankStringSchema,
   sites: QuerySiteArraySchema,
   stockOnly: QueryBooleanSchema.default(true),
   strict: QueryBooleanSchema.default(false),
   subcategories: QueryStringArraySchema,
+  unitSizes: QueryStringArraySchema,
 })
 export type PricingSelectionFilters = z.infer<typeof PricingSelectionFiltersSchema>
 
@@ -119,7 +121,7 @@ export const PricingScopePreviewQuerySchema = PricingSelectionFiltersSchema.exte
 })
 export type PricingScopePreviewQuery = z.infer<typeof PricingScopePreviewQuerySchema>
 
-export const PricingFacetFieldSchema = z.enum(['brand', 'category', 'subcategory'])
+export const PricingFacetFieldSchema = z.enum(['brand', 'category', 'subcategory', 'unitSize', 'packSize'])
 export type PricingFacetField = z.infer<typeof PricingFacetFieldSchema>
 
 export const PricingFacetsQuerySchema = PricingSelectionFiltersSchema.extend({
