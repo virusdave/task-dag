@@ -73,6 +73,18 @@ interface PendingPurchaseDraftPriceRegistry {
 const PendingPurchaseDraftPriceRegistryContext =
   createContext<PendingPurchaseDraftPriceRegistry | null>(null)
 
+// Brand / category / subcategory dropdown options for the structured-
+// override editor. Populated from the catalog facets on every
+// `mode=rows` load (see /api/catalog/pending-purchases). Null on the
+// archive view where overrides aren't rendered. The card pulls this
+// via context rather than prop-drilling through FamilyBulkPriceControl
+// and the family-group section ancestors.
+const PendingPurchaseOverrideOptionsContext = createContext<{
+  brands: readonly string[]
+  categories: readonly string[]
+  subcategories: readonly string[]
+} | null>(null)
+
 function usePendingPurchaseDraftPriceRegistry(): PendingPurchaseDraftPriceRegistry {
   const settersRef = useRef(new Map<number, (price: string) => void>())
   return useMemo<PendingPurchaseDraftPriceRegistry>(
@@ -744,9 +756,11 @@ function PendingPurchasesRowsView({
   const packetsHref = buildPendingPurchasesHref(filters, { mode: 'packets', packetId: null, page: 1 })
   const activePacket = data.activePacket
   const draftPriceRegistry = usePendingPurchaseDraftPriceRegistry()
+  const overrideOptions = data.overrideOptions
 
   return (
     <PendingPurchaseDraftPriceRegistryContext.Provider value={draftPriceRegistry}>
+    <PendingPurchaseOverrideOptionsContext.Provider value={overrideOptions}>
       <div className="pp-breadcrumb inline-row wrap-row">
         <Link className="ghost-button" to={packetsHref}>← All packets</Link>
         {activePacket ? (
@@ -816,6 +830,7 @@ function PendingPurchasesRowsView({
           </div>
         </div>
       ) : null}
+    </PendingPurchaseOverrideOptionsContext.Provider>
     </PendingPurchaseDraftPriceRegistryContext.Provider>
   )
 }
@@ -1131,6 +1146,7 @@ function PendingPurchaseRowCard(
   },
 ) {
   const revalidator = useRevalidator()
+  const overrideOptions = useContext(PendingPurchaseOverrideOptionsContext)
   const [draftDescription, setDraftDescription] = useState(item.editedProposedDescription ?? item.proposedDescription ?? '')
   const [draftPrice, setDraftPrice] = useState(readDraftPrice(item))
   const [draftImageUrl, setDraftImageUrl] = useState(item.editedPrimaryImageUrl ?? item.primaryImageUrl ?? '')
@@ -1819,6 +1835,7 @@ function PendingPurchaseRowCard(
             disabled={editingLocked}
             label="Brand"
             onChange={(value) => setDraftStructured((prev) => ({ ...prev, targetBrand: value }))}
+            options={overrideOptions?.brands}
             parsedValue={item.targetBrand}
             value={draftStructured.targetBrand}
           />
@@ -1847,6 +1864,7 @@ function PendingPurchaseRowCard(
             disabled={editingLocked}
             label="Category"
             onChange={(value) => setDraftStructured((prev) => ({ ...prev, expectedCategory: value }))}
+            options={overrideOptions?.categories}
             parsedValue={item.expectedCategory}
             value={draftStructured.expectedCategory}
           />
@@ -1854,6 +1872,7 @@ function PendingPurchaseRowCard(
             disabled={editingLocked}
             label="Subcategory"
             onChange={(value) => setDraftStructured((prev) => ({ ...prev, expectedSubcategory: value }))}
+            options={overrideOptions?.subcategories}
             parsedValue={item.expectedSubcategory}
             value={draftStructured.expectedSubcategory}
           />

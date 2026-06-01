@@ -556,6 +556,26 @@ export async function getGroupDetail(db: Queryable, catalogGroupId: number): Pro
 // guessing exact strings. Cheap enough to run inline on every browser
 // request (one scan per column, table is small and the columns are
 // already used by other queries).
+// Public re-export of the same three facet columns (brand /
+// category / subcategory) used by the catalog-browser rail. Backs the
+// pending-purchases structured-override dropdowns so reviewers can
+// pick from real catalog values instead of typing freeform — fixing
+// the long-standing "I had to retype 'Edibles' three different ways
+// before it stuck" issue raised in the catalog/pending-purchases
+// feedback loop (issue #35 follow-up).
+export async function loadCatalogStructuredOverrideFacets(db: Queryable): Promise<{
+  brands: string[]
+  categories: string[]
+  subcategories: string[]
+}> {
+  const facets = await loadCatalogBrowserFacets(db)
+  return {
+    brands: facets.brands,
+    categories: facets.categories,
+    subcategories: facets.subcategories,
+  }
+}
+
 async function loadCatalogBrowserFacets(db: Queryable): Promise<{
   brands: string[]
   categories: string[]

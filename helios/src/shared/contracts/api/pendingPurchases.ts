@@ -68,6 +68,23 @@ export const PendingPurchaseListQuerySchema = z.object({
 })
 export type PendingPurchaseListQuery = z.infer<typeof PendingPurchaseListQuerySchema>
 
+// Distinct catalog values used to back the reviewer-facing structured-
+// override dropdowns (brand / category / subcategory). Source: the
+// existing `catalog_groups` table — same facets the /catalog/browser
+// rail uses, just re-shaped for the override surface.
+//
+// Only populated when `mode === 'rows'` (the reviewer is on a packet
+// detail view and can actually edit overrides). On the packet archive
+// view we leave it null to avoid a wasted scan per page-load.
+export const PendingPurchaseStructuredOverrideOptionsSchema = z.object({
+  brands: z.array(z.string()),
+  categories: z.array(z.string()),
+  subcategories: z.array(z.string()),
+})
+export type PendingPurchaseStructuredOverrideOptions = z.infer<
+  typeof PendingPurchaseStructuredOverrideOptionsSchema
+>
+
 export const PendingPurchaseListResponseSchema = z.object({
   activePacket: PendingPurchasePacketSummarySchema.nullable(),
   activeGenerationJob: JobStatusResponseSchema.nullable(),
@@ -76,6 +93,7 @@ export const PendingPurchaseListResponseSchema = z.object({
   items: z.array(PendingPurchaseRowSchema),
   latestApplyRequest: PendingPurchaseApplyRequestSummarySchema.nullable(),
   mode: PendingPurchaseListModeSchema,
+  overrideOptions: PendingPurchaseStructuredOverrideOptionsSchema.nullable(),
   packets: z.array(PendingPurchasePacketListItemSchema),
   page: z.number().int().min(1),
   pageSize: z.number().int().min(1).max(100),

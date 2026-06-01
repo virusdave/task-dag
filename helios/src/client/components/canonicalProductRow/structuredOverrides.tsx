@@ -261,11 +261,21 @@ export function hasStructuredOverride(
 // Pre-populated with the effective merged value; the parser's
 // original value is shown as a `parser: ...` hint and an "override"
 // pill appears when the reviewer diverges from the parsed value.
+//
+// When `options` is supplied the field renders as a `<select>` rather
+// than a freeform `<input>` — used for brand / category / subcategory
+// where every legitimate value already exists somewhere in
+// `catalog_groups` and freeform typing produces avoidable typos /
+// near-duplicates that fragment the catalog. The current value is
+// always appended to the dropdown (even if it isn't in the canonical
+// list) so the operator can still see and re-pick exotic LLM-proposed
+// values without losing them.
 export function StructuredOverrideField({
   disabled,
   inputMode,
   label,
   onChange,
+  options,
   parsedValue,
   value,
 }: {
@@ -273,6 +283,7 @@ export function StructuredOverrideField({
   inputMode?: 'numeric'
   label: string
   onChange: (value: string) => void
+  options?: readonly string[]
   parsedValue: string | null
   value: string
 }): JSX.Element {
@@ -285,16 +296,76 @@ export function StructuredOverrideField({
         {label}
         {isOverridden ? <Pill tone="warning">override</Pill> : null}
       </span>
-      <input
-        disabled={disabled}
-        inputMode={inputMode}
-        onChange={(event) => onChange(event.currentTarget.value)}
-        placeholder={parsedValue ?? '—'}
-        value={value}
-      />
+      {options !== undefined ? (
+        <StructuredOverrideSelect
+          disabled={disabled}
+          onChange={onChange}
+          options={options}
+          parsedValue={parsedValue}
+          value={value}
+        />
+      ) : (
+        <input
+          disabled={disabled}
+          inputMode={inputMode}
+          onChange={(event) => onChange(event.currentTarget.value)}
+          placeholder={parsedValue ?? '—'}
+          value={value}
+        />
+      )}
       {isOverridden && parsedValue !== null ? (
         <span className="subtle-copy">parser: {parsedValue}</span>
       ) : null}
     </label>
+  )
+}
+
+function StructuredOverrideSelect({
+  disabled,
+  onChange,
+  options,
+  parsedValue,
+  value,
+}: {
+  disabled: boolean
+  onChange: (value: string) => void
+  options: readonly string[]
+  parsedValue: string | null
+  value: string
+}): JSX.Element {
+  // Build the option list:
+  //   1. Always include the empty "—" entry so the reviewer can clear
+  //      the field back to "inherit from parser" semantics (which the
+  //      override payload translates to either omit-key or null).
+  //   2. Always include the parser-proposed value (when nonempty),
+  //      even if it isn't in the canonical facet list — otherwise a
+  //      brand-new brand the LLM teacher proposed would silently
+  //      disappear from the dropdown the moment the operator opened
+  //      the editor.
+  //   3. Always include the current draft `value` for the same reason
+  //      (e.g. a previously-saved override pointing at a since-deleted
+  //      brand).
+  //   4. Then the canonical options list, de-duplicated and sorted.
+  const augmented = new Set<string>()
+  if (parsedValue && parsedValue.trim().length > 0) augmented.add(parsedValue.trim())
+  if (value && value.trim().length > 0) augmented.add(value.trim())
+  for (const option of options) {
+    const trimmed = option.trim()
+    if (trimmed.length > 0) augmented.add(trimmed)
+  }
+  const sorted = [...augmented].sort((left, right) => left.localeCompare(right))
+  return (
+    <select
+      disabled={disabled}
+      onChange={(event) => onChange(event.currentTarget.value)}
+      value={value}
+    >
+      <option value="">{parsedValue ? `— inherit (${parsedValue}) —` : '—'}</option>
+      {sorted.map((option) => (
+        <option key={option} value={option}>
+          {option}
+        </option>
+      ))}
+    </select>
   )
 }

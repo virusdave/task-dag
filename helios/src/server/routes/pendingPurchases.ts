@@ -22,6 +22,7 @@ import { sha256 } from '../../shared/util/hash.js'
 import { appendAuditEvent } from '../audit/appendAuditEvent.js'
 import { requireSessionUser } from '../auth/requireSession.js'
 import { getPool } from '../db/pool.js'
+import { loadCatalogStructuredOverrideFacets } from '../db/queries/catalogQueries.js'
 import {
   getLatestPendingPurchaseApplyRequest,
   getPendingPurchasePacketSummary,
@@ -87,7 +88,7 @@ export async function registerPendingPurchaseRoutes(server: FastifyInstance): Pr
     const page = query.page
     const pageSize = query.pageSize
 
-    const [packetsPage, items, activeGenerationJobIdResult, activePacket, latestApplyRequest] = await Promise.all([
+    const [packetsPage, items, activeGenerationJobIdResult, activePacket, latestApplyRequest, overrideOptions] = await Promise.all([
       mode === 'packets'
         ? listPendingPurchasePacketListPage(db, {
             filters: {
@@ -121,6 +122,12 @@ export async function registerPendingPurchaseRoutes(server: FastifyInstance): Pr
       query.packetId != null
         ? getLatestPendingPurchaseApplyRequest(db, query.packetId)
         : Promise.resolve(null),
+      // Only load the dropdown options when the reviewer is on the
+      // row-detail view — the archive list doesn't render override
+      // editors, so the per-request scans would be pure waste.
+      mode === 'rows'
+        ? loadCatalogStructuredOverrideFacets(db)
+        : Promise.resolve(null),
     ])
     const activeGenerationJobId = activeGenerationJobIdResult.rows[0]?.id ?? null
     const activeGenerationJob = activeGenerationJobId ? await getJobStatus(db, activeGenerationJobId) : null
@@ -133,6 +140,7 @@ export async function registerPendingPurchaseRoutes(server: FastifyInstance): Pr
       items,
       latestApplyRequest,
       mode,
+      overrideOptions,
       packets: packetsPage.items,
       page,
       pageSize,
