@@ -2768,6 +2768,139 @@ function errMessage(err: unknown): string {
   return String(err)
 }
 
+// Brand names we will never accept from the LLM teacher as a
+// classification of a *distributor* product row. "Freshly Baked NYC"
+// is the operator's own retail brand and cannot appear on a METRC
+// distributor invoice; if the teacher proposes it, it has hallucinated
+// the brand (historically because the system prompt named us by name).
+// Compared after `derivePendingPurchaseBrandKey` normalization (lower-
+// case, strip punctuation, collapse whitespace).
+const PROHIBITED_HOUSE_BRAND_KEYS: ReadonlySet<string> = new Set([
+  'freshly baked nyc',
+  'freshly baked ny',
+  'freshly baked',
+  'freshlybaked',
+  'freshlybakednyc',
+  'freshlybakedny',
+  'fbnyc',
+  'fb nyc',
+  'fbn',
+])
+
+function isProhibitedHouseBrand(brand: string | null | undefined): boolean {
+  if (!brand) return false
+  const key = derivePendingPurchaseBrandKey(brand)
+  if (!key) return false
+  return PROHIBITED_HOUSE_BRAND_KEYS.has(key)
+}
+
+type TeacherAttempt = {
+  attempt: number
+  rawContent: string
+  failureKind: 'schema' | 'house-brand' | 'too-risky'
+  failureDetail: string
+}
+
+function formatTeacherSchemaErrors(issues: ReadonlyArray<z.ZodIssue>): string {
+  if (issues.length === 0) return '(no issues reported)'
+  return issues
+    .slice(0, 8)
+    .map((issue) => {
+      const path = issue.path.length === 0 ? '<root>' : issue.path.map((segment) => String(segment)).join('.')
+      return `- at ${path}: ${issue.message}`
+    })
+    .join('\n')
+}
+
+function buildTeacherRetryPromptForSchemaErrors(options: { failureSummary: string }): string {
+  return [
+    options.failureSummary,
+    '',
+    'IMPORTANT:',
+    '- Return only valid JSON, no prose, no markdown fences.',
+    '- The shape MUST be {"classification": {...}, "teaching": {...}}.',
+    '- Every confidence is a number in [0, 1] (e.g. 0.85), never a percentage.',
+    '- packCount is a positive integer (1, 2, 3, ...), never null or 0.',
+    '- size always includes its unit ("3.5g", "1g", "100mg").',
+    '- Use only allowed enum values listed in the system message.',
+  ].join('\n')
+}
+
+function describeWhyNormalizationFailed(
+  classification: z.infer<typeof PendingPurchaseLlmClassificationSchema>,
+): string {
+  const reasons: string[] = []
+  if (!AUTO_CLASSIFIABLE_PENDING_PURCHASE_CATEGORIES.has(classification.category)) {
+    reasons.push(`category "${classification.category}" is not on the auto-classifiable list`)
+  }
+  if (classification.confidence < 0.8) {
+    reasons.push(`confidence ${classification.confidence.toFixed(2)} is below 0.8`)
+  }
+  if (classification.parserFeasibility === 'needs-more-context') {
+    reasons.push('parserFeasibility is "needs-more-context"')
+  }
+  if (reasons.length === 0) {
+    reasons.push('normalization rejected the classification for an unspecified reason')
+  }
+  return reasons.join('; ')
+}
+
+async function emitTeacherUnresolved(input: {
+  attempts: ReadonlyArray<TeacherAttempt>
+  envelope: z.infer<typeof PendingPurchaseLlmTeachingEnvelopeSchema> | null
+  finalNoteHint: string
+  normalizedDistributorProductName: string
+  observationRawRow: Record<string, JsonValue>
+  rawDistributorProductName: string
+  rowInputSignature: string
+}): Promise<PendingPurchaseLlmFallbackResult> {
+  // Persist an audit observation containing the full teacher transcript
+  // so the operator can inspect why the model kept failing. We do NOT
+  // associate a brandProfile (the whole point is the teacher could not
+  // safely identify one) and we do NOT learn a rule.
+  try {
+    await withTransaction(async (db) => {
+      await insertPendingPurchaseParseObservation(db, {
+        inference: toJsonValue({
+          attempts: input.attempts.map((attempt) => ({
+            attempt: attempt.attempt,
+            failureKind: attempt.failureKind,
+            failureDetail: attempt.failureDetail,
+            rawContent: attempt.rawContent,
+          })),
+          finalEnvelope: input.envelope,
+          parserSource: 'llm-teacher',
+          resolution: 'unresolved',
+        }),
+        normalizedDistributorProductName: input.normalizedDistributorProductName,
+        notes: input.finalNoteHint,
+        observationStatus: 'captured',
+        observationType: 'llm_inference',
+        rawDistributorProductName: input.rawDistributorProductName,
+        rawRow: input.observationRawRow,
+        rowInputSignature: input.rowInputSignature,
+        sourceSystem: PENDING_PURCHASE_SOURCE_SYSTEM,
+      })
+    })
+  } catch (persistErr) {
+    // Audit-only side effect — never let an observation-write failure
+    // hide the real classification failure from the caller.
+    console.warn('[pending-purchase] failed to persist teacher-unresolved observation', persistErr)
+  }
+
+  const transcriptSummary = input.attempts
+    .map((attempt) => `attempt ${attempt.attempt} (${attempt.failureKind}): ${attempt.failureDetail}`)
+    .join(' | ')
+  return {
+    brandProfile: null,
+    learnedRule: null,
+    note: `${input.finalNoteHint} Teacher transcript: ${transcriptSummary || '(no attempts recorded)'}`,
+    parsed: null,
+    parserSource: 'llm-teacher',
+    reviewFlag: 'LLM teacher could not classify — manual review required',
+  }
+}
+
 async function classifyPendingPurchaseNameWithLlmFallback(input: {
   cache: CatalogCache
   group: PendingPositionGroup
@@ -2780,117 +2913,203 @@ async function classifyPendingPurchaseNameWithLlmFallback(input: {
     return null
   }
 
+  const MAX_TEACHER_ATTEMPTS = 3
+  const anchors = await findPendingPurchaseLlmAnchors(input.cache, input.group.distributorProductName)
+  const normalizedDistributorProductName = normalizePendingPurchaseParserText(input.group.distributorProductName)
+  const observationRawRow = buildPendingPurchaseParserObservationRawRow(input)
+
+  const systemPrompt = [
+    'You classify a single unresolved row from a METRC cannabis-distribution invoice into a strict catalog taxonomy and teach reusable parsing knowledge.',
+    'The `brand` field MUST be the actual upstream distributor brand printed on the METRC invoice — never the receiving retailer.',
+    'Specifically: NEVER propose "Freshly Baked NYC" (or any of its aliases: Freshly Baked, Freshly Baked NY, FBNYC, FBN) as the brand. That is the receiving retailer\'s own house brand and cannot appear on a METRC distributor invoice. If the raw row name does not clearly identify an upstream brand, leave `brand` empty and set `parserFeasibility` to "needs-more-context" — do NOT default to the retailer\'s name.',
+    'Return only valid JSON with the exact top-level shape {"classification": {...}, "teaching": {...}}.',
+    'The classification object must include: brand, category, subcategory, groupName, variantName, variantTab, size, packCount, strainName, prevalence, confidence, parserFeasibility, rationale, warningFlags.',
+    'The teaching object must include: brandAliases, exactNameRules, generalizedRules, riskFlags.',
+    'Each brandAliases item must include: aliasType, aliasValue, confidence, rationale, riskFlags.',
+    'Each exactNameRules item must include: rawName, confidence, rationale, safeAutoPersist, riskFlags.',
+    'Each generalizedRules item must include: ruleKind, normalizedMatchValue, matchPayload, confidence, rationale, riskFlags.',
+    'Use parserFeasibility only from: easy-rule-based, needs-more-context, likely-llm-only.',
+    'Use null for subcategory or prevalence when not applicable.',
+    'Use aliasType only from: exact, prefix.',
+    'Use ruleKind only from: prefix, regex, template.',
+    'Every confidence field is a probability between 0 and 1 inclusive (e.g. 0.92, NOT 92 or 92%). Do not emit values above 1.',
+    'size is always a string with its unit attached, e.g. "3.5g", "1g", "100mg", "750mg" — never a bare number.',
+    'packCount is ALWAYS a positive integer (1, 3, 5, 10, etc.). For a single-unit package, packCount = 1. NEVER emit null, 0, NaN, or omit the field.',
+    'Never use generic words like Beverage, Vape, or Gummy Brick by themselves as the full groupName when a flavor, cultivar, or family differentiator is present.',
+    'If live anchor examples for the same brand and family are provided, follow their packCount, size, and variantTab pattern unless the raw input clearly contradicts them.',
+    'For beverage and edible flavors, strainName is usually empty unless the name clearly represents a cultivar lane.',
+    'Keep canonical naming customer-facing and normalized instead of copying raw punctuation.',
+    'Only mark safeAutoPersist true for narrow exact-name reuse on the exact raw row, never for broad generalized rules.',
+    'If you suggest a broader prefix, regex, or template rule, be conservative and include a risk flag unless it is very clearly safe.',
+  ].join(' ')
+
+  const userPayload = JSON.stringify({
+    row: {
+      distributorProductName: input.group.distributorProductName,
+      distributorProductId: input.group.distributorProductId,
+      distributorNames: [...input.group.distributorNames].sort(),
+      orderIds: [...input.group.orderIds].sort((left, right) => left - right),
+      positionIds: input.group.positions.map((position) => position.id).sort((left, right) => left - right),
+      resolvedCost: input.resolvedCost.value,
+      resolvedCostReason: input.resolvedCost.reason,
+      sampleLike: input.group.positions.some((position) => isSampleLike(position)),
+      suggestionCandidates: input.suggestionCandidates,
+    },
+    taxonomyHints: {
+      categories: [...AUTO_CLASSIFIABLE_PENDING_PURCHASE_CATEGORIES].sort(),
+      variantNameRule: 'Usually <Brand> <GroupName> <VariantTab>',
+    },
+    liveAnchors: anchors,
+  }, null, 2)
+
+  const messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
+    { role: 'system', content: systemPrompt },
+    { role: 'user', content: userPayload },
+  ]
+  const transcript: TeacherAttempt[] = []
+
   try {
-    const anchors = await findPendingPurchaseLlmAnchors(input.cache, input.group.distributorProductName)
-    const normalizedDistributorProductName = normalizePendingPurchaseParserText(input.group.distributorProductName)
-    const observationRawRow = buildPendingPurchaseParserObservationRawRow(input)
-    const response = await fetch(`${env.bedrockMantleBaseUrl}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${env.bedrockMantleBearerToken}`,
-      },
-      body: JSON.stringify({
-        model: 'google.gemma-3-27b-it',
-        temperature: 0.1,
-        max_tokens: 1200,
-        response_format: { type: 'json_object' },
-        messages: [
-          {
-            role: 'system',
-            content: [
-              'You classify a single unresolved Freshly Baked NYC pending-purchase row into a strict catalog taxonomy and teach reusable parsing knowledge.',
-              'Return only valid JSON with the exact top-level shape {"classification": {...}, "teaching": {...}}.',
-              'The classification object must include: brand, category, subcategory, groupName, variantName, variantTab, size, packCount, strainName, prevalence, confidence, parserFeasibility, rationale, warningFlags.',
-              'The teaching object must include: brandAliases, exactNameRules, generalizedRules, riskFlags.',
-              'Each brandAliases item must include: aliasType, aliasValue, confidence, rationale, riskFlags.',
-              'Each exactNameRules item must include: rawName, confidence, rationale, safeAutoPersist, riskFlags.',
-              'Each generalizedRules item must include: ruleKind, normalizedMatchValue, matchPayload, confidence, rationale, riskFlags.',
-              'Use parserFeasibility only from: easy-rule-based, needs-more-context, likely-llm-only.',
-              'Use null for subcategory or prevalence when not applicable.',
-              'Use aliasType only from: exact, prefix.',
-              'Use ruleKind only from: prefix, regex, template.',
-              'Every confidence field is a probability between 0 and 1 inclusive (e.g. 0.92, NOT 92 or 92%). Do not emit values above 1.',
-              'size is always a string with its unit attached, e.g. "3.5g", "1g", "100mg", "750mg" — never a bare number.',
-              'Never use generic words like Beverage, Vape, or Gummy Brick by themselves as the full groupName when a flavor, cultivar, or family differentiator is present.',
-              'If live anchor examples for the same brand and family are provided, follow their packCount, size, and variantTab pattern unless the raw input clearly contradicts them.',
-              'For beverage and edible flavors, strainName is usually empty unless the name clearly represents a cultivar lane.',
-              'Keep canonical naming customer-facing and normalized instead of copying raw punctuation.',
-              'Only mark safeAutoPersist true for narrow exact-name reuse on the exact raw row, never for broad generalized rules.',
-              'If you suggest a broader prefix, regex, or template rule, be conservative and include a risk flag unless it is very clearly safe.',
-            ].join(' '),
-          },
-          {
-            role: 'user',
-            content: JSON.stringify({
-              row: {
-                distributorProductName: input.group.distributorProductName,
-                distributorProductId: input.group.distributorProductId,
-                distributorNames: [...input.group.distributorNames].sort(),
-                orderIds: [...input.group.orderIds].sort((left, right) => left - right),
-                positionIds: input.group.positions.map((position) => position.id).sort((left, right) => left - right),
-                resolvedCost: input.resolvedCost.value,
-                resolvedCostReason: input.resolvedCost.reason,
-                sampleLike: input.group.positions.some((position) => isSampleLike(position)),
-                suggestionCandidates: input.suggestionCandidates,
-              },
-              taxonomyHints: {
-                categories: [...AUTO_CLASSIFIABLE_PENDING_PURCHASE_CATEGORIES].sort(),
-                variantNameRule: 'Usually <Brand> <GroupName> <VariantTab>',
-              },
-              liveAnchors: anchors,
-            }, null, 2),
-          },
-        ],
-      }),
-      signal: AbortSignal.timeout(env.llmRequestTimeoutMs),
-    })
-
-    const rawResponseText = await response.text()
-    if (!response.ok) {
-      return {
-        brandProfile: null,
-        learnedRule: null,
-        note: `Bedrock fallback classification failed with HTTP ${response.status}; keeping manual review.`,
-        parsed: null,
-        parserSource: 'llm-teacher',
-        reviewFlag: null,
-      }
-    }
-
-    const content = extractChatCompletionContent(rawResponseText)
-    const parsedEnvelope = PendingPurchaseLlmTeachingEnvelopeSchema.parse(JSON.parse(content))
-    const normalizedClassification = normalizePendingPurchaseLlmClassification(
-      parsedEnvelope.classification,
-      input.group.distributorProductName,
-    )
-    if (!normalizedClassification) {
-      await withTransaction(async (db) => {
-        await insertPendingPurchaseParseObservation(db, {
-          inference: toJsonValue({
-            classification: parsedEnvelope.classification,
-            parserSource: 'llm-teacher',
-            teaching: parsedEnvelope.teaching,
-          }),
-          normalizedDistributorProductName,
-          notes: 'Bedrock teacher classification returned a shape that is still too risky for automatic parser reuse.',
-          observationStatus: 'captured',
-          observationType: 'llm_inference',
-          rawDistributorProductName: input.group.distributorProductName,
-          rawRow: observationRawRow,
-          rowInputSignature: input.rowInputSignature,
-          sourceSystem: PENDING_PURCHASE_SOURCE_SYSTEM,
-        })
+    for (let attempt = 1; attempt <= MAX_TEACHER_ATTEMPTS; attempt += 1) {
+      const response = await fetch(`${env.bedrockMantleBaseUrl}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${env.bedrockMantleBearerToken}`,
+        },
+        body: JSON.stringify({
+          model: 'google.gemma-3-27b-it',
+          temperature: 0.1,
+          max_tokens: 1200,
+          response_format: { type: 'json_object' },
+          messages,
+        }),
+        signal: AbortSignal.timeout(env.llmRequestTimeoutMs),
       })
-      return {
-        brandProfile: null,
-        learnedRule: null,
-        note: 'Bedrock fallback classification returned a shape that is still too risky for auto-classification; keeping manual review.',
-        parsed: null,
-        parserSource: 'llm-teacher',
-        reviewFlag: null,
+
+      const rawResponseText = await response.text()
+      if (!response.ok) {
+        return {
+          brandProfile: null,
+          learnedRule: null,
+          note: `Bedrock fallback classification failed with HTTP ${response.status} on attempt ${attempt}; keeping manual review.`,
+          parsed: null,
+          parserSource: 'llm-teacher',
+          reviewFlag: null,
+        }
       }
-    }
+
+      const content = extractChatCompletionContent(rawResponseText)
+      messages.push({ role: 'assistant', content })
+
+      // 1) JSON.parse the model output. If it isn't even valid JSON,
+      //    feed that back and ask for a corrected response.
+      let envelopeJson: unknown
+      try {
+        envelopeJson = JSON.parse(content)
+      } catch (jsonErr) {
+        const failureDetail = jsonErr instanceof Error ? jsonErr.message : String(jsonErr)
+        transcript.push({ attempt, rawContent: content, failureKind: 'schema', failureDetail: `JSON parse error: ${failureDetail}` })
+        if (attempt < MAX_TEACHER_ATTEMPTS) {
+          messages.push({
+            role: 'user',
+            content: buildTeacherRetryPromptForSchemaErrors({
+              failureSummary: `Your previous response was not valid JSON: ${failureDetail}. Return ONLY a single JSON object with the exact required shape.`,
+            }),
+          })
+          continue
+        }
+        return await emitTeacherUnresolved({
+          attempts: transcript,
+          envelope: null,
+          finalNoteHint: `Bedrock returned non-JSON content after ${MAX_TEACHER_ATTEMPTS} attempts (last error: ${failureDetail}).`,
+          normalizedDistributorProductName,
+          observationRawRow,
+          rawDistributorProductName: input.group.distributorProductName,
+          rowInputSignature: input.rowInputSignature,
+        })
+      }
+
+      // 2) Validate against the envelope schema. If that fails, feed
+      //    the Zod errors back to the model and ask it to fix the
+      //    offending fields.
+      const safeEnvelope = PendingPurchaseLlmTeachingEnvelopeSchema.safeParse(envelopeJson)
+      if (!safeEnvelope.success) {
+        const formattedErrors = formatTeacherSchemaErrors(safeEnvelope.error.issues)
+        transcript.push({ attempt, rawContent: content, failureKind: 'schema', failureDetail: formattedErrors })
+        if (attempt < MAX_TEACHER_ATTEMPTS) {
+          messages.push({
+            role: 'user',
+            content: buildTeacherRetryPromptForSchemaErrors({
+              failureSummary: `Your previous response did not match the required schema. Validation errors:\n${formattedErrors}\nFix ONLY those fields and re-emit the complete JSON object — same shape, same other fields.`,
+            }),
+          })
+          continue
+        }
+        return await emitTeacherUnresolved({
+          attempts: transcript,
+          envelope: null,
+          finalNoteHint: `Bedrock returned schema-invalid JSON after ${MAX_TEACHER_ATTEMPTS} attempts. Last errors: ${formattedErrors}`,
+          normalizedDistributorProductName,
+          observationRawRow,
+          rawDistributorProductName: input.group.distributorProductName,
+          rowInputSignature: input.rowInputSignature,
+        })
+      }
+
+      const parsedEnvelope = safeEnvelope.data
+
+      // 3) Reject hallucinated house-brand classifications outright.
+      //    Re-prompt with the explicit instruction to pick the actual
+      //    upstream distributor brand or leave the field empty.
+      if (isProhibitedHouseBrand(parsedEnvelope.classification.brand)) {
+        const failureDetail = `proposed brand "${parsedEnvelope.classification.brand}" is the operator's own retail brand (Freshly Baked NYC) and is not a valid METRC distributor brand`
+        transcript.push({ attempt, rawContent: content, failureKind: 'house-brand', failureDetail })
+        if (attempt < MAX_TEACHER_ATTEMPTS) {
+          messages.push({
+            role: 'user',
+            content: [
+              'You proposed "Freshly Baked NYC" (or one of its aliases) as the brand. That is the receiving retailer\'s own brand and CAN NEVER be the brand of a METRC distributor row.',
+              'If the raw row name clearly identifies an upstream brand, return that brand instead.',
+              'If the raw row name does NOT clearly identify an upstream brand, set `brand` to "" (empty string) and `parserFeasibility` to "needs-more-context", and lower `confidence` below 0.8.',
+              'Re-emit the complete JSON object with the corrected classification.',
+            ].join(' '),
+          })
+          continue
+        }
+        return await emitTeacherUnresolved({
+          attempts: transcript,
+          envelope: parsedEnvelope,
+          finalNoteHint: `Bedrock kept proposing the house brand "Freshly Baked NYC" after ${MAX_TEACHER_ATTEMPTS} attempts; rejecting and keeping manual review.`,
+          normalizedDistributorProductName,
+          observationRawRow,
+          rawDistributorProductName: input.group.distributorProductName,
+          rowInputSignature: input.rowInputSignature,
+        })
+      }
+
+      const normalizedClassification = normalizePendingPurchaseLlmClassification(
+        parsedEnvelope.classification,
+        input.group.distributorProductName,
+      )
+      if (!normalizedClassification) {
+        // The model returned a valid shape but the row is still not
+        // safe to auto-classify (e.g. confidence too low, category not
+        // on the safe-list, or `parserFeasibility = 'needs-more-context'`).
+        // Surface to manual review with the classification persisted
+        // for auditing, same as before — no point retrying a model
+        // that is honestly telling us it isn't sure.
+        const why = describeWhyNormalizationFailed(parsedEnvelope.classification)
+        transcript.push({ attempt, rawContent: content, failureKind: 'too-risky', failureDetail: why })
+        return await emitTeacherUnresolved({
+          attempts: transcript,
+          envelope: parsedEnvelope,
+          finalNoteHint: `Bedrock fallback classification returned a shape that is still too risky for auto-classification (${why}); keeping manual review.`,
+          normalizedDistributorProductName,
+          observationRawRow,
+          rawDistributorProductName: input.group.distributorProductName,
+          rowInputSignature: input.rowInputSignature,
+        })
+      }
 
     const profileAndRule = await withTransaction(async (db) => {
       const brandProfile = await upsertPendingPurchaseBrandProfile(db, {
@@ -3048,6 +3267,20 @@ async function classifyPendingPurchaseNameWithLlmFallback(input: {
         ? 'Auto-learned provisional parse rule'
         : 'LLM teacher classification',
     }
+    }
+    // Unreachable: the retry loop above always returns inside the
+    // body (either with a successful classification or via
+    // `emitTeacherUnresolved`). This satisfies the TS control-flow
+    // checker for the function's return type.
+    return await emitTeacherUnresolved({
+      attempts: transcript,
+      envelope: null,
+      finalNoteHint: `Bedrock teacher exhausted ${MAX_TEACHER_ATTEMPTS} attempts without returning a usable classification.`,
+      normalizedDistributorProductName,
+      observationRawRow,
+      rawDistributorProductName: input.group.distributorProductName,
+      rowInputSignature: input.rowInputSignature,
+    })
   } catch (error) {
     const message = error instanceof Error ? error.message : 'unknown error'
     return {
