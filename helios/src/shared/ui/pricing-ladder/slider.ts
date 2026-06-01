@@ -42,9 +42,19 @@ export function attachPricingLadderSlider(
   const track = ladderEl.querySelector<HTMLElement>('.canonical-pricing-ladder-track')
   const marker = ladderEl.querySelector<HTMLElement>('[data-canonical-pricing-ladder-marker="proposed"]')
   if (!track || !marker) {
-    throw new Error(
-      'attachPricingLadderSlider: ladder element is missing required .canonical-pricing-ladder-track or proposed marker',
-    )
+    // A missing track or proposed marker is a legitimate state — e.g. a
+    // row with no proposed price yet, or a freshness-locked ladder that
+    // suppressed markers. Throwing here used to crash the whole pricing
+    // surface (renderer side-stack: "ladder element is missing required
+    // .canonical-pricing-ladder-track or proposed marker") even though
+    // the consumer's intent was just "wire it up if it's wireable".
+    // Return a no-op detach so the consumer's effect cleanup is safe.
+    if (typeof console !== 'undefined' && typeof console.warn === 'function') {
+      console.warn(
+        'attachPricingLadderSlider: ladder element has no .canonical-pricing-ladder-track or proposed marker — slider not attached (this is fine for ladders without a proposed price).',
+      )
+    }
+    return function detachNoop(): void {}
   }
   marker.setAttribute('data-canonical-ladder-slider', 'active')
 
@@ -52,9 +62,12 @@ export function attachPricingLadderSlider(
   const minimum = Number.parseFloat(ladderEl.getAttribute('data-ladder-min') ?? '')
   const maximum = Number.parseFloat(ladderEl.getAttribute('data-ladder-max') ?? '')
   if (!Number.isFinite(minimum) || !Number.isFinite(maximum) || maximum <= minimum) {
-    throw new Error(
-      `attachPricingLadderSlider: ladder ${productId} has invalid data-ladder-min/data-ladder-max`,
-    )
+    if (typeof console !== 'undefined' && typeof console.warn === 'function') {
+      console.warn(
+        `attachPricingLadderSlider: ladder ${productId} has invalid data-ladder-min/data-ladder-max — slider not attached.`,
+      )
+    }
+    return function detachNoop(): void {}
   }
 
   let pointerId: number | null = null

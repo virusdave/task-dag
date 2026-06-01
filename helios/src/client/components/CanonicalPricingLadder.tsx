@@ -47,7 +47,18 @@ export function CanonicalPricingLadder(props: CanonicalPricingLadderProps) {
   // need them in its deps (which would tear down the slider mid-drag).
   const onProposedPriceChangeRef = useRef(props.onProposedPriceChange)
   onProposedPriceChangeRef.current = props.onProposedPriceChange
-  const initialProposedPriceRef = useRef(props.proposedPrice)
+  // Latest proposedPrice captured in a ref so the useMemo can read it
+  // on the rare null↔non-null transitions that DO force a rebuild,
+  // without making numeric proposedPrice changes a dependency.
+  const proposedPriceRef = useRef(props.proposedPrice)
+  proposedPriceRef.current = props.proposedPrice
+  // The marker's *presence* in the rendered DOM is a shape change that
+  // must trigger a rebuild — otherwise the slider effect tries to wire
+  // up a marker that doesn't exist and throws (or, post-fix, warns and
+  // no-ops, leaving the row un-draggable forever). Numeric drag changes
+  // still bypass the rebuild and mutate marker.style.left directly.
+  const hasProposedPrice =
+    props.proposedPrice !== null && Number.isFinite(props.proposedPrice)
 
   const ladderHtml = useMemo(
     () =>
@@ -55,9 +66,10 @@ export function CanonicalPricingLadder(props: CanonicalPricingLadderProps) {
         {
           productId: props.productId,
           livePrice: props.livePrice,
-          // Use the initial proposed price for the first render only;
-          // subsequent updates are applied via DOM mutation below.
-          proposedPrice: initialProposedPriceRef.current,
+          // Read the current proposedPrice (via ref) at rebuild time so
+          // a null→number transition renders with the real marker
+          // position instead of a stale value.
+          proposedPrice: proposedPriceRef.current,
           marketAveragePostTax: props.marketAveragePostTax,
           marketMedianPostTax: props.marketMedianPostTax,
           competitorListings: props.competitorListings,
@@ -70,8 +82,10 @@ export function CanonicalPricingLadder(props: CanonicalPricingLadderProps) {
           acknowledgeExpiredEvidence: props.acknowledgeExpiredEvidence,
         },
       ),
-    // NOTE: `proposedPrice` deliberately excluded — see drag-survival
-    // comment above the component.
+    // NOTE: the *numeric value* of proposedPrice is deliberately
+    // excluded — see drag-survival comment above the component. We DO
+    // depend on `hasProposedPrice` so the marker's presence/absence
+    // triggers a rebuild.
     [
       props.productId,
       props.livePrice,
@@ -83,6 +97,7 @@ export function CanonicalPricingLadder(props: CanonicalPricingLadderProps) {
       props.freshness,
       props.freshnessAgeDays,
       props.acknowledgeExpiredEvidence,
+      hasProposedPrice,
     ],
   )
 
