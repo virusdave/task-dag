@@ -132,12 +132,50 @@ function hasActiveFilter(params: URLSearchParams): boolean {
   return false
 }
 
+// localStorage key for the show-maps preference. Persisted so the
+// operator's choice survives reloads/navigation; rendered as a small
+// toggle in the page header.
+const SHOW_MAPS_STORAGE_KEY = 'visitorScans.showMaps'
+
+function readShowMapsPref(): boolean {
+  if (typeof window === 'undefined') return true
+  try {
+    const v = window.localStorage.getItem(SHOW_MAPS_STORAGE_KEY)
+    if (v === null) return true
+    return v !== '0' && v !== 'false'
+  } catch {
+    return true
+  }
+}
+
+function writeShowMapsPref(showMaps: boolean): void {
+  if (typeof window === 'undefined') return
+  try {
+    window.localStorage.setItem(SHOW_MAPS_STORAGE_KEY, showMaps ? '1' : '0')
+  } catch {
+    // Quota / disabled-storage / private mode — ignore; the in-memory
+    // toggle still works for this session.
+  }
+}
+
 export function VisitorScansPage() {
   const initialData = useLoaderData() as VisitorScansResponse
   const [searchParams, setSearchParams] = useSearchParams()
   const [data, setData] = useState<VisitorScansResponse>(initialData)
   const [error, setError] = useState<string | null>(null)
   const [selected, setSelected] = useState<VisitorScanItem | null>(null)
+  // Maps-visible toggle (per-row mini-map column + mobile-card map).
+  // Defaults ON; remembered across reloads in localStorage so a power
+  // user who prefers a denser table doesn't have to re-hide them on
+  // every visit.
+  const [showMaps, setShowMaps] = useState<boolean>(() => readShowMapsPref())
+  function handleToggleMaps(): void {
+    setShowMaps((prev) => {
+      const next = !prev
+      writeShowMapsPref(next)
+      return next
+    })
+  }
 
   // Re-fetch whenever the filter changes, AND on a 20-second tick
   // so the page stays effectively-live for the operator behind the
@@ -206,6 +244,19 @@ export function VisitorScansPage() {
       <header className="vs-header">
         <h2 className="vs-title">Visitor Scans</h2>
         <div className="vs-actions">
+          <button
+            type="button"
+            className="ghost-button vs-action vs-maps-toggle"
+            onClick={handleToggleMaps}
+            aria-pressed={showMaps}
+            title={
+              showMaps
+                ? 'Hide per-row map thumbnails (denser table)'
+                : 'Show per-row map thumbnails'
+            }
+          >
+            {showMaps ? 'Expanded: on' : 'Expanded: off'}
+          </button>
           <a className="ghost-button vs-action" href={csvHref}>
             Export CSV
           </a>
@@ -349,7 +400,7 @@ export function VisitorScansPage() {
                 <colgroup>
                   <col className="vs-col-time" />
                   <col className="vs-col-site" />
-                  <col className="vs-col-mini" />
+                  {showMaps ? <col className="vs-col-mini" /> : null}
                   <col className="vs-col-visitor" />
                   <col className="vs-col-status" />
                   <col className="vs-col-status" />
@@ -364,7 +415,7 @@ export function VisitorScansPage() {
                   <tr>
                     <th>Scanned</th>
                     <th>Site</th>
-                    <th>Map</th>
+                    {showMaps ? <th>Map</th> : null}
                     <th>Visitor</th>
                     <th>Customer</th>
                     <th>Scans</th>
@@ -391,14 +442,16 @@ export function VisitorScansPage() {
                             {item.siteSlug}
                           </Pill>
                         </td>
-                        <td>
-                          <MiniGeoMarker
-                            marker={item.miniMarker}
-                            siteSlug={item.siteSlug}
-                            href={buildAppPath(item.customerUrl)}
-                            ariaLabelPrefix={formatName(item)}
-                          />
-                        </td>
+                        {showMaps ? (
+                          <td>
+                            <MiniGeoMarker
+                              marker={item.miniMarker}
+                              siteSlug={item.siteSlug}
+                              href={buildAppPath(item.customerUrl)}
+                              ariaLabelPrefix={formatName(item)}
+                            />
+                          </td>
+                        ) : null}
                         <td>
                           <a
                             className="vs-visitor-link"
@@ -443,7 +496,7 @@ export function VisitorScansPage() {
             </div>
 
             {/* Narrow-viewport: card list. Same data, no horizontal scroll. */}
-            <ul className="vs-cards">
+            <ul className={`vs-cards${showMaps ? '' : ' vs-cards-no-maps'}`}>
               {data.items.map((item) => {
                 const newPill = newOrReturningPill(item)
                 const firstBadge = firstScanBadge(item)
@@ -509,14 +562,17 @@ export function VisitorScansPage() {
                           desktop thumbnail — scales because the SVG
                           uses preserveAspectRatio="none" and the
                           marker projection re-derives from the bbox
-                          on every render. */}
-                      <MiniGeoMarker
-                        marker={item.miniMarker}
-                        siteSlug={item.siteSlug}
-                        href={buildAppPath(item.customerUrl)}
-                        ariaLabelPrefix={formatName(item)}
-                        className="vs-card-mini"
-                      />
+                          on every render. Hidden when the operator
+                          flips the page-level Maps toggle off. */}
+                      {showMaps ? (
+                        <MiniGeoMarker
+                          marker={item.miniMarker}
+                          siteSlug={item.siteSlug}
+                          href={buildAppPath(item.customerUrl)}
+                          ariaLabelPrefix={formatName(item)}
+                          className="vs-card-mini"
+                        />
+                      ) : null}
                     </article>
                   </li>
                 )

@@ -4663,6 +4663,13 @@ span.metric-chart-legend-item {
   background: rgba(120, 86, 48, 0.06);
 }
 
+/* When the page-level "Expanded" toggle is off, drop the right-hand
+   map column so the card body fills the full width instead of leaving
+   a dead 9rem gutter. */
+.visitor-scans-page .vs-cards-no-maps .vs-card {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .visitor-scans-page .vs-card-body {
   /* All text data — name, pills, time, dl-grid, action buttons —
      stacks vertically in the left column. */
