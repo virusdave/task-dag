@@ -2,7 +2,7 @@
 //
 // We construct partial CatalogAnalyticsPoint records and cast to the
 // real type for the matcher — the matcher only reads the text-y
-// fields (brand/category/subcategory/size/product/sku/packCount).
+// fields (brand/distributor/category/subcategory/size/product/sku/packCount).
 import { describe, expect, it } from 'vitest'
 import type { CatalogAnalyticsPoint } from '../../../shared/contracts/index.js'
 import { buildHighlightMatcher } from './CatalogAnalyticsTab.js'
@@ -15,6 +15,7 @@ const pt = (over: Partial<CatalogAnalyticsPoint>): CatalogAnalyticsPoint =>
     productShortName: null,
     sku: null,
     brandName: null,
+    distributorName: null,
     categoryName: null,
     subcategoryName: null,
     sizeLabel: null,
@@ -33,6 +34,13 @@ describe('buildHighlightMatcher', () => {
     expect(m).not.toBeNull()
     expect(m!(pt({ brandName: 'GoodCo Cannabis' }))).toBe(true)
     expect(m!(pt({ brandName: 'OtherBrand' }))).toBe(false)
+  })
+
+  it('matches case-insensitive substring against distributor', () => {
+    const m = buildHighlightMatcher('Curaleaf')
+    expect(m).not.toBeNull()
+    expect(m!(pt({ distributorName: 'Curaleaf NY' }))).toBe(true)
+    expect(m!(pt({ distributorName: 'Other Distributor' }))).toBe(false)
   })
 
   it('matches across category / subcategory / product name', () => {

@@ -38,6 +38,7 @@ export async function registerCatalogAnalyticsRoutes(
       categoryIds: parsed.categoryIds,
       subcategoryIds: parsed.subcategoryIds,
       brandIds: parsed.brandIds,
+      distributorNames: parsed.distributorNames,
       sizes: parsed.sizes,
       packCounts: parsed.packCounts,
     })
@@ -64,6 +65,7 @@ export async function registerCatalogAnalyticsRoutes(
       categoryIds: parsed.categoryIds,
       subcategoryIds: parsed.subcategoryIds,
       brandIds: parsed.brandIds,
+      distributorNames: parsed.distributorNames,
       sizes: parsed.sizes,
       packCounts: parsed.packCounts,
     })

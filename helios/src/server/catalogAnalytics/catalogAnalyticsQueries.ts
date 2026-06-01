@@ -107,6 +107,7 @@ export interface CatalogAnalyticsFiltersArgs {
   readonly categoryIds?: readonly string[]
   readonly subcategoryIds?: readonly string[]
   readonly brandIds?: readonly string[]
+  readonly distributorNames?: readonly string[]
   readonly sizes?: readonly string[]
   readonly packCounts?: readonly string[]
 }
@@ -116,13 +117,21 @@ export async function getCatalogAnalyticsFilters(
 ): Promise<CatalogAnalyticsFiltersResponse> {
   const dealerIds = resolveDealerIds(opts.sites)
   if (dealerIds.length === 0) {
-    return { categories: [], subcategories: [], brands: [], sizes: [], packCounts: [] }
+    return {
+      categories: [],
+      subcategories: [],
+      brands: [],
+      distributors: [],
+      sizes: [],
+      packCounts: [],
+    }
   }
   const pool = getPool()
 
   const categoryIds = opts.categoryIds ?? []
   const subcategoryIds = opts.subcategoryIds ?? []
   const brandIds = opts.brandIds ?? []
+  const distributorNames = opts.distributorNames ?? []
   const sizes = opts.sizes ?? []
   const packCounts = opts.packCounts ?? []
 
@@ -134,20 +143,24 @@ export async function getCatalogAnalyticsFilters(
   // `catalog_groups`, not on the snapshot row itself — those snapshot
   // columns ship NULL from the grouped inventory feed. We join through
   // `live_state_json->'products'[]` (productId match). 99%+ coverage.
+  // Distributor comes directly from sweed_package_current so selecting
+  // a brand can narrow to the distributor(s) carrying it, and selecting
+  // a distributor can narrow to the remaining brand options.
   //
   // Cumulative semantics: each dimension's option list is computed by
-  // applying the OTHER three dimensions' selections, but ignoring its
-  // own. That way the operator can deselect what they just chose, and
-  // selecting category=Flower narrows brand/subcategory/size to peers
-  // within Flower with correct (n=) counts.
+  // applying the OTHER dimensions' selections, but ignoring its own.
+  // That way the operator can deselect what they just chose, and
+  // selecting distributor=Curaleaf narrows brand/category/size to peers
+  // within Curaleaf with correct (n=) counts.
   //
   // Parameter slots:
   //   $1 = dealerIds bigint[]
-  //   $2 = categoryIds text[]    (selected categories — coalesced labels)
-  //   $3 = subcategoryIds text[] (selected subcategories)
-  //   $4 = brandIds text[]       (selected brands)
-  //   $5 = sizes text[]          (selected sizes)
-  //   $6 = packCounts text[]     (selected pack counts, integers-as-strings)
+  //   $2 = categoryIds text[]      (selected categories — coalesced labels)
+  //   $3 = subcategoryIds text[]   (selected subcategories)
+  //   $4 = brandIds text[]         (selected brands)
+  //   $5 = distributorNames text[] (selected distributors)
+  //   $6 = sizes text[]            (selected sizes)
+  //   $7 = packCounts text[]       (selected pack counts, integers-as-strings)
   const sql = `
     with mapping as (
       select cg.brand_name,
@@ -165,11 +178,13 @@ export async function getCatalogAnalyticsFilters(
              m.category_name,
              m.subcategory_name,
              m.brand_name,
+             spc.distributor_name,
              m.size_name,
              m.pack_of_size,
              coalesce(nullif(m.category_name, ''),    '(uncategorised)')   as category_label,
              coalesce(nullif(m.subcategory_name, ''), '(no subcategory)')  as subcategory_label,
              coalesce(nullif(m.brand_name, ''),       '(no brand)')        as brand_label,
+             coalesce(nullif(spc.distributor_name, ''), '(no distributor)') as distributor_label,
              coalesce(nullif(m.size_name, ''),        '(no size)')         as size_label,
              case when m.pack_of_size is null then '(unknown)'
                   else m.pack_of_size::text end as pack_count_label
@@ -177,7 +192,7 @@ export async function getCatalogAnalyticsFilters(
         left join mapping m on m.product_id = spc.product_id
       where spc.dealer_id = any($1::bigint[])
     )
-    -- categories: apply subcat + brand + size + pack-count, NOT category
+    -- categories: apply subcat + brand + distributor + size + pack-count, NOT category
     select 'category' as kind,
            category_label as id,
            category_label as label,
@@ -186,11 +201,12 @@ export async function getCatalogAnalyticsFilters(
     where category_name is not null
       and (cardinality($3::text[]) = 0 or subcategory_label = any($3::text[]))
       and (cardinality($4::text[]) = 0 or brand_label       = any($4::text[]))
-      and (cardinality($5::text[]) = 0 or size_label        = any($5::text[]))
-      and (cardinality($6::text[]) = 0 or pack_count_label  = any($6::text[]))
+      and (cardinality($5::text[]) = 0 or distributor_label = any($5::text[]))
+      and (cardinality($6::text[]) = 0 or size_label        = any($6::text[]))
+      and (cardinality($7::text[]) = 0 or pack_count_label  = any($7::text[]))
     group by 1, 2, 3
     union all
-    -- subcategories: apply category + brand + size + pack-count, NOT subcategory
+    -- subcategories: apply category + brand + distributor + size + pack-count, NOT subcategory
     select 'subcategory',
            subcategory_label,
            subcategory_label,
@@ -199,11 +215,12 @@ export async function getCatalogAnalyticsFilters(
     where subcategory_name is not null
       and (cardinality($2::text[]) = 0 or category_label = any($2::text[]))
       and (cardinality($4::text[]) = 0 or brand_label    = any($4::text[]))
-      and (cardinality($5::text[]) = 0 or size_label     = any($5::text[]))
-      and (cardinality($6::text[]) = 0 or pack_count_label = any($6::text[]))
+      and (cardinality($5::text[]) = 0 or distributor_label = any($5::text[]))
+      and (cardinality($6::text[]) = 0 or size_label     = any($6::text[]))
+      and (cardinality($7::text[]) = 0 or pack_count_label = any($7::text[]))
     group by 1, 2, 3
     union all
-    -- brands: apply category + subcat + size + pack-count, NOT brand
+    -- brands: apply category + subcat + distributor + size + pack-count, NOT brand
     select 'brand',
            brand_label,
            brand_label,
@@ -212,11 +229,26 @@ export async function getCatalogAnalyticsFilters(
     where brand_name is not null
       and (cardinality($2::text[]) = 0 or category_label    = any($2::text[]))
       and (cardinality($3::text[]) = 0 or subcategory_label = any($3::text[]))
-      and (cardinality($5::text[]) = 0 or size_label        = any($5::text[]))
-      and (cardinality($6::text[]) = 0 or pack_count_label  = any($6::text[]))
+      and (cardinality($5::text[]) = 0 or distributor_label = any($5::text[]))
+      and (cardinality($6::text[]) = 0 or size_label        = any($6::text[]))
+      and (cardinality($7::text[]) = 0 or pack_count_label  = any($7::text[]))
     group by 1, 2, 3
     union all
-    -- sizes: apply category + subcat + brand + pack-count, NOT size
+    -- distributors: apply category + subcat + brand + size + pack-count, NOT distributor
+    select 'distributor',
+           distributor_label,
+           distributor_label,
+           count(distinct inventory_item_id)::int
+    from base
+    where distributor_name is not null
+      and (cardinality($2::text[]) = 0 or category_label    = any($2::text[]))
+      and (cardinality($3::text[]) = 0 or subcategory_label = any($3::text[]))
+      and (cardinality($4::text[]) = 0 or brand_label       = any($4::text[]))
+      and (cardinality($6::text[]) = 0 or size_label        = any($6::text[]))
+      and (cardinality($7::text[]) = 0 or pack_count_label  = any($7::text[]))
+    group by 1, 2, 3
+    union all
+    -- sizes: apply category + subcat + brand + distributor + pack-count, NOT size
     select 'size',
            size_label,
            size_label,
@@ -226,10 +258,11 @@ export async function getCatalogAnalyticsFilters(
       and (cardinality($2::text[]) = 0 or category_label    = any($2::text[]))
       and (cardinality($3::text[]) = 0 or subcategory_label = any($3::text[]))
       and (cardinality($4::text[]) = 0 or brand_label       = any($4::text[]))
-      and (cardinality($6::text[]) = 0 or pack_count_label  = any($6::text[]))
+      and (cardinality($5::text[]) = 0 or distributor_label = any($5::text[]))
+      and (cardinality($7::text[]) = 0 or pack_count_label  = any($7::text[]))
     group by 1, 2, 3
     union all
-    -- pack counts: apply category + subcat + brand + size, NOT pack-count
+    -- pack counts: apply category + subcat + brand + distributor + size, NOT pack-count
     select 'packCount',
            pack_count_label,
            pack_count_label,
@@ -238,21 +271,31 @@ export async function getCatalogAnalyticsFilters(
     where (cardinality($2::text[]) = 0 or category_label    = any($2::text[]))
       and (cardinality($3::text[]) = 0 or subcategory_label = any($3::text[]))
       and (cardinality($4::text[]) = 0 or brand_label       = any($4::text[]))
-      and (cardinality($5::text[]) = 0 or size_label        = any($5::text[]))
+      and (cardinality($5::text[]) = 0 or distributor_label = any($5::text[]))
+      and (cardinality($6::text[]) = 0 or size_label        = any($6::text[]))
     group by 1, 2, 3
   `
 
   const result = await pool.query<{
-    kind: 'category' | 'subcategory' | 'brand' | 'size' | 'packCount'
+    kind: 'category' | 'subcategory' | 'brand' | 'distributor' | 'size' | 'packCount'
     id: string
     label: string
     item_count: number
-  }>(sql, [dealerIds, categoryIds, subcategoryIds, brandIds, sizes, packCounts])
+  }>(sql, [
+    dealerIds,
+    categoryIds,
+    subcategoryIds,
+    brandIds,
+    distributorNames,
+    sizes,
+    packCounts,
+  ])
 
   const out: CatalogAnalyticsFiltersResponse = {
     categories: [],
     subcategories: [],
     brands: [],
+    distributors: [],
     sizes: [],
     packCounts: [],
   }
@@ -278,15 +321,16 @@ export async function getCatalogAnalyticsFilters(
     if (row.kind === 'category') out.categories.push(opt)
     else if (row.kind === 'subcategory') out.subcategories.push(opt)
     else if (row.kind === 'brand') out.brands.push(opt)
+    else if (row.kind === 'distributor') out.distributors.push(opt)
     else out.sizes.push(opt)
   }
   // Sort:
   //  * categories / subcategories / sizes — count desc, label asc.
   //    These are short, structurally-meaningful enumerations where
   //    "what's biggest first" is what the operator looks for.
-  //  * brands — alphabetical only. There are dozens of comparable
-  //    brands; the operator generally knows the brand they're looking
-  //    for and wants to find it by name, not by volume.
+  //  * brands / distributors — alphabetical only. There are dozens of
+  //    comparable names; the operator generally knows what they're
+  //    looking for and wants to find it by name, not by volume.
   //  * packCounts — numeric ascending; "(unknown)" sinks to the end.
   const sortByCount = (a: CatalogFilterOption, b: CatalogFilterOption) =>
     b.itemCount - a.itemCount || a.label.localeCompare(b.label)
@@ -306,6 +350,7 @@ export async function getCatalogAnalyticsFilters(
   out.subcategories.sort(sortByCount)
   out.sizes.sort(sortByCount)
   out.brands.sort(sortByLabel)
+  out.distributors.sort(sortByLabel)
   out.packCounts.sort(sortPackCount)
   return out
 }
@@ -319,6 +364,7 @@ export interface CatalogAnalyticsPointsArgs {
   readonly categoryIds: readonly string[]
   readonly subcategoryIds: readonly string[]
   readonly brandIds: readonly string[]
+  readonly distributorNames: readonly string[]
   readonly sizes: readonly string[]
   readonly packCounts: readonly string[]
 }
@@ -339,6 +385,7 @@ export async function getCatalogAnalyticsPoints(
     categoryIds: [...args.categoryIds],
     subcategoryIds: [...args.subcategoryIds],
     brandIds: [...args.brandIds],
+    distributorNames: [...args.distributorNames],
     sizes: [...args.sizes],
     packCounts: [...args.packCounts],
     windowDays,
@@ -357,8 +404,9 @@ export async function getCatalogAnalyticsPoints(
   //   $4 = categoryNames text[]    (empty = unfiltered) — joined off catalog_groups
   //   $5 = subcategoryNames text[] (empty = unfiltered) — joined off catalog_groups
   //   $6 = brandNames text[]       (empty = unfiltered) — joined off catalog_groups
-  //   $7 = sizes text[]            (empty = unfiltered) — joined off catalog_groups
-  //   $8 = packCounts text[]       (empty = unfiltered) — integers-as-strings; "(unknown)" matches null packOfSize
+  //   $7 = distributorNames text[] (empty = unfiltered) — joined off sweed_package_current
+  //   $8 = sizes text[]            (empty = unfiltered) — joined off catalog_groups
+  //   $9 = packCounts text[]       (empty = unfiltered) — integers-as-strings; "(unknown)" matches null packOfSize
   const params: unknown[] = [
     dealerIds,
     args.from,
@@ -366,6 +414,7 @@ export async function getCatalogAnalyticsPoints(
     args.categoryIds,
     args.subcategoryIds,
     args.brandIds,
+    args.distributorNames,
     args.sizes,
     args.packCounts,
   ]
@@ -476,6 +525,7 @@ export async function getCatalogAnalyticsPoints(
            m.category_name,
            m.subcategory_name,
            m.brand_name,
+           cur.distributor_name,
            m.size_name as size_label,
            m.pack_of_size,
            cur.current_qty,
@@ -506,10 +556,11 @@ export async function getCatalogAnalyticsPoints(
       and (cardinality($4::text[]) = 0 or coalesce(m.category_name, '(uncategorised)')   = any($4::text[]))
       and (cardinality($5::text[]) = 0 or coalesce(m.subcategory_name, '(no subcategory)') = any($5::text[]))
       and (cardinality($6::text[]) = 0 or coalesce(m.brand_name, '(no brand)')             = any($6::text[]))
-      and (cardinality($7::text[]) = 0 or coalesce(m.size_name, '(no size)')               = any($7::text[]))
-      and (cardinality($8::text[]) = 0 or
+      and (cardinality($7::text[]) = 0 or coalesce(cur.distributor_name, '(no distributor)') = any($7::text[]))
+      and (cardinality($8::text[]) = 0 or coalesce(m.size_name, '(no size)')               = any($8::text[]))
+      and (cardinality($9::text[]) = 0 or
            (case when m.pack_of_size is null then '(unknown)'
-                 else m.pack_of_size::text end) = any($8::text[]))
+                 else m.pack_of_size::text end) = any($9::text[]))
   `
 
   const result = await pool.query(sql, params)
@@ -588,6 +639,7 @@ export async function getCatalogAnalyticsPoints(
         subcategoryName: asStr(row.subcategory_name),
         brandId: null,
         brandName: asStr(row.brand_name),
+        distributorName: asStr(row.distributor_name),
         sizeLabel,
         currentQty: null,
         availableQty: null,

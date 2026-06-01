@@ -24,7 +24,7 @@ import { z } from 'zod'
 // ============================ Filters endpoint =============================
 
 /**
- * One filter option (category / subcategory / brand / size).
+ * One filter option (category / subcategory / brand / size / distributor).
  *
  * `id` is the stable join key (e.g. category_id) used by the points
  * endpoint; `label` is what the SPA shows in the dropdown chip. For
@@ -44,6 +44,8 @@ export const CatalogAnalyticsFiltersResponseSchema = z.object({
   categories: z.array(CatalogFilterOptionSchema),
   subcategories: z.array(CatalogFilterOptionSchema),
   brands: z.array(CatalogFilterOptionSchema),
+  /** Distributor names sourced from sweed_package_current.distributor_name. */
+  distributors: z.array(CatalogFilterOptionSchema),
   sizes: z.array(CatalogFilterOptionSchema),
   /**
    * Pack counts (units per package) sourced from
@@ -80,6 +82,7 @@ export const CatalogAnalyticsFiltersRequestSchema = z.object({
   categoryIds: csvList,
   subcategoryIds: csvList,
   brandIds: csvList,
+  distributorNames: csvList,
   sizes: csvList,
   /** CSV of pack-count ids (integer strings, e.g. "1,5,10"). */
   packCounts: csvList,
@@ -97,6 +100,7 @@ export const CatalogAnalyticsPointsRequestSchema = z.object({
   categoryIds: csvList,
   subcategoryIds: csvList,
   brandIds: csvList,
+  distributorNames: csvList,
   sizes: csvList,
   /** CSV of pack-count ids (integer strings, e.g. "1,5,10"). */
   packCounts: csvList,
@@ -126,6 +130,7 @@ export const CatalogAnalyticsPointSchema = z.object({
   subcategoryName: z.string().nullable(),
   brandId: z.string().nullable(),
   brandName: z.string().nullable(),
+  distributorName: z.string().nullable(),
   sizeLabel: z.string().nullable(),
 
   // --- snapshot-driven (current state) ---
@@ -202,6 +207,7 @@ export const CatalogAnalyticsPointsResponseSchema = z.object({
     categoryIds: z.array(z.string()),
     subcategoryIds: z.array(z.string()),
     brandIds: z.array(z.string()),
+    distributorNames: z.array(z.string()),
     sizes: z.array(z.string()),
     packCounts: z.array(z.string()),
     windowDays: z.number(),

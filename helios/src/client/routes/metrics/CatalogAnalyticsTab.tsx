@@ -202,6 +202,7 @@ function ourPriceOverMarket(p: CatalogAnalyticsPoint): number | null {
  * highlight as inactive). The predicate is case-insensitive substring
  * match against:
  *   * brand / category / subcategory name
+ *   * distributor name
  *   * size label, pack-count synthetic label ("1 per pkg" / "5-pack")
  *   * product name + short name, sku
  *
@@ -225,6 +226,7 @@ export function buildHighlightMatcher(
         : `${p.packCount}-pack`
     const haystack = [
       p.brandName,
+      p.distributorName,
       p.categoryName,
       p.subcategoryName,
       p.sizeLabel,
@@ -583,6 +585,7 @@ type CategoricalColourByKey =
   | 'category'
   | 'subcategory'
   | 'brand'
+  | 'distributor'
   | 'sizeLabel'
   | 'packCount'
 
@@ -637,6 +640,12 @@ const CATEGORICAL_COLOUR_BY: ReadonlyArray<CategoricalColourByDef> = [
     id: 'brand',
     label: 'brand',
     bucket: (p) => p.brandName ?? '(none)',
+  },
+  {
+    kind: 'categorical',
+    id: 'distributor',
+    label: 'distributor',
+    bucket: (p) => p.distributorName ?? '(none)',
   },
   {
     kind: 'categorical',
@@ -1652,6 +1661,9 @@ export function CatalogAnalyticsTab() {
   const [selectedBrandIds, setSelectedBrandIds] = useState<ReadonlySet<string>>(
     () => new Set<string>(),
   )
+  const [selectedDistributorNames, setSelectedDistributorNames] = useState<ReadonlySet<string>>(
+    () => new Set<string>(),
+  )
   const [selectedSizes, setSelectedSizes] = useState<ReadonlySet<string>>(() => new Set<string>())
   const [selectedPackCounts, setSelectedPackCounts] = useState<ReadonlySet<string>>(
     () => new Set<string>(),
@@ -1669,6 +1681,10 @@ export function CatalogAnalyticsTab() {
   const brandIdsParam = useMemo(
     () => Array.from(selectedBrandIds).sort().join(','),
     [selectedBrandIds],
+  )
+  const distributorNamesParam = useMemo(
+    () => Array.from(selectedDistributorNames).sort().join(','),
+    [selectedDistributorNames],
   )
   const sizesParam = useMemo(
     () => Array.from(selectedSizes).sort().join(','),
@@ -1720,6 +1736,7 @@ export function CatalogAnalyticsTab() {
       if (categoryIdsParam) qs.set('categoryIds', categoryIdsParam)
       if (subcategoryIdsParam) qs.set('subcategoryIds', subcategoryIdsParam)
       if (brandIdsParam) qs.set('brandIds', brandIdsParam)
+      if (distributorNamesParam) qs.set('distributorNames', distributorNamesParam)
       if (sizesParam) qs.set('sizes', sizesParam)
       if (packCountsParam) qs.set('packCounts', packCountsParam)
       const url = qs.toString()
@@ -1732,7 +1749,14 @@ export function CatalogAnalyticsTab() {
         .catch((e) => {
           if (!cancelled) {
             setError(`Failed to load filter options: ${(e as Error).message}`)
-            setFilters({ categories: [], subcategories: [], brands: [], sizes: [], packCounts: [] })
+            setFilters({
+              categories: [],
+              subcategories: [],
+              brands: [],
+              distributors: [],
+              sizes: [],
+              packCounts: [],
+            })
           }
         })
         .finally(() => {
@@ -1743,7 +1767,15 @@ export function CatalogAnalyticsTab() {
       cancelled = true
       clearTimeout(handle)
     }
-  }, [sitesParam, categoryIdsParam, subcategoryIdsParam, brandIdsParam, sizesParam, packCountsParam])
+  }, [
+    sitesParam,
+    categoryIdsParam,
+    subcategoryIdsParam,
+    brandIdsParam,
+    distributorNamesParam,
+    sizesParam,
+    packCountsParam,
+  ])
 
   // Fetch points whenever ANY filter changes. We debounce filter changes
   // by 250ms so multi-select chip-clicks don't trigger N queries.
@@ -1756,6 +1788,7 @@ export function CatalogAnalyticsTab() {
         Array.from(selectedCategoryIds).sort().join(','),
         Array.from(selectedSubcategoryIds).sort().join(','),
         Array.from(selectedBrandIds).sort().join(','),
+        Array.from(selectedDistributorNames).sort().join(','),
         Array.from(selectedSizes).sort().join(','),
         Array.from(selectedPackCounts).sort().join(','),
       ].join('|'),
@@ -1766,6 +1799,7 @@ export function CatalogAnalyticsTab() {
       selectedCategoryIds,
       selectedSubcategoryIds,
       selectedBrandIds,
+      selectedDistributorNames,
       selectedSizes,
       selectedPackCounts,
     ],
@@ -1785,6 +1819,8 @@ export function CatalogAnalyticsTab() {
       if (selectedSubcategoryIds.size > 0)
         qs.set('subcategoryIds', Array.from(selectedSubcategoryIds).join(','))
       if (selectedBrandIds.size > 0) qs.set('brandIds', Array.from(selectedBrandIds).join(','))
+      if (selectedDistributorNames.size > 0)
+        qs.set('distributorNames', Array.from(selectedDistributorNames).join(','))
       if (selectedSizes.size > 0) qs.set('sizes', Array.from(selectedSizes).join(','))
       if (selectedPackCounts.size > 0)
         qs.set('packCounts', Array.from(selectedPackCounts).join(','))
@@ -2050,11 +2086,20 @@ export function CatalogAnalyticsTab() {
               setSelectedCategoryIds(new Set())
               setSelectedSubcategoryIds(new Set())
               setSelectedBrandIds(new Set())
+              setSelectedDistributorNames(new Set())
               setSelectedSizes(new Set())
               setSelectedPackCounts(new Set())
             },
           }}
         />
+        {filters?.distributors && filters.distributors.length > 0 ? (
+          <FilterDropdown
+            label="Distributor"
+            options={filters.distributors}
+            selected={selectedDistributorNames}
+            onToggle={makeSetToggler(setSelectedDistributorNames)}
+          />
+        ) : null}
         {/* Pack-count filter lives outside the shared CatalogFilterBar
             so the sales / inventory pages (which don't carry packOfSize
             on their metric defs) don't have to widen their dimension
@@ -2067,6 +2112,26 @@ export function CatalogAnalyticsTab() {
             selected={selectedPackCounts}
             onToggle={makeSetToggler(setSelectedPackCounts)}
           />
+        ) : null}
+        {(selectedDistributorNames.size > 0 || selectedPackCounts.size > 0) &&
+        selectedCategoryIds.size === 0 &&
+        selectedSubcategoryIds.size === 0 &&
+        selectedBrandIds.size === 0 &&
+        selectedSizes.size === 0 ? (
+          <button
+            type="button"
+            className="ghost-button"
+            onClick={() => {
+              setSelectedCategoryIds(new Set())
+              setSelectedSubcategoryIds(new Set())
+              setSelectedBrandIds(new Set())
+              setSelectedDistributorNames(new Set())
+              setSelectedSizes(new Set())
+              setSelectedPackCounts(new Set())
+            }}
+          >
+            clear all filters
+          </button>
         ) : null}
       </div>
 
@@ -3258,7 +3323,7 @@ function ScatterTooltip(p: ScatterTooltipProps) {
         ) : null}
       </div>
       <div className="catalog-analytics-tooltip-sub subtle-copy">
-        {[p.point.brandName, p.point.subcategoryName, p.point.categoryName]
+        {[p.point.brandName, p.point.distributorName, p.point.subcategoryName, p.point.categoryName]
           .filter((s) => s)
           .join(' • ') || '(no classification)'}
       </div>
