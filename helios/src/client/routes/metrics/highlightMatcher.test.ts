@@ -1,11 +1,10 @@
-// Tests for `buildHighlightMatcher` exported from CatalogAnalyticsTab.
+// Tests for small pure helpers exported from CatalogAnalyticsTab.
 //
-// We construct partial CatalogAnalyticsPoint records and cast to the
-// real type for the matcher — the matcher only reads the text-y
-// fields (brand/distributor/category/subcategory/size/product/sku/packCount).
+// We construct partial CatalogAnalyticsPoint records and cast to the real
+// type; these helpers only read a small subset of point fields.
 import { describe, expect, it } from 'vitest'
 import type { CatalogAnalyticsPoint } from '../../../shared/contracts/index.js'
-import { buildHighlightMatcher } from './CatalogAnalyticsTab.js'
+import { buildHighlightMatcher, cohortKey } from './CatalogAnalyticsTab.js'
 
 const pt = (over: Partial<CatalogAnalyticsPoint>): CatalogAnalyticsPoint =>
   ({
@@ -20,6 +19,8 @@ const pt = (over: Partial<CatalogAnalyticsPoint>): CatalogAnalyticsPoint =>
     subcategoryName: null,
     sizeLabel: null,
     packCount: null,
+    unitSizeGrams: null,
+    unitSizeMg: null,
     ...over,
   }) as unknown as CatalogAnalyticsPoint
 
@@ -78,5 +79,46 @@ describe('buildHighlightMatcher', () => {
     const m = buildHighlightMatcher('ABC123')!
     expect(m(pt({ sku: 'abc123-x' }))).toBe(true)
     expect(m(pt({ sku: 'xyz' }))).toBe(false)
+  })
+})
+
+describe('cohortKey', () => {
+  it('groups by category, subcategory, normalized gram unit size, and pack count', () => {
+    expect(
+      cohortKey(
+        pt({
+          categoryName: 'Flower',
+          subcategoryName: 'Jar',
+          sizeLabel: '3.50 g',
+          unitSizeGrams: 3.5,
+          packCount: 1,
+        }),
+      ),
+    ).toBe('Flower|Jar|g:3.5|pack:1')
+  })
+
+  it('keeps different pack counts in different cohorts even when unit size matches', () => {
+    const base = {
+      categoryName: 'Prerolls',
+      subcategoryName: 'Infused Preroll',
+      unitSizeGrams: 0.5,
+    }
+    expect(cohortKey(pt({ ...base, packCount: 1 }))).not.toBe(
+      cohortKey(pt({ ...base, packCount: 5 })),
+    )
+  })
+
+  it('uses milligram unit size for edible cohorts', () => {
+    expect(
+      cohortKey(
+        pt({
+          categoryName: 'Edibles',
+          subcategoryName: 'Gummies',
+          sizeLabel: '10mg',
+          unitSizeMg: 10,
+          packCount: 10,
+        }),
+      ),
+    ).toBe('Edibles|Gummies|mg:10|pack:10')
   })
 })

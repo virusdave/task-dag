@@ -242,10 +242,19 @@ export function buildHighlightMatcher(
   }
 }
 
-function cohortKey(p: CatalogAnalyticsPoint): string {
-  return `${p.categoryName ?? '(no cat)'}|${p.subcategoryName ?? '(no sub)'}|${
-    p.sizeLabel ?? '(no size)'
-  }`
+function cohortUnitSizeKey(p: CatalogAnalyticsPoint): string {
+  if (p.unitSizeGrams != null) return `g:${p.unitSizeGrams}`
+  if (p.unitSizeMg != null) return `mg:${p.unitSizeMg}`
+  return `label:${p.sizeLabel ?? '(no size)'}`
+}
+
+export function cohortKey(p: CatalogAnalyticsPoint): string {
+  return [
+    p.categoryName ?? '(no cat)',
+    p.subcategoryName ?? '(no sub)',
+    cohortUnitSizeKey(p),
+    p.packCount == null ? '(no pack)' : `pack:${p.packCount}`,
+  ].join('|')
 }
 
 function velocityIndex(p: CatalogAnalyticsPoint, ctx: AxisCtx): number | null {
@@ -461,7 +470,7 @@ const POINT_AXES: ReadonlyArray<PointAxisDef> = [
   },
   {
     id: 'velocityIndex',
-    label: 'Velocity index vs cohort (cat × sub × size)',
+    label: 'Velocity index vs cohort (cat × sub × unit × pack)',
     short: 'Vel idx',
     value: velocityIndex,
     format: fmtX,
@@ -1079,9 +1088,10 @@ const DEFAULT_CARDS: ReadonlyArray<ScatterCardConfig> = [
 
   // ----- Cohort-relative -----
   //
-  // Use the in-cohort medians (computed on the loaded filter slice) to
-  // give the operator a "vs peers" lens. The diagonals at 1× / 0pp
-  // anchor the eye on "at-median" cleanly.
+  // Use stable same-category/subcategory/unit-size/pack-size cohort medians
+  // from the selected site/date universe. Brand/distributor/category/size
+  // filters narrow the displayed dots, never the benchmark universe. The
+  // diagonals at 1× / 0pp anchor the eye on "at-median" cleanly.
   {
     id: 'price-index-vs-velocity-index',
     title: 'Price index vs velocity index (cohort)',
@@ -1711,8 +1721,10 @@ export function CatalogAnalyticsTab() {
 
   // -------- Data --------
   const [pointsResp, setPointsResp] = useState<CatalogAnalyticsPointsResponse | null>(null)
+  const [cohortPointsResp, setCohortPointsResp] = useState<CatalogAnalyticsPointsResponse | null>(null)
   const [loadingFilters, setLoadingFilters] = useState<boolean>(true)
   const [loadingPoints, setLoadingPoints] = useState<boolean>(true)
+  const [loadingCohorts, setLoadingCohorts] = useState<boolean>(true)
   const [error, setError] = useState<string | null>(null)
 
   // Fetch filter options whenever sites OR any selected filter changes.
@@ -1847,23 +1859,65 @@ export function CatalogAnalyticsTab() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pointsKey])
 
-  const points = pointsResp?.points ?? []
+  // Cohort benchmarks are intentionally fetched from the full selected
+  // site/date universe, with NO product-subset filters applied. The displayed
+  // points can be narrowed to Curaleaf / Select / Flower / 1g, but every
+  // cohort-relative axis still benchmarks against all same
+  // category×subcategory×unit-size×pack-size peers for the selected sites and
+  // window.
+  const cohortPointsKey = useMemo(
+    () => [range.fromMs, range.toMs, sitesParam].join('|'),
+    [range.fromMs, range.toMs, sitesParam],
+  )
+  useEffect(() => {
+    let cancelled = false
+    setLoadingCohorts(true)
+    const handle = setTimeout(() => {
+      const qs = new URLSearchParams()
+      qs.set('from', new Date(range.fromMs).toISOString())
+      qs.set('to', new Date(range.toMs).toISOString())
+      if (sitesParam) qs.set('sites', sitesParam)
+      loadJson(
+        `/api/catalog-analytics/points?${qs.toString()}`,
+        CatalogAnalyticsPointsResponseSchema,
+      )
+        .then((r) => {
+          if (!cancelled) setCohortPointsResp(r)
+        })
+        .catch((e) => {
+          if (!cancelled) setError(`Failed to load cohort benchmark universe: ${(e as Error).message}`)
+        })
+        .finally(() => {
+          if (!cancelled) setLoadingCohorts(false)
+        })
+    }, 250)
+    return () => {
+      cancelled = true
+      clearTimeout(handle)
+    }
+    // cohortPointsKey rolls up everything we depend on.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cohortPointsKey])
 
-  // Cohort medians for the index axes. Recomputed once per filter
-  // result set so axis evaluators downstream are O(1). Cohort key is
-  // (categoryName, subcategoryName, sizeLabel) per cohortKey().
+  const points = pointsResp?.points ?? []
+  const cohortPoints = cohortPointsResp?.points ?? []
+
+  // Cohort medians for the index axes. Recomputed from the stable
+  // site/date benchmark universe so axis evaluators downstream are O(1).
+  // Cohort key is (categoryName, subcategoryName, unit size, pack count)
+  // per cohortKey(); brand / distributor / category / size filters on the
+  // visible dot set never narrow these medians.
   //
   // Only points that have ALL of (velocity, effective OTD price, GM%,
   // margin/unit) populated participate in their respective medians —
   // a points-without-sales row shouldn't drag the velocity median
-  // toward zero. Cohorts smaller than MIN_COHORT contribute medians
-  // but the SPA labels them ambiguous via the tooltip.
+  // toward zero.
   const cohortMedians = useMemo(() => {
     const groups = new Map<
       string,
       { vel: number[]; price: number[]; gm: number[]; mpu: number[] }
     >()
-    for (const p of points) {
+    for (const p of cohortPoints) {
       const k = cohortKey(p)
       let g = groups.get(k)
       if (!g) {
@@ -1893,7 +1947,7 @@ export function CatalogAnalyticsTab() {
       })
     }
     return out
-  }, [points])
+  }, [cohortPoints])
 
   const axisCtx: AxisCtx = useMemo(
     () => ({ windowDays, cohortMedians }),
@@ -2140,9 +2194,9 @@ export function CatalogAnalyticsTab() {
         <p className="metric-chart-error">{error}</p>
       ) : (
         <p className="subtle-copy catalog-analytics-pointcount">
-          {loadingPoints
+          {loadingPoints || loadingCohorts
             ? `Loading…`
-            : `${points.length} variants in selection over the last ${windowDays} days.`}
+            : `${points.length} variants in selection over the last ${windowDays} days; cohort benchmarks use ${cohortPoints.length} site/date peers.`}
         </p>
       )}
 
@@ -2190,7 +2244,7 @@ export function CatalogAnalyticsTab() {
                      pageColourBy={pageColourBy}
                      pageSizeBy={pageSizeBy}
                      pageOpacityBy={pageOpacityBy}
-                     loading={loadingPoints}
+                     loading={loadingPoints || loadingCohorts}
                      axisCtx={axisCtx}
                      highlightMatcher={highlightMatcher}
                    />
