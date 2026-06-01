@@ -52,7 +52,9 @@ export const bytesConfig: TenantParserConfig = {
         searchTerm: { from: 'cultivar', transforms: [{ name: 'cleanCultivar', version: 1 }] },
         size: { literal: '10mg' },
         strainName: { literal: '' },
-        subcategory: { literal: 'Chews/Gummies' },
+        // Edibles gummies have no subcategory in our Sweed taxonomy —
+        // there is no enabled "Chews/Gummies" subcategory under Edibles.
+        subcategory: { literal: '' },
         variantTab: { literal: '__placeholder__' },
         variantName: { literal: '__placeholder__' },
       },
@@ -74,7 +76,7 @@ export const bytesConfig: TenantParserConfig = {
             searchTerm: 'Watermelon',
             size: '10mg',
             strainName: '',
-            subcategory: 'Chews/Gummies',
+            subcategory: '',
             variantName: 'Bytes Watermelon 10x 10mg',
             variantTab: '10x 10mg',
           },
@@ -1244,7 +1246,9 @@ export const hrBotanicalConfig: TenantParserConfig = {
         searchTerm: { from: 'cultivar', transforms: [{ name: 'cleanCultivar', version: 1 }] },
         size: { literal: '100mg' },
         strainName: { literal: '' },
-        subcategory: { literal: 'Chews/Gummies' },
+        // Edibles gummies have no subcategory in our Sweed taxonomy —
+        // there is no enabled "Chews/Gummies" subcategory under Edibles.
+        subcategory: { literal: '' },
         variantTab: { literal: '__placeholder__' },
         variantName: { literal: '__placeholder__' },
       },

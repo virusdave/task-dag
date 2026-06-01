@@ -24,6 +24,22 @@ const SUBCATEGORY_ALIASES = new Map<string, string>([
   ['vapes:disposable', 'All In One / Disposable'],
 ])
 
+/**
+ * Subcategory names we want explicitly dropped (treated as if the
+ * row had no subcategory) regardless of whether Sweed exposes them.
+ * Edibles gummies are deliberately stored with no subcategory in our
+ * Sweed taxonomy — there is no enabled "Gummies" or "Chews/Gummies"
+ * subcategory under Edibles. Any legacy pending row that still has
+ * `expected_subcategory='Gummies'` should apply as no-subcategory
+ * instead of failing with "Missing subcategory" or being rewritten to
+ * a name that doesn't exist either.
+ */
+const SUBCATEGORY_DROPS = new Set<string>([
+  'edibles:gummies',
+  'edibles:gummy',
+  'edibles:chews/gummies',
+])
+
 const PENDING_PURCHASE_SOURCE_SYSTEM = 'metrc'
 
 // Sweed UOM id 16 = "Milligram". Used for THC/CBD content fields on
@@ -939,6 +955,13 @@ function resolveCategoryContext(
   }
 
   const aliasKey = `${categoryName.toLowerCase()}:${requestedSubcategory.toLowerCase()}`
+  // Explicit drop list: subcategories the operator has declared should
+  // never be sent to Sweed even if a stale pending row still requests
+  // them. Apply with subcategory: null silently — no degradation note,
+  // because this is the *intended* shape, not a fallback.
+  if (SUBCATEGORY_DROPS.has(aliasKey)) {
+    return { category, subcategory: null, subcategoryNote: null }
+  }
   const resolvedSubcategoryName = SUBCATEGORY_ALIASES.get(aliasKey) ?? requestedSubcategory
   const subcategory = category.subcategories.find((candidate) => candidate.name.toLowerCase() === resolvedSubcategoryName.toLowerCase()) ?? null
   if (!subcategory) {

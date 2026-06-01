@@ -2435,7 +2435,10 @@ function classifyPipeDelimitedCategoryToken(
 
   // Edibles family.
   if (/\bgumm(?:y|ies)\b|\bchew\b|\bchocolate\b|\bcandy\b|\bmint\b|\btablets?\b/.test(lowered)) {
-    return { category: 'Edibles', subcategory: 'Chews/Gummies' }
+    // Edibles gummies / chews / candies are deliberately stored with
+    // no subcategory in our Sweed taxonomy (there is no enabled
+    // "Chews/Gummies" or "Gummies" subcategory under Edibles).
+    return { category: 'Edibles', subcategory: '' }
   }
   if (/\bbeverage\b|\bdrink\b|\bsoda\b|\bseltzer\b|\bjuice\b/.test(lowered)) {
     return { category: 'Beverages', subcategory: '' }
@@ -2930,6 +2933,7 @@ async function classifyPendingPurchaseNameWithLlmFallback(input: {
     'Each generalizedRules item must include: ruleKind, normalizedMatchValue, matchPayload, confidence, rationale, riskFlags.',
     'Use parserFeasibility only from: easy-rule-based, needs-more-context, likely-llm-only.',
     'Use null for subcategory or prevalence when not applicable.',
+    'For category "Edibles": gummies and chews are deliberately stored with NO subcategory in our Sweed taxonomy. NEVER propose "Gummies", "Gummy", or "Chews/Gummies" as a subcategory — none of those exist as enabled subcategories. Return subcategory: null for any gummy/chew edible.',
     'Use aliasType only from: exact, prefix.',
     'Use ruleKind only from: prefix, regex, template.',
     'Every confidence field is a probability between 0 and 1 inclusive (e.g. 0.92, NOT 92 or 92%). Do not emit values above 1.',
@@ -3509,6 +3513,51 @@ const LEADING_EXTRACTION_METHOD_TOKENS_RE =
 const ALL_IN_ONE_VAPE_SUBCATEGORY = 'All In One / Disposable'
 const AIO_TOKEN_RE = /(?:^|[\s\-·.,/(])aio(?:[\s\-·.,/)$]|$)/i
 
+/**
+ * LLM-emitted subcategory canonicalization map: `category:subcategory`
+ * (both lowercased) → canonical Sweed subcategory name. Used to rewrite
+ * known-bad subcategory names the LLM teacher keeps proposing into the
+ * actual taxonomy name Sweed expects. Mirrors `SUBCATEGORY_ALIASES` in
+ * the apply worker so packets are corrected at *proposal* time rather
+ * than only at apply time. Currently empty — gummies-style hallucinations
+ * are handled by `LLM_FORBIDDEN_SUBCATEGORIES` below (drop to no
+ * subcategory) rather than a rewrite, because Edibles gummies are
+ * deliberately stored with no subcategory in our Sweed taxonomy.
+ */
+const LLM_SUBCATEGORY_REWRITES = new Map<string, string>([])
+
+/**
+ * Subcategory names the LLM teacher must never emit. Forbidden values
+ * are blanked (the row keeps its category, just no subcategory) rather
+ * than rewritten. Keep this list short and explicit; the goal is to
+ * stop a known recurring hallucination, not to police all taxonomy.
+ *
+ * Edibles "Gummies" / "Gummy": Sweed's Edibles category has no
+ * enabled gummies subcategory — gummies are deliberately filed as
+ * Edibles with no subcategory. Apply jobs that proposed "Gummies"
+ * crashed (job 133150 rows 362/364).
+ */
+const LLM_FORBIDDEN_SUBCATEGORIES = new Set<string>([
+  'edibles:gummies',
+  'edibles:gummy',
+])
+
+function canonicalizeLlmSubcategory(category: string, subcategory: string): string {
+  const trimmed = subcategory.trim()
+  if (trimmed === '') {
+    return ''
+  }
+  const key = `${category.trim().toLowerCase()}:${trimmed.toLowerCase()}`
+  const rewritten = LLM_SUBCATEGORY_REWRITES.get(key)
+  if (rewritten) {
+    return rewritten
+  }
+  if (LLM_FORBIDDEN_SUBCATEGORIES.has(key)) {
+    return ''
+  }
+  return trimmed
+}
+
 function stripLeadingExtractionMethods(value: string): string {
   return value.replace(LEADING_EXTRACTION_METHOD_TOKENS_RE, '').trim()
 }
@@ -3600,6 +3649,15 @@ function normalizePendingPurchaseLlmClassification(
     resolvedSubcategory = ALL_IN_ONE_VAPE_SUBCATEGORY
   }
 
+  // Subcategory rewrites + blocklist. The LLM teacher occasionally
+  // proposes subcategory names that don't exist under that category
+  // in Sweed's taxonomy. We canonicalise the known-good rewrites
+  // (e.g. the literal "Gummies" → Sweed's canonical "Chews/Gummies")
+  // and silently drop other forbidden values so the apply path
+  // doesn't have to deal with them. Keep this list small and explicit;
+  // never silently invent a subcategory.
+  resolvedSubcategory = canonicalizeLlmSubcategory(classification.category, resolvedSubcategory)
+
   const draft: ParsedProductName = {
     brand: classification.brand,
     category: classification.category,
@@ -3650,7 +3708,10 @@ function parseHrBotanicalName(name: string): ParsedProductName {
   const isInfused = !lowered.includes('uninfused') && ['infused', 'live resin', 'rosin', 'hash hole'].some((token) => lowered.includes(token))
   const isRevertGummy = cleaned.startsWith('Revert Edible Gummy ')
   const category = isRevertGummy ? 'Edibles' : 'Pre-Rolls'
-  const subcategory = isRevertGummy ? 'Chews/Gummies' : isInfused ? 'Infused' : ''
+  // Edibles gummies have no subcategory in our Sweed taxonomy; Pre-Roll
+  // Infused does. Don't propose a "Chews/Gummies" subcategory for the
+  // gummy case — that's not an enabled Sweed subcategory.
+  const subcategory = isRevertGummy ? '' : isInfused ? 'Infused' : ''
 
   let packCount = 1
   let size = isRevertGummy ? '100mg' : '1g'
@@ -3846,7 +3907,9 @@ function parseBytesName(name: string): ParsedProductName {
     searchTerm: cultivar,
     size,
     strainName: '',
-    subcategory: 'Chews/Gummies',
+    // Edibles gummies have no subcategory in our Sweed taxonomy —
+    // there is no enabled "Chews/Gummies" subcategory under Edibles.
+    subcategory: '',
     variantName: `Bytes ${cultivar} ${variantTab}`,
     variantTab,
   }
