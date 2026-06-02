@@ -3388,6 +3388,77 @@ a.tree-nav-branch-label.is-link,
   cursor: not-allowed;
 }
 
+/*
+ * <ControlsSection> — shared collapsible Filters / Highlight section
+ * (issue #38 / task A2 + A3). Each section is a real <details> so the
+ * disclosure interaction is built-in and accessible. We tighten the
+ * default <details> chrome (no triangle marker, larger summary, light
+ * border) so the section feels like a card rather than a raw <details>.
+ */
+.metrics-controls-section {
+  border: 1px solid var(--control-border, #d8d8d8);
+  border-radius: 6px;
+  padding: 0;
+  margin: 0.5rem 0;
+  background: var(--surface, #fafafa);
+}
+.metrics-controls-section > summary.metrics-controls-section-summary {
+  list-style: none;
+  cursor: pointer;
+  padding: 0.45rem 0.7rem;
+  font-weight: 600;
+  font-size: 0.92rem;
+  letter-spacing: 0.02em;
+  color: #444;
+  user-select: none;
+}
+.metrics-controls-section > summary.metrics-controls-section-summary::-webkit-details-marker {
+  display: none;
+}
+.metrics-controls-section > summary.metrics-controls-section-summary::before {
+  content: '▸';
+  display: inline-block;
+  margin-right: 0.4rem;
+  transform: rotate(0deg);
+  transition: transform 0.12s ease-in-out;
+  color: #888;
+}
+.metrics-controls-section[open] > summary.metrics-controls-section-summary::before {
+  transform: rotate(90deg);
+}
+.metrics-controls-section-body {
+  padding: 0.4rem 0.7rem 0.7rem 0.7rem;
+}
+
+/*
+ * <HighlightControls> — chip dropdowns + free-text + clear button row.
+ * Visually mirrors the .catalog-analytics-filterbar-row so Filters and
+ * Highlight feel like siblings.
+ */
+.metrics-highlight-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+.metrics-highlight-drop {
+  position: relative;
+}
+.metrics-highlight-freetext-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.9rem;
+}
+.metrics-highlight-freetext-input {
+  min-width: 11rem;
+  padding: 0.18rem 0.4rem;
+  font-size: 0.9rem;
+}
+.metrics-highlight-count {
+  font-variant-numeric: tabular-nums;
+}
+
 /* Section titles */
 .metrics-group {
   display: flex;

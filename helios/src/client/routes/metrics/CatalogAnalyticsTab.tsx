@@ -18,6 +18,14 @@ import {
 } from '../../../shared/contracts/index.js'
 import { loadJson } from '../../app/fetchJson.js'
 import { CatalogFilterBar, FilterDropdown } from './CatalogFilterBar.js'
+import { ControlsSection } from './ControlsSection.js'
+import {
+  buildStructuredHighlightMatcher,
+  emptyHighlightSelection,
+  HighlightControls,
+  type HighlightDimensionSpec,
+  type HighlightSelectionState,
+} from './HighlightControls.js'
 import { niceXTicks, niceYTicks } from './gridlines.js'
 import {
   buildContinuousScale,
@@ -242,6 +250,90 @@ export function buildHighlightMatcher(
       .toLowerCase()
     return terms.every((t) => haystack.includes(t))
   }
+}
+
+// ---------------------------------------------------------------------------
+// Structured-highlight dimensions for the catalog scatter (issue #38).
+//
+// One dim per page-level filter dimension. `getOptions` derives chip
+// options from the FILTERED point set so the operator can only highlight
+// values that actually appear on screen. `pointKey` returns the option-id
+// the point belongs to (one per dim, except `pack` which is missing if
+// `packCount` is null — getOptions silently skips nulls).
+//
+// We use the human-visible NAME as both id and label for category /
+// subcategory / brand because the upstream `CatalogAnalyticsPoint`
+// already carries names alongside ids and the chip UX reads more
+// naturally when the chip's id is "Cresco Labs" rather than a UUID.
+// (Two points with the same brand name and different brandIds — which
+// shouldn't happen but does occur once in a while when sweed has a
+// brand-merge backlog — get collapsed into one highlight chip, which
+// is the right outcome.)
+const CATALOG_HIGHLIGHT_DIMS: ReadonlyArray<HighlightDimensionSpec<CatalogAnalyticsPoint>> = [
+  {
+    id: 'category',
+    label: 'Category',
+    getOptions: (pts) => collectChipOptions(pts, (p) => p.categoryName),
+    pointKey: (p) => (p.categoryName ? [p.categoryName] : []),
+  },
+  {
+    id: 'subcategory',
+    label: 'Subcategory',
+    getOptions: (pts) => collectChipOptions(pts, (p) => p.subcategoryName),
+    pointKey: (p) => (p.subcategoryName ? [p.subcategoryName] : []),
+  },
+  {
+    id: 'brand',
+    label: 'Brand',
+    getOptions: (pts) => collectChipOptions(pts, (p) => p.brandName),
+    pointKey: (p) => (p.brandName ? [p.brandName] : []),
+  },
+  {
+    id: 'distributor',
+    label: 'Distributor',
+    getOptions: (pts) => collectChipOptions(pts, (p) => p.distributorName),
+    pointKey: (p) => (p.distributorName ? [p.distributorName] : []),
+  },
+  {
+    id: 'size',
+    label: 'Size',
+    getOptions: (pts) => collectChipOptions(pts, (p) => p.sizeLabel),
+    pointKey: (p) => (p.sizeLabel ? [p.sizeLabel] : []),
+  },
+  {
+    id: 'pack',
+    label: 'Pack',
+    getOptions: (pts) =>
+      collectChipOptions(pts, (p) =>
+        p.packCount == null ? null : p.packCount === 1 ? '1 per pkg' : `${p.packCount}-pack`,
+      ),
+    pointKey: (p) =>
+      p.packCount == null
+        ? []
+        : p.packCount === 1
+        ? ['1 per pkg']
+        : [`${p.packCount}-pack`],
+  },
+]
+
+/**
+ * Helper: bucket the filtered point set by `keyFn`, drop nulls, and
+ * return `{id, label, itemCount}[]` sorted by label.
+ */
+function collectChipOptions<P>(
+  points: ReadonlyArray<P>,
+  keyFn: (p: P) => string | null | undefined,
+): ReadonlyArray<{ id: string; label: string; itemCount: number }> {
+  const counts = new Map<string, number>()
+  for (const p of points) {
+    const k = keyFn(p)
+    if (!k) continue
+    counts.set(k, (counts.get(k) ?? 0) + 1)
+  }
+  const out: Array<{ id: string; label: string; itemCount: number }> = []
+  for (const [k, n] of counts) out.push({ id: k, label: k, itemCount: n })
+  out.sort((a, b) => a.label.localeCompare(b.label))
+  return out
 }
 
 function cohortUnitSizeKey(p: CatalogAnalyticsPoint): string {
@@ -1805,6 +1897,14 @@ export function CatalogAnalyticsTab({ embedded }: CatalogAnalyticsTabProps = {})
         ? embeddedRef.current.highlight
         : initialQueryRef.current.get('highlight') ?? '',
   )
+  // Structured highlight chips — one set per dim id in
+  // CATALOG_HIGHLIGHT_DIMS. Combines with the free-text input above
+  // via buildStructuredHighlightMatcher (AND across dims, OR within).
+  // Brand- / distributor-detail pages can pre-seed this from the
+  // embedded prop set in A4; for now it defaults to empty.
+  const [highlightState, setHighlightState] = useState<HighlightSelectionState>(
+    () => emptyHighlightSelection(),
+  )
 
   // -------- Active sub-tab inside the catalog analytics page --------
   const [activeSection, setActiveSection] = useState<string>(SECTION_CORE)
@@ -2044,9 +2144,19 @@ export function CatalogAnalyticsTab({ embedded }: CatalogAnalyticsTabProps = {})
     [windowDays, cohortMedians],
   )
 
+  // Combined highlight matcher: structured chips (AND across dims,
+  // OR within) AND free-text. Returns null when neither is engaged,
+  // matching the legacy "no dimming" UX. The structured matcher
+  // already folds the free-text query in, so we don't need to
+  // separately build buildHighlightMatcher() here.
   const highlightMatcher = useMemo(
-    () => buildHighlightMatcher(highlightQuery),
-    [highlightQuery],
+    () =>
+      buildStructuredHighlightMatcher(
+        CATALOG_HIGHLIGHT_DIMS,
+        highlightState,
+        highlightQuery,
+      ),
+    [highlightState, highlightQuery],
   )
   const highlightCount = useMemo(() => {
     if (!highlightMatcher) return 0
@@ -2190,34 +2300,12 @@ export function CatalogAnalyticsTab({ embedded }: CatalogAnalyticsTabProps = {})
              ))}
            </select>
           </label>
-          <label
-           className="catalog-highlight-label"
-           title={
-             'Free-text filter that visually highlights matching points. ' +
-             'Case-insensitive substring match against brand, category, ' +
-             'subcategory, size, pack-count, product name, and SKU. ' +
-             'Multiple words narrow further (e.g. "blue dream 1g").'
-           }
-          >
-           highlight{' '}
-           <input
-             type="search"
-             value={highlightQuery}
-             placeholder="brand / strain / size…"
-             onChange={(e) => setHighlightQuery(e.target.value)}
-             className="catalog-highlight-input"
-           />
-           {highlightMatcher ? (
-             <span className="subtle-copy catalog-highlight-count">
-               {highlightCount}/{points.length}
-             </span>
-           ) : null}
-          </label>
           </div>
           </div>
       )}
 
       {hideFilterBar ? null : (
+      <ControlsSection title="Filters" defaultOpen="always">
       <div className="catalog-analytics-filterbar-row">
         <CatalogFilterBar
           filters={filters}
@@ -2285,7 +2373,24 @@ export function CatalogAnalyticsTab({ embedded }: CatalogAnalyticsTabProps = {})
           </button>
         ) : null}
       </div>
+      </ControlsSection>
       )}
+
+      {/* Highlight controls — see issue #38 / task A3. Open by default
+          on desktop, collapsed on mobile so the dense chip row doesn't
+          push the scatter cards off-screen. Structured chips combine
+          with the free-text input via AND across dims, OR within. */}
+      <ControlsSection title="Highlight" defaultOpen="desktop-only">
+        <HighlightControls
+          dims={CATALOG_HIGHLIGHT_DIMS}
+          state={highlightState}
+          setState={setHighlightState}
+          filteredPoints={points}
+          freeText={highlightQuery}
+          setFreeText={setHighlightQuery}
+          freeTextPlaceholder="brand / strain / size…"
+        />
+      </ControlsSection>
 
       {error ? (
         <p className="metric-chart-error">{error}</p>
