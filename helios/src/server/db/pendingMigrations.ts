@@ -425,6 +425,22 @@ const SENTINELS: MigrationSentinel[] = [
       'landing-page observations for MSS landing-page evolution jobs.',
     check: (db) => tableExists(db, 'landingpage_ad_outcomes'),
   },
+  {
+    // Per-user metric subpage grants. The auth path reads
+    // users.metric_grants on every session build; without this
+    // column every authenticated request 500s on `select … from
+    // users` and the SPA can't log anyone in.
+    migrationId: '045_user_metric_grants',
+    label:
+      'users.metric_grants (text[]) + users_metric_grants_gin_idx — ' +
+      'per-user grants for individual Metrics → subpages (Explore, ' +
+      'Brands, Distributors, Staff, Reordering). Admins implicitly ' +
+      'hold every grant; non-admin operators see only what is stored ' +
+      'here. Without this column, session build fails and ' +
+      '/api/users + /api/catalog-analytics + /api/budtender-analytics ' +
+      'reject every request.',
+    check: (db) => columnExists(db, 'users', 'metric_grants'),
+  },
 ]
 
 interface CacheEntry {

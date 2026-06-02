@@ -33,6 +33,9 @@ export const AuditEventTypeSchema = z.enum([
   'auth.user.role_changed',
   'auth.user.active_changed',
   'auth.user.name_changed',
+  // Emitted by PATCH /api/users/:id when an admin changes a user's
+  // metric_grants set. Payload carries both before + after sets.
+  'auth.user.metric_grants_changed',
   'pending_purchase.packet.generation_requested',
   'pending_purchase.packet.generated',
   'pending_purchase.packet.import_requested',

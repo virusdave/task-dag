@@ -123,6 +123,7 @@ export async function registerUsersRoutes(server: FastifyInstance): Promise<void
         role: body.role,
         active: body.active,
         name: body.name,
+        metricGrants: body.metricGrants,
       })
       if (!updated) {
         return { ok: false as const, error: 'User not found.' }
@@ -156,6 +157,14 @@ export async function registerUsersRoutes(server: FastifyInstance): Promise<void
         eventType: 'auth.user.name_changed',
         requestId,
       })
+      // Metric grants are an array, not a primitive — handle separately
+      // so the audit payload carries the BEFORE / AFTER sets verbatim.
+      await maybeAppendMetricGrantsChange(db, {
+        actor,
+        before,
+        after: updated,
+        requestId,
+      })
 
       return { ok: true as const, user: updated }
     })
@@ -164,6 +173,42 @@ export async function registerUsersRoutes(server: FastifyInstance): Promise<void
       return reply.status(404).send({ error: result.error })
     }
     return reply.send(UsersMutationResponseSchema.parse({ user: result.user }))
+  })
+}
+
+async function maybeAppendMetricGrantsChange(
+  db: Queryable,
+  input: {
+    actor: { email: string; id: number }
+    after: UserRecord
+    before: UserRecord
+    requestId: string
+  },
+): Promise<void> {
+  const before = [...input.before.metricGrants].sort().join(',')
+  const after = [...input.after.metricGrants].sort().join(',')
+  if (before === after) return
+  await appendAuditEvent(db, {
+    actorType: 'user',
+    actorUserId: input.actor.id,
+    entityId: String(input.after.id),
+    entityType: 'user',
+    eventType: 'auth.user.metric_grants_changed',
+    module: 'config',
+    payload: {
+      actorEmail: input.actor.email,
+      actorUserId: input.actor.id,
+      email: input.after.email,
+      previousMetricGrants: input.before.metricGrants,
+      nextMetricGrants: input.after.metricGrants,
+      userId: input.after.id,
+    },
+    requestId: input.requestId,
+    undoPayload: {
+      field: 'metricGrants',
+      previousValue: input.before.metricGrants,
+      userId: input.after.id,
+    },
   })
 }
 

@@ -4,7 +4,7 @@ import {
   CustomerValueAnalyticsRequestSchema,
   CustomerValueAnalyticsResponseSchema,
 } from '../../shared/contracts/index.js'
-import { requireSessionUser } from '../auth/requireSession.js'
+import { requireMetricsGrant } from '../auth/requireSession.js'
 import {
   CUSTOMER_VALUE_ANALYTICS_DEFAULT_WINDOW_DAYS,
   getCustomerValueAnalytics,
@@ -20,7 +20,11 @@ export async function registerCustomerValueAnalyticsRoutes(
   // "Customer value" tab. See customerValueAnalyticsQueries.ts for
   // the SQL strategy.
   server.get('/api/customer-value-analytics', async (request, reply) => {
-    const user = await requireSessionUser(request, reply, 'admin')
+    // Customer value lives as a tab inside Explore today — 'explore'
+    // grant is what users need. If we ever split it into its own
+    // nav child, introduce a 'customer-value' MetricGrantKey and
+    // update this check (plus the client tab visibility).
+    const user = await requireMetricsGrant(request, reply, 'explore')
     if (!user) return
     const parsed = CustomerValueAnalyticsRequestSchema.parse(request.query ?? {})
     const to = parsed.to ? new Date(parsed.to) : new Date()

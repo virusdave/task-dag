@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { NavLink, useLoaderData, useParams } from 'react-router-dom'
+import { NavLink, useLoaderData, useParams, useRouteLoaderData } from 'react-router-dom'
 
 import {
   CatalogAnalyticsFiltersResponseSchema,
@@ -11,8 +11,11 @@ import {
   type MetricCatalogFilterDimension,
   type MetricDataStatus,
   type MetricDefSummary,
+  type MetricGrantKey,
   type MetricListResponse,
+  type SessionEnvelope,
 } from '../../../shared/contracts/index.js'
+import { userHasMetricGrant } from '../../../shared/domain/metricGrants.js'
 import { loadJson } from '../../app/fetchJson.js'
 
 import { BudtenderPerformanceTab } from './BudtenderPerformanceTab.js'
@@ -23,6 +26,7 @@ import {
   emptyCatalogFilterSelection,
   type CatalogFilterSelection,
 } from './CatalogFilterBar.js'
+import { MetricsAccessGate } from './MetricsAccessGate.js'
 import {
   MetricChart,
   METRIC_STACK_MODES,
@@ -95,6 +99,13 @@ interface MetricsTab {
   readonly showStackControl: boolean
   /** Predicate run against each loaded MetricDefSummary. */
   readonly include: (m: MetricDefSummary) => boolean
+  /**
+   * Per-user grant key required to see this tab. Mirrors the
+   * server-side gate so a user without the relevant grant never
+   * gets the tab in their navigation strip. Admins implicitly
+   * hold every grant.
+   */
+  readonly grant: MetricGrantKey
 }
 
 // Group-membership sets, scoped per tab. Anything outside these falls into
@@ -131,6 +142,7 @@ const METRICS_TABS: ReadonlyArray<MetricsTab> = [
     showAggControl: true,
     showStackControl: true,
     include: (m) => ESSENTIALS_METRIC_IDS.has(m.id),
+    grant: 'explore',
   },
   {
     id: 'sales',
@@ -144,6 +156,7 @@ const METRICS_TABS: ReadonlyArray<MetricsTab> = [
       m.chartType !== 'scatter' &&
       !GEOGRAPHY_GROUPS.has(m.group) &&
       !INVENTORY_GROUPS.has(m.group),
+    grant: 'explore',
   },
   {
     id: 'geography',
@@ -154,6 +167,7 @@ const METRICS_TABS: ReadonlyArray<MetricsTab> = [
     showAggControl: true,
     showStackControl: true,
     include: (m) => m.chartType !== 'scatter' && GEOGRAPHY_GROUPS.has(m.group),
+    grant: 'explore',
   },
   {
     id: 'inventory',
@@ -164,6 +178,7 @@ const METRICS_TABS: ReadonlyArray<MetricsTab> = [
     showAggControl: true,
     showStackControl: true,
     include: (m) => m.chartType !== 'scatter' && INVENTORY_GROUPS.has(m.group),
+    grant: 'reordering',
   },
   {
     id: 'customer-value',
@@ -175,6 +190,7 @@ const METRICS_TABS: ReadonlyArray<MetricsTab> = [
     showAggControl: false,
     showStackControl: false,
     include: () => false,
+    grant: 'explore',
   },
   {
     id: 'budtenders',
@@ -189,6 +205,7 @@ const METRICS_TABS: ReadonlyArray<MetricsTab> = [
     showAggControl: false,
     showStackControl: false,
     include: () => false,
+    grant: 'staff',
   },
   {
     id: 'catalog',
@@ -207,6 +224,7 @@ const METRICS_TABS: ReadonlyArray<MetricsTab> = [
     // renders an empty metric list and we short-circuit to the dedicated
     // CatalogAnalyticsTab below.
     include: () => false,
+    grant: 'explore',
   },
   {
     id: 'scatter',
@@ -223,6 +241,7 @@ const METRICS_TABS: ReadonlyArray<MetricsTab> = [
     showAggControl: false,
     showStackControl: false,
     include: (m) => m.chartType === 'scatter',
+    grant: 'explore',
   },
 ]
 
@@ -254,7 +273,29 @@ export async function metricsLoader(): Promise<MetricListResponse> {
 export function MetricsLayoutPage() {
   const { metrics } = useLoaderData() as MetricListResponse
   const { tabId } = useParams<{ tabId?: string }>()
-  const activeTab = useMemo(() => resolveTab(tabId), [tabId])
+  // The root loader provides session — used to filter tabs by per-user
+  // metric grant. Admins implicitly hold every grant.
+  const session = useRouteLoaderData('root') as SessionEnvelope | undefined
+  const user = session?.user ?? null
+
+  // Tabs the user can see. The full set of tab definitions is static;
+  // accessibility is dynamic. We compute `visibleTabs` once per render
+  // and use it both for the nav strip and for "default tab" fallback
+  // when the URL didn't pick one (or picked one the user lacks).
+  const visibleTabs = useMemo(
+    () => METRICS_TABS.filter((t) => userHasMetricGrant(user, t.grant)),
+    [user],
+  )
+
+  const requestedTab = useMemo(() => resolveTab(tabId), [tabId])
+  const activeTab = useMemo(() => {
+    // If the URL points at a tab the user can see, keep it.
+    if (visibleTabs.some((t) => t.id === requestedTab.id)) return requestedTab
+    // Otherwise fall back to the first accessible tab (or the
+    // requested one if NONE are accessible — the access-denied
+    // page below will be rendered in that case).
+    return visibleTabs[0] ?? requestedTab
+  }, [requestedTab, visibleTabs])
 
   // Site filter: empty Set = all sites. Multi-select against KNOWN_SITES.
   const [selectedSites, setSelectedSites] = useState<ReadonlySet<string>>(() => new Set<string>())
@@ -427,23 +468,31 @@ export function MetricsLayoutPage() {
   const realGroups = useMemo(() => groupByMetricGroup(partitioned.real), [partitioned.real])
   const missingGroups = useMemo(() => groupByMetricGroup(partitioned.missing), [partitioned.missing])
 
+  // The page-level gate: at least one of the SUPPORTED grant keys
+  // (any tab's grant) must be held. If not, render the standard
+  // access-denied component instead of the dashboard chrome. The
+  // gate ALSO trips on a per-tab basis below — even with `explore`
+  // a user landing on /metrics/staff sees the staff-restricted
+  // page until they're granted 'staff' too.
+  const pageGrant = activeTab.grant
   return (
-    <TimeAxisProvider initial={initialWindow}>
-      <section className="metrics-dashboard">
-        <header className="page-header metrics-dashboard-header">
-          <div>
-            <p className="eyebrow">Business &amp; Performance Metrics</p>
-            <h2>Dashboard</h2>
-          </div>
-          <DataCoverageBadge
-            realCount={partitioned.real.length}
-            missingCount={partitioned.missing.length}
-            showMissing={showMissing}
-            onToggleShowMissing={setShowMissing}
-          />
-        </header>
+    <MetricsAccessGate anyOf={[pageGrant]} surfaceLabel={activeTab.label}>
+      <TimeAxisProvider initial={initialWindow}>
+        <section className="metrics-dashboard">
+          <header className="page-header metrics-dashboard-header">
+            <div>
+              <p className="eyebrow">Business &amp; Performance Metrics</p>
+              <h2>Dashboard</h2>
+            </div>
+            <DataCoverageBadge
+              realCount={partitioned.real.length}
+              missingCount={partitioned.missing.length}
+              showMissing={showMissing}
+              onToggleShowMissing={setShowMissing}
+            />
+          </header>
 
-        <MetricsTabsNav activeTabId={activeTab.id} />
+          <MetricsTabsNav activeTabId={activeTab.id} visibleTabs={visibleTabs} />
 
         {activeTab.id === 'catalog' ? (
           // Catalog analytics has its own filter bar + scatter grid and does
@@ -494,9 +543,10 @@ export function MetricsLayoutPage() {
             <li>Site filter: leave all chips off for an all-sites view, or pick one or more stores.</li>
             <li>The <strong>Catalog analytics</strong> tab is its own filterable scatter suite with per-variant performance metrics — independent of the time-series tabs.</li>
           </ul>
-        </details>
-      </section>
-    </TimeAxisProvider>
+          </details>
+        </section>
+      </TimeAxisProvider>
+    </MetricsAccessGate>
   )
 }
 
@@ -853,14 +903,20 @@ function DashboardControls({
 // browser back/forward buttons work as expected. The "All" / catch-all
 // idea was rejected: tabs are meant to be intentional dashboards, not a
 // generic everything-page.
-function MetricsTabsNav({ activeTabId }: { activeTabId: MetricsTabId }) {
+function MetricsTabsNav({
+  activeTabId,
+  visibleTabs,
+}: {
+  activeTabId: MetricsTabId
+  visibleTabs: ReadonlyArray<MetricsTab>
+}) {
   return (
     <nav
       className="metrics-tabs-nav"
       role="tablist"
       aria-label="Metrics dashboard tabs"
     >
-      {METRICS_TABS.map((t) => (
+      {visibleTabs.map((t) => (
         <NavLink
           key={t.id}
           to={`/metrics/${t.id}`}

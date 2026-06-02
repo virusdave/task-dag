@@ -4,7 +4,7 @@ import {
   BudtenderAnalyticsRequestSchema,
   BudtenderAnalyticsResponseSchema,
 } from '../../shared/contracts/index.js'
-import { requireSessionUser } from '../auth/requireSession.js'
+import { requireMetricsGrant } from '../auth/requireSession.js'
 import {
   BUDTENDER_ANALYTICS_DEFAULT_WINDOW_DAYS,
   getBudtenderAnalytics,
@@ -21,7 +21,10 @@ export async function registerBudtenderAnalyticsRoutes(
   // strategy. The response is small (one row per cashier + a daily
   // series) so we hand the whole thing to the SPA in one round-trip.
   server.get('/api/budtender-analytics', async (request, reply) => {
-    const user = await requireSessionUser(request, reply, 'admin')
+    // 'staff' grant gates the Budtender performance surface
+    // (replaces the prior admin-only check; admins still pass via
+    // the implicit-all-grants shortcut inside requireMetricsGrant).
+    const user = await requireMetricsGrant(request, reply, 'staff')
     if (!user) return
     const parsed = BudtenderAnalyticsRequestSchema.parse(request.query ?? {})
     const to = parsed.to ? new Date(parsed.to) : new Date()

@@ -7,6 +7,7 @@ import {
   type CatalogFilterOption,
 } from '../../../shared/contracts/index.js'
 import { loadJson } from '../../app/fetchJson.js'
+import { MetricsAccessGate } from './MetricsAccessGate.js'
 
 // ---------------------------------------------------------------------------
 // Brands / Distributors index pages.
@@ -185,9 +186,17 @@ function EntityRow({
 }
 
 export function BrandsIndexPage() {
-  return <MetricsEntityIndexPage kind="brand" />
+  return (
+    <MetricsAccessGate anyOf={['brands']} surfaceLabel="Brands">
+      <MetricsEntityIndexPage kind="brand" />
+    </MetricsAccessGate>
+  )
 }
 
 export function DistributorsIndexPage() {
-  return <MetricsEntityIndexPage kind="distributor" />
+  return (
+    <MetricsAccessGate anyOf={['distributors']} surfaceLabel="Distributors">
+      <MetricsEntityIndexPage kind="distributor" />
+    </MetricsAccessGate>
+  )
 }

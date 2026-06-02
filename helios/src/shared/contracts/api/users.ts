@@ -1,6 +1,6 @@
 import { z } from 'zod'
 
-import { RoleSchema } from '../domain/auth.js'
+import { MetricGrantKeySchema, RoleSchema } from '../domain/auth.js'
 
 // User management API contracts. Backed by the `users` table.
 //
@@ -15,6 +15,12 @@ export const UserRecordSchema = z.object({
   googleSubClaimed: z.boolean(),
   id: z.number().int().positive(),
   lastLoginAt: z.iso.datetime().nullable(),
+  // Per-user metric subpage grants. Stored on users.metric_grants.
+  // The admin role implicitly holds every grant — the value here is
+  // the literal stored set, not the effective set. The admin UI
+  // surfaces both so an operator can see "this admin would have
+  // these explicit grants if demoted".
+  metricGrants: z.array(MetricGrantKeySchema),
   name: z.string().min(1),
   role: RoleSchema,
   updatedAt: z.iso.datetime().nullable(),
@@ -37,12 +43,22 @@ export type UsersCreateBody = z.infer<typeof UsersCreateBodySchema>
 export const UsersUpdateBodySchema = z
   .object({
     active: z.boolean().optional(),
+    // Replaces the stored set wholesale (PATCH semantics on the row
+    // are partial; semantics on the SET column are atomic-replace).
+    // Pass [] to revoke every grant. Duplicates are de-duped server-side.
+    metricGrants: z.array(MetricGrantKeySchema).optional(),
     name: z.string().trim().min(1).max(120).optional(),
     role: RoleSchema.optional(),
   })
   .refine(
-    (body) => body.active !== undefined || body.name !== undefined || body.role !== undefined,
-    { message: 'At least one of role, active, or name must be provided.' },
+    (body) =>
+      body.active !== undefined ||
+      body.name !== undefined ||
+      body.role !== undefined ||
+      body.metricGrants !== undefined,
+    {
+      message: 'At least one of role, active, name, or metricGrants must be provided.',
+    },
   )
 export type UsersUpdateBody = z.infer<typeof UsersUpdateBodySchema>
 

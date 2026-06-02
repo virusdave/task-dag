@@ -1,38 +1,72 @@
 import type { FastifyInstance } from 'fastify'
 
 import {
+  ALL_METRIC_GRANT_KEYS,
   MetricListResponseSchema,
   MetricQueryRequestSchema,
   MetricQueryResponseSchema,
   MetricRouteParamsSchema,
   type MetricCatalogFilterDimension,
 } from '../../shared/contracts/index.js'
-import { requireSessionUser } from '../auth/requireSession.js'
+import { metricGrantForGroup } from '../../shared/domain/metricGrants.js'
+import { requireMetricsGrant } from '../auth/requireSession.js'
 import { getMetricById, listMetricSummaries } from '../metrics/registry.js'
 import { toMetricSummary } from '../metrics/types.js'
 
 export async function registerMetricsRoutes(server: FastifyInstance): Promise<void> {
   // List every registered metric (summary only — no `query`).
+  //
+  // The list endpoint is metadata-only (no actual data points) but
+  // we still filter the returned summaries to ONLY the metrics whose
+  // group→grant the caller is authorized for. That way a non-admin
+  // user with only `reordering` doesn't see Sales / Margin / etc
+  // metric definitions even in a "what metrics exist" listing — and
+  // the SPA's tab rendering naturally collapses to just what the user
+  // can actually load data for.
   server.get('/api/metrics', async (request, reply) => {
-    const user = await requireSessionUser(request, reply, 'admin')
+    const user = await requireMetricsGrant(request, reply, ...ALL_METRIC_GRANT_KEYS)
     if (!user) {
       return
     }
-    return reply.send(
-      MetricListResponseSchema.parse({ metrics: listMetricSummaries() }),
-    )
+    const heldGrants = new Set(user.metricGrants)
+    const visible = listMetricSummaries().filter((m) => {
+      const required = metricGrantForGroup(m.group)
+      return heldGrants.has(required)
+    })
+    return reply.send(MetricListResponseSchema.parse({ metrics: visible }))
   })
 
   // Run a metric's query and return the resulting time series.
   server.get('/api/metrics/:metricId', async (request, reply) => {
-    const user = await requireSessionUser(request, reply, 'admin')
-    if (!user) {
-      return
-    }
     const params = MetricRouteParamsSchema.parse(request.params)
     const metric = getMetricById(params.metricId)
     if (!metric) {
-      return reply.status(404).send({ error: `Unknown metric id ${JSON.stringify(params.metricId)}.` })
+      // 401/403 are gated BEFORE 404 normally, but the metric-id
+      // unknown branch genuinely doesn't reveal anything sensitive
+      // (the operator typed a bad URL) and we want callers to see
+      // the friendlier "unknown metric id" error even when grant
+      // checks would otherwise have blocked them. Tighten if this
+      // ever becomes a leakage concern.
+      // Still require auth first via a generic grant gate before
+      // resolving the id, to avoid pivoting anon callers into the
+      // 404 path.
+      const anonGuard = await requireMetricsGrant(
+        request,
+        reply,
+        ...ALL_METRIC_GRANT_KEYS,
+      )
+      if (!anonGuard) return
+      return reply
+        .status(404)
+        .send({ error: `Unknown metric id ${JSON.stringify(params.metricId)}.` })
+    }
+    // Gate by the metric's group → grant key mapping so a user with
+    // only 'reordering' can query the inventory metrics but cannot
+    // query (e.g.) the sales metrics that belong to 'explore'.
+    const requiredGrant = metricGrantForGroup(metric.group)
+    const user = await requireMetricsGrant(request, reply, requiredGrant)
+    if (!user) {
+      return
     }
 
     const queryArgs = MetricQueryRequestSchema.parse(request.query ?? {})

@@ -8,7 +8,8 @@ import {
   MetricAnnotationsListResponseSchema,
   MetricAnnotationsPatchBodySchema,
 } from '../../shared/contracts/index.js'
-import { requireSessionUser } from '../auth/requireSession.js'
+import { ALL_METRIC_GRANT_KEYS } from '../../shared/contracts/index.js'
+import { requireMetricsGrant, requireSessionUser } from '../auth/requireSession.js'
 import { getPool } from '../db/pool.js'
 import {
   getMetricAnnotationById,
@@ -33,7 +34,11 @@ function sendMigrationMissing(reply: import('fastify').FastifyReply): void {
 
 export async function registerMetricAnnotationsRoutes(server: FastifyInstance): Promise<void> {
   server.get('/api/metric-annotations', async (request, reply) => {
-    const user = await requireSessionUser(request, reply, 'admin')
+    // Annotation reads are operator notes (vendor outages, promo
+    // starts, etc.) overlaid on every chart — they're not data per
+    // se. Any user with any metric grant can read them; writes
+    // remain admin-only (see POST/PATCH/DELETE below).
+    const user = await requireMetricsGrant(request, reply, ...ALL_METRIC_GRANT_KEYS)
     if (!user) {
       return
     }

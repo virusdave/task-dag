@@ -6,7 +6,7 @@ import {
   CatalogAnalyticsPointsRequestSchema,
   CatalogAnalyticsPointsResponseSchema,
 } from '../../shared/contracts/index.js'
-import { requireSessionUser } from '../auth/requireSession.js'
+import { requireMetricsGrant } from '../auth/requireSession.js'
 import {
   CATALOG_ANALYTICS_DEFAULT_WINDOW_DAYS,
   getCatalogAnalyticsFilters,
@@ -30,7 +30,17 @@ export async function registerCatalogAnalyticsRoutes(
   // applied to itself (so the user always sees the full peer set in
   // its own dropdown).
   server.get('/api/catalog-analytics/filters', async (request, reply) => {
-    const user = await requireSessionUser(request, reply, 'viewer')
+    // The catalog analytics filters payload powers three nav children:
+    // Explore's Catalog tab, the Brands index/detail surface, and
+    // the Distributors index/detail surface. Any of the three grants
+    // is enough; admins always pass.
+    const user = await requireMetricsGrant(
+      request,
+      reply,
+      'explore',
+      'brands',
+      'distributors',
+    )
     if (!user) return
     const parsed = CatalogAnalyticsFiltersRequestSchema.parse(request.query ?? {})
     const result = await getCatalogAnalyticsFilters({
@@ -49,7 +59,14 @@ export async function registerCatalogAnalyticsRoutes(
   // Returns one point per inventory_item_id over the requested window
   // with all per-variant scatter metrics computed.
   server.get('/api/catalog-analytics/points', async (request, reply) => {
-    const user = await requireSessionUser(request, reply, 'viewer')
+    // Same multi-surface gate as /filters above.
+    const user = await requireMetricsGrant(
+      request,
+      reply,
+      'explore',
+      'brands',
+      'distributors',
+    )
     if (!user) return
     const parsed = CatalogAnalyticsPointsRequestSchema.parse(request.query ?? {})
 

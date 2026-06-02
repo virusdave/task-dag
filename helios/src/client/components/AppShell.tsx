@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Outlet, useLoaderData, useLocation, useNavigate } from 'react-router-dom'
+import { Outlet, useLoaderData, useLocation, useNavigate, useRouteLoaderData } from 'react-router-dom'
 
 import {
   buildHeliosModulePath,
   getHeliosModuleDefinition,
   type HeliosModuleCode,
+  type MetricGrantKey,
   type SessionEnvelope,
 } from '../../shared/contracts/index.js'
+import { userHasMetricGrant } from '../../shared/domain/metricGrants.js'
 import { buildAppPath } from '../app/paths.js'
 import { buildCatalogSidebarSubtree } from '../routes/catalog/catalogSidebarSubtree.js'
 import { buildCommunicationsSidebarSubtree } from '../routes/communications/communicationsSidebar.js'
@@ -96,6 +98,7 @@ const STATIC_MODULE_SUBTREES: Partial<Record<HeliosModuleCode, TreeNavNode[]>> =
  */
 function buildPrimarySidebarNodes(
   subtreesByModule: Partial<Record<HeliosModuleCode, TreeNavNode[]>>,
+  session: SessionEnvelope | null | undefined,
 ): TreeNavNode[] {
   function subtreeFor(code: HeliosModuleCode): TreeNavNode[] {
     // Page-supplied dynamic override wins over the static default. If a
@@ -123,43 +126,56 @@ function buildPrimarySidebarNodes(
     }
   }
 
-  return [
-    // Metrics is the top-most item in the IA — operators land here
-    // most often and the existing /metrics page is the primary
-    // analytics surface. Sub-leaves jump straight to specific
-    // analytics views without forcing the operator to remember
-    // which tab a thing lives on.
-    //
-    // Sub-routes:
-    //   * Explore      → /metrics              (existing dashboard, all tabs)
-    //   * Brands       → /metrics/brands       (index of brands; click → catalog
-    //                                           analytics with that brand
-    //                                           highlighted across every card)
-    //   * Distributors → /metrics/distributors (same shape as Brands, scoped
-    //                                           to sweed distributor_name)
-    //   * Staff        → /metrics/staff        (alias for the budtenders tab)
-    //   * Reordering   → /metrics/reordering   (alias for the inventory tab)
-    {
+  // Metrics children are filtered by per-user grant. Admins implicitly
+  // hold every grant (handled inside userHasMetricGrant). When a
+  // non-admin user has zero grants the entire Metrics branch is
+  // omitted from the IA below.
+  const metricsChildren: TreeNavNode[] = []
+  type MetricsLeaf = { key: MetricGrantKey; navKey: string; label: string; to: string }
+  const metricsLeaves: ReadonlyArray<MetricsLeaf> = [
+    { key: 'explore', navKey: 'operations.metrics.explore', label: 'Explore', to: '/metrics' },
+    { key: 'brands', navKey: 'operations.metrics.brands', label: 'Brands', to: '/metrics/brands' },
+    { key: 'distributors', navKey: 'operations.metrics.distributors', label: 'Distributors', to: '/metrics/distributors' },
+    { key: 'staff', navKey: 'operations.metrics.staff', label: 'Staff', to: '/metrics/staff' },
+    { key: 'reordering', navKey: 'operations.metrics.reordering', label: 'Reordering', to: '/metrics/reordering' },
+  ]
+  for (const leaf of metricsLeaves) {
+    if (userHasMetricGrant(session?.user, leaf.key)) {
+      metricsChildren.push({ kind: 'leaf', navKey: leaf.navKey, label: leaf.label, to: leaf.to })
+    }
+  }
+
+  const out: TreeNavNode[] = []
+
+  // Metrics is the top-most item in the IA when the user has at
+  // least one grant. Sub-leaves jump straight to specific analytics
+  // views without forcing the operator to remember which tab a thing
+  // lives on.
+  //
+  // Sub-routes (each gated independently by MetricGrantKey):
+  //   * Explore      → /metrics              (existing dashboard, all tabs)
+  //   * Brands       → /metrics/brands       (index → per-brand drill-down)
+  //   * Distributors → /metrics/distributors (index → per-distributor drill-down)
+  //   * Staff        → /metrics/staff        (alias for the budtenders tab)
+  //   * Reordering   → /metrics/reordering   (alias for the inventory tab)
+  if (metricsChildren.length > 0) {
+    out.push({
       kind: 'branch',
       navKey: 'operations.metrics',
       label: 'Metrics',
-      to: '/metrics',
+      to: metricsChildren[0]!.to,
       end: false,
       defaultOpen: false,
-      children: [
-        { kind: 'leaf', navKey: 'operations.metrics.explore', label: 'Explore', to: '/metrics' },
-        { kind: 'leaf', navKey: 'operations.metrics.brands', label: 'Brands', to: '/metrics/brands' },
-        { kind: 'leaf', navKey: 'operations.metrics.distributors', label: 'Distributors', to: '/metrics/distributors' },
-        { kind: 'leaf', navKey: 'operations.metrics.staff', label: 'Staff', to: '/metrics/staff' },
-        { kind: 'leaf', navKey: 'operations.metrics.reordering', label: 'Reordering', to: '/metrics/reordering' },
-      ],
-    },
-    {
-      kind: 'leaf',
-      navKey: 'dashboard',
-      label: 'Dashboard',
-      to: '/dashboard',
-    },
+      children: metricsChildren,
+    })
+  }
+  out.push({
+    kind: 'leaf',
+    navKey: 'dashboard',
+    label: 'Dashboard',
+    to: '/dashboard',
+  })
+  return out.concat([
     moduleBranch('communications'),
     moduleBranch('catalog'),
     moduleBranch('screens'),
@@ -218,13 +234,21 @@ function buildPrimarySidebarNodes(
         },
       ],
     },
-  ]
+  ])
 }
 
 function PrimarySidebar() {
   const { subtreesByModule } = useSidebarNav()
   const location = useLocation()
-  const nodes = useMemo(() => buildPrimarySidebarNodes(subtreesByModule), [subtreesByModule])
+  // The root route's loader returns the SessionEnvelope; we use it
+  // for per-user grant filtering on the Metrics branch. May be
+  // undefined while the loader is in flight on the initial render —
+  // buildPrimarySidebarNodes handles the null branch.
+  const session = useRouteLoaderData('root') as SessionEnvelope | undefined
+  const nodes = useMemo(
+    () => buildPrimarySidebarNodes(subtreesByModule, session ?? null),
+    [subtreesByModule, session],
+  )
   return (
     <nav className="sidebar" aria-label="Primary navigation">
       <TreeNav storageKey={SIDEBAR_TREE_STORAGE_KEY} nodes={nodes} activeTargetId={location.pathname} />

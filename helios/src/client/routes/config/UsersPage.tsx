@@ -20,10 +20,12 @@ import { useMemo, useState } from 'react'
 import { Navigate, useLoaderData, useRevalidator, useRouteLoaderData } from 'react-router-dom'
 
 import {
+  ALL_METRIC_GRANT_KEYS,
   RoleSchema,
   UsersCreateBodySchema,
   UsersListResponseSchema,
   UsersMutationResponseSchema,
+  type MetricGrantKey,
   type Role,
   type SessionEnvelope,
   type UserRecord,
@@ -39,6 +41,95 @@ export async function usersLoader(): Promise<UsersListResponse> {
 }
 
 const ROLE_OPTIONS: Role[] = [...RoleSchema.options]
+
+// Human-readable copy + URL hint per metric grant key. Keep in sync
+// with the children list in AppShell.tsx → buildPrimarySidebarNodes
+// (the Metrics branch).
+const METRIC_GRANT_DISPLAY: Record<MetricGrantKey, { label: string; description: string; href: string }> = {
+  explore: {
+    label: 'Explore',
+    description:
+      'The /metrics dashboard — Essentials / Sales & ops / Geography / Catalog / Customer value / Scatter tabs.',
+    href: '/metrics',
+  },
+  brands: {
+    label: 'Brands',
+    description: 'Brand index + per-brand category drill-down.',
+    href: '/metrics/brands',
+  },
+  distributors: {
+    label: 'Distributors',
+    description: 'Distributor index + per-distributor category drill-down.',
+    href: '/metrics/distributors',
+  },
+  staff: {
+    label: 'Staff',
+    description: 'Budtender performance dashboard.',
+    href: '/metrics/staff',
+  },
+  reordering: {
+    label: 'Reordering',
+    description: 'Inventory / running-low / slow-movers metrics.',
+    href: '/metrics/reordering',
+  },
+}
+
+interface MetricGrantsRowProps {
+  readonly user: UserRecord
+  readonly busy: boolean
+  readonly onToggle: (key: MetricGrantKey, nextOn: boolean) => void
+}
+
+function MetricGrantsRow({ user, busy, onToggle }: MetricGrantsRowProps) {
+  const isAdmin = user.role === 'admin'
+  const stored = new Set(user.metricGrants)
+  return (
+    <div
+      style={{
+        marginTop: 12,
+        paddingTop: 12,
+        borderTop: '1px solid var(--control-border, #d8d8d8)',
+      }}
+    >
+      <div className="subtle-copy" style={{ marginBottom: 6 }}>
+        Metrics access
+        {isAdmin ? (
+          <>
+            {' '}— <strong>admin</strong>: implicitly has every grant. The
+            checkboxes below show / edit the literal stored set (used if
+            this user is later demoted from admin).
+          </>
+        ) : (
+          <>
+            {' '}— grants control which Metrics sub-pages this user can see.
+            Server enforces the gate on every API call.
+          </>
+        )}
+      </div>
+      <div className="filter-row wrap-row" style={{ alignItems: 'center', gap: 16 }}>
+        {ALL_METRIC_GRANT_KEYS.map((key) => {
+          const display = METRIC_GRANT_DISPLAY[key]
+          const checked = stored.has(key)
+          return (
+            <label
+              key={key}
+              style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}
+              title={`${display.description} (${display.href})`}
+            >
+              <input
+                type="checkbox"
+                checked={checked}
+                disabled={busy}
+                onChange={(event) => onToggle(key, event.target.checked)}
+              />
+              <span>{display.label}</span>
+            </label>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
 
 function rolePillTone(role: Role): PillProps['tone'] {
   switch (role) {
@@ -350,6 +441,22 @@ export function UsersPage() {
 
                   {busy ? <span className="subtle-copy">saving…</span> : null}
                 </div>
+
+                <MetricGrantsRow
+                  user={user}
+                  busy={busy}
+                  onToggle={(key, nextOn) => {
+                    const current = new Set(user.metricGrants)
+                    if (nextOn) current.add(key)
+                    else current.delete(key)
+                    const next = ALL_METRIC_GRANT_KEYS.filter((k) => current.has(k))
+                    void patchUser(
+                      user.id,
+                      { metricGrants: next },
+                      `${nextOn ? 'Granted' : 'Revoked'} ${user.email}: metrics.${key}.`,
+                    )
+                  }}
+                />
               </article>
             )
           })
