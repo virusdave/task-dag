@@ -3366,6 +3366,28 @@ a.tree-nav-branch-label.is-link,
   padding: 0.4rem 0 0 0.5rem;
 }
 
+/* "Slide the window" nudge row inside the custom range panel.
+ * Lives below the from/to datetime inputs; 4 back-shift buttons
+ * followed by 4 forward-shift buttons. Forward buttons get disabled
+ * when sliding would extend the window past now.
+ *
+ * `display: flex` (not inline-flex) so the row sits on its own line
+ * below the from/to inputs even when the parent panel is wide enough
+ * to fit them inline. Forward-disabled buttons get a muted look so
+ * the operator can see "this far you cannot push" at a glance.
+ */
+.metrics-range-nudges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  padding: 0.4rem 0 0 0.5rem;
+}
+
+.metrics-range-nudge[disabled] {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
 /* Section titles */
 .metrics-group {
   display: flex;

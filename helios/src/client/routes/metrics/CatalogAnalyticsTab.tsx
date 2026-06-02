@@ -26,6 +26,7 @@ import {
   type ContinuousScale,
 } from './continuousScale.js'
 import { HelpIcon } from './MetricChart.js'
+import { RangeNudgeRow } from './RangeNudgeRow.js'
 import { computeCompactDomain } from './scatterAutoZoom.js'
 import { useScatterZoom, type ZoomView } from './scatterZoom.js'
 import { useMetricSelection } from './useMetricSelection.js'
@@ -2108,6 +2109,7 @@ export function CatalogAnalyticsTab({ embedded }: CatalogAnalyticsTabProps = {})
                 />
               </label>
             </div>
+            <RangeNudgeRow range={range} setRange={(next) => setRange(next)} />
           </details>
         </div>
 

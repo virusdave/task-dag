@@ -32,6 +32,7 @@ import {
   METRIC_STACK_MODES,
   type MetricStackMode,
 } from './MetricChart.js'
+import { RangeNudgeRow } from './RangeNudgeRow.js'
 import { TimeAxisProvider, useTimeAxis, type TimeWindow } from './TimeAxisContext.js'
 
 const DAY_MS = 24 * 60 * 60 * 1000
@@ -963,30 +964,36 @@ function PresetButton({ label, days }: { label: string; days: number }) {
 function ManualRangeInputs() {
   const axis = useTimeAxis()
   return (
-    <div className="metrics-range-custom-inputs">
-      <label className="subtle-copy">
-        from{' '}
-        <input
-          type="datetime-local"
-          value={toLocalDtInput(axis.window.fromMs)}
-          onChange={(e) => {
-            const ms = Date.parse(e.target.value)
-            if (!Number.isNaN(ms)) axis.setWindow({ fromMs: ms, toMs: axis.window.toMs })
-          }}
-        />
-      </label>
-      <label className="subtle-copy">
-        to{' '}
-        <input
-          type="datetime-local"
-          value={toLocalDtInput(axis.window.toMs)}
-          onChange={(e) => {
-            const ms = Date.parse(e.target.value)
-            if (!Number.isNaN(ms)) axis.setWindow({ fromMs: axis.window.fromMs, toMs: ms })
-          }}
-        />
-      </label>
-    </div>
+    <>
+      <div className="metrics-range-custom-inputs">
+        <label className="subtle-copy">
+          from{' '}
+          <input
+            type="datetime-local"
+            value={toLocalDtInput(axis.window.fromMs)}
+            onChange={(e) => {
+              const ms = Date.parse(e.target.value)
+              if (!Number.isNaN(ms)) axis.setWindow({ fromMs: ms, toMs: axis.window.toMs })
+            }}
+          />
+        </label>
+        <label className="subtle-copy">
+          to{' '}
+          <input
+            type="datetime-local"
+            value={toLocalDtInput(axis.window.toMs)}
+            onChange={(e) => {
+              const ms = Date.parse(e.target.value)
+              if (!Number.isNaN(ms)) axis.setWindow({ fromMs: axis.window.fromMs, toMs: ms })
+            }}
+          />
+        </label>
+      </div>
+      <RangeNudgeRow
+        range={{ fromMs: axis.window.fromMs, toMs: axis.window.toMs }}
+        setRange={(next) => axis.setWindow({ fromMs: next.fromMs, toMs: next.toMs })}
+      />
+    </>
   )
 }
 

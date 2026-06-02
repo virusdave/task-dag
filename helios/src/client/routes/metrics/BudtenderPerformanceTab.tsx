@@ -9,6 +9,7 @@ import {
 import { loadJson } from '../../app/fetchJson.js'
 import { niceXTicks, niceYTicks } from './gridlines.js'
 import { HelpIcon } from './MetricChart.js'
+import { RangeNudgeRow } from './RangeNudgeRow.js'
 import { computeCompactDomain } from './scatterAutoZoom.js'
 import { useMetricSelection } from './useMetricSelection.js'
 
@@ -194,6 +195,17 @@ export function BudtenderPerformanceTab(): JSX.Element {
                 />
               </label>
             </div>
+            <RangeNudgeRow
+              range={{ fromMs, toMs }}
+              setRange={(next) => {
+                // Nudging from a preset implicitly converts the window
+                // to a custom range; the preset chip stops being
+                // active because `useCustomRange` is now true.
+                setCustomFromMs(next.fromMs)
+                setCustomToMs(next.toMs)
+                setUseCustomRange(true)
+              }}
+            />
           </details>
         </div>
       </div>
