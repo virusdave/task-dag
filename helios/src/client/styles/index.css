@@ -6301,3 +6301,645 @@ span.metric-chart-legend-item {
   color: #888;
   font-size: 13px;
 }
+
+/* ===========================================================================
+ * Catalog → Purchase Sell-Through pages
+ *
+ * The list, PO detail, and per-line pages are buying-decision surfaces.
+ * The dominant top band must answer the page's headline question (cash
+ * exposure / verdict / SKU velocity); everything else lives in
+ * collapsed <details>. Money values live in either "Retail dollars"
+ * (.purchase-cell-retail) or "Purchase-cost dollars"
+ * (.purchase-cell-cost) so the operator never has to reverse-engineer
+ * an ambiguous label.
+ * ========================================================================= */
+
+.purchase-page {
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+}
+
+.purchase-page-header {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.purchase-page-header h1 {
+  margin: 0;
+  font-size: clamp(1.4rem, 3.5vw, 1.9rem);
+}
+
+.purchase-page-header p {
+  margin: 0;
+}
+
+.purchase-section-title {
+  margin: 0.5rem 0 0.25rem;
+  font-size: 1.05rem;
+}
+
+.purchase-muted {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+
+.purchase-danger {
+  color: var(--danger);
+  font-weight: 700;
+}
+
+.purchase-eyebrow {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted-strong);
+  font-weight: 600;
+}
+
+/* --- Hero (dominant-answer) band ---------------------------------------- */
+
+.purchase-hero {
+  display: grid;
+  grid-template-columns: minmax(260px, 1.2fr) 2fr;
+  gap: 0.85rem;
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: 12px;
+  padding: 1rem 1.1rem;
+  box-shadow: var(--shadow);
+}
+
+@media (max-width: 760px) {
+  .purchase-hero {
+    grid-template-columns: 1fr;
+    padding: 0.85rem;
+  }
+}
+
+.purchase-hero-primary {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  padding-right: 0.85rem;
+  border-right: 1px solid var(--panel-border);
+}
+
+@media (max-width: 760px) {
+  .purchase-hero-primary {
+    padding-right: 0;
+    padding-bottom: 0.65rem;
+    border-right: none;
+    border-bottom: 1px solid var(--panel-border);
+  }
+}
+
+.purchase-answer-value {
+  font-size: clamp(1.7rem, 5vw, 2.6rem);
+  font-weight: 750;
+  line-height: 1;
+}
+
+.purchase-hero-primary-sub {
+  margin-top: 0.15rem;
+}
+
+/* Verdict tones on PO detail hero -- soft accents, not full colour fills. */
+.purchase-verdict-cash .purchase-answer-value { color: #2a6c41; }
+.purchase-verdict-dead-stock .purchase-answer-value { color: #8a6a17; }
+.purchase-verdict-shrinkage .purchase-answer-value { color: var(--danger); }
+.purchase-verdict-fresh .purchase-answer-value { color: var(--text-muted-strong); }
+
+.purchase-hero-supporting {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 0.5rem 0.65rem;
+}
+
+.purchase-metric {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  padding: 0.45rem 0.6rem;
+  border-radius: 8px;
+  background: rgba(255, 250, 241, 0.55);
+  border: 1px solid transparent;
+}
+
+.purchase-metric-value {
+  font-size: 1.3rem;
+  line-height: 1.1;
+  font-weight: 700;
+}
+
+/* The retail-vs-cost colour cue is intentionally faint -- a tinted
+ * left border, not a coloured background. The point is to keep the
+ * two money axes visually distinct without turning the page into a
+ * stoplight. */
+.purchase-metric-retail,
+.purchase-cell-retail {
+  border-left: 3px solid #2a6c41;
+  padding-left: 0.55rem;
+}
+
+.purchase-metric-cost,
+.purchase-cell-cost {
+  border-left: 3px solid #8a6a17;
+  padding-left: 0.55rem;
+}
+
+.purchase-metric-danger {
+  border-left: 3px solid var(--danger);
+  padding-left: 0.55rem;
+}
+
+.purchase-metric-danger .purchase-metric-value {
+  color: var(--danger);
+}
+
+/* --- Filter bar --------------------------------------------------------- */
+
+.purchase-filter-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.purchase-filter-search {
+  display: flex;
+  gap: 0.4rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.purchase-filter-search input[type='search'] {
+  flex: 1 1 18rem;
+  min-width: 12rem;
+}
+
+.purchase-active-chips {
+  display: flex;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+}
+
+.purchase-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.2rem 0.55rem;
+  border-radius: 999px;
+  background: var(--accent-muted);
+  color: var(--accent-strong);
+  font-size: 0.78rem;
+  text-decoration: none;
+  border: 1px solid transparent;
+}
+
+.purchase-chip:hover {
+  border-color: var(--accent);
+}
+
+.purchase-chip-reset {
+  background: transparent;
+  color: var(--text-muted-strong);
+}
+
+.purchase-filter-details {
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: 10px;
+  padding: 0.35rem 0.6rem;
+}
+
+.purchase-filter-details > summary {
+  cursor: pointer;
+  font-weight: 600;
+  padding: 0.2rem 0;
+}
+
+.purchase-filter-form {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 0.65rem;
+  margin-top: 0.6rem;
+}
+
+.purchase-facet {
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  padding: 0.4rem 0.55rem;
+  margin: 0;
+}
+
+.purchase-facet legend {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--text-muted-strong);
+  padding: 0 0.3rem;
+}
+
+.purchase-facet-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+}
+
+.purchase-facet-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.25rem 0.55rem;
+  border-radius: 999px;
+  background: rgba(255, 250, 241, 0.7);
+  border: 1px solid var(--panel-border);
+  font-size: 0.82rem;
+  cursor: pointer;
+  user-select: none;
+  min-height: 32px;
+}
+
+.purchase-facet-chip:hover {
+  border-color: var(--control-border);
+}
+
+.purchase-facet-chip input[type='checkbox'] {
+  margin: 0;
+}
+
+.purchase-facet-chip-on {
+  background: var(--accent-muted);
+  border-color: var(--accent);
+  color: var(--accent-strong);
+  font-weight: 600;
+}
+
+.purchase-facet-chip-count {
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.purchase-facet-toggle {
+  background: transparent;
+  border: none;
+  color: var(--accent-strong);
+  cursor: pointer;
+  margin-top: 0.35rem;
+  padding: 0.2rem 0;
+  font-size: 0.82rem;
+}
+
+.purchase-range-fieldset {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  padding: 0.4rem 0.55rem;
+  margin: 0;
+}
+
+.purchase-range-fieldset legend {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--text-muted-strong);
+  padding: 0 0.3rem;
+}
+
+.purchase-range-fieldset input {
+  min-width: 7rem;
+}
+
+.purchase-stack-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--text-muted-strong);
+}
+
+.purchase-stack-field input {
+  font-weight: normal;
+  color: inherit;
+}
+
+.purchase-filter-actions {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  grid-column: 1 / -1;
+}
+
+/* --- Desktop / mobile visibility ---------------------------------------- */
+
+.purchase-mobile-only { display: none; }
+.purchase-desktop-only { display: block; }
+
+@media (max-width: 760px) {
+  .purchase-desktop-only { display: none; }
+  .purchase-mobile-only { display: block; }
+}
+
+/* --- Desktop tables ----------------------------------------------------- */
+
+.purchase-table-wrap {
+  overflow-x: auto;
+}
+
+.purchase-table {
+  width: 100%;
+  min-width: 0;
+}
+
+.purchase-table th {
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted-strong);
+}
+
+.purchase-table td {
+  vertical-align: top;
+}
+
+.purchase-table td.num {
+  font-variant-numeric: tabular-nums;
+}
+
+.purchase-row-purchase {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  max-width: 28ch;
+}
+
+.purchase-row-distributor {
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.purchase-row-distributor:hover {
+  text-decoration: underline;
+}
+
+.purchase-row-poid {
+  font-size: 0.72rem;
+}
+
+.purchase-row-brands {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.2rem;
+  margin-top: 0.15rem;
+}
+
+.purchase-status-stack {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.2rem;
+}
+
+.purchase-line-product {
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.purchase-line-product:hover {
+  text-decoration: underline;
+}
+
+.purchase-line-movement-value {
+  font-weight: 700;
+  font-size: 1.05rem;
+}
+
+.purchase-line-signal {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  font-size: 0.78rem;
+}
+
+/* --- Mobile cards ------------------------------------------------------- */
+
+.purchase-card-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.purchase-card {
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: 10px;
+  padding: 0.75rem 0.85rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  box-shadow: 0 2px 6px rgba(51, 31, 8, 0.04);
+}
+
+.purchase-card-head {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.purchase-card-distributor {
+  font-size: 1.05rem;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.purchase-card-distributor:hover {
+  text-decoration: underline;
+}
+
+.purchase-card-headline {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 0.5rem;
+  padding: 0.4rem 0.5rem;
+  background: rgba(255, 250, 241, 0.5);
+  border-radius: 8px;
+}
+
+.purchase-card-headline-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+
+.purchase-card-buckets {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.3rem 0.85rem;
+  margin: 0;
+}
+
+.purchase-card-buckets > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.purchase-card-buckets dt {
+  color: var(--text-muted-strong);
+  font-size: 0.78rem;
+}
+
+.purchase-card-buckets dd {
+  margin: 0;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.purchase-card-foot {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+/* Per-line card groups (PO detail + item detail) */
+
+.purchase-line-card-groups {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 0.6rem;
+}
+
+.purchase-line-card-group {
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  padding: 0.6rem 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.purchase-line-card-group h3 {
+  margin: 0;
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: var(--text-muted-strong);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.purchase-line-card-group dl {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.purchase-line-card-group dl > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  align-items: baseline;
+}
+
+.purchase-line-card-group dt {
+  color: var(--text-muted-strong);
+  font-size: 0.82rem;
+}
+
+.purchase-line-card-group dd {
+  margin: 0;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.purchase-line-card-details {
+  margin-top: 0.3rem;
+}
+
+/* --- Pager + methodology ------------------------------------------------ */
+
+.purchase-pager {
+  display: flex;
+  gap: 0.6rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.purchase-methodology {
+  margin-top: 0.5rem;
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: 10px;
+  padding: 0.35rem 0.75rem;
+}
+
+.purchase-methodology > summary {
+  cursor: pointer;
+  font-weight: 600;
+  padding: 0.2rem 0;
+  color: var(--text-muted-strong);
+}
+
+.purchase-methodology ul {
+  margin: 0.5rem 0;
+  padding-left: 1.25rem;
+}
+
+.purchase-methodology li + li {
+  margin-top: 0.35rem;
+}
+
+.purchase-meta-dl {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.2rem 1rem;
+  margin: 0.5rem 0;
+  font-size: 0.85rem;
+}
+
+.purchase-meta-dl dt {
+  color: var(--text-muted-strong);
+  font-weight: 600;
+}
+
+.purchase-meta-dl dd {
+  margin: 0;
+}
+
+/* --- Catalog analytics embed (item detail) ------------------------------ */
+
+.purchase-analytics-embed {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin-top: 0.5rem;
+}
+
+.purchase-analytics-embed header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.purchase-analytics-embed header h2 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.purchase-analytics-embed iframe {
+  width: 100%;
+  height: 70vh;
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  background: var(--panel);
+}
+
+@media (max-width: 760px) {
+  .purchase-analytics-embed iframe {
+    height: 60vh;
+  }
+}

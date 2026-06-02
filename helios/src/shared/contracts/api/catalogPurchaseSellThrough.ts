@@ -21,17 +21,31 @@ import { z } from 'zod'
 //       and highlight this SKU.
 // ---------------------------------------------------------------------------
 
+// Multi-value list parser used by every list-page filter. Accepts
+// EITHER a single comma-separated string (`?brandNames=A,B`) OR the
+// repeated query-param form (`?brandNames=A&brandNames=B`) that
+// fastify's default querystring parser surfaces as an array. Without
+// the array branch, multiselect filters posted by the page UI 400
+// out at the loader before they ever reach the SQL — that's exactly
+// the bug that was hiding the "63 Midtown purchases" the operator
+// expected to see when more than one financial-status / brand /
+// distributor / site facet was checked at once.
 const csvList = z
-  .string()
+  .union([z.string(), z.array(z.string())])
   .optional()
-  .transform((value) =>
-    value && value.trim().length > 0
-      ? value
-          .split(',')
-          .map((s) => s.trim())
-          .filter((s) => s.length > 0)
-      : [],
-  )
+  .transform((value) => {
+    if (value === undefined) return []
+    const raw = Array.isArray(value) ? value : [value]
+    const out: string[] = []
+    for (const v of raw) {
+      if (typeof v !== 'string') continue
+      for (const piece of v.split(',')) {
+        const trimmed = piece.trim()
+        if (trimmed.length > 0) out.push(trimmed)
+      }
+    }
+    return out
+  })
 
 // ============================ List endpoint ================================
 
