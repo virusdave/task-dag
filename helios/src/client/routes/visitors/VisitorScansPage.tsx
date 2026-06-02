@@ -339,6 +339,10 @@ export function VisitorScansPage() {
               placeholder="any"
             />
           </label>
+          {/* exempt: not a metrics-range-custom panel — this is an
+              admin-filter form (submit-driven, no preset chips) so it
+              does not consume RangeNudgeRow. Issue #38 / task A7
+              audit. */}
           <label className="vs-field">
             <span>Scanned after</span>
             <input

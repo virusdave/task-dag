@@ -20,11 +20,16 @@ import { MetricsAccessGate } from './MetricsAccessGate.js'
 // pre-highlighted on that entity.
 //
 // Linking strategy:
-//   * Each row links to `/metrics/catalog?highlight=<label>`. The
-//     catalog tab already supports a free-text "highlight subset"
-//     query that visually fades non-matching dots — we just seed it
-//     from the URL on mount so the operator lands with the chosen
-//     entity already framed across every scatter card.
+//   * Each row links to the canonical detail page
+//     (`/metrics/brands/<id>` or `/metrics/distributors/<id>`),
+//     which embeds the catalog scatter per category with the
+//     structured Highlight chip pre-selected for that entity
+//     (see issue #38 / task A4 — MetricsEntityDetailPage seeds
+//     highlightBrandNames / highlightDistributorNames). The
+//     legacy `/metrics/catalog?highlight=<label>` free-text
+//     fallback still works for shared/bookmarked links and is
+//     hydrated inside CatalogAnalyticsTab, but new index links
+//     do NOT use it.
 //   * We intentionally do NOT pre-filter the catalog tab to the
 //     selected entity. The product question we're answering is
 //     "where does this brand sit in its category's price /

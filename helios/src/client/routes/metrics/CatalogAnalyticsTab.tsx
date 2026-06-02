@@ -219,6 +219,15 @@ function ourPriceOverMarket(p: CatalogAnalyticsPoint): number | null {
  * Multiple whitespace-separated terms are ALL-required (AND semantics)
  * so the operator can type "blue dream 1g" to narrow to a specific
  * strain × size.
+ *
+ * exempt: NOT consumed by CatalogAnalyticsTab itself anymore (issue
+ * #38 / task A3 migrated the page to <HighlightControls> +
+ * buildStructuredHighlightMatcher). Retained as an exported
+ * symbol because highlightMatcher.test.ts exercises the
+ * catalog-specific haystack composition. Safe to delete alongside
+ * its test file in a future cleanup pass; intentionally not
+ * removed here per A7's "don't refactor matched pages beyond
+ * inserting the new primitives" non-goal.
  */
 export function buildHighlightMatcher(
   query: string,
