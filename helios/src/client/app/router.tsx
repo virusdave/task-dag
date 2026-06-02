@@ -50,6 +50,10 @@ import { HistoryPage, historyLoader } from '../routes/history/HistoryPage.js'
 import { JobDetailPage, jobDetailLoader } from '../routes/jobs/JobDetailPage.js'
 import { JobsPage, jobsLoader } from '../routes/jobs/JobsPage.js'
 import { LoginPage, loginLoader } from '../routes/login/LoginPage.js'
+import {
+  BrandsIndexPage,
+  DistributorsIndexPage,
+} from '../routes/metrics/MetricsEntityIndexPage.js'
 import { MetricsLayoutPage, metricsLoader } from '../routes/metrics/MetricsLayoutPage.js'
 import { ModuleLandingPage } from '../routes/modules/ModuleLandingPage.js'
 import { PricingGeneratePage, pricingGenerateLoader } from '../routes/pricing/PricingGeneratePage.js'
@@ -425,9 +429,27 @@ export const router = createBrowserRouter([
         path: 'metrics',
       },
       {
+        // Brand index — listed BEFORE the catch-all `:tabId` route so
+        // the literal segment wins. The page itself is data-only
+        // (hits /api/catalog-analytics/filters) so no loader.
+        element: <BrandsIndexPage />,
+        path: 'metrics/brands',
+      },
+      {
+        // Distributor index — same shape as Brands; pre-empts the
+        // `:tabId` catch-all for the same reason.
+        element: <DistributorsIndexPage />,
+        path: 'metrics/distributors',
+      },
+      {
         // Per-tab dashboard route — same loader + page, the tab id is read
         // from useParams() inside MetricsLayoutPage. Tabs share the loaded
         // metric list and a per-tab toolbar config (agg / stack mode).
+        //
+        // Accepts both raw tab ids (e.g. `budtenders`, `inventory`) and
+        // IA-level aliases registered in MetricsLayoutPage's
+        // METRICS_TAB_ALIASES (e.g. `staff` → budtenders,
+        // `reordering` → inventory).
         element: <MetricsLayoutPage />,
         loader: metricsLoader,
         path: 'metrics/:tabId',

@@ -9,6 +9,7 @@ import {
 import { loadJson } from '../../app/fetchJson.js'
 import { niceXTicks, niceYTicks } from './gridlines.js'
 import { HelpIcon } from './MetricChart.js'
+import { computeCompactDomain } from './scatterAutoZoom.js'
 import { useMetricSelection } from './useMetricSelection.js'
 
 // v1.4 V4'4: synthetic metric id for the Budtender Advanced cashier
@@ -1170,6 +1171,19 @@ function CashierScatterSvg(p: ScatterSvgProps) {
     return out
   }, [p.cashiers, p.xDef, p.yDef, p.sizeDef, p.colourDef])
 
+  // Outlier-resistant default view. Same algorithm and "Show all
+  // data (N)" affordance as the catalog scatter — see
+  // scatterAutoZoom.ts. We keep the chip / toggle here at the SVG
+  // level (rather than at the card level) so EVERY scatter on the
+  // dashboard frames its densest ~90% on first render and lets the
+  // operator opt back into the full extent. Compact-vs-full chip
+  // is intentionally omitted when no points would be hidden.
+  const [fitMode, setFitMode] = useState<'compact' | 'full'>('compact')
+  const autoZoom = useMemo(
+    () => computeCompactDomain(plotted.map((d) => ({ x: d.x, y: d.y }))),
+    [plotted],
+  )
+
   if (plotted.length === 0) {
     return <p className="subtle-copy">No cashiers have both X and Y values for the current axes.</p>
   }
@@ -1182,8 +1196,20 @@ function CashierScatterSvg(p: ScatterSvgProps) {
   // the dashboard (operator wishlist #1 — "scatter feels different
   // from the rest of the dashboard"); CI guardrail in gridlines.test
   // covers the 2.5 / 0.25 / 0.025 regression cases.
-  const xTicks = niceXTicks(Math.min(...xs), Math.max(...xs), 5).ticks
-  const yTicks = niceYTicks(Math.min(...ys), Math.max(...ys), 5).ticks
+  //
+  // Tick bounds follow the active fit mode: compact mode passes the
+  // padded compact rectangle, full mode passes the raw extent. We
+  // still feed `niceXTicks` so the resulting axis snaps to a clean
+  // ladder rather than the raw quantile cut points.
+  const compactView = autoZoom.compact
+  const fullView = autoZoom.full
+  const useCompact = fitMode === 'compact' && compactView != null
+  const xRawMin = useCompact ? compactView.xMin : Math.min(...xs)
+  const xRawMax = useCompact ? compactView.xMax : Math.max(...xs)
+  const yRawMin = useCompact ? compactView.yMin : Math.min(...ys)
+  const yRawMax = useCompact ? compactView.yMax : Math.max(...ys)
+  const xTicks = niceXTicks(xRawMin, xRawMax, 5).ticks
+  const yTicks = niceYTicks(yRawMin, yRawMax, 5).ticks
   const xLo = xTicks[0]!
   const xHi = xTicks[xTicks.length - 1]!
   const yLo = yTicks[0]!
@@ -1345,6 +1371,31 @@ function CashierScatterSvg(p: ScatterSvgProps) {
           wrapW={W}
           wrapH={H}
         />
+      ) : null}
+      {/* Compact-vs-full fit-mode chip. Mirrors the catalog scatter so
+          every scatter on /metrics offers the same outlier-resistant
+          default + one-click escape to the full extent. Hidden when
+          compact and full would frame the same set of points. */}
+      {autoZoom.hiddenCount > 0 && fullView != null ? (
+        <button
+          type="button"
+          className={
+            fitMode === 'full' ? 'metric-chart-fit-toggle is-active' : 'metric-chart-fit-toggle'
+          }
+          onClick={() => setFitMode((m) => (m === 'compact' ? 'full' : 'compact'))}
+          aria-pressed={fitMode === 'full'}
+          title={
+            fitMode === 'compact'
+              ? `Default view hides ${autoZoom.hiddenCount} outlier point${
+                  autoZoom.hiddenCount === 1 ? '' : 's'
+                }. Click to show the full extent.`
+              : 'Showing the full data extent. Click to return to the outlier-resistant default view.'
+          }
+        >
+          {fitMode === 'compact'
+            ? `Show all data (${autoZoom.hiddenCount})`
+            : 'Compact view'}
+        </button>
       ) : null}
     </div>
   )

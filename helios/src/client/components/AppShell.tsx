@@ -124,6 +124,36 @@ function buildPrimarySidebarNodes(
   }
 
   return [
+    // Metrics is the top-most item in the IA — operators land here
+    // most often and the existing /metrics page is the primary
+    // analytics surface. Sub-leaves jump straight to specific
+    // analytics views without forcing the operator to remember
+    // which tab a thing lives on.
+    //
+    // Sub-routes:
+    //   * Explore      → /metrics              (existing dashboard, all tabs)
+    //   * Brands       → /metrics/brands       (index of brands; click → catalog
+    //                                           analytics with that brand
+    //                                           highlighted across every card)
+    //   * Distributors → /metrics/distributors (same shape as Brands, scoped
+    //                                           to sweed distributor_name)
+    //   * Staff        → /metrics/staff        (alias for the budtenders tab)
+    //   * Reordering   → /metrics/reordering   (alias for the inventory tab)
+    {
+      kind: 'branch',
+      navKey: 'operations.metrics',
+      label: 'Metrics',
+      to: '/metrics',
+      end: false,
+      defaultOpen: false,
+      children: [
+        { kind: 'leaf', navKey: 'operations.metrics.explore', label: 'Explore', to: '/metrics' },
+        { kind: 'leaf', navKey: 'operations.metrics.brands', label: 'Brands', to: '/metrics/brands' },
+        { kind: 'leaf', navKey: 'operations.metrics.distributors', label: 'Distributors', to: '/metrics/distributors' },
+        { kind: 'leaf', navKey: 'operations.metrics.staff', label: 'Staff', to: '/metrics/staff' },
+        { kind: 'leaf', navKey: 'operations.metrics.reordering', label: 'Reordering', to: '/metrics/reordering' },
+      ],
+    },
     {
       kind: 'leaf',
       navKey: 'dashboard',
@@ -138,7 +168,6 @@ function buildPrimarySidebarNodes(
     moduleBranch('utilities'),
     { kind: 'leaf', navKey: 'operations.jobs', label: 'Jobs', to: '/jobs', end: false },
     { kind: 'leaf', navKey: 'operations.history', label: 'Audit history', to: '/history', end: false },
-    { kind: 'leaf', navKey: 'operations.metrics', label: 'Metrics', to: '/metrics', end: false },
     {
       kind: 'branch',
       navKey: 'tasks',

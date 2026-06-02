@@ -7,6 +7,7 @@ import {
   useRef,
   useState,
 } from 'react'
+import { useSearchParams } from 'react-router-dom'
 
 import {
   CatalogAnalyticsFiltersResponseSchema,
@@ -1643,6 +1644,45 @@ function toLocalDtInput(ms: number): string {
 }
 
 export function CatalogAnalyticsTab() {
+  // -------- URL hydration --------
+  // Brand / distributor index pages link here with `?highlight=…`
+  // (and optionally `?sites=…&categoryIds=…&brandIds=…&
+  //  distributorNames=…&subcategoryIds=…&sizes=…&packCounts=…`)
+  // so the operator lands on the catalog scatter pre-focused on
+  // that entity. We hydrate state ONCE at mount; we deliberately
+  // do NOT keep the URL in sync afterwards (the existing UI uses
+  // dropdown chips, not URL state, as its source of truth, and a
+  // bidirectional sync would force two-way state plumbing that
+  // isn't in scope for the IA refactor).
+  const [searchParams] = useSearchParams()
+  const initialQueryRef = useRef(searchParams)
+  const initialSet = useCallback(
+    (key: string): Set<string> => {
+      const raw = initialQueryRef.current.get(key)
+      if (!raw) return new Set<string>()
+      return new Set(raw.split(',').map((s) => s.trim()).filter((s) => s.length > 0))
+    },
+    [],
+  )
+  const initialMulti = useCallback(
+    (key: string): Set<string> => {
+      // Distributor names can legitimately contain commas, so the
+      // distributorNames param accepts repeated entries (matching the
+      // server contract) in addition to a single CSV string.
+      const all = initialQueryRef.current.getAll(key)
+      if (all.length === 0) return new Set<string>()
+      const out = new Set<string>()
+      for (const raw of all) {
+        for (const part of raw.split(',')) {
+          const trimmed = part.trim()
+          if (trimmed.length > 0) out.add(trimmed)
+        }
+      }
+      return out
+    },
+    [],
+  )
+
   // -------- Filters --------
   // Range is stored as concrete from/to milliseconds so the "custom"
   // datetime pickers and the preset day buttons share one source of
@@ -1660,23 +1700,23 @@ export function CatalogAnalyticsTab() {
     const now = Date.now()
     setRange({ fromMs: now - d * DAY_MS, toMs: now })
   }, [])
-  const [selectedSites, setSelectedSites] = useState<ReadonlySet<string>>(() => new Set<string>())
+  const [selectedSites, setSelectedSites] = useState<ReadonlySet<string>>(() => initialSet('sites'))
   const [filters, setFilters] = useState<CatalogAnalyticsFiltersResponse | null>(null)
   const [selectedCategoryIds, setSelectedCategoryIds] = useState<ReadonlySet<string>>(
-    () => new Set<string>(),
+    () => initialSet('categoryIds'),
   )
   const [selectedSubcategoryIds, setSelectedSubcategoryIds] = useState<ReadonlySet<string>>(
-    () => new Set<string>(),
+    () => initialSet('subcategoryIds'),
   )
   const [selectedBrandIds, setSelectedBrandIds] = useState<ReadonlySet<string>>(
-    () => new Set<string>(),
+    () => initialSet('brandIds'),
   )
   const [selectedDistributorNames, setSelectedDistributorNames] = useState<ReadonlySet<string>>(
-    () => new Set<string>(),
+    () => initialMulti('distributorNames'),
   )
-  const [selectedSizes, setSelectedSizes] = useState<ReadonlySet<string>>(() => new Set<string>())
+  const [selectedSizes, setSelectedSizes] = useState<ReadonlySet<string>>(() => initialSet('sizes'))
   const [selectedPackCounts, setSelectedPackCounts] = useState<ReadonlySet<string>>(
-    () => new Set<string>(),
+    () => initialSet('packCounts'),
   )
 
   const sitesParam = useMemo(() => Array.from(selectedSites).join(','), [selectedSites])
@@ -1714,7 +1754,12 @@ export function CatalogAnalyticsTab() {
   //   * non-matching dots: heavily dimmed so the highlighted subset
   //     pops out of the rest of the cloud.
   // Stored on the page so it applies to every card in the grid.
-  const [highlightQuery, setHighlightQuery] = useState<string>('')
+  // Hydrated from `?highlight=…` so Brand / Distributor index links
+  // can land the operator on the catalog scatter with that entity
+  // pre-highlighted across every card.
+  const [highlightQuery, setHighlightQuery] = useState<string>(
+    () => initialQueryRef.current.get('highlight') ?? '',
+  )
 
   // -------- Active sub-tab inside the catalog analytics page --------
   const [activeSection, setActiveSection] = useState<string>(SECTION_CORE)

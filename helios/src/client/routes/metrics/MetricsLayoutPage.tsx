@@ -228,9 +228,23 @@ const METRICS_TABS: ReadonlyArray<MetricsTab> = [
 
 const METRICS_TABS_BY_ID = new Map<MetricsTabId, MetricsTab>(METRICS_TABS.map((t) => [t.id, t]))
 
+// IA-level aliases. The sidebar navigates to clean, intention-revealing
+// URLs (`/metrics/staff`, `/metrics/reordering`) that map to existing
+// tab content. Adding an alias here is the only thing required to
+// surface a tab under a new URL — no router changes, no duplicated
+// component wiring.
+//
+// Brand-index gets its own dedicated route in router.tsx and never
+// resolves to a tab here.
+const METRICS_TAB_ALIASES: Record<string, MetricsTabId> = {
+  staff: 'budtenders',
+  reordering: 'inventory',
+}
+
 function resolveTab(raw: string | undefined): MetricsTab {
   if (!raw) return METRICS_TABS_BY_ID.get(DEFAULT_TAB_ID)!
-  return METRICS_TABS_BY_ID.get(raw as MetricsTabId) ?? METRICS_TABS_BY_ID.get(DEFAULT_TAB_ID)!
+  const aliased = METRICS_TAB_ALIASES[raw] ?? (raw as MetricsTabId)
+  return METRICS_TABS_BY_ID.get(aliased) ?? METRICS_TABS_BY_ID.get(DEFAULT_TAB_ID)!
 }
 
 export async function metricsLoader(): Promise<MetricListResponse> {
