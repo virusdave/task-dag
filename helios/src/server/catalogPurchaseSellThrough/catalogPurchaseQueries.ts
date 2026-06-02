@@ -106,24 +106,26 @@ const PER_LINE_CTE = `
      where cardinality(tl.matched_inventory_item_ids) > 0
   ),
   sale_items as (
+    -- sweed_order_items_flat is the materialised expansion of
+    -- sweed_orders.raw_json->items (one row per (dealer, invoice,
+    -- item)). Joining against it is an indexed btree lookup on
+    -- (dealer_id, inventory_item_id, pay_time) -- vs. the legacy
+    -- jsonb_array_elements(raw_json->items) lateral expansion that
+    -- iterated millions of intermediate rows per request and made
+    -- this page take 15-50s to load. See migration
+    -- 048_sweed_order_items_flat.sql and the upsertFlatOrderItems
+    -- tail-fill hook in configWorkersSweedOrdersIngestJob.ts.
     select lp.dealer_id, lp.po_id, lp.line_id, lp.inventory_item_id,
-           so.pay_time,
-           coalesce(
-             nullif(item->>'currentQty','')::numeric,
-             nullif(item->>'quantity','')::numeric,
-             nullif(item->>'qty','')::numeric,
-             0
-           ) as qty,
-           coalesce(nullif(item->>'subtotalAmount','')::numeric, 0) as revenue
+           oi.pay_time, oi.qty, oi.revenue
       from line_packages lp
-      join sweed_orders so on so.dealer_id = lp.dealer_id
-      cross join lateral jsonb_array_elements(so.raw_json->'items') as item
       join target_lines tl
         on tl.dealer_id = lp.dealer_id
        and tl.po_id = lp.po_id
        and tl.line_id = lp.line_id
-     where item->>'inventoryItemId' = lp.inventory_item_id
-       and so.pay_time >= coalesce(
+      join sweed_order_items_flat oi
+        on oi.dealer_id = lp.dealer_id
+       and oi.inventory_item_id = lp.inventory_item_id
+       and oi.pay_time >= coalesce(
          tl.received_at_min,
          tl.delivery_at,
          tl.delivery_date::timestamptz,
@@ -834,16 +836,15 @@ async function computeLineKpis(
     cost_90d: string | number
     current_qty: string | number | null
   }>(
+    // Use sweed_order_items_flat (materialised raw_json->items) so
+    // this is an indexed btree scan, not a per-request lateral
+    // expansion of every order's JSON. See migration
+    // 048_sweed_order_items_flat.sql.
     `with sales as (
-       select coalesce(nullif(item->>'currentQty','')::numeric,
-                       nullif(item->>'quantity','')::numeric,
-                       nullif(item->>'qty','')::numeric, 0) as qty,
-              coalesce(nullif(item->>'subtotalAmount','')::numeric, 0) as revenue,
-              so.pay_time
-         from sweed_orders so
-         cross join lateral jsonb_array_elements(so.raw_json->'items') item
-        where so.dealer_id = $1
-          and item->>'inventoryItemId' = any($2::text[])
+       select oi.qty, oi.revenue, oi.pay_time
+         from sweed_order_items_flat oi
+        where oi.dealer_id = $1
+          and oi.inventory_item_id = any($2::text[])
      )
      select
        coalesce(sum(qty) filter (where pay_time >= now() - interval '7 days'), 0)  as units_sold_7d,

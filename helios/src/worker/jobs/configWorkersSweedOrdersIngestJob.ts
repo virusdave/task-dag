@@ -586,7 +586,52 @@ async function fetchAndInsert(
           JSON.stringify(n.raw),
         ],
       )
-      if ((result.rowCount ?? 0) > 0) inserted++
+      if ((result.rowCount ?? 0) > 0) {
+        // Tail-fill the flattened items table that backs
+        // Catalog → Purchase Sell-Through. We do this only on
+        // genuine inserts (not no-op conflicts) since raw_json is
+        // immutable after first insert -- enrichment jobs only
+        // update sibling columns (invoice_get_status, etc.). See
+        // migration 048_sweed_order_items_flat.sql for the table
+        // schema and rationale.
+        await db.query(
+          `
+            insert into sweed_order_items_flat (
+              dealer_id, invoice_id, item_ordinal,
+              pay_time, inventory_item_id, qty, revenue, raw_item
+            )
+            select
+              so.dealer_id,
+              so.invoice_id,
+              (item.ord - 1)::int as item_ordinal,
+              so.pay_time,
+              item.value->>'inventoryItemId' as inventory_item_id,
+              coalesce(
+                nullif(item.value->>'currentQty', '')::numeric,
+                nullif(item.value->>'quantity', '')::numeric,
+                nullif(item.value->>'qty', '')::numeric,
+                0
+              ) as qty,
+              coalesce(nullif(item.value->>'subtotalAmount', '')::numeric, 0) as revenue,
+              item.value as raw_item
+            from sweed_orders so
+            cross join lateral jsonb_array_elements(coalesce(so.raw_json->'items', '[]'::jsonb))
+              with ordinality as item(value, ord)
+            where so.dealer_id = $1
+              and so.invoice_id = $2
+              and nullif(item.value->>'inventoryItemId', '') is not null
+            on conflict (dealer_id, invoice_id, item_ordinal) do update set
+              pay_time          = excluded.pay_time,
+              inventory_item_id = excluded.inventory_item_id,
+              qty               = excluded.qty,
+              revenue           = excluded.revenue,
+              raw_item          = excluded.raw_item,
+              flattened_at      = now()
+          `,
+          [dealerId, n.invoiceId],
+        )
+        inserted++
+      }
     }
     return inserted
   })

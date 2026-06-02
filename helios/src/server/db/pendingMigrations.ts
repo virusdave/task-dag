@@ -456,6 +456,16 @@ const SENTINELS: MigrationSentinel[] = [
       'Catalog → Purchase Sell-Through page family.',
     check: (db) => tableExists(db, 'sweed_purchases'),
   },
+  {
+    migrationId: '048_sweed_order_items_flat',
+    label:
+      'sweed_order_items_flat — materialised expansion of ' +
+      "sweed_orders.raw_json->'items'. Without this Catalog → " +
+      'Purchase Sell-Through queries fall back to a per-request ' +
+      'jsonb_array_elements lateral that takes 15-50s and times out ' +
+      'the page.',
+    check: (db) => tableExists(db, 'sweed_order_items_flat'),
+  },
 ]
 
 interface CacheEntry {
