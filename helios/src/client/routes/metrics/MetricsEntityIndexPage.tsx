@@ -159,17 +159,20 @@ function EntityRow({
   readonly kind: MetricsEntityIndexPageProps['kind']
   readonly option: CatalogFilterOption
 }) {
-  // Use the label as the highlight token. CatalogAnalyticsTab's
-  // `buildHighlightMatcher` is case-insensitive AND across
-  // whitespace-separated terms, so e.g. "Cresco Labs" requires both
-  // "cresco" AND "labs" in the same dot's haystack — which holds
-  // for that brand's points. encodeURIComponent keeps quotes / commas
-  // / spaces / unicode safe in the URL.
-  const href = `/metrics/catalog?highlight=${encodeURIComponent(option.label)}`
+  // Canonical detail route per entity. The detail page renders
+  // per-category accordions with the scatter scoped to this entity,
+  // not a query-param landing on the global scatter tab. The
+  // path segment uses the underlying id (brandId or distributor
+  // name); encodeURIComponent keeps quotes / commas / spaces /
+  // unicode safe in the URL.
+  const href =
+    kind === 'brand'
+      ? `/metrics/brands/${encodeURIComponent(option.id)}`
+      : `/metrics/distributors/${encodeURIComponent(option.id)}`
   return (
     <tr>
       <td>
-        <Link to={href} title={`View ${option.label} on the catalog scatter`}>
+        <Link to={href} title={`Open ${option.label}`}>
           {option.label}
         </Link>
       </td>
@@ -177,8 +180,8 @@ function EntityRow({
         {option.itemCount.toLocaleString()}
       </td>
       <td style={{ textAlign: 'right' }}>
-        <Link to={href} className="ghost-button" title={`View ${option.label}`}>
-          View →
+        <Link to={href} className="ghost-button" title={`Open ${option.label}`}>
+          Open →
         </Link>
       </td>
     </tr>

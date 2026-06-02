@@ -1643,7 +1643,36 @@ function toLocalDtInput(ms: number): string {
   )}`
 }
 
-export function CatalogAnalyticsTab() {
+/**
+ * Optional embedded-mode props. When provided, the catalog scatter
+ * page renders without its filter chrome (no filter bar, no
+ * highlight input, no clear-all) and pre-seeds its filter state
+ * from the override values instead of from URL search params.
+ *
+ * Used by the Brand / Distributor detail pages
+ * (`/metrics/brands/:brandId`, `/metrics/distributors/:slug`) to
+ * embed one scatter section per category, scoped to the entity.
+ */
+export interface CatalogAnalyticsTabEmbeddedProps {
+  /** Pre-select these category ids (chip selection). */
+  readonly categoryIds?: ReadonlyArray<string>
+  /** Pre-select these brand ids. */
+  readonly brandIds?: ReadonlyArray<string>
+  /** Pre-select these distributor names (legacy multi-select). */
+  readonly distributorNames?: ReadonlyArray<string>
+  /** Pre-seed the highlight-subset search input. */
+  readonly highlight?: string
+  /** Hide the page-wide filter bar so the user can't change the scope. */
+  readonly hideFilterBar?: boolean
+  /** Hide the page-wide control row (range / sites / colour-by / etc). */
+  readonly hideTopControls?: boolean
+}
+
+export interface CatalogAnalyticsTabProps {
+  readonly embedded?: CatalogAnalyticsTabEmbeddedProps
+}
+
+export function CatalogAnalyticsTab({ embedded }: CatalogAnalyticsTabProps = {}) {
   // -------- URL hydration --------
   // Brand / distributor index pages link here with `?highlight=…`
   // (and optionally `?sites=…&categoryIds=…&brandIds=…&
@@ -1654,10 +1683,19 @@ export function CatalogAnalyticsTab() {
   // dropdown chips, not URL state, as its source of truth, and a
   // bidirectional sync would force two-way state plumbing that
   // isn't in scope for the IA refactor).
+  //
+  // In embedded mode (Brand / Distributor detail pages) the
+  // override props take precedence over URL params, since the
+  // canonical route's own params already drive the override values
+  // and the embedded scatter shouldn't reach up to the page's URL.
   const [searchParams] = useSearchParams()
   const initialQueryRef = useRef(searchParams)
+  const embeddedRef = useRef(embedded)
   const initialSet = useCallback(
-    (key: string): Set<string> => {
+    (key: string, override?: ReadonlyArray<string>): Set<string> => {
+      if (override !== undefined) {
+        return new Set(override)
+      }
       const raw = initialQueryRef.current.get(key)
       if (!raw) return new Set<string>()
       return new Set(raw.split(',').map((s) => s.trim()).filter((s) => s.length > 0))
@@ -1665,7 +1703,10 @@ export function CatalogAnalyticsTab() {
     [],
   )
   const initialMulti = useCallback(
-    (key: string): Set<string> => {
+    (key: string, override?: ReadonlyArray<string>): Set<string> => {
+      if (override !== undefined) {
+        return new Set(override)
+      }
       // Distributor names can legitimately contain commas, so the
       // distributorNames param accepts repeated entries (matching the
       // server contract) in addition to a single CSV string.
@@ -1703,16 +1744,16 @@ export function CatalogAnalyticsTab() {
   const [selectedSites, setSelectedSites] = useState<ReadonlySet<string>>(() => initialSet('sites'))
   const [filters, setFilters] = useState<CatalogAnalyticsFiltersResponse | null>(null)
   const [selectedCategoryIds, setSelectedCategoryIds] = useState<ReadonlySet<string>>(
-    () => initialSet('categoryIds'),
+    () => initialSet('categoryIds', embeddedRef.current?.categoryIds),
   )
   const [selectedSubcategoryIds, setSelectedSubcategoryIds] = useState<ReadonlySet<string>>(
     () => initialSet('subcategoryIds'),
   )
   const [selectedBrandIds, setSelectedBrandIds] = useState<ReadonlySet<string>>(
-    () => initialSet('brandIds'),
+    () => initialSet('brandIds', embeddedRef.current?.brandIds),
   )
   const [selectedDistributorNames, setSelectedDistributorNames] = useState<ReadonlySet<string>>(
-    () => initialMulti('distributorNames'),
+    () => initialMulti('distributorNames', embeddedRef.current?.distributorNames),
   )
   const [selectedSizes, setSelectedSizes] = useState<ReadonlySet<string>>(() => initialSet('sizes'))
   const [selectedPackCounts, setSelectedPackCounts] = useState<ReadonlySet<string>>(
@@ -1758,7 +1799,10 @@ export function CatalogAnalyticsTab() {
   // can land the operator on the catalog scatter with that entity
   // pre-highlighted across every card.
   const [highlightQuery, setHighlightQuery] = useState<string>(
-    () => initialQueryRef.current.get('highlight') ?? '',
+    () =>
+      embeddedRef.current?.highlight !== undefined
+        ? embeddedRef.current.highlight
+        : initialQueryRef.current.get('highlight') ?? '',
   )
 
   // -------- Active sub-tab inside the catalog analytics page --------
@@ -2012,8 +2056,11 @@ export function CatalogAnalyticsTab() {
 
   const sectionedCards = useMemo(() => groupCardsBySection(DEFAULT_CARDS), [])
 
+  const hideTopControls = embedded?.hideTopControls === true
+  const hideFilterBar = embedded?.hideFilterBar === true
   return (
     <section className="catalog-analytics-tab">
+      {hideTopControls ? null : (
       <div className="metrics-controls catalog-analytics-controls">
         <div className="metrics-control-group">
           <span className="subtle-copy">range</span>
@@ -2166,7 +2213,9 @@ export function CatalogAnalyticsTab() {
           </label>
           </div>
           </div>
+      )}
 
+      {hideFilterBar ? null : (
       <div className="catalog-analytics-filterbar-row">
         <CatalogFilterBar
           filters={filters}
@@ -2234,6 +2283,7 @@ export function CatalogAnalyticsTab() {
           </button>
         ) : null}
       </div>
+      )}
 
       {error ? (
         <p className="metric-chart-error">{error}</p>

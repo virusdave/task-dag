@@ -51,6 +51,10 @@ import { JobDetailPage, jobDetailLoader } from '../routes/jobs/JobDetailPage.js'
 import { JobsPage, jobsLoader } from '../routes/jobs/JobsPage.js'
 import { LoginPage, loginLoader } from '../routes/login/LoginPage.js'
 import {
+  BrandDetailPage,
+  DistributorDetailPage,
+} from '../routes/metrics/MetricsEntityDetailPage.js'
+import {
   BrandsIndexPage,
   DistributorsIndexPage,
 } from '../routes/metrics/MetricsEntityIndexPage.js'
@@ -436,10 +440,26 @@ export const router = createBrowserRouter([
         path: 'metrics/brands',
       },
       {
+        // Canonical brand detail page. Renders one collapsible per
+        // category where this brand has presence; each expand
+        // lazy-loads an embedded catalog scatter scoped to the
+        // brand within that category.
+        element: <BrandDetailPage />,
+        path: 'metrics/brands/:brandId',
+      },
+      {
         // Distributor index — same shape as Brands; pre-empts the
         // `:tabId` catch-all for the same reason.
         element: <DistributorsIndexPage />,
         path: 'metrics/distributors',
+      },
+      {
+        // Canonical distributor detail page. The `:distributorName`
+        // path segment carries the distributor's own name verbatim
+        // (URL-encoded), since distributors are keyed by name on
+        // sweed_package_current.
+        element: <DistributorDetailPage />,
+        path: 'metrics/distributors/:distributorName',
       },
       {
         // Per-tab dashboard route — same loader + page, the tab id is read
