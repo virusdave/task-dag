@@ -47,6 +47,26 @@ const csvList = z
     return out
   })
 
+// HTML forms submit unset numeric / date inputs as `""` rather than
+// dropping the param. Without the preprocess, `z.coerce.number()`
+// turned `totalMax=""` into 0, which then drove a SQL filter of
+// `having max(po_total_dollars) <= 0` — making the list silently
+// show only the handful of POs with a $0 total. Same shape would hit
+// totalMin and any date range. Treat empty strings as "not set" so
+// the loader stays in sync with what the user actually configured.
+const optionalNumber = z.preprocess(
+  (v) => (typeof v === 'string' && v.trim().length === 0 ? undefined : v),
+  z.coerce.number().optional(),
+)
+const optionalDate = z.preprocess(
+  (v) => (typeof v === 'string' && v.trim().length === 0 ? undefined : v),
+  z.string().optional(),
+)
+const optionalText = z.preprocess(
+  (v) => (typeof v === 'string' && v.trim().length === 0 ? undefined : v),
+  z.string().optional(),
+)
+
 // ============================ List endpoint ================================
 
 /**
@@ -74,16 +94,33 @@ export type CatalogPurchaseListSort = z.infer<typeof CatalogPurchaseListSortSche
 export const CatalogPurchaseListRequestSchema = z.object({
   sites: csvList,
   distributorNames: csvList,
-  deliveryFrom: z.string().optional(),
-  deliveryTo: z.string().optional(),
-  paymentDueFrom: z.string().optional(),
-  paymentDueTo: z.string().optional(),
-  totalMin: z.coerce.number().optional(),
-  totalMax: z.coerce.number().optional(),
+  deliveryFrom: optionalDate,
+  deliveryTo: optionalDate,
+  paymentDueFrom: optionalDate,
+  paymentDueTo: optionalDate,
+  totalMin: optionalNumber,
+  totalMax: optionalNumber,
   brandNames: csvList,
-  productSearch: z.string().optional(),
+  productSearch: optionalText,
   orderStatusNames: csvList,
   financialStatusNames: csvList,
+  // POs under $2 are almost always distributor sample drops, not real
+  // buys. They drown the list at default sort. We hide them by default
+  // and let the operator opt them back in with `?includeSamples=1`.
+  // The check is layered as a HAVING on the aggregated po total so it
+  // composes cleanly with totalMin / totalMax if either is also set.
+  includeSamples: z.preprocess(
+    (v) => (typeof v === 'string' && v.trim().length === 0 ? undefined : v),
+    z
+      .union([z.boolean(), z.string()])
+      .optional()
+      .transform((value) => {
+        if (value === undefined) return false
+        if (typeof value === 'boolean') return value
+        const norm = value.trim().toLowerCase()
+        return norm === '1' || norm === 'true' || norm === 'on' || norm === 'yes'
+      }),
+  ),
   sort: CatalogPurchaseListSortSchema.default('deliveryDate'),
   dir: z.enum(['asc', 'desc']).default('desc'),
   page: z.coerce.number().int().min(1).default(1),

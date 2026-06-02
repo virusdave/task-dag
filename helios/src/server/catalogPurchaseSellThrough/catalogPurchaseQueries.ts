@@ -423,6 +423,14 @@ export async function getCatalogPurchaseList(
     params.push(req.totalMax)
     havingClauses.push(`max(po_total_dollars) <= $${i}`)
   }
+  // Sample-drop suppression: any PO under $2 is almost certainly a
+  // distributor sample, not a real buy. Hide by default unless the
+  // operator opted in via ?includeSamples=1. Skip when the user has
+  // already set their own totalMin so they don't get a confusing
+  // double filter.
+  if (!req.includeSamples && req.totalMin === undefined) {
+    havingClauses.push(`max(po_total_dollars) >= 2`)
+  }
 
   const whereSql = filters.length > 0 ? `where ${filters.join(' and ')}` : ''
   const havingSql = havingClauses.length > 0 ? `having ${havingClauses.join(' and ')}` : ''

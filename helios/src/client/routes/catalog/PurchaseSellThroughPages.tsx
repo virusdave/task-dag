@@ -75,6 +75,11 @@ const ACTIVE_FILTER_LABELS: Record<string, string> = {
   totalMax: 'PO ≤ $',
 }
 
+function samplesAreIncluded(searchParams: URLSearchParams): boolean {
+  const v = (searchParams.get('includeSamples') ?? '').trim().toLowerCase()
+  return v === '1' || v === 'true' || v === 'on' || v === 'yes'
+}
+
 export function PurchaseSellThroughListPage(): JSX.Element {
   useRegisterCatalogSidebarSubtree()
   const data = useLoaderData() as CatalogPurchaseListResponse
@@ -121,6 +126,18 @@ export function PurchaseSellThroughListPage(): JSX.Element {
       </header>
 
       <ExposureHero headline={data.headline} />
+
+      {samplesAreIncluded(searchParams) ? (
+        <p className="purchase-muted purchase-samples-note">
+          Including sample drops (POs &lt; $2).{' '}
+          <Link to={buildHref({ includeSamples: null, page: '1' })}>Hide samples</Link>
+        </p>
+      ) : (
+        <p className="purchase-muted purchase-samples-note">
+          Hiding sample drops (POs &lt; $2).{' '}
+          <Link to={buildHref({ includeSamples: '1', page: '1' })}>Include samples</Link>
+        </p>
+      )}
 
       <ListFilterBar
         data={data}
