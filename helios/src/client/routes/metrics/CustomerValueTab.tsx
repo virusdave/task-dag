@@ -16,7 +16,15 @@ import {
 } from '../../../shared/contracts/index.js'
 import { loadJson } from '../../app/fetchJson.js'
 
+import { ControlsSection } from './ControlsSection.js'
 import { formatYTick, niceYTicks } from './gridlines.js'
+import {
+  buildStructuredHighlightMatcher,
+  emptyHighlightSelection,
+  HighlightControls,
+  type HighlightDimensionSpec,
+  type HighlightSelectionState,
+} from './HighlightControls.js'
 import { HelpIcon } from './MetricChart.js'
 import { RangeNudgeRow } from './RangeNudgeRow.js'
 import { useMetricSelection } from './useMetricSelection.js'
@@ -182,6 +190,15 @@ export function CustomerValueTab(): JSX.Element {
 
   return (
     <section className="customer-value-tab">
+      {/* Issue #38 / task A6: wrap the page-level filter chrome in
+          the shared Filters ControlsSection so the surface matches
+          Catalog Analytics / Budtender Performance. defaultOpen
+          "always" keeps the chrome visible at every breakpoint —
+          this page has no scatter that benefits from hiding the
+          filters on mobile. The Highlight ControlsSection lives
+          inside <CustomerValueBody> below since its dimension
+          options come from the loaded response. */}
+      <ControlsSection title="Filters" defaultOpen="always">
       <div className="customer-value-controls metrics-controls">
         <div className="metrics-control-group">
           <span className="subtle-copy">sites</span>
@@ -332,6 +349,7 @@ export function CustomerValueTab(): JSX.Element {
           </label>
         </div>
       </div>
+      </ControlsSection>
 
       {error ? (
         <p className="metric-chart-error">Failed to load: {error}</p>
@@ -360,6 +378,25 @@ function CustomerValueBody({ data }: { data: CustomerValueAnalyticsResponse }) {
   const [moneyBasis, setMoneyBasis] = useState<MoneyBasis>('gross_sales')
   const moneyBasisDef =
     MONEY_BASES.find((b) => b.id === moneyBasis) ?? MONEY_BASES[0]!
+
+  // Issue #38 / task A6: page-level structured Highlight. The only
+  // surface on this tab with per-element identity that highlight can
+  // dim is the Cohort retention chart (one line per acquisition
+  // cohort). Bar histograms above it have no useful "per-row" axis
+  // to dim, so the matcher is consumed only by <CohortRetentionCard>.
+  const [highlightState, setHighlightState] = useState<HighlightSelectionState>(
+    () => emptyHighlightSelection(),
+  )
+  const [highlightText, setHighlightText] = useState<string>('')
+  const highlightMatcher = useMemo(
+    () =>
+      buildStructuredHighlightMatcher(
+        COHORT_HIGHLIGHT_DIMS,
+        highlightState,
+        highlightText,
+      ),
+    [highlightState, highlightText],
+  )
 
   // v1.4 V4'4: drill selection lives in the URL so share-link
   // parity holds. Escape key clears at the body level so any focused
@@ -445,11 +482,29 @@ function CustomerValueBody({ data }: { data: CustomerValueAnalyticsResponse }) {
         />
       </div>
 
+      {/* Issue #38 / task A6: structured Highlight section. Sits
+          directly above the cohort retention row so the operator can
+          see immediately which dimension's chips affect what. Mobile
+          defaults to collapsed so the section doesn't shove the
+          retention chart off-screen on phones. */}
+      <ControlsSection title="Highlight" defaultOpen="desktop-only">
+        <HighlightControls
+          dims={COHORT_HIGHLIGHT_DIMS}
+          state={highlightState}
+          setState={setHighlightState}
+          filteredPoints={data.cohortRetention}
+          freeText={highlightText}
+          setFreeText={setHighlightText}
+          freeTextPlaceholder="cohort key (e.g. 2026-W18)"
+        />
+      </ControlsSection>
+
       {/* v1.4 V4'3: cohort retention curves + first-to-second sparkline. */}
       <div className="customer-value-retention-row">
         <CohortRetentionCard
           rows={data.cohortRetention}
           granularity={data.cohortGranularity}
+          highlightMatcher={highlightMatcher}
         />
         <FirstSecondConversionCard rows={data.firstSecondConversion} />
       </div>
@@ -458,6 +513,45 @@ function CustomerValueBody({ data }: { data: CustomerValueAnalyticsResponse }) {
     </>
   )
 }
+
+// ---------------------------------------------------------------------------
+// Issue #38 / task A6: structured-highlight dimensions for the
+// CustomerValueTab. The only per-element surface on this tab is the
+// cohort retention chart (one line per acquisition cohort), so the
+// dim list is short:
+//
+//   Cohort  — chips per distinct cohortKey from data.cohortRetention.
+//             Useful for "isolate Q1 2026 onboarding cohorts" style
+//             highlights.
+//   Free-text continues to substring-match cohort labels
+//             (cohortKey contributes to the haystack via pointKey).
+//
+// The dim operates over CohortRetentionRow because that is what the
+// retention card consumes. Bar histograms above aren't keyed off
+// cohort, so they receive no matcher.
+const COHORT_HIGHLIGHT_DIMS: ReadonlyArray<HighlightDimensionSpec<CohortRetentionRow>> = [
+  {
+    id: 'cohort',
+    label: 'Cohort',
+    getOptions: (rows) => {
+      // Group by cohortKey so the chip option count = number of
+      // periods the cohort has been observed (= line length on chart),
+      // which is a useful hint for picking which cohorts to highlight.
+      const counts = new Map<string, number>()
+      for (const r of rows) counts.set(r.cohortKey, (counts.get(r.cohortKey) ?? 0) + 1)
+      return Array.from(counts.entries())
+        .map(([cohortKey, n]) => ({
+          id: cohortKey,
+          label: fmtCohortLabel(cohortKey),
+          itemCount: n,
+        }))
+        // Newest cohort first — operators usually want to highlight
+        // recently-acquired groups.
+        .sort((a, b) => b.id.localeCompare(a.id))
+    },
+    pointKey: (r) => [r.cohortKey, fmtCohortLabel(r.cohortKey)],
+  },
+]
 
 // =========================== VeriScan coverage header (v1.4 V4'5) ==========
 
@@ -971,9 +1065,17 @@ const DEFAULT_VISIBLE_COHORTS = 12
 function CohortRetentionCard({
   rows,
   granularity,
+  highlightMatcher,
 }: {
   rows: ReadonlyArray<CohortRetentionRow>
   granularity: CustomerValueCohortGranularity
+  /**
+   * Issue #38 / task A6: when non-null, cohort lines whose rows do
+   * not satisfy the matcher render at a fixed dim opacity so the
+   * matched cohorts visibly pop. Null = legacy behaviour (every
+   * cohort uses its standard newest→oldest opacity ramp).
+   */
+  highlightMatcher?: ((row: CohortRetentionRow) => boolean) | null
 }) {
   const [showAll, setShowAll] = useState<boolean>(false)
   const [hover, setHover] = useState<
@@ -1032,6 +1134,7 @@ function CohortRetentionCard({
           periodLabel={periodLabel}
           hover={hover}
           setHover={setHover}
+          highlightMatcher={highlightMatcher ?? null}
         />
       )}
     </article>
@@ -1043,6 +1146,7 @@ function CohortRetentionChart({
   periodLabel,
   hover,
   setHover,
+  highlightMatcher,
 }: {
   cohorts: ReadonlyArray<{ cohortKey: string; points: ReadonlyArray<CohortRetentionRow> }>
   periodLabel: string
@@ -1052,6 +1156,8 @@ function CohortRetentionChart({
   setHover: (
     h: { cohortKey: string; periodIndex: number; clientX: number; clientY: number } | null,
   ) => void
+  /** See parent <CohortRetentionCard>. Null = no dimming. */
+  highlightMatcher: ((row: CohortRetentionRow) => boolean) | null
 }) {
   const width = 480
   const height = 220
@@ -1187,12 +1293,20 @@ function CohortRetentionChart({
           {periodLabel} since acquisition
         </text>
 
-        {/* Cohort lines */}
+        {/* Cohort lines. When highlightMatcher is non-null, a
+            cohort counts as matched iff ANY of its rows match (since
+            chips dim by cohortKey, this is effectively "the chip
+            for this cohortKey is selected"). Non-matched cohorts
+            render at a fixed dim opacity. */}
         {cohorts.map((c, idx) => {
           const path = c.points
             .map((p, i) => `${i === 0 ? 'M' : 'L'} ${xScale(p.periodIndex)} ${yScale(p.retentionPct)}`)
             .join(' ')
           const isHovered = hover?.cohortKey === c.cohortKey
+          const matched =
+            highlightMatcher == null ? true : c.points.some((p) => highlightMatcher(p))
+          const baseOpacity = opacityFor(idx, cohorts.length)
+          const opacity = matched ? baseOpacity : 0.12
           return (
             <g key={c.cohortKey}>
               <path
@@ -1200,7 +1314,7 @@ function CohortRetentionChart({
                 fill="none"
                 stroke="currentColor"
                 strokeWidth={isHovered ? 2 : 1}
-                opacity={opacityFor(idx, cohorts.length)}
+                opacity={opacity}
               />
             </g>
           )
