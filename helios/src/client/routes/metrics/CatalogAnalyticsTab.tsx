@@ -1753,8 +1753,30 @@ export interface CatalogAnalyticsTabEmbeddedProps {
   readonly brandIds?: ReadonlyArray<string>
   /** Pre-select these distributor names (legacy multi-select). */
   readonly distributorNames?: ReadonlyArray<string>
-  /** Pre-seed the highlight-subset search input. */
+  /**
+   * Pre-seed the free-text highlight input. Deprecated for
+   * brand / distributor detail pages — prefer the structured
+   * `highlightBrandNames` / `highlightDistributorNames` below since
+   * substring matching against e.g. "Cresco" also catches strain
+   * names that happen to contain "Cresco". Free-text seed remains
+   * supported for any caller that genuinely wants substring match
+   * (e.g. an arbitrary URL share).
+   */
   readonly highlight?: string
+  /**
+   * Pre-seed the structured Highlight section's Brand chip.
+   * Values are brand NAMES (matching CATALOG_HIGHLIGHT_DIMS pointKey,
+   * which uses the human-visible name as both id and label). Used by
+   * /metrics/brands/:brandId — the detail page resolves the brand id
+   * to its label and seeds that here.
+   */
+  readonly highlightBrandNames?: ReadonlyArray<string>
+  /**
+   * Pre-seed the structured Highlight section's Distributor chip.
+   * Values are distributor NAMES. Used by
+   * /metrics/distributors/:distributorName.
+   */
+  readonly highlightDistributorNames?: ReadonlyArray<string>
   /** Hide the page-wide filter bar so the user can't change the scope. */
   readonly hideFilterBar?: boolean
   /** Hide the page-wide control row (range / sites / colour-by / etc). */
@@ -1900,11 +1922,19 @@ export function CatalogAnalyticsTab({ embedded }: CatalogAnalyticsTabProps = {})
   // Structured highlight chips — one set per dim id in
   // CATALOG_HIGHLIGHT_DIMS. Combines with the free-text input above
   // via buildStructuredHighlightMatcher (AND across dims, OR within).
-  // Brand- / distributor-detail pages can pre-seed this from the
-  // embedded prop set in A4; for now it defaults to empty.
-  const [highlightState, setHighlightState] = useState<HighlightSelectionState>(
-    () => emptyHighlightSelection(),
-  )
+  // Brand- / distributor-detail pages pre-seed this via
+  // embedded.highlightBrandNames / highlightDistributorNames so the
+  // detail page lands with that entity already chip-highlighted.
+  const [highlightState, setHighlightState] = useState<HighlightSelectionState>(() => {
+    const seed = emptyHighlightSelection()
+    const brandNames = embeddedRef.current?.highlightBrandNames ?? []
+    const distNames = embeddedRef.current?.highlightDistributorNames ?? []
+    if (brandNames.length === 0 && distNames.length === 0) return seed
+    const next = new Map<string, ReadonlySet<string>>()
+    if (brandNames.length > 0) next.set('brand', new Set(brandNames))
+    if (distNames.length > 0) next.set('distributor', new Set(distNames))
+    return next
+  })
 
   // -------- Active sub-tab inside the catalog analytics page --------
   const [activeSection, setActiveSection] = useState<string>(SECTION_CORE)

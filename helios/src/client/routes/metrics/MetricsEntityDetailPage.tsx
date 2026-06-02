@@ -76,7 +76,16 @@ function CategoryAccordion({
     readonly categoryIds: ReadonlyArray<string>
     readonly brandIds?: ReadonlyArray<string>
     readonly distributorNames?: ReadonlyArray<string>
-    readonly highlight: string
+    /**
+     * Pre-seeds the structured Highlight section's Brand chip.
+     * Set by BrandDetailPage; undefined for DistributorDetailPage.
+     */
+    readonly highlightBrandNames?: ReadonlyArray<string>
+    /**
+     * Pre-seeds the structured Highlight section's Distributor chip.
+     * Set by DistributorDetailPage; undefined for BrandDetailPage.
+     */
+    readonly highlightDistributorNames?: ReadonlyArray<string>
   }
 }) {
   const [hasOpened, setHasOpened] = useState(false)
@@ -102,7 +111,14 @@ function CategoryAccordion({
               categoryIds: embedded.categoryIds,
               brandIds: embedded.brandIds,
               distributorNames: embedded.distributorNames,
-              highlight: embedded.highlight,
+              // Issue #38 / task A4: seed the structured Highlight
+              // chip (Brand or Distributor) rather than the legacy
+              // free-text `highlight=<label>` substring match.
+              // Substring would falsely match strain names that
+              // contain the brand name (e.g. "Cresco Cookies" by a
+              // different brand); structured matching is exact.
+              highlightBrandNames: embedded.highlightBrandNames,
+              highlightDistributorNames: embedded.highlightDistributorNames,
               hideFilterBar: true,
               hideTopControls: false,
             }}
@@ -274,7 +290,14 @@ function MetricsEntityDetailPage({ kind }: { readonly kind: EntityKind }) {
               embedded={{
                 categoryIds: [cat.id],
                 ...embeddedBase,
-                highlight: resolution.entity!.label,
+                // Pre-seed the structured Highlight chip with the
+                // entity's NAME (matches the chip id used by
+                // CATALOG_HIGHLIGHT_DIMS, which keys on the
+                // human-visible name). Only set the chip for the
+                // dimension we're actually scoping to.
+                ...(kind === 'brand'
+                  ? { highlightBrandNames: [resolution.entity!.label] }
+                  : { highlightDistributorNames: [resolution.entity!.label] }),
               }}
             />
           ))}
