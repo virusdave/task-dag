@@ -481,6 +481,29 @@ export const SWEED_SHIFTS_INGEST_DEFAULT_SCHEDULE_WINDOWS: ReadonlyArray<
 ]
 
 /**
+ * Default schedule for the Sweed purchases (PO) ingest worker that
+ * backs the Catalog → Purchase Sell-Through page family. Runs every
+ * 15 minutes; each tick does a short forward poll from the per-dealer
+ * highwater AND 30 days of backwards backfill until the dealer's
+ * store-opening date is reached. PO volume per dealer is small
+ * (10–30 POs/day) so 30 days/tick is comfortably under any RPC limit
+ * and walks ~1 year of history in ~13 ticks.
+ */
+export const SWEED_PURCHASES_INGEST_DEFAULT_SCHEDULE_WINDOWS: ReadonlyArray<
+  Omit<ConfigWorkerScheduleWindow, 'id'>
+> = [
+  {
+    weekdayMask: WEEKDAY_MASK_ALL,
+    windowStartMinute: 0,
+    windowEndMinute: 1440,
+    intervalMinutes: 15,
+    paused: false,
+    notes:
+      'Forward-poll Sweed for new/updated POs + 30 days of historical backfill, every 15 minutes.',
+  },
+]
+
+/**
  * Default schedule for the customer-of-record address enrichment worker
  * (A5 of FreshlyBakedNYC/automation#25).
  *
