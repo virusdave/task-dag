@@ -47,10 +47,12 @@ export const CatalogPurchaseListSortSchema = z.enum([
   'distributorName',
   'unitsSold',
   'unitsRemaining',
+  'unitsAdjusted',
   'sellThroughPercent',
   'realisedCostIfPaidForSoldOnlyDollars',
   'costOfSoldItemsDollars',
   'costOfRemainingItemsDollars',
+  'costOfAdjustedItemsDollars',
   'currentListPriceOutstandingDollars',
 ])
 export type CatalogPurchaseListSort = z.infer<typeof CatalogPurchaseListSortSchema>
@@ -121,12 +123,23 @@ export const CatalogPurchaseListRowSchema = z.object({
   unitsOrdered: z.number(),
   unitsSold: z.number(),
   unitsRemaining: z.number(),
+  // ordered - sold - remaining (clamped >= 0). Units of the PO that
+  // are neither still on hand nor in a sold invoice — i.e. shrinkage /
+  // breakage / destruction / return-to-distributor / sample-out /
+  // unaccounted adjustments. Only meaningful for matched lines.
+  unitsAdjusted: z.number(),
   sellThroughPercent: z.number().nullable(),
 
-  // The four headline cash summaries the list page exposes per row.
+  // The headline cash summaries the list page exposes per row. They
+  // reconcile (modulo unmatched lines / cost edits):
+  //   cost_of_sold + cost_of_remaining + cost_of_adjusted ≈ ordered × unit_cost
   costOfSoldItemsDollars: z.number(),
   realisedCostIfPaidForSoldOnlyDollars: z.number(),
   costOfRemainingItemsDollars: z.number(),
+  // Realised cost (at PO unit cost) of the adjusted / non-sold units
+  // — i.e. money paid out for product that did not sell and is no
+  // longer on hand.
+  costOfAdjustedItemsDollars: z.number(),
   currentListPriceOutstandingDollars: z.number(),
 
   // Sold revenue (gross of discount). Lets the operator eyeball
@@ -146,11 +159,13 @@ export const CatalogPurchaseListHeadlineSchema = z.object({
   costOfSoldItemsDollars: z.number(),
   realisedCostIfPaidForSoldOnlyDollars: z.number(),
   costOfRemainingItemsDollars: z.number(),
+  costOfAdjustedItemsDollars: z.number(),
   currentListPriceOutstandingDollars: z.number(),
   soldRevenueDollars: z.number(),
   unitsOrdered: z.number(),
   unitsSold: z.number(),
   unitsRemaining: z.number(),
+  unitsAdjusted: z.number(),
   purchaseCount: z.number().int(),
   lineCount: z.number().int(),
 })
@@ -216,6 +231,14 @@ export const CatalogPurchaseLineSellThroughSchema = z.object({
   orderedUnits: z.number(),
   unitsSoldToDate: z.number(),
   remainingUnits: z.number(),
+  // ordered - sold - remaining (clamped >= 0). Units of this PO line
+  // that are neither still on hand nor in a sold invoice — i.e.
+  // shrinkage / breakage / destruction / return-to-distributor /
+  // samples / unaccounted adjustments. Only meaningful when the line
+  // is package-matched (we can see current on-hand); for unmatched
+  // lines this is reported as 0 because we have no qty signal beyond
+  // ordered.
+  unitsAdjusted: z.number(),
   sellThroughPercent: z.number().nullable(),
   daysSinceReceived: z.number().nullable(),
 
@@ -232,6 +255,10 @@ export const CatalogPurchaseLineSellThroughSchema = z.object({
   // are honoured by the as-of join.
   costOfSoldItemsDollars: z.number(),
   costOfRemainingItemsDollars: z.number(),
+  // PO unit_cost × unitsAdjusted. The dollar value of stock that was
+  // paid for and is gone from the package without showing up as a
+  // retail sale.
+  costOfAdjustedItemsDollars: z.number(),
   currentListPriceOutstandingDollars: z.number(),
 
   currentListPriceDollars: z.number().nullable(),
@@ -248,11 +275,13 @@ export const CatalogPurchaseSellThroughSummarySchema = z.object({
   costOfSoldItemsDollars: z.number(),
   realisedCostIfPaidForSoldOnlyDollars: z.number(),
   costOfRemainingItemsDollars: z.number(),
+  costOfAdjustedItemsDollars: z.number(),
   currentListPriceOutstandingDollars: z.number(),
   soldRevenueDollars: z.number(),
   unitsOrdered: z.number(),
   unitsSold: z.number(),
   unitsRemaining: z.number(),
+  unitsAdjusted: z.number(),
   matchedLineCount: z.number().int(),
   totalLineCount: z.number().int(),
 })

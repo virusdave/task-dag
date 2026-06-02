@@ -169,6 +169,22 @@ const PER_LINE_CTE = `
              then coalesce(pc.package_current_qty, 0)
            else greatest(tl.ordered_units - coalesce(s.units_sold_to_date, 0), 0)
          end as remaining_units,
+         -- ordered - sold - on-hand = units that were paid for but
+         -- vanished from the package without showing up in a sale
+         -- (shrinkage, breakage, destruction, return-to-distributor,
+         -- samples). Only meaningful for matched lines; clamped >= 0
+         -- so cross-PO pooling that briefly drives remaining > ordered
+         -- doesn't produce a negative "adjusted" entry.
+         case
+           when cardinality(tl.matched_inventory_item_ids) > 0
+             then greatest(
+               tl.ordered_units
+                 - coalesce(s.units_sold_to_date, 0)
+                 - coalesce(pc.package_current_qty, 0),
+               0
+             )
+           else 0
+         end as adjusted_units,
          s.last_sold_at,
          coalesce(tl.list_price_dollars_at_ingest, 0) as current_list_price_dollars
     from target_lines tl
@@ -223,6 +239,7 @@ interface PerLineRow {
   cost_of_sold_items_dollars: number | string
   realised_cost_if_paid_for_sold_only_dollars: number | string
   remaining_units: number | string
+  adjusted_units: number | string
   last_sold_at: string | Date | null
   current_list_price_dollars: number | string
 }
@@ -231,6 +248,7 @@ function rowToLine(r: PerLineRow): CatalogPurchaseLineSellThrough {
   const ordered = asNum(r.ordered_units)
   const sold = asNum(r.units_sold_to_date)
   const remaining = asNum(r.remaining_units)
+  const adjusted = asNum(r.adjusted_units)
   const sellThroughPercent = ordered > 0 ? Math.min(100, (sold / ordered) * 100) : null
   const unitCost = asNullableNum(r.unit_cost_dollars) ?? 0
   const listPrice = asNullableNum(r.current_list_price_dollars) ?? 0
@@ -257,6 +275,7 @@ function rowToLine(r: PerLineRow): CatalogPurchaseLineSellThrough {
     orderedUnits: ordered,
     unitsSoldToDate: sold,
     remainingUnits: remaining,
+    unitsAdjusted: adjusted,
     sellThroughPercent,
     daysSinceReceived,
     unitCostDollars: asNullableNum(r.unit_cost_dollars),
@@ -265,6 +284,7 @@ function rowToLine(r: PerLineRow): CatalogPurchaseLineSellThrough {
     realisedCostIfPaidForSoldOnlyDollars: asNum(r.realised_cost_if_paid_for_sold_only_dollars),
     costOfSoldItemsDollars: asNum(r.cost_of_sold_items_dollars),
     costOfRemainingItemsDollars: unitCost * remaining,
+    costOfAdjustedItemsDollars: unitCost * adjusted,
     currentListPriceOutstandingDollars: listPrice * remaining,
     currentListPriceDollars: listPrice > 0 ? listPrice : null,
     grossMarginPercent,
@@ -288,10 +308,12 @@ const VALID_SORT_COLUMNS: Record<
   distributorName: 'distributor_name',
   unitsSold: 'units_sold',
   unitsRemaining: 'units_remaining',
+  unitsAdjusted: 'units_adjusted',
   sellThroughPercent: 'sell_through_percent',
   realisedCostIfPaidForSoldOnlyDollars: 'realised_cost_if_paid_for_sold_only_dollars',
   costOfSoldItemsDollars: 'cost_of_sold_items_dollars',
   costOfRemainingItemsDollars: 'cost_of_remaining_items_dollars',
+  costOfAdjustedItemsDollars: 'cost_of_adjusted_items_dollars',
   currentListPriceOutstandingDollars: 'current_list_price_outstanding_dollars',
 }
 
@@ -421,12 +443,14 @@ export async function getCatalogPurchaseList(
              sum(ordered_units) as units_ordered,
              sum(units_sold_to_date) as units_sold,
              sum(remaining_units) as units_remaining,
+             sum(adjusted_units) as units_adjusted,
              case when sum(ordered_units) > 0
                   then least(100, sum(units_sold_to_date) / sum(ordered_units) * 100)
                   else null end as sell_through_percent,
              sum(cost_of_sold_items_dollars) as cost_of_sold_items_dollars,
              sum(realised_cost_if_paid_for_sold_only_dollars) as realised_cost_if_paid_for_sold_only_dollars,
              sum(coalesce(unit_cost_dollars,0) * remaining_units) as cost_of_remaining_items_dollars,
+             sum(coalesce(unit_cost_dollars,0) * adjusted_units) as cost_of_adjusted_items_dollars,
              sum(coalesce(current_list_price_dollars,0) * remaining_units) as current_list_price_outstanding_dollars,
              sum(sold_revenue_dollars) as sold_revenue_dollars,
              count(*)::int as line_count,
@@ -471,9 +495,11 @@ export async function getCatalogPurchaseList(
              sum(ordered_units) as units_ordered,
              sum(units_sold_to_date) as units_sold,
              sum(remaining_units) as units_remaining,
+             sum(adjusted_units) as units_adjusted,
              sum(cost_of_sold_items_dollars) as cost_of_sold_items_dollars,
              sum(realised_cost_if_paid_for_sold_only_dollars) as realised_cost_if_paid_for_sold_only_dollars,
              sum(coalesce(unit_cost_dollars,0) * remaining_units) as cost_of_remaining_items_dollars,
+             sum(coalesce(unit_cost_dollars,0) * adjusted_units) as cost_of_adjusted_items_dollars,
              sum(coalesce(current_list_price_dollars,0) * remaining_units) as current_list_price_outstanding_dollars,
              sum(sold_revenue_dollars) as sold_revenue_dollars,
              count(*) as line_count
@@ -486,11 +512,13 @@ export async function getCatalogPurchaseList(
            coalesce(sum(cost_of_sold_items_dollars), 0) as cost_of_sold_items_dollars,
            coalesce(sum(realised_cost_if_paid_for_sold_only_dollars), 0) as realised_cost_if_paid_for_sold_only_dollars,
            coalesce(sum(cost_of_remaining_items_dollars), 0) as cost_of_remaining_items_dollars,
+           coalesce(sum(cost_of_adjusted_items_dollars), 0) as cost_of_adjusted_items_dollars,
            coalesce(sum(current_list_price_outstanding_dollars), 0) as current_list_price_outstanding_dollars,
            coalesce(sum(sold_revenue_dollars), 0) as sold_revenue_dollars,
            coalesce(sum(units_ordered), 0) as units_ordered,
            coalesce(sum(units_sold), 0) as units_sold,
            coalesce(sum(units_remaining), 0) as units_remaining,
+           coalesce(sum(units_adjusted), 0) as units_adjusted,
            coalesce(sum(line_count), 0)::int as line_count,
            count(*)::int as purchase_count
       from agg
@@ -532,11 +560,13 @@ function emptyHeadline(): CatalogPurchaseListHeadline {
     costOfSoldItemsDollars: 0,
     realisedCostIfPaidForSoldOnlyDollars: 0,
     costOfRemainingItemsDollars: 0,
+    costOfAdjustedItemsDollars: 0,
     currentListPriceOutstandingDollars: 0,
     soldRevenueDollars: 0,
     unitsOrdered: 0,
     unitsSold: 0,
     unitsRemaining: 0,
+    unitsAdjusted: 0,
     purchaseCount: 0,
     lineCount: 0,
   }
@@ -553,11 +583,13 @@ function rowToHeadline(r: unknown): CatalogPurchaseListHeadline {
     costOfSoldItemsDollars: asNum(row.cost_of_sold_items_dollars),
     realisedCostIfPaidForSoldOnlyDollars: asNum(row.realised_cost_if_paid_for_sold_only_dollars),
     costOfRemainingItemsDollars: asNum(row.cost_of_remaining_items_dollars),
+    costOfAdjustedItemsDollars: asNum(row.cost_of_adjusted_items_dollars),
     currentListPriceOutstandingDollars: asNum(row.current_list_price_outstanding_dollars),
     soldRevenueDollars: asNum(row.sold_revenue_dollars),
     unitsOrdered: asNum(row.units_ordered),
     unitsSold: asNum(row.units_sold),
     unitsRemaining: asNum(row.units_remaining),
+    unitsAdjusted: asNum(row.units_adjusted),
     purchaseCount: asInt(row.purchase_count),
     lineCount: asInt(row.line_count),
   }
@@ -619,10 +651,12 @@ function rowAggToListRow(r: unknown): CatalogPurchaseListRow {
     unitsOrdered: asNum(row.units_ordered),
     unitsSold: asNum(row.units_sold),
     unitsRemaining: asNum(row.units_remaining),
+    unitsAdjusted: asNum(row.units_adjusted),
     sellThroughPercent: asNullableNum(row.sell_through_percent),
     costOfSoldItemsDollars: asNum(row.cost_of_sold_items_dollars),
     realisedCostIfPaidForSoldOnlyDollars: asNum(row.realised_cost_if_paid_for_sold_only_dollars),
     costOfRemainingItemsDollars: asNum(row.cost_of_remaining_items_dollars),
+    costOfAdjustedItemsDollars: asNum(row.cost_of_adjusted_items_dollars),
     currentListPriceOutstandingDollars: asNum(row.current_list_price_outstanding_dollars),
     soldRevenueDollars: asNum(row.sold_revenue_dollars),
     lineCount: asInt(row.line_count),
@@ -700,21 +734,25 @@ function aggregateLinesToSummary(
   let costOfSold = 0
   let realisedIfSoldOnly = 0
   let costOfRemaining = 0
+  let costOfAdjusted = 0
   let listOutstanding = 0
   let soldRevenue = 0
   let unitsOrdered = 0
   let unitsSold = 0
   let unitsRemaining = 0
+  let unitsAdjusted = 0
   let matched = 0
   for (const l of lines) {
     costOfSold += l.costOfSoldItemsDollars
     realisedIfSoldOnly += l.realisedCostIfPaidForSoldOnlyDollars
     costOfRemaining += l.costOfRemainingItemsDollars
+    costOfAdjusted += l.costOfAdjustedItemsDollars
     listOutstanding += l.currentListPriceOutstandingDollars
     soldRevenue += l.soldRevenueDollars
     unitsOrdered += l.orderedUnits
     unitsSold += l.unitsSoldToDate
     unitsRemaining += l.remainingUnits
+    unitsAdjusted += l.unitsAdjusted
     if (l.matchedInventoryItemIds.length > 0) matched += 1
   }
   return {
@@ -722,11 +760,13 @@ function aggregateLinesToSummary(
     costOfSoldItemsDollars: costOfSold,
     realisedCostIfPaidForSoldOnlyDollars: realisedIfSoldOnly,
     costOfRemainingItemsDollars: costOfRemaining,
+    costOfAdjustedItemsDollars: costOfAdjusted,
     currentListPriceOutstandingDollars: listOutstanding,
     soldRevenueDollars: soldRevenue,
     unitsOrdered,
     unitsSold,
     unitsRemaining,
+    unitsAdjusted,
     matchedLineCount: matched,
     totalLineCount: lines.length,
   }

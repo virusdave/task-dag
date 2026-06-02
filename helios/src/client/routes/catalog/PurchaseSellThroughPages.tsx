@@ -47,11 +47,13 @@ const SORT_LABELS: Record<CatalogPurchaseListSort, string> = {
   distributorName: 'Distributor',
   unitsSold: 'Units sold',
   unitsRemaining: 'Units left',
+  unitsAdjusted: 'Units adjusted',
   sellThroughPercent: '% sold',
   realisedCostIfPaidForSoldOnlyDollars: 'Paid-if-sold-only',
   costOfSoldItemsDollars: 'Cost of sold (realised)',
-  costOfRemainingItemsDollars: 'Cost remaining',
-  currentListPriceOutstandingDollars: 'List remaining',
+  costOfRemainingItemsDollars: 'Cost in stock',
+  costOfAdjustedItemsDollars: 'Cost adjusted',
+  currentListPriceOutstandingDollars: 'List in stock',
 }
 
 export function PurchaseSellThroughListPage(): JSX.Element {
@@ -185,21 +187,38 @@ export function PurchaseSellThroughListPage(): JSX.Element {
             <strong>PO total</strong> — Sweed's <code>totalPayAmount</code> for the purchase.
           </li>
           <li>
-            <strong>Paid-if-sold-only</strong> — sum over lines of <code>PO unit cost × units sold to date</code>.
-            The answer to "if I paid just for what has sold so far, what would I be paying?".
+            <strong>Sold / Left / Adj</strong> — units of this PO that have been sold,
+            are still on hand in the matched package(s), and are unaccounted for
+            (<code>ordered − sold − on-hand</code>, clamped ≥ 0). For matched lines
+            these three numbers should add to roughly <em>ordered</em>; any gap is
+            the adjustment bucket (shrinkage / breakage / destruction /
+            return-to-distributor / samples / Metrc disposal). For unmatched lines
+            we report adjustments as 0 because we have no on-hand signal.
           </li>
           <li>
-            <strong>Cost of sold (realised)</strong> — sum over each retail invoice line of
+            <strong>Cost sold</strong> — sum over each retail invoice line of
             <code>units × wholesale cost-as-of pay time</code> (falling back to PO unit cost
             when the package snapshot is missing). Closer to true COGS than "PO unit × units sold"
             because mid-PO restocks / cost corrections are honoured.
           </li>
           <li>
-            <strong>Cost remaining</strong> — <code>PO unit cost × units remaining on hand</code>
+            <strong>Cost in stock</strong> — <code>PO unit cost × units still on hand</code>
             for matched packages, or <code>PO unit × (ordered − sold)</code> for unmatched lines.
           </li>
           <li>
-            <strong>List remaining</strong> — <code>current catalog list price × units remaining</code>.
+            <strong>Cost adjusted</strong> — <code>PO unit cost × units adjusted</code>. The
+            dollars paid for product that did not sell and is no longer on hand. Bolded when
+            non-zero so write-offs stand out at a glance.
+          </li>
+          <li>
+            <strong>List in stock</strong> — <code>current catalog list price × units still on hand</code>.
+            What the remaining stock would ring up if it all sold at today's list price.
+          </li>
+          <li>
+            <strong>Paid-if-sold-only</strong> — <code>PO unit cost × units sold</code>. The
+            simpler "if I paid only for what's sold so far, what would I be paying?" framing.
+            Cost sold (above) is the same idea using the package's actual cost-as-of pay
+            time, which is the better number when distributor costs change mid-PO.
           </li>
           <li>
             Lines are matched to inventory packages via Metrc tag (<code>externalTrackCode</code>);
@@ -226,19 +245,35 @@ function HeadlineKpiStrip(props: {
     >
       <Kpi label="PO total" value={fmtUsd(headline.poTotalDollars)} />
       <Kpi
-        label="Paid-if-sold-only"
-        value={fmtUsd(headline.realisedCostIfPaidForSoldOnlyDollars)}
+        label="Cost of sold (realised)"
+        value={fmtUsd(headline.costOfSoldItemsDollars)}
         sub={
           headline.poTotalDollars > 0
-            ? `${pct(headline.realisedCostIfPaidForSoldOnlyDollars / headline.poTotalDollars)} of PO total`
+            ? `${pct(headline.costOfSoldItemsDollars / headline.poTotalDollars)} of PO total`
             : null
         }
       />
-      <Kpi label="Cost of sold (realised)" value={fmtUsd(headline.costOfSoldItemsDollars)} />
-      <Kpi label="Sold revenue" value={fmtUsd(headline.soldRevenueDollars)} />
-      <Kpi label="Cost remaining" value={fmtUsd(headline.costOfRemainingItemsDollars)} />
       <Kpi
-        label="List remaining"
+        label="Cost in stock"
+        value={fmtUsd(headline.costOfRemainingItemsDollars)}
+        sub={
+          headline.poTotalDollars > 0
+            ? `${pct(headline.costOfRemainingItemsDollars / headline.poTotalDollars)} of PO total`
+            : null
+        }
+      />
+      <Kpi
+        label="Cost adjusted (non-sold)"
+        value={fmtUsd(headline.costOfAdjustedItemsDollars)}
+        sub={
+          headline.poTotalDollars > 0
+            ? `${pct(headline.costOfAdjustedItemsDollars / headline.poTotalDollars)} of PO total`
+            : null
+        }
+      />
+      <Kpi label="Sold revenue" value={fmtUsd(headline.soldRevenueDollars)} />
+      <Kpi
+        label="List in stock"
         value={fmtUsd(headline.currentListPriceOutstandingDollars)}
         sub={
           headline.costOfRemainingItemsDollars > 0
@@ -247,8 +282,17 @@ function HeadlineKpiStrip(props: {
         }
       />
       <Kpi
-        label="Units sold / left"
-        value={`${fmtInt(headline.unitsSold)} / ${fmtInt(headline.unitsRemaining)}`}
+        label="Paid-if-sold-only"
+        value={fmtUsd(headline.realisedCostIfPaidForSoldOnlyDollars)}
+        sub={
+          headline.poTotalDollars > 0
+            ? `${pct(headline.realisedCostIfPaidForSoldOnlyDollars / headline.poTotalDollars)} of PO total`
+            : null
+        }
+      />
+      <Kpi
+        label="Units sold / left / adj"
+        value={`${fmtInt(headline.unitsSold)} / ${fmtInt(headline.unitsRemaining)} / ${fmtInt(headline.unitsAdjusted)}`}
         sub={
           headline.unitsOrdered > 0
             ? `${pct(headline.unitsSold / headline.unitsOrdered)} of ${fmtInt(headline.unitsOrdered)} ordered`
@@ -366,13 +410,18 @@ function PurchasesTable(props: {
           <tr>
             <th>Site / {sortHeader('deliveryDate', 'Delivery')}</th>
             <th>{sortHeader('distributorName', 'Distributor')} / PO</th>
-            <th>{SORT_LABELS.poTotalDollars && sortHeader('poTotalDollars', 'PO total')}</th>
-            <th>{sortHeader('unitsSold', 'Sold')} / {sortHeader('unitsRemaining', 'Left')}</th>
+            <th>{sortHeader('poTotalDollars', 'PO total')}</th>
+            <th>
+              {sortHeader('unitsSold', 'Sold')} /{' '}
+              {sortHeader('unitsRemaining', 'Left')} /{' '}
+              {sortHeader('unitsAdjusted', 'Adj')}
+            </th>
             <th>{sortHeader('sellThroughPercent', '% sold')}</th>
+            <th>{sortHeader('costOfSoldItemsDollars', 'Cost sold')}</th>
+            <th>{sortHeader('costOfRemainingItemsDollars', 'Cost in stock')}</th>
+            <th>{sortHeader('costOfAdjustedItemsDollars', 'Cost adjusted')}</th>
+            <th>{sortHeader('currentListPriceOutstandingDollars', 'List in stock')}</th>
             <th>{sortHeader('realisedCostIfPaidForSoldOnlyDollars', 'Paid-if-sold-only')}</th>
-            <th>{sortHeader('costOfSoldItemsDollars', 'Cost of sold')}</th>
-            <th>{sortHeader('costOfRemainingItemsDollars', 'Cost remaining')}</th>
-            <th>{sortHeader('currentListPriceOutstandingDollars', 'List remaining')}</th>
             <th>{sortHeader('paymentDueDate', 'Payment due')}</th>
             <th>Status</th>
           </tr>
@@ -410,13 +459,21 @@ function PurchasesTable(props: {
                 </td>
                 <td className="num">{fmtUsd(row.poTotalDollars)}</td>
                 <td className="num">
-                  {fmtInt(row.unitsSold)} / {fmtInt(row.unitsRemaining)}
+                  {fmtInt(row.unitsSold)} / {fmtInt(row.unitsRemaining)} /{' '}
+                  {row.unitsAdjusted > 0 ? <strong>{fmtInt(row.unitsAdjusted)}</strong> : fmtInt(row.unitsAdjusted)}
                 </td>
                 <td className="num">{row.sellThroughPercent !== null ? pct(row.sellThroughPercent / 100) : '—'}</td>
-                <td className="num">{fmtUsd(row.realisedCostIfPaidForSoldOnlyDollars)}</td>
                 <td className="num">{fmtUsd(row.costOfSoldItemsDollars)}</td>
                 <td className="num">{fmtUsd(row.costOfRemainingItemsDollars)}</td>
+                <td className="num">
+                  {row.costOfAdjustedItemsDollars > 0 ? (
+                    <strong>{fmtUsd(row.costOfAdjustedItemsDollars)}</strong>
+                  ) : (
+                    fmtUsd(row.costOfAdjustedItemsDollars)
+                  )}
+                </td>
                 <td className="num">{fmtUsd(row.currentListPriceOutstandingDollars)}</td>
+                <td className="num">{fmtUsd(row.realisedCostIfPaidForSoldOnlyDollars)}</td>
                 <td>{row.paymentDueDate ?? '—'}</td>
                 <td>
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '0.1rem' }}>
@@ -486,6 +543,35 @@ export function PurchaseSellThroughDetailPage(): JSX.Element {
       >
         <Kpi label="PO total" value={fmtUsd(summary.poTotalDollars ?? 0)} />
         <Kpi
+          label="Cost of sold (realised)"
+          value={fmtUsd(summary.costOfSoldItemsDollars)}
+          sub={
+            summary.poTotalDollars && summary.poTotalDollars > 0
+              ? `${pct(summary.costOfSoldItemsDollars / summary.poTotalDollars)} of PO`
+              : null
+          }
+        />
+        <Kpi
+          label="Cost in stock"
+          value={fmtUsd(summary.costOfRemainingItemsDollars)}
+          sub={
+            summary.poTotalDollars && summary.poTotalDollars > 0
+              ? `${pct(summary.costOfRemainingItemsDollars / summary.poTotalDollars)} of PO`
+              : null
+          }
+        />
+        <Kpi
+          label="Cost adjusted (non-sold)"
+          value={fmtUsd(summary.costOfAdjustedItemsDollars)}
+          sub={
+            summary.poTotalDollars && summary.poTotalDollars > 0
+              ? `${pct(summary.costOfAdjustedItemsDollars / summary.poTotalDollars)} of PO`
+              : null
+          }
+        />
+        <Kpi label="Sold revenue" value={fmtUsd(summary.soldRevenueDollars)} />
+        <Kpi label="List in stock" value={fmtUsd(summary.currentListPriceOutstandingDollars)} />
+        <Kpi
           label="Paid-if-sold-only"
           value={fmtUsd(summary.realisedCostIfPaidForSoldOnlyDollars)}
           sub={
@@ -494,13 +580,9 @@ export function PurchaseSellThroughDetailPage(): JSX.Element {
               : null
           }
         />
-        <Kpi label="Cost of sold (realised)" value={fmtUsd(summary.costOfSoldItemsDollars)} />
-        <Kpi label="Sold revenue" value={fmtUsd(summary.soldRevenueDollars)} />
-        <Kpi label="Cost remaining" value={fmtUsd(summary.costOfRemainingItemsDollars)} />
-        <Kpi label="List remaining" value={fmtUsd(summary.currentListPriceOutstandingDollars)} />
         <Kpi
-          label="Units sold / left"
-          value={`${fmtInt(summary.unitsSold)} / ${fmtInt(summary.unitsRemaining)}`}
+          label="Units sold / left / adj"
+          value={`${fmtInt(summary.unitsSold)} / ${fmtInt(summary.unitsRemaining)} / ${fmtInt(summary.unitsAdjusted)}`}
           sub={summary.unitsOrdered > 0 ? `${pct(summary.unitsSold / summary.unitsOrdered)} of ${fmtInt(summary.unitsOrdered)} ordered` : null}
         />
         <Kpi
@@ -519,13 +601,15 @@ export function PurchaseSellThroughDetailPage(): JSX.Element {
               <th>Ordered</th>
               <th>Sold</th>
               <th>Left</th>
+              <th>Adj</th>
               <th>% sold</th>
               <th>Days since recv'd</th>
               <th>Unit cost</th>
               <th>Sold revenue</th>
-              <th>Paid-if-sold-only</th>
-              <th>Cost remaining</th>
-              <th>List remaining</th>
+              <th>Cost sold</th>
+              <th>Cost in stock</th>
+              <th>Cost adjusted</th>
+              <th>List in stock</th>
               <th>GM%</th>
               <th>Match</th>
             </tr>
@@ -552,13 +636,23 @@ export function PurchaseSellThroughDetailPage(): JSX.Element {
                   <td className="num">{fmtInt(line.unitsSoldToDate)}</td>
                   <td className="num">{fmtInt(line.remainingUnits)}</td>
                   <td className="num">
+                    {line.unitsAdjusted > 0 ? <strong>{fmtInt(line.unitsAdjusted)}</strong> : fmtInt(line.unitsAdjusted)}
+                  </td>
+                  <td className="num">
                     {line.sellThroughPercent !== null ? pct(line.sellThroughPercent / 100) : '—'}
                   </td>
                   <td className="num">{line.daysSinceReceived !== null ? line.daysSinceReceived : '—'}</td>
                   <td className="num">{fmtUsd(line.unitCostDollars ?? 0)}</td>
                   <td className="num">{fmtUsd(line.soldRevenueDollars)}</td>
-                  <td className="num">{fmtUsd(line.realisedCostIfPaidForSoldOnlyDollars)}</td>
+                  <td className="num">{fmtUsd(line.costOfSoldItemsDollars)}</td>
                   <td className="num">{fmtUsd(line.costOfRemainingItemsDollars)}</td>
+                  <td className="num">
+                    {line.costOfAdjustedItemsDollars > 0 ? (
+                      <strong>{fmtUsd(line.costOfAdjustedItemsDollars)}</strong>
+                    ) : (
+                      fmtUsd(line.costOfAdjustedItemsDollars)
+                    )}
+                  </td>
                   <td className="num">{fmtUsd(line.currentListPriceOutstandingDollars)}</td>
                   <td className="num">{line.grossMarginPercent !== null ? line.grossMarginPercent.toFixed(1) + '%' : '—'}</td>
                   <td>
@@ -592,6 +686,14 @@ export function PurchaseSellThroughDetailPage(): JSX.Element {
             <strong>Remaining units</strong> for a matched line is the
             current on-hand qty across all matched packages. For an
             unmatched line it's <code>ordered − sold</code> (best effort).
+          </li>
+          <li>
+            <strong>Adjusted units</strong> is <code>ordered − sold − on-hand</code>
+            (clamped ≥ 0). This is the bucket that catches inventory adjustments
+            that reduced the package's stock without showing up as a retail sale
+            — shrinkage, breakage, destruction, returns to distributor, samples,
+            Metrc disposals, and any other Sweed inventory adjustment. Bolded
+            on the line table when non-zero. Reported as 0 for unmatched lines.
           </li>
           <li>
             Click any line's product name to open a per-item detail page in
@@ -672,6 +774,15 @@ export function PurchaseSellThroughItemPage(): JSX.Element {
         <Kpi label="Ordered" value={fmtInt(line.orderedUnits)} />
         <Kpi label="Sold" value={fmtInt(line.unitsSoldToDate)} />
         <Kpi label="Left" value={fmtInt(line.remainingUnits)} />
+        <Kpi
+          label="Adjusted (non-sold)"
+          value={fmtInt(line.unitsAdjusted)}
+          sub={
+            line.orderedUnits > 0 && line.unitsAdjusted > 0
+              ? `${pct(line.unitsAdjusted / line.orderedUnits)} of ordered`
+              : null
+          }
+        />
         <Kpi label="% sold" value={line.sellThroughPercent !== null ? pct(line.sellThroughPercent / 100) : '—'} />
         <Kpi label="Days since recv'd" value={line.daysSinceReceived !== null ? String(line.daysSinceReceived) : '—'} />
         <Kpi label="Velocity (units/day, 30d)" value={kpis.velocityUnitsPerDay30d !== null ? kpis.velocityUnitsPerDay30d.toFixed(2) : '—'} />
@@ -681,8 +792,10 @@ export function PurchaseSellThroughItemPage(): JSX.Element {
         <Kpi label="Unit cost" value={fmtUsd(line.unitCostDollars ?? 0)} />
         <Kpi label="Current list" value={fmtUsd(kpis.currentListPriceDollars ?? 0)} />
         <Kpi label="On hand" value={kpis.currentQtyOnHand !== null ? fmtInt(kpis.currentQtyOnHand) : '—'} />
+        <Kpi label="Cost sold (PO lifetime)" value={fmtUsd(line.costOfSoldItemsDollars)} />
+        <Kpi label="Cost in stock" value={fmtUsd(line.costOfRemainingItemsDollars)} />
+        <Kpi label="Cost adjusted" value={fmtUsd(line.costOfAdjustedItemsDollars)} />
         <Kpi label="Sold revenue (PO lifetime)" value={fmtUsd(line.soldRevenueDollars)} />
-        <Kpi label="Paid-if-sold-only (PO lifetime)" value={fmtUsd(line.realisedCostIfPaidForSoldOnlyDollars)} />
       </div>
 
       <div className="mini-card" style={{ marginBottom: '0.75rem', padding: '0.5rem 0.75rem' }}>
