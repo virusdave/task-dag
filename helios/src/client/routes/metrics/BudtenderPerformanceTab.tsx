@@ -7,11 +7,19 @@ import {
   type BudtenderMissingDataCard,
 } from '../../../shared/contracts/index.js'
 import { loadJson } from '../../app/fetchJson.js'
+import { ControlsSection } from './ControlsSection.js'
 import { niceXTicks, niceYTicks } from './gridlines.js'
 import { HelpIcon } from './MetricChart.js'
 import { RangeNudgeRow } from './RangeNudgeRow.js'
 import { computeCompactDomain } from './scatterAutoZoom.js'
 import { useMetricSelection } from './useMetricSelection.js'
+import {
+  buildStructuredHighlightMatcher,
+  emptyHighlightSelection,
+  HighlightControls,
+  type HighlightDimensionSpec,
+  type HighlightSelectionState,
+} from './HighlightControls.js'
 
 // v1.4 V4'4: synthetic metric id for the Budtender Advanced cashier
 // scatter (this panel is served by /api/budtender-analytics, not the
@@ -975,7 +983,14 @@ function CashierScatterCard({ data }: { data: BudtenderAnalyticsResponse }) {
   const [yId, setYId] = useState<string>('avgOrderValue')
   const [colourId, setColourId] = useState<string>('samePctRank')
   const [sizeId, setSizeId] = useState<string>('transactions')
+  // Issue #38 / task A5: structured Highlight section. `highlight`
+  // remains the free-text input (folded into the matcher); the new
+  // `highlightState` carries the structured chip selection across
+  // the Status / Drawer dims.
   const [highlight, setHighlight] = useState<string>('')
+  const [highlightState, setHighlightState] = useState<HighlightSelectionState>(
+    () => emptyHighlightSelection(),
+  )
 
   // v1.4 V4'4: URL-backed drill selection. Escape clears at the
   // window level. The scatter dot click handler writes
@@ -1021,7 +1036,18 @@ function CashierScatterCard({ data }: { data: BudtenderAnalyticsResponse }) {
     [colourId],
   )
   const sizeDef = useMemo(() => SIZE_AXES.find((a) => a.id === sizeId) ?? SIZE_AXES[0]!, [sizeId])
-  const matcher = useMemo(() => buildCashierMatcher(highlight), [highlight])
+  // Combined matcher: structured chips AND free-text. Pure helper
+  // returns null when neither is engaged, matching the legacy "no
+  // dimming" UX.
+  const matcher = useMemo(
+    () =>
+      buildStructuredHighlightMatcher(
+        CASHIER_HIGHLIGHT_DIMS,
+        highlightState,
+        highlight,
+      ),
+    [highlightState, highlight],
+  )
   return (
     <article className="metric-chart-card">
       <header className="metric-chart-header">
@@ -1074,18 +1100,25 @@ function CashierScatterCard({ data }: { data: BudtenderAnalyticsResponse }) {
               ))}
             </select>
           </label>
-          <label className="catalog-highlight-label" title="Substring match against cashier name or ID. Matched dots glow on top, others dim.">
-            highlight{' '}
-            <input
-              type="search"
-              value={highlight}
-              placeholder="name or id"
-              onChange={(e) => setHighlight(e.target.value)}
-              className="catalog-highlight-input"
-            />
-          </label>
         </div>
       </header>
+      {/* Structured Highlight section (issue #38 / task A5). Open by
+          default on desktop, collapsed on mobile so the chip row
+          doesn't push the scatter off-screen on phones. Renders
+          chips for Status / Drawer-match, plus the free-text input
+          that substring-matches cashier name / id (cashier identity
+          dim contributes its fields to the free-text haystack). */}
+      <ControlsSection title="Highlight" defaultOpen="desktop-only">
+        <HighlightControls
+          dims={CASHIER_HIGHLIGHT_DIMS}
+          state={highlightState}
+          setState={setHighlightState}
+          filteredPoints={data.cashiers}
+          freeText={highlight}
+          setFreeText={setHighlight}
+          freeTextPlaceholder="name or id"
+        />
+      </ControlsSection>
       {/* v1.4 V4'4: surface the currently-drilled cashier directly
           under the scatter so the operator never sees the 2px stroke
           highlight without an explanatory readout + clear button. */}
@@ -1136,6 +1169,72 @@ function buildCashierMatcher(
     return terms.every((t) => hay.includes(t))
   }
 }
+
+// ---------------------------------------------------------------------------
+// Structured-highlight dimensions for the cashier scatter (issue #38).
+//
+// The cashier dataset is heavily aggregated, so there are far fewer
+// categorical dims than the catalog scatter. Two natural dims live in
+// the BudtenderCashierRow itself; the rest of the page already exposes
+// the obvious filter dims (sites / date range) at the page level via
+// the standard preset chip strip.
+//
+// Status:  Sweed staff_directory_cache.user_status. 0 / null = active,
+//          any non-zero = disabled/terminated (org-wide convention).
+//          Useful for hiding ex-employees from a productivity scatter.
+// Drawer:  hasDrawerMatch. Cashiers without drawer-shift sessions in
+//          the window have null transactionsPerDrawerHour / etc;
+//          operators frequently want to highlight just the matched
+//          set to compare shift-productivity axes apples-to-apples.
+//
+// Free-text continues to substring-match cashierName + cashierId.
+const CASHIER_HIGHLIGHT_DIMS: ReadonlyArray<HighlightDimensionSpec<BudtenderCashierRow>> = [
+  {
+    id: 'status',
+    label: 'Status',
+    getOptions: (rows) => {
+      let active = 0
+      let disabled = 0
+      for (const r of rows) {
+        if (r.userStatus == null || r.userStatus === 0) active += 1
+        else disabled += 1
+      }
+      const out: Array<{ id: string; label: string; itemCount: number }> = []
+      if (active > 0) out.push({ id: 'active', label: 'Active', itemCount: active })
+      if (disabled > 0) out.push({ id: 'disabled', label: 'Disabled', itemCount: disabled })
+      return out
+    },
+    pointKey: (c) => [c.userStatus == null || c.userStatus === 0 ? 'active' : 'disabled'],
+  },
+  {
+    id: 'drawer',
+    label: 'Drawer match',
+    getOptions: (rows) => {
+      let matched = 0
+      let unmatched = 0
+      for (const r of rows) {
+        if (r.hasDrawerMatch) matched += 1
+        else unmatched += 1
+      }
+      const out: Array<{ id: string; label: string; itemCount: number }> = []
+      if (matched > 0) out.push({ id: 'matched', label: 'Has drawer match', itemCount: matched })
+      if (unmatched > 0)
+        out.push({ id: 'unmatched', label: 'No drawer match', itemCount: unmatched })
+      return out
+    },
+    pointKey: (c) => [c.hasDrawerMatch ? 'matched' : 'unmatched'],
+  },
+  {
+    // Cashier identity exposed as a dim so the free-text matcher
+    // built into HighlightControls can OR-match against (name + id).
+    // No chip dropdown is rendered since `getOptions` returns [] —
+    // but `pointKey` IS used by the free-text haystack join.
+    id: 'identity',
+    label: 'Identity',
+    getOptions: () => [],
+    pointKey: (c) => [c.cashierName ?? '', c.cashierId].filter((s) => s.length > 0),
+  },
+]
 
 interface ScatterSvgProps {
   cashiers: ReadonlyArray<BudtenderCashierRow>

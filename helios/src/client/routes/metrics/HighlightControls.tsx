@@ -201,9 +201,18 @@ export function HighlightControls<P>({
     return n
   }, [matcher, filteredPoints])
   const anySelection = highlightSelectionSize(state) > 0 || freeText.trim().length > 0
+  // Filter out dims whose `getOptions(filteredPoints)` returns empty —
+  // we don't want a useless chip dropdown for a dim with nothing to
+  // pick. This includes dims a caller deliberately defined with an
+  // empty getOptions() purely so its `pointKey` participates in the
+  // free-text haystack join (e.g. cashier identity, product SKU).
+  const renderableDims = useMemo(
+    () => dims.filter((d) => d.getOptions(filteredPoints).length > 0),
+    [dims, filteredPoints],
+  )
   return (
     <div className="metrics-highlight-controls">
-      {dims.map((dim) => (
+      {renderableDims.map((dim) => (
         <HighlightDropdown
           key={dim.id}
           dim={dim}
