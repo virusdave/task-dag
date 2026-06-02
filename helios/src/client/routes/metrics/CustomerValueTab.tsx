@@ -583,7 +583,7 @@ function SummaryStrip({
       <Kpi
         label={`Median observed LTV (${basisLabel})`}
         value={fmtMoneyOrDash(data.summary.observedMedianLtvGrossDollars)}
-        help="Median (not mean) lifetime-to-date gross sales per known customer. More robust to whale outliers than the average."
+        help="Median (not mean) lifetime-to-date gross sales per known customer. Less skewed by whale outliers than the mean."
       />
       <Kpi
         label={`Total ${basisLabel.toLowerCase()} (in range)`}

@@ -15,6 +15,7 @@ import {
   ConfigWorkersStockRefreshJobPayloadSchema,
   ConfigWorkersSweedOrdersIngestJobPayloadSchema,
   ConfigWorkersSweedPackageSnapshotsJobPayloadSchema,
+  ConfigWorkersSweedPurchasesIngestJobPayloadSchema,
   ConfigWorkersWeatherDailyIngestJobPayloadSchema,
   ConfigWorkersSweedShiftsIngestJobPayloadSchema,
   ConfigWorkersEnrichDeliveryAddressJobPayloadSchema,
@@ -53,6 +54,7 @@ import { runConfigWorkersStockRefreshJob } from '../jobs/configWorkersStockRefre
 import { runEnrichCustomerAddressJob } from '../jobs/enrichCustomerAddressJob.js'
 import { runConfigWorkersSweedOrdersIngestJob } from '../jobs/configWorkersSweedOrdersIngestJob.js'
 import { runConfigWorkersSweedPackageSnapshotsJob } from '../jobs/configWorkersSweedPackageSnapshotsJob.js'
+import { runConfigWorkersSweedPurchasesIngestJob } from '../jobs/configWorkersSweedPurchasesIngestJob.js'
 import { runIngestWeatherDailyJob } from '../jobs/ingestWeatherDailyJob.js'
 import { runConfigWorkersSweedShiftsIngestJob } from '../jobs/configWorkersSweedShiftsIngestJob.js'
 import { runConfigWorkersEnrichDeliveryAddressJob } from '../jobs/enrichDeliveryAddressJob.js'
@@ -213,6 +215,12 @@ const handlers: Record<JobType, JobHandler> = {
       ConfigWorkersSweedPackageSnapshotsJobPayloadSchema.parse(context.payload),
     )
   },
+  'config.workers.sweed_purchases_ingest': async (context) => {
+    await runConfigWorkersSweedPurchasesIngestJob(
+      context,
+      ConfigWorkersSweedPurchasesIngestJobPayloadSchema.parse(context.payload),
+    )
+  },
   'config.workers.weather_daily_ingest': async (context) => {
     await runIngestWeatherDailyJob(
       context,
@@ -274,6 +282,7 @@ const SWEED_BACKED_JOB_TYPES: ReadonlySet<JobType> = new Set<JobType>([
   'config.workers.stock_refresh',
   'config.workers.sweed_orders_ingest',
   'config.workers.sweed_package_snapshots',
+  'config.workers.sweed_purchases_ingest',
   'config.workers.sweed_shifts_ingest',
   'config.workers.enrich_delivery_address',
   'reconcile.group',

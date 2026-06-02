@@ -157,6 +157,12 @@ export function buildCatalogSidebarSubtree(options?: CatalogSidebarOptions): Tre
       to: buildHeliosModulePath('catalog', 'brand-mapping'),
     },
     buildPendingPurchasesNode(pendingPurchases),
+    {
+      kind: 'leaf',
+      navKey: 'catalog.purchases',
+      label: 'Purchase sell-through',
+      to: buildHeliosModulePath('catalog', 'purchases'),
+    },
     buildImagesAndBarcodesNode(imagesAndBarcodes),
     {
       kind: 'leaf',

@@ -47,6 +47,7 @@ export const JobTypeSchema = z.enum([
   'config.workers.enrich_customer_address',
   'config.workers.sweed_orders_ingest',
   'config.workers.sweed_package_snapshots',
+  'config.workers.sweed_purchases_ingest',
   'config.workers.weather_daily_ingest',
   'config.workers.sweed_shifts_ingest',
   'config.workers.enrich_delivery_address',
@@ -428,6 +429,29 @@ export const ConfigWorkersSweedPackageSnapshotsJobPayloadSchema = z.object({
 })
 export type ConfigWorkersSweedPackageSnapshotsJobPayload = z.infer<
   typeof ConfigWorkersSweedPackageSnapshotsJobPayloadSchema
+>
+
+/**
+ * Sweed purchases ingest worker payload — see the Catalog →
+ * Purchase Sell-Through page family. One scheduler tick = one job
+ * per dealer. The handler forward-polls `store.purchase.order.list`
+ * for the recent overlap window, then `store.purchase.order.get`
+ * for each non-pending PO. Pending POs (orderStatusId = 2) are
+ * intentionally skipped — they're owned by the catalog enrichment
+ * workflow (pending_purchase_*). Each line item is direct-matched
+ * to a sweed_package_snapshots row via externalTrackCode (Metrc tag)
+ * so the sell-through page can join purchase line items to
+ * sweed_orders.raw_json.items[] and compute realised cost-of-sold.
+ */
+export const ConfigWorkersSweedPurchasesIngestJobPayloadSchema = z.object({
+  requestedByUserId: z.number().int().positive().nullable().optional(),
+  siteDealerIds: z.array(z.number().int().positive()).default([]),
+  trigger: z.enum(['manual_run', 'scheduled']).default('scheduled'),
+  /** How many days of historical backfill to walk in this single job. */
+  backfillDays: z.number().int().min(0).max(60).default(1),
+})
+export type ConfigWorkersSweedPurchasesIngestJobPayload = z.infer<
+  typeof ConfigWorkersSweedPurchasesIngestJobPayloadSchema
 >
 
 /**

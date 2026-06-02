@@ -16,6 +16,14 @@ import { CatalogNewEntryPage } from '../routes/catalog/CatalogNewEntryPage.js'
 import { CatalogPage, catalogLoader } from '../routes/catalog/CatalogPage.js'
 import { WhiteGlovePricingPage } from '../routes/catalog/whiteglove/WhiteGlovePricingPage.js'
 import { PendingPurchasesPage, pendingPurchasesLoader } from '../routes/catalog/PendingPurchasesPage.js'
+import {
+  PurchaseSellThroughDetailPage,
+  PurchaseSellThroughItemPage,
+  PurchaseSellThroughListPage,
+  purchaseSellThroughDetailLoader,
+  purchaseSellThroughItemLoader,
+  purchaseSellThroughListLoader,
+} from '../routes/catalog/PurchaseSellThroughPages.js'
 import { ReviewDetailsPage } from '../routes/catalog/ReviewDetailsPage.js'
 import { ClusterProposalsPage } from '../routes/communications/ClusterProposalsPage.js'
 import { CommunicationsLandingPage } from '../routes/communications/CommunicationsLandingPage.js'
@@ -178,6 +186,21 @@ export const router = createBrowserRouter([
         element: <PendingPurchasesPage />,
         loader: pendingPurchasesLoader,
         path: 'catalog/pending-purchases',
+      },
+      {
+        element: <PurchaseSellThroughListPage />,
+        loader: purchaseSellThroughListLoader,
+        path: 'catalog/purchases',
+      },
+      {
+        element: <PurchaseSellThroughDetailPage />,
+        loader: purchaseSellThroughDetailLoader,
+        path: 'catalog/purchases/:poId',
+      },
+      {
+        element: <PurchaseSellThroughItemPage />,
+        loader: purchaseSellThroughItemLoader,
+        path: 'catalog/purchases/:poId/items/:lineId',
       },
       {
         element: <CatalogMaintenanceIndexPage />,

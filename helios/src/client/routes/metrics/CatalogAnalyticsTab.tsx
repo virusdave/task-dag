@@ -1097,7 +1097,7 @@ const DEFAULT_CARDS: ReadonlyArray<ScatterCardConfig> = [
     id: 'price-index-vs-velocity-index',
     title: 'Price index vs velocity index (cohort)',
     description:
-      'World-class merchandising view. Quadrants: premium winners (top-right), value workhorses (top-left), overpriced laggards (bottom-right), cheap-but-slow (bottom-left).',
+      'Quadrants: premium winners (top-right), value workhorses (top-left), overpriced laggards (bottom-right), cheap-but-slow (bottom-left).',
     defaultX: 'effectivePriceIndex',
     defaultY: 'velocityIndex',
     defaultColourBy: 'subcategory',
@@ -1457,7 +1457,7 @@ const DEFAULT_CARDS: ReadonlyArray<ScatterCardConfig> = [
     id: 'units-per-invoice-vs-gm',
     title: 'Units per invoice vs effective GM %',
     description:
-      'High basket multiplier + strong GM% = the holy grail; high basket multiplier + thin GM = promo lever pulled too hard.',
+      'High basket multiplier + strong GM% = ideal; high basket multiplier + thin GM = promo lever pulled too hard.',
     defaultX: 'unitsPerInvoice',
     defaultY: 'gmPercent',
     defaultColourBy: 'discountDepth',

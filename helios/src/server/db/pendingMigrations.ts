@@ -441,6 +441,21 @@ const SENTINELS: MigrationSentinel[] = [
       'reject every request.',
     check: (db) => columnExists(db, 'users', 'metric_grants'),
   },
+  {
+    // Real Sweed POs (sweed_purchases + sweed_purchase_line_items +
+    // sweed_purchases_ingest_state) backing the Catalog →
+    // Purchase Sell-Through page family. Distinct from
+    // pending_purchase_* (which is the proposal/catalog-enrichment
+    // workflow): these tables mirror actual completed POs so we can
+    // join purchase line items to sweed_orders.raw_json.items[] for
+    // per-line sell-through math.
+    migrationId: '046_sweed_purchases',
+    label:
+      'sweed_purchases + sweed_purchase_line_items + ' +
+      'sweed_purchases_ingest_state — real Sweed PO mirror backing ' +
+      'Catalog → Purchase Sell-Through page family.',
+    check: (db) => tableExists(db, 'sweed_purchases'),
+  },
 ]
 
 interface CacheEntry {

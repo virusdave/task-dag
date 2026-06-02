@@ -21,6 +21,7 @@ export const CONFIG_BACKGROUND_TASK_KEYS = [
   'workers.scheduling.stock',
   'workers.scheduling.sweed_orders_ingest',
   'workers.scheduling.sweed_package_snapshots',
+  'workers.scheduling.sweed_purchases_ingest',
   'workers.scheduling.weather_daily_ingest',
   'workers.scheduling.sweed_shifts_ingest',
   'workers.scheduling.enrich_delivery_address',
@@ -102,6 +103,13 @@ export const CONFIG_BACKGROUND_TASKS: ReadonlyArray<ConfigBackgroundTaskDefiniti
     slug: 'sweed-package-snapshots',
     implemented: true,
     summary: 'Polls store.inventory.item.list.grouped (with isOnStock:false so sold-through packages remain visible) every 5 minutes per dealer during 08:00–02:00 ET. Versioned snapshot per (dealer, inventory_item_id): inserts a new row whenever the observed shape changes (wholesale cost, qty, lab, expiration, location), otherwise bumps observed_at_max. Unblocks the COGS / margin / inventory metrics on the /metrics page tree because wholesale cost is a per-PACKAGE attribute that Sweed does NOT expose on the invoice envelope. See automation#24.',
+  },
+  {
+    key: 'workers.scheduling.sweed_purchases_ingest',
+    label: 'Sweed purchases ingest',
+    slug: 'sweed-purchases-ingest',
+    implemented: true,
+    summary: 'Polls store.purchase.order.list every 15 minutes per dealer, then fetches store.purchase.order.get for each non-pending PO and upserts a row into sweed_purchases + the per-line sweed_purchase_line_items. Direct-matches each line item to a sweed_package_snapshots row via externalTrackCode (Metrc tag) so the Catalog → Purchase Sell-Through page family can join purchase line items to sweed_orders.raw_json.items[] and report what we have actually paid for what has actually sold so far. Maintains a per-dealer highwater on delivery_date and walks history one day at a time toward the dealer\'s store-opening date.',
   },
   {
     key: 'workers.scheduling.weather_daily_ingest',
