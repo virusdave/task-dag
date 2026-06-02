@@ -140,6 +140,10 @@ export async function registerConfigRoutes(server: FastifyInstance): Promise<voi
         const jobId = await runNowSweedOrdersIngest(user.id)
         return reply.send(ConfigBackgroundTaskRunNowResponseSchema.parse({ jobId }))
       }
+      if (taskKey === 'workers.scheduling.sweed_purchases_ingest') {
+        const jobId = await runNowSweedPurchasesIngest(user.id)
+        return reply.send(ConfigBackgroundTaskRunNowResponseSchema.parse({ jobId }))
+      }
       if (taskKey === 'workers.scheduling.sweed_shifts_ingest') {
         const jobId = await runNowSweedShiftsIngest(user.id)
         return reply.send(ConfigBackgroundTaskRunNowResponseSchema.parse({ jobId }))
@@ -372,6 +376,51 @@ async function runNowSweedOrdersIngest(userId: number): Promise<number> {
       payload: {
         siteDealerIds,
         taskKey: 'workers.scheduling.sweed_orders_ingest',
+        trigger: 'manual_run',
+      },
+      requestId: null,
+      scope: null,
+      undoPayload: null,
+    })
+    return newJobId
+  })
+}
+
+async function runNowSweedPurchasesIngest(userId: number): Promise<number> {
+  const siteDealerIds = HELIOS_PENDING_PURCHASE_SITE_DEALERS.map((site) => site.dealerId)
+  const enqueuedAt = new Date()
+  return withTransaction(async (db) => {
+    const newJobId = await enqueueJob(db, {
+      concurrencyKey: getOptionalSweedSessionConcurrencyKey(true),
+      dedupeKey: `config.workers.sweed_purchases_ingest:manual:${enqueuedAt.toISOString().slice(0, 19)}`,
+      jobType: 'config.workers.sweed_purchases_ingest',
+      module: 'config',
+      payload: {
+        requestedByUserId: userId,
+        siteDealerIds,
+        trigger: 'manual_run',
+        // Manual runs do a one-day backwards backfill on top of the
+        // forward poll — the scheduled tick handles the steady-state
+        // 30-day-per-tick history walk; this is just "go fetch what's
+        // new and what's just been paid right now."
+        backfillDays: 1,
+      },
+      requestedByUserId: userId,
+      runAt: enqueuedAt,
+      scope: null,
+    })
+
+    await recordConfigScheduleEnqueue(db, 'workers.scheduling.sweed_purchases_ingest', newJobId, enqueuedAt)
+    await appendAuditEvent(db, {
+      actorType: 'user',
+      actorUserId: userId,
+      entityId: String(newJobId),
+      entityType: 'job',
+      eventType: 'config.workers.sweed_purchases_ingest.requested',
+      module: 'config',
+      payload: {
+        siteDealerIds,
+        taskKey: 'workers.scheduling.sweed_purchases_ingest',
         trigger: 'manual_run',
       },
       requestId: null,

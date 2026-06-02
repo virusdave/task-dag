@@ -37,6 +37,10 @@ import {
   configSweedOrdersIngestScheduleLoader,
 } from '../routes/config/ConfigSweedOrdersIngestSchedulePage.js'
 import {
+  ConfigSweedPurchasesIngestSchedulePage,
+  configSweedPurchasesIngestScheduleLoader,
+} from '../routes/config/ConfigSweedPurchasesIngestSchedulePage.js'
+import {
   ConfigParsingLitalertsPage,
   configParsingLitalertsLoader,
 } from '../routes/config/ConfigParsingLitalertsPage.js'
@@ -414,6 +418,11 @@ export const router = createBrowserRouter([
         element: <ConfigSweedOrdersIngestSchedulePage />,
         loader: configSweedOrdersIngestScheduleLoader,
         path: 'config/workers/scheduling/sweed-orders-ingest',
+      },
+      {
+        element: <ConfigSweedPurchasesIngestSchedulePage />,
+        loader: configSweedPurchasesIngestScheduleLoader,
+        path: 'config/workers/scheduling/sweed-purchases-ingest',
       },
       {
         element: <ConfigParsingPendingPurchasesPage />,
