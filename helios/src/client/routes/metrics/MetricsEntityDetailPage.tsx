@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 
 import {
@@ -26,9 +26,28 @@ import { MetricsAccessGate } from './MetricsAccessGate.js'
 //   * One <details>-style accordion per category. Collapsed by default
 //     so the page doesn't render ~60 scatter cards × N categories at
 //     mount; expanding a category lazy-mounts the existing
-//     <CatalogAnalyticsTab /> in embedded mode, pre-scoped to
-//     (category=this, brand=this) and with the brand label seeded as
-//     the highlight subset across every scatter card.
+//     <CatalogAnalyticsTab /> in embedded mode, scoped ONLY to the
+//     accordion's category, with this entity's brand / distributor
+//     label seeded into the structured Highlight section across every
+//     scatter card.
+//
+// HIGHLIGHT, NOT FILTER (operator decision, 2026-06-02, after this
+// page shipped with the brand/distributor pre-applied as a *filter*
+// instead of a highlight):
+//   * We MUST NOT pre-filter the embedded scatter to the entity's
+//     brand / distributor. Pre-filtering hides the contextual cloud
+//     of competing products and defeats the entire purpose of the
+//     detail page, which is to ask "how does this brand sit IN the
+//     rest of its category".
+//   * We MUST NOT hide the page-wide filter bar. A filtered view
+//     with no visible / engageable filter chips is a forbidden
+//     antipattern (per operator). The category filter the detail
+//     page itself sets up is visible in the chip strip exactly like
+//     any other filter and can be cleared/broadened.
+//   * The brand / distributor goes in via the structured Highlight
+//     section only (highlightBrandNames / highlightDistributorNames),
+//     which visually dims non-matching dots without removing them
+//     from the scatter.
 //
 // Why this shape vs. one big mounted catalog tab:
 //   * Per-category framing matches how operators reason about
@@ -38,7 +57,8 @@ import { MetricsAccessGate } from './MetricsAccessGate.js'
 //   * Lazy mounting keeps initial paint fast even when an entity is
 //     present across 10+ categories. Each accordion expand is a
 //     separate /api/catalog-analytics/points fetch scoped to ~hundreds
-//     of points instead of thousands.
+//     to a couple thousand points (the full category, NOT just this
+//     entity) instead of the unscoped tens-of-thousands cloud.
 // ---------------------------------------------------------------------------
 
 type EntityKind = 'brand' | 'distributor'
@@ -73,17 +93,26 @@ function CategoryAccordion({
 }: {
   readonly category: CatalogFilterOption
   readonly embedded: {
+    /**
+     * Per-accordion category scope. This IS a real filter (we
+     * intentionally scope the embedded scatter to ONE category at a
+     * time so the per-category framing the page promises actually
+     * holds). It's still exposed as a chip in the visible filter bar
+     * so the operator can broaden out of the category if they want.
+     */
     readonly categoryIds: ReadonlyArray<string>
-    readonly brandIds?: ReadonlyArray<string>
-    readonly distributorNames?: ReadonlyArray<string>
     /**
      * Pre-seeds the structured Highlight section's Brand chip.
      * Set by BrandDetailPage; undefined for DistributorDetailPage.
+     * NOTE: this is HIGHLIGHT, not FILTER — the embedded scatter
+     * still loads every product in the category so this brand's
+     * dots can be seen in context.
      */
     readonly highlightBrandNames?: ReadonlyArray<string>
     /**
      * Pre-seeds the structured Highlight section's Distributor chip.
      * Set by DistributorDetailPage; undefined for BrandDetailPage.
+     * Same HIGHLIGHT, not FILTER semantics as highlightBrandNames.
      */
     readonly highlightDistributorNames?: ReadonlyArray<string>
   }
@@ -109,18 +138,26 @@ function CategoryAccordion({
           <CatalogAnalyticsTab
             embedded={{
               categoryIds: embedded.categoryIds,
-              brandIds: embedded.brandIds,
-              distributorNames: embedded.distributorNames,
-              // Issue #38 / task A4: seed the structured Highlight
-              // chip (Brand or Distributor) rather than the legacy
-              // free-text `highlight=<label>` substring match.
-              // Substring would falsely match strain names that
-              // contain the brand name (e.g. "Cresco Cookies" by a
-              // different brand); structured matching is exact.
+              // INTENTIONALLY NOT passing brandIds /
+              // distributorNames here. The detail page's purpose is
+              // to HIGHLIGHT this entity in the full category cloud,
+              // not to FILTER the cloud down to just this entity —
+              // see "HIGHLIGHT, NOT FILTER" in the module header.
+              // Operator decision 2026-06-02.
+              //
+              // The structured Highlight chip is pre-seeded below.
+              // It uses the human-visible brand / distributor NAME
+              // (matching CATALOG_HIGHLIGHT_DIMS pointKey), so e.g.
+              // "Cresco" as a chip only matches products whose
+              // brand_name === "Cresco" — not strain names that
+              // happen to contain "Cresco".
               highlightBrandNames: embedded.highlightBrandNames,
               highlightDistributorNames: embedded.highlightDistributorNames,
-              hideFilterBar: true,
-              hideTopControls: false,
+              // hideFilterBar: false (omitted). Hiding the filter
+              // bar while pre-applying any filter is a forbidden
+              // antipattern. The operator must always be able to
+              // see / engage with the filter chips, including the
+              // category chip the detail page pre-selects.
             }}
           />
         ) : (
@@ -235,13 +272,15 @@ function MetricsEntityDetailPage({ kind }: { readonly kind: EntityKind }) {
   const indexHref = kind === 'brand' ? '/metrics/brands' : '/metrics/distributors'
   const indexLabel = kind === 'brand' ? 'Brands' : 'Distributors'
 
-  const embeddedBase = useMemo(
-    () =>
-      kind === 'brand'
-        ? { brandIds: entityKey ? [entityKey] : [] }
-        : { distributorNames: entityKey ? [entityKey] : [] },
-    [kind, entityKey],
-  )
+  // NOTE: previously this page built an `embeddedBase` with
+  // { brandIds: [entityKey] } / { distributorNames: [entityKey] }
+  // and spread it into the per-category embedded prop. That made
+  // the embedded scatter pre-FILTER to just this entity, hiding
+  // the contextual cloud and silently dropping the filter chips
+  // (because hideFilterBar=true was also being passed). Both are
+  // forbidden antipatterns — see module header. The only thing
+  // the parent page needs to push down is the per-category id
+  // (set inside the accordion loop) and the highlight chip seed.
 
   return (
     <section className="metrics-dashboard">
@@ -279,8 +318,13 @@ function MetricsEntityDetailPage({ kind }: { readonly kind: EntityKind }) {
             {resolution.categoriesWithPresence.length === 1 ? 'y' : 'ies'}.
             Expand a category to load its scatter cards. The{' '}
             <strong>{resolution.entity.label}</strong> label is seeded as the
-            highlight on every card so {kind === 'brand' ? 'this brand' : "this distributor's"}{' '}
-            products pop out of each category's distribution.
+            structured Highlight chip on every card so{' '}
+            {kind === 'brand' ? 'this brand' : "this distributor's"} products
+            pop out of each category's full distribution — the embedded
+            scatter is NOT filtered to {kind === 'brand' ? 'this brand' : 'this distributor'}{' '}
+            (the entire category cloud loads as context), and the filter
+            chips remain visible so you can broaden out of the category
+            or narrow further as you like.
           </p>
 
           {resolution.categoriesWithPresence.map((cat) => (
@@ -289,12 +333,11 @@ function MetricsEntityDetailPage({ kind }: { readonly kind: EntityKind }) {
               category={cat}
               embedded={{
                 categoryIds: [cat.id],
-                ...embeddedBase,
                 // Pre-seed the structured Highlight chip with the
                 // entity's NAME (matches the chip id used by
                 // CATALOG_HIGHLIGHT_DIMS, which keys on the
                 // human-visible name). Only set the chip for the
-                // dimension we're actually scoping to.
+                // dimension we're actually highlighting on.
                 ...(kind === 'brand'
                   ? { highlightBrandNames: [resolution.entity!.label] }
                   : { highlightDistributorNames: [resolution.entity!.label] }),
