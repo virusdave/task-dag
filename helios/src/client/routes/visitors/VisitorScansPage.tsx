@@ -251,8 +251,8 @@ export function VisitorScansPage() {
             aria-pressed={showMaps}
             title={
               showMaps
-                ? 'Hide per-row map thumbnails (denser table)'
-                : 'Show per-row map thumbnails'
+                ? 'Hide per-row map thumbnails and sensitive location fields (state, zip, city)'
+                : 'Show per-row map thumbnails and sensitive location fields (state, zip, city)'
             }
           >
             {showMaps ? 'Expanded: on' : 'Expanded: off'}
@@ -404,9 +404,9 @@ export function VisitorScansPage() {
                   <col className="vs-col-visitor" />
                   <col className="vs-col-status" />
                   <col className="vs-col-status" />
-                  <col className="vs-col-state" />
-                  <col className="vs-col-postal" />
-                  <col className="vs-col-city" />
+                  {showMaps ? <col className="vs-col-state" /> : null}
+                  {showMaps ? <col className="vs-col-postal" /> : null}
+                  {showMaps ? <col className="vs-col-city" /> : null}
                   <col className="vs-col-doc" />
                   <col className="vs-col-scan" />
                   <col className="vs-col-raw" />
@@ -419,9 +419,9 @@ export function VisitorScansPage() {
                     <th>Visitor</th>
                     <th>Customer</th>
                     <th>Scans</th>
-                    <th>St</th>
-                    <th>Zip</th>
-                    <th>City</th>
+                    {showMaps ? <th>St</th> : null}
+                    {showMaps ? <th>Zip</th> : null}
+                    {showMaps ? <th>City</th> : null}
                     <th>Doc</th>
                     <th>Status</th>
                     <th></th>
@@ -474,9 +474,11 @@ export function VisitorScansPage() {
                         <td>
                           <span className="vs-first-badge">{firstBadge.label}</span>
                         </td>
-                        <td>{item.state ?? '—'}</td>
-                        <td>{item.postalCode ?? '—'}</td>
-                        <td className="vs-cell-truncate">{item.city ?? '—'}</td>
+                        {showMaps ? <td>{item.state ?? '—'}</td> : null}
+                        {showMaps ? <td>{item.postalCode ?? '—'}</td> : null}
+                        {showMaps ? (
+                          <td className="vs-cell-truncate">{item.city ?? '—'}</td>
+                        ) : null}
                         <td className="vs-cell-truncate">{item.documentType ?? '—'}</td>
                         <td className="vs-cell-truncate">{item.scanStatus ?? '—'}</td>
                         <td>
@@ -527,12 +529,16 @@ export function VisitorScansPage() {
                           {formatTime(item.scannedAt ?? item.ingestedAt)}
                         </div>
                         <dl className="vs-card-grid">
-                          <dt>State</dt>
-                          <dd>{item.state ?? '—'}</dd>
-                          <dt>Postal</dt>
-                          <dd>{item.postalCode ?? '—'}</dd>
-                          <dt>City</dt>
-                          <dd>{item.city ?? '—'}</dd>
+                          {showMaps ? (
+                            <>
+                              <dt>State</dt>
+                              <dd>{item.state ?? '—'}</dd>
+                              <dt>Postal</dt>
+                              <dd>{item.postalCode ?? '—'}</dd>
+                              <dt>City</dt>
+                              <dd>{item.city ?? '—'}</dd>
+                            </>
+                          ) : null}
                           <dt>Doc</dt>
                           <dd>{item.documentType ?? '—'}</dd>
                           <dt>Status</dt>
