@@ -757,7 +757,14 @@ async function runRetentionQueries(args: RetentionQueryArgs): Promise<RetentionP
     ),
     customers_in_scope as (
       select cr.*,
-        date_trunc($5::text, cr.first_purchase_at) as cohort_key
+        -- Cohort acquisition bucket is a NY-local calendar boundary
+        -- (week starts NY-Monday, month starts NY-1st), re-wrapped to
+        -- timestamptz so node-postgres parses it as a real UTC instant.
+        -- See helios/src/server/metrics/bucketSelectSql.ts for the
+        -- shared NY-day / UTC-hour convention every helios metric
+        -- query uses.
+        (date_trunc($5::text, cr.first_purchase_at at time zone 'America/New_York'))
+          at time zone 'America/New_York' as cohort_key
       from customer_rollup cr
       where case $4::text
         when 'acquired_in_range' then
@@ -792,11 +799,22 @@ async function runRetentionQueries(args: RetentionQueryArgs): Promise<RetentionP
       -- zod tests can't catch SQL-column drift. Field was unused
       -- downstream so the fix is to delete it.
       select cis.cohort_key, pe.customer_id,
+        -- period_index is computed in NY-local calendar time so a DST
+        -- week is still "1 week" (not 7 * 86400 - 3600 seconds) and a
+        -- late-night purchase near month boundaries lands in the right
+        -- month. extract(year/month from timestamptz) honours the
+        -- session timezone (likely UTC); we wrap with "at time zone
+        -- America/New_York" to force NY-wall-clock extraction.
         case when $5::text = 'week'
-          then floor(extract(epoch from (pe.pay_time - cis.cohort_key)) / (7 * 86400))::int
+          then (
+            (date_trunc('week', pe.pay_time at time zone 'America/New_York')::date
+              - (cis.cohort_key at time zone 'America/New_York')::date) / 7
+          )
           else (
-            (extract(year from pe.pay_time)::int - extract(year from cis.cohort_key)::int) * 12
-            + (extract(month from pe.pay_time)::int - extract(month from cis.cohort_key)::int)
+            (extract(year  from pe.pay_time   at time zone 'America/New_York')::int
+              - extract(year  from cis.cohort_key at time zone 'America/New_York')::int) * 12
+            + (extract(month from pe.pay_time   at time zone 'America/New_York')::int
+              - extract(month from cis.cohort_key at time zone 'America/New_York')::int)
           )
         end as period_index
       from customers_in_scope cis

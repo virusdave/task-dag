@@ -129,7 +129,12 @@ export async function getBudtenderAnalytics(
     ),
     daily as (
       select
-        date_trunc('day', pay_time) as day,
+        -- NY-local day bucket re-wrapped to timestamptz so node-postgres
+        -- gives us a real UTC instant (NY-midnight) that matches the
+        -- JS-side bucket boundary. See helios/src/server/metrics/bucketSelectSql.ts
+        -- for the convention every metric query in helios shares.
+        (date_trunc('day', pay_time at time zone 'America/New_York'))
+          at time zone 'America/New_York' as day,
         count(*) filter (where cashier_user_id is not null)        as txn,
         count(*) filter (where cashier_user_id is null)            as unassigned_txn,
         coalesce(sum(grand_total) filter (where cashier_user_id is not null), 0)::float8 as sales,
@@ -237,7 +242,11 @@ export async function getBudtenderAnalytics(
         avg(case when fulfillment_type ilike 'delivery%'             then 1.0 else 0.0 end) as delivery_rate,
         avg(case when fulfillment_type ilike 'pickup%'               then 1.0 else 0.0 end) as pickup_rate,
         avg(case when payment_method  ilike 'cash%'                  then 1.0 else 0.0 end) as cash_payment_rate,
-        count(distinct date_trunc('day', pay_time))                                       as active_days
+        -- active_days is only consumed inside SQL (count distinct), so we
+        -- do not need to round-trip it through node-postgres - bucket the
+        -- NY-local date directly. Each unique NY-calendar day a cashier
+        -- rang up a sale counts once.
+        count(distinct (pay_time at time zone 'America/New_York')::date)                   as active_days
       from orders_attrib
       group by cashier_user_id
     ),

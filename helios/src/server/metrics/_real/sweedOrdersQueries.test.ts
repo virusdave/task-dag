@@ -4,24 +4,23 @@ import * as poolModule from '../../db/pool.js'
 import { queryCustomerOriginMap, queryFirstVsReturning } from './sweedOrdersQueries.js'
 
 /**
- * Regression test for the 2026-05-26 "all live metrics show zero" bug.
+ * Regression tests for the bucket-key timezone round-trip.
  *
- * Root cause: the SQL emitted by these helpers used to select
- * `date_trunc('week', pay_time at time zone 'UTC') as bucket_start`,
- * which is a `timestamp` WITHOUT time zone. node-postgres parses an
- * unzoned timestamp as **server-local time** when constructing the JS
- * `Date`. The helios server runs in America/Panama (UTC-05:00), so a
- * Postgres value of `2026-05-18 00:00:00` came back as
- * `2026-05-18T05:00:00.000Z`, which never matches the
- * `walkBuckets`-generated key `2026-05-18T00:00:00.000Z`. The merge
- * step in `runBucketedQuery` then fell through to defaultValue=0 for
- * every series in every bucket.
+ * Two layers stack here:
+ *  1. Original 2026-05-26 bug: SQL used to emit naked
+ *     `date_trunc(...)` which node-postgres parsed as server-local
+ *     time, mismatching the JS-side bucket key. Fix wrapped the trunc
+ *     in `at time zone '...'` so the column comes back as
+ *     `timestamptz`.
+ *  2. 2026-06 retail-day fix: all calendar bucketing is now in
+ *     America/New_York wall-clock so a sale at 22:30 ET on Wednesday
+ *     lands in the Wednesday bucket, not the Thursday bucket. NY
+ *     Monday-midnight in May (EDT) = `2026-05-18T04:00:00.000Z`
+ *     (NOT 00:00Z). `hour` grain still buckets at UTC top-of-hour by
+ *     design — see helios/src/server/metrics/bucketSelectSql.ts.
  *
- * Fix: wrap the trunc as `(date_trunc(...)) at time zone 'UTC'` so
- * the column comes back as a `timestamptz` that round-trips cleanly.
- *
- * This test stubs the pool with a result that mimics what Postgres
- * sends on the wire, and asserts the bucketed merge produces a
+ * These tests stub the pool with a result that mimics what Postgres
+ * sends on the wire, and assert the bucketed merge produces a
  * non-zero value (i.e. that the bucket-key match succeeded).
  */
 describe('sweed-orders metric queries — bucket-key timezone regression', () => {
@@ -37,15 +36,15 @@ describe('sweed-orders metric queries — bucket-key timezone regression', () =>
     vi.restoreAllMocks()
   })
 
-  it('queryFirstVsReturning attributes counts to the correct (UTC) bucket', async () => {
-    // The fixed SQL returns a timestamptz at UTC. Simulate node-postgres
-    // parsing that as a Date — for a timestamptz at midnight UTC, the
-    // Date is exactly that instant regardless of server TZ.
+  it('queryFirstVsReturning attributes counts to the correct (NY-Monday) bucket', async () => {
+    // The fixed SQL returns a timestamptz at NY-Monday-midnight, which
+    // in May (EDT) is 04:00Z. node-postgres parses it as the correct
+    // UTC instant regardless of server TZ.
     const fakePool = {
       query: vi.fn().mockResolvedValue({
         rows: [
-          { bucket_start: new Date('2026-05-18T00:00:00.000Z'), series_id: 'first_time', value: '7' },
-          { bucket_start: new Date('2026-05-18T00:00:00.000Z'), series_id: 'returning', value: '42' },
+          { bucket_start: new Date('2026-05-18T04:00:00.000Z'), series_id: 'first_time', value: '7' },
+          { bucket_start: new Date('2026-05-18T04:00:00.000Z'), series_id: 'returning', value: '42' },
         ],
       }),
     }
@@ -53,14 +52,14 @@ describe('sweed-orders metric queries — bucket-key timezone regression', () =>
 
     const data = await queryFirstVsReturning({
       sites: [],
-      from: new Date('2026-05-18T00:00:00.000Z'),
-      to: new Date('2026-05-25T00:00:00.000Z'),
+      from: new Date('2026-05-18T04:00:00.000Z'),
+      to: new Date('2026-05-25T04:00:00.000Z'),
       agg: 'week',
     })
 
     expect(data.length).toBeGreaterThan(0)
-    const first = data.find((r) => r.t === '2026-05-18T00:00:00.000Z')
-    expect(first, 'expected a row for the 2026-05-18 UTC bucket').toBeDefined()
+    const first = data.find((r) => r.t === '2026-05-18T04:00:00.000Z')
+    expect(first, 'expected a row for the NY-Monday 2026-05-18 bucket').toBeDefined()
     // The merge must NOT have fallen through to defaultValue=0.
     expect(first!.first_time).toBe(7)
     expect(first!.returning).toBe(42)
@@ -107,7 +106,7 @@ describe('sweed-orders metric queries — bucket-key timezone regression', () =>
     )
   })
 
-  it('SQL emitted by the helpers wraps date_trunc back into timestamptz at UTC', async () => {
+  it('SQL emitted by the helpers wraps date_trunc back into timestamptz at America/New_York', async () => {
     // Easiest way to inspect: spy the pool.query call.
     const captured: string[] = []
     const fakePool = {
@@ -120,19 +119,23 @@ describe('sweed-orders metric queries — bucket-key timezone regression', () =>
 
     await queryFirstVsReturning({
       sites: [],
-      from: new Date('2026-05-18T00:00:00.000Z'),
-      to: new Date('2026-05-25T00:00:00.000Z'),
+      from: new Date('2026-05-18T04:00:00.000Z'),
+      to: new Date('2026-05-25T04:00:00.000Z'),
       agg: 'week',
     })
 
     expect(captured.length).toBeGreaterThan(0)
     const sql = captured[0]!
-    // Guard against a future "cleanup" that drops the timezone wrap.
-    // The fix wraps date_trunc(...) in a SECOND `at time zone 'UTC'` so
-    // the column comes back as a timestamptz rather than a naive timestamp.
-    // Match both occurrences:
-    const tzMatches = sql.match(/at time zone 'UTC'/g) ?? []
-    expect(tzMatches.length, 'bucket_start must be wrapped with `at time zone UTC` to round-trip as timestamptz').toBeGreaterThanOrEqual(2)
+    // Guard against a future "cleanup" that drops the timezone wrap or
+    // reverts the retail-day fix back to UTC. For week grain, the SQL
+    // must wrap date_trunc(...) in a SECOND `at time zone
+    // 'America/New_York'` so the column comes back as a timestamptz
+    // matching the NY-Monday-midnight key produced by `walkBuckets`.
+    const nyTzMatches = sql.match(/at time zone 'America\/New_York'/g) ?? []
+    expect(
+      nyTzMatches.length,
+      'week-grain bucket_start must be wrapped with `at time zone America/New_York` to round-trip as timestamptz at the NY-Monday-midnight key',
+    ).toBeGreaterThanOrEqual(2)
     // Guard against a regression where someone selects the naked
     // date_trunc(...) (no outer timezone wrap) into bucket_start.
     expect(sql).not.toMatch(/date_trunc\([^)]+\)\s+as\s+bucket_start/)

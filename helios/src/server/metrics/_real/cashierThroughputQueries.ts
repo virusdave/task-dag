@@ -3,6 +3,7 @@ import {
   HELIOS_PENDING_PURCHASE_SITE_DEALERS,
   type HeliosPendingPurchaseSiteDealer,
 } from '../../../shared/contracts/index.js'
+import { bucketSelectExpr } from '../bucketSelectSql.js'
 import { getPool } from '../../db/pool.js'
 import { defaultWindow, walkBuckets } from '../timeBuckets.js'
 import type { MetricQueryArgs, MetricRow } from '../types.js'
@@ -178,6 +179,40 @@ export async function queryCashierTransactionsPerHour(args: MetricQueryArgs): Pr
   // shift that opens at 13:42 contributes its 13:00–14:00 partial
   // hour to the 13:00 bucket rather than starting the iteration at
   // 13:42 and creating a stray 13:42-bucket key.
+  //
+  // TZ-correctness: day / week / month buckets MUST step in America/
+  // New_York calendar time. We generate a `timestamp without time zone`
+  // series whose components are NY-local, then convert each boundary
+  // back to `timestamptz` with `at time zone 'America/New_York'`.
+  // This makes a fall-back day correctly contribute 25 elapsed UTC
+  // hours and a spring-forward day 23. For hour grain we use UTC
+  // stepping (NY UTC offset is always whole-hours so UTC top-of-hour
+  // == NY top-of-hour, and UTC stepping avoids the fall-back-Sunday
+  // ambiguity where 01:00 NY happens twice). See
+  // helios/src/server/metrics/bucketSelectSql.ts for the convention.
+  const isHourGrain = truncUnit === 'hour'
+  const sliceStartTz = isHourGrain
+    ? 'slice_start'
+    : "(slice_start at time zone 'America/New_York')"
+  const sliceEndTz = isHourGrain
+    ? `(slice_start + interval '${intervalLiteral}')`
+    : `((slice_start + interval '${intervalLiteral}') at time zone 'America/New_York')`
+  // generate_series start expression:
+  //   - hour grain: trunc(...) on the UTC instant, step in interval.
+  //   - calendar grain: trunc(...) on the NY-local timestamp (the
+  //     `at time zone 'America/New_York'` cast yields a `timestamp`
+  //     without time zone whose fields are NY wall-clock), step the
+  //     NY-local series, convert each boundary back to timestamptz
+  //     when comparing against open/close dates above.
+  const seriesStart = isHourGrain
+    ? `date_trunc('hour', greatest(di.open_date, $2::timestamptz))`
+    : `date_trunc('${truncUnit}', greatest(di.open_date, $2::timestamptz) at time zone 'America/New_York')`
+  const seriesStop = isHourGrain
+    ? `least(di.close_date, $3::timestamptz)`
+    : `(least(di.close_date, $3::timestamptz) at time zone 'America/New_York')`
+  const bucketStartExpr = isHourGrain
+    ? "slice_start"
+    : "(slice_start at time zone 'America/New_York')"
   const sql = `
     with drawer_intervals as (
       select ds.dealer_id,
@@ -193,15 +228,15 @@ export async function queryCashierTransactionsPerHour(args: MetricQueryArgs): Pr
          and ds.open_date  < $3::timestamptz
     ),
     shift_buckets as (
-      select (date_trunc('${truncUnit}', slice_start at time zone 'UTC')) at time zone 'UTC' as bucket_start,
+      select ${bucketStartExpr} as bucket_start,
              extract(epoch from (
-               least(di.close_date, slice_start + interval '${intervalLiteral}') -
-               greatest(di.open_date, slice_start)
+               least(di.close_date, ${sliceEndTz}) -
+               greatest(di.open_date, ${sliceStartTz})
              )) / 3600.0 * di.n_sessions as cashier_hours
         from drawer_intervals di
         cross join lateral generate_series(
-          (date_trunc('${truncUnit}', greatest(di.open_date, $2::timestamptz) at time zone 'UTC')) at time zone 'UTC',
-          least(di.close_date, $3::timestamptz),
+          ${seriesStart},
+          ${seriesStop},
           interval '${intervalLiteral}'
         ) as slice_start
     ),
@@ -212,7 +247,7 @@ export async function queryCashierTransactionsPerHour(args: MetricQueryArgs): Pr
        group by bucket_start
     ),
     tx_per_bucket as (
-      select (date_trunc('${truncUnit}', so.pay_time at time zone 'UTC')) at time zone 'UTC' as bucket_start,
+      select ${bucketSelectExpr(truncUnit, 'so.pay_time')} as bucket_start,
              count(*)::float as tx
         from sweed_orders so
        where so.dealer_id = any($1::bigint[])

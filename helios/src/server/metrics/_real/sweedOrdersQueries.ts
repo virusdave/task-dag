@@ -3,6 +3,7 @@ import {
   HELIOS_PENDING_PURCHASE_SITE_DEALERS,
   type HeliosPendingPurchaseSiteDealer,
 } from '../../../shared/contracts/index.js'
+import { bucketSelectExpr } from '../bucketSelectSql.js'
 import { getPool } from '../../db/pool.js'
 import { defaultWindow, walkBuckets } from '../timeBuckets.js'
 import type { MetricQueryArgs, MetricRow } from '../types.js'
@@ -73,28 +74,9 @@ function resolveWindow(args: MetricQueryArgs): ResolvedWindow {
   return { from: w.from, to: w.to, truncUnit, buckets }
 }
 
-/**
- * Build the bucket-start SELECT expression.
- *
- * IMPORTANT — DO NOT inline `date_trunc(unit, pay_time at time zone 'UTC')`
- * directly. That returns a `timestamp` WITHOUT timezone, which node-postgres
- * then parses as **server-local time** when the row crosses the wire. The
- * helios server runs in America/Panama (UTC-05:00), so a Postgres value of
- * `2026-05-18 00:00:00` arrived in JS as `2026-05-18T05:00:00.000Z` —
- * shifting every bucket five hours forward and mismatching the keys that
- * `walkBuckets` produces in UTC. The merge step in `runBucketedQuery` then
- * fell through to `defaultValue` (0) for every series in every bucket,
- * which is why every live chart looked like flatline-at-zero (see the
- * 2026-05-26 operator bug report on virusdave/top-level#7).
- *
- * Wrapping the trunc in `(...) at time zone 'UTC'` casts it back to
- * `timestamptz` at UTC, which node-postgres correctly returns as a Date
- * matching the JS-side bucket boundary.
- */
-function bucketSelectExpr(truncUnit: string | null): string {
-  if (truncUnit === null) return 'null::timestamptz'
-  return `(date_trunc('${truncUnit}', pay_time at time zone 'UTC')) at time zone 'UTC'`
-}
+// `bucketSelectExpr` lives in ../bucketSelectSql.ts so every metric
+// helper in the codebase uses the SAME NY-day / UTC-hour convention.
+// See that file for the doc-comment and the regression history.
 
 /**
  * SQL fragment producing the per-row series id for new-vs-returning
@@ -221,7 +203,7 @@ export async function queryFirstVsReturning(args: MetricQueryArgs): Promise<Metr
     })
   }
   const sql = `
-    select (date_trunc('${truncUnit}', so.pay_time at time zone 'UTC')) at time zone 'UTC' as bucket_start,
+    select ${bucketSelectExpr(truncUnit, 'so.pay_time')} as bucket_start,
            ${FIRST_TIME_SERIES_EXPR} as series_id,
            count(*) as value
       from sweed_orders so
@@ -324,10 +306,7 @@ export async function queryBasketSizeByCustomerType(args: MetricQueryArgs): Prom
   if (dealerIds.length === 0 || buckets.length === 0) {
     return buckets.map((b) => ({ t: b.toISOString(), first_time: 0, returning: 0 }))
   }
-  const bucketSelect =
-    truncUnit === null
-      ? 'null::timestamptz'
-      : `(date_trunc('${truncUnit}', so.pay_time at time zone 'UTC')) at time zone 'UTC'`
+  const bucketSelect = bucketSelectExpr(truncUnit, 'so.pay_time')
   const sql = `
     select ${bucketSelect} as bucket_start,
            ${FIRST_TIME_SERIES_EXPR} as series_id,

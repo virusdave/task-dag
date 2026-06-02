@@ -3,8 +3,9 @@ import {
   HELIOS_PENDING_PURCHASE_SITE_DEALERS,
   type HeliosPendingPurchaseSiteDealer,
 } from '../../../shared/contracts/index.js'
+import { bucketSelectExpr } from '../bucketSelectSql.js'
 import { getPool } from '../../db/pool.js'
-import { defaultWindow, walkBuckets } from '../timeBuckets.js'
+import { advanceBucketStart, defaultWindow, walkBuckets } from '../timeBuckets.js'
 import type { MetricQueryArgs, MetricRow } from '../types.js'
 import { orderItemsCatalogFilterSql } from './catalogFilterSql.js'
 import {
@@ -75,17 +76,8 @@ function resolveWindow(args: MetricQueryArgs): ResolvedWindow {
   return { from: w.from, to: w.to, truncUnit, buckets }
 }
 
-/**
- * Bucket-start SELECT expression. Always wraps the trunc in a
- * `at time zone 'UTC'` so the column comes back as a timestamptz at
- * UTC, which node-postgres parses as a JS Date at the same instant
- * regardless of server TZ. See sweedOrdersQueries.ts for the full
- * regression context (2026-05-26 "all live metrics show zero" bug).
- */
-function bucketSelectExpr(truncUnit: string | null, payTimeExpr: string = 'pay_time'): string {
-  if (truncUnit === null) return 'null::timestamptz'
-  return `(date_trunc('${truncUnit}', ${payTimeExpr} at time zone 'UTC')) at time zone 'UTC'`
-}
+// `bucketSelectExpr` is imported from ../bucketSelectSql.js — the
+// shared NY-day / UTC-hour convention every helios metrics query uses.
 
 function round2(n: number): number {
   return Math.round(n * 100) / 100
@@ -95,34 +87,17 @@ function round4(n: number): number {
   return Math.round(n * 10000) / 10000
 }
 
-const DAY_MS = 24 * 60 * 60 * 1000
-
 /**
  * Inventory metrics report "snapshot state observed AT or before the
- * END of the bucket" — so a daily bucket at `2026-05-26T00:00:00Z`
- * needs the latest snapshot seen in [start, end). We compute the
- * end of each bucket by stepping forward one grain (day / week /
- * month / hour) from the start. The final bucket is clamped to
- * `now()` so we never query the future, and small backfill buckets
- * that pre-date the snapshot worker still get a value via the
- * earliest-snapshot fallback the function already provides.
+ * END of the bucket" — so a daily bucket at `2026-05-26T04:00:00Z`
+ * (NY midnight) needs the latest snapshot seen in [start, end).
+ *
+ * `advanceBucketStart` does the NY-calendar-aware step (correct across
+ * DST: a spring-forward day is 23 elapsed hours, a fall-back day is
+ * 25). The final bucket is clamped to `now()` by the caller below.
  */
 function bucketEndForAgg(start: Date, agg: MetricAggregation): Date {
-  switch (agg) {
-    case 'hour':
-      return new Date(start.getTime() + 60 * 60 * 1000)
-    case 'date':
-      return new Date(start.getTime() + DAY_MS)
-    case 'week':
-      return new Date(start.getTime() + 7 * DAY_MS)
-    case 'month':
-      return new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth() + 1, 1))
-    case 'total':
-    case 'dow':
-    case 'dom':
-    case 'dofortnight':
-      return new Date(start.getTime() + DAY_MS)
-  }
+  return advanceBucketStart(start, agg)
 }
 
 function bucketEndsForBuckets(buckets: Date[], agg: MetricAggregation): Date[] {
