@@ -46,12 +46,32 @@ const AGE_BAND_BOUNDS: Readonly<Record<Exclude<AgeBand, 'unknown'>, [number, num
 
 // Static site-pin coordinates for our two retail locations. Kept
 // here (rather than a DB lookup) because the map page wants them
-// up-front and they don't change. Source: Google Maps lookup of
-// the published shop addresses.
-const SITE_PINS: readonly CustomersMapSitePin[] = [
-  { siteSlug: 'bx', label: 'Bronx',   lat: 40.86494, lng: -73.88488 },
-  { siteSlug: 'mh', label: 'Midtown', lat: 40.76232, lng: -73.97661 },
+// up-front and they don't change.
+//
+// Source of truth for Bronx is the Census-geocoded address that
+// landed in migration 027_litalerts_retailer_geo.sql for
+// '2375 Arthur Ave, The Bronx, NY 10458': (40.855074, -73.888066).
+// The previous value (40.86494, -73.88488) was an early Google-
+// Maps eyeball that landed ~1.1 km too far north and rendered
+// the playback Bronx pin in the wrong neighborhood — operator
+// 2026-06-03 fix.
+//
+// Midtown is the published address for the Sweed dealer 210705
+// kiosk at 40 W 55th St; Sweed/VeriScan do supply per-scan
+// kiosk lat/lng for midtown so the only consumer of the
+// midtown pin is the cross-store map page.
+//
+// EXPORTED: other modules (visitor-scan webhook handler, per-
+// scan details map) MUST import this constant instead of
+// hard-coding their own coords — keep one source of truth.
+export const SITE_PINS: readonly CustomersMapSitePin[] = [
+  { siteSlug: 'bx', label: 'Bronx',   lat: 40.855074, lng: -73.888066 },
+  { siteSlug: 'mh', label: 'Midtown', lat: 40.762160, lng: -73.976241 },
 ] as const
+
+/** Indexed lookup helper for callers that key by site_slug. */
+export const SITE_PIN_BY_SLUG: Readonly<Record<string, CustomersMapSitePin>> =
+  Object.fromEntries(SITE_PINS.map((p) => [p.siteSlug, p]))
 
 interface PointRow {
   scan_id: string | number

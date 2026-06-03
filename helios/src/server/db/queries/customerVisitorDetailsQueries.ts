@@ -42,6 +42,7 @@ import type {
 } from '../../../shared/contracts/index.js'
 
 import type { Queryable } from '../pool.js'
+import { SITE_PIN_BY_SLUG } from './customersMapQueries.js'
 
 // Soft cap on purchase history. Anyone above this is rare enough we
 // can return a truncated flag instead of blowing up the response.
@@ -907,13 +908,37 @@ function buildMapPoints(
   }
 
   // 2. Anchor scan location.
-  if (anchor.scanLatitude !== null && anchor.scanLongitude !== null) {
+  //
+  // VeriScan supplies per-scan kiosk lat/lng for Midtown but NOT for
+  // Bronx (the Bronx VeriScan device sends an envelope with null
+  // device coordinates — operator-confirmed 2026-06-03). Without a
+  // fallback the Bronx per-scan map omitted the scan-device pin
+  // entirely, which made the page read as "we don't know where this
+  // scan happened" when in fact site_slug pins it to the published
+  // store address. Fall back to the canonical SITE_PINS entry for
+  // the scan's site_slug so every scan renders a scan-device pin.
+  let scanLat = anchor.scanLatitude
+  let scanLng = anchor.scanLongitude
+  let scanLabel = anchor.locationName ?? anchor.deviceName ?? 'Scan device'
+  if (scanLat === null || scanLng === null) {
+    const fallback = SITE_PIN_BY_SLUG[anchor.siteSlug]
+    if (fallback !== undefined) {
+      scanLat = fallback.lat
+      scanLng = fallback.lng
+      // Make it visually obvious in the popup that this is the site
+      // centroid, not a per-scan-device geocode from VeriScan. The
+      // pin color/kind ('scan_location') stays the same so existing
+      // map styling keeps working.
+      scanLabel = `${fallback.label} scanner (site address)`
+    }
+  }
+  if (scanLat !== null && scanLng !== null) {
     points.push({
       id: 'scan_location',
       kind: 'scan_location',
-      label: anchor.locationName ?? anchor.deviceName ?? 'Scan device',
-      lat: anchor.scanLatitude,
-      lng: anchor.scanLongitude,
+      label: scanLabel,
+      lat: scanLat,
+      lng: scanLng,
       address: null,
       firstSeenAt: anchor.scannedAt,
       lastSeenAt: anchor.scannedAt,

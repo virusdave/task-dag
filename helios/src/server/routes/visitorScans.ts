@@ -36,6 +36,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 import { getServerEnv } from '../config/env.js'
 import { requireSessionUser } from '../auth/requireSession.js'
 import { getPool } from '../db/pool.js'
+import { SITE_PINS } from '../db/queries/customersMapQueries.js'
 import {
   insertVisitorScan,
   listVisitorScans,
@@ -65,18 +66,14 @@ import {
 const SUPPORTED_SITES = ['bx', 'mh'] as const
 type SupportedSite = (typeof SUPPORTED_SITES)[number]
 
-// Site centroids used to decide whether an incoming VeriScan
-// envelope's lat/lng pair is actually a real customer-home geocode
-// or just the scanner kiosk's location. Kept in sync with the
-// `SITE_PINS` constant in customersMapQueries.ts.
-const STORE_COORDS: ReadonlyArray<{ lat: number; lng: number }> = [
-  { lat: 40.86494, lng: -73.88488 }, // Bronx
-  { lat: 40.76232, lng: -73.97661 }, // Midtown
-]
 // 500 ft in meters. The user's spec for "is this lat/lng really the
 // scanner kiosk?" — if a scan's reported lat/lng falls within 500ft
 // of EITHER store, we treat it as the kiosk and trigger the
 // background geocode job for the customer's home address text.
+// Site centroids come from the canonical SITE_PINS export in
+// customersMapQueries.ts (single source of truth across the
+// webhook handler, the per-scan details map, and the customer-
+// origin map page).
 const STORE_KIOSK_RADIUS_M = 500 * 0.3048
 
 /**
@@ -93,7 +90,7 @@ function isStoreOrUnknownGeocode(lat: number | null, lng: number | null): boolea
   if (lat === null || lng === null || !Number.isFinite(lat) || !Number.isFinite(lng)) {
     return true
   }
-  for (const store of STORE_COORDS) {
+  for (const store of SITE_PINS) {
     const meters = haversineMeters(lat, lng, store.lat, store.lng)
     if (meters <= STORE_KIOSK_RADIUS_M) return true
   }

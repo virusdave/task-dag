@@ -26,10 +26,24 @@ from io import BytesIO
 from PIL import Image, ImageEnhance
 
 # (siteSlug, center lat, center lng). Coords copied from
-# helios/src/server/db/queries/customersMapQueries.ts.
+# helios/src/server/db/queries/customersMapQueries.ts (SITE_PINS).
+#
+# NOTE 2026-06-03: bx center moved south by ~1.1 km after the
+# operator pointed out the playback Bronx pin was rendering in
+# the wrong neighborhood. The canonical pin now reflects the
+# Census-geocoded '2375 Arthur Ave' from migration 027. The
+# committed mini-map PNG assets (helios/src/client/assets/
+# nyc-{bx,mh}-mini-map.png) and the matching BOUNDS in
+# helios/src/client/routes/visitors/MiniGeoMarker.tsx were
+# rendered against the OLD bx center and are still in use; the
+# mini-map shows the right Belmont neighborhood either way,
+# so regenerating them is a follow-on and NOT done in this
+# commit. If/when you regen here, update both the PNG and
+# MiniGeoMarker.tsx BOUNDS in the same change so the dot
+# projection stays correct.
 SITES = [
-    ('bx', 40.86494, -73.88488),
-    ('mh', 40.76232, -73.97661),
+    ('bx', 40.855074, -73.888066),
+    ('mh', 40.762160, -73.976241),
 ]
 
 # ~2 miles radius. We use a slightly generous buffer (2.25 mi) so the
