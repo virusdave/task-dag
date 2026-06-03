@@ -24,7 +24,13 @@ import type { CatalogFilterSelection } from './CatalogFilterBar.js'
 import { useTimeAxis, type TimeWindow } from './TimeAxisContext.js'
 import { bucketXTicks, crossMarkerPath, formatXTick, formatYTick, niceYTicks, smoothedPath } from './gridlines.js'
 import { computeCompactDomain } from './scatterAutoZoom.js'
-import { useScatterZoom, type ZoomView } from './scatterZoom.js'
+import { ScatterViewToolbar } from './ScatterViewToolbar.js'
+import {
+  useScatterZoom,
+  type ScatterInteractionMode,
+  type ScatterZoomTool,
+  type ZoomView,
+} from './scatterZoom.js'
 
 // We re-fetch the annotation list after every mutation, so we don't
 // need to consume the response payload — a passthrough schema lets us
@@ -1694,11 +1700,18 @@ function ScatterSvg({ response, loading, error, window, interactive }: ScatterSv
   )
   const [fitMode, setFitMode] = useState<'compact' | 'full'>('compact')
   const baseDomain = fitMode === 'full' ? autoZoom.full : autoZoom.compact
+  // June 2026: pan/zoom toggle UX. Default = inspect mode (legacy
+  // hover/drill behaviour). Operator opts in via the toolbar to
+  // capture wheel/pointer for box-zoom + pan.
+  const [zoomMode, setZoomMode] = useState<ScatterInteractionMode>('inspect')
+  const [zoomTool, setZoomTool] = useState<ScatterZoomTool>('box')
   const zoom = useScatterZoom({
     baseDomain,
     boundsDomain: autoZoom.full,
     svgRef,
     plot: { left: marginLeft, top: marginTop, width: plotW, height: plotH },
+    mode: zoomMode,
+    tool: zoomTool,
   })
   const view = zoom.view ?? baseDomain ?? fullDomain ?? { xMin, xMax, yMin, yMax }
   const clipId = useId()
@@ -1965,40 +1978,33 @@ function ScatterSvg({ response, loading, error, window, interactive }: ScatterSv
             no (weather, margin) pairs in this window / site filter
           </text>
         ) : null}
+
+        {/* Box-zoom drag preview overlay. Rendered outside the
+            clipPath so the rectangle edges remain crisp at the plot
+            border. */}
+        {interactive && zoom.dragBox ? (
+          <rect
+            className="scatter-zoom-dragbox"
+            x={zoom.dragBox.x}
+            y={zoom.dragBox.y}
+            width={zoom.dragBox.width}
+            height={zoom.dragBox.height}
+          />
+        ) : null}
       </svg>
 
-      {interactive && autoZoom.hiddenCount > 0 ? (
-        <button
-          type="button"
-          className={
-            fitMode === 'full' ? 'metric-chart-fit-toggle is-active' : 'metric-chart-fit-toggle'
-          }
-          onClick={() => setFitMode((m) => (m === 'compact' ? 'full' : 'compact'))}
-          aria-pressed={fitMode === 'full'}
-          title={
-            fitMode === 'compact'
-              ? `Default view hides ${autoZoom.hiddenCount} outlier point${
-                  autoZoom.hiddenCount === 1 ? '' : 's'
-                } so the rest of the data is more legible. Click to show every point.`
-              : 'Return to compact auto-zoom view (densest ~90% per axis).'
-          }
-        >
-          {fitMode === 'compact'
-            ? `Show all data (${autoZoom.hiddenCount})`
-            : 'Compact view'}
-        </button>
-      ) : null}
-
-      {interactive && zoom.isZoomed ? (
-        <button
-          type="button"
-          className="metric-chart-zoom-reset"
-          onClick={zoom.resetView}
-          aria-label="Reset zoom"
-          title="Reset zoom (double-click chart)"
-        >
-          Reset zoom
-        </button>
+      {interactive ? (
+        <ScatterViewToolbar
+          mode={zoomMode}
+          setMode={setZoomMode}
+          tool={zoomTool}
+          setTool={setZoomTool}
+          isZoomed={zoom.isZoomed}
+          resetView={zoom.resetView}
+          fitMode={autoZoom.hiddenCount > 0 ? fitMode : undefined}
+          setFitMode={autoZoom.hiddenCount > 0 ? setFitMode : undefined}
+          hiddenOutlierCount={autoZoom.hiddenCount}
+        />
       ) : null}
 
       <ScatterLegend sites={sites} colourFor={colourForSite} />

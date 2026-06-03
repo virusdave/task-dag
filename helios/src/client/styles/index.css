@@ -7231,3 +7231,131 @@ span.metric-chart-legend-item {
     border-bottom: 1px dashed var(--control-border);
   }
 }
+
+/* ---------------------------------------------------------------------------
+ * Scatter "view" toolbar
+ *
+ * Replaces the legacy floating .metric-chart-zoom-reset / .metric-chart-fit-
+ * toggle chips with a single coherent toolbar that lives in the top-right
+ * corner of the chart wrapper. The chart wrapper is already a positioned
+ * containing block (.metric-chart-svg-wrap / .catalog-analytics-svg-wrap).
+ *
+ * Visual rules:
+ *   * 36px tap targets on mobile (per chip), 28px on desktop hover.
+ *   * Toggle button (Pan/zoom) flips between neutral and a blue
+ *     pressed/active state so the operator can see at a glance that the
+ *     chart is in zoom mode and gestures will be captured.
+ *   * Tool group (Box / Pan) and Fit group (Compact / All) render as
+ *     segmented controls — pressed-state inversion makes the active
+ *     choice unambiguous.
+ *   * Reset chip only renders when zoomed; styled neutrally so it never
+ *     competes with the primary toggle for attention.
+ * ------------------------------------------------------------------------- */
+.scatter-view-toolbar {
+  position: absolute;
+  top: 0.4rem;
+  right: 0.5rem;
+  z-index: 2;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  align-items: center;
+  background: rgba(255, 250, 241, 0.92);
+  padding: 0.18rem 0.3rem;
+  border: 1px solid var(--control-border);
+  border-radius: 999px;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.08);
+  font-size: 0.74rem;
+  font-weight: 600;
+}
+.scatter-view-toggle {
+  padding: 0.18rem 0.65rem;
+  font-size: 0.74rem;
+  font-weight: 700;
+  color: var(--ink, #17130f);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  cursor: pointer;
+  white-space: nowrap;
+  line-height: 1.3;
+}
+.scatter-view-toggle:hover {
+  background: rgba(155, 74, 34, 0.12);
+}
+.scatter-view-toggle.is-active {
+  background: rgba(31, 78, 122, 0.18);
+  border-color: rgba(31, 78, 122, 0.55);
+  color: #0e3559;
+}
+.scatter-view-tool-group,
+.scatter-view-fit-group {
+  display: inline-flex;
+  gap: 0;
+  border: 1px solid var(--control-border);
+  border-radius: 999px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.7);
+}
+.scatter-view-tool-chip {
+  padding: 0.18rem 0.55rem;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--ink, #17130f);
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  white-space: nowrap;
+  line-height: 1.3;
+}
+.scatter-view-tool-chip + .scatter-view-tool-chip {
+  border-left: 1px solid var(--control-border);
+}
+.scatter-view-tool-chip:hover {
+  background: rgba(155, 74, 34, 0.12);
+}
+.scatter-view-tool-chip.is-active {
+  background: rgba(31, 78, 122, 0.18);
+  color: #0e3559;
+}
+.scatter-view-reset {
+  padding: 0.18rem 0.65rem;
+  font-size: 0.74rem;
+  font-weight: 600;
+  color: var(--ink, #17130f);
+  background: transparent;
+  border: 1px solid var(--control-border);
+  border-radius: 999px;
+  cursor: pointer;
+  white-space: nowrap;
+  line-height: 1.3;
+}
+.scatter-view-reset:hover {
+  background: rgba(155, 74, 34, 0.12);
+}
+
+/* Box-zoom drag overlay rect — translucent blue so it pops against
+   any dot colour but never obscures the data underneath. Pointer
+   events disabled so the rect itself doesn't steal hover. */
+.scatter-zoom-dragbox {
+  fill: rgba(31, 78, 122, 0.12);
+  stroke: rgba(31, 78, 122, 0.85);
+  stroke-width: 1;
+  stroke-dasharray: 4 3;
+  pointer-events: none;
+}
+
+@media (max-width: 720px) {
+  .scatter-view-toolbar {
+    /* Bigger tap targets on mobile — operator likely interacts with
+       this through a finger, not a trackpad. */
+    gap: 0.4rem;
+    padding: 0.25rem 0.4rem;
+  }
+  .scatter-view-toggle,
+  .scatter-view-tool-chip,
+  .scatter-view-reset {
+    padding: 0.32rem 0.75rem;
+    font-size: 0.82rem;
+  }
+}

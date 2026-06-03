@@ -35,6 +35,20 @@ export interface ZoomView {
   readonly yMax: number
 }
 
+/**
+ * Top-level interaction mode for the scatter.
+ *
+ *  - `inspect` (default): hover tooltips, click-to-drill, page-scroll
+ *    on wheel; pinch/Ctrl+wheel still zoom for power users.
+ *  - `zoom`: scatter captures wheel + pointer; plain wheel zooms
+ *    toward cursor (no Ctrl required), single-pointer drag draws a
+ *    zoom box (`tool='box'`) or pans (`tool='pan'`).
+ */
+export type ScatterInteractionMode = 'inspect' | 'zoom'
+
+/** Drag tool when interaction mode is `zoom`. */
+export type ScatterZoomTool = 'box' | 'pan'
+
 export interface UseScatterZoomArgs {
   /**
    * Reset/default visible domain. Double-click and `resetView()`
@@ -62,6 +76,16 @@ export interface UseScatterZoomArgs {
     readonly width: number
     readonly height: number
   }
+  /**
+   * Interaction mode. Defaults to `inspect` so callers that haven't
+   * adopted the toolbar still behave exactly as before.
+   */
+  readonly mode?: ScatterInteractionMode
+  /**
+   * Drag tool when `mode === 'zoom'`. Defaults to `box`. Ignored in
+   * inspect mode.
+   */
+  readonly tool?: ScatterZoomTool
 }
 
 export interface UseScatterZoomResult {
@@ -82,11 +106,31 @@ export interface UseScatterZoomResult {
     readonly onDoubleClick: (e: React.MouseEvent<SVGSVGElement>) => void
   }
   /**
-   * Style hint to apply to the SVG (or its wrapper). `pan-y` keeps
-   * native one-finger vertical scroll alive so the page is scrollable
-   * through a grid of charts.
+   * Drag-box rectangle in SVG viewBox coordinates (matches the
+   * caller's `plot` units). Non-null only while a box-zoom drag is
+   * in progress. The caller renders an overlay <rect/> from this.
    */
-  readonly svgStyle: { readonly touchAction: 'pan-y' }
+  readonly dragBox: {
+    readonly x: number
+    readonly y: number
+    readonly width: number
+    readonly height: number
+  } | null
+  /**
+   * Style hint to apply to the SVG (or its wrapper).
+   *  - `pan-y` (default / inspect mode): native vertical scroll still
+   *    works so the page is scrollable through a grid of charts.
+   *  - `none` (zoom mode): the browser cannot steal touch gestures,
+   *    so single-finger drag draws a zoom box and two-finger pinch
+   *    zooms without page-scroll interference.
+   *  - `cursor` flips to `crosshair` for the box tool and `grab` for
+   *    pan tool while in zoom mode so the operator gets clear visual
+   *    feedback about what dragging will do.
+   */
+  readonly svgStyle: {
+    readonly touchAction: 'pan-y' | 'none'
+    readonly cursor: string
+  }
 }
 
 // Minimum view span as a fraction of the base span (anti-microscopic
@@ -188,9 +232,25 @@ function viewsEqual(a: ZoomView | null, b: ZoomView | null): boolean {
 
 export function useScatterZoom(args: UseScatterZoomArgs): UseScatterZoomResult {
   const { baseDomain, boundsDomain, svgRef, plot } = args
+  const mode: ScatterInteractionMode = args.mode ?? 'inspect'
+  const tool: ScatterZoomTool = args.tool ?? 'box'
+  const modeRef = useRef<ScatterInteractionMode>(mode)
+  modeRef.current = mode
+  const toolRef = useRef<ScatterZoomTool>(tool)
+  toolRef.current = tool
   const [view, setView] = useState<ZoomView | null>(baseDomain)
   const viewRef = useRef<ZoomView | null>(view)
   viewRef.current = view
+  // Drag-box state for box-zoom (zoom-mode + box tool). Stored in a
+  // ref for high-frequency move updates; mirrored into React state
+  // only when the overlay rectangle actually changes so the
+  // re-render cost is bounded.
+  const dragBoxRef = useRef<{ x: number; y: number; width: number; height: number } | null>(
+    null,
+  )
+  const [dragBox, setDragBox] = useState<
+    { x: number; y: number; width: number; height: number } | null
+  >(null)
   // `baseRef` is the reset/default view (compact view when auto-zoom
   // is on). `boundsRef` is the maximum reachable view for pan / zoom
   // (full padded data extent when auto-zoom is on). When the caller
@@ -225,17 +285,21 @@ export function useScatterZoom(args: UseScatterZoomArgs): UseScatterZoomResult {
   >(new Map())
 
   // Active gesture metadata. `kind === null` means no gesture in
-  // flight.
+  // flight. `box` is the zoom-mode box-zoom drag (a rectangle the
+  // user sweeps over the area they want to zoom into).
   const gestureRef = useRef<{
-    kind: 'pinch' | 'pan' | null
+    kind: 'pinch' | 'pan' | 'box' | null
     startView: ZoomView | null
     // pinch
     startDistance: number
     startMidSvg: { x: number; y: number } | null
     startMidData: { x: number; y: number } | null
-    // pan
+    // pan / box
     panStartSvg: { x: number; y: number } | null
     panPointerId: number | null
+    // box: pointer-moved-past-threshold flag, used to suppress
+    // dot-click drill on a real drag
+    boxMoved: boolean
   }>({
     kind: null,
     startView: null,
@@ -244,7 +308,21 @@ export function useScatterZoom(args: UseScatterZoomArgs): UseScatterZoomResult {
     startMidData: null,
     panStartSvg: null,
     panPointerId: null,
+    boxMoved: false,
   })
+
+  // Minimum sweep size (in SVG units, == viewBox units) before a
+  // box-zoom drag is treated as a real zoom request. Below this
+  // we treat the gesture as a click, so a fat-finger tap doesn't
+  // collapse the chart to a single pixel.
+  const BOX_THRESHOLD = 8
+
+  const clearDragBox = useCallback(() => {
+    if (dragBoxRef.current != null) {
+      dragBoxRef.current = null
+      setDragBox(null)
+    }
+  }, [])
 
   // Non-passive wheel listener so Ctrl/⌘+wheel can preventDefault
   // and not page-scroll. React's synthetic onWheel is passive.
@@ -252,7 +330,14 @@ export function useScatterZoom(args: UseScatterZoomArgs): UseScatterZoomResult {
     const svg = svgRef.current
     if (!svg) return
     const handler = (e: WheelEvent) => {
-      if (!e.ctrlKey && !e.metaKey) return // let the page scroll normally
+      const inZoomMode = modeRef.current === 'zoom'
+      // Inspect mode keeps the legacy "wheel scrolls the page;
+      // Ctrl/⌘+wheel zooms" power-user behaviour. Zoom mode
+      // captures plain wheel so the operator can zoom without
+      // chording — at the cost of locking page scroll while the
+      // pointer is inside the plot, which is exactly the trade
+      // they opted into by toggling zoom mode on.
+      if (!inZoomMode && !e.ctrlKey && !e.metaKey) return
       const currentView = viewRef.current ?? baseRef.current
       const bounds = boundsRef.current ?? baseRef.current
       if (!currentView || !bounds) return
@@ -337,12 +422,53 @@ export function useScatterZoom(args: UseScatterZoomArgs): UseScatterZoomResult {
           },
           panStartSvg: null,
           panPointerId: null,
+          boxMoved: false,
         }
+        clearDragBox()
         setGestureActiveBoth(true)
         return
       }
 
-      // Single mouse pointer + already-zoomed → start drag-pan.
+      // Single pointer + zoom mode → box-zoom or pan, depending on
+      // active tool. Works for mouse AND touch in zoom mode because
+      // the caller has set touch-action:none on the SVG.
+      if (modeRef.current === 'zoom' && pointersRef.current.size === 1) {
+        try {
+          e.currentTarget.setPointerCapture(e.pointerId)
+        } catch {
+          // ignore — pointer capture is best-effort
+        }
+        if (toolRef.current === 'pan') {
+          gestureRef.current = {
+            kind: 'pan',
+            startView: currentView,
+            startDistance: 0,
+            startMidSvg: null,
+            startMidData: null,
+            panStartSvg: local,
+            panPointerId: e.pointerId,
+            boxMoved: false,
+          }
+        } else {
+          gestureRef.current = {
+            kind: 'box',
+            startView: currentView,
+            startDistance: 0,
+            startMidSvg: null,
+            startMidData: null,
+            panStartSvg: local,
+            panPointerId: e.pointerId,
+            boxMoved: false,
+          }
+        }
+        setGestureActiveBoth(true)
+        e.preventDefault()
+        return
+      }
+
+      // Inspect-mode legacy: single mouse pointer + already-zoomed →
+      // start drag-pan. Touch is unaffected so one-finger touch
+      // continues to scroll the page in inspect mode.
       if (
         e.pointerType === 'mouse' &&
         pointersRef.current.size === 1 &&
@@ -361,6 +487,7 @@ export function useScatterZoom(args: UseScatterZoomArgs): UseScatterZoomResult {
           startMidData: null,
           panStartSvg: local,
           panPointerId: e.pointerId,
+          boxMoved: false,
         }
         setGestureActiveBoth(true)
         e.preventDefault()
@@ -428,6 +555,37 @@ export function useScatterZoom(args: UseScatterZoomArgs): UseScatterZoomResult {
         )
         setView(next)
         e.preventDefault()
+      } else if (g.kind === 'box' && g.panStartSvg) {
+        // Box-zoom drag: update the overlay rectangle (clipped to
+        // the plot). We don't change the view yet — the actual zoom
+        // commits in `endPointer` so the operator can preview the
+        // sweep before releasing.
+        const local = clientToSvg(e.currentTarget, e.clientX, e.clientY)
+        if (!local) return
+        const clampedX = Math.max(plot.left, Math.min(plot.left + plot.width, local.x))
+        const clampedY = Math.max(plot.top, Math.min(plot.top + plot.height, local.y))
+        const x0 = g.panStartSvg.x
+        const y0 = g.panStartSvg.y
+        const x = Math.min(x0, clampedX)
+        const y = Math.min(y0, clampedY)
+        const width = Math.abs(clampedX - x0)
+        const height = Math.abs(clampedY - y0)
+        if (width >= BOX_THRESHOLD || height >= BOX_THRESHOLD) {
+          g.boxMoved = true
+        }
+        const nextBox = { x, y, width, height }
+        const prev = dragBoxRef.current
+        if (
+          !prev ||
+          prev.x !== nextBox.x ||
+          prev.y !== nextBox.y ||
+          prev.width !== nextBox.width ||
+          prev.height !== nextBox.height
+        ) {
+          dragBoxRef.current = nextBox
+          setDragBox(nextBox)
+        }
+        e.preventDefault()
       }
     },
     [plot],
@@ -449,6 +607,7 @@ export function useScatterZoom(args: UseScatterZoomArgs): UseScatterZoomResult {
           startMidData: null,
           panStartSvg: null,
           panPointerId: null,
+          boxMoved: false,
         }
         setGestureActiveBoth(false)
       } else if (g.kind === 'pan' && g.panPointerId === e.pointerId) {
@@ -465,11 +624,59 @@ export function useScatterZoom(args: UseScatterZoomArgs): UseScatterZoomResult {
           startMidData: null,
           panStartSvg: null,
           panPointerId: null,
+          boxMoved: false,
+        }
+        setGestureActiveBoth(false)
+      } else if (g.kind === 'box' && g.panPointerId === e.pointerId) {
+        try {
+          e.currentTarget.releasePointerCapture(e.pointerId)
+        } catch {
+          // best-effort
+        }
+        const box = dragBoxRef.current
+        const bounds = boundsRef.current ?? baseRef.current
+        const startView = g.startView
+        // Only commit if the operator actually swept past the
+        // threshold; a sub-threshold drag is treated as a click
+        // so dot-drill / no-op semantics still work.
+        if (
+          g.boxMoved &&
+          box &&
+          startView &&
+          bounds &&
+          box.width >= BOX_THRESHOLD &&
+          box.height >= BOX_THRESHOLD
+        ) {
+          const xMin = svgToDataX(startView, plotRef.current, box.x)
+          const xMax = svgToDataX(startView, plotRef.current, box.x + box.width)
+          const yMax = svgToDataY(startView, plotRef.current, box.y)
+          const yMin = svgToDataY(startView, plotRef.current, box.y + box.height)
+          const next = clampToBase(
+            {
+              xMin: Math.min(xMin, xMax),
+              xMax: Math.max(xMin, xMax),
+              yMin: Math.min(yMin, yMax),
+              yMax: Math.max(yMin, yMax),
+            },
+            bounds,
+          )
+          setView(next)
+        }
+        clearDragBox()
+        gestureRef.current = {
+          kind: null,
+          startView: null,
+          startDistance: 0,
+          startMidSvg: null,
+          startMidData: null,
+          panStartSvg: null,
+          panPointerId: null,
+          boxMoved: false,
         }
         setGestureActiveBoth(false)
       }
     },
-    [setGestureActiveBoth],
+    [setGestureActiveBoth, clearDragBox],
   )
 
   const onDoubleClick = useCallback(
@@ -485,11 +692,28 @@ export function useScatterZoom(args: UseScatterZoomArgs): UseScatterZoomResult {
 
   const isZoomed = !viewsEqual(view, baseDomain)
 
+  // In zoom mode the SVG must own touch gestures (otherwise iOS /
+  // Android route single-finger drag into page scroll and box-zoom
+  // never fires). Inspect mode keeps the legacy `pan-y` so a grid of
+  // charts remains vertically scrollable.
+  const touchAction: 'pan-y' | 'none' = mode === 'zoom' ? 'none' : 'pan-y'
+  const cursor =
+    mode === 'zoom'
+      ? gestureActive
+        ? tool === 'pan'
+          ? 'grabbing'
+          : 'crosshair'
+        : tool === 'pan'
+          ? 'grab'
+          : 'crosshair'
+      : 'default'
+
   return {
     view: view ?? baseDomain,
     isZoomed,
     resetView,
     gestureActive,
+    dragBox,
     handlers: {
       onPointerDown,
       onPointerMove,
@@ -497,6 +721,6 @@ export function useScatterZoom(args: UseScatterZoomArgs): UseScatterZoomResult {
       onPointerCancel: endPointer,
       onDoubleClick,
     },
-    svgStyle: { touchAction: 'pan-y' },
+    svgStyle: { touchAction, cursor },
   }
 }

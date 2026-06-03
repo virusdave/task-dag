@@ -40,7 +40,13 @@ import {
 import { HelpIcon } from './MetricChart.js'
 import { RangeNudgeRow } from './RangeNudgeRow.js'
 import { computeCompactDomain } from './scatterAutoZoom.js'
-import { useScatterZoom, type ZoomView } from './scatterZoom.js'
+import { ScatterViewToolbar } from './ScatterViewToolbar.js'
+import {
+  useScatterZoom,
+  type ScatterInteractionMode,
+  type ScatterZoomTool,
+  type ZoomView,
+} from './scatterZoom.js'
 import { useMetricSelection } from './useMetricSelection.js'
 
 // v1.4 V4'4: per-card synthetic metricId prefix. Catalog scatters are
@@ -3036,11 +3042,21 @@ function CatalogScatterSvg({
   )
   const [fitMode, setFitMode] = useState<'compact' | 'full'>('compact')
   const baseDomain = fitMode === 'full' ? autoZoom.full : autoZoom.compact
+  // Local pan/zoom UI state (June 2026 redesign). Default is
+  // `inspect` so the chart behaves exactly as before until the
+  // operator opts in via the toolbar. `tool` is only meaningful in
+  // zoom mode but we keep it as separate state so the toolbar can
+  // show the current/previous tool when toggling modes back and
+  // forth without losing the selection.
+  const [zoomMode, setZoomMode] = useState<ScatterInteractionMode>('inspect')
+  const [zoomTool, setZoomTool] = useState<ScatterZoomTool>('box')
   const zoom = useScatterZoom({
     baseDomain,
     boundsDomain: autoZoom.full,
     svgRef,
     plot: { left: marginLeft, top: marginTop, width: plotW, height: plotH },
+    mode: zoomMode,
+    tool: zoomTool,
   })
   const view = zoom.view ?? baseDomain ?? fullDomain ?? { xMin, xMax, yMin, yMax }
   const clipId = useId()
@@ -3543,42 +3559,33 @@ function CatalogScatterSvg({
               />
             )
           })() : null}
+          {/* Box-zoom drag preview overlay. Rendered AFTER the dots /
+              hover ring so it always paints on top, and outside the
+              clip path so a corner-of-plot drag still shows the full
+              rectangle frame at the edges. */}
+          {zoom.dragBox ? (
+            <rect
+              className="scatter-zoom-dragbox"
+              x={zoom.dragBox.x}
+              y={zoom.dragBox.y}
+              width={zoom.dragBox.width}
+              height={zoom.dragBox.height}
+            />
+          ) : null}
         </g>
       </svg>
 
-      {autoZoom.hiddenCount > 0 ? (
-        <button
-          type="button"
-          className={
-            fitMode === 'full' ? 'metric-chart-fit-toggle is-active' : 'metric-chart-fit-toggle'
-          }
-          onClick={() => setFitMode((m) => (m === 'compact' ? 'full' : 'compact'))}
-          aria-pressed={fitMode === 'full'}
-          title={
-            fitMode === 'compact'
-              ? `Default view hides ${autoZoom.hiddenCount} outlier point${
-                  autoZoom.hiddenCount === 1 ? '' : 's'
-                } so the rest of the data is more legible. Click to show every point.`
-              : 'Return to compact auto-zoom view (densest ~90% per axis).'
-          }
-        >
-          {fitMode === 'compact'
-            ? `Show all data (${autoZoom.hiddenCount})`
-            : 'Compact view'}
-        </button>
-      ) : null}
-
-      {zoom.isZoomed ? (
-        <button
-          type="button"
-          className="metric-chart-zoom-reset"
-          onClick={zoom.resetView}
-          aria-label="Reset zoom"
-          title="Reset zoom (double-click chart)"
-        >
-          Reset zoom
-        </button>
-      ) : null}
+      <ScatterViewToolbar
+        mode={zoomMode}
+        setMode={setZoomMode}
+        tool={zoomTool}
+        setTool={setZoomTool}
+        isZoomed={zoom.isZoomed}
+        resetView={zoom.resetView}
+        fitMode={autoZoom.hiddenCount > 0 ? fitMode : undefined}
+        setFitMode={autoZoom.hiddenCount > 0 ? setFitMode : undefined}
+        hiddenOutlierCount={autoZoom.hiddenCount}
+      />
 
       {hovered && hoveredDotPx ? (
         <ScatterTooltip

@@ -136,6 +136,26 @@ function CategoryAccordion({
       <div style={{ marginTop: 8 }}>
         {hasOpened ? (
           <CatalogAnalyticsTab
+            // FORCE-REMOUNT when the embedded scope changes (category /
+            // entity / highlight seed). Without this, navigating from
+            // one brand detail page to another (e.g. Revert →
+            // Quality Control) leaves the previously-mounted accordion
+            // and its nested `CatalogAnalyticsTab` reused — but the
+            // tab's `embeddedRef.current` and derived state
+            // (highlightState, selectedCategoryIds, etc.) are
+            // initialised once and only once at mount. The chart
+            // header and URL update to "Quality Control" while the
+            // embedded scatter still highlights the previous brand's
+            // products. June 2026 bug: on /metrics/brands/Quality
+            // Control → Edibles, the visible highlighted dot was a
+            // Revert product, because the accordion had been mounted
+            // earlier on the Revert brand page. Re-keying forces a
+            // clean mount whenever any embedded prop changes.
+            key={[
+              embedded.categoryIds.join('\u001f'),
+              (embedded.highlightBrandNames ?? []).join('\u001f'),
+              (embedded.highlightDistributorNames ?? []).join('\u001f'),
+            ].join('\u001e')}
             embedded={{
               categoryIds: embedded.categoryIds,
               // INTENTIONALLY NOT passing brandIds /
@@ -329,7 +349,14 @@ function MetricsEntityDetailPage({ kind }: { readonly kind: EntityKind }) {
 
           {resolution.categoriesWithPresence.map((cat) => (
             <CategoryAccordion
-              key={cat.id}
+              // Key by entity + category so React unmounts/remounts
+              // the accordion (and its embedded scatter) when the
+              // operator navigates from one brand/distributor detail
+              // page to another. Without this, React's keyed-list
+              // reconciliation reuses the same accordion DOM/state
+              // across navigations and the embedded scatter ends up
+              // showing stale highlight chips (see bug note below).
+              key={`${kind}:${resolution.entity!.id}:${cat.id}`}
               category={cat}
               embedded={{
                 categoryIds: [cat.id],
