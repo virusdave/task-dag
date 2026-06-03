@@ -171,3 +171,168 @@ export async function enqueueJob(db: Queryable, input: EnqueueJobInput): Promise
 
   return result.rows[0].id
 }
+
+/**
+ * Bulk plural variant of `enqueueJob`. Shipped as part of the
+ * Helios DB-cost-reduction epic (virusdave/top-level#11, phase
+ * A4): the per-tick scheduler batch path used to open one
+ * transaction PER pending row to do "SELECT existing dedupe →
+ * INSERT job_queue" — 2 round-trips × N rows per tick × every
+ * tick. The plural path collapses that to two round-trips per
+ * batch regardless of N.
+ *
+ * Returns the resolved job ids parallel to `inputs`. Each entry
+ * is either an existing-dedupe match (if a queued / running row
+ * for that dedupe_key already exists) or the freshly-inserted
+ * row id. Order is preserved.
+ *
+ * Constraints:
+ *   - Every input MUST have a non-null `dedupeKey`. The dedupe
+ *     key is what we use to map insert RETURNINGs back to the
+ *     caller's array slot; null dedupe keys would silently lose
+ *     that mapping. Callers without per-row dedupe keys should
+ *     keep using the singular `enqueueJob`.
+ *   - Within a single call, `dedupeKey` values must be unique.
+ *     The same-batch dedupe collapse semantics of the old
+ *     per-row loop (which would just SELECT the first insert
+ *     and skip the rest) are NOT reproduced here; the litalerts
+ *     scheduler path that motivates this helper guarantees
+ *     uniqueness because each dedupe key is built from a
+ *     unique queue-row id.
+ *   - Run inside a single transaction by the caller; this helper
+ *     does NOT open its own transaction. That keeps the batch
+ *     atomic with the audit + recordEnqueueAndPatchCache writes
+ *     the caller wraps around it.
+ */
+export async function enqueueJobs(
+  db: Queryable,
+  inputs: EnqueueJobInput[],
+): Promise<number[]> {
+  if (inputs.length === 0) {
+    return []
+  }
+  const resolved = inputs.map((input) => {
+    if (input.dedupeKey == null || input.dedupeKey === '') {
+      throw new Error(
+        'enqueueJobs: every input must have a non-null dedupeKey; use singular enqueueJob otherwise',
+      )
+    }
+    return {
+      input,
+      dedupeKey: input.dedupeKey,
+      catalogGroupId: parseCatalogGroupIdFromModuleScope(input.module, input.scope),
+      runAt: input.runAt ?? new Date(),
+      priority: input.priority ?? defaultPriorityFor(input),
+    }
+  })
+
+  const dedupeKeys = resolved.map((r) => r.dedupeKey)
+  const seenDedupeKeys = new Set<string>()
+  for (const key of dedupeKeys) {
+    if (seenDedupeKeys.has(key)) {
+      throw new Error(`enqueueJobs: duplicate dedupeKey in batch: ${key}`)
+    }
+    seenDedupeKeys.add(key)
+  }
+
+  // (1) Existing-dedupe lookup. Matches singular enqueueJob's
+  // SELECT…WHERE status IN ('queued','running') semantics.
+  const existingResult = await db.query<{ id: number; dedupe_key: string }>(
+    `
+      select id, dedupe_key
+        from job_queue
+       where dedupe_key = any($1::text[])
+         and status in ('queued', 'running')
+    `,
+    [dedupeKeys],
+  )
+  const existingByDedupeKey = new Map<string, number>()
+  for (const row of existingResult.rows) {
+    // The same dedupe key can technically appear more than once
+    // historically (race that pre-dates this code); keep the
+    // first id, same as the singular helper's LIMIT 1.
+    if (!existingByDedupeKey.has(row.dedupe_key)) {
+      existingByDedupeKey.set(row.dedupe_key, row.id)
+    }
+  }
+
+  // (2) Bulk insert for the inputs that did NOT match an
+  //     existing dedupe row. RETURNING (id, dedupe_key) lets us
+  //     map insertions back to caller slots.
+  const toInsert = resolved.filter((r) => !existingByDedupeKey.has(r.dedupeKey))
+  const insertedByDedupeKey = new Map<string, number>()
+  if (toInsert.length > 0) {
+    const payload = toInsert.map((r) => ({
+      job_type: r.input.jobType,
+      dedupe_key: r.dedupeKey,
+      concurrency_key: r.input.concurrencyKey ?? null,
+      module_code: r.input.module,
+      scope_entity_type: r.input.scope?.entityType ?? null,
+      scope_entity_id: r.input.scope?.entityId ?? null,
+      catalog_group_id: r.catalogGroupId,
+      payload_json: r.input.payload,
+      run_at: r.runAt.toISOString(),
+      requested_by_user_id: r.input.requestedByUserId ?? null,
+      priority: r.priority,
+    }))
+    const insertResult = await db.query<{ id: number; dedupe_key: string }>(
+      `
+        insert into job_queue (
+          job_type,
+          dedupe_key,
+          concurrency_key,
+          module_code,
+          scope_entity_type,
+          scope_entity_id,
+          catalog_group_id,
+          payload_json,
+          status,
+          run_at,
+          requested_by_user_id,
+          priority
+        )
+        select
+          x.job_type,
+          x.dedupe_key,
+          x.concurrency_key,
+          x.module_code,
+          x.scope_entity_type,
+          x.scope_entity_id,
+          x.catalog_group_id,
+          x.payload_json,
+          'queued',
+          x.run_at,
+          x.requested_by_user_id,
+          x.priority
+        from jsonb_to_recordset($1::jsonb) as x(
+          job_type             text,
+          dedupe_key           text,
+          concurrency_key      text,
+          module_code          text,
+          scope_entity_type    text,
+          scope_entity_id      text,
+          catalog_group_id     bigint,
+          payload_json         jsonb,
+          run_at               timestamptz,
+          requested_by_user_id bigint,
+          priority             int
+        )
+        returning id, dedupe_key
+      `,
+      [JSON.stringify(payload)],
+    )
+    for (const row of insertResult.rows) {
+      insertedByDedupeKey.set(row.dedupe_key, row.id)
+    }
+  }
+
+  return resolved.map((r) => {
+    const existing = existingByDedupeKey.get(r.dedupeKey)
+    if (existing !== undefined) return existing
+    const inserted = insertedByDedupeKey.get(r.dedupeKey)
+    if (inserted !== undefined) return inserted
+    // Defensive: a row should always appear in one of the two
+    // maps. If not, something is structurally wrong.
+    throw new Error(`enqueueJobs: lost dedupe-key mapping for ${r.dedupeKey}`)
+  })
+}

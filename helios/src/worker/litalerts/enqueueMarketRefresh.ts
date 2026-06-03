@@ -33,7 +33,7 @@
 import type { Queryable } from '../../server/db/pool.js'
 import { withTransaction } from '../../server/db/tx.js'
 import { appendAuditEvent } from '../../server/audit/appendAuditEvent.js'
-import { enqueueJob, JOB_PRIORITY_BEST_EFFORT } from '../../server/jobs/enqueueJob.js'
+import { enqueueJobs, JOB_PRIORITY_BEST_EFFORT } from '../../server/jobs/enqueueJob.js'
 import type { JsonValue } from '../../shared/contracts/index.js'
 
 /**
@@ -139,29 +139,36 @@ function buildNotesForTrigger(trigger: MarketRefreshTrigger): string | null {
 }
 
 /**
- * Dedupe-window insert.
+ * Bulk dedupe-window insert.
  *
- * Returns the id of the freshly inserted row, or null when an existing
- * pending / in-progress row for the same (product_id, enqueue_reason)
- * inside the last 5 minutes already covers this request.
+ * Inserts a queue row for each product in `productIds` that does
+ * NOT already have a pending / in-progress row for the same
+ * `enqueue_reason` inside the last 5 minutes; returns the
+ * (productId, queueRowId) pairs for the rows that were actually
+ * inserted.
  *
- * Using `insert ... select ... where not exists` rather than a SELECT
- * followed by an INSERT keeps the dedupe atomic under concurrent
- * callers (two scheduler ticks, a sibling job racing with a manual
- * action, etc.).
+ * The `where not exists (...)` inside the `insert … select` keeps
+ * the dedupe atomic under concurrent callers (two scheduler ticks,
+ * a sibling job racing with a manual action, etc.), exactly as the
+ * old per-row implementation. The plural variant collapses N
+ * round-trips per call into one bulk INSERT plus one RETURNING.
  */
-async function insertQueueRowWithDedupe(
+async function insertQueueRowsWithDedupe(
   db: Queryable,
-  input: {
-    productId: number
+  productIds: number[],
+  shared: {
     enqueueReason: string
     priority: number
     runAt: Date
     alarmClass: MarketRefreshAlarmClass | null
     notes: string | null
   },
-): Promise<number | null> {
-  const result = await db.query<{ id: number }>(
+): Promise<Array<{ productId: number; queueRowId: number }>> {
+  if (productIds.length === 0) {
+    return []
+  }
+  const payload = productIds.map((productId) => ({ product_id: productId }))
+  const result = await db.query<{ id: number; product_id: number }>(
     `
       insert into pending_litalerts_refresh_queue (
         product_id,
@@ -175,27 +182,41 @@ async function insertQueueRowWithDedupe(
         enqueue_reason,
         alarm_class
       )
-      select $1, null, 'manual', null, 'pending', $6, $3, $4, $2, $5
+      select
+        x.product_id,
+        null,
+        'manual',
+        null,
+        'pending',
+        $6,
+        $3,
+        $4,
+        $2,
+        $5
+      from jsonb_to_recordset($1::jsonb) as x(product_id bigint)
       where not exists (
         select 1
         from pending_litalerts_refresh_queue existing
-        where existing.product_id = $1
+        where existing.product_id = x.product_id
           and existing.enqueue_reason = $2
           and existing.status in ('pending', 'in_progress')
           and existing.enqueued_at > now() - interval '5 minutes'
       )
-      returning id
+      returning id, product_id
     `,
     [
-      input.productId,
-      input.enqueueReason,
-      input.priority,
-      input.runAt,
-      input.alarmClass,
-      input.notes,
+      JSON.stringify(payload),
+      shared.enqueueReason,
+      shared.priority,
+      shared.runAt,
+      shared.alarmClass,
+      shared.notes,
     ],
   )
-  return result.rows[0]?.id ?? null
+  return result.rows.map((row) => ({
+    queueRowId: row.id,
+    productId: row.product_id,
+  }))
 }
 
 /**
@@ -236,24 +257,48 @@ export async function enqueueMarketRefreshForProducts(
     uniqueProductIds.push(productId)
   }
 
-  const enqueuedQueueRowIds: number[] = []
-  const enqueuedJobIds: number[] = []
-  let skippedCount = 0
-
-  for (const productId of uniqueProductIds) {
-    const result = await withTransaction(async (db) => {
-      const queueRowId = await insertQueueRowWithDedupe(db, {
-        productId,
+  // ============================================================================
+  // Phase A4 (virusdave/top-level#11): one transaction per call
+  // with one bulk dedupe-window INSERT and one bulk enqueueJobs(),
+  // replacing the old per-product `for (...) { await
+  // withTransaction(...) { insertQueueRowWithDedupe; enqueueJob } }`
+  // loop. For a 500-product rolling-refresh tick the prior path
+  // issued 3 round-trips × 500 products = 1500 round-trips plus a
+  // final audit-tx; the new path is 3-4 round-trips per call
+  // (dedupe-window INSERT, existing-dedupe SELECT on job_queue,
+  // bulk INSERT into job_queue, audit-event INSERT).
+  //
+  // Behaviour preserved:
+  //   - 5-minute dedupe window on (product_id, enqueue_reason)
+  //     via WHERE NOT EXISTS in the queue-row INSERT.
+  //   - Per-product `(productId -> queueRowId)` mapping flows
+  //     through the RETURNING clause so the matching enqueueJobs
+  //     call can build the per-row dedupe keys
+  //     (`config.workers.litalerts_refresh.variant:<queueRowId>`).
+  //   - Output order: `enqueuedQueueRowIds` follows the dedupe
+  //     INSERT's RETURNING order. `enqueuedJobIds` is parallel to
+  //     it. `skippedCount` is the difference between input and
+  //     inserted counts (deduped or already-pending products).
+  //   - One audit event per non-empty batch (unchanged).
+  // ============================================================================
+  const { enqueuedQueueRowIds, enqueuedJobIds, skippedCount } = await withTransaction(
+    async (db) => {
+      const insertedQueueRows = await insertQueueRowsWithDedupe(db, uniqueProductIds, {
         enqueueReason,
         priority,
         runAt,
         alarmClass,
         notes,
       })
-      if (queueRowId === null) {
-        return { queueRowId: null, jobId: null }
+      const localSkipped = uniqueProductIds.length - insertedQueueRows.length
+      if (insertedQueueRows.length === 0) {
+        return {
+          enqueuedQueueRowIds: [] as number[],
+          enqueuedJobIds: [] as number[],
+          skippedCount: localSkipped,
+        }
       }
-      const jobId = await enqueueJob(db, {
+      const jobInputs = insertedQueueRows.map(({ productId, queueRowId }) => ({
         // Lit Alerts variant refreshes are background batch work — they
         // run by the thousand whenever a rolling tick or alarm scan
         // fires, and would starve live-interactive operator clicks if
@@ -263,8 +308,8 @@ export async function enqueueMarketRefreshForProducts(
         concurrencyKey: null,
         // One job per pending queue row keeps the dedupe surface obvious.
         dedupeKey: `config.workers.litalerts_refresh.variant:${queueRowId}`,
-        jobType: 'config.workers.litalerts_refresh.variant',
-        module: 'config',
+        jobType: 'config.workers.litalerts_refresh.variant' as const,
+        module: 'config' as const,
         payload: {
           productId,
           queueRowId,
@@ -276,20 +321,9 @@ export async function enqueueMarketRefreshForProducts(
         requestedByUserId: options.requestedByUserId ?? null,
         runAt,
         scope: null,
-      })
-      return { queueRowId, jobId }
-    })
-
-    if (result.queueRowId === null || result.jobId === null) {
-      skippedCount += 1
-      continue
-    }
-    enqueuedQueueRowIds.push(result.queueRowId)
-    enqueuedJobIds.push(result.jobId)
-  }
-
-  if (enqueuedQueueRowIds.length > 0) {
-    await withTransaction(async (db) => {
+      }))
+      const jobIds = await enqueueJobs(db, jobInputs)
+      const queueRowIds = insertedQueueRows.map((row) => row.queueRowId)
       await appendAuditEvent(db, {
         actorType: options.requestedByUserId ? 'user' : 'system',
         actorUserId: options.requestedByUserId ?? null,
@@ -300,18 +334,23 @@ export async function enqueueMarketRefreshForProducts(
         payload: {
           trigger: triggerToJson(options.trigger),
           productIds: uniqueProductIds,
-          enqueuedQueueRowIds,
-          enqueuedJobIds,
+          enqueuedQueueRowIds: queueRowIds,
+          enqueuedJobIds: jobIds,
           alarmClass,
           priority,
-          skippedCount,
+          skippedCount: localSkipped,
         },
         requestId: null,
         scope: null,
         undoPayload: null,
       })
-    })
-  }
+      return {
+        enqueuedQueueRowIds: queueRowIds,
+        enqueuedJobIds: jobIds,
+        skippedCount: localSkipped,
+      }
+    },
+  )
 
   return { enqueuedQueueRowIds, enqueuedJobIds, skippedCount }
 }

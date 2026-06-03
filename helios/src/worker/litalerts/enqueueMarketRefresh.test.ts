@@ -6,17 +6,40 @@ import type { Queryable } from '../../server/db/pool.js'
 // ---------------------------------------------------------------------------
 // Mocks
 // ---------------------------------------------------------------------------
+//
+// The post-A4 enqueueMarketRefreshForProducts opens ONE transaction
+// per call and inside it issues:
+//   1. ONE bulk `insert into pending_litalerts_refresh_queue …
+//      select … from jsonb_to_recordset($1::jsonb) … where not exists
+//      … returning id, product_id`  — one row per product that was
+//      NOT 5-minute-deduped.
+//   2. ONE call to the bulk `enqueueJobs` plural helper (mocked
+//      below) with one input per inserted queue row.
+//   3. ONE `appendAuditEvent` per non-empty batch.
+//
+// The fake DB below decodes the jsonb_to_recordset payload, applies
+// the per-product dedupe via `existingProductIds`, and returns the
+// (id, product_id) rows the plural insert RETURNING clause would
+// produce. `enqueueJobs` and `appendAuditEvent` are mocked module-
+// level so the assertions can inspect what the helper passed them.
 
-// In-memory shim that records every (productId, enqueueReason) the helper
-// has tried to insert. The test toggles `existingProductIds` to simulate
-// the 5-minute dedupe predicate hitting a pre-existing row.
 const dbState = {
   nextQueueRowId: 1,
   nextJobId: 100,
   existingProductIds: new Set<number>(),
-  insertCalls: [] as Array<{ productId: number; enqueueReason: string; priority: number; alarmClass: string | null; notes: string | null }>,
+  insertCalls: [] as Array<{
+    productIds: number[]
+    enqueueReason: string
+    priority: number
+    alarmClass: string | null
+    notes: string | null
+    insertedProductIds: number[]
+  }>,
   auditEvents: [] as Array<{ eventType: string; payload: unknown; actorType: string }>,
-  jobEnqueueCalls: [] as Array<{ dedupeKey: string | null; jobType: string; payload: unknown }>,
+  jobBatchCalls: [] as Array<{
+    inputs: Array<{ dedupeKey: string | null; jobType: string; payload: unknown }>
+    returnedJobIds: number[]
+  }>,
 }
 
 function buildFakeDb(): Queryable {
@@ -24,29 +47,35 @@ function buildFakeDb(): Queryable {
     async query<TResult extends QueryResultRow>(text: string, params?: unknown[]) {
       const trimmed = text.trim()
       if (trimmed.startsWith('insert into pending_litalerts_refresh_queue')) {
-        const productId = params![0] as number
+        const jsonPayload = JSON.parse(params![0] as string) as Array<{ product_id: number }>
         const enqueueReason = params![1] as string
         const priority = params![2] as number
         const alarmClass = (params![4] as string | null) ?? null
         const notes = (params![5] as string | null) ?? null
-        dbState.insertCalls.push({ productId, enqueueReason, priority, alarmClass, notes })
-        if (dbState.existingProductIds.has(productId)) {
-          return {
-            command: 'INSERT',
-            fields: [],
-            oid: 0,
-            rowCount: 0,
-            rows: [] as unknown as TResult[],
-          } as QueryResult<TResult>
+        const productIds = jsonPayload.map((row) => row.product_id)
+        const inserted: Array<{ id: number; product_id: number }> = []
+        for (const productId of productIds) {
+          if (dbState.existingProductIds.has(productId)) {
+            continue
+          }
+          const id = dbState.nextQueueRowId
+          dbState.nextQueueRowId += 1
+          inserted.push({ id, product_id: productId })
         }
-        const queueRowId = dbState.nextQueueRowId
-        dbState.nextQueueRowId += 1
+        dbState.insertCalls.push({
+          productIds,
+          enqueueReason,
+          priority,
+          alarmClass,
+          notes,
+          insertedProductIds: inserted.map((r) => r.product_id),
+        })
         return {
           command: 'INSERT',
           fields: [],
           oid: 0,
-          rowCount: 1,
-          rows: [{ id: queueRowId }] as unknown as TResult[],
+          rowCount: inserted.length,
+          rows: inserted as unknown as TResult[],
         } as QueryResult<TResult>
       }
       throw new Error(`Unexpected query in test: ${trimmed.slice(0, 80)}`)
@@ -61,18 +90,24 @@ vi.mock('../../server/db/tx.js', () => ({
 }))
 
 vi.mock('../../server/jobs/enqueueJob.js', () => ({
-  enqueueJob: vi.fn(async (_db: Queryable, input: { dedupeKey: string | null; jobType: string; payload: unknown }) => {
-    dbState.jobEnqueueCalls.push({
-      dedupeKey: input.dedupeKey ?? null,
-      jobType: input.jobType,
-      payload: input.payload,
-    })
-    const jobId = dbState.nextJobId
-    dbState.nextJobId += 1
-    return jobId
-  }),
+  enqueueJob: vi.fn(),
+  enqueueJobs: vi.fn(
+    async (
+      _db: Queryable,
+      inputs: Array<{ dedupeKey: string | null; jobType: string; payload: unknown }>,
+    ) => {
+      const ids: number[] = []
+      for (const _input of inputs) {
+        const jobId = dbState.nextJobId
+        dbState.nextJobId += 1
+        ids.push(jobId)
+      }
+      dbState.jobBatchCalls.push({ inputs, returnedJobIds: [...ids] })
+      return ids
+    },
+  ),
   // Mirror the real module's priority band constants so call sites
-  // that import them alongside `enqueueJob` resolve at test time.
+  // that import them alongside the helpers resolve at test time.
   JOB_PRIORITY_BEST_EFFORT: 0,
   JOB_PRIORITY_BACKFILL: 10,
   JOB_PRIORITY_INTERACTIVE: 100,
@@ -101,8 +136,16 @@ beforeEach(() => {
   dbState.existingProductIds.clear()
   dbState.insertCalls.length = 0
   dbState.auditEvents.length = 0
-  dbState.jobEnqueueCalls.length = 0
+  dbState.jobBatchCalls.length = 0
 })
+
+function allEnqueuedJobInputs(): Array<{
+  dedupeKey: string | null
+  jobType: string
+  payload: unknown
+}> {
+  return dbState.jobBatchCalls.flatMap((call) => call.inputs)
+}
 
 describe('enqueueMarketRefreshForProducts', () => {
   it('inserts a queue row and an enqueued job for a single product', async () => {
@@ -115,17 +158,19 @@ describe('enqueueMarketRefreshForProducts', () => {
     expect(result.skippedCount).toBe(0)
     expect(dbState.insertCalls).toHaveLength(1)
     expect(dbState.insertCalls[0]).toMatchObject({
-      productId: 501,
+      productIds: [501],
       enqueueReason: 'manual',
       priority: 50,
       alarmClass: null,
+      insertedProductIds: [501],
     })
-    expect(dbState.jobEnqueueCalls).toHaveLength(1)
-    expect(dbState.jobEnqueueCalls[0]).toMatchObject({
+    const enqueuedInputs = allEnqueuedJobInputs()
+    expect(enqueuedInputs).toHaveLength(1)
+    expect(enqueuedInputs[0]).toMatchObject({
       dedupeKey: 'config.workers.litalerts_refresh.variant:1',
       jobType: 'config.workers.litalerts_refresh.variant',
     })
-    expect(dbState.jobEnqueueCalls[0].payload).toMatchObject({
+    expect(enqueuedInputs[0].payload).toMatchObject({
       productId: 501,
       queueRowId: 1,
       siteDealerId: null,
@@ -145,11 +190,12 @@ describe('enqueueMarketRefreshForProducts', () => {
     expect(result.enqueuedJobIds).toEqual([100, 101])
     expect(result.skippedCount).toBe(1)
     // We attempted the insert for all three; the dedupe predicate
-    // produced the skip for product 502.
-    expect(dbState.insertCalls.map((call) => call.productId)).toEqual([501, 502, 503])
-    // The skipped product must not get a job enqueued.
-    const enqueuedProductIds = dbState.jobEnqueueCalls.map((call) => {
-      const payload = call.payload as { productId: number }
+    // produced the skip for product 502 inside the bulk INSERT's
+    // RETURNING clause.
+    expect(dbState.insertCalls[0].productIds).toEqual([501, 502, 503])
+    expect(dbState.insertCalls[0].insertedProductIds).toEqual([501, 503])
+    const enqueuedProductIds = allEnqueuedJobInputs().map((input) => {
+      const payload = input.payload as { productId: number }
       return payload.productId
     })
     expect(enqueuedProductIds).toEqual([501, 503])
@@ -163,10 +209,11 @@ describe('enqueueMarketRefreshForProducts', () => {
 
     expect(result.enqueuedQueueRowIds).toEqual([1])
     expect(dbState.insertCalls[0]).toMatchObject({
-      productId: 701,
+      productIds: [701],
       enqueueReason: 'brand-alarm',
       priority: 0,
       alarmClass: 'brand_match',
+      insertedProductIds: [701],
     })
   })
 
@@ -211,5 +258,22 @@ describe('enqueueMarketRefreshForProducts', () => {
     expect(result.enqueuedQueueRowIds).toEqual([])
     expect(result.skippedCount).toBe(2)
     expect(dbState.auditEvents).toHaveLength(0)
+    // We still issued exactly one bulk INSERT (which returned zero
+    // rows because all three products were inside the dedupe
+    // window).
+    expect(dbState.insertCalls).toHaveLength(1)
+    expect(dbState.insertCalls[0].insertedProductIds).toEqual([])
+    // No bulk job enqueue call should fire when there are no
+    // inserted queue rows.
+    expect(dbState.jobBatchCalls).toHaveLength(0)
+  })
+
+  it('issues exactly ONE bulk job-enqueue call per batch (no per-row enqueueJobs calls)', async () => {
+    await enqueueMarketRefreshForProducts([1001, 1002, 1003, 1004], {
+      trigger: { kind: 'rolling' },
+    })
+    expect(dbState.jobBatchCalls).toHaveLength(1)
+    expect(dbState.jobBatchCalls[0].inputs).toHaveLength(4)
+    expect(dbState.jobBatchCalls[0].returnedJobIds).toEqual([100, 101, 102, 103])
   })
 })

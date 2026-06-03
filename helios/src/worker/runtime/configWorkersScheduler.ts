@@ -14,7 +14,12 @@ import {
   recordConfigScheduleEnqueue,
 } from '../../server/db/queries/configQueries.js'
 import { getOptionalSweedSessionConcurrencyKey } from '../../server/jobs/concurrency.js'
-import { enqueueJob, JOB_PRIORITY_BACKFILL, JOB_PRIORITY_BEST_EFFORT } from '../../server/jobs/enqueueJob.js'
+import {
+  enqueueJob,
+  enqueueJobs,
+  JOB_PRIORITY_BACKFILL,
+  JOB_PRIORITY_BEST_EFFORT,
+} from '../../server/jobs/enqueueJob.js'
 import {
   enqueueMarketRefreshForProducts,
   rollingRefreshJitterSecondsForProduct,
@@ -296,36 +301,47 @@ async function enqueueScheduledLitalertsRefreshBatch(
     return
   }
 
-  const enqueuedJobIds: number[] = []
+  // ============================================================================
+  // Phase A4 (virusdave/top-level#11): one transaction per batch
+  // with a single bulk enqueueJobs() call, replacing the prior
+  // per-row `for (const row of pendingRows) { await
+  // withTransaction(...) { enqueueJob(...) } }` pattern. The old
+  // path issued at least 3 round-trips per row (BEGIN, SELECT
+  // existing-dedupe, INSERT job_queue, COMMIT) × N rows × every
+  // scheduler tick — one of the heaviest per-tick contributors
+  // to TigerData baseline write cost.
+  //
+  // The new path:
+  //   - one BEGIN per batch
+  //   - one SELECT against job_queue.dedupe_key (any-of-array)
+  //     to satisfy the dedupe contract
+  //   - one INSERT…SELECT FROM jsonb_to_recordset(...) RETURNING
+  //     id, dedupe_key
+  //   - one recordEnqueueAndPatchCache + one appendAuditEvent
+  //   - one COMMIT
+  // ============================================================================
+  const enqueueJobInputs = pendingRows.map((row) => ({
+    concurrencyKey: null,
+    // One job per pending queue row keeps the dedupe surface obvious.
+    dedupeKey: `config.workers.litalerts_refresh.variant:${row.id}`,
+    jobType: 'config.workers.litalerts_refresh.variant' as const,
+    module: 'config' as const,
+    payload: {
+      productId: row.productId,
+      queueRowId: row.id,
+      siteDealerId: row.siteDealerId,
+      sourceSnapshotId: row.sourceSnapshotId,
+      trigger: 'scheduled' as const,
+    },
+    priority: JOB_PRIORITY_BEST_EFFORT,
+    requestedByUserId: null,
+    runAt: now,
+    scope: null,
+  }))
 
-  for (const row of pendingRows) {
-    const jobId = await withTransaction(async (db) => {
-      return enqueueJob(db, {
-        // Lit Alerts refresh does not touch Sweed; no shared session lane.
-        concurrencyKey: null,
-        // One job per pending queue row keeps the dedupe surface obvious.
-        dedupeKey: `config.workers.litalerts_refresh.variant:${row.id}`,
-        jobType: 'config.workers.litalerts_refresh.variant',
-        module: 'config',
-        payload: {
-          productId: row.productId,
-          queueRowId: row.id,
-          siteDealerId: row.siteDealerId,
-          sourceSnapshotId: row.sourceSnapshotId,
-          trigger: 'scheduled',
-        },
-        priority: JOB_PRIORITY_BEST_EFFORT,
-        requestedByUserId: null,
-        runAt: now,
-        scope: null,
-      })
-    })
-    enqueuedJobIds.push(jobId)
-  }
-
-  const lastEnqueuedJobId = enqueuedJobIds[enqueuedJobIds.length - 1] ?? 0
-
-  await withTransaction(async (db) => {
+  const enqueuedJobIds = await withTransaction(async (db) => {
+    const jobIds = await enqueueJobs(db, enqueueJobInputs)
+    const lastEnqueuedJobId = jobIds[jobIds.length - 1] ?? 0
     await recordEnqueueAndPatchCache(db, taskKey, lastEnqueuedJobId, now)
     await appendAuditEvent(db, {
       actorType: 'system',
@@ -336,7 +352,7 @@ async function enqueueScheduledLitalertsRefreshBatch(
       module: 'config',
       payload: {
         intervalMinutes,
-        enqueuedJobIds,
+        enqueuedJobIds: jobIds,
         queueRowIds: pendingRows.map((row) => row.id),
         taskKey,
         trigger: 'scheduled',
@@ -345,7 +361,12 @@ async function enqueueScheduledLitalertsRefreshBatch(
       scope: null,
       undoPayload: null,
     })
+    return jobIds
   })
+  // enqueuedJobIds returned for potential future logging hooks;
+  // intentionally unused at the call site so the linter sees the
+  // value being consumed.
+  void enqueuedJobIds
 }
 
 interface RollingRefreshCandidateRow {
