@@ -321,47 +321,160 @@ interface PersistOutcome {
   pagesScanned: number
 }
 
+// Maximum number of rows to send per UPDATE / INSERT round-trip. We
+// pack everything into one jsonb parameter per chunk; keeping chunks
+// bounded prevents a pathological huge payload (e.g. 50k packages
+// after a multi-dealer backfill) from blowing past pg's parameter
+// limits or the server's `max_locks_per_transaction`.
+const BULK_CHUNK_SIZE = 500
+
 async function persistSnapshotsForDealer(
   context: JobHandlerContext,
   dealerId: number,
   snapshots: NormalisedSnapshot[],
   pagesScanned: number,
 ): Promise<PersistOutcome> {
+  // ============================================================================
+  // Bulk upsert path (db-cost-reduction).
+  //
+  // Each poll observes O(thousands) packages per dealer. The previous
+  // implementation opened one transaction PER package and issued a
+  // SELECT-prior + (UPDATE or INSERT). On a managed Timescale Cloud
+  // instance that's measured in millions of write-transactions per
+  // day and was the single largest contributor to the helios DB bill.
+  //
+  // The new path collapses each dealer's poll into:
+  //
+  //   1. one SELECT to load the latest fingerprint per
+  //      (dealer, inventory_item_id) in the observed batch;
+  //   2. one bulk UPDATE bumping observed_at_max for the rows whose
+  //      fingerprint still matches (chunked to BULK_CHUNK_SIZE);
+  //   3. one bulk INSERT for first-sightings / shape-changes
+  //      (chunked to BULK_CHUNK_SIZE).
+  //
+  // All inside a single transaction (one BEGIN / COMMIT pair). Total
+  // round-trips per dealer poll: O(1 + ceil(N / BULK_CHUNK_SIZE) +
+  // ceil(M / BULK_CHUNK_SIZE)) — typically <= 5, vs the old O(N).
+  //
+  // Single-writer assumption: the scheduler dedupes per-dealer
+  // ingest jobs by bucketed dedupe key + (sweed) concurrency key,
+  // so only one process is ever writing this (dealer, item) row at
+  // a time. That's why we can safely cache the prior fingerprints
+  // up front and decide insert-vs-update in JS without re-checking
+  // mid-transaction.
+  // ============================================================================
   let rowsInserted = 0
   let rowsUpdated = 0
 
-  for (const s of snapshots) {
-    const fingerprint = computeShapeFingerprint(s)
+  if (snapshots.length > 0) {
+    const fingerprintBySnapshot = new Map<NormalisedSnapshot, string>()
+    const inventoryItemIds: string[] = []
+    for (const s of snapshots) {
+      fingerprintBySnapshot.set(s, computeShapeFingerprint(s))
+      inventoryItemIds.push(s.inventory_item_id)
+    }
 
     await withTransaction(async (db) => {
-      // Find the most-recent prior row for this (dealer, item).
-      const prior = await db.query<{ observed_at_min: Date; shape_fingerprint: string }>(
+      // (1) Load the latest prior fingerprint per (dealer, item) for
+      // every item in this batch. DISTINCT ON over the PK is an
+      // index-only walk; the existing PK is
+      // (dealer_id, inventory_item_id, observed_at_min).
+      const priorResult = await db.query<{
+        inventory_item_id: string
+        observed_at_min: Date
+        shape_fingerprint: string
+      }>(
         `
-          select observed_at_min, shape_fingerprint
+          select distinct on (inventory_item_id)
+            inventory_item_id, observed_at_min, shape_fingerprint
           from sweed_package_snapshots
-          where dealer_id = $1 and inventory_item_id = $2
-          order by observed_at_max desc
-          limit 1
+          where dealer_id = $1
+            and inventory_item_id = any($2::text[])
+          order by inventory_item_id, observed_at_min desc
         `,
-        [dealerId, s.inventory_item_id],
+        [dealerId, inventoryItemIds],
       )
+      const priorByItemId = new Map<string, { observed_at_min: Date; shape_fingerprint: string }>()
+      for (const row of priorResult.rows) {
+        priorByItemId.set(row.inventory_item_id, {
+          observed_at_min: row.observed_at_min,
+          shape_fingerprint: row.shape_fingerprint,
+        })
+      }
 
-      if (prior.rows[0] && prior.rows[0].shape_fingerprint === fingerprint) {
-        // Same shape — bump observed_at_max on the existing row.
-        await db.query(
+      // (2) Partition this batch into "bump observed_at_max" (same
+      //     fingerprint as latest prior) vs "insert new version row".
+      const toBump: Array<{ inventory_item_id: string; observed_at_min: string }> = []
+      const toInsert: Array<NormalisedSnapshot & { shape_fingerprint: string }> = []
+      for (const s of snapshots) {
+        const fingerprint = fingerprintBySnapshot.get(s)!
+        const prior = priorByItemId.get(s.inventory_item_id)
+        if (prior && prior.shape_fingerprint === fingerprint) {
+          toBump.push({
+            inventory_item_id: s.inventory_item_id,
+            observed_at_min: prior.observed_at_min.toISOString(),
+          })
+        } else {
+          toInsert.push({ ...s, shape_fingerprint: fingerprint })
+        }
+      }
+
+      // (3a) Bulk UPDATE observed_at_max for matching-fingerprint rows.
+      for (let i = 0; i < toBump.length; i += BULK_CHUNK_SIZE) {
+        const chunk = toBump.slice(i, i + BULK_CHUNK_SIZE)
+        const result = await db.query(
           `
-            update sweed_package_snapshots
+            update sweed_package_snapshots s
             set observed_at_max = now()
-            where dealer_id = $1
-              and inventory_item_id = $2
-              and observed_at_min = $3
+            from jsonb_to_recordset($2::jsonb) as x(
+              inventory_item_id text,
+              observed_at_min timestamptz
+            )
+            where s.dealer_id = $1
+              and s.inventory_item_id = x.inventory_item_id
+              and s.observed_at_min = x.observed_at_min
           `,
-          [dealerId, s.inventory_item_id, prior.rows[0].observed_at_min],
+          [dealerId, JSON.stringify(chunk)],
         )
-        rowsUpdated += 1
-      } else {
-        // First sighting OR shape changed — insert a new version row.
-        await db.query(
+        rowsUpdated += result.rowCount ?? 0
+      }
+
+      // (3b) Bulk INSERT new version rows.
+      for (let i = 0; i < toInsert.length; i += BULK_CHUNK_SIZE) {
+        const chunk = toInsert.slice(i, i + BULK_CHUNK_SIZE)
+        // Serialise each row as plain JSON; raw_json is embedded as a
+        // nested jsonb value and decoded by jsonb_to_recordset's
+        // column-type cast.
+        const payload = chunk.map((s) => ({
+          inventory_item_id: s.inventory_item_id,
+          product_id: s.product_id,
+          product_name: s.product_name,
+          product_short_name: s.product_short_name,
+          product_sku: s.product_sku,
+          category_id: s.category_id,
+          category_name: s.category_name,
+          subcategory_id: s.subcategory_id,
+          subcategory_name: s.subcategory_name,
+          brand_id: s.brand_id,
+          brand_name: s.brand_name,
+          size_label: s.size_label,
+          current_qty: s.current_qty,
+          hold_qty: s.hold_qty,
+          available_qty: s.available_qty,
+          is_on_stock: s.is_on_stock,
+          wholesale_cost_dollars: s.wholesale_cost_dollars,
+          metrc_tag: s.metrc_tag,
+          internal_track_code: s.internal_track_code,
+          lab_thc_pct: s.lab_thc_pct,
+          lab_cbd_pct: s.lab_cbd_pct,
+          expiration_date: s.expiration_date,
+          received_at: s.received_at,
+          stock_location: s.stock_location,
+          distributor_name: s.distributor_name,
+          raw_json: s.raw_json,
+          shape_fingerprint: s.shape_fingerprint,
+        }))
+        const result = await db.query(
           `
             insert into sweed_package_snapshots (
               dealer_id, inventory_item_id, observed_at_min, observed_at_max,
@@ -373,31 +486,50 @@ async function persistSnapshotsForDealer(
               metrc_tag, internal_track_code, lab_thc_pct, lab_cbd_pct,
               expiration_date, received_at, stock_location, distributor_name,
               raw_json, shape_fingerprint
-            ) values (
-              $1, $2, now(), now(),
-              $3, $4, $5, $6,
-              $7, $8, $9, $10,
-              $11, $12, $13,
-              $14, $15, $16, $17,
-              $18,
-              $19, $20, $21, $22,
-              $23, $24, $25, $26,
-              $27::jsonb, $28
+            )
+            select
+              $1, x.inventory_item_id, now(), now(),
+              x.product_id, x.product_name, x.product_short_name, x.product_sku,
+              x.category_id, x.category_name, x.subcategory_id, x.subcategory_name,
+              x.brand_id, x.brand_name, x.size_label,
+              x.current_qty, x.hold_qty, x.available_qty, x.is_on_stock,
+              x.wholesale_cost_dollars,
+              x.metrc_tag, x.internal_track_code, x.lab_thc_pct, x.lab_cbd_pct,
+              x.expiration_date, x.received_at, x.stock_location, x.distributor_name,
+              x.raw_json, x.shape_fingerprint
+            from jsonb_to_recordset($2::jsonb) as x(
+              inventory_item_id text,
+              product_id bigint,
+              product_name text,
+              product_short_name text,
+              product_sku text,
+              category_id bigint,
+              category_name text,
+              subcategory_id bigint,
+              subcategory_name text,
+              brand_id bigint,
+              brand_name text,
+              size_label text,
+              current_qty numeric,
+              hold_qty numeric,
+              available_qty numeric,
+              is_on_stock boolean,
+              wholesale_cost_dollars numeric,
+              metrc_tag text,
+              internal_track_code text,
+              lab_thc_pct numeric,
+              lab_cbd_pct numeric,
+              expiration_date date,
+              received_at timestamptz,
+              stock_location text,
+              distributor_name text,
+              raw_json jsonb,
+              shape_fingerprint text
             )
           `,
-          [
-            dealerId, s.inventory_item_id,
-            s.product_id, s.product_name, s.product_short_name, s.product_sku,
-            s.category_id, s.category_name, s.subcategory_id, s.subcategory_name,
-            s.brand_id, s.brand_name, s.size_label,
-            s.current_qty, s.hold_qty, s.available_qty, s.is_on_stock,
-            s.wholesale_cost_dollars,
-            s.metrc_tag, s.internal_track_code, s.lab_thc_pct, s.lab_cbd_pct,
-            s.expiration_date, s.received_at, s.stock_location, s.distributor_name,
-            JSON.stringify(s.raw_json), fingerprint,
-          ],
+          [dealerId, JSON.stringify(payload)],
         )
-        rowsInserted += 1
+        rowsInserted += result.rowCount ?? 0
       }
     })
   }

@@ -90,6 +90,27 @@ export async function runWorkerLoop(): Promise<never> {
 }
 
 async function runLeaseLoop(opts: LeaseLoopOptions): Promise<never> {
+  // Idle-poll backoff (db-cost-reduction). When `leaseJobs` returns
+  // an empty result on consecutive ticks, sleep for a polynomially
+  // growing duration capped at IDLE_POLL_MAX_SLEEP_MS so the
+  // worker stops hammering TigerData with one expired-lease-sweep
+  // + lease-CTE transaction every `pollIntervalMs` while idle.
+  //
+  // The backoff is reset to zero on any non-empty lease — live work
+  // always sees full-speed polling on the very next iteration.
+  //
+  // Schedule (with opts.pollIntervalMs = 3s, cap 15s): empty=0,1 →
+  // 3s, empty=2 → ~8.5s, empty=3+ → 15s. So an idle worker settles
+  // to one poll-transaction every 15s instead of every 3s — a 5×
+  // reduction in baseline write-transactions during quiet hours
+  // (overnight + every gap between job bursts).
+  //
+  // Polynomial (n^1.5) rather than exponential, per the canon's
+  // "all backoffs must be sub-exponential" rule. Matches the
+  // shape of getRetryDelayMs below.
+  const IDLE_POLL_MAX_SLEEP_MS = 15_000
+  let consecutiveEmptyPolls = 0
+
   for (;;) {
     if (opts.runScheduler) {
       try {
@@ -181,9 +202,35 @@ async function runLeaseLoop(opts: LeaseLoopOptions): Promise<never> {
     )
 
     if (leasedJobs.length === 0) {
-      await delay(opts.pollIntervalMs)
+      consecutiveEmptyPolls += 1
+      const sleepMs = computeIdlePollSleepMs(
+        consecutiveEmptyPolls,
+        opts.pollIntervalMs,
+        IDLE_POLL_MAX_SLEEP_MS,
+      )
+      await delay(sleepMs)
+    } else {
+      consecutiveEmptyPolls = 0
     }
   }
+}
+
+/**
+ * Polynomial idle-poll sleep: base * empty^1.5, capped at `maxMs`.
+ * `empty = 1` (first empty poll) returns exactly `baseMs` so we
+ * don't slow down the very first idle iteration. Subsequent empty
+ * polls scale up to the cap. See `runLeaseLoop` for the rationale.
+ *
+ * Exported for unit-test coverage of the schedule shape.
+ */
+export function computeIdlePollSleepMs(
+  consecutiveEmptyPolls: number,
+  baseMs: number,
+  maxMs: number,
+): number {
+  const n = Math.max(consecutiveEmptyPolls, 1)
+  const raw = baseMs * Math.pow(n, 1.5)
+  return Math.min(Math.round(raw), maxMs)
 }
 
 function delay(milliseconds: number): Promise<void> {

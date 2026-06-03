@@ -1,6 +1,7 @@
 import {
   HELIOS_PENDING_PURCHASE_SITE_DEALERS,
   type ConfigBackgroundTaskKey,
+  type ConfigWorkerSchedule,
   type ConfigWorkerScheduleWindow,
 } from '../../shared/contracts/index.js'
 import { appendAuditEvent } from '../../server/audit/appendAuditEvent.js'
@@ -22,12 +23,87 @@ import {
 const LITALERTS_DRAIN_BATCH_SIZE = 50
 const LITALERTS_ROLLING_BATCH_SIZE = 100
 
+// In-process TTL for the loadAllConfigSchedules cache. Schedules
+// change only when an operator edits them in the Config UI, so a
+// 60s lag before a new cadence kicks in is well within the
+// operator's expectations. Without this cache the main worker loop
+// fires two SELECTs against config_worker_schedules{,_runs} every
+// 3 seconds (~57,600 redundant reads/day per worker process) — one
+// of the larger contributors to baseline TigerData compute cost
+// before this change.
+const SCHEDULES_CACHE_TTL_MS = 60_000
+
 interface SchedulerStateEntry {
   defaultsEnsured: boolean
+  schedulesCache: ConfigWorkerSchedule[] | null
+  schedulesCacheLoadedAtMs: number
 }
 
 const state: SchedulerStateEntry = {
   defaultsEnsured: false,
+  schedulesCache: null,
+  schedulesCacheLoadedAtMs: 0,
+}
+
+/**
+ * Test-only helper: drop the in-process schedule cache so a unit
+ * test can force the next tick to re-read from the DB. Not exported
+ * via the package entrypoint; only the scheduler tests reach in.
+ */
+export function __resetSchedulerCacheForTests(): void {
+  state.defaultsEnsured = false
+  state.schedulesCache = null
+  state.schedulesCacheLoadedAtMs = 0
+}
+
+async function loadSchedulesCached(now: Date): Promise<ConfigWorkerSchedule[]> {
+  const nowMs = now.getTime()
+  if (
+    state.schedulesCache !== null
+    && nowMs - state.schedulesCacheLoadedAtMs < SCHEDULES_CACHE_TTL_MS
+  ) {
+    return state.schedulesCache
+  }
+  const fresh = await loadAllConfigSchedules()
+  state.schedulesCache = fresh
+  state.schedulesCacheLoadedAtMs = nowMs
+  return fresh
+}
+
+/**
+ * Patch the cached schedule's `lastEnqueuedAt` to `now` so the next
+ * cached tick honours the interval bucket immediately, without
+ * waiting for the cache TTL to expire and re-read it from the DB.
+ * Called after every successful `recordConfigScheduleEnqueue` write.
+ */
+function markScheduleEnqueuedInCache(taskKey: ConfigBackgroundTaskKey, now: Date): void {
+  const cache = state.schedulesCache
+  if (cache === null) return
+  for (const schedule of cache) {
+    if (schedule.taskKey === taskKey) {
+      schedule.lastEnqueuedAt = now.toISOString()
+      return
+    }
+  }
+}
+
+/**
+ * Wrapper around `recordConfigScheduleEnqueue` that ALSO keeps the
+ * in-process schedule cache fresh. Every call site in this file
+ * uses this wrapper instead of the raw DB-write so that the cached
+ * tick path never double-fires a schedule it just enqueued.
+ *
+ * Signature mirrors `recordConfigScheduleEnqueue` exactly so the
+ * existing call sites only need a name swap.
+ */
+async function recordEnqueueAndPatchCache(
+  db: Parameters<typeof recordConfigScheduleEnqueue>[0],
+  taskKey: ConfigBackgroundTaskKey,
+  jobId: number | null,
+  now: Date,
+): Promise<void> {
+  await recordEnqueueAndPatchCache(db, taskKey, jobId, now)
+  markScheduleEnqueuedInCache(taskKey, now)
 }
 
 /**
@@ -36,6 +112,13 @@ const state: SchedulerStateEntry = {
  * lands inside any active window AND whether the configured interval has
  * elapsed since the last successful enqueue. When both conditions hold, an
  * idempotent dedupe-keyed job is queued.
+ *
+ * To keep TigerData baseline compute cost flat across the 3-second
+ * worker poll loop, schedules are cached in process memory for
+ * `SCHEDULES_CACHE_TTL_MS` (see the comment on that constant); the
+ * cache is also patched in-place after every enqueue so the
+ * interval-bucket logic always sees the just-recorded
+ * `lastEnqueuedAt`.
  */
 export async function tickConfigWorkersScheduler(now: Date = new Date()): Promise<void> {
   if (!state.defaultsEnsured) {
@@ -43,7 +126,7 @@ export async function tickConfigWorkersScheduler(now: Date = new Date()): Promis
     state.defaultsEnsured = true
   }
 
-  const schedules = await loadAllConfigSchedules()
+  const schedules = await loadSchedulesCached(now)
   for (const schedule of schedules) {
     if (!schedule.implemented) {
       continue
@@ -177,7 +260,7 @@ async function enqueueScheduledStockRefresh(
       scope: null,
     })
 
-    await recordConfigScheduleEnqueue(db, taskKey, jobId, now)
+    await recordEnqueueAndPatchCache(db, taskKey, jobId, now)
     await appendAuditEvent(db, {
       actorType: 'system',
       actorUserId: null,
@@ -208,7 +291,7 @@ async function enqueueScheduledLitalertsRefreshBatch(
     // Still record the tick so we honor the interval bucket and do not
     // re-scan the queue every poll when it is empty.
     await withTransaction(async (db) => {
-      await recordConfigScheduleEnqueue(db, taskKey, null, now)
+      await recordEnqueueAndPatchCache(db, taskKey, null, now)
     })
     return
   }
@@ -243,7 +326,7 @@ async function enqueueScheduledLitalertsRefreshBatch(
   const lastEnqueuedJobId = enqueuedJobIds[enqueuedJobIds.length - 1] ?? 0
 
   await withTransaction(async (db) => {
-    await recordConfigScheduleEnqueue(db, taskKey, lastEnqueuedJobId, now)
+    await recordEnqueueAndPatchCache(db, taskKey, lastEnqueuedJobId, now)
     await appendAuditEvent(db, {
       actorType: 'system',
       actorUserId: null,
@@ -313,7 +396,7 @@ async function runScheduledLitalertsRollingTick(
   if (candidatesResult.rows.length === 0) {
     // Record the tick anyway so the interval bucket honors its own cadence.
     await withTransaction(async (db) => {
-      await recordConfigScheduleEnqueue(db, taskKey, null, now)
+      await recordEnqueueAndPatchCache(db, taskKey, null, now)
     })
     return
   }
@@ -346,7 +429,7 @@ async function runScheduledLitalertsRollingTick(
 
   await withTransaction(async (db) => {
     const lastJobId = enqueueResult.enqueuedJobIds[enqueueResult.enqueuedJobIds.length - 1] ?? null
-    await recordConfigScheduleEnqueue(db, taskKey, lastJobId, now)
+    await recordEnqueueAndPatchCache(db, taskKey, lastJobId, now)
   })
 }
 
@@ -378,7 +461,7 @@ async function runScheduledMarketEvidenceAlarmScanTick(
       runAt: now,
       scope: null,
     })
-    await recordConfigScheduleEnqueue(db, taskKey, jobId, now)
+    await recordEnqueueAndPatchCache(db, taskKey, jobId, now)
   })
 }
 
@@ -406,7 +489,7 @@ async function enqueueScheduledCatalogRefresh(
       scope: null,
     })
 
-    await recordConfigScheduleEnqueue(db, taskKey, jobId, now)
+    await recordEnqueueAndPatchCache(db, taskKey, jobId, now)
     await appendAuditEvent(db, {
       actorType: 'system',
       actorUserId: null,
@@ -452,7 +535,7 @@ async function enqueueScheduledEdibleThcClamp(
       scope: null,
     })
 
-    await recordConfigScheduleEnqueue(db, taskKey, jobId, now)
+    await recordEnqueueAndPatchCache(db, taskKey, jobId, now)
     await appendAuditEvent(db, {
       actorType: 'system',
       actorUserId: null,
@@ -502,7 +585,7 @@ async function enqueueScheduledLitalertsRetailerBackfill(
       scope: null,
     })
 
-    await recordConfigScheduleEnqueue(db, taskKey, jobId, now)
+    await recordEnqueueAndPatchCache(db, taskKey, jobId, now)
     await appendAuditEvent(db, {
       actorType: 'system',
       actorUserId: null,
@@ -559,7 +642,7 @@ async function enqueueScheduledSweedOrdersIngest(
       scope: null,
     })
 
-    await recordConfigScheduleEnqueue(db, taskKey, jobId, now)
+    await recordEnqueueAndPatchCache(db, taskKey, jobId, now)
     await appendAuditEvent(db, {
       actorType: 'system',
       actorUserId: null,
@@ -610,7 +693,7 @@ async function enqueueScheduledSweedPurchasesIngest(
       runAt: now,
       scope: null,
     })
-    await recordConfigScheduleEnqueue(db, taskKey, jobId, now)
+    await recordEnqueueAndPatchCache(db, taskKey, jobId, now)
     await appendAuditEvent(db, {
       actorType: 'system',
       actorUserId: null,
@@ -657,7 +740,7 @@ async function enqueueScheduledSweedPackageSnapshots(
       scope: null,
     })
 
-    await recordConfigScheduleEnqueue(db, taskKey, jobId, now)
+    await recordEnqueueAndPatchCache(db, taskKey, jobId, now)
     await appendAuditEvent(db, {
       actorType: 'system',
       actorUserId: null,
@@ -708,7 +791,7 @@ async function enqueueScheduledWeatherDailyIngest(
       scope: null,
     })
 
-    await recordConfigScheduleEnqueue(db, taskKey, jobId, now)
+    await recordEnqueueAndPatchCache(db, taskKey, jobId, now)
     await appendAuditEvent(db, {
       actorType: 'system',
       actorUserId: null,
@@ -763,7 +846,7 @@ async function enqueueScheduledSweedShiftsIngest(
       scope: null,
     })
 
-    await recordConfigScheduleEnqueue(db, taskKey, jobId, now)
+    await recordEnqueueAndPatchCache(db, taskKey, jobId, now)
     await appendAuditEvent(db, {
       actorType: 'system',
       actorUserId: null,
@@ -820,7 +903,7 @@ async function enqueueScheduledEnrichCustomerAddress(
       scope: null,
     })
 
-    await recordConfigScheduleEnqueue(db, taskKey, jobId, now)
+    await recordEnqueueAndPatchCache(db, taskKey, jobId, now)
     await appendAuditEvent(db, {
       actorType: 'system',
       actorUserId: null,
@@ -874,7 +957,7 @@ async function enqueueScheduledEnrichDeliveryAddress(
       scope: null,
     })
 
-    await recordConfigScheduleEnqueue(db, taskKey, jobId, now)
+    await recordEnqueueAndPatchCache(db, taskKey, jobId, now)
     await appendAuditEvent(db, {
       actorType: 'system',
       actorUserId: null,
@@ -925,7 +1008,7 @@ async function enqueueScheduledEnrichVisitorScanAddress(
       scope: null,
     })
 
-    await recordConfigScheduleEnqueue(db, taskKey, jobId, now)
+    await recordEnqueueAndPatchCache(db, taskKey, jobId, now)
     await appendAuditEvent(db, {
       actorType: 'system',
       actorUserId: null,
