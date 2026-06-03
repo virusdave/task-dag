@@ -241,6 +241,36 @@ function floorTo(d: Date, agg: MetricAggregation): Date {
 }
 
 /**
+ * Mirror of `advanceBucketStart` going the other direction — the
+ * bucket-start that comes immediately BEFORE `d` at the given grain.
+ * Same NY-local wall-clock arithmetic for calendar grains; +/- 1
+ * hour for `hour`. Used by the partial-bucket helper to fetch the
+ * "prior bucket" pace reference for right-edge extrapolation.
+ */
+export function previousBucketStart(d: Date, agg: MetricAggregation): Date {
+  if (agg === 'hour') return new Date(d.getTime() - HOUR_MS)
+  const p = nyParts(d)
+  switch (agg) {
+    case 'date':
+    case 'total':
+    case 'dow':
+    case 'dom':
+    case 'dofortnight': {
+      const prev = normalizedYmd(p.y, p.m, p.day - 1)
+      return nyWallTimeToInstant(prev.y, prev.m, prev.day)
+    }
+    case 'week': {
+      const prev = normalizedYmd(p.y, p.m, p.day - 7)
+      return nyWallTimeToInstant(prev.y, prev.m, prev.day)
+    }
+    case 'month': {
+      const prev = normalizedYmd(p.y, p.m - 1, 1)
+      return nyWallTimeToInstant(prev.y, prev.m, prev.day)
+    }
+  }
+}
+
+/**
  * Step forward one bucket from `d`. Calendar grains (date/week/month)
  * use NY wall-clock arithmetic so a fall-back day correctly produces
  * a 25-hour step and a spring-forward day a 23-hour step. Hourly

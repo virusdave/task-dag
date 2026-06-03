@@ -685,11 +685,28 @@ function ChartSvg(props: ChartSvgProps) {
   // we draw a filled area between y0 and y1.
   const { yMin, yMax, series, datumByMs } = useMemo(() => {
     type SeriesPoint = { t: number; raw: number; y0: number; y1: number }
+    type PartialPoint = {
+      t: number
+      raw: number
+      y1: number
+      side: 'left' | 'right' | 'both'
+      kind: 'truncated' | 'extrapolated'
+      coverage: number | null
+    }
     type Series = {
       id: string
       label: string
       colour: string
       points: SeriesPoint[]
+      /**
+       * Partial-bucket edge points (server-marked via
+       * `MetricDatum.partial`). Rendered separately as a dashed
+       * connector + outlined endpoint marker rather than being
+       * woven into the solid line. Only populated in `stackMode ===
+       * 'none'`; stacked / percent modes already convey edge buckets
+       * as smaller columns at the chart edges.
+       */
+      partialPoints: PartialPoint[]
     }
     const empty = {
       yMin: 0,
@@ -733,8 +750,24 @@ function ChartSvg(props: ChartSvgProps) {
         label: s.label,
         colour: s.colour ?? FALLBACK_COLOURS[origIdx % FALLBACK_COLOURS.length]!,
         points: [],
+        partialPoints: [],
       }
     })
+
+    // Server-marked partial-bucket edge rows (gross_sales / net_sales
+    // / first_vs_returning etc. opt in via metric.supports.partialBuckets).
+    // In 'none' mode we route these to a separate per-series array so
+    // the solid line is drawn through interior buckets only; the partial
+    // points get a dashed connector + outlined marker in the SVG block.
+    // In stacked / percent mode we leave them in the main path — the
+    // smaller column at the edge already conveys "partial" visually.
+    function partialSideOf(d: MetricDatum): 'left' | 'right' | 'both' | null {
+      const p = d.partial
+      return p === 'left' || p === 'right' || p === 'both' ? p : null
+    }
+    function partialKindOf(d: MetricDatum): 'truncated' | 'extrapolated' {
+      return d.partialKind === 'extrapolated' ? 'extrapolated' : 'truncated'
+    }
 
     let lo = Number.POSITIVE_INFINITY
     let hi = Number.NEGATIVE_INFINITY
@@ -744,15 +777,30 @@ function ChartSvg(props: ChartSvgProps) {
       // behaviour exactly so 'none' mode is bit-for-bit unchanged).
       for (const d of rows) {
         const t = Date.parse(d.t)
+        const partial = partialSideOf(d as MetricDatum)
         for (let i = 0; i < seriesOut.length; i++) {
           const id = ids[i]!
           const v = (d as MetricDatum)[id]
           if (typeof v !== 'number') continue
           if (v < lo) lo = v
           if (v > hi) hi = v
-          // y0/y1 placeholders — only y1 is used; the axis baseline
-          // for y0 is filled in below once lo/hi are known.
-          seriesOut[i]!.points.push({ t, raw: v, y0: 0, y1: v })
+          if (partial !== null) {
+            seriesOut[i]!.partialPoints.push({
+              t,
+              raw: v,
+              y1: v,
+              side: partial,
+              kind: partialKindOf(d as MetricDatum),
+              coverage:
+                typeof (d as MetricDatum).partialCoverage === 'number'
+                  ? ((d as MetricDatum).partialCoverage as number)
+                  : null,
+            })
+          } else {
+            // y0/y1 placeholders — only y1 is used; the axis baseline
+            // for y0 is filled in below once lo/hi are known.
+            seriesOut[i]!.points.push({ t, raw: v, y0: 0, y1: v })
+          }
         }
       }
       if (!isFinite(lo) || !isFinite(hi)) {
@@ -835,9 +883,70 @@ function ChartSvg(props: ChartSvgProps) {
   // where each bucket lives, and an × per point per series would
   // visually swamp the area.
   const seriesPaths = useMemo(() => {
+    type PartialSegment = {
+      d: string
+      marker: {
+        x: number
+        y: number
+        side: 'left' | 'right' | 'both'
+        kind: 'truncated' | 'extrapolated'
+        coverage: number | null
+      }
+    }
     return series.map((s) => {
+      // Partial-bucket edges are rendered as dashed connectors from
+      // the nearest interior point (or as an unconnected outlined
+      // marker when there is no interior point on that side).
+      const partialSegments: PartialSegment[] = []
+      if (stackMode === 'none' && s.partialPoints.length > 0) {
+        const sortedMain = s.points.slice().sort((a, b) => a.t - b.t)
+        const firstMain = sortedMain[0]
+        const lastMain = sortedMain[sortedMain.length - 1]
+        for (const pp of s.partialPoints) {
+          const px = xScale(pp.t)
+          const py = yScale(pp.y1)
+          const marker = {
+            x: px,
+            y: py,
+            side: pp.side,
+            kind: pp.kind,
+            coverage: pp.coverage,
+          }
+          // Anchor: the closest interior point on the "inside" side
+          // of this partial. Left-edge anchors to firstMain, right to
+          // lastMain; 'both' anchors to whichever interior point we
+          // have (zoom windows narrow enough to elide all interiors
+          // just get an unconnected marker).
+          let anchor: { x: number; y: number } | null = null
+          if (pp.side === 'left' && firstMain) {
+            anchor = { x: xScale(firstMain.t), y: yScale(firstMain.y1) }
+          } else if (pp.side === 'right' && lastMain) {
+            anchor = { x: xScale(lastMain.t), y: yScale(lastMain.y1) }
+          } else if (pp.side === 'both') {
+            const fallback = firstMain ?? lastMain
+            if (fallback) {
+              anchor = { x: xScale(fallback.t), y: yScale(fallback.y1) }
+            }
+          }
+          // smoothedPath on two points degenerates to a straight
+          // segment, which is what we want for the dashed connector.
+          const d = anchor
+            ? smoothedPath([
+                { x: anchor.x, y: anchor.y },
+                { x: px, y: py },
+              ])
+            : ''
+          partialSegments.push({ d, marker })
+        }
+      }
       if (s.points.length === 0) {
-        return { ...s, d: '', markers: [] as Array<{ x: number; y: number }>, fill: stackMode !== 'none' as const }
+        return {
+          ...s,
+          d: '',
+          markers: [] as Array<{ x: number; y: number }>,
+          fill: stackMode !== 'none' as const,
+          partialSegments,
+        }
       }
       const topPts = s.points.map((p) => ({ x: xScale(p.t), y: yScale(p.y1) }))
       if (stackMode === 'none') {
@@ -846,6 +955,7 @@ function ChartSvg(props: ChartSvgProps) {
           d: smoothedPath(topPts),
           markers: topPts,
           fill: false as const,
+          partialSegments,
         }
       }
       const bottomPts = s.points
@@ -865,6 +975,7 @@ function ChartSvg(props: ChartSvgProps) {
         d: `${top} ${bottomAsLine} Z`,
         markers: topPts,
         fill: true as const,
+        partialSegments,
       }
     })
   }, [series, xScale, yScale, stackMode])
@@ -1157,7 +1268,10 @@ function ChartSvg(props: ChartSvgProps) {
     [onAnnotationsChanged],
   )
 
-  const hasData = !!response && response.data.length > 0 && seriesPaths.some((s) => s.d.length > 0)
+  const hasData =
+    !!response &&
+    response.data.length > 0 &&
+    seriesPaths.some((s) => s.d.length > 0 || s.partialSegments.length > 0)
 
   // Snap hover (this chart's own OR external from a sibling card) to the
   // nearest datum bucket for tooltip / crosshair readout.
@@ -1359,6 +1473,48 @@ function ChartSvg(props: ChartSvgProps) {
                   fill="none"
                   pointerEvents="none"
                 />
+              ))}
+              {/* Partial-bucket edge overlays: dashed connector from
+                  the last/first interior point to the partial-edge
+                  point, plus an outlined endpoint marker. Hover-only
+                  tooltip via <title>. See `partialPoints` in the
+                  series-build memo and the `MetricDatum.partial*`
+                  contract for the data shape. */}
+              {s.partialSegments.map((seg, i) => (
+                <g key={`${s.id}-p-${i}`} pointerEvents="none">
+                  {seg.d ? (
+                    <path
+                      d={seg.d}
+                      fill="none"
+                      stroke={s.colour}
+                      strokeWidth={1.5}
+                      strokeDasharray="4 3"
+                      opacity={0.85}
+                    />
+                  ) : null}
+                  <circle
+                    cx={seg.marker.x}
+                    cy={seg.marker.y}
+                    r={3.5}
+                    fill="#fff"
+                    stroke={s.colour}
+                    strokeWidth={1.5}
+                  >
+                    <title>
+                      {seg.marker.kind === 'extrapolated'
+                        ? `Extrapolated partial bucket${
+                            seg.marker.coverage !== null
+                              ? ` (${Math.round(seg.marker.coverage * 100)}% observed)`
+                              : ''
+                          }`
+                        : `Partial bucket (window-aligned)${
+                            seg.marker.coverage !== null
+                              ? ` — ${Math.round(seg.marker.coverage * 100)}% inside window`
+                              : ''
+                          }`}
+                    </title>
+                  </circle>
+                </g>
               ))}
             </g>
           ),

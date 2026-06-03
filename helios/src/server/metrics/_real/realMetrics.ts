@@ -70,6 +70,7 @@ export const REAL_METRICS: ReadonlyArray<MetricDef> = [
     defaultAggregation: 'week',
     supportedAggregations: [...SUPPORTED],
     query: queryGrossSalesDollars,
+    supports: { partialBuckets: true },
   },
   {
     id: 'essentials.gross_receipts',
@@ -81,6 +82,7 @@ export const REAL_METRICS: ReadonlyArray<MetricDef> = [
     defaultAggregation: 'week',
     supportedAggregations: [...SUPPORTED],
     query: queryGrossReceiptsDollars,
+    supports: { partialBuckets: true },
   },
   {
     id: 'essentials.net_sales',
@@ -92,6 +94,7 @@ export const REAL_METRICS: ReadonlyArray<MetricDef> = [
     defaultAggregation: 'week',
     supportedAggregations: [...SUPPORTED],
     query: queryNetSalesDollars,
+    supports: { partialBuckets: true },
   },
   {
     id: 'acquisition.first_vs_returning',
@@ -106,6 +109,7 @@ export const REAL_METRICS: ReadonlyArray<MetricDef> = [
     defaultAggregation: 'week',
     supportedAggregations: [...SUPPORTED],
     query: queryFirstVsReturning,
+    supports: { partialBuckets: true },
   },
   {
     id: 'basket.size_by_fulfillment',

@@ -143,6 +143,41 @@ export type MetricSelection = z.infer<typeof MetricSelectionSchema>
  * iterations may add more capability flags here (e.g. `download`,
  * `share`, `annotation`) without breaking existing MetricDef sources.
  */
+/**
+ * Partial-bucket side marker. When the displayed `[from, to)` window
+ * doesn't align with a metric's natural aggregation boundary, the
+ * leftmost and/or rightmost data row represents only part of a real
+ * bucket. Server marks those edge rows so the chart renderer can
+ * render them visually distinct (e.g. dashed connector + outlined
+ * endpoint marker) from the solid line through the fully-contained
+ * interior buckets.
+ *
+ *   - `left`  — first row covers `[from, firstBucketEnd)` only.
+ *   - `right` — last row covers `[lastBucketStart, to_or_now)` only.
+ *   - `both`  — a zoom window narrow enough that the same single
+ *               bucket is both the first and last edge.
+ */
+export const MetricPartialSideSchema = z.enum(['left', 'right', 'both'])
+export type MetricPartialSide = z.infer<typeof MetricPartialSideSchema>
+
+/**
+ * Whether an edge-bucket value is real (the full natural bucket
+ * happens to be observable — e.g. a historical edge where we have
+ * the whole bucket on disk, just clipped by the displayed window)
+ * or extrapolated (typically the current right-edge where the
+ * natural bucket hasn't completed yet).
+ *
+ *   - `truncated`   — full natural-bucket value is available; the
+ *                     "partial" label only means "displayed window
+ *                     doesn't include the whole bucket".
+ *   - `extrapolated` — full natural-bucket value isn't yet observable
+ *                     (e.g. the bucket includes "now"), so the server
+ *                     projected the bucket total from the prior
+ *                     bucket's intra-bucket pace.
+ */
+export const MetricPartialKindSchema = z.enum(['truncated', 'extrapolated'])
+export type MetricPartialKind = z.infer<typeof MetricPartialKindSchema>
+
 export const MetricSupportsSchema = z
   .object({
     /**
@@ -152,6 +187,20 @@ export const MetricSupportsSchema = z
      * yet, so no behavioural change).
      */
     drillSelection: z.array(MetricDrillSelectionKindSchema).optional(),
+    /**
+     * Opt-in: the metric's query is safe to wrap in the partial-bucket
+     * helper that widens the SQL window to the natural bucket
+     * boundaries, marks edge rows with `partial`/`partialKind`/
+     * `partialCoverage` metadata, and extrapolates the right-edge
+     * "current" bucket via prior-bucket-pace.
+     *
+     * Only safe for **additive** time-series metrics (sums, counts) on
+     * line aggregations (hour/date/week/month). NOT safe for ratios,
+     * averages, percent stacks, scatter metrics, or snapshot/as-of
+     * metrics — those would produce nonsense extrapolations and are
+     * intentionally not wrapped.
+     */
+    partialBuckets: z.boolean().optional(),
   })
   .strict()
 export type MetricSupports = z.infer<typeof MetricSupportsSchema>
@@ -297,7 +346,26 @@ export type MetricQueryRequest = z.infer<typeof MetricQueryRequestSchema>
 // carry an optional string dimension column (e.g. `site_zip`) which
 // the renderer uses for per-dot grouping / colour.
 export const MetricDatumSchema = z
-  .object({ t: z.string() })
+  .object({
+    t: z.string(),
+    /**
+     * Edge-bucket marker. Absent for normal fully-contained interior
+     * buckets. The chart renderer treats marked rows as separate from
+     * the solid line through the interior — they're rendered with a
+     * dashed connector + outlined endpoint marker. See
+     * `MetricPartialSideSchema`.
+     */
+    partial: MetricPartialSideSchema.optional(),
+    /** See `MetricPartialKindSchema`. Required when `partial` is set. */
+    partialKind: MetricPartialKindSchema.optional(),
+    /**
+     * Fraction of the natural bucket that's covered by the displayed
+     * window (or, for `extrapolated`, the fraction observed at the
+     * time of the snapshot). 0..1. Useful for the chart tooltip's
+     * "37% of bucket observed" caption.
+     */
+    partialCoverage: z.number().min(0).max(1).optional(),
+  })
   .catchall(z.union([z.number(), z.string(), z.null()]))
 export type MetricDatum = z.infer<typeof MetricDatumSchema>
 

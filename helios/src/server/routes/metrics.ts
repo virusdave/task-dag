@@ -12,6 +12,7 @@ import {
 import { metricGrantForGroup } from '../../shared/domain/metricGrants.js'
 import { requireMetricsGrant } from '../auth/requireSession.js'
 import { loadEssentialsDailySummary } from '../db/queries/essentialsDailySummary.js'
+import { queryWithPartialBuckets } from '../metrics/partialBuckets.js'
 import { getMetricById, listMetricSummaries } from '../metrics/registry.js'
 import { toMetricSummary } from '../metrics/types.js'
 
@@ -153,7 +154,7 @@ export async function registerMetricsRoutes(server: FastifyInstance): Promise<vo
       }
     }
 
-    const data = await metric.query({
+    const baseQueryArgs = {
       sites: queryArgs.sites,
       from,
       to,
@@ -163,7 +164,19 @@ export async function registerMetricsRoutes(server: FastifyInstance): Promise<vo
       brandIds,
       sizes,
       selection,
-    })
+    }
+    // Opt-in: metrics that declare `supports.partialBuckets` get the
+    // shared edge-aware wrapper which widens the SQL window to the
+    // natural bucket boundaries, marks the edge rows partial, and
+    // extrapolates the right-edge "current" bucket via prior-bucket
+    // pace. See `partialBuckets.ts` for the full algorithm.
+    const data = metric.supports?.partialBuckets === true
+      ? await queryWithPartialBuckets({
+          query: metric.query,
+          args: baseQueryArgs,
+          seriesIds: metric.series.map((s) => s.id),
+        })
+      : await metric.query(baseQueryArgs)
 
     return reply.send(
       MetricQueryResponseSchema.parse({
