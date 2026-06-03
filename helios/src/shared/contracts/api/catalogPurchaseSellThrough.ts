@@ -122,7 +122,12 @@ export const CatalogPurchaseListRequestSchema = z.object({
       }),
   ),
   sort: CatalogPurchaseListSortSchema.default('deliveryDate'),
-  dir: z.enum(['asc', 'desc']).default('desc'),
+  // Default to oldest-first: when the operator opens the list to plan
+  // vendor payments / extensions, the most actionable POs are the
+  // oldest unpaid ones (closest to / past payment-due), not the
+  // freshest deliveries. Operator can flip to newest-first by clicking
+  // the column header.
+  dir: z.enum(['asc', 'desc']).default('asc'),
   page: z.coerce.number().int().min(1).default(1),
   pageSize: z.coerce.number().int().min(1).max(200).default(50),
 })
@@ -150,11 +155,21 @@ export const CatalogPurchaseListFacetsSchema = z.object({
 export type CatalogPurchaseListFacets = z.infer<typeof CatalogPurchaseListFacetsSchema>
 
 /**
- * One row on the list page. `costOfSoldItemsDollars` is the realised
- * cost we have actually paid out for goods that have already sold
- * through (PO unit cost × units sold to date). It is the answer to
- * the operator's headline question "if I paid only for what's sold,
- * what would I be paying?".
+ * One row on the list page.
+ *
+ * Field-name → operator-meaning crosswalk (KEEP STRAIGHT — these get
+ * mixed up in the UI on every other rev):
+ *
+ *   * `realisedCostIfPaidForSoldOnlyDollars`
+ *     = PO unit cost × units sold so far.
+ *     = the **negotiation / vendor-payment basis** — the answer to
+ *       "if I paid only for what's sold, what would I owe?".
+ *
+ *   * `costOfSoldItemsDollars`
+ *     = sum over realised sales of qty × wholesale cost-as-of pay_time
+ *       (falling back to PO unit cost when the snapshot is missing).
+ *     = **realised COGS for margin math** — NOT the vendor payment
+ *       basis. Demoted in the UI; surfaced only in margin context.
  */
 export const CatalogPurchaseListRowSchema = z.object({
   dealerId: z.number().int(),

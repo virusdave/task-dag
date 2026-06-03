@@ -6520,6 +6520,22 @@ span.metric-chart-legend-item {
   padding-left: 0.55rem;
 }
 
+/* The "vendor payment basis" metric — the answer the operator opens
+ * the page to get. Stronger left-bar + tinted background so it reads
+ * as the dominant column even in a 7-column table row. */
+.purchase-metric-primary,
+.purchase-cell-primary {
+  border-left: 4px solid var(--brand, #6b4a1a);
+  padding-left: 0.6rem;
+  background: rgba(255, 240, 215, 0.55);
+}
+
+.purchase-metric-primary .purchase-metric-value,
+.purchase-cell-primary > .purchase-cell-primary-value {
+  font-size: 1.45rem;
+  font-weight: 750;
+}
+
 .purchase-metric-danger {
   border-left: 3px solid var(--danger);
   padding-left: 0.55rem;
@@ -6715,13 +6731,37 @@ span.metric-chart-legend-item {
 
 /* --- Desktop tables ----------------------------------------------------- */
 
+/* `overflow-x: clip` keeps horizontal overflow contained without
+ * promoting the wrap to a scroll container — which is required for
+ * `position: sticky` on the thead to anchor against the document
+ * viewport instead of a non-scrolling parent. `overflow-x: auto` (the
+ * previous value) silently forces overflow-y: auto and breaks the
+ * sticky header. Below 760px we hide this table entirely (mobile
+ * cards take over), so the loss of horizontal scroll inside the wrap
+ * has no impact on small viewports. */
 .purchase-table-wrap {
-  overflow-x: auto;
+  overflow-x: clip;
+  overflow-y: visible;
 }
 
 .purchase-table {
   width: 100%;
   min-width: 0;
+}
+
+.purchase-table thead th {
+  position: sticky;
+  /* Site shell does not have a top app bar that covers the viewport
+   * top edge, so 0 is fine. If/when that changes, this needs to match
+   * the app bar height. */
+  top: 0;
+  background: var(--panel);
+  /* Sit above tbody hover states + the per-cell tinted left borders
+   * (.purchase-cell-cost / .purchase-cell-retail). */
+  z-index: 3;
+  /* Recreate the underline that the table border normally provides,
+   * because once the row is sticky the table border doesn't follow. */
+  box-shadow: inset 0 -1px 0 var(--panel-border);
 }
 
 .purchase-table th {
@@ -6764,6 +6804,15 @@ span.metric-chart-legend-item {
   flex-wrap: wrap;
   gap: 0.2rem;
   margin-top: 0.15rem;
+}
+
+.purchase-row-products {
+  font-size: 0.72rem;
+  font-style: italic;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
 }
 
 .purchase-status-stack {
@@ -6834,6 +6883,16 @@ span.metric-chart-legend-item {
   gap: 0.5rem;
   padding: 0.4rem 0.5rem;
   background: rgba(255, 250, 241, 0.5);
+  border-radius: 8px;
+}
+
+/* The dominant "sold-through payment basis" tile on a mobile card.
+ * Re-uses .purchase-cell-primary tinted left bar + background. */
+.purchase-card-primary {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  padding: 0.55rem 0.75rem;
   border-radius: 8px;
 }
 

@@ -47,16 +47,20 @@ export async function purchaseSellThroughListLoader({ request }: { request: Requ
 const SORT_LABELS: Record<CatalogPurchaseListSort, string> = {
   deliveryDate: 'Delivered',
   paymentDueDate: 'Payment due',
-  poTotalDollars: 'PO cost',
+  poTotalDollars: 'Committed PO',
   distributorName: 'Distributor',
   unitsSold: 'Units sold',
   unitsRemaining: 'Units left',
-  unitsAdjusted: 'Units vanished',
-  sellThroughPercent: '% sold',
-  realisedCostIfPaidForSoldOnlyDollars: 'Cost × sold (PO unit)',
-  costOfSoldItemsDollars: 'Wholesale cost of sold',
-  costOfRemainingItemsDollars: 'Inventory cost left',
-  costOfAdjustedItemsDollars: 'Shrink / adjusted cost',
+  unitsAdjusted: 'Units adjusted',
+  sellThroughPercent: 'Sell-through',
+  // The headline negotiation answer (PO unit cost × units sold).
+  realisedCostIfPaidForSoldOnlyDollars: 'Sold-through payment',
+  // Realised COGS (package as-of cost). Used for margin math, NOT the
+  // vendor payment basis — labelled accordingly so the two never read
+  // as competing answers.
+  costOfSoldItemsDollars: 'COGS of sold',
+  costOfRemainingItemsDollars: 'Unsold stock at cost',
+  costOfAdjustedItemsDollars: 'Adjusted / shrink',
   currentListPriceOutstandingDollars: 'Retail list left',
 }
 
@@ -194,23 +198,31 @@ function MethodologyNotes(): JSX.Element {
   return (
     <ul>
       <li>
-        <strong>Inventory cost left</strong> = PO unit cost × units still on hand in the
-        package(s) we matched to this line by Metrc tag.
+        <strong>Sold-through payment basis</strong> = PO unit cost × units sold so far.
+        Use this as the "if you paid only for what's sold" anchor in vendor
+        negotiations. <em>This is not COGS.</em>
       </li>
       <li>
-        <strong>Shrink / adjusted cost</strong> = PO unit cost × units that disappeared
-        from the package without showing up as a retail sale (breakage, destruction,
+        <strong>Unsold stock at cost</strong> = PO unit cost × units still on hand in
+        the package(s) we matched to this line by Metrc tag.
+      </li>
+      <li>
+        <strong>Adjusted / shrink</strong> = PO unit cost × units that disappeared from
+        the package without showing up as a retail sale (breakage, destruction,
         return-to-distributor, samples, Metrc disposals). Clamped ≥ 0.
       </li>
       <li>
-        <strong>Wholesale cost of sold units</strong> sums each retail invoice line as
-        <code>qty × wholesale cost-as-of the moment it rang up</code>, falling back to
-        PO unit cost when the snapshot is missing. This is closer to true COGS than
-        "PO unit × units sold" when distributor costs change mid-PO.
+        <strong>Committed PO</strong> = invoice face value reported by Sweed.
       </li>
       <li>
-        <strong>Retail revenue from sold units</strong> is gross of discount — what
-        the register collected for those units.
+        <strong>Retail collected</strong> is gross of discount — what the register took
+        in for those units.
+      </li>
+      <li>
+        <strong>COGS of sold</strong> (collapsed under "Margin / COGS detail" on
+        per-line views) is Σ qty × wholesale cost-as-of pay_time. Use it for margin
+        math; <em>do not</em> use it as the vendor payment basis — it diverges from
+        the invoice unit cost when distributor cost changed mid-PO.
       </li>
       <li>
         Lines are matched to inventory packages via Metrc tag
@@ -227,55 +239,51 @@ function MethodologyNotes(): JSX.Element {
 
 function ExposureHero(props: { headline: CatalogPurchaseListResponse['headline'] }): JSX.Element {
   const h = props.headline
-  const stillExposed = h.costOfRemainingItemsDollars + h.costOfAdjustedItemsDollars
   const sellThroughPct = h.unitsOrdered > 0 ? h.unitsSold / h.unitsOrdered : null
+  const exposureTotal = h.costOfRemainingItemsDollars + h.costOfAdjustedItemsDollars
 
   return (
-    <section className="purchase-hero" aria-label="Cash exposure across filtered purchases">
+    <section className="purchase-hero" aria-label="Vendor payment basis across filtered purchases">
       <div className="purchase-hero-primary">
-        <div className="purchase-eyebrow">Still exposed at purchase cost</div>
-        <div className="purchase-answer-value">{fmtUsd(stillExposed)}</div>
+        <div className="purchase-eyebrow">Sold-through payment basis</div>
+        <div className="purchase-answer-value">
+          {fmtUsd(h.realisedCostIfPaidForSoldOnlyDollars)}
+        </div>
         <div className="purchase-muted purchase-hero-primary-sub">
-          {fmtUsd(h.costOfRemainingItemsDollars)} in stock
-          {h.costOfAdjustedItemsDollars > 0 ? (
-            <>
-              {' · '}
-              <span className="purchase-danger">{fmtUsd(h.costOfAdjustedItemsDollars)} vanished</span>
-            </>
-          ) : null}
-          {' · '}
-          {fmtInt(h.unitsRemaining)} units left
-          {h.unitsAdjusted > 0 ? ` · ${fmtInt(h.unitsAdjusted)} adjusted` : ''}
+          What you'd owe across these {fmtInt(h.purchaseCount)} POs if you paid only for the{' '}
+          {fmtInt(h.unitsSold)} units that have sold so far
+          {sellThroughPct !== null ? ` (${pct(sellThroughPct)} of ${fmtInt(h.unitsOrdered)} ordered)` : ''}
+          .
         </div>
       </div>
       <div className="purchase-hero-supporting">
         <HeroMetric
+          eyebrow="Remaining exposure"
+          value={fmtUsd(exposureTotal)}
+          sub={
+            h.costOfAdjustedItemsDollars > 0
+              ? `${fmtUsd(h.costOfRemainingItemsDollars)} in stock · ${fmtUsd(h.costOfAdjustedItemsDollars)} adjusted`
+              : `${fmtUsd(h.costOfRemainingItemsDollars)} in stock`
+          }
+          tone={h.costOfAdjustedItemsDollars > 0 ? 'danger' : 'cost'}
+        />
+        <HeroMetric
           eyebrow="Committed PO cost"
           value={fmtUsd(h.poTotalDollars)}
-          sub={`across ${fmtInt(h.purchaseCount)} POs`}
+          sub={`invoice face value across ${fmtInt(h.purchaseCount)} POs`}
           tone="cost"
         />
         <HeroMetric
-          eyebrow="Retail revenue from sold units"
+          eyebrow="Retail collected"
           value={fmtUsd(h.soldRevenueDollars)}
-          sub={
-            sellThroughPct !== null
-              ? `${fmtInt(h.unitsSold)}/${fmtInt(h.unitsOrdered)} units · ${pct(sellThroughPct)} sold`
-              : `${fmtInt(h.unitsSold)} units`
-          }
+          sub={`gross of discount on ${fmtInt(h.unitsSold)} sold units`}
           tone="retail"
         />
         <HeroMetric
-          eyebrow="Inventory cost left"
-          value={fmtUsd(h.costOfRemainingItemsDollars)}
-          sub={`Retail list left ${fmtUsd(h.currentListPriceOutstandingDollars)}`}
-          tone="cost"
-        />
-        <HeroMetric
-          eyebrow="Shrink / adjusted cost"
-          value={fmtUsd(h.costOfAdjustedItemsDollars)}
-          sub={h.unitsAdjusted > 0 ? `${fmtInt(h.unitsAdjusted)} adjusted units` : 'none flagged'}
-          tone={h.costOfAdjustedItemsDollars > 0 ? 'danger' : 'cost'}
+          eyebrow="Retail list left"
+          value={fmtUsd(h.currentListPriceOutstandingDollars)}
+          sub={`${fmtInt(h.unitsRemaining)} units in stock`}
+          tone="retail"
         />
       </div>
     </section>
@@ -565,12 +573,18 @@ function PurchasesDesktopTable(props: {
         <table className="data-table purchase-table">
           <thead>
             <tr>
-              <th>Purchase</th>
-              <th className="num">{sortHeader('poTotalDollars', 'Committed')}</th>
-              <th className="num">{sortHeader('costOfSoldItemsDollars', 'Retail recovered')}</th>
-              <th className="num">{sortHeader('costOfRemainingItemsDollars', 'Still in stock')}</th>
-              <th className="num">{sortHeader('costOfAdjustedItemsDollars', 'Vanished')}</th>
-              <th className="num">{sortHeader('sellThroughPercent', 'Flow')}</th>
+              <th>{sortHeader('deliveryDate', 'Purchase')}</th>
+              <th className="num purchase-cell-primary">
+                {sortHeader('realisedCostIfPaidForSoldOnlyDollars', 'Sold-through payment')}
+              </th>
+              <th className="num purchase-cell-cost">
+                {sortHeader('costOfRemainingItemsDollars', 'Unsold stock at cost')}
+              </th>
+              <th className="num purchase-cell-cost">
+                {sortHeader('costOfAdjustedItemsDollars', 'Adjusted / shrink')}
+              </th>
+              <th className="num purchase-cell-cost">{sortHeader('poTotalDollars', 'Committed PO')}</th>
+              <th className="num">{sortHeader('sellThroughPercent', 'Sell-through')}</th>
               <th>Status</th>
             </tr>
           </thead>
@@ -588,11 +602,14 @@ function PurchasesDesktopTable(props: {
 function PurchaseTableRow(props: { row: CatalogPurchaseListRow }): JSX.Element {
   const { row } = props
   const href = `${PURCHASES_PATH}/${encodeURIComponent(row.poId)}?dealerId=${row.dealerId}`
+  const productPreview =
+    row.productNamesPreview.length > 0 ? row.productNamesPreview.slice(0, 2).join(', ') : null
+  const productPreviewMore = Math.max(row.productNamesPreview.length - 2, 0)
   return (
     <tr>
       <td>
         <div className="purchase-row-purchase">
-          <Link to={href} className="purchase-row-distributor">
+          <Link to={href} className="purchase-row-distributor" target="_blank" rel="noreferrer">
             {row.distributorName ?? '—'}
           </Link>
           <div className="purchase-muted">
@@ -600,7 +617,8 @@ function PurchaseTableRow(props: { row: CatalogPurchaseListRow }): JSX.Element {
             {row.paymentDueDate ? ` · due ${row.paymentDueDate}` : ''}
           </div>
           <div className="purchase-muted purchase-row-poid">
-            {row.poName || row.externalOrderId || row.poId} · {row.lineCount} lines
+            {row.poName || row.externalOrderId || row.poId} · {row.lineCount} lines ·{' '}
+            {fmtInt(row.unitsOrdered)} units
           </div>
           {row.brandNames.length > 0 ? (
             <div className="purchase-row-brands">
@@ -612,21 +630,26 @@ function PurchaseTableRow(props: { row: CatalogPurchaseListRow }): JSX.Element {
               ) : null}
             </div>
           ) : null}
+          {productPreview ? (
+            <div className="purchase-muted purchase-row-products" title={row.productNamesPreview.join(', ')}>
+              {productPreview}
+              {productPreviewMore > 0 ? ` +${productPreviewMore}` : ''}
+            </div>
+          ) : null}
         </div>
       </td>
-      <td className="num purchase-cell-cost">
-        <strong>{fmtUsd(row.poTotalDollars)}</strong>
-      </td>
-      <td className="num purchase-cell-retail">
-        <strong>{fmtUsd(row.soldRevenueDollars)}</strong>
+      <td className="num purchase-cell-primary">
+        <div className="purchase-cell-primary-value">
+          {fmtUsd(row.realisedCostIfPaidForSoldOnlyDollars)}
+        </div>
         <div className="purchase-muted">
-          {row.sellThroughPercent !== null ? pct(row.sellThroughPercent / 100) : '—'} sold
+          {fmtInt(row.unitsSold)} sold · retail collected {fmtUsd(row.soldRevenueDollars)}
         </div>
       </td>
       <td className="num purchase-cell-cost">
         <strong>{fmtUsd(row.costOfRemainingItemsDollars)}</strong>
         <div className="purchase-muted">
-          retail list {fmtUsd(row.currentListPriceOutstandingDollars)}
+          {fmtInt(row.unitsRemaining)} units · list {fmtUsd(row.currentListPriceOutstandingDollars)}
         </div>
       </td>
       <td className="num purchase-cell-cost">
@@ -639,9 +662,17 @@ function PurchaseTableRow(props: { row: CatalogPurchaseListRow }): JSX.Element {
           {row.unitsAdjusted > 0 ? `${fmtInt(row.unitsAdjusted)} units` : 'none'}
         </div>
       </td>
+      <td className="num purchase-cell-cost">
+        <strong>{fmtUsd(row.poTotalDollars)}</strong>
+        <div className="purchase-muted">invoice face value</div>
+      </td>
       <td className="num">
-        <div>{fmtInt(row.unitsSold)} / {fmtInt(row.unitsOrdered)}</div>
-        <div className="purchase-muted">{fmtInt(row.unitsRemaining)} left</div>
+        <div className="purchase-line-movement-value">
+          {row.sellThroughPercent !== null ? pct(row.sellThroughPercent / 100) : '—'}
+        </div>
+        <div className="purchase-muted">
+          {fmtInt(row.unitsSold)} / {fmtInt(row.unitsOrdered)} units
+        </div>
       </td>
       <td>
         <div className="purchase-status-stack">
@@ -667,11 +698,11 @@ function PurchasesMobileCards(props: { rows: CatalogPurchaseListRow[] }): JSX.El
 function PurchaseMobileCard(props: { row: CatalogPurchaseListRow }): JSX.Element {
   const { row } = props
   const href = `${PURCHASES_PATH}/${encodeURIComponent(row.poId)}?dealerId=${row.dealerId}`
-  const stillExposed = row.costOfRemainingItemsDollars + row.costOfAdjustedItemsDollars
+  const remainingExposure = row.costOfRemainingItemsDollars + row.costOfAdjustedItemsDollars
   return (
     <article className="purchase-card">
       <header className="purchase-card-head">
-        <Link to={href} className="purchase-card-distributor">
+        <Link to={href} className="purchase-card-distributor" target="_blank" rel="noreferrer">
           {row.distributorName ?? '—'}
         </Link>
         <div className="purchase-muted">
@@ -679,32 +710,27 @@ function PurchaseMobileCard(props: { row: CatalogPurchaseListRow }): JSX.Element
           {row.paymentDueDate ? ` · due ${row.paymentDueDate}` : ''}
         </div>
         <div className="purchase-muted">
-          {row.poName || row.externalOrderId || row.poId} · {row.lineCount} lines
+          {row.poName || row.externalOrderId || row.poId} · {row.lineCount} lines ·{' '}
+          {fmtInt(row.unitsOrdered)} units
         </div>
       </header>
-      <div className="purchase-card-headline">
-        <div className="purchase-card-headline-cell">
-          <div className="purchase-eyebrow">Still exposed at cost</div>
-          <div className="purchase-metric-value">{fmtUsd(stillExposed)}</div>
+      <div className="purchase-card-primary purchase-cell-primary">
+        <div className="purchase-eyebrow">Sold-through payment basis</div>
+        <div className="purchase-cell-primary-value">
+          {fmtUsd(row.realisedCostIfPaidForSoldOnlyDollars)}
         </div>
-        <div className="purchase-card-headline-cell">
-          <div className="purchase-eyebrow">Retail recovered</div>
-          <div className="purchase-metric-value purchase-metric-retail">
-            {fmtUsd(row.soldRevenueDollars)}
-          </div>
+        <div className="purchase-muted">
+          {fmtInt(row.unitsSold)} / {fmtInt(row.unitsOrdered)} units sold (
+          {row.sellThroughPercent !== null ? pct(row.sellThroughPercent / 100) : '—'})
         </div>
       </div>
       <dl className="purchase-card-buckets">
         <div>
-          <dt>Committed PO cost</dt>
-          <dd>{fmtUsd(row.poTotalDollars)}</dd>
-        </div>
-        <div>
-          <dt>Inventory cost left</dt>
+          <dt>Unsold stock at cost</dt>
           <dd>{fmtUsd(row.costOfRemainingItemsDollars)}</dd>
         </div>
         <div>
-          <dt>Shrink / adjusted</dt>
+          <dt>Adjusted / shrink</dt>
           <dd>
             {row.costOfAdjustedItemsDollars > 0 ? (
               <span className="purchase-danger">{fmtUsd(row.costOfAdjustedItemsDollars)}</span>
@@ -714,15 +740,33 @@ function PurchaseMobileCard(props: { row: CatalogPurchaseListRow }): JSX.Element
           </dd>
         </div>
         <div>
+          <dt>Remaining exposure</dt>
+          <dd>{fmtUsd(remainingExposure)}</dd>
+        </div>
+        <div>
           <dt>Retail list left</dt>
           <dd>{fmtUsd(row.currentListPriceOutstandingDollars)}</dd>
         </div>
+        <div>
+          <dt>Committed PO</dt>
+          <dd>{fmtUsd(row.poTotalDollars)}</dd>
+        </div>
+        <div>
+          <dt>Retail collected</dt>
+          <dd>{fmtUsd(row.soldRevenueDollars)}</dd>
+        </div>
       </dl>
       <footer className="purchase-card-foot">
-        <span className="purchase-muted">
-          {fmtInt(row.unitsSold)} / {fmtInt(row.unitsOrdered)} sold · {fmtInt(row.unitsRemaining)} left
-          {row.unitsAdjusted > 0 ? ` · ${fmtInt(row.unitsAdjusted)} adjusted` : ''}
-        </span>
+        {row.brandNames.length > 0 ? (
+          <div className="purchase-row-brands">
+            {row.brandNames.slice(0, 4).map((b) => (
+              <Pill key={b} tone="muted">{b}</Pill>
+            ))}
+            {row.brandNames.length > 4 ? (
+              <span className="purchase-muted">+{row.brandNames.length - 4}</span>
+            ) : null}
+          </div>
+        ) : null}
         <div className="purchase-status-stack">
           {row.financialStatusName ? <Pill tone="muted">{row.financialStatusName}</Pill> : null}
           {row.orderStatusName ? <Pill tone="muted">{row.orderStatusName}</Pill> : null}
@@ -866,41 +910,62 @@ function PurchaseDetailHero(props: {
   matchedFraction: number | null
 }): JSX.Element {
   const { summary, verdict, matchedFraction } = props
+  const sellThroughPct = summary.unitsOrdered > 0 ? summary.unitsSold / summary.unitsOrdered : null
+  const remainingExposure = summary.costOfRemainingItemsDollars + summary.costOfAdjustedItemsDollars
   return (
-    <section className="purchase-hero" aria-label="PO sell-through verdict">
-      <div className={`purchase-hero-primary purchase-verdict-${verdict.kind}`}>
-        <div className="purchase-eyebrow">Verdict</div>
-        <div className="purchase-answer-value">{verdict.label}</div>
-        <div className="purchase-muted purchase-hero-primary-sub">{verdict.detail}</div>
+    <section className="purchase-hero" aria-label="PO vendor payment basis and exposure">
+      <div className="purchase-hero-primary">
+        <div className="purchase-eyebrow">Sold-through payment basis</div>
+        <div className="purchase-answer-value">
+          {fmtUsd(summary.realisedCostIfPaidForSoldOnlyDollars)}
+        </div>
+        <div className="purchase-muted purchase-hero-primary-sub">
+          What you'd owe on this PO if you paid only for the {fmtInt(summary.unitsSold)} units
+          that have sold so far
+          {sellThroughPct !== null ? ` (${pct(sellThroughPct)} of ${fmtInt(summary.unitsOrdered)} ordered)` : ''}
+          .{' '}
+          <span className={`purchase-verdict-${verdict.kind}`} title={verdict.detail}>
+            Signal: {verdict.label}.
+          </span>
+          {matchedFraction !== null && matchedFraction < 1 ? (
+            <>
+              {' '}
+              <span className="purchase-danger">
+                Only {summary.matchedLineCount}/{summary.totalLineCount} lines matched to inventory packages —
+                unmatched lines contribute $0 to the basis above.
+              </span>
+            </>
+          ) : null}
+        </div>
       </div>
       <div className="purchase-hero-supporting">
         <HeroMetric
-          eyebrow="Retail revenue from sold units"
-          value={fmtUsd(summary.soldRevenueDollars)}
-          sub={`${fmtInt(summary.unitsSold)}/${fmtInt(summary.unitsOrdered)} units sold`}
-          tone="retail"
-        />
-        <HeroMetric
-          eyebrow="Inventory cost left"
-          value={fmtUsd(summary.costOfRemainingItemsDollars)}
-          sub={`Retail list left ${fmtUsd(summary.currentListPriceOutstandingDollars)}`}
-          tone="cost"
-        />
-        <HeroMetric
-          eyebrow="Shrink / adjusted cost"
-          value={fmtUsd(summary.costOfAdjustedItemsDollars)}
-          sub={summary.unitsAdjusted > 0 ? `${fmtInt(summary.unitsAdjusted)} adjusted units` : 'none flagged'}
+          eyebrow="Remaining exposure"
+          value={fmtUsd(remainingExposure)}
+          sub={
+            summary.costOfAdjustedItemsDollars > 0
+              ? `${fmtUsd(summary.costOfRemainingItemsDollars)} in stock · ${fmtUsd(summary.costOfAdjustedItemsDollars)} adjusted`
+              : `${fmtUsd(summary.costOfRemainingItemsDollars)} in stock`
+          }
           tone={summary.costOfAdjustedItemsDollars > 0 ? 'danger' : 'cost'}
         />
         <HeroMetric
           eyebrow="Committed PO cost"
           value={fmtUsd(summary.poTotalDollars ?? 0)}
-          sub={
-            matchedFraction !== null
-              ? `${summary.matchedLineCount}/${summary.totalLineCount} lines matched`
-              : null
-          }
+          sub="invoice face value"
           tone="cost"
+        />
+        <HeroMetric
+          eyebrow="Retail collected"
+          value={fmtUsd(summary.soldRevenueDollars)}
+          sub={`gross of discount on ${fmtInt(summary.unitsSold)} units`}
+          tone="retail"
+        />
+        <HeroMetric
+          eyebrow="Retail list left"
+          value={fmtUsd(summary.currentListPriceOutstandingDollars)}
+          sub={`${fmtInt(summary.unitsRemaining)} units in stock`}
+          tone="retail"
         />
       </div>
     </section>
@@ -932,9 +997,11 @@ function PurchaseLinesTable(props: {
         <thead>
           <tr>
             <th>Item</th>
-            <th className="num">Movement</th>
-            <th className="num purchase-cell-retail">Retail dollars</th>
-            <th className="num purchase-cell-cost">Purchase-cost dollars</th>
+            <th className="num">Units (sold / ordered / left)</th>
+            <th className="num purchase-cell-primary">Sold-through payment</th>
+            <th className="num purchase-cell-cost">Unsold stock at cost</th>
+            <th className="num purchase-cell-cost">Adjusted / shrink</th>
+            <th className="num purchase-cell-retail">Retail $</th>
             <th>Signal</th>
           </tr>
         </thead>
@@ -954,17 +1021,27 @@ function PurchaseLineRow(props: {
 }): JSX.Element {
   const { line, purchase } = props
   const itemHref = `${PURCHASES_PATH}/${encodeURIComponent(purchase.poId)}/items/${encodeURIComponent(line.lineId)}?dealerId=${purchase.dealerId}`
+  const lineCommitted = (line.unitCostDollars ?? 0) * line.orderedUnits
   return (
     <tr>
       <td>
         <div className="purchase-line-item">
-          <Link to={itemHref} className="purchase-line-product">
+          <Link
+            to={itemHref}
+            className="purchase-line-product"
+            target="_blank"
+            rel="noreferrer"
+          >
             {line.productName ?? line.distributorProductName ?? '(unnamed)'}
           </Link>
           <div className="purchase-muted">
             {[line.brandName, line.categoryName, line.subcategoryName, line.sizeLabel]
               .filter((v): v is string => !!v)
-              .join(' · ')}
+              .join(' · ') || '—'}
+          </div>
+          <div className="purchase-muted purchase-row-poid">
+            unit cost {fmtUsd(line.unitCostDollars ?? 0)} · committed {fmtUsd(lineCommitted)}
+            {line.daysSinceReceived !== null ? ` · ${line.daysSinceReceived}d on shelf` : ''}
           </div>
         </div>
       </td>
@@ -973,45 +1050,53 @@ function PurchaseLineRow(props: {
           {line.sellThroughPercent !== null ? pct(line.sellThroughPercent / 100) : '—'}
         </div>
         <div className="purchase-muted">
-          {fmtInt(line.unitsSoldToDate)}/{fmtInt(line.orderedUnits)} sold ·{' '}
+          {fmtInt(line.unitsSoldToDate)} / {fmtInt(line.orderedUnits)} sold ·{' '}
           {fmtInt(line.remainingUnits)} left
           {line.unitsAdjusted > 0 ? (
             <>
-              {' '}·{' '}
+              {' · '}
               <span className="purchase-danger">{fmtInt(line.unitsAdjusted)} adj</span>
             </>
           ) : null}
         </div>
       </td>
-      <td className="num purchase-cell-retail">
-        <strong>{fmtUsd(line.soldRevenueDollars)}</strong>
-        <div className="purchase-muted">retail revenue from sold units</div>
+      <td className="num purchase-cell-primary">
+        <div className="purchase-cell-primary-value">
+          {fmtUsd(line.realisedCostIfPaidForSoldOnlyDollars)}
+        </div>
         <div className="purchase-muted">
-          list left {fmtUsd(line.currentListPriceOutstandingDollars)}
-          {line.grossMarginPercent !== null ? ` · GM ${line.grossMarginPercent.toFixed(1)}%` : ''}
+          {fmtInt(line.unitsSoldToDate)} × {fmtUsd(line.unitCostDollars ?? 0)}
         </div>
       </td>
       <td className="num purchase-cell-cost">
         <strong>{fmtUsd(line.costOfRemainingItemsDollars)}</strong>
-        <div className="purchase-muted">inventory cost left</div>
-        {line.costOfAdjustedItemsDollars > 0 ? (
-          <div className="purchase-danger">
-            shrink {fmtUsd(line.costOfAdjustedItemsDollars)}
-          </div>
-        ) : null}
         <div className="purchase-muted">
-          wholesale cost of sold {fmtUsd(line.costOfSoldItemsDollars)}
+          {fmtInt(line.remainingUnits)} units on hand
         </div>
-        <div className="purchase-muted">unit cost {fmtUsd(line.unitCostDollars ?? 0)}</div>
+      </td>
+      <td className="num purchase-cell-cost">
+        {line.costOfAdjustedItemsDollars > 0 ? (
+          <strong className="purchase-danger">{fmtUsd(line.costOfAdjustedItemsDollars)}</strong>
+        ) : (
+          <span className="purchase-muted">$0</span>
+        )}
+        <div className="purchase-muted">
+          {line.unitsAdjusted > 0 ? `${fmtInt(line.unitsAdjusted)} units` : 'none'}
+        </div>
+      </td>
+      <td className="num purchase-cell-retail">
+        <strong>{fmtUsd(line.soldRevenueDollars)}</strong>
+        <div className="purchase-muted">collected from sold units</div>
+        <div className="purchase-muted">
+          list left {fmtUsd(line.currentListPriceOutstandingDollars)}
+          {line.grossMarginPercent !== null ? ` · GM ${line.grossMarginPercent.toFixed(1)}%` : ''}
+        </div>
       </td>
       <td>
         <div className="purchase-line-signal">
           <Pill tone={line.packageMatchMethod === 'direct_metrc_tag' ? 'success' : 'warning'}>
             {line.packageMatchMethod === 'direct_metrc_tag' ? 'matched' : 'unmatched'}
           </Pill>
-          {line.daysSinceReceived !== null ? (
-            <span className="purchase-muted">{line.daysSinceReceived}d since recv'd</span>
-          ) : null}
         </div>
       </td>
     </tr>
@@ -1037,83 +1122,80 @@ function PurchaseLineCard(props: {
 }): JSX.Element {
   const { line, purchase } = props
   const itemHref = `${PURCHASES_PATH}/${encodeURIComponent(purchase.poId)}/items/${encodeURIComponent(line.lineId)}?dealerId=${purchase.dealerId}`
+  const lineCommitted = (line.unitCostDollars ?? 0) * line.orderedUnits
   return (
     <article className="purchase-card">
       <header className="purchase-card-head">
-        <Link to={itemHref} className="purchase-card-distributor">
+        <Link to={itemHref} className="purchase-card-distributor" target="_blank" rel="noreferrer">
           {line.productName ?? line.distributorProductName ?? '(unnamed)'}
         </Link>
         <div className="purchase-muted">
           {[line.brandName, line.categoryName, line.subcategoryName, line.sizeLabel]
             .filter((v): v is string => !!v)
-            .join(' · ')}
+            .join(' · ') || '—'}
         </div>
         <Pill tone={line.packageMatchMethod === 'direct_metrc_tag' ? 'success' : 'warning'}>
           {line.packageMatchMethod === 'direct_metrc_tag' ? 'matched' : 'unmatched'}
         </Pill>
       </header>
-      <div className="purchase-card-headline">
-        <div className="purchase-card-headline-cell">
-          <div className="purchase-eyebrow">% sold</div>
-          <div className="purchase-metric-value">
-            {line.sellThroughPercent !== null ? pct(line.sellThroughPercent / 100) : '—'}
-          </div>
-          <div className="purchase-muted">
-            {fmtInt(line.unitsSoldToDate)}/{fmtInt(line.orderedUnits)} sold · {fmtInt(line.remainingUnits)} left
-          </div>
+
+      <div className="purchase-card-primary purchase-cell-primary">
+        <div className="purchase-eyebrow">Sold-through payment basis</div>
+        <div className="purchase-cell-primary-value">
+          {fmtUsd(line.realisedCostIfPaidForSoldOnlyDollars)}
+        </div>
+        <div className="purchase-muted">
+          {fmtInt(line.unitsSoldToDate)} × {fmtUsd(line.unitCostDollars ?? 0)} ·{' '}
+          {line.sellThroughPercent !== null ? pct(line.sellThroughPercent / 100) : '—'} of{' '}
+          {fmtInt(line.orderedUnits)} sold
         </div>
       </div>
-      <div className="purchase-line-card-groups">
-        <section className="purchase-line-card-group purchase-cell-retail">
-          <h3>Retail dollars</h3>
-          <dl>
-            <div>
-              <dt>Retail revenue (sold)</dt>
-              <dd>{fmtUsd(line.soldRevenueDollars)}</dd>
-            </div>
-            <div>
-              <dt>Retail list value left</dt>
-              <dd>{fmtUsd(line.currentListPriceOutstandingDollars)}</dd>
-            </div>
-            {line.grossMarginPercent !== null ? (
-              <div>
-                <dt>Gross margin</dt>
-                <dd>{line.grossMarginPercent.toFixed(1)}%</dd>
-              </div>
-            ) : null}
-          </dl>
-        </section>
-        <section className="purchase-line-card-group purchase-cell-cost">
-          <h3>Purchase-cost dollars</h3>
-          <dl>
-            <div>
-              <dt>Inventory cost left</dt>
-              <dd>{fmtUsd(line.costOfRemainingItemsDollars)}</dd>
-            </div>
-            <div>
-              <dt>Shrink / adjusted cost</dt>
-              <dd>
-                {line.costOfAdjustedItemsDollars > 0 ? (
-                  <span className="purchase-danger">{fmtUsd(line.costOfAdjustedItemsDollars)}</span>
-                ) : (
-                  <span className="purchase-muted">$0</span>
-                )}
-              </dd>
-            </div>
-            <div>
-              <dt>Wholesale cost of sold units</dt>
-              <dd>{fmtUsd(line.costOfSoldItemsDollars)}</dd>
-            </div>
-            <div>
-              <dt>Unit cost</dt>
-              <dd>{fmtUsd(line.unitCostDollars ?? 0)}</dd>
-            </div>
-          </dl>
-        </section>
-      </div>
+
+      <dl className="purchase-card-buckets">
+        <div>
+          <dt>Unsold stock at cost</dt>
+          <dd>{fmtUsd(line.costOfRemainingItemsDollars)}</dd>
+        </div>
+        <div>
+          <dt>Adjusted / shrink</dt>
+          <dd>
+            {line.costOfAdjustedItemsDollars > 0 ? (
+              <span className="purchase-danger">{fmtUsd(line.costOfAdjustedItemsDollars)}</span>
+            ) : (
+              <span className="purchase-muted">$0</span>
+            )}
+          </dd>
+        </div>
+        <div>
+          <dt>Committed (line)</dt>
+          <dd>{fmtUsd(lineCommitted)}</dd>
+        </div>
+        <div>
+          <dt>Retail collected</dt>
+          <dd>{fmtUsd(line.soldRevenueDollars)}</dd>
+        </div>
+        <div>
+          <dt>Retail list left</dt>
+          <dd>{fmtUsd(line.currentListPriceOutstandingDollars)}</dd>
+        </div>
+        <div>
+          <dt>Units (sold / left / adj)</dt>
+          <dd>
+            {fmtInt(line.unitsSoldToDate)} / {fmtInt(line.remainingUnits)} /{' '}
+            {fmtInt(line.unitsAdjusted)}
+          </dd>
+        </div>
+      </dl>
+
       <details className="purchase-line-card-details">
-        <summary>Details</summary>
+        <summary>Margin / COGS &amp; identifiers</summary>
         <dl className="purchase-meta-dl">
+          <dt>Unit cost (PO)</dt>
+          <dd>{fmtUsd(line.unitCostDollars ?? 0)}</dd>
+          <dt>COGS of sold (margin)</dt>
+          <dd>{fmtUsd(line.costOfSoldItemsDollars)}</dd>
+          <dt>Gross margin (line)</dt>
+          <dd>{line.grossMarginPercent !== null ? `${line.grossMarginPercent.toFixed(1)}%` : '—'}</dd>
           <dt>Packs</dt>
           <dd>{line.packCount ?? '—'}</dd>
           <dt>Metrc tag</dt>
@@ -1233,23 +1315,27 @@ export function PurchaseSellThroughItemPage(): JSX.Element {
             </div>
           </dl>
         </section>
-        <section className="purchase-line-card-group purchase-cell-cost">
-          <h3>Purchase-cost dollars (this PO)</h3>
+        <section className="purchase-line-card-group purchase-cell-primary">
+          <h3>Vendor payment basis (this PO line)</h3>
           <dl>
             <div>
-              <dt>Unit cost</dt>
-              <dd>{fmtUsd(line.unitCostDollars ?? 0)}</dd>
+              <dt>Sold-through payment</dt>
+              <dd>
+                <strong>{fmtUsd(line.realisedCostIfPaidForSoldOnlyDollars)}</strong>
+              </dd>
             </div>
             <div>
-              <dt>Wholesale cost of sold</dt>
-              <dd>{fmtUsd(line.costOfSoldItemsDollars)}</dd>
+              <dt>= units sold × unit cost</dt>
+              <dd>
+                {fmtInt(line.unitsSoldToDate)} × {fmtUsd(line.unitCostDollars ?? 0)}
+              </dd>
             </div>
             <div>
-              <dt>Inventory cost left</dt>
+              <dt>Unsold stock at cost</dt>
               <dd>{fmtUsd(line.costOfRemainingItemsDollars)}</dd>
             </div>
             <div>
-              <dt>Shrink / adjusted cost</dt>
+              <dt>Adjusted / shrink</dt>
               <dd>
                 {line.costOfAdjustedItemsDollars > 0 ? (
                   <span className="purchase-danger">{fmtUsd(line.costOfAdjustedItemsDollars)}</span>
@@ -1258,7 +1344,27 @@ export function PurchaseSellThroughItemPage(): JSX.Element {
                 )}
               </dd>
             </div>
+            <div>
+              <dt>Committed (line)</dt>
+              <dd>{fmtUsd((line.unitCostDollars ?? 0) * line.orderedUnits)}</dd>
+            </div>
           </dl>
+          <details className="purchase-line-card-details">
+            <summary>Margin / COGS detail</summary>
+            <dl>
+              <div>
+                <dt>COGS of sold</dt>
+                <dd>{fmtUsd(line.costOfSoldItemsDollars)}</dd>
+              </div>
+              <div>
+                <dt className="purchase-muted">Method</dt>
+                <dd className="purchase-muted">
+                  Σ qty × wholesale cost-as-of pay_time. Use this for margin math —
+                  not as the vendor payment basis.
+                </dd>
+              </div>
+            </dl>
+          </details>
         </section>
       </div>
 
