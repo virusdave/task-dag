@@ -1,4 +1,5 @@
 import { getWorkerEnv } from '../config/env.js'
+import { startJobQueueNotifyListener, waitForJobQueueWakeup } from '../../server/db/notify.js'
 import { JOB_PRIORITY_URGENT } from '../../server/jobs/enqueueJob.js'
 import { recordAuthEvent, withJobAuthContext } from '../sweed/authLog.js'
 import { tickConfigWorkersScheduler } from './configWorkersScheduler.js'
@@ -56,6 +57,14 @@ export async function runWorkerLoop(): Promise<never> {
       `urgentMinPriority=${JOB_PRIORITY_URGENT}`,
   )
   await warmDependencyHealth()
+  // Phase B4 (virusdave/top-level#11): open the dedicated LISTEN
+  // connection on the helios_job_queue channel so the lease loops
+  // below can race their idle-cap delay against incoming NOTIFY
+  // wakeups. Awaiting here means the listener is in place before
+  // the first lease tick; if the connection drops at runtime the
+  // helper reconnects on its own and the loops fall back to the
+  // 60 s polling cap.
+  await startJobQueueNotifyListener()
 
   // Launch both loops; each is an infinite for(;;). Promise.all
   // never resolves (return type is `never`), but if either loop
@@ -99,16 +108,28 @@ async function runLeaseLoop(opts: LeaseLoopOptions): Promise<never> {
   // The backoff is reset to zero on any non-empty lease — live work
   // always sees full-speed polling on the very next iteration.
   //
-  // Schedule (with opts.pollIntervalMs = 3s, cap 15s): empty=0,1 →
-  // 3s, empty=2 → ~8.5s, empty=3+ → 15s. So an idle worker settles
-  // to one poll-transaction every 15s instead of every 3s — a 5×
-  // reduction in baseline write-transactions during quiet hours
-  // (overnight + every gap between job bursts).
+  // Phase B3 capped this at 15 s. Phase B4 raises the cap to 60 s
+  // because the new helios_job_queue LISTEN/NOTIFY plumbing
+  // (server/db/notify.ts) gives us sub-second wake-up latency on
+  // any real enqueue: the idle delay below is now
+  // `Promise.race([delay(sleepMs), waitForJobQueueWakeup()])`, so
+  // even at the 60 s cap a fresh enqueueJob commit reaches the
+  // lease loop almost immediately. The cap then only matters for
+  // pathological "queue is empty for 60 s straight AND nothing
+  // gets enqueued" windows, e.g. overnight when the only activity
+  // is the scheduler's own ticks.
+  //
+  // Schedule (with opts.pollIntervalMs = 3s, cap 60s): empty=1 →
+  // 3s, empty=2 → ~8.5s, empty=4 → ~24s, empty=7+ → 60s. Idle
+  // worker settles to one poll-transaction every 60 s instead of
+  // every 3 s — a 20× reduction in baseline write-transactions
+  // during quiet hours, on top of the wakeup latency win on real
+  // enqueues.
   //
   // Polynomial (n^1.5) rather than exponential, per the canon's
   // "all backoffs must be sub-exponential" rule. Matches the
   // shape of getRetryDelayMs below.
-  const IDLE_POLL_MAX_SLEEP_MS = 15_000
+  const IDLE_POLL_MAX_SLEEP_MS = 60_000
   let consecutiveEmptyPolls = 0
 
   for (;;) {
@@ -208,7 +229,22 @@ async function runLeaseLoop(opts: LeaseLoopOptions): Promise<never> {
         opts.pollIntervalMs,
         IDLE_POLL_MAX_SLEEP_MS,
       )
-      await delay(sleepMs)
+      // Race the polynomial idle delay against a fresh job-queue
+      // wakeup (Phase B4). On a real enqueue the worker wakes up
+      // within milliseconds; on a fully idle window it waits the
+      // full sleepMs. The AbortController cleans up the wakeup
+      // listener when the delay wins, so listeners never leak.
+      const abortController = new AbortController()
+      try {
+        await Promise.race([
+          delay(sleepMs).then(() => abortController.abort()),
+          waitForJobQueueWakeup(abortController.signal),
+        ])
+      } finally {
+        if (!abortController.signal.aborted) {
+          abortController.abort()
+        }
+      }
     } else {
       consecutiveEmptyPolls = 0
     }

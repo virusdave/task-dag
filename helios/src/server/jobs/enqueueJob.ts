@@ -8,6 +8,7 @@ import {
   type JobType,
 } from '../../shared/contracts/index.js'
 import type { Queryable } from '../db/pool.js'
+import { notifyJobQueueEnqueued } from '../db/notify.js'
 import { getCurrentJobAuthContext } from '../../worker/sweed/authLog.js'
 
 interface JobRow extends QueryResultRow {
@@ -169,6 +170,13 @@ export async function enqueueJob(db: Queryable, input: EnqueueJobInput): Promise
     ],
   )
 
+  // Phase B4 (virusdave/top-level#11): emit a wake-up on the
+  // job-queue channel from inside the caller's transaction so the
+  // worker lease loops can break out of their idle-cap sleep
+  // immediately on commit. A separate listening connection in the
+  // worker process picks the NOTIFY up.
+  await notifyJobQueueEnqueued(db)
+
   return result.rows[0].id
 }
 
@@ -324,6 +332,10 @@ export async function enqueueJobs(
     for (const row of insertResult.rows) {
       insertedByDedupeKey.set(row.dedupe_key, row.id)
     }
+    // Phase B4: one NOTIFY per BATCH that actually inserted at
+    // least one row. We don't need per-row notifications — the
+    // worker just needs to know "something arrived".
+    await notifyJobQueueEnqueued(db)
   }
 
   return resolved.map((r) => {
