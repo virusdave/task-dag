@@ -3127,6 +3127,53 @@ function CatalogScatterSvg({
   )
   const HOVER_PX = 12
   const TOUCH_HOVER_PX = 28 // chubbier hit-radius for fingers
+  // Two-pass hit-test that prefers highlighted (matching) dots over
+  // dimmed (non-matching) dots when a highlight matcher is active.
+  // Without this the nearest-dot scan can land on a heavily-dimmed
+  // point that visually sits underneath a popped highlight point —
+  // and the resulting tooltip shows the wrong product (see brand /
+  // distributor detail page bug, June 2026: hovering near a Quality
+  // Control edibles dot snapped to a nearby dimmed Revert dot and
+  // surfaced "Revert" as if that was the brand's highlighted point).
+  const findNearestIdx = useCallback(
+    (local: { x: number; y: number }, hitRadiusSq: number): number => {
+      const scan = (matchersOnly: boolean): { idx: number; distSq: number } => {
+        let bestIdx = -1
+        let bestDistSq = Infinity
+        for (let i = 0; i < plotted.length; i++) {
+          const pp = plotted[i]!
+          // skip points outside the visible view — they're clipped
+          if (
+            pp.x < view.xMin ||
+            pp.x > view.xMax ||
+            pp.y < view.yMin ||
+            pp.y > view.yMax
+          ) {
+            continue
+          }
+          if (matchersOnly && highlightMatcher && !highlightMatcher(pp.p)) {
+            continue
+          }
+          const dx = xScale(pp.x) - local.x
+          const dy = yScale(pp.y) - local.y
+          const d = dx * dx + dy * dy
+          if (d < bestDistSq) {
+            bestDistSq = d
+            bestIdx = i
+          }
+        }
+        return { idx: bestIdx, distSq: bestDistSq }
+      }
+      if (highlightMatcher) {
+        const m = scan(true)
+        if (m.idx >= 0 && m.distSq <= hitRadiusSq) return m.idx
+      }
+      const any = scan(false)
+      return any.idx >= 0 && any.distSq <= hitRadiusSq ? any.idx : -1
+    },
+    [plotted, xScale, yScale, view.xMin, view.xMax, view.yMin, view.yMax, highlightMatcher],
+  )
+
   const onPointerMove = useCallback(
     (e: React.PointerEvent<SVGSVGElement>) => {
       // Forward to the zoom hook first so pinch/pan can run.
@@ -3147,30 +3194,9 @@ function CatalogScatterSvg({
       pt.x = e.clientX
       pt.y = e.clientY
       const local = pt.matrixTransform(ctm.inverse())
-      let bestIdx = -1
-      let bestDistSq = Infinity
       const hitRadius = e.pointerType === 'mouse' ? HOVER_PX : TOUCH_HOVER_PX
-      const hitRadiusSq = hitRadius * hitRadius
-      for (let i = 0; i < plotted.length; i++) {
-        const pp = plotted[i]!
-        // skip points outside the visible view — they're clipped
-        if (
-          pp.x < view.xMin ||
-          pp.x > view.xMax ||
-          pp.y < view.yMin ||
-          pp.y > view.yMax
-        ) {
-          continue
-        }
-        const dx = xScale(pp.x) - local.x
-        const dy = yScale(pp.y) - local.y
-        const d = dx * dx + dy * dy
-        if (d < bestDistSq) {
-          bestDistSq = d
-          bestIdx = i
-        }
-      }
-      if (bestIdx >= 0 && bestDistSq <= hitRadiusSq) {
+      const bestIdx = findNearestIdx(local, hitRadius * hitRadius)
+      if (bestIdx >= 0) {
         setHover({ idx: bestIdx, pointerType: e.pointerType })
       } else if (e.pointerType === 'mouse') {
         // Only clear on miss for mouse; touch keeps last selection
@@ -3178,7 +3204,7 @@ function CatalogScatterSvg({
         setHover(null)
       }
     },
-    [plotted, xScale, yScale, zoom, hover, view.xMin, view.xMax, view.yMin, view.yMax],
+    [plotted, zoom, hover, findNearestIdx],
   )
 
   // Mouse: pointerleave clears the tooltip. Touch: do NOT clear on
@@ -3209,35 +3235,15 @@ function CatalogScatterSvg({
       pt.x = e.clientX
       pt.y = e.clientY
       const local = pt.matrixTransform(ctm.inverse())
-      let bestIdx = -1
-      let bestDistSq = Infinity
-      const hitRadiusSq = TOUCH_HOVER_PX * TOUCH_HOVER_PX
-      for (let i = 0; i < plotted.length; i++) {
-        const pp = plotted[i]!
-        if (
-          pp.x < view.xMin ||
-          pp.x > view.xMax ||
-          pp.y < view.yMin ||
-          pp.y > view.yMax
-        ) {
-          continue
-        }
-        const dx = xScale(pp.x) - local.x
-        const dy = yScale(pp.y) - local.y
-        const d = dx * dx + dy * dy
-        if (d < bestDistSq) {
-          bestDistSq = d
-          bestIdx = i
-        }
-      }
-      if (bestIdx >= 0 && bestDistSq <= hitRadiusSq) {
+      const bestIdx = findNearestIdx(local, TOUCH_HOVER_PX * TOUCH_HOVER_PX)
+      if (bestIdx >= 0) {
         setHover({ idx: bestIdx, pointerType: e.pointerType })
       } else {
         // tap on empty plot area — dismiss pinned tooltip
         setHover(null)
       }
     },
-    [plotted, xScale, yScale, view.xMin, view.xMax, view.yMin, view.yMax, zoom],
+    [plotted, zoom, findNearestIdx],
   )
 
   const hovered = hover ? plotted[hover.idx] ?? null : null
@@ -3514,17 +3520,29 @@ function CatalogScatterSvg({
               </>
             )
           })()}
-          {/* hovered dot highlight */}
-          {hovered ? (
-            <circle
-              cx={xScale(hovered.x)}
-              cy={yScale(hovered.y)}
-              r={6}
-              fill="none"
-              stroke="#111"
-              strokeWidth={1.5}
-            />
-          ) : null}
+          {/* hovered dot highlight — when a brand/distributor highlight
+              matcher is active, a hovered NON-matching dot uses a
+              muted dashed ring so it can never be visually confused
+              with the page-level highlight emphasis. Without this,
+              hovering near a dimmed competitor dot on a brand /
+              distributor detail page can look identical to the
+              brand-highlight ring (June 2026 bug). */}
+          {hovered ? (() => {
+            const hoveredIsMatch =
+              highlightMatcher == null ? true : highlightMatcher(hovered.p)
+            return (
+              <circle
+                cx={xScale(hovered.x)}
+                cy={yScale(hovered.y)}
+                r={6}
+                fill="none"
+                stroke={hoveredIsMatch ? '#111' : '#888'}
+                strokeOpacity={hoveredIsMatch ? 1 : 0.55}
+                strokeWidth={hoveredIsMatch ? 1.5 : 1}
+                strokeDasharray={hoveredIsMatch ? undefined : '3 2'}
+              />
+            )
+          })() : null}
         </g>
       </svg>
 
