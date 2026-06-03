@@ -152,11 +152,16 @@ export async function runConfigWorkersLitalertsRefreshVariantJob(
  * Helios DB-cost epic (virusdave/top-level#11).
  *
  * Why a CTE rather than three parallel SELECTs:
- *   - The catalog-group containment search uses the new
- *     `catalog_groups_products_gin_idx` GIN(jsonb_path_ops) index
- *     created in migration 049; the planner sees the literal
- *     `productId` constant at plan time and uses the index
- *     immediately.
+ *   - The catalog-group containment search uses the existing
+ *     `catalog_groups_live_state_products_gin` GIN(jsonb_path_ops)
+ *     index already present in production (see
+ *     `select indexdef from pg_indexes where tablename =
+ *     'catalog_groups'`); EXPLAIN shows the planner pick a
+ *     Bitmap Index Scan on it for this exact predicate, so the
+ *     pre-existing seq-scan worry in the original A5 design has
+ *     turned out to be a non-issue. A redundant migration 049
+ *     was drafted to add this index and then reverted once the
+ *     production index was discovered.
  *   - The brand_expiry_overrides lookup is intentionally NOT in
  *     this prefetch: brand resolution prefers
  *     `liveState.brand` (parsed by the JS Zod schema) over the
