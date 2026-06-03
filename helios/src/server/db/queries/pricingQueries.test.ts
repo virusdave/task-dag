@@ -185,6 +185,31 @@ describe('resolvePricingRunScope', () => {
     expect(result.scopedProductIds).toEqual([])
   })
 
+  it('emits "seed_only" mode SQL for explicit_selection scope, passing the seed list through', async () => {
+    const { db, capturedQueryText, capturedValues } = captureQuery()
+
+    const filters: PricingScopePreviewQuery = {
+      brands: [],
+      categories: [],
+      distributorNames: [],
+      includePending: false,
+      packSizes: [],
+      scopeKind: 'explicit_selection',
+      search: undefined,
+      sites: [],
+      stockOnly: false,
+      strict: false,
+      subcategories: [],
+      unitSizes: [],
+    }
+
+    await resolvePricingRunScope(db, filters, { seedProductIds: [101, 202, 303] })
+
+    expect(capturedValues()).toContain('seed_only')
+    expect(capturedValues()).toContainEqual([101, 202, 303])
+    expect(capturedQueryText()).toContain("'seed_only'")
+  })
+
   it('filters catalog products by distributor names from current package snapshots', async () => {
     const { db, capturedQueryText, capturedValues } = captureQuery()
 

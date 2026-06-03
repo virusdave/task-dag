@@ -7,16 +7,20 @@ import {
   useRef,
   useState,
 } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { useRouteLoaderData, useSearchParams } from 'react-router-dom'
 
 import {
+  buildHeliosModulePath,
   CatalogAnalyticsFiltersResponseSchema,
   CatalogAnalyticsPointsResponseSchema,
+  QueuePricingRunAcceptedResponseSchema,
   type CatalogAnalyticsFiltersResponse,
   type CatalogAnalyticsPoint,
   type CatalogAnalyticsPointsResponse,
+  type SessionEnvelope,
 } from '../../../shared/contracts/index.js'
-import { loadJson } from '../../app/fetchJson.js'
+import { loadJson, mutateJson } from '../../app/fetchJson.js'
+import { buildAppPath } from '../../app/paths.js'
 import { CatalogFilterBar, FilterDropdown } from './CatalogFilterBar.js'
 import { ControlsSection } from './ControlsSection.js'
 import {
@@ -2204,6 +2208,90 @@ export function CatalogAnalyticsTab({ embedded }: CatalogAnalyticsTabProps = {})
     return n
   }, [highlightMatcher, points])
 
+  // Distinct product ids in the highlighted subset, used to seed the
+  // "Reprice highlighted" action. `productId` on a scatter point is
+  // the catalog product id as a string (null for inventory rows that
+  // never linked to a mirrored product); we coerce and dedupe so the
+  // server-side allowlist is well-formed. Multiple inventory rows can
+  // share one productId (e.g. same product mirrored at both sites);
+  // the Set collapses them.
+  const highlightedProductIds = useMemo<readonly number[]>(() => {
+    if (!highlightMatcher) return []
+    const ids = new Set<number>()
+    for (const p of points) {
+      if (!highlightMatcher(p)) continue
+      if (p.productId == null) continue
+      const n = Number(p.productId)
+      if (Number.isInteger(n) && n > 0) ids.add(n)
+    }
+    return [...ids].sort((left, right) => left - right)
+  }, [highlightMatcher, points])
+
+  const session = useRouteLoaderData('root') as SessionEnvelope | undefined
+  const canReprice = session?.permissions.canEditProposals === true
+  const [repriceState, setRepriceState] = useState<{
+    status: 'idle' | 'queueing' | 'error'
+    message?: string
+  }>({ status: 'idle' })
+
+  const handleRepriceHighlighted = useCallback(async () => {
+    if (highlightedProductIds.length === 0) return
+    // Open the destination tab synchronously so popup blockers don't
+    // mistake the post-await `window.open` for an unsolicited popup.
+    // We park it on about:blank until the queue mutation resolves.
+    const placeholder = window.open('about:blank', '_blank')
+    setRepriceState({ status: 'queueing' })
+    try {
+      const idsForRequest = [...highlightedProductIds]
+      const response = await mutateJson(
+        '/api/pricing/runs',
+        QueuePricingRunAcceptedResponseSchema,
+        {
+          body: JSON.stringify({
+            brands: [],
+            categories: [],
+            distributorNames: [],
+            explicitProductIds: idsForRequest,
+            includePending: false,
+            packSizes: [],
+            reason: `Reprice highlighted (${idsForRequest.length} product${
+              idsForRequest.length === 1 ? '' : 's'
+            }) from metrics scatter.`,
+            scopeKind: 'explicit_selection',
+            scopeLabel: `Highlighted ${idsForRequest.length} product${
+              idsForRequest.length === 1 ? '' : 's'
+            } from metrics scatter`,
+            sites: ['bronx', 'midtown'],
+            stockOnly: false,
+            strict: false,
+            subcategories: [],
+            unitSizes: [],
+          }),
+          method: 'POST',
+        },
+      )
+      const dest = buildAppPath(
+        buildHeliosModulePath('pricing', `runs/${response.proposalBatchId}`),
+      )
+      if (placeholder && !placeholder.closed) {
+        placeholder.location.href = dest
+      } else {
+        // Popup was blocked or already closed — fall back to opening
+        // a fresh tab. Some browsers block this too; if so the user
+        // can still navigate via the link in the error message.
+        window.open(dest, '_blank')
+      }
+      setRepriceState({ status: 'idle' })
+    } catch (error) {
+      if (placeholder && !placeholder.closed) placeholder.close()
+      setRepriceState({
+        status: 'error',
+        message:
+          error instanceof Error ? error.message : 'Could not queue the pricing run.',
+      })
+    }
+  }, [highlightedProductIds])
+
   const sectionedCards = useMemo(() => groupCardsBySection(DEFAULT_CARDS), [])
 
   const hideTopControls = embedded?.hideTopControls === true
@@ -2429,6 +2517,43 @@ export function CatalogAnalyticsTab({ embedded }: CatalogAnalyticsTabProps = {})
           setFreeText={setHighlightQuery}
           freeTextPlaceholder="brand / strain / size…"
         />
+        {canReprice ? (
+          <div
+            className="catalog-analytics-highlight-actions"
+            style={{
+              alignItems: 'center',
+              display: 'flex',
+              flexWrap: 'wrap',
+              gap: '0.5rem',
+              marginTop: '0.5rem',
+            }}
+          >
+            <button
+              type="button"
+              className="ghost-button"
+              disabled={highlightedProductIds.length === 0 || repriceState.status === 'queueing'}
+              onClick={handleRepriceHighlighted}
+              title={
+                highlightedProductIds.length === 0
+                  ? 'Highlight a non-empty subset to enable a focused pricing run.'
+                  : `Queue a new pricing run for the ${highlightedProductIds.length} highlighted product${
+                      highlightedProductIds.length === 1 ? '' : 's'
+                    } (opens in a new tab).`
+              }
+            >
+              {repriceState.status === 'queueing'
+                ? 'Queueing…'
+                : highlightedProductIds.length > 0
+                  ? `Reprice highlighted (${highlightedProductIds.length})`
+                  : 'Reprice highlighted'}
+            </button>
+            {repriceState.status === 'error' && repriceState.message ? (
+              <span className="error-text" role="alert">
+                {repriceState.message}
+              </span>
+            ) : null}
+          </div>
+        ) : null}
       </ControlsSection>
 
       {error ? (

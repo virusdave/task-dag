@@ -96,6 +96,13 @@ export const PricingNewRunScopeKindSchema = z.enum([
   'family_expansion_from_stock_or_pending',
   'full_catalog',
   'filtered_catalog',
+  // "Reprice highlighted" entrypoints (metrics scatter cards, brand /
+  // distributor detail pages, etc.) post an explicit product-id
+  // allowlist instead of describing a filtered slice of the catalog.
+  // The server treats those ids as a seed set, intersected against
+  // the catalog (so retired / un-mirrored products are silently
+  // dropped) and skips the stock/pending derivation entirely.
+  'explicit_selection',
 ])
 export type PricingNewRunScopeKind = z.infer<typeof PricingNewRunScopeKindSchema>
 
@@ -166,11 +173,23 @@ export const PricingScopePreviewResponseSchema = z.object({
 export type PricingScopePreviewResponse = z.infer<typeof PricingScopePreviewResponseSchema>
 
 export const QueuePricingRunRequestSchema = PricingSelectionFiltersSchema.extend({
+  // For `scopeKind === 'explicit_selection'`, the caller passes an
+  // explicit allowlist of product ids (the "Reprice highlighted" UX
+  // on metrics scatters). MUST be non-empty when explicit_selection
+  // is requested. Empty / omitted for every other scopeKind, which
+  // continues to derive product ids from filters + stock/pending.
+  explicitProductIds: z.array(z.number().int().positive()).default([]),
   forceLiveRefresh: QueryBooleanSchema.default(false),
   reason: z.string().trim().max(500).nullable().optional(),
   scopeKind: PricingNewRunScopeKindSchema.default('family_expansion_from_stock_or_pending'),
   scopeLabel: z.string().trim().max(240).nullable().optional(),
-})
+}).refine(
+  (body) => body.scopeKind !== 'explicit_selection' || body.explicitProductIds.length > 0,
+  {
+    message: 'explicit_selection requires a non-empty explicitProductIds list.',
+    path: ['explicitProductIds'],
+  },
+)
 export type QueuePricingRunRequest = z.infer<typeof QueuePricingRunRequestSchema>
 
 export const QueuePricingRunAcceptedResponseSchema = MutationAcceptedResponseSchema.extend({

@@ -103,9 +103,33 @@ export async function registerPricingRoutes(server: FastifyInstance): Promise<vo
     }
 
     const requestId = randomUUID()
-    const seedProductIds = await resolveSeedProductIds(getPool(), body, { forceRefresh: body.forceLiveRefresh })
-    const resolvedScope = await resolvePricingRunScope(getPool(), body, { seedProductIds })
+    // "Reprice highlighted" path: the explicit product-id allowlist
+    // *is* the seed set. We deliberately bypass the stock/pending
+    // derivation (irrelevant for this path) and the catalog filter
+    // arrays (they would silently shrink the operator's hand-picked
+    // selection). The resolver below seed_only-intersects the seed
+    // against the catalog mirror, so retired or un-mirrored products
+    // drop out without surprising the user.
+    const seedProductIds = body.scopeKind === 'explicit_selection'
+      ? [...new Set(body.explicitProductIds)].sort((left, right) => left - right)
+      : await resolveSeedProductIds(getPool(), body, { forceRefresh: body.forceLiveRefresh })
+    const resolverFilters = body.scopeKind === 'explicit_selection'
+      ? {
+          ...body,
+          brands: [],
+          categories: [],
+          distributorNames: [],
+          packSizes: [],
+          search: undefined,
+          subcategories: [],
+          unitSizes: [],
+        }
+      : body
+    const resolvedScope = await resolvePricingRunScope(getPool(), resolverFilters, { seedProductIds })
     if (resolvedScope.catalogGroupIds.length === 0) {
+      if (body.scopeKind === 'explicit_selection') {
+        throw new Error('None of the highlighted products map to mirrored catalog groups; re-load the scatter and try again.')
+      }
       throw new Error(seedProductIds !== undefined && seedProductIds.length === 0
         ? 'The selected repricing scope does not match any mirrored catalog groups after applying the stock/pending source filters.'
         : 'The selected repricing scope does not match any mirrored catalog groups.')
@@ -167,6 +191,7 @@ export async function registerPricingRoutes(server: FastifyInstance): Promise<vo
           }),
           JSON.stringify({
             catalogGroupIds: resolvedScope.catalogGroupIds,
+            explicitProductIds: body.scopeKind === 'explicit_selection' ? body.explicitProductIds : null,
             forceLiveRefresh: body.forceLiveRefresh,
             resolvedCatalogGroupCount: resolvedScope.catalogGroupIds.length,
             resolvedProductCount: resolvedScope.matchedProductCount,
@@ -205,6 +230,7 @@ export async function registerPricingRoutes(server: FastifyInstance): Promise<vo
         eventType: 'proposal.batch.generation_requested',
         module: 'pricing',
         payload: {
+          explicitProductIdCount: body.scopeKind === 'explicit_selection' ? body.explicitProductIds.length : null,
           forceLiveRefresh: body.forceLiveRefresh,
           proposalBatchId,
           queuedJobId: jobId,
@@ -288,6 +314,10 @@ function buildScopeLabel(body: QueuePricingRunRequest): string {
   const parts: string[] = []
   if (body.scopeKind === 'family_expansion_from_stock_or_pending') {
     parts.push(body.strict ? 'Stock+pending (strict)' : 'Family expansion')
+  }
+  if (body.scopeKind === 'explicit_selection') {
+    const n = body.explicitProductIds.length
+    parts.push(`Highlighted ${n} product${n === 1 ? '' : 's'}`)
   }
   if (body.brands.length > 0) parts.push(body.brands.join(', '))
   if (body.distributorNames.length > 0) parts.push(body.distributorNames.join(', '))

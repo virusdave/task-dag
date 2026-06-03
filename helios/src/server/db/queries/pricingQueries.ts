@@ -139,6 +139,12 @@ function pickScopeMode(filters: PricingScopePreviewQuery, hasSeed: boolean): Sco
   if (filters.scopeKind === 'full_catalog') {
     return hasSeed ? 'seed_only' : 'all'
   }
+  if (filters.scopeKind === 'explicit_selection') {
+    // "Reprice highlighted" — the seed list IS the scope. Always
+    // seed_only; no family expansion (highlighted variants are the
+    // exact things to re-price).
+    return 'seed_only'
+  }
   // filtered_catalog
   return hasSeed ? 'seed_only' : 'all'
 }
