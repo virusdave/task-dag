@@ -102,7 +102,7 @@ async function recordEnqueueAndPatchCache(
   jobId: number | null,
   now: Date,
 ): Promise<void> {
-  await recordEnqueueAndPatchCache(db, taskKey, jobId, now)
+  await recordConfigScheduleEnqueue(db, taskKey, jobId, now)
   markScheduleEnqueuedInCache(taskKey, now)
 }
 
