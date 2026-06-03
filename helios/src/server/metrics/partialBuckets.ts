@@ -9,44 +9,55 @@ import type { MetricQueryArgs, MetricQueryFn, MetricRow } from './types.js'
 
 /**
  * Shared wrapper for "additive over time" metrics opted in via
- * `metric.supports.partialBuckets = true` on their MetricDef. The
- * wrapper performs the partial-bucket projection that's spec'd as:
+ * `metric.supports.partialBuckets = true` on their MetricDef.
+ *
+ * Spec (operator: 2026-06-03):
  *
  *   "When the displayed window doesn't align with the bucket
  *    boundaries, the first/last datapoints are partial. Show a
  *    separate datapoint on each side, connected via a dashed curve
- *    to the main 'full window' buckets. If we have full data for the
- *    truncated window (historical edge), use the real value; if we
- *    don't (right edge crossing 'now'), extrapolate as Y / x where x
- *    is the fraction of the prior bucket already complete at the
- *    same fraction-through-bucket."
+ *    to the main 'full window contents' buckets. The ACTUAL partial
+ *    data point stays on the solid curve. If we have full data for
+ *    the truncated window (historical edge), use the real value; if
+ *    we don't (right edge crossing 'now'), extrapolate linearly via
+ *    the prior bucket's pace: x = priorAtSameFracThrough /
+ *    priorFull, projected = measured / x."
  *
- * Implementation notes:
+ * Implementation:
  *
- *   1. We re-issue the metric's own query with a WIDENED window
- *      `[firstBucketStart, lastBucketEnd_or_now)` so we get the
- *      true full-bucket values for both edges in one round-trip
- *      whenever the natural bucket is observable.
+ *   1. Run the metric's own query exactly as the caller asked
+ *      (`[from, to)`). This gives us the **actual measured** value
+ *      for every bucket including the partial edges — those values
+ *      stay on the row's regular series fields so the solid line
+ *      stays anchored to real data.
  *
- *   2. For the right edge crossing `asOf` (typically `now`), the
- *      bucket is not yet observable in full, so we additionally
- *      issue two extra queries against the prior bucket — one
- *      through the same fraction-of-bucket as `asOf`, one through
- *      the whole prior bucket — and divide them to get x. We then
- *      project the current partial measurement Y to Y / x for every
- *      numeric series on the row.
+ *   2. For each partial edge, additionally compute the projected
+ *      full-natural-bucket value and attach it as
+ *      `row.partialProjected[seriesId]`:
  *
- *   3. Edge rows on the way out are tagged with `partial`,
- *      `partialKind`, and `partialCoverage` per the contract in
+ *        * Left truncated edge → run a one-bucket query for
+ *          `[firstStart, firstEnd)` and use the SQL aggregate.
+ *
+ *        * Right truncated edge (historical, fully observable) →
+ *          run a one-bucket query for `[lastStart, lastEnd)`.
+ *
+ *        * Right extrapolated edge (current "now" inside the
+ *          bucket) → fetch the prior bucket's value at the same
+ *          fraction-through-bucket as `asOf`, fetch the prior
+ *          bucket's full value, divide to get `x`, then project
+ *          `measured / x`. Falls back to uniform pro-rata when
+ *          prior-bucket pace is unavailable/pathological.
+ *
+ *   3. Edge rows are tagged with `partial`, `partialKind`,
+ *      `partialCoverage` per the contract in
  *      `shared/contracts/api/metrics.ts`. Interior rows are untouched.
  *
- *   4. NY-local bucket arithmetic is preserved everywhere — the
- *      helpers in `timeBuckets.ts` already handle DST + the
- *      hour-vs-NY-day convention.
+ *   4. NY-local bucket arithmetic preserved by the helpers in
+ *      `timeBuckets.ts`.
  *
  *   5. Only `hour` / `date` / `week` / `month` aggregations are
  *      eligible. Categorical (`total` / `dow` / `dom` /
- *      `dofortnight`) aggregations short-circuit straight through.
+ *      `dofortnight`) short-circuit straight through.
  */
 
 const TIME_AGGS = new Set<MetricAggregation>(['hour', 'date', 'week', 'month'])
@@ -114,55 +125,31 @@ export async function queryWithPartialBuckets(
   const lastEnd = advanceBucketStart(lastStart, args.agg)
 
   // The "effective right edge" of observation is the earlier of the
-  // requested `to` and `asOf`. A request with `to` in the future (or
-  // exactly at "now"+1ms) is still partial on the right whenever the
-  // natural bucket extends beyond `asOf` — otherwise we'd silently
-  // hand back a full-bucket value that hasn't been observed yet.
+  // requested `to` and `asOf`. A request with `to` in the future is
+  // still partial on the right whenever the natural bucket extends
+  // beyond `asOf` — otherwise we'd silently hand back a full-bucket
+  // value that hasn't been observed yet.
   const observedRightThrough = new Date(
     Math.min(to.getTime(), asOf.getTime()),
   )
   const leftPartial = from.getTime() > firstStart.getTime()
   const rightPartial = observedRightThrough.getTime() < lastEnd.getTime()
 
-  // Aligned window — no edge handling needed; pass through.
+  // Aligned window — no edge handling needed; pass through with no
+  // extra round-trips.
   if (!leftPartial && !rightPartial) {
     return query({ ...args, from, to })
   }
 
-  // Is the natural right-edge bucket fully observable yet? If the
-  // bucket end has already passed, we can fetch real data for the
-  // truncated portion; otherwise the bucket is still being filled
-  // and we'll have to extrapolate.
-  const rightFullAvailable = rightPartial
-    ? lastEnd.getTime() <= asOf.getTime()
-    : true
+  // Base query: actual measured values for every bucket (including
+  // the partial edges, which represent only the [from, firstEnd) /
+  // [lastStart, observedRightThrough) sub-windows). These stay on
+  // the row's regular series fields so the solid time-series line
+  // remains anchored to real measurements.
+  const baseRows = await query({ ...args, from, to: observedRightThrough })
 
-  // Widen the window so the SQL includes the full natural buckets at
-  // both edges. For an unobservable right edge ("now" is mid-bucket)
-  // we don't widen past `asOf` — there's nothing there yet and
-  // some metric SQLs would fail on `to <= from`.
-  const widenedFrom = firstStart
-  const widenedTo =
-    rightPartial && !rightFullAvailable ? observedRightThrough : lastEnd
-
-  const rows = await query({
-    ...args,
-    from: widenedFrom,
-    to: widenedTo,
-  })
-
-  // Reshape into a map keyed on bucket-start iso. Drop any rows the
-  // query produced outside our expected bucket set defensively (it
-  // would mean a bug in the query that we don't want silently
-  // surfaced as a phantom point on the chart).
-  const wanted = new Set(buckets.map((b) => b.toISOString()))
   const byT = new Map<string, MetricRowMut>()
-  for (const r of rows) {
-    if (wanted.has(r.t)) byT.set(r.t, { ...r })
-  }
-  // Ensure every bucket gets a row, even if SQL returned nothing
-  // (e.g. dead site, no data). Empty rows are how the chart shows
-  // "zero" for additive metrics.
+  for (const r of baseRows) byT.set(r.t, { ...r })
   for (const b of buckets) {
     const iso = b.toISOString()
     if (!byT.has(iso)) byT.set(iso, { t: iso })
@@ -175,19 +162,27 @@ export async function queryWithPartialBuckets(
         rightPartial && firstStart.getTime() === lastStart.getTime()
           ? 'both'
           : 'left'
-      // The left edge is always historical (everything before the
-      // operator's `from`); the natural bucket has long since closed
-      // and the value we just fetched IS the real full-bucket total.
       row.partialKind = 'truncated'
       row.partialCoverage = coverage(firstStart, firstEnd, from, firstEnd)
+      // Full natural-bucket value: one extra query [firstStart, firstEnd).
+      const fullRows = await query({
+        ...args,
+        from: firstStart,
+        to: firstEnd,
+      })
+      const fullRow = fullRows.find((r) => r.t === firstStart.toISOString())
+      row.partialProjected = projectionFromRow(fullRow, seriesIds)
+      // Left projected sits at the natural bucket start (= row.t),
+      // so the renderer treats the dashed extension as degenerate
+      // and just outlines the partial-actual marker.
+      row.partialProjectedT = firstStart.toISOString()
     }
   }
 
   if (rightPartial) {
     const row = byT.get(lastStart.toISOString())
     if (row) {
-      // If `partial` was already set to 'both' by the left-side pass
-      // (single-bucket zoom window), keep it; otherwise mark 'right'.
+      // 'both' set by left-side branch above wins; otherwise mark right.
       if (row.partial !== 'both') row.partial = 'right'
       row.partialCoverage = coverage(
         lastStart,
@@ -195,16 +190,21 @@ export async function queryWithPartialBuckets(
         lastStart,
         observedRightThrough,
       )
-
+      const rightFullAvailable = lastEnd.getTime() <= asOf.getTime()
       if (rightFullAvailable) {
-        // Historical right edge: real data, just a window-alignment
-        // artefact.
         if (row.partialKind === undefined) row.partialKind = 'truncated'
+        // Full natural-bucket value: one extra query [lastStart, lastEnd).
+        const fullRows = await query({
+          ...args,
+          from: lastStart,
+          to: lastEnd,
+        })
+        const fullRow = fullRows.find((r) => r.t === lastStart.toISOString())
+        row.partialProjected = projectionFromRow(fullRow, seriesIds)
       } else {
-        // "Now" sits inside this bucket — project from the prior
-        // bucket's pace at the same fraction-of-bucket.
         row.partialKind = 'extrapolated'
-        await extrapolateRightEdgeInPlace({
+        // Pace projection from the prior bucket. See helper below.
+        row.partialProjected = await pacePartialProjection({
           query,
           args,
           row,
@@ -214,6 +214,11 @@ export async function queryWithPartialBuckets(
           observedThrough: observedRightThrough,
         })
       }
+      // Right projected endpoint sits at the natural bucket end
+      // (= next bucket start). The renderer places the projected
+      // dot there and draws the dashed extension from the actual
+      // point at `lastStart` out to this position.
+      row.partialProjectedT = lastEnd.toISOString()
     }
   }
 
@@ -225,9 +230,27 @@ export async function queryWithPartialBuckets(
 // is readonly, so we keep this alias narrow to this file.
 type MetricRowMut = {
   -readonly [K in keyof MetricRow]: MetricRow[K]
+} & {
+  partialProjected?: Record<string, number>
+  partialProjectedT?: string
 }
 
-interface ExtrapolateOpts {
+/** Build a `Record<seriesId, number>` projection map from a one-bucket
+ *  query row. Skips series whose value isn't a finite number. */
+function projectionFromRow(
+  row: MetricRow | undefined,
+  seriesIds: readonly string[],
+): Record<string, number> {
+  const out: Record<string, number> = {}
+  if (!row) return out
+  for (const sid of seriesIds) {
+    const v = row[sid]
+    if (typeof v === 'number' && Number.isFinite(v)) out[sid] = v
+  }
+  return out
+}
+
+interface PaceProjectionOpts {
   readonly query: MetricQueryFn
   readonly args: MetricQueryArgs
   readonly row: MetricRowMut
@@ -238,16 +261,20 @@ interface ExtrapolateOpts {
 }
 
 /**
- * Right-edge extrapolation: for each numeric series on the current
- * partial bucket's row, project the full-bucket total as
- * `measured / x`, where `x = priorBucketAtSameFrac / priorBucketFull`.
+ * Right-edge prior-bucket-pace projection. For each numeric series on
+ * the current partial bucket, compute the projected full-bucket value
+ * as `measured / x`, where
+ *
+ *   x = priorBucketCumulativeAtSameFracThrough / priorBucketFull
  *
  * Falls back to uniform pro-rata (`measured / frac`) when the prior
- * bucket is missing, zero, or its pace denominator drops below
+ * bucket is missing, zero, or its pace denominator is below
  * `MIN_PACE_DENOMINATOR` (e.g. very early in the bucket on a slow
- * day — we'd prefer a sensible over-estimate to a 50× explosion).
+ * day — we'd rather a sensible over-estimate than a 50× explosion).
  */
-async function extrapolateRightEdgeInPlace(opts: ExtrapolateOpts): Promise<void> {
+async function pacePartialProjection(
+  opts: PaceProjectionOpts,
+): Promise<Record<string, number>> {
   const {
     query,
     args,
@@ -257,35 +284,32 @@ async function extrapolateRightEdgeInPlace(opts: ExtrapolateOpts): Promise<void>
     bucketEnd,
     observedThrough,
   } = opts
-
+  const out: Record<string, number> = {}
   const frac = coverage(bucketStart, bucketEnd, bucketStart, observedThrough)
-  // If we've observed essentially none of the current bucket, leave
-  // the measured value alone — extrapolation noise would be infinite.
-  if (frac <= 0) return
-
+  if (frac <= 0) {
+    // Essentially no observation yet — return measured as-is so the
+    // dashed extension is degenerate, rather than a wild projection.
+    for (const sid of seriesIds) {
+      const v = row[sid]
+      if (typeof v === 'number' && Number.isFinite(v)) out[sid] = v
+    }
+    return out
+  }
   const priorStart = previousBucketStart(bucketStart, args.agg)
   const priorEnd = bucketStart
   const priorCut = new Date(
     priorStart.getTime() + frac * (priorEnd.getTime() - priorStart.getTime()),
   )
-
-  // Two queries against the prior bucket: one through the same
-  // fraction-of-bucket as `now`, one through the whole bucket. The
-  // metric's own `query` already returns one row per bucket, keyed
-  // on the bucket-start, so we just look up the prior bucket's iso.
   const [priorPartialRows, priorFullRows] = await Promise.all([
     query({ ...args, from: priorStart, to: priorCut }),
     query({ ...args, from: priorStart, to: priorEnd }),
   ])
-
   const priorIso = priorStart.toISOString()
   const priorPartial = priorPartialRows.find((r) => r.t === priorIso)
   const priorFull = priorFullRows.find((r) => r.t === priorIso)
-
   for (const sid of seriesIds) {
     const measured = row[sid]
-    if (typeof measured !== 'number') continue
-
+    if (typeof measured !== 'number' || !Number.isFinite(measured)) continue
     let denominator: number | null = null
     const pp = priorPartial?.[sid]
     const pf = priorFull?.[sid]
@@ -302,10 +326,9 @@ async function extrapolateRightEdgeInPlace(opts: ExtrapolateOpts): Promise<void>
       !Number.isFinite(denominator) ||
       denominator < MIN_PACE_DENOMINATOR
     ) {
-      // Fallback: uniform pro-rata. Still bounded by
-      // MIN_PACE_DENOMINATOR so a tiny `frac` doesn't blow up.
       denominator = Math.max(frac, MIN_PACE_DENOMINATOR)
     }
-    row[sid] = measured / denominator
+    out[sid] = measured / denominator
   }
+  return out
 }

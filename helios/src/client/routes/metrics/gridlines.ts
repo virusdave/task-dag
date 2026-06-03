@@ -509,6 +509,43 @@ export function crossMarkerPath(x: number, y: number, r = 3): string {
   return `M${(x - r).toFixed(2)},${(y - r).toFixed(2)} L${(x + r).toFixed(2)},${(y + r).toFixed(2)} M${(x + r).toFixed(2)},${(y - r).toFixed(2)} L${(x - r).toFixed(2)},${(y + r).toFixed(2)}`
 }
 
+/**
+ * One Catmull-Rom-derived cubic bezier segment from `curr` to `next`,
+ * using `prev` and `after` as the tangent neighbours (same tension
+ * (0.5) and convention as `smoothedPath`). Returns an SVG `M…C…`
+ * path string.
+ *
+ * Used by the partial-bucket renderer to draw the dashed extension
+ * from the last solid point to the projected full-bucket endpoint
+ * with TANGENT CONTINUITY at the join — the join point uses the
+ * same control vector as `smoothedPath` would have at that vertex,
+ * so visually the dashed line is the smooth continuation of the
+ * solid line, not a straight line tacked on at an angle.
+ *
+ * Pass `curr` for `prev` to make the join a corner (no neighbour on
+ * the left); pass `next` for `after` to flatten the right tangent
+ * (no neighbour beyond the endpoint).
+ */
+export function catmullRomBezierSegment(opts: {
+  prev: { x: number; y: number }
+  curr: { x: number; y: number }
+  next: { x: number; y: number }
+  after: { x: number; y: number }
+}): string {
+  const t = 0.5
+  const { prev, curr, next, after } = opts
+  const c1x = curr.x + ((next.x - prev.x) / 6) * t * 2
+  const c1y = curr.y + ((next.y - prev.y) / 6) * t * 2
+  const c2x = next.x - ((after.x - curr.x) / 6) * t * 2
+  const c2y = next.y - ((after.y - curr.y) / 6) * t * 2
+  return (
+    `M${curr.x.toFixed(2)},${curr.y.toFixed(2)} ` +
+    `C${c1x.toFixed(2)},${c1y.toFixed(2)} ` +
+    `${c2x.toFixed(2)},${c2y.toFixed(2)} ` +
+    `${next.x.toFixed(2)},${next.y.toFixed(2)}`
+  )
+}
+
 export function formatXTick(ms: number, agg: MetricAggregation, opts: { straddlesYear: boolean } = { straddlesYear: false }): string {
   // Render the tick label in **NY wall-clock** — every helios metric
   // is bucketed in America/New_York (see server-side

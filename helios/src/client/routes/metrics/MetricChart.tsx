@@ -22,7 +22,15 @@ import { nyLongDateTime, nyParts, nyShortDateTime } from '../../app/nyTime.js'
 
 import type { CatalogFilterSelection } from './CatalogFilterBar.js'
 import { useTimeAxis, type TimeWindow } from './TimeAxisContext.js'
-import { bucketXTicks, crossMarkerPath, formatXTick, formatYTick, niceYTicks, smoothedPath } from './gridlines.js'
+import {
+  bucketXTicks,
+  catmullRomBezierSegment,
+  crossMarkerPath,
+  formatXTick,
+  formatYTick,
+  niceYTicks,
+  smoothedPath,
+} from './gridlines.js'
 import { computeCompactDomain } from './scatterAutoZoom.js'
 import { ScatterViewToolbar } from './ScatterViewToolbar.js'
 import {
@@ -684,29 +692,41 @@ function ChartSvg(props: ChartSvgProps) {
   // — we only draw the polyline at y1 in that case. For 'stacked' / 'percent'
   // we draw a filled area between y0 and y1.
   const { yMin, yMax, series, datumByMs } = useMemo(() => {
-    type SeriesPoint = { t: number; raw: number; y0: number; y1: number }
-    type PartialPoint = {
-      t: number
-      raw: number
-      y1: number
+    type PartialMeta = {
       side: 'left' | 'right' | 'both'
       kind: 'truncated' | 'extrapolated'
       coverage: number | null
+      /**
+       * Projected full-natural-bucket value for THIS series, plus
+       * the x position where it should be plotted. The renderer
+       * draws a dashed tangent-continuous extension from the solid
+       * point at `(t, raw)` to `(projectedT, projected)` whenever
+       * `projectedT > t` (right edge). When `projectedT === t`
+       * (left edge, projected sits at bucketStart = same x as the
+       * partial actual), the dashed extension is degenerate and
+       * the renderer just outlines the marker.
+       */
+      projected: number | null
+      projectedT: number | null
+    }
+    type SeriesPoint = {
+      t: number
+      raw: number
+      y0: number
+      y1: number
+      /**
+       * Server-marked partial-bucket metadata, populated only for
+       * the leftmost / rightmost row when the displayed window
+       * doesn't align with the natural aggregation boundary. See
+       * `partialBuckets.ts` (server wrapper) for the data shape.
+       */
+      partial?: PartialMeta
     }
     type Series = {
       id: string
       label: string
       colour: string
       points: SeriesPoint[]
-      /**
-       * Partial-bucket edge points (server-marked via
-       * `MetricDatum.partial`). Rendered separately as a dashed
-       * connector + outlined endpoint marker rather than being
-       * woven into the solid line. Only populated in `stackMode ===
-       * 'none'`; stacked / percent modes already convey edge buckets
-       * as smaller columns at the chart edges.
-       */
-      partialPoints: PartialPoint[]
     }
     const empty = {
       yMin: 0,
@@ -750,23 +770,43 @@ function ChartSvg(props: ChartSvgProps) {
         label: s.label,
         colour: s.colour ?? FALLBACK_COLOURS[origIdx % FALLBACK_COLOURS.length]!,
         points: [],
-        partialPoints: [],
       }
     })
 
-    // Server-marked partial-bucket edge rows (gross_sales / net_sales
-    // / first_vs_returning etc. opt in via metric.supports.partialBuckets).
-    // In 'none' mode we route these to a separate per-series array so
-    // the solid line is drawn through interior buckets only; the partial
-    // points get a dashed connector + outlined marker in the SVG block.
-    // In stacked / percent mode we leave them in the main path — the
-    // smaller column at the edge already conveys "partial" visually.
+    // Server-marked partial-bucket edge rows. The ACTUAL measured value
+    // is on the row's regular series field (so the solid line is
+    // anchored to real data); a separate per-series `partialProjected`
+    // map carries the projected full-natural-bucket value, and
+    // `partialProjectedT` carries its x position (lastEnd for right,
+    // firstStart for left). The renderer attaches `partial` metadata
+    // to the corresponding SeriesPoint so the marker / dashed extension
+    // can be drawn in the SVG block below.
     function partialSideOf(d: MetricDatum): 'left' | 'right' | 'both' | null {
       const p = d.partial
       return p === 'left' || p === 'right' || p === 'both' ? p : null
     }
     function partialKindOf(d: MetricDatum): 'truncated' | 'extrapolated' {
       return d.partialKind === 'extrapolated' ? 'extrapolated' : 'truncated'
+    }
+    function partialMetaForSeries(
+      d: MetricDatum,
+      seriesId: string,
+    ): PartialMeta | undefined {
+      const side = partialSideOf(d)
+      if (side === null) return undefined
+      const projected = d.partialProjected?.[seriesId]
+      const projectedT = d.partialProjectedT ? Date.parse(d.partialProjectedT) : null
+      return {
+        side,
+        kind: partialKindOf(d),
+        coverage:
+          typeof d.partialCoverage === 'number' ? d.partialCoverage : null,
+        projected:
+          typeof projected === 'number' && Number.isFinite(projected)
+            ? projected
+            : null,
+        projectedT: projectedT !== null && Number.isFinite(projectedT) ? projectedT : null,
+      }
     }
 
     let lo = Number.POSITIVE_INFINITY
@@ -777,30 +817,22 @@ function ChartSvg(props: ChartSvgProps) {
       // behaviour exactly so 'none' mode is bit-for-bit unchanged).
       for (const d of rows) {
         const t = Date.parse(d.t)
-        const partial = partialSideOf(d as MetricDatum)
         for (let i = 0; i < seriesOut.length; i++) {
           const id = ids[i]!
           const v = (d as MetricDatum)[id]
           if (typeof v !== 'number') continue
           if (v < lo) lo = v
           if (v > hi) hi = v
-          if (partial !== null) {
-            seriesOut[i]!.partialPoints.push({
-              t,
-              raw: v,
-              y1: v,
-              side: partial,
-              kind: partialKindOf(d as MetricDatum),
-              coverage:
-                typeof (d as MetricDatum).partialCoverage === 'number'
-                  ? ((d as MetricDatum).partialCoverage as number)
-                  : null,
-            })
-          } else {
-            // y0/y1 placeholders — only y1 is used; the axis baseline
-            // for y0 is filled in below once lo/hi are known.
-            seriesOut[i]!.points.push({ t, raw: v, y0: 0, y1: v })
+          const partial = partialMetaForSeries(d as MetricDatum, id)
+          // Include partial-projected value in the y-range so the
+          // dashed extension doesn't render off-chart.
+          if (partial?.projected !== null && partial?.projected !== undefined) {
+            if (partial.projected < lo) lo = partial.projected
+            if (partial.projected > hi) hi = partial.projected
           }
+          // y0/y1 placeholders — only y1 is used; the axis baseline
+          // for y0 is filled in below once lo/hi are known.
+          seriesOut[i]!.points.push({ t, raw: v, y0: 0, y1: v, partial })
         }
       }
       if (!isFinite(lo) || !isFinite(hi)) {
@@ -883,60 +915,75 @@ function ChartSvg(props: ChartSvgProps) {
   // where each bucket lives, and an × per point per series would
   // visually swamp the area.
   const seriesPaths = useMemo(() => {
-    type PartialSegment = {
-      d: string
-      marker: {
+    type PartialOverlay = {
+      /** Outlined marker around the partial-actual point on the solid line. */
+      actual: {
         x: number
         y: number
         side: 'left' | 'right' | 'both'
         kind: 'truncated' | 'extrapolated'
         coverage: number | null
       }
+      /**
+       * Tangent-continuous dashed bezier extending from the partial-
+       * actual point to the projected endpoint, plus the projected
+       * endpoint marker. Absent when the projected endpoint sits at
+       * the same x as the actual (left edge — degenerate).
+       */
+      extension: {
+        path: string
+        endX: number
+        endY: number
+        endValue: number
+      } | null
     }
     return series.map((s) => {
-      // Partial-bucket edges are rendered as dashed connectors from
-      // the nearest interior point (or as an unconnected outlined
-      // marker when there is no interior point on that side).
-      const partialSegments: PartialSegment[] = []
-      if (stackMode === 'none' && s.partialPoints.length > 0) {
-        const sortedMain = s.points.slice().sort((a, b) => a.t - b.t)
-        const firstMain = sortedMain[0]
-        const lastMain = sortedMain[sortedMain.length - 1]
-        for (const pp of s.partialPoints) {
-          const px = xScale(pp.t)
-          const py = yScale(pp.y1)
-          const marker = {
-            x: px,
-            y: py,
-            side: pp.side,
-            kind: pp.kind,
-            coverage: pp.coverage,
+      // Partial-bucket edge overlays: for each series point flagged
+      // with `partial`, render an outlined marker on top of the solid
+      // line, and (right edge only) a tangent-continuous dashed
+      // bezier extension to the projected endpoint at `projectedT`.
+      // Tangent continuity is what makes the dashed line look like a
+      // smooth continuation of the Catmull-Rom solid path rather
+      // than a straight tangent-free segment.
+      const sortedPts = s.points.slice().sort((a, b) => a.t - b.t)
+      const partialOverlays: PartialOverlay[] = []
+      if (stackMode === 'none') {
+        for (let i = 0; i < sortedPts.length; i++) {
+          const p = sortedPts[i]!
+          if (!p.partial) continue
+          const ax = xScale(p.t)
+          const ay = yScale(p.y1)
+          const overlay: PartialOverlay = {
+            actual: {
+              x: ax,
+              y: ay,
+              side: p.partial.side,
+              kind: p.partial.kind,
+              coverage: p.partial.coverage,
+            },
+            extension: null,
           }
-          // Anchor: the closest interior point on the "inside" side
-          // of this partial. Left-edge anchors to firstMain, right to
-          // lastMain; 'both' anchors to whichever interior point we
-          // have (zoom windows narrow enough to elide all interiors
-          // just get an unconnected marker).
-          let anchor: { x: number; y: number } | null = null
-          if (pp.side === 'left' && firstMain) {
-            anchor = { x: xScale(firstMain.t), y: yScale(firstMain.y1) }
-          } else if (pp.side === 'right' && lastMain) {
-            anchor = { x: xScale(lastMain.t), y: yScale(lastMain.y1) }
-          } else if (pp.side === 'both') {
-            const fallback = firstMain ?? lastMain
-            if (fallback) {
-              anchor = { x: xScale(fallback.t), y: yScale(fallback.y1) }
-            }
+          // Right-edge dashed extension. Tangent neighbours: the
+          // point before the partial on the solid line provides the
+          // tangent at the actual point; we reflect at the projected
+          // endpoint (no point beyond) so the right tangent flattens
+          // naturally.
+          const projT = p.partial.projectedT
+          const projV = p.partial.projected
+          if (projT !== null && projV !== null && projT > p.t) {
+            const prevPt = i > 0 ? sortedPts[i - 1]! : p
+            const prev = { x: xScale(prevPt.t), y: yScale(prevPt.y1) }
+            const curr = { x: ax, y: ay }
+            const next = { x: xScale(projT), y: yScale(projV) }
+            const path = catmullRomBezierSegment({
+              prev,
+              curr,
+              next,
+              after: next,
+            })
+            overlay.extension = { path, endX: next.x, endY: next.y, endValue: projV }
           }
-          // smoothedPath on two points degenerates to a straight
-          // segment, which is what we want for the dashed connector.
-          const d = anchor
-            ? smoothedPath([
-                { x: anchor.x, y: anchor.y },
-                { x: px, y: py },
-              ])
-            : ''
-          partialSegments.push({ d, marker })
+          partialOverlays.push(overlay)
         }
       }
       if (s.points.length === 0) {
@@ -945,7 +992,7 @@ function ChartSvg(props: ChartSvgProps) {
           d: '',
           markers: [] as Array<{ x: number; y: number }>,
           fill: stackMode !== 'none' as const,
-          partialSegments,
+          partialOverlays,
         }
       }
       const topPts = s.points.map((p) => ({ x: xScale(p.t), y: yScale(p.y1) }))
@@ -955,7 +1002,7 @@ function ChartSvg(props: ChartSvgProps) {
           d: smoothedPath(topPts),
           markers: topPts,
           fill: false as const,
-          partialSegments,
+          partialOverlays,
         }
       }
       const bottomPts = s.points
@@ -975,7 +1022,7 @@ function ChartSvg(props: ChartSvgProps) {
         d: `${top} ${bottomAsLine} Z`,
         markers: topPts,
         fill: true as const,
-        partialSegments,
+        partialOverlays,
       }
     })
   }, [series, xScale, yScale, stackMode])
@@ -1271,7 +1318,7 @@ function ChartSvg(props: ChartSvgProps) {
   const hasData =
     !!response &&
     response.data.length > 0 &&
-    seriesPaths.some((s) => s.d.length > 0 || s.partialSegments.length > 0)
+    seriesPaths.some((s) => s.d.length > 0 || s.partialOverlays.length > 0)
 
   // Snap hover (this chart's own OR external from a sibling card) to the
   // nearest datum bucket for tooltip / crosshair readout.
@@ -1474,44 +1521,71 @@ function ChartSvg(props: ChartSvgProps) {
                   pointerEvents="none"
                 />
               ))}
-              {/* Partial-bucket edge overlays: dashed connector from
-                  the last/first interior point to the partial-edge
-                  point, plus an outlined endpoint marker. Hover-only
-                  tooltip via <title>. See `partialPoints` in the
-                  series-build memo and the `MetricDatum.partial*`
-                  contract for the data shape. */}
-              {s.partialSegments.map((seg, i) => (
+              {/* Partial-bucket overlays. The solid line already
+                  passes through the ACTUAL measured value at the
+                  partial-bucket position; here we add (a) an
+                  outlined ring around that point so the reader can
+                  tell it's a partial-window measurement, and (b)
+                  for right-edge partials, a tangent-continuous
+                  dashed extension to the projected (full-bucket /
+                  pace-extrapolated) endpoint. */}
+              {s.partialOverlays.map((ov, i) => (
                 <g key={`${s.id}-p-${i}`} pointerEvents="none">
-                  {seg.d ? (
-                    <path
-                      d={seg.d}
-                      fill="none"
-                      stroke={s.colour}
-                      strokeWidth={1.5}
-                      strokeDasharray="4 3"
-                      opacity={0.85}
-                    />
+                  {ov.extension ? (
+                    <>
+                      <path
+                        d={ov.extension.path}
+                        fill="none"
+                        stroke={s.colour}
+                        strokeWidth={1.5}
+                        strokeDasharray="4 3"
+                        opacity={0.85}
+                      />
+                      <circle
+                        cx={ov.extension.endX}
+                        cy={ov.extension.endY}
+                        r={3.5}
+                        fill="#fff"
+                        stroke={s.colour}
+                        strokeWidth={1.5}
+                      >
+                        <title>
+                          {ov.actual.kind === 'extrapolated'
+                            ? `Projected full bucket (pace-extrapolated${
+                                ov.actual.coverage !== null
+                                  ? `, ${Math.round(ov.actual.coverage * 100)}% observed`
+                                  : ''
+                              })`
+                            : `Projected full bucket${
+                                ov.actual.coverage !== null
+                                  ? ` (${Math.round(ov.actual.coverage * 100)}% inside window)`
+                                  : ''
+                              }`}
+                        </title>
+                      </circle>
+                    </>
                   ) : null}
+                  {/* Outlined marker on the partial-actual point itself. */}
                   <circle
-                    cx={seg.marker.x}
-                    cy={seg.marker.y}
-                    r={3.5}
+                    cx={ov.actual.x}
+                    cy={ov.actual.y}
+                    r={3}
                     fill="#fff"
                     stroke={s.colour}
                     strokeWidth={1.5}
                   >
                     <title>
-                      {seg.marker.kind === 'extrapolated'
-                        ? `Extrapolated partial bucket${
-                            seg.marker.coverage !== null
-                              ? ` (${Math.round(seg.marker.coverage * 100)}% observed)`
+                      {ov.actual.kind === 'extrapolated'
+                        ? `Partial bucket (in progress${
+                            ov.actual.coverage !== null
+                              ? `, ${Math.round(ov.actual.coverage * 100)}% observed`
                               : ''
-                          }`
-                        : `Partial bucket (window-aligned)${
-                            seg.marker.coverage !== null
-                              ? ` — ${Math.round(seg.marker.coverage * 100)}% inside window`
+                          })`
+                        : `Partial bucket (window-aligned${
+                            ov.actual.coverage !== null
+                              ? `, ${Math.round(ov.actual.coverage * 100)}% inside window`
                               : ''
-                          }`}
+                          })`}
                     </title>
                   </circle>
                 </g>

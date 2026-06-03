@@ -365,6 +365,27 @@ export const MetricDatumSchema = z
      * "37% of bucket observed" caption.
      */
     partialCoverage: z.number().min(0).max(1).optional(),
+    /**
+     * Per-series projected (full-natural-bucket) value for a partial
+     * edge row. For `truncated` rows this is the full-bucket SQL
+     * aggregate; for `extrapolated` rows it's the pace-projected
+     * value `measured / x`. The row's regular series fields still
+     * carry the ACTUAL measured value within the observed sub-window,
+     * so the solid time-series line stays anchored to real data;
+     * the renderer draws a dashed tangent-continuous extension from
+     * the actual point to the projected point at the natural bucket
+     * boundary (lastEnd / firstStart).
+     */
+    partialProjected: z.record(z.string(), z.number()).optional(),
+    /**
+     * ISO timestamp of the x position where the projected endpoint
+     * is plotted. For a right-edge partial this is the natural
+     * bucket end (= next bucket start). For a left-edge partial
+     * it's the natural bucket start (= the row's own `t`), so the
+     * renderer treats the dashed segment as degenerate (no
+     * horizontal extension) and just marks the partial point.
+     */
+    partialProjectedT: z.string().optional(),
   })
   .catchall(z.union([z.number(), z.string(), z.null()]))
 export type MetricDatum = z.infer<typeof MetricDatumSchema>
