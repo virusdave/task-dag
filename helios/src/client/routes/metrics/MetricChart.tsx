@@ -963,17 +963,36 @@ function ChartSvg(props: ChartSvgProps) {
             },
             extension: null,
           }
-          // Right-edge dashed extension. Tangent neighbours: the
-          // point before the partial on the solid line provides the
-          // tangent at the actual point; we reflect at the projected
-          // endpoint (no point beyond) so the right tangent flattens
-          // naturally.
+          // Right-edge dashed extension. Per operator spec
+          // (2026-06-03): the dashed projection FORKS from the
+          // last full-bucket dot (the interior point immediately
+          // before the partial), NOT from the partial-actual dot.
+          // So the last full-bucket dot has two curves diverging
+          // out of it: the existing solid Catmull-Rom segment
+          // continues to the partial-actual point, and a dashed
+          // segment splits off to the projected (full-bucket /
+          // pace-extrapolated) endpoint. Skip the dashed extension
+          // when no interior point precedes the partial (e.g. a
+          // window narrow enough that the partial IS the first
+          // and only point — nothing to fork from).
           const projT = p.partial.projectedT
           const projV = p.partial.projected
-          if (projT !== null && projV !== null && projT > p.t) {
-            const prevPt = i > 0 ? sortedPts[i - 1]! : p
-            const prev = { x: xScale(prevPt.t), y: yScale(prevPt.y1) }
-            const curr = { x: ax, y: ay }
+          if (projT !== null && projV !== null && projT > p.t && i > 0) {
+            const lastFullPt = sortedPts[i - 1]!
+            // Tangent at the fork dot: same convention smoothedPath
+            // uses — neighbour 2 back on the solid side, partial-
+            // actual or projected on the other. We use the point
+            // 2 back from the partial (i.e. 1 back from the fork)
+            // for the prev neighbour so the dashed tangent at the
+            // fork dot blends with the solid curve's incoming
+            // tangent. The far end reflects (no point past the
+            // projected endpoint).
+            const prevFullPt = i >= 2 ? sortedPts[i - 2]! : lastFullPt
+            const prev = { x: xScale(prevFullPt.t), y: yScale(prevFullPt.y1) }
+            const curr = {
+              x: xScale(lastFullPt.t),
+              y: yScale(lastFullPt.y1),
+            }
             const next = { x: xScale(projT), y: yScale(projV) }
             const path = catmullRomBezierSegment({
               prev,
