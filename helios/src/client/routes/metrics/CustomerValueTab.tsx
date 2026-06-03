@@ -15,6 +15,7 @@ import {
   type PurchaseCountBucket,
 } from '../../../shared/contracts/index.js'
 import { loadJson } from '../../app/fetchJson.js'
+import { nyIsoDate, nyMonthDaySlash } from '../../app/nyTime.js'
 
 import { ControlsSection } from './ControlsSection.js'
 import { formatYTick, niceYTicks } from './gridlines.js'
@@ -1430,17 +1431,18 @@ function niceXTicksLocal(min: number, max: number): number[] {
 function fmtCohortLabel(iso: string): string {
   // e.g. 2025-W47 (Mon 2025-11-17) for weekly, 2025-11 for monthly.
   // We don't know granularity from the row itself, so we format the
-  // ISO date in a human-friendly way that works for both.
+  // ISO date in a human-friendly way that works for both. NY-local
+  // (canon: "Always use NY timezones for aggregate and display") so
+  // a cohort whose acquisition Monday is Nov 17 NY doesn't drift to
+  // Nov 16 / Nov 18 depending on the browser timezone.
   const d = new Date(iso)
   if (Number.isNaN(d.getTime())) return iso
-  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(
-    d.getUTCDate(),
-  ).padStart(2, '0')}`
+  return nyIsoDate(d.getTime())
 }
 function fmtCohortShortLabel(iso: string): string {
   const d = new Date(iso)
   if (Number.isNaN(d.getTime())) return iso
-  return `${String(d.getUTCMonth() + 1).padStart(2, '0')}/${String(d.getUTCDate()).padStart(2, '0')}`
+  return nyMonthDaySlash(d.getTime())
 }
 
 // =========================== Generic bar chart =============================

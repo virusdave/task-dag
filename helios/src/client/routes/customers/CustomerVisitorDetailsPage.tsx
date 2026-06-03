@@ -854,7 +854,12 @@ function renderPopup(props: Record<string, unknown>): string {
   if (props.lastSeenAt && typeof props.lastSeenAt === 'string') {
     lines.push(
       `<div class="cd-popup-meta subtle-copy">last seen ${escapeHtml(
-        new Date(props.lastSeenAt).toLocaleString(undefined, { hour12: false }),
+        // NY-local — see formatTime() below for the rationale (canon
+        // rule: always render in America/New_York).
+        new Date(props.lastSeenAt).toLocaleString('en-US', {
+          hour12: false,
+          timeZone: NY_TZ_DISPLAY,
+        }),
       )}</div>`,
     )
   }
@@ -881,10 +886,20 @@ function formatName(scan: CustomerVisitorAnchorScan): string {
   return parts.length === 0 ? `Visitor #${scan.id}` : parts.join(' ')
 }
 
+// Display formatters below render in **America/New_York** per the
+// AGENTS.md canon rule ("Always use NY timezones for aggregate and
+// display unless instructed otherwise"). Every customer visit /
+// purchase happens at a NYC store, so the operator always expects to
+// see times in NY wall-clock regardless of their browser timezone.
+const NY_TZ_DISPLAY = 'America/New_York'
+
 function formatTime(iso: string | null | undefined): string {
   if (!iso) return '—'
   try {
-    return new Date(iso).toLocaleString(undefined, { hour12: false })
+    return new Date(iso).toLocaleString('en-US', {
+      hour12: false,
+      timeZone: NY_TZ_DISPLAY,
+    })
   } catch {
     return iso
   }
@@ -893,7 +908,7 @@ function formatTime(iso: string | null | undefined): string {
 function formatDate(iso: string | null | undefined): string {
   if (!iso) return '—'
   try {
-    return new Date(iso).toLocaleDateString()
+    return new Date(iso).toLocaleDateString('en-US', { timeZone: NY_TZ_DISPLAY })
   } catch {
     return iso
   }

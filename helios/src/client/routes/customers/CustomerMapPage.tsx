@@ -414,25 +414,40 @@ function tickToDate(tick: number, win: SliderRange): Date {
   )
 }
 
+// Display formatters below are pinned to **America/New_York** per
+// the AGENTS.md canon rule ("Always use NY timezones for aggregate
+// and display unless instructed otherwise"). Operators reason about
+// every check-in / order in NY wall-clock; rendering in the
+// browser's local timezone produced confusing 1- or 3-hour skews for
+// anyone whose laptop wasn't set to ET.
+const NY_TZ_LOCAL = 'America/New_York'
+
 function formatTime(iso: string | null): string {
   if (iso === null) return '—'
   try {
-    return new Date(iso).toLocaleString(undefined, { hour12: false })
+    return new Date(iso).toLocaleString('en-US', { hour12: false, timeZone: NY_TZ_LOCAL })
   } catch {
     return iso
   }
 }
 
 function formatShortRange(after: Date, before: Date): string {
-  const sameDay =
-    after.toDateString() === before.toDateString()
+  // "Same day" must also be computed in NY wall-clock — otherwise a
+  // shift that crosses NY midnight but stays on the same UTC day
+  // (or vice versa) would render with the wrong layout.
+  const fmtDay = (d: Date) =>
+    d.toLocaleDateString('en-US', { timeZone: NY_TZ_LOCAL })
+  const sameDay = fmtDay(after) === fmtDay(before)
+  const dateOpts = { month: 'short', day: 'numeric', timeZone: NY_TZ_LOCAL } as const
+  const timeOpts = { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: NY_TZ_LOCAL } as const
   if (sameDay) {
-    return `${after.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })} ` +
-      `${after.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', hour12: false })} – ` +
-      `${before.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', hour12: false })}`
+    return `${after.toLocaleDateString('en-US', dateOpts)} ` +
+      `${after.toLocaleTimeString('en-US', timeOpts)} – ` +
+      `${before.toLocaleTimeString('en-US', timeOpts)}`
   }
-  return `${after.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false })} – ` +
-    `${before.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false })}`
+  const fullOpts = { ...dateOpts, ...timeOpts }
+  return `${after.toLocaleString('en-US', fullOpts)} – ` +
+    `${before.toLocaleString('en-US', fullOpts)}`
 }
 
 /**
@@ -1991,8 +2006,8 @@ export function CustomerMapPage(): JSX.Element {
               <strong>{rangeLabel}</strong>
             </span>
             <span className="cm-range-sub subtle-copy">
-              window: {sliderWindow.windowStart.toLocaleDateString()} →{' '}
-              {sliderWindow.windowEnd.toLocaleDateString()}
+              window: {sliderWindow.windowStart.toLocaleDateString('en-US', { timeZone: NY_TZ_LOCAL })} →{' '}
+              {sliderWindow.windowEnd.toLocaleDateString('en-US', { timeZone: NY_TZ_LOCAL })}
             </span>
           </div>
           <div className="cm-range-sliders">

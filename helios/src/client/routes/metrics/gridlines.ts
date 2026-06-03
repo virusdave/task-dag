@@ -1,4 +1,14 @@
 import type { MetricAggregation } from '../../../shared/contracts/index.js'
+import {
+  nyAddMonthsFromFirst,
+  nyFloorToDay,
+  nyFloorToHour,
+  nyFloorToMonth,
+  nyFloorToWeek,
+  nyHourTick,
+  nyMonthDayTick,
+  nyMonthYearTick,
+} from '../../app/nyTime.js'
 
 // ---------------------------------------------------------------------------
 // Gridline tick generation for the metric chart.
@@ -379,21 +389,19 @@ function walkFixedStep(
 }
 
 function floorToAlign(ms: number, align: 'hour' | 'date' | 'week'): number {
-  const d = new Date(ms)
-  const y = d.getUTCFullYear()
-  const mo = d.getUTCMonth()
-  const day = d.getUTCDate()
-  const hour = d.getUTCHours()
+  // NY-local snapping (canon: "Always use NY timezones for aggregate
+  // and display"). Day / week tick boundaries snap to NY midnight so
+  // they align with the server's NY-bucketed data; hour boundaries
+  // snap to top-of-hour, which for NY's whole-hour DST offset is the
+  // same UTC instant either way but we route through nyFloorToHour
+  // for consistency.
   switch (align) {
     case 'hour':
-      return Date.UTC(y, mo, day, hour)
+      return nyFloorToHour(ms)
     case 'date':
-      return Date.UTC(y, mo, day)
-    case 'week': {
-      // ISO week: Monday=0..Sunday=6 (JS getUTCDay: Sun=0..Sat=6).
-      const dow = (d.getUTCDay() + 6) % 7
-      return Date.UTC(y, mo, day - dow)
-    }
+      return nyFloorToDay(ms)
+    case 'week':
+      return nyFloorToWeek(ms)
   }
 }
 
@@ -420,32 +428,20 @@ function walkCalendarMonths(fromMs: number, toMs: number, targetCount: number): 
   if (!matched) {
     stepMonths = Math.ceil(desiredStepMonths / 12) * 12
   }
-  const from = new Date(fromMs)
-  // Snap to first-of-month UTC at or before fromMs.
-  let cursorY = from.getUTCFullYear()
-  let cursorM = from.getUTCMonth()
-  let cursorMs = Date.UTC(cursorY, cursorM, 1)
-  if (cursorMs < fromMs) {
-    // Advance one month at a time until inside the window.
-    while (cursorMs < fromMs) {
-      cursorM += 1
-      if (cursorM >= 12) {
-        cursorY += 1
-        cursorM = 0
-      }
-      cursorMs = Date.UTC(cursorY, cursorM, 1)
-    }
+  // Snap to first-of-month NY-local at or before fromMs (canon: NY
+  // wall-clock for every metrics boundary). nyFloorToMonth returns
+  // the UTC instant of NY midnight on the 1st of the containing
+  // month; nyAddMonthsFromFirst advances one or more months while
+  // staying anchored to NY first-of-month midnight (DST-safe).
+  let cursorMs = nyFloorToMonth(fromMs)
+  while (cursorMs < fromMs) {
+    cursorMs = nyAddMonthsFromFirst(cursorMs, 1)
   }
   const out: number[] = []
   const CAP = 96
   while (cursorMs <= toMs && out.length < CAP) {
     out.push(cursorMs)
-    cursorM += stepMonths
-    while (cursorM >= 12) {
-      cursorY += 1
-      cursorM -= 12
-    }
-    cursorMs = Date.UTC(cursorY, cursorM, 1)
+    cursorMs = nyAddMonthsFromFirst(cursorMs, stepMonths)
   }
   return out
 }
@@ -514,30 +510,26 @@ export function crossMarkerPath(x: number, y: number, r = 3): string {
 }
 
 export function formatXTick(ms: number, agg: MetricAggregation, opts: { straddlesYear: boolean } = { straddlesYear: false }): string {
-  const d = new Date(ms)
-  const pad = (n: number) => String(n).padStart(2, '0')
-  const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
-  // Bucket boundaries are computed and stored in UTC (see timeBuckets.ts).
-  // We render the tick label in UTC too — otherwise on a server running in
-  // a non-UTC timezone (the helios prod box is America/Panama, UTC-05:00),
-  // a "May 18" UTC bucket would render as "May 17" local, mis-aligning the
-  // tick label from the data underneath it.
+  // Render the tick label in **NY wall-clock** — every helios metric
+  // is bucketed in America/New_York (see server-side
+  // bucketSelectSql.ts + timeBuckets.ts), so the label must match.
+  // Using getUTC* here previously caused hour-grain labels to read
+  // 4–5 hours ahead of the underlying data and could shift day-grain
+  // labels by one day for clients running outside NY.
   switch (agg) {
     case 'hour':
-      return `${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:00`
+      return nyHourTick(ms)
     case 'date':
     case 'week':
-      return opts.straddlesYear
-        ? `${d.getUTCFullYear()} ${monthNames[d.getUTCMonth()]} ${pad(d.getUTCDate())}`
-        : `${monthNames[d.getUTCMonth()]} ${pad(d.getUTCDate())}`
+      return nyMonthDayTick(ms, opts.straddlesYear)
     case 'month':
-      return `${monthNames[d.getUTCMonth()]} ${d.getUTCFullYear()}`
+      return nyMonthYearTick(ms)
     case 'total':
     case 'dow':
     case 'dom':
     case 'dofortnight':
       // Categorical: caller shouldn't be rendering x ticks at all, but
       // return something sensible if they do.
-      return `${monthNames[d.getUTCMonth()]} ${pad(d.getUTCDate())}`
+      return nyMonthDayTick(ms, false)
   }
 }

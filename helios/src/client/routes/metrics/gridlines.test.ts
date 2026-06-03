@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
+import { nyParts } from '../../app/nyTime.js'
+
 import {
   bucketXTicks,
   crossMarkerPath,
@@ -257,7 +259,12 @@ describe('formatAxisValue (v1.4 V4\'1 — kind-aware tick formatter)', () => {
 })
 
 describe('bucketXTicks', () => {
-  const from = Date.UTC(2026, 4, 1) // 2026-05-01 UTC
+  // Canonical "from" is NY-midnight on 2026-05-01 (= 04:00 UTC during
+  // EDT). All date / week / month tick assertions are NY-local per
+  // the AGENTS.md canon rule, so the test fixture has to start at a
+  // real NY-midnight instant — using a UTC midnight would float by
+  // 4 hours into the previous NY day and skew the tick walker.
+  const from = Date.UTC(2026, 4, 1, 4) // 2026-05-01 00:00 America/New_York (EDT)
   const oneDay = 24 * 60 * 60 * 1000
 
   it('places one tick per day for a 7-day visible window at agg=date', () => {
@@ -289,9 +296,12 @@ describe('bucketXTicks', () => {
     }
   })
 
-  it('aligns week ticks to ISO Monday', () => {
-    // Visible window spans 4 weeks; expect every tick to be a Monday UTC.
-    const start = Date.UTC(2026, 4, 4) // 2026-05-04 is a Monday
+  it('aligns week ticks to ISO Monday — NY local', () => {
+    // Visible window spans 4 weeks; expect every tick to be a Monday in
+    // NY wall-clock (canon: NY for aggregate + display). The UTC weekday
+    // of a NY-Monday-midnight instant is still Monday at 04:00 / 05:00,
+    // but we assert via nyParts to make the intent unambiguous.
+    const start = Date.UTC(2026, 4, 4, 4) // 2026-05-04 NY midnight = 04:00 UTC (EDT)
     const ticks = bucketXTicks({
       fromMs: start,
       toMs: start + 28 * oneDay,
@@ -299,13 +309,15 @@ describe('bucketXTicks', () => {
       targetCount: 4,
     })
     for (const t of ticks) {
-      const d = new Date(t)
-      // JS getUTCDay: Sun=0..Sat=6. Monday = 1.
-      expect(d.getUTCDay(), `tick ${d.toISOString()} not a Monday`).toBe(1)
+      const p = nyParts(t)
+      // NY weekday: Sun=0..Sat=6. Monday = 1.
+      expect(p.weekday, `tick ${new Date(t).toISOString()} not a NY Monday`).toBe(1)
+      // And the NY hour is midnight.
+      expect(p.hour, `tick ${new Date(t).toISOString()} not NY midnight`).toBe(0)
     }
   })
 
-  it('aligns month ticks to first-of-month', () => {
+  it('aligns month ticks to first-of-month — NY local', () => {
     const ticks = bucketXTicks({
       fromMs: Date.UTC(2025, 11, 15), // mid-Dec 2025
       toMs: Date.UTC(2026, 5, 15), // mid-Jun 2026
@@ -313,8 +325,9 @@ describe('bucketXTicks', () => {
       targetCount: 5,
     })
     for (const t of ticks) {
-      const d = new Date(t)
-      expect(d.getUTCDate(), `tick ${d.toISOString()} not first-of-month`).toBe(1)
+      const p = nyParts(t)
+      expect(p.day, `tick ${new Date(t).toISOString()} not NY first-of-month`).toBe(1)
+      expect(p.hour, `tick ${new Date(t).toISOString()} not NY midnight`).toBe(0)
     }
   })
 
@@ -346,24 +359,39 @@ describe('bucketXTicks', () => {
 })
 
 describe('formatXTick', () => {
-  it('emits MMM DD for date / week ticks within a single year', () => {
-    const t = Date.UTC(2026, 4, 18)
+  // All assertions are in **America/New_York** per the canon rule.
+  // Test fixtures use UTC instants that correspond to the asserted
+  // NY wall-clock.
+
+  it('emits MMM DD for date / week ticks within a single year (NY-local)', () => {
+    const t = Date.UTC(2026, 4, 18, 4) // 2026-05-18 00:00 NY (EDT)
     expect(formatXTick(t, 'date')).toMatch(/May 18/)
     expect(formatXTick(t, 'week')).toMatch(/May 18/)
   })
 
-  it('emits YYYY MMM DD when the visible window straddles a year boundary', () => {
-    const t = Date.UTC(2026, 0, 4)
+  it('emits YYYY MMM DD when the visible window straddles a year boundary (NY-local)', () => {
+    const t = Date.UTC(2026, 0, 4, 5) // 2026-01-04 00:00 NY (EST)
     expect(formatXTick(t, 'date', { straddlesYear: true })).toBe('2026 Jan 04')
   })
 
-  it('emits MMM YYYY for month ticks', () => {
-    expect(formatXTick(Date.UTC(2026, 4, 1), 'month')).toBe('May 2026')
+  it('emits MMM YYYY for month ticks (NY-local)', () => {
+    expect(formatXTick(Date.UTC(2026, 4, 1, 4), 'month')).toBe('May 2026')
   })
 
-  it('emits MM-DD HH:00 in UTC for hour ticks', () => {
+  it('emits MM-DD HH:00 in NY-local for hour ticks', () => {
+    // 2026-05-18 14:00 UTC = 2026-05-18 10:00 America/New_York (EDT).
+    // The operator expects to see the NY wall-clock hour, NOT the UTC
+    // hour — that's the bug this entire NY-time refactor exists to
+    // squash.
     const t = Date.UTC(2026, 4, 18, 14)
-    expect(formatXTick(t, 'hour')).toBe('05-18 14:00')
+    expect(formatXTick(t, 'hour')).toBe('05-18 10:00')
+  })
+
+  it('treats DST boundary correctly: same UTC offset works in both EDT and EST', () => {
+    // March 1 NY (EST, UTC-5) = 05:00 UTC for NY midnight.
+    expect(formatXTick(Date.UTC(2026, 2, 1, 5), 'date')).toMatch(/Mar 01/)
+    // June 1 NY (EDT, UTC-4) = 04:00 UTC for NY midnight.
+    expect(formatXTick(Date.UTC(2026, 5, 1, 4), 'date')).toMatch(/Jun 01/)
   })
 })
 

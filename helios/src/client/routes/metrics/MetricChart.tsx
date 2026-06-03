@@ -18,6 +18,7 @@ import {
   type MetricQueryResponse,
 } from '../../../shared/contracts/index.js'
 import { loadJson, mutateJson } from '../../app/fetchJson.js'
+import { nyLongDateTime, nyParts, nyShortDateTime } from '../../app/nyTime.js'
 
 import type { CatalogFilterSelection } from './CatalogFilterBar.js'
 import { useTimeAxis, type TimeWindow } from './TimeAxisContext.js'
@@ -883,8 +884,14 @@ function ChartSvg(props: ChartSvgProps) {
 
   const xTickStraddlesYear = useMemo(() => {
     if (xTicks.length === 0) return false
-    const fromY = new Date(window.fromMs).getUTCFullYear()
-    const toY = new Date(window.toMs).getUTCFullYear()
+    // NY-calendar year — a window like Dec 28 NY → Jan 3 NY straddles
+    // the year boundary in NY even though Dec 31 23:00 NY is already
+    // Jan 1 in UTC. Using getUTCFullYear here previously caused the
+    // tick formatter to omit the year on windows the operator
+    // perceives as straddling, and add it spuriously on windows that
+    // don't straddle.
+    const fromY = nyParts(window.fromMs).y
+    const toY = nyParts(window.toMs).y
     return fromY !== toY
   }, [xTicks, window.fromMs, window.toMs])
 
@@ -2313,20 +2320,16 @@ function compactNumber(v: number): string {
   return COMPACT_FMT.format(v)
 }
 
-// Hover-readout / range-label timestamps are deliberately UTC so they
-// agree with the X-axis tick labels (gridlines.ts formats ticks in UTC
-// too). Mixing local-time tooltips with UTC ticks confuses bucket
-// interpretation around midnight / week boundaries.
+// Hover-readout / range-label timestamps render in **NY wall-clock**
+// (canon: "Always use NY timezones for aggregate and display"). This
+// matches the X-axis tick labels (gridlines.ts → formatXTick) and the
+// server-side NY-bucketed data. Previously these were rendered in
+// UTC, which caused the hover readout to read 4–5 hours ahead of the
+// register-tape time the operator expects to see.
 function shortDate(ms: number): string {
-  const d = new Date(ms)
-  const pad = (n: number) => String(n).padStart(2, '0')
-  return `${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`
+  return nyShortDateTime(ms)
 }
 
 function shortDateLong(ms: number): string {
-  const d = new Date(ms)
-  const pad = (n: number) => String(n).padStart(2, '0')
-  return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(
-    d.getUTCMinutes(),
-  )}`
+  return nyLongDateTime(ms)
 }

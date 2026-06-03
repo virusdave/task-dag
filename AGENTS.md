@@ -1,5 +1,55 @@
 # Agent instructions for the `automation` repo
 
+## Always use NY timezone (America/New_York) for aggregate and display
+
+Every store is in NYC, every transaction happens in NY wall-clock, and
+every operator reasons about "today" / "this week" / "this hour" in NY
+local time. Therefore — **unless the user explicitly says otherwise** —
+**all aggregate bucketing AND all UI display must be in `America/New_York`**.
+
+This applies everywhere, not just metrics: chart tooltips, X-axis tick
+labels, scatter readouts, table date columns, popup "last seen at"
+strings, log timestamps surfaced in the UI, day/week/month roll-ups in
+SQL, cohort keys, anything.
+
+Concrete rules:
+
+- **Server-side SQL**: bucket / `date_trunc` against `pay_time AT TIME
+  ZONE 'America/New_York'`, casting back to `timestamptz` if you need
+  to round-trip. The canonical examples live in
+  `helios/src/server/metrics/timeBuckets.ts` and
+  `helios/src/server/metrics/bucketSelectSql.ts`.
+- **Client-side display**: NEVER use `getUTCHours()` / `getUTCDate()`,
+  NEVER use a timezone-less `toLocaleString()`. Use the helpers in
+  `helios/src/client/app/nyTime.ts` (`nyShortDateTime`, `nyLongDateTime`,
+  `nyHourTick`, `nyMonthDayTick`, `nyMonthYearTick`, `nyIsoDate`,
+  `nyParts`, `nyFloorToDay`, `nyFloorToWeek`, `nyFloorToMonth`,
+  `nyFloorToHour`, `nyAddDays`, `nyAddMonthsFromFirst`). They all
+  pin to `Intl.DateTimeFormat` with `timeZone: 'America/New_York'`
+  so EST↔EDT transitions Just Work via the browser's bundled ICU.
+- **One-off display code** that genuinely cannot pull in `nyTime.ts`
+  (e.g. a stand-alone script outputting an HTML report) must still
+  explicitly pass `{ timeZone: 'America/New_York' }` to every
+  `toLocaleString` / `toLocaleDateString` / `toLocaleTimeString`
+  call, plus an explicit locale (`'en-US'`) so output is deterministic
+  across runners.
+- **Browser-local time is wrong by default**. The operator's laptop
+  might be on PT, CT, or even outside the US. Pinning to NY makes
+  every cell in the UI show the same value the register tape would
+  print, regardless of who's looking at the screen.
+
+If you find UTC-based display or browser-local-time display anywhere
+in the codebase, fix it as part of whatever you're already doing
+there. Don't leave broken NY-vs-UTC inconsistencies behind because
+"that wasn't in scope".
+
+The narrow exception: the **hour-grain server buckets** in
+`timeBuckets.ts` are deliberately UTC top-of-hour to disambiguate the
+fall-back duplicate `01:00` NY hour. The display layer still renders
+the resulting UTC hour as its NY wall-clock equivalent via
+`nyHourTick` / `nyShortDateTime`. That's the only place "UTC for
+aggregate" is allowed, and it ships with a comment explaining why.
+
 ## NEVER self-SSH. Run commands directly on the host you're already on.
 
 **You are almost always running directly on `vps-nixos-3` (the helios
