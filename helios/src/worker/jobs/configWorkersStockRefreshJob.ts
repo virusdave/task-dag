@@ -13,6 +13,14 @@ import type { JobHandlerContext } from '../runtime/jobRegistry.js'
 
 const STOCK_INVENTORY_PAGE_SIZE = 200
 
+// Maximum number of rows to send per bulk INSERT / UPDATE round-trip
+// in `persistSnapshotAndDiff`. The whole point of this job is to
+// turn an O(N) per-row-transaction loop into a handful of bulk
+// statements; chunking at 500 keeps individual jsonb_to_recordset
+// payloads bounded (well under pg's protocol limits) without giving
+// up the per-poll round-trip-count win.
+const BULK_CHUNK_SIZE = 500
+
 const StockInventoryItemSchema = z
   .object({
     availableQty: z.coerce.number().nullable().optional(),
@@ -404,12 +412,45 @@ async function persistSnapshotAndDiff(input: {
   const rows = [...rowsByProductId.values()]
   const inStockRows = rows.filter((row) => row.isOnStock)
 
+  // ============================================================================
+  // Bulk-upsert path (db-cost-reduction A2, virusdave/top-level#11).
+  //
+  // The previous implementation iterated `rows` and issued one
+  // INSERT-ON-CONFLICT per variant against `stock_variant_state`, plus
+  // one SELECT-then-INSERT per transitioning variant against
+  // `pending_litalerts_refresh_queue`, plus one upsert per brand
+  // against `landingpage_brand_site_presence`. On the 5-minute
+  // per-dealer cadence with ~thousands of variants per site, that's
+  // measured in 10⁴+ extra DB round-trips per day.
+  //
+  // The new path:
+  //
+  //   (1) chunked bulk INSERT to `stock_snapshot_items` (unchanged
+  //       in spirit; just chunked at BULK_CHUNK_SIZE so a giant site
+  //       doesn't build one O(N) parameter list).
+  //   (2) one SELECT to load existing (product_id, is_on_stock) for
+  //       this site (unchanged).
+  //   (3) one bulk INSERT … SELECT FROM jsonb_to_recordset(...) ON
+  //       CONFLICT DO UPDATE against `stock_variant_state`, chunked
+  //       at BULK_CHUNK_SIZE.
+  //   (4) one bulk INSERT … SELECT FROM jsonb_to_recordset(...) ON
+  //       CONFLICT DO NOTHING against `pending_litalerts_refresh_queue`
+  //       — the partial unique index makes the existence-check
+  //       SELECT redundant, and RETURNING gives us the accurate
+  //       newly-enqueued count.
+  //   (5) one bulk INSERT … SELECT FROM jsonb_to_recordset(...) ON
+  //       CONFLICT DO UPDATE against `landingpage_brand_site_presence`.
+  //
+  // All inside the single per-dealer transaction we already opened.
+  // ============================================================================
   return withTransaction(async (db) => {
-    if (rows.length > 0) {
+    // (1) stock_snapshot_items — bulk insert, chunked.
+    for (let i = 0; i < rows.length; i += BULK_CHUNK_SIZE) {
+      const chunk = rows.slice(i, i + BULK_CHUNK_SIZE)
       const values: string[] = []
       const args: unknown[] = []
       let argIndex = 1
-      for (const row of rows) {
+      for (const row of chunk) {
         values.push(`($${argIndex++}, $${argIndex++}, $${argIndex++}, $${argIndex++}, $${argIndex++}, $${argIndex++})`)
         args.push(snapshotId, row.productId, row.isOnStock, row.quantity, row.packageCount, row.productName)
       }
@@ -423,6 +464,7 @@ async function persistSnapshotAndDiff(input: {
       )
     }
 
+    // (2) Load prior per-variant state in one read.
     const existingResult = await db.query<ExistingStateRow>(
       `
         select product_id, is_on_stock
@@ -436,6 +478,9 @@ async function persistSnapshotAndDiff(input: {
       existingByProductId.set(row.product_id, row.is_on_stock)
     }
 
+    // Compute transitions in JS so the bulk INSERT below stays a pure
+    // upsert; transition counts and the "variants transitioned to
+    // in-stock" list are derived from the (prior, current) diff.
     let newlyInStockVariantCount = 0
     let newlyOutOfStockVariantCount = 0
     const variantsTransitionedToInStock: number[] = []
@@ -443,25 +488,52 @@ async function persistSnapshotAndDiff(input: {
     const observedAt = new Date()
     for (const row of rows) {
       const previousIsOnStock = existingByProductId.get(row.productId) ?? null
-      const transitionedToInStock = row.isOnStock && previousIsOnStock !== true
-      const transitionedToOutOfStock = !row.isOnStock && previousIsOnStock === true
-      if (transitionedToInStock) {
+      if (row.isOnStock && previousIsOnStock !== true) {
         newlyInStockVariantCount += 1
         variantsTransitionedToInStock.push(row.productId)
       }
-      if (transitionedToOutOfStock) {
+      if (!row.isOnStock && previousIsOnStock === true) {
         newlyOutOfStockVariantCount += 1
       }
+    }
 
+    // (3) stock_variant_state — bulk upsert via jsonb_to_recordset.
+    // Matches the previous per-row CASE semantics exactly: when the
+    // observed row is in stock we stamp last_in_stock_at; otherwise we
+    // stamp last_out_of_stock_at. The COALESCE in the ON CONFLICT
+    // clauses preserves the older stamp for the other column, same as
+    // before.
+    for (let i = 0; i < rows.length; i += BULK_CHUNK_SIZE) {
+      const chunk = rows.slice(i, i + BULK_CHUNK_SIZE)
+      const payload = chunk.map((row) => ({
+        product_id: row.productId,
+        is_on_stock: row.isOnStock,
+        quantity: row.quantity,
+        metrc_tags: row.metrcTags,
+      }))
       await db.query(
         `
           insert into stock_variant_state (
             site_dealer_id, product_id, is_on_stock, quantity, metrc_tags_json,
             last_snapshot_id, last_observed_at,
             last_in_stock_at, last_out_of_stock_at
-          ) values ($1, $2, $3, $4, $7::jsonb, $5, $6::timestamptz,
-            case when $3 then $6::timestamptz else null end,
-            case when $3 then null else $6::timestamptz end)
+          )
+          select
+            $1::bigint,
+            x.product_id,
+            x.is_on_stock,
+            x.quantity,
+            x.metrc_tags::jsonb,
+            $2::bigint,
+            $3::timestamptz,
+            case when x.is_on_stock then $3::timestamptz else null end,
+            case when x.is_on_stock then null else $3::timestamptz end
+          from jsonb_to_recordset($4::jsonb) as x(
+            product_id  bigint,
+            is_on_stock boolean,
+            quantity    numeric,
+            metrc_tags  jsonb
+          )
           on conflict (site_dealer_id, product_id) do update
             set is_on_stock = excluded.is_on_stock,
                 quantity = excluded.quantity,
@@ -477,64 +549,62 @@ async function persistSnapshotAndDiff(input: {
                   else excluded.last_observed_at
                 end
         `,
-        [
-          site.dealerId,
-          row.productId,
-          row.isOnStock,
-          row.quantity,
-          snapshotId,
-          observedAt,
-          JSON.stringify(row.metrcTags),
-        ],
+        [site.dealerId, snapshotId, observedAt, JSON.stringify(payload)],
       )
     }
 
+    // (4) pending_litalerts_refresh_queue — bulk insert of the
+    // transitioned-to-in-stock variants, deduped against the existing
+    // partial unique index via ON CONFLICT DO NOTHING. RETURNING
+    // gives us the accurate inserted-row count (so the operator-facing
+    // `litalerts_refresh_enqueued_count` matches reality, not just
+    // "how many we tried"). Chunked at BULK_CHUNK_SIZE; usually the
+    // whole transition set fits in one chunk.
     let litalertsRefreshEnqueuedCount = 0
-    for (const productId of variantsTransitionedToInStock) {
-      // Skip if a pending refresh row already exists for this (product, site).
-      // The partial unique index protects us under concurrent inserts; this
-      // guard avoids the catch path on the common no-op case.
-      const existing = await db.query<{ id: number }>(
+    for (let i = 0; i < variantsTransitionedToInStock.length; i += BULK_CHUNK_SIZE) {
+      const chunk = variantsTransitionedToInStock.slice(i, i + BULK_CHUNK_SIZE)
+      const payload = chunk.map((productId) => ({
+        product_id: productId,
+        notes: `Variant transitioned out-of-stock -> in-stock at ${site.siteLabel} via snapshot ${snapshotId}.`,
+      }))
+      const result = await db.query(
         `
-          select id from pending_litalerts_refresh_queue
-          where product_id = $1
-            and coalesce(site_dealer_id, 0) = coalesce($2, 0)
-            and status = 'pending'
-          limit 1
+          insert into pending_litalerts_refresh_queue (
+            product_id, site_dealer_id, reason, source_snapshot_id, status, notes
+          )
+          select
+            x.product_id,
+            $1::bigint,
+            'variant_in_stock_transition',
+            $2::bigint,
+            'pending',
+            x.notes
+          from jsonb_to_recordset($3::jsonb) as x(
+            product_id bigint,
+            notes      text
+          )
+          on conflict do nothing
         `,
-        [productId, site.dealerId],
+        [site.dealerId, snapshotId, JSON.stringify(payload)],
       )
-      if (existing.rows.length > 0) {
-        continue
-      }
-      try {
-        await db.query(
-          `
-            insert into pending_litalerts_refresh_queue (
-              product_id, site_dealer_id, reason, source_snapshot_id, status, notes
-            ) values ($1, $2, 'variant_in_stock_transition', $3, 'pending', $4)
-          `,
-          [
-            productId,
-            site.dealerId,
-            snapshotId,
-            `Variant transitioned out-of-stock -> in-stock at ${site.siteLabel} via snapshot ${snapshotId}.`,
-          ],
-        )
-        litalertsRefreshEnqueuedCount += 1
-      } catch (insertError) {
-        // Either a concurrent insert or a violation of the partial unique
-        // index. Either way, the desired pending refresh row exists; do not
-        // double-count.
-        if (!(insertError instanceof Error) || !/duplicate key|unique/i.test(insertError.message)) {
-          throw insertError
-        }
-      }
+      litalertsRefreshEnqueuedCount += result.rowCount ?? 0
     }
 
-    for (const rollup of brandRollupsByBrandId.values()) {
-      const forSaleVariantCount = rollup.forSaleProductIds.size
-      const hasForSaleNow = forSaleVariantCount > 0
+    // (5) landingpage_brand_site_presence — bulk upsert per dealer.
+    const brandRollupArray = [...brandRollupsByBrandId.values()]
+    for (let i = 0; i < brandRollupArray.length; i += BULK_CHUNK_SIZE) {
+      const chunk = brandRollupArray.slice(i, i + BULK_CHUNK_SIZE)
+      const payload = chunk.map((rollup) => {
+        const forSaleVariantCount = rollup.forSaleProductIds.size
+        return {
+          brand_id: rollup.brandId,
+          brand_name: rollup.brandName,
+          for_sale_variant_count: forSaleVariantCount,
+          for_sale_total_available_qty: rollup.forSaleTotalAvailableQty,
+          for_sale_lot_count: rollup.forSaleLotCount,
+          has_for_sale_now: forSaleVariantCount > 0,
+        }
+      })
       await db.query(
         `
           insert into landingpage_brand_site_presence (
@@ -543,14 +613,28 @@ async function persistSnapshotAndDiff(input: {
             last_observed_at, last_for_sale_observed_at,
             last_observed_snapshot_id, last_for_sale_observed_snapshot_id,
             first_observed_at
-          ) values (
-            $1, $2, $3, $4, $5,
-            $6, $7, $8,
-            $9::timestamptz,
-            case when $10 then $9::timestamptz else null end,
-            $11::bigint,
-            case when $10 then $11::bigint else null end,
-            $9::timestamptz
+          )
+          select
+            $1::bigint,
+            $2::text,
+            $3::text,
+            x.brand_id,
+            x.brand_name,
+            x.for_sale_variant_count,
+            x.for_sale_total_available_qty,
+            x.for_sale_lot_count,
+            $4::timestamptz,
+            case when x.has_for_sale_now then $4::timestamptz else null end,
+            $5::bigint,
+            case when x.has_for_sale_now then $5::bigint else null end,
+            $4::timestamptz
+          from jsonb_to_recordset($6::jsonb) as x(
+            brand_id                     bigint,
+            brand_name                   text,
+            for_sale_variant_count       integer,
+            for_sale_total_available_qty numeric,
+            for_sale_lot_count           integer,
+            has_for_sale_now             boolean
           )
           on conflict (site_dealer_id, brand_id) do update
             set site_key = excluded.site_key,
@@ -574,14 +658,9 @@ async function persistSnapshotAndDiff(input: {
           site.dealerId,
           site.siteKey,
           site.siteLabel,
-          rollup.brandId,
-          rollup.brandName,
-          forSaleVariantCount,
-          rollup.forSaleTotalAvailableQty,
-          rollup.forSaleLotCount,
           observedAt,
-          hasForSaleNow,
           snapshotId,
+          JSON.stringify(payload),
         ],
       )
     }
