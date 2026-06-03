@@ -21,6 +21,7 @@ import { loadJson } from '../../app/fetchJson.js'
 import { BudtenderPerformanceTab } from './BudtenderPerformanceTab.js'
 import { CatalogAnalyticsTab } from './CatalogAnalyticsTab.js'
 import { CustomerValueTab } from './CustomerValueTab.js'
+import { EssentialsDailySummaryBanner } from './EssentialsDailySummaryBanner.js'
 import {
   CatalogFilterBar,
   emptyCatalogFilterSelection,
@@ -494,6 +495,12 @@ export function MetricsLayoutPage() {
           </header>
 
           <MetricsTabsNav activeTabId={activeTab.id} visibleTabs={visibleTabs} />
+
+        {/* Essentials top-of-tab "today" summary banner — sticky on
+            desktop, collapsable on mobile. Polls every ~90s. Render
+            only on the essentials tab (the metric registry on the
+            other tabs has no equivalent same-day-summary contract). */}
+        {activeTab.id === 'essentials' ? <EssentialsDailySummaryBanner /> : null}
 
         {activeTab.id === 'catalog' ? (
           // Catalog analytics has its own filter bar + scatter grid and does

@@ -388,3 +388,71 @@ export const MetricAnnotationRouteParamsSchema = z.object({
   annotationId: z.string().uuid(),
 })
 export type MetricAnnotationRouteParams = z.infer<typeof MetricAnnotationRouteParamsSchema>
+
+// ============================================================================
+// Essentials daily summary (top-of-Essentials sticky banner).
+//
+// "Today" is always the NY-time calendar day (canon: use America/New_York
+// for all aggregate / display unless explicitly told otherwise). The
+// server clamps the upper bound to "now" so partial days don't ghost.
+// ============================================================================
+
+export const EssentialsDailySummaryRowSchema = z.object({
+  /** Stable site identifier. Per-site rows: 'bronx' | 'midtown'.
+   *  Totals row: 'totals'. */
+  siteKey: z.string().min(1),
+  /** Display label ('Bronx', 'Midtown', 'Totals'). */
+  siteLabel: z.string().min(1),
+  /** Scans today on this site where the person had no prior scan. */
+  newScans: z.number().int().min(0),
+  /** Scans today on this site where the person had a prior scan
+   *  (or scan lacked a person_key — treated as returning to keep the
+   *  curve conservative; mirrors acquisition.first_vs_returning). */
+  returningScans: z.number().int().min(0),
+  /** Purchases (paid orders) today on this site whose customer had no
+   *  prior order. Guest checkouts (customer_id null) count as
+   *  returning, same convention as the metrics tab. */
+  newPurchases: z.number().int().min(0),
+  /** Purchases (paid orders) today on this site whose customer had a
+   *  prior order. */
+  returningPurchases: z.number().int().min(0),
+  /** sum(grand_total) — includes tax. */
+  grossReceiptsDollars: z.number().finite(),
+  /** sum(subtotal + discount) — pre-tax, pre-discount. */
+  grossSalesDollars: z.number().finite(),
+  /** sum(subtotal) — pre-tax, post-discount. */
+  netSalesDollars: z.number().finite(),
+  /** sum(line revenue − line cogs) across line items with a known
+   *  wholesale cost. Line items without a known cost contribute
+   *  revenue toward `grossSales/netSales` (those are order-grain)
+   *  but are excluded from this aggregate (it's an item-grain
+   *  derived metric — same exclusion rule as margins.effective_gm_pct). */
+  marginDollars: z.number().finite(),
+  /** Effective GM% = (priced_item_revenue − priced_item_cogs) /
+   *  priced_item_revenue, expressed as a 0..1 fraction. Null when
+   *  no line item today has a known cost (denominator is 0). */
+  gmPct: z.number().finite().nullable(),
+  /** Subtotal across line items whose cost is known. Useful for
+   *  showing "X of $Y net sales are cost-priced" in the tooltip. */
+  marginCoverageDollars: z.number().finite(),
+})
+export type EssentialsDailySummaryRow = z.infer<typeof EssentialsDailySummaryRowSchema>
+
+export const EssentialsDailySummaryResponseSchema = z.object({
+  /** ISO timestamp when the server produced this snapshot. */
+  asOf: z.string().datetime(),
+  /** NY-day boundary used for "today". `start` is NY midnight
+   *  (as UTC ISO); `end` is the moment the snapshot was produced
+   *  (clamped to now() so a partial day isn't extrapolated). */
+  today: z.object({
+    startIso: z.string().datetime(),
+    endIso: z.string().datetime(),
+    nyDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  }),
+  /** One row per known site, in stable order. */
+  sites: z.array(EssentialsDailySummaryRowSchema),
+  /** Aggregate row across the same sites. Sum-of-counts /
+   *  sum-of-dollars; GM% is the aggregate ratio, not the average. */
+  totals: EssentialsDailySummaryRowSchema,
+})
+export type EssentialsDailySummaryResponse = z.infer<typeof EssentialsDailySummaryResponseSchema>

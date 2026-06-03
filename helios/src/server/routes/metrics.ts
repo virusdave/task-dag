@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify'
 
 import {
   ALL_METRIC_GRANT_KEYS,
+  EssentialsDailySummaryResponseSchema,
   MetricListResponseSchema,
   MetricQueryRequestSchema,
   MetricQueryResponseSchema,
@@ -10,6 +11,7 @@ import {
 } from '../../shared/contracts/index.js'
 import { metricGrantForGroup } from '../../shared/domain/metricGrants.js'
 import { requireMetricsGrant } from '../auth/requireSession.js'
+import { loadEssentialsDailySummary } from '../db/queries/essentialsDailySummary.js'
 import { getMetricById, listMetricSummaries } from '../metrics/registry.js'
 import { toMetricSummary } from '../metrics/types.js'
 
@@ -34,6 +36,19 @@ export async function registerMetricsRoutes(server: FastifyInstance): Promise<vo
       return heldGrants.has(required)
     })
     return reply.send(MetricListResponseSchema.parse({ metrics: visible }))
+  })
+
+  // Essentials sticky-banner endpoint. Returns the current NY-day
+  // per-site + totals summary. Same `explore` grant as the
+  // Essentials tab itself; the banner only renders on that tab so
+  // a viewer who already loads /metrics will have the grant.
+  server.get('/api/metrics/essentials/today', async (request, reply) => {
+    const user = await requireMetricsGrant(request, reply, 'explore')
+    if (!user) {
+      return
+    }
+    const summary = await loadEssentialsDailySummary()
+    return reply.send(EssentialsDailySummaryResponseSchema.parse(summary))
   })
 
   // Run a metric's query and return the resulting time series.
