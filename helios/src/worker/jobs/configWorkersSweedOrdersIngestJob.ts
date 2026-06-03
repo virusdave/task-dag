@@ -35,6 +35,13 @@ import type { JobHandlerContext } from '../runtime/jobRegistry.js'
 /** Forward-poll overlap window — see the long comment above. */
 const FORWARD_POLL_OVERLAP_MS = 15 * 60 * 1000
 
+// Maximum rows per bulk INSERT round-trip. Same rationale as the
+// A2 commit on configWorkersStockRefreshJob.ts: keeps the
+// jsonb_to_recordset payload bounded well under pg's protocol
+// limits while collapsing per-row round-trips into a handful of
+// statements per dealer / batch.
+const BULK_CHUNK_SIZE = 500
+
 /** Fallback per-dealer highwater seed if no row exists and there is
  * no entry in `HELIOS_SWEED_DEALER_OPENING_DATES`. We assume the
  * dealer is "new" and seed the highwater 1h in the past so the next
@@ -537,103 +544,182 @@ async function fetchAndInsert(
   if (normalised.length === 0) {
     return { normalised, insertedCount: 0 }
   }
-  const insertedCount = await withTransaction(async (db) => {
-    let inserted = 0
-    for (const n of normalised) {
-      // Determine first_time_for_customer at insert time (cheap
-      // single-row query against the indexed customer_id, pay_time
-      // composite). For guests we leave it null.
-      let firstTime: boolean | null = null
-      if (n.customerId !== null) {
-        const prior = await db.query<{ exists: boolean }>(
-          `select exists(
-             select 1
-               from sweed_orders
-              where customer_id = $1
-                and pay_time < $2
-           ) as exists`,
-          [n.customerId, n.payTime.toISOString()],
-        )
-        firstTime = !(prior.rows[0]?.exists ?? false)
-      }
-      const result = await db.query(
+  // ============================================================================
+  // Bulk-upsert path (phase A3).
+  //
+  // The previous implementation looped per-invoice, doing one
+  // SELECT EXISTS to compute `first_time_for_customer`, one
+  // INSERT … ON CONFLICT DO NOTHING into `sweed_orders`, and (on
+  // genuine insert) one INSERT … SELECT into
+  // `sweed_order_items_flat`. For a multi-hundred-invoice batch
+  // this was 3N round-trips per dealer poll.
+  //
+  // We now collapse the per-batch work into:
+  //
+  //   (1) one bulk INSERT into `sweed_orders` via
+  //       `jsonb_to_recordset`, with `first_time_for_customer`
+  //       computed set-based in the same CTE. RETURNING gives us
+  //       the genuinely-inserted invoice_ids so the items flatten
+  //       only touches those rows.
+  //   (2) one bulk INSERT into `sweed_order_items_flat`, restricted
+  //       to the just-inserted invoices, replicating the same
+  //       cross-join-lateral / on-conflict-do-update statement we
+  //       used per-row.
+  //
+  // Both statements run inside a single per-batch transaction.
+  // Chunked at BULK_CHUNK_SIZE so the jsonb payload stays well
+  // under pg's protocol limits.
+  //
+  // first_time_for_customer semantics, preserved exactly:
+  //   * NULL for guest invoices (customer_id IS NULL).
+  //   * Otherwise: true iff no prior `sweed_orders` row exists for
+  //     this customer with `pay_time < this.pay_time`, AND no
+  //     other invoice earlier in the same batch (by strict <)
+  //     shares the customer. The original per-row loop relied on
+  //     intra-transaction visibility for the batch-internal half;
+  //     the CTE makes that explicit by checking `input` itself.
+  //     Ties on pay_time (Sweed's second precision) make both
+  //     siblings first_time=true under the original loop too
+  //     (strict `<` matches neither), so the new behaviour is
+  //     identical.
+  // ============================================================================
+  let totalInserted = 0
+  for (let i = 0; i < normalised.length; i += BULK_CHUNK_SIZE) {
+    const chunk = normalised.slice(i, i + BULK_CHUNK_SIZE)
+    await withTransaction(async (db) => {
+      const payload = chunk.map((n) => ({
+        invoice_id: n.invoiceId,
+        pay_time: n.payTime.toISOString(),
+        customer_id: n.customerId,
+        is_guest: n.isGuest,
+        grand_total: n.grandTotal,
+        subtotal: n.subtotal,
+        tax: n.tax,
+        discount: n.discount,
+        fulfillment_type: n.fulfillmentType,
+        payment_method: n.paymentMethod,
+        delivery_zip: n.deliveryZip,
+        cashier_user_id: n.cashierUserId,
+        raw: n.raw,
+      }))
+      const insertedResult = await db.query<{ invoice_id: string }>(
         `
-          insert into sweed_orders (
-            dealer_id, invoice_id, pay_time, customer_id, is_guest,
-            first_time_for_customer, grand_total_dollars, subtotal_dollars,
-            tax_dollars, discount_dollars, fulfillment_type, payment_method,
-            delivery_zip, cashier_user_id, raw_json
-          ) values (
-            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15::jsonb
-          )
-          on conflict (dealer_id, invoice_id) do nothing
-        `,
-        [
-          dealerId,
-          n.invoiceId,
-          n.payTime.toISOString(),
-          n.customerId,
-          n.isGuest,
-          firstTime,
-          n.grandTotal,
-          n.subtotal,
-          n.tax,
-          n.discount,
-          n.fulfillmentType,
-          n.paymentMethod,
-          n.deliveryZip,
-          n.cashierUserId,
-          JSON.stringify(n.raw),
-        ],
-      )
-      if ((result.rowCount ?? 0) > 0) {
-        // Tail-fill the flattened items table that backs
-        // Catalog → Purchase Sell-Through. We do this only on
-        // genuine inserts (not no-op conflicts) since raw_json is
-        // immutable after first insert -- enrichment jobs only
-        // update sibling columns (invoice_get_status, etc.). See
-        // migration 048_sweed_order_items_flat.sql for the table
-        // schema and rationale.
-        await db.query(
-          `
-            insert into sweed_order_items_flat (
-              dealer_id, invoice_id, item_ordinal,
-              pay_time, inventory_item_id, qty, revenue, raw_item
+          with input as (
+            select * from jsonb_to_recordset($2::jsonb) as x(
+              invoice_id       text,
+              pay_time         timestamptz,
+              customer_id      bigint,
+              is_guest         boolean,
+              grand_total      numeric,
+              subtotal         numeric,
+              tax              numeric,
+              discount         numeric,
+              fulfillment_type text,
+              payment_method   text,
+              delivery_zip     text,
+              cashier_user_id  bigint,
+              raw              jsonb
+            )
+          ),
+          input_with_first_time as (
+            select
+              i.*,
+              case
+                when i.customer_id is null then null::boolean
+                else not (
+                  exists (
+                    select 1 from sweed_orders so
+                     where so.customer_id = i.customer_id
+                       and so.pay_time < i.pay_time
+                  )
+                  or exists (
+                    select 1 from input i2
+                     where i2.customer_id = i.customer_id
+                       and i2.pay_time   < i.pay_time
+                  )
+                )
+              end as first_time_for_customer
+            from input i
+          ),
+          inserted as (
+            insert into sweed_orders (
+              dealer_id, invoice_id, pay_time, customer_id, is_guest,
+              first_time_for_customer, grand_total_dollars, subtotal_dollars,
+              tax_dollars, discount_dollars, fulfillment_type, payment_method,
+              delivery_zip, cashier_user_id, raw_json
             )
             select
-              so.dealer_id,
-              so.invoice_id,
-              (item.ord - 1)::int as item_ordinal,
-              so.pay_time,
-              item.value->>'inventoryItemId' as inventory_item_id,
-              coalesce(
-                nullif(item.value->>'currentQty', '')::numeric,
-                nullif(item.value->>'quantity', '')::numeric,
-                nullif(item.value->>'qty', '')::numeric,
-                0
-              ) as qty,
-              coalesce(nullif(item.value->>'subtotalAmount', '')::numeric, 0) as revenue,
-              item.value as raw_item
-            from sweed_orders so
-            cross join lateral jsonb_array_elements(coalesce(so.raw_json->'items', '[]'::jsonb))
-              with ordinality as item(value, ord)
-            where so.dealer_id = $1
-              and so.invoice_id = $2
-              and nullif(item.value->>'inventoryItemId', '') is not null
-            on conflict (dealer_id, invoice_id, item_ordinal) do update set
-              pay_time          = excluded.pay_time,
-              inventory_item_id = excluded.inventory_item_id,
-              qty               = excluded.qty,
-              revenue           = excluded.revenue,
-              raw_item          = excluded.raw_item,
-              flattened_at      = now()
-          `,
-          [dealerId, n.invoiceId],
-        )
-        inserted++
+              $1::bigint,
+              invoice_id,
+              pay_time,
+              customer_id,
+              is_guest,
+              first_time_for_customer,
+              grand_total,
+              subtotal,
+              tax,
+              discount,
+              fulfillment_type,
+              payment_method,
+              delivery_zip,
+              cashier_user_id,
+              raw
+            from input_with_first_time
+            on conflict (dealer_id, invoice_id) do nothing
+            returning invoice_id
+          )
+          select invoice_id from inserted
+        `,
+        [dealerId, JSON.stringify(payload)],
+      )
+      const insertedInvoiceIds = insertedResult.rows.map((r) => r.invoice_id)
+      totalInserted += insertedInvoiceIds.length
+      if (insertedInvoiceIds.length === 0) {
+        return
       }
-    }
-    return inserted
-  })
-  return { normalised, insertedCount }
+      // (2) Items flatten — set-based over just the inserted
+      // invoices. We restrict via `invoice_id = ANY($2::text[])`
+      // so the planner can use the (dealer_id, invoice_id) PK on
+      // sweed_orders. Same on-conflict-do-update body as the v1
+      // per-row statement; ordinality starts at 0
+      // (`(item.ord - 1)::int`) for parity.
+      await db.query(
+        `
+          insert into sweed_order_items_flat (
+            dealer_id, invoice_id, item_ordinal,
+            pay_time, inventory_item_id, qty, revenue, raw_item
+          )
+          select
+            so.dealer_id,
+            so.invoice_id,
+            (item.ord - 1)::int as item_ordinal,
+            so.pay_time,
+            item.value->>'inventoryItemId' as inventory_item_id,
+            coalesce(
+              nullif(item.value->>'currentQty', '')::numeric,
+              nullif(item.value->>'quantity', '')::numeric,
+              nullif(item.value->>'qty', '')::numeric,
+              0
+            ) as qty,
+            coalesce(nullif(item.value->>'subtotalAmount', '')::numeric, 0) as revenue,
+            item.value as raw_item
+          from sweed_orders so
+          cross join lateral jsonb_array_elements(coalesce(so.raw_json->'items', '[]'::jsonb))
+            with ordinality as item(value, ord)
+          where so.dealer_id = $1
+            and so.invoice_id = any($2::text[])
+            and nullif(item.value->>'inventoryItemId', '') is not null
+          on conflict (dealer_id, invoice_id, item_ordinal) do update set
+            pay_time          = excluded.pay_time,
+            inventory_item_id = excluded.inventory_item_id,
+            qty               = excluded.qty,
+            revenue           = excluded.revenue,
+            raw_item          = excluded.raw_item,
+            flattened_at      = now()
+        `,
+        [dealerId, insertedInvoiceIds],
+      )
+    })
+  }
+  return { normalised, insertedCount: totalInserted }
 }
