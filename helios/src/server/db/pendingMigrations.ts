@@ -86,6 +86,27 @@ async function indexExists(db: Queryable, indexName: string): Promise<boolean> {
   return result.rows[0]?.exists === true
 }
 
+async function hypertableExists(db: Queryable, hypertableName: string): Promise<boolean> {
+  // TimescaleDB tracks hypertables in `timescaledb_information.hypertables`.
+  // The view exists on every database that has the timescaledb
+  // extension installed (which Helios's prod DB does); we still wrap
+  // the query in a try/catch at the call site (the sentinel runner
+  // already does that) so a missing extension in some hypothetical
+  // dev environment surfaces as "migration pending" rather than a
+  // 500. The view exposes both the hypertable schema and name; we
+  // restrict to `public` to match the rest of the helpers.
+  const result = await db.query<{ exists: boolean }>(
+    `select exists(
+       select 1
+         from timescaledb_information.hypertables
+        where hypertable_schema = 'public'
+          and hypertable_name = $1
+     ) as exists`,
+    [hypertableName],
+  )
+  return result.rows[0]?.exists === true
+}
+
 const SENTINELS: MigrationSentinel[] = [
   {
     migrationId: '007_pending_purchases',
@@ -465,6 +486,33 @@ const SENTINELS: MigrationSentinel[] = [
       'jsonb_array_elements lateral that takes 15-50s and times out ' +
       'the page.',
     check: (db) => tableExists(db, 'sweed_order_items_flat'),
+  },
+  {
+    // Phase C1 of the Helios DB-cost epic (virusdave/top-level#11):
+    // convert parsekit_reverse_shadow_events to a Timescale
+    // hypertable as a low-risk validator for the conversion pattern
+    // (tiny table, no FKs, no triggers). The sentinel asks Timescale
+    // whether the table is a hypertable; if it isn't, the operator
+    // needs to apply 050.
+    migrationId: '050_parsekit_reverse_shadow_events_hypertable',
+    label:
+      'parsekit_reverse_shadow_events — Timescale hypertable ' +
+      'conversion (DB-cost epic phase C1, no app-visible behaviour ' +
+      'change).',
+    check: (db) => hypertableExists(db, 'parsekit_reverse_shadow_events'),
+  },
+  {
+    // Phase C1 of the Helios DB-cost epic (virusdave/top-level#11):
+    // convert sweed_auth_events to a Timescale hypertable. This is
+    // the first real-volume conversion in the cost-reduction work
+    // (~167k rows / 81 MB at apply time). The Sweed-auth worker
+    // pipeline appends to this table; no live customer scan/checkin
+    // path reads or writes it.
+    migrationId: '051_sweed_auth_events_hypertable',
+    label:
+      'sweed_auth_events — Timescale hypertable conversion ' +
+      '(DB-cost epic phase C1, no app-visible behaviour change).',
+    check: (db) => hypertableExists(db, 'sweed_auth_events'),
   },
 ]
 
