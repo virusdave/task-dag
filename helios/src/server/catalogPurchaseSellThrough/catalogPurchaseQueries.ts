@@ -140,7 +140,12 @@ const PER_LINE_CTE = `
            sum(
              si.qty * coalesce(
                sweed_package_cost_as_of(si.dealer_id, si.inventory_item_id, si.pay_time),
-               tl.unit_cost_dollars,
+               -- Same effective-unit-cost fallback used in the outer
+               -- select; protects COGS-of-sold when both the package
+               -- cost snapshot AND unit_cost_dollars are missing /
+               -- 0 (e.g. HR Botanical legacy lines).
+               nullif(tl.unit_cost_dollars, 0),
+               tl.extended_cost_dollars / nullif(tl.ordered_units, 0),
                0
              )
            ) as cost_of_sold_items_dollars
@@ -164,7 +169,29 @@ const PER_LINE_CTE = `
          coalesce(s.units_sold_to_date, 0) as units_sold_to_date,
          coalesce(s.sold_revenue_dollars, 0) as sold_revenue_dollars,
          coalesce(s.cost_of_sold_items_dollars, 0) as cost_of_sold_items_dollars,
-         coalesce(tl.unit_cost_dollars, 0) * coalesce(s.units_sold_to_date, 0)
+         -- Effective per-unit cost. The ingest worker normally fills
+         -- unit_cost_dollars from distributor_product_price /
+         -- discount_product_price / (extended / ordered), but some
+         -- vendors (e.g. HR BOTANICAL) send 0 in the per-line unit
+         -- price fields and carry the real number only in the
+         -- extendedAmount field. The worker now treats a literal 0
+         -- as "missing" and falls back, but legacy rows ingested
+         -- before that fix still have unit_cost_dollars = 0.0000,
+         -- which made every per-line cost ($/sold-through payment,
+         -- $/remaining stock, $/adjusted) read as exactly $0 on the
+         -- PO detail page. Compute the effective cost here so both
+         -- the legacy rows and any future regression are self-
+         -- correcting at read time.
+         coalesce(
+           nullif(tl.unit_cost_dollars, 0),
+           tl.extended_cost_dollars / nullif(tl.ordered_units, 0),
+           0
+         ) as effective_unit_cost_dollars,
+         coalesce(
+           nullif(tl.unit_cost_dollars, 0),
+           tl.extended_cost_dollars / nullif(tl.ordered_units, 0),
+           0
+         ) * coalesce(s.units_sold_to_date, 0)
            as realised_cost_if_paid_for_sold_only_dollars,
          case
            when cardinality(tl.matched_inventory_item_ids) > 0
@@ -239,6 +266,10 @@ interface PerLineRow {
   units_sold_to_date: number | string
   sold_revenue_dollars: number | string
   cost_of_sold_items_dollars: number | string
+  // PER_LINE_CTE-computed fallback for unit_cost_dollars when the
+  // vendor sent 0 / null in the per-line price fields but a usable
+  // extendedAmount. Always populated (>= 0).
+  effective_unit_cost_dollars: number | string
   realised_cost_if_paid_for_sold_only_dollars: number | string
   remaining_units: number | string
   adjusted_units: number | string
@@ -252,7 +283,14 @@ function rowToLine(r: PerLineRow): CatalogPurchaseLineSellThrough {
   const remaining = asNum(r.remaining_units)
   const adjusted = asNum(r.adjusted_units)
   const sellThroughPercent = ordered > 0 ? Math.min(100, (sold / ordered) * 100) : null
-  const unitCost = asNullableNum(r.unit_cost_dollars) ?? 0
+  // Prefer the SQL-computed effective unit cost (handles legacy /
+  // HR-Botanical-style rows where unit_cost_dollars is literally 0
+  // but extended_cost_dollars / ordered_units is correct). The
+  // displayed `unitCostDollars` on the page intentionally uses this
+  // effective value too — having "unit cost $0" sitting next to a
+  // "committed $160 / 20 units" line was the bug the operator caught
+  // on PO 107719.
+  const unitCost = asNum(r.effective_unit_cost_dollars)
   const listPrice = asNullableNum(r.current_list_price_dollars) ?? 0
   const grossMarginPercent =
     listPrice > 0 && unitCost > 0 ? ((listPrice - unitCost) / listPrice) * 100 : null
@@ -280,7 +318,7 @@ function rowToLine(r: PerLineRow): CatalogPurchaseLineSellThrough {
     unitsAdjusted: adjusted,
     sellThroughPercent,
     daysSinceReceived,
-    unitCostDollars: asNullableNum(r.unit_cost_dollars),
+    unitCostDollars: unitCost > 0 ? unitCost : null,
     extendedCostDollars: asNullableNum(r.extended_cost_dollars),
     soldRevenueDollars: asNum(r.sold_revenue_dollars),
     realisedCostIfPaidForSoldOnlyDollars: asNum(r.realised_cost_if_paid_for_sold_only_dollars),
@@ -459,8 +497,8 @@ export async function getCatalogPurchaseList(
                   else null end as sell_through_percent,
              sum(cost_of_sold_items_dollars) as cost_of_sold_items_dollars,
              sum(realised_cost_if_paid_for_sold_only_dollars) as realised_cost_if_paid_for_sold_only_dollars,
-             sum(coalesce(unit_cost_dollars,0) * remaining_units) as cost_of_remaining_items_dollars,
-             sum(coalesce(unit_cost_dollars,0) * adjusted_units) as cost_of_adjusted_items_dollars,
+             sum(effective_unit_cost_dollars * remaining_units) as cost_of_remaining_items_dollars,
+             sum(effective_unit_cost_dollars * adjusted_units) as cost_of_adjusted_items_dollars,
              sum(coalesce(current_list_price_dollars,0) * remaining_units) as current_list_price_outstanding_dollars,
              sum(sold_revenue_dollars) as sold_revenue_dollars,
              count(*)::int as line_count,
@@ -508,8 +546,8 @@ export async function getCatalogPurchaseList(
              sum(adjusted_units) as units_adjusted,
              sum(cost_of_sold_items_dollars) as cost_of_sold_items_dollars,
              sum(realised_cost_if_paid_for_sold_only_dollars) as realised_cost_if_paid_for_sold_only_dollars,
-             sum(coalesce(unit_cost_dollars,0) * remaining_units) as cost_of_remaining_items_dollars,
-             sum(coalesce(unit_cost_dollars,0) * adjusted_units) as cost_of_adjusted_items_dollars,
+             sum(effective_unit_cost_dollars * remaining_units) as cost_of_remaining_items_dollars,
+             sum(effective_unit_cost_dollars * adjusted_units) as cost_of_adjusted_items_dollars,
              sum(coalesce(current_list_price_dollars,0) * remaining_units) as current_list_price_outstanding_dollars,
              sum(sold_revenue_dollars) as sold_revenue_dollars,
              count(*) as line_count

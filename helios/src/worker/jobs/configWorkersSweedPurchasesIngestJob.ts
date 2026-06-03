@@ -329,10 +329,26 @@ function normaliseLine(index: number, p: z.infer<typeof PoPositionSchema>): Norm
   const extended = p.extendedAmount ?? null
   let unitCost: number | null = null
   let unitCostSource = 'unknown'
-  if (p.distributorProductPrice !== null && p.distributorProductPrice !== undefined) {
+  // Treat a literal 0 in the per-line price fields as "not provided"
+  // — some distributors (e.g. HR BOTANICAL) send 0 in
+  // distributorProductPrice / discountProductPrice and carry the real
+  // amount only in extendedAmount. Without the `> 0` guard the
+  // fallback to (extended / orderedUnits) never fires and every line
+  // on those POs lands with unit_cost_dollars = 0, which silently
+  // zeroes the entire sold-through payment basis on the
+  // Catalog → Purchase Sell-Through page family.
+  if (
+    p.distributorProductPrice !== null &&
+    p.distributorProductPrice !== undefined &&
+    p.distributorProductPrice > 0
+  ) {
     unitCost = p.distributorProductPrice
     unitCostSource = 'distributor_product_price'
-  } else if (p.discountProductPrice !== null && p.discountProductPrice !== undefined) {
+  } else if (
+    p.discountProductPrice !== null &&
+    p.discountProductPrice !== undefined &&
+    p.discountProductPrice > 0
+  ) {
     unitCost = p.discountProductPrice
     unitCostSource = 'discount_product_price'
   } else if (extended !== null && orderedUnits > 0) {
