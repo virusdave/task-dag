@@ -466,6 +466,16 @@ const SENTINELS: MigrationSentinel[] = [
       'the page.',
     check: (db) => tableExists(db, 'sweed_order_items_flat'),
   },
+  {
+    migrationId: '049_catalog_groups_products_gin',
+    label:
+      'catalog_groups_products_gin_idx — GIN(jsonb_path_ops) index ' +
+      "on catalog_groups.(live_state_json -> 'products'). Removes the " +
+      'sequential-scan on every lit-alerts refresh-variant job hit, a ' +
+      'top contributor to TigerData read I/O before the Helios DB-cost ' +
+      'epic (virusdave/top-level#11, phase A5).',
+    check: (db) => indexExists(db, 'catalog_groups_products_gin_idx'),
+  },
 ]
 
 interface CacheEntry {

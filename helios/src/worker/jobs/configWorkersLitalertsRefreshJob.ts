@@ -17,7 +17,7 @@ import { rollingRefreshJitterSecondsForProduct } from '../litalerts/enqueueMarke
  * Lit Alerts evidence is considered authoritative for this many days
  * post-capture **unless** a brand_expiry_overrides row narrows or
  * widens the window for the captured brand (see migration 012/013 +
- * loadBrandExpiryDays() below).
+ * the per-job CTE prefetch below).
  */
 const DEFAULT_OBSERVATION_EXPIRY_DAYS = 4
 /** Base rolling cadence: 24h between successful captures (before jitter). */
@@ -26,6 +26,8 @@ const OBSERVATION_BASE_REFRESH_MS = 24 * 60 * 60 * 1000
 const OBSERVATION_FAILURE_FAST_RETRY_MS = 30 * 60 * 1000
 /** Treat "expires_at within next 12h" as the trigger for the faster retry. */
 const OBSERVATION_EXPIRY_FAST_RETRY_WINDOW_MS = 12 * 60 * 60 * 1000
+/** Clamp on operator-tunable brand expiry overrides (matches loadBrandExpiryDays). */
+const MAX_OBSERVATION_EXPIRY_DAYS = 30
 
 interface QueueRow extends QueryResultRow {
   id: number
@@ -43,23 +45,49 @@ interface CatalogGroupRow extends QueryResultRow {
   live_state_json: unknown
 }
 
+/**
+ * Combined per-job prefetch row. The CTE in `loadJobContext` returns
+ * at most one row joining `pending_litalerts_refresh_queue` with the
+ * catalog_groups containment match. When the queue row is missing
+ * the CTE returns zero rows; when the queue row exists but no
+ * catalog group currently mirrors this productId, the group_* /
+ * live_state_json columns are NULL.
+ */
+interface JobContextRow extends QueryResultRow {
+  queue_id: number
+  queue_product_id: number
+  queue_site_dealer_id: number | null
+  queue_source_snapshot_id: number | null
+  queue_status: 'pending' | 'in_progress' | 'completed' | 'cancelled'
+  group_id: number | null
+  group_name: string | null
+  group_brand_name: string | null
+  group_category_name: string | null
+  group_live_state_json: unknown
+}
+
+interface JobContext {
+  queueRow: QueueRow
+  groupRow: CatalogGroupRow | null
+}
+
 export async function runConfigWorkersLitalertsRefreshVariantJob(
   context: JobHandlerContext,
   payload: ConfigWorkersLitalertsRefreshVariantJobPayload,
 ): Promise<void> {
-  const queueRow = await loadQueueRow(payload.queueRowId)
-  if (!queueRow) {
+  const loaded = await loadJobContext(payload.queueRowId, payload.productId)
+  if (!loaded) {
     // The row was cleaned up between enqueue and run; nothing to do.
     return
   }
 
   // Idempotent skip when the row was already drained by a prior attempt.
-  if (queueRow.status === 'completed') {
+  if (loaded.queueRow.status === 'completed') {
     return
   }
 
-  let observationId: number | null = null
-  let groupRow: CatalogGroupRow | null = null
+  const { groupRow } = loaded
+
   let liveState: NormalizedCatalogGroupLiveState | null = null
   let evidence: ProductPricingMarketEvidence | null = null
   let availability: string | null = null
@@ -68,7 +96,6 @@ export async function runConfigWorkersLitalertsRefreshVariantJob(
   let notes: string | null = null
 
   try {
-    groupRow = await findCatalogGroupContainingProduct(payload.productId)
     if (groupRow) {
       liveState = NormalizedCatalogGroupLiveStateSchema.parse(groupRow.live_state_json)
 
@@ -85,7 +112,7 @@ export async function runConfigWorkersLitalertsRefreshVariantJob(
       notes = `No catalog group currently mirrors variant productId=${payload.productId}; cannot resolve brand for Lit Alerts refresh.`
     }
 
-    observationId = await persistObservationAndCloseQueue({
+    await persistAndAudit({
       context,
       payload,
       groupRow,
@@ -98,33 +125,9 @@ export async function runConfigWorkersLitalertsRefreshVariantJob(
       status: 'succeeded',
       error: null,
     })
-
-    await withTransaction(async (db) => {
-      await appendAuditEvent(db, {
-        actorType: payload.requestedByUserId ? 'user' : 'system',
-        actorUserId: payload.requestedByUserId ?? null,
-        entityId: String(context.id),
-        entityType: 'job',
-        eventType: 'config.workers.litalerts_refresh.completed',
-        module: 'config',
-        payload: {
-          availability,
-          listingCount: evidence?.matchedListings.length ?? 0,
-          observationId,
-          productId: payload.productId,
-          queueRowId: payload.queueRowId,
-          searchTermLabel,
-          status: 'succeeded',
-          trigger: payload.trigger,
-        },
-        requestId: null,
-        scope: null,
-        undoPayload: null,
-      })
-    })
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown Lit Alerts refresh error.'
-    await persistObservationAndCloseQueue({
+    await persistAndAudit({
       context,
       payload,
       groupRow,
@@ -138,89 +141,89 @@ export async function runConfigWorkersLitalertsRefreshVariantJob(
       error: message,
     })
 
-    await withTransaction(async (db) => {
-      await appendAuditEvent(db, {
-        actorType: payload.requestedByUserId ? 'user' : 'system',
-        actorUserId: payload.requestedByUserId ?? null,
-        entityId: String(context.id),
-        entityType: 'job',
-        eventType: 'config.workers.litalerts_refresh.completed',
-        module: 'config',
-        payload: {
-          availability,
-          error: message,
-          productId: payload.productId,
-          queueRowId: payload.queueRowId,
-          status: 'failed',
-          trigger: payload.trigger,
-        },
-        requestId: null,
-        scope: null,
-        undoPayload: null,
-      })
-    })
-
     throw error
   }
 }
 
 /**
- * Look up the operator-managed per-brand expiry window in days.
- * Returns DEFAULT_OBSERVATION_EXPIRY_DAYS when no override is
- * configured, when the brand name is null, or when the
- * brand_expiry_overrides table is not yet present (migration 012
- * unapplied — we don't want to wedge the worker on an unmigrated env).
+ * Combined prefetch CTE — replaces the prior trio of round-trips
+ * (loadQueueRow + findCatalogGroupContainingProduct +
+ * loadBrandExpiryDays) with a single SELECT. Phase A5 of the
+ * Helios DB-cost epic (virusdave/top-level#11).
+ *
+ * Why a CTE rather than three parallel SELECTs:
+ *   - The catalog-group containment search uses the new
+ *     `catalog_groups_products_gin_idx` GIN(jsonb_path_ops) index
+ *     created in migration 049; the planner sees the literal
+ *     `productId` constant at plan time and uses the index
+ *     immediately.
+ *   - The brand_expiry_overrides lookup is intentionally NOT in
+ *     this prefetch: brand resolution prefers
+ *     `liveState.brand` (parsed by the JS Zod schema) over the
+ *     raw `catalog_groups.brand_name` column, and we don't want to
+ *     replicate that normalization in SQL. It's folded into the
+ *     persist transaction instead so it still avoids a separate
+ *     round-trip on the hot path.
+ *
+ * Returns null when the queue row no longer exists (cleanup raced
+ * the worker).
  */
-async function loadBrandExpiryDays(brandName: string | null): Promise<number> {
-  if (!brandName) return DEFAULT_OBSERVATION_EXPIRY_DAYS
-  try {
-    const result = await getPool().query<{ expiry_days: number }>(
-      `select expiry_days
-         from brand_expiry_overrides
-        where lower(brand_name) = lower($1)
-        limit 1`,
-      [brandName],
-    )
-    const row = result.rows[0]
-    if (!row) return DEFAULT_OBSERVATION_EXPIRY_DAYS
-    const days = Number(row.expiry_days)
-    if (!Number.isFinite(days) || days < 1) return DEFAULT_OBSERVATION_EXPIRY_DAYS
-    return Math.min(30, Math.floor(days))
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
-    if (/relation .*brand_expiry_overrides.* does not exist/i.test(message)) {
-      return DEFAULT_OBSERVATION_EXPIRY_DAYS
-    }
-    throw error
+async function loadJobContext(
+  queueRowId: number,
+  productId: number,
+): Promise<JobContext | null> {
+  const result = await getPool().query<JobContextRow>(
+    `
+      with q as (
+        select id, product_id, site_dealer_id, source_snapshot_id, status
+          from pending_litalerts_refresh_queue
+         where id = $1
+      ),
+      g as (
+        select id, group_name, brand_name, category_name, live_state_json
+          from catalog_groups
+         where (live_state_json -> 'products') @> $2::jsonb
+         limit 1
+      )
+      select
+        q.id                  as queue_id,
+        q.product_id          as queue_product_id,
+        q.site_dealer_id      as queue_site_dealer_id,
+        q.source_snapshot_id  as queue_source_snapshot_id,
+        q.status              as queue_status,
+        g.id                  as group_id,
+        g.group_name          as group_name,
+        g.brand_name          as group_brand_name,
+        g.category_name       as group_category_name,
+        g.live_state_json     as group_live_state_json
+        from q
+        left join g on true
+    `,
+    [queueRowId, JSON.stringify([{ productId }])],
+  )
+  const row = result.rows[0]
+  if (!row) return null
+  const queueRow: QueueRow = {
+    id: row.queue_id,
+    product_id: row.queue_product_id,
+    site_dealer_id: row.queue_site_dealer_id,
+    source_snapshot_id: row.queue_source_snapshot_id,
+    status: row.queue_status,
   }
+  const groupRow: CatalogGroupRow | null =
+    row.group_id === null
+      ? null
+      : {
+          id: row.group_id,
+          group_name: row.group_name as string,
+          brand_name: row.group_brand_name,
+          category_name: row.group_category_name,
+          live_state_json: row.group_live_state_json,
+        }
+  return { queueRow, groupRow }
 }
 
-async function loadQueueRow(queueRowId: number): Promise<QueueRow | null> {
-  const result = await getPool().query<QueueRow>(
-    `
-      select id, product_id, site_dealer_id, source_snapshot_id, status
-      from pending_litalerts_refresh_queue
-      where id = $1
-    `,
-    [queueRowId],
-  )
-  return result.rows[0] ?? null
-}
-
-async function findCatalogGroupContainingProduct(productId: number): Promise<CatalogGroupRow | null> {
-  const result = await getPool().query<CatalogGroupRow>(
-    `
-      select id, group_name, brand_name, category_name, live_state_json
-      from catalog_groups
-      where (live_state_json -> 'products') @> $1::jsonb
-      limit 1
-    `,
-    [JSON.stringify([{ productId }])],
-  )
-  return result.rows[0] ?? null
-}
-
-interface PersistObservationInput {
+interface PersistInput {
   context: JobHandlerContext
   payload: ConfigWorkersLitalertsRefreshVariantJobPayload
   groupRow: CatalogGroupRow | null
@@ -234,7 +237,24 @@ interface PersistObservationInput {
   error: string | null
 }
 
-async function persistObservationAndCloseQueue(input: PersistObservationInput): Promise<number> {
+/**
+ * Persist the observation, close the queue row, and append the
+ * audit event — all inside a single transaction.
+ *
+ * Phase A5 changes vs the prior `persistObservationAndCloseQueue` +
+ * separate audit-event transaction:
+ *   - Audit event now appends inside the same transaction (was a
+ *     separate withTransaction call that issued its own
+ *     BEGIN/COMMIT round-trips per job).
+ *   - Brand-expiry lookup folded into a single combined-context
+ *     query at the top of the transaction (was a separate
+ *     pre-transaction `getPool().query` round-trip).
+ *   - Failure-branch prior-observation lookup folded into the same
+ *     combined-context query (was a second pre-INSERT round-trip).
+ * Net: 3 sequential pre-INSERT round-trips collapse to 1, and the
+ * audit event no longer needs its own transaction.
+ */
+async function persistAndAudit(input: PersistInput): Promise<number> {
   const { context, payload, groupRow, liveState, evidence } = input
 
   const matchedListings = evidence?.matchedListings ?? []
@@ -243,52 +263,95 @@ async function persistObservationAndCloseQueue(input: PersistObservationInput): 
   const farListings = matchedListings.filter((listing) => listing.distanceBand === 'far')
   const pricingEligibleListings = matchedListings.filter((listing) => listing.eligibleForPricing)
 
-  // Honor brand_expiry_overrides — the operator-managed per-brand
-  // expiry window from migration 012 — when computing expires_at on
-  // a successful capture. Defaults to 4 days when no row exists or
-  // when the brand is not resolvable from this observation. Cheap
-  // one-row lookup keyed by lower(brand_name).
+  // Same `liveState.brand ?? groupRow.brand_name` preference as the
+  // prior implementation. Resolved here in JS because the live-state
+  // normalization happens in Zod; replicating it in SQL would be
+  // brittle.
   const candidateBrandName = liveState?.brand ?? groupRow?.brand_name ?? null
-  const expiryDays = await loadBrandExpiryDays(candidateBrandName)
-  const observationExpiryMs = expiryDays * 24 * 60 * 60 * 1000
+  const succeeded = input.status === 'succeeded'
+  const jitterSeconds = rollingRefreshJitterSecondsForProduct(payload.productId)
 
   return withTransaction(async (db) => {
-    // For successful captures we set expires_at = captured_at + 4 days
-    // (matching the freshness-view bucket boundary) and
-    // next_refresh_at = captured_at + 24h + deterministic ± 2h jitter so
-    // the rolling scheduler does not pick up the same product right away.
-    // For failed captures we leave next_refresh_at NULL — the rolling
-    // scheduler will retry on its normal cadence — unless the prior
-    // observation's expires_at is within the next 12 hours, in which
-    // case we push a faster retry through.
-    const succeeded = input.status === 'succeeded'
-    const jitterSeconds = rollingRefreshJitterSecondsForProduct(payload.productId)
+    // Combined context fetch: brand-expiry override (always) +
+    // prior-observation expires_at (failure path only). Returns
+    // exactly one row regardless of whether either side matches.
+    // The query exits gracefully (defaulting expiry_days /
+    // previous_expires_at to NULL) when:
+    //   - the brand name is null or has no override row;
+    //   - the brand_expiry_overrides table doesn't exist yet
+    //     (migration 012 unapplied — see the catch below);
+    //   - there is no prior succeeded observation for this product.
+    let expiryDays = DEFAULT_OBSERVATION_EXPIRY_DAYS
+    let previousExpiresAt: Date | null = null
+    try {
+      const contextResult = await db.query<{
+        expiry_days: number | null
+        previous_expires_at: Date | null
+      }>(
+        `
+          with be as (
+            select expiry_days
+              from brand_expiry_overrides
+             where $1::text is not null
+               and lower(brand_name) = lower($1)
+             limit 1
+          ),
+          po as (
+            select expires_at
+              from litalerts_competitor_observations
+             where $2::boolean = true
+               and product_id = $3
+               and status = 'succeeded'
+             order by captured_at desc, id desc
+             limit 1
+          )
+          select
+            (select expiry_days  from be) as expiry_days,
+            (select expires_at  from po) as previous_expires_at
+        `,
+        [candidateBrandName, !succeeded, payload.productId],
+      )
+      const row = contextResult.rows[0]
+      if (row) {
+        const days = Number(row.expiry_days)
+        if (Number.isFinite(days) && days >= 1) {
+          expiryDays = Math.min(MAX_OBSERVATION_EXPIRY_DAYS, Math.floor(days))
+        }
+        previousExpiresAt = row.previous_expires_at
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      if (!/relation .*brand_expiry_overrides.* does not exist/i.test(message)) {
+        throw error
+      }
+      // Pre-migration-012 environments: brand_expiry_overrides
+      // doesn't exist yet. Defaults already initialised above; on
+      // the failure path we lose the prior-observation lookup
+      // until the operator applies migration 012, which is
+      // acceptable (the rolling scheduler will still retry on its
+      // normal cadence — just without the 30-minute fast-retry
+      // boost when an observation is about to expire).
+    }
 
+    const observationExpiryMs = expiryDays * 24 * 60 * 60 * 1000
+
+    // For successful captures we set expires_at = captured_at + N days
+    // (matching the freshness-view bucket boundary) and
+    // next_refresh_at = captured_at + 24h + deterministic ± 2h jitter
+    // so the rolling scheduler does not pick up the same product
+    // right away. For failed captures we leave next_refresh_at NULL
+    // — the rolling scheduler will retry on its normal cadence —
+    // unless the prior observation's expires_at is within the next
+    // 12 hours, in which case we push a faster retry through.
     let nextRefreshAtClause = 'null'
     let failureNextRefreshAt: Date | null = null
     if (succeeded) {
       nextRefreshAtClause = `now() + interval '${OBSERVATION_BASE_REFRESH_MS / 1000} seconds' + (${jitterSeconds}::int * interval '1 second')`
-    } else {
-      // Look up the previous successful observation's expires_at and
-      // decide whether a fast retry is needed.
-      const previous = await db.query<{ expires_at: Date | null }>(
-        `
-          select expires_at
-          from litalerts_competitor_observations
-          where product_id = $1
-            and status = 'succeeded'
-          order by captured_at desc, id desc
-          limit 1
-        `,
-        [payload.productId],
-      )
-      const previousExpiresAt = previous.rows[0]?.expires_at ?? null
-      if (
-        previousExpiresAt !== null
-        && previousExpiresAt.getTime() - Date.now() < OBSERVATION_EXPIRY_FAST_RETRY_WINDOW_MS
-      ) {
-        failureNextRefreshAt = new Date(Date.now() + OBSERVATION_FAILURE_FAST_RETRY_MS)
-      }
+    } else if (
+      previousExpiresAt !== null
+      && previousExpiresAt.getTime() - Date.now() < OBSERVATION_EXPIRY_FAST_RETRY_WINDOW_MS
+    ) {
+      failureNextRefreshAt = new Date(Date.now() + OBSERVATION_FAILURE_FAST_RETRY_MS)
     }
 
     const insertResult = await db.query<{ id: number }>(
@@ -342,7 +405,7 @@ async function persistObservationAndCloseQueue(input: PersistObservationInput): 
 
     const newObservationId = insertResult.rows[0].id
 
-    const finalQueueStatus = input.status === 'succeeded' ? 'completed' : 'cancelled'
+    const finalQueueStatus = succeeded ? 'completed' : 'cancelled'
     await db.query(
       `
         update pending_litalerts_refresh_queue
@@ -359,6 +422,37 @@ async function persistObservationAndCloseQueue(input: PersistObservationInput): 
           : input.notes,
       ],
     )
+
+    await appendAuditEvent(db, {
+      actorType: payload.requestedByUserId ? 'user' : 'system',
+      actorUserId: payload.requestedByUserId ?? null,
+      entityId: String(context.id),
+      entityType: 'job',
+      eventType: 'config.workers.litalerts_refresh.completed',
+      module: 'config',
+      payload: succeeded
+        ? {
+            availability: input.availability,
+            listingCount: matchedListings.length,
+            observationId: newObservationId,
+            productId: payload.productId,
+            queueRowId: payload.queueRowId,
+            searchTermLabel: input.searchTermLabel,
+            status: 'succeeded',
+            trigger: payload.trigger,
+          }
+        : {
+            availability: input.availability,
+            error: input.error,
+            productId: payload.productId,
+            queueRowId: payload.queueRowId,
+            status: 'failed',
+            trigger: payload.trigger,
+          },
+      requestId: null,
+      scope: null,
+      undoPayload: null,
+    })
 
     return newObservationId
   })
