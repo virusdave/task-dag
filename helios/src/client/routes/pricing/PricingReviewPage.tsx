@@ -13,6 +13,8 @@ import {
 } from '../../../shared/contracts/index.js'
 import { loadJson, mutateJson } from '../../app/fetchJson.js'
 import { waitForJob } from '../../app/jobPolling.js'
+import type { CompetitorListing } from '../../../shared/ui/pricing-ladder/index.js'
+import { CanonicalPricingLadder } from '../../components/CanonicalPricingLadder.js'
 import { HoverZoomImage } from '../../components/HoverZoomImage.js'
 import { Pill } from '../../components/Pill.js'
 import { useRegisterCatalogSidebarSubtree } from '../catalog/catalogSidebarSubtree.js'
@@ -55,7 +57,13 @@ export function PricingReviewPage() {
     ? describeRecentSales(selectedItem.pricingContext.recentSales.summary)
     : null
   const selectedDisplayedPrice = selectedItem ? resolveDisplayedPrice(draftValue, selectedItem) : null
-  const selectedPriceLabel = selectedItem && hasDraftPriceOverride(draftValue, selectedItem) ? 'Draft' : 'Proposed'
+  // Memoized on the stable selectedItem reference so the canonical ladder
+  // doesn't rebuild its DOM (and drop an in-flight drag) on every draft
+  // keystroke — see CanonicalPricingLadder's drag-survival comment.
+  const selectedCompetitorListings = useMemo(
+    () => (selectedItem ? mapMarketListingsToCompetitorListings(selectedItem.pricingContext.marketListings) : []),
+    [selectedItem],
+  )
   const selectedItems = useMemo(
     () => data.review.items.filter((item) => selectedLineItemIds.includes(item.lineItem.lineItemId)),
     [data.review.items, selectedLineItemIds],
@@ -90,6 +98,9 @@ export function PricingReviewPage() {
     setErrorMessage(null)
     setFeedbackMessage(null)
     try {
+      if (draftValue.trim().length === 0) {
+        throw new Error('Enter a price before saving.')
+      }
       const editedValue = Number(draftValue.trim())
       if (!Number.isFinite(editedValue)) {
         throw new Error('Price edits must be numeric.')
@@ -426,17 +437,30 @@ export function PricingReviewPage() {
                 </div>
               </div>
 
-              <PricingLadder
+              <CanonicalPricingLadder
+                competitorListings={selectedCompetitorListings}
                 livePrice={numericValue(selectedItem.lineItem.baselineValue)}
-                marketAverageLabel={selectedItem.pricingContext.marketAverageLabel}
-                marketAveragePostTaxPrice={selectedItem.pricingContext.marketAveragePostTaxPrice}
-                marketMedianPostTaxPrice={selectedItem.pricingContext.marketMedianPostTaxPrice}
-                marketListings={selectedItem.pricingContext.marketListings}
-                proposedLabel={selectedPriceLabel}
+                marketAveragePostTax={selectedItem.pricingContext.marketAveragePostTaxPrice}
+                marketMedianPostTax={selectedItem.pricingContext.marketMedianPostTaxPrice}
+                onProposedPriceChange={(next) => setDraftValue(next.toFixed(2))}
+                productId={selectedItem.lineItem.targetEntityId}
                 proposedPrice={selectedDisplayedPrice}
+                variant="detail"
               />
 
-              <p className="subtle-copy" style={{ marginBottom: '1rem' }}>
+              {formatMarketReferenceText(
+                selectedItem.pricingContext.marketAveragePostTaxPrice,
+                selectedItem.pricingContext.marketMedianPostTaxPrice,
+              ) ? (
+                <p className="subtle-copy" style={{ marginTop: '0.6rem', marginBottom: 0 }}>
+                  {formatMarketReferenceText(
+                    selectedItem.pricingContext.marketAveragePostTaxPrice,
+                    selectedItem.pricingContext.marketMedianPostTaxPrice,
+                  )}
+                </p>
+              ) : null}
+
+              <p className="subtle-copy" style={{ marginTop: '0.6rem', marginBottom: '1rem' }}>
                 {selectedItem.pricingContext.priceReason ?? 'No structured pricing reason recorded for this row.'}
               </p>
 
@@ -578,20 +602,6 @@ function resolveDisplayedPrice(draftValue: string, item: PricingReviewItem): num
   return numericValueFromString(draftValue) ?? item.pricingContext.proposedPrice ?? numericValue(item.lineItem.effectiveValue)
 }
 
-function hasDraftPriceOverride(draftValue: string, item: PricingReviewItem): boolean {
-  const draftedPrice = numericValueFromString(draftValue)
-  if (draftedPrice === null) {
-    return false
-  }
-
-  const persistedPrice = item.pricingContext.proposedPrice ?? numericValue(item.lineItem.effectiveValue)
-  if (persistedPrice === null) {
-    return true
-  }
-
-  return Math.abs(draftedPrice - persistedPrice) >= 0.005
-}
-
 function numericValueFromString(value: string): number | null {
   const parsed = Number(value.trim())
   return Number.isFinite(parsed) ? parsed : null
@@ -630,89 +640,17 @@ function formatDistanceBandLabel(distanceBand: PricingRunMarketListing['distance
   }
 }
 
-function PricingLadder(input: {
-  livePrice: number | null
-  marketAverageLabel: string | null
-  marketAveragePostTaxPrice: number | null
-  marketMedianPostTaxPrice: number | null
-  marketListings: PricingRunMarketListing[]
-  proposedLabel: string
-  proposedPrice: number | null
-}) {
-  const points = [
-    input.livePrice,
-    input.proposedPrice,
-    input.marketAveragePostTaxPrice,
-    input.marketMedianPostTaxPrice,
-    ...input.marketListings.map((listing) => listing.postTaxPrice),
-  ]
-    .filter((value): value is number => value !== null && Number.isFinite(value))
-
-  if (points.length === 0) {
-    return null
-  }
-
-  const minimumPoint = Math.min(...points)
-  const maximumPoint = Math.max(...points)
-  const padding = Math.max((maximumPoint - minimumPoint) * 0.12, 1)
-  const scaleMinimum = Math.max(0, minimumPoint - padding)
-  const scaleMaximum = maximumPoint + padding
-  const bandSummary = summarizeListingBands(input.marketListings)
-
-  return (
-    <div className="pricing-ladder-card">
-      <div className="inline-row wrap-row" style={{ justifyContent: 'space-between', marginBottom: '0.6rem' }}>
-        <strong>Price ladder</strong>
-        <span className="subtle-copy">{formatMoney(scaleMinimum)} to {formatMoney(scaleMaximum)}</span>
-      </div>
-      <div className="pricing-ladder-track">
-        {input.marketListings.map((listing, index) => (
-          <span
-            className={`pricing-ladder-dot band-${listing.distanceBand}`}
-            key={`${listing.dispensaryName}-${listing.listingName}-${index}`}
-            style={{ left: `${toLadderPercent(listing.postTaxPrice, scaleMinimum, scaleMaximum)}%`, opacity: listingOpacity(listing) }}
-            title={`${listing.dispensaryName} · ${formatMoney(listing.postTaxPrice)} · ${formatDistanceBandLabel(listing.distanceBand, listing.distanceMiles)}`}
-          />
-        ))}
-        {input.marketAveragePostTaxPrice !== null ? (
-          <span className="pricing-ladder-marker average" style={{ left: `${toLadderPercent(input.marketAveragePostTaxPrice, scaleMinimum, scaleMaximum)}%` }}>
-            <span>Near/mid avg</span>
-          </span>
-        ) : null}
-        {input.marketMedianPostTaxPrice !== null ? (
-          <span className="pricing-ladder-marker median" style={{ left: `${toLadderPercent(input.marketMedianPostTaxPrice, scaleMinimum, scaleMaximum)}%` }}>
-            <span>Near/mid median</span>
-          </span>
-        ) : null}
-        {input.livePrice !== null ? (
-          <span className="pricing-ladder-marker live" style={{ left: `${toLadderPercent(input.livePrice, scaleMinimum, scaleMaximum)}%` }}>
-            <span>Live</span>
-          </span>
-        ) : null}
-        {input.proposedPrice !== null ? (
-          <span className="pricing-ladder-marker proposed" style={{ left: `${toLadderPercent(input.proposedPrice, scaleMinimum, scaleMaximum)}%` }}>
-            <span>{input.proposedLabel}</span>
-          </span>
-        ) : null}
-      </div>
-      <div className="pricing-ladder-legend">
-        <span><i className="legend-swatch band-near" />Near</span>
-        <span><i className="legend-swatch band-mid" />Mid</span>
-        <span><i className="legend-swatch band-far" />Far</span>
-        <span><i className="legend-swatch band-very_far" />Very far</span>
-        <span><i className="legend-swatch marker-median" />Near/mid median</span>
-        <span><i className="legend-swatch marker-live" />Live</span>
-        <span><i className="legend-swatch marker-proposed" />Proposed</span>
-      </div>
-      {bandSummary ? <p className="subtle-copy" style={{ marginTop: '0.6rem' }}>{bandSummary}</p> : null}
-      {formatMarketReferenceText(input.marketAveragePostTaxPrice, input.marketMedianPostTaxPrice) ? (
-        <p className="subtle-copy" style={{ marginTop: '0.35rem' }}>
-          {formatMarketReferenceText(input.marketAveragePostTaxPrice, input.marketMedianPostTaxPrice)}
-        </p>
-      ) : null}
-      {input.marketAverageLabel ? <p className="subtle-copy" style={{ marginTop: '0.35rem' }}>{input.marketAverageLabel}</p> : null}
-    </div>
-  )
+function mapMarketListingsToCompetitorListings(listings: PricingRunMarketListing[]): CompetitorListing[] {
+  return listings.map((listing, index) => ({
+    listingId: `${listing.dispensaryName}-${listing.listingName}-${listing.source}-${index}`,
+    postTaxPrice: listing.postTaxPrice,
+    distanceMiles: listing.distanceMiles,
+    dispensaryName: listing.dispensaryName,
+    listingName: listing.listingName,
+    url: listing.url,
+    eligibleForPricing: listing.eligibleForPricing,
+    matchTier: listing.matchTier,
+  }))
 }
 
 function formatMarketReferenceText(averagePrice: number | null, medianPrice: number | null): string | null {
@@ -728,51 +666,4 @@ function formatMarketReferenceText(averagePrice: number | null, medianPrice: num
   return parts.length > 0 ? `Near/mid ${parts.join(' · ')}` : null
 }
 
-function toLadderPercent(value: number, minimum: number, maximum: number): number {
-  if (maximum <= minimum) {
-    return 50
-  }
-  return ((value - minimum) / (maximum - minimum)) * 100
-}
 
-function listingOpacity(listing: PricingRunMarketListing): number {
-  switch (listing.distanceBand) {
-    case 'near':
-      return 1
-    case 'mid':
-      return 0.76
-    case 'far':
-      return 0.42
-    case 'very_far': {
-      if (listing.distanceMiles === null) {
-        return 0.32
-      }
-      return Math.max(0.18, 0.42 - Math.max(0, listing.distanceMiles - 10) * 0.01)
-    }
-    default:
-      return 0.28
-  }
-}
-
-function summarizeListingBands(listings: PricingRunMarketListing[]): string | null {
-  if (listings.length === 0) {
-    return null
-  }
-
-  const summary = listings.reduce<Record<PricingRunMarketListing['distanceBand'], number>>(
-    (counts, listing) => ({
-      ...counts,
-      [listing.distanceBand]: counts[listing.distanceBand] + 1,
-    }),
-    { far: 0, mid: 0, near: 0, unknown: 0, very_far: 0 },
-  )
-  const parts = [
-    summary.near ? `${summary.near} near` : null,
-    summary.mid ? `${summary.mid} mid` : null,
-    summary.far ? `${summary.far} far` : null,
-    summary.very_far ? `${summary.very_far} very far` : null,
-    summary.unknown ? `${summary.unknown} unknown-distance` : null,
-  ].filter((value): value is string => value !== null)
-
-  return parts.length > 0 ? `Displayed competitor pool: ${parts.join(', ')}.` : null
-}

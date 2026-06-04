@@ -12,6 +12,9 @@ import {
 } from '../../../shared/contracts/index.js'
 import { loadJson, mutateJson } from '../../app/fetchJson.js'
 import { waitForJob } from '../../app/jobPolling.js'
+import type { CompetitorListing } from '../../../shared/ui/pricing-ladder/index.js'
+import { CanonicalPricingLadder } from '../../components/CanonicalPricingLadder.js'
+import { CanonicalProductRow } from '../../components/canonicalProductRow/index.js'
 import { Pill } from '../../components/Pill.js'
 import { useRegisterCatalogSidebarSubtree } from '../catalog/catalogSidebarSubtree.js'
 import { describeRecentSales, formatCount, formatCurrency } from '../catalog/recentSales.js'
@@ -103,6 +106,9 @@ export function PricingRunDetailPage() {
     setFeedbackMessage(null)
     try {
       const draftValue = draftValues[item.lineItem.lineItemId] ?? ''
+      if (draftValue.trim().length === 0) {
+        throw new Error('Enter a price before saving.')
+      }
       const editedValue = Number(draftValue.trim())
       if (!Number.isFinite(editedValue)) {
         throw new Error('Price edits must be numeric when you save them.')
@@ -461,138 +467,21 @@ export function PricingRunDetailPage() {
                             ) : null}
 
                             <div className="stacked-list">
-                              {group.reviewItems.map((item) => {
-                                const draftValue = draftValues[item.lineItem.lineItemId] ?? readEditableInputValue(item)
-                                const draftNote = draftNotes[item.lineItem.lineItemId] ?? item.lineItem.notes ?? ''
-                                const reviewedPrice = resolveDisplayedPrice(draftValue, item)
-                                const priceMarkerLabel = hasDraftPriceOverride(draftValue, item) ? 'Draft' : 'Reviewed'
-                                const recentSalesIndicator = describeRecentSales(item.pricingContext.recentSales.summary)
-                                return (
-                                  <article className="detail-panel" key={item.lineItem.lineItemId} style={{ margin: 0 }}>
-                                    <div className="page-header" style={{ alignItems: 'flex-start', gap: '1rem', marginBottom: '0.85rem' }}>
-                                      <div>
-                                        <h5 style={{ margin: 0 }}>{productLabel(item)}</h5>
-                                        <p className="subtle-copy">{pricingTransitionText(item, reviewedPrice)}</p>
-                                      </div>
-                                      <div className="inline-row wrap-row">
-                                        <span className={`velocity-indicator velocity-indicator-${recentSalesIndicator.tone}`}>{recentSalesIndicator.detailLabel}</span>
-                                        <Pill tone={approvalTone(item.lineItem.approvalStatus)}>{reviewDecisionLabel(item.lineItem.approvalStatus)}</Pill>
-                                        <span className="subtle-copy">
-                                          Cost {formatMoney(item.pricingContext.wholesaleCost)}
-                                          {item.pricingContext.wholesaleCostSource === 'package_snapshot' ? (
-                                            <span
-                                              className="subtle-copy"
-                                              style={{ marginLeft: '0.35rem', fontStyle: 'italic' }}
-                                              title="Sweed's per-product wholesaleCost was blank/zero for this SKU; cost taken from the most recent sweed_package_snapshots row."
-                                            >
-                                              (from PO)
-                                            </span>
-                                          ) : null}
-                                          {' · '}{item.pricingContext.tab ?? item.lineItem.fieldPath}
-                                        </span>
-                                      </div>
-                                    </div>
-
-                                    <PricingLadder
-                                      livePrice={numericValue(item.lineItem.baselineValue)}
-                                      marketAverageLabel={item.pricingContext.marketAverageLabel}
-                                      marketAveragePostTaxPrice={item.pricingContext.marketAveragePostTaxPrice}
-                                      marketMedianPostTaxPrice={item.pricingContext.marketMedianPostTaxPrice}
-                                      marketListings={item.pricingContext.marketListings}
-                                      proposedLabel={priceMarkerLabel}
-                                      proposedPrice={reviewedPrice}
-                                    />
-
-                                    {formatMarketReferenceText(
-                                      item.pricingContext.marketAveragePostTaxPrice,
-                                      item.pricingContext.marketMedianPostTaxPrice,
-                                    ) ? (
-                                      <p className="subtle-copy" style={{ marginTop: '0.35rem', marginBottom: '0.85rem' }}>
-                                        {formatMarketReferenceText(
-                                          item.pricingContext.marketAveragePostTaxPrice,
-                                          item.pricingContext.marketMedianPostTaxPrice,
-                                        )}
-                                      </p>
-                                    ) : null}
-
-                                    <p className="subtle-copy" style={{ marginTop: 0, marginBottom: '0.85rem' }}>
-                                      {item.pricingContext.priceReason ?? 'No structured pricing reason recorded for this row.'}
-                                    </p>
-
-                                    <div className="inline-row wrap-row" style={{ alignItems: 'center', marginBottom: '0.75rem' }}>
-                                      <input
-                                        inputMode="decimal"
-                                        onChange={(event) => setDraftValues((current) => ({ ...current, [item.lineItem.lineItemId]: event.currentTarget.value }))}
-                                        type="text"
-                                        value={draftValue}
-                                      />
-                                      <button className="ghost-button" disabled={isSaving} onClick={() => adjustDraftValue(item, -0.25)} type="button">-0.25</button>
-                                      <button className="ghost-button" disabled={isSaving} onClick={() => adjustDraftValue(item, 0.25)} type="button">+0.25</button>
-                                      <button className="ghost-button" disabled={isSaving} onClick={() => void handleSaveEdit(item)} type="button">Save price</button>
-                                      <button className="primary-button" disabled={isSaving || item.lineItem.approvalStatus !== 'pending'} onClick={() => void handleDecision(item, 'approve')} type="button">Approve</button>
-                                      <button className="danger-button" disabled={isSaving || item.lineItem.approvalStatus !== 'pending'} onClick={() => void handleDecision(item, 'reject')} type="button">Exclude</button>
-                                    </div>
-
-                                    <label className="stack-field">
-                                      <span>Review note</span>
-                                      <textarea onChange={(event) => setDraftNotes((current) => ({ ...current, [item.lineItem.lineItemId]: event.currentTarget.value }))} rows={3} value={draftNote} />
-                                    </label>
-
-                                    <div className="inline-row wrap-row" style={{ marginTop: '0.75rem' }}>
-                                      <button className="ghost-button" disabled={isSaving} onClick={() => void handleSaveNote(item)} type="button">Save note</button>
-                                      {item.pricingContext.marketListings.length > 0 ? <span className="subtle-copy">{summarizeListingBands(item.pricingContext.marketListings)}</span> : null}
-                                    </div>
-
-                                    {item.pricingContext.marketListings.length > 0 ? (
-                                      <details style={{ marginTop: '0.75rem' }}>
-                                        <summary>Market listings ({item.pricingContext.marketListings.length})</summary>
-                                        <ul className="timeline-list" style={{ marginTop: '0.75rem' }}>
-                                          {item.pricingContext.marketListings.map((listing, index) => (
-                                            <li key={`${listing.dispensaryName}-${listing.listingName}-${index}`}>
-                                              {listing.url ? (
-                                                <a href={listing.url} rel="noreferrer" target="_blank"><strong>{listing.dispensaryName}</strong></a>
-                                              ) : (
-                                                <strong>{listing.dispensaryName}</strong>
-                                              )}
-                                              <div className="subtle-copy">
-                                                {listing.listingName} · {formatMoney(listing.postTaxPrice)} post-tax · {formatDistanceBandLabel(listing.distanceBand, listing.distanceMiles)} · {formatMatchTierLabel(listing.matchTier)} match
-                                              </div>
-                                              {!listing.eligibleForPricing ? <p className="subtle-copy">Display only: {listing.exclusionReason ?? 'not pricing eligible'}</p> : null}
-                                            </li>
-                                          ))}
-                                        </ul>
-                                      </details>
-                                    ) : null}
-
-                                    <div style={{ marginTop: '0.9rem' }}>
-                                      <div className="sales-site-grid">
-                                        {item.pricingContext.recentSales.sites.map((site) => {
-                                          const siteIndicator = describeRecentSales({
-                                            combinationCount: 1,
-                                            coverageCount: site.hasCoverage ? 1 : 0,
-                                            daysPerUnit: site.daysPerUnit,
-                                            last30DaysGrossSales: site.last30DaysGrossSales,
-                                            onHand: site.onHand,
-                                            reportDate: site.reportDate,
-                                            unitsPerDay: site.unitsPerDay,
-                                          })
-                                          return (
-                                            <article className="mini-card" key={`${site.siteDealerId}-${site.productId}`}>
-                                              <header>
-                                                <strong>{site.siteLabel}</strong>
-                                                <span className={`velocity-indicator velocity-indicator-${siteIndicator.tone}`}>{siteIndicator.detailLabel}</span>
-                                              </header>
-                                              <div className="subtle-copy" style={{ marginTop: '0.4rem' }}>
-                                                {`${formatCount(site.onHand)} on hand · ${formatCurrency(site.last30DaysGrossSales)} gross / 30d`}
-                                              </div>
-                                            </article>
-                                          )
-                                        })}
-                                      </div>
-                                    </div>
-                                  </article>
-                                )
-                              })}
+                              {group.reviewItems.map((item) => (
+                                <PricingRunItemRow
+                                  draftNote={draftNotes[item.lineItem.lineItemId] ?? item.lineItem.notes ?? ''}
+                                  draftValue={draftValues[item.lineItem.lineItemId] ?? readEditableInputValue(item)}
+                                  isSaving={isSaving}
+                                  item={item}
+                                  key={item.lineItem.lineItemId}
+                                  onAdjust={(delta) => adjustDraftValue(item, delta)}
+                                  onDecision={(decision) => void handleDecision(item, decision)}
+                                  onDraftNoteChange={(value) => setDraftNotes((current) => ({ ...current, [item.lineItem.lineItemId]: value }))}
+                                  onDraftValueChange={(value) => setDraftValues((current) => ({ ...current, [item.lineItem.lineItemId]: value }))}
+                                  onSaveEdit={() => void handleSaveEdit(item)}
+                                  onSaveNote={() => void handleSaveNote(item)}
+                                />
+                              ))}
                             </div>
 
                             {group.skippedProducts.length > 0 ? (
@@ -641,6 +530,191 @@ export function PricingRunDetailPage() {
       </div>
     </section>
   )
+}
+
+/**
+ * One pricing-run review item, rendered with the shared canonical
+ * reviewer "middle part" (`CanonicalProductRow` shell + draggable
+ * `CanonicalPricingLadder`) so this surface matches `/catalog/review`
+ * and `/catalog/pending-purchases` instead of carrying its own bespoke
+ * card + static price ladder.
+ *
+ * Extracted into its own component so the competitor-listing mapping can
+ * be memoized per item: the canonical ladder deliberately excludes the
+ * proposed price from its rebuild deps to keep a drag alive, but it WILL
+ * rebuild (and drop the in-flight drag) if `competitorListings` changes
+ * identity. Memoizing on the stable `item` reference keeps the array
+ * identity stable across the parent re-renders a drag triggers.
+ */
+function PricingRunItemRow({
+  draftNote,
+  draftValue,
+  isSaving,
+  item,
+  onAdjust,
+  onDecision,
+  onDraftNoteChange,
+  onDraftValueChange,
+  onSaveEdit,
+  onSaveNote,
+}: {
+  draftNote: string
+  draftValue: string
+  isSaving: boolean
+  item: PricingReviewItem
+  onAdjust: (delta: number) => void
+  onDecision: (decision: 'approve' | 'reject') => void
+  onDraftNoteChange: (value: string) => void
+  onDraftValueChange: (value: string) => void
+  onSaveEdit: () => void
+  onSaveNote: () => void
+}): JSX.Element {
+  const reviewedPrice = resolveDisplayedPrice(draftValue, item)
+  const recentSalesIndicator = describeRecentSales(item.pricingContext.recentSales.summary)
+  const competitorListings = useMemo(
+    () => mapMarketListingsToCompetitorListings(item.pricingContext.marketListings),
+    [item.pricingContext.marketListings],
+  )
+  const marketReferenceText = formatMarketReferenceText(
+    item.pricingContext.marketAveragePostTaxPrice,
+    item.pricingContext.marketMedianPostTaxPrice,
+  )
+
+  return (
+    <CanonicalProductRow
+      className="detail-panel"
+      headerClassName="page-header"
+      title={<h5 style={{ margin: 0 }}>{productLabel(item)}</h5>}
+      subtitle={pricingTransitionText(item, reviewedPrice)}
+      statusPills={
+        <>
+          <span className={`velocity-indicator velocity-indicator-${recentSalesIndicator.tone}`}>{recentSalesIndicator.detailLabel}</span>
+          <Pill tone={approvalTone(item.lineItem.approvalStatus)}>{reviewDecisionLabel(item.lineItem.approvalStatus)}</Pill>
+          <span className="subtle-copy">
+            Cost {formatMoney(item.pricingContext.wholesaleCost)}
+            {item.pricingContext.wholesaleCostSource === 'package_snapshot' ? (
+              <span
+                className="subtle-copy"
+                style={{ marginLeft: '0.35rem', fontStyle: 'italic' }}
+                title="Sweed's per-product wholesaleCost was blank/zero for this SKU; cost taken from the most recent sweed_package_snapshots row."
+              >
+                (from PO)
+              </span>
+            ) : null}
+            {' · '}{item.pricingContext.tab ?? item.lineItem.fieldPath}
+          </span>
+        </>
+      }
+      pricingLadder={
+        <CanonicalPricingLadder
+          competitorListings={competitorListings}
+          livePrice={numericValue(item.lineItem.baselineValue)}
+          marketAveragePostTax={item.pricingContext.marketAveragePostTaxPrice}
+          marketMedianPostTax={item.pricingContext.marketMedianPostTaxPrice}
+          onProposedPriceChange={(next) => onDraftValueChange(next.toFixed(2))}
+          productId={item.lineItem.targetEntityId}
+          proposedPrice={reviewedPrice}
+          variant="detail"
+        />
+      }
+      bodyExtras={
+        <>
+          {marketReferenceText ? <p className="subtle-copy" style={{ marginTop: '0.35rem', marginBottom: '0.5rem' }}>{marketReferenceText}</p> : null}
+          <p className="subtle-copy" style={{ marginTop: 0, marginBottom: '0.5rem' }}>
+            {item.pricingContext.priceReason ?? 'No structured pricing reason recorded for this row.'}
+          </p>
+          {item.pricingContext.marketListings.length > 0 ? (
+            <p className="subtle-copy" style={{ marginTop: 0 }}>{summarizeListingBands(item.pricingContext.marketListings)}</p>
+          ) : null}
+          {item.pricingContext.marketListings.length > 0 ? (
+            <details style={{ marginTop: '0.5rem' }}>
+              <summary>Market listings ({item.pricingContext.marketListings.length})</summary>
+              <ul className="timeline-list" style={{ marginTop: '0.75rem' }}>
+                {item.pricingContext.marketListings.map((listing, index) => (
+                  <li key={`${listing.dispensaryName}-${listing.listingName}-${index}`}>
+                    {listing.url ? (
+                      <a href={listing.url} rel="noreferrer" target="_blank"><strong>{listing.dispensaryName}</strong></a>
+                    ) : (
+                      <strong>{listing.dispensaryName}</strong>
+                    )}
+                    <div className="subtle-copy">
+                      {listing.listingName} · {formatMoney(listing.postTaxPrice)} post-tax · {formatDistanceBandLabel(listing.distanceBand, listing.distanceMiles)} · {formatMatchTierLabel(listing.matchTier)} match
+                    </div>
+                    {!listing.eligibleForPricing ? <p className="subtle-copy">Display only: {listing.exclusionReason ?? 'not pricing eligible'}</p> : null}
+                  </li>
+                ))}
+              </ul>
+            </details>
+          ) : null}
+          <div style={{ marginTop: '0.9rem' }}>
+            <div className="sales-site-grid">
+              {item.pricingContext.recentSales.sites.map((site) => {
+                const siteIndicator = describeRecentSales({
+                  combinationCount: 1,
+                  coverageCount: site.hasCoverage ? 1 : 0,
+                  daysPerUnit: site.daysPerUnit,
+                  last30DaysGrossSales: site.last30DaysGrossSales,
+                  onHand: site.onHand,
+                  reportDate: site.reportDate,
+                  unitsPerDay: site.unitsPerDay,
+                })
+                return (
+                  <article className="mini-card" key={`${site.siteDealerId}-${site.productId}`}>
+                    <header>
+                      <strong>{site.siteLabel}</strong>
+                      <span className={`velocity-indicator velocity-indicator-${siteIndicator.tone}`}>{siteIndicator.detailLabel}</span>
+                    </header>
+                    <div className="subtle-copy" style={{ marginTop: '0.4rem' }}>
+                      {`${formatCount(site.onHand)} on hand · ${formatCurrency(site.last30DaysGrossSales)} gross / 30d`}
+                    </div>
+                  </article>
+                )
+              })}
+            </div>
+          </div>
+        </>
+      }
+      overrides={
+        <>
+          <div className="inline-row wrap-row" style={{ alignItems: 'center', marginBottom: '0.6rem' }}>
+            <input
+              inputMode="decimal"
+              onChange={(event) => onDraftValueChange(event.currentTarget.value)}
+              type="text"
+              value={draftValue}
+            />
+            <button className="ghost-button" disabled={isSaving} onClick={() => onAdjust(-0.25)} type="button">-0.25</button>
+            <button className="ghost-button" disabled={isSaving} onClick={() => onAdjust(0.25)} type="button">+0.25</button>
+          </div>
+          <label className="stack-field">
+            <span>Review note</span>
+            <textarea onChange={(event) => onDraftNoteChange(event.currentTarget.value)} rows={3} value={draftNote} />
+          </label>
+        </>
+      }
+      decisions={
+        <div className="inline-row wrap-row review-actions">
+          <button className="ghost-button" disabled={isSaving} onClick={() => onSaveEdit()} type="button">Save price</button>
+          <button className="primary-button" disabled={isSaving || item.lineItem.approvalStatus !== 'pending'} onClick={() => onDecision('approve')} type="button">Approve</button>
+          <button className="danger-button" disabled={isSaving || item.lineItem.approvalStatus !== 'pending'} onClick={() => onDecision('reject')} type="button">Exclude</button>
+          <button className="ghost-button" disabled={isSaving} onClick={() => onSaveNote()} type="button">Save note</button>
+        </div>
+      }
+    />
+  )
+}
+
+function mapMarketListingsToCompetitorListings(listings: PricingRunMarketListing[]): CompetitorListing[] {
+  return listings.map((listing, index) => ({
+    listingId: `${listing.dispensaryName}-${listing.listingName}-${listing.source}-${index}`,
+    postTaxPrice: listing.postTaxPrice,
+    distanceMiles: listing.distanceMiles,
+    dispensaryName: listing.dispensaryName,
+    listingName: listing.listingName,
+    url: listing.url,
+    eligibleForPricing: listing.eligibleForPricing,
+    matchTier: listing.matchTier,
+  }))
 }
 
 interface PricingReviewGroupSlice extends Omit<PricingRunGroupSummary, 'reviewItems'> {
@@ -942,20 +1016,6 @@ function resolveDisplayedPrice(draftValue: string, item: PricingReviewItem): num
   return numericValueFromString(draftValue) ?? item.pricingContext.proposedPrice ?? numericValue(item.lineItem.effectiveValue)
 }
 
-function hasDraftPriceOverride(draftValue: string, item: PricingReviewItem): boolean {
-  const draftedPrice = numericValueFromString(draftValue)
-  if (draftedPrice === null) {
-    return false
-  }
-
-  const persistedPrice = item.pricingContext.proposedPrice ?? numericValue(item.lineItem.effectiveValue)
-  if (persistedPrice === null) {
-    return true
-  }
-
-  return Math.abs(draftedPrice - persistedPrice) >= 0.005
-}
-
 function readEditableInputValue(item: PricingReviewItem): string {
   if (typeof item.lineItem.editedValue === 'number') {
     return item.lineItem.editedValue.toFixed(2)
@@ -1040,84 +1100,6 @@ function formatDistanceBandLabel(distanceBand: PricingRunMarketListing['distance
   }
 }
 
-function PricingLadder(input: {
-  livePrice: number | null
-  marketAverageLabel: string | null
-  marketAveragePostTaxPrice: number | null
-  marketMedianPostTaxPrice: number | null
-  marketListings: PricingRunMarketListing[]
-  proposedLabel: string
-  proposedPrice: number | null
-}) {
-  const points = [
-    input.livePrice,
-    input.proposedPrice,
-    input.marketAveragePostTaxPrice,
-    input.marketMedianPostTaxPrice,
-    ...input.marketListings.map((listing) => listing.postTaxPrice),
-  ]
-    .filter((value): value is number => value !== null && Number.isFinite(value))
-
-  if (points.length === 0) {
-    return null
-  }
-
-  const minimumPoint = Math.min(...points)
-  const maximumPoint = Math.max(...points)
-  const padding = Math.max((maximumPoint - minimumPoint) * 0.12, 1)
-  const scaleMinimum = Math.max(0, minimumPoint - padding)
-  const scaleMaximum = maximumPoint + padding
-
-  return (
-    <div className="pricing-ladder-card">
-      <div className="inline-row wrap-row" style={{ justifyContent: 'space-between', marginBottom: '0.6rem' }}>
-        <strong>Price ladder</strong>
-        <span className="subtle-copy">{formatMoney(scaleMinimum)} to {formatMoney(scaleMaximum)}</span>
-      </div>
-      <div className="pricing-ladder-track">
-        {input.marketListings.map((listing, index) => (
-          <span
-            className={`pricing-ladder-dot band-${listing.distanceBand}${listing.eligibleForPricing ? '' : ' is-excluded'}`}
-            key={`${listing.dispensaryName}-${listing.listingName}-${index}`}
-            style={{ left: `${toLadderPercent(listing.postTaxPrice, scaleMinimum, scaleMaximum)}%`, opacity: listingOpacity(listing) }}
-            title={buildListingTooltip(listing)}
-          />
-        ))}
-        {input.marketAveragePostTaxPrice !== null ? (
-          <span className="pricing-ladder-marker average" style={{ left: `${toLadderPercent(input.marketAveragePostTaxPrice, scaleMinimum, scaleMaximum)}%` }}>
-            <span>Near/mid avg</span>
-          </span>
-        ) : null}
-        {input.marketMedianPostTaxPrice !== null ? (
-          <span className="pricing-ladder-marker median" style={{ left: `${toLadderPercent(input.marketMedianPostTaxPrice, scaleMinimum, scaleMaximum)}%` }}>
-            <span>Near/mid median</span>
-          </span>
-        ) : null}
-        {input.livePrice !== null ? (
-          <span className="pricing-ladder-marker live" style={{ left: `${toLadderPercent(input.livePrice, scaleMinimum, scaleMaximum)}%` }}>
-            <span>Live</span>
-          </span>
-        ) : null}
-        {input.proposedPrice !== null ? (
-          <span className="pricing-ladder-marker proposed" style={{ left: `${toLadderPercent(input.proposedPrice, scaleMinimum, scaleMaximum)}%` }}>
-            <span>{input.proposedLabel}</span>
-          </span>
-        ) : null}
-      </div>
-      <div className="pricing-ladder-legend">
-        <span><i className="legend-swatch band-near" />Near</span>
-        <span><i className="legend-swatch band-mid" />Mid</span>
-        <span><i className="legend-swatch band-far" />Far</span>
-        <span><i className="legend-swatch band-very_far" />Very far</span>
-        <span><i className="legend-swatch marker-median" />Near/mid median</span>
-        <span><i className="legend-swatch marker-live" />Live</span>
-        <span><i className="legend-swatch marker-proposed" />Reviewed</span>
-      </div>
-      {input.marketAverageLabel ? <p className="subtle-copy" style={{ marginTop: '0.6rem' }}>{input.marketAverageLabel}</p> : null}
-    </div>
-  )
-}
-
 function formatMarketReferenceText(averagePrice: number | null, medianPrice: number | null): string | null {
   if (averagePrice === null && medianPrice === null) {
     return null
@@ -1129,46 +1111,6 @@ function formatMarketReferenceText(averagePrice: number | null, medianPrice: num
   ].filter((value): value is string => value !== null)
 
   return parts.length > 0 ? `Near/mid ${parts.join(' · ')}` : null
-}
-
-function toLadderPercent(value: number, minimum: number, maximum: number): number {
-  if (maximum <= minimum) {
-    return 50
-  }
-  return ((value - minimum) / (maximum - minimum)) * 100
-}
-
-function listingOpacity(listing: PricingRunMarketListing): number {
-  const baseOpacity = (() => {
-    switch (listing.distanceBand) {
-      case 'near':
-        return 1
-      case 'mid':
-        return 0.76
-      case 'far':
-        return 0.42
-      case 'very_far': {
-        if (listing.distanceMiles === null) {
-          return 0.32
-        }
-        return Math.max(0.18, 0.42 - Math.max(0, listing.distanceMiles - 10) * 0.01)
-      }
-      default:
-        return 0.28
-    }
-  })()
-
-  return listing.eligibleForPricing ? baseOpacity : Math.max(0.12, baseOpacity * 0.35)
-}
-
-function buildListingTooltip(listing: PricingRunMarketListing): string {
-  return [
-    listing.dispensaryName,
-    formatMoney(listing.postTaxPrice),
-    formatDistanceBandLabel(listing.distanceBand, listing.distanceMiles),
-    `${formatMatchTierLabel(listing.matchTier)} match`,
-    listing.eligibleForPricing ? 'Included in pricing comps' : listing.exclusionReason ?? 'Display only',
-  ].join(' · ')
 }
 
 function formatMatchTierLabel(matchTier: PricingRunMarketListing['matchTier']): string {
