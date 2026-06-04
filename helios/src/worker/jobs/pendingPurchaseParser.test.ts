@@ -1,6 +1,100 @@
 import { describe, expect, it } from 'vitest'
 
-import { parseProductName } from './generatePendingPurchasePacketJob.js'
+import { parseCannaCureName, parseProductName } from './generatePendingPurchasePacketJob.js'
+
+describe('Canna Cure Farms brand-keyed deterministic parser', () => {
+  const BRAND = 'Canna Cure Farms, LLC'
+
+  it('parses a plain 1g pre-roll with a hyphen-glued strain', () => {
+    const parsed = parseCannaCureName('Blue Dream- 1g Pre-roll')
+    expect(parsed.brand).toBe(BRAND)
+    expect(parsed.category).toBe('Pre-Rolls')
+    expect(parsed.subcategory).toBe('')
+    expect(parsed.groupName).toBe('Blue Dream')
+    expect(parsed.strainName).toBe('Blue Dream')
+    expect(parsed.size).toBe('1g')
+    expect(parsed.variantTab).toBe('1g')
+    expect(parsed.packCount).toBe(1)
+    expect(parsed.variantName).toBe('Canna Cure Farms, LLC Blue Dream 1g')
+  })
+
+  it('parses a spaced-hyphen 1g pre-roll', () => {
+    const parsed = parseCannaCureName('Purple Punch - 1g Pre-roll')
+    expect(parsed.groupName).toBe('Purple Punch')
+    expect(parsed.variantName).toBe('Canna Cure Farms, LLC Purple Punch 1g')
+    expect(parsed.subcategory).toBe('')
+  })
+
+  it('strips a trailing (Sample) marker', () => {
+    const parsed = parseCannaCureName('Purple Punch - 1g Pre-roll (Sample)')
+    expect(parsed.groupName).toBe('Purple Punch')
+    expect(parsed.variantName).toBe('Canna Cure Farms, LLC Purple Punch 1g')
+  })
+
+  it('classifies an infused 1g pre-roll into the Infused subcategory', () => {
+    const parsed = parseCannaCureName('Blueberry OG- 1g infused Pre-roll')
+    expect(parsed.category).toBe('Pre-Rolls')
+    expect(parsed.subcategory).toBe('Infused')
+    expect(parsed.groupName).toBe('Blueberry OG')
+    expect(parsed.variantName).toBe('Canna Cure Farms, LLC Blueberry OG 1g')
+  })
+
+  it('handles "Infused" appearing before the size and plural Pre-rolls', () => {
+    const parsed = parseCannaCureName('Bomb Pop 1g Infused Pre-rolls')
+    expect(parsed.subcategory).toBe('Infused')
+    expect(parsed.groupName).toBe('Bomb Pop')
+    expect(parsed.size).toBe('1g')
+  })
+
+  it('keeps the strain (not the descriptor) as the group name', () => {
+    const parsed = parseCannaCureName('Caramel Apple - Infused 1g Pre-roll')
+    expect(parsed.groupName).toBe('Caramel Apple')
+    expect(parsed.strainName).toBe('Caramel Apple')
+    expect(parsed.subcategory).toBe('Infused')
+  })
+
+  it('parses a sub-gram pre-roll multipack as Pre-Rolls (not Flower)', () => {
+    const parsed = parseCannaCureName('Sour Diesel .5g pre-roll 6 Pack')
+    expect(parsed.category).toBe('Pre-Rolls')
+    expect(parsed.groupName).toBe('Sour Diesel')
+    expect(parsed.size).toBe('0.5g')
+    expect(parsed.packCount).toBe(6)
+    expect(parsed.variantTab).toBe('6x 0.5g')
+    expect(parsed.variantName).toBe('Canna Cure Farms, LLC Sour Diesel 6x 0.5g')
+  })
+
+  it('parses a bare sub-gram multipack with no pre-roll token as Pre-Rolls', () => {
+    const parsed = parseCannaCureName('Blue Zushi .5g 6 pack')
+    expect(parsed.category).toBe('Pre-Rolls')
+    expect(parsed.groupName).toBe('Blue Zushi')
+    expect(parsed.size).toBe('0.5g')
+    expect(parsed.packCount).toBe(6)
+    expect(parsed.variantTab).toBe('6x 0.5g')
+  })
+
+  it('parses a gummies flavor/dose into Edibles with no subcategory', () => {
+    const parsed = parseCannaCureName('Gummies (Honey Lemon/100mg)')
+    expect(parsed.brand).toBe(BRAND)
+    expect(parsed.category).toBe('Edibles')
+    expect(parsed.subcategory).toBe('')
+    expect(parsed.groupName).toBe('Honey Lemon Gummies')
+    expect(parsed.strainName).toBe('')
+    expect(parsed.size).toBe('100mg')
+    expect(parsed.variantName).toBe('Canna Cure Farms, LLC Honey Lemon Gummies 100mg')
+  })
+
+  it('parses a second gummies flavor', () => {
+    const parsed = parseCannaCureName('Gummies (Orange Cran/100mg)')
+    expect(parsed.groupName).toBe('Orange Cran Gummies')
+    expect(parsed.category).toBe('Edibles')
+  })
+
+  it('throws on shapes outside the known Canna Cure catalog', () => {
+    expect(() => parseCannaCureName('Some Random Flower 3.5g Jar')).toThrowError(
+      /Unhandled Canna Cure/,
+    )
+  })
+})
 
 describe('TTM deterministic parser', () => {
   it('parses TTM Flight multi-strain 3.0g flower', () => {

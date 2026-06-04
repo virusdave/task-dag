@@ -998,6 +998,7 @@ async function updateJobProgress(jobId: number, progress: JobProgress): Promise<
 async function resolvePendingPurchaseParse(input: {
   cache: CatalogCache
   group: PendingPositionGroup
+  knownDistributorName: string | null
   resolvedCost: ResolvedCost
   rowInputSignature: string
   suggestionCandidates: SuggestedProductCandidate[]
@@ -1094,6 +1095,75 @@ async function resolvePendingPurchaseParse(input: {
       reviewFlag: null,
       rule: null,
       ruleTrust: 'none',
+    }
+  }
+
+  // Brand-keyed deterministic parsers. Some upstream distributors ship
+  // METRC product names that carry NO brand token (e.g. Canna Cure
+  // Farms' "Blue Dream- 1g Pre-roll"), so the name-only parser above
+  // cannot dispatch them and throws. But the upstream brand IS known
+  // here from the linked distributor product row, which makes these
+  // names unambiguously parseable. Run the matching brand parser before
+  // paying for an LLM round-trip.
+  if (parsed === null && isCannaCureDistributorName(input.knownDistributorName)) {
+    let cannaParsed: ParsedProductName | null = null
+    try {
+      cannaParsed = parseCannaCureName(input.group.distributorProductName)
+    } catch (cannaError) {
+      parseError = joinNotes([
+        parseError,
+        `Canna Cure brand parser could not classify "${input.group.distributorProductName}": ${cannaError instanceof Error ? cannaError.message : 'unknown error'}.`,
+      ])
+    }
+    if (cannaParsed) {
+      const brandProfile = await withTransaction(async (db) => {
+        const profile = await upsertPendingPurchaseBrandProfile(db, {
+          displayBrandName: cannaParsed.brand,
+          metadata: { seededBy: 'known-distributor-brand-parser' },
+          sourceSystem: PENDING_PURCHASE_SOURCE_SYSTEM,
+          taxonomyHints: {
+            category: cannaParsed.category,
+            subcategory: cannaParsed.subcategory || null,
+          },
+        })
+        await upsertPendingPurchaseBrandAlias(db, {
+          aliasType: 'exact',
+          aliasValue: cannaParsed.brand,
+          brandProfileId: profile.id,
+          confidence: 1,
+          metadata: { seededBy: 'known-distributor-brand-parser' },
+          provenance: 'known-distributor-brand-parser',
+          status: 'active',
+        })
+        await insertPendingPurchaseParseObservation(db, {
+          brandProfileId: profile.id,
+          inference: toJsonValue({
+            knownDistributorName: input.knownDistributorName,
+            parsed: cannaParsed,
+            parserMode: 'known-distributor-brand',
+            parserSource: 'hardcoded-parser',
+          }),
+          normalizedDistributorProductName,
+          notes: 'Resolved deterministically from the known upstream distributor brand (Canna Cure Farms).',
+          observationStatus: 'accepted',
+          observationType: 'generation_parse',
+          rawDistributorProductName: input.group.distributorProductName,
+          rawRow: observationRawRow,
+          rowInputSignature: input.rowInputSignature,
+          sourceSystem: PENDING_PURCHASE_SOURCE_SYSTEM,
+        })
+        return profile
+      })
+
+      return {
+        brandProfile,
+        note: null,
+        parsed: cannaParsed,
+        parserSource: 'hardcoded-parser',
+        reviewFlag: null,
+        rule: null,
+        ruleTrust: 'none',
+      }
     }
   }
 
@@ -1210,6 +1280,7 @@ async function resolvePendingPurchaseDatabaseRule(
 
 function buildPendingPurchaseParserObservationRawRow(input: {
   group: PendingPositionGroup
+  knownDistributorName?: string | null
   resolvedCost: ResolvedCost
   suggestionCandidates: SuggestedProductCandidate[]
 }): Record<string, JsonValue> {
@@ -1219,6 +1290,7 @@ function buildPendingPurchaseParserObservationRawRow(input: {
     distributorProductName: input.group.distributorProductName,
     effectiveUnitCost: input.resolvedCost.value,
     effectiveUnitCostReason: input.resolvedCost.reason,
+    knownDistributorName: input.knownDistributorName ?? null,
     orderIds: [...input.group.orderIds].sort((left, right) => left - right),
     positionIds: input.group.positions.map((position) => position.id).sort((left, right) => left - right),
     sampleLike: input.group.positions.some((position) => isSampleLike(position)),
@@ -1418,11 +1490,17 @@ async function buildGeneratedRow({
   const suggestionNote = formatSuggestionCandidateNote(suggestionCandidates)
   const existingDistributorLinks = describeExistingDistributorLinks(stateDistributorProductRow)
   const rowCacheKey = `${group.siteKey}:${group.distributorProductId}`
+  // The upstream distributor brand printed on the live purchase row.
+  // Some vendors (e.g. Canna Cure Farms) ship METRC product names with
+  // NO brand token, so the name-only parser cannot dispatch them — but
+  // the brand IS known here from the linked distributor product row.
+  const knownDistributorName = stateDistributorProductRow?.distributorName ?? null
   const rowInputSignature = sha256(
     JSON.stringify({
       distributorProductId: group.distributorProductId,
       distributorProductName: group.distributorProductName,
       effectiveUnitCost: resolvedCost.value,
+      knownDistributorName,
       orderIds,
       positionIds,
       sampleLike,
@@ -1434,6 +1512,7 @@ async function buildGeneratedRow({
   const parseResolution = await resolvePendingPurchaseParse({
     cache,
     group,
+    knownDistributorName,
     resolvedCost,
     rowInputSignature,
     suggestionCandidates,
@@ -3791,6 +3870,158 @@ function parseHrBotanicalName(name: string): ParsedProductName {
     variantName: packCount > 1 ? `${brand} ${cultivar} ${variantTab}` : `${brand} ${cultivar} ${size}`,
     variantTab,
   }
+}
+
+/**
+ * Canonical upstream brand string for Canna Cure Farms. This is the
+ * distributor name printed on the live METRC purchase row; we keep the
+ * legal-entity form because the existing brand profile / aliases and the
+ * `validatePendingPurchaseParsedOutput` "variantName includes brand"
+ * check all key off this exact string.
+ */
+const CANNA_CURE_DISTRIBUTOR_BRAND = 'Canna Cure Farms, LLC'
+
+/**
+ * True when the known upstream distributor (from the linked distributor
+ * product row) is Canna Cure Farms. Uses the shared distributor-name
+ * comparator so the corporate "LLC" suffix is ignored.
+ */
+function isCannaCureDistributorName(value: string | null | undefined): boolean {
+  return sameDistributorName(value ?? null, CANNA_CURE_DISTRIBUTOR_BRAND)
+}
+
+/**
+ * Brand-keyed deterministic parser for Canna Cure Farms.
+ *
+ * Canna Cure's METRC product names carry NO brand token, so the
+ * name-only `parseProductNameLegacy` dispatcher cannot route them and
+ * throws. This parser is only invoked from `resolvePendingPurchaseParse`
+ * once we know — from the linked distributor product row — that the
+ * upstream brand is Canna Cure Farms. It deterministically handles the
+ * brand's two observed shapes:
+ *
+ *   - Pre-rolls: `<Strain>[-] <size> [infused] Pre-roll[s]` and bare
+ *     sub-gram multipacks like `<Strain> .5g 6 Pack` (a 6-pack of
+ *     half-gram pre-rolls). A trailing `(Sample)` marker is stripped.
+ *   - Gummies: `Gummies (<flavor>/<size>)` → Edibles (the NY edible
+ *     canonical split is applied downstream in `buildGeneratedRow`).
+ *
+ * Anything outside those shapes throws so the LLM / manual-review path
+ * still owns the long tail — a partial deterministic parse is worse than
+ * needs-review.
+ */
+export function parseCannaCureName(rawName: string): ParsedProductName {
+  const brand = CANNA_CURE_DISTRIBUTOR_BRAND
+  // Strip a trailing "(Sample)" marker — sample-ness is tracked
+  // separately via the position, not the variant taxonomy.
+  const name = rawName.replace(/\s*\(\s*sample\s*\)\s*$/i, '').trim()
+  const lowered = name.toLowerCase()
+
+  // --- Gummies: "Gummies (<flavor>/<size>)" -> Edibles ----------------
+  const gummyMatch = /^gummies\s*\(\s*(.+?)\s*\/\s*(\d+(?:\.\d+)?\s*mg)\s*\)$/i.exec(name)
+  if (gummyMatch) {
+    const flavor = cleanCultivar(gummyMatch[1])
+    if (flavor.length === 0) {
+      throw new Error(`Unhandled Canna Cure gummy name (empty flavor): ${rawName}`)
+    }
+    const size = normalizeSizeText(gummyMatch[2]) ?? gummyMatch[2].replace(/\s+/g, '').toLowerCase()
+    const groupName = `${flavor} Gummies`
+    return normalizeAndValidateParsedProductName(
+      {
+        brand,
+        category: 'Edibles',
+        groupName,
+        packCount: 1,
+        prevalence: null,
+        searchTerm: flavor,
+        size,
+        strainName: '',
+        // Edibles gummies are deliberately filed with no subcategory in
+        // our Sweed taxonomy (see LLM_FORBIDDEN_SUBCATEGORIES).
+        subcategory: '',
+        variantName: `${brand} ${groupName} ${size}`,
+        variantTab: size,
+      },
+      rawName,
+    )
+  }
+
+  // --- Pre-rolls ------------------------------------------------------
+  // Require either an explicit pre-roll token or a bare sub-gram
+  // multipack shape; Canna Cure's catalog is pre-rolls + gummies only.
+  const isPreroll = /pre[\s-]?rolls?/i.test(lowered)
+  const isBareMultipack = /\b\d+\s*(?:pack|pk)\b/i.test(lowered)
+  if (!isPreroll && !isBareMultipack) {
+    throw new Error(`Unhandled Canna Cure product name: ${rawName}`)
+  }
+
+  // Size token. The negative lookbehind prevents matching the "5g" tail
+  // inside ".5g" as 5 grams.
+  const sizeMatch = /(?<![\d.])(\d*\.?\d+)\s*g\b/i.exec(name)
+  if (!sizeMatch) {
+    throw new Error(`Unhandled Canna Cure product name (no size token): ${rawName}`)
+  }
+  const sizeText = sizeMatch[1].startsWith('.') ? `0${sizeMatch[1]}` : sizeMatch[1]
+  const sizeGrams = Number(sizeText)
+  const size = normalizeSizeText(`${sizeText}g`) ?? `${sizeText}g`
+
+  // Pack count.
+  let packCount = 1
+  const packMatch = /(\d+)\s*(?:pack|pk)\b/i.exec(name)
+  if (packMatch) {
+    const parsedCount = Number(packMatch[1])
+    if (Number.isFinite(parsedCount) && parsedCount >= 1) {
+      packCount = parsedCount
+    }
+  }
+
+  // A multipack whose unit size is > 1g is ambiguous (it may be a total
+  // package weight rather than a per-unit size). Defer those to manual
+  // review rather than guessing.
+  if (packCount > 1 && sizeGrams > 1) {
+    throw new Error(`Unhandled Canna Cure multipack size: ${rawName}`)
+  }
+
+  const isInfused = !lowered.includes('uninfused')
+    && ['infused', 'live resin', 'rosin', 'hash hole'].some((token) => lowered.includes(token))
+  const subcategory = isInfused ? 'Infused' : ''
+
+  // Strain = the name with every descriptor token removed.
+  let strain = name
+    .replace(/\b\d+\s*(?:pack|pk)\b/gi, '')
+    .replace(/pre[\s-]?rolls?/gi, '')
+    .replace(/\buninfused\b/gi, '')
+    .replace(/\binfused\b/gi, '')
+    .replace(/\blive\s+resin\b/gi, '')
+    .replace(/\brosin\b/gi, '')
+    .replace(/(?<![\d.])\d*\.?\d+\s*g\b/gi, '')
+    .replace(/[-–—]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+  strain = cleanCultivar(strain)
+  if (strain.length === 0) {
+    throw new Error(`Unhandled Canna Cure product name (empty strain): ${rawName}`)
+  }
+
+  const variantTab = packCount > 1 ? `${packCount}x ${size}` : size
+  const variantName = packCount > 1 ? `${brand} ${strain} ${variantTab}` : `${brand} ${strain} ${size}`
+
+  return normalizeAndValidateParsedProductName(
+    {
+      brand,
+      category: 'Pre-Rolls',
+      groupName: strain,
+      packCount,
+      prevalence: derivePrevalence(name),
+      searchTerm: strain,
+      size,
+      strainName: strain,
+      subcategory,
+      variantName,
+      variantTab,
+    },
+    rawName,
+  )
 }
 
 function parseCuraleafName(name: string): ParsedProductName {
