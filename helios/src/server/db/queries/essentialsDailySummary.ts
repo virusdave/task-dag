@@ -32,9 +32,12 @@ import { getPool, type Queryable } from '../pool.js'
 // / queryNetSalesDollars and sweedPackageSnapshotsQueries.queryGrossMarginDollars
 // / queryEffectiveGmPct):
 //
-//   * grossReceipts  = sum(grand_total_dollars)      — includes tax
-//   * grossSales     = sum(subtotal + discount)       — pre-tax, pre-discount
-//   * netSales       = sum(subtotal_dollars)          — pre-tax, post-discount
+//   * grossReceipts  = sum(grand_total_dollars)              — includes tax
+//   * grossSales     = sum(subtotal_dollars)                 — pre-tax, PRE-discount (list price)
+//   * netSales       = sum(subtotal_dollars − discount_dollars) — pre-tax, POST-discount
+//     [Sweed's `subtotalAmount` is PRE-discount; verified 2026-06-04
+//      that grand_total = subtotal − discount + tax. The prior code
+//      had gross = subtotal+discount and net = subtotal, both wrong.]
 //   * marginDollars  = Σ_lines (rev − qty·cost) over line items with a
 //                      KNOWN cost. Line items without a known cost
 //                      contribute revenue to grossSales/netSales (those
@@ -177,8 +180,8 @@ export async function loadEssentialsDailySummary(
         count(*) filter (where is_first_time) as new_purchases,
         count(*) filter (where not is_first_time) as returning_purchases,
         sum(coalesce(grand_total_dollars, 0))::numeric as gross_receipts,
-        sum(coalesce(subtotal_dollars, 0) + coalesce(discount_dollars, 0))::numeric as gross_sales,
-        sum(coalesce(subtotal_dollars, 0))::numeric as net_sales
+        sum(coalesce(subtotal_dollars, 0))::numeric as gross_sales,
+        sum(coalesce(subtotal_dollars, 0) - coalesce(discount_dollars, 0))::numeric as net_sales
       from todays_orders
       group by dealer_id
     `,

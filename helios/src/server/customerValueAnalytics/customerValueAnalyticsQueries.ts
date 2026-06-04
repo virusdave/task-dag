@@ -307,9 +307,14 @@ export async function getCustomerValueAnalytics(
         so.invoice_id,
         so.pay_time,
         so.customer_id,
+        -- Gross sales = pre-tax, PRE-discount list price = subtotal alone.
+        -- Net sales = subtotal − discount (pre-tax, post-discount).
+        -- Sweed's subtotal_dollars is pre-discount (verified 2026-06-04:
+        -- grand_total = subtotal − discount + tax). Prior code had gross
+        -- = subtotal+discount and net = subtotal, both wrong.
+        coalesce(so.subtotal_dollars, 0)::numeric        as gross_sales_dollars,
         (coalesce(so.subtotal_dollars, 0)
-         + coalesce(so.discount_dollars, 0))::numeric    as gross_sales_dollars,
-        coalesce(so.subtotal_dollars, 0)::numeric        as net_sales_dollars,
+         - coalesce(so.discount_dollars, 0))::numeric    as net_sales_dollars,
         coalesce(so.grand_total_dollars, 0)::numeric     as gross_receipts_dollars
       from sweed_orders so
       where so.dealer_id = any($1::bigint[])

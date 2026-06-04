@@ -63,10 +63,10 @@ export const REAL_METRICS: ReadonlyArray<MetricDef> = [
   {
     id: 'essentials.gross_sales',
     group: 'Essentials',
-    title: 'Gross sales $ (ex-tax)',
+    title: 'Gross sales $ (ex-tax, pre-discount)',
     description:
-      'Sum of pre-discount, pre-tax line totals per bucket. Computed as Sweed `subtotalAmount` + `grandTotalDiscountAmount` — i.e. what would have been billed before promos/discounts were applied, with sales tax excluded. Use this when you want to see how much business the store actually drove, regardless of how aggressive the discounting was.',
-    series: [{ id: 'gross_sales', label: 'Gross sales $ (ex-tax)', colour: '#2ca02c' }],
+      'Sum of pre-discount, pre-tax list-price line totals per bucket. This is Sweed `subtotalAmount`, which is already the PRE-discount, pre-tax amount (verified 2026-06-04: grand_total = subtotal − discount + tax). It is "list price before promos/discounts", with sales tax excluded. Use this to see how much business the store drove at list, regardless of how aggressive the discounting was.',
+    series: [{ id: 'gross_sales', label: 'Gross sales $ (ex-tax, pre-discount)', colour: '#2ca02c' }],
     defaultAggregation: 'week',
     supportedAggregations: [...SUPPORTED],
     query: queryGrossSalesDollars,
@@ -89,7 +89,7 @@ export const REAL_METRICS: ReadonlyArray<MetricDef> = [
     group: 'Essentials',
     title: 'Net sales $ (ex-tax, net of discounts)',
     description:
-      'Sum of `subtotal_dollars` per bucket — the pre-tax line total after promos/discounts have already been applied. This is the "revenue you actually booked" number; the difference between Gross Sales and Net Sales is what discounting cost you.',
+      'Sum of `subtotal_dollars − discount_dollars` per bucket — the pre-tax line total after promos/discounts are applied. This is the "revenue you actually booked" number; the difference between Gross Sales and Net Sales is what discounting cost you.',
     series: [{ id: 'net_sales', label: 'Net sales $ (ex-tax, net of discounts)', colour: '#9467bd' }],
     defaultAggregation: 'week',
     supportedAggregations: [...SUPPORTED],
