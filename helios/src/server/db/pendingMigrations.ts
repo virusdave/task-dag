@@ -586,6 +586,23 @@ const SENTINELS: MigrationSentinel[] = [
     check: (db) => hypertableCompressionEnabled(db, 'sweed_auth_events'),
   },
   {
+    // Phase C2 of the Helios DB-cost epic (virusdave/top-level#11).
+    // Migration 057 enables Timescale compression on
+    // `litalerts_competitor_observations`. segmentby = status,
+    // orderby = (product_id, captured_at DESC, id DESC),
+    // compress_after = 60 days — comfortably larger than the
+    // worst-case "latest succeeded observation" age (~30 days)
+    // so the rolling scheduler's UPDATE of next_refresh_at never
+    // hits a compressed chunk.
+    migrationId: '057_litalerts_competitor_observations_compression',
+    label:
+      'litalerts_competitor_observations — enable Timescale ' +
+      'compression (segmentby=status, compress_after=60d, ' +
+      'DB-cost epic phase C2).',
+    check: (db) =>
+      hypertableCompressionEnabled(db, 'litalerts_competitor_observations'),
+  },
+  {
     // Phase F1 of the Helios DB-cost epic (virusdave/top-level#11).
     // Migration 052 TRUNCATEs the historical 15 GB / 32M-row
     // backlog of `catalog_taxonomy_snapshot_rows`; the new in-job
