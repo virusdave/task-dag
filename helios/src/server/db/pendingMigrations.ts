@@ -552,6 +552,24 @@ const SENTINELS: MigrationSentinel[] = [
       return result.rows[0]?.ok === true
     },
   },
+  {
+    // Phase D2 of the cashier-tablet / check-ins enrichment epic
+    // (virusdave/top-level#12, FreshlyBakedNYC/automation#40).
+    // Covers the per-row "favorite category" / "favorite product"
+    // subquery on /admin/customers/check-ins and its cashier-tablet
+    // twin so we don't re-sort every snapshot version per inventory
+    // item per request. Without this index the list page still
+    // works, but each request burns the snapshot history for every
+    // line item of every visible customer.
+    migrationId: '053_sweed_package_snapshots_dealer_item_observed_idx',
+    label:
+      'sweed_package_snapshots_dealer_item_observed_max_idx — covering ' +
+      'index for the /admin/customers/check-ins favorite-category / ' +
+      'favorite-product lateral subquery (DB-cost hard requirement, ' +
+      'D2 of #12 / #40).',
+    check: (db) =>
+      indexExists(db, 'sweed_package_snapshots_dealer_item_observed_max_idx'),
+  },
 ]
 
 interface CacheEntry {

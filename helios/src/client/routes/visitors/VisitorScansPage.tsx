@@ -121,6 +121,16 @@ function formatName(item: VisitorScanItem): string {
   return parts.length === 0 ? '—' : parts.join(' ')
 }
 
+function formatCurrency(value: number | null | undefined): string {
+  if (value === null || value === undefined) return '—'
+  return `$${value.toFixed(2)}`
+}
+
+function formatCount(value: number | null | undefined): string {
+  if (value === null || value === undefined) return '—'
+  return value.toLocaleString()
+}
+
 const FILTER_KEYS = [
   'siteSlugs',
   'ingestSources',
@@ -424,6 +434,15 @@ export function VisitorScansPage() {
                   {showMaps ? <col className="vs-col-mini" /> : null}
                   <col className="vs-col-visitor" />
                   <col className="vs-col-status" />
+                  {/* D2 Sweed-summary columns
+                      (virusdave/top-level#12). Always rendered
+                      regardless of the Expanded toggle — these are
+                      sales-history metrics, not address PII. */}
+                  <col className="vs-col-sweed" />
+                  <col className="vs-col-sweed" />
+                  <col className="vs-col-sweed" />
+                  <col className="vs-col-sweed" />
+                  <col className="vs-col-sweed" />
                   {showMaps ? <col className="vs-col-state" /> : null}
                   {showMaps ? <col className="vs-col-postal" /> : null}
                   {showMaps ? <col className="vs-col-city" /> : null}
@@ -439,6 +458,19 @@ export function VisitorScansPage() {
                     {showMaps ? <th>Map</th> : null}
                     <th>Visitor</th>
                     <th>Customer</th>
+                    <th title="Lifetime purchase count at this dealer (Sweed CRM)">
+                      # Purchases
+                    </th>
+                    <th title="Average purchase amount (lifetime spend / purchase count)">
+                      Avg $
+                    </th>
+                    <th title="Lifetime spend at this dealer (Sweed CRM)">Total $</th>
+                    <th title="Most-purchased category, qualified by ≥3 distinct invoices">
+                      Favorite category
+                    </th>
+                    <th title="Most-purchased product, qualified by ≥3 distinct invoices">
+                      Favorite product
+                    </th>
                     {showMaps ? <th>St</th> : null}
                     {showMaps ? <th>Zip</th> : null}
                     {showMaps ? <th>City</th> : null}
@@ -497,6 +529,28 @@ export function VisitorScansPage() {
                             <span className="subtle-copy">—</span>
                           )}
                         </td>
+                        {(() => {
+                          const summary = item.sweedPurchaseSummary
+                          return (
+                            <>
+                              <td className="vs-cell-numeric">
+                                {formatCount(summary?.totalPurchaseCount ?? null)}
+                              </td>
+                              <td className="vs-cell-numeric">
+                                {formatCurrency(summary?.averagePurchaseDollars ?? null)}
+                              </td>
+                              <td className="vs-cell-numeric">
+                                {formatCurrency(summary?.lifetimeSpendDollars ?? null)}
+                              </td>
+                              <td className="vs-cell-truncate">
+                                {summary?.favoriteCategoryName ?? '—'}
+                              </td>
+                              <td className="vs-cell-truncate">
+                                {summary?.favoriteProductName ?? '—'}
+                              </td>
+                            </>
+                          )
+                        })()}
                         {showMaps ? <td>{item.state ?? '—'}</td> : null}
                         {showMaps ? <td>{item.postalCode ?? '—'}</td> : null}
                         {showMaps ? (
@@ -552,6 +606,28 @@ export function VisitorScansPage() {
                           {formatTime(item.scannedAt ?? item.ingestedAt)}
                         </div>
                         <dl className="vs-card-grid">
+                          {item.sweedPurchaseSummary !== null ? (
+                            <>
+                              <dt># Purchases</dt>
+                              <dd>{formatCount(item.sweedPurchaseSummary.totalPurchaseCount)}</dd>
+                              <dt>Avg $</dt>
+                              <dd>{formatCurrency(item.sweedPurchaseSummary.averagePurchaseDollars)}</dd>
+                              <dt>Total $</dt>
+                              <dd>{formatCurrency(item.sweedPurchaseSummary.lifetimeSpendDollars)}</dd>
+                              {item.sweedPurchaseSummary.favoriteCategoryName !== null ? (
+                                <>
+                                  <dt>Favorite category</dt>
+                                  <dd>{item.sweedPurchaseSummary.favoriteCategoryName}</dd>
+                                </>
+                              ) : null}
+                              {item.sweedPurchaseSummary.favoriteProductName !== null ? (
+                                <>
+                                  <dt>Favorite product</dt>
+                                  <dd>{item.sweedPurchaseSummary.favoriteProductName}</dd>
+                                </>
+                              ) : null}
+                            </>
+                          ) : null}
                           {showMaps ? (
                             <>
                               <dt>State</dt>

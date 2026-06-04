@@ -82,6 +82,20 @@ export const VisitorScanSweedPurchaseSummarySchema = z.object({
   latestPurchaseAt: z.string().nullable(),
   lifetimeSpendDollars: z.number(),
   hasPriorPurchaseBeforeScan: z.boolean(),
+  // ---- D2 enrichment (virusdave/top-level#12) ----
+  // Average dollars per purchase. Null when totalPurchaseCount = 0.
+  // Computed server-side as lifetimeSpend / totalPurchaseCount,
+  // rounded to cents, so the client renders a stable number.
+  averagePurchaseDollars: z.number().nullable(),
+  // Per-customer "favorite category" / "favorite product" derived
+  // from the customer's sweed_order_items_flat rows joined to the
+  // latest sweed_package_snapshots row per inventory_item_id.
+  // Surfaced only when the customer has purchased at least 3
+  // distinct invoices containing that category / product — below
+  // that threshold the operator+cashier display intentionally
+  // shows nothing (per the "≥3 repeats to qualify" rule).
+  favoriteCategoryName: z.string().nullable(),
+  favoriteProductName: z.string().nullable(),
 })
 export type VisitorScanSweedPurchaseSummary = z.infer<
   typeof VisitorScanSweedPurchaseSummarySchema

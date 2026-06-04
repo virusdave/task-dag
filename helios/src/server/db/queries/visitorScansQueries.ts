@@ -277,6 +277,98 @@ export interface VisitorScanListSweedSummary {
   latestPurchaseAt: string | null
   lifetimeSpendDollars: number
   hasPriorPurchaseBeforeScan: boolean
+  // ---- D2 enrichment (virusdave/top-level#12) ----
+  averagePurchaseDollars: number | null
+  favoriteCategoryName: string | null
+  favoriteProductName: string | null
+}
+
+/**
+ * Shared SQL fragment computing a customer's "favorite category" /
+ * "favorite product" — the category and product (resolved from the
+ * latest `sweed_package_snapshots` row per inventory_item_id) that
+ * appear in the most distinct invoices for this customer.
+ *
+ * Returns NULLs for both when no category / product clears the
+ * 3-distinct-invoices threshold (per the operator's "≥3 repeats to
+ * qualify" rule). Two correlated subqueries — one per axis — kept
+ * deliberately simple so the planner can choose the obvious index
+ * paths (sweed_orders_customer_pay_time_idx,
+ * sweed_order_items_flat_invoice_idx,
+ * sweed_package_snapshots_inventory_item_idx) without hinting.
+ *
+ * The substitutions `:dealer` and `:customer` are intentionally
+ * left as text placeholders; the caller string-interpolates them
+ * with the actual SQL parameter aliases (e.g. `l.dealer_id` and
+ * `l.sweed_customer_id`) so we don't need to wire extra positional
+ * parameters per row. Both inputs are column references on the
+ * outer query, NOT user input, so no injection risk.
+ *
+ * Cost guard: the entire block evaluates to NULL when `:customer
+ * IS NULL`, so unlinked rows pay zero per-row aggregation cost.
+ */
+function favoriteCategoryProductSubqueriesSql(
+  dealer: string,
+  customer: string,
+): {
+  selectColumns: string
+  ctes: string
+} {
+  // We compute both axes in a single CTE-like LATERAL so the
+  // customer's items are scanned once. Postgres' planner inlines
+  // the LATERAL aggregate.
+  return {
+    selectColumns: `
+      fav.favorite_category_name as sweed_favorite_category_name,
+      fav.favorite_product_name  as sweed_favorite_product_name
+    `,
+    ctes: `
+      left join lateral (
+        with customer_items as (
+          select
+            so.invoice_id,
+            snap.category_name,
+            snap.product_name
+          from sweed_orders so
+          join sweed_order_items_flat soi
+            on soi.dealer_id = so.dealer_id
+           and soi.invoice_id = so.invoice_id
+          left join lateral (
+            select category_name, product_name
+            from sweed_package_snapshots
+            where dealer_id = soi.dealer_id
+              and inventory_item_id = soi.inventory_item_id
+            order by observed_at_max desc
+            limit 1
+          ) snap on true
+          where ${customer} is not null
+            and so.dealer_id = ${dealer}
+            and so.customer_id = ${customer}
+        ),
+        category_counts as (
+          select category_name, count(distinct invoice_id) as invoice_count
+          from customer_items
+          where category_name is not null
+          group by category_name
+          having count(distinct invoice_id) >= 3
+          order by invoice_count desc, category_name asc
+          limit 1
+        ),
+        product_counts as (
+          select product_name, count(distinct invoice_id) as invoice_count
+          from customer_items
+          where product_name is not null
+          group by product_name
+          having count(distinct invoice_id) >= 3
+          order by invoice_count desc, product_name asc
+          limit 1
+        )
+        select
+          (select category_name from category_counts) as favorite_category_name,
+          (select product_name  from product_counts)  as favorite_product_name
+      ) fav on ${customer} is not null
+    `,
+  }
 }
 
 export interface VisitorScanListMiniMarker {
@@ -369,6 +461,8 @@ interface VisitorScanRow {
   sweed_first_purchase_total: string | number | null
   sweed_latest_purchase_at: Date | null
   sweed_lifetime_spend: string | number | null
+  sweed_favorite_category_name: string | null
+  sweed_favorite_product_name: string | null
 }
 
 function toIsoNullable(value: Date | null): string | null {
@@ -432,14 +526,30 @@ function rowToItem(row: VisitorScanRow): VisitorScanListItem {
   if (sweedLink !== null && sweedLink.customerId !== null) {
     const totalPurchaseCount = intOrZero(row.sweed_total_purchase_count)
     const priorPurchaseCount = intOrZero(row.sweed_prior_purchase_count)
+    const lifetimeSpend = numOrNullValue(row.sweed_lifetime_spend) ?? 0
+    const averagePurchase =
+      totalPurchaseCount > 0
+        ? Number((lifetimeSpend / totalPurchaseCount).toFixed(2))
+        : null
     sweedPurchaseSummary = {
       totalPurchaseCount,
       priorPurchaseCount,
       firstPurchaseAt: toIsoNullable(row.sweed_first_purchase_at),
       firstPurchaseTotalDollars: numOrNullValue(row.sweed_first_purchase_total),
       latestPurchaseAt: toIsoNullable(row.sweed_latest_purchase_at),
-      lifetimeSpendDollars: numOrNullValue(row.sweed_lifetime_spend) ?? 0,
+      lifetimeSpendDollars: lifetimeSpend,
       hasPriorPurchaseBeforeScan: priorPurchaseCount > 0,
+      averagePurchaseDollars: averagePurchase,
+      favoriteCategoryName:
+        typeof row.sweed_favorite_category_name === 'string' &&
+        row.sweed_favorite_category_name.trim().length > 0
+          ? row.sweed_favorite_category_name
+          : null,
+      favoriteProductName:
+        typeof row.sweed_favorite_product_name === 'string' &&
+        row.sweed_favorite_product_name.trim().length > 0
+          ? row.sweed_favorite_product_name
+          : null,
     }
   }
 
@@ -557,6 +667,10 @@ export async function listVisitorScans(
   // per item being returned, capped at limit+1) so the per-row cost
   // stays modest. The two key inputs (`person_key`,
   // `(dealer_id, sweed_customer_id)`) are indexed.
+  const fav = favoriteCategoryProductSubqueriesSql(
+    'l.dealer_id',
+    'l.sweed_customer_id',
+  )
   const sql = `
     select
       vs.id, vs.ingested_at, vs.ingest_source, vs.site_slug, vs.provider,
@@ -589,7 +703,8 @@ export async function listVisitorScans(
       sweed_summary.first_purchase_at        as sweed_first_purchase_at,
       sweed_summary.first_purchase_total     as sweed_first_purchase_total,
       sweed_summary.latest_purchase_at       as sweed_latest_purchase_at,
-      sweed_summary.lifetime_spend           as sweed_lifetime_spend
+      sweed_summary.lifetime_spend           as sweed_lifetime_spend,
+      ${fav.selectColumns}
 
     from visitor_scans vs
 
@@ -651,6 +766,8 @@ export async function listVisitorScans(
         and so.dealer_id = l.dealer_id
         and so.customer_id = l.sweed_customer_id
     ) sweed_summary on l.sweed_customer_id is not null
+
+    ${fav.ctes}
 
     ${whereSql}
     order by coalesce(vs.scanned_at, vs.ingested_at) desc, vs.id desc
@@ -720,6 +837,8 @@ interface CashierVisitorScanRow {
   sweed_purchase_count: string | number | null
   sweed_lifetime_spend: string | number | null
   sweed_latest_purchase_at: Date | null
+  sweed_favorite_category_name: string | null
+  sweed_favorite_product_name: string | null
 }
 
 function redactName(firstName: string | null, lastName: string | null): string {
@@ -762,11 +881,16 @@ function rowToCashierItem(row: CashierVisitorScanRow): CashierVisitorScanItem {
       latestPurchaseAt: row.sweed_latest_purchase_at
         ? row.sweed_latest_purchase_at.toISOString()
         : null,
-      // Phase-D2 will populate these in the same query; for the
-      // initial cashier-page shipping we leave them null so the
-      // contract is forward-compatible.
-      favoriteCategoryName: null,
-      favoriteProductName: null,
+      favoriteCategoryName:
+        typeof row.sweed_favorite_category_name === 'string' &&
+        row.sweed_favorite_category_name.trim().length > 0
+          ? row.sweed_favorite_category_name
+          : null,
+      favoriteProductName:
+        typeof row.sweed_favorite_product_name === 'string' &&
+        row.sweed_favorite_product_name.trim().length > 0
+          ? row.sweed_favorite_product_name
+          : null,
     }
   }
 
@@ -807,6 +931,10 @@ export async function listCashierVisitorScans(
   params.push(limit)
   const limitPlaceholder = `$${params.length}`
 
+  const fav = favoriteCategoryProductSubqueriesSql(
+    'l.dealer_id',
+    'l.sweed_customer_id',
+  )
   const sql = `
     select
       vs.id,
@@ -826,7 +954,8 @@ export async function listCashierVisitorScans(
 
       sweed_summary.total_count              as sweed_purchase_count,
       sweed_summary.lifetime_spend           as sweed_lifetime_spend,
-      sweed_summary.latest_purchase_at       as sweed_latest_purchase_at
+      sweed_summary.latest_purchase_at       as sweed_latest_purchase_at,
+      ${fav.selectColumns}
 
     from visitor_scans vs
 
@@ -855,6 +984,8 @@ export async function listCashierVisitorScans(
         and so.dealer_id = l.dealer_id
         and so.customer_id = l.sweed_customer_id
     ) sweed_summary on l.sweed_customer_id is not null
+
+    ${fav.ctes}
 
     ${whereSql}
     order by vs.id desc

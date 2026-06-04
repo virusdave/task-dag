@@ -5600,6 +5600,11 @@ span.metric-chart-legend-item {
 .visitor-scans-page .vs-col-doc    { width: 11ch; }
 .visitor-scans-page .vs-col-scan   { width: 9ch; }
 .visitor-scans-page .vs-col-raw    { width: 3.5rem; }
+.visitor-scans-page .vs-col-sweed  { width: 9ch; }
+.visitor-scans-page .vs-cell-numeric {
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
 
 /* Per AGENTS.md: even pills should be compact and not balloon the
    row height inside this dense table view. */

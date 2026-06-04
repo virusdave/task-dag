@@ -863,14 +863,26 @@ function buildPurchaseLifetime(
       latest = payTime
     }
   }
+  const totalPurchaseCount = truncated ? invoices.length - 1 : invoices.length
+  const averagePurchase =
+    totalPurchaseCount > 0
+      ? Number((lifetime / totalPurchaseCount).toFixed(2))
+      : null
   return {
     priorPurchaseCount: prior,
-    totalPurchaseCount: truncated ? invoices.length - 1 : invoices.length,
+    totalPurchaseCount,
     firstPurchaseAt: toIsoNullable(first),
     firstPurchaseTotalDollars: firstTotal,
     latestPurchaseAt: toIsoNullable(latest),
     lifetimeSpendDollars: lifetime,
     hasPriorPurchaseBeforeScan: prior > 0,
+    averagePurchaseDollars: averagePurchase,
+    // The customer-details endpoint does not yet compute favorites
+    // (separate work item). Leaving null preserves the contract
+    // shape; the operator can still see this surface on the
+    // /admin/customers/check-ins list page.
+    favoriteCategoryName: null,
+    favoriteProductName: null,
   }
 }
 
