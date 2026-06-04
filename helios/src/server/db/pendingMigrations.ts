@@ -108,6 +108,31 @@ async function hypertableCompressionEnabled(
   return result.rows[0]?.exists === true
 }
 
+async function compressionPolicyCompressAfterIs(
+  db: Queryable,
+  hypertableName: string,
+  compressAfter: string,
+): Promise<boolean> {
+  // Unlike `hypertableCompressionEnabled`, this inspects the actual
+  // compression POLICY threshold. Migration 058 only changes the
+  // `compress_after` of an already-enabled policy, so the
+  // "compression enabled" sentinel would report it as applied even
+  // before it runs. We compare the policy job's config value
+  // (e.g. {"hypertable_id": 3, "compress_after": "45 days"}) instead.
+  const result = await db.query<{ exists: boolean }>(
+    `select exists(
+       select 1
+         from timescaledb_information.jobs
+        where hypertable_schema = 'public'
+          and hypertable_name = $1
+          and proc_name like '%compression%'
+          and config->>'compress_after' = $2
+     ) as exists`,
+    [hypertableName, compressAfter],
+  )
+  return result.rows[0]?.exists === true
+}
+
 async function hypertableExists(db: Queryable, hypertableName: string): Promise<boolean> {
   // TimescaleDB tracks hypertables in `timescaledb_information.hypertables`.
   // The view exists on every database that has the timescaledb
@@ -601,6 +626,26 @@ const SENTINELS: MigrationSentinel[] = [
       'DB-cost epic phase C2).',
     check: (db) =>
       hypertableCompressionEnabled(db, 'litalerts_competitor_observations'),
+  },
+  {
+    // Phase C3 of the Helios DB-cost epic (virusdave/top-level#11).
+    // Migration 058 lowers the litalerts_competitor_observations
+    // compression policy threshold from compress_after=60d (set in
+    // 057) down to 45d, so the growing uncompressed evidence_json
+    // window is bounded while staying clear of the rolling
+    // scheduler's mutable latest-row window (max observed age ~30d).
+    // The sentinel inspects the policy's compress_after value, not
+    // just "compression enabled", because the latter is already true.
+    migrationId: '058_litalerts_competitor_observations_compress_after_45d',
+    label:
+      'litalerts_competitor_observations — lower compression ' +
+      'compress_after 60d→45d (DB-cost epic phase C3).',
+    check: (db) =>
+      compressionPolicyCompressAfterIs(
+        db,
+        'litalerts_competitor_observations',
+        '45 days',
+      ),
   },
   {
     // Phase F1 of the Helios DB-cost epic (virusdave/top-level#11).
