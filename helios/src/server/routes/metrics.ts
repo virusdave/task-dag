@@ -7,6 +7,7 @@ import {
   MetricQueryRequestSchema,
   MetricQueryResponseSchema,
   MetricRouteParamsSchema,
+  type MetricAggregation,
   type MetricCatalogFilterDimension,
 } from '../../shared/contracts/index.js'
 import { metricGrantForGroup } from '../../shared/domain/metricGrants.js'
@@ -14,7 +15,55 @@ import { requireMetricsGrant } from '../auth/requireSession.js'
 import { loadEssentialsDailySummary } from '../db/queries/essentialsDailySummary.js'
 import { queryWithPartialBuckets } from '../metrics/partialBuckets.js'
 import { getMetricById, listMetricSummaries } from '../metrics/registry.js'
+import { advanceBucketStart } from '../metrics/timeBuckets.js'
 import { toMetricSummary } from '../metrics/types.js'
+
+/**
+ * Aggregations whose buckets have a well-defined "next bucket start"
+ * we can attach to each row as `tEnd`. Categorical aggregations
+ * (`total` / `dow` / `dom` / `dofortnight`) have no calendar end
+ * so we leave their rows unannotated and the client falls back to
+ * `t` for x-positioning.
+ */
+const TIME_AGGS_FOR_TEND: ReadonlySet<MetricAggregation> = new Set<MetricAggregation>([
+  'hour',
+  'date',
+  'week',
+  'month',
+])
+
+/**
+ * Annotate each emitted row with its natural bucket-end timestamp
+ * (`tEnd`) so the line-chart renderer can plot every aggregate at
+ * end-of-bucket. Keeps the spline's spacing linear in time even
+ * when the rightmost knot is an extrapolated full-bucket endpoint
+ * (at `partialProjectedT = lastEnd`); without this the
+ * extrapolated dot sits a full bucket-width to the right of every
+ * other marker, visually stretching the x-axis.
+ *
+ * Skips scatter metrics (whose `t` is provenance, not x position)
+ * and categorical aggregations (no bucket-end concept).
+ */
+function attachTEnd(
+  data: ReadonlyArray<Record<string, unknown>>,
+  agg: MetricAggregation,
+  chartType: 'line' | 'scatter',
+): Array<Record<string, unknown>> {
+  if (chartType === 'scatter') return data as Array<Record<string, unknown>>
+  if (!TIME_AGGS_FOR_TEND.has(agg)) return data as Array<Record<string, unknown>>
+  return data.map((row) => {
+    const t = typeof row.t === 'string' ? row.t : null
+    if (t === null) return row
+    const tStart = new Date(t)
+    if (Number.isNaN(tStart.getTime())) return row
+    const tEnd = advanceBucketStart(tStart, agg).toISOString()
+    // Don't overwrite if the query already supplied tEnd (future-
+    // proofing: a metric could emit irregular buckets that don't
+    // map cleanly to `advanceBucketStart`).
+    if (typeof row.tEnd === 'string') return row
+    return { ...row, tEnd }
+  })
+}
 
 export async function registerMetricsRoutes(server: FastifyInstance): Promise<void> {
   // List every registered metric (summary only — no `query`).
@@ -170,7 +219,7 @@ export async function registerMetricsRoutes(server: FastifyInstance): Promise<vo
     // natural bucket boundaries, marks the edge rows partial, and
     // extrapolates the right-edge "current" bucket via prior-bucket
     // pace. See `partialBuckets.ts` for the full algorithm.
-    const data = metric.supports?.partialBuckets === true
+    const rawData = metric.supports?.partialBuckets === true
       ? await queryWithPartialBuckets({
           query: metric.query,
           args: baseQueryArgs,
@@ -181,6 +230,18 @@ export async function registerMetricsRoutes(server: FastifyInstance): Promise<vo
           supportedAggregations: metric.supportedAggregations,
         })
       : await metric.query(baseQueryArgs)
+
+    // Attach `tEnd` (= natural bucket-end ISO) to every time-bucket
+    // line-chart row so the client can plot each aggregate marker at
+    // end-of-bucket; this keeps the spline spacing linear in time
+    // even when the rightmost knot is the extrapolated full-bucket
+    // endpoint (`partialProjectedT = lastEnd`). Scatter / categorical
+    // metrics fall through unmodified.
+    const data = attachTEnd(
+      rawData as ReadonlyArray<Record<string, unknown>>,
+      agg,
+      metric.chartType ?? 'line',
+    )
 
     return reply.send(
       MetricQueryResponseSchema.parse({

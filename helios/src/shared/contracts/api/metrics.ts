@@ -349,6 +349,31 @@ export const MetricDatumSchema = z
   .object({
     t: z.string(),
     /**
+     * ISO timestamp of the row's natural bucket END (= the next
+     * bucket's start). Server-supplied for every time-bucket
+     * aggregation (`hour` / `date` / `week` / `month`); absent for
+     * categorical aggregations (`total` / `dow` / `dom` /
+     * `dofortnight`) where bucket arithmetic doesn't apply, and
+     * absent for scatter metrics (whose `t` is provenance-only,
+     * never an x position).
+     *
+     * The line-chart renderer plots every bucket-aggregate marker
+     * at `tEnd ?? t`, so the marker for "Jun 3" lands at end-of-
+     * Jun-3 (= start-of-Jun-4). That keeps the spline's spacing
+     * linear in time even when the right-edge partial bucket's
+     * extrapolated endpoint (also at `lastEnd`, see
+     * `partialProjectedT`) is the rightmost knot — without this,
+     * the extrapolated endpoint sits one whole bucket-width to
+     * the right of every other interior marker, visually
+     * stretching the x-axis.
+     *
+     * Within-bucket instant values (the floating-actual dot at
+     * `partialActualT`, sub-aggregated projection curve sample
+     * points in `partialProjectionCurve`) carry their own explicit
+     * timestamps and ignore this convention.
+     */
+    tEnd: z.string().optional(),
+    /**
      * Edge-bucket marker. Absent for normal fully-contained interior
      * buckets. The chart renderer treats marked rows as separate from
      * the solid line through the interior — they're rendered with a

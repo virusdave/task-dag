@@ -769,15 +769,39 @@ function ChartSvg(props: ChartSvgProps) {
       .slice()
       .sort((a, b) => Date.parse(a.t) - Date.parse(b.t))
 
+    /**
+     * Display x position for a row's bucket-aggregate value. The
+     * server attaches `tEnd` (= natural bucket-end ISO) to every
+     * time-bucket line-chart row, so the marker for "Jun 3" lands
+     * at end-of-Jun-3 (= start-of-Jun-4) — keeping the spline's
+     * spacing linear in time even when the rightmost knot is the
+     * right-partial extrapolated endpoint (already plotted at
+     * `partialProjectedT = lastEnd`).
+     *
+     * Falls back to `t` for categorical aggregations (`total` /
+     * `dow` / …), which don't have a calendar bucket-end, and for
+     * any old client/proxy that hasn't picked up the new contract
+     * yet — preserving the legacy bucket-START display rather than
+     * crashing.
+     */
+    function displayMs(d: MetricDatum): number {
+      const e = d.tEnd
+      const parsed = typeof e === 'string' ? Date.parse(e) : NaN
+      if (Number.isFinite(parsed)) return parsed
+      return Date.parse(d.t)
+    }
+
     // datumByMs is the hover-readout source — it always shows raw values,
     // regardless of stack mode, so the operator sees the real number.
+    // Use the bucket-end x-position so the hover crosshair lands on
+    // the visible marker (which is also at bucket-end).
     const datumByMs = rows.map((d) => {
       const values: Record<string, number | null> = {}
       for (const id of ids) {
         const v = (d as MetricDatum)[id]
         values[id] = typeof v === 'number' ? v : null
       }
-      return { t: Date.parse(d.t), values }
+      return { t: displayMs(d as MetricDatum), values }
     })
 
     // Build per-series buffers, then layer stacking on top. Use the
@@ -837,7 +861,11 @@ function ChartSvg(props: ChartSvgProps) {
       // Raw values only; null cells are skipped (matches the pre-stack
       // behaviour exactly so 'none' mode is bit-for-bit unchanged).
       for (const d of rows) {
-        const t = Date.parse(d.t)
+        // `tDisplay` is the bucket-END x position (server's `tEnd`,
+        // with `t` as fallback). Bucket-aggregate values render here;
+        // within-bucket instants (floating actual, curve points)
+        // use their own explicit timestamps.
+        const tDisplay = displayMs(d as MetricDatum)
         const partial = partialMetaForRow(d as MetricDatum)
         for (let i = 0; i < seriesOut.length; i++) {
           const id = ids[i]!
@@ -847,21 +875,30 @@ function ChartSvg(props: ChartSvgProps) {
           // server-projected endpoint to s.points instead.
           if (partial?.side === 'right') {
             // Floating actual: requires partialActualT for the x
-            // position. Fall back to row.t when the server didn't
-            // emit it (older deploy / legacy data).
+            // position. Fall back to bucket-start `row.t` (NOT
+            // tDisplay, which would put the floating dot past the
+            // bucket end) when the server didn't emit it (older
+            // deploy / legacy data).
             if (typeof v === 'number' && Number.isFinite(v)) {
               if (v < lo) lo = v
               if (v > hi) hi = v
+              const fallbackTms = Date.parse(d.t)
               const actualTms = d.partialActualT
                 ? Date.parse(d.partialActualT)
-                : t
+                : fallbackTms
               seriesOut[i]!.floatingActuals.push({
-                t: Number.isFinite(actualTms) ? actualTms : t,
+                t: Number.isFinite(actualTms) ? actualTms : fallbackTms,
                 raw: v,
                 meta: partial,
               })
             }
-            // Spline endpoint: projected value at partialProjectedT.
+            // Spline endpoint: projected value at partialProjectedT
+            // (which is `lastEnd`, i.e. one full bucket-width past
+            // the row's `t`). With every other interior knot now
+            // also plotted at its bucket-END (via `displayMs`), the
+            // extrapolated endpoint sits exactly one bucket-width
+            // past the penultimate marker — uniform spacing,
+            // linear x axis.
             const projV = (d as MetricDatum).partialProjected?.[id]
             const projT = (d as MetricDatum).partialProjectedT
               ? Date.parse((d as MetricDatum).partialProjectedT!)
@@ -904,28 +941,25 @@ function ChartSvg(props: ChartSvgProps) {
           }
           // Left partials: row.values already carry T2' (full
           // completion); we treat them as a normal interior knot
-          // and additionally stash T1' as the spline's tangent
-          // neighbour at this point. Hidden — never drawn.
+          // (at the bucket-END x position) and additionally stash
+          // T1' as the spline's tangent neighbour at this point.
+          // T1' is hidden — never drawn.
           if (partial?.side === 'left') {
             if (typeof v === 'number' && Number.isFinite(v)) {
               if (v < lo) lo = v
               if (v > hi) hi = v
-              seriesOut[i]!.points.push({ t, raw: v, y0: 0, y1: v })
+              seriesOut[i]!.points.push({ t: tDisplay, raw: v, y0: 0, y1: v })
             }
             const prevV = (d as MetricDatum).partialTangentPrev?.[id]
-            const prevT = (d as MetricDatum).partialTangentPrevT
-              ? Date.parse((d as MetricDatum).partialTangentPrevT!)
-              : null
-            if (
-              typeof prevV === 'number' &&
-              Number.isFinite(prevV) &&
-              prevT !== null &&
-              Number.isFinite(prevT)
-            ) {
+            if (typeof prevV === 'number' && Number.isFinite(prevV)) {
               // Don't include T1' in the y-range — it's invisible.
               // The Catmull-Rom tangent calc only needs its
-              // x/y delta to the leftmost drawn knot.
-              seriesOut[i]!.leftTangent = { x: prevT, y: prevV }
+              // x/y delta to the leftmost drawn knot. In the
+              // bucket-END display convention T1's marker would
+              // sit at the END of T1's bucket = the START of T2's
+              // bucket = the partial-left row's `t` (= one
+              // bucket-width before T2', which is at `tDisplay`).
+              seriesOut[i]!.leftTangent = { x: Date.parse(d.t), y: prevV }
             }
             continue
           }
@@ -936,7 +970,7 @@ function ChartSvg(props: ChartSvgProps) {
           if (typeof v !== 'number') continue
           if (v < lo) lo = v
           if (v > hi) hi = v
-          seriesOut[i]!.points.push({ t, raw: v, y0: 0, y1: v })
+          seriesOut[i]!.points.push({ t: tDisplay, raw: v, y0: 0, y1: v })
         }
       }
       if (!isFinite(lo) || !isFinite(hi)) {
@@ -966,10 +1000,12 @@ function ChartSvg(props: ChartSvgProps) {
     // Stacked / percent: every bucket contributes ONE column of bands,
     // ordered by series-declaration index. Null / negative cells are
     // clamped to 0 so the stack stays monotonic and operators don't see
-    // weird inverted bands.
+    // weird inverted bands. Same bucket-END x-position convention as
+    // 'none' mode so the area's right edge lines up with the line
+    // chart's rightmost marker.
     let stackTop = 0
     for (const d of rows) {
-      const t = Date.parse(d.t)
+      const t = displayMs(d as MetricDatum)
       // First pass per bucket: gather values, possibly normalise for
       // percent mode.
       const vals = ids.map((id) => {
