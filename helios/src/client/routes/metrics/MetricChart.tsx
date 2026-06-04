@@ -791,37 +791,6 @@ function ChartSvg(props: ChartSvgProps) {
       return Date.parse(d.t)
     }
 
-    // datumByMs is the hover-readout source — it always shows raw values,
-    // regardless of stack mode, so the operator sees the real number.
-    // Use the bucket-end x-position so the hover crosshair lands on
-    // the visible marker (which is also at bucket-end).
-    const datumByMs = rows.map((d) => {
-      const values: Record<string, number | null> = {}
-      for (const id of ids) {
-        const v = (d as MetricDatum)[id]
-        values[id] = typeof v === 'number' ? v : null
-      }
-      return { t: displayMs(d as MetricDatum), values }
-    })
-
-    // Build per-series buffers, then layer stacking on top. Use the
-    // ORIGINAL series-declaration index for colour fallback so series
-    // colours stay stable as the legend toggles items on/off.
-    const seriesOut: Series[] = visibleSeriesDefs.map((s) => {
-      const origIdx = response.metric.series.findIndex((x) => x.id === s.id)
-      return {
-        id: s.id,
-        label: s.label,
-        colour: s.colour ?? FALLBACK_COLOURS[origIdx % FALLBACK_COLOURS.length]!,
-        points: [],
-        dashLastSegment: false,
-        leftTangent: null,
-        rightTangent: null,
-        floatingActuals: [],
-        projectionCurves: [],
-      }
-    })
-
     // Server-marked partial-bucket edge rows. Under the 2026-06-04
     // spec the wire shape varies by side:
     //   * LEFT  → row.values = T2' (full completion). partialTangentPrev
@@ -853,6 +822,92 @@ function ChartSvg(props: ChartSvgProps) {
           typeof d.partialCoverage === 'number' ? d.partialCoverage : null,
       }
     }
+
+    // datumByMs is the hover-readout source — it always shows raw values,
+    // regardless of stack mode, so the operator sees the real number.
+    // For full buckets and LEFT partials (whose row value is already the
+    // T2' full-completion estimate plotted at the bucket end) we emit
+    // one entry per row at the bucket-END x position.
+    //
+    // For RIGHT partials we emit TWO entries per row so the tooltip
+    // matches the rendered dot under the cursor:
+    //   * one at `partialActualT` (the floating-actual dot's position)
+    //     carrying the MEASURED value the dot represents, and
+    //   * one at `partialProjectedT` (the spline's right-edge knot,
+    //     which is the bucket end) carrying the PROJECTED value the
+    //     extrapolated knot represents.
+    // Without this split, hovering near either dot would snap to
+    // `tEnd` and surface the raw row value — i.e. the actual reading
+    // shown next to the extrapolated dot, and the extrapolated dot's
+    // own value never reachable. Bug observed 2026-06-04.
+    type DatumEntry = { t: number; values: Record<string, number | null> }
+    const datumMap = new Map<number, DatumEntry>()
+    const putValue = (tms: number, id: string, v: unknown) => {
+      let row = datumMap.get(tms)
+      if (!row) {
+        const fresh: DatumEntry = { t: tms, values: {} }
+        for (const sid of ids) fresh.values[sid] = null
+        datumMap.set(tms, fresh)
+        row = fresh
+      }
+      row.values[id] = typeof v === 'number' && Number.isFinite(v) ? v : null
+    }
+    for (const d of rows) {
+      const md = d as MetricDatum
+      const side = partialSideOf(md)
+      if (side === 'right') {
+        // RIGHT partial: split into actual @ partialActualT and
+        // projected @ partialProjectedT. Fall back to the bucket-end
+        // t-position if the server didn't supply the explicit
+        // timestamps (older deploys / synthetic test rows).
+        const tEnd = displayMs(md)
+        const actualT = md.partialActualT
+          ? Date.parse(md.partialActualT)
+          : Date.parse(md.t)
+        const projT = md.partialProjectedT
+          ? Date.parse(md.partialProjectedT)
+          : tEnd
+        for (const id of ids) {
+          putValue(
+            Number.isFinite(actualT) ? actualT : Date.parse(md.t),
+            id,
+            md[id],
+          )
+          const projV = md.partialProjected?.[id]
+          putValue(
+            Number.isFinite(projT) ? projT : tEnd,
+            id,
+            typeof projV === 'number' ? projV : null,
+          )
+        }
+        continue
+      }
+      // Default (full buckets + left-partial rows): single entry at
+      // bucket end carrying the row's values.
+      const tDisplay = displayMs(md)
+      for (const id of ids) putValue(tDisplay, id, md[id])
+    }
+    const datumByMs: DatumEntry[] = Array.from(datumMap.values()).sort(
+      (a, b) => a.t - b.t,
+    )
+
+    // Build per-series buffers, then layer stacking on top. Use the
+    // ORIGINAL series-declaration index for colour fallback so series
+    // colours stay stable as the legend toggles items on/off.
+    const seriesOut: Series[] = visibleSeriesDefs.map((s) => {
+      const origIdx = response.metric.series.findIndex((x) => x.id === s.id)
+      return {
+        id: s.id,
+        label: s.label,
+        colour: s.colour ?? FALLBACK_COLOURS[origIdx % FALLBACK_COLOURS.length]!,
+        points: [],
+        dashLastSegment: false,
+        leftTangent: null,
+        rightTangent: null,
+        floatingActuals: [],
+        projectionCurves: [],
+      }
+    })
 
     let lo = Number.POSITIVE_INFINITY
     let hi = Number.NEGATIVE_INFINITY
@@ -1874,15 +1929,29 @@ function ChartSvg(props: ChartSvgProps) {
                   // THIS series' band (y1), not at the raw value — the
                   // band is what's actually drawn at that x. Look up
                   // the series-local point at the hovered bucket.
-                  const sp = s.points.find((p) => p.t === nearestForHover.t) ?? null
+                  //
+                  // RIGHT-partial floating-actual dots aren't in
+                  // `s.points` (they sit on `s.floatingActuals`,
+                  // disconnected from the spline). When the hover
+                  // snaps to one of those actual times, fall back to
+                  // a matching floating-actual so the crosshair dot
+                  // still lands on the visible marker.
                   const raw = nearestForHover.values[s.id]
-                  if (sp == null || raw == null) return null
+                  if (raw == null) return null
+                  const sp =
+                    s.points.find((p) => p.t === nearestForHover.t) ?? null
+                  const fa = sp
+                    ? null
+                    : s.floatingActuals.find(
+                        (f) => f.t === nearestForHover.t,
+                      ) ?? null
+                  if (sp == null && fa == null) return null
                   const colour = s.colour ?? FALLBACK_COLOURS[i % FALLBACK_COLOURS.length]
                   return (
                     <circle
                       key={`hov-${s.id}`}
                       cx={xScale(nearestForHover.t)}
-                      cy={yScale(stackMode === 'none' ? raw : sp.y1)}
+                      cy={yScale(stackMode === 'none' ? raw : (sp ? sp.y1 : raw))}
                       r={3.5}
                       fill={colour}
                       stroke="#fff"
