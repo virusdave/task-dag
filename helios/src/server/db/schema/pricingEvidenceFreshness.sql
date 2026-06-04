@@ -47,11 +47,17 @@ with group_products as (
     and (p ->> 'productId') is not null
 ),
 latest_obs as (
+  -- Surfaces `next_refresh_at` directly so callers like the rolling
+  -- scheduler can use this view as a single source of truth and
+  -- avoid a second hypertable lookup by `id` alone (which would
+  -- chunk-fan-out post-C1 conversion). See the F1/C1 epic notes for
+  -- the rationale.
   select distinct on (product_id)
     id            as latest_observation_id,
     product_id,
     captured_at,
     expires_at,
+    next_refresh_at,
     listing_count,
     pricing_eligible_listing_count
   from litalerts_competitor_observations
@@ -125,7 +131,16 @@ select
     when isp.product_id is not null        then 'in_stock'
     when ppbm.catalog_group_id is not null then 'brand_match'
     else null
-  end                                                 as alarm_class
+  end                                                 as alarm_class,
+  -- Surfaced so the rolling scheduler can pick up its candidate
+  -- list without joining back to the base observations table by
+  -- `id` alone. Added in F1/C1 prep so the upcoming hypertable
+  -- conversion of `litalerts_competitor_observations` does not
+  -- introduce a chunk-fan-out lookup on every scheduler tick.
+  -- Placed at the END of the SELECT list so CREATE OR REPLACE
+  -- VIEW is preserved (Postgres allows appending columns; not
+  -- reordering / inserting).
+  lo.next_refresh_at                                  as next_refresh_at
 from group_products gp
 left join latest_obs lo
   on lo.product_id = gp.product_id

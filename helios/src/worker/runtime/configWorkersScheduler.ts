@@ -372,6 +372,11 @@ async function enqueueScheduledLitalertsRefreshBatch(
 interface RollingRefreshCandidateRow {
   product_id: number
   latest_observation_id: number | null
+  // captured_at carries through from the freshness view so the
+  // post-pick UPDATE can target a single hypertable chunk by
+  // `(id, captured_at)` instead of fanning out across every chunk
+  // looking for an `id`-only match. See the C1 epic prep notes.
+  latest_observation_captured_at: Date | null
   next_refresh_at: Date | null
 }
 
@@ -386,6 +391,15 @@ interface RollingRefreshCandidateRow {
  * On success the corresponding latest_observation rows get their
  * next_refresh_at updated to base+24h+jitter so they do not show up in
  * the candidate scan again next tick.
+ *
+ * Source of truth is `vw_pricing_evidence_freshness`, which now surfaces
+ * both `next_refresh_at` and `captured_at` directly — earlier versions
+ * of this scheduler joined back to `litalerts_competitor_observations`
+ * by `id` to read `next_refresh_at`, but with the upcoming C1
+ * hypertable conversion of that table an `id`-only join would fan out
+ * across every chunk. Reading both fields straight from the view
+ * eliminates that lookup, and the corresponding UPDATE now targets a
+ * single chunk via `(id, captured_at)`.
  */
 async function runScheduledLitalertsRollingTick(
   taskKey: ConfigBackgroundTaskKey,
@@ -393,21 +407,15 @@ async function runScheduledLitalertsRollingTick(
 ): Promise<void> {
   const candidatesResult = await getPool().query<RollingRefreshCandidateRow>(
     `
-      with candidates as (
-        select
-          vw.product_id,
-          vw.latest_observation_id,
-          obs.next_refresh_at
-        from vw_pricing_evidence_freshness vw
-        left join litalerts_competitor_observations obs
-          on obs.id = vw.latest_observation_id
-        where vw.latest_observation_id is null
-           or obs.next_refresh_at is null
-           or obs.next_refresh_at <= now()
-      )
       select distinct on (product_id)
-        product_id, latest_observation_id, next_refresh_at
-      from candidates
+        product_id,
+        latest_observation_id,
+        captured_at as latest_observation_captured_at,
+        next_refresh_at
+      from vw_pricing_evidence_freshness vw
+      where vw.latest_observation_id is null
+         or vw.next_refresh_at is null
+         or vw.next_refresh_at <= now()
       order by product_id
       limit $1
     `,
@@ -431,9 +439,18 @@ async function runScheduledLitalertsRollingTick(
   // For each product we successfully enqueued AND that had a latest
   // observation, push next_refresh_at out to base+24h+jitter so we do
   // not re-pick the same row on the very next tick.
+  //
+  // The UPDATE targets `(id, captured_at)` so the planner can chunk-
+  // prune on the hypertable's partition column. The `captured_at`
+  // value comes from the freshness view, which got it from the same
+  // DISTINCT ON (product_id) row whose `id` we are updating, so they
+  // always match a single row. Pre-hypertable-conversion this is
+  // equivalent to `WHERE id = $1` (since `id` is the unique PK
+  // today); post-conversion it lets the planner pick the right chunk
+  // directly instead of fanning out across all of them.
   const baseMs = now.getTime() + 24 * 60 * 60 * 1000
   for (const row of candidatesResult.rows) {
-    if (row.latest_observation_id === null) {
+    if (row.latest_observation_id === null || row.latest_observation_captured_at === null) {
       continue
     }
     const jitterSeconds = rollingRefreshJitterSecondsForProduct(row.product_id)
@@ -441,10 +458,11 @@ async function runScheduledLitalertsRollingTick(
     await getPool().query(
       `
         update litalerts_competitor_observations
-           set next_refresh_at = $2
+           set next_refresh_at = $3
          where id = $1
+           and captured_at = $2
       `,
-      [row.latest_observation_id, nextRefreshAt],
+      [row.latest_observation_id, row.latest_observation_captured_at, nextRefreshAt],
     )
   }
 

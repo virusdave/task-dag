@@ -515,6 +515,24 @@ const SENTINELS: MigrationSentinel[] = [
     check: (db) => hypertableExists(db, 'sweed_auth_events'),
   },
   {
+    // Pre-conversion prep for the C1 hypertable conversion of
+    // litalerts_competitor_observations (virusdave/top-level#11,
+    // phase C1). Adds (a) the partial latest-succeeded index that
+    // the rolling scheduler + refresh job will rely on after
+    // conversion, and (b) re-runs the freshness view to surface
+    // `next_refresh_at` so the scheduler stops joining back to
+    // the base table by `id` alone. The sentinel checks the
+    // index because indexExists is cheap; the view rename change
+    // ships in the same commit as the schedulers that consume it.
+    migrationId: '054_litalerts_competitor_observations_c1_prep',
+    label:
+      'litalerts_competitor_observations C1 prep — partial latest-' +
+      "succeeded index + freshness view exposes next_refresh_at " +
+      '(DB-cost epic phase C1 prep).',
+    check: (db) =>
+      indexExists(db, 'litalerts_competitor_observations_latest_succeeded_idx'),
+  },
+  {
     // Phase F1 of the Helios DB-cost epic (virusdave/top-level#11).
     // Migration 052 TRUNCATEs the historical 15 GB / 32M-row
     // backlog of `catalog_taxonomy_snapshot_rows`; the new in-job
