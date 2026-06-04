@@ -434,6 +434,64 @@ describe('smoothedPath', () => {
   })
 })
 
+describe('partialAwareSplinePath', () => {
+  it('returns the whole spline on .solid and empty .dashed by default', async () => {
+    const { partialAwareSplinePath } = await import('./gridlines.js')
+    const out = partialAwareSplinePath({
+      knots: [
+        { x: 0, y: 0 },
+        { x: 10, y: 5 },
+        { x: 20, y: 0 },
+      ],
+    })
+    expect(out.dashed).toBe('')
+    expect(out.solid).toMatch(/^M0\.00,0\.00 C/)
+    // 2 C segments for 3 knots (n-1).
+    const cCount = (out.solid.match(/ C/g) ?? []).length
+    expect(cCount).toBe(2)
+  })
+
+  it('splits the path when dashLastSegment = true', async () => {
+    const { partialAwareSplinePath } = await import('./gridlines.js')
+    const out = partialAwareSplinePath({
+      knots: [
+        { x: 0, y: 0 },
+        { x: 10, y: 5 },
+        { x: 20, y: 0 },
+        { x: 30, y: 7 },
+      ],
+      dashLastSegment: true,
+    })
+    // Solid covers segments 0→1, 1→2 (= 2 C segments).
+    expect((out.solid.match(/ C/g) ?? []).length).toBe(2)
+    // Dashed covers ONLY the last segment 2→3 (= 1 C segment).
+    expect((out.dashed.match(/ C/g) ?? []).length).toBe(1)
+    // Dashed must start with M at knots[n-2] so the dashed renderer
+    // can stroke it as a stand-alone <path>.
+    expect(out.dashed).toMatch(/^M20\.00,0\.00 C/)
+    // Final coord ends at the last knot.
+    expect(out.dashed).toContain('30.00,7.00')
+  })
+
+  it('honours leftTangent / rightTangent without drawing them', async () => {
+    const { partialAwareSplinePath } = await import('./gridlines.js')
+    const knots = [
+      { x: 10, y: 5 },
+      { x: 20, y: 0 },
+    ]
+    const out = partialAwareSplinePath({
+      knots,
+      leftTangent: { x: 0, y: 0 },
+      rightTangent: { x: 30, y: 5 },
+    })
+    // Path starts at knots[0], NOT leftTangent.
+    expect(out.solid).toMatch(/^M10\.00,5\.00 /)
+    // And ends at knots[n-1], NOT rightTangent.
+    expect(out.solid).toContain('20.00,0.00')
+    expect(out.solid).not.toContain('30.00,5.00')
+  })
+})
+
 describe('crossMarkerPath', () => {
   it('emits two crossed line segments centred on (x, y)', () => {
     expect(crossMarkerPath(10, 20, 3)).toBe('M7.00,17.00 L13.00,23.00 M13.00,17.00 L7.00,23.00')

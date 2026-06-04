@@ -175,6 +175,10 @@ export async function registerMetricsRoutes(server: FastifyInstance): Promise<vo
           query: metric.query,
           args: baseQueryArgs,
           seriesIds: metric.series.map((s) => s.id),
+          // Passed so the projection-curve sampler can opportunistically
+          // sub-aggregate the prior bucket via ONE extra SQL query
+          // (e.g. `hour` rows for a `date`-aggregated metric).
+          supportedAggregations: metric.supportedAggregations,
         })
       : await metric.query(baseQueryArgs)
 

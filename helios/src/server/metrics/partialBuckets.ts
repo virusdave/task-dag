@@ -11,53 +11,60 @@ import type { MetricQueryArgs, MetricQueryFn, MetricRow } from './types.js'
  * Shared wrapper for "additive over time" metrics opted in via
  * `metric.supports.partialBuckets = true` on their MetricDef.
  *
- * Spec (operator: 2026-06-03):
+ * Spec (operator: 2026-06-04 — replaces the older "actual stays on
+ * the solid curve" model):
  *
- *   "When the displayed window doesn't align with the bucket
- *    boundaries, the first/last datapoints are partial. Show a
- *    separate datapoint on each side, connected via a dashed curve
- *    to the main 'full window contents' buckets. The ACTUAL partial
- *    data point stays on the solid curve. If we have full data for
- *    the truncated window (historical edge), use the real value; if
- *    we don't (right edge crossing 'now'), extrapolate linearly via
- *    the prior bucket's pace: x = priorAtSameFracThrough /
- *    priorFull, projected = measured / x."
+ *   The displayed window may straddle a natural-bucket boundary on
+ *   the LEFT, the RIGHT, or both. We label the buckets:
  *
- * Implementation:
+ *     T1' — the natural full bucket *before* the left displayed edge
+ *           (NOT inside the window). Used only as the spline's
+ *           tangent neighbour at T2'; never drawn.
+ *     T2' — the FULL-COMPLETION of the left partial bucket. Drawn as
+ *           the leftmost knot. The "actual" sub-window measurement
+ *           of T2 is intentionally not surfaced — the operator only
+ *           sees the full bucket value.
+ *     T3..T(N-1) — fully-contained interior buckets, drawn unchanged.
+ *     T(N)' — extrapolated (or full-completion, for the truncated
+ *           case) value of the right partial bucket. Drawn as the
+ *           rightmost spline knot at the bucket's END (= next bucket
+ *           start, i.e. one bucket-width past the row's `t`). The
+ *           final spline segment to this knot is DASHED.
+ *     T(N) actual — the floating, disconnected dot for the right
+ *           partial's measured value, plotted proportionally inside
+ *           the in-progress bucket at `(asOf, measured)`. Optionally
+ *           linked to T(N)' via a light dotted curve when the
+ *           prior-bucket sub-aggregation curve is available.
  *
- *   1. Run the metric's own query exactly as the caller asked
- *      (`[from, to)`). This gives us the **actual measured** value
- *      for every bucket including the partial edges — those values
- *      stay on the row's regular series fields so the solid line
- *      stays anchored to real data.
+ *   Bullet summary on the wire (see
+ *   `shared/contracts/api/metrics.ts` `MetricDatumSchema` for the
+ *   exhaustive contract):
  *
- *   2. For each partial edge, additionally compute the projected
- *      full-natural-bucket value and attach it as
- *      `row.partialProjected[seriesId]`:
+ *     LEFT partial row:
+ *       row[seriesId] = T2' (full-completion value)
+ *       partialTangentPrev[seriesId] = T1' (prior full bucket)
+ *       partialTangentPrevT          = previousBucketStart(firstStart)
+ *       partialProjected / partialProjectedT — NOT emitted
+ *       partialActualT — NOT emitted (left actual is suppressed)
  *
- *        * Left truncated edge → run a one-bucket query for
- *          `[firstStart, firstEnd)` and use the SQL aggregate.
+ *     RIGHT partial row:
+ *       row[seriesId] = T(N) measured (the floating-actual value)
+ *       partialActualT               = observedRightThrough
+ *       partialProjected[seriesId]   = T(N)' (extrapolated or full)
+ *       partialProjectedT            = lastEnd
+ *       partialProjectionCurve       = optional sub-agg trajectory
  *
- *        * Right truncated edge (historical, fully observable) →
- *          run a one-bucket query for `[lastStart, lastEnd)`.
+ *   The wrapper still issues at most:
+ *     * 1 base-window query (always)
+ *     * +1 query per partial edge for the full-bucket value
+ *     * +1 query for the prior-bucket pace denominator on
+ *       extrapolated right edges
+ *     * +1 sub-aggregated query for the projection curve, ONLY when
+ *       the metric declares a smaller agg in `supportedAggregations`.
  *
- *        * Right extrapolated edge (current "now" inside the
- *          bucket) → fetch the prior bucket's value at the same
- *          fraction-through-bucket as `asOf`, fetch the prior
- *          bucket's full value, divide to get `x`, then project
- *          `measured / x`. Falls back to uniform pro-rata when
- *          prior-bucket pace is unavailable/pathological.
- *
- *   3. Edge rows are tagged with `partial`, `partialKind`,
- *      `partialCoverage` per the contract in
- *      `shared/contracts/api/metrics.ts`. Interior rows are untouched.
- *
- *   4. NY-local bucket arithmetic preserved by the helpers in
- *      `timeBuckets.ts`.
- *
- *   5. Only `hour` / `date` / `week` / `month` aggregations are
- *      eligible. Categorical (`total` / `dow` / `dom` /
- *      `dofortnight`) short-circuit straight through.
+ *   Bucket arithmetic remains NY-local via the helpers in
+ *   `timeBuckets.ts`. Categorical (`total` / `dow` / `dom` /
+ *   `dofortnight`) aggregations short-circuit straight through.
  */
 
 const TIME_AGGS = new Set<MetricAggregation>(['hour', 'date', 'week', 'month'])
@@ -69,6 +76,28 @@ const TIME_AGGS = new Set<MetricAggregation>(['hour', 'date', 'week', 'month'])
  * that to drive the chart.
  */
 const MIN_PACE_DENOMINATOR = 0.02
+
+/**
+ * The natural "smaller" aggregation we'll request to sample the
+ * projection curve. NULL means we have no smaller grain we trust;
+ * the projection curve falls back to "straight dotted line" in the
+ * client.
+ */
+function subAggregationFor(agg: MetricAggregation): MetricAggregation | null {
+  switch (agg) {
+    case 'month':
+    case 'week':
+      return 'date'
+    case 'date':
+      return 'hour'
+    case 'hour':
+      // No smaller grain we support; client renders a straight
+      // dotted segment instead.
+      return null
+    default:
+      return null
+  }
+}
 
 /**
  * Coverage fraction of a natural bucket `[bucketStart, bucketEnd)`
@@ -97,6 +126,15 @@ export interface PartialBucketWrapperOpts {
    * extrapolation is deterministic.
    */
   readonly asOf?: Date
+  /**
+   * Aggregations the metric's `query` is willing to honour. Used by
+   * the projection-curve sampler to decide whether it can request a
+   * finer sub-aggregation of the prior bucket. Omitted (or empty)
+   * disables the sub-agg sampling — the wire's
+   * `partialProjectionCurve` will be undefined and the client falls
+   * back to a straight dotted segment.
+   */
+  readonly supportedAggregations?: readonly MetricAggregation[]
 }
 
 /**
@@ -110,6 +148,9 @@ export async function queryWithPartialBuckets(
 ): Promise<MetricRow[]> {
   const { query, args, seriesIds } = opts
   const asOf = opts.asOf ?? new Date()
+  const supportedAggSet = new Set<MetricAggregation>(
+    opts.supportedAggregations ?? [],
+  )
 
   // Categorical / non-time aggregations have no notion of "edge
   // bucket"; pass through.
@@ -142,10 +183,11 @@ export async function queryWithPartialBuckets(
   }
 
   // Base query: actual measured values for every bucket (including
-  // the partial edges, which represent only the [from, firstEnd) /
-  // [lastStart, observedRightThrough) sub-windows). These stay on
-  // the row's regular series fields so the solid time-series line
-  // remains anchored to real measurements.
+  // the partial edges, which represent only the sub-windows
+  // `[from, firstEnd)` and `[lastStart, observedRightThrough)`).
+  // For the LEFT edge the row's main value gets OVERWRITTEN with
+  // the full-completion value below; for the RIGHT edge it stays as
+  // measured (and becomes the floating-actual dot).
   const baseRows = await query({ ...args, from, to: observedRightThrough })
 
   const byT = new Map<string, MetricRowMut>()
@@ -155,44 +197,79 @@ export async function queryWithPartialBuckets(
     if (!byT.has(iso)) byT.set(iso, { t: iso })
   }
 
-  if (leftPartial) {
+  // Degenerate single-bucket case: the same row is both left and
+  // right partial. We keep the legacy behaviour here (measured
+  // value on the row, projected on `partialProjected`) because the
+  // new "left → T2', right → floating actual + T(N)' knot" split
+  // can't simultaneously apply to one row, and the chart has no
+  // smooth spline to render anyway.
+  const both =
+    leftPartial && rightPartial && firstStart.getTime() === lastStart.getTime()
+
+  if (leftPartial && !both) {
     const row = byT.get(firstStart.toISOString())
     if (row) {
-      row.partial =
-        rightPartial && firstStart.getTime() === lastStart.getTime()
-          ? 'both'
-          : 'left'
+      row.partial = 'left'
       row.partialKind = 'truncated'
       row.partialCoverage = coverage(firstStart, firstEnd, from, firstEnd)
       // Full natural-bucket value: one extra query [firstStart, firstEnd).
+      // This OVERWRITES the row's main series values — the operator
+      // sees T2' (full completion), never the truncated sub-window
+      // measurement, on the leftmost spline knot.
       const fullRows = await query({
         ...args,
         from: firstStart,
         to: firstEnd,
       })
       const fullRow = fullRows.find((r) => r.t === firstStart.toISOString())
-      row.partialProjected = projectionFromRow(fullRow, seriesIds)
-      // Left projected sits at the natural bucket start (= row.t),
-      // so the renderer treats the dashed extension as degenerate
-      // and just outlines the partial-actual marker.
-      row.partialProjectedT = firstStart.toISOString()
+      const fullValues = projectionFromRow(fullRow, seriesIds)
+      for (const sid of seriesIds) {
+        if (sid in fullValues) row[sid] = fullValues[sid]
+      }
+      // T1': the natural full bucket preceding T2. The client uses
+      // this only as the spline's tangent neighbour at T2'; it is
+      // never drawn.
+      const t1Start = previousBucketStart(firstStart, args.agg)
+      const t1End = firstStart
+      const priorRows = await query({
+        ...args,
+        from: t1Start,
+        to: t1End,
+      })
+      const priorRow = priorRows.find((r) => r.t === t1Start.toISOString())
+      const priorValues = projectionFromRow(priorRow, seriesIds)
+      // Always emit the slot even when the query returned no row
+      // (treat absent prior data as zero, which is the correct
+      // tangent neighbour for a metric that genuinely had no
+      // activity then).
+      if (Object.keys(priorValues).length === 0) {
+        for (const sid of seriesIds) priorValues[sid] = 0
+      } else {
+        for (const sid of seriesIds) {
+          if (!(sid in priorValues)) priorValues[sid] = 0
+        }
+      }
+      row.partialTangentPrev = priorValues
+      row.partialTangentPrevT = t1Start.toISOString()
     }
   }
 
-  if (rightPartial) {
+  if (rightPartial && !both) {
     const row = byT.get(lastStart.toISOString())
     if (row) {
-      // 'both' set by left-side branch above wins; otherwise mark right.
-      if (row.partial !== 'both') row.partial = 'right'
+      row.partial = 'right'
       row.partialCoverage = coverage(
         lastStart,
         lastEnd,
         lastStart,
         observedRightThrough,
       )
+      // The floating-actual dot is plotted at the moment of
+      // observation, not at the bucket boundary.
+      row.partialActualT = observedRightThrough.toISOString()
       const rightFullAvailable = lastEnd.getTime() <= asOf.getTime()
       if (rightFullAvailable) {
-        if (row.partialKind === undefined) row.partialKind = 'truncated'
+        row.partialKind = 'truncated'
         // Full natural-bucket value: one extra query [lastStart, lastEnd).
         const fullRows = await query({
           ...args,
@@ -201,10 +278,22 @@ export async function queryWithPartialBuckets(
         })
         const fullRow = fullRows.find((r) => r.t === lastStart.toISOString())
         row.partialProjected = projectionFromRow(fullRow, seriesIds)
+        // Trajectory curve: sub-aggregate the CURRENT bucket itself
+        // (we have the actual data) so the dotted connector traces
+        // the real intra-bucket curve from `partialActualT` out to
+        // `partialProjectedT`.
+        row.partialProjectionCurve = await curveFromCurrentBucket({
+          query,
+          args,
+          seriesIds,
+          bucketStart: lastStart,
+          bucketEnd: lastEnd,
+          startedAt: observedRightThrough,
+          supportedAggSet,
+        })
       } else {
         row.partialKind = 'extrapolated'
-        // Pace projection from the prior bucket. See helper below.
-        row.partialProjected = await pacePartialProjection({
+        const paceResult = await pacePartialProjection({
           query,
           args,
           row,
@@ -213,12 +302,68 @@ export async function queryWithPartialBuckets(
           bucketEnd: lastEnd,
           observedThrough: observedRightThrough,
         })
+        row.partialProjected = paceResult.projected
+        // Trajectory curve from the prior bucket's intra-bucket
+        // cumulative shape, scaled by `T(N)' / priorBucketFull`.
+        row.partialProjectionCurve = await curveFromPriorBucketPace({
+          query,
+          args,
+          row,
+          seriesIds,
+          bucketStart: lastStart,
+          bucketEnd: lastEnd,
+          startedAt: observedRightThrough,
+          projected: paceResult.projected,
+          priorFullValues: paceResult.priorFullValues,
+          supportedAggSet,
+        })
       }
       // Right projected endpoint sits at the natural bucket end
       // (= next bucket start). The renderer places the projected
-      // dot there and draws the dashed extension from the actual
-      // point at `lastStart` out to this position.
+      // dot there and draws the spline's final dashed segment from
+      // the previous interior point out to this position.
       row.partialProjectedT = lastEnd.toISOString()
+    }
+  }
+
+  if (both) {
+    // Single bucket spanning both edges — legacy behaviour: the row
+    // is `partial: 'both'`, its main values stay measured, and the
+    // projected (full-bucket or pace-extrapolated) is attached as a
+    // generic `partialProjected` at `partialProjectedT = lastEnd`.
+    const row = byT.get(firstStart.toISOString())
+    if (row) {
+      row.partial = 'both'
+      row.partialCoverage = coverage(
+        firstStart,
+        firstEnd,
+        from,
+        observedRightThrough,
+      )
+      const rightFullAvailable = firstEnd.getTime() <= asOf.getTime()
+      if (rightFullAvailable) {
+        row.partialKind = 'truncated'
+        const fullRows = await query({
+          ...args,
+          from: firstStart,
+          to: firstEnd,
+        })
+        const fullRow = fullRows.find((r) => r.t === firstStart.toISOString())
+        row.partialProjected = projectionFromRow(fullRow, seriesIds)
+      } else {
+        row.partialKind = 'extrapolated'
+        const paceResult = await pacePartialProjection({
+          query,
+          args,
+          row,
+          seriesIds,
+          bucketStart: firstStart,
+          bucketEnd: firstEnd,
+          observedThrough: observedRightThrough,
+        })
+        row.partialProjected = paceResult.projected
+      }
+      row.partialProjectedT = firstEnd.toISOString()
     }
   }
 
@@ -233,6 +378,10 @@ type MetricRowMut = {
 } & {
   partialProjected?: Record<string, number>
   partialProjectedT?: string
+  partialTangentPrev?: Record<string, number>
+  partialTangentPrevT?: string
+  partialActualT?: string
+  partialProjectionCurve?: Array<Record<string, string | number | null>>
 }
 
 /** Build a `Record<seriesId, number>` projection map from a one-bucket
@@ -260,6 +409,14 @@ interface PaceProjectionOpts {
   readonly observedThrough: Date
 }
 
+interface PaceProjectionResult {
+  readonly projected: Record<string, number>
+  /** Prior-bucket full values, by series id. Returned alongside the
+   *  projection so the curve-sampler can reuse them as scaling
+   *  denominators without re-querying. */
+  readonly priorFullValues: Record<string, number>
+}
+
 /**
  * Right-edge prior-bucket-pace projection. For each numeric series on
  * the current partial bucket, compute the projected full-bucket value
@@ -274,7 +431,7 @@ interface PaceProjectionOpts {
  */
 async function pacePartialProjection(
   opts: PaceProjectionOpts,
-): Promise<Record<string, number>> {
+): Promise<PaceProjectionResult> {
   const {
     query,
     args,
@@ -285,6 +442,7 @@ async function pacePartialProjection(
     observedThrough,
   } = opts
   const out: Record<string, number> = {}
+  const priorFullValuesOut: Record<string, number> = {}
   const frac = coverage(bucketStart, bucketEnd, bucketStart, observedThrough)
   if (frac <= 0) {
     // Essentially no observation yet — return measured as-is so the
@@ -293,7 +451,7 @@ async function pacePartialProjection(
       const v = row[sid]
       if (typeof v === 'number' && Number.isFinite(v)) out[sid] = v
     }
-    return out
+    return { projected: out, priorFullValues: priorFullValuesOut }
   }
   const priorStart = previousBucketStart(bucketStart, args.agg)
   const priorEnd = bucketStart
@@ -313,6 +471,9 @@ async function pacePartialProjection(
     let denominator: number | null = null
     const pp = priorPartial?.[sid]
     const pf = priorFull?.[sid]
+    if (typeof pf === 'number' && Number.isFinite(pf)) {
+      priorFullValuesOut[sid] = pf
+    }
     if (
       typeof pp === 'number' &&
       typeof pf === 'number' &&
@@ -330,5 +491,180 @@ async function pacePartialProjection(
     }
     out[sid] = measured / denominator
   }
-  return out
+  return { projected: out, priorFullValues: priorFullValuesOut }
+}
+
+interface CurveFromPriorBucketOpts {
+  readonly query: MetricQueryFn
+  readonly args: MetricQueryArgs
+  readonly row: MetricRowMut
+  readonly seriesIds: readonly string[]
+  readonly bucketStart: Date
+  readonly bucketEnd: Date
+  readonly startedAt: Date
+  readonly projected: Record<string, number>
+  readonly priorFullValues: Record<string, number>
+  readonly supportedAggSet: ReadonlySet<MetricAggregation>
+}
+
+/**
+ * Sample the prior bucket at the metric's natural sub-aggregation
+ * (e.g. `hour` when `args.agg === 'date'`), build the cumulative
+ * progression, and project it onto the current partial bucket via
+ * `predicted(f) = projected[sid] * priorCumulativeAt(f) / priorFull`.
+ *
+ * Emits one curve point per sub-bucket whose end-fraction `f` is
+ * strictly greater than the current observed fraction — i.e. only
+ * the FUTURE half of the in-progress bucket, connecting the
+ * floating-actual dot at `startedAt` out to the projected endpoint
+ * at `bucketEnd`.
+ *
+ * Returns `undefined` when sub-aggregation isn't supported or when
+ * the prior-bucket data is absent / zero (the client falls back to a
+ * straight dotted segment in either case).
+ */
+async function curveFromPriorBucketPace(
+  opts: CurveFromPriorBucketOpts,
+): Promise<Array<Record<string, string | number | null>> | undefined> {
+  const subAgg = subAggregationFor(opts.args.agg)
+  if (subAgg === null || !opts.supportedAggSet.has(subAgg)) return undefined
+  const {
+    query,
+    args,
+    seriesIds,
+    bucketStart,
+    bucketEnd,
+    startedAt,
+    projected,
+    priorFullValues,
+  } = opts
+  const priorStart = previousBucketStart(bucketStart, args.agg)
+  const priorEnd = bucketStart
+  const subRows = await query({
+    ...args,
+    from: priorStart,
+    to: priorEnd,
+    agg: subAgg,
+  })
+  if (subRows.length === 0) return undefined
+  // Order sub-rows by t (the metric's query usually returns them
+  // sorted, but don't trust it).
+  const sortedSubRows = [...subRows].sort(
+    (a, b) => Date.parse(a.t) - Date.parse(b.t),
+  )
+  const bucketSpan = bucketEnd.getTime() - bucketStart.getTime()
+  const priorSpan = priorEnd.getTime() - priorStart.getTime()
+  const currentFrac = coverage(bucketStart, bucketEnd, bucketStart, startedAt)
+  const out: Array<Record<string, string | number | null>> = []
+  // Per-series running cumulative (cumulative inside the prior
+  // bucket, by sub-bucket end).
+  const cum: Record<string, number> = {}
+  for (const sid of seriesIds) cum[sid] = 0
+  for (const sr of sortedSubRows) {
+    const subStart = Date.parse(sr.t)
+    if (!Number.isFinite(subStart)) continue
+    // Add this sub-bucket's contribution.
+    for (const sid of seriesIds) {
+      const v = sr[sid]
+      if (typeof v === 'number' && Number.isFinite(v)) cum[sid]! += v
+    }
+    // Sub-bucket end relative to the prior bucket. Use a coarse
+    // "end = subStart + (priorSpan / nBuckets)" approximation; the
+    // exact step depends on whether `date` rolls over month
+    // boundaries inside a sub-aggregated `week`/`month` query, but
+    // for the curve-sample purpose this is plenty precise.
+    const subFrac = Math.min(
+      1,
+      Math.max(0, (subStart - priorStart.getTime() + 1) / priorSpan),
+    )
+    if (subFrac <= currentFrac) continue
+    // Project to current bucket's x position: t = bucketStart + subFrac * bucketSpan.
+    const tMs = bucketStart.getTime() + subFrac * bucketSpan
+    if (tMs <= startedAt.getTime() || tMs >= bucketEnd.getTime()) continue
+    const point: Record<string, string | number | null> = {
+      t: new Date(tMs).toISOString(),
+    }
+    let anyValue = false
+    for (const sid of seriesIds) {
+      const pf = priorFullValues[sid]
+      const proj = projected[sid]
+      if (
+        typeof pf !== 'number' ||
+        !Number.isFinite(pf) ||
+        pf <= 0 ||
+        typeof proj !== 'number' ||
+        !Number.isFinite(proj)
+      ) {
+        continue
+      }
+      const v = proj * (cum[sid]! / pf)
+      if (Number.isFinite(v)) {
+        point[sid] = v
+        anyValue = true
+      }
+    }
+    if (anyValue) out.push(point)
+  }
+  return out.length > 0 ? out : undefined
+}
+
+interface CurveFromCurrentBucketOpts {
+  readonly query: MetricQueryFn
+  readonly args: MetricQueryArgs
+  readonly seriesIds: readonly string[]
+  readonly bucketStart: Date
+  readonly bucketEnd: Date
+  readonly startedAt: Date
+  readonly supportedAggSet: ReadonlySet<MetricAggregation>
+}
+
+/**
+ * Trajectory for the TRUNCATED right edge — we have all the bucket's
+ * real data, so we sub-aggregate the bucket itself and emit
+ * cumulative points beyond the displayed window's right edge. The
+ * dotted curve traces the genuine intra-bucket shape from the
+ * floating actual at `startedAt` out to the projected (= full
+ * bucket) endpoint at `bucketEnd`.
+ */
+async function curveFromCurrentBucket(
+  opts: CurveFromCurrentBucketOpts,
+): Promise<Array<Record<string, string | number | null>> | undefined> {
+  const subAgg = subAggregationFor(opts.args.agg)
+  if (subAgg === null || !opts.supportedAggSet.has(subAgg)) return undefined
+  const { query, args, seriesIds, bucketStart, bucketEnd, startedAt } = opts
+  const subRows = await query({
+    ...args,
+    from: bucketStart,
+    to: bucketEnd,
+    agg: subAgg,
+  })
+  if (subRows.length === 0) return undefined
+  const sorted = [...subRows].sort(
+    (a, b) => Date.parse(a.t) - Date.parse(b.t),
+  )
+  const cum: Record<string, number> = {}
+  for (const sid of seriesIds) cum[sid] = 0
+  const out: Array<Record<string, string | number | null>> = []
+  for (const sr of sorted) {
+    const subStart = Date.parse(sr.t)
+    if (!Number.isFinite(subStart)) continue
+    for (const sid of seriesIds) {
+      const v = sr[sid]
+      if (typeof v === 'number' && Number.isFinite(v)) cum[sid]! += v
+    }
+    if (subStart <= startedAt.getTime()) continue
+    if (subStart >= bucketEnd.getTime()) continue
+    const point: Record<string, string | number | null> = {
+      t: new Date(subStart).toISOString(),
+    }
+    let anyValue = false
+    for (const sid of seriesIds) {
+      if (Number.isFinite(cum[sid])) {
+        point[sid] = cum[sid]!
+        anyValue = true
+      }
+    }
+    if (anyValue) out.push(point)
+  }
+  return out.length > 0 ? out : undefined
 }

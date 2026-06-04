@@ -546,6 +546,80 @@ export function catmullRomBezierSegment(opts: {
   )
 }
 
+/**
+ * Build a Catmull-Rom spline path through `knots`, optionally
+ * providing `leftTangent` / `rightTangent` pseudo-points that
+ * influence the spline's tangent at the first / last drawn knot
+ * (used by the partial-bucket renderer to pass `T1'` / a reflection)
+ * but are NOT themselves drawn.
+ *
+ * When `dashLastSegment` is true, returns the path split in two:
+ * `solid` covers `knots[0] … knots[n-2]` and `dashed` covers
+ * `knots[n-2] … knots[n-1]`. Both pieces meet at the same control
+ * vector that `smoothedPath` would have produced, so the dashed
+ * segment is a perfect smooth continuation of the solid one.
+ *
+ * `dashLastSegment = false` (default) returns the whole spline on
+ * `solid` and `dashed = ''`.
+ */
+export function partialAwareSplinePath(opts: {
+  knots: ReadonlyArray<{ x: number; y: number }>
+  leftTangent?: { x: number; y: number }
+  rightTangent?: { x: number; y: number }
+  dashLastSegment?: boolean
+}): { solid: string; dashed: string } {
+  const { knots, leftTangent, rightTangent } = opts
+  const dashLastSegment = opts.dashLastSegment === true
+  const n = knots.length
+  if (n === 0) return { solid: '', dashed: '' }
+  if (n === 1) {
+    const p = knots[0]!
+    return { solid: `M${p.x.toFixed(2)},${p.y.toFixed(2)}`, dashed: '' }
+  }
+  // Pad with tangent pseudo-knots so segment[i] can read
+  // padded[i] / padded[i+1] / padded[i+2] / padded[i+3] uniformly.
+  const padded: Array<{ x: number; y: number }> = [
+    leftTangent ?? knots[0]!,
+    ...knots,
+    rightTangent ?? knots[n - 1]!,
+  ]
+  const t = 0.5
+  const segC = (i: number): string => {
+    // Segment from knots[i] to knots[i+1] (= padded[i+1] → padded[i+2]).
+    const prev = padded[i]!
+    const curr = padded[i + 1]!
+    const next = padded[i + 2]!
+    const after = padded[i + 3] ?? padded[i + 2]!
+    const c1x = curr.x + ((next.x - prev.x) / 6) * t * 2
+    const c1y = curr.y + ((next.y - prev.y) / 6) * t * 2
+    const c2x = next.x - ((after.x - curr.x) / 6) * t * 2
+    const c2y = next.y - ((after.y - curr.y) / 6) * t * 2
+    return (
+      `C${c1x.toFixed(2)},${c1y.toFixed(2)} ` +
+      `${c2x.toFixed(2)},${c2y.toFixed(2)} ` +
+      `${next.x.toFixed(2)},${next.y.toFixed(2)}`
+    )
+  }
+  const solidUntil = dashLastSegment ? n - 2 : n - 1
+  let solid = ''
+  if (solidUntil >= 1) {
+    solid = `M${knots[0]!.x.toFixed(2)},${knots[0]!.y.toFixed(2)}`
+    for (let i = 0; i < solidUntil; i++) solid += ' ' + segC(i)
+  } else if (n >= 1) {
+    // No solid segments — still emit a single M so a marker can sit
+    // at the leftmost knot via the legend's existing path-anchored
+    // logic.
+    solid = `M${knots[0]!.x.toFixed(2)},${knots[0]!.y.toFixed(2)}`
+  }
+  let dashed = ''
+  if (dashLastSegment && n >= 2) {
+    const startIdx = n - 2
+    const start = knots[startIdx]!
+    dashed = `M${start.x.toFixed(2)},${start.y.toFixed(2)} ` + segC(startIdx)
+  }
+  return { solid, dashed }
+}
+
 export function formatXTick(ms: number, agg: MetricAggregation, opts: { straddlesYear: boolean } = { straddlesYear: false }): string {
   // Render the tick label in **NY wall-clock** — every helios metric
   // is bucketed in America/New_York (see server-side

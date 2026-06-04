@@ -366,26 +366,82 @@ export const MetricDatumSchema = z
      */
     partialCoverage: z.number().min(0).max(1).optional(),
     /**
-     * Per-series projected (full-natural-bucket) value for a partial
-     * edge row. For `truncated` rows this is the full-bucket SQL
-     * aggregate; for `extrapolated` rows it's the pace-projected
-     * value `measured / x`. The row's regular series fields still
-     * carry the ACTUAL measured value within the observed sub-window,
-     * so the solid time-series line stays anchored to real data;
-     * the renderer draws a dashed tangent-continuous extension from
-     * the actual point to the projected point at the natural bucket
-     * boundary (lastEnd / firstStart).
+     * Per-series projected (full-natural-bucket) value for the RIGHT
+     * partial edge row. For `truncated` rows this is the full-bucket
+     * SQL aggregate; for `extrapolated` rows it's the pace-projected
+     * value `measured / x`. The right-edge row's regular series fields
+     * still carry the ACTUAL measured value within the observed
+     * sub-window (the floating disconnected dot); the spline's right
+     * knot is plotted at `(partialProjectedT, partialProjected[sid])`.
+     *
+     * For LEFT partial rows the row's regular series fields now carry
+     * the projected (= full-completion of the left bucket) value
+     * directly, so the spline's left knot reads them straight off the
+     * row and `partialProjected` is NOT emitted on left rows. See
+     * `partialTangentPrev` for the hidden tangent neighbour the
+     * client uses to compute the spline's slope at that knot.
      */
     partialProjected: z.record(z.string(), z.number()).optional(),
     /**
-     * ISO timestamp of the x position where the projected endpoint
-     * is plotted. For a right-edge partial this is the natural
-     * bucket end (= next bucket start). For a left-edge partial
-     * it's the natural bucket start (= the row's own `t`), so the
-     * renderer treats the dashed segment as degenerate (no
-     * horizontal extension) and just marks the partial point.
+     * ISO timestamp where the projected (right-edge) spline knot is
+     * plotted. Always the natural bucket end (= next bucket start)
+     * for the RIGHT partial; never set on LEFT partial rows.
+     *
+     * The renderer treats the segment from the previous interior
+     * point to (partialProjectedT, partialProjected[sid]) as the
+     * last spline segment and draws it DASHED.
      */
     partialProjectedT: z.string().optional(),
+    /**
+     * Per-series value of the natural full bucket preceding a LEFT
+     * partial edge (`T1'` in the partial-bucket spec). Plotted
+     * **invisibly** by the client — used only as the spline's tangent
+     * neighbour when computing the slope at the leftmost drawn knot
+     * (`T2'`, the full-completion of the left partial bucket). Only
+     * emitted on LEFT partial rows.
+     */
+    partialTangentPrev: z.record(z.string(), z.number()).optional(),
+    /**
+     * ISO timestamp for `partialTangentPrev` — the start of the
+     * preceding natural bucket. Only emitted alongside
+     * `partialTangentPrev` (i.e. only on LEFT partial rows).
+     */
+    partialTangentPrevT: z.string().optional(),
+    /**
+     * ISO timestamp of the x position where the RIGHT partial bucket's
+     * actual measured value (carried on the row's regular series
+     * fields) should be plotted as a disconnected floating dot. This
+     * is the moment of observation (`asOf` / observedRightThrough),
+     * NOT the bucket boundary — so the floating actual is placed
+     * proportionally inside the in-progress bucket.
+     *
+     * Only emitted on RIGHT partial rows. The floating dot is NOT
+     * connected to the spline; the spline's right knot is the
+     * projected endpoint at `partialProjectedT` instead.
+     */
+    partialActualT: z.string().optional(),
+    /**
+     * Optional dotted-curve trajectory linking the right-edge
+     * floating-actual dot to the projected endpoint at
+     * `partialProjectedT`. Each entry carries `t` (ISO timestamp
+     * inside `[lastStart, lastEnd)`) plus one numeric value per
+     * `seriesId` representing the predicted cumulative-at-that-fraction
+     * value.
+     *
+     * Only populated when (a) the metric declares a smaller
+     * sub-aggregation in `supportedAggregations` (so the server can
+     * sample the prior bucket's progression with ONE extra SQL
+     * query) and (b) the right edge is `extrapolated` or
+     * `truncated`. When the curve is unavailable the client falls
+     * back to a simple straight dotted line.
+     */
+    partialProjectionCurve: z
+      .array(
+        z
+          .object({ t: z.string() })
+          .catchall(z.union([z.number(), z.string(), z.null()])),
+      )
+      .optional(),
   })
   .catchall(z.union([z.number(), z.string(), z.null()]))
 export type MetricDatum = z.infer<typeof MetricDatumSchema>

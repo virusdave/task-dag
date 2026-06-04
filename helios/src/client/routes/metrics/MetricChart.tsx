@@ -24,11 +24,11 @@ import type { CatalogFilterSelection } from './CatalogFilterBar.js'
 import { useTimeAxis, type TimeWindow } from './TimeAxisContext.js'
 import {
   bucketXTicks,
-  catmullRomBezierSegment,
   crossMarkerPath,
   formatXTick,
   formatYTick,
   niceYTicks,
+  partialAwareSplinePath,
   smoothedPath,
 } from './gridlines.js'
 import { computeCompactDomain } from './scatterAutoZoom.js'
@@ -696,45 +696,57 @@ function ChartSvg(props: ChartSvgProps) {
       side: 'left' | 'right' | 'both'
       kind: 'truncated' | 'extrapolated'
       coverage: number | null
-      /** Projected full-natural-bucket value for this series.
-       *  `null` when the server didn't emit one (e.g. left edge
-       *  without enough info). */
-      projected: number | null
-      /** ISO ms x position of the projected endpoint. For right
-       *  edges this is the natural bucket end (= next bucket
-       *  start, beyond the visible window). For left edges this
-       *  equals the row's own `t` (= same x as the actual). */
-      projectedT: number | null
     }
     type SeriesPoint = { t: number; raw: number; y0: number; y1: number }
-    type PartialEdgePoint = {
-      /** Row `t` — the natural bucket start. Also the x where the
-       *  partial-actual marker is drawn. */
+    /**
+     * Floating-actual dot for a RIGHT partial bucket. Plotted at the
+     * moment of observation (`partialActualT`), disconnected from
+     * the spline. Carries the measured value so the dot is rendered
+     * with an outlined marker + hoverover.
+     */
+    type FloatingActual = {
       t: number
-      /** Actual measured value within the observed sub-window
-       *  (`[from, firstEnd)` for left, `[lastStart, observedThrough)`
-       *  for right). */
       raw: number
       meta: PartialMeta
     }
+    /**
+     * Sample point along the optional dotted projection curve
+     * linking the floating-actual dot to the spline's right-edge
+     * knot. Already converted to the y space of this series.
+     */
+    type ProjectionCurvePoint = { t: number; raw: number }
     type Series = {
       id: string
       label: string
       colour: string
       /**
-       * The INTERIOR (fully-contained) buckets only. Partial-edge
-       * rows are routed to `partials` instead, so the smooth
-       * Catmull-Rom spline this drives only knows about real
-       * full buckets — and the spline's last-segment tangent is
-       * later computed against the EXTRAPOLATED endpoint (not the
-       * partial-actual), so the dashed continuation visually
-       * extends the spline smoothly toward the projection.
+       * The drawn spline knots in order. For LEFT partial rows the
+       * first knot's `raw` is `T2'` (server-side full-completion);
+       * for RIGHT partial rows the last knot's `raw` is `T(N)'`
+       * (extrapolated or full-completion) at the BUCKET END
+       * (`partialProjectedT`), and the last spline segment is
+       * rendered dashed.
        */
       points: SeriesPoint[]
-      /** Server-marked partial-bucket edge rows. Carry both the
-       *  measured (`raw`) and the projected (`meta.projected`)
-       *  values; the renderer uses both. */
-      partials: PartialEdgePoint[]
+      /** True ⇔ the last entry in `points` is a server-projected
+       *  endpoint knot for a right partial. Triggers `dashLastSegment`
+       *  in the spline renderer. */
+      dashLastSegment: boolean
+      /** Tangent neighbour at `points[0]` for the LEFT partial spline.
+       *  Used only by the Catmull-Rom calculation; never drawn. */
+      leftTangent: { x: number; y: number } | null
+      /** Optional reflection / projected next-bucket value for the
+       *  RIGHT partial spline. Currently always null (we let the
+       *  spline reflect the endpoint), kept on the type so a future
+       *  iteration can supply a real `T(N+1)'` here. */
+      rightTangent: { x: number; y: number } | null
+      /** Floating actual dots for right partials (disconnected from
+       *  the spline). */
+      floatingActuals: FloatingActual[]
+      /** Optional dotted-curve trajectory linking each floating
+       *  actual to the spline's right endpoint. Same series order
+       *  as `floatingActuals`. */
+      projectionCurves: ProjectionCurvePoint[][]
     }
     const empty = {
       yMin: 0,
@@ -778,18 +790,28 @@ function ChartSvg(props: ChartSvgProps) {
         label: s.label,
         colour: s.colour ?? FALLBACK_COLOURS[origIdx % FALLBACK_COLOURS.length]!,
         points: [],
-        partials: [],
+        dashLastSegment: false,
+        leftTangent: null,
+        rightTangent: null,
+        floatingActuals: [],
+        projectionCurves: [],
       }
     })
 
-    // Server-marked partial-bucket edge rows. The ACTUAL measured value
-    // is on the row's regular series field (so the solid line is
-    // anchored to real data); a separate per-series `partialProjected`
-    // map carries the projected full-natural-bucket value, and
-    // `partialProjectedT` carries its x position (lastEnd for right,
-    // firstStart for left). The renderer attaches `partial` metadata
-    // to the corresponding SeriesPoint so the marker / dashed extension
-    // can be drawn in the SVG block below.
+    // Server-marked partial-bucket edge rows. Under the 2026-06-04
+    // spec the wire shape varies by side:
+    //   * LEFT  → row.values = T2' (full completion). partialTangentPrev
+    //             carries T1' (the prior natural full bucket) as the
+    //             hidden spline-tangent neighbour.
+    //   * RIGHT → row.values = T(N) measured (the floating actual at
+    //             `partialActualT`). partialProjected/T carries the
+    //             spline's right-edge knot value/position; optional
+    //             partialProjectionCurve carries the dotted-curve
+    //             trajectory between the floating dot and the
+    //             projected endpoint.
+    //   * BOTH  → legacy degenerate single-bucket fallback; no
+    //             refactor support yet (the spline has no curve to
+    //             draw across a single bucket anyway).
     function partialSideOf(d: MetricDatum): 'left' | 'right' | 'both' | null {
       const p = d.partial
       return p === 'left' || p === 'right' || p === 'both' ? p : null
@@ -797,24 +819,14 @@ function ChartSvg(props: ChartSvgProps) {
     function partialKindOf(d: MetricDatum): 'truncated' | 'extrapolated' {
       return d.partialKind === 'extrapolated' ? 'extrapolated' : 'truncated'
     }
-    function partialMetaForSeries(
-      d: MetricDatum,
-      seriesId: string,
-    ): PartialMeta | undefined {
+    function partialMetaForRow(d: MetricDatum): PartialMeta | null {
       const side = partialSideOf(d)
-      if (side === null) return undefined
-      const projected = d.partialProjected?.[seriesId]
-      const projectedT = d.partialProjectedT ? Date.parse(d.partialProjectedT) : null
+      if (side === null) return null
       return {
         side,
         kind: partialKindOf(d),
         coverage:
           typeof d.partialCoverage === 'number' ? d.partialCoverage : null,
-        projected:
-          typeof projected === 'number' && Number.isFinite(projected)
-            ? projected
-            : null,
-        projectedT: projectedT !== null && Number.isFinite(projectedT) ? projectedT : null,
       }
     }
 
@@ -826,33 +838,105 @@ function ChartSvg(props: ChartSvgProps) {
       // behaviour exactly so 'none' mode is bit-for-bit unchanged).
       for (const d of rows) {
         const t = Date.parse(d.t)
+        const partial = partialMetaForRow(d as MetricDatum)
         for (let i = 0; i < seriesOut.length; i++) {
           const id = ids[i]!
           const v = (d as MetricDatum)[id]
+          // Right partials carry the measured value on the row's
+          // main field; we route that to floatingActuals and add the
+          // server-projected endpoint to s.points instead.
+          if (partial?.side === 'right') {
+            // Floating actual: requires partialActualT for the x
+            // position. Fall back to row.t when the server didn't
+            // emit it (older deploy / legacy data).
+            if (typeof v === 'number' && Number.isFinite(v)) {
+              if (v < lo) lo = v
+              if (v > hi) hi = v
+              const actualTms = d.partialActualT
+                ? Date.parse(d.partialActualT)
+                : t
+              seriesOut[i]!.floatingActuals.push({
+                t: Number.isFinite(actualTms) ? actualTms : t,
+                raw: v,
+                meta: partial,
+              })
+            }
+            // Spline endpoint: projected value at partialProjectedT.
+            const projV = (d as MetricDatum).partialProjected?.[id]
+            const projT = (d as MetricDatum).partialProjectedT
+              ? Date.parse((d as MetricDatum).partialProjectedT!)
+              : null
+            if (
+              typeof projV === 'number' &&
+              Number.isFinite(projV) &&
+              projT !== null &&
+              Number.isFinite(projT)
+            ) {
+              if (projV < lo) lo = projV
+              if (projV > hi) hi = projV
+              seriesOut[i]!.points.push({
+                t: projT,
+                raw: projV,
+                y0: 0,
+                y1: projV,
+              })
+              seriesOut[i]!.dashLastSegment = true
+            }
+            // Trajectory curve: optional dotted-line sample points
+            // connecting the floating-actual dot out to the
+            // projected endpoint. Each point carries its own series
+            // value.
+            const curveRows = (d as MetricDatum).partialProjectionCurve
+            const curve: ProjectionCurvePoint[] = []
+            if (curveRows && Array.isArray(curveRows)) {
+              for (const cr of curveRows) {
+                const cv = cr[id]
+                if (typeof cv !== 'number' || !Number.isFinite(cv)) continue
+                const ct = typeof cr.t === 'string' ? Date.parse(cr.t) : NaN
+                if (!Number.isFinite(ct)) continue
+                if (cv < lo) lo = cv
+                if (cv > hi) hi = cv
+                curve.push({ t: ct, raw: cv })
+              }
+            }
+            seriesOut[i]!.projectionCurves.push(curve)
+            continue
+          }
+          // Left partials: row.values already carry T2' (full
+          // completion); we treat them as a normal interior knot
+          // and additionally stash T1' as the spline's tangent
+          // neighbour at this point. Hidden — never drawn.
+          if (partial?.side === 'left') {
+            if (typeof v === 'number' && Number.isFinite(v)) {
+              if (v < lo) lo = v
+              if (v > hi) hi = v
+              seriesOut[i]!.points.push({ t, raw: v, y0: 0, y1: v })
+            }
+            const prevV = (d as MetricDatum).partialTangentPrev?.[id]
+            const prevT = (d as MetricDatum).partialTangentPrevT
+              ? Date.parse((d as MetricDatum).partialTangentPrevT!)
+              : null
+            if (
+              typeof prevV === 'number' &&
+              Number.isFinite(prevV) &&
+              prevT !== null &&
+              Number.isFinite(prevT)
+            ) {
+              // Don't include T1' in the y-range — it's invisible.
+              // The Catmull-Rom tangent calc only needs its
+              // x/y delta to the leftmost drawn knot.
+              seriesOut[i]!.leftTangent = { x: prevT, y: prevV }
+            }
+            continue
+          }
+          // BOTH partials: keep legacy "actual on solid line"
+          // behaviour. The current spec has no clean rendering for
+          // a single bucket that's both left and right partial, so
+          // we leave it as the existing interior plot.
           if (typeof v !== 'number') continue
           if (v < lo) lo = v
           if (v > hi) hi = v
-          const partial = partialMetaForSeries(d as MetricDatum, id)
-          // Include partial-projected value in the y-range so the
-          // dashed extension doesn't render off-chart.
-          if (partial && partial.projected !== null) {
-            if (partial.projected < lo) lo = partial.projected
-            if (partial.projected > hi) hi = partial.projected
-          }
-          if (partial) {
-            // Route partial rows to s.partials so the spline driving
-            // the solid path doesn't pass through them. The renderer
-            // attaches the actual via a separate straight segment
-            // and uses the projected endpoint as the spline's
-            // last-segment knot (so the dashed continuation
-            // smoothly extends the curve).
-            seriesOut[i]!.partials.push({ t, raw: v, meta: partial })
-          } else {
-            // y0/y1 placeholders — only y1 is used; the axis
-            // baseline for y0 is filled in below once lo/hi are
-            // known.
-            seriesOut[i]!.points.push({ t, raw: v, y0: 0, y1: v })
-          }
+          seriesOut[i]!.points.push({ t, raw: v, y0: 0, y1: v })
         }
       }
       if (!isFinite(lo) || !isFinite(hi)) {
@@ -869,6 +953,11 @@ function ChartSvg(props: ChartSvgProps) {
       // Set y0 = axis bottom so a future "fill under line" affordance
       // doesn't need a second pass.
       for (const s of seriesOut) {
+        // Sort points by t — the LEFT partial row's `t` is the
+        // bucket start, RIGHT partial endpoint's `t` is the bucket
+        // END (one bucket-width after `lastStart`), so the ordered
+        // sequence is automatically: [T2', T3, T4, ..., T(N-1), T(N)'].
+        s.points.sort((a, b) => a.t - b.t)
         for (const p of s.points) p.y0 = lo
       }
       return { yMin: lo, yMax: hi, series: seriesOut, datumByMs }
@@ -935,162 +1024,103 @@ function ChartSvg(props: ChartSvgProps) {
   // where each bucket lives, and an × per point per series would
   // visually swamp the area.
   const seriesPaths = useMemo(() => {
-    type PartialOverlay = {
-      /** Straight solid line from the last interior dot to the
-       *  partial-actual point, plus the outlined marker on the
-       *  actual point itself. Per operator (2026-06-04): the
-       *  actual is intentionally NOT on the spline — it's
-       *  attached via a separate straight segment off the last
-       *  full bucket dot, so the spline's slope at that dot is
-       *  free to extend smoothly toward the projected/
-       *  extrapolated endpoint instead. */
+    /** Pre-projected pixel coordinates + metadata for the right-
+     *  partial floating actual + its optional dotted-curve
+     *  trajectory connecting it to the spline endpoint. */
+    type RightFloatingOverlay = {
       actual: {
         x: number
         y: number
-        side: 'left' | 'right' | 'both'
         kind: 'truncated' | 'extrapolated'
         coverage: number | null
-        /** Straight `M…L…` connector from the last interior dot
-         *  to the actual point. Empty when there's no interior
-         *  dot to anchor against. */
-        connectorD: string
       }
-      /** Dashed Catmull-Rom continuation: the spline's last
-       *  segment treated as if the extrapolated endpoint were
-       *  the next real datum. So the spline through interior
-       *  points smoothly extends out to `(endX, endY)`. Absent
-       *  for left edges (projected at same x as actual) or when
-       *  the server didn't emit a projection. */
-      extension: {
-        path: string
-        endX: number
-        endY: number
-        endValue: number
-      } | null
+      /** Right-edge knot pixel position (from s.points[last]). */
+      endpoint: { x: number; y: number; value: number } | null
+      /** Sampled trajectory points (in pixel space). Empty array
+       *  ⇒ render a straight dotted line instead. */
+      curve: Array<{ x: number; y: number }>
     }
     return series.map((s) => {
-      const sortedPts = s.points.slice().sort((a, b) => a.t - b.t)
-      const sortedPartials = s.partials.slice().sort((a, b) => a.t - b.t)
-      const partialOverlays: PartialOverlay[] = []
-      if (stackMode === 'none' && sortedPartials.length > 0) {
-        for (const pp of sortedPartials) {
-          // Find the interior dot we'll anchor against. For a right-
-          // edge partial that's the LAST interior dot (largest t <
-          // pp.t); for a left-edge partial it's the FIRST interior
-          // dot (smallest t > pp.t).
-          const isLeft = pp.meta.side === 'left'
-          let anchorIdx = -1
-          if (isLeft) {
-            // First interior dot strictly after the partial.
-            for (let i = 0; i < sortedPts.length; i++) {
-              if (sortedPts[i]!.t > pp.t) {
-                anchorIdx = i
-                break
-              }
-            }
-          } else {
-            // Last interior dot strictly before the partial (right
-            // or 'both').
-            for (let i = sortedPts.length - 1; i >= 0; i--) {
-              if (sortedPts[i]!.t < pp.t) {
-                anchorIdx = i
-                break
-              }
-            }
-          }
-          const ax = xScale(pp.t)
-          const ay = yScale(pp.raw)
-          let connectorD = ''
-          if (anchorIdx >= 0) {
-            const a = sortedPts[anchorIdx]!
-            const aX = xScale(a.t)
-            const aY = yScale(a.y1)
-            connectorD = `M${aX.toFixed(2)},${aY.toFixed(2)} L${ax.toFixed(2)},${ay.toFixed(2)}`
-          }
-          const overlay: PartialOverlay = {
+      const sortedPts = s.points
+      const rightOverlays: RightFloatingOverlay[] = []
+      // Right partial knot is always the LAST entry in s.points when
+      // dashLastSegment is true; pre-compute its pixel coords so the
+      // curve / actual overlays can reference it.
+      let endpointPx: { x: number; y: number; value: number } | null = null
+      if (stackMode === 'none' && s.dashLastSegment && sortedPts.length > 0) {
+        const ep = sortedPts[sortedPts.length - 1]!
+        endpointPx = {
+          x: xScale(ep.t),
+          y: yScale(ep.y1),
+          value: ep.raw,
+        }
+      }
+      if (stackMode === 'none' && s.floatingActuals.length > 0) {
+        for (let i = 0; i < s.floatingActuals.length; i++) {
+          const fa = s.floatingActuals[i]!
+          const curveSrc = s.projectionCurves[i] ?? []
+          const curve = curveSrc.map((p) => ({
+            x: xScale(p.t),
+            y: yScale(p.raw),
+          }))
+          rightOverlays.push({
             actual: {
-              x: ax,
-              y: ay,
-              side: pp.meta.side,
-              kind: pp.meta.kind,
-              coverage: pp.meta.coverage,
-              connectorD,
+              x: xScale(fa.t),
+              y: yScale(fa.raw),
+              kind: fa.meta.kind,
+              coverage: fa.meta.coverage,
             },
-            extension: null,
-          }
-          // Dashed Catmull-Rom continuation. We treat the projected
-          // endpoint as the "next" knot the spline would have had
-          // if the partial bucket had been a real full datum; this
-          // means the spline's tangent at the anchor dot is
-          // computed against the projected (not the partial-actual),
-          // so the dashed continuation smoothly extends the curve.
-          // Skip when:
-          //   * no anchor interior dot (nothing to extend from), OR
-          //   * projected absent / NaN, OR
-          //   * projectedT === pp.t (left-edge — same x as actual),
-          //     so the "extension" would be degenerate.
-          const projT = pp.meta.projectedT
-          const projV = pp.meta.projected
-          if (
-            anchorIdx >= 0 &&
-            projT !== null &&
-            projV !== null &&
-            projT !== pp.t
-          ) {
-            const anchor = sortedPts[anchorIdx]!
-            // For a right-edge extension: prev = 2 back from anchor
-            // (the spline's tangent neighbour on the solid side),
-            // curr = anchor, next = projected, after = reflect.
-            // For a left-edge extension: mirror — prev = reflect,
-            // curr = projected, next = anchor, after = 2 ahead.
-            if (isLeft) {
-              const aheadIdx = anchorIdx + 1
-              const aheadPt = aheadIdx < sortedPts.length ? sortedPts[aheadIdx]! : anchor
-              const curr = { x: xScale(projT), y: yScale(projV) }
-              const next = { x: xScale(anchor.t), y: yScale(anchor.y1) }
-              const after = { x: xScale(aheadPt.t), y: yScale(aheadPt.y1) }
-              const path = catmullRomBezierSegment({
-                prev: curr,
-                curr,
-                next,
-                after,
-              })
-              overlay.extension = { path, endX: curr.x, endY: curr.y, endValue: projV }
-            } else {
-              const backIdx = anchorIdx - 1
-              const backPt = backIdx >= 0 ? sortedPts[backIdx]! : anchor
-              const prev = { x: xScale(backPt.t), y: yScale(backPt.y1) }
-              const curr = { x: xScale(anchor.t), y: yScale(anchor.y1) }
-              const next = { x: xScale(projT), y: yScale(projV) }
-              const path = catmullRomBezierSegment({
-                prev,
-                curr,
-                next,
-                after: next,
-              })
-              overlay.extension = { path, endX: next.x, endY: next.y, endValue: projV }
-            }
-          }
-          partialOverlays.push(overlay)
+            endpoint: endpointPx,
+            curve,
+          })
         }
       }
       if (s.points.length === 0) {
         return {
           ...s,
-          d: '',
-          markers: [] as Array<{ x: number; y: number }>,
+          dSolid: '',
+          dDashed: '',
+          markers: [] as Array<{ x: number; y: number; isEndpoint?: boolean }>,
           fill: stackMode !== 'none' as const,
-          partialOverlays,
+          rightOverlays,
+          d: '',
         }
       }
       const topPts = s.points.map((p) => ({ x: xScale(p.t), y: yScale(p.y1) }))
       if (stackMode === 'none') {
+        // Spline path: optionally split into solid + dashed tail when
+        // the right edge is a server-projected endpoint. The
+        // leftTangent (T1') silently steers the slope at points[0]
+        // when the left edge is a partial.
+        const leftTangentPx = s.leftTangent
+          ? { x: xScale(s.leftTangent.x), y: yScale(s.leftTangent.y) }
+          : undefined
+        const rightTangentPx = s.rightTangent
+          ? { x: xScale(s.rightTangent.x), y: yScale(s.rightTangent.y) }
+          : undefined
+        const { solid: dSolid, dashed: dDashed } = partialAwareSplinePath({
+          knots: topPts,
+          leftTangent: leftTangentPx,
+          rightTangent: rightTangentPx,
+          dashLastSegment: s.dashLastSegment,
+        })
+        // Markers: every interior knot gets the small × marker; the
+        // server-projected endpoint (last knot when dashLastSegment)
+        // is instead drawn as an outlined circle in the SVG block
+        // and is suppressed from the × markers here.
+        const markerPts = topPts.map((m, idx) => ({
+          ...m,
+          isEndpoint:
+            s.dashLastSegment && idx === topPts.length - 1 ? true : false,
+        }))
         return {
           ...s,
-          d: smoothedPath(topPts),
-          markers: topPts,
+          dSolid,
+          dDashed,
+          markers: markerPts,
           fill: false as const,
-          partialOverlays,
+          rightOverlays,
+          d: dSolid, // legacy alias for hasData test
         }
       }
       const bottomPts = s.points
@@ -1107,10 +1137,12 @@ function ChartSvg(props: ChartSvgProps) {
       // points are (vs the smoothed interpolation between them).
       return {
         ...s,
+        dSolid: '',
+        dDashed: '',
         d: `${top} ${bottomAsLine} Z`,
-        markers: topPts,
+        markers: topPts.map((m) => ({ ...m, isEndpoint: false })),
         fill: true as const,
-        partialOverlays,
+        rightOverlays,
       }
     })
   }, [series, xScale, yScale, stackMode])
@@ -1406,7 +1438,13 @@ function ChartSvg(props: ChartSvgProps) {
   const hasData =
     !!response &&
     response.data.length > 0 &&
-    seriesPaths.some((s) => s.d.length > 0 || s.partialOverlays.length > 0)
+    seriesPaths.some(
+      (s) =>
+        s.d.length > 0 ||
+        s.dSolid.length > 0 ||
+        s.dDashed.length > 0 ||
+        s.rightOverlays.length > 0,
+    )
 
   // Snap hover (this chart's own OR external from a sibling card) to the
   // nearest datum bucket for tooltip / crosshair readout.
@@ -1595,100 +1633,121 @@ function ChartSvg(props: ChartSvgProps) {
             </g>
           ) : (
             <g key={s.id}>
-              <path d={s.d} fill="none" stroke={s.colour} strokeWidth="1.5" />
-              {/* Data-point markers: small × at every real measurement so the
-                  reader can distinguish points from the interpolated curve
-                  between them. */}
-              {s.markers.map((m, i) => (
+              {/* Solid spline body: covers all but the last
+                  segment when the right edge is a server-projected
+                  endpoint (`s.dashLastSegment`). The leftTangent
+                  / rightTangent pseudo-points (T1' / reflection)
+                  steer the Catmull-Rom slope at the extreme knots
+                  but are NEVER drawn. */}
+              {s.dSolid ? (
+                <path d={s.dSolid} fill="none" stroke={s.colour} strokeWidth="1.5" />
+              ) : null}
+              {/* Dashed last spline segment: terminates at the
+                  server-projected endpoint (T(N)'). Only present
+                  when the right edge is a partial bucket. */}
+              {s.dDashed ? (
                 <path
-                  key={`${s.id}-m-${i}`}
-                  d={crossMarkerPath(m.x, m.y, 3)}
-                  stroke={s.colour}
-                  strokeWidth={1.25}
+                  d={s.dDashed}
                   fill="none"
-                  pointerEvents="none"
+                  stroke={s.colour}
+                  strokeWidth={1.5}
+                  strokeDasharray="4 3"
+                  opacity={0.85}
                 />
-              ))}
-              {/* Partial-bucket overlays:
-                    * dashed Catmull-Rom continuation from the last
-                      interior dot out to the projected / pace-
-                      extrapolated endpoint (smooth extension of
-                      the solid spline's slope at that dot),
-                    * straight solid connector from the same interior
-                      dot to the ACTUAL partial-bucket measurement,
-                    * outlined endpoint markers on both. */}
-              {s.partialOverlays.map((ov, i) => (
-                <g key={`${s.id}-p-${i}`} pointerEvents="none">
-                  {ov.extension ? (
-                    <>
-                      <path
-                        d={ov.extension.path}
-                        fill="none"
-                        stroke={s.colour}
-                        strokeWidth={1.5}
-                        strokeDasharray="4 3"
-                        opacity={0.85}
-                      />
-                      <circle
-                        cx={ov.extension.endX}
-                        cy={ov.extension.endY}
-                        r={3.5}
-                        fill="#fff"
-                        stroke={s.colour}
-                        strokeWidth={1.5}
-                      >
-                        <title>
-                          {ov.actual.kind === 'extrapolated'
-                            ? `Projected full bucket (pace-extrapolated${
-                                ov.actual.coverage !== null
-                                  ? `, ${Math.round(ov.actual.coverage * 100)}% observed`
-                                  : ''
-                              })`
-                            : `Projected full bucket${
-                                ov.actual.coverage !== null
-                                  ? ` (${Math.round(ov.actual.coverage * 100)}% inside window)`
-                                  : ''
-                              }`}
-                        </title>
-                      </circle>
-                    </>
-                  ) : null}
-                  {/* Straight solid connector from the last interior
-                      dot to the actual partial point. Drawn at the
-                      same stroke weight as the main solid line so
-                      it visually belongs to the series. */}
-                  {ov.actual.connectorD ? (
-                    <path
-                      d={ov.actual.connectorD}
-                      fill="none"
-                      stroke={s.colour}
-                      strokeWidth={1.5}
-                    />
-                  ) : null}
+              ) : null}
+              {/* Data-point markers: small × at every interior
+                  knot, suppressed on the server-projected endpoint
+                  (which gets an outlined circle marker instead). */}
+              {s.markers.map((m, i) =>
+                m.isEndpoint ? (
                   <circle
-                    cx={ov.actual.x}
-                    cy={ov.actual.y}
-                    r={3}
+                    key={`${s.id}-m-${i}`}
+                    cx={m.x}
+                    cy={m.y}
+                    r={3.5}
                     fill="#fff"
                     stroke={s.colour}
                     strokeWidth={1.5}
+                    pointerEvents="none"
                   >
-                    <title>
-                      {ov.actual.kind === 'extrapolated'
-                        ? `Partial bucket (in progress${
-                            ov.actual.coverage !== null
-                              ? `, ${Math.round(ov.actual.coverage * 100)}% observed`
-                              : ''
-                          })`
-                        : `Partial bucket (window-aligned${
-                            ov.actual.coverage !== null
-                              ? `, ${Math.round(ov.actual.coverage * 100)}% inside window`
-                              : ''
-                          })`}
-                    </title>
+                    <title>Projected full bucket (chart endpoint, estimated)</title>
                   </circle>
-                </g>
-              ))}
+                ) : (
+                  <path
+                    key={`${s.id}-m-${i}`}
+                    d={crossMarkerPath(m.x, m.y, 3)}
+                    stroke={s.colour}
+                    strokeWidth={1.25}
+                    fill="none"
+                    pointerEvents="none"
+                  />
+                ),
+              )}
+              {/* Right-partial floating-actual overlays:
+                    * disconnected outlined dot at `partialActualT`
+                      with the measured value,
+                    * optional lightly-dotted trajectory linking
+                      that dot out to the spline's right endpoint
+                      (`T(N)'`); when the server didn't supply
+                      sample points (e.g. metric doesn't support
+                      a finer sub-aggregation) the connector
+                      collapses to a straight dotted line. */}
+              {s.rightOverlays.map((ov, i) => {
+                // Build the trajectory path: starts at the floating
+                // actual, walks through the sub-aggregated curve
+                // sample points, ends at the spline's endpoint.
+                let trajD = ''
+                if (ov.endpoint) {
+                  if (ov.curve.length > 0) {
+                    const all = [
+                      { x: ov.actual.x, y: ov.actual.y },
+                      ...ov.curve,
+                      { x: ov.endpoint.x, y: ov.endpoint.y },
+                    ]
+                    trajD = smoothedPath(all)
+                  } else {
+                    trajD =
+                      `M${ov.actual.x.toFixed(2)},${ov.actual.y.toFixed(2)} ` +
+                      `L${ov.endpoint.x.toFixed(2)},${ov.endpoint.y.toFixed(2)}`
+                  }
+                }
+                return (
+                  <g key={`${s.id}-fa-${i}`} pointerEvents="none">
+                    {trajD ? (
+                      <path
+                        d={trajD}
+                        fill="none"
+                        stroke={s.colour}
+                        strokeWidth={1}
+                        strokeDasharray="1 3"
+                        opacity={0.5}
+                      />
+                    ) : null}
+                    <circle
+                      cx={ov.actual.x}
+                      cy={ov.actual.y}
+                      r={3}
+                      fill="#fff"
+                      stroke={s.colour}
+                      strokeWidth={1.5}
+                    >
+                      <title>
+                        {ov.actual.kind === 'extrapolated'
+                          ? `Partial bucket (in progress${
+                              ov.actual.coverage !== null
+                                ? `, ${Math.round(ov.actual.coverage * 100)}% observed`
+                                : ''
+                            })`
+                          : `Partial bucket (window-aligned${
+                              ov.actual.coverage !== null
+                                ? `, ${Math.round(ov.actual.coverage * 100)}% inside window`
+                                : ''
+                            })`}
+                      </title>
+                    </circle>
+                  </g>
+                )
+              })}
             </g>
           ),
         )}

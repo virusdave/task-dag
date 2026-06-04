@@ -162,11 +162,16 @@ describe('queryWithPartialBuckets', () => {
     expect(last.partialProjected).toEqual({ count: 10 }) // 5 / 0.5
   })
 
-  it('keeps measured + emits full-bucket projection for a truncated left edge', async () => {
-    // Hour-1 events: 3 + 5 = 8 total; window starts at 01:30, so the
-    // measured value the chart shows is 5 (the [01:30, 02:00) sub-
-    // window). The dashed projected endpoint should be 8.
+  it('overwrites left partial row with the full-bucket (T2") value and emits partialTangentPrev (T1") as the spline tangent', async () => {
+    // Hour-1 events: 3 + 5 = 8 total; window starts at 01:30. Under
+    // the 2026-06-04 spec the left partial row drops its measured
+    // sub-window value and surfaces T2' (= 8, the full hour-1
+    // completion) on its main series field so the spline's leftmost
+    // knot lands on a real-world full-bucket value. T1' (the natural
+    // hour-0 full bucket value, here 11) is attached as the hidden
+    // tangent neighbour at `partialTangentPrev`.
     const events = new Map<string, number>([
+      ['2026-06-01T00:00:00.000Z', 11], // hour 0 (T1')
       ['2026-06-01T01:00:00.000Z', 3],
       ['2026-06-01T01:30:00.000Z', 5],
       ['2026-06-01T02:00:00.000Z', 9],
@@ -187,9 +192,66 @@ describe('queryWithPartialBuckets', () => {
     expect(first.t).toBe('2026-06-01T01:00:00.000Z')
     expect(first.partial).toBe('left')
     expect(first.partialKind).toBe('truncated')
-    expect(first.count).toBe(5) // measured value (only the [01:30,02:00) part)
-    expect(first.partialProjected).toEqual({ count: 8 })
+    expect(first.count).toBe(8) // T2' — overwrites the measured 5
+    expect(first.partialTangentPrev).toEqual({ count: 11 })
+    expect(first.partialTangentPrevT).toBe('2026-06-01T00:00:00.000Z')
+    expect(first.partialProjected).toBeUndefined()
+    expect(first.partialProjectedT).toBeUndefined()
     expect(first.partialCoverage).toBeCloseTo(0.5)
+  })
+
+  it('emits partialTangentPrev = 0 when the prior bucket has no data', async () => {
+    // Same shape as the previous test but with no hour-0 events at
+    // all — the wrapper should still emit `partialTangentPrev` so
+    // the client always has a tangent neighbour for the spline.
+    const events = new Map<string, number>([
+      ['2026-06-01T01:00:00.000Z', 3],
+      ['2026-06-01T01:30:00.000Z', 5],
+      ['2026-06-01T02:00:00.000Z', 9],
+    ])
+    const query = makeFakeQueryFromHourCounts(events)
+    const out = await queryWithPartialBuckets({
+      query,
+      args: baseArgs(
+        'hour',
+        new Date('2026-06-01T01:30:00Z'),
+        new Date('2026-06-01T03:00:00Z'),
+      ),
+      seriesIds: ['count'],
+      asOf: new Date('2026-07-01T00:00:00Z'),
+    })
+    const first = out[0]!
+    expect(first.partial).toBe('left')
+    expect(first.count).toBe(8) // T2'
+    expect(first.partialTangentPrev).toEqual({ count: 0 })
+    expect(first.partialTangentPrevT).toBe('2026-06-01T00:00:00.000Z')
+  })
+
+  it('emits partialActualT on right-edge partials so the floating-actual dot lands at the observation moment', async () => {
+    // Reuse the historical-right-edge scenario. The new contract
+    // requires `partialActualT` to surface the moment of
+    // observation (= effective right edge of the query window),
+    // distinct from the bucket's start (= row.t) and end (=
+    // partialProjectedT).
+    const events = new Map<string, number>([
+      ['2026-06-01T02:00:00.000Z', 3],
+      ['2026-06-01T02:30:00.000Z', 7],
+    ])
+    const query = makeFakeQueryFromHourCounts(events)
+    const out = await queryWithPartialBuckets({
+      query,
+      args: baseArgs(
+        'hour',
+        new Date('2026-06-01T00:00:00Z'),
+        new Date('2026-06-01T02:30:00Z'),
+      ),
+      seriesIds: ['count'],
+      asOf: new Date('2026-07-01T00:00:00Z'),
+    })
+    const last = out[out.length - 1]!
+    expect(last.partial).toBe('right')
+    expect(last.partialActualT).toBe('2026-06-01T02:30:00.000Z')
+    expect(last.partialProjectedT).toBe('2026-06-01T03:00:00.000Z')
   })
 
   it('passes through for categorical aggregations (total / dow / dom / dofortnight)', async () => {
