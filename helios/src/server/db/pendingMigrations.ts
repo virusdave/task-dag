@@ -533,6 +533,21 @@ const SENTINELS: MigrationSentinel[] = [
       indexExists(db, 'litalerts_competitor_observations_latest_succeeded_idx'),
   },
   {
+    // Phase C1 of the Helios DB-cost epic (virusdave/top-level#11).
+    // Migration 055 converts litalerts_competitor_observations to
+    // a Timescale hypertable on `captured_at` with 14-day chunks.
+    // Prep landed in 054. No app-visible behaviour change beyond
+    // the planner picking ChunkAppend over per-chunk indexes for
+    // recency queries; UPDATEs already use the chunk-aware
+    // (id, captured_at) shape after the 054 scheduler change.
+    migrationId: '055_litalerts_competitor_observations_hypertable',
+    label:
+      'litalerts_competitor_observations — Timescale hypertable ' +
+      'conversion (DB-cost epic phase C1, no app-visible behaviour ' +
+      'change).',
+    check: (db) => hypertableExists(db, 'litalerts_competitor_observations'),
+  },
+  {
     // Phase F1 of the Helios DB-cost epic (virusdave/top-level#11).
     // Migration 052 TRUNCATEs the historical 15 GB / 32M-row
     // backlog of `catalog_taxonomy_snapshot_rows`; the new in-job
