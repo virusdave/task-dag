@@ -39,6 +39,16 @@ import {
   type ScatterZoomTool,
   type ZoomView,
 } from './scatterZoom.js'
+import {
+  computeLineYRange,
+  resolveYAxisBaseline,
+  Y_AXIS_BASELINE_CHOICES,
+  Y_AXIS_BASELINE_CHOICE_LABEL,
+  Y_AXIS_BASELINE_PAGE_DEFAULT_LABEL,
+  type YAxisBaseline,
+  type YAxisBaselineChoice,
+  type YAxisBaselinePageDefault,
+} from './yAxisBaseline.js'
 
 // We re-fetch the annotation list after every mutation, so we don't
 // need to consume the response payload — a passthrough schema lets us
@@ -255,6 +265,13 @@ export interface MetricChartProps {
    */
   readonly defaultStackMode?: MetricStackMode
   /**
+   * Page-wide Y-axis baseline default for non-scatter line charts. The
+   * chart's own per-chart override ('page' | 'zero' | 'data') wins; when
+   * it defers ('page') this default decides. Defaults to 'per-chart'
+   * (no page-wide policy → float).
+   */
+  readonly yBaselineDefault?: YAxisBaselinePageDefault
+  /**
    * Currently-visible annotations (already filtered to scope=global +
    * `metric:<this.id>` upstream). Re-renders when the parent re-fetches.
    */
@@ -285,6 +302,7 @@ export function MetricChart({
   sitesParam,
   defaultAgg,
   defaultStackMode = 'none',
+  yBaselineDefault = 'per-chart',
   annotations,
   onAnnotationsChanged,
   variant = 'expanded',
@@ -318,6 +336,14 @@ export function MetricChart({
   const stackMode: MetricStackMode = stackModeApplicable
     ? stackModeOverride ?? defaultStackMode
     : 'none'
+
+  // Y-axis baseline (line charts only). The per-chart control is only
+  // meaningful in 'none' mode — stacked / percent area charts always
+  // include zero — so we hide it otherwise. Scatter charts have their
+  // own auto-zoom axis logic and never see this control.
+  const yBaselineApplicable = metric.chartType !== 'scatter' && stackMode === 'none'
+  const [yBaselineOverride, setYBaselineOverride] = useState<YAxisBaselineChoice>('page')
+  const yBaseline: YAxisBaseline = resolveYAxisBaseline(yBaselineOverride, yBaselineDefault)
 
   const [response, setResponse] = useState<MetricQueryResponse | null>(null)
   const [loading, setLoading] = useState(false)
@@ -505,6 +531,24 @@ export function MetricChart({
                 ))}
               </select>
             ) : null}
+            {yBaselineApplicable ? (
+              <select
+                value={yBaselineOverride}
+                onChange={(e) =>
+                  setYBaselineOverride(e.target.value as YAxisBaselineChoice)
+                }
+                aria-label={`Y-axis baseline for ${metric.title}`}
+                title="Pin the Y axis to include zero, float it to the data range, or take the page default."
+              >
+                {Y_AXIS_BASELINE_CHOICES.map((c) => (
+                  <option key={c} value={c}>
+                    {c === 'page'
+                      ? `y: ${Y_AXIS_BASELINE_PAGE_DEFAULT_LABEL[yBaselineDefault]} (page)`
+                      : `y: ${Y_AXIS_BASELINE_CHOICE_LABEL[c]}`}
+                  </option>
+                ))}
+              </select>
+            ) : null}
             <button
               type="button"
               className={annotateMode ? 'ghost-button is-active' : 'ghost-button'}
@@ -561,6 +605,7 @@ export function MetricChart({
           interactive={variant === 'expanded'}
           agg={agg}
           stackMode={stackMode}
+          yBaseline={yBaseline}
         />
       )}
       <ScreenReaderSummary metric={metric} response={response} window={window} loading={loading} />
@@ -584,6 +629,9 @@ interface ChartSvgProps {
   readonly agg: MetricAggregation
   /** How to stack the series. Forced to 'none' for single-series charts. */
   readonly stackMode: MetricStackMode
+  /** Resolved Y-axis baseline ('zero' | 'data'). Only consulted in
+   *  'none' stack mode — stacked / percent always include zero. */
+  readonly yBaseline: YAxisBaseline
 }
 
 interface DragState {
@@ -618,6 +666,7 @@ function ChartSvg(props: ChartSvgProps) {
     interactive,
     agg,
     stackMode,
+    yBaseline,
   } = props
   const svgRef = useRef<SVGSVGElement | null>(null)
   const wrapRef = useRef<HTMLDivElement | null>(null)
@@ -1028,16 +1077,12 @@ function ChartSvg(props: ChartSvgProps) {
           seriesOut[i]!.points.push({ t: tDisplay, raw: v, y0: 0, y1: v })
         }
       }
-      if (!isFinite(lo) || !isFinite(hi)) {
-        lo = 0
-        hi = 1
-      } else if (lo === hi) {
-        lo -= 1
-        hi += 1
-      } else {
-        const span = hi - lo
-        lo -= span * 0.05
-        hi += span * 0.05
+      // 'zero' baseline pins the axis to include the zero line; 'data'
+      // floats to the observed range with padding. See computeLineYRange.
+      {
+        const r = computeLineYRange(lo, hi, yBaseline)
+        lo = r.yMin
+        hi = r.yMax
       }
       // Set y0 = axis bottom so a future "fill under line" affordance
       // doesn't need a second pass.
@@ -1095,7 +1140,7 @@ function ChartSvg(props: ChartSvgProps) {
     hi = stackMode === 'percent' ? 100 : stackTop > 0 ? stackTop * 1.05 : 1
 
     return { yMin: lo, yMax: hi, series: seriesOut, datumByMs }
-  }, [response, stackMode, hiddenSeries])
+  }, [response, stackMode, hiddenSeries, yBaseline])
 
   const yScale = useCallback(
     (v: number) => marginTop + plotH - ((v - yMin) / (yMax - yMin)) * plotH,

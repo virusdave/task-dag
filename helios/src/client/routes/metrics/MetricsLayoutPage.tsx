@@ -33,6 +33,11 @@ import {
   METRIC_STACK_MODES,
   type MetricStackMode,
 } from './MetricChart.js'
+import {
+  Y_AXIS_BASELINE_PAGE_DEFAULTS,
+  Y_AXIS_BASELINE_PAGE_DEFAULT_LABEL,
+  type YAxisBaselinePageDefault,
+} from './yAxisBaseline.js'
 import { RangeNudgeRow } from './RangeNudgeRow.js'
 import { TimeAxisProvider, useTimeAxis, type TimeWindow } from './TimeAxisContext.js'
 
@@ -384,14 +389,31 @@ export function MetricsLayoutPage() {
       MetricStackMode
     >,
   )
+  // Page-wide Y-axis baseline default, tab-scoped like agg / stack.
+  // Defaults to 'per-chart' (no page-wide policy → charts left on
+  // 'page' float to data range, matching the historical behaviour).
+  const [yBaselineByTab, setYBaselineByTab] = useState<
+    Record<MetricsTabId, YAxisBaselinePageDefault>
+  >(() =>
+    Object.fromEntries(METRICS_TABS.map((t) => [t.id, 'per-chart'])) as Record<
+      MetricsTabId,
+      YAxisBaselinePageDefault
+    >,
+  )
   const pageAgg = aggByTab[activeTab.id]
   const pageStackMode = stackByTab[activeTab.id]
+  const pageYBaseline = yBaselineByTab[activeTab.id]
   const setPageAgg = useCallback(
     (next: MetricAggregation) => setAggByTab((prev) => ({ ...prev, [activeTab.id]: next })),
     [activeTab.id],
   )
   const setPageStackMode = useCallback(
     (next: MetricStackMode) => setStackByTab((prev) => ({ ...prev, [activeTab.id]: next })),
+    [activeTab.id],
+  )
+  const setPageYBaseline = useCallback(
+    (next: YAxisBaselinePageDefault) =>
+      setYBaselineByTab((prev) => ({ ...prev, [activeTab.id]: next })),
     [activeTab.id],
   )
   // 90d default window matching the parent epic spec.
@@ -523,6 +545,8 @@ export function MetricsLayoutPage() {
             setPageAgg={setPageAgg}
             pageStackMode={pageStackMode}
             setPageStackMode={setPageStackMode}
+            pageYBaseline={pageYBaseline}
+            setPageYBaseline={setPageYBaseline}
             partitioned={partitioned}
             realGroups={realGroups}
             missingGroups={missingGroups}
@@ -566,6 +590,8 @@ interface RegistryDashboardProps {
   setPageAgg: (next: MetricAggregation) => void
   pageStackMode: MetricStackMode
   setPageStackMode: (next: MetricStackMode) => void
+  pageYBaseline: YAxisBaselinePageDefault
+  setPageYBaseline: (next: YAxisBaselinePageDefault) => void
   partitioned: PartitionedMetrics
   realGroups: Array<{ group: string; metrics: MetricDefSummary[] }>
   missingGroups: Array<{ group: string; metrics: MetricDefSummary[] }>
@@ -597,6 +623,8 @@ function RegistryDashboard({
   setPageAgg,
   pageStackMode,
   setPageStackMode,
+  pageYBaseline,
+  setPageYBaseline,
   partitioned,
   realGroups,
   missingGroups,
@@ -634,6 +662,8 @@ function RegistryDashboard({
         onAggChange={setPageAgg}
         pageStackMode={pageStackMode}
         onStackModeChange={setPageStackMode}
+        pageYBaseline={pageYBaseline}
+        onYBaselineChange={setPageYBaseline}
         showAggControl={activeTab.showAggControl}
         showStackControl={activeTab.showStackControl}
         catalogFilters={catalogFilters}
@@ -665,6 +695,7 @@ function RegistryDashboard({
             sitesParam={sitesParam}
             defaultAgg={pageAgg}
             defaultStackMode={pageStackMode}
+            yBaselineDefault={pageYBaseline}
             annotations={annotations}
             onAnnotationsChanged={onAnnotationsChanged}
             variant="expanded"
@@ -686,6 +717,7 @@ function RegistryDashboard({
             sitesParam={sitesParam}
             pageAgg={pageAgg}
             pageStackMode={pageStackMode}
+            pageYBaseline={pageYBaseline}
             annotations={annotations}
             onAnnotationsChanged={onAnnotationsChanged}
             expandedMetricId={expandedMetricId}
@@ -755,6 +787,8 @@ interface DashboardControlsProps {
   readonly onAggChange: (next: MetricAggregation) => void
   readonly pageStackMode: MetricStackMode
   readonly onStackModeChange: (next: MetricStackMode) => void
+  readonly pageYBaseline: YAxisBaselinePageDefault
+  readonly onYBaselineChange: (next: YAxisBaselinePageDefault) => void
   /** When false the aggregation dropdown is hidden (scatter tabs etc.). */
   readonly showAggControl: boolean
   /** When false the stack-mode dropdown is hidden (scatter tabs etc.). */
@@ -789,6 +823,8 @@ function DashboardControls({
   onAggChange,
   pageStackMode,
   onStackModeChange,
+  pageYBaseline,
+  onYBaselineChange,
   showAggControl,
   showStackControl,
   catalogFilters,
@@ -889,6 +925,23 @@ function DashboardControls({
               </select>
             </label>
           ) : null}
+          <label
+            title="Default Y-axis baseline for the line charts on this tab. 'include zero' pins every chart's axis to the zero line; 'data range' floats to the observed values; 'per-chart' imposes no page-wide policy (each chart's own setting decides, floating by default). Individual charts can override this in their focus panel."
+          >
+            y-axis{' '}
+            <select
+              value={pageYBaseline}
+              onChange={(e) =>
+                onYBaselineChange(e.target.value as YAxisBaselinePageDefault)
+              }
+            >
+              {Y_AXIS_BASELINE_PAGE_DEFAULTS.map((b) => (
+                <option key={b} value={b}>
+                  {Y_AXIS_BASELINE_PAGE_DEFAULT_LABEL[b]}
+                </option>
+              ))}
+            </select>
+          </label>
         </div>
       ) : null}
 
@@ -1022,6 +1075,7 @@ interface MetricGroupSectionProps {
   readonly sitesParam: string
   readonly pageAgg: MetricAggregation
   readonly pageStackMode: MetricStackMode
+  readonly pageYBaseline: YAxisBaselinePageDefault
   readonly annotations: ReadonlyArray<MetricAnnotationRecord>
   readonly onAnnotationsChanged: () => void
   readonly expandedMetricId: string | null
@@ -1035,6 +1089,7 @@ function MetricGroupSection({
   sitesParam,
   pageAgg,
   pageStackMode,
+  pageYBaseline,
   annotations,
   onAnnotationsChanged,
   expandedMetricId,
@@ -1052,6 +1107,7 @@ function MetricGroupSection({
             sitesParam={sitesParam}
             defaultAgg={pageAgg}
             defaultStackMode={pageStackMode}
+            yBaselineDefault={pageYBaseline}
             annotations={annotations}
             onAnnotationsChanged={onAnnotationsChanged}
             variant="card"
