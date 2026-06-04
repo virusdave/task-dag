@@ -10,6 +10,44 @@ import type { JobHandlerContext } from '../runtime/jobRegistry.js'
 
 const LIST_PAGE_SIZE = 200
 
+// Retention window for `catalog_taxonomy_snapshot_rows`. Each refresh
+// writes one row per product / group / strain / brand / category /
+// subcategory / prevalence / size / distributor — at the time this
+// retention was added that was ~7,500 rows per snapshot — and the
+// scheduler runs the refresh on the order of 200×/day, so without a
+// retention sweep the table grows ~55 MB/day forever. Production had
+// accumulated 15 GB / 32M rows of these before the F1 phase of the
+// DB-cost epic (virusdave/top-level#11) was filed.
+//
+// The application reads exactly ZERO rows from
+// `catalog_taxonomy_snapshot_rows` — only the parent
+// `catalog_taxonomy_snapshots` summary row is read, and only by
+// `loadRecentCatalogTaxonomySnapshots`. So aggressive pruning is
+// safe: the row payload is purely a write-only audit trail of "what
+// did the Sweed state catalog look like at time T". 24 h is more
+// than enough to support a "what changed between two recent
+// snapshots" diagnostic workflow if one is ever wanted, and
+// matches the F1 plan's default.
+//
+// The window is overridable via the `CATALOG_SNAPSHOT_ROW_RETENTION_HOURS`
+// env var (set to `0` to disable pruning entirely — escape hatch
+// for forensic operator work; not intended for steady-state use).
+// A future C2 / operator-tunable retention surface will replace
+// the env var with a knob on `/config/workers`.
+const DEFAULT_SNAPSHOT_ROW_RETENTION_HOURS = 24
+
+function snapshotRowRetentionHours(): number {
+  const raw = process.env.CATALOG_SNAPSHOT_ROW_RETENTION_HOURS
+  if (raw === undefined || raw === '') {
+    return DEFAULT_SNAPSHOT_ROW_RETENTION_HOURS
+  }
+  const parsed = Number.parseInt(raw, 10)
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return DEFAULT_SNAPSHOT_ROW_RETENTION_HOURS
+  }
+  return parsed
+}
+
 type EntityType =
   | 'product'
   | 'group'
@@ -430,5 +468,40 @@ async function persistSnapshotRows(
         counts.distributorCount,
       ],
     )
+
+    // Retention prune in the SAME transaction as the snapshot insert,
+    // so a crash between insert and prune leaves the table
+    // consistent (either we have the new snapshot AND the old rows
+    // are gone, or neither happened). See the
+    // DEFAULT_SNAPSHOT_ROW_RETENTION_HOURS comment for the rationale.
+    //
+    // The delete excludes the snapshot we just wrote (`snapshot_id
+    // != $1`) defensively — at retention windows ≥ 1 minute that
+    // exclusion is redundant (the just-written rows are seconds
+    // old), but it keeps the prune robust against an operator who
+    // sets the window to 0 hours for a one-off forensic sweep
+    // without wiping the snapshot they just took.
+    //
+    // We delete by `snapshot_id` rather than `WHERE inserted_at <
+    // ...` because the rows table has no time column of its own;
+    // age is carried by the parent `catalog_taxonomy_snapshots.started_at`.
+    // The subquery is small (`catalog_taxonomy_snapshots` is in the
+    // low thousands of rows total) and the delete is index-scanned
+    // by the PK.
+    const retentionHours = snapshotRowRetentionHours()
+    if (retentionHours > 0) {
+      await db.query(
+        `
+          delete from catalog_taxonomy_snapshot_rows
+          where snapshot_id != $1
+            and snapshot_id in (
+              select id
+              from catalog_taxonomy_snapshots
+              where started_at < now() - ($2 || ' hours')::interval
+            )
+        `,
+        [snapshotId, String(retentionHours)],
+      )
+    }
   })
 }

@@ -514,6 +514,44 @@ const SENTINELS: MigrationSentinel[] = [
       '(DB-cost epic phase C1, no app-visible behaviour change).',
     check: (db) => hypertableExists(db, 'sweed_auth_events'),
   },
+  {
+    // Phase F1 of the Helios DB-cost epic (virusdave/top-level#11).
+    // Migration 052 TRUNCATEs the historical 15 GB / 32M-row
+    // backlog of `catalog_taxonomy_snapshot_rows`; the new in-job
+    // TTL prune in `configWorkersCatalogRefreshJob` keeps the
+    // table bounded going forward (default 24 h retention).
+    //
+    // "Migration applied" is observationally identical to "the
+    // new TTL prune has run a few times": both leave the table
+    // free of rows whose parent snapshot is older than the
+    // retention window. The sentinel asserts that invariant
+    // directly: `pass` iff no surviving row references a snapshot
+    // older than 48 h (the 24 h target plus 24 h of grace, since
+    // the prune only runs when a refresh succeeds). If the
+    // operator deploys the new code but never applies migration
+    // 052 against a database that still has the historical
+    // backlog, the sentinel sees rows referencing snapshots
+    // weeks old and surfaces the pending banner. Once the
+    // TRUNCATE (or enough in-job prunes) has caught up, the
+    // sentinel goes quiet.
+    migrationId: '052_catalog_taxonomy_snapshot_rows_truncate',
+    label:
+      'catalog_taxonomy_snapshot_rows — one-shot historical ' +
+      'TRUNCATE (DB-cost epic phase F1; pairs with the new in-job ' +
+      'TTL prune to drop a 15 GB write-only audit backlog).',
+    check: async (db) => {
+      const result = await db.query<{ ok: boolean }>(
+        `select not exists(
+           select 1
+           from catalog_taxonomy_snapshot_rows r
+           join catalog_taxonomy_snapshots s on s.id = r.snapshot_id
+           where s.started_at < now() - interval '48 hours'
+           limit 1
+         ) as ok`,
+      )
+      return result.rows[0]?.ok === true
+    },
+  },
 ]
 
 interface CacheEntry {
