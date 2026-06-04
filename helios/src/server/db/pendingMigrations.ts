@@ -86,6 +86,28 @@ async function indexExists(db: Queryable, indexName: string): Promise<boolean> {
   return result.rows[0]?.exists === true
 }
 
+async function hypertableCompressionEnabled(
+  db: Queryable,
+  hypertableName: string,
+): Promise<boolean> {
+  // `compression_enabled` flips to true when ALTER TABLE … SET
+  // (timescaledb.compress, …) has been applied; it is independent
+  // of whether any chunks have actually been compressed yet. That
+  // is exactly what we want as a migration sentinel — the policy
+  // setup is what migration 056/057-style files perform.
+  const result = await db.query<{ exists: boolean }>(
+    `select exists(
+       select 1
+         from timescaledb_information.hypertables
+        where hypertable_schema = 'public'
+          and hypertable_name = $1
+          and compression_enabled = true
+     ) as exists`,
+    [hypertableName],
+  )
+  return result.rows[0]?.exists === true
+}
+
 async function hypertableExists(db: Queryable, hypertableName: string): Promise<boolean> {
   // TimescaleDB tracks hypertables in `timescaledb_information.hypertables`.
   // The view exists on every database that has the timescaledb
@@ -546,6 +568,22 @@ const SENTINELS: MigrationSentinel[] = [
       'conversion (DB-cost epic phase C1, no app-visible behaviour ' +
       'change).',
     check: (db) => hypertableExists(db, 'litalerts_competitor_observations'),
+  },
+  {
+    // Phase C2 of the Helios DB-cost epic (virusdave/top-level#11).
+    // Migration 056 enables Timescale compression on
+    // `sweed_auth_events` with segmentby = outcome and a 30-day
+    // `compress_after` policy aligned with the observed job_queue
+    // retention horizon (so ON DELETE SET NULL from job_queue
+    // rarely targets a compressed chunk). The sentinel only
+    // observes that compression is configured on the hypertable;
+    // it does not require any chunks to have been compressed yet
+    // (the background policy job handles that lazily).
+    migrationId: '056_sweed_auth_events_compression',
+    label:
+      'sweed_auth_events — enable Timescale compression ' +
+      '(segmentby=outcome, compress_after=30d, DB-cost epic phase C2).',
+    check: (db) => hypertableCompressionEnabled(db, 'sweed_auth_events'),
   },
   {
     // Phase F1 of the Helios DB-cost epic (virusdave/top-level#11).
