@@ -562,9 +562,12 @@ export type MetricAnnotationRouteParams = z.infer<typeof MetricAnnotationRoutePa
 // ============================================================================
 // Essentials daily summary (top-of-Essentials sticky banner).
 //
-// "Today" is always the NY-time calendar day (canon: use America/New_York
-// for all aggregate / display unless explicitly told otherwise). The
-// server clamps the upper bound to "now" so partial days don't ghost.
+// "Today" is the current LOGICAL BUSINESS DAY in NY time — the day
+// rolls over at 04:00 America/New_York, not at calendar midnight
+// (canon: use NY time for all aggregate / display unless explicitly
+// told otherwise). Between 00:00 and 03:59:59 NY the banner still
+// shows the previous calendar day's sales. The server clamps the
+// upper bound to "now" so partial days don't ghost.
 // ============================================================================
 
 export const EssentialsDailySummaryRowSchema = z.object({
@@ -611,9 +614,13 @@ export type EssentialsDailySummaryRow = z.infer<typeof EssentialsDailySummaryRow
 export const EssentialsDailySummaryResponseSchema = z.object({
   /** ISO timestamp when the server produced this snapshot. */
   asOf: z.string().datetime(),
-  /** NY-day boundary used for "today". `start` is NY midnight
-   *  (as UTC ISO); `end` is the moment the snapshot was produced
-   *  (clamped to now() so a partial day isn't extrapolated). */
+  /** Business-day boundary used for "today". `startIso` is the start
+   *  of the logical business day (04:00 NY local, as UTC ISO);
+   *  `endIso` is the moment the snapshot was produced (clamped to
+   *  now() so a partial day isn't extrapolated). `nyDate` is the
+   *  business day's calendar date in NY, e.g. `2026-06-04` is still
+   *  the label at 02:30 NY on `2026-06-05` (because the business day
+   *  hasn't rolled to 04:00 yet). */
   today: z.object({
     startIso: z.string().datetime(),
     endIso: z.string().datetime(),

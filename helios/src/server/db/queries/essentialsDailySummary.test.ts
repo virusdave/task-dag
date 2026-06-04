@@ -17,29 +17,35 @@ import { loadEssentialsDailySummary } from './essentialsDailySummary.js'
  * order-agnostic (independent of which Promise.all branch lands
  * first under any given Node scheduler).
  */
-function mockPool(canned: {
-  dayRow: { startIso: string; endIso: string; nyDate: string }
-  ordersRows: Array<{
-    dealer_id: number
-    new_purchases: number
-    returning_purchases: number
-    gross_receipts: number
-    gross_sales: number
-    net_sales: number
-  }>
-  marginRows: Array<{
-    dealer_id: number
-    priced_revenue: number
-    priced_cogs: number
-  }>
-  scanRows: Array<{
-    site_slug: string
-    new_scans: number
-    returning_scans: number
-  }>
-}): Queryable {
+function mockPool(
+  canned: {
+    dayRow: { startIso: string; endIso: string; nyDate: string }
+    ordersRows: Array<{
+      dealer_id: number
+      new_purchases: number
+      returning_purchases: number
+      gross_receipts: number
+      gross_sales: number
+      net_sales: number
+    }>
+    marginRows: Array<{
+      dealer_id: number
+      priced_revenue: number
+      priced_cogs: number
+    }>
+    scanRows: Array<{
+      site_slug: string
+      new_scans: number
+      returning_scans: number
+    }>
+  },
+  /** When provided, every SQL string seen by the mock is pushed
+   *  into this array so the caller can assert SQL shape. */
+  capturedSqls?: string[],
+): Queryable {
   return {
     async query<TResult extends QueryResultRow>(text: string, _params?: unknown[]) {
+      if (capturedSqls) capturedSqls.push(text)
       const dispatch = (rows: unknown[]): QueryResult<TResult> => ({
         command: 'SELECT',
         fields: [],
@@ -47,7 +53,7 @@ function mockPool(canned: {
         rowCount: rows.length,
         rows: rows as TResult[],
       })
-      if (text.includes('to_char(now()')) {
+      if (text.includes('business_day_ny')) {
         return dispatch([
           {
             start_iso: canned.dayRow.startIso,
@@ -189,6 +195,39 @@ describe('loadEssentialsDailySummary', () => {
     expect(result.sites[0].marginDollars).toBe(0)
     expect(result.totals.gmPct).toBeNull()
     expect(result.totals.marginDollars).toBe(0)
+  })
+
+  it("uses a 4-hour-shifted NY business day for 'today' (rolls over at 04:00 NY, not midnight)", async () => {
+    const capturedSqls: string[] = []
+    const db = mockPool(
+      {
+        dayRow: {
+          startIso: '2026-06-03T08:00:00.000Z', // 04:00 NY on 2026-06-03
+          endIso: '2026-06-04T07:30:00.000Z',
+          nyDate: '2026-06-03',
+        },
+        ordersRows: [],
+        marginRows: [],
+        scanRows: [],
+      },
+      capturedSqls,
+    )
+
+    await loadEssentialsDailySummary(db)
+
+    // The day-boundary query MUST shift now() back by 4 hours and
+    // truncate to day; otherwise calendar midnight (00:00 NY) would
+    // become the start of "today", flipping the banner one wall-clock
+    // hour too early relative to the configured business day.
+    const dayBoundarySql = capturedSqls.find((s) => s.includes('business_day_ny'))
+    expect(dayBoundarySql, 'expected a day-boundary SQL using business_day_ny').toBeTruthy()
+    expect(dayBoundarySql).toContain("interval '4 hours'")
+    expect(dayBoundarySql).toContain("at time zone 'America/New_York'")
+    // Sanity-check that the returned start_iso matches what the SQL
+    // would compute (we hard-coded 08:00Z = 04:00 NY EDT above; the
+    // implementation echoes whatever the SQL returns).
+    // No assertion on the response shape here — covered by the
+    // sibling test below. This test only certifies the SQL shape.
   })
 
   it('produces zero-valued rows for sites with no activity today', async () => {

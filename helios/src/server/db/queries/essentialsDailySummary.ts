@@ -9,10 +9,18 @@ import { getPool, type Queryable } from '../pool.js'
 // Essentials → "today, per site" daily summary.
 //
 // Per repo canon (AGENTS.md): all aggregate / display work uses NY
-// time. "Today" here is the current America/New_York calendar day,
-// i.e. [NY-midnight, now()). The window is computed in SQL via
-// `at time zone 'America/New_York'` so DST transitions are handled
-// without JS-side date arithmetic.
+// time. "Today" here is the current LOGICAL BUSINESS DAY in
+// America/New_York — the business day rolls over at 04:00 NY, not
+// at calendar midnight. So between 00:00 and 03:59:59 NY the banner
+// still shows the previous calendar day's sales, and only flips to
+// the new day at 04:00 NY.
+//
+// Concretely the window is `[businessDayStart, now())` where
+//   businessDayStart_NY  = date_trunc('day', now_NY − 4h) + 4h
+// and `now_NY` is `now() at time zone 'America/New_York'`. Converted
+// back to UTC for use as a query bound, this becomes the `start_iso`
+// returned to the client. The SQL is the source of truth so DST
+// transitions are handled without JS-side date arithmetic.
 //
 // Shape: one row per known dealer (Bronx + Midtown today), plus an
 // aggregate Totals row. Sums add across sites; GM% is recomputed as
@@ -116,13 +124,22 @@ export async function loadEssentialsDailySummary(
 
   // Single SQL round-trip for the day boundary so the four queries
   // below all see the same `[start, end)` instants even if a tick of
-  // the wall clock crosses NY-midnight while we're loading.
+  // the wall clock crosses the 04:00-NY business-day boundary while
+  // we're loading. Business day = NY local time shifted back 4h then
+  // truncated; see file header for the rationale.
   const dayResult = await db.query<NyDayRow>(`
+    with bd as (
+      select
+        date_trunc(
+          'day',
+          (now() at time zone 'America/New_York') - interval '4 hours'
+        ) as business_day_ny
+    )
     select
-      (date_trunc('day', now() at time zone 'America/New_York'))
-        at time zone 'America/New_York' as start_iso,
+      ((business_day_ny + interval '4 hours') at time zone 'America/New_York') as start_iso,
       now() as end_iso,
-      to_char(now() at time zone 'America/New_York', 'YYYY-MM-DD') as ny_date
+      to_char(business_day_ny, 'YYYY-MM-DD') as ny_date
+    from bd
   `)
   const dayRow = dayResult.rows[0]!
   const startIso = new Date(dayRow.start_iso).toISOString()
