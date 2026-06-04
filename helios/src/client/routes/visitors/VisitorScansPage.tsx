@@ -63,12 +63,23 @@ function newOrReturningPill(
  * Independent of CRM matching — strict NOT EXISTS check over
  * `visitor_scans` rows with the same `(provider, id_num)`. Just a
  * neutral count badge; not color-coded by design.
+ *
+ * Count semantics: INCLUDES this scan (matches the per-scan
+ * details page which has always done `priorIdNumScanCount + 1`).
+ * A first-time visitor therefore has total = 1 and shows
+ * "First scan"; subsequent visits show `${total}× scanned`.
+ * Operator 2026-06-03: "the number displayed should INCLUDE
+ * this scan, so we shouldn't ever see '1x scans' (that would
+ * mean 'first time scanned')" — i.e. when total === 1 we keep
+ * the friendlier "First scan" label and only flip to a numeric
+ * "Nx" once we're genuinely on visit 2+.
  */
 function firstScanBadge(item: VisitorScanItem): { label: string; tone: PillTone } {
-  if (item.identity.priorIdNumScanCount === 0) {
+  const total = item.identity.priorIdNumScanCount + 1
+  if (total === 1) {
     return { label: 'First scan', tone: 'muted' }
   }
-  return { label: `${item.identity.priorIdNumScanCount}× scanned`, tone: 'muted' }
+  return { label: `${total}× scanned`, tone: 'muted' }
 }
 
 /** CRM lookup status. Always present once a link row exists. */
@@ -404,9 +415,14 @@ export function VisitorScansPage() {
                 <colgroup>
                   <col className="vs-col-time" />
                   <col className="vs-col-site" />
+                  {/* Scans column — moved here (immediately after
+                      Site) per operator request 2026-06-03 so the
+                      visit count is the first thing a cashier sees
+                      next to the site pill, before the wider PII
+                      columns. */}
+                  <col className="vs-col-status" />
                   {showMaps ? <col className="vs-col-mini" /> : null}
                   <col className="vs-col-visitor" />
-                  <col className="vs-col-status" />
                   <col className="vs-col-status" />
                   {showMaps ? <col className="vs-col-state" /> : null}
                   {showMaps ? <col className="vs-col-postal" /> : null}
@@ -419,10 +435,10 @@ export function VisitorScansPage() {
                   <tr>
                     <th>Scanned</th>
                     <th>Site</th>
+                    <th>Scans</th>
                     {showMaps ? <th>Map</th> : null}
                     <th>Visitor</th>
                     <th>Customer</th>
-                    <th>Scans</th>
                     {showMaps ? <th>St</th> : null}
                     {showMaps ? <th>Zip</th> : null}
                     {showMaps ? <th>City</th> : null}
@@ -445,6 +461,12 @@ export function VisitorScansPage() {
                           <Pill tone={item.siteSlug === 'bx' ? 'success' : 'warning'}>
                             {item.siteSlug}
                           </Pill>
+                        </td>
+                        {/* Scans count — moved here (immediately
+                            after Site) per operator 2026-06-03; cell
+                            content is unchanged. */}
+                        <td>
+                          <span className="vs-first-badge">{firstBadge.label}</span>
                         </td>
                         {showMaps ? (
                           <td>
@@ -474,9 +496,6 @@ export function VisitorScansPage() {
                           ) : (
                             <span className="subtle-copy">—</span>
                           )}
-                        </td>
-                        <td>
-                          <span className="vs-first-badge">{firstBadge.label}</span>
                         </td>
                         {showMaps ? <td>{item.state ?? '—'}</td> : null}
                         {showMaps ? <td>{item.postalCode ?? '—'}</td> : null}
