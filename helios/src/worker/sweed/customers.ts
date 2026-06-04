@@ -192,6 +192,101 @@ export async function findSweedClientByPhoneOrEmail(args: {
   return { customerId: id, raw }
 }
 
+// =====================================================================
+// store.customer.list — search by driver's-license document number
+// (Sweed-link-on-check-in pipeline, virusdave/top-level#12 /
+// FreshlyBakedNYC/automation#40).
+// =====================================================================
+//
+// Unlike phone/email — which our earlier probing could not get
+// `store.customer.list` to honor — the operator-supplied RPC body
+//
+//   {"auth":"...","name":"store.customer.list",
+//    "params":{"documentNumber":"326QY7698907","page":1,"pageSize":50}}
+//
+// IS understood by Sweed and returns the matching CRM customer row.
+// (Confirmed by the operator from the live Sweed admin-UI network
+// tab; same RPC name, distinct param key.)
+//
+// This helper is used by the per-scan
+// `linkVisitorScanToSweedJob` to resolve a freshly-arrived
+// VeriScan id_num to a Sweed customer_id immediately on check-in,
+// so the operator-facing visitor-scans list / details page can
+// surface purchase history without an operator hand-search.
+//
+// Privacy: we deliberately do NOT log the documentNumber payload at
+// info level; it goes into `visitor_scan_links.lookup_terms` for
+// provenance under the existing operator-access gate that the
+// table is already covered by.
+
+const CustomerListRowSchema = z
+  .object({
+    id: z.coerce.number().int().nullable().optional(),
+    firstName: z.string().nullable().optional(),
+    lastName: z.string().nullable().optional(),
+    documentNumber: z.string().nullable().optional(),
+  })
+  .passthrough()
+
+const CustomerListByDocumentResponseSchema = z
+  .object({
+    data: z.array(CustomerListRowSchema).optional().default([]),
+    totalCount: z.coerce.number().int().nullable().optional(),
+  })
+  .passthrough()
+
+export interface SweedCustomerListByDocumentResult {
+  /** Best (exact-match) customer id, or null when Sweed returned 0 rows. */
+  customerId: number | null
+  /** Number of total rows Sweed returned, surfaced so the caller can
+   *  set `link_status = 'ambiguous'` when >1 and no exact match. */
+  totalCount: number
+  /** Raw envelope captured for `visitor_scan_links.raw_match`. */
+  raw: unknown
+}
+
+/**
+ * Look up a Sweed CRM customer by driver's-license document number.
+ * Returns `customerId=null` when Sweed has 0 matches; the caller is
+ * responsible for transitioning the link row to 'no_match' /
+ * 'ambiguous' / 'linked' based on `totalCount` + match selection.
+ *
+ * Caller MUST already be inside a `withSweedSession` block.
+ */
+export async function findSweedCustomerByDocumentNumber(args: {
+  dealerId: number
+  documentNumber: string
+}): Promise<SweedCustomerListByDocumentResult> {
+  const raw = await callSweedRpc<unknown>(args.dealerId, SWEED_RPC_CLIENT_LIST, {
+    documentNumber: args.documentNumber,
+    page: 1,
+    pageSize: 50,
+  })
+  const parsed = CustomerListByDocumentResponseSchema.safeParse(raw)
+  if (!parsed.success) {
+    return { customerId: null, totalCount: 0, raw }
+  }
+  const rows = parsed.data.data ?? []
+  const totalCount =
+    typeof parsed.data.totalCount === 'number' ? parsed.data.totalCount : rows.length
+
+  // Prefer an exact documentNumber match when Sweed returned >1 row,
+  // otherwise take row[0]. Sweed's matching is case-insensitive but
+  // returns the canonical string, so a raw `===` is fine.
+  let chosen: z.infer<typeof CustomerListRowSchema> | undefined
+  if (rows.length === 1) {
+    chosen = rows[0]
+  } else if (rows.length > 1) {
+    chosen = rows.find(
+      (r) =>
+        typeof r.documentNumber === 'string' &&
+        r.documentNumber.trim().toLowerCase() === args.documentNumber.trim().toLowerCase(),
+    )
+  }
+  const id = chosen !== undefined && typeof chosen.id === 'number' ? chosen.id : null
+  return { customerId: id, totalCount, raw }
+}
+
 /**
  * Create a minimal Sweed client carrying only the single contact
  * channel the customer gave us. The Sweed UI surfaces created

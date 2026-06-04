@@ -20,6 +20,7 @@ import {
   ConfigWorkersSweedShiftsIngestJobPayloadSchema,
   ConfigWorkersEnrichDeliveryAddressJobPayloadSchema,
   ConfigWorkersEnrichVisitorScanAddressJobPayloadSchema,
+  ConfigWorkersLinkVisitorScanToSweedJobPayloadSchema,
   CatalogSyncGroupDetailJobPayloadSchema,
   LlmDebugRerunJobPayloadSchema,
   ProposalGenerateDescriptionBatchJobPayloadSchema,
@@ -59,6 +60,7 @@ import { runIngestWeatherDailyJob } from '../jobs/ingestWeatherDailyJob.js'
 import { runConfigWorkersSweedShiftsIngestJob } from '../jobs/configWorkersSweedShiftsIngestJob.js'
 import { runConfigWorkersEnrichDeliveryAddressJob } from '../jobs/enrichDeliveryAddressJob.js'
 import { runConfigWorkersEnrichVisitorScanAddressJob } from '../jobs/enrichVisitorScanAddressJob.js'
+import { runConfigWorkersLinkVisitorScanToSweedJob } from '../jobs/linkVisitorScanToSweedJob.js'
 import { runProposalImportReviewJsonJob } from '../jobs/importReviewJsonJob.js'
 import { getPool } from '../../server/db/pool.js'
 import { runLlmDebugRerunJob } from '../jobs/llmDebugRerunJob.js'
@@ -251,6 +253,12 @@ const handlers: Record<JobType, JobHandler> = {
       ConfigWorkersEnrichVisitorScanAddressJobPayloadSchema.parse(context.payload),
     )
   },
+  'config.workers.link_visitor_scan_to_sweed': async (context) => {
+    await runConfigWorkersLinkVisitorScanToSweedJob(
+      context,
+      ConfigWorkersLinkVisitorScanToSweedJobPayloadSchema.parse(context.payload),
+    )
+  },
 }
 
 /**
@@ -285,6 +293,7 @@ const SWEED_BACKED_JOB_TYPES: ReadonlySet<JobType> = new Set<JobType>([
   'config.workers.sweed_purchases_ingest',
   'config.workers.sweed_shifts_ingest',
   'config.workers.enrich_delivery_address',
+  'config.workers.link_visitor_scan_to_sweed',
   'reconcile.group',
   'screens.banner_refresh',
   'screens.banner_health_maintenance',

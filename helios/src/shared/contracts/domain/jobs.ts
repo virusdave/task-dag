@@ -52,6 +52,7 @@ export const JobTypeSchema = z.enum([
   'config.workers.sweed_shifts_ingest',
   'config.workers.enrich_delivery_address',
   'config.workers.enrich_visitor_scan_address',
+  'config.workers.link_visitor_scan_to_sweed',
   'catalog.maintenance.upload_group_image',
 ])
 export type JobType = z.infer<typeof JobTypeSchema>
@@ -637,6 +638,45 @@ export const ConfigWorkersEnrichVisitorScanAddressJobPayloadSchema = z.object({
 })
 export type ConfigWorkersEnrichVisitorScanAddressJobPayload = z.infer<
   typeof ConfigWorkersEnrichVisitorScanAddressJobPayloadSchema
+>
+
+/**
+ * Per-scan Sweed CRM linking job.
+ *
+ * Enqueued by the VeriScan webhook handler immediately after a
+ * successful visitor_scans insert (and on operator manual retry).
+ * Runs inside its own `withSweedSession` claim (SWEED_BACKED_JOB_TYPES)
+ * and:
+ *
+ *   - Reads the scan's id_num (driver's-license document number);
+ *   - Calls `store.customer.list { documentNumber, page, pageSize }`
+ *     against the dealer pinned to the scan's site_slug;
+ *   - Writes the resolved sweed_customer_id back to
+ *     visitor_scan_links, transitioning link_status to 'linked'
+ *     or 'no_match' / 'insufficient_data';
+ *   - On RPC failure, marks the row 'failed', bumps
+ *     probe_failed_count + next_probe_at by a 5s × 2^retryAttempt
+ *     backoff, and self-re-enqueues another job at `runAt = next_probe_at`
+ *     until `retryAttempt` exceeds `MAX_RETRY_ATTEMPTS` (the link
+ *     row stays 'failed' for the periodic safety-net to eventually
+ *     retry on a slower cadence).
+ *
+ * One job per scan keeps the lifecycle observable: each scan's
+ * lookup is its own row in `job_queue` with payload `{ scanId }`,
+ * dedup-keyed by scanId+retryAttempt so duplicate-delivery webhooks
+ * don't pile up parallel probes.
+ */
+export const ConfigWorkersLinkVisitorScanToSweedJobPayloadSchema = z.object({
+  scanId: z.number().int().positive(),
+  // 0 = first attempt; bumped by the job on each self-re-enqueue.
+  retryAttempt: z.number().int().min(0).default(0),
+  // Free-form trigger tag for the audit trail.
+  trigger: z
+    .enum(['webhook_followup', 'manual_retry', 'scheduled_safety_net'])
+    .default('webhook_followup'),
+})
+export type ConfigWorkersLinkVisitorScanToSweedJobPayload = z.infer<
+  typeof ConfigWorkersLinkVisitorScanToSweedJobPayloadSchema
 >
 
 export {

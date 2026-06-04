@@ -46,6 +46,7 @@ import { withTransaction } from '../db/tx.js'
 import {
   enqueueJob,
   JOB_PRIORITY_BACKFILL,
+  JOB_PRIORITY_URGENT,
 } from '../jobs/enqueueJob.js'
 import { appendAuditEvent } from '../audit/appendAuditEvent.js'
 import { getCustomerVisitorDetails } from '../db/queries/customerVisitorDetailsQueries.js'
@@ -215,7 +216,57 @@ async function handleVeriScanCheckin(
         { siteSlug, hashId: rowInput.hashId },
         'veriscan webhook duplicate (provider, hash_id) — no-op',
       )
-    } else if (isStoreOrUnknownGeocode(rowInput.latitude, rowInput.longitude)) {
+    } else {
+      // ----- LIVE SWEED CRM LINK PROBE -------------------------------
+      // Enqueue a per-scan link job at URGENT priority so the
+      // fast-lane worker picks it up within ~1s of the webhook
+      // (NOTIFY wakes it from idle immediately on commit). The job
+      // calls Sweed's `store.customer.list` by documentNumber and
+      // writes the resolved customer_id into visitor_scan_links —
+      // which the operator-facing /admin/customers/check-ins page
+      // surfaces (purchase summary, lifetime spend, etc.) without
+      // any extra read-path query. Per-scan dedupe key keeps
+      // duplicate-delivery from doubling Sweed calls.
+      //
+      // Cost: 1 INSERT into job_queue + 1 NOTIFY per scan. The
+      // probe itself is a single Sweed RPC (no DB read cost). See
+      // docs/canon/AGENTS_CANON.md re: "thoughtful attention to
+      // DB performance and cost minimization is an absolute hard
+      // requirement".
+      if (result.scanId !== null) {
+        try {
+          await withTransaction(async (db) => {
+            await enqueueJob(db, {
+              jobType: 'config.workers.link_visitor_scan_to_sweed',
+              module: 'config',
+              payload: {
+                scanId: result.scanId!,
+                retryAttempt: 0,
+                trigger: 'webhook_followup',
+              },
+              priority: JOB_PRIORITY_URGENT,
+              dedupeKey: `config.workers.link_visitor_scan_to_sweed:${result.scanId}:0`,
+              requestedByUserId: null,
+              runAt: new Date(),
+              scope: null,
+            })
+          })
+        } catch (cause) {
+          // Best-effort: a missed enqueue means the slower
+          // safety-net job (eventually) catches the row.
+          request.log.warn(
+            {
+              siteSlug,
+              hashId: rowInput.hashId,
+              scanId: result.scanId,
+              cause: cause instanceof Error ? cause.message : String(cause),
+            },
+            'veriscan webhook sweed-link probe enqueue failed (will fall through to safety-net)',
+          )
+        }
+      }
+    }
+    if (result.inserted && isStoreOrUnknownGeocode(rowInput.latitude, rowInput.longitude)) {
       // Webhook arrived with NO usable home geocode (either lat/lng
       // is null, or it's the scanner kiosk's location within 500ft
       // of one of our stores). Queue a backfill-priority batch job

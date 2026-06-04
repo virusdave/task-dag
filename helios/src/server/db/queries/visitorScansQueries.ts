@@ -17,6 +17,15 @@ import { upsertAddress } from '../../../worker/geocoder/index.js'
 
 export interface InsertVisitorScanResult {
   inserted: boolean
+  /**
+   * Numeric id of the row. Populated whether or not this call wrote
+   * the row — for duplicates we re-SELECT the id so callers (e.g.
+   * the webhook handler enqueuing a Sweed-link probe) can still
+   * reference the canonical scan row. Null only when we couldn't
+   * resolve an id at all (should be impossible in practice; the
+   * column is `bigint primary key`).
+   */
+  scanId: number | null
 }
 
 /**
@@ -203,7 +212,18 @@ export async function insertVisitorScan(
       })
     }
   }
-  return { inserted }
+  let scanId: number | null = inserted ? Number(result.rows[0].id) : null
+  if (!inserted) {
+    // Duplicate delivery — look up the canonical id. Single-row
+    // lookup on a (provider, hash_id) unique index, so this is a
+    // single fast index lookup.
+    const dup = await db.query<{ id: string | number }>(
+      `select id from visitor_scans where provider = $1 and hash_id = $2::uuid`,
+      [row.provider, row.hashId],
+    )
+    scanId = dup.rows.length > 0 ? Number(dup.rows[0].id) : null
+  }
+  return { inserted, scanId }
 }
 
 // ---------------------------------------------------------------------
