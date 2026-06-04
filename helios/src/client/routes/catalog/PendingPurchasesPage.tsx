@@ -1968,6 +1968,7 @@ function PendingPurchaseRowCard(
           <StructuredOverrideField
             disabled={editingLocked}
             label="Subcategory"
+            noneLabel="— No subcategory —"
             onChange={(value) => setDraftStructured((prev) => ({ ...prev, expectedSubcategory: value }))}
             options={overrideOptions?.subcategories}
             parsedValue={item.expectedSubcategory}

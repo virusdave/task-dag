@@ -274,6 +274,7 @@ export function StructuredOverrideField({
   disabled,
   inputMode,
   label,
+  noneLabel,
   onChange,
   options,
   parsedValue,
@@ -282,6 +283,12 @@ export function StructuredOverrideField({
   disabled: boolean
   inputMode?: 'numeric'
   label: string
+  // When supplied (only meaningful for `<select>` fields whose value is
+  // legitimately optional, e.g. subcategory), the empty "" entry renders
+  // with this explicit label instead of the "inherit"/"—" default — so
+  // the reviewer can deliberately choose "no value" rather than being led
+  // to believe the empty entry keeps the parser's proposal.
+  noneLabel?: string
   onChange: (value: string) => void
   options?: readonly string[]
   parsedValue: string | null
@@ -299,6 +306,7 @@ export function StructuredOverrideField({
       {options !== undefined ? (
         <StructuredOverrideSelect
           disabled={disabled}
+          noneLabel={noneLabel}
           onChange={onChange}
           options={options}
           parsedValue={parsedValue}
@@ -322,21 +330,30 @@ export function StructuredOverrideField({
 
 function StructuredOverrideSelect({
   disabled,
+  noneLabel,
   onChange,
   options,
   parsedValue,
   value,
 }: {
   disabled: boolean
+  noneLabel?: string
   onChange: (value: string) => void
   options: readonly string[]
   parsedValue: string | null
   value: string
 }): JSX.Element {
   // Build the option list:
-  //   1. Always include the empty "—" entry so the reviewer can clear
-  //      the field back to "inherit from parser" semantics (which the
-  //      override payload translates to either omit-key or null).
+  //   1. Always include the empty "" entry. Selecting it sets the draft
+  //      to "" which `buildStructuredOverridePayload` translates to
+  //      "no value" — either omit-key (when the parser also proposed
+  //      nothing) or an explicit `null` clear (when the parser proposed
+  //      a value the reviewer wants gone). For optional fields like
+  //      subcategory, callers pass `noneLabel` (e.g. "— No subcategory —")
+  //      so this entry is unmistakably a "set to none" action rather
+  //      than the misleading "inherit the parser's value" it used to
+  //      read as. To KEEP a parser-proposed value, the reviewer picks
+  //      that value from the list (it is always present, see #2).
   //   2. Always include the parser-proposed value (when nonempty),
   //      even if it isn't in the canonical facet list — otherwise a
   //      brand-new brand the LLM teacher proposed would silently
@@ -360,7 +377,9 @@ function StructuredOverrideSelect({
       onChange={(event) => onChange(event.currentTarget.value)}
       value={value}
     >
-      <option value="">{parsedValue ? `— inherit (${parsedValue}) —` : '—'}</option>
+      <option value="">
+        {noneLabel ?? (parsedValue ? `— inherit (${parsedValue}) —` : '—')}
+      </option>
       {sorted.map((option) => (
         <option key={option} value={option}>
           {option}
