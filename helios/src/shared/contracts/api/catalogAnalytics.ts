@@ -229,3 +229,69 @@ export const CatalogAnalyticsPointsResponseSchema = z.object({
 export type CatalogAnalyticsPointsResponse = z.infer<
   typeof CatalogAnalyticsPointsResponseSchema
 >
+
+// ============================ Entity rankings endpoint ====================
+//
+// Powers the Brands / Distributors index pages
+// (/metrics/brands, /metrics/distributors). One row per brand or
+// distributor currently visible on sweed_package_current, with the
+// three columns the operator can sort by:
+//
+//   * liveItemCount             — distinct inventory_item_id (lots /
+//                                 batches), matches the legacy "Live
+//                                 items" column. Includes
+//                                 zero-on-hand packages.
+//   * inStockProductCount       — distinct product_id where the
+//                                 package is currently in stock
+//                                 (is_on_stock and available_qty > 0).
+//                                 Counts unique SKUs, not lots, which
+//                                 is usually what operators actually
+//                                 want when ranking presence.
+//   * lastOrderAt               — most recent pay_time of an order
+//                                 line for any inventory item of this
+//                                 brand/distributor, ISO timestamp
+//                                 (UTC). Null if no orders in the
+//                                 lookback window.
+//
+// The orderBy / sort toggle lives entirely in the SPA (the response
+// is small enough to sort client-side without paging).
+// ===========================================================================
+
+export const MetricsEntityKindSchema = z.enum(['brand', 'distributor'])
+export type MetricsEntityKind = z.infer<typeof MetricsEntityKindSchema>
+
+export const MetricsEntityRankingsRequestSchema = z.object({
+  kind: MetricsEntityKindSchema,
+  sites: csvList,
+})
+export type MetricsEntityRankingsRequest = z.infer<
+  typeof MetricsEntityRankingsRequestSchema
+>
+
+export const MetricsEntityRankingRowSchema = z.object({
+  /** Brand label (catalog_groups.brand_name) or distributor name
+   *  (sweed_package_current.distributor_name). Matches `CatalogFilterOption.id`
+   *  for the corresponding dimension so URLs are interchangeable. */
+  id: z.string().min(1),
+  /** Display label (same value as id for both brand/distributor today). */
+  label: z.string().min(1),
+  /** Distinct inventory_item_id count (legacy "Live items"). */
+  liveItemCount: z.number().int().nonnegative(),
+  /** Distinct product_id count restricted to packages currently in stock. */
+  inStockProductCount: z.number().int().nonnegative(),
+  /** ISO timestamp (UTC) of the most recent order line, or null. */
+  lastOrderAt: z.string().nullable(),
+})
+export type MetricsEntityRankingRow = z.infer<typeof MetricsEntityRankingRowSchema>
+
+export const MetricsEntityRankingsResponseSchema = z.object({
+  kind: MetricsEntityKindSchema,
+  /** ISO timestamp of the cutoff used for `lastOrderAt` (rows whose
+   *  most recent order is before this fall back to null). Helps the
+   *  SPA explain the "—" cell ("no orders since …"). */
+  lastOrderLookbackSince: z.string(),
+  rows: z.array(MetricsEntityRankingRowSchema),
+})
+export type MetricsEntityRankingsResponse = z.infer<
+  typeof MetricsEntityRankingsResponseSchema
+>

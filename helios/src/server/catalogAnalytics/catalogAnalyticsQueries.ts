@@ -4,6 +4,9 @@ import {
   type CatalogAnalyticsPoint,
   type CatalogAnalyticsPointsResponse,
   type CatalogFilterOption,
+  type MetricsEntityKind,
+  type MetricsEntityRankingRow,
+  type MetricsEntityRankingsResponse,
 } from '../../shared/contracts/index.js'
 import { getPool } from '../db/pool.js'
 
@@ -717,3 +720,179 @@ export async function getCatalogAnalyticsPoints(
 }
 
 export const CATALOG_ANALYTICS_DEFAULT_WINDOW_DAYS = DEFAULT_WINDOW_DAYS
+
+// ============================ Entity rankings endpoint ====================
+//
+// Brand / distributor leaderboard powering the
+// /metrics/brands and /metrics/distributors index pages.
+//
+// Returns one row per brand / distributor currently visible on
+// sweed_package_current for the requested sites, with three sortable
+// columns:
+//
+//   * live_item_count        — distinct inventory_item_id (lots /
+//                              batches). Matches the legacy
+//                              `CatalogFilterOption.itemCount` value
+//                              so the column is comparable to the
+//                              previous "Live items" display.
+//   * in_stock_product_count — distinct product_id restricted to
+//                              packages currently in stock
+//                              (coalesce(is_on_stock, true) AND
+//                              coalesce(available_qty, current_qty)
+//                              > 0). This is the operator-meaningful
+//                              "how many unique products is this
+//                              brand actually shelving right now"
+//                              measure.
+//   * last_order_at          — max(sweed_orders.pay_time) for an
+//                              order line whose inventoryItemId
+//                              matches any of this entity's
+//                              packages. Bounded to the last 365
+//                              days so the join stays cheap; rows
+//                              with no orders inside that window
+//                              return NULL and the SPA renders "—".
+// ===========================================================================
+
+const ENTITY_RANKING_LAST_ORDER_LOOKBACK_DAYS = 365
+
+export interface MetricsEntityRankingsArgs {
+  readonly kind: MetricsEntityKind
+  readonly sites: readonly string[]
+}
+
+export async function getMetricsEntityRankings(
+  opts: MetricsEntityRankingsArgs,
+): Promise<MetricsEntityRankingsResponse> {
+  const dealerIds = resolveDealerIds(opts.sites)
+  const lookbackSince = new Date(
+    Date.now() - ENTITY_RANKING_LAST_ORDER_LOOKBACK_DAYS * 86_400_000,
+  )
+
+  if (dealerIds.length === 0) {
+    return {
+      kind: opts.kind,
+      lastOrderLookbackSince: lookbackSince.toISOString(),
+      rows: [],
+    }
+  }
+
+  const pool = getPool()
+
+  // Parameter slots:
+  //   $1 = dealerIds bigint[]
+  //   $2 = lookback cutoff for last_order_at (timestamptz)
+  //
+  // The `entity_label` expression switches per kind. We resolve it
+  // server-side rather than splicing arbitrary identifiers into the
+  // SQL string so the query plan stays cacheable. brand_name lives
+  // on catalog_groups (joined via the live_state_json products
+  // array, same pattern as getCatalogAnalyticsFilters);
+  // distributor_name lives directly on sweed_package_current.
+  const entityLabelExpr =
+    opts.kind === 'brand'
+      ? "coalesce(nullif(m.brand_name, ''), '(no brand)')"
+      : "coalesce(nullif(spc.distributor_name, ''), '(no distributor)')"
+  // `entity_present` filters out rows whose entity source column
+  // is NULL/empty. For brand, that drops rows whose product_id
+  // didn't resolve in catalog_groups (which the existing filter
+  // SQL also excludes via `where brand_name is not null`). For
+  // distributor, that drops packages whose distributor_name is
+  // unset on sweed_package_current.
+  const entityPresentExpr =
+    opts.kind === 'brand'
+      ? 'm.brand_name is not null'
+      : 'spc.distributor_name is not null'
+
+  const sql = `
+    with mapping as (
+      select cg.brand_name,
+             (prod->>'productId')::bigint as product_id
+      from catalog_groups cg,
+           jsonb_array_elements(cg.live_state_json->'products') as prod
+      where cg.deleted_at is null
+    ),
+    base as (
+      select spc.dealer_id,
+             spc.inventory_item_id,
+             spc.product_id,
+             spc.is_on_stock,
+             coalesce(spc.available_qty, spc.current_qty, 0) as live_qty,
+             ${entityLabelExpr} as entity_label
+      from sweed_package_current spc
+        left join mapping m on m.product_id = spc.product_id
+      where spc.dealer_id = any($1::bigint[])
+        and ${entityPresentExpr}
+    ),
+    presence as (
+      select entity_label,
+             count(distinct inventory_item_id)::int as live_item_count,
+             count(distinct product_id)
+               filter (where coalesce(is_on_stock, true) and live_qty > 0)::int
+                                                         as in_stock_product_count
+      from base
+      group by 1
+    ),
+    -- Map each live inventory_item to the entity it belongs to so we
+    -- can roll order lines (which only carry inventoryItemId) up to
+    -- the brand / distributor without re-deriving the taxonomy join
+    -- inside the sweed_orders cross-lateral. Tied to the same
+    -- (dealer_id, inventory_item_id) we already have in base.
+    inventory_entity as (
+      select distinct dealer_id, inventory_item_id, entity_label
+      from base
+    ),
+    last_order as (
+      select ie.entity_label,
+             max(so.pay_time) as last_pay_time
+      from sweed_orders so
+        cross join lateral jsonb_array_elements(so.raw_json->'items') as item
+        join inventory_entity ie
+          on ie.dealer_id = so.dealer_id
+         and ie.inventory_item_id = item->>'inventoryItemId'
+      where so.dealer_id = any($1::bigint[])
+        and so.pay_time >= $2
+        and item->>'inventoryItemId' is not null
+      group by 1
+    )
+    select p.entity_label as label,
+           p.live_item_count,
+           p.in_stock_product_count,
+           lo.last_pay_time as last_order_at
+    from presence p
+      left join last_order lo on lo.entity_label = p.entity_label
+    order by p.in_stock_product_count desc, p.entity_label asc
+  `
+
+  const result = await pool.query<{
+    label: string
+    live_item_count: number
+    in_stock_product_count: number
+    last_order_at: Date | string | null
+  }>(sql, [dealerIds, lookbackSince])
+
+  const rows: MetricsEntityRankingRow[] = result.rows.map((row) => {
+    let lastOrderAt: string | null = null
+    if (row.last_order_at instanceof Date) {
+      lastOrderAt = row.last_order_at.toISOString()
+    } else if (typeof row.last_order_at === 'string' && row.last_order_at.length > 0) {
+      // Defensive: pg can return strings if a custom parser is registered.
+      const parsed = new Date(row.last_order_at)
+      lastOrderAt = Number.isFinite(parsed.getTime()) ? parsed.toISOString() : null
+    }
+    return {
+      // The entity_label is the join key the rest of the catalog
+      // filter machinery uses (it matches `CatalogFilterOption.id`
+      // for the same dimension), so use it for both id and label.
+      id: row.label,
+      label: row.label,
+      liveItemCount: asInt(row.live_item_count) ?? 0,
+      inStockProductCount: asInt(row.in_stock_product_count) ?? 0,
+      lastOrderAt,
+    }
+  })
+
+  return {
+    kind: opts.kind,
+    lastOrderLookbackSince: lookbackSince.toISOString(),
+    rows,
+  }
+}

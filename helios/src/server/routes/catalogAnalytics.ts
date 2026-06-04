@@ -5,12 +5,15 @@ import {
   CatalogAnalyticsFiltersResponseSchema,
   CatalogAnalyticsPointsRequestSchema,
   CatalogAnalyticsPointsResponseSchema,
+  MetricsEntityRankingsRequestSchema,
+  MetricsEntityRankingsResponseSchema,
 } from '../../shared/contracts/index.js'
 import { requireMetricsGrant } from '../auth/requireSession.js'
 import {
   CATALOG_ANALYTICS_DEFAULT_WINDOW_DAYS,
   getCatalogAnalyticsFilters,
   getCatalogAnalyticsPoints,
+  getMetricsEntityRankings,
 } from '../catalogAnalytics/catalogAnalyticsQueries.js'
 
 const DAY_MS = 86_400_000
@@ -87,5 +90,27 @@ export async function registerCatalogAnalyticsRoutes(
       packCounts: parsed.packCounts,
     })
     return reply.send(CatalogAnalyticsPointsResponseSchema.parse(result))
+  })
+
+  // GET /api/catalog-analytics/entity-rankings?kind=brand|distributor&sites=
+  // Returns the brand / distributor leaderboard powering the
+  // /metrics/brands and /metrics/distributors index pages. Each row
+  // carries the three sortable columns the SPA's sort toggle offers
+  // (live items, in-stock products, last order timestamp). Sort is
+  // applied client-side; the server returns a single stable order
+  // (in-stock products desc, label asc) as the baseline.
+  server.get('/api/catalog-analytics/entity-rankings', async (request, reply) => {
+    // Same grant model as /filters: the page is permission-gated
+    // behind the dedicated brand / distributor surface keys, so we
+    // restrict the endpoint to whichever kind the caller asked for.
+    const parsed = MetricsEntityRankingsRequestSchema.parse(request.query ?? {})
+    const grantKey = parsed.kind === 'brand' ? 'brands' : 'distributors'
+    const user = await requireMetricsGrant(request, reply, grantKey)
+    if (!user) return
+    const result = await getMetricsEntityRankings({
+      kind: parsed.kind,
+      sites: parsed.sites,
+    })
+    return reply.send(MetricsEntityRankingsResponseSchema.parse(result))
   })
 }
