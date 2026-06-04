@@ -10,6 +10,7 @@ import type { FastifyInstance } from 'fastify'
 
 import {
   CustomersMapEarliestResponseSchema,
+  CustomersMapHighwaterResponseSchema,
   CustomersMapQuerySchema,
   CustomersMapResponseSchema,
 } from '../../shared/contracts/index.js'
@@ -17,6 +18,7 @@ import { requireSessionUser } from '../auth/requireSession.js'
 import { getPool } from '../db/pool.js'
 import {
   getEarliestScanTimestamp,
+  getVisitorScansMaxId,
   listCustomersMapPoints,
 } from '../db/queries/customersMapQueries.js'
 
@@ -40,6 +42,33 @@ export async function registerCustomersMapRoutes(server: FastifyInstance): Promi
         maxPoints: query.maxPoints,
       })
       return reply.send(CustomersMapResponseSchema.parse(result))
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      if (/relation .*visitor_scans.* does not exist/i.test(message)) {
+        return reply
+          .status(503)
+          .send({ error: 'visitor_scans table missing. Apply migration 039_visitor_scans.sql.' })
+      }
+      throw error
+    }
+  })
+
+  // Live-update highwater probe — see
+  // CustomersMapHighwaterResponseSchema. The SPA polls this every
+  // few seconds while the map page is visible; when the returned
+  // maxScanId exceeds the value stored from the last full fetch,
+  // the SPA triggers ONE full refetch. Cost per call is a single
+  // indexed pkey MAX (Postgres walks the right edge of the
+  // visitor_scans pkey b-tree) — effectively free even at high
+  // poll concurrency. No filter parameters: the watermark is
+  // global, false-positive refetches are bounded by the real
+  // scan-arrival rate which is very low in steady state.
+  server.get('/api/admin/customers/map/highwater', async (request, reply) => {
+    const user = await requireSessionUser(request, reply, 'admin')
+    if (!user) return
+    try {
+      const maxScanId = await getVisitorScansMaxId(getPool())
+      return reply.send(CustomersMapHighwaterResponseSchema.parse({ maxScanId }))
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       if (/relation .*visitor_scans.* does not exist/i.test(message)) {

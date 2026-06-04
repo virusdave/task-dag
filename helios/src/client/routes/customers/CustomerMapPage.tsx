@@ -25,6 +25,7 @@ import { useLoaderData, useSearchParams } from 'react-router-dom'
 
 import {
   CustomersMapEarliestResponseSchema,
+  CustomersMapHighwaterResponseSchema,
   CustomersMapResponseSchema,
   type CustomersMapPoint,
   type CustomersMapResponse,
@@ -997,6 +998,96 @@ export function CustomerMapPage(): JSX.Element {
       cancelled = true
     }
   }, [searchParams])
+
+  // Live-update poll. Hits /api/admin/customers/map/highwater every
+  // HIGHWATER_POLL_MS; when the returned MAX(visitor_scans.id)
+  // exceeds the value we last stored from a full map fetch, we
+  // mutate `searchParams` with a no-op (a ts-bumped placeholder)
+  // to trigger the filter-change effect above. The probe itself
+  // is one indexed pkey MAX on the server — effectively free
+  // even at high tab concurrency, so the operator can leave this
+  // page open all day without burdening the DB.
+  //
+  // Polling pauses when the tab is hidden (document.visibilityState
+  // !== 'visible') so a backgrounded tab contributes zero polls.
+  // Polling resumes immediately on visibilitychange → visible.
+  //
+  // Refetches are gated on `data.maxScanId` having changed since
+  // last full fetch — NOT on a wall-clock timer — so the expensive
+  // listCustomersMapPoints query is only re-run when something
+  // actually landed in visitor_scans. False-positive triggers
+  // (a new scan that doesn't match the current filter) are bounded
+  // by the real arrival rate (a handful per hour in steady state).
+  useEffect(() => {
+    const HIGHWATER_POLL_MS = 5_000
+    let cancelled = false
+    let timer: number | null = null
+
+    const tick = async (): Promise<void> => {
+      if (cancelled) return
+      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
+        // Hidden tab: don't poll at all. visibilitychange handler
+        // below restarts the loop the moment the tab is revealed.
+        return
+      }
+      try {
+        const probe = await loadJson(
+          '/api/admin/customers/map/highwater',
+          CustomersMapHighwaterResponseSchema,
+        )
+        if (cancelled) return
+        const last = data.maxScanId
+        const next = probe.maxScanId
+        if (next !== null && (last === null || next > last)) {
+          // Trigger the filter-change effect above by bumping a
+          // throwaway query param the server ignores. Keeps all the
+          // existing loading/error plumbing without duplicating it
+          // here; React-Router fires the effect because the
+          // URLSearchParams identity changes.
+          const bumped = new URLSearchParams(searchParams)
+          bumped.set('_live', String(next))
+          setSearchParams(bumped, { replace: true })
+        }
+      } catch {
+        // Swallow probe errors silently — the next tick will retry.
+        // A failed highwater poll must NOT escalate into a user-
+        // visible error since the page is still showing valid
+        // (just possibly slightly stale) data.
+      } finally {
+        if (!cancelled) {
+          timer = window.setTimeout(() => {
+            void tick()
+          }, HIGHWATER_POLL_MS)
+        }
+      }
+    }
+
+    const onVisibilityChange = (): void => {
+      if (document.visibilityState === 'visible') {
+        if (timer !== null) {
+          window.clearTimeout(timer)
+          timer = null
+        }
+        void tick()
+      }
+    }
+
+    void tick()
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', onVisibilityChange)
+    }
+
+    return () => {
+      cancelled = true
+      if (timer !== null) {
+        window.clearTimeout(timer)
+        timer = null
+      }
+      if (typeof document !== 'undefined') {
+        document.removeEventListener('visibilitychange', onVisibilityChange)
+      }
+    }
+  }, [data.maxScanId, searchParams, setSearchParams])
 
   // -----------------------------------------------------------------
   // Map instance lifecycle.

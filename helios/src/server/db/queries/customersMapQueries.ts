@@ -463,13 +463,41 @@ export async function listCustomersMapPoints(
   // floor in the main query is inverted here.
   const unknownCount = await countUnknown(db, filter)
 
+  // Highwater mark — see CustomersMapResponseSchema.maxScanId.
+  // Single MAX(id) against the visitor_scans primary key: Postgres
+  // walks the right edge of the pkey b-tree and returns in
+  // O(log n). Adds < 1ms to the page fetch; in exchange the SPA
+  // gets a snapshot it can compare against future cheap polls
+  // of /api/admin/customers/map/highwater instead of re-running
+  // the full filtered query on a wall-clock timer.
+  const maxScanId = await getVisitorScansMaxId(db)
+
   return {
     points,
     sitePins: [...SITE_PINS],
     totalMatching,
     unknownCount,
     clipped,
+    maxScanId,
   }
+}
+
+/**
+ * MAX(visitor_scans.id) across all rows. Drives the live-update
+ * polling on the customer-origin map page. Cheap: indexed pkey
+ * MAX, sub-millisecond on any realistic visitor_scans size.
+ *
+ * Exposed at module scope so the /highwater endpoint can call it
+ * without paying for the full listCustomersMapPoints query.
+ */
+export async function getVisitorScansMaxId(db: Queryable): Promise<number | null> {
+  const result = await db.query<{ max_id: string | number | null }>(
+    `select max(id) as max_id from visitor_scans`,
+  )
+  const v = result.rows[0]?.max_id ?? null
+  if (v === null) return null
+  const n = typeof v === 'number' ? v : Number(v)
+  return Number.isFinite(n) ? n : null
 }
 
 /**

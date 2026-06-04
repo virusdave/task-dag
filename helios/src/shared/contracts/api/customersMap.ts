@@ -191,6 +191,15 @@ export const CustomersMapResponseSchema = z.object({
   // points.length` — the client uses this to render the "clipped"
   // banner per parent design §11.
   clipped: z.boolean(),
+  // Highest visitor_scans.id observed at response-build time,
+  // across ALL scans (not just rows matching the current filter).
+  // The SPA stores this and polls /api/admin/customers/map/highwater
+  // every few seconds; when the polled value exceeds the stored
+  // value the client triggers a single full refetch. This converts
+  // the page from "stale until you change a filter" to "near-live"
+  // while keeping the polling cost to one indexed primary-key MAX
+  // per poll. `null` means no scans exist yet.
+  maxScanId: z.number().int().nonnegative().nullable(),
 })
 export type CustomersMapResponse = z.infer<typeof CustomersMapResponseSchema>
 
@@ -205,3 +214,21 @@ export const CustomersMapEarliestResponseSchema = z.object({
   earliestCheckedInAt: z.string().nullable(),
 })
 export type CustomersMapEarliestResponse = z.infer<typeof CustomersMapEarliestResponseSchema>
+
+/**
+ * Highwater-mark probe for the customer-origin map.
+ *
+ * Returns the current MAX(visitor_scans.id). The SPA polls this
+ * every few seconds while the page is visible; when the polled
+ * value exceeds the last value it stored from the full map fetch
+ * (CustomersMapResponse.maxScanId), it triggers a single full
+ * refetch. Polling cost is one indexed primary-key MAX per call
+ * — Postgres serves it from the rightmost leaf of the pkey
+ * b-tree, which is effectively free.
+ *
+ * `null` means no scans exist yet.
+ */
+export const CustomersMapHighwaterResponseSchema = z.object({
+  maxScanId: z.number().int().nonnegative().nullable(),
+})
+export type CustomersMapHighwaterResponse = z.infer<typeof CustomersMapHighwaterResponseSchema>
