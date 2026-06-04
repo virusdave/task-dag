@@ -134,3 +134,72 @@ export const VisitorScansResponseSchema = z.object({
   hasMore: z.boolean(),
 })
 export type VisitorScansResponse = z.infer<typeof VisitorScansResponseSchema>
+
+// ---------------------------------------------------------------------
+// Cashier-tablet "live check-ins" surface
+// (virusdave/top-level#12 / FreshlyBakedNYC/automation#40, phase D1).
+//
+// A privacy-redacted variant of the operator check-ins feed for the
+// at-counter cashier display. Deliberately a NARROWER schema (no
+// state/postal/city/address/document/coords/raw_envelope) so that a
+// cashier-account session cannot use the endpoint to dump PII.
+//
+// `displayName` is server-computed as "First L." (first name + last
+// initial). The full name never crosses the network on this surface.
+// ---------------------------------------------------------------------
+
+export const CashierVisitorScanItemSchema = z.object({
+  id: z.coerce.number().int(),
+  scannedAt: z.string().nullable(),
+  ingestedAt: z.string(),
+  siteSlug: z.string(),
+  // Server-redacted name: "First L." (or just "First" if no last
+  // name on file, or "—" if no name at all).
+  displayName: z.string(),
+  // Strong id_num-based "first visit ever?" indicator, driven off
+  // the visitor_scans (provider, id_num) index. Mirrors what the
+  // operator page calls `isFirstScanByIdNum`.
+  isFirstVisit: z.boolean(),
+  // Total scans EVER on this id_num INCLUDING this scan. Operator
+  // semantic: a returning visitor's 4th visit shows 4× scanned.
+  totalScans: z.number().int().nonnegative(),
+  // Last-visit timestamp before this scan (null when first visit).
+  lastVisitAt: z.string().nullable(),
+  // Sweed-link status. The cashier UI only needs to know whether
+  // we have a CRM customer linked (true) vs. still pending / no_match
+  // (false). The numeric customerId is intentionally NOT exposed on
+  // this surface — the cashier display doesn't deep-link into
+  // customer details.
+  isCrmLinked: z.boolean(),
+  // Compact Sweed-purchase summary when the customer is CRM-linked
+  // and has at least one historical order. null otherwise.
+  sweedSummary: z
+    .object({
+      purchaseCount: z.number().int().nonnegative(),
+      lifetimeSpendDollars: z.number(),
+      averagePurchaseDollars: z.number().nullable(),
+      latestPurchaseAt: z.string().nullable(),
+      favoriteCategoryName: z.string().nullable(),
+      favoriteProductName: z.string().nullable(),
+    })
+    .nullable(),
+})
+export type CashierVisitorScanItem = z.infer<typeof CashierVisitorScanItemSchema>
+
+export const CashierVisitorScansResponseSchema = z.object({
+  items: z.array(CashierVisitorScanItemSchema),
+  // Echoed back so the client can store it as the "seen" highwater
+  // mark and gate subsequent polls.
+  maxScanId: z.number().int().nullable(),
+})
+export type CashierVisitorScansResponse = z.infer<typeof CashierVisitorScansResponseSchema>
+
+// Cheap highwater probe response. Single MAX(visitor_scans.id) on
+// the server (sub-millisecond). Drives live-update polling on
+// both the cashier and operator check-ins pages.
+export const VisitorScansHighwaterResponseSchema = z.object({
+  maxScanId: z.number().int().nullable(),
+})
+export type VisitorScansHighwaterResponse = z.infer<
+  typeof VisitorScansHighwaterResponseSchema
+>

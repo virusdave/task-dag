@@ -662,3 +662,207 @@ export async function listVisitorScans(
   const hasMore = rows.length > filter.limit
   return { items: hasMore ? rows.slice(0, filter.limit) : rows, hasMore }
 }
+
+// ---------------------------------------------------------------------
+// Cashier-tablet live check-ins query
+// (virusdave/top-level#12 / FreshlyBakedNYC/automation#40, phase D1).
+//
+// Returns the most recent N visitor_scans as a privacy-redacted row
+// shape: name is collapsed to "First L." server-side, and no
+// state/postal/city/address/coords/document fields are emitted.
+// The same data the operator page uses for the New/Returning pill
+// and the Sweed purchase summary is included, since the cashier
+// needs it to greet the customer appropriately.
+//
+// DB cost: one indexed top-N read on `visitor_scans` (ordered by
+// id desc), plus three small lateral subqueries per row (last visit
+// by id_num; CRM link join; sweed_orders aggregate when linked).
+// Capped at limit=50 — sufficient for the at-counter rolling feed
+// without bloating the per-poll payload.
+// ---------------------------------------------------------------------
+
+export interface CashierVisitorScanItem {
+  id: number
+  scannedAt: string | null
+  ingestedAt: string
+  siteSlug: string
+  displayName: string
+  isFirstVisit: boolean
+  totalScans: number
+  lastVisitAt: string | null
+  isCrmLinked: boolean
+  sweedSummary: {
+    purchaseCount: number
+    lifetimeSpendDollars: number
+    averagePurchaseDollars: number | null
+    latestPurchaseAt: string | null
+    favoriteCategoryName: string | null
+    favoriteProductName: string | null
+  } | null
+}
+
+interface CashierVisitorScanRow {
+  id: string | number
+  ingested_at: Date
+  scanned_at: Date | null
+  site_slug: string
+  first_name: string | null
+  last_name: string | null
+  id_num: string | null
+
+  prior_id_num_scan_count: string | number
+  prior_id_num_latest_at: Date | null
+
+  link_status: string | null
+  link_customer_id: string | number | null
+  link_dealer_id: string | number | null
+
+  sweed_purchase_count: string | number | null
+  sweed_lifetime_spend: string | number | null
+  sweed_latest_purchase_at: Date | null
+}
+
+function redactName(firstName: string | null, lastName: string | null): string {
+  const f = firstName === null ? '' : firstName.trim()
+  const l = lastName === null ? '' : lastName.trim()
+  if (f.length === 0 && l.length === 0) return '—'
+  const initial = l.length > 0 ? `${l.charAt(0).toUpperCase()}.` : ''
+  if (f.length === 0) return initial
+  if (initial.length === 0) return f
+  return `${f} ${initial}`
+}
+
+function nullableNumber(value: string | number | null | undefined): number | null {
+  if (value === null || value === undefined) return null
+  const n = typeof value === 'number' ? value : Number(value)
+  return Number.isFinite(n) ? n : null
+}
+
+function nullableInt(value: string | number | null | undefined): number {
+  const n = nullableNumber(value)
+  return n === null ? 0 : Math.trunc(n)
+}
+
+function rowToCashierItem(row: CashierVisitorScanRow): CashierVisitorScanItem {
+  const priorCount = nullableInt(row.prior_id_num_scan_count)
+  const total = priorCount + 1
+  const isCrmLinked =
+    row.link_status === 'linked' && row.link_customer_id !== null
+  const purchaseCount = nullableInt(row.sweed_purchase_count)
+  const lifetimeSpend = nullableNumber(row.sweed_lifetime_spend) ?? 0
+  const averagePurchase =
+    purchaseCount > 0 ? Number((lifetimeSpend / purchaseCount).toFixed(2)) : null
+
+  let sweedSummary: CashierVisitorScanItem['sweedSummary'] = null
+  if (isCrmLinked && purchaseCount > 0) {
+    sweedSummary = {
+      purchaseCount,
+      lifetimeSpendDollars: Number(lifetimeSpend.toFixed(2)),
+      averagePurchaseDollars: averagePurchase,
+      latestPurchaseAt: row.sweed_latest_purchase_at
+        ? row.sweed_latest_purchase_at.toISOString()
+        : null,
+      // Phase-D2 will populate these in the same query; for the
+      // initial cashier-page shipping we leave them null so the
+      // contract is forward-compatible.
+      favoriteCategoryName: null,
+      favoriteProductName: null,
+    }
+  }
+
+  return {
+    id: Number(row.id),
+    scannedAt: row.scanned_at ? row.scanned_at.toISOString() : null,
+    ingestedAt: row.ingested_at.toISOString(),
+    siteSlug: row.site_slug,
+    displayName: redactName(row.first_name, row.last_name),
+    isFirstVisit: priorCount === 0,
+    totalScans: total,
+    lastVisitAt: row.prior_id_num_latest_at
+      ? row.prior_id_num_latest_at.toISOString()
+      : null,
+    isCrmLinked,
+    sweedSummary,
+  }
+}
+
+/**
+ * Return the latest `limit` visitor_scans rows in the cashier-tablet
+ * shape. Bounded set (default 50, max 100). Per-row laterals stay
+ * cheap because the limit is small and every join input is indexed.
+ */
+export async function listCashierVisitorScans(
+  db: Queryable,
+  args: { limit?: number; siteSlugs?: string[] | null },
+): Promise<{ items: CashierVisitorScanItem[]; maxScanId: number | null }> {
+  const limit = Math.max(1, Math.min(args.limit ?? 50, 100))
+  const params: unknown[] = []
+  const conditions: string[] = []
+
+  if (args.siteSlugs && args.siteSlugs.length > 0) {
+    params.push(args.siteSlugs)
+    conditions.push(`vs.site_slug = any($${params.length})`)
+  }
+  const whereSql = conditions.length > 0 ? `where ${conditions.join(' and ')}` : ''
+  params.push(limit)
+  const limitPlaceholder = `$${params.length}`
+
+  const sql = `
+    select
+      vs.id,
+      vs.ingested_at,
+      vs.scanned_at,
+      vs.site_slug,
+      vs.first_name,
+      vs.last_name,
+      vs.id_num,
+
+      coalesce(id_num_ident.prior_count, 0) as prior_id_num_scan_count,
+      id_num_ident.latest_prior_at          as prior_id_num_latest_at,
+
+      l.link_status                          as link_status,
+      l.sweed_customer_id                    as link_customer_id,
+      l.dealer_id                            as link_dealer_id,
+
+      sweed_summary.total_count              as sweed_purchase_count,
+      sweed_summary.lifetime_spend           as sweed_lifetime_spend,
+      sweed_summary.latest_purchase_at       as sweed_latest_purchase_at
+
+    from visitor_scans vs
+
+    left join visitor_scan_links l on l.scan_id = vs.id
+
+    left join lateral (
+      select
+        count(*)::bigint                                            as prior_count,
+        max(coalesce(prior_id.scanned_at, prior_id.ingested_at))    as latest_prior_at
+      from visitor_scans prior_id
+      where vs.id_num is not null
+        and prior_id.provider = vs.provider
+        and prior_id.id_num = vs.id_num
+        and prior_id.id <> vs.id
+        and coalesce(prior_id.scanned_at, prior_id.ingested_at)
+              < coalesce(vs.scanned_at, vs.ingested_at)
+    ) id_num_ident on true
+
+    left join lateral (
+      select
+        count(*)::bigint                              as total_count,
+        coalesce(sum(so.grand_total_dollars), 0)      as lifetime_spend,
+        max(so.pay_time)                              as latest_purchase_at
+      from sweed_orders so
+      where l.sweed_customer_id is not null
+        and so.dealer_id = l.dealer_id
+        and so.customer_id = l.sweed_customer_id
+    ) sweed_summary on l.sweed_customer_id is not null
+
+    ${whereSql}
+    order by vs.id desc
+    limit ${limitPlaceholder}
+  `
+
+  const result = await db.query<CashierVisitorScanRow>(sql, params)
+  const items = result.rows.map(rowToCashierItem)
+  const maxScanId = items.length > 0 ? items[0].id : null
+  return { items, maxScanId }
+}

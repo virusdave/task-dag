@@ -7359,3 +7359,168 @@ span.metric-chart-legend-item {
     font-size: 0.82rem;
   }
 }
+
+/* =====================================================================
+ * Cashier-tablet check-ins page
+ * virusdave/top-level#12 / FreshlyBakedNYC/automation#40, phase D1.
+ * Landscape-mode tablet at the checkout counter; everything is sized
+ * for tap-from-3-feet readability rather than dense operator screens.
+ * ===================================================================== */
+
+.cashier-checkins-page {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  padding: 1rem 1.25rem 2rem;
+}
+
+.cashier-header {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  border-bottom: 1px solid var(--ui-border, #2a2a2a);
+  padding-bottom: 0.6rem;
+}
+
+.cashier-title-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+  justify-content: space-between;
+}
+
+.cashier-title {
+  font-size: 1.5rem;
+  margin: 0;
+  font-weight: 600;
+}
+
+.cashier-meta {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+
+.cashier-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.cashier-arm-button {
+  font-size: 1.05rem;
+  padding: 0.65rem 1.25rem;
+}
+
+.cashier-error {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  background: rgba(180, 40, 40, 0.08);
+  border: 1px solid rgba(180, 40, 40, 0.3);
+  border-radius: 6px;
+  padding: 0.5rem 0.75rem;
+}
+
+.cashier-empty {
+  padding: 2rem 1rem;
+  text-align: center;
+  font-style: italic;
+}
+
+.cashier-feed {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: grid;
+  /* Two columns on tablet-landscape, three on wide desktop, one on
+     phones. The minmax keeps each card readable without sliding
+     under 280px even on cramped layouts. */
+  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+  gap: 0.75rem;
+}
+
+.cashier-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.85rem 1rem;
+  border-radius: 8px;
+  border-left: 6px solid transparent;
+  background: var(--ui-card-bg, rgba(255, 255, 255, 0.04));
+  border-top: 1px solid var(--ui-border, rgba(255, 255, 255, 0.08));
+  border-right: 1px solid var(--ui-border, rgba(255, 255, 255, 0.08));
+  border-bottom: 1px solid var(--ui-border, rgba(255, 255, 255, 0.08));
+}
+
+.cashier-card.is-new {
+  /* warning-toned border = "fresh visitor, capture them" */
+  border-left-color: #d97706;
+  background: rgba(217, 119, 6, 0.06);
+}
+
+.cashier-card.is-returning {
+  /* success-toned border = "we know this person" */
+  border-left-color: #16a34a;
+  background: rgba(22, 163, 74, 0.06);
+}
+
+.cashier-card-row1 {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.cashier-card-name {
+  font-size: 1.35rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.cashier-card-time {
+  font-variant-numeric: tabular-nums;
+  font-size: 1.1rem;
+  opacity: 0.85;
+}
+
+.cashier-card-row2 {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  align-items: center;
+}
+
+.cashier-last-visit {
+  font-size: 0.85rem;
+}
+
+.cashier-card-row3 {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.85rem;
+  padding-top: 0.45rem;
+  border-top: 1px dashed var(--ui-border, rgba(255, 255, 255, 0.08));
+  font-size: 0.9rem;
+}
+
+.cashier-sweed-cell {
+  display: inline-flex;
+  flex-direction: column;
+  min-width: 6rem;
+}
+
+.cashier-sweed-label {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  opacity: 0.7;
+}
+
+.cashier-sweed-value {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}

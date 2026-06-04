@@ -34,11 +34,12 @@ import { timingSafeEqual } from 'node:crypto'
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 
 import { getServerEnv } from '../config/env.js'
-import { requireSessionUser } from '../auth/requireSession.js'
+import { requireCashierDisplayUser, requireSessionUser } from '../auth/requireSession.js'
 import { getPool } from '../db/pool.js'
-import { SITE_PINS } from '../db/queries/customersMapQueries.js'
+import { SITE_PINS, getVisitorScansMaxId } from '../db/queries/customersMapQueries.js'
 import {
   insertVisitorScan,
+  listCashierVisitorScans,
   listVisitorScans,
   type VisitorScanListItem,
 } from '../db/queries/visitorScansQueries.js'
@@ -55,7 +56,9 @@ import {
   envelopeToRowInput,
 } from '../visitorScans/envelope.js'
 import {
+  CashierVisitorScansResponseSchema,
   CustomerVisitorDetailsResponseSchema,
+  VisitorScansHighwaterResponseSchema,
   VisitorScansQuerySchema,
   VisitorScansResponseSchema,
 } from '../../shared/contracts/index.js'
@@ -436,6 +439,68 @@ export async function registerVisitorScansAdminRoutes(server: FastifyInstance): 
       throw error
     }
   })
+
+  // -----------------------------------------------------------------
+  // Cashier-tablet live check-ins
+  // (virusdave/top-level#12 / FreshlyBakedNYC/automation#40, phase D1).
+  //
+  // Two endpoints, both gated by `requireCashierDisplayUser`
+  // (admin role OR the cashier-display email allowlist):
+  //
+  //   GET /api/admin/customers/check-ins/cashier
+  //     Bounded top-N (max 100) of the latest visitor_scans rows in
+  //     a privacy-redacted shape (no PII fields, server-side name
+  //     redaction). Same query the tablet UI re-fetches when its
+  //     highwater poll detects a new scan.
+  //
+  //   GET /api/admin/customers/check-ins/cashier/highwater
+  //     Single indexed MAX(id) — sub-millisecond — for the tablet's
+  //     live-update polling loop. The tablet polls this every few
+  //     seconds; only on a maxScanId bump does it trigger the full
+  //     re-fetch. This keeps DB cost flat regardless of tab
+  //     concurrency.
+  // -----------------------------------------------------------------
+  server.get('/api/admin/customers/check-ins/cashier', async (request, reply) => {
+    const user = await requireCashierDisplayUser(request, reply)
+    if (!user) return
+    const querySchema = VisitorScansQuerySchema.pick({ siteSlugs: true, limit: true })
+    const query = querySchema.parse(request.query)
+    try {
+      const result = await listCashierVisitorScans(getPool(), {
+        siteSlugs: query.siteSlugs ?? null,
+        limit: query.limit,
+      })
+      return reply.send(CashierVisitorScansResponseSchema.parse(result))
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      if (/relation .*visitor_scans.* does not exist/i.test(message)) {
+        return reply.status(503).send({
+          error: 'visitor_scans table missing. Apply migration 039_visitor_scans.sql.',
+        })
+      }
+      throw error
+    }
+  })
+
+  server.get(
+    '/api/admin/customers/check-ins/cashier/highwater',
+    async (request, reply) => {
+      const user = await requireCashierDisplayUser(request, reply)
+      if (!user) return
+      try {
+        const maxScanId = await getVisitorScansMaxId(getPool())
+        return reply.send(VisitorScansHighwaterResponseSchema.parse({ maxScanId }))
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        if (/relation .*visitor_scans.* does not exist/i.test(message)) {
+          return reply.status(503).send({
+            error: 'visitor_scans table missing. Apply migration 039_visitor_scans.sql.',
+          })
+        }
+        throw error
+      }
+    },
+  )
 
   server.get('/api/visitors/scans.csv', async (request, reply) => {
     const user = await requireSessionUser(request, reply, 'admin')

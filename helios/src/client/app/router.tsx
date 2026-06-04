@@ -91,6 +91,7 @@ import { UtilitiesLandingPage } from '../routes/utilities/UtilitiesLandingPage.j
 import { UtilitiesPromoNamesPage, utilitiesPromoNamesLoader } from '../routes/utilities/UtilitiesPromoNamesPage.js'
 import { UtilitiesStaffPage, utilitiesStaffLoader } from '../routes/utilities/UtilitiesStaffPage.js'
 import { VisitorScansPage, visitorScansLoader } from '../routes/visitors/VisitorScansPage.js'
+import { CashierCheckInsPage } from '../routes/customers/CashierCheckInsPage.js'
 import {
   CustomerVisitorDetailsPage,
   customerVisitorDetailsLoader,
@@ -369,6 +370,16 @@ export const router = createBrowserRouter([
         element: <VisitorScansPage />,
         loader: visitorScansLoader,
         path: 'admin/customers/check-ins',
+      },
+      // Cashier-tablet privacy-redacted live display
+      // (virusdave/top-level#12 / FreshlyBakedNYC/automation#40,
+      // phase D1). NOT in the sidebar — the URL is meant to be
+      // bookmarked on the at-counter tablet. Access is gated server-
+      // side by `requireCashierDisplayUser` (admin OR the cashier-
+      // display email allowlist).
+      {
+        element: <CashierCheckInsPage />,
+        path: 'admin/customers/check-ins/cashier',
       },
       {
         element: <CustomerVisitorDetailsPage />,

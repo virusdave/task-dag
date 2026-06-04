@@ -154,3 +154,44 @@ export async function requireMetricsGrant(
     })
   return null
 }
+
+/**
+ * Allowlist of email addresses granted access to the cashier-tablet
+ * check-ins display (`/admin/customers/check-ins/cashier`) even
+ * without admin role. The display is a privacy-redacted view (server-
+ * side name redaction; no PII fields in the payload) intended for the
+ * at-counter shared tablet account.
+ *
+ * Single hardcoded address by operator direction
+ * (virusdave/top-level#12 / FreshlyBakedNYC/automation#40, phase D1).
+ * Add more by appending here; a future config-table-backed list can
+ * replace this constant if the allowlist needs operator-managed
+ * editing without a redeploy.
+ *
+ * Admins are implicitly allowed by `requireCashierDisplayUser`
+ * regardless of email.
+ */
+const CASHIER_DISPLAY_ALLOWED_EMAILS = new Set<string>([
+  'internal.shared_accounts@freshlybaked.nyc',
+])
+
+/**
+ * Gate a route on "may render the cashier check-ins tablet display".
+ * Returns the session user when admin role OR email is on the
+ * cashier-display allowlist; otherwise sends 401/403 and returns null.
+ */
+export async function requireCashierDisplayUser(
+  request: FastifyRequest,
+  reply: FastifyReply,
+): Promise<SessionUser | null> {
+  const user = await requireSessionUser(request, reply, 'viewer')
+  if (!user) return null
+  if (user.role === 'admin') return user
+  if (CASHIER_DISPLAY_ALLOWED_EMAILS.has(user.email.toLowerCase())) return user
+  reply.status(403).send({
+    error:
+      'You do not have access to the cashier check-ins display. ' +
+      'Contact an admin to add your account to the allowlist.',
+  })
+  return null
+}
