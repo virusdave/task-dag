@@ -10,6 +10,7 @@ import {
 } from '../../shared/contracts/index.js'
 import { userHasMetricGrant } from '../../shared/domain/metricGrants.js'
 import { buildAppPath } from '../app/paths.js'
+import { usePageTitle } from '../app/usePageTitle.js'
 import { buildCatalogSidebarSubtree } from '../routes/catalog/catalogSidebarSubtree.js'
 import { buildCommunicationsSidebarSubtree } from '../routes/communications/communicationsSidebar.js'
 import { buildConfigSidebarSubtree } from '../routes/config/configSidebarSubtree.js'
@@ -260,6 +261,7 @@ function AppShellInner() {
   const session = useLoaderData() as SessionEnvelope
   const navigate = useNavigate()
   const location = useLocation()
+  usePageTitle()
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState<boolean>(() => {
     if (typeof window === 'undefined') {
       return false

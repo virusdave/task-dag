@@ -6,6 +6,7 @@ import type { SessionEnvelope } from '../../../shared/contracts/index.js'
 import { mutateJson } from '../../app/fetchJson.js'
 import { buildAppPath } from '../../app/paths.js'
 import { loadSession } from '../../app/session.js'
+import { usePageTitle } from '../../app/usePageTitle.js'
 
 const DevLoginResponseSchema = z.null()
 
@@ -18,6 +19,7 @@ export async function loginLoader() {
 }
 
 export function LoginPage() {
+  usePageTitle()
   const session = useLoaderData() as SessionEnvelope
   const googleOAuthStatus = session.runtimeDependencies.find((dependency) => dependency.code === 'google_oauth')
   const [devLoginEmail, setDevLoginEmail] = useState('')
