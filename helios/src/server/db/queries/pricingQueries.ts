@@ -25,6 +25,7 @@ import type {
   PricingRunSkippedProduct,
   PricingRunTriggerSource,
   PricingSiteKey,
+  PricingWholesaleCostSource,
   ProposalLineItem,
   RecentSalesSummary,
 } from '../../../shared/contracts/index.js'
@@ -994,6 +995,7 @@ function mapPricingReviewItem(
       scopeLabel: readString(config.scopeLabel) ?? deriveScopeLabel(readScopeKind(config.scopeKind) ?? 'explicit_selection', config),
       tab: generatedProduct?.tab ?? null,
       wholesaleCost: generatedProduct?.wholesaleCost ?? null,
+      wholesaleCostSource: generatedProduct?.wholesaleCostSource ?? null,
     },
   }
 }
@@ -1399,6 +1401,7 @@ function readGeneratedProducts(evidence: Record<string, JsonValue>): PricingRunG
       tab,
       validationIssues: readValidationIssues(objectValue.validationIssues),
       wholesaleCost,
+      wholesaleCostSource: readWholesaleCostSource(objectValue.wholesaleCostSource),
     }]
   })
 }
@@ -1423,8 +1426,16 @@ function readSkippedProducts(evidence: Record<string, JsonValue>): PricingRunSki
       reason,
       tab,
       wholesaleCost: readNullableNumber(objectValue.wholesaleCost),
+      wholesaleCostSource: readWholesaleCostSource(objectValue.wholesaleCostSource),
     }]
   })
+}
+
+// Defaults to 'product_record' so historical evidence_json rows
+// (written before this field existed) still surface a usable value.
+function readWholesaleCostSource(value: JsonValue | undefined): PricingWholesaleCostSource {
+  if (value === 'package_snapshot') return 'package_snapshot'
+  return 'product_record'
 }
 
 function findGeneratedProduct(evidenceJson: JsonValue, productId: number): PricingRunGeneratedProduct | null {

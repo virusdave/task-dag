@@ -17,6 +17,7 @@ import {
 } from '../pricing/deterministicPricing.js'
 import { buildPricingFamilyContext } from '../pricing/familyPricing.js'
 import { buildPricingMarketContextWithFailureHandling } from '../pricing/litAlertsMarket.js'
+import { loadFallbackWholesaleCostsForProducts } from '../pricing/wholesaleCostFallback.js'
 import { isRetryableWorkerError } from '../runtime/errors.js'
 import { withSweedSession } from '../sweed/session.js'
 import { runCatalogSyncGroupDetailJob } from './syncGroupDetailJob.js'
@@ -415,12 +416,59 @@ async function loadGenerationContext(catalogGroupId: number, scopedProductIds?: 
     throw new Error(`Catalog group ${catalogGroupId} has no baseline snapshot.`)
   }
 
+  const scopedLiveState = filterScopedProductsFromLiveState(
+    NormalizedCatalogGroupLiveStateSchema.parse(liveStateRow.live_state_json),
+    scopedProductIds,
+  )
+
   return {
     baselineSnapshotId: latestSnapshot.id,
-    liveState: filterScopedProductsFromLiveState(
-      NormalizedCatalogGroupLiveStateSchema.parse(liveStateRow.live_state_json),
-      scopedProductIds,
-    ),
+    liveState: await overlayMissingWholesaleCostsFromPackageSnapshots(scopedLiveState),
+  }
+}
+
+/**
+ * For products whose persisted `wholesaleCost` is null or <=0 (some
+ * vendors leave Sweed's per-product cost field blank — see the long
+ * comment in worker/pricing/wholesaleCostFallback.ts), overlay the
+ * most recent non-zero `sweed_package_snapshots.wholesale_cost_dollars`
+ * so the deterministic planner has something usable to price against.
+ * Products that get an overlay are stamped
+ * `wholesaleCostSource: 'package_snapshot'`; everything else keeps
+ * the default `'product_record'` semantics.
+ */
+async function overlayMissingWholesaleCostsFromPackageSnapshots(
+  liveState: z.infer<typeof NormalizedCatalogGroupLiveStateSchema>,
+): Promise<z.infer<typeof NormalizedCatalogGroupLiveStateSchema>> {
+  const productIdsMissingCost = liveState.products
+    .filter((product) => product.wholesaleCost === null || product.wholesaleCost <= 0)
+    .map((product) => product.productId)
+  if (productIdsMissingCost.length === 0) {
+    return liveState
+  }
+
+  const fallbackByProductId = await loadFallbackWholesaleCostsForProducts(getPool(), productIdsMissingCost)
+  if (fallbackByProductId.size === 0) {
+    return liveState
+  }
+
+  return {
+    ...liveState,
+    products: liveState.products.map((product) => {
+      const stillMissing = product.wholesaleCost === null || product.wholesaleCost <= 0
+      if (!stillMissing) {
+        return product
+      }
+      const fallback = fallbackByProductId.get(product.productId)
+      if (!fallback) {
+        return product
+      }
+      return {
+        ...product,
+        wholesaleCost: fallback.wholesaleCost,
+        wholesaleCostSource: 'package_snapshot' as const,
+      }
+    }),
   }
 }
 

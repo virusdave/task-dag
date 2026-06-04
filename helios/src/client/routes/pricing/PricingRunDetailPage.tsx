@@ -477,7 +477,19 @@ export function PricingRunDetailPage() {
                                       <div className="inline-row wrap-row">
                                         <span className={`velocity-indicator velocity-indicator-${recentSalesIndicator.tone}`}>{recentSalesIndicator.detailLabel}</span>
                                         <Pill tone={approvalTone(item.lineItem.approvalStatus)}>{reviewDecisionLabel(item.lineItem.approvalStatus)}</Pill>
-                                        <span className="subtle-copy">Cost {formatMoney(item.pricingContext.wholesaleCost)} · {item.pricingContext.tab ?? item.lineItem.fieldPath}</span>
+                                        <span className="subtle-copy">
+                                          Cost {formatMoney(item.pricingContext.wholesaleCost)}
+                                          {item.pricingContext.wholesaleCostSource === 'package_snapshot' ? (
+                                            <span
+                                              className="subtle-copy"
+                                              style={{ marginLeft: '0.35rem', fontStyle: 'italic' }}
+                                              title="Sweed's per-product wholesaleCost was blank/zero for this SKU; cost taken from the most recent sweed_package_snapshots row."
+                                            >
+                                              (from PO)
+                                            </span>
+                                          ) : null}
+                                          {' · '}{item.pricingContext.tab ?? item.lineItem.fieldPath}
+                                        </span>
                                       </div>
                                     </div>
 
@@ -592,6 +604,14 @@ export function PricingRunDetailPage() {
                                       <strong>{product.productName}</strong>
                                       <div className="subtle-copy">
                                         {product.tab} · live {formatMoney(product.currentPrice)} · cost {formatMoney(product.wholesaleCost)}
+                                        {product.wholesaleCostSource === 'package_snapshot' ? (
+                                          <span
+                                            style={{ marginLeft: '0.35rem', fontStyle: 'italic' }}
+                                            title="Sweed's per-product wholesaleCost was blank/zero for this SKU; cost taken from the most recent sweed_package_snapshots row."
+                                          >
+                                            (from PO)
+                                          </span>
+                                        ) : null}
                                       </div>
                                       <p className="subtle-copy">{product.reason}</p>
                                     </li>

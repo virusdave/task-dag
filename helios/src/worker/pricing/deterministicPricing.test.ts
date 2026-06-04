@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { buildPricingPlan, type PricingMarketContext } from './deterministicPricing.js'
+import { buildPricingPlan, serializePricingPlan, type PricingMarketContext } from './deterministicPricing.js'
 import type { PricingFamilyContext } from './familyPricing.js'
 import type { NormalizedCatalogGroupLiveState } from '../catalog/liveState.js'
 
@@ -218,5 +218,35 @@ describe('buildPricingPlan', () => {
     expect(plan.generatedLineItems).toHaveLength(1)
     expect(plan.generatedLineItems[0]?.proposedPrice).toBe(45.5)
     expect(plan.generatedLineItems[0]?.priceReason).toContain('reuses current live family pricing')
+  })
+
+  it("defaults wholesaleCostSource to 'product_record' on every generated and skipped row", () => {
+    const generated = buildPricingPlan(buildLiveState(null), null)
+    expect(generated.generatedLineItems[0]?.wholesaleCostSource).toBe('product_record')
+
+    const skipped = buildPricingPlan({
+      ...buildLiveState(null),
+      products: [{ ...buildLiveState(null).products[0]!, wholesaleCost: 0 }],
+    }, null)
+    expect(skipped.skippedProducts).toHaveLength(1)
+    expect(skipped.skippedProducts[0]?.wholesaleCostSource).toBe('product_record')
+  })
+
+  it("preserves wholesaleCostSource='package_snapshot' through the planner and serializer", () => {
+    const liveState = buildLiveState(null)
+    const plan = buildPricingPlan(
+      {
+        ...liveState,
+        products: [{ ...liveState.products[0]!, wholesaleCostSource: 'package_snapshot' }],
+      },
+      null,
+    )
+    expect(plan.generatedLineItems[0]?.wholesaleCostSource).toBe('package_snapshot')
+
+    const serialized = serializePricingPlan(plan)
+    expect(serialized.generatedProducts[0]).toMatchObject({
+      wholesaleCost: 18,
+      wholesaleCostSource: 'package_snapshot',
+    })
   })
 })

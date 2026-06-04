@@ -61,6 +61,8 @@ export interface PricingMarketContext {
   searchTerm: string | null
 }
 
+export type WholesaleCostSource = 'product_record' | 'package_snapshot'
+
 export interface GeneratedPricingLineItem {
   action: 'keep-price' | 'lower-price' | 'raise-price' | 'set-price'
   baselinePrice: number | null
@@ -75,6 +77,15 @@ export interface GeneratedPricingLineItem {
   tab: string
   validationIssues: ValidationIssue[]
   wholesaleCost: number
+  /**
+   * Where the `wholesaleCost` came from. Defaults to
+   * `'product_record'` (Sweed's per-product field). The pricing
+   * batch job overlays this to `'package_snapshot'` when the
+   * product record had a null/zero cost but `sweed_package_snapshots`
+   * supplied a usable per-package cost. Surfaced to the run-detail
+   * UI so reviewers can spot fallback-cost rows at a glance.
+   */
+  wholesaleCostSource: WholesaleCostSource
 }
 
 export interface SkippedPricingProduct {
@@ -85,6 +96,7 @@ export interface SkippedPricingProduct {
   reason: string
   tab: string
   wholesaleCost: number | null
+  wholesaleCostSource: WholesaleCostSource
 }
 
 export interface GeneratedPricingPlan {
@@ -184,6 +196,7 @@ export function buildPricingPlan(
   for (const product of liveState.products) {
     const familyPricingEvidence = familyContext?.productEvidenceById[product.productId] ?? null
     const marketEvidence = marketContext?.productEvidenceById[product.productId] ?? null
+    const wholesaleCostSource: WholesaleCostSource = product.wholesaleCostSource ?? 'product_record'
     if (product.wholesaleCost === null || product.wholesaleCost <= 0) {
       skippedProducts.push({
         currentPrice: product.price,
@@ -193,6 +206,7 @@ export function buildPricingPlan(
         reason: 'Skipped because there is no usable wholesale cost in the persisted live snapshot.',
         tab: product.tab,
         wholesaleCost: product.wholesaleCost,
+        wholesaleCostSource,
       })
       continue
     }
@@ -209,6 +223,7 @@ export function buildPricingPlan(
         reason: 'Skipped because the current wholesale cost does not yield a valid target margin band.',
         tab: product.tab,
         wholesaleCost: product.wholesaleCost,
+        wholesaleCostSource,
       })
       continue
     }
@@ -239,6 +254,7 @@ export function buildPricingPlan(
         tab: product.tab,
         validationIssues: [],
         wholesaleCost: product.wholesaleCost,
+        wholesaleCostSource,
       })
       continue
     }
@@ -269,6 +285,7 @@ export function buildPricingPlan(
       tab: product.tab,
       validationIssues: [],
       wholesaleCost: product.wholesaleCost,
+      wholesaleCostSource,
     })
   }
 
@@ -291,6 +308,7 @@ export function serializePricingPlan(plan: GeneratedPricingPlan) {
       tab: lineItem.tab,
       validationIssues: lineItem.validationIssues,
       wholesaleCost: lineItem.wholesaleCost,
+      wholesaleCostSource: lineItem.wholesaleCostSource,
     })),
     pricingRules: {
       gmFormula: PRICING_GM_FORMULA,

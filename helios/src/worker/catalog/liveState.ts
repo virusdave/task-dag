@@ -83,6 +83,14 @@ export const NormalizedCatalogProductLiveStateSchema = z.object({
   sku: z.string().nullable(),
   tab: z.string(),
   wholesaleCost: z.number().nullable(),
+  // Provenance for `wholesaleCost`. Defaults to `'product_record'`
+  // (the value Sweed returns on `store.product.get`). The pricing
+  // batch job overlays this to `'package_snapshot'` when the product
+  // record had a null/zero cost but `sweed_package_snapshots` has a
+  // usable per-package cost — see worker/pricing/wholesaleCostFallback.ts.
+  // Optional so older live_state_json rows still parse and so manually
+  // constructed test fixtures don't have to spell it out.
+  wholesaleCostSource: z.enum(['product_record', 'package_snapshot']).optional(),
 })
 export type NormalizedCatalogProductLiveState = z.infer<typeof NormalizedCatalogProductLiveStateSchema>
 

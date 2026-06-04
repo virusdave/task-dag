@@ -243,6 +243,15 @@ export const PricingRunMarketEvidenceSchema = z.object({
 })
 export type PricingRunMarketEvidence = z.infer<typeof PricingRunMarketEvidenceSchema>
 
+// Where a pricing-run wholesale cost actually came from.
+// `'product_record'` is Sweed's per-product `wholesaleCost` field
+// (the default historical source). `'package_snapshot'` means the
+// product field was blank/zero and the planner overlaid the most
+// recent non-zero `sweed_package_snapshots.wholesale_cost_dollars`
+// instead — see worker/pricing/wholesaleCostFallback.ts.
+export const PricingWholesaleCostSourceSchema = z.enum(['product_record', 'package_snapshot'])
+export type PricingWholesaleCostSource = z.infer<typeof PricingWholesaleCostSourceSchema>
+
 export const PricingRunGeneratedProductSchema = z.object({
   action: z.enum(['keep-price', 'lower-price', 'raise-price', 'set-price']),
   currentGmPercent: z.number().finite().nullable(),
@@ -260,6 +269,7 @@ export const PricingRunGeneratedProductSchema = z.object({
     severity: z.enum(['error', 'warning']),
   })),
   wholesaleCost: z.number().finite(),
+  wholesaleCostSource: PricingWholesaleCostSourceSchema,
 })
 export type PricingRunGeneratedProduct = z.infer<typeof PricingRunGeneratedProductSchema>
 
@@ -271,6 +281,7 @@ export const PricingRunSkippedProductSchema = z.object({
   reason: z.string(),
   tab: z.string(),
   wholesaleCost: z.number().finite().nullable(),
+  wholesaleCostSource: PricingWholesaleCostSourceSchema,
 })
 export type PricingRunSkippedProduct = z.infer<typeof PricingRunSkippedProductSchema>
 
@@ -391,6 +402,7 @@ export const PricingReviewItemSchema = z.object({
     scopeLabel: z.string(),
     tab: z.string().nullable(),
     wholesaleCost: z.number().finite().nullable(),
+    wholesaleCostSource: PricingWholesaleCostSourceSchema.nullable(),
   }),
 })
 export type PricingReviewItem = z.infer<typeof PricingReviewItemSchema>
