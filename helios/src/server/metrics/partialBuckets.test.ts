@@ -254,6 +254,42 @@ describe('queryWithPartialBuckets', () => {
     expect(last.partialProjectedT).toBe('2026-06-01T03:00:00.000Z')
   })
 
+  it('treats the in-progress bucket as the rightmost partial even when `to` is panned past `asOf` into the future', async () => {
+    // Operator pans the chart window so `to` lies in the future
+    // (e.g. shifts a 24h view forward by 22h, with `to = now + 22h`).
+    // Without capping the bucket walk at observedRightThrough the
+    // wrapper would have walked all the way to `to`, picked a
+    // future bucket as the "rightmost" partial (with no data), and
+    // rendered the genuine in-progress bucket (containing asOf) as
+    // a plain interior knot — silently regressing the partial UX
+    // exactly when the operator pans the chart.
+    const events = new Map<string, number>([
+      ['2026-06-01T01:00:00.000Z', 4],
+      ['2026-06-01T01:30:00.000Z', 4],
+      ['2026-06-01T02:00:00.000Z', 5], // first 30 min of hour 2 (cut by asOf)
+    ])
+    const query = makeFakeQueryFromHourCounts(events)
+    const out = await queryWithPartialBuckets({
+      query,
+      args: baseArgs(
+        'hour',
+        new Date('2026-06-01T00:00:00Z'),
+        new Date('2026-06-02T00:00:00Z'), // 22h past asOf
+      ),
+      seriesIds: ['count'],
+      asOf: new Date('2026-06-01T02:30:00Z'),
+    })
+    // No future buckets past asOf.
+    expect(out[out.length - 1]!.t).toBe('2026-06-01T02:00:00.000Z')
+    const last = out[out.length - 1]!
+    expect(last.partial).toBe('right')
+    expect(last.partialKind).toBe('extrapolated')
+    expect(last.count).toBe(5) // measured value (the floating actual)
+    expect(last.partialProjected).toEqual({ count: 10 }) // pace-extrapolated
+    expect(last.partialActualT).toBe('2026-06-01T02:30:00.000Z')
+    expect(last.partialProjectedT).toBe('2026-06-01T03:00:00.000Z')
+  })
+
   it('passes through for categorical aggregations (total / dow / dom / dofortnight)', async () => {
     const events = new Map<string, number>([
       ['2026-06-01T00:00:00.000Z', 1],

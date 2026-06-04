@@ -157,7 +157,26 @@ export async function queryWithPartialBuckets(
   if (!TIME_AGGS.has(args.agg)) return query(args)
 
   const { from, to } = defaultWindow(args.from, args.to, args.agg)
-  const buckets = walkBuckets(from, to, args.agg)
+  // The "effective right edge" of observation is the earlier of the
+  // requested `to` and `asOf`. A request with `to` in the future is
+  // still partial on the right whenever the natural bucket extends
+  // beyond `asOf` — otherwise we'd silently hand back a full-bucket
+  // value that hasn't been observed yet.
+  //
+  // We deliberately cap the bucket walk at `observedRightThrough`
+  // (not `to`) so that when the operator pans the chart window past
+  // "now" the rightmost emitted bucket is the IN-PROGRESS bucket
+  // containing `asOf` (correctly marked partial), rather than a
+  // future bucket whose row is empty. Buckets that haven't started
+  // yet contain no observable data anyway — walking past `asOf`
+  // would just emit empty rows and steal the "rightmost"
+  // designation from the genuine in-progress bucket, so the
+  // operator would see the in-progress bucket rendered as a
+  // normal interior knot.
+  const observedRightThrough = new Date(
+    Math.min(to.getTime(), asOf.getTime()),
+  )
+  const buckets = walkBuckets(from, observedRightThrough, args.agg)
   if (buckets.length === 0) return query({ ...args, from, to })
 
   const firstStart = buckets[0]!
@@ -165,14 +184,6 @@ export async function queryWithPartialBuckets(
   const lastStart = buckets[buckets.length - 1]!
   const lastEnd = advanceBucketStart(lastStart, args.agg)
 
-  // The "effective right edge" of observation is the earlier of the
-  // requested `to` and `asOf`. A request with `to` in the future is
-  // still partial on the right whenever the natural bucket extends
-  // beyond `asOf` — otherwise we'd silently hand back a full-bucket
-  // value that hasn't been observed yet.
-  const observedRightThrough = new Date(
-    Math.min(to.getTime(), asOf.getTime()),
-  )
   const leftPartial = from.getTime() > firstStart.getTime()
   const rightPartial = observedRightThrough.getTime() < lastEnd.getTime()
 
