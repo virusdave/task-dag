@@ -57,8 +57,10 @@ export function hasAnyCatalogFilter(args: MetricQueryArgs): boolean {
  *
  *   * insert this immediately after a `with` keyword (or after `,` in
  *     an existing CTE chain);
- *   * join `catalog_product_mapping` by `product_id` (text comparison
- *     — order items expose `productId` as a JSON string);
+ *   * join `catalog_product_mapping` by `product_id` (text comparison;
+ *     the CTE's product_id is `(prod->>'productId')::text`, so the
+ *     order-item side must also be text — see `joinClause` below, which
+ *     casts the flat table's bigint `product_id` with `::text`);
  *   * bind the four filter arrays in the order returned by
  *     `catalogFilterParams()` (or otherwise account for parameter
  *     positions when building the WHERE snippet).
@@ -110,10 +112,14 @@ export function catalogFilterParams(
 }
 
 /**
- * For metric queries against `sweed_orders so` × `jsonb_array_elements(so.raw_json->'items') as item`,
+ * For metric queries against the materialised `sweed_order_items_flat f`
+ * table (D1 — the 1:1 expansion of sweed_orders.raw_json->'items'),
  * produce the optional `with` prefix, an extra join clause to apply
  * catalog filters, and the WHERE snippet — or empty strings when no
- * filter is active. Use like:
+ * filter is active. The join uses the typed `f.product_id` column
+ * (D1a) cast to text to match the CTE; the OLD raw_json path joined on
+ * `item->>'productId'`, a key Sweed never emits, which silently dropped
+ * every filtered row. Use like:
  *
  *   const { withPrefix, joinClause, whereClause, params, paramStart } =
  *     orderItemsCatalogFilterSql(args, /* params before mapping arrays *\/ 3)
@@ -121,11 +127,10 @@ export function catalogFilterParams(
  *   const sql = `
  *     ${withPrefix}
  *     select ...
- *       from sweed_orders so
- *            cross join lateral jsonb_array_elements(so.raw_json->'items') as item
+ *       from sweed_order_items_flat f
  *            ${joinClause}
- *      where so.dealer_id = any($1::bigint[])
- *        and so.pay_time >= $2 and so.pay_time < $3
+ *      where f.dealer_id = any($1::bigint[])
+ *        and f.pay_time >= $2 and f.pay_time < $3
  *        ${whereClause}
  *      group by ...
  *   `
@@ -145,7 +150,7 @@ export function orderItemsCatalogFilterSql(
   }
   return {
     withPrefix: `with ${CATALOG_PRODUCT_MAPPING_CTE}`,
-    joinClause: `join catalog_product_mapping cpm on cpm.product_id = (item->>'productId')`,
+    joinClause: `join catalog_product_mapping cpm on cpm.product_id = f.product_id::text`,
     whereClause: catalogFilterWhere('cpm', paramStart),
     params: catalogFilterParams(args),
   }

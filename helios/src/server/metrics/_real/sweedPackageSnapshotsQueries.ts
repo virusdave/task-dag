@@ -236,17 +236,22 @@ async function runMarginBucketedQuery(args: {
   })
 }
 
-/** Helper: produce the inner sweed_orders × items COGS join expressions.
+/** Helper: per-line revenue / qty / COGS expressions over the
+ *  materialised sweed_order_items_flat table (alias `f`), D1.
  *
- *   - revenue_expr: `(item->>'subtotalAmount')::numeric`
- *   - cogs_expr: `qty * cost_as_of_or_earliest()`
+ *   - REVENUE_EXPR: f.revenue (mirrors item->>'subtotalAmount')
+ *   - QTY_EXPR:     f.qty     (mirrors item->>'currentQty')
+ *   - COGS_EXPR:    qty * cost_as_of_or_earliest()
  *
- * Each metric query builds a `select bucket_start, series_id, sum(revenue), sum(cogs)`
- * around these.
+ * Every query below selects from `sweed_order_items_flat f` (joining
+ * `sweed_orders so` only when it also needs order-level columns such as
+ * so.customer_id / so.fulfillment_type / so.payment_method, which are
+ * NOT in the flat table). Each metric query builds a
+ * `select bucket_start, series_id, sum(revenue), sum(cogs)` around these.
  */
-const REVENUE_EXPR = `(item->>'subtotalAmount')::numeric`
-const QTY_EXPR = `(item->>'currentQty')::numeric`
-const COGS_EXPR = `${QTY_EXPR} * coalesce(sweed_package_cost_as_of_or_earliest(so.dealer_id, item->>'inventoryItemId', so.pay_time), 0)`
+const REVENUE_EXPR = `f.revenue`
+const QTY_EXPR = `f.qty`
+const COGS_EXPR = `${QTY_EXPR} * coalesce(sweed_package_cost_as_of_or_earliest(f.dealer_id, f.inventory_item_id, f.pay_time), 0)`
 
 /** margins.gross_margin_dollars — sum(revenue - cogs) per bucket. */
 export async function queryGrossMarginDollars(args: MetricQueryArgs): Promise<MetricRow[]> {
@@ -258,15 +263,14 @@ export async function queryGrossMarginDollars(args: MetricQueryArgs): Promise<Me
   const cf = orderItemsCatalogFilterSql(args, 4)
   const sql = `
     ${cf.withPrefix}
-    select ${bucketSelectExpr(truncUnit, 'so.pay_time')} as bucket_start,
+    select ${bucketSelectExpr(truncUnit, 'f.pay_time')} as bucket_start,
            'gm_dollars' as series_id,
            sum(${REVENUE_EXPR})::numeric as revenue,
            sum(${COGS_EXPR})::numeric as cogs
-      from sweed_orders so
-           cross join lateral jsonb_array_elements(so.raw_json->'items') as item
+      from sweed_order_items_flat f
            ${cf.joinClause}
-     where so.dealer_id = any($1::bigint[])
-       and so.pay_time >= $2 and so.pay_time < $3
+     where f.dealer_id = any($1::bigint[])
+       and f.pay_time >= $2 and f.pay_time < $3
        ${cf.whereClause}
      group by 1
   `
@@ -293,17 +297,16 @@ export async function queryEffectiveGmPct(args: MetricQueryArgs): Promise<Metric
   const cf = orderItemsCatalogFilterSql(args, 4)
   const sql = `
     ${cf.withPrefix}
-    select ${bucketSelectExpr(truncUnit, 'so.pay_time')} as bucket_start,
+    select ${bucketSelectExpr(truncUnit, 'f.pay_time')} as bucket_start,
            'gm_pct' as series_id,
-           sum(case when sweed_package_cost_as_of_or_earliest(so.dealer_id, item->>'inventoryItemId', so.pay_time) is not null
+           sum(case when sweed_package_cost_as_of_or_earliest(f.dealer_id, f.inventory_item_id, f.pay_time) is not null
                     then ${REVENUE_EXPR} else 0 end)::numeric as revenue,
-           sum(case when sweed_package_cost_as_of_or_earliest(so.dealer_id, item->>'inventoryItemId', so.pay_time) is not null
+           sum(case when sweed_package_cost_as_of_or_earliest(f.dealer_id, f.inventory_item_id, f.pay_time) is not null
                     then ${COGS_EXPR} else 0 end)::numeric as cogs
-      from sweed_orders so
-           cross join lateral jsonb_array_elements(so.raw_json->'items') as item
+      from sweed_order_items_flat f
            ${cf.joinClause}
-     where so.dealer_id = any($1::bigint[])
-       and so.pay_time >= $2 and so.pay_time < $3
+     where f.dealer_id = any($1::bigint[])
+       and f.pay_time >= $2 and f.pay_time < $3
        ${cf.whereClause}
      group by 1
   `
@@ -331,15 +334,16 @@ export async function queryMarginStackNewVsReturning(args: MetricQueryArgs): Pro
   const cf = orderItemsCatalogFilterSql(args, 4)
   const sql = `
     ${cf.withPrefix}
-    select ${bucketSelectExpr(truncUnit, 'so.pay_time')} as bucket_start,
+    select ${bucketSelectExpr(truncUnit, 'f.pay_time')} as bucket_start,
            ${FIRST_TIME_SERIES_EXPR} as series_id,
            sum(${REVENUE_EXPR})::numeric as revenue,
            sum(${COGS_EXPR})::numeric as cogs
-      from sweed_orders so
-           cross join lateral jsonb_array_elements(so.raw_json->'items') as item
+      from sweed_order_items_flat f
+           join sweed_orders so
+             on so.dealer_id = f.dealer_id and so.invoice_id = f.invoice_id
            ${cf.joinClause}
-     where so.dealer_id = any($1::bigint[])
-       and so.pay_time >= $2 and so.pay_time < $3
+     where f.dealer_id = any($1::bigint[])
+       and f.pay_time >= $2 and f.pay_time < $3
        ${cf.whereClause}
      group by 1, 2
   `
@@ -369,15 +373,14 @@ export async function queryCategoryMarginStack(args: MetricQueryArgs): Promise<M
   const cf = orderItemsCatalogFilterSql(args, 4)
   const sql = `
     ${cf.withPrefix}
-    select ${bucketSelectExpr(truncUnit, 'so.pay_time')} as bucket_start,
-           coalesce(lower(item->'productCategory'->>'name'), '') as cat_value,
+    select ${bucketSelectExpr(truncUnit, 'f.pay_time')} as bucket_start,
+           coalesce(lower(f.product_category_name), '') as cat_value,
            sum(${REVENUE_EXPR})::numeric as revenue,
            sum(${COGS_EXPR})::numeric as cogs
-      from sweed_orders so
-           cross join lateral jsonb_array_elements(so.raw_json->'items') as item
+      from sweed_order_items_flat f
            ${cf.joinClause}
-     where so.dealer_id = any($1::bigint[])
-       and so.pay_time >= $2 and so.pay_time < $3
+     where f.dealer_id = any($1::bigint[])
+       and f.pay_time >= $2 and f.pay_time < $3
        ${cf.whereClause}
      group by 1, 2
   `
@@ -442,15 +445,16 @@ async function queryFulfillmentMargin(
   const cf = orderItemsCatalogFilterSql(args, 4)
   const sql = `
     ${cf.withPrefix}
-    select ${bucketSelectExpr(truncUnit, 'so.pay_time')} as bucket_start,
+    select ${bucketSelectExpr(truncUnit, 'f.pay_time')} as bucket_start,
            coalesce(${FULFILLMENT_SERIES_SQL_EXPR_SO}, '') as fulfillment_value,
-           sum(${isPct ? `case when sweed_package_cost_as_of_or_earliest(so.dealer_id, item->>'inventoryItemId', so.pay_time) is not null then ${REVENUE_EXPR} else 0 end` : REVENUE_EXPR})::numeric as revenue,
-           sum(${isPct ? `case when sweed_package_cost_as_of_or_earliest(so.dealer_id, item->>'inventoryItemId', so.pay_time) is not null then ${COGS_EXPR} else 0 end` : COGS_EXPR})::numeric as cogs
-      from sweed_orders so
-           cross join lateral jsonb_array_elements(so.raw_json->'items') as item
+           sum(${isPct ? `case when sweed_package_cost_as_of_or_earliest(f.dealer_id, f.inventory_item_id, f.pay_time) is not null then ${REVENUE_EXPR} else 0 end` : REVENUE_EXPR})::numeric as revenue,
+           sum(${isPct ? `case when sweed_package_cost_as_of_or_earliest(f.dealer_id, f.inventory_item_id, f.pay_time) is not null then ${COGS_EXPR} else 0 end` : COGS_EXPR})::numeric as cogs
+      from sweed_order_items_flat f
+           join sweed_orders so
+             on so.dealer_id = f.dealer_id and so.invoice_id = f.invoice_id
            ${cf.joinClause}
-     where so.dealer_id = any($1::bigint[])
-       and so.pay_time >= $2 and so.pay_time < $3
+     where f.dealer_id = any($1::bigint[])
+       and f.pay_time >= $2 and f.pay_time < $3
        ${cf.whereClause}
      group by 1, 2
   `
@@ -518,9 +522,10 @@ async function queryFulfillmentMargin(
  * by top-level category at each bucket end. We approximate "as-of
  * bucket end" via the latest snapshot whose observed_at_max <=
  * bucket_end. For categories we have to fall back to a lookup
- * against sweed_orders raw_json (since sweed_package_snapshots
- * stores category_id as null in v1) — packages that never appeared
- * in any sweed_orders line land in "other".
+ * against the flattened order lines (sweed_order_items_flat, D1 —
+ * the materialised sweed_orders.raw_json->'items' expansion), since
+ * sweed_package_snapshots stores category_id as null in v1 — packages
+ * that never appeared in any order line land in "other".
  */
 export async function queryInventoryCostDistribution(args: MetricQueryArgs): Promise<MetricRow[]> {
   const dealerIds = resolveDealerIds(args.sites)
@@ -548,17 +553,16 @@ export async function queryInventoryCostDistribution(args: MetricQueryArgs): Pro
   const cf = orderItemsCatalogFilterSql(args, 2)
   const perPackageCategorySql = `
     ${cf.withPrefix}
-    select distinct on (so.dealer_id, item->>'inventoryItemId')
-           so.dealer_id,
-           item->>'inventoryItemId' as inventory_item_id,
-           lower(coalesce(item->'productCategory'->>'name', '')) as category_value
-      from sweed_orders so
-           cross join lateral jsonb_array_elements(so.raw_json->'items') as item
+    select distinct on (f.dealer_id, f.inventory_item_id)
+           f.dealer_id,
+           f.inventory_item_id as inventory_item_id,
+           lower(coalesce(f.product_category_name, '')) as category_value
+      from sweed_order_items_flat f
            ${cf.joinClause}
-     where so.dealer_id = any($1::bigint[])
-       and item->>'inventoryItemId' is not null
+     where f.dealer_id = any($1::bigint[])
+       and f.inventory_item_id is not null
        ${cf.whereClause}
-     order by so.dealer_id, item->>'inventoryItemId', so.pay_time desc
+     order by f.dealer_id, f.inventory_item_id, f.pay_time desc
   `
   const catResult = await pool.query<{ dealer_id: string; inventory_item_id: string; category_value: string }>(
     perPackageCategorySql,
@@ -661,16 +665,16 @@ export async function queryInventoryMisalignment(args: MetricQueryArgs): Promise
        order by dealer_id, inventory_item_id, observed_at_min desc
     ),
     run_rate as (
-      select so.dealer_id,
-             item->>'inventoryItemId' as inventory_item_id,
-             sum(${QTY_EXPR} * coalesce(sweed_package_cost_as_of_or_earliest(so.dealer_id, item->>'inventoryItemId', so.pay_time), 0)) / 30.0
+      select f.dealer_id,
+             f.inventory_item_id as inventory_item_id,
+             sum(${QTY_EXPR} * coalesce(sweed_package_cost_as_of_or_earliest(f.dealer_id, f.inventory_item_id, f.pay_time), 0)) / 30.0
                as daily_cogs
-        from sweed_orders so, jsonb_array_elements(so.raw_json->'items') as item
-       where so.dealer_id = any($1::bigint[])
-         and so.pay_time >= $2::timestamptz - interval '30 days'
-         and so.pay_time < $2::timestamptz
-         and item->>'inventoryItemId' is not null
-       group by so.dealer_id, item->>'inventoryItemId'
+        from sweed_order_items_flat f
+       where f.dealer_id = any($1::bigint[])
+         and f.pay_time >= $2::timestamptz - interval '30 days'
+         and f.pay_time < $2::timestamptz
+         and f.inventory_item_id is not null
+       group by f.dealer_id, f.inventory_item_id
     )
     select sum(case
                  when rr.daily_cogs is null or rr.daily_cogs <= 0
@@ -731,12 +735,12 @@ export async function querySlowmoversCostAtRisk(args: MetricQueryArgs): Promise<
        order by dealer_id, inventory_item_id, observed_at_min desc
     ),
     recent_sales as (
-      select so.dealer_id, item->>'inventoryItemId' as inventory_item_id, sum(${QTY_EXPR}) as qty_sold
-        from sweed_orders so, jsonb_array_elements(so.raw_json->'items') as item
-       where so.dealer_id = any($1::bigint[])
-         and so.pay_time >= $2::timestamptz - interval '30 days'
-         and so.pay_time < $2::timestamptz
-         and item->>'inventoryItemId' is not null
+      select f.dealer_id, f.inventory_item_id as inventory_item_id, sum(${QTY_EXPR}) as qty_sold
+        from sweed_order_items_flat f
+       where f.dealer_id = any($1::bigint[])
+         and f.pay_time >= $2::timestamptz - interval '30 days'
+         and f.pay_time < $2::timestamptz
+         and f.inventory_item_id is not null
        group by 1, 2
     )
     select coalesce(sum(snap.on_hand_cost) filter (
@@ -793,14 +797,14 @@ export async function queryLowstockUpcomingOuts(args: MetricQueryArgs): Promise<
        order by dealer_id, inventory_item_id, observed_at_min desc
     ),
     recent as (
-      select so.dealer_id, item->>'inventoryItemId' as inventory_item_id,
+      select f.dealer_id, f.inventory_item_id as inventory_item_id,
              sum(${QTY_EXPR}) / 21.0 as daily_qty_sold,
              sum(${REVENUE_EXPR} - ${COGS_EXPR}) / 21.0 as daily_margin
-        from sweed_orders so, jsonb_array_elements(so.raw_json->'items') as item
-       where so.dealer_id = any($1::bigint[])
-         and so.pay_time >= $2::timestamptz - interval '21 days'
-         and so.pay_time < $2::timestamptz
-         and item->>'inventoryItemId' is not null
+        from sweed_order_items_flat f
+       where f.dealer_id = any($1::bigint[])
+         and f.pay_time >= $2::timestamptz - interval '21 days'
+         and f.pay_time < $2::timestamptz
+         and f.inventory_item_id is not null
        group by 1, 2
     )
     select coalesce(sum(

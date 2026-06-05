@@ -174,7 +174,10 @@ describe('sweed-package-snapshot metric queries', () => {
     expect(captured.length).toBeGreaterThan(0)
     const sql = captured[0]!
     expect(sql).toContain('sweed_package_cost_as_of_or_earliest(')
-    expect(sql).toContain("jsonb_array_elements(so.raw_json->'items')")
+    // D1: margin queries now read the materialised flat table instead of
+    // unrolling sweed_orders.raw_json->'items' on every request.
+    expect(sql).toContain('sweed_order_items_flat')
+    expect(sql).not.toContain("jsonb_array_elements(so.raw_json->'items')")
     // Week grain → NY-Monday-midnight bucket; SQL must wrap
     // date_trunc(...) in `at time zone 'America/New_York'` twice (once
     // inside, once outside) so the result is a timestamptz at the
@@ -194,7 +197,9 @@ describe('sweed-package-snapshot metric queries', () => {
     const observedTimestamps: string[] = []
     const fakePool = {
       query: vi.fn().mockImplementation((sql: string, params: unknown[]) => {
-        if (sql.includes('jsonb_array_elements')) {
+        // D1: the per-package category lookup now reads the flat table
+        // (sweed_order_items_flat) rather than unrolling raw_json.
+        if (sql.includes('sweed_order_items_flat')) {
           return Promise.resolve({ rows: [{ dealer_id: '1', inventory_item_id: 'pkg-A', category_value: 'flower' }] })
         }
         // snapshot lookup
