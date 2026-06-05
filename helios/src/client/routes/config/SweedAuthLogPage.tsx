@@ -20,7 +20,7 @@ import {
 import { loadJson } from '../../app/fetchJson.js'
 import { Pill, type PillProps } from '../../components/Pill.js'
 
-const AUTO_REFRESH_INTERVAL_MS = 15_000
+const AUTO_REFRESH_INTERVAL_MS = 60_000 // DB-cost epic E1 (was 15s)
 
 export async function sweedAuthLogLoader({ request }: { request: Request }) {
   const url = new URL(request.url)

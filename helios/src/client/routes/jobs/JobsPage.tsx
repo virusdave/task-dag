@@ -29,7 +29,7 @@ const BANDS_HIGH_TO_LOW: JobPriorityBand[] = [...JOB_PRIORITY_BANDS]
 
 const POOLS_ORDER: JobExecutionPool[] = ['sweed', 'system', 'scheduling', 'ads']
 
-const METRICS_POLL_MS = 10_000
+const METRICS_POLL_MS = 60_000 // DB-cost epic E1 (was 10s)
 
 interface JobsLoaderData {
   list: JobsResponse

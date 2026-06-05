@@ -28,7 +28,7 @@ type MorningOp =
   | { kind: 'triggered'; result: MorningBundleRunTriggerResponse; baselineRunIds: ReadonlySet<string> }
   | { kind: 'err'; message: string }
 
-const STATUS_POLL_MS = 10_000
+const STATUS_POLL_MS = 60_000 // DB-cost epic E1 (was 10s); active-run watch stays tight below
 const MORNING_RUNS_POLL_MS = 5_000
 const MORNING_TRIGGER_WATCH_MS = 5 * 60_000
 

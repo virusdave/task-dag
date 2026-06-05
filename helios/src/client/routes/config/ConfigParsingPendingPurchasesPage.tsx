@@ -27,7 +27,7 @@ import { loadJson } from '../../app/fetchJson.js'
 import { Pill, type PillProps } from '../../components/Pill.js'
 import { useRegisterConfigSidebarSubtree } from './configSidebarSubtree.js'
 
-const AUTO_REFRESH_INTERVAL_MS = 30_000
+const AUTO_REFRESH_INTERVAL_MS = 60_000 // DB-cost epic E1 (was 30s)
 
 export async function configParsingPendingPurchasesLoader(): Promise<
   ConfigParsingPendingPurchasesResponse

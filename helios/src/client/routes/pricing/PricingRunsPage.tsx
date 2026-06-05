@@ -32,7 +32,7 @@ export function PricingRunsPage() {
       if (revalidator.state === 'idle') {
         void revalidator.revalidate()
       }
-    }, 5000)
+    }, 60000) // DB-cost epic E1 (was 5s); only polls while a run is in progress
 
     return () => window.clearInterval(intervalId)
   }, [hasInProgressRun, revalidator])

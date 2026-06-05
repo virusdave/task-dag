@@ -12,7 +12,7 @@ import { useEffect, useState } from 'react'
 import { SessionEnvelopeSchema, type PendingMigration } from '../../shared/contracts/index.js'
 import { buildAppPath } from '../app/paths.js'
 
-const POLL_INTERVAL_MS = 60_000
+const POLL_INTERVAL_MS = 300_000 // DB-cost epic E1 (was 60s); pending migrations are rare
 
 const BANNER_STYLE: React.CSSProperties = {
   position: 'fixed',

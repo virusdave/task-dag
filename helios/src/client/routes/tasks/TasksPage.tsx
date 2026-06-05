@@ -58,7 +58,7 @@ export function TasksPage() {
     }
 
     loadData()
-    const interval = setInterval(loadData, 10000) // Poll every 10s
+    const interval = setInterval(loadData, 60000) // Poll every 60s (DB-cost epic E1)
     return () => clearInterval(interval)
   }, [])
 

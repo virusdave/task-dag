@@ -44,7 +44,7 @@ export function TaskFrontierPage() {
     }
 
     loadTasks()
-    const interval = setInterval(loadTasks, 10000)
+    const interval = setInterval(loadTasks, 60000) // 60s (DB-cost epic E1)
     return () => clearInterval(interval)
   }, [issueFilter, statusFilter])
 

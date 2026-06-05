@@ -61,7 +61,7 @@ export function EpicDagPage() {
     }
 
     loadDag()
-    const interval = setInterval(loadDag, 30000) // Poll every 30s
+    const interval = setInterval(loadDag, 300000) // Poll every 300s (DB-cost epic E1)
     return () => clearInterval(interval)
   }, [id])
 
