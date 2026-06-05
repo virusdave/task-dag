@@ -1,5 +1,28 @@
 # Agent instructions for the `automation` repo
 
+**MANDATORY FIRST READ — agent canon (re-read every session).**
+Before doing anything in this repo, read the cross-repo canonical
+agent rules from a fresh ephemeral checkout of `virusdave/top-level`
+at `origin/master`:
+
+```sh
+canon_ws=$(/home/amp-local/src/github-worker/bin/ephemeral-checkout \
+              /home/amp-local/src/top-level --label canon-read)
+cat "$canon_ws/docs/canon/AGENTS_CANON.md"
+# … apply the rules …
+/home/amp-local/src/github-worker/bin/ephemeral-checkout --remove "$canon_ws"
+```
+
+That file is authoritative across all repos and changes frequently.
+It also documents the canon-update interrupt: if the operator gives a
+rule that applies to all agents/all repos ("canonical", "always",
+"never", "going forward", …), persist it to
+`docs/canon/AGENTS_CANON.md` before continuing (see
+`docs/canon/UPDATING_CANON.md` in `virusdave/top-level`). The rest of
+this `AGENTS.md` only adds repo-specific instructions and must not
+weaken canon. If canon and this file conflict, canon wins — update the
+stale one.
+
 ## Always use NY timezone (America/New_York) for aggregate and display
 
 Every store is in NYC, every transaction happens in NY wall-clock, and
