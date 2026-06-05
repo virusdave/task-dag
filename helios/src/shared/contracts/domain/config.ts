@@ -26,6 +26,7 @@ export const CONFIG_BACKGROUND_TASK_KEYS = [
   'workers.scheduling.sweed_shifts_ingest',
   'workers.scheduling.enrich_delivery_address',
   'workers.scheduling.enrich_visitor_scan_address',
+  'workers.scheduling.sweed_orders_raw_json_drain',
 ] as const
 export const ConfigBackgroundTaskKeySchema = z.enum(CONFIG_BACKGROUND_TASK_KEYS)
 export type ConfigBackgroundTaskKey = z.infer<typeof ConfigBackgroundTaskKeySchema>
@@ -145,6 +146,13 @@ export const CONFIG_BACKGROUND_TASKS: ReadonlyArray<ConfigBackgroundTaskDefiniti
     slug: 'enrich-visitor-scan-address',
     implemented: true,
     summary: 'Two-phase per tick at backfill priority: (1) links up to batchSize (default 5000) visitor_scans rows that have address text but no address_id to a row in the shared addresses table; (2) drains the addresses geocode queue via the free US Census Geocoder (≈ 1 RPS, so the per-tick drain is naturally rate-limited). Customer-of-record geocodes back the /admin/customers/map customer-origin map. Webhook handlers also enqueue a single follow-up of this job per incoming scan whose VeriScan lat/lng is missing or within 500ft of either store (i.e. is actually the scanner kiosk location, not a real home).',
+  },
+  {
+    key: 'workers.scheduling.sweed_orders_raw_json_drain',
+    label: 'Sweed orders raw_json drain',
+    slug: 'sweed-orders-raw-json-drain',
+    implemented: true,
+    summary: 'DB-cost maintenance (epic phase F5): nulls sweed_orders.raw_json for orders older than 30 days in bounded DB batches (default 500 rows/batch, ≤10 batches per tick, each its own short transaction with FOR UPDATE SKIP LOCKED). All request-time readers were migrated onto sweed_order_items_flat (items) and the cashier_user_id column (creatorId) in phases D1/F5, so the historical blob is pure dead weight — it was the single largest TOAST contributor on sweed_orders. Disk is reclaimed by autovacuum after the drain. Runs off-hours by default.',
   },
 ]
 
@@ -569,5 +577,18 @@ export const ENRICH_VISITOR_SCAN_ADDRESS_DEFAULT_SCHEDULE_WINDOWS: ReadonlyArray
     intervalMinutes: 5,
     paused: false,
     notes: 'Visitor-scan address linking (batch=5000) + Census geocode drain, every 5 minutes at backfill priority.',
+  },
+]
+
+export const SWEED_ORDERS_RAW_JSON_DRAIN_DEFAULT_SCHEDULE_WINDOWS: ReadonlyArray<
+  Omit<ConfigWorkerScheduleWindow, 'id'>
+> = [
+  {
+    weekdayMask: WEEKDAY_MASK_ALL,
+    windowStartMinute: 2 * 60, // 02:00 server local (off-hours)
+    windowEndMinute: 8 * 60, // 08:00 server local
+    intervalMinutes: 15,
+    paused: false,
+    notes: 'Null sweed_orders.raw_json for orders older than 30 days in bounded DB batches (≤500 rows/batch, ≤10 batches/tick). Off-hours so the candidate scan + dead-tuple churn never competes with daytime serving (DB-cost epic phase F5).',
   },
 ]

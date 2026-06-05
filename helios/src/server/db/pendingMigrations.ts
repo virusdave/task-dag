@@ -577,6 +577,25 @@ const SENTINELS: MigrationSentinel[] = [
     },
   },
   {
+    // Phase F5 of the Helios DB-cost epic (virusdave/top-level#11).
+    // Migration 062 drops the NOT NULL constraint on
+    // sweed_orders.raw_json so the drain worker
+    // (config.workers.sweed_orders_raw_json_drain) can null it for
+    // orders older than 30 days. The sentinel is true once the column
+    // is nullable.
+    migrationId: '062_sweed_orders_raw_json_drop_not_null',
+    label:
+      'sweed_orders.raw_json is nullable (DB-cost epic phase F5) — ' +
+      'required before the raw_json drain worker can run.',
+    check: async (db) => {
+      const result = await db.query<{ is_nullable: string }>(
+        `select is_nullable from information_schema.columns
+          where table_name = 'sweed_orders' and column_name = 'raw_json'`,
+      )
+      return result.rows[0]?.is_nullable === 'YES'
+    },
+  },
+  {
     // Phase C1 of the Helios DB-cost epic (virusdave/top-level#11):
     // convert parsekit_reverse_shadow_events to a Timescale
     // hypertable as a low-risk validator for the conversion pattern

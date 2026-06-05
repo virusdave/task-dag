@@ -54,6 +54,7 @@ export const JobTypeSchema = z.enum([
   'config.workers.enrich_visitor_scan_address',
   'config.workers.link_visitor_scan_to_sweed',
   'config.workers.refresh_sweed_customer_segments',
+  'config.workers.sweed_orders_raw_json_drain',
   'catalog.maintenance.upload_group_image',
 ])
 export type JobType = z.infer<typeof JobTypeSchema>
@@ -353,6 +354,22 @@ export const ConfigWorkersEdibleThcClampJobPayloadSchema = z.object({
 })
 export type ConfigWorkersEdibleThcClampJobPayload = z.infer<
   typeof ConfigWorkersEdibleThcClampJobPayloadSchema
+>
+
+// F5 (virusdave/top-level#11): drain sweed_orders.raw_json for orders
+// older than `cutoffDays` in bounded DB batches. Each batch is its own
+// short transaction; one job invocation does at most
+// `maxBatches * batchSize` rows so it never holds long locks or floods
+// WAL. See configWorkersSweedOrdersRawJsonDrainJob.ts.
+export const ConfigWorkersSweedOrdersRawJsonDrainJobPayloadSchema = z.object({
+  requestedByUserId: z.number().int().positive().nullable().optional(),
+  trigger: z.enum(['manual_run', 'scheduled']).default('scheduled'),
+  cutoffDays: z.number().int().min(30).max(365).default(30),
+  batchSize: z.number().int().min(1).max(2000).default(500),
+  maxBatches: z.number().int().min(1).max(40).default(10),
+})
+export type ConfigWorkersSweedOrdersRawJsonDrainJobPayload = z.infer<
+  typeof ConfigWorkersSweedOrdersRawJsonDrainJobPayloadSchema
 >
 
 /**

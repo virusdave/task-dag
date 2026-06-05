@@ -183,6 +183,8 @@ export async function tickConfigWorkersScheduler(now: Date = new Date()): Promis
         await enqueueScheduledEnrichDeliveryAddress(schedule.taskKey, now, activeWindow.intervalMinutes)
       } else if (schedule.taskKey === 'workers.scheduling.enrich_visitor_scan_address') {
         await enqueueScheduledEnrichVisitorScanAddress(schedule.taskKey, now, activeWindow.intervalMinutes)
+      } else if (schedule.taskKey === 'workers.scheduling.sweed_orders_raw_json_drain') {
+        await enqueueScheduledSweedOrdersRawJsonDrain(schedule.taskKey, now, activeWindow.intervalMinutes)
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown scheduler-task error.'
@@ -585,6 +587,54 @@ async function enqueueScheduledEdibleThcClamp(
       payload: {
         intervalMinutes,
         siteDealerIds,
+        taskKey,
+        trigger: 'scheduled',
+      },
+      requestId: null,
+      scope: null,
+      undoPayload: null,
+    })
+  })
+}
+
+// F5 (virusdave/top-level#11): enqueue the bounded sweed_orders.raw_json
+// drain. System pool, no Sweed session. The dedicated concurrency key
+// plus the per-bucket dedupe key keep at most one drain in flight even
+// if a tick overlaps a still-running invocation.
+async function enqueueScheduledSweedOrdersRawJsonDrain(
+  taskKey: ConfigBackgroundTaskKey,
+  now: Date,
+  intervalMinutes: number,
+): Promise<void> {
+  const bucketMs = intervalMinutes * 60 * 1000
+  const bucketStartMs = Math.floor(now.getTime() / bucketMs) * bucketMs
+  const bucketIso = new Date(bucketStartMs).toISOString()
+
+  await withTransaction(async (db) => {
+    const jobId = await enqueueJob(db, {
+      priority: JOB_PRIORITY_BEST_EFFORT,
+      concurrencyKey: 'config.workers.sweed_orders_raw_json_drain',
+      dedupeKey: `config.workers.sweed_orders_raw_json_drain:scheduled:${bucketIso}`,
+      jobType: 'config.workers.sweed_orders_raw_json_drain',
+      module: 'config',
+      payload: {
+        trigger: 'scheduled',
+      },
+      requestedByUserId: null,
+      runAt: now,
+      scope: null,
+    })
+
+    await recordEnqueueAndPatchCache(db, taskKey, jobId, now)
+    await appendAuditEvent(db, {
+      actorType: 'system',
+      actorUserId: null,
+      entityId: String(jobId),
+      entityType: 'job',
+      eventType: 'config.workers.sweed_orders_raw_json_drain.requested',
+      module: 'config',
+      payload: {
+        intervalMinutes,
         taskKey,
         trigger: 'scheduled',
       },
