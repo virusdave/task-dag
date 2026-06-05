@@ -120,10 +120,11 @@ async function loadProductDealerMetrics(
   //      via `sweed_package_current` (the DISTINCT ON view that
   //      collapses sweed_package_snapshots to its latest shape per
   //      package).
-  //   2. Expand the last 30 days of order line items once via
-  //      `jsonb_array_elements(sweed_orders.raw_json -> 'items')`,
-  //      driven by the `sweed_orders_pay_time_idx` btree so we only
-  //      touch rolling-30d orders, not the full ~40k order history.
+  //   2. Read the last 30 days of order line items from the
+  //      materialised `sweed_order_items_flat` table (D1), driven by
+  //      `sweed_order_items_flat_dealer_pay_idx` on (dealer_id,
+  //      pay_time) so we only touch rolling-30d rows, not the full
+  //      order history — and never re-unroll raw_json at request time.
   //   3. Aggregate per (dealer_id, product_id): sum gross over 30d,
   //      sum units over the last 7d (the reorder report used a
   //      7d unitsPerDay window — keep parity), and full-outer-join
@@ -154,16 +155,21 @@ async function loadProductDealerMetrics(
          join target_dealers td on td.dealer_id = spc.dealer_id
      ),
      last_30d_lines as (
-       select so.dealer_id,
-              so.pay_time,
-              item->>'inventoryItemId' as inventory_item_id,
-              coalesce(nullif(item->>'currentQty', ''), '0')::numeric as qty,
-              coalesce(nullif(item->>'subtotalAmount', ''), '0')::numeric as gross
-         from sweed_orders so
-              cross join lateral
-                jsonb_array_elements(coalesce(so.raw_json->'items', '[]'::jsonb)) item
-        where so.pay_time >= now() - interval '30 days'
-          and so.dealer_id in (select dealer_id from target_dealers)
+       -- D1: reads materialised sweed_order_items_flat instead of
+       -- unrolling sweed_orders.raw_json->'items' per request. f.qty
+       -- mirrors currentQty, f.revenue mirrors subtotalAmount, and the
+       -- flat table only stores rows with a non-null inventory_item_id
+       -- (which is exactly what the target_packages join below keeps).
+       -- Live dark-diff over the rolling 30d window showed 0 differences
+       -- in per-(dealer,inventory_item) 30d gross / 7d units.
+       select f.dealer_id,
+              f.pay_time,
+              f.inventory_item_id as inventory_item_id,
+              f.qty as qty,
+              f.revenue as gross
+         from sweed_order_items_flat f
+        where f.pay_time >= now() - interval '30 days'
+          and f.dealer_id in (select dealer_id from target_dealers)
      ),
      sales_per_dp as (
        select tp.dealer_id, tp.product_id,

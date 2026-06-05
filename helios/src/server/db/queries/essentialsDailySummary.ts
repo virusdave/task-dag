@@ -194,19 +194,24 @@ export async function loadEssentialsDailySummary(
   const marginPromise = db.query<MarginRow>(
     `
       with todays_items as (
+        -- D1: reads materialised sweed_order_items_flat instead of
+        -- unrolling sweed_orders.raw_json->'items' per request. f.revenue
+        -- mirrors subtotalAmount; f.qty mirrors currentQty (with the same
+        -- quantity/qty fallback the flat ingest applies). Live dark-diff
+        -- over the rolling 30d window showed 0 priced_revenue/priced_cogs
+        -- differences vs the old raw_json path.
         select
-          so.dealer_id,
-          (item->>'subtotalAmount')::numeric as revenue,
-          (item->>'currentQty')::numeric as qty,
+          f.dealer_id,
+          f.revenue as revenue,
+          f.qty as qty,
           sweed_package_cost_as_of_or_earliest(
-            so.dealer_id,
-            item->>'inventoryItemId',
-            so.pay_time
+            f.dealer_id,
+            f.inventory_item_id,
+            f.pay_time
           ) as unit_cost
-        from sweed_orders so
-             cross join lateral jsonb_array_elements(so.raw_json->'items') as item
-        where so.dealer_id = any($1::bigint[])
-          and so.pay_time >= $2 and so.pay_time < $3
+        from sweed_order_items_flat f
+        where f.dealer_id = any($1::bigint[])
+          and f.pay_time >= $2 and f.pay_time < $3
       )
       select
         dealer_id,
