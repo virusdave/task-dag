@@ -50,7 +50,10 @@ import {
   JOB_PRIORITY_URGENT,
 } from '../jobs/enqueueJob.js'
 import { appendAuditEvent } from '../audit/appendAuditEvent.js'
-import { getCustomerVisitorDetails } from '../db/queries/customerVisitorDetailsQueries.js'
+import {
+  getCustomerVisitorDetails,
+  getCustomerVisitorInvoiceItems,
+} from '../db/queries/customerVisitorDetailsQueries.js'
 import { markCustomerSegmentsRefreshPending } from '../db/queries/sweedCustomerSegmentsQueries.js'
 import {
   VeriScanEnvelopeSchema,
@@ -59,6 +62,7 @@ import {
 import {
   CashierVisitorScansResponseSchema,
   CustomerVisitorDetailsResponseSchema,
+  CustomerVisitorInvoiceItemsResponseSchema,
   VisitorScansHighwaterResponseSchema,
   VisitorScansQuerySchema,
   VisitorScansResponseSchema,
@@ -440,6 +444,48 @@ export async function registerVisitorScansAdminRoutes(server: FastifyInstance): 
       throw error
     }
   })
+
+  // -----------------------------------------------------------------
+  // Lazy per-invoice line items for the details page. Fetched on
+  // demand when the operator expands an invoice row, so the main
+  // details payload stays header-only. Reads the materialised
+  // sweed_order_items_flat table (phase D1) via an indexed
+  // (dealer_id, invoice_id) lookup; the invoice must belong to the
+  // Sweed customer this scan is linked to.
+  // -----------------------------------------------------------------
+  server.get(
+    '/api/admin/customers/visitors/:scanId/invoices/:invoiceId/items',
+    async (request, reply) => {
+      const user = await requireSessionUser(request, reply, 'admin')
+      if (!user) return
+
+      const params = request.params as { scanId?: string; invoiceId?: string }
+      const scanId = Number(params.scanId)
+      const invoiceId = (params.invoiceId ?? '').trim()
+      if (!Number.isFinite(scanId) || scanId <= 0 || !Number.isInteger(scanId)) {
+        return reply.status(400).send({ error: 'Invalid scanId.' })
+      }
+      if (invoiceId.length === 0) {
+        return reply.status(400).send({ error: 'Invalid invoiceId.' })
+      }
+      try {
+        const items = await getCustomerVisitorInvoiceItems(getPool(), scanId, invoiceId)
+        if (items === null) {
+          return reply.status(404).send({ error: 'Invoice not found for this visitor.' })
+        }
+        return reply.send(CustomerVisitorInvoiceItemsResponseSchema.parse(items))
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        if (/relation .*sweed_order_items_flat.* does not exist/i.test(message)) {
+          return reply.status(503).send({
+            error:
+              'sweed_order_items_flat table missing. Apply migration 048_sweed_order_items_flat.sql.',
+          })
+        }
+        throw error
+      }
+    },
+  )
 
   // -----------------------------------------------------------------
   // Manual "Refresh segments" for the details page

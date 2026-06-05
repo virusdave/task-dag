@@ -21,15 +21,19 @@
 // All work runs in a single transactional read (`begin read only`)
 // so the per-tab refetch sees a consistent snapshot.
 //
-// Line items: sweed_orders intentionally does NOT mirror invoice
-// line items (see helios/src/server/db/schema/sweedOrders.sql), so
-// the response's `limitations.lineItemsAvailable` is the literal
-// `false` and the page surfaces a plain-language note. Wiring up
-// full-item history requires net-new Sweed RPC ingest infra.
+// Line items: each invoice carries a `lineItemCount` sourced from
+// sweed_order_items_flat (the #39 DB-cost epic phase D1 materialised
+// expansion of sweed_orders.raw_json->'items'). The items themselves
+// are fetched lazily per invoice on expand via
+// getCustomerVisitorInvoiceItems so the main payload stays
+// header-only and we never reparse the whole-order raw_json (which
+// phase C3/F5 is draining off sweed_orders).
 
 import type {
   CustomerVisitorAnchorScan,
   CustomerVisitorDetailsResponse,
+  CustomerVisitorInvoiceItemsResponse,
+  CustomerVisitorLineItem,
   CustomerVisitorLinkedCustomer,
   CustomerVisitorMapPoint,
   CustomerVisitorPriorVisit,
@@ -62,12 +66,6 @@ const KNOWN_LINK_STATUSES: readonly VisitorScanLinkStatus[] = [
   'rejected',
   'insufficient_data',
 ]
-
-const LINE_ITEMS_NOTE =
-  'Helios mirrors Sweed invoice headers only — line items are not ' +
-  'ingested into sweed_orders today (see ' +
-  'helios/src/server/db/schema/sweedOrders.sql). Full per-item ' +
-  'purchase history requires net-new Sweed RPC ingest infrastructure.'
 
 // ---------------------------------------------------------------------
 // Row shapes coming back from each SQL block.
@@ -191,6 +189,7 @@ interface InvoiceRow {
   delivery_latitude: number | null
   delivery_longitude: number | null
   delivery_geocode_status: string | null
+  line_item_count: string | number | null
 }
 
 interface SweedAddressRow {
@@ -385,9 +384,128 @@ export async function getCustomerVisitorDetails(
     },
     identity,
     limitations: {
-      lineItemsAvailable: false,
-      lineItemsNote: LINE_ITEMS_NOTE,
+      lineItemsAvailable: true,
+      lineItemsNote: null,
     },
+  }
+}
+
+// ---------------------------------------------------------------------
+// Lazy per-invoice line items.
+//
+// Reads from sweed_order_items_flat (the #39 phase-D1 materialised
+// 1:1 expansion of sweed_orders.raw_json->'items'), NOT from the
+// whole-order raw_json. Typed columns (qty / revenue / product_id /
+// product_category_name) come straight off the flat row; product
+// name / short name / thumbnail / item status come from the small
+// per-item `raw_item` blob the flat table deliberately keeps for
+// exactly this kind of "read the extras without re-joining the order"
+// access (see migration 048 header).
+//
+// Ownership: the requested invoice must belong to the Sweed customer
+// this scan is `linked` to, enforced by joining through
+// visitor_scan_links so an operator can't probe arbitrary invoice ids.
+//
+// Returns null when the scan is not linked or the invoice does not
+// belong to the linked customer (caller maps null -> 404). Returns an
+// empty `lineItems` array when the invoice is valid but has no
+// inventory-bearing items (the flat table skips items with no
+// inventory_item_id).
+// ---------------------------------------------------------------------
+
+interface LineItemRow {
+  dealer_id: string | number
+  item_ordinal: string | number | null
+  inventory_item_id: string | null
+  product_id: string | number | null
+  product_category_name: string | null
+  qty: string | number | null
+  revenue: string | number | null
+  product_name: string | null
+  short_name: string | null
+  image_url: string | null
+  item_status: string | null
+}
+
+export async function getCustomerVisitorInvoiceItems(
+  db: Queryable,
+  scanId: number,
+  invoiceId: string,
+): Promise<CustomerVisitorInvoiceItemsResponse | null> {
+  const sql = `
+    with owned as (
+      select so.dealer_id, so.invoice_id
+      from visitor_scan_links l
+      join sweed_orders so
+        on so.dealer_id = l.dealer_id
+       and so.customer_id = l.sweed_customer_id
+       and so.invoice_id = $2
+      where l.scan_id = $1
+        and l.link_status = 'linked'
+        and l.sweed_customer_id is not null
+    )
+    select
+      o.dealer_id,
+      f.item_ordinal,
+      f.inventory_item_id,
+      f.product_id,
+      f.product_category_name,
+      f.qty,
+      f.revenue,
+      f.raw_item->'product'->>'name'      as product_name,
+      f.raw_item->'product'->>'shortName' as short_name,
+      coalesce(
+        f.raw_item->'product'->'groupImages'->0->>'url',
+        f.raw_item->'product'->'images'->0->>'url'
+      ) as image_url,
+      coalesce(
+        f.raw_item->'invoiceItemStatus'->>'name',
+        nullif(f.raw_item->>'invoiceItemStatus', '')
+      ) as item_status
+    from owned o
+    left join sweed_order_items_flat f
+      on f.dealer_id = o.dealer_id
+     and f.invoice_id = o.invoice_id
+    order by f.item_ordinal asc
+  `
+  const result = await db.query<LineItemRow>(sql, [scanId, invoiceId])
+  if (result.rows.length === 0) return null
+
+  const dealerId = Number(result.rows[0].dealer_id)
+  const lineItems: CustomerVisitorLineItem[] = []
+  for (const row of result.rows) {
+    // The LEFT JOIN yields exactly one all-null item row when the
+    // invoice is owned but carries no flat items; skip it.
+    if (row.item_ordinal === null) continue
+    lineItems.push({
+      itemOrdinal: intOrZero(row.item_ordinal),
+      inventoryItemId: row.inventory_item_id,
+      productId: numOrNull(row.product_id),
+      productName: row.product_name,
+      shortName: row.short_name,
+      category: row.product_category_name,
+      qty: numOrNull(row.qty),
+      revenueDollars: numOrNull(row.revenue),
+      imageUrl: safeImageUrl(row.image_url),
+      status: row.item_status,
+    })
+  }
+
+  return { dealerId, invoiceId, lineItems }
+}
+
+// Only surface http(s) image URLs; anything else (data:, javascript:,
+// malformed) becomes null so the client renders the no-image
+// fallback instead of an attacker-controlled src.
+function safeImageUrl(value: string | null): string | null {
+  if (value === null) return null
+  const trimmed = value.trim()
+  if (trimmed.length === 0) return null
+  try {
+    const url = new URL(trimmed)
+    return url.protocol === 'https:' || url.protocol === 'http:' ? trimmed : null
+  } catch {
+    return null
   }
 }
 
@@ -600,7 +718,17 @@ async function loadPurchaseInvoices(
       a.normalized  as delivery_normalized,
       a.latitude    as delivery_latitude,
       a.longitude   as delivery_longitude,
-      a.geocode_status as delivery_geocode_status
+      a.geocode_status as delivery_geocode_status,
+      -- Count of materialised line items for this invoice. Indexed
+      -- via sweed_order_items_flat_invoice_idx (dealer_id,
+      -- invoice_id), so this is a per-row index-only count over the
+      -- already-capped invoice page (no whole-order raw_json read).
+      (
+        select count(*)::int
+        from sweed_order_items_flat f
+        where f.dealer_id = so.dealer_id
+          and f.invoice_id = so.invoice_id
+      ) as line_item_count
     from sweed_orders so
     left join addresses a on a.id = so.delivery_address_id
     where so.dealer_id = $1
@@ -870,6 +998,7 @@ function buildPurchaseInvoice(row: InvoiceRow): CustomerVisitorPurchaseInvoice {
     paymentMethod: row.payment_method,
     deliveryZip: row.delivery_zip,
     deliveryAddress,
+    lineItemCount: intOrZero(row.line_item_count),
   }
 }
 

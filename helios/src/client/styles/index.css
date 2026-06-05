@@ -5423,13 +5423,147 @@ span.metric-chart-legend-item {
   font-size: 0.78rem;
   padding: 0.2rem 0.55rem;
 }
-.customer-details-page .cd-lineitems-note {
+.customer-details-page .cd-lineitems-note-text {
   margin-top: 0.5rem;
 }
-.customer-details-page .cd-lineitems-note > summary {
+
+/* ---- Purchase invoices: expandable line items ---- */
+.customer-details-page .cd-cell-expander {
+  width: 1.8rem;
+  padding-right: 0;
+}
+.customer-details-page .cd-expand-btn {
+  font: inherit;
+  font-size: 0.8rem;
+  line-height: 1;
+  width: 1.5rem;
+  height: 1.5rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  background: var(--surface, #fff);
+  color: inherit;
   cursor: pointer;
-  font-size: 0.82rem;
+}
+.customer-details-page .cd-expand-btn:hover:not(:disabled) {
+  background: var(--surface-hover, #f3f4f6);
+}
+.customer-details-page .cd-expand-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+.customer-details-page .cd-invoice-row.is-open > td {
+  border-bottom-color: transparent;
+}
+.customer-details-page .cd-invoice-items-row > td {
+  background: rgba(0, 0, 0, 0.018);
+  padding: 0.65rem 0.9rem 0.85rem;
+}
+.customer-details-page .cd-lineitems-status {
+  margin: 0.25rem 0;
+}
+.customer-details-page .cd-lineitems-error {
+  color: var(--danger, #b42318);
+}
+.customer-details-page .cd-lineitem-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 0.6rem;
+}
+.customer-details-page .cd-lineitem-card {
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr);
+  gap: 0.6rem;
+  align-items: start;
+  padding: 0.55rem;
+  border: 1px solid var(--panel-border-faint, rgba(0, 0, 0, 0.08));
+  border-radius: 8px;
+  background: var(--surface, #fff);
+}
+.customer-details-page .cd-lineitem-thumb-link {
+  display: block;
+  width: 64px;
+  height: 64px;
+  position: relative;
+  flex: none;
+}
+.customer-details-page .cd-lineitem-thumb {
+  width: 64px;
+  height: 64px;
+  object-fit: cover;
+  border-radius: 6px;
+  border: 1px solid var(--panel-border);
+  background: #fff;
+}
+.customer-details-page .cd-lineitem-thumb-link.is-broken::after {
+  content: 'No image';
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  font-size: 0.68rem;
   color: var(--text-muted);
+  border: 1px dashed var(--panel-border);
+  border-radius: 6px;
+}
+.customer-details-page .cd-lineitem-thumb-empty {
+  width: 64px;
+  height: 64px;
+  display: grid;
+  place-items: center;
+  font-size: 0.68rem;
+  color: var(--text-muted);
+  border: 1px dashed var(--panel-border);
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.02);
+}
+/* Desktop hover-zoom preview: a viewport-fixed overlay positioned by
+   JS near the cursor, so it is never clipped by the scrolling table
+   wrapper. Touch devices don't trigger this (tap opens the full-size
+   CDN image in a new tab instead). */
+.customer-details-page .cd-thumb-preview {
+  position: fixed;
+  z-index: 1000;
+  pointer-events: none;
+  border-radius: 10px;
+  overflow: hidden;
+  border: 1px solid var(--panel-border);
+  background: #fff;
+  box-shadow: 0 16px 44px rgba(0, 0, 0, 0.34);
+}
+.customer-details-page .cd-thumb-preview img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+}
+.customer-details-page .cd-lineitem-body {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+.customer-details-page .cd-lineitem-name {
+  font-size: 0.85rem;
+  line-height: 1.2;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+.customer-details-page .cd-lineitem-meta {
+  font-size: 0.74rem;
+}
+.customer-details-page .cd-lineitem-figs {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  font-size: 0.8rem;
+  font-variant-numeric: tabular-nums;
+  margin-top: 0.1rem;
 }
 /* =====================================================================
  * Budtender performance tab (/metrics/budtenders).

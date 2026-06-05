@@ -21,20 +21,23 @@
 //      this person (by id_num and/or person_key), with each visit's
 //      same-business-day purchase rollup when the anchor is linked.
 //   6. Purchase invoices table — full sweed_orders header history for
-//      the Sweed customer, with a clear note about why line items are
-//      not available today.
+//      the Sweed customer. Each row is expandable to a product
+//      thumbnail grid of its line items (lazily fetched per invoice
+//      from the materialised sweed_order_items_flat table).
 //   7. Raw envelope, collapsed.
 
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, createContext, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { useLoaderData, useParams } from 'react-router-dom'
 
 import maplibregl from 'maplibre-gl'
 
 import {
   CustomerVisitorDetailsResponseSchema,
+  CustomerVisitorInvoiceItemsResponseSchema,
   type CustomerVisitorAddableSegment,
   type CustomerVisitorAnchorScan,
   type CustomerVisitorDetailsResponse,
+  type CustomerVisitorLineItem,
   type CustomerVisitorMapPoint,
   type CustomerVisitorPriorVisit,
   type CustomerVisitorPurchaseInvoice,
@@ -470,12 +473,14 @@ function CustomerVisitorDetailsView({
           <PurchaseInvoicesTable
             rows={purchaseInvoices}
             truncated={data.purchaseInvoicesTruncated}
+            scanId={scanId}
           />
         )}
-        <details className="cd-lineitems-note">
-          <summary>Why no per-item history?</summary>
-          <p className="subtle-copy">{data.limitations.lineItemsNote}</p>
-        </details>
+        {data.limitations.lineItemsNote !== null ? (
+          <p className="subtle-copy cd-lineitems-note-text">
+            {data.limitations.lineItemsNote}
+          </p>
+        ) : null}
       </section>
 
       <SweedSegmentsSection
@@ -840,57 +845,184 @@ function PriorVisitsTable({
   )
 }
 
+// Number of table columns (the expanded line-item row spans them all).
+const PURCHASE_TABLE_COLSPAN = 11
+
+type LineItemsState =
+  | { status: 'loading' }
+  | { status: 'loaded'; items: readonly CustomerVisitorLineItem[] }
+  | { status: 'error'; error: string }
+
+// Hover-zoom preview. Rendered as a viewport-fixed overlay (not a CSS
+// transform on the thumbnail) so it can't be clipped by the
+// horizontally-scrolling table wrapper. The preview reuses the exact
+// same image URL as the thumbnail, which the browser has already
+// downloaded, so hovering costs no extra network.
+interface ThumbPreview {
+  url: string
+  x: number
+  y: number
+}
+interface ThumbPreviewApi {
+  show: (url: string, x: number, y: number) => void
+  move: (x: number, y: number) => void
+  hide: () => void
+}
+const ThumbPreviewContext = createContext<ThumbPreviewApi | null>(null)
+
+// Pointer must be a real mouse (not touch) for hover-zoom to make
+// sense; touch devices fall back to tap → open full image.
+function pointerCanHover(): boolean {
+  return (
+    typeof window !== 'undefined' &&
+    typeof window.matchMedia === 'function' &&
+    window.matchMedia('(hover: hover) and (pointer: fine)').matches
+  )
+}
+
 function PurchaseInvoicesTable({
   rows,
   truncated,
+  scanId,
 }: {
   rows: readonly CustomerVisitorPurchaseInvoice[]
   truncated: boolean
+  scanId: number
 }): JSX.Element {
+  const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set())
+  const [itemsByKey, setItemsByKey] = useState<Record<string, LineItemsState>>({})
+  const [preview, setPreview] = useState<ThumbPreview | null>(null)
+
+  const previewApi = useMemo<ThumbPreviewApi>(
+    () => ({
+      show: (url, x, y) => setPreview({ url, x, y }),
+      move: (x, y) => setPreview((p) => (p === null ? p : { ...p, x, y })),
+      hide: () => setPreview(null),
+    }),
+    [],
+  )
+
+  function loadItems(key: string, invoiceId: string): void {
+    setItemsByKey((prev) => ({ ...prev, [key]: { status: 'loading' } }))
+    void (async () => {
+      try {
+        const res = await loadJson(
+          `/api/admin/customers/visitors/${scanId}/invoices/${encodeURIComponent(
+            invoiceId,
+          )}/items`,
+          CustomerVisitorInvoiceItemsResponseSchema,
+        )
+        setItemsByKey((prev) => ({
+          ...prev,
+          [key]: { status: 'loaded', items: res.lineItems },
+        }))
+      } catch (cause) {
+        setItemsByKey((prev) => ({
+          ...prev,
+          [key]: {
+            status: 'error',
+            error: cause instanceof Error ? cause.message : 'Failed to load items',
+          },
+        }))
+      }
+    })()
+  }
+
+  function toggle(key: string, invoiceId: string, count: number): void {
+    setExpanded((prev) => {
+      const next = new Set(prev)
+      if (next.has(key)) {
+        next.delete(key)
+      } else {
+        next.add(key)
+        // Lazy-fetch only on first open, and only when there's
+        // something to fetch.
+        if (count > 0 && itemsByKey[key] === undefined) {
+          loadItems(key, invoiceId)
+        }
+      }
+      return next
+    })
+  }
+
   return (
+    <ThumbPreviewContext.Provider value={previewApi}>
     <div className="cd-table-scroll">
-      <table className="cd-table">
+      <table className="cd-table cd-purchase-table">
         <thead>
           <tr>
+            <th aria-label="Expand" />
             <th>When</th>
             <th>Invoice</th>
+            <th>Items</th>
             <th>Grand total</th>
             <th>Subtotal</th>
             <th>Tax</th>
             <th>Discount</th>
             <th>Fulfillment</th>
             <th>Payment</th>
-            <th>Delivery zip</th>
-            <th>Delivery address</th>
+            <th>Delivery</th>
           </tr>
         </thead>
         <tbody>
-          {rows.map((row) => (
-            <tr key={`${row.dealerId}:${row.invoiceId}`}>
-              <td className="cd-cell-time">{formatTime(row.payTime)}</td>
-              <td>
-                <code className="cd-invoice-code">{row.invoiceId}</code>
-              </td>
-              <td className="cd-cell-num">${row.grandTotalDollars.toFixed(2)}</td>
-              <td className="cd-cell-num">
-                {row.subtotalDollars !== null ? `$${row.subtotalDollars.toFixed(2)}` : '—'}
-              </td>
-              <td className="cd-cell-num">
-                {row.taxDollars !== null ? `$${row.taxDollars.toFixed(2)}` : '—'}
-              </td>
-              <td className="cd-cell-num">
-                {row.discountDollars !== null
-                  ? `$${row.discountDollars.toFixed(2)}`
-                  : '—'}
-              </td>
-              <td>{row.fulfillmentType ?? '—'}</td>
-              <td>{row.paymentMethod ?? '—'}</td>
-              <td>{row.deliveryZip ?? '—'}</td>
-              <td className="cd-cell-truncate">
-                {row.deliveryAddress?.line1 ?? row.deliveryAddress?.normalized ?? '—'}
-              </td>
-            </tr>
-          ))}
+          {rows.map((row) => {
+            const key = `${row.dealerId}:${row.invoiceId}`
+            const isOpen = expanded.has(key)
+            const hasItems = row.lineItemCount > 0
+            const itemsState = itemsByKey[key]
+            return (
+              <Fragment key={key}>
+                <tr className={isOpen ? 'cd-invoice-row is-open' : 'cd-invoice-row'}>
+                  <td className="cd-cell-expander">
+                    <button
+                      type="button"
+                      className="cd-expand-btn"
+                      aria-expanded={isOpen}
+                      aria-label={isOpen ? 'Hide items' : 'Show items'}
+                      disabled={!hasItems}
+                      onClick={() => toggle(key, row.invoiceId, row.lineItemCount)}
+                    >
+                      {hasItems ? (isOpen ? '▾' : '▸') : '·'}
+                    </button>
+                  </td>
+                  <td className="cd-cell-time">{formatTime(row.payTime)}</td>
+                  <td>
+                    <code className="cd-invoice-code">{row.invoiceId}</code>
+                  </td>
+                  <td className="cd-cell-num">{hasItems ? row.lineItemCount : '—'}</td>
+                  <td className="cd-cell-num">${row.grandTotalDollars.toFixed(2)}</td>
+                  <td className="cd-cell-num">
+                    {row.subtotalDollars !== null
+                      ? `$${row.subtotalDollars.toFixed(2)}`
+                      : '—'}
+                  </td>
+                  <td className="cd-cell-num">
+                    {row.taxDollars !== null ? `$${row.taxDollars.toFixed(2)}` : '—'}
+                  </td>
+                  <td className="cd-cell-num">
+                    {row.discountDollars !== null
+                      ? `$${row.discountDollars.toFixed(2)}`
+                      : '—'}
+                  </td>
+                  <td>{row.fulfillmentType ?? '—'}</td>
+                  <td>{row.paymentMethod ?? '—'}</td>
+                  <td className="cd-cell-truncate">
+                    {row.deliveryZip ??
+                      row.deliveryAddress?.line1 ??
+                      row.deliveryAddress?.normalized ??
+                      '—'}
+                  </td>
+                </tr>
+                {isOpen ? (
+                  <tr className="cd-invoice-items-row">
+                    <td colSpan={PURCHASE_TABLE_COLSPAN}>
+                      <LineItemsPanel state={itemsState} />
+                    </td>
+                  </tr>
+                ) : null}
+              </Fragment>
+            )
+          })}
         </tbody>
       </table>
       {truncated ? (
@@ -900,7 +1032,144 @@ function PurchaseInvoicesTable({
         </p>
       ) : null}
     </div>
+      {preview !== null ? <ThumbPreviewOverlay preview={preview} /> : null}
+    </ThumbPreviewContext.Provider>
   )
+}
+
+function ThumbPreviewOverlay({ preview }: { preview: ThumbPreview }): JSX.Element {
+  // Clamp a ~300px preview to the viewport, offset from the cursor.
+  const size = 300
+  const pad = 12
+  const vw = typeof window !== 'undefined' ? window.innerWidth : size + pad
+  const vh = typeof window !== 'undefined' ? window.innerHeight : size + pad
+  let left = preview.x + 20
+  let top = preview.y + 20
+  if (left + size + pad > vw) left = preview.x - size - 20
+  if (top + size + pad > vh) top = Math.max(pad, vh - size - pad)
+  if (left < pad) left = pad
+  return (
+    <div className="cd-thumb-preview" style={{ left, top, width: size, height: size }}>
+      <img src={preview.url} alt="" />
+    </div>
+  )
+}
+
+function LineItemsPanel({ state }: { state: LineItemsState | undefined }): JSX.Element {
+  if (state === undefined || state.status === 'loading') {
+    return <p className="subtle-copy cd-lineitems-status">Loading items…</p>
+  }
+  if (state.status === 'error') {
+    return (
+      <p className="subtle-copy cd-lineitems-status cd-lineitems-error">
+        Couldn’t load items: {state.error}
+      </p>
+    )
+  }
+  if (state.items.length === 0) {
+    return (
+      <p className="subtle-copy cd-lineitems-status">
+        No itemised products recorded for this invoice.
+      </p>
+    )
+  }
+  return (
+    <div className="cd-lineitem-grid">
+      {state.items.map((item) => (
+        <LineItemCard key={item.itemOrdinal} item={item} />
+      ))}
+    </div>
+  )
+}
+
+function LineItemCard({ item }: { item: CustomerVisitorLineItem }): JSX.Element {
+  const label = item.productName ?? item.shortName ?? item.inventoryItemId ?? 'Unknown product'
+  return (
+    <article className="cd-lineitem-card">
+      <ProductThumb imageUrl={item.imageUrl} label={label} />
+      <div className="cd-lineitem-body">
+        <strong className="cd-lineitem-name" title={label}>
+          {label}
+        </strong>
+        <div className="cd-lineitem-meta subtle-copy">
+          {item.category ?? 'Uncategorised'}
+        </div>
+        <div className="cd-lineitem-figs">
+          <span>Qty {item.qty ?? '—'}</span>
+          <span>
+            {item.revenueDollars !== null ? `$${item.revenueDollars.toFixed(2)}` : '—'}
+          </span>
+        </div>
+        {item.status !== null && !isDefaultItemStatus(item.status) ? (
+          <Pill tone={toneForItemStatus(item.status)}>{item.status}</Pill>
+        ) : null}
+      </div>
+    </article>
+  )
+}
+
+function ProductThumb({
+  imageUrl,
+  label,
+}: {
+  imageUrl: string | null
+  label: string
+}): JSX.Element {
+  const preview = useContext(ThumbPreviewContext)
+  if (imageUrl === null) {
+    return <div className="cd-lineitem-thumb cd-lineitem-thumb-empty">No image</div>
+  }
+  return (
+    <a
+      className="cd-lineitem-thumb-link"
+      href={imageUrl}
+      target="_blank"
+      rel="noreferrer"
+      aria-label={`Open full-size image for ${label}`}
+      onMouseEnter={(e) => {
+        if (preview !== null && pointerCanHover()) preview.show(imageUrl, e.clientX, e.clientY)
+      }}
+      onMouseMove={(e) => {
+        if (preview !== null && pointerCanHover()) preview.move(e.clientX, e.clientY)
+      }}
+      onMouseLeave={() => {
+        if (preview !== null) preview.hide()
+      }}
+    >
+      <img
+        className="cd-lineitem-thumb"
+        src={imageUrl}
+        alt={label}
+        loading="lazy"
+        decoding="async"
+        // @ts-expect-error fetchpriority is valid HTML but not yet in
+        // the React DOM typings on this version.
+        fetchpriority="low"
+        onError={(e) => {
+          const el = e.currentTarget
+          el.style.display = 'none'
+          el.parentElement?.classList.add('is-broken')
+        }}
+      />
+    </a>
+  )
+}
+
+// "New" / "Paid" are the normal happy-path statuses for a completed
+// sale; we don't badge them (it's just noise on every card). Anything
+// else (refund / return / canceled / in-process) gets a tone-coded
+// pill.
+function isDefaultItemStatus(status: string): boolean {
+  const s = status.trim().toLowerCase()
+  return s === 'paid' || s === 'new'
+}
+
+function toneForItemStatus(status: string): 'danger' | 'warning' | 'muted' | 'success' {
+  const s = status.trim().toLowerCase()
+  if (s.includes('refund') || s.includes('return')) return 'danger'
+  if (s.includes('cancel')) return 'muted'
+  if (s.includes('exchange') || s.includes('issue') || s.includes('process')) return 'warning'
+  return 'muted'
 }
 
 // ---------------------------------------------------------------------

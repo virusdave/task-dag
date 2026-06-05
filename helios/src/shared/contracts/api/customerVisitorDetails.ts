@@ -19,9 +19,11 @@
 //                       carrying its same-day purchase summary when
 //                       a Sweed link is known
 //   - purchaseInvoices  full invoice-header history for the Sweed
-//                       customer (capped); sweed_orders intentionally
-//                       does NOT carry line items today, see
-//                       limitations.lineItemsNote
+//                       customer (capped), each carrying a
+//                       lineItemCount; the line items themselves are
+//                       fetched lazily per invoice on expand from the
+//                       materialised sweed_order_items_flat table via
+//                       GET .../invoices/:invoiceId/items
 //   - mapPoints         a few markers worth rendering on the full
 //                       MapLibre canvas: document address, scan
 //                       location, Sweed primary address(es),
@@ -168,9 +170,46 @@ export const CustomerVisitorPurchaseInvoiceSchema = z.object({
   paymentMethod: z.string().nullable(),
   deliveryZip: z.string().nullable(),
   deliveryAddress: CustomerVisitorAddressSchema.nullable(),
+  // Count of materialised line items for this invoice (from
+  // sweed_order_items_flat). Lets the table show "N items" + an
+  // expander without fetching the items themselves. Note: the flat
+  // table only carries items that have an inventory_item_id, so this
+  // can be 0 for an otherwise-valid invoice (e.g. fee-only tickets).
+  lineItemCount: z.number().int().nonnegative(),
 })
 export type CustomerVisitorPurchaseInvoice = z.infer<
   typeof CustomerVisitorPurchaseInvoiceSchema
+>
+
+// ---------------------------------------------------------------------
+// Purchase invoice line item (one row of sweed_order_items_flat, the
+// materialised expansion of sweed_orders.raw_json->'items' built by
+// the #39 DB-cost epic phase D1). Lazily fetched per invoice on expand
+// via GET /api/admin/customers/visitors/:scanId/invoices/:invoiceId/items
+// so the main details payload stays header-only.
+// ---------------------------------------------------------------------
+
+export const CustomerVisitorLineItemSchema = z.object({
+  itemOrdinal: z.number().int().nonnegative(),
+  inventoryItemId: z.string().nullable(),
+  productId: z.number().int().nullable(),
+  productName: z.string().nullable(),
+  shortName: z.string().nullable(),
+  category: z.string().nullable(),
+  qty: z.number().nullable(),
+  revenueDollars: z.number().nullable(),
+  imageUrl: z.string().nullable(),
+  status: z.string().nullable(),
+})
+export type CustomerVisitorLineItem = z.infer<typeof CustomerVisitorLineItemSchema>
+
+export const CustomerVisitorInvoiceItemsResponseSchema = z.object({
+  dealerId: z.number().int(),
+  invoiceId: z.string(),
+  lineItems: z.array(CustomerVisitorLineItemSchema),
+})
+export type CustomerVisitorInvoiceItemsResponse = z.infer<
+  typeof CustomerVisitorInvoiceItemsResponseSchema
 >
 
 // ---------------------------------------------------------------------
@@ -291,11 +330,13 @@ export const CustomerVisitorDetailsResponseSchema = z.object({
   // matched person, NOT just this one scan).
   identity: VisitorScanIdentitySchema,
   limitations: z.object({
-    // sweed_orders today persists invoice headers only — see the
-    // comment in helios/src/server/db/schema/sweedOrders.sql. Item
-    // history requires net-new Sweed RPC infrastructure.
-    lineItemsAvailable: z.literal(false),
-    lineItemsNote: z.string(),
+    // Per-item history IS available: it is materialised in
+    // sweed_order_items_flat (the #39 DB-cost epic phase D1 expansion
+    // of sweed_orders.raw_json->'items') and fetched lazily per
+    // invoice. `lineItemsNote` is a non-null string only when the
+    // server wants to surface a caveat (e.g. the flat table missing).
+    lineItemsAvailable: z.boolean(),
+    lineItemsNote: z.string().nullable(),
   }),
 })
 export type CustomerVisitorDetailsResponse = z.infer<
