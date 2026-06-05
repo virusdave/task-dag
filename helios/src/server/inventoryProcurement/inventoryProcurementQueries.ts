@@ -201,6 +201,17 @@ FROM po
 GROUP BY dealer_id, distributor_name
 `
 
+// Supplier case-sizing knobs (uniform approximation until we record true
+// per-SKU case sizes / MOQs).
+const ORDER_MULTIPLE_UNITS = 5
+const MIN_ORDER_UNITS = 10
+// A case-rounded order may exceed the target coverage window, but not by
+// more than this multiple, and never push a SKU past an absolute day cap.
+// Beyond that, the minimum case overstocks the SKU and recommending it is
+// misleading — suppress the recommendation (see skip_min_order_overshoots).
+const MAX_CASE_OVERSHOOT_MULTIPLE = 2
+const MAX_CASE_COVER_DAYS = 60
+
 function clamp(x: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, x))
 }
@@ -321,12 +332,31 @@ export async function getInventoryProcurement(
     // Supplier orders are snapped to case sizes (almost always multiples
     // of 5). We don't yet record true per-SKU case sizing, so until we can
     // infer/record it, round any nonzero recommendation UP to the nearest
-    // multiple of 5 with a 10-unit minimum. See A-issue follow-up.
-    const recommendedQty =
-      rawRecommendedQty > 0 ? Math.max(10, Math.ceil(rawRecommendedQty / 5) * 5) : 0
+    // multiple of 5 with a 10-unit minimum.
+    const snappedRecommendedQty =
+      rawRecommendedQty > 0
+        ? Math.max(MIN_ORDER_UNITS, Math.ceil(rawRecommendedQty / ORDER_MULTIPLE_UNITS) * ORDER_MULTIPLE_UNITS)
+        : 0
+    // Days of supply the SKU would carry AFTER the snapped order lands.
+    const coverageAfterSnappedOrderDays =
+      forecastDailyUnits > 0 && snappedRecommendedQty > 0
+        ? (sellableUnits + snappedRecommendedQty) / forecastDailyUnits
+        : null
+    // The snap (esp. the 10-unit floor) can overstock a slow mover far past
+    // its target window. When it does, recommending the order is actively
+    // misleading, so suppress it: there IS demand, but the minimum case is
+    // economically wrong. (No brand/category variety exception exists yet.)
+    const maxCaseCoverDays = Math.min(MAX_CASE_COVER_DAYS, MAX_CASE_OVERSHOOT_MULTIPLE * targetCoverDays)
+    const minOrderOvershootsTarget =
+      rawRecommendedQty > 0 &&
+      snappedRecommendedQty > rawRecommendedQty &&
+      coverageAfterSnappedOrderDays !== null &&
+      coverageAfterSnappedOrderDays > maxCaseCoverDays
+    const recommendedQty = minOrderOvershootsTarget ? 0 : snappedRecommendedQty
+    const suppressedRecommendedQty = minOrderOvershootsTarget ? snappedRecommendedQty : null
     const recommendedCost = recommendedQty * (unitCostCurrent ?? 0)
     const orderByDate =
-      projectedStockoutAt !== null
+      recommendedQty > 0 && projectedStockoutAt !== null
         ? new Date(new Date(projectedStockoutAt).getTime() - reorderPointDays * DAY_MS).toISOString()
         : null
 
@@ -411,6 +441,9 @@ export async function getInventoryProcurement(
       recommendedQty,
       recommendedCost,
       orderByDate,
+      coverageAfterSnappedOrderDays,
+      minOrderOvershootsTarget,
+      suppressedRecommendedQty,
       lostMarginPerDay,
       expectedMarginLossBeforeReplenishment: expectedLoss,
       reorderPriorityScore: 0, // filled in pass 2
@@ -504,9 +537,16 @@ function classifyAction(row: InventorySkuRow): InventoryAction {
   if (row.deadweightScore >= 80 && row.units90 === 0 && row.physicalUnits > 0) return 'liquidate_now'
   if (row.deadweightScore >= 70 && row.physicalUnits > 0) return 'burn_down_stop_carry'
 
+  // Hidden stock is worth surfacing even before the overshoot check.
+  if (row.sellableUnits === 0 && row.hiddenStock) return 'check_hidden_stock'
+
+  // There's demand, but the case-rounded minimum order would overstock the
+  // SKU past its target window — don't recommend it (distinct from no-demand
+  // do_not_reorder, and applies even to out-of-stock recent sellers).
+  if (row.minOrderOvershootsTarget) return 'skip_min_order_overshoots'
+
   // Out / reorder.
   if (row.sellableUnits === 0) {
-    if (row.hiddenStock) return 'check_hidden_stock'
     if (row.recommendedQty > 0 && row.distributorName) return 'order_now'
     if (row.recommendedQty > 0) return 'order_now_supplier_unknown'
     if (row.recentSeller) return 'accept_stockout'
@@ -540,6 +580,7 @@ const METHODOLOGY: string[] = [
   'Forecast daily units blends 7d and window velocity (0.6·v7 + 0.4·vW), capped at 3× the window velocity to damp spikes.',
   'Days supply = sellable units ÷ forecast daily units. Reorder point = lead time + safety (¼ lead, min 2d). Target cover = clamp(lead + cadence + safety, 10..45). Recommended qty = ceil(forecast·targetCover − sellable units), floored at 0.',
   'Recommended quantities are snapped to supplier case sizing: any nonzero recommendation is rounded UP to the nearest multiple of 5, with a 10-unit minimum per SKU. (True per-SKU case sizes are not yet recorded; this is a uniform approximation.)',
+  'When the case-rounded minimum order would overstock a slow mover — pushing post-order days-of-supply past min(2× target cover, 60 days) — the recommendation is SUPPRESSED (recommendedQty = 0, action "skip_min_order_overshoots") rather than misleading the operator into an uneconomic buy. There is real demand, but the minimum case is too chunky; the qty we declined is shown as suppressedRecommendedQty. No brand/category variety exception exists yet, so these are not auto-ordered.',
   'Lead time defaults to a configurable constant (PO line received-at is not populated in source data); reorder cadence is the median gap between distributor delivery dates, clamped 7..45 days.',
   'Package received-at is not populated upstream, so inventory age degrades to days-since-last-observed (coalesce(received_at, latest snapshot time)); it is a lower bound on true age.',
   'Reorder priority blends expected margin loss before replenishment (50%), reorder gap (25%), lost margin/day (15%), confidence (10%), minus a deadweight penalty. Deadweight score blends slow velocity, capital tied up, age, expiry proximity, and weak margin.',

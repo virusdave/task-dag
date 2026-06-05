@@ -166,6 +166,7 @@ const ACTION_META: Record<InventoryAction, { label: string; cls: string }> = {
   accept_stockout: { label: 'ACCEPT STOCKOUT', cls: 'inv-pill--muted' },
   hold: { label: 'HOLD', cls: 'inv-pill--muted' },
   do_not_reorder: { label: 'DO NOT REORDER', cls: 'inv-pill--muted' },
+  skip_min_order_overshoots: { label: 'SKIP — CASE TOO LARGE', cls: 'inv-pill--muted' },
 }
 
 function ActionPill({ action }: { action: InventoryAction }) {
@@ -343,6 +344,7 @@ function ReorderQueueView({ data }: { data: InventoryProcurementResponse }) {
           (r) =>
             !r.outRegretted &&
             (r.recommendedQty > 0 ||
+              r.minOrderOvershootsTarget ||
               (r.daysSupply !== null && r.forecastDailyUnits > 0 && r.daysSupply <= r.reorderPointDays)),
         )
         .sort((a, b) => b.reorderPriorityScore - a.reorderPriorityScore)
@@ -454,6 +456,16 @@ function ReorderQueueView({ data }: { data: InventoryProcurementResponse }) {
                     <td className="num">{fmtMoney(r.lostMarginPerDay, 2)}</td>
                     <td className="num">
                       <strong>{fmtNum(r.recommendedQty)}</strong>
+                      {r.minOrderOvershootsTarget && r.suppressedRecommendedQty !== null && (
+                        <div
+                          className="subtle-copy"
+                          title={`Minimum case of ${fmtNum(r.suppressedRecommendedQty)} would create ~${fmtDays(
+                            r.coverageAfterSnappedOrderDays ?? undefined,
+                          )} of supply vs a ${fmtDays(r.targetCoverDays)} target — too much to sell through, so not recommended.`}
+                        >
+                          (min {fmtNum(r.suppressedRecommendedQty)} = {fmtDays(r.coverageAfterSnappedOrderDays ?? undefined)})
+                        </div>
+                      )}
                     </td>
                     <td className="num">{fmtMoney(r.recommendedCost)}</td>
                     <td>
@@ -576,10 +588,17 @@ function buildBaskets(data: InventoryProcurementResponse): DistBasket[] {
     const included = lines.filter((l) => l.include)
     const basketCost = included.reduce((t, l) => t + l.r.recommendedCost, 0)
     const basketUnits = included.reduce((t, l) => t + l.r.recommendedQty, 0)
+    // Only count rows we'd actually order toward basket urgency — a slow
+    // mover whose minimum case overshoots target (recommendedQty === 0) must
+    // not flip a distributor to "ORDER NOW" for something we won't buy.
     const urgentCount = rows.filter(
-      (r) => r.daysSupply !== null && r.forecastDailyUnits > 0 && r.daysSupply <= r.reorderPointDays,
+      (r) =>
+        r.recommendedQty > 0 &&
+        r.daysSupply !== null &&
+        r.forecastDailyUnits > 0 &&
+        r.daysSupply <= r.reorderPointDays,
     ).length
-    const outRegrettedCount = rows.filter((r) => r.outRegretted).length
+    const outRegrettedCount = rows.filter((r) => r.outRegretted && r.recommendedQty > 0).length
     const orderNowValue = included.reduce((t, l) => t + l.orderNowValue, 0)
     const lossIfOrderNow = included.reduce((t, l) => t + l.lossIfOrderNow, 0)
     const lossIfWait = included.reduce((t, l) => t + l.lossIfWait, 0)

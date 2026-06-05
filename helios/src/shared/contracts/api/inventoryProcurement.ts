@@ -56,6 +56,10 @@ export const InventoryActionSchema = z.enum([
   'accept_stockout',
   'hold',
   'do_not_reorder',
+  // There IS demand, but the case-rounded minimum order would overstock
+  // the SKU well past its target coverage window — buying it would tie up
+  // capital / risk expiry. Distinct from do_not_reorder (no demand).
+  'skip_min_order_overshoots',
 ])
 export type InventoryAction = z.infer<typeof InventoryActionSchema>
 
@@ -110,6 +114,19 @@ export const InventorySkuRowSchema = z.object({
   recommendedQty: z.number(),
   recommendedCost: z.number(),
   orderByDate: z.string().nullable(),
+  /** Days of supply the SKU would have AFTER the case-snapped order
+   *  (sellable + snapped qty) / forecast daily units. Null when there's
+   *  no forecast demand or nothing to order. Diagnostic for the
+   *  min-order-overshoots decision. */
+  coverageAfterSnappedOrderDays: z.number().nullable(),
+  /** True when there is real demand but the case-rounded minimum order
+   *  would push coverage past the acceptable ceiling, so we suppress the
+   *  recommendation (recommendedQty forced to 0). The qty we *would* have
+   *  ordered is preserved in `suppressedRecommendedQty` for the operator. */
+  minOrderOvershootsTarget: z.boolean(),
+  /** When `minOrderOvershootsTarget`, the case-snapped qty we declined to
+   *  recommend (e.g. 10). Null otherwise. Never enters baskets/totals. */
+  suppressedRecommendedQty: z.number().nullable(),
   lostMarginPerDay: z.number(),
   expectedMarginLossBeforeReplenishment: z.number(),
 
