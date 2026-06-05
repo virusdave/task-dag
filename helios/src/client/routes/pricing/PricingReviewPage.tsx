@@ -149,20 +149,35 @@ export function PricingReviewPage() {
     setIsSaving(true)
     setErrorMessage(null)
     setFeedbackMessage(null)
+    let jobId: number | null = null
+    const label = productLabel(selectedItem)
     try {
       const response = await mutateJson(`/api/proposal-line-items/${selectedItem.lineItem.lineItemId}/${decision}`, MutationAcceptedResponseSchema, {
         body: JSON.stringify({ expectedVersion: selectedItem.lineItem.version }),
         method: 'POST',
       })
-      if (response.jobId) {
-        await waitForJob(response.jobId)
-      }
+      jobId = response.jobId ?? null
       await revalidator.revalidate()
-      setFeedbackMessage(`${decision === 'approve' ? 'Approved' : 'Excluded'} ${productLabel(selectedItem)}.`)
+      setFeedbackMessage(`${decision === 'approve' ? 'Approved' : 'Excluded'} ${label}.`)
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : `Could not ${decision === 'approve' ? 'approve' : 'exclude'} this pricing row.`)
-    } finally {
       setIsSaving(false)
+      return
+    }
+    setIsSaving(false)
+    // The decision is committed once the POST returns; watch the Sweed
+    // sync job in the background (bounded) instead of freezing the page.
+    if (jobId !== null) {
+      try {
+        const status = await waitForJob(jobId, { timeoutMs: 120_000 })
+        if (status.job.status !== 'succeeded') {
+          setErrorMessage(`${decision === 'approve' ? 'Approval of' : 'Exclusion of'} ${label} recorded in Helios, but the Sweed sync did not complete: job #${jobId} ${status.job.status}: ${status.job.lastError ?? 'no detail provided'}`)
+        } else {
+          await revalidator.revalidate()
+        }
+      } catch (error) {
+        setErrorMessage(error instanceof Error ? error.message : `Sweed sync status for job #${jobId} is unknown; check the Jobs page.`)
+      }
     }
   }
 

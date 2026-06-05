@@ -145,25 +145,54 @@ export function PricingRunDetailPage() {
     }
   }
 
+  // Watch the background reconcile/Sweed-sync job(s) a decision enqueues
+  // WITHOUT blocking the UI. The approval/exclusion itself is already
+  // committed server-side once the POST returns, so we revalidate + free
+  // the buttons first, then poll the job here with a bound. A failed sync
+  // (e.g. Sweed rejecting the product edit) is surfaced as a non-blocking
+  // error instead of silently doing nothing or freezing the page forever.
+  async function watchReconcileJobs(jobIds: number[], context: string) {
+    if (jobIds.length === 0) {
+      return
+    }
+    const failures: string[] = []
+    for (const jobId of jobIds) {
+      try {
+        const status = await waitForJob(jobId, { timeoutMs: 120_000 })
+        if (status.job.status !== 'succeeded') {
+          failures.push(`job #${jobId} ${status.job.status}: ${status.job.lastError ?? 'no detail provided'}`)
+        }
+      } catch (error) {
+        failures.push(error instanceof Error ? error.message : `job #${jobId} status unknown`)
+      }
+    }
+    if (failures.length > 0) {
+      setErrorMessage(`${context} recorded in Helios, but the Sweed sync did not complete: ${failures[0]}${failures.length > 1 ? ` (+${failures.length - 1} more)` : ''}`)
+    } else {
+      await revalidator.revalidate()
+    }
+  }
+
   async function handleDecision(item: PricingReviewItem, decision: 'approve' | 'reject') {
     setIsSaving(true)
     setErrorMessage(null)
     setFeedbackMessage(null)
+    let jobId: number | null = null
     try {
       const response = await mutateJson(`/api/proposal-line-items/${item.lineItem.lineItemId}/${decision}`, MutationAcceptedResponseSchema, {
         body: JSON.stringify({ expectedVersion: item.lineItem.version }),
         method: 'POST',
       })
-      if (response.jobId) {
-        await waitForJob(response.jobId)
-      }
+      jobId = response.jobId ?? null
       await revalidator.revalidate()
       setFeedbackMessage(`${decision === 'approve' ? 'Approved' : 'Excluded'} ${productLabel(item)}.`)
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : `Could not ${decision === 'approve' ? 'approve' : 'exclude'} this pricing row.`)
-    } finally {
       setIsSaving(false)
+      return
     }
+    setIsSaving(false)
+    await watchReconcileJobs(jobId === null ? [] : [jobId], `${decision === 'approve' ? 'Approval of' : 'Exclusion of'} ${productLabel(item)}`)
   }
 
   async function handleBatchPriceApply(items: PricingReviewItem[], draftValue: string, label: string) {
@@ -250,17 +279,17 @@ export function PricingRunDetailPage() {
           failures.push(`${productLabel(item)}: ${message}`)
         }
       }
-      for (const jobId of jobIds) {
-        await waitForJob(jobId)
-      }
       await revalidator.revalidate()
       setFeedbackMessage(`${decision === 'approve' ? 'Approved' : 'Excluded'} ${successCount}/${pendingItems.length} pending row${pendingItems.length === 1 ? '' : 's'} in ${label}.`)
       if (failures.length > 0) {
         setErrorMessage(`Failed ${failures.length} row${failures.length === 1 ? '' : 's'}; page state was refreshed. First failure: ${failures[0]}`)
       }
+      setIsSaving(false)
+      // Don't block the page on Sweed sync; watch the jobs in the
+      // background and surface any sync failure non-blockingly.
+      await watchReconcileJobs(jobIds, `${decision === 'approve' ? 'Approval' : 'Exclusion'} of ${label}`)
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : `Could not update the pending rows in ${label}.`)
-    } finally {
       setIsSaving(false)
     }
   }
