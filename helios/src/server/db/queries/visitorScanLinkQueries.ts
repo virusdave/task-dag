@@ -13,6 +13,7 @@
 //     query orders predictably.
 
 import type { Queryable } from '../pool.js'
+import { notifyVisitorScanChanged } from '../visitorScansNotify.js'
 import { getDealerIdForVisitorScanSiteSlug } from '../../visitorScans/dealerForSiteSlug.js'
 
 export type VisitorScanLinkStatus =
@@ -176,6 +177,11 @@ export async function markLinkLinked(
       JSON.stringify(args.rawMatch ?? null),
     ],
   )
+  // Push the live feed so the operator's open /visitors/scans tab
+  // flips the row's New/Returning + CRM pills the moment the link
+  // resolves (DB-cost epic phase E1). Row is already committed above,
+  // so the SSE-driven refetch sees the resolved status.
+  await notifyVisitorScanChanged(db, { scanId: args.scanId, kind: 'link_updated' })
 }
 
 /**
@@ -212,6 +218,10 @@ export async function markLinkTerminal(
       args.rawMatch === undefined ? null : JSON.stringify(args.rawMatch),
     ],
   )
+  // Live-feed push (DB-cost epic phase E1): no_match / ambiguous /
+  // insufficient_data are visible terminal states, so the open
+  // operator tab refetches and updates the CRM pill immediately.
+  await notifyVisitorScanChanged(db, { scanId: args.scanId, kind: 'link_updated' })
 }
 
 /**

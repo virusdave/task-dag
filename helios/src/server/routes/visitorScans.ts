@@ -36,6 +36,10 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 import { getServerEnv } from '../config/env.js'
 import { requireCashierDisplayUser, requireSessionUser } from '../auth/requireSession.js'
 import { getPool } from '../db/pool.js'
+import {
+  notifyVisitorScanChanged,
+  subscribeToVisitorScanChanges,
+} from '../db/visitorScansNotify.js'
 import { SITE_PINS, getVisitorScansMaxId } from '../db/queries/customersMapQueries.js'
 import {
   insertVisitorScan,
@@ -218,7 +222,17 @@ async function handleVeriScanCheckin(
 
   // ----- INSERT ------------------------------------------------------
   try {
-    const result = await insertVisitorScan(getPool(), rowInput)
+    // Insert + the live-feed NOTIFY share one commit boundary so the
+    // SSE event is delivered exactly when (and only if) the row
+    // becomes visible (DB-cost epic phase E1). A rolled-back insert
+    // drops the wakeup, which is correct.
+    const result = await withTransaction(async (db) => {
+      const r = await insertVisitorScan(db, rowInput)
+      if (r.inserted && r.scanId !== null) {
+        await notifyVisitorScanChanged(db, { scanId: r.scanId, kind: 'inserted' })
+      }
+      return r
+    })
     if (!result.inserted) {
       request.log.info(
         { siteSlug, hashId: rowInput.hashId },
@@ -412,6 +426,85 @@ export async function registerVisitorScansAdminRoutes(server: FastifyInstance): 
       }
       throw error
     }
+  })
+
+  // Live feed for the operator-facing /visitors/scans page (DB-cost
+  // epic phase E1 — virusdave/top-level#11). Replaces the page's old
+  // unconditional 20 s poll: the browser opens this Server-Sent-Events
+  // stream and only re-queries /api/visitors/scans when a real scan
+  // (or its CRM enrichment) lands, driven by the
+  // `visitor_scans_changed` LISTEN/NOTIFY channel. This is the page
+  // the epic's hard constraint forbids throttling, so the mechanism
+  // is swapped (push) rather than the cadence slowed.
+  //
+  // Cost shape: zero DB queries while idle; one shared LISTEN
+  // connection per server process fans out to all open tabs. A 25 s
+  // heartbeat keeps the stream alive under nginx's 60 s
+  // proxy_read_timeout, and `X-Accel-Buffering: no` disables nginx
+  // response buffering so events flush immediately.
+  server.get('/api/visitors/scans/stream', async (request, reply) => {
+    const user = await requireSessionUser(request, reply, 'admin')
+    if (!user) return
+
+    // Take over the socket; after this point we never touch `reply`
+    // (no send/throw) — only the raw response stream.
+    reply.hijack()
+    const res = reply.raw
+
+    const headers: Record<string, string> = {
+      'Content-Type': 'text/event-stream; charset=utf-8',
+      'Cache-Control': 'no-cache, no-transform',
+      'X-Accel-Buffering': 'no',
+    }
+    // `Connection` is illegal in HTTP/2; only set it for HTTP/1.x.
+    if (request.raw.httpVersionMajor < 2) {
+      headers.Connection = 'keep-alive'
+    }
+    res.writeHead(200, headers)
+    res.flushHeaders?.()
+
+    let closed = false
+    const cleanup = (): void => {
+      if (closed) return
+      closed = true
+      clearInterval(heartbeat)
+      subscription.close()
+    }
+    const safeWrite = (chunk: string): void => {
+      if (closed || res.destroyed) return
+      try {
+        // Low-volume stream: if the client can't keep up, just close
+        // and let EventSource reconnect + refetch rather than buffer
+        // unboundedly.
+        if (!res.write(chunk)) {
+          cleanup()
+          res.end()
+        }
+      } catch {
+        cleanup()
+      }
+    }
+
+    const subscription = subscribeToVisitorScanChanges({
+      onChange: (payload) => {
+        safeWrite(`event: scan\ndata: ${JSON.stringify(payload)}\n\n`)
+      },
+      onResync: () => {
+        safeWrite(`event: resync\ndata: {}\n\n`)
+      },
+    })
+
+    const heartbeat = setInterval(() => {
+      safeWrite(`: hb\n\n`)
+    }, 25_000)
+    heartbeat.unref?.()
+
+    request.raw.on('close', cleanup)
+    res.on('error', cleanup)
+
+    // Tell EventSource to reconnect after 2 s, and prove the stream
+    // is flowing (also flushes the response head through the proxy).
+    safeWrite(`retry: 2000\n\n: connected\n\n`)
   })
 
   server.get('/api/admin/customers/visitors/:scanId', async (request, reply) => {

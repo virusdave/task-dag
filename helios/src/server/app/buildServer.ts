@@ -11,6 +11,10 @@ import { ZodError } from 'zod'
 import { getServerEnv } from '../config/env.js'
 import { registerAuthGate } from '../auth/authGate.js'
 import { startAdsDrivePoller, stopAdsDrivePoller } from '../ads/adsDrivePoller.js'
+import {
+  startVisitorScansNotifyListener,
+  stopVisitorScansNotifyListener,
+} from '../db/visitorScansNotify.js'
 import { registerAdsRoutes } from '../routes/ads.js'
 import { registerAdsClusterProposalsRoutes } from '../routes/adsClusterProposals.js'
 import { registerAdsMorningBundlesRoutes } from '../routes/adsMorningBundles.js'
@@ -189,8 +193,15 @@ export async function buildServer() {
   // every ~30s and runs the ingestion pipeline whenever the newest
   // CSV changes. No-ops cleanly when the API key isn't configured.
   startAdsDrivePoller()
+
+  // Visitor-scans live feed (DB-cost epic phase E1): open the shared
+  // LISTEN connection that powers the /api/visitors/scans/stream SSE
+  // route. Lazy + self-reconnecting; safe to start at boot.
+  void startVisitorScansNotifyListener()
+
   server.addHook('onClose', async () => {
     stopAdsDrivePoller()
+    stopVisitorScansNotifyListener()
   })
 
   return server

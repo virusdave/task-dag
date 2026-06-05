@@ -198,17 +198,39 @@ export function VisitorScansPage() {
     })
   }
 
-  // Re-fetch whenever the filter changes, AND on a 20-second tick
-  // so the page stays effectively-live for the operator behind the
-  // counter (FreshlyBakedNYC/automation#33 phase C1). The interval
-  // tears down on filter change so we never stack multiple
-  // overlapping timers.
+  // Live updates via Server-Sent Events instead of a fixed poll
+  // (DB-cost epic phase E1 — virusdave/top-level#11). This is the one
+  // operator surface the epic forbids throttling, so rather than slow
+  // the old 20 s poll we swap the mechanism: the server pushes a
+  // `scan` event over /api/visitors/scans/stream whenever a scan (or
+  // its CRM enrichment) lands, and we refetch the CURRENT filtered
+  // view in response. Net effect: new door scans still appear in ≤2 s
+  // (faster than the old 20 s worst case) at a fraction of the DB
+  // cost — zero queries while the floor is quiet.
+  //
+  // Reconciliation backstops, so a missed/dropped event can never
+  // leave the page silently stale:
+  //   * refetch on (re)connect (`open`) and on server `resync`;
+  //   * refetch when the tab becomes visible again;
+  //   * a slow 120 s safety refetch.
+  // A single-flight guard coalesces event bursts into at most one
+  // in-flight request plus one trailing refetch.
+  const queryString = searchParams.toString()
   useEffect(() => {
     let cancelled = false
+    let debounceTimer: number | null = null
+    let inFlight = false
+    let rerun = false
+
     async function refresh(): Promise<void> {
+      if (inFlight) {
+        rerun = true
+        return
+      }
+      inFlight = true
       try {
         const next = await loadJson(
-          `/api/visitors/scans?${searchParams.toString()}`,
+          `/api/visitors/scans?${queryString}`,
           VisitorScansResponseSchema,
         )
         if (!cancelled) {
@@ -219,17 +241,57 @@ export function VisitorScansPage() {
         if (!cancelled) {
           setError(cause instanceof Error ? cause.message : 'Failed to load visitor scans.')
         }
+      } finally {
+        inFlight = false
+        if (rerun && !cancelled) {
+          rerun = false
+          scheduleRefresh(0)
+        }
       }
     }
+
+    function scheduleRefresh(delayMs = 400): void {
+      if (debounceTimer !== null) window.clearTimeout(debounceTimer)
+      debounceTimer = window.setTimeout(() => {
+        debounceTimer = null
+        void refresh()
+      }, delayMs)
+    }
+
+    // Initial load for this filter set.
     void refresh()
-    const id = window.setInterval(() => {
+
+    const es = new EventSource(buildAppPath('/api/visitors/scans/stream'))
+    es.addEventListener('open', () => {
+      // Reconcile anything that landed before the stream was up.
       void refresh()
-    }, 20_000)
+    })
+    es.addEventListener('scan', () => {
+      scheduleRefresh(400)
+    })
+    es.addEventListener('resync', () => {
+      void refresh()
+    })
+    // On error EventSource auto-reconnects; don't wipe the table just
+    // because the stream is momentarily reconnecting.
+
+    const safety = window.setInterval(() => {
+      void refresh()
+    }, 120_000)
+
+    const onVisible = (): void => {
+      if (document.visibilityState === 'visible') void refresh()
+    }
+    document.addEventListener('visibilitychange', onVisible)
+
     return () => {
       cancelled = true
-      window.clearInterval(id)
+      if (debounceTimer !== null) window.clearTimeout(debounceTimer)
+      window.clearInterval(safety)
+      document.removeEventListener('visibilitychange', onVisible)
+      es.close()
     }
-  }, [searchParams])
+  }, [queryString])
 
   const counts = useMemo(() => {
     const bySite = new Map<string, number>()
