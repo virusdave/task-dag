@@ -682,33 +682,45 @@ async function queryCategoryLineItems(args: MetricQueryArgs): Promise<MetricRow[
       return row as MetricRow
     })
   }
-  const bucketSelect = bucketSelectExpr(truncUnit)
-  // Series-binning is always by raw `item->'productCategory'->>'name'`
-  // (mapped to a stable canonical series id below). When catalog
-  // filters are active we narrow which line items participate by
-  // joining catalog_product_mapping on the order item's productId.
+  const bucketSelect = bucketSelectExpr(truncUnit, 'f.pay_time')
+  // D1: reads the materialised sweed_order_items_flat table instead of
+  // unrolling sweed_orders.raw_json->'items' per request. Series-binning
+  // is by f.product_category_name (mirrors item->'productCategory'->>
+  // 'name'; mapped to a stable canonical series id below) and value is
+  // f.revenue (mirrors subtotalAmount).
+  //
+  // When catalog filters are active we narrow which line items
+  // participate by joining catalog_product_mapping on the item's product
+  // id. The OLD raw_json path joined on `item->>'productId'`, a key that
+  // never exists in Sweed's payload (the id lives at
+  // item->'product'->>'id'), so every catalog-filtered category query
+  // silently returned ZERO rows. D1a captured the correct id into
+  // f.product_id (bigint); we now join cpm.product_id (text) =
+  // f.product_id::text, which FIXES that latent bug — catalog-filtered
+  // category series now return real numbers. This is an intentional
+  // behaviour change approved for D1 (not an "identical numbers"
+  // migration for the filtered path).
   const filtersActive = hasAnyCatalogFilter(args)
   const sql = filtersActive
     ? `
       with ${CATALOG_PRODUCT_MAPPING_CTE}
       select ${bucketSelect} as bucket_start,
-             coalesce(lower(item->'productCategory'->>'name'), '') as col_value,
-             sum((item->>'subtotalAmount')::numeric) as value
-        from sweed_orders
-             cross join lateral jsonb_array_elements(raw_json->'items') as item
-             join catalog_product_mapping cpm on cpm.product_id = (item->>'productId')
-       where dealer_id = any($1::bigint[])
-         and pay_time >= $2 and pay_time < $3
+             coalesce(lower(f.product_category_name), '') as col_value,
+             sum(f.revenue) as value
+        from sweed_order_items_flat f
+             join catalog_product_mapping cpm on cpm.product_id = f.product_id::text
+       where f.dealer_id = any($1::bigint[])
+         and f.pay_time >= $2 and f.pay_time < $3
          ${catalogFilterWhere('cpm', 4)}
        group by 1, 2
     `
     : `
       select ${bucketSelect} as bucket_start,
-             coalesce(lower(item->'productCategory'->>'name'), '') as col_value,
-             sum((item->>'subtotalAmount')::numeric) as value
-        from sweed_orders, jsonb_array_elements(raw_json->'items') as item
-       where dealer_id = any($1::bigint[])
-         and pay_time >= $2 and pay_time < $3
+             coalesce(lower(f.product_category_name), '') as col_value,
+             sum(f.revenue) as value
+        from sweed_order_items_flat f
+       where f.dealer_id = any($1::bigint[])
+         and f.pay_time >= $2 and f.pay_time < $3
        group by 1, 2
     `
   const pool = getPool()
