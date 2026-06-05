@@ -32,6 +32,7 @@ import { registerCatalogAnalyticsRoutes } from '../routes/catalogAnalytics.js'
 import { registerConfigParsingRoutes } from '../routes/configParsing.js'
 import { registerCustomerReviewsRoutes } from '../routes/customerReviews.js'
 import { registerCustomerValueAnalyticsRoutes } from '../routes/customerValueAnalytics.js'
+import { registerInventoryProcurementRoutes } from '../routes/inventoryProcurement.js'
 import { registerHistoryRoutes } from '../routes/history.js'
 import { registerJobRoutes } from '../routes/jobs.js'
 import { registerLlmRoutes } from '../routes/llm.js'
@@ -233,6 +234,7 @@ async function registerApplicationSurface(server: FastifyInstance) {
   await registerBudtenderAnalyticsRoutes(server)
   await registerCatalogAnalyticsRoutes(server)
   await registerCustomerValueAnalyticsRoutes(server)
+  await registerInventoryProcurementRoutes(server)
   await registerJobRoutes(server)
   await registerTaskDagRoutes(server)
   await registerUsersRoutes(server)

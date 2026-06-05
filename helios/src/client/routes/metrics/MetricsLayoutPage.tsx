@@ -21,6 +21,7 @@ import { loadJson } from '../../app/fetchJson.js'
 import { BudtenderPerformanceTab } from './BudtenderPerformanceTab.js'
 import { CatalogAnalyticsTab } from './CatalogAnalyticsTab.js'
 import { CustomerValueTab } from './CustomerValueTab.js'
+import { InventoryProcurementTab } from './InventoryProcurementTab.js'
 import { EssentialsDailySummaryBanner } from './EssentialsDailySummaryBanner.js'
 import {
   CatalogFilterBar,
@@ -179,12 +180,17 @@ const METRICS_TABS: ReadonlyArray<MetricsTab> = [
   {
     id: 'inventory',
     label: 'Inventory',
-    description: 'Current on-hand state — slow movers, running low, days-of-stock.',
+    description:
+      'Procurement workspace: reorder queue (out-now + runout-soon with recommended order qty), distributor baskets (order now / short order / wait), exit / liquidate (deadweight capital), and mix drift (inventory $/unit vs sales/margin mix).',
     defaultAgg: 'date',
     defaultStackMode: 'none',
-    showAggControl: true,
-    showStackControl: true,
-    include: (m) => m.chartType !== 'scatter' && INVENTORY_GROUPS.has(m.group),
+    // The inventory tab renders its OWN UI (see InventoryProcurementTab) —
+    // one consolidated /api/inventory-procurement fetch drives all four
+    // views, so the shared toolbar agg / stack / range controls don't
+    // apply and the registry metric list is empty for this tab.
+    showAggControl: false,
+    showStackControl: false,
+    include: () => false,
     grant: 'reordering',
   },
   {
@@ -536,6 +542,12 @@ export function MetricsLayoutPage() {
           <BudtenderPerformanceTab />
         ) : activeTab.id === 'customer-value' ? (
           <CustomerValueTab />
+        ) : activeTab.id === 'inventory' ? (
+          // Inventory / Reordering: a bespoke procurement workspace
+          // (reorder queue / distributor baskets / exit-liquidate / mix
+          // drift) backed by one consolidated /api/inventory-procurement
+          // fetch. Owns its full UI; the shared toolbar doesn't apply.
+          <InventoryProcurementTab />
         ) : (
           <RegistryDashboard
             activeTab={activeTab}
