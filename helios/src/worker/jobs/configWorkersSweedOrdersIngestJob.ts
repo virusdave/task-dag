@@ -687,7 +687,8 @@ async function fetchAndInsert(
         `
           insert into sweed_order_items_flat (
             dealer_id, invoice_id, item_ordinal,
-            pay_time, inventory_item_id, qty, revenue, raw_item
+            pay_time, inventory_item_id, qty, revenue, raw_item,
+            product_id, product_category_name
           )
           select
             so.dealer_id,
@@ -702,7 +703,17 @@ async function fetchAndInsert(
               0
             ) as qty,
             coalesce(nullif(item.value->>'subtotalAmount', '')::numeric, 0) as revenue,
-            item.value as raw_item
+            item.value as raw_item,
+            -- D1: typed projections. product id lives at
+            -- item.product.id (NOT item.productId, which does not
+            -- exist); guarded cast so a non-numeric surprise never
+            -- fails ingest.
+            case
+              when nullif(item.value #>> '{product,id}', '') ~ '^\d+$'
+                then (item.value #>> '{product,id}')::bigint
+              else null
+            end as product_id,
+            nullif(item.value #>> '{productCategory,name}', '') as product_category_name
           from sweed_orders so
           cross join lateral jsonb_array_elements(coalesce(so.raw_json->'items', '[]'::jsonb))
             with ordinality as item(value, ord)
@@ -710,12 +721,14 @@ async function fetchAndInsert(
             and so.invoice_id = any($2::text[])
             and nullif(item.value->>'inventoryItemId', '') is not null
           on conflict (dealer_id, invoice_id, item_ordinal) do update set
-            pay_time          = excluded.pay_time,
-            inventory_item_id = excluded.inventory_item_id,
-            qty               = excluded.qty,
-            revenue           = excluded.revenue,
-            raw_item          = excluded.raw_item,
-            flattened_at      = now()
+            pay_time              = excluded.pay_time,
+            inventory_item_id     = excluded.inventory_item_id,
+            qty                   = excluded.qty,
+            revenue               = excluded.revenue,
+            raw_item              = excluded.raw_item,
+            product_id            = excluded.product_id,
+            product_category_name = excluded.product_category_name,
+            flattened_at          = now()
         `,
         [dealerId, insertedInvoiceIds],
       )

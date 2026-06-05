@@ -535,6 +535,20 @@ const SENTINELS: MigrationSentinel[] = [
     check: (db) => tableExists(db, 'sweed_order_items_flat'),
   },
   {
+    // Phase D1 (step 1) of the Helios DB-cost epic
+    // (virusdave/top-level#11). Migration 060 enriches
+    // sweed_order_items_flat with typed product_id /
+    // product_category_name columns (backfilled from raw_item and
+    // populated by the ingest job going forward) so the
+    // catalog-analytics / metrics readers can stop unrolling
+    // sweed_orders.raw_json->'items' at request time.
+    migrationId: '060_sweed_order_items_flat_typed_columns',
+    label:
+      'sweed_order_items_flat — typed product_id / ' +
+      'product_category_name columns (DB-cost epic phase D1).',
+    check: (db) => columnExists(db, 'sweed_order_items_flat', 'product_id'),
+  },
+  {
     // Phase C1 of the Helios DB-cost epic (virusdave/top-level#11):
     // convert parsekit_reverse_shadow_events to a Timescale
     // hypertable as a low-risk validator for the conversion pattern
