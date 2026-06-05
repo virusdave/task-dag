@@ -295,7 +295,15 @@ export async function runScreensBannerRefreshJob(
 export async function runScreensRefreshScript(jobId: number, payload: ScreensBannerRefreshJobPayload): Promise<string> {
   const startedAt = new Date().toISOString()
   const mode: 'apply' | 'dry-run' = payload.mode === 'apply' ? 'apply' : 'dry-run'
-  const targetDealers = resolveTargetDealers(payload.siteDealerIds)
+  // When the operator picked specific TVs, narrow to exactly those
+  // screens (and only the dealers that own them). Otherwise fall back to
+  // whole-site behaviour driven by siteDealerIds.
+  const targetScreenKeys = payload.targetScreens.length > 0
+    ? new Set(payload.targetScreens.map((target) => `${target.dealerId}:${target.screenId}`))
+    : null
+  const targetDealers = targetScreenKeys
+    ? resolveTargetDealers([...new Set(payload.targetScreens.map((target) => target.dealerId))])
+    : resolveTargetDealers(payload.siteDealerIds)
 
   await emitStage(jobId, 'starting', payload)
 
@@ -305,7 +313,10 @@ export async function runScreensRefreshScript(jobId: number, payload: ScreensBan
 
   // 1) Read original inventory for every target site/screen/banner.
   for (const dealer of targetDealers) {
-    const screens = await listScreens(dealer.dealerId)
+    const allDealerScreens = await listScreens(dealer.dealerId)
+    const screens = targetScreenKeys
+      ? allDealerScreens.filter((screen) => targetScreenKeys.has(`${dealer.dealerId}:${screen.screenId}`))
+      : allDealerScreens
     const screenArtifacts: ScreenBannerArtifact['siteDealers'][number]['screens'] = []
 
     for (const screen of screens) {

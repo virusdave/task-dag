@@ -56,6 +56,8 @@ export const AuditEventTypeSchema = z.enum([
   'desired_state.resumed',
   'catalog.full_sync.requested',
   'catalog.group.refresh_requested',
+  'screens.banner_bulk_toggle.requested',
+  'screens.banner_bulk_toggle.completed',
   'screens.banner_refresh.requested',
   'screens.banner_refresh.completed',
   'screens.banner_health_maintenance.requested',

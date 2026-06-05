@@ -8,6 +8,7 @@ import {
   HELIOS_SCREENS_BRONX_TO_MIDTOWN_IMAGE_FALLBACK_BANNER_NAMES,
   HELIOS_SCREENS_MIDTOWN_SITE_DEALER_ID,
   HELIOS_SCREENS_PRICED_TO_MOVE_PROMO_ACTIONS,
+  QueueScreensBannerBulkToggleRequestSchema,
   QueueScreensImageBannerSyncRequestSchema,
   SCREENS_BANNER_REFRESH_MAX_HOLD_SECONDS,
   ScreensBannerRefreshIntentSchema,
@@ -16,6 +17,7 @@ import {
   getHeliosScreensSiteDealer,
   normalizeHeliosScreensSiteDealerIds,
   type HeliosModuleScope,
+  type ScreensBannerBulkToggleTarget,
   type ScreensBannerRefreshIntent,
   type ScreensRunMode,
 } from '../../shared/contracts/index.js'
@@ -31,8 +33,14 @@ const QueueScreensWorkflowRequestSchema = z.object({
   reason: z.string().trim().max(500).nullable().optional(),
 })
 
+const ScreensScreenRefRequestSchema = z.object({
+  dealerId: z.coerce.number().int().positive(),
+  screenId: z.coerce.number().int().positive(),
+})
+
 const QueueScreensBannerRefreshRequestSchema = QueueScreensWorkflowRequestSchema.extend({
   siteDealerIds: z.array(z.coerce.number().int().positive()).default([]),
+  targetScreens: z.array(ScreensScreenRefRequestSchema).default([]),
   holdSeconds: z.coerce.number().nonnegative().max(SCREENS_BANNER_REFRESH_MAX_HOLD_SECONDS).optional(),
   intent: ScreensBannerRefreshIntentSchema.optional(),
 })
@@ -61,16 +69,27 @@ export async function registerScreensRoutes(server: FastifyInstance): Promise<vo
       throw new Error('Screens banner refresh can only target the configured Bronx and Midtown site dealers.')
     }
 
+    const targetScreens = dedupeTargetScreens(body.targetScreens)
+    const targetScreenDealerIds = [...new Set(targetScreens.map((target) => target.dealerId))]
+    if (normalizeHeliosScreensSiteDealerIds(targetScreenDealerIds).length !== targetScreenDealerIds.length) {
+      throw new Error('Screens banner refresh can only target screens on the configured Bronx and Midtown site dealers.')
+    }
+
     const mode: ScreensRunMode = body.apply ? 'apply' : 'dry_run'
     const intent: ScreensBannerRefreshIntent = body.intent ?? 'refresh'
     const holdSeconds = body.holdSeconds ?? 0
     const requestId = randomUUID()
-    const scope = buildScreensScope(siteDealerIds)
+    const scope = targetScreens.length > 0
+      ? buildScreensImageBannerSyncScope(targetScreens)
+      : buildScreensScope(siteDealerIds)
+    const targetScreensFingerprint = targetScreens.length > 0
+      ? targetScreens.map((target) => `${target.dealerId}-${target.screenId}`).join(',')
+      : 'all'
 
     const mutationResult = await withTransaction(async (db) => {
       const jobId = await enqueueJob(db, {
         concurrencyKey: getOptionalSweedSessionConcurrencyKey(true),
-        dedupeKey: `screens.banner_refresh:${mode}:${siteDealerIds.join(',') || 'all'}:hold=${holdSeconds}:intent=${intent}`,
+        dedupeKey: `screens.banner_refresh:${mode}:${siteDealerIds.join(',') || 'all'}:screens=${targetScreensFingerprint}:hold=${holdSeconds}:intent=${intent}`,
         jobType: 'screens.banner_refresh',
         module: 'screens',
         payload: {
@@ -79,6 +98,7 @@ export async function registerScreensRoutes(server: FastifyInstance): Promise<vo
           mode,
           requestedByUserId: user.id,
           siteDealerIds,
+          targetScreens,
         },
         requestedByUserId: user.id,
         scope,
@@ -101,7 +121,8 @@ export async function registerScreensRoutes(server: FastifyInstance): Promise<vo
           siteDealerNames: siteDealerIds
             .map((dealerId) => getHeliosScreensSiteDealer(dealerId)?.dealerName ?? null)
             .filter((dealerName): dealerName is string => dealerName !== null),
-          summary: buildQueuedRefreshSummary(mode, siteDealerIds, intent, holdSeconds),
+          summary: buildQueuedRefreshSummary(mode, siteDealerIds, intent, holdSeconds, targetScreens.length),
+          targetScreens,
         },
         requestId,
         scope,
@@ -454,6 +475,82 @@ export async function registerScreensRoutes(server: FastifyInstance): Promise<vo
       }),
     )
   })
+
+  server.post('/api/screens/banner-bulk-toggle', async (request, reply) => {
+    const user = await requireSessionUser(request, reply, 'editor')
+    if (!user) {
+      return
+    }
+
+    const body = QueueScreensBannerBulkToggleRequestSchema.parse(request.body ?? {})
+
+    // Validate every referenced dealer is a configured screens site.
+    const referencedDealerIds = body.target.kind === 'explicit_banners'
+      ? body.target.banners.map((banner) => banner.dealerId)
+      : [
+          ...body.target.predicate.siteDealerIds,
+          ...body.target.predicate.screenRefs.map((ref) => ref.dealerId),
+        ]
+    const uniqueReferencedDealerIds = [...new Set(referencedDealerIds)]
+    if (normalizeHeliosScreensSiteDealerIds(uniqueReferencedDealerIds).length !== uniqueReferencedDealerIds.length) {
+      throw new Error('Bulk banner toggle can only target the configured Bronx and Midtown site dealers.')
+    }
+
+    const mode: ScreensRunMode = body.apply ? 'apply' : 'dry_run'
+    const requestId = randomUUID()
+    const scope = buildBulkToggleScope(body.target)
+    const dedupeFingerprint = body.target.kind === 'explicit_banners'
+      ? `explicit:${body.target.banners.map((banner) => `${banner.dealerId}-${banner.screenId}-${banner.bannerId}`).sort().join(',')}`
+      : `predicate:${JSON.stringify(body.target.predicate)}`
+
+    const mutationResult = await withTransaction(async (db) => {
+      const jobId = await enqueueJob(db, {
+        concurrencyKey: getOptionalSweedSessionConcurrencyKey(true),
+        dedupeKey: `screens.banner_bulk_toggle:${mode}:enabled=${body.desiredEnabled}:${dedupeFingerprint}`,
+        jobType: 'screens.banner_bulk_toggle',
+        module: 'screens',
+        payload: {
+          desiredEnabled: body.desiredEnabled,
+          mode,
+          requestedByUserId: user.id,
+          target: body.target,
+        },
+        requestedByUserId: user.id,
+        scope,
+      })
+
+      const auditEventId = await appendAuditEvent(db, {
+        actorType: 'user',
+        actorUserId: user.id,
+        entityId: String(jobId),
+        entityType: 'job',
+        eventType: 'screens.banner_bulk_toggle.requested',
+        module: 'screens',
+        payload: {
+          desiredEnabled: body.desiredEnabled,
+          explicitBannerCount: body.target.kind === 'explicit_banners' ? body.target.banners.length : null,
+          mode,
+          queuedJobId: jobId,
+          requestedReason: body.reason ?? null,
+          summary: buildQueuedBulkToggleSummary(mode, body.desiredEnabled, body.target),
+          targetKind: body.target.kind,
+        },
+        requestId,
+        scope,
+        undoPayload: null,
+      })
+
+      return { auditEventId, jobId }
+    })
+
+    return reply.send(
+      MutationAcceptedResponseSchema.parse({
+        auditEventId: mutationResult.auditEventId,
+        jobId: mutationResult.jobId,
+        requestId,
+      }),
+    )
+  })
 }
 
 function buildQueuedRefreshSummary(
@@ -461,17 +558,20 @@ function buildQueuedRefreshSummary(
   siteDealerIds: number[],
   intent: ScreensBannerRefreshIntent = 'refresh',
   holdSeconds = 0,
+  targetScreenCount = 0,
 ): string {
-  const dealerLabel = describeDealerSelection(siteDealerIds)
+  const scopeLabel = targetScreenCount > 0
+    ? `${targetScreenCount} selected screen(s)`
+    : describeDealerSelection(siteDealerIds)
   if (intent === 'bounce') {
     const holdLabel = holdSeconds > 0 ? `${holdSeconds}-second` : 'immediate'
     return mode === 'apply'
-      ? `Queued live ${holdLabel} banner/screen bounce for ${dealerLabel}.`
-      : `Queued dry-run ${holdLabel} banner/screen bounce for ${dealerLabel}.`
+      ? `Queued live ${holdLabel} banner/screen bounce for ${scopeLabel}.`
+      : `Queued dry-run ${holdLabel} banner/screen bounce for ${scopeLabel}.`
   }
   return mode === 'apply'
-    ? `Queued live banner refresh for ${dealerLabel}.`
-    : `Queued dry-run banner refresh for ${dealerLabel}.`
+    ? `Queued live banner refresh for ${scopeLabel}.`
+    : `Queued dry-run banner refresh for ${scopeLabel}.`
 }
 
 function buildQueuedHealthyBannerEnableSummary(mode: ScreensRunMode, siteDealerIds: number[]): string {
@@ -540,6 +640,37 @@ function buildDealerScope(dealerId: number): HeliosModuleScope {
     entityId: String(dealerId),
     entityType: 'dealer',
   }
+}
+
+function buildBulkToggleScope(target: ScreensBannerBulkToggleTarget): HeliosModuleScope | null {
+  if (target.kind === 'explicit_banners') {
+    return buildScreensImageBannerSyncScope(
+      target.banners.map((banner) => ({ dealerId: banner.dealerId, screenId: banner.screenId })),
+    )
+  }
+
+  const predicate = target.predicate
+  if (predicate.screenRefs.length > 0) {
+    return buildScreensImageBannerSyncScope(predicate.screenRefs)
+  }
+  if (predicate.siteDealerIds.length === 1) {
+    return buildDealerScope(predicate.siteDealerIds[0])
+  }
+  return null
+}
+
+function buildQueuedBulkToggleSummary(
+  mode: ScreensRunMode,
+  desiredEnabled: boolean,
+  target: ScreensBannerBulkToggleTarget,
+): string {
+  const action = desiredEnabled ? 'enable' : 'disable'
+  const modeLabel = mode === 'apply' ? 'live' : 'dry-run'
+  if (target.kind === 'explicit_banners') {
+    return `Queued ${modeLabel} bulk ${action} for ${target.banners.length} selected banner(s).`
+  }
+  const scopeLabel = describeDealerSelection(target.predicate.siteDealerIds)
+  return `Queued ${modeLabel} bulk ${action} for matching banners across ${scopeLabel}.`
 }
 
 function buildScreensImageBannerSyncScope(

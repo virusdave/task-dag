@@ -1,6 +1,10 @@
 import { z } from 'zod'
 
-import { ScreensImageBannerSyncTargetSchema, ScreensRunModeSchema } from '../domain/screens.js'
+import {
+  ScreensBannerBulkToggleTargetSchema,
+  ScreensImageBannerSyncTargetSchema,
+  ScreensRunModeSchema,
+} from '../domain/screens.js'
 
 export const ScreensInventoryBannerSchema = z.object({
   bannerId: z.string().trim().min(1),
@@ -63,3 +67,11 @@ export const QueueScreensImageBannerSyncRequestSchema = z.object({
   targetScreens: z.array(ScreensImageBannerSyncTargetSchema).min(1),
 })
 export type QueueScreensImageBannerSyncRequest = z.infer<typeof QueueScreensImageBannerSyncRequestSchema>
+
+export const QueueScreensBannerBulkToggleRequestSchema = z.object({
+  apply: z.boolean().default(false),
+  desiredEnabled: z.boolean(),
+  reason: z.string().trim().max(500).nullable().optional(),
+  target: ScreensBannerBulkToggleTargetSchema,
+})
+export type QueueScreensBannerBulkToggleRequest = z.infer<typeof QueueScreensBannerBulkToggleRequestSchema>

@@ -29,6 +29,7 @@ import {
   ProposalGeneratePricingBatchJobPayloadSchema,
   ProposalImportReviewJsonJobPayloadSchema,
   ReconcileGroupJobPayloadSchema,
+  ScreensBannerBulkToggleJobPayloadSchema,
   ScreensBannerRefreshJobPayloadSchema,
   ScreensBannerHealthMaintenanceJobPayloadSchema,
   ScreensBronxMidtownImageCloneJobPayloadSchema,
@@ -69,6 +70,7 @@ import { runProposalImportReviewJsonJob } from '../jobs/importReviewJsonJob.js'
 import { getPool } from '../../server/db/pool.js'
 import { runLlmDebugRerunJob } from '../jobs/llmDebugRerunJob.js'
 import { runReconcileGroupJob } from '../jobs/reconcileGroupJob.js'
+import { runScreensBannerBulkToggleJob } from '../jobs/screensBannerBulkToggleJob.js'
 import { runScreensBannerRefreshJob } from '../jobs/screensBannerRefreshJob.js'
 import { runScreensBannerHealthMaintenanceJob } from '../jobs/screensBannerHealthMaintenanceJob.js'
 import { runScreensBronxMidtownImageCloneJob } from '../jobs/screensBronxMidtownImageCloneJob.js'
@@ -139,6 +141,9 @@ const handlers: Record<JobType, JobHandler> = {
   },
   'reconcile.group': async (context) => {
     await runReconcileGroupJob(context, ReconcileGroupJobPayloadSchema.parse(context.payload))
+  },
+  'screens.banner_bulk_toggle': async (context) => {
+    await runScreensBannerBulkToggleJob(context, ScreensBannerBulkToggleJobPayloadSchema.parse(context.payload))
   },
   'screens.banner_refresh': async (context) => {
     await runScreensBannerRefreshJob(context, ScreensBannerRefreshJobPayloadSchema.parse(context.payload))
@@ -312,6 +317,7 @@ const SWEED_BACKED_JOB_TYPES: ReadonlySet<JobType> = new Set<JobType>([
   'config.workers.link_visitor_scan_to_sweed',
   'config.workers.refresh_sweed_customer_segments',
   'reconcile.group',
+  'screens.banner_bulk_toggle',
   'screens.banner_refresh',
   'screens.banner_health_maintenance',
   'screens.bronx_midtown_image_clone',

@@ -4,6 +4,7 @@ import { JsonValueSchema } from '../common/json.js'
 import { HeliosModuleCodeSchema, HeliosModuleScopeSchema } from './modules.js'
 import { ScopeKindSchema, ScopeRefSchema } from './scopeRef.js'
 import {
+  ScreensBannerBulkToggleJobPayloadSchema,
   ScreensBannerRefreshJobPayloadSchema,
   ScreensBannerHealthMaintenanceJobPayloadSchema,
   ScreensBronxMidtownImageCloneJobPayloadSchema,
@@ -27,6 +28,7 @@ export const JobTypeSchema = z.enum([
   'proposal.generate.description_batch',
   'proposal.generate.pricing_batch',
   'reconcile.group',
+  'screens.banner_bulk_toggle',
   'screens.banner_refresh',
   'screens.banner_health_maintenance',
   'screens.enable_healthy_banners',
@@ -723,6 +725,7 @@ export type ConfigWorkersRefreshSweedCustomerSegmentsJobPayload = z.infer<
 >
 
 export {
+  ScreensBannerBulkToggleJobPayloadSchema,
   ScreensBannerRefreshJobPayloadSchema,
   ScreensBannerHealthMaintenanceJobPayloadSchema,
   ScreensBronxMidtownImageCloneJobPayloadSchema,

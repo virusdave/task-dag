@@ -29,8 +29,21 @@
  *   empty banner list for that screen rather than dying.
  */
 
-export function isScreenEligibleForBannerOps(screen: { enabled: boolean }): boolean {
-  return screen.enabled
+/**
+ * Operator convention for soft-retired records: the name is renamed to
+ * start with `DEAD - …`, `DEAD-`, `DELETED`, or `RETIRED`. Such records
+ * are operationally out of service and must be skipped by every read,
+ * write, sweep, or maintenance job (see helios/AGENTS.md). Sweed itself
+ * also rejects banner ops on disabled screens with a misleading 14002
+ * error, but a screen can be left `enabled` while flagged DEAD by name,
+ * so we guard on both.
+ */
+export function isRetiredRecordName(name: string | null | undefined): boolean {
+  return /^(?:dead\s*-|dead-|deleted|retired)/i.test((name ?? '').trim())
+}
+
+export function isScreenEligibleForBannerOps(screen: { enabled: boolean; name?: string | null }): boolean {
+  return screen.enabled && !isRetiredRecordName(screen.name)
 }
 
 export function looksLikeSweedDeadScreenError(error: unknown): boolean {

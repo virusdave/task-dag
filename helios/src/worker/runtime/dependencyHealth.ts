@@ -54,6 +54,7 @@ export async function ensureDependenciesReadyForJob(jobType: JobType, payload: u
     case 'catalog.sync.full_summary':
     case 'catalog.sync.group_detail':
     case 'reconcile.group':
+    case 'screens.banner_bulk_toggle':
     case 'screens.banner_refresh':
     case 'screens.banner_health_maintenance':
     case 'screens.enable_healthy_banners':

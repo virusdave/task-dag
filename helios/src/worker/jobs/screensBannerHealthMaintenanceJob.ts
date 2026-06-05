@@ -61,6 +61,7 @@ export async function runScreensBannerHealthMaintenanceJob(
     mode: payload.mode,
     requestedByUserId: payload.requestedByUserId,
     siteDealerIds: payload.siteDealerIds,
+    targetScreens: [],
   })
   const refreshArtifact = ScreenBannerArtifactSchema.parse(JSON.parse(await readFile(refreshArtifactPath, 'utf-8')))
   const refreshSummary = summarizeScreenBannerArtifact(refreshArtifact)
