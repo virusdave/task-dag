@@ -44,6 +44,7 @@ import type {
   VisitorScanLinkStatus,
   VisitorScanSweedPurchaseSummary,
 } from '../../../shared/contracts/index.js'
+import { HELIOS_BUSINESS_DAY_START_HOUR } from '../../../shared/contracts/index.js'
 
 import type { Queryable } from '../pool.js'
 import { SITE_PIN_BY_SLUG } from './customersMapQueries.js'
@@ -677,8 +678,11 @@ async function loadPriorVisits(
       from sweed_orders so
       where so.dealer_id = $2
         and so.customer_id = $3
-        and (so.pay_time at time zone 'America/New_York')::date =
-            (coalesce(vs.scanned_at, vs.ingested_at) at time zone 'America/New_York')::date
+        -- Same *business day* (08:00-ET rollover) as the scan, so a
+        -- late-night scan + after-midnight purchase still match. See
+        -- shared/contracts/domain/businessDay.ts.
+        and ((so.pay_time at time zone 'America/New_York') - interval '${HELIOS_BUSINESS_DAY_START_HOUR} hours')::date =
+            ((coalesce(vs.scanned_at, vs.ingested_at) at time zone 'America/New_York') - interval '${HELIOS_BUSINESS_DAY_START_HOUR} hours')::date
     ) purchase_day on $2 is not null and $3 is not null
 
     order by coalesce(vs.scanned_at, vs.ingested_at) desc, vs.id desc

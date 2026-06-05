@@ -1,10 +1,10 @@
 import type { MetricAggregation } from '../../../shared/contracts/index.js'
 import {
-  nyAddMonthsFromFirst,
-  nyFloorToDay,
+  nyAddBusinessMonths,
+  nyFloorToBusinessDay,
+  nyFloorToBusinessMonth,
+  nyFloorToBusinessWeek,
   nyFloorToHour,
-  nyFloorToMonth,
-  nyFloorToWeek,
   nyHourTick,
   nyMonthDayTick,
   nyMonthYearTick,
@@ -390,18 +390,18 @@ function walkFixedStep(
 
 function floorToAlign(ms: number, align: 'hour' | 'date' | 'week'): number {
   // NY-local snapping (canon: "Always use NY timezones for aggregate
-  // and display"). Day / week tick boundaries snap to NY midnight so
-  // they align with the server's NY-bucketed data; hour boundaries
-  // snap to top-of-hour, which for NY's whole-hour DST offset is the
-  // same UTC instant either way but we route through nyFloorToHour
-  // for consistency.
+  // and display"). Day / week tick boundaries snap to the 08:00-ET
+  // business-day boundary so they align with the server's business-day
+  // buckets; hour boundaries snap to top-of-hour, which for NY's
+  // whole-hour DST offset is the same UTC instant either way but we
+  // route through nyFloorToHour for consistency.
   switch (align) {
     case 'hour':
       return nyFloorToHour(ms)
     case 'date':
-      return nyFloorToDay(ms)
+      return nyFloorToBusinessDay(ms)
     case 'week':
-      return nyFloorToWeek(ms)
+      return nyFloorToBusinessWeek(ms)
   }
 }
 
@@ -428,20 +428,20 @@ function walkCalendarMonths(fromMs: number, toMs: number, targetCount: number): 
   if (!matched) {
     stepMonths = Math.ceil(desiredStepMonths / 12) * 12
   }
-  // Snap to first-of-month NY-local at or before fromMs (canon: NY
-  // wall-clock for every metrics boundary). nyFloorToMonth returns
-  // the UTC instant of NY midnight on the 1st of the containing
-  // month; nyAddMonthsFromFirst advances one or more months while
-  // staying anchored to NY first-of-month midnight (DST-safe).
-  let cursorMs = nyFloorToMonth(fromMs)
+  // Snap to first-of-month business-day boundary at or before fromMs
+  // (canon: NY wall-clock for every metrics boundary). nyFloorToBusinessMonth
+  // returns the UTC instant of 08:00 ET on the 1st of the containing
+  // business month; nyAddBusinessMonths advances one or more months while
+  // staying anchored to that 08:00-ET first-of-month boundary (DST-safe).
+  let cursorMs = nyFloorToBusinessMonth(fromMs)
   while (cursorMs < fromMs) {
-    cursorMs = nyAddMonthsFromFirst(cursorMs, 1)
+    cursorMs = nyAddBusinessMonths(cursorMs, 1)
   }
   const out: number[] = []
   const CAP = 96
   while (cursorMs <= toMs && out.length < CAP) {
     out.push(cursorMs)
-    cursorMs = nyAddMonthsFromFirst(cursorMs, stepMonths)
+    cursorMs = nyAddBusinessMonths(cursorMs, stepMonths)
   }
   return out
 }

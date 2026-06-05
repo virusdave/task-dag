@@ -1,4 +1,7 @@
-import type { MetricAggregation } from '../../../shared/contracts/index.js'
+import {
+  HELIOS_BUSINESS_DAY_START_HOUR,
+  type MetricAggregation,
+} from '../../../shared/contracts/index.js'
 import {
   HELIOS_PENDING_PURCHASE_SITE_DEALERS,
   type HeliosPendingPurchaseSiteDealer,
@@ -191,28 +194,36 @@ export async function queryCashierTransactionsPerHour(args: MetricQueryArgs): Pr
   // ambiguity where 01:00 NY happens twice). See
   // helios/src/server/metrics/bucketSelectSql.ts for the convention.
   const isHourGrain = truncUnit === 'hour'
+  // Business-day shift: calendar-grain buckets roll over at 08:00 ET,
+  // so we step the generate_series in *business-local* time (NY wall
+  // clock minus 8h) and add the 8h back when converting a series
+  // boundary to a real instant — yielding the 08:00-ET bucket start
+  // that matches `bucketSelectExpr` for the tx side of the join. See
+  // shared/contracts/domain/businessDay.ts.
+  const SHIFT = `interval '${HELIOS_BUSINESS_DAY_START_HOUR} hours'`
+  // Real-instant of a business-local series boundary (slice_start):
+  // (slice_start + 8h) interpreted as NY wall-clock.
   const sliceStartTz = isHourGrain
     ? 'slice_start'
-    : "(slice_start at time zone 'America/New_York')"
+    : `((slice_start + ${SHIFT}) at time zone 'America/New_York')`
   const sliceEndTz = isHourGrain
     ? `(slice_start + interval '${intervalLiteral}')`
-    : `((slice_start + interval '${intervalLiteral}') at time zone 'America/New_York')`
+    : `((slice_start + interval '${intervalLiteral}' + ${SHIFT}) at time zone 'America/New_York')`
   // generate_series start expression:
   //   - hour grain: trunc(...) on the UTC instant, step in interval.
-  //   - calendar grain: trunc(...) on the NY-local timestamp (the
-  //     `at time zone 'America/New_York'` cast yields a `timestamp`
-  //     without time zone whose fields are NY wall-clock), step the
-  //     NY-local series, convert each boundary back to timestamptz
-  //     when comparing against open/close dates above.
+  //   - calendar grain: trunc(...) on the *business-local* timestamp
+  //     (NY wall-clock minus the 8h business-day shift), step the
+  //     business-local series, then add the shift back and convert
+  //     each boundary to timestamptz when comparing / keying above.
   const seriesStart = isHourGrain
     ? `date_trunc('hour', greatest(di.open_date, $2::timestamptz))`
-    : `date_trunc('${truncUnit}', greatest(di.open_date, $2::timestamptz) at time zone 'America/New_York')`
+    : `date_trunc('${truncUnit}', (greatest(di.open_date, $2::timestamptz) at time zone 'America/New_York') - ${SHIFT})`
   const seriesStop = isHourGrain
     ? `least(di.close_date, $3::timestamptz)`
-    : `(least(di.close_date, $3::timestamptz) at time zone 'America/New_York')`
+    : `((least(di.close_date, $3::timestamptz) at time zone 'America/New_York') - ${SHIFT})`
   const bucketStartExpr = isHourGrain
-    ? "slice_start"
-    : "(slice_start at time zone 'America/New_York')"
+    ? 'slice_start'
+    : `((slice_start + ${SHIFT}) at time zone 'America/New_York')`
   const sql = `
     with drawer_intervals as (
       select ds.dealer_id,

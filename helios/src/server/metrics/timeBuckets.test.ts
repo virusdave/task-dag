@@ -4,23 +4,38 @@ import { advanceBucketStart, defaultWindow, walkBuckets } from './timeBuckets.js
 
 // NY uses EST (UTC-5) in winter and EDT (UTC-4) from the second Sunday
 // of March through the first Sunday of November. All retail bucketing
-// in helios is in America/New_York calendar time, so date/week/month
-// boundaries are at NY-midnight (= 05:00Z winter, 04:00Z summer).
-// `hour` buckets remain on UTC top-of-hour by design — see the
-// doc-comment on timeBuckets.ts for the rationale.
+// in helios is by the NYC **business day**, which rolls over at 08:00 ET
+// (store open), NOT calendar midnight — see
+// shared/contracts/domain/businessDay.ts. So date/week/month bucket
+// starts are at 08:00 ET (= 13:00Z in winter / EST, 12:00Z in summer /
+// EDT) on the business date, and a transaction before 08:00 ET belongs
+// to the PREVIOUS business day. `hour` buckets remain on UTC top-of-hour
+// by design — see the doc-comment on timeBuckets.ts for the rationale.
 
 describe('walkBuckets', () => {
-  it('returns daily buckets aligned to NY midnight (winter / EST)', () => {
-    // Inputs are arbitrary instants inside NY-Jan-1, NY-Jan-2, NY-Jan-3.
-    // NY midnight in January = 05:00Z because EST = UTC-5.
-    const from = new Date('2025-01-01T10:00:00Z')
-    const to = new Date('2025-01-04T00:00:00Z')
+  it('returns daily buckets aligned to the 08:00-ET business day (winter / EST)', () => {
+    // Inputs are arbitrary post-open instants inside the Jan-1, Jan-2,
+    // Jan-3 business days. 08:00 ET in January = 13:00Z (EST = UTC-5).
+    const from = new Date('2025-01-01T14:00:00Z') // 09:00 ET Jan 1
+    const to = new Date('2025-01-04T13:00:00Z') // 08:00 ET Jan 4 (exclusive)
     const buckets = walkBuckets(from, to, 'date')
     expect(buckets.map((d) => d.toISOString())).toEqual([
-      '2025-01-01T05:00:00.000Z',
-      '2025-01-02T05:00:00.000Z',
-      '2025-01-03T05:00:00.000Z',
+      '2025-01-01T13:00:00.000Z',
+      '2025-01-02T13:00:00.000Z',
+      '2025-01-03T13:00:00.000Z',
     ])
+  })
+
+  it('rolls a pre-08:00-ET instant into the previous business day', () => {
+    // 2025-01-02T10:00:00Z = 05:00 ET Jan 2, before the 08:00 open, so
+    // it belongs to the Jan-1 business day (which started 08:00 ET Jan 1
+    // = 13:00Z).
+    const buckets = walkBuckets(
+      new Date('2025-01-02T10:00:00Z'),
+      new Date('2025-01-02T10:30:00Z'),
+      'date',
+    )
+    expect(buckets).toEqual([new Date('2025-01-01T13:00:00.000Z')])
   })
 
   it('returns hourly buckets aligned to UTC hour boundaries', () => {
@@ -34,14 +49,14 @@ describe('walkBuckets', () => {
     ])
   })
 
-  it('returns weekly buckets aligned to NY-Monday midnight', () => {
-    // 2025-01-04 (Saturday) → containing NY ISO week starts NY-Monday
-    // 2024-12-30. NY midnight in January = 05:00Z.
+  it('returns weekly buckets aligned to the business-Monday 08:00 ET', () => {
+    // 2025-01-04 (Saturday) → containing ISO week starts business-Monday
+    // 2024-12-30. 08:00 ET in January = 13:00Z.
     const from = new Date('2025-01-04T00:00:00Z')
-    const to = new Date('2025-01-20T05:00:00Z')
+    const to = new Date('2025-01-20T13:00:00Z')
     const buckets = walkBuckets(from, to, 'week')
-    expect(buckets[0]?.toISOString()).toBe('2024-12-30T05:00:00.000Z')
-    expect(buckets.at(-1)?.toISOString()).toBe('2025-01-13T05:00:00.000Z')
+    expect(buckets[0]?.toISOString()).toBe('2024-12-30T13:00:00.000Z')
+    expect(buckets.at(-1)?.toISOString()).toBe('2025-01-13T13:00:00.000Z')
   })
 
   it('returns a single bucket for total/dow/dom/dofortnight', () => {
@@ -62,34 +77,31 @@ describe('walkBuckets', () => {
 
   it('handles the NY DST spring-forward day correctly', () => {
     // 2026-03-08 is the second Sunday of March → 2:00 AM EST jumps to
-    // 3:00 AM EDT. Day boundaries: NY-Mar-7 midnight = 05:00Z (EST),
-    // NY-Mar-8 midnight = 05:00Z (still EST — clock change hasn't
-    // happened yet at midnight), NY-Mar-9 midnight = 04:00Z (EDT).
-    const from = new Date('2026-03-07T05:00:00Z')
-    const to = new Date('2026-03-10T04:00:00Z')
+    // 3:00 AM EDT. Business-day starts are at 08:00 ET, which is AFTER
+    // the 02:00 transition: Mar-7 08:00 = 13:00Z (EST), Mar-8 08:00 =
+    // 12:00Z (EDT), Mar-9 08:00 = 12:00Z (EDT).
+    const from = new Date('2026-03-07T14:00:00Z') // 09:00 ET Mar 7
+    const to = new Date('2026-03-10T12:00:00Z') // 08:00 ET Mar 10 (exclusive)
     const buckets = walkBuckets(from, to, 'date')
     expect(buckets.map((d) => d.toISOString())).toEqual([
-      '2026-03-07T05:00:00.000Z',
-      '2026-03-08T05:00:00.000Z',
-      '2026-03-09T04:00:00.000Z',
+      '2026-03-07T13:00:00.000Z',
+      '2026-03-08T12:00:00.000Z',
+      '2026-03-09T12:00:00.000Z',
     ])
   })
 
   it('handles the NY DST fall-back day correctly (would loop forever on naive +24h)', () => {
     // 2026-11-01 is the first Sunday of November → 2:00 AM EDT falls
-    // back to 1:00 AM EST. Day boundaries: NY-Oct-31 midnight = 04:00Z
-    // (EDT), NY-Nov-1 midnight = 04:00Z (still EDT at midnight,
-    // before the change), NY-Nov-2 midnight = 05:00Z (EST). A naive
-    // "add 24h then re-floor in NY" walker stalls on Nov 1 → Nov 2
-    // because 04:00Z + 24h = 04:00Z next day, which is still inside
-    // NY-Nov-1; this regression test catches that.
-    const from = new Date('2026-10-31T04:00:00Z')
-    const to = new Date('2026-11-03T05:00:00Z')
+    // back to 1:00 AM EST. Business-day starts are at 08:00 ET (after
+    // the 02:00 transition): Oct-31 08:00 = 12:00Z (EDT), Nov-1 08:00 =
+    // 13:00Z (EST), Nov-2 08:00 = 13:00Z (EST).
+    const from = new Date('2026-10-31T13:00:00Z') // 09:00 ET Oct 31
+    const to = new Date('2026-11-03T13:00:00Z') // 08:00 ET Nov 3 (exclusive)
     const buckets = walkBuckets(from, to, 'date')
     expect(buckets.map((d) => d.toISOString())).toEqual([
-      '2026-10-31T04:00:00.000Z',
-      '2026-11-01T04:00:00.000Z',
-      '2026-11-02T05:00:00.000Z',
+      '2026-10-31T12:00:00.000Z',
+      '2026-11-01T13:00:00.000Z',
+      '2026-11-02T13:00:00.000Z',
     ])
   })
 
@@ -110,24 +122,30 @@ describe('walkBuckets', () => {
 })
 
 describe('advanceBucketStart', () => {
-  it('spring-forward day is 23 elapsed hours', () => {
-    const mar8NyMidnight = new Date('2026-03-08T05:00:00Z')
-    const mar9NyMidnight = advanceBucketStart(mar8NyMidnight, 'date')
-    expect(mar9NyMidnight.toISOString()).toBe('2026-03-09T04:00:00.000Z')
-    expect(mar9NyMidnight.getTime() - mar8NyMidnight.getTime()).toBe(23 * 60 * 60 * 1000)
+  it('spring-forward business day is 23 elapsed hours', () => {
+    // Mar-7 08:00 ET = 13:00Z (EST); Mar-8 08:00 ET = 12:00Z (EDT). The
+    // 02:00 spring-forward happens between them, so the business day is
+    // only 23 elapsed hours.
+    const mar7 = new Date('2026-03-07T13:00:00Z')
+    const mar8 = advanceBucketStart(mar7, 'date')
+    expect(mar8.toISOString()).toBe('2026-03-08T12:00:00.000Z')
+    expect(mar8.getTime() - mar7.getTime()).toBe(23 * 60 * 60 * 1000)
   })
 
-  it('fall-back day is 25 elapsed hours', () => {
-    const nov1NyMidnight = new Date('2026-11-01T04:00:00Z')
-    const nov2NyMidnight = advanceBucketStart(nov1NyMidnight, 'date')
-    expect(nov2NyMidnight.toISOString()).toBe('2026-11-02T05:00:00.000Z')
-    expect(nov2NyMidnight.getTime() - nov1NyMidnight.getTime()).toBe(25 * 60 * 60 * 1000)
+  it('fall-back business day is 25 elapsed hours', () => {
+    // Oct-31 08:00 ET = 12:00Z (EDT); Nov-1 08:00 ET = 13:00Z (EST). The
+    // 02:00 fall-back happens between them, so the business day is 25
+    // elapsed hours.
+    const oct31 = new Date('2026-10-31T12:00:00Z')
+    const nov1 = advanceBucketStart(oct31, 'date')
+    expect(nov1.toISOString()).toBe('2026-11-01T13:00:00.000Z')
+    expect(nov1.getTime() - oct31.getTime()).toBe(25 * 60 * 60 * 1000)
   })
 
-  it('month grain rolls forward to NY-first-of-month midnight', () => {
-    const may1Ny = new Date('2025-05-01T04:00:00Z') // EDT
-    const jun1Ny = advanceBucketStart(may1Ny, 'month')
-    expect(jun1Ny.toISOString()).toBe('2025-06-01T04:00:00.000Z') // also EDT
+  it('month grain rolls forward to the 08:00-ET first-of-month boundary', () => {
+    const may1 = new Date('2025-05-01T12:00:00Z') // 08:00 ET May 1 (EDT)
+    const jun1 = advanceBucketStart(may1, 'month')
+    expect(jun1.toISOString()).toBe('2025-06-01T12:00:00.000Z') // also EDT
   })
 })
 

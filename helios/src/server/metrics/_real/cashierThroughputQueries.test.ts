@@ -8,7 +8,7 @@ describe('cashier.transactions_per_hour real query', () => {
     vi.restoreAllMocks()
   })
 
-  it('attributes ratios to the correct NY-midnight bucket and returns null in empty buckets', async () => {
+  it('attributes ratios to the correct business-day bucket and returns null in empty buckets', async () => {
     // Two buckets in the window; the SQL only returns rows for the
     // bucket that had drawer-shift coverage. The merge must:
     //   * surface the real ratio in the covered bucket
@@ -16,11 +16,12 @@ describe('cashier.transactions_per_hour real query', () => {
     //     suggest the store was open with no transactions, vs.
     //     unknown / no on-the-clock cashiers)
     //
-    // Day grain buckets at NY-midnight. May 18 2026 is EDT → 04:00Z.
+    // Day grain buckets at the business-day boundary (08:00 ET).
+    // May 18 2026 is EDT → 12:00Z.
     const fakePool = {
       query: vi.fn().mockResolvedValue({
         rows: [
-          { bucket_start: new Date('2026-05-18T04:00:00.000Z'), value: '12.5' },
+          { bucket_start: new Date('2026-05-18T12:00:00.000Z'), value: '12.5' },
         ],
       }),
     }
@@ -28,14 +29,14 @@ describe('cashier.transactions_per_hour real query', () => {
 
     const data = await queryCashierTransactionsPerHour({
       sites: [],
-      from: new Date('2026-05-18T04:00:00.000Z'),
-      to: new Date('2026-05-20T04:00:00.000Z'),
+      from: new Date('2026-05-18T12:00:00.000Z'),
+      to: new Date('2026-05-20T12:00:00.000Z'),
       agg: 'date',
     })
 
     expect(data.length).toBe(2)
-    expect(data[0]).toEqual({ t: '2026-05-18T04:00:00.000Z', tx_per_hour: 12.5 })
-    expect(data[1]).toEqual({ t: '2026-05-19T04:00:00.000Z', tx_per_hour: null })
+    expect(data[0]).toEqual({ t: '2026-05-18T12:00:00.000Z', tx_per_hour: 12.5 })
+    expect(data[1]).toEqual({ t: '2026-05-19T12:00:00.000Z', tx_per_hour: null })
   })
 
   it('returns null for the single bucket in the `total` collapse when no drawer-shifts exist', async () => {

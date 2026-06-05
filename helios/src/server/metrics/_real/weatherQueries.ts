@@ -1,4 +1,5 @@
 import {
+  HELIOS_BUSINESS_DAY_START_HOUR,
   HELIOS_PENDING_PURCHASE_SITE_DEALERS,
   HELIOS_SITE_ZIP_BY_DEALER,
   type HeliosPendingPurchaseSiteDealer,
@@ -110,10 +111,15 @@ async function fetchPerDayRows(
   to: Date,
 ): Promise<DayWeatherMarginRow[]> {
   const pool = getPool()
+  // Sales are bucketed by the NYC business day (08:00-ET rollover), so a
+  // pre-open / after-midnight order rolls into the business day it
+  // belongs to, then joins to that business date's weather_daily row.
+  // See shared/contracts/domain/businessDay.ts.
+  const shift = `interval '${HELIOS_BUSINESS_DAY_START_HOUR} hours'`
   const sql = `
     with per_day_margin as (
       select ${dealerZipCaseExpr()} as site_zip,
-             (pay_time at time zone $1)::date as date,
+             ((pay_time at time zone $1) - ${shift})::date as date,
              sum(coalesce(grand_total_dollars, 0)
                  - coalesce(tax_dollars, 0)
                  - coalesce(discount_dollars, 0)) as margin_dollars
@@ -131,8 +137,8 @@ async function fetchPerDayRows(
         on p.site_zip = w.site_zip
        and p.date = w.date
      where w.site_zip = any($5::text[])
-       and w.date >= ($3::timestamptz at time zone $1)::date
-       and w.date <  ($4::timestamptz at time zone $1)::date
+       and w.date >= (($3::timestamptz at time zone $1) - ${shift})::date
+       and w.date <  (($4::timestamptz at time zone $1) - ${shift})::date
      order by w.date, w.site_zip
   `
   const result = await pool.query<{

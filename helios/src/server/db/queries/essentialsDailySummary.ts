@@ -1,4 +1,5 @@
 import {
+  HELIOS_BUSINESS_DAY_START_HOUR,
   HELIOS_PENDING_PURCHASE_SITE_DEALERS,
   type EssentialsDailySummaryResponse,
   type EssentialsDailySummaryRow,
@@ -8,15 +9,17 @@ import { getPool, type Queryable } from '../pool.js'
 // ============================================================================
 // Essentials → "today, per site" daily summary.
 //
-// Per repo canon (AGENTS.md): all aggregate / display work uses NY
-// time. "Today" here is the current LOGICAL BUSINESS DAY in
-// America/New_York — the business day rolls over at 04:00 NY, not
-// at calendar midnight. So between 00:00 and 03:59:59 NY the banner
-// still shows the previous calendar day's sales, and only flips to
-// the new day at 04:00 NY.
+// Per repo canon (AGENTS.md + shared/contracts/domain/businessDay.ts):
+// all aggregate / display work uses the NYC business day. "Today" here
+// is the current LOGICAL BUSINESS DAY in America/New_York — the
+// business day rolls over at 08:00 NY (store open), not at calendar
+// midnight. So between 00:00 and 07:59:59 NY the banner still shows the
+// previous business day's sales (including any pre-open prepaid pickups
+// / preorders placed before 08:00), and only flips to the new day at
+// 08:00 NY.
 //
 // Concretely the window is `[businessDayStart, now())` where
-//   businessDayStart_NY  = date_trunc('day', now_NY − 4h) + 4h
+//   businessDayStart_NY  = date_trunc('day', now_NY − 8h) + 8h
 // and `now_NY` is `now() at time zone 'America/New_York'`. Converted
 // back to UTC for use as a query bound, this becomes the `start_iso`
 // returned to the client. The SQL is the source of truth so DST
@@ -132,19 +135,20 @@ export async function loadEssentialsDailySummary(
 
   // Single SQL round-trip for the day boundary so the four queries
   // below all see the same `[start, end)` instants even if a tick of
-  // the wall clock crosses the 04:00-NY business-day boundary while
-  // we're loading. Business day = NY local time shifted back 4h then
+  // the wall clock crosses the 08:00-NY business-day boundary while
+  // we're loading. Business day = NY local time shifted back 8h then
   // truncated; see file header for the rationale.
+  const shift = `interval '${HELIOS_BUSINESS_DAY_START_HOUR} hours'`
   const dayResult = await db.query<NyDayRow>(`
     with bd as (
       select
         date_trunc(
           'day',
-          (now() at time zone 'America/New_York') - interval '4 hours'
+          (now() at time zone 'America/New_York') - ${shift}
         ) as business_day_ny
     )
     select
-      ((business_day_ny + interval '4 hours') at time zone 'America/New_York') as start_iso,
+      ((business_day_ny + ${shift}) at time zone 'America/New_York') as start_iso,
       now() as end_iso,
       to_char(business_day_ny, 'YYYY-MM-DD') as ny_date
     from bd

@@ -36,15 +36,16 @@ describe('sweed-orders metric queries — bucket-key timezone regression', () =>
     vi.restoreAllMocks()
   })
 
-  it('queryFirstVsReturning attributes counts to the correct (NY-Monday) bucket', async () => {
-    // The fixed SQL returns a timestamptz at NY-Monday-midnight, which
-    // in May (EDT) is 04:00Z. node-postgres parses it as the correct
-    // UTC instant regardless of server TZ.
+  it('queryFirstVsReturning attributes counts to the correct (business-Monday) bucket', async () => {
+    // The fixed SQL returns a timestamptz at the business-Monday
+    // boundary (08:00 ET), which in May (EDT) is 12:00Z. node-postgres
+    // parses it as the correct UTC instant regardless of server TZ.
+    // 2026-05-18 is a Monday; `from` is a post-open instant that day.
     const fakePool = {
       query: vi.fn().mockResolvedValue({
         rows: [
-          { bucket_start: new Date('2026-05-18T04:00:00.000Z'), series_id: 'first_time', value: '7' },
-          { bucket_start: new Date('2026-05-18T04:00:00.000Z'), series_id: 'returning', value: '42' },
+          { bucket_start: new Date('2026-05-18T12:00:00.000Z'), series_id: 'first_time', value: '7' },
+          { bucket_start: new Date('2026-05-18T12:00:00.000Z'), series_id: 'returning', value: '42' },
         ],
       }),
     }
@@ -52,14 +53,14 @@ describe('sweed-orders metric queries — bucket-key timezone regression', () =>
 
     const data = await queryFirstVsReturning({
       sites: [],
-      from: new Date('2026-05-18T04:00:00.000Z'),
-      to: new Date('2026-05-25T04:00:00.000Z'),
+      from: new Date('2026-05-18T13:00:00.000Z'),
+      to: new Date('2026-05-25T13:00:00.000Z'),
       agg: 'week',
     })
 
     expect(data.length).toBeGreaterThan(0)
-    const first = data.find((r) => r.t === '2026-05-18T04:00:00.000Z')
-    expect(first, 'expected a row for the NY-Monday 2026-05-18 bucket').toBeDefined()
+    const first = data.find((r) => r.t === '2026-05-18T12:00:00.000Z')
+    expect(first, 'expected a row for the business-Monday 2026-05-18 bucket').toBeDefined()
     // The merge must NOT have fallen through to defaultValue=0.
     expect(first!.first_time).toBe(7)
     expect(first!.returning).toBe(42)

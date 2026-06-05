@@ -204,13 +204,13 @@ describe('loadEssentialsDailySummary', () => {
     expect(result.totals.marginDollars).toBe(0)
   })
 
-  it("uses a 4-hour-shifted NY business day for 'today' (rolls over at 04:00 NY, not midnight)", async () => {
+  it("uses an 8-hour-shifted NY business day for 'today' (rolls over at 08:00 NY, not midnight)", async () => {
     const capturedSqls: string[] = []
     const db = mockPool(
       {
         dayRow: {
-          startIso: '2026-06-03T08:00:00.000Z', // 04:00 NY on 2026-06-03
-          endIso: '2026-06-04T07:30:00.000Z',
+          startIso: '2026-06-03T12:00:00.000Z', // 08:00 NY on 2026-06-03 (EDT)
+          endIso: '2026-06-04T11:30:00.000Z',
           nyDate: '2026-06-03',
         },
         ordersRows: [],
@@ -222,13 +222,14 @@ describe('loadEssentialsDailySummary', () => {
 
     await loadEssentialsDailySummary(db)
 
-    // The day-boundary query MUST shift now() back by 4 hours and
+    // The day-boundary query MUST shift now() back by 8 hours and
     // truncate to day; otherwise calendar midnight (00:00 NY) would
-    // become the start of "today", flipping the banner one wall-clock
-    // hour too early relative to the configured business day.
+    // become the start of "today", flipping the banner several
+    // wall-clock hours too early relative to the configured business
+    // day (which opens at 08:00 ET).
     const dayBoundarySql = capturedSqls.find((s) => s.includes('business_day_ny'))
     expect(dayBoundarySql, 'expected a day-boundary SQL using business_day_ny').toBeTruthy()
-    expect(dayBoundarySql).toContain("interval '4 hours'")
+    expect(dayBoundarySql).toContain("interval '8 hours'")
     expect(dayBoundarySql).toContain("at time zone 'America/New_York'")
     // Sanity-check that the returned start_iso matches what the SQL
     // would compute (we hard-coded 08:00Z = 04:00 NY EDT above; the

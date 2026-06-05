@@ -259,12 +259,14 @@ describe('formatAxisValue (v1.4 V4\'1 — kind-aware tick formatter)', () => {
 })
 
 describe('bucketXTicks', () => {
-  // Canonical "from" is NY-midnight on 2026-05-01 (= 04:00 UTC during
-  // EDT). All date / week / month tick assertions are NY-local per
-  // the AGENTS.md canon rule, so the test fixture has to start at a
-  // real NY-midnight instant — using a UTC midnight would float by
-  // 4 hours into the previous NY day and skew the tick walker.
-  const from = Date.UTC(2026, 4, 1, 4) // 2026-05-01 00:00 America/New_York (EDT)
+  // Canonical "from" is the NY business-day start on 2026-05-01 — i.e.
+  // 08:00 America/New_York (= 12:00 UTC during EDT). All date / week /
+  // month tick assertions are NY-local AND aligned to the 08:00 ET
+  // business-day boundary per the AGENTS.md canon rule, so the test
+  // fixture has to start at a real 08:00-ET instant — using a UTC
+  // midnight (or NY midnight) would float off the business-day grid
+  // and skew the tick walker.
+  const from = Date.UTC(2026, 4, 1, 12) // 2026-05-01 08:00 America/New_York (EDT)
   const oneDay = 24 * 60 * 60 * 1000
 
   it('places one tick per day for a 7-day visible window at agg=date', () => {
@@ -296,12 +298,11 @@ describe('bucketXTicks', () => {
     }
   })
 
-  it('aligns week ticks to ISO Monday — NY local', () => {
+  it('aligns week ticks to ISO Monday — NY local (08:00 ET business-day start)', () => {
     // Visible window spans 4 weeks; expect every tick to be a Monday in
-    // NY wall-clock (canon: NY for aggregate + display). The UTC weekday
-    // of a NY-Monday-midnight instant is still Monday at 04:00 / 05:00,
-    // but we assert via nyParts to make the intent unambiguous.
-    const start = Date.UTC(2026, 4, 4, 4) // 2026-05-04 NY midnight = 04:00 UTC (EDT)
+    // NY wall-clock (canon: NY for aggregate + display) at the 08:00 ET
+    // business-day boundary. The fixture starts at 08:00 ET on a Monday.
+    const start = Date.UTC(2026, 4, 4, 12) // 2026-05-04 08:00 ET = 12:00 UTC (EDT)
     const ticks = bucketXTicks({
       fromMs: start,
       toMs: start + 28 * oneDay,
@@ -312,12 +313,12 @@ describe('bucketXTicks', () => {
       const p = nyParts(t)
       // NY weekday: Sun=0..Sat=6. Monday = 1.
       expect(p.weekday, `tick ${new Date(t).toISOString()} not a NY Monday`).toBe(1)
-      // And the NY hour is midnight.
-      expect(p.hour, `tick ${new Date(t).toISOString()} not NY midnight`).toBe(0)
+      // And the NY hour is the 08:00 business-day start.
+      expect(p.hour, `tick ${new Date(t).toISOString()} not NY 08:00`).toBe(8)
     }
   })
 
-  it('aligns month ticks to first-of-month — NY local', () => {
+  it('aligns month ticks to first-of-month — NY local (08:00 ET business-day start)', () => {
     const ticks = bucketXTicks({
       fromMs: Date.UTC(2025, 11, 15), // mid-Dec 2025
       toMs: Date.UTC(2026, 5, 15), // mid-Jun 2026
@@ -327,7 +328,7 @@ describe('bucketXTicks', () => {
     for (const t of ticks) {
       const p = nyParts(t)
       expect(p.day, `tick ${new Date(t).toISOString()} not NY first-of-month`).toBe(1)
-      expect(p.hour, `tick ${new Date(t).toISOString()} not NY midnight`).toBe(0)
+      expect(p.hour, `tick ${new Date(t).toISOString()} not NY 08:00`).toBe(8)
     }
   })
 

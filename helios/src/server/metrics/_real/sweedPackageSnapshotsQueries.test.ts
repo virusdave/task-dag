@@ -15,7 +15,7 @@ import {
  * Unit tests for the COGS / margin / inventory query helpers added
  * under automation#24. We stub the pg pool to return shaped result
  * sets and assert (a) the bucket-key merge attributes values to the
- * correct NY-midnight bucket (calendar bucketing is in America/
+ * correct business-day bucket (08:00 ET rollover; bucketing is in America/
  * New_York since 2026-06; the same regression the orders queries had
  * on 2026-05-26 still has to pass at the new key), (b) the SQL
  * emitted joins through `sweed_package_cost_as_of_or_earliest`, and
@@ -43,17 +43,17 @@ describe('sweed-package-snapshot metric queries', () => {
     return fakePool
   }
 
-  it('queryGrossMarginDollars attributes (revenue - cogs) to the correct NY-midnight bucket', async () => {
+  it('queryGrossMarginDollars attributes (revenue - cogs) to the correct business-day bucket', async () => {
     mockPool([
-      { bucket_start: new Date('2026-05-18T04:00:00.000Z'), series_id: 'gm_dollars', revenue: '1000.00', cogs: '550.00' },
+      { bucket_start: new Date('2026-05-18T12:00:00.000Z'), series_id: 'gm_dollars', revenue: '1000.00', cogs: '550.00' },
     ])
     const rows = await queryGrossMarginDollars({
       sites: [],
-      from: new Date('2026-05-18T04:00:00.000Z'),
-      to: new Date('2026-05-25T04:00:00.000Z'),
+      from: new Date('2026-05-18T12:00:00.000Z'),
+      to: new Date('2026-05-25T12:00:00.000Z'),
       agg: 'week',
     })
-    const target = rows.find((r) => r.t === '2026-05-18T04:00:00.000Z')
+    const target = rows.find((r) => r.t === '2026-05-18T12:00:00.000Z')
     expect(target, 'expected bucket row to merge by ISO key').toBeDefined()
     expect(target!.gm_dollars).toBe(450)
   })
@@ -62,8 +62,8 @@ describe('sweed-package-snapshot metric queries', () => {
     mockPool([])
     const rows = await queryEffectiveGmPct({
       sites: [],
-      from: new Date('2026-05-18T04:00:00.000Z'),
-      to: new Date('2026-05-25T04:00:00.000Z'),
+      from: new Date('2026-05-18T12:00:00.000Z'),
+      to: new Date('2026-05-25T12:00:00.000Z'),
       agg: 'week',
     })
     expect(rows.length).toBeGreaterThan(0)
@@ -74,47 +74,47 @@ describe('sweed-package-snapshot metric queries', () => {
 
   it('queryEffectiveGmPct computes ratio = (revenue - cogs) / revenue', async () => {
     mockPool([
-      { bucket_start: new Date('2026-05-18T04:00:00.000Z'), series_id: 'gm_pct', revenue: '1000', cogs: '450' },
+      { bucket_start: new Date('2026-05-18T12:00:00.000Z'), series_id: 'gm_pct', revenue: '1000', cogs: '450' },
     ])
     const rows = await queryEffectiveGmPct({
       sites: [],
-      from: new Date('2026-05-18T04:00:00.000Z'),
-      to: new Date('2026-05-25T04:00:00.000Z'),
+      from: new Date('2026-05-18T12:00:00.000Z'),
+      to: new Date('2026-05-25T12:00:00.000Z'),
       agg: 'week',
     })
-    const target = rows.find((r) => r.t === '2026-05-18T04:00:00.000Z')
+    const target = rows.find((r) => r.t === '2026-05-18T12:00:00.000Z')
     expect(target!.gm_pct).toBeCloseTo(0.55, 4)
   })
 
   it('queryMarginStackNewVsReturning fills both first_time / returning series', async () => {
     mockPool([
-      { bucket_start: new Date('2026-05-18T04:00:00.000Z'), series_id: 'first_time', revenue: '500', cogs: '200' },
-      { bucket_start: new Date('2026-05-18T04:00:00.000Z'), series_id: 'returning', revenue: '800', cogs: '400' },
+      { bucket_start: new Date('2026-05-18T12:00:00.000Z'), series_id: 'first_time', revenue: '500', cogs: '200' },
+      { bucket_start: new Date('2026-05-18T12:00:00.000Z'), series_id: 'returning', revenue: '800', cogs: '400' },
     ])
     const rows = await queryMarginStackNewVsReturning({
       sites: [],
-      from: new Date('2026-05-18T04:00:00.000Z'),
-      to: new Date('2026-05-25T04:00:00.000Z'),
+      from: new Date('2026-05-18T12:00:00.000Z'),
+      to: new Date('2026-05-25T12:00:00.000Z'),
       agg: 'week',
     })
-    const target = rows.find((r) => r.t === '2026-05-18T04:00:00.000Z')
+    const target = rows.find((r) => r.t === '2026-05-18T12:00:00.000Z')
     expect(target!.first_time).toBe(300)
     expect(target!.returning).toBe(400)
   })
 
   it('queryCategoryMarginStack bins live category names into the declared series', async () => {
     mockPool([
-      { bucket_start: new Date('2026-05-18T04:00:00.000Z'), cat_value: 'pre-rolls', revenue: '500', cogs: '200' },
-      { bucket_start: new Date('2026-05-18T04:00:00.000Z'), cat_value: 'flower', revenue: '800', cogs: '400' },
-      { bucket_start: new Date('2026-05-18T04:00:00.000Z'), cat_value: 'beverages', revenue: '100', cogs: '60' },
+      { bucket_start: new Date('2026-05-18T12:00:00.000Z'), cat_value: 'pre-rolls', revenue: '500', cogs: '200' },
+      { bucket_start: new Date('2026-05-18T12:00:00.000Z'), cat_value: 'flower', revenue: '800', cogs: '400' },
+      { bucket_start: new Date('2026-05-18T12:00:00.000Z'), cat_value: 'beverages', revenue: '100', cogs: '60' },
     ])
     const rows = await queryCategoryMarginStack({
       sites: [],
-      from: new Date('2026-05-18T04:00:00.000Z'),
-      to: new Date('2026-05-25T04:00:00.000Z'),
+      from: new Date('2026-05-18T12:00:00.000Z'),
+      to: new Date('2026-05-25T12:00:00.000Z'),
       agg: 'week',
     })
-    const target = rows.find((r) => r.t === '2026-05-18T04:00:00.000Z')!
+    const target = rows.find((r) => r.t === '2026-05-18T12:00:00.000Z')!
     expect(target.preroll).toBe(300)
     expect(target.flower).toBe(400)
     // beverages → 'other' bucket
@@ -130,16 +130,16 @@ describe('sweed-package-snapshot metric queries', () => {
     // simulate the post-derivation value rather than the raw
     // sweed_orders.fulfillment_type text.
     mockPool([
-      { bucket_start: new Date('2026-05-18T04:00:00.000Z'), fulfillment_value: 'kiosk', revenue: '500', cogs: '200' },
-      { bucket_start: new Date('2026-05-18T04:00:00.000Z'), fulfillment_value: 'in_store', revenue: '300', cogs: '150' },
+      { bucket_start: new Date('2026-05-18T12:00:00.000Z'), fulfillment_value: 'kiosk', revenue: '500', cogs: '200' },
+      { bucket_start: new Date('2026-05-18T12:00:00.000Z'), fulfillment_value: 'in_store', revenue: '300', cogs: '150' },
     ])
     const rows = await queryFulfillmentMarginDollars({
       sites: [],
-      from: new Date('2026-05-18T04:00:00.000Z'),
-      to: new Date('2026-05-25T04:00:00.000Z'),
+      from: new Date('2026-05-18T12:00:00.000Z'),
+      to: new Date('2026-05-25T12:00:00.000Z'),
       agg: 'week',
     })
-    const target = rows.find((r) => r.t === '2026-05-18T04:00:00.000Z')!
+    const target = rows.find((r) => r.t === '2026-05-18T12:00:00.000Z')!
     expect(target.kiosk).toBe(300)
     expect(target.in_store).toBe(150)
     expect(target.delivery_prepaid).toBe(0)
@@ -149,15 +149,15 @@ describe('sweed-package-snapshot metric queries', () => {
     // Mocked rows simulate the post-derivation series id (see comment
     // on queryFulfillmentMarginDollars test above).
     mockPool([
-      { bucket_start: new Date('2026-05-18T04:00:00.000Z'), fulfillment_value: 'kiosk', revenue: '500', cogs: '200' },
+      { bucket_start: new Date('2026-05-18T12:00:00.000Z'), fulfillment_value: 'kiosk', revenue: '500', cogs: '200' },
     ])
     const rows = await queryFulfillmentEffectiveGmPct({
       sites: [],
-      from: new Date('2026-05-18T04:00:00.000Z'),
-      to: new Date('2026-05-25T04:00:00.000Z'),
+      from: new Date('2026-05-18T12:00:00.000Z'),
+      to: new Date('2026-05-25T12:00:00.000Z'),
       agg: 'week',
     })
-    const target = rows.find((r) => r.t === '2026-05-18T04:00:00.000Z')!
+    const target = rows.find((r) => r.t === '2026-05-18T12:00:00.000Z')!
     expect(target.kiosk).toBeCloseTo(0.6, 4)
     expect(target.pickup).toBeNull()
   })
@@ -167,8 +167,8 @@ describe('sweed-package-snapshot metric queries', () => {
     mockPool([], (sql) => captured.push(sql))
     await queryGrossMarginDollars({
       sites: [],
-      from: new Date('2026-05-18T04:00:00.000Z'),
-      to: new Date('2026-05-25T04:00:00.000Z'),
+      from: new Date('2026-05-18T12:00:00.000Z'),
+      to: new Date('2026-05-25T12:00:00.000Z'),
       agg: 'week',
     })
     expect(captured.length).toBeGreaterThan(0)
@@ -178,14 +178,14 @@ describe('sweed-package-snapshot metric queries', () => {
     // unrolling sweed_orders.raw_json->'items' on every request.
     expect(sql).toContain('sweed_order_items_flat')
     expect(sql).not.toContain("jsonb_array_elements(so.raw_json->'items')")
-    // Week grain → NY-Monday-midnight bucket; SQL must wrap
+    // Week grain → business-Monday (08:00 ET) bucket; SQL must wrap
     // date_trunc(...) in `at time zone 'America/New_York'` twice (once
     // inside, once outside) so the result is a timestamptz at the
-    // NY-Monday-midnight key produced by `walkBuckets`.
+    // business-Monday (08:00 ET) key produced by `walkBuckets`.
     const nyTzMatches = sql.match(/at time zone 'America\/New_York'/g) ?? []
     expect(
       nyTzMatches.length,
-      "week-grain bucket_start must be wrapped with `at time zone 'America/New_York'` to round-trip as timestamptz at the NY-Monday-midnight key",
+      "week-grain bucket_start must be wrapped with `at time zone 'America/New_York'` to round-trip as timestamptz at the business-Monday (08:00 ET) key",
     ).toBeGreaterThanOrEqual(2)
   })
 

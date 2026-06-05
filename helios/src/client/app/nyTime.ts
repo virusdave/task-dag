@@ -20,6 +20,8 @@
 // the browser handle EST↔EDT transitions correctly.
 // ---------------------------------------------------------------------------
 
+import { HELIOS_BUSINESS_DAY_START_HOUR } from '../../shared/contracts/index.js'
+
 export const NY_TZ = 'America/New_York'
 
 const MONTH_NAMES_SHORT = [
@@ -179,6 +181,70 @@ export function nyAddMonthsFromFirst(ms: number, months: number): number {
     y -= 1
   }
   return nyWallClockToInstant(y, m, 1, 0)
+}
+
+// ---------------------------------------------------------------------------
+// Business-day variants — bucket boundaries roll over at 08:00 ET (store
+// open), not calendar midnight. These mirror the server bucket walker in
+// helios/src/server/metrics/timeBuckets.ts so the X-axis tick gridlines
+// land exactly on the data's business-day buckets. See
+// shared/contracts/domain/businessDay.ts for the operator rule.
+// ---------------------------------------------------------------------------
+
+/**
+ * The (y, m, day) of the business date containing instant `ms`. A
+ * transaction before 08:00 ET belongs to the previous calendar date's
+ * business day (before that day's open).
+ */
+function nyBusinessDateParts(ms: number): { y: number; m: number; day: number } {
+  const p = nyParts(ms)
+  if (p.hour < HELIOS_BUSINESS_DAY_START_HOUR) {
+    const prevMidnight = nyAddDays(nyWallClockToInstant(p.y, p.m, p.day, 0), -1)
+    const pp = nyParts(prevMidnight)
+    return { y: pp.y, m: pp.m, day: pp.day }
+  }
+  return { y: p.y, m: p.m, day: p.day }
+}
+
+/** Business-day floor: 08:00 ET on the business date containing `ms`. */
+export function nyFloorToBusinessDay(ms: number): number {
+  const b = nyBusinessDateParts(ms)
+  return nyWallClockToInstant(b.y, b.m, b.day, HELIOS_BUSINESS_DAY_START_HOUR)
+}
+
+/** ISO-week (Mon-start) business-day floor: 08:00 ET on the week's Monday. */
+export function nyFloorToBusinessWeek(ms: number): number {
+  const b = nyBusinessDateParts(ms)
+  const bizMidnight = nyWallClockToInstant(b.y, b.m, b.day, 0)
+  const dow = (nyParts(bizMidnight).weekday + 6) % 7
+  const mondayMidnight = nyAddDays(bizMidnight, -dow)
+  const mp = nyParts(mondayMidnight)
+  return nyWallClockToInstant(mp.y, mp.m, mp.day, HELIOS_BUSINESS_DAY_START_HOUR)
+}
+
+/** Business-day floor: 08:00 ET on the 1st of the business date's month. */
+export function nyFloorToBusinessMonth(ms: number): number {
+  const b = nyBusinessDateParts(ms)
+  return nyWallClockToInstant(b.y, b.m, 1, HELIOS_BUSINESS_DAY_START_HOUR)
+}
+
+/**
+ * Add `months` to an instant representing a business-month boundary,
+ * re-anchoring at 08:00 ET on the 1st.
+ */
+export function nyAddBusinessMonths(ms: number, months: number): number {
+  const p = nyParts(ms)
+  let y = p.y
+  let m = p.m + months
+  while (m > 12) {
+    m -= 12
+    y += 1
+  }
+  while (m < 1) {
+    m += 12
+    y -= 1
+  }
+  return nyWallClockToInstant(y, m, 1, HELIOS_BUSINESS_DAY_START_HOUR)
 }
 
 const HOUR_MS = 60 * 60 * 1000

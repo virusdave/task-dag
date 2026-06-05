@@ -1,4 +1,5 @@
 import {
+  HELIOS_BUSINESS_DAY_START_HOUR,
   HELIOS_PENDING_PURCHASE_SITE_DEALERS,
   type BasketByPurchaseNumberPoint,
   type CohortRetentionRow,
@@ -297,6 +298,12 @@ export async function getCustomerValueAnalytics(
 
   if (dealerIds.length === 0) return emptyResp
 
+  // Business-day rollover shift (08:00 ET): cohort acquisition buckets
+  // and retention period indices are computed on NY-business-local time
+  // (NY wall-clock minus 8h), so an acquisition or repeat purchase in
+  // the 00:00–08:00 ET pre-open window is attributed to the previous
+  // business day/week/month. See shared/contracts/domain/businessDay.ts.
+  const shift = `interval '${HELIOS_BUSINESS_DAY_START_HOUR} hours'`
   // Single-statement UNION ALL: every branch returns the same column
   // shape (kind, bucket, overflow, n, v1..v8). Branches document what
   // they put in each value slot.
@@ -724,6 +731,13 @@ async function runRetentionQueries(args: RetentionQueryArgs): Promise<RetentionP
     return { cohortRetention: [], firstSecondConversion: [] }
   }
 
+  // Business-day rollover shift (08:00 ET): cohort acquisition buckets
+  // and retention period indices are computed on the business-local
+  // timeline (NY wall-clock shifted back by the rollover) so pre-open
+  // orders roll into the previous business day. See
+  // shared/contracts/domain/businessDay.ts.
+  const shift = `interval '${HELIOS_BUSINESS_DAY_START_HOUR} hours'`
+
   // The retention SQL re-derives the per-customer rollup (first
   // purchase time, total purchases, second purchase time) under
   // the same cohort-scope filter the main query uses. We use a
@@ -762,13 +776,14 @@ async function runRetentionQueries(args: RetentionQueryArgs): Promise<RetentionP
     ),
     customers_in_scope as (
       select cr.*,
-        -- Cohort acquisition bucket is a NY-local calendar boundary
-        -- (week starts NY-Monday, month starts NY-1st), re-wrapped to
-        -- timestamptz so node-postgres parses it as a real UTC instant.
-        -- See helios/src/server/metrics/bucketSelectSql.ts for the
-        -- shared NY-day / UTC-hour convention every helios metric
-        -- query uses.
-        (date_trunc($5::text, cr.first_purchase_at at time zone 'America/New_York'))
+        -- Cohort acquisition bucket is a NY business-day boundary
+        -- (08:00-ET rollover; week starts business-Monday, month starts
+        -- business-1st), re-wrapped to timestamptz so node-postgres
+        -- parses it as a real UTC instant. See
+        -- helios/src/server/metrics/bucketSelectSql.ts and
+        -- shared/contracts/domain/businessDay.ts for the shared
+        -- business-day / UTC-hour convention every helios metric uses.
+        (date_trunc($5::text, (cr.first_purchase_at at time zone 'America/New_York') - ${shift}) + ${shift})
           at time zone 'America/New_York' as cohort_key
       from customer_rollup cr
       where case $4::text
@@ -812,14 +827,14 @@ async function runRetentionQueries(args: RetentionQueryArgs): Promise<RetentionP
         -- America/New_York" to force NY-wall-clock extraction.
         case when $5::text = 'week'
           then (
-            (date_trunc('week', pe.pay_time at time zone 'America/New_York')::date
-              - (cis.cohort_key at time zone 'America/New_York')::date) / 7
+            (date_trunc('week', (pe.pay_time at time zone 'America/New_York') - ${shift})::date
+              - ((cis.cohort_key at time zone 'America/New_York') - ${shift})::date) / 7
           )
           else (
-            (extract(year  from pe.pay_time   at time zone 'America/New_York')::int
-              - extract(year  from cis.cohort_key at time zone 'America/New_York')::int) * 12
-            + (extract(month from pe.pay_time   at time zone 'America/New_York')::int
-              - extract(month from cis.cohort_key at time zone 'America/New_York')::int)
+            (extract(year  from (pe.pay_time   at time zone 'America/New_York') - ${shift})::int
+              - extract(year  from (cis.cohort_key at time zone 'America/New_York') - ${shift})::int) * 12
+            + (extract(month from (pe.pay_time   at time zone 'America/New_York') - ${shift})::int
+              - extract(month from (cis.cohort_key at time zone 'America/New_York') - ${shift})::int)
           )
         end as period_index
       from customers_in_scope cis

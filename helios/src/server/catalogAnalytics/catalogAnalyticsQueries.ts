@@ -9,6 +9,7 @@ import {
   type MetricsEntityRankingsResponse,
 } from '../../shared/contracts/index.js'
 import { getPool } from '../db/pool.js'
+import { bucketLocalExpr } from '../metrics/bucketSelectSql.js'
 
 // ============================================================================
 // Catalog analytics SQL helpers
@@ -464,7 +465,7 @@ export async function getCatalogAnalyticsPoints(
              -- Distinct calendar days (ET) that this variant sold on.
              -- Powers the "sales-day coverage" scatter and the
              -- promo-event vs reliable-demand quadrant analysis.
-             count(distinct date_trunc('day', oi.pay_time at time zone 'America/New_York')) as days_with_sales
+             count(distinct ${bucketLocalExpr('day', 'oi.pay_time')}) as days_with_sales
       from sweed_order_items_flat oi
       where oi.dealer_id = any($1::bigint[])
         and oi.pay_time >= $2 and oi.pay_time < $3

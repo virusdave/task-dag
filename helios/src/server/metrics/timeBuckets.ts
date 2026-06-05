@@ -1,13 +1,21 @@
-import type { MetricAggregation } from '../../shared/contracts/index.js'
+import {
+  HELIOS_BUSINESS_DAY_START_HOUR,
+  type MetricAggregation,
+} from '../../shared/contracts/index.js'
 
 /**
  * Pure helpers shared by every metrics query that needs to enumerate
  * bucket-start timestamps for a chart's x-axis. All retail bucketing in
- * Helios is done in **America/New_York** time, because every store is
- * in NYC and every operator reasons about "today" / "this week" /
- * "this month" in local calendar time. A sale that closes at
- * 22:30 ET on Wednesday must land in the Wednesday bucket, not the
- * Thursday bucket (which it would if we bucketed in UTC).
+ * Helios is done by the NYC **business day**, which rolls over at
+ * 08:00 ET (NOT calendar midnight) — see
+ * shared/contracts/domain/businessDay.ts for the operator rule. Every
+ * store is in NYC and every operator reasons about "today" / "this
+ * week" / "this month" as the business day. A sale that closes at
+ * 22:30 ET on Wednesday lands in the Wednesday business-day bucket; a
+ * pre-open prepaid pickup at 07:30 ET Thursday lands in the *Wednesday*
+ * business-day bucket (before Thursday's 08:00 open). Bucket-start
+ * instants are therefore 08:00 ET on the business date (12:00Z under
+ * EDT, 13:00Z under EST).
  *
  * NOTE — `hour` is intentionally bucketed in UTC, not NY-local.
  * Reasons:
@@ -85,10 +93,11 @@ function offsetMillisAt(instantUtc: Date): number {
  * twice) resolve to the EARLIER instant (EDT). Non-existent
  * spring-forward times (02:30 on the Sunday it doesn't exist) resolve
  * to the equivalent EDT instant (i.e. 02:30 EST → 03:30 EDT). We
- * never call this for local 01:00 or 02:00 in practice — only midnight
- * (day / week / month) and the day-arithmetic adds whole days, never
- * a 1-hour offset — so neither edge actually matters for our bucket
- * boundaries.
+ * never call this for local 01:00 or 02:00 in practice — only the
+ * 08:00 ET business-day boundary (day / week / month), which is far
+ * from both the 02:00 spring-forward gap and the 01:00 fall-back
+ * overlap, and the day-arithmetic adds whole days, never a 1-hour
+ * offset — so neither edge actually matters for our bucket boundaries.
  */
 function nyWallTimeToInstant(
   y: number,
@@ -127,6 +136,29 @@ function normalizedYmd(y: number, m: number, day: number): {
     m: d.getUTCMonth() + 1,
     day: d.getUTCDate(),
   }
+}
+
+/**
+ * The (y, m, day) of the **business date** containing instant `d`.
+ * A transaction before 08:00 ET belongs to the previous calendar
+ * date's business day (it is before that day's open). Mirrors the SQL
+ * `((ts at time zone 'America/New_York') - interval '8 hours')::date`.
+ */
+function businessDateParts(d: Date): { y: number; m: number; day: number } {
+  const p = nyParts(d)
+  if (p.hour < HELIOS_BUSINESS_DAY_START_HOUR) {
+    return normalizedYmd(p.y, p.m, p.day - 1)
+  }
+  return { y: p.y, m: p.m, day: p.day }
+}
+
+/**
+ * The UTC instant of the business-day boundary (08:00 ET) on the given
+ * NY calendar date. This is the canonical bucket-start key for a
+ * day/week/month bucket.
+ */
+function businessBoundaryInstant(y: number, m: number, day: number): Date {
+  return nyWallTimeToInstant(y, m, day, HELIOS_BUSINESS_DAY_START_HOUR)
 }
 
 // ----- public API ----------------------------------------------------
@@ -218,25 +250,25 @@ function floorTo(d: Date, agg: MetricAggregation): Date {
   if (agg === 'hour') {
     return new Date(Math.floor(d.getTime() / HOUR_MS) * HOUR_MS)
   }
-  const p = nyParts(d)
+  const bd = businessDateParts(d)
   switch (agg) {
     case 'date':
     case 'total':
     case 'dow':
     case 'dom':
     case 'dofortnight':
-      return nyWallTimeToInstant(p.y, p.m, p.day)
+      return businessBoundaryInstant(bd.y, bd.m, bd.day)
     case 'week': {
       // ISO week starts Monday. Compute the local DOW via the surrogate
       // (y, m, day)-as-UTC, since the JS Date's DOW math is calendar-
       // pure and doesn't care which timezone we *meant* the y/m/d to be in.
-      const surrogate = new Date(Date.UTC(p.y, p.m - 1, p.day))
+      const surrogate = new Date(Date.UTC(bd.y, bd.m - 1, bd.day))
       const daysSinceMonday = (surrogate.getUTCDay() + 6) % 7
-      const monday = normalizedYmd(p.y, p.m, p.day - daysSinceMonday)
-      return nyWallTimeToInstant(monday.y, monday.m, monday.day)
+      const monday = normalizedYmd(bd.y, bd.m, bd.day - daysSinceMonday)
+      return businessBoundaryInstant(monday.y, monday.m, monday.day)
     }
     case 'month':
-      return nyWallTimeToInstant(p.y, p.m, 1)
+      return businessBoundaryInstant(bd.y, bd.m, 1)
   }
 }
 
@@ -249,23 +281,23 @@ function floorTo(d: Date, agg: MetricAggregation): Date {
  */
 export function previousBucketStart(d: Date, agg: MetricAggregation): Date {
   if (agg === 'hour') return new Date(d.getTime() - HOUR_MS)
-  const p = nyParts(d)
+  const bd = businessDateParts(d)
   switch (agg) {
     case 'date':
     case 'total':
     case 'dow':
     case 'dom':
     case 'dofortnight': {
-      const prev = normalizedYmd(p.y, p.m, p.day - 1)
-      return nyWallTimeToInstant(prev.y, prev.m, prev.day)
+      const prev = normalizedYmd(bd.y, bd.m, bd.day - 1)
+      return businessBoundaryInstant(prev.y, prev.m, prev.day)
     }
     case 'week': {
-      const prev = normalizedYmd(p.y, p.m, p.day - 7)
-      return nyWallTimeToInstant(prev.y, prev.m, prev.day)
+      const prev = normalizedYmd(bd.y, bd.m, bd.day - 7)
+      return businessBoundaryInstant(prev.y, prev.m, prev.day)
     }
     case 'month': {
-      const prev = normalizedYmd(p.y, p.m - 1, 1)
-      return nyWallTimeToInstant(prev.y, prev.m, prev.day)
+      const prev = normalizedYmd(bd.y, bd.m - 1, 1)
+      return businessBoundaryInstant(prev.y, prev.m, prev.day)
     }
   }
 }
@@ -278,23 +310,23 @@ export function previousBucketStart(d: Date, agg: MetricAggregation): Date {
  */
 export function advanceBucketStart(d: Date, agg: MetricAggregation): Date {
   if (agg === 'hour') return new Date(d.getTime() + HOUR_MS)
-  const p = nyParts(d)
+  const bd = businessDateParts(d)
   switch (agg) {
     case 'date':
     case 'total':
     case 'dow':
     case 'dom':
     case 'dofortnight': {
-      const next = normalizedYmd(p.y, p.m, p.day + 1)
-      return nyWallTimeToInstant(next.y, next.m, next.day)
+      const next = normalizedYmd(bd.y, bd.m, bd.day + 1)
+      return businessBoundaryInstant(next.y, next.m, next.day)
     }
     case 'week': {
-      const next = normalizedYmd(p.y, p.m, p.day + 7)
-      return nyWallTimeToInstant(next.y, next.m, next.day)
+      const next = normalizedYmd(bd.y, bd.m, bd.day + 7)
+      return businessBoundaryInstant(next.y, next.m, next.day)
     }
     case 'month': {
-      const next = normalizedYmd(p.y, p.m + 1, 1)
-      return nyWallTimeToInstant(next.y, next.m, next.day)
+      const next = normalizedYmd(bd.y, bd.m + 1, 1)
+      return businessBoundaryInstant(next.y, next.m, next.day)
     }
   }
 }
