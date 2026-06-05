@@ -314,10 +314,16 @@ export async function getInventoryProcurement(
     const reorderPointDays = leadTimeDays + safetyDays
     const targetCoverDays = clamp(leadTimeDays + cadenceDays + safetyDays, 10, 45)
 
-    const recommendedQty =
+    const rawRecommendedQty =
       forecastDailyUnits <= 0
         ? 0
         : Math.max(0, Math.ceil(forecastDailyUnits * targetCoverDays - sellableUnits))
+    // Supplier orders are snapped to case sizes (almost always multiples
+    // of 5). We don't yet record true per-SKU case sizing, so until we can
+    // infer/record it, round any nonzero recommendation UP to the nearest
+    // multiple of 5 with a 10-unit minimum. See A-issue follow-up.
+    const recommendedQty =
+      rawRecommendedQty > 0 ? Math.max(10, Math.ceil(rawRecommendedQty / 5) * 5) : 0
     const recommendedCost = recommendedQty * (unitCostCurrent ?? 0)
     const orderByDate =
       projectedStockoutAt !== null
@@ -533,6 +539,7 @@ const METHODOLOGY: string[] = [
   'Unit cost = current-quantity-weighted average wholesale cost across the SKU\'s on-hand packages. Unit margin = avg unit price − unit cost. COGS is not joined per-sale.',
   'Forecast daily units blends 7d and window velocity (0.6·v7 + 0.4·vW), capped at 3× the window velocity to damp spikes.',
   'Days supply = sellable units ÷ forecast daily units. Reorder point = lead time + safety (¼ lead, min 2d). Target cover = clamp(lead + cadence + safety, 10..45). Recommended qty = ceil(forecast·targetCover − sellable units), floored at 0.',
+  'Recommended quantities are snapped to supplier case sizing: any nonzero recommendation is rounded UP to the nearest multiple of 5, with a 10-unit minimum per SKU. (True per-SKU case sizes are not yet recorded; this is a uniform approximation.)',
   'Lead time defaults to a configurable constant (PO line received-at is not populated in source data); reorder cadence is the median gap between distributor delivery dates, clamped 7..45 days.',
   'Package received-at is not populated upstream, so inventory age degrades to days-since-last-observed (coalesce(received_at, latest snapshot time)); it is a lower bound on true age.',
   'Reorder priority blends expected margin loss before replenishment (50%), reorder gap (25%), lost margin/day (15%), confidence (10%), minus a deadweight penalty. Deadweight score blends slow velocity, capital tied up, age, expiry proximity, and weak margin.',

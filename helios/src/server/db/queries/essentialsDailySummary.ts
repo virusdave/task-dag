@@ -32,12 +32,16 @@ import { getPool, type Queryable } from '../pool.js'
 // / queryNetSalesDollars and sweedPackageSnapshotsQueries.queryGrossMarginDollars
 // / queryEffectiveGmPct):
 //
-//   * grossReceipts  = sum(grand_total_dollars)              — includes tax
 //   * grossSales     = sum(subtotal_dollars)                 — pre-tax, PRE-discount (list price)
+//   * grossReceipts  = sum(subtotal_dollars + tax_dollars)   — list + tax, PRE-discount
 //   * netSales       = sum(subtotal_dollars − discount_dollars) — pre-tax, POST-discount
+//   * netReceipts    = sum(subtotal_dollars − discount_dollars + tax_dollars)
+//                    = sum(grand_total_dollars)              — incl tax, POST-discount
 //     [Sweed's `subtotalAmount` is PRE-discount; verified 2026-06-04
-//      that grand_total = subtotal − discount + tax. The prior code
-//      had gross = subtotal+discount and net = subtotal, both wrong.]
+//      that grand_total = subtotal − discount + tax. NB: "gross
+//      receipts" is BEFORE promos (list+tax); grand_total is NET
+//      receipts (after promos). The prior code reported grand_total as
+//      "gross receipts", which was actually net receipts.]
 //   * marginDollars  = Σ_lines (rev − qty·cost) over line items with a
 //                      KNOWN cost. Line items without a known cost
 //                      contribute revenue to grossSales/netSales (those
@@ -91,6 +95,7 @@ interface OrderTotalsRow {
   gross_receipts: string | null
   gross_sales: string | null
   net_sales: string | null
+  net_receipts: string | null
 }
 
 interface MarginRow {
@@ -161,6 +166,7 @@ export async function loadEssentialsDailySummary(
           so.grand_total_dollars,
           so.subtotal_dollars,
           so.discount_dollars,
+          so.tax_dollars,
           case
             when so.customer_id is not null
              and not exists (
@@ -179,9 +185,10 @@ export async function loadEssentialsDailySummary(
         dealer_id,
         count(*) filter (where is_first_time) as new_purchases,
         count(*) filter (where not is_first_time) as returning_purchases,
-        sum(coalesce(grand_total_dollars, 0))::numeric as gross_receipts,
+        sum(coalesce(subtotal_dollars, 0) + coalesce(tax_dollars, 0))::numeric as gross_receipts,
         sum(coalesce(subtotal_dollars, 0))::numeric as gross_sales,
-        sum(coalesce(subtotal_dollars, 0) - coalesce(discount_dollars, 0))::numeric as net_sales
+        sum(coalesce(subtotal_dollars, 0) - coalesce(discount_dollars, 0))::numeric as net_sales,
+        sum(coalesce(subtotal_dollars, 0) - coalesce(discount_dollars, 0) + coalesce(tax_dollars, 0))::numeric as net_receipts
       from todays_orders
       group by dealer_id
     `,
@@ -292,6 +299,7 @@ export async function loadEssentialsDailySummary(
       grossReceiptsDollars: orders ? round2(Number(orders.gross_receipts ?? 0)) : 0,
       grossSalesDollars: orders ? round2(Number(orders.gross_sales ?? 0)) : 0,
       netSalesDollars: orders ? round2(Number(orders.net_sales ?? 0)) : 0,
+      netReceiptsDollars: orders ? round2(Number(orders.net_receipts ?? 0)) : 0,
       marginDollars: round2(marginDollars),
       gmPct,
       marginCoverageDollars: round2(pricedRevenue),
@@ -317,6 +325,7 @@ export async function loadEssentialsDailySummary(
         grossReceiptsDollars: acc.grossReceiptsDollars + row.grossReceiptsDollars,
         grossSalesDollars: acc.grossSalesDollars + row.grossSalesDollars,
         netSalesDollars: acc.netSalesDollars + row.netSalesDollars,
+        netReceiptsDollars: acc.netReceiptsDollars + row.netReceiptsDollars,
         marginDollars: acc.marginDollars + row.marginDollars,
         // gmPct/marginCoverageDollars overwritten after the fold.
         gmPct: null,
@@ -333,6 +342,7 @@ export async function loadEssentialsDailySummary(
       grossReceiptsDollars: 0,
       grossSalesDollars: 0,
       netSalesDollars: 0,
+      netReceiptsDollars: 0,
       marginDollars: 0,
       gmPct: null,
       marginCoverageDollars: 0,
@@ -341,6 +351,7 @@ export async function loadEssentialsDailySummary(
   totals.grossReceiptsDollars = round2(totals.grossReceiptsDollars)
   totals.grossSalesDollars = round2(totals.grossSalesDollars)
   totals.netSalesDollars = round2(totals.netSalesDollars)
+  totals.netReceiptsDollars = round2(totals.netReceiptsDollars)
   totals.marginDollars = round2(totalMarginDollars)
   totals.marginCoverageDollars = round2(totalPricedRevenue)
   totals.gmPct = totalPricedRevenue > 0 ? round4(totalMarginDollars / totalPricedRevenue) : null

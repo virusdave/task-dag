@@ -141,6 +141,11 @@ function SummaryRow({ row, emphasis }: RowProps) {
         emphasis={emphasis}
       />
       <SummaryCell
+        label="net receipts"
+        value={formatDollars(row.netReceiptsDollars)}
+        emphasis={emphasis}
+      />
+      <SummaryCell
         label="net sales"
         value={formatDollars(row.netSalesDollars)}
         emphasis={emphasis}

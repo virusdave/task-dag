@@ -7238,8 +7238,8 @@ span.metric-chart-legend-item {
 
 .essentials-daily-summary__row {
   display: grid;
-  /* label + 9 cells; cells flex to fill the available width. */
-  grid-template-columns: minmax(72px, max-content) repeat(9, minmax(58px, 1fr));
+  /* label + 10 cells; cells flex to fill the available width. */
+  grid-template-columns: minmax(72px, max-content) repeat(10, minmax(54px, 1fr));
   gap: 0.4rem;
   align-items: end;
   padding: 0.25rem 0.1rem;

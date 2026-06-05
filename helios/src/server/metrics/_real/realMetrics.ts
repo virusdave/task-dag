@@ -13,6 +13,7 @@ import {
   queryGrossReceiptsDollars,
   queryGrossSalesDollars,
   queryNetSalesDollars,
+  queryNetReceiptsDollars,
   queryPaymentOrderCount,
   queryPaymentSalesDollars,
 } from './sweedOrdersQueries.js'
@@ -75,10 +76,10 @@ export const REAL_METRICS: ReadonlyArray<MetricDef> = [
   {
     id: 'essentials.gross_receipts',
     group: 'Essentials',
-    title: 'Gross receipts $ (incl. tax)',
+    title: 'Gross receipts $ (incl. tax, pre-discount)',
     description:
-      'Sum of `grand_total_dollars` per bucket — every dollar that came in, including tax collected and net of promos/discounts. This is the "money in the drawer" number; reconciliation friendly.',
-    series: [{ id: 'gross_receipts', label: 'Gross receipts $ (incl. tax)', colour: '#1f77b4' }],
+      'Sum of `subtotal_dollars + tax_dollars` per bucket — list price plus sales tax, BEFORE promos/discounts. This is "what the receipts would total at list". For the post-promo amount actually collected, see Net receipts.',
+    series: [{ id: 'gross_receipts', label: 'Gross receipts $ (incl. tax, pre-discount)', colour: '#1f77b4' }],
     defaultAggregation: 'week',
     supportedAggregations: [...SUPPORTED],
     query: queryGrossReceiptsDollars,
@@ -94,6 +95,18 @@ export const REAL_METRICS: ReadonlyArray<MetricDef> = [
     defaultAggregation: 'week',
     supportedAggregations: [...SUPPORTED],
     query: queryNetSalesDollars,
+    supports: { partialBuckets: true },
+  },
+  {
+    id: 'essentials.net_receipts',
+    group: 'Essentials',
+    title: 'Net receipts $ (incl. tax, net of discounts)',
+    description:
+      'Sum of `subtotal_dollars − discount_dollars + tax_dollars` per bucket (= `grand_total_dollars`) — the post-promo amount actually collected including tax. This is the "money in the drawer" number; reconciliation friendly.',
+    series: [{ id: 'net_receipts', label: 'Net receipts $ (incl. tax, net of discounts)', colour: '#8c564b' }],
+    defaultAggregation: 'week',
+    supportedAggregations: [...SUPPORTED],
+    query: queryNetReceiptsDollars,
     supports: { partialBuckets: true },
   },
   {

@@ -27,6 +27,7 @@ function mockPool(
       gross_receipts: number
       gross_sales: number
       net_sales: number
+      net_receipts: number
     }>
     marginRows: Array<{
       dealer_id: number
@@ -92,6 +93,7 @@ describe('loadEssentialsDailySummary', () => {
           gross_receipts: 550.8,
           gross_sales: 487.4,
           net_sales: 487.4,
+          net_receipts: 543.2,
         },
         {
           dealer_id: 210705,
@@ -100,6 +102,7 @@ describe('loadEssentialsDailySummary', () => {
           gross_receipts: 1113.25,
           gross_sales: 985.29,
           net_sales: 985.29,
+          net_receipts: 1099.8,
         },
       ],
       marginRows: [
@@ -130,6 +133,7 @@ describe('loadEssentialsDailySummary', () => {
       grossReceiptsDollars: 550.8,
       grossSalesDollars: 487.4,
       netSalesDollars: 487.4,
+      netReceiptsDollars: 543.2,
       marginDollars: 300,
       gmPct: 0.75,
       marginCoverageDollars: 400,
@@ -144,6 +148,7 @@ describe('loadEssentialsDailySummary', () => {
       grossReceiptsDollars: 1113.25,
       grossSalesDollars: 985.29,
       netSalesDollars: 985.29,
+      netReceiptsDollars: 1099.8,
       marginDollars: 400,
       gmPct: 0.5,
       marginCoverageDollars: 800,
@@ -162,6 +167,7 @@ describe('loadEssentialsDailySummary', () => {
       grossReceiptsDollars: 1664.05,
       grossSalesDollars: 1472.69,
       netSalesDollars: 1472.69,
+      netReceiptsDollars: 1643,
       marginDollars: 700,
       marginCoverageDollars: 1200,
     })
@@ -184,6 +190,7 @@ describe('loadEssentialsDailySummary', () => {
           gross_receipts: 100,
           gross_sales: 90,
           net_sales: 90,
+          net_receipts: 99,
         },
       ],
       marginRows: [], // no priced line items today

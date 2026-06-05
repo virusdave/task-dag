@@ -949,16 +949,21 @@ export async function queryDeliveryOrderCountByZone(args: MetricQueryArgs): Prom
 //     with a discount, grand_total = subtotal − discount + tax, which
 //     only holds when `subtotal` is pre-discount. So gross sales =
 //     subtotal_dollars alone — "list price before promos/discounts".]
-//   * Gross Receipts (incl tax)          = grand_total_dollars
+//   * Gross Receipts (incl tax, PRE-discount) = subtotal_dollars + tax_dollars
+//     [List price plus sales tax, BEFORE promos/discounts.]
 //   * Net Sales (ex-tax, POST-discount)  = subtotal_dollars − discount_dollars
 //     [Gross sales minus promos/discounts; still excludes tax.]
+//   * Net Receipts (incl tax, POST-discount) =
+//       subtotal_dollars − discount_dollars + tax_dollars = grand_total_dollars
+//     [The post-promo amount actually collected — "money in the drawer".]
 //
 // NOTE (2026-06-04): the pre-2026-06-04 code had this backwards — it
 // assumed `subtotalAmount` was post-discount, so it reported gross =
 // subtotal+discount (double-counting the discount) and net = subtotal
 // (= the gross/list value). Both are corrected here. Discounts are
 // rare (~0.2% of orders) so historical charts barely move, but the
-// definitions are now right.
+// definitions are now right. NB: "gross receipts" is list+tax BEFORE
+// promos; `grand_total` is NET receipts (after promos).
 // ============================================================================
 
 async function querySingleSumPerBucket(
@@ -1000,12 +1005,12 @@ export function queryGrossSalesDollars(args: MetricQueryArgs): Promise<MetricRow
   )
 }
 
-/** essentials.gross_receipts — sum(grand_total) per bucket, incl. tax. */
+/** essentials.gross_receipts — sum(subtotal + tax) per bucket: list price + tax, PRE-discount. */
 export function queryGrossReceiptsDollars(args: MetricQueryArgs): Promise<MetricRow[]> {
   return querySingleSumPerBucket(
     args,
     'gross_receipts',
-    'sum(coalesce(grand_total_dollars, 0))',
+    'sum(coalesce(subtotal_dollars, 0) + coalesce(tax_dollars, 0))',
   )
 }
 
@@ -1015,5 +1020,14 @@ export function queryNetSalesDollars(args: MetricQueryArgs): Promise<MetricRow[]
     args,
     'net_sales',
     'sum(coalesce(subtotal_dollars, 0) - coalesce(discount_dollars, 0))',
+  )
+}
+
+/** essentials.net_receipts — sum(subtotal − discount + tax) = grand_total: incl tax, POST-discount. */
+export function queryNetReceiptsDollars(args: MetricQueryArgs): Promise<MetricRow[]> {
+  return querySingleSumPerBucket(
+    args,
+    'net_receipts',
+    'sum(coalesce(subtotal_dollars, 0) - coalesce(discount_dollars, 0) + coalesce(tax_dollars, 0))',
   )
 }

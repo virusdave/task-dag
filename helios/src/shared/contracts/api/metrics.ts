@@ -589,12 +589,15 @@ export const EssentialsDailySummaryRowSchema = z.object({
   /** Purchases (paid orders) today on this site whose customer had a
    *  prior order. */
   returningPurchases: z.number().int().min(0),
-  /** sum(grand_total) — includes tax. */
+  /** sum(subtotal + tax) — list price + tax, PRE-discount. */
   grossReceiptsDollars: z.number().finite(),
-  /** sum(subtotal + discount) — pre-tax, pre-discount. */
+  /** sum(subtotal) — pre-tax, PRE-discount (list price). */
   grossSalesDollars: z.number().finite(),
-  /** sum(subtotal) — pre-tax, post-discount. */
+  /** sum(subtotal − discount) — pre-tax, POST-discount. */
   netSalesDollars: z.number().finite(),
+  /** sum(subtotal − discount + tax) = grand_total — incl tax, POST-discount
+   *  ("money in the drawer"). */
+  netReceiptsDollars: z.number().finite(),
   /** sum(line revenue − line cogs) across line items with a known
    *  wholesale cost. Line items without a known cost contribute
    *  revenue toward `grossSales/netSales` (those are order-grain)
