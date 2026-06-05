@@ -32,15 +32,18 @@ import maplibregl from 'maplibre-gl'
 
 import {
   CustomerVisitorDetailsResponseSchema,
+  type CustomerVisitorAddableSegment,
   type CustomerVisitorAnchorScan,
   type CustomerVisitorDetailsResponse,
   type CustomerVisitorMapPoint,
   type CustomerVisitorPriorVisit,
   type CustomerVisitorPurchaseInvoice,
+  type CustomerVisitorSegmentMembership,
 } from '../../../shared/contracts/index.js'
-import { loadJson } from '../../app/fetchJson.js'
+import { loadJson, mutateJson } from '../../app/fetchJson.js'
 import { buildAppPath } from '../../app/paths.js'
 import { Pill } from '../../components/Pill.js'
+import { z } from 'zod'
 
 // ---------------------------------------------------------------------
 // Map style — same recipe as CustomerMapPage. Kept inline to avoid a
@@ -126,6 +129,8 @@ export function CustomerVisitorDetailsPage(): JSX.Element {
   const [data, setData] = useState<CustomerVisitorDetailsResponse | null>(initialData)
   const [error, setError] = useState<string | null>(initialData === null ? 'load-failed' : null)
   const [reloading, setReloading] = useState(false)
+  // Bumped to force a re-fetch (e.g. after enqueuing a segment refresh).
+  const [reloadKey, setReloadKey] = useState(0)
 
   // Manual refresh button (and re-fetch on scanId change, e.g. when an
   // operator clicks a prior-visit link in the table).
@@ -154,7 +159,7 @@ export function CustomerVisitorDetailsPage(): JSX.Element {
     return () => {
       cancelled = true
     }
-  }, [scanId])
+  }, [scanId, reloadKey])
 
   if (!Number.isFinite(scanId) || scanId <= 0) {
     return (
@@ -187,7 +192,14 @@ export function CustomerVisitorDetailsPage(): JSX.Element {
     )
   }
 
-  return <CustomerVisitorDetailsView data={data} reloading={reloading} />
+  return (
+    <CustomerVisitorDetailsView
+      data={data}
+      reloading={reloading}
+      scanId={scanId}
+      onRequestReload={() => setReloadKey((k) => k + 1)}
+    />
+  )
 }
 
 // ---------------------------------------------------------------------
@@ -197,9 +209,13 @@ export function CustomerVisitorDetailsPage(): JSX.Element {
 function CustomerVisitorDetailsView({
   data,
   reloading,
+  scanId,
+  onRequestReload,
 }: {
   data: CustomerVisitorDetailsResponse
   reloading: boolean
+  scanId: number
+  onRequestReload: () => void
 }): JSX.Element {
   const { anchorScan, linkedCustomer, priorVisits, purchaseInvoices, purchaseLifetime } = data
 
@@ -462,6 +478,13 @@ function CustomerVisitorDetailsView({
         </details>
       </section>
 
+      <SweedSegmentsSection
+        data={data}
+        scanId={scanId}
+        hasLink={hasLink}
+        onRequestReload={onRequestReload}
+      />
+
       <details className="cd-debug">
         <summary>Anchor scan raw envelope (JSON)</summary>
         <pre className="cd-debug-pre">{JSON.stringify(anchorScan.rawEnvelope, null, 2)}</pre>
@@ -472,6 +495,207 @@ function CustomerVisitorDetailsView({
           <summary>Sweed customer raw match (JSON)</summary>
           <pre className="cd-debug-pre">{JSON.stringify(linkedCustomer.rawMatch, null, 2)}</pre>
         </details>
+      ) : null}
+    </section>
+  )
+}
+
+// ---------------------------------------------------------------------
+// Sweed marketing segments section (virusdave/top-level#12)
+// ---------------------------------------------------------------------
+
+const RefreshSegmentsResponseSchema = z.object({
+  enqueued: z.boolean(),
+  sweedCustomerId: z.number().int(),
+  status: z.string(),
+})
+
+const SCOPE_ORDER: Record<'state' | 'site', number> = { state: 0, site: 1 }
+
+function segmentTypeLabel(type: CustomerVisitorSegmentMembership['type']): string {
+  if (type === 'static') return 'Static'
+  if (type === 'dynamic') return 'Dynamic'
+  return 'Unknown'
+}
+
+function groupByScope<T extends { scopeLevel: 'state' | 'site'; scopeLabel: string }>(
+  items: T[],
+): Array<{ scopeLevel: 'state' | 'site'; scopeLabel: string; items: T[] }> {
+  const byKey = new Map<string, { scopeLevel: 'state' | 'site'; scopeLabel: string; items: T[] }>()
+  for (const item of items) {
+    const key = `${item.scopeLevel}:${item.scopeLabel}`
+    const existing = byKey.get(key)
+    if (existing) existing.items.push(item)
+    else byKey.set(key, { scopeLevel: item.scopeLevel, scopeLabel: item.scopeLabel, items: [item] })
+  }
+  return [...byKey.values()].sort((a, b) => {
+    const s = SCOPE_ORDER[a.scopeLevel] - SCOPE_ORDER[b.scopeLevel]
+    return s !== 0 ? s : a.scopeLabel.localeCompare(b.scopeLabel)
+  })
+}
+
+function formatDateShort(iso: string | null): string {
+  if (!iso) return '—'
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return '—'
+  return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })
+}
+
+function SweedSegmentsSection({
+  data,
+  scanId,
+  hasLink,
+  onRequestReload,
+}: {
+  data: CustomerVisitorDetailsResponse
+  scanId: number
+  hasLink: boolean
+  onRequestReload: () => void
+}): JSX.Element {
+  const { segments, addableStaticSegments, segmentsState } = data
+  const [busy, setBusy] = useState(false)
+  const [actionError, setActionError] = useState<string | null>(null)
+
+  const membershipGroups = groupByScope(segments)
+  const addableGroups = groupByScope(addableStaticSegments)
+
+  async function onRefresh(): Promise<void> {
+    setBusy(true)
+    setActionError(null)
+    try {
+      await mutateJson(
+        `/api/admin/customers/visitors/${scanId}/refresh-segments`,
+        RefreshSegmentsResponseSchema,
+        { method: 'POST', body: JSON.stringify({}) },
+      )
+      // Reflect 'pending' immediately, then re-pull once the urgent
+      // Sweed-pool job has had a moment to run.
+      onRequestReload()
+      setTimeout(onRequestReload, 3500)
+    } catch (cause) {
+      setActionError(cause instanceof Error ? cause.message : 'Refresh failed')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <section className="cd-table-card cd-segments">
+      <div className="cd-section-head">
+        <h3>Sweed segments ({segments.length})</h3>
+        <div className="cd-segments-refresh">
+          {segmentsState.refreshedAt ? (
+            <span className="subtle-copy">
+              cached {formatDateShort(segmentsState.refreshedAt)}
+              {segmentsState.status === 'pending' ? ' · refresh queued…' : ''}
+              {segmentsState.status === 'failed' ? ' · last refresh failed' : ''}
+            </span>
+          ) : (
+            <span className="subtle-copy">
+              {segmentsState.status === 'pending' ? 'refresh queued…' : 'not yet fetched'}
+            </span>
+          )}
+          {hasLink ? (
+            <button type="button" className="cd-btn" onClick={() => void onRefresh()} disabled={busy}>
+              {busy ? 'Refreshing…' : 'Refresh segments'}
+            </button>
+          ) : null}
+        </div>
+      </div>
+
+      {actionError ? <p className="cd-error subtle-copy">{actionError}</p> : null}
+      {segmentsState.status === 'failed' && segmentsState.lastError ? (
+        <p className="cd-error subtle-copy">Sweed error: {segmentsState.lastError}</p>
+      ) : null}
+
+      {!hasLink ? (
+        <p className="subtle-copy cd-empty">
+          Segments load once the CRM link transitions to <code>linked</code>.
+        </p>
+      ) : segments.length === 0 ? (
+        <p className="subtle-copy cd-empty">
+          {segmentsState.status === 'never'
+            ? 'No segment data cached yet — click “Refresh segments”.'
+            : 'This customer is not in any Sweed marketing segments.'}
+        </p>
+      ) : (
+        <div className="cd-segment-groups">
+          {membershipGroups.map((group) => (
+            <div className="cd-segment-group" key={`${group.scopeLevel}:${group.scopeLabel}`}>
+              <h4 className="cd-segment-scope">
+                {group.scopeLevel === 'state' ? 'State-wide' : `Site · ${group.scopeLabel}`}
+              </h4>
+              <ul className="cd-segment-list">
+                {group.items.map((seg) => (
+                  <li className="cd-segment-row" key={seg.segmentId}>
+                    <span className="cd-segment-name">{seg.name}</span>
+                    <Pill tone={seg.type === 'static' ? 'success' : 'muted'}>
+                      {segmentTypeLabel(seg.type)}
+                    </Pill>
+                    {seg.enabled === false ? <Pill tone="warning">disabled</Pill> : null}
+                    <span className="subtle-copy cd-segment-since">
+                      since {formatDateShort(seg.dateOnEnter)}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Add-to-static-segment affordance. Programmatic add is blocked
+          by Sweed's API (every member-add RPC returns "Action is not
+          available"), so we link the operator into Sweed Prime instead
+          of shipping a button that silently fails. */}
+      {hasLink ? (
+        <div className="cd-segments-add">
+          <h4 className="cd-segment-scope">Add to a static segment</h4>
+          <p className="subtle-copy cd-segments-add-note">
+            Helios can’t write Sweed segment membership yet — Sweed’s API rejects every
+            member-add call (<code>Action is not available</code>). Open the segment in Sweed
+            Prime and add this customer there.{' '}
+            {segmentsState.sweedCustomerId !== null ? (
+              <>
+                Sweed customer ID: <code>{segmentsState.sweedCustomerId}</code>
+              </>
+            ) : null}
+          </p>
+          {addableStaticSegments.length === 0 ? (
+            <p className="subtle-copy cd-empty">
+              No additional static segments available
+              {segmentsState.status === 'never' ? ' (refresh to load the catalog).' : '.'}
+            </p>
+          ) : (
+            <div className="cd-segment-groups">
+              {addableGroups.map((group) => (
+                <div
+                  className="cd-segment-group"
+                  key={`add:${group.scopeLevel}:${group.scopeLabel}`}
+                >
+                  <h5 className="cd-segment-scope">
+                    {group.scopeLevel === 'state' ? 'State-wide' : `Site · ${group.scopeLabel}`}
+                  </h5>
+                  <ul className="cd-segment-list">
+                    {group.items.map((seg: CustomerVisitorAddableSegment) => (
+                      <li className="cd-segment-row" key={seg.segmentId}>
+                        <span className="cd-segment-name">{seg.name}</span>
+                        <a
+                          className="cd-btn cd-btn-link"
+                          href={seg.sweedPrimeUrl}
+                          target="_blank"
+                          rel="noreferrer noopener"
+                        >
+                          Open in Sweed Prime ↗
+                        </a>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
       ) : null}
     </section>
   )

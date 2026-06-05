@@ -703,6 +703,21 @@ const SENTINELS: MigrationSentinel[] = [
     check: (db) =>
       indexExists(db, 'sweed_package_snapshots_dealer_item_observed_max_idx'),
   },
+  {
+    // Sweed marketing-segment caches for the customer/check-in
+    // details page segment surface (virusdave/top-level#12,
+    // FreshlyBakedNYC/automation#40). Without these tables the
+    // details endpoint's segment read fails and the link worker's
+    // best-effort segment refresh has nowhere to write. The
+    // sentinel checks the per-customer membership cache table; the
+    // sibling catalog/refresh tables ship in the same migration.
+    migrationId: '059_sweed_customer_segments',
+    label:
+      'sweed_customer_segments (+ _refresh, sweed_marketing_segments, ' +
+      '_refresh) — cache tables backing the customer-details Sweed ' +
+      'segment-membership display + "add to static segment" picker.',
+    check: (db) => tableExists(db, 'sweed_customer_segments'),
+  },
 ]
 
 interface CacheEntry {

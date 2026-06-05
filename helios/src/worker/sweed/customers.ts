@@ -372,6 +372,155 @@ export async function removeSegmentMember(args: {
 }
 
 // =====================================================================
+// store.customer.segment.list — read a customer's segment membership
+// =====================================================================
+//
+// VERIFIED (live probe, 2026-06): `store.customer.segment.list
+// { id: <customerId>, page, pageSize }` returns the customer's FULL
+// marketing-segment membership regardless of which dealer context is
+// pinned. The response is a BARE ARRAY (not the usual
+// `{ data, totalCount }` envelope). Each row:
+//
+//   { id, name, description, type: { id, name },
+//     dealer: { id, name }, enabled, dateOnEnter }
+//
+// `dealer.id` is the segment's owning scope: 210248 = state / all
+// stores, 210705 = Midtown, 210249 = Bronx. This wrapper is read-only
+// and MUST run inside a `withSweedSession` block.
+export const SWEED_RPC_CUSTOMER_SEGMENT_LIST = 'store.customer.segment.list'
+// VERIFIED: `store.marketing.segment.list { page, pageSize }` returns
+// the `{ data, totalCount }` catalog of segments visible from the
+// calling dealer context. Called against the state dealer it returns
+// every segment across stores (site-specific ones carry their store in
+// `targetStoreNames`). Each row: { id, name, type: { id, name },
+// enabled, totalCustomers, targetStoreNames: string[] }.
+export const SWEED_RPC_MARKETING_SEGMENT_LIST = 'store.marketing.segment.list'
+
+const CustomerSegmentTypeSchema = z
+  .object({ id: z.coerce.number().int().nullable().optional(), name: z.string().nullable().optional() })
+  .passthrough()
+
+const CustomerSegmentRowSchema = z
+  .object({
+    id: z.coerce.string(),
+    name: z.string().nullable().optional(),
+    description: z.string().nullable().optional(),
+    type: CustomerSegmentTypeSchema.nullable().optional(),
+    dealer: z
+      .object({
+        id: z.coerce.number().int().nullable().optional(),
+        name: z.string().nullable().optional(),
+      })
+      .passthrough()
+      .nullable()
+      .optional(),
+    enabled: z.boolean().nullable().optional(),
+    dateOnEnter: z.string().nullable().optional(),
+  })
+  .passthrough()
+export type SweedCustomerSegmentRow = z.infer<typeof CustomerSegmentRowSchema>
+
+/**
+ * Read all marketing segments the given Sweed customer belongs to.
+ * Pages through the (rarely >50) results. Caller MUST be inside a
+ * `withSweedSession` block. `dealerId` only fixes the call context;
+ * the result is the same from any dealer.
+ */
+export async function listSweedCustomerSegments(args: {
+  dealerId: number
+  customerId: number
+}): Promise<SweedCustomerSegmentRow[]> {
+  const pageSize = 100
+  const out: SweedCustomerSegmentRow[] = []
+  for (let page = 1; page <= 10; page++) {
+    const raw = await callSweedRpc<unknown>(args.dealerId, SWEED_RPC_CUSTOMER_SEGMENT_LIST, {
+      id: String(args.customerId),
+      page,
+      pageSize,
+    })
+    // Bare-array response; tolerate a `{ data }` envelope just in case.
+    const arr = Array.isArray(raw)
+      ? raw
+      : Array.isArray((raw as { data?: unknown[] })?.data)
+        ? (raw as { data: unknown[] }).data
+        : []
+    const parsed = z.array(CustomerSegmentRowSchema).safeParse(arr)
+    const rows = parsed.success ? parsed.data : []
+    out.push(...rows)
+    if (rows.length < pageSize) break
+  }
+  return out
+}
+
+const MarketingSegmentRowSchema = z
+  .object({
+    id: z.coerce.string(),
+    name: z.string().nullable().optional(),
+    type: CustomerSegmentTypeSchema.nullable().optional(),
+    enabled: z.boolean().nullable().optional(),
+    totalCustomers: z.coerce.number().int().nullable().optional(),
+    targetStoreNames: z.array(z.string()).nullable().optional(),
+  })
+  .passthrough()
+export type SweedMarketingSegmentRow = z.infer<typeof MarketingSegmentRowSchema>
+
+/**
+ * Read the marketing-segment catalog from ONE dealer context. Note that
+ * `store.marketing.segment.list` is dealer-SCOPED: the static segments
+ * (delivery zones, imports, etc.) only appear under the SITE dealer that
+ * owns them. Callers that want the full catalog should use
+ * `listSweedMarketingSegmentsCatalogForDealers`. MUST run inside a
+ * `withSweedSession` block.
+ */
+export async function listSweedMarketingSegmentsCatalog(args: {
+  dealerId: number
+}): Promise<SweedMarketingSegmentRow[]> {
+  const pageSize = 200
+  const out: SweedMarketingSegmentRow[] = []
+  for (let page = 1; page <= 20; page++) {
+    const raw = await callSweedRpc<unknown>(args.dealerId, SWEED_RPC_MARKETING_SEGMENT_LIST, {
+      page,
+      pageSize,
+    })
+    const arr = Array.isArray((raw as { data?: unknown[] })?.data)
+      ? (raw as { data: unknown[] }).data
+      : Array.isArray(raw)
+        ? raw
+        : []
+    const parsed = z.array(MarketingSegmentRowSchema).safeParse(arr)
+    const rows = parsed.success ? parsed.data : []
+    out.push(...rows)
+    if (rows.length < pageSize) break
+  }
+  return out
+}
+
+export interface ScopedMarketingSegmentRow extends SweedMarketingSegmentRow {
+  /** The dealer context this segment was observed under (its scope). */
+  scopeDealerId: number
+}
+
+/**
+ * Read the full marketing-segment catalog by fanning the list call out
+ * across the given dealers (state + both sites), tagging each row with
+ * the dealer it was seen under and deduping by segment id (first dealer
+ * in the list wins, so pass the state dealer first to keep org-wide
+ * segments state-scoped). MUST run inside a `withSweedSession` block.
+ */
+export async function listSweedMarketingSegmentsCatalogForDealers(args: {
+  dealerIds: number[]
+}): Promise<ScopedMarketingSegmentRow[]> {
+  const byId = new Map<string, ScopedMarketingSegmentRow>()
+  for (const dealerId of args.dealerIds) {
+    const rows = await listSweedMarketingSegmentsCatalog({ dealerId })
+    for (const r of rows) {
+      if (!byId.has(r.id)) byId.set(r.id, { ...r, scopeDealerId: dealerId })
+    }
+  }
+  return [...byId.values()]
+}
+
+// =====================================================================
 // store.customer.get — fetch one Sweed CRM customer (incl. address)
 // =====================================================================
 //

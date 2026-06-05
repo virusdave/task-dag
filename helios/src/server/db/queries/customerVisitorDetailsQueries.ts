@@ -43,6 +43,11 @@ import type {
 
 import type { Queryable } from '../pool.js'
 import { SITE_PIN_BY_SLUG } from './customersMapQueries.js'
+import {
+  readAddableStaticSegments,
+  readCustomerSegments,
+  readSegmentsRefreshState,
+} from './sweedCustomerSegmentsQueries.js'
 
 // Soft cap on purchase history. Anyone above this is rare enough we
 // can return a truncated flag instead of blowing up the response.
@@ -309,6 +314,33 @@ export async function getCustomerVisitorDetails(
     ? await loadSweedCustomerAddresses(db, linkDealerId, linkCustomerId)
     : []
 
+  // Sweed marketing-segment membership + "add to a static segment"
+  // picker, read from the cache tables only (no live Sweed call here).
+  // Defensive: if migration 058 hasn't been applied yet, degrade to an
+  // empty segment surface rather than 500-ing the whole details page
+  // (the pendingMigrations banner already nudges the operator to apply
+  // it).
+  let segments: CustomerVisitorDetailsResponse['segments'] = []
+  let addableStaticSegments: CustomerVisitorDetailsResponse['addableStaticSegments'] = []
+  let segmentsRefresh: { status: 'never' | 'pending' | 'ok' | 'failed'; refreshedAt: string | null; lastError: string | null } =
+    { status: 'never', refreshedAt: null, lastError: null }
+  if (isLinkedToCustomer && linkCustomerId !== null) {
+    try {
+      ;[segments, addableStaticSegments, segmentsRefresh] = await Promise.all([
+        readCustomerSegments(db, linkCustomerId),
+        readAddableStaticSegments(db, linkCustomerId),
+        readSegmentsRefreshState(db, linkCustomerId),
+      ])
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      if (/relation .*sweed_customer_segments.* does not exist/i.test(message)) {
+        // Migration 058 pending; leave the empty defaults.
+      } else {
+        throw error
+      }
+    }
+  }
+
   // ----- assemble -----
   const anchorScan = buildAnchorScan(anchorRow)
   const linkedCustomer = buildLinkedCustomer(
@@ -342,6 +374,15 @@ export async function getCustomerVisitorDetails(
     purchaseInvoicesTruncated,
     purchaseLifetime,
     mapPoints,
+    segments,
+    addableStaticSegments,
+    segmentsState: {
+      sweedCustomerId: isLinkedToCustomer ? linkCustomerId : null,
+      status: segmentsRefresh.status,
+      refreshedAt: segmentsRefresh.refreshedAt,
+      lastError: segmentsRefresh.lastError,
+      programmaticAddSupported: false,
+    },
     identity,
     limitations: {
       lineItemsAvailable: false,

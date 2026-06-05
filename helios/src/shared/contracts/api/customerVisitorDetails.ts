@@ -197,6 +197,71 @@ export const CustomerVisitorMapPointSchema = z.object({
 export type CustomerVisitorMapPoint = z.infer<typeof CustomerVisitorMapPointSchema>
 
 // ---------------------------------------------------------------------
+// Sweed marketing segments (virusdave/top-level#12)
+// ---------------------------------------------------------------------
+//
+// Scope tells the operator whether a segment spans both stores
+// (state-level) or targets a single site. Derived server-side from the
+// segment's owning dealer / target stores so the client never hardcodes
+// dealer ids.
+
+export const SweedSegmentScopeLevelSchema = z.enum(['state', 'site'])
+export type SweedSegmentScopeLevel = z.infer<typeof SweedSegmentScopeLevelSchema>
+
+export const SweedSegmentTypeSchema = z.enum(['static', 'dynamic', 'unknown'])
+export type SweedSegmentType = z.infer<typeof SweedSegmentTypeSchema>
+
+// A segment the linked customer currently belongs to.
+export const CustomerVisitorSegmentMembershipSchema = z.object({
+  segmentId: z.string(),
+  name: z.string(),
+  description: z.string().nullable(),
+  type: SweedSegmentTypeSchema,
+  scopeLevel: SweedSegmentScopeLevelSchema,
+  // Human label for the scope ("All stores" or the store name).
+  scopeLabel: z.string(),
+  enabled: z.boolean().nullable(),
+  dateOnEnter: z.string().nullable(),
+})
+export type CustomerVisitorSegmentMembership = z.infer<
+  typeof CustomerVisitorSegmentMembershipSchema
+>
+
+// A static segment the customer is NOT already in, offered in the
+// "add to a static segment" picker. Programmatic add is currently
+// blocked by Sweed's API (every member-add RPC returns "Action is not
+// available"), so each entry carries a deep link into Sweed Prime where
+// the operator completes the add by hand.
+export const CustomerVisitorAddableSegmentSchema = z.object({
+  segmentId: z.string(),
+  name: z.string(),
+  scopeLevel: SweedSegmentScopeLevelSchema,
+  scopeLabel: z.string(),
+  enabled: z.boolean().nullable(),
+  sweedPrimeUrl: z.string(),
+})
+export type CustomerVisitorAddableSegment = z.infer<
+  typeof CustomerVisitorAddableSegmentSchema
+>
+
+// Freshness / status of the cached segment data for this customer.
+export const CustomerVisitorSegmentsStateSchema = z.object({
+  // null when the customer is not linked (no Sweed customer id).
+  sweedCustomerId: z.number().int().nullable(),
+  // 'never' until the first successful or attempted refresh.
+  status: z.enum(['never', 'pending', 'ok', 'failed']),
+  refreshedAt: z.string().nullable(),
+  lastError: z.string().nullable(),
+  // Whether the operator can write segment membership through Helios.
+  // Always false today — surfaced so the client renders the honest
+  // "add manually in Sweed Prime" affordance instead of a fake button.
+  programmaticAddSupported: z.literal(false),
+})
+export type CustomerVisitorSegmentsState = z.infer<
+  typeof CustomerVisitorSegmentsStateSchema
+>
+
+// ---------------------------------------------------------------------
 // Response envelope
 // ---------------------------------------------------------------------
 
@@ -212,6 +277,16 @@ export const CustomerVisitorDetailsResponseSchema = z.object({
   // specific `priorPurchaseCount` / `hasPriorPurchaseBeforeScan`.
   purchaseLifetime: VisitorScanSweedPurchaseSummarySchema.nullable(),
   mapPoints: z.array(CustomerVisitorMapPointSchema),
+  // Sweed marketing-segment membership for the linked customer, read
+  // from the cache tables (never a live Sweed call on page load).
+  // Empty array when the customer is not linked or has no cached
+  // membership — distinguish via `segmentsState.status`.
+  segments: z.array(CustomerVisitorSegmentMembershipSchema),
+  // Static segments the customer is NOT already in, grouped-ready for
+  // the "add to a static segment" picker. Empty when the catalog cache
+  // is cold or the customer is unlinked.
+  addableStaticSegments: z.array(CustomerVisitorAddableSegmentSchema),
+  segmentsState: CustomerVisitorSegmentsStateSchema,
   // Identity rollup for the OTHER-visits joins (count is across the
   // matched person, NOT just this one scan).
   identity: VisitorScanIdentitySchema,

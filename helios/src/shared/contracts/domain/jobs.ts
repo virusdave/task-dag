@@ -53,6 +53,7 @@ export const JobTypeSchema = z.enum([
   'config.workers.enrich_delivery_address',
   'config.workers.enrich_visitor_scan_address',
   'config.workers.link_visitor_scan_to_sweed',
+  'config.workers.refresh_sweed_customer_segments',
   'catalog.maintenance.upload_group_image',
 ])
 export type JobType = z.infer<typeof JobTypeSchema>
@@ -677,6 +678,28 @@ export const ConfigWorkersLinkVisitorScanToSweedJobPayloadSchema = z.object({
 })
 export type ConfigWorkersLinkVisitorScanToSweedJobPayload = z.infer<
   typeof ConfigWorkersLinkVisitorScanToSweedJobPayloadSchema
+>
+
+/**
+ * Refresh the cached Sweed marketing-segment membership for one
+ * linked customer (virusdave/top-level#12).
+ *
+ * Runs in the Sweed pool inside its own withSweedSession. Calls
+ * `store.customer.segment.list { id: sweedCustomerId }` and
+ * snapshot-replaces the customer's rows in `sweed_customer_segments`,
+ * then opportunistically refreshes the global
+ * `sweed_marketing_segments` catalog if it's stale. Enqueued by the
+ * operator "Refresh segments" button on the details page (deduped per
+ * customer). The per-scan link worker refreshes membership inline on
+ * link success, so this job exists mainly for the manual re-pull.
+ */
+export const ConfigWorkersRefreshSweedCustomerSegmentsJobPayloadSchema = z.object({
+  sweedCustomerId: z.number().int().positive(),
+  // For the audit trail / dedup observability.
+  trigger: z.enum(['manual_refresh', 'link_followup']).default('manual_refresh'),
+})
+export type ConfigWorkersRefreshSweedCustomerSegmentsJobPayload = z.infer<
+  typeof ConfigWorkersRefreshSweedCustomerSegmentsJobPayloadSchema
 >
 
 export {

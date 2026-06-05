@@ -51,6 +51,7 @@ import {
 } from '../jobs/enqueueJob.js'
 import { appendAuditEvent } from '../audit/appendAuditEvent.js'
 import { getCustomerVisitorDetails } from '../db/queries/customerVisitorDetailsQueries.js'
+import { markCustomerSegmentsRefreshPending } from '../db/queries/sweedCustomerSegmentsQueries.js'
 import {
   VeriScanEnvelopeSchema,
   envelopeToRowInput,
@@ -435,6 +436,66 @@ export async function registerVisitorScansAdminRoutes(server: FastifyInstance): 
         return reply
           .status(503)
           .send({ error: 'visitor_scan_links table missing. Apply migration 040_visitor_scan_links.sql.' })
+      }
+      throw error
+    }
+  })
+
+  // -----------------------------------------------------------------
+  // Manual "Refresh segments" for the details page
+  // (virusdave/top-level#12). Enqueues a Sweed-pool job to re-pull the
+  // linked customer's segment membership. Cheap + deduped: at most one
+  // pending refresh per customer. No live Sweed call on this request.
+  // -----------------------------------------------------------------
+  server.post('/api/admin/customers/visitors/:scanId/refresh-segments', async (request, reply) => {
+    const user = await requireSessionUser(request, reply, 'admin')
+    if (!user) return
+
+    const params = request.params as { scanId?: string }
+    const scanId = Number(params.scanId)
+    if (!Number.isFinite(scanId) || scanId <= 0 || !Number.isInteger(scanId)) {
+      return reply.status(400).send({ error: 'Invalid scanId.' })
+    }
+
+    // Resolve the linked Sweed customer for this scan.
+    const linkRes = await getPool().query<{ sweed_customer_id: string | number | null; link_status: string | null }>(
+      `select sweed_customer_id, link_status
+         from visitor_scan_links where scan_id = $1`,
+      [scanId],
+    )
+    const row = linkRes.rows[0]
+    const sweedCustomerId =
+      row && row.sweed_customer_id !== null && row.link_status === 'linked'
+        ? Number(row.sweed_customer_id)
+        : null
+    if (sweedCustomerId === null || !Number.isFinite(sweedCustomerId) || sweedCustomerId <= 0) {
+      return reply
+        .status(409)
+        .send({ error: 'This scan is not linked to a Sweed customer yet.' })
+    }
+
+    try {
+      await markCustomerSegmentsRefreshPending(getPool(), sweedCustomerId)
+      await withTransaction(async (db) => {
+        await enqueueJob(db, {
+          jobType: 'config.workers.refresh_sweed_customer_segments',
+          module: 'config',
+          payload: { sweedCustomerId, trigger: 'manual_refresh' },
+          priority: JOB_PRIORITY_URGENT,
+          // One pending refresh per customer; duplicate clicks collapse.
+          dedupeKey: `config.workers.refresh_sweed_customer_segments:${sweedCustomerId}`,
+          requestedByUserId: user.id,
+          runAt: new Date(),
+          scope: null,
+        })
+      })
+      return reply.send({ enqueued: true, sweedCustomerId, status: 'pending' as const })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      if (/relation .*sweed_customer_segments_refresh.* does not exist/i.test(message)) {
+        return reply
+          .status(503)
+          .send({ error: 'sweed_customer_segments tables missing. Apply migration 059_sweed_customer_segments.sql.' })
       }
       throw error
     }

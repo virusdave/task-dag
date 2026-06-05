@@ -49,6 +49,11 @@ import {
   markLinkTerminal,
 } from '../../server/db/queries/visitorScanLinkQueries.js'
 import { findSweedCustomerByDocumentNumber } from '../sweed/customers.js'
+import {
+  refreshCustomerSegmentMembership,
+  refreshMarketingCatalogIfStale,
+} from '../sweed/segmentRefresh.js'
+import { getWorkerEnv } from '../config/env.js'
 import type { JobHandlerContext } from '../runtime/jobRegistry.js'
 
 // Self-re-enqueue cap. After this many in-job retries we leave the
@@ -214,6 +219,29 @@ export async function runConfigWorkersLinkVisitorScanToSweedJob(
     console.log(
       `[link-visitor-scan-to-sweed] job=${context.id} scan=${scanId} linked customer=${result.customerId} (totalCount=${result.totalCount})`,
     )
+    // Best-effort: warm the segment-membership cache for the freshly
+    // linked customer so the details page has data immediately, plus a
+    // highwater-gated catalog refresh. This MUST NOT fail the link —
+    // we're already inside the job's withSweedSession, so it's one
+    // extra RPC with zero added DB-read cost. Swallow all errors.
+    try {
+      const count = await refreshCustomerSegmentMembership({
+        sweedCustomerId: result.customerId,
+        dealerId: link.dealerId,
+      })
+      await refreshMarketingCatalogIfStale({ stateDealerId: getWorkerEnv().sweedStateDealerId })
+      // eslint-disable-next-line no-console
+      console.log(
+        `[link-visitor-scan-to-sweed] job=${context.id} scan=${scanId} cached ${count} segments for customer=${result.customerId}`,
+      )
+    } catch (segErr) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[link-visitor-scan-to-sweed] job=${context.id} scan=${scanId} segment cache warm failed (non-fatal): ${
+          segErr instanceof Error ? segErr.message : String(segErr)
+        }`,
+      )
+    }
     return
   }
 
