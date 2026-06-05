@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useLoaderData, useRevalidator } from 'react-router-dom'
 
 import {
@@ -24,6 +24,22 @@ export async function pricingRunDetailLoader({ params }: { params: Record<string
   return loadJson(`/api/pricing/runs/${params.proposalBatchId}`, PricingRunDetailResponseSchema)
 }
 
+/**
+ * Handlers a section/row needs to mutate the server. They are created once
+ * (stable identities via `useCallback`) in the page component so the memoized
+ * section/row subtrees below never re-render just because the operator typed a
+ * character somewhere else on the page. Draft text, collapse state, and the
+ * per-section "saving" lock all live INSIDE the leaf components now, so a
+ * keystroke only re-renders the one input the operator is touching.
+ */
+interface SectionHandlers {
+  onBatchPriceApply: (items: PricingReviewItem[], draftValue: string, label: string) => Promise<boolean>
+  onDecision: (item: PricingReviewItem, decision: 'approve' | 'reject') => Promise<void>
+  onGroupDecision: (items: PricingReviewItem[], decision: 'approve' | 'reject', label: string) => Promise<void>
+  onSaveEdit: (item: PricingReviewItem, draftValue: string) => Promise<boolean>
+  onSaveNote: (item: PricingReviewItem, draftNote: string) => Promise<boolean>
+}
+
 export function PricingRunDetailPage() {
   // Catalog sidebar context for the new under-Catalog placement.
   useRegisterCatalogSidebarSubtree()
@@ -38,20 +54,19 @@ export function PricingRunDetailPage() {
   const generatedLineItemCount = data.run.generatedLineItemCount ?? data.totals.generatedProductCount
   const skippedProductCount = data.run.skippedProductCount ?? data.totals.skippedProductCount
   const currentGroupName = readStringField(data.run.rawSummary, 'currentGroupName')
-  const [draftValues, setDraftValues] = useState<Record<number, string>>({})
-  const [draftNotes, setDraftNotes] = useState<Record<number, string>>({})
-  const [brandDrafts, setBrandDrafts] = useState<Record<string, string>>({})
-  const [groupDrafts, setGroupDrafts] = useState<Record<number, string>>({})
-  const [collapsedBrandKeys, setCollapsedBrandKeys] = useState<Set<string>>(new Set())
-  const [collapsedGroupIds, setCollapsedGroupIds] = useState<Set<number>>(new Set())
-  const [isSaving, setIsSaving] = useState(false)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [feedbackMessage, setFeedbackMessage] = useState<string | null>(null)
 
   const categorySections = useMemo(() => {
     return buildPricingReviewHierarchy(data.groups)
   }, [data.groups])
-  const brandFamilyLeaves = useMemo(() => flattenBrandFamilyLeaves(categorySections), [categorySections])
+
+  // Keep a stable reference to `revalidate` so the mutation handlers below can
+  // be created with empty dependency arrays. `useRevalidator()` returns a new
+  // object whenever its state flips (idle ↔ loading), and we don't want that
+  // churn to bust the stable handler identities the memoized subtree relies on.
+  const revalidateRef = useRef(revalidator.revalidate)
+  revalidateRef.current = revalidator.revalidate
 
   useEffect(() => {
     if (!isBuildInProgress) {
@@ -67,45 +82,10 @@ export function PricingRunDetailPage() {
     return () => window.clearInterval(intervalId)
   }, [isBuildInProgress, revalidator])
 
-  useEffect(() => {
-    const nextDraftValues = Object.fromEntries(
-      data.groups.flatMap((group) => group.reviewItems.map((item) => [item.lineItem.lineItemId, readEditableInputValue(item)])),
-    )
-    const nextDraftNotes = Object.fromEntries(
-      data.groups.flatMap((group) => group.reviewItems.map((item) => [item.lineItem.lineItemId, item.lineItem.notes ?? ''])),
-    )
-
-    setDraftValues((current) => ({ ...nextDraftValues, ...current }))
-    setDraftNotes((current) => ({ ...nextDraftNotes, ...current }))
-  }, [data.groups])
-
-  useEffect(() => {
-    setCollapsedGroupIds((current) => {
-      const next = new Set(current)
-      for (const group of brandFamilyLeaves.flatMap((leaf) => leaf.groups)) {
-        if (countPendingItems(group.reviewItems) === 0) {
-          next.add(group.proposalRowId)
-        }
-      }
-      return next
-    })
-    setCollapsedBrandKeys((current) => {
-      const next = new Set(current)
-      for (const leaf of brandFamilyLeaves) {
-        if (countPendingItems(leaf.reviewItems) === 0) {
-          next.add(leaf.key)
-        }
-      }
-      return next
-    })
-  }, [brandFamilyLeaves])
-
-  async function handleSaveEdit(item: PricingReviewItem) {
-    setIsSaving(true)
+  const handleSaveEdit = useCallback(async (item: PricingReviewItem, draftValue: string): Promise<boolean> => {
     setErrorMessage(null)
     setFeedbackMessage(null)
     try {
-      const draftValue = draftValues[item.lineItem.lineItemId] ?? ''
       if (draftValue.trim().length === 0) {
         throw new Error('Enter a price before saving.')
       }
@@ -118,32 +98,31 @@ export function PricingRunDetailPage() {
         body: JSON.stringify({ editedValue: roundCurrency(editedValue), expectedVersion: item.lineItem.version }),
         method: 'PATCH',
       })
-      await revalidator.revalidate()
-      setFeedbackMessage(`Saved ${productLabel(item)} at ${formatMoney(editedValue)}.`)
+      await revalidateRef.current()
+      setFeedbackMessage(`Saved ${productLabel(item)} at ${formatMoney(roundCurrency(editedValue))}.`)
+      return true
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : 'Could not save the pricing edit.')
-    } finally {
-      setIsSaving(false)
+      return false
     }
-  }
+  }, [])
 
-  async function handleSaveNote(item: PricingReviewItem) {
-    setIsSaving(true)
+  const handleSaveNote = useCallback(async (item: PricingReviewItem, draftNote: string): Promise<boolean> => {
     setErrorMessage(null)
     setFeedbackMessage(null)
     try {
       await mutateJson(`/api/proposal-line-items/${item.lineItem.lineItemId}/note`, MutationAcceptedResponseSchema, {
-        body: JSON.stringify({ note: (draftNotes[item.lineItem.lineItemId] ?? '').trim() || null }),
+        body: JSON.stringify({ note: draftNote.trim() || null }),
         method: 'PATCH',
       })
-      await revalidator.revalidate()
+      await revalidateRef.current()
       setFeedbackMessage(`Saved note for ${productLabel(item)}.`)
+      return true
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : 'Could not save the note.')
-    } finally {
-      setIsSaving(false)
+      return false
     }
-  }
+  }, [])
 
   // Watch the background reconcile/Sweed-sync job(s) a decision enqueues
   // WITHOUT blocking the UI. The approval/exclusion itself is already
@@ -151,7 +130,7 @@ export function PricingRunDetailPage() {
   // the buttons first, then poll the job here with a bound. A failed sync
   // (e.g. Sweed rejecting the product edit) is surfaced as a non-blocking
   // error instead of silently doing nothing or freezing the page forever.
-  async function watchReconcileJobs(jobIds: number[], context: string) {
+  const watchReconcileJobs = useCallback(async (jobIds: number[], context: string) => {
     if (jobIds.length === 0) {
       return
     }
@@ -169,12 +148,11 @@ export function PricingRunDetailPage() {
     if (failures.length > 0) {
       setErrorMessage(`${context} recorded in Helios, but the Sweed sync did not complete: ${failures[0]}${failures.length > 1 ? ` (+${failures.length - 1} more)` : ''}`)
     } else {
-      await revalidator.revalidate()
+      await revalidateRef.current()
     }
-  }
+  }, [])
 
-  async function handleDecision(item: PricingReviewItem, decision: 'approve' | 'reject') {
-    setIsSaving(true)
+  const handleDecision = useCallback(async (item: PricingReviewItem, decision: 'approve' | 'reject'): Promise<void> => {
     setErrorMessage(null)
     setFeedbackMessage(null)
     let jobId: number | null = null
@@ -184,31 +162,34 @@ export function PricingRunDetailPage() {
         method: 'POST',
       })
       jobId = response.jobId ?? null
-      await revalidator.revalidate()
+      await revalidateRef.current()
       setFeedbackMessage(`${decision === 'approve' ? 'Approved' : 'Excluded'} ${productLabel(item)}.`)
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : `Could not ${decision === 'approve' ? 'approve' : 'exclude'} this pricing row.`)
-      setIsSaving(false)
       return
     }
-    setIsSaving(false)
-    await watchReconcileJobs(jobId === null ? [] : [jobId], `${decision === 'approve' ? 'Approval of' : 'Exclusion of'} ${productLabel(item)}`)
-  }
+    // Don't block the page (or the row's buttons) on the Sweed sync; watch the
+    // job in the background and surface any sync failure non-blockingly.
+    void watchReconcileJobs(jobId === null ? [] : [jobId], `${decision === 'approve' ? 'Approval of' : 'Exclusion of'} ${productLabel(item)}`)
+  }, [watchReconcileJobs])
 
-  async function handleBatchPriceApply(items: PricingReviewItem[], draftValue: string, label: string) {
+  const handleBatchPriceApply = useCallback(async (items: PricingReviewItem[], draftValue: string, label: string): Promise<boolean> => {
     const editableItems = items.filter((item) => item.lineItem.approvalStatus === 'pending')
     if (editableItems.length === 0) {
       setErrorMessage(`${label} has no pending pricing rows left to update.`)
-      return
+      return false
     }
 
+    if (draftValue.trim().length === 0) {
+      setErrorMessage(`${label} needs a price before you apply it.`)
+      return false
+    }
     const editedValue = Number(draftValue.trim())
     if (!Number.isFinite(editedValue)) {
       setErrorMessage(`${label} needs a numeric price before you apply it.`)
-      return
+      return false
     }
 
-    setIsSaving(true)
     setErrorMessage(null)
     setFeedbackMessage(null)
     try {
@@ -232,30 +213,29 @@ export function PricingRunDetailPage() {
           failures.push(`${productLabel(item)}: ${message}`)
         }
       }
-      await revalidator.revalidate()
+      await revalidateRef.current()
       setFeedbackMessage(`Saved ${formatMoney(normalizedPrice)} across ${successCount}/${editableItems.length} pending row${editableItems.length === 1 ? '' : 's'} in ${label}.`)
       if (failures.length > 0) {
         setErrorMessage(`Failed ${failures.length} row${failures.length === 1 ? '' : 's'}; page state was refreshed. First failure: ${failures[0]}`)
       }
+      return failures.length === 0
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : `Could not apply the batch price for ${label}.`)
-    } finally {
-      setIsSaving(false)
+      return false
     }
-  }
+  }, [])
 
-  async function handleGroupDecision(items: PricingReviewItem[], decision: 'approve' | 'reject', label: string) {
+  const handleGroupDecision = useCallback(async (items: PricingReviewItem[], decision: 'approve' | 'reject', label: string): Promise<void> => {
     const pendingItems = items.filter((item) => item.lineItem.approvalStatus === 'pending')
     if (pendingItems.length === 0) {
       setErrorMessage(`${label} has no pending pricing rows left.`)
       return
     }
 
-    setIsSaving(true)
     setErrorMessage(null)
     setFeedbackMessage(null)
+    const jobIds: number[] = []
     try {
-      const jobIds: number[] = []
       const failures: string[] = []
       let successCount = 0
       for (const item of pendingItems) {
@@ -279,37 +259,27 @@ export function PricingRunDetailPage() {
           failures.push(`${productLabel(item)}: ${message}`)
         }
       }
-      await revalidator.revalidate()
+      await revalidateRef.current()
       setFeedbackMessage(`${decision === 'approve' ? 'Approved' : 'Excluded'} ${successCount}/${pendingItems.length} pending row${pendingItems.length === 1 ? '' : 's'} in ${label}.`)
       if (failures.length > 0) {
         setErrorMessage(`Failed ${failures.length} row${failures.length === 1 ? '' : 's'}; page state was refreshed. First failure: ${failures[0]}`)
       }
-      setIsSaving(false)
-      // Don't block the page on Sweed sync; watch the jobs in the
-      // background and surface any sync failure non-blockingly.
-      await watchReconcileJobs(jobIds, `${decision === 'approve' ? 'Approval' : 'Exclusion'} of ${label}`)
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : `Could not update the pending rows in ${label}.`)
-      setIsSaving(false)
+      return
     }
-  }
+    // Don't block the page on Sweed sync; watch the jobs in the
+    // background and surface any sync failure non-blockingly.
+    void watchReconcileJobs(jobIds, `${decision === 'approve' ? 'Approval' : 'Exclusion'} of ${label}`)
+  }, [watchReconcileJobs])
 
-  function adjustDraftValue(item: PricingReviewItem, delta: number) {
-    const currentValue = draftValues[item.lineItem.lineItemId] ?? readEditableInputValue(item)
-    const baseValue = Number(currentValue)
-    const nextValue = Number.isFinite(baseValue)
-      ? roundCurrency(baseValue + delta)
-      : roundCurrency((item.pricingContext.proposedPrice ?? numericValue(item.lineItem.effectiveValue) ?? 0) + delta)
-    setDraftValues((current) => ({ ...current, [item.lineItem.lineItemId]: nextValue.toFixed(2) }))
-  }
-
-  function toggleBrandCollapsed(brandKey: string) {
-    setCollapsedBrandKeys((current) => toggleSetValue(current, brandKey))
-  }
-
-  function toggleGroupCollapsed(proposalRowId: number) {
-    setCollapsedGroupIds((current) => toggleSetValue(current, proposalRowId))
-  }
+  const sectionHandlers = useMemo<SectionHandlers>(() => ({
+    onBatchPriceApply: handleBatchPriceApply,
+    onDecision: handleDecision,
+    onGroupDecision: handleGroupDecision,
+    onSaveEdit: handleSaveEdit,
+    onSaveNote: handleSaveNote,
+  }), [handleBatchPriceApply, handleDecision, handleGroupDecision, handleSaveEdit, handleSaveNote])
 
   return (
     <section>
@@ -386,180 +356,282 @@ export function PricingRunDetailPage() {
 
       <div className="stacked-list">
         {categorySections.map((category) => (
-          <article className="detail-panel" key={category.key}>
-            <div className="page-header" style={{ alignItems: 'flex-start', gap: '1rem', marginBottom: '1rem' }}>
-              <div>
-                <h3 style={{ margin: 0 }}>{category.categoryName}</h3>
-                <p className="subtle-copy">{compactCountsText(category.pendingCount, category.approvedCount, category.rejectedCount)}</p>
-              </div>
-            </div>
-
-            <div className="stacked-list">
-              {category.subcategories.map((subcategory) => (
-                <section className="detail-panel" key={subcategory.key} style={{ borderStyle: 'solid', borderWidth: '1px', margin: 0 }}>
-                  <h4 style={{ margin: '0 0 0.35rem' }}>{subcategory.subcategoryName}</h4>
-                  <p className="subtle-copy" style={{ marginTop: 0 }}>{compactCountsText(subcategory.pendingCount, subcategory.approvedCount, subcategory.rejectedCount)}</p>
-
-                  <div className="stacked-list">
-                    {subcategory.tabs.map((tabSection) => (
-                      <section className="detail-panel" key={tabSection.key} style={{ borderStyle: 'solid', borderWidth: '1px', margin: 0 }}>
-                        <h5 style={{ margin: '0 0 0.35rem' }}>{tabSection.tab}</h5>
-                        <p className="subtle-copy" style={{ marginTop: 0 }}>{compactCountsText(tabSection.pendingCount, tabSection.approvedCount, tabSection.rejectedCount)}</p>
-
-                        <div className="stacked-list">
-                          {tabSection.brands.map((brand) => {
-                            const brandCollapsed = collapsedBrandKeys.has(brand.key)
-                            const brandPendingCount = countPendingItems(brand.reviewItems)
-                            const brandApprovedCount = countItemsWithStatus(brand.reviewItems, 'approved')
-                            const brandRejectedCount = countItemsWithStatus(brand.reviewItems, 'rejected')
-                            const leafLabel = `${brand.categoryName} · ${brand.subcategoryName} · ${brand.tab} · ${brand.brandName}`
-
-                            return (
-                              <article className="detail-panel" key={brand.key} style={{ borderStyle: 'solid', borderWidth: '1px', margin: 0 }}>
-                                <div className="page-header" style={{ alignItems: 'flex-start', gap: '1rem', marginBottom: brandCollapsed ? 0 : '1rem' }}>
-                                  <div>
-                                    <h5 style={{ margin: 0 }}>{brand.brandName}</h5>
-                                    <p className="subtle-copy">{compactCountsText(brandPendingCount, brandApprovedCount, brandRejectedCount)} · {marketSummaryForItems(brand.reviewItems)}</p>
-                                  </div>
-                                  <div className="inline-row wrap-row" style={{ justifyContent: 'flex-end' }}>
-                                    <input
-                                      inputMode="decimal"
-                                      onChange={(event) => setBrandDrafts((current) => ({ ...current, [brand.key]: event.currentTarget.value }))}
-                                      placeholder="Family price"
-                                      type="text"
-                                      value={brandDrafts[brand.key] ?? ''}
-                                    />
-                                    <button className="ghost-button" disabled={isSaving} onClick={() => void handleBatchPriceApply(brand.reviewItems, brandDrafts[brand.key] ?? '', leafLabel)} type="button">
-                                      Apply family price
-                                    </button>
-                                    <button className="ghost-button" disabled={isSaving || brandPendingCount === 0} onClick={() => void handleGroupDecision(brand.reviewItems, 'approve', leafLabel)} type="button">
-                                      Approve family
-                                    </button>
-                                    <button className="danger-button" disabled={isSaving || brandPendingCount === 0} onClick={() => void handleGroupDecision(brand.reviewItems, 'reject', leafLabel)} type="button">
-                                      Exclude family
-                                    </button>
-                                    <button className="ghost-button" onClick={() => toggleBrandCollapsed(brand.key)} type="button">
-                                      {brandCollapsed ? 'Expand family' : 'Collapse family'}
-                                    </button>
-                                  </div>
-                                </div>
-
-                                {brandCollapsed ? null : (
-                                  <div className="stacked-list">
-                                    {brand.groups.map((group) => {
-                    const groupCollapsed = collapsedGroupIds.has(group.proposalRowId)
-                    const pendingCount = countPendingItems(group.reviewItems)
-                    const approvedCount = countItemsWithStatus(group.reviewItems, 'approved')
-                    const rejectedCount = countItemsWithStatus(group.reviewItems, 'rejected')
-
-                    return (
-                      <section className="detail-panel" key={group.proposalRowId} style={{ borderStyle: 'solid', borderWidth: '1px', margin: 0 }}>
-                        <div className="page-header" style={{ alignItems: 'flex-start', gap: '1rem', marginBottom: groupCollapsed ? 0 : '1rem' }}>
-                          <div>
-                            <h4 style={{ margin: 0 }}>{group.groupName}</h4>
-                            <p className="subtle-copy">
-                              {(group.categoryName ?? 'No category')} · {(group.subcategoryName ?? 'No subcategory')} · {compactCountsText(pendingCount, approvedCount, rejectedCount)}
-                            </p>
-                          </div>
-                          <div className="inline-row wrap-row" style={{ justifyContent: 'flex-end' }}>
-                            <input
-                              inputMode="decimal"
-                              onChange={(event) => setGroupDrafts((current) => ({ ...current, [group.proposalRowId]: event.currentTarget.value }))}
-                              placeholder="Group price"
-                              type="text"
-                              value={groupDrafts[group.proposalRowId] ?? ''}
-                            />
-                            <button className="ghost-button" disabled={isSaving} onClick={() => void handleBatchPriceApply(group.reviewItems, groupDrafts[group.proposalRowId] ?? '', group.groupName)} type="button">
-                              Apply group price
-                            </button>
-                            <button className="ghost-button" disabled={isSaving || pendingCount === 0} onClick={() => void handleGroupDecision(group.reviewItems, 'approve', group.groupName)} type="button">
-                              Approve group
-                            </button>
-                            <button className="danger-button" disabled={isSaving || pendingCount === 0} onClick={() => void handleGroupDecision(group.reviewItems, 'reject', group.groupName)} type="button">
-                              Exclude group
-                            </button>
-                            <Link className="ghost-button like-button" rel="noreferrer" target="_blank" to={buildHeliosModulePath('catalog', `groups/${group.catalogGroupId}`)}>
-                              Open catalog
-                            </Link>
-                            <button className="ghost-button" onClick={() => toggleGroupCollapsed(group.proposalRowId)} type="button">
-                              {groupCollapsed ? 'Expand group' : 'Collapse group'}
-                            </button>
-                          </div>
-                        </div>
-
-                        {groupCollapsed ? null : (
-                          <>
-                            {group.marketAvailability || group.marketNote ? (
-                              <p className="subtle-copy" style={{ marginBottom: '1rem' }}>
-                                {group.marketAvailability ?? 'market'}{group.marketNote ? ` · ${group.marketNote}` : ''}
-                              </p>
-                            ) : null}
-
-                            <div className="stacked-list">
-                              {group.reviewItems.map((item) => (
-                                <PricingRunItemRow
-                                  draftNote={draftNotes[item.lineItem.lineItemId] ?? item.lineItem.notes ?? ''}
-                                  draftValue={draftValues[item.lineItem.lineItemId] ?? readEditableInputValue(item)}
-                                  isSaving={isSaving}
-                                  item={item}
-                                  key={item.lineItem.lineItemId}
-                                  onAdjust={(delta) => adjustDraftValue(item, delta)}
-                                  onDecision={(decision) => void handleDecision(item, decision)}
-                                  onDraftNoteChange={(value) => setDraftNotes((current) => ({ ...current, [item.lineItem.lineItemId]: value }))}
-                                  onDraftValueChange={(value) => setDraftValues((current) => ({ ...current, [item.lineItem.lineItemId]: value }))}
-                                  onSaveEdit={() => void handleSaveEdit(item)}
-                                  onSaveNote={() => void handleSaveNote(item)}
-                                />
-                              ))}
-                            </div>
-
-                            {group.skippedProducts.length > 0 ? (
-                              <details style={{ marginTop: '1rem' }}>
-                                <summary>Skipped products ({group.skippedProducts.length})</summary>
-                                <ul className="timeline-list" style={{ marginTop: '0.75rem' }}>
-                                  {group.skippedProducts.map((product) => (
-                                    <li key={product.productId}>
-                                      <strong>{product.productName}</strong>
-                                      <div className="subtle-copy">
-                                        {product.tab} · live {formatMoney(product.currentPrice)} · cost {formatMoney(product.wholesaleCost)}
-                                        {product.wholesaleCostSource === 'package_snapshot' ? (
-                                          <span
-                                            style={{ marginLeft: '0.35rem', fontStyle: 'italic' }}
-                                            title="Sweed's per-product wholesaleCost was blank/zero for this SKU; cost taken from the most recent sweed_package_snapshots row."
-                                          >
-                                            (from PO)
-                                          </span>
-                                        ) : null}
-                                      </div>
-                                      <p className="subtle-copy">{product.reason}</p>
-                                    </li>
-                                  ))}
-                                </ul>
-                              </details>
-                            ) : null}
-                          </>
-                        )}
-                      </section>
-                    )
-                                    })}
-                                  </div>
-                                )}
-                              </article>
-                            )
-                          })}
-                        </div>
-                      </section>
-                    ))}
-                  </div>
-                </section>
-              ))}
-            </div>
-          </article>
+          <CategorySectionView key={category.key} category={category} handlers={sectionHandlers} />
         ))}
       </div>
     </section>
   )
 }
+
+/**
+ * Category → subcategory → tab levels are pure display (a heading + rollup
+ * counts). They're memoized on the stable hierarchy slice + stable handler
+ * bundle so that a save-triggered page re-render (which only flips the
+ * error/feedback banners) doesn't reconcile the whole tree underneath. The
+ * heavy interactive subtree (`BrandFamilySectionView` and below) bails out of
+ * re-rendering unless its own slice of `data.groups` actually changed.
+ */
+const CategorySectionView = memo(function CategorySectionView({
+  category,
+  handlers,
+}: {
+  category: CategorySection
+  handlers: SectionHandlers
+}): JSX.Element {
+  return (
+    <article className="detail-panel">
+      <div className="page-header" style={{ alignItems: 'flex-start', gap: '1rem', marginBottom: '1rem' }}>
+        <div>
+          <h3 style={{ margin: 0 }}>{category.categoryName}</h3>
+          <p className="subtle-copy">{compactCountsText(category.pendingCount, category.approvedCount, category.rejectedCount)}</p>
+        </div>
+      </div>
+
+      <div className="stacked-list">
+        {category.subcategories.map((subcategory) => (
+          <section className="detail-panel" key={subcategory.key} style={{ borderStyle: 'solid', borderWidth: '1px', margin: 0 }}>
+            <h4 style={{ margin: '0 0 0.35rem' }}>{subcategory.subcategoryName}</h4>
+            <p className="subtle-copy" style={{ marginTop: 0 }}>{compactCountsText(subcategory.pendingCount, subcategory.approvedCount, subcategory.rejectedCount)}</p>
+
+            <div className="stacked-list">
+              {subcategory.tabs.map((tabSection) => (
+                <section className="detail-panel" key={tabSection.key} style={{ borderStyle: 'solid', borderWidth: '1px', margin: 0 }}>
+                  <h5 style={{ margin: '0 0 0.35rem' }}>{tabSection.tab}</h5>
+                  <p className="subtle-copy" style={{ marginTop: 0 }}>{compactCountsText(tabSection.pendingCount, tabSection.approvedCount, tabSection.rejectedCount)}</p>
+
+                  <div className="stacked-list">
+                    {tabSection.brands.map((brand) => (
+                      <BrandFamilySectionView key={brand.key} brand={brand} handlers={handlers} />
+                    ))}
+                  </div>
+                </section>
+              ))}
+            </div>
+          </section>
+        ))}
+      </div>
+    </article>
+  )
+})
+
+/**
+ * One brand/family leaf: the "Family price" batch input, family-wide
+ * approve/exclude, and the collapse toggle. Owns its own draft text, collapse
+ * state, and saving lock so typing a family price only re-renders this header,
+ * not every sibling family or the line-item cards underneath.
+ */
+const BrandFamilySectionView = memo(function BrandFamilySectionView({
+  brand,
+  handlers,
+}: {
+  brand: BrandFamilySection
+  handlers: SectionHandlers
+}): JSX.Element {
+  const pendingCount = countPendingItems(brand.reviewItems)
+  const approvedCount = countItemsWithStatus(brand.reviewItems, 'approved')
+  const rejectedCount = countItemsWithStatus(brand.reviewItems, 'rejected')
+  const leafLabel = `${brand.categoryName} · ${brand.subcategoryName} · ${brand.tab} · ${brand.brandName}`
+
+  const [collapsed, setCollapsed] = useState(() => pendingCount === 0)
+  const [draft, setDraft] = useState('')
+  const [isSaving, setIsSaving] = useState(false)
+
+  // Auto-collapse a family once it has no pending rows left, but never fight a
+  // manual expand: this only fires when `pendingCount` itself changes.
+  useEffect(() => {
+    if (pendingCount === 0) {
+      setCollapsed(true)
+    }
+  }, [pendingCount])
+
+  async function applyFamilyPrice() {
+    setIsSaving(true)
+    try {
+      await handlers.onBatchPriceApply(brand.reviewItems, draft, leafLabel)
+    } finally {
+      setIsSaving(false)
+    }
+  }
+
+  async function decideFamily(decision: 'approve' | 'reject') {
+    setIsSaving(true)
+    try {
+      await handlers.onGroupDecision(brand.reviewItems, decision, leafLabel)
+    } finally {
+      setIsSaving(false)
+    }
+  }
+
+  return (
+    <article className="detail-panel" style={{ borderStyle: 'solid', borderWidth: '1px', margin: 0 }}>
+      <div className="page-header" style={{ alignItems: 'flex-start', gap: '1rem', marginBottom: collapsed ? 0 : '1rem' }}>
+        <div>
+          <h5 style={{ margin: 0 }}>{brand.brandName}</h5>
+          <p className="subtle-copy">{compactCountsText(pendingCount, approvedCount, rejectedCount)} · {marketSummaryForItems(brand.reviewItems)}</p>
+        </div>
+        <div className="inline-row wrap-row" style={{ justifyContent: 'flex-end' }}>
+          <input
+            inputMode="decimal"
+            onChange={(event) => setDraft(event.currentTarget.value)}
+            placeholder="Family price"
+            type="text"
+            value={draft}
+          />
+          <button className="ghost-button" disabled={isSaving} onClick={() => void applyFamilyPrice()} type="button">
+            Apply family price
+          </button>
+          <button className="ghost-button" disabled={isSaving || pendingCount === 0} onClick={() => void decideFamily('approve')} type="button">
+            Approve family
+          </button>
+          <button className="danger-button" disabled={isSaving || pendingCount === 0} onClick={() => void decideFamily('reject')} type="button">
+            Exclude family
+          </button>
+          <button className="ghost-button" onClick={() => setCollapsed((value) => !value)} type="button">
+            {collapsed ? 'Expand family' : 'Collapse family'}
+          </button>
+        </div>
+      </div>
+
+      {collapsed ? null : (
+        <div className="stacked-list">
+          {brand.groups.map((group) => (
+            <GroupSectionView key={group.key} group={group} handlers={handlers} />
+          ))}
+        </div>
+      )}
+    </article>
+  )
+})
+
+/**
+ * One pricing group within a family: the "Group price" batch input,
+ * group-wide approve/exclude, the catalog link, and the collapse toggle. Owns
+ * its own draft/collapse/saving state for the same isolation reason as the
+ * family level above.
+ */
+const GroupSectionView = memo(function GroupSectionView({
+  group,
+  handlers,
+}: {
+  group: PricingReviewGroupSlice
+  handlers: SectionHandlers
+}): JSX.Element {
+  const pendingCount = countPendingItems(group.reviewItems)
+  const approvedCount = countItemsWithStatus(group.reviewItems, 'approved')
+  const rejectedCount = countItemsWithStatus(group.reviewItems, 'rejected')
+
+  const [collapsed, setCollapsed] = useState(() => pendingCount === 0)
+  const [draft, setDraft] = useState('')
+  const [isSaving, setIsSaving] = useState(false)
+
+  useEffect(() => {
+    if (pendingCount === 0) {
+      setCollapsed(true)
+    }
+  }, [pendingCount])
+
+  async function applyGroupPrice() {
+    setIsSaving(true)
+    try {
+      await handlers.onBatchPriceApply(group.reviewItems, draft, group.groupName)
+    } finally {
+      setIsSaving(false)
+    }
+  }
+
+  async function decideGroup(decision: 'approve' | 'reject') {
+    setIsSaving(true)
+    try {
+      await handlers.onGroupDecision(group.reviewItems, decision, group.groupName)
+    } finally {
+      setIsSaving(false)
+    }
+  }
+
+  return (
+    <section className="detail-panel" style={{ borderStyle: 'solid', borderWidth: '1px', margin: 0 }}>
+      <div className="page-header" style={{ alignItems: 'flex-start', gap: '1rem', marginBottom: collapsed ? 0 : '1rem' }}>
+        <div>
+          <h4 style={{ margin: 0 }}>{group.groupName}</h4>
+          <p className="subtle-copy">
+            {(group.categoryName ?? 'No category')} · {(group.subcategoryName ?? 'No subcategory')} · {compactCountsText(pendingCount, approvedCount, rejectedCount)}
+          </p>
+        </div>
+        <div className="inline-row wrap-row" style={{ justifyContent: 'flex-end' }}>
+          <input
+            inputMode="decimal"
+            onChange={(event) => setDraft(event.currentTarget.value)}
+            placeholder="Group price"
+            type="text"
+            value={draft}
+          />
+          <button className="ghost-button" disabled={isSaving} onClick={() => void applyGroupPrice()} type="button">
+            Apply group price
+          </button>
+          <button className="ghost-button" disabled={isSaving || pendingCount === 0} onClick={() => void decideGroup('approve')} type="button">
+            Approve group
+          </button>
+          <button className="danger-button" disabled={isSaving || pendingCount === 0} onClick={() => void decideGroup('reject')} type="button">
+            Exclude group
+          </button>
+          <Link className="ghost-button like-button" rel="noreferrer" target="_blank" to={buildHeliosModulePath('catalog', `groups/${group.catalogGroupId}`)}>
+            Open catalog
+          </Link>
+          <button className="ghost-button" onClick={() => setCollapsed((value) => !value)} type="button">
+            {collapsed ? 'Expand group' : 'Collapse group'}
+          </button>
+        </div>
+      </div>
+
+      {collapsed ? null : (
+        <>
+          {group.marketAvailability || group.marketNote ? (
+            <p className="subtle-copy" style={{ marginBottom: '1rem' }}>
+              {group.marketAvailability ?? 'market'}{group.marketNote ? ` · ${group.marketNote}` : ''}
+            </p>
+          ) : null}
+
+          <div className="stacked-list">
+            {group.reviewItems.map((item) => (
+              <PricingRunItemRow
+                item={item}
+                key={item.lineItem.lineItemId}
+                onDecision={handlers.onDecision}
+                onSaveEdit={handlers.onSaveEdit}
+                onSaveNote={handlers.onSaveNote}
+              />
+            ))}
+          </div>
+
+          {group.skippedProducts.length > 0 ? (
+            <details style={{ marginTop: '1rem' }}>
+              <summary>Skipped products ({group.skippedProducts.length})</summary>
+              <ul className="timeline-list" style={{ marginTop: '0.75rem' }}>
+                {group.skippedProducts.map((product) => (
+                  <li key={product.productId}>
+                    <strong>{product.productName}</strong>
+                    <div className="subtle-copy">
+                      {product.tab} · live {formatMoney(product.currentPrice)} · cost {formatMoney(product.wholesaleCost)}
+                      {product.wholesaleCostSource === 'package_snapshot' ? (
+                        <span
+                          style={{ marginLeft: '0.35rem', fontStyle: 'italic' }}
+                          title="Sweed's per-product wholesaleCost was blank/zero for this SKU; cost taken from the most recent sweed_package_snapshots row."
+                        >
+                          (from PO)
+                        </span>
+                      ) : null}
+                    </div>
+                    <p className="subtle-copy">{product.reason}</p>
+                  </li>
+                ))}
+              </ul>
+            </details>
+          ) : null}
+        </>
+      )}
+    </section>
+  )
+})
 
 /**
  * One pricing-run review item, rendered with the shared canonical
@@ -568,36 +640,49 @@ export function PricingRunDetailPage() {
  * and `/catalog/pending-purchases` instead of carrying its own bespoke
  * card + static price ladder.
  *
- * Extracted into its own component so the competitor-listing mapping can
- * be memoized per item: the canonical ladder deliberately excludes the
- * proposed price from its rebuild deps to keep a drag alive, but it WILL
- * rebuild (and drop the in-flight drag) if `competitorListings` changes
- * identity. Memoizing on the stable `item` reference keeps the array
- * identity stable across the parent re-renders a drag triggers.
+ * Memoized, and owns its own price/note draft + saving state. That keeps a
+ * keystroke (or a ladder drag) local to this one card instead of re-rendering
+ * the entire run, and keeps the canonical ladder's `competitorListings`
+ * identity stable across those local re-renders (it deliberately excludes the
+ * proposed price from its rebuild deps to keep a drag alive, but WILL rebuild
+ * and drop an in-flight drag if `competitorListings` changes identity).
+ *
+ * Drafts re-seed from the server value after a revalidation only while the
+ * operator hasn't touched the field — a `dirty` flag protects in-progress
+ * typing from being clobbered by a background refresh.
  */
-function PricingRunItemRow({
-  draftNote,
-  draftValue,
-  isSaving,
+const PricingRunItemRow = memo(function PricingRunItemRow({
   item,
-  onAdjust,
   onDecision,
-  onDraftNoteChange,
-  onDraftValueChange,
   onSaveEdit,
   onSaveNote,
 }: {
-  draftNote: string
-  draftValue: string
-  isSaving: boolean
   item: PricingReviewItem
-  onAdjust: (delta: number) => void
-  onDecision: (decision: 'approve' | 'reject') => void
-  onDraftNoteChange: (value: string) => void
-  onDraftValueChange: (value: string) => void
-  onSaveEdit: () => void
-  onSaveNote: () => void
+  onDecision: (item: PricingReviewItem, decision: 'approve' | 'reject') => Promise<void>
+  onSaveEdit: (item: PricingReviewItem, draftValue: string) => Promise<boolean>
+  onSaveNote: (item: PricingReviewItem, draftNote: string) => Promise<boolean>
 }): JSX.Element {
+  const serverDraftValue = readEditableInputValue(item)
+  const serverNote = item.lineItem.notes ?? ''
+
+  const [draftValue, setDraftValue] = useState(serverDraftValue)
+  const [draftNote, setDraftNote] = useState(serverNote)
+  const [priceDirty, setPriceDirty] = useState(false)
+  const [noteDirty, setNoteDirty] = useState(false)
+  const [isSaving, setIsSaving] = useState(false)
+
+  useEffect(() => {
+    if (!priceDirty) {
+      setDraftValue(serverDraftValue)
+    }
+  }, [serverDraftValue, priceDirty])
+
+  useEffect(() => {
+    if (!noteDirty) {
+      setDraftNote(serverNote)
+    }
+  }, [serverNote, noteDirty])
+
   const reviewedPrice = resolveDisplayedPrice(draftValue, item)
   const recentSalesIndicator = describeRecentSales(item.pricingContext.recentSales.summary)
   const competitorListings = useMemo(
@@ -608,6 +693,58 @@ function PricingRunItemRow({
     item.pricingContext.marketAveragePostTaxPrice,
     item.pricingContext.marketMedianPostTaxPrice,
   )
+
+  function changeDraftValue(value: string) {
+    setPriceDirty(true)
+    setDraftValue(value)
+  }
+
+  function changeDraftNote(value: string) {
+    setNoteDirty(true)
+    setDraftNote(value)
+  }
+
+  function adjustDraftValue(delta: number) {
+    const trimmed = draftValue.trim()
+    const baseValue = Number(trimmed)
+    const nextValue = trimmed.length > 0 && Number.isFinite(baseValue)
+      ? roundCurrency(baseValue + delta)
+      : roundCurrency((item.pricingContext.proposedPrice ?? numericValue(item.lineItem.effectiveValue) ?? 0) + delta)
+    changeDraftValue(nextValue.toFixed(2))
+  }
+
+  async function savePrice() {
+    setIsSaving(true)
+    try {
+      const ok = await onSaveEdit(item, draftValue)
+      if (ok) {
+        setPriceDirty(false)
+      }
+    } finally {
+      setIsSaving(false)
+    }
+  }
+
+  async function saveNote() {
+    setIsSaving(true)
+    try {
+      const ok = await onSaveNote(item, draftNote)
+      if (ok) {
+        setNoteDirty(false)
+      }
+    } finally {
+      setIsSaving(false)
+    }
+  }
+
+  async function decide(decision: 'approve' | 'reject') {
+    setIsSaving(true)
+    try {
+      await onDecision(item, decision)
+    } finally {
+      setIsSaving(false)
+    }
+  }
 
   return (
     <CanonicalProductRow
@@ -640,7 +777,7 @@ function PricingRunItemRow({
           livePrice={numericValue(item.lineItem.baselineValue)}
           marketAveragePostTax={item.pricingContext.marketAveragePostTaxPrice}
           marketMedianPostTax={item.pricingContext.marketMedianPostTaxPrice}
-          onProposedPriceChange={(next) => onDraftValueChange(next.toFixed(2))}
+          onProposedPriceChange={(next) => changeDraftValue(next.toFixed(2))}
           productId={item.lineItem.targetEntityId}
           proposedPrice={reviewedPrice}
           variant="detail"
@@ -708,30 +845,30 @@ function PricingRunItemRow({
           <div className="inline-row wrap-row" style={{ alignItems: 'center', marginBottom: '0.6rem' }}>
             <input
               inputMode="decimal"
-              onChange={(event) => onDraftValueChange(event.currentTarget.value)}
+              onChange={(event) => changeDraftValue(event.currentTarget.value)}
               type="text"
               value={draftValue}
             />
-            <button className="ghost-button" disabled={isSaving} onClick={() => onAdjust(-0.25)} type="button">-0.25</button>
-            <button className="ghost-button" disabled={isSaving} onClick={() => onAdjust(0.25)} type="button">+0.25</button>
+            <button className="ghost-button" disabled={isSaving} onClick={() => adjustDraftValue(-0.25)} type="button">-0.25</button>
+            <button className="ghost-button" disabled={isSaving} onClick={() => adjustDraftValue(0.25)} type="button">+0.25</button>
           </div>
           <label className="stack-field">
             <span>Review note</span>
-            <textarea onChange={(event) => onDraftNoteChange(event.currentTarget.value)} rows={3} value={draftNote} />
+            <textarea onChange={(event) => changeDraftNote(event.currentTarget.value)} rows={3} value={draftNote} />
           </label>
         </>
       }
       decisions={
         <div className="inline-row wrap-row review-actions">
-          <button className="ghost-button" disabled={isSaving} onClick={() => onSaveEdit()} type="button">Save price</button>
-          <button className="primary-button" disabled={isSaving || item.lineItem.approvalStatus !== 'pending'} onClick={() => onDecision('approve')} type="button">Approve</button>
-          <button className="danger-button" disabled={isSaving || item.lineItem.approvalStatus !== 'pending'} onClick={() => onDecision('reject')} type="button">Exclude</button>
-          <button className="ghost-button" disabled={isSaving} onClick={() => onSaveNote()} type="button">Save note</button>
+          <button className="ghost-button" disabled={isSaving} onClick={() => void savePrice()} type="button">Save price</button>
+          <button className="primary-button" disabled={isSaving || item.lineItem.approvalStatus !== 'pending'} onClick={() => void decide('approve')} type="button">Approve</button>
+          <button className="danger-button" disabled={isSaving || item.lineItem.approvalStatus !== 'pending'} onClick={() => void decide('reject')} type="button">Exclude</button>
+          <button className="ghost-button" disabled={isSaving} onClick={() => void saveNote()} type="button">Save note</button>
         </div>
       }
     />
   )
-}
+})
 
 function mapMarketListingsToCompetitorListings(listings: PricingRunMarketListing[]): CompetitorListing[] {
   return listings.map((listing, index) => ({
@@ -868,14 +1005,6 @@ function buildPricingReviewHierarchy(groups: PricingRunDetailResponse['groups'])
   }
 
   return [...categoryMap.values()].sort(comparePendingThenLabel((section) => section.categoryName))
-}
-
-function flattenBrandFamilyLeaves(categorySections: CategorySection[]): BrandFamilySection[] {
-  return categorySections.flatMap((category) =>
-    category.subcategories.flatMap((subcategory) =>
-      subcategory.tabs.flatMap((tab) => tab.brands),
-    ),
-  )
 }
 
 function getOrInsert<K, V>(map: Map<K, V>, key: K, build: () => V): V {
@@ -1037,7 +1166,11 @@ function numericValue(value: unknown): number | null {
 }
 
 function numericValueFromString(value: string): number | null {
-  const parsed = Number(value.trim())
+  const trimmed = value.trim()
+  if (trimmed.length === 0) {
+    return null
+  }
+  const parsed = Number(trimmed)
   return Number.isFinite(parsed) ? parsed : null
 }
 
@@ -1101,16 +1234,6 @@ function readStringField(value: PricingRunDetailResponse['run']['rawSummary'], k
 
   const candidate = (value as Record<string, unknown>)[key]
   return typeof candidate === 'string' && candidate.trim().length > 0 ? candidate : null
-}
-
-function toggleSetValue<T>(current: Set<T>, value: T): Set<T> {
-  const next = new Set(current)
-  if (next.has(value)) {
-    next.delete(value)
-  } else {
-    next.add(value)
-  }
-  return next
 }
 
 function formatDistanceBandLabel(distanceBand: PricingRunMarketListing['distanceBand'], distanceMiles: number | null): string {
