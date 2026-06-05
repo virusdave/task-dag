@@ -5,7 +5,7 @@ import { sha256, stableJsonStringify } from '../../../shared/util/hash.js'
 import type { Queryable } from '../pool.js'
 
 export type PendingPurchaseBrandAliasStatus = 'active' | 'draft' | 'provisional' | 'rejected' | 'retired'
-export type PendingPurchaseBrandAliasType = 'exact' | 'prefix'
+export type PendingPurchaseBrandAliasType = 'exact' | 'prefix' | 'distributor'
 export type PendingPurchaseObservationStatus =
   | 'accepted'
   | 'blocked'
@@ -571,6 +571,76 @@ export async function listPendingPurchaseMatchingBrandAliases(
         ba.id desc
     `,
     [input.sourceSystem, ACTIVE_ALIAS_STATES, input.aliasCandidates, input.normalizedName],
+  )
+
+  return result.rows.map((row) => ({
+    alias: mapBrandAliasRow(row),
+    brandProfile: {
+      displayBrandName: row.brand_display_name,
+      id: row.brand_profile_id,
+      metadata: row.brand_metadata_json,
+      normalizedBrandKey: row.brand_normalized_brand_key,
+      sourceSystem: row.brand_source_system,
+      taxonomyHints: row.brand_taxonomy_hints_json,
+    },
+  }))
+}
+
+/**
+ * Look up distributor-keyed brand aliases (alias_type='distributor').
+ *
+ * Unlike the product-name aliases above, these match on the (already
+ * normalized) DISTRIBUTOR name. A match means "every product this
+ * distributor ships belongs to this brand" — used by the generation
+ * worker to pin the brand deterministically (skipping the LLM) when the
+ * brand never appears in the product name. `normalizedDistributorNames`
+ * should already be run through `normalizePendingPurchaseParserText`.
+ *
+ * Backed by the partial unique index added in migration 063 so an
+ * active/provisional distributor alias maps to at most one brand
+ * profile; we still order deterministically and let the caller detect
+ * cross-brand conflicts defensively.
+ */
+export async function listPendingPurchaseDistributorBrandAliases(
+  db: Queryable,
+  input: { normalizedDistributorNames: string[]; sourceSystem: string },
+): Promise<PendingPurchaseBrandAliasMatch[]> {
+  const distinctNames = [...new Set(input.normalizedDistributorNames.filter((name) => name.length > 0))]
+  if (distinctNames.length === 0) {
+    return []
+  }
+
+  const result = await db.query<PendingPurchaseAliasMatchRow>(
+    `
+      select
+        ba.id,
+        ba.brand_profile_id,
+        ba.alias_type,
+        ba.alias_value,
+        ba.normalized_alias_value,
+        ba.status,
+        ba.confidence::double precision as confidence,
+        ba.provenance,
+        ba.metadata_json,
+        ba.created_at,
+        ba.updated_at,
+        bp.source_system as brand_source_system,
+        bp.normalized_brand_key as brand_normalized_brand_key,
+        bp.display_brand_name as brand_display_name,
+        bp.taxonomy_hints_json as brand_taxonomy_hints_json,
+        bp.metadata_json as brand_metadata_json
+      from pending_purchase_brand_aliases ba
+      inner join pending_purchase_brand_profiles bp on bp.id = ba.brand_profile_id
+      where bp.source_system = $1
+        and ba.status = any($2::text[])
+        and ba.alias_type = 'distributor'
+        and ba.normalized_alias_value = any($3::text[])
+      order by
+        case ba.status when 'active' then 0 when 'provisional' then 1 else 2 end,
+        ba.confidence desc nulls last,
+        ba.id desc
+    `,
+    [input.sourceSystem, ACTIVE_ALIAS_STATES, distinctNames],
   )
 
   return result.rows.map((row) => ({

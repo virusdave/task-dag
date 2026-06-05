@@ -18,6 +18,7 @@ import {
   derivePendingPurchaseBrandKey,
   findPendingPurchaseExactParseRule,
   insertPendingPurchaseParseObservation,
+  listPendingPurchaseDistributorBrandAliases,
   listPendingPurchaseMatchingBrandAliases,
   listPendingPurchaseRuntimeRulesForProfiles,
   markPendingPurchaseParseRuleMatched,
@@ -461,7 +462,7 @@ interface PendingPurchaseParseResolution {
   brandProfile: PendingPurchaseBrandProfileRecord | null
   note: string | null
   parsed: ParsedProductName | null
-  parserSource: 'database-rule' | 'hardcoded-parser' | 'llm-teacher' | 'unresolved'
+  parserSource: 'database-rule' | 'distributor-override' | 'hardcoded-parser' | 'llm-teacher' | 'unresolved'
   reviewFlag: string | null
   rule: PendingPurchaseParseRuleRecord | null
   ruleTrust: 'active' | 'provisional' | 'none'
@@ -1021,6 +1022,53 @@ async function resolvePendingPurchaseParse(input: {
 }): Promise<PendingPurchaseParseResolution> {
   const observationRawRow = buildPendingPurchaseParserObservationRawRow(input)
   const normalizedDistributorProductName = normalizePendingPurchaseParserText(input.group.distributorProductName)
+
+  // Distributor-keyed brand override (operator-curated). When the row's
+  // distributor maps to a brand whose name never appears in the product
+  // name (white-label product), pin the brand deterministically and skip
+  // the LLM. This wins over learned product-name rules, which can carry
+  // a wrong brand the LLM previously guessed from the distributor. We
+  // deliberately return a PARTIAL resolution (parsed = null) so the row
+  // is a brand-prefilled needs-review row, not a catalog-create with
+  // missing category/size — the reviewer sets category/size/variant.
+  const distributorOverride = await resolveDistributorBrandOverride(input.group.distributorNames)
+  if (distributorOverride.status === 'matched') {
+    const displayBrandName = distributorOverride.brandProfile.displayBrandName
+    await withTransaction(async (db) => {
+      await insertPendingPurchaseParseObservation(db, {
+        brandProfileId: distributorOverride.brandProfile.id,
+        inference: toJsonValue({
+          matchedAliasId: distributorOverride.aliasId,
+          matchedDistributor: distributorOverride.matchedDistributorName,
+          parserSource: 'distributor-override',
+        }),
+        normalizedDistributorProductName,
+        notes: `Pinned brand "${displayBrandName}" from distributor alias "${distributorOverride.matchedDistributorName}"; skipped LLM. Category/size require review.`,
+        observationStatus: 'accepted',
+        observationType: 'generation_parse',
+        rawDistributorProductName: input.group.distributorProductName,
+        rawRow: observationRawRow,
+        rowInputSignature: input.rowInputSignature,
+        sourceSystem: PENDING_PURCHASE_SOURCE_SYSTEM,
+      })
+    })
+
+    return {
+      brandProfile: distributorOverride.brandProfile,
+      note: `Brand pinned to ${displayBrandName} from distributor mapping (${distributorOverride.matchedDistributorName}); set category, size, and variant before creating.`,
+      parsed: null,
+      parserSource: 'distributor-override',
+      reviewFlag: 'Distributor brand override — set category/size/variant',
+      rule: null,
+      ruleTrust: 'none',
+    }
+  }
+  if (distributorOverride.status === 'conflict') {
+    // Misconfiguration (one distributor mapped to >1 brand). Surface it
+    // and fall through to normal parsing rather than guessing.
+    console.warn(`[pending-purchases] ${distributorOverride.note}`)
+  }
+
   const databaseMatch = await resolvePendingPurchaseDatabaseRule(input.group.distributorProductName)
   if (databaseMatch) {
     await withTransaction(async (db) => {
@@ -1232,6 +1280,62 @@ async function resolvePendingPurchaseParse(input: {
     reviewFlag: null,
     rule: null,
     ruleTrust: 'none',
+  }
+}
+
+type DistributorBrandOverrideResult =
+  | { status: 'none' }
+  | {
+      status: 'matched'
+      aliasId: number
+      brandProfile: PendingPurchaseBrandProfileRecord
+      matchedDistributorName: string
+    }
+  | { status: 'conflict'; note: string }
+
+/**
+ * Resolve a row's distributor name(s) to a pinned brand via the
+ * operator-curated `alias_type='distributor'` aliases. `distributorNames`
+ * carries both the distributor and distributor-integration names Sweed
+ * exposes on the order; any of them may match.
+ *
+ *  - 0 matches  → 'none'      (caller continues normal parsing)
+ *  - 1 brand    → 'matched'   (caller pins the brand)
+ *  - >1 brand   → 'conflict'  (misconfiguration; caller warns + continues)
+ */
+async function resolveDistributorBrandOverride(
+  distributorNames: Set<string>,
+): Promise<DistributorBrandOverrideResult> {
+  const normalizedNames = [...distributorNames]
+    .map((name) => normalizePendingPurchaseParserText(name))
+    .filter((name) => name.length > 0)
+  if (normalizedNames.length === 0) {
+    return { status: 'none' }
+  }
+
+  const matches = await listPendingPurchaseDistributorBrandAliases(getPool(), {
+    normalizedDistributorNames: normalizedNames,
+    sourceSystem: PENDING_PURCHASE_SOURCE_SYSTEM,
+  })
+  if (matches.length === 0) {
+    return { status: 'none' }
+  }
+
+  const distinctBrandIds = new Set(matches.map((match) => match.brandProfile.id))
+  if (distinctBrandIds.size > 1) {
+    const brandNames = [...new Set(matches.map((match) => match.brandProfile.displayBrandName))]
+    return {
+      note: `Distributor name(s) ${normalizedNames.join(', ')} map to multiple brands (${brandNames.join(', ')}); skipping distributor override.`,
+      status: 'conflict',
+    }
+  }
+
+  const winner = matches[0]
+  return {
+    aliasId: winner.alias.id,
+    brandProfile: winner.brandProfile,
+    matchedDistributorName: winner.alias.aliasValue,
+    status: 'matched',
   }
 }
 
@@ -1598,9 +1702,17 @@ async function buildGeneratedRow({
         : null
 
   if (!parsed && !reuse) {
+    // A distributor-override resolution pins the brand but intentionally
+    // leaves category/size/variant for the reviewer, so it lands here as
+    // a brand-prefilled needs-review row rather than a genuinely
+    // unclassified one.
+    const isDistributorOverride = parseResolution.parserSource === 'distributor-override'
+    const pinnedBrand = parseResolution.brandProfile?.displayBrandName ?? ''
     return {
       actionType: 'needs-review',
-      catalogAction: 'Review and classify this unresolved distributor product before proposing catalog create or mapping work.',
+      catalogAction: isDistributorOverride
+        ? `Brand pinned to ${pinnedBrand} from distributor mapping. Set category, size, and variant, then create.`
+        : 'Review and classify this unresolved distributor product before proposing catalog create or mapping work.',
       currentDescription,
       currentPrice,
       currentPriceBasis,
@@ -1634,7 +1746,7 @@ async function buildGeneratedRow({
         suggestionNote,
       ]),
       reviewFlags: compactStrings([
-        'Needs manual classification',
+        isDistributorOverride ? 'Needs category/size classification' : 'Needs manual classification',
         proposedPrice === null ? 'Needs manual price' : null,
         !primaryImage ? 'Needs image review' : null,
         parseResolution.reviewFlag,
@@ -1652,7 +1764,7 @@ async function buildGeneratedRow({
       siteKey: group.siteKey,
       siteLabel: group.siteLabel,
       suggestionCandidates,
-      targetBrand: '',
+      targetBrand: pinnedBrand,
       targetGroupName: '',
       targetPackCount: null,
       targetPrevalence: '',
@@ -1660,7 +1772,9 @@ async function buildGeneratedRow({
       targetStrain: '',
       targetVariantName: group.distributorProductName,
       targetVariantTab: '',
-      unresolvedReason: 'Name parser could not confidently classify this distributor product.',
+      unresolvedReason: isDistributorOverride
+        ? 'Brand pinned from distributor mapping; category, size, and variant still need review.'
+        : 'Name parser could not confidently classify this distributor product.',
     }
   }
 

@@ -779,6 +779,28 @@ const SENTINELS: MigrationSentinel[] = [
       'segment-membership display + "add to static segment" picker.',
     check: (db) => tableExists(db, 'sweed_customer_segments'),
   },
+  {
+    // Distributor-keyed brand aliases for the pending-purchase parser.
+    // Migration 063 widens the pending_purchase_brand_aliases.alias_type
+    // CHECK to allow 'distributor' (plus a partial unique index). The
+    // generation worker pins a brand deterministically when a row's
+    // distributor matches an active 'distributor' alias; without the
+    // widened CHECK, inserting/seeding such an alias fails and the
+    // worker's distributor-override lookup never matches.
+    migrationId: '063_pending_purchase_distributor_brand_alias',
+    label:
+      "pending_purchase_brand_aliases.alias_type accepts 'distributor' " +
+      '— distributor-keyed brand pinning for catalog/pending-purchases.',
+    check: async (db) => {
+      const result = await db.query<{ ok: boolean }>(
+        `select pg_get_constraintdef(oid) like '%distributor%' as ok
+           from pg_constraint
+          where conrelid = 'pending_purchase_brand_aliases'::regclass
+            and conname = 'pending_purchase_brand_aliases_alias_type_check'`,
+      )
+      return result.rows[0]?.ok === true
+    },
+  },
 ]
 
 interface CacheEntry {
