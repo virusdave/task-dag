@@ -449,24 +449,27 @@ export async function getCatalogAnalyticsPoints(
       group by dealer_id
     ),
     sales as (
-      select so.dealer_id,
-             item->>'inventoryItemId' as inventory_item_id,
-             sum(coalesce((item->>'currentQty')::numeric, 0)) as units_sold,
-             sum(coalesce((item->>'subtotalAmount')::numeric, 0)) as revenue,
-             sum(coalesce((item->>'currentQty')::numeric, 0)
+      -- D1: reads the materialised sweed_order_items_flat (oi) instead
+      -- of unrolling sweed_orders.raw_json->'items' at request time.
+      -- oi.qty == old currentQty (verified 0 fallback rows) and
+      -- oi.revenue == old subtotalAmount; flat rows are a 1:1 mirror.
+      select oi.dealer_id,
+             oi.inventory_item_id,
+             sum(oi.qty) as units_sold,
+             sum(oi.revenue) as revenue,
+             sum(oi.qty
                  * coalesce(sweed_package_cost_as_of_or_earliest(
-                     so.dealer_id, item->>'inventoryItemId', so.pay_time), 0)) as cogs,
-             count(distinct so.invoice_id) as invoice_count,
+                     oi.dealer_id, oi.inventory_item_id, oi.pay_time), 0)) as cogs,
+             count(distinct oi.invoice_id) as invoice_count,
              -- Distinct calendar days (ET) that this variant sold on.
              -- Powers the "sales-day coverage" scatter and the
              -- promo-event vs reliable-demand quadrant analysis.
-             count(distinct date_trunc('day', so.pay_time at time zone 'America/New_York')) as days_with_sales
-      from sweed_orders so
-        cross join lateral jsonb_array_elements(so.raw_json->'items') as item
-      where so.dealer_id = any($1::bigint[])
-        and so.pay_time >= $2 and so.pay_time < $3
-        and item->>'inventoryItemId' is not null
-      group by so.dealer_id, item->>'inventoryItemId'
+             count(distinct date_trunc('day', oi.pay_time at time zone 'America/New_York')) as days_with_sales
+      from sweed_order_items_flat oi
+      where oi.dealer_id = any($1::bigint[])
+        and oi.pay_time >= $2 and oi.pay_time < $3
+        and oi.inventory_item_id is not null
+      group by oi.dealer_id, oi.inventory_item_id
     ),
     mapping as (
       select cg.id as catalog_group_id,
@@ -841,16 +844,16 @@ export async function getMetricsEntityRankings(
       from base
     ),
     last_order as (
+      -- D1: same materialised flat table; max(pay_time) per entity.
       select ie.entity_label,
-             max(so.pay_time) as last_pay_time
-      from sweed_orders so
-        cross join lateral jsonb_array_elements(so.raw_json->'items') as item
+             max(oi.pay_time) as last_pay_time
+      from sweed_order_items_flat oi
         join inventory_entity ie
-          on ie.dealer_id = so.dealer_id
-         and ie.inventory_item_id = item->>'inventoryItemId'
-      where so.dealer_id = any($1::bigint[])
-        and so.pay_time >= $2
-        and item->>'inventoryItemId' is not null
+          on ie.dealer_id = oi.dealer_id
+         and ie.inventory_item_id = oi.inventory_item_id
+      where oi.dealer_id = any($1::bigint[])
+        and oi.pay_time >= $2
+        and oi.inventory_item_id is not null
       group by 1
     )
     select p.entity_label as label,
