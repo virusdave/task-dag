@@ -7646,6 +7646,29 @@ span.metric-chart-legend-item {
 .inv-proc-section-sub {
   margin: 0 0 10px;
 }
+.inv-proc-section-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.inv-proc-export-btn {
+  cursor: pointer;
+  white-space: nowrap;
+}
+.inv-proc-export-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.inv-proc-basket-detail-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 4px 2px 6px;
+}
 
 .inv-proc-table-scroll {
   width: 100%;

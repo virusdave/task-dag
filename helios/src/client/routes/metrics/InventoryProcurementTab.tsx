@@ -8,7 +8,7 @@ import {
   type InventorySkuRow,
 } from '../../../shared/contracts/index.js'
 import { loadJson } from '../../app/fetchJson.js'
-import { nyMonthDaySlash } from '../../app/nyTime.js'
+import { nyIsoDate, nyMonthDaySlash } from '../../app/nyTime.js'
 
 // ---------------------------------------------------------------------------
 // Inventory / Procurement workspace (the /metrics → "Inventory" /
@@ -81,6 +81,79 @@ function daysAgo(iso: string | null | undefined): number | null {
   return Math.floor((Date.now() - t) / DAY_MS)
 }
 
+// ---------------------------------------------------------------------------
+// Deep-link state — persist the active sub-tab + filters in the URL hash so a
+// buyer can bookmark/share a specific view (e.g. ".../metrics/inventory
+// #view=distributors&sites=bronx&window=56"). The route path itself is owned
+// by react-router (the :tabId segment), so we keep our view state in the hash
+// to avoid fighting the router.
+// ---------------------------------------------------------------------------
+
+interface DeepLinkState {
+  view: SubTab
+  sites: ReadonlySet<string>
+  windowDays: number
+}
+
+const VALID_SUBTABS = new Set<SubTab>(SUBTABS.map((t) => t.id))
+const VALID_WINDOWS = new Set<number>(WINDOW_PRESETS.map((w) => w.days))
+
+function readDeepLink(defaults: DeepLinkState): DeepLinkState {
+  if (typeof window === 'undefined') return defaults
+  const raw = window.location.hash.replace(/^#/, '')
+  if (!raw) return defaults
+  const p = new URLSearchParams(raw)
+  const view = p.get('view')
+  const sites = p.get('sites')
+  const win = p.get('window')
+  const winNum = win ? Number(win) : NaN
+  return {
+    view: view && VALID_SUBTABS.has(view as SubTab) ? (view as SubTab) : defaults.view,
+    sites: sites
+      ? new Set(sites.split(',').filter((s) => s.length > 0))
+      : defaults.sites,
+    windowDays: VALID_WINDOWS.has(winNum) ? winNum : defaults.windowDays,
+  }
+}
+
+function writeDeepLink(state: DeepLinkState): void {
+  if (typeof window === 'undefined') return
+  const p = new URLSearchParams()
+  p.set('view', state.view)
+  if (state.sites.size > 0) p.set('sites', Array.from(state.sites).sort().join(','))
+  p.set('window', String(state.windowDays))
+  const hash = `#${p.toString()}`
+  if (hash !== window.location.hash) {
+    window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}${hash}`)
+  }
+}
+
+// ---------------------------------------------------------------------------
+// CSV export — hand the buyer a spreadsheet they can act on / hand to a
+// distributor. NY-local date in the filename per repo canon.
+// ---------------------------------------------------------------------------
+
+function csvCell(v: string | number | null | undefined): string {
+  if (v === null || v === undefined) return ''
+  const s = typeof v === 'number' ? (Number.isFinite(v) ? String(v) : '') : v
+  return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
+}
+
+function downloadCsv(filename: string, header: ReadonlyArray<string>, rows: ReadonlyArray<ReadonlyArray<string | number | null | undefined>>): void {
+  if (typeof document === 'undefined') return
+  const lines = [header, ...rows].map((cols) => cols.map(csvCell).join(','))
+  // Prepend a UTF-8 BOM so Excel opens it with the right encoding.
+  const blob = new Blob(['\ufeff' + lines.join('\r\n') + '\r\n'], { type: 'text/csv;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  URL.revokeObjectURL(url)
+}
+
 const ACTION_META: Record<InventoryAction, { label: string; cls: string }> = {
   order_now: { label: 'ORDER NOW', cls: 'inv-pill--danger' },
   order_now_supplier_unknown: { label: 'ORDER — SUPPLIER?', cls: 'inv-pill--warn' },
@@ -120,9 +193,13 @@ function Kpi({ value, label, warn }: { value: string; label: string; warn?: bool
 // ---------------------------------------------------------------------------
 
 export function InventoryProcurementTab() {
-  const [selectedSites, setSelectedSites] = useState<ReadonlySet<string>>(() => new Set<string>())
-  const [windowDays, setWindowDays] = useState(28)
-  const [subTab, setSubTab] = useState<SubTab>('reorder')
+  const initial = useMemo(
+    () => readDeepLink({ view: 'reorder', sites: new Set<string>(), windowDays: 28 }),
+    [],
+  )
+  const [selectedSites, setSelectedSites] = useState<ReadonlySet<string>>(() => initial.sites)
+  const [windowDays, setWindowDays] = useState(initial.windowDays)
+  const [subTab, setSubTab] = useState<SubTab>(initial.view)
   const [data, setData] = useState<InventoryProcurementResponse | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -150,6 +227,11 @@ export function InventoryProcurementTab() {
       cancelled = true
     }
   }, [sitesParam, windowDays])
+
+  // Keep the URL hash in sync so the current view is bookmarkable/shareable.
+  useEffect(() => {
+    writeDeepLink({ view: subTab, sites: selectedSites, windowDays })
+  }, [subTab, selectedSites, windowDays])
 
   function toggleSite(id: string) {
     setSelectedSites((prev) => {
@@ -535,6 +617,58 @@ function buildBaskets(data: InventoryProcurementResponse): DistBasket[] {
     .sort((a, b) => rank[a.guidance] - rank[b.guidance] || b.orderNowValue - a.orderNowValue)
 }
 
+const BASKET_CSV_HEADER: ReadonlyArray<string> = [
+  'Site',
+  'Distributor',
+  'Guidance',
+  'Product',
+  'Brand',
+  'Category',
+  'SKU',
+  'Sellable units',
+  'Days supply',
+  'Projected stockout',
+  'Forecast/day',
+  'Unit cost',
+  'Recommended qty',
+  'Extended cost',
+  'Order-now value',
+]
+
+function round2(n: number | null | undefined): number | null {
+  if (n === null || n === undefined || !Number.isFinite(n)) return null
+  return Math.round(n * 100) / 100
+}
+
+function basketCsvRows(
+  baskets: ReadonlyArray<DistBasket>,
+): Array<Array<string | number | null>> {
+  const rows: Array<Array<string | number | null>> = []
+  for (const b of baskets) {
+    for (const l of b.lines) {
+      const r = l.r
+      rows.push([
+        b.siteLabel,
+        b.distributorName,
+        GUIDANCE_META[b.guidance].label,
+        r.productName,
+        r.brandName ?? '',
+        r.categoryName ?? '',
+        r.productSku ?? '',
+        r.sellableUnits,
+        r.daysSupply === null ? '' : round2(r.daysSupply),
+        r.projectedStockoutAt ? nyIsoDate(new Date(r.projectedStockoutAt).getTime()) : '',
+        round2(r.forecastDailyUnits),
+        round2(r.unitCostCurrent),
+        r.recommendedQty,
+        round2(r.recommendedCost),
+        round2(l.orderNowValue),
+      ])
+    }
+  }
+  return rows
+}
+
 const GUIDANCE_META: Record<DistBasket['guidance'], { label: string; cls: string }> = {
   order_now: { label: 'ORDER NOW', cls: 'inv-pill--danger' },
   short_order: { label: 'SHORT ORDER', cls: 'inv-pill--warn' },
@@ -552,6 +686,16 @@ function DistributorBasketsView({ data }: { data: InventoryProcurementResponse }
     .reduce((t, b) => t + b.basketCost, 0)
   const marginSaved = baskets.reduce((t, b) => t + Math.max(0, b.lossIfWait - b.lossIfOrderNow), 0)
 
+  const actionableBaskets = baskets.filter(
+    (b) => b.guidance === 'order_now' || b.guidance === 'short_order',
+  )
+
+  function exportBaskets(toExport: ReadonlyArray<DistBasket>, label: string) {
+    const rows = basketCsvRows(toExport)
+    if (rows.length === 0) return
+    downloadCsv(`procurement-baskets-${label}-${nyIsoDate(Date.now())}.csv`, BASKET_CSV_HEADER, rows)
+  }
+
   return (
     <div className="inv-proc-view">
       <div className="budtender-totals-strip">
@@ -562,7 +706,18 @@ function DistributorBasketsView({ data }: { data: InventoryProcurementResponse }
       </div>
 
       <article className="metric-chart-card">
-        <h3 className="inv-proc-section-title">Distributor order board</h3>
+        <div className="inv-proc-section-head">
+          <h3 className="inv-proc-section-title">Distributor order board</h3>
+          <button
+            type="button"
+            className="metrics-site-chip inv-proc-export-btn"
+            disabled={actionableBaskets.length === 0}
+            title="Download the order-now + short-order baskets as a CSV"
+            onClick={() => exportBaskets(actionableBaskets, 'order-now')}
+          >
+            ⬇ Export order baskets (CSV)
+          </button>
+        </div>
         <p className="subtle-copy inv-proc-section-sub">
           Batched per-distributor guidance. "Order-now value" = margin lost by waiting minus early
           carrying cost. Click a row to see the recommended basket.
@@ -623,6 +778,29 @@ function DistributorBasketsView({ data }: { data: InventoryProcurementResponse }
                     {expanded === b.key ? (
                       <tr key={`${b.key}-detail`} className="inv-proc-basket-detail">
                         <td colSpan={11}>
+                          <div className="inv-proc-basket-detail-head">
+                            <span className="subtle-copy">
+                              {b.distributorName} · {b.siteLabel} · {b.lines.length} line
+                              {b.lines.length === 1 ? '' : 's'} · {fmtMoney(b.basketCost)}
+                            </span>
+                            <button
+                              type="button"
+                              className="metrics-site-chip inv-proc-export-btn"
+                              title="Download this distributor's basket as a CSV"
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                exportBaskets(
+                                  [b],
+                                  `${b.distributorName}-${b.siteLabel}`
+                                    .toLowerCase()
+                                    .replace(/[^a-z0-9]+/g, '-')
+                                    .replace(/^-+|-+$/g, ''),
+                                )
+                              }}
+                            >
+                              ⬇ Export this basket (CSV)
+                            </button>
+                          </div>
                           <table className="budtender-leaderboard inv-proc-table inv-proc-subtable">
                             <thead>
                               <tr>
