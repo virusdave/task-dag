@@ -66,7 +66,7 @@ function mockPool(
       if (text.includes('todays_orders')) {
         return dispatch(canned.ordersRows)
       }
-      if (text.includes('todays_items')) {
+      if (text.includes('order_cogs')) {
         return dispatch(canned.marginRows)
       }
       if (text.includes('todays_scans')) {
@@ -236,6 +236,46 @@ describe('loadEssentialsDailySummary', () => {
     // implementation echoes whatever the SQL returns).
     // No assertion on the response shape here — covered by the
     // sibling test below. This test only certifies the SQL shape.
+  })
+
+  it('computes the LIVE margin from order-HEADER revenue + expectedQty cost (not item-level subtotalAmount/currentQty)', async () => {
+    // Regression guard for the −57% Midtown bug (2026-06-05): live
+    // in-flight kiosk orders are still 'New' / 'In Process', and
+    // Sweed's order-LIST feed zeroes per-item subtotalAmount while
+    // drifting currentQty to 0 for those lines. The old calc paired
+    // item-level revenue with item-level qty×cost and charged COGS
+    // against zero revenue → absurd negative GM%. The live banner must
+    // instead take revenue from the order header (subtotal_dollars),
+    // COGS from expectedQty×cost over non-canceled lines, and exclude
+    // an order whose active lines have unknown cost.
+    const capturedSqls: string[] = []
+    const db = mockPool(
+      {
+        dayRow: {
+          startIso: '2026-06-05T12:00:00.000Z',
+          endIso: '2026-06-05T15:00:00.000Z',
+          nyDate: '2026-06-05',
+        },
+        ordersRows: [],
+        marginRows: [],
+        scanRows: [],
+      },
+      capturedSqls,
+    )
+
+    await loadEssentialsDailySummary(db)
+
+    const marginSql = capturedSqls.find((s) => s.includes('order_cogs'))
+    expect(marginSql, 'expected a margin SQL using the order_cogs CTE').toBeTruthy()
+    // Revenue comes from the order header, not item subtotalAmount.
+    expect(marginSql).toContain('subtotal_dollars')
+    expect(marginSql).toContain('from sweed_orders so')
+    // Sold quantity is expectedQty (with a fallback), NOT raw currentQty.
+    expect(marginSql).toContain("raw_item->>'expectedQty'")
+    // Canceled lines are excluded from COGS.
+    expect(marginSql).toContain('is_canceled')
+    // Unknown-cost orders are guarded so they can't inflate GM%.
+    expect(marginSql).toContain('missing_cost')
   })
 
   it('produces zero-valued rows for sites with no activity today', async () => {

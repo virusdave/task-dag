@@ -199,22 +199,38 @@ export async function loadEssentialsDailySummary(
     [dealerIds, startIso, endIso],
   )
 
-  // Margin — per-item revenue × cost. Mirrors the SQL pattern used
-  // by margins.gross_margin_dollars / margins.effective_gm_pct so
-  // the daily summary numbers reconcile with the cards beneath.
+  // Margin — LIVE / TODAY basis. This is deliberately NOT the Paid-only
+  // item-level basis used by the historical /metrics margin charts (see
+  // sweedPackageSnapshotsQueries.ts). Today's orders are live in-flight
+  // kiosk/pickup orders that are still 'New' / 'In Process', not yet
+  // 'Paid'. Sweed's order-LIST feed zeroes the per-item revenue
+  // (subtotalAmount) for non-final lines while the ORDER HEADER total
+  // (sweed_orders.subtotal_dollars) is already correct, and it also
+  // drifts per-line currentQty to 0 for 'In Process' lines. The
+  // pre-2026-06 calc paired item-level revenue with item-level
+  // qty × cost, so it charged COGS against zero item-revenue and showed
+  // e.g. Midtown −57% GM on a day that was really ~+58%.
+  //
+  // So for the live banner we compute margin per ORDER:
+  //   * revenue = order-header subtotal_dollars (reliable even pre-Paid)
+  //   * COGS    = Σ over non-canceled lines of expectedQty × unit_cost
+  //              (expectedQty is the ordered/sold quantity; currentQty
+  //               drifts to 0 before settlement)
+  //   * an order is excluded from BOTH revenue and COGS if ANY of its
+  //     non-canceled, positive-qty lines has an unknown wholesale cost
+  //     (so a partial-cost order can't inflate the GM%). With current
+  //     100% cost coverage this guard is a no-op, but it keeps the ratio
+  //     honest if coverage ever drops.
+  // Canceled orders contribute 0 (their header subtotal is 0 and their
+  // lines are excluded), so they need no special handling.
   const marginPromise = db.query<MarginRow>(
     `
-      with todays_items as (
-        -- D1: reads materialised sweed_order_items_flat instead of
-        -- unrolling sweed_orders.raw_json->'items' per request. f.revenue
-        -- mirrors subtotalAmount; f.qty mirrors currentQty (with the same
-        -- quantity/qty fallback the flat ingest applies). Live dark-diff
-        -- over the rolling 30d window showed 0 priced_revenue/priced_cogs
-        -- differences vs the old raw_json path.
+      with order_lines as (
         select
           f.dealer_id,
-          f.revenue as revenue,
-          f.qty as qty,
+          f.invoice_id,
+          (f.raw_item->'invoiceItemStatus'->>'name') = 'Canceled' as is_canceled,
+          coalesce(nullif(f.raw_item->>'expectedQty', '')::numeric, f.qty, 0) as qty,
           sweed_package_cost_as_of_or_earliest(
             f.dealer_id,
             f.inventory_item_id,
@@ -223,13 +239,30 @@ export async function loadEssentialsDailySummary(
         from sweed_order_items_flat f
         where f.dealer_id = any($1::bigint[])
           and f.pay_time >= $2 and f.pay_time < $3
+      ),
+      order_cogs as (
+        select
+          dealer_id,
+          invoice_id,
+          sum(case when not is_canceled then qty * coalesce(unit_cost, 0) else 0 end) as order_cogs,
+          bool_or(not is_canceled and qty > 0 and unit_cost is null) as missing_cost
+        from order_lines
+        group by dealer_id, invoice_id
+      ),
+      margin_orders as (
+        select so.dealer_id, so.invoice_id, coalesce(so.subtotal_dollars, 0) as subtotal_dollars
+        from sweed_orders so
+        where so.dealer_id = any($1::bigint[])
+          and so.pay_time >= $2 and so.pay_time < $3
       )
       select
-        dealer_id,
-        sum(case when unit_cost is not null then revenue else 0 end)::numeric as priced_revenue,
-        sum(case when unit_cost is not null then qty * unit_cost else 0 end)::numeric as priced_cogs
-      from todays_items
-      group by dealer_id
+        o.dealer_id,
+        sum(case when not coalesce(oc.missing_cost, false) then o.subtotal_dollars else 0 end)::numeric as priced_revenue,
+        sum(case when not coalesce(oc.missing_cost, false) then coalesce(oc.order_cogs, 0) else 0 end)::numeric as priced_cogs
+      from margin_orders o
+      left join order_cogs oc
+        on oc.dealer_id = o.dealer_id and oc.invoice_id = o.invoice_id
+      group by o.dealer_id
     `,
     [dealerIds, startIso, endIso],
   )
