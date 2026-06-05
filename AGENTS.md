@@ -2,8 +2,15 @@
 
 **MANDATORY FIRST READ — agent canon (re-read every session).**
 Before doing anything in this repo, read the cross-repo canonical
-agent rules from a fresh ephemeral checkout of `virusdave/top-level`
-at `origin/master`:
+agent rules. They live in **one** file, with no mirror and no copy in
+this repo:
+
+```
+virusdave/top-level : docs/canon/AGENTS_CANON.md   (branch: master)
+```
+
+**You MUST read it from a freshly-cloned ephemeral checkout of
+top-level's `master`, every session — do not read it any other way:**
 
 ```sh
 canon_ws=$(/home/amp-local/src/github-worker/bin/ephemeral-checkout \
@@ -13,15 +20,30 @@ cat "$canon_ws/docs/canon/AGENTS_CANON.md"
 /home/amp-local/src/github-worker/bin/ephemeral-checkout --remove "$canon_ws"
 ```
 
-That file is authoritative across all repos and changes frequently.
-It also documents the canon-update interrupt: if the operator gives a
-rule that applies to all agents/all repos ("canonical", "always",
-"never", "going forward", …), persist it to
-`docs/canon/AGENTS_CANON.md` before continuing (see
-`docs/canon/UPDATING_CANON.md` in `virusdave/top-level`). The rest of
-this `AGENTS.md` only adds **repo-specific** instructions and must not
-weaken or restate canon. If canon and this file conflict, canon wins —
-update the stale one.
+Why this exact procedure, and not a shortcut:
+
+- **Canon changes frequently** (operators add/modify rules mid-task),
+  so a cached or remembered copy is stale almost immediately. Re-read
+  it fresh at the start of every session — never paraphrase, cache, or
+  copy it into this repo.
+- **Do NOT `cat` the shared `~/src/top-level` working copy.** That tree
+  is routinely stale: other agents work in ephemeral checkouts and
+  nobody pulls there, so it can be many commits behind `origin/master`.
+- The `ephemeral-checkout` tool clones the supplied path's `origin`
+  **fresh from `master`** into a throwaway tree, so the file you read
+  is guaranteed to be the latest published canon. That guarantee is the
+  whole point of going through the tool rather than reading a local path.
+- If the clone/read fails, **stop and report** — do not proceed on a
+  guessed or remembered version of the rules.
+
+That file is authoritative across all repos. It also documents the
+canon-update interrupt: if the operator gives a rule that applies to
+all agents/all repos ("canonical", "always", "never", "going forward",
+…), persist it to `docs/canon/AGENTS_CANON.md` (via the same fresh
+ephemeral checkout) before continuing — see `docs/canon/UPDATING_CANON.md`
+in `virusdave/top-level`. The rest of this `AGENTS.md` only adds
+**repo-specific** instructions and must not weaken or restate canon. If
+canon and this file conflict, canon wins — update the stale one.
 
 ---
 
