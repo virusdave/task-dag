@@ -10,6 +10,7 @@ import {
   type PricingRunGroupSummary,
   type PricingRunMarketListing,
 } from '../../../shared/contracts/index.js'
+import { calculateGmPercent } from '../../../shared/domain/pricingGeneration.js'
 import { loadJson, mutateJson } from '../../app/fetchJson.js'
 import { waitForJob } from '../../app/jobPolling.js'
 import type { CompetitorListing } from '../../../shared/ui/pricing-ladder/index.js'
@@ -1111,8 +1112,18 @@ function buildSelectionFilterSummary(selectionFilters: PricingRunDetailResponse[
 }
 
 function pricingTransitionText(item: PricingReviewItem, reviewedPrice: number | null): string {
-  const livePrice = formatMoney(numericValue(item.lineItem.baselineValue))
-  return `${livePrice} (${formatPercent(item.pricingContext.currentGmPercent)}) -> ${formatMoney(reviewedPrice)} (${formatPercent(item.pricingContext.proposedGmPercent)})`
+  // GM% MUST be derived from the price actually on screen (which reflects the
+  // operator's live edit / ladder drag), not the generation-time percentages
+  // stored in evidence_json. The stored proposedGmPercent was computed against
+  // the originally-generated price, so pairing it with an edited price produced
+  // impossible transitions like "$25.00 (57.06%) -> $22.50 (58.71%)" — a lower
+  // price appearing to raise GM. Recompute both ends from the displayed prices
+  // and the same wholesale cost via the canonical shared helper.
+  const cost = item.pricingContext.wholesaleCost
+  const livePriceValue = numericValue(item.lineItem.baselineValue)
+  const currentGmPercent = calculateGmPercent(cost, livePriceValue)
+  const proposedGmPercent = calculateGmPercent(cost, reviewedPrice)
+  return `${formatMoney(livePriceValue)} (${formatPercent(currentGmPercent)}) -> ${formatMoney(reviewedPrice)} (${formatPercent(proposedGmPercent)})`
 }
 
 function approvalTone(status: string): 'danger' | 'muted' | 'success' | 'warning' {

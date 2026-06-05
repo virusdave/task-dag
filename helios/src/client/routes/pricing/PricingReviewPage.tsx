@@ -11,6 +11,7 @@ import {
   type PricingReviewResponse,
   type PricingRunListResponse,
 } from '../../../shared/contracts/index.js'
+import { calculateGmPercent } from '../../../shared/domain/pricingGeneration.js'
 import { loadJson, mutateJson } from '../../app/fetchJson.js'
 import { waitForJob } from '../../app/jobPolling.js'
 import type { CompetitorListing } from '../../../shared/ui/pricing-ladder/index.js'
@@ -390,7 +391,7 @@ export function PricingReviewPage() {
                       <td>{formatMoney(livePrice)}</td>
                       <td>{formatMoney(proposedPrice)}</td>
                       <td>{delta === null ? '—' : formatSignedMoney(delta)}</td>
-                      <td>{formatPercent(item.pricingContext.currentGmPercent)} {'->'} {formatPercent(item.pricingContext.proposedGmPercent)}</td>
+                      <td>{formatPercent(calculateGmPercent(item.pricingContext.wholesaleCost, livePrice))} {'->'} {formatPercent(calculateGmPercent(item.pricingContext.wholesaleCost, proposedPrice))}</td>
                       <td>{formatMoney(item.pricingContext.wholesaleCost)}</td>
                       <td>
                         {formatMarketReferenceText(
