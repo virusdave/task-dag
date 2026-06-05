@@ -489,18 +489,27 @@ export async function runCatalogPendingPurchasesGenerateJob(
   }
 
   const sites = resolveSites(payload.siteDealerIds)
+  const purchaseOrderNumber = normalizeNonEmptyString(payload.purchaseOrderNumber)
   const requestId = randomUUID()
 
   await updateJobProgress(context.id, {
     completed: 0,
-    message: `Scanning ${sites.length} site${sites.length === 1 ? '' : 's'} for unresolved outstanding purchase lines.`,
+    message: purchaseOrderNumber
+      ? `Scanning ${sites.length} site${sites.length === 1 ? '' : 's'} for outstanding purchase order ${purchaseOrderNumber}.`
+      : `Scanning ${sites.length} site${sites.length === 1 ? '' : 's'} for unresolved outstanding purchase lines.`,
     phase: 'Collecting outstanding purchase orders',
     phaseCount: 3,
     phaseIndex: 1,
     total: sites.length,
   })
 
-  const liveCollection = await collectPendingPositions(context.id, payload.fromDate, payload.toDate, sites)
+  const liveCollection = await collectPendingPositions(context.id, payload.fromDate, payload.toDate, sites, purchaseOrderNumber)
+
+  if (purchaseOrderNumber && liveCollection.orders.length === 0) {
+    throw new Error(
+      `No outstanding purchase order matching "${purchaseOrderNumber}" was found on the selected site(s) between ${payload.fromDate} and ${payload.toDate}. Check the purchase number, the selected site, and the date range.`,
+    )
+  }
   const cache = new CatalogCache(env.sweedStateDealerId)
 
   await ensureDealerContext(env.sweedStateDealerId)
@@ -840,6 +849,7 @@ async function collectPendingPositions(
   fromDate: string,
   toDate: string,
   sites: HeliosPendingPurchaseSiteDealer[],
+  purchaseOrderNumber: string | null,
 ): Promise<{ groups: Map<string, PendingPositionGroup>; orders: PendingOrderSummary[] }> {
   const groups = new Map<string, PendingPositionGroup>()
   const orders: PendingOrderSummary[] = []
@@ -853,7 +863,13 @@ async function collectPendingPositions(
       phaseIndex: 1,
       total: sites.length,
     })
-    const siteOrders = await listOutstandingOrders(site.dealerId, fromDate, toDate)
+    const allSiteOrders = await listOutstandingOrders(site.dealerId, fromDate, toDate)
+    // Single-PO scope: when a purchase number is requested, drop every other
+    // outstanding order at the list step (before any per-order detail/suggestion
+    // RPCs) so only that one purchase runs through the flow.
+    const siteOrders = purchaseOrderNumber
+      ? allSiteOrders.filter((order) => matchesRequestedPurchaseOrder(order, purchaseOrderNumber))
+      : allSiteOrders
     for (const orderSummary of siteOrders) {
       const order = PurchaseOrderDetailSchema.parse(
         await callSweedRpc(site.dealerId, 'store.purchase.order.get', { id: orderSummary.id }),
@@ -1817,8 +1833,12 @@ async function buildGeneratedRow({
   }
 }
 
-async function listOutstandingOrders(dealerId: number, fromDate: string, toDate: string): Promise<Array<{ id: number }>> {
-  const orders: Array<{ id: number }> = []
+async function listOutstandingOrders(
+  dealerId: number,
+  fromDate: string,
+  toDate: string,
+): Promise<Array<{ id: number; name: string | null }>> {
+  const orders: Array<{ id: number; name: string | null }> = []
   let page = 1
   const pageSize = 50
 
@@ -1833,12 +1853,41 @@ async function listOutstandingOrders(dealerId: number, fromDate: string, toDate:
       }),
     )
 
-    orders.push(...response.data.map((row) => ({ id: row.id })))
+    orders.push(...response.data.map((row) => ({
+      id: row.id,
+      name: normalizeNonEmptyString((row as Record<string, unknown>).name),
+    })))
     if (orders.length >= response.totalCount || response.data.length < pageSize) {
       return orders
     }
     page += 1
   }
+}
+
+/**
+ * Single-PO scope predicate. The operator enters a "purchase number" exactly
+ * as it appears in Sweed's outstanding-PO list; that can be either the
+ * human-facing order name/number (e.g. `PO-12345`) or the numeric Sweed order
+ * id. We accept either: a normalized text match against the order name (so
+ * `PO-12345`, `po 12345`, and `PO12345` all match) OR an exact match against
+ * the numeric order id.
+ */
+function matchesRequestedPurchaseOrder(
+  order: { id: number; name: string | null },
+  requestedPurchaseOrderNumber: string,
+): boolean {
+  const requestedTrimmed = requestedPurchaseOrderNumber.trim()
+  if (requestedTrimmed.length === 0) {
+    return false
+  }
+  if (String(order.id) === requestedTrimmed) {
+    return true
+  }
+  const requestedCompact = compactText(requestedTrimmed)
+  if (requestedCompact.length === 0) {
+    return false
+  }
+  return compactText(order.name) === requestedCompact
 }
 
 async function findExactDistributorProductRow(group: PendingPositionGroup): Promise<ExactDistributorProductRow | null> {

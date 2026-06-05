@@ -201,6 +201,7 @@ export function PendingPurchasesPage() {
     HELIOS_PENDING_PURCHASE_SITE_DEALERS.map((dealer) => dealer.dealerId),
   )
   const [generationJobStatus, setGenerationJobStatus] = useState<JobStatusResponse | null>(data.activeGenerationJob)
+  const [generatePurchaseOrderNumber, setGeneratePurchaseOrderNumber] = useState('')
   const [generateSuccessMessage, setGenerateSuccessMessage] = useState<string | null>(null)
   const [generateToDate, setGenerateToDate] = useState(defaultGenerateToDate)
   const [importFilePath, setImportFilePath] = useState('')
@@ -355,8 +356,10 @@ export function PendingPurchasesPage() {
     clearFeedback()
 
     try {
+      const trimmedPurchaseOrderNumber = generatePurchaseOrderNumber.trim()
       const body = QueuePendingPurchasePacketGenerationRequestSchema.parse({
         fromDate: generateFromDate,
+        purchaseOrderNumber: trimmedPurchaseOrderNumber.length > 0 ? trimmedPurchaseOrderNumber : null,
         reason: 'Admin live pending-purchase packet generation',
         siteDealerIds: generateSiteDealerIds,
         toDate: generateToDate,
@@ -506,7 +509,7 @@ export function PendingPurchasesPage() {
             <Pill tone="warning">admin</Pill>
           </summary>
           <p className="subtle-copy">
-            Read the current Sweed outstanding PO queue directly and persist a generated Helios review packet. This supersedes the prior ready packet without writing to Sweed synchronously.
+            Read the current Sweed outstanding PO queue directly and persist a generated Helios review packet. This supersedes the prior ready packet without writing to Sweed synchronously. Leave the purchase order # blank to scan the whole queue, or enter a specific Sweed purchase order number (and select its site) to run only that one purchase through the flow.
           </p>
           <div className="filter-row" style={{ alignItems: 'center' }}>
             <label className="stack-field" style={{ minWidth: '11rem' }}>
@@ -516,6 +519,15 @@ export function PendingPurchasesPage() {
             <label className="stack-field" style={{ minWidth: '11rem' }}>
               <span>To</span>
               <input onChange={(event) => setGenerateToDate(event.currentTarget.value)} type="date" value={generateToDate} />
+            </label>
+            <label className="stack-field" style={{ minWidth: '12rem' }}>
+              <span>Purchase order # (optional)</span>
+              <input
+                onChange={(event) => setGeneratePurchaseOrderNumber(event.currentTarget.value)}
+                placeholder="Single PO only — blank = all"
+                type="text"
+                value={generatePurchaseOrderNumber}
+              />
             </label>
             <div className="stack-field">
               <span>Sites</span>

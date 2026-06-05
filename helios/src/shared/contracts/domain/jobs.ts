@@ -227,6 +227,9 @@ export type CatalogPendingPurchasesImportJobPayload = z.infer<typeof CatalogPend
 
 export const CatalogPendingPurchasesGenerateJobPayloadSchema = z.object({
   fromDate: z.iso.date(),
+  // Optional single-PO scope: only the outstanding purchase order whose Sweed
+  // name/number (or numeric id) matches is processed when this is set.
+  purchaseOrderNumber: z.string().trim().min(1).nullable().optional(),
   requestedByUserId: z.number().int().positive().nullable().optional(),
   siteDealerIds: z.array(z.number().int().positive()).default([]),
   toDate: z.iso.date(),

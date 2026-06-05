@@ -110,6 +110,10 @@ export type QueuePendingPurchasePacketImportRequest = z.infer<typeof QueuePendin
 export const QueuePendingPurchasePacketGenerationRequestSchema = z
   .object({
     fromDate: z.iso.date(),
+    // When set, only the single outstanding purchase order whose Sweed
+    // name/number (or numeric id) matches is run through the pending-purchase
+    // flow; every other outstanding order in the date range is skipped.
+    purchaseOrderNumber: z.string().trim().min(1).max(100).nullable().optional(),
     reason: z.string().trim().max(500).nullable().optional(),
     siteDealerIds: z.array(z.coerce.number().int().positive()).default([]),
     toDate: z.iso.date(),

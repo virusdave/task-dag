@@ -221,16 +221,18 @@ export async function registerPendingPurchaseRoutes(server: FastifyInstance): Pr
     const siteDealerIds = body.siteDealerIds.length > 0
       ? [...new Set(body.siteDealerIds)]
       : HELIOS_PENDING_PURCHASE_SITE_DEALERS.map((dealer) => dealer.dealerId)
+    const purchaseOrderNumber = body.purchaseOrderNumber ?? null
     const requestId = randomUUID()
 
     const mutationResult = await withTransaction(async (db) => {
       const jobId = await enqueueJob(db, {
         concurrencyKey: getOptionalSweedSessionConcurrencyKey(true),
-        dedupeKey: `catalog.pending_purchases.generate:${body.fromDate}:${body.toDate}:${siteDealerIds.join(',')}`,
+        dedupeKey: `catalog.pending_purchases.generate:${body.fromDate}:${body.toDate}:${siteDealerIds.join(',')}:${purchaseOrderNumber ?? 'all'}`,
         jobType: 'catalog.pending_purchases.generate',
         module: 'catalog',
         payload: {
           fromDate: body.fromDate,
+          purchaseOrderNumber,
           requestedByUserId: user.id,
           siteDealerIds,
           toDate: body.toDate,
@@ -248,6 +250,7 @@ export async function registerPendingPurchaseRoutes(server: FastifyInstance): Pr
         module: 'catalog',
         payload: {
           fromDate: body.fromDate,
+          purchaseOrderNumber,
           queuedJobId: jobId,
           requestedReason: body.reason ?? null,
           siteDealerIds,
@@ -255,7 +258,7 @@ export async function registerPendingPurchaseRoutes(server: FastifyInstance): Pr
             const dealer = HELIOS_PENDING_PURCHASE_SITE_DEALERS.find((candidate) => candidate.dealerId === dealerId)
             return dealer ? [dealer.dealerName] : []
           }),
-          summary: buildQueuedPendingPurchaseGenerationSummary(siteDealerIds, body.fromDate, body.toDate),
+          summary: buildQueuedPendingPurchaseGenerationSummary(siteDealerIds, body.fromDate, body.toDate, purchaseOrderNumber),
           toDate: body.toDate,
         },
         requestId,
@@ -704,6 +707,7 @@ function buildQueuedPendingPurchaseGenerationSummary(
   siteDealerIds: number[],
   fromDate: string,
   toDate: string,
+  purchaseOrderNumber: string | null,
 ): string {
   const siteLabels = siteDealerIds.flatMap((dealerId) => {
     const dealer = HELIOS_PENDING_PURCHASE_SITE_DEALERS.find((candidate) => candidate.dealerId === dealerId)
@@ -711,6 +715,9 @@ function buildQueuedPendingPurchaseGenerationSummary(
   })
 
   const siteLabel = siteLabels.length > 0 ? siteLabels.join(', ') : 'configured sites'
+  if (purchaseOrderNumber) {
+    return `Queued live pending-purchase packet generation for purchase order ${purchaseOrderNumber} on ${siteLabel} from ${fromDate} through ${toDate}.`
+  }
   return `Queued live pending-purchase packet generation for ${siteLabel} from ${fromDate} through ${toDate}.`
 }
 
