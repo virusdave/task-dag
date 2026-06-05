@@ -549,6 +549,34 @@ const SENTINELS: MigrationSentinel[] = [
     check: (db) => columnExists(db, 'sweed_order_items_flat', 'product_id'),
   },
   {
+    // Phase F5 prerequisite of the Helios DB-cost epic
+    // (virusdave/top-level#11). Migration 061 backfills
+    // sweed_orders.cashier_user_id from raw_json->>'creatorId' so the
+    // budtender analytics queries can stop reading
+    // sweed_orders.raw_json->>'creatorId' as a fallback — the last
+    // server callsite that touches sweed_orders.raw_json. The sentinel
+    // is true once no order still has a NULL cashier_user_id that could
+    // be recovered from a (still-present) raw_json creatorId. New rows
+    // never trip this (ingest writes the column) and the later F5 drain
+    // nulls raw_json, so it stays true once 061 has run.
+    migrationId: '061_sweed_orders_cashier_user_id_backfill',
+    label:
+      'sweed_orders.cashier_user_id backfilled from raw_json ' +
+      '(DB-cost epic phase F5 prerequisite) — budtender analytics ' +
+      'reads the column directly, no raw_json fallback.',
+    check: async (db) => {
+      const result = await db.query<{ pending: boolean }>(
+        `select exists (
+           select 1 from sweed_orders
+            where cashier_user_id is null
+              and (raw_json->>'creatorType') = '1'
+              and nullif(raw_json->>'creatorId', '') ~ '^\\d+$'
+         ) as pending`,
+      )
+      return result.rows[0]?.pending === false
+    },
+  },
+  {
     // Phase C1 of the Helios DB-cost epic (virusdave/top-level#11):
     // convert parsekit_reverse_shadow_events to a Timescale
     // hypertable as a low-risk validator for the conversion pattern

@@ -93,26 +93,16 @@ export async function getBudtenderAnalytics(
   const pool = getPool()
 
   // ---- query 1: totals + daily series in a single round-trip ----------
-  // NOTE on cashier identity: the schema for sweed_orders carries a
-  // dedicated `cashier_user_id` bigint column, but the ingest worker
-  // initially looked at the wrong Sweed envelope field (`createdById`
-  // / `cashierId`) — Sweed actually exposes the cashier as
-  // top-level `creatorId` (+ `creatorType=1` for User). Until the
-  // ingest is fixed AND backfilled, the column is NULL for every
-  // existing row.  Reading from raw_json->>'creatorId' as a fallback
-  // means the page works for ALL historical and future data without
-  // waiting on the backfill. We filter `creatorType = '1'` so
-  // non-user creators (API / system) don't masquerade as a cashier.
-  const CASHIER_EXPR = `
-    coalesce(
-      cashier_user_id,
-      case
-        when (raw_json->>'creatorType') = '1'
-          then nullif(raw_json->>'creatorId', '')::bigint
-        else null
-      end
-    )
-  `
+  // Cashier identity comes straight from the dedicated
+  // `sweed_orders.cashier_user_id` bigint column. The ingest worker
+  // writes it from Sweed's canonical `creatorId` field (when
+  // creatorType = 1 / User), and migration 061 backfilled every
+  // historical row from raw_json->>'creatorId' (DB-cost epic phase F5
+  // prerequisite, virusdave/top-level#11). We therefore no longer read
+  // sweed_orders.raw_json here at all — which both honours the
+  // "no raw_json on the hot path" design rule above and unblocks the
+  // F5 drain of that column.
+  const CASHIER_EXPR = `cashier_user_id`
 
   const dailyAndTotalsSql = `
     with orders as (
@@ -216,8 +206,8 @@ export async function getBudtenderAnalytics(
         and pay_time >= $2
         and pay_time <  $3
     ),
-    -- Drop unattributed rows AFTER the projection so the CASHIER_EXPR
-    -- fallback from raw_json gets a chance.
+    -- Drop unattributed rows (NULL cashier_user_id) AFTER the
+    -- projection.
     orders_attrib as (
       select * from orders where cashier_user_id is not null
     ),
