@@ -596,6 +596,25 @@ const SENTINELS: MigrationSentinel[] = [
     },
   },
   {
+    // Phase F2 of the Helios DB-cost epic (virusdave/top-level#11).
+    // Migration 064 drops four operator backup / pre-migration
+    // snapshot tables (~52 MB) after a verified off-box pg_dump. The
+    // sentinel is true once all four are gone.
+    migrationId: '064_drop_operator_backup_tables',
+    label:
+      'operator backup/snapshot tables dropped (DB-cost epic phase F2) — ' +
+      'pos_payment_matches_* / payment_transactions_* one-off backups removed.',
+    check: async (db) => {
+      const present = await Promise.all([
+        tableExists(db, 'pos_payment_matches_backup_20260303'),
+        tableExists(db, 'pos_payment_matches_snapshot_20260310_pre_remainder_backfill'),
+        tableExists(db, 'payment_transactions_snapshot_20260310_pre_remainder_backfill'),
+        tableExists(db, 'payment_transactions_snapshot_20260310_overpayment_fix'),
+      ])
+      return present.every((exists) => !exists)
+    },
+  },
+  {
     // Phase C1 of the Helios DB-cost epic (virusdave/top-level#11):
     // convert parsekit_reverse_shadow_events to a Timescale
     // hypertable as a low-risk validator for the conversion pattern
