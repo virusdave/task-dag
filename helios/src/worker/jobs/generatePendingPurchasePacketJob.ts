@@ -2550,6 +2550,15 @@ function resolveSites(siteDealerIds: number[]): HeliosPendingPurchaseSiteDealer[
 export function parseProductNameLegacy(name: string): ParsedProductName {
   const normalized = name.trim()
   const lowered = normalized.toLowerCase()
+  // Case-pack grammar (`<brand> <size> <type...> <N>cpk - <strain>`) used by
+  // multiple distributors (e.g. Empire Standard) for CRU / Untitled / Jetpacks
+  // / Littles. Gated on the very specific `<N>cpk` token so it can run before
+  // the brand `startsWith` branches without swallowing anything else. The
+  // `cpk` count is the *case / order* quantity, never the retail pack count.
+  const casePack = parseMetrcCasePackName(normalized)
+  if (casePack !== null) {
+    return normalizeAndValidateParsedProductName(casePack, normalized)
+  }
   if (normalized.startsWith('Pr(') || normalized.startsWith('F(') || normalized.startsWith('V(')) {
     return normalizeAndValidateParsedProductName(parseCuraleafName(normalized), normalized)
   }
@@ -2609,6 +2618,122 @@ export function parseProductNameLegacy(name: string): ParsedProductName {
 // parts. Keeps the parse path cheap (the regex is the gatekeeper before
 // any of the per-token classification work runs).
 const PIPE_DELIMITED_FOUR_PART_REGEX = /^[^|]+\|[^|]+\|[^|]+\|[^|]+$/
+
+// Size token in the case-pack grammar: `1g`, `0.5g`, `.5g`, `3.5g`, `1ml`.
+const METRC_CASE_PACK_SIZE_REGEX = /^(?:\d+(?:\.\d+)?|\.\d+)(?:g|ml)$/i
+// Case / order quantity token: `16cpk`, `12cpk`, `25cpk`, `32cpk`.
+const METRC_CASE_PACK_TOKEN_REGEX = /^\d+cpk$/i
+// Flower nug-size tier tokens worth preserving in the group name (e.g.
+// Untitled catalog has both `Bigs Bombay Dream` and `Smalls Green Crack`).
+const METRC_CASE_PACK_TIER_REGEX = /^(?:bigs|smalls)$/i
+
+/**
+ * Parses the case-pack METRC grammar:
+ *
+ *   `<brand> [line...] <size> <type...> <N>cpk - <strain>`
+ *
+ * Returns null on any ambiguity so the legacy waterfall keeps going. The
+ * `<N>cpk` token is the case / order quantity and is deliberately discarded:
+ * the catalog variant is a single retail unit (`packCount = 1`).
+ */
+function parseMetrcCasePackName(name: string): ParsedProductName | null {
+  const sep = name.lastIndexOf(' - ')
+  if (sep < 0) return null
+
+  const left = name.slice(0, sep).trim()
+  const strainRaw = name.slice(sep + 3).trim()
+  if (left.length === 0 || strainRaw.length === 0) return null
+
+  const tokens = left.split(/\s+/).filter((token) => token.length > 0)
+  const sizeIndex = tokens.findIndex((token) => METRC_CASE_PACK_SIZE_REGEX.test(token))
+  // Need at least one brand token before the size.
+  if (sizeIndex <= 0) return null
+
+  const cpkIndex = tokens.findIndex((token, index) => index > sizeIndex && METRC_CASE_PACK_TOKEN_REGEX.test(token))
+  // The `cpk` token must terminate the left side; anything after it means the
+  // shape isn't what we think it is, so decline and let the waterfall run.
+  if (cpkIndex < 0 || cpkIndex !== tokens.length - 1) return null
+
+  const preTokens = tokens.slice(0, sizeIndex)
+  const typeTokens = tokens.slice(sizeIndex + 1, cpkIndex)
+  if (preTokens.length === 0 || typeTokens.length === 0) return null
+
+  const classification = classifyMetrcCasePackType(typeTokens.join(' '))
+  if (classification === null) return null
+
+  // `1ml` → `1g`: Sweed has no millilitre sizes for these vapes.
+  const sizeInput = tokens[sizeIndex].replace(/ml$/i, 'g')
+  const size = normalizeSizeText(sizeInput)
+  if (size === null || !/\d/.test(size)) return null
+
+  const brand = preTokens[0]
+  const lineTokens = preTokens.slice(1)
+  const tierTokens = typeTokens.filter((token) => METRC_CASE_PACK_TIER_REGEX.test(token))
+  // Prevalence must be derived from the raw strain (the `(I)`/`(S)`/`(H)`
+  // marker is stripped by `cleanCultivar`).
+  const prevalence = derivePrevalence(strainRaw)
+  const strain = cleanCultivar(strainRaw)
+
+  const groupPrefix = [...lineTokens, ...tierTokens].join(' ').trim()
+  const groupName = groupPrefix.length > 0 ? `${groupPrefix} ${strain}` : strain
+
+  return {
+    brand,
+    category: classification.category,
+    groupName,
+    packCount: 1,
+    prevalence,
+    searchTerm: strain,
+    size,
+    strainName: strain,
+    subcategory: classification.subcategory,
+    variantName: `${brand} ${groupName} ${size}`,
+    variantTab: size,
+  }
+}
+
+// Maps the free-form type segment of the case-pack grammar to the canonical
+// (category, subcategory) tuple. Form-factor categories (pre-roll / flower /
+// vape) are checked before concentrate sub-types so "Live Resin Disposable"
+// classifies as a Vapes disposable rather than a Concentrates Live Resin.
+// Returns null for anything we don't recognise so the row declines to the LLM
+// fallback rather than being mis-placed.
+function classifyMetrcCasePackType(token: string): { category: string; subcategory: string } | null {
+  const lowered = token.toLowerCase()
+  const isInfused = !/\bun[\s-]?infused\b|\bnon[\s-]?infused\b/.test(lowered)
+    && /\binfused\b|\blive\s*resin\b|\blive\s*rosin\b|\brosin\b/.test(lowered)
+
+  if (/\bpre[\s-]?rolls?\b|\bprerolls?\b|\bjoints?\b/.test(lowered)) {
+    return { category: 'Pre-Rolls', subcategory: isInfused ? 'Infused' : '' }
+  }
+  if (/\bflower\b/.test(lowered)) {
+    return { category: 'Flower', subcategory: isInfused ? 'Infused' : '' }
+  }
+  // Vapes (form factor) must win over the concentrate sub-types below.
+  if (/\baio\b|\ball[\s-]?in[\s-]?one\b|\bdisposables?\b/.test(lowered)) {
+    return { category: 'Vapes', subcategory: 'All In One / Disposable' }
+  }
+  if (/\bcarts?\b|\bcartridges?\b/.test(lowered)) {
+    return { category: 'Vapes', subcategory: 'Cartridge' }
+  }
+  if (/\bpods?\b/.test(lowered)) {
+    return { category: 'Vapes', subcategory: 'Pod' }
+  }
+  // A bare "vape" with no recognised form factor can't be placed — decline.
+  if (/\bvapes?\b/.test(lowered)) {
+    return null
+  }
+  // Concentrate sub-types.
+  if (/\bdiamonds?\b/.test(lowered)) return { category: 'Concentrates', subcategory: 'Diamonds' }
+  if (/\bbadder\b|\bbudder\b/.test(lowered)) return { category: 'Concentrates', subcategory: 'Badder' }
+  if (/\bsugar\b/.test(lowered)) return { category: 'Concentrates', subcategory: 'Sugar' }
+  if (/\bkief\b/.test(lowered)) return { category: 'Concentrates', subcategory: 'Kief' }
+  if (/\blive\s*rosin\b|\brosin\b/.test(lowered)) return { category: 'Concentrates', subcategory: 'Live Rosin' }
+  if (/\blive\s*resin\b/.test(lowered)) return { category: 'Concentrates', subcategory: 'Live Resin' }
+  if (/\bhash\b/.test(lowered)) return { category: 'Concentrates', subcategory: 'Hash' }
+
+  return null
+}
 
 function parsePipeDelimitedFourPartName(name: string): ParsedProductName | null {
   const parts = name.split('|').map((part) => part.trim())

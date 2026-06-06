@@ -219,6 +219,88 @@ describe('Cannabals deterministic parser', () => {
   })
 })
 
+describe('case-pack METRC deterministic parser (<brand> <size> <type> <N>cpk - <strain>)', () => {
+  it('parses CRU 0.5g Infused PreRoll as an individual unit (cpk = case qty, not pack)', () => {
+    const parsed = parseProductName('CRU 0.5g Infused PreRoll 16cpk - Amnesia Haze')
+    expect(parsed.brand).toBe('CRU')
+    expect(parsed.category).toBe('Pre-Rolls')
+    expect(parsed.subcategory).toBe('Infused')
+    expect(parsed.packCount).toBe(1)
+    expect(parsed.size).toBe('0.5g')
+    expect(parsed.variantTab).toBe('0.5g')
+    expect(parsed.groupName).toBe('Amnesia Haze')
+    expect(parsed.strainName).toBe('Amnesia Haze')
+    expect(parsed.variantName).toBe('CRU Amnesia Haze 0.5g')
+  })
+
+  it('parses CRU 1ml Live Resin Disposable as a 1g (not 1ml) AIO vape', () => {
+    const parsed = parseProductName('CRU 1ml Live Resin Disposable 12cpk - Granddaddy Purple')
+    expect(parsed.brand).toBe('CRU')
+    expect(parsed.category).toBe('Vapes')
+    expect(parsed.subcategory).toBe('All In One / Disposable')
+    expect(parsed.packCount).toBe(1)
+    expect(parsed.size).toBe('1g')
+    expect(parsed.variantTab).toBe('1g')
+    expect(parsed.variantName).toBe('CRU Granddaddy Purple 1g')
+  })
+
+  it('classifies a Vape Cartridge as Vapes / Cartridge', () => {
+    const parsed = parseProductName('Untitled 1g Vape Cartridge 12cpk - Mango Kush')
+    expect(parsed.brand).toBe('Untitled')
+    expect(parsed.category).toBe('Vapes')
+    expect(parsed.subcategory).toBe('Cartridge')
+    expect(parsed.variantName).toBe('Untitled Mango Kush 1g')
+  })
+
+  it('classifies Diamonds and Badder concentrates correctly', () => {
+    const diamonds = parseProductName('Jetpacks 1g Diamonds 12cpk - Candyland')
+    expect(diamonds.brand).toBe('Jetpacks')
+    expect(diamonds.category).toBe('Concentrates')
+    expect(diamonds.subcategory).toBe('Diamonds')
+    expect(diamonds.packCount).toBe(1)
+
+    const badder = parseProductName('Jetpacks 1g Badder 12cpk - Key Lime Gelato')
+    expect(badder.category).toBe('Concentrates')
+    expect(badder.subcategory).toBe('Badder')
+    expect(badder.variantName).toBe('Jetpacks Key Lime Gelato 1g')
+  })
+
+  it('keeps the brand and folds a pre-size sub-line token into the group name', () => {
+    const parsed = parseProductName('Jetpacks FJ-1 1g Infused PreRoll 12cpk - Cereal Milk')
+    expect(parsed.brand).toBe('Jetpacks')
+    expect(parsed.category).toBe('Pre-Rolls')
+    expect(parsed.subcategory).toBe('Infused')
+    expect(parsed.groupName).toBe('FJ-1 Cereal Milk')
+    expect(parsed.variantName).toBe('Jetpacks FJ-1 Cereal Milk 1g')
+  })
+
+  it('preserves a flower nug-size tier (Bigs/Smalls) in the group name', () => {
+    const parsed = parseProductName('Untitled 3.5g Bigs Flower 32cpk - Durban Poison')
+    expect(parsed.brand).toBe('Untitled')
+    expect(parsed.category).toBe('Flower')
+    expect(parsed.subcategory).toBe('')
+    expect(parsed.size).toBe('3.5g')
+    expect(parsed.packCount).toBe(1)
+    expect(parsed.groupName).toBe('Bigs Durban Poison')
+    expect(parsed.variantName).toBe('Untitled Bigs Durban Poison 3.5g')
+  })
+
+  it('handles the multi-word "Vape Live Resin Disposable" type as an AIO vape', () => {
+    const parsed = parseProductName('Littles 1ml Vape Live Resin Disposable 12cpk - Birthday Cake')
+    expect(parsed.brand).toBe('Littles')
+    expect(parsed.category).toBe('Vapes')
+    expect(parsed.subcategory).toBe('All In One / Disposable')
+    expect(parsed.size).toBe('1g')
+  })
+
+  it('derives prevalence from the raw strain marker and strips it from the name', () => {
+    const parsed = parseProductName('Untitled 1g Infused PreRoll 25cpk - Blue Dream (H)')
+    expect(parsed.strainName).toBe('Blue Dream')
+    expect(parsed.prevalence).toBe('Hybrid')
+    expect(parsed.variantName).toBe('Untitled Blue Dream 1g')
+  })
+})
+
 describe('parser semantic-validation gate', () => {
   it('rejects parser output whose variantName is generic like "Vape"', () => {
     expect(() => parseProductName('Posh Puff .5g Vapes')).toThrowError(
