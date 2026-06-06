@@ -2559,6 +2559,17 @@ export function parseProductNameLegacy(name: string): ParsedProductName {
   if (casePack !== null) {
     return normalizeAndValidateParsedProductName(casePack, normalized)
   }
+  // Bare brand-prefix grammar (`<brand> <descriptor...>`) submitted with no
+  // delimiters by some distributors (e.g. BCD Innovation for Alter / Hashtag
+  // Honey / Continental Exotics). Gated on a small allowlist of known brand
+  // prefixes — including a canonicalising alias map (`HH` → Hashtag Honey,
+  // the `Contintental` misspelling → Continental Exotics) — so it can never
+  // mis-place an unknown row. Declines (null) on any unrecognised descriptor
+  // shape so the row falls through to the rest of the waterfall.
+  const brandPrefix = parseKnownBrandPrefixName(normalized)
+  if (brandPrefix !== null) {
+    return normalizeAndValidateParsedProductName(brandPrefix, normalized)
+  }
   if (normalized.startsWith('Pr(') || normalized.startsWith('F(') || normalized.startsWith('V(')) {
     return normalizeAndValidateParsedProductName(parseCuraleafName(normalized), normalized)
   }
@@ -2733,6 +2744,122 @@ function classifyMetrcCasePackType(token: string): { category: string; subcatego
   if (/\bhash\b/.test(lowered)) return { category: 'Concentrates', subcategory: 'Hash' }
 
   return null
+}
+
+// Allowlist of brand prefixes for the bare brand-prefix grammar. Maps a
+// lower-cased leading brand phrase to the canonical catalog brand. Keep this
+// list tight: every entry runs deterministically ahead of the LLM teacher, so
+// only add brands whose descriptor shapes we have verified. Includes alias
+// spellings (`HH` and the `Contintental` typo) that fold to a canonical brand.
+const KNOWN_BRAND_PREFIXES: ReadonlyArray<readonly [string, string]> = [
+  ['contintental exotics', 'Continental Exotics'],
+  ['continental exotics', 'Continental Exotics'],
+  ['hashtag honey', 'Hashtag Honey'],
+  ['alter', 'Alter'],
+  ['hh', 'Hashtag Honey'],
+]
+
+// Terminal vendor package / batch code, e.g. `AL-CG-1225-001`. Strict enough
+// (all-caps lead, then ≥3 dash-separated alphanumeric segments) that it never
+// eats legitimate strain tokens like `MAC-1`, `AK-47`, or `GG-4`.
+const TERMINAL_PACKAGE_CODE_REGEX = /\s+[A-Z]{2,}(?:-[A-Z0-9]+){2,}$/
+
+/**
+ * Parses the bare brand-prefix grammar `<brand> <descriptor...>` for the small
+ * allowlist of brands in {@link KNOWN_BRAND_PREFIXES}. Returns null for any
+ * brand outside the allowlist, or any descriptor shape we don't recognise, so
+ * the legacy waterfall keeps going and nothing is mis-placed.
+ */
+function parseKnownBrandPrefixName(name: string): ParsedProductName | null {
+  const lowered = name.toLowerCase()
+  // Prefer the longest matching prefix so `Hashtag Honey` wins over a bare
+  // `HH`, and the two-word `Continental Exotics` wins over any single token.
+  const ordered = [...KNOWN_BRAND_PREFIXES].sort((a, b) => b[0].length - a[0].length)
+  const match = ordered.find(([prefix]) => lowered === prefix || lowered.startsWith(`${prefix} `))
+  if (match === undefined) return null
+
+  const [prefix, brand] = match
+  const rest = name.slice(prefix.length).trim()
+  if (rest.length === 0) return null
+
+  // Edible gummies carry no explicit size; try that shape first.
+  const gummy = parseBrandPrefixGummy(brand, rest)
+  if (gummy !== null) return gummy
+
+  // Everything else (pre-rolls, vapes, flower) carries an explicit gram size.
+  return parseBrandPrefixSized(brand, rest)
+}
+
+/**
+ * Edible-gummy shape: `<flavor> Gummy [pkg-code]` or `<flavor> Gummies`. All of
+ * these brands ship gummies as 10-packs of 10mg pieces. The terminal package
+ * code (Alter only) is dropped entirely. Singular "Gummy" stays in the group
+ * name (matching the catalog), plural "Gummies" is dropped.
+ */
+function parseBrandPrefixGummy(brand: string, rest: string): ParsedProductName | null {
+  const body = rest.replace(TERMINAL_PACKAGE_CODE_REGEX, '').trim()
+  let group: string
+  if (/\bgummies$/i.test(body)) {
+    group = body.replace(/\s+gummies$/i, '').trim()
+  } else if (/\bgummy$/i.test(body)) {
+    group = body
+  } else {
+    return null
+  }
+  if (group.length === 0) return null
+
+  return {
+    brand,
+    category: 'Edibles',
+    groupName: group,
+    packCount: 10,
+    prevalence: null,
+    searchTerm: group,
+    size: '10mg',
+    strainName: group,
+    subcategory: '',
+    variantName: `${brand} ${group} 10x 10mg`,
+    variantTab: '10x 10mg',
+  }
+}
+
+/**
+ * Explicit-size shape: `<strain...> <size> <type...>`, e.g. `Amnesia Lemon Haze
+ * 1G preroll` or `Lemon Cherry Gelato .5G Live Resin Disposable Vape`. The type
+ * segment after the size classifies category/subcategory via the same table the
+ * case-pack parser uses. The catalog variant is a single retail unit.
+ */
+function parseBrandPrefixSized(brand: string, rest: string): ParsedProductName | null {
+  const tokens = rest.split(/\s+/).filter((token) => token.length > 0)
+  const sizeIndex = tokens.findIndex((token) => METRC_CASE_PACK_SIZE_REGEX.test(token))
+  // Need at least one strain token before the size and a type segment after it.
+  if (sizeIndex <= 0 || sizeIndex >= tokens.length - 1) return null
+
+  const classification = classifyMetrcCasePackType(tokens.slice(sizeIndex + 1).join(' '))
+  if (classification === null) return null
+
+  // `1ml` → `1g`: Sweed has no millilitre sizes for these forms.
+  const size = normalizeSizeText(tokens[sizeIndex].replace(/ml$/i, 'g'))
+  if (size === null || !/\d/.test(size)) return null
+
+  const strainRaw = tokens.slice(0, sizeIndex).join(' ')
+  const prevalence = derivePrevalence(strainRaw)
+  const strain = cleanCultivar(strainRaw)
+  if (strain.length === 0) return null
+
+  return {
+    brand,
+    category: classification.category,
+    groupName: strain,
+    packCount: 1,
+    prevalence,
+    searchTerm: strain,
+    size,
+    strainName: strain,
+    subcategory: classification.subcategory,
+    variantName: `${brand} ${strain} ${size}`,
+    variantTab: size,
+  }
 }
 
 function parsePipeDelimitedFourPartName(name: string): ParsedProductName | null {

@@ -301,6 +301,70 @@ describe('case-pack METRC deterministic parser (<brand> <size> <type> <N>cpk - <
   })
 })
 
+describe('known brand-prefix deterministic parser (Alter / Hashtag Honey / Continental Exotics)', () => {
+  it('parses an Alter 1g pre-roll (strain in the middle, explicit size)', () => {
+    const parsed = parseProductName('Alter Amnesia Lemon Haze 1G preroll')
+    expect(parsed.brand).toBe('Alter')
+    expect(parsed.category).toBe('Pre-Rolls')
+    expect(parsed.subcategory).toBe('')
+    expect(parsed.groupName).toBe('Amnesia Lemon Haze')
+    expect(parsed.strainName).toBe('Amnesia Lemon Haze')
+    expect(parsed.size).toBe('1g')
+    expect(parsed.variantTab).toBe('1g')
+    expect(parsed.packCount).toBe(1)
+    expect(parsed.variantName).toBe('Alter Amnesia Lemon Haze 1g')
+  })
+
+  it('parses an Alter gummy as a 10x 10mg edible and drops the terminal package code', () => {
+    const parsed = parseProductName('Alter Cool Gummy AL-CG-1225-001')
+    expect(parsed.brand).toBe('Alter')
+    expect(parsed.category).toBe('Edibles')
+    expect(parsed.subcategory).toBe('')
+    expect(parsed.groupName).toBe('Cool Gummy')
+    expect(parsed.size).toBe('10mg')
+    expect(parsed.packCount).toBe(10)
+    expect(parsed.variantTab).toBe('10x 10mg')
+    expect(parsed.variantName).toBe('Alter Cool Gummy 10x 10mg')
+  })
+
+  it('maps the HH alias to Hashtag Honey and drops the plural "Gummies"', () => {
+    const parsed = parseProductName('HH Cali Melon Gummies')
+    expect(parsed.brand).toBe('Hashtag Honey')
+    expect(parsed.category).toBe('Edibles')
+    expect(parsed.subcategory).toBe('')
+    expect(parsed.groupName).toBe('Cali Melon')
+    expect(parsed.size).toBe('10mg')
+    expect(parsed.packCount).toBe(10)
+    expect(parsed.variantTab).toBe('10x 10mg')
+    expect(parsed.variantName).toBe('Hashtag Honey Cali Melon 10x 10mg')
+  })
+
+  it('canonicalises the "Contintental" misspelling and classifies the disposable vape', () => {
+    const parsed = parseProductName(
+      'Contintental Exotics Lemon Cherry Gelato .5G Live Resin Disposable Vape',
+    )
+    expect(parsed.brand).toBe('Continental Exotics')
+    expect(parsed.category).toBe('Vapes')
+    expect(parsed.subcategory).toBe('All In One / Disposable')
+    expect(parsed.groupName).toBe('Lemon Cherry Gelato')
+    expect(parsed.size).toBe('0.5g')
+    expect(parsed.packCount).toBe(1)
+    expect(parsed.variantName).toBe('Continental Exotics Lemon Cherry Gelato 0.5g')
+  })
+
+  it('does not strip a legitimate dashed strain token (MAC-1) as a package code', () => {
+    const parsed = parseProductName('Alter MAC-1 1G preroll')
+    expect(parsed.brand).toBe('Alter')
+    expect(parsed.strainName).toBe('MAC-1')
+    expect(parsed.variantName).toBe('Alter MAC-1 1g')
+  })
+
+  it('declines brands outside the allowlist (no false positive)', () => {
+    // "Alteration" is not the Alter brand — the prefix requires a word break.
+    expect(() => parseProductName('Alteration Station Mystery Item')).toThrow()
+  })
+})
+
 describe('parser semantic-validation gate', () => {
   it('rejects parser output whose variantName is generic like "Vape"', () => {
     expect(() => parseProductName('Posh Puff .5g Vapes')).toThrowError(
