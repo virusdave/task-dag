@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
-import { Form, Link, useLoaderData, useRevalidator, useRouteLoaderData } from 'react-router-dom'
+import { Form, Link, useLoaderData, useNavigate, useRevalidator, useRouteLoaderData } from 'react-router-dom'
 
 import {
   HELIOS_PENDING_PURCHASE_SITE_DEALERS,
@@ -194,6 +194,7 @@ export function PendingPurchasesPage() {
   const data = useLoaderData() as PendingPurchaseListResponse
   const session = useRouteLoaderData('root') as SessionEnvelope
   const revalidator = useRevalidator()
+  const navigate = useNavigate()
   const [applySuccessMessage, setApplySuccessMessage] = useState<string | null>(null)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [generateFromDate, setGenerateFromDate] = useState(defaultGenerateFromDate)
@@ -447,6 +448,16 @@ export function PendingPurchasesPage() {
           : 'Generated the live pending-purchase packet successfully.',
       )
       setErrorMessage(null)
+
+      // On a successful generation, warp the reviewer straight into the
+      // freshly-generated packet's row review (page 1, first review row)
+      // so they land on the work instead of having to hunt the new
+      // packet out of the archive. The rows-view loader re-runs for the
+      // new URL, so we don't also revalidate here.
+      if (packetId) {
+        navigate(buildPendingPurchasesHref(filters, { mode: 'rows', packetId, page: 1 }))
+        return
+      }
     } else {
       setGenerateSuccessMessage(null)
       setErrorMessage(jobStatus.job.lastError ?? 'The live pending-purchase generation job did not succeed.')
@@ -577,9 +588,33 @@ export function PendingPurchasesPage() {
       </nav>
 
       {applySuccessMessage ? <p className="pp-toast pp-toast-success">{applySuccessMessage}</p> : null}
-      {generateSuccessMessage ? <p className="pp-toast pp-toast-success">{generateSuccessMessage}</p> : null}
+      {generateSuccessMessage ? (
+        <p className="pp-toast pp-toast-success">
+          {generateSuccessMessage}
+          {generationJobStatus ? (
+            <>
+              {' '}
+              <Link to={`/jobs/${generationJobStatus.job.jobId}`}>
+                {`Open job #${generationJobStatus.job.jobId} status ↗`}
+              </Link>
+            </>
+          ) : null}
+        </p>
+      ) : null}
       {importSuccessMessage ? <p className="pp-toast pp-toast-success">{importSuccessMessage}</p> : null}
       {errorMessage ? <p className="pp-toast pp-toast-error">{errorMessage}</p> : null}
+
+      {/*
+        Surface the live generation status widget (progressbar + phase +
+        links) directly below the toast the moment a generation job is
+        kicked off, instead of leaving it buried in the collapsed
+        "Admin & methodology" block. The reviewer who just queued a
+        generation watches it progress right here, and the panel's own
+        "Open job details" link doubles the toast's direct job link.
+      */}
+      {generationJobStatus ? (
+        <PendingPurchaseGenerationStatusPanel jobStatus={generationJobStatus} />
+      ) : null}
 
       {mode === 'packets' ? (
         <PendingPurchasesPacketsView
@@ -609,9 +644,12 @@ export function PendingPurchasesPage() {
             Helios stores operator edits here first so the later apply path stays asynchronous, audited, and worker-driven. This page is the service-backed replacement for the older packet review HTMLs. Generate or import a packet to populate the archive above; queue apply from inside a packet's row review.
           </p>
 
-          {generationJobStatus ? (
-            <PendingPurchaseGenerationStatusPanel jobStatus={generationJobStatus} />
-          ) : null}
+          {/*
+            The live generation status widget now renders at the top of
+            the page (directly below the kickoff toast) so the reviewer
+            who just queued a job watches it progress without expanding
+            this Admin block. See the panel above the mode tabs.
+          */}
 
           {data.latestApplyRequest ? (
             <article className="mini-card">
