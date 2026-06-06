@@ -42,20 +42,27 @@ export interface EnqueueJobInput {
  * nudge a single row up or down a few notches without colliding
  * with the next band:
  *
- * - `JOB_PRIORITY_BEST_EFFORT` (0) — background batch work
- *   (scheduler-driven litalerts refresh, sweed orders ingest,
- *   package snapshots, etc). The default for enqueues that
- *   originate inside the worker process. These run only when no
- *   higher-priority work is waiting.
+ * - `JOB_PRIORITY_BEST_EFFORT` (0) — background batch work, most
+ *   importantly the high-volume scheduler-driven litalerts refresh
+ *   flood (hundreds of `litalerts_refresh.variant` rows per tick).
+ *   The default for enqueues that originate inside the worker
+ *   process. These run only when no higher-priority work is waiting.
  * - `JOB_PRIORITY_BACKFILL` (10) — slightly above best-effort, used
  *   for short, system-scheduled "walk historical rows and enrich"
  *   jobs (the address-enrichment jobs, the litalerts retailer
  *   backfill, etc). The narrow lift over best-effort lets backfills
- *   slip ahead of routine refresh / ingest batch jobs in the same
- *   execution pool, so a multi-hour ingest backlog doesn't starve
- *   the per-tick backfill enqueues that the scheduler is depositing.
+ *   slip ahead of the litalerts flood in the same execution pool.
  *   The 100-point gap to interactive means operator clicks still
  *   always preempt a backfill.
+ * - `JOB_PRIORITY_SCHEDULED_INGEST` (50) — freshness-sensitive
+ *   periodic data ingest/refresh (sweed orders/shifts/purchases
+ *   ingest, package snapshots, stock + catalog refresh, the raw_json
+ *   drain, etc). Sits above both the best-effort litalerts flood (0)
+ *   AND the bulk backfills (10) so that the data feeding the live
+ *   metrics surfaces never has to wait behind a multi-minute
+ *   litalerts batch on the single main worker loop — the root cause
+ *   of the 2026-06-06 "Essentials lags Sweed by ~20 min" incident.
+ *   Still below `INTERACTIVE` so operator clicks always preempt it.
  * - `JOB_PRIORITY_INTERACTIVE` (100) — live operator-driven work
  *   originating from an HTTP request / the Helios UI. The default
  *   for any enqueue happening outside the worker process. These
@@ -76,6 +83,7 @@ export interface EnqueueJobInput {
  */
 export const JOB_PRIORITY_BEST_EFFORT = 0
 export const JOB_PRIORITY_BACKFILL = 10
+export const JOB_PRIORITY_SCHEDULED_INGEST = 50
 export const JOB_PRIORITY_INTERACTIVE = 100
 export const JOB_PRIORITY_LIVE_REQUESTED = 500
 export const JOB_PRIORITY_URGENT = 1000

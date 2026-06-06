@@ -19,6 +19,7 @@ import {
   enqueueJobs,
   JOB_PRIORITY_BACKFILL,
   JOB_PRIORITY_BEST_EFFORT,
+  JOB_PRIORITY_SCHEDULED_INGEST,
 } from '../../server/jobs/enqueueJob.js'
 import {
   enqueueMarketRefreshForProducts,
@@ -253,7 +254,7 @@ async function enqueueScheduledStockRefresh(
 
   await withTransaction(async (db) => {
     const jobId = await enqueueJob(db, {
-      priority: JOB_PRIORITY_BEST_EFFORT,
+      priority: JOB_PRIORITY_SCHEDULED_INGEST,
       concurrencyKey: getOptionalSweedSessionConcurrencyKey(true),
       dedupeKey: `config.workers.stock_refresh:scheduled:${bucketIso}`,
       jobType: 'config.workers.stock_refresh',
@@ -489,7 +490,7 @@ async function runScheduledMarketEvidenceAlarmScanTick(
   const bucketIso = new Date(Math.floor(now.getTime() / 60000) * 60000).toISOString()
   await withTransaction(async (db) => {
     const jobId = await enqueueJob(db, {
-      priority: JOB_PRIORITY_BEST_EFFORT,
+      priority: JOB_PRIORITY_SCHEDULED_INGEST,
       concurrencyKey: null,
       dedupeKey: `config.workers.market_evidence_alarm_scan:scheduled:${bucketIso}`,
       jobType: 'config.workers.market_evidence_alarm_scan',
@@ -517,7 +518,7 @@ async function enqueueScheduledCatalogRefresh(
 
   await withTransaction(async (db) => {
     const jobId = await enqueueJob(db, {
-      priority: JOB_PRIORITY_BEST_EFFORT,
+      priority: JOB_PRIORITY_SCHEDULED_INGEST,
       concurrencyKey: getOptionalSweedSessionConcurrencyKey(true),
       dedupeKey: `config.workers.catalog_refresh:scheduled:${bucketIso}`,
       jobType: 'config.workers.catalog_refresh',
@@ -562,7 +563,7 @@ async function enqueueScheduledEdibleThcClamp(
 
   await withTransaction(async (db) => {
     const jobId = await enqueueJob(db, {
-      priority: JOB_PRIORITY_BEST_EFFORT,
+      priority: JOB_PRIORITY_SCHEDULED_INGEST,
       concurrencyKey: getOptionalSweedSessionConcurrencyKey(true),
       dedupeKey: `config.workers.edible_thc_clamp:scheduled:${bucketIso}`,
       jobType: 'config.workers.edible_thc_clamp',
@@ -612,7 +613,7 @@ async function enqueueScheduledSweedOrdersRawJsonDrain(
 
   await withTransaction(async (db) => {
     const jobId = await enqueueJob(db, {
-      priority: JOB_PRIORITY_BEST_EFFORT,
+      priority: JOB_PRIORITY_SCHEDULED_INGEST,
       concurrencyKey: 'config.workers.sweed_orders_raw_json_drain',
       dedupeKey: `config.workers.sweed_orders_raw_json_drain:scheduled:${bucketIso}`,
       jobType: 'config.workers.sweed_orders_raw_json_drain',
@@ -706,7 +707,7 @@ async function enqueueScheduledSweedOrdersIngest(
 
   await withTransaction(async (db) => {
     const jobId = await enqueueJob(db, {
-      priority: JOB_PRIORITY_BEST_EFFORT,
+      priority: JOB_PRIORITY_SCHEDULED_INGEST,
       concurrencyKey: getOptionalSweedSessionConcurrencyKey(true),
       dedupeKey: `config.workers.sweed_orders_ingest:scheduled:${bucketIso}`,
       jobType: 'config.workers.sweed_orders_ingest',
@@ -764,7 +765,7 @@ async function enqueueScheduledSweedPurchasesIngest(
 
   await withTransaction(async (db) => {
     const jobId = await enqueueJob(db, {
-      priority: JOB_PRIORITY_BEST_EFFORT,
+      priority: JOB_PRIORITY_SCHEDULED_INGEST,
       concurrencyKey: getOptionalSweedSessionConcurrencyKey(true),
       dedupeKey: `config.workers.sweed_purchases_ingest:scheduled:${bucketIso}`,
       jobType: 'config.workers.sweed_purchases_ingest',
@@ -815,7 +816,7 @@ async function enqueueScheduledSweedPackageSnapshots(
 
   await withTransaction(async (db) => {
     const jobId = await enqueueJob(db, {
-      priority: JOB_PRIORITY_BEST_EFFORT,
+      priority: JOB_PRIORITY_SCHEDULED_INGEST,
       concurrencyKey: getOptionalSweedSessionConcurrencyKey(true),
       dedupeKey: `config.workers.sweed_package_snapshots:scheduled:${bucketIso}`,
       jobType: 'config.workers.sweed_package_snapshots',
@@ -865,7 +866,7 @@ async function enqueueScheduledWeatherDailyIngest(
 
   await withTransaction(async (db) => {
     const jobId = await enqueueJob(db, {
-      priority: JOB_PRIORITY_BEST_EFFORT,
+      priority: JOB_PRIORITY_SCHEDULED_INGEST,
       // Open-Meteo is an HTTPS GET to a public endpoint; no Sweed
       // session needed.
       concurrencyKey: null,
@@ -912,7 +913,7 @@ async function enqueueScheduledSweedShiftsIngest(
 
   await withTransaction(async (db) => {
     const jobId = await enqueueJob(db, {
-      priority: JOB_PRIORITY_BEST_EFFORT,
+      priority: JOB_PRIORITY_SCHEDULED_INGEST,
       concurrencyKey: getOptionalSweedSessionConcurrencyKey(true),
       dedupeKey: `config.workers.sweed_shifts_ingest:scheduled:${bucketIso}`,
       jobType: 'config.workers.sweed_shifts_ingest',
