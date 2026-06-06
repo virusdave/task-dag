@@ -50,6 +50,27 @@ import { getPool } from '../db/pool.js'
 export const CUSTOMER_VALUE_ANALYTICS_DEFAULT_WINDOW_DAYS = 90
 export const CUSTOMER_VALUE_ANALYTICS_MAX_N_HARD_CAP = 50
 
+/**
+ * Exclude fully-cancelled Sweed orders from every customer-value read.
+ *
+ * Mirrors `NON_CANCELLED_ORDER_SQL_BARE` in
+ * metrics/_real/sweedOrdersQueries.ts. The Sweed order-list feed carries
+ * a non-zero header subtotal/grand_total on `status='Cancelled'` orders,
+ * so without this guard cancelled activity silently inflates every LTV /
+ * contribution / receipt sum AND — worse for this surface — counts as a
+ * real purchase in the `row_number()` purchase-ordinal and per-customer
+ * `count(*)` rollups (a cancelled order would push a customer into a
+ * higher "Nth purchase" bucket). Cancellations are ~18% of orders here,
+ * so the distortion is material, not a rounding-error tail.
+ *
+ * Pass the table alias used in each query (`''` for an unaliased
+ * `from sweed_orders`).
+ */
+function nonCancelledOrderSql(alias = ''): string {
+  const prefix = alias ? `${alias}.` : ''
+  return `and lower(coalesce(${prefix}raw_json->'invoiceStatus'->>'name', '')) <> 'cancelled'`
+}
+
 function resolveDealerIds(sites: readonly string[]): number[] {
   if (sites.length === 0) {
     return HELIOS_PENDING_PURCHASE_SITE_DEALERS.map((d) => d.dealerId)
@@ -93,10 +114,12 @@ function cohortScopeProbeFilter(
         select min(pay_time) from sweed_orders so2
          where so2.dealer_id = sweed_orders.dealer_id
            and so2.customer_id = sweed_orders.customer_id
+           ${nonCancelledOrderSql('so2')}
       ) >= ${fromParam}::timestamptz and (
         select min(pay_time) from sweed_orders so2
          where so2.dealer_id = sweed_orders.dealer_id
            and so2.customer_id = sweed_orders.customer_id
+           ${nonCancelledOrderSql('so2')}
       ) < ${toParam}::timestamptz`
     case 'active_in_range':
       // Customer must have at least one order inside the range.
@@ -106,6 +129,7 @@ function cohortScopeProbeFilter(
            and so2.customer_id = sweed_orders.customer_id
            and so2.pay_time >= ${fromParam}::timestamptz
            and so2.pay_time < ${toParam}::timestamptz
+           ${nonCancelledOrderSql('so2')}
       )`
     case 'all_as_of_end':
     default:
@@ -232,6 +256,7 @@ export async function getCustomerValueAnalytics(
            where dealer_id = any($1::bigint[])
              and pay_time < $2::timestamptz
              and customer_id is not null
+             ${nonCancelledOrderSql()}
              ${cohortScopeProbeFilter(args.cohortScope, '$3', '$4')}
            group by dealer_id, customer_id
         ), per_n as (
@@ -327,6 +352,7 @@ export async function getCustomerValueAnalytics(
       where so.dealer_id = any($1::bigint[])
         and so.pay_time < $3::timestamptz
         and so.customer_id is not null
+        ${nonCancelledOrderSql('so')}
     ),
     purchase_events as (
       select
@@ -511,6 +537,7 @@ export async function getCustomerValueAnalytics(
        and pay_time >= $2::timestamptz
        and pay_time < $3::timestamptz
        and customer_id is null
+       ${nonCancelledOrderSql()}
   `
   // v1.4 V4'5: VeriScan link coverage over the visible window.
   // `total` = all sweed_orders in window for the selected dealers
@@ -532,6 +559,7 @@ export async function getCustomerValueAnalytics(
     where so.dealer_id = any($1::bigint[])
       and so.pay_time >= $2::timestamptz
       and so.pay_time < $3::timestamptz
+      ${nonCancelledOrderSql('so')}
   `
   const [result, guestRes, retentionRes, veriscanRes] = await Promise.all([
     pool.query<UnionRow>(sql, [
@@ -756,6 +784,7 @@ async function runRetentionQueries(args: RetentionQueryArgs): Promise<RetentionP
        where so.dealer_id = any($1::bigint[])
          and so.pay_time < $3::timestamptz
          and so.customer_id is not null
+         ${nonCancelledOrderSql('so')}
     ),
     purchase_events as (
       select o.*,
