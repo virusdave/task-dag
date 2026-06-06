@@ -470,6 +470,11 @@ export async function getCatalogAnalyticsPoints(
       where oi.dealer_id = any($1::bigint[])
         and oi.pay_time >= $2 and oi.pay_time < $3
         and oi.inventory_item_id is not null
+        -- Canceled (voided) lines carry a non-zero subtotalAmount/qty
+        -- in Sweed's feed but are not real sales; exclude them from
+        -- units / revenue / COGS / sales-day coverage. (Line status is
+        -- spelled 'Canceled'; order status is 'Cancelled'.)
+        and lower(coalesce(oi.raw_item->'invoiceItemStatus'->>'name', '')) <> 'canceled'
       group by oi.dealer_id, oi.inventory_item_id
     ),
     mapping as (

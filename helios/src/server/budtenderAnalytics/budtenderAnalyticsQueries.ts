@@ -117,6 +117,9 @@ export async function getBudtenderAnalytics(
       where dealer_id = any($1::bigint[])
         and pay_time >= $2
         and pay_time <  $3
+        -- Fully-cancelled orders are not transactions; exclude from
+        -- cashier attribution. (Order status is spelled 'Cancelled'.)
+        and lower(coalesce(raw_json->'invoiceStatus'->>'name', '')) <> 'cancelled'
     ),
     daily as (
       select
@@ -206,6 +209,9 @@ export async function getBudtenderAnalytics(
       where dealer_id = any($1::bigint[])
         and pay_time >= $2
         and pay_time <  $3
+        -- Fully-cancelled orders are not transactions; exclude from
+        -- cashier attribution. (Order status is spelled 'Cancelled'.)
+        and lower(coalesce(raw_json->'invoiceStatus'->>'name', '')) <> 'cancelled'
     ),
     -- Drop unattributed rows (NULL cashier_user_id) AFTER the
     -- projection.

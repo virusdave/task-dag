@@ -184,6 +184,10 @@ export async function loadEssentialsDailySummary(
         from sweed_orders so
         where so.dealer_id = any($1::bigint[])
           and so.pay_time >= $2 and so.pay_time < $3
+          -- A fully-cancelled order is not a purchase and contributes
+          -- no revenue: drop it from counts AND sales/receipts. (Order
+          -- status is spelled 'Cancelled'; line status is 'Canceled'.)
+          and lower(coalesce(so.raw_json->'invoiceStatus'->>'name', '')) <> 'cancelled'
       )
       select
         dealer_id,
@@ -221,8 +225,12 @@ export async function loadEssentialsDailySummary(
   //     (so a partial-cost order can't inflate the GM%). With current
   //     100% cost coverage this guard is a no-op, but it keeps the ratio
   //     honest if coverage ever drops.
-  // Canceled orders contribute 0 (their header subtotal is 0 and their
-  // lines are excluded), so they need no special handling.
+  // Fully-cancelled orders are excluded outright (margin_orders WHERE):
+  // their header subtotal is frequently NON-zero in Sweed's feed even
+  // though every line is canceled (COGS=0), so leaving them in would
+  // add pure revenue with no cost and inflate GM%. Partially-canceled
+  // orders keep their non-canceled lines for COGS while the canceled
+  // lines are dropped via is_canceled.
   const marginPromise = db.query<MarginRow>(
     `
       with order_lines as (
@@ -254,6 +262,11 @@ export async function loadEssentialsDailySummary(
         from sweed_orders so
         where so.dealer_id = any($1::bigint[])
           and so.pay_time >= $2 and so.pay_time < $3
+          -- Exclude fully-cancelled orders: their header subtotal is
+          -- often non-zero in Sweed's feed while every line is canceled
+          -- (so COGS=0), which would otherwise add pure revenue with no
+          -- cost and inflate GM%. (Order status is spelled 'Cancelled'.)
+          and lower(coalesce(so.raw_json->'invoiceStatus'->>'name', '')) <> 'cancelled'
       )
       select
         o.dealer_id,

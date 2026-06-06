@@ -126,6 +126,10 @@ async function fetchPerDayRows(
         from sweed_orders
        where dealer_id = any($2::bigint[])
          and pay_time >= $3 and pay_time < $4
+         -- Fully-cancelled orders are not sales; their header
+         -- subtotal/grand_total is often non-zero in Sweed's feed.
+         -- (Order status is spelled 'Cancelled'.)
+         and lower(coalesce(raw_json->'invoiceStatus'->>'name', '')) <> 'cancelled'
        group by 1, 2
     )
     select w.site_zip::text as site_zip,

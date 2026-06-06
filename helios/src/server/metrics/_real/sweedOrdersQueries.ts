@@ -36,6 +36,26 @@ import {
 //     or null (ratio metrics).
 // ============================================================================
 
+// A fully-cancelled order is not a transaction: it must not count
+// toward order counts, sales/receipts dollars, basket size, or
+// fulfillment / payment / category splits. Sweed's ORDER-level status
+// lives at raw_json->'invoiceStatus'->>'name' and reads 'Cancelled'
+// (note: the LINE-level status is the differently-spelled 'Canceled').
+// Its header subtotal/grand_total is frequently non-zero in Sweed's
+// feed, so without this guard cancelled orders silently inflated every
+// header-grain metric. Older orders (pre-2026-05) carry no
+// invoiceStatus at all → coalesce('') keeps them included. Case-
+// insensitive against taxonomy drift. The bare variant is for
+// single-table `from sweed_orders` queries; the `so.` variant for
+// aliased / joined ones.
+const NON_CANCELLED_ORDER_SQL = `and lower(coalesce(so.raw_json->'invoiceStatus'->>'name', '')) <> 'cancelled'`
+const NON_CANCELLED_ORDER_SQL_BARE = `and lower(coalesce(raw_json->'invoiceStatus'->>'name', '')) <> 'cancelled'`
+
+// Canceled (voided) LINE items inside an otherwise-live order: same
+// idea at the item grain, for item-level revenue/category queries over
+// sweed_order_items_flat (alias `f`).
+const NON_CANCELED_LINE_SQL = `and lower(coalesce(f.raw_item->'invoiceItemStatus'->>'name', '')) <> 'canceled'`
+
 const POSTGRES_TRUNC_UNIT_BY_AGG: Record<
   Exclude<MetricAggregation, 'dow' | 'dom' | 'dofortnight' | 'total'>,
   string
@@ -191,6 +211,7 @@ export async function queryFirstVsReturning(args: MetricQueryArgs): Promise<Metr
         from sweed_orders so
        where so.dealer_id = any($1::bigint[])
          and so.pay_time >= $2 and so.pay_time < $3
+         ${NON_CANCELLED_ORDER_SQL}
        group by 1
     `
     return runBucketedQuery({
@@ -209,6 +230,7 @@ export async function queryFirstVsReturning(args: MetricQueryArgs): Promise<Metr
       from sweed_orders so
      where so.dealer_id = any($1::bigint[])
        and so.pay_time >= $2 and so.pay_time < $3
+       ${NON_CANCELLED_ORDER_SQL}
      group by 1, 2
   `
   return runBucketedQuery({
@@ -258,6 +280,7 @@ async function queryGroupedByColumn(args: {
       from sweed_orders
      where dealer_id = any($1::bigint[])
        and pay_time >= $2 and pay_time < $3
+       ${NON_CANCELLED_ORDER_SQL_BARE}
      group by 1, 2
   `
   const pool = getPool()
@@ -314,6 +337,7 @@ export async function queryBasketSizeByCustomerType(args: MetricQueryArgs): Prom
       from sweed_orders so
      where so.dealer_id = any($1::bigint[])
        and so.pay_time >= $2 and so.pay_time < $3
+       ${NON_CANCELLED_ORDER_SQL}
      group by 1, 2
   `
   return runBucketedQuery({
@@ -431,6 +455,7 @@ async function queryAvgGroupedByFulfillment(args: MetricQueryArgs, aggExpr: stri
       from sweed_orders
      where dealer_id = any($1::bigint[])
        and pay_time >= $2 and pay_time < $3
+       ${NON_CANCELLED_ORDER_SQL_BARE}
      group by 1, 2
   `
   const pool = getPool()
@@ -449,6 +474,7 @@ async function queryAvgGroupedByFulfillment(args: MetricQueryArgs, aggExpr: stri
       from sweed_orders
      where dealer_id = any($1::bigint[])
        and pay_time >= $2 and pay_time < $3
+       ${NON_CANCELLED_ORDER_SQL_BARE}
      group by 1, 2
   `
   const r2 = await pool.query<{ bucket_start: string | null; col_value: string | null; sum_value: string | null; cnt: string }>(
@@ -711,6 +737,7 @@ async function queryCategoryLineItems(args: MetricQueryArgs): Promise<MetricRow[
              join catalog_product_mapping cpm on cpm.product_id = f.product_id::text
        where f.dealer_id = any($1::bigint[])
          and f.pay_time >= $2 and f.pay_time < $3
+         ${NON_CANCELED_LINE_SQL}
          ${catalogFilterWhere('cpm', 4)}
        group by 1, 2
     `
@@ -721,6 +748,7 @@ async function queryCategoryLineItems(args: MetricQueryArgs): Promise<MetricRow[
         from sweed_order_items_flat f
        where f.dealer_id = any($1::bigint[])
          and f.pay_time >= $2 and f.pay_time < $3
+         ${NON_CANCELED_LINE_SQL}
        group by 1, 2
     `
   const pool = getPool()
@@ -832,6 +860,7 @@ export async function queryCustomerOriginMap(args: MetricQueryArgs): Promise<Met
          and deliv.geocode_status = 'ok'
        where so.dealer_id = any($1::bigint[])
          and so.pay_time >= $2 and so.pay_time < $3
+         ${NON_CANCELLED_ORDER_SQL}
     )
     select bucket_start, county, state_code, count(*)::numeric as value
       from resolved
@@ -900,6 +929,7 @@ export async function queryDeliveryOrderCountByZone(args: MetricQueryArgs): Prom
      where so.dealer_id = any($1::bigint[])
        and so.pay_time >= $2 and so.pay_time < $3
        and so.fulfillment_type ~* '^delivery'
+       ${NON_CANCELLED_ORDER_SQL}
      group by bucket_start, a.county, a.state_code
   `
   const pool = getPool()
@@ -984,6 +1014,7 @@ async function querySingleSumPerBucket(
       from sweed_orders
      where dealer_id = any($1::bigint[])
        and pay_time >= $2 and pay_time < $3
+       ${NON_CANCELLED_ORDER_SQL_BARE}
      group by 1
   `
   return runBucketedQuery({

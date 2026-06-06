@@ -236,12 +236,27 @@ async function runMarginBucketedQuery(args: {
   })
 }
 
+/** Canceled line items are voided sales — they must NEVER contribute
+ *  revenue, qty, or COGS to any margin / velocity / sell-through
+ *  metric. Sweed's per-LINE status lives at
+ *  `raw_item.invoiceItemStatus.name`; a voided line reads 'Canceled'
+ *  (note: the differently-spelled order-level status is 'Cancelled').
+ *  Canceled lines DO carry a non-zero `subtotalAmount` (and sometimes
+ *  qty) in Sweed's order-list feed, so without this guard they
+ *  inflated revenue and (when qty was present) COGS. Case-insensitive
+ *  for safety against Sweed taxonomy drift. */
+const NON_CANCELED_LINE_SQL = `lower(coalesce(f.raw_item->'invoiceItemStatus'->>'name', '')) <> 'canceled'`
+
 /** Helper: per-line revenue / qty / COGS expressions over the
  *  materialised sweed_order_items_flat table (alias `f`), D1.
  *
- *   - REVENUE_EXPR: f.revenue (mirrors item->>'subtotalAmount')
- *   - QTY_EXPR:     f.qty     (mirrors item->>'currentQty')
+ *   - REVENUE_EXPR: f.revenue (item->>'subtotalAmount'), 0 for canceled lines
+ *   - QTY_EXPR:     f.qty     (item->>'currentQty'),     0 for canceled lines
  *   - COGS_EXPR:    qty * cost_as_of_or_earliest()
+ *
+ * Canceled lines are zeroed (not WHERE-filtered) so every downstream
+ * query gets the exclusion centrally without each having to carry the
+ * predicate — see NON_CANCELED_LINE_SQL.
  *
  * Every query below selects from `sweed_order_items_flat f` (joining
  * `sweed_orders so` only when it also needs order-level columns such as
@@ -249,8 +264,8 @@ async function runMarginBucketedQuery(args: {
  * NOT in the flat table). Each metric query builds a
  * `select bucket_start, series_id, sum(revenue), sum(cogs)` around these.
  */
-const REVENUE_EXPR = `f.revenue`
-const QTY_EXPR = `f.qty`
+const REVENUE_EXPR = `(case when ${NON_CANCELED_LINE_SQL} then f.revenue else 0 end)`
+const QTY_EXPR = `(case when ${NON_CANCELED_LINE_SQL} then f.qty else 0 end)`
 const COGS_EXPR = `${QTY_EXPR} * coalesce(sweed_package_cost_as_of_or_earliest(f.dealer_id, f.inventory_item_id, f.pay_time), 0)`
 
 /** margins.gross_margin_dollars — sum(revenue - cogs) per bucket. */

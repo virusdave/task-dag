@@ -8,6 +8,7 @@ import {
   type InventorySkuRow,
 } from '../../shared/contracts/index.js'
 import { getPool } from '../db/pool.js'
+import { bucketLocalExpr } from '../metrics/bucketSelectSql.js'
 
 // ============================================================================
 // Inventory / Procurement analytics SQL + scoring
@@ -163,13 +164,16 @@ sales AS (
     sum(f.qty) FILTER (WHERE f.pay_time >= (SELECT as_of FROM params) - ((SELECT window_days FROM params) || ' days')::interval) AS units_w,
     sum(f.qty) AS units_90,
     sum(f.revenue) FILTER (WHERE f.pay_time >= (SELECT as_of FROM params) - ((SELECT window_days FROM params) || ' days')::interval) AS revenue_w,
-    count(DISTINCT (f.pay_time AT TIME ZONE 'America/New_York')::date)
+    count(DISTINCT ${bucketLocalExpr('day', 'f.pay_time')})
       FILTER (WHERE f.pay_time >= (SELECT as_of FROM params) - ((SELECT window_days FROM params) || ' days')::interval) AS sale_days_w,
     max(f.pay_time) AS last_sale_at
   FROM sweed_order_items_flat f
   JOIN pkg_dim d ON d.dealer_id = f.dealer_id AND d.inventory_item_id = f.inventory_item_id
   WHERE f.dealer_id = ANY($1::bigint[])
     AND f.pay_time >= (SELECT as_of FROM params) - interval '90 days'
+    -- Canceled (voided) lines are not real sales; exclude from units /
+    -- revenue / selling-day velocity. (Line status spelled 'Canceled'.)
+    AND lower(coalesce(f.raw_item->'invoiceItemStatus'->>'name', '')) <> 'canceled'
   GROUP BY d.dealer_id, d.product_id
 )
 SELECT
