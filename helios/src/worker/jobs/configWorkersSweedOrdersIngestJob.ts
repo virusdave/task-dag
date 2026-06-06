@@ -16,24 +16,60 @@ import type { JobHandlerContext } from '../runtime/jobRegistry.js'
 //
 // One job per scheduler tick. For each dealer we:
 //
-//   1. **Forward poll** — fetch invoices from `highwater - OVERLAP` to
-//      `now`, upsert into `sweed_orders` via `on conflict do nothing`,
-//      advance the highwater to `max(pay_time)` of the inserted batch.
+//   1. **Forward poll + settlement refresh** — fetch invoices from
+//      `min(highwater - OVERLAP, now - SETTLEMENT_REFRESH)` to `now`,
+//      UPSERT into `sweed_orders` via `on conflict do update` (refresh
+//      financials + raw_json + re-flatten line items), advance the
+//      highwater to `max(pay_time)` of the batch.
 //   2. **Backfill one day** — if `backfill_cursor_day` is non-null,
-//      fetch invoices for that day, insert (same upsert), decrement
+//      fetch invoices for that day, upsert (same path), decrement
 //      the cursor by one day. Stops when the cursor reaches the
 //      dealer's store-opening date (`min_pay_time`).
+//
+// Why UPSERT + settlement refresh (2026-06): Sweed's order-LIST feed
+// returns an order's HEADER financials (subtotalAmount / grandTotal)
+// and per-line revenue as **0 / partial** while the order is still
+// `Open` / `In process` — i.e. a prepaid pickup/preorder that has not
+// yet been fulfilled+settled to `Paid`. payTime is stamped at creation,
+// so once the order settles (often same-day, hours later) its payTime
+// is already behind the forward-poll highwater and a plain
+// `highwater - OVERLAP` poll never sees it again. The original pipeline
+// snapshotted each invoice ONCE (`on conflict do nothing`, flatten only
+// genuinely-new invoices), so an order first seen pre-settlement stayed
+// frozen at 0/partial revenue forever. A live audit of Midtown's
+// 2026-06-05 business day found 19 such orders undercounting
+// $1,023.94 (~25% of the day) — the dominant cause of helios reporting
+// well below Sweed's dashboard.
+//
+// Fix: (a) `on conflict do update` refreshes the financial / cashier /
+// raw columns (but NOT first_time_for_customer, delivery_zip,
+// delivery_address_id, invoice_get_status, invoice_get_polled_at,
+// ingested_at — those are owned by the first sighting or by the
+// address-enrichment job), (b) the items flatten DELETEs + re-INSERTs
+// for EVERY touched invoice (inserted or updated), and (c) the forward
+// poll always re-fetches at least the trailing SETTLEMENT_REFRESH
+// window so late-settling orders converge to their `Paid` state. The
+// one-time historical repair is done by re-walking backfill_cursor_day.
 //
 // The `OVERLAP` window covers two failure modes:
 //   * Sweed's `payTime` precision is seconds; multiple invoices can
 //     share a second, and a strict `>` cursor would miss the second
-//     one. Overlap + `on conflict do nothing` is idempotent.
+//     one. Overlap + the idempotent upsert covers it.
 //   * Late-arriving rows (e.g. kiosk offline → ticket lands minutes
 //     after pay). The overlap window guarantees re-poll catches them.
 // ============================================================================
 
 /** Forward-poll overlap window — see the long comment above. */
 const FORWARD_POLL_OVERLAP_MS = 15 * 60 * 1000
+
+/** Settlement-refresh window. Every forward poll re-fetches at least
+ *  this far back so orders that were `Open` / `In process` (with 0 /
+ *  partial revenue) when first seen get re-upserted once they settle
+ *  to `Paid`. Live data shows orders settle same-day or next-day, so
+ *  48h is a safe margin while keeping the per-tick page count small
+ *  (~5 pages/dealer). Anything older than this is repaired by the
+ *  backfill day-walk. */
+const SETTLEMENT_REFRESH_MS = 48 * 60 * 60 * 1000
 
 // Maximum rows per bulk INSERT round-trip. Same rationale as the
 // A2 commit on configWorkersStockRefreshJob.ts: keeps the
@@ -396,9 +432,17 @@ interface DealerResult {
 async function ingestDealer(dealerId: number, requestedBackfillDays: number): Promise<DealerResult> {
   const state = await ensureHighwaterRow(dealerId)
 
-  // ----- 1. Forward poll -----
+  // ----- 1. Forward poll + settlement refresh -----
+  // Re-fetch from whichever is EARLIER: the usual `highwater - OVERLAP`
+  // cursor, or `now - SETTLEMENT_REFRESH`. The latter guarantees the
+  // last 48h are always re-upserted so orders that settle from
+  // Open/In-process to Paid (gaining their real revenue) converge even
+  // though their payTime is long behind the highwater. The upsert path
+  // makes the wider window idempotent.
   const now = new Date()
-  const fromUtc = new Date(state.highwaterPayTime.getTime() - FORWARD_POLL_OVERLAP_MS)
+  const overlapFrom = state.highwaterPayTime.getTime() - FORWARD_POLL_OVERLAP_MS
+  const settlementFrom = now.getTime() - SETTLEMENT_REFRESH_MS
+  const fromUtc = new Date(Math.min(overlapFrom, settlementFrom))
   const forward = await fetchAndInsert(dealerId, fromUtc, now)
   let newHighwater = state.highwaterPayTime
   for (const inv of forward.normalised) {
@@ -665,24 +709,53 @@ async function fetchAndInsert(
               cashier_user_id,
               raw
             from input_with_first_time
-            on conflict (dealer_id, invoice_id) do nothing
+            on conflict (dealer_id, invoice_id) do update set
+              -- Refresh the financial / denormalised header fields +
+              -- raw envelope so an order that has settled from
+              -- Open/In-process to Paid (gaining real revenue) is
+              -- corrected. We DO NOT touch first_time_for_customer
+              -- (owned by the first sighting), delivery_zip /
+              -- delivery_address_id / invoice_get_status /
+              -- invoice_get_polled_at (owned by the address-enrichment
+              -- job), pay_time (stable creation time; avoids
+              -- business-day bucket drift), or ingested_at.
+              customer_id         = excluded.customer_id,
+              is_guest            = excluded.is_guest,
+              grand_total_dollars = excluded.grand_total_dollars,
+              subtotal_dollars    = excluded.subtotal_dollars,
+              tax_dollars         = excluded.tax_dollars,
+              discount_dollars    = excluded.discount_dollars,
+              fulfillment_type    = excluded.fulfillment_type,
+              payment_method      = excluded.payment_method,
+              cashier_user_id     = excluded.cashier_user_id,
+              raw_json            = excluded.raw_json
+            -- Only actually write (and therefore RETURN, and therefore
+            -- re-flatten) when the raw envelope changed. Keeps the 48h
+            -- settlement-refresh window from churning unchanged rows
+            -- every tick.
+            where sweed_orders.raw_json is distinct from excluded.raw_json
             returning invoice_id
           )
           select invoice_id from inserted
         `,
         [dealerId, JSON.stringify(payload)],
       )
-      const insertedInvoiceIds = insertedResult.rows.map((r) => r.invoice_id)
-      totalInserted += insertedInvoiceIds.length
-      if (insertedInvoiceIds.length === 0) {
+      const touchedInvoiceIds = insertedResult.rows.map((r) => r.invoice_id)
+      totalInserted += touchedInvoiceIds.length
+      if (touchedInvoiceIds.length === 0) {
         return
       }
-      // (2) Items flatten — set-based over just the inserted
-      // invoices. We restrict via `invoice_id = ANY($2::text[])`
-      // so the planner can use the (dealer_id, invoice_id) PK on
-      // sweed_orders. Same on-conflict-do-update body as the v1
-      // per-row statement; ordinality starts at 0
-      // (`(item.ord - 1)::int`) for parity.
+      // (2) Items flatten — set-based over every TOUCHED (inserted or
+      // updated) invoice. We DELETE the existing flat rows first so a
+      // re-fetched order that lost a line (rare, but possible) can't
+      // leave a stale higher-ordinal row behind, then re-INSERT from
+      // the fresh raw_json. We restrict via `invoice_id = ANY($2)` so
+      // the planner uses the (dealer_id, invoice_id) PK / index.
+      await db.query(
+        `delete from sweed_order_items_flat
+          where dealer_id = $1 and invoice_id = any($2::text[])`,
+        [dealerId, touchedInvoiceIds],
+      )
       await db.query(
         `
           insert into sweed_order_items_flat (
@@ -730,7 +803,7 @@ async function fetchAndInsert(
             product_category_name = excluded.product_category_name,
             flattened_at          = now()
         `,
-        [dealerId, insertedInvoiceIds],
+        [dealerId, touchedInvoiceIds],
       )
     })
   }
