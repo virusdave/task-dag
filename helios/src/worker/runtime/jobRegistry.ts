@@ -9,6 +9,7 @@ import {
   ConfigWorkersCatalogRefreshJobPayloadSchema,
   ConfigWorkersEdibleThcClampJobPayloadSchema,
   ConfigWorkersSweedOrdersRawJsonDrainJobPayloadSchema,
+  ConfigWorkersLitalertsProductsRawJsonDrainJobPayloadSchema,
   ConfigWorkersLitalertsRefreshVariantJobPayloadSchema,
   ConfigWorkersLitalertsRetailerBackfillJobPayloadSchema,
   ConfigWorkersMarketEvidenceAlarmScanJobPayloadSchema,
@@ -52,6 +53,7 @@ import { runCatalogPendingPurchasesImportJob } from '../jobs/importPendingPurcha
 import { runConfigWorkersCatalogRefreshJob } from '../jobs/configWorkersCatalogRefreshJob.js'
 import { runConfigWorkersEdibleThcClampJob } from '../jobs/configWorkersEdibleThcClampJob.js'
 import { runConfigWorkersSweedOrdersRawJsonDrainJob } from '../jobs/configWorkersSweedOrdersRawJsonDrainJob.js'
+import { runConfigWorkersLitalertsProductsRawJsonDrainJob } from '../jobs/configWorkersLitalertsProductsRawJsonDrainJob.js'
 import { runConfigWorkersLitalertsRefreshVariantJob } from '../jobs/configWorkersLitalertsRefreshJob.js'
 import { runConfigWorkersLitalertsRetailerBackfillJob } from '../jobs/configWorkersLitalertsRetailerBackfillJob.js'
 import { runConfigWorkersMarketEvidenceAlarmScanJob } from '../jobs/configWorkersMarketEvidenceAlarmScanJob.js'
@@ -212,6 +214,12 @@ const handlers: Record<JobType, JobHandler> = {
     await runConfigWorkersSweedOrdersRawJsonDrainJob(
       context,
       ConfigWorkersSweedOrdersRawJsonDrainJobPayloadSchema.parse(context.payload),
+    )
+  },
+  'config.workers.litalerts_products_raw_json_drain': async (context) => {
+    await runConfigWorkersLitalertsProductsRawJsonDrainJob(
+      context,
+      ConfigWorkersLitalertsProductsRawJsonDrainJobPayloadSchema.parse(context.payload),
     )
   },
   'config.workers.litalerts_retailer_backfill': async (context) => {

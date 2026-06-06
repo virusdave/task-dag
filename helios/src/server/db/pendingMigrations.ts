@@ -615,6 +615,22 @@ const SENTINELS: MigrationSentinel[] = [
     },
   },
   {
+    // Phase F3 of the Helios DB-cost epic (virusdave/top-level#11).
+    // Migration 065 adds litalerts_products.image_url and drops the
+    // NOT NULL constraint on raw_config_json / raw_product_json so the
+    // drain worker (config.workers.litalerts_products_raw_json_drain)
+    // can null those redundant blobs for observations older than 7
+    // days. The pricing-cache reader + steady-state ingest now read
+    // /write the typed columns (incl. image_url) instead of the raw
+    // JSON. The sentinel is true once the image_url column exists.
+    migrationId: '065_litalerts_products_drop_raw_not_null',
+    label:
+      'litalerts_products.image_url added + raw_config_json / ' +
+      'raw_product_json nullable (DB-cost epic phase F3) — required ' +
+      'before the litalerts raw_json drain worker can run.',
+    check: (db) => columnExists(db, 'litalerts_products', 'image_url'),
+  },
+  {
     // Phase C1 of the Helios DB-cost epic (virusdave/top-level#11):
     // convert parsekit_reverse_shadow_events to a Timescale
     // hypertable as a low-risk validator for the conversion pattern

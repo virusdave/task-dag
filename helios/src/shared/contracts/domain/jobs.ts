@@ -57,6 +57,7 @@ export const JobTypeSchema = z.enum([
   'config.workers.link_visitor_scan_to_sweed',
   'config.workers.refresh_sweed_customer_segments',
   'config.workers.sweed_orders_raw_json_drain',
+  'config.workers.litalerts_products_raw_json_drain',
   'catalog.maintenance.upload_group_image',
 ])
 export type JobType = z.infer<typeof JobTypeSchema>
@@ -375,6 +376,23 @@ export const ConfigWorkersSweedOrdersRawJsonDrainJobPayloadSchema = z.object({
 })
 export type ConfigWorkersSweedOrdersRawJsonDrainJobPayload = z.infer<
   typeof ConfigWorkersSweedOrdersRawJsonDrainJobPayloadSchema
+>
+
+// F3 (virusdave/top-level#11): drain litalerts_products.raw_config_json
+// / raw_product_json for observations older than `cutoffDays` in bounded
+// DB batches. Each batch is its own short transaction; one invocation
+// does at most `maxBatches * batchSize` rows so it never holds long
+// locks or floods WAL. The cutoff floor is 7 days (the plan's documented
+// window). See configWorkersLitalertsProductsRawJsonDrainJob.ts.
+export const ConfigWorkersLitalertsProductsRawJsonDrainJobPayloadSchema = z.object({
+  requestedByUserId: z.number().int().positive().nullable().optional(),
+  trigger: z.enum(['manual_run', 'scheduled']).default('scheduled'),
+  cutoffDays: z.number().int().min(7).max(365).default(7),
+  batchSize: z.number().int().min(1).max(2000).default(500),
+  maxBatches: z.number().int().min(1).max(40).default(10),
+})
+export type ConfigWorkersLitalertsProductsRawJsonDrainJobPayload = z.infer<
+  typeof ConfigWorkersLitalertsProductsRawJsonDrainJobPayloadSchema
 >
 
 /**

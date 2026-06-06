@@ -666,6 +666,16 @@ async function loadBrandProductsFromCache(
   brandId: number,
   stateCode: string,
 ): Promise<LitAlertsProduct[]> {
+  // Every field below comes from a typed column (phase F3): the raw
+  // JSON blobs the structured ingest used to persist were redundant
+  // with these columns and are being drained off the table to reclaim
+  // ~3.4 GB. The per-product image is read from the typed `image_url`
+  // column, falling back to the legacy raw_product_json->>'imageURL'
+  // ONLY for rows the drain worker hasn't converged yet (rows it has
+  // touched, plus all rows written by the new ingest, carry image_url
+  // directly). That transitional `raw_product_json` read is the single
+  // remaining raw consumer and is removed by the follow-up
+  // DROP COLUMN task once the drain has fully converged.
   const result = await getPool().query<{
     brand_id: string | null
     brand_name: string | null
@@ -676,8 +686,14 @@ async function loadBrandProductsFromCache(
     category: string | null
     medical_url: string | null
     recreational_url: string | null
-    raw_product_json: unknown
-    raw_config_json: unknown
+    image_url: string | null
+    amount: string | null
+    units: string | null
+    normal_price: string | null
+    sale_price: string | null
+    current_stock: number | null
+    recreational: boolean | null
+    medical: boolean | null
   }>(
     `
       with latest as (
@@ -698,8 +714,14 @@ async function loadBrandProductsFromCache(
         category,
         medical_url,
         recreational_url,
-        raw_product_json,
-        raw_config_json
+        coalesce(image_url, nullif(raw_product_json->>'imageURL', '')) as image_url,
+        amount,
+        units,
+        normal_price,
+        sale_price,
+        current_stock,
+        recreational,
+        medical
       from latest
       order by retailer_id, product_id, config_idx
     `,
@@ -712,7 +734,6 @@ async function loadBrandProductsFromCache(
     const key = `${row.retailer_id}:${row.product_id}`
     let product = productById.get(key)
     if (!product) {
-      const rawProduct = (row.raw_product_json ?? {}) as Record<string, unknown>
       product = {
         id: Number(row.product_id),
         name: row.product_name,
@@ -722,20 +743,22 @@ async function loadBrandProductsFromCache(
         medicalURL: row.medical_url ?? undefined,
         recreationalURL: row.recreational_url ?? undefined,
         category: row.category ?? undefined,
-        imageURL: typeof rawProduct.imageURL === 'string' ? rawProduct.imageURL : undefined,
+        imageURL: row.image_url ?? undefined,
         configs: [],
       }
       productById.set(key, product)
     }
-    const rawConfig = (row.raw_config_json ?? {}) as Record<string, unknown>
     product.configs.push({
-      amount: (rawConfig.amount ?? null) as LitAlertsProductConfig['amount'],
-      units: (rawConfig.units ?? null) as LitAlertsProductConfig['units'],
-      recreational: (rawConfig.recreational ?? null) as LitAlertsProductConfig['recreational'],
-      medical: (rawConfig.medical ?? null) as LitAlertsProductConfig['medical'],
-      normalPrice: (rawConfig.normalPrice ?? null) as LitAlertsProductConfig['normalPrice'],
-      salePrice: (rawConfig.salePrice ?? null) as LitAlertsProductConfig['salePrice'],
-      currentStock: (rawConfig.currentStock ?? null) as LitAlertsProductConfig['currentStock'],
+      amount: row.amount,
+      units: row.units,
+      recreational: row.recreational,
+      medical: row.medical,
+      // numeric(10,2) comes back from node-pg as a string; the config
+      // schema + parseLitAlertsPrice both accept string|number, so we
+      // pass it through untouched (no float round-trip).
+      normalPrice: row.normal_price,
+      salePrice: row.sale_price,
+      currentStock: row.current_stock,
     })
   }
   return Array.from(productById.values())

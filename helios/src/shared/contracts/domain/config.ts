@@ -27,6 +27,7 @@ export const CONFIG_BACKGROUND_TASK_KEYS = [
   'workers.scheduling.enrich_delivery_address',
   'workers.scheduling.enrich_visitor_scan_address',
   'workers.scheduling.sweed_orders_raw_json_drain',
+  'workers.scheduling.litalerts_products_raw_json_drain',
 ] as const
 export const ConfigBackgroundTaskKeySchema = z.enum(CONFIG_BACKGROUND_TASK_KEYS)
 export type ConfigBackgroundTaskKey = z.infer<typeof ConfigBackgroundTaskKeySchema>
@@ -153,6 +154,13 @@ export const CONFIG_BACKGROUND_TASKS: ReadonlyArray<ConfigBackgroundTaskDefiniti
     slug: 'sweed-orders-raw-json-drain',
     implemented: true,
     summary: 'DB-cost maintenance (epic phase F5): nulls sweed_orders.raw_json for orders older than 30 days in bounded DB batches (default 500 rows/batch, ≤10 batches per tick, each its own short transaction with FOR UPDATE SKIP LOCKED). All request-time readers were migrated onto sweed_order_items_flat (items) and the cashier_user_id column (creatorId) in phases D1/F5, so the historical blob is pure dead weight — it was the single largest TOAST contributor on sweed_orders. Disk is reclaimed by autovacuum after the drain. Runs off-hours by default.',
+  },
+  {
+    key: 'workers.scheduling.litalerts_products_raw_json_drain',
+    label: 'LitAlerts products raw_json drain',
+    slug: 'litalerts-products-raw-json-drain',
+    implemented: true,
+    summary: 'DB-cost maintenance (epic phase F3): nulls litalerts_products.raw_config_json / raw_product_json for observations older than 7 days in bounded DB batches (default 500 rows/batch, ≤10 batches per tick, each its own short transaction with FOR UPDATE SKIP LOCKED by primary key). Every field a consumer needs is captured in a typed column, and the per-product image is carried into the typed image_url column before each raw row is nulled, so no data is lost. litalerts_products was ~3.4 GB / 3.48M rows and the two raw blobs were the bulk of it. Unlike the F5 drain this is a finite backlog: the ingest stops writing raw, so once the pre-cutover rows drain the partial index empties and the candidate scan is an O(0) no-op. Disk is reclaimed by autovacuum after the drain. Runs off-hours by default.',
   },
 ]
 
@@ -590,5 +598,18 @@ export const SWEED_ORDERS_RAW_JSON_DRAIN_DEFAULT_SCHEDULE_WINDOWS: ReadonlyArray
     intervalMinutes: 15,
     paused: false,
     notes: 'Null sweed_orders.raw_json for orders older than 30 days in bounded DB batches (≤500 rows/batch, ≤10 batches/tick). Off-hours so the candidate scan + dead-tuple churn never competes with daytime serving (DB-cost epic phase F5).',
+  },
+]
+
+export const LITALERTS_PRODUCTS_RAW_JSON_DRAIN_DEFAULT_SCHEDULE_WINDOWS: ReadonlyArray<
+  Omit<ConfigWorkerScheduleWindow, 'id'>
+> = [
+  {
+    weekdayMask: WEEKDAY_MASK_ALL,
+    windowStartMinute: 2 * 60, // 02:00 server local (off-hours)
+    windowEndMinute: 8 * 60, // 08:00 server local
+    intervalMinutes: 15,
+    paused: false,
+    notes: 'Null litalerts_products.raw_config_json / raw_product_json for observations older than 7 days in bounded DB batches (≤500 rows/batch, ≤10 batches/tick), carrying any raw image URL into image_url first. Off-hours so the backlog drain + dead-tuple churn never competes with daytime serving (DB-cost epic phase F3).',
   },
 ]

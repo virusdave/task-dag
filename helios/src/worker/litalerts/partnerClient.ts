@@ -69,8 +69,9 @@ const ProductSchema = z.object({
   // /Products/menulistings endpoint via
   // `scripts/litalerts-backfill-product-images.mts`. The new
   // partner-API field is the source of truth going forward, and
-  // we record it onto `litalerts_products.raw_product_json` (via the
-  // structured ingest) and propagate it into
+  // we record it onto the typed `litalerts_products.image_url` column
+  // (via the structured ingest — phase F3; it used to land on the
+  // now-being-drained raw_product_json blob) and propagate it into
   // `fuzzy_skus.raw_input_jsonb.imageUrl` (via the
   // litalerts-products-to-fuzzy-skus backfill) so the catalog
   // market-data review can decorate candidates without a separate

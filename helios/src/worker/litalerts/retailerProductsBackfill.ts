@@ -315,21 +315,24 @@ async function persistProducts(
       const productConfigs = Array.isArray(product.configs) ? product.configs : []
       for (let configIdx = 0; configIdx < productConfigs.length; configIdx += 1) {
         const cfg = productConfigs[configIdx]
+        // F3 (virusdave/top-level#11): we no longer persist the
+        // redundant raw_config_json / raw_product_json blobs — every
+        // field a consumer needs is captured in a typed column, and the
+        // per-product image now lands in the typed `image_url` column
+        // (LAProduct.imageURL is a first-class partner-API field).
         await client.query(
           `insert into litalerts_products (
              state_code, brand_id, brand_name, retailer_id, product_id, config_idx,
              product_name, category,
              amount, units, normal_price, sale_price, current_stock,
              recreational, medical,
-             medical_url, recreational_url,
-             raw_config_json, raw_product_json
+             medical_url, recreational_url, image_url
            ) values (
              $1, $2, $3, $4, $5, $6,
              $7, $8,
              $9, $10, $11, $12, $13,
              $14, $15,
-             $16, $17,
-             $18::jsonb, $19::jsonb
+             $16, $17, $18
            )`,
           [
             stateCode,
@@ -349,8 +352,7 @@ async function persistProducts(
             cfg.medical ?? null,
             product.medicalURL ?? null,
             product.recreationalURL ?? null,
-            JSON.stringify(cfg),
-            JSON.stringify({ ...product, configs: undefined }),
+            stringOrNull(product.imageURL),
           ],
         )
         configs += 1

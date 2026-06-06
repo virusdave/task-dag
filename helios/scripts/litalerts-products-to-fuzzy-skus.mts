@@ -59,7 +59,7 @@ async function main(): Promise<void> {
                amount, units,
                normal_price, sale_price, current_stock,
                medical_url, recreational_url,
-               raw_config_json, raw_product_json
+               coalesce(image_url, nullif(raw_product_json->>'imageURL', '')) as image_url
           from litalerts_products
          where state_code = $1
          order by retailer_id, product_id, config_idx, observed_at desc
@@ -89,10 +89,14 @@ async function main(): Promise<void> {
             -- the fuzzy row, without paying for the legacy LEFT JOIN
             -- against the legacy litalerts_product_images table
             -- (the scraped-dashboard table that the new API field
-            -- replaces).
-            'imageUrl', raw_product_json->>'imageURL',
-            'raw_config_json', raw_config_json,
-            'raw_product_json', raw_product_json
+            -- replaces). Phase F3: read from the typed image_url
+            -- column (with a transitional raw_product_json fallback
+            -- for not-yet-drained rows), no longer the raw blob. The
+            -- redundant raw_config_json / raw_product_json blobs are
+            -- no longer copied into the fuzzy envelope — every field a
+            -- consumer needs is already surfaced above, and nothing
+            -- reads them back out of raw_input_jsonb.
+            'imageUrl', image_url
           ) as raw_input_jsonb,
           nullif(lower(trim(brand_name)), '') as brand_norm,
           nullif(lower(trim(category)), '') as category_norm,
