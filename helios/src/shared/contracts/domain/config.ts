@@ -28,6 +28,7 @@ export const CONFIG_BACKGROUND_TASK_KEYS = [
   'workers.scheduling.enrich_visitor_scan_address',
   'workers.scheduling.sweed_orders_raw_json_drain',
   'workers.scheduling.litalerts_products_raw_json_drain',
+  'workers.scheduling.fuzzy_skus_retention',
 ] as const
 export const ConfigBackgroundTaskKeySchema = z.enum(CONFIG_BACKGROUND_TASK_KEYS)
 export type ConfigBackgroundTaskKey = z.infer<typeof ConfigBackgroundTaskKeySchema>
@@ -161,6 +162,13 @@ export const CONFIG_BACKGROUND_TASKS: ReadonlyArray<ConfigBackgroundTaskDefiniti
     slug: 'litalerts-products-raw-json-drain',
     implemented: true,
     summary: 'DB-cost maintenance (epic phase F3): nulls litalerts_products.raw_config_json / raw_product_json for observations older than 7 days in bounded DB batches (default 500 rows/batch, ≤10 batches per tick, each its own short transaction with FOR UPDATE SKIP LOCKED by primary key). Every field a consumer needs is captured in a typed column, and the per-product image is carried into the typed image_url column before each raw row is nulled, so no data is lost. litalerts_products was ~3.4 GB / 3.48M rows and the two raw blobs were the bulk of it. Unlike the F5 drain this is a finite backlog: the ingest stops writing raw, so once the pre-cutover rows drain the partial index empties and the candidate scan is an O(0) no-op. Disk is reclaimed by autovacuum after the drain. Runs off-hours by default.',
+  },
+  {
+    key: 'workers.scheduling.fuzzy_skus_retention',
+    label: 'Fuzzy SKUs retention',
+    slug: 'fuzzy-skus-retention',
+    implemented: true,
+    summary: 'DB-cost maintenance (epic phase F4): enforces the documented 30-day retention on fuzzy_skus (the parser-output staging table for catalog → market-data review) by deleting rows older than retentionDays in bounded DB batches (default 1000 rows/batch, ≤20 batches per tick, each its own short transaction with FOR UPDATE SKIP LOCKED by primary key). Rows still referenced by catalog_market_matches are retained past the window (the FK is ON DELETE NO ACTION). fuzzy_skus had grown to ~1.67 GB / 913k rows with no retention. The retentionDays window is operator-tunable here. Disk is reclaimed by autovacuum after the delete. Runs daily off-hours by default.',
   },
 ]
 
@@ -611,5 +619,18 @@ export const LITALERTS_PRODUCTS_RAW_JSON_DRAIN_DEFAULT_SCHEDULE_WINDOWS: Readonl
     intervalMinutes: 15,
     paused: false,
     notes: 'Null litalerts_products.raw_config_json / raw_product_json for observations older than 7 days in bounded DB batches (≤500 rows/batch, ≤10 batches/tick), carrying any raw image URL into image_url first. Off-hours so the backlog drain + dead-tuple churn never competes with daytime serving (DB-cost epic phase F3).',
+  },
+]
+
+export const FUZZY_SKUS_RETENTION_DEFAULT_SCHEDULE_WINDOWS: ReadonlyArray<
+  Omit<ConfigWorkerScheduleWindow, 'id'>
+> = [
+  {
+    weekdayMask: WEEKDAY_MASK_ALL,
+    windowStartMinute: 3 * 60, // 03:00 server local (off-hours)
+    windowEndMinute: 4 * 60, // 04:00 server local
+    intervalMinutes: 1440, // once per day
+    paused: false,
+    notes: 'Delete fuzzy_skus rows older than 30 days (operator-tunable) in bounded DB batches (≤1000 rows/batch, ≤20 batches/tick), skipping rows still referenced by catalog_market_matches. Daily off-hours so the delete + dead-tuple churn never competes with daytime serving (DB-cost epic phase F4).',
   },
 ]

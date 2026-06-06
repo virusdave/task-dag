@@ -20,6 +20,7 @@ import {
   ENRICH_VISITOR_SCAN_ADDRESS_DEFAULT_SCHEDULE_WINDOWS,
   SWEED_ORDERS_RAW_JSON_DRAIN_DEFAULT_SCHEDULE_WINDOWS,
   LITALERTS_PRODUCTS_RAW_JSON_DRAIN_DEFAULT_SCHEDULE_WINDOWS,
+  FUZZY_SKUS_RETENTION_DEFAULT_SCHEDULE_WINDOWS,
   getConfigBackgroundTaskDefinition,
   type ConfigBackgroundTaskKey,
   type ConfigWorkerSchedule,
@@ -169,6 +170,7 @@ const DEFAULT_WINDOWS_BY_TASK_KEY: Partial<
   'workers.scheduling.enrich_visitor_scan_address': ENRICH_VISITOR_SCAN_ADDRESS_DEFAULT_SCHEDULE_WINDOWS,
   'workers.scheduling.sweed_orders_raw_json_drain': SWEED_ORDERS_RAW_JSON_DRAIN_DEFAULT_SCHEDULE_WINDOWS,
   'workers.scheduling.litalerts_products_raw_json_drain': LITALERTS_PRODUCTS_RAW_JSON_DRAIN_DEFAULT_SCHEDULE_WINDOWS,
+  'workers.scheduling.fuzzy_skus_retention': FUZZY_SKUS_RETENTION_DEFAULT_SCHEDULE_WINDOWS,
 }
 
 export async function ensureDefaultConfigSchedules(db: Queryable = getPool()): Promise<void> {

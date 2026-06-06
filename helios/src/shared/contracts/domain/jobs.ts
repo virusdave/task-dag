@@ -58,6 +58,7 @@ export const JobTypeSchema = z.enum([
   'config.workers.refresh_sweed_customer_segments',
   'config.workers.sweed_orders_raw_json_drain',
   'config.workers.litalerts_products_raw_json_drain',
+  'config.workers.fuzzy_skus_retention',
   'catalog.maintenance.upload_group_image',
 ])
 export type JobType = z.infer<typeof JobTypeSchema>
@@ -393,6 +394,23 @@ export const ConfigWorkersLitalertsProductsRawJsonDrainJobPayloadSchema = z.obje
 })
 export type ConfigWorkersLitalertsProductsRawJsonDrainJobPayload = z.infer<
   typeof ConfigWorkersLitalertsProductsRawJsonDrainJobPayloadSchema
+>
+
+// F4 (virusdave/top-level#11): enforce the documented fuzzy_skus
+// retention by deleting rows older than `retentionDays` in bounded DB
+// batches (skipping rows still referenced by catalog_market_matches).
+// Each batch is its own short transaction; one invocation does at most
+// `maxBatches * batchSize` rows so it never holds long locks or floods
+// WAL. See configWorkersFuzzySkusRetentionJob.ts.
+export const ConfigWorkersFuzzySkusRetentionJobPayloadSchema = z.object({
+  requestedByUserId: z.number().int().positive().nullable().optional(),
+  trigger: z.enum(['manual_run', 'scheduled']).default('scheduled'),
+  retentionDays: z.number().int().min(7).max(365).default(30),
+  batchSize: z.number().int().min(1).max(5000).default(1000),
+  maxBatches: z.number().int().min(1).max(60).default(20),
+})
+export type ConfigWorkersFuzzySkusRetentionJobPayload = z.infer<
+  typeof ConfigWorkersFuzzySkusRetentionJobPayloadSchema
 >
 
 /**

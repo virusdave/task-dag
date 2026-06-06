@@ -631,6 +631,19 @@ const SENTINELS: MigrationSentinel[] = [
     check: (db) => columnExists(db, 'litalerts_products', 'image_url'),
   },
   {
+    // Phase F4 of the Helios DB-cost epic (virusdave/top-level#11).
+    // Migration 066 adds the fuzzy_skus_created_at_idx btree so the
+    // retention worker (config.workers.fuzzy_skus_retention) can find
+    // the oldest rows past the cutoff via an index range scan instead
+    // of a multi-second full seq scan of the ~1.67 GB table on every
+    // tick. The sentinel is true once the index exists.
+    migrationId: '066_fuzzy_skus_created_at_idx',
+    label:
+      'fuzzy_skus_created_at_idx created (DB-cost epic phase F4) — ' +
+      'required before the fuzzy_skus retention worker can run cheaply.',
+    check: (db) => indexExists(db, 'fuzzy_skus_created_at_idx'),
+  },
+  {
     // Phase C1 of the Helios DB-cost epic (virusdave/top-level#11):
     // convert parsekit_reverse_shadow_events to a Timescale
     // hypertable as a low-risk validator for the conversion pattern
