@@ -373,6 +373,126 @@ export async function queryMarginStackNewVsReturning(args: MetricQueryArgs): Pro
   })
 }
 
+// Tristate area = NY / NJ / CT. A line item's customer region is
+// resolved from a customer's geocoded address, trying three sources
+// in priority order:
+//
+//   1. scan  — the address on the customer's scanned government ID,
+//      via visitor_scan_links (link_status='linked') → visitor_scans
+//      → addresses. This is the ONLY source currently carrying real
+//      geocoded data for live orders (verified 2026-06-09), because…
+//   2. prim  — the Sweed customer-profile primary address
+//      (sweed_customer_addresses kind='primary' → addresses). The A5
+//      enrichment presently links almost every recent customer to the
+//      empty-address sentinel (geocode_status='not_us'), so this
+//      resolves to NULL in practice today, but is kept so the metric
+//      lights up automatically if/when that pipeline is fixed.
+//   3. deliv — the order's delivery address. Also ~unpopulated on
+//      recent orders today; kept for the same forward-compat reason.
+//
+// An order is classified 'far' ONLY when we positively resolved a
+// state OUTSIDE the tristate area; an unknown / un-geocoded address
+// falls back to 'tri'. That conservative default mirrors the "guests
+// count as returning" convention elsewhere in these stacks — we don't
+// claim a customer is "far" without a resolved out-of-area address, so
+// the far bucket stays a high-confidence "we KNOW this person is out
+// of the tristate" signal rather than a dumping ground for the (large)
+// set of orders whose address never resolved.
+const RESOLVED_STATE_SQL = `coalesce(scan.state_code, prim.state_code, deliv.state_code)`
+const TRISTATE_REGION_EXPR = `
+  case
+    when ${RESOLVED_STATE_SQL} is not null
+     and upper(btrim(${RESOLVED_STATE_SQL})) not in ('NY', 'NJ', 'CT')
+    then 'far'
+    else 'tri'
+  end
+`
+// Combine the first-time/returning pin with the tristate region into
+// one of four series ids: new_tri / new_far / return_tri / return_far.
+const NEW_VS_RETURNING_REGION_SERIES_EXPR = `
+  (case when ${FIRST_TIME_SERIES_EXPR} = 'first_time' then 'new' else 'return' end)
+  || '_' ||
+  (${TRISTATE_REGION_EXPR})
+`
+// Address-resolution joins shared by the region-segmented margin
+// query. None take bind params, so caller param numbering is
+// unaffected. `scan` is the working source today; `prim` mirrors
+// queryCustomerOriginMap; `deliv` is the order's delivery address.
+const CUSTOMER_REGION_ADDRESS_JOINS = `
+  left join lateral (
+    select a.state_code
+      from visitor_scan_links vsl
+      join visitor_scans vs on vs.id = vsl.scan_id
+      join addresses a on a.id = vs.address_id
+     where vsl.dealer_id = so.dealer_id
+       and vsl.sweed_customer_id = so.customer_id
+       and vsl.link_status = 'linked'
+       and a.geocode_status = 'ok'
+     limit 1
+  ) scan on so.customer_id is not null
+  left join lateral (
+    select a.state_code
+      from sweed_customer_addresses sca
+      join addresses a on a.id = sca.address_id
+     where sca.dealer_id = so.dealer_id
+       and sca.customer_id = so.customer_id
+       and sca.kind = 'primary'
+       and a.geocode_status = 'ok'
+     limit 1
+  ) prim on so.customer_id is not null
+  left join addresses deliv
+    on deliv.id = so.delivery_address_id
+   and deliv.geocode_status = 'ok'
+`
+
+/** margins.stack_new_vs_returning_region — gross margin $ stacked by
+ *  the first-time/returning pin (same as margins.stack_new_vs_returning)
+ *  CROSSED with whether the customer's resolved address is inside the
+ *  tristate area (NY/NJ/CT) or 'far' outside it. Four series:
+ *  new_tri / new_far / return_tri / return_far. Customer region uses
+ *  the customers.origin_map address chain (primary, then delivery);
+ *  unknown/un-geocoded → 'tri' (see TRISTATE_REGION_EXPR comment). */
+export async function queryMarginStackNewVsReturningByRegion(
+  args: MetricQueryArgs,
+): Promise<MetricRow[]> {
+  const dealerIds = resolveDealerIds(args.sites)
+  const { from, to, truncUnit, buckets } = resolveWindow(args)
+  const seriesIds = ['new_tri', 'new_far', 'return_tri', 'return_far'] as const
+  if (dealerIds.length === 0 || buckets.length === 0) {
+    return buckets.map((b) => {
+      const row: Record<string, string | number | null> = { t: b.toISOString() }
+      for (const sid of seriesIds) row[sid] = 0
+      return row as MetricRow
+    })
+  }
+  const cf = orderItemsCatalogFilterSql(args, 4)
+  const sql = `
+    ${cf.withPrefix}
+    select ${bucketSelectExpr(truncUnit, 'f.pay_time')} as bucket_start,
+           ${NEW_VS_RETURNING_REGION_SERIES_EXPR} as series_id,
+           sum(${REVENUE_EXPR})::numeric as revenue,
+           sum(${COGS_EXPR})::numeric as cogs
+      from sweed_order_items_flat f
+           join sweed_orders so
+             on so.dealer_id = f.dealer_id and so.invoice_id = f.invoice_id
+           ${CUSTOMER_REGION_ADDRESS_JOINS}
+           ${cf.joinClause}
+     where f.dealer_id = any($1::bigint[])
+       and f.pay_time >= $2 and f.pay_time < $3
+       ${cf.whereClause}
+     group by 1, 2
+  `
+  return runMarginBucketedQuery({
+    sql,
+    params: [dealerIds, from.toISOString(), to.toISOString(), ...cf.params],
+    seriesIds: [...seriesIds],
+    buckets,
+    defaultValue: 0,
+    collapseToSingleBucket: truncUnit === null,
+    aggregator: (revenue, cogs) => round2(revenue - cogs),
+  })
+}
+
 /** category.margin_dollars_stack — gross margin $ stacked by
  *  product category. */
 export async function queryCategoryMarginStack(args: MetricQueryArgs): Promise<MetricRow[]> {

@@ -27,6 +27,7 @@ import {
   queryInventoryMisalignment,
   queryLowstockUpcomingOuts,
   queryMarginStackNewVsReturning,
+  queryMarginStackNewVsReturningByRegion,
   querySlowmoversCostAtRisk,
 } from './sweedPackageSnapshotsQueries.js'
 import {
@@ -316,6 +317,29 @@ export const REAL_METRICS: ReadonlyArray<MetricDef> = [
     // window, so sub-window completion/pace queries stay correct —
     // exactly the property that lets acquisition.first_vs_returning
     // opt in too.
+    supports: { partialBuckets: true },
+  },
+  {
+    id: 'margins.stack_new_vs_returning_region',
+    group: 'Margins',
+    title: 'Gross margin $ — new vs returning × tristate',
+    description:
+      'Gross margin $ per bucket, stacked into FOUR buckets: the first-time/returning pin (same as margins.stack_new_vs_returning) crossed with whether the customer lives in the tristate area (NY/NJ/CT) or "far" outside it. Customer region is resolved from the customer\'s geocoded address, preferring the scanned-ID address (VeriScan link) and falling back to the Sweed profile primary and the order delivery address. A customer is only counted "far" when we positively resolved a state outside the tristate; unknown / un-geocoded addresses fall back to "tristate" so the far bucket stays a high-confidence signal rather than a dumping ground for missing-address data. NOTE: only orders whose customer has a linked VeriScan ID currently resolve to a real region — the Sweed customer-profile and delivery enrichment links are largely empty today, so the far buckets reflect VeriScan-linked customers only and will grow as address enrichment improves. Guests (no customer_id) count as returning + tristate.',
+    series: [
+      { id: 'new_tri', label: 'New (tristate)', colour: '#2ca02c' },
+      { id: 'return_tri', label: 'Return (tristate)', colour: '#1f77b4' },
+      { id: 'new_far', label: 'New (far)', colour: '#98df8a' },
+      { id: 'return_far', label: 'Return (far)', colour: '#aec7e8' },
+    ],
+    defaultAggregation: 'week',
+    supportedAggregations: [...SUPPORTED],
+    query: queryMarginStackNewVsReturningByRegion,
+    supportedCatalogFilters: ALL_CATALOG_FILTERS,
+    // Additive-over-time $ stack like margins.stack_new_vs_returning.
+    // Both the first-time pin AND the customer region are classified
+    // independently of the query window (region = current resolved
+    // address, not as-of), so the partial-bucket sub-window
+    // completion/pace queries stay correct.
     supports: { partialBuckets: true },
   },
   {
