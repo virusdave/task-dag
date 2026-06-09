@@ -278,6 +278,11 @@ export const REAL_METRICS: ReadonlyArray<MetricDef> = [
     supportedAggregations: [...SUPPORTED],
     query: queryGrossMarginDollars,
     supportedCatalogFilters: ALL_CATALOG_FILTERS,
+    // Additive-over-time $ metric (sum of revenue−cogs); the
+    // rightmost in-progress bucket should be pace-extrapolated like
+    // the Essentials $ charts. Safe because the query is a pure
+    // function of its window and COGS lookup is window-independent.
+    supports: { partialBuckets: true },
   },
   {
     id: 'margins.effective_gm_pct',
@@ -305,6 +310,13 @@ export const REAL_METRICS: ReadonlyArray<MetricDef> = [
     supportedAggregations: [...SUPPORTED],
     query: queryMarginStackNewVsReturning,
     supportedCatalogFilters: ALL_CATALOG_FILTERS,
+    // Same as margins.gross_margin_dollars: additive-over-time $
+    // stack. The first-time/returning split (FIRST_TIME_SERIES_EXPR)
+    // is classified on absolute customer history, not the query
+    // window, so sub-window completion/pace queries stay correct —
+    // exactly the property that lets acquisition.first_vs_returning
+    // opt in too.
+    supports: { partialBuckets: true },
   },
   {
     id: 'category.margin_dollars_stack',
