@@ -75,6 +75,7 @@ export const JOB_EXECUTION_POOL_BY_TYPE: Record<JobType, JobPoolMetadata> = {
   'config.workers.sweed_orders_raw_json_drain': { pool: 'system', requiresSweedSession: false },
   'config.workers.litalerts_products_raw_json_drain': { pool: 'system', requiresSweedSession: false },
   'config.workers.fuzzy_skus_retention': { pool: 'system', requiresSweedSession: false },
+  'config.workers.stock_snapshot_items_retention': { pool: 'system', requiresSweedSession: false },
   // Visitor-scan address enrichment hits only Postgres + Census
   // (no Sweed), so it lives in the system pool — keeps the Sweed
   // pool free for catalog / orders / shifts / etc.

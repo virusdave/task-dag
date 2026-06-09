@@ -11,6 +11,7 @@ import {
   ConfigWorkersSweedOrdersRawJsonDrainJobPayloadSchema,
   ConfigWorkersLitalertsProductsRawJsonDrainJobPayloadSchema,
   ConfigWorkersFuzzySkusRetentionJobPayloadSchema,
+  ConfigWorkersStockSnapshotItemsRetentionJobPayloadSchema,
   ConfigWorkersLitalertsRefreshVariantJobPayloadSchema,
   ConfigWorkersLitalertsRetailerBackfillJobPayloadSchema,
   ConfigWorkersMarketEvidenceAlarmScanJobPayloadSchema,
@@ -56,6 +57,7 @@ import { runConfigWorkersEdibleThcClampJob } from '../jobs/configWorkersEdibleTh
 import { runConfigWorkersSweedOrdersRawJsonDrainJob } from '../jobs/configWorkersSweedOrdersRawJsonDrainJob.js'
 import { runConfigWorkersLitalertsProductsRawJsonDrainJob } from '../jobs/configWorkersLitalertsProductsRawJsonDrainJob.js'
 import { runConfigWorkersFuzzySkusRetentionJob } from '../jobs/configWorkersFuzzySkusRetentionJob.js'
+import { runConfigWorkersStockSnapshotItemsRetentionJob } from '../jobs/configWorkersStockSnapshotItemsRetentionJob.js'
 import { runConfigWorkersLitalertsRefreshVariantJob } from '../jobs/configWorkersLitalertsRefreshJob.js'
 import { runConfigWorkersLitalertsRetailerBackfillJob } from '../jobs/configWorkersLitalertsRetailerBackfillJob.js'
 import { runConfigWorkersMarketEvidenceAlarmScanJob } from '../jobs/configWorkersMarketEvidenceAlarmScanJob.js'
@@ -228,6 +230,12 @@ const handlers: Record<JobType, JobHandler> = {
     await runConfigWorkersFuzzySkusRetentionJob(
       context,
       ConfigWorkersFuzzySkusRetentionJobPayloadSchema.parse(context.payload),
+    )
+  },
+  'config.workers.stock_snapshot_items_retention': async (context) => {
+    await runConfigWorkersStockSnapshotItemsRetentionJob(
+      context,
+      ConfigWorkersStockSnapshotItemsRetentionJobPayloadSchema.parse(context.payload),
     )
   },
   'config.workers.litalerts_retailer_backfill': async (context) => {

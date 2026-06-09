@@ -59,6 +59,7 @@ export const JobTypeSchema = z.enum([
   'config.workers.sweed_orders_raw_json_drain',
   'config.workers.litalerts_products_raw_json_drain',
   'config.workers.fuzzy_skus_retention',
+  'config.workers.stock_snapshot_items_retention',
   'catalog.maintenance.upload_group_image',
 ])
 export type JobType = z.infer<typeof JobTypeSchema>
@@ -411,6 +412,24 @@ export const ConfigWorkersFuzzySkusRetentionJobPayloadSchema = z.object({
 })
 export type ConfigWorkersFuzzySkusRetentionJobPayload = z.infer<
   typeof ConfigWorkersFuzzySkusRetentionJobPayloadSchema
+>
+
+// F6 (virusdave/top-level#11): delete the items of stock snapshots older
+// than `retentionDays` in bounded DB batches (the stock_snapshots header
+// rows are kept — they're referenced by many other tables). Each batch
+// is its own short transaction; one invocation does at most
+// `maxBatches * batchSize` rows so it never holds long locks or floods
+// WAL. The 90-day default covers the ≤12-week /metrics windows. See
+// configWorkersStockSnapshotItemsRetentionJob.ts.
+export const ConfigWorkersStockSnapshotItemsRetentionJobPayloadSchema = z.object({
+  requestedByUserId: z.number().int().positive().nullable().optional(),
+  trigger: z.enum(['manual_run', 'scheduled']).default('scheduled'),
+  retentionDays: z.number().int().min(30).max(730).default(90),
+  batchSize: z.number().int().min(1).max(5000).default(2000),
+  maxBatches: z.number().int().min(1).max(60).default(20),
+})
+export type ConfigWorkersStockSnapshotItemsRetentionJobPayload = z.infer<
+  typeof ConfigWorkersStockSnapshotItemsRetentionJobPayloadSchema
 >
 
 /**

@@ -190,6 +190,8 @@ export async function tickConfigWorkersScheduler(now: Date = new Date()): Promis
         await enqueueScheduledLitalertsProductsRawJsonDrain(schedule.taskKey, now, activeWindow.intervalMinutes)
       } else if (schedule.taskKey === 'workers.scheduling.fuzzy_skus_retention') {
         await enqueueScheduledFuzzySkusRetention(schedule.taskKey, now, activeWindow.intervalMinutes)
+      } else if (schedule.taskKey === 'workers.scheduling.stock_snapshot_items_retention') {
+        await enqueueScheduledStockSnapshotItemsRetention(schedule.taskKey, now, activeWindow.intervalMinutes)
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown scheduler-task error.'
@@ -733,6 +735,54 @@ async function enqueueScheduledFuzzySkusRetention(
       entityId: String(jobId),
       entityType: 'job',
       eventType: 'config.workers.fuzzy_skus_retention.requested',
+      module: 'config',
+      payload: {
+        intervalMinutes,
+        taskKey,
+        trigger: 'scheduled',
+      },
+      requestId: null,
+      scope: null,
+      undoPayload: null,
+    })
+  })
+}
+
+// F6 (virusdave/top-level#11): enqueue the bounded stock_snapshot_items
+// retention delete. System pool, no Sweed session. The dedicated
+// concurrency key plus the per-bucket dedupe key keep at most one delete
+// in flight even if a tick overlaps a still-running invocation.
+async function enqueueScheduledStockSnapshotItemsRetention(
+  taskKey: ConfigBackgroundTaskKey,
+  now: Date,
+  intervalMinutes: number,
+): Promise<void> {
+  const bucketMs = intervalMinutes * 60 * 1000
+  const bucketStartMs = Math.floor(now.getTime() / bucketMs) * bucketMs
+  const bucketIso = new Date(bucketStartMs).toISOString()
+
+  await withTransaction(async (db) => {
+    const jobId = await enqueueJob(db, {
+      priority: JOB_PRIORITY_BEST_EFFORT,
+      concurrencyKey: 'config.workers.stock_snapshot_items_retention',
+      dedupeKey: `config.workers.stock_snapshot_items_retention:scheduled:${bucketIso}`,
+      jobType: 'config.workers.stock_snapshot_items_retention',
+      module: 'config',
+      payload: {
+        trigger: 'scheduled',
+      },
+      requestedByUserId: null,
+      runAt: now,
+      scope: null,
+    })
+
+    await recordEnqueueAndPatchCache(db, taskKey, jobId, now)
+    await appendAuditEvent(db, {
+      actorType: 'system',
+      actorUserId: null,
+      entityId: String(jobId),
+      entityType: 'job',
+      eventType: 'config.workers.stock_snapshot_items_retention.requested',
       module: 'config',
       payload: {
         intervalMinutes,

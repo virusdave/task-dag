@@ -29,6 +29,7 @@ export const CONFIG_BACKGROUND_TASK_KEYS = [
   'workers.scheduling.sweed_orders_raw_json_drain',
   'workers.scheduling.litalerts_products_raw_json_drain',
   'workers.scheduling.fuzzy_skus_retention',
+  'workers.scheduling.stock_snapshot_items_retention',
 ] as const
 export const ConfigBackgroundTaskKeySchema = z.enum(CONFIG_BACKGROUND_TASK_KEYS)
 export type ConfigBackgroundTaskKey = z.infer<typeof ConfigBackgroundTaskKeySchema>
@@ -169,6 +170,13 @@ export const CONFIG_BACKGROUND_TASKS: ReadonlyArray<ConfigBackgroundTaskDefiniti
     slug: 'fuzzy-skus-retention',
     implemented: true,
     summary: 'DB-cost maintenance (epic phase F4): enforces the documented 30-day retention on fuzzy_skus (the parser-output staging table for catalog → market-data review) by deleting rows older than retentionDays in bounded DB batches (default 1000 rows/batch, ≤20 batches per tick, each its own short transaction with FOR UPDATE SKIP LOCKED by primary key). Rows still referenced by catalog_market_matches are retained past the window (the FK is ON DELETE NO ACTION). fuzzy_skus had grown to ~1.67 GB / 913k rows with no retention. The retentionDays window is operator-tunable here. Disk is reclaimed by autovacuum after the delete. Runs daily off-hours by default.',
+  },
+  {
+    key: 'workers.scheduling.stock_snapshot_items_retention',
+    label: 'Stock snapshot items retention',
+    slug: 'stock-snapshot-items-retention',
+    implemented: true,
+    summary: 'DB-cost maintenance (epic phase F6): deletes stock_snapshot_items belonging to snapshots older than retentionDays (default 90, operator-tunable) in bounded DB batches (default 2000 rows/batch, ≤20 batches per tick, each its own short transaction with FOR UPDATE SKIP LOCKED by primary key). Only the bulky item rows are deleted — the tiny stock_snapshots header rows are kept because many other tables reference them. stock_snapshot_items had grown to ~1.63 GB / 12M rows (≈375k new rows/day) while the /metrics windows only read ≤12 weeks. Runs on the off-hours multi-tick window (not once-daily) so it comfortably exceeds the aging rate; it self-stops once no eligible rows remain. Disk is reclaimed by autovacuum after the delete. A follow-on commit converts the table to a compressed hypertable to bound the steady-state footprint.',
   },
 ]
 
@@ -632,5 +640,18 @@ export const FUZZY_SKUS_RETENTION_DEFAULT_SCHEDULE_WINDOWS: ReadonlyArray<
     intervalMinutes: 1440, // once per day
     paused: false,
     notes: 'Delete fuzzy_skus rows older than 30 days (operator-tunable) in bounded DB batches (≤1000 rows/batch, ≤20 batches/tick), skipping rows still referenced by catalog_market_matches. Daily off-hours so the delete + dead-tuple churn never competes with daytime serving (DB-cost epic phase F4).',
+  },
+]
+
+export const STOCK_SNAPSHOT_ITEMS_RETENTION_DEFAULT_SCHEDULE_WINDOWS: ReadonlyArray<
+  Omit<ConfigWorkerScheduleWindow, 'id'>
+> = [
+  {
+    weekdayMask: WEEKDAY_MASK_ALL,
+    windowStartMinute: 2 * 60, // 02:00 server local (off-hours)
+    windowEndMinute: 8 * 60, // 08:00 server local
+    intervalMinutes: 15,
+    paused: false,
+    notes: 'Delete stock_snapshot_items of snapshots older than 90 days (operator-tunable) in bounded DB batches (≤2000 rows/batch, ≤20 batches/tick), keeping the referenced stock_snapshots headers. Off-hours multi-tick (not once-daily) so deletion comfortably exceeds the ≈375k rows/day aging rate without competing with daytime serving (DB-cost epic phase F6).',
   },
 ]

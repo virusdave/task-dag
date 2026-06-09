@@ -103,6 +103,8 @@ export const AuditEventTypeSchema = z.enum([
   'config.workers.litalerts_products_raw_json_drain.completed',
   'config.workers.fuzzy_skus_retention.requested',
   'config.workers.fuzzy_skus_retention.completed',
+  'config.workers.stock_snapshot_items_retention.requested',
+  'config.workers.stock_snapshot_items_retention.completed',
   'config.workers.litalerts_retailer_backfill.requested',
   'config.workers.litalerts_retailer_backfill.completed',
   'config.workers.sweed_orders_ingest.requested',
