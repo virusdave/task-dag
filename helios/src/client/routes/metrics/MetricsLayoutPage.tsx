@@ -17,6 +17,15 @@ import {
 } from '../../../shared/contracts/index.js'
 import { userHasMetricGrant } from '../../../shared/domain/metricGrants.js'
 import { loadJson } from '../../app/fetchJson.js'
+import {
+  NY_HOUR_MS,
+  nyAddBusinessMonths,
+  nyAddDays,
+  nyFloorToBusinessDay,
+  nyFloorToBusinessMonth,
+  nyFloorToBusinessWeek,
+  nyFloorToHour,
+} from '../../app/nyTime.js'
 
 import { BudtenderPerformanceTab } from './BudtenderPerformanceTab.js'
 import { CatalogAnalyticsTab } from './CatalogAnalyticsTab.js'
@@ -43,6 +52,37 @@ import { RangeNudgeRow } from './RangeNudgeRow.js'
 import { TimeAxisProvider, useTimeAxis, type TimeWindow } from './TimeAxisContext.js'
 
 const DAY_MS = 24 * 60 * 60 * 1000
+
+/**
+ * Right edge for the default / preset window: the END of the
+ * in-progress bucket for the active aggregation, NOT bare `now`.
+ *
+ * The server pace-extrapolates the rightmost in-progress bucket and
+ * draws that projected knot at the bucket END (= next bucket start —
+ * see `partialBuckets.ts`, `partialProjectedT = lastEnd`). With the
+ * old `toMs = Date.now()` right edge, that projected knot sat up to
+ * one whole bucket-width past the visible window, so the extrapolated
+ * datapoint the operator cares about started off-screen to the right.
+ *
+ * Mirror the server's `advanceBucketStart` over the NY-business-day
+ * grid (08:00 ET rollover) so the window's right edge lands exactly on
+ * the projected knot. Categorical aggregations (total / dow / dom /
+ * dofortnight) have no time edge, so fall back to `now`.
+ */
+function defaultWindowRightEdge(agg: MetricAggregation, nowMs: number = Date.now()): number {
+  switch (agg) {
+    case 'hour':
+      return nyFloorToHour(nowMs) + NY_HOUR_MS
+    case 'date':
+      return nyAddDays(nyFloorToBusinessDay(nowMs), 1)
+    case 'week':
+      return nyAddDays(nyFloorToBusinessWeek(nowMs), 7)
+    case 'month':
+      return nyAddBusinessMonths(nyFloorToBusinessMonth(nowMs), 1)
+    default:
+      return nowMs
+  }
+}
 
 function toggleInSet(prev: ReadonlySet<string>, id: string): ReadonlySet<string> {
   const next = new Set(prev)
@@ -422,10 +462,13 @@ export function MetricsLayoutPage() {
       setYBaselineByTab((prev) => ({ ...prev, [activeTab.id]: next })),
     [activeTab.id],
   )
-  // 90d default window matching the parent epic spec.
+  // 90d default window matching the parent epic spec. The right edge
+  // extends to the END of the current bucket (for the landing tab's
+  // default aggregation) so the rightmost pace-extrapolated knot is
+  // visible on first paint instead of one bucket-width off-screen.
   const [initialWindow] = useState<TimeWindow>(() => ({
     fromMs: Date.now() - 90 * DAY_MS,
-    toMs: Date.now(),
+    toMs: defaultWindowRightEdge(pageAgg),
   }))
 
   // Missing-data metrics (spec'd but not yet wired to real data) are hidden
@@ -960,7 +1003,7 @@ function DashboardControls({
       <div className="metrics-control-group">
         <span className="subtle-copy">range</span>
         {PRESETS.map((p) => (
-          <PresetButton key={p.label} label={p.label} days={p.days} />
+          <PresetButton key={p.label} label={p.label} days={p.days} agg={pageAgg} />
         ))}
         <details className="metrics-range-custom">
           <summary>custom</summary>
@@ -1013,19 +1056,23 @@ function MetricsTabsNav({
   )
 }
 
-function PresetButton({ label, days }: { label: string; days: number }) {
+function PresetButton({ label, days, agg }: { label: string; days: number; agg: MetricAggregation }) {
   const axis = useTimeAxis()
-  // A preset chip is "active" when the current window is exactly
-  // (now-Nd … now). After the user types in a custom range, no
-  // preset stays highlighted (matching the catalog tab's behaviour).
+  // A preset chip spans the last N days, anchored on the left at
+  // `now - Nd` and on the right at the END of the current bucket (so
+  // the rightmost pace-extrapolated knot is visible — see
+  // `defaultWindowRightEdge`). A chip is "active" when both edges
+  // match within a day's tolerance. After the user types in a custom
+  // range, no preset stays highlighted (matching the catalog tab).
+  const rightEdge = defaultWindowRightEdge(agg)
   const isExactPreset =
-    Math.abs(axis.window.toMs - Date.now()) < DAY_MS &&
-    Math.round((axis.window.toMs - axis.window.fromMs) / DAY_MS) === days
+    Math.abs(axis.window.toMs - rightEdge) < DAY_MS &&
+    Math.abs(axis.window.fromMs - (Date.now() - days * DAY_MS)) < DAY_MS
   return (
     <button
       type="button"
       className={isExactPreset ? 'metrics-site-chip is-active' : 'metrics-site-chip'}
-      onClick={() => axis.setWindow({ fromMs: Date.now() - days * DAY_MS, toMs: Date.now() })}
+      onClick={() => axis.setWindow({ fromMs: Date.now() - days * DAY_MS, toMs: defaultWindowRightEdge(agg) })}
       aria-pressed={isExactPreset}
     >
       {label}
