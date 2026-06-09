@@ -1,20 +1,25 @@
 import { useMemo, useState } from 'react'
-import { Form, Link, useLoaderData, useSearchParams } from 'react-router-dom'
+import { Form, Link, useLoaderData, useRevalidator, useSearchParams } from 'react-router-dom'
 
 import {
+  CATALOG_PURCHASE_PAYMENT_TYPES,
   CatalogPurchaseDetailResponseSchema,
   CatalogPurchaseLineDetailResponseSchema,
   CatalogPurchaseListResponseSchema,
+  CatalogPurchasePaymentResponseSchema,
   buildHeliosModulePath,
   type CatalogPurchaseDetailResponse,
+  type CatalogPurchaseHeader,
   type CatalogPurchaseLineDetailResponse,
   type CatalogPurchaseLineSellThrough,
   type CatalogPurchaseListResponse,
   type CatalogPurchaseListRow,
   type CatalogPurchaseListSort,
+  type CatalogPurchasePaymentResponse,
+  type CatalogPurchasePaymentTypeId,
   type CatalogPurchaseSellThroughSummary,
 } from '../../../shared/contracts/index.js'
-import { loadJson } from '../../app/fetchJson.js'
+import { loadJson, mutateJson } from '../../app/fetchJson.js'
 import { Pill } from '../../components/Pill.js'
 import { useRegisterCatalogSidebarSubtree } from './catalogSidebarSubtree.js'
 
@@ -47,7 +52,7 @@ export async function purchaseSellThroughListLoader({ request }: { request: Requ
 const SORT_LABELS: Record<CatalogPurchaseListSort, string> = {
   deliveryDate: 'Delivered',
   paymentDueDate: 'Payment due',
-  poTotalDollars: 'Committed PO',
+  poTotalDollars: 'Invoice face value',
   distributorName: 'Distributor',
   unitsSold: 'Units sold',
   unitsRemaining: 'Units left',
@@ -330,7 +335,7 @@ function ListFilterBar(props: {
           type="search"
           name="productSearch"
           defaultValue={searchParams.get('productSearch') ?? ''}
-          placeholder="Search product, distributor, brand…"
+          placeholder="Search PO #, amount, product, brand…"
         />
         {/* Preserve every other current filter so a quick search doesn't
             wipe the user's facet selections. */}
@@ -573,6 +578,9 @@ function PurchasesDesktopTable(props: {
         <table className="data-table purchase-table">
           <thead>
             <tr>
+              <th className="num purchase-cell-facevalue">
+                {sortHeader('poTotalDollars', 'Invoice face value')}
+              </th>
               <th>{sortHeader('deliveryDate', 'Purchase')}</th>
               <th className="num purchase-cell-primary">
                 {sortHeader('realisedCostIfPaidForSoldOnlyDollars', 'Sold-through payment')}
@@ -583,7 +591,6 @@ function PurchasesDesktopTable(props: {
               <th className="num purchase-cell-cost">
                 {sortHeader('costOfAdjustedItemsDollars', 'Adjusted / shrink')}
               </th>
-              <th className="num purchase-cell-cost">{sortHeader('poTotalDollars', 'Committed PO')}</th>
               <th className="num">{sortHeader('sellThroughPercent', 'Sell-through')}</th>
               <th>Status</th>
             </tr>
@@ -607,6 +614,12 @@ function PurchaseTableRow(props: { row: CatalogPurchaseListRow }): JSX.Element {
   const productPreviewMore = Math.max(row.productNamesPreview.length - 2, 0)
   return (
     <tr>
+      <td className="num purchase-cell-facevalue">
+        <div className="purchase-cell-facevalue-value">{fmtUsd(row.poTotalDollars)}</div>
+        <div className="purchase-muted">
+          {row.externalOrderId || row.poName || row.poId}
+        </div>
+      </td>
       <td>
         <div className="purchase-row-purchase">
           <Link to={href} className="purchase-row-distributor" target="_blank" rel="noreferrer">
@@ -661,10 +674,6 @@ function PurchaseTableRow(props: { row: CatalogPurchaseListRow }): JSX.Element {
         <div className="purchase-muted">
           {row.unitsAdjusted > 0 ? `${fmtInt(row.unitsAdjusted)} units` : 'none'}
         </div>
-      </td>
-      <td className="num purchase-cell-cost">
-        <strong>{fmtUsd(row.poTotalDollars)}</strong>
-        <div className="purchase-muted">invoice face value</div>
       </td>
       <td className="num">
         <div className="purchase-line-movement-value">
@@ -830,6 +839,8 @@ export function PurchaseSellThroughDetailPage(): JSX.Element {
 
       <PurchaseDetailHero summary={summary} verdict={verdict} matchedFraction={matchedFraction} />
 
+      <PurchasePaymentPanel purchase={purchase} />
+
       <h2 className="purchase-section-title">Line items</h2>
       <PurchaseLinesView lines={lines} purchase={purchase} />
 
@@ -859,6 +870,177 @@ export function PurchaseSellThroughDetailPage(): JSX.Element {
         <MethodologyNotes />
       </details>
     </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Record-payment panel (detail page)
+//
+// Lets the operator mark a PO partially or fully paid. "Mark fully paid"
+// records the amount actually paid, then — if a balance remains — writes
+// the remainder into Sweed as a Check tagged "unpayable balance", zeroing
+// the PO out. The write goes through POST /api/catalog/purchases/:poId/
+// payments, which talks to Sweed and re-mirrors the PO.
+// ---------------------------------------------------------------------------
+
+function todayInputValue(): string {
+  // <input type="date"> wants YYYY-MM-DD in local terms; en-CA gives that.
+  return new Intl.DateTimeFormat('en-CA').format(new Date())
+}
+
+function PurchasePaymentPanel(props: { purchase: CatalogPurchaseHeader }): JSX.Element {
+  const { purchase } = props
+  const revalidator = useRevalidator()
+
+  const owed = purchase.poOwedDollars
+  const faceValue = purchase.poTotalDollars
+  const alreadyPaid =
+    faceValue !== null && owed !== null ? Math.max(faceValue - owed, 0) : null
+  const nothingOwed = owed !== null && owed <= 0.005
+
+  const [amount, setAmount] = useState<string>(owed !== null && owed > 0 ? owed.toFixed(2) : '')
+  const [methodId, setMethodId] = useState<CatalogPurchasePaymentTypeId>(1)
+  const [payTime, setPayTime] = useState<string>(todayInputValue())
+  const [busy, setBusy] = useState<null | 'partial' | 'full'>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [result, setResult] = useState<CatalogPurchasePaymentResponse['recorded'] | null>(null)
+
+  async function submit(markFullyPaid: boolean): Promise<void> {
+    setError(null)
+    setResult(null)
+    const payAmount = Number(amount)
+    if (!Number.isFinite(payAmount) || payAmount < 0) {
+      setError('Enter a valid payment amount.')
+      return
+    }
+    if (!markFullyPaid && payAmount <= 0) {
+      setError('Enter an amount greater than $0 for a partial payment.')
+      return
+    }
+    if (owed !== null && payAmount > owed + 0.005) {
+      setError(`Payment exceeds the $${owed.toFixed(2)} owed.`)
+      return
+    }
+    setBusy(markFullyPaid ? 'full' : 'partial')
+    try {
+      const resp = await mutateJson(
+        `/api/catalog/purchases/${encodeURIComponent(purchase.poId)}/payments`,
+        CatalogPurchasePaymentResponseSchema,
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            dealerId: purchase.dealerId,
+            payAmount,
+            orderPaymentTypeId: methodId,
+            payTime,
+            markFullyPaid,
+            expectedOwedDollars: owed ?? undefined,
+          }),
+        },
+      )
+      setResult(resp.recorded)
+      // Re-run the loader so the header/owed/status reflect the write.
+      revalidator.revalidate()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Payment failed.')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  return (
+    <section className="purchase-payment-panel" aria-label="Record payment">
+      <h2 className="purchase-section-title">Record payment</h2>
+      <dl className="purchase-payment-figures">
+        <div>
+          <dt>Invoice face value</dt>
+          <dd>{fmtUsd(faceValue)}</dd>
+        </div>
+        <div>
+          <dt>Already paid</dt>
+          <dd>{alreadyPaid !== null ? fmtUsd(alreadyPaid) : '—'}</dd>
+        </div>
+        <div>
+          <dt>Owed</dt>
+          <dd className={nothingOwed ? undefined : 'purchase-danger'}>{fmtUsd(owed)}</dd>
+        </div>
+        <div>
+          <dt>Status</dt>
+          <dd>{purchase.financialStatusName ?? '—'}</dd>
+        </div>
+      </dl>
+
+      {nothingOwed ? (
+        <p className="purchase-muted">This PO is fully paid — nothing owed.</p>
+      ) : (
+        <div className="purchase-payment-form">
+          <label>
+            <span>Amount paid</span>
+            <input
+              type="number"
+              min="0"
+              step="0.01"
+              inputMode="decimal"
+              value={amount}
+              onChange={(e) => setAmount(e.target.value)}
+              disabled={busy !== null}
+            />
+          </label>
+          <label>
+            <span>Method</span>
+            <select
+              value={methodId}
+              onChange={(e) => setMethodId(Number(e.target.value) as CatalogPurchasePaymentTypeId)}
+              disabled={busy !== null}
+            >
+              {CATALOG_PURCHASE_PAYMENT_TYPES.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            <span>Payment date</span>
+            <input
+              type="date"
+              value={payTime}
+              onChange={(e) => setPayTime(e.target.value)}
+              disabled={busy !== null}
+            />
+          </label>
+          <div className="purchase-payment-actions">
+            <button type="button" onClick={() => submit(false)} disabled={busy !== null}>
+              {busy === 'partial' ? 'Recording…' : 'Record partial payment'}
+            </button>
+            <button
+              type="button"
+              className="purchase-payment-fullpaid"
+              onClick={() => submit(true)}
+              disabled={busy !== null}
+            >
+              {busy === 'full' ? 'Recording…' : 'Mark fully paid'}
+            </button>
+          </div>
+          <p className="purchase-muted purchase-payment-hint">
+            “Mark fully paid” records the amount above, then books any remaining
+            balance as a Check noted “unpayable balance” so the PO zeroes out.
+          </p>
+        </div>
+      )}
+
+      {error ? <p className="purchase-danger purchase-payment-msg">{error}</p> : null}
+      {result ? (
+        <p className="purchase-payment-msg">
+          Recorded {fmtUsd(result.paymentDollars)}
+          {result.unpayableBalanceCheckDollars
+            ? ` + ${fmtUsd(result.unpayableBalanceCheckDollars)} unpayable-balance Check`
+            : ''}
+          . PO is now {result.financialStatusName ?? 'updated'} (owed{' '}
+          {fmtUsd(result.owedAfterDollars)}).
+        </p>
+      ) : null}
+    </section>
   )
 }
 

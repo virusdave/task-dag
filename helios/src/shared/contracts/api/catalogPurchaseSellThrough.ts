@@ -362,6 +362,66 @@ export const CatalogPurchaseDetailResponseSchema = z.object({
 })
 export type CatalogPurchaseDetailResponse = z.infer<typeof CatalogPurchaseDetailResponseSchema>
 
+// ============================ Record-payment endpoint =======================
+
+/**
+ * Sweed `orderPaymentType` ids we are willing to write. Verified from
+ * live Sweed traffic only:
+ *   1 = Cash, 3 = Check.
+ * The "unpayable balance" top-up is always written as a Check (3).
+ * Do NOT add unverified ids here — a wrong id silently mislabels a real
+ * financial record in Sweed.
+ */
+export const CATALOG_PURCHASE_PAYMENT_TYPES = [
+  { id: 1, label: 'Cash' },
+  { id: 3, label: 'Check' },
+] as const
+export const CatalogPurchasePaymentTypeIdSchema = z.union([z.literal(1), z.literal(3)])
+export type CatalogPurchasePaymentTypeId = z.infer<typeof CatalogPurchasePaymentTypeIdSchema>
+
+/**
+ * Record one operator payment against a PO in Sweed.
+ *
+ * `markFullyPaid` semantics (per operator workflow): record the actual
+ * `payAmount` paid with `orderPaymentTypeId`, then — if a balance still
+ * remains — write the remainder as a Check (type 3) with the note
+ * "unpayable balance", zeroing the PO out to "Fully paid". When
+ * `markFullyPaid` is false the payment is recorded as-is (partial).
+ *
+ * `expectedOwedDollars` is the owed figure the operator saw when they
+ * opened the form; the server rejects the write if Sweed's live owed has
+ * drifted (stale tab / double-submit) so we never double-pay.
+ */
+export const CatalogPurchasePaymentRequestSchema = z.object({
+  dealerId: z.coerce.number().int().positive(),
+  payAmount: z.coerce.number().finite().nonnegative(),
+  orderPaymentTypeId: CatalogPurchasePaymentTypeIdSchema.default(1),
+  payTime: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/, 'payTime must be YYYY-MM-DD')
+    .optional(),
+  markFullyPaid: z.boolean().default(false),
+  expectedOwedDollars: z.coerce.number().finite().optional(),
+})
+export type CatalogPurchasePaymentRequest = z.infer<typeof CatalogPurchasePaymentRequestSchema>
+
+/**
+ * Response after a successful payment write: the refreshed PO detail
+ * (same shape as the detail endpoint) plus a short human summary of what
+ * was recorded, so the UI can confirm the top-up explicitly.
+ */
+export const CatalogPurchasePaymentResponseSchema = z.object({
+  detail: CatalogPurchaseDetailResponseSchema,
+  recorded: z.object({
+    paymentDollars: z.number(),
+    orderPaymentTypeId: CatalogPurchasePaymentTypeIdSchema,
+    unpayableBalanceCheckDollars: z.number().nullable(),
+    financialStatusName: z.string().nullable(),
+    owedAfterDollars: z.number().nullable(),
+  }),
+})
+export type CatalogPurchasePaymentResponse = z.infer<typeof CatalogPurchasePaymentResponseSchema>
+
 // ============================ Line-item detail endpoint =====================
 
 export const CatalogPurchaseLineKpisSchema = z.object({

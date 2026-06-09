@@ -338,6 +338,13 @@ function rowToLine(r: PerLineRow): CatalogPurchaseLineSellThrough {
 // List endpoint
 // --------------------------------------------------------------------------
 
+// Suppress Sweed/Metrc virtual purchase orders. Their external_order_id
+// is the synthetic `V<store>_N<manifest>` shape (e.g. "V623_N39555"),
+// optionally prefixed with "#" in some Sweed surfaces. The `_N<digits>`
+// requirement deliberately spares real distributor POs that merely
+// start with "V" (e.g. "Vireo 638 639 640"). Case-insensitive.
+const VIRTUAL_PO_EXCLUSION_CLAUSE = `coalesce(external_order_id, '') !~* '^#?V[0-9]+_N[0-9]+'`
+
 const VALID_SORT_COLUMNS: Record<
   CatalogPurchaseListRequest['sort'],
   string
@@ -400,6 +407,16 @@ export async function getCatalogPurchaseList(
   const filters: string[] = []
   let i = params.length
 
+  // Always hide Sweed/Metrc "virtual purchase orders" — auto-generated
+  // POs whose external_order_id is the synthetic `V<store>_N<manifest>`
+  // shape (the operator sees these as manifest "#V…" in Sweed). These
+  // are never real distributor invoices, so they're suppressed
+  // unconditionally on every read (rows, count, headline, facets, and
+  // the detail lookup). Constant clause, no bound param — safe literal.
+  // NB: a real distributor PO like "Vireo 638 639 640" is NOT matched
+  // (the `_N` digits requirement keeps it visible).
+  filters.push(VIRTUAL_PO_EXCLUSION_CLAUSE)
+
   if (req.distributorNames.length > 0) {
     i += 1
     params.push(req.distributorNames)
@@ -441,11 +458,30 @@ export async function getCatalogPurchaseList(
     filters.push(`brand_name = any($${i}::text[])`)
   }
   if (req.productSearch && req.productSearch.trim().length > 0) {
+    const raw = req.productSearch.trim()
     i += 1
-    params.push(`%${req.productSearch.trim().toLowerCase()}%`)
-    filters.push(
-      `(lower(coalesce(product_name,'')) like $${i} or lower(coalesce(distributor_product_name,'')) like $${i} or lower(coalesce(sweed_product_name,'')) like $${i})`,
-    )
+    const textParam = i
+    params.push(`%${raw.toLowerCase()}%`)
+    // The same box doubles as a PO finder: it matches product names AND
+    // header identifiers (PO number / Sweed PO id / order name). When the
+    // query looks like a money amount ("5159", "$5,159.00") we also match
+    // it against the PO face value so the operator can scan to a PO by the
+    // dollar figure they're eyeballing in the leftmost column.
+    const clauses = [
+      `lower(coalesce(product_name,'')) like $${textParam}`,
+      `lower(coalesce(distributor_product_name,'')) like $${textParam}`,
+      `lower(coalesce(sweed_product_name,'')) like $${textParam}`,
+      `lower(coalesce(external_order_id,'')) like $${textParam}`,
+      `lower(coalesce(po_name,'')) like $${textParam}`,
+      `lower(coalesce(po_id,'')) like $${textParam}`,
+    ]
+    const amountRaw = raw.replace(/[$,\s]/g, '')
+    if (/^\d+(\.\d+)?$/.test(amountRaw)) {
+      i += 1
+      params.push(`%${amountRaw}%`)
+      clauses.push(`coalesce(po_total_dollars::text,'') like $${i}`)
+    }
+    filters.push(`(${clauses.join(' or ')})`)
   }
 
   // After line-level filtering, aggregate to PO grain and apply
@@ -583,7 +619,8 @@ export async function getCatalogPurchaseList(
               financial_status_name,
               brand_names
          from sweed_purchases
-        where ($1::bigint[] is null or dealer_id = any($1::bigint[]))`,
+        where ($1::bigint[] is null or dealer_id = any($1::bigint[]))
+          and ${VIRTUAL_PO_EXCLUSION_CLAUSE}`,
       [dealerIds],
     ),
   ])
@@ -737,7 +774,12 @@ export async function getCatalogPurchaseDetail(args: {
 }): Promise<CatalogPurchaseDetailResponse | null> {
   const pool = getPool()
   const headerRes = await pool.query(
-    `select * from sweed_purchases where dealer_id = $1 and po_id = $2`,
+    // Virtual purchase orders are hidden everywhere on this page family,
+    // including direct-URL detail loads (they have no real invoice to
+    // reconcile against).
+    `select * from sweed_purchases
+      where dealer_id = $1 and po_id = $2
+        and ${VIRTUAL_PO_EXCLUSION_CLAUSE}`,
     [args.dealerId, args.poId],
   )
   if (headerRes.rows.length === 0) return null

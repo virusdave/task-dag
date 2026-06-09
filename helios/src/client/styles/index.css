@@ -6748,6 +6748,95 @@ span.metric-chart-legend-item {
   font-weight: 750;
 }
 
+/* Invoice face value — the leftmost column the operator scans to find a
+ * PO. Emphasised value, dimmed PO-number subline. */
+.purchase-cell-facevalue {
+  border-right: 3px solid #8a6a17;
+  padding-right: 0.6rem;
+}
+
+.purchase-cell-facevalue > .purchase-cell-facevalue-value {
+  font-size: 1.25rem;
+  font-weight: 750;
+}
+
+/* --- Record-payment panel ---------------------------------------------- */
+.purchase-payment-panel {
+  margin: 1.25rem 0;
+  padding: 1rem 1.1rem;
+  border: 1px solid var(--border, #d9cfc0);
+  border-radius: 8px;
+  background: rgba(255, 250, 242, 0.6);
+}
+
+.purchase-payment-figures {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1.25rem;
+  margin: 0 0 0.85rem;
+}
+
+.purchase-payment-figures > div {
+  margin: 0;
+}
+
+.purchase-payment-figures dt {
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--muted, #7a6f5e);
+}
+
+.purchase-payment-figures dd {
+  margin: 0.1rem 0 0;
+  font-size: 1.1rem;
+  font-weight: 700;
+}
+
+.purchase-payment-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 0.75rem;
+}
+
+.purchase-payment-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  font-size: 0.82rem;
+}
+
+.purchase-payment-form input,
+.purchase-payment-form select {
+  padding: 0.4rem 0.5rem;
+  font-size: 1rem;
+}
+
+.purchase-payment-form input[type='number'] {
+  width: 8rem;
+}
+
+.purchase-payment-actions {
+  display: flex;
+  gap: 0.6rem;
+}
+
+.purchase-payment-fullpaid {
+  font-weight: 700;
+}
+
+.purchase-payment-hint {
+  flex-basis: 100%;
+  margin: 0.4rem 0 0;
+  font-size: 0.8rem;
+}
+
+.purchase-payment-msg {
+  margin: 0.6rem 0 0;
+  font-weight: 600;
+}
+
 .purchase-metric-danger {
   border-left: 3px solid var(--danger);
   padding-left: 0.55rem;
