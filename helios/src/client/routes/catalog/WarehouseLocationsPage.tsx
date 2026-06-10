@@ -165,7 +165,11 @@ function LocationPicker(props: LocationPickerProps) {
     const next = String.fromCharCode(
       Math.min(90, Math.max(65, column.charCodeAt(0) + delta)),
     )
-    onColumn(next)
+    // Don't fire (and reset row/split) when already clamped at A/Z.
+    if (next !== column) onColumn(next)
+  }
+  const shiftRow = (next: number) => {
+    if (next !== row) onRow(next)
   }
   return (
     <div className="wh-picker">
@@ -205,7 +209,7 @@ function LocationPicker(props: LocationPickerProps) {
           <button
             type="button"
             className="ghost-button wh-step-btn"
-            onClick={() => onRow(Math.max(1, row - 1))}
+            onClick={() => shiftRow(Math.max(1, row - 1))}
             aria-label="Previous row"
           >
             −
@@ -221,7 +225,7 @@ function LocationPicker(props: LocationPickerProps) {
               onRow(Number.isInteger(next) && next >= 1 ? next : 1)
             }}
           />
-          <button type="button" className="ghost-button wh-step-btn" onClick={() => onRow(row + 1)} aria-label="Next row">
+          <button type="button" className="ghost-button wh-step-btn" onClick={() => shiftRow(row + 1)} aria-label="Next row">
             +
           </button>
         </div>
@@ -256,11 +260,78 @@ interface SessionEntry {
   inventoryItemId: string
 }
 
-function AssignMode() {
+interface LocationPickerState {
+  prefix: WarehouseLocationPrefix | null
+  column: string
+  row: number
+  split: string
+  code: string | null
+  setPrefix: (p: WarehouseLocationPrefix) => void
+  changeColumn: (c: string) => void
+  changeRow: (r: number) => void
+  setSplit: (s: string) => void
+  advance: () => void
+}
+
+/**
+ * Shared prefix/column/row/split state for both the shelf-run and audit
+ * pickers, with the operator's traversal rules baked in:
+ *   - changing the COLUMN starts a fresh column → row 1, no bin split;
+ *   - changing the ROW keeps you in split mode but jumps to the first bin →
+ *     if a split was set it returns to 'a', otherwise it stays none;
+ *   - `advance` ("next location") walks the bin-split letters when the row is
+ *     split (a → b → …), otherwise steps to the next row. Exhausting the
+ *     letters rolls to the next row, restarting at bin 'a'.
+ */
+function useLocationPickerState(): LocationPickerState {
   const [prefix, setPrefix] = useState<WarehouseLocationPrefix | null>(null)
   const [column, setColumn] = useState('A')
   const [row, setRow] = useState(1)
   const [split, setSplit] = useState('')
+
+  const changeColumn = useCallback((c: string) => {
+    setColumn(c)
+    setRow(1)
+    setSplit('')
+  }, [])
+
+  const changeRow = useCallback((r: number) => {
+    setRow(r)
+    setSplit((s) => (s === '' ? '' : 'a'))
+  }, [])
+
+  const advance = useCallback(() => {
+    if (split === '') {
+      setRow((r) => r + 1)
+      return
+    }
+    const next = nextSplit(split)
+    if (next) {
+      setSplit(next)
+    } else {
+      setRow((r) => r + 1)
+      setSplit('a')
+    }
+  }, [split])
+
+  const code = useMemo(() => buildCode(prefix, column, row, split), [prefix, column, row, split])
+
+  return { prefix, column, row, split, code, setPrefix, changeColumn, changeRow, setSplit, advance }
+}
+
+function AssignMode() {
+  const {
+    prefix,
+    column,
+    row,
+    split,
+    code: currentCode,
+    setPrefix,
+    changeColumn,
+    changeRow,
+    setSplit,
+    advance: advanceRow,
+  } = useLocationPickerState()
   const [scannerOpen, setScannerOpen] = useState(false)
   const [manualCode, setManualCode] = useState('')
   const [busy, setBusy] = useState(false)
@@ -276,13 +347,6 @@ function AssignMode() {
   // Guards against a double-submit from a rapid double-tap / Enter race, which
   // the disabled-on-`busy` buttons can't fully close (state lags the event).
   const inFlightRef = useRef(false)
-
-  const currentCode = useMemo(() => buildCode(prefix, column, row, split), [prefix, column, row, split])
-
-  const advanceRow = useCallback(() => {
-    setRow((r) => r + 1)
-    setSplit('')
-  }, [])
 
   // Core submit. `extra` lets the disambiguation / confirm paths re-issue
   // the request with a resolved item id or override flags.
@@ -385,8 +449,8 @@ function AssignMode() {
         row={row}
         split={split}
         onPrefix={setPrefix}
-        onColumn={setColumn}
-        onRow={setRow}
+        onColumn={changeColumn}
+        onRow={changeRow}
         onSplit={setSplit}
       />
 
@@ -609,15 +673,11 @@ interface AuditCardProps {
 
 function AuditCard({ pkg, onAssigned, onError }: AuditCardProps) {
   const [open, setOpen] = useState(false)
-  const [prefix, setPrefix] = useState<WarehouseLocationPrefix | null>(null)
-  const [column, setColumn] = useState('A')
-  const [row, setRow] = useState(1)
-  const [split, setSplit] = useState('')
+  const { prefix, column, row, split, code, setPrefix, changeColumn, changeRow, setSplit } =
+    useLocationPickerState()
   const [busy, setBusy] = useState(false)
   const [confirmReassign, setConfirmReassign] = useState<string | null>(null)
   const inFlightRef = useRef(false)
-
-  const code = useMemo(() => buildCode(prefix, column, row, split), [prefix, column, row, split])
 
   const doAssign = useCallback(
     async (allowReassign?: boolean) => {
@@ -697,8 +757,8 @@ function AuditCard({ pkg, onAssigned, onError }: AuditCardProps) {
             row={row}
             split={split}
             onPrefix={setPrefix}
-            onColumn={setColumn}
-            onRow={setRow}
+            onColumn={changeColumn}
+            onRow={changeRow}
             onSplit={setSplit}
           />
           <div className="wh-current">
