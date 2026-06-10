@@ -54,6 +54,7 @@ import { registerSessionRoutes } from '../routes/session.js'
 import { registerStaffRoutes } from '../routes/staff.js'
 import { registerSweedAuthEventsRoutes } from '../routes/sweedAuthEvents.js'
 import { registerUtilitiesPromoNamesRoutes } from '../routes/utilitiesPromoNames.js'
+import { registerWarehouseLocationsRoutes } from '../routes/warehouseLocations.js'
 import { registerTaskDagRoutes } from '../routes/taskDag.js'
 import { registerUsersRoutes } from '../routes/users.js'
 import {
@@ -216,6 +217,7 @@ async function registerApplicationSurface(server: FastifyInstance) {
   await registerAnnotationsRoutes(server)
   await registerCatalogRoutes(server)
   await registerCatalogMaintenanceRoutes(server)
+  await registerWarehouseLocationsRoutes(server)
   await registerCatalogMarketMatchRoutes(server)
   await registerCatalogLitalertsBrandOverridesRoutes(server)
   await registerCatalogReviewRoutes(server)

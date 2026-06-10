@@ -849,6 +849,13 @@ const SENTINELS: MigrationSentinel[] = [
       return result.rows[0]?.ok === true
     },
   },
+  {
+    migrationId: '067_warehouse_location_assignments',
+    label:
+      'warehouse_location_assignments table created — required by the ' +
+      'catalog/warehouse-locations packing page (location <-> package codes).',
+    check: (db) => tableExists(db, 'warehouse_location_assignments'),
+  },
 ]
 
 interface CacheEntry {

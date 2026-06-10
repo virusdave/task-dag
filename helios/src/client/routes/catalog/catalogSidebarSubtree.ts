@@ -179,6 +179,16 @@ export function buildCatalogSidebarSubtree(options?: CatalogSidebarOptions): Tre
       to: buildHeliosModulePath('catalog', 'edible-thc-clamp'),
     },
     {
+      // Warehouse Locations — floor-operator packing workflow that stamps
+      // a physical shelf location onto each package's Sweed
+      // internalTrackCode. Lives next to the other catalog-maintenance
+      // floor tools (Images & Barcodes, Edible THC clamp).
+      kind: 'leaf',
+      navKey: 'catalog.warehouse-locations',
+      label: 'Warehouse Locations',
+      to: buildHeliosModulePath('catalog', 'warehouse-locations'),
+    },
+    {
       kind: 'leaf',
       navKey: 'catalog.new-entry',
       label: 'New entry',

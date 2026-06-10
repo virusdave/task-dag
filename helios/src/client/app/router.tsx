@@ -13,6 +13,7 @@ import { CatalogMarketDataPage, catalogMarketDataLoader } from '../routes/catalo
 import { CatalogMaintenancePage } from '../routes/catalog/CatalogMaintenancePage.js'
 import { CatalogModulePage } from '../routes/catalog/CatalogModulePage.js'
 import { CatalogNewEntryPage } from '../routes/catalog/CatalogNewEntryPage.js'
+import { WarehouseLocationsPage } from '../routes/catalog/WarehouseLocationsPage.js'
 import { CatalogPage, catalogLoader } from '../routes/catalog/CatalogPage.js'
 import { WhiteGlovePricingPage } from '../routes/catalog/whiteglove/WhiteGlovePricingPage.js'
 import { PendingPurchasesPage, pendingPurchasesLoader } from '../routes/catalog/PendingPurchasesPage.js'
@@ -219,6 +220,10 @@ export const router = createBrowserRouter([
         element: <CatalogEdibleThcClampPage />,
         loader: catalogEdibleThcClampLoader,
         path: 'catalog/edible-thc-clamp',
+      },
+      {
+        element: <WarehouseLocationsPage />,
+        path: 'catalog/warehouse-locations',
       },
       {
         element: <CatalogNewEntryPage />,
