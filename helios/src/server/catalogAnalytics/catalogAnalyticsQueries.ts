@@ -577,11 +577,28 @@ export async function getCatalogAnalyticsPoints(
 
   const result = await pool.query(sql, params)
 
-  // Collapse multi-dealer rows for the same inventory_item_id into one
-  // "variant" point. Different dealers can stock the same package id so
-  // we want one dot per (product, size) — sum the qty / sales fields,
-  // pick the most-recent snapshot's metadata (already current per the
-  // sweed_package_current view).
+  // Collapse to ONE dot per VARIANT (catalog product_id = the
+  // per-(product, size) SKU), aggregating every inventory package /
+  // lot AND every dealer that stocks it. The SQL returns one row per
+  // (dealer, inventory_item_id) — i.e. per physical lot — and a single
+  // variant routinely has several lots (e.g. "STIIIZY Blue Dream Pod
+  // 0.5g" product_id 477355 carries 3 lots with different wholesale
+  // costs). Keying the scatter on inventory_item_id therefore drew one
+  // dot per lot, which is wrong: the operator reasons per-SKU. We key
+  // on product_id and roll the lots up.
+  //
+  // Additive fields (qty, units, revenue, cogs, invoices) sum. Per-unit
+  // lot attributes that differ across lots (wholesale cost, lab THC/CBD)
+  // are collapsed to a current-inventory-quantity-weighted average so a
+  // big fresh lot dominates a tiny remnant; when no lot has stock on
+  // hand we fall back to a simple mean of the populated lots. Margin %,
+  // $/unit and velocities are recomputed from the summed totals (COGS is
+  // already per-lot-accurate via sweed_package_cost_as_of_or_earliest),
+  // so they stay correct regardless of the cost-field averaging.
+  //
+  // Packages that never mapped to a catalog product (product_id null)
+  // can't be variant-grouped, so each stays its own dot keyed by its
+  // lot id.
   type Acc = {
     point: CatalogAnalyticsPoint
     unitsSold: number
@@ -589,9 +606,9 @@ export async function getCatalogAnalyticsPoints(
     cogs: number
     invoiceCount: number
     /**
-     * Max(distinct-days-sold) across dealers. Strictly, the union of
-     * per-dealer day-sets would be more correct (some days appear at
-     * both stores). Taking the max is a conservative lower bound on
+     * Max(distinct-days-sold) across lots / dealers. Strictly, the
+     * union of per-lot day-sets would be more correct (some days appear
+     * across lots). Taking the max is a conservative lower bound on
      * coverage that avoids double-counting. Good enough for the
      * sales-day-coverage scatter; if it becomes operator-relevant we
      * can switch to a per-day GROUP-BY round-trip.
@@ -601,12 +618,31 @@ export async function getCatalogAnalyticsPoints(
     availableQty: number
     taxRatio: number
     taxRatioCount: number
+    // qty-weighted-average accumulators for per-unit lot attributes.
+    costWeightedSum: number
+    costWeight: number
+    costSimpleSum: number
+    costSimpleCount: number
+    thcWeightedSum: number
+    thcWeight: number
+    thcSimpleSum: number
+    thcSimpleCount: number
+    cbdWeightedSum: number
+    cbdWeight: number
+    cbdSimpleSum: number
+    cbdSimpleCount: number
+    // representative distributor = the one shipping the most on-hand qty.
+    bestDistributor: string | null
+    bestDistributorQty: number
   }
-  const byId = new Map<string, Acc>()
+  const byVariant = new Map<string, Acc>()
   for (const row of result.rows as Array<Record<string, unknown>>) {
-    const id = asStr(row.inventory_item_id)
-    if (!id) continue
-    const existing = byId.get(id)
+    const lotId = asStr(row.inventory_item_id)
+    if (!lotId) continue
+    const productId = asStr(row.product_id)
+    // One dot per variant; un-mapped lots (no product_id) keep their own
+    // lot-scoped key so they aren't silently merged together.
+    const key = productId ?? `iiid:${lotId}`
     const unitsSold = asNum(row.units_sold) ?? 0
     const revenue = asNum(row.revenue) ?? 0
     const cogs = asNum(row.cogs) ?? 0
@@ -615,6 +651,14 @@ export async function getCatalogAnalyticsPoints(
     const currentQty = asNum(row.current_qty) ?? 0
     const availableQty = asNum(row.available_qty) ?? 0
     const taxRatio = asNum(row.tax_ratio) ?? 1.0
+    const cost = asNum(row.wholesale_cost_dollars)
+    const thc = asNum(row.lab_thc_pct)
+    const cbd = asNum(row.lab_cbd_pct)
+    const distributor = asStr(row.distributor_name)
+    const onStock = typeof row.is_on_stock === 'boolean' ? row.is_on_stock : null
+    const w = currentQty > 0 ? currentQty : 0
+
+    const existing = byVariant.get(key)
     if (existing) {
       existing.unitsSold += unitsSold
       existing.revenue += revenue
@@ -627,6 +671,34 @@ export async function getCatalogAnalyticsPoints(
       existing.availableQty += availableQty
       existing.taxRatio += taxRatio
       existing.taxRatioCount += 1
+      if (cost !== null) {
+        existing.costWeightedSum += cost * w
+        existing.costWeight += w
+        existing.costSimpleSum += cost
+        existing.costSimpleCount += 1
+      }
+      if (thc !== null) {
+        existing.thcWeightedSum += thc * w
+        existing.thcWeight += w
+        existing.thcSimpleSum += thc
+        existing.thcSimpleCount += 1
+      }
+      if (cbd !== null) {
+        existing.cbdWeightedSum += cbd * w
+        existing.cbdWeight += w
+        existing.cbdSimpleSum += cbd
+        existing.cbdSimpleCount += 1
+      }
+      if (onStock === true) existing.point.isOnStock = true
+      else if (onStock === false && existing.point.isOnStock == null) {
+        existing.point.isOnStock = false
+      }
+      if (distributor !== null && currentQty > existing.bestDistributorQty) {
+        existing.bestDistributor = distributor
+        existing.bestDistributorQty = currentQty
+      }
+      // List / market price are keyed on the variant (product_id) so
+      // they're identical across lots; keep the first non-null.
       if (existing.point.listPriceDollars == null) {
         existing.point.listPriceDollars = asNum(row.list_price_dollars)
       }
@@ -638,10 +710,13 @@ export async function getCatalogAnalyticsPoints(
     }
     const sizeLabel = asStr(row.size_label)
     const unitSize = parseUnitSize(sizeLabel)
-    byId.set(id, {
+    byVariant.set(key, {
       point: {
-        inventoryItemId: id,
-        productId: asStr(row.product_id),
+        // The dot identity is the variant, not a physical lot. Keep the
+        // field name (contract) but populate it with the variant key so
+        // selection / highlight stay 1:1 with the rendered dot.
+        inventoryItemId: key,
+        productId,
         productName: asStr(row.product_name) ?? '(unnamed)',
         productShortName: asStr(row.product_short_name),
         sku: asStr(row.product_sku),
@@ -651,14 +726,14 @@ export async function getCatalogAnalyticsPoints(
         subcategoryName: asStr(row.subcategory_name),
         brandId: null,
         brandName: asStr(row.brand_name),
-        distributorName: asStr(row.distributor_name),
+        distributorName: distributor,
         sizeLabel,
         currentQty: null,
         availableQty: null,
-        isOnStock: typeof row.is_on_stock === 'boolean' ? row.is_on_stock : null,
-        wholesaleCostDollars: asNum(row.wholesale_cost_dollars),
-        labThcPct: asNum(row.lab_thc_pct),
-        labCbdPct: asNum(row.lab_cbd_pct),
+        isOnStock: onStock,
+        wholesaleCostDollars: null,
+        labThcPct: null,
+        labCbdPct: null,
         listPriceDollars: asNum(row.list_price_dollars),
         packCount: asInt(row.pack_of_size),
         unitSizeGrams: unitSize.grams,
@@ -688,16 +763,62 @@ export async function getCatalogAnalyticsPoints(
       availableQty,
       taxRatio,
       taxRatioCount: 1,
+      costWeightedSum: cost !== null ? cost * w : 0,
+      costWeight: cost !== null ? w : 0,
+      costSimpleSum: cost ?? 0,
+      costSimpleCount: cost !== null ? 1 : 0,
+      thcWeightedSum: thc !== null ? thc * w : 0,
+      thcWeight: thc !== null ? w : 0,
+      thcSimpleSum: thc ?? 0,
+      thcSimpleCount: thc !== null ? 1 : 0,
+      cbdWeightedSum: cbd !== null ? cbd * w : 0,
+      cbdWeight: cbd !== null ? w : 0,
+      cbdSimpleSum: cbd ?? 0,
+      cbdSimpleCount: cbd !== null ? 1 : 0,
+      bestDistributor: distributor,
+      bestDistributorQty: currentQty,
     })
   }
 
+  // qty-weighted average of a per-unit lot attribute, falling back to a
+  // simple mean of the populated lots when no lot has stock on hand.
+  const weightedAvg = (
+    weightedSum: number,
+    weight: number,
+    simpleSum: number,
+    simpleCount: number,
+  ): number | null => {
+    if (weight > 0) return weightedSum / weight
+    if (simpleCount > 0) return simpleSum / simpleCount
+    return null
+  }
+
   const points: CatalogAnalyticsPoint[] = []
-  for (const acc of byId.values()) {
+  for (const acc of byVariant.values()) {
     const p = acc.point
     p.currentQty = acc.currentQty
     p.availableQty = acc.availableQty
     p.invoiceCount = acc.invoiceCount
     p.daysWithSales = acc.daysWithSales
+    p.distributorName = acc.bestDistributor
+    p.wholesaleCostDollars = weightedAvg(
+      acc.costWeightedSum,
+      acc.costWeight,
+      acc.costSimpleSum,
+      acc.costSimpleCount,
+    )
+    p.labThcPct = weightedAvg(
+      acc.thcWeightedSum,
+      acc.thcWeight,
+      acc.thcSimpleSum,
+      acc.thcSimpleCount,
+    )
+    p.labCbdPct = weightedAvg(
+      acc.cbdWeightedSum,
+      acc.cbdWeight,
+      acc.cbdSimpleSum,
+      acc.cbdSimpleCount,
+    )
     const taxRatio = acc.taxRatioCount > 0 ? acc.taxRatio / acc.taxRatioCount : 1.0
     p.taxRatio = taxRatio
     if (acc.unitsSold > 0 || acc.revenue > 0) {
