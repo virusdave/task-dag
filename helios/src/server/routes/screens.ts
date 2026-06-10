@@ -9,6 +9,7 @@ import {
   HELIOS_SCREENS_MIDTOWN_SITE_DEALER_ID,
   HELIOS_SCREENS_PRICED_TO_MOVE_PROMO_ACTIONS,
   QueueScreensBannerBulkToggleRequestSchema,
+  QueueScreensBannerDuplicateRequestSchema,
   QueueScreensImageBannerSyncRequestSchema,
   SCREENS_BANNER_REFRESH_MAX_HOLD_SECONDS,
   ScreensBannerRefreshIntentSchema,
@@ -551,6 +552,100 @@ export async function registerScreensRoutes(server: FastifyInstance): Promise<vo
       }),
     )
   })
+
+  server.post('/api/screens/banner-duplicate', async (request, reply) => {
+    const user = await requireSessionUser(request, reply, 'editor')
+    if (!user) {
+      return
+    }
+
+    const body = QueueScreensBannerDuplicateRequestSchema.parse(request.body ?? {})
+    if (!getHeliosScreensSiteDealer(body.sourceDealerId)) {
+      throw new Error('Banner duplicate can only use configured screens dealers as the source.')
+    }
+
+    const targetDealerIds = normalizeHeliosScreensSiteDealerIds(body.targetScreens.map((target) => target.dealerId))
+    if (targetDealerIds.length === 0 || targetDealerIds.length !== new Set(body.targetScreens.map((target) => target.dealerId)).size) {
+      throw new Error('Banner duplicate can only target the configured Bronx and Midtown site dealers.')
+    }
+
+    const uniqueSourceBannerIds = [...new Set(body.sourceBannerIds)]
+    const uniqueTargetScreens = dedupeTargetScreens(body.targetScreens).filter(
+      (target) => !(target.dealerId === body.sourceDealerId && target.screenId === body.sourceScreenId),
+    )
+    if (uniqueTargetScreens.length === 0) {
+      throw new Error('Banner duplicate needs at least one target screen beyond the source screen.')
+    }
+
+    const mode: ScreensRunMode = body.apply ? 'apply' : 'dry_run'
+    const requestId = randomUUID()
+    const scope = buildScreensImageBannerSyncScope(uniqueTargetScreens)
+
+    const mutationResult = await withTransaction(async (db) => {
+      const jobId = await enqueueJob(db, {
+        concurrencyKey: getOptionalSweedSessionConcurrencyKey(true),
+        dedupeKey: `screens.banner_duplicate:${mode}:${body.sourceDealerId}:${body.sourceScreenId}:${uniqueSourceBannerIds.join(',')}:${uniqueTargetScreens.map((target) => `${target.dealerId}-${target.screenId}`).join(',')}`,
+        jobType: 'screens.banner_duplicate',
+        module: 'screens',
+        payload: {
+          mode,
+          requestedByUserId: user.id,
+          sourceBannerIds: uniqueSourceBannerIds,
+          sourceDealerId: body.sourceDealerId,
+          sourceScreenId: body.sourceScreenId,
+          targetScreens: uniqueTargetScreens,
+        },
+        requestedByUserId: user.id,
+        scope,
+      })
+
+      const auditEventId = await appendAuditEvent(db, {
+        actorType: 'user',
+        actorUserId: user.id,
+        entityId: String(jobId),
+        entityType: 'job',
+        eventType: 'screens.banner_duplicate.requested',
+        module: 'screens',
+        payload: {
+          mode,
+          queuedJobId: jobId,
+          requestedReason: body.reason ?? null,
+          sourceBannerIds: uniqueSourceBannerIds,
+          sourceDealerId: body.sourceDealerId,
+          sourceDealerName: readDealerName(body.sourceDealerId),
+          sourceScreenId: body.sourceScreenId,
+          summary: buildQueuedBannerDuplicateSummary(mode, body.sourceDealerId, body.sourceScreenId, uniqueSourceBannerIds.length, uniqueTargetScreens.length),
+          targetScreens: uniqueTargetScreens,
+        },
+        requestId,
+        scope,
+        undoPayload: null,
+      })
+
+      return { auditEventId, jobId }
+    })
+
+    return reply.send(
+      MutationAcceptedResponseSchema.parse({
+        auditEventId: mutationResult.auditEventId,
+        jobId: mutationResult.jobId,
+        requestId,
+      }),
+    )
+  })
+}
+
+function buildQueuedBannerDuplicateSummary(
+  mode: ScreensRunMode,
+  sourceDealerId: number,
+  sourceScreenId: number,
+  sourceBannerCount: number,
+  targetScreenCount: number,
+): string {
+  const sourceDealerLabel = readDealerName(sourceDealerId)
+  return mode === 'apply'
+    ? `Queued live banner duplicate for ${sourceBannerCount} banner(s) from ${sourceDealerLabel} screen ${sourceScreenId} to ${targetScreenCount} target screen(s).`
+    : `Queued dry-run banner duplicate for ${sourceBannerCount} banner(s) from ${sourceDealerLabel} screen ${sourceScreenId} to ${targetScreenCount} target screen(s).`
 }
 
 function buildQueuedRefreshSummary(

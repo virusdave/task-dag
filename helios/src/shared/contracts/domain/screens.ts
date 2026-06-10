@@ -142,6 +142,28 @@ export const ScreensImageBannerSyncJobPayloadSchema = z.object({
 })
 export type ScreensImageBannerSyncJobPayload = z.infer<typeof ScreensImageBannerSyncJobPayloadSchema>
 
+// Sweed banner type ids. Image banners reuse a shared media id and can be
+// duplicated to any site; product-menu banners carry a dealer-scoped
+// promoActionId and can only be duplicated within the same site.
+export const SCREENS_IMAGE_BANNER_TYPE_ID = 1
+export const SCREENS_PRODUCT_MENU_BANNER_TYPE_ID = 3
+
+export const ScreensBannerDuplicateTargetSchema = z.object({
+  dealerId: z.number().int().positive(),
+  screenId: z.number().int().positive(),
+})
+export type ScreensBannerDuplicateTarget = z.infer<typeof ScreensBannerDuplicateTargetSchema>
+
+export const ScreensBannerDuplicateJobPayloadSchema = z.object({
+  mode: ScreensRunModeSchema,
+  requestedByUserId: z.number().int().positive().nullable().optional(),
+  sourceBannerIds: z.array(z.string().trim().min(1)).min(1),
+  sourceDealerId: z.number().int().positive(),
+  sourceScreenId: z.number().int().positive(),
+  targetScreens: z.array(ScreensBannerDuplicateTargetSchema).min(1),
+})
+export type ScreensBannerDuplicateJobPayload = z.infer<typeof ScreensBannerDuplicateJobPayloadSchema>
+
 /**
  * Bulk banner enable/disable. Targets are expressed either as an
  * explicit list of banners (selected in the UI) or as a predicate that

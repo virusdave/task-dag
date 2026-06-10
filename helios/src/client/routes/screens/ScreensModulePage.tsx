@@ -11,7 +11,7 @@ import {
   JobsResponseSchema,
   MutationAcceptedResponseSchema,
   QueueScreensBannerBulkToggleRequestSchema,
-  QueueScreensImageBannerSyncRequestSchema,
+  QueueScreensBannerDuplicateRequestSchema,
   SCREENS_BANNER_BOUNCE_DEFAULT_HOLD_SECONDS,
   ScreensInventoryResponseSchema,
   buildHeliosModulePath,
@@ -182,7 +182,13 @@ export function ScreensModulePage() {
     setErrorMessage(null)
     setNotice(null)
     if (kind === 'copy') {
-      setCopyTargetKeys([...selectedScreens].filter((key) => !copySource || key !== screenKey(copySource.dealerId, copySource.screenId)))
+      setCopyTargetKeys([...selectedScreens].filter((key) => {
+        if (!copySource) return false
+        if (key === screenKey(copySource.dealerId, copySource.screenId)) return false
+        // promoActionId is dealer-scoped: promo banners can only target the source site.
+        if (copySource.hasPromo && parseScreenKey(key).dealerId !== copySource.dealerId) return false
+        return true
+      }))
     }
     setDrawer(kind)
   }
@@ -469,7 +475,7 @@ export function ScreensModulePage() {
               <>
                 <button className="ghost-button" disabled={!canEdit} onClick={() => openDrawer('enable')} type="button">Enable</button>
                 <button className="ghost-button" disabled={!canEdit} onClick={() => openDrawer('disable')} type="button">Disable</button>
-                <button className="ghost-button" disabled={!canEdit || !copySource} onClick={() => openDrawer('copy')} type="button">Copy</button>
+                <button className="ghost-button" disabled={!canEdit || !copySource} onClick={() => openDrawer('copy')} type="button">Duplicate</button>
               </>
             ) : null}
             {selectedScreens.size > 0 ? (
@@ -532,8 +538,8 @@ export function ScreensModulePage() {
           onCopy={(apply) => {
             if (!copySource) return
             void submit(
-              '/api/screens/image-banner-sync',
-              QueueScreensImageBannerSyncRequestSchema.parse({
+              '/api/screens/banner-duplicate',
+              QueueScreensBannerDuplicateRequestSchema.parse({
                 apply,
                 reason: reason.trim() || null,
                 sourceBannerIds: copySource.bannerIds,
@@ -541,7 +547,7 @@ export function ScreensModulePage() {
                 sourceScreenId: copySource.screenId,
                 targetScreens: copyTargetKeys.map(parseScreenKey),
               }),
-              apply ? 'Queued live banner copy' : 'Queued dry-run banner copy',
+              apply ? 'Queued live banner duplicate' : 'Queued dry-run banner duplicate',
             )
           }}
         />
@@ -740,7 +746,7 @@ function SiteOperationsCard({
   )
 }
 
-interface CopySource { bannerIds: string[]; dealerId: number; screenId: number; screenName: string }
+interface CopySource { bannerIds: string[]; dealerId: number; hasPromo: boolean; screenId: number; screenName: string }
 
 function OperationDrawer({
   drawer,
@@ -787,7 +793,7 @@ function OperationDrawer({
       ? `Enable ${selectedBannerCount} banner(s)`
       : drawer === 'disable'
         ? `Disable ${selectedBannerCount} banner(s)`
-        : 'Copy image banners'
+        : 'Duplicate banners'
 
   return (
     <div className="screens-drawer-backdrop" onClick={onClose} role="presentation">
@@ -811,11 +817,15 @@ function OperationDrawer({
         {drawer === 'copy' ? (
           copySource ? (
             <div>
-              <p className="subtle-copy">Source: <strong>{copySource.screenName}</strong> · {copySource.bannerIds.length} image banner(s).</p>
+              <p className="subtle-copy">Source: <strong>{copySource.screenName}</strong> · {copySource.bannerIds.length} banner(s).</p>
+              {copySource.hasPromo ? (
+                <p className="subtle-copy">A product-menu/promo banner is selected, so only screens at the source site can be targeted (promo actions are dealer-scoped).</p>
+              ) : null}
               <p><strong>Target screens</strong></p>
               <div className="screens-drawer-targets">
                 {allScreens
                   .filter((screen) => !(screen.dealerId === copySource.dealerId && screen.screenId === copySource.screenId))
+                  .filter((screen) => !copySource.hasPromo || screen.dealerId === copySource.dealerId)
                   .filter((screen) => isScreenEligible(screen.screenEnabled, screen.screenName))
                   .map((screen) => {
                     const key = screenKey(screen.dealerId, screen.screenId)
@@ -833,7 +843,7 @@ function OperationDrawer({
               </div>
             </div>
           ) : (
-            <p className="error-text">Select image banners from a single source screen to copy.</p>
+            <p className="error-text">Select image or product-menu/promo banners from a single source screen to duplicate.</p>
           )
         ) : null}
 
@@ -977,9 +987,16 @@ function deriveCopySource(
   if (!sameScreen) return null
   const screen = screenByKey.get(screenKey(first.dealerId, first.screenId))
   if (!screen) return null
-  const allImage = refs.every((ref) => lookupBanner(screenByKey, ref)?.type.toLowerCase() === 'image')
-  if (!allImage) return null
-  return { bannerIds: refs.map((ref) => ref.bannerId), dealerId: first.dealerId, screenId: first.screenId, screenName: screen.screenName }
+  // A banner can be duplicated when it is an image banner (reusable media) or a
+  // product-menu/promo banner (carries a promoActionId). Anything else is not
+  // supported by the duplicate worker.
+  const allDuplicatable = refs.every((ref) => {
+    const banner = lookupBanner(screenByKey, ref)
+    return banner !== null && (banner.type.toLowerCase() === 'image' || banner.promoActionId !== null)
+  })
+  if (!allDuplicatable) return null
+  const hasPromo = refs.some((ref) => lookupBanner(screenByKey, ref)?.promoActionId != null)
+  return { bannerIds: refs.map((ref) => ref.bannerId), dealerId: first.dealerId, hasPromo, screenId: first.screenId, screenName: screen.screenName }
 }
 
 function statusTone(status: JobsResponse['items'][number]['status']): 'danger' | 'muted' | 'success' | 'warning' {

@@ -2,6 +2,7 @@ import { z } from 'zod'
 
 import {
   ScreensBannerBulkToggleTargetSchema,
+  ScreensBannerDuplicateTargetSchema,
   ScreensImageBannerSyncTargetSchema,
   ScreensRunModeSchema,
 } from '../domain/screens.js'
@@ -67,6 +68,16 @@ export const QueueScreensImageBannerSyncRequestSchema = z.object({
   targetScreens: z.array(ScreensImageBannerSyncTargetSchema).min(1),
 })
 export type QueueScreensImageBannerSyncRequest = z.infer<typeof QueueScreensImageBannerSyncRequestSchema>
+
+export const QueueScreensBannerDuplicateRequestSchema = z.object({
+  apply: z.boolean().default(false),
+  reason: z.string().trim().max(500).nullable().optional(),
+  sourceBannerIds: z.array(z.string().trim().min(1)).min(1),
+  sourceDealerId: z.number().int().positive(),
+  sourceScreenId: z.number().int().positive(),
+  targetScreens: z.array(ScreensBannerDuplicateTargetSchema).min(1),
+})
+export type QueueScreensBannerDuplicateRequest = z.infer<typeof QueueScreensBannerDuplicateRequestSchema>
 
 export const QueueScreensBannerBulkToggleRequestSchema = z.object({
   apply: z.boolean().default(false),

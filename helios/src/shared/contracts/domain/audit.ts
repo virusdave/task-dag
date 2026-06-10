@@ -70,6 +70,8 @@ export const AuditEventTypeSchema = z.enum([
   'screens.midtown_priced_to_move_promo_rebind.completed',
   'screens.image_banner_sync.requested',
   'screens.image_banner_sync.completed',
+  'screens.banner_duplicate.requested',
+  'screens.banner_duplicate.completed',
   'scheduling.run.requested',
   'scheduling.run.extracted',
   'scheduling.run.normalized_input_saved',

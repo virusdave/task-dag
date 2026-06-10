@@ -33,6 +33,7 @@ import {
   ProposalImportReviewJsonJobPayloadSchema,
   ReconcileGroupJobPayloadSchema,
   ScreensBannerBulkToggleJobPayloadSchema,
+  ScreensBannerDuplicateJobPayloadSchema,
   ScreensBannerRefreshJobPayloadSchema,
   ScreensBannerHealthMaintenanceJobPayloadSchema,
   ScreensBronxMidtownImageCloneJobPayloadSchema,
@@ -82,6 +83,7 @@ import { runScreensBannerHealthMaintenanceJob } from '../jobs/screensBannerHealt
 import { runScreensBronxMidtownImageCloneJob } from '../jobs/screensBronxMidtownImageCloneJob.js'
 import { runScreensEnableHealthyBannersJob } from '../jobs/screensEnableHealthyBannersJob.js'
 import { runScreensImageBannerSyncJob } from '../jobs/screensImageBannerSyncJob.js'
+import { runScreensBannerDuplicateJob } from '../jobs/screensBannerDuplicateJob.js'
 import { runScreensMidtownPricedToMovePromoRebindJob } from '../jobs/screensMidtownPricedToMovePromoRebindJob.js'
 import { runSchedulingExtractConstraintsJob } from '../jobs/schedulingExtractConstraintsJob.js'
 import { runSchedulingGenerateCandidatesJob } from '../jobs/schedulingGenerateCandidatesJob.js'
@@ -174,6 +176,9 @@ const handlers: Record<JobType, JobHandler> = {
   },
   'screens.image_banner_sync': async (context) => {
     await runScreensImageBannerSyncJob(context, ScreensImageBannerSyncJobPayloadSchema.parse(context.payload))
+  },
+  'screens.banner_duplicate': async (context) => {
+    await runScreensBannerDuplicateJob(context, ScreensBannerDuplicateJobPayloadSchema.parse(context.payload))
   },
   'scheduling.extract_constraints': async (context) => {
     await runSchedulingExtractConstraintsJob(context, SchedulingExtractConstraintsJobPayloadSchema.parse(context.payload))
@@ -347,6 +352,7 @@ const SWEED_BACKED_JOB_TYPES: ReadonlySet<JobType> = new Set<JobType>([
   'screens.bronx_midtown_image_clone',
   'screens.enable_healthy_banners',
   'screens.image_banner_sync',
+  'screens.banner_duplicate',
   'screens.midtown_priced_to_move_promo_rebind',
 ])
 

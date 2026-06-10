@@ -59,6 +59,7 @@ export const JOB_EXECUTION_POOL_BY_TYPE: Record<JobType, JobPoolMetadata> = {
   'screens.bronx_midtown_image_clone': { pool: 'sweed', requiresSweedSession: true },
   'screens.midtown_priced_to_move_promo_rebind': { pool: 'sweed', requiresSweedSession: true },
   'screens.image_banner_sync': { pool: 'sweed', requiresSweedSession: true },
+  'screens.banner_duplicate': { pool: 'sweed', requiresSweedSession: true },
   'undo.execute': { pool: 'sweed', requiresSweedSession: true },
 
   // --- scheduling pool ---

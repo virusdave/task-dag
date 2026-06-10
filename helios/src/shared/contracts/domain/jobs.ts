@@ -5,6 +5,7 @@ import { HeliosModuleCodeSchema, HeliosModuleScopeSchema } from './modules.js'
 import { ScopeKindSchema, ScopeRefSchema } from './scopeRef.js'
 import {
   ScreensBannerBulkToggleJobPayloadSchema,
+  ScreensBannerDuplicateJobPayloadSchema,
   ScreensBannerRefreshJobPayloadSchema,
   ScreensBannerHealthMaintenanceJobPayloadSchema,
   ScreensBronxMidtownImageCloneJobPayloadSchema,
@@ -35,6 +36,7 @@ export const JobTypeSchema = z.enum([
   'screens.bronx_midtown_image_clone',
   'screens.midtown_priced_to_move_promo_rebind',
   'screens.image_banner_sync',
+  'screens.banner_duplicate',
   'scheduling.extract_constraints',
   'scheduling.generate_candidates',
   'undo.execute',
@@ -781,6 +783,7 @@ export type ConfigWorkersRefreshSweedCustomerSegmentsJobPayload = z.infer<
 
 export {
   ScreensBannerBulkToggleJobPayloadSchema,
+  ScreensBannerDuplicateJobPayloadSchema,
   ScreensBannerRefreshJobPayloadSchema,
   ScreensBannerHealthMaintenanceJobPayloadSchema,
   ScreensBronxMidtownImageCloneJobPayloadSchema,
