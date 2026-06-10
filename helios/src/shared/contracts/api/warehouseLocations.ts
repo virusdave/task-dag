@@ -137,11 +137,14 @@ export const WarehouseLocationAssignRequestSchema = z
     locationCode: WarehouseLocationCodeSchema,
     /** Where the request originated — for the audit trail only. */
     source: z.enum(['shelf-scan', 'audit']),
-    /** A scanned barcode (METRC tag or package barcode) to resolve to a package. */
+    /** A scanned barcode (METRC tag or package barcode) to resolve to package(s). */
     scannedCode: z.string().trim().min(1).max(128).optional(),
-    /** A package resolved already (audit-card tap, or disambiguation pick). */
+    /** A specific package to act on (audit-card tap). */
     inventoryItemId: z.string().trim().min(1).max(64).optional(),
-    /** Operator confirmed overwriting an already-valid location on this package. */
+    /**
+     * Operator confirmed MOVING matched packages that are currently at a
+     * different valid location into this one (the "conflict" case).
+     */
     allowReassign: z.boolean().optional(),
   })
   .refine((body) => Boolean(body.scannedCode) !== Boolean(body.inventoryItemId), {
@@ -152,8 +155,10 @@ export type WarehouseLocationAssignRequest = z.infer<
 >
 
 /**
- * A candidate when a scanned barcode resolves to more than one in-stock
- * FOR-SALE package (same METRC tag across sub-locations, or a shared UPC).
+ * A matched package that was NOT assigned because it is already at a
+ * different valid location. Surfaced so the operator can confirm moving it
+ * (locations are 1-to-many, so co-located packages are assigned by default —
+ * only a package sitting at another location is treated as a conflict).
  */
 export const WarehouseScanCandidateSchema = z.object({
   inventoryItemId: z.string(),
@@ -166,34 +171,47 @@ export const WarehouseScanCandidateSchema = z.object({
 export type WarehouseScanCandidate = z.infer<typeof WarehouseScanCandidateSchema>
 
 /**
- * Discriminated assign outcome. Actionable conflicts (ambiguous scan,
- * occupied location, package already located) are returned with HTTP 200
- * and a `status` discriminator so the client can render the right prompt
- * without parsing error strings. Hard failures (bad input, no such
- * package, Sweed/plumbing errors) use HTTP 4xx/5xx + `{ error }`.
+ * A matched package that could NOT be assigned because of a per-package error
+ * (it vanished from Sweed mid-run, or the Sweed write failed). Surfaced
+ * per-package so a failure on one package in a multi-package scan never throws
+ * away the packages that DID assign.
  */
-export const WarehouseLocationAssignResponseSchema = z.discriminatedUnion('status', [
-  z.object({
+export const WarehouseAssignFailureSchema = z.object({
+  inventoryItemId: z.string(),
+  productName: z.string().nullable(),
+  metrcTag: z.string().nullable(),
+  reason: z.string(),
+})
+export type WarehouseAssignFailure = z.infer<typeof WarehouseAssignFailureSchema>
+
+/**
+ * Assign outcome (always HTTP 200). A single scan may resolve to MANY
+ * co-located packages (e.g. a product split across a 4-pack and a 1-pack in
+ * one shelf bin); all of them are assigned by default. Any matched package
+ * already sitting at a *different* valid location is left untouched and
+ * reported in `conflicts` for the operator to confirm moving (re-submit with
+ * allowReassign). Per-package errors (a package that sold mid-run, a Sweed
+ * write failure) land in `failures` so the rest of the batch still succeeds.
+ * Whole-request failures (bad input, NO matching package, every package
+ * failing) use HTTP 4xx/5xx + `{ error }`.
+ *
+ * `packages` = newly assigned (or already at this code, idempotent).
+ * `conflicts` = matched packages skipped because they're located elsewhere.
+ * `failures`  = matched packages that errored individually.
+ * At least one of the three is non-empty (an empty match is a 404, and an
+ * all-failed batch is surfaced as the first error).
+ */
+export const WarehouseLocationAssignResponseSchema = z
+  .object({
     status: z.literal('assigned'),
     locationCode: z.string(),
-    package: WarehousePackageSchema,
-    previousInternalTrackCode: z.string().nullable(),
-  }),
-  z.object({
-    status: z.literal('ambiguous'),
-    candidates: z.array(WarehouseScanCandidateSchema).min(2),
-  }),
-  z.object({
-    status: z.literal('location-occupied'),
-    locationCode: z.string(),
-    occupant: WarehouseScanCandidateSchema,
-  }),
-  z.object({
-    status: z.literal('already-assigned'),
-    currentLocationCode: z.string(),
-    candidate: WarehouseScanCandidateSchema,
-  }),
-])
+    packages: z.array(WarehousePackageSchema),
+    conflicts: z.array(WarehouseScanCandidateSchema),
+    failures: z.array(WarehouseAssignFailureSchema),
+  })
+  .refine((r) => r.packages.length + r.conflicts.length + r.failures.length > 0, {
+    message: 'An assign response must report at least one package, conflict, or failure.',
+  })
 export type WarehouseLocationAssignResponse = z.infer<
   typeof WarehouseLocationAssignResponseSchema
 >

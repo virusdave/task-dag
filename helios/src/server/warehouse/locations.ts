@@ -3,8 +3,8 @@ import { z } from 'zod'
 import {
   HELIOS_PENDING_PURCHASE_SITE_DEALERS,
   WAREHOUSE_LOCATION_PREFIXES,
-  WAREHOUSE_LOCATION_CODE_SQL_REGEX,
   isValidWarehouseLocationCode,
+  type WarehouseAssignFailure,
   type WarehouseLocationAssignResponse,
   type WarehouseLocationsStateResponse,
   type WarehousePackage,
@@ -100,20 +100,9 @@ function mirrorRowToPackage(row: MirrorRow): WarehousePackage {
   }
 }
 
-function mirrorRowToCandidate(row: MirrorRow): WarehouseScanCandidate {
-  return {
-    inventoryItemId: row.inventory_item_id,
-    productName: row.product_name,
-    metrcTag: row.metrc_tag,
-    availableQty: toNumberOrNull(row.available_qty),
-    stockLocation: row.stock_location,
-    currentInternalTrackCode: row.assigned_location_code ?? row.internal_track_code,
-  }
-}
-
 /**
  * The in-stock FOR-SALE non-trade-sample filter, shared by every read so
- * the audit list, occupancy checks, and scan resolution all agree on which
+ * the audit list, conflict checks, and scan resolution all agree on which
  * packages "exist" for the warehouse-locations flow.
  *
  * `$1` must be the dealer id. Selects from the distinct-on current view and
@@ -231,11 +220,23 @@ export interface AssignWarehouseLocationInput {
   requestedByUserId: number | null
 }
 
-/** First key of each advisory-lock namespace. Distinct first keys keep the
- *  location and package lock spaces from ever colliding with each other. */
-const LOCK_NS_LOCATION = `wh-loc:${MIDTOWN_DEALER_ID}`
+/** Advisory-lock namespace for per-package serialization. Different packages
+ *  hash to different keys, so a shelf run stays parallel across packages. */
 const LOCK_NS_PACKAGE = `wh-pkg:${MIDTOWN_DEALER_ID}`
 
+/**
+ * Assign a warehouse location to the package(s) a scan resolves to.
+ *
+ * Locations are 1-to-MANY with packages: a single shelf bin commonly holds
+ * several packages of the same product (e.g. a 4-pack and a 1-pack), and a
+ * scanned barcode/METRC tag can therefore resolve to several in-stock
+ * packages. ALL of them are assigned to `locationCode` by default. The only
+ * thing that blocks a package is a genuine conflict — it is already sitting at
+ * a DIFFERENT valid location — which is surfaced (not silently overwritten)
+ * unless the operator confirms the move with `allowReassign`.
+ *
+ * An audit-card tap targets exactly one package (`inventoryItemId`).
+ */
 export async function assignWarehouseLocation(
   input: AssignWarehouseLocationInput,
 ): Promise<WarehouseLocationAssignResponse> {
@@ -246,45 +247,72 @@ export async function assignWarehouseLocation(
 
   const db = getPool()
 
-  // 1. Resolve the target package (returns a structured "ambiguous" outcome
-  //    rather than throwing when a scan matches more than one package). Done
-  //    on the pool BEFORE we take the lock client.
-  const resolution = await resolveTargetPackage(db, input)
-  if (resolution.kind === 'ambiguous') {
-    return { status: 'ambiguous', candidates: resolution.candidates }
-  }
-  const target = resolution.row
-  const inventoryItemId = target.inventoryItemId
+  // 1. Resolve the scan to the set of in-stock FOR-SALE packages it matches
+  //    (0..n). Done on the pool BEFORE we take the lock client. A 404 is
+  //    thrown when nothing matches.
+  const targets = await resolveTargetPackages(db, input)
+  // Sort by package id so every request acquires the per-package locks below in
+  // the same global order — that's what keeps two overlapping scans of an
+  // overlapping package set deadlock-free. It also keeps output stable.
+  targets.sort((a, b) => a.inventoryItemId.localeCompare(b.inventoryItemId))
 
-  // The critical section is serialized with two Postgres session advisory
-  // locks held on a SINGLE dedicated client:
-  //   * per (dealer, location code) — so two operators can't both claim the
-  //     same code for different packages (breaking 1-to-1 in Sweed), and
-  //   * per (dealer, package)       — so two operators can't assign the same
-  //     package to two different codes and leave Helios disagreeing with Sweed.
-  // Always location-first then package-second: a single global acquisition
-  // order makes the pair deadlock-free. Different codes / packages hash to
-  // different keys, so a shelf run stays parallel across distinct shelves.
-  //
   // The Sweed session is established OUTSIDE `withClient`: claiming a Sweed
   // token itself checks a client out of the same pool, so nesting it under a
   // held lock client could exhaust the pool and self-deadlock (pool max 10).
-  // Every other DB statement below runs on the one locked client.
+  // Every DB statement below runs on the one checked-out client.
+  //
+  // ALL target packages are advisory-locked up front, in the sorted order
+  // above, then processed, then released in reverse. Sorting gives a single
+  // global acquisition order so two overlapping scans of the same multi-package
+  // barcode can't interleave and split the group across two locations — the
+  // whole matched set moves together. Distinct packages hash to distinct keys,
+  // so unrelated shelf runs still proceed in parallel.
   return withSweedSession(() =>
     withClient(async (client) => {
-      await client.query('select pg_advisory_lock(hashtext($1), hashtext($2))', [
-        LOCK_NS_LOCATION,
-        locationCode,
-      ])
-      await client.query('select pg_advisory_lock(hashtext($1), hashtext($2))', [
-        LOCK_NS_PACKAGE,
-        inventoryItemId,
-      ])
+      const locked: string[] = []
       try {
-        return await assignUnderLock(client, input, locationCode, target, inventoryItemId)
+        for (const target of targets) {
+          await client.query('select pg_advisory_lock(hashtext($1), hashtext($2))', [
+            LOCK_NS_PACKAGE,
+            target.inventoryItemId,
+          ])
+          locked.push(target.inventoryItemId)
+        }
+
+        const assigned: WarehousePackage[] = []
+        const conflicts: WarehouseScanCandidate[] = []
+        const failures: { failure: WarehouseAssignFailure; error: HttpError }[] = []
+        for (const target of targets) {
+          const outcome = await assignOnePackage(client, input, locationCode, target)
+          if (outcome.kind === 'assigned') {
+            assigned.push(outcome.package)
+          } else if (outcome.kind === 'conflict') {
+            conflicts.push(outcome.conflict)
+          } else {
+            failures.push({ failure: outcome.failure, error: outcome.error })
+          }
+        }
+
+        // If nothing succeeded and nothing is a (recoverable) conflict, surface
+        // the first error as the whole-request failure — this preserves the
+        // single-scan / audit-card behaviour (e.g. a 404 when the one package
+        // the operator targeted has gone). Otherwise return 200 with whatever
+        // assigned plus the per-package failures so successes are never lost.
+        if (assigned.length === 0 && conflicts.length === 0 && failures.length > 0) {
+          throw failures[0]!.error
+        }
+
+        return {
+          status: 'assigned',
+          locationCode,
+          packages: assigned,
+          conflicts,
+          failures: failures.map((f) => f.failure),
+        }
       } finally {
-        await releaseLock(client, LOCK_NS_PACKAGE, inventoryItemId)
-        await releaseLock(client, LOCK_NS_LOCATION, locationCode)
+        for (const inventoryItemId of [...locked].reverse()) {
+          await releaseLock(client, LOCK_NS_PACKAGE, inventoryItemId)
+        }
       }
     }),
   )
@@ -298,38 +326,58 @@ async function releaseLock(client: Queryable, namespace: string, key: string): P
   }
 }
 
+type PackageOutcome =
+  | { kind: 'assigned'; package: WarehousePackage }
+  | { kind: 'conflict'; conflict: WarehouseScanCandidate }
+  | { kind: 'failed'; failure: WarehouseAssignFailure; error: HttpError }
+
+/** The columns we need to restore a prior assignment if a Sweed write fails. */
+interface PriorAssignmentRow {
+  location_code: string
+  metrc_tag: string | null
+  product_name: string | null
+  assigned_by_user_id: string | number | null
+  assigned_at: Date | string
+}
+
+function packageFailure(target: WarehousePackage, reason: string): WarehouseAssignFailure {
+  return {
+    inventoryItemId: target.inventoryItemId,
+    productName: target.productName,
+    metrcTag: target.metrcTag,
+    reason,
+  }
+}
+
 /**
- * The location-claiming critical section, run on the single client that holds
- * the per-location and per-package advisory locks (and inside the ambient
- * Sweed session). Every step is serialized against any other assignment that
- * touches the same location code or the same package.
+ * Assign one package to `locationCode`, run on the single client that holds
+ * that package's advisory lock (and inside the ambient Sweed session).
  *
- * Ordering is "reserve locally, then write Sweed, compensating on failure":
- *   2. occupancy guard (1-to-1 codes),
- *   3. live-verify the package + read its current code (already-located guard),
- *   4. RESERVE the code in Helios's own table (immediately consistent),
- *   5. write Sweed — on failure, drop the reservation so the code never looks
- *      claimed for a package whose Sweed code we never changed,
- *   6. best-effort audit (must not undo a completed assignment).
+ * Steps:
+ *   1. live-verify the package + read its current internalTrackCode,
+ *   2. conflict guard: a package already at a DIFFERENT valid location is left
+ *      untouched and returned as a conflict unless `allowReassign`,
+ *   3. RESERVE the code in Helios's own table (immediately consistent),
+ *   4. write Sweed — on failure, RESTORE the package's prior assignment row so
+ *      a reassign that fails never erases the package's old valid location,
+ *   5. best-effort audit (must not undo a completed assignment).
  * Reserving before the Sweed write means there is no post-write window where
- * the code reads as free, which is what made a duplicate possible.
+ * Helios reads the package as unlocated.
+ *
+ * Per-package errors are returned as `{ kind: 'failed' }` rather than thrown,
+ * so one bad package in a multi-package scan never discards the packages that
+ * assigned cleanly; the caller decides whether an all-failed batch becomes a
+ * whole-request error.
  */
-async function assignUnderLock(
+async function assignOnePackage(
   client: Queryable,
   input: AssignWarehouseLocationInput,
   locationCode: string,
   target: WarehousePackage,
-  inventoryItemId: string,
-): Promise<WarehouseLocationAssignResponse> {
-  // 2. Location-occupancy guard (1-to-1 codes). Authoritative under the lock:
-  //    if another in-stock package already holds this exact code, the operator
-  //    must pick a different bin-split suffix.
-  const occupant = await findLocationOccupant(client, locationCode, inventoryItemId)
-  if (occupant) {
-    return { status: 'location-occupied', locationCode, occupant }
-  }
+): Promise<PackageOutcome> {
+  const inventoryItemId = target.inventoryItemId
 
-  // 3. Live-verify the package and read its current internalTrackCode (the
+  // 1. Live-verify the package and read its current internalTrackCode (the
   //    Sweed session is already open around this whole call).
   let detailRaw: unknown
   try {
@@ -337,19 +385,27 @@ async function assignUnderLock(
       inventoryItemId,
     })
   } catch (error) {
-    throw new HttpError(
-      404,
-      `Package ${inventoryItemId} could not be loaded from Sweed (it may have been sold or moved): ${
-        error instanceof Error ? error.message : String(error)
-      }`,
-    )
+    const message = error instanceof Error ? error.message : String(error)
+    return {
+      kind: 'failed',
+      failure: packageFailure(
+        target,
+        `could not be loaded from Sweed (it may have been sold or moved)`,
+      ),
+      error: new HttpError(
+        404,
+        `Package ${inventoryItemId} could not be loaded from Sweed (it may have been sold or moved): ${message}`,
+      ),
+    }
   }
   const detail = SweedItemDetailSchema.parse(extractRpcResult(detailRaw))
   const previousInternalTrackCode = detail.internalTrackCode?.trim() ?? null
 
-  // Already-located guard: refuse to silently clobber an existing valid
-  // location code unless the operator confirmed the reassignment. Checked
-  // before any write or reservation, so the abort leaves all state untouched.
+  // 2. Conflict guard. A package already at a DIFFERENT valid location is a
+  //    real conflict (co-located packages sharing this code are NOT — that's
+  //    the whole point of 1-to-many). Surface it for confirmation rather than
+  //    silently moving it, unless the operator already confirmed the move.
+  //    Checked before any write/reservation, so the skip leaves state untouched.
   if (
     !input.allowReassign &&
     previousInternalTrackCode !== null &&
@@ -357,22 +413,28 @@ async function assignUnderLock(
     isValidWarehouseLocationCode(previousInternalTrackCode)
   ) {
     return {
-      status: 'already-assigned',
-      currentLocationCode: previousInternalTrackCode,
-      candidate: mirrorRowToCandidate(targetMirrorRow(target)),
+      kind: 'conflict',
+      conflict: {
+        inventoryItemId,
+        productName: target.productName,
+        metrcTag: target.metrcTag,
+        availableQty: target.availableQty,
+        stockLocation: target.stockLocation,
+        currentInternalTrackCode: previousInternalTrackCode,
+      },
     }
   }
 
-  // 4. Reserve the code in Helios's own table FIRST (immediately consistent).
-  //    A package holds at most one location, so drop its prior row before
-  //    inserting. The `on conflict (dealer, location)` branch only ever fires
-  //    for a STALE row left by a package that has since left stock (the
-  //    occupancy guard above already ruled out any in-stock holder), so
-  //    reclaiming it is correct.
+  // 3. Reserve the code in Helios's own table FIRST (immediately consistent).
+  //    A package holds at most one location, so this upserts on the package
+  //    key (1-to-1 package→location); many packages may share a location.
+  //    Capture any prior row first so a failed Sweed write can restore it.
+  const priorRow = await loadPriorAssignment(client, inventoryItemId)
   await reserveAssignment(client, input, locationCode, target, inventoryItemId)
 
-  // 5. Write Sweed. Skip the RPC when the code is already exactly this
-  //    (idempotent re-scan). On failure, drop the reservation we just made.
+  // 4. Write Sweed. Skip the RPC when the code is already exactly this
+  //    (idempotent re-scan). On failure, restore the prior reservation so we
+  //    never leave the package claiming a location Sweed never accepted.
   if (previousInternalTrackCode !== locationCode) {
     try {
       await callSweedRpc(MIDTOWN_DEALER_ID, 'store.inventory.item.update.internaltrackcode', {
@@ -380,28 +442,20 @@ async function assignUnderLock(
         inventoryItemId,
       })
     } catch (error) {
-      await client
-        .query(
-          `delete from warehouse_location_assignments
-            where dealer_id = $1 and location_code = $2 and inventory_item_id = $3`,
-          [MIDTOWN_DEALER_ID, locationCode, inventoryItemId],
-        )
-        .catch((cleanupError: unknown) => {
-          console.error(
-            'warehouse/locations: failed to roll back reservation after Sweed write error',
-            cleanupError,
-          )
-        })
-      throw new HttpError(
-        502,
-        `Failed to write location ${locationCode} to Sweed for package ${inventoryItemId}: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      )
+      await restoreAssignment(client, inventoryItemId, locationCode, priorRow)
+      const message = error instanceof Error ? error.message : String(error)
+      return {
+        kind: 'failed',
+        failure: packageFailure(target, `Sweed rejected the location write`),
+        error: new HttpError(
+          502,
+          `Failed to write location ${locationCode} to Sweed for package ${inventoryItemId}: ${message}`,
+        ),
+      }
     }
   }
 
-  // 6. Audit is best-effort: the assignment (Sweed + reservation) is already
+  // 5. Audit is best-effort: the assignment (Sweed + reservation) is already
   //    durable, so a failure to record the audit row must not undo it.
   try {
     await appendAuditEvent(client, {
@@ -431,23 +485,81 @@ async function assignUnderLock(
     )
   }
 
-  const assignedPackage: WarehousePackage = {
-    ...target,
-    internalTrackCode: locationCode,
-    assignedLocationCode: locationCode,
-    effectiveLocationCode: locationCode,
-  }
-
   return {
-    status: 'assigned',
-    locationCode,
-    package: assignedPackage,
-    previousInternalTrackCode,
+    kind: 'assigned',
+    package: {
+      ...target,
+      internalTrackCode: locationCode,
+      assignedLocationCode: locationCode,
+      effectiveLocationCode: locationCode,
+    },
   }
 }
 
-/** Drop the package's prior assignment then claim `locationCode`, in one tx on
- *  the locked client. */
+/** Read the package's current assignment row (if any), under its held lock,
+ *  so a failed Sweed write can put it back exactly as it was. */
+async function loadPriorAssignment(
+  client: Queryable,
+  inventoryItemId: string,
+): Promise<PriorAssignmentRow | null> {
+  const result = await client.query<PriorAssignmentRow>(
+    `select location_code, metrc_tag, product_name, assigned_by_user_id, assigned_at
+       from warehouse_location_assignments
+      where dealer_id = $1 and inventory_item_id = $2`,
+    [MIDTOWN_DEALER_ID, inventoryItemId],
+  )
+  return result.rows[0] ?? null
+}
+
+/** Undo a reservation after a failed Sweed write: restore the package's prior
+ *  row verbatim if it had one, else delete the row we just inserted (guarded by
+ *  the code we attempted, so we never touch a row a concurrent run re-created).
+ *  Best-effort — the original Sweed error is what the caller surfaces. */
+async function restoreAssignment(
+  client: Queryable,
+  inventoryItemId: string,
+  attemptedCode: string,
+  prior: PriorAssignmentRow | null,
+): Promise<void> {
+  try {
+    if (prior) {
+      await client.query(
+        `insert into warehouse_location_assignments
+           (dealer_id, location_code, inventory_item_id, metrc_tag, product_name, assigned_by_user_id, assigned_at)
+         values ($1, $2, $3, $4, $5, $6, $7)
+         on conflict (dealer_id, inventory_item_id) do update set
+           location_code = excluded.location_code,
+           metrc_tag = excluded.metrc_tag,
+           product_name = excluded.product_name,
+           assigned_by_user_id = excluded.assigned_by_user_id,
+           assigned_at = excluded.assigned_at`,
+        [
+          MIDTOWN_DEALER_ID,
+          prior.location_code,
+          inventoryItemId,
+          prior.metrc_tag,
+          prior.product_name,
+          prior.assigned_by_user_id,
+          prior.assigned_at,
+        ],
+      )
+    } else {
+      await client.query(
+        `delete from warehouse_location_assignments
+          where dealer_id = $1 and inventory_item_id = $2 and location_code = $3`,
+        [MIDTOWN_DEALER_ID, inventoryItemId, attemptedCode],
+      )
+    }
+  } catch (cleanupError) {
+    console.error(
+      'warehouse/locations: failed to roll back reservation after Sweed write error',
+      cleanupError,
+    )
+  }
+}
+
+/** Upsert the package's assignment to `locationCode` (1-to-1 on the package
+ *  key; a location may hold many packages), in one tx on the locked client. */
 async function reserveAssignment(
   client: Queryable,
   input: AssignWarehouseLocationInput,
@@ -458,16 +570,11 @@ async function reserveAssignment(
   await client.query('begin')
   try {
     await client.query(
-      `delete from warehouse_location_assignments
-        where dealer_id = $1 and inventory_item_id = $2`,
-      [MIDTOWN_DEALER_ID, inventoryItemId],
-    )
-    await client.query(
       `insert into warehouse_location_assignments
          (dealer_id, location_code, inventory_item_id, metrc_tag, product_name, assigned_by_user_id, assigned_at)
        values ($1, $2, $3, $4, $5, $6, now())
-       on conflict (dealer_id, location_code) do update set
-         inventory_item_id = excluded.inventory_item_id,
+       on conflict (dealer_id, inventory_item_id) do update set
+         location_code = excluded.location_code,
          metrc_tag = excluded.metrc_tag,
          product_name = excluded.product_name,
          assigned_by_user_id = excluded.assigned_by_user_id,
@@ -490,28 +597,17 @@ async function reserveAssignment(
   }
 }
 
-function targetMirrorRow(pkg: WarehousePackage): MirrorRow {
-  return {
-    inventory_item_id: pkg.inventoryItemId,
-    product_name: pkg.productName,
-    metrc_tag: pkg.metrcTag,
-    inventory_barcode: pkg.inventoryBarcode,
-    available_qty: pkg.availableQty,
-    stock_location: pkg.stockLocation,
-    internal_track_code: pkg.internalTrackCode,
-    observed_at_max: pkg.observedAt,
-    assigned_location_code: pkg.assignedLocationCode,
-  }
-}
-
-type Resolution =
-  | { kind: 'single'; row: WarehousePackage }
-  | { kind: 'ambiguous'; candidates: WarehouseScanCandidate[] }
-
-async function resolveTargetPackage(
+/**
+ * Resolve the request to the set of in-stock FOR-SALE Midtown packages it
+ * targets. An audit-card tap (`inventoryItemId`) resolves to exactly that one
+ * package; a `scannedCode` resolves to EVERY package whose METRC tag or
+ * package barcode matches (0..n — 1-to-many co-located packages). Throws a 404
+ * when nothing matches.
+ */
+async function resolveTargetPackages(
   db: Queryable,
   input: AssignWarehouseLocationInput,
-): Promise<Resolution> {
+): Promise<WarehousePackage[]> {
   if (input.inventoryItemId) {
     const itemId = input.inventoryItemId.trim()
     const result = await db.query<MirrorRow>(
@@ -525,7 +621,7 @@ async function resolveTargetPackage(
         `Package ${itemId} is not an in-stock FOR-SALE Midtown package (it may have sold out, moved, or been marked not-for-sale).`,
       )
     }
-    return { kind: 'single', row: mirrorRowToPackage(row) }
+    return [mirrorRowToPackage(row)]
   }
 
   const scanned = (input.scannedCode ?? '').trim()
@@ -547,46 +643,5 @@ async function resolveTargetPackage(
       `No in-stock FOR-SALE Midtown package matches the scanned code "${scanned}".`,
     )
   }
-  if (result.rows.length === 1) {
-    return { kind: 'single', row: mirrorRowToPackage(result.rows[0]!) }
-  }
-  return { kind: 'ambiguous', candidates: result.rows.map(mirrorRowToCandidate) }
-}
-
-/**
- * Find an *in-stock* package OTHER than `excludeItemId` whose EFFECTIVE
- * location code is exactly `locationCode`.
- *
- * Both the fresh source (Helios's own assignment record, joined in by
- * BASE_PACKAGE_CTE) and the eventual source (the snapshot mirror's
- * format-valid `internal_track_code`) are considered, via the same
- * `coalesce(assignment, internalTrackCode)` precedence used everywhere else.
- *
- * Crucially this is scoped to BASE_PACKAGE_CTE (in-stock, FOR-SALE,
- * non-trade-sample), so a stale assignment row that points at a package which
- * has since sold out or moved does NOT report the code as occupied — that code
- * is genuinely free for reuse. The SQL regex must stay in lockstep with the JS
- * WAREHOUSE_LOCATION_CODE_REGEX.
- */
-async function findLocationOccupant(
-  db: Queryable,
-  locationCode: string,
-  excludeItemId: string,
-): Promise<WarehouseScanCandidate | null> {
-  // `trim()` mirrors the JS validity check (which trims), so a Sweed value
-  // like 'EDI-A-3 ' is recognised as occupying EDI-A-3 rather than read as free.
-  const result = await db.query<MirrorRow>(
-    `${BASE_PACKAGE_CTE}
-       where cur.inventory_item_id <> $2
-         and coalesce(wla.location_code, case
-               when trim(coalesce(cur.internal_track_code, '')) ~ $3
-               then trim(cur.internal_track_code)
-               else null end) = $4
-       limit 1`,
-    [MIDTOWN_DEALER_ID, excludeItemId, WAREHOUSE_LOCATION_CODE_SQL_REGEX, locationCode],
-  )
-  if (result.rows[0]) {
-    return mirrorRowToCandidate(result.rows[0])
-  }
-  return null
+  return result.rows.map(mirrorRowToPackage)
 }

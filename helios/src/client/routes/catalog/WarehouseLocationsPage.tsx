@@ -336,10 +336,13 @@ function AssignMode() {
   const [manualCode, setManualCode] = useState('')
   const [busy, setBusy] = useState(false)
   const [banner, setBanner] = useState<{ kind: 'ok' | 'err' | 'warn'; message: string } | null>(null)
-  const [candidates, setCandidates] = useState<WarehouseScanCandidate[] | null>(null)
-  const [reassign, setReassign] = useState<{
-    candidate: WarehouseScanCandidate
-    currentLocationCode: string
+  // Locations are 1-to-many: a scan assigns ALL co-located packages by
+  // default. The only thing that prompts is a conflict — a matched package
+  // already sitting at a DIFFERENT valid location — which the operator can
+  // confirm moving here too.
+  const [conflictPrompt, setConflictPrompt] = useState<{
+    conflicts: WarehouseScanCandidate[]
+    assignedPackages: WarehousePackage[]
     pendingScannedCode?: string
     pendingInventoryItemId?: string
   } | null>(null)
@@ -380,54 +383,52 @@ function AssignMode() {
         setBanner({ kind: 'err', message: outcome.error })
         return
       }
-      const data = outcome.data
-      switch (data.status) {
-        case 'assigned': {
-          const label = packageLabel(data.package)
-          setBanner({ kind: 'ok', message: `✓ ${currentCode} → ${label}` })
-          setSession((prev) => [
-            { locationCode: currentCode, label, inventoryItemId: data.package.inventoryItemId },
-            ...prev,
-          ])
-          setCandidates(null)
-          setReassign(null)
-          setManualCode('')
-          advanceRow()
-          return
-        }
-        case 'ambiguous':
-          setCandidates(data.candidates)
-          setBanner({
-            kind: 'warn',
-            message: `That barcode matches ${data.candidates.length} packages — pick the one in this location.`,
-          })
-          return
-        case 'location-occupied': {
-          const next = nextSplit(split)
-          setBanner({
-            kind: 'warn',
-            message: `${currentCode} is already used by ${packageLabel(
-              data.occupant,
-            )}. Add a bin-split suffix to keep codes 1-to-1${next ? ` (try -${next})` : ''}.`,
-          })
-          if (next) setSplit(next)
-          return
-        }
-        case 'already-assigned':
-          setReassign({
-            candidate: data.candidate,
-            currentLocationCode: data.currentLocationCode,
-            pendingScannedCode: target.scannedCode,
-            pendingInventoryItemId: target.inventoryItemId,
-          })
-          setBanner({
-            kind: 'warn',
-            message: `That package is already located at ${data.currentLocationCode}.`,
-          })
-          return
+      const { packages, conflicts, failures } = outcome.data
+      const failNote =
+        failures.length > 0
+          ? ` · ${failures.length} could not be assigned (${failures[0]!.reason})`
+          : ''
+
+      if (conflicts.length === 0) {
+        // Everything the scan matched is now at this location (or already was),
+        // apart from any per-package failures noted in the banner.
+        setBanner({
+          kind: failures.length > 0 ? 'warn' : 'ok',
+          message: summarizeAssigned(currentCode, packages) + failNote,
+        })
+        setSession((prev) => [
+          ...packages.map((p) => ({
+            locationCode: currentCode,
+            label: packageLabel(p),
+            inventoryItemId: p.inventoryItemId,
+          })),
+          ...prev,
+        ])
+        setConflictPrompt(null)
+        setManualCode('')
+        advanceRow()
+        return
       }
+
+      // Some matched packages are already at a different valid location. The
+      // non-conflicting ones (if any) are already assigned server-side; ask
+      // the operator whether to move the strays here too.
+      setConflictPrompt({
+        conflicts,
+        assignedPackages: packages,
+        pendingScannedCode: target.scannedCode,
+        pendingInventoryItemId: target.inventoryItemId,
+      })
+      setBanner({
+        kind: 'warn',
+        message: `${conflicts.length} matched package${
+          conflicts.length === 1 ? ' is' : 's are'
+        } already at another location. Confirm moving ${
+          conflicts.length === 1 ? 'it' : 'them'
+        } to ${currentCode}.${failNote}`,
+      })
     },
-    [advanceRow, currentCode, split],
+    [advanceRow, currentCode],
   )
 
   const handleDetected = useCallback(
@@ -521,41 +522,64 @@ function AssignMode() {
 
       <LiveBarcodeScanner open={scannerOpen} onDetected={handleDetected} onCancel={handleCancel} />
 
-      {candidates ? (
-        <DisambiguationModal
-          candidates={candidates}
-          locationCode={currentCode ?? ''}
-          busy={busy}
-          onPick={(itemId) => void submit({ inventoryItemId: itemId })}
-          onCancel={() => {
-            setCandidates(null)
-            setBanner(null)
-          }}
-        />
-      ) : null}
-
-      {reassign ? (
-        <ConfirmReassignModal
-          info={reassign}
+      {conflictPrompt ? (
+        <ConfirmMoveModal
+          conflicts={conflictPrompt.conflicts}
+          assignedCount={conflictPrompt.assignedPackages.length}
           locationCode={currentCode ?? ''}
           busy={busy}
           onConfirm={() =>
             void submit(
               {
-                scannedCode: reassign.pendingScannedCode,
-                inventoryItemId: reassign.pendingInventoryItemId,
+                scannedCode: conflictPrompt.pendingScannedCode,
+                inventoryItemId: conflictPrompt.pendingInventoryItemId,
               },
               { allowReassign: true },
             )
           }
           onCancel={() => {
-            setReassign(null)
-            setBanner(null)
+            // The non-conflicting packages were already assigned server-side;
+            // record them so the session history reflects reality, then leave
+            // the strays where they are and move on.
+            const left = conflictPrompt.assignedPackages
+            if (left.length > 0) {
+              setSession((prev) => [
+                ...left.map((p) => ({
+                  locationCode: currentCode ?? '',
+                  label: packageLabel(p),
+                  inventoryItemId: p.inventoryItemId,
+                })),
+                ...prev,
+              ])
+            }
+            setBanner({
+              kind: 'warn',
+              message: `Left ${conflictPrompt.conflicts.length} package${
+                conflictPrompt.conflicts.length === 1 ? '' : 's'
+              } at ${
+                conflictPrompt.conflicts.length === 1 ? 'its' : 'their'
+              } current location${left.length > 0 ? `; assigned ${left.length} here` : ''}.`,
+            })
+            setConflictPrompt(null)
+            setManualCode('')
+            advanceRow()
           }}
         />
       ) : null}
     </div>
   )
+}
+
+/** "✓ EDI-A-4 → 5 packages: Stiizy Blue Dream +4 more" */
+function summarizeAssigned(locationCode: string, packages: WarehousePackage[]): string {
+  if (packages.length === 0) {
+    // Defensive: a 200 with no packages and no conflicts shouldn't happen
+    // (an empty match is a 404), but never crash on it.
+    return `✓ ${locationCode}`
+  }
+  const first = packageLabel(packages[0]!)
+  if (packages.length === 1) return `✓ ${locationCode} → ${first}`
+  return `✓ ${locationCode} → ${packages.length} packages: ${first} +${packages.length - 1} more`
 }
 
 function nextSplit(current: string): string | null {
@@ -676,7 +700,10 @@ function AuditCard({ pkg, onAssigned, onError }: AuditCardProps) {
   const { prefix, column, row, split, code, setPrefix, changeColumn, changeRow, setSplit } =
     useLocationPickerState()
   const [busy, setBusy] = useState(false)
-  const [confirmReassign, setConfirmReassign] = useState<string | null>(null)
+  // Set when the package is already at a different valid location and the
+  // operator must confirm moving it here (audit targets exactly one package,
+  // so this is at most one conflict).
+  const [conflict, setConflict] = useState<WarehouseScanCandidate | null>(null)
   const inFlightRef = useRef(false)
 
   const doAssign = useCallback(
@@ -701,32 +728,15 @@ function AuditCard({ pkg, onAssigned, onError }: AuditCardProps) {
         onError(outcome.error)
         return
       }
-      const data = outcome.data
-      switch (data.status) {
-        case 'assigned':
-          onAssigned(`✓ ${code} → ${packageLabel(pkg)}`)
-          return
-        case 'location-occupied': {
-          const next = nextSplit(split)
-          onError(
-            `${code} is already used by ${packageLabel(data.occupant)}. Add a bin-split suffix${
-              next ? ` (try -${next})` : ''
-            }.`,
-          )
-          if (next) setSplit(next)
-          return
-        }
-        case 'already-assigned':
-          setConfirmReassign(data.currentLocationCode)
-          return
-        case 'ambiguous':
-          // Not reachable for an inventoryItemId-based assign, but handle
-          // defensively rather than silently dropping the response.
-          onError('Unexpected ambiguous result for a direct package assignment.')
-          return
+      const { conflicts } = outcome.data
+      if (conflicts.length === 0) {
+        onAssigned(`✓ ${code} → ${packageLabel(pkg)}`)
+        return
       }
+      // Already located elsewhere — confirm the move.
+      setConflict(conflicts[0]!)
     },
-    [code, onAssigned, onError, pkg, split],
+    [code, onAssigned, onError, pkg],
   )
 
   return (
@@ -776,26 +786,16 @@ function AuditCard({ pkg, onAssigned, onError }: AuditCardProps) {
         </div>
       )}
 
-      {confirmReassign ? (
-        <ConfirmReassignModal
-          info={{
-            candidate: {
-              inventoryItemId: pkg.inventoryItemId,
-              productName: pkg.productName,
-              metrcTag: pkg.metrcTag,
-              availableQty: pkg.availableQty,
-              stockLocation: pkg.stockLocation,
-              currentInternalTrackCode: confirmReassign,
-            },
-            currentLocationCode: confirmReassign,
-          }}
+      {conflict ? (
+        <ConfirmMoveModal
+          conflicts={[conflict]}
           locationCode={code ?? ''}
           busy={busy}
           onConfirm={() => {
-            setConfirmReassign(null)
+            setConflict(null)
             void doAssign(true)
           }}
-          onCancel={() => setConfirmReassign(null)}
+          onCancel={() => setConflict(null)}
         />
       ) : null}
     </article>
@@ -806,35 +806,51 @@ function AuditCard({ pkg, onAssigned, onError }: AuditCardProps) {
 /*  Modals                                                                      */
 /* -------------------------------------------------------------------------- */
 
-function DisambiguationModal(props: {
-  candidates: WarehouseScanCandidate[]
+/**
+ * Confirm moving package(s) that are already at a different valid location
+ * into `locationCode`. Used by both the shelf-run (where a scan can surface
+ * several strays) and the audit card (exactly one). Co-located packages that
+ * shared the scan are NOT shown here — they're already assigned by default.
+ */
+function ConfirmMoveModal(props: {
+  conflicts: WarehouseScanCandidate[]
+  assignedCount?: number
   locationCode: string
   busy: boolean
-  onPick: (inventoryItemId: string) => void
+  onConfirm: () => void
   onCancel: () => void
 }) {
-  const { candidates, locationCode, busy, onPick, onCancel } = props
+  const { conflicts, assignedCount = 0, locationCode, busy, onConfirm, onCancel } = props
+  const count = conflicts.length
   return (
     <div className="wh-modal-overlay" role="dialog" aria-modal="true">
       <div className="wh-modal">
-        <h3>Which package is at {locationCode}?</h3>
-        <p className="subtle-copy">That barcode matches more than one in-stock package. Pick the one physically in this location.</p>
+        <h3>
+          Move {count === 1 ? 'this package' : `these ${count} packages`} to {locationCode}?
+        </h3>
+        <p className="subtle-copy">
+          {count === 1 ? 'It is' : 'They are'} already located elsewhere.
+          {assignedCount > 0
+            ? ` ${assignedCount} other package${
+                assignedCount === 1 ? '' : 's'
+              } from this scan ${assignedCount === 1 ? 'was' : 'were'} already assigned to ${locationCode}.`
+            : ''}
+        </p>
         <ul className="wh-candidate-list">
-          {candidates.map((candidate) => (
+          {conflicts.map((candidate) => (
             <li key={candidate.inventoryItemId}>
-              <button
-                type="button"
-                className="ghost-button wh-candidate-btn"
-                disabled={busy}
-                onClick={() => onPick(candidate.inventoryItemId)}
-              >
+              <div className="wh-candidate-btn" style={{ cursor: 'default' }}>
                 <strong>{packageLabel(candidate)}</strong>
                 <span className="subtle-copy">
+                  {candidate.currentInternalTrackCode ? (
+                    <>
+                      at <code>{candidate.currentInternalTrackCode}</code> ·{' '}
+                    </>
+                  ) : null}
                   METRC {metrcSuffix(candidate.metrcTag)}
                   {candidate.availableQty !== null ? ` · qty ${candidate.availableQty}` : ''}
-                  {candidate.stockLocation ? ` · ${candidate.stockLocation}` : ''}
                 </span>
-              </button>
+              </div>
             </li>
           ))}
         </ul>
@@ -842,34 +858,8 @@ function DisambiguationModal(props: {
           <button type="button" className="ghost-button" onClick={onCancel} disabled={busy}>
             Cancel
           </button>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-function ConfirmReassignModal(props: {
-  info: { candidate: WarehouseScanCandidate; currentLocationCode: string }
-  locationCode: string
-  busy: boolean
-  onConfirm: () => void
-  onCancel: () => void
-}) {
-  const { info, locationCode, busy, onConfirm, onCancel } = props
-  return (
-    <div className="wh-modal-overlay" role="dialog" aria-modal="true">
-      <div className="wh-modal">
-        <h3>Move this package's location?</h3>
-        <p>
-          <strong>{packageLabel(info.candidate)}</strong> is already located at{' '}
-          <code>{info.currentLocationCode}</code>. Overwrite it with <code>{locationCode}</code>?
-        </p>
-        <div className="wh-modal-actions">
-          <button type="button" className="ghost-button" onClick={onCancel} disabled={busy}>
-            Cancel
-          </button>
           <button type="button" className="primary-button" onClick={onConfirm} disabled={busy}>
-            {busy ? 'Saving…' : `Move to ${locationCode}`}
+            {busy ? 'Saving…' : `Move ${count === 1 ? '' : `${count} `}to ${locationCode}`}
           </button>
         </div>
       </div>

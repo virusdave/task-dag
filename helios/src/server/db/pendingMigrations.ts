@@ -856,6 +856,14 @@ const SENTINELS: MigrationSentinel[] = [
       'catalog/warehouse-locations packing page (location <-> package codes).',
     check: (db) => tableExists(db, 'warehouse_location_assignments'),
   },
+  {
+    migrationId: '068_warehouse_location_one_to_many',
+    label:
+      'warehouse_location_assignments: dropped the (dealer, location) primary ' +
+      'key so a location can hold many packages (1-to-many); added the ' +
+      '(dealer, location) lookup index.',
+    check: (db) => indexExists(db, 'warehouse_location_assignments_dealer_location_idx'),
+  },
 ]
 
 interface CacheEntry {

@@ -13,14 +13,18 @@
 -- mirror eventually ingests the same internalTrackCode, so this is a
 -- freshness accelerator, not a competing source of truth.
 --
--- Invariants:
---   * PRIMARY KEY (dealer_id, location_code)     -> a location code maps
---     to at most one package.
---   * UNIQUE      (dealer_id, inventory_item_id)  -> a package maps to at
---     most one location code (re-assign deletes the package's old row
---     then inserts the new one).
+-- Invariants (after migration 068):
+--   * UNIQUE (dealer_id, inventory_item_id) -> a package maps to at most one
+--     location code (upsert on this key when (re)assigning). This is the
+--     table's effective key.
+--   * A location code maps to MANY packages (1-to-many): co-located packages
+--     such as a product split across a 4-pack and a 1-pack in one bin all
+--     carry the same code. The (dealer_id, location_code) index is therefore
+--     a plain lookup index, NOT unique.
 --
--- Created by migration 067_warehouse_location_assignments.sql.
+-- Created by migration 067_warehouse_location_assignments.sql; the
+-- (dealer_id, location_code) primary key was dropped and the lookup index
+-- added by migration 068_warehouse_location_one_to_many.sql.
 
 create table if not exists warehouse_location_assignments (
   dealer_id          bigint not null,
@@ -31,6 +35,8 @@ create table if not exists warehouse_location_assignments (
   assigned_by_user_id bigint,
   assigned_at        timestamptz not null default now(),
 
-  primary key (dealer_id, location_code),
   unique (dealer_id, inventory_item_id)
 );
+
+create index if not exists warehouse_location_assignments_dealer_location_idx
+  on warehouse_location_assignments (dealer_id, location_code);
