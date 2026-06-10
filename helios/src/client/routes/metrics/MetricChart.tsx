@@ -71,9 +71,17 @@ export function HelpIcon({ text }: { text: string }): JSX.Element | null {
   const anchorRef = useRef<HTMLSpanElement | null>(null)
   const popRef = useRef<HTMLSpanElement | null>(null)
   const hoverInsideRef = useRef<boolean>(false)
+  // Remembers how the most recent interaction arrived so the click
+  // handler can tell a real touch/pen TAP apart from the synthetic
+  // click a mouse fires after a hover. Defaults to 'mouse' (desktop).
+  const lastPointerTypeRef = useRef<string>('mouse')
   useEffect(() => {
     if (!open) return
-    const onDocClick = (e: MouseEvent): void => {
+    // Close when the operator taps/clicks anywhere outside the icon or
+    // its popover. `pointerdown` (not `mousedown`) so a touch tap-away
+    // closes it on mobile too — mobile only synthesises `mousedown`
+    // after a delay, and not at all while scrolling.
+    const onDocPointerDown = (e: PointerEvent): void => {
       if (
         anchorRef.current &&
         !anchorRef.current.contains(e.target as Node) &&
@@ -83,8 +91,8 @@ export function HelpIcon({ text }: { text: string }): JSX.Element | null {
         setOpen(false)
       }
     }
-    document.addEventListener('mousedown', onDocClick)
-    return () => document.removeEventListener('mousedown', onDocClick)
+    document.addEventListener('pointerdown', onDocPointerDown)
+    return () => document.removeEventListener('pointerdown', onDocPointerDown)
   }, [open])
   useViewportClampedPopover(open, anchorRef, popRef)
   if (!text || text.trim() === '') return null
@@ -92,18 +100,33 @@ export function HelpIcon({ text }: { text: string }): JSX.Element | null {
     <span
       className={`metric-chart-help ${open ? 'is-open' : ''}`}
       ref={anchorRef}
+      onPointerDown={(e) => {
+        lastPointerTypeRef.current = e.pointerType || 'mouse'
+      }}
       onClick={(e) => {
         e.stopPropagation()
+        // On a MOUSE the popover is already driven by hover (pointer
+        // enter/leave below), and the browser also fires a `click`
+        // right after a tap — if we toggled here unconditionally, a
+        // mobile tap would open via the synthetic pointerenter and then
+        // immediately close via this click, so the popover never stuck.
+        // Only treat touch/pen taps (no hover) as a toggle.
+        if (lastPointerTypeRef.current === 'mouse') return
         setOpen((v) => !v)
       }}
-      onMouseEnter={() => {
+      onPointerEnter={(e) => {
+        // Hover-to-open is a mouse affordance only. Touch/pen "enter"
+        // events fire on tap and must NOT auto-open (the click toggle
+        // owns touch).
+        if (e.pointerType !== 'mouse') return
         hoverInsideRef.current = true
         setOpen(true)
       }}
-      onMouseLeave={() => {
+      onPointerLeave={(e) => {
+        if (e.pointerType !== 'mouse') return
         hoverInsideRef.current = false
         // Only auto-close on mouse-leave; touch-tap toggles persist
-        // until the operator taps elsewhere (handled by onDocClick).
+        // until the operator taps elsewhere (handled by onDocPointerDown).
         setTimeout(() => {
           if (!hoverInsideRef.current) setOpen(false)
         }, 80)
