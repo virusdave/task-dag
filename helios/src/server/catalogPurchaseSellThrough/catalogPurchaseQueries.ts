@@ -451,6 +451,11 @@ export async function getCatalogPurchaseList(
     i += 1
     params.push(req.financialStatusNames)
     filters.push(`financial_status_name = any($${i}::text[])`)
+  } else if (!req.includeFullyPaid) {
+    // Hide settled POs by default. Only applies when the operator hasn't
+    // picked an explicit financial-status filter (so selecting "Fully
+    // paid" still surfaces them). Constant clause — safe literal.
+    filters.push(`lower(coalesce(financial_status_name, '')) <> 'fully paid'`)
   }
   if (req.brandNames.length > 0) {
     i += 1

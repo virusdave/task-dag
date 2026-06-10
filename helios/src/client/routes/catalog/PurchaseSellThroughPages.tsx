@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import { Form, Link, useLoaderData, useRevalidator, useSearchParams } from 'react-router-dom'
+import { Form, Link, redirect, useLoaderData, useRevalidator, useSearchParams } from 'react-router-dom'
 
 import {
   CATALOG_PURCHASE_PAYMENT_TYPES,
@@ -46,6 +46,15 @@ const PURCHASES_PATH = buildHeliosModulePath('catalog', 'purchases')
 
 export async function purchaseSellThroughListLoader({ request }: { request: Request }) {
   const url = new URL(request.url)
+  // Default the site filter to Midtown only. We redirect (rather than
+  // default server-side) so the URL, the active filter chip, and the
+  // site facet checkboxes all stay consistent — and the operator can
+  // still pick Bronx / both sites from the filter. Absence of any
+  // `sites` param (fresh load, or after clearing it) re-applies Midtown.
+  if (!url.searchParams.has('sites')) {
+    url.searchParams.set('sites', 'midtown')
+    throw redirect(`${PURCHASES_PATH}?${url.searchParams.toString()}`)
+  }
   return loadJson(`/api/catalog/purchases${url.search}`, CatalogPurchaseListResponseSchema)
 }
 
@@ -84,9 +93,20 @@ const ACTIVE_FILTER_LABELS: Record<string, string> = {
   totalMax: 'PO ≤ $',
 }
 
-function samplesAreIncluded(searchParams: URLSearchParams): boolean {
-  const v = (searchParams.get('includeSamples') ?? '').trim().toLowerCase()
+function flagIsOn(searchParams: URLSearchParams, name: string): boolean {
+  const v = (searchParams.get(name) ?? '').trim().toLowerCase()
   return v === '1' || v === 'true' || v === 'on' || v === 'yes'
+}
+function samplesAreIncluded(searchParams: URLSearchParams): boolean {
+  return flagIsOn(searchParams, 'includeSamples')
+}
+function fullyPaidAreIncluded(searchParams: URLSearchParams): boolean {
+  return flagIsOn(searchParams, 'includeFullyPaid')
+}
+// A user-chosen financial-status filter overrides the default "hide
+// fully paid" behaviour, so the toggle is only meaningful without one.
+function financialStatusFilterIsExplicit(searchParams: URLSearchParams): boolean {
+  return searchParams.getAll('financialStatusNames').some((v) => v.trim().length > 0)
 }
 
 export function PurchaseSellThroughListPage(): JSX.Element {
@@ -145,6 +165,18 @@ export function PurchaseSellThroughListPage(): JSX.Element {
         <p className="purchase-muted purchase-samples-note">
           Hiding sample drops (POs &lt; $2).{' '}
           <Link to={buildHref({ includeSamples: '1', page: '1' })}>Include samples</Link>
+        </p>
+      )}
+
+      {financialStatusFilterIsExplicit(searchParams) ? null : fullyPaidAreIncluded(searchParams) ? (
+        <p className="purchase-muted purchase-samples-note">
+          Including fully-paid POs.{' '}
+          <Link to={buildHref({ includeFullyPaid: null, page: '1' })}>Hide fully paid</Link>
+        </p>
+      ) : (
+        <p className="purchase-muted purchase-samples-note">
+          Hiding fully-paid POs.{' '}
+          <Link to={buildHref({ includeFullyPaid: '1', page: '1' })}>Include fully paid</Link>
         </p>
       )}
 

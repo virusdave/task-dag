@@ -121,6 +121,23 @@ export const CatalogPurchaseListRequestSchema = z.object({
         return norm === '1' || norm === 'true' || norm === 'on' || norm === 'yes'
       }),
   ),
+  // Fully-paid POs are settled — the operator opens this page to work
+  // outstanding balances, so we hide them by default and let the user
+  // opt them back in with `?includeFullyPaid=1`. Skipped when the user
+  // has explicitly picked their own financialStatusNames filter (so an
+  // explicit "Fully paid" selection still shows them).
+  includeFullyPaid: z.preprocess(
+    (v) => (typeof v === 'string' && v.trim().length === 0 ? undefined : v),
+    z
+      .union([z.boolean(), z.string()])
+      .optional()
+      .transform((value) => {
+        if (value === undefined) return false
+        if (typeof value === 'boolean') return value
+        const norm = value.trim().toLowerCase()
+        return norm === '1' || norm === 'true' || norm === 'on' || norm === 'yes'
+      }),
+  ),
   sort: CatalogPurchaseListSortSchema.default('deliveryDate'),
   // Default to oldest-first: when the operator opens the list to plan
   // vendor payments / extensions, the most actionable POs are the
