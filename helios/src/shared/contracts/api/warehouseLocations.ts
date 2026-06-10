@@ -135,8 +135,13 @@ export type WarehouseLocationsStateResponse = z.infer<
 export const WarehouseLocationAssignRequestSchema = z
   .object({
     locationCode: WarehouseLocationCodeSchema,
-    /** Where the request originated — for the audit trail only. */
-    source: z.enum(['shelf-scan', 'audit']),
+    /**
+     * Where the request originated — for the audit trail only.
+     *  - `shelf-scan`: the Warehouse Locations packing flow (scan → assign).
+     *  - `audit`: the Warehouse Locations audit list (tap an unlocated package).
+     *  - `images-page`: the per-package "Set shelf" action on Images & Barcodes.
+     */
+    source: z.enum(['shelf-scan', 'audit', 'images-page']),
     /** A scanned barcode (METRC tag or package barcode) to resolve to package(s). */
     scannedCode: z.string().trim().min(1).max(128).optional(),
     /** A specific package to act on (audit-card tap). */

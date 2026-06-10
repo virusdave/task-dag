@@ -24,6 +24,12 @@ import {
   type ImagesAndBarcodesSiteEntry,
 } from './catalogSidebarSubtree.js'
 import { LiveBarcodeScanner } from './LiveBarcodeScanner.js'
+import {
+  LocationPicker,
+  postAssign,
+  useLocationPickerState,
+  type AssignOutcome,
+} from './warehouseLocationPicker.js'
 
 type CardMode = 'group' | 'variants' | 'barcode'
 
@@ -1206,13 +1212,22 @@ function PackagesPanel(props: {
   const lots = variant.lots ?? []
   const [pendingLot, setPendingLot] = useState<CatalogMaintenancePackageLot | null>(null)
   const [busy, setBusy] = useState(false)
-
-  if (lots.length === 0) {
-    // Live verify hadn't returned per-lot detail (or the server
-    // failed open). Hide the panel entirely — the operator can still
-    // re-trigger Sweed via the existing "Fix cache" button.
-    return null
-  }
+  // Optimistic shelf overrides keyed by inventory-item id. The "Set shelf"
+  // flow assigns exactly one package and (unlike Move to Inspection) does NOT
+  // re-fetch the whole survey, so we patch the displayed shelf locally for
+  // instant feedback.
+  const [shelfByItemId, setShelfByItemId] = useState<Record<string, string>>({})
+  // Drop the optimistic overrides whenever a fresh survey arrives (new `lots`
+  // reference): server data is now authoritative, so we must not keep masking
+  // it with a possibly-stale local value (e.g. another operator re-shelved it).
+  useEffect(() => {
+    setShelfByItemId({})
+  }, [variant.lots])
+  // Shelf assignment is Midtown-only: the assign route pins the Midtown dealer
+  // server-side, so offering it on Bronx lots would silently write the wrong
+  // store. Restrict to FOR-SALE, non-trade-sample Midtown lots.
+  const canSetShelf = (lot: CatalogMaintenancePackageLot): boolean =>
+    siteKey === 'midtown' && lot.isForSale && !lot.isTradeSample
 
   const handleConfirm = useCallback(async () => {
     if (!pendingLot || !dealer) return
@@ -1244,6 +1259,14 @@ function PackagesPanel(props: {
     }
   }, [dealer, onError, onMoved, pendingLot, variant])
 
+  if (lots.length === 0) {
+    // Live verify hadn't returned per-lot detail (or the server failed open).
+    // Hide the panel entirely — the operator can still re-trigger Sweed via the
+    // existing "Fix cache" button. (Early return AFTER all hooks so hook order
+    // stays stable even if a survey refresh flips lots from empty to non-empty.)
+    return null
+  }
+
   return (
     <div className="catalog-maintenance-packages">
       <span className="subtle-copy">Packages:</span>
@@ -1259,6 +1282,16 @@ function PackagesPanel(props: {
               {lot.isTradeSample ? ' · trade sample' : ''}
               {!lot.isForSale ? ' · NOT FOR SALE' : ''}
             </span>
+            {canSetShelf(lot) ? (
+              <ShelfControl
+                itemId={lot.itemId}
+                currentShelf={shelfByItemId[lot.itemId] ?? lot.warehouseLocationCode}
+                onAssigned={(code) =>
+                  setShelfByItemId((prev) => ({ ...prev, [lot.itemId]: code }))
+                }
+                onError={onError}
+              />
+            ) : null}
             <button
               type="button"
               className="catalog-maintenance-package-move-btn"
@@ -1306,6 +1339,232 @@ function describeMoveOutcome(
     )} → ${target} (${movedCount} lot${movedCount === 1 ? '' : 's'}).`
   }
   return `Nothing to move for ${label} — Sweed already shows zero stock. Refreshed cache.`
+}
+
+/**
+ * Per-package "Set shelf" / "Change shelf" control shown under a lot row on
+ * the Images & Barcodes page (Midtown FOR-SALE lots only). Reuses the exact
+ * warehouse-page shelf picker + assign route so the two never drift.
+ *
+ * Flow: tap "Set/Change shelf" → inline picker → Save → POST the shared
+ * /api/warehouse-locations/assign with this one `inventoryItemId`. On success
+ * the shelf line updates optimistically (no full survey re-fetch). If the
+ * package is already at a DIFFERENT valid shelf, the server reports a conflict
+ * (it does NOT silently overwrite) and we show a plain two-choice modal;
+ * "Update" re-submits with `allowReassign`. Real write failures page Dave
+ * server-side (see registerWarehouseLocationsRoutes); the operator just sees a
+ * friendly error.
+ */
+function ShelfControl(props: {
+  itemId: string
+  currentShelf: string | null
+  onAssigned: (code: string) => void
+  onError: (message: string) => void
+}) {
+  const { itemId, currentShelf, onAssigned, onError } = props
+  const [open, setOpen] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [conflict, setConflict] = useState<{ existing: string; target: string } | null>(null)
+  // Closes the double-tap / Enter race the `disabled`-on-busy buttons can't
+  // fully close (React state lags the event).
+  const inFlight = useRef(false)
+
+  const submit = useCallback(
+    async (code: string, allowReassign: boolean) => {
+      if (inFlight.current) return
+      inFlight.current = true
+      setBusy(true)
+      let outcome: AssignOutcome
+      try {
+        outcome = await postAssign({
+          locationCode: code,
+          source: 'images-page',
+          inventoryItemId: itemId,
+          allowReassign,
+        })
+      } catch (error) {
+        // postAssign catches its own transport/parse errors and returns
+        // { ok: false }, so reaching here is a genuinely unexpected client
+        // fault — report it (which pages Dave server-side) and surface a
+        // friendly, actionable message.
+        const raw = error instanceof Error ? error.message : String(error)
+        reportClientError({
+          context: 'catalog.maintenance.shelf-set',
+          message: raw,
+          detail: { itemId, code },
+        })
+        onError('Couldn’t set the shelf right now. Dave has been paged — try again in a moment.')
+        return
+      } finally {
+        inFlight.current = false
+        setBusy(false)
+      }
+      if (!outcome.ok) {
+        if (outcome.status === undefined) {
+          // No HTTP status → the request never reached the server (network /
+          // parse). Dave wasn't paged server-side, so report it (which pages
+          // Dave) and show a friendly, actionable message.
+          reportClientError({
+            context: 'catalog.maintenance.shelf-set',
+            message: outcome.error,
+            detail: { itemId, code },
+          })
+          onError('Couldn’t set the shelf right now. Dave has been paged — try again in a moment.')
+        } else if (outcome.status >= 500) {
+          // Real write failure — already paged Dave server-side; spare the
+          // operator the raw Sweed error.
+          onError('Couldn’t set the shelf right now. Dave has been paged — try again in a moment.')
+        } else {
+          // User-correctable 4xx (bad code, package no longer FOR-SALE): show
+          // the server's specific, actionable message as-is.
+          onError(outcome.error)
+        }
+        return
+      }
+      const { packages, conflicts, failures } = outcome.data
+      if (conflicts.length > 0) {
+        // We target exactly one package, so at most one conflict. The server
+        // only raises a conflict for a package already at a DIFFERENT *valid*
+        // shelf, so `currentInternalTrackCode` is always present; guard anyway
+        // rather than show the operator a fake "(unknown)" shelf.
+        const existing = conflicts[0]!.currentInternalTrackCode
+        if (!existing) {
+          onError('Couldn’t set the shelf — the package’s current shelf is unclear. Please retry.')
+          return
+        }
+        setConflict({ existing, target: code })
+        return
+      }
+      if (packages.length === 0) {
+        // Defensive: the single-item path returns a 404 (→ !ok) when nothing
+        // matches, so an empty success shouldn't happen — never crash on it.
+        onError(failures[0]?.reason ?? 'Couldn’t set the shelf — no package was updated.')
+        return
+      }
+      setConflict(null)
+      setOpen(false)
+      onAssigned(code)
+    },
+    [itemId, onAssigned, onError],
+  )
+
+  return (
+    <div className="catalog-maintenance-shelf">
+      <span className="catalog-maintenance-shelf-status subtle-copy">
+        Shelf: {currentShelf ? <code>{currentShelf}</code> : 'not set'}
+      </span>
+      <button
+        type="button"
+        className="catalog-maintenance-shelf-btn"
+        disabled={busy}
+        onClick={() => setOpen((value) => !value)}
+      >
+        {open ? 'Close' : currentShelf ? 'Change shelf' : 'Set shelf'}
+      </button>
+      {open ? (
+        <ShelfEditor
+          // Remount when the saved shelf changes so the picker re-seeds from
+          // the latest value (useLocationPickerState reads initialCode once).
+          key={currentShelf ?? '__none__'}
+          currentShelf={currentShelf}
+          busy={busy}
+          onCancel={() => setOpen(false)}
+          onSave={(code) => void submit(code, false)}
+        />
+      ) : null}
+      {conflict ? (
+        <ShelfConflictModal
+          existing={conflict.existing}
+          target={conflict.target}
+          busy={busy}
+          onKeep={() => {
+            // Reflect the package's real (server-reported) shelf so the row
+            // stops saying "not set" after the operator declines the move.
+            onAssigned(conflict.existing)
+            setConflict(null)
+            setOpen(false)
+          }}
+          onUpdate={() => void submit(conflict.target, true)}
+        />
+      ) : null}
+    </div>
+  )
+}
+
+/** Inline shelf picker (the warehouse picker + a Save/Cancel row). Mounted only
+ *  while the editor is open; seeds from the package's current shelf. */
+function ShelfEditor(props: {
+  currentShelf: string | null
+  busy: boolean
+  onCancel: () => void
+  onSave: (code: string) => void
+}) {
+  const { currentShelf, busy, onCancel, onSave } = props
+  const { prefix, column, row, split, code, setPrefix, changeColumn, changeRow, setSplit } =
+    useLocationPickerState(currentShelf)
+  return (
+    <div className="catalog-maintenance-shelf-editor">
+      <LocationPicker
+        prefix={prefix}
+        column={column}
+        row={row}
+        split={split}
+        onPrefix={setPrefix}
+        onColumn={changeColumn}
+        onRow={changeRow}
+        onSplit={setSplit}
+      />
+      <div className="wh-current" aria-live="polite">
+        <span className="wh-current-label">New shelf</span>
+        <span className="wh-current-code">{code ?? '—'}</span>
+      </div>
+      <div className="catalog-maintenance-shelf-actions">
+        <button type="button" className="ghost-button" onClick={onCancel} disabled={busy}>
+          Cancel
+        </button>
+        <button
+          type="button"
+          className="primary-button"
+          disabled={!code || busy}
+          onClick={() => code && onSave(code)}
+        >
+          {busy ? 'Saving…' : 'Save shelf'}
+        </button>
+      </div>
+    </div>
+  )
+}
+
+/** Plain two-choice conflict modal (no typed confirmation — moving a shelf is
+ *  cheap and reversible). Wording is written for nontechnical floor staff. */
+function ShelfConflictModal(props: {
+  existing: string
+  target: string
+  busy: boolean
+  onKeep: () => void
+  onUpdate: () => void
+}) {
+  const { existing, target, busy, onKeep, onUpdate } = props
+  return (
+    <div className="wh-modal-overlay" role="dialog" aria-modal="true">
+      <div className="wh-modal">
+        <h3>This package already has a shelf</h3>
+        <p>
+          This package is already listed at shelf <code>{existing}</code>. If you’re holding it and
+          want to change where it lives, move it to <code>{target}</code>. Otherwise keep it at{' '}
+          <code>{existing}</code>.
+        </p>
+        <div className="wh-modal-actions">
+          <button type="button" className="ghost-button" onClick={onKeep} disabled={busy}>
+            Keep at {existing}
+          </button>
+          <button type="button" className="primary-button" onClick={onUpdate} disabled={busy}>
+            {busy ? 'Moving…' : `Move to ${target}`}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
 }
 
 /**

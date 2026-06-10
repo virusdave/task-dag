@@ -1,25 +1,28 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 
 import {
-  WAREHOUSE_LOCATION_PREFIXES,
-  WarehouseLocationAssignResponseSchema,
   WarehouseLocationsStateResponseSchema,
-  isValidWarehouseLocationCode,
-  type WarehouseLocationAssignResponse,
   type WarehouseLocationsStateResponse,
   type WarehousePackage,
-  type WarehouseLocationPrefix,
   type WarehouseScanCandidate,
 } from '../../../shared/contracts/index.js'
 import { buildAppPath } from '../../app/paths.js'
 import { Pill } from '../../components/Pill.js'
 import { useRegisterCatalogSidebarSubtree } from './catalogSidebarSubtree.js'
 import { LiveBarcodeScanner } from './LiveBarcodeScanner.js'
+import {
+  LocationPicker,
+  SPLIT_OPTIONS,
+  metrcSuffix,
+  postAssign,
+  readError,
+  useLocationPickerState,
+  type AssignBody,
+  type AssignOutcome,
+} from './warehouseLocationPicker.js'
 
 type Mode = 'assign' | 'audit'
-
-const SPLIT_OPTIONS = ['', 'a', 'b', 'c', 'd', 'e', 'f'] as const
 
 /* -------------------------------------------------------------------------- */
 /*  Page shell + mode tabs                                                      */
@@ -80,174 +83,8 @@ export function WarehouseLocationsPage() {
 /*  Assign helpers                                                              */
 /* -------------------------------------------------------------------------- */
 
-interface AssignBody {
-  locationCode: string
-  source: 'shelf-scan' | 'audit'
-  scannedCode?: string
-  inventoryItemId?: string
-  allowReassign?: boolean
-}
-
-type AssignOutcome =
-  | { ok: true; data: WarehouseLocationAssignResponse }
-  | { ok: false; error: string }
-
-async function postAssign(body: AssignBody): Promise<AssignOutcome> {
-  try {
-    const response = await fetch(buildAppPath('/api/warehouse-locations/assign'), {
-      method: 'POST',
-      credentials: 'same-origin',
-      headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    })
-    if (!response.ok) {
-      const error = await readError(response)
-      return { ok: false, error }
-    }
-    const data = WarehouseLocationAssignResponseSchema.parse(await response.json())
-    return { ok: true, data }
-  } catch (error) {
-    return { ok: false, error: error instanceof Error ? error.message : String(error) }
-  }
-}
-
-async function readError(response: Response): Promise<string> {
-  try {
-    const payload = (await response.json()) as { error?: string }
-    if (typeof payload.error === 'string' && payload.error.length > 0) return payload.error
-  } catch {
-    /* fall through */
-  }
-  return `${response.status} ${response.statusText}`
-}
-
-function buildCode(
-  prefix: WarehouseLocationPrefix | null,
-  column: string,
-  row: number,
-  split: string,
-): string | null {
-  if (!prefix) return null
-  if (!/^[A-Z]$/.test(column)) return null
-  if (!Number.isInteger(row) || row < 1) return null
-  const code = `${prefix}-${column}-${row}${split ? `-${split}` : ''}`
-  return isValidWarehouseLocationCode(code) ? code : null
-}
-
-function metrcSuffix(tag: string | null): string {
-  if (!tag) return '—'
-  const cleaned = tag.replace(/\s+/g, '')
-  return cleaned.length <= 6 ? cleaned : `…${cleaned.slice(-6)}`
-}
-
 function packageLabel(p: WarehousePackage | WarehouseScanCandidate): string {
   return p.productName ?? `Item #${p.inventoryItemId}`
-}
-
-/* -------------------------------------------------------------------------- */
-/*  Location picker (shared by assign + audit)                                  */
-/* -------------------------------------------------------------------------- */
-
-interface LocationPickerProps {
-  prefix: WarehouseLocationPrefix | null
-  column: string
-  row: number
-  split: string
-  onPrefix: (p: WarehouseLocationPrefix) => void
-  onColumn: (c: string) => void
-  onRow: (r: number) => void
-  onSplit: (s: string) => void
-}
-
-function LocationPicker(props: LocationPickerProps) {
-  const { prefix, column, row, split, onPrefix, onColumn, onRow, onSplit } = props
-  const shiftColumn = (delta: number) => {
-    const next = String.fromCharCode(
-      Math.min(90, Math.max(65, column.charCodeAt(0) + delta)),
-    )
-    // Don't fire (and reset row/split) when already clamped at A/Z.
-    if (next !== column) onColumn(next)
-  }
-  const shiftRow = (next: number) => {
-    if (next !== row) onRow(next)
-  }
-  return (
-    <div className="wh-picker">
-      <div className="wh-picker-row">
-        <span className="wh-picker-label">Category</span>
-        <div className="inline-row wrap-row wh-chip-row">
-          {WAREHOUSE_LOCATION_PREFIXES.map((entry) => (
-            <button
-              key={entry.prefix}
-              type="button"
-              className={`ghost-button wh-chip${prefix === entry.prefix ? ' is-active' : ''}`}
-              onClick={() => onPrefix(entry.prefix)}
-              title={entry.label}
-            >
-              {entry.prefix}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      <div className="wh-picker-row">
-        <span className="wh-picker-label">Column</span>
-        <div className="wh-stepper">
-          <button type="button" className="ghost-button wh-step-btn" onClick={() => shiftColumn(-1)} aria-label="Previous column">
-            −
-          </button>
-          <span className="wh-step-value">{column}</span>
-          <button type="button" className="ghost-button wh-step-btn" onClick={() => shiftColumn(1)} aria-label="Next column">
-            +
-          </button>
-        </div>
-      </div>
-
-      <div className="wh-picker-row">
-        <span className="wh-picker-label">Row</span>
-        <div className="wh-stepper">
-          <button
-            type="button"
-            className="ghost-button wh-step-btn"
-            onClick={() => shiftRow(Math.max(1, row - 1))}
-            aria-label="Previous row"
-          >
-            −
-          </button>
-          <input
-            type="number"
-            inputMode="numeric"
-            min={1}
-            className="wh-row-input"
-            value={row}
-            onChange={(event) => {
-              const next = Number.parseInt(event.target.value, 10)
-              onRow(Number.isInteger(next) && next >= 1 ? next : 1)
-            }}
-          />
-          <button type="button" className="ghost-button wh-step-btn" onClick={() => shiftRow(row + 1)} aria-label="Next row">
-            +
-          </button>
-        </div>
-      </div>
-
-      <div className="wh-picker-row">
-        <span className="wh-picker-label">Bin split</span>
-        <div className="inline-row wrap-row wh-chip-row">
-          {SPLIT_OPTIONS.map((option) => (
-            <button
-              key={option || 'none'}
-              type="button"
-              className={`ghost-button wh-chip${split === option ? ' is-active' : ''}`}
-              onClick={() => onSplit(option)}
-            >
-              {option === '' ? 'none' : option}
-            </button>
-          ))}
-        </div>
-      </div>
-    </div>
-  )
 }
 
 /* -------------------------------------------------------------------------- */
@@ -258,65 +95,6 @@ interface SessionEntry {
   locationCode: string
   label: string
   inventoryItemId: string
-}
-
-interface LocationPickerState {
-  prefix: WarehouseLocationPrefix | null
-  column: string
-  row: number
-  split: string
-  code: string | null
-  setPrefix: (p: WarehouseLocationPrefix) => void
-  changeColumn: (c: string) => void
-  changeRow: (r: number) => void
-  setSplit: (s: string) => void
-  advance: () => void
-}
-
-/**
- * Shared prefix/column/row/split state for both the shelf-run and audit
- * pickers, with the operator's traversal rules baked in:
- *   - changing the COLUMN starts a fresh column → row 1, no bin split;
- *   - changing the ROW keeps you in split mode but jumps to the first bin →
- *     if a split was set it returns to 'a', otherwise it stays none;
- *   - `advance` ("next location") walks the bin-split letters when the row is
- *     split (a → b → …), otherwise steps to the next row. Exhausting the
- *     letters rolls to the next row, restarting at bin 'a'.
- */
-function useLocationPickerState(): LocationPickerState {
-  const [prefix, setPrefix] = useState<WarehouseLocationPrefix | null>(null)
-  const [column, setColumn] = useState('A')
-  const [row, setRow] = useState(1)
-  const [split, setSplit] = useState('')
-
-  const changeColumn = useCallback((c: string) => {
-    setColumn(c)
-    setRow(1)
-    setSplit('')
-  }, [])
-
-  const changeRow = useCallback((r: number) => {
-    setRow(r)
-    setSplit((s) => (s === '' ? '' : 'a'))
-  }, [])
-
-  const advance = useCallback(() => {
-    if (split === '') {
-      setRow((r) => r + 1)
-      return
-    }
-    const next = nextSplit(split)
-    if (next) {
-      setSplit(next)
-    } else {
-      setRow((r) => r + 1)
-      setSplit('a')
-    }
-  }, [split])
-
-  const code = useMemo(() => buildCode(prefix, column, row, split), [prefix, column, row, split])
-
-  return { prefix, column, row, split, code, setPrefix, changeColumn, changeRow, setSplit, advance }
 }
 
 function AssignMode() {
@@ -580,14 +358,6 @@ function summarizeAssigned(locationCode: string, packages: WarehousePackage[]): 
   const first = packageLabel(packages[0]!)
   if (packages.length === 1) return `✓ ${locationCode} → ${first}`
   return `✓ ${locationCode} → ${packages.length} packages: ${first} +${packages.length - 1} more`
-}
-
-function nextSplit(current: string): string | null {
-  if (current === '') return 'a'
-  if (current.length === 1 && current >= 'a' && current < 'z') {
-    return String.fromCharCode(current.charCodeAt(0) + 1)
-  }
-  return null
 }
 
 /* -------------------------------------------------------------------------- */

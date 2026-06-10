@@ -3105,6 +3105,73 @@ a.tree-nav-branch-label.is-link,
   }
 }
 
+/* Per-package list under a variant row (Move to Inspection + Set shelf). */
+.catalog-maintenance-packages {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin-top: 0.5rem;
+}
+.catalog-maintenance-package-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.catalog-maintenance-package-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem 0.6rem;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+}
+.catalog-maintenance-package-move-btn {
+  min-height: 40px;
+  margin-left: auto;
+}
+
+/* Per-package "Set shelf" / "Change shelf" control. */
+.catalog-maintenance-shelf {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem 0.6rem;
+  flex: 1 1 100%;
+}
+.catalog-maintenance-shelf-status code {
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.catalog-maintenance-shelf-btn {
+  min-height: 40px;
+}
+.catalog-maintenance-shelf-editor {
+  flex: 1 1 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-top: 0.4rem;
+  padding: 0.75rem;
+  border: 1px solid var(--panel-border);
+  border-radius: 10px;
+  background: rgba(43, 108, 176, 0.05);
+}
+.catalog-maintenance-shelf-editor .wh-current {
+  margin: 0.25rem 0;
+}
+.catalog-maintenance-shelf-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+}
+.catalog-maintenance-shelf-actions button {
+  min-height: 44px;
+}
+
 /* Helios → Catalog → Warehouse Locations (mobile-first packing) */
 .wh-page {
   max-width: 720px;

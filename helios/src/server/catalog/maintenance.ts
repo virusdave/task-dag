@@ -43,6 +43,7 @@ import { z } from 'zod'
 import {
   buildCatalogGroupModuleScope,
   HELIOS_PENDING_PURCHASE_SITE_DEALERS,
+  isValidWarehouseLocationCode,
   type CatalogMaintenanceCacheRepairResponse,
   type CatalogMaintenanceFatalBanner,
   type CatalogMaintenanceFatalReason,
@@ -221,6 +222,10 @@ const LiveVerifyItemSchema = z
     isNotForSale: z.boolean().nullable().optional(),
     isAvailableOnline: z.boolean().nullable().optional(),
     externalTrackCode: z.string().nullable().optional(),
+    // Sweed's free-form per-package code. We repurpose it as the warehouse
+    // SHELF code (PREFIX-COL-ROW[-split]); only surfaced on the lot when it
+    // parses as a valid shelf code, so legacy junk never shows as a shelf.
+    internalTrackCode: z.string().nullable().optional(),
     stockLocation: z
       .object({
         id: z.coerce.number().int().optional(),
@@ -356,6 +361,15 @@ async function liveVerifyCandidateSet(
                 if (isForSale && typeof availableQty === 'number' && availableQty > 0) {
                   sawForSaleLot = true
                 }
+                // Surface the package's current shelf only when its
+                // internalTrackCode actually parses as a warehouse location
+                // code; legacy junk (e.g. a lower-cased METRC tag) reads as
+                // "not located", matching the warehouse page's effectiveCode.
+                const rawInternalTrackCode = nonEmptyString(item.internalTrackCode ?? null)
+                const warehouseLocationCode =
+                  rawInternalTrackCode && isValidWarehouseLocationCode(rawInternalTrackCode)
+                    ? rawInternalTrackCode
+                    : null
                 builtLots.push({
                   itemId: String(itemIdRaw),
                   externalTrackCode: nonEmptyString(item.externalTrackCode ?? null),
@@ -366,6 +380,7 @@ async function liveVerifyCandidateSet(
                   availableQty,
                   isForSale,
                   isTradeSample,
+                  warehouseLocationCode,
                 })
               }
               // Merge with anything seen on a prior grouped-feed row for

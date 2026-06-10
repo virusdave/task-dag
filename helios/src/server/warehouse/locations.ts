@@ -213,7 +213,7 @@ function extractRpcResult(raw: unknown): unknown {
 
 export interface AssignWarehouseLocationInput {
   locationCode: string
-  source: 'shelf-scan' | 'audit'
+  source: 'shelf-scan' | 'audit' | 'images-page'
   scannedCode?: string
   inventoryItemId?: string
   allowReassign?: boolean
@@ -401,17 +401,32 @@ async function assignOnePackage(
   const detail = SweedItemDetailSchema.parse(extractRpcResult(detailRaw))
   const previousInternalTrackCode = detail.internalTrackCode?.trim() ?? null
 
+  // Capture Helios's own prior assignment now, under the package's advisory
+  // lock — it's needed both for the conflict guard below and to restore the row
+  // if the Sweed write later fails.
+  const priorRow = await loadPriorAssignment(client, inventoryItemId)
+
   // 2. Conflict guard. A package already at a DIFFERENT valid location is a
   //    real conflict (co-located packages sharing this code are NOT — that's
   //    the whole point of 1-to-many). Surface it for confirmation rather than
   //    silently moving it, unless the operator already confirmed the move.
   //    Checked before any write/reservation, so the skip leaves state untouched.
-  if (
-    !input.allowReassign &&
-    previousInternalTrackCode !== null &&
-    previousInternalTrackCode !== locationCode &&
-    isValidWarehouseLocationCode(previousInternalTrackCode)
-  ) {
+  //
+  //    The "current valid location" is live Sweed's internalTrackCode when it
+  //    parses as a shelf code, ELSE Helios's own freshly-reserved code. The
+  //    Helios fallback closes a race: two serialized assigns of the same
+  //    package (the advisory lock orders them) where the second reads stale
+  //    Sweed data after the first's write hasn't propagated — without it the
+  //    second would silently overwrite the first's valid shelf.
+  const liveValidCode =
+    previousInternalTrackCode && isValidWarehouseLocationCode(previousInternalTrackCode)
+      ? previousInternalTrackCode
+      : null
+  const heliosPriorCode = priorRow?.location_code?.trim() ?? null
+  const heliosValidCode =
+    heliosPriorCode && isValidWarehouseLocationCode(heliosPriorCode) ? heliosPriorCode : null
+  const currentValidCode = liveValidCode ?? heliosValidCode
+  if (!input.allowReassign && currentValidCode !== null && currentValidCode !== locationCode) {
     return {
       kind: 'conflict',
       conflict: {
@@ -420,7 +435,7 @@ async function assignOnePackage(
         metrcTag: target.metrcTag,
         availableQty: target.availableQty,
         stockLocation: target.stockLocation,
-        currentInternalTrackCode: previousInternalTrackCode,
+        currentInternalTrackCode: currentValidCode,
       },
     }
   }
@@ -428,8 +443,7 @@ async function assignOnePackage(
   // 3. Reserve the code in Helios's own table FIRST (immediately consistent).
   //    A package holds at most one location, so this upserts on the package
   //    key (1-to-1 package→location); many packages may share a location.
-  //    Capture any prior row first so a failed Sweed write can restore it.
-  const priorRow = await loadPriorAssignment(client, inventoryItemId)
+  //    (`priorRow`, captured above, lets a failed Sweed write restore the row.)
   await reserveAssignment(client, input, locationCode, target, inventoryItemId)
 
   // 4. Write Sweed. Skip the RPC when the code is already exactly this

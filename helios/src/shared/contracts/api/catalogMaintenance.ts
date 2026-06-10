@@ -38,6 +38,20 @@ export const CatalogMaintenancePackageLotSchema = z.object({
   availableQty: z.number().nullable(),
   isForSale: z.boolean(),
   isTradeSample: z.boolean(),
+  /**
+   * The package's current warehouse SHELF location code
+   * (PREFIX-COLUMN-ROW[-split], e.g. `EDI-A-4`) IF its Sweed
+   * `internalTrackCode` parses as a valid shelf code, else null. Legacy
+   * junk values (e.g. a lower-cased METRC tag that was once written into
+   * internalTrackCode) are normalized to null server-side so the UI only
+   * ever shows a real shelf. Rides the same grouped-inventory pull that
+   * builds the rest of the lot, so the Images & Barcodes page can render
+   * "Shelf: …/Set shelf" with no extra fetch.
+   *
+   * Defaulted so an older server build that hasn't shipped the field yet
+   * doesn't break client-side parse during a rolling redeploy.
+   */
+  warehouseLocationCode: z.string().nullable().default(null),
 })
 export type CatalogMaintenancePackageLot = z.infer<typeof CatalogMaintenancePackageLotSchema>
 
