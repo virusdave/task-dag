@@ -674,6 +674,20 @@ async function enqueueScheduledLitalertsProductsRawJsonDrain(
       module: 'config',
       payload: {
         trigger: 'scheduled',
+        // Accelerate convergence of the (multi-million-row) raw_*_json
+        // backlog so the F3 column-drop follow-up isn't weeks away. We
+        // raise throughput by doing MORE small batches, not bigger
+        // ones: batchSize stays modest (1000, well under the 2000 cap)
+        // so each FOR UPDATE SKIP LOCKED transaction keeps its lock /
+        // WAL / connection-hold footprint tiny, and the per-batch
+        // lock_timeout=2s + statement_timeout=10s + 100ms inter-batch
+        // breather + 45s wall-clock ceiling + best-effort priority +
+        // off-hours (02:00-08:00) window all still apply. Net effect:
+        // ~8x throughput (~40k rows/tick) with no change to any live
+        // serving safeguard. ~40 batches * (small update + breather)
+        // completes well within the 45s invocation cap.
+        batchSize: 1000,
+        maxBatches: 40,
       },
       requestedByUserId: null,
       runAt: now,
