@@ -13,6 +13,8 @@ import {
   type MetricDefSummary,
   type MetricGrantKey,
   type MetricListResponse,
+  type MetricsTabDefaults,
+  type MetricsViewDefaults,
   type SessionEnvelope,
 } from '../../../shared/contracts/index.js'
 import { userHasMetricGrant } from '../../../shared/domain/metricGrants.js'
@@ -28,7 +30,21 @@ import {
 } from '../../app/nyTime.js'
 
 import { BudtenderPerformanceTab } from './BudtenderPerformanceTab.js'
-import { CatalogAnalyticsTab } from './CatalogAnalyticsTab.js'
+import {
+  CatalogAnalyticsTab,
+  resolveScatterDefaults,
+  scatterChangeRows,
+  SCATTER_CODE_DEFAULTS,
+} from './CatalogAnalyticsTab.js'
+import {
+  MetricsDefaultsProvider,
+  loadMetricsDefaults,
+  useMetricsDefaults,
+} from './MetricsDefaultsContext.js'
+import {
+  MetricsDefaultsModal,
+  type MetricsDefaultsChange,
+} from './MetricsDefaultsModal.js'
 import { CustomerValueTab } from './CustomerValueTab.js'
 import { InventoryProcurementTab } from './InventoryProcurementTab.js'
 import { EssentialsDailySummaryBanner } from './EssentialsDailySummaryBanner.js'
@@ -319,12 +335,120 @@ function resolveTab(raw: string | undefined): MetricsTab {
   return METRICS_TABS_BY_ID.get(aliased) ?? METRICS_TABS_BY_ID.get(DEFAULT_TAB_ID)!
 }
 
-export async function metricsLoader(): Promise<MetricListResponse> {
-  return loadJson('/api/metrics', MetricListResponseSchema)
+// ---------------------------------------------------------------------------
+// Page-wide line-chart defaults (persisted via /api/metrics-defaults)
+//
+// The persisted blob stores, per tab id, the toolbar aggregation / stack
+// mode / y-axis baseline. These helpers resolve an (untrusted) stored
+// slice against the known enums — falling back to the code defaults for
+// any missing / unknown value — so a stale DB blob can never break the
+// page, and let the admin "Update defaults" flow capture + diff the
+// current state.
+// ---------------------------------------------------------------------------
+
+/**
+ * Code default Y-axis baseline. Operator direction (2026-06): every
+ * line chart should pin its axis to include zero unless an admin saves
+ * a different page-wide default. (Was 'per-chart' = float-to-data.)
+ */
+const CODE_DEFAULT_Y_BASELINE: YAxisBaselinePageDefault = 'zero'
+
+const AGG_VALUE_SET = new Set<string>([...PRIMARY_AGGREGATIONS, ...ADVANCED_AGGREGATIONS])
+const STACK_VALUE_SET = new Set<string>(METRIC_STACK_MODES)
+const Y_BASELINE_VALUE_SET = new Set<string>(Y_AXIS_BASELINE_PAGE_DEFAULTS)
+
+// Tabs whose toolbar exposes the agg / stack / y-axis line controls.
+// These are the only tabs whose line defaults we capture / diff.
+const LINE_CONTROL_TABS: ReadonlyArray<MetricsTab> = METRICS_TABS.filter(
+  (t) => t.showAggControl || t.showStackControl,
+)
+
+interface ResolvedLineTabDefaults {
+  readonly agg: MetricAggregation
+  readonly stackMode: MetricStackMode
+  readonly yBaseline: YAxisBaselinePageDefault
+}
+
+/** The code-baseline line defaults for a tab (used on reset + as fallback). */
+function lineTabCodeDefaults(tab: MetricsTab): ResolvedLineTabDefaults {
+  return {
+    agg: tab.defaultAgg,
+    stackMode: tab.defaultStackMode,
+    yBaseline: CODE_DEFAULT_Y_BASELINE,
+  }
+}
+
+/**
+ * Resolve a tab's effective line defaults from the persisted blob,
+ * falling back to the code defaults for any missing / unknown value.
+ */
+function resolveLineTabDefaults(
+  stored: MetricsViewDefaults | null,
+  tab: MetricsTab,
+): ResolvedLineTabDefaults {
+  const s = stored?.tabs?.[tab.id]
+  const code = lineTabCodeDefaults(tab)
+  return {
+    agg: s?.agg && AGG_VALUE_SET.has(s.agg) ? (s.agg as MetricAggregation) : code.agg,
+    stackMode:
+      s?.stackMode && STACK_VALUE_SET.has(s.stackMode)
+        ? (s.stackMode as MetricStackMode)
+        : code.stackMode,
+    yBaseline:
+      s?.yBaseline && Y_BASELINE_VALUE_SET.has(s.yBaseline)
+        ? (s.yBaseline as YAxisBaselinePageDefault)
+        : code.yBaseline,
+  }
+}
+
+/** Diff two resolved line-tab configs into labelled change rows. */
+function lineTabChangeRows(
+  tabLabel: string,
+  before: ResolvedLineTabDefaults,
+  after: ResolvedLineTabDefaults,
+): MetricsDefaultsChange[] {
+  const rows: MetricsDefaultsChange[] = []
+  if (before.agg !== after.agg) {
+    rows.push({ label: `${tabLabel} — aggregation`, before: before.agg, after: after.agg })
+  }
+  if (before.stackMode !== after.stackMode) {
+    rows.push({
+      label: `${tabLabel} — stack`,
+      before: STACK_MODE_PAGE_LABEL[before.stackMode],
+      after: STACK_MODE_PAGE_LABEL[after.stackMode],
+    })
+  }
+  if (before.yBaseline !== after.yBaseline) {
+    rows.push({
+      label: `${tabLabel} — y-axis`,
+      before: Y_AXIS_BASELINE_PAGE_DEFAULT_LABEL[before.yBaseline],
+      after: Y_AXIS_BASELINE_PAGE_DEFAULT_LABEL[after.yBaseline],
+    })
+  }
+  return rows
+}
+
+export interface MetricsLoaderData extends MetricListResponse {
+  readonly metricsDefaults: {
+    defaults: MetricsViewDefaults | null
+    updatedBy: string | null
+    updatedAt: string | null
+  }
+}
+
+export async function metricsLoader(): Promise<MetricsLoaderData> {
+  // Load the metric registry and the persisted page-wide defaults in
+  // parallel. The defaults fetch tolerates failure (returns nulls) so a
+  // missing migration / transient blip never blocks the metrics page.
+  const [metrics, metricsDefaults] = await Promise.all([
+    loadJson('/api/metrics', MetricListResponseSchema),
+    loadMetricsDefaults(),
+  ])
+  return { ...metrics, metricsDefaults }
 }
 
 export function MetricsLayoutPage() {
-  const { metrics } = useLoaderData() as MetricListResponse
+  const { metrics, metricsDefaults: loadedDefaults } = useLoaderData() as MetricsLoaderData
   const { tabId } = useParams<{ tabId?: string }>()
   // The root loader provides session — used to filter tabs by per-user
   // metric grant. Admins implicitly hold every grant.
@@ -423,28 +547,28 @@ export function MetricsLayoutPage() {
   // Tab-scoped toolbar config. Each tab remembers its own aggregation +
   // stack-mode independently so switching tabs doesn't trample the operator's
   // preferences on the previous one. Defaults come from the tab definition.
+  // Hydrate each tab's toolbar config from the persisted page-wide
+  // defaults (loaded synchronously by the route loader, so no flash),
+  // falling back to the tab's code defaults for anything unset. The
+  // y-axis code default is now 'include zero' (CODE_DEFAULT_Y_BASELINE).
+  const storedDefaults = loadedDefaults.defaults
   const [aggByTab, setAggByTab] = useState<Record<MetricsTabId, MetricAggregation>>(() =>
-    Object.fromEntries(METRICS_TABS.map((t) => [t.id, t.defaultAgg])) as Record<
-      MetricsTabId,
-      MetricAggregation
-    >,
+    Object.fromEntries(
+      METRICS_TABS.map((t) => [t.id, resolveLineTabDefaults(storedDefaults, t).agg]),
+    ) as Record<MetricsTabId, MetricAggregation>,
   )
   const [stackByTab, setStackByTab] = useState<Record<MetricsTabId, MetricStackMode>>(() =>
-    Object.fromEntries(METRICS_TABS.map((t) => [t.id, t.defaultStackMode])) as Record<
-      MetricsTabId,
-      MetricStackMode
-    >,
+    Object.fromEntries(
+      METRICS_TABS.map((t) => [t.id, resolveLineTabDefaults(storedDefaults, t).stackMode]),
+    ) as Record<MetricsTabId, MetricStackMode>,
   )
   // Page-wide Y-axis baseline default, tab-scoped like agg / stack.
-  // Defaults to 'per-chart' (no page-wide policy → charts left on
-  // 'page' float to data range, matching the historical behaviour).
   const [yBaselineByTab, setYBaselineByTab] = useState<
     Record<MetricsTabId, YAxisBaselinePageDefault>
   >(() =>
-    Object.fromEntries(METRICS_TABS.map((t) => [t.id, 'per-chart'])) as Record<
-      MetricsTabId,
-      YAxisBaselinePageDefault
-    >,
+    Object.fromEntries(
+      METRICS_TABS.map((t) => [t.id, resolveLineTabDefaults(storedDefaults, t).yBaseline]),
+    ) as Record<MetricsTabId, YAxisBaselinePageDefault>,
   )
   const pageAgg = aggByTab[activeTab.id]
   const pageStackMode = stackByTab[activeTab.id]
@@ -548,7 +672,14 @@ export function MetricsLayoutPage() {
   // a user landing on /metrics/staff sees the staff-restricted
   // page until they're granted 'staff' too.
   const pageGrant = activeTab.grant
+  const isAdmin = user?.role === 'admin'
   return (
+    <MetricsDefaultsProvider
+      initialStored={loadedDefaults.defaults}
+      initialUpdatedBy={loadedDefaults.updatedBy}
+      initialUpdatedAt={loadedDefaults.updatedAt}
+      isAdmin={isAdmin}
+    >
     <MetricsAccessGate anyOf={[pageGrant]} surfaceLabel={activeTab.label}>
       <TimeAxisProvider initial={initialWindow}>
         <section className="metrics-dashboard">
@@ -557,12 +688,17 @@ export function MetricsLayoutPage() {
               <p className="eyebrow">Business &amp; Performance Metrics</p>
               <h2>Dashboard</h2>
             </div>
-            <DataCoverageBadge
-              realCount={partitioned.real.length}
-              missingCount={partitioned.missing.length}
-              showMissing={showMissing}
-              onToggleShowMissing={setShowMissing}
-            />
+            <div className="metrics-dashboard-header-actions">
+              <MetricsDefaultsAdminControls
+                lineState={{ aggByTab, stackByTab, yBaselineByTab }}
+              />
+              <DataCoverageBadge
+                realCount={partitioned.real.length}
+                missingCount={partitioned.missing.length}
+                showMissing={showMissing}
+                onToggleShowMissing={setShowMissing}
+              />
+            </div>
           </header>
 
           <MetricsTabsNav activeTabId={activeTab.id} visibleTabs={visibleTabs} />
@@ -634,6 +770,184 @@ export function MetricsLayoutPage() {
         </section>
       </TimeAxisProvider>
     </MetricsAccessGate>
+    </MetricsDefaultsProvider>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Admin "Update defaults" / "Reset defaults" controls
+//
+// Rendered inside MetricsDefaultsProvider. Visible only to admins. Captures
+// the CURRENT page-wide toolbar config (line-chart tab agg / stack / y-axis
+// where the page owns it, plus the shared scatter colour / size / opacity)
+// and persists it as the new global default, or drops the override to fall
+// back to code defaults. Both flows confirm via a diff modal.
+//
+// `lineState` is present on the main /metrics dashboard (which owns the
+// line-chart tab state). On pages that only embed the scatter (brand /
+// distributor detail) it is omitted: an Update there captures the current
+// scatter encodings while PRESERVING the stored line-tab defaults, and a
+// Reset still clears everything (the diff is computed from the stored blob).
+// ---------------------------------------------------------------------------
+
+interface MetricsDefaultsAdminControlsProps {
+  readonly lineState?: {
+    readonly aggByTab: Record<MetricsTabId, MetricAggregation>
+    readonly stackByTab: Record<MetricsTabId, MetricStackMode>
+    readonly yBaselineByTab: Record<MetricsTabId, YAxisBaselinePageDefault>
+  }
+}
+
+export function MetricsDefaultsAdminControls({ lineState }: MetricsDefaultsAdminControlsProps) {
+  const ctx = useMetricsDefaults()
+  const [mode, setMode] = useState<'update' | 'reset' | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  if (!ctx || !ctx.isAdmin) return null
+
+  const stored = ctx.stored
+
+  // Capture the current view into a full defaults blob (used by Update).
+  const buildCaptured = (): MetricsViewDefaults => {
+    // Line tabs: capture from live state where the page owns it,
+    // otherwise preserve whatever is already stored so a scatter-only
+    // page doesn't wipe the line defaults.
+    const tabs: Record<string, MetricsTabDefaults> = {}
+    if (lineState) {
+      for (const t of LINE_CONTROL_TABS) {
+        tabs[t.id] = {
+          agg: lineState.aggByTab[t.id],
+          stackMode: lineState.stackByTab[t.id],
+          yBaseline: lineState.yBaselineByTab[t.id],
+        }
+      }
+    } else if (stored?.tabs) {
+      for (const [k, v] of Object.entries(stored.tabs)) tabs[k] = v
+    }
+    // Scatter: prefer the live snapshot (set when a scatter is mounted),
+    // else preserve the resolved stored encodings.
+    const snap = ctx.getScatterSnapshot()
+    const scatter = snap ?? resolveScatterDefaults(stored?.scatter)
+    return {
+      version: 1,
+      tabs,
+      scatter: {
+        colourBy: scatter.colourBy,
+        sizeBy: scatter.sizeBy,
+        opacityBy: scatter.opacityBy,
+      },
+    }
+  }
+
+  // Diff rows for the modal, depending on the active flow.
+  const computeChanges = (): MetricsDefaultsChange[] => {
+    const rows: MetricsDefaultsChange[] = []
+    if (mode === 'update') {
+      const captured = buildCaptured()
+      if (lineState) {
+        for (const t of LINE_CONTROL_TABS) {
+          rows.push(
+            ...lineTabChangeRows(
+              t.label,
+              resolveLineTabDefaults(stored, t),
+              resolveLineTabDefaults(captured, t),
+            ),
+          )
+        }
+      }
+      rows.push(
+        ...scatterChangeRows(
+          resolveScatterDefaults(stored?.scatter),
+          resolveScatterDefaults(captured.scatter),
+        ),
+      )
+    } else if (mode === 'reset') {
+      // Reset drops the whole override → everything reverts to code
+      // defaults. Diff the resolved stored config against code defaults.
+      for (const t of LINE_CONTROL_TABS) {
+        rows.push(
+          ...lineTabChangeRows(
+            t.label,
+            resolveLineTabDefaults(stored, t),
+            lineTabCodeDefaults(t),
+          ),
+        )
+      }
+      rows.push(
+        ...scatterChangeRows(resolveScatterDefaults(stored?.scatter), SCATTER_CODE_DEFAULTS),
+      )
+    }
+    return rows
+  }
+
+  const onConfirm = async () => {
+    setBusy(true)
+    setError(null)
+    try {
+      if (mode === 'update') await ctx.saveDefaults(buildCaptured())
+      else if (mode === 'reset') await ctx.resetDefaults()
+      setMode(null)
+    } catch (e) {
+      setError((e as Error).message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const onCancel = () => {
+    if (busy) return
+    setMode(null)
+    setError(null)
+  }
+
+  return (
+    <div className="metrics-defaults-admin">
+      <button
+        type="button"
+        className="ghost-button metrics-defaults-admin-btn"
+        onClick={() => {
+          setError(null)
+          setMode('update')
+        }}
+        title="Save the current page-wide chart configuration as the default for everyone."
+      >
+        Update defaults
+      </button>
+      <button
+        type="button"
+        className="ghost-button metrics-defaults-admin-btn"
+        onClick={() => {
+          setError(null)
+          setMode('reset')
+        }}
+        title="Clear the saved page-wide defaults and revert to the built-in code defaults."
+      >
+        Reset defaults
+      </button>
+      {ctx.updatedBy ? (
+        <span className="subtle-copy metrics-defaults-admin-meta">
+          defaults set by {ctx.updatedBy}
+          {ctx.updatedAt ? ` · ${new Date(ctx.updatedAt).toLocaleDateString()}` : ''}
+        </span>
+      ) : null}
+      {mode ? (
+        <MetricsDefaultsModal
+          title={mode === 'update' ? 'Update page-wide defaults' : 'Reset page-wide defaults'}
+          intro={
+            mode === 'update'
+              ? 'Save the current chart configuration as the page-wide default for every metrics viewer. This replaces the previously-saved defaults.'
+              : 'Clear the saved page-wide defaults so every metrics page falls back to the built-in code defaults.'
+          }
+          changes={computeChanges()}
+          confirmLabel={mode === 'update' ? 'Save defaults' : 'Reset to code defaults'}
+          busy={busy}
+          error={error}
+          onConfirm={onConfirm}
+          onCancel={onCancel}
+        />
+      ) : null}
+    </div>
   )
 }
 

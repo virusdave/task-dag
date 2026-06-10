@@ -42,6 +42,7 @@ import { registerJobRoutes } from '../routes/jobs.js'
 import { registerLlmRoutes } from '../routes/llm.js'
 import { registerMetricAnnotationsRoutes } from '../routes/metricAnnotations.js'
 import { registerMetricsRoutes } from '../routes/metrics.js'
+import { registerMetricsDefaultsRoutes } from '../routes/metricsDefaults.js'
 import { registerCatalogPurchaseSellThroughRoutes } from '../routes/catalogPurchaseSellThrough.js'
 import { registerPendingPurchaseRoutes } from '../routes/pendingPurchases.js'
 import { registerPricingRoutes } from '../routes/pricing.js'
@@ -246,6 +247,7 @@ async function registerApplicationSurface(server: FastifyInstance) {
   await registerLlmRoutes(server)
   await registerMetricAnnotationsRoutes(server)
   await registerMetricsRoutes(server)
+  await registerMetricsDefaultsRoutes(server)
   await registerBudtenderAnalyticsRoutes(server)
   await registerCatalogAnalyticsRoutes(server)
   await registerCustomerValueAnalyticsRoutes(server)

@@ -38,6 +38,7 @@ import {
   type ContinuousScale,
 } from './continuousScale.js'
 import { HelpIcon } from './MetricChart.js'
+import { useMetricsDefaults } from './MetricsDefaultsContext.js'
 import { RangeNudgeRow } from './RangeNudgeRow.js'
 import { computeCompactDomain } from './scatterAutoZoom.js'
 import { ScatterViewToolbar } from './ScatterViewToolbar.js'
@@ -976,6 +977,96 @@ const OPACITY_BY: ReadonlyArray<OpacityByDef> = [
 const OPACITY_BY_BY_ID = new Map(OPACITY_BY.map((o) => [o.id, o]))
 function opacityBy(id: OpacityByKey): OpacityByDef {
   return OPACITY_BY_BY_ID.get(id) ?? OPACITY_BY[0]!
+}
+
+// ============================================================================
+// Page-wide scatter encoding defaults (persisted via /api/metrics-defaults)
+//
+// The Catalog analytics tab AND the embedded brand / distributor detail
+// scatters share one set of page-wide encodings. These helpers let the
+// "Update defaults" admin flow capture, hydrate, label, and diff them
+// without the metrics layout needing to know the (large, client-only)
+// colour/size/opacity unions.
+// ============================================================================
+
+/** A page-wide scatter encoding selection ('per-chart' = defer to each card). */
+export type PageScatterValue<K extends string> = K | 'per-chart'
+export interface PageScatterEncoding {
+  readonly colourBy: PageScatterValue<ColourByKey>
+  readonly sizeBy: PageScatterValue<SizeByKey>
+  readonly opacityBy: PageScatterValue<OpacityByKey>
+}
+
+/** Part-1 code defaults: colour by brand, size by margin $/day. */
+export const SCATTER_CODE_DEFAULTS: PageScatterEncoding = {
+  colourBy: 'brand',
+  sizeBy: 'marginVelocity',
+  opacityBy: 'per-chart',
+}
+
+const COLOUR_BY_IDS = new Set<string>(COLOUR_BY.map((c) => c.id))
+const SIZE_BY_IDS = new Set<string>(SIZE_BY.map((s) => s.id))
+const OPACITY_BY_IDS = new Set<string>(OPACITY_BY.map((o) => o.id))
+
+/**
+ * Resolve a stored (untrusted) scatter slice against the known encoding
+ * ids, falling back to the code defaults for any missing / unknown
+ * value. Keeps junk in a stale DB blob from breaking the page.
+ */
+export function resolveScatterDefaults(stored?: {
+  colourBy?: string
+  sizeBy?: string
+  opacityBy?: string
+}): PageScatterEncoding {
+  const pick = <K extends string>(
+    raw: string | undefined,
+    ids: Set<string>,
+    fallback: PageScatterValue<K>,
+  ): PageScatterValue<K> => {
+    if (raw === 'per-chart') return 'per-chart'
+    if (raw !== undefined && ids.has(raw)) return raw as K
+    return fallback
+  }
+  return {
+    colourBy: pick(stored?.colourBy, COLOUR_BY_IDS, SCATTER_CODE_DEFAULTS.colourBy),
+    sizeBy: pick(stored?.sizeBy, SIZE_BY_IDS, SCATTER_CODE_DEFAULTS.sizeBy),
+    opacityBy: pick(stored?.opacityBy, OPACITY_BY_IDS, SCATTER_CODE_DEFAULTS.opacityBy),
+  }
+}
+
+/** Human label for a page-wide scatter encoding value. */
+export function scatterEncodingLabel(
+  channel: 'colourBy' | 'sizeBy' | 'opacityBy',
+  value: string,
+): string {
+  if (value === 'per-chart') return 'per chart'
+  const list =
+    channel === 'colourBy' ? COLOUR_BY : channel === 'sizeBy' ? SIZE_BY : OPACITY_BY
+  return (list as ReadonlyArray<{ id: string; label: string }>).find((d) => d.id === value)
+    ?.label ?? value
+}
+
+/** Diff two scatter encodings into labelled change rows (empty = identical). */
+export function scatterChangeRows(
+  before: PageScatterEncoding,
+  after: PageScatterEncoding,
+): Array<{ label: string; before: string; after: string }> {
+  const rows: Array<{ label: string; before: string; after: string }> = []
+  const channels: Array<{ key: keyof PageScatterEncoding; label: string }> = [
+    { key: 'colourBy', label: 'Scatter — colour by' },
+    { key: 'sizeBy', label: 'Scatter — size by' },
+    { key: 'opacityBy', label: 'Scatter — opacity by' },
+  ]
+  for (const { key, label } of channels) {
+    if (before[key] !== after[key]) {
+      rows.push({
+        label,
+        before: scatterEncodingLabel(key, before[key]),
+        after: scatterEncodingLabel(key, after[key]),
+      })
+    }
+  }
+  return rows
 }
 
 // Same palette as the line chart so the look is consistent across the
@@ -1917,11 +2008,33 @@ export function CatalogAnalyticsTab({ embedded }: CatalogAnalyticsTabProps = {})
   )
 
   // -------- Page-wide chart controls --------
-  const [pageColourBy, setPageColourBy] = useState<ColourByKey | 'per-chart'>('per-chart')
-  const [pageSizeBy, setPageSizeBy] = useState<SizeByKey | 'per-chart'>('per-chart')
-  const [pageOpacityBy, setPageOpacityBy] = useState<OpacityByKey | 'per-chart'>(
-    'per-chart',
+  // Hydrate the page-wide scatter encodings from the persisted global
+  // defaults (falling back to the code defaults: colour by brand, size by
+  // margin $/day). `useState(() => …)` so first paint already reflects the
+  // saved defaults — no flash from code default → saved default.
+  const metricsDefaults = useMetricsDefaults()
+  const [scatterInit] = useState<PageScatterEncoding>(() =>
+    resolveScatterDefaults(metricsDefaults?.stored?.scatter),
   )
+  const [pageColourBy, setPageColourBy] = useState<ColourByKey | 'per-chart'>(
+    scatterInit.colourBy,
+  )
+  const [pageSizeBy, setPageSizeBy] = useState<SizeByKey | 'per-chart'>(scatterInit.sizeBy)
+  const [pageOpacityBy, setPageOpacityBy] = useState<OpacityByKey | 'per-chart'>(
+    scatterInit.opacityBy,
+  )
+  // Publish the live encodings so the admin "Update defaults" flow can
+  // capture them even though the button lives outside this component.
+  const registerScatterSnapshot = metricsDefaults?.registerScatterSnapshot
+  useEffect(() => {
+    if (!registerScatterSnapshot) return
+    registerScatterSnapshot({
+      colourBy: pageColourBy,
+      sizeBy: pageSizeBy,
+      opacityBy: pageOpacityBy,
+    })
+    return () => registerScatterSnapshot(null)
+  }, [registerScatterSnapshot, pageColourBy, pageSizeBy, pageOpacityBy])
   // Free-text "highlight subset" query. Lower-cased substring match
   // against the point's text-y fields (brand / category / subcategory
   // / size / product name / sku / pack count). When non-empty:

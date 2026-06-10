@@ -864,6 +864,13 @@ const SENTINELS: MigrationSentinel[] = [
       '(dealer, location) lookup index.',
     check: (db) => indexExists(db, 'warehouse_location_assignments_dealer_location_idx'),
   },
+  {
+    migrationId: '069_app_settings',
+    label:
+      'app_settings key/value table — required by the /metrics page-wide ' +
+      'view defaults (admin "Update defaults" / "Reset defaults").',
+    check: (db) => tableExists(db, 'app_settings'),
+  },
 ]
 
 interface CacheEntry {

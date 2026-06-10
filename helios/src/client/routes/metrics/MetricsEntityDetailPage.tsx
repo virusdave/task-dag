@@ -10,6 +10,8 @@ import { loadJson } from '../../app/fetchJson.js'
 
 import { CatalogAnalyticsTab } from './CatalogAnalyticsTab.js'
 import { MetricsAccessGate } from './MetricsAccessGate.js'
+import { MetricsDefaultsBoundary } from './MetricsDefaultsContext.js'
+import { MetricsDefaultsAdminControls } from './MetricsLayoutPage.js'
 
 // ---------------------------------------------------------------------------
 // Brand / Distributor DETAIL pages.
@@ -312,6 +314,12 @@ function MetricsEntityDetailPage({ kind }: { readonly kind: EntityKind }) {
           </p>
           <h2>{resolution?.entity?.label ?? entityKey ?? '—'}</h2>
         </div>
+        <div className="metrics-dashboard-header-actions">
+          {/* No `lineState`: detail pages only embed the scatter, so an
+              "Update defaults" here captures the scatter encodings while
+              preserving the saved line-tab defaults. */}
+          <MetricsDefaultsAdminControls />
+        </div>
       </header>
 
       {loading ? (
@@ -380,7 +388,9 @@ function MetricsEntityDetailPage({ kind }: { readonly kind: EntityKind }) {
 export function BrandDetailPage() {
   return (
     <MetricsAccessGate anyOf={['brands']} surfaceLabel="Brand detail">
-      <MetricsEntityDetailPage kind="brand" />
+      <MetricsDefaultsBoundary>
+        <MetricsEntityDetailPage kind="brand" />
+      </MetricsDefaultsBoundary>
     </MetricsAccessGate>
   )
 }
@@ -388,7 +398,9 @@ export function BrandDetailPage() {
 export function DistributorDetailPage() {
   return (
     <MetricsAccessGate anyOf={['distributors']} surfaceLabel="Distributor detail">
-      <MetricsEntityDetailPage kind="distributor" />
+      <MetricsDefaultsBoundary>
+        <MetricsEntityDetailPage kind="distributor" />
+      </MetricsDefaultsBoundary>
     </MetricsAccessGate>
   )
 }

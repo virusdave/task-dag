@@ -3450,6 +3450,65 @@ a.tree-nav-branch-label.is-link,
   gap: 0.5rem;
 }
 
+/* Right-hand header cluster: admin defaults controls + coverage badge. */
+.metrics-dashboard-header-actions {
+  display: flex;
+  align-items: flex-end;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+/* Admin "Update / Reset defaults" controls. */
+.metrics-defaults-admin {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+.metrics-defaults-admin-btn {
+  font-size: 0.8rem;
+  padding: 0.25rem 0.6rem;
+  min-height: 32px;
+}
+.metrics-defaults-admin-meta {
+  font-size: 0.75rem;
+}
+
+/* Defaults confirmation modal diff table. */
+.metrics-defaults-diff {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 0.5rem;
+  font-size: 0.85rem;
+}
+.metrics-defaults-diff th,
+.metrics-defaults-diff td {
+  text-align: left;
+  padding: 0.3rem 0.5rem;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.08);
+  vertical-align: top;
+}
+.metrics-defaults-diff th {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted, #666);
+}
+.metrics-defaults-diff-before {
+  color: #8a2222;
+  text-decoration: line-through;
+}
+.metrics-defaults-diff-after {
+  color: #166c16;
+  font-weight: 600;
+}
+.metrics-defaults-error {
+  margin-top: 0.5rem;
+  color: #8a2222;
+  font-size: 0.85rem;
+  white-space: pre-wrap;
+}
+
 .metrics-coverage-badge {
   display: flex;
   align-items: center;
