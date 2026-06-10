@@ -86,6 +86,12 @@ export function buildConfigSidebarSubtree(): TreeNavNode[] {
     },
     {
       kind: 'leaf',
+      navKey: 'config.sweed-sessions',
+      label: 'Sweed session pool',
+      to: buildHeliosModulePath('config', 'sweed/sessions'),
+    },
+    {
+      kind: 'leaf',
       navKey: 'config.sweed-auth-log',
       label: 'Sweed auth log',
       to: buildHeliosModulePath('config', 'sweed-auth-log'),

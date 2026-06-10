@@ -55,6 +55,7 @@ import {
 } from '../routes/config/ConfigParsingPendingPurchasesPage.js'
 import { ConfigWorkersPage } from '../routes/config/ConfigWorkersPage.js'
 import { SweedAuthLogPage, sweedAuthLogLoader } from '../routes/config/SweedAuthLogPage.js'
+import { SweedSessionsPage, sweedSessionsLoader } from '../routes/config/SweedSessionsPage.js'
 import { UsersPage, usersLoader } from '../routes/config/UsersPage.js'
 import { ConfigWorkersSchedulingPage, configWorkersSchedulingLoader } from '../routes/config/ConfigWorkersSchedulingPage.js'
 import { DashboardPage } from '../routes/dashboard/DashboardPage.js'
@@ -409,6 +410,11 @@ export const router = createBrowserRouter([
         element: <SweedAuthLogPage />,
         loader: sweedAuthLogLoader,
         path: 'config/sweed-auth-log',
+      },
+      {
+        element: <SweedSessionsPage />,
+        loader: sweedSessionsLoader,
+        path: 'config/sweed/sessions',
       },
       {
         element: <ConfigWorkersSchedulingPage />,

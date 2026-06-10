@@ -53,6 +53,7 @@ import { registerScreensRoutes } from '../routes/screens.js'
 import { registerSessionRoutes } from '../routes/session.js'
 import { registerStaffRoutes } from '../routes/staff.js'
 import { registerSweedAuthEventsRoutes } from '../routes/sweedAuthEvents.js'
+import { registerSweedSessionsRoutes } from '../routes/sweedSessions.js'
 import { registerUtilitiesPromoNamesRoutes } from '../routes/utilitiesPromoNames.js'
 import { registerWarehouseLocationsRoutes } from '../routes/warehouseLocations.js'
 import { registerTaskDagRoutes } from '../routes/taskDag.js'
@@ -239,6 +240,7 @@ async function registerApplicationSurface(server: FastifyInstance) {
   await registerScreensRoutes(server)
   await registerStaffRoutes(server)
   await registerSweedAuthEventsRoutes(server)
+  await registerSweedSessionsRoutes(server)
   await registerUtilitiesPromoNamesRoutes(server)
   await registerHistoryRoutes(server)
   await registerLlmRoutes(server)
