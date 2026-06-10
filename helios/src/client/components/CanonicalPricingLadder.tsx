@@ -60,6 +60,26 @@ export function CanonicalPricingLadder(props: CanonicalPricingLadderProps) {
   const hasProposedPrice =
     props.proposedPrice !== null && Number.isFinite(props.proposedPrice)
 
+  // Depend on a STRUCTURAL signature of the competitor listings rather
+  // than the array reference. Several callers build this array inline in
+  // JSX (e.g. `mapToCompetitorListings(item.marketListings)` on the
+  // pending-purchases page, `ladder.competitorListings.map(...)` on the
+  // review page), so the reference changes on every parent render. If we
+  // keyed the ladderHtml memo on that reference, every re-render — most
+  // importantly the ones the slider itself triggers via setDraftPrice
+  // mid-drag, plus typing in the override-price input or clicking
+  // "Apply to family" — would rebuild the ladder HTML, replace the
+  // marker DOM via dangerouslySetInnerHTML, and drop the in-flight
+  // pointer capture. That silently defeats the whole drag-survival
+  // design (the slider would only respond to the initial click). Keying
+  // on a value-based signature keeps the memo stable across
+  // referentially-unstable-but-identical arrays, so numeric
+  // proposedPrice changes never rebuild the DOM.
+  const competitorListingsSignature = useMemo(
+    () => buildCompetitorListingsSignature(props.competitorListings),
+    [props.competitorListings],
+  )
+
   const ladderHtml = useMemo(
     () =>
       renderPricingLadder(
@@ -91,7 +111,7 @@ export function CanonicalPricingLadder(props: CanonicalPricingLadderProps) {
       props.livePrice,
       props.marketAveragePostTax,
       props.marketMedianPostTax,
-      props.competitorListings,
+      competitorListingsSignature,
       props.variant,
       props.headHtml,
       props.freshness,
@@ -150,6 +170,35 @@ export function CanonicalPricingLadder(props: CanonicalPricingLadderProps) {
   }, [ladderHtml])
 
   return <div ref={containerRef} dangerouslySetInnerHTML={{ __html: ladderHtml }} />
+}
+
+// Value-based fingerprint of the competitor listings. MUST include every
+// field that affects how a listing is rendered/positioned on the ladder
+// (see CompetitorListingInput): identity, price, distance, the label
+// strings, eligibility (dims the dot + excludes from stats), and the
+// matchTier (drops `weak`, dims `fallback`). If a new rendered field is
+// added to CompetitorListing, add it here too, otherwise a change to it
+// won't trigger a ladder rebuild.
+function buildCompetitorListingsSignature(listings: readonly CompetitorListing[]): string {
+  return listings
+    .map((listing) =>
+      [
+        listing.listingId,
+        signatureNumber(listing.postTaxPrice),
+        signatureNumber(listing.distanceMiles),
+        listing.dispensaryName ?? '',
+        listing.dispensaryAddress ?? '',
+        listing.listingName ?? '',
+        listing.url ?? '',
+        listing.eligibleForPricing === false ? '0' : '1',
+        listing.matchTier ?? 'exact',
+      ].join('\u001f'),
+    )
+    .join('\u001e')
+}
+
+function signatureNumber(value: number | null | undefined): string {
+  return typeof value === 'number' && Number.isFinite(value) ? String(value) : ''
 }
 
 function updateProposedMarker(
