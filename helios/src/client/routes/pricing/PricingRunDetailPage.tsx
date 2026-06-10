@@ -521,7 +521,12 @@ const GroupSectionView = memo(function GroupSectionView({
   const approvedCount = countItemsWithStatus(group.reviewItems, 'approved')
   const rejectedCount = countItemsWithStatus(group.reviewItems, 'rejected')
 
-  const [collapsed, setCollapsed] = useState(() => pendingCount === 0)
+  // Groups start collapsed. A single run can carry dozens of groups, each
+  // with item rows + market-evidence ladders; rendering them all up front is
+  // what makes the page crawl (see issue/perf notes). The operator expands
+  // only the group they're working on, and the per-group counts in the header
+  // tell them where pending work lives without expanding anything.
+  const [collapsed, setCollapsed] = useState(true)
   const [draft, setDraft] = useState('')
   const [isSaving, setIsSaving] = useState(false)
 

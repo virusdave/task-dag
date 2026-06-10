@@ -1,10 +1,17 @@
-import { useEffect, useMemo, useRef } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 
 import {
   attachPricingLadderSlider,
   renderPricingLadder,
   type CompetitorListing,
 } from '../../shared/ui/pricing-ladder/index.js'
+
+// Default cap on plotted competitor dots. A popular brand/size can match
+// thousands of statewide listings; painting one DOM node per listing per
+// product is what makes the run-review page crawl. We plot the closest
+// `DEFAULT_DOT_CAP` by distance up front and let the operator load the
+// rest on demand. Stats/markers always reflect the full set.
+const DEFAULT_DOT_CAP = 150
 
 export interface CanonicalPricingLadderProps {
   productId: number
@@ -60,6 +67,23 @@ export function CanonicalPricingLadder(props: CanonicalPricingLadderProps) {
   const hasProposedPrice =
     props.proposedPrice !== null && Number.isFinite(props.proposedPrice)
 
+  // Number of dots that *would* plot (mirrors geometry's weak+finite filter).
+  // Drives whether we offer a "show all" affordance at all.
+  const plottableCount = useMemo(
+    () =>
+      props.competitorListings.filter(
+        (l) => (l.matchTier ?? 'exact') !== 'weak' && Number.isFinite(l.postTaxPrice),
+      ).length,
+    [props.competitorListings],
+  )
+  const isCappable = plottableCount > DEFAULT_DOT_CAP
+
+  // Start trimmed (closest-by-distance) for cappable ladders; the operator
+  // can load the full dot cloud on demand. Toggling rebuilds the ladder HTML
+  // (an explicit click, never mid-drag) so the slider simply re-attaches.
+  const [showAllDots, setShowAllDots] = useState(false)
+  const competitorDotCap = isCappable && !showAllDots ? DEFAULT_DOT_CAP : undefined
+
   // Depend on a STRUCTURAL signature of the competitor listings rather
   // than the array reference. Several callers build this array inline in
   // JSX (e.g. `mapToCompetitorListings(item.marketListings)` on the
@@ -93,6 +117,7 @@ export function CanonicalPricingLadder(props: CanonicalPricingLadderProps) {
           marketAveragePostTax: props.marketAveragePostTax,
           marketMedianPostTax: props.marketMedianPostTax,
           competitorListings: props.competitorListings,
+          competitorDotCap,
         },
         {
           variant: props.variant ?? 'detail',
@@ -118,6 +143,7 @@ export function CanonicalPricingLadder(props: CanonicalPricingLadderProps) {
       props.freshnessAgeDays,
       props.acknowledgeExpiredEvidence,
       hasProposedPrice,
+      competitorDotCap,
     ],
   )
 
@@ -169,7 +195,23 @@ export function CanonicalPricingLadder(props: CanonicalPricingLadderProps) {
     // what keeps drag-state alive across re-renders.
   }, [ladderHtml])
 
-  return <div ref={containerRef} dangerouslySetInnerHTML={{ __html: ladderHtml }} />
+  return (
+    <div className="canonical-pricing-ladder-wrap">
+      <div ref={containerRef} dangerouslySetInnerHTML={{ __html: ladderHtml }} />
+      {isCappable ? (
+        <button
+          className="ghost-button canonical-pricing-ladder-dotcap-toggle"
+          onClick={() => setShowAllDots((value) => !value)}
+          style={{ marginTop: '0.5rem' }}
+          type="button"
+        >
+          {showAllDots
+            ? `Show closest ${DEFAULT_DOT_CAP} dots`
+            : `Show all ${plottableCount} market dots`}
+        </button>
+      ) : null}
+    </div>
+  )
 }
 
 // Value-based fingerprint of the competitor listings. MUST include every

@@ -64,6 +64,13 @@ export interface PricingLadderInput {
   /** Optional explicit domain override; otherwise computed from anchors. */
   domainMin?: number
   domainMax?: number
+  /**
+   * Maximum number of competitor dots to plot. When the (visible, finite)
+   * listing count exceeds this, only the closest-by-distance subset is
+   * rendered; stats/markers/domain still use the full set. Omit (or pass
+   * undefined) to plot every dot. See buildLadderGeometry for rationale.
+   */
+  competitorDotCap?: number
 }
 
 export interface LadderMarkerGeometry {
@@ -113,6 +120,11 @@ export interface LadderStats {
   pricingCompCount: number
   /** Total competitor listings (eligible + display-only). */
   totalCompCount: number
+  /**
+   * Number of dots actually plotted. Equals the plottable count unless a
+   * `competitorDotCap` trimmed the chart, in which case it is the cap.
+   */
+  renderedCompCount: number
   /** Per-band counts. */
   bandCounts: Record<DistanceBandKey, number>
 }
@@ -199,7 +211,7 @@ export function buildLadderGeometry(input: PricingLadderInput): LadderGeometry {
     markers.push({ kind: 'proposed', postTaxPrice: input.proposedPrice, leftPercent: positionPercent(input.proposedPrice) })
   }
 
-  const competitors: LadderCompetitorGeometry[] = visibleListings
+  const allCompetitors: LadderCompetitorGeometry[] = visibleListings
     .filter((l) => Number.isFinite(l.postTaxPrice))
     .map((l) => {
       const band = bandForDistance(l.distanceMiles)
@@ -223,6 +235,26 @@ export function buildLadderGeometry(input: PricingLadderInput): LadderGeometry {
       }
     })
 
+  // Cap the number of rendered dots. A single popular brand/size can match
+  // thousands of statewide listings, and the run-review page paints one dot
+  // per listing per product — tens of thousands of DOM nodes that make the
+  // page crawl. The dots are a visual distribution aid, not the source of
+  // any statistic (q1/median/q3/min/max/counts above are all computed from
+  // the FULL `eligibleListings`/`visibleListings` sets), so we can drop some
+  // dots from the chart without changing any number the reviewer relies on.
+  //
+  // When a cap is requested and exceeded we keep the CLOSEST listings (by
+  // distance), because the nearby competitors are the ones a reviewer cares
+  // about first. The caller (CanonicalPricingLadder) can lift the cap on
+  // demand so the full dot cloud loads when the operator expands a ladder.
+  const cap = input.competitorDotCap
+  const competitors =
+    cap !== undefined && cap > 0 && allCompetitors.length > cap
+      ? [...allCompetitors]
+          .sort(byDistanceAscThenPrice)
+          .slice(0, cap)
+      : allCompetitors
+
   const iqr =
     q1 !== null && q3 !== null
       ? {
@@ -238,9 +270,11 @@ export function buildLadderGeometry(input: PricingLadderInput): LadderGeometry {
     far: 0,
     statewide: 0,
   }
-  for (const c of competitors) bandCounts[c.bandKey] += 1
+  // Band counts/legend describe the full market, not just the plotted subset,
+  // so the legend stays complete even when a cap trims distant dots.
+  for (const c of allCompetitors) bandCounts[c.bandKey] += 1
 
-  const presentKeys = new Set<DistanceBandKey>(competitors.map((c) => c.bandKey))
+  const presentKeys = new Set<DistanceBandKey>(allCompetitors.map((c) => c.bandKey))
   const bandsPresent: DistanceBand[] = DISTANCE_BANDS.filter((band) => presentKeys.has(band.key))
 
   return {
@@ -258,10 +292,26 @@ export function buildLadderGeometry(input: PricingLadderInput): LadderGeometry {
       maxPostTax: max,
       pricingCompCount: eligibleListings.length,
       totalCompCount: visibleListings.length,
+      renderedCompCount: competitors.length,
       bandCounts,
     },
     bandsPresent,
   }
+}
+
+/**
+ * Order competitor dots so the closest dispensaries come first. Listings
+ * with an unknown distance sort last; ties break on price for determinism.
+ * Used to pick the "keep" subset when a competitorDotCap trims the chart.
+ */
+function byDistanceAscThenPrice(
+  a: LadderCompetitorGeometry,
+  b: LadderCompetitorGeometry,
+): number {
+  const da = a.distanceMiles ?? Number.POSITIVE_INFINITY
+  const db = b.distanceMiles ?? Number.POSITIVE_INFINITY
+  if (da !== db) return da - db
+  return a.postTaxPrice - b.postTaxPrice
 }
 
 function quantile(sortedValues: number[], q: number): number | null {
