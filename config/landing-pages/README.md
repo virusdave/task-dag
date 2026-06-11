@@ -67,6 +67,36 @@ mutable object and is swapped via atomic same-dir `rename()`:
 **Signing keys live with Helios only — never on the shared `/cloud`
 mount** (parent §5, decision 5).
 
+## Operator approval → candidate publish (P5 — implemented)
+
+From P5 ("Dual-publish; stop cross-repo writes", parent §10), operator
+approval of new landing-page content is wired to a single sanctioned
+action — **build + validate + publish a candidate bundle** — and the
+legacy cross-repo commit producer is **off by default**
+(`LP_CROSSREPO_COMMIT_PRODUCER=false`, see [`FLAGS.md`](./FLAGS.md)):
+
+```sh
+tsx helios/src/server/lp/cli.ts publish-candidate \
+    --root /cloud/lp --env prod \
+    --config ./approved-content.json --privkey ./signing.pem
+```
+
+- Writes the immutable, content-addressed bundle files and a **candidate
+  pointer** `current.candidate.json`. It **never** swaps the live
+  `current.json` — the existing live bundle stays frozen as the
+  last-known-good fallback.
+- Fail-closed self-validates the candidate (schema + `sha256` +
+  signature + `min_renderer_version` + path-safety); a candidate that
+  fails validation is reported and never staged for promotion.
+- Promoting a candidate to live traffic is the separate, **operator-
+  gated P6 canary** pointer flip (canon §1: no auto-publish of
+  user-visible content). `--enable-crossrepo-producer` re-enables the
+  legacy path as the P5 rollback lever.
+
+Implemented in `helios/src/server/lp/publishCandidate.ts`
+(`publishApprovedContentCandidate`) + the `publish-candidate` CLI
+subcommand.
+
 ## Event ingest endpoint (P1 — implemented)
 
 The conversion-feedback sink (parent §9) is live in Helios:

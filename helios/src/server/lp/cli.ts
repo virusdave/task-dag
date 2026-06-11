@@ -6,8 +6,17 @@
 //   tsx src/server/lp/cli.ts keygen
 //   tsx src/server/lp/cli.ts publish --root /cloud/lp --env prod \
 //       --config ./bundle-input.json --privkey ./signing.pem [--dry-run]
+//   tsx src/server/lp/cli.ts publish-candidate --root /cloud/lp --env prod \
+//       --config ./approved-content.json --privkey ./signing.pem \
+//       [--enable-crossrepo-producer]
 //   tsx src/server/lp/cli.ts validate --root /cloud/lp --env prod \
 //       --pubkey ./signing.pub.pem --renderer 0.4.0 [--active 4411]
+//
+// `publish-candidate` is the P5 operator-approval entrypoint: it builds
+// + validates a candidate bundle from approved content and writes a
+// candidate pointer ONLY — it never swaps the live current.json (that
+// is the operator-gated P6 canary step). The legacy cross-repo commit
+// producer is disabled unless `--enable-crossrepo-producer` is passed.
 //
 // Signing keys are passed by the operator (file paths); the CLI never
 // reads keys from the artifact root.
@@ -15,9 +24,10 @@
 import { readFileSync } from 'node:fs'
 import { pathToFileURL } from 'node:url'
 
-import { compileBundle, CompileError } from './compile.js'
+import { compileBundle, CompileError, type CompileInput } from './compile.js'
 import { generateEd25519Pem, publicKeyPemFromPrivate } from './signing.js'
 import { publishBundle, type LpEnvironment } from './publish.js'
+import { publishApprovedContentCandidate } from './publishCandidate.js'
 import { validateBundle } from './validate.js'
 
 interface Args {
@@ -143,6 +153,75 @@ function cmdPublish(args: Args): number {
   return 0
 }
 
+// P5: operator-approval-triggered dual-publish-candidate. Builds +
+// validates a candidate bundle from approved content and writes a
+// candidate pointer ONLY (never the live current.json). The legacy
+// cross-repo commit producer stays disabled unless
+// `--enable-crossrepo-producer` is passed (parent EPIC_PLAN §10 P5).
+function cmdPublishCandidate(args: Args): number {
+  const root = requireFlag(args, 'root')
+  const environment = asEnvironment(requireFlag(args, 'env'))
+  const configPath = requireFlag(args, 'config')
+  const privateKeyPem = readFileSync(requireFlag(args, 'privkey'), 'utf8')
+  const publicKeyPem = publicKeyPemFromPrivate(privateKeyPem)
+
+  const cfg = JSON.parse(readFileSync(configPath, 'utf8')) as {
+    sites: Record<string, unknown>
+    families: Record<string, unknown>
+    components: Record<string, unknown>
+    variants: unknown[]
+    policy: { policy_version_id: string; selection_algorithm_version: string; rules: unknown[] }
+    disabledVariants?: unknown[]
+    minRendererVersion?: string
+    automationGitSha?: string
+    generatedFrom?: { cluster_sweep_run_id?: number; asset_approval_snapshot_id?: number; policy_version_id?: string }
+    previousBundleId?: string
+  }
+
+  const approvedContent: CompileInput = {
+    sites: cfg.sites as never,
+    families: cfg.families as never,
+    components: cfg.components as never,
+    variants: cfg.variants as never,
+    policy: cfg.policy as never,
+    disabledVariants: cfg.disabledVariants as never,
+  }
+
+  const result = publishApprovedContentCandidate({
+    approvedContent,
+    privateKeyPem,
+    publicKeyPem,
+    artifactRoot: root,
+    environment,
+    minRendererVersion: args.flags.renderer ?? cfg.minRendererVersion ?? 'mss-lp-runtime>=0.1.0',
+    automationGitSha: args.flags['git-sha'] ?? cfg.automationGitSha ?? '0000000',
+    generatedFrom: {
+      policy_version_id: cfg.policy.policy_version_id,
+      ...(cfg.generatedFrom?.cluster_sweep_run_id ? { cluster_sweep_run_id: cfg.generatedFrom.cluster_sweep_run_id } : {}),
+      ...(cfg.generatedFrom?.asset_approval_snapshot_id
+        ? { asset_approval_snapshot_id: cfg.generatedFrom.asset_approval_snapshot_id }
+        : {}),
+    },
+    previousBundleId: args.flags.prev ?? cfg.previousBundleId,
+    disabledVariants: cfg.disabledVariants as never,
+    verifyRendererVersion: args.flags['verify-renderer'],
+    crossRepoCommitProducerEnabled: args.bools.has('enable-crossrepo-producer'),
+  })
+
+  process.stdout.write(
+    `candidate ${result.bundleId} v${result.version}\n` +
+      `  candidatePointer: ${result.candidatePointerPath}\n` +
+      `  bundleDir:        ${result.bundleDir}\n` +
+      `  crossRepoCommitProducer: ${result.crossRepoCommitProducerEnabled ? 'ENABLED (legacy)' : 'disabled (default)'}\n`,
+  )
+  if (!result.ok) {
+    process.stderr.write(`CANDIDATE INVALID:\n  - ${result.validation.errors.join('\n  - ')}\n`)
+    return 1
+  }
+  process.stdout.write(`  self-validation: ok\n  next: ${result.promoteHint}\n`)
+  return 0
+}
+
 function cmdValidate(args: Args): number {
   const root = requireFlag(args, 'root')
   const publicKeyPem = readFileSync(requireFlag(args, 'pubkey'), 'utf8')
@@ -171,10 +250,12 @@ export function main(argv: string[]): number {
         return cmdKeygen()
       case 'publish':
         return cmdPublish(args)
+      case 'publish-candidate':
+        return cmdPublishCandidate(args)
       case 'validate':
         return cmdValidate(args)
       default:
-        process.stderr.write('usage: lp-bundle <keygen|publish|validate> [options]\n')
+        process.stderr.write('usage: lp-bundle <keygen|publish|publish-candidate|validate> [options]\n')
         return 2
     }
   } catch (e) {

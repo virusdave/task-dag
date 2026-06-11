@@ -35,6 +35,24 @@ runtime that reads them is built in mss P2+.
   (parent §5 step 6, decision 2). Flag changes are the operator's lever;
   fail-closed is the automatic safety net.
 
+## Helios-side content-source control (P5)
+
+The flags above are **consumer (mss-runtime) flags**. P5 ("Dual-publish;
+stop cross-repo writes", parent §10) adds one **producer (Helios) side**
+control, named here so dashboards/runbooks share one vocabulary:
+
+| Flag | Type | Default | Meaning |
+|------|------|---------|---------|
+| `LP_CROSSREPO_COMMIT_PRODUCER` | bool | `false` | The legacy path that authored landing-page content directly into the `mostly-static-sites` repo. **Disabled by default from P5 on.** When `false`, approved content flows **only** through the published Helios bundle candidate. `true` is the P5 rollback lever ("re-enable legacy commit path"). |
+
+From P5, **operator approval of new content triggers
+`lp-bundle publish-candidate`** (build + validate + write a candidate
+pointer `current.candidate.json`) — it never swaps the live
+`current.json`. Promoting a candidate to live traffic is the
+operator-gated **P6 canary** pointer flip. The previous live bundle and
+its `current.json` stay frozen as the last-known-good fallback while a
+candidate is staged.
+
 ## Phase → flag trajectory (parent §10)
 
 | Phase | Typical flag state |
@@ -43,6 +61,7 @@ runtime that reads them is built in mss P2+.
 | P2 loader | `LP_BUNDLE_SOURCE` set; mode still `legacy` |
 | P3 shadow | `LP_RUNTIME_MODE=shadow` |
 | P4 preview | `legacy` + per-request `?lp_runtime=v2` for allowlisted QA |
+| P5 dual-publish | `legacy` served; `LP_CROSSREPO_COMMIT_PRODUCER=false`; approval publishes a bundle candidate (no live pointer flip) |
 | P6 canary | `LP_RUNTIME_MODE=canary`; ramp `LP_V2_PERCENT` 1→5→25→50→100 over a widening allowlist |
 | P7 full | `LP_RUNTIME_MODE=v2`; `legacy` retained behind `LP_V2_KILL_SWITCH` one release window |
 | P8 decommission | flags retained for emergency rollback; legacy code removed |
