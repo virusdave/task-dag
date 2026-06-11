@@ -175,6 +175,14 @@ export function WhiteGlovePricingPage() {
           <h2>Bulk-Flower Pricing</h2>
         </div>
         <div className="wl-controls">
+          <a
+            className="wl-menu-link"
+            href="https://freshlybaked.nyc/white-glove/bulk-flower"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            View live menu ↗
+          </a>
           <button onClick={refresh} disabled={busy !== null}>
             {busy === 'refresh' ? 'Refreshing…' : 'Refresh cost basis (Sweed)'}
           </button>
@@ -468,7 +476,9 @@ function DecisionPicker({
 const INLINE_CSS = `
 .wl-pricing { padding: 16px; }
 .wl-pricing h2 { margin: 0 0 4px; }
-.wl-controls { display: flex; gap: 8px; }
+.wl-controls { display: flex; gap: 8px; align-items: center; }
+.wl-controls a.wl-menu-link { font: inherit; padding: 6px 12px; border: 1px solid #ccc; background: white; border-radius: 4px; cursor: pointer; text-decoration: none; color: #2a5db0; }
+.wl-controls a.wl-menu-link:hover { background: #f0f4fc; }
 .wl-controls button { font: inherit; padding: 6px 12px; border: 1px solid #ccc; background: white; border-radius: 4px; cursor: pointer; }
 .wl-controls button.primary { background: #2a5db0; color: white; border-color: #2a5db0; }
 .wl-controls button:disabled { opacity: 0.5; cursor: not-allowed; }
