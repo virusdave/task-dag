@@ -40,6 +40,7 @@ import { registerInventoryProcurementRoutes } from '../routes/inventoryProcureme
 import { registerHistoryRoutes } from '../routes/history.js'
 import { registerJobRoutes } from '../routes/jobs.js'
 import { registerLlmRoutes } from '../routes/llm.js'
+import { registerLpEventsRoutes } from '../routes/lpEvents.js'
 import { registerMetricAnnotationsRoutes } from '../routes/metricAnnotations.js'
 import { registerMetricsRoutes } from '../routes/metrics.js'
 import { registerMetricsDefaultsRoutes } from '../routes/metricsDefaults.js'
@@ -245,6 +246,7 @@ async function registerApplicationSurface(server: FastifyInstance) {
   await registerUtilitiesPromoNamesRoutes(server)
   await registerHistoryRoutes(server)
   await registerLlmRoutes(server)
+  await registerLpEventsRoutes(server)
   await registerMetricAnnotationsRoutes(server)
   await registerMetricsRoutes(server)
   await registerMetricsDefaultsRoutes(server)

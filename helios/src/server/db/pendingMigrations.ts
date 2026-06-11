@@ -871,6 +871,14 @@ const SENTINELS: MigrationSentinel[] = [
       'view defaults (admin "Update defaults" / "Reset defaults").',
     check: (db) => tableExists(db, 'app_settings'),
   },
+  {
+    migrationId: '070_lp_events',
+    label:
+      'lp_events sink — required by the unified-landing-engine event ' +
+      'ingest (POST /v1/lp-events/batch). Without it the ingest route ' +
+      '503s and the mostly-static-sites runtime spools events locally.',
+    check: (db) => tableExists(db, 'lp_events'),
+  },
 ]
 
 interface CacheEntry {

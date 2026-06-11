@@ -54,6 +54,20 @@ const BEDROCK_MANTLE_BEARER_TOKEN_SECRET_FILE_PATHS = buildDefaultSecretFilePath
   'bedrock/mantle-bearer-token.env',
 )
 
+// Unified-landing-engine event-ingest bearer token (parent epic
+// virusdave/top-level#13 / child FreshlyBakedNYC/automation#42, P1).
+// The mostly-static-sites landing runtime authenticates its
+// `POST /v1/lp-events/batch` flushes with this long-lived bearer; the
+// Helios ingest handler refuses any batch whose bearer doesn't
+// constant-time match. Unset → the route 503s every request
+// (fail-closed, see routes/lpEvents.ts). Stored alongside the other
+// agenix-encrypted secrets and exposed via the systemd EnvironmentFile
+// as LP_EVENTS_INGEST_TOKEN.
+const LP_EVENTS_INGEST_TOKEN_SECRET_FILE_PATHS = buildDefaultSecretFilePaths(
+  'lp-events/ingest-token',
+  'lp-events/ingest-token.env',
+)
+
 export interface ServerEnv {
   appBasePath: string
   appBaseUrl: string
@@ -77,6 +91,11 @@ export interface ServerEnv {
   // every webhook POST returns 503 in that state, see
   // helios/src/server/routes/visitorScans.ts).
   veriscanWebhookToken: string | null
+  // Unified-landing-engine event-ingest bearer token. See
+  // LP_EVENTS_INGEST_TOKEN_SECRET_FILE_PATHS above; null when unset
+  // (fail-closed — POST /v1/lp-events/batch returns 503 in that state,
+  // see routes/lpEvents.ts).
+  lpEventsIngestToken: string | null
   communicationsPolicyPacketDir: string
   // Customer-Sentiment Capture (issue #13).  Default off so a deploy
   // can't accidentally start accepting public POST /v1/reviews/submit
@@ -145,6 +164,9 @@ export function getServerEnv(): ServerEnv {
     sweedStateDealerId: readNumberEnv('SWEED_STATE_DEALER_ID', 210248),
     veriscanWebhookToken: readOptionalSecretEnv('VERISCAN_WEBHOOK_TOKEN', {
       defaultFilePaths: VERISCAN_WEBHOOK_TOKEN_SECRET_FILE_PATHS,
+    }),
+    lpEventsIngestToken: readOptionalSecretEnv('LP_EVENTS_INGEST_TOKEN', {
+      defaultFilePaths: LP_EVENTS_INGEST_TOKEN_SECRET_FILE_PATHS,
     }),
     communicationsPolicyPacketDir:
       readOptionalEnv('COMMUNICATIONS_POLICY_PACKET_DIR') ??

@@ -55,6 +55,13 @@ const LOGIN_FLOW_ENDPOINTS: readonly LoginFlowEndpoint[] = [
   // any UUID submissionId is allowed without needing per-id
   // allowlisting.
   { method: 'POST', appRelativePath: '/v1/reviews/submit' },
+  // Unified-landing-engine event ingest (parent virusdave/top-level#13
+  // / child FreshlyBakedNYC/automation#42, P1). Called service-to-
+  // service by the mostly-static-sites landing runtime's batch
+  // flusher; it does its own constant-time `Authorization: Bearer`
+  // check against LP_EVENTS_INGEST_TOKEN inside the handler (see
+  // routes/lpEvents.ts), so it must bypass the SPA session gate.
+  { method: 'POST', appRelativePath: '/v1/lp-events/batch' },
 ]
 
 // Public POST endpoints whose appPath starts with one of these

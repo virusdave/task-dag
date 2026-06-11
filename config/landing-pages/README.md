@@ -67,6 +67,31 @@ mutable object and is swapped via atomic same-dir `rename()`:
 **Signing keys live with Helios only — never on the shared `/cloud`
 mount** (parent §5, decision 5).
 
+## Event ingest endpoint (P1 — implemented)
+
+The conversion-feedback sink (parent §9) is live in Helios:
+
+```
+POST /v1/lp-events/batch        body → lp-events-batch.v1.schema.json
+```
+
+- **Consumer:** the mostly-static-sites landing runtime's durable
+  spool + 15-minute batch flusher (mss P2). Nothing serves v2 yet, so
+  no production traffic writes here until later phases — the endpoint
+  is stood up now so the contract is exercisable end-to-end.
+- **Auth:** `Authorization: Bearer <LP_EVENTS_INGEST_TOKEN>`, compared
+  constant-time. Unset token ⇒ `503` (fail-closed); missing/mismatched
+  bearer ⇒ `401`. Provision the secret the same way as
+  `VERISCAN_WEBHOOK_TOKEN` (agenix → systemd `EnvironmentFile`).
+- **Storage:** append-only `lp_events` table (Helios migration
+  `070_lp_events.sql`). Idempotent by the runtime-assigned `event_id`
+  (`on conflict do nothing`), so an interrupted flush can safely
+  re-send. Every row carries `assignment_id` / `bundle_id` / `policy_id`
+  provenance for the P3 parity dashboard and the conversion loop.
+- **Response:** `200 {received, inserted, duplicates}`. If the table is
+  missing the route returns `503` (operator: apply migration 070) and
+  the runtime keeps the batch spooled rather than dropping it.
+
 ## Binding constraints (do not violate in any phase)
 
 - **No URL-schema changes.** The canonical FB-US schema
