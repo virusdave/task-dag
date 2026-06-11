@@ -54,6 +54,58 @@ export type CustomerValueCohortGranularity = z.infer<typeof CustomerValueCohortG
 export const CustomerValueIncludeSectionSchema = z.enum(['retention'])
 export type CustomerValueIncludeSection = z.infer<typeof CustomerValueIncludeSectionSchema>
 
+/**
+ * Purchase-count percentiles the Customer Value tab reports. Exactly
+ * five, each an integer in `[50, 99]`. The operator can pick which
+ * five via the `?percentiles=` request param; the default mirrors the
+ * original fixed set.
+ */
+export const PURCHASE_COUNT_PERCENTILE_SLOTS = 5
+export const PURCHASE_COUNT_PERCENTILE_MIN = 50
+export const PURCHASE_COUNT_PERCENTILE_MAX = 99
+export const DEFAULT_PURCHASE_COUNT_PERCENTILES: readonly number[] = [50, 75, 80, 90, 95]
+
+/** Clamp + round one requested percentile into the supported range. */
+export function normalizePurchaseCountPercentile(n: number): number {
+  return Math.min(
+    PURCHASE_COUNT_PERCENTILE_MAX,
+    Math.max(PURCHASE_COUNT_PERCENTILE_MIN, Math.round(n)),
+  )
+}
+
+/**
+ * Normalize an arbitrary requested list into exactly five valid
+ * percentiles: drop non-finite entries, clamp each to `[50, 99]`,
+ * truncate beyond five, and pad short lists from the default set.
+ * Order is preserved (the operator chose it).
+ */
+export function normalizePurchaseCountPercentiles(input: readonly number[]): number[] {
+  const cleaned = input
+    .filter((n) => Number.isFinite(n))
+    .map(normalizePurchaseCountPercentile)
+    .slice(0, PURCHASE_COUNT_PERCENTILE_SLOTS)
+  while (cleaned.length < PURCHASE_COUNT_PERCENTILE_SLOTS) {
+    cleaned.push(DEFAULT_PURCHASE_COUNT_PERCENTILES[cleaned.length])
+  }
+  return cleaned
+}
+
+// `?percentiles=` — comma-separated integers; normalized to exactly
+// five values in [50, 99]. Empty / unset → the default set.
+const PercentilesParam = z
+  .string()
+  .optional()
+  .transform((v) =>
+    normalizePurchaseCountPercentiles(
+      v
+        ? v
+            .split(',')
+            .map((s) => Number(s.trim()))
+            .filter((n) => Number.isFinite(n))
+        : [],
+    ),
+  )
+
 export const CustomerValueAnalyticsRequestSchema = z.object({
   from: z.string().datetime().optional(),
   to: z.string().datetime().optional(),
@@ -73,27 +125,38 @@ export const CustomerValueAnalyticsRequestSchema = z.object({
     .pipe(z.array(CustomerValueIncludeSectionSchema)),
   /** Cohort retention granularity. Only meaningful when `include=retention`. */
   cohortGranularity: CustomerValueCohortGranularitySchema.optional(),
+  /**
+   * Which five purchase-count percentiles to report (each 50..99).
+   * Comma-separated; normalized to exactly five. Empty / unset →
+   * the default set (50/75/80/90/95).
+   */
+  percentiles: PercentilesParam,
 })
 export type CustomerValueAnalyticsRequest = z.infer<typeof CustomerValueAnalyticsRequestSchema>
 
 // =========================== Summary KPIs ==================================
 
 /**
- * Percentiles of per-customer total purchase count (number of
- * purchases) across the in-scope customer set. Each value is the
- * smallest purchase count at or below which the given fraction of
- * customers fall (`percentile_disc` — an actual observed integer
- * count, never an interpolated fraction). `null` when there are no
- * in-scope customers. Honours the same site + cohort-scope filters
- * as the rest of the page.
+ * One reported percentile of per-customer total purchase count
+ * (number of purchases) across the in-scope customer set.
+ *
+ *   - `percentile` — the requested percentile (50..99).
+ *   - `value`      — the smallest purchase count at or below which
+ *     that fraction of customers fall (`percentile_disc` — an actual
+ *     observed integer count, never an interpolated fraction).
+ *     `null` when there are no in-scope customers.
+ *
+ * Honours the same site + date + cohort-scope filters as the rest of
+ * the page. The response always carries exactly five entries, in the
+ * order the operator requested (default 50/75/80/90/95).
  */
-export const PurchaseCountPercentilesSchema = z.object({
-  p50: z.number().nullable(),
-  p75: z.number().nullable(),
-  p80: z.number().nullable(),
-  p90: z.number().nullable(),
-  p95: z.number().nullable(),
+export const PurchaseCountPercentileSchema = z.object({
+  percentile: z.number().int().min(50).max(99),
+  value: z.number().nullable(),
 })
+export type PurchaseCountPercentile = z.infer<typeof PurchaseCountPercentileSchema>
+
+export const PurchaseCountPercentilesSchema = z.array(PurchaseCountPercentileSchema)
 export type PurchaseCountPercentiles = z.infer<typeof PurchaseCountPercentilesSchema>
 
 export const CustomerValueSummarySchema = z.object({

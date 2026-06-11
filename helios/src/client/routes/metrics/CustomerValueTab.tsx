@@ -14,6 +14,8 @@ import {
   type MetricSelection,
   type PurchaseCountBucket,
   type PurchaseCountPercentiles,
+  DEFAULT_PURCHASE_COUNT_PERCENTILES,
+  normalizePurchaseCountPercentile,
 } from '../../../shared/contracts/index.js'
 import { loadJson } from '../../app/fetchJson.js'
 import { nyIsoDate, nyMonthDaySlash } from '../../app/nyTime.js'
@@ -140,6 +142,11 @@ export function CustomerValueTab(): JSX.Element {
   // cohorts in a default 90-day window.
   const [cohortGranularity, setCohortGranularity] =
     useState<CustomerValueCohortGranularity>('week')
+  // Which five purchase-count percentiles to report (each 50..99).
+  // Operator-adjustable; defaults to the original fixed set.
+  const [percentiles, setPercentiles] = useState<number[]>(() => [
+    ...DEFAULT_PURCHASE_COUNT_PERCENTILES,
+  ])
 
   const [data, setData] = useState<CustomerValueAnalyticsResponse | null>(null)
   const [loading, setLoading] = useState<boolean>(true)
@@ -152,6 +159,7 @@ export function CustomerValueTab(): JSX.Element {
   }, [useCustomRange, customFromMs, customToMs, windowDays])
 
   const sitesParam = useMemo(() => Array.from(selectedSites).join(','), [selectedSites])
+  const percentilesParam = useMemo(() => percentiles.join(','), [percentiles])
 
   useEffect(() => {
     let cancelled = false
@@ -168,6 +176,7 @@ export function CustomerValueTab(): JSX.Element {
     // endpoint. Granularity also forwarded; server defaults to 'week'.
     params.set('include', 'retention')
     params.set('cohortGranularity', cohortGranularity)
+    params.set('percentiles', percentilesParam)
     setLoading(true)
     setError(null)
     loadJson(
@@ -189,7 +198,7 @@ export function CustomerValueTab(): JSX.Element {
     return () => {
       cancelled = true
     }
-  }, [fromMs, toMs, sitesParam, cohortScope, maxN, cohortGranularity])
+  }, [fromMs, toMs, sitesParam, cohortScope, maxN, cohortGranularity, percentilesParam])
 
   return (
     <section className="customer-value-tab">
@@ -354,7 +363,17 @@ export function CustomerValueTab(): JSX.Element {
       ) : loading && !data ? (
         <p className="subtle-copy">Loading…</p>
       ) : data ? (
-        <CustomerValueBody data={data} />
+        <CustomerValueBody
+          data={data}
+          percentiles={percentiles}
+          onPercentileChange={(index, next) =>
+            setPercentiles((prev) => {
+              const copy = [...prev]
+              copy[index] = normalizePurchaseCountPercentile(next)
+              return copy
+            })
+          }
+        />
       ) : null}
     </section>
   )
@@ -372,7 +391,15 @@ const CUSTOMER_VALUE_METRIC_IDS = {
   contributionByN: 'customer-value.contribution-by-purchase-number',
 } as const
 
-function CustomerValueBody({ data }: { data: CustomerValueAnalyticsResponse }) {
+function CustomerValueBody({
+  data,
+  percentiles,
+  onPercentileChange,
+}: {
+  data: CustomerValueAnalyticsResponse
+  percentiles: ReadonlyArray<number>
+  onPercentileChange: (index: number, next: number) => void
+}) {
   const [moneyBasis, setMoneyBasis] = useState<MoneyBasis>('gross_sales')
   const moneyBasisDef =
     MONEY_BASES.find((b) => b.id === moneyBasis) ?? MONEY_BASES[0]!
@@ -451,7 +478,9 @@ function CustomerValueBody({ data }: { data: CustomerValueAnalyticsResponse }) {
         <PurchaseCountHistogramCard
           data={data.purchaseCountHistogram}
           maxN={data.maxPurchaseNumber}
-          percentiles={data.summary.purchaseCountPercentiles}
+          percentiles={percentiles}
+          percentileValues={data.summary.purchaseCountPercentiles}
+          onPercentileChange={onPercentileChange}
           selection={selection}
           onSelect={setSelection}
         />
@@ -761,12 +790,18 @@ function PurchaseCountHistogramCard({
   data,
   maxN,
   percentiles,
+  percentileValues,
+  onPercentileChange,
   selection,
   onSelect,
 }: {
   data: ReadonlyArray<PurchaseCountBucket>
   maxN: number
-  percentiles: PurchaseCountPercentiles
+  /** Operator-requested percentiles (page state, drives the inputs). */
+  percentiles: ReadonlyArray<number>
+  /** Server-computed values, index-aligned with `percentiles`. */
+  percentileValues: PurchaseCountPercentiles
+  onPercentileChange: (index: number, next: number) => void
   selection: MetricSelection | null
   onSelect: (next: MetricSelection | null) => void
 }) {
@@ -812,42 +847,94 @@ function PurchaseCountHistogramCard({
         selectedKey={selectedKey}
         onSelect={(key) => onSelect(key == null ? null : { kind: 'histogramBucket', metricId, bucketKey: key })}
       />
-      <PurchaseCountPercentilesRow percentiles={percentiles} />
+      <PurchaseCountPercentilesRow
+        percentiles={percentiles}
+        percentileValues={percentileValues}
+        onPercentileChange={onPercentileChange}
+      />
     </article>
   )
 }
 
-/** Compact percentile readout for per-customer total purchase count,
- *  rendered under the histogram. Each value answers "X% of in-scope
- *  customers made at most this many purchases". Honours the same
- *  site / date / cohort-scope filters as the chart above it. */
+/** Compact, editable percentile readout for per-customer total
+ *  purchase count, rendered under the histogram. Each chip's
+ *  percentile is operator-adjustable (50..99); the value answers
+ *  "X% of in-scope customers made at most this many purchases".
+ *  Honours the same site / date / cohort-scope filters as the chart
+ *  above it. */
 function PurchaseCountPercentilesRow({
   percentiles,
+  percentileValues,
+  onPercentileChange,
 }: {
-  percentiles: PurchaseCountPercentiles
+  percentiles: ReadonlyArray<number>
+  percentileValues: PurchaseCountPercentiles
+  onPercentileChange: (index: number, next: number) => void
 }) {
-  const entries: ReadonlyArray<{ label: string; value: number | null }> = [
-    { label: 'p50', value: percentiles.p50 },
-    { label: 'p75', value: percentiles.p75 },
-    { label: 'p80', value: percentiles.p80 },
-    { label: 'p90', value: percentiles.p90 },
-    { label: 'p95', value: percentiles.p95 },
-  ]
   return (
     <div className="customer-value-percentiles" role="group" aria-label="Purchase-count percentiles">
       <span className="customer-value-percentiles-title subtle-copy">
         Purchases per customer{' '}
-        <HelpIcon text="Percentiles of the number of purchases per in-scope customer, over the same site / date / cohort-scope filters as this chart. e.g. p90 = 90% of customers made at most this many purchases. Whole numbers (an actual observed purchase count, not interpolated)." />
+        <HelpIcon text="Percentiles of the number of purchases per in-scope customer, over the same site / date / cohort-scope filters as this chart. e.g. p90 = 90% of customers made at most this many purchases. Edit any percentile (50–99) to re-query. Whole numbers (an actual observed purchase count, not interpolated)." />
       </span>
-      {entries.map((e) => (
-        <span key={e.label} className="customer-value-percentile-chip">
-          <span className="customer-value-percentile-key">{e.label}</span>
+      {percentiles.map((p, i) => (
+        <span key={i} className="customer-value-percentile-chip">
+          <span className="customer-value-percentile-key">
+            p
+            <PercentileInput value={p} onCommit={(next) => onPercentileChange(i, next)} />
+          </span>
           <span className="customer-value-percentile-val">
-            {e.value == null ? '—' : fmtInt(e.value)}
+            {percentileValues[i]?.value == null ? '—' : fmtInt(percentileValues[i]!.value!)}
           </span>
         </span>
       ))}
     </div>
+  )
+}
+
+/** Small number input for one percentile. Keeps a local draft so the
+ *  operator can type freely (no clamp-mid-keystroke, no per-keystroke
+ *  re-query); commits a clamped value to the parent on blur / Enter,
+ *  which is what triggers the page refetch. */
+function PercentileInput({
+  value,
+  onCommit,
+}: {
+  value: number
+  onCommit: (next: number) => void
+}) {
+  const [draft, setDraft] = useState<string>(String(value))
+  // Re-sync if the canonical value changes from elsewhere (e.g. the
+  // server normalized it, or another control reset state).
+  useEffect(() => setDraft(String(value)), [value])
+  const commit = (): void => {
+    const n = Number(draft)
+    if (Number.isFinite(n)) {
+      const clamped = normalizePurchaseCountPercentile(n)
+      setDraft(String(clamped))
+      if (clamped !== value) onCommit(clamped)
+    } else {
+      setDraft(String(value))
+    }
+  }
+  return (
+    <input
+      type="number"
+      min={50}
+      max={99}
+      step={1}
+      className="customer-value-percentile-input"
+      value={draft}
+      aria-label="percentile (50–99)"
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault()
+          ;(e.target as HTMLInputElement).blur()
+        }
+      }}
+    />
   )
 }
 

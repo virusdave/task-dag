@@ -7189,6 +7189,29 @@ span.metric-chart-legend-item {
   text-transform: uppercase;
   letter-spacing: 0.04em;
   color: #6b7280;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 1px;
+}
+
+.customer-value-percentile-input {
+  width: 3.2ch;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  padding: 0 2px;
+  border: 1px solid #cbd5e1;
+  border-radius: 4px;
+  background: #fff;
+  color: #374151;
+  /* Hide the spinner arrows so the chip stays compact; the field is
+     still keyboard-spinnable and accepts typed input. */
+  -moz-appearance: textfield;
+}
+
+.customer-value-percentile-input::-webkit-outer-spin-button,
+.customer-value-percentile-input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
 }
 
 .customer-value-percentile-val {

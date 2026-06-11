@@ -51,12 +51,11 @@ import { getPool } from '../db/pool.js'
 export const CUSTOMER_VALUE_ANALYTICS_DEFAULT_WINDOW_DAYS = 90
 export const CUSTOMER_VALUE_ANALYTICS_MAX_N_HARD_CAP = 50
 
-const EMPTY_PURCHASE_COUNT_PERCENTILES: PurchaseCountPercentiles = {
-  p50: null,
-  p75: null,
-  p80: null,
-  p90: null,
-  p95: null,
+/** Build the empty-state percentile array (all values null) that
+ *  still echoes back the requested percentiles so the client can
+ *  label them even when there are no in-scope customers. */
+function emptyPurchaseCountPercentiles(percentiles: readonly number[]): PurchaseCountPercentiles {
+  return percentiles.map((percentile) => ({ percentile, value: null }))
 }
 
 /**
@@ -169,6 +168,12 @@ interface QueryArgs {
    * `'week'`. Only meaningful when `includeRetention === true`.
    */
   cohortGranularity: CustomerValueCohortGranularity
+  /**
+   * Exactly five purchase-count percentiles to report (each 50..99),
+   * in the operator-requested order. The route normalizes this via
+   * `normalizePurchaseCountPercentiles` before calling.
+   */
+  percentiles: readonly number[]
 }
 
 const MISSING_CARDS: ReadonlyArray<CustomerValueMissingDataCard> = [
@@ -319,7 +324,7 @@ export async function getCustomerValueAnalytics(
       repeatPurchaseRate: null,
       observedAvgLtvGrossDollars: null,
       observedMedianLtvGrossDollars: null,
-      purchaseCountPercentiles: EMPTY_PURCHASE_COUNT_PERCENTILES,
+      purchaseCountPercentiles: emptyPurchaseCountPercentiles(args.percentiles),
       grossSalesDollars: 0,
       grossReceiptsDollars: 0,
       netSalesDollars: 0,
@@ -464,16 +469,17 @@ export async function getCustomerValueAnalytics(
       -- Percentiles of per-customer total purchase count over the
       -- in-scope customer set (the same population the histograms
       -- below are built from). percentile_disc → an actual observed
-      -- integer count, not an interpolated fraction.
-      (select percentile_disc(0.50) within group (order by total_purchases)
+      -- integer count, not an interpolated fraction. The five
+      -- fractions are operator-chosen, bound as params $6..$10.
+      (select percentile_disc($6::float8) within group (order by total_purchases)
          from customers_in_scope)                        as v9,
-      (select percentile_disc(0.75) within group (order by total_purchases)
+      (select percentile_disc($7::float8) within group (order by total_purchases)
          from customers_in_scope)                        as v10,
-      (select percentile_disc(0.80) within group (order by total_purchases)
+      (select percentile_disc($8::float8) within group (order by total_purchases)
          from customers_in_scope)                        as v11,
-      (select percentile_disc(0.90) within group (order by total_purchases)
+      (select percentile_disc($9::float8) within group (order by total_purchases)
          from customers_in_scope)                        as v12,
-      (select percentile_disc(0.95) within group (order by total_purchases)
+      (select percentile_disc($10::float8) within group (order by total_purchases)
          from customers_in_scope)                        as v13
     union all
     -- ===========================================================
@@ -604,6 +610,9 @@ export async function getCustomerValueAnalytics(
       args.to.toISOString(),
       effectiveMaxN,
       args.cohortScope,
+      // $6..$10 — the five percentile fractions (e.g. 90 → 0.90),
+      // in the operator-requested order. v9..v13 read these back.
+      ...args.percentiles.map((p) => p / 100),
     ]),
     // Pull guest order count separately (summary.totalOrders = known + guest).
     pool.query<{ n: string | number }>(guestSql, [
@@ -645,7 +654,7 @@ export async function getCustomerValueAnalytics(
     repeatPurchaseRate: null,
     observedAvgLtvGrossDollars: null,
     observedMedianLtvGrossDollars: null,
-    purchaseCountPercentiles: EMPTY_PURCHASE_COUNT_PERCENTILES,
+    purchaseCountPercentiles: emptyPurchaseCountPercentiles(args.percentiles),
     grossSalesDollars: 0,
     grossReceiptsDollars: 0,
     netSalesDollars: 0,
@@ -670,13 +679,13 @@ export async function getCustomerValueAnalytics(
           knownOrdersInWindow > 0 ? summary.repeatPurchases / knownOrdersInWindow : null
         summary.observedAvgLtvGrossDollars = asNum(row.v4)
         summary.observedMedianLtvGrossDollars = asNum(row.v5)
-        summary.purchaseCountPercentiles = {
-          p50: asNum(row.v9),
-          p75: asNum(row.v10),
-          p80: asNum(row.v11),
-          p90: asNum(row.v12),
-          p95: asNum(row.v13),
-        }
+        // v9..v13 carry the five percentile values in the same order
+        // the operator requested them (args.percentiles[0..4]).
+        const percentileValues = [row.v9, row.v10, row.v11, row.v12, row.v13]
+        summary.purchaseCountPercentiles = args.percentiles.map((percentile, i) => ({
+          percentile,
+          value: asNum(percentileValues[i]),
+        }))
         summary.grossSalesDollars = asReqNum(row.v6)
         summary.netSalesDollars = asReqNum(row.v7)
         summary.grossReceiptsDollars = asReqNum(row.v8)

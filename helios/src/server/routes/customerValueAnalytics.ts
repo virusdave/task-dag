@@ -44,6 +44,9 @@ export async function registerCustomerValueAnalyticsRoutes(
       // Default granularity is `week`.
       includeRetention: parsed.include.includes('retention'),
       cohortGranularity: parsed.cohortGranularity ?? 'week',
+      // Already normalized to exactly five values in [50, 99] by the
+      // request schema's `percentiles` transform.
+      percentiles: parsed.percentiles,
     })
     return reply.send(CustomerValueAnalyticsResponseSchema.parse(result))
   })
