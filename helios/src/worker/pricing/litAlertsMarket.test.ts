@@ -278,6 +278,41 @@ describe('pricing comp match prioritization', () => {
     expect(weakAssessment.matchTier).toBe('weak')
   })
 
+  it('matches an infused-preroll catalog group (subcategory "Infused") against a bare listing lane', () => {
+    // Regression: catalog groups carry a subcategory ("Infused") but
+    // LitAlerts listings always come in with subcategory=null. The
+    // preroll lane key must collapse to "infused" on both sides, or
+    // every nearby Baby Jeeter comp gets stuck in the weak lane.
+    const productProfile = {
+      laneKey: __test__.inferComparableLaneKey({
+        category: 'Pre-Rolls',
+        subcategory: 'Infused',
+        text: 'Jeeter Baby Jeeter Infused Acapulco Gold 5x 2.5g',
+      }),
+      size: { measure: 'g' as const, packCount: 5, totalValue: 2.5, unitValue: 0.5 },
+    }
+
+    expect(productProfile.laneKey).toBe('infused')
+
+    const assessment = __test__.assessListingForProduct(productProfile, {
+      availability: null,
+      category: 'Pre-Rolls',
+      distanceBand: 'near',
+      distanceMiles: 1,
+      dispensaryName: 'Herbwell Cannabis - Bronx',
+      listingName: 'Skywalker OG Quad-Infused Baby Jeeter 5-pack | 2.5g',
+      postTaxPrice: 54.24,
+      preTaxPrice: 48,
+      size: { measure: 'g', packCount: 5, totalValue: 2.5, unitValue: 0.5 },
+      source: 'nearby',
+      url: null,
+    })
+
+    expect(assessment.laneTier).toBe(3)
+    expect(assessment.sizeTier).toBe(3)
+    expect(assessment.matchTier).toBe('exact')
+  })
+
   it('treats exact size matches as stronger than mismatched multipacks', () => {
     const exactSizeTier = __test__.classifySizeTier(
       { measure: 'g', packCount: 1, totalValue: 1, unitValue: 1 },

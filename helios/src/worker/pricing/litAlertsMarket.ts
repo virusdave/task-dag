@@ -1378,10 +1378,16 @@ function inferComparableLaneKey(input: {
   }
 
   if (categoryKey === 'pre rolls' || categoryKey === 'prerolls') {
-    const prerollLane = combinedText.includes('infused') || combinedText.includes('hash hole') || combinedText.includes('hash-hole')
+    // Only the infused-vs-standard split is meaningful here, and it is
+    // already derived from `combinedText` (which folds in the catalog
+    // subcategory on the product side and the listing name on the
+    // listing side). Do NOT prefix the raw `subcategoryKey`: LitAlerts
+    // listings always come in with subcategory=null, so a product key
+    // like "infused|infused" could never match a listing's bare
+    // "infused", forcing every nearby preroll comp to the weak lane.
+    return combinedText.includes('infused') || combinedText.includes('hash hole') || combinedText.includes('hash-hole')
       ? 'infused'
       : 'standard'
-    return subcategoryKey ? `${subcategoryKey}|${prerollLane}` : prerollLane
   }
 
   if (categoryKey === 'concentrates') {
@@ -1863,12 +1869,15 @@ function resolveCatalogSizeProfile(input: {
 
 /**
  * Build the size profile for a competitor listing. LitAlerts ships a
- * structured per-config `amount`/`units` pair that, for pre-rolls, is
- * reliably the package TOTAL across brands (verified: "5pk .5g" =>
- * amount 2.5g, "7pk" => 3.5g, "5 x 0.5g" => 2.5g). When it parses to a
- * clean weight we trust it as the total and derive the per-unit size
- * from the pack count in the listing name. When it's missing or junk
- * we fall back to free-text parsing of the name (+ brand convention).
+ * structured per-config `amount`/`units` pair, but it is NOT consistent:
+ * for one and the same Baby Jeeter 5-pack, retailers report `amount` as
+ * 2.5g (the pack total), 0.5g (per-stick), or even "5 pk". So we can't
+ * blindly treat it as the total — when there's a multipack we run the
+ * clean weight through the same distribution-aware disambiguator as
+ * everywhere else (which reads value=2.5 and value=0.5 both as a 2.5g
+ * total / 0.5g unit for a 5-pack pre-roll). Singles use the value as-is.
+ * When `amount`/`units` is missing or junk we fall back to free-text
+ * parsing of the listing name.
  */
 function resolveListingSizeProfile(input: {
   listingName: string
@@ -1878,16 +1887,33 @@ function resolveListingSizeProfile(input: {
   category?: string | null
   prior?: SizeDistributionPrior | null
 }): ParsedSizeProfile {
-  const structuredTotal = parseStructuredWeight(input.amount, input.units)
-  if (structuredTotal) {
+  const structured = parseStructuredWeight(input.amount, input.units)
+  if (structured) {
     const packCount = parsePackCount(input.listingName)
-    const totalValue = structuredTotal.value
-    const unitValue = packCount > 1 ? totalValue / packCount : totalValue
+    if (packCount > 1) {
+      const convention = resolveSizeConvention(input.brand)
+      return disambiguateMultipackValue({
+        packCount,
+        value: structured.value,
+        measure: structured.measure,
+        context: {
+          category: input.category,
+          prior: input.prior,
+          conventionInterpretation:
+            convention?.multiplierValueIsTotal === true && convention.measure === structured.measure
+              ? 'total'
+              : null,
+          // LitAlerts `amount` is the pack total more often than not, so
+          // bias the undecided case that way.
+          defaultInterpretation: 'total',
+        },
+      })
+    }
     return {
-      measure: structuredTotal.measure,
+      measure: structured.measure,
       packCount,
-      totalValue: roundCurrency(totalValue),
-      unitValue: roundCurrency(unitValue),
+      totalValue: roundCurrency(structured.value),
+      unitValue: roundCurrency(structured.value),
     }
   }
   return parseSizeProfile(input.listingName, {
@@ -2059,7 +2085,10 @@ function computeSizeDelta(left: number | null, right: number | null): number | n
 }
 
 function parsePackCount(text: string): number {
-  const exact = text.match(/(\d+)\s*(?:pk|pack|packs)\b/i)
+  // Accept "5pk", "5 pack", and hyphenated "5-pack" (LitAlerts retailers
+  // write the pack size every which way; missing it causes a spurious
+  // pack-count mismatch in classifySizeTier).
+  const exact = text.match(/(\d+)\s*-?\s*(?:pk|pack|packs)\b/i)
   if (exact) {
     return Number.parseInt(exact[1], 10)
   }
