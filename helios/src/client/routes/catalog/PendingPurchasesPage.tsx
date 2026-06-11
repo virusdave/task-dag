@@ -195,7 +195,7 @@ export function PendingPurchasesPage() {
   const session = useRouteLoaderData('root') as SessionEnvelope
   const revalidator = useRevalidator()
   const navigate = useNavigate()
-  const [applySuccessMessage, setApplySuccessMessage] = useState<string | null>(null)
+  const [applySuccessMessage, setApplySuccessMessage] = useState<{ text: string; jobId: number | null } | null>(null)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [generateFromDate, setGenerateFromDate] = useState(defaultGenerateFromDate)
   const [generateSiteDealerIds, setGenerateSiteDealerIds] = useState<number[]>(
@@ -414,19 +414,25 @@ export function PendingPurchasesPage() {
         }
 
         const applyRequestId = jobStatus.linkedRecords.pendingPurchaseApplyRequestId
-        setApplySuccessMessage(
-          applyRequestId
-            ? `Completed pending-purchase apply request #${applyRequestId}.`
-            : 'Completed the pending-purchase apply request.',
-        )
+        setApplySuccessMessage({
+          jobId: response.jobId,
+          text: applyRequestId
+            ? `Completed pending-purchase apply request #${applyRequestId} (job #${response.jobId}).`
+            : `Completed the pending-purchase apply request (job #${response.jobId}).`,
+        })
       } else {
-        setApplySuccessMessage('Queued the pending-purchase apply request successfully.')
+        setApplySuccessMessage({ jobId: null, text: 'Queued the pending-purchase apply request successfully.' })
       }
 
       setSelectedRowIds([])
       await revalidator.revalidate()
+      // Teleport the approver to the top so the apply status + job link
+      // they almost certainly want next is in view, instead of leaving
+      // them parked at the now-empty apply bar hunting for the result.
+      scrollToApplyStatus()
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : 'Could not queue the pending-purchase apply request.')
+      scrollToApplyStatus()
     } finally {
       setIsApplying(false)
     }
@@ -437,6 +443,16 @@ export function PendingPurchasesPage() {
     setErrorMessage(null)
     setGenerateSuccessMessage(null)
     setImportSuccessMessage(null)
+  }
+
+  // The "Queue apply" button lives in the apply bar at the bottom of a
+  // long row review. After apply finishes we scroll the page-level
+  // toasts (apply status + job link) back into view so the reviewer
+  // lands on the outcome of the action they just took.
+  function scrollToApplyStatus() {
+    if (typeof window !== 'undefined') {
+      window.scrollTo({ behavior: 'smooth', top: 0 })
+    }
   }
 
   async function finalizeGenerationJob(jobStatus: JobStatusResponse) {
@@ -587,7 +603,17 @@ export function PendingPurchasesPage() {
         )}
       </nav>
 
-      {applySuccessMessage ? <p className="pp-toast pp-toast-success">{applySuccessMessage}</p> : null}
+      {applySuccessMessage ? (
+        <p className="pp-toast pp-toast-success">
+          {applySuccessMessage.text}
+          {applySuccessMessage.jobId !== null ? (
+            <>
+              {' '}
+              <Link to={`/jobs/${applySuccessMessage.jobId}`}>Open job details</Link>
+            </>
+          ) : null}
+        </p>
+      ) : null}
       {generateSuccessMessage ? (
         <p className="pp-toast pp-toast-success">
           {generateSuccessMessage}
