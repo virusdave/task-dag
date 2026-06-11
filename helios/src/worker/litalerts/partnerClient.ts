@@ -203,10 +203,25 @@ export async function listRetailers(stateCode: string): Promise<LitAlertsRetaile
 
 export async function listRetailerProducts(
   retailerId: number,
-  stateCode: string,
+  stateCodeOrOptions: string | { stateCode: string; brandIds?: number[]; includeOutOfStock?: boolean },
 ): Promise<LitAlertsProduct[]> {
+  const opts =
+    typeof stateCodeOrOptions === 'string' ? { stateCode: stateCodeOrOptions } : stateCodeOrOptions
+  const params = new URLSearchParams({ state: opts.stateCode })
+  // `brandIds` (plural, comma-separated) restricts the per-retailer menu to
+  // just those brands server-side. Confirmed live June 2026: a single-brand
+  // filter shrinks the payload ~30x (≈600KB full menu → ≈20KB), which is what
+  // makes the nearest-retailer fan-out in litAlertsMarket cheap. The singular
+  // `brandId` form is silently ignored by the partner API, so always send the
+  // plural key.
+  if (opts.brandIds && opts.brandIds.length > 0) {
+    params.set('brandIds', opts.brandIds.join(','))
+  }
+  if (opts.includeOutOfStock) {
+    params.set('includeOOS', 'true')
+  }
   const payload = await fetchPartnerJson(
-    `/v1/retailers/${encodeURIComponent(String(retailerId))}/products?state=${encodeURIComponent(stateCode)}`,
+    `/v1/retailers/${encodeURIComponent(String(retailerId))}/products?${params.toString()}`,
   )
   return ProductListResponseSchema.parse(payload).data
 }

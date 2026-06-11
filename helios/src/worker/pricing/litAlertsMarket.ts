@@ -16,8 +16,8 @@ import type { NormalizedCatalogGroupLiveState } from '../catalog/liveState.js'
 import { getWorkerEnv } from '../config/env.js'
 import {
   hasPartnerApiToken,
-  listBrandProducts,
   listBrandsForState,
+  listRetailerProducts,
   listRetailers,
   type LitAlertsProduct,
   type LitAlertsRetailer,
@@ -72,6 +72,21 @@ const BRAND_MANUFACTURER_ALIASES = new Map<string, string>([
 ])
 
 const MIN_PRICING_ELIGIBLE_COMP_COUNT = 3
+
+/**
+ * Live market evidence is gathered by fanning out across the geographically
+ * nearest retailers and pulling only the target brand's listings from each
+ * (`/v1/retailers/:id/products?brandIds=`), instead of one statewide
+ * `/v1/brands/:id/products` call that routinely times out for high-volume
+ * brands. We cap the fan-out at the ~50 closest retailers: the near (≤1mi)
+ * and mid (≤3mi) buckets that actually drive price are dense within the first
+ * couple dozen, and the existing distance weighting already prioritises the
+ * closest dispensaries — there is no value in wading through all ~550 active
+ * NY retailers. The cache (litalerts_products) remains the backstop when the
+ * brand isn't carried nearby or the fan-out fails wholesale.
+ */
+const PRICING_NEARBY_RETAILER_FETCH_LIMIT = 50
+const PRICING_NEARBY_RETAILER_FETCH_CONCURRENCY = 8
 const PRICING_SEARCH_ADAPTATION_MODEL = 'google.gemma-3-27b-it'
 const PRICING_SEARCH_ADAPTATION_MAX_TERMS = 4
 const PRICING_SEARCH_ADAPTATION_MAX_ATTEMPTS = 4
@@ -195,41 +210,52 @@ export async function buildPricingMarketContext(
   }
 
   const retailerDirectory = await loadRetailerDirectory()
-  // Fetch the brand's full product roster once. The partner API returns the
-  // entire statewide product catalog for this brand; we filter it client-side
-  // by search term instead of paginating multiple search-filtered API calls
-  // like the legacy public-api flow did.
+  // Primary strategy: fan out across the ~50 geographically nearest retailers
+  // and pull only this brand's listings from each
+  // (`/v1/retailers/:id/products?brandIds=`). Each call is tiny (~20KB vs the
+  // ~600KB full menu), and we avoid the statewide `/v1/brands/:id/products`
+  // roster entirely — that endpoint routinely times out for high-volume brands
+  // (e.g. Jeeter), which used to force every run onto the stale cache fallback
+  // with no near/mid comps. Nearest-first means the near/mid distance buckets
+  // that actually drive price get populated from live data.
   //
-  // Resilience: the `/v1/brands/:id/products` endpoint has been intermittently
-  // returning 502 / timing out on busy days. Rather than failing the whole
-  // pending-purchase packet (or shipping rows with empty market evidence), we
-  // fall back to the locally-cached `litalerts_products` table, which the
-  // daily `config.workers.litalerts_refresh.variant` jobs keep populated.
-  // The cache is at most ~24h stale — acceptable for "comp evidence" when
-  // the alternative is no evidence at all. We stamp the note so the
-  // reviewer can see which path served the data.
-  let brandProducts: LitAlertsProduct[]
+  // Resilience: individual retailer fetches that fail transiently are skipped
+  // (the partner client already retries each call with backoff before giving
+  // up). Only if the fan-out yields zero live listings — brand not carried
+  // within range, or a wholesale upstream outage — do we fall back to the
+  // locally-cached `litalerts_products` table (kept fresh by the daily
+  // retailer backfill). The cache is at most ~24h stale: a worse signal than
+  // live, but strictly better than shipping a packet with no comp evidence.
+  // We stamp the note so the reviewer can see which path served the data.
+  const nearby = await loadBrandProductsFromNearbyRetailers(brandMatch.brandId, retailerDirectory)
+  let allBrandListings = flattenBrandProductsToListingCandidates(nearby.products, retailerDirectory, 'nearby')
   let brandSourceNote: string | null = null
-  try {
-    brandProducts = await listBrandProducts(brandMatch.brandId, LIT_ALERTS_PARTNER_STATE_CODE)
-  } catch (error) {
-    if (!(error instanceof RetryableWorkerError)) {
-      throw error
+  if (allBrandListings.length > 0) {
+    if (nearby.retailersFailed > 0) {
+      brandSourceNote =
+        `Pulled live ${brandMatch.brandName} listings from the ${nearby.retailersQueried} nearest retailers ` +
+        `(${nearby.retailersFailed} retailer queries failed transiently and were skipped).`
     }
+  } else {
     const cached = await loadBrandProductsFromCache(brandMatch.brandId, LIT_ALERTS_PARTNER_STATE_CODE)
     if (cached.length === 0) {
-      // No cached evidence either — re-throw so the worker retries the whole
-      // job after backoff instead of shipping an empty packet.
-      throw error
+      // No live nearby evidence AND no cached evidence — re-throw so the worker
+      // retries the whole job after backoff instead of shipping an empty packet.
+      throw new RetryableWorkerError(
+        `Lit Alerts produced no live listings from the ${nearby.retailersQueried} nearest retailers ` +
+          `(${nearby.retailersFailed} failed) and no cached listings for brand ${brandMatch.brandId}.`,
+      )
     }
-    brandProducts = cached
+    allBrandListings = flattenBrandProductsToListingCandidates(cached, retailerDirectory, 'statewide')
+    const failureSuffix =
+      nearby.retailersFailed > 0
+        ? `${nearby.retailersFailed} of the ${nearby.retailersQueried} nearest-retailer queries failed transiently`
+        : `${brandMatch.brandName} is not carried at the ${nearby.retailersQueried} nearest retailers`
     brandSourceNote =
-      `Lit Alerts /v1/brands/${brandMatch.brandId}/products is currently failing ` +
-      `(${error.message.replace(/\s+/g, ' ').slice(0, 160)}); served comp evidence from ` +
+      `No live nearby listings (${failureSuffix}); served comp evidence from ` +
       `the locally-cached litalerts_products table instead (${cached.length} listings).`
-    console.warn(`[litAlertsMarket] partner brand-products endpoint failed; using local cache fallback: ${brandSourceNote}`)
+    console.warn(`[litAlertsMarket] nearby-retailer fan-out empty; using local cache fallback: ${brandSourceNote}`)
   }
-  const allBrandListings = flattenBrandProductsToListingCandidates(brandProducts, retailerDirectory)
 
   const categoryId = resolveLitAlertsCategoryId(liveState)
   const deterministicSearchTerms = deriveSearchTerms(liveState)
@@ -582,6 +608,7 @@ function collectProductEvidence(
 function flattenBrandProductsToListingCandidates(
   products: LitAlertsProduct[],
   retailerDirectory: RetailerDirectory,
+  source: ListingPriceCandidate['source'],
 ): ListingPriceCandidate[] {
   const flattened: ListingPriceCandidate[] = []
 
@@ -629,7 +656,7 @@ function flattenBrandProductsToListingCandidates(
         postTaxPrice: roundCurrency(preTaxPrice * PRICING_POST_TAX_MULTIPLIER),
         preTaxPrice: roundCurrency(preTaxPrice),
         size: parseListingSizeProfile(listingName, configWeight),
-        source: 'statewide',
+        source,
         url,
       })
     }
@@ -648,15 +675,91 @@ function buildConfigWeightText(amount: number | string | null | undefined, units
 }
 
 /**
- * Fallback path for `buildPricingMarketContext` when the live partner-API
- * call `listBrandProducts(brandId, state)` fails with a transient
- * `RetryableWorkerError` (typically 502 / timeout from the upstream).
+ * Primary live-evidence path for `buildPricingMarketContext`.
+ *
+ * Fans out across the geographically nearest retailers (capped at
+ * `PRICING_NEARBY_RETAILER_FETCH_LIMIT`, nearest-first) and pulls only the
+ * target brand's listings from each via
+ * `/v1/retailers/:id/products?brandIds=`. Replaces the single statewide
+ * `/v1/brands/:id/products` call, which routinely timed out for high-volume
+ * brands and forced every run onto the stale cache fallback.
+ *
+ * Retailers are ranked by `minDistanceMiles` (geocoded ⨯ helios stores),
+ * with ungeocoded retailers sorted last so they only get queried when there
+ * aren't 50 geocoded ones — in NY today the cap is always filled by geocoded
+ * retailers. Our own stores ("Freshly Baked") are excluded.
+ *
+ * Concurrency is bounded (`PRICING_NEARBY_RETAILER_FETCH_CONCURRENCY`) so we
+ * never hammer the already-fragile partner ELB; the partner client retries
+ * each individual call with backoff. A retailer whose fetch still fails after
+ * those retries is counted and skipped — partial nearby data beats no data,
+ * which is the whole point of this strategy.
+ */
+async function loadBrandProductsFromNearbyRetailers(
+  brandId: number,
+  retailerDirectory: RetailerDirectory,
+): Promise<{ products: LitAlertsProduct[]; retailersQueried: number; retailersFailed: number }> {
+  const nearest = [...retailerDirectory.byId.values()]
+    .filter((entry) => !/freshly baked/i.test(entry.name))
+    .sort(
+      (left, right) =>
+        (left.minDistanceMiles ?? Number.POSITIVE_INFINITY) -
+        (right.minDistanceMiles ?? Number.POSITIVE_INFINITY),
+    )
+    .slice(0, PRICING_NEARBY_RETAILER_FETCH_LIMIT)
+
+  const products: LitAlertsProduct[] = []
+  let retailersFailed = 0
+  let cursor = 0
+  const runners = Math.min(PRICING_NEARBY_RETAILER_FETCH_CONCURRENCY, nearest.length)
+  await Promise.all(
+    Array.from({ length: runners }, async () => {
+      while (true) {
+        const index = cursor
+        cursor += 1
+        if (index >= nearest.length) {
+          return
+        }
+        const retailer = nearest[index]!
+        try {
+          const rows = await listRetailerProducts(retailer.id, {
+            stateCode: LIT_ALERTS_PARTNER_STATE_CODE,
+            brandIds: [brandId],
+          })
+          for (const row of rows) {
+            // The brandIds filter already scopes the payload server-side; we
+            // only normalise retailerId (defensively) so the flatten step can
+            // attach the right distance band.
+            products.push(
+              row.retailerId === null || row.retailerId === undefined
+                ? { ...row, retailerId: retailer.id }
+                : row,
+            )
+          }
+        } catch (error) {
+          retailersFailed += 1
+          console.warn(
+            `[litAlertsMarket] nearby fetch failed for retailer ${retailer.id} (${retailer.name}): ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          )
+        }
+      }
+    }),
+  )
+
+  return { products, retailersQueried: nearest.length, retailersFailed }
+}
+
+/**
+ * Fallback path for `buildPricingMarketContext` when the nearby-retailer
+ * fan-out yields zero live listings (brand not carried within range, or a
+ * wholesale upstream outage).
  *
  * We rebuild the per-(retailer, product) listing roster from the locally
- * cached `litalerts_products` table, which the daily
- * `config.workers.litalerts_refresh.variant` worker keeps populated.
- * The output matches `LitAlertsProduct[]` so it is a drop-in substitute
- * for `listBrandProducts`.
+ * cached `litalerts_products` table, which the daily retailer backfill keeps
+ * populated. The output matches `LitAlertsProduct[]` so it flattens through
+ * the same path as the live data.
  *
  * Staleness: the cache is at most ~24h old in steady state. That is a
  * worse signal than a live partner-API call, but strictly better than

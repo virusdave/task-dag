@@ -38,8 +38,8 @@ vi.mock('../litalerts/partnerClient.js', () => ({
 import type { NormalizedCatalogGroupLiveState } from '../catalog/liveState.js'
 import {
   hasPartnerApiToken,
-  listBrandProducts,
   listBrandsForState,
+  listRetailerProducts,
   listRetailers,
   type LitAlertsBrand,
   type LitAlertsProduct,
@@ -62,8 +62,21 @@ import {
 const pageDaveMock = vi.mocked(pageDave)
 const hasPartnerApiTokenMock = vi.mocked(hasPartnerApiToken)
 const listBrandsForStateMock = vi.mocked(listBrandsForState)
-const listBrandProductsMock = vi.mocked(listBrandProducts)
+const listRetailerProductsMock = vi.mocked(listRetailerProducts)
 const listRetailersMock = vi.mocked(listRetailers)
+
+/**
+ * The live evidence path now fans out across the nearest retailers and pulls
+ * each one's brand-filtered menu via `listRetailerProducts`. The test fixtures
+ * use synthetic retailer ids (1001–1003) that aren't in the geocoded distance
+ * table, so they all fall under the nearest-N cap and get queried. This helper
+ * routes the full product set to the right retailer based on `retailerId`.
+ */
+function mockNearbyRetailerProducts(products: LitAlertsProduct[]): void {
+  listRetailerProductsMock.mockImplementation(async (retailerId: number) =>
+    products.filter((product) => product.retailerId === retailerId),
+  )
+}
 
 const SAMPLE_LIVE_STATE: NormalizedCatalogGroupLiveState = {
   brand: 'Ayrloom',
@@ -141,8 +154,8 @@ beforeEach(() => {
   hasPartnerApiTokenMock.mockReturnValue(true)
   listBrandsForStateMock.mockReset()
   listBrandsForStateMock.mockResolvedValue([AYRLOOM_BRAND])
-  listBrandProductsMock.mockReset()
-  listBrandProductsMock.mockResolvedValue([])
+  listRetailerProductsMock.mockReset()
+  listRetailerProductsMock.mockResolvedValue([])
   listRetailersMock.mockReset()
   listRetailersMock.mockResolvedValue(RETAILERS)
 })
@@ -307,11 +320,11 @@ describe('buildPricingMarketContext (partner API integration)', () => {
     const context = await buildPricingMarketContext(SAMPLE_LIVE_STATE)
 
     expect(context.availability).toBe('unresolved_brand')
-    expect(listBrandProductsMock).not.toHaveBeenCalled()
+    expect(listRetailerProductsMock).not.toHaveBeenCalled()
   })
 
   it('builds market evidence from exact partner-product matches', async () => {
-    listBrandProductsMock.mockResolvedValue([
+    mockNearbyRetailerProducts([
       buildBrandProduct({
         id: 5001,
         name: 'Ayrloom Black Cherry 1:1 5mg',
@@ -341,7 +354,9 @@ describe('buildPricingMarketContext (partner API integration)', () => {
     expect(evidence?.listingCount).toBeGreaterThanOrEqual(2)
     expect(evidence?.matchedListings.some((l) => l.listingName.includes('Black Cherry'))).toBe(true)
     expect(evidence?.matchedListings.some((l) => l.listingName.includes('Sour Apple'))).toBe(false)
-    expect(listBrandProductsMock).toHaveBeenCalledWith(42, 'NY')
+    // Live evidence is pulled per-retailer with a brandIds filter, nearest-first.
+    expect(listRetailerProductsMock).toHaveBeenCalledWith(1001, { stateCode: 'NY', brandIds: [42] })
+    expect(listRetailerProductsMock).toHaveBeenCalledWith(1002, { stateCode: 'NY', brandIds: [42] })
     expect(listRetailersMock).toHaveBeenCalledWith('NY')
   })
 
@@ -350,7 +365,7 @@ describe('buildPricingMarketContext (partner API integration)', () => {
     listBrandsForStateMock.mockResolvedValue([
       { id: 77, name: 'Camino Kiva', states: ['NY'] },
     ])
-    listBrandProductsMock.mockResolvedValue([
+    mockNearbyRetailerProducts([
       buildBrandProduct({
         id: 6001,
         name: 'Camino Black Cherry 5mg',
@@ -361,13 +376,14 @@ describe('buildPricingMarketContext (partner API integration)', () => {
 
     const context = await buildPricingMarketContext(liveState)
 
-    // Alias map resolves 'camino' -> 'camino kiva'; verify products were fetched
-    expect(listBrandProductsMock).toHaveBeenCalledWith(77, 'NY')
+    // Alias map resolves 'camino' -> 'camino kiva'; verify the resolved brand id
+    // is passed through the per-retailer brandIds filter.
+    expect(listRetailerProductsMock).toHaveBeenCalledWith(1001, { stateCode: 'NY', brandIds: [77] })
     expect(context.availability).not.toBe('unresolved_brand')
   })
 
   it('returns availability=no_family_matches when no partner products match any search term', async () => {
-    listBrandProductsMock.mockResolvedValue([
+    mockNearbyRetailerProducts([
       buildBrandProduct({
         id: 7001,
         name: 'Ayrloom Sour Apple 1:1 5mg',
@@ -383,7 +399,7 @@ describe('buildPricingMarketContext (partner API integration)', () => {
   })
 
   it('marks every partner-API listing with distanceBand=unknown and distanceMiles=null', async () => {
-    listBrandProductsMock.mockResolvedValue([
+    mockNearbyRetailerProducts([
       buildBrandProduct({
         id: 8001,
         name: 'Ayrloom Black Cherry 5mg',
