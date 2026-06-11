@@ -293,43 +293,118 @@ describe('pricing comp match prioritization', () => {
   })
 })
 
-describe('per-brand size-labelling conventions', () => {
-  it('parses the Jeeter "Nx Mg" multipack as a package TOTAL, not per-unit', () => {
-    // Our catalog SKU: "...5x 2.5g" = 5 sticks totalling 2.5g (0.5g each).
-    const ours = __test__.parseProductSizeProfile(
-      'Jeeter Baby Jeeter Infused Acapulco Gold 5x 2.5g',
-      '',
-      'Jeeter',
-    )
+describe('catalog size profile (structured Sweed fields + brand convention)', () => {
+  it('reads Jeeter "5x 2.5g" via packOfSize + sizeName as a package TOTAL', () => {
+    // Real Sweed shape: sizeName="2.5g" (the TOTAL for Baby Jeeter), packOfSize=5.
+    const ours = __test__.resolveCatalogSizeProfile({
+      name: 'Jeeter Baby Jeeter Infused Acapulco Gold 5x 2.5g',
+      tab: '5x 2.5g',
+      sizeName: '2.5g',
+      packOfSize: 5,
+      brand: 'Jeeter',
+    })
     expect(ours).toEqual({ measure: 'g', packCount: 5, totalValue: 2.5, unitValue: 0.5 })
   })
 
-  it('parses the Jeeter "Npk Mg" competitor listing as a per-unit size', () => {
-    // Same physical SKU as listed at competitors: "5pk .5g" = 5 x 0.5g.
-    const comp = __test__.parseListingSizeProfile('Acapulco Gold Infused 5pk .5g', '0.5 g', 'Jeeter')
+  it('treats sizeName as per-unit for default brands (real Sweed shape)', () => {
+    // Real Sweed shape: "Dank ... 7x 0.5g" -> sizeName="0.5g" is per-stick, packOfSize=7.
+    const dank = __test__.resolveCatalogSizeProfile({
+      name: 'Dank Girl Scout Cookies 7x 0.5g',
+      tab: '7x 0.5g',
+      sizeName: '0.5g',
+      packOfSize: 7,
+      brand: 'Dank',
+    })
+    expect(dank).toEqual({ measure: 'g', packCount: 7, totalValue: 3.5, unitValue: 0.5 })
+  })
+
+  it('keeps default mg-edible semantics for Jeeter (grams-only convention guard)', () => {
+    const jeeterEdible = __test__.resolveCatalogSizeProfile({
+      name: 'Jeeter Gummies 10x 10mg',
+      tab: '10x 10mg',
+      sizeName: '10mg',
+      packOfSize: 10,
+      brand: 'Jeeter',
+    })
+    expect(jeeterEdible).toEqual({ measure: 'mg', packCount: 10, totalValue: 100, unitValue: 10 })
+  })
+
+  it('falls back to free-text name parsing when structured fields are missing', () => {
+    const ours = __test__.resolveCatalogSizeProfile({
+      name: 'Jeeter Baby Jeeter Acapulco Gold 5x 2.5g',
+      tab: '',
+      sizeName: null,
+      packOfSize: null,
+      brand: 'Jeeter',
+    })
+    expect(ours).toEqual({ measure: 'g', packCount: 5, totalValue: 2.5, unitValue: 0.5 })
+  })
+})
+
+describe('listing size profile (structured LitAlerts amount/units)', () => {
+  it('trusts LitAlerts amount as the package TOTAL and derives per-unit from the name', () => {
+    // Real LitAlerts shape: name says ".5g" per-stick but amount=2.5g is the TOTAL.
+    const comp = __test__.resolveListingSizeProfile({
+      listingName: '*Limited Edition* American Pl (Baby) | .5g | Quad Infused | 5pk',
+      amount: '2.5',
+      units: 'g',
+      brand: 'Jeeter',
+    })
     expect(comp).toEqual({ measure: 'g', packCount: 5, totalValue: 2.5, unitValue: 0.5 })
   })
 
+  it('converts oz totals to grams (e.g. 7-pack reported as 0.125 oz)', () => {
+    const comp = __test__.resolveListingSizeProfile({
+      listingName: 'Face Melters - Pre-Roll 7 Pack (3.5g)',
+      amount: 0.125,
+      units: 'oz',
+      brand: 'Face Melters',
+    })
+    expect(comp.measure).toBe('g')
+    expect(comp.packCount).toBe(7)
+    expect(comp.totalValue).toBeCloseTo(3.54, 1)
+    expect(comp.unitValue).toBeCloseTo(0.51, 1)
+  })
+
+  it('falls back to name parsing when units are junk (non-weight)', () => {
+    // LitAlerts emits e.g. units="packtransdermalpatches" / "mg (pack of 40)".
+    const comp = __test__.resolveListingSizeProfile({
+      listingName: 'Acme Preroll 5pk 3.5g',
+      amount: '3',
+      units: 'packtransdermalpatches',
+      brand: 'Acme',
+    })
+    // Default fallback: "5pk 3.5g" -> 3.5g total, 0.7g/unit.
+    expect(comp).toEqual({ measure: 'g', packCount: 5, totalValue: 3.5, unitValue: 0.7 })
+  })
+
+  it('falls back to name + Jeeter convention when amount is missing', () => {
+    const comp = __test__.resolveListingSizeProfile({
+      listingName: 'Acapulco Gold Infused 5pk .5g',
+      amount: null,
+      units: null,
+      brand: 'Jeeter',
+    })
+    expect(comp).toEqual({ measure: 'g', packCount: 5, totalValue: 2.5, unitValue: 0.5 })
+  })
+})
+
+describe('per-brand size-labelling conventions', () => {
   it('makes the Jeeter SKU and competitor listing score as an exact size match', () => {
-    const ours = __test__.parseProductSizeProfile('Baby Jeeter Acapulco Gold 5x 2.5g', '', 'Jeeter')
-    const comp = __test__.parseListingSizeProfile('Acapulco Gold Infused 5pk .5g', '0.5 g', 'Jeeter')
+    const ours = __test__.resolveCatalogSizeProfile({
+      name: 'Jeeter Baby Jeeter Acapulco Gold 5x 2.5g',
+      tab: '5x 2.5g',
+      sizeName: '2.5g',
+      packOfSize: 5,
+      brand: 'Jeeter',
+    })
+    const comp = __test__.resolveListingSizeProfile({
+      listingName: '*Limited Edition* American Pl (Baby) | .5g | Quad Infused | 5pk',
+      amount: '2.5',
+      units: 'g',
+      brand: 'Jeeter',
+    })
     expect(__test__.classifySizeTier(ours, comp)).toBe(3)
-  })
-
-  it('leaves the default multipack semantics untouched for other brands', () => {
-    // Default: "Nx Mg" is per-unit (total = N*M); "Npk Mg" is package total.
-    const defaultMultiplier = __test__.parseProductSizeProfile('Some Edible 10x 10mg', '', 'Acme Gummies')
-    expect(defaultMultiplier).toEqual({ measure: 'mg', packCount: 10, totalValue: 100, unitValue: 10 })
-
-    const defaultPack = __test__.parseListingSizeProfile('Acme Preroll 5pk 3.5g', null, 'Acme')
-    expect(defaultPack).toEqual({ measure: 'g', packCount: 5, totalValue: 3.5, unitValue: 0.7 })
-  })
-
-  it('does not apply the gram preroll convention to Jeeter mg edibles', () => {
-    // measure guard: Jeeter convention is grams-only, so an mg multipack
-    // stays on default semantics (10 units x 10mg = 100mg total).
-    const jeeterEdible = __test__.parseProductSizeProfile('Jeeter Gummies 10x 10mg', '', 'Jeeter')
-    expect(jeeterEdible).toEqual({ measure: 'mg', packCount: 10, totalValue: 100, unitValue: 10 })
   })
 
   it('only resolves a convention for known brands', () => {

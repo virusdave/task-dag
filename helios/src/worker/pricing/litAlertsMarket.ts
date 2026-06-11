@@ -372,8 +372,8 @@ export const __test__ = {
   classifyLaneTier,
   classifySizeTier,
   inferComparableLaneKey,
-  parseProductSizeProfile,
-  parseListingSizeProfile,
+  resolveCatalogSizeProfile,
+  resolveListingSizeProfile,
   resolveSizeConvention,
 }
 
@@ -522,7 +522,13 @@ function collectProductEvidence(
         subcategory: liveState.subcategory,
         text: `${liveState.groupFullName} ${product.name} ${product.tab}`,
       }),
-      size: parseProductSizeProfile(product.name, product.tab, liveState.brand),
+      size: resolveCatalogSizeProfile({
+        name: product.name,
+        tab: product.tab,
+        sizeName: product.sizeName,
+        packOfSize: product.packOfSize,
+        brand: liveState.brand,
+      }),
     }
     const assessedListings = dedupeListingCandidates(
       listings.filter((listing) => isCategoryCompatible(liveState, listing.category)),
@@ -639,7 +645,6 @@ function flattenBrandProductsToListingCandidates(
         continue
       }
 
-      const configWeight = buildConfigWeightText(config.amount, config.units)
       // Resolve per-listing distance to our nearest store via the
       // geocoded retailer directory (litalerts_retailer_locations ⨯
       // helios_store_locations). Retailers we haven't geocoded yet
@@ -658,7 +663,12 @@ function flattenBrandProductsToListingCandidates(
         listingName,
         postTaxPrice: roundCurrency(preTaxPrice * PRICING_POST_TAX_MULTIPLIER),
         preTaxPrice: roundCurrency(preTaxPrice),
-        size: parseListingSizeProfile(listingName, configWeight, product.brand),
+        size: resolveListingSizeProfile({
+          listingName,
+          amount: config.amount,
+          units: config.units,
+          brand: product.brand,
+        }),
         source,
         url,
       })
@@ -666,15 +676,6 @@ function flattenBrandProductsToListingCandidates(
   }
 
   return flattened
-}
-
-function buildConfigWeightText(amount: number | string | null | undefined, units: string | null | undefined): string | null {
-  const normalizedAmount = amount === null || amount === undefined ? null : normalizeInlineText(String(amount))
-  const normalizedUnits = normalizeInlineText(units)
-  if (!normalizedAmount && !normalizedUnits) {
-    return null
-  }
-  return `${normalizedAmount ?? ''}${normalizedUnits ? `${normalizedAmount ? ' ' : ''}${normalizedUnits}` : ''}`.trim() || null
 }
 
 /**
@@ -1517,19 +1518,122 @@ function resolveSizeConvention(brand: string | null | undefined): SizeConvention
   return null
 }
 
-function parseProductSizeProfile(productName: string, tab: string, brand?: string | null): ParsedSizeProfile {
-  return parseSizeProfile(`${productName} ${tab}`, resolveSizeConvention(brand))
+/**
+ * Parse a recognised weight from a structured (value, units) pair into
+ * grams/milligrams. Returns null when the units are NOT a clean weight
+ * (e.g. LitAlerts emits `units: "packtransdermalpatches"` or
+ * `"mg (pack of 40)"` for some edibles/accessories) so callers can fall
+ * back to free-text parsing instead of trusting garbage.
+ */
+function parseStructuredWeight(
+  amount: number | string | null | undefined,
+  units: string | null | undefined,
+): { measure: 'g' | 'mg'; value: number } | null {
+  const rawValue =
+    typeof amount === 'number'
+      ? amount
+      : Number.parseFloat(String(amount ?? '').replace(/[$,\s]/g, ''))
+  if (!Number.isFinite(rawValue) || rawValue <= 0) {
+    return null
+  }
+  const unit = normalizeInlineText(units).toLowerCase()
+  if (unit === 'g' || unit === 'gram' || unit === 'grams') {
+    return { measure: 'g', value: rawValue }
+  }
+  if (unit === 'mg' || unit === 'milligram' || unit === 'milligrams') {
+    return { measure: 'mg', value: rawValue }
+  }
+  if (unit === 'oz' || unit === 'ounce' || unit === 'ounces') {
+    return { measure: 'g', value: rawValue * 28.3495 }
+  }
+  return null
 }
 
-function parseListingSizeProfile(
-  listingName: string,
-  configWeight: string | null,
-  brand?: string | null,
-): ParsedSizeProfile {
-  return parseSizeProfile(
-    [listingName, configWeight].filter((value): value is string => Boolean(value)).join(' '),
-    resolveSizeConvention(brand),
-  )
+/**
+ * Parse a clean single size token ("2.5g", "0.5 g", "10mg", ".5g") into
+ * a normalised weight. Used for Sweed's `size.name` field, which is a
+ * tidy per-variant size string. Returns null when nothing parses.
+ */
+function parseSizeToken(text: string | null | undefined): { measure: 'g' | 'mg'; value: number } | null {
+  const values = extractSizeValues(normalizeInlineText(text ?? ''))
+  const measure = chooseDominantMeasure(values)
+  if (measure === null) {
+    return null
+  }
+  const matching = values.filter((value) => value.measure === measure).map((value) => value.value)
+  if (matching.length === 0) {
+    return null
+  }
+  return { measure, value: Math.max(...matching) }
+}
+
+/**
+ * Build the size profile for one of OUR catalog SKUs. Prefers the
+ * structured Sweed fields already normalised at catalog-sync time
+ * (`packOfSize` = pack count, `size.name` = per-variant size token)
+ * over re-deriving everything from the free-text product name. The
+ * size *token* still carries the per-unit-vs-total ambiguity (most
+ * brands label "Nx Mg" with M = per-stick, Jeeter with M = pack
+ * total), so we resolve that with the per-brand convention. Falls back
+ * to free-text name/tab parsing when the structured fields are absent.
+ */
+function resolveCatalogSizeProfile(input: {
+  name: string
+  tab: string
+  sizeName: string | null
+  packOfSize: number | null
+  brand?: string | null
+}): ParsedSizeProfile {
+  const convention = resolveSizeConvention(input.brand)
+  const structuredSize = parseSizeToken(input.sizeName)
+  const packCount =
+    input.packOfSize !== null && Number.isFinite(input.packOfSize) && input.packOfSize >= 1
+      ? input.packOfSize
+      : parsePackCount(`${input.name} ${input.tab}`)
+  if (structuredSize) {
+    const { measure, value } = structuredSize
+    const valueIsTotal =
+      convention?.multiplierValueIsTotal === true && convention.measure === measure && packCount > 1
+    const totalValue = valueIsTotal ? value : packCount > 1 ? value * packCount : value
+    const unitValue = valueIsTotal ? value / packCount : value
+    return {
+      measure,
+      packCount,
+      totalValue: roundCurrency(totalValue),
+      unitValue: roundCurrency(unitValue),
+    }
+  }
+  return parseSizeProfile(`${input.name} ${input.tab}`, convention)
+}
+
+/**
+ * Build the size profile for a competitor listing. LitAlerts ships a
+ * structured per-config `amount`/`units` pair that, for pre-rolls, is
+ * reliably the package TOTAL across brands (verified: "5pk .5g" =>
+ * amount 2.5g, "7pk" => 3.5g, "5 x 0.5g" => 2.5g). When it parses to a
+ * clean weight we trust it as the total and derive the per-unit size
+ * from the pack count in the listing name. When it's missing or junk
+ * we fall back to free-text parsing of the name (+ brand convention).
+ */
+function resolveListingSizeProfile(input: {
+  listingName: string
+  amount: number | string | null | undefined
+  units: string | null | undefined
+  brand?: string | null
+}): ParsedSizeProfile {
+  const structuredTotal = parseStructuredWeight(input.amount, input.units)
+  if (structuredTotal) {
+    const packCount = parsePackCount(input.listingName)
+    const totalValue = structuredTotal.value
+    const unitValue = packCount > 1 ? totalValue / packCount : totalValue
+    return {
+      measure: structuredTotal.measure,
+      packCount,
+      totalValue: roundCurrency(totalValue),
+      unitValue: roundCurrency(unitValue),
+    }
+  }
+  return parseSizeProfile(input.listingName, resolveSizeConvention(input.brand))
 }
 
 function parseSizeProfile(text: string, convention: SizeConvention | null = null): ParsedSizeProfile {
