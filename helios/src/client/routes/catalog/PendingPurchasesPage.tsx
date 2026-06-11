@@ -2,6 +2,8 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { Form, Link, useLoaderData, useNavigate, useRevalidator, useRouteLoaderData } from 'react-router-dom'
 
 import {
+  BatchPendingPurchaseFamilyOverrideRequestSchema,
+  BatchPendingPurchaseFamilyOverrideResponseSchema,
   HELIOS_PENDING_PURCHASE_SITE_DEALERS,
   MutationAcceptedResponseSchema,
   PendingPurchaseListResponseSchema,
@@ -874,9 +876,18 @@ function PendingPurchasesRowsView({
                   <Pill tone="muted">{`${group.rows.length} row${group.rows.length === 1 ? '' : 's'}`}</Pill>
                 </div>
                 {canEdit ? (
-                  <FamilyBulkPriceControl
-                    rowIds={group.rows.map((row) => row.rowId)}
-                  />
+                  <div className="pp-rows-family-controls inline-row wrap-row" style={{ gap: '0.75rem' }}>
+                    <FamilyBulkPriceControl
+                      rowIds={group.rows.map((row) => row.rowId)}
+                    />
+                    {activePacket ? (
+                      <FamilyStructuredOverrideControl
+                        familyKey={group.familyKey}
+                        packetId={activePacket.packetId}
+                        rows={group.rows}
+                      />
+                    ) : null}
+                  </div>
                 ) : null}
               </header>
               <div className="stacked-list">
@@ -975,6 +986,141 @@ function FamilyBulkPriceControl({ rowIds }: { rowIds: readonly number[] }) {
       </label>
       <button className="ghost-button" onClick={apply} type="button">
         Apply to family
+      </button>
+      {feedback ? <span className="subtle-copy">{feedback}</span> : null}
+    </div>
+  )
+}
+
+// The facet-backed structured fields a reviewer can mass-fix across a
+// whole family in one save. Restricted to the three dropdown-backed
+// taxonomy fields (the ones with catalog facets) — exactly the fields
+// that define the family grouping, so fixing one regroups the family.
+type StructuredFamilyFieldKey = 'expectedCategory' | 'expectedSubcategory' | 'targetBrand'
+const STRUCTURED_FAMILY_FIELD_CHOICES: readonly {
+  facet: 'brands' | 'categories' | 'subcategories'
+  key: StructuredFamilyFieldKey
+  label: string
+}[] = [
+  { facet: 'brands', key: 'targetBrand', label: 'Brand' },
+  { facet: 'categories', key: 'expectedCategory', label: 'Category' },
+  { facet: 'subcategories', key: 'expectedSubcategory', label: 'Subcategory' },
+]
+
+// Family-level structured override: pick a field (Brand/Category/
+// Subcategory) + value and persist it across every editable row of the
+// family in ONE request + ONE revalidate. Replaces the slow, painful
+// "edit Brand → Save → wait for full-page reload → repeat per row"
+// loop when the parser mis-attributed a whole family (e.g. the Jeeter
+// "World Cup" line landing under brand "World Cup").
+function FamilyStructuredOverrideControl({
+  familyKey,
+  packetId,
+  rows,
+}: {
+  familyKey: FamilyKey
+  packetId: number
+  rows: readonly PendingPurchaseRow[]
+}) {
+  const revalidator = useRevalidator()
+  const overrideOptions = useContext(PendingPurchaseOverrideOptionsContext)
+  const [fieldKey, setFieldKey] = useState<StructuredFamilyFieldKey>('targetBrand')
+  const [value, setValue] = useState('')
+  const [feedback, setFeedback] = useState<string | null>(null)
+  const [isSaving, setIsSaving] = useState(false)
+
+  const choice = STRUCTURED_FAMILY_FIELD_CHOICES.find((candidate) => candidate.key === fieldKey)
+    ?? STRUCTURED_FAMILY_FIELD_CHOICES[0]
+  const facetOptions = overrideOptions ? overrideOptions[choice.facet] : []
+  const datalistId = `pp-family-override-${buildFamilyKeyString(familyKey).replace(/[^a-z0-9]+/gi, '-')}-${fieldKey}`
+
+  // Server is authoritative (it re-checks and skips), but pre-filtering
+  // here keeps the request tight and the feedback honest.
+  const editableRowIds = rows
+    .filter(
+      (row) =>
+        row.approvalStatus !== 'approved' &&
+        row.lastApplyStatus !== 'queued' &&
+        row.lastApplyStatus !== 'running',
+    )
+    .map((row) => row.rowId)
+
+  async function apply() {
+    const trimmed = value.trim()
+    if (!trimmed) {
+      setFeedback('Enter a value first')
+      return
+    }
+    if (editableRowIds.length === 0) {
+      setFeedback('No editable rows in this family')
+      return
+    }
+    setIsSaving(true)
+    setFeedback(null)
+    try {
+      const body = BatchPendingPurchaseFamilyOverrideRequestSchema.parse({
+        packetId,
+        reason: 'Reviewer family-level structured override',
+        rowIds: editableRowIds,
+        structuredOverride: { [fieldKey]: trimmed },
+      })
+      const response = await mutateJson(
+        '/api/catalog/pending-purchases/family-override',
+        BatchPendingPurchaseFamilyOverrideResponseSchema,
+        { body: JSON.stringify(body), method: 'POST' },
+      )
+      await revalidator.revalidate()
+      const updated = response.updatedRowIds.length
+      const skipped = response.skippedRows.length
+      setFeedback(
+        `Set ${choice.label} on ${updated} row${updated === 1 ? '' : 's'}` +
+          (skipped > 0 ? ` · skipped ${skipped}` : ''),
+      )
+      setValue('')
+    } catch (error) {
+      setFeedback(error instanceof Error ? error.message : 'Could not apply the family override.')
+    } finally {
+      setIsSaving(false)
+    }
+  }
+
+  return (
+    <div className="pp-rows-family-structured inline-row wrap-row" style={{ gap: '0.4rem' }}>
+      <label className="inline-row" style={{ alignItems: 'center', gap: '0.35rem' }}>
+        <span className="subtle-copy">Fix whole family →</span>
+        <select
+          onChange={(event) => {
+            setFieldKey(event.currentTarget.value as StructuredFamilyFieldKey)
+            setValue('')
+            setFeedback(null)
+          }}
+          value={fieldKey}
+        >
+          {STRUCTURED_FAMILY_FIELD_CHOICES.map((candidate) => (
+            <option key={candidate.key} value={candidate.key}>{candidate.label}</option>
+          ))}
+        </select>
+      </label>
+      <input
+        list={datalistId}
+        onChange={(event) => setValue(event.currentTarget.value)}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter') {
+            event.preventDefault()
+            void apply()
+          }
+        }}
+        placeholder={`New ${choice.label.toLowerCase()}`}
+        style={{ width: '11rem' }}
+        value={value}
+      />
+      <datalist id={datalistId}>
+        {(facetOptions ?? []).map((option) => (
+          <option key={option} value={option} />
+        ))}
+      </datalist>
+      <button className="ghost-button" disabled={isSaving} onClick={() => void apply()} type="button">
+        {isSaving ? 'Saving…' : 'Apply & save'}
       </button>
       {feedback ? <span className="subtle-copy">{feedback}</span> : null}
     </div>

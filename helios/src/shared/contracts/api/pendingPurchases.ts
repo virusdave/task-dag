@@ -208,6 +208,43 @@ export const UpdatePendingPurchaseRowRequestSchema = z
 export type UpdatePendingPurchaseRowRequest = z.infer<typeof UpdatePendingPurchaseRowRequestSchema>
 
 /**
+ * Family-level (bulk) structured override (issue: reviewer needs to
+ * mass-fix a mis-parsed structured field — e.g. Brand — across every
+ * row of a family in one save instead of editing/saving each row
+ * sequentially).
+ *
+ * Unlike the per-row PATCH (which FULL-replaces the override map), the
+ * batch endpoint MERGES `structuredOverride` into each row's existing
+ * `edited_structured_fields`: a key present (including explicit `null`
+ * to clear-at-apply) sets that field; an absent key leaves the row's
+ * existing override for that field untouched. This keeps unrelated
+ * per-row overrides (size, variant, …) intact when the reviewer only
+ * means to fix one field for the whole family.
+ */
+export const BatchPendingPurchaseFamilyOverrideRequestSchema = z.object({
+  packetId: z.number().int().positive(),
+  reason: z.string().trim().max(500).nullable().optional(),
+  rowIds: z.array(z.coerce.number().int().positive()).min(1).max(500),
+  structuredOverride: EditedStructuredFieldsSchema.refine(
+    (value) => Object.keys(value).length > 0,
+    'At least one structured override field is required.',
+  ),
+})
+export type BatchPendingPurchaseFamilyOverrideRequest = z.infer<typeof BatchPendingPurchaseFamilyOverrideRequestSchema>
+
+export const BatchPendingPurchaseFamilyOverrideResponseSchema = z.object({
+  requestId: z.string(),
+  skippedRows: z.array(
+    z.object({
+      reason: z.enum(['approved', 'apply_locked', 'no_change']),
+      rowId: z.number().int().positive(),
+    }),
+  ),
+  updatedRowIds: z.array(z.number().int().positive()),
+})
+export type BatchPendingPurchaseFamilyOverrideResponse = z.infer<typeof BatchPendingPurchaseFamilyOverrideResponseSchema>
+
+/**
  * Reviewer-facing live Sweed variant picker (powering the
  * `targetReuseProductId` link-override on a pending-purchase row).
  *

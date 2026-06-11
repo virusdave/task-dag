@@ -6,6 +6,9 @@ import type { PoolClient, QueryResultRow } from 'pg'
 import { z } from 'zod'
 
 import {
+  BatchPendingPurchaseFamilyOverrideRequestSchema,
+  type BatchPendingPurchaseFamilyOverrideResponse,
+  BatchPendingPurchaseFamilyOverrideResponseSchema,
   type EditedStructuredFields,
   HELIOS_PENDING_PURCHASE_SITE_DEALERS,
   type JsonValue,
@@ -654,6 +657,162 @@ export async function registerPendingPurchaseRoutes(server: FastifyInstance): Pr
       }),
     )
   })
+
+  // Family-level (bulk) structured override. Lets a reviewer mass-fix a
+  // mis-parsed structured field (e.g. Brand) across every row of a
+  // family in ONE request + ONE revalidate, instead of N sequential
+  // PATCH + full-list-revalidate round-trips. Merges the sparse
+  // override into each row's existing edited_structured_fields so
+  // unrelated per-row overrides survive.
+  server.post('/api/catalog/pending-purchases/family-override', async (request, reply) => {
+    const user = await requireSessionUser(request, reply, 'editor')
+    if (!user) {
+      return
+    }
+
+    const body = BatchPendingPurchaseFamilyOverrideRequestSchema.parse(request.body ?? {})
+    const requestId = randomUUID()
+    // Dedupe + stable lock order (ascending id) to avoid deadlocks with
+    // concurrent row writers.
+    const rowIds = [...new Set(body.rowIds)].sort((a, b) => a - b)
+
+    const result = await withTransaction(async (db) => {
+      const locked = await db.query<PendingPurchaseRowLockRow>(
+        `
+          select
+            id,
+            packet_id,
+            distributor_product_name,
+            site_label,
+            catalog_action,
+            approval_status,
+            edited_proposed_description,
+            edited_proposed_price::double precision as edited_proposed_price,
+            edited_primary_image_url,
+            edited_structured_fields,
+            last_apply_status,
+            notes,
+            raw_row_json,
+            row_input_signature,
+            version
+          from pending_purchase_rows
+          where packet_id = $1 and id = any($2::bigint[])
+          order by id asc
+          for update
+        `,
+        [body.packetId, rowIds],
+      )
+
+      // Reject (don't silently skip) any id that isn't in this packet —
+      // that signals a client bug or a tampered request, not an
+      // intentionally-uneditable row.
+      if (locked.rows.length !== rowIds.length) {
+        throw new Error('One or more pending-purchase rows were not found in the selected packet.')
+      }
+
+      const updates: { id: number; nextEditedStructuredFields: EditedStructuredFields | null }[] = []
+      const skippedRows: BatchPendingPurchaseFamilyOverrideResponse['skippedRows'] = []
+
+      for (const current of locked.rows) {
+        if (current.approval_status === 'approved') {
+          skippedRows.push({ reason: 'approved', rowId: current.id })
+          continue
+        }
+        if (current.last_apply_status === 'queued' || current.last_apply_status === 'running') {
+          skippedRows.push({ reason: 'apply_locked', rowId: current.id })
+          continue
+        }
+
+        const previous = readEditedStructuredFieldsFromJson(current.edited_structured_fields)
+        const next = mergeEditedStructuredFields(previous, body.structuredOverride)
+        if (editedStructuredFieldsEqual(next, previous)) {
+          skippedRows.push({ reason: 'no_change', rowId: current.id })
+          continue
+        }
+
+        updates.push({ id: current.id, nextEditedStructuredFields: next })
+      }
+
+      if (updates.length > 0) {
+        // Single set-based UPDATE for all changed rows — one statement
+        // instead of N, keeping the bulk op well within the per-request
+        // DB budget even at the 500-row cap.
+        await db.query(
+          `
+            update pending_purchase_rows r
+            set edited_structured_fields = v.edited_structured_fields,
+                last_apply_request_id = null,
+                last_apply_status = 'not_requested',
+                last_apply_error = null,
+                last_apply_summary_json = '{}'::jsonb,
+                version = r.version + 1,
+                updated_at = now()
+            from jsonb_to_recordset($1::jsonb) as v(id bigint, edited_structured_fields jsonb)
+            where r.id = v.id
+          `,
+          [
+            JSON.stringify(
+              updates.map((update) => ({
+                edited_structured_fields: update.nextEditedStructuredFields,
+                id: update.id,
+              })),
+            ),
+          ],
+        )
+
+        const updatedById = new Map(updates.map((update) => [update.id, update]))
+        for (const current of locked.rows) {
+          const update = updatedById.get(current.id)
+          if (!update) {
+            continue
+          }
+          const previous = readEditedStructuredFieldsFromJson(current.edited_structured_fields)
+          await appendAuditEvent(db, {
+            actorType: 'user',
+            actorUserId: user.id,
+            entityId: String(current.id),
+            entityType: 'pending_purchase_row',
+            eventType: 'pending_purchase.row.edited',
+            module: 'catalog',
+            payload: {
+              nextEditedStructuredFields: update.nextEditedStructuredFields,
+              packetId: current.packet_id,
+              pendingPurchaseRowId: current.id,
+              previousEditedStructuredFields: previous,
+              previousVersion: current.version,
+              requestedReason: body.reason ?? null,
+              source: 'family_override',
+              structuredOverride: body.structuredOverride,
+              summary: `Family override updated structured fields for ${current.distributor_product_name}.`,
+            },
+            requestId,
+            scope: buildPendingPurchasePacketScope(current.packet_id),
+            undoPayload: null,
+          })
+
+          await recordPendingPurchaseParserReviewFeedback(db, {
+            action: 'edit',
+            currentRow: current,
+            notes: 'Reviewer applied a family-level structured override.',
+            userId: user.id,
+          })
+        }
+      }
+
+      return {
+        skippedRows,
+        updatedRowIds: updates.map((update) => update.id),
+      }
+    })
+
+    return reply.send(
+      BatchPendingPurchaseFamilyOverrideResponseSchema.parse({
+        requestId,
+        skippedRows: result.skippedRows,
+        updatedRowIds: result.updatedRowIds,
+      }),
+    )
+  })
 }
 
 async function lockPendingPurchaseRow(db: PoolClient, rowId: number): Promise<PendingPurchaseRowLockRow> {
@@ -794,6 +953,25 @@ function readEditedStructuredFieldsFromJson(value: JsonValue): EditedStructuredF
   if (value === null || value === undefined) return null
   if (typeof value !== 'object' || Array.isArray(value)) return null
   return value as EditedStructuredFields
+}
+
+/**
+ * Merges a sparse structured override into a row's existing override
+ * map (family-override batch path). For each key present in `patch`
+ * (including explicit `null` — "clear at apply"), the value replaces
+ * whatever the row had; keys absent from `patch` keep their existing
+ * value. Returns `null` only when the merged map is empty, mirroring
+ * the "null == no overrides" convention the apply worker relies on.
+ */
+function mergeEditedStructuredFields(
+  previous: EditedStructuredFields | null,
+  patch: EditedStructuredFields,
+): EditedStructuredFields | null {
+  const next: Record<string, unknown> = previous ? { ...previous } : {}
+  for (const [key, value] of Object.entries(patch)) {
+    next[key] = value
+  }
+  return Object.keys(next).length === 0 ? null : (next as EditedStructuredFields)
 }
 
 /**
