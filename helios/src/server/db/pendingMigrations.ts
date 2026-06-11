@@ -911,6 +911,14 @@ const SENTINELS: MigrationSentinel[] = [
       return hasApprovals && hasFaqSets
     },
   },
+  {
+    migrationId: '072_seo_post_control_plane',
+    label:
+      'SEO auto-blog control plane (seo_posts + post approvals) — required ' +
+      'by the /api/seo/posts control plane and the approved-post bundle ' +
+      'loader. Without it the post authoring/approval pages 500.',
+    check: (db) => tableExists(db, 'seo_posts'),
+  },
 ]
 
 interface CacheEntry {

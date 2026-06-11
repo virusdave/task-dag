@@ -233,6 +233,15 @@ function buildPrimarySidebarNodes(
         to: '/seo/faq',
         end: false,
       },
+      {
+        // P4 ships the auto-blog ("What's new") generator/editor/approval
+        // surface (Helios-driven SEO widgets epic, top-level#15).
+        kind: 'leaf',
+        navKey: 'marketing.seo-posts',
+        label: 'SEO · Blog posts',
+        to: '/seo/posts',
+        end: false,
+      },
     ],
   }
 

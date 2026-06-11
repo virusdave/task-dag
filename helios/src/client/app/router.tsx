@@ -82,6 +82,8 @@ import { PricingRunsPage, pricingRunsLoader } from '../routes/pricing/PricingRun
 import { ReviewPage, reviewLoader } from '../routes/review/ReviewPage.js'
 import { SeoFaqListPage, seoFaqListLoader } from '../routes/seo/SeoFaqListPage.js'
 import { SeoFaqEditorPage, seoFaqEditorLoader } from '../routes/seo/SeoFaqEditorPage.js'
+import { SeoPostListPage, seoPostListLoader } from '../routes/seo/SeoPostListPage.js'
+import { SeoPostEditorPage, seoPostEditorLoader } from '../routes/seo/SeoPostEditorPage.js'
 import { SchedulingNewRunPage } from '../routes/scheduling/SchedulingNewRunPage.js'
 import { SchedulingCandidateDetailPage, schedulingCandidateDetailLoader } from '../routes/scheduling/SchedulingCandidateDetailPage.js'
 import { SchedulingRunDetailPage, schedulingRunDetailLoader } from '../routes/scheduling/SchedulingRunDetailPage.js'
@@ -324,6 +326,16 @@ export const router = createBrowserRouter([
         element: <SeoFaqEditorPage />,
         loader: seoFaqEditorLoader,
         path: 'seo/faq/:faqSetId',
+      },
+      {
+        element: <SeoPostListPage />,
+        loader: seoPostListLoader,
+        path: 'seo/posts',
+      },
+      {
+        element: <SeoPostEditorPage />,
+        loader: seoPostEditorLoader,
+        path: 'seo/posts/:postId',
       },
       {
         loader: legacyGroupDetailLoader,

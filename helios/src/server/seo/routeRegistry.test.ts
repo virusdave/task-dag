@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  BLOG_CANONICAL_ORIGIN,
   RESERVED_GLOBAL_SITE_ID,
+  blogCanonicalUrl,
   blogIndexPath,
   blogPostPath,
   isReservedGlobalSiteId,
@@ -20,6 +22,13 @@ describe('FB.nyc Reserved Prefix Registry slug', () => {
 
   it('builds the blog index path', () => {
     expect(blogIndexPath('fb_us')).toBe('/sites/fb_us/whats-new')
+  })
+
+  it('derives the canonical post URL from scope+slug', () => {
+    expect(blogCanonicalUrl('all', 'summer-drop-2026')).toBe(
+      `${BLOG_CANONICAL_ORIGIN}/sites/all/whats-new/summer-drop-2026`,
+    )
+    expect(() => blogCanonicalUrl('fb_nyc', 'Bad Slug')).toThrow()
   })
 
   it('rejects an invalid slug', () => {

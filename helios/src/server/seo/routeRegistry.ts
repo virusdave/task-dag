@@ -55,3 +55,21 @@ export function blogIndexPath(siteId: string): string {
   }
   return `${SITES_PREFIX}/${siteId}/${WHATS_NEW_SEGMENT}`
 }
+
+// Canonical origin for blog-post canonical URLs. The blog is HOSTED
+// CONTENT that accrues authority to the FB.nyc domain (the `all` scope is
+// the domain-boosting global token; per-site scopes still canonicalise to
+// the .nyc origin so a post has ONE canonical home regardless of which
+// host renders the variant — same-host canonical is a renderer concern,
+// the indexable canonical is the .nyc post URL). Frozen here so the
+// control plane and the bundle loader can never mint a drifting canonical.
+export const BLOG_CANONICAL_ORIGIN = 'https://freshlybaked.nyc'
+
+/**
+ * The canonical (indexable) URL for a blog post, DERIVED from scope+slug
+ * so it can never drift from the route the content renders at. Throws on
+ * an invalid slug.
+ */
+export function blogCanonicalUrl(siteId: string, slug: string): string {
+  return `${BLOG_CANONICAL_ORIGIN}${blogPostPath(siteId, slug)}`
+}

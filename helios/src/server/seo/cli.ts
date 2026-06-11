@@ -25,6 +25,7 @@ import { pathToFileURL } from 'node:url'
 import { generateEd25519Pem, publicKeyPemFromPrivate } from '../lp/signing.js'
 import { compileSeoBundle, SeoCompileError, type CompileInput } from './compile.js'
 import { loadApprovedFaqSetsForBundle } from './faqBundleSource.js'
+import { loadApprovedPostsForBundle } from './postBundleSource.js'
 import { publishSeoBundle, type SeoPublishOptions } from './publish.js'
 import { validateSeoBundle } from './validate.js'
 import { getPool, closePool } from '../db/pool.js'
@@ -120,6 +121,25 @@ async function applyFaqFromDb(cfg: BundleConfig, args: Args): Promise<BundleConf
   }
 }
 
+/**
+ * When `--posts-from-db` is passed, replace the config's `content.posts`
+ * with the operator-APPROVED blog posts from the control-plane DB (verified
+ * against the approval ledger by postBundleSource.ts). Everything else
+ * (sites/widgets/policy/assets/sitemaps) still comes from the JSON config.
+ * Requires DATABASE_URL to be set. Returns the (possibly unchanged) config.
+ */
+async function applyPostsFromDb(cfg: BundleConfig, args: Args): Promise<BundleConfig> {
+  if (!args.bools.has('posts-from-db')) {
+    return cfg
+  }
+  const posts = await loadApprovedPostsForBundle(getPool())
+  process.stdout.write(`[posts-from-db] loaded ${posts.length} approved post(s) from DB\n`)
+  return {
+    ...cfg,
+    content: { ...cfg.content, posts },
+  }
+}
+
 function publishOptsFromConfig(
   cfg: BundleConfig,
   args: Args,
@@ -159,7 +179,8 @@ function cmdKeygen(): number {
 
 async function doPublish(args: Args, candidateOnly: boolean): Promise<number> {
   const environment = asEnvironment(requireFlag(args, 'env'))
-  const cfg = await applyFaqFromDb(loadConfig(requireFlag(args, 'config')), args)
+  let cfg = await applyFaqFromDb(loadConfig(requireFlag(args, 'config')), args)
+  cfg = await applyPostsFromDb(cfg, args)
   const privateKeyPem = readFileSync(requireFlag(args, 'privkey'), 'utf8')
 
   const compiled = compileFromConfig(cfg)
@@ -238,9 +259,9 @@ export async function main(argv: string[]): Promise<number> {
     process.stderr.write(`error: ${e instanceof Error ? e.message : String(e)}\n`)
     return 1
   } finally {
-    // The DB pool is only opened by the --faq-from-db path; closing an
-    // unopened pool is a no-op, so this is always safe.
-    if (args.bools.has('faq-from-db')) {
+    // The DB pool is only opened by the --faq-from-db / --posts-from-db
+    // paths; closing an unopened pool is a no-op, so this is always safe.
+    if (args.bools.has('faq-from-db') || args.bools.has('posts-from-db')) {
       await closePool()
     }
   }
