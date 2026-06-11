@@ -1302,7 +1302,7 @@ function CohortRetentionCard({
         <div className="metric-chart-titlewrap">
           <h3 className="metric-chart-title">Cohort retention</h3>
           <HelpIcon
-            text={`Each line is one acquisition cohort (customers whose 1st-ever purchase fell in that ${granularity}); Y axis = fraction of that cohort that purchased again in period N. Period 0 is the acquisition ${granularity} itself (always 100%). Most-recent cohort = most opaque; older cohorts fade. Lines that flatten high mean the cohort is sticking; lines that decay sharply mean churn. Cohort scope (top of page) filters which cohorts are considered.`}
+            text={`Cohort triangle. Each ROW is one acquisition cohort (customers whose 1st-ever purchase fell in that ${granularity}), most-recent at top; each COLUMN is the number of ${granularity === 'week' ? 'weeks' : 'months'} since acquisition. Each cell shows the % of that cohort that purchased again in that period, colour-coded (darker teal = higher retention). Period 0 is the acquisition ${granularity} itself (always 100%). Cells are blank where a cohort is too recent to have reached that period — that's what gives the table its triangular shape. Cohort scope (top of page) filters which cohorts are considered.`}
           />
         </div>
         {byCohort.length > DEFAULT_VISIBLE_COHORTS ? (
@@ -1349,62 +1349,23 @@ function CohortRetentionChart({
   /** See parent <CohortRetentionCard>. Null = no dimming. */
   highlightMatcher: ((row: CohortRetentionRow) => boolean) | null
 }) {
-  const width = 480
-  const height = 220
-  const marginTop = 8
-  const marginRight = 12
-  const marginBottom = 32
-  const marginLeft = 56
-  const plotW = width - marginLeft - marginRight
-  const plotH = height - marginTop - marginBottom
-
-  // X axis: 0..maxPeriod across all visible cohorts.
-  // Y axis: 0..1 (pct). Tick at every 0.25.
+  // Classic cohort triangle / heatmap: one row per acquisition cohort
+  // (most recent at top), one column per period since acquisition.
+  // Each cell is colour-coded by retention rate with the rate printed
+  // inside it. Cells the cohort hasn't reached yet (too recent) are
+  // blank — that's what gives the table its triangular shape.
   const maxPeriod = Math.max(
     1,
     ...cohorts.flatMap((c) => c.points.map((p) => p.periodIndex)),
   )
-  const xTicks = niceXTicksLocal(0, maxPeriod)
-  const yTicks = [0, 0.25, 0.5, 0.75, 1]
+  const periods = Array.from({ length: maxPeriod + 1 }, (_, i) => i)
+  // Most-recent cohort first (cohorts arrive oldest → newest).
+  const orderedCohorts = [...cohorts].reverse()
 
-  const xScale = (v: number) => marginLeft + (v / Math.max(1, maxPeriod)) * plotW
-  const yScale = (v: number) => marginTop + (1 - Math.min(1, Math.max(0, v))) * plotH
-
-  // Most-recent cohort fully opaque; older cohorts fade. Linear ramp.
-  const opacityFor = (idx: number, n: number) => {
-    if (n === 1) return 1
-    const t = idx / (n - 1) // oldest = 0, newest = 1
-    return 0.25 + 0.75 * t
-  }
-
-  // Hover hit-target: nearest cohort point to the pointer.
-  const onPointerMove = (e: React.PointerEvent<SVGSVGElement>): void => {
-    const svg = e.currentTarget
-    const rect = svg.getBoundingClientRect()
-    const px = ((e.clientX - rect.left) / rect.width) * width
-    const py = ((e.clientY - rect.top) / rect.height) * height
-    let best: { cohortKey: string; periodIndex: number; dist: number } | null = null
-    for (const c of cohorts) {
-      for (const p of c.points) {
-        const dx = xScale(p.periodIndex) - px
-        const dy = yScale(p.retentionPct) - py
-        const dist = dx * dx + dy * dy
-        if (best === null || dist < best.dist) {
-          best = { cohortKey: c.cohortKey, periodIndex: p.periodIndex, dist }
-        }
-      }
-    }
-    if (best && best.dist < 400) {
-      setHover({
-        cohortKey: best.cohortKey,
-        periodIndex: best.periodIndex,
-        clientX: e.clientX,
-        clientY: e.clientY,
-      })
-    } else {
-      setHover(null)
-    }
-  }
+  const cellByCohortPeriod = (
+    c: { points: ReadonlyArray<CohortRetentionRow> },
+    period: number,
+  ): CohortRetentionRow | null => c.points.find((p) => p.periodIndex === period) ?? null
 
   const hoveredRow = hover
     ? cohorts
@@ -1415,101 +1376,73 @@ function CohortRetentionChart({
 
   return (
     <div className="customer-value-chart-wrap">
-      <svg
-        viewBox={`0 0 ${width} ${height}`}
-        preserveAspectRatio="none"
-        role="img"
-        className="customer-value-chart-svg"
-        onPointerMove={onPointerMove}
-        onPointerLeave={() => setHover(null)}
-      >
-        {/* Y gridlines + labels */}
-        {yTicks.map((t) => (
-          <g key={`y-${t}`}>
-            <line
-              x1={marginLeft}
-              x2={marginLeft + plotW}
-              y1={yScale(t)}
-              y2={yScale(t)}
-              stroke="currentColor"
-              opacity="0.12"
-              strokeDasharray="4 4"
-            />
-            <text
-              x={marginLeft - 6}
-              y={yScale(t)}
-              dy="0.32em"
-              textAnchor="end"
-              fontSize="10"
-              fill="currentColor"
-              opacity="0.7"
-            >
-              {`${Math.round(t * 100)}%`}
-            </text>
-          </g>
-        ))}
-        {/* X gridlines + labels */}
-        {xTicks.map((t) => (
-          <g key={`x-${t}`}>
-            <line
-              x1={xScale(t)}
-              x2={xScale(t)}
-              y1={marginTop}
-              y2={marginTop + plotH}
-              stroke="currentColor"
-              opacity="0.08"
-              strokeDasharray="4 4"
-            />
-            <text
-              x={xScale(t)}
-              y={marginTop + plotH + 14}
-              textAnchor="middle"
-              fontSize="10"
-              fill="currentColor"
-              opacity="0.7"
-            >
-              {t}
-            </text>
-          </g>
-        ))}
-        <text
-          x={marginLeft + plotW / 2}
-          y={height - 4}
-          textAnchor="middle"
-          fontSize="10"
-          fill="currentColor"
-          opacity="0.6"
-        >
-          {periodLabel} since acquisition
-        </text>
-
-        {/* Cohort lines. When highlightMatcher is non-null, a
-            cohort counts as matched iff ANY of its rows match (since
-            chips dim by cohortKey, this is effectively "the chip
-            for this cohortKey is selected"). Non-matched cohorts
-            render at a fixed dim opacity. */}
-        {cohorts.map((c, idx) => {
-          const path = c.points
-            .map((p, i) => `${i === 0 ? 'M' : 'L'} ${xScale(p.periodIndex)} ${yScale(p.retentionPct)}`)
-            .join(' ')
-          const isHovered = hover?.cohortKey === c.cohortKey
-          const matched =
-            highlightMatcher == null ? true : c.points.some((p) => highlightMatcher(p))
-          const baseOpacity = opacityFor(idx, cohorts.length)
-          const opacity = matched ? baseOpacity : 0.12
-          return (
-            <g key={c.cohortKey}>
-              <path
-                d={path}
-                fill="none"
-                stroke="currentColor"
-                strokeWidth={isHovered ? 2 : 1}
-                opacity={opacity}
-              />
-            </g>
-          )
-        })}
-      </svg>
+      <div className="cohort-heatmap-scroll">
+        <table className="cohort-heatmap">
+          <thead>
+            <tr>
+              <th className="cohort-heatmap-corner" scope="col">
+                Cohort
+              </th>
+              <th className="cohort-heatmap-size" scope="col">
+                Size
+              </th>
+              {periods.map((p) => (
+                <th key={p} className="cohort-heatmap-period" scope="col">
+                  {p}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {orderedCohorts.map((c) => {
+              const matched =
+                highlightMatcher == null ? true : c.points.some((p) => highlightMatcher(p))
+              const cohortSize = c.points[0]?.cohortSize ?? 0
+              return (
+                <tr
+                  key={c.cohortKey}
+                  style={{ opacity: matched ? 1 : 0.25 }}
+                >
+                  <th scope="row" className="cohort-heatmap-rowlabel">
+                    {fmtCohortLabel(c.cohortKey)}
+                  </th>
+                  <td className="cohort-heatmap-size">{fmtInt(cohortSize)}</td>
+                  {periods.map((p) => {
+                    const cell = cellByCohortPeriod(c, p)
+                    if (cell == null) {
+                      return <td key={p} className="cohort-heatmap-cell cohort-heatmap-empty" />
+                    }
+                    const style = retentionCellStyle(cell.retentionPct)
+                    const isHovered =
+                      hover?.cohortKey === c.cohortKey && hover?.periodIndex === p
+                    return (
+                      <td
+                        key={p}
+                        className={`cohort-heatmap-cell${isHovered ? ' is-hovered' : ''}`}
+                        style={style}
+                        onPointerMove={(e) =>
+                          setHover({
+                            cohortKey: c.cohortKey,
+                            periodIndex: p,
+                            clientX: e.clientX,
+                            clientY: e.clientY,
+                          })
+                        }
+                        onPointerLeave={() => setHover(null)}
+                      >
+                        {Math.round(cell.retentionPct * 100)}
+                      </td>
+                    )
+                  })}
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      </div>
+      <div className="subtle-copy cohort-heatmap-axislabel">
+        columns = {periodLabel} since acquisition · cell = % of cohort retained
+      </div>
       {hover && hoveredRow && hoveredCohortLabel ? (
         <FollowTooltip
           lines={[
@@ -1524,6 +1457,17 @@ function CohortRetentionChart({
       ) : null}
     </div>
   )
+}
+
+/** Heatmap cell colour for a retention rate in [0,1]: blends toward a
+ *  saturated teal as the rate climbs, flipping the label to white once
+ *  the background is dark enough to keep contrast readable. */
+function retentionCellStyle(pct: number): React.CSSProperties {
+  const t = Math.max(0, Math.min(1, pct))
+  return {
+    background: `rgba(13, 124, 115, ${0.06 + 0.94 * t})`,
+    color: t > 0.5 ? '#ffffff' : '#10302d',
+  }
 }
 
 function FirstSecondConversionCard({
@@ -1602,19 +1546,6 @@ function FirstSecondConversionCard({
       )}
     </article>
   )
-}
-
-/** Minimal local X-tick helper for the retention chart — we don't pull
- *  in `niceXTicks` because the retention X axis is a strict integer
- *  period index (0..N) and we want tick-at-each-integer behaviour up
- *  to 12, then every 2nd beyond that. */
-function niceXTicksLocal(min: number, max: number): number[] {
-  const span = Math.max(1, max - min)
-  const step = span <= 12 ? 1 : span <= 26 ? 2 : Math.ceil(span / 12)
-  const out: number[] = []
-  for (let v = Math.ceil(min); v <= Math.floor(max); v += step) out.push(v)
-  if (out.length === 0) out.push(min)
-  return out
 }
 
 function fmtCohortLabel(iso: string): string {

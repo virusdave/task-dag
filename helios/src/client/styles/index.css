@@ -7232,6 +7232,64 @@ span.metric-chart-legend-item {
   position: relative;
 }
 
+/* Cohort retention heatmap (triangle table). */
+.cohort-heatmap-scroll {
+  overflow-x: auto;
+}
+.cohort-heatmap {
+  border-collapse: collapse;
+  font-size: 11px;
+  line-height: 1.2;
+}
+.cohort-heatmap th,
+.cohort-heatmap td {
+  border: 1px solid rgba(0, 0, 0, 0.06);
+  text-align: center;
+  padding: 3px 6px;
+  white-space: nowrap;
+}
+.cohort-heatmap thead th {
+  font-weight: 600;
+  opacity: 0.75;
+  position: sticky;
+  top: 0;
+  background: var(--surface, #fff);
+  z-index: 1;
+}
+.cohort-heatmap-rowlabel {
+  text-align: left;
+  font-weight: 500;
+  position: sticky;
+  left: 0;
+  background: var(--surface, #fff);
+  z-index: 1;
+}
+.cohort-heatmap-corner {
+  text-align: left;
+  left: 0;
+  z-index: 2;
+}
+.cohort-heatmap-size {
+  opacity: 0.7;
+  font-variant-numeric: tabular-nums;
+}
+.cohort-heatmap-cell {
+  font-variant-numeric: tabular-nums;
+  cursor: default;
+}
+.cohort-heatmap-cell.is-hovered {
+  outline: 2px solid rgba(0, 0, 0, 0.55);
+  outline-offset: -2px;
+}
+.cohort-heatmap-empty {
+  background: transparent;
+  border-color: transparent;
+}
+.cohort-heatmap-axislabel {
+  margin-top: 4px;
+  font-size: 11px;
+}
+
 .customer-value-tooltip {
   /* Position is set inline by FollowTooltip; we just make sure the
      element is fixed-positioned so coordinates are viewport-relative
