@@ -197,6 +197,12 @@ export const CustomerValueSummarySchema = z.object({
   purchaseCountPercentiles: PurchaseCountPercentilesSchema,
   /** Percentiles of per-customer trailing-12-month spend (50/80/90/95). */
   trailing12moSpendPercentiles: TrailingSpendPercentilesSchema,
+  /**
+   * Same trailing-12-month spend percentiles, but over the repeat-only
+   * population — customers with >= 2 non-cancelled orders in the
+   * trailing window (single-visit customers excluded).
+   */
+  trailing12moSpendPercentilesRepeat: TrailingSpendPercentilesSchema,
   grossSalesDollars: z.number(),
   grossReceiptsDollars: z.number(),
   netSalesDollars: z.number(),

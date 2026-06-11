@@ -338,6 +338,7 @@ export async function getCustomerValueAnalytics(
       observedMedianLtvGrossDollars: null,
       purchaseCountPercentiles: emptyPurchaseCountPercentiles(args.percentiles),
       trailing12moSpendPercentiles: emptyTrailingSpendPercentiles(),
+      trailing12moSpendPercentilesRepeat: emptyTrailingSpendPercentiles(),
       grossSalesDollars: 0,
       grossReceiptsDollars: 0,
       netSalesDollars: 0,
@@ -621,17 +622,26 @@ export async function getCustomerValueAnalytics(
   // order at the selected sites in [to − 12 months, to). One param per
   // requested percentile ($3, $4, …), reused across all three $ bases.
   const ttmFractions = TRAILING_SPEND_PERCENTILES.map((p) => p / 100)
+  // For each requested percentile, emit all three $ bases for BOTH the
+  // full trailing-window population (gs_/ns_/rc_, from `ttm`) and the
+  // repeat-only population with >= 2 visits (rgs_/rns_/rrc_, from
+  // `ttm_repeat`). Scalar subqueries keep the two populations cleanly
+  // separated in one round-trip.
   const ttmSelectCols = TRAILING_SPEND_PERCENTILES.map((_, i) => {
     const p = `$${i + 3}::float8`
-    return (
-      `      percentile_cont(${p}) within group (order by gross_sales) as gs_${i},\n` +
-      `      percentile_cont(${p}) within group (order by net_sales) as ns_${i},\n` +
-      `      percentile_cont(${p}) within group (order by receipts) as rc_${i}`
-    )
-  }).join(',\n')
+    return [
+      `(select percentile_cont(${p}) within group (order by gross_sales) from ttm) as gs_${i}`,
+      `(select percentile_cont(${p}) within group (order by net_sales) from ttm) as ns_${i}`,
+      `(select percentile_cont(${p}) within group (order by receipts) from ttm) as rc_${i}`,
+      `(select percentile_cont(${p}) within group (order by gross_sales) from ttm_repeat) as rgs_${i}`,
+      `(select percentile_cont(${p}) within group (order by net_sales) from ttm_repeat) as rns_${i}`,
+      `(select percentile_cont(${p}) within group (order by receipts) from ttm_repeat) as rrc_${i}`,
+    ].join(',\n      ')
+  }).join(',\n      ')
   const trailingSpendSql = `
     with ttm as (
       select so.customer_id,
+        count(*)::int                                                              as visits,
         sum(coalesce(so.subtotal_dollars, 0))::numeric                              as gross_sales,
         sum(coalesce(so.subtotal_dollars, 0) - coalesce(so.discount_dollars, 0))::numeric as net_sales,
         sum(coalesce(so.grand_total_dollars, 0))::numeric                           as receipts
@@ -642,10 +652,10 @@ export async function getCustomerValueAnalytics(
         and so.pay_time <  $2::timestamptz
         ${nonCancelledOrderSql('so')}
       group by so.customer_id
-    )
-    select count(*)::int as n,
-${ttmSelectCols}
-    from ttm
+    ),
+    ttm_repeat as (select * from ttm where visits >= 2)
+    select
+      ${ttmSelectCols}
   `
   const [result, guestRes, retentionRes, veriscanRes, ttmRes] = await Promise.all([
     pool.query<UnionRow>(sql, [
@@ -704,6 +714,15 @@ ${ttmSelectCols}
       grossReceiptsDollars: round2OrNull(ttmRow?.[`rc_${i}`]),
     }),
   )
+  // Repeat-only population (>= 2 visits in the trailing window).
+  const trailing12moSpendPercentilesRepeat: TrailingSpendPercentiles = TRAILING_SPEND_PERCENTILES.map(
+    (percentile, i) => ({
+      percentile,
+      grossSalesDollars: round2OrNull(ttmRow?.[`rgs_${i}`]),
+      netSalesDollars: round2OrNull(ttmRow?.[`rns_${i}`]),
+      grossReceiptsDollars: round2OrNull(ttmRow?.[`rrc_${i}`]),
+    }),
+  )
   const veriscanTotal = asReqInt(veriscanRes.rows[0]?.total)
   const veriscanLinked = asReqInt(veriscanRes.rows[0]?.linked)
   const veriscanCoverage: VeriscanCoverage = {
@@ -722,6 +741,7 @@ ${ttmSelectCols}
     observedMedianLtvGrossDollars: null,
     purchaseCountPercentiles: emptyPurchaseCountPercentiles(args.percentiles),
     trailing12moSpendPercentiles: emptyTrailingSpendPercentiles(),
+    trailing12moSpendPercentilesRepeat: emptyTrailingSpendPercentiles(),
     grossSalesDollars: 0,
     grossReceiptsDollars: 0,
     netSalesDollars: 0,
@@ -758,8 +778,9 @@ ${ttmSelectCols}
         summary.grossReceiptsDollars = asReqNum(row.v8)
         // Trailing-12-month spend percentiles come from a separate
         // query (different lookback window than the page range), not
-        // the union — assign the precomputed value here.
+        // the union — assign the precomputed values here.
         summary.trailing12moSpendPercentiles = trailing12moSpendPercentiles
+        summary.trailing12moSpendPercentilesRepeat = trailing12moSpendPercentilesRepeat
         break
       }
       case 'purchase_count': {

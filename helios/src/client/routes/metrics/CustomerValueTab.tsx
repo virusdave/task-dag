@@ -469,7 +469,16 @@ function CustomerValueBody({
       </div>
 
       <TrailingSpendPercentilesStrip
+        title="Trailing-12-mo spend"
+        help="Distribution of each customer's total spend over the trailing 12 months ending at the range end. Population: non-guest customers with at least one non-cancelled order in that window at the selected sites. Switches with the $ basis selector above. Independent of the cohort-scope / from-date controls (the lookback is always a fixed 12 months back from the range end)."
         percentiles={data.summary.trailing12moSpendPercentiles}
+        basis={moneyBasis}
+        basisLabel={moneyBasisDef.label}
+      />
+      <TrailingSpendPercentilesStrip
+        title="Trailing-12-mo spend, repeat only (≥2 visits)"
+        help="Same as the row above, but excluding single-visit customers: only customers with 2 or more non-cancelled orders in the trailing 12 months are counted."
+        percentiles={data.summary.trailing12moSpendPercentilesRepeat}
         basis={moneyBasis}
         basisLabel={moneyBasisDef.label}
       />
@@ -754,10 +763,14 @@ function Kpi({ label, value, help }: { label: string; value: string; help: strin
  *  non-cancelled order in the trailing 12 months ending at the range
  *  end, at the selected sites. */
 function TrailingSpendPercentilesStrip({
+  title,
+  help,
   percentiles,
   basis,
   basisLabel,
 }: {
+  title: string
+  help: string
   percentiles: TrailingSpendPercentiles
   basis: MoneyBasis
   basisLabel: string
@@ -772,8 +785,7 @@ function TrailingSpendPercentilesStrip({
     <div className="customer-value-kpis customer-value-ttm-spend">
       <div className="customer-value-kpi">
         <div className="customer-value-kpi-label">
-          Trailing-12-mo spend ({basisLabel.toLowerCase()}){' '}
-          <HelpIcon text="Distribution of each customer's total spend over the trailing 12 months ending at the range end. Population: non-guest customers with at least one non-cancelled order in that window at the selected sites. Switches with the $ basis selector above. Independent of the cohort-scope / from-date controls (the lookback is always a fixed 12 months back from the range end)." />
+          {title} ({basisLabel.toLowerCase()}) <HelpIcon text={help} />
         </div>
         <div className="customer-value-kpi-value subtle-copy" style={{ fontSize: '0.8em' }}>
           percentiles
@@ -784,7 +796,7 @@ function TrailingSpendPercentilesStrip({
           key={p.percentile}
           label={`P${p.percentile}`}
           value={fmtMoneyOrDash(pick(p))}
-          help={`The spend at or below which ${p.percentile}% of trailing-12-month customers fall (${basisLabel.toLowerCase()}).`}
+          help={`The spend at or below which ${p.percentile}% of the population fall (${basisLabel.toLowerCase()}).`}
         />
       ))}
     </div>
