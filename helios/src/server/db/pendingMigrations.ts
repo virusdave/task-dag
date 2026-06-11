@@ -885,6 +885,20 @@ const SENTINELS: MigrationSentinel[] = [
       '503s and the mostly-static-sites runtime spools events locally.',
     check: (db) => tableExists(db, 'lp_events'),
   },
+  {
+    migrationId: '071_seo_faq_control_plane',
+    label:
+      'SEO FAQ control plane (seo_approvals + seo_faq_sets) — required by ' +
+      'the /api/seo/faq-sets control plane and the approved-FAQ bundle ' +
+      'loader. Without it the FAQ authoring/approval pages 500.',
+    check: async (db) => {
+      const [hasApprovals, hasFaqSets] = await Promise.all([
+        tableExists(db, 'seo_approvals'),
+        tableExists(db, 'seo_faq_sets'),
+      ])
+      return hasApprovals && hasFaqSets
+    },
+  },
 ]
 
 interface CacheEntry {

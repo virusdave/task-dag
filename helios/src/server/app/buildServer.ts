@@ -52,6 +52,7 @@ import { registerProposalBatchRoutes } from '../routes/proposalBatches.js'
 import { registerProposalImportRoutes } from '../routes/proposalImports.js'
 import { registerReviewRoutes } from '../routes/review.js'
 import { registerSchedulingRoutes } from '../routes/scheduling.js'
+import { registerSeoFaqRoutes } from '../routes/seoFaq.js'
 import { registerScreensRoutes } from '../routes/screens.js'
 import { registerSessionRoutes } from '../routes/session.js'
 import { registerStaffRoutes } from '../routes/staff.js'
@@ -240,6 +241,7 @@ async function registerApplicationSurface(server: FastifyInstance) {
   await registerProposalImportRoutes(server)
   await registerReviewRoutes(server)
   await registerSchedulingRoutes(server)
+  await registerSeoFaqRoutes(server)
   await registerScreensRoutes(server)
   await registerStaffRoutes(server)
   await registerSweedAuthEventsRoutes(server)

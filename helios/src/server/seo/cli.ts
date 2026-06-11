@@ -24,8 +24,10 @@ import { pathToFileURL } from 'node:url'
 
 import { generateEd25519Pem, publicKeyPemFromPrivate } from '../lp/signing.js'
 import { compileSeoBundle, SeoCompileError, type CompileInput } from './compile.js'
+import { loadApprovedFaqSetsForBundle } from './faqBundleSource.js'
 import { publishSeoBundle, type SeoPublishOptions } from './publish.js'
 import { validateSeoBundle } from './validate.js'
+import { getPool, closePool } from '../db/pool.js'
 import type { SeoEnvironment } from './contracts.js'
 
 interface Args {
@@ -99,6 +101,25 @@ function compileFromConfig(cfg: BundleConfig) {
   })
 }
 
+/**
+ * When `--faq-from-db` is passed, replace the config's `content.faq_sets`
+ * with the operator-APPROVED FAQ sets from the control-plane DB (verified
+ * against the approval ledger by faqBundleSource.ts). Everything else
+ * (sites/widgets/policy/assets/sitemaps) still comes from the JSON config.
+ * Requires DATABASE_URL to be set. Returns the (possibly unchanged) config.
+ */
+async function applyFaqFromDb(cfg: BundleConfig, args: Args): Promise<BundleConfig> {
+  if (!args.bools.has('faq-from-db')) {
+    return cfg
+  }
+  const faqSets = await loadApprovedFaqSetsForBundle(getPool())
+  process.stdout.write(`[faq-from-db] loaded ${faqSets.length} approved FAQ set(s) from DB\n`)
+  return {
+    ...cfg,
+    content: { ...cfg.content, faq_sets: faqSets },
+  }
+}
+
 function publishOptsFromConfig(
   cfg: BundleConfig,
   args: Args,
@@ -136,9 +157,9 @@ function cmdKeygen(): number {
   return 0
 }
 
-function doPublish(args: Args, candidateOnly: boolean): number {
+async function doPublish(args: Args, candidateOnly: boolean): Promise<number> {
   const environment = asEnvironment(requireFlag(args, 'env'))
-  const cfg = loadConfig(requireFlag(args, 'config'))
+  const cfg = await applyFaqFromDb(loadConfig(requireFlag(args, 'config')), args)
   const privateKeyPem = readFileSync(requireFlag(args, 'privkey'), 'utf8')
 
   const compiled = compileFromConfig(cfg)
@@ -190,7 +211,7 @@ function cmdValidate(args: Args): number {
   return 1
 }
 
-export function main(argv: string[]): number {
+export async function main(argv: string[]): Promise<number> {
   const args = parseArgs(argv)
   const command = args._[0]
   try {
@@ -198,10 +219,11 @@ export function main(argv: string[]): number {
       case 'keygen':
         return cmdKeygen()
       case 'build':
-        // P1 dry-run: compile + write a candidate pointer only.
-        return doPublish(args, true)
+        // P1 dry-run: compile + write a candidate pointer only. With
+        // `--faq-from-db` the FAQ content comes from approved DB rows.
+        return await doPublish(args, true)
       case 'publish':
-        return doPublish(args, args.bools.has('dry-run'))
+        return await doPublish(args, args.bools.has('dry-run'))
       case 'validate':
         return cmdValidate(args)
       default:
@@ -215,10 +237,22 @@ export function main(argv: string[]): number {
     }
     process.stderr.write(`error: ${e instanceof Error ? e.message : String(e)}\n`)
     return 1
+  } finally {
+    // The DB pool is only opened by the --faq-from-db path; closing an
+    // unopened pool is a no-op, so this is always safe.
+    if (args.bools.has('faq-from-db')) {
+      await closePool()
+    }
   }
 }
 
 /* istanbul ignore next — entrypoint guard */
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  process.exit(main(process.argv.slice(2)))
+  main(process.argv.slice(2)).then(
+    (code) => process.exit(code),
+    (err) => {
+      process.stderr.write(`error: ${err instanceof Error ? err.message : String(err)}\n`)
+      process.exit(1)
+    },
+  )
 }

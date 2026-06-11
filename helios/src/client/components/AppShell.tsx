@@ -224,6 +224,15 @@ function buildPrimarySidebarNodes(
         label: 'Promo Names',
         to: '/utilities/promo-names',
       },
+      {
+        // SEO control plane (Helios-driven SEO widgets epic, top-level#15).
+        // P3 ships the FAQ generator/editor/approval surface.
+        kind: 'leaf',
+        navKey: 'marketing.seo-faq',
+        label: 'SEO · FAQ sets',
+        to: '/seo/faq',
+        end: false,
+      },
     ],
   }
 
