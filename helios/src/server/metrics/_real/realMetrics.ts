@@ -24,8 +24,11 @@ import {
   queryFulfillmentMarginDollars,
   queryGrossMarginDollars,
   queryInventoryCostDistribution,
+  queryInventoryCostForSaleSplit,
+  queryInventoryForSaleCostByCategory,
   queryInventoryMisalignment,
   queryLowstockUpcomingOuts,
+  querySalesVsSellableInventory,
   queryMarginStackNewVsReturning,
   queryMarginStackNewVsReturningByRegion,
   querySlowmoversCostAtRisk,
@@ -406,6 +409,58 @@ export const REAL_METRICS: ReadonlyArray<MetricDef> = [
     supportedAggregations: [...SUPPORTED],
     query: queryFulfillmentEffectiveGmPct,
     supportedCatalogFilters: ALL_CATALOG_FILTERS,
+  },
+  // ---- Inventory cost (Sales & ops section) — backed by
+  //      sweed_package_snapshots. "For sale" vs "not for sale" is read
+  //      off each package's stock_location text. ----
+  {
+    id: 'inventory_cost.for_sale_vs_not',
+    group: 'Inventory cost',
+    title: 'Inventory cost in stock: for sale vs not for sale',
+    description:
+      'Wholesale cost $ of in-stock inventory (sum of `current_qty * wholesale_cost_dollars` over the latest snapshot per package as-of each bucket end), split into FOR SALE (stock_location starts "FOR SALE …" — sales floor / vault / mobile vault) vs NOT FOR SALE (quarantine, hold-for-inspection, samples, deprecated, and any other in-stock location). Stack the two series to read total in-stock cost. Snapshot coverage begins 2026-05-26; earlier buckets read 0.',
+    series: [
+      { id: 'for_sale', label: 'For sale $', colour: '#2ca02c' },
+      { id: 'not_for_sale', label: 'Not for sale $', colour: '#d62728' },
+    ],
+    defaultAggregation: 'date',
+    supportedAggregations: [...SUPPORTED],
+    query: queryInventoryCostForSaleSplit,
+  },
+  {
+    id: 'inventory_cost.for_sale_by_category',
+    group: 'Inventory cost',
+    title: 'For-sale inventory cost $ by category',
+    description:
+      'For-sale (sellable) in-stock inventory cost $ as-of each bucket end, stacked by top-level category. Same snapshot + category derivation as the on-hand inventory chart, but restricted to FOR SALE stock_location. Categories come from the most-recent observation of each package on an order line; packages never seen on an order line are dropped.',
+    series: [
+      { id: 'flower', label: 'Flower', colour: '#2ca02c' },
+      { id: 'preroll', label: 'Pre-roll', colour: '#1f77b4' },
+      { id: 'edible', label: 'Edible', colour: '#ff7f0e' },
+      { id: 'vape', label: 'Vape', colour: '#9467bd' },
+      { id: 'concentrate', label: 'Concentrate', colour: '#d62728' },
+      { id: 'accessory', label: 'Accessory', colour: '#7f7f7f' },
+    ],
+    defaultAggregation: 'date',
+    supportedAggregations: [...SUPPORTED],
+    query: queryInventoryForSaleCostByCategory,
+    supportedCatalogFilters: ALL_CATALOG_FILTERS,
+  },
+  {
+    id: 'inventory_cost.sales_vs_sellable_inventory',
+    group: 'Inventory cost',
+    title: 'Net sales $ vs avg sellable inventory cost $',
+    description:
+      'Scatter: X = average DAILY for-sale (sellable) inventory cost $ during the bucket; Y = net sales $ (ex-tax, post-discount = Σ subtotal) booked in the bucket. One dot per (site, bucket). Use it to eyeball whether thin sellable inventory coincides with weak sales (the "are we losing customers to shortage?" question). Dots only appear for buckets with snapshot coverage (snapshots begin 2026-05-26); default `week` agg gives one dot per site per week.',
+    series: [
+      { id: 'sellable_inventory_cost', label: 'Avg sellable inventory cost $', colour: '#1f77b4' },
+      { id: 'sales_dollars', label: 'Net sales $', colour: '#2ca02c' },
+    ],
+    defaultAggregation: 'week',
+    supportedAggregations: ['total', 'month', 'week', 'date'],
+    chartType: 'scatter',
+    supports: { drillSelection: ['scatterDot'] },
+    query: querySalesVsSellableInventory,
   },
   // ---- Inventory (P4) — backed by sweed_package_snapshots ----
   {

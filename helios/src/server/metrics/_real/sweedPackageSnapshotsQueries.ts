@@ -1,6 +1,7 @@
 import type { MetricAggregation } from '../../../shared/contracts/index.js'
 import {
   HELIOS_PENDING_PURCHASE_SITE_DEALERS,
+  HELIOS_SITE_ZIP_BY_DEALER,
   type HeliosPendingPurchaseSiteDealer,
 } from '../../../shared/contracts/index.js'
 import { bucketSelectExpr } from '../bucketSelectSql.js'
@@ -967,6 +968,265 @@ export async function queryLowstockUpcomingOuts(args: MetricQueryArgs): Promise<
       ? 0
       : Number(results[i]!.rows[0]!.expected_margin_loss)
     out.push({ t: buckets[i]!.toISOString(), expected_margin_loss_dollars: round2(Math.max(0, v)) })
+  }
+  return out
+}
+
+// ============================================================================
+// Inventory cost (for-sale vs not-for-sale) — Sales & ops "Inventory cost"
+// section (FreshlyBakedNYC/automation: operator request 2026-06-11).
+//
+// "For sale" vs "not for sale" is read off the per-package
+// `stock_location` text on sweed_package_snapshots. The operator's
+// Sweed taxonomy prefixes the location string with "FOR SALE - …"
+// (sales floor / vault / mobile vault) for sellable stock and
+// "NOT FOR SALE - …" (quarantine, hold-for-inspection, samples) plus a
+// handful of deprecated / junk buckets for everything else. We treat
+// `stock_location ILIKE 'FOR SALE%'` as the sellable set and ALL other
+// in-stock packages (NOT FOR SALE, deprecated, samples, NULL) as the
+// not-for-sale set, so received-but-unlisted / quarantined cost never
+// silently vanishes.
+//
+// "In stock" = current_qty > 0. Cost = current_qty * wholesale_cost.
+// All three queries report the snapshot state as-of each bucket END
+// (latest snapshot with observed_at_min <= bucket_end per package),
+// matching queryInventoryCostDistribution.
+// ============================================================================
+
+/** Sum of in-stock cost split by FOR SALE vs everything else, as-of each
+ *  bucket end. */
+export async function queryInventoryCostForSaleSplit(args: MetricQueryArgs): Promise<MetricRow[]> {
+  const dealerIds = resolveDealerIds(args.sites)
+  const { buckets } = resolveWindow(args)
+  const bucketEnds = bucketEndsForBuckets(buckets, args.agg)
+  if (dealerIds.length === 0 || buckets.length === 0) {
+    return buckets.map((b) => ({ t: b.toISOString(), for_sale: 0, not_for_sale: 0 }))
+  }
+  const pool = getPool()
+  const sql = `
+    select
+      coalesce(sum(cost) filter (where stock_location ilike 'FOR SALE%'), 0) as for_sale,
+      coalesce(sum(cost) filter (where stock_location is null
+                                    or stock_location not ilike 'FOR SALE%'), 0) as not_for_sale
+      from (
+        select distinct on (dealer_id, inventory_item_id)
+               coalesce(current_qty, 0) * coalesce(wholesale_cost_dollars, 0) as cost,
+               stock_location
+          from sweed_package_snapshots
+         where dealer_id = any($1::bigint[])
+           and observed_at_min <= $2::timestamptz
+         order by dealer_id, inventory_item_id, observed_at_min desc
+      ) snap
+     where snap.cost > 0
+  `
+  const results = await Promise.all(
+    buckets.map((_, i) =>
+      pool.query<{ for_sale: string | null; not_for_sale: string | null }>(sql, [
+        dealerIds,
+        bucketEnds[i]!.toISOString(),
+      ]),
+    ),
+  )
+  return buckets.map((b, i) => {
+    const row = results[i]!.rows[0]
+    return {
+      t: b.toISOString(),
+      for_sale: round2(row?.for_sale == null ? 0 : Number(row.for_sale)),
+      not_for_sale: round2(row?.not_for_sale == null ? 0 : Number(row.not_for_sale)),
+    }
+  })
+}
+
+/** Per-package category lookup (most-recent observed category from the
+ *  flattened order lines), honouring active catalog filters. Shared by
+ *  the for-sale-by-category breakdown. Packages never seen on an order
+ *  line are absent (callers treat that as unclassifiable → drop). */
+async function buildCategoryByPackage(args: MetricQueryArgs, dealerIds: number[]): Promise<Map<string, string>> {
+  const pool = getPool()
+  const cf = orderItemsCatalogFilterSql(args, 2)
+  const sql = `
+    ${cf.withPrefix}
+    select distinct on (f.dealer_id, f.inventory_item_id)
+           f.dealer_id,
+           f.inventory_item_id as inventory_item_id,
+           lower(coalesce(f.product_category_name, '')) as category_value
+      from sweed_order_items_flat f
+           ${cf.joinClause}
+     where f.dealer_id = any($1::bigint[])
+       and f.inventory_item_id is not null
+       ${cf.whereClause}
+     order by f.dealer_id, f.inventory_item_id, f.pay_time desc
+  `
+  const result = await pool.query<{ dealer_id: string; inventory_item_id: string; category_value: string }>(
+    sql,
+    [dealerIds, ...cf.params],
+  )
+  const map = new Map<string, string>()
+  for (const row of result.rows) {
+    const canonical = (row.category_value ?? '').trim().toLowerCase()
+    const sid = CATEGORY_SERIES_BY_VALUE.get(canonical) ?? 'other'
+    if (INVENTORY_CATEGORY_SERIES_IDS.includes(sid as (typeof INVENTORY_CATEGORY_SERIES_IDS)[number])) {
+      map.set(`${row.dealer_id}:${row.inventory_item_id}`, sid)
+    }
+  }
+  return map
+}
+
+/** For-sale (sellable) in-stock inventory cost stacked by top-level
+ *  category, as-of each bucket end. Same category derivation as
+ *  inventory.cost_distribution but restricted to FOR SALE stock. */
+export async function queryInventoryForSaleCostByCategory(args: MetricQueryArgs): Promise<MetricRow[]> {
+  const dealerIds = resolveDealerIds(args.sites)
+  const { buckets } = resolveWindow(args)
+  const bucketEnds = bucketEndsForBuckets(buckets, args.agg)
+  if (dealerIds.length === 0 || buckets.length === 0) {
+    return buckets.map((b) => {
+      const row: Record<string, string | number | null> = { t: b.toISOString() }
+      for (const sid of INVENTORY_CATEGORY_SERIES_IDS) row[sid] = 0
+      return row as MetricRow
+    })
+  }
+  const pool = getPool()
+  const categoryByPackage = await buildCategoryByPackage(args, dealerIds)
+  const snapSql = `
+    select distinct on (dealer_id, inventory_item_id)
+           dealer_id::text as dealer_id,
+           inventory_item_id,
+           current_qty,
+           wholesale_cost_dollars
+      from sweed_package_snapshots
+     where dealer_id = any($1::bigint[])
+       and observed_at_min <= $2
+       and stock_location ilike 'FOR SALE%'
+     order by dealer_id, inventory_item_id, observed_at_min desc
+  `
+  const snapResults = await Promise.all(
+    buckets.map((_, i) =>
+      pool.query<{ dealer_id: string; inventory_item_id: string; current_qty: string | null; wholesale_cost_dollars: string | null }>(
+        snapSql,
+        [dealerIds, bucketEnds[i]!.toISOString()],
+      ),
+    ),
+  )
+  const out: MetricRow[] = []
+  for (let i = 0; i < buckets.length; i++) {
+    const byCategory = new Map<string, number>()
+    for (const row of snapResults[i]!.rows) {
+      const qty = row.current_qty === null ? 0 : Number(row.current_qty)
+      const cost = row.wholesale_cost_dollars === null ? 0 : Number(row.wholesale_cost_dollars)
+      if (!Number.isFinite(qty) || !Number.isFinite(cost) || qty <= 0) continue
+      const sid = categoryByPackage.get(`${row.dealer_id}:${row.inventory_item_id}`)
+      if (sid === undefined) continue
+      byCategory.set(sid, (byCategory.get(sid) ?? 0) + qty * cost)
+    }
+    const row: Record<string, string | number | null> = { t: buckets[i]!.toISOString() }
+    for (const sid of INVENTORY_CATEGORY_SERIES_IDS) row[sid] = round2(byCategory.get(sid) ?? 0)
+    out.push(row as MetricRow)
+  }
+  return out
+}
+
+/** Scatter family: one dot per (site, bucket). X = average daily
+ *  for-sale (sellable) inventory cost during the bucket; Y = net sales
+ *  $ (ex-tax, post-discount = sum subtotal_dollars) booked in the
+ *  bucket. Dots only appear for (site, bucket) pairs with snapshot
+ *  coverage — snapshots begin 2026-05-26, so earlier buckets have no
+ *  dot. Used to eyeball whether low sellable inventory coincides with
+ *  weak sales. */
+export async function querySalesVsSellableInventory(args: MetricQueryArgs): Promise<MetricRow[]> {
+  const dealerIds = resolveDealerIds(args.sites)
+  const { buckets } = resolveWindow(args)
+  const bucketEnds = bucketEndsForBuckets(buckets, args.agg)
+  if (dealerIds.length === 0 || buckets.length === 0) return []
+  const pool = getPool()
+  // Avg daily sellable inventory cost within each bucket window, per
+  // dealer. Snapshots are INCREMENTAL — after the 2026-05-26 initial
+  // sweep the worker only re-snapshots packages whose shape changed
+  // (typically a few dozen / day), so summing only packages observed
+  // ON a given day badly undercounts standing inventory. Instead we
+  // carry forward: for each day in the bucket we take the latest
+  // snapshot per package with observed_at_min < end-of-day, sum the
+  // for-sale cost, then average across the days that have any snapshot
+  // coverage yet (days entirely before the first snapshot contribute
+  // nothing and are excluded so the average isn't dragged to 0).
+  const invSql = `
+    with days as (
+      select generate_series(
+               date_trunc('day', $2::timestamptz),
+               date_trunc('day', $3::timestamptz - interval '1 second'),
+               interval '1 day') as day_start
+    ),
+    asof as (
+      select d.day_start, sub.dealer_id,
+             count(*) as pkgs,
+             coalesce(sum(sub.cost) filter (where sub.stock_location ilike 'FOR SALE%'), 0) as forsale_cost
+        from days d
+        cross join lateral (
+          select distinct on (s.dealer_id, s.inventory_item_id)
+                 s.dealer_id,
+                 coalesce(s.current_qty, 0) * coalesce(s.wholesale_cost_dollars, 0) as cost,
+                 s.stock_location
+            from sweed_package_snapshots s
+           where s.dealer_id = any($1::bigint[])
+             and s.observed_at_min < d.day_start + interval '1 day'
+           order by s.dealer_id, s.inventory_item_id, s.observed_at_min desc
+        ) sub
+       group by d.day_start, sub.dealer_id
+    )
+    select dealer_id::text as dealer_id, avg(forsale_cost)::numeric as avg_forsale_cost
+      from asof
+     where pkgs > 0
+     group by dealer_id
+  `
+  const salesSql = `
+    select dealer_id::text as dealer_id, coalesce(sum(subtotal_dollars), 0)::numeric as sales
+      from sweed_orders
+     where dealer_id = any($1::bigint[])
+       and pay_time >= $2::timestamptz and pay_time < $3::timestamptz
+     group by dealer_id
+  `
+  const invResults = await Promise.all(
+    buckets.map((_, i) =>
+      pool.query<{ dealer_id: string; avg_forsale_cost: string | null }>(invSql, [
+        dealerIds,
+        buckets[i]!.toISOString(),
+        bucketEnds[i]!.toISOString(),
+      ]),
+    ),
+  )
+  const salesResults = await Promise.all(
+    buckets.map((_, i) =>
+      pool.query<{ dealer_id: string; sales: string | null }>(salesSql, [
+        dealerIds,
+        buckets[i]!.toISOString(),
+        bucketEnds[i]!.toISOString(),
+      ]),
+    ),
+  )
+  const out: MetricRow[] = []
+  for (let i = 0; i < buckets.length; i++) {
+    const invByDealer = new Map<string, number>()
+    for (const r of invResults[i]!.rows) {
+      invByDealer.set(r.dealer_id, r.avg_forsale_cost == null ? 0 : Number(r.avg_forsale_cost))
+    }
+    const salesByDealer = new Map<string, number>()
+    for (const r of salesResults[i]!.rows) {
+      salesByDealer.set(r.dealer_id, r.sales == null ? 0 : Number(r.sales))
+    }
+    for (const dealerId of dealerIds) {
+      const key = String(dealerId)
+      const inv = invByDealer.get(key)
+      if (inv === undefined) continue // no snapshot coverage in this bucket → no dot
+      const sales = salesByDealer.get(key) ?? 0
+      const zip = HELIOS_SITE_ZIP_BY_DEALER[dealerId] ?? null
+      const row: Record<string, string | number | null> = {
+        t: buckets[i]!.toISOString(),
+        sellable_inventory_cost: round2(inv),
+        sales_dollars: round2(sales),
+      }
+      if (zip) row.site_zip = zip
+      out.push(row as MetricRow)
+    }
   }
   return out
 }
