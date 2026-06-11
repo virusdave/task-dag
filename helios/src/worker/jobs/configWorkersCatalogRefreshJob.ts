@@ -48,6 +48,26 @@ function snapshotRowRetentionHours(): number {
   return parsed
 }
 
+// Whether to persist the per-entity `catalog_taxonomy_snapshot_rows`
+// detail at all. The application reads EXACTLY ZERO rows from this table
+// (only the parent `catalog_taxonomy_snapshots` summary is read, by
+// `loadRecentCatalogTaxonomySnapshots`); the detail rows are a pure
+// write-only audit trail. At ~200 refreshes/day × ~7,500 rows each that
+// was ~816k inserts + an equal volume of retention deletes per day on
+// prod — a large, traffic-independent autovacuum/WAL cost for data
+// nobody reads (canon §3: budget steady-state background cost). So we
+// DEFAULT OFF and only write detail rows when an operator explicitly
+// opts in for a forensic "what did the Sweed catalog look like at time
+// T" sweep. The parent summary row + counts are always written.
+function persistSnapshotDetailRows(): boolean {
+  const raw = process.env.CATALOG_SNAPSHOT_PERSIST_ROWS
+  if (raw === undefined) {
+    return false
+  }
+  const normalized = raw.trim().toLowerCase()
+  return normalized === '1' || normalized === 'true' || normalized === 'yes'
+}
+
 type EntityType =
   | 'product'
   | 'group'
@@ -403,19 +423,26 @@ async function persistSnapshotRows(
   collected: CollectedCatalog,
   counts: EntityCounts,
 ): Promise<void> {
-  const seenKeys = new Set<string>()
+  // Default OFF (see persistSnapshotDetailRows): nobody reads the detail
+  // rows, so we skip the dedup + chunked-insert work entirely unless an
+  // operator opts in for a forensic sweep. The parent summary + counts
+  // are always written below.
+  const writeDetailRows = persistSnapshotDetailRows()
   const uniqueRows: CatalogEntityRow[] = []
-  for (const row of collected.rows) {
-    const key = `${row.entityType}:${row.entityId}`
-    if (seenKeys.has(key)) {
-      continue
+  if (writeDetailRows) {
+    const seenKeys = new Set<string>()
+    for (const row of collected.rows) {
+      const key = `${row.entityType}:${row.entityId}`
+      if (seenKeys.has(key)) {
+        continue
+      }
+      seenKeys.add(key)
+      uniqueRows.push(row)
     }
-    seenKeys.add(key)
-    uniqueRows.push(row)
   }
 
   await withTransaction(async (db) => {
-    if (uniqueRows.length > 0) {
+    if (writeDetailRows && uniqueRows.length > 0) {
       // Insert in chunks so a single huge insert does not blow past pg's
       // bind-parameter limit on large state catalogs.
       const chunkSize = 500
