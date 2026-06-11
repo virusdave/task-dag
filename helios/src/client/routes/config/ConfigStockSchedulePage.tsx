@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { useLoaderData, useRevalidator } from 'react-router-dom'
+import { Link, useLoaderData, useRevalidator } from 'react-router-dom'
 
 import {
   ConfigBackgroundTaskDetailResponseSchema,
@@ -157,6 +157,12 @@ export function ConfigStockSchedulePage() {
           <h2>Stock</h2>
           <p className="subtle-copy">
             Periodic full per-site stock scan including out-of-stock items. A variant transitioning out-of-stock to in-stock auto-enqueues a Lit Alerts refresh for that variant.
+          </p>
+          <p className="subtle-copy">
+            This page edits the recurring <strong>schedule</strong>. To refresh
+            stock right now, use the canonical{' '}
+            <Link to="/catalog/inventory/stock-refresh">Stock refresh</Link>{' '}
+            page (the "Run now" button below does the same thing).
           </p>
         </div>
         <Pill tone="success">live</Pill>

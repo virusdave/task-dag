@@ -165,6 +165,19 @@ export function buildCatalogSidebarSubtree(options?: CatalogSidebarOptions): Tre
     },
     buildImagesAndBarcodesNode(imagesAndBarcodes),
     {
+      // Canonical home for "refresh current inventory stock for a site"
+      // (virusdave/top-level#14). Previously this could only be triggered
+      // as a side effect of the Images & Barcodes "Fix cache" button or
+      // the Config → Workers → Scheduling → Stock "Run now" control;
+      // neither was the obvious place to look. The page reuses the same
+      // existing enqueue job (workers.scheduling.stock run-now) — no new
+      // backend service.
+      kind: 'leaf',
+      navKey: 'catalog.stock-refresh',
+      label: 'Stock refresh',
+      to: '/catalog/inventory/stock-refresh',
+    },
+    {
       kind: 'leaf',
       // Edible THC clamp lives in the same catalog-maintenance vein as
       // Images & Barcodes — both are floor-operator-driven catalog fixups

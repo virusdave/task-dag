@@ -26,6 +26,7 @@ import {
   purchaseSellThroughListLoader,
 } from '../routes/catalog/PurchaseSellThroughPages.js'
 import { ReviewDetailsPage } from '../routes/catalog/ReviewDetailsPage.js'
+import { StockRefreshPage } from '../routes/catalog/StockRefreshPage.js'
 import { ClusterProposalsPage } from '../routes/communications/ClusterProposalsPage.js'
 import { CommunicationsLandingPage } from '../routes/communications/CommunicationsLandingPage.js'
 import { PolicyReplacementReviewPage, policyReplacementReviewLoader } from '../routes/communications/PolicyReplacementReviewPage.js'
@@ -135,6 +136,42 @@ async function legacyAdsLoader() {
   throw redirect(buildHeliosModulePath('communications', 'drive-ingest'))
 }
 
+// --- Nav redesign (virusdave/top-level#14) redirects ---
+//
+// The app landing and the quarantined pages keep their old URLs working
+// as redirects so nothing breaks for bookmarks / muscle memory; the
+// canonical nav surfaces them only in their new homes.
+async function indexRedirectLoader() {
+  // Landing moved off the (trashed) Dashboard to the Operations frontier.
+  throw redirect('/tasks/frontier')
+}
+
+async function legacyDashboardLoader() {
+  throw redirect('/trash/dashboard')
+}
+
+async function legacyCrmLoader() {
+  throw redirect('/trash/crm')
+}
+
+async function trashIndexLoader() {
+  throw redirect('/trash/dashboard')
+}
+
+// Category-root convenience redirects: typing a top-level category path
+// lands on that category's canonical first page.
+async function opsRootLoader() {
+  throw redirect('/tasks/frontier')
+}
+
+async function customersRootLoader() {
+  throw redirect('/admin/customers/check-ins')
+}
+
+async function reportsRootLoader() {
+  throw redirect('/metrics')
+}
+
 export const router = createBrowserRouter([
   {
     element: <LoginPage />,
@@ -145,11 +182,39 @@ export const router = createBrowserRouter([
     children: [
       {
         index: true,
-        element: <DashboardPage />,
+        loader: indexRedirectLoader,
+      },
+      // Dashboard was quarantined under /trash (operator declared it
+      // useless). Old URL redirects to its new home; the component is
+      // rendered at /trash/dashboard below.
+      {
+        loader: legacyDashboardLoader,
+        path: 'dashboard',
       },
       {
         element: <DashboardPage />,
-        path: 'dashboard',
+        path: 'trash/dashboard',
+      },
+      {
+        element: <ModuleLandingPage moduleCode="crm" />,
+        path: 'trash/crm',
+      },
+      {
+        loader: trashIndexLoader,
+        path: 'trash',
+      },
+      // Category-root convenience redirects (nav redesign #14).
+      {
+        loader: opsRootLoader,
+        path: 'ops',
+      },
+      {
+        loader: customersRootLoader,
+        path: 'customers',
+      },
+      {
+        loader: reportsRootLoader,
+        path: 'reports',
       },
       {
         loader: legacyAdsLoader,
@@ -227,6 +292,12 @@ export const router = createBrowserRouter([
         path: 'catalog/warehouse-locations',
       },
       {
+        // Canonical "refresh current inventory stock" page (nav redesign
+        // #14). Reuses the existing workers.scheduling.stock run-now job.
+        element: <StockRefreshPage />,
+        path: 'catalog/inventory/stock-refresh',
+      },
+      {
         element: <CatalogNewEntryPage />,
         path: 'catalog/new-entry',
       },
@@ -257,7 +328,9 @@ export const router = createBrowserRouter([
         path: 'screens/devices',
       },
       {
-        element: <ModuleLandingPage moduleCode="crm" />,
+        // CRM is a planned placeholder with no current workflow; it was
+        // moved to the Trash quarantine (/trash/crm) until it ships.
+        loader: legacyCrmLoader,
         path: 'crm',
       },
       {

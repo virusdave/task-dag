@@ -19,6 +19,29 @@ import type { TreeNavNode } from '../../components/TreeNav.js'
 export function buildConfigSidebarSubtree(): TreeNavNode[] {
   return [
     {
+      // People — operator accounts and public-facing staff editorial.
+      // Staff is physically routed under /utilities/staff but belongs in
+      // the People group post-redesign (virusdave/top-level#14); the
+      // route is unchanged.
+      kind: 'branch',
+      navKey: 'config.people',
+      label: 'People',
+      children: [
+        {
+          kind: 'leaf',
+          navKey: 'config.users',
+          label: 'Users',
+          to: buildHeliosModulePath('config', 'users'),
+        },
+        {
+          kind: 'leaf',
+          navKey: 'config.staff',
+          label: 'Staff',
+          to: '/utilities/staff',
+        },
+      ],
+    },
+    {
       kind: 'branch',
       navKey: 'config.workers',
       label: 'Workers',
@@ -59,42 +82,31 @@ export function buildConfigSidebarSubtree(): TreeNavNode[] {
       ],
     },
     {
+      // Integrations — external-system plumbing (Sweed session pool +
+      // auth log).
+      //
+      // The former Config → LitAlerts → Brands pointer was removed in the
+      // redesign: it duplicated the canonical Brand mapping entry under
+      // Catalog & Inventory (route /catalog/brand-mapping is unchanged),
+      // and a route appearing in two nav locations makes active-state
+      // highlighting ambiguous.
       kind: 'branch',
-      navKey: 'config.litalerts',
-      label: 'LitAlerts',
-      to: buildHeliosModulePath('catalog', 'brand-mapping'),
+      navKey: 'config.integrations',
+      label: 'Integrations',
       children: [
         {
-          // Brand-mapping page is physically routed under /catalog/brand-mapping
-          // because the data lives in `catalog_litalerts_brand_overrides` and
-          // the page was originally introduced under Catalog. We expose it
-          // here too so operators discover it where they expect (Config →
-          // LitAlerts → Brands), matching the place where other LitAlerts
-          // settings live.
           kind: 'leaf',
-          navKey: 'config.litalerts.brands',
-          label: 'Brands',
-          to: buildHeliosModulePath('catalog', 'brand-mapping'),
+          navKey: 'config.sweed-sessions',
+          label: 'Sweed session pool',
+          to: buildHeliosModulePath('config', 'sweed/sessions'),
+        },
+        {
+          kind: 'leaf',
+          navKey: 'config.sweed-auth-log',
+          label: 'Sweed auth log',
+          to: buildHeliosModulePath('config', 'sweed-auth-log'),
         },
       ],
-    },
-    {
-      kind: 'leaf',
-      navKey: 'config.users',
-      label: 'Users',
-      to: buildHeliosModulePath('config', 'users'),
-    },
-    {
-      kind: 'leaf',
-      navKey: 'config.sweed-sessions',
-      label: 'Sweed session pool',
-      to: buildHeliosModulePath('config', 'sweed/sessions'),
-    },
-    {
-      kind: 'leaf',
-      navKey: 'config.sweed-auth-log',
-      label: 'Sweed auth log',
-      to: buildHeliosModulePath('config', 'sweed-auth-log'),
     },
   ]
 }

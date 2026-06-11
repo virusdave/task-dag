@@ -3,7 +3,6 @@ import { Outlet, useLoaderData, useLocation, useNavigate, useRouteLoaderData } f
 
 import {
   buildHeliosModulePath,
-  getHeliosModuleDefinition,
   type HeliosModuleCode,
   type MetricGrantKey,
   type SessionEnvelope,
@@ -18,16 +17,17 @@ import { REVIEWS_SIDEBAR_SUBTREE } from '../routes/customerReviews/customerRevie
 import { SCHEDULING_SIDEBAR_SUBTREE } from '../routes/scheduling/schedulingSidebar.js'
 import { SCREENS_SIDEBAR_SUBTREE } from '../routes/screens/screensSidebar.js'
 import { TASKS_SIDEBAR_SUBTREE } from '../routes/tasks/tasksSidebar.js'
-import { UTILITIES_SIDEBAR_SUBTREE } from '../routes/utilities/utilitiesSidebar.js'
 import { Pill } from './Pill.js'
 import { SidebarNavProvider, useSidebarNav } from './SidebarNavContext.js'
 import { TreeNav, type TreeNavNode } from './TreeNav.js'
 
 const SIDEBAR_COLLAPSED_STORAGE_KEY = 'helios.sidebar.collapsed'
-// Bumped to .v3 when primary sidebar branches started collapsed by default
-// except for branches needed to reveal the current page, so existing
-// operators do not keep stale open state from the old default.
-const SIDEBAR_TREE_STORAGE_KEY = 'helios.sidebar.tree.v3'
+// Bumped to .v4 for the 7-category nav redesign (virusdave/top-level#14):
+// the top-level IA changed shape entirely (Operations / Catalog & Inventory
+// / Marketing & Competitors / Customers & Feedback / Reports & Audit /
+// Admin & Config / Trash), so existing operators must not inherit stale
+// expanded/collapsed branch state keyed by the old node navKeys.
+const SIDEBAR_TREE_STORAGE_KEY = 'helios.sidebar.tree.v4'
 const MOBILE_BREAKPOINT_QUERY = '(max-width: 960px)'
 
 function isAnyModalOpen(): boolean {
@@ -59,13 +59,19 @@ function isAnyModalOpen(): boolean {
  * win over the static default.
  *
  * `crm` is intentionally absent: it's marked rolloutStatus='planned' in
- * HELIOS_MODULES and has no real subroutes yet, so it renders as a leaf
- * (see `buildPrimarySidebarNodes` below) instead of a branch with no
- * children.
+ * HELIOS_MODULES and has no real subroutes yet. Post-redesign
+ * (virusdave/top-level#14) it is quarantined under the Trash category as
+ * a single leaf (/trash/crm), not rendered as a module branch.
  *
  * `pricing` is intentionally absent: its routes are surfaced under the
  * Catalog branch's Pricing sub-branch (see catalogSidebarSubtree.ts),
  * not as a top-level module.
+ *
+ * `utilities` is intentionally absent: the vague "Utilities" bucket was
+ * dissolved in the redesign — Staff now lives under Admin & Config →
+ * People and Promo Names under Marketing & Competitors. The legacy
+ * `useRegisterSidebarSubtree('utilities', …)` calls on those pages are
+ * harmless no-ops (there is no top-level utilities branch to fill).
  */
 const STATIC_MODULE_SUBTREES: Partial<Record<HeliosModuleCode, TreeNavNode[]>> = {
   communications: buildCommunicationsSidebarSubtree(),
@@ -73,29 +79,39 @@ const STATIC_MODULE_SUBTREES: Partial<Record<HeliosModuleCode, TreeNavNode[]>> =
   screens: SCREENS_SIDEBAR_SUBTREE,
   scheduling: SCHEDULING_SIDEBAR_SUBTREE,
   reviews: REVIEWS_SIDEBAR_SUBTREE,
-  utilities: UTILITIES_SIDEBAR_SUBTREE,
   config: buildConfigSidebarSubtree(),
 }
 
 /**
- * Explicit primary-sidebar IA. We deliberately do NOT derive this from
- * `HELIOS_MODULES` order — that array is domain metadata and can't
- * represent Dashboard / Tasks / Jobs / Audit history, nor the
- * intentional ordering (workflow-first, ops next, meta last).
+ * Explicit primary-sidebar IA — 7 consistent top-level *category*
+ * branches (Helios nav-bar redesign, virusdave/top-level#14). The
+ * authoritative design lives in
+ * virusdave/top-level:docs/epics/helios-nav-bar/EPIC_PLAN.md.
  *
- * Order:
- *   1. Dashboard           — the index page; gives reviewers an at-a-glance home.
- *   2. Ads (communications)— daily ads workflow (Drive ingest, cluster proposals, packet review).
- *   3. Catalog             — primary catalog mirroring + reviewer queue (includes Pricing as sub-branch).
- *   4. Screens             — banner refresh / fallback clone / promo rebind jobs.
- *   5. Scheduling          — employee scheduling runs.
- *   6. Reviews             — customer-sentiment capture (issue #13).
- *   7. Utilities           — cross-cutting one-offs (Staff editorial, etc.).
- *   8. Jobs                — cross-module job queue.
- *   9. Audit history       — cross-module audit timeline.
- *  10. Tasks               — Git-DAG epic / frontier surfaces.
- *  11. Config              — meta settings (worker schedules, users, Sweed auth log).
- *  12. CRM                 — planned; leaf only.
+ * We deliberately do NOT derive this from `HELIOS_MODULES` order — that
+ * array is domain metadata and can't represent the cross-cutting
+ * surfaces (Tasks, Jobs, Audit history, Metrics) nor the workflow-first
+ * ordering. Every top-level entry is now a category *branch* (no mix of
+ * one-off leaves and deep module branches), ordered:
+ *
+ *   1. Operations            — what's running / needs attention now:
+ *                              Tasks, Jobs, Scheduling, Screens.
+ *   2. Catalog & Inventory   — core product / stock / pricing / maintenance.
+ *   3. Marketing & Competitors — Ads (Drive ingest, clusters, competitor
+ *                              price comparison) + Promo Names.
+ *   4. Customers & Feedback  — customer admin (check-ins, origin map) +
+ *                              review submissions.
+ *   5. Reports & Audit       — read-only: Metrics, Audit history.
+ *   6. Admin & Config        — People, Workers, Parsing, Integrations.
+ *   7. Trash                 — quarantine for low-value / placeholder
+ *                              pages (Dashboard, planned CRM).
+ *
+ * Existing per-module subtrees are composed into these groups via
+ * `subtreeFor(code)` so page-supplied dynamic overrides keep working and
+ * no route is re-authored. Each route appears in exactly ONE canonical
+ * place; the legacy URLs that no longer have a nav entry (e.g.
+ * /dashboard, /crm) are handled as router redirects (see router.tsx),
+ * never duplicate nav pointers.
  */
 function buildPrimarySidebarNodes(
   subtreesByModule: Partial<Record<HeliosModuleCode, TreeNavNode[]>>,
@@ -112,46 +128,10 @@ function buildPrimarySidebarNodes(
     return STATIC_MODULE_SUBTREES[code] ?? []
   }
 
-  function moduleBranch(code: HeliosModuleCode): TreeNavNode {
-    const definition = getHeliosModuleDefinition(code)
-    return {
-      kind: 'branch',
-      navKey: `module.${code}`,
-      label: definition.label,
-      to: buildHeliosModulePath(code),
-      // Module branches stay highlighted while the operator is on any
-      // descendant page (e.g. /catalog/groups/42 keeps Catalog active).
-      end: false,
-      defaultOpen: false,
-      children: subtreeFor(code),
-    }
-  }
-
   // Metrics children are filtered by per-user grant. Admins implicitly
   // hold every grant (handled inside userHasMetricGrant). When a
-  // non-admin user has zero grants the entire Metrics branch is
-  // omitted from the IA below.
-  const metricsChildren: TreeNavNode[] = []
-  type MetricsLeaf = { key: MetricGrantKey; navKey: string; label: string; to: string }
-  const metricsLeaves: ReadonlyArray<MetricsLeaf> = [
-    { key: 'explore', navKey: 'operations.metrics.explore', label: 'Explore', to: '/metrics' },
-    { key: 'brands', navKey: 'operations.metrics.brands', label: 'Brands', to: '/metrics/brands' },
-    { key: 'distributors', navKey: 'operations.metrics.distributors', label: 'Distributors', to: '/metrics/distributors' },
-    { key: 'staff', navKey: 'operations.metrics.staff', label: 'Staff', to: '/metrics/staff' },
-    { key: 'reordering', navKey: 'operations.metrics.reordering', label: 'Reordering', to: '/metrics/reordering' },
-  ]
-  for (const leaf of metricsLeaves) {
-    if (userHasMetricGrant(session?.user, leaf.key)) {
-      metricsChildren.push({ kind: 'leaf', navKey: leaf.navKey, label: leaf.label, to: leaf.to })
-    }
-  }
-
-  const out: TreeNavNode[] = []
-
-  // Metrics is the top-most item in the IA when the user has at
-  // least one grant. Sub-leaves jump straight to specific analytics
-  // views without forcing the operator to remember which tab a thing
-  // lives on.
+  // non-admin user has zero grants the Metrics branch is omitted from
+  // Reports & Audit (the category itself still shows Audit history).
   //
   // Sub-routes (each gated independently by MetricGrantKey):
   //   * Explore      → /metrics              (existing dashboard, all tabs)
@@ -159,10 +139,136 @@ function buildPrimarySidebarNodes(
   //   * Distributors → /metrics/distributors (index → per-distributor drill-down)
   //   * Staff        → /metrics/staff        (alias for the budtenders tab)
   //   * Reordering   → /metrics/reordering   (alias for the inventory tab)
+  const metricsChildren: TreeNavNode[] = []
+  type MetricsLeaf = { key: MetricGrantKey; navKey: string; label: string; to: string }
+  const metricsLeaves: ReadonlyArray<MetricsLeaf> = [
+    { key: 'explore', navKey: 'reports.metrics.explore', label: 'Explore', to: '/metrics' },
+    { key: 'brands', navKey: 'reports.metrics.brands', label: 'Brands', to: '/metrics/brands' },
+    { key: 'distributors', navKey: 'reports.metrics.distributors', label: 'Distributors', to: '/metrics/distributors' },
+    { key: 'staff', navKey: 'reports.metrics.staff', label: 'Staff', to: '/metrics/staff' },
+    { key: 'reordering', navKey: 'reports.metrics.reordering', label: 'Reordering', to: '/metrics/reordering' },
+  ]
+  for (const leaf of metricsLeaves) {
+    if (userHasMetricGrant(session?.user, leaf.key)) {
+      metricsChildren.push({ kind: 'leaf', navKey: leaf.navKey, label: leaf.label, to: leaf.to })
+    }
+  }
+
+  // ---- 1. Operations ----
+  const operations: TreeNavNode = {
+    kind: 'branch',
+    navKey: 'ops',
+    label: 'Operations',
+    to: '/tasks/frontier',
+    end: false,
+    defaultOpen: false,
+    children: [
+      {
+        kind: 'branch',
+        navKey: 'ops.tasks',
+        label: 'Tasks',
+        to: '/tasks',
+        end: false,
+        defaultOpen: false,
+        children: TASKS_SIDEBAR_SUBTREE,
+      },
+      { kind: 'leaf', navKey: 'ops.jobs', label: 'Jobs', to: '/jobs', end: false },
+      {
+        kind: 'branch',
+        navKey: 'ops.scheduling',
+        label: 'Scheduling',
+        to: buildHeliosModulePath('scheduling'),
+        end: false,
+        defaultOpen: false,
+        children: subtreeFor('scheduling'),
+      },
+      {
+        kind: 'branch',
+        navKey: 'ops.screens',
+        label: 'Screens',
+        to: buildHeliosModulePath('screens'),
+        end: false,
+        defaultOpen: false,
+        children: subtreeFor('screens'),
+      },
+    ],
+  }
+
+  // ---- 2. Catalog & Inventory ----
+  const catalogInventory: TreeNavNode = {
+    kind: 'branch',
+    navKey: 'catalog-inventory',
+    label: 'Catalog & Inventory',
+    to: buildHeliosModulePath('catalog', 'browser'),
+    end: false,
+    defaultOpen: false,
+    children: subtreeFor('catalog'),
+  }
+
+  // ---- 3. Marketing & Competitors ----
+  const marketing: TreeNavNode = {
+    kind: 'branch',
+    navKey: 'marketing',
+    label: 'Marketing & Competitors',
+    to: '/communications/drive-ingest',
+    end: false,
+    defaultOpen: false,
+    children: [
+      ...subtreeFor('communications'),
+      {
+        // Promo Names moved out of the dissolved Utilities bucket — it's
+        // a marketing-copy workflow. Route /utilities/promo-names is
+        // unchanged.
+        kind: 'leaf',
+        navKey: 'marketing.promo-names',
+        label: 'Promo Names',
+        to: '/utilities/promo-names',
+      },
+    ],
+  }
+
+  // ---- 4. Customers & Feedback ----
+  // C1 Check-ins → /admin/customers/check-ins (alias of the ingestion
+  // epic's /admin/visitors/scans; both URLs remain valid). C4 Map →
+  // /admin/customers/map. Review submissions live here too.
+  const customers: TreeNavNode = {
+    kind: 'branch',
+    navKey: 'customers',
+    label: 'Customers & Feedback',
+    to: '/admin/customers/check-ins',
+    end: false,
+    defaultOpen: false,
+    children: [
+      {
+        kind: 'leaf',
+        navKey: 'customers.checkins',
+        label: 'Check-ins',
+        to: '/admin/customers/check-ins',
+      },
+      {
+        kind: 'leaf',
+        navKey: 'customers.map',
+        label: 'Origin Map',
+        to: '/admin/customers/map',
+      },
+      {
+        kind: 'branch',
+        navKey: 'customers.reviews',
+        label: 'Reviews',
+        to: '/reviews',
+        end: false,
+        defaultOpen: false,
+        children: subtreeFor('reviews'),
+      },
+    ],
+  }
+
+  // ---- 5. Reports & Audit ----
+  const reportsChildren: TreeNavNode[] = []
   if (metricsChildren.length > 0) {
-    out.push({
+    reportsChildren.push({
       kind: 'branch',
-      navKey: 'operations.metrics',
+      navKey: 'reports.metrics',
       label: 'Metrics',
       to: metricsChildren[0]!.to,
       end: false,
@@ -170,72 +276,62 @@ function buildPrimarySidebarNodes(
       children: metricsChildren,
     })
   }
-  out.push({
+  reportsChildren.push({
     kind: 'leaf',
-    navKey: 'dashboard',
-    label: 'Dashboard',
-    to: '/dashboard',
+    navKey: 'reports.history',
+    label: 'Audit history',
+    to: '/history',
+    end: false,
   })
-  return out.concat([
-    moduleBranch('communications'),
-    moduleBranch('catalog'),
-    moduleBranch('screens'),
-    moduleBranch('scheduling'),
-    moduleBranch('reviews'),
-    moduleBranch('utilities'),
-    { kind: 'leaf', navKey: 'operations.jobs', label: 'Jobs', to: '/jobs', end: false },
-    { kind: 'leaf', navKey: 'operations.history', label: 'Audit history', to: '/history', end: false },
-    {
-      kind: 'branch',
-      navKey: 'tasks',
-      label: 'Tasks',
-      to: '/tasks',
-      end: false,
-      defaultOpen: false,
-      children: TASKS_SIDEBAR_SUBTREE,
-    },
-    moduleBranch('config'),
-    // Customers branch — collapsed by default. TreeNav auto-expands
-    // the ancestor chain to whatever leaf the operator is on, so
-    // visiting any /admin/customers/* page opens this branch
-    // automatically without leaving every other branch flapping
-    // open.
-    //
-    // FreshlyBakedNYC/automation#33 (Customers UX epic):
-    //   - C1 Check-ins  → /admin/customers/check-ins (alias of the
-    //                     ingestion epic's /admin/visitors/scans;
-    //                     both URLs remain valid).
-    //   - C4 Map        → /admin/customers/map.
-    //   - CRM / Segments stay on the existing module URL until the
-    //     C3 IA-relocation slice lands.
-    {
-      kind: 'branch',
-      navKey: 'customers',
-      label: 'Customers',
-      defaultOpen: false,
-      end: false,
-      children: [
-        {
-          kind: 'leaf',
-          navKey: 'admin.customers.checkins',
-          label: 'Check-ins',
-          to: '/admin/customers/check-ins',
-        },
-        {
-          kind: 'leaf',
-          navKey: 'admin.customers.map',
-          label: 'Origin Map',
-          to: '/admin/customers/map',
-        },
-        {
-          kind: 'leaf',
-          navKey: 'module.crm',
-          label: 'CRM & Segments',
-          to: buildHeliosModulePath('crm'),
-        },
-      ],
-    },
-  ])
+  const reports: TreeNavNode = {
+    kind: 'branch',
+    navKey: 'reports',
+    label: 'Reports & Audit',
+    to: '/metrics',
+    end: false,
+    defaultOpen: false,
+    children: reportsChildren,
+  }
+
+  // ---- 6. Admin & Config ----
+  const adminConfig: TreeNavNode = {
+    kind: 'branch',
+    navKey: 'admin-config',
+    label: 'Admin & Config',
+    to: buildHeliosModulePath('config'),
+    end: false,
+    defaultOpen: false,
+    children: subtreeFor('config'),
+  }
+
+  // ---- 7. Trash ----
+  // Quarantine for low-value / placeholder pages (reversible — the
+  // operator can change their mind). /dashboard and /crm redirect here
+  // (see router.tsx).
+  const trash: TreeNavNode = {
+    kind: 'branch',
+    navKey: 'trash',
+    label: 'Trash',
+    to: '/trash/dashboard',
+    end: false,
+    defaultOpen: false,
+    children: [
+      {
+        kind: 'leaf',
+        navKey: 'trash.dashboard',
+        label: 'Dashboard',
+        to: '/trash/dashboard',
+      },
+      {
+        kind: 'leaf',
+        navKey: 'trash.crm',
+        label: 'CRM & Segments',
+        to: '/trash/crm',
+      },
+    ],
+  }
+
+  return [operations, catalogInventory, marketing, customers, reports, adminConfig, trash]
 }
 
 function PrimarySidebar() {

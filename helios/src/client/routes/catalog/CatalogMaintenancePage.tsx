@@ -471,9 +471,16 @@ function FatalBanner({ banner, busy, onRepair }: FatalBannerProps) {
           ))}
         </ul>
         {banner.canRepair ? (
-          <button type="button" className="primary-button" onClick={onRepair} disabled={busy}>
-            {busy ? 'Enqueuing fix-cache jobs…' : '🛠 Fix cache (enqueue high-priority workers)'}
-          </button>
+          <>
+            <button type="button" className="primary-button" onClick={onRepair} disabled={busy}>
+              {busy ? 'Enqueuing repair jobs…' : '🛠 Repair image/barcode cache'}
+            </button>
+            <p className="subtle-copy" style={{ margin: '0.5rem 0 0' }}>
+              Rebuilds the METRC image/barcode cache; this also queues a stock
+              refresh as part of the repair. Need only inventory counts?{' '}
+              <Link to="/catalog/inventory/stock-refresh">→ Stock refresh</Link>
+            </p>
+          </>
         ) : null}
       </div>
     </div>
