@@ -72,7 +72,7 @@ export const REAL_METRICS: ReadonlyArray<MetricDef> = [
     defaultAggregation: 'week',
     supportedAggregations: [...SUPPORTED],
     query: queryGrossSalesDollars,
-    supports: { partialBuckets: true },
+    supports: { partialBuckets: true, ghostRiders: true },
   },
   {
     id: 'essentials.gross_receipts',
@@ -84,7 +84,7 @@ export const REAL_METRICS: ReadonlyArray<MetricDef> = [
     defaultAggregation: 'week',
     supportedAggregations: [...SUPPORTED],
     query: queryGrossReceiptsDollars,
-    supports: { partialBuckets: true },
+    supports: { partialBuckets: true, ghostRiders: true },
   },
   {
     id: 'essentials.net_sales',
@@ -96,7 +96,7 @@ export const REAL_METRICS: ReadonlyArray<MetricDef> = [
     defaultAggregation: 'week',
     supportedAggregations: [...SUPPORTED],
     query: queryNetSalesDollars,
-    supports: { partialBuckets: true },
+    supports: { partialBuckets: true, ghostRiders: true },
   },
   {
     id: 'essentials.net_receipts',
@@ -108,7 +108,7 @@ export const REAL_METRICS: ReadonlyArray<MetricDef> = [
     defaultAggregation: 'week',
     supportedAggregations: [...SUPPORTED],
     query: queryNetReceiptsDollars,
-    supports: { partialBuckets: true },
+    supports: { partialBuckets: true, ghostRiders: true },
   },
   {
     id: 'acquisition.first_vs_returning',
@@ -123,7 +123,7 @@ export const REAL_METRICS: ReadonlyArray<MetricDef> = [
     defaultAggregation: 'week',
     supportedAggregations: [...SUPPORTED],
     query: queryFirstVsReturning,
-    supports: { partialBuckets: true },
+    supports: { partialBuckets: true, ghostRiders: true },
   },
   {
     id: 'basket.size_by_fulfillment',
@@ -174,6 +174,7 @@ export const REAL_METRICS: ReadonlyArray<MetricDef> = [
     defaultAggregation: 'week',
     supportedAggregations: [...SUPPORTED],
     query: queryFulfillmentOrderCount,
+    supports: { ghostRiders: true },
   },
   {
     id: 'fulfillment.sales_dollars',
@@ -192,6 +193,7 @@ export const REAL_METRICS: ReadonlyArray<MetricDef> = [
     defaultAggregation: 'week',
     supportedAggregations: [...SUPPORTED],
     query: queryFulfillmentSalesDollars,
+    supports: { ghostRiders: true },
   },
   {
     id: 'payment.order_count',
@@ -209,6 +211,7 @@ export const REAL_METRICS: ReadonlyArray<MetricDef> = [
     defaultAggregation: 'week',
     supportedAggregations: [...SUPPORTED],
     query: queryPaymentOrderCount,
+    supports: { ghostRiders: true },
   },
   {
     id: 'payment.sales_dollars',
@@ -226,6 +229,7 @@ export const REAL_METRICS: ReadonlyArray<MetricDef> = [
     defaultAggregation: 'week',
     supportedAggregations: [...SUPPORTED],
     query: queryPaymentSalesDollars,
+    supports: { ghostRiders: true },
   },
   {
     id: 'category.sales_stack_dollars',
@@ -246,6 +250,7 @@ export const REAL_METRICS: ReadonlyArray<MetricDef> = [
     supportedAggregations: [...SUPPORTED],
     query: queryCategorySalesStackDollars,
     supportedCatalogFilters: ALL_CATALOG_FILTERS,
+    supports: { ghostRiders: true },
   },
   {
     id: 'category.sales_stack_fraction',
@@ -283,7 +288,7 @@ export const REAL_METRICS: ReadonlyArray<MetricDef> = [
     // rightmost in-progress bucket should be pace-extrapolated like
     // the Essentials $ charts. Safe because the query is a pure
     // function of its window and COGS lookup is window-independent.
-    supports: { partialBuckets: true },
+    supports: { partialBuckets: true, ghostRiders: true },
   },
   {
     id: 'margins.effective_gm_pct',
@@ -317,7 +322,7 @@ export const REAL_METRICS: ReadonlyArray<MetricDef> = [
     // window, so sub-window completion/pace queries stay correct —
     // exactly the property that lets acquisition.first_vs_returning
     // opt in too.
-    supports: { partialBuckets: true },
+    supports: { partialBuckets: true, ghostRiders: true },
   },
   {
     id: 'margins.stack_new_vs_returning_region',
@@ -340,7 +345,7 @@ export const REAL_METRICS: ReadonlyArray<MetricDef> = [
     // independently of the query window (region = current resolved
     // address, not as-of), so the partial-bucket sub-window
     // completion/pace queries stay correct.
-    supports: { partialBuckets: true },
+    supports: { partialBuckets: true, ghostRiders: true },
   },
   {
     id: 'category.margin_dollars_stack',
@@ -361,6 +366,7 @@ export const REAL_METRICS: ReadonlyArray<MetricDef> = [
     supportedAggregations: [...SUPPORTED],
     query: queryCategoryMarginStack,
     supportedCatalogFilters: ALL_CATALOG_FILTERS,
+    supports: { ghostRiders: true },
   },
   {
     id: 'fulfillment.margin_dollars',
@@ -380,6 +386,7 @@ export const REAL_METRICS: ReadonlyArray<MetricDef> = [
     supportedAggregations: [...SUPPORTED],
     query: queryFulfillmentMarginDollars,
     supportedCatalogFilters: ALL_CATALOG_FILTERS,
+    supports: { ghostRiders: true },
   },
   {
     id: 'fulfillment.effective_gm_pct',
@@ -536,6 +543,7 @@ export const REAL_METRICS: ReadonlyArray<MetricDef> = [
     defaultAggregation: 'week',
     supportedAggregations: [...SUPPORTED],
     query: queryCustomerOriginMap,
+    supports: { ghostRiders: true },
   },
   {
     id: 'delivery.order_count_by_zone',
@@ -555,6 +563,7 @@ export const REAL_METRICS: ReadonlyArray<MetricDef> = [
     defaultAggregation: 'week',
     supportedAggregations: [...SUPPORTED],
     query: queryDeliveryOrderCountByZone,
+    supports: { ghostRiders: true },
   },
 ]
 

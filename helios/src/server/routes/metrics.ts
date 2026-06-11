@@ -13,6 +13,11 @@ import {
 import { metricGrantForGroup } from '../../shared/domain/metricGrants.js'
 import { requireMetricsGrant } from '../auth/requireSession.js'
 import { loadEssentialsDailySummary } from '../db/queries/essentialsDailySummary.js'
+import {
+  buildGhostResponse,
+  inferDefaultGhostPeriod,
+  resolveGhostConfig,
+} from '../metrics/ghostRiders.js'
 import { queryWithPartialBuckets } from '../metrics/partialBuckets.js'
 import { getMetricById, listMetricSummaries } from '../metrics/registry.js'
 import { advanceBucketStart } from '../metrics/timeBuckets.js'
@@ -214,6 +219,68 @@ export async function registerMetricsRoutes(server: FastifyInstance): Promise<vo
       sizes,
       selection,
     }
+
+    // Ghost Riders overlay. When requested, ignore the page agg and
+    // instead run the metric query once at a FINE aggregation (hour
+    // for a day period, date for a week period) over a window covering
+    // the current + prior N periods, then reshape the rows into
+    // phase-aligned cumulative trajectories. Only additive metrics
+    // (declaring supports.ghostRiders) are eligible — a running sum of
+    // a ratio/average is meaningless.
+    if (queryArgs.overlay === 'ghost') {
+      if (metric.supports?.ghostRiders !== true) {
+        return reply.status(400).send({
+          error:
+            `Metric ${JSON.stringify(metric.id)} does not support the Ghost Riders overlay ` +
+            `(values are not additive). `,
+        })
+      }
+      const period = queryArgs.ghostPeriod ?? inferDefaultGhostPeriod(agg)
+      const lookback = queryArgs.ghostLookback ?? 4
+      const config = resolveGhostConfig({ period, lookback, to })
+      if (!metric.supportedAggregations.includes(config.bucketAgg)) {
+        return reply.status(400).send({
+          error:
+            `Metric ${JSON.stringify(metric.id)} cannot run Ghost Riders period ${JSON.stringify(period)}; ` +
+            `it requires the ${JSON.stringify(config.bucketAgg)} aggregation. ` +
+            `Supported: ${metric.supportedAggregations.join(', ')}.`,
+        })
+      }
+      const rawRows = await metric.query({
+        sites: queryArgs.sites,
+        from: config.fetchFrom,
+        to: config.fetchTo,
+        agg: config.bucketAgg,
+        categoryIds,
+        subcategoryIds,
+        brandIds,
+        sizes,
+        selection,
+      })
+      const built = buildGhostResponse({
+        seriesIds: metric.series.map((s) => s.id),
+        config,
+        rawRows,
+      })
+      return reply.send(
+        MetricQueryResponseSchema.parse({
+          metric: toMetricSummary(metric),
+          resolved: {
+            sites: queryArgs.sites,
+            from: config.fetchFrom.toISOString(),
+            to: config.fetchTo.toISOString(),
+            agg: config.bucketAgg,
+            categoryIds,
+            subcategoryIds,
+            brandIds,
+            sizes,
+          },
+          data: built.data,
+          ghost: built.ghost,
+        }),
+      )
+    }
+
     // Opt-in: metrics that declare `supports.partialBuckets` get the
     // shared edge-aware wrapper which widens the SQL window to the
     // natural bucket boundaries, marks the edge rows partial, and

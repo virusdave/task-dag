@@ -149,6 +149,9 @@ export function toMetricSummary(metric: MetricDef): MetricDefSummary {
           ...(metric.supports.drillSelection !== undefined
             ? { drillSelection: [...metric.supports.drillSelection] }
             : {}),
+          ...(metric.supports.ghostRiders !== undefined
+            ? { ghostRiders: metric.supports.ghostRiders }
+            : {}),
           ...(metric.supports.partialBuckets !== undefined
             ? { partialBuckets: metric.supports.partialBuckets }
             : {}),

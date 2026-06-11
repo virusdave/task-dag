@@ -178,6 +178,29 @@ export type MetricPartialSide = z.infer<typeof MetricPartialSideSchema>
 export const MetricPartialKindSchema = z.enum(['truncated', 'extrapolated'])
 export type MetricPartialKind = z.infer<typeof MetricPartialKindSchema>
 
+/**
+ * Ghost Riders overlay — the "period" whose intra-period cumulative
+ * trajectory is overlaid against the same-phase trajectory of the
+ * prior N periods (Mario-Kart-ghost style). Determines both the
+ * phase x-axis and the fine bucket aggregation used to build the
+ * running sum:
+ *
+ *   - `day`  → bucket at `hour`, phase = hour-of-business-day (0..23
+ *              where 0 = the 08:00 ET business-day open).
+ *   - `week` → bucket at `date`, phase = day-of-business-week (0..6
+ *              where 0 = Monday's business day).
+ */
+export const MetricGhostPeriodSchema = z.enum(['day', 'week'])
+export type MetricGhostPeriod = z.infer<typeof MetricGhostPeriodSchema>
+
+/**
+ * Chart overlay mode requested by the client. Today the only overlay
+ * is `ghost` (Ghost Riders). Absent ⇒ the normal single-timeline
+ * line chart.
+ */
+export const MetricOverlaySchema = z.enum(['ghost'])
+export type MetricOverlay = z.infer<typeof MetricOverlaySchema>
+
 export const MetricSupportsSchema = z
   .object({
     /**
@@ -187,6 +210,16 @@ export const MetricSupportsSchema = z
      * yet, so no behavioural change).
      */
     drillSelection: z.array(MetricDrillSelectionKindSchema).optional(),
+    /**
+     * Opt-in: the metric's per-bucket series values are ADDITIVE
+     * (sums / counts) and therefore safe to convert into a cumulative
+     * within-period trajectory for the Ghost Riders overlay. NOT safe
+     * for ratios, averages, percent stacks, scatter, or snapshot/as-of
+     * metrics (a running sum of GM% or basket-size is meaningless), so
+     * those must NOT declare it. The route rejects `overlay=ghost` for
+     * any metric that doesn't set this flag.
+     */
+    ghostRiders: z.boolean().optional(),
     /**
      * Opt-in: the metric's query is safe to wrap in the partial-bucket
      * helper that widens the SQL window to the natural bucket
@@ -309,6 +342,20 @@ export const MetricQueryRequestSchema = z.object({
    * Empty / unset = no selection (the default — every existing
    * caller stays on the unfiltered code path).
    */
+  /**
+   * Ghost Riders overlay request. When `overlay=ghost` the route
+   * ignores `from`/`agg` and instead derives a fine bucket
+   * aggregation + a lookback window from `ghostPeriod`/`ghostLookback`,
+   * runs the metric query once, and reshapes the result into
+   * phase-aligned cumulative period series (see the `ghost` field on
+   * the response). Only valid for metrics declaring
+   * `supports.ghostRiders`.
+   */
+  overlay: MetricOverlaySchema.optional(),
+  /** Ghost Riders period. Defaults server-side (hour-agg ⇒ day, else week). */
+  ghostPeriod: MetricGhostPeriodSchema.optional(),
+  /** Number of PRIOR periods (ghosts) to draw behind the current one. 1..12. */
+  ghostLookback: z.coerce.number().int().min(1).max(12).optional(),
   selection: z
     .string()
     .optional()
@@ -471,6 +518,62 @@ export const MetricDatumSchema = z
   .catchall(z.union([z.number(), z.string(), z.null()]))
 export type MetricDatum = z.infer<typeof MetricDatumSchema>
 
+/**
+ * Ghost Riders response metadata. Present only when the request set
+ * `overlay=ghost`. The `data` array carries one row per phase index
+ * (0..phaseCount-1) with generated cumulative keys (one per base
+ * series × period age, named `<baseSeriesId>__ghost_<age>`); this
+ * metadata tells the renderer how to interpret those keys (which age
+ * each belongs to, the period labels, the current period, the phase
+ * unit) without brittle key parsing.
+ */
+export const MetricGhostPeriodInfoSchema = z.object({
+  /** 0 = current (in-progress) period, 1 = previous, 2 = two ago, … */
+  age: z.number().int().min(0),
+  /** ISO start instant of the period (business-day boundary). */
+  start: z.string(),
+  /** ISO end instant of the period (exclusive). */
+  end: z.string(),
+  /** Human label, e.g. "This week", "1 week ago", "Mon Jun 8". */
+  label: z.string().min(1),
+  /** True for the single in-progress current period (age 0). */
+  isCurrent: z.boolean(),
+})
+export type MetricGhostPeriodInfo = z.infer<typeof MetricGhostPeriodInfoSchema>
+
+export const MetricGhostSeriesInfoSchema = z.object({
+  /** Generated datum key, e.g. `gross_sales__ghost_2`. */
+  key: z.string().min(1),
+  /** The original metric series id this ghost line derives from. */
+  baseSeriesId: z.string().min(1),
+  /** Which period age this line represents (0 = current). */
+  periodAge: z.number().int().min(0),
+})
+export type MetricGhostSeriesInfo = z.infer<typeof MetricGhostSeriesInfoSchema>
+
+export const MetricGhostResponseSchema = z.object({
+  period: MetricGhostPeriodSchema,
+  /** Fine aggregation the running sum was built from (`hour` | `date`). */
+  bucketAgg: MetricAggregationSchema,
+  /** Number of prior periods (ghosts) drawn behind the current period. */
+  lookback: z.number().int().min(1),
+  /** ISO anchor instant used to choose the current period (clamped to now). */
+  anchor: z.string(),
+  /** Phase axis unit. */
+  phaseUnit: z.enum(['hour', 'day']),
+  /** Number of phase steps in a full period (24 for day, 7 for week). */
+  phaseCount: z.number().int().min(1),
+  /** Human label for each phase index (e.g. ["Mon",…"Sun"] or ["8a",…]). */
+  phaseLabels: z.array(z.string()),
+  /** The current phase index reached so far (current period's progress). */
+  currentPhaseIndex: z.number().int().min(0),
+  /** Period descriptors, age 0 (current) → age lookback (oldest). */
+  periods: z.array(MetricGhostPeriodInfoSchema),
+  /** Generated-series descriptors mapping datum keys → base series + age. */
+  series: z.array(MetricGhostSeriesInfoSchema),
+})
+export type MetricGhostResponse = z.infer<typeof MetricGhostResponseSchema>
+
 export const MetricQueryResponseSchema = z.object({
   metric: MetricDefSummarySchema,
   // Echo of the resolved query (after defaulting to the metric's
@@ -490,6 +593,12 @@ export const MetricQueryResponseSchema = z.object({
     sizes: z.array(z.string()).default([]),
   }),
   data: z.array(MetricDatumSchema),
+  /**
+   * Ghost Riders overlay metadata. Present only when the request set
+   * `overlay=ghost`; absent for normal line / scatter responses (which
+   * the renderer treats as before).
+   */
+  ghost: MetricGhostResponseSchema.optional(),
 })
 export type MetricQueryResponse = z.infer<typeof MetricQueryResponseSchema>
 

@@ -273,6 +273,17 @@ function floorTo(d: Date, agg: MetricAggregation): Date {
 }
 
 /**
+ * Public wrapper around the private `floorTo`: round an instant DOWN
+ * to the nearest natural bucket-start boundary at the given grain
+ * (UTC top-of-hour for `hour`; NY business-day boundary for the
+ * calendar grains). Used by the Ghost Riders transformer to find the
+ * period (day / week) that contains an anchor instant.
+ */
+export function floorToBucketStart(d: Date, agg: MetricAggregation): Date {
+  return floorTo(d, agg)
+}
+
+/**
  * Mirror of `advanceBucketStart` going the other direction — the
  * bucket-start that comes immediately BEFORE `d` at the given grain.
  * Same NY-local wall-clock arithmetic for calendar grains; +/- 1

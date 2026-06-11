@@ -4231,6 +4231,65 @@ a.tree-nav-branch-label.is-link,
   border-color: rgba(155, 74, 34, 0.5);
 }
 
+/* ---- Ghost Riders overlay ---- */
+.ghost-riders-readout {
+  margin-top: 0.35rem;
+  padding: 0.4rem 0.55rem;
+  border: 1px solid var(--control-border);
+  border-radius: 6px;
+  background: var(--surface-raised, #fff);
+  font-size: 0.8rem;
+}
+
+.ghost-riders-readout-head {
+  font-weight: 600;
+  margin-bottom: 0.25rem;
+}
+
+.ghost-riders-readout-series + .ghost-riders-readout-series {
+  margin-top: 0.3rem;
+}
+
+.ghost-riders-readout-serieslabel {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-weight: 600;
+  margin-bottom: 0.15rem;
+}
+
+.ghost-riders-readout-row {
+  display: grid;
+  grid-template-columns: 10px 1fr auto;
+  align-items: center;
+  gap: 0.4rem;
+  line-height: 1.5;
+}
+
+.ghost-riders-readout-agedot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.ghost-riders-readout-label {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ghost-riders-readout-value {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  text-align: right;
+}
+
+.ghost-riders-period-note {
+  margin-top: 0.3rem;
+  font-size: 0.75rem;
+}
+
 .metric-chart-svg-wrap {
   position: relative;
 }

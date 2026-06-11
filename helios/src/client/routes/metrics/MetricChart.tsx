@@ -15,12 +15,14 @@ import {
   type MetricAnnotationRecord,
   type MetricDatum,
   type MetricDefSummary,
+  type MetricGhostPeriod,
   type MetricQueryResponse,
 } from '../../../shared/contracts/index.js'
 import { loadJson, mutateJson } from '../../app/fetchJson.js'
 import { nyLongDateTime, nyParts, nyShortDateTime } from '../../app/nyTime.js'
 
 import type { CatalogFilterSelection } from './CatalogFilterBar.js'
+import { GhostRidersSvg } from './GhostRidersSvg.js'
 import { useTimeAxis, type TimeWindow } from './TimeAxisContext.js'
 import {
   bucketXTicks,
@@ -368,6 +370,20 @@ export function MetricChart({
   const [yBaselineOverride, setYBaselineOverride] = useState<YAxisBaselineChoice>('page')
   const yBaseline: YAxisBaseline = resolveYAxisBaseline(yBaselineOverride, yBaselineDefault)
 
+  // Ghost Riders overlay — only offered for additive line metrics that
+  // declare supports.ghostRiders. When active, the chart renders the
+  // current period's cumulative trajectory overlaid against the prior
+  // N periods (aligned on phase-within-period) instead of the normal
+  // single timeline.
+  const ghostEligible =
+    metric.chartType !== 'scatter' && metric.supports?.ghostRiders === true
+  const [overlayMode, setOverlayMode] = useState<'off' | 'ghost'>('off')
+  const ghostActive = ghostEligible && overlayMode === 'ghost'
+  const [ghostPeriod, setGhostPeriod] = useState<MetricGhostPeriod>(() =>
+    effectiveAgg === 'hour' ? 'day' : 'week',
+  )
+  const [ghostLookback, setGhostLookback] = useState<number>(4)
+
   const [response, setResponse] = useState<MetricQueryResponse | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -421,9 +437,18 @@ export function MetricChart({
     const controller = new AbortController()
     const params = new URLSearchParams()
     if (sitesParam) params.set('sites', sitesParam)
-    params.set('from', new Date(window.fromMs).toISOString())
     params.set('to', new Date(window.toMs).toISOString())
-    params.set('agg', agg)
+    if (ghostActive) {
+      // Ghost mode: the server derives the fine bucket agg + lookback
+      // window from period/lookback; `from`/`agg` are ignored. `to`
+      // (above) is the anchor for the current period.
+      params.set('overlay', 'ghost')
+      params.set('ghostPeriod', ghostPeriod)
+      params.set('ghostLookback', String(ghostLookback))
+    } else {
+      params.set('from', new Date(window.fromMs).toISOString())
+      params.set('agg', agg)
+    }
     if (categoryParam) params.set('categoryIds', categoryParam)
     if (subcategoryParam) params.set('subcategoryIds', subcategoryParam)
     if (brandParam) params.set('brandIds', brandParam)
@@ -458,6 +483,9 @@ export function MetricChart({
     subcategoryParam,
     brandParam,
     sizeParam,
+    ghostActive,
+    ghostPeriod,
+    ghostLookback,
   ])
 
   useEffect(() => {
@@ -572,6 +600,41 @@ export function MetricChart({
                 ))}
               </select>
             ) : null}
+            {ghostEligible ? (
+              <select
+                value={overlayMode}
+                onChange={(e) => setOverlayMode(e.target.value as 'off' | 'ghost')}
+                aria-label={`Overlay mode for ${metric.title}`}
+                title="Ghost Riders: overlay the current period's cumulative trajectory against the prior periods (aligned on phase within the period)."
+              >
+                <option value="off">overlay: off</option>
+                <option value="ghost">overlay: ghosts</option>
+              </select>
+            ) : null}
+            {ghostActive ? (
+              <select
+                value={ghostPeriod}
+                onChange={(e) => setGhostPeriod(e.target.value as MetricGhostPeriod)}
+                aria-label={`Ghost Riders period for ${metric.title}`}
+                title="Period each ghost spans: day (hour-of-day phase) or week (day-of-week phase)."
+              >
+                <option value="day">period: day</option>
+                <option value="week">period: week</option>
+              </select>
+            ) : null}
+            {ghostActive ? (
+              <select
+                value={ghostLookback}
+                onChange={(e) => setGhostLookback(Number(e.target.value))}
+                aria-label={`Ghost Riders lookback for ${metric.title}`}
+                title="How many prior periods (ghosts) to draw behind the current one."
+              >
+                <option value={2}>ghosts: 2</option>
+                <option value={4}>ghosts: 4</option>
+                <option value={6}>ghosts: 6</option>
+                <option value={8}>ghosts: 8</option>
+              </select>
+            ) : null}
             <button
               type="button"
               className={annotateMode ? 'ghost-button is-active' : 'ghost-button'}
@@ -612,6 +675,13 @@ export function MetricChart({
           loading={loading}
           error={error}
           window={window}
+          interactive={variant === 'expanded'}
+        />
+      ) : ghostActive ? (
+        <GhostRidersSvg
+          response={response}
+          loading={loading}
+          error={error}
           interactive={variant === 'expanded'}
         />
       ) : (
