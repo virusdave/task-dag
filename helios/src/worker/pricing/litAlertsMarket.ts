@@ -372,6 +372,9 @@ export const __test__ = {
   classifyLaneTier,
   classifySizeTier,
   inferComparableLaneKey,
+  parseProductSizeProfile,
+  parseListingSizeProfile,
+  resolveSizeConvention,
 }
 
 interface BrandOverrideRow {
@@ -519,7 +522,7 @@ function collectProductEvidence(
         subcategory: liveState.subcategory,
         text: `${liveState.groupFullName} ${product.name} ${product.tab}`,
       }),
-      size: parseProductSizeProfile(product.name, product.tab),
+      size: parseProductSizeProfile(product.name, product.tab, liveState.brand),
     }
     const assessedListings = dedupeListingCandidates(
       listings.filter((listing) => isCategoryCompatible(liveState, listing.category)),
@@ -655,7 +658,7 @@ function flattenBrandProductsToListingCandidates(
         listingName,
         postTaxPrice: roundCurrency(preTaxPrice * PRICING_POST_TAX_MULTIPLIER),
         preTaxPrice: roundCurrency(preTaxPrice),
-        size: parseListingSizeProfile(listingName, configWeight),
+        size: parseListingSizeProfile(listingName, configWeight, product.brand),
         source,
         url,
       })
@@ -1451,25 +1454,99 @@ function inferComparableLaneKey(input: {
   return subcategoryKey || null
 }
 
-function parseProductSizeProfile(productName: string, tab: string): ParsedSizeProfile {
-  return parseSizeProfile(`${productName} ${tab}`)
+/**
+ * A per-brand (vendor) size-labelling convention. Some manufacturers
+ * label a multipack by its package TOTAL weight, others (and the
+ * competitor listings that carry the same SKU) by the per-unit weight.
+ * The bare "N x M<measure>" / "N pk M<measure>" strings are genuinely
+ * ambiguous, so we key the disambiguation off the brand.
+ *
+ * NOTE: this is deliberately a small code-resident map, NOT a parsekit
+ * config. parsekit is keyed per-tenant (distributor/competitor) and is
+ * not wired into the pricing comparator; this convention is a brand
+ * semantic that crosses every tenant that carries the brand. If this
+ * table grows past a handful of brands, or non-engineers need to edit
+ * it without a deploy, promote it to a DB-backed config (see the
+ * "advanced path" notes in the run-85 size-parsing investigation).
+ */
+interface SizeConvention {
+  /**
+   * For the "N x M<measure>" form, treat M as the package TOTAL weight
+   * (so unit = M / N) instead of the per-unit weight. Jeeter's Baby
+   * Jeeter prerolls are labelled e.g. "5x 2.5g" = 5 sticks totalling
+   * 2.5g (0.5g each).
+   */
+  multiplierValueIsTotal: boolean
+  /**
+   * For the "N pk M<measure>" form, treat M as the per-unit weight (so
+   * total = N * M) instead of the package total. The same Jeeter SKU
+   * shows up at competitors as "5pk .5g" = 5 x 0.5g.
+   */
+  packValueIsUnit: boolean
+  /**
+   * Only apply when the parsed measure matches. Guards against mis-
+   * applying gram-preroll semantics to mg edibles — e.g. a generic
+   * "10x 10mg" gummy pack stays 10 units x 10mg = 100mg total.
+   */
+  measure: 'g' | 'mg'
 }
 
-function parseListingSizeProfile(listingName: string, configWeight: string | null): ParsedSizeProfile {
-  return parseSizeProfile([listingName, configWeight].filter((value): value is string => Boolean(value)).join(' '))
+const JEETER_PREROLL_SIZE_CONVENTION: SizeConvention = {
+  multiplierValueIsTotal: true,
+  packValueIsUnit: true,
+  measure: 'g',
 }
 
-function parseSizeProfile(text: string): ParsedSizeProfile {
+/**
+ * Resolve the size-labelling convention for a brand, or null when the
+ * brand uses the default (multiplier value is per-unit, pack value is
+ * the package total).
+ */
+function resolveSizeConvention(brand: string | null | undefined): SizeConvention | null {
+  const brandKey = normalizeBrandKey(brand)
+  if (!brandKey) {
+    return null
+  }
+  // "Jeeter" / "Baby Jeeter" gram preroll multipacks. See
+  // https://helios.freshlybaked.us/pricing/runs/85 — our SKU
+  // "...5x 2.5g" (total 2.5g) was scored against competitor "5pk .5g"
+  // (0.5g/stick) and every comp came out size-mismatched/weak.
+  if (brandKey.split(' ').includes('jeeter')) {
+    return JEETER_PREROLL_SIZE_CONVENTION
+  }
+  return null
+}
+
+function parseProductSizeProfile(productName: string, tab: string, brand?: string | null): ParsedSizeProfile {
+  return parseSizeProfile(`${productName} ${tab}`, resolveSizeConvention(brand))
+}
+
+function parseListingSizeProfile(
+  listingName: string,
+  configWeight: string | null,
+  brand?: string | null,
+): ParsedSizeProfile {
+  return parseSizeProfile(
+    [listingName, configWeight].filter((value): value is string => Boolean(value)).join(' '),
+    resolveSizeConvention(brand),
+  )
+}
+
+function parseSizeProfile(text: string, convention: SizeConvention | null = null): ParsedSizeProfile {
   const normalizedText = normalizeInlineText(text)
-  const explicitMultipack = normalizedText.match(/(\d+)\s*x\s*(\d+(?:\.\d+)?)\s*(mg|g)\b/i)
+  const explicitMultipack = normalizedText.match(/(\d+)\s*x\s*(\d+(?:\.\d+)?|\.\d+)\s*(mg|g)\b/i)
   if (explicitMultipack) {
     const packCount = Number.parseInt(explicitMultipack[1], 10)
-    const unitValue = Number.parseFloat(explicitMultipack[2])
+    const matchedValue = Number.parseFloat(explicitMultipack[2])
     const measure = explicitMultipack[3].toLowerCase() as 'g' | 'mg'
+    const valueIsTotal =
+      convention?.multiplierValueIsTotal === true && convention.measure === measure && packCount > 1
+    const totalValue = valueIsTotal ? matchedValue : packCount * matchedValue
+    const unitValue = valueIsTotal ? totalValue / packCount : matchedValue
     return {
       measure,
       packCount,
-      totalValue: roundCurrency(packCount * unitValue),
+      totalValue: roundCurrency(totalValue),
       unitValue: roundCurrency(unitValue),
     }
   }
@@ -1488,8 +1565,10 @@ function parseSizeProfile(text: string): ParsedSizeProfile {
   }
 
   const sortedValues = [...matchingValues].sort((left, right) => left - right)
-  const totalValue = sortedValues[sortedValues.length - 1]
-  const unitValue = packCount > 1 ? roundCurrency(totalValue / packCount) : totalValue
+  const matchedValue = sortedValues[sortedValues.length - 1]
+  const valueIsUnit = convention?.packValueIsUnit === true && convention.measure === measure && packCount > 1
+  const totalValue = valueIsUnit ? matchedValue * packCount : matchedValue
+  const unitValue = valueIsUnit ? matchedValue : packCount > 1 ? totalValue / packCount : matchedValue
   return {
     measure,
     packCount,
@@ -1499,7 +1578,7 @@ function parseSizeProfile(text: string): ParsedSizeProfile {
 }
 
 function extractSizeValues(text: string): Array<{ measure: 'g' | 'mg'; value: number }> {
-  const matches = Array.from(text.matchAll(/(\d+(?:\.\d+)?)\s*(mg|g|oz|ounce|ounces)\b/gi))
+  const matches = Array.from(text.matchAll(/(\d+(?:\.\d+)?|\.\d+)\s*(mg|g|oz|ounce|ounces)\b/gi))
   return matches
     .map((match) => {
       const rawValue = Number.parseFloat(match[1])

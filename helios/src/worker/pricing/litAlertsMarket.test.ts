@@ -293,6 +293,53 @@ describe('pricing comp match prioritization', () => {
   })
 })
 
+describe('per-brand size-labelling conventions', () => {
+  it('parses the Jeeter "Nx Mg" multipack as a package TOTAL, not per-unit', () => {
+    // Our catalog SKU: "...5x 2.5g" = 5 sticks totalling 2.5g (0.5g each).
+    const ours = __test__.parseProductSizeProfile(
+      'Jeeter Baby Jeeter Infused Acapulco Gold 5x 2.5g',
+      '',
+      'Jeeter',
+    )
+    expect(ours).toEqual({ measure: 'g', packCount: 5, totalValue: 2.5, unitValue: 0.5 })
+  })
+
+  it('parses the Jeeter "Npk Mg" competitor listing as a per-unit size', () => {
+    // Same physical SKU as listed at competitors: "5pk .5g" = 5 x 0.5g.
+    const comp = __test__.parseListingSizeProfile('Acapulco Gold Infused 5pk .5g', '0.5 g', 'Jeeter')
+    expect(comp).toEqual({ measure: 'g', packCount: 5, totalValue: 2.5, unitValue: 0.5 })
+  })
+
+  it('makes the Jeeter SKU and competitor listing score as an exact size match', () => {
+    const ours = __test__.parseProductSizeProfile('Baby Jeeter Acapulco Gold 5x 2.5g', '', 'Jeeter')
+    const comp = __test__.parseListingSizeProfile('Acapulco Gold Infused 5pk .5g', '0.5 g', 'Jeeter')
+    expect(__test__.classifySizeTier(ours, comp)).toBe(3)
+  })
+
+  it('leaves the default multipack semantics untouched for other brands', () => {
+    // Default: "Nx Mg" is per-unit (total = N*M); "Npk Mg" is package total.
+    const defaultMultiplier = __test__.parseProductSizeProfile('Some Edible 10x 10mg', '', 'Acme Gummies')
+    expect(defaultMultiplier).toEqual({ measure: 'mg', packCount: 10, totalValue: 100, unitValue: 10 })
+
+    const defaultPack = __test__.parseListingSizeProfile('Acme Preroll 5pk 3.5g', null, 'Acme')
+    expect(defaultPack).toEqual({ measure: 'g', packCount: 5, totalValue: 3.5, unitValue: 0.7 })
+  })
+
+  it('does not apply the gram preroll convention to Jeeter mg edibles', () => {
+    // measure guard: Jeeter convention is grams-only, so an mg multipack
+    // stays on default semantics (10 units x 10mg = 100mg total).
+    const jeeterEdible = __test__.parseProductSizeProfile('Jeeter Gummies 10x 10mg', '', 'Jeeter')
+    expect(jeeterEdible).toEqual({ measure: 'mg', packCount: 10, totalValue: 100, unitValue: 10 })
+  })
+
+  it('only resolves a convention for known brands', () => {
+    expect(__test__.resolveSizeConvention('Jeeter')).not.toBeNull()
+    expect(__test__.resolveSizeConvention('Baby Jeeter')).not.toBeNull()
+    expect(__test__.resolveSizeConvention('Stiiizy')).toBeNull()
+    expect(__test__.resolveSizeConvention(null)).toBeNull()
+  })
+})
+
 describe('buildPricingMarketContext (partner API integration)', () => {
   it('returns availability=disabled when no partner API token is configured', async () => {
     hasPartnerApiTokenMock.mockReturnValue(false)
