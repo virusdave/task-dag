@@ -672,24 +672,41 @@ async function persistSnapshotAndDiff(input: {
                   when excluded.for_sale_variant_count > 0 then excluded.last_observed_snapshot_id
                   else landingpage_brand_site_presence.last_for_sale_observed_snapshot_id
                 end
-            -- Write-on-change (canon §3 R3). Only the real-state columns
-            -- are read by consumers (the freshlybakedus-site live-menu
-            -- builder reads brand_name, for_sale_variant_count, and the
-            -- last_*_observed_at timestamps — but the timestamps are used
-            -- only as a non-null page-existence gate / max-merge / display,
-            -- never as a recency cutoff). Refreshing last_observed_at /
-            -- last_observed_snapshot_id on every 5-min poll churned all
-            -- ~315 rows every cycle: ~2.16M dead tuples and ~16,668
-            -- autovacuums for nothing. Guard on the read/real-state cols
-            -- so unchanged brands don't write; the first for-sale
-            -- transition still stamps last_for_sale_observed_at (non-null
-            -- gate preserved), and out-of-sale transitions preserve it.
+            -- Write-on-change + daily for-sale heartbeat (canon §3 R3).
+            -- Refreshing last_observed_at / last_observed_snapshot_id on
+            -- every 5-min poll churned all ~315 rows every cycle: ~2.16M
+            -- dead tuples and ~16,668 autovacuums for nothing. Guard on the
+            -- read/real-state cols so unchanged brands don't write.
+            --
+            -- IMPORTANT: last_for_sale_observed_at is NOT pure display. The
+            -- freshlybakedus-site reviewer dashboard computes staleness as
+            --   (now - max(landingpage_brands.last_for_sale_observed_at,
+            --              <this table>.last_for_sale_observed_at)) > 7 days
+            -- (see mostly-static-sites internal-brand-index-page.tsx
+            -- isBrandStale + freshlybakedus-live-menu.ts maxNullableDate).
+            -- So a brand that stays continuously for sale but whose
+            -- for_sale_variant_count / qty / lot_count are byte-identical
+            -- for 7+ days would, under a pure write-on-change guard, freeze
+            -- this timestamp and falsely flag as "stale". The final OR is a
+            -- coalesced heartbeat: while for sale, re-stamp at most once per
+            -- 24h (well inside the 7-day threshold) so steady inventory
+            -- never goes false-stale, without per-poll churn. Compared
+            -- against excluded.last_observed_at (the observation time the
+            -- statement inserts) rather than now() to keep SET/WHERE aligned.
             where landingpage_brand_site_presence.brand_name is distinct from excluded.brand_name
                or landingpage_brand_site_presence.site_key is distinct from excluded.site_key
                or landingpage_brand_site_presence.site_label is distinct from excluded.site_label
                or landingpage_brand_site_presence.for_sale_variant_count is distinct from excluded.for_sale_variant_count
                or landingpage_brand_site_presence.for_sale_total_available_qty is distinct from excluded.for_sale_total_available_qty
                or landingpage_brand_site_presence.for_sale_lot_count is distinct from excluded.for_sale_lot_count
+               or (
+                 excluded.for_sale_variant_count > 0
+                 and (
+                   landingpage_brand_site_presence.last_for_sale_observed_at is null
+                   or landingpage_brand_site_presence.last_for_sale_observed_at
+                      < excluded.last_observed_at - interval '24 hours'
+                 )
+               )
         `,
         [
           site.dealerId,
