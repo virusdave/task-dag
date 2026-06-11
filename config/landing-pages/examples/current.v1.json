@@ -1,0 +1,22 @@
+{
+  "schema": "freshlybaked.lp.current.v1",
+  "environment": "prod",
+  "bundle_id": "lpb_2026-06-10_140312_7f3a91",
+  "manifest_url": "bundles/lpb_2026-06-10_140312_7f3a91/manifest.json",
+  "manifest_sha256": "abc1230000000000000000000000000000000000000000000000000000000000",
+  "version": 4412,
+  "published_at": "2026-06-10T14:03:12Z",
+  "previous_bundle_id": "lpb_2026-06-09_221004_9ac201",
+  "signature": "ed25519:Zm9vYmFyc2lnbmF0dXJlZXhhbXBsZQ==",
+  "disabled_variants": [
+    {
+      "site": "midtown",
+      "purpose": "compare",
+      "slug": "*",
+      "num": 3,
+      "replacement_num": 1,
+      "reason": "roi_guardrail",
+      "effective_at": "2026-06-10T13:50:00Z"
+    }
+  ]
+}

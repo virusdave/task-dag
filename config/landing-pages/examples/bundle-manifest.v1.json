@@ -1,0 +1,17 @@
+{
+  "schema": "freshlybaked.lp.bundle-manifest.v1",
+  "bundle_id": "lpb_2026-06-10_140312_7f3a91",
+  "min_renderer_version": "mss-lp-runtime>=0.4.0",
+  "automation_git_sha": "6c9e1f2",
+  "generated_from": {
+    "cluster_sweep_run_id": 418,
+    "asset_approval_snapshot_id": 902,
+    "policy_version_id": "polv_2026-06-10_01"
+  },
+  "files": {
+    "bundle": { "url": "bundle.json", "sha256": "1111111111111111111111111111111111111111111111111111111111111111" },
+    "policy": { "url": "policy.json", "sha256": "2222222222222222222222222222222222222222222222222222222222222222" },
+    "assets": { "url": "assets.json", "sha256": "3333333333333333333333333333333333333333333333333333333333333333" }
+  },
+  "signature": "ed25519:bWFuaWZlc3RzaWduYXR1cmVleGFtcGxl"
+}

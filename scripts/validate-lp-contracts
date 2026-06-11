@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+# Validate the landing-page engine frozen contracts (P0).
+#
+# Checks, for config/landing-pages/:
+#   1. every schema and example file is valid JSON;
+#   2. every schema compiles as a valid JSON Schema (draft-07);
+#   3. every examples/<name>.v1.json validates against
+#      schemas/<name>.v1.schema.json (with format assertions on).
+#
+# Uses ajv via `npx` (ajv-cli + ajv-formats). Run from anywhere in the
+# repo. Exits non-zero on the first failure.
+#
+# See config/landing-pages/README.md.
+
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+lp_dir="${repo_root}/config/landing-pages"
+schemas_dir="${lp_dir}/schemas"
+examples_dir="${lp_dir}/examples"
+
+if ! command -v jq >/dev/null 2>&1; then
+    echo "ERROR: jq is required" >&2
+    exit 1
+fi
+if ! command -v npx >/dev/null 2>&1; then
+    echo "ERROR: npx (Node.js) is required to run ajv" >&2
+    exit 1
+fi
+
+# One ajv invocation wrapper so the npx package set is declared once.
+ajv() {
+    npx --yes -p ajv-cli@5 -p ajv-formats@2 ajv "$@"
+}
+
+fail=0
+
+echo "==> JSON parse check"
+while IFS= read -r f; do
+    if ! jq -e . "$f" >/dev/null 2>&1; then
+        echo "  INVALID JSON: ${f#"$repo_root"/}" >&2
+        fail=1
+    fi
+done < <(find "$schemas_dir" "$examples_dir" -type f -name '*.json' | sort)
+[ "$fail" -eq 0 ] && echo "  ok"
+
+echo "==> schema compile + example validation"
+for schema in "$schemas_dir"/*.v1.schema.json; do
+    name="$(basename "$schema" .v1.schema.json)"
+    example="${examples_dir}/${name}.v1.json"
+
+    # Compile the schema on its own (catches malformed schemas).
+    if ! ajv compile --strict=false -c ajv-formats -s "$schema" >/dev/null 2>&1; then
+        echo "  SCHEMA INVALID: ${name}" >&2
+        ajv compile --strict=false -c ajv-formats -s "$schema" 2>&1 | sed 's/^/    /' >&2 || true
+        fail=1
+        continue
+    fi
+
+    if [ ! -f "$example" ]; then
+        echo "  MISSING EXAMPLE for ${name} (expected ${example#"$repo_root"/})" >&2
+        fail=1
+        continue
+    fi
+
+    if ajv validate --strict=false -c ajv-formats -s "$schema" -d "$example" >/dev/null 2>&1; then
+        echo "  ok: ${name}"
+    else
+        echo "  EXAMPLE FAILS SCHEMA: ${name}" >&2
+        ajv validate --strict=false -c ajv-formats -s "$schema" -d "$example" 2>&1 | sed 's/^/    /' >&2 || true
+        fail=1
+    fi
+done
+
+if [ "$fail" -ne 0 ]; then
+    echo "FAILED" >&2
+    exit 1
+fi
+echo "All landing-page contracts valid."

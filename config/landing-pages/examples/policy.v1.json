@@ -1,0 +1,32 @@
+{
+  "schema": "freshlybaked.lp.policy.v1",
+  "policy_version_id": "polv_2026-06-10_01",
+  "selection_algorithm_version": "hmac-bucket-weighted-v1",
+  "rules": [
+    {
+      "policy_rule_id": "rule_delivery_near_me",
+      "match": {
+        "site": "freshlybakednyc",
+        "family": "weed-delivery-near-me",
+        "cluster_slug": "delivery-near-me"
+      },
+      "assignment_key": ["site", "family", "cluster_slug", "utm_campaign", "utm_term", "click_or_session_id"],
+      "experiment_id": "exp_delivery_near_me_2026q2",
+      "experiment_salt": "s_7f3a91c2",
+      "exploration_rate_bps": 500,
+      "slots": {
+        "X1": {
+          "exploit": "hero_speed_a",
+          "explore": [{ "variant_id": "hero_speed_b", "weight": 60 }]
+        },
+        "X2": { "fixed": "trust_anchor_cash_debit_v1" },
+        "X3": { "exploit": "utility_tourist_id_a", "explore": [] },
+        "X4": { "data_source": "sweed_menu", "config_id": "carousel_delivery_v1" },
+        "X5": {
+          "exploit": "cta_order_now_a",
+          "explore": [{ "variant_id": "cta_check_window_b", "weight": 100 }]
+        }
+      }
+    }
+  ]
+}

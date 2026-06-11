@@ -1,0 +1,57 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://freshlybaked.us/lp/schemas/current.v1.schema.json",
+  "title": "Landing-page bundle pointer (current.json) v1",
+  "description": "The single mutable object in the published artifact layout (parent EPIC_PLAN §5). Swapped atomically via same-dir rename(). mss ignores any pointer whose `version` is <= its active version; rollback is a new higher `version` referencing the previous good bundle_id. Also carries the signed, monotonic kill-list (parent §6.1).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "environment",
+    "bundle_id",
+    "manifest_url",
+    "manifest_sha256",
+    "version",
+    "published_at",
+    "signature"
+  ],
+  "properties": {
+    "schema": { "const": "freshlybaked.lp.current.v1" },
+    "environment": { "type": "string", "enum": ["prod", "preview", "staging", "nonprod"] },
+    "bundle_id": { "$ref": "#/definitions/bundle_id" },
+    "manifest_url": { "type": "string", "minLength": 1, "description": "Relative-to-artifact-root or absolute URL of the manifest.json this pointer activates." },
+    "manifest_sha256": { "$ref": "#/definitions/sha256" },
+    "version": { "type": "integer", "minimum": 1, "description": "Monotonic. mss rejects any pointer with version <= active." },
+    "published_at": { "type": "string", "format": "date-time" },
+    "previous_bundle_id": { "$ref": "#/definitions/bundle_id", "description": "The bundle this one supersedes (for audit / rollback target)." },
+    "signature": { "$ref": "#/definitions/signature", "description": "ed25519 signature over (manifest_sha256 + version) (+ disabled_variants when present)." },
+    "disabled_variants": {
+      "type": "array",
+      "description": "Signed, monotonic, auditable kill-list keyed on the canonical (site, purpose, slug, num) tuple. NOT a second policy language (parent §6.1).",
+      "items": { "$ref": "#/definitions/disabled_variant" }
+    }
+  },
+  "definitions": {
+    "bundle_id": {
+      "type": "string",
+      "pattern": "^lpb_[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{6}_[0-9a-f]{6}$",
+      "description": "e.g. lpb_2026-06-10_140312_7f3a91"
+    },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "signature": { "type": "string", "pattern": "^ed25519:[A-Za-z0-9+/=_-]+$" },
+    "disabled_variant": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["site", "purpose", "slug", "num", "reason", "effective_at"],
+      "properties": {
+        "site": { "type": "string", "description": "Canonical SITE id or '*' for all." },
+        "purpose": { "type": "string", "description": "Canonical PURPOSE or '*' for all." },
+        "slug": { "type": "string", "description": "Canonical SLUG or '*' for all." },
+        "num": { "type": "integer", "minimum": 1, "description": "The variant NUM being disabled." },
+        "replacement_num": { "type": "integer", "minimum": 1, "description": "NUM to redirect/serve instead; omit for safe-fallback render." },
+        "reason": { "type": "string", "minLength": 1, "examples": ["roi_guardrail", "compliance", "operator"] },
+        "effective_at": { "type": "string", "format": "date-time" }
+      }
+    }
+  }
+}
