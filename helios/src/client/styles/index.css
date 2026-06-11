@@ -7158,6 +7158,45 @@ span.metric-chart-legend-item {
   font-size: 12px;
 }
 
+.customer-value-percentiles {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid #eee;
+}
+
+.customer-value-percentiles-title {
+  font-size: 12px;
+  font-weight: 600;
+  margin-right: 2px;
+}
+
+.customer-value-percentile-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #f1f5fa;
+  font-variant-numeric: tabular-nums;
+}
+
+.customer-value-percentile-key {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #6b7280;
+}
+
+.customer-value-percentile-val {
+  font-size: 13px;
+  font-weight: 600;
+  color: #1f2937;
+}
+
 .customer-value-chart-wrap {
   position: relative;
 }

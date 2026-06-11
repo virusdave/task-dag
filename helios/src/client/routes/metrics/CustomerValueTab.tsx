@@ -13,6 +13,7 @@ import {
   type LifetimeByTotalPurchasesPoint,
   type MetricSelection,
   type PurchaseCountBucket,
+  type PurchaseCountPercentiles,
 } from '../../../shared/contracts/index.js'
 import { loadJson } from '../../app/fetchJson.js'
 import { nyIsoDate, nyMonthDaySlash } from '../../app/nyTime.js'
@@ -450,6 +451,7 @@ function CustomerValueBody({ data }: { data: CustomerValueAnalyticsResponse }) {
         <PurchaseCountHistogramCard
           data={data.purchaseCountHistogram}
           maxN={data.maxPurchaseNumber}
+          percentiles={data.summary.purchaseCountPercentiles}
           selection={selection}
           onSelect={setSelection}
         />
@@ -758,11 +760,13 @@ function SelectionCallout({
 function PurchaseCountHistogramCard({
   data,
   maxN,
+  percentiles,
   selection,
   onSelect,
 }: {
   data: ReadonlyArray<PurchaseCountBucket>
   maxN: number
+  percentiles: PurchaseCountPercentiles
   selection: MetricSelection | null
   onSelect: (next: MetricSelection | null) => void
 }) {
@@ -808,7 +812,42 @@ function PurchaseCountHistogramCard({
         selectedKey={selectedKey}
         onSelect={(key) => onSelect(key == null ? null : { kind: 'histogramBucket', metricId, bucketKey: key })}
       />
+      <PurchaseCountPercentilesRow percentiles={percentiles} />
     </article>
+  )
+}
+
+/** Compact percentile readout for per-customer total purchase count,
+ *  rendered under the histogram. Each value answers "X% of in-scope
+ *  customers made at most this many purchases". Honours the same
+ *  site / date / cohort-scope filters as the chart above it. */
+function PurchaseCountPercentilesRow({
+  percentiles,
+}: {
+  percentiles: PurchaseCountPercentiles
+}) {
+  const entries: ReadonlyArray<{ label: string; value: number | null }> = [
+    { label: 'p50', value: percentiles.p50 },
+    { label: 'p75', value: percentiles.p75 },
+    { label: 'p80', value: percentiles.p80 },
+    { label: 'p90', value: percentiles.p90 },
+    { label: 'p95', value: percentiles.p95 },
+  ]
+  return (
+    <div className="customer-value-percentiles" role="group" aria-label="Purchase-count percentiles">
+      <span className="customer-value-percentiles-title subtle-copy">
+        Purchases per customer{' '}
+        <HelpIcon text="Percentiles of the number of purchases per in-scope customer, over the same site / date / cohort-scope filters as this chart. e.g. p90 = 90% of customers made at most this many purchases. Whole numbers (an actual observed purchase count, not interpolated)." />
+      </span>
+      {entries.map((e) => (
+        <span key={e.label} className="customer-value-percentile-chip">
+          <span className="customer-value-percentile-key">{e.label}</span>
+          <span className="customer-value-percentile-val">
+            {e.value == null ? '—' : fmtInt(e.value)}
+          </span>
+        </span>
+      ))}
+    </div>
   )
 }
 

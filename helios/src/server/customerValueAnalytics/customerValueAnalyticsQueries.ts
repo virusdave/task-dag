@@ -11,6 +11,7 @@ import {
   type FirstSecondConversionRow,
   type LifetimeByTotalPurchasesPoint,
   type PurchaseCountBucket,
+  type PurchaseCountPercentiles,
   type VeriscanCoverage,
 } from '../../shared/contracts/index.js'
 import { getPool } from '../db/pool.js'
@@ -49,6 +50,14 @@ import { getPool } from '../db/pool.js'
 
 export const CUSTOMER_VALUE_ANALYTICS_DEFAULT_WINDOW_DAYS = 90
 export const CUSTOMER_VALUE_ANALYTICS_MAX_N_HARD_CAP = 50
+
+const EMPTY_PURCHASE_COUNT_PERCENTILES: PurchaseCountPercentiles = {
+  p50: null,
+  p75: null,
+  p80: null,
+  p90: null,
+  p95: null,
+}
 
 /**
  * Exclude fully-cancelled Sweed orders from every customer-value read.
@@ -228,6 +237,13 @@ interface UnionRow {
   v6: string | number | null
   v7: string | number | null
   v8: string | number | null
+  // v9..v13: total-purchase-count percentiles (summary branch only;
+  // null in every other `kind`).
+  v9: string | number | null
+  v10: string | number | null
+  v11: string | number | null
+  v12: string | number | null
+  v13: string | number | null
 }
 
 export async function getCustomerValueAnalytics(
@@ -303,6 +319,7 @@ export async function getCustomerValueAnalytics(
       repeatPurchaseRate: null,
       observedAvgLtvGrossDollars: null,
       observedMedianLtvGrossDollars: null,
+      purchaseCountPercentiles: EMPTY_PURCHASE_COUNT_PERCENTILES,
       grossSalesDollars: 0,
       grossReceiptsDollars: 0,
       netSalesDollars: 0,
@@ -410,6 +427,7 @@ export async function getCustomerValueAnalytics(
     --   v1..v3  : n_orders_in_window / n_first / n_repeat
     --   v4..v5  : avg / median lifetime gross sales (LTV)
     --   v6..v8  : sum gross / sum net / sum receipts in window
+    --   v9..v13 : total-purchase-count percentiles p50/p75/p80/p90/p95
     -- ===========================================================
     select
       'summary'::text                                    as kind,
@@ -442,7 +460,21 @@ export async function getCustomerValueAnalytics(
       (select sum(gross_receipts_dollars)
          from events_in_scope
          where pay_time >= $2::timestamptz
-           and pay_time < $3::timestamptz)               as v8
+           and pay_time < $3::timestamptz)               as v8,
+      -- Percentiles of per-customer total purchase count over the
+      -- in-scope customer set (the same population the histograms
+      -- below are built from). percentile_disc → an actual observed
+      -- integer count, not an interpolated fraction.
+      (select percentile_disc(0.50) within group (order by total_purchases)
+         from customers_in_scope)                        as v9,
+      (select percentile_disc(0.75) within group (order by total_purchases)
+         from customers_in_scope)                        as v10,
+      (select percentile_disc(0.80) within group (order by total_purchases)
+         from customers_in_scope)                        as v11,
+      (select percentile_disc(0.90) within group (order by total_purchases)
+         from customers_in_scope)                        as v12,
+      (select percentile_disc(0.95) within group (order by total_purchases)
+         from customers_in_scope)                        as v13
     union all
     -- ===========================================================
     -- purchase_count (Hist 1)
@@ -459,6 +491,7 @@ export async function getCustomerValueAnalytics(
       sum(lifetime_gross_sales_dollars),
       sum(lifetime_net_sales_dollars),
       sum(lifetime_gross_receipts_dollars),
+      null::numeric, null::numeric, null::numeric, null::numeric, null::numeric,
       null::numeric, null::numeric, null::numeric, null::numeric, null::numeric
     from customers_in_scope
     group by total_purchases_bucket
@@ -480,7 +513,8 @@ export async function getCustomerValueAnalytics(
       avg(net_sales_dollars),
       percentile_cont(0.5) within group (order by net_sales_dollars),
       avg(gross_receipts_dollars),
-      null::numeric, null::numeric, null::numeric
+      null::numeric, null::numeric, null::numeric,
+      null::numeric, null::numeric, null::numeric, null::numeric, null::numeric
     from events_in_scope
     group by purchase_n_bucket
     union all
@@ -500,7 +534,8 @@ export async function getCustomerValueAnalytics(
       percentile_cont(0.5) within group (order by lifetime_gross_sales_dollars),
       avg(lifetime_net_sales_dollars),
       percentile_cont(0.5) within group (order by lifetime_net_sales_dollars),
-      null::numeric, null::numeric, null::numeric, null::numeric
+      null::numeric, null::numeric, null::numeric, null::numeric,
+      null::numeric, null::numeric, null::numeric, null::numeric, null::numeric
     from customers_in_scope
     group by total_purchases_bucket
     union all
@@ -519,6 +554,7 @@ export async function getCustomerValueAnalytics(
       sum(gross_sales_dollars),
       sum(net_sales_dollars),
       sum(gross_receipts_dollars),
+      null::numeric, null::numeric, null::numeric, null::numeric, null::numeric,
       null::numeric, null::numeric, null::numeric, null::numeric, null::numeric
     from events_in_scope
     where pay_time >= $2::timestamptz
@@ -609,6 +645,7 @@ export async function getCustomerValueAnalytics(
     repeatPurchaseRate: null,
     observedAvgLtvGrossDollars: null,
     observedMedianLtvGrossDollars: null,
+    purchaseCountPercentiles: EMPTY_PURCHASE_COUNT_PERCENTILES,
     grossSalesDollars: 0,
     grossReceiptsDollars: 0,
     netSalesDollars: 0,
@@ -633,6 +670,13 @@ export async function getCustomerValueAnalytics(
           knownOrdersInWindow > 0 ? summary.repeatPurchases / knownOrdersInWindow : null
         summary.observedAvgLtvGrossDollars = asNum(row.v4)
         summary.observedMedianLtvGrossDollars = asNum(row.v5)
+        summary.purchaseCountPercentiles = {
+          p50: asNum(row.v9),
+          p75: asNum(row.v10),
+          p80: asNum(row.v11),
+          p90: asNum(row.v12),
+          p95: asNum(row.v13),
+        }
         summary.grossSalesDollars = asReqNum(row.v6)
         summary.netSalesDollars = asReqNum(row.v7)
         summary.grossReceiptsDollars = asReqNum(row.v8)

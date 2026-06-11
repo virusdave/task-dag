@@ -78,6 +78,24 @@ export type CustomerValueAnalyticsRequest = z.infer<typeof CustomerValueAnalytic
 
 // =========================== Summary KPIs ==================================
 
+/**
+ * Percentiles of per-customer total purchase count (number of
+ * purchases) across the in-scope customer set. Each value is the
+ * smallest purchase count at or below which the given fraction of
+ * customers fall (`percentile_disc` — an actual observed integer
+ * count, never an interpolated fraction). `null` when there are no
+ * in-scope customers. Honours the same site + cohort-scope filters
+ * as the rest of the page.
+ */
+export const PurchaseCountPercentilesSchema = z.object({
+  p50: z.number().nullable(),
+  p75: z.number().nullable(),
+  p80: z.number().nullable(),
+  p90: z.number().nullable(),
+  p95: z.number().nullable(),
+})
+export type PurchaseCountPercentiles = z.infer<typeof PurchaseCountPercentilesSchema>
+
 export const CustomerValueSummarySchema = z.object({
   knownCustomers: z.number().int().nonnegative(),
   totalOrders: z.number().int().nonnegative(),
@@ -86,6 +104,8 @@ export const CustomerValueSummarySchema = z.object({
   repeatPurchaseRate: z.number().nullable(),
   observedAvgLtvGrossDollars: z.number().nullable(),
   observedMedianLtvGrossDollars: z.number().nullable(),
+  /** Percentiles of per-customer total purchase count (50/75/80/90/95). */
+  purchaseCountPercentiles: PurchaseCountPercentilesSchema,
   grossSalesDollars: z.number(),
   grossReceiptsDollars: z.number(),
   netSalesDollars: z.number(),
