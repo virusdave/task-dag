@@ -474,6 +474,13 @@ function fmtNum(v: number): string {
   if (Math.abs(v) >= 100) return v.toLocaleString(undefined, { maximumFractionDigits: 0 })
   return v.toFixed(2)
 }
+// Weeks-of-supply is clamped to a 52-week ceiling for plotting; render
+// the cap as "52+" so a capped runway (or a never-sold item with stock
+// on hand) reads as "≥1 year of supply" rather than exactly 52.
+function fmtWeeks(v: number): string {
+  if (v >= WEEKS_OF_SUPPLY_CAP) return `${WEEKS_OF_SUPPLY_CAP}+`
+  return v.toFixed(1)
+}
 
 const POINT_AXES: ReadonlyArray<PointAxisDef> = [
   {
@@ -634,10 +641,10 @@ const POINT_AXES: ReadonlyArray<PointAxisDef> = [
   },
   {
     id: 'weeksOfSupplyOnHand',
-    label: 'Weeks of supply (on-hand / weekly velocity)',
+    label: 'Weeks of supply (on-hand / weekly velocity, capped 52)',
     short: 'Wks supply',
     value: (p) => weeksOfSupplyOnHand(p),
-    format: fmtNum,
+    format: fmtWeeks,
   },
   {
     id: 'velocityIndex',
@@ -752,6 +759,185 @@ const POINT_AXES: ReadonlyArray<PointAxisDef> = [
 const POINT_AXES_BY_ID = new Map(POINT_AXES.map((a) => [a.id, a]))
 function axis(id: string): PointAxisDef {
   return POINT_AXES_BY_ID.get(id) ?? POINT_AXES[0]!
+}
+
+// =================== No-sales plot defaults + clamps =======================
+//
+// The server returns EVERY in-filter variant (never-sold included, via
+// LEFT JOIN), with window/sales-driven fields null when the variant had
+// no sales in [from, to]. The scatter renderer drops any dot whose X or
+// Y axis value is null — so a never-sold variant silently disappears
+// instead of landing at a sensible "no movement" spot.
+//
+// That's bad for the merchandiser's core workflow: e.g. "reprice a
+// just-received order whose receive-time prices lacked market data" —
+// they want to see where those still-unsold items would fall on an
+// "effective GM%" cohort scatter using their LIST-price default.
+//
+// Fix (per oracle design, June 2026): when a variant has NO window sales
+// AND the inputs for a sensible default exist, substitute a list-price /
+// no-movement default *for plot position only*. The API stays factual
+// (null = no sales), cohort medians stay computed over sales-present
+// variants only, and the tooltip flags the substitution. We also clamp
+// weeks-of-supply to a 52-week ceiling UNIVERSALLY (even for sold
+// variants) since >52 ≈ 52 materially and uncapped values blow out the
+// axis. Missing list / cost / market / lab / size inputs are NOT
+// defaultable — those nulls are genuinely unknown, so the dot stays
+// hidden on axes that need them.
+// ---------------------------------------------------------------------------
+
+export const WEEKS_OF_SUPPLY_CAP = 52
+
+/** No window sales ⇒ every sales-driven field is null (LEFT JOIN). */
+export function hasNoWindowSales(p: CatalogAnalyticsPoint): boolean {
+  return p.unitsSold == null && p.revenueDollars == null
+}
+
+function finiteOrNull(v: number | null | undefined): number | null {
+  return v != null && Number.isFinite(v) ? v : null
+}
+
+/** List-default unit margin $ — what a unit would earn if sold at list. */
+function listMarginDollarsPerUnit(p: CatalogAnalyticsPoint): number | null {
+  if (p.listPriceDollars == null || p.wholesaleCostDollars == null) return null
+  return p.listPriceDollars - p.wholesaleCostDollars
+}
+
+/**
+ * Colour / size / opacity channels key off their own id namespaces
+ * (e.g. `price`, `salesVelocity`) which don't all match the POINT_AXES
+ * ids. Map them to the canonical axis id so one resolver covers every
+ * channel.
+ */
+function canonicalPlotMetricId(id: string): string {
+  switch (id) {
+    case 'price':
+      return 'otdUnitPriceDollars'
+    case 'salesVelocity':
+      return 'salesVelocityUnitsPerDay'
+    case 'marginVelocity':
+      return 'marginVelocityDollarsPerDay'
+    case 'discountDepth':
+      return 'discountDepthPercent'
+    case 'salesDayCoverage':
+      return 'salesDayCoveragePercent'
+    case 'thc':
+      return 'labThcPct'
+    case 'pctBelowMarket':
+      return 'percentBelowMarket'
+    default:
+      return id
+  }
+}
+
+/** Universal clamps applied to BOTH real and defaulted plot values. */
+function clampPlotValue(metricId: string, v: number | null): number | null {
+  if (v == null || !Number.isFinite(v)) return null
+  if (metricId === 'weeksOfSupplyOnHand') {
+    return Math.max(0, Math.min(WEEKS_OF_SUPPLY_CAP, v))
+  }
+  if (metricId === 'salesDayCoveragePercent') {
+    return Math.max(0, Math.min(100, v))
+  }
+  return v
+}
+
+/**
+ * The no-sales substitute for a metric, or null when no sensible
+ * default exists (missing list/cost/market/etc., or a metric that has
+ * no "no movement" meaning). Only consulted when `hasNoWindowSales`.
+ */
+function noSalesPlotDefault(
+  metricId: string,
+  p: CatalogAnalyticsPoint,
+  ctx: AxisCtx,
+): number | null {
+  switch (metricId) {
+    // True no-movement totals / rates → zero.
+    case 'unitsSold':
+    case 'revenueDollars':
+    case 'cogsDollars':
+    case 'marginDollars':
+    case 'salesVelocityUnitsPerDay':
+    case 'marginVelocityDollarsPerDay':
+    case 'invoiceCount':
+    case 'daysWithSales':
+    case 'salesDayCoveragePercent':
+    case 'unitsPerInvoice':
+    case 'marginPerInvoiceDollars':
+    case 'totalGramsSoldWindow':
+    case 'totalMgSoldWindow':
+      // grams/mg "sold" totals are zero only if the size unit applies.
+      if (metricId === 'totalGramsSoldWindow') return p.unitSizeGrams == null ? null : 0
+      if (metricId === 'totalMgSoldWindow') return p.unitSizeMg == null ? null : 0
+      return 0
+
+    // Effective price / margin economics → fall back to LIST defaults.
+    case 'avgUnitPriceDollars':
+      return finiteOrNull(p.listPriceDollars)
+    case 'otdUnitPriceDollars':
+      return listOtdPriceDollars(p)
+    case 'marginDollarsPerUnit':
+      return listMarginDollarsPerUnit(p)
+    case 'gmPercent':
+      return listGmPercent(p)
+
+    // Discount vs list → none realized when never sold.
+    case 'discountDollarsPerUnit':
+      return p.listPriceDollars == null ? null : 0
+    case 'discountDepthPercent':
+      return p.listPriceDollars != null && p.listPriceDollars > 0 ? 0 : null
+    case 'priceRealizationPercent':
+      return p.listPriceDollars != null && p.listPriceDollars > 0 ? 100 : null
+
+    // Weeks of supply: infinite runway with stock on hand → cap; no
+    // stock → 0; unknown on-hand → can't place.
+    case 'weeksOfSupplyOnHand':
+      if (p.currentQty == null) return null
+      return p.currentQty <= 0 ? 0 : WEEKS_OF_SUPPLY_CAP
+
+    // Cohort-relative indexes use the LIST default as the numerator,
+    // against the (sales-present) cohort median denominator.
+    case 'velocityIndex': {
+      const m = ctx.cohortMedians.get(cohortKey(p))
+      return m?.velocityUnitsPerDay && m.velocityUnitsPerDay > 0 ? 0 : null
+    }
+    case 'effectivePriceIndex': {
+      const listOtd = listOtdPriceDollars(p)
+      const m = ctx.cohortMedians.get(cohortKey(p))
+      if (listOtd == null || !m?.effectiveOtdPriceDollars) return null
+      return listOtd / m.effectiveOtdPriceDollars
+    }
+    case 'gmPercentIndex': {
+      const listGm = listGmPercent(p)
+      const m = ctx.cohortMedians.get(cohortKey(p))
+      if (listGm == null || m?.gmPercent == null) return null
+      return listGm - m.gmPercent
+    }
+
+    default:
+      // Sales-independent metrics (list price, lab, market, pack/size)
+      // and anything unrecognized: no no-sales substitute.
+      return null
+  }
+}
+
+/**
+ * Resolve the value used to PLOT a metric for one variant: the real
+ * value when present (clamped), else a no-sales default (clamped) when
+ * the variant had no window sales, else null (dot stays hidden).
+ */
+export function plotMetricValue(
+  metricIdRaw: string,
+  rawValue: number | null,
+  p: CatalogAnalyticsPoint,
+  ctx: AxisCtx,
+): number | null {
+  const metricId = canonicalPlotMetricId(metricIdRaw)
+  const raw = finiteOrNull(rawValue)
+  if (raw != null) return clampPlotValue(metricId, raw)
+  if (!hasNoWindowSales(p)) return null
+  return clampPlotValue(metricId, noSalesPlotDefault(metricId, p, ctx))
 }
 
 // =========================== Colour-by (cohort) ============================
@@ -3163,16 +3349,22 @@ function CatalogScatterSvg({
     const opacityValuesAll: Array<number | null> = []
     const isContinuousColour = colourByDef.kind === 'continuous'
     for (const p of points) {
-      const x = xDef.value(p, axisCtx)
-      const y = yDef.value(p, axisCtx)
+      // Plot-position resolution: real value when present, else a
+      // list-price / no-movement default for never-sold variants, so
+      // they land at a sensible spot instead of vanishing. See
+      // `plotMetricValue` above.
+      const x = plotMetricValue(xDef.id, xDef.value(p, axisCtx), p, axisCtx)
+      const y = plotMetricValue(yDef.id, yDef.value(p, axisCtx), p, axisCtx)
       if (x === null || y === null || !Number.isFinite(x) || !Number.isFinite(y)) continue
       const bucket = isContinuousColour ? '' : colourByDef.bucket(p)
       if (!isContinuousColour) bucketSet.add(bucket)
-      const colourRaw = isContinuousColour ? colourByDef.value(p, axisCtx) : null
+      const colourRaw = isContinuousColour
+        ? plotMetricValue(colourByDef.id, colourByDef.value(p, axisCtx), p, axisCtx)
+        : null
       const colourValue = colourRaw != null && Number.isFinite(colourRaw) ? colourRaw : null
       colourValues.push(colourValue)
-      const sRaw = sizeByDef.value(p, axisCtx)
-      const oRaw = opacityByDef.value(p, axisCtx)
+      const sRaw = plotMetricValue(sizeByDef.id, sizeByDef.value(p, axisCtx), p, axisCtx)
+      const oRaw = plotMetricValue(opacityByDef.id, opacityByDef.value(p, axisCtx), p, axisCtx)
       const sizeValue = sRaw != null && Number.isFinite(sRaw) ? sRaw : null
       const opacityValue = oRaw != null && Number.isFinite(oRaw) ? oRaw : null
       sizeValuesAll.push(sizeValue)
@@ -3815,6 +4007,7 @@ function CatalogScatterSvg({
           yDef={yDef}
           xValue={hovered.x}
           yValue={hovered.y}
+          noWindowSales={hasNoWindowSales(hovered.p)}
           colourLabel={
             colourByDef.kind === 'categorical'
               ? hovered.bucket
@@ -3926,6 +4119,9 @@ interface ScatterTooltipProps {
   yDef: PointAxisDef
   xValue: number
   yValue: number
+  /** True when this variant had no window sales — its axis positions
+   *  are list-price / no-movement defaults, not realized sales. */
+  noWindowSales: boolean
   colourLabel: string
   colourByDef: ColourByDef
   /** Hovered dot position, in chart-wrapper-local pixel space. */
@@ -3997,11 +4193,11 @@ function ScatterTooltip(p: ScatterTooltipProps) {
       <table className="catalog-analytics-tooltip-table">
         <tbody>
           <tr>
-            <th>{p.xDef.short}</th>
+            <th>{p.xDef.short}{p.noWindowSales ? '*' : ''}</th>
             <td>{p.xDef.format(p.xValue)}</td>
           </tr>
           <tr>
-            <th>{p.yDef.short}</th>
+            <th>{p.yDef.short}{p.noWindowSales ? '*' : ''}</th>
             <td>{p.yDef.format(p.yValue)}</td>
           </tr>
           {p.point.unitsSold != null ? (
@@ -4064,6 +4260,11 @@ function ScatterTooltip(p: ScatterTooltipProps) {
           ) : null}
         </tbody>
       </table>
+      {p.noWindowSales ? (
+        <div className="catalog-analytics-tooltip-note subtle-copy">
+          * no sales in window — axes show list-price / no-movement defaults
+        </div>
+      ) : null}
     </div>
   )
 }
