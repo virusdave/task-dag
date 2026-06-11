@@ -12,6 +12,7 @@ import {
 } from '../../../shared/contracts/index.js'
 import { loadJson } from '../../app/fetchJson.js'
 import { nyIsoDate, nyMonthDaySlash } from '../../app/nyTime.js'
+import { normaliseSiteSelection, toggleSiteSelection } from './metricsSiteSelection.js'
 
 // ---------------------------------------------------------------------------
 // Inventory / Procurement workspace (the /metrics → "Inventory" /
@@ -746,7 +747,9 @@ export function InventoryProcurementTab() {
       }),
     [],
   )
-  const [selectedSites, setSelectedSites] = useState<ReadonlySet<string>>(() => initial.sites)
+  const [selectedSites, setSelectedSites] = useState<ReadonlySet<string>>(() =>
+    normaliseSiteSelection(initial.sites, KNOWN_SITES.length),
+  )
   const [windowDays, setWindowDays] = useState(initial.windowDays)
   const [subTab, setSubTab] = useState<SubTab>(initial.view)
   const [expandedSku, setExpandedSku] = useState<string | null>(initial.expandedSku)
@@ -794,12 +797,7 @@ export function InventoryProcurementTab() {
   }
 
   function toggleSite(id: string) {
-    setSelectedSites((prev) => {
-      const next = new Set(prev)
-      if (next.has(id)) next.delete(id)
-      else next.add(id)
-      return next
-    })
+    setSelectedSites((prev) => toggleSiteSelection(prev, id, KNOWN_SITES.length))
   }
 
   return (

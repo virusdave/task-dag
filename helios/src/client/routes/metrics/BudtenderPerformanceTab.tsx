@@ -10,6 +10,7 @@ import { loadJson } from '../../app/fetchJson.js'
 import { ControlsSection } from './ControlsSection.js'
 import { niceXTicks, niceYTicks } from './gridlines.js'
 import { HelpIcon } from './MetricChart.js'
+import { toggleSiteSelection } from './metricsSiteSelection.js'
 import { RangeNudgeRow } from './RangeNudgeRow.js'
 import { computeCompactDomain } from './scatterAutoZoom.js'
 import { useMetricSelection } from './useMetricSelection.js'
@@ -135,12 +136,7 @@ export function BudtenderPerformanceTab(): JSX.Element {
                 key={s.id}
                 type="button"
                 className={active ? 'metrics-site-chip is-active' : 'metrics-site-chip'}
-                onClick={() => {
-                  const next = new Set(selectedSites)
-                  if (active) next.delete(s.id)
-                  else next.add(s.id)
-                  setSelectedSites(next)
-                }}
+                onClick={() => setSelectedSites(toggleSiteSelection(selectedSites, s.id, KNOWN_SITES.length))}
                 aria-pressed={active}
               >
                 {s.label}

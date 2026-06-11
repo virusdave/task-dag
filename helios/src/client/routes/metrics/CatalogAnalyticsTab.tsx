@@ -39,6 +39,7 @@ import {
 } from './continuousScale.js'
 import { HelpIcon } from './MetricChart.js'
 import { useMetricsDefaults } from './MetricsDefaultsContext.js'
+import { normaliseSiteSelection, toggleSiteSelection } from './metricsSiteSelection.js'
 import { RangeNudgeRow } from './RangeNudgeRow.js'
 import { computeCompactDomain } from './scatterAutoZoom.js'
 import { ScatterViewToolbar } from './ScatterViewToolbar.js'
@@ -2001,7 +2002,9 @@ export function CatalogAnalyticsTab({ embedded }: CatalogAnalyticsTabProps = {})
     const now = Date.now()
     setRange({ fromMs: now - d * DAY_MS, toMs: now })
   }, [])
-  const [selectedSites, setSelectedSites] = useState<ReadonlySet<string>>(() => initialSet('sites'))
+  const [selectedSites, setSelectedSites] = useState<ReadonlySet<string>>(() =>
+    normaliseSiteSelection(initialSet('sites'), KNOWN_SITES.length),
+  )
   const [filters, setFilters] = useState<CatalogAnalyticsFiltersResponse | null>(null)
   const [selectedCategoryIds, setSelectedCategoryIds] = useState<ReadonlySet<string>>(
     () => initialSet('categoryIds', embeddedRef.current?.categoryIds),
@@ -2530,12 +2533,7 @@ export function CatalogAnalyticsTab({ embedded }: CatalogAnalyticsTabProps = {})
                 key={s.id}
                 type="button"
                 className={active ? 'metrics-site-chip is-active' : 'metrics-site-chip'}
-                onClick={() => {
-                  const next = new Set(selectedSites)
-                  if (active) next.delete(s.id)
-                  else next.add(s.id)
-                  setSelectedSites(next)
-                }}
+                onClick={() => setSelectedSites(toggleSiteSelection(selectedSites, s.id, KNOWN_SITES.length))}
                 aria-pressed={active}
               >
                 {s.label}

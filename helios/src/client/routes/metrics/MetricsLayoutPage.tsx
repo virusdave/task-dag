@@ -54,6 +54,7 @@ import {
   type CatalogFilterSelection,
 } from './CatalogFilterBar.js'
 import { MetricsAccessGate } from './MetricsAccessGate.js'
+import { toggleSiteSelection } from './metricsSiteSelection.js'
 import {
   MetricChart,
   METRIC_STACK_MODES,
@@ -1221,12 +1222,7 @@ function DashboardControls({
               key={s.id}
               type="button"
               className={active ? 'metrics-site-chip is-active' : 'metrics-site-chip'}
-              onClick={() => {
-                const next = new Set(selectedSites)
-                if (active) next.delete(s.id)
-                else next.add(s.id)
-                onSitesChange(next)
-              }}
+              onClick={() => onSitesChange(toggleSiteSelection(selectedSites, s.id, KNOWN_SITES.length))}
               aria-pressed={active}
             >
               {s.label}
