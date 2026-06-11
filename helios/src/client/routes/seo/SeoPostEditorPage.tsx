@@ -16,9 +16,11 @@ import { z } from 'zod'
 
 import {
   SeoPostDetailResponseSchema,
+  SeoSocialExportResponseSchema,
   type SeoPostDetailResponse,
   type SeoPostRecord,
   type SeoPostStatus,
+  type SeoSocialExportResponse,
 } from '../../../shared/contracts/index.js'
 import { loadJson, mutateJson } from '../../app/fetchJson.js'
 import { nyLongDateTime } from '../../app/nyTime.js'
@@ -141,6 +143,11 @@ export function SeoPostEditorPage() {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [problems, setProblems] = useState<string[] | null>(null)
+  // Control-plane release time (P4 follow-on). Excluded from the content
+  // fingerprint, so (re)scheduling never invalidates an approval.
+  const [scheduleAt, setScheduleAt] = useState(record.scheduledPublishAt ?? '')
+  // On-demand social/marketing export (export-only — nothing auto-posts).
+  const [social, setSocial] = useState<SeoSocialExportResponse | null>(null)
 
   // Reset local edit state whenever a fresh record loads (after save /
   // approve / navigation).
@@ -148,7 +155,9 @@ export function SeoPostEditorPage() {
     setDraft(draftFromRecord(record))
     setNote('')
     setError(null)
-  }, [record.postId, record.contentSha256, record.status])
+    setScheduleAt(record.scheduledPublishAt ?? '')
+    setSocial(null)
+  }, [record.postId, record.contentSha256, record.status, record.scheduledPublishAt])
 
   const savedDraft = useMemo(() => draftFromRecord(record), [record])
   const dirty = useMemo(
@@ -211,6 +220,28 @@ export function SeoPostEditorPage() {
       expectedContentSha256: record.contentSha256,
       note: note || undefined,
     })
+  // Set / clear the release time. Does not touch content or the approval
+  // binding, so it is allowed at any status.
+  const schedule = () =>
+    run('Schedule', `/api/seo/posts/${record.postId}/schedule`, 'POST', {
+      scheduledPublishAt: scheduleAt.trim() === '' ? null : scheduleAt.trim(),
+    })
+
+  async function loadSocial() {
+    setBusy(true)
+    setError(null)
+    try {
+      const res = await loadJson(
+        `/api/seo/posts/${record.postId}/social-export`,
+        SeoSocialExportResponseSchema,
+      )
+      setSocial(res)
+    } catch (e) {
+      setError(`Social export failed: ${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      setBusy(false)
+    }
+  }
 
   const compliant = problems !== null && problems.length === 0
   const canApprove = !busy && !dirty && record.status !== 'approved' && compliant
@@ -407,6 +438,33 @@ export function SeoPostEditorPage() {
         </p>
       )}
 
+      {/* Scheduling — release timing only; never changes content or the
+          approval binding (excluded from the content fingerprint). */}
+      <div
+        className="filter-row wrap-row"
+        style={{ gap: 12, alignItems: 'center', marginTop: 12 }}
+      >
+        <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+          Scheduled release (ISO 8601; blank = as soon as approved)
+          <input
+            type="text"
+            value={scheduleAt}
+            onChange={(e) => setScheduleAt(e.target.value)}
+            disabled={busy}
+            placeholder="2026-07-01T09:00:00-04:00"
+            style={{ width: 280 }}
+          />
+        </label>
+        <span className="subtle-copy">
+          {scheduleAt.trim() === ''
+            ? 'No schedule set.'
+            : `${scheduleDisplay(scheduleAt)} (NY)`}
+        </span>
+        <button type="button" onClick={schedule} disabled={busy}>
+          Save schedule
+        </button>
+      </div>
+
       {/* BlogPosting JSON-LD preview (no cloaking — equals the visible body) */}
       <h2 style={{ marginTop: 24 }}>BlogPosting preview ({mode})</h2>
       <p className="subtle-copy" style={{ marginTop: 0 }}>
@@ -438,6 +496,44 @@ export function SeoPostEditorPage() {
           </pre>
         </div>
       </div>
+
+      {/* Social / marketing export (export-only — nothing auto-posts).
+          Collapsed by default per helios page rules. */}
+      <details style={{ marginTop: 16 }}>
+        <summary>Social / marketing export (export-only)</summary>
+        <p className="subtle-copy" style={{ marginTop: 8 }}>
+          Copy/paste captions + UTM-tagged links per platform. Nothing is
+          posted automatically.
+        </p>
+        <button type="button" onClick={loadSocial} disabled={busy}>
+          Build export
+        </button>
+        {social && (
+          <div style={{ marginTop: 8 }}>
+            {social.entries.map((e) => (
+              <div key={e.platform} style={{ marginBottom: 12 }}>
+                <strong>{e.platform}</strong>
+                {e.url && (
+                  <>
+                    {' — '}
+                    <code>{e.url}</code>
+                  </>
+                )}
+                <pre
+                  style={{
+                    whiteSpace: 'pre-wrap',
+                    background: 'var(--code-bg, #f5f5f5)',
+                    padding: 8,
+                    borderRadius: 6,
+                  }}
+                >
+                  {e.caption}
+                </pre>
+              </div>
+            ))}
+          </div>
+        )}
+      </details>
 
       {/* Provenance / debug — collapsed by default per helios page rules. */}
       <details style={{ marginTop: 16 }}>
@@ -478,6 +574,13 @@ export function SeoPostEditorPage() {
       </details>
     </div>
   )
+}
+
+// Render a typed schedule value in NY wall-clock (per AGENTS.md), or echo
+// it back unparsed so the operator can see/fix a malformed entry.
+function scheduleDisplay(value: string): string {
+  const ms = Date.parse(value)
+  return Number.isNaN(ms) ? value : nyLongDateTime(ms)
 }
 
 function approveTitle(dirty: boolean, compliant: boolean, status: SeoPostStatus): string {

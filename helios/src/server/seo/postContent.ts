@@ -252,3 +252,98 @@ export function buildBlogPostJsonLd(
   }
   return jsonLd
 }
+
+// ── social / marketing export (export-only — parent §7.8, §0.3) ────────
+//
+// Per-post copy-to-clipboard payload: a canonical + UTM-tagged URL per
+// platform plus a platform-appropriate caption. EXPORT ONLY — nothing here
+// posts anywhere (canon §1: no auto-publish to externally-visible
+// channels). Uses the SHARED, sanitized-safe fields (title/excerpt/tags) so
+// the exported copy is safe to paste on any platform regardless of host
+// policy. Pure + deterministic so it is unit-tested.
+
+export type SocialPlatform = 'instagram' | 'x' | 'linkedin' | 'email'
+
+export interface SocialExportEntry {
+  readonly platform: SocialPlatform
+  readonly url: string
+  readonly caption: string
+}
+
+export interface SocialExport {
+  readonly canonical_url: string
+  readonly entries: SocialExportEntry[]
+}
+
+const SOCIAL_PLATFORMS: readonly SocialPlatform[] = ['instagram', 'x', 'linkedin', 'email']
+
+/** X/Twitter visible caption budget (leaves room for the appended URL). */
+const X_CAPTION_BUDGET = 240
+
+function hashtagsFromTags(tags: readonly string[]): string {
+  return tags
+    .map((t) => `#${t.replace(/[^a-z0-9]+/gi, '')}`)
+    .filter((t) => t.length > 1)
+    .join(' ')
+}
+
+function utmUrl(canonical: string, source: SocialPlatform): string {
+  // Leave a non-URL canonical untouched (a draft without a valid slug); the
+  // route only exposes export once a post has a derivable canonical.
+  let u: URL
+  try {
+    u = new URL(canonical)
+  } catch {
+    return canonical
+  }
+  u.searchParams.set('utm_source', source)
+  u.searchParams.set('utm_medium', source === 'email' ? 'email' : 'social')
+  u.searchParams.set('utm_campaign', 'whats-new')
+  return u.toString()
+}
+
+function truncate(text: string, max: number): string {
+  if (text.length <= max) return text
+  return `${text.slice(0, Math.max(0, max - 1)).trimEnd()}…`
+}
+
+export interface SocialExportInput {
+  readonly title: string
+  readonly excerpt: string
+  readonly tags: readonly string[]
+}
+
+/**
+ * Build the per-platform social/marketing export for a post from its
+ * shared, sanitized-safe fields + its derived canonical URL.
+ */
+export function buildSocialExport(input: SocialExportInput, canonicalUrl: string): SocialExport {
+  const hashtags = hashtagsFromTags(input.tags)
+  const entries = SOCIAL_PLATFORMS.map((platform): SocialExportEntry => {
+    const url = utmUrl(canonicalUrl, platform)
+    let caption: string
+    switch (platform) {
+      case 'x': {
+        const base = hashtags ? `${input.title} ${hashtags}` : input.title
+        caption = `${truncate(base, X_CAPTION_BUDGET)} ${url}`
+        break
+      }
+      case 'instagram': {
+        caption = [input.title, '', input.excerpt, '', hashtags].join('\n').trimEnd()
+        break
+      }
+      case 'linkedin': {
+        caption = [input.title, '', input.excerpt, '', url, hashtags ? `\n${hashtags}` : '']
+          .join('\n')
+          .trimEnd()
+        break
+      }
+      case 'email': {
+        caption = [`Subject: ${input.title}`, '', input.excerpt, '', `Read more: ${url}`].join('\n')
+        break
+      }
+    }
+    return { platform, url, caption }
+  })
+  return { canonical_url: canonicalUrl, entries }
+}

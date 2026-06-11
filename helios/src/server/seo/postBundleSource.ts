@@ -46,6 +46,7 @@ interface ApprovedPostRow {
   noindex: boolean
   published_at: Date | string
   updated_at: Date | string
+  scheduled_publish_at: Date | string | null
   reviewer: string | null
   content_sha256: string
   approval_id: string | null
@@ -82,12 +83,17 @@ function rowToContentInput(row: ApprovedPostRow): PostContentInput {
 }
 
 /**
- * Fetch every `approved` post, verify the approval ledger join + hash for
- * each, and return them as validated contract BlogPostContent objects ready
- * for compileSeoBundle(). Throws PostBundleSourceError if any approved row
- * is inconsistent.
+ * Fetch every `approved` post whose scheduled release time has arrived
+ * (scheduled_publish_at is null or <= now), verify the approval ledger join
+ * + hash for each, and return them as validated contract BlogPostContent
+ * objects ready for compileSeoBundle(). A future-scheduled post simply does
+ * not appear until a later bundle build after its release time. Throws
+ * PostBundleSourceError if any approved row is inconsistent.
  */
-export async function loadApprovedPostsForBundle(db: Queryable): Promise<BlogPostContent[]> {
+export async function loadApprovedPostsForBundle(
+  db: Queryable,
+  now: Date = new Date(),
+): Promise<BlogPostContent[]> {
   const result = await db.query<ApprovedPostRow>(
     `
       select
@@ -104,6 +110,7 @@ export async function loadApprovedPostsForBundle(db: Queryable): Promise<BlogPos
         p.noindex,
         p.published_at,
         p.updated_at,
+        p.scheduled_publish_at,
         p.reviewer,
         p.content_sha256,
         p.approval_id,
@@ -113,8 +120,10 @@ export async function loadApprovedPostsForBundle(db: Queryable): Promise<BlogPos
       from seo_posts p
       left join seo_approvals a on a.approval_id = p.approval_id
       where p.status = 'approved'
+        and (p.scheduled_publish_at is null or p.scheduled_publish_at <= $1)
       order by p.post_id
     `,
+    [now.toISOString()],
   )
 
   const problems: string[] = []

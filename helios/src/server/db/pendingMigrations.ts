@@ -919,6 +919,14 @@ const SENTINELS: MigrationSentinel[] = [
       'loader. Without it the post authoring/approval pages 500.',
     check: (db) => tableExists(db, 'seo_posts'),
   },
+  {
+    migrationId: '073_seo_post_scheduling',
+    label:
+      'SEO auto-blog scheduling (seo_posts.scheduled_publish_at) — required ' +
+      'by the post /schedule route and the schedule-gated bundle loader. ' +
+      'Without it scheduling a post 500s.',
+    check: (db) => columnExists(db, 'seo_posts', 'scheduled_publish_at'),
+  },
 ]
 
 interface CacheEntry {

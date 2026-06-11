@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   buildBlogPostJsonLd,
+  buildSocialExport,
   checkPostApprovable,
   newPostId,
   POST_ID_RE,
@@ -159,5 +160,56 @@ describe('buildBlogPostJsonLd (no cloaking)', () => {
       published_at: meta.published_at,
     }, 'raw')
     expect('dateModified' in jsonLd).toBe(false)
+  })
+})
+
+describe('buildSocialExport (export-only)', () => {
+  const canonical = 'https://freshlybaked.nyc/sites/all/whats-new/summer-drop-2026'
+
+  it('emits one entry per platform with UTM-tagged URLs + non-empty captions', () => {
+    const out = buildSocialExport(
+      { title: 'Summer 2026 Drop', excerpt: 'New arrivals for summer.', tags: ['nyc-culture'] },
+      canonical,
+    )
+    expect(out.canonical_url).toBe(canonical)
+    expect(out.entries.map((e) => e.platform)).toEqual(['instagram', 'x', 'linkedin', 'email'])
+    // instagram caption carries no URL (IG strips links), so check the others.
+    for (const entry of out.entries) {
+      expect(entry.caption.length).toBeGreaterThan(0)
+      if (entry.platform === 'instagram') {
+        expect(entry.url).toContain('utm_source=instagram')
+        continue
+      }
+      expect(entry.url).toContain(`utm_source=${entry.platform}`)
+      expect(entry.url).toContain('utm_campaign=whats-new')
+      expect(entry.caption).toContain(entry.url)
+    }
+    expect(out.entries.find((e) => e.platform === 'email')!.url).toContain('utm_medium=email')
+    expect(out.entries.find((e) => e.platform === 'x')!.url).toContain('utm_medium=social')
+  })
+
+  it('keeps the x caption text within budget before the appended URL', () => {
+    const out = buildSocialExport({ title: 'A'.repeat(400), excerpt: '', tags: [] }, canonical)
+    const x = out.entries.find((e) => e.platform === 'x')!
+    expect(x.caption.indexOf('http')).toBeLessThanOrEqual(241)
+  })
+
+  it('leaves a non-URL canonical (draft without slug) untouched', () => {
+    const out = buildSocialExport({ title: 'Draft', excerpt: 'x', tags: [] }, '')
+    expect(out.canonical_url).toBe('')
+    for (const entry of out.entries) {
+      expect(entry.url).toBe('')
+    }
+  })
+
+  it('builds hashtags only from alphanumeric-safe tags', () => {
+    const out = buildSocialExport(
+      { title: 'T', excerpt: 'e', tags: ['nyc-culture', 'new arrivals', '!!'] },
+      canonical,
+    )
+    const x = out.entries.find((e) => e.platform === 'x')!
+    expect(x.caption).toContain('#nycculture')
+    expect(x.caption).toContain('#newarrivals')
+    expect(x.caption).not.toContain('#!!')
   })
 })

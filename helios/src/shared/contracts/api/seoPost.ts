@@ -36,6 +36,10 @@ export const SeoPostRecordSchema = z.object({
   // Derived (scope+slug) canonical URL — never stored, always recomputed.
   canonicalUrl: z.string(),
   publishedAt: z.string(),
+  // Control-plane release time (P4 follow-on). Excluded from the content
+  // fingerprint, so (re)scheduling never invalidates an approval. null =
+  // export as soon as approved.
+  scheduledPublishAt: z.string().nullable(),
   status: SeoPostStatusSchema,
   source: SeoPostSourceSchema,
   // Current content fingerprint — the client echoes this back on approve
@@ -144,3 +148,28 @@ export const SeoPostRouteParamsSchema = z.object({
   postId: z.string().min(1),
 })
 export type SeoPostRouteParams = z.infer<typeof SeoPostRouteParamsSchema>
+
+// Set or clear the control-plane release time. Does NOT change content,
+// status, or the approval binding (scheduled_publish_at is excluded from
+// the content fingerprint), so rescheduling never invalidates an approval.
+export const SeoPostScheduleBodySchema = z
+  .object({
+    scheduledPublishAt: z
+      .string()
+      .refine((v) => !Number.isNaN(Date.parse(v)), { message: 'not a valid date' })
+      .nullable(),
+  })
+  .strict()
+export type SeoPostScheduleBody = z.infer<typeof SeoPostScheduleBodySchema>
+
+// Per-platform social/marketing export (export-only — nothing auto-posts).
+export const SeoSocialExportEntrySchema = z.object({
+  platform: z.enum(['instagram', 'x', 'linkedin', 'email']),
+  url: z.string(),
+  caption: z.string(),
+})
+export const SeoSocialExportResponseSchema = z.object({
+  canonicalUrl: z.string(),
+  entries: z.array(SeoSocialExportEntrySchema),
+})
+export type SeoSocialExportResponse = z.infer<typeof SeoSocialExportResponseSchema>

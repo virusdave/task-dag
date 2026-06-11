@@ -125,4 +125,34 @@ describe('loadApprovedPostsForBundle', () => {
   it('returns an empty array when there are no approved rows', async () => {
     expect(await loadApprovedPostsForBundle(fakeDb([]))).toEqual([])
   })
+
+  it('passes the release-time gate (now) to the SQL filter', async () => {
+    const captured: unknown[][] = []
+    const capturingDb: Queryable = {
+      query: async <T extends QueryResultRow>(
+        _sql: string,
+        params?: unknown[],
+      ): Promise<QueryResult<T>> => {
+        captured.push(params ?? [])
+        return {
+          rows: [] as T[],
+          rowCount: 0,
+          command: '',
+          oid: 0,
+          fields: [],
+        } as QueryResult<T>
+      },
+    }
+    const now = new Date('2026-06-11T12:00:00Z')
+    await loadApprovedPostsForBundle(capturingDb, now)
+    expect(captured[0]).toEqual([now.toISOString()])
+  })
+
+  it('maps an approved row that carries a (past) scheduled_publish_at', async () => {
+    const out = await loadApprovedPostsForBundle(
+      fakeDb([approvedRow({ scheduled_publish_at: '2026-06-10T08:00:00Z' })]),
+    )
+    expect(out).toHaveLength(1)
+    expect(out[0]!.post_id).toBe('post_a')
+  })
 })

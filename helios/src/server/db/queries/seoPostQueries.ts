@@ -38,6 +38,7 @@ interface SeoPostRow {
   body_sanitized: string
   noindex: boolean
   published_at: Date | string
+  scheduled_publish_at: Date | string | null
   source: string
   content_sha256: string
   approval_id: string | null
@@ -68,6 +69,7 @@ const SELECT_POST = `
     p.body_sanitized,
     p.noindex,
     p.published_at,
+    p.scheduled_publish_at,
     p.source,
     p.content_sha256,
     p.approval_id,
@@ -87,9 +89,9 @@ const SELECT_POST = `
 const RETURNING_POST = `
   returning
     post_id, scope, slug, status, title, meta_description, excerpt, author, tags,
-    body_raw, body_sanitized, noindex, published_at, source, content_sha256,
-    approval_id, reviewer, generation_meta, created_by_user_id, updated_by_user_id,
-    created_at, updated_at,
+    body_raw, body_sanitized, noindex, published_at, scheduled_publish_at, source,
+    content_sha256, approval_id, reviewer, generation_meta, created_by_user_id,
+    updated_by_user_id, created_at, updated_at,
     null::bigint as approved_by_user_id, null::timestamptz as approved_at,
     null::text as approval_note
 `
@@ -160,6 +162,7 @@ function mapRow(row: SeoPostRow): SeoPostRecord {
     // slug is set (a draft may not have one yet).
     canonicalUrl: row.slug ? safeCanonicalUrl(row.scope, row.slug) : '',
     publishedAt: toIsoString(row.published_at)!,
+    scheduledPublishAt: toIsoString(row.scheduled_publish_at),
     status: row.status as SeoPostRecord['status'],
     source: row.source as SeoPostSource,
     contentSha256: row.content_sha256,
@@ -364,6 +367,40 @@ export async function setSeoPostStatus(
   return row ? mapRow(row) : null
 }
 
+/**
+ * Set or clear the control-plane release time. Does NOT change content,
+ * status, or the approval binding (scheduled_publish_at is excluded from
+ * the content fingerprint), so rescheduling never invalidates an approval.
+ * Returns null if not found.
+ */
+export async function scheduleSeoPost(
+  db: Queryable,
+  postId: string,
+  scheduledPublishAt: string | null,
+  userId: number,
+): Promise<SeoPostRecord | null> {
+  const result = await db.query<SeoPostRow>(
+    `
+      update seo_posts
+         set scheduled_publish_at = $2,
+             updated_by_user_id = $3,
+             updated_at = now()
+       where post_id = $1
+      returning
+        post_id, scope, slug, status, title, meta_description, excerpt, author,
+        tags, body_raw, body_sanitized, noindex, published_at, scheduled_publish_at,
+        source, content_sha256, approval_id, reviewer, generation_meta,
+        created_by_user_id, updated_by_user_id, created_at, updated_at,
+        (select approved_by_user_id from seo_approvals where approval_id = seo_posts.approval_id) as approved_by_user_id,
+        (select approved_at from seo_approvals where approval_id = seo_posts.approval_id) as approved_at,
+        (select note from seo_approvals where approval_id = seo_posts.approval_id) as approval_note
+    `,
+    [postId, scheduledPublishAt, userId],
+  )
+  const row = result.rows[0]
+  return row ? mapRow(row) : null
+}
+
 export type ApprovePostResult =
   | { kind: 'ok'; record: SeoPostRecord }
   | { kind: 'not_found' }
@@ -458,8 +495,8 @@ export async function approveSeoPost(
          where post_id = $1
         returning
           post_id, scope, slug, status, title, meta_description, excerpt, author,
-          tags, body_raw, body_sanitized, noindex, published_at, source,
-          content_sha256, approval_id, reviewer, generation_meta,
+          tags, body_raw, body_sanitized, noindex, published_at, scheduled_publish_at,
+          source, content_sha256, approval_id, reviewer, generation_meta,
           created_by_user_id, updated_by_user_id, created_at, updated_at,
           (select approved_by_user_id from seo_approvals where approval_id = $2) as approved_by_user_id,
           (select approved_at from seo_approvals where approval_id = $2) as approved_at,

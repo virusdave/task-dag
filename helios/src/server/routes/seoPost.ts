@@ -21,7 +21,9 @@ import {
   SeoPostListResponseSchema,
   SeoPostRejectBodySchema,
   SeoPostRouteParamsSchema,
+  SeoPostScheduleBodySchema,
   SeoPostUpdateBodySchema,
+  SeoSocialExportResponseSchema,
 } from '../../shared/contracts/index.js'
 import { requireSessionUser } from '../auth/requireSession.js'
 import { getPool } from '../db/pool.js'
@@ -30,11 +32,12 @@ import {
   createSeoPost,
   getSeoPost,
   listSeoPosts,
+  scheduleSeoPost,
   setSeoPostStatus,
   updateSeoPost,
   type PostContentFields,
 } from '../db/queries/seoPostQueries.js'
-import { checkPostApprovable } from '../seo/postContent.js'
+import { buildSocialExport, checkPostApprovable } from '../seo/postContent.js'
 import { generatePostDraft } from '../seo/postGenerate.js'
 
 export async function registerSeoPostRoutes(server: FastifyInstance): Promise<void> {
@@ -157,6 +160,51 @@ export async function registerSeoPostRoutes(server: FastifyInstance): Promise<vo
       case 'ok':
         return reply.send(SeoPostDetailResponseSchema.parse({ post: result.record }))
     }
+  })
+
+  // Set / clear the scheduled release time (no content / approval change).
+  // Editor+; scheduled_publish_at is excluded from the content fingerprint
+  // so rescheduling never invalidates an approval.
+  server.post('/api/seo/posts/:postId/schedule', async (request, reply) => {
+    const user = await requireSessionUser(request, reply, 'editor')
+    if (!user) {
+      return
+    }
+    const params = SeoPostRouteParamsSchema.parse(request.params)
+    const body = SeoPostScheduleBodySchema.parse(request.body ?? {})
+    const post = await scheduleSeoPost(
+      getPool(),
+      params.postId,
+      body.scheduledPublishAt,
+      user.id,
+    )
+    if (!post) {
+      return reply.status(404).send({ error: 'Post not found.' })
+    }
+    return reply.send(SeoPostDetailResponseSchema.parse({ post }))
+  })
+
+  // Per-post social/marketing export (export-only — nothing auto-posts).
+  server.get('/api/seo/posts/:postId/social-export', async (request, reply) => {
+    const user = await requireSessionUser(request, reply, 'viewer')
+    if (!user) {
+      return
+    }
+    const params = SeoPostRouteParamsSchema.parse(request.params)
+    const post = await getSeoPost(getPool(), params.postId)
+    if (!post) {
+      return reply.status(404).send({ error: 'Post not found.' })
+    }
+    const exported = buildSocialExport(
+      { title: post.title, excerpt: post.excerpt, tags: post.tags },
+      post.canonicalUrl,
+    )
+    return reply.send(
+      SeoSocialExportResponseSchema.parse({
+        canonicalUrl: exported.canonical_url,
+        entries: exported.entries,
+      }),
+    )
   })
 
   // Generate a DRAFT proposal via Bedrock and save it as a new draft post.
