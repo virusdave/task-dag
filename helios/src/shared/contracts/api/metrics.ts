@@ -589,13 +589,21 @@ export const EssentialsDailySummaryRowSchema = z.object({
   /** Purchases (paid orders) today on this site whose customer had a
    *  prior order. */
   returningPurchases: z.number().int().min(0),
-  /** sum(subtotal + tax) — list price + tax, PRE-discount. */
+  /** OTD list price, PRE-discount: net receipts + Σ reconstructed
+   *  line-item OTD discount (promoAmount + managerDiscount, grossed
+   *  back up for tax). The header `discount_dollars` column is
+   *  effectively never populated (15/4650 orders over 30d) so the
+   *  real promo/manager discounts are reconstructed from the line
+   *  items — see essentialsDailySummary / sweedOrdersQueries. */
   grossReceiptsDollars: z.number().finite(),
-  /** sum(subtotal) — pre-tax, PRE-discount (list price). */
+  /** Ex-tax list price, PRE-discount: net sales + Σ reconstructed
+   *  ex-tax line-item discount (promoAmount + managerDiscount). */
   grossSalesDollars: z.number().finite(),
-  /** sum(subtotal − discount) — pre-tax, POST-discount. */
+  /** sum(subtotal_dollars) — pre-tax, POST-discount (the booked
+   *  ex-tax revenue; `subtotal_dollars` already equals Σ line
+   *  subtotalAmount, which is post-discount). */
   netSalesDollars: z.number().finite(),
-  /** sum(subtotal − discount + tax) = grand_total — incl tax, POST-discount
+  /** sum(grand_total_dollars) — incl tax, POST-discount
    *  ("money in the drawer"). */
   netReceiptsDollars: z.number().finite(),
   /** sum(line revenue − line cogs) across line items with a known
