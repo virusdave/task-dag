@@ -242,6 +242,16 @@ function buildPrimarySidebarNodes(
         to: '/seo/posts',
         end: false,
       },
+      {
+        // P4 remainder: independent image-asset registration/approval
+        // (Helios-driven SEO widgets epic, top-level#15). Images are
+        // approved on their own merits and can later back a post's hero/og.
+        kind: 'leaf',
+        navKey: 'marketing.seo-images',
+        label: 'SEO · Image assets',
+        to: '/seo/images',
+        end: false,
+      },
     ],
   }
 

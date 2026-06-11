@@ -84,6 +84,14 @@ import { SeoFaqListPage, seoFaqListLoader } from '../routes/seo/SeoFaqListPage.j
 import { SeoFaqEditorPage, seoFaqEditorLoader } from '../routes/seo/SeoFaqEditorPage.js'
 import { SeoPostListPage, seoPostListLoader } from '../routes/seo/SeoPostListPage.js'
 import { SeoPostEditorPage, seoPostEditorLoader } from '../routes/seo/SeoPostEditorPage.js'
+import {
+  SeoImageAssetListPage,
+  seoImageAssetListLoader,
+} from '../routes/seo/SeoImageAssetListPage.js'
+import {
+  SeoImageAssetEditorPage,
+  seoImageAssetEditorLoader,
+} from '../routes/seo/SeoImageAssetEditorPage.js'
 import { SchedulingNewRunPage } from '../routes/scheduling/SchedulingNewRunPage.js'
 import { SchedulingCandidateDetailPage, schedulingCandidateDetailLoader } from '../routes/scheduling/SchedulingCandidateDetailPage.js'
 import { SchedulingRunDetailPage, schedulingRunDetailLoader } from '../routes/scheduling/SchedulingRunDetailPage.js'
@@ -336,6 +344,16 @@ export const router = createBrowserRouter([
         element: <SeoPostEditorPage />,
         loader: seoPostEditorLoader,
         path: 'seo/posts/:postId',
+      },
+      {
+        element: <SeoImageAssetListPage />,
+        loader: seoImageAssetListLoader,
+        path: 'seo/images',
+      },
+      {
+        element: <SeoImageAssetEditorPage />,
+        loader: seoImageAssetEditorLoader,
+        path: 'seo/images/:assetId',
       },
       {
         loader: legacyGroupDetailLoader,

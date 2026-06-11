@@ -927,6 +927,15 @@ const SENTINELS: MigrationSentinel[] = [
       'Without it scheduling a post 500s.',
     check: (db) => columnExists(db, 'seo_posts', 'scheduled_publish_at'),
   },
+  {
+    migrationId: '074_seo_image_asset_control_plane',
+    label:
+      'SEO image-asset control plane (seo_image_assets + image approvals) — ' +
+      'required by the /api/seo/image-assets control plane and the ' +
+      'approved-asset bundle loader. Without it the image authoring/approval ' +
+      'pages 500.',
+    check: (db) => tableExists(db, 'seo_image_assets'),
+  },
 ]
 
 interface CacheEntry {

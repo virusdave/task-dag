@@ -25,6 +25,7 @@ import { pathToFileURL } from 'node:url'
 import { generateEd25519Pem, publicKeyPemFromPrivate } from '../lp/signing.js'
 import { compileSeoBundle, SeoCompileError, type CompileInput } from './compile.js'
 import { loadApprovedFaqSetsForBundle } from './faqBundleSource.js'
+import { loadApprovedImageAssetsForBundle } from './imageAssetBundleSource.js'
 import { loadApprovedPostsForBundle } from './postBundleSource.js'
 import { publishSeoBundle, type SeoPublishOptions } from './publish.js'
 import { validateSeoBundle } from './validate.js'
@@ -140,6 +141,28 @@ async function applyPostsFromDb(cfg: BundleConfig, args: Args): Promise<BundleCo
   }
 }
 
+/**
+ * When `--assets-from-db` is passed, replace the config's top-level
+ * `assets` with the operator-APPROVED SEO image assets from the
+ * control-plane DB (verified against the approval ledger by
+ * imageAssetBundleSource.ts). Everything else (sites/widgets/content/
+ * policy/sitemaps) still comes from the JSON config. The compiler's
+ * consistency layer additionally enforces that any post that references a
+ * hero/og image resolves to one of these approved assets. Requires
+ * DATABASE_URL to be set. Returns the (possibly unchanged) config.
+ */
+async function applyAssetsFromDb(cfg: BundleConfig, args: Args): Promise<BundleConfig> {
+  if (!args.bools.has('assets-from-db')) {
+    return cfg
+  }
+  const assets = await loadApprovedImageAssetsForBundle(getPool())
+  process.stdout.write(`[assets-from-db] loaded ${assets.length} approved image asset(s) from DB\n`)
+  return {
+    ...cfg,
+    assets,
+  }
+}
+
 function publishOptsFromConfig(
   cfg: BundleConfig,
   args: Args,
@@ -181,6 +204,7 @@ async function doPublish(args: Args, candidateOnly: boolean): Promise<number> {
   const environment = asEnvironment(requireFlag(args, 'env'))
   let cfg = await applyFaqFromDb(loadConfig(requireFlag(args, 'config')), args)
   cfg = await applyPostsFromDb(cfg, args)
+  cfg = await applyAssetsFromDb(cfg, args)
   const privateKeyPem = readFileSync(requireFlag(args, 'privkey'), 'utf8')
 
   const compiled = compileFromConfig(cfg)
@@ -259,9 +283,14 @@ export async function main(argv: string[]): Promise<number> {
     process.stderr.write(`error: ${e instanceof Error ? e.message : String(e)}\n`)
     return 1
   } finally {
-    // The DB pool is only opened by the --faq-from-db / --posts-from-db
-    // paths; closing an unopened pool is a no-op, so this is always safe.
-    if (args.bools.has('faq-from-db') || args.bools.has('posts-from-db')) {
+    // The DB pool is only opened by the --faq-from-db / --posts-from-db /
+    // --assets-from-db paths; closing an unopened pool is a no-op, so this
+    // is always safe.
+    if (
+      args.bools.has('faq-from-db') ||
+      args.bools.has('posts-from-db') ||
+      args.bools.has('assets-from-db')
+    ) {
       await closePool()
     }
   }
