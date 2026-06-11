@@ -2,6 +2,7 @@ import {
   HELIOS_PENDING_PURCHASE_SITE_DEALERS,
   getHeliosPendingPurchaseSiteDealer,
   type InventoryAction,
+  type InventoryCategoryOverhang,
   type InventoryDistributorStat,
   type InventoryProcurementResponse,
   type InventoryProcurementSummary,
@@ -129,6 +130,21 @@ pkg_dim AS (
   -- package -> product map for mapping order line items
   SELECT dealer_id, inventory_item_id, product_id FROM pkg_clean WHERE product_id IS NOT NULL
 ),
+pkg_first_seen AS (
+  -- Upstream received_at is NULL in prod, and pkg_latest only carries
+  -- the LATEST snapshot per package -- so coalescing age to
+  -- observed_at_max (the latest obs) makes inventory age ~ 0 and the
+  -- 60-day "we have already paid for it" concern never fires. Recover a
+  -- usable lower-bound age from the FIRST time we ever observed the
+  -- package on hand (qty > 0) across all snapshots.
+  SELECT
+    s.dealer_id,
+    s.inventory_item_id,
+    min(s.observed_at_max) FILTER (WHERE s.current_qty > 0) AS first_observed_on_hand_at
+  FROM sweed_package_snapshots s
+  WHERE s.dealer_id = ANY($1::bigint[])
+  GROUP BY s.dealer_id, s.inventory_item_id
+),
 taxonomy AS (
   -- Brand / category / subcategory live on catalog_groups, NOT on the
   -- snapshot row (those snapshot columns ship NULL from the grouped
@@ -158,10 +174,10 @@ inv AS (
       THEN sum(greatest(pl.current_qty,0) * coalesce(pl.wholesale_cost_dollars,0)) / sum(greatest(pl.current_qty,0))
       ELSE max(pl.wholesale_cost_dollars) END AS unit_cost_current,
     count(*) AS pkg_count,
-    min(pl.received_at) AS first_received_at,
+    min(coalesce(pl.received_at, fs.first_observed_on_hand_at)) AS first_received_at,
     CASE WHEN sum(greatest(pl.current_qty,0)) > 0
       THEN sum(greatest(pl.current_qty,0) *
-             (EXTRACT(EPOCH FROM ((SELECT as_of FROM params) - coalesce(pl.received_at, pl.observed_at_max))) / 86400.0))
+             (EXTRACT(EPOCH FROM ((SELECT as_of FROM params) - coalesce(pl.received_at, fs.first_observed_on_hand_at, pl.observed_at_max))) / 86400.0))
            / sum(greatest(pl.current_qty,0))
       ELSE NULL END AS avg_inventory_age_days,
     min(pl.expiration_date) FILTER (WHERE pl.current_qty > 0) AS nearest_expiration,
@@ -169,6 +185,8 @@ inv AS (
     sum(greatest(pl.current_qty,0) * coalesce(pl.wholesale_cost_dollars,0)) FILTER (WHERE pl.expiration_date IS NOT NULL AND pl.expiration_date <= ((SELECT as_of FROM params)::date + 60)) AS expiring_cost_60,
     EXTRACT(EPOCH FROM ((SELECT as_of FROM params) - max(pl.observed_at_max))) / 3600.0 AS snapshot_age_hours
   FROM pkg_clean pl
+  LEFT JOIN pkg_first_seen fs
+    ON fs.dealer_id = pl.dealer_id AND fs.inventory_item_id = pl.inventory_item_id
   GROUP BY pl.dealer_id, pl.product_id
 ),
 sales AS (
@@ -230,6 +248,18 @@ const MIN_ORDER_UNITS = 10
 // misleading — suppress the recommendation (see skip_min_order_overshoots).
 const MAX_CASE_OVERSHOOT_MULTIPLE = 2
 const MAX_CASE_COVER_DAYS = 60
+
+// Inventory-turn framing (operator policy). We want every dollar of
+// inventory to sell through within ~3 weeks; by 60 days the buy has
+// effectively been paid for whether or not it sold, so anything that
+// won't clear by then is stranded capital we should actively exit rather
+// than let auto-discount into oblivion.
+const IDEAL_TURN_DAYS = 21
+const HARD_TURN_DAYS = 60
+// Minimum on-hand $ for a dead SKU to warrant an active "liquidate now"
+// push vs simply burning it down; below this the dollars don't justify a
+// promo/markdown effort.
+const LIQUIDATE_MIN_CAPITAL = 50
 
 function clamp(x: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, x))
@@ -393,9 +423,24 @@ export async function getInventoryProcurement(
       nearestExp !== null ? Math.round((new Date(nearestExp).getTime() - asOfMs) / DAY_MS) : null
     const snapshotAgeHours = asNum(r.snapshot_age_hours)
 
-    // Deadweight score components.
-    const slowScore = unitsW === 0 && units90 === 0 ? 1 : daysSupply !== null ? clamp(daysSupply / 120, 0, 1) : unitsW === 0 ? 1 : 0
-    const ageScore = avgAge !== null ? clamp(avgAge / 120, 0, 1) : 0
+    // Deadweight score components, framed around the inventory-turn policy.
+    // Slow score ramps over the 21→60-day turn window: an item that will
+    // clear by the ideal 21-day mark scores 0; one that won't clear before
+    // the 60-day "already paid for it" mark scores 1. No-sale stock pegs at
+    // 1 (it never turns). This replaces the old, far-too-forgiving
+    // daysSupply/120 ramp, under which a 60-day-supply item only scored 0.5.
+    const slowScore =
+      unitsW === 0 && units90 === 0
+        ? 1
+        : daysSupply !== null
+          ? clamp((daysSupply - IDEAL_TURN_DAYS) / (HARD_TURN_DAYS - IDEAL_TURN_DAYS), 0, 1)
+          : unitsW === 0
+            ? 1
+            : 0
+    // Age ramps to full by the 60-day hard-turn mark (was /120). Age is a
+    // lower bound recovered from first-observed-on-hand (received_at is NULL
+    // upstream), so it only ever understates true age.
+    const ageScore = avgAge !== null ? clamp(avgAge / HARD_TURN_DAYS, 0, 1) : 0
     const expiryScore = daysToNearestExp !== null ? clamp((60 - daysToNearestExp) / 60, 0, 1) : 0
     const marginWeakness = gmPct !== null ? clamp((0.45 - gmPct) / 0.45, 0, 1) : 0.5
 
@@ -561,6 +606,8 @@ export async function getInventoryProcurement(
     a.distributorName.localeCompare(b.distributorName),
   )
 
+  const categoryOverhang = computeCategoryOverhang(skus)
+
   return {
     asOf: asOf.toISOString(),
     generatedAt: asOf.toISOString(),
@@ -568,8 +615,70 @@ export async function getInventoryProcurement(
     summary,
     skus,
     distributors,
+    categoryOverhang,
     methodology: METHODOLOGY,
   }
+}
+
+// ============================================================================
+// Category overhang — roll capital-tied-up vs realized demand up to category
+// grain so the operator can see structural overstacking (e.g. "Flower is
+// carrying 35% of capital but earning 18% of margin") that no single SKU row
+// reveals. Worst overhang first; only categories with real capital surface.
+// ============================================================================
+function computeCategoryOverhang(
+  skus: readonly InventorySkuRow[],
+): InventoryCategoryOverhang[] {
+  interface Acc {
+    onHandCost: number
+    windowMargin: number
+    skuCount: number
+    deadweightCapital: number
+  }
+  const byCat = new Map<string, Acc>()
+  for (const s of skus) {
+    if (s.onHandCost <= 0 && s.marginWindow <= 0) continue
+    const key = s.categoryName ?? 'Uncategorized'
+    let a = byCat.get(key)
+    if (!a) {
+      a = { onHandCost: 0, windowMargin: 0, skuCount: 0, deadweightCapital: 0 }
+      byCat.set(key, a)
+    }
+    a.onHandCost += Math.max(0, s.onHandCost)
+    a.windowMargin += Math.max(0, s.marginWindow)
+    a.skuCount += 1
+    if (s.deadweightScore >= 70) a.deadweightCapital += Math.max(0, s.onHandCost)
+  }
+  const totalCost = sum([...byCat.values()].map((a) => a.onHandCost))
+  const totalMargin = sum([...byCat.values()].map((a) => a.windowMargin))
+
+  const rows: InventoryCategoryOverhang[] = []
+  for (const [categoryName, a] of byCat) {
+    const onHandCostShare = totalCost > 0 ? a.onHandCost / totalCost : 0
+    const marginShare = totalMargin > 0 ? a.windowMargin / totalMargin : 0
+    // Capital we're carrying above a demand-proportional level. If a category
+    // earns 18% of margin it has no business holding 35% of capital; the gap
+    // is the freeable dollars.
+    const excessCapital = Math.max(0, a.onHandCost - marginShare * totalCost)
+    // Ratio of capital share to demand share. marginShare→0 with capital on
+    // hand means "all capital, no demand" — represent as a large finite ratio.
+    const overhangRatio =
+      marginShare > 0 ? onHandCostShare / marginShare : onHandCostShare > 0 ? 99 : 0
+    rows.push({
+      categoryName,
+      skuCount: a.skuCount,
+      onHandCost: round2(a.onHandCost),
+      onHandCostShare: round4(onHandCostShare),
+      windowMargin: round2(a.windowMargin),
+      marginShare: round4(marginShare),
+      overhangRatio: round2(overhangRatio),
+      excessCapital: round2(excessCapital),
+      deadweightCapital: round2(a.deadweightCapital),
+    })
+  }
+  // Worst overhang first, breaking ties by freeable dollars.
+  rows.sort((x, y) => y.overhangRatio - x.overhangRatio || y.excessCapital - x.excessCapital)
+  return rows
 }
 
 // ============================================================================
@@ -666,9 +775,36 @@ function nyBusinessDayKey(ms: number, shiftMs: number): string {
 }
 
 function classifyAction(row: InventorySkuRow): InventoryAction {
-  // Liquidation / exit takes precedence for genuine deadweight.
-  if (row.deadweightScore >= 80 && row.units90 === 0 && row.physicalUnits > 0) return 'liquidate_now'
-  if (row.deadweightScore >= 70 && row.physicalUnits > 0) return 'burn_down_stop_carry'
+  const hasStock = row.physicalUnits > 0
+  const turnDays = row.daysSupply // days to clear sellable stock at current velocity; null = no demand forecast
+  const age = row.avgInventoryAgeDays
+  const matured = age !== null && age >= HARD_TURN_DAYS // we've effectively paid for it
+
+  // --- Exit / liquidate (capital recovery) takes precedence. Driven by the
+  // inventory-turn policy, NOT by an arbitrary deadweight-score threshold:
+  // we want to surface every genuinely slow / aged / no-sale capital trap,
+  // not just the handful that happen to clear 70/80. ---
+
+  // Nothing sold in 90 days while stock sits on hand: the capital is
+  // stranded. Actively liquidate if the dollars justify a markdown effort;
+  // otherwise just stop carrying and let it draw down.
+  if (hasStock && row.units90 === 0) {
+    return row.onHandCost >= LIQUIDATE_MIN_CAPITAL ? 'liquidate_now' : 'burn_down_stop_carry'
+  }
+
+  // Won't clear before the 60-day "already paid for it" mark (or has already
+  // sat that long) AND it's a weak holding — stop carrying it. We don't burn
+  // down an otherwise-healthy seller that's merely overstocked; that falls
+  // through to "reduce future orders" below.
+  if (hasStock) {
+    const wontTurnByHard = (turnDays !== null && turnDays > HARD_TURN_DAYS) || matured
+    const weakHolding =
+      row.units28 === 0 ||
+      matured ||
+      (turnDays !== null && turnDays > 2 * HARD_TURN_DAYS) ||
+      (row.gmPct !== null && row.gmPct < 0.35)
+    if (wontTurnByHard && weakHolding) return 'burn_down_stop_carry'
+  }
 
   // Hidden stock is worth surfacing even before the overshoot check.
   if (row.sellableUnits === 0 && row.hiddenStock) return 'check_hidden_stock'
@@ -693,7 +829,9 @@ function classifyAction(row: InventorySkuRow): InventoryAction {
   // Expiry / overstock.
   if (row.daysToNearestExpiration !== null && row.daysToNearestExpiration <= 45 && row.physicalUnits > 0)
     return 'reprice_before_expiry'
-  if (row.daysSupply !== null && row.daysSupply >= 90) return 'reduce_future_orders'
+  // Healthy seller, but overstocked past the 60-day hard-turn mark — don't
+  // reorder; let it draw down. (Weak/aged overstock was already exited above.)
+  if (row.daysSupply !== null && row.daysSupply > HARD_TURN_DAYS) return 'reduce_future_orders'
   return 'hold'
 }
 
@@ -705,6 +843,9 @@ function sum(xs: number[]): number {
 function round2(x: number): number {
   return Math.round(x * 100) / 100
 }
+function round4(x: number): number {
+  return Math.round(x * 10000) / 10000
+}
 
 const METHODOLOGY: string[] = [
   'SKU grain = (store, product_id), aggregated over the latest snapshot of each package (distinct-on observed_at_max desc).',
@@ -715,7 +856,9 @@ const METHODOLOGY: string[] = [
   'Recommended quantities are snapped to supplier case sizing: any nonzero recommendation is rounded UP to the nearest multiple of 5, with a 10-unit minimum per SKU. (True per-SKU case sizes are not yet recorded; this is a uniform approximation.)',
   'When the case-rounded minimum order would overstock a slow mover — pushing post-order days-of-supply past min(2× target cover, 60 days) — the recommendation is SUPPRESSED (recommendedQty = 0, action "skip_min_order_overshoots") rather than misleading the operator into an uneconomic buy. There is real demand, but the minimum case is too chunky; the qty we declined is shown as suppressedRecommendedQty. No brand/category variety exception exists yet, so these are not auto-ordered.',
   'Lead time defaults to a configurable constant (PO line received-at is not populated in source data); reorder cadence is the median gap between distributor delivery dates, clamped 7..45 days.',
-  'Package received-at is not populated upstream, so inventory age degrades to days-since-last-observed (coalesce(received_at, latest snapshot time)); it is a lower bound on true age.',
+  'Package received-at is not populated upstream, so inventory age is recovered from the FIRST snapshot in which we observed the package on hand (qty > 0); it is a lower bound on true age (coalesce(received_at, first-observed-on-hand, latest snapshot time)).',
+  'Inventory-turn policy: we target a ~21-day turn and treat 60 days as the "already paid for it" mark. Slow-velocity and age deadweight terms ramp to full over the 21→60-day window (no-sale stock pegs at 1). Exit advice is driven by this turn framing, not by an arbitrary deadweight-score cutoff: any SKU with stock and zero 90-day sales is flagged liquidate/burn-down, and weak or aged holdings that won\'t clear by 60 days are flagged stop-carry.',
   'Reorder priority blends expected margin loss before replenishment (50%), reorder gap (25%), lost margin/day (15%), confidence (10%), minus a deadweight penalty. Deadweight score blends slow velocity, capital tied up, age, expiry proximity, and weak margin.',
+  'Category overhang rolls each category\'s on-hand capital share up against its share of realized window margin; overhang ratio = capital share ÷ margin share (>1 means it carries more capital than its demand earns), and excess capital = on-hand cost − demand-proportional cost — the dollars that could be freed by drawing the category down.',
   'All time windows and day boundaries use America/New_York per repo convention.',
 ]

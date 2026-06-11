@@ -192,6 +192,36 @@ export const InventoryProcurementSummarySchema = z.object({
 })
 export type InventoryProcurementSummary = z.infer<typeof InventoryProcurementSummarySchema>
 
+// =========================== Category overhang ===========================
+//
+// SKU-level exit advice is myopic: it can't see that a whole *category*
+// is carrying far more capital than its recent demand justifies (the
+// "Flower is overstacked" problem). This rolls each category's on-hand
+// capital share up against its share of realized window margin so the
+// operator can target category-wide drawdowns, not just one-off SKUs.
+
+export const InventoryCategoryOverhangSchema = z.object({
+  categoryName: z.string(),
+  skuCount: z.number(),
+  /** On-hand inventory cost ($) across the category. */
+  onHandCost: z.number(),
+  /** Category share of total on-hand cost (0..1). */
+  onHandCostShare: z.number(),
+  /** Realized gross margin ($) over the demand window. */
+  windowMargin: z.number(),
+  /** Category share of total realized window margin (0..1). */
+  marginShare: z.number(),
+  /** Capital share ÷ margin share. >1 = carrying more capital than its
+   *  demand earns; large values are the overstacked categories. */
+  overhangRatio: z.number(),
+  /** Estimated capital ($) held above a demand-proportional level —
+   *  onHandCost − (marginShare · totalOnHandCost). Floored at 0. */
+  excessCapital: z.number(),
+  /** Capital ($) in this category flagged deadweight (score ≥ 70). */
+  deadweightCapital: z.number(),
+})
+export type InventoryCategoryOverhang = z.infer<typeof InventoryCategoryOverhangSchema>
+
 // ================================ Response ================================
 
 export const InventoryProcurementResponseSchema = z.object({
@@ -205,6 +235,8 @@ export const InventoryProcurementResponseSchema = z.object({
   summary: InventoryProcurementSummarySchema,
   skus: z.array(InventorySkuRowSchema),
   distributors: z.array(InventoryDistributorStatSchema),
+  /** Category-level capital-vs-demand overhang, worst first. */
+  categoryOverhang: z.array(InventoryCategoryOverhangSchema),
   methodology: z.array(z.string()),
 })
 export type InventoryProcurementResponse = z.infer<typeof InventoryProcurementResponseSchema>

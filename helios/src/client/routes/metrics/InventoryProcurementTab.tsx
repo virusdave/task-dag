@@ -4,6 +4,7 @@ import {
   InventoryProcurementResponseSchema,
   InventorySkuHistoryResponseSchema,
   type InventoryAction,
+  type InventoryCategoryOverhang,
   type InventoryDistributorStat,
   type InventoryProcurementResponse,
   type InventoryScoreFactor,
@@ -1525,6 +1526,75 @@ function DistributorBasketsView({ data }: { data: InventoryProcurementResponse }
 // Tab 3 — Exit / Liquidate
 // ---------------------------------------------------------------------------
 
+// Category-level capital-vs-demand overhang. Surfaces structural
+// overstacking ("Flower carries 35% of capital but earns 18% of margin")
+// that no single SKU row reveals, so the buyer can target whole-category
+// drawdowns. Only categories carrying capital with meaningful overhang
+// (ratio ≥ 1.25 or no demand at all) are shown; healthy categories are
+// omitted to keep the panel actionable.
+function CategoryOverhangPanel({ rows }: { rows: readonly InventoryCategoryOverhang[] }) {
+  const flagged = useMemo(
+    () =>
+      rows
+        .filter((r) => r.onHandCost > 0 && (r.overhangRatio >= 1.25 || r.marginShare === 0))
+        .slice(0, 8),
+    [rows],
+  )
+  if (flagged.length === 0) return null
+  const freeable = flagged.reduce((t, r) => t + r.excessCapital, 0)
+
+  return (
+    <article className="metric-chart-card">
+      <h3 className="inv-proc-section-title">Category overhang</h3>
+      <p className="subtle-copy inv-proc-section-sub">
+        Categories carrying more capital than their recent demand earns. Overhang = capital
+        share ÷ margin share (&gt;1 means overstacked); excess capital is the dollars freeable by
+        drawing the category down to a demand-proportional level. Up to{' '}
+        <strong>{fmtMoney(freeable)}</strong> is tied up above demand here.
+      </p>
+      <div className="inv-proc-table-scroll">
+        <table className="budtender-leaderboard inv-proc-table">
+          <thead>
+            <tr>
+              <th>Category</th>
+              <th className="num">SKUs</th>
+              <th className="num">On-hand cost</th>
+              <th className="num">Capital share</th>
+              <th className="num">Margin share</th>
+              <th className="num">Overhang</th>
+              <th className="num">Excess capital</th>
+              <th className="num">Deadweight $</th>
+            </tr>
+          </thead>
+          <tbody>
+            {flagged.map((r) => (
+              <tr key={r.categoryName}>
+                <td>{r.categoryName}</td>
+                <td className="num">{fmtNum(r.skuCount)}</td>
+                <td className="num">{fmtMoney(r.onHandCost)}</td>
+                <td className="num">{fmtPct(r.onHandCostShare)}</td>
+                <td className="num">{fmtPct(r.marginShare)}</td>
+                <td className="num">
+                  <span
+                    className={`inv-pill ${r.overhangRatio >= 2 || r.marginShare === 0 ? 'inv-pill--danger' : 'inv-pill--warn'}`}
+                    title="On-hand capital share ÷ realized margin share. >1 = carrying more capital than demand earns."
+                  >
+                    {r.marginShare === 0 ? 'no demand' : `${r.overhangRatio.toFixed(1)}×`}
+                  </span>
+                </td>
+                <td className="num">
+                  <strong>{fmtMoney(r.excessCapital)}</strong>
+                </td>
+                <td className="num">{fmtMoney(r.deadweightCapital)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </article>
+  )
+}
+
 function ExitLiquidateView({ data, expandedSku, onToggleExpand, sites }: SkuViewProps) {
   const s = data.summary
   const win = data.params.windowDays
@@ -1547,6 +1617,8 @@ function ExitLiquidateView({ data, expandedSku, onToggleExpand, sites }: SkuView
         <Kpi value={fmtMoney(s.expiringSoonCost)} label="Expiring ≤60d (cost)" warn={s.expiringSoonCost > 0} />
         <Kpi value={String(stopCarry)} label="Stop-carry candidates" />
       </div>
+
+      <CategoryOverhangPanel rows={data.categoryOverhang} />
 
       <article className="metric-chart-card">
         <h3 className="inv-proc-section-title">Liquidation queue</h3>
