@@ -47,6 +47,7 @@ import {
 } from './MetricsDefaultsModal.js'
 import { CustomerValueTab } from './CustomerValueTab.js'
 import { InventoryProcurementTab } from './InventoryProcurementTab.js'
+import { TargetTrackingTab } from './TargetTrackingTab.js'
 import { EssentialsDailySummaryBanner } from './EssentialsDailySummaryBanner.js'
 import {
   CatalogFilterBar,
@@ -151,6 +152,7 @@ export type MetricsTabId =
   | 'catalog'
   | 'budtenders'
   | 'customer-value'
+  | 'target'
 
 const DEFAULT_TAB_ID: MetricsTabId = 'essentials'
 
@@ -293,6 +295,19 @@ const METRICS_TABS: ReadonlyArray<MetricsTab> = [
     // at all. Returning `false` for every registry metric means the tab
     // renders an empty metric list and we short-circuit to the dedicated
     // CatalogAnalyticsTab below.
+    include: () => false,
+    grant: 'explore',
+  },
+  {
+    id: 'target',
+    label: 'Target tracking',
+    description:
+      'Break-even progress per period. Admins enter the business cost basis (fixed monthly costs + blended labour rate × weekly staffing); the page prorates that to each period and charts actual gross margin $ earned against the break-even target, with a pace projection for the current period.',
+    defaultAgg: 'week',
+    defaultStackMode: 'none',
+    showAggControl: false,
+    showStackControl: false,
+    // Owns its full UI (see TargetTrackingTab); no registry metrics.
     include: () => false,
     grant: 'explore',
   },
@@ -722,6 +737,10 @@ export function MetricsLayoutPage() {
           <BudtenderPerformanceTab />
         ) : activeTab.id === 'customer-value' ? (
           <CustomerValueTab />
+        ) : activeTab.id === 'target' ? (
+          // Target tracking owns its full UI (cost config + break-even
+          // gauge + per-period bar chart). No shared toolbar.
+          <TargetTrackingTab isAdmin={isAdmin} />
         ) : activeTab.id === 'inventory' ? (
           // Inventory / Reordering: a bespoke procurement workspace
           // (reorder queue / distributor baskets / exit-liquidate / mix
