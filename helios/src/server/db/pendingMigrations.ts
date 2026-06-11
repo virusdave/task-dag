@@ -788,12 +788,24 @@ const SENTINELS: MigrationSentinel[] = [
       'TRUNCATE (DB-cost epic phase F1; pairs with the new in-job ' +
       'TTL prune to drop a 15 GB write-only audit backlog).',
     check: async (db) => {
+      // Drive the existence check from the small snapshots table, not the
+      // ~1M-row rows table. The naive `rows JOIN snapshots WHERE started_at<48h`
+      // form forces a full seq scan of catalog_taxonomy_snapshot_rows every
+      // time the sentinel runs (~per minute via the pending-migrations banner):
+      // ~470ms / ~88k buffers just to confirm "none old". Flipping to a
+      // snapshots-first semijoin probes the rows PK (snapshot_id leading) per
+      // old snapshot and short-circuits on the first hit via LIMIT 1 — ~8ms /
+      // index-only scans, identical boolean result. (DB-cost epic follow-up.)
       const result = await db.query<{ ok: boolean }>(
         `select not exists(
            select 1
-           from catalog_taxonomy_snapshot_rows r
-           join catalog_taxonomy_snapshots s on s.id = r.snapshot_id
+           from catalog_taxonomy_snapshots s
            where s.started_at < now() - interval '48 hours'
+             and exists (
+               select 1
+               from catalog_taxonomy_snapshot_rows r
+               where r.snapshot_id = s.id
+             )
            limit 1
          ) as ok`,
       )
