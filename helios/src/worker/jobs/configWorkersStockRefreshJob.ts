@@ -548,6 +548,25 @@ async function persistSnapshotAndDiff(input: {
                   when excluded.is_on_stock then stock_variant_state.last_out_of_stock_at
                   else excluded.last_observed_at
                 end
+            -- Write-on-change (canon §3 R3): only emit a new row version
+            -- when a column a CONSUMER reads actually changed. The only
+            -- readers of stock_variant_state are is_on_stock, quantity,
+            -- and metrc_tags_json (catalog maintenance, the pricing-
+            -- evidence freshness view, orphan-group discovery, the
+            -- conquest comparison loader). last_snapshot_id /
+            -- last_observed_at / last_in_stock_at / last_out_of_stock_at
+            -- have ZERO readers, so refreshing them every 5-min poll
+            -- produced ~19.5M dead tuples and ~20k autovacuums on a
+            -- ~1,853-row table for no benefit. metrc_tags_json is built
+            -- sorted+deduped (collectMetrcTagsFromInventoryItems /
+            -- mergeMetrcTags), so the jsonb IS DISTINCT FROM comparison
+            -- is order-stable and won't false-positive. Transitions for
+            -- pending_litalerts_refresh_queue are computed from a
+            -- separate prior-state read above, NOT from this upsert, so
+            -- skipping no-op writes here cannot affect them.
+            where stock_variant_state.is_on_stock is distinct from excluded.is_on_stock
+               or stock_variant_state.quantity is distinct from excluded.quantity
+               or stock_variant_state.metrc_tags_json is distinct from excluded.metrc_tags_json
         `,
         [site.dealerId, snapshotId, observedAt, JSON.stringify(payload)],
       )
