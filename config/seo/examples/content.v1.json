@@ -1,0 +1,91 @@
+{
+  "schema": "freshlybaked.seo.content.v1",
+  "seo_bundle_id": "seob_2026-06-11_120000_abcd12",
+  "faq_sets": [
+    {
+      "faq_set_id": "faq_general",
+      "scope": "fb_nyc",
+      "approval_id": "appr_faq_general_2026_06_11",
+      "items": [
+        {
+          "question": "What are your store hours?",
+          "answer_raw": "Our NYC dispensary is open 9am-10pm daily for recreational cannabis sales.",
+          "answer_sanitized": "Our NYC store is open 9am-10pm daily."
+        },
+        {
+          "question": "Do you offer same-day pickup?",
+          "answer_raw": "Yes, order cannabis online and pick up in-store the same day.",
+          "answer_sanitized": "Yes, order online and pick up in-store the same day."
+        }
+      ]
+    }
+  ],
+  "posts": [
+    {
+      "post_id": "post_summer_drop_2026",
+      "scope": "all",
+      "slug": "summer-drop-2026",
+      "title": "Summer 2026 Drop: What's New on the Menu",
+      "meta_description": "A look at the new summer arrivals and local NYC cannabis culture highlights.",
+      "excerpt": "New arrivals for summer 2026, plus local NYC highlights.",
+      "canonical_url": "https://freshlybaked.nyc/sites/all/whats-new/summer-drop-2026",
+      "published_at": "2026-06-11T08:00:00Z",
+      "updated_at": "2026-06-11T09:30:00Z",
+      "author": "Freshly Baked Editorial",
+      "reviewer": "dave",
+      "tags": ["nyc-culture", "new-arrivals"],
+      "body_raw": "Summer is here and so are new cannabis arrivals across our NYC menu...",
+      "body_sanitized": "Summer is here and so are new arrivals across our NYC menu...",
+      "hero_image_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "og_image_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "approval_id": "appr_post_summer_drop_2026"
+    },
+    {
+      "post_id": "post_outdated_strain_guide",
+      "scope": "all",
+      "slug": "outdated-strain-guide",
+      "title": "Strain Guide (Outdated)",
+      "meta_description": "An older strain guide kept for reference.",
+      "excerpt": "An older strain guide.",
+      "canonical_url": "https://freshlybaked.nyc/sites/all/whats-new/outdated-strain-guide",
+      "published_at": "2026-01-02T08:00:00Z",
+      "author": "Freshly Baked Editorial",
+      "reviewer": "dave",
+      "tags": ["reference"],
+      "body_raw": "An older guide to cannabis strains, kept for reference only.",
+      "body_sanitized": "An older guide, kept for reference only.",
+      "approval_id": "appr_post_outdated_strain_guide"
+    }
+  ],
+  "related_link_sets": [
+    {
+      "related_set_id": "related_storefront",
+      "scope": "fb_nyc",
+      "source_route_pattern": "/stores/*",
+      "approval_id": "appr_related_storefront",
+      "links": [
+        {
+          "target_url": "/sites/all/whats-new/summer-drop-2026",
+          "anchor_text": "See the summer 2026 drop",
+          "reason": "topical_relevance",
+          "priority": 10,
+          "mode": "dual"
+        }
+      ]
+    }
+  ],
+  "heads": [
+    {
+      "head_id": "head_home",
+      "scope": "fb_nyc",
+      "title": "Freshly Baked NYC — Recreational Cannabis Dispensary",
+      "meta_description": "Freshly Baked is your NYC dispensary for recreational cannabis.",
+      "canonical_url": "https://freshlybaked.nyc/",
+      "robots": "index,follow",
+      "og": { "og:type": "website", "og:title": "Freshly Baked NYC" },
+      "twitter": { "twitter:card": "summary_large_image" },
+      "schema_refs": ["LocalBusiness", "Organization"],
+      "approval_id": "appr_head_home"
+    }
+  ]
+}

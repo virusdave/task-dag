@@ -1,0 +1,224 @@
+// `seo-bundle` CLI — keygen / build (compile + dry-run publish) / publish
+// / validate. The Helios-side P1 deliverable (parent EPIC_PLAN §10 P1,
+// child epic automation#44; Satisfies: virusdave/top-level#15 Phase: P1).
+//
+// Run with tsx:
+//   tsx src/server/seo/cli.ts keygen
+//   tsx src/server/seo/cli.ts build --root /cloud/seo --env nonprod \
+//       --config ./seo-bundle-input.json --privkey ./signing.pem
+//   tsx src/server/seo/cli.ts publish --root /cloud/seo --env prod \
+//       --config ./approved.json --privkey ./signing.pem [--dry-run]
+//   tsx src/server/seo/cli.ts validate --root /cloud/seo --env prod \
+//       --pubkey ./signing.pub.pem --renderer 0.1.0 [--active 141]
+//
+// `build` is the P1 dry-run entrypoint: compile + validate + write a
+// CANDIDATE pointer to a non-prod path; it never touches the live
+// current.json — nothing consumes it yet. `publish` flips the live
+// pointer and is operator-only against prod (canon §1: live content).
+//
+// Signing keys are passed by the operator (file paths); the CLI never
+// reads keys from the artifact root.
+
+import { readFileSync } from 'node:fs'
+import { pathToFileURL } from 'node:url'
+
+import { generateEd25519Pem, publicKeyPemFromPrivate } from '../lp/signing.js'
+import { compileSeoBundle, SeoCompileError, type CompileInput } from './compile.js'
+import { publishSeoBundle, type SeoPublishOptions } from './publish.js'
+import { validateSeoBundle } from './validate.js'
+import type { SeoEnvironment } from './contracts.js'
+
+interface Args {
+  readonly _: string[]
+  readonly flags: Record<string, string>
+  readonly bools: Set<string>
+}
+
+function parseArgs(argv: string[]): Args {
+  const _: string[] = []
+  const flags: Record<string, string> = {}
+  const bools = new Set<string>()
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i]
+    if (a.startsWith('--')) {
+      const key = a.slice(2)
+      const next = argv[i + 1]
+      if (next === undefined || next.startsWith('--')) {
+        bools.add(key)
+      } else {
+        flags[key] = next
+        i++
+      }
+    } else {
+      _.push(a)
+    }
+  }
+  return { _, flags, bools }
+}
+
+function requireFlag(args: Args, name: string): string {
+  const v = args.flags[name]
+  if (v === undefined) throw new Error(`missing required --${name}`)
+  return v
+}
+
+const ENVIRONMENTS: readonly SeoEnvironment[] = ['prod', 'preview', 'staging', 'nonprod']
+
+function asEnvironment(v: string): SeoEnvironment {
+  if ((ENVIRONMENTS as readonly string[]).includes(v)) return v as SeoEnvironment
+  throw new Error(`invalid --env '${v}' (expected one of ${ENVIRONMENTS.join(', ')})`)
+}
+
+interface BundleConfig {
+  sites: CompileInput['sites']
+  widgets: CompileInput['widgets']
+  content: CompileInput['content']
+  policy: CompileInput['policy']
+  assets: CompileInput['assets']
+  sitemaps: CompileInput['sitemaps']
+  disabledContent?: CompileInput['disabledContent']
+  minRendererVersion?: string
+  automationGitSha?: string
+  generatedFrom?: { approval_snapshot_id?: number; seo_policy_version_id?: string }
+  previousBundleId?: string
+}
+
+function loadConfig(path: string): BundleConfig {
+  return JSON.parse(readFileSync(path, 'utf8')) as BundleConfig
+}
+
+function compileFromConfig(cfg: BundleConfig) {
+  return compileSeoBundle({
+    sites: cfg.sites,
+    widgets: cfg.widgets,
+    content: cfg.content,
+    policy: cfg.policy,
+    assets: cfg.assets,
+    sitemaps: cfg.sitemaps,
+    disabledContent: cfg.disabledContent,
+  })
+}
+
+function publishOptsFromConfig(
+  cfg: BundleConfig,
+  args: Args,
+  compiled: ReturnType<typeof compileFromConfig>,
+  environment: SeoEnvironment,
+  privateKeyPem: string,
+  candidateOnly: boolean,
+): SeoPublishOptions {
+  return {
+    compiled,
+    privateKeyPem,
+    artifactRoot: requireFlag(args, 'root'),
+    environment,
+    minRendererVersion:
+      args.flags.renderer ?? cfg.minRendererVersion ?? 'mss-seo-runtime>=0.1.0',
+    automationGitSha: args.flags['git-sha'] ?? cfg.automationGitSha ?? '0000000',
+    generatedFrom: {
+      seo_policy_version_id: cfg.generatedFrom?.seo_policy_version_id ?? cfg.policy.seo_policy_version_id,
+      ...(cfg.generatedFrom?.approval_snapshot_id
+        ? { approval_snapshot_id: cfg.generatedFrom.approval_snapshot_id }
+        : {}),
+    },
+    previousBundleId: args.flags.prev ?? cfg.previousBundleId,
+    disabledContent: cfg.disabledContent,
+    candidateOnly,
+  }
+}
+
+function cmdKeygen(): number {
+  const { publicKeyPem, privateKeyPem } = generateEd25519Pem()
+  process.stdout.write(`# ed25519 keypair for SEO bundle signing\n`)
+  process.stdout.write(`# Store the PRIVATE key with Helios only (never on /cloud).\n`)
+  process.stdout.write(`\n# --- PRIVATE (signing) ---\n${privateKeyPem}`)
+  process.stdout.write(`\n# --- PUBLIC (verify; ship to mss) ---\n${publicKeyPem}`)
+  return 0
+}
+
+function doPublish(args: Args, candidateOnly: boolean): number {
+  const environment = asEnvironment(requireFlag(args, 'env'))
+  const cfg = loadConfig(requireFlag(args, 'config'))
+  const privateKeyPem = readFileSync(requireFlag(args, 'privkey'), 'utf8')
+
+  const compiled = compileFromConfig(cfg)
+  const result = publishSeoBundle(
+    publishOptsFromConfig(cfg, args, compiled, environment, privateKeyPem, candidateOnly),
+  )
+
+  const tag = result.candidate ? '[dry-run] ' : ''
+  process.stdout.write(
+    `${tag}published ${result.seoBundleId} v${result.version}\n` +
+      `  bundleDir: ${result.bundleDir}\n` +
+      `  pointer:   ${result.pointerPath}\n`,
+  )
+
+  // Self-validate what we just wrote (a publish that fails its own
+  // validation is a bug; surface it loudly and fail).
+  const publicKeyPem = publicKeyPemFromPrivate(privateKeyPem)
+  const v = validateSeoBundle({
+    artifactRoot: requireFlag(args, 'root'),
+    pointerPath: result.pointerPath,
+    publicKeyPem,
+    runningRendererVersion: args.flags['verify-renderer'] ?? '999.0.0',
+  })
+  if (!v.ok) {
+    process.stderr.write(`SELF-VALIDATION FAILED:\n  - ${v.errors.join('\n  - ')}\n`)
+    return 1
+  }
+  process.stdout.write(`  self-validation: ok\n`)
+  return 0
+}
+
+function cmdValidate(args: Args): number {
+  const publicKeyPem = readFileSync(requireFlag(args, 'pubkey'), 'utf8')
+  const result = validateSeoBundle({
+    artifactRoot: requireFlag(args, 'root'),
+    environment: args.flags.env,
+    pointerPath: args.flags.pointer,
+    publicKeyPem,
+    runningRendererVersion: args.flags.renderer ?? '0.0.0',
+    activeVersion: args.flags.active ? Number.parseInt(args.flags.active, 10) : undefined,
+  })
+  if (result.ok) {
+    process.stdout.write(`VALID ${result.seoBundleId} v${result.version}\n`)
+    return 0
+  }
+  process.stderr.write(
+    `INVALID${result.seoBundleId ? ` ${result.seoBundleId}` : ''}:\n  - ${result.errors.join('\n  - ')}\n`,
+  )
+  return 1
+}
+
+export function main(argv: string[]): number {
+  const args = parseArgs(argv)
+  const command = args._[0]
+  try {
+    switch (command) {
+      case 'keygen':
+        return cmdKeygen()
+      case 'build':
+        // P1 dry-run: compile + write a candidate pointer only.
+        return doPublish(args, true)
+      case 'publish':
+        return doPublish(args, args.bools.has('dry-run'))
+      case 'validate':
+        return cmdValidate(args)
+      default:
+        process.stderr.write('usage: seo-bundle <keygen|build|publish|validate> [options]\n')
+        return 2
+    }
+  } catch (e) {
+    if (e instanceof SeoCompileError) {
+      process.stderr.write(`${e.message}\n`)
+      return 1
+    }
+    process.stderr.write(`error: ${e instanceof Error ? e.message : String(e)}\n`)
+    return 1
+  }
+}
+
+/* istanbul ignore next — entrypoint guard */
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  process.exit(main(process.argv.slice(2)))
+}

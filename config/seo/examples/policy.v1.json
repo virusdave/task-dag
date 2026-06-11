@@ -1,0 +1,13 @@
+{
+  "schema": "freshlybaked.seo.policy.v1",
+  "seo_policy_version_id": "seopol_2026-06-11_01",
+  "selection_algorithm_version": "seo-select-v1",
+  "rules": [
+    {
+      "policy_rule_id": "home_nyc_widgets",
+      "match": { "site": "fb_nyc", "route_pattern": "/" },
+      "widget_ids": ["head_home_nyc", "faq_storefront_nyc", "whats_new_home"],
+      "priority": 100
+    }
+  ]
+}
