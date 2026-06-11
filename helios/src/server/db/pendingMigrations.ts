@@ -245,6 +245,12 @@ const SENTINELS: MigrationSentinel[] = [
     },
   },
   {
+    migrationId: '045_sweed_session_tokens_prolong',
+    label:
+      'sweed_session_tokens.last_prolonged_at column — highwater mark of the daily Sweed keep-alive (store.auth.dealer.list); required so withSweedSession can prolong a claimed token at most once per 24h and persist when it last did so',
+    check: (db) => columnExists(db, 'sweed_session_tokens', 'last_prolonged_at'),
+  },
+  {
     migrationId: '016_job_queue_priority',
     label:
       'job_queue.priority column + lease ordering — required so operator-initiated jobs jump ahead of system-generated background backlog',

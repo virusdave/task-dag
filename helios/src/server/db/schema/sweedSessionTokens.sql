@@ -55,7 +55,12 @@ create table if not exists sweed_session_tokens (
   -- Pool claim columns (see file header for semantics).
   claimed_at          timestamptz,
   claimed_by          text,
-  claim_expires_at    timestamptz
+  claim_expires_at    timestamptz,
+  -- Highwater mark of the last successful Sweed keep-alive
+  -- ("prolongs") for this token. withSweedSession re-issues the
+  -- store.auth.dealer.list keep-alive when this is null or >24h old,
+  -- then stamps it now(). See migration 045.
+  last_prolonged_at   timestamptz
 );
 
 create unique index if not exists sweed_session_tokens_prefix_idx

@@ -16,6 +16,7 @@ interface SweedSessionTokenRow {
   claimed_at: Date | null
   claimed_by: string | null
   claim_expires_at: Date | null
+  last_prolonged_at: Date | null
 }
 
 function toIsoOrNull(value: Date | string | null): string | null {
@@ -48,6 +49,7 @@ function rowToToken(row: SweedSessionTokenRow, options: { revealToken: boolean }
     claimedAt: toIsoOrNull(row.claimed_at),
     claimedBy: row.claimed_by,
     claimExpiresAt: toIsoOrNull(row.claim_expires_at),
+    lastProlongedAt: toIsoOrNull(row.last_prolonged_at),
     isActive,
     isClaimed,
     isAvailable,
@@ -68,7 +70,8 @@ const SELECT_COLUMNS = `
   t.initial_dealer_id,
   t.claimed_at,
   t.claimed_by,
-  t.claim_expires_at
+  t.claim_expires_at,
+  t.last_prolonged_at
 `
 
 export interface ClaimedSweedSessionToken {
@@ -78,6 +81,13 @@ export interface ClaimedSweedSessionToken {
   initialDealerId: number | null
   claimedBy: string
   claimExpiresAt: Date
+  /**
+   * Highwater mark of the last successful Sweed keep-alive
+   * ("prolongs") for this row, or null if helios has never prolonged
+   * it. withSweedSession uses this to decide whether the daily
+   * store.auth.dealer.list keep-alive is due before the row is used.
+   */
+  lastProlongedAt: Date | null
 }
 
 /**
@@ -131,6 +141,7 @@ export async function claimAvailableSweedSessionToken(
       initial_dealer_id: string | number | null
       claimed_by: string
       claim_expires_at: Date
+      last_prolonged_at: Date | null
     }>(
       `
         with candidate as (
@@ -148,7 +159,7 @@ export async function claimAvailableSweedSessionToken(
                claim_expires_at = now() + ($2::int * interval '1 millisecond')
           from candidate
          where t.id = candidate.id
-        returning t.id, t.token, t.token_prefix, t.initial_dealer_id, t.claimed_by, t.claim_expires_at
+        returning t.id, t.token, t.token_prefix, t.initial_dealer_id, t.claimed_by, t.claim_expires_at, t.last_prolonged_at
       `,
       [options.claimedBy, options.ttlMs],
     )
@@ -163,14 +174,48 @@ export async function claimAvailableSweedSessionToken(
       initialDealerId: row.initial_dealer_id === null ? null : Number(row.initial_dealer_id),
       claimedBy: row.claimed_by,
       claimExpiresAt: row.claim_expires_at,
+      lastProlongedAt: row.last_prolonged_at,
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     if (
       /relation .*sweed_session_tokens.* does not exist/i.test(message) ||
-      /column .*(claimed_at|claimed_by|claim_expires_at).* does not exist/i.test(message)
+      /column .*(claimed_at|claimed_by|claim_expires_at|last_prolonged_at).* does not exist/i.test(message)
     ) {
       return null
+    }
+    throw error
+  }
+}
+
+/**
+ * Stamp the keep-alive highwater mark on a claimed pool row after a
+ * successful Sweed `store.auth.dealer.list` prolong. Only updates the
+ * row while the caller still holds the claim (`claimed_by` match), so
+ * a stale call from a process whose lease lapsed is a no-op.
+ *
+ * Tolerates the column/table being absent (migration 045 not applied)
+ * by silently no-op'ing — the keep-alive still ran against Sweed; we
+ * just can't persist the highwater mark yet.
+ */
+export async function markSweedSessionTokenProlonged(
+  db: Queryable,
+  options: { id: number; claimedBy: string },
+): Promise<void> {
+  try {
+    await db.query(
+      `update sweed_session_tokens
+          set last_prolonged_at = now()
+        where id = $1 and claimed_by = $2`,
+      [options.id, options.claimedBy],
+    )
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    if (
+      /relation .*sweed_session_tokens.* does not exist/i.test(message) ||
+      /column .*last_prolonged_at.* does not exist/i.test(message)
+    ) {
+      return
     }
     throw error
   }

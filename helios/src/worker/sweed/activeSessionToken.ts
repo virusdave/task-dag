@@ -24,6 +24,7 @@ import { getPool } from '../../server/db/pool.js'
 import {
   claimAvailableSweedSessionToken,
   markSweedSessionTokenExpired,
+  markSweedSessionTokenProlonged,
   releaseSweedSessionToken as releaseSweedSessionTokenRow,
 } from '../../server/db/queries/sweedSessionTokensQueries.js'
 
@@ -46,6 +47,13 @@ export interface ClaimedSweedToken {
   readonly rowId: number
   readonly claimedBy: string
   readonly initialDealerId: number | null
+  /**
+   * Highwater mark of the last successful Sweed keep-alive
+   * ("prolongs") for this row at claim time, or null if helios has
+   * never prolonged it. withSweedSession reads this to decide whether
+   * the daily store.auth.dealer.list keep-alive is due before use.
+   */
+  readonly lastProlongedAt: Date | null
 }
 
 export interface ClaimSweedTokenOptions {
@@ -81,6 +89,7 @@ export async function claimSweedToken(
         rowId: claimed.id,
         claimedBy: claimed.claimedBy,
         initialDealerId: claimed.initialDealerId,
+        lastProlongedAt: claimed.lastProlongedAt,
       }
     }
   } catch (error) {
@@ -128,6 +137,27 @@ export async function expireClaimedSweedToken(
   } catch (error) {
     console.warn(
       `[sweed] failed to mark session token #${claim.rowId} expired:`,
+      error instanceof Error ? error.message : error,
+    )
+  }
+}
+
+/**
+ * Persist the keep-alive ("prolongs") highwater mark for a claimed
+ * pool row after a successful Sweed `store.auth.dealer.list` call.
+ * Best-effort: a failure to stamp the column never aborts the job
+ * (the session was already prolonged server-side; we just lose the
+ * local highwater-mark update and will re-prolong next claim).
+ */
+export async function prolongClaimedSweedToken(claim: ClaimedSweedToken): Promise<void> {
+  try {
+    await markSweedSessionTokenProlonged(getPool(), {
+      id: claim.rowId,
+      claimedBy: claim.claimedBy,
+    })
+  } catch (error) {
+    console.warn(
+      `[sweed] failed to stamp prolong highwater mark on session token row #${claim.rowId}:`,
       error instanceof Error ? error.message : error,
     )
   }

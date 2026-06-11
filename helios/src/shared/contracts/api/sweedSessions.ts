@@ -31,6 +31,12 @@ export const SweedSessionTokenSchema = z.object({
   claimedAt: z.string().nullable(),
   claimedBy: z.string().nullable(),
   claimExpiresAt: z.string().nullable(),
+  // Highwater mark of the last successful Sweed keep-alive
+  // ("prolongs") RPC (store.auth.dealer.list) for this token, or
+  // null if helios has never prolonged it. The worker re-issues the
+  // keep-alive on claim when this is null or >24h old (see
+  // worker/sweed/session.ts maybeProlongSession).
+  lastProlongedAt: z.string().nullable(),
   // Convenience flags derived server-side:
   //   isActive       — row is not marked_expired
   //   isClaimed      — claim is held AND lease hasn't lapsed

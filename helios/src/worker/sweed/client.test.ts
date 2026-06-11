@@ -23,6 +23,9 @@ vi.mock('./activeSessionToken.js', async () => {
       rowId: 1,
       claimedBy: 'test-claim',
       initialDealerId: null,
+      // Recently prolonged, so withSweedSession's daily keep-alive is
+      // skipped and these tests keep asserting on the job's own RPCs.
+      lastProlongedAt: new Date(),
     })),
     releaseClaimedSweedToken: vi.fn(async () => undefined),
     expireClaimedSweedToken: vi.fn(async () => undefined),

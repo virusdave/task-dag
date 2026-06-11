@@ -4,16 +4,32 @@ import { DependencyUnavailableWorkerError } from '../runtime/errors.js'
 import {
   buildClaimTag,
   claimSweedToken,
+  prolongClaimedSweedToken,
   releaseClaimedSweedToken,
   type ClaimedSweedToken,
 } from './activeSessionToken.js'
 import { getCurrentJobAuthContext } from './authLog.js'
+import { postSweedRpc } from './transport.js'
 
 // How long to defer a job whose claim attempt found the pool
 // fully leased. Short enough that a job which "just missed" a
 // release comes back online quickly, long enough not to busy-poll
 // the DB when the pool is genuinely empty.
 const POOL_EMPTY_RETRY_DELAY_MS = 5_000
+
+// Sweed sessions stay valid as long as we exercise them at least
+// once a day. Per Sweed's own guidance (Alex, 2026-06), the canonical
+// keep-alive ("prolongs") is a `store.auth.dealer.list` RPC issued
+// with the session token; calling it daily prolongs the session
+// server-side so an operator-pasted UUID does not silently lapse.
+// We re-issue the keep-alive on claim only when the row's
+// last_prolonged_at highwater mark is null or older than this window,
+// so the cost is at most one extra RPC per token per day.
+const SESSION_PROLONG_INTERVAL_MS = 24 * 60 * 60 * 1000
+
+// Sweed's documented keep-alive RPC. Listing dealers is a cheap,
+// read-only call that has the side effect of prolonging the session.
+const SESSION_PROLONG_RPC = 'store.auth.dealer.list'
 
 /**
  * Per-job Sweed session context.
@@ -162,7 +178,17 @@ export async function withSweedSession<T>(fn: () => Promise<T>): Promise<T> {
   }
 
   try {
-    return await sessionStorage.run(context, fn)
+    return await sessionStorage.run(context, async () => {
+      // Daily keep-alive runs INSIDE the session context (so the
+      // transport layer uses + audits THIS claim's token) and BEFORE
+      // the job's own work, so the session is freshly prolonged
+      // before use and on through its eventual release back to the
+      // pool. A dead token surfaces here just like any other RPC:
+      // the auth-error path retires the row rather than keeping it
+      // warm.
+      await maybeProlongSession(claim)
+      return fn()
+    })
   } finally {
     // Always release back to the pool, even on failure. If the
     // transport layer retired the row (auth-expired), the release
@@ -171,4 +197,35 @@ export async function withSweedSession<T>(fn: () => Promise<T>): Promise<T> {
     // columns cleared by markSweedSessionTokenExpired.
     await releaseClaimedSweedToken(claim)
   }
+}
+
+/**
+ * Issue Sweed's daily keep-alive ("prolongs") for the freshly-claimed
+ * pool row when it is due, then advance the row's last_prolonged_at
+ * highwater mark.
+ *
+ * "Due" means the row has never been prolonged by helios
+ * (last_prolonged_at is null) or its last prolong is older than
+ * SESSION_PROLONG_INTERVAL_MS (24h). Because each pool row is claimed
+ * exclusively for the lifetime of the job, reading the highwater mark
+ * and conditionally prolonging is race-free — no other worker can
+ * touch this row concurrently.
+ *
+ * Must be called from within the session's AsyncLocalStorage context
+ * (i.e. inside sessionStorage.run) so postSweedRpc resolves THIS
+ * claim's token. If the keep-alive RPC itself fails with an auth
+ * error, the transport layer retires the row (maybeExpireDbToken) and
+ * rethrows, so a dead token is not silently kept in the pool.
+ */
+async function maybeProlongSession(claim: ClaimedSweedToken): Promise<void> {
+  const lastProlongedAt = claim.lastProlongedAt
+  if (
+    lastProlongedAt !== null &&
+    Date.now() - lastProlongedAt.getTime() < SESSION_PROLONG_INTERVAL_MS
+  ) {
+    return
+  }
+
+  await postSweedRpc<unknown>({ name: SESSION_PROLONG_RPC })
+  await prolongClaimedSweedToken(claim)
 }
