@@ -475,13 +475,16 @@ function CustomerValueBody({
         basis={moneyBasis}
         basisLabel={moneyBasisDef.label}
       />
-      <TrailingSpendPercentilesStrip
-        title="Trailing-12-mo spend, repeat only (≥2 visits)"
-        help="Same as the row above, but excluding single-visit customers: only customers with 2 or more non-cancelled orders in the trailing 12 months are counted."
-        percentiles={data.summary.trailing12moSpendPercentilesRepeat}
-        basis={moneyBasis}
-        basisLabel={moneyBasisDef.label}
-      />
+      {data.summary.trailing12moSpendPercentilesByMinVisits.map((cohort) => (
+        <TrailingSpendPercentilesStrip
+          key={cohort.minVisits}
+          title={`Trailing-12-mo spend, >${cohort.minVisits - 1} visit${cohort.minVisits - 1 === 1 ? '' : 's'} (${fmtInt(cohort.customers)} cust)`}
+          help={`Same as the all-customers row, but restricted to customers with ${cohort.minVisits} or more non-cancelled orders in the trailing 12 months (i.e. more than ${cohort.minVisits - 1} visit${cohort.minVisits - 1 === 1 ? '' : 's'}). ${fmtInt(cohort.customers)} customers qualify.`}
+          percentiles={cohort.percentiles}
+          basis={moneyBasis}
+          basisLabel={moneyBasisDef.label}
+        />
+      ))}
 
       {/* v1.4 V4'4: selection callout — visible iff a histogram bucket
           is currently selected via URL state. Click ✕ or press Escape

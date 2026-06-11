@@ -185,6 +185,24 @@ export type TrailingSpendPercentile = z.infer<typeof TrailingSpendPercentileSche
 export const TrailingSpendPercentilesSchema = z.array(TrailingSpendPercentileSchema)
 export type TrailingSpendPercentiles = z.infer<typeof TrailingSpendPercentilesSchema>
 
+/**
+ * Minimum-visit thresholds for the repeat-only trailing-spend
+ * percentile breakouts (operator request 2026-06-11): `> 1, > 2, > 3,
+ * > 4` visits in the trailing window — i.e. `minVisits` of 2/3/4/5.
+ */
+export const TRAILING_SPEND_REPEAT_MIN_VISITS: readonly number[] = [2, 3, 4, 5]
+
+/**
+ * Trailing-12-month spend percentiles for one minimum-visit cohort.
+ * `minVisits = 2` means "customers with > 1 visit", etc.
+ */
+export const TrailingSpendByMinVisitsSchema = z.object({
+  minVisits: z.number().int().min(2),
+  customers: z.number().int().nonnegative(),
+  percentiles: TrailingSpendPercentilesSchema,
+})
+export type TrailingSpendByMinVisits = z.infer<typeof TrailingSpendByMinVisitsSchema>
+
 export const CustomerValueSummarySchema = z.object({
   knownCustomers: z.number().int().nonnegative(),
   totalOrders: z.number().int().nonnegative(),
@@ -198,11 +216,12 @@ export const CustomerValueSummarySchema = z.object({
   /** Percentiles of per-customer trailing-12-month spend (50/80/90/95). */
   trailing12moSpendPercentiles: TrailingSpendPercentilesSchema,
   /**
-   * Same trailing-12-month spend percentiles, but over the repeat-only
-   * population — customers with >= 2 non-cancelled orders in the
-   * trailing window (single-visit customers excluded).
+   * Same trailing-12-month spend percentiles, broken out by repeat
+   * cohort — customers with >= N non-cancelled orders in the trailing
+   * window, for N in TRAILING_SPEND_REPEAT_MIN_VISITS (2/3/4/5, i.e.
+   * > 1 / > 2 / > 3 / > 4 visits).
    */
-  trailing12moSpendPercentilesRepeat: TrailingSpendPercentilesSchema,
+  trailing12moSpendPercentilesByMinVisits: z.array(TrailingSpendByMinVisitsSchema),
   grossSalesDollars: z.number(),
   grossReceiptsDollars: z.number(),
   netSalesDollars: z.number(),

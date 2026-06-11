@@ -12,9 +12,11 @@ import {
   type LifetimeByTotalPurchasesPoint,
   type PurchaseCountBucket,
   type PurchaseCountPercentiles,
+  type TrailingSpendByMinVisits,
   type TrailingSpendPercentiles,
   type VeriscanCoverage,
   TRAILING_SPEND_PERCENTILES,
+  TRAILING_SPEND_REPEAT_MIN_VISITS,
 } from '../../shared/contracts/index.js'
 import { getPool } from '../db/pool.js'
 
@@ -67,6 +69,15 @@ function emptyTrailingSpendPercentiles(): TrailingSpendPercentiles {
     grossSalesDollars: null,
     netSalesDollars: null,
     grossReceiptsDollars: null,
+  }))
+}
+
+/** Empty-state repeat-cohort breakouts (one entry per min-visit threshold). */
+function emptyTrailingSpendByMinVisits(): TrailingSpendByMinVisits[] {
+  return TRAILING_SPEND_REPEAT_MIN_VISITS.map((minVisits) => ({
+    minVisits,
+    customers: 0,
+    percentiles: emptyTrailingSpendPercentiles(),
   }))
 }
 
@@ -338,7 +349,7 @@ export async function getCustomerValueAnalytics(
       observedMedianLtvGrossDollars: null,
       purchaseCountPercentiles: emptyPurchaseCountPercentiles(args.percentiles),
       trailing12moSpendPercentiles: emptyTrailingSpendPercentiles(),
-      trailing12moSpendPercentilesRepeat: emptyTrailingSpendPercentiles(),
+      trailing12moSpendPercentilesByMinVisits: emptyTrailingSpendByMinVisits(),
       grossSalesDollars: 0,
       grossReceiptsDollars: 0,
       netSalesDollars: 0,
@@ -622,22 +633,25 @@ export async function getCustomerValueAnalytics(
   // order at the selected sites in [to − 12 months, to). One param per
   // requested percentile ($3, $4, …), reused across all three $ bases.
   const ttmFractions = TRAILING_SPEND_PERCENTILES.map((p) => p / 100)
-  // For each requested percentile, emit all three $ bases for BOTH the
-  // full trailing-window population (gs_/ns_/rc_, from `ttm`) and the
-  // repeat-only population with >= 2 visits (rgs_/rns_/rrc_, from
-  // `ttm_repeat`). Scalar subqueries keep the two populations cleanly
-  // separated in one round-trip.
-  const ttmSelectCols = TRAILING_SPEND_PERCENTILES.map((_, i) => {
-    const p = `$${i + 3}::float8`
-    return [
-      `(select percentile_cont(${p}) within group (order by gross_sales) from ttm) as gs_${i}`,
-      `(select percentile_cont(${p}) within group (order by net_sales) from ttm) as ns_${i}`,
-      `(select percentile_cont(${p}) within group (order by receipts) from ttm) as rc_${i}`,
-      `(select percentile_cont(${p}) within group (order by gross_sales) from ttm_repeat) as rgs_${i}`,
-      `(select percentile_cont(${p}) within group (order by net_sales) from ttm_repeat) as rns_${i}`,
-      `(select percentile_cont(${p}) within group (order by receipts) from ttm_repeat) as rrc_${i}`,
-    ].join(',\n      ')
-  }).join(',\n      ')
+  // Cohorts: the full trailing-window population (minVisits = 1, prefix
+  // `m1`) plus one repeat cohort per TRAILING_SPEND_REPEAT_MIN_VISITS
+  // threshold (minVisits 2/3/4/5, prefixes `m2`…`m5`). For each cohort
+  // we emit a customer count plus all three $ bases at each requested
+  // percentile, as scalar subqueries filtered by `visits >= N` over a
+  // single shared `ttm` CTE — one round-trip, cohorts cleanly separated.
+  const ttmCohorts: ReadonlyArray<number> = [1, ...TRAILING_SPEND_REPEAT_MIN_VISITS]
+  const cohortCols: string[] = []
+  for (const n of ttmCohorts) {
+    cohortCols.push(`(select count(*) from ttm where visits >= ${n})::int as m${n}_cust`)
+    for (let i = 0; i < TRAILING_SPEND_PERCENTILES.length; i++) {
+      const p = `$${i + 3}::float8`
+      cohortCols.push(
+        `(select percentile_cont(${p}) within group (order by gross_sales) from ttm where visits >= ${n}) as m${n}_gs_${i}`,
+        `(select percentile_cont(${p}) within group (order by net_sales) from ttm where visits >= ${n}) as m${n}_ns_${i}`,
+        `(select percentile_cont(${p}) within group (order by receipts) from ttm where visits >= ${n}) as m${n}_rc_${i}`,
+      )
+    }
+  }
   const trailingSpendSql = `
     with ttm as (
       select so.customer_id,
@@ -652,10 +666,9 @@ export async function getCustomerValueAnalytics(
         and so.pay_time <  $2::timestamptz
         ${nonCancelledOrderSql('so')}
       group by so.customer_id
-    ),
-    ttm_repeat as (select * from ttm where visits >= 2)
+    )
     select
-      ${ttmSelectCols}
+      ${cohortCols.join(',\n      ')}
   `
   const [result, guestRes, retentionRes, veriscanRes, ttmRes] = await Promise.all([
     pool.query<UnionRow>(sql, [
@@ -706,23 +719,22 @@ export async function getCustomerValueAnalytics(
     const n = asNum(v)
     return n === null ? null : Math.round(n * 100) / 100
   }
-  const trailing12moSpendPercentiles: TrailingSpendPercentiles = TRAILING_SPEND_PERCENTILES.map(
-    (percentile, i) => ({
+  const cohortPercentiles = (n: number): TrailingSpendPercentiles =>
+    TRAILING_SPEND_PERCENTILES.map((percentile, i) => ({
       percentile,
-      grossSalesDollars: round2OrNull(ttmRow?.[`gs_${i}`]),
-      netSalesDollars: round2OrNull(ttmRow?.[`ns_${i}`]),
-      grossReceiptsDollars: round2OrNull(ttmRow?.[`rc_${i}`]),
-    }),
-  )
-  // Repeat-only population (>= 2 visits in the trailing window).
-  const trailing12moSpendPercentilesRepeat: TrailingSpendPercentiles = TRAILING_SPEND_PERCENTILES.map(
-    (percentile, i) => ({
-      percentile,
-      grossSalesDollars: round2OrNull(ttmRow?.[`rgs_${i}`]),
-      netSalesDollars: round2OrNull(ttmRow?.[`rns_${i}`]),
-      grossReceiptsDollars: round2OrNull(ttmRow?.[`rrc_${i}`]),
-    }),
-  )
+      grossSalesDollars: round2OrNull(ttmRow?.[`m${n}_gs_${i}`]),
+      netSalesDollars: round2OrNull(ttmRow?.[`m${n}_ns_${i}`]),
+      grossReceiptsDollars: round2OrNull(ttmRow?.[`m${n}_rc_${i}`]),
+    }))
+  // m1 = full trailing-window population (>= 1 visit).
+  const trailing12moSpendPercentiles = cohortPercentiles(1)
+  // Repeat cohorts: >= 2 / 3 / 4 / 5 visits (> 1 / > 2 / > 3 / > 4).
+  const trailing12moSpendPercentilesByMinVisits: TrailingSpendByMinVisits[] =
+    TRAILING_SPEND_REPEAT_MIN_VISITS.map((minVisits) => ({
+      minVisits,
+      customers: asReqInt(ttmRow?.[`m${minVisits}_cust`]),
+      percentiles: cohortPercentiles(minVisits),
+    }))
   const veriscanTotal = asReqInt(veriscanRes.rows[0]?.total)
   const veriscanLinked = asReqInt(veriscanRes.rows[0]?.linked)
   const veriscanCoverage: VeriscanCoverage = {
@@ -741,7 +753,7 @@ export async function getCustomerValueAnalytics(
     observedMedianLtvGrossDollars: null,
     purchaseCountPercentiles: emptyPurchaseCountPercentiles(args.percentiles),
     trailing12moSpendPercentiles: emptyTrailingSpendPercentiles(),
-    trailing12moSpendPercentilesRepeat: emptyTrailingSpendPercentiles(),
+    trailing12moSpendPercentilesByMinVisits: emptyTrailingSpendByMinVisits(),
     grossSalesDollars: 0,
     grossReceiptsDollars: 0,
     netSalesDollars: 0,
@@ -780,7 +792,8 @@ export async function getCustomerValueAnalytics(
         // query (different lookback window than the page range), not
         // the union — assign the precomputed values here.
         summary.trailing12moSpendPercentiles = trailing12moSpendPercentiles
-        summary.trailing12moSpendPercentilesRepeat = trailing12moSpendPercentilesRepeat
+        summary.trailing12moSpendPercentilesByMinVisits =
+          trailing12moSpendPercentilesByMinVisits
         break
       }
       case 'purchase_count': {
