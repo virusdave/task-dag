@@ -5,6 +5,8 @@ import {
   type InventoryDistributorStat,
   type InventoryProcurementResponse,
   type InventoryProcurementSummary,
+  type InventoryScoreFactor,
+  type InventorySkuHistoryResponse,
   type InventorySkuRow,
 } from '../../shared/contracts/index.js'
 import { getPool } from '../db/pool.js'
@@ -127,14 +129,26 @@ pkg_dim AS (
   -- package -> product map for mapping order line items
   SELECT dealer_id, inventory_item_id, product_id FROM pkg_clean WHERE product_id IS NOT NULL
 ),
+taxonomy AS (
+  -- Brand / category / subcategory live on catalog_groups, NOT on the
+  -- snapshot row (those snapshot columns ship NULL from the grouped
+  -- inventory feed). Resolve per product_id via
+  -- live_state_json->'products'[](productId match), same as catalog
+  -- analytics. distinct-on keeps one taxonomy row per product even if a
+  -- product appears in more than one catalog group. ~99% coverage.
+  SELECT DISTINCT ON ((prod->>'productId')::bigint)
+    (prod->>'productId')::bigint AS product_id,
+    cg.brand_name, cg.category_name, cg.subcategory_name
+  FROM catalog_groups cg,
+       jsonb_array_elements(cg.live_state_json->'products') AS prod
+  WHERE cg.deleted_at IS NULL AND prod->>'productId' IS NOT NULL
+  ORDER BY (prod->>'productId')::bigint, cg.updated_at DESC NULLS LAST
+),
 inv AS (
   SELECT
     pl.dealer_id, pl.product_id,
     max(pl.product_name)     AS product_name,
     max(pl.product_sku)      AS product_sku,
-    max(pl.category_name)    AS category_name,
-    max(pl.subcategory_name) AS subcategory_name,
-    max(pl.brand_name)       AS brand_name,
     max(pl.distributor_name) AS distributor_name,
     sum(greatest(pl.current_qty,0))   AS physical_units,
     sum(greatest(pl.hold_qty,0))      AS held_units,
@@ -178,7 +192,7 @@ sales AS (
 )
 SELECT
   inv.dealer_id, inv.product_id, inv.product_name, inv.product_sku,
-  inv.category_name, inv.subcategory_name, inv.brand_name, inv.distributor_name,
+  tx.category_name, tx.subcategory_name, tx.brand_name, inv.distributor_name,
   inv.physical_units, inv.held_units, inv.sellable_units, inv.on_hand_cost,
   inv.unit_cost_current, inv.pkg_count, inv.first_received_at, inv.avg_inventory_age_days,
   inv.nearest_expiration, inv.expiring_units_60, inv.expiring_cost_60, inv.snapshot_age_hours,
@@ -186,6 +200,7 @@ SELECT
   coalesce(s.revenue_w,0) AS revenue_w, coalesce(s.sale_days_w,0) AS sale_days_w, s.last_sale_at
 FROM inv
 LEFT JOIN sales s ON s.dealer_id = inv.dealer_id AND s.product_id = inv.product_id
+LEFT JOIN taxonomy tx ON tx.product_id = inv.product_id
 WHERE inv.product_id IS NOT NULL
 `
 
@@ -452,6 +467,8 @@ export async function getInventoryProcurement(
       expectedMarginLossBeforeReplenishment: expectedLoss,
       reorderPriorityScore: 0, // filled in pass 2
       deadweightScore: 0, // filled in pass 2 (needs capital p95)
+      reorderFactors: [], // filled in pass 2
+      deadweightFactors: [], // filled in pass 2
       confidenceScore,
       recentSeller,
       outRegretted,
@@ -473,29 +490,48 @@ export async function getInventoryProcurement(
   // Pass 2: scores + actions.
   for (const m of mids) {
     const row = m.row
-    const capitalScore = normLog(row.onHandCost, p95Capital)
-    const deadweightScore = Math.round(
-      100 *
-        (0.3 * m.slowScore +
-          0.25 * capitalScore +
-          0.2 * m.ageScore +
-          0.15 * m.expiryScore +
-          0.1 * m.marginWeakness),
-    )
-    row.deadweightScore = clamp(deadweightScore, 0, 100)
 
+    // --- Deadweight score, decomposed into its weighted terms. We build
+    // the factor list from raw (unrounded) point contributions and derive
+    // the displayed score as clamp(round(Σ contribution), 0, 100) so the
+    // justification bars in the UI always sum to the number shown. ---
+    const capitalScore = normLog(row.onHandCost, p95Capital)
+    const deadweightFactors: InventoryScoreFactor[] = [
+      { key: 'slow', label: 'Slow velocity', weight: 0.3, norm: m.slowScore, contribution: 30 * m.slowScore },
+      { key: 'capital', label: 'Capital tied up', weight: 0.25, norm: capitalScore, contribution: 25 * capitalScore },
+      { key: 'age', label: 'Inventory age', weight: 0.2, norm: m.ageScore, contribution: 20 * m.ageScore },
+      { key: 'expiry', label: 'Expiry proximity', weight: 0.15, norm: m.expiryScore, contribution: 15 * m.expiryScore },
+      { key: 'margin_weakness', label: 'Weak margin', weight: 0.1, norm: m.marginWeakness, contribution: 10 * m.marginWeakness },
+    ]
+    row.deadweightScore = clamp(
+      Math.round(sum(deadweightFactors.map((f) => f.contribution))),
+      0,
+      100,
+    )
+    row.deadweightFactors = deadweightFactors
+
+    // --- Reorder priority score, likewise decomposed. The deadweight
+    // penalty is a NEGATIVE term (we deprioritise reordering things we're
+    // simultaneously trying to exit). ---
     const reorderGapDays =
       row.daysSupply !== null ? Math.max(0, row.reorderPointDays - row.daysSupply) : row.reorderPointDays
-    const deadweightPenalty = row.deadweightScore >= 70 ? 0.2 : 0
-    const priority = Math.round(
-      100 *
-        (0.5 * normLog(m.expectedLoss, p95Loss) +
-          0.25 * clamp(reorderGapDays / 14, 0, 1) +
-          0.15 * normLog(m.lostMarginPerDay, p95Lost) +
-          0.1 * row.confidenceScore -
-          deadweightPenalty),
+    const expectedLossNorm = normLog(m.expectedLoss, p95Loss)
+    const reorderGapNorm = clamp(reorderGapDays / 14, 0, 1)
+    const lostMarginNorm = normLog(m.lostMarginPerDay, p95Lost)
+    const penaltyNorm = row.deadweightScore >= 70 ? 1 : 0
+    const reorderFactors: InventoryScoreFactor[] = [
+      { key: 'expected_loss', label: 'Margin loss before restock', weight: 0.5, norm: expectedLossNorm, contribution: 50 * expectedLossNorm },
+      { key: 'reorder_gap', label: 'Below reorder point', weight: 0.25, norm: reorderGapNorm, contribution: 25 * reorderGapNorm },
+      { key: 'lost_margin', label: 'Lost margin / day', weight: 0.15, norm: lostMarginNorm, contribution: 15 * lostMarginNorm },
+      { key: 'confidence', label: 'Confidence', weight: 0.1, norm: row.confidenceScore, contribution: 10 * row.confidenceScore },
+      { key: 'deadweight_penalty', label: 'Deadweight penalty', weight: -0.2, norm: penaltyNorm, contribution: -20 * penaltyNorm },
+    ]
+    row.reorderPriorityScore = clamp(
+      Math.round(sum(reorderFactors.map((f) => f.contribution))),
+      0,
+      100,
     )
-    row.reorderPriorityScore = clamp(priority, 0, 100)
+    row.reorderFactors = reorderFactors
 
     // do_not_reorder
     row.doNotReorder =
@@ -534,6 +570,99 @@ export async function getInventoryProcurement(
     distributors,
     methodology: METHODOLOGY,
   }
+}
+
+// ============================================================================
+// On-demand per-SKU daily sales history (powers the insight-panel sparkline).
+// Maps order lines to product via the SAME latest-snapshot package dimension
+// the velocity calc uses, so the sparkline total reconciles with the row's
+// displayed units. NY-local business-day buckets; canceled lines excluded.
+// ============================================================================
+
+const SKU_HISTORY_SQL = `
+WITH pkg_dim AS (
+  SELECT DISTINCT ON (s.dealer_id, s.inventory_item_id)
+    s.dealer_id, s.inventory_item_id, s.product_id
+  FROM sweed_package_snapshots s
+  WHERE s.dealer_id = $1::bigint AND s.product_id = $2::bigint
+  ORDER BY s.dealer_id, s.inventory_item_id, s.observed_at_max DESC
+)
+SELECT
+  (${bucketLocalExpr('day', 'f.pay_time')})::date AS d,
+  sum(f.qty)     AS units,
+  sum(f.revenue) AS revenue
+FROM sweed_order_items_flat f
+JOIN pkg_dim pd ON pd.dealer_id = f.dealer_id AND pd.inventory_item_id = f.inventory_item_id
+WHERE f.dealer_id = $1::bigint
+  AND f.pay_time >= now() - ($3::int || ' days')::interval
+  AND lower(coalesce(f.raw_item->'invoiceItemStatus'->>'name', '')) <> 'canceled'
+GROUP BY 1
+ORDER BY 1
+`
+
+interface SkuHistoryRow {
+  d: string | Date
+  units: string | number | null
+  revenue: string | number | null
+}
+
+export async function getInventorySkuHistory(args: {
+  dealerId: number
+  productId: number
+  days: number
+}): Promise<InventorySkuHistoryResponse> {
+  const pool = getPool()
+  const res = await pool.query<SkuHistoryRow>(SKU_HISTORY_SQL, [
+    args.dealerId,
+    args.productId,
+    args.days,
+  ])
+
+  // Index observed days, then zero-fill the whole window so the chart is
+  // honest about no-sale days. Keys are NY-local business-day ISO dates.
+  const byDate = new Map<string, { units: number; revenue: number }>()
+  for (const r of res.rows) {
+    const key = r.d instanceof Date ? r.d.toISOString().slice(0, 10) : String(r.d).slice(0, 10)
+    byDate.set(key, { units: num(r.units), revenue: num(r.revenue) })
+  }
+
+  const series: InventorySkuHistoryResponse['series'] = []
+  let totalUnits = 0
+  let totalRevenue = 0
+  // Walk day-by-day from (days-1) ago to today in NY-local business-day
+  // space, zero-filling. Dedupe keys (a DST-boundary day can otherwise
+  // repeat when stepping by a fixed 24h) so totals can't double-count.
+  const SHIFT_MS = 8 * 3600_000
+  const seen = new Set<string>()
+  for (let i = args.days - 1; i >= 0; i--) {
+    const key = nyBusinessDayKey(Date.now() - i * DAY_MS, SHIFT_MS)
+    if (seen.has(key)) continue
+    seen.add(key)
+    const hit = byDate.get(key)
+    const units = hit?.units ?? 0
+    const revenue = hit?.revenue ?? 0
+    series.push({ date: key, units, revenue })
+    totalUnits += units
+    totalRevenue += revenue
+  }
+
+  return {
+    dealerId: args.dealerId,
+    productId: args.productId,
+    days: args.days,
+    totalUnits: round2(totalUnits),
+    totalRevenue: round2(totalRevenue),
+    series,
+  }
+}
+
+// NY-local business-day key (YYYY-MM-DD) for a UTC ms instant: shift back
+// 8h so pre-08:00 sales fall on the prior business day, then format in the
+// America/New_York wall-clock — mirrors bucketLocalExpr('day', …).
+function nyBusinessDayKey(ms: number, shiftMs: number): string {
+  const shifted = new Date(ms - shiftMs)
+  // en-CA gives YYYY-MM-DD; timeZone renders NY wall-clock.
+  return shifted.toLocaleDateString('en-CA', { timeZone: 'America/New_York' })
 }
 
 function classifyAction(row: InventorySkuRow): InventoryAction {

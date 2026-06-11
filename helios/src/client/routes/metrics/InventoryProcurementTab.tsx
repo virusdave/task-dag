@@ -1,10 +1,13 @@
-import { useEffect, useMemo, useState } from 'react'
+import { Fragment, useEffect, useMemo, useState } from 'react'
 
 import {
   InventoryProcurementResponseSchema,
+  InventorySkuHistoryResponseSchema,
   type InventoryAction,
   type InventoryDistributorStat,
   type InventoryProcurementResponse,
+  type InventoryScoreFactor,
+  type InventorySkuHistoryResponse,
   type InventorySkuRow,
 } from '../../../shared/contracts/index.js'
 import { loadJson } from '../../app/fetchJson.js'
@@ -93,6 +96,8 @@ interface DeepLinkState {
   view: SubTab
   sites: ReadonlySet<string>
   windowDays: number
+  /** Expanded SKU insight panel (`dealerId:productId`), or null. */
+  expandedSku: string | null
 }
 
 const VALID_SUBTABS = new Set<SubTab>(SUBTABS.map((t) => t.id))
@@ -106,6 +111,7 @@ function readDeepLink(defaults: DeepLinkState): DeepLinkState {
   const view = p.get('view')
   const sites = p.get('sites')
   const win = p.get('window')
+  const sku = p.get('sku')
   const winNum = win ? Number(win) : NaN
   return {
     view: view && VALID_SUBTABS.has(view as SubTab) ? (view as SubTab) : defaults.view,
@@ -113,6 +119,7 @@ function readDeepLink(defaults: DeepLinkState): DeepLinkState {
       ? new Set(sites.split(',').filter((s) => s.length > 0))
       : defaults.sites,
     windowDays: VALID_WINDOWS.has(winNum) ? winNum : defaults.windowDays,
+    expandedSku: sku && /^\d+:\d+$/.test(sku) ? sku : defaults.expandedSku,
   }
 }
 
@@ -122,10 +129,32 @@ function writeDeepLink(state: DeepLinkState): void {
   p.set('view', state.view)
   if (state.sites.size > 0) p.set('sites', Array.from(state.sites).sort().join(','))
   p.set('window', String(state.windowDays))
+  if (state.expandedSku) p.set('sku', state.expandedSku)
   const hash = `#${p.toString()}`
   if (hash !== window.location.hash) {
     window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}${hash}`)
   }
+}
+
+/** Stable per-SKU key for expand state / deep-links. */
+function skuKey(r: InventorySkuRow): string {
+  return `${r.dealerId}:${r.productId}`
+}
+
+/** Build a deep-link href to this page with one SKU pre-expanded (new tab). */
+function skuDetailHref(
+  subTab: SubTab,
+  sites: ReadonlySet<string>,
+  windowDays: number,
+  key: string,
+): string {
+  if (typeof window === 'undefined') return '#'
+  const p = new URLSearchParams()
+  p.set('view', subTab)
+  if (sites.size > 0) p.set('sites', Array.from(sites).sort().join(','))
+  p.set('window', String(windowDays))
+  p.set('sku', key)
+  return `${window.location.pathname}${window.location.search}#${p.toString()}`
 }
 
 // ---------------------------------------------------------------------------
@@ -189,18 +218,442 @@ function Kpi({ value, label, warn }: { value: string; label: string; warn?: bool
   )
 }
 
+// ===========================================================================
+// Per-SKU insight / justification panel
+//
+// Turns each "black art" recommendation row into a defensible decision:
+//   1. a plain-language sentence stating the action + the business reason,
+//   2. the supporting facts behind it,
+//   3. the score broken into its weighted terms (so the 0–100 number isn't
+//      a black box), and
+//   4. an on-demand daily-sales sparkline answering "was this actually
+//      selling, or is the model inventing demand?".
+// Shared by the Reorder queue and Exit/liquidate tables.
+// ===========================================================================
+
+type InsightMode = 'reorder' | 'exit'
+
+// Module-level cache so re-expanding a row (or deep-linking) is instant and
+// we never refetch the same series within a session.
+const skuHistoryCache = new Map<string, InventorySkuHistoryResponse>()
+
+function useSkuHistory(
+  r: InventorySkuRow,
+  days: number,
+): { data: InventorySkuHistoryResponse | null; loading: boolean; error: string | null } {
+  const key = `${r.dealerId}|${r.productId}|${days}`
+  const [state, setState] = useState<{
+    data: InventorySkuHistoryResponse | null
+    loading: boolean
+    error: string | null
+  }>(() =>
+    skuHistoryCache.has(key)
+      ? { data: skuHistoryCache.get(key)!, loading: false, error: null }
+      : { data: null, loading: false, error: null },
+  )
+  useEffect(() => {
+    if (r.productId === null) {
+      setState({ data: null, loading: false, error: 'No product id for this row.' })
+      return
+    }
+    const cached = skuHistoryCache.get(key)
+    if (cached) {
+      setState({ data: cached, loading: false, error: null })
+      return
+    }
+    let cancelled = false
+    setState({ data: null, loading: true, error: null })
+    loadJson(
+      `/api/inventory-procurement/sku-history?dealerId=${r.dealerId}&productId=${r.productId}&days=${days}`,
+      InventorySkuHistoryResponseSchema,
+    )
+      .then((d) => {
+        skuHistoryCache.set(key, d)
+        if (!cancelled) setState({ data: d, loading: false, error: null })
+      })
+      .catch((e: unknown) => {
+        if (!cancelled)
+          setState({ data: null, loading: false, error: e instanceof Error ? e.message : String(e) })
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [key, r.productId, r.dealerId, days])
+  return state
+}
+
+// Plain-language decision sentence, action-rule-aware (the action is NOT
+// always "because the score is high" — overshoot / hidden-stock / expiry
+// are rule-driven), plus a low-confidence caveat.
+function buildSkuJustification(r: InventorySkuRow, mode: InsightMode): {
+  sentence: string
+  caveat: string | null
+} {
+  const dist = r.distributorName ? ` from ${r.distributorName}` : ''
+  const ds = fmtDays(r.daysSupply ?? undefined)
+  const fcst = fmtNum(r.forecastDailyUnits, 1)
+  let sentence: string
+
+  switch (r.action) {
+    case 'order_now':
+    case 'order_now_supplier_unknown':
+      sentence =
+        `Order ${fmtNum(r.recommendedQty)} units${dist} (~${fmtMoney(r.recommendedCost)}). ` +
+        `Only ${fmtNum(r.sellableUnits)} sellable (~${ds} at ${fcst}/day) and restock needs ` +
+        `~${fmtDays(r.reorderPointDays)}; waiting risks ${fmtMoney(r.expectedMarginLossBeforeReplenishment)} ` +
+        `of margin before stock lands.` +
+        (r.action === 'order_now_supplier_unknown' ? ' Supplier unknown — confirm who to buy from.' : '')
+      break
+    case 'reorder_soon':
+      sentence =
+        `Reorder ~${fmtNum(r.recommendedQty)} units${dist} soon — ${ds} of supply at ${fcst}/day ` +
+        `vs a ${fmtDays(r.reorderPointDays)} reorder point. Not urgent yet.`
+      break
+    case 'check_hidden_stock':
+      sentence =
+        `${fmtNum(r.physicalUnits)} units on hand but 0 sellable — likely stuck on hold / quarantine. ` +
+        `Check the floor before reordering (was selling at ${fcst}/day).`
+      break
+    case 'skip_min_order_overshoots':
+      sentence =
+        `Real demand (${fcst}/day), but the ${fmtNum(r.suppressedRecommendedQty)}-unit minimum case would ` +
+        `cover ~${fmtDays(r.coverageAfterSnappedOrderDays ?? undefined)} vs a ${fmtDays(r.targetCoverDays)} ` +
+        `target — too much to sell through, so it's not recommended.`
+      break
+    case 'accept_stockout':
+      sentence =
+        `Out of stock and was recently selling, but there's no economical reorder right now ` +
+        `(no supplier or qty). Accept the stockout unless you can source it.`
+      break
+    case 'liquidate_now':
+      sentence =
+        `Liquidate now — ${fmtMoney(r.onHandCost)} of capital tied up in ${fmtNum(r.physicalUnits)} units, ` +
+        `${fmtNum(r.units90)} sold in 90d, avg age ~${fmtDays(r.avgInventoryAgeDays ?? undefined)}. ` +
+        `The capital is stranded; clear it.`
+      break
+    case 'burn_down_stop_carry':
+      sentence =
+        `Burn down / stop carrying — deadweight ${r.deadweightScore}/100: ${fmtMoney(r.onHandCost)} capital, ` +
+        `${fmtNum(r.units90)} sold in 90d` +
+        (r.expiringUnits60 > 0 ? `, ${fmtNum(r.expiringUnits60)} units expiring ≤60d` : '') +
+        `. Don't replenish; let it draw down or discount.`
+      break
+    case 'reprice_before_expiry':
+      sentence =
+        `Reprice before expiry — ${fmtNum(r.expiringUnits60 > 0 ? r.expiringUnits60 : r.physicalUnits)} units ` +
+        `near expiry (${fmtDays(r.daysToNearestExpiration ?? undefined)} out). Discount to clear while it ` +
+        `still has value.`
+      break
+    case 'reduce_future_orders':
+      sentence =
+        `Overstocked — ${ds} of supply at ${fcst}/day. Stop or thin future orders and let it draw down.`
+      break
+    case 'do_not_reorder':
+      sentence =
+        `Not selling enough to justify reordering` +
+        (r.deadweightScore >= 70 ? ` (flagged deadweight ${r.deadweightScore}/100)` : '') +
+        `. ${fmtNum(r.units90)} sold in 90d.`
+      break
+    default:
+      sentence =
+        mode === 'reorder'
+          ? `Adequately stocked — ${ds} of supply, above the ${fmtDays(r.reorderPointDays)} reorder point.`
+          : `${fmtMoney(r.onHandCost)} on hand, ${fmtNum(r.units90)} sold in 90d.`
+  }
+
+  const caveat =
+    r.confidenceScore < 0.6
+      ? `Low confidence (${fmtPct(r.confidenceScore)}) — sparse sales history and/or default supplier timing; treat as directional.`
+      : null
+  return { sentence, caveat }
+}
+
+// Weighted-factor score breakdown. Bar width = |points|/100 so the bars are
+// proportional to the 0–100 score and visibly sum to the headline number.
+function ScoreBreakdown({
+  title,
+  score,
+  factors,
+}: {
+  title: string
+  score: number
+  factors: ReadonlyArray<InventoryScoreFactor>
+}) {
+  return (
+    <div className="inv-score">
+      <div className="inv-score-head">
+        <strong>{score}</strong>
+        <span className="subtle-copy">/100 · {title}</span>
+      </div>
+      {factors.map((f) => {
+        const neg = f.contribution < 0
+        const widthPct = Math.min(100, Math.abs(f.contribution))
+        return (
+          <div className="inv-score-row" key={f.key}>
+            <span className="inv-score-label" title={`weight ${(f.weight * 100).toFixed(0)}% · magnitude ${fmtPct(f.norm)}`}>
+              {f.label}
+            </span>
+            <span className="inv-score-track">
+              <span
+                className={`inv-score-fill${neg ? ' is-neg' : ''}`}
+                style={{ width: `${widthPct}%` }}
+              />
+            </span>
+            <span className="inv-score-val">
+              {f.contribution >= 0 ? '+' : '−'}
+              {Math.abs(f.contribution).toFixed(1)}
+            </span>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+// Honest daily-sales bar chart (sparse spiky data → bars, not a smoothed
+// line). Zero-filled by the server. A 7-day trailing average line gives the
+// trend the forecast is built on.
+function DailySalesBars({ history }: { history: InventorySkuHistoryResponse }) {
+  const series = history.series
+  const n = series.length
+  if (n === 0) return <p className="subtle-copy">No sales in the last {history.days} days.</p>
+  const W = 760
+  const H = 130
+  const PADL = 6
+  const PADR = 6
+  const PADT = 8
+  const PADB = 18
+  const plotW = W - PADL - PADR
+  const plotH = H - PADT - PADB
+  const maxU = Math.max(1, ...series.map((s) => s.units))
+  const bw = plotW / n
+  const yOf = (u: number) => PADT + plotH - (u / maxU) * plotH
+
+  // 7-day trailing average path.
+  const avg: number[] = series.map((_, i) => {
+    const lo = Math.max(0, i - 6)
+    let t = 0
+    for (let j = lo; j <= i; j++) t += series[j]!.units
+    return t / (i - lo + 1)
+  })
+  let avgPath = ''
+  for (let i = 0; i < n; i++) {
+    const x = PADL + i * bw + bw / 2
+    const y = yOf(avg[i]!)
+    avgPath += `${i === 0 ? 'M' : 'L'} ${x.toFixed(1)} ${y.toFixed(1)} `
+  }
+
+  const firstDate = series[0]!.date
+  const lastDate = series[n - 1]!.date
+  const avgPerDay = history.totalUnits / n
+
+  return (
+    <div className="inv-spark">
+      <div className="inv-spark-caption subtle-copy">
+        {fmtNum(history.totalUnits)} units over {history.days}d · {avgPerDay.toFixed(2)}/day avg ·{' '}
+        {fmtMoney(history.totalRevenue)} revenue
+      </div>
+      <svg viewBox={`0 0 ${W} ${H}`} className="inv-spark-svg" role="img" aria-label="Daily units sold">
+        <line x1={PADL} x2={W - PADR} y1={PADT + plotH} y2={PADT + plotH} stroke="#d8d8d8" strokeWidth={1} />
+        {series.map((s, i) => {
+          const h = (s.units / maxU) * plotH
+          return (
+            <rect
+              key={s.date}
+              x={PADL + i * bw + 0.4}
+              y={PADT + plotH - h}
+              width={Math.max(0.6, bw - 0.8)}
+              height={h}
+              className="inv-spark-bar"
+            >
+              <title>{`${s.date}: ${s.units} units · ${fmtMoney(s.revenue)}`}</title>
+            </rect>
+          )
+        })}
+        {n > 1 ? <path d={avgPath} className="inv-spark-avg" fill="none" /> : null}
+        <text x={PADL} y={H - 5} fontSize={9} fill="#666">
+          {firstDate}
+        </text>
+        <text x={W - PADR} y={H - 5} fontSize={9} fill="#666" textAnchor="end">
+          {lastDate}
+        </text>
+      </svg>
+    </div>
+  )
+}
+
+function Fact({ label, value, warn }: { label: string; value: string; warn?: boolean }) {
+  return (
+    <div className={`inv-fact${warn ? ' is-warn' : ''}`}>
+      <div className="inv-fact-label subtle-copy">{label}</div>
+      <div className="inv-fact-value">{value}</div>
+    </div>
+  )
+}
+
+function reorderFacts(r: InventorySkuRow): Array<{ label: string; value: string; warn?: boolean }> {
+  return [
+    { label: 'Sellable', value: fmtNum(r.sellableUnits), warn: r.sellableUnits === 0 },
+    { label: 'Days supply', value: fmtDays(r.daysSupply ?? undefined) },
+    { label: 'Forecast/day', value: fmtNum(r.forecastDailyUnits, 1) },
+    { label: 'Velocity 7d / win', value: `${fmtNum(r.units7 / 7, 1)} / ${fmtNum(r.velocity, 1)}` },
+    { label: 'Lead + safety', value: fmtDays(r.reorderPointDays) },
+    { label: 'Cadence', value: fmtDays(r.cadenceDays) },
+    { label: 'Target cover', value: fmtDays(r.targetCoverDays) },
+    { label: 'Rec qty', value: fmtNum(r.recommendedQty) },
+    { label: 'Est cost', value: fmtMoney(r.recommendedCost) },
+    { label: 'Unit margin', value: fmtMoney(r.unitMargin, 2) },
+    { label: 'Lost $/day', value: fmtMoney(r.lostMarginPerDay, 2), warn: r.lostMarginPerDay > 0 },
+    { label: 'Confidence', value: fmtPct(r.confidenceScore), warn: r.confidenceScore < 0.6 },
+  ]
+}
+
+function exitFacts(r: InventorySkuRow): Array<{ label: string; value: string; warn?: boolean }> {
+  const last = daysAgo(r.lastSaleAt)
+  const breakeven =
+    r.avgUnitPrice && r.avgUnitPrice > 0 && r.unitCostCurrent !== null
+      ? Math.max(0, 1 - r.unitCostCurrent / r.avgUnitPrice)
+      : null
+  return [
+    { label: 'On-hand units', value: fmtNum(r.physicalUnits) },
+    { label: 'On-hand cost', value: fmtMoney(r.onHandCost), warn: r.onHandCost > 0 },
+    { label: 'Avg age', value: fmtDays(r.avgInventoryAgeDays ?? undefined) },
+    { label: 'Last sale', value: last === null ? 'never' : `${last}d ago` },
+    { label: 'Sold 90d', value: fmtNum(r.units90), warn: r.units90 === 0 },
+    { label: 'GM%', value: fmtPct(r.gmPct) },
+    { label: 'Breakeven disc', value: fmtPct(breakeven) },
+    { label: 'Expiring ≤60d', value: r.expiringUnits60 > 0 ? fmtNum(r.expiringUnits60) : '—', warn: r.expiringUnits60 > 0 },
+    { label: 'Confidence', value: fmtPct(r.confidenceScore), warn: r.confidenceScore < 0.6 },
+  ]
+}
+
+function SkuInsightPanel({
+  r,
+  mode,
+  windowDays,
+}: {
+  r: InventorySkuRow
+  mode: InsightMode
+  windowDays: number
+}) {
+  const histDays = 90
+  const { data: history, loading, error } = useSkuHistory(r, histDays)
+  const { sentence, caveat } = buildSkuJustification(r, mode)
+  const facts = mode === 'reorder' ? reorderFacts(r) : exitFacts(r)
+
+  return (
+    <div className="inv-insight">
+      <p className="inv-insight-sentence">{sentence}</p>
+      {caveat ? <p className="inv-insight-caveat">⚠ {caveat}</p> : null}
+
+      <div className="inv-fact-grid">
+        {facts.map((f) => (
+          <Fact key={f.label} label={f.label} value={f.value} warn={f.warn} />
+        ))}
+      </div>
+
+      <div className="inv-insight-chart">
+        <div className="inv-insight-chart-title subtle-copy">Daily units sold — last {histDays}d</div>
+        {loading ? (
+          <p className="subtle-copy">Loading sales history…</p>
+        ) : error ? (
+          <p className="subtle-copy">Couldn't load sales history: {error}</p>
+        ) : history ? (
+          <DailySalesBars history={history} />
+        ) : null}
+      </div>
+
+      <div className="inv-insight-scores">
+        {mode === 'reorder' ? (
+          <ScoreBreakdown title="reorder priority" score={r.reorderPriorityScore} factors={r.reorderFactors} />
+        ) : null}
+        <ScoreBreakdown title="deadweight" score={r.deadweightScore} factors={r.deadweightFactors} />
+      </div>
+    </div>
+  )
+}
+
+// Wraps a table row so clicking it expands an inline insight panel. The
+// `cells` are the row's <td>s; `detailColSpan` must equal the table's column
+// count. A small "open ↗" link in the panel header deep-links the row in a
+// new tab (no dedicated SKU route needed).
+function ExpandableSkuRow({
+  r,
+  mode,
+  cells,
+  detailColSpan,
+  expandedSku,
+  onToggleExpand,
+  detailHref,
+  windowDays,
+}: {
+  r: InventorySkuRow
+  mode: InsightMode
+  cells: React.ReactNode
+  detailColSpan: number
+  expandedSku: string | null
+  onToggleExpand: (key: string) => void
+  detailHref: string
+  windowDays: number
+}) {
+  const key = skuKey(r)
+  const canExpand = r.productId !== null
+  const isOpen = canExpand && expandedSku === key
+  return (
+    <>
+      <tr
+        className={`${canExpand ? 'inv-proc-clickable' : ''}${isOpen ? ' is-expanded' : ''}`}
+        onClick={canExpand ? () => onToggleExpand(key) : undefined}
+      >
+        {cells}
+      </tr>
+      {isOpen ? (
+        <tr className="inv-proc-sku-detail">
+          <td colSpan={detailColSpan}>
+            <div className="inv-insight-head">
+              <span className="subtle-copy">Why this recommendation</span>
+              <a
+                href={detailHref}
+                target="_blank"
+                rel="noreferrer noopener"
+                className="inv-insight-openlink"
+                onClick={(e) => e.stopPropagation()}
+              >
+                open ↗
+              </a>
+            </div>
+            <SkuInsightPanel r={r} mode={mode} windowDays={windowDays} />
+          </td>
+        </tr>
+      ) : null}
+    </>
+  )
+}
+
+// A leading caret cell content marking a row as expandable.
+function caret(isOpen: boolean): string {
+  return isOpen ? '▾ ' : '▸ '
+}
+
 // ---------------------------------------------------------------------------
 // Main component
 // ---------------------------------------------------------------------------
 
 export function InventoryProcurementTab() {
   const initial = useMemo(
-    () => readDeepLink({ view: 'reorder', sites: new Set<string>(), windowDays: 28 }),
+    () =>
+      readDeepLink({
+        view: 'reorder',
+        sites: new Set<string>(),
+        windowDays: 28,
+        expandedSku: null,
+      }),
     [],
   )
   const [selectedSites, setSelectedSites] = useState<ReadonlySet<string>>(() => initial.sites)
   const [windowDays, setWindowDays] = useState(initial.windowDays)
   const [subTab, setSubTab] = useState<SubTab>(initial.view)
+  const [expandedSku, setExpandedSku] = useState<string | null>(initial.expandedSku)
   const [data, setData] = useState<InventoryProcurementResponse | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -231,8 +684,18 @@ export function InventoryProcurementTab() {
 
   // Keep the URL hash in sync so the current view is bookmarkable/shareable.
   useEffect(() => {
-    writeDeepLink({ view: subTab, sites: selectedSites, windowDays })
-  }, [subTab, selectedSites, windowDays])
+    writeDeepLink({ view: subTab, sites: selectedSites, windowDays, expandedSku })
+  }, [subTab, selectedSites, windowDays, expandedSku])
+
+  const toggleExpand = (key: string) =>
+    setExpandedSku((cur) => (cur === key ? null : key))
+
+  // Switching to a view without per-SKU rows clears the expanded panel so
+  // the hash doesn't carry a stale sku= on the distributor / mix tabs.
+  function changeSubTab(next: SubTab) {
+    setSubTab(next)
+    if (next !== 'reorder' && next !== 'exit') setExpandedSku(null)
+  }
 
   function toggleSite(id: string) {
     setSelectedSites((prev) => {
@@ -286,7 +749,7 @@ export function InventoryProcurementTab() {
             key={t.id}
             type="button"
             className={`metrics-site-chip${subTab === t.id ? ' is-active' : ''}`}
-            onClick={() => setSubTab(t.id)}
+            onClick={() => changeSubTab(t.id)}
           >
             {t.label}
           </button>
@@ -298,9 +761,23 @@ export function InventoryProcurementTab() {
 
       {data ? (
         <>
-          {subTab === 'reorder' ? <ReorderQueueView data={data} /> : null}
+          {subTab === 'reorder' ? (
+            <ReorderQueueView
+              data={data}
+              expandedSku={expandedSku}
+              onToggleExpand={toggleExpand}
+              sites={selectedSites}
+            />
+          ) : null}
           {subTab === 'distributors' ? <DistributorBasketsView data={data} /> : null}
-          {subTab === 'exit' ? <ExitLiquidateView data={data} /> : null}
+          {subTab === 'exit' ? (
+            <ExitLiquidateView
+              data={data}
+              expandedSku={expandedSku}
+              onToggleExpand={toggleExpand}
+              sites={selectedSites}
+            />
+          ) : null}
           {subTab === 'mix' ? <MixDriftView data={data} /> : null}
 
           <details className="inv-proc-methodology">
@@ -327,8 +804,17 @@ export function InventoryProcurementTab() {
 // Tab 1 — Reorder Queue
 // ---------------------------------------------------------------------------
 
-function ReorderQueueView({ data }: { data: InventoryProcurementResponse }) {
+interface SkuViewProps {
+  data: InventoryProcurementResponse
+  expandedSku: string | null
+  onToggleExpand: (key: string) => void
+  sites: ReadonlySet<string>
+}
+
+function ReorderQueueView({ data, expandedSku, onToggleExpand, sites }: SkuViewProps) {
   const s = data.summary
+  const win = data.params.windowDays
+  const hrefFor = (r: InventorySkuRow) => skuDetailHref('reorder', sites, win, skuKey(r))
   const outRows = useMemo(
     () =>
       data.skus
@@ -394,7 +880,19 @@ function ReorderQueueView({ data }: { data: InventoryProcurementResponse }) {
                   </td>
                 </tr>
               ) : (
-                outRows.map((r) => <SkuRowCells key={rowKey(r)} r={r} />)
+                outRows.map((r) => (
+                  <ExpandableSkuRow
+                    key={rowKey(r)}
+                    r={r}
+                    mode="reorder"
+                    detailColSpan={13}
+                    expandedSku={expandedSku}
+                    onToggleExpand={onToggleExpand}
+                    detailHref={hrefFor(r)}
+                    windowDays={win}
+                    cells={<SkuRowCells r={r} isOpen={expandedSku === skuKey(r)} />}
+                  />
+                ))
               )}
             </tbody>
           </table>
@@ -436,45 +934,17 @@ function ReorderQueueView({ data }: { data: InventoryProcurementResponse }) {
                 </tr>
               ) : (
                 queueRows.map((r) => (
-                  <tr key={rowKey(r)}>
-                    <td className="num">
-                      <strong>{r.reorderPriorityScore}</strong>
-                    </td>
-                    <td>{r.siteLabel}</td>
-                    <td>
-                      <div className="inv-proc-prod">{r.productName}</div>
-                      <div className="subtle-copy inv-proc-prod-sub">
-                        {[r.brandName, r.categoryName].filter(Boolean).join(' · ')}
-                      </div>
-                    </td>
-                    <td>{r.distributorName ?? <span className="subtle-copy">unknown</span>}</td>
-                    <td className="num">{fmtNum(r.sellableUnits)}</td>
-                    <td className="num">{fmtDays(r.daysSupply ?? undefined)}</td>
-                    <td className="num">{fmtDate(r.projectedStockoutAt)}</td>
-                    <td className="num">{fmtDays(r.leadTimeDays)}</td>
-                    <td className="num">{fmtNum(r.forecastDailyUnits, 1)}</td>
-                    <td className="num">{fmtMoney(r.lostMarginPerDay, 2)}</td>
-                    <td className="num">
-                      <strong>{fmtNum(r.recommendedQty)}</strong>
-                      {r.minOrderOvershootsTarget && r.suppressedRecommendedQty !== null && (
-                        <div
-                          className="subtle-copy"
-                          title={`Minimum case of ${fmtNum(r.suppressedRecommendedQty)} would create ~${fmtDays(
-                            r.coverageAfterSnappedOrderDays ?? undefined,
-                          )} of supply vs a ${fmtDays(r.targetCoverDays)} target — too much to sell through, so not recommended.`}
-                        >
-                          (min {fmtNum(r.suppressedRecommendedQty)} = {fmtDays(r.coverageAfterSnappedOrderDays ?? undefined)})
-                        </div>
-                      )}
-                    </td>
-                    <td className="num">{fmtMoney(r.recommendedCost)}</td>
-                    <td>
-                      <ConfidencePill score={r.confidenceScore} />
-                    </td>
-                    <td>
-                      <ActionPill action={r.action} />
-                    </td>
-                  </tr>
+                  <ExpandableSkuRow
+                    key={rowKey(r)}
+                    r={r}
+                    mode="reorder"
+                    detailColSpan={14}
+                    expandedSku={expandedSku}
+                    onToggleExpand={onToggleExpand}
+                    detailHref={hrefFor(r)}
+                    windowDays={win}
+                    cells={<QueueRowCells r={r} isOpen={expandedSku === skuKey(r)} />}
+                  />
                 ))
               )}
             </tbody>
@@ -485,11 +955,16 @@ function ReorderQueueView({ data }: { data: InventoryProcurementResponse }) {
   )
 }
 
-function SkuRowCells({ r }: { r: InventorySkuRow }) {
+// Cells for the "out & regretting" table (13 columns). Returns <td>s only —
+// the surrounding <tr> + click/expand is owned by ExpandableSkuRow.
+function SkuRowCells({ r, isOpen }: { r: InventorySkuRow; isOpen: boolean }) {
   const last = daysAgo(r.lastSaleAt)
   return (
-    <tr>
-      <td>{r.siteLabel}</td>
+    <>
+      <td>
+        {r.productId !== null ? <span className="inv-caret">{caret(isOpen)}</span> : null}
+        {r.siteLabel}
+      </td>
       <td>
         <div className="inv-proc-prod">{r.productName}</div>
         <div className="subtle-copy inv-proc-prod-sub">{r.brandName ?? ''}</div>
@@ -511,7 +986,88 @@ function SkuRowCells({ r }: { r: InventorySkuRow }) {
       <td>
         <ActionPill action={r.action} />
       </td>
-    </tr>
+    </>
+  )
+}
+
+// Cells for the "runout soon — reorder queue" table (14 columns).
+function QueueRowCells({ r, isOpen }: { r: InventorySkuRow; isOpen: boolean }) {
+  return (
+    <>
+      <td className="num">
+        {r.productId !== null ? <span className="inv-caret">{caret(isOpen)}</span> : null}
+        <strong>{r.reorderPriorityScore}</strong>
+      </td>
+      <td>{r.siteLabel}</td>
+      <td>
+        <div className="inv-proc-prod">{r.productName}</div>
+        <div className="subtle-copy inv-proc-prod-sub">
+          {[r.brandName, r.categoryName].filter(Boolean).join(' · ')}
+        </div>
+      </td>
+      <td>{r.distributorName ?? <span className="subtle-copy">unknown</span>}</td>
+      <td className="num">{fmtNum(r.sellableUnits)}</td>
+      <td className="num">{fmtDays(r.daysSupply ?? undefined)}</td>
+      <td className="num">{fmtDate(r.projectedStockoutAt)}</td>
+      <td className="num">{fmtDays(r.leadTimeDays)}</td>
+      <td className="num">{fmtNum(r.forecastDailyUnits, 1)}</td>
+      <td className="num">{fmtMoney(r.lostMarginPerDay, 2)}</td>
+      <td className="num">
+        <strong>{fmtNum(r.recommendedQty)}</strong>
+        {r.minOrderOvershootsTarget && r.suppressedRecommendedQty !== null && (
+          <div
+            className="subtle-copy"
+            title={`Minimum case of ${fmtNum(r.suppressedRecommendedQty)} would create ~${fmtDays(
+              r.coverageAfterSnappedOrderDays ?? undefined,
+            )} of supply vs a ${fmtDays(r.targetCoverDays)} target — too much to sell through, so not recommended.`}
+          >
+            (min {fmtNum(r.suppressedRecommendedQty)} = {fmtDays(r.coverageAfterSnappedOrderDays ?? undefined)})
+          </div>
+        )}
+      </td>
+      <td className="num">{fmtMoney(r.recommendedCost)}</td>
+      <td>
+        <ConfidencePill score={r.confidenceScore} />
+      </td>
+      <td>
+        <ActionPill action={r.action} />
+      </td>
+    </>
+  )
+}
+
+// Cells for the liquidation/exit table (13 columns). Returns <td>s only —
+// the surrounding <tr> + click/expand is owned by ExpandableSkuRow.
+function ExitRowCells({ r, isOpen }: { r: InventorySkuRow; isOpen: boolean }) {
+  const last = daysAgo(r.lastSaleAt)
+  const breakeven =
+    r.avgUnitPrice && r.avgUnitPrice > 0 && r.unitCostCurrent !== null
+      ? Math.max(0, 1 - r.unitCostCurrent / r.avgUnitPrice)
+      : null
+  return (
+    <>
+      <td className="num">
+        {r.productId !== null ? <span className="inv-caret">{caret(isOpen)}</span> : null}
+        <strong>{r.deadweightScore}</strong>
+      </td>
+      <td>{r.siteLabel}</td>
+      <td>
+        <div className="inv-proc-prod">{r.productName}</div>
+        <div className="subtle-copy inv-proc-prod-sub">{r.brandName ?? ''}</div>
+      </td>
+      <td>{[r.categoryName, r.subcategoryName].filter(Boolean).join(' · ') || '—'}</td>
+      <td className="num">{fmtNum(r.physicalUnits)}</td>
+      <td className="num">{fmtMoney(r.onHandCost)}</td>
+      <td className="num">{fmtDays(r.avgInventoryAgeDays ?? undefined)}</td>
+      <td className="num">{last === null ? 'never' : `${last}d`}</td>
+      <td className="num">{fmtNum(r.units90)}</td>
+      <td className="num">{fmtPct(r.gmPct)}</td>
+      <td className="num">{fmtPct(breakeven)}</td>
+      <td className="num">{r.expiringUnits60 > 0 ? fmtNum(r.expiringUnits60) : '—'}</td>
+      <td>
+        <ActionPill action={r.action} />
+      </td>
+    </>
   )
 }
 
@@ -875,8 +1431,10 @@ function DistributorBasketsView({ data }: { data: InventoryProcurementResponse }
 // Tab 3 — Exit / Liquidate
 // ---------------------------------------------------------------------------
 
-function ExitLiquidateView({ data }: { data: InventoryProcurementResponse }) {
+function ExitLiquidateView({ data, expandedSku, onToggleExpand, sites }: SkuViewProps) {
   const s = data.summary
+  const win = data.params.windowDays
+  const hrefFor = (r: InventorySkuRow) => skuDetailHref('exit', sites, win, skuKey(r))
   const rows = useMemo(
     () =>
       data.skus
@@ -929,37 +1487,19 @@ function ExitLiquidateView({ data }: { data: InventoryProcurementResponse }) {
                   </td>
                 </tr>
               ) : (
-                rows.map((r) => {
-                  const last = daysAgo(r.lastSaleAt)
-                  const breakeven =
-                    r.avgUnitPrice && r.avgUnitPrice > 0 && r.unitCostCurrent !== null
-                      ? Math.max(0, 1 - r.unitCostCurrent / r.avgUnitPrice)
-                      : null
-                  return (
-                    <tr key={rowKey(r)}>
-                      <td className="num">
-                        <strong>{r.deadweightScore}</strong>
-                      </td>
-                      <td>{r.siteLabel}</td>
-                      <td>
-                        <div className="inv-proc-prod">{r.productName}</div>
-                        <div className="subtle-copy inv-proc-prod-sub">{r.brandName ?? ''}</div>
-                      </td>
-                      <td>{[r.categoryName, r.subcategoryName].filter(Boolean).join(' · ') || '—'}</td>
-                      <td className="num">{fmtNum(r.physicalUnits)}</td>
-                      <td className="num">{fmtMoney(r.onHandCost)}</td>
-                      <td className="num">{fmtDays(r.avgInventoryAgeDays ?? undefined)}</td>
-                      <td className="num">{last === null ? 'never' : `${last}d`}</td>
-                      <td className="num">{fmtNum(r.units90)}</td>
-                      <td className="num">{fmtPct(r.gmPct)}</td>
-                      <td className="num">{fmtPct(breakeven)}</td>
-                      <td className="num">{r.expiringUnits60 > 0 ? fmtNum(r.expiringUnits60) : '—'}</td>
-                      <td>
-                        <ActionPill action={r.action} />
-                      </td>
-                    </tr>
-                  )
-                })
+                rows.map((r) => (
+                  <ExpandableSkuRow
+                    key={rowKey(r)}
+                    r={r}
+                    mode="exit"
+                    detailColSpan={13}
+                    expandedSku={expandedSku}
+                    onToggleExpand={onToggleExpand}
+                    detailHref={hrefFor(r)}
+                    windowDays={win}
+                    cells={<ExitRowCells r={r} isOpen={expandedSku === skuKey(r)} />}
+                  />
+                ))
               )}
             </tbody>
           </table>

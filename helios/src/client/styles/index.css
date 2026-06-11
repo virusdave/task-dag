@@ -8359,6 +8359,153 @@ span.metric-chart-legend-item {
   background: #2f6fb0;
 }
 
+/* SKU insight / justification panel (expandable row) */
+.inv-caret {
+  display: inline-block;
+  width: 1em;
+  color: #9b4a22;
+  font-size: 0.8em;
+}
+.inv-proc-clickable.is-expanded td {
+  background: rgba(155, 74, 34, 0.06);
+}
+.inv-proc-sku-detail > td {
+  background: #fafbfd;
+  border-top: 0;
+  padding: 0 12px 14px !important;
+  white-space: normal;
+}
+.inv-insight-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 0 4px;
+}
+.inv-insight-openlink {
+  font-size: 0.78rem;
+  color: #2f6fb0;
+  text-decoration: none;
+  white-space: nowrap;
+}
+.inv-insight-openlink:hover {
+  text-decoration: underline;
+}
+.inv-insight {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-width: 920px;
+}
+.inv-insight-sentence {
+  margin: 0;
+  font-size: 0.92rem;
+  line-height: 1.4;
+}
+.inv-insight-caveat {
+  margin: 0;
+  font-size: 0.82rem;
+  color: #8a5a00;
+  background: #fff7e6;
+  border: 1px solid #f0d9a8;
+  border-radius: 4px;
+  padding: 6px 8px;
+}
+.inv-fact-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
+  gap: 6px;
+}
+.inv-fact {
+  background: #fff;
+  border: 1px solid #e6e8ec;
+  border-radius: 4px;
+  padding: 5px 8px;
+}
+.inv-fact.is-warn {
+  border-color: #f3b7b0;
+  background: #fdf3f2;
+}
+.inv-fact-label {
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.inv-fact-value {
+  font-size: 0.92rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.inv-insight-chart-title,
+.inv-spark-caption {
+  font-size: 0.74rem;
+  margin-bottom: 2px;
+}
+.inv-spark-svg {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+.inv-spark-bar {
+  fill: #2f6fb0;
+  opacity: 0.75;
+}
+.inv-spark-avg {
+  stroke: #c9772d;
+  stroke-width: 1.5;
+}
+.inv-insight-scores {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 14px;
+}
+.inv-score {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.inv-score-head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+.inv-score-head strong {
+  font-size: 1.05rem;
+}
+.inv-score-row {
+  display: grid;
+  grid-template-columns: 90px 1fr 46px;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.74rem;
+}
+.inv-score-label {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: #555;
+}
+.inv-score-track {
+  position: relative;
+  height: 8px;
+  background: #eef0f4;
+  border-radius: 4px;
+  overflow: hidden;
+}
+.inv-score-fill {
+  display: block;
+  height: 100%;
+  background: #2f6fb0;
+}
+.inv-score-fill.is-neg {
+  background: #c0584a;
+}
+.inv-score-val {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: #444;
+}
+
 /* ===========================================================================
    Screens control room
    =========================================================================== */

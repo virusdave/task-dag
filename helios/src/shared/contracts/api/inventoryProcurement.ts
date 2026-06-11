@@ -63,6 +63,22 @@ export const InventoryActionSchema = z.enum([
 ])
 export type InventoryAction = z.infer<typeof InventoryActionSchema>
 
+// One weighted term of a 0–100 score (reorder priority or deadweight),
+// surfaced so the UI can JUSTIFY the recommendation instead of showing a
+// black-box number. `contribution` is the signed points this term added
+// to the final score; the score is clamp(round(Σ contribution), 0, 100)
+// (a term may be negative, e.g. the deadweight penalty on reorder).
+export const InventoryScoreFactorSchema = z.object({
+  key: z.string(),
+  label: z.string(),
+  weight: z.number(),
+  /** Normalised 0..1 magnitude of this term before weighting. */
+  norm: z.number(),
+  /** Signed points this term contributed to the 0–100 score. */
+  contribution: z.number(),
+})
+export type InventoryScoreFactor = z.infer<typeof InventoryScoreFactorSchema>
+
 export const InventorySkuRowSchema = z.object({
   dealerId: z.number(),
   siteKey: z.string(),
@@ -134,6 +150,10 @@ export const InventorySkuRowSchema = z.object({
   reorderPriorityScore: z.number(),
   deadweightScore: z.number(),
   confidenceScore: z.number(),
+  /** Weighted terms behind reorderPriorityScore (justification UI). */
+  reorderFactors: z.array(InventoryScoreFactorSchema),
+  /** Weighted terms behind deadweightScore (justification UI). */
+  deadweightFactors: z.array(InventoryScoreFactorSchema),
 
   // Flags / classification.
   recentSeller: z.boolean(),
@@ -188,3 +208,37 @@ export const InventoryProcurementResponseSchema = z.object({
   methodology: z.array(z.string()),
 })
 export type InventoryProcurementResponse = z.infer<typeof InventoryProcurementResponseSchema>
+
+// =========================== SKU sales history ============================
+//
+// On-demand per-SKU daily sales series, fetched only when a buyer expands
+// a row's insight panel (so the main procurement payload stays lean). The
+// sparkline answers the buyer's trust question: "was this actually selling
+// recently, or is the model inventing demand?"
+
+export const InventorySkuHistoryRequestSchema = z.object({
+  dealerId: z.coerce.number().int().positive(),
+  productId: z.coerce.number().int().positive(),
+  /** Trailing window in days. Default 90. */
+  days: z.coerce.number().int().min(7).max(180).optional(),
+})
+export type InventorySkuHistoryRequest = z.infer<typeof InventorySkuHistoryRequestSchema>
+
+export const InventorySkuHistoryPointSchema = z.object({
+  /** NY-local business day (YYYY-MM-DD). */
+  date: z.string(),
+  units: z.number(),
+  revenue: z.number(),
+})
+export type InventorySkuHistoryPoint = z.infer<typeof InventorySkuHistoryPointSchema>
+
+export const InventorySkuHistoryResponseSchema = z.object({
+  dealerId: z.number(),
+  productId: z.number(),
+  days: z.number(),
+  totalUnits: z.number(),
+  totalRevenue: z.number(),
+  /** Zero-filled daily series, oldest → newest, so the chart is honest. */
+  series: z.array(InventorySkuHistoryPointSchema),
+})
+export type InventorySkuHistoryResponse = z.infer<typeof InventorySkuHistoryResponseSchema>
