@@ -375,6 +375,8 @@ export const __test__ = {
   resolveCatalogSizeProfile,
   resolveListingSizeProfile,
   resolveSizeConvention,
+  disambiguateMultipackValue,
+  buildSizeDistributionPrior,
 }
 
 interface BrandOverrideRow {
@@ -528,6 +530,7 @@ function collectProductEvidence(
         sizeName: product.sizeName,
         packOfSize: product.packOfSize,
         brand: liveState.brand,
+        category: liveState.category,
       }),
     }
     const assessedListings = dedupeListingCandidates(
@@ -668,6 +671,7 @@ function flattenBrandProductsToListingCandidates(
           amount: config.amount,
           units: config.units,
           brand: product.brand,
+          category,
         }),
         source,
         url,
@@ -1518,6 +1522,236 @@ function resolveSizeConvention(brand: string | null | undefined): SizeConvention
   return null
 }
 
+// ---------------------------------------------------------------------
+// Distribution-aware size disambiguation
+// ---------------------------------------------------------------------
+//
+// A bare multipack size token like "N x M<measure>" / "N pk M<measure>"
+// is genuinely ambiguous: is M the per-unit size (total = N*M) or the
+// package total (unit = M/N)? Rather than rely solely on a hardcoded
+// per-brand rule, we lean on what the catalog actually carries: it is
+// vastly more likely that we're seeing a (category, pack, unit) cohort
+// we've seen many times before than that a huge deviation occurred
+// ("5 x 2.5g" as 12.5g total would be an enormous pre-roll pack — they
+// exist, e.g. a 32g jar, but are exceedingly rare and should require a
+// manual override to win over an in-distribution reading).
+//
+// Resolution precedence (see `disambiguateMultipackValue`):
+//   manual override > strong distribution signal > brand convention >
+//   syntax default ('unit' for the "N x M" form, 'total' for "N pk M").
+
+type SizeValueInterpretation = 'unit' | 'total'
+
+/** A queryable prior over catalog (category, measure, pack, unit) cohorts. */
+interface SizeDistributionPrior {
+  getCohortCount(input: {
+    category: string | null | undefined
+    measure: 'g' | 'mg'
+    packCount: number
+    unitValue: number
+  }): number
+}
+
+interface SizeDistributionCohort {
+  category: string
+  measure: 'g' | 'mg'
+  packCount: number
+  unitValue: number
+  count: number
+}
+
+/** Bucket a size value deterministically so near-identical units collide. */
+function bucketSizeValue(value: number, measure: 'g' | 'mg'): string {
+  return measure === 'g'
+    ? (Math.round(value * 100) / 100).toFixed(2)
+    : (Math.round(value * 10) / 10).toFixed(1)
+}
+
+function sizeCohortKey(
+  category: string | null | undefined,
+  measure: 'g' | 'mg',
+  packCount: number,
+  unitValue: number,
+): string {
+  return `${normalizeCategoryKey(category)}|${measure}|${packCount}|${bucketSizeValue(unitValue, measure)}`
+}
+
+function buildSizeDistributionPrior(cohorts: SizeDistributionCohort[]): SizeDistributionPrior {
+  const counts = new Map<string, number>()
+  for (const cohort of cohorts) {
+    const key = sizeCohortKey(cohort.category, cohort.measure, cohort.packCount, cohort.unitValue)
+    counts.set(key, (counts.get(key) ?? 0) + cohort.count)
+  }
+  return {
+    getCohortCount: ({ category, measure, packCount, unitValue }) =>
+      counts.get(sizeCohortKey(category, measure, packCount, unitValue)) ?? 0,
+  }
+}
+
+// Empirical per-unit cohorts, sourced from a `catalog_groups` query
+// (`(category, packOfSize, size.name)` frequencies, n>=3) on 2026-06-11.
+// IMPORTANT: these are *true per-unit* cohorts. The raw "Pre-Rolls, 5 x
+// 2.5g" rows in that query are Jeeter pack-TOTAL mislabels (true unit
+// 0.5g) and are intentionally folded into the 5 x 0.5g cohort below
+// rather than seeded as a bogus 2.5g/stick unit — otherwise the prior
+// would reinforce the very mislabel we want it to overrule.
+const DEFAULT_SIZE_DISTRIBUTION_COHORTS: SizeDistributionCohort[] = [
+  // Pre-Rolls (grams, per stick)
+  { category: 'pre rolls', measure: 'g', packCount: 1, unitValue: 1, count: 421 },
+  { category: 'pre rolls', measure: 'g', packCount: 1, unitValue: 0.5, count: 168 },
+  { category: 'pre rolls', measure: 'g', packCount: 5, unitValue: 0.5, count: 147 },
+  { category: 'pre rolls', measure: 'g', packCount: 2, unitValue: 0.5, count: 92 },
+  { category: 'pre rolls', measure: 'g', packCount: 7, unitValue: 0.5, count: 35 },
+  { category: 'pre rolls', measure: 'g', packCount: 6, unitValue: 0.5, count: 26 },
+  { category: 'pre rolls', measure: 'g', packCount: 1, unitValue: 1.1, count: 15 },
+  { category: 'pre rolls', measure: 'g', packCount: 5, unitValue: 0.7, count: 14 },
+  { category: 'pre rolls', measure: 'g', packCount: 10, unitValue: 0.35, count: 13 },
+  { category: 'pre rolls', measure: 'g', packCount: 1, unitValue: 2, count: 13 },
+  { category: 'pre rolls', measure: 'g', packCount: 1, unitValue: 2.5, count: 13 },
+  { category: 'pre rolls', measure: 'g', packCount: 3, unitValue: 0.5, count: 13 },
+  { category: 'pre rolls', measure: 'g', packCount: 1, unitValue: 0.75, count: 12 },
+  { category: 'pre rolls', measure: 'g', packCount: 1, unitValue: 1.5, count: 10 },
+  { category: 'pre rolls', measure: 'g', packCount: 2, unitValue: 0.75, count: 10 },
+  { category: 'pre rolls', measure: 'g', packCount: 5, unitValue: 0.4, count: 10 },
+  { category: 'pre rolls', measure: 'g', packCount: 5, unitValue: 0.6, count: 8 },
+  { category: 'pre rolls', measure: 'g', packCount: 1, unitValue: 0.6, count: 7 },
+  { category: 'pre rolls', measure: 'g', packCount: 1, unitValue: 0.7, count: 7 },
+  { category: 'pre rolls', measure: 'g', packCount: 2, unitValue: 1, count: 7 },
+  { category: 'pre rolls', measure: 'g', packCount: 20, unitValue: 0.35, count: 5 },
+  { category: 'pre rolls', measure: 'g', packCount: 14, unitValue: 0.5, count: 5 },
+  { category: 'pre rolls', measure: 'g', packCount: 10, unitValue: 1, count: 5 },
+  { category: 'pre rolls', measure: 'g', packCount: 4, unitValue: 0.75, count: 4 },
+  { category: 'pre rolls', measure: 'g', packCount: 4, unitValue: 1.75, count: 4 },
+  { category: 'pre rolls', measure: 'g', packCount: 5, unitValue: 0.75, count: 3 },
+  { category: 'pre rolls', measure: 'g', packCount: 5, unitValue: 1.3, count: 3 },
+  // Edibles (milligrams, per piece)
+  { category: 'edibles', measure: 'mg', packCount: 10, unitValue: 10, count: 256 },
+  { category: 'edibles', measure: 'mg', packCount: 20, unitValue: 5, count: 55 },
+  { category: 'edibles', measure: 'mg', packCount: 1, unitValue: 10, count: 16 },
+  { category: 'edibles', measure: 'mg', packCount: 1, unitValue: 100, count: 16 },
+  { category: 'edibles', measure: 'mg', packCount: 2, unitValue: 5, count: 14 },
+  { category: 'edibles', measure: 'mg', packCount: 10, unitValue: 5, count: 12 },
+  { category: 'edibles', measure: 'mg', packCount: 2, unitValue: 10, count: 10 },
+  { category: 'edibles', measure: 'mg', packCount: 5, unitValue: 20, count: 5 },
+  { category: 'edibles', measure: 'mg', packCount: 20, unitValue: 2.5, count: 3 },
+  { category: 'edibles', measure: 'mg', packCount: 2, unitValue: 50, count: 3 },
+]
+
+const DEFAULT_SIZE_DISTRIBUTION_PRIOR = buildSizeDistributionPrior(DEFAULT_SIZE_DISTRIBUTION_COHORTS)
+
+// Distribution decision thresholds. A reading only "wins on distribution"
+// when the evidence is unambiguous: either exactly one candidate clears
+// MIN_COHORT_COUNT, or the stronger candidate is both >= STRONG_RATIO x
+// and >= STRONG_ABSOLUTE_DIFF more than the weaker. Otherwise we defer to
+// the brand convention / syntax default so we never make a confident
+// wrong call on thin data.
+const MIN_COHORT_COUNT = 3
+const STRONG_RATIO = 3
+const STRONG_ABSOLUTE_DIFF = 5
+
+/**
+ * Per-SKU manual overrides that force a size interpretation against the
+ * distribution — the "manual effort" escape hatch for genuine outliers
+ * (e.g. a real large-format multipack the prior would otherwise read as
+ * a common smaller cohort). Keyed by `${brandKey}|${categoryKey}`.
+ * Intentionally empty by default; add an entry (or, later, a DB-backed
+ * field) when a human confirms an out-of-distribution SKU. Example:
+ *   'someheavyhitter|pre rolls': 'unit'  // genuinely 5 x 2.5g = 12.5g
+ */
+const SIZE_INTERPRETATION_OVERRIDES: Record<string, SizeValueInterpretation> = {}
+
+function resolveSizeInterpretationOverride(
+  brand: string | null | undefined,
+  category: string | null | undefined,
+): SizeValueInterpretation | null {
+  const key = `${normalizeBrandKey(brand)}|${normalizeCategoryKey(category)}`
+  return SIZE_INTERPRETATION_OVERRIDES[key] ?? null
+}
+
+function profileForInterpretation(
+  packCount: number,
+  value: number,
+  measure: 'g' | 'mg',
+  interpretation: SizeValueInterpretation,
+): ParsedSizeProfile {
+  if (interpretation === 'total') {
+    return {
+      measure,
+      packCount,
+      totalValue: roundCurrency(value),
+      unitValue: roundCurrency(value / packCount),
+    }
+  }
+  return {
+    measure,
+    packCount,
+    totalValue: roundCurrency(value * packCount),
+    unitValue: roundCurrency(value),
+  }
+}
+
+function decideByDistribution(unitCount: number, totalCount: number): SizeValueInterpretation | null {
+  const unitKnown = unitCount >= MIN_COHORT_COUNT
+  const totalKnown = totalCount >= MIN_COHORT_COUNT
+  if (unitKnown && !totalKnown) {
+    return 'unit'
+  }
+  if (totalKnown && !unitKnown) {
+    return 'total'
+  }
+  if (!unitKnown && !totalKnown) {
+    return null
+  }
+  // Both candidates are attested — only override the default when one is
+  // decisively more common.
+  const [higher, lower, winner] =
+    unitCount >= totalCount ? [unitCount, totalCount, 'unit' as const] : [totalCount, unitCount, 'total' as const]
+  if (higher >= lower * STRONG_RATIO && higher - lower >= STRONG_ABSOLUTE_DIFF) {
+    return winner
+  }
+  return null
+}
+
+interface SizeDisambiguationContext {
+  category?: string | null
+  prior?: SizeDistributionPrior | null
+  /** Interpretation the brand convention implies for this form, or null. */
+  conventionInterpretation?: SizeValueInterpretation | null
+  /** Manual per-SKU override; beats everything when set. */
+  override?: SizeValueInterpretation | null
+  /** Fallback when neither distribution nor convention decides. */
+  defaultInterpretation: SizeValueInterpretation
+}
+
+/**
+ * Resolve an ambiguous multipack size value into a full size profile,
+ * preferring the in-distribution catalog cohort. Only call for
+ * packCount > 1 with a single clean size value.
+ */
+function disambiguateMultipackValue(input: {
+  packCount: number
+  value: number
+  measure: 'g' | 'mg'
+  context: SizeDisambiguationContext
+}): ParsedSizeProfile {
+  const { packCount, value, measure, context } = input
+  if (context.override) {
+    return profileForInterpretation(packCount, value, measure, context.override)
+  }
+  const prior = context.prior ?? DEFAULT_SIZE_DISTRIBUTION_PRIOR
+  // 'unit' interpretation => per-unit is `value`; 'total' => per-unit is `value / packCount`.
+  const unitCount = prior.getCohortCount({ category: context.category, measure, packCount, unitValue: value })
+  const totalCount = prior.getCohortCount({
+    category: context.category,
+    measure,
+    packCount,
+    unitValue: value / packCount,
+  })
+  const decided =
+    decideByDistribution(unitCount, totalCount) ?? context.conventionInterpretation ?? context.defaultInterpretation
+  return profileForInterpretation(packCount, value, measure, decided)
+}
+
 /**
  * Parse a recognised weight from a structured (value, units) pair into
  * grams/milligrams. Returns null when the units are NOT a clean weight
@@ -1583,8 +1817,11 @@ function resolveCatalogSizeProfile(input: {
   sizeName: string | null
   packOfSize: number | null
   brand?: string | null
+  category?: string | null
+  prior?: SizeDistributionPrior | null
 }): ParsedSizeProfile {
   const convention = resolveSizeConvention(input.brand)
+  const override = resolveSizeInterpretationOverride(input.brand, input.category)
   const structuredSize = parseSizeToken(input.sizeName)
   const packCount =
     input.packOfSize !== null && Number.isFinite(input.packOfSize) && input.packOfSize >= 1
@@ -1592,18 +1829,36 @@ function resolveCatalogSizeProfile(input: {
       : parsePackCount(`${input.name} ${input.tab}`)
   if (structuredSize) {
     const { measure, value } = structuredSize
-    const valueIsTotal =
-      convention?.multiplierValueIsTotal === true && convention.measure === measure && packCount > 1
-    const totalValue = valueIsTotal ? value : packCount > 1 ? value * packCount : value
-    const unitValue = valueIsTotal ? value / packCount : value
+    if (packCount > 1) {
+      // sizeName carries the same per-unit-vs-total ambiguity as the
+      // "N x M" name token, so resolve it the same way.
+      return disambiguateMultipackValue({
+        packCount,
+        value,
+        measure,
+        context: {
+          category: input.category,
+          prior: input.prior,
+          override,
+          conventionInterpretation:
+            convention?.multiplierValueIsTotal === true && convention.measure === measure ? 'total' : null,
+          defaultInterpretation: 'unit',
+        },
+      })
+    }
     return {
       measure,
       packCount,
-      totalValue: roundCurrency(totalValue),
-      unitValue: roundCurrency(unitValue),
+      totalValue: roundCurrency(value),
+      unitValue: roundCurrency(value),
     }
   }
-  return parseSizeProfile(`${input.name} ${input.tab}`, convention)
+  return parseSizeProfile(`${input.name} ${input.tab}`, {
+    category: input.category,
+    convention,
+    prior: input.prior,
+    override,
+  })
 }
 
 /**
@@ -1620,6 +1875,8 @@ function resolveListingSizeProfile(input: {
   amount: number | string | null | undefined
   units: string | null | undefined
   brand?: string | null
+  category?: string | null
+  prior?: SizeDistributionPrior | null
 }): ParsedSizeProfile {
   const structuredTotal = parseStructuredWeight(input.amount, input.units)
   if (structuredTotal) {
@@ -1633,25 +1890,50 @@ function resolveListingSizeProfile(input: {
       unitValue: roundCurrency(unitValue),
     }
   }
-  return parseSizeProfile(input.listingName, resolveSizeConvention(input.brand))
+  return parseSizeProfile(input.listingName, {
+    category: input.category,
+    convention: resolveSizeConvention(input.brand),
+    prior: input.prior,
+  })
 }
 
-function parseSizeProfile(text: string, convention: SizeConvention | null = null): ParsedSizeProfile {
+interface ParseSizeOptions {
+  category?: string | null
+  convention?: SizeConvention | null
+  prior?: SizeDistributionPrior | null
+  override?: SizeValueInterpretation | null
+}
+
+function parseSizeProfile(text: string, options: ParseSizeOptions = {}): ParsedSizeProfile {
+  const { category, convention, prior, override } = options
   const normalizedText = normalizeInlineText(text)
   const explicitMultipack = normalizedText.match(/(\d+)\s*x\s*(\d+(?:\.\d+)?|\.\d+)\s*(mg|g)\b/i)
   if (explicitMultipack) {
     const packCount = Number.parseInt(explicitMultipack[1], 10)
     const matchedValue = Number.parseFloat(explicitMultipack[2])
     const measure = explicitMultipack[3].toLowerCase() as 'g' | 'mg'
-    const valueIsTotal =
-      convention?.multiplierValueIsTotal === true && convention.measure === measure && packCount > 1
-    const totalValue = valueIsTotal ? matchedValue : packCount * matchedValue
-    const unitValue = valueIsTotal ? totalValue / packCount : matchedValue
+    if (packCount > 1) {
+      // "N x M" form: legacy default is M = per-unit; Jeeter-style
+      // convention flips it to M = total. Distribution decides first.
+      return disambiguateMultipackValue({
+        packCount,
+        value: matchedValue,
+        measure,
+        context: {
+          category,
+          prior,
+          override,
+          conventionInterpretation:
+            convention?.multiplierValueIsTotal === true && convention.measure === measure ? 'total' : null,
+          defaultInterpretation: 'unit',
+        },
+      })
+    }
     return {
       measure,
       packCount,
-      totalValue: roundCurrency(totalValue),
-      unitValue: roundCurrency(unitValue),
+      totalValue: roundCurrency(matchedValue),
+      unitValue: roundCurrency(matchedValue),
     }
   }
 
@@ -1670,14 +1952,28 @@ function parseSizeProfile(text: string, convention: SizeConvention | null = null
 
   const sortedValues = [...matchingValues].sort((left, right) => left - right)
   const matchedValue = sortedValues[sortedValues.length - 1]
-  const valueIsUnit = convention?.packValueIsUnit === true && convention.measure === measure && packCount > 1
-  const totalValue = valueIsUnit ? matchedValue * packCount : matchedValue
-  const unitValue = valueIsUnit ? matchedValue : packCount > 1 ? totalValue / packCount : matchedValue
+  if (packCount > 1) {
+    // "N pk M" form: legacy default is M = package total; Jeeter-style
+    // convention flips it to M = per-unit. Distribution decides first.
+    return disambiguateMultipackValue({
+      packCount,
+      value: matchedValue,
+      measure,
+      context: {
+        category,
+        prior,
+        override,
+        conventionInterpretation:
+          convention?.packValueIsUnit === true && convention.measure === measure ? 'unit' : null,
+        defaultInterpretation: 'total',
+      },
+    })
+  }
   return {
     measure,
     packCount,
-    totalValue: roundCurrency(totalValue),
-    unitValue: roundCurrency(unitValue),
+    totalValue: roundCurrency(matchedValue),
+    unitValue: roundCurrency(matchedValue),
   }
 }
 

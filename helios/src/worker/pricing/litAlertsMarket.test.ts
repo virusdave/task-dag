@@ -415,6 +415,109 @@ describe('per-brand size-labelling conventions', () => {
   })
 })
 
+describe('distribution-aware size disambiguation', () => {
+  // A fixture prior modelling the real catalog: pre-roll 5-packs are
+  // overwhelmingly 0.5g/stick; an mg edible 10-pack is 10mg/piece.
+  const prior = __test__.buildSizeDistributionPrior([
+    { category: 'pre rolls', measure: 'g', packCount: 5, unitValue: 0.5, count: 147 },
+    { category: 'pre rolls', measure: 'g', packCount: 7, unitValue: 0.5, count: 35 },
+    { category: 'edibles', measure: 'mg', packCount: 10, unitValue: 10, count: 256 },
+  ])
+
+  it('reads "5x 2.5g" as a 2.5g total (0.5g/stick) WITHOUT any brand rule', () => {
+    // No brand convention — the distribution alone rejects the
+    // 12.5g-total reading because 5 x 2.5g/stick is never seen but
+    // 5 x 0.5g (=2.5g total) is the most common cohort.
+    const ours = __test__.resolveCatalogSizeProfile({
+      name: 'Generic Brand Acapulco Gold 5x 2.5g',
+      tab: '5x 2.5g',
+      sizeName: '2.5g',
+      packOfSize: 5,
+      brand: 'Generic Brand',
+      category: 'Pre-Rolls',
+      prior,
+    })
+    expect(ours).toEqual({ measure: 'g', packCount: 5, totalValue: 2.5, unitValue: 0.5 })
+  })
+
+  it('keeps "7x 0.5g" as per-unit (3.5g total), the in-distribution reading', () => {
+    const dank = __test__.resolveCatalogSizeProfile({
+      name: 'Generic Brand GSC 7x 0.5g',
+      tab: '7x 0.5g',
+      sizeName: '0.5g',
+      packOfSize: 7,
+      brand: 'Generic Brand',
+      category: 'Pre-Rolls',
+      prior,
+    })
+    expect(dank).toEqual({ measure: 'g', packCount: 7, totalValue: 3.5, unitValue: 0.5 })
+  })
+
+  it('reads an edible "10x 10mg" as 10mg/piece, 100mg total', () => {
+    const profile = __test__.disambiguateMultipackValue({
+      packCount: 10,
+      value: 10,
+      measure: 'mg',
+      context: { category: 'Edibles', prior, defaultInterpretation: 'unit' },
+    })
+    expect(profile).toEqual({ measure: 'mg', packCount: 10, totalValue: 100, unitValue: 10 })
+  })
+
+  it('falls back to the syntax default when the prior has no opinion', () => {
+    // Unknown category -> no cohort match -> default interpretation wins.
+    const profile = __test__.disambiguateMultipackValue({
+      packCount: 5,
+      value: 2.5,
+      measure: 'g',
+      context: { category: 'Mystery', prior, defaultInterpretation: 'unit' },
+    })
+    expect(profile).toEqual({ measure: 'g', packCount: 5, totalValue: 12.5, unitValue: 2.5 })
+  })
+
+  it('falls back to brand convention when distribution is silent', () => {
+    const profile = __test__.disambiguateMultipackValue({
+      packCount: 5,
+      value: 2.5,
+      measure: 'g',
+      context: {
+        category: 'Mystery',
+        prior,
+        conventionInterpretation: 'total',
+        defaultInterpretation: 'unit',
+      },
+    })
+    expect(profile).toEqual({ measure: 'g', packCount: 5, totalValue: 2.5, unitValue: 0.5 })
+  })
+
+  it('lets a manual override force a genuine out-of-distribution outlier', () => {
+    // The "manual effort" escape hatch: force the rare 12.5g-total pack
+    // even though the distribution would read it as 2.5g total.
+    const profile = __test__.disambiguateMultipackValue({
+      packCount: 5,
+      value: 2.5,
+      measure: 'g',
+      context: { category: 'Pre-Rolls', prior, override: 'unit', defaultInterpretation: 'total' },
+    })
+    expect(profile).toEqual({ measure: 'g', packCount: 5, totalValue: 12.5, unitValue: 2.5 })
+  })
+
+  it('requires a decisive margin before distribution overrides the default', () => {
+    // Two attested cohorts that are close in count -> keep the default.
+    const closePrior = __test__.buildSizeDistributionPrior([
+      { category: 'pre rolls', measure: 'g', packCount: 2, unitValue: 1, count: 7 },
+      { category: 'pre rolls', measure: 'g', packCount: 2, unitValue: 0.5, count: 6 },
+    ])
+    const profile = __test__.disambiguateMultipackValue({
+      packCount: 2,
+      value: 1,
+      measure: 'g',
+      context: { category: 'Pre-Rolls', prior: closePrior, defaultInterpretation: 'unit' },
+    })
+    // 7 vs 6 is not a >=3x, >=5-count margin -> default 'unit' stands.
+    expect(profile).toEqual({ measure: 'g', packCount: 2, totalValue: 2, unitValue: 1 })
+  })
+})
+
 describe('buildPricingMarketContext (partner API integration)', () => {
   it('returns availability=disabled when no partner API token is configured', async () => {
     hasPartnerApiTokenMock.mockReturnValue(false)
