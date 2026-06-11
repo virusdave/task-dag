@@ -108,6 +108,11 @@ interface BrandRollup {
 interface SiteScanResult {
   rowsByProductId: Map<number, ParsedRow>
   brandRollupsByBrandId: Map<number, BrandRollup>
+  // True only when we are confident the scan enumerated the dealer's full
+  // inventory this cycle. Used to fail-closed the disappearance close-out
+  // (which is destructive): a truncated-but-non-erroring Sweed response must
+  // never be allowed to zero brands that are merely missing from a short page.
+  scanComplete: boolean
 }
 
 const FOR_SALE_STOCK_LOCATION_PREFIX = 'for sale'
@@ -179,6 +184,7 @@ export async function runConfigWorkersStockRefreshJob(
         snapshotId,
         rowsByProductId: scan.rowsByProductId,
         brandRollupsByBrandId: scan.brandRollupsByBrandId,
+        scanComplete: scan.scanComplete,
       })
 
       totalNewlyInStockVariants += summary.newlyInStockVariantCount
@@ -235,12 +241,22 @@ async function scanFullStockForSite(site: HeliosPendingPurchaseSiteDealer): Prom
   const brandRollupsByBrandId = new Map<number, BrandRollup>()
 
   let page = 1
+  let fetchedRowCount = 0
+  let expectedTotalCount: number | null = null
   while (true) {
     const raw = await callSweedRpcForDealer(site.dealerId, 'store.inventory.item.list.grouped', {
       page,
       pageSize: STOCK_INVENTORY_PAGE_SIZE,
     })
     const parsed = StockInventoryResponseSchema.parse(raw)
+
+    // Capture the dealer's advertised total once (from the first page) so we
+    // can later confirm the scan was complete before running the destructive
+    // disappearance close-out. Pagination still terminates on a short page.
+    if (expectedTotalCount === null && typeof parsed.totalCount === 'number') {
+      expectedTotalCount = parsed.totalCount
+    }
+    fetchedRowCount += parsed.data.length
 
     for (const row of parsed.data) {
       const productId = row.product?.id
@@ -296,7 +312,17 @@ async function scanFullStockForSite(site: HeliosPendingPurchaseSiteDealer): Prom
     page += 1
   }
 
-  return { rowsByProductId, brandRollupsByBrandId }
+  // The scan is "complete" iff either Sweed advertised no total (we fall back
+  // to trusting the natural short-page termination, as the upserts always
+  // have) or we actually fetched at least as many rows as the first page
+  // advertised. A truncated-but-non-erroring response (short page before the
+  // advertised total) yields scanComplete=false, which suppresses the
+  // disappearance close-out so we never zero brands that were simply on a page
+  // we failed to receive. (A real Sweed RPC error throws inside the loop and
+  // fails the snapshot before we get here, so partial scans never persist.)
+  const scanComplete = expectedTotalCount === null || fetchedRowCount >= expectedTotalCount
+
+  return { rowsByProductId, brandRollupsByBrandId, scanComplete }
 }
 
 function accumulateBrandRollup(
@@ -407,8 +433,9 @@ async function persistSnapshotAndDiff(input: {
   snapshotId: number
   rowsByProductId: Map<number, ParsedRow>
   brandRollupsByBrandId: Map<number, BrandRollup>
+  scanComplete: boolean
 }): Promise<PersistResult> {
-  const { context, site, snapshotId, rowsByProductId, brandRollupsByBrandId } = input
+  const { context, site, snapshotId, rowsByProductId, brandRollupsByBrandId, scanComplete } = input
   const rows = [...rowsByProductId.values()]
   const inStockRows = rows.filter((row) => row.isOnStock)
 
@@ -483,6 +510,7 @@ async function persistSnapshotAndDiff(input: {
     // in-stock" list are derived from the (prior, current) diff.
     let newlyInStockVariantCount = 0
     let newlyOutOfStockVariantCount = 0
+    let disappearedBrandCloseoutCount = 0
     const variantsTransitionedToInStock: number[] = []
 
     const observedAt = new Date()
@@ -719,6 +747,53 @@ async function persistSnapshotAndDiff(input: {
       )
     }
 
+    // (5b) landingpage_brand_site_presence — disappearance close-out.
+    //
+    // When a brand vanishes entirely from the Sweed feed it is absent from
+    // `brandRollupArray`, so the upsert above never touches it and its
+    // for-sale counts stay frozen at the last >0 value forever. That phantom
+    // count is not cosmetic: the freshlybakedus-site live-menu derives
+    // `hasForSaleNow = for_sale_variant_count > 0` and, while true, keeps
+    // re-stamping the FB-US overlay `landingpage_brands.last_for_sale_observed_at`.
+    // Because the reviewer dashboard's staleness check is
+    //   (now - max(overlay.lfsoa, presence.lfsoa)) > 7d
+    // a frozen phantom count MASKS disappeared brands from ever flagging stale
+    // (verified on prod: 94 disappeared rows, 93 masked). Zeroing the current
+    // for-sale counts (only) lets hasForSaleNow go false so both lfsoa sides
+    // age out and the brand correctly surfaces as stale for operator review.
+    //
+    // Deliberately preserved (NOT touched): last_observed_at,
+    // last_for_sale_observed_at, last_observed_snapshot_id,
+    // last_for_sale_observed_snapshot_id, first_observed_at — these remain the
+    // true "last actually observed" audit values; the close-out is an
+    // inference from absence, not a new observation. Visibility is also
+    // preserved (lfsoa stays non-null → brand stays canonically present /
+    // browsable until an operator retires it — the intended workflow).
+    //
+    // Write-on-change (canon §3 R3): guarded on for_sale_variant_count > 0, so
+    // each disappeared brand is zeroed exactly once (the first scan after it
+    // vanishes); steady-state extra writes ≈ 0. Reappearance self-heals via
+    // the normal upsert. Fail-closed safety: skip entirely unless the scan was
+    // complete AND returned at least one brand, so a truncated or empty Sweed
+    // response can never mass-zero brands that are merely missing from a page.
+    // (Oracle-reviewed, R1.)
+    if (scanComplete && brandRollupArray.length > 0) {
+      const presentBrandIds = brandRollupArray.map((rollup) => rollup.brandId)
+      const closeoutResult = await db.query(
+        `
+          update landingpage_brand_site_presence
+             set for_sale_variant_count = 0,
+                 for_sale_total_available_qty = 0,
+                 for_sale_lot_count = 0
+           where site_dealer_id = $1
+             and brand_id <> all($2::bigint[])
+             and for_sale_variant_count > 0
+        `,
+        [site.dealerId, presentBrandIds],
+      )
+      disappearedBrandCloseoutCount = closeoutResult.rowCount ?? 0
+    }
+
     await db.query(
       `
         update stock_snapshots
@@ -728,7 +803,9 @@ async function persistSnapshotAndDiff(input: {
             in_stock_variant_count = $3,
             newly_in_stock_variant_count = $4,
             newly_out_of_stock_variant_count = $5,
-            litalerts_refresh_enqueued_count = $6
+            litalerts_refresh_enqueued_count = $6,
+            metadata_json = coalesce(metadata_json, '{}'::jsonb)
+              || jsonb_build_object('disappearedBrandCloseoutCount', $7::int)
         where id = $1
       `,
       [
@@ -738,6 +815,7 @@ async function persistSnapshotAndDiff(input: {
         newlyInStockVariantCount,
         newlyOutOfStockVariantCount,
         litalertsRefreshEnqueuedCount,
+        disappearedBrandCloseoutCount,
       ],
     )
 
