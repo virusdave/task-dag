@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -105,6 +105,22 @@ describe('P5 publishApprovedContentCandidate', () => {
 
     // The live pointer is byte-for-byte unchanged (frozen fallback).
     expect(readFileSync(livePointer, 'utf8')).toBe(beforeBytes)
+  })
+
+  it('a failed candidate does not clobber a previously-staged good candidate', () => {
+    const good = publishApprovedContentCandidate(candidateOpts(root))
+    expect(good.ok).toBe(true)
+    const goodCandidateBytes = readFileSync(join(root, 'prod', 'current.candidate.json'), 'utf8')
+
+    // A second approval whose self-validation fails (renderer too old).
+    const bad = publishApprovedContentCandidate(candidateOpts(root, { verifyRendererVersion: '0.1.0' }))
+    expect(bad.ok).toBe(false)
+
+    // The canonical candidate still holds the prior good one; no pending
+    // staging file was left behind.
+    expect(readFileSync(join(root, 'prod', 'current.candidate.json'), 'utf8')).toBe(goodCandidateBytes)
+    const leftover = readdirSync(join(root, 'prod')).filter((f) => f.includes('pending'))
+    expect(leftover).toEqual([])
   })
 
   it('throws CompileError on content that does not compile', () => {

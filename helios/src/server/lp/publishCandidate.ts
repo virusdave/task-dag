@@ -15,26 +15,39 @@
 //     bundle files and a *candidate* pointer (`current.candidate.json`).
 //     It NEVER swaps the live `current.json`. Promotion of a candidate
 //     to the live pointer is the separate, operator-gated P6 canary
-//     step — not something this function does.
-//   - The existing live `current.json` and its bundles are therefore
-//     left frozen as the last-known-good fallback ("legacy manifests
-//     frozen for fallback").
+//     step (see promoteCandidate) — not something this function does.
+//   - The candidate pointer is staged to a unique pending file,
+//     validated, and only then atomically promoted to the canonical
+//     `current.candidate.json`. A candidate that fails validation never
+//     lands at the canonical name, so P6 promotion can never pick up an
+//     invalid candidate. Any previously-good `current.candidate.json`
+//     is left untouched on failure.
+//   - The existing live `current.json` and its bundles are left frozen
+//     as the last-known-good fallback ("legacy manifests frozen").
 //   - The legacy cross-repo commit producer is gated behind
-//     `crossRepoCommitProducerEnabled` and defaults to OFF. Re-enabling
-//     it is the documented rollback lever (parent §10 P5 "re-enable
-//     legacy commit path"); this module refuses to take that path
-//     unless explicitly told to.
+//     `crossRepoCommitProducerEnabled` and defaults to OFF. There is no
+//     legacy producer implementation in Helios (content historically
+//     flowed via humans/scripts authoring into the mss repo), so this is
+//     a policy marker / rollback lever, not an executable path here.
+
+import { rmSync } from 'node:fs'
+import { join } from 'node:path'
 
 import { compileBundle, type CompileInput } from './compile.js'
 import type { DisabledVariant, Manifest } from './contracts.js'
-import { publishBundle, type LpEnvironment } from './publish.js'
+import { durableRename, publishBundle, type LpEnvironment } from './publish.js'
 import { validateBundle, type ValidationResult } from './validate.js'
 
 export interface ApprovedContentCandidateOptions {
   /** The approved landing-page content, ready to compile into a bundle. */
   readonly approvedContent: CompileInput
   readonly privateKeyPem: string
-  /** Public key used to self-validate the candidate we just wrote. */
+  /**
+   * Public key to self-validate the candidate. For prod candidates this
+   * MUST be the key the mss runtime trusts (pass `--pubkey`), so that
+   * signing with the wrong private key is caught here rather than
+   * silently rejected by mss later.
+   */
   readonly publicKeyPem: string
   readonly artifactRoot: string
   readonly environment: LpEnvironment
@@ -43,12 +56,17 @@ export interface ApprovedContentCandidateOptions {
   readonly generatedFrom: Manifest['generated_from']
   readonly previousBundleId?: string
   readonly disabledVariants?: readonly DisabledVariant[]
-  /** Renderer version to self-validate against (defaults to the floor). */
-  readonly verifyRendererVersion?: string
+  /**
+   * The renderer version to self-validate against. MUST be the version
+   * actually deployed in the mss runtime, so a candidate that needs a
+   * newer renderer than is live is rejected now (no permissive sentinel).
+   */
+  readonly verifyRendererVersion: string
   /**
    * Legacy cross-repo commit producer. Default `false` — disabled. When
    * `false`, content flows ONLY through the published bundle candidate.
-   * Set `true` only as the documented P5 rollback lever (parent §10).
+   * `true` is the documented P5 rollback lever; it is a policy marker
+   * here (Helios contains no legacy producer to run).
    */
   readonly crossRepoCommitProducerEnabled?: boolean
   readonly now?: Date
@@ -58,11 +76,11 @@ export interface ApprovedContentCandidateResult {
   readonly ok: boolean
   readonly bundleId: string
   readonly version: number
-  /** Path to `current.candidate.json` (the live pointer is untouched). */
+  /** Canonical candidate pointer path (only written when validation passed). */
   readonly candidatePointerPath: string
   readonly bundleDir: string
   readonly validation: ValidationResult
-  /** Whether the legacy cross-repo commit producer was engaged. */
+  /** Whether the legacy cross-repo commit producer was requested. */
   readonly crossRepoCommitProducerEnabled: boolean
   /** Operator's likely next step (canon §3 user-efficiency). */
   readonly promoteHint: string
@@ -71,21 +89,30 @@ export interface ApprovedContentCandidateResult {
 
 /**
  * Operator-approval-triggered dual-publish-candidate. Compiles the
- * approved content, publishes a candidate (never the live pointer), and
- * fail-closed self-validates it. Throws `CompileError` if the approved
- * content does not compile; returns `ok:false` with the validation
- * errors if the candidate fails validation.
+ * approved content, stages a candidate (never the live pointer),
+ * fail-closed validates it, and only on success atomically promotes the
+ * staged pointer to the canonical `current.candidate.json`. Throws
+ * `CompileError` if the approved content does not compile; returns
+ * `ok:false` with the validation errors if the candidate fails.
  */
 export function publishApprovedContentCandidate(
   opts: ApprovedContentCandidateOptions,
 ): ApprovedContentCandidateResult {
   const crossRepoCommitProducerEnabled = opts.crossRepoCommitProducerEnabled === true
 
-  const compiled = compileBundle(opts.approvedContent)
+  // Single source of truth for the kill-list: prefer the explicit option,
+  // else whatever the approved content carries. The same value is both
+  // compiled (validated against the registry) and signed into the pointer.
+  const disabledVariants = opts.disabledVariants ?? opts.approvedContent.disabledVariants ?? []
 
-  // Candidate publish: writes immutable bundle files + current.candidate.json
-  // only. `dryRun` is publish.ts's name for exactly this "write a
-  // candidate pointer, never touch current.json" behaviour.
+  const compiled = compileBundle({ ...opts.approvedContent, disabledVariants })
+
+  const envDir = join(opts.artifactRoot, opts.environment)
+  const stagingName = `current.candidate.pending.${compiled.bundleId}.json`
+  const canonicalCandidatePath = join(envDir, 'current.candidate.json')
+
+  // Stage the candidate pointer to a unique pending file (atomic write),
+  // alongside the immutable bundle artifacts.
   const published = publishBundle({
     compiled,
     privateKeyPem: opts.privateKeyPem,
@@ -95,38 +122,57 @@ export function publishApprovedContentCandidate(
     automationGitSha: opts.automationGitSha,
     generatedFrom: opts.generatedFrom,
     previousBundleId: opts.previousBundleId,
-    disabledVariants: opts.disabledVariants,
-    dryRun: true,
+    disabledVariants,
+    candidateOnly: true,
+    candidatePointerName: stagingName,
     now: opts.now,
   })
 
+  // Fail-closed validate the staged pointer against the trusted key and
+  // the actually-deployed renderer version.
   const validation = validateBundle({
     artifactRoot: opts.artifactRoot,
     pointerPath: published.pointerPath,
     publicKeyPem: opts.publicKeyPem,
-    runningRendererVersion: opts.verifyRendererVersion ?? '999.0.0',
+    runningRendererVersion: opts.verifyRendererVersion,
   })
 
-  const errors = validation.ok
-    ? []
-    : [`candidate self-validation failed:`, ...validation.errors.map((e) => `  - ${e}`)]
+  if (!validation.ok) {
+    // Quarantine: drop the invalid staging pointer; leave any existing
+    // good candidate and the live pointer untouched.
+    rmSync(published.pointerPath, { force: true })
+    return {
+      ok: false,
+      bundleId: published.bundleId,
+      version: published.version,
+      candidatePointerPath: canonicalCandidatePath,
+      bundleDir: published.bundleDir,
+      validation,
+      crossRepoCommitProducerEnabled,
+      promoteHint:
+        `candidate ${published.bundleId} did NOT validate; staged pointer discarded and ` +
+        `the live pointer left frozen (fail-closed). Fix the content/policy and re-run ` +
+        `before any promotion.`,
+      errors: ['candidate self-validation failed:', ...validation.errors.map((e) => `  - ${e}`)],
+    }
+  }
 
-  const promoteHint = validation.ok
-    ? `candidate ${published.bundleId} v${published.version} is built & validated at ` +
-      `${published.pointerPath}; promote to live traffic via the P6 canary ` +
-      `(operator-gated pointer flip), not by editing current.json by hand.`
-    : `candidate ${published.bundleId} did NOT validate; live pointer left frozen ` +
-      `(fail-closed). Fix the content/policy and re-run before any promotion.`
+  // Valid → atomically promote the staged pointer to the canonical name.
+  durableRename(published.pointerPath, canonicalCandidatePath, envDir)
 
   return {
-    ok: validation.ok,
+    ok: true,
     bundleId: published.bundleId,
     version: published.version,
-    candidatePointerPath: published.pointerPath,
+    candidatePointerPath: canonicalCandidatePath,
     bundleDir: published.bundleDir,
     validation,
     crossRepoCommitProducerEnabled,
-    promoteHint,
-    errors,
+    promoteHint:
+      `candidate ${published.bundleId} v${published.version} is built & validated at ` +
+      `${canonicalCandidatePath}; promote to live traffic with ` +
+      `\`lp-bundle promote-candidate\` (operator-gated P6 canary), not by editing ` +
+      `current.json by hand.`,
+    errors: [],
   }
 }

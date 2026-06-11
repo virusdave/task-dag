@@ -8,15 +8,25 @@
 //       --config ./bundle-input.json --privkey ./signing.pem [--dry-run]
 //   tsx src/server/lp/cli.ts publish-candidate --root /cloud/lp --env prod \
 //       --config ./approved-content.json --privkey ./signing.pem \
+//       --pubkey ./signing.pub.pem --verify-renderer 0.4.0 \
 //       [--enable-crossrepo-producer]
+//   tsx src/server/lp/cli.ts promote-candidate --root /cloud/lp --env prod \
+//       --privkey ./signing.pem --pubkey ./signing.pub.pem --renderer 0.4.0
+//   tsx src/server/lp/cli.ts rollback --root /cloud/lp --env prod \
+//       --to-bundle <bundle_id> --privkey ./signing.pem \
+//       --pubkey ./signing.pub.pem --renderer 0.4.0
 //   tsx src/server/lp/cli.ts validate --root /cloud/lp --env prod \
 //       --pubkey ./signing.pub.pem --renderer 0.4.0 [--active 4411]
 //
 // `publish-candidate` is the P5 operator-approval entrypoint: it builds
 // + validates a candidate bundle from approved content and writes a
-// candidate pointer ONLY — it never swaps the live current.json (that
-// is the operator-gated P6 canary step). The legacy cross-repo commit
-// producer is disabled unless `--enable-crossrepo-producer` is passed.
+// candidate pointer ONLY — it never swaps the live current.json. The
+// legacy cross-repo commit producer is disabled unless
+// `--enable-crossrepo-producer` is passed.
+//
+// `promote-candidate` / `rollback` are the P6 canary primitives that
+// DO flip the live pointer. They only run against the prod artifact root
+// under operator authorization (canon §1: changing live ad traffic).
 //
 // Signing keys are passed by the operator (file paths); the CLI never
 // reads keys from the artifact root.
@@ -28,6 +38,7 @@ import { compileBundle, CompileError, type CompileInput } from './compile.js'
 import { generateEd25519Pem, publicKeyPemFromPrivate } from './signing.js'
 import { publishBundle, type LpEnvironment } from './publish.js'
 import { publishApprovedContentCandidate } from './publishCandidate.js'
+import { promoteCandidate, rollbackToBundle } from './promoteCandidate.js'
 import { validateBundle } from './validate.js'
 
 interface Args {
@@ -163,7 +174,15 @@ function cmdPublishCandidate(args: Args): number {
   const environment = asEnvironment(requireFlag(args, 'env'))
   const configPath = requireFlag(args, 'config')
   const privateKeyPem = readFileSync(requireFlag(args, 'privkey'), 'utf8')
-  const publicKeyPem = publicKeyPemFromPrivate(privateKeyPem)
+  // Validate against the mss-trusted public key when given (catches a
+  // wrong signing key now instead of a silent mss rejection later);
+  // fall back to the derived key for non-prod self-consistency checks.
+  const publicKeyPem = args.flags.pubkey
+    ? readFileSync(args.flags.pubkey, 'utf8')
+    : publicKeyPemFromPrivate(privateKeyPem)
+  // The renderer to validate against MUST be the version actually
+  // deployed in mss — no permissive sentinel.
+  const verifyRendererVersion = requireFlag(args, 'verify-renderer')
 
   const cfg = JSON.parse(readFileSync(configPath, 'utf8')) as {
     sites: Record<string, unknown>
@@ -204,21 +223,84 @@ function cmdPublishCandidate(args: Args): number {
     },
     previousBundleId: args.flags.prev ?? cfg.previousBundleId,
     disabledVariants: cfg.disabledVariants as never,
-    verifyRendererVersion: args.flags['verify-renderer'],
+    verifyRendererVersion,
     crossRepoCommitProducerEnabled: args.bools.has('enable-crossrepo-producer'),
   })
 
+  const producerLine = result.crossRepoCommitProducerEnabled
+    ? 'requested ENABLED (policy marker only; Helios has no legacy producer to run — see runbook)'
+    : 'disabled (default)'
   process.stdout.write(
     `candidate ${result.bundleId} v${result.version}\n` +
       `  candidatePointer: ${result.candidatePointerPath}\n` +
       `  bundleDir:        ${result.bundleDir}\n` +
-      `  crossRepoCommitProducer: ${result.crossRepoCommitProducerEnabled ? 'ENABLED (legacy)' : 'disabled (default)'}\n`,
+      `  crossRepoCommitProducer: ${producerLine}\n`,
   )
   if (!result.ok) {
     process.stderr.write(`CANDIDATE INVALID:\n  - ${result.validation.errors.join('\n  - ')}\n`)
     return 1
   }
   process.stdout.write(`  self-validation: ok\n  next: ${result.promoteHint}\n`)
+  return 0
+}
+
+// P6: promote a validated candidate to the live current.json. THIS FLIPS
+// LIVE TRAFFIC — only an operator runs it against prod /cloud (canon §1).
+function cmdPromoteCandidate(args: Args): number {
+  const root = requireFlag(args, 'root')
+  const environment = asEnvironment(requireFlag(args, 'env'))
+  const privateKeyPem = readFileSync(requireFlag(args, 'privkey'), 'utf8')
+  const publicKeyPem = readFileSync(requireFlag(args, 'pubkey'), 'utf8')
+  const runningRendererVersion = requireFlag(args, 'renderer')
+
+  const result = promoteCandidate({
+    artifactRoot: root,
+    environment,
+    privateKeyPem,
+    publicKeyPem,
+    runningRendererVersion,
+    allowVersionRebase: args.bools.has('allow-version-rebase'),
+  })
+
+  if (!result.ok) {
+    process.stderr.write(`PROMOTE FAILED:\n  - ${result.errors.join('\n  - ')}\n`)
+    return 1
+  }
+  process.stdout.write(
+    `promoted ${result.bundleId} → live v${result.toVersion} (from v${result.fromVersion})\n` +
+      `  livePointer: ${result.livePointerPath}\n` +
+      `  ${result.rollbackHint ?? ''}\n`,
+  )
+  return 0
+}
+
+// P6 rollback: publish a NEW higher-versioned live pointer at a previous
+// good bundle. Operator-only against prod /cloud (canon §1).
+function cmdRollback(args: Args): number {
+  const root = requireFlag(args, 'root')
+  const environment = asEnvironment(requireFlag(args, 'env'))
+  const privateKeyPem = readFileSync(requireFlag(args, 'privkey'), 'utf8')
+  const publicKeyPem = readFileSync(requireFlag(args, 'pubkey'), 'utf8')
+  const runningRendererVersion = requireFlag(args, 'renderer')
+  const toBundleId = requireFlag(args, 'to-bundle')
+
+  const result = rollbackToBundle({
+    artifactRoot: root,
+    environment,
+    toBundleId,
+    privateKeyPem,
+    publicKeyPem,
+    runningRendererVersion,
+  })
+
+  if (!result.ok) {
+    process.stderr.write(`ROLLBACK FAILED:\n  - ${result.errors.join('\n  - ')}\n`)
+    return 1
+  }
+  process.stdout.write(
+    `rolled back to ${result.bundleId} → live v${result.toVersion} (from v${result.fromVersion})\n` +
+      `  livePointer: ${result.livePointerPath}\n`,
+  )
   return 0
 }
 
@@ -252,10 +334,16 @@ export function main(argv: string[]): number {
         return cmdPublish(args)
       case 'publish-candidate':
         return cmdPublishCandidate(args)
+      case 'promote-candidate':
+        return cmdPromoteCandidate(args)
+      case 'rollback':
+        return cmdRollback(args)
       case 'validate':
         return cmdValidate(args)
       default:
-        process.stderr.write('usage: lp-bundle <keygen|publish|publish-candidate|validate> [options]\n')
+        process.stderr.write(
+          'usage: lp-bundle <keygen|publish|publish-candidate|promote-candidate|rollback|validate> [options]\n',
+        )
         return 2
     }
   } catch (e) {

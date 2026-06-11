@@ -34,7 +34,21 @@ export interface PublishOptions {
   readonly disabledVariants?: readonly DisabledVariant[]
   /** Override the monotonic version (else existing pointer version + 1). */
   readonly version?: number
-  /** Dry run: write artifacts + a candidate pointer, never touch current.json. */
+  /**
+   * Candidate-only publish: write the immutable bundle artifacts + a
+   * *candidate* pointer, and never touch the live `current.json`. The
+   * live pointer stays frozen as last-known-good. (This is the P5
+   * dual-publish path.)
+   */
+  readonly candidateOnly?: boolean
+  /**
+   * Override the candidate pointer filename within the env dir. Lets the
+   * caller stage to a unique pending file, validate it, then atomically
+   * promote it to the canonical `current.candidate.json` only on success.
+   * Ignored unless `candidateOnly` (or the `dryRun` alias) is set.
+   */
+  readonly candidatePointerName?: string
+  /** @deprecated Back-compat alias for {@link candidateOnly}. */
   readonly dryRun?: boolean
   readonly now?: Date
 }
@@ -45,6 +59,9 @@ export interface PublishResult {
   readonly manifestSha256: string
   readonly bundleDir: string
   readonly pointerPath: string
+  /** True when this was a candidate-only publish (live pointer untouched). */
+  readonly candidate: boolean
+  /** @deprecated Back-compat alias for {@link candidate}. */
   readonly dryRun: boolean
 }
 
@@ -65,9 +82,10 @@ export function manifestSigningPayload(manifest: Omit<Manifest, 'signature'>): s
   return canonicalJsonStringify(manifest)
 }
 
-function readExistingVersion(envDir: string): number {
+/** Read the monotonic version of a pointer file; 0 if absent/unparseable. */
+export function readPointerVersion(pointerPath: string): number {
   try {
-    const raw = readFileSync(join(envDir, 'current.json'), 'utf8')
+    const raw = readFileSync(pointerPath, 'utf8')
     const parsed = CurrentPointerSchema.safeParse(JSON.parse(raw))
     return parsed.success ? parsed.data.version : 0
   } catch {
@@ -75,7 +93,52 @@ function readExistingVersion(envDir: string): number {
   }
 }
 
-function writeFileAtomic(targetPath: string, dir: string, tmpName: string, data: string): void {
+/** Canonical relative URL of a bundle's manifest within the artifact root. */
+export function manifestUrlFor(bundleId: string): string {
+  return `bundles/${bundleId}/manifest.json`
+}
+
+export interface SignedPointerInput {
+  readonly environment: LpEnvironment
+  readonly bundleId: string
+  readonly manifestUrl: string
+  readonly manifestSha256: string
+  readonly version: number
+  readonly previousBundleId?: string
+  readonly disabledVariants: readonly DisabledVariant[]
+  readonly publishedAt: string
+  readonly privateKeyPem: string
+}
+
+/**
+ * Build the canonical, signed `current.json` pointer bytes. Single source
+ * of truth for the pointer shape + signing payload, shared by initial
+ * publish, candidate publish, P6 promotion, and rollback so every pointer
+ * is byte-identical in structure and signed the same way.
+ */
+export function buildSignedPointerBytes(input: SignedPointerInput): string {
+  const signature = signPayload(
+    pointerSigningPayload(input.manifestSha256, input.version, input.disabledVariants),
+    input.privateKeyPem,
+  )
+  const pointer = {
+    schema: 'freshlybaked.lp.current.v1' as const,
+    environment: input.environment,
+    bundle_id: input.bundleId,
+    manifest_url: input.manifestUrl,
+    manifest_sha256: input.manifestSha256,
+    version: input.version,
+    published_at: input.publishedAt,
+    ...(input.previousBundleId ? { previous_bundle_id: input.previousBundleId } : {}),
+    signature,
+    ...(input.disabledVariants.length > 0 ? { disabled_variants: input.disabledVariants } : {}),
+  }
+  // Self-validate the pointer before anyone writes it.
+  CurrentPointerSchema.parse(pointer)
+  return canonicalJsonStringify(pointer)
+}
+
+export function writeFileAtomic(targetPath: string, dir: string, tmpName: string, data: string): void {
   const tmpPath = join(dir, tmpName)
   const fd = openSync(tmpPath, 'w')
   try {
@@ -86,6 +149,22 @@ function writeFileAtomic(targetPath: string, dir: string, tmpName: string, data:
   }
   renameSync(tmpPath, targetPath)
   // fsync the directory so the rename is durable.
+  const dirFd = openSync(dir, 'r')
+  try {
+    fsyncSync(dirFd)
+  } finally {
+    closeSync(dirFd)
+  }
+}
+
+/**
+ * Atomically move `fromPath` → `toPath` within the same directory and
+ * fsync the directory so the rename is durable. POSIX `rename(2)` is
+ * atomic, so a reader sees either the old or the new file, never a torn
+ * one. Used to promote a validated staging pointer to its canonical name.
+ */
+export function durableRename(fromPath: string, toPath: string, dir: string): void {
+  renameSync(fromPath, toPath)
   const dirFd = openSync(dir, 'r')
   try {
     fsyncSync(dirFd)
@@ -132,35 +211,28 @@ export function publishBundle(opts: PublishOptions): PublishResult {
   // 3. Build the signed pointer.
   const envDir = join(artifactRoot, environment)
   mkdirSync(envDir, { recursive: true })
-  const version = opts.version ?? readExistingVersion(envDir) + 1
-  const pointerSignature = signPayload(
-    pointerSigningPayload(manifestSha256, version, disabledVariants),
-    opts.privateKeyPem,
-  )
-  const pointer = {
-    schema: 'freshlybaked.lp.current.v1' as const,
+  const version = opts.version ?? readPointerVersion(join(envDir, 'current.json')) + 1
+  const pointerBytes = buildSignedPointerBytes({
     environment,
-    bundle_id: compiled.bundleId,
-    manifest_url: `bundles/${compiled.bundleId}/manifest.json`,
-    manifest_sha256: manifestSha256,
+    bundleId: compiled.bundleId,
+    manifestUrl: manifestUrlFor(compiled.bundleId),
+    manifestSha256,
     version,
-    published_at: now.toISOString(),
-    ...(opts.previousBundleId ? { previous_bundle_id: opts.previousBundleId } : {}),
-    signature: pointerSignature,
-    ...(disabledVariants.length > 0 ? { disabled_variants: disabledVariants } : {}),
-  }
-  // Self-validate the pointer before writing it.
-  CurrentPointerSchema.parse(pointer)
-  const pointerBytes = canonicalJsonStringify(pointer)
+    previousBundleId: opts.previousBundleId,
+    disabledVariants,
+    publishedAt: now.toISOString(),
+    privateKeyPem: opts.privateKeyPem,
+  })
 
-  // 4. Write the pointer. Dry run → candidate file; real → atomic swap.
-  const pointerName = opts.dryRun ? 'current.candidate.json' : 'current.json'
+  // 4. Write the pointer atomically (temp → fsync → rename → fsync dir),
+  //    so a reader never sees a torn pointer. Candidate-only publishes
+  //    write a candidate file and never touch the live `current.json`.
+  const candidate = opts.candidateOnly === true || opts.dryRun === true
+  const pointerName = candidate
+    ? opts.candidatePointerName ?? 'current.candidate.json'
+    : 'current.json'
   const pointerPath = join(envDir, pointerName)
-  if (opts.dryRun) {
-    writeFileSync(pointerPath, pointerBytes)
-  } else {
-    writeFileAtomic(pointerPath, envDir, `current.json.tmp.${version}`, pointerBytes)
-  }
+  writeFileAtomic(pointerPath, envDir, `${pointerName}.tmp.${version}`, pointerBytes)
 
   return {
     bundleId: compiled.bundleId,
@@ -168,6 +240,7 @@ export function publishBundle(opts: PublishOptions): PublishResult {
     manifestSha256,
     bundleDir,
     pointerPath,
-    dryRun: opts.dryRun === true,
+    candidate,
+    dryRun: candidate,
   }
 }

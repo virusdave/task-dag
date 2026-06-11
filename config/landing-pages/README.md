@@ -95,7 +95,47 @@ tsx helios/src/server/lp/cli.ts publish-candidate \
 
 Implemented in `helios/src/server/lp/publishCandidate.ts`
 (`publishApprovedContentCandidate`) + the `publish-candidate` CLI
-subcommand.
+subcommand. The candidate is staged to a unique pending file, validated,
+and only then atomically promoted to `current.candidate.json`, so a
+candidate that fails validation can never be picked up by promotion.
+
+## Canary promotion + rollback (P6 — tooling implemented; live ramp operator-gated)
+
+P6 ("Canary cutover", parent §10) is where a validated candidate is
+actually served. The **tooling** is implemented and tested; **running it
+against the prod `/cloud` root flips live ad traffic and is an operator
+action** (canon §1), as is any `LP_RUNTIME_MODE` / `LP_V2_PERCENT` /
+allowlist change.
+
+```sh
+# Promote the staged candidate to the live current.json:
+tsx helios/src/server/lp/cli.ts promote-candidate --root /cloud/lp --env prod \
+    --privkey ./signing.pem --pubkey ./signing.pub.pem --renderer <deployed-mss-version>
+
+# Roll back to a previous known-good bundle (forward publish, never a rewrite):
+tsx helios/src/server/lp/cli.ts rollback --root /cloud/lp --env prod \
+    --to-bundle <bundle_id> --privkey ./signing.pem --pubkey ./signing.pub.pem \
+    --renderer <deployed-mss-version>
+```
+
+- Both write a **new, higher-versioned, freshly-signed** `current.json`
+  atomically and re-validate it. Promotion enforces version monotonicity
+  (`candidate.version == live+1`; stale candidates are rejected unless
+  `--allow-version-rebase`). Rollback preserves the current kill-list by
+  default. (parent §5: rollback is a forward publish, never a re-write of
+  an old pointer.)
+- **Revenue guardrail** (parent §10 P6: auto-revert if conversion drops
+  >15% vs baseline for 5 min) — the pure decision logic is implemented in
+  `helios/src/server/lp/revenueGuardrail.ts` (`evaluateRevenueGuardrail`):
+  fail-safe on stale/thin data, and **auto-revert is disabled by
+  default** (a breach yields an *alert*, not an automatic pointer flip).
+  Wiring it into a periodic `lp_events`-querying job that can write
+  `current.json` is an operator-gated step that first needs a written DB
+  cost budget + an Oracle DB-efficiency review (canon §3).
+
+Implemented in `helios/src/server/lp/promoteCandidate.ts`
+(`promoteCandidate`, `rollbackToBundle`) + `revenueGuardrail.ts`, with
+the `promote-candidate` / `rollback` CLI subcommands.
 
 ## Event ingest endpoint (P1 — implemented)
 
