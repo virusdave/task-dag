@@ -166,7 +166,10 @@ function skuDetailHref(
 // against its category cohort" — reusing the exact charts Catalog Analytics
 // already provides instead of duplicating the cohort math here. Opens in a
 // new tab. `categoryIds` / `brandIds` on the catalog page are matched by
-// NAME (not numeric id), so the row's own fields are sufficient.
+// NAME (not numeric id), so the row's own fields are sufficient. The
+// product is highlighted by VARIANT ID (productId) via
+// `highlightVariantIds` — a product-name free-text highlight rarely lines
+// up across data sources, so the id is the only reliable handle.
 const COHORT_LINKS: ReadonlyArray<{ section: string; label: string; hint: string }> = [
   {
     section: 'Cohort-relative',
@@ -189,7 +192,10 @@ function catalogCohortHref(r: InventorySkuRow, section: string, windowDays: numb
   const p = new URLSearchParams()
   if (r.siteKey) p.set('sites', r.siteKey)
   if (r.categoryName) p.set('categoryIds', r.categoryName)
-  if (r.productName) p.set('highlight', r.productName)
+  // Highlight the exact variant by id. Fall back to a product-name
+  // free-text highlight only for un-mapped rows with no productId.
+  if (r.productId != null) p.set('highlightVariantIds', String(r.productId))
+  else if (r.productName) p.set('highlight', r.productName)
   p.set('section', section)
   p.set('windowDays', String(windowDays))
   return `/metrics/catalog?${p.toString()}`

@@ -335,6 +335,33 @@ const CATALOG_HIGHLIGHT_DIMS: ReadonlyArray<HighlightDimensionSpec<CatalogAnalyt
         ? ['1 per pkg']
         : [`${p.packCount}-pack`],
   },
+  {
+    // Variant dim — chip id is the catalog product id (the variant), so
+    // structured highlighting (and any deep-link that seeds `highlight-
+    // VariantIds`) pins the EXACT variant rather than fuzzy-matching a
+    // product-name string. Each scatter dot is already one-per-variant
+    // (rolled up from physical lots server-side), so this resolves to a
+    // single dot per chip.
+    id: 'variant',
+    label: 'Variant',
+    getOptions: (pts) => collectVariantChipOptions(pts),
+    pointKey: (p) => (p.productId ? [p.productId] : []),
+  },
+  {
+    // Hidden haystack-only dim (no chip dropdown): folds the product name
+    // + short name + SKU into the free-text highlight haystack so typing
+    // part of a product name still works. The structured matcher migration
+    // (issue #38) had dropped product name/sku from the haystack, which is
+    // why free-text product searches "never matched anything". getOptions
+    // returns [] so HighlightControls renders no chip for it.
+    id: 'product',
+    label: 'Product',
+    getOptions: () => [],
+    pointKey: (p) =>
+      [p.productName, p.productShortName, p.sku].filter(
+        (s): s is string => typeof s === 'string' && s.length > 0,
+      ),
+  },
 ]
 
 /**
@@ -353,6 +380,35 @@ function collectChipOptions<P>(
   }
   const out: Array<{ id: string; label: string; itemCount: number }> = []
   for (const [k, n] of counts) out.push({ id: k, label: k, itemCount: n })
+  out.sort((a, b) => a.label.localeCompare(b.label))
+  return out
+}
+
+/**
+ * Variant chip options keyed on the catalog product id (the variant),
+ * labelled with the human-readable product name (+ size) so the chip is
+ * legible while the option *id* stays the stable numeric variant id. This
+ * is what lets a deep-link (e.g. from the inventory page) highlight an
+ * exact variant by id instead of fuzzy-matching a product-name string that
+ * rarely lines up across data sources. Un-mapped lots (productId null) are
+ * skipped — they have no variant id to pin.
+ */
+function collectVariantChipOptions(
+  points: ReadonlyArray<CatalogAnalyticsPoint>,
+): ReadonlyArray<{ id: string; label: string; itemCount: number }> {
+  const byId = new Map<string, { label: string; count: number }>()
+  for (const p of points) {
+    if (!p.productId) continue
+    const existing = byId.get(p.productId)
+    if (existing) {
+      existing.count += 1
+      continue
+    }
+    const size = p.sizeLabel ? ` · ${p.sizeLabel}` : ''
+    byId.set(p.productId, { label: `${p.productName}${size}`, count: 1 })
+  }
+  const out: Array<{ id: string; label: string; itemCount: number }> = []
+  for (const [id, v] of byId) out.push({ id, label: v.label, itemCount: v.count })
   out.sort((a, b) => a.label.localeCompare(b.label))
   return out
 }
@@ -2099,10 +2155,21 @@ export function CatalogAnalyticsTab({ embedded }: CatalogAnalyticsTabProps = {})
     const seed = emptyHighlightSelection()
     const brandNames = embeddedRef.current?.highlightBrandNames ?? []
     const distNames = embeddedRef.current?.highlightDistributorNames ?? []
-    if (brandNames.length === 0 && distNames.length === 0) return seed
+    // Exact-variant highlight via ?highlightVariantIds=<productId>[,…].
+    // Deep-links (e.g. the inventory cohort links) use the variant id so
+    // the highlight reliably hits the right dot instead of fuzzy-matching
+    // a product name. Ignored in embedded mode (the host owns highlight).
+    const variantIds = embeddedRef.current
+      ? []
+      : (initialQueryRef.current.get('highlightVariantIds') ?? '')
+          .split(',')
+          .map((s) => s.trim())
+          .filter((s) => s.length > 0)
+    if (brandNames.length === 0 && distNames.length === 0 && variantIds.length === 0) return seed
     const next = new Map<string, ReadonlySet<string>>()
     if (brandNames.length > 0) next.set('brand', new Set(brandNames))
     if (distNames.length > 0) next.set('distributor', new Set(distNames))
+    if (variantIds.length > 0) next.set('variant', new Set(variantIds))
     return next
   })
 
