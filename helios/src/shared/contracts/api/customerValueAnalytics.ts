@@ -159,6 +159,32 @@ export type PurchaseCountPercentile = z.infer<typeof PurchaseCountPercentileSche
 export const PurchaseCountPercentilesSchema = z.array(PurchaseCountPercentileSchema)
 export type PurchaseCountPercentiles = z.infer<typeof PurchaseCountPercentilesSchema>
 
+/**
+ * Fixed set of trailing-12-month per-customer spend percentiles the
+ * Customer Value tab reports (operator request 2026-06-11). Unlike the
+ * purchase-count percentiles these are NOT operator-adjustable.
+ */
+export const TRAILING_SPEND_PERCENTILES: readonly number[] = [50, 80, 90, 95]
+
+/**
+ * One reported percentile of per-customer spend over the trailing 12
+ * months ending at the window `to`. The population is non-guest
+ * customers with at least one non-cancelled order at the selected
+ * sites in [to − 12 months, to). All three $ bases are reported so the
+ * client can switch with the page's `$ basis` selector without a
+ * re-fetch; each value is `null` when the population is empty.
+ */
+export const TrailingSpendPercentileSchema = z.object({
+  percentile: z.number().int().min(1).max(99),
+  grossSalesDollars: z.number().nullable(),
+  netSalesDollars: z.number().nullable(),
+  grossReceiptsDollars: z.number().nullable(),
+})
+export type TrailingSpendPercentile = z.infer<typeof TrailingSpendPercentileSchema>
+
+export const TrailingSpendPercentilesSchema = z.array(TrailingSpendPercentileSchema)
+export type TrailingSpendPercentiles = z.infer<typeof TrailingSpendPercentilesSchema>
+
 export const CustomerValueSummarySchema = z.object({
   knownCustomers: z.number().int().nonnegative(),
   totalOrders: z.number().int().nonnegative(),
@@ -169,6 +195,8 @@ export const CustomerValueSummarySchema = z.object({
   observedMedianLtvGrossDollars: z.number().nullable(),
   /** Percentiles of per-customer total purchase count (50/75/80/90/95). */
   purchaseCountPercentiles: PurchaseCountPercentilesSchema,
+  /** Percentiles of per-customer trailing-12-month spend (50/80/90/95). */
+  trailing12moSpendPercentiles: TrailingSpendPercentilesSchema,
   grossSalesDollars: z.number(),
   grossReceiptsDollars: z.number(),
   netSalesDollars: z.number(),

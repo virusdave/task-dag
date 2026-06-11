@@ -12,7 +12,9 @@ import {
   type LifetimeByTotalPurchasesPoint,
   type PurchaseCountBucket,
   type PurchaseCountPercentiles,
+  type TrailingSpendPercentiles,
   type VeriscanCoverage,
+  TRAILING_SPEND_PERCENTILES,
 } from '../../shared/contracts/index.js'
 import { getPool } from '../db/pool.js'
 
@@ -56,6 +58,16 @@ export const CUSTOMER_VALUE_ANALYTICS_MAX_N_HARD_CAP = 50
  *  label them even when there are no in-scope customers. */
 function emptyPurchaseCountPercentiles(percentiles: readonly number[]): PurchaseCountPercentiles {
   return percentiles.map((percentile) => ({ percentile, value: null }))
+}
+
+/** Empty-state trailing-spend percentiles (all bases null). */
+function emptyTrailingSpendPercentiles(): TrailingSpendPercentiles {
+  return TRAILING_SPEND_PERCENTILES.map((percentile) => ({
+    percentile,
+    grossSalesDollars: null,
+    netSalesDollars: null,
+    grossReceiptsDollars: null,
+  }))
 }
 
 /**
@@ -325,6 +337,7 @@ export async function getCustomerValueAnalytics(
       observedAvgLtvGrossDollars: null,
       observedMedianLtvGrossDollars: null,
       purchaseCountPercentiles: emptyPurchaseCountPercentiles(args.percentiles),
+      trailing12moSpendPercentiles: emptyTrailingSpendPercentiles(),
       grossSalesDollars: 0,
       grossReceiptsDollars: 0,
       netSalesDollars: 0,
@@ -603,7 +616,38 @@ export async function getCustomerValueAnalytics(
       and so.pay_time < $3::timestamptz
       ${nonCancelledOrderSql('so')}
   `
-  const [result, guestRes, retentionRes, veriscanRes] = await Promise.all([
+  // Trailing-12-month per-customer spend percentiles (operator request
+  // 2026-06-11). Population: non-guest customers with >= 1 non-cancelled
+  // order at the selected sites in [to − 12 months, to). One param per
+  // requested percentile ($3, $4, …), reused across all three $ bases.
+  const ttmFractions = TRAILING_SPEND_PERCENTILES.map((p) => p / 100)
+  const ttmSelectCols = TRAILING_SPEND_PERCENTILES.map((_, i) => {
+    const p = `$${i + 3}::float8`
+    return (
+      `      percentile_cont(${p}) within group (order by gross_sales) as gs_${i},\n` +
+      `      percentile_cont(${p}) within group (order by net_sales) as ns_${i},\n` +
+      `      percentile_cont(${p}) within group (order by receipts) as rc_${i}`
+    )
+  }).join(',\n')
+  const trailingSpendSql = `
+    with ttm as (
+      select so.customer_id,
+        sum(coalesce(so.subtotal_dollars, 0))::numeric                              as gross_sales,
+        sum(coalesce(so.subtotal_dollars, 0) - coalesce(so.discount_dollars, 0))::numeric as net_sales,
+        sum(coalesce(so.grand_total_dollars, 0))::numeric                           as receipts
+      from sweed_orders so
+      where so.dealer_id = any($1::bigint[])
+        and so.customer_id is not null
+        and so.pay_time >= $2::timestamptz - interval '12 months'
+        and so.pay_time <  $2::timestamptz
+        ${nonCancelledOrderSql('so')}
+      group by so.customer_id
+    )
+    select count(*)::int as n,
+${ttmSelectCols}
+    from ttm
+  `
+  const [result, guestRes, retentionRes, veriscanRes, ttmRes] = await Promise.all([
     pool.query<UnionRow>(sql, [
       dealerIds,
       args.from.toISOString(),
@@ -635,9 +679,31 @@ export async function getCustomerValueAnalytics(
       args.from.toISOString(),
       args.to.toISOString(),
     ]),
+    pool.query<Record<string, string | number | null>>(trailingSpendSql, [
+      dealerIds,
+      args.to.toISOString(),
+      ...ttmFractions,
+    ]),
   ])
 
   const guestCount = asReqInt(guestRes.rows[0]?.n)
+  // Trailing-12-month spend percentiles — one entry per requested
+  // percentile, each carrying all three $ bases (client switches on the
+  // page's $ basis selector). Null when the trailing-window population
+  // is empty.
+  const ttmRow = ttmRes.rows[0]
+  const round2OrNull = (v: unknown): number | null => {
+    const n = asNum(v)
+    return n === null ? null : Math.round(n * 100) / 100
+  }
+  const trailing12moSpendPercentiles: TrailingSpendPercentiles = TRAILING_SPEND_PERCENTILES.map(
+    (percentile, i) => ({
+      percentile,
+      grossSalesDollars: round2OrNull(ttmRow?.[`gs_${i}`]),
+      netSalesDollars: round2OrNull(ttmRow?.[`ns_${i}`]),
+      grossReceiptsDollars: round2OrNull(ttmRow?.[`rc_${i}`]),
+    }),
+  )
   const veriscanTotal = asReqInt(veriscanRes.rows[0]?.total)
   const veriscanLinked = asReqInt(veriscanRes.rows[0]?.linked)
   const veriscanCoverage: VeriscanCoverage = {
@@ -655,6 +721,7 @@ export async function getCustomerValueAnalytics(
     observedAvgLtvGrossDollars: null,
     observedMedianLtvGrossDollars: null,
     purchaseCountPercentiles: emptyPurchaseCountPercentiles(args.percentiles),
+    trailing12moSpendPercentiles: emptyTrailingSpendPercentiles(),
     grossSalesDollars: 0,
     grossReceiptsDollars: 0,
     netSalesDollars: 0,
@@ -689,6 +756,10 @@ export async function getCustomerValueAnalytics(
         summary.grossSalesDollars = asReqNum(row.v6)
         summary.netSalesDollars = asReqNum(row.v7)
         summary.grossReceiptsDollars = asReqNum(row.v8)
+        // Trailing-12-month spend percentiles come from a separate
+        // query (different lookback window than the page range), not
+        // the union — assign the precomputed value here.
+        summary.trailing12moSpendPercentiles = trailing12moSpendPercentiles
         break
       }
       case 'purchase_count': {

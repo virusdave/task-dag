@@ -14,6 +14,7 @@ import {
   type MetricSelection,
   type PurchaseCountBucket,
   type PurchaseCountPercentiles,
+  type TrailingSpendPercentiles,
   DEFAULT_PURCHASE_COUNT_PERCENTILES,
   normalizePurchaseCountPercentile,
 } from '../../../shared/contracts/index.js'
@@ -467,6 +468,12 @@ function CustomerValueBody({
         <span className="subtle-copy">{moneyBasisDef.help}</span>
       </div>
 
+      <TrailingSpendPercentilesStrip
+        percentiles={data.summary.trailing12moSpendPercentiles}
+        basis={moneyBasis}
+        basisLabel={moneyBasisDef.label}
+      />
+
       {/* v1.4 V4'4: selection callout — visible iff a histogram bucket
           is currently selected via URL state. Click ✕ or press Escape
           (anywhere) to clear. */}
@@ -735,6 +742,51 @@ function Kpi({ label, value, help }: { label: string; value: string; help: strin
         {label} <HelpIcon text={help} />
       </div>
       <div className="customer-value-kpi-value">{value}</div>
+    </div>
+  )
+}
+
+// =================== Trailing-12-month spend percentiles ===================
+
+/** Compact strip of trailing-12-month per-customer spend percentiles
+ *  (fixed P50/P80/P90/P95). The displayed $ value tracks the page's
+ *  `$ basis` selector. Population = non-guest customers with >= 1
+ *  non-cancelled order in the trailing 12 months ending at the range
+ *  end, at the selected sites. */
+function TrailingSpendPercentilesStrip({
+  percentiles,
+  basis,
+  basisLabel,
+}: {
+  percentiles: TrailingSpendPercentiles
+  basis: MoneyBasis
+  basisLabel: string
+}) {
+  const pick = (p: TrailingSpendPercentiles[number]): number | null =>
+    basis === 'gross_sales'
+      ? p.grossSalesDollars
+      : basis === 'net_sales'
+        ? p.netSalesDollars
+        : p.grossReceiptsDollars
+  return (
+    <div className="customer-value-kpis customer-value-ttm-spend">
+      <div className="customer-value-kpi">
+        <div className="customer-value-kpi-label">
+          Trailing-12-mo spend ({basisLabel.toLowerCase()}){' '}
+          <HelpIcon text="Distribution of each customer's total spend over the trailing 12 months ending at the range end. Population: non-guest customers with at least one non-cancelled order in that window at the selected sites. Switches with the $ basis selector above. Independent of the cohort-scope / from-date controls (the lookback is always a fixed 12 months back from the range end)." />
+        </div>
+        <div className="customer-value-kpi-value subtle-copy" style={{ fontSize: '0.8em' }}>
+          percentiles
+        </div>
+      </div>
+      {percentiles.map((p) => (
+        <Kpi
+          key={p.percentile}
+          label={`P${p.percentile}`}
+          value={fmtMoneyOrDash(pick(p))}
+          help={`The spend at or below which ${p.percentile}% of trailing-12-month customers fall (${basisLabel.toLowerCase()}).`}
+        />
+      ))}
     </div>
   )
 }
