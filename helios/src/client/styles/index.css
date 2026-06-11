@@ -1411,6 +1411,21 @@ pre {
   background: linear-gradient(135deg, #c34f4f, #d46868);
 }
 
+.cache-repair-progress-list {
+  display: grid;
+  gap: 0.85rem;
+}
+
+.cache-repair-job-row {
+  display: grid;
+  gap: 0.15rem;
+}
+
+.cache-repair-next {
+  border-top: 1px solid var(--panel-border);
+  padding-top: 0.75rem;
+}
+
 .job-log-tail {
   max-height: 22rem;
   overflow-y: auto;

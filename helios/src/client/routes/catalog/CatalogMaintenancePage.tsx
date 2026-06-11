@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent }
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 
 import {
+  buildHeliosModulePath,
   CatalogMaintenanceMovePackageResponseSchema,
   CatalogMaintenanceSurveyResponseSchema,
   HELIOS_PENDING_PURCHASE_SITE_DEALERS,
@@ -13,8 +14,10 @@ import {
   type CatalogMaintenanceSiteGroup,
   type CatalogMaintenanceSiteVariant,
   type CatalogMaintenanceSurveyResponse,
+  type JobStatusResponse,
 } from '../../../shared/contracts/index.js'
 import { buildAppPath } from '../../app/paths.js'
+import { isJobTerminal, loadJobStatus } from '../../app/jobPolling.js'
 import { importChunkOrReload } from '../../app/dynamicImport.js'
 import { Pill } from '../../components/Pill.js'
 import {
@@ -62,6 +65,8 @@ export interface UseMaintenanceSurveyResult {
   fetchSurvey: (forceRefresh: boolean) => Promise<void>
   repairBusy: boolean
   handleRepairCache: () => Promise<void>
+  repairJobs: RepairJobRef[] | null
+  clearRepairJobs: () => void
 }
 
 export function useMaintenanceSurvey(): UseMaintenanceSurveyResult {
@@ -69,6 +74,8 @@ export function useMaintenanceSurvey(): UseMaintenanceSurveyResult {
   const [state, setState] = useState<SurveyState>(INITIAL_STATE)
   const [feedback, setFeedback] = useState<{ kind: 'ok' | 'err'; message: string } | null>(null)
   const [repairBusy, setRepairBusy] = useState(false)
+  const [repairJobs, setRepairJobs] = useState<RepairJobRef[] | null>(null)
+  const clearRepairJobs = useCallback(() => setRepairJobs(null), [])
 
   const fetchSurvey = useCallback(
     async (forceRefresh: boolean) => {
@@ -119,13 +126,16 @@ export function useMaintenanceSurvey(): UseMaintenanceSurveyResult {
         throw new Error(errorPayload ?? `${response.status} ${response.statusText}`)
       }
       const payload = (await response.json()) as CatalogMaintenanceCacheRepairResponse
-      const jobIds = [payload.fullSummaryJobId, payload.stockRefreshJobId, payload.discoverOrphanGroupsJobId]
-        .filter((v): v is number => v !== null)
-        .join(', ')
-      setFeedback({
-        kind: 'ok',
-        message: `Fix-cache jobs enqueued (ids: ${jobIds}). The page will look correct once workers finish.`,
-      })
+      const jobs = buildRepairJobRefs(payload)
+      if (jobs.length === 0) {
+        setFeedback({
+          kind: 'ok',
+          message: 'Fix-cache requested, but no new jobs were enqueued (one may already be running).',
+        })
+      } else {
+        setFeedback(null)
+        setRepairJobs(jobs)
+      }
     } catch (error) {
       setFeedback({ kind: 'err', message: error instanceof Error ? error.message : 'Fix cache failed.' })
     } finally {
@@ -133,7 +143,47 @@ export function useMaintenanceSurvey(): UseMaintenanceSurveyResult {
     }
   }, [navigate])
 
-  return { state, feedback, setFeedback, fetchSurvey, repairBusy, handleRepairCache }
+  return { state, feedback, setFeedback, fetchSurvey, repairBusy, handleRepairCache, repairJobs, clearRepairJobs }
+}
+
+/**
+ * One enqueued cache-repair worker, in execution order. The three jobs
+ * share a Sweed-session concurrency key, so they run serially top-to-
+ * bottom: stock refresh marks the just-received SKUs in-stock, orphan
+ * discovery adds the newly in-stock groups to the catalog mirror (the
+ * table the pricing brand picker reads), and the summary refresh
+ * rebuilds the cached catalog rollups.
+ */
+interface RepairJobRef {
+  jobId: number
+  label: string
+  description: string
+}
+
+function buildRepairJobRefs(payload: CatalogMaintenanceCacheRepairResponse): RepairJobRef[] {
+  const refs: RepairJobRef[] = []
+  if (payload.stockRefreshJobId !== null) {
+    refs.push({
+      jobId: payload.stockRefreshJobId,
+      label: 'Stock refresh',
+      description: 'Marks just-received SKUs as in-stock from Sweed.',
+    })
+  }
+  if (payload.discoverOrphanGroupsJobId !== null) {
+    refs.push({
+      jobId: payload.discoverOrphanGroupsJobId,
+      label: 'Discover new groups',
+      description: 'Adds newly in-stock product groups to the catalog mirror the pricing picker reads.',
+    })
+  }
+  if (payload.fullSummaryJobId !== null) {
+    refs.push({
+      jobId: payload.fullSummaryJobId,
+      label: 'Catalog summary refresh',
+      description: 'Rebuilds cached catalog rollups so this page and dashboards agree.',
+    })
+  }
+  return refs
 }
 
 /**
@@ -154,7 +204,8 @@ export function CatalogMaintenancePage() {
   const [searchParams, setSearchParams] = useSearchParams()
   const activeBrand = searchParams.get('brand')
   const navigate = useNavigate()
-  const { state, feedback, setFeedback, fetchSurvey, repairBusy, handleRepairCache } = useMaintenanceSurvey()
+  const { state, feedback, setFeedback, fetchSurvey, repairBusy, handleRepairCache, repairJobs, clearRepairJobs } =
+    useMaintenanceSurvey()
 
   // If we somehow land here without a siteKey in the URL (legacy link
   // or a typo), bounce to the site index so the operator can pick one.
@@ -300,6 +351,10 @@ export function CatalogMaintenancePage() {
         <div className="catalog-maintenance-toast catalog-maintenance-toast-err">{state.error}</div>
       ) : null}
 
+      {repairJobs ? (
+        <CacheRepairProgressPanel jobs={repairJobs} onDismiss={clearRepairJobs} onRescan={() => void fetchSurvey(true)} />
+      ) : null}
+
       {filteredSurvey?.fatal ? (
         <FatalBanner banner={filteredSurvey.fatal} busy={repairBusy} onRepair={() => void handleRepairCache()} />
       ) : null}
@@ -423,6 +478,181 @@ function FatalBanner({ banner, busy, onRepair }: FatalBannerProps) {
       </div>
     </div>
   )
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Fix-cache progress: stacked, live-polled progress bars for the three      */
+/*  workers the "Fix cache" button enqueues, with a link to each job and a    */
+/*  "what's next" jump to pricing once the catalog mirror is rebuilt.         */
+/* -------------------------------------------------------------------------- */
+
+interface CacheRepairProgressPanelProps {
+  jobs: RepairJobRef[]
+  onDismiss: () => void
+  onRescan: () => void
+}
+
+function CacheRepairProgressPanel({ jobs, onDismiss, onRescan }: CacheRepairProgressPanelProps) {
+  const [statuses, setStatuses] = useState<Record<number, JobStatusResponse | null>>({})
+  const jobsKey = jobs.map((job) => job.jobId).join(',')
+
+  useEffect(() => {
+    let cancelled = false
+    let timer: ReturnType<typeof setTimeout> | null = null
+
+    const tick = async () => {
+      const results = await Promise.all(
+        jobs.map(async (job) => {
+          try {
+            return [job.jobId, await loadJobStatus(job.jobId)] as const
+          } catch {
+            return [job.jobId, null] as const
+          }
+        }),
+      )
+      if (cancelled) {
+        return
+      }
+      const next: Record<number, JobStatusResponse | null> = {}
+      for (const [id, status] of results) {
+        next[id] = status
+      }
+      setStatuses(next)
+      const allTerminal = results.every(([, status]) => status !== null && isJobTerminal(status.job.status))
+      if (!allTerminal) {
+        timer = setTimeout(() => void tick(), 2500)
+      }
+    }
+
+    void tick()
+    return () => {
+      cancelled = true
+      if (timer) {
+        clearTimeout(timer)
+      }
+    }
+    // jobsKey captures the identity of the tracked job set; re-poll when it changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [jobsKey])
+
+  const allSucceeded = jobs.length > 0 && jobs.every((job) => statuses[job.jobId]?.job.status === 'succeeded')
+  const anyFailed = jobs.some((job) => {
+    const status = statuses[job.jobId]?.job.status
+    return status === 'failed' || status === 'dead_letter'
+  })
+  const allTerminal =
+    jobs.length > 0 &&
+    jobs.every((job) => {
+      const status = statuses[job.jobId]?.job.status
+      return status !== undefined && isJobTerminal(status)
+    })
+
+  return (
+    <article className="detail-panel job-progress-panel" style={{ marginBottom: '1rem' }}>
+      <div className="page-header" style={{ marginBottom: '0.75rem' }}>
+        <div>
+          <h3 style={{ margin: 0 }}>Fix-cache progress</h3>
+          <p className="subtle-copy">
+            {allSucceeded
+              ? 'Done — newly received SKUs are now in the catalog mirror.'
+              : anyFailed
+                ? 'One of the workers failed. Open it for the error, then retry Fix cache.'
+                : 'Workers run top-to-bottom; this panel refreshes automatically.'}
+          </p>
+        </div>
+        <div className="inline-row wrap-row">
+          {allTerminal ? (
+            <button type="button" className="ghost-button" onClick={onDismiss}>
+              Dismiss
+            </button>
+          ) : null}
+        </div>
+      </div>
+
+      <div className="cache-repair-progress-list">
+        {jobs.map((job) => (
+          <CacheRepairJobRow key={job.jobId} job={job} status={statuses[job.jobId] ?? null} />
+        ))}
+      </div>
+
+      {allSucceeded ? (
+        <div className="cache-repair-next" style={{ marginTop: '0.9rem' }}>
+          <strong>Next:</strong> the brand should now appear in the pricing brand picker.
+          <div className="inline-row wrap-row module-card-links" style={{ marginTop: '0.5rem' }}>
+            <Link className="primary-button" to={buildHeliosModulePath('pricing', 'generate')}>
+              Start a pricing run →
+            </Link>
+            <button type="button" className="ghost-button" onClick={onRescan}>
+              Re-scan this page
+            </button>
+          </div>
+        </div>
+      ) : null}
+    </article>
+  )
+}
+
+function CacheRepairJobRow({ job, status }: { job: RepairJobRef; status: JobStatusResponse | null }) {
+  const jobStatus = status?.job.status ?? 'queued'
+  const failed = jobStatus === 'failed' || jobStatus === 'dead_letter'
+  const percent = computeRepairJobPercent(status)
+
+  return (
+    <div className="cache-repair-job-row">
+      <div className="inline-row wrap-row" style={{ justifyContent: 'space-between' }}>
+        <div>
+          <Link to={`/jobs/${job.jobId}`}>
+            #{job.jobId} · {job.label}
+          </Link>
+          <p className="subtle-copy" style={{ margin: '0.1rem 0 0' }}>
+            {status?.progress?.message ?? job.description}
+          </p>
+        </div>
+        <Pill tone={repairStatusTone(jobStatus)}>{jobStatus.replaceAll('_', ' ')}</Pill>
+      </div>
+      <div className="job-progress-track" aria-hidden="true" style={{ marginTop: '0.4rem' }}>
+        <div className={`job-progress-fill${failed ? ' failed' : ''}`} style={{ width: `${percent}%` }} />
+      </div>
+      {failed && status?.job.lastError ? <p className="error-text">{status.job.lastError}</p> : null}
+    </div>
+  )
+}
+
+function repairStatusTone(status: JobStatusResponse['job']['status']): 'danger' | 'muted' | 'success' | 'warning' {
+  switch (status) {
+    case 'succeeded':
+      return 'success'
+    case 'failed':
+    case 'dead_letter':
+      return 'danger'
+    case 'queued':
+    case 'running':
+      return 'warning'
+    default:
+      return 'muted'
+  }
+}
+
+function computeRepairJobPercent(status: JobStatusResponse | null): number {
+  if (!status) {
+    return 4
+  }
+  if (status.job.status === 'succeeded') {
+    return 100
+  }
+  if (status.job.status === 'queued') {
+    return 4
+  }
+  const progress = status.progress
+  if (!progress) {
+    return status.job.status === 'running' ? 35 : 12
+  }
+  const phaseOffset = (progress.phaseIndex - 1) / progress.phaseCount
+  const phaseFraction =
+    progress.total && progress.completed !== null ? Math.min(progress.completed / progress.total, 1) : 0.35
+  const computed = Math.round((phaseOffset + phaseFraction / progress.phaseCount) * 100)
+  const floor = status.job.status === 'failed' || status.job.status === 'dead_letter' ? 10 : 5
+  return Math.max(floor, Math.min(99, computed))
 }
 
 interface SiteSectionProps {

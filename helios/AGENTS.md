@@ -102,3 +102,31 @@ Rules:
 - If you encounter existing promos with the field off (e.g. via a
   bulk audit / dashboard), the correct remediation is to flip them
   on, not to leave them as-is.
+
+## Building the client: raise Node's heap or it OOMs
+
+`npm run build:client` (i.e. `vite build`) transforms ~850 modules and
+emits a multi-megabyte bundle. On the agent hosts the default V8 old-space
+limit (~1 GB here) is **not** enough — a bare `vite build` dies partway
+through `rendering chunks…` with:
+
+```
+FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory
+```
+
+This is an environment/heap ceiling, **not** a code error, and retrying
+the identical command will keep failing. Always build the client with an
+enlarged heap:
+
+```sh
+NODE_OPTIONS=--max-old-space-size=8192 npm run build:client
+# or, invoking vite directly:
+NODE_OPTIONS=--max-old-space-size=8192 ./node_modules/.bin/vite build
+```
+
+8192 (8 GiB) is comfortable headroom; 4096 also works today but leaves
+little slack as the bundle grows. The same flag applies to `npm run build`
+(which runs `build:client`) and to the `scripts/smoke-server.ts` gate when
+it has to build the client first. The pre-commit hook itself only relies
+on an **already-built** `dist/client`, so if you've just built with the
+flag above the hook's smoke step will pass without re-building.
