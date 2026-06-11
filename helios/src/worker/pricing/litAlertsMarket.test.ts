@@ -36,6 +36,7 @@ vi.mock('../litalerts/partnerClient.js', () => ({
 }))
 
 import type { NormalizedCatalogGroupLiveState } from '../catalog/liveState.js'
+import { assessParseReasonableness } from '../llm/parseReasonableness.js'
 import {
   hasPartnerApiToken,
   listBrandsForState,
@@ -703,5 +704,190 @@ describe('buildPricingMarketContextWithFailureHandling', () => {
 
     expect(pageDaveMock).toHaveBeenCalledTimes(1)
     expect(pageDaveMock.mock.calls[0]?.[0]).toContain('Packet generation failed: pricing market research failed for Ayrloom')
+  })
+})
+
+describe('LLM parse-reasonableness escalation (catalog size)', () => {
+  function buildPrerollGroup(opts: {
+    brand: string
+    sizeName: string | null
+    packOfSize: number | null
+    productName: string
+    tab?: string
+  }): NormalizedCatalogGroupLiveState {
+    return {
+      brand: opts.brand,
+      category: 'Pre-Rolls',
+      currentDescription: '',
+      effects: [],
+      flavorings: [],
+      groupFullName: opts.productName,
+      groupId: 900,
+      groupName: opts.productName,
+      imageUrl: null,
+      productTabs: [opts.tab ?? ''],
+      products: [
+        {
+          gmPercent: 60,
+          imageUrl: null,
+          name: opts.productName,
+          packOfSize: opts.packOfSize,
+          price: 50,
+          productId: 9001,
+          shortName: null,
+          sizeName: opts.sizeName,
+          sku: null,
+          tab: opts.tab ?? '',
+          wholesaleCost: 20,
+        },
+      ],
+      scents: [],
+      strain: null,
+      subcategory: null,
+      tags: [],
+    }
+  }
+
+  // A genuinely ambiguous multipack: a generic brand (no convention), a
+  // structured 5 x 2.5g, and an EMPTY prior so the distribution stays
+  // silent and the LLM tie-break becomes eligible.
+  const ambiguousGroup = buildPrerollGroup({
+    brand: 'GenericCo',
+    packOfSize: 5,
+    productName: 'GenericCo Mystery Pack 5x 2.5g',
+    sizeName: '2.5g',
+  })
+  const emptyPrior = __test__.buildSizeDistributionPrior([])
+
+  it('flags an ambiguous multipack (no override, silent prior) for LLM review', () => {
+    const ambiguity = __test__.inspectCatalogMultipackAmbiguity({
+      name: ambiguousGroup.products[0]!.name,
+      tab: ambiguousGroup.products[0]!.tab,
+      sizeName: ambiguousGroup.products[0]!.sizeName,
+      packOfSize: ambiguousGroup.products[0]!.packOfSize,
+      brand: ambiguousGroup.brand,
+      category: ambiguousGroup.category,
+      prior: emptyPrior,
+    })
+    expect(ambiguity).not.toBeNull()
+    expect(ambiguity?.candidateUnit).toMatchObject({ packCount: 5, totalValue: 12.5, unitValue: 2.5 })
+    expect(ambiguity?.candidateTotal).toMatchObject({ packCount: 5, totalValue: 2.5, unitValue: 0.5 })
+  })
+
+  it('does NOT flag a SKU the distribution prior settles (real Jeeter-like 5x2.5g pre-roll)', () => {
+    // Default prior has 147 rows of (pre rolls, 5-pack, 0.5g/stick) and 0
+    // of 2.5g/stick, so distribution decides 'total' and no LLM is needed.
+    const ambiguity = __test__.inspectCatalogMultipackAmbiguity({
+      name: 'GenericCo Mystery Pack 5x 2.5g',
+      tab: '',
+      sizeName: '2.5g',
+      packOfSize: 5,
+      brand: 'GenericCo',
+      category: 'Pre-Rolls',
+    })
+    expect(ambiguity).toBeNull()
+  })
+
+  it('never calls the LLM when the distribution prior decides', async () => {
+    const assessor = vi.fn()
+    const profiles = await __test__.buildCatalogComparableProfiles({
+      liveState: buildPrerollGroup({
+        brand: 'GenericCo',
+        packOfSize: 5,
+        productName: 'GenericCo Mystery Pack 5x 2.5g',
+        sizeName: '2.5g',
+      }),
+      listingSamples: [],
+      assessor: assessor as never,
+    })
+    expect(assessor).not.toHaveBeenCalled()
+    // Deterministic distribution choice = 'total' => 2.5g total, 0.5g/stick.
+    expect(profiles.get(9001)?.size).toMatchObject({ packCount: 5, totalValue: 2.5, unitValue: 0.5 })
+  })
+
+  it('accepts a high-confidence LLM pick on an ambiguous tie', async () => {
+    const assessor = vi.fn().mockResolvedValue({
+      chosenLabel: 'total',
+      confidence: 0.92,
+      note: 'Common 0.5g/stick pre-roll multipack.',
+      candidate: null,
+    })
+    const profiles = await __test__.buildCatalogComparableProfiles({
+      liveState: ambiguousGroup,
+      listingSamples: [],
+      prior: emptyPrior,
+      assessor: assessor as never,
+    })
+    expect(assessor).toHaveBeenCalledTimes(1)
+    expect(profiles.get(9001)?.size).toMatchObject({ packCount: 5, totalValue: 2.5, unitValue: 0.5 })
+  })
+
+  it('ignores a low-confidence LLM pick and keeps the deterministic default', async () => {
+    const assessor = vi.fn().mockResolvedValue({
+      chosenLabel: 'total',
+      confidence: 0.4,
+      note: 'Not sure.',
+      candidate: null,
+    })
+    const profiles = await __test__.buildCatalogComparableProfiles({
+      liveState: ambiguousGroup,
+      listingSamples: [],
+      prior: emptyPrior,
+      assessor: assessor as never,
+    })
+    // Falls back to structured-syntax default 'unit' => 12.5g total, 2.5g/stick.
+    expect(profiles.get(9001)?.size).toMatchObject({ packCount: 5, totalValue: 12.5, unitValue: 2.5 })
+  })
+
+  it('ignores an LLM pick with an unknown label', async () => {
+    const assessor = vi.fn().mockResolvedValue({
+      chosenLabel: 'bogus',
+      confidence: 0.99,
+      note: 'made up',
+      candidate: null,
+    })
+    const profiles = await __test__.buildCatalogComparableProfiles({
+      liveState: ambiguousGroup,
+      listingSamples: [],
+      prior: emptyPrior,
+      assessor: assessor as never,
+    })
+    expect(profiles.get(9001)?.size).toMatchObject({ packCount: 5, totalValue: 12.5, unitValue: 2.5 })
+  })
+
+  it('stays deterministic when the assessor returns null (e.g. no Mantle token)', async () => {
+    const assessor = vi.fn().mockResolvedValue(null)
+    const profiles = await __test__.buildCatalogComparableProfiles({
+      liveState: ambiguousGroup,
+      listingSamples: [],
+      prior: emptyPrior,
+      assessor: assessor as never,
+    })
+    expect(profiles.get(9001)?.size).toMatchObject({ packCount: 5, totalValue: 12.5, unitValue: 2.5 })
+  })
+
+  it('stays deterministic when the assessor throws', async () => {
+    const assessor = vi.fn().mockRejectedValue(new Error('mantle down'))
+    const profiles = await __test__.buildCatalogComparableProfiles({
+      liveState: ambiguousGroup,
+      listingSamples: [],
+      prior: emptyPrior,
+      assessor: assessor as never,
+    })
+    expect(profiles.get(9001)?.size).toMatchObject({ packCount: 5, totalValue: 12.5, unitValue: 2.5 })
+  })
+})
+
+describe('assessParseReasonableness (LLM helper)', () => {
+  it('returns null when no Mantle token is configured', async () => {
+    const result = await assessParseReasonableness({
+      name: 'GenericCo Mystery Pack 5x 2.5g',
+      candidates: [
+        { label: 'unit', packCount: 5, unitValue: 2.5, totalValue: 12.5, measure: 'g' },
+        { label: 'total', packCount: 5, unitValue: 0.5, totalValue: 2.5, measure: 'g' },
+      ],
+      context: 'test',
+    })
+    expect(result).toBeNull()
   })
 })

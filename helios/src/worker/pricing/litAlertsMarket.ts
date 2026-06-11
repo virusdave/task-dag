@@ -12,8 +12,13 @@ import {
 } from '../../shared/domain/pricingGeneration.js'
 import { getPool } from '../../server/db/pool.js'
 
-import type { NormalizedCatalogGroupLiveState } from '../catalog/liveState.js'
+import type { NormalizedCatalogGroupLiveState, NormalizedCatalogProductLiveState } from '../catalog/liveState.js'
 import { getWorkerEnv } from '../config/env.js'
+import {
+  assessParseReasonableness,
+  type ParseReasonablenessCandidate,
+  type ParseReasonablenessResult,
+} from '../llm/parseReasonableness.js'
 import {
   hasPartnerApiToken,
   listBrandsForState,
@@ -87,6 +92,12 @@ const MIN_PRICING_ELIGIBLE_COMP_COUNT = 3
  */
 const PRICING_NEARBY_RETAILER_FETCH_LIMIT = 50
 const PRICING_NEARBY_RETAILER_FETCH_CONCURRENCY = 8
+// Only accept an LLM size-interpretation pick when it is at least this
+// confident; otherwise keep the deterministic convention/syntax default.
+const PARSE_REASONABLENESS_CONFIDENCE_THRESHOLD = 0.85
+// Cap how many same-brand retailer listing names we hand the LLM as
+// nearby examples, to keep the prompt small and cheap.
+const PARSE_REASONABLENESS_LISTING_SAMPLE_LIMIT = 12
 const PRICING_SEARCH_ADAPTATION_MODEL = 'google.gemma-3-27b-it'
 const PRICING_SEARCH_ADAPTATION_MAX_TERMS = 4
 const PRICING_SEARCH_ADAPTATION_MAX_ATTEMPTS = 4
@@ -264,7 +275,20 @@ export async function buildPricingMarketContext(
   let mergedListings = combinedSearchTerms.length > 0
     ? filterListingCandidatesBySearchTerms(allBrandListings, combinedSearchTerms)
     : []
-  let evidenceByProductId = collectProductEvidence(liveState, mergedListings, buildSearchTermLabel(combinedSearchTerms))
+  // Build OUR catalog SKU profiles once for this run. This is where the
+  // (rare) LLM size sanity check fires — only for SKUs whose multipack
+  // size the distribution prior can't settle — so reusing the map across
+  // the initial and search-adapted evidence passes avoids re-asking.
+  const catalogProfiles = await buildCatalogComparableProfiles({
+    liveState,
+    listingSamples: allBrandListings,
+  })
+  let evidenceByProductId = collectProductEvidence(
+    liveState,
+    mergedListings,
+    buildSearchTermLabel(combinedSearchTerms),
+    catalogProfiles,
+  )
   let adaptationSummary: string | null = null
 
   if (shouldAttemptSearchAdaptation(liveState, evidenceByProductId)) {
@@ -281,7 +305,12 @@ export async function buildPricingMarketContext(
       combinedSearchTerms = [...combinedSearchTerms, ...adaptedSearchTerms]
       const adaptedListings = filterListingCandidatesBySearchTerms(allBrandListings, adaptedSearchTerms)
       mergedListings = dedupeListingCandidates([...mergedListings, ...adaptedListings])
-      evidenceByProductId = collectProductEvidence(liveState, mergedListings, buildSearchTermLabel(combinedSearchTerms))
+      evidenceByProductId = collectProductEvidence(
+        liveState,
+        mergedListings,
+        buildSearchTermLabel(combinedSearchTerms),
+        catalogProfiles,
+      )
       adaptationSummary = `Mantle search adaptation added ${adaptedSearchTerms.map((term) => `"${term}"`).join(', ')} because the initial pass left at least one SKU below ${MIN_PRICING_ELIGIBLE_COMP_COUNT} near/mid comps. ${adaptation?.rationale ?? ''}`.trim()
     } else if (adaptation?.rationale) {
       adaptationSummary = `Mantle search adaptation reviewed the thin-comp case but did not add safer search terms. ${adaptation.rationale}`
@@ -369,9 +398,11 @@ export function resetPricingMarketCachesForTest(): void {
 
 export const __test__ = {
   assessListingForProduct,
+  buildCatalogComparableProfiles,
   classifyLaneTier,
   classifySizeTier,
   inferComparableLaneKey,
+  inspectCatalogMultipackAmbiguity,
   resolveCatalogSizeProfile,
   resolveListingSizeProfile,
   resolveSizeConvention,
@@ -510,29 +541,203 @@ function filterListingCandidatesBySearchTerms(
   return dedupeListingCandidates(matched)
 }
 
+/** Pure, network-free comparable profile for one of OUR catalog SKUs. */
+function buildDeterministicCatalogProfile(
+  liveState: NormalizedCatalogGroupLiveState,
+  product: NormalizedCatalogProductLiveState,
+  options: { assessedInterpretation?: SizeValueInterpretation | null; prior?: SizeDistributionPrior | null } = {},
+): ProductComparableProfile {
+  return {
+    laneKey: inferComparableLaneKey({
+      category: liveState.category,
+      subcategory: liveState.subcategory,
+      text: `${liveState.groupFullName} ${product.name} ${product.tab}`,
+    }),
+    size: resolveCatalogSizeProfile({
+      name: product.name,
+      tab: product.tab,
+      sizeName: product.sizeName,
+      packOfSize: product.packOfSize,
+      brand: liveState.brand,
+      category: liveState.category,
+      prior: options.prior,
+      assessedInterpretation: options.assessedInterpretation ?? null,
+    }),
+  }
+}
+
+type ParseReasonablenessAssessor = typeof assessParseReasonableness
+
+/**
+ * Build comparable profiles for every catalog SKU in the group, once per
+ * pricing run. For the rare SKUs whose multipack size is genuinely
+ * ambiguous (no manual override AND the distribution prior is silent) we
+ * escalate to a cheap LLM sanity check, handing it the two candidate
+ * parses plus the surrounding catalog/distributor/nearby-listing context.
+ * Its pick is accepted only above a confidence threshold; everything else
+ * falls straight back to the deterministic chain. The hot per-listing
+ * comparison path never calls the LLM — only these few catalog SKUs do.
+ */
+async function buildCatalogComparableProfiles(input: {
+  liveState: NormalizedCatalogGroupLiveState
+  listingSamples: ListingPriceCandidate[]
+  prior?: SizeDistributionPrior | null
+  extraContext?: string | null
+  assessor?: ParseReasonablenessAssessor
+}): Promise<Map<number, ProductComparableProfile>> {
+  const assessor = input.assessor ?? assessParseReasonableness
+  const profiles = new Map<number, ProductComparableProfile>()
+
+  for (const product of input.liveState.products) {
+    let assessedInterpretation: SizeValueInterpretation | null = null
+    const ambiguity = inspectCatalogMultipackAmbiguity({
+      name: product.name,
+      tab: product.tab,
+      sizeName: product.sizeName,
+      packOfSize: product.packOfSize,
+      brand: input.liveState.brand,
+      category: input.liveState.category,
+      prior: input.prior,
+    })
+    if (ambiguity) {
+      const candidates: ParseReasonablenessCandidate[] = [
+        toReasonablenessCandidate('unit', ambiguity.candidateUnit),
+        toReasonablenessCandidate('total', ambiguity.candidateTotal),
+      ]
+      let assessment: ParseReasonablenessResult | null = null
+      try {
+        assessment = await assessor({
+          name: product.name || product.tab,
+          candidates,
+          context: buildParseReasonablenessContext({
+            liveState: input.liveState,
+            product,
+            ambiguity,
+            listingSamples: input.listingSamples,
+            extraContext: input.extraContext ?? null,
+          }),
+        })
+      } catch (error) {
+        console.warn(
+          `[litAlertsMarket] parse reasonableness check threw for "${product.name}"; staying deterministic: ${buildUnknownErrorMessage(error)}`,
+        )
+      }
+      if (
+        assessment &&
+        (assessment.chosenLabel === 'unit' || assessment.chosenLabel === 'total') &&
+        assessment.confidence >= PARSE_REASONABLENESS_CONFIDENCE_THRESHOLD
+      ) {
+        assessedInterpretation = assessment.chosenLabel
+        console.info(
+          `[litAlertsMarket] parse reasonableness accepted '${assessment.chosenLabel}' ` +
+            `(confidence ${assessment.confidence.toFixed(2)}) for "${product.name}": ${assessment.note}`,
+        )
+      } else if (assessment) {
+        console.info(
+          `[litAlertsMarket] parse reasonableness inconclusive for "${product.name}" ` +
+            `(chosen=${assessment.chosenLabel ?? 'none'}, confidence ${assessment.confidence.toFixed(2)}); ` +
+            `keeping deterministic parse. ${assessment.note}`,
+        )
+      }
+    }
+    profiles.set(
+      product.productId,
+      buildDeterministicCatalogProfile(input.liveState, product, {
+        assessedInterpretation,
+        prior: input.prior,
+      }),
+    )
+  }
+
+  return profiles
+}
+
+function toReasonablenessCandidate(label: string, profile: ParsedSizeProfile): ParseReasonablenessCandidate {
+  return {
+    label,
+    measure: profile.measure,
+    packCount: profile.packCount,
+    totalValue: profile.totalValue,
+    unitValue: profile.unitValue,
+  }
+}
+
+function buildParseReasonablenessContext(input: {
+  liveState: NormalizedCatalogGroupLiveState
+  product: NormalizedCatalogProductLiveState
+  ambiguity: CatalogMultipackAmbiguity
+  listingSamples: ListingPriceCandidate[]
+  extraContext: string | null
+}): string {
+  const { ambiguity, liveState, product } = input
+  const lines: string[] = []
+  lines.push('Catalog pricing size sanity check for Freshly Baked NYC (a NY cannabis retailer).')
+  lines.push(`Brand: ${liveState.brand ?? 'unknown'}`)
+  lines.push(`Category: ${liveState.category ?? 'unknown'}`)
+  if (liveState.subcategory) {
+    lines.push(`Subcategory: ${liveState.subcategory}`)
+  }
+  lines.push(`Catalog group: ${liveState.groupFullName || liveState.groupName}`)
+  if (liveState.strain) {
+    lines.push(`Strain: ${liveState.strain}`)
+  }
+  lines.push(
+    `Structured catalog fields: sizeName=${product.sizeName ?? 'none'}, packOfSize=${product.packOfSize ?? 'none'}, tab=${product.tab || 'none'}`,
+  )
+  lines.push('Deterministic signals (already applied, all currently inconclusive):')
+  lines.push('- manual override: none')
+  lines.push(
+    `- catalog distribution prior: "unit" cohort count=${ambiguity.unitCount}, "total" cohort count=${ambiguity.totalCount} (neither decisive)`,
+  )
+  lines.push(`- brand convention: ${ambiguity.conventionInterpretation ?? 'no specific convention'}`)
+  lines.push(`- syntax default: ${ambiguity.defaultInterpretation}`)
+
+  const siblingNames = liveState.products
+    .filter((sibling) => sibling.productId !== product.productId)
+    .map((sibling) => sibling.name)
+    .filter((name) => name.trim().length > 0)
+    .slice(0, 6)
+  if (siblingNames.length > 0) {
+    lines.push('Sibling SKUs in this catalog group:')
+    for (const name of siblingNames) {
+      lines.push(`- ${name}`)
+    }
+  }
+
+  const listingNames = Array.from(
+    new Set(
+      input.listingSamples
+        .filter((listing) => isCategoryCompatible(liveState, listing.category))
+        .map((listing) => normalizeInlineText(listing.listingName))
+        .filter((name) => name.length > 0),
+    ),
+  ).slice(0, PARSE_REASONABLENESS_LISTING_SAMPLE_LIMIT)
+  if (listingNames.length > 0) {
+    lines.push('Nearby same-brand retailer listing examples (how competitors label this product):')
+    for (const name of listingNames) {
+      lines.push(`- ${name}`)
+    }
+  }
+
+  if (input.extraContext && input.extraContext.trim().length > 0) {
+    lines.push('Additional context:')
+    lines.push(input.extraContext.trim())
+  }
+
+  return lines.join('\n')
+}
+
 function collectProductEvidence(
   liveState: NormalizedCatalogGroupLiveState,
   listings: ListingPriceCandidate[],
   searchTerm: string,
+  catalogProfilesByProductId: Map<number, ProductComparableProfile> = new Map(),
 ): Record<number, ProductPricingMarketEvidence> {
   const result: Record<number, ProductPricingMarketEvidence> = {}
 
   for (const product of liveState.products) {
-    const productProfile: ProductComparableProfile = {
-      laneKey: inferComparableLaneKey({
-        category: liveState.category,
-        subcategory: liveState.subcategory,
-        text: `${liveState.groupFullName} ${product.name} ${product.tab}`,
-      }),
-      size: resolveCatalogSizeProfile({
-        name: product.name,
-        tab: product.tab,
-        sizeName: product.sizeName,
-        packOfSize: product.packOfSize,
-        brand: liveState.brand,
-        category: liveState.category,
-      }),
-    }
+    const productProfile: ProductComparableProfile =
+      catalogProfilesByProductId.get(product.productId) ?? buildDeterministicCatalogProfile(liveState, product)
     const assessedListings = dedupeListingCandidates(
       listings.filter((listing) => isCategoryCompatible(liveState, listing.category)),
     ).map((listing) => assessListingForProduct(productProfile, listing))
@@ -1725,6 +1930,12 @@ interface SizeDisambiguationContext {
   conventionInterpretation?: SizeValueInterpretation | null
   /** Manual per-SKU override; beats everything when set. */
   override?: SizeValueInterpretation | null
+  /**
+   * LLM sanity-check pick, accepted only for ambiguous ties where the
+   * distribution prior was silent. Slots in below a strong distribution
+   * signal but above the brand convention / syntax default.
+   */
+  assessedInterpretation?: SizeValueInterpretation | null
   /** Fallback when neither distribution nor convention decides. */
   defaultInterpretation: SizeValueInterpretation
 }
@@ -1754,8 +1965,156 @@ function disambiguateMultipackValue(input: {
     unitValue: value / packCount,
   })
   const decided =
-    decideByDistribution(unitCount, totalCount) ?? context.conventionInterpretation ?? context.defaultInterpretation
+    decideByDistribution(unitCount, totalCount) ??
+    context.assessedInterpretation ??
+    context.conventionInterpretation ??
+    context.defaultInterpretation
   return profileForInterpretation(packCount, value, measure, decided)
+}
+
+/** The disambiguation inputs for an ambiguous catalog multipack value. */
+interface CatalogMultipackDisambiguation {
+  packCount: number
+  value: number
+  measure: 'g' | 'mg'
+  conventionInterpretation: SizeValueInterpretation | null
+  defaultInterpretation: SizeValueInterpretation
+}
+
+/**
+ * Re-derive the ambiguous (value, packCount, measure) + convention/default
+ * for one of OUR catalog SKUs the same way `resolveCatalogSizeProfile` /
+ * `parseSizeProfile` do, OR null when the SKU is not an ambiguous
+ * multipack (single unit, no recognised weight, etc.).
+ *
+ * This is *advisory only* — it decides whether to ask the LLM and which
+ * two candidate parses to show it. The deterministic resolver remains the
+ * sole source of truth for the final value, so a drift here can only
+ * change whether/how we escalate, never the committed parse.
+ */
+function extractCatalogMultipackDisambiguation(input: {
+  name: string
+  tab: string
+  sizeName: string | null
+  packOfSize: number | null
+  brand?: string | null
+}): CatalogMultipackDisambiguation | null {
+  const convention = resolveSizeConvention(input.brand)
+  const structuredSize = parseSizeToken(input.sizeName)
+  const text = normalizeInlineText(`${input.name} ${input.tab}`)
+  if (structuredSize) {
+    const packCount =
+      input.packOfSize !== null && Number.isFinite(input.packOfSize) && input.packOfSize >= 1
+        ? input.packOfSize
+        : parsePackCount(text)
+    if (packCount <= 1) {
+      return null
+    }
+    return {
+      packCount,
+      value: structuredSize.value,
+      measure: structuredSize.measure,
+      conventionInterpretation:
+        convention?.multiplierValueIsTotal === true && convention.measure === structuredSize.measure ? 'total' : null,
+      defaultInterpretation: 'unit',
+    }
+  }
+  // No structured size token → mirror parseSizeProfile's free-text forms.
+  const explicitMultipack = text.match(/(\d+)\s*x\s*(\d+(?:\.\d+)?|\.\d+)\s*(mg|g)\b/i)
+  if (explicitMultipack) {
+    const packCount = Number.parseInt(explicitMultipack[1], 10)
+    if (packCount <= 1) {
+      return null
+    }
+    const measure = explicitMultipack[3].toLowerCase() as 'g' | 'mg'
+    return {
+      packCount,
+      value: Number.parseFloat(explicitMultipack[2]),
+      measure,
+      conventionInterpretation:
+        convention?.multiplierValueIsTotal === true && convention.measure === measure ? 'total' : null,
+      defaultInterpretation: 'unit',
+    }
+  }
+  const packCount = parsePackCount(text)
+  if (packCount <= 1) {
+    return null
+  }
+  const sizeValues = extractSizeValues(text)
+  const measure = chooseDominantMeasure(sizeValues)
+  if (measure === null) {
+    return null
+  }
+  const matchingValues = sizeValues.filter((value) => value.measure === measure).map((value) => value.value)
+  if (matchingValues.length === 0) {
+    return null
+  }
+  const value = Math.max(...matchingValues)
+  return {
+    packCount,
+    value,
+    measure,
+    conventionInterpretation:
+      convention?.packValueIsUnit === true && convention.measure === measure ? 'unit' : null,
+    defaultInterpretation: 'total',
+  }
+}
+
+/** A catalog multipack whose size interpretation the prior cannot settle. */
+interface CatalogMultipackAmbiguity extends CatalogMultipackDisambiguation {
+  unitCount: number
+  totalCount: number
+  candidateUnit: ParsedSizeProfile
+  candidateTotal: ParsedSizeProfile
+}
+
+/**
+ * Returns the ambiguity descriptor for a catalog SKU ONLY when an LLM
+ * sanity check would actually help: there is an ambiguous multipack
+ * value, there is no manual override, and the distribution prior is
+ * silent (neither `unit` nor `total` wins decisively). In every other
+ * case it returns null and the caller stays fully deterministic.
+ */
+function inspectCatalogMultipackAmbiguity(input: {
+  name: string
+  tab: string
+  sizeName: string | null
+  packOfSize: number | null
+  brand?: string | null
+  category?: string | null
+  prior?: SizeDistributionPrior | null
+}): CatalogMultipackAmbiguity | null {
+  if (resolveSizeInterpretationOverride(input.brand, input.category)) {
+    return null
+  }
+  const disambig = extractCatalogMultipackDisambiguation(input)
+  if (!disambig) {
+    return null
+  }
+  const prior = input.prior ?? DEFAULT_SIZE_DISTRIBUTION_PRIOR
+  const unitCount = prior.getCohortCount({
+    category: input.category,
+    measure: disambig.measure,
+    packCount: disambig.packCount,
+    unitValue: disambig.value,
+  })
+  const totalCount = prior.getCohortCount({
+    category: input.category,
+    measure: disambig.measure,
+    packCount: disambig.packCount,
+    unitValue: disambig.value / disambig.packCount,
+  })
+  if (decideByDistribution(unitCount, totalCount) !== null) {
+    // Distribution decides confidently — no LLM needed.
+    return null
+  }
+  return {
+    ...disambig,
+    unitCount,
+    totalCount,
+    candidateUnit: profileForInterpretation(disambig.packCount, disambig.value, disambig.measure, 'unit'),
+    candidateTotal: profileForInterpretation(disambig.packCount, disambig.value, disambig.measure, 'total'),
+  }
 }
 
 /**
@@ -1825,6 +2184,8 @@ function resolveCatalogSizeProfile(input: {
   brand?: string | null
   category?: string | null
   prior?: SizeDistributionPrior | null
+  /** Optional LLM tie-break; only consulted when distribution is silent. */
+  assessedInterpretation?: SizeValueInterpretation | null
 }): ParsedSizeProfile {
   const convention = resolveSizeConvention(input.brand)
   const override = resolveSizeInterpretationOverride(input.brand, input.category)
@@ -1846,6 +2207,7 @@ function resolveCatalogSizeProfile(input: {
           category: input.category,
           prior: input.prior,
           override,
+          assessedInterpretation: input.assessedInterpretation,
           conventionInterpretation:
             convention?.multiplierValueIsTotal === true && convention.measure === measure ? 'total' : null,
           defaultInterpretation: 'unit',
@@ -1864,6 +2226,7 @@ function resolveCatalogSizeProfile(input: {
     convention,
     prior: input.prior,
     override,
+    assessedInterpretation: input.assessedInterpretation,
   })
 }
 
@@ -1928,10 +2291,11 @@ interface ParseSizeOptions {
   convention?: SizeConvention | null
   prior?: SizeDistributionPrior | null
   override?: SizeValueInterpretation | null
+  assessedInterpretation?: SizeValueInterpretation | null
 }
 
 function parseSizeProfile(text: string, options: ParseSizeOptions = {}): ParsedSizeProfile {
-  const { category, convention, prior, override } = options
+  const { category, convention, prior, override, assessedInterpretation } = options
   const normalizedText = normalizeInlineText(text)
   const explicitMultipack = normalizedText.match(/(\d+)\s*x\s*(\d+(?:\.\d+)?|\.\d+)\s*(mg|g)\b/i)
   if (explicitMultipack) {
@@ -1949,6 +2313,7 @@ function parseSizeProfile(text: string, options: ParseSizeOptions = {}): ParsedS
           category,
           prior,
           override,
+          assessedInterpretation,
           conventionInterpretation:
             convention?.multiplierValueIsTotal === true && convention.measure === measure ? 'total' : null,
           defaultInterpretation: 'unit',
@@ -1989,6 +2354,7 @@ function parseSizeProfile(text: string, options: ParseSizeOptions = {}): ParsedS
         category,
         prior,
         override,
+        assessedInterpretation,
         conventionInterpretation:
           convention?.packValueIsUnit === true && convention.measure === measure ? 'unit' : null,
         defaultInterpretation: 'total',
