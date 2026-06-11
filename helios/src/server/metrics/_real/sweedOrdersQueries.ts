@@ -972,29 +972,99 @@ export async function queryDeliveryOrderCountByZone(args: MetricQueryArgs): Prom
 // columns; no line-item math, no joins. Used both by the Essentials tab
 // and the Sales & ops tab (per the operator's spec, these belong in both).
 //
-// Definitions (matching Sweed invoice envelope fields):
-//   * Gross Sales (ex-tax, PRE-discount) = subtotal_dollars
-//     [Sweed's `subtotalAmount` is the PRE-discount, pre-tax list
-//     total. Verified against live data 2026-06-04: for every invoice
-//     with a discount, grand_total = subtotal − discount + tax, which
-//     only holds when `subtotal` is pre-discount. So gross sales =
-//     subtotal_dollars alone — "list price before promos/discounts".]
-//   * Gross Receipts (incl tax, PRE-discount) = subtotal_dollars + tax_dollars
-//     [List price plus sales tax, BEFORE promos/discounts.]
-//   * Net Sales (ex-tax, POST-discount)  = subtotal_dollars − discount_dollars
-//     [Gross sales minus promos/discounts; still excludes tax.]
-//   * Net Receipts (incl tax, POST-discount) =
-//       subtotal_dollars − discount_dollars + tax_dollars = grand_total_dollars
-//     [The post-promo amount actually collected — "money in the drawer".]
+// Definitions (verified against live line-item data 2026-06-11):
 //
-// NOTE (2026-06-04): the pre-2026-06-04 code had this backwards — it
-// assumed `subtotalAmount` was post-discount, so it reported gross =
-// subtotal+discount (double-counting the discount) and net = subtotal
-// (= the gross/list value). Both are corrected here. Discounts are
-// rare (~0.2% of orders) so historical charts barely move, but the
-// definitions are now right. NB: "gross receipts" is list+tax BEFORE
-// promos; `grand_total` is NET receipts (after promos).
+//   * Net Sales (ex-tax, POST-discount)  = sum(subtotal_dollars)
+//     [Sweed's header `subtotalAmount` equals the sum of the line
+//     items' `subtotalAmount`, which is the pre-tax line total AFTER
+//     promo-engine / manager discounts. Confirmed: for an order with a
+//     $14 OTD promo, header subtotal (98.68) == Σ line subtotal (98.68),
+//     and the header `discount_dollars` was 0. So "net sales" is just
+//     subtotal_dollars — the revenue we actually booked, ex-tax.]
+//   * Net Receipts (incl tax, POST-discount) = sum(grand_total_dollars)
+//     [The money actually collected — "money in the drawer".]
+//   * Gross Sales (ex-tax, PRE-discount) = Net Sales + Σ ex-tax discount
+//   * Gross Receipts (incl tax, PRE-discount) = Net Receipts + Σ OTD discount
+//     [The discount is reconstructed PER LINE ITEM, because the header
+//     `discount_dollars` (Sweed `grandTotalDiscountAmount`) is
+//     effectively never populated — 15 of 4,650 orders / $153 over a
+//     30-day sample. The real promo / manager discounts live only on
+//     the line items: `promoAmount` (promo engine) + `managerDiscount.
+//     amount` (rare), both tax-inclusive (OTD). For Gross SALES we
+//     convert each line's OTD discount to ex-tax via that line's own
+//     tax ratio subtotalAmount/(subtotalAmount+taxesAmount); for Gross
+//     RECEIPTS we use the OTD discount as-is. Canceled lines excluded.]
+//
+// NOTE (2026-06-11): earlier code assumed the header `subtotal` was
+// PRE-discount and tried to derive the discount from the header
+// `discount_dollars` column. Both were wrong — subtotal is POST-discount
+// and the header discount column is ~always 0, so Gross == Net. The
+// discount is now sourced from the line items, where it actually lives.
 // ============================================================================
+
+// Per-line discount, reconstructed from Sweed line-item fields. Sweed
+// only exposes the discount in tax-inclusive (OTD) terms via
+// `promoAmount` (promo engine) + the rare `managerDiscount.amount`; the
+// pre-tax `subtotal*PromoAmount` fields ship 0 in our data. Used inside a
+// lateral over so.raw_json->'items' aliased `item`; the caller's WHERE
+// excludes canceled lines.
+const LINE_OTD_DISCOUNT_EXPR = `
+  ( coalesce(nullif(item->>'promoAmount','')::numeric, 0)
+    + coalesce(nullif(item->'managerDiscount'->>'amount','')::numeric, 0) )
+`
+// The ex-tax portion of that discount: scale the OTD discount by the
+// line's own ex-tax ratio. Guarded against a zero (fully-comped) line.
+const LINE_EXTAX_DISCOUNT_EXPR = `
+  ${LINE_OTD_DISCOUNT_EXPR}
+  * case
+      when coalesce(nullif(item->>'subtotalAmount','')::numeric, 0)
+         + coalesce(nullif(item->>'taxesAmount','')::numeric, 0) > 0
+      then coalesce(nullif(item->>'subtotalAmount','')::numeric, 0)
+         / (coalesce(nullif(item->>'subtotalAmount','')::numeric, 0)
+            + coalesce(nullif(item->>'taxesAmount','')::numeric, 0))
+      else 0
+    end
+`
+
+// Gross = header term (per order) + that order's summed line discount.
+// The lateral aggregates per order so the header term isn't multiplied
+// by the basket size.
+async function queryHeaderPlusLineDiscount(
+  args: MetricQueryArgs,
+  seriesId: string,
+  headerExpr: string,
+  lineDiscountExpr: string,
+): Promise<MetricRow[]> {
+  const dealerIds = resolveDealerIds(args.sites)
+  const { from, to, truncUnit, buckets } = resolveWindow(args)
+  if (dealerIds.length === 0 || buckets.length === 0) {
+    return buckets.map((b) => ({ t: b.toISOString(), [seriesId]: 0 } as MetricRow))
+  }
+  const bucketSelect = bucketSelectExpr(truncUnit, 'so.pay_time')
+  const sql = `
+    select ${bucketSelect} as bucket_start,
+           '${seriesId}'::text as series_id,
+           coalesce(sum(${headerExpr} + coalesce(d.line_discount, 0)), 0)::numeric as value
+      from sweed_orders so
+      left join lateral (
+        select sum(${lineDiscountExpr}) as line_discount
+          from jsonb_array_elements(so.raw_json->'items') as item
+         where lower(coalesce(item->'invoiceItemStatus'->>'name', '')) <> 'canceled'
+      ) d on true
+     where so.dealer_id = any($1::bigint[])
+       and so.pay_time >= $2 and so.pay_time < $3
+       ${NON_CANCELLED_ORDER_SQL}
+     group by 1
+  `
+  return runBucketedQuery({
+    sql,
+    params: [dealerIds, from.toISOString(), to.toISOString()],
+    seriesIds: [seriesId],
+    buckets,
+    defaultValue: 0,
+    collapseToSingleBucket: truncUnit === null,
+  })
+}
 
 async function querySingleSumPerBucket(
   args: MetricQueryArgs,
@@ -1027,38 +1097,40 @@ async function querySingleSumPerBucket(
   })
 }
 
-/** essentials.gross_sales — sum(subtotal) per bucket: pre-tax, PRE-discount list price. */
+/** essentials.gross_sales — net sales + ex-tax line discount: pre-tax, PRE-discount. */
 export function queryGrossSalesDollars(args: MetricQueryArgs): Promise<MetricRow[]> {
-  return querySingleSumPerBucket(
+  return queryHeaderPlusLineDiscount(
     args,
     'gross_sales',
-    'sum(coalesce(subtotal_dollars, 0))',
+    'coalesce(so.subtotal_dollars, 0)',
+    LINE_EXTAX_DISCOUNT_EXPR,
   )
 }
 
-/** essentials.gross_receipts — sum(subtotal + tax) per bucket: list price + tax, PRE-discount. */
+/** essentials.gross_receipts — net receipts + OTD line discount: incl tax, PRE-discount. */
 export function queryGrossReceiptsDollars(args: MetricQueryArgs): Promise<MetricRow[]> {
-  return querySingleSumPerBucket(
+  return queryHeaderPlusLineDiscount(
     args,
     'gross_receipts',
-    'sum(coalesce(subtotal_dollars, 0) + coalesce(tax_dollars, 0))',
+    'coalesce(so.grand_total_dollars, 0)',
+    LINE_OTD_DISCOUNT_EXPR,
   )
 }
 
-/** essentials.net_sales — sum(subtotal − discount) per bucket: pre-tax, POST-discount. */
+/** essentials.net_sales — sum(subtotal) per bucket: pre-tax, POST-discount. */
 export function queryNetSalesDollars(args: MetricQueryArgs): Promise<MetricRow[]> {
   return querySingleSumPerBucket(
     args,
     'net_sales',
-    'sum(coalesce(subtotal_dollars, 0) - coalesce(discount_dollars, 0))',
+    'sum(coalesce(subtotal_dollars, 0))',
   )
 }
 
-/** essentials.net_receipts — sum(subtotal − discount + tax) = grand_total: incl tax, POST-discount. */
+/** essentials.net_receipts — sum(grand_total) per bucket: incl tax, POST-discount ("money in drawer"). */
 export function queryNetReceiptsDollars(args: MetricQueryArgs): Promise<MetricRow[]> {
   return querySingleSumPerBucket(
     args,
     'net_receipts',
-    'sum(coalesce(subtotal_dollars, 0) - coalesce(discount_dollars, 0) + coalesce(tax_dollars, 0))',
+    'sum(coalesce(grand_total_dollars, 0))',
   )
 }

@@ -67,7 +67,7 @@ export const REAL_METRICS: ReadonlyArray<MetricDef> = [
     group: 'Essentials',
     title: 'Gross sales $ (ex-tax, pre-discount)',
     description:
-      'Sum of pre-discount, pre-tax list-price line totals per bucket. This is Sweed `subtotalAmount`, which is already the PRE-discount, pre-tax amount (verified 2026-06-04: grand_total = subtotal − discount + tax). It is "list price before promos/discounts", with sales tax excluded. Use this to see how much business the store drove at list, regardless of how aggressive the discounting was.',
+      'Pre-tax revenue at list, BEFORE promo-engine / manager discounts. Computed as Net sales + the ex-tax value of each line item\u2019s discount (Sweed line `promoAmount` + `managerDiscount.amount`, converted from tax-inclusive to ex-tax). The header `discount_dollars` column is ~always 0, so the discount is reconstructed from the line items where it actually lives. Use this to see how much business the store drove at list, regardless of how aggressive the discounting was; the gap to Net sales is what discounting cost you.',
     series: [{ id: 'gross_sales', label: 'Gross sales $ (ex-tax, pre-discount)', colour: '#2ca02c' }],
     defaultAggregation: 'week',
     supportedAggregations: [...SUPPORTED],
@@ -79,7 +79,7 @@ export const REAL_METRICS: ReadonlyArray<MetricDef> = [
     group: 'Essentials',
     title: 'Gross receipts $ (incl. tax, pre-discount)',
     description:
-      'Sum of `subtotal_dollars + tax_dollars` per bucket — list price plus sales tax, BEFORE promos/discounts. This is "what the receipts would total at list". For the post-promo amount actually collected, see Net receipts.',
+      'Net receipts + the (tax-inclusive) value of each line item\u2019s discount — i.e. what the receipts would total at list, including tax, BEFORE promos/discounts. The discount is reconstructed from line `promoAmount` + `managerDiscount.amount`. For the post-promo amount actually collected, see Net receipts.',
     series: [{ id: 'gross_receipts', label: 'Gross receipts $ (incl. tax, pre-discount)', colour: '#1f77b4' }],
     defaultAggregation: 'week',
     supportedAggregations: [...SUPPORTED],
@@ -91,7 +91,7 @@ export const REAL_METRICS: ReadonlyArray<MetricDef> = [
     group: 'Essentials',
     title: 'Net sales $ (ex-tax, net of discounts)',
     description:
-      'Sum of `subtotal_dollars − discount_dollars` per bucket — the pre-tax line total after promos/discounts are applied. This is the "revenue you actually booked" number; the difference between Gross Sales and Net Sales is what discounting cost you.',
+      'Sum of `subtotal_dollars` per bucket — the pre-tax line total AFTER promos/discounts (Sweed\u2019s `subtotalAmount` is already net of promo-engine / manager discounts). This is the "revenue you actually booked" number; the difference between Gross Sales and Net Sales is what discounting cost you.',
     series: [{ id: 'net_sales', label: 'Net sales $ (ex-tax, net of discounts)', colour: '#9467bd' }],
     defaultAggregation: 'week',
     supportedAggregations: [...SUPPORTED],
@@ -103,7 +103,7 @@ export const REAL_METRICS: ReadonlyArray<MetricDef> = [
     group: 'Essentials',
     title: 'Net receipts $ (incl. tax, net of discounts)',
     description:
-      'Sum of `subtotal_dollars − discount_dollars + tax_dollars` per bucket (= `grand_total_dollars`) — the post-promo amount actually collected including tax. This is the "money in the drawer" number; reconciliation friendly.',
+      'Sum of `grand_total_dollars` per bucket — the post-promo amount actually collected including tax. This is the "money in the drawer" number; reconciliation friendly.',
     series: [{ id: 'net_receipts', label: 'Net receipts $ (incl. tax, net of discounts)', colour: '#8c564b' }],
     defaultAggregation: 'week',
     supportedAggregations: [...SUPPORTED],

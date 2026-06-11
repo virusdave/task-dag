@@ -35,16 +35,16 @@ import { getPool, type Queryable } from '../pool.js'
 // / queryNetSalesDollars and sweedPackageSnapshotsQueries.queryGrossMarginDollars
 // / queryEffectiveGmPct):
 //
-//   * grossSales     = sum(subtotal_dollars)                 — pre-tax, PRE-discount (list price)
-//   * grossReceipts  = sum(subtotal_dollars + tax_dollars)   — list + tax, PRE-discount
-//   * netSales       = sum(subtotal_dollars − discount_dollars) — pre-tax, POST-discount
-//   * netReceipts    = sum(subtotal_dollars − discount_dollars + tax_dollars)
-//                    = sum(grand_total_dollars)              — incl tax, POST-discount
-//     [Sweed's `subtotalAmount` is PRE-discount; verified 2026-06-04
-//      that grand_total = subtotal − discount + tax. NB: "gross
-//      receipts" is BEFORE promos (list+tax); grand_total is NET
-//      receipts (after promos). The prior code reported grand_total as
-//      "gross receipts", which was actually net receipts.]
+//   * netSales       = sum(subtotal_dollars)                 — pre-tax, POST-discount (booked)
+//   * netReceipts    = sum(grand_total_dollars)              — incl tax, POST-discount (drawer)
+//   * grossSales     = netSales + Σ ex-tax line discount     — pre-tax, PRE-discount (list)
+//   * grossReceipts  = netReceipts + Σ OTD line discount     — incl tax, PRE-discount (list)
+//     [Sweed's header `subtotalAmount` is POST-discount (= Σ line
+//      subtotalAmount), and the header `discount_dollars` column is
+//      ~always 0, so the discount is reconstructed from the line items:
+//      `promoAmount` + `managerDiscount.amount` (both tax-inclusive),
+//      with the ex-tax portion taken via each line's own tax ratio.
+//      See sweedOrdersQueries.ts for the matching /metrics definitions.]
 //   * marginDollars  = Σ_lines (rev − qty·cost) over line items with a
 //                      KNOWN cost. Line items without a known cost
 //                      contribute revenue to grossSales/netSales (those
@@ -169,8 +169,13 @@ export async function loadEssentialsDailySummary(
           so.dealer_id,
           so.grand_total_dollars,
           so.subtotal_dollars,
-          so.discount_dollars,
           so.tax_dollars,
+          -- Promo / manager discount reconstructed from the line items
+          -- (header discount_dollars is ~always 0). Sweed exposes it only
+          -- in tax-inclusive (OTD) terms; we also derive the ex-tax
+          -- portion via each line's own tax ratio. Canceled lines skipped.
+          coalesce(ld.otd_discount, 0) as otd_discount,
+          coalesce(ld.extax_discount, 0) as extax_discount,
           case
             when so.customer_id is not null
              and not exists (
@@ -182,6 +187,20 @@ export async function loadEssentialsDailySummary(
             else false
           end as is_first_time
         from sweed_orders so
+        left join lateral (
+          select
+            sum(otd) as otd_discount,
+            sum(otd * case when sa + ta > 0 then sa / (sa + ta) else 0 end) as extax_discount
+          from (
+            select
+              ( coalesce(nullif(item->>'promoAmount','')::numeric, 0)
+                + coalesce(nullif(item->'managerDiscount'->>'amount','')::numeric, 0) ) as otd,
+              coalesce(nullif(item->>'subtotalAmount','')::numeric, 0) as sa,
+              coalesce(nullif(item->>'taxesAmount','')::numeric, 0) as ta
+            from jsonb_array_elements(so.raw_json->'items') as item
+            where lower(coalesce(item->'invoiceItemStatus'->>'name', '')) <> 'canceled'
+          ) lines
+        ) ld on true
         where so.dealer_id = any($1::bigint[])
           and so.pay_time >= $2 and so.pay_time < $3
           -- A fully-cancelled order is not a purchase and contributes
@@ -193,10 +212,11 @@ export async function loadEssentialsDailySummary(
         dealer_id,
         count(*) filter (where is_first_time) as new_purchases,
         count(*) filter (where not is_first_time) as returning_purchases,
-        sum(coalesce(subtotal_dollars, 0) + coalesce(tax_dollars, 0))::numeric as gross_receipts,
-        sum(coalesce(subtotal_dollars, 0))::numeric as gross_sales,
-        sum(coalesce(subtotal_dollars, 0) - coalesce(discount_dollars, 0))::numeric as net_sales,
-        sum(coalesce(subtotal_dollars, 0) - coalesce(discount_dollars, 0) + coalesce(tax_dollars, 0))::numeric as net_receipts
+        -- Gross = pre-discount (list); Net = post-discount (booked).
+        sum(coalesce(grand_total_dollars, 0) + otd_discount)::numeric as gross_receipts,
+        sum(coalesce(subtotal_dollars, 0) + extax_discount)::numeric as gross_sales,
+        sum(coalesce(subtotal_dollars, 0))::numeric as net_sales,
+        sum(coalesce(grand_total_dollars, 0))::numeric as net_receipts
       from todays_orders
       group by dealer_id
     `,
