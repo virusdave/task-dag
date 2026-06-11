@@ -157,6 +157,42 @@ function skuDetailHref(
   return `${window.location.pathname}${window.location.search}#${p.toString()}`
 }
 
+// Deep-link into the Catalog Analytics scatter suite, pre-filtered to this
+// SKU's category and with the product highlighted, landing on a specific
+// sub-section (Cohort-relative / Inventory traps / Promo erosion). This is
+// how the buyer goes from "the model says X" to "show me how this item sits
+// against its category cohort" — reusing the exact charts Catalog Analytics
+// already provides instead of duplicating the cohort math here. Opens in a
+// new tab. `categoryIds` / `brandIds` on the catalog page are matched by
+// NAME (not numeric id), so the row's own fields are sufficient.
+const COHORT_LINKS: ReadonlyArray<{ section: string; label: string; hint: string }> = [
+  {
+    section: 'Cohort-relative',
+    label: 'Cohort-relative',
+    hint: 'Price index, velocity index and GM% vs the category-cohort median — is this SKU priced/selling/margining above or below its peers?',
+  },
+  {
+    section: 'Inventory traps',
+    label: 'Inventory traps',
+    hint: 'Weeks-of-supply vs velocity and on-hand qty vs margin $/day — spot capital traps and overstock.',
+  },
+  {
+    section: 'Promo erosion',
+    label: 'Promo erosion',
+    hint: 'List vs effective OTD price and list vs effective GM% — how much discounting is eroding this SKU’s margin.',
+  },
+]
+
+function catalogCohortHref(r: InventorySkuRow, section: string, windowDays: number): string {
+  const p = new URLSearchParams()
+  if (r.siteKey) p.set('sites', r.siteKey)
+  if (r.categoryName) p.set('categoryIds', r.categoryName)
+  if (r.productName) p.set('highlight', r.productName)
+  p.set('section', section)
+  p.set('windowDays', String(windowDays))
+  return `/metrics/catalog?${p.toString()}`
+}
+
 // ---------------------------------------------------------------------------
 // CSV export — hand the buyer a spreadsheet they can act on / hand to a
 // distributor. NY-local date in the filename per repo canon.
@@ -368,6 +404,39 @@ function buildSkuJustification(r: InventorySkuRow, mode: InsightMode): {
   return { sentence, caveat }
 }
 
+// Plain-English explanation per score-factor key, so the (often
+// truncated) factor label has a meaningful hover/title instead of a
+// dangling "Margin loss b…". Keyed by the stable factor `key` the server
+// emits; falls back to just the label + weight when a key is unmapped.
+const FACTOR_EXPLANATIONS: Record<string, string> = {
+  // reorder-priority terms
+  expected_loss:
+    'Estimated margin $ lost to stockouts before a reorder could land, given current velocity and lead time. The biggest driver of reorder urgency.',
+  reorder_gap:
+    'How far current days-of-supply has fallen below the reorder point (lead time + safety stock). Larger gap = more overdue.',
+  lost_margin:
+    'Margin $/day currently being forfeited because the item is out of stock or running short.',
+  confidence:
+    'How trustworthy the forecast is, based on sales-history density and how certain the supplier lead time is.',
+  deadweight_penalty:
+    'Penalty subtracted when the item is also flagged deadweight (≥70/100) — we don’t want to reorder something we’re simultaneously trying to exit.',
+  // deadweight terms
+  slow: 'How slowly the item sells relative to the units on hand. Low velocity = more deadweight.',
+  capital: 'How much cash is tied up in on-hand units (log-scaled vs the catalog’s 95th-percentile SKU).',
+  age: 'How long the on-hand units have been sitting in inventory.',
+  expiry: 'How close the on-hand units are to expiration.',
+  margin_weakness:
+    'How weak this item’s gross margin is — weak-margin slow movers are the worst capital to keep holding.',
+}
+
+function factorTitle(f: InventoryScoreFactor): string {
+  const expl = FACTOR_EXPLANATIONS[f.key]
+  const meta = `(weight ${(f.weight * 100).toFixed(0)}% · magnitude ${fmtPct(f.norm)} · ${
+    f.contribution >= 0 ? '+' : '−'
+  }${Math.abs(f.contribution).toFixed(1)} pts)`
+  return expl ? `${f.label}: ${expl} ${meta}` : `${f.label} ${meta}`
+}
+
 // Weighted-factor score breakdown. Bar width = |points|/100 so the bars are
 // proportional to the 0–100 score and visibly sum to the headline number.
 function ScoreBreakdown({
@@ -388,9 +457,10 @@ function ScoreBreakdown({
       {factors.map((f) => {
         const neg = f.contribution < 0
         const widthPct = Math.min(100, Math.abs(f.contribution))
+        const tip = factorTitle(f)
         return (
           <div className="inv-score-row" key={f.key}>
-            <span className="inv-score-label" title={`weight ${(f.weight * 100).toFixed(0)}% · magnitude ${fmtPct(f.norm)}`}>
+            <span className="inv-score-label" title={tip} aria-label={tip}>
               {f.label}
             </span>
             <span className="inv-score-track">
@@ -568,6 +638,32 @@ function SkuInsightPanel({
           <ScoreBreakdown title="reorder priority" score={r.reorderPriorityScore} factors={r.reorderFactors} />
         ) : null}
         <ScoreBreakdown title="deadweight" score={r.deadweightScore} factors={r.deadweightFactors} />
+      </div>
+
+      <div className="inv-cohort-links">
+        <div className="inv-cohort-links-title subtle-copy">
+          See this SKU vs its category cohort{r.categoryName ? ` (${r.categoryName})` : ''} — opens
+          Catalog Analytics in a new tab
+        </div>
+        {r.categoryName ? (
+          <div className="inv-cohort-links-row">
+            {COHORT_LINKS.map((l) => (
+              <a
+                key={l.section}
+                className="inv-cohort-link"
+                href={catalogCohortHref(r, l.section, windowDays)}
+                target="_blank"
+                rel="noreferrer noopener"
+                title={l.hint}
+                onClick={(e) => e.stopPropagation()}
+              >
+                {l.label} ↗
+              </a>
+            ))}
+          </div>
+        ) : (
+          <p className="subtle-copy">No category resolved for this SKU, so cohort comparison isn’t available.</p>
+        )}
       </div>
     </div>
   )

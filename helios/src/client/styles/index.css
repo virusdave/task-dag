@@ -8505,6 +8505,35 @@ span.metric-chart-legend-item {
   font-variant-numeric: tabular-nums;
   color: #444;
 }
+.inv-cohort-links {
+  border-top: 1px solid #e6e8ec;
+  padding-top: 10px;
+}
+.inv-cohort-links-title {
+  font-size: 0.74rem;
+  margin-bottom: 6px;
+}
+.inv-cohort-links-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.inv-cohort-link {
+  display: inline-block;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: #2f6fb0;
+  text-decoration: none;
+  border: 1px solid #cfe0f0;
+  background: #f3f8fd;
+  border-radius: 4px;
+  padding: 5px 10px;
+  white-space: nowrap;
+}
+.inv-cohort-link:hover {
+  background: #e6f1fb;
+  border-color: #2f6fb0;
+}
 
 /* ===========================================================================
    Screens control room

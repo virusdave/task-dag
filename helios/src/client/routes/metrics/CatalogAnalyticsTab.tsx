@@ -1831,7 +1831,42 @@ const KNOWN_SITES: ReadonlyArray<{ id: string; label: string }> = [
 // "over the last N days" copy keep matching what the user sees.
 function initialRange(): { fromMs: number; toMs: number } {
   const now = Date.now()
-  return { fromMs: now - DEFAULT_WINDOW_DAYS * DAY_MS, toMs: now }
+  // Honour a `?windowDays=` deep-link param (e.g. from the inventory
+  // page's "cohort analysis" links) so the cohort comparison uses the
+  // same window the buyer was looking at. Falls back to the default.
+  let days = DEFAULT_WINDOW_DAYS
+  if (typeof window !== 'undefined') {
+    const raw = new URLSearchParams(window.location.search).get('windowDays')
+    const parsed = raw ? Number.parseInt(raw, 10) : NaN
+    if (Number.isFinite(parsed) && parsed > 0 && parsed <= 365) days = parsed
+  }
+  return { fromMs: now - days * DAY_MS, toMs: now }
+}
+
+// Resolve a `?section=` deep-link param to one of the known sub-tab
+// section names. Accepts the exact section name (case-insensitive) or a
+// short slug (e.g. "cohort", "traps", "promo") so external links don't
+// have to URL-encode the display strings. Returns null when unrecognised
+// so the caller can fall back to the default section.
+function resolveSectionParam(raw: string | null): string | null {
+  if (!raw) return null
+  const norm = raw.trim().toLowerCase()
+  const exact = SECTIONS_IN_ORDER.find((s) => s.toLowerCase() === norm)
+  if (exact) return exact
+  const slug: Record<string, string> = {
+    core: SECTION_CORE,
+    profit: SECTION_PROFIT,
+    promo: SECTION_PROMO,
+    erosion: SECTION_PROMO,
+    cohort: SECTION_COHORT,
+    potency: SECTION_POTENCY,
+    cannabinoid: SECTION_POTENCY,
+    demand: SECTION_DEMAND,
+    basket: SECTION_BASKET,
+    inventory: SECTION_BASKET,
+    traps: SECTION_TRAPS,
+  }
+  return slug[norm] ?? null
 }
 
 // Format a millisecond timestamp as the `value` expected by an
@@ -2069,7 +2104,15 @@ export function CatalogAnalyticsTab({ embedded }: CatalogAnalyticsTabProps = {})
   })
 
   // -------- Active sub-tab inside the catalog analytics page --------
-  const [activeSection, setActiveSection] = useState<string>(SECTION_CORE)
+  // Hydrated once from `?section=` (inventory "cohort analysis" links and
+  // other deep links land directly on Cohort-relative / Inventory traps /
+  // Promo erosion). Ignored in embedded mode, where the host page owns
+  // which section is shown. Falls back to Core merchandising.
+  const [activeSection, setActiveSection] = useState<string>(
+    () =>
+      (embeddedRef.current ? null : resolveSectionParam(initialQueryRef.current.get('section'))) ??
+      SECTION_CORE,
+  )
 
   // -------- Data --------
   const [pointsResp, setPointsResp] = useState<CatalogAnalyticsPointsResponse | null>(null)
