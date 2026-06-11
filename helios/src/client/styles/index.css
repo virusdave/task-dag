@@ -6746,6 +6746,51 @@ span.metric-chart-legend-item {
   min-height: 32px;
   border-radius: 999px;
 }
+/* Active preset: filled so the operator can see at a glance which
+   window is in effect. */
+.customer-map-page .cm-preset-btn.is-active,
+.customer-map-page .cm-preset-btn[aria-pressed='true'] {
+  background: var(--accent-strong, #b95f25);
+  border-color: var(--accent-strong, #b95f25);
+  color: #fffaf1;
+  font-weight: 600;
+}
+.customer-map-page .cm-preset-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* Window stepper — Prev / current-range / Next on one row. */
+.customer-map-page .cm-window-stepper {
+  display: flex;
+  flex: 1 1 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+.customer-map-page .cm-step-btn {
+  font-size: 0.78rem;
+  padding: 0.3rem 0.65rem;
+  min-height: 32px;
+  border-radius: 8px;
+  white-space: nowrap;
+}
+.customer-map-page .cm-step-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.customer-map-page .cm-window-stepper .cm-range-label {
+  flex: 1 1 auto;
+  text-align: center;
+}
+
+/* Precise date/time entry. */
+.customer-map-page .cm-range-exact {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  align-items: end;
+}
 
 /* Replay (C5) — play/pause/scrubber + duration/lifetime inputs. */
 .customer-map-page .cm-replay {
@@ -6791,21 +6836,14 @@ span.metric-chart-legend-item {
   background: transparent;
   cursor: pointer;
 }
-.customer-map-page .cm-replay-bar {
-  position: relative;
-  height: 4px;
-  background: rgba(0, 0, 0, 0.08);
-  border-radius: 2px;
-  overflow: hidden;
+.customer-map-page .cm-replay-advanced > summary {
+  cursor: pointer;
+  font-size: 0.78rem;
+  color: var(--muted, #6b5b48);
+  user-select: none;
 }
-.customer-map-page .cm-replay-fill {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  left: 0;
-  background: linear-gradient(90deg, #0d47ff, #f25c1c);
-  border-radius: 2px;
-  transition: width 80ms linear;
+.customer-map-page .cm-replay-advanced[open] > summary {
+  margin-bottom: 0.4rem;
 }
 .customer-map-page .cm-replay-meta {
   font-size: 0.78rem;

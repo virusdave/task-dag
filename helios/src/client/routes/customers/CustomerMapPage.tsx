@@ -324,23 +324,321 @@ function formatDurationMs(ms: number): string {
   return hr === 0 ? `${d}d` : `${d}d ${hr}h`
 }
 
-// ---------------------------------------------------------------------
-// Default-window helpers
-// ---------------------------------------------------------------------
+// All time math and display on this page are pinned to
+// **America/New_York** per the AGENTS.md canon rule ("Always use NY
+// timezones for aggregate and display unless instructed otherwise").
+// Operators reason about every check-in / order in NY wall-clock;
+// using the browser's local timezone produced confusing 1- or 3-hour
+// skews for anyone whose laptop wasn't set to ET.
+const NY_TZ_LOCAL = 'America/New_York'
 
-/** "Yesterday 6am" in the operator's local timezone, as ISO. */
-function defaultCheckedInAfter(now: Date = new Date()): string {
-  const d = new Date(now)
-  d.setDate(d.getDate() - 1)
-  d.setHours(6, 0, 0, 0)
-  return d.toISOString()
+// ---------------------------------------------------------------------
+// Business-day-aware time windows + presets
+// ---------------------------------------------------------------------
+// ALL business-window math is done in **America/New_York** wall-clock
+// (NY_TZ_LOCAL), per the canon rule that aggregate/display times use NY
+// time regardless of the operator's laptop timezone. We never use
+// Date#getHours / setHours (those are browser-local) and never use
+// `n * 86_400_000` day arithmetic (DST would drift the wall-clock
+// endpoints). Instead we read/write NY wall-clock fields via Intl and
+// do calendar math on the (year, month, day) triple.
+//
+// Business-day model:
+//   * The business day "starts" at 4am NY (BUSINESS_BOUNDARY_HOUR): a
+//     scan at 1am Tuesday belongs to Monday's business day.
+//   * Reporting windows open at 8am NY (BUSINESS_OPEN_HOUR) — there is
+//     no meaningful traffic between the 4am boundary and the 8am open,
+//     so "Today"/"Week to date"/"Month to date" all start at 8am.
+//   * A *completed* business day spans 8am on its date → 4am the next
+//     calendar date.
+
+const BUSINESS_BOUNDARY_HOUR = 4
+const BUSINESS_OPEN_HOUR = 8
+// Week starts Monday (JS getUTCDay(): Sun=0 … Sat=6).
+const WEEK_START_DAY = 1
+
+interface TimeWindow {
+  after: Date
+  before: Date
 }
 
-/** "Today 3am" in the operator's local timezone, as ISO. */
+/** A NY wall-clock calendar date. `month` is 1–12. */
+interface NyDate {
+  readonly year: number
+  readonly month: number
+  readonly day: number
+}
+
+const NY_PARTS_FMT = new Intl.DateTimeFormat('en-US', {
+  timeZone: NY_TZ_LOCAL,
+  hour12: false,
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+  hour: '2-digit',
+  minute: '2-digit',
+  second: '2-digit',
+})
+
+/** NY wall-clock fields for an instant. */
+function nyParts(instant: Date): {
+  year: number
+  month: number
+  day: number
+  hour: number
+  minute: number
+  second: number
+} {
+  const parts = NY_PARTS_FMT.formatToParts(instant)
+  const get = (type: string): number => Number(parts.find((p) => p.type === type)?.value ?? '0')
+  // Intl can emit "24" for midnight in the hourCycle h24; normalize.
+  const hour = get('hour') % 24
+  return {
+    year: get('year'),
+    month: get('month'),
+    day: get('day'),
+    hour,
+    minute: get('minute'),
+    second: get('second'),
+  }
+}
+
+/**
+ * NY UTC offset (ms) at `instant`, defined as (NY-wall-as-UTC − instant).
+ * For ET this is −4h (EDT) or −5h (EST).
+ */
+function nyOffsetMs(instant: Date): number {
+  const p = nyParts(instant)
+  const asUtc = Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute, p.second)
+  return asUtc - instant.getTime()
+}
+
+/** Convert NY wall-clock fields to the corresponding UTC instant. */
+function nyWallToDate(
+  date: NyDate,
+  hour = 0,
+  minute = 0,
+  second = 0,
+): Date {
+  const guessUtc = Date.UTC(date.year, date.month - 1, date.day, hour, minute, second)
+  // Subtract the offset to land on the real instant; refine once in
+  // case the first guess fell on the other side of a DST change.
+  const off1 = nyOffsetMs(new Date(guessUtc))
+  let instant = guessUtc - off1
+  const off2 = nyOffsetMs(new Date(instant))
+  if (off2 !== off1) instant = guessUtc - off2
+  return new Date(instant)
+}
+
+/** Add `n` calendar days to a NY date (pure calendar math, tz-free). */
+function addDays(date: NyDate, n: number): NyDate {
+  const d = new Date(Date.UTC(date.year, date.month - 1, date.day + n))
+  return { year: d.getUTCFullYear(), month: d.getUTCMonth() + 1, day: d.getUTCDate() }
+}
+
+/** Day-of-week for a NY date (Sun=0 … Sat=6). */
+function dayOfWeek(date: NyDate): number {
+  return new Date(Date.UTC(date.year, date.month - 1, date.day)).getUTCDay()
+}
+
+/** Add `n` months to a NY date, clamping the day (Jan 31 +1mo → Feb 28/29). */
+function addMonthsClamped(date: NyDate, n: number): NyDate {
+  const totalMonth0 = date.month - 1 + n
+  const year = date.year + Math.floor(totalMonth0 / 12)
+  const month = ((totalMonth0 % 12) + 12) % 12 + 1
+  const lastDay = new Date(Date.UTC(year, month, 0)).getUTCDate()
+  return { year, month, day: Math.min(date.day, lastDay) }
+}
+
+/**
+ * The NY calendar date whose business day `now` belongs to. NY times
+ * before the 4am boundary roll back to the previous date.
+ */
+function businessDateFor(now: Date): NyDate {
+  const p = nyParts(now)
+  const today: NyDate = { year: p.year, month: p.month, day: p.day }
+  return p.hour < BUSINESS_BOUNDARY_HOUR ? addDays(today, -1) : today
+}
+
+/** 8am NY open of the business day on `bd`. */
+function businessOpen(bd: NyDate): Date {
+  return nyWallToDate(bd, BUSINESS_OPEN_HOUR)
+}
+
+/** 4am NY of the NEXT calendar date — close of a completed business day. */
+function businessClose(bd: NyDate): Date {
+  return nyWallToDate(addDays(bd, 1), BUSINESS_BOUNDARY_HOUR)
+}
+
+/** Completed business day: 8am open → 4am next-day close. */
+function completedBusinessDay(bd: NyDate): TimeWindow {
+  return { after: businessOpen(bd), before: businessClose(bd) }
+}
+
+/**
+ * Today's in-progress business day: 8am open → now. Returns null in
+ * the 4am–8am NY dead zone (today's window hasn't opened yet).
+ */
+function todayBusinessWindow(now: Date): TimeWindow | null {
+  const after = businessOpen(businessDateFor(now))
+  if (now.getTime() < after.getTime()) return null
+  return { after, before: now }
+}
+
+function yesterdayBusinessWindow(now: Date): TimeWindow {
+  return completedBusinessDay(addDays(businessDateFor(now), -1))
+}
+
+/** Week-to-date: 8am NY Monday of the current business week → now. */
+function weekToDateWindow(now: Date): TimeWindow | null {
+  const bd = businessDateFor(now)
+  const daysSinceWeekStart = (dayOfWeek(bd) - WEEK_START_DAY + 7) % 7
+  const after = businessOpen(addDays(bd, -daysSinceWeekStart))
+  if (now.getTime() < after.getTime()) return null
+  return { after, before: now }
+}
+
+/** Month-to-date: 8am NY on the 1st of the current business month → now. */
+function monthToDateWindow(now: Date): TimeWindow | null {
+  const bd = businessDateFor(now)
+  const after = businessOpen({ year: bd.year, month: bd.month, day: 1 })
+  if (now.getTime() < after.getTime()) return null
+  return { after, before: now }
+}
+
+/**
+ * Rolling "last N days" ending at now, preserving the NY wall-clock
+ * time-of-day N calendar days back (DST-safe).
+ */
+function lastDaysWindow(now: Date, days: number): TimeWindow {
+  const p = nyParts(now)
+  const start = addDays({ year: p.year, month: p.month, day: p.day }, -days)
+  return { after: nyWallToDate(start, p.hour, p.minute, p.second), before: now }
+}
+
+/** Default window: today's business day, or the most recent completed one. */
+function defaultBusinessWindow(now: Date = new Date()): TimeWindow {
+  return todayBusinessWindow(now) ?? yesterdayBusinessWindow(now)
+}
+
+function defaultCheckedInAfter(now: Date = new Date()): string {
+  return defaultBusinessWindow(now).after.toISOString()
+}
+
 function defaultCheckedInBefore(now: Date = new Date()): string {
-  const d = new Date(now)
-  d.setHours(3, 0, 0, 0)
-  return d.toISOString()
+  return defaultBusinessWindow(now).before.toISOString()
+}
+
+// --- Preset + shift-step definitions ---------------------------------
+
+// A "shift step" is the semantic amount the prev/next stepper moves the
+// window by. We shift by calendar units (a day / a week / a month / N
+// days), NOT by the raw window width: a completed business day is ~20h
+// wide, so a width shift would land on a nonsensical noon→8am window.
+type ShiftStep =
+  | { readonly kind: 'days'; readonly amount: number; readonly label: string }
+  | { readonly kind: 'months'; readonly amount: number; readonly label: string }
+
+interface PresetCtx {
+  readonly now: Date
+  readonly earliest: Date | null
+  readonly fallbackStart: Date
+}
+
+interface TimePreset {
+  readonly id: string
+  readonly label: string
+  /** Semantic step for the prev/next stepper while this preset is active. */
+  readonly step: ShiftStep | null
+  /** Returns the window, or null when it isn't available yet (4–8am dead zone). */
+  readonly getWindow: (ctx: PresetCtx) => TimeWindow | null
+}
+
+const TIME_PRESETS: readonly TimePreset[] = [
+  {
+    id: 'today',
+    label: 'Today',
+    step: { kind: 'days', amount: 1, label: 'day' },
+    getWindow: ({ now }) => todayBusinessWindow(now),
+  },
+  {
+    id: 'yesterday',
+    label: 'Yesterday',
+    step: { kind: 'days', amount: 1, label: 'day' },
+    getWindow: ({ now }) => yesterdayBusinessWindow(now),
+  },
+  {
+    id: 'wtd',
+    label: 'Week to date',
+    step: { kind: 'days', amount: 7, label: 'week' },
+    getWindow: ({ now }) => weekToDateWindow(now),
+  },
+  {
+    id: 'last7',
+    label: 'Last 7 days',
+    step: { kind: 'days', amount: 7, label: 'week' },
+    getWindow: ({ now }) => lastDaysWindow(now, 7),
+  },
+  {
+    id: 'mtd',
+    label: 'Month to date',
+    step: { kind: 'months', amount: 1, label: 'month' },
+    getWindow: ({ now }) => monthToDateWindow(now),
+  },
+  {
+    id: 'last30',
+    label: 'Last 30 days',
+    step: { kind: 'days', amount: 30, label: '30 days' },
+    getWindow: ({ now }) => lastDaysWindow(now, 30),
+  },
+  {
+    id: 'last90',
+    label: 'Last 90 days',
+    step: { kind: 'days', amount: 90, label: '90 days' },
+    getWindow: ({ now }) => lastDaysWindow(now, 90),
+  },
+  {
+    id: 'last365',
+    label: 'Last 365 days',
+    step: { kind: 'days', amount: 365, label: 'year' },
+    getWindow: ({ now }) => lastDaysWindow(now, 365),
+  },
+  {
+    id: 'all',
+    label: 'All time',
+    step: null,
+    getWindow: ({ now, earliest, fallbackStart }) => ({
+      after: earliest ?? fallbackStart,
+      before: now,
+    }),
+  },
+]
+
+/**
+ * Shift a single endpoint by a semantic step in the given direction,
+ * preserving its NY wall-clock time-of-day (DST-safe).
+ */
+function shiftDateByStep(d: Date, step: ShiftStep, direction: -1 | 1): Date {
+  const p = nyParts(d)
+  const here: NyDate = { year: p.year, month: p.month, day: p.day }
+  const shifted =
+    step.kind === 'days'
+      ? addDays(here, direction * step.amount)
+      : addMonthsClamped(here, direction * step.amount)
+  return nyWallToDate(shifted, p.hour, p.minute, p.second)
+}
+
+/**
+ * Step to use when no preset is active — inferred from the current
+ * window width so a custom range still steps by a sensible unit.
+ */
+function inferShiftStep(after: Date, before: Date): ShiftStep {
+  const spanHours = Math.abs(before.getTime() - after.getTime()) / (60 * 60 * 1000)
+  if (spanHours <= 36) return { kind: 'days', amount: 1, label: 'day' }
+  if (spanHours <= 10 * 24) return { kind: 'days', amount: 7, label: 'week' }
+  if (spanHours <= 45 * 24) return { kind: 'days', amount: 30, label: '30 days' }
+  if (spanHours <= 120 * 24) return { kind: 'days', amount: 90, label: '90 days' }
+  return { kind: 'days', amount: 365, label: 'year' }
 }
 
 // ---------------------------------------------------------------------
@@ -415,14 +713,6 @@ function tickToDate(tick: number, win: SliderRange): Date {
   )
 }
 
-// Display formatters below are pinned to **America/New_York** per
-// the AGENTS.md canon rule ("Always use NY timezones for aggregate
-// and display unless instructed otherwise"). Operators reason about
-// every check-in / order in NY wall-clock; rendering in the
-// browser's local timezone produced confusing 1- or 3-hour skews for
-// anyone whose laptop wasn't set to ET.
-const NY_TZ_LOCAL = 'America/New_York'
-
 function formatTime(iso: string | null): string {
   if (iso === null) return '—'
   try {
@@ -451,23 +741,34 @@ function formatShortRange(after: Date, before: Date): string {
     `${before.toLocaleString('en-US', fullOpts)}`
 }
 
-/**
- * Convenience preset: returns the canonical "yesterday 6am → today 3am"
- * range anchored to `now`. Uses 0-second/minute precision so it matches
- * `defaultCheckedIn{After,Before}` exactly.
- */
-function yesterdayShiftRange(now: Date = new Date()): { after: Date; before: Date } {
-  const after = new Date(now)
-  after.setDate(after.getDate() - 1)
-  after.setHours(6, 0, 0, 0)
-  const before = new Date(now)
-  before.setHours(3, 0, 0, 0)
-  return { after, before }
-}
-
 /** True when `a` and `b` are within `tolMs` of each other. */
 function nearMs(a: Date, b: Date, tolMs = 60 * 60 * 1000): boolean {
   return Math.abs(a.getTime() - b.getTime()) <= tolMs
+}
+
+/**
+ * Format an instant for a `<input type="datetime-local">` value, in NY
+ * wall-clock (the page reasons in NY time throughout).
+ */
+function toNyDateTimeInput(d: Date): string {
+  const p = nyParts(d)
+  const pad = (n: number): string => String(n).padStart(2, '0')
+  return (
+    `${p.year}-${pad(p.month)}-${pad(p.day)}` + `T${pad(p.hour)}:${pad(p.minute)}`
+  )
+}
+
+/** Parse a `datetime-local` value ("2024-06-01T08:30") as NY wall-clock. */
+function parseNyDateTimeInput(value: string): Date | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/.exec(value)
+  if (m === null) return null
+  const d = nyWallToDate(
+    { year: Number(m[1]), month: Number(m[2]), day: Number(m[3]) },
+    Number(m[4]),
+    Number(m[5]),
+    m[6] === undefined ? 0 : Number(m[6]),
+  )
+  return Number.isFinite(d.getTime()) ? d : null
 }
 
 // FNV-1a 32-bit hash → unsigned int. Deterministic, branch-free,
@@ -610,16 +911,26 @@ type ColorByDef = CategoricalColorByDef | ContinuousColorByDef
 // Categorical palettes. Picked for legibility on the ghosted
 // basemap; first-time scans land on the brand-orange so the
 // saturation boost (see modulateColor below) makes them really pop.
-const NULL_COLOR = '#9a9a9a'
+const NULL_COLOR = '#8a8a8a'
+
+// Categorical hues drawn from the Okabe–Ito colorblind-safe palette.
+// Visit type uses GREEN for new (go / grow) and ORANGE for returning,
+// which reads intuitively where the old orange/blue did not. Site uses
+// a separate blue/pink pair so "which site" never reads as "new vs
+// returning".
+const COLOR_NEW = '#009e73' // Okabe–Ito green
+const COLOR_RETURNING = '#d55e00' // Okabe–Ito vermilion/orange
+const COLOR_SITE_BX = '#0072b2' // Okabe–Ito blue
+const COLOR_SITE_MH = '#cc79a7' // Okabe–Ito reddish-purple
 
 const COLOR_BY_DEFS: ReadonlyArray<ColorByDef> = [
   {
     kind: 'categorical',
     id: 'visitType',
-    label: 'Visit type (first / returning)',
+    label: 'Visit type (new / returning)',
     buckets: [
-      { key: 'first', label: 'First-time', color: '#f25c1c' },
-      { key: 'returning', label: 'Returning', color: '#0d47ff' },
+      { key: 'first', label: 'New', color: COLOR_NEW },
+      { key: 'returning', label: 'Returning', color: COLOR_RETURNING },
       { key: 'unknown', label: 'Unknown (no person key)', color: NULL_COLOR },
     ],
     bucketFor: (p) => p.visitType,
@@ -631,8 +942,8 @@ const COLOR_BY_DEFS: ReadonlyArray<ColorByDef> = [
     id: 'site',
     label: 'Site (Bronx / Midtown)',
     buckets: [
-      { key: 'bx', label: 'Bronx (bx)', color: '#0d47ff' },
-      { key: 'mh', label: 'Midtown (mh)', color: '#f25c1c' },
+      { key: 'bx', label: 'Bronx (bx)', color: COLOR_SITE_BX },
+      { key: 'mh', label: 'Midtown (mh)', color: COLOR_SITE_MH },
     ],
     bucketFor: (p) => p.siteSlug,
     nullColor: NULL_COLOR,
@@ -856,9 +1167,9 @@ function hslToRgb(
 // saturation, no change) — the function short-circuits before
 // referencing it because hex→hsl→hex on the same color is lossy
 // at the byte level.
-const SAT_FACTOR_RETURNING = 0.5
+const SAT_FACTOR_RETURNING = 0.65
 const SAT_FACTOR_UNKNOWN = 0.75
-const LIGHTNESS_BOOST_RETURNING = 0.12
+const LIGHTNESS_BOOST_RETURNING = 0.06
 
 function modulateSaturation(hex: string, visitType: 'first' | 'returning' | 'unknown'): string {
   // First-time scans keep the encoding's full vibrancy so they
@@ -1402,7 +1713,7 @@ export function CustomerMapPage(): JSX.Element {
           const visitTypeRaw = String(props.visitType ?? '')
           const visitTypeLabel =
             visitTypeRaw === 'first'
-              ? 'First-time'
+              ? 'New'
               : visitTypeRaw === 'returning'
                 ? 'Returning'
                 : visitTypeRaw === 'unknown'
@@ -1590,7 +1901,9 @@ export function CustomerMapPage(): JSX.Element {
     commitRangeToUrl(sliderAfterTick, v)
   }
 
-  // Quick presets — set both handles + URL at once.
+  // Quick presets — set both handles + URL at once. Writes the exact
+  // window to the URL (the data fetch uses the URL verbatim); the slider
+  // ticks are a coarse visual mirror that clamps to the visible window.
   function applyPreset(after: Date, before: Date): void {
     const a = dateToTick(after, sliderWindow)
     const b = dateToTick(before, sliderWindow)
@@ -1605,17 +1918,65 @@ export function CustomerMapPage(): JSX.Element {
   const previewAfter = tickToDate(Math.min(sliderAfterTick, sliderBeforeTick), sliderWindow)
   const previewBefore = tickToDate(Math.max(sliderAfterTick, sliderBeforeTick), sliderWindow)
 
-  // Friendly label: when the current window matches the canonical
-  // "yesterday 6am → today 3am" preset (within an hour, since slider
-  // ticks are 1h apart), show "Yesterday" instead of digits. Otherwise
-  // fall through to formatShortRange.
-  const yesterdayPreset = yesterdayShiftRange(sliderWindow.windowEnd)
-  const isYesterdayPreset =
-    nearMs(previewAfter, yesterdayPreset.after) &&
-    nearMs(previewBefore, yesterdayPreset.before)
-  const rangeLabel = isYesterdayPreset
-    ? 'Yesterday'
+  // "now" is pinned to the slider window's end (fixed for the session)
+  // so presets and the active-preset highlight stay stable as the page
+  // sits open.
+  const presetCtx: PresetCtx = {
+    now: sliderWindow.windowEnd,
+    earliest: earliestCheckedInAt,
+    fallbackStart: sliderWindow.windowStart,
+  }
+
+  function applyTimePreset(preset: TimePreset): void {
+    const w = preset.getWindow(presetCtx)
+    if (w === null) return
+    applyPreset(w.after, w.before)
+  }
+
+  // Which preset (if any) does the current URL-backed window match?
+  // Tolerance absorbs hour-snapping and the live "now" endpoint drift.
+  const matchTolMs = 2 * 60 * 60 * 1000
+  const activePreset =
+    TIME_PRESETS.find((p) => {
+      const w = p.getWindow(presetCtx)
+      return (
+        w !== null &&
+        nearMs(currentAfter, w.after, matchTolMs) &&
+        nearMs(currentBefore, w.before, matchTolMs)
+      )
+    }) ?? null
+
+  const rangeLabel = activePreset
+    ? activePreset.label
     : formatShortRange(previewAfter, previewBefore)
+
+  // Prev/Next window stepper. Steps by a semantic calendar unit (a day
+  // / week / month / N days) — the active preset's own step, or one
+  // inferred from the window width for a custom range. "All time" has no
+  // step. "Next" is disabled when it would push past now.
+  const shiftStep: ShiftStep = activePreset?.step ?? inferShiftStep(currentAfter, currentBefore)
+  const canShiftWindow = activePreset?.id !== 'all'
+  const nextWindowExceedsNow =
+    shiftDateByStep(currentBefore, shiftStep, 1).getTime() > sliderWindow.windowEnd.getTime()
+
+  function shiftWindow(direction: -1 | 1): void {
+    if (!canShiftWindow) return
+    applyPreset(
+      shiftDateByStep(currentAfter, shiftStep, direction),
+      shiftDateByStep(currentBefore, shiftStep, direction),
+    )
+  }
+
+  // Precise date/time entry (NY wall-clock) — the slider is hour-coarse
+  // over multi-year windows, so the operator can type an exact endpoint.
+  function commitDateTimeInput(which: 'after' | 'before', value: string): void {
+    if (value === '') return
+    const d = parseNyDateTimeInput(value)
+    if (d === null) return
+    const next = new URLSearchParams(searchParams)
+    next.set(which === 'after' ? 'checkedInAfter' : 'checkedInBefore', d.toISOString())
+    setSearchParams(next, { replace: true })
+  }
 
   // -----------------------------------------------------------------
   // Other filter controls
@@ -1860,8 +2221,6 @@ export function CustomerMapPage(): JSX.Element {
     setReplayLifetimeMs(Math.max(REPLAY_MIN_LIFETIME_MS, Math.min(REPLAY_MAX_LIFETIME_MS, ms)))
   }
 
-  const replayProgress =
-    windowSpanMs > 0 ? (replayCursorMs - windowAfterMs) / windowSpanMs : 0
   const replayCursorLabel = formatTime(new Date(replayCursorMs).toISOString())
 
   function handleResetFilters(): void {
@@ -1872,24 +2231,15 @@ export function CustomerMapPage(): JSX.Element {
     setSearchParams(next, { replace: true })
   }
 
-  const now = sliderWindow.windowEnd
-  const sixAmYesterday = new Date(now)
-  sixAmYesterday.setDate(sixAmYesterday.getDate() - 1)
-  sixAmYesterday.setHours(6, 0, 0, 0)
-  const threeAmToday = new Date(now)
-  threeAmToday.setHours(3, 0, 0, 0)
-
   return (
     <section className="customer-map-page">
       <header className="cm-header">
         <div>
           <h2 className="cm-title">Customer Origin Map</h2>
           <p className="subtle-copy cm-sub">
-            One dot per VeriScan check-in with a geocoded home address.
-            Color and size encode whichever dimension you pick below;{' '}
-            <strong>first-time scans render at full saturation</strong> so
-            new customers stand out from returning ones. Drag the time
-            range below to update the map live.
+            One dot per VeriScan check-in, plotted at the customer&rsquo;s
+            home address. <strong>New customers show in green</strong>;
+            returning in orange.
           </p>
         </div>
         <div className="cm-stats">
@@ -1934,7 +2284,7 @@ export function CustomerMapPage(): JSX.Element {
               onChange={(e) => setParam('visitType', e.target.value)}
             >
               <option value="">All</option>
-              <option value="first">First-time</option>
+              <option value="first">New</option>
               <option value="returning">Returning</option>
               <option value="unknown">Unknown</option>
             </select>
@@ -2023,8 +2373,9 @@ export function CustomerMapPage(): JSX.Element {
             type="button"
             className="ghost-button cm-action cm-reset-action"
             onClick={handleResetFilters}
+            title="Clear all filters and return to today's business day"
           >
-            Reset to last shift
+            Reset to Today
           </button>
         </div>
 
@@ -2078,7 +2429,7 @@ export function CustomerMapPage(): JSX.Element {
             </select>
           </label>
           <span className="cm-encoding-hint subtle-copy">
-            First-time scans are full saturation; returning visitors are
+            New customers render at full saturation; returning visitors are
             muted. Opacity fades by check-in age during replay.
           </span>
         </div>
@@ -2092,14 +2443,93 @@ export function CustomerMapPage(): JSX.Element {
         ) : null}
 
         <div className="cm-range">
+          {/* Preset chips — business-day-aware, NY wall-clock. The
+              active window is highlighted so the operator always knows
+              which period they're looking at. Presets that haven't
+              opened yet (the 4–8am NY dead zone) render disabled. */}
+          <div className="cm-presets" role="group" aria-label="Time range presets">
+            {TIME_PRESETS.map((preset) => {
+              const available = preset.getWindow(presetCtx) !== null
+              const isActive = activePreset?.id === preset.id
+              return (
+                <button
+                  key={preset.id}
+                  type="button"
+                  className={`ghost-button cm-preset-btn${isActive ? ' is-active' : ''}`}
+                  aria-pressed={isActive}
+                  disabled={!available}
+                  onClick={() => applyTimePreset(preset)}
+                >
+                  {preset.label}
+                </button>
+              )
+            })}
+          </div>
+
+          {/* Window stepper + current-range readout. Prev/Next slide the
+              window by a sensible calendar unit (a day / week / month /
+              N days) so the operator can flip through "yesterday", "the
+              day before", etc. without re-picking. */}
           <div className="cm-range-labels">
-            <span className="cm-range-label">
-              <strong>{rangeLabel}</strong>
-            </span>
+            <div className="cm-window-stepper">
+              <button
+                type="button"
+                className="ghost-button cm-step-btn"
+                onClick={() => shiftWindow(-1)}
+                disabled={!canShiftWindow}
+                title={canShiftWindow ? `Previous ${shiftStep.label}` : 'All time — nothing earlier'}
+                aria-label={`Previous ${shiftStep.label}`}
+              >
+                ‹ Prev {shiftStep.label}
+              </button>
+              <span className="cm-range-label">
+                <strong>{rangeLabel}</strong>
+              </span>
+              <button
+                type="button"
+                className="ghost-button cm-step-btn"
+                onClick={() => shiftWindow(1)}
+                disabled={!canShiftWindow || nextWindowExceedsNow}
+                title={
+                  !canShiftWindow
+                    ? 'All time — nothing later'
+                    : nextWindowExceedsNow
+                      ? 'Already at the latest window'
+                      : `Next ${shiftStep.label}`
+                }
+                aria-label={`Next ${shiftStep.label}`}
+              >
+                Next {shiftStep.label} ›
+              </button>
+            </div>
             <span className="cm-range-sub subtle-copy">
-              window: {sliderWindow.windowStart.toLocaleDateString('en-US', { timeZone: NY_TZ_LOCAL })} →{' '}
-              {sliderWindow.windowEnd.toLocaleDateString('en-US', { timeZone: NY_TZ_LOCAL })}
+              {formatShortRange(previewAfter, previewBefore)} · NY time
             </span>
+          </div>
+
+          {/* Precise endpoints (NY wall-clock). The slider below is a
+              coarse overview; these let the operator type an exact
+              start/end, which the hour-granular slider can't express
+              over a multi-year span. */}
+          <div className="cm-range-exact">
+            <label className="cm-field cm-field-inline">
+              <span>From</span>
+              <input
+                type="datetime-local"
+                value={toNyDateTimeInput(currentAfter)}
+                onChange={(e) => commitDateTimeInput('after', e.target.value)}
+                aria-label="Range start (exact)"
+              />
+            </label>
+            <label className="cm-field cm-field-inline">
+              <span>To</span>
+              <input
+                type="datetime-local"
+                value={toNyDateTimeInput(currentBefore)}
+                onChange={(e) => commitDateTimeInput('before', e.target.value)}
+                aria-label="Range end (exact)"
+              />
+            </label>
           </div>
           <div className="cm-range-sliders">
             <input
@@ -2132,58 +2562,13 @@ export function CustomerMapPage(): JSX.Element {
               />
             </div>
           </div>
-          <div className="cm-presets">
-            <button
-              type="button"
-              className="ghost-button cm-preset-btn"
-              onClick={() =>
-                applyPreset(new Date(now.getTime() - 60 * 60 * 1000), now)
-              }
-            >
-              Last 1h
-            </button>
-            <button
-              type="button"
-              className="ghost-button cm-preset-btn"
-              onClick={() =>
-                applyPreset(new Date(now.getTime() - 4 * 60 * 60 * 1000), now)
-              }
-            >
-              Last 4h
-            </button>
-            <button
-              type="button"
-              className="ghost-button cm-preset-btn"
-              onClick={() => applyPreset(sixAmYesterday, threeAmToday)}
-            >
-              Yesterday 6a–3a
-            </button>
-            <button
-              type="button"
-              className="ghost-button cm-preset-btn"
-              onClick={() =>
-                applyPreset(new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000), now)
-              }
-            >
-              Last 7d
-            </button>
-            <button
-              type="button"
-              className="ghost-button cm-preset-btn"
-              onClick={() =>
-                applyPreset(new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000), now)
-              }
-            >
-              Last 30d
-            </button>
-          </div>
         </div>
 
-        {/* Replay (C5) controls. Plays the currently-filtered window
-            as a time-lapse with dots fading in at their check-in
-            time and out over the configured lifetime. Defaults per
-            operator: 5s per 24h of window (min 5s), lifetime 10%
-            of window (capped at 1 week), loop on. */}
+        {/* Replay controls — a standard media-player layout: play/pause,
+            restart, a single scrubber that doubles as the progress bar,
+            and a loop toggle. The fine-tuning knobs (playback duration /
+            dot lifetime) are tucked into a collapsed disclosure since the
+            defaults are good for almost every window. */}
         <div className="cm-replay">
           <div className="cm-replay-row">
             <button
@@ -2199,9 +2584,9 @@ export function CustomerMapPage(): JSX.Element {
               type="button"
               className="ghost-button cm-replay-reset"
               onClick={handleReplayReset}
-              title="Reset replay to start of window"
+              title="Restart replay from the start of the window"
             >
-              ↺ Reset
+              ↺ Restart
             </button>
             <label className="cm-replay-loop">
               <input
@@ -2225,48 +2610,45 @@ export function CustomerMapPage(): JSX.Element {
             className="cm-replay-scrub"
             aria-label="Replay scrubber"
           />
-          <div className="cm-replay-bar">
-            <div
-              className="cm-replay-fill"
-              style={{ width: `${Math.max(0, Math.min(1, replayProgress)) * 100}%` }}
-            />
-          </div>
-          <div className="cm-replay-row cm-replay-row-tight">
-            <label className="cm-field cm-field-inline">
-              <span title="Total real-world seconds the playback should take">
-                Duration
+          <details className="cm-replay-advanced">
+            <summary>Replay speed &amp; fade</summary>
+            <div className="cm-replay-row cm-replay-row-tight">
+              <label className="cm-field cm-field-inline">
+                <span title="Total real-world seconds the playback should take">
+                  Duration
+                </span>
+                <input
+                  type="number"
+                  inputMode="numeric"
+                  min={REPLAY_MIN_DURATION_MS / 1000}
+                  step={1}
+                  value={Math.round(replayDurationMs / 1000)}
+                  onChange={(e) => handleReplayDurationChange(Number(e.target.value))}
+                />
+                <span className="cm-replay-unit">s</span>
+              </label>
+              <label className="cm-field cm-field-inline">
+                <span title="How long (in virtual seconds) each dot stays visible before fading out">
+                  Lifetime
+                </span>
+                <input
+                  type="number"
+                  inputMode="numeric"
+                  min={REPLAY_MIN_LIFETIME_MS / 1000}
+                  max={REPLAY_MAX_LIFETIME_MS / 1000}
+                  step={1}
+                  value={Math.round(replayLifetimeMs / 1000)}
+                  onChange={(e) => handleReplayLifetimeChange(Number(e.target.value))}
+                />
+                <span className="cm-replay-unit">s virt</span>
+              </label>
+              <span className="subtle-copy cm-replay-meta">
+                {`${formatDurationMs(replayDurationMs)} real · ` +
+                  `${formatDurationMs(replayLifetimeMs)} virtual lifetime · ` +
+                  `window ${formatDurationMs(windowSpanMs)}`}
               </span>
-              <input
-                type="number"
-                inputMode="numeric"
-                min={REPLAY_MIN_DURATION_MS / 1000}
-                step={1}
-                value={Math.round(replayDurationMs / 1000)}
-                onChange={(e) => handleReplayDurationChange(Number(e.target.value))}
-              />
-              <span className="cm-replay-unit">s</span>
-            </label>
-            <label className="cm-field cm-field-inline">
-              <span title="How long (in virtual seconds) each dot stays visible before fading out">
-                Lifetime
-              </span>
-              <input
-                type="number"
-                inputMode="numeric"
-                min={REPLAY_MIN_LIFETIME_MS / 1000}
-                max={REPLAY_MAX_LIFETIME_MS / 1000}
-                step={1}
-                value={Math.round(replayLifetimeMs / 1000)}
-                onChange={(e) => handleReplayLifetimeChange(Number(e.target.value))}
-              />
-              <span className="cm-replay-unit">s virt</span>
-            </label>
-            <span className="subtle-copy cm-replay-meta">
-              {`${formatDurationMs(replayDurationMs)} real · ` +
-                `${formatDurationMs(replayLifetimeMs)} virtual lifetime · ` +
-                `window ${formatDurationMs(windowSpanMs)}`}
-            </span>
-          </div>
+            </div>
+          </details>
         </div>
       </div>
 
@@ -2298,9 +2680,13 @@ export function CustomerMapPage(): JSX.Element {
             the loop. Scans without document address coords are not shown.
           </p>
           <p>
-            Default window is <strong>yesterday 6am → today 3am</strong> in
-            your local time so the page opens to "today's traffic". Drag the
-            handles to widen / narrow the window; the map updates live.
+            All times are <strong>America/New&nbsp;York</strong>. The
+            business day starts at 4am and reporting windows open at 8am, so{' '}
+            <strong>Today</strong> means 8am&nbsp;→&nbsp;now and a completed
+            day spans 8am&nbsp;→&nbsp;4am the next morning. The page opens to
+            today&rsquo;s business day (or the most recent completed one in
+            the 4–8am gap). Use the presets, the Prev/Next stepper, or the
+            exact date/time fields to change the window; the map updates live.
           </p>
         </div>
       </details>
@@ -2322,6 +2708,15 @@ interface ColorLegendProps {
 
 function ColorLegend({ def, domain }: ColorLegendProps): JSX.Element | null {
   if (def.kind === 'categorical') {
+    // For the visit-type axis the dots are saturation-modulated by
+    // visit type (new = full, returning = muted), so the swatches must
+    // mirror that modulation or the legend lies about the map. Other
+    // categorical axes modulate per-dot (by each dot's own visit type),
+    // so their single swatch stays at full saturation.
+    const swatch = (key: string, color: string): string =>
+      def.id === 'visitType' && (key === 'first' || key === 'returning' || key === 'unknown')
+        ? modulateSaturation(color, key)
+        : color
     const items = [
       ...def.buckets,
       { key: '__null__', label: def.nullLabel, color: def.nullColor },
@@ -2333,7 +2728,7 @@ function ColorLegend({ def, domain }: ColorLegendProps): JSX.Element | null {
           <span key={b.key} className="cm-legend-item" title={b.label}>
             <span
               className="cm-legend-swatch"
-              style={{ background: b.color }}
+              style={{ background: swatch(b.key, b.color) }}
               aria-hidden="true"
             />
             <span className="cm-legend-label">{b.label}</span>
