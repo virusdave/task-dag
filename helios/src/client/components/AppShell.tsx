@@ -263,6 +263,15 @@ function buildPrimarySidebarNodes(
         to: '/seo/recommendations',
         end: false,
       },
+      {
+        // P5: read-only Search Console metrics dashboard (top queries/pages
+        // + import provenance) over the imported GA4/GSC facts.
+        kind: 'leaf',
+        navKey: 'marketing.seo-metrics',
+        label: 'SEO · Metrics',
+        to: '/seo/metrics',
+        end: false,
+      },
     ],
   }
 

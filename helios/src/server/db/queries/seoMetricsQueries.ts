@@ -403,6 +403,115 @@ export async function getGscQueryGaps(
   }))
 }
 
+export interface GscPageAggregate {
+  readonly pageUrl: string
+  readonly clicks: number
+  readonly impressions: number
+  readonly ctr: number
+  readonly avgPosition: number | null
+}
+
+/** Top pages by impression volume for the dashboard (bounded by site + window). */
+export async function getTopGscPages(
+  db: Queryable,
+  w: DateWindow & { limit: number },
+): Promise<GscPageAggregate[]> {
+  const res = await db.query<{
+    page_url: string
+    clicks: string
+    impressions: string
+    ctr: string
+    avg_position: string | null
+  }>(
+    `
+      select
+        page_url,
+        sum(clicks)        as clicks,
+        sum(impressions)   as impressions,
+        case when sum(impressions) = 0 then 0
+             else sum(clicks)::numeric / sum(impressions) end as ctr,
+        case when sum(impressions) = 0 then null
+             else sum(position * impressions)::numeric / sum(impressions) end as avg_position
+      from seo_gsc_daily
+      where site = $1 and bucket_date_ny >= $2 and bucket_date_ny < $3
+      group by page_url
+      order by sum(impressions) desc
+      limit $4
+    `,
+    [w.site, w.startDate, w.endDate, w.limit],
+  )
+  return res.rows.map((r) => ({
+    pageUrl: r.page_url,
+    clicks: Number(r.clicks),
+    impressions: Number(r.impressions),
+    ctr: Number(r.ctr),
+    avgPosition: r.avg_position === null ? null : Number(r.avg_position),
+  }))
+}
+
+export interface ImportBatchSummary {
+  readonly importBatchId: string
+  readonly source: string
+  readonly property: string
+  readonly site: string
+  readonly status: string
+  readonly rowsInserted: number
+  readonly rowsUpdated: number
+  readonly rowsUnchanged: number
+  readonly rowsRejected: number
+  readonly exportStartDate: string | null
+  readonly exportEndDate: string | null
+  readonly createdAt: string
+}
+
+/** Most-recent import batches (provenance panel), bounded by LIMIT. */
+export async function listImportBatches(
+  db: Queryable,
+  args: { limit: number },
+): Promise<ImportBatchSummary[]> {
+  const res = await db.query<{
+    import_batch_id: string
+    source: string
+    property: string
+    site: string
+    status: string
+    rows_inserted: number
+    rows_updated: number
+    rows_unchanged: number
+    rows_rejected: number
+    export_start_date: string | null
+    export_end_date: string | null
+    created_at: Date | string
+  }>(
+    `
+      select
+        import_batch_id, source, property, site, status,
+        rows_inserted, rows_updated, rows_unchanged, rows_rejected,
+        export_start_date::text as export_start_date,
+        export_end_date::text as export_end_date,
+        created_at
+      from seo_metric_import_batches
+      order by created_at desc
+      limit $1
+    `,
+    [args.limit],
+  )
+  return res.rows.map((r) => ({
+    importBatchId: r.import_batch_id,
+    source: r.source,
+    property: r.property,
+    site: r.site,
+    status: r.status,
+    rowsInserted: r.rows_inserted,
+    rowsUpdated: r.rows_updated,
+    rowsUnchanged: r.rows_unchanged,
+    rowsRejected: r.rows_rejected,
+    exportStartDate: r.export_start_date,
+    exportEndDate: r.export_end_date,
+    createdAt: r.created_at instanceof Date ? r.created_at.toISOString() : String(r.created_at),
+  }))
+}
+
 export interface LowCtrPageAggregate {
   readonly pageUrl: string
   readonly clicks: number

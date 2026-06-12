@@ -54,6 +54,7 @@ import { registerReviewRoutes } from '../routes/review.js'
 import { registerSchedulingRoutes } from '../routes/scheduling.js'
 import { registerSeoFaqRoutes } from '../routes/seoFaq.js'
 import { registerSeoImageAssetRoutes } from '../routes/seoImageAsset.js'
+import { registerSeoMetricsRoutes } from '../routes/seoMetrics.js'
 import { registerSeoPostRoutes } from '../routes/seoPost.js'
 import { registerSeoRecommendationRoutes } from '../routes/seoRecommendation.js'
 import { registerScreensRoutes } from '../routes/screens.js'
@@ -247,6 +248,7 @@ async function registerApplicationSurface(server: FastifyInstance) {
   await registerSeoFaqRoutes(server)
   await registerSeoPostRoutes(server)
   await registerSeoImageAssetRoutes(server)
+  await registerSeoMetricsRoutes(server)
   await registerSeoRecommendationRoutes(server)
   await registerScreensRoutes(server)
   await registerStaffRoutes(server)

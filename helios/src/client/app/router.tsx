@@ -88,6 +88,7 @@ import {
   SeoRecommendationsPage,
   seoRecommendationsLoader,
 } from '../routes/seo/SeoRecommendationsPage.js'
+import { SeoMetricsPage, seoMetricsLoader } from '../routes/seo/SeoMetricsPage.js'
 import {
   SeoImageAssetListPage,
   seoImageAssetListLoader,
@@ -363,6 +364,11 @@ export const router = createBrowserRouter([
         element: <SeoRecommendationsPage />,
         loader: seoRecommendationsLoader,
         path: 'seo/recommendations',
+      },
+      {
+        element: <SeoMetricsPage />,
+        loader: seoMetricsLoader,
+        path: 'seo/metrics',
       },
       {
         loader: legacyGroupDetailLoader,
