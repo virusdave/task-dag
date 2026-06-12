@@ -952,6 +952,14 @@ const SENTINELS: MigrationSentinel[] = [
       'feedback-loop aggregation queries. Without it the import CLI 500s.',
     check: (db) => tableExists(db, 'seo_gsc_daily'),
   },
+  {
+    migrationId: '077_seo_recommendations',
+    label:
+      'SEO recommendation engine (seo_recommendations) — required by the ' +
+      'GA4/GSC feedback-loop recommendation generate/list/accept/dismiss ' +
+      'routes. Without it the recommendations page 500s.',
+    check: (db) => tableExists(db, 'seo_recommendations'),
+  },
 ]
 
 interface CacheEntry {

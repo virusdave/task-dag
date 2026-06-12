@@ -403,6 +403,63 @@ export async function getGscQueryGaps(
   }))
 }
 
+export interface LowCtrPageAggregate {
+  readonly pageUrl: string
+  readonly clicks: number
+  readonly impressions: number
+  readonly ctr: number
+  readonly avgPosition: number | null
+}
+
+/**
+ * High-impression / low-CTR PAGE candidates (title/meta-revision feeders for
+ * the recommendation engine). Returns CANDIDATES only — no recommendation is
+ * created here (canon §1). Callers should pass an endDate that excludes the
+ * freshest ~3 Google days (GSC restates them).
+ */
+export async function getLowCtrPages(
+  db: Queryable,
+  w: DateWindow & {
+    minImpressions: number
+    maxCtr: number
+    maxPosition: number
+    limit: number
+  },
+): Promise<LowCtrPageAggregate[]> {
+  const res = await db.query<{
+    page_url: string
+    clicks: string
+    impressions: string
+    ctr: string
+    avg_position: string | null
+  }>(
+    `
+      select
+        page_url,
+        sum(clicks)      as clicks,
+        sum(impressions) as impressions,
+        sum(clicks)::numeric / nullif(sum(impressions), 0) as ctr,
+        sum(position * impressions)::numeric / nullif(sum(impressions), 0) as avg_position
+      from seo_gsc_daily
+      where site = $1 and bucket_date_ny >= $2 and bucket_date_ny < $3
+      group by page_url
+      having sum(impressions) >= $4
+         and sum(clicks)::numeric / nullif(sum(impressions), 0) <= $5
+         and sum(position * impressions)::numeric / nullif(sum(impressions), 0) <= $6
+      order by sum(impressions) desc
+      limit $7
+    `,
+    [w.site, w.startDate, w.endDate, w.minImpressions, w.maxCtr, w.maxPosition, w.limit],
+  )
+  return res.rows.map((r) => ({
+    pageUrl: r.page_url,
+    clicks: Number(r.clicks),
+    impressions: Number(r.impressions),
+    ctr: Number(r.ctr),
+    avgPosition: r.avg_position === null ? null : Number(r.avg_position),
+  }))
+}
+
 export interface UrlDailyPerformance {
   readonly bucketDateNy: string
   readonly clicks: number

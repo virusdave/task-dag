@@ -85,6 +85,10 @@ import { SeoFaqEditorPage, seoFaqEditorLoader } from '../routes/seo/SeoFaqEditor
 import { SeoPostListPage, seoPostListLoader } from '../routes/seo/SeoPostListPage.js'
 import { SeoPostEditorPage, seoPostEditorLoader } from '../routes/seo/SeoPostEditorPage.js'
 import {
+  SeoRecommendationsPage,
+  seoRecommendationsLoader,
+} from '../routes/seo/SeoRecommendationsPage.js'
+import {
   SeoImageAssetListPage,
   seoImageAssetListLoader,
 } from '../routes/seo/SeoImageAssetListPage.js'
@@ -354,6 +358,11 @@ export const router = createBrowserRouter([
         element: <SeoImageAssetEditorPage />,
         loader: seoImageAssetEditorLoader,
         path: 'seo/images/:assetId',
+      },
+      {
+        element: <SeoRecommendationsPage />,
+        loader: seoRecommendationsLoader,
+        path: 'seo/recommendations',
       },
       {
         loader: legacyGroupDetailLoader,

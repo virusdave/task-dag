@@ -252,6 +252,17 @@ function buildPrimarySidebarNodes(
         to: '/seo/images',
         end: false,
       },
+      {
+        // P5: GA4/GSC feedback loop. The recommendation engine reads
+        // imported Search Console metrics and proposes draft FAQ/title work
+        // (Helios-driven SEO widgets epic, top-level#15). Suggestions only —
+        // accepting one creates a draft that still passes the approve gate.
+        kind: 'leaf',
+        navKey: 'marketing.seo-recommendations',
+        label: 'SEO · Recommendations',
+        to: '/seo/recommendations',
+        end: false,
+      },
     ],
   }
 
