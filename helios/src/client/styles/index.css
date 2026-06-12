@@ -8657,6 +8657,27 @@ span.metric-chart-legend-item {
   background: rgba(155, 74, 34, 0.05);
 }
 
+/* Divider introducing the carried-but-excluded SKUs beneath a basket. */
+.inv-proc-excluded-divider > td {
+  padding: 8px 6px 4px !important;
+  font-size: 0.72rem;
+  font-style: italic;
+  border-top: 1px dashed #d6dae3;
+  letter-spacing: 0.02em;
+}
+/* Carried SKUs left OUT of the order: dimmed, but still expandable. */
+.inv-proc-line-excluded > td {
+  opacity: 0.55;
+}
+.inv-proc-line-excluded.inv-proc-clickable:hover > td {
+  opacity: 0.85;
+}
+.inv-proc-exclude-reason {
+  font-size: 0.7rem;
+  color: #8a5a2b;
+  margin-top: 2px;
+}
+
 .inv-proc-error {
   color: #a3261b;
   background: #fdecea;
