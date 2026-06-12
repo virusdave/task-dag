@@ -32,22 +32,31 @@ import { buildTextPreview, toIsoString } from './helpers.js'
 
 interface FamilyQueueRow extends QueryResultRow {
   approval_status: 'approved' | 'pending' | 'rejected' | 'superseded'
-  baseline_value_json: JsonValue
+  // Preview *sources* (not the full value_json). For json-string values the SQL
+  // ships a whitespace-normalised, length-bounded prefix (string fields are the
+  // bulk of the payload and only a ≤160-char preview is ever rendered); for
+  // non-string scalars (e.g. prices) the raw json value is passed through
+  // unchanged. `buildTextPreview` / `readNumericValue` run on these exactly as
+  // they did on the full value_json, so previews + pricing stay byte-identical.
+  // See the SQL projection below for why this slashes the response payload.
+  baseline_preview_src: JsonValue
   brand_name: string | null
   catalog_group_id: number
   category_name: string | null
-  edited_value_json: JsonValue | null
-  effective_value_json: JsonValue
+  edited_preview_src: JsonValue | null
+  effective_preview_src: JsonValue
   field_path: string
   group_name: string
   id: number
+  // Reduced live state: only `{ products: [{ productId, name, tab, sizeName,
+  // price }] }` (the fields the family-queue actually reads), in original order.
   live_state_json: JsonValue
   notes: string | null
   proposal_batch_type: string
   proposal_row_id: number
   reconcile_status: string
   subcategory_name: string | null
-  suggested_value_json: JsonValue
+  suggested_preview_src: JsonValue
   target_entity_id: number
   target_entity_type: 'catalog_group' | 'catalog_product'
   validation_issues_json: ValidationIssue[]
@@ -85,10 +94,30 @@ export async function listReviewFamilyQueue(
         pli.target_entity_type,
         pli.target_entity_id,
         pli.field_path,
-        pli.baseline_value_json,
-        pli.suggested_value_json,
-        pli.edited_value_json,
-        pli.effective_value_json,
+        -- Ship only what previews/pricing need, not the full value_json blobs.
+        -- json-string values -> whitespace-collapsed, length-bounded prefix
+        -- (a 160-char preview never needs more than this); other scalars (e.g.
+        -- prices) pass through raw so numeric/canonicalisation stays identical.
+        case
+          when jsonb_typeof(pli.baseline_value_json) = 'string'
+            then to_jsonb(left(regexp_replace(pli.baseline_value_json #>> '{}', '\\s+', ' ', 'g'), 400))
+          else pli.baseline_value_json
+        end as baseline_preview_src,
+        case
+          when jsonb_typeof(pli.suggested_value_json) = 'string'
+            then to_jsonb(left(regexp_replace(pli.suggested_value_json #>> '{}', '\\s+', ' ', 'g'), 400))
+          else pli.suggested_value_json
+        end as suggested_preview_src,
+        case
+          when jsonb_typeof(pli.edited_value_json) = 'string'
+            then to_jsonb(left(regexp_replace(pli.edited_value_json #>> '{}', '\\s+', ' ', 'g'), 400))
+          else pli.edited_value_json
+        end as edited_preview_src,
+        case
+          when jsonb_typeof(pli.effective_value_json) = 'string'
+            then to_jsonb(left(regexp_replace(pli.effective_value_json #>> '{}', '\\s+', ' ', 'g'), 400))
+          else pli.effective_value_json
+        end as effective_preview_src,
         pli.approval_status,
         pli.version,
         pli.notes,
@@ -99,11 +128,42 @@ export async function listReviewFamilyQueue(
         cg.category_name,
         cg.subcategory_name,
         cg.reconcile_status,
-        cg.live_state_json
+        -- Reduced live state: only the product fields the family-queue reads,
+        -- preserving original product order. The full live_state_json carries
+        -- ~19 unused top-level keys + 8 unused per-product fields and was the
+        -- single biggest contributor to this endpoint's payload.
+        lsp.live_state_json
       from proposal_line_items pli
       inner join proposal_rows pr on pr.id = pli.proposal_row_id
       inner join proposal_batches pb on pb.id = pr.proposal_batch_id
       inner join catalog_groups cg on cg.id = pli.catalog_group_id
+      left join lateral (
+        select jsonb_build_object(
+          'products',
+          coalesce(
+            (
+              select jsonb_agg(
+                       jsonb_build_object(
+                         'productId', elem -> 'productId',
+                         'name', elem -> 'name',
+                         'tab', elem -> 'tab',
+                         'sizeName', elem -> 'sizeName',
+                         'price', elem -> 'price'
+                       )
+                       order by ord
+                     )
+              from jsonb_array_elements(
+                     case
+                       when jsonb_typeof(cg.live_state_json -> 'products') = 'array'
+                         then cg.live_state_json -> 'products'
+                       else '[]'::jsonb
+                     end
+                   ) with ordinality as t(elem, ord)
+            ),
+            '[]'::jsonb
+          )
+        ) as live_state_json
+      ) lsp on true
       ${whereSql}
       order by pli.proposal_row_id, pli.id
     `,
@@ -280,11 +340,11 @@ function buildReviewRow(
   let notes: string | null = null
 
   for (const r of rows) {
-    const baselinePreview = buildTextPreview(r.baseline_value_json)
-    const suggestedPreview = buildTextPreview(r.suggested_value_json)
-    const proposedSource = r.edited_value_json ?? r.suggested_value_json
+    const baselinePreview = buildTextPreview(r.baseline_preview_src)
+    const suggestedPreview = buildTextPreview(r.suggested_preview_src)
+    const proposedSource = r.edited_preview_src ?? r.suggested_preview_src
     const proposedPreview = buildTextPreview(proposedSource)
-    const effectivePreview = buildTextPreview(r.effective_value_json)
+    const effectivePreview = buildTextPreview(r.effective_preview_src)
 
     const fieldPath = r.field_path as FieldPath
     comparisons.push({
@@ -302,9 +362,16 @@ function buildReviewRow(
       fieldPath,
       version: r.version,
       approvalStatus: r.approval_status,
-      editedValue: r.edited_value_json,
-      suggestedValue: r.suggested_value_json,
-      baselineValue: r.baseline_value_json,
+      // The full edited/suggested/baseline value_json blobs were historically
+      // returned here but are never read by any client (ReviewPage renders only
+      // fieldPath/version/approvalStatus from lineItems). They were a large,
+      // pure-waste slice of this endpoint's payload, so they are no longer
+      // fetched; we emit nulls to keep the wire contract stable for any cached
+      // client bundle. Repopulate (and add them back to the SQL) only if a
+      // consumer ever genuinely needs the full values.
+      editedValue: null,
+      suggestedValue: null,
+      baselineValue: null,
     })
     if (Array.isArray(r.validation_issues_json)) {
       validationIssues.push(...r.validation_issues_json)
@@ -356,7 +423,9 @@ function buildPricingLadder(
 
   // Proposed price comes from any pricing line item in this proposal row.
   const pricingLine = rows.find((r) => r.field_path === 'products.price') ?? null
-  const proposedPrice = pricingLine ? readNumericValue(pricingLine.edited_value_json ?? pricingLine.suggested_value_json) : null
+  // Price values are json numbers, so the SQL passes them through raw (not as a
+  // bounded string), and readNumericValue sees the same value it always did.
+  const proposedPrice = pricingLine ? readNumericValue(pricingLine.edited_preview_src ?? pricingLine.suggested_preview_src) : null
 
   const observation = observationByProductId.get(targetProductId) ?? null
 
