@@ -86,6 +86,18 @@ function daysAgo(iso: string | null | undefined): number | null {
   return Math.floor((Date.now() - t) / DAY_MS)
 }
 
+// Breakeven discount: the deepest markdown off the CURRENT shelf price that
+// still covers wholesale cost, i.e. 1 - cost/price. Based on the current
+// list/menu price (not the realized avg sale price) so it (a) is defined for
+// SKUs with zero recent sales — exactly the liquidation candidates — and
+// (b) reads differently from GM%, which is margin on what we actually sold.
+// Falls back to avg sale price only when no catalog price is available.
+function breakevenDisc(r: InventorySkuRow): number | null {
+  const base = r.listPrice && r.listPrice > 0 ? r.listPrice : r.avgUnitPrice
+  if (!base || base <= 0 || r.unitCostCurrent === null) return null
+  return Math.max(0, 1 - r.unitCostCurrent / base)
+}
+
 // ---------------------------------------------------------------------------
 // Deep-link state — persist the active sub-tab + filters in the URL hash so a
 // buyer can bookmark/share a specific view (e.g. ".../metrics/inventory
@@ -588,10 +600,7 @@ function reorderFacts(r: InventorySkuRow): Array<{ label: string; value: string;
 
 function exitFacts(r: InventorySkuRow): Array<{ label: string; value: string; warn?: boolean }> {
   const last = daysAgo(r.lastSaleAt)
-  const breakeven =
-    r.avgUnitPrice && r.avgUnitPrice > 0 && r.unitCostCurrent !== null
-      ? Math.max(0, 1 - r.unitCostCurrent / r.avgUnitPrice)
-      : null
+  const breakeven = breakevenDisc(r)
   return [
     { label: 'On-hand units', value: fmtNum(r.physicalUnits) },
     { label: 'On-hand cost', value: fmtMoney(r.onHandCost), warn: r.onHandCost > 0 },
@@ -1141,10 +1150,7 @@ function QueueRowCells({ r, isOpen }: { r: InventorySkuRow; isOpen: boolean }) {
 // the surrounding <tr> + click/expand is owned by ExpandableSkuRow.
 function ExitRowCells({ r, isOpen }: { r: InventorySkuRow; isOpen: boolean }) {
   const last = daysAgo(r.lastSaleAt)
-  const breakeven =
-    r.avgUnitPrice && r.avgUnitPrice > 0 && r.unitCostCurrent !== null
-      ? Math.max(0, 1 - r.unitCostCurrent / r.avgUnitPrice)
-      : null
+  const breakeven = breakevenDisc(r)
   return (
     <>
       <td className="num">
@@ -1630,7 +1636,8 @@ function ExitLiquidateView({ data, expandedSku, onToggleExpand, sites }: SkuView
         <h3 className="inv-proc-section-title">Liquidation queue</h3>
         <p className="subtle-copy inv-proc-section-sub">
           On-hand SKUs ranked by deadweight score (slow velocity, capital tied up, age, expiry
-          proximity, weak margin). Breakeven discount = how far you can cut and still cover cost.
+          proximity, weak margin). GM% is margin on recent sales; Breakeven disc = how far you can
+          cut off the current shelf price and still cover cost (shown even for SKUs with no sales).
         </p>
         <div className="inv-proc-table-scroll">
           <table className="budtender-leaderboard inv-proc-table">

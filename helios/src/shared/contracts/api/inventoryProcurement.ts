@@ -89,6 +89,10 @@ export const InventorySkuRowSchema = z.object({
   categoryName: z.string().nullable(),
   subcategoryName: z.string().nullable(),
   brandName: z.string().nullable(),
+  /** Current shelf/menu price (effective actualPrice, else list price).
+   *  Base for the breakeven-discount column; available even for SKUs with
+   *  no recent sales (unlike avgUnitPrice). */
+  listPrice: z.number().nullable(),
   distributorName: z.string().nullable(),
 
   // Inventory facts (latest snapshot per package, summed to SKU grain).

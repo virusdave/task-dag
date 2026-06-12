@@ -78,6 +78,7 @@ interface FactRow {
   category_name: string | null
   subcategory_name: string | null
   brand_name: string | null
+  list_price_dollars: string | number | null
   distributor_name: string | null
   physical_units: string | number | null
   held_units: string | number | null
@@ -154,7 +155,14 @@ taxonomy AS (
   -- product appears in more than one catalog group. ~99% coverage.
   SELECT DISTINCT ON ((prod->>'productId')::bigint)
     (prod->>'productId')::bigint AS product_id,
-    cg.brand_name, cg.category_name, cg.subcategory_name
+    cg.brand_name, cg.category_name, cg.subcategory_name,
+    -- Current shelf/menu price (effective actualPrice, else list price).
+    -- Used as the breakeven-discount base so it's available even for SKUs
+    -- with zero sales (no avg-sale-price to lean on).
+    coalesce(
+      nullif(prod->'priceInfo'->>'actualPrice', '')::numeric,
+      nullif(prod->>'price', '')::numeric
+    ) AS list_price_dollars
   FROM catalog_groups cg,
        jsonb_array_elements(cg.live_state_json->'products') AS prod
   WHERE cg.deleted_at IS NULL AND prod->>'productId' IS NOT NULL
@@ -210,7 +218,7 @@ sales AS (
 )
 SELECT
   inv.dealer_id, inv.product_id, inv.product_name, inv.product_sku,
-  tx.category_name, tx.subcategory_name, tx.brand_name, inv.distributor_name,
+  tx.category_name, tx.subcategory_name, tx.brand_name, tx.list_price_dollars, inv.distributor_name,
   inv.physical_units, inv.held_units, inv.sellable_units, inv.on_hand_cost,
   inv.unit_cost_current, inv.pkg_count, inv.first_received_at, inv.avg_inventory_age_days,
   inv.nearest_expiration, inv.expiring_units_60, inv.expiring_cost_60, inv.snapshot_age_hours,
@@ -470,6 +478,7 @@ export async function getInventoryProcurement(
       categoryName: r.category_name,
       subcategoryName: r.subcategory_name,
       brandName: r.brand_name,
+      listPrice: asNum(r.list_price_dollars),
       distributorName,
       physicalUnits,
       heldUnits,
