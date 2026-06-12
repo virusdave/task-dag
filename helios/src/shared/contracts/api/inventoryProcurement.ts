@@ -93,6 +93,14 @@ export const InventorySkuRowSchema = z.object({
    *  Base for the breakeven-discount column; available even for SKUs with
    *  no recent sales (unlike avgUnitPrice). */
   listPrice: z.number().nullable(),
+  /** Lifetime units sold for this SKU over all ingested order history
+   *  (package→product mapped). Feeds the approximate recovered-margin term
+   *  of the breakeven-discount estimate. 0 when no sales on record. */
+  lifetimeUnitsSold: z.number(),
+  /** Lifetime sold revenue ($) for this SKU over all ingested order
+   *  history. Paired with lifetimeUnitsSold; approximate (no canceled
+   *  filter, horizon bounded by ingested history). */
+  lifetimeSoldRevenue: z.number(),
   distributorName: z.string().nullable(),
 
   // Inventory facts (latest snapshot per package, summed to SKU grain).

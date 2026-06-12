@@ -108,6 +108,13 @@ interface DistRow {
   po_count: string | number | null
 }
 
+interface SoldLifeRow {
+  dealer_id: string | number
+  product_id: string | number | null
+  units_life: string | number | null
+  revenue_life: string | number | null
+}
+
 const FACTS_SQL = `
 WITH params AS (
   SELECT now() AS as_of, ($2::int) AS window_days
@@ -230,6 +237,35 @@ LEFT JOIN taxonomy tx ON tx.product_id = inv.product_id
 WHERE inv.product_id IS NOT NULL
 `
 
+// Lifetime sold units + revenue per SKU, used to net already-recovered
+// margin out of the breakeven-discount estimate (see breakevenDisc on the
+// client). Kept as a SEPARATE query rather than another LEFT JOIN on
+// FACTS_SQL: bolting a third join onto that CTE-heavy query made the
+// planner pick a nested-loop plan that ballooned to ~480ms, whereas this
+// stands alone at ~25-70ms (index-only flat scan + the package→product
+// map). It is deliberately APPROXIMATE — no canceled-status filter (that
+// jsonb predicate forces an all-time seq scan, ~210ms; canceled lines are
+// mostly $0 revenue anyway), all-time horizon bounded by however much
+// order history we have ingested, and COGS is applied client-side using
+// the current unit cost. Package→product mapping mirrors the FACTS sales
+// CTE (latest snapshot per inventory_item_id).
+const SOLD_LIFETIME_SQL = `
+WITH pkg_dim AS (
+  SELECT DISTINCT ON (s.dealer_id, s.inventory_item_id)
+    s.dealer_id, s.inventory_item_id, s.product_id
+  FROM sweed_package_snapshots s
+  WHERE s.dealer_id = ANY($1::bigint[]) AND s.product_id IS NOT NULL
+  ORDER BY s.dealer_id, s.inventory_item_id, s.observed_at_max DESC
+)
+SELECT d.dealer_id, d.product_id,
+  sum(f.qty)     AS units_life,
+  sum(f.revenue) AS revenue_life
+FROM sweed_order_items_flat f
+JOIN pkg_dim d ON d.dealer_id = f.dealer_id AND d.inventory_item_id = f.inventory_item_id
+WHERE f.dealer_id = ANY($1::bigint[])
+GROUP BY d.dealer_id, d.product_id
+`
+
 const DIST_SQL = `
 WITH po AS (
   SELECT dealer_id, distributor_name, delivery_date,
@@ -295,10 +331,22 @@ export async function getInventoryProcurement(
   const dealerIds = resolveDealerIds(p.sites)
   const asOf = new Date()
 
-  const [factsRes, distRes] = await Promise.all([
+  const [factsRes, distRes, soldLifeRes] = await Promise.all([
     pool.query<FactRow>(FACTS_SQL, [dealerIds, p.windowDays]),
     pool.query<DistRow>(DIST_SQL, [dealerIds]),
+    pool.query<SoldLifeRow>(SOLD_LIFETIME_SQL, [dealerIds]),
   ])
+
+  // Lifetime sold units + revenue per SKU, keyed by dealer|product. Used to
+  // net already-recovered margin out of the (approximate) breakeven disc.
+  const soldLifeByKey = new Map<string, { unitsLife: number; revenueLife: number }>()
+  for (const r of soldLifeRes.rows) {
+    if (r.product_id === null) continue
+    soldLifeByKey.set(`${num(r.dealer_id)}|${num(r.product_id)}`, {
+      unitsLife: num(r.units_life),
+      revenueLife: num(r.revenue_life),
+    })
+  }
 
   // Distributor stats keyed by dealer|name.
   const distByKey = new Map<string, InventoryDistributorStat>()
@@ -468,17 +516,22 @@ export async function getInventoryProcurement(
       1,
     )
 
+    const productId = asNum(r.product_id)
+    const soldLife = productId !== null ? soldLifeByKey.get(`${dealerId}|${productId}`) : undefined
+
     const row: InventorySkuRow = {
       dealerId,
       siteKey,
       siteLabel,
-      productId: asNum(r.product_id),
+      productId,
       productName: r.product_name ?? '(unnamed product)',
       productSku: r.product_sku,
       categoryName: r.category_name,
       subcategoryName: r.subcategory_name,
       brandName: r.brand_name,
       listPrice: asNum(r.list_price_dollars),
+      lifetimeUnitsSold: soldLife?.unitsLife ?? 0,
+      lifetimeSoldRevenue: soldLife?.revenueLife ?? 0,
       distributorName,
       physicalUnits,
       heldUnits,

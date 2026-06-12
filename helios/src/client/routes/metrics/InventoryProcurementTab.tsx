@@ -86,16 +86,32 @@ function daysAgo(iso: string | null | undefined): number | null {
   return Math.floor((Date.now() - t) / DAY_MS)
 }
 
-// Breakeven discount: the deepest markdown off the CURRENT shelf price that
-// still covers wholesale cost, i.e. 1 - cost/price. Based on the current
-// list/menu price (not the realized avg sale price) so it (a) is defined for
-// SKUs with zero recent sales — exactly the liquidation candidates — and
-// (b) reads differently from GM%, which is margin on what we actually sold.
-// Falls back to avg sale price only when no catalog price is available.
+// Approximate breakeven discount: the deepest markdown off the CURRENT
+// shelf price at which liquidating the *remaining* on-hand units still
+// breaks the SKU even — netting out the margin already banked from prior
+// sales. So a SKU whose past sales have already recovered its on-hand cost
+// can be blown out at ~100% off and still come out whole, whereas one
+// that's barely sold can only be cut by its raw cost margin.
+//
+//   recoveredMargin = max(0, lifetimeSoldRevenue - lifetimeUnitsSold * unitCost)
+//   floorPrice      = max(0, onHandCost - recoveredMargin) / onHandUnits
+//   breakevenDisc   = clamp(1 - floorPrice / shelfPrice, 0..1)
+//
+// APPROXIMATE (surfaced as "appx" in the UI): COGS is the current unit cost
+// (no per-sale cost-as-of), lifetime sales apply no canceled-status
+// filter, and the horizon is bounded by however much order history has been
+// ingested. With no sales on record it degrades to 1 - cost/shelfPrice.
 function breakevenDisc(r: InventorySkuRow): number | null {
   const base = r.listPrice && r.listPrice > 0 ? r.listPrice : r.avgUnitPrice
   if (!base || base <= 0 || r.unitCostCurrent === null) return null
-  return Math.max(0, 1 - r.unitCostCurrent / base)
+  let floorPrice: number
+  if (r.physicalUnits > 0) {
+    const recoveredMargin = Math.max(0, r.lifetimeSoldRevenue - r.lifetimeUnitsSold * r.unitCostCurrent)
+    floorPrice = Math.max(0, r.onHandCost - recoveredMargin) / r.physicalUnits
+  } else {
+    floorPrice = r.unitCostCurrent
+  }
+  return Math.max(0, Math.min(1, 1 - floorPrice / base))
 }
 
 // ---------------------------------------------------------------------------
@@ -601,14 +617,20 @@ function reorderFacts(r: InventorySkuRow): Array<{ label: string; value: string;
 function exitFacts(r: InventorySkuRow): Array<{ label: string; value: string; warn?: boolean }> {
   const last = daysAgo(r.lastSaleAt)
   const breakeven = breakevenDisc(r)
+  const recoveredMargin =
+    r.unitCostCurrent !== null
+      ? Math.max(0, r.lifetimeSoldRevenue - r.lifetimeUnitsSold * r.unitCostCurrent)
+      : null
   return [
     { label: 'On-hand units', value: fmtNum(r.physicalUnits) },
     { label: 'On-hand cost', value: fmtMoney(r.onHandCost), warn: r.onHandCost > 0 },
     { label: 'Avg age', value: fmtDays(r.avgInventoryAgeDays ?? undefined) },
     { label: 'Last sale', value: last === null ? 'never' : `${last}d ago` },
     { label: 'Sold 90d', value: fmtNum(r.units90), warn: r.units90 === 0 },
+    { label: 'Sold lifetime', value: `${fmtNum(r.lifetimeUnitsSold)} / ${fmtMoney(r.lifetimeSoldRevenue)}` },
+    { label: 'Recovered margin (appx)', value: recoveredMargin === null ? '—' : fmtMoney(recoveredMargin) },
     { label: 'GM%', value: fmtPct(r.gmPct) },
-    { label: 'Breakeven disc', value: fmtPct(breakeven) },
+    { label: 'Breakeven disc (appx)', value: breakeven === null ? '—' : `≈${fmtPct(breakeven)}` },
     { label: 'Expiring ≤60d', value: r.expiringUnits60 > 0 ? fmtNum(r.expiringUnits60) : '—', warn: r.expiringUnits60 > 0 },
     { label: 'Confidence', value: fmtPct(r.confidenceScore), warn: r.confidenceScore < 0.6 },
   ]
@@ -1169,7 +1191,7 @@ function ExitRowCells({ r, isOpen }: { r: InventorySkuRow; isOpen: boolean }) {
       <td className="num">{last === null ? 'never' : `${last}d`}</td>
       <td className="num">{fmtNum(r.units90)}</td>
       <td className="num">{fmtPct(r.gmPct)}</td>
-      <td className="num">{fmtPct(breakeven)}</td>
+      <td className="num">{breakeven === null ? '—' : `≈${fmtPct(breakeven)}`}</td>
       <td className="num">{r.expiringUnits60 > 0 ? fmtNum(r.expiringUnits60) : '—'}</td>
       <td>
         <ActionPill action={r.action} />
@@ -1636,8 +1658,11 @@ function ExitLiquidateView({ data, expandedSku, onToggleExpand, sites }: SkuView
         <h3 className="inv-proc-section-title">Liquidation queue</h3>
         <p className="subtle-copy inv-proc-section-sub">
           On-hand SKUs ranked by deadweight score (slow velocity, capital tied up, age, expiry
-          proximity, weak margin). GM% is margin on recent sales; Breakeven disc = how far you can
-          cut off the current shelf price and still cover cost (shown even for SKUs with no sales).
+          proximity, weak margin). GM% is margin on recent sales. Breakeven disc (appx ≈) is the
+          deepest cut off the current shelf price at which liquidating the remaining units still
+          breaks even, after crediting margin already recovered from prior sales — so SKUs you've
+          already paid off can be cut further. Approximate: COGS uses current unit cost and the
+          sales horizon is bounded by ingested order history. Expand a row to see the inputs.
         </p>
         <div className="inv-proc-table-scroll">
           <table className="budtender-leaderboard inv-proc-table">
@@ -1653,7 +1678,7 @@ function ExitLiquidateView({ data, expandedSku, onToggleExpand, sites }: SkuView
                 <th className="num">Last sale</th>
                 <th className="num">Sold 90d</th>
                 <th className="num">GM%</th>
-                <th className="num">Breakeven disc</th>
+                <th className="num">Breakeven disc (appx)</th>
                 <th className="num">Expiring 60d</th>
                 <th>Action</th>
               </tr>
