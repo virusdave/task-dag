@@ -944,6 +944,14 @@ const SENTINELS: MigrationSentinel[] = [
       'sorts the whole table per request.',
     check: (db) => indexExists(db, 'seo_posts_updated_at_id_desc_idx'),
   },
+  {
+    migrationId: '076_seo_ga_gsc_imports',
+    label:
+      'SEO GA4/GSC metric import (seo_metric_import_batches + seo_gsc_daily ' +
+      '+ seo_ga4_daily) — required by the batch metric importer and the ' +
+      'feedback-loop aggregation queries. Without it the import CLI 500s.',
+    check: (db) => tableExists(db, 'seo_gsc_daily'),
+  },
 ]
 
 interface CacheEntry {
