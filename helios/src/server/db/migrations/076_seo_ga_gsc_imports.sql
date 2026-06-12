@@ -29,8 +29,11 @@
 -- `row_key` = sha256 over its identifying dimensions (NOT including the
 -- batch id or file hash, so overlapping re-imports collapse). The upsert is
 -- `on conflict (row_key) do update … where <metric> is distinct from
--- excluded.<metric>` so an unchanged re-import writes ZERO rows (no WAL, no
--- dead tuples). GSC restates the freshest ~3 days, so those legitimately
+-- excluded.<metric>` so an unchanged re-import produces NO new row version
+-- (no heap/index churn, no dead tuples). It is not literally zero-WAL: the
+-- conflicting row is still tuple-locked while the DO UPDATE predicate is
+-- evaluated, so cost is near-zero, not nil. GSC restates the freshest ~3
+-- days, so those legitimately
 -- update; the query layer excludes the freshest days from gap/comparison
 -- logic.
 --

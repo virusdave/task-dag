@@ -5,7 +5,10 @@
 // Idempotency / write-on-change (canon §3): the daily fact upserts key on
 // the deterministic `row_key` and only UPDATE when a metric actually
 // changed (`… is distinct from excluded.…`), so an unchanged re-import of
-// an overlapping date range writes ZERO rows — no WAL, no dead tuples. We
+// an overlapping date range produces no new row version — no heap/index
+// churn, no dead tuples. (Not literally zero-WAL: the conflicting row is
+// still tuple-locked while the DO UPDATE predicate is evaluated, so the
+// cost is near-zero, not nil.) We
 // distinguish insert vs update via the `xmax = 0` idiom and count
 // "unchanged" as (sent − returned). Upserts are CHUNKED (≤500 rows/stmt)
 // to stay under the 125ms per-interaction budget. Every aggregation query

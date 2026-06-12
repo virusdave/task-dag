@@ -26,6 +26,7 @@ import { requireSessionUser } from '../auth/requireSession.js'
 import { getPool } from '../db/pool.js'
 import { createSeoFaqSet } from '../db/queries/seoFaqQueries.js'
 import { getGscQueryGaps, getLowCtrPages } from '../db/queries/seoMetricsQueries.js'
+import { MAX_SEO_WINDOW_DAYS, isWindowWithinCap } from '../seo/metricWindow.js'
 import {
   acceptRecommendation,
   dismissRecommendation,
@@ -83,6 +84,11 @@ export async function registerSeoRecommendationRoutes(server: FastifyInstance): 
     const body = SeoRecommendationGenerateBodySchema.parse(request.body ?? {})
     if (body.startDate >= body.endDate) {
       return reply.status(400).send({ error: 'startDate must be before endDate.' })
+    }
+    if (!isWindowWithinCap(body.startDate, body.endDate)) {
+      return reply
+        .status(400)
+        .send({ error: `Date window too large; max ${MAX_SEO_WINDOW_DAYS} days.` })
     }
     const window = {
       site: body.site,

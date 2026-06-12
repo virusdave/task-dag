@@ -16,6 +16,7 @@ import {
   getTopGscQueries,
   listImportBatches,
 } from '../db/queries/seoMetricsQueries.js'
+import { MAX_SEO_WINDOW_DAYS, isWindowWithinCap } from '../seo/metricWindow.js'
 
 const DASHBOARD_ROW_LIMIT = 50
 const IMPORTS_LIMIT = 10
@@ -40,6 +41,11 @@ export async function registerSeoMetricsRoutes(server: FastifyInstance): Promise
     }
     if (q.startDate >= q.endDate) {
       return reply.status(400).send({ error: 'startDate must be before endDate.' })
+    }
+    if (!isWindowWithinCap(q.startDate, q.endDate)) {
+      return reply
+        .status(400)
+        .send({ error: `Date window too large; max ${MAX_SEO_WINDOW_DAYS} days.` })
     }
     const window = { site, startDate: q.startDate, endDate: q.endDate, limit: DASHBOARD_ROW_LIMIT }
     const db = getPool()
