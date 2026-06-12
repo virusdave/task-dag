@@ -23,10 +23,14 @@ import {
   SeoRecommendationRouteParamsSchema,
 } from '../../shared/contracts/index.js'
 import { requireSessionUser } from '../auth/requireSession.js'
-import { getPool } from '../db/pool.js'
+import { getPool, isStatementTimeout, withStatementTimeout } from '../db/pool.js'
 import { createSeoFaqSet } from '../db/queries/seoFaqQueries.js'
 import { getGscQueryGaps, getLowCtrPages } from '../db/queries/seoMetricsQueries.js'
-import { MAX_SEO_WINDOW_DAYS, isWindowWithinCap } from '../seo/metricWindow.js'
+import {
+  MAX_SEO_WINDOW_DAYS,
+  SEO_RECOMMENDATION_QUERY_TIMEOUT_MS,
+  isWindowWithinCap,
+} from '../seo/metricWindow.js'
 import {
   acceptRecommendation,
   dismissRecommendation,
@@ -99,13 +103,23 @@ export async function registerSeoRecommendationRoutes(server: FastifyInstance): 
       maxPosition: body.maxPosition ?? DEFAULT_MAX_POSITION,
       limit: body.limit ?? DEFAULT_LIMIT,
     }
-    const db = getPool()
-    const [gaps, lowCtrPages] = await Promise.all([
-      getGscQueryGaps(db, window),
-      getLowCtrPages(db, window),
-    ])
+    const readDb = withStatementTimeout(SEO_RECOMMENDATION_QUERY_TIMEOUT_MS)
+    let gaps, lowCtrPages
+    try {
+      ;[gaps, lowCtrPages] = await Promise.all([
+        getGscQueryGaps(readDb, window),
+        getLowCtrPages(readDb, window),
+      ])
+    } catch (error) {
+      if (isStatementTimeout(error)) {
+        return reply
+          .status(503)
+          .send({ error: 'Metrics scan timed out — narrow the date window and retry.' })
+      }
+      throw error
+    }
     const drafts = buildRecommendations(body.site, { gaps, lowCtrPages })
-    const counts = await upsertRecommendations(db, drafts)
+    const counts = await upsertRecommendations(getPool(), drafts)
     return reply.send(SeoRecommendationGenerateResponseSchema.parse(counts))
   })
 

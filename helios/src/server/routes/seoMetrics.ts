@@ -10,13 +10,17 @@ import type { FastifyInstance } from 'fastify'
 
 import { SeoMetricsOverviewResponseSchema } from '../../shared/contracts/index.js'
 import { requireSessionUser } from '../auth/requireSession.js'
-import { getPool } from '../db/pool.js'
+import { isStatementTimeout, withStatementTimeout } from '../db/pool.js'
 import {
   getTopGscPages,
   getTopGscQueries,
   listImportBatches,
 } from '../db/queries/seoMetricsQueries.js'
-import { MAX_SEO_WINDOW_DAYS, isWindowWithinCap } from '../seo/metricWindow.js'
+import {
+  MAX_SEO_WINDOW_DAYS,
+  SEO_METRICS_QUERY_TIMEOUT_MS,
+  isWindowWithinCap,
+} from '../seo/metricWindow.js'
 
 const DASHBOARD_ROW_LIMIT = 50
 const IMPORTS_LIMIT = 10
@@ -48,12 +52,22 @@ export async function registerSeoMetricsRoutes(server: FastifyInstance): Promise
         .send({ error: `Date window too large; max ${MAX_SEO_WINDOW_DAYS} days.` })
     }
     const window = { site, startDate: q.startDate, endDate: q.endDate, limit: DASHBOARD_ROW_LIMIT }
-    const db = getPool()
-    const [topQueries, topPages, recentImports] = await Promise.all([
-      getTopGscQueries(db, window),
-      getTopGscPages(db, window),
-      listImportBatches(db, { limit: IMPORTS_LIMIT }),
-    ])
+    const db = withStatementTimeout(SEO_METRICS_QUERY_TIMEOUT_MS)
+    let topQueries, topPages, recentImports
+    try {
+      ;[topQueries, topPages, recentImports] = await Promise.all([
+        getTopGscQueries(db, window),
+        getTopGscPages(db, window),
+        listImportBatches(db, { limit: IMPORTS_LIMIT }),
+      ])
+    } catch (error) {
+      if (isStatementTimeout(error)) {
+        return reply
+          .status(503)
+          .send({ error: 'Metrics query timed out — narrow the date window and retry.' })
+      }
+      throw error
+    }
     return reply.send(
       SeoMetricsOverviewResponseSchema.parse({
         site,

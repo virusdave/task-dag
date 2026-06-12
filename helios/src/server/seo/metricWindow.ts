@@ -11,6 +11,14 @@
 /** Largest [startDate, endDate) window any SEO metric API will serve, in days. */
 export const MAX_SEO_WINDOW_DAYS = 180
 
+// Per-statement timeouts (ms) for the aggregation endpoints. Even within the
+// 180-day cap a high-volume `all`-site window is a multi-hundred-ms scan +
+// hash aggregate; these bound the worst case so a deliberately wide request
+// can't pin a pool connection (canon §3). The viewer dashboard is tighter
+// than the editor-only generate path.
+export const SEO_METRICS_QUERY_TIMEOUT_MS = 5_000
+export const SEO_RECOMMENDATION_QUERY_TIMEOUT_MS = 8_000
+
 /**
  * Whole-day span between two `YYYY-MM-DD` dates (endDate exclusive). Both
  * inputs must already be validated as ISO calendar dates. Computed in UTC so
