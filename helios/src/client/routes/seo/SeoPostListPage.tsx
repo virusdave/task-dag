@@ -7,7 +7,7 @@
 // child FreshlyBakedNYC/automation#44 (P4) · Satisfies: virusdave/top-level#15
 
 import { useState } from 'react'
-import { Link, useLoaderData, useNavigate, useRevalidator } from 'react-router-dom'
+import { Link, useLoaderData, useNavigate, useRevalidator, useSearchParams } from 'react-router-dom'
 
 import {
   SeoPostDetailResponseSchema,
@@ -19,8 +19,19 @@ import { loadJson, mutateJson } from '../../app/fetchJson.js'
 import { nyShortDateTime } from '../../app/nyTime.js'
 import { Pill, type PillProps } from '../../components/Pill.js'
 
-export async function seoPostListLoader(): Promise<SeoPostListResponse> {
-  return loadJson('/api/seo/posts', SeoPostListResponseSchema)
+const PAGE_SIZE = 50
+
+export async function seoPostListLoader({
+  request,
+}: {
+  request: Request
+}): Promise<SeoPostListResponse> {
+  const url = new URL(request.url)
+  const offset = Math.max(0, Number.parseInt(url.searchParams.get('offset') ?? '0', 10) || 0)
+  return loadJson(
+    `/api/seo/posts?limit=${PAGE_SIZE}&offset=${offset}`,
+    SeoPostListResponseSchema,
+  )
 }
 
 function statusTone(status: SeoPostStatus): PillProps['tone'] {
@@ -45,9 +56,25 @@ export function SeoPostListPage() {
   const data = useLoaderData() as SeoPostListResponse
   const navigate = useNavigate()
   const revalidator = useRevalidator()
+  const [searchParams, setSearchParams] = useSearchParams()
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [topic, setTopic] = useState('')
+
+  const pageStart = data.total === 0 ? 0 : data.offset + 1
+  const pageEnd = data.offset + data.posts.length
+  const hasPrev = data.offset > 0
+  const hasNext = pageEnd < data.total
+
+  function goToOffset(offset: number) {
+    const next = new URLSearchParams(searchParams)
+    if (offset <= 0) {
+      next.delete('offset')
+    } else {
+      next.set('offset', String(offset))
+    }
+    setSearchParams(next)
+  }
 
   async function createBlank() {
     setBusy(true)
@@ -150,6 +177,31 @@ export function SeoPostListPage() {
             ))}
           </tbody>
         </table>
+      )}
+
+      {data.total > 0 && (
+        <div
+          className="filter-row"
+          style={{ gap: 12, alignItems: 'center', marginTop: 12 }}
+        >
+          <button
+            type="button"
+            onClick={() => goToOffset(Math.max(0, data.offset - data.limit))}
+            disabled={!hasPrev || revalidator.state === 'loading'}
+          >
+            ← Prev
+          </button>
+          <span className="subtle-copy">
+            {pageStart}–{pageEnd} of {data.total}
+          </span>
+          <button
+            type="button"
+            onClick={() => goToOffset(data.offset + data.limit)}
+            disabled={!hasNext || revalidator.state === 'loading'}
+          >
+            Next →
+          </button>
+        </div>
       )}
     </div>
   )

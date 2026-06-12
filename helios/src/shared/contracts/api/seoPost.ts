@@ -59,8 +59,36 @@ export const SeoPostRecordSchema = z.object({
 })
 export type SeoPostRecord = z.infer<typeof SeoPostRecordSchema>
 
+// A lean list row — deliberately EXCLUDES the (potentially large) body
+// variants and other detail-only fields so the list endpoint's payload
+// stays flat as the table grows. Detail/editing loads the full record via
+// GET /api/seo/posts/:postId.
+export const SeoPostSummarySchema = z.object({
+  postId: z.string().min(1),
+  scope: z.string().min(1),
+  slug: z.string(),
+  title: z.string(),
+  status: SeoPostStatusSchema,
+  source: SeoPostSourceSchema,
+  noindex: z.boolean(),
+  publishedAt: z.string(),
+  updatedAt: z.string(),
+})
+export type SeoPostSummary = z.infer<typeof SeoPostSummarySchema>
+
+// List query params: newest-first page window. Coerced from the query
+// string; capped so a caller can't request an unbounded page.
+export const SeoPostListQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(200).default(50),
+  offset: z.coerce.number().int().min(0).default(0),
+})
+export type SeoPostListQuery = z.infer<typeof SeoPostListQuerySchema>
+
 export const SeoPostListResponseSchema = z.object({
-  posts: z.array(SeoPostRecordSchema),
+  posts: z.array(SeoPostSummarySchema),
+  total: z.number().int().nonnegative(),
+  limit: z.number().int().positive(),
+  offset: z.number().int().nonnegative(),
 })
 export type SeoPostListResponse = z.infer<typeof SeoPostListResponseSchema>
 

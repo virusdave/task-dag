@@ -12,7 +12,11 @@
 
 import type { PoolClient } from 'pg'
 
-import type { SeoPostRecord, SeoPostSource } from '../../../shared/contracts/index.js'
+import type {
+  SeoPostRecord,
+  SeoPostSource,
+  SeoPostSummary,
+} from '../../../shared/contracts/index.js'
 import { newSeoApprovalId } from '../../seo/faqContent.js'
 import {
   checkPostApprovable,
@@ -190,9 +194,64 @@ function safeCanonicalUrl(scope: string, slug: string): string {
   }
 }
 
-export async function listSeoPosts(db: Queryable): Promise<SeoPostRecord[]> {
-  const result = await db.query<SeoPostRow>(`${SELECT_POST} order by p.updated_at desc`)
-  return result.rows.map(mapRow)
+interface SeoPostSummaryRow {
+  post_id: string
+  scope: string
+  slug: string
+  title: string
+  status: string
+  source: string
+  noindex: boolean
+  published_at: Date | string
+  updated_at: Date | string
+}
+
+export interface ListSeoPostsOptions {
+  readonly limit: number
+  readonly offset: number
+}
+
+export interface SeoPostListPage {
+  readonly posts: SeoPostSummary[]
+  readonly total: number
+}
+
+/**
+ * Lean, newest-first, paginated list. Selects ONLY the summary columns
+ * (never the large body variants) so the payload stays flat as the table
+ * grows; the editor loads full content via getSeoPost. Ordered by
+ * (updated_at desc, id desc) for a stable page window, backed by the
+ * seo_posts_updated_at_id_desc_idx index (migration 075).
+ */
+export async function listSeoPosts(
+  db: Queryable,
+  options: ListSeoPostsOptions,
+): Promise<SeoPostListPage> {
+  const [pageResult, countResult] = await Promise.all([
+    db.query<SeoPostSummaryRow>(
+      `
+        select post_id, scope, slug, title, status, source, noindex,
+               published_at, updated_at
+          from seo_posts
+         order by updated_at desc, id desc
+         limit $1 offset $2
+      `,
+      [options.limit, options.offset],
+    ),
+    db.query<{ total: string }>(`select count(*)::text as total from seo_posts`),
+  ])
+  const posts: SeoPostSummary[] = pageResult.rows.map((row) => ({
+    postId: row.post_id,
+    scope: row.scope,
+    slug: row.slug,
+    title: row.title,
+    status: row.status as SeoPostSummary['status'],
+    source: row.source as SeoPostSource,
+    noindex: row.noindex === true,
+    publishedAt: toIsoString(row.published_at)!,
+    updatedAt: toIsoString(row.updated_at)!,
+  }))
+  return { posts, total: Number.parseInt(countResult.rows[0]?.total ?? '0', 10) }
 }
 
 export async function getSeoPost(db: Queryable, postId: string): Promise<SeoPostRecord | null> {

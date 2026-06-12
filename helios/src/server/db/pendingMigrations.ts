@@ -936,6 +936,14 @@ const SENTINELS: MigrationSentinel[] = [
       'pages 500.',
     check: (db) => tableExists(db, 'seo_image_assets'),
   },
+  {
+    migrationId: '075_seo_posts_list_index',
+    label:
+      'SEO posts list index (updated_at desc, id desc) — backs the lean, ' +
+      'paginated /api/seo/posts list. Without it the list still works but ' +
+      'sorts the whole table per request.',
+    check: (db) => indexExists(db, 'seo_posts_updated_at_id_desc_idx'),
+  },
 ]
 
 interface CacheEntry {

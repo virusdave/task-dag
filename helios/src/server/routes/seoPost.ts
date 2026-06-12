@@ -18,6 +18,7 @@ import {
   SeoPostCreateBodySchema,
   SeoPostDetailResponseSchema,
   SeoPostGenerateBodySchema,
+  SeoPostListQuerySchema,
   SeoPostListResponseSchema,
   SeoPostRejectBodySchema,
   SeoPostRouteParamsSchema,
@@ -41,14 +42,22 @@ import { buildSocialExport, checkPostApprovable } from '../seo/postContent.js'
 import { generatePostDraft } from '../seo/postGenerate.js'
 
 export async function registerSeoPostRoutes(server: FastifyInstance): Promise<void> {
-  // List all posts.
+  // List posts — lean (no bodies), newest-first, paginated.
   server.get('/api/seo/posts', async (request, reply) => {
     const user = await requireSessionUser(request, reply, 'viewer')
     if (!user) {
       return
     }
-    const posts = await listSeoPosts(getPool())
-    return reply.send(SeoPostListResponseSchema.parse({ posts }))
+    const query = SeoPostListQuerySchema.parse(request.query ?? {})
+    const page = await listSeoPosts(getPool(), { limit: query.limit, offset: query.offset })
+    return reply.send(
+      SeoPostListResponseSchema.parse({
+        posts: page.posts,
+        total: page.total,
+        limit: query.limit,
+        offset: query.offset,
+      }),
+    )
   })
 
   // Get one post.
