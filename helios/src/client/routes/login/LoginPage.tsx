@@ -1,8 +1,9 @@
 import { useState, type FormEvent } from 'react'
-import { redirect, useLoaderData } from 'react-router-dom'
+import { redirect, useLoaderData, type LoaderFunctionArgs } from 'react-router-dom'
 import { z } from 'zod'
 
 import type { SessionEnvelope } from '../../../shared/contracts/index.js'
+import { normalizeReturnToOrRoot } from '../../../shared/config/returnTo.js'
 import { mutateJson } from '../../app/fetchJson.js'
 import { buildAppPath } from '../../app/paths.js'
 import { loadSession } from '../../app/session.js'
@@ -10,17 +11,24 @@ import { usePageTitle } from '../../app/usePageTitle.js'
 
 const DevLoginResponseSchema = z.null()
 
-export async function loginLoader() {
+interface LoginLoaderData {
+  session: SessionEnvelope
+  returnTo: string
+}
+
+export async function loginLoader({ request }: LoaderFunctionArgs): Promise<LoginLoaderData> {
+  const returnTo = normalizeReturnToOrRoot(new URL(request.url).searchParams.get('returnTo'))
   const session = await loadSession()
   if (session.user) {
-    throw redirect('/')
+    // Already authenticated — go straight to wherever they were headed.
+    throw redirect(returnTo)
   }
-  return session
+  return { returnTo, session }
 }
 
 export function LoginPage() {
   usePageTitle()
-  const session = useLoaderData() as SessionEnvelope
+  const { session, returnTo } = useLoaderData() as LoginLoaderData
   const googleOAuthStatus = session.runtimeDependencies.find((dependency) => dependency.code === 'google_oauth')
   const [devLoginEmail, setDevLoginEmail] = useState('')
   const [devLoginError, setDevLoginError] = useState<string | null>(null)
@@ -36,7 +44,7 @@ export function LoginPage() {
         body: JSON.stringify({ email: devLoginEmail }),
         method: 'POST',
       })
-      window.location.assign(buildAppPath('/'))
+      window.location.assign(buildAppPath(returnTo))
     } catch (error) {
       setDevLoginError(error instanceof Error ? error.message : 'Local dev sign-in failed.')
       setIsSubmittingDevLogin(false)
@@ -53,7 +61,12 @@ export function LoginPage() {
       </p>
       {googleOAuthStatus && googleOAuthStatus.status !== 'configured' ? <p className="error-text">{googleOAuthStatus.summary}</p> : null}
       {googleOAuthStatus?.status === 'configured' ? (
-        <a className="primary-button" href={buildAppPath('/api/auth/google/start')}>
+        <a
+          className="primary-button"
+          href={buildAppPath(
+            returnTo === '/' ? '/api/auth/google/start' : `/api/auth/google/start?returnTo=${encodeURIComponent(returnTo)}`,
+          )}
+        >
           Continue with Google
         </a>
       ) : null}

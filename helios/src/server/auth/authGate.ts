@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 
 import { joinBasePath } from '../../shared/config/appBasePath.js'
+import { normalizeReturnTo } from '../../shared/config/returnTo.js'
 import { getServerEnv, isGoogleOAuthReady, type ServerEnv } from '../config/env.js'
 import { readSessionUserId } from './sessionCookie.js'
 
@@ -167,7 +168,18 @@ function respondUnauthenticated(
   // Google OAuth is configured (dev), a minimal self-contained page
   // describing how to obtain a session locally.
   if (isGoogleOAuthReady(env)) {
-    return reply.redirect(joinBasePath(env.appBasePath, '/api/auth/google/start'))
+    // Preserve the page the user was actually trying to reach so the
+    // OAuth callback can return them there instead of dumping everyone
+    // on the app root. `appPath` here is already app-base-relative and
+    // query-stripped; re-attach the original query string and validate
+    // the whole thing (normalizeReturnTo rejects anything that isn't a
+    // safe same-app page path, e.g. /api/*). Fragments are never sent
+    // to the server, so they can't be preserved here.
+    const returnTo = normalizeReturnTo(`${appPath}${extractQuery(request.url)}`)
+    const startPath = joinBasePath(env.appBasePath, '/api/auth/google/start')
+    const startUrl =
+      returnTo && returnTo !== '/' ? `${startPath}?returnTo=${encodeURIComponent(returnTo)}` : startPath
+    return reply.redirect(startUrl)
   }
 
   return reply
@@ -195,6 +207,11 @@ function renderDevSignInNotice(): string {
 function stripQuery(url: string): string {
   const queryIndex = url.indexOf('?')
   return queryIndex === -1 ? url : url.slice(0, queryIndex)
+}
+
+function extractQuery(url: string): string {
+  const queryIndex = url.indexOf('?')
+  return queryIndex === -1 ? '' : url.slice(queryIndex)
 }
 
 function stripAppBasePath(path: string, basePath: string): string {

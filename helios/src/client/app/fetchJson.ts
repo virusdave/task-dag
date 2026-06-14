@@ -1,7 +1,7 @@
 import { redirect } from 'react-router-dom'
 import type { z } from 'zod'
 
-import { buildAppPath } from './paths.js'
+import { buildAppPath, getCurrentInAppReturnTo } from './paths.js'
 
 export async function loadJson<TSchema extends z.ZodType>(
   path: string,
@@ -19,7 +19,11 @@ export async function loadJson<TSchema extends z.ZodType>(
   })
 
   if (response.status === 401) {
-    throw redirect('/login')
+    // Session expired mid-use. Remember where the user was so the login
+    // flow can send them straight back instead of dumping them on the
+    // app root.
+    const returnTo = getCurrentInAppReturnTo()
+    throw redirect(returnTo === '/' ? '/login' : `/login?returnTo=${encodeURIComponent(returnTo)}`)
   }
 
   if (!response.ok) {
