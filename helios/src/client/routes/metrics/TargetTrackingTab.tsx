@@ -80,6 +80,18 @@ export function TargetTrackingTab({ isAdmin }: TargetTrackingTabProps): JSX.Elem
   const config = data?.config ?? null
   const current = data?.periods.find((p) => p.isCurrent) ?? null
 
+  // Targets/expenses are per-site, so editing requires exactly one
+  // selected site. "All sites" (or a multi-site selection) shows the
+  // aggregate but can't be edited as a unit.
+  const perSite = data?.perSite ?? []
+  const editSiteKey = selectedSites.size === 1 ? Array.from(selectedSites)[0]! : null
+  const editSite = editSiteKey ? perSite.find((s) => s.siteKey === editSiteKey) ?? null : null
+  const canEdit = isAdmin && editSite !== null
+  // Sites in the current selection with no saved config — break-even
+  // then covers only configured sites while actuals cover all of them.
+  const unconfiguredSites = perSite.filter((s) => s.config === null)
+  const hasPartialTargets = config !== null && unconfiguredSites.length > 0
+
   return (
     <div className="target-tracking">
       <div className="target-tracking-toolbar">
@@ -121,8 +133,16 @@ export function TargetTrackingTab({ isAdmin }: TargetTrackingTabProps): JSX.Elem
           </button>
         </div>
         {isAdmin ? (
-          <button type="button" className="ghost-button" onClick={() => setEditing(true)}>
-            {config ? '⚙ Edit targets' : '⚙ Configure targets'}
+          <button
+            type="button"
+            className="ghost-button"
+            disabled={!canEdit}
+            title={canEdit ? undefined : 'Select a single site (Bronx or Midtown) to edit its targets.'}
+            onClick={() => setEditing(true)}
+          >
+            {editSite
+              ? `${editSite.config ? '⚙ Edit' : '⚙ Configure'} ${editSite.siteLabel} targets`
+              : '⚙ Select one site to edit targets'}
           </button>
         ) : null}
       </div>
@@ -133,9 +153,22 @@ export function TargetTrackingTab({ isAdmin }: TargetTrackingTabProps): JSX.Elem
       {data && !config ? (
         <div className="target-tracking-empty">
           <p>
-            No targets configured yet. {isAdmin ? 'Click “Configure targets” to enter your fixed costs (rent, electricity…), blended labour rate, and weekly staffed hours.' : 'Ask an admin to configure the business cost targets.'}
+            No targets configured for {editSite ? editSite.siteLabel : 'the selected site(s)'} yet.{' '}
+            {isAdmin
+              ? editSite
+                ? 'Click “Configure targets” to enter this site’s fixed costs (rent, electricity…), blended labour rate, and weekly staffed hours.'
+                : 'Select a single site (Bronx or Midtown), then click “Configure targets”.'
+              : 'Ask an admin to configure the per-site cost targets.'}
           </p>
         </div>
+      ) : null}
+
+      {hasPartialTargets ? (
+        <p className="metric-chart-error" role="status">
+          ⚠ No targets saved for {unconfiguredSites.map((s) => s.siteLabel).join(', ')}. Break-even
+          covers configured sites only, while actual margin includes every selected site — so this
+          comparison may understate the margin needed.
+        </p>
       ) : null}
 
       {data && config ? (
@@ -146,9 +179,11 @@ export function TargetTrackingTab({ isAdmin }: TargetTrackingTabProps): JSX.Elem
         </>
       ) : null}
 
-      {editing ? (
+      {editing && editSite ? (
         <TargetConfigModal
-          initial={config ?? EMPTY_CONFIG}
+          siteKey={editSite.siteKey}
+          siteLabel={editSite.siteLabel}
+          initial={editSite.config ?? EMPTY_CONFIG}
           onCancel={() => setEditing(false)}
           onSaved={onSaved}
         />
@@ -360,8 +395,8 @@ function CostBreakdown({
       <div className="target-cost-body">
         <table>
           <tbody>
-            {config.fixedCosts.map((c) => (
-              <tr key={c.label}>
+            {config.fixedCosts.map((c, i) => (
+              <tr key={`${c.label}:${i}`}>
                 <td>{c.label}</td>
                 <td>{USD.format(c.monthlyDollars)}/mo</td>
               </tr>
@@ -395,10 +430,14 @@ function CostBreakdown({
 }
 
 function TargetConfigModal({
+  siteKey,
+  siteLabel,
   initial,
   onCancel,
   onSaved,
 }: {
+  siteKey: string
+  siteLabel: string
   initial: TargetTrackingConfig
   onCancel: () => void
   onSaved: () => void
@@ -428,10 +467,14 @@ function TargetConfigModal({
         laborRateDollarsPerHour: Number(laborRate) || 0,
         weeklyStaffedHours: Number(weeklyHours) || 0,
       }
-      await mutateJson('/api/target-tracking/config', TargetTrackingResponseSchema, {
-        method: 'PUT',
-        body: JSON.stringify(body),
-      })
+      await mutateJson(
+        `/api/target-tracking/config?site=${encodeURIComponent(siteKey)}`,
+        TargetTrackingResponseSchema,
+        {
+          method: 'PUT',
+          body: JSON.stringify(body),
+        },
+      )
       onSaved()
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e))
@@ -440,11 +483,15 @@ function TargetConfigModal({
   }
 
   const reset = async () => {
-    if (!globalThis.confirm('Reset target tracking config to empty? This clears all saved costs.')) return
+    if (!globalThis.confirm(`Reset ${siteLabel} target config to empty? This clears its saved costs.`))
+      return
     setBusy(true)
     setErr(null)
     try {
-      await fetch(`/api/target-tracking/config`, { method: 'DELETE', credentials: 'same-origin' })
+      await fetch(`/api/target-tracking/config?site=${encodeURIComponent(siteKey)}`, {
+        method: 'DELETE',
+        credentials: 'same-origin',
+      })
       onSaved()
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e))
@@ -455,14 +502,14 @@ function TargetConfigModal({
   return (
     <div className="wh-modal-overlay" onClick={onCancel} role="presentation">
       <div className="wh-modal target-config-modal" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
-        <h3>Target tracking config</h3>
+        <h3>{siteLabel} target tracking config</h3>
         <p className="subtle-copy">
-          Company-wide costs. Fixed costs are monthly; labour is prorated from a
+          Costs for {siteLabel}. Fixed costs are monthly; labour is prorated from a
           blended hourly rate × weekly staffed hours. Break-even = the gross
           margin $ needed to cover these.
         </p>
 
-        <h3>Fixed monthly costs</h3>
+        <h4 className="target-config-section-title">Fixed monthly costs</h4>
         <div className="target-config-fixed">
           {fixedCosts.map((c, i) => (
             <div key={i} className="target-config-fixed-row">
@@ -480,7 +527,12 @@ function TargetConfigModal({
                 value={c.monthlyDollars}
                 onChange={(e) => updateRow(i, 'monthlyDollars', e.target.value)}
               />
-              <button type="button" className="ghost-button" onClick={() => removeRow(i)}>
+              <button
+                type="button"
+                className="ghost-button target-config-remove"
+                aria-label="Remove fixed cost"
+                onClick={() => removeRow(i)}
+              >
                 ✕
               </button>
             </div>
@@ -490,7 +542,7 @@ function TargetConfigModal({
           </button>
         </div>
 
-        <h3>Labour</h3>
+        <h4 className="target-config-section-title">Labour</h4>
         <div className="target-config-labor">
           <label>
             Blended cost $/hr

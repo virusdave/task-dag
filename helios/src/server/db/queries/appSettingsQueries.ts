@@ -44,6 +44,24 @@ export async function getAppSetting(
   return row ? mapRow(row) : null
 }
 
+/**
+ * Bulk variant of {@link getAppSetting}: fetch many keys in a single
+ * round-trip, returned as a key→record map (missing keys are absent).
+ */
+export async function getAppSettings(
+  db: Queryable,
+  keys: readonly string[],
+): Promise<Map<string, AppSettingRecord>> {
+  if (keys.length === 0) return new Map()
+  const result = await db.query<AppSettingRow>(
+    `select key, value, updated_by, updated_at
+       from app_settings
+      where key = any($1::text[])`,
+    [keys],
+  )
+  return new Map(result.rows.map((row) => [row.key, mapRow(row)]))
+}
+
 export async function upsertAppSetting(
   db: Queryable,
   key: string,

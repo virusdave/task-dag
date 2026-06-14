@@ -10,10 +10,13 @@ import { z } from 'zod'
 // charts the actual margin $ (net sales − COGS) earned each period against
 // that target — with a pace projection for the in-progress current period.
 //
-// Config is persisted GLOBALLY (company-wide) in `app_settings` under the
-// `target_tracking_config` key — admins edit it, everyone reads it. Costs
-// are company-wide; actuals are summed across the selected sites (default
-// all) so the page is meaningful with the shared site selector.
+// Config is persisted PER SITE in `app_settings` under the
+// `target_tracking_config:<siteKey>` key — admins edit one site at a
+// time, everyone reads. Actual margin $ is summed across the selected
+// sites (default all). For a multi-site selection the server returns an
+// aggregate `config` (site fixed-cost subtotals + a staffing-weighted
+// blended labour rate) for the cost breakdown / break-even math, plus a
+// `perSite` array carrying each site's exact editable config.
 // ---------------------------------------------------------------------------
 
 /** A single recurring fixed cost line (monthly basis). */
@@ -70,15 +73,37 @@ export const TargetTrackingPeriodSchema = z.object({
 })
 export type TargetTrackingPeriod = z.infer<typeof TargetTrackingPeriodSchema>
 
-export const TargetTrackingResponseSchema = z.object({
-  /** Null when no config has been saved yet (page renders an empty state). */
+/** One resolved site's saved config (null when that site is unconfigured). */
+export const TargetTrackingPerSiteConfigSchema = z.object({
+  siteKey: z.string().min(1),
+  siteLabel: z.string().min(1),
   config: TargetTrackingConfigSchema.nullable(),
+  updatedBy: z.string().nullable(),
+  updatedAt: z.string().nullable(),
+})
+export type TargetTrackingPerSiteConfig = z.infer<typeof TargetTrackingPerSiteConfigSchema>
+
+export const TargetTrackingResponseSchema = z.object({
+  /**
+   * Effective config for the resolved site selection. For a single site
+   * it is that site's config; for a multi-site selection it is a
+   * server-built aggregate (per-site fixed-cost subtotals + a
+   * staffing-weighted blended labour rate) used only for display +
+   * break-even math. Null when NONE of the resolved sites is configured
+   * (page renders an empty state). Never edit this directly — use the
+   * matching `perSite[].config`.
+   */
+  config: TargetTrackingConfigSchema.nullable(),
+  /** One entry per resolved site, with that site's exact editable config. */
+  perSite: z.array(TargetTrackingPerSiteConfigSchema),
   resolved: z.object({
     agg: TargetTrackingAggSchema,
+    /** The resolved site keys (an empty request resolves to all sites). */
     sites: z.array(z.string()),
   }),
   /** Oldest → newest; the last entry is the in-progress current period. */
   periods: z.array(TargetTrackingPeriodSchema),
+  /** Latest update among configured resolved sites (exact for one site). */
   updatedBy: z.string().nullable(),
   updatedAt: z.string().nullable(),
 })
