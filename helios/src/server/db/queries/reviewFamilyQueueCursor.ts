@@ -5,9 +5,9 @@
  * client in `pageInfo.endCursor`; the client never inspects it. It pins
  * the keyset boundary (the last family emitted, in SQL/keyset order) plus
  * the filter state it was generated under, so a cursor cannot silently
- * leak rows across a filter change. `familyKeyVersion` lets Phase B change
- * family-key semantics (adding `sizeName`) while still rejecting — rather
- * than mis-paging — in-flight v1 cursors.
+ * leak rows across a filter change. `familyKeyVersion` (v2 = Phase B,
+ * which folds `size` into the family key) makes an older v1 cursor reject
+ * rather than mis-page after the key semantics change.
  *
  * This is integrity-by-validation, not encryption: there is nothing
  * secret in a cursor, but a malformed/foreign cursor is rejected.
@@ -28,6 +28,7 @@ export const ReviewFamilyQueueCursorSchema = z.object({
   brand: z.string().nullable(),
   category: z.string().nullable(),
   subcategory: z.string().nullable(),
+  size: z.string().nullable(),
   filtersHash: z.string(),
 })
 export type ReviewFamilyQueueCursor = z.infer<typeof ReviewFamilyQueueCursorSchema>
@@ -59,6 +60,7 @@ export function encodeReviewCursor(input: {
   brand: string | null
   category: string | null
   subcategory: string | null
+  size: string | null
   filters: ReviewFamilyQueueQuery
 }): string {
   const payload: ReviewFamilyQueueCursor = {
@@ -68,6 +70,7 @@ export function encodeReviewCursor(input: {
     brand: input.brand,
     category: input.category,
     subcategory: input.subcategory,
+    size: input.size,
     filtersHash: hashReviewFilters(input.filters),
   }
   return Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url')

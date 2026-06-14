@@ -67,6 +67,13 @@ interface FamilyQueueRow extends QueryResultRow {
   target_entity_type: 'catalog_group' | 'catalog_product'
   validation_issues_json: ValidationIssue[]
   version: number
+  /**
+   * Resolved size for this line item's family (Phase B / familyKeyVersion 2):
+   * product-targeted -> that product's size; group-targeted single-size group
+   * -> that size; group-targeted multi-size group -> null. Read from the
+   * `catalog_group_products` projection, never cracked from live_state_json.
+   */
+  family_size: string | null
   /** Position of this row's family within the selected page (SQL keyset order). */
   family_ord: number
 }
@@ -76,6 +83,7 @@ interface NarrowFamilyRow extends QueryResultRow {
   family_brand: string | null
   family_category: string | null
   family_subcategory: string | null
+  family_size: string | null
   has_drift: boolean
   line_item_count: number
   review_row_count: number
@@ -101,20 +109,24 @@ interface LiveStateProduct {
 }
 
 /**
- * Phase A (top-level#16) family-aware keyset pagination.
+ * Phase A+B (top-level#16) family-aware keyset pagination.
  *
  * Two phases:
  *  1. A NARROW page query rolls the indexed join up to one row per family
- *     `(brand, category, subcategory)` — no `live_state_json` crack, no
- *     `regexp_replace` previews, no `evidence_json`, no observation join —
- *     orders families by `(has_drift desc, brand, category, subcategory)`
- *     and keyset-pages `familyLimit + 1` of them.
+ *     `(brand, category, subcategory, size)` — size resolved from the
+ *     `catalog_group_products` projection (Phase B), so there is STILL no
+ *     `live_state_json` crack, no `regexp_replace` previews, no
+ *     `evidence_json`, and no observation join — orders families by
+ *     `(has_drift desc, brand, category, subcategory, size)` and
+ *     keyset-pages `familyLimit + 1` of them.
  *  2. A DETAIL query then fetches the SQL-projected line items (preview
- *     sources + reduced live state — see #dbb4897) and we fetch the latest
- *     observation ONLY for the selected page's families/products.
+ *     sources + reduced live state rebuilt from `catalog_group_products`,
+ *     not from the blob) and we fetch the latest observation ONLY for the
+ *     selected page's families/products.
  *
  * This is the ~9× win: the whole-queue per-row JSON work that dominated
- * the old endpoint now happens for ≤ `familyLimit` families per request.
+ * the old endpoint now happens for ≤ `familyLimit` families per request,
+ * and Phase B removes the last `jsonb_array_elements` crack entirely.
  */
 export async function listReviewFamilyQueue(
   db: Queryable,
@@ -152,6 +164,7 @@ export async function listReviewFamilyQueue(
             brand: family.family_brand,
             category: family.family_category,
             subcategory: family.family_subcategory,
+            sizeName: family.family_size,
           },
           lineItemCount: family.line_item_count,
         }
@@ -159,6 +172,7 @@ export async function listReviewFamilyQueue(
           brand: family.family_brand,
           category: family.family_category,
           subcategory: family.family_subcategory,
+          sizeName: family.family_size,
           lineItemCount: family.line_item_count,
           cap: REVIEW_MAX_LINE_ITEMS_PER_PAGE,
         })
@@ -188,6 +202,7 @@ export async function listReviewFamilyQueue(
           brand: boundary.family_brand,
           category: boundary.family_category,
           subcategory: boundary.family_subcategory,
+          size: boundary.family_size,
           filters,
         })
       : null
@@ -312,15 +327,21 @@ async function runNarrowFamilyPageQuery(
     const pSubNull = values.length
     values.push(cursor.subcategory ?? '')
     const pSubSort = values.length
+    values.push(cursor.size === null)
+    const pSizeNull = values.length
+    values.push(cursor.size ?? '')
+    const pSizeSort = values.length
     cursorPredicate = `
       where (
         fs.drift_rank, fs.brand_is_null, fs.brand_sort,
         fs.category_is_null, fs.category_sort,
-        fs.subcategory_is_null, fs.subcategory_sort
+        fs.subcategory_is_null, fs.subcategory_sort,
+        fs.size_is_null, fs.size_sort
       ) > (
         $${pDrift}::int, $${pBrandNull}::boolean, $${pBrandSort}::text collate "C",
         $${pCatNull}::boolean, $${pCatSort}::text collate "C",
-        $${pSubNull}::boolean, $${pSubSort}::text collate "C"
+        $${pSubNull}::boolean, $${pSubSort}::text collate "C",
+        $${pSizeNull}::boolean, $${pSizeSort}::text collate "C"
       )`
   }
 
@@ -331,25 +352,65 @@ async function runNarrowFamilyPageQuery(
     `
       with candidate_items as (
         select
+          cg.id as catalog_group_id,
           cg.brand_name as family_brand,
           cg.category_name as family_category,
           cg.subcategory_name as family_subcategory,
           (cg.reconcile_status = 'drifted') as is_drifted,
-          pli.proposal_row_id
+          pli.proposal_row_id,
+          pli.target_entity_type,
+          pli.target_entity_id
         from proposal_line_items pli
         inner join proposal_rows pr on pr.id = pli.proposal_row_id
         inner join proposal_batches pb on pb.id = pr.proposal_batch_id
         inner join catalog_groups cg on cg.id = pli.catalog_group_id
         where ${filterClauses.join(' and ')}
       ),
+      -- Phase B: per-group distinct (non-null) size rollup over the skinny
+      -- projection. NULL size_names are ignored by count(distinct)/min, so a
+      -- group with one real size + null-size products still resolves to that
+      -- one size (matches Phase A's display semantics).
+      group_size_summary as (
+        select
+          cgp.catalog_group_id,
+          count(distinct cgp.size_name) as distinct_size_count,
+          min(cgp.size_name) as single_size
+        from catalog_group_products cgp
+        where cgp.catalog_group_id in (select distinct catalog_group_id from candidate_items)
+        group by cgp.catalog_group_id
+      ),
+      -- Resolve each line item's family size: product-targeted -> that
+      -- product's size (PK point lookup); group-targeted single-size group
+      -- -> that size; otherwise null ("mixed" bucket). No JSON cracking.
+      resolved as (
+        select
+          ci.family_brand,
+          ci.family_category,
+          ci.family_subcategory,
+          ci.is_drifted,
+          ci.proposal_row_id,
+          case
+            when ci.target_entity_type = 'catalog_product'
+              then (
+                select cgp.size_name
+                from catalog_group_products cgp
+                where cgp.catalog_group_id = ci.catalog_group_id
+                  and cgp.product_id = ci.target_entity_id
+              )
+            when gss.distinct_size_count = 1 then gss.single_size
+            else null
+          end as family_size
+        from candidate_items ci
+        left join group_size_summary gss on gss.catalog_group_id = ci.catalog_group_id
+      ),
       family_rollup as (
         select
-          family_brand, family_category, family_subcategory,
+          family_brand, family_category, family_subcategory, family_size,
           bool_or(is_drifted) as has_drift,
           count(*)::int as line_item_count,
           count(distinct proposal_row_id)::int as review_row_count
-        from candidate_items
-        group by family_brand, family_category, family_subcategory
+        from resolved
+        group by family_brand, family_category, family_subcategory, family_size
       ),
       family_sorted as (
         select
@@ -360,7 +421,9 @@ async function runNarrowFamilyPageQuery(
           (family_category is null) as category_is_null,
           coalesce(family_category, '') collate "C" as category_sort,
           (family_subcategory is null) as subcategory_is_null,
-          coalesce(family_subcategory, '') collate "C" as subcategory_sort
+          coalesce(family_subcategory, '') collate "C" as subcategory_sort,
+          (family_size is null) as size_is_null,
+          coalesce(family_size, '') collate "C" as size_sort
         from family_rollup
       ),
       totals as (
@@ -376,15 +439,16 @@ async function runNarrowFamilyPageQuery(
         order by
           fs.drift_rank, fs.brand_is_null, fs.brand_sort,
           fs.category_is_null, fs.category_sort,
-          fs.subcategory_is_null, fs.subcategory_sort
+          fs.subcategory_is_null, fs.subcategory_sort,
+          fs.size_is_null, fs.size_sort
         limit $${limitParam}
       )
       select
-        (page.family_brand is not null or page.family_category is not null
-          or page.family_subcategory is not null or page.has_drift is not null) as page_row,
+        (page.has_drift is not null) as page_row,
         page.family_brand,
         page.family_category,
         page.family_subcategory,
+        page.family_size,
         page.has_drift,
         page.line_item_count,
         page.review_row_count,
@@ -399,7 +463,9 @@ async function runNarrowFamilyPageQuery(
         page.category_is_null asc nulls last,
         page.category_sort asc nulls last,
         page.subcategory_is_null asc nulls last,
-        page.subcategory_sort asc nulls last
+        page.subcategory_sort asc nulls last,
+        page.size_is_null asc nulls last,
+        page.size_sort asc nulls last
     `,
     values,
   )
@@ -409,13 +475,25 @@ async function runNarrowFamilyPageQuery(
 }
 
 /**
- * Phase 2 — detail query for the selected page families only. Joins
- * `catalog_groups` by null-safe `(brand, category, subcategory)` equality
- * to the families chosen in Phase 1, then their line items, applying the
- * SAME filters. This is the only query allowed to read `live_state_json`,
- * and it does so for ≤ `familyLimit` families. It keeps the #dbb4897 SQL
- * projection — preview sources (length-bounded prefixes) + reduced live
- * state — so the per-row payload trimming is preserved on the page.
+ * Phase 2 — detail query for the selected page families only.
+ *
+ * Shape (measured cheaper than a family-first nested loop, because the
+ * null-safe `(brand, category, subcategory, size)` family match is not
+ * index-drivable so the planner won't prune from the 12-row family side):
+ *  1. `candidate` = the pending line items over the already-fast indexed
+ *     join (same scan the narrow query does). Only raw columns / toast
+ *     pointers are carried — no JSON is read here.
+ *  2. `group_size_summary` rolls each candidate group's projection rows up
+ *     ONCE (not per line item) to the distinct-size summary.
+ *  3. `resolved` attaches each line item's family size (same rule as
+ *     narrow): product-targeted -> that product's size; single-size group
+ *     -> that size; else null.
+ *  4. The outer select inner-joins `resolved` to the selected size-families
+ *     by null-safe `(brand, category, subcategory, size)` — so the
+ *     #dbb4897 preview-source `regexp`/`#>>` work and the projection-based
+ *     live-state rebuild run ONLY for the ≤ familyLimit page rows, never the
+ *     whole queue, and the value_json blobs of non-page rows are never
+ *     detoasted. No `jsonb_array_elements` anywhere.
  */
 async function runFamilyDetailQuery(
   db: Queryable,
@@ -430,6 +508,7 @@ async function runFamilyDetailQuery(
       brand: f.family_brand,
       category: f.family_category,
       subcategory: f.family_subcategory,
+      size: f.family_size,
     })),
   )
 
@@ -440,63 +519,120 @@ async function runFamilyDetailQuery(
     `
       with selected_families as (
         select ord::int as ord, brand::text as family_brand,
-               category::text as family_category, subcategory::text as family_subcategory
+               category::text as family_category, subcategory::text as family_subcategory,
+               size::text as family_size
         from jsonb_to_recordset($1::jsonb)
-          as x(ord int, brand text, category text, subcategory text)
+          as x(ord int, brand text, category text, subcategory text, size text)
+      ),
+      candidate as (
+        select
+          pli.id,
+          pli.proposal_row_id,
+          pli.catalog_group_id,
+          pli.target_entity_type,
+          pli.target_entity_id,
+          pli.field_path,
+          pli.baseline_value_json,
+          pli.suggested_value_json,
+          pli.edited_value_json,
+          pli.effective_value_json,
+          pli.approval_status,
+          pli.version,
+          pli.notes,
+          pli.validation_issues_json,
+          pb.type as proposal_batch_type,
+          cg.id as cg_id,
+          cg.group_name,
+          cg.brand_name,
+          cg.category_name,
+          cg.subcategory_name,
+          cg.reconcile_status
+        from proposal_line_items pli
+        inner join proposal_rows pr on pr.id = pli.proposal_row_id
+        inner join proposal_batches pb on pb.id = pr.proposal_batch_id
+        inner join catalog_groups cg on cg.id = pli.catalog_group_id
+        where ${filterClauses.join(' and ')}
+      ),
+      group_size_summary as (
+        select
+          cgp.catalog_group_id,
+          count(distinct cgp.size_name) as distinct_size_count,
+          min(cgp.size_name) as single_size
+        from catalog_group_products cgp
+        where cgp.catalog_group_id in (select distinct cg_id from candidate)
+        group by cgp.catalog_group_id
+      ),
+      resolved as (
+        select
+          candidate.*,
+          case
+            when candidate.target_entity_type = 'catalog_product'
+              then (
+                select cgp.size_name
+                from catalog_group_products cgp
+                where cgp.catalog_group_id = candidate.cg_id
+                  and cgp.product_id = candidate.target_entity_id
+              )
+            when gss.distinct_size_count = 1 then gss.single_size
+            else null
+          end as family_size
+        from candidate
+        left join group_size_summary gss on gss.catalog_group_id = candidate.cg_id
       )
       select
-        pli.id,
-        pli.proposal_row_id,
-        pli.catalog_group_id,
-        pli.target_entity_type,
-        pli.target_entity_id,
-        pli.field_path,
+        r.id,
+        r.proposal_row_id,
+        r.catalog_group_id,
+        r.target_entity_type,
+        r.target_entity_id,
+        r.field_path,
         -- Ship only what previews/pricing need, not the full value_json blobs
         -- (#dbb4897): json-string values -> whitespace-collapsed, length-bounded
         -- prefix; other scalars (e.g. prices) pass through raw so numeric /
-        -- canonicalisation stays identical.
+        -- canonicalisation stays identical. Evaluated only for page rows
+        -- (after the inner join below), so non-page blobs never detoast.
         case
-          when jsonb_typeof(pli.baseline_value_json) = 'string'
-            then to_jsonb(left(regexp_replace(pli.baseline_value_json #>> '{}', '\\s+', ' ', 'g'), 400))
-          else pli.baseline_value_json
+          when jsonb_typeof(r.baseline_value_json) = 'string'
+            then to_jsonb(left(regexp_replace(r.baseline_value_json #>> '{}', '\\s+', ' ', 'g'), 400))
+          else r.baseline_value_json
         end as baseline_preview_src,
         case
-          when jsonb_typeof(pli.suggested_value_json) = 'string'
-            then to_jsonb(left(regexp_replace(pli.suggested_value_json #>> '{}', '\\s+', ' ', 'g'), 400))
-          else pli.suggested_value_json
+          when jsonb_typeof(r.suggested_value_json) = 'string'
+            then to_jsonb(left(regexp_replace(r.suggested_value_json #>> '{}', '\\s+', ' ', 'g'), 400))
+          else r.suggested_value_json
         end as suggested_preview_src,
         case
-          when jsonb_typeof(pli.edited_value_json) = 'string'
-            then to_jsonb(left(regexp_replace(pli.edited_value_json #>> '{}', '\\s+', ' ', 'g'), 400))
-          else pli.edited_value_json
+          when jsonb_typeof(r.edited_value_json) = 'string'
+            then to_jsonb(left(regexp_replace(r.edited_value_json #>> '{}', '\\s+', ' ', 'g'), 400))
+          else r.edited_value_json
         end as edited_preview_src,
         case
-          when jsonb_typeof(pli.effective_value_json) = 'string'
-            then to_jsonb(left(regexp_replace(pli.effective_value_json #>> '{}', '\\s+', ' ', 'g'), 400))
-          else pli.effective_value_json
+          when jsonb_typeof(r.effective_value_json) = 'string'
+            then to_jsonb(left(regexp_replace(r.effective_value_json #>> '{}', '\\s+', ' ', 'g'), 400))
+          else r.effective_value_json
         end as effective_preview_src,
-        pli.approval_status,
-        pli.version,
-        pli.notes,
-        pli.validation_issues_json,
-        pb.type as proposal_batch_type,
-        cg.group_name,
-        cg.brand_name,
-        cg.category_name,
-        cg.subcategory_name,
-        cg.reconcile_status,
-        -- Reduced live state: only the product fields the family-queue reads,
-        -- preserving original product order (#dbb4897).
+        r.approval_status,
+        r.version,
+        r.notes,
+        r.validation_issues_json,
+        r.proposal_batch_type,
+        r.group_name,
+        r.brand_name,
+        r.category_name,
+        r.subcategory_name,
+        r.reconcile_status,
+        r.family_size,
+        -- Reduced live state rebuilt from the projection table (Phase B): only
+        -- the product fields the family-queue reads, in original ordinal order.
+        -- No live_state_json crack.
         lsp.live_state_json,
         sf.ord as family_ord
-      from selected_families sf
-      inner join catalog_groups cg
-        on cg.brand_name is not distinct from sf.family_brand
-       and cg.category_name is not distinct from sf.family_category
-       and cg.subcategory_name is not distinct from sf.family_subcategory
-      inner join proposal_line_items pli on pli.catalog_group_id = cg.id
-      inner join proposal_rows pr on pr.id = pli.proposal_row_id
-      inner join proposal_batches pb on pb.id = pr.proposal_batch_id
+      from resolved r
+      inner join selected_families sf
+        on sf.family_brand is not distinct from r.brand_name
+       and sf.family_category is not distinct from r.category_name
+       and sf.family_subcategory is not distinct from r.subcategory_name
+       and sf.family_size is not distinct from r.family_size
       left join lateral (
         select jsonb_build_object(
           'products',
@@ -504,28 +640,22 @@ async function runFamilyDetailQuery(
             (
               select jsonb_agg(
                        jsonb_build_object(
-                         'productId', elem -> 'productId',
-                         'name', elem -> 'name',
-                         'tab', elem -> 'tab',
-                         'sizeName', elem -> 'sizeName',
-                         'price', elem -> 'price'
+                         'productId', cgp.product_id,
+                         'name', cgp.name,
+                         'tab', cgp.tab,
+                         'sizeName', cgp.size_name,
+                         'price', cgp.price
                        )
-                       order by ord
+                       order by cgp.ordinal
                      )
-              from jsonb_array_elements(
-                     case
-                       when jsonb_typeof(cg.live_state_json -> 'products') = 'array'
-                         then cg.live_state_json -> 'products'
-                       else '[]'::jsonb
-                     end
-                   ) with ordinality as t(elem, ord)
+              from catalog_group_products cgp
+              where cgp.catalog_group_id = r.cg_id
             ),
             '[]'::jsonb
           )
         ) as live_state_json
       ) lsp on true
-      where ${filterClauses.join(' and ')}
-      order by sf.ord, pli.proposal_row_id, pli.id
+      order by sf.ord, r.proposal_row_id, r.id
     `,
     values,
   )
@@ -560,11 +690,14 @@ async function fetchLatestObservationsByProductId(
 
 /**
  * Build the page's `ReviewFamily[]` from the (page-scoped) detail rows.
- * Families are keyed by Phase A identity `(brand, category, subcategory)`;
- * `sizeName` is display-only ("Mixed" when a family spans multiple sizes,
- * the single size otherwise) and is NOT part of identity in
- * `familyKeyVersion: 1`. Families are returned in the SQL keyset page order
- * (`family_ord`) so the page is consistent with the cursor boundary.
+ * Families are keyed by Phase B identity `(brand, category, subcategory,
+ * size)` where `size` is the SQL-resolved `family_size` carried on every
+ * detail row (`familyKeyVersion: 2`). The detail query already filtered each
+ * line item to exactly one selected size-family, so grouping on
+ * `family_size` here just reassembles those families. `familyKey.sizeName`
+ * is therefore the family's true identity size (null = the "mixed"/unknown-
+ * size bucket of multi-size groups). Families are returned in the SQL keyset
+ * page order (`family_ord`) so the page is consistent with the cursor.
  */
 function buildFamilies(
   rows: FamilyQueueRow[],
@@ -585,8 +718,8 @@ function buildFamilies(
     brand: string | null
     category: string | null
     subcategory: string | null
+    size: string | null
     ord: number
-    sizeNames: Set<string>
     rows: ReviewRow[]
   }
   const familiesByKey = new Map<string, WorkingFamily>()
@@ -603,14 +736,13 @@ function buildFamilies(
         brand: first.brand_name,
         category: first.category_name,
         subcategory: first.subcategory_name,
+        size: first.family_size,
         ord: first.family_ord,
-        sizeNames: new Set<string>(),
         rows: [],
       }
       familiesByKey.set(keyStr, working)
     }
     working.rows.push(reviewRow)
-    for (const size of readRowSizeNames(group)) working.sizeNames.add(size)
   }
 
   const families: ReviewFamily[] = []
@@ -624,21 +756,12 @@ function buildFamilies(
       return acc
     }, null)
 
-    // Phase A display-only size label: a single size renders verbatim,
-    // multiple sizes render "Mixed"; identity stays size-agnostic.
-    const sizeName =
-      working.sizeNames.size === 1
-        ? [...working.sizeNames][0]!
-        : working.sizeNames.size > 1
-          ? 'Mixed'
-          : null
-
     families.push({
       familyKey: {
         brand: working.brand,
         category: working.category,
         subcategory: working.subcategory,
-        sizeName,
+        sizeName: working.size,
       },
       ordering: {
         driftedRowCount,
@@ -659,28 +782,11 @@ function buildFamilies(
 }
 
 function familyIdentityToString(row: FamilyQueueRow): string {
-  return JSON.stringify([row.brand_name, row.category_name, row.subcategory_name])
+  return JSON.stringify([row.brand_name, row.category_name, row.subcategory_name, row.family_size])
 }
 
 function familyKeyToOrdString(key: ReviewFamily['familyKey']): string {
-  return JSON.stringify([key.brand, key.category, key.subcategory])
-}
-
-/** Distinct sizeNames represented by a proposal row's targeted product(s). */
-function readRowSizeNames(group: FamilyQueueRow[]): string[] {
-  const sizes = new Set<string>()
-  for (const row of group) {
-    const liveProducts = extractLiveStateProducts(row.live_state_json)
-    if (row.target_entity_type === 'catalog_product') {
-      const p = liveProducts.find((lp) => lp.productId === row.target_entity_id)
-      if (p?.sizeName) sizes.add(p.sizeName)
-    } else {
-      for (const p of liveProducts) {
-        if (p.sizeName) sizes.add(p.sizeName)
-      }
-    }
-  }
-  return [...sizes]
+  return JSON.stringify([key.brand, key.category, key.subcategory, key.sizeName])
 }
 
 function buildReviewRow(

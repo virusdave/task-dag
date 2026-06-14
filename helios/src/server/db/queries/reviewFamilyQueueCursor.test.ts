@@ -20,32 +20,36 @@ describe('review family queue cursor', () => {
       brand: 'Acme',
       category: 'Flower',
       subcategory: 'Indica',
+      size: '3.5g',
       filters: f,
     })
     const decoded = decodeReviewCursor(token, f)
     expect(decoded).toMatchObject({
       v: 1,
-      familyKeyVersion: 1,
+      familyKeyVersion: 2,
       hasDrift: true,
       brand: 'Acme',
       category: 'Flower',
       subcategory: 'Indica',
+      size: '3.5g',
     })
   })
 
-  it('preserves null brand/category/subcategory distinctly from empty string', () => {
+  it('preserves null brand/category/subcategory/size distinctly from empty string', () => {
     const f = filters()
     const token = encodeReviewCursor({
       hasDrift: false,
       brand: null,
       category: '',
       subcategory: null,
+      size: null,
       filters: f,
     })
     const decoded = decodeReviewCursor(token, f)
     expect(decoded.brand).toBeNull()
     expect(decoded.category).toBe('')
     expect(decoded.subcategory).toBeNull()
+    expect(decoded.size).toBeNull()
   })
 
   it('rejects a cursor minted under different filters', () => {
@@ -54,9 +58,28 @@ describe('review family queue cursor', () => {
       brand: 'Acme',
       category: null,
       subcategory: null,
+      size: null,
       filters: filters({ search: 'a' }),
     })
     expect(() => decodeReviewCursor(token, filters({ search: 'b' }))).toThrow(InvalidReviewCursorError)
+  })
+
+  it('rejects an in-flight v1 (familyKeyVersion 1) cursor after the Phase B bump', () => {
+    const f = filters()
+    // A cursor as minted by Phase A: no `size`, familyKeyVersion 1.
+    const v1 = Buffer.from(
+      JSON.stringify({
+        v: 1,
+        familyKeyVersion: 1,
+        hasDrift: false,
+        brand: 'Acme',
+        category: 'Flower',
+        subcategory: 'Indica',
+        filtersHash: hashReviewFilters(f),
+      }),
+      'utf8',
+    ).toString('base64url')
+    expect(() => decodeReviewCursor(v1, f)).toThrow(InvalidReviewCursorError)
   })
 
   it('treats limit as irrelevant to the cursor lineage', () => {

@@ -77,13 +77,19 @@ export type RejectProposalLineItemRequest = z.infer<typeof RejectProposalLineIte
 /* ------------------------------------------------------------------ */
 
 /**
- * Phase A (top-level#16) pagination defaults/caps. The page is keyset
+ * Phase A/B (top-level#16) pagination defaults/caps. The page is keyset
  * (cursor) based, NOT offset based, so the whole queue is never scanned
  * or JSON-cracked per request. `familyKeyVersion` is carried in the
- * cursor so Phase B can change family-key semantics (add `sizeName`)
- * without breaking in-flight cursors.
+ * cursor so a family-key semantics change rejects (rather than mis-pages)
+ * in-flight cursors.
+ *
+ * v1 (Phase A): family key = (brand, category, subcategory); `sizeName`
+ * was display-only ("Mixed" for multi-size groups).
+ * v2 (Phase B): family key = (brand, category, subcategory, sizeName),
+ * resolved from the `catalog_group_products` projection so the narrow
+ * page query never cracks `live_state_json`.
  */
-export const REVIEW_FAMILY_KEY_VERSION = 1
+export const REVIEW_FAMILY_KEY_VERSION = 2
 export const REVIEW_DEFAULT_FAMILY_LIMIT = 12
 export const REVIEW_MAX_FAMILY_LIMIT = 25
 export const REVIEW_MAX_LINE_ITEMS_PER_PAGE = 250
@@ -177,6 +183,7 @@ export const ReviewFamilyQueueOversizedFamilySchema = z.object({
     brand: z.string().nullable(),
     category: z.string().nullable(),
     subcategory: z.string().nullable(),
+    sizeName: z.string().nullable(),
   }),
   lineItemCount: z.number().int().positive(),
 })

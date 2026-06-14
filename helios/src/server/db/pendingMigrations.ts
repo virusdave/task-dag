@@ -960,6 +960,16 @@ const SENTINELS: MigrationSentinel[] = [
       'routes. Without it the recommendations page 500s.',
     check: (db) => tableExists(db, 'seo_recommendations'),
   },
+  {
+    migrationId: '078_catalog_group_products',
+    label:
+      'Catalog per-product live-state projection (catalog_group_products) — ' +
+      'required by the family-grouped review queue (Phase B): the narrow ' +
+      'family-page query reads product size from this table to group/sort ' +
+      'by size without cracking live_state_json. Without it the ' +
+      '/catalog/review queue 500s.',
+    check: (db) => tableExists(db, 'catalog_group_products'),
+  },
 ]
 
 interface CacheEntry {

@@ -34,6 +34,7 @@ function narrowRow(over: Record<string, unknown>): QueryResultRow {
     family_brand: 'Acme',
     family_category: 'Flower',
     family_subcategory: 'Indica',
+    family_size: '3.5g',
     has_drift: false,
     line_item_count: 2,
     review_row_count: 1,
@@ -67,6 +68,7 @@ function detailRow(over: Record<string, unknown>): QueryResultRow {
     category_name: 'Flower',
     subcategory_name: 'Indica',
     reconcile_status: 'clean',
+    family_size: '3.5g',
     live_state_json: liveState,
     family_ord: 0,
     ...over,
@@ -75,7 +77,7 @@ function detailRow(over: Record<string, unknown>): QueryResultRow {
 
 const baseFilters: ReviewFamilyQueueQuery = { limit: 12 }
 
-describe('listReviewFamilyQueue (Phase A pagination)', () => {
+describe('listReviewFamilyQueue (Phase A/B pagination)', () => {
   it('returns whole-queue totals with an empty page when no families match', async () => {
     const { db } = routingDb({
       narrow: [{ page_row: false, family_brand: null, family_category: null, family_subcategory: null,
@@ -138,18 +140,42 @@ describe('listReviewFamilyQueue (Phase A pagination)', () => {
     expect(res.pageInfo.hasNextPage).toBe(true)
   })
 
-  it('labels a multi-size family "Mixed" but keeps identity size-agnostic', async () => {
-    const mixedLiveState: JsonValue = {
-      products: [
-        { productId: 1, name: 'a', tab: 'flower', sizeName: '1g', price: 10 },
-        { productId: 2, name: 'b', tab: 'flower', sizeName: '3.5g', price: 30 },
-      ],
-    }
+  it('carries the SQL-resolved size into the family key (familyKeyVersion 2)', async () => {
     const { db } = routingDb({
-      narrow: [narrowRow({ family_brand: 'Acme' })],
-      detail: [detailRow({ proposal_row_id: 1, brand_name: 'Acme', live_state_json: mixedLiveState })],
+      narrow: [narrowRow({ family_brand: 'Acme', family_size: '7g' })],
+      detail: [detailRow({ proposal_row_id: 1, brand_name: 'Acme', family_size: '7g' })],
     })
     const res = await listReviewFamilyQueue(db, { ...baseFilters, limit: 5 })
-    expect(res.families[0]!.familyKey.sizeName).toBe('Mixed')
+    expect(res.pageInfo.familyKeyVersion).toBe(2)
+    expect(res.families).toHaveLength(1)
+    expect(res.families[0]!.familyKey.sizeName).toBe('7g')
+  })
+
+  it('splits the same (brand, category, subcategory) into one family per resolved size', async () => {
+    // Two proposal rows in the same brand/category/subcategory but different
+    // resolved sizes are now two distinct families (size is part of identity).
+    const { db } = routingDb({
+      narrow: [
+        narrowRow({ family_brand: 'Acme', family_size: '1g' }),
+        narrowRow({ family_brand: 'Acme', family_size: '3.5g' }),
+      ],
+      detail: [
+        detailRow({ proposal_row_id: 1, brand_name: 'Acme', family_size: '1g', family_ord: 0 }),
+        detailRow({ proposal_row_id: 2, brand_name: 'Acme', family_size: '3.5g', family_ord: 1 }),
+      ],
+    })
+    const res = await listReviewFamilyQueue(db, { ...baseFilters, limit: 5 })
+    expect(res.families).toHaveLength(2)
+    expect(res.families.map((f) => f.familyKey.sizeName)).toEqual(['1g', '3.5g'])
+  })
+
+  it('keeps a null-size (multi-size group) family as a null-size key', async () => {
+    const { db } = routingDb({
+      narrow: [narrowRow({ family_brand: 'Acme', family_size: null })],
+      detail: [detailRow({ proposal_row_id: 1, brand_name: 'Acme', family_size: null })],
+    })
+    const res = await listReviewFamilyQueue(db, { ...baseFilters, limit: 5 })
+    expect(res.families).toHaveLength(1)
+    expect(res.families[0]!.familyKey.sizeName).toBeNull()
   })
 })
