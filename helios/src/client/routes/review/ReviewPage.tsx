@@ -17,7 +17,7 @@
  * reject mutations) lives in `ReviewRowCard` below, which adapts the
  * ReviewRow contract into shell props + slot content.
  */
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Form, Link, useLoaderData, useRevalidator } from 'react-router-dom'
 
 import {
@@ -120,7 +120,9 @@ export function ReviewPage() {
           recent cached LitAlerts competitor observation for that SKU.
           Drag the proposed marker to adjust price — it snaps to the
           nearest $0.25 — then click <strong>Save edit</strong> to write
-          back to the proposal line item.
+          back to the proposal line item. Each row's ladder mounts lazily
+          as it scrolls into view, so the page stays responsive even with a
+          full page of families.
         </p>
         <p>
           See <Link to="https://github.com/FreshlyBakedNYC/automation/blob/master/docs/helios/canonical-review-row/README.md" target="_blank">the canonical-review-row design doc</Link>{' '}
@@ -298,6 +300,14 @@ function ReviewRowCard({ row }: { row: ReviewRow }): JSX.Element {
 
   const pricingLine = row.lineItems.find((li) => li.fieldPath === 'products.price') ?? null
 
+  // Lazy/virtualized ladder mount (top-level#16, Phase C): the canonical
+  // pricing ladder paints up to ~150 competitor dots + wires a drag slider
+  // per row. Mounting every row's ladder on load is what makes the page
+  // unresponsive after data arrives. We defer each ladder until its row
+  // scrolls near the viewport, then keep it mounted (so an in-flight
+  // edit/drag is never torn down by scrolling away).
+  const [ladderMountRef, ladderInView] = useInViewOnce<HTMLDivElement>()
+
   async function handleSavePrice() {
     if (!pricingLine || proposedPrice === null) return
     setBusy(true)
@@ -394,10 +404,16 @@ function ReviewRowCard({ row }: { row: ReviewRow }): JSX.Element {
       comparisons={comparisons}
       pricingLadder={
         row.pricingLadder ? (
-          <PricingLadderBlock
-            ladder={row.pricingLadder}
-            onPriceChange={pricingLine ? setProposedPrice : undefined}
-          />
+          <div className="review-pricing-ladder-lazy" ref={ladderMountRef}>
+            {ladderInView ? (
+              <PricingLadderBlock
+                ladder={row.pricingLadder}
+                onPriceChange={pricingLine ? setProposedPrice : undefined}
+              />
+            ) : (
+              <PricingLadderPlaceholder ladder={row.pricingLadder} />
+            )}
+          </div>
         ) : (
           <p className="subtle-copy">No LitAlerts evidence cached for this SKU yet.</p>
         )
@@ -449,6 +465,76 @@ function ReviewRowCard({ row }: { row: ReviewRow }): JSX.Element {
         </details>
       }
     />
+  )
+}
+
+/**
+ * One-shot in-view detector for lazy mounting. Returns a callback ref to
+ * attach to the element whose visibility gates the work, plus a boolean
+ * that flips to `true` the first time the element nears the viewport and
+ * then STAYS true (the observer disconnects after the first hit). We never
+ * unmount once shown so an in-flight ladder drag / price edit survives the
+ * operator scrolling away and back.
+ *
+ * Mounts immediately (no deferral) in any environment without
+ * `IntersectionObserver` — e.g. the in-process SPA smoke test / SSR — so
+ * behaviour there is identical to the old eager render.
+ */
+function useInViewOnce<T extends Element>(): [(node: T | null) => void, boolean] {
+  const [inView, setInView] = useState(false)
+  const observerRef = useRef<IntersectionObserver | null>(null)
+
+  const refCallback = useCallback(
+    (node: T | null) => {
+      if (observerRef.current) {
+        observerRef.current.disconnect()
+        observerRef.current = null
+      }
+      if (inView || !node) return
+      if (typeof IntersectionObserver === 'undefined') {
+        setInView(true)
+        return
+      }
+      const observer = new IntersectionObserver(
+        (entries) => {
+          if (entries.some((entry) => entry.isIntersecting)) {
+            setInView(true)
+            observer.disconnect()
+            observerRef.current = null
+          }
+        },
+        // Preload a little before the row enters the viewport so the ladder
+        // is ready by the time the operator reaches it.
+        { rootMargin: '300px 0px' },
+      )
+      observer.observe(node)
+      observerRef.current = observer
+    },
+    [inView],
+  )
+
+  return [refCallback, inView]
+}
+
+/**
+ * Lightweight, height-reserving stand-in shown until a row's pricing
+ * ladder scrolls into view. Surfaces the at-a-glance numbers (live price,
+ * market average, comp count) so the placeholder is still informative and
+ * the layout doesn't jump when the real ladder mounts.
+ */
+function PricingLadderPlaceholder({ ladder }: { ladder: ReviewRowPricingLadder }): JSX.Element {
+  const bits: string[] = []
+  if (ladder.livePrice !== null) bits.push(`Live ${formatCurrency(ladder.livePrice)}`)
+  if (ladder.marketAveragePostTax !== null) bits.push(`market avg ${formatCurrency(ladder.marketAveragePostTax)}`)
+  if (ladder.competitorListings.length > 0) {
+    bits.push(`${ladder.competitorListings.length} ${ladder.competitorListings.length === 1 ? 'comp' : 'comps'}`)
+  }
+  return (
+    <div className="review-pricing-ladder-placeholder">
+      <span className="subtle-copy">
+        Pricing ladder{bits.length > 0 ? ` · ${bits.join(' · ')}` : ''} — loads on scroll…
+      </span>
+    </div>
   )
 }
 

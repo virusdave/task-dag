@@ -462,6 +462,19 @@ pre {
   font-size: 0.92rem;
 }
 
+/* Lazy pricing-ladder mount (review queue): the placeholder reserves
+ * roughly the rendered ladder's height so deferring the mount doesn't
+ * cause the page to jump as rows scroll into view. */
+.review-pricing-ladder-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 160px;
+  padding: 1rem;
+  border: 1px dashed var(--border, rgba(148, 163, 184, 0.35));
+  border-radius: 0.6rem;
+}
+
 .primary-button,
 .ghost-button,
 .danger-button {
