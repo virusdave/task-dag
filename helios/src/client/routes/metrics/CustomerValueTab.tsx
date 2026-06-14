@@ -31,7 +31,7 @@ import {
   type HighlightSelectionState,
 } from './HighlightControls.js'
 import { HelpIcon } from './MetricChart.js'
-import { toggleSiteSelection } from './metricsSiteSelection.js'
+import { defaultSiteSelection, toggleSiteSelection } from './metricsSiteSelection.js'
 import { RangeNudgeRow } from './RangeNudgeRow.js'
 import { useMetricSelection } from './useMetricSelection.js'
 
@@ -135,7 +135,7 @@ export function CustomerValueTab(): JSX.Element {
   const [useCustomRange, setUseCustomRange] = useState<boolean>(false)
   const [customFromMs, setCustomFromMs] = useState<number>(Date.now() - 90 * DAY_MS)
   const [customToMs, setCustomToMs] = useState<number>(Date.now())
-  const [selectedSites, setSelectedSites] = useState<ReadonlySet<string>>(() => new Set())
+  const [selectedSites, setSelectedSites] = useState<ReadonlySet<string>>(() => defaultSiteSelection())
   const [cohortScope, setCohortScope] = useState<CohortScope>('all_as_of_end')
   const [maxN, setMaxN] = useState<MaxNChoice>('auto')
   // v1.4 V4'3: cohort retention granularity (week / month). Default

@@ -39,7 +39,7 @@ import {
 } from './continuousScale.js'
 import { HelpIcon } from './MetricChart.js'
 import { useMetricsDefaults } from './MetricsDefaultsContext.js'
-import { normaliseSiteSelection, toggleSiteSelection } from './metricsSiteSelection.js'
+import { defaultSiteSelection, normaliseSiteSelection, toggleSiteSelection } from './metricsSiteSelection.js'
 import { RangeNudgeRow } from './RangeNudgeRow.js'
 import { computeCompactDomain } from './scatterAutoZoom.js'
 import { ScatterViewToolbar } from './ScatterViewToolbar.js'
@@ -2244,9 +2244,13 @@ export function CatalogAnalyticsTab({ embedded }: CatalogAnalyticsTabProps = {})
     const now = Date.now()
     setRange({ fromMs: now - d * DAY_MS, toMs: now })
   }, [])
-  const [selectedSites, setSelectedSites] = useState<ReadonlySet<string>>(() =>
-    normaliseSiteSelection(initialSet('sites'), KNOWN_SITES.length),
-  )
+  const [selectedSites, setSelectedSites] = useState<ReadonlySet<string>>(() => {
+    const fromUrl = initialSet('sites')
+    return normaliseSiteSelection(
+      fromUrl.size > 0 ? fromUrl : defaultSiteSelection(KNOWN_SITES.map((s) => s.id)),
+      KNOWN_SITES.length,
+    )
+  })
   const [filters, setFilters] = useState<CatalogAnalyticsFiltersResponse | null>(null)
   const [selectedCategoryIds, setSelectedCategoryIds] = useState<ReadonlySet<string>>(
     () => initialSet('categoryIds', embeddedRef.current?.categoryIds),
@@ -2719,6 +2723,33 @@ export function CatalogAnalyticsTab({ embedded }: CatalogAnalyticsTabProps = {})
       {hideTopControls ? null : (
       <div className="metrics-controls catalog-analytics-controls">
         <div className="metrics-control-group">
+          <span className="subtle-copy">sites</span>
+          <button
+            type="button"
+            className={
+              selectedSites.size === 0 ? 'metrics-site-chip is-active' : 'metrics-site-chip'
+            }
+            onClick={() => setSelectedSites(new Set())}
+          >
+            All
+          </button>
+          {KNOWN_SITES.map((s) => {
+            const active = selectedSites.has(s.id)
+            return (
+              <button
+                key={s.id}
+                type="button"
+                className={active ? 'metrics-site-chip is-active' : 'metrics-site-chip'}
+                onClick={() => setSelectedSites(toggleSiteSelection(selectedSites, s.id, KNOWN_SITES.length))}
+                aria-pressed={active}
+              >
+                {s.label}
+              </button>
+            )
+          })}
+        </div>
+
+        <div className="metrics-control-group">
           <span className="subtle-copy">range</span>
           {[7, 30, 90, 180, 365].map((d) => {
             // A preset matches "currently active" only if the range is
@@ -2766,33 +2797,6 @@ export function CatalogAnalyticsTab({ embedded }: CatalogAnalyticsTabProps = {})
             </div>
             <RangeNudgeRow range={range} setRange={(next) => setRange(next)} />
           </details>
-        </div>
-
-        <div className="metrics-control-group">
-          <span className="subtle-copy">sites</span>
-          <button
-            type="button"
-            className={
-              selectedSites.size === 0 ? 'metrics-site-chip is-active' : 'metrics-site-chip'
-            }
-            onClick={() => setSelectedSites(new Set())}
-          >
-            All
-          </button>
-          {KNOWN_SITES.map((s) => {
-            const active = selectedSites.has(s.id)
-            return (
-              <button
-                key={s.id}
-                type="button"
-                className={active ? 'metrics-site-chip is-active' : 'metrics-site-chip'}
-                onClick={() => setSelectedSites(toggleSiteSelection(selectedSites, s.id, KNOWN_SITES.length))}
-                aria-pressed={active}
-              >
-                {s.label}
-              </button>
-            )
-          })}
         </div>
 
         <div className="metrics-control-group">

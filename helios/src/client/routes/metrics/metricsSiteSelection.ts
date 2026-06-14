@@ -39,3 +39,19 @@ export function normaliseSiteSelection(
   if (sites.size === 0 || sites.size >= totalSiteCount) return new Set()
   return new Set(sites)
 }
+
+// The site every /metrics page defaults to when nothing else is
+// specified (no deep-link param, no saved state). Our sites live in
+// wildly different demographics with wildly different stock levels, so
+// an all-sites blend is almost never the view you actually want; we
+// default to a single, concrete store instead.
+export const DEFAULT_SITE_ID = 'midtown'
+
+// Default site selection used to seed page state. Falls back to the
+// all-sites view (empty set) only if the default site somehow isn't a
+// known site.
+export function defaultSiteSelection(
+  knownSiteIds: ReadonlyArray<string> = [DEFAULT_SITE_ID],
+): Set<string> {
+  return knownSiteIds.includes(DEFAULT_SITE_ID) ? new Set([DEFAULT_SITE_ID]) : new Set()
+}

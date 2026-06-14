@@ -13,7 +13,7 @@ import {
 } from '../../../shared/contracts/index.js'
 import { loadJson } from '../../app/fetchJson.js'
 import { nyIsoDate, nyMonthDaySlash } from '../../app/nyTime.js'
-import { normaliseSiteSelection, toggleSiteSelection } from './metricsSiteSelection.js'
+import { defaultSiteSelection, normaliseSiteSelection, toggleSiteSelection } from './metricsSiteSelection.js'
 
 // ---------------------------------------------------------------------------
 // Inventory / Procurement workspace (the /metrics → "Inventory" /
@@ -785,7 +785,7 @@ export function InventoryProcurementTab() {
     () =>
       readDeepLink({
         view: 'reorder',
-        sites: new Set<string>(),
+        sites: defaultSiteSelection(),
         windowDays: 28,
         expandedSku: null,
       }),

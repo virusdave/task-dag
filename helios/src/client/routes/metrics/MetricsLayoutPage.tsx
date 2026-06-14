@@ -55,7 +55,7 @@ import {
   type CatalogFilterSelection,
 } from './CatalogFilterBar.js'
 import { MetricsAccessGate } from './MetricsAccessGate.js'
-import { toggleSiteSelection } from './metricsSiteSelection.js'
+import { defaultSiteSelection, toggleSiteSelection } from './metricsSiteSelection.js'
 import {
   MetricChart,
   METRIC_STACK_MODES,
@@ -524,7 +524,7 @@ export function MetricsLayoutPage() {
   }, [requestedTab, visibleTabs])
 
   // Site filter: empty Set = all sites. Multi-select against KNOWN_SITES.
-  const [selectedSites, setSelectedSites] = useState<ReadonlySet<string>>(() => new Set<string>())
+  const [selectedSites, setSelectedSites] = useState<ReadonlySet<string>>(() => defaultSiteSelection())
   const sitesParam = useMemo(() => Array.from(selectedSites).join(','), [selectedSites])
 
   // Shared catalog-scope filter selection (category / subcategory /

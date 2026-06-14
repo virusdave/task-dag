@@ -10,7 +10,7 @@ import { loadJson } from '../../app/fetchJson.js'
 import { ControlsSection } from './ControlsSection.js'
 import { niceXTicks, niceYTicks } from './gridlines.js'
 import { HelpIcon } from './MetricChart.js'
-import { toggleSiteSelection } from './metricsSiteSelection.js'
+import { defaultSiteSelection, toggleSiteSelection } from './metricsSiteSelection.js'
 import { RangeNudgeRow } from './RangeNudgeRow.js'
 import { computeCompactDomain } from './scatterAutoZoom.js'
 import { useMetricSelection } from './useMetricSelection.js'
@@ -76,7 +76,7 @@ export function BudtenderPerformanceTab(): JSX.Element {
   const [customFromMs, setCustomFromMs] = useState<number>(Date.now() - 90 * DAY_MS)
   const [customToMs, setCustomToMs] = useState<number>(Date.now())
   const [useCustomRange, setUseCustomRange] = useState<boolean>(false)
-  const [selectedSites, setSelectedSites] = useState<ReadonlySet<string>>(() => new Set())
+  const [selectedSites, setSelectedSites] = useState<ReadonlySet<string>>(() => defaultSiteSelection())
 
   const [data, setData] = useState<BudtenderAnalyticsResponse | null>(null)
   const [loading, setLoading] = useState<boolean>(true)

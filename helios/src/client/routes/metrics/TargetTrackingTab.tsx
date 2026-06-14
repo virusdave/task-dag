@@ -9,7 +9,7 @@ import {
 } from '../../../shared/contracts/index.js'
 import { loadJson, mutateJson } from '../../app/fetchJson.js'
 
-import { toggleSiteSelection } from './metricsSiteSelection.js'
+import { defaultSiteSelection, toggleSiteSelection } from './metricsSiteSelection.js'
 
 const KNOWN_SITES: ReadonlyArray<{ id: string; label: string }> = [
   { id: 'bronx', label: 'Bronx' },
@@ -42,7 +42,7 @@ export interface TargetTrackingTabProps {
  */
 export function TargetTrackingTab({ isAdmin }: TargetTrackingTabProps): JSX.Element {
   const [agg, setAgg] = useState<TargetTrackingAgg>('week')
-  const [selectedSites, setSelectedSites] = useState<ReadonlySet<string>>(() => new Set())
+  const [selectedSites, setSelectedSites] = useState<ReadonlySet<string>>(() => defaultSiteSelection())
   const [data, setData] = useState<TargetTrackingResponse | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
