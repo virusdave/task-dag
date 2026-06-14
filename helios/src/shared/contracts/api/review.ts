@@ -76,12 +76,26 @@ export type RejectProposalLineItemRequest = z.infer<typeof RejectProposalLineIte
 /* Family-grouped review queue (issue #15 — canonical product-review row) */
 /* ------------------------------------------------------------------ */
 
+/**
+ * Phase A (top-level#16) pagination defaults/caps. The page is keyset
+ * (cursor) based, NOT offset based, so the whole queue is never scanned
+ * or JSON-cracked per request. `familyKeyVersion` is carried in the
+ * cursor so Phase B can change family-key semantics (add `sizeName`)
+ * without breaking in-flight cursors.
+ */
+export const REVIEW_FAMILY_KEY_VERSION = 1
+export const REVIEW_DEFAULT_FAMILY_LIMIT = 12
+export const REVIEW_MAX_FAMILY_LIMIT = 25
+export const REVIEW_MAX_LINE_ITEMS_PER_PAGE = 250
+
 export const ReviewFamilyQueueQuerySchema = z.object({
   approvalStatus: BlankApprovalStatusSchema,
   driftOnly: z.coerce.boolean().optional(),
   msoOnly: z.coerce.boolean().optional(),
   proposalType: BlankProposalTypeSchema,
   search: BlankStringSchema,
+  limit: z.coerce.number().int().min(1).max(REVIEW_MAX_FAMILY_LIMIT).default(REVIEW_DEFAULT_FAMILY_LIMIT),
+  cursor: BlankStringSchema,
 })
 export type ReviewFamilyQueueQuery = z.infer<typeof ReviewFamilyQueueQuerySchema>
 
@@ -168,10 +182,38 @@ export const ReviewFamilySchema = z.object({
 })
 export type ReviewFamily = z.infer<typeof ReviewFamilySchema>
 
+export const ReviewFamilyQueueOversizedFamilySchema = z.object({
+  familyKey: z.object({
+    brand: z.string().nullable(),
+    category: z.string().nullable(),
+    subcategory: z.string().nullable(),
+  }),
+  lineItemCount: z.number().int().positive(),
+})
+export type ReviewFamilyQueueOversizedFamily = z.infer<typeof ReviewFamilyQueueOversizedFamilySchema>
+
+export const ReviewFamilyQueuePageInfoSchema = z.object({
+  familyKeyVersion: z.literal(REVIEW_FAMILY_KEY_VERSION),
+  hasNextPage: z.boolean(),
+  endCursor: z.string().nullable(),
+  familyLimit: z.number().int().positive(),
+  maxLineItemsPerPage: z.number().int().positive(),
+  returnedFamilyCount: z.number().int().min(0),
+  returnedLineItemCount: z.number().int().min(0),
+  /** True when an item-cap or oversized-family guard cut the page short. */
+  truncatedByItemCap: z.boolean(),
+  /** Set when a single family exceeded the item cap and was returned alone. */
+  oversizedFamily: ReviewFamilyQueueOversizedFamilySchema.nullable(),
+})
+export type ReviewFamilyQueuePageInfo = z.infer<typeof ReviewFamilyQueuePageInfoSchema>
+
 export const ReviewFamilyQueueResponseSchema = z.object({
   filters: ReviewFamilyQueueQuerySchema,
   families: z.array(ReviewFamilySchema),
+  /** Count of pending ReviewRows across the WHOLE filtered queue (not just this page). */
   totalRowCount: z.number().int().min(0),
+  /** Count of families across the WHOLE filtered queue (not just this page). */
   totalFamilyCount: z.number().int().min(0),
+  pageInfo: ReviewFamilyQueuePageInfoSchema,
 })
 export type ReviewFamilyQueueResponse = z.infer<typeof ReviewFamilyQueueResponseSchema>

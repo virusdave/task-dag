@@ -97,11 +97,14 @@ export function ReviewPage() {
       {data.families.length === 0 ? (
         <p className="subtle-copy">No families match the current filters.</p>
       ) : (
-        <div className="review-family-stack">
-          {data.families.map((family) => (
-            <FamilyPanel family={family} key={familyKeyString(family)} />
-          ))}
-        </div>
+        <>
+          <div className="review-family-stack">
+            {data.families.map((family) => (
+              <FamilyPanel family={family} key={familyKeyString(family)} />
+            ))}
+          </div>
+          <ReviewPagination data={data} />
+        </>
       )}
 
       <details className="review-page-about">
@@ -131,6 +134,60 @@ export function ReviewPage() {
 function familyKeyString(family: ReviewFamily): string {
   const k = family.familyKey
   return [k.brand ?? '∅', k.category ?? '∅', k.subcategory ?? '∅', k.sizeName ?? '∅'].join('|')
+}
+
+/**
+ * Build the `?…` query string for a page, carrying the current filters
+ * (so paging never silently changes the filter set) and an optional
+ * keyset cursor. Omitting the cursor links back to page 1.
+ */
+function buildReviewQueryString(
+  filters: ReviewFamilyQueueResponse['filters'],
+  cursor: string | null,
+): string {
+  const params = new URLSearchParams()
+  if (filters.search) params.set('search', filters.search)
+  if (filters.proposalType) params.set('proposalType', filters.proposalType)
+  if (filters.approvalStatus) params.set('approvalStatus', filters.approvalStatus)
+  if (filters.driftOnly) params.set('driftOnly', 'true')
+  if (filters.msoOnly) params.set('msoOnly', 'true')
+  if (filters.limit) params.set('limit', String(filters.limit))
+  if (cursor) params.set('cursor', cursor)
+  const qs = params.toString()
+  return qs.length > 0 ? `?${qs}` : ''
+}
+
+/**
+ * Keyset pagination footer. Forward-only "Next page" via `endCursor`; a
+ * "Back to start" link drops the cursor. Keyset pagination has no random
+ * page access, which is fine for a sequential review workflow.
+ */
+function ReviewPagination({ data }: { data: ReviewFamilyQueueResponse }): JSX.Element | null {
+  const { pageInfo, filters } = data
+  const onFirstPage = !filters.cursor
+  if (onFirstPage && !pageInfo.hasNextPage) {
+    return null
+  }
+  return (
+    <nav className="review-pagination inline-row wrap-row" aria-label="Review queue pages">
+      {onFirstPage ? null : (
+        <Link className="ghost-button" to={`.${buildReviewQueryString(filters, null)}`}>
+          ← Back to start
+        </Link>
+      )}
+      <span className="subtle-copy">
+        Showing {pageInfo.returnedFamilyCount} of {data.totalFamilyCount} families
+        {pageInfo.truncatedByItemCap && pageInfo.oversizedFamily
+          ? ` · large family (${pageInfo.oversizedFamily.lineItemCount} items) shown alone`
+          : ''}
+      </span>
+      {pageInfo.hasNextPage && pageInfo.endCursor ? (
+        <Link className="primary-button" to={`.${buildReviewQueryString(filters, pageInfo.endCursor)}`}>
+          Next page →
+        </Link>
+      ) : null}
+    </nav>
+  )
 }
 
 function FamilyPanel({ family }: { family: ReviewFamily }) {

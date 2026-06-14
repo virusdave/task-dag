@@ -30,6 +30,7 @@ import { getPool } from '../db/pool.js'
 import { listActiveDesiredStateFields } from '../db/queries/desiredStateQueries.js'
 import { buildDesiredProjection, getDesiredProjectionHash } from '../domain/desiredProjection.js'
 import { listReviewFamilyQueue } from '../db/queries/reviewFamilyQueueQueries.js'
+import { InvalidReviewCursorError } from '../db/queries/reviewFamilyQueueCursor.js'
 import { listReviewLineItems } from '../db/queries/reviewQueries.js'
 import { getOptionalSweedSessionConcurrencyKey } from '../jobs/concurrency.js'
 import { withTransaction } from '../db/tx.js'
@@ -85,8 +86,15 @@ export async function registerReviewRoutes(server: FastifyInstance): Promise<voi
     }
 
     const query = ReviewFamilyQueueQuerySchema.parse(request.query)
-    const response = await listReviewFamilyQueue(getPool(), query)
-    return reply.send(ReviewFamilyQueueResponseSchema.parse(response))
+    try {
+      const response = await listReviewFamilyQueue(getPool(), query)
+      return reply.send(ReviewFamilyQueueResponseSchema.parse(response))
+    } catch (error) {
+      if (error instanceof InvalidReviewCursorError) {
+        return reply.status(400).send({ error: error.message })
+      }
+      throw error
+    }
   })
 
   server.patch('/api/proposal-line-items/:lineItemId/edit', async (request, reply) => {
