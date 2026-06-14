@@ -49,7 +49,6 @@ export function hashReviewFilters(filters: ReviewFamilyQueueQuery): string {
     approvalStatus: filters.approvalStatus ?? 'pending',
     proposalType: filters.proposalType ?? null,
     driftOnly: Boolean(filters.driftOnly),
-    msoOnly: Boolean(filters.msoOnly),
     search: filters.search ?? null,
   }
   return createHash('sha256').update(JSON.stringify(normalized)).digest('base64url').slice(0, 16)

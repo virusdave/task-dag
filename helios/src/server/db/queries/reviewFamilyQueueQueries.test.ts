@@ -1,5 +1,5 @@
 import type { QueryResult, QueryResultRow } from 'pg'
-import { describe, expect, it, vi } from 'vitest'
+import { describe, expect, it } from 'vitest'
 
 import type { JsonValue, ReviewFamilyQueueQuery } from '../../../shared/contracts/index.js'
 import type { Queryable } from '../pool.js'
@@ -76,16 +76,6 @@ function detailRow(over: Record<string, unknown>): QueryResultRow {
 const baseFilters: ReviewFamilyQueueQuery = { limit: 12 }
 
 describe('listReviewFamilyQueue (Phase A pagination)', () => {
-  it('short-circuits msoOnly to an empty page without touching the DB', async () => {
-    const { db, queryText } = routingDb({})
-    const spy = vi.spyOn(db, 'query')
-    const res = await listReviewFamilyQueue(db, { ...baseFilters, msoOnly: true })
-    expect(res.families).toEqual([])
-    expect(res.pageInfo.hasNextPage).toBe(false)
-    expect(spy).not.toHaveBeenCalled()
-    expect(queryText).toHaveLength(0)
-  })
-
   it('returns whole-queue totals with an empty page when no families match', async () => {
     const { db } = routingDb({
       narrow: [{ page_row: false, family_brand: null, family_category: null, family_subcategory: null,

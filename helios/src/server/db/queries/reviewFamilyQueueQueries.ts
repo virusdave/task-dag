@@ -120,13 +120,6 @@ export async function listReviewFamilyQueue(
   db: Queryable,
   filters: ReviewFamilyQueueQuery,
 ): Promise<ReviewFamilyQueueResponse> {
-  // MSO is hardcoded false today (no brand-annotation source yet — Phase D).
-  // `msoOnly` would discard every family, so short-circuit to an empty page
-  // rather than paginate and throw the whole page away.
-  if (filters.msoOnly) {
-    return emptyResponse(filters)
-  }
-
   const narrowRows = await runNarrowFamilyPageQuery(db, filters)
 
   const totalFamilyCount = narrowRows[0]?.total_family_count ?? 0
@@ -631,10 +624,6 @@ function buildFamilies(
       return acc
     }, null)
 
-    // MSO chip: not yet wired to a brand-level annotation store; surface
-    // false for v1 (the row contract supports it for when we wire it).
-    const mso = { isMSOBrand: false, msoBrandId: null, isHouseBrand: false }
-
     // Phase A display-only size label: a single size renders verbatim,
     // multiple sizes render "Mixed"; identity stays size-agnostic.
     const sizeName =
@@ -651,10 +640,8 @@ function buildFamilies(
         subcategory: working.subcategory,
         sizeName,
       },
-      mso,
       ordering: {
         driftedRowCount,
-        msoFirst: mso.isMSOBrand,
         maxPriceSpread,
       },
       rows: working.rows,

@@ -91,7 +91,6 @@ export const REVIEW_MAX_LINE_ITEMS_PER_PAGE = 250
 export const ReviewFamilyQueueQuerySchema = z.object({
   approvalStatus: BlankApprovalStatusSchema,
   driftOnly: z.coerce.boolean().optional(),
-  msoOnly: z.coerce.boolean().optional(),
   proposalType: BlankProposalTypeSchema,
   search: BlankStringSchema,
   limit: z.coerce.number().int().min(1).max(REVIEW_MAX_FAMILY_LIMIT).default(REVIEW_DEFAULT_FAMILY_LIMIT),
@@ -106,13 +105,6 @@ export const ReviewFamilyKeySchema = z.object({
   sizeName: z.string().nullable(),
 })
 export type ReviewFamilyKey = z.infer<typeof ReviewFamilyKeySchema>
-
-export const ReviewFamilyMSOAnnotationSchema = z.object({
-  isMSOBrand: z.boolean(),
-  msoBrandId: z.number().int().positive().nullable(),
-  isHouseBrand: z.boolean(),
-})
-export type ReviewFamilyMSOAnnotation = z.infer<typeof ReviewFamilyMSOAnnotationSchema>
 
 export const ReviewFieldComparisonSchema = z.object({
   lineItemId: z.number().int().positive(),
@@ -169,14 +161,12 @@ export type ReviewRow = z.infer<typeof ReviewRowSchema>
 
 export const ReviewFamilyOrderingSchema = z.object({
   driftedRowCount: z.number().int().min(0),
-  msoFirst: z.boolean(),
   maxPriceSpread: z.number().nullable(),
 })
 export type ReviewFamilyOrdering = z.infer<typeof ReviewFamilyOrderingSchema>
 
 export const ReviewFamilySchema = z.object({
   familyKey: ReviewFamilyKeySchema,
-  mso: ReviewFamilyMSOAnnotationSchema,
   ordering: ReviewFamilyOrderingSchema,
   rows: z.array(ReviewRowSchema),
 })

@@ -81,15 +81,6 @@ export function ReviewPage() {
             />
             <span>Drifted only</span>
           </label>
-          <label className="inline-row">
-            <input
-              defaultChecked={data.filters.msoOnly ?? false}
-              name="msoOnly"
-              type="checkbox"
-              value="true"
-            />
-            <span>MSO only</span>
-          </label>
           <button className="ghost-button" type="submit">Filter</button>
         </Form>
       </div>
@@ -112,8 +103,8 @@ export function ReviewPage() {
         <p>
           Families group catalog rows by (brand × category × subcategory ×
           size). Within a family, rows are ordered drift-first, then by
-          price spread. Across families: drifted first, then MSO, then
-          largest market spread.
+          price spread. Across families: drifted first, then largest
+          market spread.
         </p>
         <p>
           The pricing ladder for each row is prepopulated from the most
@@ -152,7 +143,6 @@ function buildReviewQueryString(
   if (filters.proposalType) params.set('proposalType', filters.proposalType)
   if (filters.approvalStatus) params.set('approvalStatus', filters.approvalStatus)
   if (filters.driftOnly) params.set('driftOnly', 'true')
-  if (filters.msoOnly) params.set('msoOnly', 'true')
   if (filters.limit) params.set('limit', String(filters.limit))
   if (cursor) params.set('cursor', cursor)
   const qs = params.toString()
@@ -247,7 +237,6 @@ function FamilyPanel({ family }: { family: ReviewFamily }) {
         <div className="review-family-title">
           <h3>{familyLabel}</h3>
           <div className="inline-row wrap-row">
-            {family.mso.isMSOBrand ? <Pill tone="warning">MSO</Pill> : null}
             <Pill tone={family.ordering.driftedRowCount > 0 ? 'danger' : 'muted'}>
               {`${family.rows.length} ${family.rows.length === 1 ? 'row' : 'rows'}${
                 family.ordering.driftedRowCount > 0 ? ` · ${family.ordering.driftedRowCount} drifted` : ''
