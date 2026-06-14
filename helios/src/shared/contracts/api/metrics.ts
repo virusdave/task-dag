@@ -185,12 +185,19 @@ export type MetricPartialKind = z.infer<typeof MetricPartialKindSchema>
  * phase x-axis and the fine bucket aggregation used to build the
  * running sum:
  *
- *   - `day`  → bucket at `hour`, phase = hour-of-business-day (0..23
- *              where 0 = the 08:00 ET business-day open).
- *   - `week` → bucket at `date`, phase = day-of-business-week (0..6
- *              where 0 = Monday's business day).
+ *   - `day`     → bucket at `hour`, phase = hour-of-business-day (0..23
+ *                 where 0 = the 08:00 ET business-day open). Ghosts are
+ *                 the immediately preceding days.
+ *   - `week`    → bucket at `date`, phase = day-of-business-week (0..6
+ *                 where 0 = Monday's business day).
+ *   - `weekday` → like `day` (hour-of-business-day phase), but the
+ *                 ghosts step back one WEEK at a time, so each ghost is
+ *                 the SAME weekday in a prior week (this Monday vs last
+ *                 Monday vs the Monday before, …). Far more useful than
+ *                 day-vs-yesterday when traffic has a strong weekly
+ *                 shape.
  */
-export const MetricGhostPeriodSchema = z.enum(['day', 'week'])
+export const MetricGhostPeriodSchema = z.enum(['day', 'week', 'weekday'])
 export type MetricGhostPeriod = z.infer<typeof MetricGhostPeriodSchema>
 
 /**

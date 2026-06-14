@@ -160,13 +160,18 @@ function SummaryRow({ row, emphasis }: RowProps) {
   )
 }
 
-function MobileSummary({ data }: { readonly data: EssentialsDailySummaryResponse }) {
-  // One-liner that hits the operator's highest-priority numbers
-  // without needing to expand the section.
+// One-liner that hits the operator's highest-priority numbers without
+// needing to expand the section. Shared by the mobile <details> and the
+// collapsed desktop banner.
+function summaryLine(data: EssentialsDailySummaryResponse): string {
   const t = data.totals
-  const summary = `Today · GS ${formatDollars(t.grossSalesDollars)} · Mgn ${formatDollars(
+  return `Today · GS ${formatDollars(t.grossSalesDollars)} · Mgn ${formatDollars(
     t.marginDollars,
   )} (${formatGmPct(t.gmPct)}) · Scans ${formatCount(t.newScans + t.returningScans)}`
+}
+
+function MobileSummary({ data }: { readonly data: EssentialsDailySummaryResponse }) {
+  const summary = summaryLine(data)
   return (
     <details className="essentials-daily-summary essentials-daily-summary--mobile">
       <summary className="essentials-daily-summary__summary-line">
@@ -185,24 +190,63 @@ function MobileSummary({ data }: { readonly data: EssentialsDailySummaryResponse
   )
 }
 
+const DESKTOP_COLLAPSED_KEY = 'helios.metrics.essentialsBanner.collapsed'
+
+function useDesktopCollapsed(): [boolean, () => void] {
+  const [collapsed, setCollapsed] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return false
+    return window.localStorage.getItem(DESKTOP_COLLAPSED_KEY) === '1'
+  })
+  const toggle = () =>
+    setCollapsed((prev) => {
+      const next = !prev
+      if (typeof window !== 'undefined') {
+        window.localStorage.setItem(DESKTOP_COLLAPSED_KEY, next ? '1' : '0')
+      }
+      return next
+    })
+  return [collapsed, toggle]
+}
+
 function DesktopSummary({ data }: { readonly data: EssentialsDailySummaryResponse }) {
+  // Collapsible on desktop: the full per-site table is dense and the
+  // banner is sticky, so an operator who has internalised today's
+  // numbers can fold it down to a one-line summary and reclaim the
+  // vertical space. The choice persists across reloads.
+  const [collapsed, toggleCollapsed] = useDesktopCollapsed()
   return (
     <section
-      className="essentials-daily-summary essentials-daily-summary--desktop"
+      className={`essentials-daily-summary essentials-daily-summary--desktop${
+        collapsed ? ' essentials-daily-summary--collapsed' : ''
+      }`}
       aria-label="Today's per-site summary"
     >
       <div className="essentials-daily-summary__header">
+        <button
+          type="button"
+          className="essentials-daily-summary__collapse-toggle"
+          onClick={toggleCollapsed}
+          aria-expanded={!collapsed}
+          title={collapsed ? 'Expand today’s summary' : 'Collapse today’s summary'}
+        >
+          {collapsed ? '▸' : '▾'}
+        </button>
         <span className="essentials-daily-summary__title">Today ({data.today.nyDate})</span>
+        {collapsed ? (
+          <span className="essentials-daily-summary__summary-line-text">{summaryLine(data)}</span>
+        ) : null}
         <span className="essentials-daily-summary__asof subtle-copy">
           as of {formatAsOf(data.asOf)} ET
         </span>
       </div>
-      <div className="essentials-daily-summary__body">
-        {data.sites.map((row) => (
-          <SummaryRow key={row.siteKey} row={row} />
-        ))}
-        <SummaryRow row={data.totals} emphasis />
-      </div>
+      {collapsed ? null : (
+        <div className="essentials-daily-summary__body">
+          {data.sites.map((row) => (
+            <SummaryRow key={row.siteKey} row={row} />
+          ))}
+          <SummaryRow row={data.totals} emphasis />
+        </div>
+      )}
     </section>
   )
 }

@@ -616,9 +616,10 @@ export function MetricChart({
                 value={ghostPeriod}
                 onChange={(e) => setGhostPeriod(e.target.value as MetricGhostPeriod)}
                 aria-label={`Ghost Riders period for ${metric.title}`}
-                title="Period each ghost spans: day (hour-of-day phase) or week (day-of-week phase)."
+                title="Period each ghost spans. day: consecutive days (hour-of-day phase). weekday: same weekday across prior weeks (hour-of-day phase) — best when traffic has a strong weekly shape. week: consecutive weeks (day-of-week phase)."
               >
                 <option value="day">period: day</option>
+                <option value="weekday">period: weekday</option>
                 <option value="week">period: week</option>
               </select>
             ) : null}

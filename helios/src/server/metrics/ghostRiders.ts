@@ -29,23 +29,39 @@ const NY_TZ = 'America/New_York'
 const PERIOD_BUCKET_AGG: Record<MetricGhostPeriod, MetricAggregation> = {
   day: 'hour',
   week: 'date',
+  weekday: 'hour',
 }
 
 /** The aggregation whose buckets ARE the periods themselves. */
 const PERIOD_AGG: Record<MetricGhostPeriod, MetricAggregation> = {
   day: 'date',
   week: 'week',
+  weekday: 'date',
+}
+
+/**
+ * Number of `PERIOD_AGG` buckets to step back between consecutive ghosts.
+ * `weekday` spans a single day but steps back 7 date-buckets so each
+ * ghost lands on the same weekday a week earlier (DST-safe because each
+ * step honours the NY business-day grid).
+ */
+const PERIOD_STEP_BUCKETS: Record<MetricGhostPeriod, number> = {
+  day: 1,
+  week: 1,
+  weekday: 7,
 }
 
 const PHASE_UNIT: Record<MetricGhostPeriod, 'hour' | 'day'> = {
   day: 'hour',
   week: 'day',
+  weekday: 'hour',
 }
 
 /** Nominal phase count (DST days can briefly differ; we clamp up). */
 const NOMINAL_PHASE_COUNT: Record<MetricGhostPeriod, number> = {
   day: 24,
   week: 7,
+  weekday: 24,
 }
 
 export interface GhostPeriodSpec {
@@ -93,13 +109,21 @@ export function resolveGhostConfig(args: {
   // picks the completed period).
   const currentStart = floorToBucketStart(new Date(anchor.getTime() - 1), periodAgg)
 
+  const stepBuckets = PERIOD_STEP_BUCKETS[args.period]
   const periods: GhostPeriodSpec[] = []
   let start = currentStart
   for (let age = 0; age <= args.lookback; age++) {
+    // Each period spans exactly ONE periodAgg bucket (a day or a week),
+    // regardless of how far apart consecutive periods are stepped.
     const end = advanceBucketStart(start, periodAgg)
     const bucketStarts = walkBuckets(start, end, bucketAgg)
     periods.push({ age, start, end, bucketStarts })
-    start = previousBucketStart(start, periodAgg)
+    // Step back `stepBuckets` periodAgg buckets to the previous ghost.
+    // For day/week that's one bucket; for weekday it's 7 date-buckets =
+    // the same weekday a week earlier.
+    for (let s = 0; s < stepBuckets; s++) {
+      start = previousBucketStart(start, periodAgg)
+    }
   }
 
   const oldest = periods[periods.length - 1]
@@ -150,8 +174,10 @@ function hourLabel(d: Date): string {
 }
 
 function periodLabel(period: MetricGhostPeriod, spec: GhostPeriodSpec): string {
+  // `weekday` spans a single day but steps a week at a time, so its
+  // ghosts are "N weeks ago" (same weekday) while age 0 is "Today".
   const noun = period === 'day' ? 'day' : 'week'
-  if (spec.age === 0) return period === 'day' ? 'Today' : 'This week'
+  if (spec.age === 0) return period === 'week' ? 'This week' : 'Today'
   if (spec.age === 1) return `1 ${noun} ago`
   return `${spec.age} ${noun}s ago`
 }
@@ -213,9 +239,10 @@ export function buildGhostResponse(args: {
     const label =
       rep === null
         ? String(phase)
-        : config.period === 'day'
-          ? hourLabel(rep)
-          : NY_WEEKDAY_FMT.format(rep)
+        : config.period === 'week'
+          ? NY_WEEKDAY_FMT.format(rep)
+          : // day + weekday both phase on hour-of-business-day.
+            hourLabel(rep)
     phaseLabels.push(label)
     rows.push({
       t: (rep ?? current.start).toISOString(),

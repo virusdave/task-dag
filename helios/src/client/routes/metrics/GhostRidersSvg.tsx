@@ -112,8 +112,39 @@ export function GhostRidersSvg(props: GhostRidersSvgProps): JSX.Element {
     const yMin = Math.min(0, lo)
     const yMax = hi > yMin ? hi : yMin + 1
 
+    // Trim dead horizontal space on the hour-of-day views (day +
+    // weekday): the store is closed for a big chunk of the 24h grid, so
+    // we clip the x-axis to [one hour before the first sale on any
+    // visible ghost/current line] .. [the last hour at which any of them
+    // still increases]. Flat tails carry no information. The week view
+    // (only 7 day-of-week phases) is never trimmed.
+    let phaseStart = 0
+    let phaseEnd = phaseCount - 1
+    if (ghost.phaseUnit === 'hour' && phaseCount > 1) {
+      let firstActivity = Infinity
+      let lastIncrease = -Infinity
+      for (const sinfo of ghost.series) {
+        if (!visibleBaseIds.has(sinfo.baseSeriesId)) continue
+        let prev: number | null = null
+        for (let phase = 0; phase < phaseCount; phase++) {
+          const raw = response.data[phase]?.[sinfo.key]
+          if (typeof raw !== 'number' || !Number.isFinite(raw)) continue
+          if (raw > 0 && phase < firstActivity) firstActivity = phase
+          if (prev !== null && raw > prev && phase > lastIncrease) lastIncrease = phase
+          prev = raw
+        }
+      }
+      if (Number.isFinite(firstActivity) && lastIncrease >= 0) {
+        // One hour marker of lead-in before the first sale; clip the
+        // flat tail right at the final increase.
+        phaseStart = Math.max(0, firstActivity - 1)
+        phaseEnd = Math.min(phaseCount - 1, Math.max(lastIncrease, phaseStart + 1))
+      }
+    }
+    const visSpan = phaseEnd - phaseStart
+
     const xScale = (phase: number): number =>
-      marginLeft + (phaseCount <= 1 ? 0 : (phase / (phaseCount - 1)) * plotW)
+      marginLeft + (visSpan <= 0 ? 0 : ((phase - phaseStart) / visSpan) * plotW)
     const yScale = (v: number): number =>
       marginTop + plotH - ((v - yMin) / (yMax - yMin)) * plotH
 
@@ -133,7 +164,7 @@ export function GhostRidersSvg(props: GhostRidersSvgProps): JSX.Element {
       const base = baseSeries.find((b) => b.id === sinfo.baseSeriesId)
       if (!base) continue
       const pts: Array<{ phase: number; x: number; y: number; value: number }> = []
-      for (let phase = 0; phase < phaseCount; phase++) {
+      for (let phase = phaseStart; phase <= phaseEnd; phase++) {
         const v = response.data[phase]?.[sinfo.key]
         if (typeof v !== 'number' || !Number.isFinite(v)) continue
         pts.push({ phase, x: xScale(phase), y: yScale(v), value: v })
@@ -154,7 +185,7 @@ export function GhostRidersSvg(props: GhostRidersSvgProps): JSX.Element {
 
     const yTicks = niceYTicks(yMin, yMax, 5)
 
-    return { phaseCount, yMin, yMax, xScale, yScale, lines, yTicks, visibleBase }
+    return { phaseCount, phaseStart, phaseEnd, yMin, yMax, xScale, yScale, lines, yTicks, visibleBase }
   }, [response, ghost, baseSeries, hiddenBase, marginLeft, marginTop, plotW, plotH])
 
   const clientXToPhase = useCallback(
@@ -168,8 +199,9 @@ export function GhostRidersSvg(props: GhostRidersSvgProps): JSX.Element {
       point.y = 0
       const svgX = point.matrixTransform(ctm.inverse()).x
       const frac = (svgX - marginLeft) / plotW
-      const phase = Math.round(frac * (model.phaseCount - 1))
-      if (phase < 0 || phase > model.phaseCount - 1) return null
+      const span = model.phaseEnd - model.phaseStart
+      const phase = Math.round(model.phaseStart + frac * span)
+      if (phase < model.phaseStart || phase > model.phaseEnd) return null
       return phase
     },
     [model, marginLeft, plotW],
@@ -245,10 +277,15 @@ export function GhostRidersSvg(props: GhostRidersSvgProps): JSX.Element {
           )
         })}
 
-        {/* X phase labels (subset to avoid crowding) */}
+        {/* X phase labels (subset to avoid crowding), restricted to the
+            visible (trimmed) phase window. */}
         {ghost.phaseLabels.map((label, phase) => {
-          const step = ghost.phaseCount > 12 ? Math.ceil(ghost.phaseCount / 8) : 1
-          if (phase % step !== 0 && phase !== ghost.phaseCount - 1) return null
+          if (phase < model.phaseStart || phase > model.phaseEnd) return null
+          const visCount = model.phaseEnd - model.phaseStart + 1
+          const step = visCount > 12 ? Math.ceil(visCount / 8) : 1
+          // Anchor the subsample on the first visible phase and always
+          // keep the last visible one.
+          if ((phase - model.phaseStart) % step !== 0 && phase !== model.phaseEnd) return null
           const x = model.xScale(phase)
           return (
             <text
@@ -328,7 +365,7 @@ export function GhostRidersSvg(props: GhostRidersSvgProps): JSX.Element {
       {hovered !== null ? (
         <div className="ghost-riders-readout" role="status">
           <div className="ghost-riders-readout-head">
-            {ghost.period === 'day' ? 'Hour' : 'Day'} · {ghost.phaseLabels[hovered]}
+            {ghost.phaseUnit === 'hour' ? 'Hour' : 'Day'} · {ghost.phaseLabels[hovered]}
           </div>
           {model.visibleBase.map((base) => (
             <div key={base.id} className="ghost-riders-readout-series">
@@ -394,7 +431,8 @@ export function GhostRidersSvg(props: GhostRidersSvgProps): JSX.Element {
         Bold = {periodsByAge[0]?.label ?? 'current'} (through{' '}
         {ghost.phaseLabels[ghost.currentPhaseIndex] ?? ''}); faded ={' '}
         {ghost.lookback} prior {ghost.period === 'day' ? 'day' : 'week'}
-        {ghost.lookback > 1 ? 's' : ''} (older = fainter).
+        {ghost.lookback > 1 ? 's' : ''}
+        {ghost.period === 'weekday' ? ' (same weekday)' : ''} (older = fainter).
       </p>
     </div>
   )

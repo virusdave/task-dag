@@ -8165,6 +8165,28 @@ span.metric-chart-legend-item {
   letter-spacing: 0.01em;
 }
 
+.essentials-daily-summary__collapse-toggle {
+  appearance: none;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  padding: 0 0.25rem 0 0;
+  font-size: 0.8rem;
+  line-height: 1;
+  color: var(--ink-muted, #8a7f76);
+}
+.essentials-daily-summary__collapse-toggle:hover {
+  color: var(--ink, #17130f);
+}
+/* When collapsed, the one-line summary sits between the title and the
+ * as-of stamp and takes the slack so the as-of stays right-aligned. */
+.essentials-daily-summary--collapsed .essentials-daily-summary__summary-line-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
 .essentials-daily-summary__asof {
   font-size: 0.78rem;
 }

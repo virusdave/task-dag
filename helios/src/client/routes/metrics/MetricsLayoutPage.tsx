@@ -108,12 +108,57 @@ function toggleInSet(prev: ReadonlySet<string>, id: string): ReadonlySet<string>
   else next.add(id)
   return next
 }
-const PRESETS: ReadonlyArray<{ label: string; days: number }> = [
-  { label: '7d', days: 7 },
-  { label: '30d', days: 30 },
-  { label: '90d', days: 90 },
-  { label: '6mo', days: 180 },
-  { label: '1y', days: 365 },
+interface RangePreset {
+  readonly label: string
+  /**
+   * Grouping to switch to when this preset is clicked. Omitted ⇒ leave
+   * the current page aggregation untouched (only the window changes).
+   */
+  readonly agg?: MetricAggregation
+  /**
+   * Window builder. `agg` is the effective aggregation
+   * (`preset.agg ?? current page agg`) so the right edge lands on the
+   * projected in-progress-bucket knot (see `defaultWindowRightEdge`).
+   */
+  readonly range: (nowMs: number, agg: MetricAggregation) => TimeWindow
+}
+
+// A trailing-N-days window anchored on the left at `now - Nd` and on the
+// right at the end of the current bucket for the effective aggregation.
+const lastNDaysRange =
+  (days: number) =>
+  (nowMs: number, agg: MetricAggregation): TimeWindow => ({
+    fromMs: nowMs - days * DAY_MS,
+    toMs: defaultWindowRightEdge(agg, nowMs),
+  })
+
+const PRESETS: ReadonlyArray<RangePreset> = [
+  // Single-business-day views default to hourly grouping — that's the
+  // only granularity that makes an intra-day window legible.
+  {
+    label: 'today',
+    agg: 'hour',
+    range: (nowMs) => ({
+      fromMs: nyFloorToBusinessDay(nowMs),
+      toMs: defaultWindowRightEdge('hour', nowMs),
+    }),
+  },
+  {
+    label: '-1d',
+    agg: 'hour',
+    range: (nowMs) => ({
+      // Yesterday's full business day: [start of yesterday, start of today).
+      fromMs: nyAddDays(nyFloorToBusinessDay(nowMs), -1),
+      toMs: nyFloorToBusinessDay(nowMs),
+    }),
+  },
+  // A week reads best bucketed by day.
+  { label: '7d', agg: 'date', range: lastNDaysRange(7) },
+  // Longer ranges keep whatever grouping the operator has chosen.
+  { label: '30d', range: lastNDaysRange(30) },
+  { label: '90d', range: lastNDaysRange(90) },
+  { label: '6mo', range: lastNDaysRange(180) },
+  { label: '1y', range: lastNDaysRange(365) },
 ]
 
 const PRIMARY_AGGREGATIONS: ReadonlyArray<MetricAggregation> = ['hour', 'date', 'week', 'month', 'total']
@@ -146,7 +191,6 @@ const KNOWN_SITES: ReadonlyArray<{ id: string; label: string }> = [
 export type MetricsTabId =
   | 'essentials'
   | 'sales'
-  | 'geography'
   | 'inventory'
   | 'scatter'
   | 'catalog'
@@ -223,17 +267,6 @@ const METRICS_TABS: ReadonlyArray<MetricsTab> = [
       m.chartType !== 'scatter' &&
       !GEOGRAPHY_GROUPS.has(m.group) &&
       !INVENTORY_GROUPS.has(m.group),
-    grant: 'explore',
-  },
-  {
-    id: 'geography',
-    label: 'Customer geography',
-    description: 'Where orders come from (borough mix) and how they fulfill (delivery vs pickup).',
-    defaultAgg: 'week',
-    defaultStackMode: 'percent',
-    showAggControl: true,
-    showStackControl: true,
-    include: (m) => m.chartType !== 'scatter' && GEOGRAPHY_GROUPS.has(m.group),
     grant: 'explore',
   },
   {
@@ -1332,7 +1365,7 @@ function DashboardControls({
       <div className="metrics-control-group">
         <span className="subtle-copy">range</span>
         {PRESETS.map((p) => (
-          <PresetButton key={p.label} label={p.label} days={p.days} agg={pageAgg} />
+          <PresetButton key={p.label} preset={p} pageAgg={pageAgg} setPageAgg={onAggChange} />
         ))}
         <details className="metrics-range-custom">
           <summary>custom</summary>
@@ -1385,26 +1418,38 @@ function MetricsTabsNav({
   )
 }
 
-function PresetButton({ label, days, agg }: { label: string; days: number; agg: MetricAggregation }) {
+function PresetButton({
+  preset,
+  pageAgg,
+  setPageAgg,
+}: {
+  preset: RangePreset
+  pageAgg: MetricAggregation
+  setPageAgg: (next: MetricAggregation) => void
+}) {
   const axis = useTimeAxis()
-  // A preset chip spans the last N days, anchored on the left at
-  // `now - Nd` and on the right at the END of the current bucket (so
-  // the rightmost pace-extrapolated knot is visible — see
-  // `defaultWindowRightEdge`). A chip is "active" when both edges
-  // match within a day's tolerance. After the user types in a custom
-  // range, no preset stays highlighted (matching the catalog tab).
-  const rightEdge = defaultWindowRightEdge(agg)
+  // A chip is "active" when the current window matches the window this
+  // preset would produce (within a day's tolerance, since `now` drifts)
+  // AND — for presets that prescribe a grouping — the page is on that
+  // grouping. After the user types a custom range or changes grouping,
+  // no preset stays highlighted (matching the catalog tab).
+  const effectiveAgg = preset.agg ?? pageAgg
+  const target = preset.range(Date.now(), effectiveAgg)
   const isExactPreset =
-    Math.abs(axis.window.toMs - rightEdge) < DAY_MS &&
-    Math.abs(axis.window.fromMs - (Date.now() - days * DAY_MS)) < DAY_MS
+    Math.abs(axis.window.toMs - target.toMs) < DAY_MS &&
+    Math.abs(axis.window.fromMs - target.fromMs) < DAY_MS &&
+    (preset.agg === undefined || pageAgg === preset.agg)
   return (
     <button
       type="button"
       className={isExactPreset ? 'metrics-site-chip is-active' : 'metrics-site-chip'}
-      onClick={() => axis.setWindow({ fromMs: Date.now() - days * DAY_MS, toMs: defaultWindowRightEdge(agg) })}
+      onClick={() => {
+        if (preset.agg !== undefined && preset.agg !== pageAgg) setPageAgg(preset.agg)
+        axis.setWindow(preset.range(Date.now(), preset.agg ?? pageAgg))
+      }}
       aria-pressed={isExactPreset}
     >
-      {label}
+      {preset.label}
     </button>
   )
 }
