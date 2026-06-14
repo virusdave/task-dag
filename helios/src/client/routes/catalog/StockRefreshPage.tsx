@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom'
 
 import { ConfigBackgroundTaskRunNowResponseSchema } from '../../../shared/contracts/index.js'
 import { mutateJson } from '../../app/fetchJson.js'
+import { buildAppPath } from '../../app/paths.js'
 import { Pill } from '../../components/Pill.js'
 import { useRegisterCatalogSidebarSubtree } from './catalogSidebarSubtree.js'
 
@@ -99,6 +100,26 @@ export function StockRefreshPage() {
             <Link to="/jobs">(all jobs)</Link>
           </p>
         ) : null}
+      </article>
+
+      <article className="mini-card">
+        <header>
+          <strong>Download snapshot</strong>
+        </header>
+        <p className="subtle-copy">
+          Export the current inventory as CSV — one row per <strong>site × variant</strong>
+          {' '}with structured attributes, pricing, on-hand quantities, the synthetic
+          {' '}<code>cohort_key</code> (the same peer grouping the cohort scatter plots use),
+          {' '}and <code>has_image</code>. No sales data.
+        </p>
+        <div className="inline-row wrap-row" style={{ marginTop: '0.5rem' }}>
+          <a
+            className="ghost-button like-button"
+            href={buildAppPath('/api/catalog/inventory/stock-snapshot.csv')}
+          >
+            Download current stock CSV
+          </a>
+        </div>
       </article>
 
       <article className="mini-card">

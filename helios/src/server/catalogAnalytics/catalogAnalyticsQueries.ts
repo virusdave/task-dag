@@ -8,6 +8,7 @@ import {
   type MetricsEntityRankingRow,
   type MetricsEntityRankingsResponse,
 } from '../../shared/contracts/index.js'
+import { parseUnitSize } from '../../shared/domain/catalogCohort.js'
 import { getPool } from '../db/pool.js'
 import { bucketLocalExpr } from '../metrics/bucketSelectSql.js'
 
@@ -59,50 +60,9 @@ function asStr(v: unknown): string | null {
   return s.length > 0 ? s : null
 }
 
-/**
- * Parse a Sweed `sizeName` string and return its numeric unit size in
- * grams + milligrams (whichever the input expresses, never both).
- *
- *   "1g"     → { grams: 1,    mg: null }
- *   "3.5g"   → { grams: 3.5,  mg: null }
- *   "0.5g"   → { grams: 0.5,  mg: null }
- *   "10mg"   → { grams: null, mg: 10 }
- *   "100 MG" → { grams: null, mg: 100 }
- *   "1oz"    → { grams: 28.3495, mg: null }
- *   "1ct" / "Each" / unparseable → { grams: null, mg: null }
- *
- * Returned in a single object so the caller doesn't have to invoke
- * two regexes per row. `mg` parsing takes precedence — "10mg" must
- * not be misread as 10g via the `g` branch.
- */
-function parseUnitSize(sizeLabel: string | null): {
-  grams: number | null
-  mg: number | null
-} {
-  if (!sizeLabel) return { grams: null, mg: null }
-  const s = sizeLabel.trim().toLowerCase()
-  if (s.length === 0) return { grams: null, mg: null }
-  // Try mg first (otherwise "10mg" matches the `g` branch as 10g).
-  const mgMatch = s.match(/(\d+(?:\.\d+)?)\s*mg\b/)
-  if (mgMatch?.[1]) {
-    const n = Number.parseFloat(mgMatch[1])
-    if (Number.isFinite(n) && n > 0) return { grams: null, mg: n }
-  }
-  // Grams — require a word boundary to avoid "mg".
-  const gMatch = s.match(/(\d+(?:\.\d+)?)\s*g\b/)
-  if (gMatch?.[1]) {
-    const n = Number.parseFloat(gMatch[1])
-    if (Number.isFinite(n) && n > 0) return { grams: n, mg: null }
-  }
-  // Ounces — convert to grams (1 oz = 28.3495 g, ish; precise enough
-  // for the scatter / for "total grams sold" aggregates).
-  const ozMatch = s.match(/(\d+(?:\.\d+)?)\s*oz\b/)
-  if (ozMatch?.[1]) {
-    const n = Number.parseFloat(ozMatch[1])
-    if (Number.isFinite(n) && n > 0) return { grams: n * 28.3495, mg: null }
-  }
-  return { grams: null, mg: null }
-}
+// `parseUnitSize` is shared with the CSV snapshot exports and the client
+// cohort key (shared/domain/catalogCohort.ts) so the parsed unit size that
+// feeds the scatter cohort grouping never drifts from the exports.
 
 // ============================ Filters endpoint =============================
 

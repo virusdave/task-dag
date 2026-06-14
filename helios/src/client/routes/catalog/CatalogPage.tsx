@@ -11,6 +11,7 @@ import {
   type SessionEnvelope,
 } from '../../../shared/contracts/index.js'
 import { loadJson, mutateJson } from '../../app/fetchJson.js'
+import { buildAppPath } from '../../app/paths.js'
 import { waitForJob } from '../../app/jobPolling.js'
 import { Pill } from '../../components/Pill.js'
 import { useRegisterCatalogSidebarSubtree } from './catalogSidebarSubtree.js'
@@ -62,6 +63,16 @@ export function CatalogPage() {
     const params = new URLSearchParams(searchParams)
     params.set('page', String(nextPage))
     return `${browserPath}?${params.toString()}`
+  }
+
+  // CSV export of the current filter view (all matching variants, not just the
+  // visible page — drop the pagination params).
+  function buildCsvHref(): string {
+    const params = new URLSearchParams(searchParams)
+    params.delete('page')
+    params.delete('pageSize')
+    const qs = params.toString()
+    return buildAppPath(`/api/catalog/groups.csv${qs ? `?${qs}` : ''}`)
   }
 
   async function handleRefresh(catalogGroupId: number) {
@@ -237,6 +248,13 @@ export function CatalogPage() {
           <p className="eyebrow">Catalog Browser</p>
           <h2>Mirrored groups and managed-field status</h2>
         </div>
+        <a
+          className="ghost-button like-button"
+          href={buildCsvHref()}
+          title="Per-(site × variant) catalog snapshot for the current filters, with cohort-key and has_image. No sales info."
+        >
+          Download CSV
+        </a>
       </div>
       {errorMessage ? <p className="error-text">{errorMessage}</p> : null}
       {data.recentSalesIssue ? <p className="error-text">{data.recentSalesIssue}</p> : null}

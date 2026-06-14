@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 
-import type { FastifyInstance } from 'fastify'
+import type { FastifyInstance, FastifyReply } from 'fastify'
 import { z } from 'zod'
 
 import {
@@ -18,6 +18,12 @@ import { requireSessionUser } from '../auth/requireSession.js'
 import { getPool } from '../db/pool.js'
 import { getCatalogHistory } from '../db/queries/catalogHistoryQueries.js'
 import { getGroupDetail, listCatalogGroups } from '../db/queries/catalogQueries.js'
+import {
+  listCatalogBrowserCsvRows,
+  listStockSnapshotCsvRows,
+  renderCatalogSnapshotCsv,
+  type CatalogSnapshotCsvRow,
+} from '../db/queries/catalogSnapshotCsvQueries.js'
 import { getOptionalSweedSessionConcurrencyKey } from '../jobs/concurrency.js'
 import { enqueueJob } from '../jobs/enqueueJob.js'
 import { withTransaction } from '../db/tx.js'
@@ -58,6 +64,53 @@ export async function registerCatalogRoutes(server: FastifyInstance): Promise<vo
     // client also re-parses the body; this just makes the server the
     // first line of defense (regression: issue #17).
     return reply.send(CatalogBrowserResponseSchema.parse(response))
+  })
+
+  // Snapshot CSV exports. Per-(site × variant) rows with structured
+  // attributes + pricing + on-hand state + synthetic cohort_key / has_image,
+  // and NO sales info. Capped so a runaway export can't tie up the server.
+  const CSV_ROW_LIMIT = 50_000
+
+  function sendCsv(reply: FastifyReply, rows: CatalogSnapshotCsvRow[], filenameStem: string): FastifyReply {
+    const csv = renderCatalogSnapshotCsv(rows)
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')
+    return reply
+      .header('content-type', 'text/csv; charset=utf-8')
+      .header('content-disposition', `attachment; filename="${filenameStem}-${stamp}.csv"`)
+      .send(csv)
+  }
+
+  // GET /api/catalog/groups.csv — catalog snapshot for the current browser
+  // filter view (one row per site × catalog variant).
+  server.get('/api/catalog/groups.csv', async (request, reply) => {
+    const user = await requireSessionUser(request, reply, 'viewer')
+    if (!user) return
+
+    // Same filters as the browser, but page/pageSize are irrelevant to a
+    // full export — Zod fills their defaults and we ignore them.
+    const filters = CatalogBrowserQuerySchema.parse(request.query)
+    const rows = await listCatalogBrowserCsvRows(getPool(), filters, CSV_ROW_LIMIT + 1)
+    if (rows.length > CSV_ROW_LIMIT) {
+      return reply.status(413).send({
+        error: `Export exceeds ${CSV_ROW_LIMIT.toLocaleString()} rows. Narrow the filters first.`,
+      })
+    }
+    return sendCsv(reply, rows, 'catalog-snapshot')
+  })
+
+  // GET /api/catalog/inventory/stock-snapshot.csv — current inventory snapshot
+  // (one row per site × in-current-inventory variant; all sites).
+  server.get('/api/catalog/inventory/stock-snapshot.csv', async (request, reply) => {
+    const user = await requireSessionUser(request, reply, 'viewer')
+    if (!user) return
+
+    const rows = await listStockSnapshotCsvRows(getPool(), CSV_ROW_LIMIT + 1)
+    if (rows.length > CSV_ROW_LIMIT) {
+      return reply.status(413).send({
+        error: `Export exceeds ${CSV_ROW_LIMIT.toLocaleString()} rows.`,
+      })
+    }
+    return sendCsv(reply, rows, 'stock-snapshot')
   })
 
   server.post('/api/catalog/refresh', async (request, reply) => {

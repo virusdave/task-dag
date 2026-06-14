@@ -645,7 +645,7 @@ async function loadCatalogBrowserFacets(db: Queryable): Promise<{
   }
 }
 
-function buildCatalogWhere(filters: CatalogBrowserQuery): { values: unknown[]; whereSql: string } {
+export function buildCatalogWhere(filters: CatalogBrowserQuery): { values: unknown[]; whereSql: string } {
   const clauses: string[] = []
   const values: unknown[] = []
 

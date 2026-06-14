@@ -19,6 +19,7 @@ import {
   type CatalogAnalyticsPointsResponse,
   type SessionEnvelope,
 } from '../../../shared/contracts/index.js'
+import { buildCatalogCohortKey } from '../../../shared/domain/catalogCohort.js'
 import { loadJson, mutateJson } from '../../app/fetchJson.js'
 import { buildAppPath } from '../../app/paths.js'
 import { CatalogFilterBar, FilterDropdown } from './CatalogFilterBar.js'
@@ -413,19 +414,11 @@ function collectVariantChipOptions(
   return out
 }
 
-function cohortUnitSizeKey(p: CatalogAnalyticsPoint): string {
-  if (p.unitSizeGrams != null) return `g:${p.unitSizeGrams}`
-  if (p.unitSizeMg != null) return `mg:${p.unitSizeMg}`
-  return `label:${p.sizeLabel ?? '(no size)'}`
-}
-
 export function cohortKey(p: CatalogAnalyticsPoint): string {
-  return [
-    p.categoryName ?? '(no cat)',
-    p.subcategoryName ?? '(no sub)',
-    cohortUnitSizeKey(p),
-    p.packCount == null ? '(no pack)' : `pack:${p.packCount}`,
-  ].join('|')
+  // Delegates to the shared cohort-key builder so the scatter cohorts and the
+  // CSV snapshot exports (/api/catalog/groups.csv, /api/catalog/inventory/
+  // stock-snapshot.csv) always describe the exact same peer set.
+  return buildCatalogCohortKey(p)
 }
 
 function velocityIndex(p: CatalogAnalyticsPoint, ctx: AxisCtx): number | null {
