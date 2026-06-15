@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify'
 
 import {
   SegmentDetailsResponseSchema,
+  SegmentMembershipRefreshAllResponseSchema,
   SegmentMembershipRefreshResponseSchema,
 } from '../../shared/contracts/index.js'
 import { requireSessionUser } from '../auth/requireSession.js'
@@ -12,6 +13,7 @@ import {
   getSegmentDetails,
   markSegmentMembershipRefreshPending,
 } from '../db/queries/marketingSegmentDetailsQueries.js'
+import { readMarketingCatalogSegments } from '../db/queries/sweedCustomerSegmentsQueries.js'
 
 // Read-only Helios "segment details" page + its membership-refresh
 // trigger (/config/marketing/segments/:segmentId, virusdave/top-level#12).
@@ -56,6 +58,66 @@ export async function registerMarketingSegmentsRoutes(server: FastifyInstance): 
       throw error
     }
   })
+
+  // Batch refresh: fan the per-segment refresh job out across every
+  // enabled cached segment. Each leg is the SAME deduped job the
+  // single-segment button enqueues, so this is just "click refresh on
+  // every segment at once" — O(#segments) Sweed RPCs, one per segment,
+  // and duplicate batch clicks collapse on the per-segment dedupe key.
+  // Enumerates from the local catalog cache (no Sweed call here); a
+  // segment created since the last catalog refresh is included on the
+  // next batch once the catalog (6h highwater) catches up.
+  //
+  // Declared before the ':segmentId' route below for clarity; the paths
+  // have different arities so Fastify never confuses the two.
+  server.post(
+    '/api/config/marketing/segments/refresh-all-membership',
+    async (request, reply) => {
+      const actor = await requireSessionUser(request, reply, 'editor')
+      if (!actor) return
+
+      try {
+        const segments = await readMarketingCatalogSegments(getPool(), {
+          includeDisabled: false,
+        })
+        const segmentIds = segments.map((s) => s.segmentId)
+
+        // One transaction so a partial fan-out can't leave some segments
+        // stuck 'pending' with no job queued.
+        await withTransaction(async (db) => {
+          for (const segmentId of segmentIds) {
+            await markSegmentMembershipRefreshPending(db, segmentId)
+            await enqueueJob(db, {
+              jobType: 'config.workers.refresh_sweed_segment_members',
+              module: 'config',
+              payload: { segmentId, trigger: 'manual_refresh_all' },
+              priority: JOB_PRIORITY_URGENT,
+              dedupeKey: `config.workers.refresh_sweed_segment_members:${segmentId}`,
+              requestedByUserId: actor.id,
+              runAt: new Date(),
+              scope: null,
+            })
+          }
+        })
+
+        return reply.send(
+          SegmentMembershipRefreshAllResponseSchema.parse({
+            enqueued: segmentIds.length,
+            segmentIds,
+          }),
+        )
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        if (/relation .*sweed_segment_membership_refresh.* does not exist/i.test(message)) {
+          return reply.status(503).send({
+            error:
+              'sweed_segment_membership_refresh table missing. Apply migration 081_sweed_segment_membership_refresh.sql.',
+          })
+        }
+        throw error
+      }
+    },
+  )
 
   server.post(
     '/api/config/marketing/segments/:segmentId/refresh-membership',

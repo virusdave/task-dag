@@ -789,7 +789,10 @@ export type ConfigWorkersRefreshSweedCustomerSegmentsJobPayload = z.infer<
 // from Sweed and snapshot-replaces its cached rows. Operator-triggered.
 export const ConfigWorkersRefreshSweedSegmentMembersJobPayloadSchema = z.object({
   segmentId: z.number().int().positive(),
-  trigger: z.enum(['manual_refresh']).default('manual_refresh'),
+  // manual_refresh: single-segment "Refresh membership cache" button.
+  // manual_refresh_all: one fan-out leg of the "Refresh all segment
+  // caches" batch trigger (same per-segment job, deduped per segment).
+  trigger: z.enum(['manual_refresh', 'manual_refresh_all']).default('manual_refresh'),
 })
 export type ConfigWorkersRefreshSweedSegmentMembersJobPayload = z.infer<
   typeof ConfigWorkersRefreshSweedSegmentMembersJobPayloadSchema

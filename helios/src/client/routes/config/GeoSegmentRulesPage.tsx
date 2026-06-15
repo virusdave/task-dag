@@ -35,6 +35,7 @@ import {
   type GeoSegmentRuleUpdateBody,
   type GeoSegmentSiteOption,
   type GeoSegmentTrigger,
+  SegmentMembershipRefreshAllResponseSchema,
   type SessionEnvelope,
 } from '../../../shared/contracts/index.js'
 import { loadJson, mutateJson } from '../../app/fetchJson.js'
@@ -98,20 +99,25 @@ interface ActionNotice {
   readonly scope: 'create' | 'global' | number
   readonly message: string
   readonly segmentId?: number
+  // Pill label; defaults to 'saved' for mutations. Background queue
+  // actions (e.g. batch refresh) use 'queued'.
+  readonly label?: string
+  // Override the default "Open segment N details" link text.
+  readonly segmentLinkText?: string
 }
 
 function ActionNoticeStrip({ notice }: { notice: ActionNotice }) {
   return (
     <div className="runtime-status-strip" style={{ marginTop: 12 }}>
       <div className="runtime-status-item">
-        <Pill tone="success">saved</Pill>
+        <Pill tone="success">{notice.label ?? 'saved'}</Pill>
         <span className="subtle-copy">
           {notice.message}
           {notice.segmentId ? (
             <>
               {' '}
               <Link to={`/config/marketing/segments/${notice.segmentId}`}>
-                Open segment {notice.segmentId} details
+                {notice.segmentLinkText ?? `Open segment ${notice.segmentId} details`}
               </Link>{' '}
               (
               <a href={sweedSegmentUrl(notice.segmentId)} target="_blank" rel="noreferrer">
@@ -670,6 +676,38 @@ export function GeoSegmentRulesPage() {
   const [busyRuleId, setBusyRuleId] = useState<number | null>(null)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [notice, setNotice] = useState<ActionNotice | null>(null)
+  const [refreshingAll, setRefreshingAll] = useState(false)
+
+  // Batch "Refresh all segment caches": queues a per-segment membership
+  // refresh for every enabled segment Helios knows about. Each segment's
+  // own details page reflects its individual refresh status; this is the
+  // one-click way to pull all of them from Sweed at once.
+  async function handleRefreshAll(): Promise<void> {
+    setErrorMessage(null)
+    setNotice(null)
+    setRefreshingAll(true)
+    try {
+      const result = await mutateJson(
+        '/api/config/marketing/segments/refresh-all-membership',
+        SegmentMembershipRefreshAllResponseSchema,
+        { method: 'POST' },
+      )
+      setNotice({
+        scope: 'global',
+        label: 'queued',
+        message:
+          result.enqueued === 0
+            ? 'No enabled segments are cached, so there was nothing to refresh.'
+            : `Queued membership refreshes for ${result.enqueued} enabled segment${result.enqueued === 1 ? '' : 's'}. Each segment updates when its pull from Sweed finishes.`,
+        segmentId: result.segmentIds[0],
+        segmentLinkText: 'Open a segment to watch its status',
+      })
+    } catch (cause) {
+      setErrorMessage(cause instanceof Error ? cause.message : 'Failed to queue a refresh.')
+    } finally {
+      setRefreshingAll(false)
+    }
+  }
 
   async function handleCreate(): Promise<void> {
     setErrorMessage(null)
@@ -803,6 +841,29 @@ export function GeoSegmentRulesPage() {
       ) : null}
 
       {notice?.scope === 'global' ? <ActionNoticeStrip notice={notice} /> : null}
+
+      {canEdit ? (
+        <article className="history-card" style={{ marginTop: 16 }}>
+          <div className="history-card-topline wrap-row" style={{ alignItems: 'flex-start' }}>
+            <div style={{ minWidth: 0, flex: '1 1 260px' }}>
+              <strong>Membership caches</strong>
+              <p className="subtle-copy" style={{ marginTop: 4 }}>
+                Pull the latest membership from Sweed for every enabled segment in Helios. Each
+                segment also has its own refresh button on its details page.
+              </p>
+            </div>
+            <button
+              type="button"
+              className="ghost-button"
+              disabled={refreshingAll}
+              onClick={() => void handleRefreshAll()}
+              style={{ minHeight: 44 }}
+            >
+              {refreshingAll ? 'Queuing…' : 'Refresh all segment caches'}
+            </button>
+          </div>
+        </article>
+      ) : null}
 
       {canEdit ? (
         <article className="history-card" style={{ marginTop: 16 }}>

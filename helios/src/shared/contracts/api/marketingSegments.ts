@@ -118,3 +118,14 @@ export const SegmentMembershipRefreshResponseSchema = z.object({
 export type SegmentMembershipRefreshResponse = z.infer<
   typeof SegmentMembershipRefreshResponseSchema
 >
+
+// Batch "Refresh all segment caches": fans the per-segment refresh job
+// out across every enabled cached segment (deduped per segment). Returns
+// how many segments were queued so the UI can confirm the action.
+export const SegmentMembershipRefreshAllResponseSchema = z.object({
+  enqueued: z.number().int().nonnegative(),
+  segmentIds: z.array(z.number().int().positive()),
+})
+export type SegmentMembershipRefreshAllResponse = z.infer<
+  typeof SegmentMembershipRefreshAllResponseSchema
+>
