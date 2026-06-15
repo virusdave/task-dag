@@ -35,6 +35,7 @@ import { registerBudtenderAnalyticsRoutes } from '../routes/budtenderAnalytics.j
 import { registerCatalogAnalyticsRoutes } from '../routes/catalogAnalytics.js'
 import { registerConfigParsingRoutes } from '../routes/configParsing.js'
 import { registerCustomerReviewsRoutes } from '../routes/customerReviews.js'
+import { registerCrmSegmentMetricsRoutes } from '../routes/crmSegmentMetrics.js'
 import { registerCustomerValueAnalyticsRoutes } from '../routes/customerValueAnalytics.js'
 import { registerInventoryProcurementRoutes } from '../routes/inventoryProcurement.js'
 import { registerHistoryRoutes } from '../routes/history.js'
@@ -266,6 +267,7 @@ async function registerApplicationSurface(server: FastifyInstance) {
   await registerTargetTrackingRoutes(server)
   await registerBudtenderAnalyticsRoutes(server)
   await registerCatalogAnalyticsRoutes(server)
+  await registerCrmSegmentMetricsRoutes(server)
   await registerCustomerValueAnalyticsRoutes(server)
   await registerInventoryProcurementRoutes(server)
   await registerJobRoutes(server)

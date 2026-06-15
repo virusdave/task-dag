@@ -7566,6 +7566,106 @@ span.metric-chart-legend-item {
 }
 
 /* ===========================================================================
+ * CRM Segments tab (/metrics/crm-segments)
+ *
+ * Mobile-first: the segment picker grows to the full control row, KPIs
+ * reuse the auto-fit .customer-value-kpis grid, and the distribution
+ * sections render as 100%-width horizontal bars (.crm-seg-barlist) rather
+ * than dense tables so they stay legible on a phone.
+ * ========================================================================= */
+
+.crm-seg-picker {
+  min-width: 0;
+  max-width: 100%;
+  flex: 1 1 220px;
+}
+
+.crm-seg-header {
+  justify-content: space-between;
+}
+
+.crm-seg-header-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  font-size: 12px;
+}
+
+.crm-seg-notes {
+  margin: 0;
+  padding: 8px 12px 8px 28px;
+  border: 1px solid #f0e2c0;
+  background: #fffbef;
+  border-radius: 6px;
+  font-size: 12px;
+  color: #6b5b1f;
+}
+
+.crm-seg-notes li {
+  margin: 2px 0;
+}
+
+.crm-seg-error {
+  color: #b00020;
+  font-size: 13px;
+}
+
+.crm-seg-section h3 {
+  margin: 0 0 2px;
+  font-size: 14px;
+}
+
+.crm-seg-empty {
+  font-size: 12px;
+  padding: 8px 0;
+}
+
+.crm-seg-barlist {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.crm-seg-bar {
+  display: grid;
+  grid-template-columns: minmax(90px, 38%) 1fr auto;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.crm-seg-bar-label {
+  color: #444;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.crm-seg-bar-track {
+  background: #f0f0f0;
+  border-radius: 4px;
+  height: 12px;
+  overflow: hidden;
+}
+
+.crm-seg-bar-fill {
+  display: block;
+  height: 100%;
+  background: #4a7cba;
+  border-radius: 4px;
+  min-width: 2px;
+}
+
+.crm-seg-bar-value {
+  font-variant-numeric: tabular-nums;
+  color: #333;
+  white-space: nowrap;
+}
+
+/* ===========================================================================
  * Catalog → Purchase Sell-Through pages
  *
  * The list, PO detail, and per-line pages are buying-decision surfaces.

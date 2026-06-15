@@ -7,12 +7,65 @@
 > them to the questions worth asking, load fast, stay DB-cheap, and be
 > mobile-first.
 >
-> Status: **design** (oracle-reviewed). No code landed yet.
+> Status: **in build** (oracle-reviewed design + statistical methodology).
+> Phase 1 shipped — see "Implementation status" below.
 > Companion: [`../../runbooks/helios-metrics-surface.md`](../../runbooks/helios-metrics-surface.md)
 > (current metrics inventory) and
 > [`../../sweed/marketing.md`](../../sweed/marketing.md) (segment RPCs).
 > Related: virusdave/top-level#12 / FreshlyBakedNYC/automation#40
 > (segment-cache infra already landed in migration 059).
+
+---
+
+## 0. Implementation status & refined IA (2026-06)
+
+The operator refined the page IA: instead of an index+detail pair, ship two
+dedicated **metrics tabs** (both `explore`-gated, both own their full UI like
+the catalog / budtender tabs):
+
+- **CRM Segments** (`/metrics/crm-segments`) — *about* one chosen segment:
+  membership, growth (entries/week), activity / value / recency, fulfillment
+  mix. **SHIPPED (Phase 1).**
+- **CRM Segment Analysis** (`/metrics/crm-segment-analysis`) — segment-vs-rest
+  / segment-vs-everyone comparison with lift/index, deltas, category &
+  fulfillment affinity, and significance flags. **Pending (Phase 3+).**
+
+A second oracle review (2026-06) refined the **statistical methodology** for
+the Analysis tab (use it when building Phase 3+):
+
+- Baseline = **rest** (everyone − segment), not "everyone" (avoids partial
+  self-comparison); show "everyone" only as context.
+- Rates / penetration / channel share: **two-proportion z** vs rest
+  (pooled SE for the test, unpooled SE for the CI). Suppress badges when
+  either denominator `< 30` or expected successes/failures `< 5`.
+- Continuous (AOV, margin/customer, units/order, days-between): show
+  mean delta + p50/p75/p90; **Welch t** only at healthy n (≥30 each).
+  Skewed money distributions ⇒ prefer medians/percentiles.
+- Category/subcategory families: per-cell two-proportion z on **customer
+  penetration**, then **Benjamini-Hochberg FDR** q-values
+  (`q≤0.05` strong, `q≤0.10` notable, else directional) + min-volume
+  guards (segment buyers ≥5, rest buyers ≥10).
+- Never claim causality / predictive CLV / attribution; dynamic segments
+  tautologically over-index on their defining behaviour — label as
+  descriptive.
+
+**Phase 1 (shipped) — files:**
+- Contract `helios/src/shared/contracts/api/crmSegmentMetrics.ts`
+  (`GET /api/crm/segments` list + `GET /api/crm/segment-metrics`).
+- Query `helios/src/server/crmSegmentMetrics/crmSegmentMetricsQueries.ts`
+  (header-grain over `sweed_orders` ⋈ `sweed_customer_segments`; reuses
+  `getSegmentDetails` for identity/membership/entry-histogram; rides the
+  migration-043 `(dealer_id, customer_id, pay_time)` and migration-080
+  `(segment_id, …)` indexes — no per-line COGS, no category join yet).
+- Route `helios/src/server/routes/crmSegmentMetrics.ts`.
+- Tab `helios/src/client/routes/metrics/CrmSegmentsTab.tsx` + wiring in
+  `MetricsLayoutPage.tsx` (tab id `crm-segments`) + sidebar leaf in
+  `AppShell.tsx`.
+
+**Deferred to later phases (need the §4 fact rollups):** margin/member,
+GM%, category & subcategory mix/affinity, and the entire CRM Segment
+Analysis comparison tab. Phase 2 builds the daily customer/category facts;
+Phase 3 builds the Analysis tab on top of them.
 
 ---
 

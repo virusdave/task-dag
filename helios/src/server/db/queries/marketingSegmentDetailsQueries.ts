@@ -28,7 +28,7 @@ const SITE_LABEL_BY_SLUG: Record<string, string> = Object.fromEntries(
   SITE_PINS.map((p) => [p.siteSlug, p.label]),
 )
 
-function mapSegmentType(typeId: number | null): SegmentType {
+export function mapSegmentType(typeId: number | null): SegmentType {
   if (typeId === 1) return 'static'
   if (typeId === 2) return 'dynamic'
   return 'unknown'
@@ -47,7 +47,7 @@ function isSiteDealer(dealerId: number | null): boolean {
 // Scope of a (scope_dealer_id, scope_dealer_name) pair: a store dealer => the
 // site; the state holder / unknown => state-wide. dealer 0 is our NOT-NULL
 // "unknown owning dealer" sentinel.
-function scopeOf(
+export function scopeOf(
   scopeDealerId: number | null,
   scopeDealerName: string | null,
 ): { scopeLevel: SegmentScopeLevel; scopeLabel: string } {

@@ -45,6 +45,7 @@ import {
   MetricsDefaultsModal,
   type MetricsDefaultsChange,
 } from './MetricsDefaultsModal.js'
+import { CrmSegmentsTab } from './CrmSegmentsTab.js'
 import { CustomerValueTab } from './CustomerValueTab.js'
 import { InventoryProcurementTab } from './InventoryProcurementTab.js'
 import { TargetTrackingTab } from './TargetTrackingTab.js'
@@ -196,6 +197,7 @@ export type MetricsTabId =
   | 'catalog'
   | 'budtenders'
   | 'customer-value'
+  | 'crm-segments'
   | 'target'
 
 const DEFAULT_TAB_ID: MetricsTabId = 'essentials'
@@ -292,6 +294,20 @@ const METRICS_TABS: ReadonlyArray<MetricsTab> = [
       'Short- and long-term value of customers. Top grid shows the four mandatory LTV histograms (customer count by purchase number, basket-size escalation, lifetime $ by total purchases, revenue mix by purchase ordinal). Configurable metric basis (gross sales / margin $). Drives CAC / spend-to-convert / repeat-vs-tourist decisions.',
     defaultAgg: 'week',
     defaultStackMode: 'none',
+    showAggControl: false,
+    showStackControl: false,
+    include: () => false,
+    grant: 'explore',
+  },
+  {
+    id: 'crm-segments',
+    label: 'CRM Segments',
+    description:
+      'About a customer segment: cached membership, growth (entries/week), and how active / valuable / recent its members are, plus fulfillment mix. Pick a segment, site scope, and window. Companion to CRM Segment Analysis (segment-vs-rest comparison).',
+    defaultAgg: 'week',
+    defaultStackMode: 'none',
+    // Owns its full UI (segment picker + sites/range + cards). No shared
+    // toolbar or registry metrics.
     showAggControl: false,
     showStackControl: false,
     include: () => false,
@@ -770,6 +786,11 @@ export function MetricsLayoutPage() {
           <BudtenderPerformanceTab />
         ) : activeTab.id === 'customer-value' ? (
           <CustomerValueTab />
+        ) : activeTab.id === 'crm-segments' ? (
+          // CRM Segments owns its full UI (segment picker + sites/range +
+          // about-the-segment cards). Single consolidated fetch; no shared
+          // toolbar. Same short-circuit pattern as the other bespoke tabs.
+          <CrmSegmentsTab />
         ) : activeTab.id === 'target' ? (
           // Target tracking owns its full UI (cost config + break-even
           // gauge + per-period bar chart). No shared toolbar.

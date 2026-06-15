@@ -143,6 +143,7 @@ function buildPrimarySidebarNodes(
   type MetricsLeaf = { key: MetricGrantKey; navKey: string; label: string; to: string }
   const metricsLeaves: ReadonlyArray<MetricsLeaf> = [
     { key: 'explore', navKey: 'reports.metrics.explore', label: 'Explore', to: '/metrics' },
+    { key: 'explore', navKey: 'reports.metrics.crmSegments', label: 'CRM Segments', to: '/metrics/crm-segments' },
     { key: 'brands', navKey: 'reports.metrics.brands', label: 'Brands', to: '/metrics/brands' },
     { key: 'distributors', navKey: 'reports.metrics.distributors', label: 'Distributors', to: '/metrics/distributors' },
     { key: 'staff', navKey: 'reports.metrics.staff', label: 'Staff', to: '/metrics/staff' },
