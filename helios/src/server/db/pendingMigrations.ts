@@ -1136,7 +1136,19 @@ const SENTINELS: MigrationSentinel[] = [
       'the append-only lp_events sink. The GAds → Landing pages analytics surface ' +
       '(automation#47) reads only this rollup; without it the refresh job fails and ' +
       'the dashboard renders no data.',
-    check: (db) => tableExists(db, 'gads_lp_rollup'),
+    // Probe BOTH tables and the grain unique index so a partial apply
+    // (e.g. the first table created but a later statement failed — the
+    // migration is not wrapped in one transaction) is reported pending
+    // rather than silently "applied". Re-running the idempotent
+    // migration completes the missing objects.
+    check: async (db) => {
+      const [hasRollup, hasState, hasGrainIndex] = await Promise.all([
+        tableExists(db, 'gads_lp_rollup'),
+        tableExists(db, 'gads_lp_rollup_refresh_state'),
+        indexExists(db, 'gads_lp_rollup_grain_idx'),
+      ])
+      return hasRollup && hasState && hasGrainIndex
+    },
   },
 ]
 
