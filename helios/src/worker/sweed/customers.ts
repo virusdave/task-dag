@@ -62,14 +62,18 @@ import { callSweedRpc } from './rpc.js'
 //     `store.customer.list` doesn't surface arbitrary CRM rows;
 //     `store.customer.{search,find,lookup,by.phone,…}` all return
 //     "Action is not available".
-//   - The "add customer to a static marketing segment" RPC.
-//     `store.marketing.segment.member.{add,delete}` etc. all
-//     return "Action is not available"; segment.edit silently
-//     accepts member-list-shaped params without mutating
-//     totalCustomers. The operator needs to capture the real RPC
-//     name + payload from Sweed's admin-UI network tab when they
-//     manually add a customer to a Static segment, and update the
-//     constants below.
+//
+// RESOLVED (operator-verified 2026-06, captured from the Sweed
+// admin-UI network tab while manually adding a customer to static
+// segment 10282 under the Bronx dealer context):
+//   - The "add customer to a static marketing segment" RPC is
+//     `store.marketing.segment.result.add` with params
+//     `{ id: "<segmentId>", customerIds: ["<customerId>", …] }`
+//     (BOTH the segment id and the customer ids are STRINGS, and
+//     `customerIds` is an array — the call is batch-capable). It
+//     must run under the segment-owning dealer context (e.g.
+//     dealer 210249 for Bronx-owned segments). The earlier
+//     `store.marketing.segment.member.add` guess is retired below.
 // =====================================================================
 
 // Verified: store.customer.list exists. Note: returns 0 rows in
@@ -92,15 +96,19 @@ export const SWEED_RPC_CLIENT_GET = 'store.customer.get'
 // orchestrator will continue to fail-and-log here until the
 // correct payload is identified.
 export const SWEED_RPC_CLIENT_ADD = 'store.customer.add'
-// NEEDS_OPERATOR_VERIFICATION. `store.marketing.segment.member.add`
-// returns "Action is not available" on live prod. Static-segment
-// member management appears to go through a different RPC we
-// haven't been able to identify by probing. Leaving the old value
-// here so failures are still recorded with a recognizable trail —
-// retire this once the real method name is captured from the
-// Sweed admin UI.
-export const SWEED_RPC_SEGMENT_MEMBER_ADD = 'store.marketing.segment.member.add'
-export const SWEED_RPC_SEGMENT_MEMBER_DELETE = 'store.marketing.segment.member.delete'
+// OPERATOR-VERIFIED (2026-06). Add one or more customers to a static
+// marketing segment. Captured live from the Sweed admin UI:
+//   {"name":"store.marketing.segment.result.add",
+//    "params":{"id":"10282","customerIds":["428378"]}}
+// `id` (segment) and each `customerIds` entry are STRINGS; the call
+// is batch-capable. Must run under the segment-owning dealer context.
+export const SWEED_RPC_SEGMENT_MEMBER_ADD = 'store.marketing.segment.result.add'
+// NEEDS_OPERATOR_VERIFICATION. The remove counterpart was NOT captured
+// alongside the add; `store.marketing.segment.result.delete` is the
+// strong same-family hypothesis (the old `…member.delete` value
+// definitely returned "Action is not available"). Mirrors the verified
+// add param shape. Confirm from the admin UI before relying on it.
+export const SWEED_RPC_SEGMENT_MEMBER_DELETE = 'store.marketing.segment.result.delete'
 
 export type ContactChannel = 'phone' | 'email'
 
@@ -349,14 +357,39 @@ export async function findOrCreateSweedClientForContacts(args: {
   return null
 }
 
+/**
+ * Add one customer to a static marketing segment. Convenience wrapper
+ * around the batch RPC (see `addSegmentMembers`). Caller MUST be inside
+ * a `withSweedSession` block, and `dealerId` MUST be the dealer that
+ * owns the segment (e.g. 210249 for Bronx-owned segments).
+ */
 export async function addSegmentMember(args: {
   dealerId: number
   segmentId: number
   customerId: number
 }): Promise<unknown> {
-  return callSweedRpc<unknown>(args.dealerId, SWEED_RPC_SEGMENT_MEMBER_ADD, {
+  return addSegmentMembers({
+    dealerId: args.dealerId,
     segmentId: args.segmentId,
-    clientId: args.customerId,
+    customerIds: [args.customerId],
+  })
+}
+
+/**
+ * Add a batch of customers to a static marketing segment in one RPC.
+ * `store.marketing.segment.result.add` accepts an array of customer
+ * ids (operator-verified). Both the segment id and the customer ids
+ * are sent as strings. Caller MUST be inside a `withSweedSession`
+ * block under the segment-owning dealer context.
+ */
+export async function addSegmentMembers(args: {
+  dealerId: number
+  segmentId: number
+  customerIds: ReadonlyArray<number>
+}): Promise<unknown> {
+  return callSweedRpc<unknown>(args.dealerId, SWEED_RPC_SEGMENT_MEMBER_ADD, {
+    id: String(args.segmentId),
+    customerIds: args.customerIds.map((id) => String(id)),
   })
 }
 
@@ -366,8 +399,8 @@ export async function removeSegmentMember(args: {
   customerId: number
 }): Promise<unknown> {
   return callSweedRpc<unknown>(args.dealerId, SWEED_RPC_SEGMENT_MEMBER_DELETE, {
-    segmentId: args.segmentId,
-    clientId: args.customerId,
+    id: String(args.segmentId),
+    customerIds: [String(args.customerId)],
   })
 }
 
