@@ -673,6 +673,14 @@ export const router = createBrowserRouter([
         loader: metricsLoader,
         path: 'metrics/:tabId',
       },
+      {
+        // Sub-page form, e.g. /metrics/gads-midtown/landing-pages.
+        // Same loader + page; MetricsLayoutPage reads :tabId and
+        // :subpage from useParams() and renders the matching surface.
+        element: <MetricsLayoutPage />,
+        loader: metricsLoader,
+        path: 'metrics/:tabId/:subpage',
+      },
     ],
     element: <AppShell />,
     id: 'root',

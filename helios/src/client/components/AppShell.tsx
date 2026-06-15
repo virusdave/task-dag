@@ -7,7 +7,8 @@ import {
   type MetricGrantKey,
   type SessionEnvelope,
 } from '../../shared/contracts/index.js'
-import { userHasMetricGrant } from '../../shared/domain/metricGrants.js'
+import { userHasAnyMetricGrant } from '../../shared/domain/metricGrants.js'
+import { requiredGadsGrants } from '../../shared/domain/gadsSites.js'
 import { buildAppPath } from '../app/paths.js'
 import { usePageTitle } from '../app/usePageTitle.js'
 import { buildCatalogSidebarSubtree } from '../routes/catalog/catalogSidebarSubtree.js'
@@ -140,18 +141,39 @@ function buildPrimarySidebarNodes(
   //   * Staff        → /metrics/staff        (alias for the budtenders tab)
   //   * Reordering   → /metrics/reordering   (alias for the inventory tab)
   const metricsChildren: TreeNavNode[] = []
-  type MetricsLeaf = { key: MetricGrantKey; navKey: string; label: string; to: string }
+  // A leaf shows if the user holds ANY of `anyOf`. Most leaves gate on a
+  // single grant; the GAds leaves use ANY-of so the `gads-all` superset
+  // reveals every per-site leaf (mirrors requiredGadsGrants on the server).
+  type MetricsLeaf = { anyOf: ReadonlyArray<MetricGrantKey>; navKey: string; label: string; to: string }
   const metricsLeaves: ReadonlyArray<MetricsLeaf> = [
-    { key: 'explore', navKey: 'reports.metrics.explore', label: 'Explore', to: '/metrics' },
-    { key: 'explore', navKey: 'reports.metrics.crmSegments', label: 'CRM Segments', to: '/metrics/crm-segments' },
-    { key: 'explore', navKey: 'reports.metrics.crmSegmentAnalysis', label: 'CRM Segment Analysis', to: '/metrics/crm-segment-analysis' },
-    { key: 'brands', navKey: 'reports.metrics.brands', label: 'Brands', to: '/metrics/brands' },
-    { key: 'distributors', navKey: 'reports.metrics.distributors', label: 'Distributors', to: '/metrics/distributors' },
-    { key: 'staff', navKey: 'reports.metrics.staff', label: 'Staff', to: '/metrics/staff' },
-    { key: 'reordering', navKey: 'reports.metrics.reordering', label: 'Reordering', to: '/metrics/reordering' },
+    { anyOf: ['explore'], navKey: 'reports.metrics.explore', label: 'Explore', to: '/metrics' },
+    { anyOf: ['explore'], navKey: 'reports.metrics.crmSegments', label: 'CRM Segments', to: '/metrics/crm-segments' },
+    { anyOf: ['explore'], navKey: 'reports.metrics.crmSegmentAnalysis', label: 'CRM Segment Analysis', to: '/metrics/crm-segment-analysis' },
+    { anyOf: ['brands'], navKey: 'reports.metrics.brands', label: 'Brands', to: '/metrics/brands' },
+    { anyOf: ['distributors'], navKey: 'reports.metrics.distributors', label: 'Distributors', to: '/metrics/distributors' },
+    { anyOf: ['staff'], navKey: 'reports.metrics.staff', label: 'Staff', to: '/metrics/staff' },
+    { anyOf: ['reordering'], navKey: 'reports.metrics.reordering', label: 'Reordering', to: '/metrics/reordering' },
+    {
+      anyOf: requiredGadsGrants('bronx'),
+      navKey: 'reports.metrics.gadsBronx',
+      label: 'GAds · Bronx',
+      to: '/metrics/gads-bronx/landing-pages',
+    },
+    {
+      anyOf: requiredGadsGrants('midtown'),
+      navKey: 'reports.metrics.gadsMidtown',
+      label: 'GAds · Midtown',
+      to: '/metrics/gads-midtown/landing-pages',
+    },
+    {
+      anyOf: requiredGadsGrants('all'),
+      navKey: 'reports.metrics.gadsAll',
+      label: 'GAds · All sites',
+      to: '/metrics/gads-all/landing-pages',
+    },
   ]
   for (const leaf of metricsLeaves) {
-    if (userHasMetricGrant(session?.user, leaf.key)) {
+    if (userHasAnyMetricGrant(session?.user, leaf.anyOf)) {
       metricsChildren.push({ kind: 'leaf', navKey: leaf.navKey, label: leaf.label, to: leaf.to })
     }
   }

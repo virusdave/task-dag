@@ -13,12 +13,15 @@ export const PermissionSetSchema = z.object({
 export type PermissionSet = z.infer<typeof PermissionSetSchema>
 
 // Per-user grants for individual subpages under the top-level
-// Metrics navbar branch. One key per direct child of the Metrics
-// branch (explore, brands, distributors, staff, reordering). The
-// admin role implicitly holds ALL grants; non-admins see ONLY the
-// grants stored on their users row. Grants gate both the sidebar
-// rendering (client) and the analytics API endpoints (server),
-// with the server as the authority.
+// Metrics navbar branch. Most keys gate one direct child of the
+// Metrics branch (explore, brands, distributors, staff, reordering).
+// The GAds keys are per-site (gads-bronx, gads-midtown) plus a
+// superset key (gads-all) that covers every current and future GAds
+// site; see helios/src/shared/domain/gadsSites.ts for the site↔grant
+// model and the requiredGadsGrants() gate. The admin role implicitly
+// holds ALL grants; non-admins see ONLY the grants stored on their
+// users row. Grants gate both the sidebar rendering (client) and the
+// analytics API endpoints (server), with the server as the authority.
 //
 // Adding a new key is a three-step change:
 //   1. Append it to the enum + ALL_METRIC_GRANT_KEYS below.
@@ -30,6 +33,9 @@ export const MetricGrantKeySchema = z.enum([
   'distributors',
   'staff',
   'reordering',
+  'gads-bronx',
+  'gads-midtown',
+  'gads-all',
 ])
 export type MetricGrantKey = z.infer<typeof MetricGrantKeySchema>
 export const ALL_METRIC_GRANT_KEYS: ReadonlyArray<MetricGrantKey> = [
@@ -38,6 +44,9 @@ export const ALL_METRIC_GRANT_KEYS: ReadonlyArray<MetricGrantKey> = [
   'distributors',
   'staff',
   'reordering',
+  'gads-bronx',
+  'gads-midtown',
+  'gads-all',
 ]
 
 export const SessionUserSchema = z.object({

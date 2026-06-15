@@ -72,6 +72,24 @@ const METRIC_GRANT_DISPLAY: Record<MetricGrantKey, { label: string; description:
     description: 'Inventory / running-low / slow-movers metrics.',
     href: '/metrics/reordering',
   },
+  'gads-bronx': {
+    label: 'GAds · Bronx',
+    description:
+      'Confidential Google Ads landing-page analytics for Bronx only (funnel + per-variant observed performance).',
+    href: '/metrics/gads-bronx/landing-pages',
+  },
+  'gads-midtown': {
+    label: 'GAds · Midtown',
+    description:
+      'Confidential Google Ads landing-page analytics for Midtown only (funnel + per-variant observed performance).',
+    href: '/metrics/gads-midtown/landing-pages',
+  },
+  'gads-all': {
+    label: 'GAds · All sites',
+    description:
+      'Confidential Google Ads landing-page analytics across ALL current and future sites. Superset: also grants every per-site GAds page.',
+    href: '/metrics/gads-all/landing-pages',
+  },
 }
 
 interface MetricGrantsRowProps {

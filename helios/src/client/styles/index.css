@@ -9652,3 +9652,302 @@ span.metric-chart-legend-item {
     padding-bottom: 4.5rem;
   }
 }
+
+/* ===========================================================================
+   GAds → Landing pages analytics (issue #18)
+   Per-site confidential dashboard. Mobile-first: KPI strip + funnel are
+   auto-fit grids that collapse to one column; the variant table scrolls
+   horizontally inside its own container so the page never overflows.
+   =========================================================================== */
+
+.gads-lp-tab {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.gads-lp-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.gads-lp-title {
+  font-size: 1.1rem;
+  font-weight: 600;
+  margin: 0;
+}
+
+.gads-lp-section-title {
+  font-size: 0.95rem;
+  font-weight: 600;
+  margin: 0 0 6px;
+}
+
+.gads-lp-error {
+  color: #b4233a;
+}
+
+/* ---------- Freshness + attribution status strip ---------- */
+
+.gads-lp-status {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.gads-lp-badge {
+  font-size: 0.72rem;
+  font-weight: 600;
+  background: #eef2f7;
+  border: 1px solid #d3dae4;
+  color: #3a455c;
+  padding: 2px 8px;
+  border-radius: 999px;
+}
+
+.gads-lp-badge.is-pending {
+  background: #f1ecff;
+  border-color: #c9bbf0;
+  color: #5a3fa0;
+}
+
+.gads-lp-badge.is-warn {
+  background: #fff3e3;
+  border-color: #e6c388;
+  color: #8a5a16;
+}
+
+/* ---------- KPI strip ---------- */
+
+.gads-lp-kpi-strip {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 10px;
+}
+
+.gads-lp-kpi {
+  padding: 8px 10px;
+  background: #f4f7fb;
+  border: 1px solid #d8dde6;
+  border-radius: 4px;
+}
+
+.gads-lp-kpi.is-pending {
+  background: #faf8ff;
+  border-style: dashed;
+  border-color: #c9bbf0;
+}
+
+.gads-lp-kpi-value {
+  font-size: 1.2rem;
+  font-weight: 600;
+  color: #1d2940;
+  font-variant-numeric: tabular-nums;
+}
+
+.gads-lp-kpi-label {
+  font-size: 0.78rem;
+  margin-top: 2px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* ---------- Pills ---------- */
+
+.gads-lp-pill {
+  display: inline-block;
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 1px 5px;
+  border-radius: 3px;
+  margin-left: 6px;
+  background: #e3e8f0;
+  color: #4a566e;
+}
+
+.gads-lp-pill.is-pending {
+  background: #ede6ff;
+  color: #5a3fa0;
+}
+
+/* ---------- Next-action card ---------- */
+
+.gads-lp-next-actions {
+  background: #fbfcfe;
+  border: 1px solid #dfe4ec;
+  border-radius: 6px;
+  padding: 10px 12px;
+}
+
+.gads-lp-action-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.gads-lp-action {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-left: 10px;
+  border-left: 3px solid #3c8a4a;
+}
+
+.gads-lp-action-title {
+  font-weight: 600;
+  font-size: 0.85rem;
+}
+
+/* ---------- Funnel waterfall ---------- */
+
+.gads-lp-funnel-note {
+  font-weight: 400;
+}
+
+.gads-lp-funnel-stages {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.gads-lp-funnel-stage {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.gads-lp-funnel-label {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+
+.gads-lp-funnel-count {
+  font-variant-numeric: tabular-nums;
+}
+
+.gads-lp-funnel-bar {
+  width: 100%;
+  height: 12px;
+  background: #eef0f4;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.gads-lp-funnel-bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #3c6ad0, #3c8a4a);
+}
+
+.gads-lp-funnel-step {
+  font-size: 0.72rem;
+}
+
+/* ---------- Variant table ---------- */
+
+.gads-lp-variants-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.gads-lp-lowsample-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.gads-lp-table-scroll {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.gads-lp-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+  min-width: 640px;
+}
+
+.gads-lp-table th,
+.gads-lp-table td {
+  padding: 4px 8px;
+  border-bottom: 1px solid #ececec;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.gads-lp-table th.num,
+.gads-lp-table td.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.gads-lp-table tr.is-low-sample td {
+  opacity: 0.55;
+}
+
+/* GAds: next-action links jump to the matching variant row. */
+.gads-lp-action-title {
+  color: var(--accent-strong);
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.gads-lp-action-title:hover,
+.gads-lp-action-title:focus-visible {
+  text-decoration: underline;
+}
+
+.gads-lp-table tr:target td {
+  background: #fff7dc;
+}
+
+/* GAds: phone-first overrides. Keep density, but make the real controls
+   finger-friendly (44px targets) and the KPI strip two-up. */
+@media (max-width: 640px) {
+  .gads-lp-header,
+  .gads-lp-controls,
+  .gads-lp-controls .metrics-control-group {
+    width: 100%;
+  }
+
+  .gads-lp-controls .metrics-site-chip {
+    flex: 1 1 0;
+    min-height: 44px;
+    padding: 0.35rem 0.75rem;
+  }
+
+  .gads-lp-kpi-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
+
+  .gads-lp-variants-head .metrics-control-group {
+    width: 100%;
+    align-items: stretch;
+  }
+
+  .gads-lp-sort,
+  .gads-lp-lowsample-toggle {
+    width: 100%;
+    min-height: 44px;
+  }
+
+  .gads-lp-table th,
+  .gads-lp-table td {
+    padding: 6px;
+  }
+}
