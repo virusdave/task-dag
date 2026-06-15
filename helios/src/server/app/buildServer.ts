@@ -66,6 +66,7 @@ import { registerUtilitiesPromoNamesRoutes } from '../routes/utilitiesPromoNames
 import { registerWarehouseLocationsRoutes } from '../routes/warehouseLocations.js'
 import { registerTaskDagRoutes } from '../routes/taskDag.js'
 import { registerUsersRoutes } from '../routes/users.js'
+import { registerGeoSegmentRulesRoutes } from '../routes/geoSegmentRules.js'
 import {
   registerVisitorScansAdminRoutes,
   registerVisitorScansWebhookRoutes,
@@ -269,6 +270,7 @@ async function registerApplicationSurface(server: FastifyInstance) {
   await registerJobRoutes(server)
   await registerTaskDagRoutes(server)
   await registerUsersRoutes(server)
+  await registerGeoSegmentRulesRoutes(server)
   await registerVisitorScansAdminRoutes(server)
   await registerCustomersMapRoutes(server)
   await registerWhiteglovePricingRoutes(server)

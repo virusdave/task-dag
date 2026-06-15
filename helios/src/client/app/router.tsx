@@ -58,6 +58,7 @@ import { ConfigWorkersPage } from '../routes/config/ConfigWorkersPage.js'
 import { SweedAuthLogPage, sweedAuthLogLoader } from '../routes/config/SweedAuthLogPage.js'
 import { SweedSessionsPage, sweedSessionsLoader } from '../routes/config/SweedSessionsPage.js'
 import { UsersPage, usersLoader } from '../routes/config/UsersPage.js'
+import { GeoSegmentRulesPage, geoSegmentRulesLoader } from '../routes/config/GeoSegmentRulesPage.js'
 import { ConfigWorkersSchedulingPage, configWorkersSchedulingLoader } from '../routes/config/ConfigWorkersSchedulingPage.js'
 import { DashboardPage } from '../routes/dashboard/DashboardPage.js'
 import { GroupDetailPage, groupDetailLoader } from '../routes/groups/GroupDetailPage.js'
@@ -595,6 +596,11 @@ export const router = createBrowserRouter([
         element: <UsersPage />,
         loader: usersLoader,
         path: 'config/users',
+      },
+      {
+        element: <GeoSegmentRulesPage />,
+        loader: geoSegmentRulesLoader,
+        path: 'config/marketing/geo-segment-rules',
       },
       {
         element: <JobsPage />,

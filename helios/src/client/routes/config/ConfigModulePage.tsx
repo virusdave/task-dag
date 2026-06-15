@@ -67,6 +67,23 @@ export function ConfigModulePage() {
 
         <article className="mini-card">
           <header>
+            <strong>Marketing</strong>
+            <Pill tone="success">live</Pill>
+          </header>
+          <p className="subtle-copy">
+            Geofenced, scan-location-based segment assignment. Add customers to a Sweed marketing
+            segment when their scanned ID home address geocodes within a radius of a store. First
+            scan rules run live on-scan.
+          </p>
+          <div className="inline-row wrap-row module-card-links">
+            <Link to={buildHeliosModulePath('config', 'marketing/geo-segment-rules')}>
+              Open Geo segment rules
+            </Link>
+          </div>
+        </article>
+
+        <article className="mini-card">
+          <header>
             <strong>Access</strong>
             <Pill tone="success">live</Pill>
           </header>
