@@ -18,7 +18,10 @@
  *      helper itself dedupes within a 5-minute window per (product,
  *      enqueue_reason).
  *   4. Fires exactly one `pageDave()` per fired alarm class
- *      summarizing how many products / brands were re-enqueued.
+ *      summarizing how many products / brands were re-enqueued —
+ *      EXCEPT for classes in `NON_PAGING_ALARM_CLASSES` (currently
+ *      `in_stock`), which re-enqueue silently because the page was
+ *      pure noise.
  *   5. Emits a single `config.workers.market_evidence_alarm.completed`
  *      audit event summarising the run.
  *
@@ -43,6 +46,21 @@ import type { JobHandlerContext } from '../runtime/jobRegistry.js'
 
 /** Per-brand sibling expansion cap; matches the 50 in the spec. */
 export const BRAND_SIBLING_CAP = 50
+
+/**
+ * Alarm classes whose re-enqueue is routine enough that paging the
+ * operator on every fire is just noise. We still re-enqueue these (the
+ * whole point of the scan), we just don't page on them — the rolling
+ * refresh picks the work up and the audit event records what happened.
+ *
+ * `in_stock` lives here: an in-stock product with expired/expiring
+ * competitor data is the common, expected steady-state case, so the
+ * page added nothing actionable. See virusdave/automation operator
+ * request (recurring "in_stock market-evidence alarm" page).
+ */
+export const NON_PAGING_ALARM_CLASSES: ReadonlySet<MarketRefreshAlarmClass> = new Set([
+  'in_stock',
+])
 
 /** How far ahead of expires_at we treat evidence as "about to expire". */
 export const EXPIRING_SOON_WINDOW_MS = 12 * 60 * 60 * 1000
@@ -456,9 +474,11 @@ export async function executeMarketEvidenceAlarmScan(
     }
     enqueuedByClass[batch.alarmClass] = enqueuedInBatch
     totalEnqueued += enqueuedInBatch
-    if (batch.productIds.length > 0) {
+    if (batch.productIds.length > 0 && !NON_PAGING_ALARM_CLASSES.has(batch.alarmClass)) {
       // Page the operator once per class, regardless of how many
-      // brand-keyed enqueue calls we just fanned out into.
+      // brand-keyed enqueue calls we just fanned out into. Classes in
+      // NON_PAGING_ALARM_CLASSES (e.g. in_stock) still re-enqueue above
+      // but are intentionally silent — the page was pure noise.
       await deps.page(batch.pageMessage)
       pagedClasses.push(batch.alarmClass)
     }

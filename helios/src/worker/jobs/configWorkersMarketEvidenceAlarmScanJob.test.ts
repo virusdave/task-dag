@@ -212,7 +212,7 @@ describe('executeMarketEvidenceAlarmScan', () => {
     expect(state.audits[0]?.enqueuedByClass).toEqual({ in_stock: 0, pending_purchase: 0, brand_match: 0 })
   })
 
-  it('two expired in-stock products enqueue at priority=0 and page once', async () => {
+  it('two expired in-stock products enqueue at priority=0 but do NOT page (in_stock is silent)', async () => {
     const state = defaultState([
       row({ productId: 10, brandName: 'BrandA', alarmClass: 'in_stock', freshness: 'expired' }),
       row({ productId: 11, brandName: 'BrandA', alarmClass: 'in_stock', freshness: 'expired' }),
@@ -227,10 +227,11 @@ describe('executeMarketEvidenceAlarmScan', () => {
     expect(state.enqueueCalls[0]?.priority).toBe(0)
     expect(state.enqueueCalls[0]?.alarmClass).toBe('in_stock')
     expect(state.enqueueCalls[0]?.trigger).toEqual({ kind: 'in-stock-alarm' })
-    expect(state.pages).toHaveLength(1)
-    expect(state.pages[0]).toMatch(/^in_stock market-evidence alarm/)
+    // in_stock is a NON_PAGING_ALARM_CLASS: we still re-enqueue, but the
+    // operator is not paged (the page was pure noise).
+    expect(state.pages).toEqual([])
     expect(result.totalEnqueued).toBe(2)
-    expect(result.pagedClasses).toEqual(['in_stock'])
+    expect(result.pagedClasses).toEqual([])
   })
 
   it('absent pending-purchase product enqueues + pages with the pending_purchase message', async () => {
@@ -283,7 +284,8 @@ describe('executeMarketEvidenceAlarmScan', () => {
     expect(state.enqueueCalls).toHaveLength(1)
     expect(state.enqueueCalls[0]?.productIds).toEqual([200, 201, 202])
     expect(state.enqueueCalls[0]?.alarmClass).toBe('in_stock')
-    expect(state.pages[0]).toMatch(/3 products \(1 brands\)/)
+    // in_stock no longer pages; sibling expansion still feeds the enqueue.
+    expect(state.pages).toEqual([])
   })
 
   it('filters out alarm rows whose freshness does not warrant a refresh', async () => {
@@ -325,9 +327,16 @@ describe('executeMarketEvidenceAlarmScan', () => {
     })
   })
 
-  it('does not page on a class with no candidates even if other classes fire', async () => {
+  it('pages exactly once for a paging class that fires', async () => {
     const state = defaultState([
-      row({ productId: 10, brandName: 'BrandA', alarmClass: 'in_stock', freshness: 'expired' }),
+      row({
+        productId: 77,
+        brandName: 'BrandZ',
+        alarmClass: 'pending_purchase',
+        freshness: 'absent',
+        capturedAt: null,
+        expiresAt: null,
+      }),
     ])
     await executeMarketEvidenceAlarmScan(
       { trigger: 'scheduled', requestedByUserId: null },
@@ -335,12 +344,19 @@ describe('executeMarketEvidenceAlarmScan', () => {
       NOW,
     )
     expect(state.pages).toHaveLength(1)
-    expect(state.pages[0]).toMatch(/^in_stock/)
+    expect(state.pages[0]).toMatch(/^pending_purchase/)
   })
 
   it('survives a page failure by surfacing the error (no silent swallow)', async () => {
     const state = defaultState([
-      row({ productId: 10, brandName: 'BrandA', alarmClass: 'in_stock', freshness: 'expired' }),
+      row({
+        productId: 77,
+        brandName: 'BrandZ',
+        alarmClass: 'pending_purchase',
+        freshness: 'absent',
+        capturedAt: null,
+        expiresAt: null,
+      }),
     ])
     const deps = buildFakeDeps(state)
     const failingDeps: AlarmScanDependencies = {
