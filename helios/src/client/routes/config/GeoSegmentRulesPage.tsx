@@ -19,7 +19,7 @@
 // application ledger is keyed by rule id; the builder locks them on edit.
 
 import { useMemo, useState, type CSSProperties } from 'react'
-import { useLoaderData, useRevalidator, useRouteLoaderData } from 'react-router-dom'
+import { Link, useLoaderData, useRevalidator, useRouteLoaderData } from 'react-router-dom'
 
 import {
   GeoSegmentRuleDeleteResponseSchema,
@@ -110,9 +110,14 @@ function ActionNoticeStrip({ notice }: { notice: ActionNotice }) {
           {notice.segmentId ? (
             <>
               {' '}
+              <Link to={`/config/marketing/segments/${notice.segmentId}`}>
+                Open segment {notice.segmentId} details
+              </Link>{' '}
+              (
               <a href={sweedSegmentUrl(notice.segmentId)} target="_blank" rel="noreferrer">
-                Open Sweed segment {notice.segmentId}
+                Sweed
               </a>
+              )
             </>
           ) : null}
         </span>
@@ -858,7 +863,14 @@ export function GeoSegmentRulesPage() {
                     </strong>
                     <p className="subtle-copy" style={{ marginTop: 2 }}>
                       rule #{rule.id} · segment{' '}
-                      <a href={sweedSegmentUrl(rule.segmentId)} target="_blank" rel="noreferrer">{rule.segmentId}</a> · dealer {rule.dealerId}
+                      <Link to={`/config/marketing/segments/${rule.segmentId}`}>
+                        {rule.segmentId}
+                      </Link>{' '}
+                      (
+                      <a href={sweedSegmentUrl(rule.segmentId)} target="_blank" rel="noreferrer">
+                        Sweed
+                      </a>
+                      ) · dealer {rule.dealerId}
                     </p>
                     <p className="subtle-copy" style={{ marginTop: 2 }}>{conditions}</p>
                     {rule.note ? <p className="subtle-copy" style={{ marginTop: 2 }}>{rule.note}</p> : null}

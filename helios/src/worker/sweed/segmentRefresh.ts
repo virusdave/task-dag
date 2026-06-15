@@ -190,3 +190,58 @@ export async function refreshSegmentMembershipBulk(args: {
   }
   return result
 }
+
+/**
+ * Refresh ONE segment's full cached membership (the Helios segment
+ * details page "Refresh membership cache" button). Single-segment
+ * analogue of refreshSegmentMembershipBulk: refresh the catalog so the
+ * segment's metadata/scope is current, fetch its full member list via
+ * one paginated `store.marketing.segment.result.list`, and
+ * snapshot-replace its cached rows (authoritative per-segment writer).
+ *
+ * Throws on Sweed/transport failure so the caller can mark the
+ * per-segment refresh highwater failed. MUST run inside a
+ * `withSweedSession` block. Returns the number of members cached.
+ *
+ * Cost: at most one catalog refresh (highwater-gated, shared) + one
+ * paginated member pull + one bounded write-on-change snapshot.
+ */
+export async function refreshOneSegmentMembership(args: {
+  segmentId: number
+  stateDealerId: number
+}): Promise<number> {
+  // Keep the catalog current so the segment's name/type/scope are right
+  // (non-fatal: fall back to whatever is cached).
+  try {
+    await refreshMarketingCatalogIfStale({ stateDealerId: args.stateDealerId })
+  } catch {
+    // ignore — use the already-cached catalog row, if any.
+  }
+
+  const catalog = await readMarketingCatalogSegments(getPool(), { includeDisabled: true })
+  const seg = catalog.find((s) => s.segmentId === args.segmentId) ?? null
+
+  // Prefer the segment's own scope dealer; fall back to the state dealer
+  // when the catalog doesn't carry one (or the segment isn't cached yet).
+  const dealerId = seg?.scopeDealerId ?? args.stateDealerId
+  const members = await getSweedMarketingSegmentMembers({ dealerId, segmentId: args.segmentId })
+
+  await snapshotSegmentMembers({
+    segmentId: args.segmentId,
+    segmentName: seg?.segmentName ?? `Segment #${args.segmentId}`,
+    segmentDescription: seg?.segmentDescription ?? null,
+    segmentTypeId: seg?.segmentTypeId ?? null,
+    segmentTypeName: seg?.segmentTypeName ?? null,
+    scopeDealerId: seg?.scopeDealerId ?? null,
+    scopeDealerName: null,
+    members: members.map((m) => ({
+      customerId: m.customerId,
+      // result.list has no per-member enabled flag; membership is
+      // presence. Carry the segment's own enabled state.
+      enabled: seg?.enabled ?? null,
+      dateOnEnter: m.dateOnEnter,
+    })),
+  })
+
+  return members.length
+}

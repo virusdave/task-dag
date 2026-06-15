@@ -51,6 +51,7 @@ export const JOB_EXECUTION_POOL_BY_TYPE: Record<JobType, JobPoolMetadata> = {
   'config.workers.enrich_delivery_address': { pool: 'sweed', requiresSweedSession: true },
   'config.workers.link_visitor_scan_to_sweed': { pool: 'sweed', requiresSweedSession: true },
   'config.workers.refresh_sweed_customer_segments': { pool: 'sweed', requiresSweedSession: true },
+  'config.workers.refresh_sweed_segment_members': { pool: 'sweed', requiresSweedSession: true },
   'reconcile.group': { pool: 'sweed', requiresSweedSession: true },
   'screens.banner_bulk_toggle': { pool: 'sweed', requiresSweedSession: true },
   'screens.banner_refresh': { pool: 'sweed', requiresSweedSession: true },

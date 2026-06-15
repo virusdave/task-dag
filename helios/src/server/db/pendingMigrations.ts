@@ -1001,6 +1001,30 @@ const SENTINELS: MigrationSentinel[] = [
       '(caught/logged, but no composable rules can be authored or matched).',
     check: (db) => columnExists(db, 'geo_segment_rules', 'predicate_json'),
   },
+  {
+    migrationId: '081_sweed_segment_membership_refresh',
+    label:
+      'Per-segment membership-refresh highwater (sweed_segment_membership_refresh) ' +
+      '— backs the "Refresh membership cache" button + truthful last-refreshed ' +
+      'line on the Helios segment details page. Without it that page 503s on ' +
+      'refresh and shows a fallback last-refreshed time.',
+    check: (db) => tableExists(db, 'sweed_segment_membership_refresh'),
+  },
+  {
+    migrationId: '082_reword_geo_rule_seed_note',
+    label:
+      'Reword the seeded Bronx geo-rule note (drop the "Seeded with migration ' +
+      '079." provenance drivel shown to operators). Cosmetic; no code depends ' +
+      'on it.',
+    check: async (db) => {
+      const res = await db.query<{ stale: boolean }>(
+        `select exists(
+           select 1 from geo_segment_rules where note like '%Seeded with migration 079.%'
+         ) as stale`,
+      )
+      return res.rows[0]?.stale !== true
+    },
+  },
 ]
 
 interface CacheEntry {

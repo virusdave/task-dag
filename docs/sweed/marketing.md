@@ -635,6 +635,41 @@ membership from a parse miss. Spot-check with
 [`scripts/probe-sweed-segment-members.ts`](../../helios/scripts/probe-sweed-segment-members.ts)
 `<segmentId> [dealerId]`.
 
+### Helios in-app segment surfaces (pages, routes, jobs)
+
+The operator-facing Helios surfaces for marketing segments, so future
+agents don't have to rediscover them:
+
+| surface | route / path | what it does |
+| --- | --- | --- |
+| Geo segment rules (control plane) | client `config/marketing/geo-segment-rules`; server `registerGeoSegmentRulesRoutes` ([`geoSegmentRules.ts`](../../helios/src/server/routes/geoSegmentRules.ts)) | CRUD over `geo_segment_rules` (migration 079). Each rule row links to the internal Helios segment-details page (primary) and to Sweed Prime (secondary). |
+| Segment details (read-only) | client `config/marketing/segments/:segmentId` ([`MarketingSegmentDetailsPage.tsx`](../../helios/src/client/routes/config/MarketingSegmentDetailsPage.tsx)); server `GET /api/config/marketing/segments/:segmentId` ([`marketingSegments.ts`](../../helios/src/server/routes/marketingSegments.ts)) | Cache-only snapshot of one segment: identity/scope, cached member count vs Sweed's reported total, membership freshness, weekly entry + scope mini-charts, geo-rule linkage/tallies, recent geo-add failures, and labelled (not-yet-segment-filtered) links to metrics. The GET NEVER calls Sweed; it is ~5 indexed aggregates by `segment_id`, all sub-2ms. |
+| Refresh one segment's membership | `POST /api/config/marketing/segments/:segmentId/refresh-membership` (editor+) | Deduped enqueue of job `config.workers.refresh_sweed_segment_members`. The page polls the cache-only GET every 4s only while the highwater is `pending`. |
+
+Backing query module:
+[`marketingSegmentDetailsQueries.ts`](../../helios/src/server/db/queries/marketingSegmentDetailsQueries.ts).
+Worker job:
+[`refreshSweedSegmentMembersJob.ts`](../../helios/src/worker/jobs/refreshSweedSegmentMembersJob.ts)
+→ `refreshOneSegmentMembership` in
+[`segmentRefresh.ts`](../../helios/src/worker/sweed/segmentRefresh.ts)
+(single-segment analogue of `refreshSegmentMembershipBulk`).
+
+**Per-segment refresh highwater** (`sweed_segment_membership_refresh`,
+migration 081): one row per segment recording `status`
+(`pending`/`ok`/`failed`), `requested_at`, `refreshed_at`,
+`member_count`, `last_error`. It exists because `snapshotSegmentMembers`
+is **write-on-change** (migration 080 + DB-efficiency review) — unchanged
+member rows keep their old `refreshed_at`, so
+`max(sweed_customer_segments.refreshed_at)` is NOT a truthful
+"last refreshed this segment" signal. Only the per-segment refresh job
+and its enqueue endpoint write this table.
+
+> **Operator-note hygiene:** `geo_segment_rules.note` is shown verbatim
+> to operators on both the geo-rules and segment-details pages, so seed
+> notes must be operator-useful, not migration provenance. Migration 082
+> reworded the original "Seeded with migration 079." boilerplate on the
+> Bronx rule; keep future seed notes free of provenance drivel.
+
 ---
 
 ## 3. Reference scripts in the repo

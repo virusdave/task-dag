@@ -119,7 +119,7 @@ insert into geo_segment_rules
 select
   'bx', 210249, 10282, 40.855074, -73.888066, 3750,
   'first_scan', 365, timestamptz '2026-05-21 00:00:00-04:00', true,
-  'Bronx hyperlocal: first scan in >=1yr, geocoded ID home address within 3750ft of the store -> segment 10282. Seeded with migration 079.'
+  'Bronx hyperlocal automation: adds qualifying first-scan customers whose geocoded ID home address is within 3,750 ft of the Bronx store to Sweed segment 10282. Starts 2026-05-21; ignores customers scanned within the prior 365 days.'
 where not exists (
   select 1 from geo_segment_rules
   where site_slug = 'bx' and trigger = 'first_scan' and segment_id = 10282

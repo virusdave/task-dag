@@ -58,6 +58,7 @@ export const JobTypeSchema = z.enum([
   'config.workers.enrich_visitor_scan_address',
   'config.workers.link_visitor_scan_to_sweed',
   'config.workers.refresh_sweed_customer_segments',
+  'config.workers.refresh_sweed_segment_members',
   'config.workers.geo_segment_rule_eval',
   'config.workers.sweed_orders_raw_json_drain',
   'config.workers.litalerts_products_raw_json_drain',
@@ -780,6 +781,17 @@ export const ConfigWorkersRefreshSweedCustomerSegmentsJobPayloadSchema = z.objec
 })
 export type ConfigWorkersRefreshSweedCustomerSegmentsJobPayload = z.infer<
   typeof ConfigWorkersRefreshSweedCustomerSegmentsJobPayloadSchema
+>
+
+// Per-segment bulk membership refresh (the Helios segment details page's
+// "Refresh membership cache" button). Pulls one segment's full member list
+// from Sweed and snapshot-replaces its cached rows. Operator-triggered.
+export const ConfigWorkersRefreshSweedSegmentMembersJobPayloadSchema = z.object({
+  segmentId: z.number().int().positive(),
+  trigger: z.enum(['manual_refresh']).default('manual_refresh'),
+})
+export type ConfigWorkersRefreshSweedSegmentMembersJobPayload = z.infer<
+  typeof ConfigWorkersRefreshSweedSegmentMembersJobPayloadSchema
 >
 
 /**

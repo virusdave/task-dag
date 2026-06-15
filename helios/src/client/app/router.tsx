@@ -59,6 +59,10 @@ import { SweedAuthLogPage, sweedAuthLogLoader } from '../routes/config/SweedAuth
 import { SweedSessionsPage, sweedSessionsLoader } from '../routes/config/SweedSessionsPage.js'
 import { UsersPage, usersLoader } from '../routes/config/UsersPage.js'
 import { GeoSegmentRulesPage, geoSegmentRulesLoader } from '../routes/config/GeoSegmentRulesPage.js'
+import {
+  MarketingSegmentDetailsPage,
+  marketingSegmentDetailsLoader,
+} from '../routes/config/MarketingSegmentDetailsPage.js'
 import { ConfigWorkersSchedulingPage, configWorkersSchedulingLoader } from '../routes/config/ConfigWorkersSchedulingPage.js'
 import { DashboardPage } from '../routes/dashboard/DashboardPage.js'
 import { GroupDetailPage, groupDetailLoader } from '../routes/groups/GroupDetailPage.js'
@@ -601,6 +605,11 @@ export const router = createBrowserRouter([
         element: <GeoSegmentRulesPage />,
         loader: geoSegmentRulesLoader,
         path: 'config/marketing/geo-segment-rules',
+      },
+      {
+        element: <MarketingSegmentDetailsPage />,
+        loader: marketingSegmentDetailsLoader,
+        path: 'config/marketing/segments/:segmentId',
       },
       {
         element: <JobsPage />,

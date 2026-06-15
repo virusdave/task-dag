@@ -26,6 +26,7 @@ import {
   ConfigWorkersEnrichVisitorScanAddressJobPayloadSchema,
   ConfigWorkersLinkVisitorScanToSweedJobPayloadSchema,
   ConfigWorkersRefreshSweedCustomerSegmentsJobPayloadSchema,
+  ConfigWorkersRefreshSweedSegmentMembersJobPayloadSchema,
   ConfigWorkersGeoSegmentRuleEvalJobPayloadSchema,
   CatalogSyncGroupDetailJobPayloadSchema,
   LlmDebugRerunJobPayloadSchema,
@@ -74,6 +75,7 @@ import { runConfigWorkersEnrichDeliveryAddressJob } from '../jobs/enrichDelivery
 import { runConfigWorkersEnrichVisitorScanAddressJob } from '../jobs/enrichVisitorScanAddressJob.js'
 import { runConfigWorkersLinkVisitorScanToSweedJob } from '../jobs/linkVisitorScanToSweedJob.js'
 import { runConfigWorkersRefreshSweedCustomerSegmentsJob } from '../jobs/refreshSweedCustomerSegmentsJob.js'
+import { runConfigWorkersRefreshSweedSegmentMembersJob } from '../jobs/refreshSweedSegmentMembersJob.js'
 import { runConfigWorkersGeoSegmentRuleEvalJob } from '../jobs/geoSegmentRuleEvalJob.js'
 import { runProposalImportReviewJsonJob } from '../jobs/importReviewJsonJob.js'
 import { getPool } from '../../server/db/pool.js'
@@ -311,6 +313,12 @@ const handlers: Record<JobType, JobHandler> = {
       ConfigWorkersRefreshSweedCustomerSegmentsJobPayloadSchema.parse(context.payload),
     )
   },
+  'config.workers.refresh_sweed_segment_members': async (context) => {
+    await runConfigWorkersRefreshSweedSegmentMembersJob(
+      context,
+      ConfigWorkersRefreshSweedSegmentMembersJobPayloadSchema.parse(context.payload),
+    )
+  },
   'config.workers.geo_segment_rule_eval': async (context) => {
     await runConfigWorkersGeoSegmentRuleEvalJob(
       context,
@@ -353,6 +361,7 @@ const SWEED_BACKED_JOB_TYPES: ReadonlySet<JobType> = new Set<JobType>([
   'config.workers.enrich_delivery_address',
   'config.workers.link_visitor_scan_to_sweed',
   'config.workers.refresh_sweed_customer_segments',
+  'config.workers.refresh_sweed_segment_members',
   'reconcile.group',
   'screens.banner_bulk_toggle',
   'screens.banner_refresh',
