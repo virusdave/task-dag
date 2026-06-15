@@ -33,16 +33,35 @@
 
 ## 2. Hard facts that constrain the design (verified in code)
 
-1. **Segment membership is cached, not complete.** It's pulled from the
-   expensive per-customer Sweed RPC only on link/manual refresh. *Do not
-   ship segment-vs-population numbers without a coverage badge and/or a
-   background job that refreshes membership for all active known
-   customers.* This is the #1 risk.
-2. **No per-customer margin yet.** `sweed_order_margin_mv` was never
-   landed (needs `sweed_order_line_items` + `product_cost_history`
-   ingest, not live on prod). v1 segment value metrics use **net sales /
-   basket / orders / discount**, not margin-per-customer. Order-grain
-   margin stays at the site level.
+1. **Segment membership coverage — solved by BULK `store.marketing.segment.get`.**
+   Membership was originally cached per-customer via
+   `store.customer.segment.list { id }` (one RPC per customer → only
+   covers customers we happened to link). The efficient inverse exists:
+   `store.marketing.segment.get { id: <segmentId> }` returns the FULL
+   member list of a segment in ONE call. So whole-cache population is
+   O(#segments) RPCs, not O(#customers). Implemented as
+   `getSweedMarketingSegmentMembers` + `snapshotSegmentMembers` (bulk,
+   authoritative per-segment replace) + `refreshSegmentMembershipBulk` +
+   `scripts/refresh-segment-members-bulk.ts` (dry-run by default).
+   STATUS: the response shape is not yet operator-verified (the seed
+   segment was empty), so the parser is **fail-closed** and the bulk job
+   is **manual/script-triggered, not auto-scheduled**, until
+   `scripts/probe-sweed-segment-members.ts <id>` confirms the shape.
+   Write-model rule: bulk-by-segment is the authoritative deleter; the
+   per-customer details-page refresh is a positive overlay (must become
+   delete-free once bulk is the primary populate path).
+2. **Per-customer margin IS available** (earlier "blocked" note was
+   stale — there is no `sweed_order_margin_mv` / `sweed_order_line_items`
+   / `product_cost_history` dependency). Per-line wholesale cost comes
+   from `sweed_package_snapshots` via
+   `sweed_package_cost_as_of_or_earliest(dealer, inventory_item_id,
+   pay_time)`, the same proven path the `margins.gross_margin_dollars`
+   registry metric uses. Per-customer margin = sum over a customer's
+   `sweed_order_items_flat` line items of (line revenue − qty × cost),
+   joined on `sweed_orders.customer_id`. Convention: unknown cost = $0,
+   canceled LINE items excluded. This now ships as a **margin money
+   basis** on the Customer Value tab; segment value metrics can include
+   margin from day one.
 3. **Customer geography is best-effort** (VeriScan ID scans →
    `visitor_scan_links`), present only for scanned & linked customers.
 4. **Guests can't be segment members** (`is_guest`, null `customer_id`).
@@ -97,7 +116,8 @@ refresh today/yesterday on ingest, enqueue ranges on backfill:
 
 - `analytics_customer_day_facts` — PK `(business_date, dealer_id,
   customer_id)`: orders, first/returning orders, gross/net sales &
-  receipts, discount, (margin when ingest lands), fulfillment-type order
+  receipts, discount, margin (per-line COGS via
+  `sweed_package_cost_as_of_or_earliest`), fulfillment-type order
   counts, payment-type order counts, first/last order at.
 - `analytics_site_day_facts` — PK `(business_date, dealer_id)`: world
   totals incl. guests, active known customers, guest-order share.

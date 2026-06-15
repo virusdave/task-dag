@@ -488,6 +488,56 @@ is the canonical example: Mon-Thu 8am-4pm.
 
 ---
 
+## 2b. Customer segments — membership reads
+
+Helios caches Sweed marketing-segment membership (migration
+`059_sweed_customer_segments.sql`; tables `sweed_customer_segments`,
+`sweed_marketing_segments`). Wrappers in
+[`customers.ts`](../../helios/src/worker/sweed/customers.ts). Three read
+RPCs, by direction:
+
+### `store.marketing.segment.list { page, pageSize }` — the catalog
+
+Dealer-CONTEXT-scoped. From the state dealer it returns every segment
+across stores (site-specific ones carry their store in
+`targetStoreNames`); the static segments (delivery zones, imports) only
+appear under the SITE dealer that owns them — so Helios fans the call
+out across state + both sites (`listSweedMarketingSegmentsCatalogForDealers`).
+Row: `{ id, name, type:{id,name}, enabled, totalCustomers, targetStoreNames[] }`.
+
+### `store.customer.segment.list { id }` — one customer → their segments
+
+VERIFIED context-independent: returns a customer's FULL membership
+regardless of pinned dealer; each row's `dealer.id` is the segment's
+owning scope (`210248` = state/all-stores, `210705` = Midtown,
+`210249` = Bronx). One RPC PER CUSTOMER, so this is the
+on-demand / details-page path only — it never gives complete coverage.
+
+### `store.marketing.segment.get { id }` — one segment → ALL its members (BULK)
+
+The efficient inverse: ONE RPC returns every customer in a segment.
+This is how Helios populates membership COMPLETELY (O(#segments) RPCs
+instead of O(#customers)) —
+`getSweedMarketingSegmentMembers` → `snapshotSegmentMembers` →
+`refreshSegmentMembershipBulk` →
+[`scripts/refresh-segment-members-bulk.ts`](../../helios/scripts/refresh-segment-members-bulk.ts)
+(dry-run by default). Operator-supplied call shape:
+
+```json
+{"name":"store.marketing.segment.get","params":{"id":"10282"}}
+```
+
+NEEDS_OPERATOR_VERIFICATION: the exact member-array key and per-member
+customer-id field name are not yet confirmed (the seed segment was
+empty). Run
+[`scripts/probe-sweed-segment-members.ts`](../../helios/scripts/probe-sweed-segment-members.ts)
+`<segmentId>` against a POPULATED segment to confirm, then tighten the
+fail-closed parser in `customers.ts`. The parser throws on an
+unrecognised envelope so a bulk snapshot can never wipe a segment's
+membership from a parse miss.
+
+---
+
 ## 3. Reference scripts in the repo
 
 These one-offs live in [`helios/scripts/`](../../helios/scripts/) and

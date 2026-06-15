@@ -15,13 +15,16 @@
 import { getPool } from '../../server/db/pool.js'
 import { HELIOS_PENDING_PURCHASE_SITE_DEALERS } from '../../shared/contracts/index.js'
 import {
+  getSweedMarketingSegmentMembers,
   listSweedCustomerSegments,
   listSweedMarketingSegmentsCatalogForDealers,
 } from './customers.js'
 import {
   isMarketingCatalogStale,
+  readMarketingCatalogSegments,
   snapshotCustomerSegments,
   snapshotMarketingCatalog,
+  snapshotSegmentMembers,
   type CustomerSegmentSnapshotRow,
   type MarketingSegmentCatalogRow,
 } from '../../server/db/queries/sweedCustomerSegmentsQueries.js'
@@ -93,4 +96,94 @@ export async function refreshMarketingCatalogIfStale(args: {
   }))
   await snapshotMarketingCatalog(catalog)
   return true
+}
+
+export interface BulkSegmentRefreshResult {
+  segmentsTotal: number
+  segmentsSnapshotted: number
+  membersCached: number
+  failures: Array<{ segmentId: number; segmentName: string; error: string }>
+  dryRun: boolean
+}
+
+/**
+ * BULK-populate `sweed_customer_segments` from each segment's full
+ * member list (`store.marketing.segment.get`), instead of the
+ * per-customer `store.customer.segment.list` path. This is the
+ * COMPLETE-coverage populate: one Sweed RPC per enabled segment covers
+ * every member at once, so the cache no longer depends on which
+ * customers we happened to link.
+ *
+ * Authoritative per-segment replace (snapshotSegmentMembers). MUST run
+ * inside a `withSweedSession` block.
+ *
+ * Operator-/script-triggered ONLY (scripts/refresh-segment-members-bulk.ts)
+ * — NOT auto-scheduled — because the segment.get response shape is not
+ * yet operator-verified (the parser is fail-closed; see
+ * getSweedMarketingSegmentMembers). `dryRun` fetches + parses but skips
+ * all writes so the operator can confirm counts before mutating the
+ * cache. Refreshes the catalog first so newly-created segments are
+ * included.
+ */
+export async function refreshSegmentMembershipBulk(args: {
+  stateDealerId: number
+  dryRun?: boolean
+  includeDisabled?: boolean
+}): Promise<BulkSegmentRefreshResult> {
+  const dryRun = args.dryRun ?? false
+  // Make sure the catalog is current so we don't miss new segments.
+  try {
+    await refreshMarketingCatalogIfStale({ stateDealerId: args.stateDealerId })
+  } catch {
+    // Non-fatal: fall back to whatever catalog is already cached.
+  }
+
+  const segments = await readMarketingCatalogSegments(getPool(), {
+    includeDisabled: args.includeDisabled ?? false,
+  })
+
+  const result: BulkSegmentRefreshResult = {
+    segmentsTotal: segments.length,
+    segmentsSnapshotted: 0,
+    membersCached: 0,
+    failures: [],
+    dryRun,
+  }
+
+  for (const seg of segments) {
+    // Prefer the segment's own scope dealer; fall back to the state
+    // dealer when the catalog row doesn't carry one.
+    const dealerId = seg.scopeDealerId ?? args.stateDealerId
+    try {
+      const members = await getSweedMarketingSegmentMembers({
+        dealerId,
+        segmentId: seg.segmentId,
+      })
+      if (!dryRun) {
+        await snapshotSegmentMembers({
+          segmentId: seg.segmentId,
+          segmentName: seg.segmentName,
+          segmentDescription: seg.segmentDescription,
+          segmentTypeId: seg.segmentTypeId,
+          segmentTypeName: seg.segmentTypeName,
+          scopeDealerId: seg.scopeDealerId,
+          scopeDealerName: null,
+          members: members.map((m) => ({
+            customerId: m.customerId,
+            enabled: m.enabled,
+            dateOnEnter: m.dateOnEnter,
+          })),
+        })
+      }
+      result.segmentsSnapshotted += 1
+      result.membersCached += members.length
+    } catch (error) {
+      result.failures.push({
+        segmentId: seg.segmentId,
+        segmentName: seg.segmentName,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    }
+  }
+  return result
 }

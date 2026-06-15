@@ -390,3 +390,132 @@ export async function readSegmentsRefreshState(
     lastError: row.last_error,
   }
 }
+
+// =====================================================================
+// Write — BULK per-segment membership snapshot (authoritative)
+// =====================================================================
+//
+// WRITE-MODEL RULE (architecture review): two writers touch
+// `sweed_customer_segments` with DIFFERENT delete scopes:
+//   - snapshotCustomerSegments() deletes WHERE sweed_customer_id = $1
+//     (per-customer full replace; on-demand details-page refresh).
+//   - snapshotSegmentMembers() below deletes WHERE segment_id = $1
+//     (per-segment full replace; bulk population).
+// To keep them from stomping each other, BULK-BY-SEGMENT is the
+// AUTHORITATIVE coverage path. The per-customer path is a targeted
+// on-demand overlay. When bulk becomes the primary populate path (it is
+// currently operator-/script-triggered, not auto-scheduled — see
+// refreshSegmentMembershipBulk + scripts/refresh-segment-members-bulk.ts),
+// the per-customer path MUST be switched to positive-only upsert (drop
+// its delete) so it can no longer remove bulk-populated rows. Until
+// then, do not run both continuously against the same customers.
+//
+// Deleting by segment_id ALONE (not (scope_dealer_id, segment_id)) is
+// deliberate: segment ids are globally unique (sweed_marketing_segments
+// PK is segment_id), so a corrected scope can never leave stale dupes.
+
+export interface SegmentMemberRow {
+  customerId: number
+  enabled: boolean | null
+  dateOnEnter: string | null
+}
+
+export interface SegmentMembershipSnapshot {
+  segmentId: number
+  segmentName: string
+  segmentDescription: string | null
+  segmentTypeId: number | null
+  segmentTypeName: string | null
+  /** Segment's owning (scope) dealer; part of the row PK. */
+  scopeDealerId: number | null
+  scopeDealerName: string | null
+  members: SegmentMemberRow[]
+}
+
+/**
+ * Snapshot-replace ALL cached membership rows for one segment from the
+ * bulk `store.marketing.segment.get` member list. Authoritative: this
+ * is the only writer allowed to delete by segment. Replacing the whole
+ * set per segment is safe because segment.get returns the segment's
+ * FULL membership in one call.
+ */
+export async function snapshotSegmentMembers(snapshot: SegmentMembershipSnapshot): Promise<void> {
+  const scopeDealerId = snapshot.scopeDealerId ?? 0
+  await withTransaction(async (tx) => {
+    await tx.query(`delete from sweed_customer_segments where segment_id = $1`, [snapshot.segmentId])
+    for (const m of snapshot.members) {
+      await tx.query(
+        `insert into sweed_customer_segments
+           (sweed_customer_id, segment_id, segment_name, segment_description,
+            segment_type_id, segment_type_name, scope_dealer_id, scope_dealer_name,
+            enabled, date_on_enter, refreshed_at)
+         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10, now())
+         on conflict (sweed_customer_id, scope_dealer_id, segment_id) do update set
+           segment_name        = excluded.segment_name,
+           segment_description = excluded.segment_description,
+           segment_type_id     = excluded.segment_type_id,
+           segment_type_name   = excluded.segment_type_name,
+           scope_dealer_name   = excluded.scope_dealer_name,
+           enabled             = excluded.enabled,
+           date_on_enter       = excluded.date_on_enter,
+           refreshed_at        = now()`,
+        [
+          m.customerId,
+          snapshot.segmentId,
+          snapshot.segmentName,
+          snapshot.segmentDescription,
+          snapshot.segmentTypeId,
+          snapshot.segmentTypeName,
+          scopeDealerId,
+          snapshot.scopeDealerName,
+          m.enabled,
+          m.dateOnEnter,
+        ],
+      )
+    }
+  })
+}
+
+export interface MarketingCatalogSegment {
+  segmentId: number
+  segmentName: string
+  segmentDescription: string | null
+  segmentTypeId: number | null
+  segmentTypeName: string | null
+  scopeDealerId: number | null
+  enabled: boolean | null
+}
+
+/**
+ * Read the cached marketing-segment catalog rows for the bulk
+ * membership refresh. Enabled segments only by default (disabled
+ * segments are not worth a Sweed round-trip).
+ */
+export async function readMarketingCatalogSegments(
+  db: Queryable,
+  opts: { includeDisabled?: boolean } = {},
+): Promise<MarketingCatalogSegment[]> {
+  const res = await db.query<{
+    segment_id: string
+    segment_name: string
+    segment_type_id: number | null
+    segment_type_name: string | null
+    scope_dealer_id: string | null
+    enabled: boolean | null
+  }>(
+    `select segment_id, segment_name, segment_type_id, segment_type_name,
+            scope_dealer_id, enabled
+       from sweed_marketing_segments
+      ${opts.includeDisabled ? '' : 'where coalesce(enabled, true) = true'}
+      order by segment_name asc`,
+  )
+  return res.rows.map((r) => ({
+    segmentId: Number(r.segment_id),
+    segmentName: r.segment_name,
+    segmentDescription: null,
+    segmentTypeId: r.segment_type_id,
+    segmentTypeName: r.segment_type_name,
+    scopeDealerId: r.scope_dealer_id === null ? null : Number(r.scope_dealer_id),
+    enabled: r.enabled,
+  }))
+}

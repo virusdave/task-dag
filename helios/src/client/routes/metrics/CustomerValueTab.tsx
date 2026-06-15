@@ -49,9 +49,10 @@ import { useMetricSelection } from './useMetricSelection.js'
 // happens client-side without another round-trip.
 //
 // Per oracle's design — see virusdave/top-level#7 — we NEVER
-// fabricate. Margin-basis histograms render as MISSING DATA cards
-// until per-invoice margin is materialized (see backend
-// MISSING_CARDS).
+// fabricate. The money-basis selector includes Margin $, computed
+// server-side from per-line revenue minus package cost (same
+// convention as the margins.gross_margin_dollars registry metric;
+// see customerValueAnalyticsQueries.ts).
 // ---------------------------------------------------------------------------
 
 const DAY_MS = 86_400_000
@@ -88,7 +89,7 @@ const COHORT_SCOPES: ReadonlyArray<{ id: CohortScope; label: string; help: strin
   },
 ]
 
-type MoneyBasis = 'gross_sales' | 'net_sales' | 'gross_receipts'
+type MoneyBasis = 'gross_sales' | 'net_sales' | 'gross_receipts' | 'margin'
 const MONEY_BASES: ReadonlyArray<{ id: MoneyBasis; label: string; help: string }> = [
   {
     id: 'gross_sales',
@@ -104,6 +105,11 @@ const MONEY_BASES: ReadonlyArray<{ id: MoneyBasis; label: string; help: string }
     id: 'gross_receipts',
     label: 'Gross receipts (incl. tax)',
     help: 'After-discount, including sales tax — money actually collected.',
+  },
+  {
+    id: 'margin',
+    label: 'Margin $',
+    help: 'Line revenue minus per-line wholesale package cost (same convention as the gross_margin_dollars metric). Missing package cost is treated as $0; canceled lines are excluded.',
   },
 ]
 
@@ -700,7 +706,28 @@ function SummaryStrip({
       ? data.summary.grossSalesDollars
       : basis === 'net_sales'
         ? data.summary.netSalesDollars
-        : data.summary.grossReceiptsDollars
+        : basis === 'gross_receipts'
+          ? data.summary.grossReceiptsDollars
+          : data.summary.marginDollars
+  // Observed lifetime-to-date value per known customer, basis-correct
+  // (previously the value was hard-coded to the gross-sales field even
+  // as the label switched with the basis — a latent bug).
+  const observedAvgLtv =
+    basis === 'gross_sales'
+      ? data.summary.observedAvgLtvGrossDollars
+      : basis === 'net_sales'
+        ? data.summary.observedAvgLtvNetSalesDollars
+        : basis === 'gross_receipts'
+          ? data.summary.observedAvgLtvGrossReceiptsDollars
+          : data.summary.observedAvgLtvMarginDollars
+  const observedMedianLtv =
+    basis === 'gross_sales'
+      ? data.summary.observedMedianLtvGrossDollars
+      : basis === 'net_sales'
+        ? data.summary.observedMedianLtvNetSalesDollars
+        : basis === 'gross_receipts'
+          ? data.summary.observedMedianLtvGrossReceiptsDollars
+          : data.summary.observedMedianLtvMarginDollars
   return (
     <div className="customer-value-kpis">
       <Kpi
@@ -730,13 +757,13 @@ function SummaryStrip({
       />
       <Kpi
         label={`Avg observed LTV (${basisLabel})`}
-        value={fmtMoneyOrDash(data.summary.observedAvgLtvGrossDollars)}
-        help="Average lifetime-to-date gross sales per known customer in scope. 'Observed' = up to the selected end date; recent customers are right-censored."
+        value={fmtMoneyOrDash(observedAvgLtv)}
+        help="Average lifetime-to-date value (selected $ basis) per known customer in scope. 'Observed' = up to the selected end date; recent customers are right-censored."
       />
       <Kpi
         label={`Median observed LTV (${basisLabel})`}
-        value={fmtMoneyOrDash(data.summary.observedMedianLtvGrossDollars)}
-        help="Median (not mean) lifetime-to-date gross sales per known customer. Less skewed by whale outliers than the mean."
+        value={fmtMoneyOrDash(observedMedianLtv)}
+        help="Median (not mean) lifetime-to-date value (selected $ basis) per known customer. Less skewed by whale outliers than the mean."
       />
       <Kpi
         label={`Total ${basisLabel.toLowerCase()} (in range)`}
@@ -783,7 +810,9 @@ function TrailingSpendPercentilesStrip({
       ? p.grossSalesDollars
       : basis === 'net_sales'
         ? p.netSalesDollars
-        : p.grossReceiptsDollars
+        : basis === 'gross_receipts'
+          ? p.grossReceiptsDollars
+          : p.marginDollars
   return (
     <div className="customer-value-kpis customer-value-ttm-spend">
       <div className="customer-value-kpi">
@@ -1032,9 +1061,13 @@ function BasketByPurchaseNumberCard({
           ? aggKind === 'avg'
             ? b.avgNetSalesDollars
             : b.medianNetSalesDollars
-          : aggKind === 'avg'
-            ? b.avgGrossReceiptsDollars
-            : null // no median for receipts (server doesn't compute)
+          : basis === 'gross_receipts'
+            ? aggKind === 'avg'
+              ? b.avgGrossReceiptsDollars
+              : null // no median for receipts (server doesn't compute)
+            : aggKind === 'avg'
+              ? b.avgMarginDollars
+              : b.medianMarginDollars
     return {
       x: b.purchaseNumber,
       y: y ?? 0,
@@ -1112,7 +1145,11 @@ function LifetimeByTotalPurchasesCard({
           ? aggKind === 'avg'
             ? b.avgLifetimeNetSalesDollars
             : b.medianLifetimeNetSalesDollars
-          : null // no receipts series here (lifetime by total purchases doesn't carry receipts)
+          : basis === 'margin'
+            ? aggKind === 'avg'
+              ? b.avgLifetimeMarginDollars
+              : b.medianLifetimeMarginDollars
+            : null // no receipts series here (lifetime by total purchases doesn't carry receipts)
     return {
       x: b.totalPurchases,
       y: y ?? 0,
@@ -1194,7 +1231,9 @@ function ContributionByPurchaseNumberCard({
         ? b.totalGrossSalesDollars
         : basis === 'net_sales'
           ? b.totalNetSalesDollars
-          : b.totalGrossReceiptsDollars
+          : basis === 'gross_receipts'
+            ? b.totalGrossReceiptsDollars
+            : b.totalMarginDollars
     return {
       x: b.purchaseNumber,
       y,

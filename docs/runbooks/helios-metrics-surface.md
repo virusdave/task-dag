@@ -125,13 +125,16 @@ For real-vs-stub status of each, see `helios-metrics.md` §"P2-P6 status".
   `customersMapQueries.ts` reads visitor-scan document addresses. `orders`
   also carry `delivery_zip` (delivery only). Home state/zip is therefore
   best-effort, present only for ID-scanned & linked customers.
-- **Per-customer margin is NOT available today.** `sweed_order_margin_mv`
-  was planned (v1.4 V4'2) but never landed — it needs the
-  `sweed_order_line_items` + `product_cost_history` ingest, which is not
-  live on the prod warehouse. Customer-value margin cards are gated off
-  until that ingest lands. Order-grain margin metrics
-  (`margins.*`, `fulfillment.margin_dollars`) compute from
-  `sweed_order_items_flat` + package-snapshot COGS instead.
+- **Per-customer margin IS available** (the old `sweed_order_margin_mv` /
+  `sweed_order_line_items` + `product_cost_history` "blocker" was stale —
+  none of those exist or are needed). Per-line wholesale cost comes from
+  `sweed_package_snapshots` via
+  `sweed_package_cost_as_of_or_earliest(dealer, inventory_item_id,
+  pay_time)`. Margin = sum over `sweed_order_items_flat` of (line revenue
+  − qty × cost); join `sweed_orders.customer_id` for per-customer margin.
+  Convention (matches `margins.gross_margin_dollars`): unknown cost = $0,
+  canceled LINE items excluded. The Customer Value tab now exposes a
+  **margin money basis** using this path.
 
 ---
 
@@ -150,11 +153,20 @@ marketing segments (virusdave/top-level#12 / FreshlyBakedNYC/automation#40):
 - **Scope axis** = `scope_dealer_id`: `210248` state/all-stores,
   `210705` Midtown, `210249` Bronx → maps onto the operator's
   US/state/site segment scopes.
-- **Membership is cached, not complete.** Per-customer membership is
-  pulled from the expensive Sweed RPC `store.customer.segment.list`
-  (pooled token) only on link / manual refresh — never on page load.
-  So the cache covers refreshed customers only; coverage must be surfaced
-  before trusting segment-vs-population comparisons.
+- **Two membership-population paths:**
+  - *Per-customer (overlay):* `store.customer.segment.list { id }` — one
+    RPC per customer, pulled on link / manual details-page refresh.
+    Covers only linked customers (incomplete on its own).
+  - *Bulk per-segment (authoritative, complete):*
+    `store.marketing.segment.get { id }` returns a whole segment's
+    member list in ONE call. Implemented as
+    `getSweedMarketingSegmentMembers` →
+    `snapshotSegmentMembers` (delete/replace by `segment_id`) via
+    `refreshSegmentMembershipBulk` /
+    `scripts/refresh-segment-members-bulk.ts` (dry-run by default).
+    Manual/script-triggered until `scripts/probe-sweed-segment-members.ts`
+    confirms the response shape (parser is fail-closed). This is the
+    coverage solution; bulk-by-segment is the authoritative deleter.
 - Segment RPC reference: [`../sweed/marketing.md`](../sweed/marketing.md).
 
 See the [segmentation epic plan](../helios/customer-segmentation/EPIC_PLAN.md)

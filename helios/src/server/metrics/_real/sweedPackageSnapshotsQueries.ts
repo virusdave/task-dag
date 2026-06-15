@@ -246,7 +246,7 @@ async function runMarginBucketedQuery(args: {
  *  qty) in Sweed's order-list feed, so without this guard they
  *  inflated revenue and (when qty was present) COGS. Case-insensitive
  *  for safety against Sweed taxonomy drift. */
-const NON_CANCELED_LINE_SQL = `lower(coalesce(f.raw_item->'invoiceItemStatus'->>'name', '')) <> 'canceled'`
+export const NON_CANCELED_LINE_SQL = `lower(coalesce(f.raw_item->'invoiceItemStatus'->>'name', '')) <> 'canceled'`
 
 /** Helper: per-line revenue / qty / COGS expressions over the
  *  materialised sweed_order_items_flat table (alias `f`), D1.
@@ -265,9 +265,9 @@ const NON_CANCELED_LINE_SQL = `lower(coalesce(f.raw_item->'invoiceItemStatus'->>
  * NOT in the flat table). Each metric query builds a
  * `select bucket_start, series_id, sum(revenue), sum(cogs)` around these.
  */
-const REVENUE_EXPR = `(case when ${NON_CANCELED_LINE_SQL} then f.revenue else 0 end)`
-const QTY_EXPR = `(case when ${NON_CANCELED_LINE_SQL} then f.qty else 0 end)`
-const COGS_EXPR = `${QTY_EXPR} * coalesce(sweed_package_cost_as_of_or_earliest(f.dealer_id, f.inventory_item_id, f.pay_time), 0)`
+export const REVENUE_EXPR = `(case when ${NON_CANCELED_LINE_SQL} then f.revenue else 0 end)`
+export const QTY_EXPR = `(case when ${NON_CANCELED_LINE_SQL} then f.qty else 0 end)`
+export const COGS_EXPR = `${QTY_EXPR} * coalesce(sweed_package_cost_as_of_or_earliest(f.dealer_id, f.inventory_item_id, f.pay_time), 0)`
 
 /** margins.gross_margin_dollars — sum(revenue - cogs) per bucket. */
 export async function queryGrossMarginDollars(args: MetricQueryArgs): Promise<MetricRow[]> {

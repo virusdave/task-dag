@@ -554,6 +554,172 @@ export async function listSweedMarketingSegmentsCatalogForDealers(args: {
 }
 
 // =====================================================================
+// store.marketing.segment.get — BULK read a segment's member list
+// =====================================================================
+//
+// The inverse of `store.customer.segment.list`: instead of one RPC per
+// customer to learn that customer's segments, this is ONE RPC per
+// SEGMENT that returns every customer in it. That makes whole-segment
+// membership population O(#segments) Sweed calls instead of
+// O(#customers) — the only affordable way to keep the membership cache
+// COMPLETE (the per-customer path only ever covers customers we
+// happened to link). Operator-supplied call shape:
+//   {"name":"store.marketing.segment.get","params":{"id":"10282"}}
+//
+// NEEDS_OPERATOR_VERIFICATION: the segment used to derive this parser
+// was empty at authoring time, so the exact member-array path and the
+// per-member customer-id field name are NOT yet confirmed against a
+// populated segment. Run `scripts/probe-sweed-segment-members.ts
+// <segmentId>` against a populated segment to confirm, then tighten
+// the candidate paths/fields below. The parser is deliberately
+// FAIL-CLOSED: it throws on an unrecognised envelope rather than
+// returning `[]`, so a bulk snapshot can never delete a segment's
+// membership and re-insert zero rows just because the shape drifted.
+export const SWEED_RPC_MARKETING_SEGMENT_GET = 'store.marketing.segment.get'
+
+export interface SweedSegmentMember {
+  /** Sweed customer id (the join key into `sweed_customer_segments`). */
+  customerId: number
+  /** Per-member enabled flag if the RPC exposes one, else null. */
+  enabled: boolean | null
+  /** When the customer entered the segment, if exposed, else null. */
+  dateOnEnter: string | null
+}
+
+/** Candidate envelope paths the member array might live under. */
+const SEGMENT_MEMBER_ARRAY_PATHS: ReadonlyArray<ReadonlyArray<string>> = [
+  ['customers'],
+  ['clients'],
+  ['members'],
+  ['data'],
+  ['segment', 'customers'],
+  ['segment', 'clients'],
+  ['segment', 'members'],
+]
+
+function pickArrayAtPath(root: unknown, path: ReadonlyArray<string>): unknown[] | null {
+  let cur: unknown = root
+  for (const key of path) {
+    if (cur === null || typeof cur !== 'object') return null
+    cur = (cur as Record<string, unknown>)[key]
+  }
+  return Array.isArray(cur) ? cur : null
+}
+
+function extractMemberCustomerId(raw: unknown): number | null {
+  if (raw === null || typeof raw !== 'object') {
+    // A bare scalar id is plausible for a thin member list.
+    const n = Number(raw)
+    return Number.isFinite(n) && n > 0 ? n : null
+  }
+  const o = raw as Record<string, unknown>
+  const candidates: unknown[] = [
+    o.customerId,
+    o.clientId,
+    o.id,
+    (o.customer as Record<string, unknown> | undefined)?.id,
+    (o.client as Record<string, unknown> | undefined)?.id,
+  ]
+  for (const c of candidates) {
+    const n = Number(c)
+    if (Number.isFinite(n) && n > 0) return n
+  }
+  return null
+}
+
+function coerceBoolOrNull(v: unknown): boolean | null {
+  return typeof v === 'boolean' ? v : null
+}
+
+function coerceStrOrNull(v: unknown): string | null {
+  return typeof v === 'string' && v.length > 0 ? v : null
+}
+
+/**
+ * BULK-read every customer in one marketing segment via
+ * `store.marketing.segment.get { id }`. FAIL-CLOSED: throws if the
+ * response envelope is unrecognised (so callers never mistake a parse
+ * miss for an empty segment). Returns `[]` ONLY when a recognised
+ * member array is present and empty, or an explicit `totalCount: 0` /
+ * `totalCustomers: 0` says the segment is empty. Caller MUST be inside
+ * a `withSweedSession` block. `dealerId` should be the segment's owning
+ * (scope) dealer.
+ */
+export async function getSweedMarketingSegmentMembers(args: {
+  dealerId: number
+  segmentId: number
+}): Promise<SweedSegmentMember[]> {
+  const raw = await callSweedRpc<unknown>(args.dealerId, SWEED_RPC_MARKETING_SEGMENT_GET, {
+    id: String(args.segmentId),
+  })
+  return parseSegmentMembersResponse(raw, args.segmentId)
+}
+
+/**
+ * Pure FAIL-CLOSED parser for a `store.marketing.segment.get` response.
+ * Exported for unit testing (the live shape is not yet
+ * operator-verified). Throws on an unrecognised envelope; returns `[]`
+ * only for a recognised-but-empty member array or an explicit
+ * zero-count envelope.
+ */
+export function parseSegmentMembersResponse(raw: unknown, segmentId: number): SweedSegmentMember[] {
+  // A bare-array response is the simplest recognised shape.
+  let memberArray: unknown[] | null = Array.isArray(raw) ? raw : null
+  if (memberArray === null) {
+    for (const path of SEGMENT_MEMBER_ARRAY_PATHS) {
+      const found = pickArrayAtPath(raw, path)
+      if (found !== null) {
+        memberArray = found
+        break
+      }
+    }
+  }
+
+  if (memberArray === null) {
+    // No recognised member array. Treat an explicit zero-count envelope
+    // as a genuinely empty segment; otherwise fail closed.
+    const o = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : null
+    const seg = o && typeof o.segment === 'object' ? (o.segment as Record<string, unknown>) : o
+    const zeroCount =
+      Number(o?.totalCount) === 0 ||
+      Number(o?.totalCustomers) === 0 ||
+      Number(seg?.totalCustomers) === 0 ||
+      Number(seg?.totalCount) === 0
+    if (zeroCount) return []
+    throw new Error(
+      `store.marketing.segment.get { id: ${segmentId} } returned an unrecognised shape ` +
+        `(top-level keys: ${o ? Object.keys(o).join(',') : typeof raw}). ` +
+        `Run scripts/probe-sweed-segment-members.ts ${segmentId} and update the parser.`,
+    )
+  }
+
+  const out: SweedSegmentMember[] = []
+  const seen = new Set<number>()
+  for (const m of memberArray) {
+    const customerId = extractMemberCustomerId(m)
+    if (customerId === null || seen.has(customerId)) continue
+    seen.add(customerId)
+    const mo = m && typeof m === 'object' ? (m as Record<string, unknown>) : {}
+    out.push({
+      customerId,
+      enabled: coerceBoolOrNull(mo.enabled),
+      dateOnEnter: coerceStrOrNull(mo.dateOnEnter),
+    })
+  }
+  // A non-empty member array that yielded zero parseable ids means the
+  // member-id field name drifted — fail closed rather than wipe a
+  // segment's membership.
+  if (out.length === 0 && memberArray.length > 0) {
+    throw new Error(
+      `store.marketing.segment.get { id: ${segmentId} } returned ${memberArray.length} ` +
+        `member rows but none had a parseable customer id. ` +
+        `Run scripts/probe-sweed-segment-members.ts ${segmentId} and update extractMemberCustomerId.`,
+    )
+  }
+  return out
+}
+
+// =====================================================================
 // store.customer.get — fetch one Sweed CRM customer (incl. address)
 // =====================================================================
 //

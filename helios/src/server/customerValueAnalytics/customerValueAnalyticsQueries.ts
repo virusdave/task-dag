@@ -19,6 +19,17 @@ import {
   TRAILING_SPEND_REPEAT_MIN_VISITS,
 } from '../../shared/contracts/index.js'
 import { getPool } from '../db/pool.js'
+// Per-line margin convention is shared verbatim with the proven
+// `margins.gross_margin_dollars` registry metric: line margin =
+// REVENUE_EXPR − COGS_EXPR over `sweed_order_items_flat f`, where
+// unknown package cost is treated as $0 and canceled LINE items are
+// zeroed (NON_CANCELED_LINE_SQL). Importing (not re-deriving) the
+// expressions guarantees the customer-value margin dollars never
+// drift from the registry metric.
+import {
+  COGS_EXPR,
+  REVENUE_EXPR,
+} from '../metrics/_real/sweedPackageSnapshotsQueries.js'
 
 // ============================================================================
 // Customer Value analytics SQL
@@ -47,13 +58,28 @@ import { getPool } from '../db/pool.js'
 //     window.
 //   * Exclude guests (customer_id IS NULL) from per-customer LTV
 //     histograms — they can't be deduped into unique customers.
-//   * Margin $ is not in v1; would require expanding raw_json items
-//     and joining sweed_package_snapshots on the hot path. Render a
-//     MISSING DATA card instead of fabricating.
+//   * Margin $ is a first-class money basis. Per-line margin (same
+//     convention as the `margins.gross_margin_dollars` registry
+//     metric: REVENUE_EXPR − COGS_EXPR over sweed_order_items_flat,
+//     unknown package cost treated as $0, canceled lines excluded) is
+//     pre-aggregated to INVOICE grain in the `invoice_margin` CTE,
+//     then LEFT JOINed onto the order-grain `orders_for_lifetime` CTE
+//     on (dealer_id, invoice_id) with coalesce(..., 0). Joining at
+//     invoice grain (never raw line rows) keeps the per-order
+//     row_number() purchase ordinals and per-customer counts intact.
 // ============================================================================
 
 export const CUSTOMER_VALUE_ANALYTICS_DEFAULT_WINDOW_DAYS = 90
 export const CUSTOMER_VALUE_ANALYTICS_MAX_N_HARD_CAP = 50
+
+/** Per-line margin $ = line revenue − qty × package cost, over
+ *  `sweed_order_items_flat f`. Composed verbatim from the registry
+ *  metric's REVENUE_EXPR / COGS_EXPR (unknown cost → $0; canceled
+ *  lines zeroed). `*` binds tighter than `-`, so this is
+ *  `revenue − (qty × cost)`. Always summed inside a
+ *  `group by f.dealer_id, f.invoice_id` so it lands at invoice grain
+ *  before any join to order rows. */
+const LINE_MARGIN_EXPR = `${REVENUE_EXPR} - ${COGS_EXPR}`
 
 /** Build the empty-state percentile array (all values null) that
  *  still echoes back the requested percentiles so the client can
@@ -69,6 +95,7 @@ function emptyTrailingSpendPercentiles(): TrailingSpendPercentiles {
     grossSalesDollars: null,
     netSalesDollars: null,
     grossReceiptsDollars: null,
+    marginDollars: null,
   }))
 }
 
@@ -200,24 +227,12 @@ interface QueryArgs {
 }
 
 const MISSING_CARDS: ReadonlyArray<CustomerValueMissingDataCard> = [
-  {
-    id: 'customer-value.margin',
-    title: 'Lifetime margin $ histograms',
-    // v1.4 V4'2 attempted to land sweed_order_margin_mv but the
-    // line-items ingest prerequisite (sweed_order_line_items +
-    // product_cost_history) is not live on prod. Card stays until
-    // that ingest lands; V4'2 ships as a separate commit once it
-    // does. See top-level#7's v1.4 status comment.
-    whyMissing:
-      'Margin requires per-line-item revenue minus per-line-item wholesale cost. v1.4 V4\'2 planned a materialized sweed_order_margin_mv view but the prerequisite line-items ingest (sweed_order_line_items + product_cost_history) is not yet live on the prod warehouse. No stubs — the card stays until the ingest lands.',
-    neededSource: 'sweed_order_line_items + product_cost_history ingest on prod, then sweed_order_margin_mv',
-    unlockedMetrics: [
-      'Avg lifetime margin $ by total purchases',
-      'Total margin $ contributed by purchase ordinal',
-      'Margin-basis basket-size escalation',
-    ],
-    blockedByUrl: null,
-  },
+  // The "customer-value.margin" MISSING DATA card was removed once the
+  // margin money basis shipped: per-line margin is computed from
+  // sweed_order_items_flat with the same convention as the proven
+  // `margins.gross_margin_dollars` registry metric (no
+  // sweed_order_margin_mv / line-items ingest is required — that
+  // prerequisite claim was stale).
   {
     id: 'customer-value.scan-funnel',
     title: 'Scan-to-purchase funnel',
@@ -272,6 +287,16 @@ interface UnionRow {
   v11: string | number | null
   v12: string | number | null
   v13: string | number | null
+  // v14..v20: margin money basis (added with the margin basis). Each
+  // branch documents what it fills; null in branches that don't use a
+  // given slot.
+  v14: string | number | null
+  v15: string | number | null
+  v16: string | number | null
+  v17: string | number | null
+  v18: string | number | null
+  v19: string | number | null
+  v20: string | number | null
 }
 
 export async function getCustomerValueAnalytics(
@@ -347,12 +372,19 @@ export async function getCustomerValueAnalytics(
       repeatPurchaseRate: null,
       observedAvgLtvGrossDollars: null,
       observedMedianLtvGrossDollars: null,
+      observedAvgLtvNetSalesDollars: null,
+      observedMedianLtvNetSalesDollars: null,
+      observedAvgLtvGrossReceiptsDollars: null,
+      observedMedianLtvGrossReceiptsDollars: null,
+      observedAvgLtvMarginDollars: null,
+      observedMedianLtvMarginDollars: null,
       purchaseCountPercentiles: emptyPurchaseCountPercentiles(args.percentiles),
       trailing12moSpendPercentiles: emptyTrailingSpendPercentiles(),
       trailing12moSpendPercentilesByMinVisits: emptyTrailingSpendByMinVisits(),
       grossSalesDollars: 0,
       grossReceiptsDollars: 0,
       netSalesDollars: 0,
+      marginDollars: 0,
     },
     purchaseCountHistogram: [],
     basketByPurchaseNumber: [],
@@ -380,7 +412,24 @@ export async function getCustomerValueAnalytics(
   // shape (kind, bucket, overflow, n, v1..v8). Branches document what
   // they put in each value slot.
   const sql = `
-    with orders_for_lifetime as (
+    with invoice_margin as (
+      -- Pre-aggregate per-LINE margin to INVOICE grain FIRST, over the
+      -- SAME lifetime horizon orders_for_lifetime uses (pay_time < $3),
+      -- so the LEFT JOIN below is 1:1 with order rows and can never
+      -- multiply them (which would corrupt purchase ordinals / customer
+      -- counts). Margin convention is shared verbatim with the
+      -- margins.gross_margin_dollars registry metric: unknown package
+      -- cost => $0, canceled LINE items zeroed.
+      select
+        f.dealer_id,
+        f.invoice_id,
+        sum(${LINE_MARGIN_EXPR})::numeric as margin_dollars
+      from sweed_order_items_flat f
+      where f.dealer_id = any($1::bigint[])
+        and f.pay_time < $3::timestamptz
+      group by f.dealer_id, f.invoice_id
+    ),
+    orders_for_lifetime as (
       select
         so.dealer_id,
         so.invoice_id,
@@ -394,8 +443,14 @@ export async function getCustomerValueAnalytics(
         coalesce(so.subtotal_dollars, 0)::numeric        as gross_sales_dollars,
         (coalesce(so.subtotal_dollars, 0)
          - coalesce(so.discount_dollars, 0))::numeric    as net_sales_dollars,
-        coalesce(so.grand_total_dollars, 0)::numeric     as gross_receipts_dollars
+        coalesce(so.grand_total_dollars, 0)::numeric     as gross_receipts_dollars,
+        -- Margin from the invoice-grain CTE; coalesce(0) so orders with
+        -- no matching line rows (or all-canceled lines) read $0 rather
+        -- than dropping out of the lifetime aggregates.
+        coalesce(im.margin_dollars, 0)::numeric          as margin_dollars
       from sweed_orders so
+      left join invoice_margin im
+        on im.dealer_id = so.dealer_id and im.invoice_id = so.invoice_id
       where so.dealer_id = any($1::bigint[])
         and so.pay_time < $3::timestamptz
         and so.customer_id is not null
@@ -419,7 +474,8 @@ export async function getCustomerValueAnalytics(
         count(*)::int as total_purchases,
         sum(gross_sales_dollars)::numeric    as lifetime_gross_sales_dollars,
         sum(net_sales_dollars)::numeric      as lifetime_net_sales_dollars,
-        sum(gross_receipts_dollars)::numeric as lifetime_gross_receipts_dollars
+        sum(gross_receipts_dollars)::numeric as lifetime_gross_receipts_dollars,
+        sum(margin_dollars)::numeric         as lifetime_margin_dollars
       from purchase_events
       group by dealer_id, customer_id
     ),
@@ -458,6 +514,10 @@ export async function getCustomerValueAnalytics(
     --   v4..v5  : avg / median lifetime gross sales (LTV)
     --   v6..v8  : sum gross / sum net / sum receipts in window
     --   v9..v13 : total-purchase-count percentiles p50/p75/p80/p90/p95
+    --   v14..v15: avg / median lifetime net sales (LTV)
+    --   v16..v17: avg / median lifetime gross receipts (LTV)
+    --   v18..v19: avg / median lifetime margin (LTV)
+    --   v20     : sum margin in window
     -- ===========================================================
     select
       'summary'::text                                    as kind,
@@ -505,7 +565,23 @@ export async function getCustomerValueAnalytics(
       (select percentile_disc($9::float8) within group (order by total_purchases)
          from customers_in_scope)                        as v12,
       (select percentile_disc($10::float8) within group (order by total_purchases)
-         from customers_in_scope)                        as v13
+         from customers_in_scope)                        as v13,
+      (select avg(lifetime_net_sales_dollars)
+         from customers_in_scope)                        as v14,
+      (select percentile_cont(0.5) within group (order by lifetime_net_sales_dollars)
+         from customers_in_scope)                        as v15,
+      (select avg(lifetime_gross_receipts_dollars)
+         from customers_in_scope)                        as v16,
+      (select percentile_cont(0.5) within group (order by lifetime_gross_receipts_dollars)
+         from customers_in_scope)                        as v17,
+      (select avg(lifetime_margin_dollars)
+         from customers_in_scope)                        as v18,
+      (select percentile_cont(0.5) within group (order by lifetime_margin_dollars)
+         from customers_in_scope)                        as v19,
+      (select sum(margin_dollars)
+         from events_in_scope
+         where pay_time >= $2::timestamptz
+           and pay_time < $3::timestamptz)               as v20
     union all
     -- ===========================================================
     -- purchase_count (Hist 1)
@@ -523,7 +599,9 @@ export async function getCustomerValueAnalytics(
       sum(lifetime_net_sales_dollars),
       sum(lifetime_gross_receipts_dollars),
       null::numeric, null::numeric, null::numeric, null::numeric, null::numeric,
-      null::numeric, null::numeric, null::numeric, null::numeric, null::numeric
+      null::numeric, null::numeric, null::numeric, null::numeric, null::numeric,
+      null::numeric, null::numeric, null::numeric, null::numeric, null::numeric,
+      null::numeric, null::numeric
     from customers_in_scope
     group by total_purchases_bucket
     union all
@@ -532,7 +610,8 @@ export async function getCustomerValueAnalytics(
     --   bucket  : purchaseNumber
     --   n       : orderCount
     --   v1..v5  : avg gross / median gross / avg net / median net / avg receipts
-    --   v6..v8  : unused
+    --   v6..v7  : avg margin / median margin
+    --   v8..v20 : unused
     -- ===========================================================
     select
       'basket_by_n'::text,
@@ -544,8 +623,12 @@ export async function getCustomerValueAnalytics(
       avg(net_sales_dollars),
       percentile_cont(0.5) within group (order by net_sales_dollars),
       avg(gross_receipts_dollars),
-      null::numeric, null::numeric, null::numeric,
-      null::numeric, null::numeric, null::numeric, null::numeric, null::numeric
+      avg(margin_dollars),
+      percentile_cont(0.5) within group (order by margin_dollars),
+      null::numeric,
+      null::numeric, null::numeric, null::numeric, null::numeric, null::numeric,
+      null::numeric, null::numeric, null::numeric, null::numeric, null::numeric,
+      null::numeric, null::numeric
     from events_in_scope
     group by purchase_n_bucket
     union all
@@ -554,7 +637,8 @@ export async function getCustomerValueAnalytics(
     --   bucket  : totalPurchases
     --   n       : customerCount
     --   v1..v4  : avg gross / median gross / avg net / median net (lifetime $)
-    --   v5..v8  : unused
+    --   v5..v6  : avg margin / median margin (lifetime $)
+    --   v7..v20 : unused
     -- ===========================================================
     select
       'lifetime_by_total'::text,
@@ -565,8 +649,12 @@ export async function getCustomerValueAnalytics(
       percentile_cont(0.5) within group (order by lifetime_gross_sales_dollars),
       avg(lifetime_net_sales_dollars),
       percentile_cont(0.5) within group (order by lifetime_net_sales_dollars),
-      null::numeric, null::numeric, null::numeric, null::numeric,
-      null::numeric, null::numeric, null::numeric, null::numeric, null::numeric
+      avg(lifetime_margin_dollars),
+      percentile_cont(0.5) within group (order by lifetime_margin_dollars),
+      null::numeric, null::numeric,
+      null::numeric, null::numeric, null::numeric, null::numeric, null::numeric,
+      null::numeric, null::numeric, null::numeric, null::numeric, null::numeric,
+      null::numeric, null::numeric
     from customers_in_scope
     group by total_purchases_bucket
     union all
@@ -575,7 +663,8 @@ export async function getCustomerValueAnalytics(
     --   bucket  : purchaseNumber
     --   n       : orderCount
     --   v1..v3  : sum gross / sum net / sum receipts ($ in bucket, in window)
-    --   v4..v8  : unused
+    --   v4      : sum margin ($ in bucket, in window)
+    --   v5..v20 : unused
     -- ===========================================================
     select
       'contribution_by_n'::text,
@@ -585,8 +674,11 @@ export async function getCustomerValueAnalytics(
       sum(gross_sales_dollars),
       sum(net_sales_dollars),
       sum(gross_receipts_dollars),
+      sum(margin_dollars),
+      null::numeric, null::numeric, null::numeric, null::numeric,
       null::numeric, null::numeric, null::numeric, null::numeric, null::numeric,
-      null::numeric, null::numeric, null::numeric, null::numeric, null::numeric
+      null::numeric, null::numeric, null::numeric, null::numeric, null::numeric,
+      null::numeric, null::numeric
     from events_in_scope
     where pay_time >= $2::timestamptz
       and pay_time < $3::timestamptz
@@ -649,17 +741,34 @@ export async function getCustomerValueAnalytics(
         `(select percentile_cont(${p}) within group (order by gross_sales) from ttm where visits >= ${n}) as m${n}_gs_${i}`,
         `(select percentile_cont(${p}) within group (order by net_sales) from ttm where visits >= ${n}) as m${n}_ns_${i}`,
         `(select percentile_cont(${p}) within group (order by receipts) from ttm where visits >= ${n}) as m${n}_rc_${i}`,
+        `(select percentile_cont(${p}) within group (order by margin) from ttm where visits >= ${n}) as m${n}_mg_${i}`,
       )
     }
   }
   const trailingSpendSql = `
-    with ttm as (
+    with inv_margin as (
+      -- Per-LINE margin pre-aggregated to INVOICE grain over the SAME
+      -- trailing-12-month horizon ttm uses, so the LEFT JOIN below is
+      -- 1:1 with order rows. Same convention as
+      -- margins.gross_margin_dollars (unknown cost => $0, canceled
+      -- lines zeroed).
+      select f.dealer_id, f.invoice_id, sum(${LINE_MARGIN_EXPR})::numeric as margin_dollars
+        from sweed_order_items_flat f
+       where f.dealer_id = any($1::bigint[])
+         and f.pay_time >= $2::timestamptz - interval '12 months'
+         and f.pay_time <  $2::timestamptz
+       group by f.dealer_id, f.invoice_id
+    ),
+    ttm as (
       select so.customer_id,
         count(*)::int                                                              as visits,
         sum(coalesce(so.subtotal_dollars, 0))::numeric                              as gross_sales,
         sum(coalesce(so.subtotal_dollars, 0) - coalesce(so.discount_dollars, 0))::numeric as net_sales,
-        sum(coalesce(so.grand_total_dollars, 0))::numeric                           as receipts
+        sum(coalesce(so.grand_total_dollars, 0))::numeric                           as receipts,
+        sum(coalesce(im.margin_dollars, 0))::numeric                                as margin
       from sweed_orders so
+      left join inv_margin im
+        on im.dealer_id = so.dealer_id and im.invoice_id = so.invoice_id
       where so.dealer_id = any($1::bigint[])
         and so.customer_id is not null
         and so.pay_time >= $2::timestamptz - interval '12 months'
@@ -725,6 +834,7 @@ export async function getCustomerValueAnalytics(
       grossSalesDollars: round2OrNull(ttmRow?.[`m${n}_gs_${i}`]),
       netSalesDollars: round2OrNull(ttmRow?.[`m${n}_ns_${i}`]),
       grossReceiptsDollars: round2OrNull(ttmRow?.[`m${n}_rc_${i}`]),
+      marginDollars: round2OrNull(ttmRow?.[`m${n}_mg_${i}`]),
     }))
   // m1 = full trailing-window population (>= 1 visit).
   const trailing12moSpendPercentiles = cohortPercentiles(1)
@@ -751,12 +861,19 @@ export async function getCustomerValueAnalytics(
     repeatPurchaseRate: null,
     observedAvgLtvGrossDollars: null,
     observedMedianLtvGrossDollars: null,
+    observedAvgLtvNetSalesDollars: null,
+    observedMedianLtvNetSalesDollars: null,
+    observedAvgLtvGrossReceiptsDollars: null,
+    observedMedianLtvGrossReceiptsDollars: null,
+    observedAvgLtvMarginDollars: null,
+    observedMedianLtvMarginDollars: null,
     purchaseCountPercentiles: emptyPurchaseCountPercentiles(args.percentiles),
     trailing12moSpendPercentiles: emptyTrailingSpendPercentiles(),
     trailing12moSpendPercentilesByMinVisits: emptyTrailingSpendByMinVisits(),
     grossSalesDollars: 0,
     grossReceiptsDollars: 0,
     netSalesDollars: 0,
+    marginDollars: 0,
   }
   const purchaseCountHistogram: PurchaseCountBucket[] = []
   const basketByPurchaseNumber: BasketByPurchaseNumberPoint[] = []
@@ -778,6 +895,12 @@ export async function getCustomerValueAnalytics(
           knownOrdersInWindow > 0 ? summary.repeatPurchases / knownOrdersInWindow : null
         summary.observedAvgLtvGrossDollars = asNum(row.v4)
         summary.observedMedianLtvGrossDollars = asNum(row.v5)
+        summary.observedAvgLtvNetSalesDollars = asNum(row.v14)
+        summary.observedMedianLtvNetSalesDollars = asNum(row.v15)
+        summary.observedAvgLtvGrossReceiptsDollars = asNum(row.v16)
+        summary.observedMedianLtvGrossReceiptsDollars = asNum(row.v17)
+        summary.observedAvgLtvMarginDollars = asNum(row.v18)
+        summary.observedMedianLtvMarginDollars = asNum(row.v19)
         // v9..v13 carry the five percentile values in the same order
         // the operator requested them (args.percentiles[0..4]).
         const percentileValues = [row.v9, row.v10, row.v11, row.v12, row.v13]
@@ -788,6 +911,7 @@ export async function getCustomerValueAnalytics(
         summary.grossSalesDollars = asReqNum(row.v6)
         summary.netSalesDollars = asReqNum(row.v7)
         summary.grossReceiptsDollars = asReqNum(row.v8)
+        summary.marginDollars = asReqNum(row.v20)
         // Trailing-12-month spend percentiles come from a separate
         // query (different lookback window than the page range), not
         // the union — assign the precomputed values here.
@@ -817,6 +941,8 @@ export async function getCustomerValueAnalytics(
           avgNetSalesDollars: asNum(row.v3),
           medianNetSalesDollars: asNum(row.v4),
           avgGrossReceiptsDollars: asNum(row.v5),
+          avgMarginDollars: asNum(row.v6),
+          medianMarginDollars: asNum(row.v7),
         })
         break
       }
@@ -829,6 +955,8 @@ export async function getCustomerValueAnalytics(
           medianLifetimeGrossSalesDollars: asNum(row.v2),
           avgLifetimeNetSalesDollars: asNum(row.v3),
           medianLifetimeNetSalesDollars: asNum(row.v4),
+          avgLifetimeMarginDollars: asNum(row.v5),
+          medianLifetimeMarginDollars: asNum(row.v6),
         })
         break
       }
@@ -840,6 +968,7 @@ export async function getCustomerValueAnalytics(
           totalGrossSalesDollars: asReqNum(row.v1),
           totalNetSalesDollars: asReqNum(row.v2),
           totalGrossReceiptsDollars: asReqNum(row.v3),
+          totalMarginDollars: asReqNum(row.v4),
         })
         break
       }

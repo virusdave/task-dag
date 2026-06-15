@@ -9,11 +9,14 @@ import { z } from 'zod'
 // purchases, revenue mix by purchase ordinal) plus a KPI strip, all
 // from a single CTE pass over `sweed_orders`.
 //
-// Margin $ is derived elsewhere (sweed_package_snapshots) and not
-// included in this v1 endpoint — margin-basis histograms will be a
-// follow-on once the per-order margin can be joined cheaply (see v1.4
-// V4'2 — currently BLOCKED on prod line-items ingest). The SPA renders
-// an explicit MISSING DATA card for the margin variants.
+// Margin $ is a first-class money basis alongside gross sales / net
+// sales / gross receipts. Per-line margin is computed from
+// `sweed_order_items_flat` using the same convention as the proven
+// `margins.gross_margin_dollars` registry metric (line revenue minus
+// qty × `sweed_package_cost_as_of_or_earliest(...)`, unknown cost
+// treated as $0, canceled lines excluded), pre-aggregated to invoice
+// grain and LEFT JOINed to the order-grain purchase-event CTEs. See
+// customerValueAnalyticsQueries.ts.
 //
 // v1.4 V4'3 adds cohort retention + first-to-second conversion behind
 // an `?include=retention` query-param toggle (V4'0 decision). Existing
@@ -179,6 +182,10 @@ export const TrailingSpendPercentileSchema = z.object({
   grossSalesDollars: z.number().nullable(),
   netSalesDollars: z.number().nullable(),
   grossReceiptsDollars: z.number().nullable(),
+  /** Margin $ = line revenue − qty × package cost (unknown cost
+   *  treated as $0; canceled lines excluded). Same convention as the
+   *  `margins.gross_margin_dollars` registry metric. */
+  marginDollars: z.number().nullable(),
 })
 export type TrailingSpendPercentile = z.infer<typeof TrailingSpendPercentileSchema>
 
@@ -209,8 +216,21 @@ export const CustomerValueSummarySchema = z.object({
   firstPurchases: z.number().int().nonnegative(),
   repeatPurchases: z.number().int().nonnegative(),
   repeatPurchaseRate: z.number().nullable(),
+  // Observed lifetime-to-date value per known customer, one pair
+  // (avg + median) per money basis so the KPI strip can switch with
+  // the `$ basis` selector. `…GrossDollars` is the gross-sales basis
+  // (kept under its original name for back-compat).
   observedAvgLtvGrossDollars: z.number().nullable(),
   observedMedianLtvGrossDollars: z.number().nullable(),
+  observedAvgLtvNetSalesDollars: z.number().nullable(),
+  observedMedianLtvNetSalesDollars: z.number().nullable(),
+  observedAvgLtvGrossReceiptsDollars: z.number().nullable(),
+  observedMedianLtvGrossReceiptsDollars: z.number().nullable(),
+  /** Margin basis (line revenue − qty × package cost; unknown cost $0,
+   *  canceled lines excluded). Same convention as
+   *  `margins.gross_margin_dollars`. */
+  observedAvgLtvMarginDollars: z.number().nullable(),
+  observedMedianLtvMarginDollars: z.number().nullable(),
   /** Percentiles of per-customer total purchase count (50/75/80/90/95). */
   purchaseCountPercentiles: PurchaseCountPercentilesSchema,
   /** Percentiles of per-customer trailing-12-month spend (50/80/90/95). */
@@ -225,6 +245,9 @@ export const CustomerValueSummarySchema = z.object({
   grossSalesDollars: z.number(),
   grossReceiptsDollars: z.number(),
   netSalesDollars: z.number(),
+  /** Sum of margin $ across all in-scope orders in the visible window
+   *  (same convention as `margins.gross_margin_dollars`). */
+  marginDollars: z.number(),
 })
 export type CustomerValueSummary = z.infer<typeof CustomerValueSummarySchema>
 
@@ -253,6 +276,10 @@ export const BasketByPurchaseNumberPointSchema = z.object({
   avgNetSalesDollars: z.number().nullable(),
   medianNetSalesDollars: z.number().nullable(),
   avgGrossReceiptsDollars: z.number().nullable(),
+  /** Margin basis (unknown package cost treated as $0; canceled lines
+   *  excluded). Same convention as `margins.gross_margin_dollars`. */
+  avgMarginDollars: z.number().nullable(),
+  medianMarginDollars: z.number().nullable(),
 })
 export type BasketByPurchaseNumberPoint = z.infer<typeof BasketByPurchaseNumberPointSchema>
 
@@ -265,6 +292,10 @@ export const LifetimeByTotalPurchasesPointSchema = z.object({
   medianLifetimeGrossSalesDollars: z.number().nullable(),
   avgLifetimeNetSalesDollars: z.number().nullable(),
   medianLifetimeNetSalesDollars: z.number().nullable(),
+  /** Margin basis (unknown package cost treated as $0; canceled lines
+   *  excluded). Same convention as `margins.gross_margin_dollars`. */
+  avgLifetimeMarginDollars: z.number().nullable(),
+  medianLifetimeMarginDollars: z.number().nullable(),
 })
 export type LifetimeByTotalPurchasesPoint = z.infer<typeof LifetimeByTotalPurchasesPointSchema>
 
@@ -276,6 +307,9 @@ export const ContributionByPurchaseNumberPointSchema = z.object({
   totalGrossSalesDollars: z.number(),
   totalNetSalesDollars: z.number(),
   totalGrossReceiptsDollars: z.number(),
+  /** Margin basis (unknown package cost treated as $0; canceled lines
+   *  excluded). Same convention as `margins.gross_margin_dollars`. */
+  totalMarginDollars: z.number(),
 })
 export type ContributionByPurchaseNumberPoint = z.infer<typeof ContributionByPurchaseNumberPointSchema>
 
