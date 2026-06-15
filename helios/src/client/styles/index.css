@@ -6788,6 +6788,12 @@ span.metric-chart-legend-item {
   margin: 0 0 0.4rem;
   font-style: italic;
 }
+.cm-popup .cm-popup-segments {
+  font-size: 0.78rem;
+  color: #1d4ed8;
+  font-weight: 600;
+  margin: 0 0 0.4rem;
+}
 .cm-popup .cm-popup-link {
   display: inline-block;
   font-weight: 600;
@@ -6874,6 +6880,106 @@ span.metric-chart-legend-item {
 
 .customer-map-page .cm-more-filters[open] > summary {
   margin-bottom: 0.5rem;
+}
+
+/* ----- Marketing-segment lens ----- */
+.customer-map-page .cm-segment-lens {
+  border-top: 1px dashed var(--panel-border);
+  padding-top: 0.4rem;
+}
+.customer-map-page .cm-segment-lens > summary {
+  cursor: pointer;
+  font-size: 0.82rem;
+  color: var(--muted, #6b5b48);
+  user-select: none;
+  list-style: revert;
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+}
+.customer-map-page .cm-segment-lens-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+.customer-map-page .cm-segment-lens-mode {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+.customer-map-page .cm-segment-lens-mode button {
+  padding: 0.4rem 0.8rem;
+  min-height: 44px;
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  background: var(--surface, rgba(255, 250, 241, 0.55));
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+.customer-map-page .cm-segment-lens-mode button.is-active {
+  background: #1d4ed8;
+  border-color: #1d4ed8;
+  color: #fff;
+  font-weight: 600;
+}
+.customer-map-page .cm-segment-lens-mode button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.customer-map-page .cm-segment-lens-clear {
+  margin-left: auto;
+}
+.customer-map-page .cm-segment-lens-hint {
+  font-size: 0.76rem;
+  margin: 0;
+}
+.customer-map-page .cm-segment-lens-search {
+  padding: 0.45rem 0.6rem;
+  min-height: 44px;
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  width: 100%;
+  max-width: 22rem;
+}
+.customer-map-page .cm-segment-lens-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  max-height: 14rem;
+  overflow-y: auto;
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  padding: 0.3rem;
+}
+.customer-map-page .cm-segment-lens-option {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.4rem 0.3rem;
+  min-height: 44px;
+  cursor: pointer;
+  border-radius: 6px;
+}
+.customer-map-page .cm-segment-lens-option:hover {
+  background: rgba(120, 86, 48, 0.08);
+}
+.customer-map-page .cm-segment-lens-option input[type='checkbox'] {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+}
+.customer-map-page .cm-segment-lens-name {
+  flex: 1 1 auto;
+  font-size: 0.88rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.customer-map-page .cm-segment-lens-meta {
+  flex: 0 0 auto;
+  font-size: 0.74rem;
+  white-space: nowrap;
 }
 
 /* ----- Encoding-axis selectors (color by / size by) + legend ------ */

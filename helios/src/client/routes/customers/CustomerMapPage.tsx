@@ -27,8 +27,10 @@ import {
   CustomersMapEarliestResponseSchema,
   CustomersMapHighwaterResponseSchema,
   CustomersMapResponseSchema,
+  CustomersMapSegmentsResponseSchema,
   type CustomersMapPoint,
   type CustomersMapResponse,
+  type CustomersMapSegmentOption,
 } from '../../../shared/contracts/index.js'
 import { loadJson } from '../../app/fetchJson.js'
 import { buildAppPath } from '../../app/paths.js'
@@ -1283,6 +1285,47 @@ export function CustomerMapPage(): JSX.Element {
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
 
+  // ---- Marketing-segment lens ----
+  // Picker options (cached catalog + member counts), loaded lazily the
+  // first time the operator opens the lens; never on every map fetch.
+  const [segOptions, setSegOptions] = useState<CustomersMapSegmentOption[] | null>(null)
+  const [segLensOpen, setSegLensOpen] = useState(false)
+  const [segSearch, setSegSearch] = useState('')
+  const selectedSegmentIds = useMemo(
+    () =>
+      (searchParams.get('marketingSegmentIds') ?? '')
+        .split(',')
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0),
+    [searchParams],
+  )
+  const segmentMode: 'highlight' | 'filter' =
+    searchParams.get('marketingSegmentMode') === 'filter' ? 'filter' : 'highlight'
+  // id -> display name, for the popup's "Matched: …" line. Kept in a
+  // ref so the imperative MapLibre click handler can read it without
+  // re-binding on every option load.
+  const segNameByIdRef = useRef<Map<string, string>>(new Map())
+  useEffect(() => {
+    const m = new Map<string, string>()
+    for (const o of segOptions ?? []) m.set(o.segmentId, o.name)
+    segNameByIdRef.current = m
+  }, [segOptions])
+
+  useEffect(() => {
+    if (!segLensOpen || segOptions !== null) return
+    void (async () => {
+      try {
+        const res = await loadJson(
+          '/api/admin/customers/map/segments',
+          CustomersMapSegmentsResponseSchema,
+        )
+        setSegOptions(res.segments)
+      } catch {
+        setSegOptions([])
+      }
+    })()
+  }, [segLensOpen, segOptions])
+
   // Re-fetch on filter change.
   useEffect(() => {
     let cancelled = false
@@ -1523,6 +1566,12 @@ export function CustomerMapPage(): JSX.Element {
             lifetimeVisitCount: p.lifetimeVisitCount,
             lifetimeSpendDollars: p.lifetimeSpendDollars,
             lifetimeOrderCount: p.lifetimeOrderCount,
+            // Marketing-segment lens: whether this point's customer is
+            // in any selected segment, plus the matched ids (for the
+            // popup). `segMatch` drives the emphasis halo layer; it is
+            // false for every point when no segment is selected.
+            segMatch: p.marketingSegmentMatchIds.length > 0,
+            segMatchIds: p.marketingSegmentMatchIds.join(','),
             // Per-feature encoded color (after saturation modulation)
             // and size multiplier. Both read by MapLibre paint
             // expressions via `['get', ...]`.
@@ -1677,6 +1726,26 @@ export function CustomerMapPage(): JSX.Element {
           },
         })
 
+        // Marketing-segment emphasis halo. A separate ring layer drawn
+        // ABOVE the dots, filtered to points whose customer matches the
+        // selected segment(s). Kept as its own layer (rather than
+        // mutating the base dots' paint) so it never collides with the
+        // replay opacity/radius animation. When no segment is selected,
+        // no feature has segMatch=true so this layer renders nothing.
+        mapInstance.addLayer({
+          id: 'scans-seg-highlight',
+          type: 'circle',
+          source: 'scans',
+          filter: ['==', ['get', 'segMatch'], true],
+          paint: {
+            'circle-radius': ['+', SIZED_RADIUS_EXPR, 4],
+            'circle-color': 'rgba(0,0,0,0)',
+            'circle-stroke-color': '#1d4ed8',
+            'circle-stroke-width': 2.5,
+            'circle-stroke-opacity': 0.95,
+          },
+        })
+
         // Store labels last so they sit on top and stay legible
         // over the customer dots.
         mapInstance.addLayer({
@@ -1738,6 +1807,20 @@ export function CustomerMapPage(): JSX.Element {
           const demoCells = [visitTypeLabel, ageLabel, gender ? `sex ${gender}` : '']
             .filter(Boolean)
             .join(' · ')
+          // Matched marketing segments (lens). Map the matched ids to
+          // names via the picker options; fall back to the id when an
+          // option is not loaded. Capped so the popup stays compact.
+          const matchIds = String(props.segMatchIds ?? '')
+            .split(',')
+            .map((s) => s.trim())
+            .filter(Boolean)
+          const matchNames = matchIds.map((id) => segNameByIdRef.current.get(id) ?? `#${id}`)
+          const shownMatches = matchNames.slice(0, 3)
+          const matchExtra = matchNames.length - shownMatches.length
+          const matchLabel =
+            matchNames.length === 0
+              ? ''
+              : `Matched: ${shownMatches.join(', ')}${matchExtra > 0 ? `, +${matchExtra} more` : ''}`
           const html = `
             <div class="cm-popup">
               <div class="cm-popup-name">${escapeHtml(String(props.displayName ?? 'Unknown'))}</div>
@@ -1755,6 +1838,7 @@ export function CustomerMapPage(): JSX.Element {
                   ? `<div class="cm-popup-lifetime">${escapeHtml(lifetimeCells)} · ${escapeHtml(String(lifetimeVisits))} scans</div>`
                   : `<div class="cm-popup-lifetime">${escapeHtml(String(lifetimeVisits))} scans (not CRM-linked)</div>`
               }
+              ${matchLabel ? `<div class="cm-popup-segments">${escapeHtml(matchLabel)}</div>` : ''}
               <a
                 class="cm-popup-link"
                 href="${buildAppPath(String(props.customerUrl ?? ''))}"
@@ -1994,6 +2078,37 @@ export function CustomerMapPage(): JSX.Element {
   }
   function handleSiteChange(siteSlugs: string): void {
     setParam('siteSlugs', siteSlugs)
+  }
+
+  // Marketing-segment lens mutators. Selection is stored as a CSV in
+  // `marketingSegmentIds`; mode in `marketingSegmentMode`. Clearing the
+  // selection also drops the mode so the URL stays clean.
+  function toggleSegment(segmentId: string): void {
+    const next = new URLSearchParams(searchParams)
+    const set = new Set(selectedSegmentIds)
+    if (set.has(segmentId)) set.delete(segmentId)
+    else set.add(segmentId)
+    if (set.size === 0) {
+      next.delete('marketingSegmentIds')
+      next.delete('marketingSegmentMode')
+    } else {
+      next.set('marketingSegmentIds', [...set].join(','))
+      if (!next.has('marketingSegmentMode')) next.set('marketingSegmentMode', 'highlight')
+    }
+    setSearchParams(next, { replace: true })
+  }
+  function setSegmentMode(mode: 'highlight' | 'filter'): void {
+    if (selectedSegmentIds.length === 0) return
+    const next = new URLSearchParams(searchParams)
+    next.set('marketingSegmentMode', mode)
+    setSearchParams(next, { replace: true })
+  }
+  function clearSegments(): void {
+    const next = new URLSearchParams(searchParams)
+    next.delete('marketingSegmentIds')
+    next.delete('marketingSegmentMode')
+    setSearchParams(next, { replace: true })
+    setSegSearch('')
   }
 
   // ZIP prefix has the same draft/commit pattern as Max Points —
@@ -2256,6 +2371,15 @@ export function CustomerMapPage(): JSX.Element {
               </Pill>
             </span>
           ) : null}
+          {selectedSegmentIds.length > 0 ? (
+            <span title="Marketing-segment lens active. Matches CRM-linked customers with cached membership only.">
+              <Pill tone="success">
+                {`Segments: ${selectedSegmentIds.length} ${
+                  segmentMode === 'filter' ? 'filtered' : 'highlighted'
+                }`}
+              </Pill>
+            </span>
+          ) : null}
           {loading ? <Pill tone="muted">refreshing…</Pill> : null}
         </div>
       </header>
@@ -2396,6 +2520,95 @@ export function CustomerMapPage(): JSX.Element {
                 <option value="pending,failed">Pending / retrying</option>
               </select>
             </label>
+          </div>
+        </details>
+
+        {/* Marketing-segment lens: highlight or filter the map by Sweed
+            marketing-segment membership. Options load lazily on open. */}
+        <details
+          className="cm-segment-lens"
+          open={segLensOpen}
+          onToggle={(e) => setSegLensOpen((e.target as HTMLDetailsElement).open)}
+        >
+          <summary>
+            Marketing segment lens
+            {selectedSegmentIds.length > 0
+              ? ` (${selectedSegmentIds.length} selected, ${
+                  segmentMode === 'filter' ? 'show only' : 'highlight'
+                })`
+              : ''}
+          </summary>
+          <div className="cm-segment-lens-body">
+            <div className="cm-segment-lens-mode" role="group" aria-label="Segment lens mode">
+              <button
+                type="button"
+                className={segmentMode === 'highlight' ? 'is-active' : ''}
+                aria-pressed={segmentMode === 'highlight'}
+                disabled={selectedSegmentIds.length === 0}
+                onClick={() => setSegmentMode('highlight')}
+              >
+                Highlight
+              </button>
+              <button
+                type="button"
+                className={segmentMode === 'filter' ? 'is-active' : ''}
+                aria-pressed={segmentMode === 'filter'}
+                disabled={selectedSegmentIds.length === 0}
+                onClick={() => setSegmentMode('filter')}
+              >
+                Show only
+              </button>
+              {selectedSegmentIds.length > 0 ? (
+                <button type="button" className="cm-segment-lens-clear" onClick={clearSegments}>
+                  Clear
+                </button>
+              ) : null}
+            </div>
+            <p className="cm-segment-lens-hint subtle-copy">
+              Matches CRM-linked customers with cached membership. In Highlight, unmatched dots are
+              still shown.
+            </p>
+            <input
+              type="search"
+              className="cm-segment-lens-search"
+              aria-label="Search marketing segments"
+              placeholder="Search segments"
+              value={segSearch}
+              onChange={(e) => setSegSearch(e.target.value)}
+            />
+            <div className="cm-segment-lens-list">
+              {segOptions === null ? (
+                <p className="subtle-copy">Loading segments…</p>
+              ) : segOptions.length === 0 ? (
+                <p className="subtle-copy">No cached segments yet.</p>
+              ) : (
+                (() => {
+                  const q = segSearch.trim().toLowerCase()
+                  const shown = segOptions.filter((o) =>
+                    q === '' ? true : o.name.toLowerCase().includes(q),
+                  )
+                  if (shown.length === 0) {
+                    return <p className="subtle-copy">No matching segments.</p>
+                  }
+                  return shown.map((o) => {
+                    const checked = selectedSegmentIds.includes(o.segmentId)
+                    return (
+                      <label key={o.segmentId} className="cm-segment-lens-option">
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={() => toggleSegment(o.segmentId)}
+                        />
+                        <span className="cm-segment-lens-name">{o.name}</span>
+                        <span className="cm-segment-lens-meta subtle-copy">
+                          {o.scopeLabel} · {o.cachedMemberCount.toLocaleString()}
+                        </span>
+                      </label>
+                    )
+                  })
+                })()
+              )}
+            </div>
           </div>
         </details>
 

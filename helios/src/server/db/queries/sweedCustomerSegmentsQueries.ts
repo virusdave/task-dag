@@ -501,6 +501,66 @@ export async function readMarketingSegmentChipsForCustomers(
   return out
 }
 
+// =====================================================================
+// Read — segment options for the customer-map marketing-segment lens
+// =====================================================================
+
+export interface MapSegmentOption {
+  segmentId: string
+  name: string
+  type: SweedSegmentType
+  scopeLabel: string
+  cachedMemberCount: number
+}
+
+/**
+ * Enabled marketing-segment catalog entries plus their cached member
+ * count, for the customer-map segment picker.
+ *
+ * DB-cost (docs/canon/rules/DB_PERFORMANCE.md): one grouped read. The
+ * member count is a grouped scan of sweed_customer_segments on the
+ * (segment_id, sweed_customer_id) index (migration 080); the catalog
+ * side is tiny. Never calls Sweed. Cached at the route layer so the
+ * picker doesn't re-run it on every keystroke.
+ */
+export async function readMapSegmentOptions(db: Queryable): Promise<MapSegmentOption[]> {
+  const res = await db.query<{
+    segment_id: string
+    segment_name: string
+    segment_type_id: number | null
+    scope_dealer_id: string | number | null
+    target_store_names: string[] | null
+    member_count: string | number
+  }>(
+    `select c.segment_id::text       as segment_id,
+            c.segment_name           as segment_name,
+            c.segment_type_id        as segment_type_id,
+            c.scope_dealer_id        as scope_dealer_id,
+            c.target_store_names     as target_store_names,
+            coalesce(m.member_count, 0) as member_count
+       from sweed_marketing_segments c
+       left join (
+         select segment_id, count(*)::bigint as member_count
+           from sweed_customer_segments
+          where enabled is distinct from false
+          group by segment_id
+       ) m on m.segment_id = c.segment_id
+      where coalesce(c.enabled, true) = true
+      order by member_count desc, c.segment_name asc`,
+  )
+  return res.rows.map((r) => {
+    const scopeDealerId = r.scope_dealer_id === null ? null : Number(r.scope_dealer_id)
+    const { scopeLabel } = catalogScope(scopeDealerId, r.target_store_names ?? [])
+    return {
+      segmentId: r.segment_id,
+      name: r.segment_name,
+      type: mapSegmentType(r.segment_type_id),
+      scopeLabel,
+      cachedMemberCount: Number(r.member_count),
+    }
+  })
+}
+
 interface CatalogStaticRow {
   segment_id: string
   segment_name: string

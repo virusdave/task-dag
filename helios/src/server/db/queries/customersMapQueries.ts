@@ -31,6 +31,10 @@ export interface ListCustomersMapPointsFilter {
   postalPrefix: string | null
   linkStatus: readonly LinkStatus[] | null
   coordSource: CoordSourceFilter | null
+  // Marketing-segment lens: selected segment ids + what selection does.
+  // Empty/null ids = lens off. Mode defaults to 'highlight'.
+  marketingSegmentIds: readonly number[] | null
+  marketingSegmentMode: 'highlight' | 'filter' | null
   maxPoints: number
 }
 
@@ -93,6 +97,9 @@ interface PointRow {
   lifetime_visit_count: string | number
   lifetime_spend_dollars: string | number | null
   lifetime_order_count: string | number | null
+  // Selected segment ids this point's customer matches; [] when the
+  // lens is off or no match.
+  segment_match_ids: string[] | null
 }
 
 function toIso(value: Date | null): string {
@@ -246,15 +253,62 @@ export async function listCustomersMapPoints(
     ? 'left join visitor_scan_links vsl on vsl.scan_id = vs.id'
     : ''
 
+  // Marketing-segment lens. In 'filter' mode we restrict the base set
+  // to scans whose linked customer is in any selected segment, via an
+  // EXISTS (applied BEFORE the limit so totalMatching/clipped stay
+  // truthful). In 'highlight' mode we leave the set alone and only
+  // annotate matches (see the match lateral below).
+  const segmentIds =
+    filter.marketingSegmentIds !== null && filter.marketingSegmentIds.length > 0
+      ? [...filter.marketingSegmentIds]
+      : null
+  const segmentMode = filter.marketingSegmentMode ?? 'highlight'
+  if (segmentIds !== null && segmentMode === 'filter') {
+    add(
+      (p) =>
+        'exists (select 1 from visitor_scan_links msl' +
+        ' join sweed_customer_segments scs on scs.sweed_customer_id = msl.sweed_customer_id' +
+        ` where msl.scan_id = vs.id and scs.enabled is distinct from false and scs.segment_id = any(${p}::bigint[]))`,
+      segmentIds,
+    )
+  }
+
   const whereSql = `where ${conditions.join(' and ')}`
 
   // We over-fetch by one so we can detect the "clipped" case without
   // a second count query for the typical fits-under-budget request.
   // When the over-fetch trips we issue a single count query so the
   // operator sees the true total they'd need to filter down to.
+  // Everything pushed so far is a WHERE-clause param; the count query
+  // (clipped case) reuses exactly these and nothing after.
+  const whereParamCount = params.length
+
   const fetchLimit = Math.max(1, filter.maxPoints) + 1
   params.push(fetchLimit)
   const limitPlaceholder = `$${params.length}`
+
+  // Param + SQL for the per-point segment-match annotation. Computed
+  // for the TRIMMED base set only (a lateral over base), so it costs
+  // one indexed lookup per returned point, not per matching scan.
+  // Present in both modes when a selection exists.
+  let segMatchPlaceholder: string | null = null
+  if (segmentIds !== null) {
+    params.push(segmentIds)
+    segMatchPlaceholder = `$${params.length}`
+  }
+  const segMatchSelect =
+    segMatchPlaceholder !== null ? 'coalesce(seg.match_ids, array[]::text[])' : "array[]::text[]"
+  const segMatchJoin =
+    segMatchPlaceholder !== null
+      ? `left join lateral (
+           select array_agg(distinct scs.segment_id::text) as match_ids
+             from visitor_scan_links msl
+             join sweed_customer_segments scs on scs.sweed_customer_id = msl.sweed_customer_id
+            where msl.scan_id = b.scan_id
+              and scs.enabled is distinct from false
+              and scs.segment_id = any(${segMatchPlaceholder}::bigint[])
+         ) seg on true`
+      : ''
 
   // Always include the addresses-LEFT-JOIN so the document/scan
   // coalesce works the same regardless of whether the link-status
@@ -343,7 +397,9 @@ export async function listCustomersMapPoints(
       case
         when link.sweed_customer_id is null then null
         else coalesce(spend.lifetime_order_count, 0)
-      end                                          as lifetime_order_count
+      end                                          as lifetime_order_count,
+
+      ${segMatchSelect}                            as segment_match_ids
 
     from base b
 
@@ -377,6 +433,8 @@ export async function listCustomersMapPoints(
         and so.dealer_id   = link.dealer_id
         and so.customer_id = link.sweed_customer_id
     ) spend on true
+
+    ${segMatchJoin}
 
     order by b.checked_in_at desc, b.scan_id desc
   `
@@ -434,6 +492,9 @@ export async function listCustomersMapPoints(
         lifetimeVisitCount,
         lifetimeSpendDollars,
         lifetimeOrderCount,
+        marketingSegmentMatchIds: Array.isArray(row.segment_match_ids)
+          ? row.segment_match_ids
+          : [],
       }
     })
     .filter((p): p is CustomersMapPoint => p !== null)
@@ -442,10 +503,10 @@ export async function listCustomersMapPoints(
   // the unclipped case is just `points.length`.
   let totalMatching = points.length
   if (clipped) {
-    // Reuse the same WHERE clause but drop the LIMIT param (the last
-    // one we pushed). pg ignores extras only when placeholders match,
-    // so re-build the params array without it.
-    const countParams = params.slice(0, params.length - 1)
+    // Reuse the same WHERE clause with EXACTLY its params (everything
+    // before the limit + segment-match params, which the count query
+    // doesn't reference).
+    const countParams = params.slice(0, whereParamCount)
     const countSql = `select count(*)::bigint as n from visitor_scans vs left join addresses addr on addr.id = vs.address_id ${joinSql} ${whereSql}`
     const countResult = await db.query<{ n: string | number }>(countSql, countParams)
     const n = countResult.rows[0]?.n
@@ -608,6 +669,21 @@ async function countUnknown(
     filter.linkStatus !== null && filter.linkStatus.length > 0
   if (needsLinkJoin) {
     add((p) => `vsl.link_status = any(${p})`, filter.linkStatus)
+  }
+  // Mirror the main query's segment FILTER so "Unknown: N" reflects the
+  // same population in filter mode (highlight mode leaves the set whole).
+  const segIds =
+    filter.marketingSegmentIds !== null && filter.marketingSegmentIds.length > 0
+      ? [...filter.marketingSegmentIds]
+      : null
+  if (segIds !== null && (filter.marketingSegmentMode ?? 'highlight') === 'filter') {
+    add(
+      (p) =>
+        'exists (select 1 from visitor_scan_links msl' +
+        ' join sweed_customer_segments scs on scs.sweed_customer_id = msl.sweed_customer_id' +
+        ` where msl.scan_id = vs.id and scs.enabled is distinct from false and scs.segment_id = any(${p}::bigint[]))`,
+      segIds,
+    )
   }
   const joinSql = needsLinkJoin
     ? 'left join visitor_scan_links vsl on vsl.scan_id = vs.id'

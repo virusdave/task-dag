@@ -13,6 +13,7 @@ import {
   CustomersMapHighwaterResponseSchema,
   CustomersMapQuerySchema,
   CustomersMapResponseSchema,
+  CustomersMapSegmentsResponseSchema,
 } from '../../shared/contracts/index.js'
 import { requireSessionUser } from '../auth/requireSession.js'
 import { getPool } from '../db/pool.js'
@@ -21,6 +22,7 @@ import {
   getVisitorScansMaxId,
   listCustomersMapPoints,
 } from '../db/queries/customersMapQueries.js'
+import { readMapSegmentOptions } from '../db/queries/sweedCustomerSegmentsQueries.js'
 
 export async function registerCustomersMapRoutes(server: FastifyInstance): Promise<void> {
   server.get('/api/admin/customers/map', async (request, reply) => {
@@ -39,6 +41,8 @@ export async function registerCustomersMapRoutes(server: FastifyInstance): Promi
         postalPrefix: query.postalPrefix ?? null,
         linkStatus: query.linkStatus ?? null,
         coordSource: query.coordSource ?? null,
+        marketingSegmentIds: query.marketingSegmentIds ?? null,
+        marketingSegmentMode: query.marketingSegmentMode ?? null,
         maxPoints: query.maxPoints,
       })
       return reply.send(CustomersMapResponseSchema.parse(result))
@@ -97,6 +101,26 @@ export async function registerCustomersMapRoutes(server: FastifyInstance): Promi
         return reply
           .status(503)
           .send({ error: 'visitor_scans table missing. Apply migration 039_visitor_scans.sql.' })
+      }
+      throw error
+    }
+  })
+
+  // Picker options for the marketing-segment lens. Cached catalog +
+  // member counts; never calls Sweed. Loaded once when the operator
+  // opens the lens, not on every map fetch.
+  server.get('/api/admin/customers/map/segments', async (request, reply) => {
+    const user = await requireSessionUser(request, reply, 'admin')
+    if (!user) return
+    try {
+      const segments = await readMapSegmentOptions(getPool())
+      return reply.send(CustomersMapSegmentsResponseSchema.parse({ segments }))
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      if (/relation .*sweed_(customer_segments|marketing_segments).* does not exist/i.test(message)) {
+        // Lens unavailable until the segment cache migrations land;
+        // degrade to an empty picker rather than 500ing the map.
+        return reply.send(CustomersMapSegmentsResponseSchema.parse({ segments: [] }))
       }
       throw error
     }

@@ -107,6 +107,29 @@ export const CustomersMapQuerySchema = z.object({
     .pipe(z.array(LinkStatusSchema))
     .optional(),
   coordSource: CoordSourceFilterSchema.optional(),
+  // Marketing-segment lens. `marketingSegmentIds` is the set of Sweed
+  // segment ids the operator selected (OR semantics: a point matches
+  // if its linked customer is in ANY of them). `marketingSegmentMode`
+  // decides what selection does:
+  //   highlight (default) — show all points, emphasise matches
+  //   filter              — show ONLY points whose customer matches
+  // Matching only works for CRM-linked customers with cached
+  // membership; non-matches in highlight mode are not proof of
+  // non-membership.
+  marketingSegmentIds: z
+    .union([z.string(), z.array(z.string())])
+    .transform((value) => {
+      const flat = Array.isArray(value) ? value : [value]
+      return flat
+        .flatMap((entry) => entry.split(','))
+        .map((entry) => entry.trim())
+        .filter((entry) => entry.length > 0)
+        .map((entry) => Number(entry))
+        .filter((n) => Number.isInteger(n) && n > 0)
+    })
+    .pipe(z.array(z.number().int().positive()))
+    .optional(),
+  marketingSegmentMode: z.enum(['highlight', 'filter']).optional(),
   // Hard cap on the number of points returned; the server uses this
   // both as the LIMIT and as a "too many" sentinel that the client
   // surfaces as "data clipped — narrow your filter" in the UI.
@@ -166,6 +189,12 @@ export const CustomersMapPointSchema = z.object({
   // accordingly in the legend.
   lifetimeSpendDollars: z.number().nullable(),
   lifetimeOrderCount: z.number().int().nullable(),
+  // Marketing-segment ids (as strings) from the current selection
+  // that this point's linked customer matches. Empty when no segment
+  // is selected, the scan is not linked, or the customer is in none
+  // of the selected segments. Drives the map's highlight emphasis and
+  // the popup's "Matched: …" line.
+  marketingSegmentMatchIds: z.array(z.string()).default([]),
 })
 export type CustomersMapPoint = z.infer<typeof CustomersMapPointSchema>
 
@@ -232,3 +261,24 @@ export const CustomersMapHighwaterResponseSchema = z.object({
   maxScanId: z.number().int().nonnegative().nullable(),
 })
 export type CustomersMapHighwaterResponse = z.infer<typeof CustomersMapHighwaterResponseSchema>
+
+/**
+ * Picker options for the map's marketing-segment lens. Cached catalog
+ * only (sweed_marketing_segments); never calls Sweed on page load.
+ */
+export const CustomersMapSegmentOptionSchema = z.object({
+  segmentId: z.string(),
+  name: z.string(),
+  type: z.enum(['static', 'dynamic', 'unknown']),
+  scopeLabel: z.string(),
+  // Cached members currently in this segment (from
+  // sweed_customer_segments), so the operator can tell which segments
+  // actually have coverage before selecting them. May be 0.
+  cachedMemberCount: z.number().int().nonnegative(),
+})
+export type CustomersMapSegmentOption = z.infer<typeof CustomersMapSegmentOptionSchema>
+
+export const CustomersMapSegmentsResponseSchema = z.object({
+  segments: z.array(CustomersMapSegmentOptionSchema),
+})
+export type CustomersMapSegmentsResponse = z.infer<typeof CustomersMapSegmentsResponseSchema>
