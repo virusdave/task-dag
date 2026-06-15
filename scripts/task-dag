@@ -76,6 +76,26 @@ is_task_completed() {
     return 1
 }
 
+# Helper: true iff every dependency parent of <sha> is completed, i.e.
+# the task is "ready" to be picked up. A task with no dependency parents
+# is trivially ready (a dependency-free root). Mirrors the readiness
+# logic of `cmd_deps` (get_dep_parents + is_task_completed) so `frontier`
+# and `deps` never disagree about whether a task is pickable.
+# NOTE: temporary in-place backport of the canonical top-level fix
+# (top-level@04e5121) — automation's task-dag fork is not yet re-syncable
+# (its cross-host atomic claim subsystem must be unioned into canonical
+# first; tracked on issue #17). Until then, keep this in sync by hand.
+deps_satisfied() {
+    local sha="$1"
+    local deps dep
+    deps="$(get_dep_parents "$sha")" || return 1
+    while IFS= read -r dep; do
+        [ -z "$dep" ] && continue
+        is_task_completed "$dep" || return 1
+    done <<< "$deps"
+    return 0
+}
+
 # Helper: check if all child tasks of an epic are complete
 is_epic_complete() {
     local epic_sha="$1"
@@ -288,6 +308,16 @@ cmd_frontier() {
             if echo " $claimed_shas " | grep -q " $short_sha "; then
                 continue
             fi
+        fi
+
+        # Not-ready tasks are NOT pickable. `breakdown` publishes a
+        # tasks/frontier/<short> ref for EVERY task up front, so the ref
+        # set also contains tasks whose dependencies are not yet complete.
+        # Advertising those caused premature dispatch (a worker claims a
+        # task it cannot actually start). Skip any task with >=1 incomplete
+        # dependency; it surfaces automatically once its deps land.
+        if ! deps_satisfied "$sha"; then
+            continue
         fi
 
         if [ "$json" = true ]; then
