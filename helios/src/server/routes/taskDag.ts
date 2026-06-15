@@ -1,109 +1,103 @@
 /**
- * Task DAG API Routes for Fastify
+ * Task DAG API routes (Fastify).
+ *
+ * All endpoints degrade gracefully: when the task-DAG git source is
+ * unavailable they return a structured 503 (`task_dag_unavailable`) with
+ * the source status instead of a raw 500, so the client can render a
+ * friendly "task data unavailable" state. This matters because
+ * /tasks/frontier is the app landing page.
  */
 
-import type { FastifyInstance } from 'fastify';
-import * as taskDagRepo from '../taskDagRepo.js';
+import type { FastifyInstance, FastifyReply } from 'fastify'
+import * as taskDagRepo from '../taskDagRepo.js'
+import { TaskDagUnavailableError } from '../taskDagRepo.js'
+
+function handleError(
+  server: FastifyInstance,
+  reply: FastifyReply,
+  error: unknown,
+  context: string,
+): FastifyReply {
+  if (error instanceof TaskDagUnavailableError) {
+    return reply.status(503).send({
+      error: 'task_dag_unavailable',
+      message: 'Task DAG data is temporarily unavailable.',
+      source: error.status,
+    })
+  }
+  server.log.error(error, context)
+  return reply.status(500).send({ error: context })
+}
 
 export async function registerTaskDagRoutes(server: FastifyInstance) {
-  // GET /api/tasks/epics - List all epics
+  // GET /api/tasks/epics - list all epics
   server.get('/api/tasks/epics', async (_request, reply) => {
     try {
-      const epics = await taskDagRepo.getEpics();
-      return reply.send(epics);
+      return reply.send(await taskDagRepo.getEpics())
     } catch (error) {
-      server.log.error(error, 'Error fetching epics');
-      return reply.status(500).send({ error: 'Failed to fetch epics' });
+      return handleError(server, reply, error, 'Failed to fetch epics')
     }
-  });
+  })
 
-  // GET /api/tasks/epics/:id/dag - Get DAG for an epic
+  // GET /api/tasks/epics/:id/dag - DAG for an epic (issue number, ref, or sha)
   server.get<{ Params: { id: string } }>('/api/tasks/epics/:id/dag', async (request, reply) => {
     try {
-      const { id } = request.params;
-      
-      // Support both issue number and ref/sha
-      const ref = id.match(/^\d+$/) ? `refs/heads/tasks/pending/${id}` : id;
-      
-      const dag = await taskDagRepo.getEpicDag(ref);
-      return reply.send(dag);
+      return reply.send(await taskDagRepo.getEpicDag(request.params.id))
     } catch (error) {
-      server.log.error(error, 'Error fetching epic DAG');
-      return reply.status(500).send({ error: 'Failed to fetch epic DAG' });
-    }
-  });
-
-  // GET /api/tasks/frontier - List frontier tasks
-  server.get<{ Querystring: { issue?: string; status?: string } }>('/api/tasks/frontier', async (request, reply) => {
-    try {
-      const filter: { issue?: number; status?: string } = {};
-      
-      if (request.query.issue) {
-        filter.issue = parseInt(request.query.issue, 10);
+      if (error instanceof TaskDagUnavailableError) {
+        return handleError(server, reply, error, 'Failed to fetch epic DAG')
       }
-      if (request.query.status) {
-        filter.status = request.query.status;
+      if (error instanceof Error && /not found/i.test(error.message)) {
+        return reply.status(404).send({ error: error.message })
       }
-      
-      const tasks = await taskDagRepo.getFrontier(filter);
-      return reply.send(tasks);
-    } catch (error) {
-      server.log.error(error, 'Error fetching frontier');
-      return reply.status(500).send({ error: 'Failed to fetch frontier tasks' });
+      return handleError(server, reply, error, 'Failed to fetch epic DAG')
     }
-  });
+  })
 
-  // GET /api/tasks/task/:sha - Get task details
+  // GET /api/tasks/frontier - grouped frontier view
+  server.get<{ Querystring: { issue?: string; status?: string } }>(
+    '/api/tasks/frontier',
+    async (request, reply) => {
+      try {
+        const filter: { issue?: number; status?: string } = {}
+        if (request.query.issue) {
+          const n = parseInt(request.query.issue, 10)
+          if (Number.isFinite(n)) filter.issue = n
+        }
+        if (request.query.status) filter.status = request.query.status
+        return reply.send(await taskDagRepo.getFrontierView(filter))
+      } catch (error) {
+        return handleError(server, reply, error, 'Failed to fetch frontier tasks')
+      }
+    },
+  )
+
+  // GET /api/tasks/task/:sha - task detail with resolved relations
   server.get<{ Params: { sha: string } }>('/api/tasks/task/:sha', async (request, reply) => {
     try {
-      const { sha } = request.params;
-      const task = await taskDagRepo.getTaskDetail(sha);
-      
-      if (!task) {
-        return reply.status(404).send({ error: 'Task not found' });
-      }
-      
-      return reply.send(task);
+      const detail = await taskDagRepo.getTaskDetail(request.params.sha)
+      if (!detail) return reply.status(404).send({ error: 'Task not found' })
+      return reply.send(detail)
     } catch (error) {
-      server.log.error(error, 'Error fetching task');
-      return reply.status(500).send({ error: 'Failed to fetch task' });
+      return handleError(server, reply, error, 'Failed to fetch task')
     }
-  });
+  })
 
-  // GET /api/tasks/validate - Validate DAG structure
+  // GET /api/tasks/validate - validate DAG structure
   server.get('/api/tasks/validate', async (_request, reply) => {
     try {
-      const result = await taskDagRepo.validateDag();
-      return reply.send(result);
+      return reply.send(await taskDagRepo.validateDag())
     } catch (error) {
-      server.log.error(error, 'Error validating DAG');
-      return reply.status(500).send({ error: 'Failed to validate DAG' });
+      return handleError(server, reply, error, 'Failed to validate DAG')
     }
-  });
+  })
 
-  // GET /api/tasks/activity - Activity dashboard data
+  // GET /api/tasks/activity - dashboard counters
   server.get('/api/tasks/activity', async (_request, reply) => {
     try {
-      const epics = await taskDagRepo.getEpics();
-      const frontier = await taskDagRepo.getFrontier();
-      
-      const activity = {
-        totalEpics: epics.length,
-        totalFrontier: frontier.length,
-        activeTasks: frontier.filter(t => t.isActive).length,
-        completedToday: 0, // TODO: calculate from commit history
-        epicSummaries: epics.map(e => ({
-          title: e.title,
-          issueNumber: e.issueNumber,
-          frontierCount: e.frontierCount,
-          completionPct: e.completionPct,
-        })),
-      };
-      
-      return reply.send(activity);
+      return reply.send(await taskDagRepo.getActivity())
     } catch (error) {
-      server.log.error(error, 'Error fetching activity');
-      return reply.status(500).send({ error: 'Failed to fetch activity data' });
+      return handleError(server, reply, error, 'Failed to fetch activity data')
     }
-  });
+  })
 }

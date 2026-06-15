@@ -1,31 +1,17 @@
-import { useState, useEffect, useRef } from 'react'
-import { useParams, Link } from 'react-router-dom'
+import { useMemo, useState } from 'react'
+import { Link, useParams } from 'react-router-dom'
 import dagre from 'dagre'
 import { Pill } from '../../components/Pill.js'
-
-interface TaskNode {
-  sha: string
-  shortSha: string
-  title: string
-  status: string
-  type: string
-  dependencies: string[]
-}
-
-interface TaskEdge {
-  source: string
-  target: string
-  kind: 'breakdown' | 'dependency'
-}
-
-interface DagResult {
-  nodes: TaskNode[]
-  edges: TaskEdge[]
-  summary: {
-    totalTasks: number
-    statusCounts: Record<string, number>
-  }
-}
+import {
+  fetchTaskJson,
+  usePolledData,
+  SourceBanner,
+  TaskUnavailable,
+  TaskCard,
+  githubIssueUrl,
+  type DagResult,
+  type TaskNode,
+} from './taskShared.js'
 
 interface LayoutNode {
   x: number
@@ -35,93 +21,31 @@ interface LayoutNode {
   node: TaskNode
 }
 
+const STATUS_COLOR: Record<string, string> = {
+  done: '#22c55e',
+  'in-progress': '#f59e0b',
+  blocked: '#ef4444',
+  pending: '#6b7280',
+}
+const STATUS_FILL: Record<string, string> = {
+  done: '#dcfce7',
+  'in-progress': '#fef3c7',
+  blocked: '#fee2e2',
+  pending: '#f3f4f6',
+}
+
 export function EpicDagPage() {
   const { id } = useParams<{ id: string }>()
-  const [dag, setDag] = useState<DagResult | null>(null)
-  const [selectedNode, setSelectedNode] = useState<TaskNode | null>(null)
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
-  const svgRef = useRef<SVGSVGElement>(null)
+  const [view, setView] = useState<'list' | 'graph'>('list')
+  const [selected, setSelected] = useState<TaskNode | null>(null)
 
-  useEffect(() => {
-    async function loadDag() {
-      if (!id) return
+  const { data, error, loading, refresh } = usePolledData<DagResult>(
+    () => fetchTaskJson<DagResult>(`/api/tasks/epics/${id}/dag`),
+    [id],
+    30_000,
+  )
 
-      try {
-        const res = await fetch(`/api/tasks/epics/${id}/dag`)
-        if (!res.ok) throw new Error('Failed to load epic DAG')
-
-        const data = await res.json()
-        setDag(data)
-      } catch (err) {
-        setError(err instanceof Error ? err.message : 'Unknown error')
-      } finally {
-        setLoading(false)
-      }
-    }
-
-    loadDag()
-    const interval = setInterval(loadDag, 300000) // Poll every 300s (DB-cost epic E1)
-    return () => clearInterval(interval)
-  }, [id])
-
-  const layoutDag = (dagData: DagResult): LayoutNode[] => {
-    const g = new dagre.graphlib.Graph()
-    g.setGraph({ rankdir: 'TB', nodesep: 80, ranksep: 100 })
-    g.setDefaultEdgeLabel(() => ({}))
-
-    // Add nodes
-    dagData.nodes.forEach((node) => {
-      g.setNode(node.sha, { width: 200, height: 80 })
-    })
-
-    // Add edges
-    dagData.edges.forEach((edge) => {
-      g.setEdge(edge.source, edge.target)
-    })
-
-    dagre.layout(g)
-
-    // Extract layout positions
-    return dagData.nodes.map((node) => {
-      const n = g.node(node.sha)
-      return {
-        x: n.x,
-        y: n.y,
-        width: n.width,
-        height: n.height,
-        node,
-      }
-    })
-  }
-
-  const getStatusColor = (status: string) => {
-    switch (status) {
-      case 'done':
-        return '#22c55e'
-      case 'in-progress':
-        return '#f59e0b'
-      case 'blocked':
-        return '#ef4444'
-      default:
-        return '#6b7280'
-    }
-  }
-
-  const getNodeFill = (status: string) => {
-    switch (status) {
-      case 'done':
-        return '#dcfce7'
-      case 'in-progress':
-        return '#fef3c7'
-      case 'blocked':
-        return '#fee2e2'
-      default:
-        return '#f3f4f6'
-    }
-  }
-
-  if (loading) {
+  if (loading && !data) {
     return (
       <section>
         <div className="page-header">
@@ -132,123 +56,192 @@ export function EpicDagPage() {
     )
   }
 
-  if (error || !dag) {
+  if ((error && !data) || !data) {
     return (
       <section>
         <div className="page-header">
           <h2>Epic DAG</h2>
         </div>
-        <p style={{ color: 'var(--color-danger)' }}>Error: {error || 'No data'}</p>
-        <Link to="/tasks">← Back to Task Management</Link>
+        <TaskUnavailable error={error} onRetry={refresh} />
+        <p className="subtle-copy" style={{ marginTop: '1rem' }}>
+          <Link to="/tasks">Back to task management</Link>
+        </p>
       </section>
     )
   }
-
-  const layoutNodes = layoutDag(dag)
-  const minX = Math.min(...layoutNodes.map((n) => n.x - n.width / 2))
-  const minY = Math.min(...layoutNodes.map((n) => n.y - n.height / 2))
-  const maxX = Math.max(...layoutNodes.map((n) => n.x + n.width / 2))
-  const maxY = Math.max(...layoutNodes.map((n) => n.y + n.height / 2))
-
-  const viewBox = `${minX - 50} ${minY - 50} ${maxX - minX + 100} ${maxY - minY + 100}`
 
   return (
     <section>
       <div className="page-header">
         <div>
-          <p className="eyebrow">Epic DAG</p>
-          <h2>Task Dependency Graph</h2>
-          <p className="subtle-copy">Issue #{id}</p>
+          <p className="eyebrow">Operations · Epic</p>
+          <h2>{data.epic.title}</h2>
+          {data.epic.issueNumber != null && (
+            <p className="subtle-copy">
+              <a
+                href={data.epic.githubUrl ?? githubIssueUrl(data.epic.issueNumber)}
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                Issue #{data.epic.issueNumber}
+              </a>{' '}
+              · {data.summary.totalTasks} tasks
+            </p>
+          )}
         </div>
       </div>
 
-      <div className="review-grid" style={{ marginBottom: '2rem' }}>
-        <article className="mini-card">
-          <header>
-            <strong>Summary</strong>
-          </header>
-          <div className="stacked-list compact-stack">
-            <div className="mini-card-row">
-              <span>Total Tasks</span>
-              <strong>{dag.summary.totalTasks}</strong>
-            </div>
-            {Object.entries(dag.summary.statusCounts).map(([status, count]) => (
-              <div className="mini-card-row" key={status}>
-                <span style={{ textTransform: 'capitalize' }}>{status.replace('-', ' ')}</span>
-                <strong>{count}</strong>
-              </div>
-            ))}
-          </div>
-        </article>
+      <SourceBanner source={data.source} onRefresh={refresh} />
 
-        <article className="mini-card">
-          <header>
-            <strong>Legend</strong>
-          </header>
-          <div className="stacked-list compact-stack">
-            <div className="mini-card-row">
-              <span>Solid arrow</span>
-              <span>Breakdown (parent → child)</span>
-            </div>
-            <div className="mini-card-row">
-              <span>Dashed arrow</span>
-              <span>Dependency (prerequisite → dependent)</span>
-            </div>
+      <div className="task-summary-row">
+        {(['done', 'in-progress', 'blocked', 'pending'] as const).map((s) => (
+          <div
+            key={s}
+            className="task-summary-stat"
+            style={{ borderColor: STATUS_COLOR[s] }}
+          >
+            <span className="task-summary-value">{data.summary.statusCounts[s] ?? 0}</span>
+            <span className="task-summary-label">{s.replace('-', ' ')}</span>
           </div>
-          <div className="inline-row wrap-row" style={{ marginTop: '1rem', gap: '0.5rem' }}>
-            <Pill tone="success">Done</Pill>
-            <Pill tone="warning">In Progress</Pill>
-            <Pill tone="danger">Blocked</Pill>
-            <Pill tone="muted">Pending</Pill>
-          </div>
-        </article>
+        ))}
       </div>
 
-      <div
-        style={{
-          background: '#fff',
-          border: '1px solid var(--color-border)',
-          borderRadius: '8px',
-          padding: '1rem',
-          overflow: 'auto',
-          marginBottom: '2rem',
-        }}
-      >
-        <svg ref={svgRef} viewBox={viewBox} style={{ width: '100%', height: '600px' }}>
-          {/* Render edges */}
-          <g>
-            {dag.edges.map((edge, i) => {
-              const sourceNode = layoutNodes.find((n) => n.node.sha === edge.source)
-              const targetNode = layoutNodes.find((n) => n.node.sha === edge.target)
+      <div className="task-control-actions" style={{ marginBottom: '1rem' }}>
+        <button
+          type="button"
+          className={`task-chip${view === 'list' ? ' task-chip--active' : ''}`}
+          onClick={() => setView('list')}
+        >
+          List
+        </button>
+        <button
+          type="button"
+          className={`task-chip${view === 'graph' ? ' task-chip--active' : ''}`}
+          onClick={() => setView('graph')}
+        >
+          Graph
+        </button>
+        {data.epic.issueNumber != null ? (
+          <Link
+            to={`/tasks/frontier?issue=${data.epic.issueNumber}`}
+            className="task-link-button"
+          >
+            Frontier for issue #{data.epic.issueNumber}
+          </Link>
+        ) : (
+          <Link to="/tasks/frontier" className="task-link-button">
+            All frontier
+          </Link>
+        )}
+        {data.epic.issueNumber != null && (
+          <a
+            href={data.epic.githubUrl ?? githubIssueUrl(data.epic.issueNumber)}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="task-link-button"
+          >
+            GitHub issue
+          </a>
+        )}
+        <Link to="/tasks" className="task-link-button">
+          Task overview
+        </Link>
+      </div>
 
-              if (!sourceNode || !targetNode) return null
+      {view === 'list' ? (
+        <DagListView data={data} />
+      ) : (
+        <DagGraphView data={data} selected={selected} onSelect={setSelected} />
+      )}
 
-              const x1 = sourceNode.x
-              const y1 = sourceNode.y + sourceNode.height / 2
-              const x2 = targetNode.x
-              const y2 = targetNode.y - targetNode.height / 2
+      <p className="subtle-copy" style={{ marginTop: '1.5rem' }}>
+        <Link to="/tasks">Back to task management</Link>
+      </p>
+    </section>
+  )
+}
 
-              return (
-                <g key={i}>
-                  <line
-                    x1={x1}
-                    y1={y1}
-                    x2={x2}
-                    y2={y2}
-                    stroke={edge.kind === 'breakdown' ? '#6b7280' : '#3b82f6'}
-                    strokeWidth="2"
-                    strokeDasharray={edge.kind === 'dependency' ? '5,5' : '0'}
-                    markerEnd="url(#arrowhead)"
-                  />
-                </g>
-              )
-            })}
-          </g>
+function DagListView({ data }: { data: DagResult }) {
+  // Order by breakdown depth so parents precede children.
+  const bySha = useMemo(() => new Map(data.nodes.map((n) => [n.sha, n])), [data.nodes])
+  const ordered = useMemo(() => {
+    const roots = data.nodes.filter((n) => !n.parentTask || !bySha.has(n.parentTask))
+    const out: { node: TaskNode; depth: number }[] = []
+    const seen = new Set<string>()
+    const visit = (n: TaskNode, depth: number) => {
+      if (seen.has(n.sha)) return
+      seen.add(n.sha)
+      out.push({ node: n, depth })
+      for (const childSha of n.breakdownChildren) {
+        const child = bySha.get(childSha)
+        if (child) visit(child, depth + 1)
+      }
+    }
+    roots.forEach((r) => visit(r, 0))
+    // Any nodes not reached (cycles / detached) appended at depth 0.
+    data.nodes.forEach((n) => {
+      if (!seen.has(n.sha)) visit(n, 0)
+    })
+    return out
+  }, [data.nodes, bySha])
 
-          {/* Arrow marker */}
+  return (
+    <div className="task-group-body">
+      {ordered.map(({ node, depth }) => (
+        <div
+          key={node.sha}
+          style={{ marginLeft: `${Math.min(depth, 4) * 1.25}rem` }}
+        >
+          <TaskCard task={node} />
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function DagGraphView({
+  data,
+  selected,
+  onSelect,
+}: {
+  data: DagResult
+  selected: TaskNode | null
+  onSelect: (n: TaskNode | null) => void
+}) {
+  const layout = useMemo(() => layoutDag(data), [data])
+  if (layout.nodes.length === 0) {
+    return (
+      <article className="mini-card">
+        <p className="subtle-copy">No nodes to graph.</p>
+      </article>
+    )
+  }
+
+  const minX = Math.min(...layout.nodes.map((n) => n.x - n.width / 2))
+  const minY = Math.min(...layout.nodes.map((n) => n.y - n.height / 2))
+  const maxX = Math.max(...layout.nodes.map((n) => n.x + n.width / 2))
+  const maxY = Math.max(...layout.nodes.map((n) => n.y + n.height / 2))
+  const viewBox = `${minX - 40} ${minY - 40} ${maxX - minX + 80} ${maxY - minY + 80}`
+  // Render at natural size and let the wrapper scroll, rather than
+  // squashing a large DAG into an unreadable thumbnail on small screens.
+  const graphWidth = Math.max(720, maxX - minX + 80)
+  const graphHeight = Math.max(420, maxY - minY + 80)
+
+  return (
+    <>
+      <p className="subtle-copy" style={{ marginBottom: '0.5rem' }}>
+        Scroll to pan. Tap a node to inspect it.
+      </p>
+      <div className="task-graph-wrap">
+        <svg
+          viewBox={viewBox}
+          width={graphWidth}
+          height={graphHeight}
+          style={{ maxWidth: 'none', display: 'block' }}
+        >
           <defs>
             <marker
-              id="arrowhead"
+              id="arrow"
               markerWidth="10"
               markerHeight="10"
               refX="9"
@@ -259,117 +252,100 @@ export function EpicDagPage() {
               <path d="M0,0 L0,6 L9,3 z" fill="#6b7280" />
             </marker>
           </defs>
-
-          {/* Render nodes */}
-          <g>
-            {layoutNodes.map((layoutNode) => {
-              const { x, y, width, height, node } = layoutNode
-              const isSelected = selectedNode?.sha === node.sha
-
-              return (
-                <g
-                  key={node.sha}
-                  transform={`translate(${x - width / 2}, ${y - height / 2})`}
-                  onClick={() => setSelectedNode(node)}
-                  style={{ cursor: 'pointer' }}
-                >
-                  <rect
-                    width={width}
-                    height={height}
-                    fill={getNodeFill(node.status)}
-                    stroke={isSelected ? '#3b82f6' : getStatusColor(node.status)}
-                    strokeWidth={isSelected ? 3 : 2}
-                    rx="6"
-                  />
-                  <text
-                    x={width / 2}
-                    y={height / 2 - 10}
-                    textAnchor="middle"
-                    style={{ fontSize: '12px', fontWeight: 600, fill: '#111' }}
-                  >
-                    {node.title.length > 25 ? node.title.substring(0, 25) + '...' : node.title}
-                  </text>
-                  <text
-                    x={width / 2}
-                    y={height / 2 + 10}
-                    textAnchor="middle"
-                    style={{ fontSize: '10px', fill: '#6b7280' }}
-                  >
-                    {node.type} • {node.shortSha}
-                  </text>
-                  <text
-                    x={width / 2}
-                    y={height / 2 + 25}
-                    textAnchor="middle"
-                    style={{ fontSize: '10px', fill: getStatusColor(node.status), fontWeight: 500 }}
-                  >
-                    {node.status}
-                  </text>
-                </g>
-              )
-            })}
-          </g>
+          {data.edges.map((edge, i) => {
+            const s = layout.nodes.find((n) => n.node.sha === edge.source)
+            const t = layout.nodes.find((n) => n.node.sha === edge.target)
+            if (!s || !t) return null
+            return (
+              <line
+                key={i}
+                x1={s.x}
+                y1={s.y + s.height / 2}
+                x2={t.x}
+                y2={t.y - t.height / 2}
+                stroke={edge.kind === 'breakdown' ? '#6b7280' : '#3b82f6'}
+                strokeWidth="2"
+                strokeDasharray={edge.kind === 'dependency' ? '5,5' : '0'}
+                markerEnd="url(#arrow)"
+              />
+            )
+          })}
+          {layout.nodes.map((ln) => {
+            const isSel = selected?.sha === ln.node.sha
+            return (
+              <g
+                key={ln.node.sha}
+                transform={`translate(${ln.x - ln.width / 2}, ${ln.y - ln.height / 2})`}
+                onClick={() => onSelect(ln.node)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault()
+                    onSelect(ln.node)
+                  }
+                }}
+                role="button"
+                tabIndex={0}
+                aria-label={`${ln.node.title} (${ln.node.type}, ${ln.node.status})`}
+                style={{ cursor: 'pointer' }}
+              >
+                <rect
+                  width={ln.width}
+                  height={ln.height}
+                  fill={STATUS_FILL[ln.node.status] ?? '#f3f4f6'}
+                  stroke={isSel ? '#3b82f6' : STATUS_COLOR[ln.node.status] ?? '#6b7280'}
+                  strokeWidth={isSel ? 3 : 2}
+                  rx="6"
+                />
+                <text x={ln.width / 2} y={ln.height / 2 - 8} textAnchor="middle" style={{ fontSize: '11px', fontWeight: 600, fill: '#111' }}>
+                  {ln.node.title.length > 26 ? ln.node.title.slice(0, 26) + '…' : ln.node.title}
+                </text>
+                <text x={ln.width / 2} y={ln.height / 2 + 10} textAnchor="middle" style={{ fontSize: '10px', fill: STATUS_COLOR[ln.node.status] ?? '#6b7280' }}>
+                  {ln.node.type} · {ln.node.status}
+                </text>
+              </g>
+            )
+          })}
         </svg>
       </div>
-
-      {selectedNode && (
-        <article className="mini-card" style={{ marginBottom: '2rem' }}>
-          <header>
-            <strong>Selected Task</strong>
-            <button
-              onClick={() => setSelectedNode(null)}
-              style={{
-                background: 'transparent',
-                border: 'none',
-                cursor: 'pointer',
-                fontSize: '1.25rem',
-                padding: '0',
-              }}
-            >
-              ×
+      <p className="subtle-copy" style={{ marginTop: '0.5rem' }}>
+        Solid arrow = breakdown (parent → child); dashed = dependency (prerequisite → dependent).
+      </p>
+      {selected && (
+        <div style={{ marginTop: '1rem' }}>
+          <div className="inline-row" style={{ justifyContent: 'space-between' }}>
+            <strong>Selected task</strong>
+            <button type="button" className="task-link-button" onClick={() => onSelect(null)}>
+              Clear
             </button>
-          </header>
-          <div>
-            <h3 style={{ marginTop: '0.5rem' }}>{selectedNode.title}</h3>
-            <div className="inline-row wrap-row" style={{ marginTop: '0.75rem', gap: '1rem' }}>
-              <div>
-                <span className="subtle-copy">Type:</span> {selectedNode.type}
-              </div>
-              <div>
-                <span className="subtle-copy">Status:</span> {selectedNode.status}
-              </div>
-              <div>
-                <span className="subtle-copy">Dependencies:</span> {selectedNode.dependencies.length}
-              </div>
-            </div>
-            <div className="inline-row wrap-row module-card-links" style={{ marginTop: '1rem' }}>
-              <Link to={`/tasks/task/${selectedNode.sha}`}>View Full Details</Link>
-              <button
-                onClick={() => navigator.clipboard.writeText(selectedNode.sha)}
-                style={{
-                  background: 'transparent',
-                  border: 'none',
-                  color: 'var(--color-link)',
-                  cursor: 'pointer',
-                  padding: 0,
-                  fontSize: 'inherit',
-                }}
-              >
-                Copy SHA
-              </button>
-            </div>
-            <p className="subtle-copy" style={{ marginTop: '0.75rem', fontSize: '0.75rem', fontFamily: 'monospace' }}>
-              {selectedNode.sha}
-            </p>
           </div>
-        </article>
+          <div style={{ marginTop: '0.5rem' }}>
+            <TaskCard task={selected} />
+          </div>
+        </div>
       )}
-
-      <div>
-        <Link to="/tasks" style={{ fontSize: '0.875rem' }}>
-          ← Back to Task Management
-        </Link>
+      <div className="inline-row wrap-row" style={{ marginTop: '0.75rem', gap: '0.5rem' }}>
+        <Pill tone="success">Done</Pill>
+        <Pill tone="warning">In progress</Pill>
+        <Pill tone="danger">Blocked</Pill>
+        <Pill tone="muted">Pending</Pill>
       </div>
-    </section>
+    </>
   )
+}
+
+function layoutDag(data: DagResult): { nodes: LayoutNode[] } {
+  const g = new dagre.graphlib.Graph()
+  g.setGraph({ rankdir: 'TB', nodesep: 60, ranksep: 80 })
+  g.setDefaultEdgeLabel(() => ({}))
+  data.nodes.forEach((n) => g.setNode(n.sha, { width: 190, height: 64 }))
+  data.edges.forEach((e) => {
+    if (g.hasNode(e.source) && g.hasNode(e.target)) g.setEdge(e.source, e.target)
+  })
+  dagre.layout(g)
+  return {
+    nodes: data.nodes.map((node) => {
+      const n = g.node(node.sha)
+      return { x: n.x, y: n.y, width: n.width, height: n.height, node }
+    }),
+  }
 }

@@ -1,92 +1,41 @@
-import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
 import { Pill } from '../../components/Pill.js'
-
-interface EpicSummary {
-  issueNumber?: number
-  epicRef: string
-  sha: string
-  title: string
-  statusCounts: Record<string, number>
-  frontierCount: number
-  completionPct: number
-}
+import {
+  fetchTaskJson,
+  usePolledData,
+  SourceBanner,
+  TaskUnavailable,
+  githubIssueUrl,
+  type EpicSummary,
+} from './taskShared.js'
 
 interface Activity {
+  source: import('./taskShared.js').TaskDagSourceStatus
   totalEpics: number
   totalFrontier: number
+  readyTasks: number
   activeTasks: number
-  completedToday: number
-  epicSummaries: Array<{
-    title: string
-    issueNumber?: number
-    frontierCount: number
-    completionPct: number
-  }>
+  blockedTasks: number
 }
 
 export function TasksPage() {
-  const [epics, setEpics] = useState<EpicSummary[]>([])
-  const [activity, setActivity] = useState<Activity | null>(null)
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
+  const epicsQ = usePolledData<EpicSummary[]>(
+    () => fetchTaskJson<EpicSummary[]>('/api/tasks/epics'),
+    [],
+    30_000,
+  )
+  const activityQ = usePolledData<Activity>(
+    () => fetchTaskJson<Activity>('/api/tasks/activity'),
+    [],
+    30_000,
+  )
 
-  useEffect(() => {
-    async function loadData() {
-      try {
-        const [epicsRes, activityRes] = await Promise.all([
-          fetch('/api/tasks/epics'),
-          fetch('/api/tasks/activity'),
-        ])
+  const loading = epicsQ.loading && activityQ.loading && !epicsQ.data && !activityQ.data
+  const fatal = epicsQ.error && !epicsQ.data
 
-        if (!epicsRes.ok || !activityRes.ok) {
-          throw new Error('Failed to load task data')
-        }
-
-        const [epicsData, activityData] = await Promise.all([
-          epicsRes.json(),
-          activityRes.json(),
-        ])
-
-        setEpics(epicsData)
-        setActivity(activityData)
-      } catch (err) {
-        setError(err instanceof Error ? err.message : 'Unknown error')
-      } finally {
-        setLoading(false)
-      }
-    }
-
-    loadData()
-    const interval = setInterval(loadData, 60000) // Poll every 60s (DB-cost epic E1)
-    return () => clearInterval(interval)
-  }, [])
-
-  if (loading) {
-    return (
-      <section>
-        <div className="page-header">
-          <h2>Task Management</h2>
-        </div>
-        <p>Loading...</p>
-      </section>
-    )
-  }
-
-  if (error) {
-    return (
-      <section>
-        <div className="page-header">
-          <h2>Task Management</h2>
-        </div>
-        <p style={{ color: 'var(--color-danger)' }}>Error: {error}</p>
-      </section>
-    )
-  }
-
-  const getCompletionTone = (pct: number) => {
+  const completionTone = (pct: number): 'success' | 'warning' | 'muted' => {
     if (pct >= 0.8) return 'success'
-    if (pct >= 0.5) return 'warning'
+    if (pct >= 0.4) return 'warning'
     return 'muted'
   }
 
@@ -94,137 +43,129 @@ export function TasksPage() {
     <section>
       <div className="page-header">
         <div>
-          <p className="eyebrow">Git-DAG Task Management</p>
-          <h2>Automated Development Task Tracking</h2>
+          <p className="eyebrow">Operations · Tasks</p>
+          <h2>Task management</h2>
           <p className="subtle-copy">
-            Track epics, tasks, and leaf-level work across parallel agentic development efforts.
+            Git-DAG epics and the frontier of leaf tasks across parallel agentic development.
           </p>
         </div>
       </div>
 
-      {activity && (
-        <div className="review-grid" style={{ marginBottom: '2rem' }}>
-          <article className="mini-card">
-            <header>
-              <strong>Activity Overview</strong>
-              <Pill tone="muted">live</Pill>
-            </header>
-            <div className="stacked-list compact-stack">
-              <div className="mini-card-row">
-                <span>Total Epics</span>
-                <strong>{activity.totalEpics}</strong>
-              </div>
-              <div className="mini-card-row">
-                <span>Frontier Tasks</span>
-                <strong>{activity.totalFrontier}</strong>
-              </div>
-              <div className="mini-card-row">
-                <span>Active Tasks</span>
-                <strong>{activity.activeTasks}</strong>
-              </div>
-            </div>
-            <div className="inline-row wrap-row module-card-links" style={{ marginTop: '1rem' }}>
-              <Link to="/tasks/frontier">View Frontier</Link>
-            </div>
-          </article>
+      <SourceBanner
+        source={activityQ.data?.source}
+        onRefresh={() => {
+          epicsQ.refresh()
+          activityQ.refresh()
+        }}
+      />
 
-          <article className="mini-card">
-            <header>
-              <strong>Quick Links</strong>
-            </header>
-            <div className="inline-row wrap-row module-card-links">
-              <a href="https://github.com/FreshlyBakedNYC/automation/issues" target="_blank" rel="noopener noreferrer">
-                GitHub Issues
-              </a>
-              <Link to="/tasks/validate">Validate DAG</Link>
-            </div>
-            <p className="subtle-copy" style={{ marginTop: '1rem' }}>
-              Use the <code>task-dag</code> CLI for detailed queries and management.
-            </p>
-          </article>
+      {activityQ.data && (
+        <div className="task-summary-row">
+          <Stat label="Ready" value={activityQ.data.readyTasks} tone="success" />
+          <Stat label="Active" value={activityQ.data.activeTasks} tone="warning" />
+          <Stat label="Blocked" value={activityQ.data.blockedTasks} tone="danger" />
+          <Stat label="Frontier" value={activityQ.data.totalFrontier} tone="muted" />
+          <Stat label="Epics" value={activityQ.data.totalEpics} tone="muted" />
         </div>
       )}
+
+      <div className="inline-row wrap-row module-card-links" style={{ marginBottom: '1.5rem' }}>
+        <Link to="/tasks/frontier">Open the frontier</Link>
+        <a
+          href="https://github.com/FreshlyBakedNYC/automation/issues"
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          GitHub issues
+        </a>
+      </div>
 
       <div className="page-header">
         <div>
           <p className="eyebrow">Epics</p>
-          <h2>Current Development Efforts</h2>
+          <h2>Current development efforts</h2>
         </div>
       </div>
 
-      {epics.length === 0 ? (
+      {loading ? (
+        <p>Loading...</p>
+      ) : fatal ? (
+        <TaskUnavailable error={epicsQ.error} onRetry={epicsQ.refresh} />
+      ) : (epicsQ.data?.length ?? 0) === 0 ? (
         <article className="mini-card">
-          <p className="subtle-copy">No epics found. Create a GitHub issue to start a new epic.</p>
+          <p className="subtle-copy">No epics with active tasks. Open a GitHub issue to start one.</p>
         </article>
       ) : (
         <div className="review-grid">
-          {epics.map((epic) => {
-            const totalTasks = Object.values(epic.statusCounts).reduce((sum, count) => sum + count, 0)
-            const doneTasks = epic.statusCounts.done || 0
-
-            return (
-              <article className="mini-card" key={epic.sha}>
-                <header>
-                  <div>
-                    <strong>{epic.title}</strong>
-                    {epic.issueNumber && (
-                      <p className="subtle-copy" style={{ marginTop: '0.25rem' }}>
-                        <a
-                          href={`https://github.com/FreshlyBakedNYC/automation/issues/${epic.issueNumber}`}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          style={{ fontSize: '0.875rem' }}
-                        >
-                          Issue #{epic.issueNumber}
-                        </a>
-                      </p>
-                    )}
-                  </div>
-                  <Pill tone={getCompletionTone(epic.completionPct)}>
-                    {Math.round(epic.completionPct * 100)}%
-                  </Pill>
-                </header>
-
-                <div className="stacked-list compact-stack" style={{ marginTop: '0.75rem' }}>
-                  <div className="mini-card-row">
-                    <span>Total Tasks</span>
-                    <strong>{totalTasks}</strong>
-                  </div>
-                  <div className="mini-card-row">
-                    <span>Completed</span>
-                    <strong>{doneTasks}</strong>
-                  </div>
-                  <div className="mini-card-row">
-                    <span>Frontier</span>
-                    <strong>{epic.frontierCount}</strong>
-                  </div>
-                  {epic.statusCounts.pending && (
-                    <div className="mini-card-row">
-                      <span>Pending</span>
-                      <strong>{epic.statusCounts.pending}</strong>
-                    </div>
-                  )}
-                  {epic.statusCounts['in-progress'] && (
-                    <div className="mini-card-row">
-                      <span>In Progress</span>
-                      <strong>{epic.statusCounts['in-progress']}</strong>
-                    </div>
+          {epicsQ.data!.map((epic) => (
+            <article className="mini-card" key={`${epic.issueNumber ?? epic.sha}`}>
+              <header>
+                <div>
+                  <strong>{epic.title}</strong>
+                  {epic.issueNumber != null && (
+                    <p className="subtle-copy" style={{ marginTop: '0.25rem' }}>
+                      <a
+                        href={epic.githubUrl ?? githubIssueUrl(epic.issueNumber)}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        style={{ fontSize: '0.875rem' }}
+                      >
+                        Issue #{epic.issueNumber}
+                      </a>
+                    </p>
                   )}
                 </div>
+                <Pill tone={completionTone(epic.completionPct)}>
+                  {`${Math.round(epic.completionPct * 100)}%`}
+                </Pill>
+              </header>
 
-                <div className="inline-row wrap-row module-card-links" style={{ marginTop: '1rem' }}>
-                  {epic.issueNumber && <Link to={`/tasks/epic/${epic.issueNumber}`}>View DAG</Link>}
-                  <Link to={`/tasks/frontier?issue=${epic.issueNumber || ''}`}>Frontier Tasks</Link>
-                </div>
+              <div className="stacked-list compact-stack" style={{ marginTop: '0.75rem' }}>
+                <Row label="Tasks" value={epic.totalTasks} />
+                <Row label="Ready" value={epic.readyCount} />
+                <Row label="Active" value={epic.activeCount} />
+                {epic.blockedCount > 0 && <Row label="Blocked" value={epic.blockedCount} />}
+              </div>
 
-                <p className="subtle-copy" style={{ marginTop: '0.75rem', fontSize: '0.75rem', fontFamily: 'monospace' }}>
-                  {epic.sha.substring(0, 12)}
-                </p>
-              </article>
-            )
-          })}
+              <div
+                className="inline-row wrap-row module-card-links"
+                style={{ marginTop: '1rem' }}
+              >
+                {epic.issueNumber != null && <Link to={`/tasks/epic/${epic.issueNumber}`}>View DAG</Link>}
+                {epic.issueNumber != null && (
+                  <Link to={`/tasks/frontier?issue=${epic.issueNumber}`}>Frontier tasks</Link>
+                )}
+              </div>
+            </article>
+          ))}
         </div>
       )}
     </section>
+  )
+}
+
+function Stat({
+  label,
+  value,
+  tone,
+}: {
+  label: string
+  value: number
+  tone: 'success' | 'warning' | 'danger' | 'muted'
+}) {
+  return (
+    <div className={`task-summary-stat task-summary-stat--${tone}`}>
+      <span className="task-summary-value">{value}</span>
+      <span className="task-summary-label">{label}</span>
+    </div>
+  )
+}
+
+function Row({ label, value }: { label: string; value: number }) {
+  return (
+    <div className="mini-card-row">
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
   )
 }

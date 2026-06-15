@@ -9951,3 +9951,292 @@ span.metric-chart-legend-item {
     padding: 6px;
   }
 }
+
+/* ===========================================================================
+ * Operations · Tasks (frontier / epics / detail)
+ * Git-DAG task surfaces. Mobile-first: single column, generous tap targets,
+ * collapsible issue groups. See helios/src/client/routes/tasks/.
+ * ======================================================================== */
+
+.task-source-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  padding: 0.5rem 0.75rem;
+  margin-bottom: 1rem;
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  background: var(--accent-muted);
+  font-size: 0.8125rem;
+  color: var(--text-muted-strong);
+}
+.task-source-banner--stale {
+  background: var(--warn, #fff0c9);
+  border-color: var(--warning);
+}
+
+.task-link-button {
+  background: transparent;
+  border: none;
+  color: var(--accent);
+  cursor: pointer;
+  padding: 0;
+  font: inherit;
+  text-decoration: underline;
+}
+.task-link-button:hover {
+  color: var(--accent-strong);
+}
+
+.task-summary-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(86px, 1fr));
+  gap: 0.5rem;
+  margin-bottom: 1.25rem;
+}
+.task-summary-stat {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 0.6rem 0.4rem;
+  border: 1px solid var(--panel-border);
+  border-radius: 10px;
+  background: var(--panel);
+}
+.task-summary-value {
+  font-size: 1.4rem;
+  font-weight: 700;
+  line-height: 1.1;
+}
+.task-summary-label {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.task-summary-stat--success .task-summary-value { color: var(--success); }
+.task-summary-stat--warning .task-summary-value { color: var(--warning); }
+.task-summary-stat--danger .task-summary-value { color: var(--danger); }
+
+.task-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  margin-bottom: 1.25rem;
+}
+.task-search {
+  width: 100%;
+  padding: 0.55rem 0.7rem;
+  border: 1px solid var(--control-border);
+  border-radius: 8px;
+  font: inherit;
+  background: #fffdfa;
+}
+.task-chip-row,
+.task-control-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  align-items: center;
+}
+.task-chip {
+  padding: 0.35rem 0.7rem;
+  border: 1px solid var(--control-border);
+  border-radius: 999px;
+  background: #fff7ec;
+  cursor: pointer;
+  font-size: 0.8125rem;
+  color: var(--text-muted-strong);
+}
+.task-chip--active {
+  background: var(--accent);
+  border-color: var(--accent-strong);
+  color: #fff;
+}
+
+.task-group-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+.task-group {
+  border: 1px solid var(--panel-border);
+  border-radius: 10px;
+  background: var(--panel);
+  overflow: hidden;
+}
+.task-group-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  padding: 0.75rem 0.9rem;
+  cursor: pointer;
+  list-style: none;
+}
+.task-group-summary::-webkit-details-marker { display: none; }
+.task-group-summary::before {
+  content: '▸';
+  margin-right: 0.4rem;
+  color: var(--text-muted);
+  transition: transform 0.15s ease;
+}
+.task-group[open] > .task-group-summary::before {
+  transform: rotate(90deg);
+}
+.task-group-title {
+  font-weight: 650;
+  flex: 1 1 12rem;
+  min-width: 0;
+}
+.task-group-issue {
+  color: var(--accent);
+  margin-right: 0.4rem;
+  font-variant-numeric: tabular-nums;
+}
+.task-group-counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  align-items: center;
+}
+.task-group-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0 0.9rem 0.9rem;
+}
+.task-group-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  padding: 0.25rem 0 0.5rem;
+  font-size: 0.875rem;
+}
+
+.task-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  background: #fffdfa;
+}
+.task-card-main {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+.task-card-title {
+  font-weight: 600;
+  line-height: 1.3;
+  word-break: break-word;
+}
+.task-card-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  align-items: center;
+}
+.task-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1rem;
+  align-items: center;
+  font-size: 0.8125rem;
+  color: var(--text-muted);
+}
+.task-card-sha {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.8125rem;
+}
+.task-card-epic {
+  font-size: 0.8125rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+.task-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.9rem;
+  align-items: center;
+  font-size: 0.875rem;
+}
+
+.task-section-title {
+  font-size: 1rem;
+  margin: 0 0 0.5rem;
+}
+.task-related-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+}
+.task-dep-marker {
+  font-size: 1rem;
+  line-height: 1.6;
+  color: var(--text-muted);
+}
+.task-ref-list {
+  list-style: none;
+  margin: 0.4rem 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.8125rem;
+}
+.task-ref-list code {
+  word-break: break-all;
+}
+
+.task-graph-wrap {
+  background: #fff;
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  padding: 0.75rem;
+  overflow: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.task-graph-wrap svg g[role='button']:focus-visible rect {
+  stroke: #3b82f6;
+  stroke-width: 3;
+}
+
+.task-nav-row {
+  margin-bottom: 1.25rem;
+  gap: 0.75rem;
+}
+
+.task-error-detail {
+  margin-top: 0.5rem;
+  padding: 0.5rem 0.65rem;
+  background: var(--panel-muted, #f3f4f6);
+  border-radius: 6px;
+  font-size: 0.8rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-x: auto;
+}
+
+@media (min-width: 720px) {
+  .task-controls {
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .task-search { max-width: 22rem; }
+  .task-card-main {
+    flex-direction: row;
+    align-items: flex-start;
+    justify-content: space-between;
+  }
+  .task-card-main .task-card-badges { flex: 0 0 auto; }
+}
