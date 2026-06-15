@@ -1,5 +1,5 @@
 // Re-theme the state-level Sweed marketing event 2474
-// ("Happy Birthday from Freshly Baked NYC" — birthday EXTRA 5% off to
+// ("Happy Birthday from Freshly Baked NYC" — birthday EXTRA 10% off to
 // the "Birthday is Today" segment) with FBNYC brand chrome: dark card,
 // gold accent, Georgia serif headings, logo, high-contrast cream copy,
 // a celebratory gift banner, and a "Shop Now" CTA at the top AND bottom.
@@ -41,7 +41,7 @@ const LOGO_URL =
 const SHOP_URL = 'https://freshlybaked.nyc/?modal=locations'
 
 const PREHEADER =
-  "It's your birthday — so here's an extra 5% off our already-discounted prices, today only. 🎂"
+  'Your birthday 10% stacks on our everyday low prices. Today only, just for you.'
 
 // ---- Mandatory compliance footer (verbatim from recent site-level emails) ----
 // State-level cross-store send → both store licenses listed.
@@ -112,21 +112,21 @@ const EMAIL_HTML = `<!doctype html>
 
       <!-- Eyebrow + heading + intro -->
       <tr><td class="pad" style="padding:10px 28px 0 28px;">
-        <p style="margin:0;text-transform:uppercase;letter-spacing:2px;color:#e8b265;font-size:12px;line-height:165%;font-weight:700;">🎂 It's Your Birthday</p>
+        <p style="margin:0;text-transform:uppercase;letter-spacing:2px;color:#e8b265;font-size:12px;line-height:165%;font-weight:700;">It's your day 🎂</p>
       </td></tr>
       <tr><td class="pad" style="padding:4px 28px 10px 28px;">
-        <h1 style="margin:0;color:#f7eee8;font-family:Georgia,'Palatino','Book Antiqua','Palatino Linotype',serif;font-size:30px;line-height:120%;">Happy Birthday from Freshly Baked NYC!</h1>
+        <h1 style="margin:0;color:#f7eee8;font-family:Georgia,'Palatino','Book Antiqua','Palatino Linotype',serif;font-size:30px;line-height:120%;">We brought a gift.</h1>
       </td></tr>
       <tr><td class="pad" style="padding:0 28px 16px 28px;color:#eadfd6;font-size:16px;line-height:165%;">
-        <p style="margin:0 0 12px 0;color:#eadfd6;">It's your day, so let's celebrate the right way. As a thank-you for being part of the Freshly Baked family, we've got a little birthday treat waiting for you.</p>
-        <p style="margin:0;color:#eadfd6;">Take an <strong style="color:#f7eee8;">extra 5% off</strong> all of our already-discounted prices — just for today.</p>
+        <p style="margin:0 0 12px 0;color:#eadfd6;">Happy birthday. We mean it, and we wanted to do something that actually matters.</p>
+        <p style="margin:0;color:#eadfd6;">So here's an <strong style="color:#f7eee8;">extra 10% off</strong>. Not instead of our regular discounts. On top of them. Most places make you choose; we don't.</p>
       </td></tr>
 
       <!-- Gift banner -->
       <tr><td class="pad" style="padding:2px 28px 18px 28px;">
         <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
           <tr><td style="background:#e8b265;border-radius:18px;padding:16px 18px;text-align:center;">
-            <p style="margin:0;color:#2b1f1a;font-weight:700;letter-spacing:1.6px;text-transform:uppercase;font-size:15px;line-height:140%;">🎁&nbsp;&nbsp;Extra 5% Off — Today Only</p>
+            <p style="margin:0;color:#2b1f1a;font-weight:700;letter-spacing:1.6px;text-transform:uppercase;font-size:15px;line-height:140%;">Extra 10% Off, Today Only</p>
           </td></tr>
         </table>
       </td></tr>
@@ -136,11 +136,11 @@ const EMAIL_HTML = `<!doctype html>
 
       <!-- Details -->
       <tr><td class="pad" style="padding:0 28px 18px 28px;color:#eadfd6;font-size:15px;line-height:165%;">
-        <p style="margin:0 0 10px 0;color:#eadfd6;">Your birthday discount stacks right on top of our everyday deals — so it's the perfect day to grab the things you've had your eye on.</p>
+        <p style="margin:0 0 10px 0;color:#eadfd6;">Our prices are already lower than list. This birthday discount piles right on top. No codes to remember, no hoops. If your email or phone is linked to your account, it happens automatically at checkout.</p>
         <ul style="margin:0;padding:0 0 0 18px;color:#eadfd6;font-size:15px;line-height:165%;">
-          <li style="margin:0 0 6px 0;">Valid today only — your birthday.</li>
-          <li style="margin:0 0 6px 0;">Shop in-store, pickup, or delivery.</li>
-          <li style="margin:0;">Make sure your account is linked so the discount applies.</li>
+          <li style="margin:0 0 6px 0;">Good today, your birthday only.</li>
+          <li style="margin:0 0 6px 0;">In-store, pickup, or delivery.</li>
+          <li style="margin:0;">Link your account so the discount hits.</li>
         </ul>
       </td></tr>
 
@@ -149,8 +149,8 @@ const EMAIL_HTML = `<!doctype html>
 
       <!-- Sign-off -->
       <tr><td class="pad" style="padding:0 28px 18px 28px;color:#eadfd6;font-size:14px;line-height:165%;">
-        <p style="margin:0;color:#eadfd6;">Have an amazing day — you deserve it.</p>
-        <p style="margin:8px 0 0 0;color:#eadfd6;">— The Freshly Baked NYC team</p>
+        <p style="margin:0;color:#eadfd6;">Hope it's a good one.</p>
+        <p style="margin:8px 0 0 0;color:#eadfd6;">Freshly Baked NYC</p>
       </td></tr>
 
       <!-- Mandatory compliance footer (site-level boilerplate) -->
@@ -237,7 +237,7 @@ const EMAIL_DESIGN = {
             containerPadding: '10px 28px 0 28px',
             fontSize: '12px',
             color: '#e8b265',
-            text: "<p style=\"margin:0;text-transform:uppercase;letter-spacing:2px;color:#e8b265;font-weight:700;\">🎂 It's Your Birthday</p>",
+            text: "<p style=\"margin:0;text-transform:uppercase;letter-spacing:2px;color:#e8b265;font-weight:700;\">It's your day 🎂</p>",
           },
         },
         {
@@ -249,7 +249,7 @@ const EMAIL_DESIGN = {
             fontSize: '30px',
             color: '#f7eee8',
             lineHeight: '120%',
-            text: '<span style="color:#f7eee8;">Happy Birthday from Freshly Baked NYC!</span>',
+            text: '<span style="color:#f7eee8;">We brought a gift.</span>',
           },
         },
         {
@@ -259,7 +259,7 @@ const EMAIL_DESIGN = {
             fontSize: '16px',
             color: '#eadfd6',
             lineHeight: '165%',
-            text: "<p style=\"margin:0 0 12px 0;color:#eadfd6;\">It's your day, so let's celebrate the right way. As a thank-you for being part of the Freshly Baked family, we've got a little birthday treat waiting for you.</p><p style=\"margin:0;color:#eadfd6;\">Take an <strong style=\"color:#f7eee8;\">extra 5% off</strong> all of our already-discounted prices — just for today.</p>",
+            text: "<p style=\"margin:0 0 12px 0;color:#eadfd6;\">Happy birthday. We mean it, and we wanted to do something that actually matters.</p><p style=\"margin:0;color:#eadfd6;\">So here's an <strong style=\"color:#f7eee8;\">extra 10% off</strong>. Not instead of our regular discounts. On top of them. Most places make you choose; we don't.</p>",
           },
         },
       ]),
@@ -272,7 +272,7 @@ const EMAIL_DESIGN = {
             fontSize: '15px',
             color: '#2b1f1a',
             textAlign: 'center',
-            text: '<table role="presentation" width="100%"><tr><td style="background:#e8b265;border-radius:18px;padding:16px 18px;text-align:center;"><p style="margin:0;color:#2b1f1a;font-weight:700;letter-spacing:1.6px;text-transform:uppercase;">🎁&nbsp;&nbsp;Extra 5% Off — Today Only</p></td></tr></table>',
+            text: '<table role="presentation" width="100%"><tr><td style="background:#e8b265;border-radius:18px;padding:16px 18px;text-align:center;"><p style="margin:0;color:#2b1f1a;font-weight:700;letter-spacing:1.6px;text-transform:uppercase;">Extra 10% Off, Today Only</p></td></tr></table>',
           },
         },
       ]),
@@ -287,7 +287,7 @@ const EMAIL_DESIGN = {
             fontSize: '15px',
             color: '#eadfd6',
             lineHeight: '165%',
-            text: '<p style="margin:0 0 10px 0;color:#eadfd6;">Your birthday discount stacks right on top of our everyday deals — so it\'s the perfect day to grab the things you\'ve had your eye on.</p><ul style="margin:0;padding:0 0 0 18px;color:#eadfd6;"><li style="margin:0 0 6px 0;">Valid today only — your birthday.</li><li style="margin:0 0 6px 0;">Shop in-store, pickup, or delivery.</li><li style="margin:0;">Make sure your account is linked so the discount applies.</li></ul>',
+            text: '<p style="margin:0 0 10px 0;color:#eadfd6;">Our prices are already lower than list. This birthday discount piles right on top. No codes to remember, no hoops. If your email or phone is linked to your account, it happens automatically at checkout.</p><ul style="margin:0;padding:0 0 0 18px;color:#eadfd6;"><li style="margin:0 0 6px 0;">Good today, your birthday only.</li><li style="margin:0 0 6px 0;">In-store, pickup, or delivery.</li><li style="margin:0;">Link your account so the discount hits.</li></ul>',
           },
         },
       ]),
@@ -302,7 +302,7 @@ const EMAIL_DESIGN = {
             fontSize: '14px',
             color: '#eadfd6',
             lineHeight: '165%',
-            text: '<p style="margin:0;color:#eadfd6;">Have an amazing day — you deserve it.</p><p style="margin:8px 0 0 0;color:#eadfd6;">— The Freshly Baked NYC team</p>',
+            text: '<p style="margin:0;color:#eadfd6;">Hope it\'s a good one.</p><p style="margin:8px 0 0 0;color:#eadfd6;">Freshly Baked NYC</p>',
           },
         },
       ]),

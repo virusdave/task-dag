@@ -1,7 +1,7 @@
 // Populate the SMS (Text Notification) trigger 27545 on state-level
 // marketing event 2474 ("Happy Birthday from Freshly Baked NYC") with a
 // message comparable to the redesigned birthday email: birthday greeting,
-// the EXTRA 5% off offer, and a Shop link to the state store picker.
+// the EXTRA 10% off offer, and a Shop link to the state store picker.
 //
 // SMS is gated — messageText is rejected unless an approved template +
 // image are attached first (docs/sweed/marketing.md §1.5). We reuse the
@@ -31,11 +31,11 @@ const SMS_APPROVED_IMAGE_ID = '2019999f-f859-4b52-c58b-08de9cc488b6'
 
 const SHOP_URL = 'https://freshlybaked.nyc/?modal=locations'
 
-// Comparable to the email: birthday greeting + EXTRA 5% off + shop link.
+// Comparable to the email: birthday greeting + EXTRA 10% off + shop link.
 const SMS_BODY =
-  'Happy Birthday from Freshly Baked NYC! 🎂 Take an EXTRA 5% off our already-discounted prices — today only. In-store, pickup or delivery. Shop: ' +
+  "Happy birthday. An extra 10% off from us, and here's the thing: it stacks on top of our everyday prices. Most birthday deals don't. This one does. Today only. " +
   SHOP_URL +
-  ' T&C & limits may apply.'
+  '. 21+ only. T&C and limits apply.'
 
 // Sweed does not render the Unlayer design for SMS — it just stores it.
 // Keep it minimal: one text block carrying the same body.
