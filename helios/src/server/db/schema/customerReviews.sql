@@ -168,7 +168,10 @@ create index if not exists review_emails_status_idx
 
 -- Midtown pilot seed (issue #13).  Inserted only if the row is
 -- missing so re-running the schema doesn't clobber operator edits.
--- Bronx is intentionally not seeded; that site rolls out later.
+-- Bronx (dealer 210249) is seeded separately by the forward migration
+-- 086_seed_bronx_review_settings.sql (its full launch config: provider
+-- URL, flags, segments 10291/10292), so it is intentionally NOT added
+-- to this pilot seed.
 insert into site_review_settings (
   dealer_id,
   site_label,

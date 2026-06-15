@@ -1096,6 +1096,38 @@ const SENTINELS: MigrationSentinel[] = [
       'the order-ingest job; backfilled by the migration.',
     check: (db) => tableExists(db, 'analytics_invoice_margin_facts'),
   },
+  {
+    migrationId: '086_seed_bronx_review_settings',
+    label:
+      'Bronx (dealer 210249) site_review_settings launch row, required so ' +
+      'the public /go/bx/review page works end to end. Without it, POST ' +
+      '/v1/reviews/submit returns 404 ("Unknown site dealer_id") for every ' +
+      'Bronx submission. Apply this BEFORE flipping the mostly-static-sites ' +
+      'bx.reviewPageEnabled flag (two-phase rollout).',
+    // Pass only when the Bronx row is actually launch-ready: it exists,
+    // is a google provider pointing at the operator-supplied URL, has
+    // the two behavioral flags on (drawing + LLM gate, matching live
+    // Midtown), and carries the two Bronx Sweed segment ids.
+    // Intentionally does NOT assert review_free_preroll_enabled (a no-op
+    // flag the route logic never reads; mirrors Midtown's false) nor the
+    // exact email addresses, so operator edits to either don't re-trip
+    // the banner.
+    check: async (db) => {
+      const result = await db.query<{ ok: boolean }>(
+        `select exists(
+           select 1 from site_review_settings
+            where dealer_id = 210249
+              and review_provider_kind = 'google'
+              and review_provider_url_template = 'https://g.page/r/CVvrYxFQkCZDEAE/review'
+              and review_drawing_enabled = true
+              and review_llm_gate_enabled = true
+              and sweed_drawing_segment_id = 10291
+              and sweed_free_preroll_segment_id = 10292
+         ) as ok`,
+      )
+      return result.rows[0]?.ok === true
+    },
+  },
 ]
 
 interface CacheEntry {
