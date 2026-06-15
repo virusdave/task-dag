@@ -126,6 +126,8 @@ export const AuditEventTypeSchema = z.enum([
   'config.workers.enrich_visitor_scan_address.completed',
   'config.workers.weather_daily_ingest.requested',
   'config.workers.weather_daily_ingest.completed',
+  'config.workers.gads_lp_rollup_refresh.requested',
+  'config.workers.gads_lp_rollup_refresh.completed',
   'config.workers.market_evidence_alarm.completed',
   'config.brand_expiry_override.upserted',
   'config.brand_expiry_override.deleted',

@@ -64,6 +64,7 @@ export const JobTypeSchema = z.enum([
   'config.workers.litalerts_products_raw_json_drain',
   'config.workers.fuzzy_skus_retention',
   'config.workers.stock_snapshot_items_retention',
+  'config.workers.gads_lp_rollup_refresh',
   'catalog.maintenance.upload_group_image',
 ])
 export type JobType = z.infer<typeof JobTypeSchema>
@@ -834,6 +835,30 @@ export const ConfigWorkersGeoSegmentRuleEvalJobPayloadSchema = z.object({
 })
 export type ConfigWorkersGeoSegmentRuleEvalJobPayload = z.infer<
   typeof ConfigWorkersGeoSegmentRuleEvalJobPayloadSchema
+>
+
+/**
+ * GAds → Landing-pages rollup refresh payload (P2; parent epic
+ * virusdave/top-level#18, child FreshlyBakedNYC/automation#47).
+ *
+ * One scheduler tick = one job (60-min cadence). The handler recomputes
+ * the bounded NY-local horizon of `gads_lp_rollup` from the append-only
+ * `lp_events` sink and updates the singleton refresh-state row. The
+ * default scheduler enqueue leaves `horizonDays` unset (the helper
+ * defaults to 90 per the operator's bounded-horizon decree); an
+ * operator manual /config enqueue may widen it for a one-off rebuild.
+ *
+ * See helios/src/worker/jobs/refreshGadsLpRollupJob.ts and migration
+ * 087_gads_lp_rollup.sql.
+ */
+export const ConfigWorkersGadsLpRollupRefreshJobPayloadSchema = z.object({
+  requestedByUserId: z.number().int().positive().nullable().optional(),
+  trigger: z.enum(['manual_run', 'scheduled']).default('scheduled'),
+  /** NY-local recompute horizon in days. Defaults to 90 in the handler. */
+  horizonDays: z.number().int().min(1).max(365).optional(),
+})
+export type ConfigWorkersGadsLpRollupRefreshJobPayload = z.infer<
+  typeof ConfigWorkersGadsLpRollupRefreshJobPayloadSchema
 >
 
 export {

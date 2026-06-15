@@ -192,6 +192,8 @@ export async function tickConfigWorkersScheduler(now: Date = new Date()): Promis
         await enqueueScheduledFuzzySkusRetention(schedule.taskKey, now, activeWindow.intervalMinutes)
       } else if (schedule.taskKey === 'workers.scheduling.stock_snapshot_items_retention') {
         await enqueueScheduledStockSnapshotItemsRetention(schedule.taskKey, now, activeWindow.intervalMinutes)
+      } else if (schedule.taskKey === 'workers.scheduling.gads_lp_rollup_refresh') {
+        await enqueueScheduledGadsLpRollupRefresh(schedule.taskKey, now, activeWindow.intervalMinutes)
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown scheduler-task error.'
@@ -797,6 +799,58 @@ async function enqueueScheduledStockSnapshotItemsRetention(
       entityId: String(jobId),
       entityType: 'job',
       eventType: 'config.workers.stock_snapshot_items_retention.requested',
+      module: 'config',
+      payload: {
+        intervalMinutes,
+        taskKey,
+        trigger: 'scheduled',
+      },
+      requestId: null,
+      scope: null,
+      undoPayload: null,
+    })
+  })
+}
+
+// GAds → Landing-pages rollup refresh (automation#47 P2). System pool,
+// no Sweed session. The per-bucket dedupe key plus the per-tick
+// elapsed-interval check keep at most one refresh enqueued per hour even
+// if two scheduler ticks land in the same minute; the job's own
+// transaction-scoped advisory lock further guards against an overlapping
+// recompute. The recompute reads lp_events + writes the small rollup, so
+// JOB_PRIORITY_SCHEDULED_INGEST keeps it in line with the other periodic
+// ingest/refresh work.
+async function enqueueScheduledGadsLpRollupRefresh(
+  taskKey: ConfigBackgroundTaskKey,
+  now: Date,
+  intervalMinutes: number,
+): Promise<void> {
+  const bucketMs = intervalMinutes * 60 * 1000
+  const bucketStartMs = Math.floor(now.getTime() / bucketMs) * bucketMs
+  const bucketIso = new Date(bucketStartMs).toISOString()
+
+  await withTransaction(async (db) => {
+    const jobId = await enqueueJob(db, {
+      priority: JOB_PRIORITY_SCHEDULED_INGEST,
+      concurrencyKey: 'config.workers.gads_lp_rollup_refresh',
+      dedupeKey: `config.workers.gads_lp_rollup_refresh:scheduled:${bucketIso}`,
+      jobType: 'config.workers.gads_lp_rollup_refresh',
+      module: 'config',
+      payload: {
+        trigger: 'scheduled',
+      },
+      requestedByUserId: null,
+      runAt: now,
+      scope: null,
+    })
+
+    await recordEnqueueAndPatchCache(db, taskKey, jobId, now)
+    await appendAuditEvent(db, {
+      actorType: 'system',
+      actorUserId: null,
+      entityId: String(jobId),
+      entityType: 'job',
+      eventType: 'config.workers.gads_lp_rollup_refresh.requested',
       module: 'config',
       payload: {
         intervalMinutes,

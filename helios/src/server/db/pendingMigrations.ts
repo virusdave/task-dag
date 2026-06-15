@@ -1128,6 +1128,16 @@ const SENTINELS: MigrationSentinel[] = [
       return result.rows[0]?.ok === true
     },
   },
+  {
+    migrationId: '087_gads_lp_rollup',
+    label:
+      'GAds landing-pages rollup (gads_lp_rollup + gads_lp_rollup_refresh_state) ' +
+      'recomputed hourly by the config.workers.gads_lp_rollup_refresh worker from ' +
+      'the append-only lp_events sink. The GAds → Landing pages analytics surface ' +
+      '(automation#47) reads only this rollup; without it the refresh job fails and ' +
+      'the dashboard renders no data.',
+    check: (db) => tableExists(db, 'gads_lp_rollup'),
+  },
 ]
 
 interface CacheEntry {

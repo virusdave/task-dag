@@ -12,6 +12,7 @@ import {
   ConfigWorkersLitalertsProductsRawJsonDrainJobPayloadSchema,
   ConfigWorkersFuzzySkusRetentionJobPayloadSchema,
   ConfigWorkersStockSnapshotItemsRetentionJobPayloadSchema,
+  ConfigWorkersGadsLpRollupRefreshJobPayloadSchema,
   ConfigWorkersLitalertsRefreshVariantJobPayloadSchema,
   ConfigWorkersLitalertsRetailerBackfillJobPayloadSchema,
   ConfigWorkersMarketEvidenceAlarmScanJobPayloadSchema,
@@ -61,6 +62,7 @@ import { runConfigWorkersSweedOrdersRawJsonDrainJob } from '../jobs/configWorker
 import { runConfigWorkersLitalertsProductsRawJsonDrainJob } from '../jobs/configWorkersLitalertsProductsRawJsonDrainJob.js'
 import { runConfigWorkersFuzzySkusRetentionJob } from '../jobs/configWorkersFuzzySkusRetentionJob.js'
 import { runConfigWorkersStockSnapshotItemsRetentionJob } from '../jobs/configWorkersStockSnapshotItemsRetentionJob.js'
+import { runRefreshGadsLpRollupJob } from '../jobs/refreshGadsLpRollupJob.js'
 import { runConfigWorkersLitalertsRefreshVariantJob } from '../jobs/configWorkersLitalertsRefreshJob.js'
 import { runConfigWorkersLitalertsRetailerBackfillJob } from '../jobs/configWorkersLitalertsRetailerBackfillJob.js'
 import { runConfigWorkersMarketEvidenceAlarmScanJob } from '../jobs/configWorkersMarketEvidenceAlarmScanJob.js'
@@ -245,6 +247,12 @@ const handlers: Record<JobType, JobHandler> = {
     await runConfigWorkersStockSnapshotItemsRetentionJob(
       context,
       ConfigWorkersStockSnapshotItemsRetentionJobPayloadSchema.parse(context.payload),
+    )
+  },
+  'config.workers.gads_lp_rollup_refresh': async (context) => {
+    await runRefreshGadsLpRollupJob(
+      context,
+      ConfigWorkersGadsLpRollupRefreshJobPayloadSchema.parse(context.payload),
     )
   },
   'config.workers.litalerts_retailer_backfill': async (context) => {

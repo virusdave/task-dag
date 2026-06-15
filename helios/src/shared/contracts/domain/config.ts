@@ -30,6 +30,7 @@ export const CONFIG_BACKGROUND_TASK_KEYS = [
   'workers.scheduling.litalerts_products_raw_json_drain',
   'workers.scheduling.fuzzy_skus_retention',
   'workers.scheduling.stock_snapshot_items_retention',
+  'workers.scheduling.gads_lp_rollup_refresh',
 ] as const
 export const ConfigBackgroundTaskKeySchema = z.enum(CONFIG_BACKGROUND_TASK_KEYS)
 export type ConfigBackgroundTaskKey = z.infer<typeof ConfigBackgroundTaskKeySchema>
@@ -177,6 +178,13 @@ export const CONFIG_BACKGROUND_TASKS: ReadonlyArray<ConfigBackgroundTaskDefiniti
     slug: 'stock-snapshot-items-retention',
     implemented: true,
     summary: 'DB-cost maintenance (epic phase F6): deletes stock_snapshot_items belonging to snapshots older than retentionDays (default 90, operator-tunable) in bounded DB batches (default 2000 rows/batch, ≤20 batches per tick, each its own short transaction with FOR UPDATE SKIP LOCKED by primary key). Only the bulky item rows are deleted — the tiny stock_snapshots header rows are kept because many other tables reference them. stock_snapshot_items had grown to ~1.63 GB / 12M rows (≈375k new rows/day) while the /metrics windows only read ≤12 weeks. Runs on the off-hours multi-tick window (not once-daily) so it comfortably exceeds the aging rate; it self-stops once no eligible rows remain. Disk is reclaimed by autovacuum after the delete. A follow-on commit converts the table to a compressed hypertable to bound the steady-state footprint.',
+  },
+  {
+    key: 'workers.scheduling.gads_lp_rollup_refresh',
+    label: 'GAds landing-pages rollup refresh',
+    slug: 'gads-lp-rollup-refresh',
+    implemented: true,
+    summary: 'GAds → Landing-pages analytics V1 (parent epic virusdave/top-level#18, child automation#47, phase P2). Every 60 minutes recomputes the small day-grain gads_lp_rollup table from the append-only lp_events sink (migration 070) and updates the singleton gads_lp_rollup_refresh_state freshness row. Idempotent bounded-horizon recompute: a single transaction (advisory-locked) deletes + re-inserts every assignment_day within the trailing 90 NY-local days, so late lp_conversions update the correct older assignment-day bucket while frozen older rows are left untouched. Anchors on the locked paid-GAds-traffic predicate (gclid/gbraid/wbraid keys or a paid_google flag, minus bot_suspected), buckets by America/New_York day, and computes assignment-level-unique funnel counts + 7/30/90d conversion windows. Cost is left unavailable in V1 (no in-DB GAds cost snapshot yet); revenue/ROAS are deferred to V2. The serving endpoint reads only this rollup, never raw lp_events.',
   },
 ]
 
@@ -484,6 +492,27 @@ export const WEATHER_DAILY_INGEST_DEFAULT_SCHEDULE_WINDOWS: ReadonlyArray<
     intervalMinutes: 1440,        // once per day
     paused: false,
     notes: 'Daily Open-Meteo pull for the two operating sites (~06:00 EST / 07:00 EDT in NY).',
+  },
+]
+
+/**
+ * Default schedule for the GAds landing-pages rollup refresh
+ * (automation#47 P2). All-day, every 60 minutes — the slower end of the
+ * parent's 30-60 min range, per the operator's cheap-DB steer / P0 §6.
+ * The recompute is a bounded 90-day single-transaction delete+insert
+ * over the small rollup, so an hourly cadence keeps the DB cost minimal
+ * while landing-page funnels (which move slowly) stay fresh enough.
+ */
+export const GADS_LP_ROLLUP_REFRESH_DEFAULT_SCHEDULE_WINDOWS: ReadonlyArray<
+  Omit<ConfigWorkerScheduleWindow, 'id'>
+> = [
+  {
+    weekdayMask: WEEKDAY_MASK_ALL,
+    windowStartMinute: 0,
+    windowEndMinute: 1440,
+    intervalMinutes: 60,
+    paused: false,
+    notes: 'Recompute the GAds landing-pages rollup every 60 minutes (bounded 90-day horizon).',
   },
 ]
 
