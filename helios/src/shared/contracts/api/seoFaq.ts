@@ -31,6 +31,11 @@ export type SeoFaqSource = z.infer<typeof SeoFaqSourceSchema>
 export const SeoFaqSetRecordSchema = z.object({
   faqSetId: z.string().min(1),
   scope: z.string().min(1),
+  // The stable logical source identity (e.g. `fbus-global-faq`), or null
+  // for a manual/legacy set. An FBUS source key holds the set to the
+  // stricter FBUS denylist at approval time (CI gate 2). DB-constrained to
+  // the source-key grammar; never settable via the public authoring API.
+  sourceKey: z.string().nullable(),
   status: SeoFaqStatusSchema,
   source: SeoFaqSourceSchema,
   items: z.array(SeoFaqItemSchema),
@@ -83,6 +88,19 @@ export const SeoFaqSetUpdateBodySchema = z
   })
   .strict()
 export type SeoFaqSetUpdateBody = z.infer<typeof SeoFaqSetUpdateBodySchema>
+
+// Dry-run compliance check (no mutation). Lets the editor UI surface the
+// same problems the approve path would raise. `sourceKey` is ADVISORY here
+// (it lets the UI preview the stricter FBUS rule for an FBUS set); the
+// authoritative approval check always reads the set's persisted source key
+// from the locked DB row, never client input.
+export const SeoFaqSetCheckBodySchema = z
+  .object({
+    items: z.array(SeoFaqItemSchema),
+    sourceKey: z.string().trim().min(1).nullable().optional(),
+  })
+  .strict()
+export type SeoFaqSetCheckBody = z.infer<typeof SeoFaqSetCheckBodySchema>
 
 // Mark a draft as ready for review (no content change).
 export const SeoFaqSetSubmitBodySchema = z.object({}).strict()

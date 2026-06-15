@@ -105,7 +105,9 @@ export function SeoFaqEditorPage() {
       try {
         const res = await mutateJson('/api/seo/faq-sets/check', CheckResponseSchema, {
           method: 'POST',
-          body: JSON.stringify({ scope: record.scope, items: record.items }),
+          // Pass the set's source key so an FBUS (.us) set previews the
+          // stricter FBUS denylist — exactly what the approve path enforces.
+          body: JSON.stringify({ items: record.items, sourceKey: record.sourceKey }),
         })
         if (!cancelled) {
           setProblems(res.problems)
@@ -119,7 +121,7 @@ export function SeoFaqEditorPage() {
     return () => {
       cancelled = true
     }
-  }, [record.faqSetId, record.contentSha256])
+  }, [record.faqSetId, record.contentSha256, record.sourceKey])
 
   function updateItem(index: number, patch: Partial<SeoFaqItem>) {
     setItems((prev) => prev.map((it, i) => (i === index ? { ...it, ...patch } : it)))

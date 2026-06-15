@@ -18,6 +18,7 @@ import {
   visibleFaqAnswer,
   type FaqItemInput,
 } from './faqContent.js'
+import { FBUS_GLOBAL_FAQ_SOURCE_KEY } from './faqSourceKey.js'
 
 const baseItems = (): FaqItemInput[] => [
   {
@@ -150,6 +151,127 @@ describe('checkFaqSetApprovable', () => {
       },
     ])
     expect(problems.some((p) => p.field === 'answer_sanitized')).toBe(true)
+  })
+})
+
+describe('checkFaqSetApprovable — FBUS-strict enforcement (CI gate 2)', () => {
+  // An FBUS set whose shared question + sanitized answer are clean, with a
+  // raw answer that legitimately carries the NYC/raw variant.
+  const fbusCleanItems = (): FaqItemInput[] => [
+    {
+      question: 'What are your store hours?',
+      answer_raw: 'We are open 9am-9pm; see our cannabis flower menu at freshlybaked.nyc.',
+      answer_sanitized: 'We are open 9am-9pm and restock our products daily.',
+    },
+  ]
+
+  it('passes an FBUS set whose shared/sanitized fields are clean (raw may carry NYC copy)', () => {
+    expect(checkFaqSetApprovable(fbusCleanItems(), { sourceKey: FBUS_GLOBAL_FAQ_SOURCE_KEY })).toEqual(
+      [],
+    )
+  })
+
+  it('does NOT subject the raw answer to the FBUS rule', () => {
+    const problems = checkFaqSetApprovable(fbusCleanItems(), {
+      sourceKey: FBUS_GLOBAL_FAQ_SOURCE_KEY,
+    })
+    expect(problems.every((p) => p.field !== 'answer_raw')).toBe(true)
+  })
+
+  it('rejects an FBUS-extra meta-term (flower) in the sanitized answer that the host-agnostic rule tolerates', () => {
+    const items: FaqItemInput[] = [
+      {
+        question: 'What do you stock?',
+        answer_raw: 'Fresh flower daily.',
+        answer_sanitized: 'Our finest flower today.',
+      },
+    ]
+    // Host-agnostic rule tolerates "flower" → approvable.
+    expect(checkFaqSetApprovable(items)).toEqual([])
+    // FBUS rule rejects it.
+    const problems = checkFaqSetApprovable(items, { sourceKey: FBUS_GLOBAL_FAQ_SOURCE_KEY })
+    expect(problems.some((p) => p.field === 'answer_sanitized')).toBe(true)
+  })
+
+  it('rejects an FBUS-extra meta-term (strains) in the shared question', () => {
+    const problems = checkFaqSetApprovable(
+      [
+        {
+          question: 'Which strains are popular?',
+          answer_raw: 'Many options.',
+          answer_sanitized: 'Many options.',
+        },
+      ],
+      { sourceKey: FBUS_GLOBAL_FAQ_SOURCE_KEY },
+    )
+    expect(problems.some((p) => p.field === 'question')).toBe(true)
+  })
+
+  it('rejects a .nyc host/URL leaking into the sanitized answer for an FBUS set', () => {
+    const problems = checkFaqSetApprovable(
+      [
+        {
+          question: 'Where else can I shop?',
+          answer_raw: 'Visit us in store.',
+          answer_sanitized: 'Visit our sibling at https://www.freshlybaked.nyc/menu.',
+        },
+      ],
+      { sourceKey: FBUS_GLOBAL_FAQ_SOURCE_KEY },
+    )
+    expect(problems.some((p) => p.field === 'answer_sanitized')).toBe(true)
+  })
+
+  it('rejects the "Freshly Baked NYC" brand phrase in the shared question for an FBUS set', () => {
+    const problems = checkFaqSetApprovable(
+      [
+        {
+          question: 'Are you the Freshly Baked NYC company?',
+          answer_raw: 'We are a sister brand.',
+          answer_sanitized: 'We are a sister brand.',
+        },
+      ],
+      { sourceKey: FBUS_GLOBAL_FAQ_SOURCE_KEY },
+    )
+    expect(problems.some((p) => p.field === 'question')).toBe(true)
+  })
+
+  it('still rejects plain raw-only terms (thc) for an FBUS set (superset behavior)', () => {
+    const problems = checkFaqSetApprovable(
+      [
+        {
+          question: 'How much THC?',
+          answer_raw: 'Varies.',
+          answer_sanitized: 'Varies.',
+        },
+      ],
+      { sourceKey: FBUS_GLOBAL_FAQ_SOURCE_KEY },
+    )
+    expect(problems.some((p) => p.field === 'question')).toBe(true)
+  })
+
+  it('keeps the host-agnostic behavior unchanged for a non-FBUS / null source key', () => {
+    // "flower" in the sanitized answer is an FBUS-extra term, but the
+    // host-agnostic rule (no/empty source key) tolerates it.
+    const items: FaqItemInput[] = [
+      {
+        question: 'What do you stock?',
+        answer_raw: 'Fresh flower daily.',
+        answer_sanitized: 'Our finest flower today.',
+      },
+    ]
+    expect(checkFaqSetApprovable(items)).toEqual([])
+    expect(checkFaqSetApprovable(items, { sourceKey: null })).toEqual([])
+    expect(checkFaqSetApprovable(items, {})).toEqual([])
+  })
+
+  it('fails closed on a non-null but unrecognized source key', () => {
+    const problems = checkFaqSetApprovable(baseItems(), { sourceKey: 'not-a-real-key' })
+    expect(problems.length).toBeGreaterThan(0)
+    expect(problems.some((p) => p.itemIndex === -1)).toBe(true)
+  })
+
+  it('ignores a whitespace-only source key (treated as no source key)', () => {
+    expect(checkFaqSetApprovable(baseItems(), { sourceKey: '   ' })).toEqual([])
   })
 })
 

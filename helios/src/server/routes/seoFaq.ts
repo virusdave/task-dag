@@ -17,6 +17,7 @@ import {
   SeoFaqGenerateBodySchema,
   SeoFaqRouteParamsSchema,
   SeoFaqSetApproveBodySchema,
+  SeoFaqSetCheckBodySchema,
   SeoFaqSetCreateBodySchema,
   SeoFaqSetDetailResponseSchema,
   SeoFaqSetListResponseSchema,
@@ -191,8 +192,8 @@ export async function registerSeoFaqRoutes(server: FastifyInstance): Promise<voi
     if (!user) {
       return
     }
-    const body = SeoFaqSetUpdateBodySchema.parse(request.body ?? {})
-    const problems = checkFaqSetApprovable(body.items)
+    const body = SeoFaqSetCheckBodySchema.parse(request.body ?? {})
+    const problems = checkFaqSetApprovable(body.items, { sourceKey: body.sourceKey ?? null })
     return reply.send({
       ok: problems.length === 0,
       problems: problems.map((p) =>

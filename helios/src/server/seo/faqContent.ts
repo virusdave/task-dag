@@ -8,6 +8,8 @@
 
 import { createHash, randomBytes } from 'node:crypto'
 
+import { parseFaqSourceKey } from './faqSourceKey.js'
+
 // ── id minting ────────────────────────────────────────────────────────
 
 function pad(n: number, width: number): string {
@@ -272,23 +274,66 @@ export interface FaqComplianceProblem {
   readonly message: string
 }
 
-// NOTE: `findFbusLeaks` / `hasFbusLeak` / `describeFbusLeaks` above are the
-// FBUS-strict (`.us`) primitives. `checkFaqSetApprovable` below remains the
-// existing host-agnostic / raw-only approval check — it does NOT yet apply
-// the stricter FBUS rule. Route-level enforcement of the FBUS denylist is
-// deferred until the FBUS source-key model lands (child #46 P1, CI gate 2),
-// which is what tells the approver which sets are FBUS-scoped.
+// `findFbusLeaks` / `hasFbusLeak` / `describeFbusLeaks` above are the
+// FBUS-strict (`.us`) primitives. `checkFaqSetApprovable` below applies the
+// host-agnostic raw-only rule by default and SWITCHES to the stricter FBUS
+// rule when the set's `sourceKey` identifies it as FBUS (`.us`) sanitized-
+// mode (CI gate 2). The source key — not `scope` — is the trustworthy,
+// server-side FBUS signal: it is the persisted source identity of the set
+// (see faqSourceKey.ts), so approval can never be talked out of the strict
+// rule by client input.
+
+export interface CheckFaqSetApprovableOptions {
+  /**
+   * The set's persisted source key (e.g. `fbus-global-faq`), or null for a
+   * manual/legacy set with no source identity. When this is an FBUS key the
+   * shared question + sanitized answer are held to the STRICTER FBUS
+   * denylist (`findFbusLeaks`) instead of the host-agnostic raw-only check.
+   * A non-null but UNRECOGNIZED key fails closed (the set is not approvable
+   * until its source key is valid).
+   */
+  readonly sourceKey?: string | null
+}
 
 /**
  * Validate a FAQ set for APPROVAL. Checks structural completeness (every
  * item has a non-empty question + both answer variants) and the
- * sanitized-host compliance heuristic (no raw-only terms in the shared
- * question or the sanitized answer; and a raw answer that is byte-identical
- * to its sanitized variant while containing raw terms means no sanitizing
- * actually happened). Returns the list of problems; empty = approvable.
+ * sanitized-host compliance heuristic.
+ *
+ * For a non-FBUS set this is the host-agnostic raw-only check (no raw-only
+ * terms in the shared question or the sanitized answer). For an FBUS
+ * (`.us`) sanitized-mode set — identified by `options.sourceKey` — the
+ * shared question and the sanitized answer are instead held to the
+ * STRICTER FBUS denylist: zero cannabis meta-terms, zero `.nyc` host/URL,
+ * and no "Freshly Baked NYC" brand phrase (`findFbusLeaks`). The raw
+ * answer (the `.nyc` variant) is NEVER subjected to the FBUS rule — it is
+ * allowed to carry the raw NYC copy.
+ *
+ * In both modes, a raw answer byte-identical to its sanitized variant
+ * while containing raw-only terms means no sanitizing actually happened.
+ * Returns the list of problems; empty = approvable.
  */
-export function checkFaqSetApprovable(items: readonly FaqItemInput[]): FaqComplianceProblem[] {
+export function checkFaqSetApprovable(
+  items: readonly FaqItemInput[],
+  options: CheckFaqSetApprovableOptions = {},
+): FaqComplianceProblem[] {
   const problems: FaqComplianceProblem[] = []
+
+  // Resolve the FBUS classification from the source key. A non-null but
+  // structurally-invalid key fails closed: we refuse to approve a set whose
+  // claimed source identity we cannot parse, rather than silently dropping
+  // to the weaker host-agnostic rule.
+  const sourceKey = options.sourceKey?.trim() || null
+  const parsedSourceKey = sourceKey === null ? null : parseFaqSourceKey(sourceKey)
+  if (sourceKey !== null && parsedSourceKey === null) {
+    problems.push({
+      itemIndex: -1,
+      field: 'question',
+      message: `FAQ source_key ${JSON.stringify(sourceKey)} is not a recognized source key; failing closed.`,
+    })
+  }
+  const enforceFbus = parsedSourceKey?.isFbus === true
+
   if (items.length === 0) {
     problems.push({ itemIndex: -1, field: 'question', message: 'FAQ set has no items.' })
     return problems
@@ -313,21 +358,30 @@ export function checkFaqSetApprovable(items: readonly FaqItemInput[]): FaqCompli
     }
 
     // The shared question renders on BOTH hosts → must be sanitized-safe.
-    const questionLeaks = findRawOnlyLeaks(question)
+    // FBUS sets are held to the stricter denylist (meta-terms + `.nyc`
+    // host/URL + brand phrase); everything else to the host-agnostic
+    // raw-only rule.
+    const questionLeaks = enforceFbus ? describeFbusLeaks(question) : findRawOnlyLeaks(question)
     if (questionLeaks.length > 0) {
       problems.push({
         itemIndex,
         field: 'question',
-        message: `Question contains raw-only term(s) that would leak onto the sanitized host: ${questionLeaks.join(', ')}.`,
+        message: enforceFbus
+          ? `Question contains FBUS-forbidden leak(s) for the sanitized .us host: ${questionLeaks.join(', ')}.`
+          : `Question contains raw-only term(s) that would leak onto the sanitized host: ${questionLeaks.join(', ')}.`,
       })
     }
 
-    const sanitizedLeaks = findRawOnlyLeaks(answerSanitized)
+    const sanitizedLeaks = enforceFbus
+      ? describeFbusLeaks(answerSanitized)
+      : findRawOnlyLeaks(answerSanitized)
     if (sanitizedLeaks.length > 0) {
       problems.push({
         itemIndex,
         field: 'answer_sanitized',
-        message: `Sanitized answer contains raw-only term(s): ${sanitizedLeaks.join(', ')}.`,
+        message: enforceFbus
+          ? `Sanitized answer contains FBUS-forbidden leak(s) for the sanitized .us host: ${sanitizedLeaks.join(', ')}.`
+          : `Sanitized answer contains raw-only term(s): ${sanitizedLeaks.join(', ')}.`,
       })
     }
 

@@ -29,6 +29,7 @@ import { withTransaction } from '../tx.js'
 interface SeoFaqSetRow {
   faq_set_id: string
   scope: string
+  source_key: string | null
   status: string
   source: string
   items: unknown
@@ -49,6 +50,7 @@ const SELECT_FAQ_SET = `
   select
     f.faq_set_id,
     f.scope,
+    f.source_key,
     f.status,
     f.source,
     f.items,
@@ -99,6 +101,7 @@ function mapRow(row: SeoFaqSetRow): SeoFaqSetRecord {
   return {
     faqSetId: row.faq_set_id,
     scope: row.scope,
+    sourceKey: row.source_key,
     status: row.status as SeoFaqSetRecord['status'],
     source: row.source as SeoFaqSource,
     items: parseItems(row.items),
@@ -146,6 +149,13 @@ export interface CreateSeoFaqSetInput {
   readonly items: readonly SeoFaqItem[]
   readonly source?: SeoFaqSource
   readonly generationMeta?: unknown
+  /**
+   * Optional persisted source key (e.g. `fbus-global-faq`). Set by the
+   * server-side FBUS import/sync; never accepted from the public authoring
+   * API. An FBUS key holds the set to the stricter FBUS denylist at
+   * approval time (CI gate 2). Defaults to null (manual/host-agnostic set).
+   */
+  readonly sourceKey?: string | null
   readonly userId: number
   readonly now?: Date
 }
@@ -161,12 +171,12 @@ export async function createSeoFaqSet(
   const result = await db.query<SeoFaqSetRow>(
     `
       insert into seo_faq_sets (
-        faq_set_id, scope, status, items, source, generation_meta,
+        faq_set_id, scope, source_key, status, items, source, generation_meta,
         content_sha256, approval_id, created_by_user_id, updated_by_user_id
       )
-      values ($1, $2, 'draft', $3::jsonb, $4, $5::jsonb, $6, null, $7, $7)
+      values ($1, $2, $8, 'draft', $3::jsonb, $4, $5::jsonb, $6, null, $7, $7)
       returning
-        faq_set_id, scope, status, source, items, content_sha256, approval_id,
+        faq_set_id, scope, source_key, status, source, items, content_sha256, approval_id,
         generation_meta, created_by_user_id, updated_by_user_id, created_at, updated_at,
         null::bigint as approved_by_user_id, null::timestamptz as approved_at,
         null::text as approval_note
@@ -179,6 +189,7 @@ export async function createSeoFaqSet(
       input.generationMeta === undefined ? null : JSON.stringify(input.generationMeta),
       contentSha256,
       input.userId,
+      input.sourceKey ?? null,
     ],
   )
   return mapRow(result.rows[0]!)
@@ -215,7 +226,7 @@ export async function updateSeoFaqSet(
              updated_at = now()
        where faq_set_id = $1
       returning
-        faq_set_id, scope, status, source, items, content_sha256, approval_id,
+        faq_set_id, scope, source_key, status, source, items, content_sha256, approval_id,
         generation_meta, created_by_user_id, updated_by_user_id, created_at, updated_at,
         null::bigint as approved_by_user_id, null::timestamptz as approved_at,
         null::text as approval_note
@@ -248,7 +259,7 @@ export async function setSeoFaqSetStatus(
              updated_at = now()
        where faq_set_id = $1
       returning
-        faq_set_id, scope, status, source, items, content_sha256, approval_id,
+        faq_set_id, scope, source_key, status, source, items, content_sha256, approval_id,
         generation_meta, created_by_user_id, updated_by_user_id, created_at, updated_at,
         null::bigint as approved_by_user_id, null::timestamptz as approved_at,
         null::text as approval_note
@@ -289,9 +300,10 @@ export async function approveSeoFaqSet(
     const locked = await client.query<{
       faq_set_id: string
       scope: string
+      source_key: string | null
       items: unknown
     }>(
-      `select faq_set_id, scope, items from seo_faq_sets where faq_set_id = $1 for update`,
+      `select faq_set_id, scope, source_key, items from seo_faq_sets where faq_set_id = $1 for update`,
       [faqSetId],
     )
     const lockedRow = locked.rows[0]
@@ -310,7 +322,7 @@ export async function approveSeoFaqSet(
       return { kind: 'stale', currentSha256 }
     }
 
-    const problems = checkFaqSetApprovable(itemInputs)
+    const problems = checkFaqSetApprovable(itemInputs, { sourceKey: lockedRow.source_key })
     if (problems.length > 0) {
       return {
         kind: 'not_compliant',
@@ -342,7 +354,7 @@ export async function approveSeoFaqSet(
                updated_at = now()
          where faq_set_id = $1
         returning
-          faq_set_id, scope, status, source, items, content_sha256, approval_id,
+          faq_set_id, scope, source_key, status, source, items, content_sha256, approval_id,
           generation_meta, created_by_user_id, updated_by_user_id, created_at, updated_at,
           (select approved_by_user_id from seo_approvals where approval_id = $2) as approved_by_user_id,
           (select approved_at from seo_approvals where approval_id = $2) as approved_at,

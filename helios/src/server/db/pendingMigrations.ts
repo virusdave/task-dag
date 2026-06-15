@@ -73,6 +73,26 @@ async function tableExists(db: Queryable, tableName: string): Promise<boolean> {
   return result.rows[0]?.exists === true
 }
 
+async function constraintExists(
+  db: Queryable,
+  tableName: string,
+  constraintName: string,
+): Promise<boolean> {
+  const result = await db.query<{ exists: boolean }>(
+    `select exists(
+       select 1
+         from pg_constraint c
+         join pg_class t on t.oid = c.conrelid
+         join pg_namespace n on n.oid = t.relnamespace
+        where n.nspname = 'public'
+          and t.relname = $1
+          and c.conname = $2
+     ) as exists`,
+    [tableName, constraintName],
+  )
+  return result.rows[0]?.exists === true
+}
+
 async function indexExists(db: Queryable, indexName: string): Promise<boolean> {
   const result = await db.query<{ exists: boolean }>(
     `select exists(
@@ -1023,6 +1043,24 @@ const SENTINELS: MigrationSentinel[] = [
          ) as stale`,
       )
       return res.rows[0]?.stale !== true
+    },
+  },
+  {
+    migrationId: '083_seo_faq_source_key',
+    label:
+      'FBUS FAQ source-key persistence (seo_faq_sets.source_key) — lets the ' +
+      'IRONCLAD approval gate identify FBUS (.us) sanitized-mode sets and ' +
+      'hold them to the STRICTER FBUS denylist (CI gate 2). Without it, ' +
+      'FBUS sets fall back to the host-agnostic raw-only check.',
+    // Require BOTH the column and its grammar check constraint, so a
+    // partial/manual schema (column present, constraint missing) is not
+    // reported as applied.
+    check: async (db) => {
+      const [hasColumn, hasConstraint] = await Promise.all([
+        columnExists(db, 'seo_faq_sets', 'source_key'),
+        constraintExists(db, 'seo_faq_sets', 'seo_faq_sets_source_key_check'),
+      ])
+      return hasColumn && hasConstraint
     },
   },
 ]
