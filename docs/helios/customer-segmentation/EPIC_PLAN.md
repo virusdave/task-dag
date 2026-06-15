@@ -27,10 +27,12 @@ the catalog / budtender tabs):
   membership, growth (entries/week), activity / value / recency, fulfillment
   mix. **SHIPPED (Phase 1).**
 - **CRM Segment Analysis** (`/metrics/crm-segment-analysis`) — segment-vs-rest
-  comparison with lift/index, deltas, fulfillment affinity, and significance
-  flags. **SHIPPED (header-grain phase 1)** — basket size, value/customer,
-  repeat & discount rates, channel affinity. Margin/customer + category &
-  subcategory affinity still pending (need the §4 fact rollups).
+  comparison with lift/index, deltas, and significance flags. **SHIPPED
+  (header-grain phase 1)** — basket size, value/customer, repeat & discount
+  rates, fulfillment-channel affinity, and **category affinity** (customer
+  penetration off the typed `product_category_name`, migration 060 — no COGS
+  needed). Margin/customer + **subcategory** affinity still pending (need the
+  §4 fact rollups / cohort-key derivation).
 
 The 2026-06 oracle review refined the **statistical methodology** now
 implemented in `segmentStats.ts` (unit-tested) and used by the Analysis tab:

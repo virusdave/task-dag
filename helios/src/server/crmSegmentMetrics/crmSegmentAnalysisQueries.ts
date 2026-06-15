@@ -14,6 +14,7 @@
 // idx 043 sweed_orders(dealer_id,customer_id,pay_time).
 
 import {
+  type CrmCategoryAffinityRow,
   type CrmChannelAffinityRow,
   type CrmComparisonMetric,
   type CrmPopulationSummary,
@@ -99,6 +100,17 @@ interface ChannelRow {
   orders: number
 }
 
+interface CategoryRow {
+  in_seg: boolean
+  category: string
+  buyers: number
+  revenue: number
+}
+
+// Cap the category affinity list so the UI stays legible; categories are
+// ranked by segment penetration before truncation.
+const TOP_N_CATEGORIES = 20
+
 const ZERO_CUST: Omit<CustRow, 'in_seg'> = {
   customers: 0,
   orders: 0,
@@ -138,11 +150,12 @@ export async function getCrmSegmentAnalysis(
   let custRows: CustRow[] = []
   let orderRows: OrderRow[] = []
   let channelRows: ChannelRow[] = []
+  let categoryRows: CategoryRow[] = []
 
   if (dealerIds.length === 0) {
     dataQuality.push('No store sites selected — comparison is empty.')
   } else {
-    const [custRes, orderRes, channelRes] = await Promise.all([
+    const [custRes, orderRes, channelRes, categoryRes] = await Promise.all([
       db.query<CustRow>(
         `with ${ordersCte()},
          cust as (
@@ -187,10 +200,45 @@ export async function getCrmSegmentAnalysis(
           group by in_seg, channel`,
         params,
       ),
+      // Category affinity: customer penetration per category. Joins the
+      // flattened line items (typed product_category_name, migration 060,
+      // covered by idx sweed_order_items_flat_dealer_pay_idx) back to the
+      // order for customer_id + segment membership + cancel guard. No COGS
+      // function — pure category grouping, so it stays interactive.
+      db.query<CategoryRow>(
+        `with members as (
+           select distinct sweed_customer_id::bigint as cid
+             from sweed_customer_segments
+            where segment_id = $1
+         ),
+         lines as (
+           select so.customer_id,
+                  (m.cid is not null) as in_seg,
+                  coalesce(nullif(lower(f.product_category_name), ''), '(uncategorised)') as category,
+                  f.revenue::numeric as revenue
+             from sweed_order_items_flat f
+             join sweed_orders so
+               on so.dealer_id = f.dealer_id and so.invoice_id = f.invoice_id
+             left join members m on m.cid = so.customer_id
+            where f.dealer_id = any($2::bigint[])
+              and f.pay_time >= $3::timestamptz
+              and f.pay_time <  $4::timestamptz
+              and so.customer_id is not null
+              ${nonCancelledOrderSql('so')}
+         )
+         select in_seg,
+                category,
+                count(distinct customer_id)::int as buyers,
+                coalesce(sum(revenue), 0)::float8 as revenue
+           from lines
+          group by in_seg, category`,
+        params,
+      ),
     ])
     custRows = custRes.rows
     orderRows = orderRes.rows
     channelRows = channelRes.rows
+    categoryRows = categoryRes.rows
   }
 
   const seg = { ...ZERO_CUST, ...custRows.find((r) => r.in_seg) }
@@ -331,6 +379,9 @@ export async function getCrmSegmentAnalysis(
   // Fulfillment-channel affinity — order-share two-proportion z + BH FDR.
   const channelAffinity = buildChannelAffinity(channelRows, seg.orders, rest.orders)
 
+  // Category affinity — customer penetration two-proportion z + BH FDR.
+  const categoryAffinity = buildCategoryAffinity(categoryRows, seg.customers, rest.customers)
+
   // Data-quality caveats.
   if (seg.customers === 0) {
     dataQuality.push(
@@ -353,6 +404,7 @@ export async function getCrmSegmentAnalysis(
     shares: { customerShare, netSalesShare, valueIndex },
     metrics,
     channelAffinity,
+    categoryAffinity,
     dataQuality,
   }
 }
@@ -399,4 +451,48 @@ function buildChannelAffinity(
       confidence: confidenceLabel(qValues[i] ?? p.t.pValue, p.ok),
     }))
     .sort((a, b) => (b.segmentShare ?? 0) - (a.segmentShare ?? 0))
+}
+
+function buildCategoryAffinity(
+  rows: ReadonlyArray<CategoryRow>,
+  segCustomers: number,
+  restCustomers: number,
+): CrmCategoryAffinityRow[] {
+  const categories = [...new Set(rows.map((r) => r.category))]
+  const segByCat = new Map(rows.filter((r) => r.in_seg).map((r) => [r.category, r]))
+  const restByCat = new Map(rows.filter((r) => !r.in_seg).map((r) => [r.category, r]))
+  const segRevenueTotal = rows
+    .filter((r) => r.in_seg)
+    .reduce((sum, r) => sum + r.revenue, 0)
+
+  const prelim = categories.map((category) => {
+    const xSeg = segByCat.get(category)?.buyers ?? 0
+    const xRest = restByCat.get(category)?.buyers ?? 0
+    const segRevenue = segByCat.get(category)?.revenue ?? 0
+    const t = twoProportionTest(xSeg, segCustomers, xRest, restCustomers)
+    const ok = proportionSampleOk(xSeg, segCustomers, xRest, restCustomers)
+    return { category, xSeg, xRest, segRevenue, t, ok }
+  })
+
+  const qValues = benjaminiHochberg(prelim.map((p) => (p.ok ? p.t.pValue : null)))
+
+  return prelim
+    .map((p, i) => ({
+      category: p.category,
+      segmentBuyers: p.xSeg,
+      restBuyers: p.xRest,
+      segmentPenetration: p.t.segmentRate,
+      restPenetration: p.t.restRate,
+      everyonePenetration: ratio(p.xSeg + p.xRest, segCustomers + restCustomers),
+      deltaPp: p.t.deltaPp,
+      index: p.t.index,
+      segmentRevenueShare: ratio(p.segRevenue, segRevenueTotal),
+      pValue: p.t.pValue,
+      qValue: qValues[i],
+      confidence: confidenceLabel(qValues[i] ?? p.t.pValue, p.ok),
+    }))
+    // Rank by segment penetration (the headline "what they buy" ordering),
+    // then cap for legibility.
+    .sort((a, b) => (b.segmentPenetration ?? 0) - (a.segmentPenetration ?? 0))
+    .slice(0, TOP_N_CATEGORIES)
 }

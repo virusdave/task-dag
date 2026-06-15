@@ -285,6 +285,47 @@ function CrmSegmentAnalysisBody({ data }: { data: CrmSegmentAnalysisResponse }) 
         </div>
       </div>
 
+      {/* Category affinity */}
+      <div className="customer-value-card crm-seg-section">
+        <h3>Category affinity</h3>
+        <p className="subtle-copy">
+          Customer penetration — share of each population’s active customers who bought the
+          category. Ranked by segment penetration; index &gt;1 = over-indexed vs rest.
+        </p>
+        {data.categoryAffinity.length === 0 ? (
+          <p className="crm-seg-empty subtle-copy">No line items in the selected window.</p>
+        ) : (
+          <div className="crm-cmp-scroll">
+            <table className="crm-cmp-table">
+              <thead>
+                <tr>
+                  <th>Category</th>
+                  <th>Segment</th>
+                  <th>Rest</th>
+                  <th>Δ</th>
+                  <th>Index</th>
+                  <th>Seg rev %</th>
+                  <th>Confidence</th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.categoryAffinity.map((c) => (
+                  <tr key={c.category}>
+                    <th scope="row">{c.category}</th>
+                    <td>{fmtPct(c.segmentPenetration)}</td>
+                    <td>{fmtPct(c.restPenetration)}</td>
+                    <td>{fmtDelta(c.deltaPp, 'rate')}</td>
+                    <td>{fmtIndex(c.index)}</td>
+                    <td className="crm-cmp-context">{fmtPct(c.segmentRevenueShare)}</td>
+                    <td><ConfBadge c={c.confidence} /></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
       {/* Channel affinity */}
       <div className="customer-value-card crm-seg-section">
         <h3>Fulfillment-channel affinity</h3>

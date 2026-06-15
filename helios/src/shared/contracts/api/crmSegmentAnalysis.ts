@@ -79,6 +79,26 @@ export const CrmChannelAffinityRowSchema = z.object({
 })
 export type CrmChannelAffinityRow = z.infer<typeof CrmChannelAffinityRowSchema>
 
+// Category affinity: customer PENETRATION (share of a population's active
+// customers who bought the category) segment-vs-rest, the most actionable
+// "what's different" signal. Two-proportion z + BH-FDR across categories.
+export const CrmCategoryAffinityRowSchema = z.object({
+  category: z.string(),
+  segmentBuyers: z.number().int().nonnegative(),
+  restBuyers: z.number().int().nonnegative(),
+  segmentPenetration: z.number().nullable(),
+  restPenetration: z.number().nullable(),
+  everyonePenetration: z.number().nullable(),
+  deltaPp: z.number().nullable(),
+  index: z.number().nullable(),
+  // Category's share of the SEGMENT's line revenue (context for materiality).
+  segmentRevenueShare: z.number().nullable(),
+  pValue: z.number().nullable(),
+  qValue: z.number().nullable(),
+  confidence: CrmConfidenceLabelSchema,
+})
+export type CrmCategoryAffinityRow = z.infer<typeof CrmCategoryAffinityRowSchema>
+
 export const CrmSegmentAnalysisResponseSchema = z.object({
   segment: SegmentIdentitySchema,
   window: z.object({ from: z.iso.datetime(), to: z.iso.datetime() }),
@@ -97,6 +117,7 @@ export const CrmSegmentAnalysisResponseSchema = z.object({
   }),
   metrics: z.array(CrmComparisonMetricSchema),
   channelAffinity: z.array(CrmChannelAffinityRowSchema),
+  categoryAffinity: z.array(CrmCategoryAffinityRowSchema),
   dataQuality: z.array(z.string()),
 })
 export type CrmSegmentAnalysisResponse = z.infer<typeof CrmSegmentAnalysisResponseSchema>
