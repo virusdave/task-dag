@@ -266,10 +266,65 @@ image are attached first.
   `messageHeaderText` from the template — those values are not what the
   customer sees; the actual SMS body comes from `messageText.html`.
 - `approvedImageId: "2019999f-f859-4b52-c58b-08de9cc488b6"` is the
-  gold leaf-logo FBNYC SMS image. Resolves to
+  **sanitized (cannabis-stripped) gold-coin FBNYC SMS image** — a
+  carrier-safe asset with no cannabis leaf/product imagery. Resolves to
   `https://media-prime.sweedpos.com/store/prime/1776460022_babde2d7-1180-4cde-a555-91259b53df90.png`.
-- For SMS body design JSON, keep it minimal — one `text` block — Sweed
-  doesn't render the Unlayer design for SMS, just stores it.
+  Treat the `approvedImage` field as carrier-facing/compliance-sensitive:
+  for cannabis campaigns use a sanitized image here unless the operator
+  has specifically approved otherwise.
+
+> **SMS bodies ARE rich (do not "keep it minimal").** An earlier version
+> of this doc claimed SMS content should be a single `<p>` text block
+> because "Sweed doesn't render the Unlayer design for SMS." **That is
+> wrong.** Text Notification triggers (`actionType.id === 5`) carry the
+> same rich `messageText.design` + `messageText.html` shape as email
+> triggers, and live *enabled* SMS triggers across our dealers commonly
+> hold full marketing creative (images, headings, buttons, styled HTML at
+> 500–600px Unlayer layouts; 25k–43k bytes is normal). A plain `<p>` body
+> is only a fallback/anomaly. See the recipe below.
+
+##### Recipe: copy a polished email into a rich SMS
+
+This is a **recurring activity** ("make the SMS match the polished
+email"). The canonical, automated way is
+[`sweed-copy-email-to-rich-sms.ts`](../../helios/scripts/sweed-copy-email-to-rich-sms.ts),
+which copies the email trigger's exact `messageText` onto the SMS trigger:
+
+```bash
+DATABASE_URL=postgres://... npx tsx scripts/sweed-copy-email-to-rich-sms.ts \
+  --event-id 2474 \
+  [--dealer state|midtown|bronx | --dealer-id 210248] \
+  [--email-trigger-id 27544] [--sms-trigger-id 27545] \
+  [--approved-template-id 223] \
+  [--approved-image-id 2019999f-f859-4b52-c58b-08de9cc488b6]
+```
+
+What it does (and the manual steps, if you ever do it by hand):
+
+1. Polish + review the **email** trigger first; it is the single source
+   of truth for the creative.
+2. Attach the SMS-approved template + (carrier-safe) image to the SMS
+   trigger — this gates the `messageText` write.
+3. Copy the email's `messageText.design` and `messageText.html`
+   **as the raw base64 strings, byte-for-byte**. Do NOT decode and
+   re-encode (risks double-base64 / drift); decode only to validate.
+4. Leave the SMS trigger `enabled: false` (canon §1 — no unreviewed
+   sends). The script refuses to overwrite an already-enabled SMS trigger
+   without `--force`, and never touches the event's enabled state,
+   schedule, segment, or channels.
+5. Do **not** copy email-only fields to SMS: not the `sender`, and not
+   the email subject into the SMS `messageHeaderText` (the approved
+   template owns SMS naming/header metadata, which the customer does not
+   see).
+
+**Logo / cannabis nuance:** keep the carrier-safe sanitized image in
+`approvedImage`. The rich `messageText.html` copied from the email may use
+the **standard** brand creative (including the leaf logo) when the
+operator has approved that creative — live rich SMS examples support this.
+But do not assume the rich HTML is invisible to carriers (Sweed may
+render/host/transform it for MMS/RCS/rich delivery); if deliverability or
+filtering issues appear, switch the rich SMS body to sanitized creative
+too.
 
 #### Disabling a trigger
 
