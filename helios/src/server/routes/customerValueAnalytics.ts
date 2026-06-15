@@ -47,6 +47,9 @@ export async function registerCustomerValueAnalyticsRoutes(
       // Already normalized to exactly five values in [50, 99] by the
       // request schema's `percentiles` transform.
       percentiles: parsed.percentiles,
+      // v1.4 V4'6: marketing-segment lens. Empty => no filter. The
+      // query layer sanitizes ids to positive integers.
+      marketingSegmentIds: parsed.marketingSegmentIds,
     })
     return reply.send(CustomerValueAnalyticsResponseSchema.parse(result))
   })

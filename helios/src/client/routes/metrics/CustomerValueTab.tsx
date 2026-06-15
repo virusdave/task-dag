@@ -3,7 +3,9 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 
 import {
   CustomerValueAnalyticsResponseSchema,
+  CustomersMapSegmentsResponseSchema,
   type BasketByPurchaseNumberPoint,
+  type CustomersMapSegmentOption,
   type CohortRetentionRow,
   type ContributionByPurchaseNumberPoint,
   type CustomerValueAnalyticsResponse,
@@ -155,6 +157,40 @@ export function CustomerValueTab(): JSX.Element {
     ...DEFAULT_PURCHASE_COUNT_PERCENTILES,
   ])
 
+  // Marketing-segment lens (v1.4 V4'6). Selecting one or more segments
+  // filters the WHOLE page (KPIs + every chart) to customers in any
+  // selected segment. Options are loaded lazily from the cached
+  // catalog endpoint the customer-map lens uses, so opening the picker
+  // never hits Sweed.
+  const [selectedSegmentIds, setSelectedSegmentIds] = useState<string[]>([])
+  const [segOptions, setSegOptions] = useState<CustomersMapSegmentOption[] | null>(null)
+  const [segOptionsError, setSegOptionsError] = useState<boolean>(false)
+  const [segLensOpen, setSegLensOpen] = useState<boolean>(false)
+  const [segSearch, setSegSearch] = useState<string>('')
+
+  // Lazy-load the catalog the first time the operator opens the picker.
+  useEffect(() => {
+    if (!segLensOpen || segOptions !== null) return
+    let cancelled = false
+    loadJson('/api/admin/customers/map/segments', CustomersMapSegmentsResponseSchema)
+      .then((res) => {
+        if (!cancelled) setSegOptions(res.segments)
+      })
+      .catch(() => {
+        if (!cancelled) setSegOptionsError(true)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [segLensOpen, segOptions])
+
+  // Name lookup for the active-lens banner + picker meta.
+  const segmentNameById = useMemo(() => {
+    const m = new Map<string, string>()
+    for (const o of segOptions ?? []) m.set(o.segmentId, o.name)
+    return m
+  }, [segOptions])
+
   const [data, setData] = useState<CustomerValueAnalyticsResponse | null>(null)
   const [loading, setLoading] = useState<boolean>(true)
   const [error, setError] = useState<string | null>(null)
@@ -167,6 +203,7 @@ export function CustomerValueTab(): JSX.Element {
 
   const sitesParam = useMemo(() => Array.from(selectedSites).join(','), [selectedSites])
   const percentilesParam = useMemo(() => percentiles.join(','), [percentiles])
+  const segmentsParam = useMemo(() => selectedSegmentIds.join(','), [selectedSegmentIds])
 
   useEffect(() => {
     let cancelled = false
@@ -184,6 +221,7 @@ export function CustomerValueTab(): JSX.Element {
     params.set('include', 'retention')
     params.set('cohortGranularity', cohortGranularity)
     params.set('percentiles', percentilesParam)
+    if (segmentsParam) params.set('marketingSegmentIds', segmentsParam)
     setLoading(true)
     setError(null)
     loadJson(
@@ -205,7 +243,14 @@ export function CustomerValueTab(): JSX.Element {
     return () => {
       cancelled = true
     }
-  }, [fromMs, toMs, sitesParam, cohortScope, maxN, cohortGranularity, percentilesParam])
+  }, [fromMs, toMs, sitesParam, cohortScope, maxN, cohortGranularity, percentilesParam, segmentsParam])
+
+  const toggleSegment = useCallback((segmentId: string): void => {
+    setSelectedSegmentIds((prev) =>
+      prev.includes(segmentId) ? prev.filter((id) => id !== segmentId) : [...prev, segmentId],
+    )
+  }, [])
+  const clearSegments = useCallback((): void => setSelectedSegmentIds([]), [])
 
   return (
     <section className="customer-value-tab">
@@ -362,6 +407,81 @@ export function CustomerValueTab(): JSX.Element {
             </select>
           </label>
         </div>
+
+        {/* v1.4 V4'6: marketing-segment lens. Reuses the customer-map
+            lens picker pattern (cached catalog, lazy-loaded on open).
+            Filter-only semantics here: selecting segments restricts the
+            whole page to members of any selected segment. */}
+        <div className="metrics-control-group">
+          <details
+            className="cm-segment-lens"
+            open={segLensOpen}
+            onToggle={(e) => setSegLensOpen((e.target as HTMLDetailsElement).open)}
+          >
+            <summary>
+              Marketing segment lens
+              {selectedSegmentIds.length > 0 ? ` (${selectedSegmentIds.length} selected)` : ''}
+            </summary>
+            <div className="cm-segment-lens-body">
+              <p className="cm-segment-lens-hint subtle-copy">
+                Filter all Customer Value metrics to customers in any selected marketing segment.
+                Guests are excluded because guests cannot belong to a segment.
+              </p>
+              {selectedSegmentIds.length > 0 ? (
+                <div className="cm-segment-lens-mode" role="group" aria-label="Segment lens actions">
+                  <button type="button" className="cm-segment-lens-clear" onClick={clearSegments}>
+                    Clear segments
+                  </button>
+                </div>
+              ) : null}
+              <input
+                type="search"
+                className="cm-segment-lens-search"
+                aria-label="Search marketing segments"
+                placeholder="Search segments"
+                value={segSearch}
+                onChange={(e) => setSegSearch(e.target.value)}
+              />
+              <div className="cm-segment-lens-list">
+                {segOptionsError ? (
+                  <p className="subtle-copy">
+                    Could not load marketing segments. Customer Value metrics are unchanged.
+                  </p>
+                ) : segOptions === null ? (
+                  <p className="subtle-copy">Loading segments…</p>
+                ) : segOptions.length === 0 ? (
+                  <p className="subtle-copy">No cached marketing segments found.</p>
+                ) : (
+                  (() => {
+                    const q = segSearch.trim().toLowerCase()
+                    const shown = segOptions.filter((o) =>
+                      q === '' ? true : o.name.toLowerCase().includes(q),
+                    )
+                    if (shown.length === 0) {
+                      return <p className="subtle-copy">No matching segments.</p>
+                    }
+                    return shown.map((o) => {
+                      const checked = selectedSegmentIds.includes(o.segmentId)
+                      return (
+                        <label key={o.segmentId} className="cm-segment-lens-option">
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={() => toggleSegment(o.segmentId)}
+                          />
+                          <span className="cm-segment-lens-name">{o.name}</span>
+                          <span className="cm-segment-lens-meta subtle-copy">
+                            {o.scopeLabel} · {o.cachedMemberCount.toLocaleString()}
+                          </span>
+                        </label>
+                      )
+                    })
+                  })()
+                )}
+              </div>
+            </div>
+          </details>
+        </div>
       </div>
       </ControlsSection>
 
@@ -373,6 +493,10 @@ export function CustomerValueTab(): JSX.Element {
         <CustomerValueBody
           data={data}
           percentiles={percentiles}
+          selectedSegmentNames={selectedSegmentIds.map(
+            (id) => segmentNameById.get(id) ?? `Segment ${id}`,
+          )}
+          onClearSegments={clearSegments}
           onPercentileChange={(index, next) =>
             setPercentiles((prev) => {
               const copy = [...prev]
@@ -401,10 +525,15 @@ const CUSTOMER_VALUE_METRIC_IDS = {
 function CustomerValueBody({
   data,
   percentiles,
+  selectedSegmentNames,
+  onClearSegments,
   onPercentileChange,
 }: {
   data: CustomerValueAnalyticsResponse
   percentiles: ReadonlyArray<number>
+  /** Display names of the active marketing-segment lens (empty => off). */
+  selectedSegmentNames: ReadonlyArray<string>
+  onClearSegments: () => void
   onPercentileChange: (index: number, next: number) => void
 }) {
   const [moneyBasis, setMoneyBasis] = useState<MoneyBasis>('gross_sales')
@@ -445,12 +574,34 @@ function CustomerValueBody({
     return () => window.removeEventListener('keydown', onKey)
   }, [selection, setSelection])
 
+  // v1.4 V4'6: active marketing-segment lens. The server echoes the
+  // sanitized ids it actually applied; the client owns names. Banner
+  // sits above the KPI strip so filtered totals are never misread as
+  // the full population.
+  const lensActive = data.meta.marketingSegmentLens.selectedSegmentIds.length > 0
+  const knownCustomers = data.summary.knownCustomers.toLocaleString()
+  const lensText =
+    selectedSegmentNames.length === 1
+      ? `Filtered to "${selectedSegmentNames[0]}". Current scope: ${knownCustomers} known customers.`
+      : `Filtered to ${selectedSegmentNames.length} marketing segments. Current scope: ${knownCustomers} known customers.`
+
   return (
     <>
+      {lensActive ? (
+        <div className="cv-segment-banner" role="status">
+          <span className="cv-segment-banner-text">
+            <strong>Marketing segment lens active.</strong> {lensText} Guests are excluded.
+          </span>
+          <button type="button" className="cv-segment-banner-clear" onClick={onClearSegments}>
+            Clear segments
+          </button>
+        </div>
+      ) : null}
+
       {/* v1.4 V4'5: tab header — VeriScan coverage badge + gated
           toggle. Sits above the KPI strip so the badge is visible
           before any chart resolves. */}
-      <VeriscanCoverageHeader meta={data.meta} />
+      <VeriscanCoverageHeader meta={data.meta} segmentLensActive={lensActive} />
 
       <SummaryStrip data={data} basis={moneyBasis} basisLabel={moneyBasisDef.label} />
 
@@ -623,17 +774,25 @@ const COHORT_HIGHLIGHT_DIMS: ReadonlyArray<HighlightDimensionSpec<CohortRetentio
  */
 function VeriscanCoverageHeader({
   meta,
+  segmentLensActive,
 }: {
   meta: CustomerValueAnalyticsResponse['meta']
+  /** When the marketing-segment lens is active, coverage is scoped to
+   *  segment-member orders, so we say so in the tooltip. */
+  segmentLensActive: boolean
 }) {
   const [veriscanOnly, setVeriscanOnly] = useState<boolean>(false)
   const { linked, total, pct } = meta.veriscanCoverage
   const pctRounded = Math.round(pct * 1000) / 10 // one decimal
   const aboveThreshold = pct >= VERISCAN_COVERAGE_THRESHOLD_PCT
-  const tooltip = VERISCAN_BADGE_TOOLTIP_TEMPLATE
-    .replace('{linked}', linked.toLocaleString())
-    .replace('{total}', total.toLocaleString())
-    .replace('{thresholdPct}', String(Math.round(VERISCAN_COVERAGE_THRESHOLD_PCT * 100)))
+  const tooltip =
+    VERISCAN_BADGE_TOOLTIP_TEMPLATE
+      .replace('{linked}', linked.toLocaleString())
+      .replace('{total}', total.toLocaleString())
+      .replace('{thresholdPct}', String(Math.round(VERISCAN_COVERAGE_THRESHOLD_PCT * 100))) +
+    (segmentLensActive
+      ? ' Coverage is scoped to the active marketing-segment lens (segment-member orders only).'
+      : '')
   const badgeText = `${pctRounded.toFixed(1)}% linked`
   return (
     <div className="customer-value-tab-header" role="group" aria-label="VeriScan coverage">

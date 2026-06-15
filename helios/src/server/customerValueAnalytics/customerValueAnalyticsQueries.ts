@@ -129,6 +129,44 @@ function nonCancelledOrderSql(alias = ''): string {
   return `and lower(coalesce(${prefix}raw_json->'invoiceStatus'->>'name', '')) <> 'cancelled'`
 }
 
+/**
+ * Marketing-segment lens (v1.4 V4'6). Parse the request's CSV segment
+ * ids into a deduped list of positive integers; drop anything that
+ * isn't a finite positive integer so a typo can't widen or break the
+ * filter. Empty result => no lens.
+ */
+function resolveSegmentIds(ids: readonly string[]): number[] {
+  const out = new Set<number>()
+  for (const raw of ids) {
+    const n = Number(raw)
+    if (Number.isInteger(n) && n > 0) out.add(n)
+  }
+  return [...out]
+}
+
+/**
+ * Segment-membership predicate for the marketing-segment lens. Restricts
+ * a customer-bearing query to Sweed customers who belong to ANY of the
+ * selected segments (OR semantics, same as the customer-map lens).
+ *
+ * `$paramIndex` must bind a `bigint[]` of segment ids. The IN-subquery
+ * resolves member ids via the `(segment_id, sweed_customer_id)` index
+ * (migration 080) once per statement and Postgres turns it into a hash
+ * semi-join; it can only SHRINK the order/customer row count.
+ *
+ * `alias` is the table alias holding `customer_id` (`''` for an
+ * unaliased `from sweed_orders`).
+ */
+function segmentLensPredicate(alias: string, paramIndex: number): string {
+  const col = alias ? `${alias}.customer_id` : 'customer_id'
+  return `and ${col} in (
+        select scs.sweed_customer_id
+          from sweed_customer_segments scs
+         where scs.segment_id = any($${paramIndex}::bigint[])
+           and scs.enabled is distinct from false
+      )`
+}
+
 function resolveDealerIds(sites: readonly string[]): number[] {
   if (sites.length === 0) {
     return HELIOS_PENDING_PURCHASE_SITE_DEALERS.map((d) => d.dealerId)
@@ -224,6 +262,12 @@ interface QueryArgs {
    * `normalizePurchaseCountPercentiles` before calling.
    */
   percentiles: readonly number[]
+  /**
+   * Marketing-segment lens (v1.4 V4'6). CSV segment ids from the
+   * request; when non-empty the whole page is restricted to members
+   * of any selected segment (OR semantics). Empty => no lens.
+   */
+  marketingSegmentIds: readonly string[]
 }
 
 const MISSING_CARDS: ReadonlyArray<CustomerValueMissingDataCard> = [
@@ -303,6 +347,11 @@ export async function getCustomerValueAnalytics(
   args: QueryArgs,
 ): Promise<CustomerValueAnalyticsResponse> {
   const dealerIds = resolveDealerIds(args.sites)
+  const segmentIds = resolveSegmentIds(args.marketingSegmentIds)
+  const segmentLensActive = segmentIds.length > 0
+  // Server-sanitized lens echo for the response meta (drops typos /
+  // non-integer ids) so the client banner reflects what was applied.
+  const segmentLensEcho = { selectedSegmentIds: segmentIds.map((n) => String(n)) }
   const pool = getPool()
   const generatedAt = new Date()
 
@@ -318,6 +367,16 @@ export async function getCustomerValueAnalytics(
     if (dealerIds.length === 0) {
       effectiveMaxN = 20
     } else {
+      const probeParams: unknown[] = [dealerIds, args.to.toISOString()]
+      if (args.cohortScope !== 'all_as_of_end') {
+        probeParams.push(args.from.toISOString(), args.to.toISOString())
+      }
+      // Segment-lens param binds after the existing probe params; index
+      // depends on whether the cohort scope added $3/$4.
+      const probeSegClause = segmentLensActive
+        ? segmentLensPredicate('', probeParams.length + 1)
+        : ''
+      if (segmentLensActive) probeParams.push(segmentIds)
       const probeSql = `
         with cr as (
           select customer_id, count(*) as total_purchases
@@ -327,6 +386,7 @@ export async function getCustomerValueAnalytics(
              and customer_id is not null
              ${nonCancelledOrderSql()}
              ${cohortScopeProbeFilter(args.cohortScope, '$3', '$4')}
+             ${probeSegClause}
            group by dealer_id, customer_id
         ), per_n as (
           -- One row per distinct total_purchases value; we want the
@@ -341,10 +401,6 @@ export async function getCustomerValueAnalytics(
           2
         ) as max_n_with_ge2
       `
-      const probeParams: unknown[] = [dealerIds, args.to.toISOString()]
-      if (args.cohortScope !== 'all_as_of_end') {
-        probeParams.push(args.from.toISOString(), args.to.toISOString())
-      }
       const probe = await pool.query<{ max_n_with_ge2: string | number | null }>(
         probeSql,
         probeParams,
@@ -396,7 +452,10 @@ export async function getCustomerValueAnalytics(
     // value when there are no orders in window; the client will
     // render "0% linked" rather than "—%" so the operator can tell
     // "no orders" from "real but zero coverage".
-    meta: { veriscanCoverage: { linked: 0, total: 0, pct: 0 } },
+    meta: {
+      veriscanCoverage: { linked: 0, total: 0, pct: 0 },
+      marketingSegmentLens: segmentLensEcho,
+    },
     missingDataCards: [...MISSING_CARDS],
   }
 
@@ -455,6 +514,7 @@ export async function getCustomerValueAnalytics(
         and so.pay_time < $3::timestamptz
         and so.customer_id is not null
         ${nonCancelledOrderSql('so')}
+        ${segmentLensActive ? segmentLensPredicate('so', 11) : ''}
     ),
     purchase_events as (
       select
@@ -719,6 +779,7 @@ export async function getCustomerValueAnalytics(
       and so.pay_time >= $2::timestamptz
       and so.pay_time < $3::timestamptz
       ${nonCancelledOrderSql('so')}
+      ${segmentLensActive ? segmentLensPredicate('so', 4) : ''}
   `
   // Trailing-12-month per-customer spend percentiles (operator request
   // 2026-06-11). Population: non-guest customers with >= 1 non-cancelled
@@ -774,11 +835,23 @@ export async function getCustomerValueAnalytics(
         and so.pay_time >= $2::timestamptz - interval '12 months'
         and so.pay_time <  $2::timestamptz
         ${nonCancelledOrderSql('so')}
+        ${segmentLensActive ? segmentLensPredicate('so', TRAILING_SPEND_PERCENTILES.length + 3) : ''}
       group by so.customer_id
     )
     select
       ${cohortCols.join(',\n      ')}
   `
+  // Guest orders cannot belong to a marketing segment, so when the
+  // lens is active the guest count is definitionally 0 — skip the
+  // query entirely (no wasted round-trip) rather than filter it.
+  const guestPromise: Promise<{ rows: ReadonlyArray<{ n: string | number }> }> =
+    segmentLensActive
+      ? Promise.resolve({ rows: [{ n: 0 }] })
+      : pool.query<{ n: string | number }>(guestSql, [
+          dealerIds,
+          args.from.toISOString(),
+          args.to.toISOString(),
+        ])
   const [result, guestRes, retentionRes, veriscanRes, ttmRes] = await Promise.all([
     pool.query<UnionRow>(sql, [
       dealerIds,
@@ -789,13 +862,11 @@ export async function getCustomerValueAnalytics(
       // $6..$10 — the five percentile fractions (e.g. 90 → 0.90),
       // in the operator-requested order. v9..v13 read these back.
       ...args.percentiles.map((p) => p / 100),
+      // $11 — segment-lens ids (only present when the lens is active).
+      ...(segmentLensActive ? [segmentIds] : []),
     ]),
     // Pull guest order count separately (summary.totalOrders = known + guest).
-    pool.query<{ n: string | number }>(guestSql, [
-      dealerIds,
-      args.from.toISOString(),
-      args.to.toISOString(),
-    ]),
+    guestPromise,
     args.includeRetention
       ? runRetentionQueries({
           pool,
@@ -804,17 +875,22 @@ export async function getCustomerValueAnalytics(
           to: args.to,
           cohortScope: args.cohortScope,
           cohortGranularity: args.cohortGranularity,
+          segmentIds,
         })
       : Promise.resolve({ cohortRetention: [], firstSecondConversion: [] } as RetentionPayload),
     pool.query<{ total: string | number; linked: string | number }>(veriscanSql, [
       dealerIds,
       args.from.toISOString(),
       args.to.toISOString(),
+      // $4 — segment-lens ids (only present when the lens is active).
+      ...(segmentLensActive ? [segmentIds] : []),
     ]),
     pool.query<Record<string, string | number | null>>(trailingSpendSql, [
       dealerIds,
       args.to.toISOString(),
       ...ttmFractions,
+      // $7 — segment-lens ids (only present when the lens is active).
+      ...(segmentLensActive ? [segmentIds] : []),
     ]),
   ])
 
@@ -994,7 +1070,7 @@ export async function getCustomerValueAnalytics(
     contributionByPurchaseNumber,
     cohortRetention: retentionRes.cohortRetention,
     firstSecondConversion: retentionRes.firstSecondConversion,
-    meta: { veriscanCoverage },
+    meta: { veriscanCoverage, marketingSegmentLens: segmentLensEcho },
     missingDataCards: [...MISSING_CARDS],
   }
 }
@@ -1038,13 +1114,16 @@ interface RetentionQueryArgs {
   to: Date
   cohortScope: CustomerValueCohortScope
   cohortGranularity: CustomerValueCohortGranularity
+  /** Marketing-segment lens ids (v1.4 V4'6). Empty => no filter. */
+  segmentIds: readonly number[]
 }
 
 async function runRetentionQueries(args: RetentionQueryArgs): Promise<RetentionPayload> {
-  const { pool, dealerIds, from, to, cohortScope, cohortGranularity } = args
+  const { pool, dealerIds, from, to, cohortScope, cohortGranularity, segmentIds } = args
   if (dealerIds.length === 0) {
     return { cohortRetention: [], firstSecondConversion: [] }
   }
+  const segmentLensActive = segmentIds.length > 0
 
   // Business-day rollover shift (08:00 ET): cohort acquisition buckets
   // and retention period indices are computed on the business-local
@@ -1072,6 +1151,7 @@ async function runRetentionQueries(args: RetentionQueryArgs): Promise<RetentionP
          and so.pay_time < $3::timestamptz
          and so.customer_id is not null
          ${nonCancelledOrderSql('so')}
+         ${segmentLensActive ? segmentLensPredicate('so', 6) : ''}
     ),
     purchase_events as (
       select o.*,
@@ -1212,6 +1292,8 @@ async function runRetentionQueries(args: RetentionQueryArgs): Promise<RetentionP
     to.toISOString(),
     cohortScope,
     cohortGranularity,
+    // $6 — segment-lens ids (only present when the lens is active).
+    ...(segmentLensActive ? [segmentIds] : []),
   ])
 
   const retention: CohortRetentionRow[] = []

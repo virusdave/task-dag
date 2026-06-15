@@ -6883,11 +6883,11 @@ span.metric-chart-legend-item {
 }
 
 /* ----- Marketing-segment lens ----- */
-.customer-map-page .cm-segment-lens {
+.customer-map-page .cm-segment-lens , .customer-value-tab .cm-segment-lens {
   border-top: 1px dashed var(--panel-border);
   padding-top: 0.4rem;
 }
-.customer-map-page .cm-segment-lens > summary {
+.customer-map-page .cm-segment-lens > summary , .customer-value-tab .cm-segment-lens > summary {
   cursor: pointer;
   font-size: 0.82rem;
   color: var(--muted, #6b5b48);
@@ -6897,18 +6897,18 @@ span.metric-chart-legend-item {
   display: flex;
   align-items: center;
 }
-.customer-map-page .cm-segment-lens-body {
+.customer-map-page .cm-segment-lens-body , .customer-value-tab .cm-segment-lens-body {
   display: flex;
   flex-direction: column;
   gap: 0.5rem;
   margin-top: 0.5rem;
 }
-.customer-map-page .cm-segment-lens-mode {
+.customer-map-page .cm-segment-lens-mode , .customer-value-tab .cm-segment-lens-mode {
   display: flex;
   flex-wrap: wrap;
   gap: 0.4rem;
 }
-.customer-map-page .cm-segment-lens-mode button {
+.customer-map-page .cm-segment-lens-mode button , .customer-value-tab .cm-segment-lens-mode button {
   padding: 0.4rem 0.8rem;
   min-height: 44px;
   border: 1px solid var(--panel-border);
@@ -6917,24 +6917,24 @@ span.metric-chart-legend-item {
   cursor: pointer;
   font-size: 0.85rem;
 }
-.customer-map-page .cm-segment-lens-mode button.is-active {
+.customer-map-page .cm-segment-lens-mode button.is-active , .customer-value-tab .cm-segment-lens-mode button.is-active {
   background: #1d4ed8;
   border-color: #1d4ed8;
   color: #fff;
   font-weight: 600;
 }
-.customer-map-page .cm-segment-lens-mode button:disabled {
+.customer-map-page .cm-segment-lens-mode button:disabled , .customer-value-tab .cm-segment-lens-mode button:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }
-.customer-map-page .cm-segment-lens-clear {
+.customer-map-page .cm-segment-lens-clear , .customer-value-tab .cm-segment-lens-clear {
   margin-left: auto;
 }
-.customer-map-page .cm-segment-lens-hint {
+.customer-map-page .cm-segment-lens-hint , .customer-value-tab .cm-segment-lens-hint {
   font-size: 0.76rem;
   margin: 0;
 }
-.customer-map-page .cm-segment-lens-search {
+.customer-map-page .cm-segment-lens-search , .customer-value-tab .cm-segment-lens-search {
   padding: 0.45rem 0.6rem;
   min-height: 44px;
   border: 1px solid var(--panel-border);
@@ -6942,7 +6942,7 @@ span.metric-chart-legend-item {
   width: 100%;
   max-width: 22rem;
 }
-.customer-map-page .cm-segment-lens-list {
+.customer-map-page .cm-segment-lens-list , .customer-value-tab .cm-segment-lens-list {
   display: flex;
   flex-direction: column;
   gap: 0.1rem;
@@ -6952,7 +6952,7 @@ span.metric-chart-legend-item {
   border-radius: 8px;
   padding: 0.3rem;
 }
-.customer-map-page .cm-segment-lens-option {
+.customer-map-page .cm-segment-lens-option , .customer-value-tab .cm-segment-lens-option {
   display: flex;
   align-items: center;
   gap: 0.5rem;
@@ -6961,25 +6961,61 @@ span.metric-chart-legend-item {
   cursor: pointer;
   border-radius: 6px;
 }
-.customer-map-page .cm-segment-lens-option:hover {
+.customer-map-page .cm-segment-lens-option:hover , .customer-value-tab .cm-segment-lens-option:hover {
   background: rgba(120, 86, 48, 0.08);
 }
-.customer-map-page .cm-segment-lens-option input[type='checkbox'] {
+.customer-map-page .cm-segment-lens-option input[type='checkbox'] , .customer-value-tab .cm-segment-lens-option input[type='checkbox'] {
   width: 18px;
   height: 18px;
   flex: 0 0 auto;
 }
-.customer-map-page .cm-segment-lens-name {
+.customer-map-page .cm-segment-lens-name , .customer-value-tab .cm-segment-lens-name {
   flex: 1 1 auto;
   font-size: 0.88rem;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.customer-map-page .cm-segment-lens-meta {
+.customer-map-page .cm-segment-lens-meta , .customer-value-tab .cm-segment-lens-meta {
   flex: 0 0 auto;
   font-size: 0.74rem;
   white-space: nowrap;
+}
+
+/* Customer Value: active marketing-segment lens banner. Sits above the
+   KPI strip so the operator can never misread filtered totals as the
+   full population. */
+.customer-value-tab .cv-segment-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 0.75rem;
+  margin: 0 0 0.6rem;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid #1d4ed8;
+  border-left-width: 4px;
+  border-radius: 8px;
+  background: rgba(29, 78, 216, 0.08);
+  font-size: 0.85rem;
+}
+.customer-value-tab .cv-segment-banner-text {
+  flex: 1 1 16rem;
+  line-height: 1.3;
+}
+.customer-value-tab .cv-segment-banner-text strong {
+  font-weight: 600;
+}
+.customer-value-tab .cv-segment-banner-clear {
+  flex: 0 0 auto;
+  min-height: 44px;
+  padding: 0.4rem 0.9rem;
+  border: 1px solid #1d4ed8;
+  border-radius: 8px;
+  background: #1d4ed8;
+  color: #fff;
+  font-weight: 600;
+  font-size: 0.85rem;
+  cursor: pointer;
 }
 
 /* ----- Encoding-axis selectors (color by / size by) + legend ------ */

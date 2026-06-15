@@ -129,6 +129,18 @@ export const CustomerValueAnalyticsRequestSchema = z.object({
   /** Cohort retention granularity. Only meaningful when `include=retention`. */
   cohortGranularity: CustomerValueCohortGranularitySchema.optional(),
   /**
+   * Marketing-segment lens (v1.4 V4'6). Comma-separated Sweed segment
+   * ids; OR semantics (a customer matches if they belong to ANY of
+   * them), same convention as the customer-map lens. When non-empty
+   * the WHOLE page (KPIs, the four histograms, trailing spend,
+   * retention, VeriScan coverage) is restricted to members of any
+   * selected segment, read from the cached `sweed_customer_segments`
+   * table. Empty / unset => no segment filter. Guests cannot belong
+   * to a marketing segment, so the guest order count is forced to 0
+   * when this is set.
+   */
+  marketingSegmentIds: csvList,
+  /**
    * Which five purchase-count percentiles to report (each 50..99).
    * Comma-separated; normalized to exactly five. Empty / unset →
    * the default set (50/75/80/90/95).
@@ -388,13 +400,27 @@ export const VeriscanCoverageSchema = z.object({
 export type VeriscanCoverage = z.infer<typeof VeriscanCoverageSchema>
 
 /**
- * Per-response metadata bag (v1.4 V4'5). Today only carries
- * `veriscanCoverage`; future sections (e.g. data-freshness stamps,
- * upstream-ingest health) attach here without expanding the
- * top-level response shape.
+ * Active marketing-segment lens echo (v1.4 V4'6). Carries the
+ * server-sanitized set of segment ids actually applied to this
+ * response so the client banner reflects what the server filtered on
+ * (not just what the URL requested). Empty when no lens is active.
+ */
+export const CustomerValueSegmentLensSchema = z.object({
+  selectedSegmentIds: z.array(z.string()),
+})
+export type CustomerValueSegmentLens = z.infer<typeof CustomerValueSegmentLensSchema>
+
+/**
+ * Per-response metadata bag (v1.4 V4'5). Carries `veriscanCoverage`
+ * and (v1.4 V4'6) the active `marketingSegmentLens` echo; future
+ * sections (e.g. data-freshness stamps, upstream-ingest health) attach
+ * here without expanding the top-level response shape.
  */
 export const CustomerValueMetaSchema = z.object({
   veriscanCoverage: VeriscanCoverageSchema,
+  /** Active marketing-segment lens echo (v1.4 V4'6). Always present;
+   *  `selectedSegmentIds` is empty when no lens is applied. */
+  marketingSegmentLens: CustomerValueSegmentLensSchema,
 })
 export type CustomerValueMeta = z.infer<typeof CustomerValueMetaSchema>
 
