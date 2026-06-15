@@ -1150,6 +1150,22 @@ const SENTINELS: MigrationSentinel[] = [
       return hasRollup && hasState && hasGrainIndex
     },
   },
+  {
+    migrationId: '088_gads_lp_rollup_dq',
+    label:
+      'GAds landing-pages rollup data-quality counters (assignments_missing_id, ' +
+      'unattributed_stage_events on gads_lp_rollup_refresh_state). The refresh job ' +
+      'records them so the serving endpoint (automation#47 P3) can surface data ' +
+      'quality WITHOUT scanning lp_events; without these columns the refresh ' +
+      "update fails and the dashboard's data-quality figures stay zero.",
+    check: async (db) => {
+      const [hasMissingId, hasUnattributed] = await Promise.all([
+        columnExists(db, 'gads_lp_rollup_refresh_state', 'assignments_missing_id'),
+        columnExists(db, 'gads_lp_rollup_refresh_state', 'unattributed_stage_events'),
+      ])
+      return hasMissingId && hasUnattributed
+    },
+  },
 ]
 
 interface CacheEntry {

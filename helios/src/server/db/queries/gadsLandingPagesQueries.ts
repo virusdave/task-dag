@@ -1,32 +1,32 @@
-// GAds → Landing pages analytics read path (V1).
+// GAds → Landing pages analytics read path (V1, phase P3).
 //
 // Backs GET /api/gads/landing-pages (helios/src/server/routes/
 // gadsLandingPages.ts), the first sub-page of the GAds analytics
-// surface (parent epic virusdave/top-level#18).
+// surface (parent epic virusdave/top-level#18, child automation#47).
 //
-// Design (Oracle-reviewed — see issue #18 thread): V1 reads the
-// append-only `lp_events` sink (migration 070) DIRECTLY — no rollup
-// tables, no assignment-fact table, no background worker. The
-// operator explicitly accepts slightly reduced precision / latency in
-// exchange for minimal DB footprint (this is not an accounting
-// system). Cost / revenue / ROAS are NOT wired yet.
+// Design (authoritative: docs/epics/gads-landing-analytics/EPIC_PLAN.md
+// §3 + child EPIC_PLAN P3; locked semantics: docs/helios/
+// gads-landing-analytics/P0_AUDIT.md; second Oracle review). The serving
+// path reads ONLY the day-grain `gads_lp_rollup` table + the singleton
+// `gads_lp_rollup_refresh_state` row — NEVER raw lp_events. The rollup is
+// recomputed out-of-band by config.workers.gads_lp_rollup_refresh
+// (gadsLpRollupQueries.ts) on a ~60-min cadence. This keeps every
+// dashboard load cheap (a tiny indexed scan of an aggregate table), per
+// the operator's binding DB-cost steer (epic #11): this is observed
+// performance for rapid hill-climbing, not an accounting system, so we
+// accept day-grain bucketing and ~refresh-cadence staleness in exchange
+// for minimal DB footprint. A unit test asserts no 'lp_events' appears in
+// any SQL on this path.
 //
-// Semantics: ASSIGNMENT-COHORT, not raw event counts.
-//   1. `anchors`: the set of assignments whose `lp_assignment` event
-//      falls in the half-open window [from, to), with their placement
-//      + provenance taken from the assignment row.
-//   2. `assignment_flags`: per assignment, did it later reach the
-//      impression / redirect / conversion stage (bool_or over
-//      same-assignment events, outcomes observed through generatedAt).
-//   3. Funnel + KPIs + per-variant table are all derived from those
-//      one-row-per-assignment flags, so every count is an
-//      assignment-level unique.
-//
-// Guardrails: half-open window, a default window when omitted, and a
-// hard max span so a request can never seq-scan all of lp_events.
-// Existing indexes (lp_events_type_ts_idx, lp_events_assignment_idx,
-// lp_events_site_family_idx) cover this access pattern; no new index
-// is required for V1.
+// Semantics (all from the rollup, which already encodes them):
+//   - Funnel counts are assignment-level-unique (the refresh dedupes via
+//     distinct/bool_or). assignment_day is the assignment's NY-local date.
+//   - "Converted" uses the 30-day assignment-time attribution window
+//     (conversions_30d) to match the default analysis window; 7d/90d are
+//     also in the rollup for a future contract extension.
+//   - Cost / revenue / ROAS are not wired in V1 (no in-DB cost snapshot);
+//     the rollup carries cost_attribution_status = 'unavailable', which we
+//     surface honestly as null money KPIs (UI badge), never fake zeros.
 
 import {
   GADS_SITES,
@@ -34,6 +34,7 @@ import {
   type GadsSiteKey,
 } from '../../../shared/domain/gadsSites.js'
 import type {
+  GadsAttributionStatus,
   GadsDataQuality,
   GadsFunnelStage,
   GadsLandingPagesKpis,
@@ -46,8 +47,8 @@ const DAY_MS = 86_400_000
 
 /** Default window when the caller omits from/to. */
 export const GADS_LANDING_PAGES_DEFAULT_WINDOW_DAYS = 30
-/** Hard cap on the requested span, so a request can never scan all of
- *  lp_events. The operator can widen later if needed. */
+/** Hard cap on the requested span. The rollup only retains a bounded
+ *  horizon, so windows beyond it simply return fewer day rows. */
 export const GADS_LANDING_PAGES_MAX_WINDOW_DAYS = 120
 /** Variant rows with fewer assignments than this are flagged
  *  low-sample; the UI hides them by default behind a toggle. */
@@ -65,7 +66,7 @@ export interface GadsLandingPagesArgs {
   readonly db?: Queryable
 }
 
-/** The concrete lp_events.site values a scope covers. */
+/** The concrete gads_lp_rollup.site values a scope covers. */
 function sitesForScope(scope: GadsScope): GadsSiteKey[] {
   if (scope === 'all') return GADS_SITES.map((s) => s.key)
   return [scope]
@@ -87,7 +88,9 @@ function rate(numer: number, denom: number): number | null {
   return numer / denom
 }
 
-interface AnchorRow {
+/** One variant grain, aggregated across day/policy_id/cluster within the
+ *  requested window. */
+interface VariantAggRow {
   site: string
   family: string | null
   experiment_id: string | null
@@ -96,8 +99,24 @@ interface AnchorRow {
   assignments: string
   impressions: string
   redirects: string
-  conversions: string
-  avg_served_probability_bps: string | null
+  conversions_30d: string
+  sum_served_prob_bps: string
+  assignments_with_prob: string
+  has_allocated: boolean
+  has_unavailable: boolean
+}
+
+interface RefreshStateRow {
+  assignments_missing_id: string | number | null
+  unattributed_stage_events: string | number | null
+}
+
+/** Map the rollup's per-row cost_attribution_status aggregate to the
+ *  response enum, honestly reflecting mixed states. */
+function attributionStatusFrom(hasAllocated: boolean, hasUnavailable: boolean): GadsAttributionStatus {
+  if (hasAllocated && !hasUnavailable) return 'allocated'
+  if (hasAllocated && hasUnavailable) return 'incomplete'
+  return 'not-wired'
 }
 
 export async function getGadsLandingPages(
@@ -121,122 +140,80 @@ export async function getGadsLandingPages(
 
   const sites = sitesForScope(args.scope)
 
-  // Bind params. `$1` from, `$2` to, `$3` site list. Optional family /
-  // experiment filters appended afterwards.
+  // Bind params. $1 from, $2 to, $3 site list. The window timestamps are
+  // mapped to NY-local assignment_day dates (the rollup grain). Optional
+  // family / experiment filters appended afterwards.
   const params: unknown[] = [from.toISOString(), to.toISOString(), sites]
-  const anchorFilters: string[] = []
+  const filters: string[] = []
   if (args.family) {
     params.push(args.family)
-    anchorFilters.push(`and a.family = $${params.length}`)
+    filters.push(`and family = $${params.length}`)
   }
   if (args.experimentId) {
     params.push(args.experimentId)
-    anchorFilters.push(`and a.experiment_id = $${params.length}`)
+    filters.push(`and experiment_id = $${params.length}`)
   }
-  const anchorFilterSql = anchorFilters.join('\n        ')
+  const filterSql = filters.join('\n        ')
 
-  // One round-trip computes the per-variant aggregates. The funnel +
-  // KPIs are summed from these rows in JS (the grain is small — bounded
-  // by the number of (site, family, experiment, rule, branch) groups).
-  // We deliberately DO NOT group by served_probability_bps (it can
-  // drift over time and fragment rows); it is averaged as a diagnostic.
-  const sql = `
-    with anchors as materialized (
-      select distinct on (assignment_id)
-        assignment_id,
-        site,
-        family,
-        experiment_id,
-        policy_rule_id,
-        branch_id,
-        served_probability_bps
-      from lp_events
-      where event_type = 'lp_assignment'
-        and assignment_id is not null
-        and event_ts >= $1::timestamptz
-        and event_ts <  $2::timestamptz
-        and site = any($3::text[])
-      order by assignment_id, event_ts asc
-    ),
-    assignment_flags as materialized (
-      select
-        a.site,
-        a.family,
-        a.experiment_id,
-        a.policy_rule_id,
-        a.branch_id,
-        a.served_probability_bps,
-        coalesce(bool_or(e.event_type = 'lp_impression'), false) as reached_impression,
-        coalesce(bool_or(e.event_type = 'lp_redirect'), false)   as reached_redirect,
-        coalesce(bool_or(e.event_type = 'lp_conversion'), false) as reached_conversion
-      from anchors a
-      left join lp_events e
-        on e.assignment_id = a.assignment_id
-       and e.event_type in ('lp_impression', 'lp_redirect', 'lp_conversion')
-      where true
-        ${anchorFilterSql}
-      group by
-        a.assignment_id,
-        a.site,
-        a.family,
-        a.experiment_id,
-        a.policy_rule_id,
-        a.branch_id,
-        a.served_probability_bps
-    )
+  // Aggregate the rollup to the variant grain over the window. The rollup
+  // is small (one row per day x placement x provenance), so this is a
+  // cheap indexed scan (gads_lp_rollup_site_day_idx) + group-by. We sum
+  // across day / policy_id / cluster_slug, which the variant grain does
+  // not distinguish.
+  const variantSql = `
     select
       site,
       family,
       experiment_id,
       policy_rule_id,
       branch_id,
-      count(*)::bigint                                              as assignments,
-      count(*) filter (where reached_impression)::bigint           as impressions,
-      count(*) filter (where reached_redirect)::bigint             as redirects,
-      count(*) filter (where reached_conversion)::bigint           as conversions,
-      avg(served_probability_bps)::float8                          as avg_served_probability_bps
-    from assignment_flags
+      sum(assignments)::bigint                                  as assignments,
+      sum(impressions)::bigint                                  as impressions,
+      sum(redirects)::bigint                                    as redirects,
+      sum(conversions_30d)::bigint                              as conversions_30d,
+      sum(sum_served_prob_bps)::bigint                          as sum_served_prob_bps,
+      sum(assignments_with_prob)::bigint                        as assignments_with_prob,
+      bool_or(cost_attribution_status = 'allocated')            as has_allocated,
+      bool_or(cost_attribution_status = 'unavailable')          as has_unavailable
+    from gads_lp_rollup
+    where site = any($3::text[])
+      and assignment_day >= ($1::timestamptz at time zone 'America/New_York')::date
+      and assignment_day <  ($2::timestamptz at time zone 'America/New_York')::date
+      ${filterSql}
     group by site, family, experiment_id, policy_rule_id, branch_id
     order by assignments desc, site, family, experiment_id, branch_id
   `
 
-  // Data-quality counters: assignment events with a null id (dropped),
-  // and later-stage events with a null id (unattributable). Cheap,
-  // time-bounded, same window + sites.
-  const dqSql = `
-    select
-      count(*) filter (
-        where event_type = 'lp_assignment' and assignment_id is null
-      )::bigint as assignments_missing_id,
-      count(*) filter (
-        where event_type in ('lp_impression', 'lp_redirect', 'lp_conversion')
-          and assignment_id is null
-      )::bigint as unattributed_stage_events
-    from lp_events
-    where event_ts >= $1::timestamptz
-      and event_ts <  $2::timestamptz
-      and site = any($3::text[])
+  // Data quality is recorded on the refresh-state row by the out-of-band
+  // job (so the serving path never scans lp_events). It is an
+  // as-of-last-refresh, horizon-bounded snapshot, not per-window.
+  const stateSql = `
+    select assignments_missing_id, unattributed_stage_events
+      from gads_lp_rollup_refresh_state
+     where id = 'singleton'
   `
 
-  const [variantResult, dqResult] = await Promise.all([
-    db.query<AnchorRow>(sql, params),
-    db.query<{ assignments_missing_id: string; unattributed_stage_events: string }>(
-      dqSql,
-      [from.toISOString(), to.toISOString(), sites],
-    ),
+  const [variantResult, stateResult] = await Promise.all([
+    db.query<VariantAggRow>(variantSql, params),
+    db.query<RefreshStateRow>(stateSql),
   ])
 
-  // --- Aggregate funnel + KPI totals from the variant rows. ---
+  // --- Aggregate funnel + KPI totals + attribution from variant rows. ---
   let totalAssignments = 0
   let totalImpressions = 0
   let totalRedirects = 0
   let totalConversions = 0
+  let anyAllocated = false
+  let anyUnavailable = false
   for (const r of variantResult.rows) {
     totalAssignments += asInt(r.assignments)
     totalImpressions += asInt(r.impressions)
     totalRedirects += asInt(r.redirects)
-    totalConversions += asInt(r.conversions)
+    totalConversions += asInt(r.conversions_30d)
+    anyAllocated = anyAllocated || r.has_allocated === true
+    anyUnavailable = anyUnavailable || r.has_unavailable === true
   }
+  const attributionStatus = attributionStatusFrom(anyAllocated, anyUnavailable)
 
   const funnel: GadsFunnelStage[] = [
     { stage: 'assigned', label: 'Assigned', count: totalAssignments, stepRate: null },
@@ -265,7 +242,7 @@ export async function getGadsLandingPages(
     conversionRate: rate(totalConversions, totalAssignments),
     redirectRate: rate(totalRedirects, totalImpressions),
     impressionRate: rate(totalImpressions, totalAssignments),
-    // Money KPIs are not wired in V1.
+    // Money KPIs are not wired in V1 (no in-DB cost snapshot).
     adSpend: null,
     attributedRevenue: null,
     roas: null,
@@ -278,8 +255,10 @@ export async function getGadsLandingPages(
       const assignments = asInt(r.assignments)
       const impressions = asInt(r.impressions)
       const redirects = asInt(r.redirects)
-      const conversions = asInt(r.conversions)
-      const avgBps = asNum(r.avg_served_probability_bps)
+      const conversions = asInt(r.conversions_30d)
+      const sumBps = asInt(r.sum_served_prob_bps)
+      const withProb = asInt(r.assignments_with_prob)
+      const avgBps = withProb > 0 ? sumBps / withProb : null
       return {
         site: r.site,
         family: r.family,
@@ -299,10 +278,10 @@ export async function getGadsLandingPages(
       }
     })
 
-  const dqRow = dqResult.rows[0]
+  const stateRow = stateResult.rows[0]
   const dataQuality: GadsDataQuality = {
-    assignmentsMissingId: asInt(dqRow?.assignments_missing_id),
-    unattributedStageEvents: asInt(dqRow?.unattributed_stage_events),
+    assignmentsMissingId: asInt(stateRow?.assignments_missing_id),
+    unattributedStageEvents: asInt(stateRow?.unattributed_stage_events),
     lowSampleThreshold: GADS_LANDING_PAGES_LOW_SAMPLE_THRESHOLD,
   }
 
@@ -311,7 +290,7 @@ export async function getGadsLandingPages(
     range: { from: from.toISOString(), to: to.toISOString() },
     generatedAt: now.toISOString(),
     sites,
-    attributionStatus: 'not-wired',
+    attributionStatus,
     kpis,
     funnel,
     variants,

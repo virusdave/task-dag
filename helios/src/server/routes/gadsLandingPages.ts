@@ -14,8 +14,9 @@ export async function registerGadsLandingPagesRoutes(
   // GET /api/gads/landing-pages?site=&from=&to=&family=&experimentId=
   //
   // One consolidated endpoint powering the per-site
-  // /metrics/gads-<site>/landing-pages surface. Reads lp_events
-  // directly (see gadsLandingPagesQueries.ts) and returns KPI strip +
+  // /metrics/gads-<site>/landing-pages surface. Reads ONLY the
+  // out-of-band gads_lp_rollup + refresh-state row (never raw
+  // lp_events; see gadsLandingPagesQueries.ts) and returns KPI strip +
   // funnel + variant table + data-quality in one round-trip.
   //
   // Access: gated per-scope via requiredGadsGrants() — site=bronx

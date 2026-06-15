@@ -14,17 +14,20 @@ import { GADS_SCOPES, type GadsScope } from '../../domain/gadsSites.js'
 // attribution status in a single payload so the page makes ONE
 // backend round-trip (no MetricChart fan-out).
 //
-// V1 is "observed performance" only, computed directly from the
-// append-only `lp_events` sink (migration 070) with assignment-cohort
-// semantics: we anchor on the `lp_assignment` event whose `event_ts`
-// falls in [from, to), then observe whether that assignment later
-// reached impression / redirect / conversion stages. All counts are
-// assignment-level uniques, never raw event counts.
+// V1 is "observed performance" only. The serving path reads ONLY the
+// out-of-band `gads_lp_rollup` day-grain table + its refresh-state row
+// (migration 087/088), recomputed from the append-only `lp_events` sink
+// by a ~60-min worker job — never raw lp_events on the request path
+// (parent §3 + the operator's DB-cost steer, epic #11). Assignment-cohort
+// semantics are baked into the rollup: counts are assignment-level uniques
+// bucketed by the assignment's NY-local day; "converted" uses the 30-day
+// assignment-time attribution window.
 //
 // Cost / revenue / ROAS / CPA are NOT wired in V1 (the operator's
-// guidance: this is not an accounting system). The server returns
-// them as `null` with `attributionStatus: 'not-wired'` and the UI
-// renders explicit "pending" badges rather than misleading zeros.
+// guidance: this is not an accounting system). The server returns them as
+// `null` with `attributionStatus: 'not-wired'`; the UI must render them as
+// "Unavailable" (not a fake "pending" number), per the second Oracle
+// review.
 // ---------------------------------------------------------------------------
 
 // ============================ Request schema ===============================
@@ -137,11 +140,14 @@ export type GadsVariantRow = z.infer<typeof GadsVariantRowSchema>
 // ============================ Data quality =================================
 
 export const GadsDataQualitySchema = z.object({
-  /** lp_assignment events in window with a null assignment_id (dropped
-   *  from the cohort — cannot be attributed). */
+  /** lp_assignment events with a null assignment_id (dropped from the
+   *  cohort — cannot be attributed). As-of-last-refresh, over the rollup
+   *  recompute horizon (not per-request-window); recorded by the refresh
+   *  job so the serving path never scans lp_events. */
   assignmentsMissingId: z.number().int().nonnegative(),
-  /** Later-stage events (impression/redirect/conversion) seen in
-   *  window with a null assignment_id (unattributable). */
+  /** Later-stage events (impression/redirect/conversion) with a null
+   *  assignment_id (unattributable). Same as-of-last-refresh,
+   *  horizon-scoped snapshot as assignmentsMissingId. */
   unattributedStageEvents: z.number().int().nonnegative(),
   /** The low-sample assignment threshold applied to variant rows. */
   lowSampleThreshold: z.number().int().positive(),

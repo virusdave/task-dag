@@ -69,6 +69,15 @@ export interface GadsLpRollupRefreshResult {
   readonly horizonFloor: string
   readonly sourceMinAt: string | null
   readonly sourceMaxAt: string | null
+  /**
+   * Data-quality counters, computed in the same pass over `lp_events`
+   * and recorded onto the refresh-state row so the serving endpoint (P3)
+   * can surface them WITHOUT reading lp_events itself. Both are an
+   * as-of-this-refresh, horizon-bounded snapshot (event_ts within the
+   * recompute horizon), not per-request-window figures.
+   */
+  readonly assignmentsMissingId: number
+  readonly unattributedStageEvents: number
 }
 
 /**
@@ -193,11 +202,33 @@ export async function refreshGadsLpRollup(
          from lp_events`,
     )
 
+    // Data-quality counters over the recompute horizon (by event_ts), so
+    // the serving endpoint can report them from the refresh-state row and
+    // never has to scan lp_events itself (P3). Cheap, bounded count.
+    const dqRes = await client.query<{
+      assignments_missing_id: string
+      unattributed_stage_events: string
+    }>(
+      `select
+         count(*) filter (
+           where event_type = 'lp_assignment' and assignment_id is null
+         )::bigint as assignments_missing_id,
+         count(*) filter (
+           where event_type in ('lp_impression', 'lp_redirect', 'lp_conversion')
+             and assignment_id is null
+         )::bigint as unattributed_stage_events
+       from lp_events
+       where event_ts >= now() - make_interval(days => $1::int)`,
+      [horizonDays],
+    )
+
     return {
       rowsWritten: insertRes.rowCount ?? 0,
       horizonFloor,
       sourceMinAt: spanRes.rows[0]?.source_min_at ?? null,
       sourceMaxAt: spanRes.rows[0]?.source_max_at ?? null,
+      assignmentsMissingId: Number(dqRes.rows[0]?.assignments_missing_id ?? 0),
+      unattributedStageEvents: Number(dqRes.rows[0]?.unattributed_stage_events ?? 0),
     }
   })
 }
@@ -223,10 +254,18 @@ export async function markGadsLpRollupRefreshOk(
             source_min_at = $1::timestamptz,
             source_max_at = $2::timestamptz,
             rows_written = $3::int,
+            assignments_missing_id = $4::int,
+            unattributed_stage_events = $5::int,
             error_message = null,
             updated_at = now()
       where id = 'singleton'`,
-    [result.sourceMinAt, result.sourceMaxAt, result.rowsWritten],
+    [
+      result.sourceMinAt,
+      result.sourceMaxAt,
+      result.rowsWritten,
+      result.assignmentsMissingId,
+      result.unattributedStageEvents,
+    ],
   )
 }
 
