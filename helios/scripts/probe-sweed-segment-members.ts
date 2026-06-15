@@ -1,102 +1,36 @@
-// Probe `store.marketing.segment.get { id }` to verify the BULK
-// segment-member response shape before we trust the fail-closed parser
-// in src/worker/sweed/customers.ts (getSweedMarketingSegmentMembers).
+// Dump one page of a marketing segment's member list via the verified
+// `store.marketing.segment.result.list` RPC (the "result" family —
+// sibling of the verified `store.marketing.segment.result.add`). Use to
+// spot-check membership / re-confirm the response shape the parser in
+// src/worker/sweed/customers.ts (parseSegmentResultPage) depends on.
 //
-// The operator gave us the call shape but the segment was empty at
-// authoring time, so we don't yet know:
-//   1. Under what key the member array lives (customers / clients /
-//      members / data / segment.customers / bare array …).
-//   2. The per-member customer-id field name (id / customerId /
-//      clientId / customer.id …).
-//   3. Whether members carry `enabled` / `dateOnEnter`.
-//   4. Whether the call must be pinned to the segment's owning dealer.
+// NOTE: `store.marketing.segment.get { id }` is NOT the member list — it
+// returns the segment DEFINITION (rule `ruleData`, type, totalCustomers).
 //
-// Run (against a POPULATED segment):
+// Run:
 //   cd helios && npx tsx scripts/probe-sweed-segment-members.ts <segmentId> [dealerId]
+// State (NY) segments are visible from the state dealer 210248 (default).
 //
-// Dumps the redacted envelope + first few members so we can tighten the
-// parser. REDACTS PII aggressively — segment member rows may contain
-// names / phones / emails / addresses / DOB.
+// REDACTS PII aggressively — member rows carry name / DOB / contact.
 
 import { withSweedSession } from '../src/worker/sweed/session.js'
 import { callSweedRpc } from '../src/worker/sweed/rpc.js'
-import { HELIOS_PENDING_PURCHASE_SITE_DEALERS } from '../src/shared/contracts/domain/pendingPurchases.js'
 
-const MAX_MEMBERS = 3
+const STATE_DEALER = 210248
+const PAGE_SIZE = 5
 const PII_KEY = /name|phone|email|mail|address|birth|dob|ssn|license|document|zip|postal|street|city/i
 
-function redactValue(key: string, value: unknown): unknown {
-  if (PII_KEY.test(key)) return '«redacted»'
-  if (value !== null && typeof value === 'object') return '«object»'
-  return value
-}
-
-function summariseMember(m: unknown): Record<string, unknown> {
-  if (m === null || typeof m !== 'object') return { __scalar: m }
-  const o = m as Record<string, unknown>
-  const out: Record<string, unknown> = {}
-  for (const k of Object.keys(o)) out[k] = redactValue(k, o[k])
-  return out
-}
-
-function findArrays(root: unknown): string[] {
-  if (root === null || typeof root !== 'object') return []
-  const o = root as Record<string, unknown>
-  const paths: string[] = []
-  for (const k of Object.keys(o)) {
-    if (Array.isArray(o[k])) paths.push(`${k} (len=${(o[k] as unknown[]).length})`)
-    else if (o[k] !== null && typeof o[k] === 'object') {
-      const inner = o[k] as Record<string, unknown>
-      for (const k2 of Object.keys(inner)) {
-        if (Array.isArray(inner[k2])) paths.push(`${k}.${k2} (len=${(inner[k2] as unknown[]).length})`)
-      }
+function redact(o: unknown): unknown {
+  if (Array.isArray(o)) return o.slice(0, 3).map(redact)
+  if (o !== null && typeof o === 'object') {
+    const r: Record<string, unknown> = {}
+    for (const k of Object.keys(o as Record<string, unknown>)) {
+      const v = (o as Record<string, unknown>)[k]
+      r[k] = PII_KEY.test(k) ? '«redacted»' : v !== null && typeof v === 'object' ? redact(v) : v
     }
+    return r
   }
-  return paths
-}
-
-async function probeSegment(segmentId: string, dealerId: number, dealerName: string): Promise<void> {
-  console.log(`\n=== segment ${segmentId} @ dealer ${dealerId} (${dealerName}) ===`)
-  let raw: unknown
-  try {
-    raw = await callSweedRpc<unknown>(dealerId, 'store.marketing.segment.get', { id: segmentId })
-  } catch (err) {
-    console.error(`  call failed: ${err instanceof Error ? err.message : String(err)}`)
-    return
-  }
-
-  if (Array.isArray(raw)) {
-    console.log(`  response is a BARE ARRAY, length=${raw.length}`)
-    console.log(`  first ${MAX_MEMBERS} members:`)
-    for (const m of raw.slice(0, MAX_MEMBERS)) console.log('   ', JSON.stringify(summariseMember(m)))
-    return
-  }
-  if (raw === null || typeof raw !== 'object') {
-    console.log(`  response is a scalar: ${JSON.stringify(raw)}`)
-    return
-  }
-  const o = raw as Record<string, unknown>
-  console.log(`  top-level keys: ${Object.keys(o).join(', ')}`)
-  console.log(`  scalar header (redacted):`)
-  for (const k of Object.keys(o)) {
-    if (o[k] === null || typeof o[k] !== 'object') console.log(`    ${k} = ${JSON.stringify(redactValue(k, o[k]))}`)
-  }
-  const arrayPaths = findArrays(o)
-  console.log(`  array-valued paths (member-list candidates): ${arrayPaths.length ? arrayPaths.join(' | ') : '(none found!)'}`)
-
-  // Dump first few rows of the largest array path.
-  let bestKey: string | null = null
-  let bestArr: unknown[] = []
-  for (const k of Object.keys(o)) {
-    if (Array.isArray(o[k]) && (o[k] as unknown[]).length >= bestArr.length) {
-      bestKey = k
-      bestArr = o[k] as unknown[]
-    }
-  }
-  if (bestKey && bestArr.length > 0) {
-    console.log(`  sample members from "${bestKey}" (first ${MAX_MEMBERS}, redacted):`)
-    for (const m of bestArr.slice(0, MAX_MEMBERS)) console.log('   ', JSON.stringify(summariseMember(m)))
-  }
+  return o
 }
 
 async function main(): Promise<void> {
@@ -105,21 +39,23 @@ async function main(): Promise<void> {
     console.error('usage: npx tsx scripts/probe-sweed-segment-members.ts <segmentId> [dealerId]')
     process.exit(2)
   }
-  const dealerArg = process.argv[3] ? Number(process.argv[3]) : null
+  const dealerId = process.argv[3] ? Number(process.argv[3]) : STATE_DEALER
+
   await withSweedSession(async () => {
-    if (dealerArg) {
-      await probeSegment(segmentId, dealerArg, 'explicit')
-      return
-    }
-    // No dealer given — try each site dealer so we learn whether the
-    // segment is visible from a specific store context.
-    for (const dealer of HELIOS_PENDING_PURCHASE_SITE_DEALERS) {
-      try {
-        await probeSegment(segmentId, dealer.dealerId, dealer.dealerName)
-      } catch (err) {
-        console.error(`[probe] dealer ${dealer.dealerId} failed:`, err)
-      }
-    }
+    console.log(`\n=== segment ${segmentId} members @ dealer ${dealerId} (page 1, pageSize ${PAGE_SIZE}) ===`)
+    const raw = await callSweedRpc<unknown>(dealerId, 'store.marketing.segment.result.list', {
+      id: segmentId,
+      page: 1,
+      pageSize: PAGE_SIZE,
+    })
+    const o = raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, unknown>) : null
+    console.log(`  top-level keys: ${o ? Object.keys(o).join(', ') : typeof raw}`)
+    const customers = o?.customers as Record<string, unknown> | undefined
+    console.log(`  total=${o?.total}  customers.totalCount=${customers?.totalCount}`)
+    const data = Array.isArray(customers?.data) ? (customers!.data as unknown[]) : []
+    console.log(`  customers.data length (this page): ${data.length}`)
+    console.log(`  sample members (redacted):`)
+    for (const m of data.slice(0, 3)) console.log('   ', JSON.stringify(redact(m)))
   })
 }
 

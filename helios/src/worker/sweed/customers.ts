@@ -554,81 +554,51 @@ export async function listSweedMarketingSegmentsCatalogForDealers(args: {
 }
 
 // =====================================================================
-// store.marketing.segment.get — BULK read a segment's member list
+// store.marketing.segment.result.list — BULK read a segment's members
 // =====================================================================
 //
 // The inverse of `store.customer.segment.list`: instead of one RPC per
-// customer to learn that customer's segments, this is ONE RPC per
-// SEGMENT that returns every customer in it. That makes whole-segment
-// membership population O(#segments) Sweed calls instead of
-// O(#customers) — the only affordable way to keep the membership cache
-// COMPLETE (the per-customer path only ever covers customers we
-// happened to link). Operator-supplied call shape:
-//   {"name":"store.marketing.segment.get","params":{"id":"10282"}}
+// customer to learn that customer's segments, this returns every
+// customer IN a segment (paginated), so whole-segment membership
+// population is O(#segments × pages) Sweed calls instead of
+// O(#customers) — the only affordable way to keep the cache COMPLETE.
 //
-// NEEDS_OPERATOR_VERIFICATION: the segment used to derive this parser
-// was empty at authoring time, so the exact member-array path and the
-// per-member customer-id field name are NOT yet confirmed against a
-// populated segment. Run `scripts/probe-sweed-segment-members.ts
-// <segmentId>` against a populated segment to confirm, then tighten
-// the candidate paths/fields below. The parser is deliberately
-// FAIL-CLOSED: it throws on an unrecognised envelope rather than
-// returning `[]`, so a bulk snapshot can never delete a segment's
-// membership and re-insert zero rows just because the shape drifted.
-export const SWEED_RPC_MARKETING_SEGMENT_GET = 'store.marketing.segment.get'
+// IMPORTANT: `store.marketing.segment.get { id }` is NOT the member
+// list — it returns the segment DEFINITION (rule `ruleData`, type,
+// `totalCustomers`, etc.). The member list is the "result" family,
+// sibling of the verified add RPC `store.marketing.segment.result.add`.
+//
+// VERIFIED (live probe, segment 1532 @ state dealer 210248, 2026-06):
+//   store.marketing.segment.result.list { id, page, pageSize } returns
+//   { total, withEmail, withPhone, lastUpdated,
+//     customers: { page, pageSize, totalCount,
+//                  data: [ { customerId: "<str>", customerName,
+//                            dateOfBirth, age, dateOnEnter,
+//                            genderType?, hasEmail, hasPhone }, … ] } }
+//   `customerId` is a STRING; `dateOnEnter` is the join timestamp. The
+//   call works for DYNAMIC (rule) segments too — Sweed materialises the
+//   result set. Other guesses (segment.result.get / segment.customer.
+//   list / segment.member.list) all return "Action is not available".
+//
+// We pull ONLY the join key (+ dateOnEnter); name/DOB/contact are PII we
+// neither need nor cache. The page parser is FAIL-CLOSED: it throws on
+// an unrecognised envelope so a bulk snapshot can never wipe a
+// segment's membership and re-insert zero rows from a shape drift.
+export const SWEED_RPC_SEGMENT_RESULT_LIST = 'store.marketing.segment.result.list'
 
 export interface SweedSegmentMember {
   /** Sweed customer id (the join key into `sweed_customer_segments`). */
   customerId: number
-  /** Per-member enabled flag if the RPC exposes one, else null. */
-  enabled: boolean | null
   /** When the customer entered the segment, if exposed, else null. */
   dateOnEnter: string | null
 }
 
-/** Candidate envelope paths the member array might live under. */
-const SEGMENT_MEMBER_ARRAY_PATHS: ReadonlyArray<ReadonlyArray<string>> = [
-  ['customers'],
-  ['clients'],
-  ['members'],
-  ['data'],
-  ['segment', 'customers'],
-  ['segment', 'clients'],
-  ['segment', 'members'],
-]
-
-function pickArrayAtPath(root: unknown, path: ReadonlyArray<string>): unknown[] | null {
-  let cur: unknown = root
-  for (const key of path) {
-    if (cur === null || typeof cur !== 'object') return null
-    cur = (cur as Record<string, unknown>)[key]
-  }
-  return Array.isArray(cur) ? cur : null
-}
-
-function extractMemberCustomerId(raw: unknown): number | null {
-  if (raw === null || typeof raw !== 'object') {
-    // A bare scalar id is plausible for a thin member list.
-    const n = Number(raw)
-    return Number.isFinite(n) && n > 0 ? n : null
-  }
-  const o = raw as Record<string, unknown>
-  const candidates: unknown[] = [
-    o.customerId,
-    o.clientId,
-    o.id,
-    (o.customer as Record<string, unknown> | undefined)?.id,
-    (o.client as Record<string, unknown> | undefined)?.id,
-  ]
-  for (const c of candidates) {
-    const n = Number(c)
-    if (Number.isFinite(n) && n > 0) return n
-  }
-  return null
-}
-
-function coerceBoolOrNull(v: unknown): boolean | null {
-  return typeof v === 'boolean' ? v : null
+interface SegmentResultPage {
+  members: SweedSegmentMember[]
+  /** Total members across all pages, if the envelope reports it. */
+  totalCount: number | null
+  /** Members on THIS page before dedup (drives the paginate-until). */
+  pageRowCount: number
 }
 
 function coerceStrOrNull(v: unknown): string | null {
@@ -636,85 +606,96 @@ function coerceStrOrNull(v: unknown): string | null {
 }
 
 /**
+ * Pure FAIL-CLOSED parser for ONE page of a
+ * `store.marketing.segment.result.list` response. Exported for unit
+ * testing. Throws on an unrecognised envelope; returns an empty page
+ * (members: []) only when the recognised `customers.data` array is
+ * present and empty, or `customers.totalCount` / top-level `total` is 0.
+ */
+export function parseSegmentResultPage(raw: unknown, segmentId: number): SegmentResultPage {
+  const root = raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, unknown>) : null
+  const customers =
+    root && root.customers && typeof root.customers === 'object'
+      ? (root.customers as Record<string, unknown>)
+      : null
+
+  // The verified path is `customers.data`. Tolerate a bare top-level
+  // `data` array as a defensive fallback.
+  let data: unknown[] | null = Array.isArray(customers?.data)
+    ? (customers!.data as unknown[])
+    : Array.isArray(root?.data)
+      ? (root!.data as unknown[])
+      : null
+
+  const totalCount =
+    Number.isFinite(Number(customers?.totalCount))
+      ? Number(customers!.totalCount)
+      : Number.isFinite(Number(root?.total))
+        ? Number(root!.total)
+        : null
+
+  if (data === null) {
+    // No recognised member array: only treat an explicit zero count as a
+    // genuinely empty segment; otherwise fail closed.
+    if (totalCount === 0) return { members: [], totalCount: 0, pageRowCount: 0 }
+    throw new Error(
+      `store.marketing.segment.result.list { id: ${segmentId} } returned an unrecognised shape ` +
+        `(top-level keys: ${root ? Object.keys(root).join(',') : typeof raw}). ` +
+        `Run scripts/probe-sweed-segment-members.ts ${segmentId} and update parseSegmentResultPage.`,
+    )
+  }
+
+  const members: SweedSegmentMember[] = []
+  for (const row of data) {
+    if (row === null || typeof row !== 'object') continue
+    const r = row as Record<string, unknown>
+    const customerId = Number(r.customerId)
+    if (!Number.isFinite(customerId) || customerId <= 0) continue
+    members.push({ customerId, dateOnEnter: coerceStrOrNull(r.dateOnEnter) })
+  }
+
+  // A non-empty page that yielded zero parseable ids means the member-id
+  // field name drifted — fail closed rather than under-count a segment.
+  if (members.length === 0 && data.length > 0) {
+    throw new Error(
+      `store.marketing.segment.result.list { id: ${segmentId} } returned ${data.length} ` +
+        `member rows but none had a parseable customerId. ` +
+        `Run scripts/probe-sweed-segment-members.ts ${segmentId} and update parseSegmentResultPage.`,
+    )
+  }
+  return { members, totalCount, pageRowCount: data.length }
+}
+
+/**
  * BULK-read every customer in one marketing segment via
- * `store.marketing.segment.get { id }`. FAIL-CLOSED: throws if the
- * response envelope is unrecognised (so callers never mistake a parse
- * miss for an empty segment). Returns `[]` ONLY when a recognised
- * member array is present and empty, or an explicit `totalCount: 0` /
- * `totalCustomers: 0` says the segment is empty. Caller MUST be inside
- * a `withSweedSession` block. `dealerId` should be the segment's owning
- * (scope) dealer.
+ * `store.marketing.segment.result.list`, paginating until exhausted.
+ * Dedups by customer id. Caller MUST be inside a `withSweedSession`
+ * block. `dealerId` should be the segment's owning (scope) dealer
+ * (state segments are visible from the state dealer 210248).
  */
 export async function getSweedMarketingSegmentMembers(args: {
   dealerId: number
   segmentId: number
 }): Promise<SweedSegmentMember[]> {
-  const raw = await callSweedRpc<unknown>(args.dealerId, SWEED_RPC_MARKETING_SEGMENT_GET, {
-    id: String(args.segmentId),
-  })
-  return parseSegmentMembersResponse(raw, args.segmentId)
-}
-
-/**
- * Pure FAIL-CLOSED parser for a `store.marketing.segment.get` response.
- * Exported for unit testing (the live shape is not yet
- * operator-verified). Throws on an unrecognised envelope; returns `[]`
- * only for a recognised-but-empty member array or an explicit
- * zero-count envelope.
- */
-export function parseSegmentMembersResponse(raw: unknown, segmentId: number): SweedSegmentMember[] {
-  // A bare-array response is the simplest recognised shape.
-  let memberArray: unknown[] | null = Array.isArray(raw) ? raw : null
-  if (memberArray === null) {
-    for (const path of SEGMENT_MEMBER_ARRAY_PATHS) {
-      const found = pickArrayAtPath(raw, path)
-      if (found !== null) {
-        memberArray = found
-        break
-      }
-    }
-  }
-
-  if (memberArray === null) {
-    // No recognised member array. Treat an explicit zero-count envelope
-    // as a genuinely empty segment; otherwise fail closed.
-    const o = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : null
-    const seg = o && typeof o.segment === 'object' ? (o.segment as Record<string, unknown>) : o
-    const zeroCount =
-      Number(o?.totalCount) === 0 ||
-      Number(o?.totalCustomers) === 0 ||
-      Number(seg?.totalCustomers) === 0 ||
-      Number(seg?.totalCount) === 0
-    if (zeroCount) return []
-    throw new Error(
-      `store.marketing.segment.get { id: ${segmentId} } returned an unrecognised shape ` +
-        `(top-level keys: ${o ? Object.keys(o).join(',') : typeof raw}). ` +
-        `Run scripts/probe-sweed-segment-members.ts ${segmentId} and update the parser.`,
-    )
-  }
-
+  const pageSize = 500
   const out: SweedSegmentMember[] = []
   const seen = new Set<number>()
-  for (const m of memberArray) {
-    const customerId = extractMemberCustomerId(m)
-    if (customerId === null || seen.has(customerId)) continue
-    seen.add(customerId)
-    const mo = m && typeof m === 'object' ? (m as Record<string, unknown>) : {}
-    out.push({
-      customerId,
-      enabled: coerceBoolOrNull(mo.enabled),
-      dateOnEnter: coerceStrOrNull(mo.dateOnEnter),
+  for (let page = 1; page <= 1000; page++) {
+    const raw = await callSweedRpc<unknown>(args.dealerId, SWEED_RPC_SEGMENT_RESULT_LIST, {
+      id: String(args.segmentId),
+      page,
+      pageSize,
     })
-  }
-  // A non-empty member array that yielded zero parseable ids means the
-  // member-id field name drifted — fail closed rather than wipe a
-  // segment's membership.
-  if (out.length === 0 && memberArray.length > 0) {
-    throw new Error(
-      `store.marketing.segment.get { id: ${segmentId} } returned ${memberArray.length} ` +
-        `member rows but none had a parseable customer id. ` +
-        `Run scripts/probe-sweed-segment-members.ts ${segmentId} and update extractMemberCustomerId.`,
-    )
+    const parsed = parseSegmentResultPage(raw, args.segmentId)
+    for (const m of parsed.members) {
+      if (seen.has(m.customerId)) continue
+      seen.add(m.customerId)
+      out.push(m)
+    }
+    // Stop when this page was short (last page) or we've collected the
+    // full reported total.
+    if (parsed.pageRowCount < pageSize) break
+    if (parsed.totalCount != null && out.length >= parsed.totalCount) break
   }
   return out
 }

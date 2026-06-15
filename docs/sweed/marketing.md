@@ -513,28 +513,46 @@ owning scope (`210248` = state/all-stores, `210705` = Midtown,
 `210249` = Bronx). One RPC PER CUSTOMER, so this is the
 on-demand / details-page path only — it never gives complete coverage.
 
-### `store.marketing.segment.get { id }` — one segment → ALL its members (BULK)
+### `store.marketing.segment.get { id }` — one segment → its DEFINITION
 
-The efficient inverse: ONE RPC returns every customer in a segment.
-This is how Helios populates membership COMPLETELY (O(#segments) RPCs
-instead of O(#customers)) —
+Returns the segment's metadata + rule, NOT its members:
+`{ id, name, type, enabled, ruleData, distributionLevel, accountForType,
+stores, totalCustomers, targetStoreNames }`. `ruleData` is base64 JSON —
+the dynamic-segment rule (e.g. `customer.ticketsOnline = 0 AND
+customer.hasAccount = 1`). Use this for segment metadata / sizing
+(`totalCustomers`), not membership.
+
+### `store.marketing.segment.result.list { id, page, pageSize }` — one segment → ALL its members (BULK)
+
+The efficient inverse: paginated, returns every customer IN a segment
+(works for DYNAMIC rule segments too — Sweed materialises the result
+set). This is how Helios populates membership COMPLETELY
+(O(#segments × pages) RPCs instead of O(#customers)) —
 `getSweedMarketingSegmentMembers` → `snapshotSegmentMembers` →
 `refreshSegmentMembershipBulk` →
 [`scripts/refresh-segment-members-bulk.ts`](../../helios/scripts/refresh-segment-members-bulk.ts)
-(dry-run by default). Operator-supplied call shape:
+(dry-run by default). It is the "result" family — sibling of the
+verified add RPC `store.marketing.segment.result.add`.
 
-```json
-{"name":"store.marketing.segment.get","params":{"id":"10282"}}
+VERIFIED shape (live probe, segment 1532 @ state dealer 210248):
+
+```jsonc
+{ "total": 1412, "withEmail": …, "withPhone": …, "lastUpdated": "…",
+  "customers": { "page": 1, "pageSize": 500, "totalCount": 1412,
+    "data": [ { "customerId": "404200",  // STRING
+                "customerName": "…", "dateOfBirth": "…", "age": 36,
+                "dateOnEnter": "2025-07-15T12:34:56Z",
+                "genderType": {…}, "hasEmail": …, "hasPhone": … }, … ] } }
 ```
 
-NEEDS_OPERATOR_VERIFICATION: the exact member-array key and per-member
-customer-id field name are not yet confirmed (the seed segment was
-empty). Run
-[`scripts/probe-sweed-segment-members.ts`](../../helios/scripts/probe-sweed-segment-members.ts)
-`<segmentId>` against a POPULATED segment to confirm, then tighten the
-fail-closed parser in `customers.ts`. The parser throws on an
+Helios caches only `customerId` + `dateOnEnter` (the rest is PII).
+Sibling guesses (`segment.result.get`, `segment.customer.list`,
+`segment.member.list`) all return "Action is not available". The page
+parser (`parseSegmentResultPage`) is fail-closed — it throws on an
 unrecognised envelope so a bulk snapshot can never wipe a segment's
-membership from a parse miss.
+membership from a parse miss. Spot-check with
+[`scripts/probe-sweed-segment-members.ts`](../../helios/scripts/probe-sweed-segment-members.ts)
+`<segmentId> [dealerId]`.
 
 ---
 

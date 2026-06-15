@@ -33,20 +33,25 @@
 
 ## 2. Hard facts that constrain the design (verified in code)
 
-1. **Segment membership coverage — solved by BULK `store.marketing.segment.get`.**
+1. **Segment membership coverage — solved by BULK `store.marketing.segment.result.list`.**
    Membership was originally cached per-customer via
    `store.customer.segment.list { id }` (one RPC per customer → only
-   covers customers we happened to link). The efficient inverse exists:
-   `store.marketing.segment.get { id: <segmentId> }` returns the FULL
-   member list of a segment in ONE call. So whole-cache population is
-   O(#segments) RPCs, not O(#customers). Implemented as
-   `getSweedMarketingSegmentMembers` + `snapshotSegmentMembers` (bulk,
-   authoritative per-segment replace) + `refreshSegmentMembershipBulk` +
+   covers customers we happened to link). The efficient inverse is the
+   "result" family (sibling of the verified add RPC
+   `store.marketing.segment.result.add`):
+   `store.marketing.segment.result.list { id, page, pageSize }` returns a
+   segment's full member list, paginated, **for dynamic rule segments
+   too** (Sweed materialises the result set). So whole-cache population
+   is O(#segments × pages) RPCs, not O(#customers). (Note: plain
+   `store.marketing.segment.get { id }` returns the segment DEFINITION /
+   `ruleData` / `totalCustomers`, NOT members.) Implemented as
+   `getSweedMarketingSegmentMembers` (paginating) + `parseSegmentResultPage`
+   (fail-closed) + `snapshotSegmentMembers` (bulk, authoritative
+   per-segment replace) + `refreshSegmentMembershipBulk` +
    `scripts/refresh-segment-members-bulk.ts` (dry-run by default).
-   STATUS: the response shape is not yet operator-verified (the seed
-   segment was empty), so the parser is **fail-closed** and the bulk job
-   is **manual/script-triggered, not auto-scheduled**, until
-   `scripts/probe-sweed-segment-members.ts <id>` confirms the shape.
+   VERIFIED live against segment 1532 (1412 members pulled). STATUS: the
+   bulk job is **operator/script-triggered, not auto-scheduled**, so the
+   operator controls when membership is (re)populated.
    Write-model rule: bulk-by-segment is the authoritative deleter; the
    per-customer details-page refresh is a positive overlay (must become
    delete-free once bulk is the primary populate path).

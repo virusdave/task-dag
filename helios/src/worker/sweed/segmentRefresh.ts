@@ -170,7 +170,10 @@ export async function refreshSegmentMembershipBulk(args: {
           scopeDealerName: null,
           members: members.map((m) => ({
             customerId: m.customerId,
-            enabled: m.enabled,
+            // segment.result.list has no per-member enabled flag —
+            // membership is presence. Carry the segment's own enabled
+            // state so the cached rows reflect whether the segment is live.
+            enabled: seg.enabled,
             dateOnEnter: m.dateOnEnter,
           })),
         })

@@ -158,15 +158,17 @@ marketing segments (virusdave/top-level#12 / FreshlyBakedNYC/automation#40):
     RPC per customer, pulled on link / manual details-page refresh.
     Covers only linked customers (incomplete on its own).
   - *Bulk per-segment (authoritative, complete):*
-    `store.marketing.segment.get { id }` returns a whole segment's
-    member list in ONE call. Implemented as
-    `getSweedMarketingSegmentMembers` →
+    `store.marketing.segment.result.list { id, page, pageSize }` returns a
+    whole segment's member list (paginated; works for dynamic rule
+    segments too). Implemented as `getSweedMarketingSegmentMembers`
+    (paginating) + `parseSegmentResultPage` (fail-closed) →
     `snapshotSegmentMembers` (delete/replace by `segment_id`) via
     `refreshSegmentMembershipBulk` /
     `scripts/refresh-segment-members-bulk.ts` (dry-run by default).
-    Manual/script-triggered until `scripts/probe-sweed-segment-members.ts`
-    confirms the response shape (parser is fail-closed). This is the
-    coverage solution; bulk-by-segment is the authoritative deleter.
+    VERIFIED live (segment 1532, 1412 members). Operator/script-triggered;
+    bulk-by-segment is the authoritative deleter. NB: plain
+    `store.marketing.segment.get { id }` returns the segment DEFINITION
+    (`ruleData` / `totalCustomers`), not members.
 - Segment RPC reference: [`../sweed/marketing.md`](../sweed/marketing.md).
 
 See the [segmentation epic plan](../helios/customer-segmentation/EPIC_PLAN.md)
