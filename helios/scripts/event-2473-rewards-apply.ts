@@ -41,7 +41,7 @@ const LOGO_URL =
 const CTA_URL = 'https://freshlybaked.nyc/'
 
 const PREHEADER =
-  'Our rewards program just leveled up — earn points, perks and discounts faster across four new tiers.'
+  'Our rewards program just leveled up. Earn points, perks and discounts faster across four new tiers.'
 
 // Mandatory compliance footer, cribbed verbatim from recent site-level
 // marketing emails (Midtown event 1890 / Bronx 420 events). Because 2473
@@ -157,7 +157,7 @@ const EMAIL_HTML = `<!doctype html>
         name: 'Baked Out',
         highlight: false,
         rows: `<li style="margin:0 0 6px 0;"><strong style="color:#f7eee8;">How to join:</strong> Opt in with your phone number or email address.</li>
-                <li style="margin:0;"><strong style="color:#f7eee8;">Your benefits:</strong> Earn <strong style="color:#e8b265;">1 point for every $1 spent</strong> (1% back) on all purchases — previously the only level in our program.</li>`,
+                <li style="margin:0;"><strong style="color:#f7eee8;">Your benefits:</strong> Earn <strong style="color:#e8b265;">1 point for every $1 spent</strong> (1% back) on all purchases; previously the only level in our program.</li>`,
       })}
       ${tierCardHtml({
         num: '2',
@@ -333,7 +333,7 @@ const EMAIL_DESIGN = {
           '1',
           'Baked Out',
           false,
-          '<li style="margin:0 0 6px 0;"><strong style="color:#f7eee8;">How to join:</strong> Opt in with your phone number or email address.</li><li style="margin:0;"><strong style="color:#f7eee8;">Your benefits:</strong> Earn <strong style="color:#e8b265;">1 point for every $1 spent</strong> (1% back) on all purchases — previously the only level in our program.</li>',
+          '<li style="margin:0 0 6px 0;"><strong style="color:#f7eee8;">How to join:</strong> Opt in with your phone number or email address.</li><li style="margin:0;"><strong style="color:#f7eee8;">Your benefits:</strong> Earn <strong style="color:#e8b265;">1 point for every $1 spent</strong> (1% back) on all purchases; previously the only level in our program.</li>',
         ),
       ]),
       col([
