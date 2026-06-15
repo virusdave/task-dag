@@ -71,6 +71,9 @@ function ratio(numer: number, denom: number): number | null {
 export async function getCrmSegmentList(
   db: Queryable,
 ): Promise<CrmSegmentListResponse> {
+  // NOTE: sweed_marketing_segments carries scope_dealer_id but NOT a
+  // scope_dealer_name (that column lives on sweed_customer_segments). Pass a
+  // null name to scopeOf — state-level scopes fall back to "All stores".
   const res = await db.query<{
     segment_id: string | number
     segment_name: string | null
@@ -78,7 +81,6 @@ export async function getCrmSegmentList(
     enabled: boolean | null
     total_customers: number | null
     scope_dealer_id: string | number | null
-    scope_dealer_name: string | null
     cached_member_count: number
   }>(
     `select c.segment_id,
@@ -87,7 +89,6 @@ export async function getCrmSegmentList(
             c.enabled,
             c.total_customers,
             c.scope_dealer_id,
-            nullif(c.scope_dealer_name, '') as scope_dealer_name,
             coalesce(m.cnt, 0)::int as cached_member_count
        from sweed_marketing_segments c
        left join (
@@ -102,7 +103,7 @@ export async function getCrmSegmentList(
     segments: res.rows.map((r) => {
       const scope = scopeOf(
         r.scope_dealer_id === null ? null : Number(r.scope_dealer_id),
-        r.scope_dealer_name,
+        null,
       )
       return {
         segmentId: Number(r.segment_id),
