@@ -1063,6 +1063,39 @@ const SENTINELS: MigrationSentinel[] = [
       return hasColumn && hasConstraint
     },
   },
+  {
+    migrationId: '084_sweed_order_items_flat_product_id_backfill',
+    label:
+      'Backfill sweed_order_items_flat.product_id from raw_item for ' +
+      'historical rows (migration 060 added the column but the one-time ' +
+      'backfill did not stick — ~459/62.7k rows were typed). The CRM ' +
+      'Segment Analysis subcategory-affinity cut maps order lines to ' +
+      'catalog_groups.subcategory_name via catalog_group_products(product_id) ' +
+      'and needs the typed column on the hot read path.',
+    // Applied iff no rows remain with a null typed product_id while
+    // raw_item carries a numeric product id (the backfill predicate).
+    check: async (db) => {
+      const res = await db.query<{ pending: boolean }>(
+        `select exists(
+           select 1 from sweed_order_items_flat
+            where product_id is null
+              and nullif(raw_item #>> '{product,id}', '') ~ '^\\d+$'
+            limit 1
+         ) as pending`,
+      )
+      return res.rows[0]?.pending !== true
+    },
+  },
+  {
+    migrationId: '085_analytics_invoice_margin_facts',
+    label:
+      'Invoice-grain margin rollup (analytics_invoice_margin_facts) that ' +
+      'precomputes per-line COGS once so CRM Segment Analysis can show ' +
+      'margin/customer + gross-margin% via a trivial PK join instead of ' +
+      'the ~333ms-per-call cost function on the read path. Kept fresh by ' +
+      'the order-ingest job; backfilled by the migration.',
+    check: (db) => tableExists(db, 'analytics_invoice_margin_facts'),
+  },
 ]
 
 interface CacheEntry {

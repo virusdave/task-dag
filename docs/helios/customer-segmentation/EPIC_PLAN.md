@@ -28,11 +28,31 @@ the catalog / budtender tabs):
   mix. **SHIPPED (Phase 1).**
 - **CRM Segment Analysis** (`/metrics/crm-segment-analysis`) — segment-vs-rest
   comparison with lift/index, deltas, and significance flags. **SHIPPED
-  (header-grain phase 1)** — basket size, value/customer, repeat & discount
-  rates, fulfillment-channel affinity, and **category affinity** (customer
-  penetration off the typed `product_category_name`, migration 060 — no COGS
-  needed). Margin/customer + **subcategory** affinity still pending (need the
-  §4 fact rollups / cohort-key derivation).
+  (complete).** Basket size, net sales/customer, orders/customer, repeat &
+  discount rates, **margin/customer + gross-margin %**, fulfillment-channel
+  affinity, **category affinity** (typed `product_category_name`, migration
+  060), and **subcategory affinity** (Helios catalog taxonomy via the line's
+  typed `product_id`, migrations 084/085).
+
+  The two formerly-deferred items shipped without the full §4 daily-fact
+  layer, per an oracle DB-cost review (2026-06):
+  - **Margin** rides a lightweight invoice-grain rollup
+    `analytics_invoice_margin_facts` (migration 085) that precomputes per-line
+    COGS once (the `sweed_package_cost_as_of_or_earliest()` call was ~333ms of
+    a 408ms direct query). The CRM read joins it by `(dealer_id, invoice_id)`
+    PK; the order-ingest job recomputes touched invoices to keep it fresh.
+    Verified on prod: margin/customer query **408ms → 63ms**.
+  - **Subcategory** maps each order line to `catalog_groups.subcategory_name`
+    via the line's typed `product_id` (backfilled for historical rows in
+    migration 084 — 060's backfill had only stuck on 459/62.7k rows) →
+    `catalog_group_products(product_id)` [indexed], collapsed to one
+    deterministic subcategory per product. Verified on prod: **155ms → 88ms**.
+    Caveat: ~70% of recent lines are `(uncategorised)` because many catalog
+    groups carry no `subcategory_name` yet (taxonomy is still reconciling);
+    surfaced honestly with an `(uncategorised)` bucket + data-quality note.
+
+  The full §4 daily customer/category fact layer remains deferred (see §9 for
+  the graduation triggers) — not needed for a two-store deployment.
 
 The 2026-06 oracle review refined the **statistical methodology** now
 implemented in `segmentStats.ts` (unit-tested) and used by the Analysis tab:

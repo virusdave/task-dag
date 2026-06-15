@@ -805,6 +805,56 @@ async function fetchAndInsert(
         `,
         [dealerId, touchedInvoiceIds],
       )
+      // (3) Invoice-margin rollup — recompute the just-(re)flattened
+      // invoices in analytics_invoice_margin_facts (migration 085). This
+      // is where we pay the expensive sweed_package_cost_as_of_or_earliest()
+      // lookups ONCE, so the CRM Segment Analysis read path can join
+      // precomputed margin instead of calling the cost function per line.
+      // Margin convention is identical to the margins.gross_margin_dollars
+      // registry metric (REVENUE_EXPR / QTY_EXPR / COGS_EXPR /
+      // NON_CANCELED_LINE_SQL in sweedPackageSnapshotsQueries.ts) — keep
+      // these expressions in lock-step. Set-based over the touched
+      // invoices; idempotent via the PK upsert.
+      await db.query(
+        `
+          insert into analytics_invoice_margin_facts as aimf
+            (dealer_id, invoice_id, pay_time, line_count,
+             revenue_dollars, cogs_dollars, margin_dollars, refreshed_at)
+          select
+            f.dealer_id,
+            f.invoice_id,
+            max(f.pay_time) as pay_time,
+            count(*)::int as line_count,
+            coalesce(sum(
+              case when lower(coalesce(f.raw_item->'invoiceItemStatus'->>'name', '')) <> 'canceled'
+                   then f.revenue else 0 end
+            ), 0)::numeric as revenue_dollars,
+            coalesce(sum(
+              (case when lower(coalesce(f.raw_item->'invoiceItemStatus'->>'name', '')) <> 'canceled'
+                    then f.qty else 0 end)
+              * coalesce(sweed_package_cost_as_of_or_earliest(f.dealer_id, f.inventory_item_id, f.pay_time), 0)
+            ), 0)::numeric as cogs_dollars,
+            coalesce(sum(
+              (case when lower(coalesce(f.raw_item->'invoiceItemStatus'->>'name', '')) <> 'canceled'
+                    then f.revenue else 0 end)
+              - (case when lower(coalesce(f.raw_item->'invoiceItemStatus'->>'name', '')) <> 'canceled'
+                      then f.qty else 0 end)
+                * coalesce(sweed_package_cost_as_of_or_earliest(f.dealer_id, f.inventory_item_id, f.pay_time), 0)
+            ), 0)::numeric as margin_dollars,
+            now()
+          from sweed_order_items_flat f
+          where f.dealer_id = $1 and f.invoice_id = any($2::text[])
+          group by f.dealer_id, f.invoice_id
+          on conflict (dealer_id, invoice_id) do update set
+            pay_time        = excluded.pay_time,
+            line_count      = excluded.line_count,
+            revenue_dollars = excluded.revenue_dollars,
+            cogs_dollars    = excluded.cogs_dollars,
+            margin_dollars  = excluded.margin_dollars,
+            refreshed_at    = excluded.refreshed_at
+        `,
+        [dealerId, touchedInvoiceIds],
+      )
     })
   }
   return { normalised, insertedCount: totalInserted }

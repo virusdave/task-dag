@@ -12,10 +12,11 @@ import { SegmentIdentitySchema } from './marketingSegments.js'
 // (two-proportion z for rates/shares, Welch for means, Benjamini-Hochberg
 // across the channel family).
 //
-// Phase 1 of this tab is header-grain (orders only): basket size, value /
-// customer, repeat rate, discount rate, and fulfillment-channel affinity.
-// Margin/customer and category/subcategory affinity arrive once the
-// per-customer daily fact rollups land (EPIC_PLAN.md §4). See
+// Metrics: basket size, net sales / customer, orders / customer, repeat
+// rate, discount rate, margin / customer, gross-margin %, plus
+// fulfillment-channel, category, and subcategory affinity. Margin rides
+// the invoice-grain analytics_invoice_margin_facts rollup (precomputed
+// COGS); subcategory rides the Helios catalog taxonomy. See
 // server/crmSegmentMetrics/crmSegmentAnalysisQueries.ts.
 
 export const CrmSegmentAnalysisRequestSchema = z.object({
@@ -99,6 +100,27 @@ export const CrmCategoryAffinityRowSchema = z.object({
 })
 export type CrmCategoryAffinityRow = z.infer<typeof CrmCategoryAffinityRowSchema>
 
+// Subcategory affinity: same customer-PENETRATION comparison as category,
+// one level finer. Subcategory is NOT on the Sweed order line (its
+// productCategory is just {id,name}); it comes from the Helios catalog
+// taxonomy (catalog_groups.subcategory_name) joined on the line's
+// product_id. Same two-proportion z + BH-FDR treatment as category.
+export const CrmSubcategoryAffinityRowSchema = z.object({
+  subcategory: z.string(),
+  segmentBuyers: z.number().int().nonnegative(),
+  restBuyers: z.number().int().nonnegative(),
+  segmentPenetration: z.number().nullable(),
+  restPenetration: z.number().nullable(),
+  everyonePenetration: z.number().nullable(),
+  deltaPp: z.number().nullable(),
+  index: z.number().nullable(),
+  segmentRevenueShare: z.number().nullable(),
+  pValue: z.number().nullable(),
+  qValue: z.number().nullable(),
+  confidence: CrmConfidenceLabelSchema,
+})
+export type CrmSubcategoryAffinityRow = z.infer<typeof CrmSubcategoryAffinityRowSchema>
+
 export const CrmSegmentAnalysisResponseSchema = z.object({
   segment: SegmentIdentitySchema,
   window: z.object({ from: z.iso.datetime(), to: z.iso.datetime() }),
@@ -118,6 +140,7 @@ export const CrmSegmentAnalysisResponseSchema = z.object({
   metrics: z.array(CrmComparisonMetricSchema),
   channelAffinity: z.array(CrmChannelAffinityRowSchema),
   categoryAffinity: z.array(CrmCategoryAffinityRowSchema),
+  subcategoryAffinity: z.array(CrmSubcategoryAffinityRowSchema),
   dataQuality: z.array(z.string()),
 })
 export type CrmSegmentAnalysisResponse = z.infer<typeof CrmSegmentAnalysisResponseSchema>

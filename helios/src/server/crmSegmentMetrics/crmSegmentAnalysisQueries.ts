@@ -19,6 +19,7 @@ import {
   type CrmComparisonMetric,
   type CrmPopulationSummary,
   type CrmSegmentAnalysisResponse,
+  type CrmSubcategoryAffinityRow,
 } from '../../shared/contracts/index.js'
 import type { Queryable } from '../db/pool.js'
 import { getSegmentDetails } from '../db/queries/marketingSegmentDetailsQueries.js'
@@ -61,9 +62,18 @@ function ordersCte(): string {
               - coalesce(so.discount_dollars, 0))::numeric as net,
              coalesce(so.grand_total_dollars, 0)::numeric as receipts,
              coalesce(so.discount_dollars, 0)::numeric as discount,
+             -- Precomputed invoice margin (COGS done once at ingest; see
+             -- analytics_invoice_margin_facts / migration 085). LEFT JOIN
+             -- so an invoice with no fact row contributes $0 rather than
+             -- dropping the order.
+             coalesce(aimf.margin_dollars, 0)::numeric as margin,
+             coalesce(aimf.revenue_dollars, 0)::numeric as margin_revenue,
              ${FULFILLMENT_SERIES_SQL_EXPR_SO} as channel
         from sweed_orders so
         left join members m on m.cid = so.customer_id
+        left join analytics_invoice_margin_facts aimf
+               on aimf.dealer_id = so.dealer_id
+              and aimf.invoice_id = so.invoice_id
        where so.dealer_id = any($2::bigint[])
          and so.customer_id is not null
          and so.pay_time >= $3::timestamptz
@@ -83,6 +93,10 @@ interface CustRow {
   net_per_customer_var: number
   orders_per_customer_mean: number
   orders_per_customer_var: number
+  margin_dollars: number
+  margin_revenue: number
+  margin_per_customer_mean: number
+  margin_per_customer_var: number
 }
 
 interface OrderRow {
@@ -107,9 +121,17 @@ interface CategoryRow {
   revenue: number
 }
 
-// Cap the category affinity list so the UI stays legible; categories are
-// ranked by segment penetration before truncation.
+interface SubcategoryRow {
+  in_seg: boolean
+  subcategory: string
+  buyers: number
+  revenue: number
+}
+
+// Cap the affinity lists so the UI stays legible; rows are ranked by
+// segment penetration before truncation.
 const TOP_N_CATEGORIES = 20
+const TOP_N_SUBCATEGORIES = 25
 
 const ZERO_CUST: Omit<CustRow, 'in_seg'> = {
   customers: 0,
@@ -121,6 +143,10 @@ const ZERO_CUST: Omit<CustRow, 'in_seg'> = {
   net_per_customer_var: 0,
   orders_per_customer_mean: 0,
   orders_per_customer_var: 0,
+  margin_dollars: 0,
+  margin_revenue: 0,
+  margin_per_customer_mean: 0,
+  margin_per_customer_var: 0,
 }
 const ZERO_ORDER: Omit<OrderRow, 'in_seg'> = {
   orders: 0,
@@ -151,11 +177,12 @@ export async function getCrmSegmentAnalysis(
   let orderRows: OrderRow[] = []
   let channelRows: ChannelRow[] = []
   let categoryRows: CategoryRow[] = []
+  let subcategoryRows: SubcategoryRow[] = []
 
   if (dealerIds.length === 0) {
     dataQuality.push('No store sites selected — comparison is empty.')
   } else {
-    const [custRes, orderRes, channelRes, categoryRes] = await Promise.all([
+    const [custRes, orderRes, channelRes, categoryRes, subcategoryRes] = await Promise.all([
       db.query<CustRow>(
         `with ${ordersCte()},
          cust as (
@@ -163,7 +190,9 @@ export async function getCrmSegmentAnalysis(
                   bool_or(in_seg) as in_seg,
                   count(*) as orders,
                   sum(net) as net,
-                  sum(receipts) as receipts
+                  sum(receipts) as receipts,
+                  sum(margin) as margin,
+                  sum(margin_revenue) as margin_revenue
              from o
             group by customer_id
          )
@@ -176,7 +205,11 @@ export async function getCrmSegmentAnalysis(
                 coalesce(avg(net), 0)::float8 as net_per_customer_mean,
                 coalesce(var_samp(net), 0)::float8 as net_per_customer_var,
                 coalesce(avg(orders), 0)::float8 as orders_per_customer_mean,
-                coalesce(var_samp(orders), 0)::float8 as orders_per_customer_var
+                coalesce(var_samp(orders), 0)::float8 as orders_per_customer_var,
+                coalesce(sum(margin), 0)::float8 as margin_dollars,
+                coalesce(sum(margin_revenue), 0)::float8 as margin_revenue,
+                coalesce(avg(margin), 0)::float8 as margin_per_customer_mean,
+                coalesce(var_samp(margin), 0)::float8 as margin_per_customer_var
            from cust
           group by in_seg`,
         params,
@@ -234,11 +267,58 @@ export async function getCrmSegmentAnalysis(
           group by in_seg, category`,
         params,
       ),
+      // Subcategory affinity: same customer-penetration cut, one level
+      // finer. Subcategory is NOT on the order line (its productCategory
+      // is just {id,name}); it comes from the Helios catalog taxonomy via
+      // the line's typed product_id (backfilled in migration 084) ->
+      // catalog_group_products(product_id) [indexed] ->
+      // catalog_groups.subcategory_name. A product can appear in more than
+      // one catalog group, so collapse to ONE deterministic subcategory
+      // per product first (min name) to avoid multiplying line revenue /
+      // buyer counts. Still no COGS function — stays interactive.
+      db.query<SubcategoryRow>(
+        `with members as (
+           select distinct sweed_customer_id::bigint as cid
+             from sweed_customer_segments
+            where segment_id = $1
+         ),
+         product_subcategory as (
+           select cgp.product_id,
+                  nullif(lower(min(cg.subcategory_name)), '') as subcategory
+             from catalog_group_products cgp
+             join catalog_groups cg on cg.id = cgp.catalog_group_id
+            group by cgp.product_id
+         ),
+         lines as (
+           select so.customer_id,
+                  (m.cid is not null) as in_seg,
+                  coalesce(ps.subcategory, '(uncategorised)') as subcategory,
+                  f.revenue::numeric as revenue
+             from sweed_order_items_flat f
+             join sweed_orders so
+               on so.dealer_id = f.dealer_id and so.invoice_id = f.invoice_id
+             left join members m on m.cid = so.customer_id
+             left join product_subcategory ps on ps.product_id = f.product_id
+            where f.dealer_id = any($2::bigint[])
+              and f.pay_time >= $3::timestamptz
+              and f.pay_time <  $4::timestamptz
+              and so.customer_id is not null
+              ${nonCancelledOrderSql('so')}
+         )
+         select in_seg,
+                subcategory,
+                count(distinct customer_id)::int as buyers,
+                coalesce(sum(revenue), 0)::float8 as revenue
+           from lines
+          group by in_seg, subcategory`,
+        params,
+      ),
     ])
     custRows = custRes.rows
     orderRows = orderRes.rows
     channelRows = channelRes.rows
     categoryRows = categoryRes.rows
+    subcategoryRows = subcategoryRes.rows
   }
 
   const seg = { ...ZERO_CUST, ...custRows.find((r) => r.in_seg) }
@@ -337,6 +417,54 @@ export async function getCrmSegmentAnalysis(
     })
   }
 
+  // Margin / customer — Welch on customer-grain margin $ (COGS precomputed
+  // in analytics_invoice_margin_facts; unknown package cost counted as $0).
+  {
+    const w = welchTest(
+      seg.margin_per_customer_mean,
+      seg.margin_per_customer_var,
+      seg.customers,
+      rest.margin_per_customer_mean,
+      rest.margin_per_customer_var,
+      rest.customers,
+    )
+    const ok = seg.customers >= MIN_GROUP_N && rest.customers >= MIN_GROUP_N
+    metrics.push({
+      key: 'margin_per_customer',
+      label: 'Margin / customer',
+      unit: 'money',
+      help: 'Gross margin $ (line revenue − package COGS; unknown cost = $0) per active customer. Welch t vs rest.',
+      segment: seg.customers > 0 ? seg.margin_per_customer_mean : null,
+      rest: rest.customers > 0 ? rest.margin_per_customer_mean : null,
+      everyone: ratio(seg.margin_dollars + rest.margin_dollars, seg.customers + rest.customers),
+      deltaVsRest: w.delta,
+      indexVsRest: w.index,
+      pValue: w.pValue,
+      confidence: confidenceLabel(w.pValue, ok),
+    })
+  }
+
+  // Gross-margin % — dollar ratio (margin $ ÷ margin revenue $); shown for
+  // context, not significance-tested (it's a ratio of sums, not a mean).
+  {
+    const segGm = ratio(seg.margin_dollars, seg.margin_revenue)
+    const restGm = ratio(rest.margin_dollars, rest.margin_revenue)
+    const ok = seg.customers >= MIN_GROUP_N && rest.customers >= MIN_GROUP_N
+    metrics.push({
+      key: 'gross_margin_pct',
+      label: 'Gross-margin %',
+      unit: 'rate',
+      help: 'Gross margin $ ÷ pre-tax line revenue $. A dollar ratio, so shown for context but not significance-tested.',
+      segment: segGm,
+      rest: restGm,
+      everyone: ratio(seg.margin_dollars + rest.margin_dollars, seg.margin_revenue + rest.margin_revenue),
+      deltaVsRest: segGm !== null && restGm !== null ? segGm - restGm : null,
+      indexVsRest: segGm !== null && restGm !== null && restGm > 0 ? segGm / restGm : null,
+      pValue: null,
+      confidence: ok ? 'directional' : 'too_small',
+    })
+  }
+
   // Repeat rate — two-proportion z (customers with ≥2 orders).
   {
     const t = twoProportionTest(seg.repeat_customers, seg.customers, rest.repeat_customers, rest.customers)
@@ -382,6 +510,9 @@ export async function getCrmSegmentAnalysis(
   // Category affinity — customer penetration two-proportion z + BH FDR.
   const categoryAffinity = buildCategoryAffinity(categoryRows, seg.customers, rest.customers)
 
+  // Subcategory affinity — same treatment, one taxonomy level finer.
+  const subcategoryAffinity = buildSubcategoryAffinity(subcategoryRows, seg.customers, rest.customers)
+
   // Data-quality caveats.
   if (seg.customers === 0) {
     dataQuality.push(
@@ -394,7 +525,11 @@ export async function getCrmSegmentAnalysis(
       `Small sample (segment ${seg.customers} / rest ${rest.customers} active customers) — most comparisons are directional, not significance-badged.`,
     )
   }
-  dataQuality.push('Margin/customer and category affinity arrive in a later phase (need the per-customer fact rollups).')
+  dataQuality.push(
+    'Margin $ uses package wholesale cost as-of each sale (unknown cost counted as $0); ' +
+      'subcategory comes from the Helios catalog taxonomy, so a product with no catalog ' +
+      'group maps to “(uncategorised)”.',
+  )
 
   return {
     segment: details.segment,
@@ -405,6 +540,7 @@ export async function getCrmSegmentAnalysis(
     metrics,
     channelAffinity,
     categoryAffinity,
+    subcategoryAffinity,
     dataQuality,
   }
 }
@@ -495,4 +631,46 @@ function buildCategoryAffinity(
     // then cap for legibility.
     .sort((a, b) => (b.segmentPenetration ?? 0) - (a.segmentPenetration ?? 0))
     .slice(0, TOP_N_CATEGORIES)
+}
+
+function buildSubcategoryAffinity(
+  rows: ReadonlyArray<SubcategoryRow>,
+  segCustomers: number,
+  restCustomers: number,
+): CrmSubcategoryAffinityRow[] {
+  const subcategories = [...new Set(rows.map((r) => r.subcategory))]
+  const segBySub = new Map(rows.filter((r) => r.in_seg).map((r) => [r.subcategory, r]))
+  const restBySub = new Map(rows.filter((r) => !r.in_seg).map((r) => [r.subcategory, r]))
+  const segRevenueTotal = rows
+    .filter((r) => r.in_seg)
+    .reduce((sum, r) => sum + r.revenue, 0)
+
+  const prelim = subcategories.map((subcategory) => {
+    const xSeg = segBySub.get(subcategory)?.buyers ?? 0
+    const xRest = restBySub.get(subcategory)?.buyers ?? 0
+    const segRevenue = segBySub.get(subcategory)?.revenue ?? 0
+    const t = twoProportionTest(xSeg, segCustomers, xRest, restCustomers)
+    const ok = proportionSampleOk(xSeg, segCustomers, xRest, restCustomers)
+    return { subcategory, xSeg, xRest, segRevenue, t, ok }
+  })
+
+  const qValues = benjaminiHochberg(prelim.map((p) => (p.ok ? p.t.pValue : null)))
+
+  return prelim
+    .map((p, i) => ({
+      subcategory: p.subcategory,
+      segmentBuyers: p.xSeg,
+      restBuyers: p.xRest,
+      segmentPenetration: p.t.segmentRate,
+      restPenetration: p.t.restRate,
+      everyonePenetration: ratio(p.xSeg + p.xRest, segCustomers + restCustomers),
+      deltaPp: p.t.deltaPp,
+      index: p.t.index,
+      segmentRevenueShare: ratio(p.segRevenue, segRevenueTotal),
+      pValue: p.t.pValue,
+      qValue: qValues[i],
+      confidence: confidenceLabel(qValues[i] ?? p.t.pValue, p.ok),
+    }))
+    .sort((a, b) => (b.segmentPenetration ?? 0) - (a.segmentPenetration ?? 0))
+    .slice(0, TOP_N_SUBCATEGORIES)
 }

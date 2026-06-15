@@ -17,12 +17,14 @@ import { defaultSiteSelection, toggleSiteSelection } from './metricsSiteSelectio
 // ---------------------------------------------------------------------------
 // CRM "Segment Analysis" tab — how the chosen segment differs from the REST
 // (everyone − segment). Headline share cards, a comparison table with
-// lift/index + significance badges, and fulfillment-channel affinity.
+// lift/index + significance badges, and affinity tables.
 //
-// Phase 1: header-grain (basket size, value/customer, repeat rate, discount
-// rate, channel affinity). Margin/customer and category affinity arrive with
-// the per-customer fact rollups (EPIC_PLAN.md §4). Baseline is REST; the
-// stats come from the server (segmentStats.ts) so the client just formats.
+// Metrics: basket size, net sales / customer, orders / customer, repeat rate,
+// discount rate, margin / customer, gross-margin %, plus category,
+// subcategory, and fulfillment-channel affinity. Margin rides the
+// invoice-grain margin rollup; subcategory rides the Helios catalog taxonomy.
+// Baseline is REST; the stats come from the server (segmentStats.ts) so the
+// client just formats.
 // ---------------------------------------------------------------------------
 
 const DAY_MS = 86_400_000
@@ -318,6 +320,47 @@ function CrmSegmentAnalysisBody({ data }: { data: CrmSegmentAnalysisResponse }) 
                     <td>{fmtIndex(c.index)}</td>
                     <td className="crm-cmp-context">{fmtPct(c.segmentRevenueShare)}</td>
                     <td><ConfBadge c={c.confidence} /></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {/* Subcategory affinity */}
+      <div className="customer-value-card crm-seg-section">
+        <h3>Subcategory affinity</h3>
+        <p className="subtle-copy">
+          One taxonomy level finer than category (from the Helios catalog). Customer
+          penetration, ranked by segment penetration; index &gt;1 = over-indexed vs rest.
+        </p>
+        {data.subcategoryAffinity.length === 0 ? (
+          <p className="crm-seg-empty subtle-copy">No catalogued line items in the selected window.</p>
+        ) : (
+          <div className="crm-cmp-scroll">
+            <table className="crm-cmp-table">
+              <thead>
+                <tr>
+                  <th>Subcategory</th>
+                  <th>Segment</th>
+                  <th>Rest</th>
+                  <th>Δ</th>
+                  <th>Index</th>
+                  <th>Seg rev %</th>
+                  <th>Confidence</th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.subcategoryAffinity.map((s) => (
+                  <tr key={s.subcategory}>
+                    <th scope="row">{s.subcategory}</th>
+                    <td>{fmtPct(s.segmentPenetration)}</td>
+                    <td>{fmtPct(s.restPenetration)}</td>
+                    <td>{fmtDelta(s.deltaPp, 'rate')}</td>
+                    <td>{fmtIndex(s.index)}</td>
+                    <td className="crm-cmp-context">{fmtPct(s.segmentRevenueShare)}</td>
+                    <td><ConfBadge c={s.confidence} /></td>
                   </tr>
                 ))}
               </tbody>
