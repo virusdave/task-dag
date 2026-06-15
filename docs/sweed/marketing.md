@@ -242,6 +242,32 @@ Partial edits are accepted — pass only the fields you want changed.
   Freshly-Baked-NYC sender id `9e09e1c4-c0f2-44ca-a81d-e0766f34f2f6`
   is the only approved one on the state dealer as of May 2026.
 
+##### Recipe: surgical hero accent + FAQ CTA swap
+
+When an email is already polished/operator-edited and you only need a
+small, non-destructive touch-up (add the brand hero accent; repoint a
+CTA), edit the live trigger **in place** rather than regenerating — that
+preserves every operator edit exactly.
+[`event-emails-hero-divider-and-faq.ts`](../../helios/scripts/event-emails-hero-divider-and-faq.ts)
+is the worked example. It:
+
+1. Inserts a gold leaf-divider hero accent (`&#127811;` flanked by two
+   `#e8b265` rules) directly under the logo, into **both**
+   `messageText.html` and `messageText.design`. Idempotent via an
+   `fbnyc-hero-divider` HTML-comment marker.
+2. Handles both email origins: hand-authored 560px table cards (anchor:
+   the eyebrow comment) and Unlayer `u-row-container` layouts (insert a
+   mimic row before the 2nd container / at design row index 1).
+3. (Optional, `--no-swap` to skip) repoints only the **"Learn More"** CTA
+   button hrefs to the FAQ url, leaving the logo's home link and any
+   other URL untouched.
+
+It is content-only (canon §1): never changes enabled state, schedule,
+segment, or channel. Always `--dry-run` first and eyeball the
+`/tmp/preview-email-<id>.html` it writes. After polishing the email this
+way, propagate to SMS with the copy-to-rich-SMS recipe below so the SMS
+inherits the same accent and (already-swapped) CTA URLs.
+
 #### SMS / Text Notification trigger
 
 SMS is gated: messageText is rejected unless an approved template and
