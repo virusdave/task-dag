@@ -7,6 +7,8 @@ import {
   type CustomerValueAnalyticsResponse,
   type CustomerValueCohortGranularity,
   type CustomerValueMissingDataCard,
+  type CustomerValuePopulationStats,
+  type CustomerValueSegmentComparison,
   type CustomerValueSummary,
   type FirstSecondConversionRow,
   type LifetimeByTotalPurchasesPoint,
@@ -456,6 +458,9 @@ export async function getCustomerValueAnalytics(
       veriscanCoverage: { linked: 0, total: 0, pct: 0 },
       marketingSegmentLens: segmentLensEcho,
     },
+    // No customers in scope => no comparison to draw, even if a lens
+    // was requested.
+    segmentComparison: null,
     missingDataCards: [...MISSING_CARDS],
   }
 
@@ -841,6 +846,69 @@ export async function getCustomerValueAnalytics(
     select
       ${cohortCols.join(',\n      ')}
   `
+  // Segment vs rest comparison (v1.4 V4'7). Only computed when the lens
+  // is active. ONE grouped pass over the visible window tags each
+  // in-window known-customer order as 'segment' (customer is a member
+  // of any selected segment) or 'rest' (known non-member), so the two
+  // populations are disjoint and additive — no whole-minus-segment
+  // subtraction, no ratio-of-averages error. Cash bases only (no margin
+  // function calls): this keeps the query a single cheap window scan
+  // (~80ms at 90d, well within budget) for ANY range. Margin is
+  // deliberately excluded — its per-line package-cost lookup is
+  // multi-second over a year and belongs to the daily-facts phase
+  // (EPIC_PLAN §9). Bounded by dealer set + [from,to); result is 2 rows.
+  //   $1 dealerIds · $2 from · $3 to · $4 segment ids
+  const comparisonSql = `
+    with members as (
+      select distinct scs.sweed_customer_id as customer_id
+        from sweed_customer_segments scs
+       where scs.segment_id = any($4::bigint[])
+         and scs.enabled is distinct from false
+    ),
+    window_orders as (
+      select
+        so.customer_id,
+        coalesce(so.subtotal_dollars, 0)::numeric                        as gross_sales,
+        (coalesce(so.subtotal_dollars, 0)
+         - coalesce(so.discount_dollars, 0))::numeric                    as net_sales,
+        coalesce(so.grand_total_dollars, 0)::numeric                     as receipts
+      from sweed_orders so
+      where so.dealer_id = any($1::bigint[])
+        and so.pay_time >= $2::timestamptz
+        and so.pay_time < $3::timestamptz
+        and so.customer_id is not null
+        ${nonCancelledOrderSql('so')}
+    )
+    select
+      case when m.customer_id is not null then 'segment' else 'rest' end as pop,
+      count(distinct wo.customer_id)::int        as active_customers,
+      count(*)::int                               as orders,
+      sum(wo.gross_sales)::numeric                as gross_sales,
+      sum(wo.net_sales)::numeric                  as net_sales,
+      sum(wo.receipts)::numeric                   as receipts
+    from window_orders wo
+    left join members m
+      on m.customer_id = wo.customer_id
+    group by 1
+  `
+  const comparisonPromise: Promise<{
+    rows: ReadonlyArray<{
+      pop: string
+      active_customers: string | number
+      orders: string | number
+      gross_sales: string | number | null
+      net_sales: string | number | null
+      receipts: string | number | null
+    }>
+  }> = segmentLensActive
+    ? pool.query(comparisonSql, [
+        dealerIds,
+        args.from.toISOString(),
+        args.to.toISOString(),
+        segmentIds,
+      ])
+    : Promise.resolve({ rows: [] })
+
   // Guest orders cannot belong to a marketing segment, so when the
   // lens is active the guest count is definitionally 0 — skip the
   // query entirely (no wasted round-trip) rather than filter it.
@@ -852,7 +920,7 @@ export async function getCustomerValueAnalytics(
           args.from.toISOString(),
           args.to.toISOString(),
         ])
-  const [result, guestRes, retentionRes, veriscanRes, ttmRes] = await Promise.all([
+  const [result, guestRes, retentionRes, veriscanRes, ttmRes, comparisonRes] = await Promise.all([
     pool.query<UnionRow>(sql, [
       dealerIds,
       args.from.toISOString(),
@@ -892,6 +960,7 @@ export async function getCustomerValueAnalytics(
       // $7 — segment-lens ids (only present when the lens is active).
       ...(segmentLensActive ? [segmentIds] : []),
     ]),
+    comparisonPromise,
   ])
 
   const guestCount = asReqInt(guestRes.rows[0]?.n)
@@ -927,6 +996,38 @@ export async function getCustomerValueAnalytics(
     linked: veriscanLinked,
     total: veriscanTotal,
     pct: veriscanTotal > 0 ? veriscanLinked / veriscanTotal : 0,
+  }
+
+  // Segment vs rest comparison (v1.4 V4'7). Two grouped rows ('segment'
+  // / 'rest'); a population absent from the result (e.g. an empty rest)
+  // reads as all-zeros so the client can still render a baseline cell.
+  const round2 = (v: unknown): number => {
+    const n = asNum(v)
+    return n === null ? 0 : Math.round(n * 100) / 100
+  }
+  const emptyPopStats = (): CustomerValuePopulationStats => ({
+    activeCustomers: 0,
+    orders: 0,
+    grossSalesDollars: 0,
+    netSalesDollars: 0,
+    grossReceiptsDollars: 0,
+  })
+  let segmentComparison: CustomerValueSegmentComparison | null = null
+  if (segmentLensActive) {
+    const byPop = new Map<string, CustomerValuePopulationStats>()
+    for (const r of comparisonRes.rows) {
+      byPop.set(r.pop, {
+        activeCustomers: asReqInt(r.active_customers),
+        orders: asReqInt(r.orders),
+        grossSalesDollars: round2(r.gross_sales),
+        netSalesDollars: round2(r.net_sales),
+        grossReceiptsDollars: round2(r.receipts),
+      })
+    }
+    segmentComparison = {
+      segment: byPop.get('segment') ?? emptyPopStats(),
+      rest: byPop.get('rest') ?? emptyPopStats(),
+    }
   }
 
   const summary: CustomerValueSummary = {
@@ -1071,6 +1172,7 @@ export async function getCustomerValueAnalytics(
     cohortRetention: retentionRes.cohortRetention,
     firstSecondConversion: retentionRes.firstSecondConversion,
     meta: { veriscanCoverage, marketingSegmentLens: segmentLensEcho },
+    segmentComparison,
     missingDataCards: [...MISSING_CARDS],
   }
 }

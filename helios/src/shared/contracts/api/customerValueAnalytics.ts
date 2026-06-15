@@ -424,6 +424,54 @@ export const CustomerValueMetaSchema = z.object({
 })
 export type CustomerValueMeta = z.infer<typeof CustomerValueMetaSchema>
 
+// =========================== Segment vs rest (v1.4 V4'7) ==================
+
+/**
+ * Window-scoped aggregates for one population (segment or rest) in the
+ * "Segment vs rest" comparison band (v1.4 V4'7). Known customers only
+ * (guests excluded; they cannot be segment members). All sums are over
+ * non-cancelled in-window orders for the selected sites.
+ *
+ *   - `activeCustomers` — distinct Sweed customer_ids that placed at
+ *     least one in-window order in this population.
+ *   - `orders`          — in-window order count for this population.
+ *   - `grossSalesDollars` / `netSalesDollars` / `grossReceiptsDollars`
+ *     — summed cash money bases (same conventions as the rest of the
+ *     tab). These are cheap window sums.
+ *
+ * Margin $ is intentionally NOT included here: per-line margin requires
+ * the `sweed_package_cost_as_of_or_earliest()` lookup per item, which
+ * is multi-second over a 12 month window (the documented EPIC_PLAN §9
+ * "graduate to daily facts" trigger). Rather than push the interactive
+ * endpoint past the latency budget, the comparison band shows the cash
+ * bases now and defers the margin split to the segment facts pipeline.
+ * The client derives avg basket (`<basis>$ / orders`) and orders per
+ * customer (`orders / activeCustomers`) from these so it can switch the
+ * cash `$ basis` options without a re-fetch.
+ */
+export const CustomerValuePopulationStatsSchema = z.object({
+  activeCustomers: z.number().int().nonnegative(),
+  orders: z.number().int().nonnegative(),
+  grossSalesDollars: z.number(),
+  netSalesDollars: z.number(),
+  grossReceiptsDollars: z.number(),
+})
+export type CustomerValuePopulationStats = z.infer<typeof CustomerValuePopulationStatsSchema>
+
+/**
+ * Segment vs rest comparison (v1.4 V4'7). Present (non-null) only when
+ * the marketing-segment lens is active. `segment` = members of any
+ * selected segment; `rest` = known non-members. Both are over the same
+ * visible window / sites, computed in a single grouped pass so the two
+ * populations are disjoint and additive (no double-counting, no
+ * ratio-of-averages error). `null` when no lens is applied.
+ */
+export const CustomerValueSegmentComparisonSchema = z.object({
+  segment: CustomerValuePopulationStatsSchema,
+  rest: CustomerValuePopulationStatsSchema,
+})
+export type CustomerValueSegmentComparison = z.infer<typeof CustomerValueSegmentComparisonSchema>
+
 // =========================== Missing-data card =============================
 
 export const CustomerValueMissingDataCardSchema = z.object({
@@ -472,6 +520,12 @@ export const CustomerValueAnalyticsResponseSchema = z.object({
    * badge + the gated "VeriScan-linked only" toggle. Always present.
    */
   meta: CustomerValueMetaSchema,
+  /**
+   * Segment vs rest comparison (v1.4 V4'7). Non-null only when the
+   * marketing-segment lens is active; the client renders the
+   * "Segment vs rest" headline band from it. `null` otherwise.
+   */
+  segmentComparison: CustomerValueSegmentComparisonSchema.nullable().default(null),
   missingDataCards: z.array(CustomerValueMissingDataCardSchema),
 })
 export type CustomerValueAnalyticsResponse = z.infer<typeof CustomerValueAnalyticsResponseSchema>

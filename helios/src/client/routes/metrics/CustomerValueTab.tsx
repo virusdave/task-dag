@@ -11,6 +11,8 @@ import {
   type CustomerValueAnalyticsResponse,
   type CustomerValueCohortGranularity,
   type CustomerValueMissingDataCard,
+  type CustomerValuePopulationStats,
+  type CustomerValueSegmentComparison,
   type FirstSecondConversionRow,
   type LifetimeByTotalPurchasesPoint,
   type MetricSelection,
@@ -603,12 +605,13 @@ function CustomerValueBody({
           before any chart resolves. */}
       <VeriscanCoverageHeader meta={data.meta} segmentLensActive={lensActive} />
 
-      <SummaryStrip data={data} basis={moneyBasis} basisLabel={moneyBasisDef.label} />
-
+      {/* $ basis selector. Moved above everything it drives (the
+          comparison band, the KPI strip, and the histograms) so the
+          control is never below the numbers it changes. */}
       <div className="customer-value-basis-row metrics-control-group">
         <label
           className="subtle-copy"
-          title="Which dollar dimension drives the histograms below. Hot-swappable without re-fetching."
+          title="Which dollar dimension drives the comparison band, KPI strip, and histograms below. Hot-swappable without re-fetching."
         >
           $ basis{' '}
           <select
@@ -624,6 +627,21 @@ function CustomerValueBody({
         </label>
         <span className="subtle-copy">{moneyBasisDef.help}</span>
       </div>
+
+      {/* v1.4 V4'7: Segment vs rest headline comparison. Only when the
+          lens is active and the server returned a comparison payload. */}
+      {lensActive && data.segmentComparison ? (
+        <SegmentVsRestBand
+          comparison={data.segmentComparison}
+          basis={moneyBasis}
+          basisLabel={moneyBasisDef.label}
+        />
+      ) : null}
+
+      {lensActive ? (
+        <h3 className="customer-value-section-label">Segment detail</h3>
+      ) : null}
+      <SummaryStrip data={data} basis={moneyBasis} basisLabel={moneyBasisDef.label} />
 
       <TrailingSpendPercentilesStrip
         title="Trailing-12-mo spend"
@@ -845,6 +863,200 @@ function VeriscanCoverageHeader({
           </span>
         ) : null}
       </label>
+    </div>
+  )
+}
+
+// ====================== Segment vs rest band (v1.4 V4'7) ==================
+
+/** Cash basis dollars for a population, or null when the selected basis
+ *  is margin (the comparison band does not compute margin; see the
+ *  contract note + EPIC_PLAN §9). */
+function popBasisDollars(p: CustomerValuePopulationStats, basis: MoneyBasis): number | null {
+  switch (basis) {
+    case 'gross_sales':
+      return p.grossSalesDollars
+    case 'net_sales':
+      return p.netSalesDollars
+    case 'gross_receipts':
+      return p.grossReceiptsDollars
+    case 'margin':
+      return null
+  }
+}
+
+interface GuardrailCtx {
+  tooSmall: boolean
+  directional: boolean
+  restBaseline: number | null
+}
+
+/** Percent-lift badge for a normalized metric vs rest (neutral = 0),
+ *  honoring small-sample guardrails. Returns text + direction class. */
+function liftBadge(
+  lift: number | null,
+  ctx: GuardrailCtx,
+): { text: string; kind: 'up' | 'down' | 'flat' | 'muted' } | null {
+  if (ctx.tooSmall) return { text: 'too small', kind: 'muted' }
+  if (ctx.restBaseline === null || ctx.restBaseline === 0)
+    return { text: 'no rest baseline', kind: 'muted' }
+  if (lift === null) return null
+  const pct = lift * 100
+  const sign = pct >= 0 ? '+' : ''
+  const text = `${sign}${pct.toFixed(0)}% vs rest${ctx.directional ? ' (directional)' : ''}`
+  const kind = Math.abs(pct) < 0.5 ? 'flat' : pct > 0 ? 'up' : 'down'
+  return { text, kind }
+}
+
+/** Index ("1.4x rest") badge for a ratio metric vs rest (neutral = 1). */
+function indexBadge(
+  index: number | null,
+  ctx: GuardrailCtx,
+): { text: string; kind: 'up' | 'down' | 'flat' | 'muted' } | null {
+  if (ctx.tooSmall) return { text: 'too small', kind: 'muted' }
+  if (ctx.restBaseline === null || ctx.restBaseline === 0)
+    return { text: 'no rest baseline', kind: 'muted' }
+  if (index === null) return null
+  const text = `${index.toFixed(2)}x rest${ctx.directional ? ' (directional)' : ''}`
+  const kind = Math.abs(index - 1) < 0.01 ? 'flat' : index > 1 ? 'up' : 'down'
+  return { text, kind }
+}
+
+/**
+ * Segment vs rest headline band. Four compact scorecards comparing the
+ * selected segment(s) to the rest of the known-customer population over
+ * the visible window. Additive totals (active customers, total $) carry
+ * a share-of-known badge; normalized behavior metrics (avg basket,
+ * orders/customer) carry a lift/index badge with small-sample
+ * guardrails. Mobile-first single column; multi-column on wider screens.
+ */
+function SegmentVsRestBand({
+  comparison,
+  basis,
+  basisLabel,
+}: {
+  comparison: CustomerValueSegmentComparison
+  basis: MoneyBasis
+  basisLabel: string
+}) {
+  const seg = comparison.segment
+  const rest = comparison.rest
+  const isMargin = basis === 'margin'
+
+  // Small-sample guardrails (EPIC_PLAN §7). Suppress lift entirely under
+  // 10 active in either population; flag "directional only" under 30
+  // active or 100 orders in either.
+  const tooSmall = seg.activeCustomers < 10 || rest.activeCustomers < 10
+  const directional =
+    !tooSmall &&
+    (seg.activeCustomers < 30 ||
+      rest.activeCustomers < 30 ||
+      seg.orders < 100 ||
+      rest.orders < 100)
+
+  const totalActive = seg.activeCustomers + rest.activeCustomers
+  const activeShare = totalActive > 0 ? seg.activeCustomers / totalActive : null
+
+  const segDollars = popBasisDollars(seg, basis)
+  const restDollars = popBasisDollars(rest, basis)
+  const totalDollars =
+    segDollars !== null && restDollars !== null ? segDollars + restDollars : null
+  const dollarShare =
+    totalDollars !== null && totalDollars > 0 && segDollars !== null
+      ? segDollars / totalDollars
+      : null
+
+  const segBasket = segDollars !== null && seg.orders > 0 ? segDollars / seg.orders : null
+  const restBasket = restDollars !== null && rest.orders > 0 ? restDollars / rest.orders : null
+  const basketLift =
+    segBasket !== null && restBasket !== null && restBasket !== 0
+      ? (segBasket - restBasket) / restBasket
+      : null
+  const basketBadge = isMargin
+    ? null
+    : liftBadge(basketLift, { tooSmall, directional, restBaseline: restBasket })
+
+  const segOpc = seg.activeCustomers > 0 ? seg.orders / seg.activeCustomers : null
+  const restOpc = rest.activeCustomers > 0 ? rest.orders / rest.activeCustomers : null
+  const opcIndex = segOpc !== null && restOpc !== null && restOpc !== 0 ? segOpc / restOpc : null
+  const opcBadge = indexBadge(opcIndex, { tooSmall, directional, restBaseline: restOpc })
+
+  return (
+    <section className="cv-vsrest" aria-label="Segment vs rest comparison">
+      <div className="cv-vsrest-head">
+        <h3 className="customer-value-section-label">Segment vs rest</h3>
+        <span className="subtle-copy cv-vsrest-sub">
+          Known customers only, selected date range. Current segment membership; the cohort
+          selector affects the deep dive below, not this band.
+        </span>
+      </div>
+      <div className="cv-vsrest-cards">
+        <VsRestCard
+          label="Active customers"
+          big={fmtInt(seg.activeCustomers)}
+          vsRest={`vs rest ${fmtInt(rest.activeCustomers)}`}
+          badge={
+            activeShare !== null
+              ? { text: `${(activeShare * 100).toFixed(1)}% of active known`, kind: 'share' }
+              : null
+          }
+        />
+        <VsRestCard
+          label={`Total ${basisLabel.toLowerCase()}`}
+          big={segDollars !== null ? fmtMoney(segDollars) : 'n/a'}
+          vsRest={restDollars !== null ? `vs rest ${fmtMoney(restDollars)}` : null}
+          badge={
+            isMargin || dollarShare === null
+              ? null
+              : { text: `${(dollarShare * 100).toFixed(1)}% of known total`, kind: 'share' }
+          }
+          note={isMargin ? 'Margin comparison needs the segment facts pipeline.' : undefined}
+        />
+        <VsRestCard
+          label="Avg basket"
+          big={segBasket !== null ? fmtMoney(segBasket) : 'n/a'}
+          vsRest={restBasket !== null ? `vs rest ${fmtMoney(restBasket)}` : null}
+          badge={basketBadge}
+          note={
+            isMargin
+              ? 'Margin comparison needs the segment facts pipeline.'
+              : `${fmtInt(seg.orders)} segment order${seg.orders === 1 ? '' : 's'}`
+          }
+        />
+        <VsRestCard
+          label="Orders per customer"
+          big={segOpc !== null ? segOpc.toFixed(2) : 'n/a'}
+          vsRest={restOpc !== null ? `vs rest ${restOpc.toFixed(2)}` : null}
+          badge={opcBadge}
+          note={`${fmtInt(seg.activeCustomers)} active, ${fmtInt(seg.orders)} order${seg.orders === 1 ? '' : 's'}`}
+        />
+      </div>
+    </section>
+  )
+}
+
+function VsRestCard({
+  label,
+  big,
+  vsRest,
+  badge,
+  note,
+}: {
+  label: string
+  big: string
+  vsRest: string | null
+  badge: { text: string; kind: 'share' | 'up' | 'down' | 'flat' | 'muted' } | null
+  note?: string
+}) {
+  return (
+    <div className="cv-vsrest-card">
+      <div className="cv-vsrest-card-label">{label}</div>
+      <div className="cv-vsrest-card-big">{big}</div>
+      {vsRest ? <div className="cv-vsrest-card-rest subtle-copy">{vsRest}</div> : null}
+      {badge ? (
+        <div className={`cv-vsrest-badge cv-vsrest-badge-${badge.kind}`}>{badge.text}</div>
+      ) : null}
+      {note ? <div className="cv-vsrest-card-note subtle-copy">{note}</div> : null}
     </div>
   )
 }

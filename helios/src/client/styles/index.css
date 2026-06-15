@@ -7018,6 +7018,104 @@ span.metric-chart-legend-item {
   cursor: pointer;
 }
 
+/* Section label used to demote the existing KPI strip to "Segment
+   detail" and to title the "Segment vs rest" band when the lens is on. */
+.customer-value-tab .customer-value-section-label {
+  margin: 0.8rem 0 0.4rem;
+  font-size: 0.95rem;
+  font-weight: 700;
+}
+
+/* Customer Value: "Segment vs rest" headline comparison band. */
+.customer-value-tab .cv-vsrest {
+  margin: 0 0 0.8rem;
+}
+.customer-value-tab .cv-vsrest-head .customer-value-section-label {
+  margin-top: 0;
+}
+.customer-value-tab .cv-vsrest-sub {
+  display: block;
+  font-size: 0.76rem;
+  line-height: 1.3;
+  margin-bottom: 0.5rem;
+}
+.customer-value-tab .cv-vsrest-cards {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 0.6rem;
+}
+@media (min-width: 560px) {
+  .customer-value-tab .cv-vsrest-cards {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+@media (min-width: 900px) {
+  .customer-value-tab .cv-vsrest-cards {
+    grid-template-columns: repeat(4, 1fr);
+  }
+}
+.customer-value-tab .cv-vsrest-card {
+  border: 1px solid var(--panel-border);
+  border-radius: 10px;
+  padding: 0.6rem 0.75rem;
+  background: var(--surface, rgba(255, 250, 241, 0.55));
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+.customer-value-tab .cv-vsrest-card-label {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--muted, #6b5b48);
+}
+.customer-value-tab .cv-vsrest-card-big {
+  font-size: 1.35rem;
+  font-weight: 700;
+  line-height: 1.1;
+}
+.customer-value-tab .cv-vsrest-card-rest {
+  font-size: 0.78rem;
+}
+.customer-value-tab .cv-vsrest-card-note {
+  font-size: 0.72rem;
+}
+.customer-value-tab .cv-vsrest-badge {
+  align-self: flex-start;
+  margin-top: 0.15rem;
+  padding: 0.1rem 0.45rem;
+  border-radius: 999px;
+  font-size: 0.74rem;
+  font-weight: 600;
+  border: 1px solid transparent;
+}
+.customer-value-tab .cv-vsrest-badge-share {
+  background: rgba(29, 78, 216, 0.1);
+  border-color: rgba(29, 78, 216, 0.35);
+  color: #1d4ed8;
+}
+.customer-value-tab .cv-vsrest-badge-up {
+  background: rgba(21, 128, 61, 0.12);
+  border-color: rgba(21, 128, 61, 0.4);
+  color: #15803d;
+}
+.customer-value-tab .cv-vsrest-badge-down {
+  background: rgba(185, 28, 28, 0.1);
+  border-color: rgba(185, 28, 28, 0.4);
+  color: #b91c1c;
+}
+.customer-value-tab .cv-vsrest-badge-flat {
+  background: rgba(120, 86, 48, 0.1);
+  border-color: rgba(120, 86, 48, 0.3);
+  color: var(--muted, #6b5b48);
+}
+.customer-value-tab .cv-vsrest-badge-muted {
+  background: rgba(120, 86, 48, 0.06);
+  border-color: rgba(120, 86, 48, 0.25);
+  color: var(--muted, #6b5b48);
+  font-style: italic;
+  font-weight: 500;
+}
+
 /* ----- Encoding-axis selectors (color by / size by) + legend ------ */
 .customer-map-page .cm-encoding-row {
   border-top: 1px dashed var(--panel-border);
