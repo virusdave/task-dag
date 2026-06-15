@@ -26,6 +26,7 @@ import {
   ConfigWorkersEnrichVisitorScanAddressJobPayloadSchema,
   ConfigWorkersLinkVisitorScanToSweedJobPayloadSchema,
   ConfigWorkersRefreshSweedCustomerSegmentsJobPayloadSchema,
+  ConfigWorkersGeoSegmentRuleEvalJobPayloadSchema,
   CatalogSyncGroupDetailJobPayloadSchema,
   LlmDebugRerunJobPayloadSchema,
   ProposalGenerateDescriptionBatchJobPayloadSchema,
@@ -73,6 +74,7 @@ import { runConfigWorkersEnrichDeliveryAddressJob } from '../jobs/enrichDelivery
 import { runConfigWorkersEnrichVisitorScanAddressJob } from '../jobs/enrichVisitorScanAddressJob.js'
 import { runConfigWorkersLinkVisitorScanToSweedJob } from '../jobs/linkVisitorScanToSweedJob.js'
 import { runConfigWorkersRefreshSweedCustomerSegmentsJob } from '../jobs/refreshSweedCustomerSegmentsJob.js'
+import { runConfigWorkersGeoSegmentRuleEvalJob } from '../jobs/geoSegmentRuleEvalJob.js'
 import { runProposalImportReviewJsonJob } from '../jobs/importReviewJsonJob.js'
 import { getPool } from '../../server/db/pool.js'
 import { runLlmDebugRerunJob } from '../jobs/llmDebugRerunJob.js'
@@ -307,6 +309,12 @@ const handlers: Record<JobType, JobHandler> = {
     await runConfigWorkersRefreshSweedCustomerSegmentsJob(
       context,
       ConfigWorkersRefreshSweedCustomerSegmentsJobPayloadSchema.parse(context.payload),
+    )
+  },
+  'config.workers.geo_segment_rule_eval': async (context) => {
+    await runConfigWorkersGeoSegmentRuleEvalJob(
+      context,
+      ConfigWorkersGeoSegmentRuleEvalJobPayloadSchema.parse(context.payload),
     )
   },
 }

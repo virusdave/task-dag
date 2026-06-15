@@ -29,6 +29,8 @@ import type { ConfigWorkersEnrichVisitorScanAddressJobPayload } from '../../shar
 import { appendAuditEvent } from '../../server/audit/appendAuditEvent.js'
 import { getPool } from '../../server/db/pool.js'
 import { withTransaction } from '../../server/db/tx.js'
+import { enqueueJobs, JOB_PRIORITY_BACKFILL } from '../../server/jobs/enqueueJob.js'
+import type { EnqueueJobInput } from '../../server/jobs/enqueueJob.js'
 import {
   applyGeocodeResult,
   geocodeViaCensus,
@@ -53,6 +55,26 @@ interface UnlinkedScanRow {
 // thousands of rows.
 const PROGRESS_LOG_INTERVAL_MS = 30_000
 
+// Build the geo-segment eval enqueue input for one scan + trigger edge.
+// Per-edge dedupe key (so distinct edges never suppress each other) +
+// shared per-scan concurrencyKey (so the edges still serialise and we
+// never run two Sweed sessions for the same scan at once).
+function geoEvalEnqueueInput(
+  scanId: number,
+  trigger: 'address_geocoded' | 'address_attached',
+): EnqueueJobInput {
+  const key = `config.workers.geo_segment_rule_eval:${scanId}`
+  return {
+    jobType: 'config.workers.geo_segment_rule_eval',
+    module: 'config',
+    payload: { scanId, trigger },
+    priority: JOB_PRIORITY_BACKFILL,
+    dedupeKey: `${key}:${trigger}`,
+    concurrencyKey: key,
+    requestedByUserId: null,
+  }
+}
+
 export async function runConfigWorkersEnrichVisitorScanAddressJob(
   context: JobHandlerContext,
   payload: ConfigWorkersEnrichVisitorScanAddressJobPayload,
@@ -70,6 +92,11 @@ export async function runConfigWorkersEnrichVisitorScanAddressJob(
   let linked = 0
   let noText = 0
   let alreadyLinked = 0
+  // Scans we just attached to an address that was ALREADY geocoded `ok`
+  // (no fresh geocode event will fire for them in phase 2), so we must
+  // kick the geo-segment engine for them explicitly. See the
+  // `address_attached` enqueue after this phase.
+  const addressReadyScanIds: number[] = []
   let lastProgressLogAt = Date.now()
   function maybeLogProgress(phase: 'link' | 'geo', extra: string): void {
     const now = Date.now()
@@ -133,7 +160,13 @@ export async function runConfigWorkersEnrichVisitorScanAddressJob(
           [upserted.addressId, row.id],
         )
         if (upd.rowCount === 0) alreadyLinked += 1
-        else linked += 1
+        else {
+          linked += 1
+          // We just attached this scan to an address that is ALREADY
+          // geocoded — phase 2 won't re-geocode it, so remember it for
+          // an explicit geo-segment kick below.
+          if (upserted.geocodeStatus === 'ok') addressReadyScanIds.push(Number(row.id))
+        }
       })
     } catch (cause) {
       // eslint-disable-next-line no-console
@@ -152,10 +185,58 @@ export async function runConfigWorkersEnrichVisitorScanAddressJob(
     `[enrich-visitor-scan-address] job=${context.id} phase=link done scanned=${scanned} linked=${linked} no_text=${noText} already=${alreadyLinked}`,
   )
 
+  // ----- 1b. Geo-segment kick for already-geocoded attachments -----
+  // Scans attached this tick to an address that was already geocoded
+  // `ok` get no phase-2 geocode event, so trigger the engine directly
+  // for the LINKED ones whose site has an enabled, in-window first_scan
+  // rule. (Not-yet-linked scans are covered later by the link worker.)
+  if (addressReadyScanIds.length > 0) {
+    try {
+      const scanRows = await pool.query<{ id: string }>(
+        `
+          select vs.id
+            from visitor_scans vs
+            join visitor_scan_links vsl
+              on vsl.scan_id = vs.id and vsl.link_status = 'linked'
+           where vs.id = any($1::bigint[])
+             and exists (
+               select 1 from geo_segment_rules r
+                where r.enabled
+                  and r.site_slug = vs.site_slug
+                  and r.trigger = 'first_scan'
+                  and (r.since is null or coalesce(vs.scanned_at, vs.ingested_at) >= r.since)
+             )
+        `,
+        [addressReadyScanIds],
+      )
+      const inputs = scanRows.rows.map((r) => geoEvalEnqueueInput(Number(r.id), 'address_attached'))
+      if (inputs.length > 0) {
+        await withTransaction(async (db) => {
+          await enqueueJobs(db, inputs)
+        })
+        // eslint-disable-next-line no-console
+        console.log(
+          `[enrich-visitor-scan-address] job=${context.id} enqueued geo-segment eval (address_attached) for ${inputs.length} linked scan(s)`,
+        )
+      }
+    } catch (cause) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[enrich-visitor-scan-address] job=${context.id} geo-segment address_attached enqueue failed (non-fatal): ${
+          cause instanceof Error ? cause.message : String(cause)
+        }`,
+      )
+    }
+  }
+
   // ----- 2. Geocode drain -----
   let geocodedOk = 0
   let geocodedFailed = 0
   let geocodedNotUs = 0
+  // Address ids that reached geocode `ok` this tick — used to kick the
+  // geographic segment-rule engine for the scans on those addresses
+  // (the geocode half of the dual scan-link/geocode trigger).
+  const geocodedOkAddressIds: number[] = []
   // Reset the progress beacon clock for phase 2 so the first geo
   // beacon also fires after ~30s of geocode work, not whatever was
   // left over from phase 1.
@@ -163,14 +244,18 @@ export async function runConfigWorkersEnrichVisitorScanAddressJob(
   for (let i = 0; i < batchSize; i++) {
     let status: 'ok' | 'failed' | 'not_us' | null = null
     try {
-      status = await withTransaction(async (db) => {
+      const outcome = await withTransaction(async (db) => {
         const pending = await queueGeocodePending(db, 1)
         if (pending.length === 0) return null
         const row = pending[0]!
         const result = await geocodeViaCensus(row.normalized)
         await applyGeocodeResult(db, row.addressId, result)
-        return result.status as 'ok' | 'failed' | 'not_us'
+        return { status: result.status as 'ok' | 'failed' | 'not_us', addressId: Number(row.addressId) }
       })
+      status = outcome === null ? null : outcome.status
+      if (outcome !== null && outcome.status === 'ok') {
+        geocodedOkAddressIds.push(outcome.addressId)
+      }
     } catch (cause) {
       // eslint-disable-next-line no-console
       console.warn('[enrich-visitor-scan-address] geocode failed', {
@@ -195,6 +280,51 @@ export async function runConfigWorkersEnrichVisitorScanAddressJob(
       1000
     ).toFixed(1)}s`,
   )
+
+  // ----- 2b. Geographic segment-rule engine kick -----
+  // For each address that just reached geocode `ok`, enqueue the
+  // geo-segment eval job for its LINKED scans whose site has at least
+  // one enabled rule. This is the geocode half of the dual trigger
+  // (the link worker covers the case where the link lands last).
+  // Deduped per scan, best-effort, DB-only unless a rule matches.
+  if (geocodedOkAddressIds.length > 0) {
+    try {
+      const scanRows = await pool.query<{ id: string }>(
+        `
+          select vs.id
+            from visitor_scans vs
+            join visitor_scan_links vsl
+              on vsl.scan_id = vs.id and vsl.link_status = 'linked'
+           where vs.address_id = any($1::bigint[])
+             and exists (
+               select 1 from geo_segment_rules r
+                where r.enabled
+                  and r.site_slug = vs.site_slug
+                  and r.trigger = 'first_scan'
+                  and (r.since is null or coalesce(vs.scanned_at, vs.ingested_at) >= r.since)
+             )
+        `,
+        [geocodedOkAddressIds],
+      )
+      const inputs = scanRows.rows.map((r) => geoEvalEnqueueInput(Number(r.id), 'address_geocoded'))
+      if (inputs.length > 0) {
+        await withTransaction(async (db) => {
+          await enqueueJobs(db, inputs)
+        })
+        // eslint-disable-next-line no-console
+        console.log(
+          `[enrich-visitor-scan-address] job=${context.id} enqueued geo-segment eval for ${inputs.length} linked scan(s) across ${geocodedOkAddressIds.length} newly-geocoded address(es)`,
+        )
+      }
+    } catch (cause) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[enrich-visitor-scan-address] job=${context.id} geo-segment eval enqueue failed (non-fatal): ${
+          cause instanceof Error ? cause.message : String(cause)
+        }`,
+      )
+    }
+  }
 
   // ----- 3. Audit -----
   await withTransaction(async (db) => {

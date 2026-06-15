@@ -262,6 +262,46 @@ export async function loadPurchaseTriggerCandidates(
   }))
 }
 
+/**
+ * A persisted geographic segment-assignment rule
+ * (`geo_segment_rules`). The on-scan engine loads the enabled rules
+ * for a scan's site + trigger and applies any that match. Mirrors the
+ * migration-079 columns (camelCased).
+ */
+export interface GeoSegmentRule {
+  readonly id: number
+  readonly siteSlug: string
+  readonly dealerId: number
+  readonly segmentId: number
+  readonly centerLat: number
+  readonly centerLng: number
+  readonly radiusFeet: number
+  readonly trigger: TriggerKind
+  readonly reactivationDays: number
+  /** Inclusive lower bound on the qualifying event, or null. */
+  readonly since: Date | null
+  readonly enabled: boolean
+}
+
+/**
+ * Does a geocoded point fall inside a rule's geofence? Uses the same
+ * equirectangular `approxMeters` as the selection SQL so the live
+ * engine and the backfill agree to the foot. Pure — unit tested.
+ */
+export function ruleGeoMatches(rule: GeoSegmentRule, lat: number, lng: number): boolean {
+  const d = approxMeters(rule.centerLat, rule.centerLng, lat, lng)
+  return d <= feetToMeters(rule.radiusFeet)
+}
+
+/**
+ * Is the qualifying-event instant on/after the rule's `since` bound?
+ * A null bound means "no lower bound". Pure — unit tested.
+ */
+export function ruleSinceSatisfied(rule: GeoSegmentRule, eventTime: Date): boolean {
+  if (rule.since === null) return true
+  return eventTime.getTime() >= rule.since.getTime()
+}
+
 export type TriggerKind = 'first_scan' | 'first_purchase'
 
 export interface MergedCandidate {

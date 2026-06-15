@@ -81,6 +81,13 @@ export const JOB_EXECUTION_POOL_BY_TYPE: Record<JobType, JobPoolMetadata> = {
   // (no Sweed), so it lives in the system pool — keeps the Sweed
   // pool free for catalog / orders / shifts / etc.
   'config.workers.enrich_visitor_scan_address': { pool: 'system', requiresSweedSession: false },
+  // Geographic segment-rule evaluation is DB-only on the common path
+  // (most scans match no rule); it opens its OWN private Sweed session
+  // via `withSweedSession` only when a rule actually matches a customer,
+  // so it lives in the system pool and is NOT a `requiresSweedSession`
+  // job — keeping the singleton Sweed worker free of the per-scan
+  // no-op evaluations.
+  'config.workers.geo_segment_rule_eval': { pool: 'system', requiresSweedSession: false },
   'llm.debug.rerun': { pool: 'system', requiresSweedSession: false },
   'proposal.generate.description_batch': { pool: 'system', requiresSweedSession: false },
   'proposal.generate.pricing_batch': { pool: 'system', requiresSweedSession: false },

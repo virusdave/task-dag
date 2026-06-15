@@ -970,6 +970,17 @@ const SENTINELS: MigrationSentinel[] = [
       '/catalog/review queue 500s.',
     check: (db) => tableExists(db, 'catalog_group_products'),
   },
+  {
+    migrationId: '079_geo_segment_rules',
+    label:
+      'Geographic (scan-location-based) segment-assignment engine ' +
+      '(geo_segment_rules + geo_segment_rule_applications) — required by ' +
+      'the on-scan geo-segment eval job (config.workers.geo_segment_rule_eval) ' +
+      'and its enqueue hooks in the visitor-scan link / address-enrich ' +
+      'workers. Without it those best-effort enqueues + the eval handler ' +
+      'error on the missing tables (caught/logged, but no assignments happen).',
+    check: (db) => tableExists(db, 'geo_segment_rules'),
+  },
 ]
 
 interface CacheEntry {

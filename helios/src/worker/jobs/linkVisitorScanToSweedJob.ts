@@ -41,7 +41,7 @@
 import type { ConfigWorkersLinkVisitorScanToSweedJobPayload } from '../../shared/contracts/index.js'
 import { getPool } from '../../server/db/pool.js'
 import { withTransaction } from '../../server/db/tx.js'
-import { enqueueJob, JOB_PRIORITY_URGENT } from '../../server/jobs/enqueueJob.js'
+import { enqueueJob, JOB_PRIORITY_BACKFILL, JOB_PRIORITY_URGENT } from '../../server/jobs/enqueueJob.js'
 import {
   loadLinkForJob,
   markLinkFailed,
@@ -239,6 +239,37 @@ export async function runConfigWorkersLinkVisitorScanToSweedJob(
       console.warn(
         `[link-visitor-scan-to-sweed] job=${context.id} scan=${scanId} segment cache warm failed (non-fatal): ${
           segErr instanceof Error ? segErr.message : String(segErr)
+        }`,
+      )
+    }
+    // Best-effort: kick the geographic segment-rule engine now that the
+    // scan is linked. It's DB-only unless a rule actually matches, and
+    // deduped per scan so the geocode-completion hook collapses onto the
+    // same row when both fire. Must never fail the link. See
+    // geoSegmentRuleEvalJob.ts + migration 079.
+    try {
+      const geoConcurrencyKey = `config.workers.geo_segment_rule_eval:${scanId}`
+      await withTransaction(async (db) => {
+        await enqueueJob(db, {
+          jobType: 'config.workers.geo_segment_rule_eval',
+          module: 'config',
+          payload: { scanId, trigger: 'scan_linked' },
+          priority: JOB_PRIORITY_BACKFILL,
+          // Per-EDGE dedupe so the geocode-completion edge can never be
+          // suppressed by an in-flight scan_linked eval (and vice
+          // versa) — that would drop the second prerequisite. The
+          // shared concurrencyKey still serialises the two per scan so
+          // they never run a Sweed session for the same scan at once.
+          dedupeKey: `${geoConcurrencyKey}:scan_linked`,
+          concurrencyKey: geoConcurrencyKey,
+          requestedByUserId: null,
+        })
+      })
+    } catch (geoErr) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[link-visitor-scan-to-sweed] job=${context.id} scan=${scanId} geo-segment eval enqueue failed (non-fatal): ${
+          geoErr instanceof Error ? geoErr.message : String(geoErr)
         }`,
       )
     }

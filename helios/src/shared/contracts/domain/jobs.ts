@@ -58,6 +58,7 @@ export const JobTypeSchema = z.enum([
   'config.workers.enrich_visitor_scan_address',
   'config.workers.link_visitor_scan_to_sweed',
   'config.workers.refresh_sweed_customer_segments',
+  'config.workers.geo_segment_rule_eval',
   'config.workers.sweed_orders_raw_json_drain',
   'config.workers.litalerts_products_raw_json_drain',
   'config.workers.fuzzy_skus_retention',
@@ -779,6 +780,48 @@ export const ConfigWorkersRefreshSweedCustomerSegmentsJobPayloadSchema = z.objec
 })
 export type ConfigWorkersRefreshSweedCustomerSegmentsJobPayload = z.infer<
   typeof ConfigWorkersRefreshSweedCustomerSegmentsJobPayloadSchema
+>
+
+/**
+ * Per-scan geographic-segment rule evaluation
+ * (virusdave/top-level Bronx geo-segment work, phase 2).
+ *
+ * Enqueued (best-effort, deduped per scan) from BOTH ends of the
+ * scan-enrichment pipeline, because a scan's Sweed link and its home
+ * address geocode complete in either order:
+ *
+ *   - `linkVisitorScanToSweedJob` enqueues it after a scan links to a
+ *     Sweed customer; and
+ *   - `enrichVisitorScanAddressJob` enqueues it for the scans on an
+ *     address that just reached geocode `ok`.
+ *
+ * The handler is DB-only on the common path: it loads the scan's link
+ * + geocode + person context, loads the small set of enabled
+ * `geo_segment_rules` for the scan's site and `first_scan` trigger,
+ * and only opens a Sweed session (to call
+ * `store.marketing.segment.result.add`) when a rule actually matches a
+ * customer not yet recorded as applied in `geo_segment_rule_applications`.
+ * Missing prerequisites (not yet linked / not yet geocoded) are NOT
+ * errors — the other hook re-enqueues when its half completes.
+ *
+ * See helios/src/worker/jobs/geoSegmentRuleEvalJob.ts and
+ * migration 079.
+ */
+export const ConfigWorkersGeoSegmentRuleEvalJobPayloadSchema = z.object({
+  scanId: z.number().int().positive(),
+  // What re-triggered this evaluation, for the audit trail / dedup
+  // observability. All paths converge on the same DB evaluation:
+  //   - scan_linked       : the scan just linked to a Sweed customer
+  //   - address_geocoded  : the scan's home address just reached geocode ok
+  //   - address_attached  : the scan was just attached to an address that
+  //                         was ALREADY geocoded ok (no fresh geocode event)
+  //   - manual            : operator / backfill re-trigger
+  trigger: z
+    .enum(['scan_linked', 'address_geocoded', 'address_attached', 'manual'])
+    .default('scan_linked'),
+})
+export type ConfigWorkersGeoSegmentRuleEvalJobPayload = z.infer<
+  typeof ConfigWorkersGeoSegmentRuleEvalJobPayloadSchema
 >
 
 export {
