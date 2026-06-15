@@ -45,6 +45,7 @@ import {
   MetricsDefaultsModal,
   type MetricsDefaultsChange,
 } from './MetricsDefaultsModal.js'
+import { CrmSegmentAnalysisTab } from './CrmSegmentAnalysisTab.js'
 import { CrmSegmentsTab } from './CrmSegmentsTab.js'
 import { CustomerValueTab } from './CustomerValueTab.js'
 import { InventoryProcurementTab } from './InventoryProcurementTab.js'
@@ -198,6 +199,7 @@ export type MetricsTabId =
   | 'budtenders'
   | 'customer-value'
   | 'crm-segments'
+  | 'crm-segment-analysis'
   | 'target'
 
 const DEFAULT_TAB_ID: MetricsTabId = 'essentials'
@@ -308,6 +310,18 @@ const METRICS_TABS: ReadonlyArray<MetricsTab> = [
     defaultStackMode: 'none',
     // Owns its full UI (segment picker + sites/range + cards). No shared
     // toolbar or registry metrics.
+    showAggControl: false,
+    showStackControl: false,
+    include: () => false,
+    grant: 'explore',
+  },
+  {
+    id: 'crm-segment-analysis',
+    label: 'CRM Segment Analysis',
+    description:
+      'How a segment differs from the rest (everyone − segment): customer / sales share + value index, basket size, value-per-customer, repeat & discount rates, and fulfillment-channel affinity — each with lift/index and a significance badge (two-proportion z / Welch / BH-FDR). Margin & category affinity arrive with the fact rollups.',
+    defaultAgg: 'week',
+    defaultStackMode: 'none',
     showAggControl: false,
     showStackControl: false,
     include: () => false,
@@ -791,6 +805,10 @@ export function MetricsLayoutPage() {
           // about-the-segment cards). Single consolidated fetch; no shared
           // toolbar. Same short-circuit pattern as the other bespoke tabs.
           <CrmSegmentsTab />
+        ) : activeTab.id === 'crm-segment-analysis' ? (
+          // CRM Segment Analysis owns its full UI (picker + sites/range +
+          // comparison cards/tables). Single consolidated fetch.
+          <CrmSegmentAnalysisTab />
         ) : activeTab.id === 'target' ? (
           // Target tracking owns its full UI (cost config + break-even
           // gauge + per-period bar chart). No shared toolbar.

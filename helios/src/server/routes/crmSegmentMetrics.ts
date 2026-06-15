@@ -1,11 +1,14 @@
 import type { FastifyInstance } from 'fastify'
 
 import {
+  CrmSegmentAnalysisRequestSchema,
+  CrmSegmentAnalysisResponseSchema,
   CrmSegmentListResponseSchema,
   CrmSegmentMetricsRequestSchema,
   CrmSegmentMetricsResponseSchema,
 } from '../../shared/contracts/index.js'
 import { requireMetricsGrant } from '../auth/requireSession.js'
+import { getCrmSegmentAnalysis } from '../crmSegmentMetrics/crmSegmentAnalysisQueries.js'
 import {
   defaultCrmWindow,
   getCrmSegmentList,
@@ -45,5 +48,22 @@ export async function registerCrmSegmentMetricsRoutes(
       return reply.status(404).send({ error: `No segment ${parsed.segmentId} is known to Helios.` })
     }
     return reply.send(CrmSegmentMetricsResponseSchema.parse(result))
+  })
+
+  server.get('/api/crm/segment-analysis', async (request, reply) => {
+    const user = await requireMetricsGrant(request, reply, 'explore')
+    if (!user) return
+    const parsed = CrmSegmentAnalysisRequestSchema.parse(request.query ?? {})
+    const { from, to } = defaultCrmWindow(parsed.to, parsed.from)
+    const result = await getCrmSegmentAnalysis(getPool(), {
+      segmentId: parsed.segmentId,
+      sites: parsed.sites,
+      from,
+      to,
+    })
+    if (result === null) {
+      return reply.status(404).send({ error: `No segment ${parsed.segmentId} is known to Helios.` })
+    }
+    return reply.send(CrmSegmentAnalysisResponseSchema.parse(result))
   })
 }

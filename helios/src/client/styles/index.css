@@ -7665,6 +7665,70 @@ span.metric-chart-legend-item {
   white-space: nowrap;
 }
 
+/* CRM Segment Analysis: comparison tables + confidence badges. The
+   horizontal scroll wrapper keeps the 6–7 column tables usable on a phone
+   without squashing the numbers. */
+.crm-cmp-scroll {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.crm-cmp-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  min-width: 460px;
+}
+
+.crm-cmp-table th,
+.crm-cmp-table td {
+  padding: 6px 8px;
+  text-align: right;
+  white-space: nowrap;
+  border-bottom: 1px solid #f0f0f0;
+  font-variant-numeric: tabular-nums;
+}
+
+.crm-cmp-table thead th {
+  color: #666;
+  font-weight: 600;
+  border-bottom: 1px solid #ddd;
+}
+
+.crm-cmp-table th[scope='row'] {
+  text-align: left;
+  font-weight: 500;
+  color: #333;
+}
+
+.crm-cmp-context {
+  color: #999;
+}
+
+.crm-conf {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+}
+.crm-conf-strong {
+  background: #e3f4e7;
+  color: #1d7a3a;
+}
+.crm-conf-notable {
+  background: #eef5da;
+  color: #5a6e16;
+}
+.crm-conf-directional {
+  background: #f3f3f3;
+  color: #777;
+}
+.crm-conf-too_small {
+  background: #f7f7f7;
+  color: #aaa;
+}
+
 /* ===========================================================================
  * Catalog → Purchase Sell-Through pages
  *

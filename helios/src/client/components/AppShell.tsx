@@ -144,6 +144,7 @@ function buildPrimarySidebarNodes(
   const metricsLeaves: ReadonlyArray<MetricsLeaf> = [
     { key: 'explore', navKey: 'reports.metrics.explore', label: 'Explore', to: '/metrics' },
     { key: 'explore', navKey: 'reports.metrics.crmSegments', label: 'CRM Segments', to: '/metrics/crm-segments' },
+    { key: 'explore', navKey: 'reports.metrics.crmSegmentAnalysis', label: 'CRM Segment Analysis', to: '/metrics/crm-segment-analysis' },
     { key: 'brands', navKey: 'reports.metrics.brands', label: 'Brands', to: '/metrics/brands' },
     { key: 'distributors', navKey: 'reports.metrics.distributors', label: 'Distributors', to: '/metrics/distributors' },
     { key: 'staff', navKey: 'reports.metrics.staff', label: 'Staff', to: '/metrics/staff' },

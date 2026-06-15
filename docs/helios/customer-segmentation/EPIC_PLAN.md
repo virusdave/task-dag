@@ -27,11 +27,13 @@ the catalog / budtender tabs):
   membership, growth (entries/week), activity / value / recency, fulfillment
   mix. **SHIPPED (Phase 1).**
 - **CRM Segment Analysis** (`/metrics/crm-segment-analysis`) — segment-vs-rest
-  / segment-vs-everyone comparison with lift/index, deltas, category &
-  fulfillment affinity, and significance flags. **Pending (Phase 3+).**
+  comparison with lift/index, deltas, fulfillment affinity, and significance
+  flags. **SHIPPED (header-grain phase 1)** — basket size, value/customer,
+  repeat & discount rates, channel affinity. Margin/customer + category &
+  subcategory affinity still pending (need the §4 fact rollups).
 
-A second oracle review (2026-06) refined the **statistical methodology** for
-the Analysis tab (use it when building Phase 3+):
+The 2026-06 oracle review refined the **statistical methodology** now
+implemented in `segmentStats.ts` (unit-tested) and used by the Analysis tab:
 
 - Baseline = **rest** (everyone − segment), not "everyone" (avoids partial
   self-comparison); show "everyone" only as context.
@@ -61,11 +63,17 @@ the Analysis tab (use it when building Phase 3+):
 - Tab `helios/src/client/routes/metrics/CrmSegmentsTab.tsx` + wiring in
   `MetricsLayoutPage.tsx` (tab id `crm-segments`) + sidebar leaf in
   `AppShell.tsx`.
+- Analysis: contract `crmSegmentAnalysis.ts`, stats
+  `crmSegmentMetrics/segmentStats.ts` (+ `.test.ts`), query
+  `crmSegmentMetrics/crmSegmentAnalysisQueries.ts` (single classify-and-group
+  pass: in_segment LEFT JOIN over sweed_orders → customer/order/channel
+  grouped aggregates), route `GET /api/crm/segment-analysis`, tab
+  `CrmSegmentAnalysisTab.tsx` (tab id `crm-segment-analysis`). Shared segment
+  picker extracted to `crmSegmentPicker.tsx` (deep-links via `?segmentId=`).
 
 **Deferred to later phases (need the §4 fact rollups):** margin/member,
-GM%, category & subcategory mix/affinity, and the entire CRM Segment
-Analysis comparison tab. Phase 2 builds the daily customer/category facts;
-Phase 3 builds the Analysis tab on top of them.
+GM%, and category & subcategory mix/affinity (on both tabs). Phase 2 builds
+the daily customer/category facts; a follow-up enriches both tabs from them.
 
 ---
 

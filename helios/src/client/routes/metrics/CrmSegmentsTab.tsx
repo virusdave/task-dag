@@ -2,15 +2,14 @@ import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 
 import {
-  CrmSegmentListResponseSchema,
   CrmSegmentMetricsResponseSchema,
   type CrmRecencyBucketKey,
-  type CrmSegmentListItem,
   type CrmSegmentMetricsResponse,
 } from '../../../shared/contracts/index.js'
 import { loadJson } from '../../app/fetchJson.js'
 
 import { ControlsSection } from './ControlsSection.js'
+import { CrmSegmentPicker, useCrmSegmentPicker } from './crmSegmentPicker.js'
 import { defaultSiteSelection, toggleSiteSelection } from './metricsSiteSelection.js'
 
 // ---------------------------------------------------------------------------
@@ -123,9 +122,7 @@ function Kpi({ label, value, hint }: { label: string; value: string; hint?: stri
 }
 
 export function CrmSegmentsTab() {
-  const [segments, setSegments] = useState<ReadonlyArray<CrmSegmentListItem>>([])
-  const [segmentsError, setSegmentsError] = useState<string | null>(null)
-  const [selectedSegmentId, setSelectedSegmentId] = useState<number | null>(null)
+  const { segments, segmentsError, selectedSegmentId, setSelectedSegmentId } = useCrmSegmentPicker()
 
   const [selectedSites, setSelectedSites] = useState<ReadonlySet<string>>(() =>
     defaultSiteSelection(KNOWN_SITES.map((s) => s.id)),
@@ -135,25 +132,6 @@ export function CrmSegmentsTab() {
   const [data, setData] = useState<CrmSegmentMetricsResponse | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
-
-  // Load the picker list once.
-  useEffect(() => {
-    let cancelled = false
-    loadJson('/api/crm/segments', CrmSegmentListResponseSchema)
-      .then((r) => {
-        if (cancelled) return
-        setSegments(r.segments)
-        // Default to the largest segment with cached members.
-        const firstWithMembers = r.segments.find((s) => s.cachedMemberCount > 0) ?? r.segments[0]
-        if (firstWithMembers) setSelectedSegmentId((cur) => cur ?? firstWithMembers.segmentId)
-      })
-      .catch((e: unknown) => {
-        if (!cancelled) setSegmentsError(e instanceof Error ? e.message : String(e))
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [])
 
   const sitesParam = useMemo(
     () => [...selectedSites].sort().join(','),
@@ -191,45 +169,15 @@ export function CrmSegmentsTab() {
     }
   }, [selectedSegmentId, sitesParam, windowDays])
 
-  // Group segments by scope for the picker's optgroups.
-  const segmentGroups = useMemo(() => {
-    const order: ReadonlyArray<{ key: string; label: string }> = [
-      { key: 'state', label: 'All-store / state' },
-      { key: 'site', label: 'Site' },
-      { key: 'unknown', label: 'Other' },
-    ]
-    return order
-      .map((g) => ({
-        ...g,
-        items: segments.filter((s) => s.scopeLevel === g.key),
-      }))
-      .filter((g) => g.items.length > 0)
-  }, [segments])
-
   return (
     <section className="customer-value-tab crm-segments-tab">
       <ControlsSection title="Filters" defaultOpen="always">
         <div className="metrics-controls">
-          <div className="metrics-control-group">
-            <span className="subtle-copy">segment</span>
-            <select
-              className="crm-seg-picker"
-              value={selectedSegmentId ?? ''}
-              onChange={(e) => setSelectedSegmentId(e.target.value ? Number(e.target.value) : null)}
-            >
-              {selectedSegmentId === null ? <option value="">Select a segment…</option> : null}
-              {segmentGroups.map((g) => (
-                <optgroup key={g.key} label={g.label}>
-                  {g.items.map((s) => (
-                    <option key={s.segmentId} value={s.segmentId}>
-                      {s.name} · {fmtInt(s.cachedMemberCount)} members
-                      {s.enabled === false ? ' · disabled' : ''}
-                    </option>
-                  ))}
-                </optgroup>
-              ))}
-            </select>
-          </div>
+          <CrmSegmentPicker
+            segments={segments}
+            selectedSegmentId={selectedSegmentId}
+            setSelectedSegmentId={setSelectedSegmentId}
+          />
 
           <div className="metrics-control-group">
             <span className="subtle-copy">sites</span>
@@ -324,6 +272,9 @@ function CrmSegmentsBody({ data }: { data: CrmSegmentMetricsResponse }) {
           </span>
         </div>
         <div className="crm-seg-header-links">
+          <Link to={`/metrics/crm-segment-analysis?segmentId=${segment.segmentId}`}>
+            Compare vs others →
+          </Link>
           <Link to={`/config/marketing/segments/${segment.segmentId}`}>Manage / refresh →</Link>
           <a href={segment.sweedPrimeUrl} target="_blank" rel="noreferrer">
             Open in Sweed →

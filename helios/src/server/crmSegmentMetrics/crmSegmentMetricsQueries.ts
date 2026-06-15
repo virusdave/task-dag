@@ -39,12 +39,12 @@ const DAY_MS = 86_400_000
 // the customer-value reader (header subtotal/grand_total can be non-zero on
 // cancelled orders, so without this guard cancelled activity inflates every
 // rollup). Keep in sync with customerValueAnalyticsQueries.nonCancelledOrderSql.
-function nonCancelledOrderSql(alias = ''): string {
+export function nonCancelledOrderSql(alias = ''): string {
   const prefix = alias ? `${alias}.` : ''
   return `and lower(coalesce(${prefix}raw_json->'invoiceStatus'->>'name', '')) <> 'cancelled'`
 }
 
-function resolveDealerIds(sites: readonly string[]): number[] {
+export function resolveDealerIds(sites: readonly string[]): number[] {
   if (sites.length === 0) {
     return HELIOS_PENDING_PURCHASE_SITE_DEALERS.map((d) => d.dealerId)
   }
@@ -54,7 +54,7 @@ function resolveDealerIds(sites: readonly string[]): number[] {
   ).map((d) => d.dealerId)
 }
 
-function siteKeysForDealerIds(dealerIds: readonly number[]): string[] {
+export function siteKeysForDealerIds(dealerIds: readonly number[]): string[] {
   return HELIOS_PENDING_PURCHASE_SITE_DEALERS.filter((d) =>
     dealerIds.includes(d.dealerId),
   ).map((d) => d.siteKey)
