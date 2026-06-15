@@ -17,9 +17,12 @@ re-fuzzying competitor evidence on every run.
   you'll need when phases 5–6 start touching pricing reads.
 - [`task-dag-breakdown.json`](./task-dag-breakdown.json) — leaf-task
   spec for
-  `scripts/task-dag breakdown <epic-sha> --spec-file=docs/helios/catalog-market-data/task-dag-breakdown.json`
-  once the breakdown subcommand is wired up (see "Open questions" in
-  the plan). Each leaf is sized to a single agent-shot of work.
+  `scripts/task-dag breakdown <epic-sha> --spec-file=docs/helios/catalog-market-data/task-dag-breakdown.json`.
+  Each leaf is sized to a single agent-shot of work. To let inter-leaf
+  `dependencies` resolve in one pass, give each producing entry a `key`
+  (the angle-bracket label its dependents already reference, minus the
+  `<>`); see the `breakdown` flow in
+  [`../market-data-sweep/README.md`](../market-data-sweep/README.md).
 
 ## Status
 

@@ -1020,27 +1020,52 @@ cmd_breakdown() {
     local parent_sha=""
     local spec_file=""
     local stdin_json=false
-    
+    local dry_run=false
+    local do_push=true
+    local force=false
+
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --spec-file=*) spec_file="${1#*=}"; shift ;;
             --stdin-json) stdin_json=true; shift ;;
+            --dry-run) dry_run=true; shift ;;
+            --no-push) do_push=false; shift ;;
+            --force) force=true; shift ;;
             --help|-h)
                 cat <<EOF
-Usage: task-dag breakdown <parent-sha> [--spec-file=PATH | --stdin-json]
+Usage: task-dag breakdown <parent-sha> [--spec-file=PATH | --stdin-json] [options]
 
-Create subtasks from a JSON specification.
+Materialise an epic's subtasks from a JSON spec: one empty-tree task
+commit per entry (first parent = the epic, extra parents = its
+dependency tasks, exactly the encoding \`deps\` / \`complete\` read back),
+each published as a \`tasks/frontier/<short>\` ref so other workers can
+\`claim\` it.
 
-Spec format:
+Options:
+  --spec-file=PATH   Read the JSON spec from PATH.
+  --stdin-json       Read the JSON spec from stdin.
+  --dry-run          Print the plan; create no commits/refs, push nothing.
+  --no-push          Create local frontier refs but do not push to origin.
+  --force            Add subtasks even if this epic already has children.
+
+Spec format — a non-empty JSON array, processed in order:
 [
   {
-    "title": "Task title",
-    "description": "Task description",
-    "dependencies": ["<sha1>", "<sha2>"],
-    "type": "task|leaf",
-    "status": "pending"
+    "title": "Task title",            // required
+    "description": "Longer detail",   // optional (commit body)
+    "key": "phase1-foo",              // optional label other entries depend on
+    "dependencies": ["<phase0-bar>", "<sha>"], // optional
+    "type": "leaf",                   // optional, default "leaf" (or "task")
+    "status": "pending"               // optional, default "pending"
   }
 ]
+
+Dependencies resolve to a real commit either by (a) a real git SHA, or
+(b) the \`key\` of an EARLIER entry in the same spec (angle brackets
+optional, so "<phase0-bar>" matches "key": "phase0-bar"). List entries in
+dependency order; a forward / unknown reference is a hard error. The
+dependency gate itself is enforced at \`complete\` time (it refuses while
+any dependency is still open).
 EOF
                 return 0
                 ;;
@@ -1055,17 +1080,289 @@ EOF
                 ;;
         esac
     done
-    
+
     if [ -z "$parent_sha" ]; then
         echo "Error: parent SHA required" >&2
         return 1
     fi
-    
+
     parent_sha=$(resolve_sha "$parent_sha") || return 1
-    
-    echo "Command 'breakdown' not yet fully implemented" >&2
-    echo "Parent: $parent_sha" >&2
-    return 1
+
+    # Read the spec.
+    local spec=""
+    if [ -n "$spec_file" ]; then
+        if [ ! -f "$spec_file" ]; then
+            echo "Error: spec file not found: $spec_file" >&2
+            return 1
+        fi
+        spec=$(cat "$spec_file")
+    elif [ "$stdin_json" = true ]; then
+        spec=$(cat)
+    else
+        echo "Error: provide --spec-file=PATH or --stdin-json" >&2
+        return 1
+    fi
+
+    # Validate it is a non-empty JSON array.
+    if ! echo "$spec" | jq -e 'type == "array" and length > 0' >/dev/null 2>&1; then
+        echo "Error: spec must be a non-empty JSON array" >&2
+        return 1
+    fi
+
+    # Inherit Issue / URL from the epic so children link back (mirrors
+    # what create-task-commit.sh writes and what complete/issue-update read).
+    # `|| true` so a missing field can't trip `set -e` via grep's exit code.
+    local epic_msg
+    epic_msg=$(parse_commit_metadata "$parent_sha")
+    local issue_num
+    issue_num=$(extract_field "$epic_msg" "Issue" 2>/dev/null | sed 's/^#//' || true)
+    local issue_url
+    issue_url=$(extract_field "$epic_msg" "URL" 2>/dev/null || true)
+    if [ -z "$issue_num" ]; then
+        printf "${YELLOW}Warning: epic %s has no Issue field; children will not auto-link to an issue.${RESET}\n" \
+            "$(git rev-parse --short "$parent_sha")" >&2
+    fi
+
+    # Refuse to double-apply. Fetch first so we see children another worker
+    # already pushed (frontier/active refs) or landed (origin/master), then
+    # treat a child as any commit whose FIRST parent is THIS epic OR any
+    # epic-revision ancestor of it — create-task-commit.sh re-parents the
+    # pending ref on every issue edit, so the "current" epic SHA drifts and
+    # a SHA-exact guard would miss an earlier revision's children.
+    if [ "$force" = false ]; then
+        fetch_task_refs
+        git fetch --quiet origin '+refs/heads/master:refs/remotes/origin/master' 2>/dev/null || true
+
+        local epic_chain="$parent_sha"
+        local anc="$parent_sha"
+        local hops=0
+        while [ "$hops" -lt 50 ]; do
+            local p
+            p=$(get_first_parent "$anc" 2>/dev/null || true)
+            [ -z "$p" ] && break
+            local pmsg
+            pmsg=$(parse_commit_metadata "$p" 2>/dev/null || true)
+            local ptype
+            ptype=$(extract_field "$pmsg" "Type" 2>/dev/null || true)
+            [ "$ptype" = "epic" ] || break
+            epic_chain="${epic_chain}"$'\n'"$p"
+            anc="$p"
+            hops=$((hops + 1))
+        done
+
+        # Candidate children: first parent ∈ epic_chain. Exclude the epic
+        # revisions themselves (Type: epic) so only real leaf/task subtasks
+        # count.
+        local candidates
+        candidates=$(git log --all --format='%H %P' 2>/dev/null \
+            | awk -v list="$epic_chain" 'BEGIN{n=split(list,a,"\n"); for(i=1;i<=n;i++) e[a[i]]=1} ($2 in e){print $1}')
+        local child_count=0
+        local cand
+        while IFS= read -r cand; do
+            [ -z "$cand" ] && continue
+            local cmsg
+            cmsg=$(parse_commit_metadata "$cand" 2>/dev/null || true)
+            local ctype
+            ctype=$(extract_field "$cmsg" "Type" 2>/dev/null || true)
+            [ "$ctype" = "epic" ] && continue
+            child_count=$((child_count + 1))
+        done <<< "$candidates"
+
+        if [ "$child_count" -gt 0 ]; then
+            printf "${RED}Error: epic %s already has %s child task(s).${RESET}\n" \
+                "$(git rev-parse --short "$parent_sha")" "$child_count" >&2
+            echo "Re-running breakdown would duplicate them. Use --force to add more." >&2
+            return 1
+        fi
+    fi
+
+    local count
+    count=$(echo "$spec" | jq 'length')
+
+    declare -A KEY_TO_SHA   # key -> created commit SHA (filled in pass 2)
+    declare -A KEY_SEEN     # key -> 1 once declared (used by both passes)
+
+    # ── Pass 1: validate the WHOLE spec before mutating anything ─────────
+    # Eliminates partial-ref state: a bad title / dup key / unresolvable or
+    # non-task dependency fails here, before any commit or ref is created.
+    local idx=0
+    while [ "$idx" -lt "$count" ]; do
+        local entry
+        entry=$(echo "$spec" | jq -c ".[$idx]")
+        if [ "$(echo "$entry" | jq -r 'type')" != "object" ]; then
+            echo "Error: spec entry $idx is not a JSON object" >&2
+            return 1
+        fi
+        local title
+        title=$(echo "$entry" | jq -r '.title // empty')
+        if [ -z "$title" ]; then
+            echo "Error: spec entry $idx is missing a non-empty title" >&2
+            return 1
+        fi
+        local type
+        type=$(echo "$entry" | jq -r '.type // "leaf"')
+        if [ "$type" != "leaf" ] && [ "$type" != "task" ] && [ "$type" != "epic" ]; then
+            echo "Error: entry $idx ('$title') has invalid type '$type' (want leaf|task|epic)" >&2
+            return 1
+        fi
+        if [ "$(echo "$entry" | jq -r '(.dependencies // []) | type')" != "array" ]; then
+            echo "Error: entry $idx ('$title') 'dependencies' must be an array" >&2
+            return 1
+        fi
+        local key
+        key=$(echo "$entry" | jq -r '.key // empty' | sed 's/^<//; s/>$//')
+        if [ -n "$key" ] && [ -n "${KEY_SEEN[$key]:-}" ]; then
+            echo "Error: entry $idx ('$title') reuses key '$key' already declared earlier" >&2
+            return 1
+        fi
+
+        local dep
+        while IFS= read -r dep; do
+            [ -z "$dep" ] && continue
+            local tok
+            tok=$(echo "$dep" | sed 's/^<//; s/>$//' | xargs)
+            [ -z "$tok" ] && continue
+            if [ -n "${KEY_SEEN[$tok]:-}" ]; then
+                continue   # resolves to an earlier entry's key
+            fi
+            local rsha
+            if rsha=$(git rev-parse --verify --quiet "${tok}^{commit}" 2>/dev/null); then
+                # A real-SHA dependency must itself be an (empty-tree) task
+                # commit, or deps/complete would read a bogus parent.
+                if [ "$(git rev-parse "${rsha}^{tree}")" != "$EMPTY_TREE" ]; then
+                    printf "${RED}Error: entry %d ('%s'): dependency '%s' is not a task commit (non-empty tree).${RESET}\n" \
+                        "$idx" "$title" "$dep" >&2
+                    return 1
+                fi
+            else
+                printf "${RED}Error: entry %d ('%s'): cannot resolve dependency '%s'.${RESET}\n" \
+                    "$idx" "$title" "$dep" >&2
+                echo "  Reference an earlier entry's \"key\" (define it before this one) or a real task SHA." >&2
+                return 1
+            fi
+        done < <(echo "$entry" | jq -r '(.dependencies // [])[]')
+
+        [ -n "$key" ] && KEY_SEEN[$key]=1
+        idx=$((idx + 1))
+    done
+
+    if [ "$dry_run" = true ]; then
+        idx=0
+        while [ "$idx" -lt "$count" ]; do
+            local entry
+            entry=$(echo "$spec" | jq -c ".[$idx]")
+            local title
+            title=$(echo "$entry" | jq -r '.title // empty')
+            local type
+            type=$(echo "$entry" | jq -r '.type // "leaf"')
+            local status
+            status=$(echo "$entry" | jq -r '.status // "pending"')
+            local key
+            key=$(echo "$entry" | jq -r '.key // empty' | sed 's/^<//; s/>$//')
+            local deps
+            deps=$(echo "$entry" | jq -r '(.dependencies // []) | map(gsub("^<|>$";"")) | join(" ")')
+            printf "[dry-run] leaf %d/%d: %s\n" "$((idx + 1))" "$count" "$title"
+            printf "          type=%s status=%s key=%s\n" "$type" "$status" "${key:-(none)}"
+            [ -n "$deps" ] && printf "          deps: %s\n" "$deps"
+            idx=$((idx + 1))
+        done
+        printf "\n[dry-run] %s leaf task(s) would be created under epic %s. No commits, no refs, nothing pushed.\n" \
+            "$count" "$(git rev-parse --short "$parent_sha")"
+        return 0
+    fi
+
+    # ── Pass 2: create commits + frontier refs (spec already validated) ──
+    local refspecs=()
+    local created_refs=()
+    local created=0
+    idx=0
+    while [ "$idx" -lt "$count" ]; do
+        local entry
+        entry=$(echo "$spec" | jq -c ".[$idx]")
+        local title
+        title=$(echo "$entry" | jq -r '.title // empty')
+        local desc
+        desc=$(echo "$entry" | jq -r '.description // ""')
+        local type
+        type=$(echo "$entry" | jq -r '.type // "leaf"')
+        local status
+        status=$(echo "$entry" | jq -r '.status // "pending"')
+        local key
+        key=$(echo "$entry" | jq -r '.key // empty' | sed 's/^<//; s/>$//')
+
+        local dep_parents=()
+        local dep_display=()
+        local dep
+        while IFS= read -r dep; do
+            [ -z "$dep" ] && continue
+            local tok
+            tok=$(echo "$dep" | sed 's/^<//; s/>$//' | xargs)
+            [ -z "$tok" ] && continue
+            local resolved=""
+            if [ -n "${KEY_TO_SHA[$tok]:-}" ]; then
+                resolved="${KEY_TO_SHA[$tok]}"
+            else
+                resolved=$(git rev-parse --verify "${tok}^{commit}")
+            fi
+            dep_parents+=("$resolved")
+            dep_display+=("${tok}→$(git rev-parse --short "$resolved")")
+        done < <(echo "$entry" | jq -r '(.dependencies // [])[]')
+
+        # Build the task commit message (matches create-task-commit.sh shape):
+        # "Task: <title>" subject, blank line, then metadata fields + body.
+        local body=""
+        [ -n "$issue_num" ] && body="${body}Issue: #${issue_num}"$'\n'
+        [ -n "$issue_url" ] && body="${body}URL: ${issue_url}"$'\n'
+        body="${body}Status: ${status}"$'\n'"Type: ${type}"
+        [ -n "$desc" ] && body="${body}"$'\n\n'"${desc}"
+        local msg="Task: ${title}"$'\n\n'"${body}"
+
+        # Parents: epic first (breakdown parent), then dependency parents.
+        local parents=(-p "$parent_sha")
+        local d
+        if [ ${#dep_parents[@]} -gt 0 ]; then
+            for d in "${dep_parents[@]}"; do
+                parents+=(-p "$d")
+            done
+        fi
+
+        local new_commit
+        new_commit=$(printf '%s' "$msg" | git commit-tree "$EMPTY_TREE" "${parents[@]}")
+        local short
+        short=$(git rev-parse --short "$new_commit")
+        git update-ref "refs/heads/tasks/frontier/$short" "$new_commit"
+        created_refs+=("refs/heads/tasks/frontier/$short")
+        refspecs+=("$new_commit:refs/heads/tasks/frontier/$short")
+        [ -n "$key" ] && KEY_TO_SHA[$key]="$new_commit"
+        created=$((created + 1))
+
+        printf "${GREEN}✓${RESET} %s  %s\n" "$short" "$title"
+        [ ${#dep_display[@]} -gt 0 ] && printf "    deps: %s\n" "${dep_display[*]}"
+        idx=$((idx + 1))
+    done
+
+    if [ "$do_push" = true ] && [ ${#refspecs[@]} -gt 0 ]; then
+        printf "Pushing %d frontier ref(s) to origin…\n" "${#refspecs[@]}"
+        if git push --atomic origin "${refspecs[@]}"; then
+            printf "${GREEN}✓ Pushed %d frontier ref(s).${RESET}\n" "${#refspecs[@]}"
+        else
+            # Roll back the local refs we just made so a retry isn't blocked
+            # by the double-apply guard seeing half-created children.
+            local r
+            for r in "${created_refs[@]}"; do
+                git update-ref -d "$r" 2>/dev/null || true
+            done
+            printf "${RED}✗ Push failed — rolled back %d local frontier ref(s). Investigate and retry.${RESET}\n" \
+                "${#created_refs[@]}" >&2
+            return 4
+        fi
+    elif [ "$do_push" = false ]; then
+        printf '%s\n' "${YELLOW}--no-push: ${created} frontier ref(s) created locally only (not on origin).${RESET}"
+    fi
+
+    printf "${GREEN}✓ Breakdown complete: %d leaf task(s) under epic %s.${RESET}\n" \
+        "$created" "$(git rev-parse --short "$parent_sha")"
+    return 0
 }
 
 # Command: complete - mark task as complete
