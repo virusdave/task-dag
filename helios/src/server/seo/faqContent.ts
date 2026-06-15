@@ -124,16 +124,16 @@ export const RAW_ONLY_TERMS: readonly string[] = [
 ]
 
 /**
- * Return the distinct raw-only terms found in `text` (case-insensitive,
- * whole-token match). Empty array = clean.
+ * Match each whole-token term in `terms` against already-lowercased
+ * `lower`, returning the distinct terms found. A term matches only when
+ * bounded by non-alphanumerics (so "thc" does not match "ethical" and
+ * "dab" does not match "database"); hyphenated terms like "pre-roll" are
+ * matched verbatim. Shared by the host-agnostic raw-only check and the
+ * stricter FBUS check below so both use identical token semantics.
  */
-export function findRawOnlyLeaks(text: string): string[] {
-  const lower = text.toLowerCase()
+function matchWholeTokenTerms(lower: string, terms: readonly string[]): string[] {
   const hits = new Set<string>()
-  for (const term of RAW_ONLY_TERMS) {
-    // Whole-token match: the term must be bounded by non-alphanumerics
-    // (so "thc" does not match "ethical" and "dab" does not match
-    // "database"). Hyphenated terms like "pre-roll" are matched verbatim.
+  for (const term of terms) {
     const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
     const re = new RegExp(`(?<![a-z0-9])${escaped}(?![a-z0-9])`, 'i')
     if (re.test(lower)) {
@@ -143,11 +143,141 @@ export function findRawOnlyLeaks(text: string): string[] {
   return [...hits]
 }
 
+/**
+ * Return the distinct raw-only terms found in `text` (case-insensitive,
+ * whole-token match). Empty array = clean.
+ */
+export function findRawOnlyLeaks(text: string): string[] {
+  return matchWholeTokenTerms(text.toLowerCase(), RAW_ONLY_TERMS)
+}
+
+// ── FBUS (.us) STRICTER sanitized-host denylist ───────────────────────
+//
+// `freshlybaked.us` (FBUS) is the SEO-sanitized public host. The binding
+// constraint (parent EPIC_PLAN §5–§6, this child epic #46) is HARDER than
+// the host-agnostic `RAW_ONLY_TERMS` above: FBUS content must carry
+//   1. ZERO cannabis META-terms — including the everyday-ambiguous words
+//      (`flower(s)`, `strain(s)`, …) the host-agnostic list deliberately
+//      tolerates, and
+//   2. ZERO leak of the sibling `.nyc` brand — no `*.nyc` URL / host and
+//      no "Freshly Baked NYC" brand phrase, anywhere.
+//
+// `FBUS_EXTRA_DENY_TERMS` are the meta-terms added ON TOP of
+// `RAW_ONLY_TERMS` for the `.us` host. Kept deliberately conservative and
+// transparent (a human approver still reads every word; this only blocks
+// the highest-risk accidental leaks): it adds the §5-named ambiguous
+// terms plus close cannabis-meta synonyms, and intentionally still
+// excludes generic everyday words that would false-positive heavily in a
+// retail FAQ ("high", "joint", "pot", "green", "grass", "bar"). Tune here
+// if the operator wants an even stricter rule.
+//
+// Satisfies: virusdave/top-level#17 · Phase: P1
+
+export const FBUS_EXTRA_DENY_TERMS: readonly string[] = [
+  'flower',
+  'flowers',
+  'strain',
+  'strains',
+  'bud',
+  'buds',
+  'nug',
+  'nugs',
+  'hemp',
+  'thca',
+  'cbn',
+  'cbg',
+  'terpene',
+  'terpenes',
+  'tincture',
+  'tinctures',
+  'cartridge',
+  'cartridges',
+  'flwr',
+  // Common `pre-roll` lexical variants beyond the singular forms already
+  // in RAW_ONLY_TERMS (high-signal, near-zero retail-FAQ false positives).
+  'prerolls',
+  'pre-rolls',
+  'pre roll',
+  'pre rolls',
+]
+
+/** The full, stricter `.us` meta-term denylist (raw-only ∪ FBUS-extra). */
+export const FBUS_DENY_TERMS: readonly string[] = [...RAW_ONLY_TERMS, ...FBUS_EXTRA_DENY_TERMS]
+
+// Distinct categories of FBUS leak, so callers/approvers can tell a
+// cannabis-meta leak apart from a sibling-brand leak.
+export interface FbusLeaks {
+  /** Cannabis raw-only / meta-terms (whole-token, case-insensitive). */
+  readonly terms: string[]
+  /** Distinct `.nyc` hosts referenced (e.g. `freshlybaked.nyc`). */
+  readonly nycHosts: string[]
+  /** True iff the "Freshly Baked NYC" brand phrase appears. */
+  readonly nycBrandPhrase: boolean
+}
+
+// A `<label>.nyc` host/URL token (bounded so "concierge.nycdata" or a bare
+// "nyc" word do not match — only a real `*.nyc` host does). Captures the
+// host so the approver sees exactly what leaked.
+const NYC_HOST_RE = /(?<![a-z0-9.])((?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+nyc)(?![a-z0-9])/gi
+// The sibling brand phrase, tolerant of arbitrary inter-word whitespace.
+const NYC_BRAND_PHRASE_RE = /freshly\s+baked\s+nyc/i
+
+/**
+ * Detect every category of forbidden FBUS leak in `text`. A result is
+ * "clean for `.us`" iff `terms` is empty, `nycHosts` is empty, and
+ * `nycBrandPhrase` is false (see {@link hasFbusLeak}).
+ */
+export function findFbusLeaks(text: string): FbusLeaks {
+  const lower = text.toLowerCase()
+  const terms = matchWholeTokenTerms(lower, FBUS_DENY_TERMS)
+
+  const nycHosts = new Set<string>()
+  for (const match of text.matchAll(NYC_HOST_RE)) {
+    nycHosts.add(match[1]!.toLowerCase())
+  }
+
+  return {
+    terms,
+    nycHosts: [...nycHosts],
+    nycBrandPhrase: NYC_BRAND_PHRASE_RE.test(text),
+  }
+}
+
+/** True iff `text` contains any FBUS-forbidden term, `.nyc` host, or brand phrase. */
+export function hasFbusLeak(text: string): boolean {
+  const leaks = findFbusLeaks(text)
+  return leaks.terms.length > 0 || leaks.nycHosts.length > 0 || leaks.nycBrandPhrase
+}
+
+/**
+ * Human-readable leak markers for `text` under the FBUS rule, suitable for
+ * surfacing in an approval-rejection message or a CI assertion. Empty
+ * array = clean for `.us`.
+ */
+export function describeFbusLeaks(text: string): string[] {
+  const leaks = findFbusLeaks(text)
+  const markers: string[] = [...leaks.terms]
+  for (const host of leaks.nycHosts) {
+    markers.push(`.nyc-url:${host}`)
+  }
+  if (leaks.nycBrandPhrase) {
+    markers.push('nyc-brand-phrase')
+  }
+  return markers
+}
+
 export interface FaqComplianceProblem {
   readonly itemIndex: number
   readonly field: 'question' | 'answer_sanitized' | 'answer_raw'
   readonly message: string
 }
+
+// NOTE: `findFbusLeaks` / `hasFbusLeak` / `describeFbusLeaks` above are the
+// FBUS-strict (`.us`) primitives. `checkFaqSetApprovable` below remains the
+// existing host-agnostic / raw-only approval check — it does NOT yet apply
+// the stricter FBUS rule. Route-level enforcement of the FBUS denylist is
+// deferred until the FBUS source-key model lands (child #46 P1, CI gate 2),
+// which is what tells the approver which sets are FBUS-scoped.
 
 /**
  * Validate a FAQ set for APPROVAL. Checks structural completeness (every

@@ -2,11 +2,17 @@ import { describe, expect, it } from 'vitest'
 
 import {
   FAQ_SET_ID_RE,
+  FBUS_DENY_TERMS,
+  FBUS_EXTRA_DENY_TERMS,
+  RAW_ONLY_TERMS,
   SEO_APPROVAL_ID_RE,
   buildFaqPageJsonLd,
   checkFaqSetApprovable,
+  describeFbusLeaks,
   faqSetContentSha256,
+  findFbusLeaks,
   findRawOnlyLeaks,
+  hasFbusLeak,
   newFaqSetId,
   newSeoApprovalId,
   visibleFaqAnswer,
@@ -144,6 +150,97 @@ describe('checkFaqSetApprovable', () => {
       },
     ])
     expect(problems.some((p) => p.field === 'answer_sanitized')).toBe(true)
+  })
+})
+
+describe('FBUS stricter denylist (.us sanitized host)', () => {
+  it('is a strict superset of RAW_ONLY_TERMS', () => {
+    for (const term of RAW_ONLY_TERMS) {
+      expect(FBUS_DENY_TERMS).toContain(term)
+    }
+    expect(FBUS_DENY_TERMS.length).toBeGreaterThan(RAW_ONLY_TERMS.length)
+  })
+
+  it('adds the §5-named ambiguous meta-terms the host-agnostic list tolerates', () => {
+    // These are deliberately ABSENT from RAW_ONLY_TERMS but REQUIRED for FBUS.
+    for (const term of ['flower', 'flowers', 'strain', 'strains']) {
+      expect(RAW_ONLY_TERMS).not.toContain(term)
+      expect(FBUS_EXTRA_DENY_TERMS).toContain(term)
+      expect(findRawOnlyLeaks(`Our finest ${term} today`)).toEqual([])
+      expect(findFbusLeaks(`Our finest ${term} today`).terms).toContain(term)
+    }
+  })
+})
+
+describe('findFbusLeaks', () => {
+  it('returns fully clean for sanitized retail copy', () => {
+    const leaks = findFbusLeaks('We are open 9am-9pm and restock our products daily.')
+    expect(leaks.terms).toEqual([])
+    expect(leaks.nycHosts).toEqual([])
+    expect(leaks.nycBrandPhrase).toBe(false)
+    expect(hasFbusLeak('We are open 9am-9pm and restock our products daily.')).toBe(false)
+    expect(describeFbusLeaks('We are open 9am-9pm and restock our products daily.')).toEqual([])
+  })
+
+  it('flags both raw-only and FBUS-extra meta-terms, whole-token & case-insensitive', () => {
+    const leaks = findFbusLeaks('Fresh CANNABIS Flower and premium Strains in stock')
+    expect(leaks.terms).toEqual(expect.arrayContaining(['cannabis', 'flower', 'strains']))
+  })
+
+  it('does not false-positive on substrings of meta-terms', () => {
+    // "cartridge" near "Descartes", "bud" inside "budget", "flower" inside
+    // "flowering" should NOT match; "cbg" nowhere.
+    const leaks = findFbusLeaks('Descartes budget for the flowering catalog')
+    expect(leaks.terms).toEqual([])
+  })
+
+  it('still tolerates generic everyday words excluded by design', () => {
+    // We deliberately do NOT deny these to avoid heavy false positives.
+    const leaks = findFbusLeaks('High-quality service, our bar is open, join the green initiative')
+    expect(leaks.terms).toEqual([])
+  })
+
+  it('catches singular and plural/spaced pre-roll variants', () => {
+    for (const variant of ['preroll', 'pre-roll', 'prerolls', 'pre-rolls', 'pre roll', 'pre rolls']) {
+      expect(findFbusLeaks(`We stock ${variant} options`).terms).toContain(variant)
+    }
+  })
+
+  it('detects any *.nyc host and captures it', () => {
+    const leaks = findFbusLeaks('Visit our sibling at https://www.freshlybaked.nyc/menu today')
+    expect(leaks.nycHosts).toContain('www.freshlybaked.nyc')
+    expect(hasFbusLeak('https://www.freshlybaked.nyc/menu')).toBe(true)
+  })
+
+  it('detects a bare freshlybaked.nyc host', () => {
+    expect(findFbusLeaks('email us at hi@freshlybaked.nyc').nycHosts).toContain('freshlybaked.nyc')
+  })
+
+  it('does not treat a bare "nyc" word or non-.nyc host as a leak', () => {
+    const leaks = findFbusLeaks('We serve all of NYC from our nyc-area warehouse at example.nycdata.com')
+    expect(leaks.nycHosts).toEqual([])
+    expect(leaks.nycBrandPhrase).toBe(false)
+    expect(leaks.terms).toEqual([])
+  })
+
+  it('conservatively flags a .nyc label even mid-host (fail-closed)', () => {
+    // foo.nyc.evil.com embeds a `.nyc` host label; we fail closed and flag
+    // it rather than risk missing a disguised sibling-brand reference.
+    expect(findFbusLeaks('see foo.nyc.evil.com').nycHosts).toContain('foo.nyc')
+  })
+
+  it('detects the "Freshly Baked NYC" brand phrase regardless of spacing/case', () => {
+    expect(findFbusLeaks('A Freshly Baked NYC company').nycBrandPhrase).toBe(true)
+    expect(findFbusLeaks('freshly   baked   nyc').nycBrandPhrase).toBe(true)
+  })
+
+  it('describeFbusLeaks surfaces every category as markers', () => {
+    const markers = describeFbusLeaks(
+      'Our Freshly Baked NYC flower menu lives at https://shop.freshlybaked.nyc',
+    )
+    expect(markers).toContain('flower')
+    expect(markers).toContain('.nyc-url:shop.freshlybaked.nyc')
+    expect(markers).toContain('nyc-brand-phrase')
   })
 })
 
