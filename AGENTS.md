@@ -1,68 +1,43 @@
 # Agent instructions for the `automation` repo
 
-**MANDATORY FIRST READ — agent canon (re-read every session).**
-Before doing anything in this repo, read the cross-repo canonical
-agent rules. They live in **one** file, with no mirror and no copy in
-this repo:
-
-```
-virusdave/top-level : docs/canon/AGENTS_CANON.md   (branch: master)
-```
-
-**You MUST read it from a freshly-cloned ephemeral checkout of
-top-level's `master`, every session — do not read it any other way:**
+**MANDATORY FIRST READ — agent canon (re-read every session).** Before
+doing anything in this repo, read the cross-repo canonical agent rules
+fresh from a throwaway ephemeral checkout of `virusdave/top-level` at
+`origin/master` (never the stale shared `~/src/top-level`):
 
 ```sh
-canon_ws=$(/home/amp-local/src/github-worker/bin/ephemeral-checkout \
-              /home/amp-local/src/top-level --label canon-read)
-cat "$canon_ws/docs/canon/AGENTS_CANON.md"
-# … apply the rules …
-/home/amp-local/src/github-worker/bin/ephemeral-checkout --remove "$canon_ws"
+cw=$(/home/amp-local/src/github-worker/bin/ephemeral-checkout \
+        /home/amp-local/src/top-level --label canon-read)
+cat "$cw/docs/canon/AGENTS_CANON.md"
+# … apply the rules; follow the Core's §4 dispatch table into rules/ …
+/home/amp-local/src/github-worker/bin/ephemeral-checkout --remove "$cw"
 ```
 
-Why this exact procedure, and not a shortcut:
-
-- **Canon changes frequently** (operators add/modify rules mid-task),
-  so a cached or remembered copy is stale almost immediately. Re-read
-  it fresh at the start of every session — never paraphrase, cache, or
-  copy it into this repo.
-- **Do NOT `cat` the shared `~/src/top-level` working copy.** That tree
-  is routinely stale: other agents work in ephemeral checkouts and
-  nobody pulls there, so it can be many commits behind `origin/master`.
-- The `ephemeral-checkout` tool clones the supplied path's `origin`
-  **fresh from `master`** into a throwaway tree, so the file you read
-  is guaranteed to be the latest published canon. That guarantee is the
-  whole point of going through the tool rather than reading a local path.
-- If the clone/read fails, **stop and report** — do not proceed on a
-  guessed or remembered version of the rules.
-
-That file is authoritative across all repos. It also documents the
-canon-update interrupt: if the operator gives a rule that applies to
-all agents/all repos ("canonical", "always", "never", "going forward",
-…), persist it to `docs/canon/AGENTS_CANON.md` (via the same fresh
-ephemeral checkout) before continuing — see `docs/canon/UPDATING_CANON.md`
-in `virusdave/top-level`. The rest of this `AGENTS.md` only adds
-**repo-specific** instructions and must not weaken or restate canon. If
-canon and this file conflict, canon wins — update the stale one.
+That file is the **Canon Core**: read it in full, then follow its §4
+dispatch table to the relevant `docs/canon/rules/*` docs for your task.
+It changes frequently; never cache or paraphrase it. Your final work
+must include the **Agent Gate Record** (Core §3, template at
+`docs/canon/templates/AGENT_GATE_RECORD.md`). If anything below
+conflicts with canon, **canon wins** — fix the stale prose here.
 
 ---
 
 Everything below is repo-specific. The cross-repo rules it relies on
 (no self-SSH, no manual service restarts, ephemeral-checkout-only,
-default branch `master`, task-dag usage, no `--no-verify`, etc.) live
-in canon — read it first.
+default branch `master`, task-dag usage, no `--no-verify`, the Agent
+Gate Record, etc.) live in canon — read it first.
 
-## Host & deploy topology (canon §1)
+## Host & deploy topology (canon: rules/SAFETY.md)
 
 - **You are almost always running directly on `vps-nixos-3`, the helios
   production host.** Run `hostname` to confirm, then run everything
-  locally — do not self-SSH back into this box (canon §1).
+  locally — do not self-SSH back into this box (canon: rules/SAFETY.md).
 - If you genuinely must SSH to a **different** fleet host, the port is
   **22223**, not 22.
 - **Deploy helios** after `git push origin HEAD:master` with the
   mirror-aware wrapper — the only sanctioned way to roll helios (never
   restart `helios-prep` / `helios-server` / `helios-worker` by hand;
-  that bypasses the mirror flip and serves user-visible 5xxs — canon §1):
+  that bypasses the mirror flip and serves user-visible 5xxs — canon: rules/SAFETY.md):
 
   ```sh
   self-deploy-helios
@@ -80,7 +55,7 @@ in canon — read it first.
 
   (`helios-prep` is a oneshot; `inactive` after a clean run is normal.)
 
-## Ephemeral checkout paths (canon §2)
+## Ephemeral checkout paths (canon: rules/WORKFLOW.md)
 
 The shared trees for this repo are `/home/amp-local/src/automation` and
 its `helios/` subdir. Develop only in a throwaway checkout of them:
@@ -104,7 +79,7 @@ git config core.hooksPath .githooks
 ```
 
 The hook needs `helios/node_modules/` populated (`npm install` inside
-`helios/`). Do not bypass it with `--no-verify` (canon §1); if it
+`helios/`). Do not bypass it with `--no-verify` (canon: rules/SAFETY.md); if it
 fails, fix the cause or stop and report.
 
 ## Commit & push when done
@@ -116,7 +91,7 @@ human. If something genuinely blocks the push, stop and loudly report
 the exact error and your proposed next step rather than continuing
 silently.
 
-## Git-DAG tasks — `scripts/task-dag` (canon §2)
+## Git-DAG tasks — `scripts/task-dag` (canon: rules/WORKFLOW.md)
 
 Canon mandates the task-dag system where a repo has it and forbids
 tombstone commits for new work. Repo specifics:
@@ -240,22 +215,10 @@ If the pool is exhausted, `withSweedSession` throws
 fallback — back off and retry, or ask the operator to paste a live
 session.
 
-## Paging the operator — always `page-dave`, never `gh`
+## Paging the operator
 
-To page / notify / alert Dave (deploy ready for on-device check, a
-blocking decision, a long job finished), use the installed CLI:
-
-```sh
-page-dave -p <priority> -t "<short title>" "<message body>"
-```
-
-- `-p`: ntfy priority `1`–`5` (or `min`/`low`/`default`/`high`/`max`).
-  Use `4` (high) for most completion pages, `5` (max) only to unblock
-  work needing immediate attention, `3` for routine FYIs.
-- `-t`: short banner headline. Final positional arg is the body (don't
-  prefix it with the priority number).
-
-A `gh issue comment` is **not** paging — GitHub notifications aren't a
-pager. A comment can accompany a page (to persist context) but never
-substitutes for one. If `page-dave` isn't on `$PATH`, say so loudly
-rather than silently posting a `gh` comment and claiming you paged.
+Use `page-dave` (canon tool-first map; runbook
+`agent-kb/runbooks/paging-operator.md`). Repo-specific note: a
+`gh issue comment` is **not** paging (GitHub notifications aren't a
+pager). A comment can accompany a page to persist context, but never
+substitutes for one.
