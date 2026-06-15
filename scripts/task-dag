@@ -1,6 +1,22 @@
 #!/usr/bin/env bash
 # Git-DAG Task Management CLI
 # See docs/task_dag/README.md and HOW_TASK_DAG_WORKS.md
+#
+# CANONICAL SOURCE: virusdave/top-level : scripts/task-dag (+ scripts/task-dag.d/).
+# Peer repos (automation, mostly-static-sites, …) vendor a VERBATIM copy
+# because GitHub Actions runners only have the checked-out repo. Do NOT
+# edit this file per-repo: change it in top-level, then re-sync the copies
+# (they should stay byte-identical). A CI drift-guard
+# (shared-workflows: task-dag-drift-guard.yml) fails any peer whose copy
+# diverges. See docs/task_dag/CLI_DISTRIBUTION.md.
+#
+# This canonical copy is the UNION of every peer's feature set:
+#   - cross-repo coordination + block/unblock/blocked/drop (from top-level)
+#   - the cross-host atomic claim subsystem claim/release/active (CAS on
+#     origin via --force-with-lease + double-checked readback; originally
+#     developed in the automation fork). Keep claim/release/active intact:
+#     the github-worker shell claim (lib/state.sh) is per-host only, so
+#     these refs are what protect against duplicate work ACROSS hosts.
 
 set -euo pipefail
 
@@ -81,10 +97,6 @@ is_task_completed() {
 # is trivially ready (a dependency-free root). Mirrors the readiness
 # logic of `cmd_deps` (get_dep_parents + is_task_completed) so `frontier`
 # and `deps` never disagree about whether a task is pickable.
-# NOTE: temporary in-place backport of the canonical top-level fix
-# (top-level@04e5121) — automation's task-dag fork is not yet re-syncable
-# (its cross-host atomic claim subsystem must be unioned into canonical
-# first; tracked on issue #17). Until then, keep this in sync by hand.
 deps_satisfied() {
     local sha="$1"
     local deps dep
@@ -199,6 +211,24 @@ Note: ${note}"
     git commit-tree "$task_tree" -p "$task_sha" -m "$msg"
 }
 
+# Helper: canonical "blocked" ref name for a task.
+#
+# Blocked refs are an OVERLAY: they point directly at the task commit and
+# live in their own namespace alongside (not instead of) the task's
+# pending/frontier ref. A task is BLOCKED iff such a ref exists. We name
+# the ref by the task's FULL SHA (not the short SHA that frontier/active
+# use) so there is never a short-prefix collision.
+blocked_ref_for() {
+    local sha="$1"
+    echo "refs/heads/tasks/blocked/$sha"
+}
+
+# Helper: is a task blocked? (its canonical blocked overlay ref exists)
+is_task_blocked() {
+    local sha="$1"
+    git show-ref --verify --quiet "$(blocked_ref_for "$sha")"
+}
+
 # Command: help
 cmd_help() {
     cat <<EOF
@@ -209,18 +239,41 @@ USAGE:
 
 COMMANDS:
     dag <ref>              Show task DAG for epic/task
-    frontier               List available leaf tasks (excludes claimed)
-    claim <sha>            Atomically claim a frontier task (must be done
-                           BEFORE you start working on it, so concurrent
-                           agents on other hosts don't duplicate your work)
+    frontier               List available leaf tasks (excludes tasks already
+                           claimed on origin; pass --include-claimed to show)
+    claim <sha>            Atomically claim a frontier task across hosts (run
+                           this BEFORE you start working so concurrent agents
+                           on other hosts don't duplicate your work)
     release <sha>          Drop a claim back onto the frontier
-    active                 List currently-claimed tasks
+    active                 List currently-claimed (in-flight) tasks
     show <sha>             Show task details
     deps <sha>             Show task dependencies
     breakdown <parent>     Create task breakdown
     complete <sha>         Mark task as complete
+    block <sha>            Park a task: keep it in the DAG but stop workers
+                           from picking it up (NOT closed). Use when stalled
+                           awaiting operator/downstream input.
+    unblock <sha>          Make a blocked task pickable again
+    blocked                List blocked (parked) tasks
+    drop <sha>             Housecleaning: remove an orphaned/irrelevant task
+                           from the pickable/blocked sets
     issue-update <sha>     Update GitHub issue with task progress
     validate               Validate DAG structure
+    check-workflow         Validate recent commits follow task-dag convention
+
+CROSS-REPO COORDINATION:
+    delegate <task-sha> <owner/repo#issue>
+                           Delegate a task to a peer repo's issue
+    ingest-comment <issue> <comment-file> [--author=<login>]
+                           Ingest a human comment from this repo's issue
+                           (called by shared-workflows comment sync)
+    ingest-completion <epic-issue> <owner/repo@sha> [--message=<msg>]
+                           Record that a downstream repo's commit satisfies
+                           a delegated task on this epic
+    close-epic <epic-issue>
+                           Close the GitHub issue for an epic once all of
+                           its tasks are complete
+
     help                   Show this help
 
 OPTIONS:
@@ -235,10 +288,12 @@ EOF
 #
 # By default this fetches origin's task refs first so the local view
 # reflects what's actually available (and what's actually claimed by
-# another worker). Tasks with a remote `tasks/active/<short>` ref are
-# filtered out — they are in-flight on some other agent. Pass
-# `--no-fetch` to suppress the network round-trip (offline use) and
-# `--include-claimed` to override the active-ref filter.
+# another worker on a different host). Tasks with a remote
+# `tasks/active/<short>` ref are filtered out — they are in-flight on
+# some other agent. Pass `--no-fetch` to suppress the network round-trip
+# (offline use) and `--include-claimed` to override the active-ref filter.
+# Blocked tasks (tasks/blocked overlay) and tasks with unmet dependencies
+# are never pickable and are always excluded.
 cmd_frontier() {
     local json=false
     local issue_filter=""
@@ -284,6 +339,12 @@ cmd_frontier() {
     git for-each-ref refs/heads/tasks/frontier/ --format='%(objectname) %(refname:strip=3)' | while read sha short_ref; do
         # strip=3 leaves 'frontier/<short>' — drop the prefix.
         short_ref="${short_ref#frontier/}"
+
+        # Blocked tasks stay in the DAG but are NOT pickable.
+        if is_task_blocked "$sha"; then
+            continue
+        fi
+
         local short_sha=$(git rev-parse --short "$sha")
         local title=$(get_task_title "$sha")
         local msg=$(parse_commit_metadata "$sha")
@@ -346,7 +407,6 @@ JSON
         echo "]"
     fi
 }
-
 # Command: claim - atomically take ownership of a frontier task.
 #
 # The contract:
@@ -1050,52 +1110,27 @@ cmd_breakdown() {
     local parent_sha=""
     local spec_file=""
     local stdin_json=false
-    local dry_run=false
-    local do_push=true
-    local force=false
-
+    
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --spec-file=*) spec_file="${1#*=}"; shift ;;
             --stdin-json) stdin_json=true; shift ;;
-            --dry-run) dry_run=true; shift ;;
-            --no-push) do_push=false; shift ;;
-            --force) force=true; shift ;;
             --help|-h)
                 cat <<EOF
-Usage: task-dag breakdown <parent-sha> [--spec-file=PATH | --stdin-json] [options]
+Usage: task-dag breakdown <parent-sha> [--spec-file=PATH | --stdin-json]
 
-Materialise an epic's subtasks from a JSON spec: one empty-tree task
-commit per entry (first parent = the epic, extra parents = its
-dependency tasks, exactly the encoding \`deps\` / \`complete\` read back),
-each published as a \`tasks/frontier/<short>\` ref so other workers can
-\`claim\` it.
+Create subtasks from a JSON specification.
 
-Options:
-  --spec-file=PATH   Read the JSON spec from PATH.
-  --stdin-json       Read the JSON spec from stdin.
-  --dry-run          Print the plan; create no commits/refs, push nothing.
-  --no-push          Create local frontier refs but do not push to origin.
-  --force            Add subtasks even if this epic already has children.
-
-Spec format — a non-empty JSON array, processed in order:
+Spec format:
 [
   {
-    "title": "Task title",            // required
-    "description": "Longer detail",   // optional (commit body)
-    "key": "phase1-foo",              // optional label other entries depend on
-    "dependencies": ["<phase0-bar>", "<sha>"], // optional
-    "type": "leaf",                   // optional, default "leaf" (or "task")
-    "status": "pending"               // optional, default "pending"
+    "title": "Task title",
+    "description": "Task description",
+    "dependencies": ["<sha1>", "<sha2>"],
+    "type": "task|leaf",
+    "status": "pending"
   }
 ]
-
-Dependencies resolve to a real commit either by (a) a real git SHA, or
-(b) the \`key\` of an EARLIER entry in the same spec (angle brackets
-optional, so "<phase0-bar>" matches "key": "phase0-bar"). List entries in
-dependency order; a forward / unknown reference is a hard error. The
-dependency gate itself is enforced at \`complete\` time (it refuses while
-any dependency is still open).
 EOF
                 return 0
                 ;;
@@ -1110,289 +1145,17 @@ EOF
                 ;;
         esac
     done
-
+    
     if [ -z "$parent_sha" ]; then
         echo "Error: parent SHA required" >&2
         return 1
     fi
-
+    
     parent_sha=$(resolve_sha "$parent_sha") || return 1
-
-    # Read the spec.
-    local spec=""
-    if [ -n "$spec_file" ]; then
-        if [ ! -f "$spec_file" ]; then
-            echo "Error: spec file not found: $spec_file" >&2
-            return 1
-        fi
-        spec=$(cat "$spec_file")
-    elif [ "$stdin_json" = true ]; then
-        spec=$(cat)
-    else
-        echo "Error: provide --spec-file=PATH or --stdin-json" >&2
-        return 1
-    fi
-
-    # Validate it is a non-empty JSON array.
-    if ! echo "$spec" | jq -e 'type == "array" and length > 0' >/dev/null 2>&1; then
-        echo "Error: spec must be a non-empty JSON array" >&2
-        return 1
-    fi
-
-    # Inherit Issue / URL from the epic so children link back (mirrors
-    # what create-task-commit.sh writes and what complete/issue-update read).
-    # `|| true` so a missing field can't trip `set -e` via grep's exit code.
-    local epic_msg
-    epic_msg=$(parse_commit_metadata "$parent_sha")
-    local issue_num
-    issue_num=$(extract_field "$epic_msg" "Issue" 2>/dev/null | sed 's/^#//' || true)
-    local issue_url
-    issue_url=$(extract_field "$epic_msg" "URL" 2>/dev/null || true)
-    if [ -z "$issue_num" ]; then
-        printf "${YELLOW}Warning: epic %s has no Issue field; children will not auto-link to an issue.${RESET}\n" \
-            "$(git rev-parse --short "$parent_sha")" >&2
-    fi
-
-    # Refuse to double-apply. Fetch first so we see children another worker
-    # already pushed (frontier/active refs) or landed (origin/master), then
-    # treat a child as any commit whose FIRST parent is THIS epic OR any
-    # epic-revision ancestor of it — create-task-commit.sh re-parents the
-    # pending ref on every issue edit, so the "current" epic SHA drifts and
-    # a SHA-exact guard would miss an earlier revision's children.
-    if [ "$force" = false ]; then
-        fetch_task_refs
-        git fetch --quiet origin '+refs/heads/master:refs/remotes/origin/master' 2>/dev/null || true
-
-        local epic_chain="$parent_sha"
-        local anc="$parent_sha"
-        local hops=0
-        while [ "$hops" -lt 50 ]; do
-            local p
-            p=$(get_first_parent "$anc" 2>/dev/null || true)
-            [ -z "$p" ] && break
-            local pmsg
-            pmsg=$(parse_commit_metadata "$p" 2>/dev/null || true)
-            local ptype
-            ptype=$(extract_field "$pmsg" "Type" 2>/dev/null || true)
-            [ "$ptype" = "epic" ] || break
-            epic_chain="${epic_chain}"$'\n'"$p"
-            anc="$p"
-            hops=$((hops + 1))
-        done
-
-        # Candidate children: first parent ∈ epic_chain. Exclude the epic
-        # revisions themselves (Type: epic) so only real leaf/task subtasks
-        # count.
-        local candidates
-        candidates=$(git log --all --format='%H %P' 2>/dev/null \
-            | awk -v list="$epic_chain" 'BEGIN{n=split(list,a,"\n"); for(i=1;i<=n;i++) e[a[i]]=1} ($2 in e){print $1}')
-        local child_count=0
-        local cand
-        while IFS= read -r cand; do
-            [ -z "$cand" ] && continue
-            local cmsg
-            cmsg=$(parse_commit_metadata "$cand" 2>/dev/null || true)
-            local ctype
-            ctype=$(extract_field "$cmsg" "Type" 2>/dev/null || true)
-            [ "$ctype" = "epic" ] && continue
-            child_count=$((child_count + 1))
-        done <<< "$candidates"
-
-        if [ "$child_count" -gt 0 ]; then
-            printf "${RED}Error: epic %s already has %s child task(s).${RESET}\n" \
-                "$(git rev-parse --short "$parent_sha")" "$child_count" >&2
-            echo "Re-running breakdown would duplicate them. Use --force to add more." >&2
-            return 1
-        fi
-    fi
-
-    local count
-    count=$(echo "$spec" | jq 'length')
-
-    declare -A KEY_TO_SHA   # key -> created commit SHA (filled in pass 2)
-    declare -A KEY_SEEN     # key -> 1 once declared (used by both passes)
-
-    # ── Pass 1: validate the WHOLE spec before mutating anything ─────────
-    # Eliminates partial-ref state: a bad title / dup key / unresolvable or
-    # non-task dependency fails here, before any commit or ref is created.
-    local idx=0
-    while [ "$idx" -lt "$count" ]; do
-        local entry
-        entry=$(echo "$spec" | jq -c ".[$idx]")
-        if [ "$(echo "$entry" | jq -r 'type')" != "object" ]; then
-            echo "Error: spec entry $idx is not a JSON object" >&2
-            return 1
-        fi
-        local title
-        title=$(echo "$entry" | jq -r '.title // empty')
-        if [ -z "$title" ]; then
-            echo "Error: spec entry $idx is missing a non-empty title" >&2
-            return 1
-        fi
-        local type
-        type=$(echo "$entry" | jq -r '.type // "leaf"')
-        if [ "$type" != "leaf" ] && [ "$type" != "task" ] && [ "$type" != "epic" ]; then
-            echo "Error: entry $idx ('$title') has invalid type '$type' (want leaf|task|epic)" >&2
-            return 1
-        fi
-        if [ "$(echo "$entry" | jq -r '(.dependencies // []) | type')" != "array" ]; then
-            echo "Error: entry $idx ('$title') 'dependencies' must be an array" >&2
-            return 1
-        fi
-        local key
-        key=$(echo "$entry" | jq -r '.key // empty' | sed 's/^<//; s/>$//')
-        if [ -n "$key" ] && [ -n "${KEY_SEEN[$key]:-}" ]; then
-            echo "Error: entry $idx ('$title') reuses key '$key' already declared earlier" >&2
-            return 1
-        fi
-
-        local dep
-        while IFS= read -r dep; do
-            [ -z "$dep" ] && continue
-            local tok
-            tok=$(echo "$dep" | sed 's/^<//; s/>$//' | xargs)
-            [ -z "$tok" ] && continue
-            if [ -n "${KEY_SEEN[$tok]:-}" ]; then
-                continue   # resolves to an earlier entry's key
-            fi
-            local rsha
-            if rsha=$(git rev-parse --verify --quiet "${tok}^{commit}" 2>/dev/null); then
-                # A real-SHA dependency must itself be an (empty-tree) task
-                # commit, or deps/complete would read a bogus parent.
-                if [ "$(git rev-parse "${rsha}^{tree}")" != "$EMPTY_TREE" ]; then
-                    printf "${RED}Error: entry %d ('%s'): dependency '%s' is not a task commit (non-empty tree).${RESET}\n" \
-                        "$idx" "$title" "$dep" >&2
-                    return 1
-                fi
-            else
-                printf "${RED}Error: entry %d ('%s'): cannot resolve dependency '%s'.${RESET}\n" \
-                    "$idx" "$title" "$dep" >&2
-                echo "  Reference an earlier entry's \"key\" (define it before this one) or a real task SHA." >&2
-                return 1
-            fi
-        done < <(echo "$entry" | jq -r '(.dependencies // [])[]')
-
-        [ -n "$key" ] && KEY_SEEN[$key]=1
-        idx=$((idx + 1))
-    done
-
-    if [ "$dry_run" = true ]; then
-        idx=0
-        while [ "$idx" -lt "$count" ]; do
-            local entry
-            entry=$(echo "$spec" | jq -c ".[$idx]")
-            local title
-            title=$(echo "$entry" | jq -r '.title // empty')
-            local type
-            type=$(echo "$entry" | jq -r '.type // "leaf"')
-            local status
-            status=$(echo "$entry" | jq -r '.status // "pending"')
-            local key
-            key=$(echo "$entry" | jq -r '.key // empty' | sed 's/^<//; s/>$//')
-            local deps
-            deps=$(echo "$entry" | jq -r '(.dependencies // []) | map(gsub("^<|>$";"")) | join(" ")')
-            printf "[dry-run] leaf %d/%d: %s\n" "$((idx + 1))" "$count" "$title"
-            printf "          type=%s status=%s key=%s\n" "$type" "$status" "${key:-(none)}"
-            [ -n "$deps" ] && printf "          deps: %s\n" "$deps"
-            idx=$((idx + 1))
-        done
-        printf "\n[dry-run] %s leaf task(s) would be created under epic %s. No commits, no refs, nothing pushed.\n" \
-            "$count" "$(git rev-parse --short "$parent_sha")"
-        return 0
-    fi
-
-    # ── Pass 2: create commits + frontier refs (spec already validated) ──
-    local refspecs=()
-    local created_refs=()
-    local created=0
-    idx=0
-    while [ "$idx" -lt "$count" ]; do
-        local entry
-        entry=$(echo "$spec" | jq -c ".[$idx]")
-        local title
-        title=$(echo "$entry" | jq -r '.title // empty')
-        local desc
-        desc=$(echo "$entry" | jq -r '.description // ""')
-        local type
-        type=$(echo "$entry" | jq -r '.type // "leaf"')
-        local status
-        status=$(echo "$entry" | jq -r '.status // "pending"')
-        local key
-        key=$(echo "$entry" | jq -r '.key // empty' | sed 's/^<//; s/>$//')
-
-        local dep_parents=()
-        local dep_display=()
-        local dep
-        while IFS= read -r dep; do
-            [ -z "$dep" ] && continue
-            local tok
-            tok=$(echo "$dep" | sed 's/^<//; s/>$//' | xargs)
-            [ -z "$tok" ] && continue
-            local resolved=""
-            if [ -n "${KEY_TO_SHA[$tok]:-}" ]; then
-                resolved="${KEY_TO_SHA[$tok]}"
-            else
-                resolved=$(git rev-parse --verify "${tok}^{commit}")
-            fi
-            dep_parents+=("$resolved")
-            dep_display+=("${tok}→$(git rev-parse --short "$resolved")")
-        done < <(echo "$entry" | jq -r '(.dependencies // [])[]')
-
-        # Build the task commit message (matches create-task-commit.sh shape):
-        # "Task: <title>" subject, blank line, then metadata fields + body.
-        local body=""
-        [ -n "$issue_num" ] && body="${body}Issue: #${issue_num}"$'\n'
-        [ -n "$issue_url" ] && body="${body}URL: ${issue_url}"$'\n'
-        body="${body}Status: ${status}"$'\n'"Type: ${type}"
-        [ -n "$desc" ] && body="${body}"$'\n\n'"${desc}"
-        local msg="Task: ${title}"$'\n\n'"${body}"
-
-        # Parents: epic first (breakdown parent), then dependency parents.
-        local parents=(-p "$parent_sha")
-        local d
-        if [ ${#dep_parents[@]} -gt 0 ]; then
-            for d in "${dep_parents[@]}"; do
-                parents+=(-p "$d")
-            done
-        fi
-
-        local new_commit
-        new_commit=$(printf '%s' "$msg" | git commit-tree "$EMPTY_TREE" "${parents[@]}")
-        local short
-        short=$(git rev-parse --short "$new_commit")
-        git update-ref "refs/heads/tasks/frontier/$short" "$new_commit"
-        created_refs+=("refs/heads/tasks/frontier/$short")
-        refspecs+=("$new_commit:refs/heads/tasks/frontier/$short")
-        [ -n "$key" ] && KEY_TO_SHA[$key]="$new_commit"
-        created=$((created + 1))
-
-        printf "${GREEN}✓${RESET} %s  %s\n" "$short" "$title"
-        [ ${#dep_display[@]} -gt 0 ] && printf "    deps: %s\n" "${dep_display[*]}"
-        idx=$((idx + 1))
-    done
-
-    if [ "$do_push" = true ] && [ ${#refspecs[@]} -gt 0 ]; then
-        printf "Pushing %d frontier ref(s) to origin…\n" "${#refspecs[@]}"
-        if git push --atomic origin "${refspecs[@]}"; then
-            printf "${GREEN}✓ Pushed %d frontier ref(s).${RESET}\n" "${#refspecs[@]}"
-        else
-            # Roll back the local refs we just made so a retry isn't blocked
-            # by the double-apply guard seeing half-created children.
-            local r
-            for r in "${created_refs[@]}"; do
-                git update-ref -d "$r" 2>/dev/null || true
-            done
-            printf "${RED}✗ Push failed — rolled back %d local frontier ref(s). Investigate and retry.${RESET}\n" \
-                "${#created_refs[@]}" >&2
-            return 4
-        fi
-    elif [ "$do_push" = false ]; then
-        printf '%s\n' "${YELLOW}--no-push: ${created} frontier ref(s) created locally only (not on origin).${RESET}"
-    fi
-
-    printf "${GREEN}✓ Breakdown complete: %d leaf task(s) under epic %s.${RESET}\n" \
-        "$created" "$(git rev-parse --short "$parent_sha")"
-    return 0
+    
+    echo "Command 'breakdown' not yet fully implemented" >&2
+    echo "Parent: $parent_sha" >&2
+    return 1
 }
 
 # Command: complete - mark task as complete
@@ -1435,32 +1198,7 @@ EOF
     fi
     
     task_sha=$(resolve_sha "$task_sha") || return 1
-
-    # Soft check: did we actually hold a claim on this task? Not
-    # holding one is allowed (e.g. operator-driven completion of work
-    # that landed before claim was introduced) but worth flagging,
-    # because the racy "find a frontier ref and start coding" workflow
-    # is what gave us the duplicate-work problem this whole claim
-    # mechanism exists to fix.
-    local complete_short_sha
-    complete_short_sha=$(git rev-parse --short "$task_sha")
-    if ! git show-ref --verify --quiet "refs/heads/tasks/active/$complete_short_sha"; then
-        local remote_active_completer
-        remote_active_completer=$(task_is_claimed_on_remote "$complete_short_sha")
-        if [ "$remote_active_completer" = "yes" ]; then
-            printf "${YELLOW}WARNING: task %s is claimed on origin but not by this checkout.${RESET}\n" \
-                "$complete_short_sha" >&2
-            echo "  Another worker may have it in flight. If you are sure the work" >&2
-            echo "  you are completing here is the canonical one, continue." >&2
-            echo "" >&2
-        else
-            printf "${YELLOW}NOTE: completing %s without a prior \`task-dag claim\`.${RESET}\n" \
-                "$complete_short_sha" >&2
-            echo "  Future work on the same task in a parallel agent could have" >&2
-            echo "  raced with this. Run \`task-dag claim\` BEFORE coding next time." >&2
-        fi
-    fi
-
+    
     # Check dependencies
     if ! cmd_deps "$task_sha" --check-complete >/dev/null 2>&1; then
         echo "Error: Dependencies not met for task $task_sha" >&2
@@ -1520,50 +1258,6 @@ EOF
     local issue_num=$(extract_field "$task_msg" "Issue" | sed 's/^#//')
     local issue_url=$(extract_field "$task_msg" "URL")
     local task_title=$(get_task_title "$task_sha")
-
-    # Walk up the parent chain to inherit Issue/URL if missing on the leaf
-    # task commit. Breakdown children typically only carry "Issue: #N" and
-    # rely on the epic ancestor to hold the canonical "URL:" field. Without
-    # this walk, `Related: <url>` would silently never be appended for any
-    # leaf task whose commit message lacks an explicit URL.
-    local ancestor_sha="$task_sha"
-    local hops=0
-    while { [ -z "$issue_num" ] || [ -z "$issue_url" ]; } && [ "$hops" -lt 25 ]; do
-        local parent_sha=$(get_first_parent "$ancestor_sha" || true)
-        if [ -z "$parent_sha" ] || [ "$parent_sha" = "$ancestor_sha" ]; then
-            break
-        fi
-        local parent_msg=$(parse_commit_metadata "$parent_sha")
-        # Stop walking once we leave task/epic metadata commits
-        local parent_type=$(extract_field "$parent_msg" "Type")
-        if [ -z "$parent_type" ]; then
-            break
-        fi
-        if [ -z "$issue_num" ]; then
-            issue_num=$(extract_field "$parent_msg" "Issue" | sed 's/^#//')
-        fi
-        if [ -z "$issue_url" ]; then
-            issue_url=$(extract_field "$parent_msg" "URL")
-        fi
-        ancestor_sha="$parent_sha"
-        hops=$((hops + 1))
-    done
-
-    # Last-resort fallback: synthesize URL from origin remote + Issue #.
-    # Only fires when the entire ancestor chain lacks a URL field but we do
-    # have an issue number and an origin remote that looks like GitHub.
-    if [ -z "$issue_url" ] && [ -n "$issue_num" ]; then
-        local origin_url=$(git config --get remote.origin.url 2>/dev/null || true)
-        # Normalize git@github.com:owner/repo(.git) and
-        # https://github.com/owner/repo(.git) into owner/repo.
-        local repo_slug=$(echo "$origin_url" \
-            | sed -E 's#^git@[^:]+:#https://github.com/#' \
-            | sed -E 's#\.git$##' \
-            | sed -E 's#^https?://[^/]+/##')
-        if [ -n "$repo_slug" ] && echo "$origin_url" | grep -qi github; then
-            issue_url="https://github.com/${repo_slug}/issues/${issue_num}"
-        fi
-    fi
     
     # Create new commit with task as second parent and full issue metadata
     local new_message="${old_message}
@@ -1603,6 +1297,8 @@ Related: $issue_url"
         local frontier_ref="refs/heads/tasks/frontier/$short_sha"
         local active_ref="refs/heads/tasks/active/$short_sha"
         
+        local blocked_ref=$(blocked_ref_for "$task_sha")
+
         # Delete local refs
         if git show-ref --verify --quiet "$frontier_ref"; then
             git update-ref -d "$frontier_ref"
@@ -1613,10 +1309,17 @@ Related: $issue_url"
             git update-ref -d "$active_ref"
             echo "Deleted local $active_ref"
         fi
+
+        # A completed task should never linger in the blocked set.
+        if git show-ref --verify --quiet "$blocked_ref"; then
+            git update-ref -d "$blocked_ref"
+            echo "Deleted local $blocked_ref"
+        fi
         
         # Delete remote refs if they exist
         local remote_frontier="tasks/frontier/$short_sha"
         local remote_active="tasks/active/$short_sha"
+        local remote_blocked="${blocked_ref#refs/heads/}"
         
         if git ls-remote --exit-code origin "refs/heads/$remote_frontier" >/dev/null 2>&1; then
             git push origin --delete "$remote_frontier" 2>/dev/null && echo "Deleted remote $remote_frontier" || true
@@ -1624,6 +1327,10 @@ Related: $issue_url"
         
         if git ls-remote --exit-code origin "refs/heads/$remote_active" >/dev/null 2>&1; then
             git push origin --delete "$remote_active" 2>/dev/null && echo "Deleted remote $remote_active" || true
+        fi
+
+        if git ls-remote --exit-code origin "refs/heads/$remote_blocked" >/dev/null 2>&1; then
+            git push origin --delete "$remote_blocked" 2>/dev/null && echo "Deleted remote $remote_blocked" || true
         fi
     fi
     
@@ -1633,7 +1340,7 @@ Related: $issue_url"
     if [ -n "$issue_num" ] && [ -n "$issue_url" ] && [ -n "${GITHUB_TOKEN:-}" ]; then
         local repo=$(echo "$issue_url" | sed -E 's|https://github.com/([^/]+/[^/]+)/.*|\1|')
         local short_task_sha=$(git rev-parse --short "$task_sha")
-        local comment_body="✅ Task **${task_title}** completed!\n\nTask SHA: \`${short_task_sha}\`\nCompletion commit: \`$(git rev-parse --short "$new_commit")\`"
+        local comment_body="<!-- task-dag:status -->\n✅ Task **${task_title}** completed!\n\nTask SHA: \`${short_task_sha}\`\nCompletion commit: \`$(git rev-parse --short "$new_commit")\`"
         
         # Post comment
         local api_url="https://api.github.com/repos/$repo/issues/$issue_num/comments"
@@ -1660,7 +1367,6 @@ Related: $issue_url"
             if is_epic_complete "$parent_sha"; then
                 local parent_issue_num=$(extract_field "$parent_msg" "Issue" | sed 's/^#//')
                 local parent_issue_url=$(extract_field "$parent_msg" "URL")
-                local parent_author=$(extract_field "$parent_msg" "Author")
                 
                 if [ -n "$parent_issue_num" ] && [ -n "$parent_issue_url" ]; then
                     printf "\n${GREEN}🎉 Epic completed! All tasks done.${RESET}\n"
@@ -1670,42 +1376,25 @@ Related: $issue_url"
                     
                     # Check for GITHUB_TOKEN
                     if [ -n "${GITHUB_TOKEN:-}" ]; then
-                        # Build completion comment, tagging the issue opener (Author field)
+                        # Post completion comment and close issue
                         local epic_title=$(get_task_title "$parent_sha")
-                        local mention=""
-                        # Only treat Author as a GitHub handle if it looks like one
-                        # (bots / agent identifiers like 'amp-agent' or 'github-actions[bot]'
-                        # should not be @mentioned).
-                        if [[ -n "$parent_author" && "$parent_author" =~ ^[A-Za-z0-9][A-Za-z0-9-]*$ && "$parent_author" != *agent* && "$parent_author" != *bot* ]]; then
-                            mention="@${parent_author} "
-                        fi
-                        local comment_body
-                        comment_body=$(printf '🎉 %sEpic **%s** completed!\n\nAll child tasks have been implemented and merged. Closing as completed.' "$mention" "$epic_title")
-                        
-                        # JSON-escape the body (handles quotes / newlines / backslashes safely)
-                        local json_body
-                        json_body=$(printf '%s' "$comment_body" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))' 2>/dev/null) || \
-                            json_body="\"$(printf '%s' "$comment_body" | sed 's/\\/\\\\/g; s/"/\\"/g' | awk 'BEGIN{ORS="\\n"}{print}' | sed 's/\\n$//')\""
+                        local comment_body="<!-- task-dag:status -->\n🎉 Epic **$epic_title** completed!\n\nAll child tasks have been implemented and merged."
                         
                         # Post comment
                         local api_url="https://api.github.com/repos/$repo/issues/$parent_issue_num/comments"
                         curl -s -X POST "$api_url" \
                             -H "Authorization: token $GITHUB_TOKEN" \
                             -H "Accept: application/vnd.github.v3+json" \
-                            -d "{\"body\":$json_body}" > /dev/null
+                            -d "{\"body\":\"$comment_body\"}" > /dev/null
                         
-                        # Close issue as completed
+                        # Close issue
                         api_url="https://api.github.com/repos/$repo/issues/$parent_issue_num"
                         curl -s -X PATCH "$api_url" \
                             -H "Authorization: token $GITHUB_TOKEN" \
                             -H "Accept: application/vnd.github.v3+json" \
-                            -d '{"state":"closed","state_reason":"completed"}' > /dev/null
+                            -d '{"state":"closed"}' > /dev/null
                         
-                        if [ -n "$mention" ]; then
-                            printf "${GREEN}✓ Closed issue #%s and tagged %s${RESET}\n" "$parent_issue_num" "@${parent_author}"
-                        else
-                            printf "${GREEN}✓ Closed issue #%s${RESET}\n" "$parent_issue_num"
-                        fi
+                        printf "${GREEN}✓ Closed issue #$parent_issue_num${RESET}\n"
                     else
                         echo "Note: Set GITHUB_TOKEN to auto-close issue #$parent_issue_num"
                     fi
@@ -1751,6 +1440,10 @@ cmd_validate() {
     
     # Check 2: Frontier refs point only to leaf-type tasks
     git for-each-ref refs/heads/tasks/frontier/ --format='%(objectname) %(refname:short)' | while read sha ref; do
+        # Blocked tasks are intentionally parked; don't flag their type.
+        if is_task_blocked "$sha"; then
+            continue
+        fi
         local msg=$(parse_commit_metadata "$sha")
         local type=$(extract_field "$msg" "Type")
         if [ "$type" != "leaf" ] && [ "$type" != "task" ]; then
@@ -1819,67 +1512,35 @@ EOF
     local issue_url=$(extract_field "$task_msg" "URL")
     local task_title=$(get_task_title "$task_sha")
     local short_sha=$(git rev-parse --short "$task_sha")
-
-    # Walk up the parent chain to inherit Issue/URL if missing on the leaf
-    # task commit. Breakdown children typically only carry "Issue: #N" and
-    # rely on the epic ancestor to hold the canonical "URL:" field.
-    # Mirrors the cmd_complete walk added in aa0c14e.
-    local ancestor_sha="$task_sha"
-    local hops=0
-    while { [ -z "$issue_num" ] || [ -z "$issue_url" ]; } && [ "$hops" -lt 10 ]; do
-        local parent_sha=$(get_first_parent "$ancestor_sha" || true)
-        if [ -z "$parent_sha" ] || [ "$parent_sha" = "$ancestor_sha" ]; then
-            break
-        fi
-        local parent_msg=$(parse_commit_metadata "$parent_sha")
-        local parent_type=$(extract_field "$parent_msg" "Type")
-        if [ -z "$parent_type" ]; then
-            break
-        fi
-        if [ -z "$issue_num" ]; then
-            issue_num=$(extract_field "$parent_msg" "Issue" | sed 's/^#//')
-        fi
-        if [ -z "$issue_url" ]; then
-            issue_url=$(extract_field "$parent_msg" "URL")
-        fi
-        ancestor_sha="$parent_sha"
-        hops=$((hops + 1))
-    done
-
+    
     if [ -z "$issue_num" ]; then
         echo "Error: Task has no Issue number" >&2
         return 1
     fi
-
-    # Extract repo from issue URL, then fall back to origin remote.
-    # Normalizes both `git@host:owner/repo(.git)` (including SSH host
-    # aliases like `github-automation`) and `https://host/owner/repo(.git)`
-    # into the owner/repo slug we need for the GitHub API.
+    
+    # Extract repo from issue URL or git remote
     local repo=""
     if [ -n "$issue_url" ]; then
-        repo=$(echo "$issue_url" | sed -E 's|https?://[^/]+/([^/]+/[^/]+)/.*|\1|')
-    fi
-    if [ -z "$repo" ]; then
+        repo=$(echo "$issue_url" | sed -E 's|https://github.com/([^/]+/[^/]+)/.*|\1|')
+    else
+        # Try to get from git remote
         local remote_url=$(git remote get-url origin 2>/dev/null || echo "")
-        repo=$(echo "$remote_url" \
-            | sed -E 's#^git@[^:]+:#https://github.com/#' \
-            | sed -E 's#\.git$##' \
-            | sed -E 's#^https?://[^/]+/##')
+        if [[ "$remote_url" =~ github.com[:/]([^/]+/[^/]+)(\.git)?$ ]]; then
+            repo="${BASH_REMATCH[1]}"
+        fi
     fi
-
+    
     if [ -z "$repo" ]; then
         echo "Error: Could not determine GitHub repository" >&2
         return 1
     fi
-
-    # Synthesize the issue URL when only the ancestor Issue # was found.
-    if [ -z "$issue_url" ]; then
-        issue_url="https://github.com/${repo}/issues/${issue_num}"
-    fi
     
-    # Determine status message
+    # Determine status message.
+    # Prefix a `task-dag:status` marker so the comment-sync ingest skips
+    # this agent-generated status post instead of turning it into a new
+    # pickable frontier task (which would create a worker dispatch loop).
     local status_msg="${status:-pending}"
-    local comment_body="Task [\`$short_sha\`](${issue_url:-https://github.com/$repo/issues/$issue_num}) **$task_title**"
+    local comment_body="<!-- task-dag:status -->\nTask [\`$short_sha\`](${issue_url:-https://github.com/$repo/issues/$issue_num}) **$task_title**"
     
     case "$status_msg" in
         completed)
@@ -1929,6 +1590,200 @@ EOF
     fi
 }
 
+# Command: block - park a task so workers won't pick it up (but it's not closed)
+cmd_block() {
+    local task_sha="" reason=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --reason=*) reason="${1#*=}"; shift ;;
+            --help|-h)
+                cat <<EOF
+Usage: task-dag block <sha> [--reason="..."]
+
+Mark a task BLOCKED. It stays in the DAG and is listable (task-dag
+blocked), but workers will NOT pick it up. Use this when a task is
+stalled awaiting operator input or a downstream dependency, instead of
+repeatedly posting status comments (which get ingested as new pickable
+tasks and create a worker dispatch loop).
+
+Reverse with 'task-dag unblock <sha>'.
+
+Note: --reason is printed/logged only; it is not durably stored on the
+ref. Put durable context in a markered issue comment if needed.
+EOF
+                return 0 ;;
+            *)
+                if [ -z "$task_sha" ]; then task_sha="$1"; else
+                    echo "Unknown option: $1" >&2; return 1; fi
+                shift ;;
+        esac
+    done
+    [ -n "$task_sha" ] || { echo "Error: task SHA required" >&2; return 1; }
+    task_sha=$(resolve_sha "$task_sha") || return 1
+
+    local blocked_ref; blocked_ref=$(blocked_ref_for "$task_sha")
+    if is_task_blocked "$task_sha"; then
+        printf "${YELLOW}Task already blocked:${RESET} %s\n" "$(get_task_title "$task_sha")"
+        return 0
+    fi
+
+    git update-ref "$blocked_ref" "$task_sha"
+    if git push origin "$blocked_ref:$blocked_ref" 2>/dev/null; then
+        printf "${GREEN}✓ Blocked task:${RESET} %s\n" "$(get_task_title "$task_sha")"
+    else
+        printf "${YELLOW}⚠ Blocked locally but could not push %s${RESET}\n" "$blocked_ref" >&2
+    fi
+    [ -n "$reason" ] && echo "  Reason: $reason"
+    return 0
+}
+
+# Command: unblock - make a previously-blocked task pickable again
+cmd_unblock() {
+    local task_sha=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --help|-h) echo "Usage: task-dag unblock <sha>"; return 0 ;;
+            *)
+                if [ -z "$task_sha" ]; then task_sha="$1"; else
+                    echo "Unknown option: $1" >&2; return 1; fi
+                shift ;;
+        esac
+    done
+    [ -n "$task_sha" ] || { echo "Error: task SHA required" >&2; return 1; }
+    task_sha=$(resolve_sha "$task_sha") || return 1
+
+    local blocked_ref; blocked_ref=$(blocked_ref_for "$task_sha")
+    if ! is_task_blocked "$task_sha"; then
+        printf "${YELLOW}Task is not blocked:${RESET} %s\n" "$(get_task_title "$task_sha")"
+        return 0
+    fi
+
+    # Overlay semantics: deleting the blocked ref restores whatever
+    # pickability the task already had (its pending/frontier ref is
+    # untouched by block/unblock).
+    git update-ref -d "$blocked_ref"
+    if git push origin ":$blocked_ref" 2>/dev/null; then
+        printf "${GREEN}✓ Unblocked task:${RESET} %s\n" "$(get_task_title "$task_sha")"
+    else
+        printf "${YELLOW}⚠ Unblocked locally but could not push deletion of %s${RESET}\n" "$blocked_ref" >&2
+    fi
+    return 0
+}
+
+# Command: blocked - list parked (blocked) tasks
+cmd_blocked() {
+    local json=false issue_filter=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --json) json=true; shift ;;
+            --issue=*) issue_filter="${1#*=}"; shift ;;
+            --help|-h) echo "Usage: task-dag blocked [--issue=N] [--json]"; return 0 ;;
+            *) echo "Unknown option: $1" >&2; return 1 ;;
+        esac
+    done
+
+    if [ "$json" = true ]; then
+        echo "["
+    else
+        printf "${BOLD}%-12s %-50s %-12s${RESET}\n" "SHA" "TITLE" "ISSUE"
+        printf "%-12s %-50s %-12s\n" "$(printf '%.12s' '============')" "$(printf '%.50s' '==================================================')" "$(printf '%.12s' '============')"
+    fi
+
+    local first=true
+    git for-each-ref refs/heads/tasks/blocked/ --format='%(objectname)' | while read sha; do
+        local short_sha=$(git rev-parse --short "$sha")
+        local title=$(get_task_title "$sha")
+        local msg=$(parse_commit_metadata "$sha")
+        # Tasks use "Issue: #N"; ingested comment nodes use YAML "issue:\n number:".
+        local issue=$(extract_field "$msg" "Issue" | sed 's/^#//')
+        if [ -z "$issue" ]; then
+            issue=$(echo "$msg" | awk '/^issue:[[:space:]]*$/{f=1;next} f&&/number:/{sub(/^[[:space:]]*number:[[:space:]]*/,"");print;exit}')
+        fi
+        if [ -n "$issue_filter" ] && [ "$issue" != "$issue_filter" ]; then
+            continue
+        fi
+        if [ "$json" = true ]; then
+            [ "$first" = false ] && echo ","
+            printf '    {"sha": "%s", "shortSha": "%s", "title": "%s", "issue": %s}' \
+                "$sha" "$short_sha" "$title" "${issue:-null}"
+            first=false
+        else
+            printf "%-12s %-50s %-12s\n" "$short_sha" "${title:0:50}" "${issue:+#$issue}"
+        fi
+    done
+
+    if [ "$json" = true ]; then
+        echo ""
+        echo "]"
+    fi
+    return 0
+}
+
+# Command: drop - housecleaning; remove an orphaned/irrelevant task from the
+# pickable and blocked sets (does NOT rewrite history or close anything).
+cmd_drop() {
+    local task_sha="" yes=false
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --yes|-y) yes=true; shift ;;
+            --help|-h)
+                cat <<EOF
+Usage: task-dag drop <sha> [--yes]
+
+Housecleaning: remove an orphaned or no-longer-relevant task from the
+pickable/blocked sets. Deletes its frontier / blocked / active refs both
+locally and on origin.
+
+It deliberately does NOT delete:
+  - the epic 'tasks/pending/<N>' ref (epic identity),
+  - the 'gh/comments/<N>/<id>' provenance ref (kept so the source
+    comment is never re-ingested into a new task),
+and it never rewrites history. The underlying commit remains reachable,
+so a drop is reversible by recreating the ref.
+
+Requires --yes when stdin is not a TTY.
+EOF
+                return 0 ;;
+            *)
+                if [ -z "$task_sha" ]; then task_sha="$1"; else
+                    echo "Unknown option: $1" >&2; return 1; fi
+                shift ;;
+        esac
+    done
+    [ -n "$task_sha" ] || { echo "Error: task SHA required" >&2; return 1; }
+    task_sha=$(resolve_sha "$task_sha") || return 1
+
+    local short_sha; short_sha=$(git rev-parse --short "$task_sha")
+    local title; title=$(get_task_title "$task_sha")
+
+    if [ "$yes" = false ]; then
+        if [ -t 0 ]; then
+            printf "About to drop task refs for %s (%s).\n" "$short_sha" "$title"
+            printf "Press Ctrl-C to abort or Enter to continue..."
+            read -r
+        else
+            echo "Error: refusing to drop without --yes in non-interactive mode" >&2
+            return 1
+        fi
+    fi
+
+    local r
+    for r in "refs/heads/tasks/frontier/$short_sha" \
+             "$(blocked_ref_for "$task_sha")" \
+             "refs/heads/tasks/active/$short_sha"; do
+        if git show-ref --verify --quiet "$r"; then
+            git update-ref -d "$r" && echo "Deleted local $r"
+        fi
+        if git ls-remote --exit-code origin "$r" >/dev/null 2>&1; then
+            git push origin --delete "${r#refs/heads/}" 2>/dev/null \
+                && echo "Deleted remote ${r#refs/heads/}" || true
+        fi
+    done
+
+    printf "${GREEN}✓ Dropped task refs:${RESET} %s\n" "$title"
+    return 0
+}
+
 # Main dispatch
 main() {
     if [ $# -eq 0 ]; then
@@ -1951,15 +1806,144 @@ main() {
         dag) cmd_dag "$@" ;;
         breakdown) cmd_breakdown "$@" ;;
         complete) cmd_complete "$@" ;;
+        block) cmd_block "$@" ;;
+        unblock) cmd_unblock "$@" ;;
+        blocked) cmd_blocked "$@" ;;
+        drop) cmd_drop "$@" ;;
         validate) cmd_validate "$@" ;;
         issue-update) cmd_issue_update "$@" ;;
         check-workflow) cmd_check_workflow "$@" ;;
+        delegate) cmd_delegate "$@" ;;
+        ingest-comment) cmd_ingest_comment "$@" ;;
+        ingest-completion) cmd_ingest_completion "$@" ;;
+        close-epic) cmd_close_epic "$@" ;;
         *)
             echo "Unknown command: $command" >&2
             echo "Run 'task-dag help' for usage" >&2
             return 1
             ;;
     esac
+}
+
+# Source extension modules (cross-repo coordination, etc.)
+# Located at scripts/task-dag.d/*.sh relative to this script.
+__task_dag_self="${BASH_SOURCE[0]}"
+__task_dag_dir="$(cd "$(dirname "$__task_dag_self")" && pwd)"
+if [ -d "${__task_dag_dir}/task-dag.d" ]; then
+    for __ext in "${__task_dag_dir}/task-dag.d"/*.sh; do
+        # shellcheck disable=SC1090
+        [ -f "$__ext" ] && source "$__ext"
+    done
+    unset __ext
+fi
+unset __task_dag_self __task_dag_dir
+
+# DEAD CODE BELOW: a duplicate cmd_issue_update + cmd_check_workflow originally
+# lived here after main was invoked. We've reordered so main "$@" runs at the
+# very bottom of the file, after extension sourcing. The original first copy of
+# cmd_issue_update earlier in the file is the canonical one. The cmd_check_workflow
+# definition that follows below is now correctly registered before main runs.
+
+# Command: issue-update (legacy duplicate - kept verbatim for diff stability)
+_dead_cmd_issue_update_duplicate() {
+    local task_sha=""
+    local status="in-progress"
+    local message=""
+    
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --status=*) status="${1#*=}"; shift ;;
+            --message=*) message="${1#*=}"; shift ;;
+            --help|-h)
+                cat <<EOF
+Usage: task-dag issue-update <task-sha> [--status=STATUS] [--message=TEXT]
+
+Post status update to GitHub issue associated with task.
+
+Options:
+  --status=STATUS    Task status: completed|blocked|in-progress (default: in-progress)
+  --message=TEXT     Additional message for issue comment
+
+Requires: gh CLI installed and authenticated
+EOF
+                return 0
+                ;;
+            *)
+                if [ -z "$task_sha" ]; then
+                    task_sha="$1"
+                else
+                    echo "Unknown option: $1" >&2
+                    return 1
+                fi
+                shift
+                ;;
+        esac
+    done
+    
+    if [ -z "$task_sha" ]; then
+        echo "Error: task SHA required" >&2
+        return 1
+    fi
+    
+    task_sha=$(resolve_sha "$task_sha") || return 1
+    
+    # Extract issue URL from task commit
+    local task_msg=$(parse_commit_metadata "$task_sha")
+    local issue_url=$(extract_field "$task_msg" "URL")
+    local issue_num=$(extract_field "$task_msg" "Issue" | sed 's/^#//')
+    local task_title=$(get_task_title "$task_sha")
+    
+    if [ -z "$issue_num" ]; then
+        echo "Error: No issue number found in task commit" >&2
+        return 1
+    fi
+    
+    # Check if gh CLI is available
+    if ! command -v gh &> /dev/null; then
+        echo "Warning: gh CLI not installed, cannot update GitHub issue" >&2
+        echo "Task status: $status - $task_title" >&2
+        return 0
+    fi
+    
+    # Build status emoji
+    local status_emoji
+    case "$status" in
+        completed) status_emoji="✅" ;;
+        blocked) status_emoji="🚫" ;;
+        in-progress) status_emoji="⏳" ;;
+        *) status_emoji="📝" ;;
+    esac
+    
+    # Create issue comment
+    local comment="$status_emoji Task **$status**: $task_title
+
+Task SHA: \`$(git rev-parse --short "$task_sha")\`
+Status: $status"
+    
+    if [ -n "$issue_url" ]; then
+        comment="$comment
+
+Root issue: $issue_url"
+    fi
+    
+    if [ -n "$message" ]; then
+        comment="$comment
+
+$message"
+    fi
+    
+    # Post comment to issue
+    echo "$comment" | gh issue comment "$issue_num" --body-file - || {
+        echo "Failed to post comment to issue #$issue_num" >&2
+        return 1
+    }
+    
+    printf "${GREEN}✓ Posted status update to issue #$issue_num${RESET}\n"
+    
+    # Note: Issue closing logic is handled by the check-task-completions.sh GitHub Action
+    # which runs on push and closes issues when all tasks are complete
+    
+    return 0
 }
 
 # Command: check-workflow - validate recent commits follow task-dag convention
@@ -2047,4 +2031,6 @@ EOF
     return 0
 }
 
+# Execute (must be the final statement so all functions, including those
+# in dead-code section above and any sourced extensions, are registered).
 main "$@"
