@@ -108,22 +108,22 @@ export interface BulkSegmentRefreshResult {
 
 /**
  * BULK-populate `sweed_customer_segments` from each segment's full
- * member list (`store.marketing.segment.get`), instead of the
- * per-customer `store.customer.segment.list` path. This is the
- * COMPLETE-coverage populate: one Sweed RPC per enabled segment covers
- * every member at once, so the cache no longer depends on which
- * customers we happened to link.
+ * member list (`store.marketing.segment.result.list`, paginated to
+ * exhaustion), instead of the per-customer `store.customer.segment.list`
+ * path. This is the COMPLETE-coverage populate: one paginated Sweed RPC
+ * per enabled segment covers every member at once, so the cache no
+ * longer depends on which customers we happened to link.
  *
  * Authoritative per-segment replace (snapshotSegmentMembers). MUST run
  * inside a `withSweedSession` block.
  *
  * Operator-/script-triggered ONLY (scripts/refresh-segment-members-bulk.ts)
- * — NOT auto-scheduled — because the segment.get response shape is not
- * yet operator-verified (the parser is fail-closed; see
- * getSweedMarketingSegmentMembers). `dryRun` fetches + parses but skips
- * all writes so the operator can confirm counts before mutating the
- * cache. Refreshes the catalog first so newly-created segments are
- * included.
+ * — NOT auto-scheduled. The `result.list` response shape is
+ * operator-verified (live on NY segment 1532) and the parser is
+ * fail-closed (see getSweedMarketingSegmentMembers). `dryRun` fetches +
+ * parses but skips all writes so the operator can confirm counts before
+ * mutating the cache. Refreshes the catalog first so newly-created
+ * segments are included.
  */
 export async function refreshSegmentMembershipBulk(args: {
   stateDealerId: number

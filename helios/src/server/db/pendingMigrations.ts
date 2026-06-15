@@ -981,6 +981,16 @@ const SENTINELS: MigrationSentinel[] = [
       'error on the missing tables (caught/logged, but no assignments happen).',
     check: (db) => tableExists(db, 'geo_segment_rules'),
   },
+  {
+    migrationId: '080_sweed_customer_segments_segment_idx',
+    label:
+      'sweed_customer_segments(segment_id, sweed_customer_id) index — backs ' +
+      'the per-segment bulk membership diff/delete (snapshotSegmentMembers). ' +
+      'Without it that DELETE/diff WHERE segment_id seq-scans the whole table, ' +
+      'so bulk population is O(segments × table size). Code still works ' +
+      'without it, just slower as the table grows.',
+    check: (db) => indexExists(db, 'sweed_customer_segments_segment_customer_idx'),
+  },
 ]
 
 interface CacheEntry {

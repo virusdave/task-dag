@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom'
 
 import { ConfigBackgroundTaskRunNowResponseSchema } from '../../../shared/contracts/index.js'
 import { mutateJson } from '../../app/fetchJson.js'
-import { buildAppPath } from '../../app/paths.js'
+import { downloadFile } from '../../app/downloadFile.js'
 import { Pill } from '../../components/Pill.js'
 import { useRegisterCatalogSidebarSubtree } from './catalogSidebarSubtree.js'
 
@@ -34,6 +34,7 @@ export function StockRefreshPage() {
   const [running, setRunning] = useState(false)
   const [queuedJobId, setQueuedJobId] = useState<number | null>(null)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
+  const [downloadingCsv, setDownloadingCsv] = useState(false)
 
   async function handleRefreshNow() {
     setErrorMessage(null)
@@ -52,6 +53,18 @@ export function StockRefreshPage() {
       setErrorMessage(error instanceof Error ? error.message : 'Failed to queue stock refresh.')
     } finally {
       setRunning(false)
+    }
+  }
+
+  async function handleDownloadCsv() {
+    setErrorMessage(null)
+    setDownloadingCsv(true)
+    try {
+      await downloadFile('/api/catalog/inventory/stock-snapshot.csv', 'stock-snapshot.csv')
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : 'Could not download the stock snapshot.')
+    } finally {
+      setDownloadingCsv(false)
     }
   }
 
@@ -113,12 +126,14 @@ export function StockRefreshPage() {
           {' '}and <code>has_image</code>. No sales data.
         </p>
         <div className="inline-row wrap-row" style={{ marginTop: '0.5rem' }}>
-          <a
-            className="ghost-button like-button"
-            href={buildAppPath('/api/catalog/inventory/stock-snapshot.csv')}
+          <button
+            type="button"
+            className="ghost-button"
+            onClick={() => void handleDownloadCsv()}
+            disabled={downloadingCsv}
           >
-            Download current stock CSV
-          </a>
+            {downloadingCsv ? 'Preparing CSV…' : 'Download all-site stock CSV'}
+          </button>
         </div>
       </article>
 

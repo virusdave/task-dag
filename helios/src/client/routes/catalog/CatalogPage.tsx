@@ -11,7 +11,7 @@ import {
   type SessionEnvelope,
 } from '../../../shared/contracts/index.js'
 import { loadJson, mutateJson } from '../../app/fetchJson.js'
-import { buildAppPath } from '../../app/paths.js'
+import { downloadFile } from '../../app/downloadFile.js'
 import { waitForJob } from '../../app/jobPolling.js'
 import { Pill } from '../../components/Pill.js'
 import { useRegisterCatalogSidebarSubtree } from './catalogSidebarSubtree.js'
@@ -37,6 +37,7 @@ export function CatalogPage() {
   const [isGeneratingDescriptions, setIsGeneratingDescriptions] = useState(false)
   const [isGeneratingPricing, setIsGeneratingPricing] = useState(false)
   const [isRefreshingAll, setIsRefreshingAll] = useState(false)
+  const [isDownloadingCsv, setIsDownloadingCsv] = useState(false)
   const [descriptionGenerationForceLiveRefresh, setDescriptionGenerationForceLiveRefresh] = useState(false)
   const [pricingGenerationForceLiveRefresh, setPricingGenerationForceLiveRefresh] = useState(false)
   const [generationSuccessMessage, setGenerationSuccessMessage] = useState<string | null>(null)
@@ -67,12 +68,24 @@ export function CatalogPage() {
 
   // CSV export of the current filter view (all matching variants, not just the
   // visible page — drop the pagination params).
-  function buildCsvHref(): string {
+  function buildCsvPath(): string {
     const params = new URLSearchParams(searchParams)
     params.delete('page')
     params.delete('pageSize')
     const qs = params.toString()
-    return buildAppPath(`/api/catalog/groups.csv${qs ? `?${qs}` : ''}`)
+    return `/api/catalog/groups.csv${qs ? `?${qs}` : ''}`
+  }
+
+  async function handleDownloadCsv() {
+    setErrorMessage(null)
+    setIsDownloadingCsv(true)
+    try {
+      await downloadFile(buildCsvPath(), 'catalog-snapshot.csv')
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : 'Could not download the CSV export.')
+    } finally {
+      setIsDownloadingCsv(false)
+    }
   }
 
   async function handleRefresh(catalogGroupId: number) {
@@ -243,18 +256,24 @@ export function CatalogPage() {
 
   return (
     <section>
-      <div className="page-header">
+      <div className="page-header wrap-row" style={{ alignItems: 'flex-start' }}>
         <div>
           <p className="eyebrow">Catalog Browser</p>
           <h2>Mirrored groups and managed-field status</h2>
         </div>
-        <a
-          className="ghost-button like-button"
-          href={buildCsvHref()}
-          title="Per-(site × variant) catalog snapshot for the current filters, with cohort-key and has_image. No sales info."
-        >
-          Download CSV
-        </a>
+        <div style={{ display: 'grid', gap: '0.3rem', justifyItems: 'start' }}>
+          <button
+            type="button"
+            className="ghost-button"
+            onClick={() => void handleDownloadCsv()}
+            disabled={isDownloadingCsv}
+          >
+            {isDownloadingCsv ? 'Preparing CSV…' : 'Download filtered CSV'}
+          </button>
+          <span className="subtle-copy" style={{ margin: 0 }}>
+            Current filters, all pages. Cohort-key + has_image. No sales data.
+          </span>
+        </div>
       </div>
       {errorMessage ? <p className="error-text">{errorMessage}</p> : null}
       {data.recentSalesIssue ? <p className="error-text">{data.recentSalesIssue}</p> : null}

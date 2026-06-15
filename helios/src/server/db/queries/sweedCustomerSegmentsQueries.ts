@@ -103,24 +103,58 @@ export interface CustomerSegmentSnapshotRow {
  * refresh highwater 'ok'. Replacing the whole set is safe because
  * `store.customer.segment.list` returns the customer's FULL membership
  * (verified context-independent).
+ *
+ * Write-on-change (docs/canon/rules/DB_PERFORMANCE.md): this runs on every
+ * per-scan link, so it must not churn. Instead of delete-all + reinsert it
+ * (1) deletes only this customer's rows no longer present (anti-join on the
+ * incoming (scope_dealer_id, segment_id) set), and (2) batch-upserts the
+ * incoming rows in a single statement, with an `IS DISTINCT FROM` guard so an
+ * unchanged membership row is left untouched (no dead tuple, no WAL).
  */
 export async function snapshotCustomerSegments(
   args: { sweedCustomerId: number; rows: CustomerSegmentSnapshotRow[] },
 ): Promise<void> {
+  const rows = args.rows
+  const segmentIds = rows.map((r) => Number(r.segmentId))
+  // scope_dealer_id is part of the PK and NOT NULL; fall back to 0 (an
+  // unknown/state sentinel) when Sweed omits the owning dealer.
+  const scopeDealerIds = rows.map((r) => r.scopeDealerId ?? 0)
+  const names = rows.map((r) => r.segmentName)
+  const descriptions = rows.map((r) => r.segmentDescription)
+  const typeIds = rows.map((r) => r.segmentTypeId)
+  const typeNames = rows.map((r) => r.segmentTypeName)
+  const scopeDealerNames = rows.map((r) => r.scopeDealerName)
+  const enabledFlags = rows.map((r) => r.enabled)
+  const dateOnEnters = rows.map((r) => r.dateOnEnter)
   await withTransaction(async (tx) => {
-    await tx.query(`delete from sweed_customer_segments where sweed_customer_id = $1`, [
-      args.sweedCustomerId,
-    ])
-    for (const r of args.rows) {
-      // scope_dealer_id is part of the PK and NOT NULL; fall back to 0
-      // (an unknown/state sentinel) when Sweed omits the owning dealer.
-      const scopeDealerId = r.scopeDealerId ?? 0
+    // (1) Drop rows for this customer that are no longer in the membership.
+    await tx.query(
+      `delete from sweed_customer_segments s
+        where s.sweed_customer_id = $1
+          and not exists (
+            select 1
+              from unnest($2::bigint[], $3::bigint[]) as i(scope_dealer_id, segment_id)
+             where i.scope_dealer_id = s.scope_dealer_id
+               and i.segment_id = s.segment_id
+          )`,
+      [args.sweedCustomerId, scopeDealerIds, segmentIds],
+    )
+    // (2) Batch-upsert the incoming rows; write only changed columns.
+    if (rows.length > 0) {
       await tx.query(
         `insert into sweed_customer_segments
            (sweed_customer_id, segment_id, segment_name, segment_description,
             segment_type_id, segment_type_name, scope_dealer_id, scope_dealer_name,
             enabled, date_on_enter, refreshed_at)
-         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10, now())
+         select $1, u.segment_id, u.segment_name, u.segment_description,
+                u.segment_type_id, u.segment_type_name, u.scope_dealer_id,
+                u.scope_dealer_name, u.enabled, u.date_on_enter, now()
+           from unnest($2::bigint[], $3::bigint[], $4::text[], $5::text[],
+                       $6::int[], $7::text[], $8::text[], $9::boolean[],
+                       $10::timestamptz[])
+             as u(segment_id, scope_dealer_id, segment_name, segment_description,
+                  segment_type_id, segment_type_name, scope_dealer_name, enabled,
+                  date_on_enter)
          on conflict (sweed_customer_id, scope_dealer_id, segment_id) do update set
            segment_name        = excluded.segment_name,
            segment_description = excluded.segment_description,
@@ -129,18 +163,35 @@ export async function snapshotCustomerSegments(
            scope_dealer_name   = excluded.scope_dealer_name,
            enabled             = excluded.enabled,
            date_on_enter       = excluded.date_on_enter,
-           refreshed_at        = now()`,
+           refreshed_at        = now()
+         where (
+           sweed_customer_segments.segment_name,
+           sweed_customer_segments.segment_description,
+           sweed_customer_segments.segment_type_id,
+           sweed_customer_segments.segment_type_name,
+           sweed_customer_segments.scope_dealer_name,
+           sweed_customer_segments.enabled,
+           sweed_customer_segments.date_on_enter
+         ) is distinct from (
+           excluded.segment_name,
+           excluded.segment_description,
+           excluded.segment_type_id,
+           excluded.segment_type_name,
+           excluded.scope_dealer_name,
+           excluded.enabled,
+           excluded.date_on_enter
+         )`,
         [
           args.sweedCustomerId,
-          Number(r.segmentId),
-          r.segmentName,
-          r.segmentDescription,
-          r.segmentTypeId,
-          r.segmentTypeName,
-          scopeDealerId,
-          r.scopeDealerName,
-          r.enabled,
-          r.dateOnEnter,
+          segmentIds,
+          scopeDealerIds,
+          names,
+          descriptions,
+          typeIds,
+          typeNames,
+          scopeDealerNames,
+          enabledFlags,
+          dateOnEnters,
         ],
       )
     }
@@ -226,8 +277,22 @@ export async function isMarketingCatalogStale(
 export async function snapshotMarketingCatalog(
   rows: MarketingSegmentCatalogRow[],
 ): Promise<void> {
+  // Write-on-change (docs/canon/rules/DB_PERFORMANCE.md): the catalog is
+  // refreshed every few hours and rarely changes, so don't delete-all +
+  // reinsert (that churns the whole table each run). Delete only segments no
+  // longer in the catalog, then upsert with an `IS DISTINCT FROM` guard so
+  // unchanged rows are left untouched. The per-row loop is fine here: the
+  // catalog is ~tens of rows, not the 1000s the membership writers handle.
+  const segmentIds = rows.map((r) => Number(r.segmentId))
   await withTransaction(async (tx) => {
-    await tx.query(`delete from sweed_marketing_segments`)
+    await tx.query(
+      `delete from sweed_marketing_segments s
+        where not exists (
+          select 1 from unnest($1::bigint[]) as i(segment_id)
+           where i.segment_id = s.segment_id
+        )`,
+      [segmentIds],
+    )
     for (const r of rows) {
       await tx.query(
         `insert into sweed_marketing_segments
@@ -242,7 +307,24 @@ export async function snapshotMarketingCatalog(
            total_customers   = excluded.total_customers,
            scope_dealer_id   = excluded.scope_dealer_id,
            target_store_names = excluded.target_store_names,
-           refreshed_at      = now()`,
+           refreshed_at      = now()
+         where (
+           sweed_marketing_segments.segment_name,
+           sweed_marketing_segments.segment_type_id,
+           sweed_marketing_segments.segment_type_name,
+           sweed_marketing_segments.enabled,
+           sweed_marketing_segments.total_customers,
+           sweed_marketing_segments.scope_dealer_id,
+           sweed_marketing_segments.target_store_names
+         ) is distinct from (
+           excluded.segment_name,
+           excluded.segment_type_id,
+           excluded.segment_type_name,
+           excluded.enabled,
+           excluded.total_customers,
+           excluded.scope_dealer_id,
+           excluded.target_store_names
+         )`,
         [
           Number(r.segmentId),
           r.segmentName,
@@ -434,22 +516,54 @@ export interface SegmentMembershipSnapshot {
 
 /**
  * Snapshot-replace ALL cached membership rows for one segment from the
- * bulk `store.marketing.segment.get` member list. Authoritative: this
- * is the only writer allowed to delete by segment. Replacing the whole
- * set per segment is safe because segment.get returns the segment's
- * FULL membership in one call.
+ * bulk `store.marketing.segment.result.list` member list. Authoritative:
+ * this is the only writer allowed to delete by segment. Replacing the
+ * whole set per segment is safe because result.list paginates the
+ * segment's FULL membership.
+ *
+ * Write-on-change + indexed (docs/canon/rules/DB_PERFORMANCE.md): the
+ * operator bulk-populates every segment (NY segment 1532 alone = 1412
+ * members), so this must not seq-scan or churn. It (1) deletes only the
+ * segment's stale rows (members no longer present, or whose scope dealer
+ * changed) via the `sweed_customer_segments_segment_customer_idx`
+ * (segment_id, sweed_customer_id) index — see migration 080 — and (2)
+ * batch-upserts all members in one `unnest()` statement (not N round-trips),
+ * with an `IS DISTINCT FROM` guard so unchanged members are left untouched.
+ * An empty member list correctly clears every row for the segment.
  */
 export async function snapshotSegmentMembers(snapshot: SegmentMembershipSnapshot): Promise<void> {
   const scopeDealerId = snapshot.scopeDealerId ?? 0
+  const customerIds = snapshot.members.map((m) => m.customerId)
+  const enabledFlags = snapshot.members.map((m) => m.enabled)
+  const dateOnEnters = snapshot.members.map((m) => m.dateOnEnter)
   await withTransaction(async (tx) => {
-    await tx.query(`delete from sweed_customer_segments where segment_id = $1`, [snapshot.segmentId])
-    for (const m of snapshot.members) {
+    // (1) Drop rows for this segment that are no longer members, or whose
+    // scope dealer changed (the new-scope row is re-inserted below). Uses
+    // the (segment_id, sweed_customer_id) index; no seq scan.
+    await tx.query(
+      `delete from sweed_customer_segments s
+        where s.segment_id = $1
+          and (
+            s.scope_dealer_id is distinct from $2::bigint
+            or not exists (
+              select 1
+                from unnest($3::bigint[]) as i(sweed_customer_id)
+               where i.sweed_customer_id = s.sweed_customer_id
+            )
+          )`,
+      [snapshot.segmentId, scopeDealerId, customerIds],
+    )
+    // (2) Batch-upsert all members; write only changed columns.
+    if (customerIds.length > 0) {
       await tx.query(
         `insert into sweed_customer_segments
            (sweed_customer_id, segment_id, segment_name, segment_description,
             segment_type_id, segment_type_name, scope_dealer_id, scope_dealer_name,
             enabled, date_on_enter, refreshed_at)
-         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10, now())
+         select u.sweed_customer_id, $1, $2, $3, $4, $5, $6, $7,
+                u.enabled, u.date_on_enter, now()
+           from unnest($8::bigint[], $9::boolean[], $10::timestamptz[])
+             as u(sweed_customer_id, enabled, date_on_enter)
          on conflict (sweed_customer_id, scope_dealer_id, segment_id) do update set
            segment_name        = excluded.segment_name,
            segment_description = excluded.segment_description,
@@ -458,9 +572,25 @@ export async function snapshotSegmentMembers(snapshot: SegmentMembershipSnapshot
            scope_dealer_name   = excluded.scope_dealer_name,
            enabled             = excluded.enabled,
            date_on_enter       = excluded.date_on_enter,
-           refreshed_at        = now()`,
+           refreshed_at        = now()
+         where (
+           sweed_customer_segments.segment_name,
+           sweed_customer_segments.segment_description,
+           sweed_customer_segments.segment_type_id,
+           sweed_customer_segments.segment_type_name,
+           sweed_customer_segments.scope_dealer_name,
+           sweed_customer_segments.enabled,
+           sweed_customer_segments.date_on_enter
+         ) is distinct from (
+           excluded.segment_name,
+           excluded.segment_description,
+           excluded.segment_type_id,
+           excluded.segment_type_name,
+           excluded.scope_dealer_name,
+           excluded.enabled,
+           excluded.date_on_enter
+         )`,
         [
-          m.customerId,
           snapshot.segmentId,
           snapshot.segmentName,
           snapshot.segmentDescription,
@@ -468,8 +598,9 @@ export async function snapshotSegmentMembers(snapshot: SegmentMembershipSnapshot
           snapshot.segmentTypeName,
           scopeDealerId,
           snapshot.scopeDealerName,
-          m.enabled,
-          m.dateOnEnter,
+          customerIds,
+          enabledFlags,
+          dateOnEnters,
         ],
       )
     }
