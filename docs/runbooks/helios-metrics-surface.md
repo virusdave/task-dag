@@ -52,6 +52,8 @@ Each tab declares an access `grant` (see `shared/domain/metricGrants.ts`:
 | `catalog` | Catalog analytics | bespoke (`CatalogAnalyticsTab`) | explore | per-variant scatter suite + cohort-median overlay |
 | `target` | Target tracking | bespoke (`TargetTrackingTab`) | explore | break-even progress per period |
 | `scatter` | Scatter analytics | registry (scatter chartType) | explore | weather-correlation scatter (more to follow) |
+| `crm-segments` | CRM Segments | bespoke (`CrmSegmentsTab`) | explore | *about* one chosen marketing segment: membership, growth (entries/week), activity / value / recency, fulfillment mix. `/api/crm/segments` (picker) + `/api/crm/segment-metrics` |
+| `crm-segment-analysis` | CRM Segment Analysis | bespoke (`CrmSegmentAnalysisTab`) | explore | segment-vs-**rest** comparison: basket, net sales/customer, orders/customer, repeat & discount rates, **margin/customer + gross-margin %**, plus category / **subcategory** / fulfillment-channel affinity. Lift/index + significance (two-proportion z, Welch, BH-FDR via `segmentStats.ts`). `/api/crm/segment-analysis` |
 
 > Two tabs already implement **cohort-vs-peers comparison patterns** worth
 > emulating for segment analytics:
