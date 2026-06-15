@@ -12,15 +12,17 @@
 
 import type { Queryable } from '../pool.js'
 import type { GeoSegmentRule, TriggerKind } from '../../../worker/sweed/geoSegment.js'
+import { EMPTY_GEO_PREDICATE_AST, type GeoPredicateAst } from '../../../shared/contracts/index.js'
 
 interface GeoSegmentRuleRow {
   id: string | number
   site_slug: string
   dealer_id: string | number
   segment_id: string | number
-  center_lat: string | number
-  center_lng: string | number
-  radius_feet: string | number
+  predicate_json: GeoPredicateAst | null
+  center_lat: string | number | null
+  center_lng: string | number | null
+  radius_feet: string | number | null
   trigger: string
   reactivation_days: string | number
   since: Date | string | null
@@ -35,7 +37,7 @@ export async function loadEnabledRules(
 ): Promise<GeoSegmentRule[]> {
   const res = await db.query<GeoSegmentRuleRow>(
     `
-      select id, site_slug, dealer_id, segment_id,
+      select id, site_slug, dealer_id, segment_id, predicate_json,
              center_lat, center_lng, radius_feet,
              trigger, reactivation_days, since, enabled
         from geo_segment_rules
@@ -54,9 +56,12 @@ function mapRuleRow(r: GeoSegmentRuleRow): GeoSegmentRule {
     siteSlug: r.site_slug,
     dealerId: Number(r.dealer_id),
     segmentId: Number(r.segment_id),
-    centerLat: Number(r.center_lat),
-    centerLng: Number(r.center_lng),
-    radiusFeet: Number(r.radius_feet),
+    // The raw jsonb arrives as a parsed object; the evaluator re-validates
+    // with zod and fails closed on a malformed enabled rule.
+    predicateJson: r.predicate_json ?? EMPTY_GEO_PREDICATE_AST,
+    centerLat: r.center_lat === null ? null : Number(r.center_lat),
+    centerLng: r.center_lng === null ? null : Number(r.center_lng),
+    radiusFeet: r.radius_feet === null ? null : Number(r.radius_feet),
     trigger: r.trigger as TriggerKind,
     reactivationDays: Number(r.reactivation_days),
     since: r.since === null ? null : new Date(r.since),
@@ -77,6 +82,14 @@ export interface ScanEvalContext {
   readonly addressLat: number | null
   readonly addressLng: number | null
   readonly geocodeStatus: string | null
+  /** Geocoded ZIP5 of the home address, falling back to the raw ID ZIP. */
+  readonly zip5: string | null
+  /** Geocoded 2-letter state of the home address, falling back to raw ID state. */
+  readonly stateCode: string | null
+  /** ID date of birth (for age predicates), or null. */
+  readonly birthDate: Date | null
+  /** Raw ID gender marker (normalised in the evaluator), or null. */
+  readonly gender: string | null
 }
 
 /**
@@ -100,7 +113,14 @@ export async function loadScanEvalContext(
         vsl.sweed_customer_id as sweed_customer_id,
         a.geocode_status as geocode_status,
         a.latitude     as address_lat,
-        a.longitude    as address_lng
+        a.longitude    as address_lng,
+        -- Prefer the canonical geocoded ZIP5/state; fall back to the raw
+        -- values parsed off the ID itself so zip/state predicates still
+        -- evaluate even if the Census geocode only resolved coarsely.
+        coalesce(a.zip5, vs.postal_code) as zip5,
+        coalesce(a.state_code, vs.state) as state_code,
+        vs.birth_date  as birth_date,
+        vs.gender      as gender
       from visitor_scans vs
       left join visitor_scan_links vsl
         on vsl.scan_id = vs.id and vsl.link_status = 'linked'
@@ -125,38 +145,35 @@ export async function loadScanEvalContext(
     addressLat: row.address_lat === null || row.address_lat === undefined ? null : Number(row.address_lat),
     addressLng: row.address_lng === null || row.address_lng === undefined ? null : Number(row.address_lng),
     geocodeStatus: row.geocode_status ?? null,
+    zip5: row.zip5 ?? null,
+    stateCode: row.state_code ?? null,
+    birthDate: row.birth_date === null || row.birth_date === undefined ? null : new Date(row.birth_date),
+    gender: row.gender ?? null,
   }
 }
 
 /**
- * "First scan in >= N days": true when the SAME person has NO strictly
- * earlier scan whose gap is LESS than `reactivationDays` before this
- * event. Mirrors the not-exists clause in
- * `loadScanTriggerCandidates` so the live engine and the backfill
- * agree on what "first scan" means.
+ * The most-recent scan strictly earlier than `eventTime` for this
+ * person, or null. Feeds every `first_scan_in_days` predicate from one
+ * indexed read (the most-recent prior dominates all day-windows). Rides
+ * `visitor_scans_person_key_time_idx`.
  */
-export async function personHasPriorScanWithin(
+export async function loadLatestPriorScanAt(
   db: Queryable,
-  args: {
-    provider: string
-    personKey: string
-    eventTime: Date
-    reactivationDays: number
-  },
-): Promise<boolean> {
-  const res = await db.query(
+  args: { provider: string; personKey: string; eventTime: Date },
+): Promise<Date | null> {
+  const res = await db.query<{ latest: Date | string | null }>(
     `
-      select 1
+      select max(coalesce(p.scanned_at, p.ingested_at)) as latest
         from visitor_scans p
        where p.provider = $1
          and p.person_key = $2
          and coalesce(p.scanned_at, p.ingested_at) < $3
-         and coalesce(p.scanned_at, p.ingested_at) > $3::timestamptz - make_interval(days => $4::int)
-       limit 1
     `,
-    [args.provider, args.personKey, args.eventTime.toISOString(), args.reactivationDays],
+    [args.provider, args.personKey, args.eventTime.toISOString()],
   )
-  return (res.rowCount ?? 0) > 0
+  const latest = res.rows[0]?.latest
+  return latest === null || latest === undefined ? null : new Date(latest)
 }
 
 export type ApplicationClaim = 'claimed' | 'skip_done' | 'skip_inflight' | 'reattempt'

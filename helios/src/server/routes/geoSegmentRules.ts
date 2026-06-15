@@ -74,13 +74,12 @@ export async function registerGeoSegmentRulesRoutes(server: FastifyInstance): Pr
     } catch (cause) {
       const code = pgCode(cause)
       if (code === PG_UNIQUE_VIOLATION) {
-        return reply.status(400).send({
-          error:
-            'An enabled rule already exists for this site, trigger, and segment. Disable or edit the existing rule first.',
-        })
+        return reply.status(400).send({ error: 'Rule values collided with a uniqueness constraint.' })
       }
       if (code === PG_CHECK_VIOLATION) {
-        return reply.status(400).send({ error: 'Rule values failed a database constraint.' })
+        return reply.status(400).send({
+          error: 'Rule values failed a database constraint (an enabled rule needs at least one condition).',
+        })
       }
       throw cause
     }
@@ -128,13 +127,12 @@ export async function registerGeoSegmentRulesRoutes(server: FastifyInstance): Pr
     } catch (cause) {
       const code = pgCode(cause)
       if (code === PG_UNIQUE_VIOLATION) {
-        return reply.status(400).send({
-          error:
-            'Enabling this rule would collide with another enabled rule for the same site, trigger, and segment.',
-        })
+        return reply.status(400).send({ error: 'Rule values collided with a uniqueness constraint.' })
       }
       if (code === PG_CHECK_VIOLATION) {
-        return reply.status(400).send({ error: 'Rule values failed a database constraint.' })
+        return reply.status(400).send({
+          error: 'Rule values failed a database constraint (an enabled rule needs at least one condition).',
+        })
       }
       throw cause
     }

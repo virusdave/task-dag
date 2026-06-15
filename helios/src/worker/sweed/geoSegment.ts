@@ -26,6 +26,7 @@
 //     never for high-frequency polling.
 
 import type { Pool } from 'pg'
+import type { GeoGender, GeoPredicate, GeoPredicateAst } from '../../shared/contracts/index.js'
 
 export const FEET_PER_METER = 0.3048
 
@@ -273,9 +274,16 @@ export interface GeoSegmentRule {
   readonly siteSlug: string
   readonly dealerId: number
   readonly segmentId: number
-  readonly centerLat: number
-  readonly centerLng: number
-  readonly radiusFeet: number
+  /** Composable rule definition (migration 080) — the source of truth. */
+  readonly predicateJson: GeoPredicateAst
+  /**
+   * Legacy 079 mirror columns. NULL for non-geofence rules. Still loaded
+   * for the backfill CLI + back-compat; the live evaluator uses
+   * `predicateJson`, not these.
+   */
+  readonly centerLat: number | null
+  readonly centerLng: number | null
+  readonly radiusFeet: number | null
   readonly trigger: TriggerKind
   readonly reactivationDays: number
   /** Inclusive lower bound on the qualifying event, or null. */
@@ -283,26 +291,135 @@ export interface GeoSegmentRule {
   readonly enabled: boolean
 }
 
-/**
- * Does a geocoded point fall inside a rule's geofence? Uses the same
- * equirectangular `approxMeters` as the selection SQL so the live
- * engine and the backfill agree to the foot. Pure — unit tested.
- */
-export function ruleGeoMatches(rule: GeoSegmentRule, lat: number, lng: number): boolean {
-  const d = approxMeters(rule.centerLat, rule.centerLng, lat, lng)
-  return d <= feetToMeters(rule.radiusFeet)
-}
-
-/**
- * Is the qualifying-event instant on/after the rule's `since` bound?
- * A null bound means "no lower bound". Pure — unit tested.
- */
-export function ruleSinceSatisfied(rule: GeoSegmentRule, eventTime: Date): boolean {
-  if (rule.since === null) return true
-  return eventTime.getTime() >= rule.since.getTime()
-}
-
 export type TriggerKind = 'first_scan' | 'first_purchase'
+
+// ===========================================================================
+// Composable predicate engine (migration 080 / phase 1).
+//
+// Pure, unit-tested evaluation of a rule's `predicate_json` AST against
+// the cheap facts available at scan time. SQL loads facts; this code
+// interprets the AST — so the rule language is single-sourced and
+// testable. Every predicate FAILS CLOSED on a missing fact, so a
+// half-populated scan can never be matched site-wide by accident.
+// ===========================================================================
+
+const MS_PER_DAY = 86_400_000
+
+/** Facts the scan-event evaluator feeds the predicate engine. */
+export interface ScanFacts {
+  /** Geocoded ID home-address coordinates (null until geocode 'ok'). */
+  readonly addressLat: number | null
+  readonly addressLng: number | null
+  /** Normalised 5-digit ZIP of the ID home address, or null. */
+  readonly zip5: string | null
+  /** Normalised 2-letter US state of the ID home address, or null. */
+  readonly stateCode: string | null
+  /** The qualifying-event instant (coalesce(scanned_at, ingested_at)). */
+  readonly eventTime: Date
+  /** Person identity for first-scan windows; null disqualifies that kind. */
+  readonly personKey: string | null
+  /** Most-recent strictly-earlier scan for this person, or null. */
+  readonly latestPriorScanAt: Date | null
+  /** ID date of birth, for age windows. */
+  readonly birthDate: Date | null
+  /** Normalised gender marker (M/F/X), or null when unrecognised. */
+  readonly gender: GeoGender | null
+}
+
+/** First 5 ASCII digits of a postal string (handles ZIP+4), else null. */
+export function normalizeZip5(postal: string | null | undefined): string | null {
+  if (postal === null || postal === undefined) return null
+  const m = postal.trim().match(/^(\d{5})/)
+  return m === null ? null : m[1]
+}
+
+/** A 2-letter uppercase US state code, else null. */
+export function normalizeUsState(state: string | null | undefined): string | null {
+  if (state === null || state === undefined) return null
+  const t = state.trim().toUpperCase()
+  return /^[A-Z]{2}$/.test(t) ? t : null
+}
+
+/**
+ * Normalise a government-ID gender marker to M/F/X. Markers vary by
+ * issuer ('M'/'MALE', 'F'/'FEMALE', 'X'); anything else (incl. 'U'
+ * unknown) returns null so a `gender_in` predicate fails closed.
+ */
+export function normalizeGender(raw: string | null | undefined): GeoGender | null {
+  if (raw === null || raw === undefined) return null
+  const c = raw.trim().charAt(0).toUpperCase()
+  return c === 'M' || c === 'F' || c === 'X' ? (c as GeoGender) : null
+}
+
+/** Whole years between birthDate and asOf (calendar-correct). */
+export function computeAgeYears(birthDate: Date, asOf: Date): number {
+  let age = asOf.getUTCFullYear() - birthDate.getUTCFullYear()
+  const m = asOf.getUTCMonth() - birthDate.getUTCMonth()
+  if (m < 0 || (m === 0 && asOf.getUTCDate() < birthDate.getUTCDate())) age -= 1
+  return age
+}
+
+/** Evaluate a single predicate against scan facts. Pure — unit tested. */
+export function predicateMatches(predicate: GeoPredicate, facts: ScanFacts): boolean {
+  switch (predicate.kind) {
+    case 'geofence': {
+      if (facts.addressLat === null || facts.addressLng === null) return false
+      const d = approxMeters(predicate.centerLat, predicate.centerLng, facts.addressLat, facts.addressLng)
+      return d <= feetToMeters(predicate.radiusFeet)
+    }
+    case 'zip5_in':
+      return facts.zip5 !== null && predicate.zip5.includes(facts.zip5)
+    case 'us_state_in':
+      return facts.stateCode !== null && predicate.states.includes(facts.stateCode)
+    case 'scan_time_window': {
+      if (predicate.since !== undefined && facts.eventTime.getTime() < new Date(predicate.since).getTime()) {
+        return false
+      }
+      if (predicate.until !== undefined && facts.eventTime.getTime() >= new Date(predicate.until).getTime()) {
+        return false
+      }
+      return true
+    }
+    case 'first_scan_in_days': {
+      // "First scan in >= N days": qualify unless a strictly-earlier scan
+      // sits within the last N days (gap < N). An exactly-N-day gap still
+      // qualifies. Mirrors loadScanTriggerCandidates / personHasPriorScanWithin.
+      if (facts.personKey === null) return false
+      if (facts.latestPriorScanAt === null) return true
+      const cutoff = facts.eventTime.getTime() - predicate.days * MS_PER_DAY
+      return facts.latestPriorScanAt.getTime() <= cutoff
+    }
+    case 'age_range': {
+      if (facts.birthDate === null) return false
+      const age = computeAgeYears(facts.birthDate, facts.eventTime)
+      if (predicate.minAge !== undefined && age < predicate.minAge) return false
+      if (predicate.maxAge !== undefined && age > predicate.maxAge) return false
+      return true
+    }
+    case 'gender_in':
+      return facts.gender !== null && predicate.genders.includes(facts.gender)
+  }
+}
+
+/**
+ * Evaluate a full AST (AND-list). An empty predicate list NEVER matches
+ * (fail-closed: an enabled empty rule must not assign every scan). Pure.
+ */
+export function astMatches(ast: GeoPredicateAst, facts: ScanFacts): boolean {
+  if (ast.predicates.length === 0) return false
+  return ast.predicates.every((p) => predicateMatches(p, facts))
+}
+
+/** The largest `first_scan_in_days.days` across rules, or null if none use it. */
+export function maxFirstScanDays(asts: ReadonlyArray<GeoPredicateAst>): number | null {
+  let max: number | null = null
+  for (const ast of asts) {
+    for (const p of ast.predicates) {
+      if (p.kind === 'first_scan_in_days' && (max === null || p.days > max)) max = p.days
+    }
+  }
+  return max
+}
 
 export interface MergedCandidate {
   readonly sweedCustomerId: number

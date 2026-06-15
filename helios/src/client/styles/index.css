@@ -522,6 +522,13 @@ pre {
   flex: 1 1 180px;
 }
 
+/* Checkboxes must never stretch to the 180px text-control width — they
+   render as a tiny box inside an inline label (e.g. "Enabled"). */
+.filter-row input[type='checkbox'] {
+  min-width: 0;
+  flex: 0 0 auto;
+}
+
 .user-chip {
   padding: 0.6rem 0.85rem;
   border-radius: 999px;

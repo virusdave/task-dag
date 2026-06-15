@@ -28,18 +28,27 @@
 // zero Sweed RPCs. Sweed session + RPCs fire only on a true match,
 // gated by the ledger so each customer is added at most once per rule.
 
+import { GeoPredicateAstSchema } from '../../shared/contracts/index.js'
 import type { ConfigWorkersGeoSegmentRuleEvalJobPayload } from '../../shared/contracts/index.js'
 import { getPool } from '../../server/db/pool.js'
 import {
   claimRuleApplication,
   loadEnabledRules,
+  loadLatestPriorScanAt,
   loadResolvedRuleIds,
   loadScanEvalContext,
   markRuleApplicationApplied,
   markRuleApplicationFailed,
-  personHasPriorScanWithin,
 } from '../../server/db/queries/geoSegmentRulesQueries.js'
-import { ruleGeoMatches, ruleSinceSatisfied, type GeoSegmentRule } from '../sweed/geoSegment.js'
+import {
+  astMatches,
+  maxFirstScanDays,
+  normalizeGender,
+  normalizeUsState,
+  normalizeZip5,
+  type GeoSegmentRule,
+  type ScanFacts,
+} from '../sweed/geoSegment.js'
 import { addSegmentMembers, listSweedCustomerSegments } from '../sweed/customers.js'
 import { ensureDealerContext } from '../sweed/rpc.js'
 import { withSweedSession } from '../sweed/session.js'
@@ -64,19 +73,16 @@ export async function runConfigWorkersGeoSegmentRuleEvalJob(
     return
   }
 
-  // Prerequisites. Neither is an error: the link hook re-enqueues when
-  // the scan links, the geocode hook re-enqueues when the address
-  // reaches `ok`.
+  // Only hard prerequisite: the scan must be linked to a Sweed customer
+  // (the add target). NOT an error — the link hook re-enqueues on link.
+  // We deliberately do NOT bail on a missing geocode or person_key here:
+  // each predicate FAILS CLOSED on a missing fact (a geofence won't match
+  // without coordinates; first_scan_in_days won't match without a
+  // person_key), and the geocode hook re-enqueues when the address
+  // resolves — so a geofence rule still converges, while a zip/state-only
+  // rule can fire from the raw ID address before geocoding completes.
   if (ctx.sweedCustomerId === null) {
     log(context, scanId, 'not linked to a Sweed customer yet — deferring to link hook')
-    return
-  }
-  if (ctx.geocodeStatus !== 'ok' || ctx.addressLat === null || ctx.addressLng === null) {
-    log(context, scanId, `home address not geocoded ok (status=${ctx.geocodeStatus ?? 'none'}) — deferring to geocode hook`)
-    return
-  }
-  if (ctx.personKey === null) {
-    log(context, scanId, 'no person_key — cannot evaluate first_scan; skipping')
     return
   }
 
@@ -86,21 +92,47 @@ export async function runConfigWorkersGeoSegmentRuleEvalJob(
     return
   }
 
-  // Keep the rules this scan satisfies geometrically + temporally, then
-  // confirm the "first scan in >= N days" predicate per matching rule.
-  const matched: GeoSegmentRule[] = []
-  for (const rule of rules) {
-    if (!ruleSinceSatisfied(rule, ctx.eventTime)) continue
-    if (!ruleGeoMatches(rule, ctx.addressLat, ctx.addressLng)) continue
-    const hasPrior = await personHasPriorScanWithin(pool, {
+  // Re-validate each rule's predicate AST; a malformed enabled rule is
+  // SKIPPED (fail closed), never crashes the scan job. Build the scan
+  // facts once, loading the prior-scan fact only if some candidate rule
+  // actually uses a first_scan_in_days window.
+  const validRules = rules.filter((rule) => {
+    const parsed = GeoPredicateAstSchema.safeParse(rule.predicateJson)
+    if (!parsed.success) {
+      log(context, scanId, `rule=${rule.id} has invalid predicate_json — skipping (fail closed)`)
+      return false
+    }
+    return true
+  })
+  if (validRules.length === 0) {
+    log(context, scanId, `no valid enabled rules for site=${ctx.siteSlug}`)
+    return
+  }
+
+  let latestPriorScanAt: Date | null = null
+  if (ctx.personKey !== null && maxFirstScanDays(validRules.map((r) => r.predicateJson)) !== null) {
+    latestPriorScanAt = await loadLatestPriorScanAt(pool, {
       provider: ctx.provider,
       personKey: ctx.personKey,
       eventTime: ctx.eventTime,
-      reactivationDays: rule.reactivationDays,
     })
-    if (hasPrior) continue
-    matched.push(rule)
   }
+
+  const facts: ScanFacts = {
+    addressLat: ctx.addressLat,
+    addressLng: ctx.addressLng,
+    zip5: normalizeZip5(ctx.zip5),
+    stateCode: normalizeUsState(ctx.stateCode),
+    eventTime: ctx.eventTime,
+    personKey: ctx.personKey,
+    latestPriorScanAt,
+    birthDate: ctx.birthDate,
+    gender: normalizeGender(ctx.gender),
+  }
+
+  const matched: GeoSegmentRule[] = validRules.filter((rule) =>
+    astMatches(rule.predicateJson, facts),
+  )
 
   if (matched.length === 0) {
     log(context, scanId, `customer=${ctx.sweedCustomerId} matched no rule predicates`)
@@ -127,6 +159,12 @@ export async function runConfigWorkersGeoSegmentRuleEvalJob(
   // failure (pool exhausted) leaves zero claims behind. The claim is
   // the exclusion lease — only 'claimed'/'reattempt' may write.
   let retryableFailure: unknown = null
+  // Composable rules let several matched rules target the SAME segment.
+  // Once we've added the customer to a (dealer, segment) this run, a
+  // later rule for the same target is a no-op — record it as
+  // already_member without a redundant Sweed add. Keyed by dealer+segment
+  // because segment ids are only unique within a dealer context.
+  const addedSegmentKeys = new Set<string>()
   await withSweedSession(async () => {
     for (const rule of actionable) {
       const claim = await claimRuleApplication(pool, {
@@ -142,23 +180,26 @@ export async function runConfigWorkersGeoSegmentRuleEvalJob(
         log(context, scanId, `rule=${rule.id} customer=${customerId} claimed by another job — skipping`)
         continue
       }
+      const segmentKey = `${rule.dealerId}:${rule.segmentId}`
       try {
         await ensureDealerContext(rule.dealerId)
         // Membership check keeps the ledger status accurate and avoids a
         // redundant add when the customer is already in the segment
-        // (e.g. added by the backfill). One extra read RPC, only on a
-        // real, not-yet-applied match.
-        const segs = await listSweedCustomerSegments({
-          dealerId: rule.dealerId,
-          customerId,
-        })
-        const alreadyMember = segs.some((row) => row.id === String(rule.segmentId))
+        // (e.g. added by the backfill, or by an earlier rule THIS run).
+        // One extra read RPC, only on a real, not-yet-applied match.
+        const alreadyAddedThisRun = addedSegmentKeys.has(segmentKey)
+        const segs = alreadyAddedThisRun
+          ? []
+          : await listSweedCustomerSegments({ dealerId: rule.dealerId, customerId })
+        const alreadyMember =
+          alreadyAddedThisRun || segs.some((row) => row.id === String(rule.segmentId))
         if (!alreadyMember) {
           await addSegmentMembers({
             dealerId: rule.dealerId,
             segmentId: rule.segmentId,
             customerIds: [customerId],
           })
+          addedSegmentKeys.add(segmentKey)
         }
         await markRuleApplicationApplied(pool, {
           ruleId: rule.id,

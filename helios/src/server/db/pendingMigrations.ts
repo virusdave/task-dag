@@ -991,6 +991,16 @@ const SENTINELS: MigrationSentinel[] = [
       'without it, just slower as the table grows.',
     check: (db) => indexExists(db, 'sweed_customer_segments_segment_customer_idx'),
   },
+  {
+    migrationId: '080_geo_segment_rules_predicates',
+    label:
+      'Composable predicate AST for the geo-segment engine ' +
+      '(geo_segment_rules.predicate_json + relaxed geofence columns) — ' +
+      'required by the on-scan evaluator and the rule builder, which read/' +
+      'write the AST. Without it those reads error on the missing column ' +
+      '(caught/logged, but no composable rules can be authored or matched).',
+    check: (db) => columnExists(db, 'geo_segment_rules', 'predicate_json'),
+  },
 ]
 
 interface CacheEntry {

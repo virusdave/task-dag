@@ -17,7 +17,9 @@
 
 import type { Queryable } from '../pool.js'
 import {
+  EMPTY_GEO_PREDICATE_AST,
   LIVE_EVALUATED_TRIGGERS,
+  type GeoPredicateAst,
   type GeoSegmentRuleCreateBody,
   type GeoSegmentRuleRecord,
   type GeoSegmentRuleUpdateBody,
@@ -30,9 +32,10 @@ interface RuleStatsRow {
   site_slug: string
   dealer_id: string | number
   segment_id: string | number
-  center_lat: string | number
-  center_lng: string | number
-  radius_feet: string | number
+  predicate_json: GeoPredicateAst | null
+  center_lat: string | number | null
+  center_lng: string | number | null
+  radius_feet: string | number | null
   trigger: string
   reactivation_days: string | number
   since: Date | string | null
@@ -47,9 +50,41 @@ interface RuleStatsRow {
 }
 
 const LIVE_TRIGGER_SET = new Set<GeoSegmentTrigger>(LIVE_EVALUATED_TRIGGERS)
+const DEFAULT_REACTIVATION_DAYS = 365
 
 function toIso(value: Date | string): string {
   return value instanceof Date ? value.toISOString() : new Date(value).toISOString()
+}
+
+/**
+ * Project the legacy 079 mirror columns out of the AST so the backfill
+ * CLI + any 079-era reader still see a consistent geofence/since/
+ * reactivation. The AST is the source of truth; these are derived.
+ */
+function deriveLegacyMirror(ast: GeoPredicateAst): {
+  centerLat: number | null
+  centerLng: number | null
+  radiusFeet: number | null
+  since: string | null
+  reactivationDays: number
+} {
+  let centerLat: number | null = null
+  let centerLng: number | null = null
+  let radiusFeet: number | null = null
+  let since: string | null = null
+  let reactivationDays = DEFAULT_REACTIVATION_DAYS
+  for (const p of ast.predicates) {
+    if (p.kind === 'geofence') {
+      centerLat = p.centerLat
+      centerLng = p.centerLng
+      radiusFeet = p.radiusFeet
+    } else if (p.kind === 'scan_time_window' && p.since !== undefined) {
+      since = p.since
+    } else if (p.kind === 'first_scan_in_days') {
+      reactivationDays = p.days
+    }
+  }
+  return { centerLat, centerLng, radiusFeet, since, reactivationDays }
 }
 
 function mapRow(r: RuleStatsRow): GeoSegmentRuleRecord {
@@ -61,9 +96,10 @@ function mapRow(r: RuleStatsRow): GeoSegmentRuleRecord {
     siteLabel,
     dealerId: Number(r.dealer_id),
     segmentId: Number(r.segment_id),
-    centerLat: Number(r.center_lat),
-    centerLng: Number(r.center_lng),
-    radiusFeet: Number(r.radius_feet),
+    predicateJson: r.predicate_json ?? EMPTY_GEO_PREDICATE_AST,
+    centerLat: r.center_lat === null ? null : Number(r.center_lat),
+    centerLng: r.center_lng === null ? null : Number(r.center_lng),
+    radiusFeet: r.radius_feet === null ? null : Number(r.radius_feet),
     trigger,
     triggerLive: LIVE_TRIGGER_SET.has(trigger),
     reactivationDays: Number(r.reactivation_days),
@@ -85,7 +121,7 @@ function mapRow(r: RuleStatsRow): GeoSegmentRuleRecord {
 // reads so every read returns the identical record shape.
 const SELECT_WITH_STATS = `
   select
-    r.id, r.site_slug, r.dealer_id, r.segment_id,
+    r.id, r.site_slug, r.dealer_id, r.segment_id, r.predicate_json,
     r.center_lat, r.center_lng, r.radius_feet,
     r.trigger, r.reactivation_days, r.since, r.enabled, r.note,
     r.created_at, r.updated_at,
@@ -123,7 +159,7 @@ export async function getGeoSegmentRuleById(
   const res = await db.query<RuleStatsRow>(
     `
       select
-        r.id, r.site_slug, r.dealer_id, r.segment_id,
+        r.id, r.site_slug, r.dealer_id, r.segment_id, r.predicate_json,
         r.center_lat, r.center_lng, r.radius_feet,
         r.trigger, r.reactivation_days, r.since, r.enabled, r.note,
         r.created_at, r.updated_at,
@@ -153,24 +189,27 @@ export async function createGeoSegmentRule(
   db: Queryable,
   input: GeoSegmentRuleCreateBody,
 ): Promise<number> {
+  const mirror = deriveLegacyMirror(input.predicateJson)
   const res = await db.query<{ id: string | number }>(
     `
       insert into geo_segment_rules
-        (site_slug, dealer_id, segment_id, center_lat, center_lng, radius_feet,
+        (site_slug, dealer_id, segment_id, predicate_json,
+         center_lat, center_lng, radius_feet,
          trigger, reactivation_days, since, enabled, note)
-      values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+      values ($1, $2, $3, $4::jsonb, $5, $6, $7, $8, $9, $10, $11, $12)
       returning id
     `,
     [
       input.siteSlug,
       input.dealerId,
       input.segmentId,
-      input.centerLat,
-      input.centerLng,
-      input.radiusFeet,
+      JSON.stringify(input.predicateJson),
+      mirror.centerLat,
+      mirror.centerLng,
+      mirror.radiusFeet,
       input.trigger,
-      input.reactivationDays,
-      input.since ?? null,
+      mirror.reactivationDays,
+      mirror.since,
       input.enabled,
       input.note ?? null,
     ],
@@ -190,21 +229,26 @@ export async function updateGeoSegmentRule(
   const sets: string[] = []
   const values: unknown[] = []
   let i = 1
-  const set = (column: string, value: unknown): void => {
-    sets.push(`${column} = $${i}`)
+  const set = (column: string, value: unknown, cast = ''): void => {
+    sets.push(`${column} = $${i}${cast}`)
     values.push(value)
     i += 1
   }
 
-  if (patch.siteSlug !== undefined) set('site_slug', patch.siteSlug)
-  if (patch.dealerId !== undefined) set('dealer_id', patch.dealerId)
-  if (patch.segmentId !== undefined) set('segment_id', patch.segmentId)
-  if (patch.centerLat !== undefined) set('center_lat', patch.centerLat)
-  if (patch.centerLng !== undefined) set('center_lng', patch.centerLng)
-  if (patch.radiusFeet !== undefined) set('radius_feet', patch.radiusFeet)
-  if (patch.trigger !== undefined) set('trigger', patch.trigger)
-  if (patch.reactivationDays !== undefined) set('reactivation_days', patch.reactivationDays)
-  if (patch.since !== undefined) set('since', patch.since)
+  // Target/identity fields (site/dealer/segment/trigger) are immutable
+  // once a rule exists — the route rejects any real change, so we never
+  // write them here. Editable: the predicate AST, enabled, note.
+  if (patch.predicateJson !== undefined) {
+    set('predicate_json', JSON.stringify(patch.predicateJson), '::jsonb')
+    // Re-derive the legacy mirror columns from the new AST so they stay
+    // consistent for the backfill CLI / 079-era readers.
+    const mirror = deriveLegacyMirror(patch.predicateJson)
+    set('center_lat', mirror.centerLat)
+    set('center_lng', mirror.centerLng)
+    set('radius_feet', mirror.radiusFeet)
+    set('reactivation_days', mirror.reactivationDays)
+    set('since', mirror.since)
+  }
   if (patch.enabled !== undefined) set('enabled', patch.enabled)
   if (patch.note !== undefined) set('note', patch.note)
 
