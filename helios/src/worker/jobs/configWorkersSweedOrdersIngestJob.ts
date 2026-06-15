@@ -780,9 +780,14 @@ async function fetchAndInsert(
             -- D1: typed projections. product id lives at
             -- item.product.id (NOT item.productId, which does not
             -- exist); guarded cast so a non-numeric surprise never
-            -- fails ingest.
+            -- fails ingest. Use [0-9] NOT \d: this is a JS template
+            -- literal, where \d silently collapses to a bare 'd' (so
+            -- '^\d+$' would reach Postgres as '^d+$' and match nothing,
+            -- leaving product_id null on every ingested line — the
+            -- original 060 bug that this fixes). The migration .sql
+            -- files are fine with \d because they are not JS strings.
             case
-              when nullif(item.value #>> '{product,id}', '') ~ '^\d+$'
+              when nullif(item.value #>> '{product,id}', '') ~ '^[0-9]+$'
                 then (item.value #>> '{product,id}')::bigint
               else null
             end as product_id,
