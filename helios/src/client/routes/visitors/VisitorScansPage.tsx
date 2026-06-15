@@ -100,6 +100,53 @@ function crmPill(item: VisitorScanItem): { label: string; tone: PillTone } | nul
   return null
 }
 
+// Compact marketing-segment chip strip for a linked customer. Shown
+// only in the Expanded view. The server already caps `items` to the
+// top few and reports the full `totalCount`, so we render those chips
+// plus a "+N more" overflow chip. Same-named chips across scopes get a
+// scope suffix so they stay distinguishable.
+function SegmentChips({
+  segments,
+}: {
+  segments: VisitorScanItem['marketingSegments']
+}): JSX.Element | null {
+  if (segments === null || segments.items.length === 0) return null
+  const nameCounts = new Map<string, number>()
+  for (const s of segments.items) {
+    nameCounts.set(s.name, (nameCounts.get(s.name) ?? 0) + 1)
+  }
+  const overflow = segments.totalCount - segments.items.length
+  return (
+    <div className="vs-seg-chips" aria-label="Marketing segments">
+      {segments.items.map((s) => {
+        const dupName = (nameCounts.get(s.name) ?? 0) > 1
+        const label = dupName ? `${s.name} · ${s.scopeLabel}` : s.name
+        const typeLabel = s.type === 'unknown' ? '' : `${s.type[0].toUpperCase()}${s.type.slice(1)}. `
+        const detail = `Marketing segment: ${label}. ${typeLabel}${s.scopeLabel}.`
+        return (
+          <span
+            key={`${s.scopeDealerId ?? 'state'}-${s.segmentId}`}
+            className="vs-seg-chip"
+            title={detail}
+            aria-label={detail}
+          >
+            {label}
+          </span>
+        )
+      })}
+      {overflow > 0 ? (
+        <span
+          className="vs-seg-chip vs-seg-chip-more"
+          title={`${overflow} more marketing segments. ${segments.totalCount} total.`}
+          aria-label={`${overflow} more marketing segments. ${segments.totalCount} total.`}
+        >
+          +{overflow} more
+        </span>
+      ) : null}
+    </div>
+  )
+}
+
 export async function visitorScansLoader({ request }: { request: Request }) {
   const url = new URL(request.url)
   return loadJson(`/api/visitors/scans${url.search}`, VisitorScansResponseSchema)
@@ -590,6 +637,7 @@ export function VisitorScansPage() {
                           ) : (
                             <span className="subtle-copy">—</span>
                           )}
+                          {showMaps ? <SegmentChips segments={item.marketingSegments} /> : null}
                         </td>
                         {(() => {
                           const summary = item.sweedPurchaseSummary
@@ -664,6 +712,7 @@ export function VisitorScansPage() {
                             {item.siteSlug}
                           </Pill>
                         </div>
+                        {showMaps ? <SegmentChips segments={item.marketingSegments} /> : null}
                         <div className="vs-card-time">
                           {formatTime(item.scannedAt ?? item.ingestedAt)}
                         </div>

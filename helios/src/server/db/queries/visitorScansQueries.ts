@@ -14,6 +14,10 @@ import type { VisitorScanRowInput } from '../../visitorScans/envelope.js'
 import { computePersonKey } from '../../visitorScans/personKey.js'
 import { seedVisitorScanLink } from './visitorScanLinkQueries.js'
 import { upsertAddress } from '../../../worker/geocoder/index.js'
+import {
+  readMarketingSegmentChipsForCustomers,
+  type VisitorScanMarketingSegmentsSummary,
+} from './sweedCustomerSegmentsQueries.js'
 
 export interface InsertVisitorScanResult {
   inserted: boolean
@@ -410,6 +414,10 @@ export interface VisitorScanListItem {
   sweedLink: VisitorScanListSweedLink | null
   sweedPurchaseSummary: VisitorScanListSweedSummary | null
   miniMarker: VisitorScanListMiniMarker | null
+  // Bounded cached marketing-segment membership for the linked
+  // customer; populated by a single batch query per page (see
+  // listVisitorScans). null when not linked or no enabled memberships.
+  marketingSegments: VisitorScanMarketingSegmentsSummary | null
 }
 
 interface VisitorScanRow {
@@ -595,6 +603,9 @@ function rowToItem(row: VisitorScanRow): VisitorScanListItem {
     sweedLink,
     sweedPurchaseSummary,
     miniMarker,
+    // Filled in by listVisitorScans' per-page batch query; rows that
+    // aren't linked or have no cached membership stay null.
+    marketingSegments: null,
   }
 }
 
@@ -777,7 +788,23 @@ export async function listVisitorScans(
   const result = await db.query<VisitorScanRow>(sql, params)
   const rows = result.rows.map(rowToItem)
   const hasMore = rows.length > filter.limit
-  return { items: hasMore ? rows.slice(0, filter.limit) : rows, hasMore }
+  const items = hasMore ? rows.slice(0, filter.limit) : rows
+
+  // One batch query attaches cached marketing-segment chips to the
+  // page's linked rows (vs a per-row lateral join in the main query).
+  const linkedCustomerIds = items
+    .map((it) => it.sweedLink?.customerId ?? null)
+    .filter((id): id is number => id !== null)
+  if (linkedCustomerIds.length > 0) {
+    const chipsByCustomer = await readMarketingSegmentChipsForCustomers(db, linkedCustomerIds)
+    for (const it of items) {
+      const customerId = it.sweedLink?.customerId ?? null
+      if (customerId === null) continue
+      it.marketingSegments = chipsByCustomer.get(customerId) ?? null
+    }
+  }
+
+  return { items, hasMore }
 }
 
 // ---------------------------------------------------------------------

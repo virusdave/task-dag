@@ -3,6 +3,12 @@
 
 import { z } from 'zod'
 
+// Inlined (not imported from ./customerVisitorDetails.js) on purpose:
+// that module imports VisitorScanItemSchema from here, so importing
+// back would create a module cycle that leaves the schemas undefined
+// at init time. Kept in sync with SweedSegmentTypeSchema there.
+const VisitorScanSegmentTypeSchema = z.enum(['static', 'dynamic', 'unknown'])
+
 // Comma-separated string in the query string ↔ string[] on the
 // server. Supports `?siteSlugs=bx,mh` and `?siteSlugs=bx&siteSlugs=mh`
 // equally.
@@ -101,6 +107,32 @@ export type VisitorScanSweedPurchaseSummary = z.infer<
   typeof VisitorScanSweedPurchaseSummarySchema
 >
 
+// A single marketing-segment chip for the check-ins list. A compact
+// projection of CustomerVisitorSegmentMembership: only what the row
+// needs to render a chip (name + scope label + type for the tooltip).
+// virusdave/top-level#12 / FreshlyBakedNYC/automation#40.
+export const VisitorScanMarketingSegmentSchema = z.object({
+  segmentId: z.string(),
+  // Owning dealer (its site/state scope) as reported by Sweed; null
+  // for the state holder. Carried so chips can be keyed/deduped by
+  // (scope, segment) without colliding across scopes.
+  scopeDealerId: z.number().int().nullable(),
+  name: z.string(),
+  type: VisitorScanSegmentTypeSchema,
+  scopeLabel: z.string(),
+})
+export type VisitorScanMarketingSegment = z.infer<typeof VisitorScanMarketingSegmentSchema>
+
+// Bounded marketing-segment summary attached to each linked scan row.
+// `items` is capped server-side (top N by scope/type/name) and
+// `totalCount` is the full enabled membership count so the UI can
+// render "+N more". null when the scan has no linked customer.
+export const VisitorScanMarketingSegmentsSchema = z.object({
+  totalCount: z.number().int().nonnegative(),
+  items: z.array(VisitorScanMarketingSegmentSchema),
+})
+export type VisitorScanMarketingSegments = z.infer<typeof VisitorScanMarketingSegmentsSchema>
+
 export const VisitorScanMiniMarkerSchema = z.object({
   lat: z.number(),
   lng: z.number(),
@@ -140,6 +172,10 @@ export const VisitorScanItemSchema = z.object({
   sweedLink: VisitorScanSweedLinkSchema.nullable(),
   sweedPurchaseSummary: VisitorScanSweedPurchaseSummarySchema.nullable(),
   miniMarker: VisitorScanMiniMarkerSchema.nullable(),
+  // Bounded cached marketing-segment membership for the linked
+  // customer; null when not linked or no enabled memberships cached.
+  // Rendered only in the page's Expanded view. virusdave/top-level#12.
+  marketingSegments: VisitorScanMarketingSegmentsSchema.nullable(),
 })
 export type VisitorScanItem = z.infer<typeof VisitorScanItemSchema>
 

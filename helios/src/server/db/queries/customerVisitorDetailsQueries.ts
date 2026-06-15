@@ -884,6 +884,9 @@ function buildAnchorScan(row: AnchorRow): CustomerVisitorAnchorScan {
     sweedLink,
     sweedPurchaseSummary: null,
     miniMarker,
+    // The details page has its own dedicated segment section; the
+    // anchor scan does not carry the list's chip summary.
+    marketingSegments: null,
 
     // Extra anchor-only fields.
     idNum: row.id_num,

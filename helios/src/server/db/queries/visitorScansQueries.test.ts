@@ -158,4 +158,81 @@ describe('listVisitorScans', () => {
     expect(result.items).toHaveLength(2)
     expect(result.hasMore).toBe(true)
   })
+
+  it('attaches marketing-segment chips via one batch query for linked rows', async () => {
+    const { db, calls } = mockPool((text) => {
+      if (/from sweed_customer_segments/i.test(text)) {
+        return [
+          {
+            sweed_customer_id: 428378,
+            segment_id: '10282',
+            scope_dealer_id: 210249,
+            segment_name: 'Bronx Local',
+            segment_type_id: 1,
+            scope_dealer_name: 'Bronx',
+            total_count: 4,
+          },
+        ]
+      }
+      return [
+        {
+          id: 7,
+          ingested_at: new Date('2026-05-27T00:00:00Z'),
+          ingest_source: 'webhook',
+          site_slug: 'bx',
+          provider: 'veriscan',
+          scanned_at: new Date('2026-05-27T00:00:00Z'),
+          created_at: null,
+          webhook_type: 'CreateCard',
+          hash_id: '00000000-0000-0000-0000-000000000007',
+          first_name: null,
+          middle_name: null,
+          last_name: null,
+          state: null,
+          postal_code: null,
+          city: null,
+          address: null,
+          country: null,
+          document_type: null,
+          authentication_status: null,
+          scan_status: null,
+          latitude: null,
+          longitude: null,
+          scan_latitude: null,
+          scan_longitude: null,
+          raw_envelope: {},
+          link_dealer_id: 210249,
+          link_customer_id: 428378,
+          link_status: 'linked',
+        },
+      ]
+    })
+    const result = await listVisitorScans(db, {
+      siteSlugs: null,
+      ingestSources: null,
+      states: null,
+      postalPrefix: null,
+      documentType: null,
+      authenticationStatus: null,
+      scanStatus: null,
+      scannedAfter: null,
+      scannedBefore: null,
+      beforeId: null,
+      limit: 50,
+    })
+    // List query + exactly one batch chip query.
+    expect(calls).toHaveLength(2)
+    expect(calls[1].text).toMatch(/from sweed_customer_segments/i)
+    expect(calls[1].params?.[0]).toEqual([428378])
+    const seg = result.items[0].marketingSegments
+    expect(seg).not.toBeNull()
+    expect(seg?.totalCount).toBe(4)
+    expect(seg?.items).toHaveLength(1)
+    expect(seg?.items[0]).toMatchObject({
+      segmentId: '10282',
+      name: 'Bronx Local',
+      type: 'static',
+      scopeLabel: 'Bronx',
+    })
+  })
 })

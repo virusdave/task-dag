@@ -398,6 +398,109 @@ export async function readCustomerSegments(
   })
 }
 
+// =====================================================================
+// Read — bounded chips for the check-ins LIST (many customers at once)
+// =====================================================================
+
+export interface VisitorScanMarketingSegmentChip {
+  segmentId: string
+  scopeDealerId: number | null
+  name: string
+  type: SweedSegmentType
+  scopeLabel: string
+}
+
+export interface VisitorScanMarketingSegmentsSummary {
+  totalCount: number
+  items: VisitorScanMarketingSegmentChip[]
+}
+
+interface ChipRow {
+  sweed_customer_id: string | number
+  segment_id: string
+  scope_dealer_id: string | number | null
+  segment_name: string
+  segment_type_id: number | null
+  scope_dealer_name: string | null
+  total_count: string | number
+}
+
+// Max chips returned per customer; the rest are summarised as "+N more".
+const VISITOR_SCAN_SEGMENT_CHIP_LIMIT = 3
+
+/**
+ * Batch-read a bounded marketing-segment summary for a page of linked
+ * customers, for the check-ins list's Expanded view.
+ *
+ * DB-cost (docs/canon/rules/DB_PERFORMANCE.md): ONE query for the whole
+ * page (vs a per-row lateral join inside the already-complex scan list
+ * query). The page is capped at limit+1 rows, so the input id array is
+ * tiny and the scan over `sweed_customer_segments` rides the
+ * customer-leading primary key. We return only the top
+ * VISITOR_SCAN_SEGMENT_CHIP_LIMIT rows per customer plus the full
+ * enabled membership count, so payload stays small regardless of how
+ * many segments a customer is in. Disabled segments are excluded.
+ */
+export async function readMarketingSegmentChipsForCustomers(
+  db: Queryable,
+  sweedCustomerIds: readonly number[],
+): Promise<Map<number, VisitorScanMarketingSegmentsSummary>> {
+  const out = new Map<number, VisitorScanMarketingSegmentsSummary>()
+  const ids = [...new Set(sweedCustomerIds.filter((id) => Number.isInteger(id) && id > 0))]
+  if (ids.length === 0) return out
+
+  const res = await db.query<ChipRow>(
+    `with ranked as (
+       select
+         s.sweed_customer_id,
+         s.segment_id::text                                 as segment_id,
+         s.scope_dealer_id,
+         s.segment_name,
+         s.segment_type_id,
+         s.scope_dealer_name,
+         count(*) over (partition by s.sweed_customer_id)   as total_count,
+         row_number() over (
+           partition by s.sweed_customer_id
+           order by
+             case when s.segment_type_id = 1 then 0 else 1 end,
+             s.segment_name asc,
+             s.segment_id asc
+         )                                                  as rn
+       from sweed_customer_segments s
+       where s.sweed_customer_id = any($1::bigint[])
+         and s.enabled is distinct from false
+     )
+     select sweed_customer_id, segment_id, scope_dealer_id, segment_name,
+            segment_type_id, scope_dealer_name, total_count
+       from ranked
+      where rn <= $2
+      order by sweed_customer_id, rn`,
+    [ids, VISITOR_SCAN_SEGMENT_CHIP_LIMIT],
+  )
+
+  for (const r of res.rows) {
+    const customerId = Number(r.sweed_customer_id)
+    const scopeDealerId =
+      r.scope_dealer_id === null || Number(r.scope_dealer_id) === 0
+        ? null
+        : Number(r.scope_dealer_id)
+    const { scopeLabel } = membershipScope(scopeDealerId, r.scope_dealer_name)
+    let entry = out.get(customerId)
+    if (!entry) {
+      entry = { totalCount: Number(r.total_count), items: [] }
+      out.set(customerId, entry)
+    }
+    entry.items.push({
+      segmentId: r.segment_id,
+      scopeDealerId,
+      name: r.segment_name,
+      type: mapSegmentType(r.segment_type_id),
+      scopeLabel,
+    })
+  }
+  return out
+}
+
 interface CatalogStaticRow {
   segment_id: string
   segment_name: string
