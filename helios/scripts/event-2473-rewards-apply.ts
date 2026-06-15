@@ -43,6 +43,29 @@ const CTA_URL = 'https://freshlybaked.nyc/'
 const PREHEADER =
   'Our rewards program just leveled up — earn points, perks and discounts faster across four new tiers.'
 
+// Mandatory compliance footer, cribbed verbatim from recent site-level
+// marketing emails (Midtown event 1890 / Bronx 420 events). Because 2473
+// is a STATE-LEVEL cross-store send, both store licenses are listed
+// (Midtown OCM-RETL-26-000488 + Bronx OCM-CAURD-24-000137). Rendered as
+// black text on the brand pale-gold band (#fbeeb8) for high contrast,
+// matching the highlight color used in the source emails.
+const COMPLIANCE_LINE_1 =
+  '&copy; Freshly Baked NYC&nbsp;&nbsp;&bull;&nbsp;&nbsp;OCM-RETL-26-000488&nbsp;&nbsp;&bull;&nbsp;&nbsp;OCM-CAURD-24-000137&nbsp;&nbsp;&bull;&nbsp;&nbsp;NYS HOPELINE ph: 877-846-7369 text: 467369'
+const COMPLIANCE_LINE_2 =
+  'For use only by persons 21 years of age and older. Keep out of reach of children and pets.'
+const COMPLIANCE_LINE_3 =
+  'If someone accidentally consumes cannabis, contact the Poison Center.'
+const COMPLIANCE_LINE_4 = 'Consume responsibly. Cannabis can be addictive.'
+
+// Inner markup of the pale-gold compliance band (shared by HTML + design).
+const COMPLIANCE_BAND_INNER =
+  `<div style="font-family:arial,helvetica,sans-serif;font-size:11px;line-height:160%;text-align:center;color:#1a1a1a;word-wrap:break-word;">` +
+  `<span style="color:#1a1a1a;">${COMPLIANCE_LINE_1}</span><br>` +
+  `<span style="color:#1a1a1a;">${COMPLIANCE_LINE_2}</span><br>` +
+  `<span style="color:#1a1a1a;">${COMPLIANCE_LINE_3}</span><br>` +
+  `<span style="color:#1a1a1a;">${COMPLIANCE_LINE_4}</span>` +
+  `</div>`
+
 // ---------------------------------------------------------------------------
 // Rendered HTML (what the customer receives). Table-based, inline styles,
 // 560px card, high contrast on a dark background.
@@ -173,9 +196,13 @@ const EMAIL_HTML = `<!doctype html>
       <!-- Bottom CTA -->
       ${learnMoreButtonHtml()}
 
-      <!-- Compliance footer -->
-      <tr><td style="padding:8px 28px 30px 28px;border-top:1px solid #2b201d;color:#8a7e74;font-size:12px;line-height:165%;text-align:center;">
-        <p style="margin:0;color:#8a7e74;">Consume responsibly. Cannabis can be addictive.</p>
+      <!-- Mandatory compliance footer (site-level boilerplate) -->
+      <tr><td style="padding:14px 24px 28px 24px;border-top:1px solid #2b201d;">
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+          <tr><td style="background-color:#fbeeb8;border-radius:8px;padding:12px 16px;">
+            ${COMPLIANCE_BAND_INNER}
+          </td></tr>
+        </table>
       </td></tr>
 
     </table>
@@ -364,11 +391,14 @@ const EMAIL_DESIGN = {
               {
                 type: 'text',
                 values: {
-                  containerPadding: '14px 28px 30px 28px',
-                  fontSize: '12px',
-                  color: '#8a7e74',
+                  containerPadding: '14px 24px 28px 24px',
+                  fontSize: '11px',
+                  color: '#1a1a1a',
                   textAlign: 'center',
-                  text: '<p style="margin:0;color:#8a7e74;text-align:center;">Consume responsibly. Cannabis can be addictive.</p>',
+                  text:
+                    '<table role="presentation" width="100%"><tr><td style="background-color:#fbeeb8;border-radius:8px;padding:12px 16px;">' +
+                    COMPLIANCE_BAND_INNER +
+                    '</td></tr></table>',
                 },
               },
             ],
