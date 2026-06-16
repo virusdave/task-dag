@@ -1,0 +1,30 @@
+name: task-dag CLI tests
+
+# Central quality gate for the canonical task-dag CLI. This REPLACES the
+# per-repo task-dag-drift-guard that used to compare each peer's vendored
+# copy against top-level (now retired with the vendored copies). The
+# fixture tests are self-contained (each builds a throwaway bare origin +
+# clone in a tempdir; no network, no real repo).
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'scripts/task-dag'
+      - 'scripts/task-dag.d/**'
+      - 'tests/task-dag/**'
+      - '.github/workflows/cli-tests.yml'
+  pull_request:
+    paths:
+      - 'scripts/task-dag'
+      - 'scripts/task-dag.d/**'
+      - 'tests/task-dag/**'
+      - '.github/workflows/cli-tests.yml'
+
+jobs:
+  cli-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck + bash -n + fixture smoke
+        run: bash tests/task-dag/run-all.sh
