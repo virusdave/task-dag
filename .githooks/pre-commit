@@ -29,6 +29,13 @@ cd "$repo_root"
 echo "[pre-commit] scanning for disabled/weakened gates…"
 bash "$repo_root/scripts/scan-disabled-gates.sh"
 
+# Repo-wide test-resource scanner (automation#49 Phase D.11). Also cheap,
+# pure git/bash; flags any committed test that reaches a prod serving
+# resource (ambient-env fallback, non-loopback DB/broker URL, real
+# credential path). Runs on every commit, mirrors the required-status CI.
+echo "[pre-commit] scanning tests for prod-resource access…"
+bash "$repo_root/scripts/scan-test-resources.sh"
+
 # Find staged files that touch helios/ (excluding deletions).
 mapfile -t helios_changes < <(git diff --cached --name-only --diff-filter=ACMR | grep -E '^helios/' || true)
 
