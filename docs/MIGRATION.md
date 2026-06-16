@@ -84,14 +84,25 @@ branch the workflow is pinned to — keep them aligned.
    > `workflows: write` and installed on each peer + this repo). Per-repo
    > deploy keys are **not** sufficient. Provision this once before the
    > canary; otherwise each peer caller must be hand-placed via the web UI.
-2. **Canary = automation.** Add its single `task-dag.yml` caller in the
-   *same commit* that removes its superseded local workflows + vendored
-   scripts (never delete a script before its workflow is gone). It gains
-   the missing `close-completed-issues` + comment-sync paths. Verify the
-   full event matrix on a scratch issue.
-3. **Roll out** the identical caller to `mostly-static-sites`, `nixos-sbc`
-   (fixes the `issue-comment-sync`-missing deadlock), deleting duplicated
-   scripts in the same commits.
+2. **Canary = automation. [staged 2026-06-16]** A single `task-dag.yml`
+   caller + a `REMOVE.txt` manifest are staged under `automation`'s
+   `.github2/`. Promoting it adds the caller and, in the **same commit**,
+   removes the superseded `issue-to-task.yml`, `issue-comment-sync.yml`,
+   `cross-repo-completion-sync.yml` and `.github/scripts/create-task-commit.sh`
+   — and it gains the missing `close-completed` path. `task-dag-drift-guard.yml`
+   and the vendored CLI are intentionally kept (CLI distribution = step 5).
+   Promote with `scripts/promote-github2.sh FreshlyBakedNYC/automation` and
+   verify the full event matrix on a scratch issue before the rest.
+3. **Roll out. [staged 2026-06-16]** The identical caller + `REMOVE.txt`
+   are staged under `mostly-static-sites` and `nixos-sbc` `.github2/` (they
+   gain the missing `issue_comment` → comment-sync path, fixing the deadlock
+   class; `REMOVE.txt` also drops their `close-completed-issues.yml` +
+   `close-completed-issues.sh`). Promote with
+   `scripts/promote-github2.sh Nicponskis/mostly-static-sites Nicponskis/nixos-sbc`.
+
+   > **Order:** promote **task-dag first** (`scripts/promote-github2.sh`,
+   > default) so the reusable `issue-to-task` / `close-completed-issues`
+   > exist at `@main` before any peer caller references them.
 4. **Retire `shared-workflows`' task-dag workflows** — leave thin
    re-export wrappers for one release window, then delete once every
    caller points here and the smoke test is green. Drop per-repo

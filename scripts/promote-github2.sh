@@ -16,9 +16,12 @@
 #   1. clone it (via your `gh` auth);
 #   2. `git mv` every file under `.github2/` to the matching `.github/`
 #      path (e.g. `.github2/workflows/x.yml` -> `.github/workflows/x.yml`),
-#      skipping the `.github2/README.md` staging note;
-#   3. remove the now-empty `.github2/`;
-#   4. commit and push to the default branch.
+#      skipping the `.github2/README.md` note and `.github2/REMOVE.txt`;
+#   3. if `.github2/REMOVE.txt` exists, `git rm --ignore-unmatch` each path
+#      it lists (one repo-relative path per line; `#` comments / blanks
+#      ignored) — for retiring workflows the caller supersedes;
+#   4. remove the now-empty `.github2/`;
+#   5. commit and push to the default branch.
 #   Repos with no `.github2/` are skipped, so it is safe to re-run.
 #
 # PREREQUISITE
@@ -64,13 +67,28 @@ for slug in "${repos[@]}"; do
 
     moved=0
     while IFS= read -r -d '' f; do
-      [[ "${f}" == ".github2/README.md" ]] && continue   # staging note, not promoted
+      case "${f}" in
+        .github2/README.md|.github2/REMOVE.txt) continue ;;   # control files, not promoted
+      esac
       dest=".github/${f#.github2/}"
       mkdir -p "$(dirname "${dest}")"
       git mv "${f}" "${dest}"
-      echo "  ${f} -> ${dest}"
+      echo "  promote: ${f} -> ${dest}"
       moved=$((moved + 1))
     done < <(find .github2 -type f -print0)
+
+    removed=0
+    if [[ -f .github2/REMOVE.txt ]]; then
+      while IFS= read -r line; do
+        line="${line%%#*}"; line="${line#"${line%%[![:space:]]*}"}"; line="${line%"${line##*[![:space:]]}"}"
+        [[ -z "${line}" ]] && continue
+        if [[ -e "${line}" ]]; then
+          git rm -q --ignore-unmatch -- "${line}"
+          echo "  remove:  ${line}"
+          removed=$((removed + 1))
+        fi
+      done < .github2/REMOVE.txt
+    fi
 
     rm -rf .github2
     git add -A
@@ -80,9 +98,9 @@ for slug in "${repos[@]}"; do
       exit 0
     fi
 
-    git commit -q -m "Promote staged .github2/ task-dag files into .github/ (${moved} file(s))"
+    git commit -q -m "Promote staged .github2/ task-dag files into .github/ (${moved} added, ${removed} removed)"
     git push
-    echo "  pushed ${slug} (${moved} file(s))"
+    echo "  pushed ${slug} (${moved} added, ${removed} removed)"
   ) || rc=1
 done
 
