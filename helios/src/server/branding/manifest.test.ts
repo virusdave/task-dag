@@ -55,6 +55,7 @@ describe('buildBrandingOpaqueManifest', () => {
         row({ siteKey: 'midtown', sweedBrandId: 1, brandName: 'Cannaballs', forSaleVariantCount: 0, lastForSaleObservedAt: new Date('2026-01-01T00:00:00Z') }),
         row({ siteKey: 'queens', sweedBrandId: 5, brandName: 'Elsewhere' }), // non-FB-US site
         row({ siteKey: 'bronx', sweedBrandId: 6, brandName: '   ' }), // empty name
+        row({ siteKey: 'bronx', sweedBrandId: 9, brandName: 'DEAD - Old Brand' }), // operator-retired name
         row({ siteKey: 'bronx', sweedBrandId: 7, brandName: '***' }), // empty slug
         row({ siteKey: 'bronx', sweedBrandId: 8, brandName: 'NeverSold', forSaleVariantCount: 0, lastForSaleObservedAt: null }), // never for sale
       ],
@@ -68,8 +69,10 @@ describe('buildBrandingOpaqueManifest', () => {
       includedBrands: 2,
       skippedNotFbUsSite: 1,
       skippedEmptyName: 1,
+      skippedRetiredName: 1,
       skippedEmptySlug: 1,
       skippedNotForSale: 1,
+      slugCollisionGroups: 0,
     })
   })
 
@@ -85,16 +88,96 @@ describe('buildBrandingOpaqueManifest', () => {
     expect(result.summary.mergedDuplicateSlugRows).toBe(1)
   })
 
-  it('throws on a (site, slug) collision to a different brand id (mss collision)', () => {
-    expect(() =>
-      buildBrandingOpaqueManifest(
-        [
-          row({ siteKey: 'bronx', sweedBrandId: 1234, brandName: 'Herb' }),
-          row({ siteKey: 'bronx', sweedBrandId: 5678, brandName: 'herb' }),
-        ],
-        OPTS,
-      ),
-    ).toThrow(BrandingManifestBuildError)
+  it('resolves a slug collision by skipping the disabled (not-for-sale-anywhere) duplicate', () => {
+    // Mirrors the live bronx/dr-jekyll-and-mr-high collision: brand 1902 is
+    // live (for sale at midtown), brand 16413 is a stale bronx-only dup.
+    const result = buildBrandingOpaqueManifest(
+      [
+        row({ siteKey: 'bronx', sweedBrandId: 16413, brandName: 'Dr Jekyll and Mr High', forSaleVariantCount: 0, lastForSaleObservedAt: new Date('2026-05-21T14:09:57Z') }),
+        row({ siteKey: 'bronx', sweedBrandId: 1902, brandName: 'Dr. Jekyll And Mr. High', forSaleVariantCount: 0, lastForSaleObservedAt: new Date('2026-06-04T21:27:47Z') }),
+        row({ siteKey: 'midtown', sweedBrandId: 1902, brandName: 'Dr. Jekyll And Mr. High', forSaleVariantCount: 2, lastForSaleObservedAt: new Date('2026-06-16T19:54:00Z') }),
+      ],
+      OPTS,
+    )
+    // bronx keeps only the live brand (1902); midtown keeps 1902 normally.
+    expect(result.entries.map((e) => [e.site_key, e.literal_slug, e.sweed_brand_id])).toEqual([
+      ['bronx', 'dr-jekyll-and-mr-high', 1902],
+      ['midtown', 'dr-jekyll-and-mr-high', 1902],
+    ])
+    expect(result.summary).toMatchObject({
+      slugCollisionGroups: 1,
+      ambiguousCollisionGroups: 0,
+      droppedCollisionBrands: 1,
+    })
+    expect(result.collisions).toHaveLength(1)
+    const collision = result.collisions[0]
+    expect(collision).toMatchObject({
+      siteKey: 'bronx',
+      literalSlug: 'dr-jekyll-and-mr-high',
+      resolution: 'skipped-disabled',
+      winnerBrandId: 1902,
+    })
+    expect(collision.brands.map((b) => [b.sweedBrandId, b.brandWideActive, b.selected])).toEqual([
+      [1902, true, true],
+      [16413, false, false],
+    ])
+  })
+
+  it('resolves an ambiguous slug collision (>1 live brand) by deterministic winner + flags it', () => {
+    const result = buildBrandingOpaqueManifest(
+      [
+        row({ siteKey: 'bronx', sweedBrandId: 1234, brandName: 'Herb', forSaleVariantCount: 2, lastForSaleObservedAt: new Date('2026-06-01T00:00:00Z') }),
+        row({ siteKey: 'bronx', sweedBrandId: 5678, brandName: 'herb', forSaleVariantCount: 9, lastForSaleObservedAt: new Date('2026-06-10T00:00:00Z') }),
+      ],
+      OPTS,
+    )
+    // Both live; higher for-sale count wins (5678).
+    expect(result.entries).toHaveLength(1)
+    expect(result.entries[0].sweed_brand_id).toBe(5678)
+    expect(result.summary).toMatchObject({ slugCollisionGroups: 1, ambiguousCollisionGroups: 1, droppedCollisionBrands: 1 })
+    expect(result.collisions[0].resolution).toBe('ambiguous')
+    expect(result.collisions[0].winnerBrandId).toBe(5678)
+  })
+
+  it('resolves an all-disabled slug collision (0 live brands) as ambiguous by most-recent-for-sale', () => {
+    const result = buildBrandingOpaqueManifest(
+      [
+        row({ siteKey: 'bronx', sweedBrandId: 1234, brandName: 'Herb', forSaleVariantCount: 0, lastForSaleObservedAt: new Date('2026-05-01T00:00:00Z') }),
+        row({ siteKey: 'bronx', sweedBrandId: 5678, brandName: 'herb', forSaleVariantCount: 0, lastForSaleObservedAt: new Date('2026-06-01T00:00:00Z') }),
+      ],
+      OPTS,
+    )
+    expect(result.entries).toHaveLength(1)
+    expect(result.entries[0].sweed_brand_id).toBe(5678) // more recent last-for-sale
+    expect(result.summary).toMatchObject({ slugCollisionGroups: 1, ambiguousCollisionGroups: 1 })
+    expect(result.collisions[0].resolution).toBe('ambiguous')
+  })
+
+  it('breaks an exact collision tie deterministically by lowest sweedBrandId (input-order independent)', () => {
+    const rows = [
+      row({ siteKey: 'bronx', sweedBrandId: 5678, brandName: 'Herb', forSaleVariantCount: 0, lastForSaleObservedAt: new Date('2026-06-01T00:00:00Z') }),
+      row({ siteKey: 'bronx', sweedBrandId: 1234, brandName: 'herb', forSaleVariantCount: 0, lastForSaleObservedAt: new Date('2026-06-01T00:00:00Z') }),
+    ]
+    const a = buildBrandingOpaqueManifest(rows, OPTS)
+    const b = buildBrandingOpaqueManifest([...rows].reverse(), OPTS)
+    expect(a.entries[0].sweed_brand_id).toBe(1234)
+    expect(b.entries[0].sweed_brand_id).toBe(1234)
+    expect(a.collisions).toEqual(b.collisions)
+  })
+
+  it('does not let a retired-named (DEAD-) row mark a brand live in a collision', () => {
+    // brand 5678 only appears as a DEAD- row with forSale>0 — it must NOT
+    // count as live; brand 1234 (present, not for sale) is the lone winner.
+    const result = buildBrandingOpaqueManifest(
+      [
+        row({ siteKey: 'bronx', sweedBrandId: 1234, brandName: 'Herb', forSaleVariantCount: 0, lastForSaleObservedAt: new Date('2026-06-01T00:00:00Z') }),
+        row({ siteKey: 'bronx', sweedBrandId: 5678, brandName: 'DEAD - Herb', forSaleVariantCount: 9, lastForSaleObservedAt: new Date('2026-06-10T00:00:00Z') }),
+      ],
+      OPTS,
+    )
+    // The DEAD- row is skipped entirely, so there is no collision at all.
+    expect(result.entries.map((e) => e.sweed_brand_id)).toEqual([1234])
+    expect(result.summary).toMatchObject({ skippedRetiredName: 1, slugCollisionGroups: 0 })
   })
 
   it('throws on an invalid sweedBrandId', () => {

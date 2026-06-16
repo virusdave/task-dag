@@ -13,17 +13,31 @@
 // holds (`brand_id` = sweedBrandId, `brand_name`) but NOT the URL slug. mss
 // derives the slug from the brand name. To produce the `literal → opaque`
 // mapping the consumers need, this builder reproduces the EXACT mss
-// derivation (`slugifyBrandName` + the canonical-presence filters +
-// slug-collision detection), keeping the manifest a SUBSET of the pages
-// mss's `generateStaticParams` emits so no literal `308` ever points at a
-// page mss never generated (parent EPIC_PLAN §6.5.1). Residual divergence
-// from mss's overlay-DB fixups (`sweedBrandId` override, retired-by-slug —
-// which are NOT in Helios's canonical registry) is the design's accepted
-// gap, caught by mss's build-time parity assertion (red build, never a prod
-// 404). The clean end state migrates those fixups into Helios.
+// derivation (`slugifyBrandName` + the canonical-presence filters),
+// keeping the manifest a SUBSET of the pages mss's `generateStaticParams`
+// emits so no literal `308` ever points at a page mss never generated
+// (parent EPIC_PLAN §6.5.1).
+//
+// Slug collisions (two different `sweedBrandId`s whose names slugify to the
+// SAME `(site, slug)`) are the duplicate-Sweed-brand-record hazard mss
+// resolves via its overlay DB (retiring one id). Helios's canonical
+// registry has no explicit retire flag, so rather than hard-fail the whole
+// build (which would block every prod publish on one stale duplicate), the
+// builder resolves each collision deterministically and reports it loudly
+// (operator decision, automation#48):
+//   - "disabled" duplicates — brands not for sale anywhere in the FB-US
+//     footprint — are skipped in favour of the one live brand;
+//   - if more than one (or zero) of the colliding brands is live the case
+//     is "ambiguous": the build still emits ONE deterministic winner so a
+//     stale duplicate never blocks prod, but flags it for the operator.
+// The CLI prints every collision and escalates ("notify operator") when the
+// collision count grows beyond the single known one or any group is
+// ambiguous. The clean end state still migrates mss's overlay fixups into
+// Helios so the canonical registry alone disambiguates.
 
 import { z } from 'zod'
 
+import { isRetiredRecordName } from '../../worker/jobs/screensCarouselHelpers.js'
 import { deriveFreshlyBakedUsBrandOpaqueRef, freshlyBakedUsOpaquePublicRefLength } from './opaqueRef.js'
 
 // FB-US branding locations. Mirrors mss `isFreshlyBakedUsLocationKey`
@@ -147,14 +161,56 @@ export class BrandingManifestBuildError extends Error {
   }
 }
 
+/**
+ * How a `(site, slug)` collision (≥2 distinct brand ids slugifying to the
+ * same literal slug at one site) was resolved:
+ *  - `skipped-disabled`: exactly ONE of the colliding brands is live
+ *    (for sale somewhere in the FB-US footprint); the others are treated as
+ *    disabled/stale duplicates and skipped. Benign — the live brand wins.
+ *  - `ambiguous`: zero or ≥2 of the colliding brands are live, so there is
+ *    no single obvious winner. The build still emits ONE deterministic
+ *    winner (so a stale duplicate never blocks a prod publish) but flags it
+ *    for operator attention.
+ */
+export type BrandingSlugCollisionResolution = 'skipped-disabled' | 'ambiguous'
+
+/** One colliding brand, with the activity signals used to pick a winner. */
+export interface BrandingSlugCollisionBrand {
+  readonly sweedBrandId: number
+  readonly brandName: string
+  /** True if this brand is for sale anywhere in the FB-US footprint. */
+  readonly brandWideActive: boolean
+  readonly forSaleVariantCount: number
+  readonly lastForSaleObservedAt: Date | null
+  /** True for the single brand whose opaque ref the literal slug maps to. */
+  readonly selected: boolean
+}
+
+/** A resolved `(site, slug)` slug collision, surfaced for loud reporting. */
+export interface BrandingSlugCollision {
+  readonly siteKey: FbUsLocationKey
+  readonly literalSlug: string
+  readonly resolution: BrandingSlugCollisionResolution
+  readonly winnerBrandId: number
+  /** All colliding brands, sorted by `sweedBrandId`. */
+  readonly brands: readonly BrandingSlugCollisionBrand[]
+}
+
 export interface BrandingManifestBuildSummary {
   readonly presenceRowsConsidered: number
   readonly includedBrands: number
   readonly skippedNotFbUsSite: number
   readonly skippedEmptyName: number
+  readonly skippedRetiredName: number
   readonly skippedEmptySlug: number
   readonly skippedNotForSale: number
   readonly mergedDuplicateSlugRows: number
+  /** Number of `(site, slug)` slug-collision groups resolved. */
+  readonly slugCollisionGroups: number
+  /** Subset of `slugCollisionGroups` with no single obvious winner. */
+  readonly ambiguousCollisionGroups: number
+  /** Total colliding brands dropped (not selected) across all groups. */
+  readonly droppedCollisionBrands: number
 }
 
 export interface BrandingManifestBuildResult {
@@ -162,6 +218,8 @@ export interface BrandingManifestBuildResult {
   readonly scheme: BrandingOpaqueRefScheme
   readonly secretSource: SecretSource
   readonly summary: BrandingManifestBuildSummary
+  /** Every resolved slug collision, for loud CLI reporting / operator pages. */
+  readonly collisions: readonly BrandingSlugCollision[]
 }
 
 export interface BuildBrandingManifestOptions {
@@ -170,21 +228,55 @@ export interface BuildBrandingManifestOptions {
 }
 
 /**
+ * A canonically-present brand at one (site, slug), after merging rows that
+ * share the same `sweedBrandId`. `representativeRow` is the row used for
+ * winner selection (most-recently / most-for-sale of the merged rows).
+ */
+interface BrandAtSlug {
+  readonly sweedBrandId: number
+  readonly brandName: string
+  representativeRow: BrandPresenceRow
+}
+
+/**
+ * Deterministic "most-live" ordering used to pick a collision winner:
+ * higher current for-sale count, then more recent last-for-sale, then the
+ * lowest `sweedBrandId` as a stable final tiebreak. Returns < 0 if `a`
+ * should sort before `b`.
+ */
+function compareBrandLiveness(a: BrandPresenceRow, b: BrandPresenceRow): number {
+  if (a.forSaleVariantCount !== b.forSaleVariantCount) {
+    return b.forSaleVariantCount - a.forSaleVariantCount
+  }
+  const at = a.lastForSaleObservedAt?.getTime() ?? Number.NEGATIVE_INFINITY
+  const bt = b.lastForSaleObservedAt?.getTime() ?? Number.NEGATIVE_INFINITY
+  if (at !== bt) return bt - at
+  return a.sweedBrandId - b.sweedBrandId
+}
+
+/**
  * Build the deterministic branding `literal → opaque` manifest entries from
  * Helios's canonical presence rows. Pure: no I/O, no env, no clock.
  *
  * Inclusion (mirrors mss `buildCanonicalHeliosBrands`, so the manifest stays
  * a subset of the pages mss emits): skip non-FB-US sites, empty trimmed
- * names, empty slugs, and brands never observed for sale
+ * names, operator soft-retired (`DEAD -`/`RETIRED`/… per helios/AGENTS.md)
+ * brands, empty slugs, and brands never observed for sale
  * (`forSaleVariantCount > 0 || lastForSaleObservedAt !== null`). Rows that
- * collapse to one (site, slug) with the SAME brand id are merged; a clash
- * (same slug, different brand id) is a hard build error — exactly mss's
- * collision throw.
+ * collapse to one (site, slug) with the SAME brand id are merged.
  *
- * Guards that FAIL the build (data corruption): invalid sweedBrandId; a
- * (site, slug) slug collision to a different brand id; a global opaque-ref
- * collision to a different brand id; any literal slug equal to any opaque
- * ref in the same location (parent EPIC_PLAN §6.5 / §6.5.1).
+ * Slug collisions (same (site, slug), different brand id) are NOT a hard
+ * error (operator decision, automation#48): one stale duplicate Sweed brand
+ * record must not block every prod publish. Instead each collision is
+ * resolved deterministically — disabled (not-for-sale-anywhere) duplicates
+ * are skipped in favour of the one live brand, and genuinely ambiguous
+ * groups still emit one deterministic winner — and reported via
+ * `result.collisions` for loud CLI logging + operator notification.
+ *
+ * Guards that STILL FAIL the build (data corruption the build cannot
+ * silently paper over): invalid sweedBrandId; a global opaque-ref collision
+ * to a different brand id; any literal slug equal to any opaque ref in the
+ * same location (parent EPIC_PLAN §6.5 / §6.5.1).
  */
 export function buildBrandingOpaqueManifest(
   rows: readonly BrandPresenceRow[],
@@ -192,13 +284,30 @@ export function buildBrandingOpaqueManifest(
 ): BrandingManifestBuildResult {
   let skippedNotFbUsSite = 0
   let skippedEmptyName = 0
+  let skippedRetiredName = 0
   let skippedEmptySlug = 0
   let skippedNotForSale = 0
   let mergedDuplicateSlugRows = 0
 
-  // (site, slug) → resolved entry; same-slug/same-id rows merge, same-slug/
-  // different-id rows throw (the canonical mss collision).
-  const bySiteSlug = new Map<string, BrandingOpaqueManifestEntry>()
+  // Brand-wide "is this brand live": for sale anywhere in the FB-US
+  // footprint (any site). A brand that is for sale at midtown but not at
+  // bronx is still a live brand, not a stale duplicate, so collisions are
+  // disambiguated by brand-wide — not per-site — activity. Eligibility here
+  // must match the per-row skip filters below (valid id, non-empty,
+  // not operator-retired) so a stale `DEAD -`/blank row can never mark a
+  // brand "live" and win a collision over the real one.
+  const liveBrandIds = new Set<number>()
+  for (const row of rows) {
+    if (!isFbUsLocationKey(row.siteKey)) continue
+    if (!Number.isInteger(row.sweedBrandId) || row.sweedBrandId <= 0) continue
+    const name = row.brandName.trim()
+    if (name.length === 0 || isRetiredRecordName(name)) continue
+    if (row.forSaleVariantCount > 0) liveBrandIds.add(row.sweedBrandId)
+  }
+
+  // (site, slug) → { sweedBrandId → BrandAtSlug }. Same-id rows merge; a
+  // group with >1 entry is a slug collision resolved below.
+  const groups = new Map<string, { siteKey: FbUsLocationKey; slug: string; byBrand: Map<number, BrandAtSlug> }>()
 
   for (const row of rows) {
     if (!isFbUsLocationKey(row.siteKey)) {
@@ -216,6 +325,14 @@ export function buildBrandingOpaqueManifest(
       skippedEmptyName += 1
       continue
     }
+    // Operator soft-retire convention (helios/AGENTS.md): a brand renamed to
+    // start with `DEAD -`/`RETIRED`/… is out of service — skip it from the
+    // read entirely (subset-safe: mss may still emit it, so omitting it only
+    // means no literal→opaque 308, never a 404).
+    if (isRetiredRecordName(trimmedName)) {
+      skippedRetiredName += 1
+      continue
+    }
     const slug = slugifyBrandName(trimmedName)
     if (slug.length === 0) {
       skippedEmptySlug += 1
@@ -228,49 +345,123 @@ export function buildBrandingOpaqueManifest(
     }
 
     const key = `${row.siteKey}\u0000${slug}`
-    const existing = bySiteSlug.get(key)
+    let group = groups.get(key)
+    if (group === undefined) {
+      group = { siteKey: row.siteKey, slug, byBrand: new Map() }
+      groups.set(key, group)
+    }
+    const existing = group.byBrand.get(row.sweedBrandId)
     if (existing !== undefined) {
-      if (existing.sweed_brand_id !== row.sweedBrandId) {
-        throw new BrandingManifestBuildError(
-          `Helios slug collision at ${row.siteKey}: slug "${slug}" maps to brand IDs ` +
-            `${String(existing.sweed_brand_id)} and ${String(row.sweedBrandId)}`,
-        )
-      }
+      // Same (site, slug, brand id): merge, keeping the most-live row as the
+      // representative for any later collision tiebreak.
       mergedDuplicateSlugRows += 1
+      if (compareBrandLiveness(row, existing.representativeRow) < 0) {
+        existing.representativeRow = row
+      }
       continue
     }
-
-    bySiteSlug.set(key, {
-      site_key: row.siteKey,
-      literal_slug: slug,
-      sweed_brand_id: row.sweedBrandId,
-      opaque_ref: deriveFreshlyBakedUsBrandOpaqueRef(options.secret, row.sweedBrandId),
+    group.byBrand.set(row.sweedBrandId, {
+      sweedBrandId: row.sweedBrandId,
+      brandName: trimmedName,
+      representativeRow: row,
     })
   }
 
-  const entries = sortBrandingManifestEntries([...bySiteSlug.values()])
+  const entries: BrandingOpaqueManifestEntry[] = []
+  const collisions: BrandingSlugCollision[] = []
+  let ambiguousCollisionGroups = 0
+  let droppedCollisionBrands = 0
+
+  for (const group of groups.values()) {
+    const brands = [...group.byBrand.values()]
+
+    if (brands.length === 1) {
+      const only = brands[0]
+      entries.push(makeManifestEntry(group.siteKey, group.slug, only.sweedBrandId, options.secret))
+      continue
+    }
+
+    // Slug collision: resolve to one deterministic winner.
+    const liveBrands = brands.filter((b) => liveBrandIds.has(b.sweedBrandId))
+    const candidatePool = liveBrands.length > 0 ? liveBrands : brands
+    const winner = [...candidatePool].sort((a, b) =>
+      compareBrandLiveness(a.representativeRow, b.representativeRow),
+    )[0]
+    const resolution: BrandingSlugCollisionResolution = liveBrands.length === 1 ? 'skipped-disabled' : 'ambiguous'
+    if (resolution === 'ambiguous') ambiguousCollisionGroups += 1
+    droppedCollisionBrands += brands.length - 1
+
+    entries.push(makeManifestEntry(group.siteKey, group.slug, winner.sweedBrandId, options.secret))
+    collisions.push({
+      siteKey: group.siteKey,
+      literalSlug: group.slug,
+      resolution,
+      winnerBrandId: winner.sweedBrandId,
+      brands: [...brands]
+        .sort((a, b) => a.sweedBrandId - b.sweedBrandId)
+        .map((b) => ({
+          sweedBrandId: b.sweedBrandId,
+          brandName: b.brandName,
+          brandWideActive: liveBrandIds.has(b.sweedBrandId),
+          forSaleVariantCount: b.representativeRow.forSaleVariantCount,
+          lastForSaleObservedAt: b.representativeRow.lastForSaleObservedAt,
+          selected: b.sweedBrandId === winner.sweedBrandId,
+        })),
+    })
+  }
+
+  // Deterministic collision report order (independent of DB row / group
+  // insertion order) so logs and operator pages are stable across runs.
+  collisions.sort((a, b) => {
+    if (a.siteKey !== b.siteKey) return a.siteKey < b.siteKey ? -1 : 1
+    return a.literalSlug < b.literalSlug ? -1 : a.literalSlug > b.literalSlug ? 1 : 0
+  })
+
+  const sortedEntries = sortBrandingManifestEntries(entries)
 
   // Fail-closed consistency guards (opaque collisions, literal==opaque).
   // Shared with the read-time validator so a manifest can never be both
-  // produced and accepted in an inconsistent state.
-  const consistencyErrors = checkBrandingManifestConsistency(entries)
+  // produced and accepted in an inconsistent state. (After collision
+  // resolution every (site, slug) is unique, so the duplicate-slug branch of
+  // the checker is a belt-and-suspenders re-assert.)
+  const consistencyErrors = checkBrandingManifestConsistency(sortedEntries)
   if (consistencyErrors.length > 0) {
     throw new BrandingManifestBuildError(consistencyErrors.join('; '))
   }
 
   return {
-    entries,
+    entries: sortedEntries,
     scheme: BRANDING_OPAQUE_REF_SCHEME,
     secretSource: options.secretSource,
     summary: {
       presenceRowsConsidered: rows.length,
-      includedBrands: entries.length,
+      includedBrands: sortedEntries.length,
       skippedNotFbUsSite,
       skippedEmptyName,
+      skippedRetiredName,
       skippedEmptySlug,
       skippedNotForSale,
       mergedDuplicateSlugRows,
+      slugCollisionGroups: collisions.length,
+      ambiguousCollisionGroups,
+      droppedCollisionBrands,
     },
+    collisions,
+  }
+}
+
+/** Build one manifest entry, deriving the opaque ref from the brand id. */
+function makeManifestEntry(
+  siteKey: FbUsLocationKey,
+  literalSlug: string,
+  sweedBrandId: number,
+  secret: string,
+): BrandingOpaqueManifestEntry {
+  return {
+    site_key: siteKey,
+    literal_slug: literalSlug,
+    sweed_brand_id: sweedBrandId,
+    opaque_ref: deriveFreshlyBakedUsBrandOpaqueRef(secret, sweedBrandId),
   }
 }
 

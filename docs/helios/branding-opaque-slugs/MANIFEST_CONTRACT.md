@@ -86,11 +86,37 @@ with an atomically-swapped signed pointer at
 `<artifactRoot>/branding-opaque/<env>/current.json`
 (`freshlybaked.branding-opaque.current.v1`).
 
-**Guards that fail the publish:** invalid `sweedBrandId`; a `(site, slug)`
-collision to a different brand id; a duplicate `opaque_ref` mapping to a
-different brand id; a literal slug equal to an opaque ref in the same
-location. Rows mss would not generate (non-FB-US site, empty trimmed
-name/slug, never-for-sale) are **excluded** (subset invariant), not errors.
+**Guards that fail the publish:** invalid `sweedBrandId`; a duplicate
+`opaque_ref` mapping to a different brand id; a literal slug equal to an
+opaque ref in the same location. Rows mss would not generate (non-FB-US
+site, empty trimmed name/slug, operator soft-retired `DEAD -`/`RETIRED`
+names, never-for-sale) are **excluded** (subset invariant), not errors.
+
+### Slug collisions are resolved, not fatal (operator decision, #48)
+
+Two different `sweedBrandId`s whose names slugify to the same
+`(site, slug)` are a duplicate-Sweed-brand-record hazard. mss resolves it
+via its overlay DB (retiring one id); Helios's canonical registry has no
+explicit retire flag. Rather than hard-fail the whole build on one stale
+duplicate (which would block **every** prod publish), the builder resolves
+each collision deterministically and reports it:
+
+- **`skipped-disabled`** — exactly one of the colliding brands is *live*
+  (for sale anywhere in the FB-US footprint). The live brand wins; the
+  disabled/stale duplicates are skipped. Benign.
+- **`ambiguous`** — zero or ≥2 colliding brands are live, so there is no
+  single obvious winner. The build still emits ONE deterministic winner
+  (highest current for-sale count → most recent last-for-sale → lowest
+  `sweedBrandId`) so a stale duplicate never blocks prod, but flags the
+  group for operator attention.
+
+Each collision is printed loudly by the CLI (`build` and `publish`). The
+CLI **pages the operator** (`page-dave`) when the collision picture is
+abnormal — more than the one known benign group, or any `ambiguous` group.
+The single live collision today (`bronx/dr-jekyll-and-mr-high`: live brand
+`1902` kept, stale `16413` skipped) resolves as `skipped-disabled` and does
+**not** page. The clean #13-aligned end state still migrates mss's overlay
+fixups into Helios so the canonical registry alone disambiguates.
 
 ## Two prerequisites that gate the production PUBLISH (operator-side)
 
@@ -106,19 +132,32 @@ manifest today. Both items below are explicitly deferred by the parent plan
    secret must be provisioned into Helios (e.g. via `nixos-sbc` +
    `self-deploy`, operator approval) before a prod manifest can be produced.
 
-2. **A canonical-registry slug collision must be resolved (the §6.5.1
-   overlay-fixup migration).** Running the producer read-only against the live
+2. **~~A canonical-registry slug collision must be resolved~~ — RESOLVED in
+   the builder (#48).** Running the producer read-only against the live
    registry surfaced a real collision at **bronx**: brand ids `1902`
    ("Dr. Jekyll And Mr. High") and `16413` ("Dr Jekyll and Mr High") both
-   slugify to `dr-jekyll-and-mr-high`. This is the "split-then-merged"
-   duplicate the mss comment describes: mss resolves it via the FB-US overlay
-   DB marking one id `status='retired'` (keyed by `sweedBrandId`) *before* its
-   collision check. Helios's canonical registry has no such retirement flag,
-   so the producer fails loud (correct — better than emitting a manifest entry
-   whose opaque page mss never generated). The clean, #13-aligned fix is to
-   migrate the residual overlay fixups (retired-by-slug, `sweedBrandId`
-   override) **into Helios** so the canonical registry alone disambiguates.
-   That migration is separate, follow-on work.
+   slugify to `dr-jekyll-and-mr-high`. The producer no longer hard-fails on
+   this: per the operator decision (#48) it skips the disabled duplicate
+   (`16413`, not for sale anywhere in the FB-US footprint) in favour of the
+   live brand (`1902`) and reports it loudly (see "Slug collisions are
+   resolved, not fatal" above). So this no longer gates the prod publish.
+   The clean, #13-aligned end state still migrates the residual mss overlay
+   fixups (retired-by-slug, `sweedBrandId` override) **into Helios** so the
+   canonical registry alone disambiguates — that is separate, follow-on work.
 
-Until both are done, the actual prod publish stays gated. mss P1 can already
+Until item 1 is done, the actual prod publish stays gated. mss P1 can already
 build against the **agreed contract** above (schema + golden vectors).
+
+> **On item 1 — why does Helios need the secret?** Only because the manifest
+> currently emits the final `opaque_ref` (so the operator's Ads-Editor CSV
+> migration can read literal-URL → opaque-URL directly). The opaque ref is
+> `HMAC(secret, sweedBrandId)`; to emit prod-correct refs Helios needs the
+> same secret mss uses, or every literal `308` lands on an opaque page mss
+> can't decode (→ 404). Helios does **not** need the secret to *know the
+> mapping* — it already emits the immutable `sweed_brand_id` per entry, and
+> any secret-holder (mss) can derive the opaque ref from that. So an
+> alternative is: Helios publishes `literal_slug → sweed_brand_id` only, and
+> the secret-holding consumer derives the opaque ref. That keeps the secret
+> out of Helios entirely, at the cost of moving the literal→opaque CSV
+> derivation to a secret-holding step. **Operator decision required** before
+> changing the agreed mss contract (which today includes `opaque_ref`).

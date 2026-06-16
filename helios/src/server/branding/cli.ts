@@ -24,11 +24,16 @@
 import { readFileSync, writeFileSync } from 'node:fs'
 import { pathToFileURL } from 'node:url'
 
+import { pageDave } from '../../worker/runtime/pageDave.js'
 import { closePool, getPool } from '../db/pool.js'
 import { publicKeyPemFromPrivate } from '../lp/signing.js'
 import type { LpEnvironment } from '../lp/publish.js'
 import { fetchBrandingPresenceRows } from './db.js'
-import { buildBrandingOpaqueManifest, type BrandingManifestBuildResult } from './manifest.js'
+import {
+  buildBrandingOpaqueManifest,
+  type BrandingManifestBuildResult,
+  type BrandingSlugCollision,
+} from './manifest.js'
 import { publishBrandingOpaqueManifest, validateBrandingOpaqueManifest } from './publish.js'
 import {
   requireProductionBrandingSecret,
@@ -90,10 +95,77 @@ function summarize(result: BrandingManifestBuildResult): string {
     `  presence rows considered: ${String(s.presenceRowsConsidered)}\n` +
     `  skipped (non-FB-US site): ${String(s.skippedNotFbUsSite)}\n` +
     `  skipped (empty name): ${String(s.skippedEmptyName)}\n` +
+    `  skipped (retired/DEAD name): ${String(s.skippedRetiredName)}\n` +
     `  skipped (empty slug): ${String(s.skippedEmptySlug)}\n` +
     `  skipped (never for sale): ${String(s.skippedNotForSale)}\n` +
-    `  merged duplicate-slug rows: ${String(s.mergedDuplicateSlugRows)}\n`
+    `  merged duplicate-slug rows: ${String(s.mergedDuplicateSlugRows)}\n` +
+    `  slug collisions resolved: ${String(s.slugCollisionGroups)} ` +
+    `(${String(s.ambiguousCollisionGroups)} ambiguous, ${String(s.droppedCollisionBrands)} brand(s) dropped)\n`
   )
+}
+
+// The single live collision (bronx/dr-jekyll-and-mr-high) is known and
+// benign (one stale duplicate skipped in favour of the live brand). The
+// operator wants a page only when collisions grow beyond that one OR a
+// genuinely ambiguous group appears (no single obvious winner).
+const KNOWN_BENIGN_COLLISION_GROUPS = 1
+
+function isoOrNull(value: Date | null): string {
+  return value === null ? 'never' : value.toISOString()
+}
+
+/** Human-readable, greppable dump of one resolved collision. */
+function formatCollision(collision: BrandingSlugCollision): string {
+  const lines = [
+    `  [${collision.resolution}] ${collision.siteKey}/${collision.literalSlug} ` +
+      `→ brand ${String(collision.winnerBrandId)}`,
+  ]
+  for (const b of collision.brands) {
+    lines.push(
+      `      ${b.selected ? '✓ keep' : '✗ drop'} brand ${String(b.sweedBrandId)} "${b.brandName}" ` +
+        `(live=${String(b.brandWideActive)}, forSale=${String(b.forSaleVariantCount)}, ` +
+        `lastForSale=${isoOrNull(b.lastForSaleObservedAt)})`,
+    )
+  }
+  return lines.join('\n')
+}
+
+/**
+ * Print every resolved slug collision (always, loudly, to stderr) and, when
+ * the collision picture is abnormal (more than the one known benign group,
+ * or any ambiguous group), page the operator. Best-effort: a paging failure
+ * must never break a read-only build or an otherwise-successful publish.
+ */
+async function reportCollisions(result: BrandingManifestBuildResult, command: string): Promise<void> {
+  const { collisions } = result
+  if (collisions.length === 0) return
+
+  process.stderr.write(`\n[branding] ${String(collisions.length)} slug collision(s) resolved:\n`)
+  for (const c of collisions) process.stderr.write(`${formatCollision(c)}\n`)
+
+  const abnormal =
+    collisions.length > KNOWN_BENIGN_COLLISION_GROUPS || result.summary.ambiguousCollisionGroups > 0
+  if (!abnormal) {
+    process.stderr.write(`[branding] (within the single tolerated benign collision count; not paging)\n`)
+    return
+  }
+
+  const summaryLine =
+    `branding manifest ${command}: ${String(collisions.length)} slug collision(s), ` +
+    `${String(result.summary.ambiguousCollisionGroups)} ambiguous — expanded beyond the known one.`
+  process.stderr.write(`\n‼️  OPERATOR ACTION REQUIRED: ${summaryLine}\n`)
+  process.stderr.write(`    Resolve via the mss overlay-fixup migration into Helios (automation#48).\n`)
+  try {
+    await pageDave(
+      `${summaryLine}\n\n` +
+        collisions.map((c) => formatCollision(c)).join('\n\n') +
+        `\n\nSee https://github.com/FreshlyBakedNYC/automation/issues/48`,
+      { priority: 4, title: 'FB-US branding slug collisions expanded' },
+    )
+    process.stderr.write(`[branding] paged operator (page-dave).\n`)
+  } catch (e) {
+    process.stderr.write(`[branding] WARNING: failed to page operator: ${e instanceof Error ? e.message : String(e)}\n`)
+  }
 }
 
 async function buildFromDb(environment: LpEnvironment): Promise<BrandingManifestBuildResult> {
@@ -113,6 +185,7 @@ async function cmdBuild(args: Args): Promise<number> {
     process.stdout.write(`${out}\n`)
   }
   process.stdout.write(summarize(result))
+  await reportCollisions(result, 'build')
   return 0
 }
 
@@ -138,6 +211,7 @@ async function cmdPublish(args: Args): Promise<number> {
       `  pointer:     ${result.pointerPath}\n`,
   )
   process.stdout.write(summarize(buildResult))
+  await reportCollisions(buildResult, 'publish')
 
   // Self-validate what we just wrote.
   const v = validateBrandingOpaqueManifest({
