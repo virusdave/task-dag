@@ -25,7 +25,7 @@ jobs:
     uses: Nicponskis/shared-workflows/.github/workflows/task-dag-drift-guard.yml@master
     with:
       canonical_repo: virusdave/top-level
-      canonical_ref: 7a226bdb8d2c6f3a19c6703e9ea3b4d1ede02dbd
+      canonical_ref: 9c365e5cccf4e5a327328730fa49b4d5eef0dc32
     secrets:
       app_id: ${{ secrets.TASK_DAG_APP_ID }}
       app_private_key: ${{ secrets.TASK_DAG_APP_PRIVATE_KEY }}

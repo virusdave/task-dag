@@ -17,6 +17,9 @@
 #     developed in the automation fork). Keep claim/release/active intact:
 #     the github-worker shell claim (lib/state.sh) is per-host only, so
 #     these refs are what protect against duplicate work ACROSS hosts.
+#   - breakdown: decompose an epic/task into child tasks from a JSON spec
+#     (was a stub until 2026-06-16). Creates child commits (DAG edges =
+#     git parents), atomically publishes their frontier refs, create-only.
 
 set -euo pipefail
 
@@ -1107,55 +1110,330 @@ cmd_dag() {
 
 # Command: breakdown - create task breakdown from spec
 cmd_breakdown() {
-    local parent_sha=""
-    local spec_file=""
-    local stdin_json=false
-    
+    local parent_sha="" spec_file="" stdin_json=false dry_run=false force=false json=false
+
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --spec-file=*) spec_file="${1#*=}"; shift ;;
             --stdin-json) stdin_json=true; shift ;;
+            --dry-run) dry_run=true; shift ;;
+            --force) force=true; shift ;;
+            --json) json=true; shift ;;
             --help|-h)
-                cat <<EOF
+                cat <<'EOF'
 Usage: task-dag breakdown <parent-sha> [--spec-file=PATH | --stdin-json]
+                         [--dry-run] [--force] [--json]
 
-Create subtasks from a JSON specification.
+Create subtasks (children) of <parent-sha> from a JSON spec, publishing a
+tasks/frontier/<short> ref for each so the frontier/claim/complete flow can
+pick them up. Each child inherits the parent's Issue:/URL:/Author: metadata.
 
-Spec format:
+The DAG is encoded in the git parents of each child commit:
+  * first parent  = <parent-sha>            (the breakdown/epic parent)
+  * 2nd+ parents  = the child's dependencies (it is "ready" only once all
+                    of them are completed, mirroring `deps`/`frontier`)
+
+Spec format (a non-empty JSON array, authored in dependency order):
 [
   {
-    "title": "Task title",
-    "description": "Task description",
-    "dependencies": ["<sha1>", "<sha2>"],
-    "type": "task|leaf",
-    "status": "pending"
+    "title": "Task title",            (required, non-empty, single line)
+    "description": "Longer body",     (optional string)
+    "dependencies": ["@1", "..."],    (optional; see below)
+    "type": "epic|task|leaf",         (optional; default "leaf")
+    "status": "pending"               (optional; only "pending" is valid)
   }
 ]
+
+Each "dependencies" entry must be a non-empty string, one of:
+  * "@N"         — 1-based index of an EARLIER sibling in this same spec
+  * "<title>"    — exact title of an EARLIER sibling in this same spec
+  * "<sha|ref>"  — any already-existing, resolvable commit/ref
+
+Dependencies must resolve to siblings declared earlier in the array (git
+commit parents are immutable, so a child is created after its deps) or to
+pre-existing commits; forward/self sibling references are rejected.
+
+Options:
+  --spec-file=PATH  read the JSON spec from PATH
+  --stdin-json      read the JSON spec from stdin
+  --dry-run         validate + print the plan; create/push nothing
+  --force           proceed even if <parent-sha> already has live child
+                    task refs (otherwise breakdown refuses, to avoid
+                    accidentally double-decomposing an epic)
+  --json            machine-readable output
+
+Commits are created locally first and published with a single atomic,
+create-only `git push`; if the push fails nothing is left on origin.
+Reverse a breakdown by dropping the children (e.g. `task-dag drop <sha>`).
 EOF
                 return 0
+                ;;
+            -*)
+                echo "Unknown option: $1" >&2
+                return 1
                 ;;
             *)
                 if [ -z "$parent_sha" ]; then
                     parent_sha="$1"
                 else
-                    echo "Unknown option: $1" >&2
+                    echo "Unknown argument: $1" >&2
                     return 1
                 fi
                 shift
                 ;;
         esac
     done
-    
+
     if [ -z "$parent_sha" ]; then
         echo "Error: parent SHA required" >&2
         return 1
     fi
-    
+    if [ "$stdin_json" = true ] && [ -n "$spec_file" ]; then
+        echo "Error: use only one of --spec-file / --stdin-json" >&2
+        return 1
+    fi
+    if ! command -v jq >/dev/null 2>&1; then
+        echo "Error: 'jq' is required for breakdown but was not found on PATH" >&2
+        return 1
+    fi
+
     parent_sha=$(resolve_sha "$parent_sha") || return 1
-    
-    echo "Command 'breakdown' not yet fully implemented" >&2
-    echo "Parent: $parent_sha" >&2
-    return 1
+
+    # ── read the spec ────────────────────────────────────────────────
+    local spec_json
+    if [ "$stdin_json" = true ]; then
+        spec_json=$(cat)
+    elif [ -n "$spec_file" ]; then
+        if [ ! -f "$spec_file" ]; then
+            echo "Error: spec file not found: $spec_file" >&2
+            return 1
+        fi
+        spec_json=$(cat "$spec_file")
+    else
+        echo "Error: provide --spec-file=PATH or --stdin-json (see --help)" >&2
+        return 1
+    fi
+
+    # ── full schema validation BEFORE any mutation ───────────────────
+    # (type/shape of every field; title single-line & non-empty; deps are
+    #  non-empty strings; type is a known enum; status, if present, pending)
+    if ! printf '%s' "$spec_json" | jq -e '
+        type == "array" and length > 0 and all(.[];
+            type == "object"
+            and has("title") and (.title | type == "string")
+                and (.title | length > 0) and (.title | test("[\r\n]") | not)
+            and ((has("description") | not) or (.description == null)
+                 or (.description | type == "string"))
+            and ((has("type") | not)
+                 or (.type == "epic" or .type == "task" or .type == "leaf"))
+            and ((has("status") | not) or (.status == "pending"))
+            and ((has("dependencies") | not)
+                 or ((.dependencies | type == "array")
+                     and all(.dependencies[]; type == "string" and length > 0)))
+        )' >/dev/null 2>&1; then
+        echo "Error: invalid spec. Each entry needs a non-empty single-line" >&2
+        echo "       'title'; optional 'description' (string), 'type'" >&2
+        echo "       (epic|task|leaf), 'status' (pending), and 'dependencies'" >&2
+        echo "       (array of non-empty strings). See --help." >&2
+        return 1
+    fi
+
+    # ── inherit issue / url / author from the parent task commit ─────
+    local parent_msg issue_num issue_url author parent_title
+    parent_msg=$(parse_commit_metadata "$parent_sha")
+    issue_num=$(extract_field "$parent_msg" "Issue" || true)
+    issue_url=$(extract_field "$parent_msg" "URL" || true)
+    author=$(extract_field "$parent_msg" "Author" || true)
+    parent_title=$(get_task_title "$parent_sha")
+
+    local count
+    count=$(printf '%s' "$spec_json" | jq 'length')
+
+    # ── pass 1: collect fields + full title→index map (detect dup titles) ──
+    local -a titles=() types=() statuses=() descs=() dep_plans=() out_lines=()
+    local -A title_to_idx=()
+    local i
+    for (( i=0; i<count; i++ )); do
+        local title
+        title=$(printf '%s' "$spec_json" | jq -r ".[$i].title")
+        if [ -n "${title_to_idx[$title]+set}" ]; then
+            echo "Error: duplicate sibling title '$title' (siblings are referenced by title)" >&2
+            return 1
+        fi
+        title_to_idx[$title]=$i
+        titles[i]="$title"
+        types[i]=$(printf '%s' "$spec_json" | jq -r ".[$i].type // \"leaf\"")
+        statuses[i]=$(printf '%s' "$spec_json" | jq -r ".[$i].status // \"pending\"")
+        descs[i]=$(printf '%s' "$spec_json" | jq -r ".[$i].description // \"\"")
+    done
+
+    # ── pass 2: structurally validate every dependency (still no mutation) ──
+    # dep_plans[i] is a space-separated list of tokens "idx:<n>" (an earlier
+    # sibling, resolved to its sha after creation) or "sha:<full>" (external).
+    for (( i=0; i<count; i++ )); do
+        local ndeps j depref plan="" disp=""
+        ndeps=$(printf '%s' "$spec_json" | jq ".[$i].dependencies // [] | length")
+        for (( j=0; j<ndeps; j++ )); do
+            depref=$(printf '%s' "$spec_json" | jq -r ".[$i].dependencies[$j]")
+            if [[ "$depref" =~ ^@([0-9]+)$ ]]; then
+                local idx="${BASH_REMATCH[1]}"
+                if (( idx < 1 || idx > i )); then
+                    echo "Error: entry $((i+1)) dependency '@$idx' must reference an" >&2
+                    echo "       earlier sibling (valid range here: @1..@$i)" >&2
+                    return 1
+                fi
+                plan+=" idx:$((idx-1))"
+                disp+="${disp:+,}@$idx"
+            elif [ -n "${title_to_idx[$depref]+set}" ]; then
+                local sib="${title_to_idx[$depref]}"
+                if (( sib >= i )); then
+                    echo "Error: entry $((i+1)) dependency '$depref' refers to a sibling" >&2
+                    echo "       that is not declared earlier; reorder so deps come first" >&2
+                    return 1
+                fi
+                plan+=" idx:$sib"
+                disp+="${disp:+,}$depref"
+            else
+                local dep_full
+                dep_full=$(git rev-parse --verify "${depref}^{commit}" 2>/dev/null) || {
+                    echo "Error: entry $((i+1)) dependency '$depref' is not '@N', an earlier" >&2
+                    echo "       sibling title, or a resolvable commit/ref" >&2
+                    return 1
+                }
+                plan+=" sha:$dep_full"
+                disp+="${disp:+,}${dep_full:0:12}"
+            fi
+        done
+        dep_plans[i]="$plan"
+        local deps_str=""
+        [ -n "$disp" ] && deps_str=" deps=[$disp]"
+        out_lines[i]="[${types[i]}] ${titles[i]}${deps_str}"
+    done
+
+    # ── guard: refuse to double-decompose unless --force (skip in dry-run) ─
+    if [ "$force" = false ] && [ "$dry_run" = false ]; then
+        # Sync remote task refs first so a stale checkout still sees children.
+        git fetch --quiet origin \
+            '+refs/heads/tasks/frontier/*:refs/heads/tasks/frontier/*' \
+            '+refs/heads/tasks/active/*:refs/heads/tasks/active/*' \
+            '+refs/heads/tasks/blocked/*:refs/heads/tasks/blocked/*' \
+            2>/dev/null || true
+        local existing_child="" ref child_sha
+        while IFS= read -r ref; do
+            [ -z "$ref" ] && continue
+            child_sha=$(git rev-parse "$ref" 2>/dev/null) || continue
+            if [ "$(get_first_parent "$child_sha")" = "$parent_sha" ]; then
+                existing_child="$ref"
+                break
+            fi
+        done < <(git for-each-ref --format='%(refname)' \
+                    refs/heads/tasks/frontier/ \
+                    refs/heads/tasks/active/ \
+                    refs/heads/tasks/blocked/)
+        if [ -n "$existing_child" ]; then
+            echo "Error: parent ${parent_sha:0:12} ('${parent_title}') already has at" >&2
+            echo "       least one live child task ref ($existing_child)." >&2
+            echo "       Refusing to create a duplicate breakdown. Re-run with --force" >&2
+            echo "       if you really mean to add more children." >&2
+            return 1
+        fi
+    fi
+
+    # ── dry-run: report the plan, mutate nothing ─────────────────────
+    if [ "$dry_run" = true ]; then
+        if [ "$json" = true ]; then
+            printf '%s' "$spec_json" | jq --arg parent "$parent_sha" \
+                '{ok:true, dryRun:true, parent:$parent, count:length, tasks:.}'
+        else
+            printf "${BOLD}Breakdown plan (dry-run) for %s — '%s'${RESET}\n" \
+                "${parent_sha:0:12}" "$parent_title"
+            for (( i=0; i<count; i++ )); do
+                echo "  $((i+1)). ${out_lines[i]}"
+            done
+            echo "(${count} task(s); nothing created)"
+        fi
+        return 0
+    fi
+
+    # ── create the commit objects (no refs yet → nothing to clean up) ─
+    local -a created_shas=() refspecs=() lease_args=()
+    for (( i=0; i<count; i++ )); do
+        local msg_file
+        msg_file=$(mktemp)
+        {
+            printf 'Task: %s\n\n' "${titles[i]}"
+            [ -n "$issue_num" ] && printf 'Issue: %s\n' "$issue_num"
+            [ -n "$author" ] && printf 'Author: %s\n' "$author"
+            [ -n "$issue_url" ] && printf 'URL: %s\n' "$issue_url"
+            printf 'Status: %s\n' "${statuses[i]}"
+            printf 'Type: %s\n' "${types[i]}"
+            if [ -n "${descs[i]}" ]; then
+                printf '\n%s\n' "${descs[i]}"
+            fi
+        } > "$msg_file"
+
+        local -a parent_args=("-p" "$parent_sha")
+        local token
+        for token in ${dep_plans[i]}; do
+            case "$token" in
+                idx:*) parent_args+=("-p" "${created_shas[${token#idx:}]}") ;;
+                sha:*) parent_args+=("-p" "${token#sha:}") ;;
+            esac
+        done
+
+        local child_sha
+        child_sha=$(git commit-tree "$EMPTY_TREE" "${parent_args[@]}" -F "$msg_file") || {
+            rm -f "$msg_file"
+            echo "Error: git commit-tree failed for entry $((i+1)) ('${titles[i]}')" >&2
+            return 1
+        }
+        rm -f "$msg_file"
+
+        created_shas[i]="$child_sha"
+        local short_sha frontier_ref
+        short_sha=$(git rev-parse --short "$child_sha")
+        frontier_ref="refs/heads/tasks/frontier/$short_sha"
+        refspecs+=("$child_sha:$frontier_ref")
+        lease_args+=("--force-with-lease=$frontier_ref:")
+        out_lines[i]="${short_sha}  ${out_lines[i]}"
+    done
+
+    # ── publish all frontier refs to origin atomically, create-only ──
+    local push_output push_rc=0
+    push_output=$(git push --atomic "${lease_args[@]}" origin "${refspecs[@]}" 2>&1) || push_rc=$?
+    if [ "$push_rc" -ne 0 ]; then
+        echo "Error: failed to publish frontier refs to origin (nothing was created" >&2
+        echo "       on origin; the local commit objects are unreferenced)." >&2
+        echo "$push_output" >&2
+        return 4
+    fi
+
+    # ── mirror onto local refs so subsequent commands see them ───────
+    for (( i=0; i<count; i++ )); do
+        git update-ref "refs/heads/tasks/frontier/$(git rev-parse --short "${created_shas[i]}")" \
+            "${created_shas[i]}"
+    done
+
+    # ── report ───────────────────────────────────────────────────────
+    if [ "$json" = true ]; then
+        local k first=true
+        printf '{"ok":true,"parent":"%s","count":%s,"tasks":[' "$parent_sha" "$count"
+        for (( k=0; k<count; k++ )); do
+            [ "$first" = false ] && printf ','
+            first=false
+            printf '{"sha":"%s","shortSha":"%s"}' \
+                "${created_shas[k]}" "$(git rev-parse --short "${created_shas[k]}")"
+        done
+        printf ']}\n'
+    else
+        printf "${GREEN}✓ Created %s task(s) under %s — '%s'${RESET}\n" \
+            "$count" "${parent_sha:0:12}" "$parent_title"
+        for (( i=0; i<count; i++ )); do
+            echo "  ${out_lines[i]}"
+        done
+        echo "Run 'task-dag frontier' to see the ready leaves."
+    fi
+    return 0
 }
 
 # Command: complete - mark task as complete
