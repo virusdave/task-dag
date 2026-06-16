@@ -15,7 +15,7 @@ on:
 jobs:
   issue-to-task:
     if: ${{ github.event_name == 'issues' }}
-    uses: virusdave/task-dag/.github/workflows/issue-to-task.yml@main
+    uses: virusdave/task-dag/.github/workflows/issue-to-task.yml@master
     permissions:
       contents: write
       issues: write
@@ -30,7 +30,7 @@ jobs:
     concurrency:
       group: task-dag-issue-${{ github.event.issue.number }}
       cancel-in-progress: false
-    uses: virusdave/task-dag/.github/workflows/sync-comment-to-task.yml@main
+    uses: virusdave/task-dag/.github/workflows/sync-comment-to-task.yml@master
     permissions:
       contents: write
       issues: write
@@ -39,7 +39,7 @@ jobs:
 
   close-completed:
     if: ${{ github.event_name == 'push' }}
-    uses: virusdave/task-dag/.github/workflows/close-completed-issues.yml@main
+    uses: virusdave/task-dag/.github/workflows/close-completed-issues.yml@master
     permissions:
       contents: read
       issues: write
@@ -48,7 +48,7 @@ jobs:
 
   completion-aggregate:
     if: ${{ github.event_name == 'push' }}
-    uses: virusdave/task-dag/.github/workflows/aggregate-cross-repo-completions.yml@main
+    uses: virusdave/task-dag/.github/workflows/aggregate-cross-repo-completions.yml@master
     with:
       base_sha: ${{ github.event.before }}
       head_sha: ${{ github.sha }}
