@@ -1,0 +1,64 @@
+name: Sync Comment to Task-DAG (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      max_comment_size:
+        description: 'Maximum comment size in bytes'
+        type: number
+        default: 2048
+      max_daily_comments:
+        description: 'Maximum agent comments per issue per day'
+        type: number
+        default: 20
+      enable_auto_frontier:
+        description: 'Automatically mark work-request comments as frontier tasks'
+        type: boolean
+        default: true
+      ref:
+        description: 'task-dag ref to fetch helper scripts from (branch, tag, or SHA)'
+        type: string
+        default: main
+    secrets:
+      token:
+        description: 'GitHub token for API access'
+        required: true
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  sync-comment-to-task:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.token }}
+
+      - name: Download task-dag scripts
+        run: |
+          curl -fsSL "https://raw.githubusercontent.com/virusdave/task-dag/${{ inputs.ref }}/scripts/sync-comment-to-tasks.sh" \
+            -o /tmp/sync-comment-to-tasks.sh
+          chmod +x /tmp/sync-comment-to-tasks.sh
+
+      - name: Sync comment to task-dag
+        env:
+          GITHUB_TOKEN: ${{ secrets.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_REPO: ${{ github.repository }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          ISSUE_URL: ${{ github.event.issue.html_url }}
+          ISSUE_AUTHOR: ${{ github.event.issue.user.login }}
+          COMMENT_ID: ${{ github.event.comment.id }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          COMMENT_URL: ${{ github.event.comment.html_url }}
+          COMMENT_AUTHOR: ${{ github.event.comment.user.login }}
+          MAX_COMMENT_SIZE: ${{ inputs.max_comment_size }}
+          ENABLE_AUTO_FRONTIER: ${{ inputs.enable_auto_frontier }}
+        run: |
+          /tmp/sync-comment-to-tasks.sh

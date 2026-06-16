@@ -1,0 +1,49 @@
+name: Sync Task to Comment (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      max_batch_size:
+        description: 'Maximum messages to post per run (rate limit protection)'
+        type: number
+        default: 10
+      sync_interval_minutes:
+        description: 'How often this should run (for scheduling)'
+        type: number
+        default: 5
+      ref:
+        description: 'task-dag ref to fetch helper scripts from (branch, tag, or SHA)'
+        type: string
+        default: main
+    secrets:
+      token:
+        description: 'GitHub token for API access'
+        required: true
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  sync-task-to-comment:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.token }}
+
+      - name: Download task-dag scripts
+        run: |
+          curl -fsSL "https://raw.githubusercontent.com/virusdave/task-dag/${{ inputs.ref }}/scripts/sync-tasks-to-github.sh" \
+            -o /tmp/sync-tasks-to-github.sh
+          chmod +x /tmp/sync-tasks-to-github.sh
+
+      - name: Sync agent messages to GitHub
+        env:
+          GITHUB_TOKEN: ${{ secrets.token }}
+          MAX_BATCH_SIZE: ${{ inputs.max_batch_size }}
+        run: |
+          /tmp/sync-tasks-to-github.sh
