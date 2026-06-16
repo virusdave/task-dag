@@ -1,7 +1,13 @@
-# The unified .github/workflows/task-dag.yml caller replaced every shared
-# task-dag workflow; task-dag-drift-guard.yml was the LAST reference to
-# Nicponskis/shared-workflows and is retired here (CLI_DISTRIBUTION.md B1
-# Phase C). The vendored scripts/task-dag + scripts/task-dag.d/ are left in
-# place for now and removed in a follow-up once it's confirmed no worker /
-# agent harness invokes a peer's vendored copy.
+# Retire this repo's vendored task-dag CLI + drift-guard (virusdave/top-level#21).
+#
+# The canonical task-dag runtime now lives ONLY in virusdave/task-dag. This
+# repo consumes it via the .github/workflows/task-dag.yml reusable-workflow
+# caller, and agents run it from an `ephemeral-checkout task-dag` checkout
+# (canon rules/WORKFLOW.md). These vendored copies + the drift-guard are no
+# longer needed and are being removed fleet-wide.
+#
+# One repo-relative path per line; removals run during promote-github2.sh.
+scripts/task-dag
+scripts/task-dag.d/cross-repo.sh
+scripts/task-dag.d/phase-gates.conf
 .github/workflows/task-dag-drift-guard.yml

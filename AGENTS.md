@@ -91,33 +91,29 @@ human. If something genuinely blocks the push, stop and loudly report
 the exact error and your proposed next step rather than continuing
 silently.
 
-## Git-DAG tasks — `scripts/task-dag` (canon: rules/WORKFLOW.md)
+## Git-DAG tasks — task-dag (canon: rules/WORKFLOW.md)
 
 Canon mandates the task-dag system where a repo has it and forbids
-tombstone commits for new work. Repo specifics:
+tombstone commits for new work. **Run the canonical CLI from a dedicated
+`task-dag` ephemeral checkout** — this repo's vendored `scripts/task-dag`
+is being retired (virusdave/top-level#21); do not depend on it. Repo
+specifics:
 
 - An issue is task-tracked once `github-actions` posts a
   `Task metadata commit:` comment and `tasks/frontier/<sha>` refs exist.
-- Workflow:
+- Workflow (full how-to + claim/race/release semantics are in canon
+  `rules/WORKFLOW.md` — don't duplicate them here):
 
   ```sh
-  scripts/task-dag frontier [--issue=N]        # pick a ready leaf → its <task-sha>
-  scripts/task-dag claim <task-sha> --note='…' # claim BEFORE reading any file
+  td=$(/home/amp-local/src/github-worker/bin/ephemeral-checkout \
+          task-dag --label task-dag-runtime)
+  cd <this-repo-worktree>
+  "$td/scripts/task-dag" frontier [--issue=N]        # pick a ready leaf
+  "$td/scripts/task-dag" claim <task-sha> --note='…' # claim BEFORE reading any file
   # … make the real implementation change, commit it normally …
-  scripts/task-dag complete <task-sha>         # links the commit, writes trailers, retires refs
+  "$td/scripts/task-dag" complete <task-sha>         # links the commit, retires refs
   git push origin HEAD:master
   ```
-
-- **Claim before you read a single file.** It's an atomic CAS on
-  `origin`; a lost race exits non-zero (`2` race-lost, `3` no-frontier,
-  `4` push-failed → retry). Picking a SHA off `frontier` is not a claim,
-  and skipping this once had three agents implement the same task.
-- Can't finish a claimed task? `scripts/task-dag release <task-sha>`
-  before tearing down your workspace — a stuck `tasks/active/<sha>`
-  blocks every other agent on it.
-- Let `complete` author the `Related:` / `Task-Commit:` / `Issue:`
-  trailers; never hand-craft parent links or use `--allow-empty`
-  tombstones for work you just did.
 
 ## Public URL for viewable artifacts
 
