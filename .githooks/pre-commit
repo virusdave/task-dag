@@ -5,9 +5,9 @@
 # browser (playwright is too heavy for a pre-commit hook in this
 # environment) — instead we:
 #
-#   1. Typecheck the client tree (tsc --noEmit -p tsconfig.client.json).
-#   2. Compile the server tree (tsc -p tsconfig.server.json) — this is
+#   1. Compile the server tree (tsc -p tsconfig.server.json) — this is
 #      the same artifact prod runs, so it's also our server typecheck.
+#   2. Typecheck the client tree (tsc --noEmit -p tsconfig.client.json).
 #   3. Boot the Fastify server in-process and exercise the SPA shell +
 #      hashed-asset endpoints via server.inject(), to catch the class
 #      of regression where the SPA root page renders blank (see
@@ -46,7 +46,7 @@ for bin in "$TSC" "$TSX"; do
   fi
 done
 
-echo "[pre-commit] 1/2 compiling server (tsc -p tsconfig.server.json)…"
+echo "[pre-commit] 1/3 compiling server (tsc -p tsconfig.server.json)…"
 # This is a full typecheck *and* the build the smoke test depends on,
 # in one pass. The server tsconfig excludes tests/vitest, so we don't
 # need vitest installed locally to get a clean typecheck.
@@ -57,17 +57,13 @@ echo "[pre-commit] 1/2 compiling server (tsc -p tsconfig.server.json)…"
 mkdir -p dist/server/worker/scheduling
 cp src/worker/scheduling/extractConstraints.js dist/server/worker/scheduling/extractConstraints.js
 
-# NOTE on client typecheck: `tsc -p tsconfig.client.json --noEmit`
-# currently surfaces ~9 pre-existing errors (stale identifier
-# references, drifted shared/ui exports, etc.) that would block every
-# helios commit until fixed. Until those are cleaned up, we rely on
-# `vite build` (run by the smoke step below — actually no, smoke only
-# uses the *existing* dist/client) for client validation. To enforce
-# strict client typechecking, fix the errors then add:
-#   "$TSC" -p tsconfig.client.json --noEmit
-# back to this hook.
+echo "[pre-commit] 2/3 typechecking client (tsc -p tsconfig.client.json --noEmit)…"
+# Strict client typecheck — matches CI. tsconfig.client.json excludes
+# *.test.ts/tsx and the node-only shared/ modules, so this checks only
+# the browser bundle's sources.
+"$TSC" -p tsconfig.client.json --noEmit
 
-echo "[pre-commit] 2/2 booting server + smoke-checking SPA shell and assets…"
+echo "[pre-commit] 3/3 booting server + smoke-checking SPA shell and assets…"
 "$TSX" scripts/smoke-server.ts
 
 echo "[pre-commit] OK."
