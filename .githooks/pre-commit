@@ -22,6 +22,13 @@ set -euo pipefail
 repo_root=$(git rev-parse --show-toplevel)
 cd "$repo_root"
 
+# Repo-wide disabled-gate scanner (automation#49 Phase D.10). Cheap,
+# pure git/bash, so it runs on *every* commit regardless of which area
+# changed — a weakened gate anywhere is a master breakage. Mirrors the
+# scanner the required-status CI runs.
+echo "[pre-commit] scanning for disabled/weakened gates…"
+bash "$repo_root/scripts/scan-disabled-gates.sh"
+
 # Find staged files that touch helios/ (excluding deletions).
 mapfile -t helios_changes < <(git diff --cached --name-only --diff-filter=ACMR | grep -E '^helios/' || true)
 
