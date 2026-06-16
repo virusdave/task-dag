@@ -1192,7 +1192,7 @@ function CustomerVisitorMap({
       type: 'FeatureCollection' as const,
       features: points.map((p) => ({
         type: 'Feature' as const,
-        geometry: { type: 'Point' as const, coordinates: [p.lng, p.lat] },
+        geometry: { type: 'Point' as const, coordinates: [p.lng, p.lat] as [number, number] },
         properties: {
           id: p.id,
           kind: p.kind,
@@ -1270,7 +1270,8 @@ function CustomerVisitorMap({
           const feat = e.features?.[0]
           if (!feat) return
           const props = feat.properties ?? {}
-          const coords = (feat.geometry as { coordinates: [number, number] }).coordinates
+          if (feat.geometry.type !== 'Point') return
+          const coords = feat.geometry.coordinates as [number, number]
           popupRef.current?.remove()
           popupRef.current = new maplibregl.Popup({ closeButton: true, maxWidth: '320px' })
             .setLngLat(coords)
