@@ -8,6 +8,7 @@
 
 import { createHash, randomBytes } from 'node:crypto'
 
+import { findFaqAdsPolicyProblems } from './adsPolicy.js'
 import { parseFaqSourceKey } from './faqSourceKey.js'
 
 // ── id minting ────────────────────────────────────────────────────────
@@ -311,6 +312,14 @@ export interface CheckFaqSetApprovableOptions {
  *
  * In both modes, a raw answer byte-identical to its sanitized variant
  * while containing raw-only terms means no sanitizing actually happened.
+ *
+ * Independently of the source key, every public field (the shared question
+ * and BOTH answer variants) is also run through the Google-Ads
+ * forbidden-claim lint (CI gate 9, `findFaqAdsPolicyProblems`): medical,
+ * legality, effect, disparagement, and unsourced price/availability claims
+ * are forbidden on both the raw `.nyc` and sanitized `.us` ad landing
+ * pages, so any match fails approval closed.
+ *
  * Returns the list of problems; empty = approvable.
  */
 export function checkFaqSetApprovable(
@@ -400,6 +409,26 @@ export function checkFaqSetApprovable(
       })
     }
   })
+
+  // CI gate 9 — Google-Ads forbidden-claim lint. Ads-policy claims
+  // (medical/therapeutic, overbroad legality, recreational effect,
+  // competitor disparagement, unsourced price/availability) are forbidden
+  // on BOTH public hosts: the `.nyc` raw landing page and the `.us`
+  // sanitized one both serve as ad destinations. So unlike the FBUS leak
+  // rule (which only guards the sanitized `.us` output), this gate is
+  // applied to EVERY public field — the shared question AND both answer
+  // variants — regardless of the set's source key. It fails closed: a
+  // draft cannot be approved while any forbidden claim remains. The human
+  // approver still reads every word; this only blocks the highest-risk
+  // accidental claims (see adsPolicy.ts).
+  for (const p of findFaqAdsPolicyProblems(items)) {
+    problems.push({
+      itemIndex: p.itemIndex,
+      field: p.field,
+      message: `Contains a forbidden ads-policy claim (${p.category.replace('_', '/')}): ${JSON.stringify(p.phrase)}.`,
+    })
+  }
+
   return problems
 }
 

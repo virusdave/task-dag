@@ -275,6 +275,77 @@ describe('checkFaqSetApprovable — FBUS-strict enforcement (CI gate 2)', () => 
   })
 })
 
+describe('checkFaqSetApprovable — ads-policy enforcement (CI gate 9)', () => {
+  it('rejects a medical/therapeutic claim in an answer (fails approval closed)', () => {
+    const problems = checkFaqSetApprovable([
+      {
+        question: 'Can your products help me sleep?',
+        answer_raw: 'Many customers say it relieves anxiety and treats insomnia.',
+        answer_sanitized: 'Many customers say it relieves anxiety and treats insomnia.',
+      },
+    ])
+    expect(problems.some((p) => /ads-policy claim \(medical\)/.test(p.message))).toBe(true)
+  })
+
+  it('lints the RAW answer too — ads-policy applies to the public .nyc host', () => {
+    const problems = checkFaqSetApprovable([
+      {
+        question: 'Are these products legal?',
+        // Raw carries the forbidden legality claim; sanitized is clean.
+        answer_raw: 'Our products are 100% legal everywhere.',
+        answer_sanitized: 'Our products comply with all applicable state regulations.',
+      },
+    ])
+    expect(
+      problems.some((p) => p.field === 'answer_raw' && /ads-policy claim \(legal\)/.test(p.message)),
+    ).toBe(true)
+  })
+
+  it('flags an effect claim in the shared question', () => {
+    const problems = checkFaqSetApprovable([
+      {
+        question: 'Will this get you high?',
+        answer_raw: 'Effects vary by person and product.',
+        answer_sanitized: 'Effects vary by person and product.',
+      },
+    ])
+    expect(
+      problems.some((p) => p.field === 'question' && /ads-policy claim \(effect\)/.test(p.message)),
+    ).toBe(true)
+  })
+
+  it('flags an unsourced price/availability promise', () => {
+    const problems = checkFaqSetApprovable([
+      {
+        question: 'Do you have good prices?',
+        answer_raw: 'Yes, we have the lowest prices and are always in stock.',
+        answer_sanitized: 'Yes, we have the lowest prices and are always in stock.',
+      },
+    ])
+    expect(
+      problems.some((p) => /ads-policy claim \(price\/availability\)/.test(p.message)),
+    ).toBe(true)
+  })
+
+  it('enforces ads-policy regardless of source key (also on FBUS sets)', () => {
+    const problems = checkFaqSetApprovable(
+      [
+        {
+          question: 'What are your hours?',
+          answer_raw: 'We are open daily; this product cures pain.',
+          answer_sanitized: 'We are open daily; this product cures pain.',
+        },
+      ],
+      { sourceKey: FBUS_GLOBAL_FAQ_SOURCE_KEY },
+    )
+    expect(problems.some((p) => /ads-policy claim \(medical\)/.test(p.message))).toBe(true)
+  })
+
+  it('passes clean retail copy that contains no forbidden claim kinds', () => {
+    expect(checkFaqSetApprovable(baseItems())).toEqual([])
+  })
+})
+
 describe('FBUS stricter denylist (.us sanitized host)', () => {
   it('is a strict superset of RAW_ONLY_TERMS', () => {
     for (const term of RAW_ONLY_TERMS) {
