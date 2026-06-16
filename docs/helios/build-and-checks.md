@@ -38,6 +38,46 @@ flag documented in `helios/AGENTS.md`:
 NODE_OPTIONS=--max-old-space-size=8192 npm run build
 ```
 
+## `ensure-build-env` — idempotent, self-prerequisite build env
+
+`scripts/ensure-build-env.sh` (`npm run ensure-build-env`) owns the build
+prerequisites and is safe to run cold (fresh checkout) or warm:
+
+- `npm install` (against the on-box `~/.npm` cache) when `node_modules`
+  is absent, a dangling symlink, or stale relative to `package.json`.
+  Helios deliberately does **not** track a `package-lock.json` and the
+  host deploy uses `npm install` (not `npm ci`) — see `.gitignore` — so
+  `ensure-build-env` mirrors that.
+- `mkdir -p` every output dir the build / asset-copy steps assume
+  (`dist/server`, `dist/server/worker/scheduling`, `dist/client`).
+
+It is wired in so no build step fails on a missing dependency or dir:
+
+- `build` runs it first (via the `prebuild` lifecycle hook),
+- `test` runs it first (via the `pretest` lifecycle hook),
+- `check` runs it explicitly before the typechecks.
+
+When warm it is a fast no-op (`…present and current; skipping install`).
+
+## `check:idempotence` — reproducible-build matrix (nightly / manual)
+
+`scripts/idempotence-matrix.sh` (`npm run check:idempotence`) proves the
+build is reproducible across the artifact states that bite in practice —
+cold checkout, warm `node_modules`, stale `dist`, and post-`git clean
+-xfd` — running the verification command twice where it matters. It works
+in a **throwaway local clone** (it runs `git clean -xfd`, which would
+otherwise nuke your in-tree `node_modules`/`dist`).
+
+This is a heavy nightly/manual gate, **not** part of the default `vitest`
+suite. Run it under the shared large-action-lock:
+
+```sh
+large-action-lock -- bash helios/scripts/idempotence-matrix.sh
+```
+
+The verification command defaults to the full `npm run check`; override
+it for a fast harness smoke: `IDEMPOTENCE_VERIFY='npm run ensure-build-env && npm run typecheck'`.
+
 ## Related scripts
 
 - `npm run typecheck` / `npm run typecheck:client` — run a single
