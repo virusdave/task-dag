@@ -719,10 +719,23 @@ cmd_ingest_comment() {
         return 0
     fi
 
-    # Any other <!-- task-dag: marker → skip; humans use this to mark
-    # comments they don't want ingested.
-    if grep -q "<!-- task-dag:" "$body_file"; then
-        _xrepo_log "ingest-comment: skipping bot comment with non-completion task-dag marker"
+    # Skip machine-generated / explicitly-marked comments so they are NOT
+    # minted as new pickable tasks (the comment->task dispatch loop, where
+    # one worker's status comment becomes the next worker's "task").
+    #
+    # Author cannot help here: agents post via the operator's `gh`
+    # credentials, so an agent status comment is indistinguishable by
+    # author from a genuine operator instruction. The reliable signal is a
+    # LEADING HTML marker: operators dispatch work by typing prose (no
+    # leading "<!--"), while every machine comment leads with one
+    # (`<!-- task-dag:status -->`, `<!-- post-comment:… -->`,
+    # `<!-- manual-close-page:… -->`, …). `task-dag:completion` is already
+    # handled above, before this skip. We also keep the legacy
+    # "task-dag: marker anywhere in the body" skip for back-compat.
+    local first_nonblank
+    first_nonblank="$(grep -m1 -v '^[[:space:]]*$' "$body_file" 2>/dev/null || true)"
+    if [[ "$first_nonblank" =~ ^[[:space:]]*\<\!-- ]] || grep -q "<!-- task-dag:" "$body_file"; then
+        _xrepo_log "ingest-comment: skipping machine/marked comment (leading HTML marker) — not minting a task"
         return 0
     fi
 

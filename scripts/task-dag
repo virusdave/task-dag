@@ -2,20 +2,23 @@
 # Git-DAG Task Management CLI
 # See docs/task_dag/README.md and HOW_TASK_DAG_WORKS.md
 #
-# CANONICAL SOURCE (single runtime): virusdave/top-level : scripts/task-dag
-# (+ scripts/task-dag.d/). This is the ONE implementation; do NOT edit or
-# fork it per-repo. All git operations bind to the caller's CWD and the
+# CANONICAL SOURCE (single runtime): virusdave/task-dag : scripts/task-dag
+# (+ scripts/task-dag.d/). This repo is the ONE home for the implementation
+# (operator decision A'-new; see README.md + docs/MIGRATION.md). Do NOT edit
+# or fork it per-repo. All git operations bind to the caller's CWD and the
 # helpers are sourced relative to THIS file, so the canonical script runs
 # correctly against any peer repo when invoked by absolute path from that
-# repo's working directory (e.g. agents run it from their ephemeral
-# top-level checkout — see docs/canon/rules/WORKFLOW.md).
+# repo's working directory.
 #
 # MIGRATION (B1, in progress): peer repos historically vendored a verbatim
-# copy here because GitHub Actions runners only had the checked-out repo.
-# Those vendored copies + the shared-workflows task-dag-drift-guard.yml are
-# being retired in favour of fetching this canonical runtime at job time.
-# Until that lands, any remaining vendored copy is a transitional fallback
-# and must stay byte-identical. See docs/task_dag/CLI_DISTRIBUTION.md.
+# copy + a shared-workflows task-dag-drift-guard.yml. Workflow consolidation
+# is DONE (every peer carries one logic-free .github/workflows/task-dag.yml
+# caller into this repo's reusable workflows). CLI consolidation is in
+# progress: the per-repo vendored copies + the drift-guard are being retired
+# in favour of this single runtime. Until that lands, any remaining vendored
+# copy is a transitional fallback. Rationale + phased plan:
+# virusdave/top-level:docs/task_dag/CLI_DISTRIBUTION.md and this repo's
+# docs/MIGRATION.md.
 #
 # This canonical copy is the UNION of every peer's feature set:
 #   - cross-repo coordination + block/unblock/blocked/drop (from top-level)
@@ -146,10 +149,20 @@ list_task_refs() {
 # Helper: fetch task refs from origin so local view reflects remote.
 # Safe to call repeatedly. Quiet on success; failure is non-fatal —
 # offline callers can still see whatever they fetched last.
+#
+# The `blocked` overlay MUST be fetched here too: `is_task_blocked` (used
+# by `frontier` and `claim`) reads the LOCAL blocked ref, so a fresh
+# worker that never syncs the overlay would treat parked tasks as
+# pickable and re-dispatch them — the exact comment→task dispatch loop
+# the block mechanism exists to prevent (issue #22). `--prune` scoped to
+# these namespaces drops local refs that origin has since removed
+# (completed/claimed/unblocked) so long-lived checkouts don't show stale
+# frontier/blocked entries.
 fetch_task_refs() {
-    git fetch --quiet origin \
+    git fetch --quiet --prune origin \
         '+refs/heads/tasks/frontier/*:refs/heads/tasks/frontier/*' \
         '+refs/heads/tasks/active/*:refs/heads/tasks/active/*' \
+        '+refs/heads/tasks/blocked/*:refs/heads/tasks/blocked/*' \
         2>/dev/null || true
 }
 
@@ -219,6 +232,69 @@ Note: ${note}"
     fi
 
     git commit-tree "$task_tree" -p "$task_sha" -m "$msg"
+}
+
+# Helper: advance HEAD to a completion commit WITHOUT destroying the
+# worktree. Replaces the old `git reset --hard` in cmd_complete, which —
+# because task-dag binds git ops to the CALLER'S cwd (the peer repo
+# worktree) — would silently discard any uncommitted/staged changes there.
+#
+#   $1 = base_commit   (the commit the completion was built on; == HEAD by
+#                        default, or the resolved --commit=SHA)
+#   $2 = new_commit     (the completion commit: commit-tree -p base -p task)
+#
+# Contract: new_commit's tree MUST equal base_commit's tree (the completion
+# adds only a second parent + metadata, never file changes). We assert that.
+#
+#   * base == HEAD (the normal path, incl. detached HEAD): the completion
+#     is a first-parent fast-forward of HEAD with an identical tree, so we
+#     just move the ref with `git update-ref HEAD <new> <old>`. The old
+#     value is a CAS guard (refuse if HEAD moved). The index/worktree are
+#     left untouched, so dirty/staged changes are PRESERVED.
+#   * base != HEAD (only with --commit=SHA): updating the checkout could
+#     change tracked files, so we require (a) base is a ff descendant of
+#     HEAD and (b) no dirty tracked changes, then `git merge --ff-only`.
+#     Otherwise we refuse and tell the caller to use a fresh worktree.
+advance_head_to_completion() {
+    local base="$1" new="$2"
+    local current base_tree new_tree
+
+    current=$(git rev-parse --verify HEAD^{commit}) || return 1
+    base_tree=$(git rev-parse "$base^{tree}") || return 1
+    new_tree=$(git rev-parse "$new^{tree}") || return 1
+    if [ "$base_tree" != "$new_tree" ]; then
+        echo "Error: completion commit tree differs from base tree; refusing to advance HEAD." >&2
+        return 1
+    fi
+
+    if [ "$base" = "$current" ]; then
+        # Identical tree + first-parent ff: move the ref only, preserving
+        # any uncommitted work in the worktree/index.
+        git update-ref -m 'task-dag complete: advance HEAD to completion commit' \
+            HEAD "$new" "$current" || {
+            echo "Error: HEAD moved during complete; refusing to overwrite (rerun)." >&2
+            return 1
+        }
+        return 0
+    fi
+
+    # --commit=SHA path where SHA != HEAD: this can change checked-out
+    # files, so it requires a clean tracked worktree + a fast-forward.
+    if ! git merge-base --is-ancestor "$current" "$base"; then
+        echo "Error: --commit=$base is not a fast-forward descendant of HEAD ($current)." >&2
+        echo "Refusing to move this checkout (could discard work). Check that commit out in a fresh ephemeral worktree and rerun." >&2
+        return 1
+    fi
+    if ! git diff --quiet --ignore-submodules -- || \
+       ! git diff --cached --quiet --ignore-submodules --; then
+        echo "Error: --commit is not HEAD and completing it would update a dirty tracked worktree." >&2
+        echo "Commit/stash your changes or use a fresh ephemeral checkout, then rerun." >&2
+        return 1
+    fi
+    git merge --ff-only "$new" >/dev/null || {
+        echo "Error: failed to fast-forward to completion commit." >&2
+        return 1
+    }
 }
 
 # Helper: canonical "blocked" ref name for a task.
@@ -511,8 +587,24 @@ EOF
     local short_sha
     short_sha=$(git rev-parse --short "$task_sha")
 
-    # Refresh local view so we see other workers' claims.
+    # Refresh local view so we see other workers' claims AND the blocked
+    # overlay (fetch_task_refs now syncs tasks/blocked/*).
     fetch_task_refs
+
+    # Defense-in-depth: a blocked task is excluded from `frontier`, but a
+    # worker could still target its SHA directly. Refuse unless --force,
+    # so a parked task can never be claimed back into flight by accident.
+    if [ "$do_force" = false ] && is_task_blocked "$task_sha"; then
+        if [ "$json" = true ]; then
+            cat <<JSON
+{"ok":false,"reason":"blocked","sha":"$task_sha","shortSha":"$short_sha"}
+JSON
+        else
+            printf "${RED}Task %s is BLOCKED (parked) — not claimable.${RESET}\n" "$short_sha" >&2
+            echo "Revive it with 'task-dag unblock $short_sha', or --force if you know the block is stale." >&2
+        fi
+        return 2
+    fi
 
     local frontier_local_ref="refs/heads/tasks/frontier/$short_sha"
     local active_local_ref="refs/heads/tasks/active/$short_sha"
@@ -1448,20 +1540,30 @@ cmd_complete() {
     local task_sha=""
     local commit_sha=""
     local no_cleanup=false
+    local do_force=false
     
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --commit=*) commit_sha="${1#*=}"; shift ;;
             --no-cleanup) no_cleanup=true; shift ;;
+            --force) do_force=true; shift ;;
             --help|-h)
                 cat <<EOF
-Usage: task-dag complete <task-sha> [--commit=SHA] [--no-cleanup]
+Usage: task-dag complete <task-sha> [--commit=SHA] [--no-cleanup] [--force]
 
 Mark a task as complete by creating a completion commit.
 
 Options:
   --commit=SHA     Use this commit as base (default: HEAD)
   --no-cleanup     Don't delete frontier/active refs
+  --force          Complete even if the task's active claim is held by
+                   another worker (use only if that claim is known dead).
+
+Safety: 'complete' advances HEAD with 'git update-ref' (never
+'git reset --hard'), so uncommitted work is preserved; it refuses to
+complete a task another live worker has claimed; and it removes remote
+task refs with --force-with-lease so it can never clobber a concurrent
+worker's claim.
 EOF
                 return 0
                 ;;
@@ -1496,6 +1598,76 @@ EOF
         commit_sha=$(git rev-parse HEAD)
     else
         commit_sha=$(resolve_sha "$commit_sha") || return 1
+    fi
+
+    # The completion must be built on a real implementation commit, never
+    # the task commit itself (that would be an empty/tombstone link).
+    if [ "$commit_sha" = "$task_sha" ]; then
+        echo "Error: --commit cannot be the task commit itself; complete against your implementation commit." >&2
+        return 1
+    fi
+
+    local short_sha
+    short_sha=$(git rev-parse --short "$task_sha")
+
+    # ── Ownership guard (do not complete a task another worker holds) ──
+    # The claim CAS is the cross-host mutex; honour it here so 'complete'
+    # can't land work over a live claim that isn't ours. We record the
+    # exact active claim SHA we authorise so the ref cleanup below deletes
+    # only THAT claim (never a concurrent worker's fresh one).
+    local verified_active_sha=""
+    local active_remote_sha
+    active_remote_sha=$(task_active_sha_on_remote "$short_sha")
+    if [ -n "$active_remote_sha" ]; then
+        local tmp_active="refs/task-dag-tmp/complete-check/$short_sha"
+        git update-ref -d "$tmp_active" 2>/dev/null || true
+        if git fetch --quiet --no-tags origin \
+               "+refs/heads/tasks/active/$short_sha:$tmp_active" 2>/dev/null; then
+            local claim_msg claim_taskcommit claim_first_parent claimer claimer_host
+            # Each field is `|| true`-guarded: a malformed/legacy claim
+            # missing a field must NOT abort under `set -e` (that would
+            # both defeat the malformed-ref handling below and leak the
+            # temp ref). extract_field/get_first_parent grep internally.
+            claim_msg=$(parse_commit_metadata "$tmp_active" 2>/dev/null || true)
+            claim_taskcommit=$(extract_field "$claim_msg" "Task-Commit" 2>/dev/null || true)
+            claim_first_parent=$(get_first_parent "$tmp_active" 2>/dev/null || true)
+            claimer=$(extract_field "$claim_msg" "Claimer" 2>/dev/null || true)
+            claimer_host=$(extract_field "$claim_msg" "Claimer-Host" 2>/dev/null || true)
+            git update-ref -d "$tmp_active" 2>/dev/null || true
+
+            # Guard against short-SHA collision / malformed active refs:
+            # the claim must actually reference THIS task.
+            if [ "$claim_taskcommit" != "$task_sha" ] && \
+               [ "$claim_first_parent" != "$task_sha" ]; then
+                if [ "$do_force" = false ]; then
+                    echo "Error: tasks/active/$short_sha does not reference task $task_sha (Task-Commit=${claim_taskcommit:-?}). Refusing; rerun with --force only if you know it is safe." >&2
+                    return 2
+                fi
+            fi
+
+            local me_claimer me_host
+            me_claimer="${TASK_DAG_CLAIMER:-${USER:-unknown}}"
+            me_host="${TASK_DAG_CLAIMER_HOST:-$(hostname -s 2>/dev/null || echo unknown)}"
+            if [ "$claimer" = "$me_claimer" ] && [ "$claimer_host" = "$me_host" ]; then
+                verified_active_sha="$active_remote_sha"   # owned by us
+            elif [ "$do_force" = true ]; then
+                printf '%b\n' "${YELLOW}--force: completing task ${short_sha} claimed by ${claimer:-unknown}@${claimer_host:-unknown} (you are ${me_claimer}@${me_host}).${RESET}" >&2
+                verified_active_sha="$active_remote_sha"
+            else
+                echo "Error: task $short_sha is claimed by ${claimer:-unknown}@${claimer_host:-unknown}, not you (${me_claimer}@${me_host})." >&2
+                echo "Refusing to complete another worker's active task. Use --force only if that claim is dead." >&2
+                return 2
+            fi
+        else
+            # Fetch of the active claim failed; tmp ref was pre-deleted but
+            # clean up defensively in case a partial ref exists.
+            git update-ref -d "$tmp_active" 2>/dev/null || true
+            if [ "$do_force" = false ]; then
+                echo "Error: could not read active claim tasks/active/$short_sha for the ownership check. Rerun with --force to override." >&2
+                return 2
+            fi
+            verified_active_sha="$active_remote_sha"
+        fi
     fi
     
     # Get current commit details
@@ -1573,49 +1745,82 @@ Related: $issue_url"
     
     echo "Created completion commit: $new_commit"
     
-    # Reset to new commit
-    git reset --hard "$new_commit"
+    # Advance HEAD non-destructively (NEVER `git reset --hard`, which would
+    # wipe uncommitted work in the caller's cwd peer worktree).
+    advance_head_to_completion "$commit_sha" "$new_commit" || return 1
     
     # Clean up refs unless --no-cleanup
     if [ "$no_cleanup" = false ]; then
-        local short_sha=$(git rev-parse --short "$task_sha")
         local frontier_ref="refs/heads/tasks/frontier/$short_sha"
         local active_ref="refs/heads/tasks/active/$short_sha"
-        
-        local blocked_ref=$(blocked_ref_for "$task_sha")
+        local blocked_ref
+        blocked_ref=$(blocked_ref_for "$task_sha")
 
-        # Delete local refs
-        if git show-ref --verify --quiet "$frontier_ref"; then
-            git update-ref -d "$frontier_ref"
-            echo "Deleted local $frontier_ref"
-        fi
-        
-        if git show-ref --verify --quiet "$active_ref"; then
-            git update-ref -d "$active_ref"
-            echo "Deleted local $active_ref"
+        # Delete local refs (purely local bookkeeping; harmless if absent).
+        git update-ref -d "$frontier_ref" 2>/dev/null && echo "Deleted local $frontier_ref" || true
+        git update-ref -d "$active_ref" 2>/dev/null && echo "Deleted local $active_ref" || true
+        git update-ref -d "$blocked_ref" 2>/dev/null && echo "Deleted local $blocked_ref" || true
+
+        # ── CAS-clean remote refs ──────────────────────────────────────
+        # Every remote delete is leased to the EXACT sha we verified, so a
+        # concurrent worker's fresh claim/task can never be clobbered. Any
+        # lease mismatch (the remote changed under us) is FATAL: the
+        # completion commit is already local, but we must not leave the DAG
+        # in a state that can dispatch duplicate work, so we stop and let
+        # the caller resolve it before pushing master.
+        local lease_args=() refspecs=()
+
+        # Active: delete only the claim authorised by the ownership guard,
+        # and only if it is still exactly that claim right now.
+        local active_now
+        active_now=$(task_active_sha_on_remote "$short_sha")
+        if [ -n "$verified_active_sha" ]; then
+            if [ "$active_now" != "$verified_active_sha" ]; then
+                echo "Error: active claim for $short_sha changed during completion (authorised $verified_active_sha, now ${active_now:-<gone>}). Not cleaning refs." >&2
+                echo "Completion commit is local ($new_commit); resolve the claim before pushing." >&2
+                return 3
+            fi
+            lease_args+=("--force-with-lease=$active_ref:$verified_active_sha")
+            refspecs+=(":$active_ref")
+        elif [ -n "$active_now" ]; then
+            # No claim at guard time, but one exists now → claimed mid-flight.
+            echo "Error: a new active claim ($active_now) appeared for $short_sha during completion. Not cleaning refs." >&2
+            echo "Completion commit is local ($new_commit); resolve the claim before pushing." >&2
+            return 3
         fi
 
-        # A completed task should never linger in the blocked set.
-        if git show-ref --verify --quiet "$blocked_ref"; then
-            git update-ref -d "$blocked_ref"
-            echo "Deleted local $blocked_ref"
-        fi
-        
-        # Delete remote refs if they exist
-        local remote_frontier="tasks/frontier/$short_sha"
-        local remote_active="tasks/active/$short_sha"
-        local remote_blocked="${blocked_ref#refs/heads/}"
-        
-        if git ls-remote --exit-code origin "refs/heads/$remote_frontier" >/dev/null 2>&1; then
-            git push origin --delete "$remote_frontier" 2>/dev/null && echo "Deleted remote $remote_frontier" || true
-        fi
-        
-        if git ls-remote --exit-code origin "refs/heads/$remote_active" >/dev/null 2>&1; then
-            git push origin --delete "$remote_active" 2>/dev/null && echo "Deleted remote $remote_active" || true
+        # Frontier: delete only if it still points at THIS task commit.
+        local frontier_now
+        frontier_now=$(task_frontier_on_remote "$short_sha")
+        if [ -n "$frontier_now" ]; then
+            if [ "$frontier_now" != "$task_sha" ]; then
+                echo "Error: tasks/frontier/$short_sha points at $frontier_now, not task $task_sha (possible short-SHA collision). Not deleting." >&2
+                return 3
+            fi
+            lease_args+=("--force-with-lease=$frontier_ref:$frontier_now")
+            refspecs+=(":$frontier_ref")
         fi
 
-        if git ls-remote --exit-code origin "refs/heads/$remote_blocked" >/dev/null 2>&1; then
-            git push origin --delete "$remote_blocked" 2>/dev/null && echo "Deleted remote $remote_blocked" || true
+        # Blocked (full-SHA overlay ref): delete only if present at the task.
+        local blocked_now
+        blocked_now=$(git ls-remote origin "$blocked_ref" 2>/dev/null | awk '{print $1; exit}')
+        if [ -n "$blocked_now" ]; then
+            if [ "$blocked_now" != "$task_sha" ]; then
+                echo "Error: $blocked_ref points at $blocked_now, not task $task_sha. Not deleting." >&2
+                return 3
+            fi
+            lease_args+=("--force-with-lease=$blocked_ref:$blocked_now")
+            refspecs+=(":$blocked_ref")
+        fi
+
+        if [ "${#refspecs[@]}" -gt 0 ]; then
+            if git push --atomic origin "${lease_args[@]}" "${refspecs[@]}" >/dev/null 2>&1; then
+                echo "Cleaned remote task refs for $short_sha"
+            else
+                echo "Error: failed to CAS-clean remote task refs for $short_sha (a lease failed — remote changed under us)." >&2
+                echo "Completion commit is local ($new_commit); do NOT push until the task refs are resolved." >&2
+                return 3
+            fi
         fi
     fi
     
@@ -1957,15 +2162,22 @@ cmd_unblock() {
 
 # Command: blocked - list parked (blocked) tasks
 cmd_blocked() {
-    local json=false issue_filter=""
+    local json=false issue_filter="" do_fetch=true
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --json) json=true; shift ;;
             --issue=*) issue_filter="${1#*=}"; shift ;;
-            --help|-h) echo "Usage: task-dag blocked [--issue=N] [--json]"; return 0 ;;
+            --no-fetch) do_fetch=false; shift ;;
+            --help|-h) echo "Usage: task-dag blocked [--issue=N] [--json] [--no-fetch]"; return 0 ;;
             *) echo "Unknown option: $1" >&2; return 1 ;;
         esac
     done
+
+    # Sync the blocked overlay from origin so a fresh checkout sees parked
+    # tasks (the local refs are otherwise empty). Pass --no-fetch offline.
+    if [ "$do_fetch" = true ]; then
+        fetch_task_refs
+    fi
 
     if [ "$json" = true ]; then
         echo "["
