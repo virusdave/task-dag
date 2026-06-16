@@ -12,7 +12,9 @@
 // live in docs/runbooks/visitor-scans-veriscan-webhook-smoke-test.md
 // because they require a real Postgres.
 
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, expect, it, vi } from 'vitest'
+
+import { describeRequiresTestDb } from '../__tests__/requiresTestDb.js'
 
 const originalEnv = { ...process.env }
 
@@ -53,7 +55,7 @@ async function buildIsolatedServer() {
   return buildServer()
 }
 
-describe('veriscan webhook auth gate', () => {
+describeRequiresTestDb('veriscan webhook auth gate', () => {
   it('returns 503 when VERISCAN_WEBHOOK_TOKEN is unset', async () => {
     process.env = { ...originalEnv, ...BASE_ENV }
     delete process.env.VERISCAN_WEBHOOK_TOKEN

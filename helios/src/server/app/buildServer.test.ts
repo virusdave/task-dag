@@ -1,4 +1,6 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, expect, it, vi } from 'vitest'
+
+import { describeRequiresTestDb } from '../__tests__/requiresTestDb.js'
 
 const originalEnv = { ...process.env }
 
@@ -7,7 +9,7 @@ afterEach(() => {
   vi.resetModules()
 })
 
-describe('buildServer origin validation', () => {
+describeRequiresTestDb('buildServer origin validation', () => {
   it('accepts the localhost Vite fallback port for mutating requests in development', async () => {
     process.env = {
       ...originalEnv,

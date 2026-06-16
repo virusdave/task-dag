@@ -1,5 +1,7 @@
 import cookieSigner from '@fastify/cookie'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, expect, it, vi } from 'vitest'
+
+import { describeRequiresTestDb } from '../__tests__/requiresTestDb.js'
 
 const originalEnv = { ...process.env }
 
@@ -41,7 +43,7 @@ function signTransaction(state: string, returnTo: string): string {
   return `${TXN_COOKIE}=${encodeURIComponent(value)}`
 }
 
-describe('google oauth start', () => {
+describeRequiresTestDb('google oauth start', () => {
   it('stores the validated returnTo in the signed transaction cookie and redirects to Google', async () => {
     const { buildServer } = await import('../app/buildServer.js')
     const server = await buildServer()
@@ -80,7 +82,7 @@ describe('google oauth start', () => {
   })
 })
 
-describe('google oauth callback', () => {
+describeRequiresTestDb('google oauth callback', () => {
   it('self-heals (redirects back to start once) when the state cookie is missing on a browser navigation', async () => {
     const { buildServer } = await import('../app/buildServer.js')
     const server = await buildServer()

@@ -5,6 +5,8 @@
   "type": "module",
   "scripts": {
     "build": "npm run build:server && npm run build:client",
+    "test": "vitest run",
+    "test:db": "HELIOS_TEST_DB=1 vitest run",
     "build:server": "tsc -p tsconfig.server.json && npm run copy:non-ts-server-assets",
     "copy:non-ts-server-assets": "mkdir -p dist/server/worker/scheduling && cp src/worker/scheduling/extractConstraints.js dist/server/worker/scheduling/extractConstraints.js",
     "build:client": "vite build",

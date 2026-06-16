@@ -10,7 +10,9 @@
 // The "happy path returns 200 + idempotent replay" assertions require
 // a real Postgres and live in the P1 ingest runbook.
 
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, expect, it, vi } from 'vitest'
+
+import { describeRequiresTestDb } from '../__tests__/requiresTestDb.js'
 
 const originalEnv = { ...process.env }
 
@@ -48,7 +50,7 @@ async function buildIsolatedServer() {
   return buildServer()
 }
 
-describe('lp-events ingest auth + validation gate', () => {
+describeRequiresTestDb('lp-events ingest auth + validation gate', () => {
   it('returns 503 when LP_EVENTS_INGEST_TOKEN is unset', async () => {
     process.env = { ...originalEnv, ...BASE_ENV }
     delete process.env.LP_EVENTS_INGEST_TOKEN

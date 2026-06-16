@@ -1,5 +1,7 @@
 import cookieSigner from '@fastify/cookie'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, expect, it, vi } from 'vitest'
+
+import { describeRequiresTestDb } from '../__tests__/requiresTestDb.js'
 
 const originalEnv = { ...process.env }
 
@@ -27,7 +29,7 @@ function signSessionCookie(userId: string): string {
   return `helios-session=${encodeURIComponent(signer.sign(userId))}`
 }
 
-describe('auth gate', () => {
+describeRequiresTestDb('auth gate', () => {
   it('lets /healthzz through without a session', async () => {
     const { buildServer } = await import('../app/buildServer.js')
     const server = await buildServer()
