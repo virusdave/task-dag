@@ -120,7 +120,7 @@ async function fixOne(customerId: string, hit: Hit): Promise<void> {
     : `SELECT ad_group.resource_name, ad_group.targeting_setting.target_restrictions
        FROM ad_group WHERE ad_group.resource_name = '${hit.resourceName}'`;
   const [row] = await customer.query(query);
-  const existing: any[] = isCampaign
+  const existing = isCampaign
     ? (row.campaign?.targeting_setting?.target_restrictions || [])
     : (row.ad_group?.targeting_setting?.target_restrictions || []);
   const updated = existing.map(r =>
@@ -128,14 +128,11 @@ async function fixOne(customerId: string, hit: Hit): Promise<void> {
       ? {...r, bid_only: true}
       : r
   );
-  const resource: any = {
-    resource_name: hit.resourceName,
-    targeting_setting: {target_restrictions: updated},
-  };
+  const targeting_setting = {target_restrictions: updated};
   if (isCampaign) {
-    await customer.campaigns.update([resource]);
+    await customer.campaigns.update([{resource_name: hit.resourceName, targeting_setting}]);
   } else {
-    await customer.adGroups.update([resource]);
+    await customer.adGroups.update([{resource_name: hit.resourceName, targeting_setting}]);
   }
 }
 
@@ -149,8 +146,8 @@ async function main() {
     let hits: Hit[];
     try {
       hits = await findAudienceTargeting(cid);
-    } catch (e: any) {
-      console.log(`  ${cid}: query failed — ${e?.message || e}`);
+    } catch (e: unknown) {
+      console.log(`  ${cid}: query failed — ${e instanceof Error ? e.message : String(e)}`);
       continue;
     }
     if (!hits.length) {
@@ -172,8 +169,8 @@ async function main() {
           await fixOne(cid, h);
           fixed += 1;
           console.log(`    ✓ flipped ${label} → Observation`);
-        } catch (e: any) {
-          console.log(`    ✗ failed ${label}: ${e?.message || e}`);
+        } catch (e: unknown) {
+          console.log(`    ✗ failed ${label}: ${e instanceof Error ? e.message : String(e)}`);
         }
       }
     }

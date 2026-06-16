@@ -9,9 +9,63 @@ import type {
   ExecutiveSummary,
   GlobalOverview,
   CampaignSection,
+  FamilyKey,
+  RiskLevel,
 } from '../shared/types.js';
 import { formatFamilyKey, createAdSnippet, percentage, round } from '../shared/utils.js';
 import { safeRender, safeText, safeToken, escapeHtml } from './safe-render.js';
+
+/**
+ * Loose read-views over the L2 output for the HTML builders. The
+ * upstream L2 normalization (see llm-predictor) can emit alternate key
+ * names and partial objects, so these views keep fields optional and
+ * tolerate the variant shapes the builders defensively read.
+ */
+interface PgAction {
+  action_type?: string;
+  ad_id?: string;
+  issue_codes?: string[];
+  csv_row_number?: number;
+}
+interface PgIssue {
+  issue_description?: string;
+}
+interface PgCreative {
+  headlines?: string[];
+  descriptions?: string[];
+}
+interface PgControl {
+  label?: string;
+  creative?: PgCreative;
+}
+interface PgVariant {
+  variant_label?: string;
+  label?: string;
+  headlines?: string[];
+  descriptions?: string[];
+}
+interface PgTrial {
+  trial_group_name?: string;
+  hypothesis?: string;
+  policy_class_being_probed?: string;
+  trial_budget_usd?: number;
+  success_criteria?: { time_window_days?: number };
+  control_ads?: PgControl[];
+  controls?: PgControl[];
+  variant_creatives?: PgVariant[];
+  variants?: PgVariant[];
+}
+interface PgFamily {
+  family_key?: FamilyKey;
+  family_risk?: string;
+  ad_actions?: PgAction[];
+  issues?: PgIssue[];
+  trial_plans?: PgTrial[];
+}
+type OverviewFamily = GlobalOverview['families'][number];
+
+/** Fallback family key for defensive reads of partial L2 output. */
+const EMPTY_FAMILY_KEY: FamilyKey = { account_id: '' };
 
 /**
  * Generate complete HTML packet
@@ -62,7 +116,7 @@ function buildHTMLPacketData(
  * keys, etc.) can't throw — it just degrades to a zero count.
  */
 function buildExecutiveSummary(l2Output: L2PredictionOutput): ExecutiveSummary {
-  const families = asArray<any>((l2Output as any)?.families);
+  const families = asArray<PgFamily>(l2Output?.families);
   const familyKeys = new Set<string>();
   let totalAds = 0;
   let limitedDisapprovedAds = 0;
@@ -72,10 +126,10 @@ function buildExecutiveSummary(l2Output: L2PredictionOutput): ExecutiveSummary {
   let trialGroups = 0;
 
   for (const family of families) {
-    const key = formatFamilyKey((family?.family_key ?? {}) as any);
+    const key = formatFamilyKey(family?.family_key ?? EMPTY_FAMILY_KEY);
     if (key && key !== 'unknown') familyKeys.add(key);
 
-    const actions = asArray<any>(family?.ad_actions);
+    const actions = asArray<PgAction>(family?.ad_actions);
     totalAds += actions.length;
 
     if (family?.family_risk === 'high') {
@@ -127,13 +181,13 @@ function buildExecutiveSummary(l2Output: L2PredictionOutput): ExecutiveSummary {
  * Build global overview
  */
 function buildGlobalOverview(l2Output: L2PredictionOutput): GlobalOverview {
-  const families = asArray<any>((l2Output as any)?.families);
+  const families = asArray<PgFamily>(l2Output?.families);
   return {
     families: families.map((family, idx) => {
-      const actions = asArray<any>(family?.ad_actions);
+      const actions = asArray<PgAction>(family?.ad_actions);
       return {
-        family_key: family?.family_key,
-        family_risk: family?.family_risk,
+        family_key: family?.family_key ?? EMPTY_FAMILY_KEY,
+        family_risk: (family?.family_risk ?? 'low') as RiskLevel,
         limited_disapproved_count: 0,
         repair_count: actions.filter((a) => a?.action_type === 'repair').length,
         replacement_count: actions.filter((a) => a?.action_type === 'replace').length,
@@ -161,18 +215,18 @@ function formatCsvRef(batch: string, row: unknown): string {
  * read is guarded, every array is asArray()'d.
  */
 function buildCampaignSections(l2Output: L2PredictionOutput): CampaignSection[] {
-  const families = asArray<any>((l2Output as any)?.families);
+  const families = asArray<PgFamily>(l2Output?.families);
   return families.map((family) => {
-    const fkey = (family?.family_key ?? {}) as any;
-    const actions = asArray<any>(family?.ad_actions);
-    const issues = asArray<any>(family?.issues);
-    const trials = asArray<any>(family?.trial_plans);
+    const fkey: FamilyKey = family?.family_key ?? EMPTY_FAMILY_KEY;
+    const actions = asArray<PgAction>(family?.ad_actions);
+    const issues = asArray<PgIssue>(family?.issues);
+    const trials = asArray<PgTrial>(family?.trial_plans);
     return {
       campaign_name: fkey.campaign_name || formatFamilyKey(fkey),
       family_key: fkey,
       summary: {
-        risk_level: family?.family_risk,
-        main_issues: issues.map((i) => i?.issue_description),
+        risk_level: (family?.family_risk ?? 'low') as RiskLevel,
+        main_issues: issues.map((i) => i?.issue_description ?? ''),
       },
       policy_snapshot: [],
       repair_actions: actions
@@ -200,22 +254,22 @@ function buildCampaignSections(l2Output: L2PredictionOutput): CampaignSection[] 
           csv_ref: formatCsvRef('004', a?.csv_row_number),
         })),
       trial_plans: trials.map((trial) => {
-        const successCriteria = (trial?.success_criteria ?? {}) as any;
+        const successCriteria = trial?.success_criteria ?? {};
         const days = Number(successCriteria.time_window_days);
         const runDays = Number.isFinite(days) && days > 0 ? days : 7;
         const budget = Number(trial?.trial_budget_usd);
         return {
           trial_name: trial?.trial_group_name,
           hypothesis: trial?.hypothesis,
-          controls: asArray<any>(trial?.control_ads || trial?.controls).map((c) => ({
+          controls: asArray<PgControl>(trial?.control_ads || trial?.controls).map((c) => ({
             label: c?.label,
             snippet: c?.creative
-              ? createAdSnippet(asArray(c.creative?.headlines), asArray(c.creative?.descriptions))
+              ? createAdSnippet(asArray<string>(c.creative?.headlines), asArray<string>(c.creative?.descriptions))
               : '',
           })),
-          variants: asArray<any>(trial?.variant_creatives || trial?.variants).map((v) => ({
+          variants: asArray<PgVariant>(trial?.variant_creatives || trial?.variants).map((v) => ({
             label: v?.variant_label || v?.label || 'variant',
-            snippet: createAdSnippet(asArray(v?.headlines), asArray(v?.descriptions)),
+            snippet: createAdSnippet(asArray<string>(v?.headlines), asArray<string>(v?.descriptions)),
           })),
           budget: Number.isFinite(budget) ? budget : undefined,
           expected_run_time: `${runDays} days`,
@@ -377,7 +431,7 @@ function renderFamilyDetails(section: unknown, idx: number): string {
  */
 function renderHTMLPacket(packet: HTMLPacket): string {
   const exec = (packet.executive_summary ?? {}) as Record<string, unknown>;
-  const overviewFamilies = asArray((packet.global_overview ?? {} as any).families);
+  const overviewFamilies = asArray<OverviewFamily>(packet.global_overview?.families);
   const sections = asArray(packet.campaign_sections);
   const taxonomy = (packet.issue_taxonomy ?? {}) as Record<string, unknown>;
   const riskDefs = (taxonomy.risk_definitions ?? {}) as Record<string, unknown>;
@@ -728,7 +782,7 @@ function renderHTMLPacket(packet: HTMLPacket): string {
     <nav class="panel" aria-label="Jump to family">
       <h2 style="margin-top:0">Jump to family</h2>
       <ul class="nav-list">
-        ${overviewFamilies.map((f: any) => {
+        ${overviewFamilies.map((f) => {
           const anchor = safeToken(f?.anchor_id, 'family');
           const repair = Number(f?.repair_count) || 0;
           const replace = Number(f?.replacement_count) || 0;
@@ -736,7 +790,7 @@ function renderHTMLPacket(packet: HTMLPacket): string {
           return `
           <li class="nav-item">
             <a href="#${anchor}">
-              <span class="nav-name">${safeText(formatFamilyKey((f?.family_key ?? {}) as any))} ${renderRiskBadge(f?.family_risk)}</span>
+              <span class="nav-name">${safeText(formatFamilyKey(f?.family_key ?? EMPTY_FAMILY_KEY))} ${renderRiskBadge(f?.family_risk)}</span>
               <span class="nav-counts">
                 ${repair > 0 ? `<span class="count-pill repair">${repair}R</span>` : ''}
                 ${replace > 0 ? `<span class="count-pill replace">${replace}X</span>` : ''}

@@ -32,10 +32,22 @@
 import type {
   L2PredictionOutput,
   AdSnapshot,
+  AdAction,
   TrialPlan,
   CSVBatch,
   CSVRow,
 } from '../shared/types.js';
+
+/**
+ * Loose shape of a creative we read from the LLM's repair output. The
+ * model returns either a full suggested creative or a partial object,
+ * so headline/description fields are unknown until narrowed at use.
+ */
+interface RepairCreative {
+  headlines?: unknown;
+  descriptions?: unknown;
+  final_url?: string;
+}
 import {
   sanitizeHeadlinesReport,
   sanitizeDescriptionsReport,
@@ -490,17 +502,20 @@ function generateRepairCSV(l2Output: L2PredictionOutput, ctx: SnapshotIndex): CS
       // headlines+descriptions and applying the substitution. This
       // recovers ~50% of repair actions that would otherwise be
       // skipped as "no suggested_new_creatives".
-      let creative: any = action.suggested_new_creatives?.[0];
+      let creative: RepairCreative | undefined = action.suggested_new_creatives?.[0];
+      // The LLM's repair "shortcut" carries before/after at the action
+      // level — fields not on the canonical AdAction contract.
+      const actionExtra = action as AdAction & { before?: string; after?: string };
       if (
         (!creative ||
           typeof creative !== 'object' ||
           (!Array.isArray(creative.headlines) && !Array.isArray(creative.descriptions))) &&
-        typeof (action as any).before === 'string' &&
-        typeof (action as any).after === 'string' &&
+        typeof actionExtra.before === 'string' &&
+        typeof actionExtra.after === 'string' &&
         knownAd
       ) {
-        const before = (action as any).before as string;
-        const after = (action as any).after as string;
+        const before = actionExtra.before;
+        const after = actionExtra.after;
         const apply = (s: string): string =>
           before && s.includes(before) ? s.split(before).join(after) : s;
         creative = {

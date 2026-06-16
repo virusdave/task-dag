@@ -3,17 +3,25 @@
  * Uses LLM to evaluate L2 predictions vs actual outcomes and propose improvements
  */
 
-import type { L2PredictionOutput, L3EvaluationOutput } from '../shared/types.js';
+import type { L2PredictionOutput, L3EvaluationOutput, FamilyKey, TrialPlan } from '../shared/types.js';
 import { LLMClient, formatPromptTemplate } from '../shared/llm-client.js';
 
 export interface L3AnalyzerConfig {
   llmClient: LLMClient;
 }
 
+/** Loose shape of the JSON the L3 LLM returns. */
+interface RawL3Response {
+  prediction_accuracy?: unknown;
+  trial_insights?: unknown[];
+  prompt_updates?: unknown[];
+  rule_updates?: unknown[];
+}
+
 export interface TrialOutcome {
   trial_id: string;
-  family_key: any;
-  trial_plan: any;
+  family_key: FamilyKey;
+  trial_plan: TrialPlan;
   l2_predicted_risk: string;
   l2_predicted_success: boolean;
   actual_serving_status: string;
@@ -72,7 +80,7 @@ export class L3LLMAnalyzer {
     });
 
     // Parse response
-    let parsedResponse: any;
+    let parsedResponse: RawL3Response;
     try {
       parsedResponse = JSON.parse(response.content);
     } catch (error) {

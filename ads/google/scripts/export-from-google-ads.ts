@@ -9,6 +9,8 @@ import * as fsSync from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { GoogleAdsApi } from 'google-ads-api';
+import type { AdSnapshot } from '../lib/shared/types.js';
+import type { GadsExportRow } from '../lib/gads-api/real-client.js';
 
 async function main() {
   console.log('🚀 Exporting LIVE snapshot from Google Ads API\n');
@@ -32,7 +34,7 @@ async function main() {
     developer_token: developerToken,
   });
   
-  const allAds: any[] = [];
+  const allAds: AdSnapshot[] = [];
   
   // Fetch from each customer
   for (const customerId of customerIds) {
@@ -78,7 +80,9 @@ async function main() {
     `;
     
     try {
-      const results = await customer.query(query);
+      // Boundary cast: adopt the narrow GadsExportRow shape for the
+      // fields the GAQL SELECT above guarantees.
+      const results = (await customer.query(query)) as unknown as GadsExportRow[];
       console.log(`  ✅ Fetched ${results.length} ads`);
       
       for (const row of results) {
@@ -91,8 +95,8 @@ async function main() {
         console.log('  ⏱️  Waiting 10s (rate limit)...');
         await new Promise(resolve => setTimeout(resolve, 10000));
       }
-    } catch (error: any) {
-      console.error(`  ❌ Error fetching from ${customerId}:`, error.message);
+    } catch (error: unknown) {
+      console.error(`  ❌ Error fetching from ${customerId}:`, error instanceof Error ? error.message : String(error));
     }
   }
   
@@ -124,20 +128,20 @@ async function main() {
   console.log(`  npx tsx scripts/run-analysis.ts --snapshot ${outputPath} --output-dir outputs/urgent`);
 }
 
-function transformAdToSnapshot(row: any, customerId: string): any {
+function transformAdToSnapshot(row: GadsExportRow, customerId: string): AdSnapshot {
   const ad = row.ad_group_ad.ad;
   const rsa = ad.responsive_search_ad;
   
   const policyApproval = row.ad_group_ad.policy_summary?.approval_status || 'UNKNOWN';
   const policyTopics = (row.ad_group_ad.policy_summary?.policy_topic_entries || [])
-    .map((entry: any) => entry.type || entry.topic)
-    .filter((t: string) => t);
+    .map((entry) => entry.type || entry.topic)
+    .filter((t): t is string => Boolean(t));
   
-  const servingStatusMap: Record<string, string> = {
+  const servingStatusMap: Record<string, AdSnapshot['serving_status']> = {
     'APPROVED': 'eligible',
     'APPROVED_LIMITED': 'eligible_limited',
     'DISAPPROVED': 'not_eligible',
-    'UNDER_REVIEW': 'under_review',
+    'UNDER_REVIEW': 'pending',
     'AREA_OF_INTEREST_ONLY': 'eligible_limited',
   };
   
@@ -172,20 +176,20 @@ function transformAdToSnapshot(row: any, customerId: string): any {
     ad_id: ad.id.toString(),
     ad_type: 'responsive_search_ad',
     ad_status: row.ad_group_ad.status.toLowerCase(),
-    headlines: (rsa.headlines || []).map((h: any) => h.text),
-    descriptions: (rsa.descriptions || []).map((d: any) => d.text),
-    paths: [rsa.path1, rsa.path2].filter((p: string) => p),
+    headlines: (rsa?.headlines || []).map((h) => h.text ?? ''),
+    descriptions: (rsa?.descriptions || []).map((d) => d.text ?? ''),
+    paths: [rsa?.path1, rsa?.path2].filter((p): p is string => Boolean(p)),
     final_url: (ad.final_urls || [])[0] || '',
-    policy_status: policyApproval.toLowerCase(),
+    policy_status: policyApproval.toLowerCase() as AdSnapshot['policy_status'],
     policy_topics: policyTopics,
     serving_status: servingStatus,
     metrics: {
-      impressions: parseInt(row.metrics?.impressions || '0'),
-      clicks: parseInt(row.metrics?.clicks || '0'),
-      conversions: parseFloat(row.metrics?.conversions || '0'),
-      cost: (parseInt(row.metrics?.cost_micros || '0') / 1000000),
-      ctr: parseFloat(row.metrics?.ctr || '0'),
-      conversion_rate: parseFloat(row.metrics?.conversions_from_interactions_rate || '0'),
+      impressions: row.metrics?.impressions ?? 0,
+      clicks: row.metrics?.clicks ?? 0,
+      conversions: row.metrics?.conversions ?? 0,
+      cost: (row.metrics?.cost_micros ?? 0) / 1000000,
+      ctr: row.metrics?.ctr ?? 0,
+      conversion_rate: row.metrics?.conversions_from_interactions_rate ?? 0,
     },
     family_tags: familyTags,
     snapshot_date: new Date().toISOString().split('T')[0],

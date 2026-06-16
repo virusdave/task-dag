@@ -14,6 +14,14 @@ interface CleanupOptions {
   dryRun: boolean;
 }
 
+interface TrialForCleanup {
+  trial_id: string;
+  trial_group_name: string;
+  trial_ad_group_id: string;
+  started_at: string;
+  checks_completed: number;
+}
+
 /**
  * Parse CLI arguments
  */
@@ -26,7 +34,7 @@ function parseArgs(): CleanupOptions {
 /**
  * Get trials ready for cleanup (>48hr old, all checks complete)
  */
-async function getTrialsForCleanup(): Promise<any[]> {
+async function getTrialsForCleanup(): Promise<TrialForCleanup[]> {
   // TODO: Query Helios
   // const pool = getHeliosPool();
   

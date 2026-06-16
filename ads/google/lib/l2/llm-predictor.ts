@@ -5,10 +5,85 @@
 
 import type {
   AdSnapshot,
+  FamilyKey,
+  FamilyPrediction,
   L1FamilySummary,
+  L1RuleUpdate,
   L2PredictionOutput,
+  TrialPlan,
 } from '../shared/types.js';
 import { LLMClient, formatPromptTemplate, loadPromptConfig, readL3Addenda } from '../shared/llm-client.js';
+
+/**
+ * Loose shapes for the JSON an LLM returns. The model's output varies
+ * run to run (key names, nesting, capitalization), so these boundary
+ * interfaces keep every field optional; the normalization code below
+ * reconciles them into the canonical {@link L2PredictionOutput} shape.
+ */
+interface RawLlmIssue {
+  issue?: string;
+  issue_code?: string;
+  issue_description?: string;
+  severity?: string;
+  affected_ad_count?: number;
+}
+
+interface RawLlmAction {
+  action?: string;
+  action_type?: string;
+  ad_id?: string;
+  rationale?: string;
+  justification?: string;
+  csv_batch?: number;
+  changes?: Record<string, unknown>;
+  modifications?: Record<string, unknown>;
+  issue_codes?: string[];
+  issues?: string[];
+  suggested_new_creatives?: unknown[];
+  csv_row_number?: number;
+  [key: string]: unknown;
+}
+
+interface RawLlmRiskAssessment {
+  risk_level?: string;
+  risk_score?: number;
+  identified_issues?: RawLlmIssue[];
+}
+
+interface RawLlmFamily {
+  family_key?: FamilyKey;
+  family_risk_assessment?: RawLlmRiskAssessment;
+  family_risk?: string;
+  risk_level?: string;
+  risk_score?: number;
+  identified_issues?: RawLlmIssue[];
+  issues?: RawLlmIssue[];
+  ad_actions?: RawLlmAction[];
+  ad_level_actions?: RawLlmAction[];
+  trial_plans?: TrialPlan[];
+  l1_summary_ref?: string;
+  family_index?: number;
+}
+
+interface RawLlmResponse {
+  families?: RawLlmFamily[];
+  l2_predictions?: RawLlmFamily[];
+  predictions?: RawLlmFamily[];
+  family_predictions?: RawLlmFamily[];
+  l1_rule_updates?: L1RuleUpdate[];
+  ad_actions?: RawLlmAction[];
+  ad_level_actions?: RawLlmAction[];
+  trial_plans?: TrialPlan[];
+}
+
+/** The L2 prompt YAML config loaded by {@link loadPromptConfig}. */
+interface L2PromptConfig {
+  version?: string;
+  main_prompt: {
+    system_prompt?: string;
+    user_prompt_template?: string;
+  };
+}
 
 export interface L2PredictorConfig {
   promptConfigPath: string;
@@ -31,7 +106,7 @@ export interface L2PredictorConfig {
  */
 export class L2LLMPredictor {
   private config: L2PredictorConfig;
-  private promptConfig: any;
+  private promptConfig!: L2PromptConfig;
   private l3Addenda: string = '';
 
   constructor(config: L2PredictorConfig) {
@@ -48,7 +123,9 @@ export class L2LLMPredictor {
    * reports nobody read.
    */
   async initialize(): Promise<void> {
-    this.promptConfig = await loadPromptConfig(this.config.promptConfigPath);
+    // Boundary cast: loadPromptConfig returns the parsed YAML as unknown;
+    // the L2 prompt file is authored to the L2PromptConfig shape.
+    this.promptConfig = (await loadPromptConfig(this.config.promptConfigPath)) as L2PromptConfig;
     this.l3Addenda = await readL3Addenda(this.config.promptConfigPath);
     if (this.l3Addenda) {
       console.log(
@@ -234,11 +311,11 @@ export class L2LLMPredictor {
           return {
             family_payload: familyPayload,
             rawFamily: null,
-            l1_rule_updates: [] as any[],
+            l1_rule_updates: [] as L1RuleUpdate[],
           };
         }
 
-        let parsedResponse: any;
+        let parsedResponse: RawLlmResponse;
         try {
           parsedResponse = JSON.parse(response.content);
         } catch (error) {
@@ -255,13 +332,13 @@ export class L2LLMPredictor {
           'predictions',
           'family_predictions', // observed in 5/24 per-family responses
         ];
-        let rawFamiliesArray: any[] = [];
+        let rawFamiliesArray: RawLlmFamily[] = [];
         for (const k of Object.keys(parsedResponse ?? {})) {
           if (
             knownKeys.includes(k.toLowerCase()) &&
-            Array.isArray((parsedResponse as any)[k])
+            Array.isArray((parsedResponse as Record<string, unknown>)[k])
           ) {
-            rawFamiliesArray = (parsedResponse as any)[k];
+            rawFamiliesArray = (parsedResponse as Record<string, unknown>)[k] as RawLlmFamily[];
             break;
           }
         }
@@ -296,9 +373,7 @@ export class L2LLMPredictor {
           );
         }
         const impairedCount = familyPayload.impaired_ads.length;
-        const actionCount = Array.isArray(rawFamily?.ad_actions ?? rawFamily?.ad_level_actions)
-          ? (rawFamily.ad_actions ?? rawFamily.ad_level_actions).length
-          : 0;
+        const actionCount = (rawFamily?.ad_actions ?? rawFamily?.ad_level_actions ?? []).length;
         if (impairedCount > 0) {
           const pct = Math.round((actionCount / impairedCount) * 100);
           console.log(
@@ -318,7 +393,7 @@ export class L2LLMPredictor {
     // input order) — when a per-family call returned an unrecognized
     // shape we emit an empty stub so downstream `families[idx]`
     // alignment with `familySummaries[idx]` is preserved.
-    const rawFamilies: any[] = perFamilyResults.map((r) =>
+    const rawFamilies: RawLlmFamily[] = perFamilyResults.map((r) =>
       r.rawFamily ?? {
         family_key: r.family_payload.family_key,
         ad_actions: [],
@@ -326,12 +401,12 @@ export class L2LLMPredictor {
         issues: [],
       },
     );
-    const combinedL1RuleUpdates: any[] = perFamilyResults.flatMap(
+    const combinedL1RuleUpdates: L1RuleUpdate[] = perFamilyResults.flatMap(
       (r) => r.l1_rule_updates,
     );
     // Synthesize a parsedResponse-shaped object so downstream code
     // (which reads `parsedResponse.l1_rule_updates`) is unchanged.
-    const parsedResponse: any = { l1_rule_updates: combinedL1RuleUpdates };
+    const parsedResponse = { l1_rule_updates: combinedL1RuleUpdates };
 
     if (rawFamilies.length !== familySummaries.length) {
       console.warn(
@@ -341,7 +416,7 @@ export class L2LLMPredictor {
 
     // Map LLM response structure to our schema
     // IMPORTANT: Preserve ALL fields from LLM response for downstream CSV/HTML
-    const families: any[] = rawFamilies.map((fam: any) => {
+    const families = rawFamilies.map((fam) => {
       // LLM might return nested structure, flatten it
       const riskAssessment = fam.family_risk_assessment || fam;
       const adActions = fam.ad_level_actions || fam.ad_actions || [];
@@ -351,13 +426,13 @@ export class L2LLMPredictor {
         family_key: fam.family_key,
         family_risk: riskAssessment.risk_level || fam.family_risk || 'low',
         risk_score: riskAssessment.risk_score || fam.risk_score || 0,
-        issues: (riskAssessment.identified_issues || fam.issues || []).map((issue: any) => ({
+        issues: (riskAssessment.identified_issues || fam.issues || []).map((issue: RawLlmIssue) => ({
           issue_code: issue.issue || issue.issue_code || 'unknown',
           issue_description: issue.severity || issue.issue_description || '',
           affected_ad_count: issue.affected_ad_count || 0,
           severity: issue.severity || 'medium',
         })),
-        ad_actions: adActions.map((action: any) => {
+        ad_actions: adActions.map((action: RawLlmAction) => {
           // Normalize action_type to lowercase: the LLM frequently
           // returns "Pause" / "Repair" / "Replace" / "Monitor" with
           // capital initial letters (matching the markdown headings in
@@ -389,7 +464,7 @@ export class L2LLMPredictor {
     });
 
     // Validate and ensure all required fields
-    const validatedFamilies = families.map((family: any, idx: number) => ({
+    const validatedFamilies = families.map((family, idx) => ({
       family_key: familySummaries[idx].family_key,
       family_risk: family.family_risk || 'low',
       risk_score: family.risk_score || 0,
@@ -402,7 +477,11 @@ export class L2LLMPredictor {
     return {
       run_id: runId,
       snapshot_date: snapshotDate,
-      families: validatedFamilies,
+      // The normalized families are a superset of the canonical contract:
+      // they preserve extra LLM-supplied ad fields for downstream CSV/HTML
+      // and carry the model's free-text risk/action labels. Adopt the
+      // contract shape at this boundary.
+      families: validatedFamilies as unknown as FamilyPrediction[],
       l1_rule_updates: parsedResponse.l1_rule_updates || [],
       generated_at: new Date().toISOString(),
       l2_prompt_version: this.promptConfig.version || '1.0.0',
@@ -423,6 +502,10 @@ function statusUrgency(servingStatus: string): number {
       return 4;
     case 'eligible_limited':
       return 3;
+    // 'pending' is the canonical ServingStatus for an ad awaiting
+    // review; 'under_review' is retained for older persisted snapshots
+    // that used the pre-contract value.
+    case 'pending':
     case 'under_review':
       return 2;
     case 'eligible':

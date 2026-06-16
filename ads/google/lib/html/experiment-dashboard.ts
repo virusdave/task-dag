@@ -3,18 +3,33 @@
  * Creates visual HTML dashboard showing trial structure, hypotheses, and status
  */
 
-import type { L2PredictionOutput, TrialPlan } from '../shared/types.js';
+import type { L2PredictionOutput, TrialPlan, FamilyKey } from '../shared/types.js';
+
+export interface TrialStatus {
+  status: string;
+  serving_status: string;
+  impressions: number;
+  clicks: number;
+  ctr: number;
+  last_check: string;
+}
+
+/**
+ * Loose shape of a control/variant ad as it appears in LLM trial
+ * output: either a raw string or one of several object shapes.
+ */
+type DashboardAd =
+  | string
+  | {
+      creative?: { headlines?: string[]; descriptions?: string[] };
+      headlines?: string[];
+      descriptions?: string[];
+      text?: string;
+    };
 
 export interface ExperimentDashboardData {
   l2Runs: L2PredictionOutput[];
-  trialStatuses?: Map<string, {
-    status: string;
-    serving_status: string;
-    impressions: number;
-    clicks: number;
-    ctr: number;
-    last_check: string;
-  }>;
+  trialStatuses?: Map<string, TrialStatus>;
 }
 
 /**
@@ -433,9 +448,9 @@ export function generateExperimentDashboard(data: ExperimentDashboardData): stri
  * Generate individual experiment card
  */
 function generateExperimentCard(
-  item: { run_id: string; family_key: any; trial: TrialPlan },
+  item: { run_id: string; family_key: FamilyKey; trial: TrialPlan },
   index: number,
-  statuses?: Map<string, any>
+  statuses?: Map<string, TrialStatus>
 ): string {
   const trial = item.trial;
   const familyName = formatFamilyName(item.family_key);
@@ -531,7 +546,7 @@ function generateExperimentCard(
 /**
  * Format family key as readable name
  */
-function formatFamilyName(key: any): string {
+function formatFamilyName(key: FamilyKey & { geo_target?: string }): string {
   const parts = [];
   if (key.account_id) parts.push(key.account_id.substring(0, 8));
   if (key.creative_theme) parts.push(key.creative_theme);
@@ -544,12 +559,12 @@ function formatFamilyName(key: any): string {
 /**
  * Format ad list (controls or variants)
  */
-function formatAdList(ads: any[], type: 'control' | 'variant'): string {
+function formatAdList(ads: DashboardAd[], type: 'control' | 'variant'): string {
   if (!Array.isArray(ads) || ads.length === 0) {
     return `<div style="color: #9ca3af; font-style: italic;">None</div>`;
   }
 
-  return ads.map((ad: any) => {
+  return ads.map((ad) => {
     // Handle different formats
     let text = '';
     if (typeof ad === 'string') {

@@ -11,11 +11,27 @@ export interface GoogleAdsConfig {
   customerId: string;
 }
 
+export interface CampaignInfo {
+  id: string;
+  name: string;
+  status: string;
+  advertising_channel_type?: string;
+  budget_amount_micros?: number;
+}
+
 export interface AdGroupInfo {
   id: string;
   name: string;
   campaign_id: string;
   status: string;
+}
+
+export interface AdPerformanceMetrics {
+  ad_id: string;
+  impressions: number;
+  clicks: number;
+  conversions: number;
+  cost_micros: number;
 }
 
 export interface AdInfo {
@@ -63,7 +79,7 @@ export class GoogleAdsClient {
   /**
    * List campaigns
    */
-  async listCampaigns(): Promise<any[]> {
+  async listCampaigns(): Promise<CampaignInfo[]> {
     await this.respectRateLimit();
     
     // TODO: Implement actual Google Ads API call
@@ -103,7 +119,7 @@ export class GoogleAdsClient {
   /**
    * Get performance metrics for ads
    */
-  async getPerformanceMetrics(adIds: string[], startDate: string, endDate: string): Promise<any[]> {
+  async getPerformanceMetrics(adIds: string[], startDate: string, endDate: string): Promise<AdPerformanceMetrics[]> {
     await this.respectRateLimit();
     
     // TODO: Implement actual Google Ads API call with GAQL query
@@ -160,7 +176,7 @@ export class GoogleAdsClient {
   /**
    * Execute GAQL query
    */
-  private async query(gaql: string): Promise<any> {
+  private async query(gaql: string): Promise<unknown> {
     await this.respectRateLimit();
     
     // TODO: Implement actual Google Ads API query using google-ads-api library
@@ -173,7 +189,7 @@ export class GoogleAdsClient {
   /**
    * Execute mutation
    */
-  private async mutate(operations: any): Promise<any> {
+  private async mutate(operations: unknown): Promise<unknown> {
     await this.respectRateLimit();
     
     // TODO: Implement actual Google Ads API mutation

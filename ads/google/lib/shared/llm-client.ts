@@ -209,7 +209,7 @@ export async function readL3Addenda(promptConfigPath: string): Promise<string> {
   }
 }
 
-export async function loadPromptConfig(configPath: string): Promise<any> {
+export async function loadPromptConfig(configPath: string): Promise<unknown> {
   const yaml = await import('js-yaml');
   const content = await fs.readFile(configPath, 'utf-8');
   return yaml.load(content);
@@ -218,7 +218,7 @@ export async function loadPromptConfig(configPath: string): Promise<any> {
 /**
  * Format prompt template with variables
  */
-export function formatPromptTemplate(template: string, variables: Record<string, any>): string {
+export function formatPromptTemplate(template: string, variables: Record<string, unknown>): string {
   let result = template;
   
   for (const [key, value] of Object.entries(variables)) {

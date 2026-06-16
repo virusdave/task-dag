@@ -41,10 +41,35 @@ function parseArgs(): MonitorOptions {
   return { intervalHours, dryRun };
 }
 
+interface ActiveTrial {
+  trial_id: string;
+  trial_group_name: string;
+  trial_ad_group_id: string;
+  started_at: string;
+  ad_ids: string[];
+  is_controls: boolean[];
+  variant_labels: string[];
+}
+
+interface TrialCheckResult {
+  trial_id: string;
+  ad_id: string;
+  is_control: boolean;
+  variant_label: string;
+  serving_status: string;
+  policy_status: string;
+  policy_topics: string[];
+  impressions: number;
+  clicks: number;
+  conversions: number;
+  ctr: number;
+  conversion_rate: number;
+}
+
 /**
  * Get active trials from Helios
  */
-async function getActiveTrials(intervalHours: number): Promise<any[]> {
+async function getActiveTrials(intervalHours: number): Promise<ActiveTrial[]> {
   // TODO: Query Helios for trials that need checking at this interval
   // const pool = getHeliosPool();
   
@@ -79,9 +104,9 @@ async function getActiveTrials(intervalHours: number): Promise<any[]> {
  */
 async function checkTrialStatus(
   client: GoogleAdsClient,
-  trial: any
-): Promise<any[]> {
-  const results = [];
+  trial: ActiveTrial
+): Promise<TrialCheckResult[]> {
+  const results: TrialCheckResult[] = [];
   
   for (let i = 0; i < trial.ad_ids.length; i++) {
     const adId = trial.ad_ids[i];
@@ -116,7 +141,7 @@ async function checkTrialStatus(
  */
 async function storeCheckResults(
   intervalHours: number,
-  results: any[]
+  results: TrialCheckResult[]
 ): Promise<void> {
   // TODO: Insert into gads_trial_checks table
   // const pool = getHeliosPool();

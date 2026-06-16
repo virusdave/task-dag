@@ -7,7 +7,49 @@ import { GoogleAdsApi, Customer } from 'google-ads-api';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import type { GoogleAdsConfig, AdGroupInfo, AdInfo } from './client.js';
+import type { GoogleAdsConfig } from './client.js';
+import type { AdSnapshot } from '../shared/types.js';
+
+/**
+ * Shape of a single row returned by the `exportAllAds` GAQL query.
+ *
+ * The google-ads-api library types every selected field as optional
+ * (protobuf semantics), but the GAQL SELECT below guarantees the fields
+ * we read. This narrow interface describes exactly that selection so the
+ * transform code is fully typed; the single cast that adopts it lives at
+ * the `customer.query` boundary in `exportAllAds`.
+ */
+export interface GadsExportRow {
+  customer: { id: string };
+  campaign: { id: string | number; name: string };
+  ad_group: { id: string | number; name: string };
+  ad_group_ad: {
+    status: string;
+    ad: {
+      id: string | number;
+      type: string;
+      final_urls?: string[];
+      responsive_search_ad?: {
+        headlines?: { text?: string }[];
+        descriptions?: { text?: string }[];
+        path1?: string;
+        path2?: string;
+      };
+    };
+    policy_summary?: {
+      approval_status?: string;
+      policy_topic_entries?: { type?: string; topic?: string }[];
+    };
+  };
+  metrics?: {
+    impressions?: number | null;
+    clicks?: number | null;
+    conversions?: number | null;
+    cost_micros?: number | null;
+    ctr?: number | null;
+    conversions_from_interactions_rate?: number | null;
+  };
+}
 
 /**
  * Load Google Ads credentials from production secrets
@@ -84,7 +126,7 @@ export class RealGoogleAdsClient {
   /**
    * Export all responsive search ads with their metrics and policy status
    */
-  async exportAllAds(): Promise<any[]> {
+  async exportAllAds(): Promise<AdSnapshot[]> {
     console.log('📡 Fetching all responsive search ads from Google Ads API...');
     
     await this.respectRateLimit();
@@ -122,12 +164,14 @@ export class RealGoogleAdsClient {
     `;
 
     try {
-      const results = await this.customer.query(query);
+      // Boundary cast: adopt the narrow GadsExportRow shape for the
+      // fields the GAQL SELECT above guarantees (see GadsExportRow).
+      const results = (await this.customer.query(query)) as unknown as GadsExportRow[];
       
       console.log(`✅ Fetched ${results.length} ads from Google Ads`);
       
       // Transform to our snapshot format
-      const snapshots = results.map((row: any) => this.transformToSnapshot(row));
+      const snapshots = results.map((row) => this.transformToSnapshot(row));
       
       return snapshots;
     } catch (error) {
@@ -139,15 +183,15 @@ export class RealGoogleAdsClient {
   /**
    * Transform Google Ads API row to our snapshot format
    */
-  private transformToSnapshot(row: any): any {
+  private transformToSnapshot(row: GadsExportRow): AdSnapshot {
     const ad = row.ad_group_ad.ad;
     const rsa = ad.responsive_search_ad;
     
     // Extract policy status
     const policyApproval = row.ad_group_ad.policy_summary?.approval_status || 'UNKNOWN';
     const policyTopics = (row.ad_group_ad.policy_summary?.policy_topic_entries || [])
-      .map((entry: any) => entry.type)
-      .filter((t: string) => t);
+      .map((entry) => entry.type)
+      .filter((t): t is string => Boolean(t));
     
     // Map approval status to serving status
     const servingStatus = this.mapApprovalToServingStatus(policyApproval);
@@ -161,20 +205,20 @@ export class RealGoogleAdsClient {
       ad_id: ad.id.toString(),
       ad_type: 'responsive_search_ad',
       ad_status: row.ad_group_ad.status.toLowerCase(),
-      headlines: (rsa.headlines || []).map((h: any) => h.text),
-      descriptions: (rsa.descriptions || []).map((d: any) => d.text),
-      paths: [rsa.path1, rsa.path2].filter(p => p),
+      headlines: (rsa?.headlines || []).map((h) => h.text ?? ''),
+      descriptions: (rsa?.descriptions || []).map((d) => d.text ?? ''),
+      paths: [rsa?.path1, rsa?.path2].filter((p): p is string => Boolean(p)),
       final_url: (ad.final_urls || [])[0] || '',
-      policy_status: policyApproval.toLowerCase(),
+      policy_status: policyApproval.toLowerCase() as AdSnapshot['policy_status'],
       policy_topics: policyTopics,
       serving_status: servingStatus,
       metrics: {
-        impressions: parseInt(row.metrics?.impressions || '0'),
-        clicks: parseInt(row.metrics?.clicks || '0'),
-        conversions: parseFloat(row.metrics?.conversions || '0'),
-        cost: (parseInt(row.metrics?.cost_micros || '0') / 1000000),
-        ctr: parseFloat(row.metrics?.ctr || '0'),
-        conversion_rate: parseFloat(row.metrics?.conversions_from_interactions_rate || '0'),
+        impressions: row.metrics?.impressions ?? 0,
+        clicks: row.metrics?.clicks ?? 0,
+        conversions: row.metrics?.conversions ?? 0,
+        cost: (row.metrics?.cost_micros ?? 0) / 1000000,
+        ctr: row.metrics?.ctr ?? 0,
+        conversion_rate: row.metrics?.conversions_from_interactions_rate ?? 0,
       },
       family_tags: this.extractFamilyTags(row),
       snapshot_date: new Date().toISOString().split('T')[0],
@@ -184,12 +228,12 @@ export class RealGoogleAdsClient {
   /**
    * Map Google's approval status to our serving status
    */
-  private mapApprovalToServingStatus(approval: string): string {
-    const map: Record<string, string> = {
+  private mapApprovalToServingStatus(approval: string): AdSnapshot['serving_status'] {
+    const map: Record<string, AdSnapshot['serving_status']> = {
       'APPROVED': 'eligible',
       'APPROVED_LIMITED': 'eligible_limited',
       'DISAPPROVED': 'not_eligible',
-      'UNDER_REVIEW': 'under_review',
+      'UNDER_REVIEW': 'pending',
       'AREA_OF_INTEREST_ONLY': 'eligible_limited',
     };
     
@@ -199,7 +243,7 @@ export class RealGoogleAdsClient {
   /**
    * Extract family tags from ad/campaign names
    */
-  private extractFamilyTags(row: any): Record<string, string> {
+  private extractFamilyTags(row: GadsExportRow): Record<string, string> {
     const tags: Record<string, string> = {};
     
     // Try to extract theme/product from campaign or ad group name

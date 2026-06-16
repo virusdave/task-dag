@@ -274,11 +274,12 @@ async function main() {
     console.log(
       `📋 Loaded snapshot issues sidecar: ${snapshotIssues!.ad_group_issues.length} ad-group issues, ${snapshotIssues!.landing_page_health.length} landing-page health rows`,
     );
-  } catch (e: any) {
-    if (e.code === 'ENOENT') {
+  } catch (e: unknown) {
+    const err = e as NodeJS.ErrnoException;
+    if (err.code === 'ENOENT') {
       console.log(`(no issues sidecar at ${issuesPath} — skipping landing-page suspicion analysis)`);
     } else {
-      console.warn(`⚠️  Could not read issues sidecar: ${e.message}`);
+      console.warn(`⚠️  Could not read issues sidecar: ${err.message}`);
     }
   }
   
@@ -360,8 +361,8 @@ async function main() {
       // actions actually addressable in Ads Editor.
       ads
     );
-  } catch (error: any) {
-    const msg = error?.message || String(error);
+  } catch (error: unknown) {
+    const msg = error instanceof Error ? error.message : String(error);
 
     const isConfigError =
       msg.includes('LLM credentials') ||

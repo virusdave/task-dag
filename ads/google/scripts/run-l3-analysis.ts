@@ -16,7 +16,9 @@ import type {
   L2PredictionOutput,
   L3EvaluationOutput,
   TrialOutcome,
+  AdAction,
 } from '../lib/shared/types.js';
+import type { ActualFamilyOutcome } from '../lib/l3/prediction-evaluator.js';
 import { generateRunId } from '../lib/shared/utils.js';
 import { collectTrialOutcomes } from '../lib/l3/outcome-collector.js';
 import { evaluatePredictions, evaluatePatternEffectiveness } from '../lib/l3/prediction-evaluator.js';
@@ -111,7 +113,7 @@ async function collectAllTrialOutcomes(l2Outputs: L2PredictionOutput[]): Promise
 /**
  * Collect actual family outcomes from Helios
  */
-async function collectFamilyOutcomes(): Promise<any[]> {
+async function collectFamilyOutcomes(): Promise<ActualFamilyOutcome[]> {
   // TODO: Query Helios for actual limitation/disapproval rates by family
   
   // Mock for now
@@ -317,8 +319,8 @@ async function main() {
     }];
     
     l3Output = await analyzer.analyze(l2Outputs, trialOutcomes, predictionAccuracyArray);
-  } catch (error: any) {
-    if (error.message?.includes('Missing required environment variables')) {
+  } catch (error: unknown) {
+    if (error instanceof Error && error.message.includes('Missing required environment variables')) {
       console.warn('⚠️  LLM not configured, using deterministic evaluation only');
       
       // Fallback to deterministic analysis
@@ -454,7 +456,7 @@ function summarizeRecentIssues(l2Outputs: L2PredictionOutput[]): string[] {
   // call it out as a signal of triaging-by-template.
   const justificationCounts: Record<string, number> = {};
   for (const a of allActions) {
-    const j = ((a as any).justification ?? (a as any).rationale ?? '').trim();
+    const j = (a.justification ?? (a as AdAction & { rationale?: string }).rationale ?? '').trim();
     if (j.length > 40) {
       justificationCounts[j] = (justificationCounts[j] ?? 0) + 1;
     }
