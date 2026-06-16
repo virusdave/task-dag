@@ -10,5 +10,12 @@
   "include": [
     "src/client/**/*",
     "src/shared/**/*"
+  ],
+  "exclude": [
+    "**/*.test.ts",
+    "**/*.test.tsx",
+    "**/__tests__/**/*",
+    "src/shared/config/runtimeEnv.ts",
+    "src/shared/util/hash.ts"
   ]
 }
