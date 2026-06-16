@@ -210,6 +210,13 @@ build_claim_commit() {
     local claimer_host="$3"
     local ttl_hours="$4"
     local note="$5"
+    # Claimer-PID: OS process id of the claiming worker on Claimer-Host.
+    # Recorded so a janitor (or another worker) on that same host can cheaply
+    # tell a live claim from an orphaned one — a worker the OS/an error killed
+    # before it could `complete` or `release` — via `kill -0 <pid>`, instead of
+    # waiting out the (long, advisory) TTL. Optional: legacy/cross-tool callers
+    # may omit it, in which case the line is simply not written.
+    local claimer_pid="$6"
 
     local task_title
     task_title=$(get_task_title "$task_sha")
@@ -219,11 +226,18 @@ build_claim_commit() {
     local now
     now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
+    # Keep the identity fields (who / where / which-process) grouped together,
+    # ahead of the timing fields, so a liveness check reads top-to-bottom.
     local msg="Claim: ${task_title}
 
 Task-Commit: ${task_sha}
 Claimer: ${claimer}
-Claimer-Host: ${claimer_host}
+Claimer-Host: ${claimer_host}"
+    if [ -n "$claimer_pid" ]; then
+        msg="${msg}
+Claimer-PID: ${claimer_pid}"
+    fi
+    msg="${msg}
 Claimed-At: ${now}
 TTL-Hours: ${ttl_hours}"
     if [ -n "$note" ]; then
@@ -508,9 +522,10 @@ JSON
 #   2. The new `tasks/active/<short>` ref points at a "claim commit"
 #      whose tree is identical to the task commit's and whose first
 #      parent is the task commit. The commit message carries
-#      Claimer / Claimer-Host / Claimed-At / TTL-Hours so an
-#      operator can later see who's holding each claim without a
-#      separate metadata store.
+#      Claimer / Claimer-Host / Claimer-PID / Claimed-At / TTL-Hours so
+#      an operator can later see who's holding each claim — and, via
+#      Claimer-PID, whether that worker is still alive on its host —
+#      without a separate metadata store.
 #   3. After a successful claim, the caller MUST eventually either
 #      `task-dag complete <sha>` (which deletes both refs and lands
 #      the task) or `task-dag release <sha>` (which moves the active
@@ -528,6 +543,13 @@ cmd_claim() {
     local claimer_host="${TASK_DAG_CLAIMER_HOST:-$(hostname -s 2>/dev/null || echo unknown)}"
     local ttl_hours="${TASK_DAG_TTL_HOURS:-12}"
     local note=""
+    # PID of the worker that owns this claim, for same-host liveness checks.
+    # Default to $PPID: this CLI is short-lived, so $$ would be a dead pid the
+    # instant we return; $PPID is the process that invoked us (the worker /
+    # its shell). A harness that knows its own long-lived worker pid should
+    # export TASK_DAG_CLAIMER_PID (or pass --pid=) so the recorded pid stays
+    # alive for as long as the work does.
+    local claimer_pid="${TASK_DAG_CLAIMER_PID:-$PPID}"
     local do_force=false
     local json=false
 
@@ -535,6 +557,7 @@ cmd_claim() {
         case "$1" in
             --by=*) claimer="${1#*=}"; shift ;;
             --host=*) claimer_host="${1#*=}"; shift ;;
+            --pid=*) claimer_pid="${1#*=}"; shift ;;
             --ttl-hours=*) ttl_hours="${1#*=}"; shift ;;
             --note=*) note="${1#*=}"; shift ;;
             --force) do_force=true; shift ;;
@@ -551,6 +574,11 @@ observation.
 Options:
   --by=<id>           Claimer identifier (default: \$TASK_DAG_CLAIMER or \$USER)
   --host=<name>       Claimer hostname (default: \$TASK_DAG_CLAIMER_HOST or hostname -s)
+  --pid=<n>           Claiming worker PID, recorded for same-host liveness
+                      checks (default: \$TASK_DAG_CLAIMER_PID or \$PPID, the
+                      process that invoked this CLI). Export
+                      TASK_DAG_CLAIMER_PID to your long-lived worker pid so a
+                      janitor can detect a dead worker's orphaned claim.
   --ttl-hours=<n>     Advisory TTL stored in the claim metadata (default: 12)
   --note=<text>       Free-form note recorded in the claim metadata
   --force             Steal an existing claim (only do this if you know
@@ -615,19 +643,27 @@ JSON
         # Try to fetch the claim metadata for a friendlier error.
         local existing_claimer="unknown"
         local existing_when="unknown"
+        local existing_host="unknown"
+        local existing_pid=""
         if git show-ref --verify --quiet "$active_local_ref"; then
             local existing_msg
             existing_msg=$(parse_commit_metadata "$active_local_ref" 2>/dev/null || true)
             existing_claimer=$(extract_field "$existing_msg" "Claimer")
             existing_when=$(extract_field "$existing_msg" "Claimed-At")
+            existing_host=$(extract_field "$existing_msg" "Claimer-Host" 2>/dev/null || true)
+            existing_pid=$(extract_field "$existing_msg" "Claimer-PID" 2>/dev/null || true)
         fi
         if [ "$json" = true ]; then
             cat <<JSON
-{"ok":false,"reason":"already-claimed","sha":"$task_sha","shortSha":"$short_sha","claimer":"${existing_claimer:-unknown}","claimedAt":"${existing_when:-unknown}"}
+{"ok":false,"reason":"already-claimed","sha":"$task_sha","shortSha":"$short_sha","claimer":"${existing_claimer:-unknown}","claimerHost":"${existing_host:-unknown}","claimerPid":${existing_pid:-null},"claimedAt":"${existing_when:-unknown}"}
 JSON
         else
-            printf "${RED}Task %s is already claimed by %s at %s${RESET}\n" \
-                "$short_sha" "${existing_claimer:-unknown}" "${existing_when:-unknown}" >&2
+            printf "${RED}Task %s is already claimed by %s (pid %s on %s) at %s${RESET}\n" \
+                "$short_sha" "${existing_claimer:-unknown}" "${existing_pid:-?}" \
+                "${existing_host:-unknown}" "${existing_when:-unknown}" >&2
+            if [ -n "$existing_pid" ]; then
+                echo "If you are on ${existing_host:-that host}, 'kill -0 ${existing_pid}' tells you whether that worker is still alive." >&2
+            fi
             echo "Re-run with --force ONLY if you know that claim is dead." >&2
         fi
         return 2
@@ -649,7 +685,7 @@ JSON
 
     # Build the claim commit locally before pushing.
     local claim_commit
-    claim_commit=$(build_claim_commit "$task_sha" "$claimer" "$claimer_host" "$ttl_hours" "$note") || {
+    claim_commit=$(build_claim_commit "$task_sha" "$claimer" "$claimer_host" "$ttl_hours" "$note" "$claimer_pid") || {
         echo "Error: failed to build claim commit" >&2
         return 4
     }
@@ -729,11 +765,11 @@ JSON
         fi
         if [ "$json" = true ]; then
             cat <<JSON
-{"ok":true,"sha":"$task_sha","shortSha":"$short_sha","claimCommit":"$claim_commit","claimer":"$claimer","claimerHost":"$claimer_host","ttlHours":$ttl_hours}
+{"ok":true,"sha":"$task_sha","shortSha":"$short_sha","claimCommit":"$claim_commit","claimer":"$claimer","claimerHost":"$claimer_host","claimerPid":${claimer_pid:-null},"ttlHours":$ttl_hours}
 JSON
         else
-            printf "${GREEN}✓ Claimed task %s as %s@%s (TTL %sh, verified on origin)${RESET}\n" \
-                "$short_sha" "$claimer" "$claimer_host" "$ttl_hours"
+            printf "${GREEN}✓ Claimed task %s as %s@%s (pid %s, TTL %sh, verified on origin)${RESET}\n" \
+                "$short_sha" "$claimer" "$claimer_host" "${claimer_pid:-?}" "$ttl_hours"
         fi
         return 0
     fi
@@ -908,7 +944,7 @@ cmd_active() {
     if [ "$json" = true ]; then
         echo "["
     else
-        printf "${BOLD}%-12s %-12s %-30s %-20s %s${RESET}\n" "SHORT" "ISSUE" "CLAIMER@HOST" "CLAIMED-AT" "TITLE"
+        printf "${BOLD}%-12s %-12s %-28s %-8s %-20s %s${RESET}\n" "SHORT" "ISSUE" "CLAIMER@HOST" "PID" "CLAIMED-AT" "TITLE"
     fi
 
     local first=true
@@ -934,6 +970,7 @@ cmd_active() {
         local claim_msg=$(parse_commit_metadata "$claim_sha" 2>/dev/null || true)
         local claimer=$(extract_field "$claim_msg" "Claimer" 2>/dev/null || true)
         local claimer_host=$(extract_field "$claim_msg" "Claimer-Host" 2>/dev/null || true)
+        local claimer_pid=$(extract_field "$claim_msg" "Claimer-PID" 2>/dev/null || true)
         local claimed_at=$(extract_field "$claim_msg" "Claimed-At" 2>/dev/null || true)
         local ttl_hours=$(extract_field "$claim_msg" "TTL-Hours" 2>/dev/null || true)
 
@@ -948,16 +985,18 @@ cmd_active() {
         "title": "$title",
         "claimer": "${claimer:-unknown}",
         "claimerHost": "${claimer_host:-unknown}",
+        "claimerPid": ${claimer_pid:-null},
         "claimedAt": "${claimed_at:-unknown}",
         "ttlHours": ${ttl_hours:-null}
     }
 JSON
             first=false
         else
-            printf "%-12s %-12s %-30s %-20s %s\n" \
+            printf "%-12s %-12s %-28s %-8s %-20s %s\n" \
                 "$short_ref" \
                 "${issue:+#$issue}" \
                 "${claimer:-?}@${claimer_host:-?}" \
+                "${claimer_pid:-?}" \
                 "${claimed_at:-unknown}" \
                 "${title:0:60}"
         fi
