@@ -103,14 +103,19 @@ branch the workflow is pinned to — keep them aligned.
    > **Order:** promote **task-dag first** (`scripts/promote-github2.sh`,
    > default) so the reusable `issue-to-task` / `close-completed-issues`
    > exist at `@master` before any peer caller references them.
-4. **Retire `shared-workflows`' task-dag workflows** — leave thin
-   re-export wrappers for one release window, then delete once every
-   caller points here and the smoke test is green. Drop per-repo
-   drift-guard at the same point.
-5. **CLI home.** Flip `task-dag-drift-guard.yml`'s `canonical_repo`
-   default to `virusdave/task-dag` and drop the App-token mint (this repo
-   is public). Update each peer `AGENTS.md` to drop stale `scripts/task-dag`
-   references and point at this repo.
+4. **Retire `shared-workflows`' task-dag workflows. [done 2026-06-16,
+   top-level#21]** Every caller now points at
+   `virusdave/task-dag/.github/workflows/*@master` and no repo vendors the
+   CLI, so `Nicponskis/shared-workflows`' task-dag workflows + scripts were
+   removed (staged via its `.github2/REMOVE.txt`, promoted by the operator)
+   and the repo tombstoned. The per-repo drift-guard is dropped — see
+   step 5.
+5. **CLI home. [done 2026-06-16, top-level#21]** The CLI source of truth is
+   this repo. Because no peer vendors `scripts/task-dag` any longer,
+   `task-dag-drift-guard.yml` has nothing to guard and was retired here
+   (staged via `.github2/REMOVE.txt`, promoted by the operator) rather than
+   re-pointed. Peer `AGENTS.md` files already drop stale `scripts/task-dag`
+   references and run the CLI via `ephemeral-checkout task-dag`.
 
 ## Ordering hazards
 

@@ -35,7 +35,6 @@ scripts/
     sync-comment-to-task.yml
     sync-task-to-comment.yml
     aggregate-cross-repo-completions.yml
-    task-dag-drift-guard.yml
   scripts/                          coordinator / per-repo action helpers (source of truth)
     create-task-commit.sh           issue → task ref
     close-completed-issues.sh       auto-close issues whose tasks are all complete
