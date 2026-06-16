@@ -1,8 +1,0 @@
-# DELETE manifest for promote-github2.sh — one repo-relative path per line.
-# Blank lines and '#' comments are ignored. Listed paths are `git rm`'d
-# during promotion (BEFORE staged files are moved into place, so a staged
-# .github2/ file may replace one listed here).
-#
-# Replacing the existing reusable workflow in place with the staged copy
-# that adds per-issue job concurrency (F2 follow-up, virusdave/top-level#22).
-.github/workflows/issue-to-task.yml
