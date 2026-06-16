@@ -671,13 +671,25 @@ async function fetchLatestObservationsByProductId(
     return new Map()
   }
   const result = await db.query<ObservationRow>(
+    // Dedupe to the latest observation id per product on NARROW columns
+    // first, then join the wide evidence_json back for only the surviving
+    // rows. The old `distinct on (product_id) ... evidence_json` carried
+    // ~15 kB of evidence_json per row through the sort (~24
+    // observations/product), spilling for multi-product pages. id is the
+    // PK; result identical modulo the pre-existing arbitrary tie pick.
     `
-      select distinct on (product_id)
-        product_id, captured_at, evidence_json,
-        listing_count, pricing_eligible_listing_count
-      from litalerts_competitor_observations
-      where product_id = any($1::bigint[]) and status = 'succeeded'
-      order by product_id, captured_at desc
+      with latest as (
+        select distinct on (product_id) id
+        from litalerts_competitor_observations
+        where product_id = any($1::bigint[]) and status = 'succeeded'
+        order by product_id, captured_at desc
+      )
+      select
+        o.product_id, o.captured_at, o.evidence_json,
+        o.listing_count, o.pricing_eligible_listing_count
+      from latest l
+      join litalerts_competitor_observations o on o.id = l.id
+      order by o.product_id
     `,
     [productIds],
   )

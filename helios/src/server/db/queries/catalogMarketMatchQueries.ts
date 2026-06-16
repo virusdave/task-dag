@@ -737,13 +737,23 @@ export async function loadGroupReview(
             ) as product
             where cg.id = $1
               and (product ->> 'productId') ~ '^[0-9]+$'
+          ),
+          latest as (
+            -- Dedupe to the latest observation id per product on NARROW
+            -- columns first, then join the wide evidence_json back below
+            -- for only the surviving rows, instead of carrying ~15 kB of
+            -- evidence_json per row through the DISTINCT ON sort. o.id is
+            -- the PK; result identical modulo the pre-existing tie pick.
+            select distinct on (o.product_id) o.id
+            from litalerts_competitor_observations o
+            join snapshot_products sp on sp.product_id = o.product_id
+            where o.evidence_json is not null
+            order by o.product_id, o.captured_at desc
           )
-          select distinct on (o.product_id)
-            o.id, o.product_id, o.evidence_json, o.captured_at::text
-          from litalerts_competitor_observations o
-          join snapshot_products sp on sp.product_id = o.product_id
-          where o.evidence_json is not null
-          order by o.product_id, o.captured_at desc
+          select o.id, o.product_id, o.evidence_json, o.captured_at::text
+          from latest l
+          join litalerts_competitor_observations o on o.id = l.id
+          order by o.product_id
         `,
         [catalogGroupId],
       )

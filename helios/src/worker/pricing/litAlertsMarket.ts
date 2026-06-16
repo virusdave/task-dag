@@ -1011,35 +1011,43 @@ async function loadBrandProductsFromCache(
     recreational: boolean | null
     medical: boolean | null
   }>(
+    // Dedupe on the NARROW key (observation_id) first, then join the
+    // wide row back for only the surviving "latest" rows. The old form
+    // (`select distinct on (...) *`) carried every column through the
+    // DISTINCT ON sort, so for a big brand (100k+ observation rows) it
+    // spilled the whole wide rowset to a temp-file external-merge sort
+    // on every call. observation_id is the PK, so the join is 1:1; the result is
+    // identical modulo the pre-existing arbitrary DISTINCT ON tie pick.
     `
       with latest as (
         select distinct on (retailer_id, product_id, config_idx)
-          *
+          observation_id
         from litalerts_products
         where brand_id = $1
           and state_code = $2
         order by retailer_id, product_id, config_idx, observed_at desc
       )
       select
-        brand_id::text as brand_id,
-        brand_name,
-        retailer_id::text as retailer_id,
-        product_id::text as product_id,
-        config_idx,
-        product_name,
-        category,
-        medical_url,
-        recreational_url,
-        coalesce(image_url, nullif(raw_product_json->>'imageURL', '')) as image_url,
-        amount,
-        units,
-        normal_price,
-        sale_price,
-        current_stock,
-        recreational,
-        medical
-      from latest
-      order by retailer_id, product_id, config_idx
+        p.brand_id::text as brand_id,
+        p.brand_name,
+        p.retailer_id::text as retailer_id,
+        p.product_id::text as product_id,
+        p.config_idx,
+        p.product_name,
+        p.category,
+        p.medical_url,
+        p.recreational_url,
+        coalesce(p.image_url, nullif(p.raw_product_json->>'imageURL', '')) as image_url,
+        p.amount,
+        p.units,
+        p.normal_price,
+        p.sale_price,
+        p.current_stock,
+        p.recreational,
+        p.medical
+      from latest l
+      join litalerts_products p on p.observation_id = l.observation_id
+      order by p.retailer_id, p.product_id, p.config_idx
     `,
     [brandId, stateCode],
   )
