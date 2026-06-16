@@ -22,7 +22,10 @@ import {
 } from '../../../shared/contracts/index.js'
 import type { Queryable } from '../pool.js'
 import { SITE_PINS } from './customersMapQueries.js'
-import { sweedPrimeSegmentUrl } from './sweedCustomerSegmentsQueries.js'
+import {
+  readSegmentRetirementState,
+  sweedPrimeSegmentUrl,
+} from './sweedCustomerSegmentsQueries.js'
 
 const SITE_LABEL_BY_SLUG: Record<string, string> = Object.fromEntries(
   SITE_PINS.map((p) => [p.siteSlug, p.label]),
@@ -127,6 +130,9 @@ export async function getSegmentDetails(
   if (catalog === null && cachedMemberCount === 0 && !hasGeo) {
     return null
   }
+
+  // Helios-local retirement state (catalog disabled flag + explicit row).
+  const retirement = await readSegmentRetirementState(db, segmentId)
 
   // Refresh highwater (PK lookup).
   const hwRes = await db.query<{
@@ -291,6 +297,12 @@ export async function getSegmentDetails(
       catalogRefreshedAt: isoOrNull(catalog?.catalog_refreshed_at ?? null),
       inCatalog: catalog !== null,
       sweedPrimeUrl: sweedPrimeSegmentUrl(segmentId),
+      isRetired: retirement.isRetired,
+      explicitlyRetired: retirement.explicitlyRetired,
+      disabledImpliedRetired: retirement.disabledImpliedRetired,
+      retiredAt: retirement.retiredAt,
+      retiredBy: retirement.retiredBy,
+      retirementNote: retirement.retirementNote,
     },
     membership: {
       cachedMemberCount,

@@ -23,6 +23,7 @@ import { Link, useLoaderData, useRevalidator, useRouteLoaderData } from 'react-r
 import {
   SegmentDetailsResponseSchema,
   SegmentMembershipRefreshResponseSchema,
+  SegmentRetirementResponseSchema,
   type SegmentDetailsResponse,
   type SegmentRefreshStatus,
   type SessionEnvelope,
@@ -170,6 +171,7 @@ export function MarketingSegmentDetailsPage() {
   }, [session])
 
   const [refreshing, setRefreshing] = useState(false)
+  const [retiring, setRetiring] = useState(false)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
 
@@ -227,6 +229,29 @@ export function MarketingSegmentDetailsPage() {
     }
   }
 
+  async function handleRetire(action: 'retire' | 'unretire'): Promise<void> {
+    setRetiring(true)
+    setErrorMessage(null)
+    setNotice(null)
+    try {
+      await mutateJson(
+        `/api/config/marketing/segments/${segment.segmentId}/${action}`,
+        SegmentRetirementResponseSchema,
+        { method: 'POST' },
+      )
+      setNotice(
+        action === 'retire'
+          ? 'Segment retired. It is now hidden from the rest of Helios.'
+          : 'Segment un-retired. It is visible across Helios again.',
+      )
+      revalidator.revalidate()
+    } catch (cause) {
+      setErrorMessage(cause instanceof Error ? cause.message : `Failed to ${action} segment.`)
+    } finally {
+      setRetiring(false)
+    }
+  }
+
   const entryRows = data.entryHistogram.map((b) => ({
     key: b.weekStart,
     label: nyIsoDate(Date.parse(`${b.weekStart}T12:00:00Z`)),
@@ -242,7 +267,9 @@ export function MarketingSegmentDetailsPage() {
     <section>
       <div className="page-header wrap-row" style={{ alignItems: 'flex-start' }}>
         <div style={{ minWidth: 0, flex: '1 1 260px' }}>
-          <p className="eyebrow">Config / Marketing</p>
+          <p className="eyebrow">
+            <Link to="/config/marketing/segments">Config / Marketing / Segments</Link>
+          </p>
           <h2 style={{ overflowWrap: 'anywhere' }}>{segment.name}</h2>
           <p className="subtle-copy">
             Segment #{segment.segmentId}. Helios snapshot of this Sweed marketing segment, built
@@ -255,6 +282,7 @@ export function MarketingSegmentDetailsPage() {
           <Pill tone={segment.enabled === false ? 'muted' : 'success'}>
             {segment.enabled === false ? 'disabled' : 'enabled'}
           </Pill>
+          {segment.isRetired ? <Pill tone="warning">retired</Pill> : null}
           <Pill tone="muted">{segment.type}</Pill>
           <Pill tone="muted">{SCOPE_LABEL[segment.scopeLevel]}</Pill>
         </div>
@@ -277,6 +305,66 @@ export function MarketingSegmentDetailsPage() {
           </div>
         </div>
       ) : null}
+
+      {/* Retirement: hide/show this segment across the rest of Helios. */}
+      <article className="history-card" style={{ marginTop: 16 }}>
+        <div className="history-card-topline wrap-row" style={{ alignItems: 'flex-start' }}>
+          <div style={{ minWidth: 0 }}>
+            <strong>Helios visibility</strong>
+            {segment.isRetired ? (
+              <>
+                <p className="subtle-copy" style={{ marginTop: 2 }}>
+                  Retired: hidden from every Helios page except this one and the segment directory.
+                </p>
+                {segment.disabledImpliedRetired ? (
+                  <p className="subtle-copy" style={{ marginTop: 2, fontSize: '0.8em' }}>
+                    This segment is disabled in Sweed, so it stays hidden until it is re-enabled in
+                    Sweed (Helios cannot re-enable it).
+                  </p>
+                ) : null}
+                {segment.explicitlyRetired ? (
+                  <p className="subtle-copy" style={{ marginTop: 2, fontSize: '0.8em' }}>
+                    Retired in Helios{' '}
+                    {segment.retiredAt ? `${nyLongDateTime(Date.parse(segment.retiredAt))} NY` : ''}
+                    {segment.retiredBy ? ` by ${segment.retiredBy}` : ''}
+                    {segment.retirementNote ? `; ${segment.retirementNote}` : ''}.
+                  </p>
+                ) : null}
+              </>
+            ) : (
+              <p className="subtle-copy" style={{ marginTop: 2 }}>
+                Active: visible across Helios. Retire it to hide this segment everywhere except this
+                page and the segment directory (useful for test and junk segments).
+              </p>
+            )}
+          </div>
+          {canEdit ? (
+            <div className="inline-row wrap-row">
+              {segment.explicitlyRetired ? (
+                <button
+                  type="button"
+                  className="ghost-button"
+                  disabled={retiring}
+                  onClick={() => void handleRetire('unretire')}
+                  title="Show this segment across Helios again."
+                >
+                  {retiring ? 'Working…' : 'Un-retire'}
+                </button>
+              ) : !segment.disabledImpliedRetired ? (
+                <button
+                  type="button"
+                  className="ghost-button"
+                  disabled={retiring}
+                  onClick={() => void handleRetire('retire')}
+                  title="Hide this segment from every Helios page except this one and the directory."
+                >
+                  {retiring ? 'Working…' : 'Retire segment'}
+                </button>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
+      </article>
 
       {/* Membership freshness + the primary next action. */}
       <article className="history-card" style={{ marginTop: 16 }}>

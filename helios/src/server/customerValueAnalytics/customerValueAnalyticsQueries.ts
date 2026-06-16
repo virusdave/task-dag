@@ -21,6 +21,7 @@ import {
   TRAILING_SPEND_REPEAT_MIN_VISITS,
 } from '../../shared/contracts/index.js'
 import { getPool } from '../db/pool.js'
+import { membershipSegmentVisibleSql } from '../db/queries/sweedCustomerSegmentsQueries.js'
 // Per-line margin convention is shared verbatim with the proven
 // `margins.gross_margin_dollars` registry metric: line margin =
 // REVENUE_EXPR − COGS_EXPR over `sweed_order_items_flat f`, where
@@ -162,11 +163,11 @@ function resolveSegmentIds(ids: readonly string[]): number[] {
 function segmentLensPredicate(alias: string, paramIndex: number): string {
   const col = alias ? `${alias}.customer_id` : 'customer_id'
   return `and ${col} in (
-        select scs.sweed_customer_id
-          from sweed_customer_segments scs
-         where scs.segment_id = any($${paramIndex}::bigint[])
-           and scs.enabled is distinct from false
-      )`
+      select scs.sweed_customer_id
+        from sweed_customer_segments scs
+       where scs.segment_id = any($${paramIndex}::bigint[])
+         and ${membershipSegmentVisibleSql('scs')}
+    )`
 }
 
 function resolveDealerIds(sites: readonly string[]): number[] {
@@ -863,7 +864,7 @@ export async function getCustomerValueAnalytics(
       select distinct scs.sweed_customer_id as customer_id
         from sweed_customer_segments scs
        where scs.segment_id = any($4::bigint[])
-         and scs.enabled is distinct from false
+         and ${membershipSegmentVisibleSql('scs')}
     ),
     window_orders as (
       select

@@ -63,6 +63,10 @@ import {
   MarketingSegmentDetailsPage,
   marketingSegmentDetailsLoader,
 } from '../routes/config/MarketingSegmentDetailsPage.js'
+import {
+  MarketingSegmentsDirectoryPage,
+  marketingSegmentsDirectoryLoader,
+} from '../routes/config/MarketingSegmentsDirectoryPage.js'
 import { ConfigWorkersSchedulingPage, configWorkersSchedulingLoader } from '../routes/config/ConfigWorkersSchedulingPage.js'
 import { DashboardPage } from '../routes/dashboard/DashboardPage.js'
 import { GroupDetailPage, groupDetailLoader } from '../routes/groups/GroupDetailPage.js'
@@ -605,6 +609,11 @@ export const router = createBrowserRouter([
         element: <GeoSegmentRulesPage />,
         loader: geoSegmentRulesLoader,
         path: 'config/marketing/geo-segment-rules',
+      },
+      {
+        element: <MarketingSegmentsDirectoryPage />,
+        loader: marketingSegmentsDirectoryLoader,
+        path: 'config/marketing/segments',
       },
       {
         element: <MarketingSegmentDetailsPage />,

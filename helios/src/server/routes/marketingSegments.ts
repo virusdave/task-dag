@@ -1,9 +1,11 @@
 import type { FastifyInstance } from 'fastify'
 
 import {
+  MarketingSegmentDirectoryResponseSchema,
   SegmentDetailsResponseSchema,
   SegmentMembershipRefreshAllResponseSchema,
   SegmentMembershipRefreshResponseSchema,
+  SegmentRetirementResponseSchema,
 } from '../../shared/contracts/index.js'
 import { requireSessionUser } from '../auth/requireSession.js'
 import { getPool } from '../db/pool.js'
@@ -13,7 +15,13 @@ import {
   getSegmentDetails,
   markSegmentMembershipRefreshPending,
 } from '../db/queries/marketingSegmentDetailsQueries.js'
-import { readMarketingCatalogSegments } from '../db/queries/sweedCustomerSegmentsQueries.js'
+import {
+  readMarketingCatalogSegments,
+  readMarketingSegmentsDirectory,
+  readSegmentRetirementState,
+  retireSegment,
+  unretireSegment,
+} from '../db/queries/sweedCustomerSegmentsQueries.js'
 
 // Read-only Helios "segment details" page + its membership-refresh
 // trigger (/config/marketing/segments/:segmentId, virusdave/top-level#12).
@@ -31,7 +39,33 @@ function parseSegmentId(raw: unknown): number | null {
   return n
 }
 
+const RETIREMENT_TABLE_MISSING =
+  'sweed_marketing_segment_retirement table missing. Apply migration 089_sweed_marketing_segment_retirement.sql.'
+
+function isRetirementTableMissing(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error)
+  return /relation .*sweed_marketing_segment_retirement.* does not exist/i.test(message)
+}
+
 export async function registerMarketingSegmentsRoutes(server: FastifyInstance): Promise<void> {
+  // Segment directory: every cached segment + its retirement state. Lists
+  // active segments first; retired ones (disabled in Sweed or explicitly
+  // retired in Helios) are returned too so the directory can show and
+  // un-retire them. Cache-only.
+  server.get('/api/config/marketing/segments', async (request, reply) => {
+    const actor = await requireSessionUser(request, reply, 'viewer')
+    if (!actor) return
+    try {
+      const result = await readMarketingSegmentsDirectory(getPool())
+      return reply.send(MarketingSegmentDirectoryResponseSchema.parse(result))
+    } catch (error) {
+      if (isRetirementTableMissing(error)) {
+        return reply.status(503).send({ error: RETIREMENT_TABLE_MISSING })
+      }
+      throw error
+    }
+  })
+
   server.get('/api/config/marketing/segments/:segmentId', async (request, reply) => {
     const actor = await requireSessionUser(request, reply, 'viewer')
     if (!actor) return
@@ -166,4 +200,57 @@ export async function registerMarketingSegmentsRoutes(server: FastifyInstance): 
       }
     },
   )
+
+  // Retire a segment in Helios: semi-permanently hide it from every
+  // Helios surface except the segment directory/details config pages.
+  // Idempotent. An optional note records why.
+  server.post('/api/config/marketing/segments/:segmentId/retire', async (request, reply) => {
+    const actor = await requireSessionUser(request, reply, 'editor')
+    if (!actor) return
+
+    const segmentId = parseSegmentId((request.params as { segmentId?: string }).segmentId)
+    if (segmentId === null) {
+      return reply.status(400).send({ error: 'Invalid segmentId.' })
+    }
+
+    const rawNote = (request.body as { note?: unknown } | undefined)?.note
+    const note = typeof rawNote === 'string' && rawNote.trim().length > 0 ? rawNote.trim().slice(0, 1000) : null
+
+    try {
+      const pool = getPool()
+      await retireSegment(pool, { segmentId, userId: actor.id, note })
+      const state = await readSegmentRetirementState(pool, segmentId)
+      return reply.send(SegmentRetirementResponseSchema.parse(state))
+    } catch (error) {
+      if (isRetirementTableMissing(error)) {
+        return reply.status(503).send({ error: RETIREMENT_TABLE_MISSING })
+      }
+      throw error
+    }
+  })
+
+  // Un-retire a segment in Helios: removes the explicit retirement.
+  // Idempotent. Note: a segment that is disabled in Sweed stays hidden
+  // until it is re-enabled in Sweed (Helios cannot re-enable it).
+  server.post('/api/config/marketing/segments/:segmentId/unretire', async (request, reply) => {
+    const actor = await requireSessionUser(request, reply, 'editor')
+    if (!actor) return
+
+    const segmentId = parseSegmentId((request.params as { segmentId?: string }).segmentId)
+    if (segmentId === null) {
+      return reply.status(400).send({ error: 'Invalid segmentId.' })
+    }
+
+    try {
+      const pool = getPool()
+      await unretireSegment(pool, segmentId)
+      const state = await readSegmentRetirementState(pool, segmentId)
+      return reply.send(SegmentRetirementResponseSchema.parse(state))
+    } catch (error) {
+      if (isRetirementTableMissing(error)) {
+        return reply.status(503).send({ error: RETIREMENT_TABLE_MISSING })
+      }
+      throw error
+    }
+  })
 }

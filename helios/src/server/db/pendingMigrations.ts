@@ -1166,6 +1166,22 @@ const SENTINELS: MigrationSentinel[] = [
       return hasMissingId && hasUnattributed
     },
   },
+  {
+    migrationId: '089_sweed_marketing_segment_retirement',
+    label:
+      'Helios-local marketing-segment retirement (sweed_marketing_segment_retirement) — ' +
+      'backs the /config/marketing/segments directory + details "Retire" control that ' +
+      'semi-permanently hides test/junk Sweed segments from every Helios surface. Without ' +
+      'it the directory list and the retire/unretire endpoints 503 and the segment-listing ' +
+      'queries cannot anti-join the retirement set.',
+    check: async (db) => {
+      const [hasTable, hasRetiredAt] = await Promise.all([
+        tableExists(db, 'sweed_marketing_segment_retirement'),
+        columnExists(db, 'sweed_marketing_segment_retirement', 'retired_at'),
+      ])
+      return hasTable && hasRetiredAt
+    },
+  },
 ]
 
 interface CacheEntry {

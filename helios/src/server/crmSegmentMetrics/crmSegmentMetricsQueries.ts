@@ -29,6 +29,7 @@ import {
   mapSegmentType,
   scopeOf,
 } from '../db/queries/marketingSegmentDetailsQueries.js'
+import { catalogSegmentVisibleSql } from '../db/queries/sweedCustomerSegmentsQueries.js'
 import { FULFILLMENT_SERIES_SQL_EXPR_SO } from '../metrics/_real/sweedOrdersQueries.js'
 
 export const CRM_SEGMENT_METRICS_DEFAULT_WINDOW_DAYS = 90
@@ -83,7 +84,19 @@ export async function getCrmSegmentList(
     scope_dealer_id: string | number | null
     cached_member_count: number
   }>(
-    `select c.segment_id,
+    // `member_counts` is a MATERIALIZED CTE on purpose: the catalog
+    // visibility predicate's anti-join makes the planner under-estimate
+    // the catalog row count to 1, which otherwise flips the join to a
+    // nested loop that recomputes this 147k-row aggregate once per
+    // segment (~1.4s on prod). Materializing computes it exactly once
+    // (~27ms). Do not inline it back into a sub-select.
+    `with member_counts as materialized (
+       select segment_id, count(distinct sweed_customer_id)::int as cnt
+         from sweed_customer_segments
+        where enabled is distinct from false
+        group by segment_id
+     )
+     select c.segment_id,
             c.segment_name,
             c.segment_type_id,
             c.enabled,
@@ -91,11 +104,8 @@ export async function getCrmSegmentList(
             c.scope_dealer_id,
             coalesce(m.cnt, 0)::int as cached_member_count
        from sweed_marketing_segments c
-       left join (
-         select segment_id, count(distinct sweed_customer_id)::int as cnt
-           from sweed_customer_segments
-          group by segment_id
-       ) m on m.segment_id = c.segment_id
+       left join member_counts m on m.segment_id = c.segment_id
+      where ${catalogSegmentVisibleSql('c')}
       order by coalesce(m.cnt, 0) desc, lower(coalesce(c.segment_name, ''))`,
   )
 
@@ -135,7 +145,9 @@ export async function getCrmSegmentMetrics(
   args: CrmSegmentMetricsArgs,
 ): Promise<CrmSegmentMetricsResponse | null> {
   const details = await getSegmentDetails(db, args.segmentId)
-  if (details === null) return null
+  // Retired segments are hidden everywhere except the segment config
+  // pages; treat a direct (e.g. bookmarked) metrics request as not found.
+  if (details === null || details.segment.isRetired) return null
 
   const dealerIds = resolveDealerIds(args.sites)
   const cachedMemberCount = details.membership.cachedMemberCount

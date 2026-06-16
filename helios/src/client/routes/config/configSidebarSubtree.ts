@@ -90,6 +90,12 @@ export function buildConfigSidebarSubtree(): TreeNavNode[] {
       children: [
         {
           kind: 'leaf',
+          navKey: 'config.marketing.segments',
+          label: 'Segments',
+          to: buildHeliosModulePath('config', 'marketing/segments'),
+        },
+        {
+          kind: 'leaf',
           navKey: 'config.marketing.geo-segment-rules',
           label: 'Geo segment rules',
           to: buildHeliosModulePath('config', 'marketing/geo-segment-rules'),

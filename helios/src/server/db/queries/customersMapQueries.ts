@@ -10,6 +10,7 @@
 // follow-on slice.
 
 import type { Queryable } from '../pool.js'
+import { membershipSegmentVisibleSql } from './sweedCustomerSegmentsQueries.js'
 import type {
   AgeBand,
   CoordSourceFilter,
@@ -268,7 +269,7 @@ export async function listCustomersMapPoints(
       (p) =>
         'exists (select 1 from visitor_scan_links msl' +
         ' join sweed_customer_segments scs on scs.sweed_customer_id = msl.sweed_customer_id' +
-        ` where msl.scan_id = vs.id and scs.enabled is distinct from false and scs.segment_id = any(${p}::bigint[]))`,
+        ` where msl.scan_id = vs.id and ${membershipSegmentVisibleSql('scs')} and scs.segment_id = any(${p}::bigint[]))`,
       segmentIds,
     )
   }
@@ -305,7 +306,7 @@ export async function listCustomersMapPoints(
              from visitor_scan_links msl
              join sweed_customer_segments scs on scs.sweed_customer_id = msl.sweed_customer_id
             where msl.scan_id = b.scan_id
-              and scs.enabled is distinct from false
+              and ${membershipSegmentVisibleSql('scs')}
               and scs.segment_id = any(${segMatchPlaceholder}::bigint[])
          ) seg on true`
       : ''
@@ -681,7 +682,7 @@ async function countUnknown(
       (p) =>
         'exists (select 1 from visitor_scan_links msl' +
         ' join sweed_customer_segments scs on scs.sweed_customer_id = msl.sweed_customer_id' +
-        ` where msl.scan_id = vs.id and scs.enabled is distinct from false and scs.segment_id = any(${p}::bigint[]))`,
+        ` where msl.scan_id = vs.id and ${membershipSegmentVisibleSql('scs')} and scs.segment_id = any(${p}::bigint[]))`,
       segIds,
     )
   }

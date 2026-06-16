@@ -20,6 +20,9 @@ import {
   HELIOS_PENDING_PURCHASE_SITE_DEALERS,
   type CustomerVisitorAddableSegment,
   type CustomerVisitorSegmentMembership,
+  type MarketingSegmentDirectoryResponse,
+  type MarketingSegmentDirectoryRow,
+  type SegmentRetirementResponse,
   type SweedSegmentScopeLevel,
   type SweedSegmentType,
 } from '../../../shared/contracts/index.js'
@@ -32,6 +35,49 @@ const SWEED_PRIME_SEGMENT_URL_BASE = 'https://prime.sweedpos.com/marketing/segme
 
 export function sweedPrimeSegmentUrl(segmentId: string | number): string {
   return `${SWEED_PRIME_SEGMENT_URL_BASE}/${segmentId}`
+}
+
+// =====================================================================
+// Retirement visibility predicates (migration 089)
+// =====================================================================
+//
+// A segment is HIDDEN from every Helios surface except the segment
+// directory/details config pages when it is "retired": disabled in Sweed
+// (sweed_marketing_segments.enabled = false) OR explicitly retired by the
+// operator (a row in sweed_marketing_segment_retirement). These helpers
+// emit the SQL fragment that keeps the rule identical across every
+// listing query. Both anti-joins ride a primary key (segment_id), so on
+// the small catalog and the per-segment-indexed membership table they add
+// negligible cost.
+
+/**
+ * Visibility predicate for a `sweed_marketing_segments` row (alias given).
+ * True iff the catalog row is enabled in Sweed AND not explicitly retired.
+ */
+export function catalogSegmentVisibleSql(alias: string): string {
+  return `coalesce(${alias}.enabled, true) = true
+      and not exists (
+        select 1 from sweed_marketing_segment_retirement ret
+         where ret.segment_id = ${alias}.segment_id
+      )`
+}
+
+/**
+ * Visibility predicate for a `sweed_customer_segments` membership row
+ * (alias given). Uses the row's own enabled flag AND the authoritative
+ * catalog enabled flag (membership rows can lag the catalog), AND the
+ * explicit retirement set.
+ */
+export function membershipSegmentVisibleSql(alias: string): string {
+  return `${alias}.enabled is distinct from false
+      and not exists (
+        select 1 from sweed_marketing_segments cat
+         where cat.segment_id = ${alias}.segment_id and cat.enabled = false
+      )
+      and not exists (
+        select 1 from sweed_marketing_segment_retirement ret
+         where ret.segment_id = ${alias}.segment_id
+      )`
 }
 
 function mapSegmentType(typeId: number | null): SweedSegmentType {
@@ -371,12 +417,16 @@ export async function readCustomerSegments(
   db: Queryable,
   sweedCustomerId: number,
 ): Promise<CustomerVisitorSegmentMembership[]> {
+  // Retired segments (disabled in Sweed or explicitly retired in Helios)
+  // are hidden here: the customer details page is not the segment config
+  // page, so it shows only the customer's ACTIVE Helios segments.
   const res = await db.query<MembershipRow>(
-    `select segment_id::text, segment_name, segment_description, segment_type_id,
-            scope_dealer_id, scope_dealer_name, enabled, date_on_enter
-       from sweed_customer_segments
-      where sweed_customer_id = $1
-      order by segment_name asc`,
+    `select s.segment_id::text, s.segment_name, s.segment_description, s.segment_type_id,
+            s.scope_dealer_id, s.scope_dealer_name, s.enabled, s.date_on_enter
+       from sweed_customer_segments s
+      where s.sweed_customer_id = $1
+        and ${membershipSegmentVisibleSql('s')}
+      order by s.segment_name asc`,
     [sweedCustomerId],
   )
   return res.rows.map((r) => {
@@ -468,7 +518,7 @@ export async function readMarketingSegmentChipsForCustomers(
          )                                                  as rn
        from sweed_customer_segments s
        where s.sweed_customer_id = any($1::bigint[])
-         and s.enabled is distinct from false
+         and ${membershipSegmentVisibleSql('s')}
      )
      select sweed_customer_id, segment_id, scope_dealer_id, segment_name,
             segment_type_id, scope_dealer_name, total_count
@@ -532,20 +582,26 @@ export async function readMapSegmentOptions(db: Queryable): Promise<MapSegmentOp
     target_store_names: string[] | null
     member_count: string | number
   }>(
-    `select c.segment_id::text       as segment_id,
+    // `member_counts` is MATERIALIZED on purpose: the catalog visibility
+    // predicate's anti-join under-estimates the catalog row count, which
+    // would otherwise flip this into a nested loop that recomputes the
+    // 147k-row aggregate once per segment. Materializing keeps it a single
+    // pass. (Same trap fixed in getCrmSegmentList.)
+    `with member_counts as materialized (
+       select segment_id, count(*)::bigint as member_count
+         from sweed_customer_segments
+        where enabled is distinct from false
+        group by segment_id
+     )
+     select c.segment_id::text       as segment_id,
             c.segment_name           as segment_name,
             c.segment_type_id        as segment_type_id,
             c.scope_dealer_id        as scope_dealer_id,
             c.target_store_names     as target_store_names,
             coalesce(m.member_count, 0) as member_count
        from sweed_marketing_segments c
-       left join (
-         select segment_id, count(*)::bigint as member_count
-           from sweed_customer_segments
-          where enabled is distinct from false
-          group by segment_id
-       ) m on m.segment_id = c.segment_id
-      where coalesce(c.enabled, true) = true
+       left join member_counts m on m.segment_id = c.segment_id
+      where ${catalogSegmentVisibleSql('c')}
       order by member_count desc, c.segment_name asc`,
   )
   return res.rows.map((r) => {
@@ -582,7 +638,7 @@ export async function readAddableStaticSegments(
     `select c.segment_id::text, c.segment_name, c.enabled, c.scope_dealer_id, c.target_store_names
        from sweed_marketing_segments c
       where c.segment_type_id = 1
-        and coalesce(c.enabled, true) = true
+        and ${catalogSegmentVisibleSql('c')}
         and not exists (
           select 1 from sweed_customer_segments m
            where m.sweed_customer_id = $1
@@ -782,13 +838,25 @@ export interface MarketingCatalogSegment {
 
 /**
  * Read the cached marketing-segment catalog rows for the bulk
- * membership refresh. Enabled segments only by default (disabled
- * segments are not worth a Sweed round-trip).
+ * membership refresh. Enabled, non-retired segments only by default
+ * (disabled or operator-retired segments are not worth a Sweed
+ * round-trip).
  */
 export async function readMarketingCatalogSegments(
   db: Queryable,
-  opts: { includeDisabled?: boolean } = {},
+  opts: { includeDisabled?: boolean; includeRetired?: boolean } = {},
 ): Promise<MarketingCatalogSegment[]> {
+  const conds: string[] = []
+  if (!opts.includeDisabled) conds.push('coalesce(enabled, true) = true')
+  if (!opts.includeRetired) {
+    conds.push(
+      `not exists (
+         select 1 from sweed_marketing_segment_retirement ret
+          where ret.segment_id = sweed_marketing_segments.segment_id
+       )`,
+    )
+  }
+  const whereSql = conds.length > 0 ? `where ${conds.join(' and ')}` : ''
   const res = await db.query<{
     segment_id: string
     segment_name: string
@@ -800,7 +868,7 @@ export async function readMarketingCatalogSegments(
     `select segment_id, segment_name, segment_type_id, segment_type_name,
             scope_dealer_id, enabled
        from sweed_marketing_segments
-      ${opts.includeDisabled ? '' : 'where coalesce(enabled, true) = true'}
+      ${whereSql}
       order by segment_name asc`,
   )
   return res.rows.map((r) => ({
@@ -812,4 +880,164 @@ export async function readMarketingCatalogSegments(
     scopeDealerId: r.scope_dealer_id === null ? null : Number(r.scope_dealer_id),
     enabled: r.enabled,
   }))
+}
+
+// =====================================================================
+// Segment directory + retirement (migration 089)
+// =====================================================================
+
+interface DirectoryRow {
+  segment_id: string | number
+  segment_name: string | null
+  segment_type_id: number | null
+  enabled: boolean | null
+  total_customers: number | null
+  scope_dealer_id: string | number | null
+  target_store_names: string[] | null
+  cached_member_count: number
+  retired_at: Date | null
+  retirement_note: string | null
+  retired_by: string | null
+  explicitly_retired: boolean
+  disabled_implied_retired: boolean
+}
+
+/**
+ * Full segment directory for /config/marketing/segments: every cached
+ * catalog segment with its cached member count and retirement state.
+ * Cache-only; never calls Sweed.
+ *
+ * DB-cost (docs/canon/rules/DB_PERFORMANCE.md): the catalog is ~tens of
+ * rows. The member-count CTE is one grouped scan over
+ * sweed_customer_segments on the (segment_id, sweed_customer_id) index
+ * (migration 080) — the same shape getCrmSegmentList already runs. The
+ * two left joins (retirement, users) ride primary keys. Active segments
+ * are ordered first so the operator sees the live set without scrolling.
+ */
+export async function readMarketingSegmentsDirectory(
+  db: Queryable,
+): Promise<MarketingSegmentDirectoryResponse> {
+  const res = await db.query<DirectoryRow>(
+    `with member_counts as materialized (
+       select segment_id, count(distinct sweed_customer_id)::int as cnt
+         from sweed_customer_segments
+        where enabled is distinct from false
+        group by segment_id
+     )
+     select c.segment_id,
+            c.segment_name,
+            c.segment_type_id,
+            c.enabled,
+            c.total_customers,
+            c.scope_dealer_id,
+            c.target_store_names,
+            coalesce(mc.cnt, 0) as cached_member_count,
+            r.retired_at,
+            r.note as retirement_note,
+            coalesce(nullif(u.name, ''), u.email) as retired_by,
+            (r.segment_id is not null) as explicitly_retired,
+            (c.enabled is false) as disabled_implied_retired
+       from sweed_marketing_segments c
+       left join member_counts mc on mc.segment_id = c.segment_id
+       left join sweed_marketing_segment_retirement r on r.segment_id = c.segment_id
+       left join users u on u.id = r.retired_by_user_id
+      order by ((c.enabled is false) or r.segment_id is not null) asc,
+               coalesce(mc.cnt, 0) desc,
+               lower(coalesce(c.segment_name, '')) asc`,
+  )
+
+  const hwRes = await db.query<{ refreshed_at: Date | null }>(
+    `select refreshed_at from sweed_marketing_segments_refresh where id = 1`,
+  )
+
+  const segments: MarketingSegmentDirectoryRow[] = res.rows.map((r) => {
+    const scopeDealerId = r.scope_dealer_id === null ? null : Number(r.scope_dealer_id)
+    const { scopeLevel, scopeLabel } = catalogScope(scopeDealerId, r.target_store_names ?? [])
+    const explicitlyRetired = r.explicitly_retired === true
+    const disabledImpliedRetired = r.disabled_implied_retired === true
+    return {
+      segmentId: Number(r.segment_id),
+      name: (r.segment_name ?? '').trim() || `Segment #${Number(r.segment_id)}`,
+      type: mapSegmentType(r.segment_type_id),
+      enabled: r.enabled,
+      scopeLevel,
+      scopeLabel,
+      cachedMemberCount: r.cached_member_count,
+      sweedTotalCustomers: r.total_customers,
+      isRetired: explicitlyRetired || disabledImpliedRetired,
+      explicitlyRetired,
+      disabledImpliedRetired,
+      retiredAt: r.retired_at ? r.retired_at.toISOString() : null,
+      retiredBy: r.retired_by,
+      retirementNote: r.retirement_note,
+    }
+  })
+
+  return {
+    segments,
+    catalogRefreshedAt: hwRes.rows[0]?.refreshed_at
+      ? hwRes.rows[0].refreshed_at.toISOString()
+      : null,
+  }
+}
+
+/**
+ * Resolve a single segment's retirement state (catalog disabled flag +
+ * explicit retirement row), used by the retire/unretire endpoints to
+ * return the post-mutation state. Returns a row even when the segment is
+ * not in the catalog (synthetic key), so a not-yet-cached segment can
+ * still be retired/unretired.
+ */
+export async function readSegmentRetirementState(
+  db: Queryable,
+  segmentId: number,
+): Promise<SegmentRetirementResponse> {
+  const res = await db.query<{
+    disabled_implied_retired: boolean
+    explicitly_retired: boolean
+    retired_at: Date | null
+    retirement_note: string | null
+    retired_by: string | null
+  }>(
+    `select (c.enabled is false) as disabled_implied_retired,
+            (r.segment_id is not null) as explicitly_retired,
+            r.retired_at,
+            r.note as retirement_note,
+            coalesce(nullif(u.name, ''), u.email) as retired_by
+       from (select $1::bigint as segment_id) k
+       left join sweed_marketing_segments c on c.segment_id = k.segment_id
+       left join sweed_marketing_segment_retirement r on r.segment_id = k.segment_id
+       left join users u on u.id = r.retired_by_user_id`,
+    [segmentId],
+  )
+  const row = res.rows[0]
+  const explicitlyRetired = row?.explicitly_retired === true
+  const disabledImpliedRetired = row?.disabled_implied_retired === true
+  return {
+    segmentId,
+    isRetired: explicitlyRetired || disabledImpliedRetired,
+    explicitlyRetired,
+    disabledImpliedRetired,
+    retiredAt: row?.retired_at ? row.retired_at.toISOString() : null,
+    retiredBy: row?.retired_by ?? null,
+    retirementNote: row?.retirement_note ?? null,
+  }
+}
+
+/** Retire a segment in Helios (idempotent). */
+export async function retireSegment(
+  db: Queryable,
+  args: { segmentId: number; userId: number; note?: string | null },
+): Promise<void> {
+  await db.query(
+    `insert into sweed_marketing_segment_retirement (segment_id, retired_by_user_id, note)
+     values ($1, $2, $3)
+     on conflict (segment_id) do nothing`,
+    [args.segmentId, args.userId, args.note ?? null],
+  )
+}
+
+/** Un-retire a segment in Helios (idempotent; removes the explicit row only). */
+export async function unretireSegment(db: Queryable, segmentId: number): Promise<void> {
+  await db.query(`delete from sweed_marketing_segment_retirement where segment_id = $1`, [segmentId])
 }

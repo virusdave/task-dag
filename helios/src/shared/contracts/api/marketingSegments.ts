@@ -41,6 +41,16 @@ export const SegmentIdentitySchema = z.object({
   // page is rendered from membership/geo data alone (cold catalog).
   inCatalog: z.boolean(),
   sweedPrimeUrl: z.string().url(),
+  // Helios-local retirement. A retired segment is hidden from every Helios
+  // surface EXCEPT the segment directory/details config pages. A segment is
+  // retired iff it is disabled in Sweed (disabledImpliedRetired) OR the
+  // operator explicitly retired it in Helios (explicitlyRetired).
+  isRetired: z.boolean(),
+  explicitlyRetired: z.boolean(),
+  disabledImpliedRetired: z.boolean(),
+  retiredAt: z.iso.datetime().nullable(),
+  retiredBy: z.string().nullable(),
+  retirementNote: z.string().nullable(),
 })
 
 export const SegmentMembershipSummarySchema = z.object({
@@ -129,3 +139,50 @@ export const SegmentMembershipRefreshAllResponseSchema = z.object({
 export type SegmentMembershipRefreshAllResponse = z.infer<
   typeof SegmentMembershipRefreshAllResponseSchema
 >
+
+// ---------------------------------------------------------------------
+// Segment directory (/config/marketing/segments) — lists every cached
+// segment so the operator can open a detail page or retire/unretire a
+// segment. Cache-only (sweed_marketing_segments + sweed_customer_segments
+// + sweed_marketing_segment_retirement); never calls Sweed.
+// ---------------------------------------------------------------------
+
+export const MarketingSegmentDirectoryRowSchema = z.object({
+  segmentId: z.number().int().positive(),
+  name: z.string(),
+  type: SegmentTypeSchema,
+  enabled: z.boolean().nullable(),
+  scopeLevel: SegmentScopeLevelSchema,
+  scopeLabel: z.string(),
+  cachedMemberCount: z.number().int().nonnegative(),
+  sweedTotalCustomers: z.number().int().nonnegative().nullable(),
+  // Retirement state (see SegmentIdentitySchema).
+  isRetired: z.boolean(),
+  explicitlyRetired: z.boolean(),
+  disabledImpliedRetired: z.boolean(),
+  retiredAt: z.iso.datetime().nullable(),
+  retiredBy: z.string().nullable(),
+  retirementNote: z.string().nullable(),
+})
+export type MarketingSegmentDirectoryRow = z.infer<typeof MarketingSegmentDirectoryRowSchema>
+
+export const MarketingSegmentDirectoryResponseSchema = z.object({
+  segments: z.array(MarketingSegmentDirectoryRowSchema),
+  catalogRefreshedAt: z.iso.datetime().nullable(),
+})
+export type MarketingSegmentDirectoryResponse = z.infer<
+  typeof MarketingSegmentDirectoryResponseSchema
+>
+
+// Retire / unretire a segment in Helios. Idempotent; returns the
+// resulting retirement state so the UI can update without a reload.
+export const SegmentRetirementResponseSchema = z.object({
+  segmentId: z.number().int().positive(),
+  isRetired: z.boolean(),
+  explicitlyRetired: z.boolean(),
+  disabledImpliedRetired: z.boolean(),
+  retiredAt: z.iso.datetime().nullable(),
+  retiredBy: z.string().nullable(),
+  retirementNote: z.string().nullable(),
+})
+export type SegmentRetirementResponse = z.infer<typeof SegmentRetirementResponseSchema>

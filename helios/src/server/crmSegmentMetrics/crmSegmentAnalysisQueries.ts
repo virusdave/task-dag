@@ -165,7 +165,9 @@ export async function getCrmSegmentAnalysis(
   args: CrmSegmentAnalysisArgs,
 ): Promise<CrmSegmentAnalysisResponse | null> {
   const details = await getSegmentDetails(db, args.segmentId)
-  if (details === null) return null
+  // Retired segments are hidden everywhere except the segment config
+  // pages; treat a direct (e.g. bookmarked) analysis request as not found.
+  if (details === null || details.segment.isRetired) return null
 
   const dealerIds = resolveDealerIds(args.sites)
   const fromIso = args.from.toISOString()
