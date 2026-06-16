@@ -34,23 +34,36 @@ export interface SweedSuggestedProduct {
 }
 
 /**
+ * Minimal structural type for the Sweed RPC client. We only depend on
+ * its generic `call(method, params)` method, which resolves to an
+ * envelope whose `result` payload shape varies per RPC — callers pass
+ * the expected payload type explicitly.
+ */
+export interface SweedClient {
+  call<T = unknown>(
+    method: string,
+    params: Record<string, unknown>
+  ): Promise<{ result?: T }>
+}
+
+/**
  * Fetch all pending purchase orders for a site
  */
 export async function fetchPendingOrdersForSite(
-  sweedClient: unknown, // SweedClient instance
+  sweedClient: SweedClient,
   siteDealer: HeliosPendingPurchaseSiteDealer
 ): Promise<SweedOrder[]> {
   // Set dealer context
-  await (sweedClient as any).call('store.auth.dealer.set', { dealerId: siteDealer.dealerId })
+  await sweedClient.call('store.auth.dealer.set', { dealerId: siteDealer.dealerId })
   
   // Verify dealer context
-  const dealerCheck = await (sweedClient as any).call('store.auth.dealer.get', {})
+  const dealerCheck = await sweedClient.call<{ currentDealerId?: number }>('store.auth.dealer.get', {})
   if (dealerCheck.result?.currentDealerId !== siteDealer.dealerId) {
     throw new Error(`Failed to set dealer context to ${siteDealer.dealerId}`)
   }
   
   // Fetch pending orders (orderStatusId = 2)
-  const ordersResult = await (sweedClient as any).call('store.purchase.order.list', {
+  const ordersResult = await sweedClient.call<{ data?: SweedOrder[] }>('store.purchase.order.list', {
     orderStatusId: 2,
     fromDate: '2026-01-01', // Adjust based on needs
     toDate: '2026-12-31',
@@ -63,11 +76,11 @@ export async function fetchPendingOrdersForSite(
   // Fetch details for each order
   const detailedOrders: SweedOrder[] = []
   for (const order of orders) {
-    const orderDetail = await (sweedClient as any).call('store.purchase.order.get', { id: order.id })
-    const suggestions = await (sweedClient as any).call('store.distributor.product.suggestion', { orderId: order.id })
+    const orderDetail = await sweedClient.call<SweedOrder>('store.purchase.order.get', { id: order.id })
+    const suggestions = await sweedClient.call<SweedSuggestedProduct[]>('store.distributor.product.suggestion', { orderId: order.id })
     
     const orderWithDetails = {
-      ...orderDetail.result,
+      ...(orderDetail.result ?? order),
       suggestions: suggestions.result || [],
     }
     

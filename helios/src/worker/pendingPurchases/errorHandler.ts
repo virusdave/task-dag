@@ -143,7 +143,12 @@ function sleep(ms: number): Promise<void> {
  * Classify error type
  */
 export function classifyError(error: unknown, context: string): Error {
-  const err = error as any
+  const err = error as {
+    code?: string
+    statusCode?: number
+    message?: string
+    name?: string
+  }
   
   // Network errors - retryable
   if (err.code === 'ECONNREFUSED' || err.code === 'ETIMEDOUT' || err.code === 'ENOTFOUND') {
