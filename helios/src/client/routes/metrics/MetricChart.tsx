@@ -379,6 +379,10 @@ export function MetricChart({
     metric.chartType !== 'scatter' && metric.supports?.ghostRiders === true
   const [overlayMode, setOverlayMode] = useState<'off' | 'ghost'>('off')
   const ghostActive = ghostEligible && overlayMode === 'ghost'
+  // The wheel-zoom toggle only governs the time-series `ChartSvg`. Scatter
+  // has its own in-chart pan/zoom toolbar and Ghost Riders has no zoom, so
+  // the header toggle would be inert there — don't render it.
+  const wheelZoomApplicable = metric.chartType !== 'scatter' && !ghostActive
   const [ghostPeriod, setGhostPeriod] = useState<MetricGhostPeriod>(() =>
     effectiveAgg === 'hour' ? 'day' : 'week',
   )
@@ -388,6 +392,11 @@ export function MetricChart({
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [annotateMode, setAnnotateMode] = useState(false)
+  // Plain-wheel zoom is OFF by default: with it on, scrolling the page
+  // accidentally zooms any chart the cursor happens to stop over. The
+  // operator opts in via the toolbar toggle. Ctrl/⌘+wheel and pinch
+  // still zoom for power users regardless of this flag.
+  const [zoomEnabled, setZoomEnabled] = useState(false)
 
   // Per-dimension CSV catalog-filter params. We forward each
   // dimension ONLY when the metric declares it in
@@ -649,6 +658,25 @@ export function MetricChart({
             >
               {annotateMode ? '✏️ annotating' : '✏️ annotate'}
             </button>
+            {wheelZoomApplicable ? (
+              <button
+                type="button"
+                className={zoomEnabled ? 'ghost-button is-active' : 'ghost-button'}
+                onClick={(e) => {
+                  e.stopPropagation()
+                  setZoomEnabled((v) => !v)
+                }}
+                aria-pressed={zoomEnabled}
+                aria-label={zoomEnabled ? 'Turn off wheel zoom' : 'Turn on wheel zoom'}
+                title={
+                  zoomEnabled
+                    ? 'Wheel zoom on — scrolling over the chart zooms it. Toggle off to scroll the page past it.'
+                    : 'Wheel zoom off — scroll the page freely. Toggle on to zoom with the wheel (Ctrl/⌘+wheel and pinch always zoom).'
+                }
+              >
+                {zoomEnabled ? '✓ wheel zoom' : '🔍 wheel zoom'}
+              </button>
+            ) : null}
             <button
               type="button"
               className="ghost-button"
@@ -697,6 +725,7 @@ export function MetricChart({
           metricId={metric.id}
           onAnnotationsChanged={onAnnotationsChanged}
           interactive={variant === 'expanded'}
+          zoomEnabled={zoomEnabled}
           agg={agg}
           stackMode={stackMode}
           yBaseline={yBaseline}
@@ -719,6 +748,9 @@ interface ChartSvgProps {
   readonly onAnnotationsChanged: () => void
   /** Card variant disables pan/zoom/annotate to keep the dashboard scannable. */
   readonly interactive: boolean
+  /** When false (default), plain wheel scrolls the page instead of zooming
+   *  the chart; Ctrl/⌘+wheel and pinch still zoom. Operator toggles it on. */
+  readonly zoomEnabled: boolean
   /** Effective aggregation (drives X-axis bucket-aligned tick placement). */
   readonly agg: MetricAggregation
   /** How to stack the series. Forced to 'none' for single-series charts. */
@@ -758,6 +790,7 @@ function ChartSvg(props: ChartSvgProps) {
     metricId,
     onAnnotationsChanged,
     interactive,
+    zoomEnabled,
     agg,
     stackMode,
     yBaseline,
@@ -1614,14 +1647,26 @@ function ChartSvg(props: ChartSvgProps) {
     [drag],
   )
 
-  const onWheel = useCallback((e: React.WheelEvent<SVGSVGElement>) => {
-    e.stopPropagation()
-  }, [])
+  const onWheel = useCallback(
+    (e: React.WheelEvent<SVGSVGElement>) => {
+      // Only swallow the wheel event (keeping it from bubbling to the
+      // page) when this gesture actually zooms the chart. Otherwise let
+      // it propagate so the page scrolls normally.
+      if (zoomEnabled || e.ctrlKey || e.metaKey) e.stopPropagation()
+    },
+    [zoomEnabled],
+  )
 
   useEffect(() => {
     const svg = svgRef.current
     if (!svg || !interactive) return
     function handler(this: SVGSVGElement, ev: WheelEvent) {
+      // Plain wheel only zooms when the operator has opted in via the
+      // toolbar toggle. Ctrl/⌘+wheel always zooms (power-user gesture).
+      // When neither applies, do nothing — don't preventDefault — so the
+      // wheel scrolls the page instead of accidentally zooming a chart
+      // the cursor merely paused over.
+      if (!zoomEnabled && !ev.ctrlKey && !ev.metaKey) return
       ev.preventDefault()
       const t = clientXToTime(ev.clientX)
       if (t === null) return
@@ -1633,7 +1678,7 @@ function ChartSvg(props: ChartSvgProps) {
     }
     svg.addEventListener('wheel', handler, { passive: false })
     return () => svg.removeEventListener('wheel', handler)
-  }, [clientXToTime, interactive, setWindow, window.fromMs, window.toMs])
+  }, [clientXToTime, interactive, zoomEnabled, setWindow, window.fromMs, window.toMs])
 
   const handleCreate = useCallback(
     async (payload: { title: string; body: string; tag: string | null; scope: string }) => {
@@ -1740,7 +1785,11 @@ function ChartSvg(props: ChartSvgProps) {
           }
         }}
         style={{
-          touchAction: interactive ? 'none' : 'auto',
+          // 'pan-y' lets the browser keep handling vertical page scroll
+          // (so a touch drag down the page isn't trapped by the chart)
+          // while horizontal drags still pan the chart. Only when wheel
+          // zoom is enabled do we capture all gestures with 'none'.
+          touchAction: interactive ? (zoomEnabled ? 'none' : 'pan-y') : 'auto',
           cursor: !interactive ? 'pointer' : annotateMode ? 'crosshair' : drag?.kind === 'pan' ? 'grabbing' : 'crosshair',
         }}
       >
