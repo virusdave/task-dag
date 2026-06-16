@@ -35,22 +35,22 @@ on:
 jobs:
   issue-to-task:
     if: ${{ github.event_name == 'issues' }}
-    uses: virusdave/task-dag/.github/workflows/issue-to-task.yml@main
+    uses: virusdave/task-dag/.github/workflows/issue-to-task.yml@master
     permissions: { contents: write, issues: write }
     secrets: { token: ${{ secrets.GITHUB_TOKEN }} }
   comment-sync:
     if: ${{ github.event_name == 'issue_comment' }}
-    uses: virusdave/task-dag/.github/workflows/sync-comment-to-task.yml@main
+    uses: virusdave/task-dag/.github/workflows/sync-comment-to-task.yml@master
     permissions: { contents: write, issues: write }
     secrets: { token: ${{ secrets.GITHUB_TOKEN }} }
   close-completed:
     if: ${{ github.event_name == 'push' }}
-    uses: virusdave/task-dag/.github/workflows/close-completed-issues.yml@main
+    uses: virusdave/task-dag/.github/workflows/close-completed-issues.yml@master
     permissions: { contents: read, issues: write }
     secrets: { token: ${{ secrets.GITHUB_TOKEN }} }
   completion-aggregate:
     if: ${{ github.event_name == 'push' }}
-    uses: virusdave/task-dag/.github/workflows/aggregate-cross-repo-completions.yml@main
+    uses: virusdave/task-dag/.github/workflows/aggregate-cross-repo-completions.yml@master
     with:
       base_sha: ${{ github.event.before }}
       head_sha: ${{ github.sha }}
@@ -59,7 +59,7 @@ jobs:
       app_private_key: ${{ secrets.TASK_DAG_APP_PRIVATE_KEY }}
 ```
 
-Pin `@main` while stabilising; cut a moving `task-dag-v1` tag once the
+Pin `@master` while stabilising; cut a moving `task-dag-v1` tag once the
 fixture smoke test is green and pin peers to it so future patches need no
 peer edits. The workflow `ref` input (script fetch) defaults to the same
 branch the workflow is pinned to — keep them aligned.
@@ -102,7 +102,7 @@ branch the workflow is pinned to — keep them aligned.
 
    > **Order:** promote **task-dag first** (`scripts/promote-github2.sh`,
    > default) so the reusable `issue-to-task` / `close-completed-issues`
-   > exist at `@main` before any peer caller references them.
+   > exist at `@master` before any peer caller references them.
 4. **Retire `shared-workflows`' task-dag workflows** — leave thin
    re-export wrappers for one release window, then delete once every
    caller points here and the smoke test is green. Drop per-repo

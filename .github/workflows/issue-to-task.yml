@@ -11,7 +11,7 @@ on:
       ref:
         description: 'task-dag ref to fetch the helper script from (branch, tag, or SHA)'
         type: string
-        default: main
+        default: master
     secrets:
       token:
         description: 'GitHub token for API + git access (needs contents:write, issues:write)'

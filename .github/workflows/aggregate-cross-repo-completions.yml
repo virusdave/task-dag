@@ -20,7 +20,7 @@ on:
         description: 'task-dag ref to fetch helper scripts from (branch, tag, or SHA)'
         required: false
         type: string
-        default: main
+        default: master
     secrets:
       app_id:
         description: |

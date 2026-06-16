@@ -14,7 +14,7 @@ on:
       ref:
         description: 'task-dag ref to fetch helper scripts from (branch, tag, or SHA)'
         type: string
-        default: main
+        default: master
     secrets:
       token:
         description: 'GitHub token for API access'
