@@ -14,12 +14,14 @@
 #
 # WHAT IT DOES, per repo (default: virusdave/task-dag):
 #   1. clone it (via your `gh` auth);
-#   2. `git mv` every file under `.github2/` to the matching `.github/`
+#   2. if `.github2/REMOVE.txt` exists, `git rm --ignore-unmatch` each path
+#      it lists (one repo-relative path per line; `#` comments / blanks
+#      ignored) — for retiring workflows the caller supersedes, AND so an
+#      in-place update can list its own target here and have the staged
+#      copy replace it (removals run BEFORE moves);
+#   3. `git mv` every file under `.github2/` to the matching `.github/`
 #      path (e.g. `.github2/workflows/x.yml` -> `.github/workflows/x.yml`),
 #      skipping the `.github2/README.md` note and `.github2/REMOVE.txt`;
-#   3. if `.github2/REMOVE.txt` exists, `git rm --ignore-unmatch` each path
-#      it lists (one repo-relative path per line; `#` comments / blanks
-#      ignored) — for retiring workflows the caller supersedes;
 #   4. remove the now-empty `.github2/`;
 #   5. commit and push to the default branch.
 #   Repos with no `.github2/` are skipped, so it is safe to re-run.
@@ -65,18 +67,8 @@ for slug in "${repos[@]}"; do
       exit 0
     fi
 
-    moved=0
-    while IFS= read -r -d '' f; do
-      case "${f}" in
-        .github2/README.md|.github2/REMOVE.txt) continue ;;   # control files, not promoted
-      esac
-      dest=".github/${f#.github2/}"
-      mkdir -p "$(dirname "${dest}")"
-      git mv "${f}" "${dest}"
-      echo "  promote: ${f} -> ${dest}"
-      moved=$((moved + 1))
-    done < <(find .github2 -type f -print0)
-
+    # Removals run FIRST so a staged file can replace its own target
+    # (plain `git mv` refuses to overwrite an existing destination).
     removed=0
     if [[ -f .github2/REMOVE.txt ]]; then
       while IFS= read -r line; do
@@ -89,6 +81,18 @@ for slug in "${repos[@]}"; do
         fi
       done < .github2/REMOVE.txt
     fi
+
+    moved=0
+    while IFS= read -r -d '' f; do
+      case "${f}" in
+        .github2/README.md|.github2/REMOVE.txt) continue ;;   # control files, not promoted
+      esac
+      dest=".github/${f#.github2/}"
+      mkdir -p "$(dirname "${dest}")"
+      git mv "${f}" "${dest}"
+      echo "  promote: ${f} -> ${dest}"
+      moved=$((moved + 1))
+    done < <(find .github2 -type f -print0)
 
     rm -rf .github2
     git add -A
