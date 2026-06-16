@@ -682,7 +682,23 @@ export async function listVisitorScans(
     'l.dealer_id',
     'l.sweed_customer_id',
   )
+  // Pick the page of scan ids FIRST, sorting only narrow rows
+  // (id + sort key), then join the wide columns (incl. raw_envelope)
+  // and the per-row laterals for just those <=limit+1 ids. Sorting the
+  // full visitor_scans set while carrying raw_envelope previously forced
+  // a multi-hundred-MB external-merge sort to disk on every call (the
+  // single largest source of temp-file I/O on the database); deferring
+  // the wide payload keeps the sort a tiny in-memory top-N. The filters
+  // are all on vs columns, so applying them inside the page CTE selects
+  // exactly the same rows the outer query used to.
   const sql = `
+    with paged_scans as (
+      select vs.id, coalesce(vs.scanned_at, vs.ingested_at) as sort_at
+      from visitor_scans vs
+      ${whereSql}
+      order by coalesce(vs.scanned_at, vs.ingested_at) desc, vs.id desc
+      limit ${limitPlaceholder}
+    )
     select
       vs.id, vs.ingested_at, vs.ingest_source, vs.site_slug, vs.provider,
       vs.scanned_at, vs.created_at, vs.webhook_type,
@@ -717,7 +733,8 @@ export async function listVisitorScans(
       sweed_summary.lifetime_spend           as sweed_lifetime_spend,
       ${fav.selectColumns}
 
-    from visitor_scans vs
+    from paged_scans ps
+    join visitor_scans vs on vs.id = ps.id
 
     left join visitor_scan_links l on l.scan_id = vs.id
 
@@ -780,9 +797,9 @@ export async function listVisitorScans(
 
     ${fav.ctes}
 
-    ${whereSql}
+    -- Filtering + limit happen in paged_scans above; here we only need to
+    -- restore the page's order after the 1:1 enrichment join.
     order by coalesce(vs.scanned_at, vs.ingested_at) desc, vs.id desc
-    limit ${limitPlaceholder}
   `
 
   const result = await db.query<VisitorScanRow>(sql, params)
