@@ -106,6 +106,28 @@ async function indexExists(db: Queryable, indexName: string): Promise<boolean> {
   return result.rows[0]?.exists === true
 }
 
+// Like indexExists, but only true for an index that is VALID and READY.
+// A cancelled/failed `CREATE INDEX CONCURRENTLY` leaves behind an
+// invalid index that still shows up in pg_indexes; treating that as
+// "applied" would be wrong, so sentinels for concurrently-built indexes
+// must use this stricter check.
+async function validIndexExists(db: Queryable, indexName: string): Promise<boolean> {
+  const result = await db.query<{ exists: boolean }>(
+    `select exists(
+       select 1
+         from pg_class c
+         join pg_namespace n on n.oid = c.relnamespace
+         join pg_index i on i.indexrelid = c.oid
+        where n.nspname = 'public'
+          and c.relname = $1
+          and i.indisvalid
+          and i.indisready
+     ) as exists`,
+    [indexName],
+  )
+  return result.rows[0]?.exists === true
+}
+
 async function hypertableCompressionEnabled(
   db: Queryable,
   hypertableName: string,
@@ -1180,6 +1202,28 @@ const SENTINELS: MigrationSentinel[] = [
         columnExists(db, 'sweed_marketing_segment_retirement', 'retired_at'),
       ])
       return hasTable && hasRetiredAt
+    },
+  },
+  {
+    migrationId: '090_job_queue_scope_lookup_reindex',
+    label:
+      'Re-key the job_queue scope-lookup index: create the immutable-keyed ' +
+      'job_queue_scope_created_at_idx (scope_entity_type, scope_entity_id, ' +
+      'created_at desc, id desc) that serves the scheduling-run debug query ' +
+      'as a pure seek, and drop the mis-keyed, write-amplifying original ' +
+      'job_queue_scope_status_run_at_idx (led with module_code, included ' +
+      'mutable status/run_at). End state: replacement present, original gone.',
+    // Applied iff the re-keyed index exists, is VALID/READY, AND the old
+    // one is gone. validIndexExists guards against a cancelled CREATE
+    // INDEX CONCURRENTLY leaving an invalid same-name index that a
+    // retry would then skip; a partial run (new created, old not yet
+    // dropped) is also not reported done.
+    check: async (db) => {
+      const [hasNew, hasOld] = await Promise.all([
+        validIndexExists(db, 'job_queue_scope_created_at_idx'),
+        indexExists(db, 'job_queue_scope_status_run_at_idx'),
+      ])
+      return hasNew && !hasOld
     },
   },
 ]
