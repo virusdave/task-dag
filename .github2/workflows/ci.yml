@@ -1,0 +1,43 @@
+{
+  "name": "CI",
+  "on": {
+    "push": { "branches": ["master"] },
+    "pull_request": {}
+  },
+  "permissions": { "contents": "read" },
+  "concurrency": {
+    "group": "ci-${{ github.workflow }}-${{ github.ref }}",
+    "cancel-in-progress": true
+  },
+  "jobs": {
+    "scanners": {
+      "runs-on": "ubuntu-latest",
+      "steps": [
+        { "uses": "actions/checkout@v4" },
+        { "name": "scan-explicit-any", "run": "./scripts/scan-explicit-any.sh" },
+        { "name": "scan-disabled-gates", "run": "./scripts/scan-disabled-gates.sh" },
+        { "name": "scan-test-resources", "run": "./scripts/scan-test-resources.sh" }
+      ]
+    },
+    "helios": {
+      "runs-on": "ubuntu-latest",
+      "defaults": { "run": { "working-directory": "helios" } },
+      "steps": [
+        { "uses": "actions/checkout@v4" },
+        { "uses": "actions/setup-node@v4", "with": { "node-version": "22" } },
+        { "name": "typecheck (server), typecheck (client), test", "run": "npm run check" },
+        { "name": "build", "run": "npm run build" }
+      ]
+    },
+    "ads-google": {
+      "runs-on": "ubuntu-latest",
+      "defaults": { "run": { "working-directory": "ads/google" } },
+      "steps": [
+        { "uses": "actions/checkout@v4" },
+        { "uses": "actions/setup-node@v4", "with": { "node-version": "22" } },
+        { "name": "install", "run": "npm install --no-audit --no-fund" },
+        { "name": "typecheck", "run": "npm run typecheck" }
+      ]
+    }
+  }
+}
