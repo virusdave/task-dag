@@ -83,19 +83,42 @@ for slug in "${repos[@]}"; do
     fi
 
     moved=0
+    dests=()
     while IFS= read -r -d '' f; do
       case "${f}" in
         .github2/README.md|.github2/REMOVE.txt) continue ;;   # control files, not promoted
       esac
       dest=".github/${f#.github2/}"
       mkdir -p "$(dirname "${dest}")"
-      git mv "${f}" "${dest}"
+      # `-f` so a staged file ALWAYS overwrites its destination in a single
+      # operation. Without it, `git mv` refuses an existing destination, which
+      # historically forced an in-place replacement to also be listed in
+      # REMOVE.txt (a `git rm` of the destination BEFORE the move). That
+      # rm-then-recreate dance is fragile: any divergence between the removal
+      # and the move (e.g. a stale local copy of this script, or the move
+      # silently not happening) leaves the destination DELETED with no
+      # replacement — exactly the failure that wiped issue-to-task.yml in
+      # a7252fff and broke every caller's task-dag automation. `-f` makes a
+      # delete-without-replace structurally impossible for staged files, and
+      # REMOVE.txt is then only needed to retire files with NO staged successor.
+      git mv -f "${f}" "${dest}"
       echo "  promote: ${f} -> ${dest}"
+      dests+=( "${dest}" )
       moved=$((moved + 1))
     done < <(find .github2 -type f -print0)
 
     rm -rf .github2
     git add -A
+
+    # Guard: every promoted destination MUST be present in the index after the
+    # move. If any is missing, abort before committing rather than publishing a
+    # commit that deletes a workflow without its replacement.
+    for dest in ${dests[@]+"${dests[@]}"}; do
+      if ! git ls-files --error-unmatch -- "${dest}" >/dev/null 2>&1; then
+        echo "  ERROR: promoted file ${dest} is missing from the index after move; aborting (no commit)." >&2
+        exit 1
+      fi
+    done
 
     if git diff --cached --quiet; then
       echo "  no changes after promote (skip)"
