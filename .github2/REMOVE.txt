@@ -1,7 +1,0 @@
-# The unified .github/workflows/task-dag.yml caller replaced every shared
-# task-dag workflow; task-dag-drift-guard.yml was the LAST reference to
-# Nicponskis/shared-workflows and is retired here (CLI_DISTRIBUTION.md B1
-# Phase C). The vendored scripts/task-dag + scripts/task-dag.d/ are left in
-# place for now and removed in a follow-up once it's confirmed no worker /
-# agent harness invokes a peer's vendored copy.
-.github/workflows/task-dag-drift-guard.yml
