@@ -33,10 +33,20 @@ on:
   issue_comment: { types: [created] }
   push: { branches: [master] }
 jobs:
+  issue-to-task:
+    if: ${{ github.event_name == 'issues' }}
+    uses: virusdave/task-dag/.github/workflows/issue-to-task.yml@main
+    permissions: { contents: write, issues: write }
+    secrets: { token: ${{ secrets.GITHUB_TOKEN }} }
   comment-sync:
     if: ${{ github.event_name == 'issue_comment' }}
     uses: virusdave/task-dag/.github/workflows/sync-comment-to-task.yml@main
     permissions: { contents: write, issues: write }
+    secrets: { token: ${{ secrets.GITHUB_TOKEN }} }
+  close-completed:
+    if: ${{ github.event_name == 'push' }}
+    uses: virusdave/task-dag/.github/workflows/close-completed-issues.yml@main
+    permissions: { contents: read, issues: write }
     secrets: { token: ${{ secrets.GITHUB_TOKEN }} }
   completion-aggregate:
     if: ${{ github.event_name == 'push' }}
@@ -58,10 +68,22 @@ branch the workflow is pinned to — keep them aligned.
 
 0. **[done] Bootstrap.** Land CLI + scripts + reusable workflows + docs
    here. Additive: no peer references this repo, so nothing is at risk.
-1. **New reusable workflows.** Author reusable `issue-to-task` and
-   `close-completed-issues` (wrapping `.github/scripts/create-task-commit.sh`
-   and `close-completed-issues.sh`) with a single central CLI-fetch path.
-   Smoke-test on a fixture repo, then cut `task-dag-v1`.
+1. **New reusable workflows. [authored 2026-06-16]** Reusable
+   `issue-to-task` and `close-completed-issues` wrap the self-contained
+   `.github/scripts/create-task-commit.sh` / `close-completed-issues.sh`
+   (git + gh only — no CLI fetch needed), following the proven
+   `sync-comment-to-task` fetch-from-raw pattern. **Currently staged under
+   `.github2/workflows/`** because deploy keys / the available token can't
+   push `.github/workflows/` (see top-level KB discovery 2026-06). Move
+   them into `.github/workflows/` with a `workflow`-capable credential,
+   smoke-test on a fixture/scratch issue, then cut `task-dag-v1`.
+
+   > **Rollout gate:** every step below pushes a `.github/workflows/`
+   > file into a peer repo. That requires a credential carrying `workflow`
+   > scope (a `workflow`-scoped PAT, or the task-dag GitHub App granted
+   > `workflows: write` and installed on each peer + this repo). Per-repo
+   > deploy keys are **not** sufficient. Provision this once before the
+   > canary; otherwise each peer caller must be hand-placed via the web UI.
 2. **Canary = automation.** Add its single `task-dag.yml` caller in the
    *same commit* that removes its superseded local workflows + vendored
    scripts (never delete a script before its workflow is gone). It gains

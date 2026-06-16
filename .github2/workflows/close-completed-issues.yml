@@ -1,0 +1,46 @@
+name: Close Completed Task Issues (Reusable)
+
+# Reusable version of the per-repo close-completed-issues workflow. The
+# caller wires its own `push` event; this workflow fetches the canonical
+# close-completed-issues.sh from virusdave/task-dag and runs it against the
+# caller's checkout (the script is self-contained: git + gh only).
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: 'task-dag ref to fetch the helper script from (branch, tag, or SHA)'
+        type: string
+        default: main
+    secrets:
+      token:
+        description: 'GitHub token for API access (needs issues:write)'
+        required: true
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  close-issues:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout caller repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.token }}
+
+      - name: Download close-completed-issues script
+        run: |
+          curl -fsSL "https://raw.githubusercontent.com/virusdave/task-dag/${{ inputs.ref }}/.github/scripts/close-completed-issues.sh" \
+            -o /tmp/close-completed-issues.sh
+          chmod +x /tmp/close-completed-issues.sh
+
+      - name: Close issues for completed task epics
+        env:
+          GH_TOKEN: ${{ secrets.token }}
+          BEFORE_SHA: ${{ github.event.before }}
+          AFTER_SHA: ${{ github.sha }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: bash /tmp/close-completed-issues.sh
