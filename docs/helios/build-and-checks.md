@@ -78,6 +78,23 @@ large-action-lock -- bash helios/scripts/idempotence-matrix.sh
 The verification command defaults to the full `npm run check`; override
 it for a fast harness smoke: `IDEMPOTENCE_VERIFY='npm run ensure-build-env && npm run typecheck'`.
 
+## `nix develop` — reproducible toolchain (flake.nix)
+
+The repo-root `flake.nix` exposes a devShell that pins the build
+toolchain (node + npm via `nodejs_22`) so the same versions are available
+locally, on the box, and in any future off-prod builder:
+
+```sh
+nix develop          # drops you into a shell with node 22 + npm pinned
+cd helios && npm run check
+```
+
+`nixpkgs` is pinned (see `flake.lock`) to the revision the production box
+already runs, so `nix develop` reuses the on-box Nix store rather than
+fetching a different toolchain. The devShell provides the **toolchain**;
+`ensure-build-env` provides the **project prerequisites** — together they
+give an identical, declarative build environment.
+
 ## Related scripts
 
 - `npm run typecheck` / `npm run typecheck:client` — run a single
