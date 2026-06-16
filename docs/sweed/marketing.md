@@ -492,6 +492,7 @@ Returns `{ page, pageSize, totalCount, data: ActionRow[] }`. The
 | `originator`                   | `{ id, name }`                                | dealer the action was authored on                                        |
 | `displayInEcommerceProducts`   | `true`                                        | toggles the badge on the e-commerce menu                                 |
 | `isBonusLoyaltyQualifying`     | `true`                                        | counts toward loyalty bonus accrual                                      |
+| `segments[]`                   | `[{ id:"7262", name:"Opted into Marketing", enabled:true }]` | **customer-audience restriction** — the promo only applies to customers in these segment(s). Empty/absent = applies to everyone. See § 2.7 |
 
 `getSelectors[]` is the product matcher:
 
@@ -548,7 +549,42 @@ To bound a daily action to a time window, send both
 Bronx (cron `"0 0 * * 1-4 *"`, `startTimeMin: 480`, `endTimeMin: 960`)
 is the canonical example: Mon-Thu 8am-4pm.
 
-### 2.6 Common gotchas
+### 2.6 Customer-audience (segment) restrictions on a promo action
+
+A promo action's `segments[]` field restricts the discount to customers
+in one or more **marketing segments** (the same segment objects from
+`store.marketing.segment.*`, e.g. segment `7262` "Opted into Marketing",
+`2773` "Fordham Students", `7691` "FBNYC Staff"). An empty or absent
+`segments[]` means the promo applies to **everyone**.
+
+This is independent of `getSelectors[]` (which matches *products*).
+`getSelectors` says *what* is discounted; `segments` says *who* gets it.
+
+**Add / change / remove a restriction** with a partial
+`store.promo.action.edit`. Pass the full desired segment list — Sweed
+replaces the field wholesale:
+
+```json
+{ "name": "store.promo.action.edit",
+  "params": { "id": "9239", "segments": [] } }   // remove all restrictions
+```
+
+VERIFIED (2026-06-16, Bronx dealer 210249): a partial edit sending only
+`{ id, segments }` changes **only** the `segments` field — `promoPrice`,
+`discountPercent`, `cronExpression`, `displayInEcommerceProducts`,
+`fromDate`, and `getSelectors[]` are all preserved. To strip just one
+segment while keeping others, read the action, filter that id out of
+`segments`, and send the remainder. The op is reversible: re-send the
+original segment list to restore.
+
+> **Note on the "Opted into Marketing" (7262) gate.** Gating active
+> promos behind the marketing-opt-in segment (so the discount is dangled
+> only to customers who opt into marketing) was retired as coercive and
+> low-ROI — in June 2026 segment 7262 was removed from all 26 active
+> Bronx promo actions. Don't reintroduce a 7262 audience gate on a
+> store-wide promo without an explicit operator request.
+
+### 2.7 Common gotchas
 
 - **List endpoint hides cron.** `store.promo.action.list` and
   `store.promo.action.get` only include `cronExpression` /
