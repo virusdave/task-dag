@@ -24,10 +24,19 @@ import { fileURLToPath } from 'node:url'
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const heliosRoot = resolve(__dirname, '..')
 
-process.env.APP_BASE_URL ??= 'http://127.0.0.1:3001/'
-process.env.DATABASE_URL ??= 'postgres://helios:helios@127.0.0.1:5432/helios_test'
-process.env.NODE_ENV ??= 'test'
-process.env.SESSION_COOKIE_SECRET ??= 'smoke-test-session-secret-please-rotate'
+// Force test-only config (fleet-green epic Phase B.5, automation#49). We
+// assign unconditionally (`=`, never `??=`): on the prod host the real
+// prod DATABASE_URL / SESSION_COOKIE_SECRET are exported into the
+// environment, and a `??=` fallback would let this smoke check silently
+// inherit those PROD values. Canon forbids any smoke check from touching
+// prod config, so we always override with loopback test-only values
+// regardless of the ambient environment. (The server's DB pool is lazy
+// and this smoke never hits a DB-backed route, but we never want a smoke
+// run capable of reaching prod.)
+process.env.APP_BASE_URL = 'http://127.0.0.1:3001/'
+process.env.DATABASE_URL = 'postgres://helios:helios@127.0.0.1:5432/helios_test'
+process.env.NODE_ENV = 'test'
+process.env.SESSION_COOKIE_SECRET = 'smoke-test-session-secret-please-rotate'
 
 const clientDist = resolve(heliosRoot, 'dist/client')
 const indexHtmlPath = resolve(clientDist, 'index.html')
