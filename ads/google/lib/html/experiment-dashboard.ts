@@ -3,7 +3,13 @@
  * Creates visual HTML dashboard showing trial structure, hypotheses, and status
  */
 
-import type { L2PredictionOutput, TrialPlan, FamilyKey } from '../shared/types.js';
+import type {
+  L2PredictionOutput,
+  TrialPlan,
+  FamilyKey,
+  ControlRef,
+  SuggestedCreative,
+} from '../shared/types.js';
 
 export interface TrialStatus {
   status: string;
@@ -15,17 +21,11 @@ export interface TrialStatus {
 }
 
 /**
- * Loose shape of a control/variant ad as it appears in LLM trial
- * output: either a raw string or one of several object shapes.
+ * A control or variant entry as it appears in a canonical TrialPlan:
+ * controls are ControlRef (existing ad reference and/or explicit
+ * creative), variants are SuggestedCreative.
  */
-type DashboardAd =
-  | string
-  | {
-      creative?: { headlines?: string[]; descriptions?: string[] };
-      headlines?: string[];
-      descriptions?: string[];
-      text?: string;
-    };
+type DashboardAd = ControlRef | SuggestedCreative;
 
 export interface ExperimentDashboardData {
   l2Runs: L2PredictionOutput[];
@@ -47,8 +47,8 @@ export function generateExperimentDashboard(data: ExperimentDashboardData): stri
   );
 
   const totalTrials = allTrials.length;
-  const totalVariants = allTrials.reduce((sum, t) => 
-    sum + (t.trial.variants?.length || 0), 0
+  const totalVariants = allTrials.reduce((sum, t) =>
+    sum + t.trial.variant_creatives.length, 0
   );
 
   return `<!DOCTYPE html>
@@ -454,16 +454,16 @@ function generateExperimentCard(
 ): string {
   const trial = item.trial;
   const familyName = formatFamilyName(item.family_key);
-  const status = statuses?.get(trial.trial_group_name || '');
+  const status = statuses?.get(trial.trial_group_name);
   const statusBadge = status ? 'running' : 'pending';
-  
-  const controls = trial.controls || trial.control_ads || [];
-  const variants = trial.variants || trial.variant_creatives || trial.variant_ads || [];
+
+  const controls = trial.control_ads;
+  const variants = trial.variant_creatives;
 
   return `
     <div class="experiment-card">
       <div class="experiment-header">
-        <div class="experiment-name">${trial.trial_group_name || `Trial ${index + 1}`}</div>
+        <div class="experiment-name">${trial.trial_group_name}</div>
         <span class="experiment-badge badge-${statusBadge}">${statusBadge}</span>
       </div>
       
@@ -472,12 +472,12 @@ function generateExperimentCard(
       </div>
 
       <div class="policy-class">
-        📋 Testing: ${trial.policy_class_being_probed || trial.policy_class_probed || 'General Policy'}
+        📋 Testing: ${trial.policy_class_being_probed}
       </div>
 
       <div class="hypothesis">
         <div class="hypothesis-label">💡 Hypothesis</div>
-        ${trial.hypothesis || 'No hypothesis specified'}
+        ${trial.hypothesis}
       </div>
 
       <div class="trial-structure">
@@ -486,47 +486,41 @@ function generateExperimentCard(
           <div class="control-box">
             <div class="box-header">
               <span class="control-icon">✓</span>
-              Control (${Array.isArray(controls) ? controls.length : 0})
+              Control (${controls.length})
             </div>
             ${formatAdList(controls, 'control')}
           </div>
           <div class="variant-box">
             <div class="box-header">
               <span class="variant-icon">🧪</span>
-              Variants (${Array.isArray(variants) ? variants.length : 0})
+              Variants (${variants.length})
             </div>
             ${formatAdList(variants, 'variant')}
           </div>
         </div>
       </div>
 
-      ${trial.success_criteria ? `
-        <div class="success-criteria">
-          <div class="criteria-label">🎯 Success Criteria</div>
-          <ul class="criteria-list">
-            <li>Serve for ${trial.success_criteria.time_window_days || 2} days minimum</li>
-            <li>Maintain ≥${(trial.success_criteria.min_ctr_ratio || 0.8) * 100}% of control CTR</li>
-            <li>Maintain ≥${(trial.success_criteria.min_conversion_rate_ratio || 0.8) * 100}% of control conversion rate</li>
-            <li>Allowed serving: ${(trial.success_criteria.allowed_serving_statuses || ['eligible']).join(', ')}</li>
-          </ul>
-        </div>
-      ` : ''}
-
-      ${trial.expected_insights ? `
-        <div class="expected-insights">
-          <div class="insights-label">🔍 Expected Insights</div>
-          ${trial.expected_insights}
-        </div>
-      ` : ''}
+      <div class="success-criteria">
+        <div class="criteria-label">🎯 Success Criteria</div>
+        <ul class="criteria-list">
+          ${trial.success_criteria.time_window_days !== undefined
+            ? `<li>Serve for ${trial.success_criteria.time_window_days} days minimum</li>` : ''}
+          ${trial.success_criteria.min_ctr_delta !== undefined
+            ? `<li>Minimum CTR delta vs. control: ${trial.success_criteria.min_ctr_delta}</li>` : ''}
+          ${trial.success_criteria.min_impressions !== undefined
+            ? `<li>Minimum impressions: ${trial.success_criteria.min_impressions}</li>` : ''}
+          <li>Allowed serving: ${trial.success_criteria.allowed_serving_statuses.join(', ')}</li>
+        </ul>
+      </div>
 
       <div class="trial-meta">
         <div class="meta-item">
           <span class="meta-label">Budget</span>
-          <span class="meta-value">$${(trial.budget || trial.trial_budget_usd || 0.01).toFixed(2)}/day</span>
+          <span class="meta-value">$${trial.trial_budget_usd.toFixed(2)}/day</span>
         </div>
         <div class="meta-item">
           <span class="meta-label">Duration</span>
-          <span class="meta-value">${trial.success_criteria?.time_window_days || 2} days</span>
+          <span class="meta-value">${trial.success_criteria.time_window_days ?? 'n/a'} days</span>
         </div>
         ${status ? `
           <div class="meta-item">
@@ -565,20 +559,20 @@ function formatAdList(ads: DashboardAd[], type: 'control' | 'variant'): string {
   }
 
   return ads.map((ad) => {
-    // Handle different formats
     let text = '';
-    if (typeof ad === 'string') {
-      text = ad;
+    if ('headlines' in ad) {
+      // SuggestedCreative (variant)
+      text = `${ad.headlines[0] ?? ''} | ${ad.descriptions[0] ?? ''}`;
     } else if (ad.creative) {
-      const h = ad.creative.headlines?.[0] || '';
-      const d = ad.creative.descriptions?.[0] || '';
-      text = `${h} | ${d}`;
-    } else if (ad.headlines) {
-      text = `${ad.headlines[0] || ''} | ${ad.descriptions?.[0] || ''}`;
-    } else if (ad.text) {
-      text = ad.text;
+      // ControlRef with an explicit creative
+      text = `${ad.creative.headlines[0] ?? ''} | ${ad.creative.descriptions[0] ?? ''}`;
+    } else if (ad.ad_id) {
+      // ControlRef pointing at an existing ad
+      text = `${ad.label} (${ad.ad_id})`;
+    } else {
+      text = ad.label;
     }
-    
+
     return `<div class="ad-snippet">${text || '[Ad content]'}</div>`;
   }).join('');
 }

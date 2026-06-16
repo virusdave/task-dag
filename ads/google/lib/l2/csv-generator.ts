@@ -991,7 +991,7 @@ export function csvBatchToString(batch: CSVBatch): string {
 
   for (const row of batch.rows) {
     const values = columns.map((col) => {
-      const value = row.data[col] || '';
+      const value = String(row.data[col] || '');
       if (value.includes(',') || value.includes('"') || value.includes('\n')) {
         return `"${value.replace(/"/g, '""')}"`;
       }

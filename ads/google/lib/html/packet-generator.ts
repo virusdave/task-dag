@@ -40,7 +40,6 @@ interface PgControl {
 }
 interface PgVariant {
   variant_label?: string;
-  label?: string;
   headlines?: string[];
   descriptions?: string[];
 }
@@ -51,9 +50,7 @@ interface PgTrial {
   trial_budget_usd?: number;
   success_criteria?: { time_window_days?: number };
   control_ads?: PgControl[];
-  controls?: PgControl[];
   variant_creatives?: PgVariant[];
-  variants?: PgVariant[];
 }
 interface PgFamily {
   family_key?: FamilyKey;
@@ -261,14 +258,14 @@ function buildCampaignSections(l2Output: L2PredictionOutput): CampaignSection[] 
         return {
           trial_name: trial?.trial_group_name,
           hypothesis: trial?.hypothesis,
-          controls: asArray<PgControl>(trial?.control_ads || trial?.controls).map((c) => ({
+          controls: asArray<PgControl>(trial?.control_ads).map((c) => ({
             label: c?.label,
             snippet: c?.creative
               ? createAdSnippet(asArray<string>(c.creative?.headlines), asArray<string>(c.creative?.descriptions))
               : '',
           })),
-          variants: asArray<PgVariant>(trial?.variant_creatives || trial?.variants).map((v) => ({
-            label: v?.variant_label || v?.label || 'variant',
+          variants: asArray<PgVariant>(trial?.variant_creatives).map((v) => ({
+            label: v?.variant_label || 'variant',
             snippet: createAdSnippet(asArray<string>(v?.headlines), asArray<string>(v?.descriptions)),
           })),
           budget: Number.isFinite(budget) ? budget : undefined,
@@ -430,10 +427,10 @@ function renderFamilyDetails(section: unknown, idx: number): string {
  * degrade gracefully instead of producing '[object Object]'.
  */
 function renderHTMLPacket(packet: HTMLPacket): string {
-  const exec = (packet.executive_summary ?? {}) as Record<string, unknown>;
+  const exec = (packet.executive_summary ?? {}) as unknown as Record<string, unknown>;
   const overviewFamilies = asArray<OverviewFamily>(packet.global_overview?.families);
   const sections = asArray(packet.campaign_sections);
-  const taxonomy = (packet.issue_taxonomy ?? {}) as Record<string, unknown>;
+  const taxonomy = (packet.issue_taxonomy ?? {}) as unknown as Record<string, unknown>;
   const riskDefs = (taxonomy.risk_definitions ?? {}) as Record<string, unknown>;
   return `<!DOCTYPE html>
 <html lang="en">

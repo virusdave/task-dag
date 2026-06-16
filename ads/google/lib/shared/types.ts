@@ -286,6 +286,18 @@ export interface PredictionAccuracy {
   }>;
 }
 
+export interface L2RunPredictionAccuracy {
+  l2_run_id: string;
+  total_families: number;
+  high_risk_correct: number;
+  high_risk_total: number;
+  medium_risk_correct: number;
+  medium_risk_total: number;
+  low_risk_correct: number;
+  low_risk_total: number;
+  overall_accuracy: number;
+}
+
 export interface PatternEffectiveness {
   pattern_id: string;
   pattern_description: string;
@@ -332,17 +344,15 @@ export interface TrialOutcome {
  * Complete L3 output
  */
 export interface L3EvaluationOutput {
-  run_id: string;
-  evaluation_date: string;
-  l2_run_ids_evaluated: string[];
-  prediction_accuracy: PredictionAccuracy;
-  pattern_effectiveness: PatternEffectiveness[];
-  trial_outcomes: TrialOutcome[];
-  proposed_updates: ProposedUpdate[];
-  governance_status: "pending_review" | "approved" | "rejected";
-  governance_notes?: string;
+  evaluation_id: string;
+  l2_runs_analyzed: string[];
+  trials_analyzed: number;
+  prediction_accuracy?: L2RunPredictionAccuracy;
+  trial_insights: unknown[];
+  prompt_updates: ProposedUpdate[];
+  rule_updates: ProposedUpdate[];
   generated_at: string;
-  l3_prompt_version: string;
+  requires_human_approval: boolean;
 }
 
 // ============================================================================
@@ -427,7 +437,7 @@ export interface CampaignSection {
 
 export interface AdActionDisplay {
   ad_group: string;
-  ad_id: string;
+  ad_id?: string;
   before_snippet?: string;
   after_snippet?: string;
   issue_codes: string[];
@@ -435,11 +445,11 @@ export interface AdActionDisplay {
 }
 
 export interface TrialPlanDisplay {
-  trial_name: string;
-  hypothesis: string;
-  controls: { label: string; snippet: string }[];
+  trial_name?: string;
+  hypothesis?: string;
+  controls: { label?: string; snippet: string }[];
   variants: { label: string; snippet: string }[];
-  budget: number;
+  budget?: number;
   expected_run_time: string;
   policy_questions: string[];
   csv_refs: string[];

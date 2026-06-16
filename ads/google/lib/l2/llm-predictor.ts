@@ -534,7 +534,7 @@ function groupAdsByFamilyKey(
   }
   for (const ad of ads) {
     for (let i = 0; i < familySummaries.length; i++) {
-      const key = familySummaries[i].family_key as Record<string, unknown>;
+      const key = familySummaries[i].family_key as unknown as Record<string, unknown>;
       let ok = true;
       for (const [k, v] of Object.entries(key)) {
         if (v === undefined || v === null) continue;

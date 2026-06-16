@@ -54,7 +54,7 @@ export const PerformanceMetricsSchema = z.object({
   quality_score: z.number().optional(),
 });
 
-export const FamilyTagsSchema = z.record(z.string());
+export const FamilyTagsSchema = z.record(z.string(), z.string());
 
 export const FamilyKeySchema = z.object({
   account_id: z.string(),
@@ -134,15 +134,15 @@ export const AnomalySchema = z.object({
   ad_id: z.string(),
   anomaly_type: z.string(),
   severity: z.enum(["high", "medium", "low"]),
-  details: z.record(z.unknown()),
+  details: z.record(z.string(), z.unknown()),
   suggested_action: z.string().optional(),
 });
 
 export const L1FamilySummarySchema = z.object({
   family_key: FamilyKeySchema,
   ads_total: z.number(),
-  policy_status_counts: z.record(z.number()),
-  pattern_stats: z.record(z.object({
+  policy_status_counts: z.record(z.string(), z.number()),
+  pattern_stats: z.record(z.string(), z.object({
     count: z.number(),
     pct: z.number(),
   })),
@@ -163,7 +163,7 @@ export const L1RuleUpdateSchema = z.object({
   rule_type: z.enum(["feature_extractor", "threshold", "bucket_definition"]),
   description: z.string(),
   rationale: z.string(),
-  proposed_change: z.record(z.unknown()),
+  proposed_change: z.record(z.string(), z.unknown()),
 });
 
 // ============================================================================
@@ -264,10 +264,22 @@ export const PredictionAccuracySchema = z.object({
   false_positives: z.number(),
   true_negatives: z.number(),
   false_negatives: z.number(),
-  by_risk_level: z.record(z.object({
+  by_risk_level: z.record(z.string(), z.object({
     precision: z.number(),
     recall: z.number(),
   })).optional(),
+});
+
+export const L2RunPredictionAccuracySchema = z.object({
+  l2_run_id: z.string(),
+  total_families: z.number(),
+  high_risk_correct: z.number(),
+  high_risk_total: z.number(),
+  medium_risk_correct: z.number(),
+  medium_risk_total: z.number(),
+  low_risk_correct: z.number(),
+  low_risk_total: z.number(),
+  overall_accuracy: z.number(),
 });
 
 export const PatternEffectivenessSchema = z.object({
@@ -287,8 +299,8 @@ export const PatternEffectivenessSchema = z.object({
 export const ProposedUpdateSchema = z.object({
   update_type: z.enum(["prompt", "l1_rule", "trial_design", "action_threshold"]),
   component: z.string(),
-  current_value: z.union([z.string(), z.record(z.unknown())]),
-  proposed_value: z.union([z.string(), z.record(z.unknown())]),
+  current_value: z.union([z.string(), z.record(z.string(), z.unknown())]),
+  proposed_value: z.union([z.string(), z.record(z.string(), z.unknown())]),
   rationale: z.string(),
   expected_impact: z.string(),
   confidence: z.number().min(0).max(1),
@@ -313,17 +325,15 @@ export const TrialOutcomeSchema = z.object({
 });
 
 export const L3EvaluationOutputSchema = z.object({
-  run_id: z.string(),
-  evaluation_date: z.string(),
-  l2_run_ids_evaluated: z.array(z.string()),
-  prediction_accuracy: PredictionAccuracySchema,
-  pattern_effectiveness: z.array(PatternEffectivenessSchema),
-  trial_outcomes: z.array(TrialOutcomeSchema),
-  proposed_updates: z.array(ProposedUpdateSchema),
-  governance_status: z.enum(["pending_review", "approved", "rejected"]),
-  governance_notes: z.string().optional(),
+  evaluation_id: z.string(),
+  l2_runs_analyzed: z.array(z.string()),
+  trials_analyzed: z.number(),
+  prediction_accuracy: L2RunPredictionAccuracySchema.optional(),
+  trial_insights: z.array(z.unknown()),
+  prompt_updates: z.array(ProposedUpdateSchema),
+  rule_updates: z.array(ProposedUpdateSchema),
   generated_at: z.string(),
-  l3_prompt_version: z.string(),
+  requires_human_approval: z.boolean(),
 });
 
 // ============================================================================

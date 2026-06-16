@@ -3,7 +3,13 @@
  * Uses LLM to evaluate L2 predictions vs actual outcomes and propose improvements
  */
 
-import type { L2PredictionOutput, L3EvaluationOutput, FamilyKey, TrialPlan } from '../shared/types.js';
+import type {
+  L2PredictionOutput,
+  L3EvaluationOutput,
+  TrialOutcome,
+  L2RunPredictionAccuracy,
+  ProposedUpdate,
+} from '../shared/types.js';
 import { LLMClient, formatPromptTemplate } from '../shared/llm-client.js';
 
 export interface L3AnalyzerConfig {
@@ -12,36 +18,10 @@ export interface L3AnalyzerConfig {
 
 /** Loose shape of the JSON the L3 LLM returns. */
 interface RawL3Response {
-  prediction_accuracy?: unknown;
+  prediction_accuracy?: L2RunPredictionAccuracy;
   trial_insights?: unknown[];
-  prompt_updates?: unknown[];
-  rule_updates?: unknown[];
-}
-
-export interface TrialOutcome {
-  trial_id: string;
-  family_key: FamilyKey;
-  trial_plan: TrialPlan;
-  l2_predicted_risk: string;
-  l2_predicted_success: boolean;
-  actual_serving_status: string;
-  actual_policy_topics: string[];
-  actual_ctr_vs_control: number;
-  actual_conversion_rate_vs_control: number;
-  success: boolean;
-  insights: string;
-}
-
-export interface PredictionAccuracy {
-  l2_run_id: string;
-  total_families: number;
-  high_risk_correct: number;
-  high_risk_total: number;
-  medium_risk_correct: number;
-  medium_risk_total: number;
-  low_risk_correct: number;
-  low_risk_total: number;
-  overall_accuracy: number;
+  prompt_updates?: ProposedUpdate[];
+  rule_updates?: ProposedUpdate[];
 }
 
 /**
@@ -60,7 +40,7 @@ export class L3LLMAnalyzer {
   async analyze(
     l2Runs: L2PredictionOutput[],
     trialOutcomes: TrialOutcome[],
-    predictionAccuracy: PredictionAccuracy[]
+    predictionAccuracy: L2RunPredictionAccuracy[]
   ): Promise<L3EvaluationOutput> {
     console.log(`🔬 Running L3 meta-analysis...`);
     console.log(`  L2 runs: ${l2Runs.length}`);
@@ -93,7 +73,7 @@ export class L3LLMAnalyzer {
       evaluation_id: `l3-eval-${new Date().toISOString().split('T')[0]}`,
       l2_runs_analyzed: l2Runs.map(r => r.run_id),
       trials_analyzed: trialOutcomes.length,
-      prediction_accuracy: parsedResponse.prediction_accuracy || predictionAccuracy[0] || {},
+      prediction_accuracy: parsedResponse.prediction_accuracy ?? predictionAccuracy[0],
       trial_insights: parsedResponse.trial_insights || [],
       prompt_updates: parsedResponse.prompt_updates || [],
       rule_updates: parsedResponse.rule_updates || [],
@@ -138,7 +118,7 @@ NORTH STAR:
   private getUserPrompt(
     l2Runs: L2PredictionOutput[],
     trialOutcomes: TrialOutcome[],
-    predictionAccuracy: PredictionAccuracy[]
+    predictionAccuracy: L2RunPredictionAccuracy[]
   ): string {
     return `Analyze the following L2 predictions vs actual outcomes and propose improvements.
 

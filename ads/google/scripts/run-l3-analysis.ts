@@ -17,6 +17,8 @@ import type {
   L3EvaluationOutput,
   TrialOutcome,
   AdAction,
+  L2RunPredictionAccuracy,
+  ProposedUpdate,
 } from '../lib/shared/types.js';
 import type { ActualFamilyOutcome } from '../lib/l3/prediction-evaluator.js';
 import { generateRunId } from '../lib/shared/utils.js';
@@ -301,22 +303,21 @@ async function main() {
   // Use LLM for deep analysis and proposal generation
   console.log('\n🤖 Running LLM-based meta-analysis...');
   let l3Output: L3EvaluationOutput;
+  const predictionAccuracyArray: L2RunPredictionAccuracy[] = [{
+    l2_run_id: options.l2RunIds.join(','),
+    total_families: allPredictions.length,
+    high_risk_correct: 0,
+    high_risk_total: 0,
+    medium_risk_correct: 0,
+    medium_risk_total: 0,
+    low_risk_correct: 0,
+    low_risk_total: 0,
+    overall_accuracy: predictionAccuracy.precision,
+  }];
   
   try {
     const llmClient = createLLMClientFromEnv();
     const analyzer = createL3Analyzer(llmClient);
-    
-    const predictionAccuracyArray = [{
-      l2_run_id: options.l2RunIds.join(','),
-      total_families: allPredictions.length,
-      high_risk_correct: 0,
-      high_risk_total: 0,
-      medium_risk_correct: 0,
-      medium_risk_total: 0,
-      low_risk_correct: 0,
-      low_risk_total: 0,
-      overall_accuracy: predictionAccuracy.precision,
-    }];
     
     l3Output = await analyzer.analyze(l2Outputs, trialOutcomes, predictionAccuracyArray);
   } catch (error: unknown) {
@@ -367,7 +368,7 @@ async function main() {
   // observations so we don't drown the system prompt in noise.
   const addendaPath = path.resolve('config/l3-addenda.md');
   const highConfidenceUpdates = l3Output.prompt_updates
-    .filter((p) => p.update_type === 'prompt' && p.confidence >= 0.6)
+    .filter((p: ProposedUpdate) => p.update_type === 'prompt' && p.confidence >= 0.6)
     .slice(0, 10);
   const issueObservations = summarizeRecentIssues(l2Outputs);
   const outcomeObservations = adAttemptOutcomes
