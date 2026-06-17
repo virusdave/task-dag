@@ -20,11 +20,18 @@
 #
 #   1. ephemerally clones virusdave/top-level (canon), then uses it to locate
 #      and clone Nicponskis/nixos-sbc;
-#   2. decrypts secrets/vps-nixos-2/freshlybakedus-public-token.env.age with
-#      YOUR age/ssh identity (the `dave` recipient);
+#   2. decrypts the intact secrets/vps-nixos-1/freshlybakedus-public-token.env.age
+#      (the documented canonical copy) with YOUR age/ssh identity (the `dave`
+#      recipient). NOTE: the vps-nixos-2 copy is NOT used — it was found to
+#      decrypt to a *path string* (a prior attempt encrypted a filename instead
+#      of file contents) and is corrupt. Override the source with --source/SRC_REL,
+#      or skip agenix entirely with --plaintext-file <local file with the real
+#      FRESHLYBAKEDUS_PUBLIC_TOKEN_SECRET=… line>;
 #   3. re-encrypts the SAME plaintext to a new
 #      secrets/vps-nixos-3/freshlybakedus-public-token.env.age, targeted at the
-#      `dave` + `vpsNixos3` recipients pulled straight from secrets.nix;
+#      `dave` + `vpsNixos3` recipients pulled straight from secrets.nix, then
+#      decrypts that output again and verifies it is byte-for-byte identical to
+#      the source (so a wrong-content / path-as-data blob can never be committed);
 #   4. wires it up in nixos-sbc:
 #        - adds the publicKeys entry in secrets.nix,
 #        - declares the `helios-freshlybakedus-public-token-env` agenix secret
@@ -58,6 +65,8 @@
 #   scripts/rekey-branding-secret.sh            # do everything, stop before push
 #   scripts/rekey-branding-secret.sh --push     # ...and push to origin/master
 #   scripts/rekey-branding-secret.sh --identity ~/.ssh/id_ed25519_dave
+#   scripts/rekey-branding-secret.sh --source secrets/vps-nixos-2/freshlybakedus-public-token.env.age
+#   scripts/rekey-branding-secret.sh --plaintext-file ./fbus-secret.env  # bypass agenix; encrypt this file's contents
 #   scripts/rekey-branding-secret.sh --keep     # keep the ephemeral clones
 #   scripts/rekey-branding-secret.sh --wrap-bare # source blob is a BARE secret
 #                                               #   value (no VAR=); wrap it as
@@ -88,7 +97,15 @@ ALLOW_NIX=1
 FORCE=0
 WRAP_BARE=0
 
-SRC_REL="secrets/vps-nixos-2/freshlybakedus-public-token.env.age"
+# Source the real plaintext from the vps-nixos-1 copy by default: it is the
+# documented canonical FRESHLYBAKEDUS_PUBLIC_TOKEN_SECRET env file and was not
+# touched by this task. The vps-nixos-2 blob was found to decrypt to a *path*
+# (a prior provisioning attempt encrypted a filename instead of the file's
+# contents), so it is no longer a trustworthy source. Override with SRC_REL=…,
+# or bypass agenix entirely with --plaintext-file (encrypts a local file's
+# CONTENTS directly).
+SRC_REL="${SRC_REL:-secrets/vps-nixos-1/freshlybakedus-public-token.env.age}"
+PLAINTEXT_FILE="${PLAINTEXT_FILE:-}"
 DST_REL="secrets/vps-nixos-3/freshlybakedus-public-token.env.age"
 HOST_NIX="hosts/per-host/vps-nixos-3.nix"
 SECRETS_NIX="secrets.nix"
@@ -105,7 +122,11 @@ while [[ $# -gt 0 ]]; do
     --no-nix)       ALLOW_NIX=0 ;;
     --identity)     IDENTITY="${2:?--identity needs a path}"; shift ;;
     --identity=*)   IDENTITY="${1#*=}" ;;
-    -h|--help)      sed -n '2,75p' "$0"; exit 0 ;;
+    --plaintext-file)   PLAINTEXT_FILE="${2:?--plaintext-file needs a path}"; shift ;;
+    --plaintext-file=*) PLAINTEXT_FILE="${1#*=}" ;;
+    --source)       SRC_REL="${2:?--source needs a path}"; shift ;;
+    --source=*)     SRC_REL="${1#*=}" ;;
+    -h|--help)      sed -n '2,84p' "$0"; exit 0 ;;
     *) echo "error: unknown argument: $1" >&2; exit 2 ;;
   esac
   shift
@@ -182,12 +203,25 @@ VPS3_PUB="$(sed_pub vpsNixos3)"
 [[ -n "$VPS3_PUB" ]] || die "could not read 'vpsNixos3' pubkey from $SECRETS_NIX"
 log "Recipients: dave + vpsNixos3 (parsed from $SECRETS_NIX)"
 
-# ── 3. Decrypt vps-nixos-2 copy, re-encrypt to vps-nixos-3 recipients ────────
+# ── 3. Obtain the real plaintext, re-encrypt to vps-nixos-3 recipients ───────
+# IMPORTANT: every `age` call here passes the input as a FILE (either the
+# positional `IN` argument or, for decryption, the named ciphertext). age then
+# operates on the file's CONTENTS. It never receives a path *as data*, which is
+# how a previous attempt corrupted a blob (encrypting the string
+# "/tmp/…/plaintext.env" instead of that file's bytes). The round-trip
+# verification at the end of this section makes that class of mistake
+# impossible to commit.
 RAW="$WORK/plaintext.raw"
 PLAIN="$WORK/plaintext.env"
-log "Decrypting $SRC_REL with identity $IDENTITY"
-AGE -d -i "$IDENTITY" -o "$RAW" "$SRC_REL" \
-  || die "decryption failed — is $IDENTITY the 'dave' key?"
+if [[ -n "$PLAINTEXT_FILE" ]]; then
+  [[ -f "$PLAINTEXT_FILE" ]] || die "--plaintext-file not found: $PLAINTEXT_FILE"
+  log "Using operator-supplied plaintext file (encrypting its CONTENTS): $PLAINTEXT_FILE"
+  cp "$PLAINTEXT_FILE" "$RAW"
+else
+  log "Decrypting $SRC_REL with identity $IDENTITY"
+  AGE -d -i "$IDENTITY" -o "$RAW" "$SRC_REL" \
+    || die "decryption failed — is $IDENTITY the 'dave' key?"
+fi
 
 # Normalize encoding before inspecting/provisioning. A secret pasted from a
 # GUI / Windows tool can arrive as UTF-16 or carry a BOM / CRLF; that hides a
@@ -245,7 +279,21 @@ fi
 log "Re-encrypting → $DST_REL (dave + vpsNixos3)"
 AGE -r "$DAVE_PUB" -r "$VPS3_PUB" -o "$DST_REL" "$PLAIN" \
   || die "re-encryption failed"
-rm -f "$PLAIN"
+
+# Round-trip verification: decrypt what we just wrote and prove it is byte-for-
+# byte the source plaintext AND still carries the expected var. This is the
+# guard that makes a "path encrypted as data" (or any wrong-content) blob
+# impossible to commit — if $DST_REL ever held a path string, cmp would fail.
+log "Verifying $DST_REL decrypts back to the exact source plaintext"
+VERIFY="$WORK/verify.env"
+AGE -d -i "$IDENTITY" -o "$VERIFY" "$DST_REL" \
+  || die "could not decrypt the file we just wrote with $IDENTITY (recipient mismatch?)"
+cmp -s "$PLAIN" "$VERIFY" \
+  || die "re-encrypted output does NOT match the source plaintext — refusing to commit"
+grep -q 'FRESHLYBAKEDUS_PUBLIC_TOKEN_SECRET=' "$VERIFY" \
+  || die "verification: $DST_REL is missing FRESHLYBAKEDUS_PUBLIC_TOKEN_SECRET="
+log "Verified: $DST_REL contents match the source and contain the expected var."
+rm -f "$PLAIN" "$VERIFY"
 
 # ── 4a. secrets.nix: add the vps-nixos-3 publicKeys entry (idempotent) ───────
 SECRETS_LINE="  \"$DST_REL\".publicKeys = [ dave vpsNixos3 ];"
