@@ -49,7 +49,9 @@
 #     is the `dave` line in nixos-sbc/secrets.nix. Defaults to ~/.ssh/id_ed25519;
 #     override with --identity PATH.
 #   - `git`, `ssh`, and `age`. If `age` is not on PATH, the script falls back to
-#     `nix shell nixpkgs#age` (pass --no-nix to forbid that).
+#     `nix shell github:NixOS/nixpkgs/nixpkgs-unstable#age` (a fully-qualified
+#     flake URL, so it works even with an empty flake registry; override the
+#     ref with NIXPKGS_FLAKE, or forbid the fallback entirely with --no-nix).
 #
 # USAGE
 # -----
@@ -102,11 +104,17 @@ die()  { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 command -v git >/dev/null || die "git not found on PATH"
 command -v ssh >/dev/null || die "ssh not found on PATH"
 
+# Fully-qualified nixpkgs flake ref (a github: URL) so the nix fallback does
+# NOT depend on a `nixpkgs` entry existing in the local flake registry — a
+# bare `nixpkgs#age` fails with "cannot find flake 'flake:nixpkgs'" on hosts
+# whose registry is empty. Override with NIXPKGS_FLAKE if you want pinning.
+NIXPKGS_FLAKE="${NIXPKGS_FLAKE:-github:NixOS/nixpkgs/nixpkgs-unstable}"
+
 if command -v age >/dev/null 2>&1; then
   AGE() { age "$@"; }
 elif [[ "$ALLOW_NIX" == 1 ]] && command -v nix >/dev/null 2>&1; then
-  log "age not on PATH; using 'nix shell nixpkgs#age'"
-  AGE() { nix shell nixpkgs#age -c age "$@"; }
+  log "age not on PATH; using 'nix shell ${NIXPKGS_FLAKE}#age'"
+  AGE() { nix shell "${NIXPKGS_FLAKE}#age" -c age "$@"; }
 else
   die "age not found (install age, or allow the nix fallback by not passing --no-nix)"
 fi
