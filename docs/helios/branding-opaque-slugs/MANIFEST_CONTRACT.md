@@ -146,7 +146,19 @@ manifest today. Both items below are explicitly deferred by the parent plan
      secret in `Nicponskis/nixos-sbc` and expose it to the helios units via
      the systemd `EnvironmentFile` as `FRESHLYBAKEDUS_PUBLIC_TOKEN_SECRET`
      (same mechanism as `VERISCAN_WEBHOOK_TOKEN` / `LP_EVENTS_INGEST_TOKEN`),
-     then `self-deploy-helios`.
+     then deploy. The plaintext is identical to the value already encrypted
+     for the mss FBUS frontends at
+     `secrets/vps-nixos-{1,2}/freshlybakedus-public-token.env.age`, so there
+     is no need to re-fetch a raw secret: run the off-machine operator helper
+     [`scripts/rekey-branding-secret.sh`](../../../scripts/rekey-branding-secret.sh),
+     which clones top-level + nixos-sbc, re-encrypts that existing copy to the
+     `vps-nixos-3` recipients, wires it into `secrets.nix` +
+     `hosts/per-host/vps-nixos-3.nix` (`services.helios.environmentFiles`), and
+     commits/pushes the change as one atomic commit. Then `ssh vps-nixos-3
+     self-deploy`. The branding publish oneshot must run on `vps-nixos-3` (it
+     writes the signed bundle to `/cloud/lp`, which is read-write there and a
+     read-only mirror on `vps-nixos-2`); the existing
+     `helios-lp-bundle-signing-key` on `vps-nixos-3` is reused.
    - **One-off CLI publish:** alternatively drop the raw value into
      `~/.secret/freshlybakedus/public-token-secret` on the host running
      `branding-opaque-manifest publish --env prod`.
