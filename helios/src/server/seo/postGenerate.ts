@@ -17,8 +17,22 @@ import { isValidSlug } from './routeRegistry.js'
 // Same proven-working mantle model as the other Helios callers.
 const POST_GEN_MODEL = 'google.gemma-3-27b-it'
 
+// Optional grounding from an ingested source lead (seo_source_items). When
+// present the model is told to write an ORIGINAL article INSPIRED by the
+// source (summarize-with-attribution, never copy) with a unique local NYC
+// angle — wiring the §7.1 source/topic intake into draft generation
+// (parent EPIC_PLAN §7 steps 1 + 3). Omitting it preserves the original
+// free-text-topic behavior.
+export interface PostGenerateSource {
+  readonly sourceKey: string
+  readonly title: string
+  readonly url?: string | null
+  readonly summary?: string | null
+}
+
 export interface PostGenerateInput {
   readonly topic: string
+  readonly source?: PostGenerateSource
 }
 
 export interface PostGenerateDraft {
@@ -59,8 +73,28 @@ const SYSTEM_PROMPT = [
   'Output ONLY the JSON object. No prose, no markdown fences.',
 ].join(' ')
 
-function buildUserPrompt(input: PostGenerateInput): string {
-  return `topic: ${JSON.stringify(input.topic)}`
+/**
+ * Build the user-message prompt. For a bare topic it is just the topic; for
+ * a source-grounded request it additionally hands the model the source's
+ * title / URL / summary and instructs an ORIGINAL, attributed rewrite (never
+ * a copy). Exported for unit testing without a live gateway.
+ */
+export function buildPostGenerationUserPrompt(input: PostGenerateInput): string {
+  const lines = [`topic: ${JSON.stringify(input.topic)}`]
+  const source = input.source
+  if (source) {
+    lines.push(
+      'Write an ORIGINAL article INSPIRED BY the source below — summarize and add a unique local NYC angle, do NOT copy its wording, and attribute it.',
+      `source_title: ${JSON.stringify(source.title)}`,
+    )
+    if (source.url != null && source.url.length > 0) {
+      lines.push(`source_url: ${JSON.stringify(source.url)}`)
+    }
+    if (source.summary != null && source.summary.length > 0) {
+      lines.push(`source_summary: ${JSON.stringify(source.summary)}`)
+    }
+  }
+  return lines.join('\n')
 }
 
 function looksLikeRecord(value: unknown): value is Record<string, unknown> {
@@ -168,7 +202,7 @@ export async function generatePostDraft(input: PostGenerateInput): Promise<PostG
         max_tokens: 2500,
         messages: [
           { role: 'system', content: SYSTEM_PROMPT },
-          { role: 'user', content: buildUserPrompt(input) },
+          { role: 'user', content: buildPostGenerationUserPrompt(input) },
         ],
         model: POST_GEN_MODEL,
         response_format: { type: 'json_object' },

@@ -1,5 +1,7 @@
 import { z } from 'zod'
 
+import { SeoPostRecordSchema } from './seoPost.js'
+
 // API contracts for the SEO auto-blog SOURCE-INGESTION brick (P4).
 //
 // The Helios control plane records the source content / links Helios will
@@ -188,4 +190,17 @@ export const SeoSourceAllowlistRouteParamsSchema = z
   .strict()
 export type SeoSourceAllowlistRouteParams = z.infer<
   typeof SeoSourceAllowlistRouteParamsSchema
+>
+
+// Generating a blog-post DRAFT from a source item: Bedrock produces a
+// draft-only proposal (never auto-approved/published — canon §1), it is
+// saved as a `draft` post (source='generated', provenance in
+// generation_meta), and the source item transitions to `drafted`. The
+// response returns both the new draft and the updated source item.
+export const SeoSourceItemGenerateDraftResponseSchema = z.object({
+  post: SeoPostRecordSchema,
+  sourceItem: SeoSourceItemRecordSchema,
+})
+export type SeoSourceItemGenerateDraftResponse = z.infer<
+  typeof SeoSourceItemGenerateDraftResponseSchema
 >

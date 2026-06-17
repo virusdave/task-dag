@@ -24,6 +24,7 @@ import {
   SeoSourceAllowlistSetEnabledBodySchema,
   SeoSourceAllowlistUpsertBodySchema,
   SeoSourceItemDetailResponseSchema,
+  SeoSourceItemGenerateDraftResponseSchema,
   SeoSourceItemIngestBodySchema,
   SeoSourceItemIngestResponseSchema,
   SeoSourceItemListQuerySchema,
@@ -33,6 +34,7 @@ import {
 } from '../../shared/contracts/index.js'
 import { requireSessionUser } from '../auth/requireSession.js'
 import { getPool } from '../db/pool.js'
+import { createSeoPost } from '../db/queries/seoPostQueries.js'
 import {
   getSeoSourceAllowlistEntry,
   getSeoSourceItem,
@@ -44,6 +46,8 @@ import {
   setSeoSourceItemStatus,
   upsertSeoSourceAllowlist,
 } from '../db/queries/seoSourceQueries.js'
+import { withTransaction } from '../db/tx.js'
+import { generatePostDraft } from '../seo/postGenerate.js'
 
 export async function registerSeoSourceRoutes(server: FastifyInstance): Promise<void> {
   // ── allowlist ──────────────────────────────────────────────────────
@@ -182,5 +186,86 @@ export async function registerSeoSourceRoutes(server: FastifyInstance): Promise<
       return reply.status(404).send({ error: 'Source item not found.' })
     }
     return reply.send(SeoSourceItemDetailResponseSchema.parse({ item }))
+  })
+
+  // Generate a blog-post DRAFT from a source item via Bedrock (P4, the
+  // §7.1-intake → §7.3-draft wiring). Editor+. Bedrock produces a
+  // draft-only proposal — NEVER auto-approved/published (canon §1): it is
+  // saved as a `draft` post (source='generated', scope defaults to the
+  // reserved global `all`, provenance recorded in generation_meta) and the
+  // source item moves to `drafted`. The two writes commit atomically AFTER
+  // the (slow, network) LLM call, which is made outside any DB transaction.
+  server.post('/api/seo/source-items/:sourceItemId/generate-draft', async (request, reply) => {
+    const user = await requireSessionUser(request, reply, 'editor')
+    if (!user) {
+      return
+    }
+    const params = SeoSourceItemRouteParamsSchema.parse(request.params)
+    const item = await getSeoSourceItem(getPool(), params.sourceItemId)
+    if (!item) {
+      return reply.status(404).send({ error: 'Source item not found.' })
+    }
+    if (item.status === 'dismissed') {
+      return reply.status(409).send({
+        error: 'This source item was dismissed; un-dismiss it before drafting from it.',
+      })
+    }
+
+    const generated = await generatePostDraft({
+      topic: item.title,
+      source: {
+        sourceKey: item.sourceKey,
+        title: item.title,
+        url: item.url,
+        summary: item.summary,
+      },
+    })
+    if (generated.kind === 'error') {
+      return reply.status(502).send({
+        error: 'Draft generation failed.',
+        detail: generated.message,
+      })
+    }
+
+    const { post, sourceItem } = await withTransaction(async (client) => {
+      const created = await createSeoPost(client, {
+        scope: 'all',
+        slug: generated.draft.slug,
+        title: generated.draft.title,
+        metaDescription: generated.draft.meta_description,
+        excerpt: generated.draft.excerpt,
+        author: 'Freshly Baked Editorial',
+        tags: generated.draft.tags,
+        bodyRaw: generated.draft.body_raw,
+        bodySanitized: generated.draft.body_sanitized,
+        noindex: false,
+        source: 'generated',
+        // Provenance: which source lead this draft was generated from.
+        generationMeta: {
+          ...generated.meta,
+          sourceItemId: item.sourceItemId,
+          sourceKey: item.sourceKey,
+          sourceUrl: item.url,
+        },
+        userId: user.id,
+      })
+      const updated = await setSeoSourceItemStatus(
+        client,
+        item.sourceItemId,
+        'drafted',
+        user.id,
+      )
+      return { post: created, sourceItem: updated }
+    })
+
+    // setSeoSourceItemStatus only returns null if the row vanished mid-tx
+    // (it existed at the guard above); the tx would have surfaced any real
+    // error. Fall back to the pre-tx item rather than 500ing the draft.
+    return reply.status(201).send(
+      SeoSourceItemGenerateDraftResponseSchema.parse({
+        post,
+        sourceItem: sourceItem ?? { ...item, status: 'drafted' },
+      }),
+    )
   })
 }

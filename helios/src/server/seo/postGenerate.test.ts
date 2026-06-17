@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { parsePostGenerationContent } from './postGenerate.js'
+import { buildPostGenerationUserPrompt, parsePostGenerationContent } from './postGenerate.js'
 
 function validDraftJson(overrides: Record<string, unknown> = {}): string {
   return JSON.stringify({
@@ -52,5 +52,39 @@ describe('parsePostGenerationContent', () => {
 
   it('throws when a required field is empty', () => {
     expect(() => parsePostGenerationContent(validDraftJson({ body_sanitized: '' }))).toThrow()
+  })
+})
+
+describe('buildPostGenerationUserPrompt', () => {
+  it('is just the topic when no source is given (backward-compatible)', () => {
+    const prompt = buildPostGenerationUserPrompt({ topic: 'rooftop season' })
+    expect(prompt).toBe('topic: "rooftop season"')
+    expect(prompt).not.toMatch(/source_/)
+  })
+
+  it('grounds on the source title + url + summary with an original-rewrite instruction', () => {
+    const prompt = buildPostGenerationUserPrompt({
+      topic: 'NYC street fair',
+      source: {
+        sourceKey: 'gothamist',
+        title: 'Annual street fair returns',
+        url: 'https://gothamist.com/article/fair',
+        summary: 'Food vendors and live music downtown.',
+      },
+    })
+    expect(prompt).toMatch(/ORIGINAL article INSPIRED BY/)
+    expect(prompt).toContain('source_title: "Annual street fair returns"')
+    expect(prompt).toContain('source_url: "https://gothamist.com/article/fair"')
+    expect(prompt).toContain('source_summary: "Food vendors and live music downtown."')
+  })
+
+  it('omits the url/summary lines when those source fields are absent', () => {
+    const prompt = buildPostGenerationUserPrompt({
+      topic: 'internal note',
+      source: { sourceKey: 'fb-internal', title: 'New store opening', url: null, summary: null },
+    })
+    expect(prompt).toContain('source_title: "New store opening"')
+    expect(prompt).not.toMatch(/source_url:/)
+    expect(prompt).not.toMatch(/source_summary:/)
   })
 })
