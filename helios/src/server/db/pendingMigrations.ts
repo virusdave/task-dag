@@ -1226,6 +1226,34 @@ const SENTINELS: MigrationSentinel[] = [
       return hasNew && !hasOld
     },
   },
+  {
+    migrationId: '091_seo_source_items',
+    label:
+      'SEO auto-blog source ingestion (seo_source_allowlist + seo_source_items) ' +
+      '— required by the /api/seo/source-allowlist + /api/seo/source-items ' +
+      'control plane (parent EPIC §7.1 source intake, #44 P4). Without it the ' +
+      'source-allowlist + source-item routes 500.',
+    // Probe the live END-STATE the routes depend on, not just table
+    // existence: a partial/drifted apply (tables present but the dedup
+    // unique constraint, FK, or list indexes missing) would break ingest
+    // (`on conflict (dedup_hash)`) or the FK gate, so report it pending.
+    check: async (db) => {
+      const checks = await Promise.all([
+        tableExists(db, 'seo_source_allowlist'),
+        tableExists(db, 'seo_source_items'),
+        columnExists(db, 'seo_source_items', 'dedup_hash'),
+        columnExists(db, 'seo_source_items', 'status'),
+        // Inline `unique` constraints + the FK Postgres auto-names.
+        constraintExists(db, 'seo_source_allowlist', 'seo_source_allowlist_source_key_key'),
+        constraintExists(db, 'seo_source_items', 'seo_source_items_dedup_hash_key'),
+        constraintExists(db, 'seo_source_items', 'seo_source_items_source_key_fkey'),
+        constraintExists(db, 'seo_source_items', 'seo_source_items_status_check'),
+        indexExists(db, 'seo_source_items_status_idx'),
+        indexExists(db, 'seo_source_items_source_key_idx'),
+      ])
+      return checks.every(Boolean)
+    },
+  },
 ]
 
 interface CacheEntry {
