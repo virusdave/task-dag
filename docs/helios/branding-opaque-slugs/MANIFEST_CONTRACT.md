@@ -124,13 +124,37 @@ The producer is complete and green, but it cannot emit a *production-correct*
 manifest today. Both items below are explicitly deferred by the parent plan
 (§5 P4 rollout, §6.5.1 clean end-state) and are **out of P1-prereq scope**:
 
-1. **`FRESHLYBAKEDUS_PUBLIC_TOKEN_SECRET` is not provisioned into Helios.**
-   mss is not deployed on the Helios host and the secret is absent from
-   Helios's environment. A manifest built with the non-production fallback
-   secret would `308` live Google-Ads URLs to non-existent opaque pages
-   (404), so `publish --env prod` fails closed without the real secret. The
-   secret must be provisioned into Helios (e.g. via `nixos-sbc` +
-   `self-deploy`, operator approval) before a prod manifest can be produced.
+1. **`FRESHLYBAKEDUS_PUBLIC_TOKEN_SECRET` must be provisioned into Helios
+   (DECISION A, operator, #48).** mss is not deployed on the Helios host and
+   the secret is absent from Helios's environment. A manifest built with the
+   non-production fallback secret would `308` live Google-Ads URLs to
+   non-existent opaque pages (404), so `publish --env prod` fails closed
+   without the real secret.
+
+   The operator chose **Option A** (#48): keep `opaque_ref` in the manifest
+   and provision mss's real production secret into Helios — fewer downsides /
+   less brittleness than moving opaque derivation to a secret-holding
+   consumer (Option B). The producer now resolves the secret the **same
+   canonical way as every other Helios secret** (see
+   [`secret.ts`](../../../helios/src/server/branding/secret.ts)): the env var
+   `FRESHLYBAKEDUS_PUBLIC_TOKEN_SECRET`, with `_FILE` indirection and
+   `~/.secret/freshlybakedus/public-token-secret[.env]` fallbacks. To
+   provision (operator action — needs the **real** value from mss's secret
+   store; an agent must not copy a prod secret across systems):
+
+   - **Production (running services):** add the value as an agenix-encrypted
+     secret in `Nicponskis/nixos-sbc` and expose it to the helios units via
+     the systemd `EnvironmentFile` as `FRESHLYBAKEDUS_PUBLIC_TOKEN_SECRET`
+     (same mechanism as `VERISCAN_WEBHOOK_TOKEN` / `LP_EVENTS_INGEST_TOKEN`),
+     then `self-deploy-helios`.
+   - **One-off CLI publish:** alternatively drop the raw value into
+     `~/.secret/freshlybakedus/public-token-secret` on the host running
+     `branding-opaque-manifest publish --env prod`.
+
+   The value MUST equal mss's production `FRESHLYBAKEDUS_PUBLIC_TOKEN_SECRET`
+   (NOT the `freshlybakedus-nonproduction-public-token-secret` fallback);
+   `requireProductionBrandingSecret` rejects the fallback so a mismatched
+   manifest can never reach live ad traffic.
 
 2. **~~A canonical-registry slug collision must be resolved~~ — RESOLVED in
    the builder (#48).** Running the producer read-only against the live
@@ -148,16 +172,15 @@ manifest today. Both items below are explicitly deferred by the parent plan
 Until item 1 is done, the actual prod publish stays gated. mss P1 can already
 build against the **agreed contract** above (schema + golden vectors).
 
-> **On item 1 — why does Helios need the secret?** Only because the manifest
-> currently emits the final `opaque_ref` (so the operator's Ads-Editor CSV
-> migration can read literal-URL → opaque-URL directly). The opaque ref is
-> `HMAC(secret, sweedBrandId)`; to emit prod-correct refs Helios needs the
-> same secret mss uses, or every literal `308` lands on an opaque page mss
-> can't decode (→ 404). Helios does **not** need the secret to *know the
-> mapping* — it already emits the immutable `sweed_brand_id` per entry, and
-> any secret-holder (mss) can derive the opaque ref from that. So an
-> alternative is: Helios publishes `literal_slug → sweed_brand_id` only, and
-> the secret-holding consumer derives the opaque ref. That keeps the secret
-> out of Helios entirely, at the cost of moving the literal→opaque CSV
-> derivation to a secret-holding step. **Operator decision required** before
-> changing the agreed mss contract (which today includes `opaque_ref`).
+> **On item 1 — why does Helios need the secret? (resolved: A)** Helios needs
+> it only because the manifest emits the final `opaque_ref`
+> (`HMAC(secret, sweedBrandId)`), so the operator's Ads-Editor CSV migration
+> reads literal-URL → opaque-URL directly; to emit prod-correct refs Helios
+> needs the same secret mss uses, or every literal `308` lands on an opaque
+> page mss can't decode (→ 404). The considered **Option B** — Helios ships
+> only `sweed_brand_id` and the secret-holding consumer derives the ref,
+> keeping the secret out of Helios — was **not** chosen: the operator picked
+> **A** (#48) as having fewer downsides / less brittleness than moving the
+> literal→opaque CSV derivation to a secret-holding step and changing the
+> agreed mss contract. So the manifest keeps `opaque_ref` and the secret is
+> provisioned into Helios (see item 1 above for the how).

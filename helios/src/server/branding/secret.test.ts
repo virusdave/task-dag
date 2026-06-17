@@ -31,6 +31,12 @@ describe('resolveBrandingOpaqueSecret', () => {
       source: 'production',
     })
   })
+
+  it('does not touch the filesystem for an injected env object (hermetic)', () => {
+    // A plain injected env (not process.env) must resolve purely from the
+    // object — no .secret/ fallback file reads — so unit tests stay isolated.
+    expect(resolveBrandingOpaqueSecret({}).source).toBe('nonproduction-fallback')
+  })
 })
 
 describe('requireProductionBrandingSecret', () => {
