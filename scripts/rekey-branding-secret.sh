@@ -59,8 +59,17 @@
 #   scripts/rekey-branding-secret.sh --push     # ...and push to origin/master
 #   scripts/rekey-branding-secret.sh --identity ~/.ssh/id_ed25519_dave
 #   scripts/rekey-branding-secret.sh --keep     # keep the ephemeral clones
+#   scripts/rekey-branding-secret.sh --wrap-bare # source blob is a BARE secret
+#                                               #   value (no VAR=); wrap it as
+#                                               #   FRESHLYBAKEDUS_PUBLIC_TOKEN_SECRET=<value>
 #   scripts/rekey-branding-secret.sh --force    # provision even if the var-name
 #                                               #   sanity check can't confirm it
+#
+# The decrypted source is auto-normalized first: UTF-16 → UTF-8, and any UTF-8
+# BOM / CRLF stripped (those silently hide a valid VAR= from byte-wise checks
+# and from systemd's env-file parser). If the var still can't be confirmed the
+# script prints leak-safe structure only (byte/line/key-name counts, NEVER the
+# value) so you can tell a bare value from a wrong blob.
 #
 # Re-running is safe: every mutation is idempotent and the script aborts loudly
 # (without writing a partial commit) if any expected anchor is missing.
@@ -77,6 +86,7 @@ DO_PUSH=0
 KEEP=0
 ALLOW_NIX=1
 FORCE=0
+WRAP_BARE=0
 
 SRC_REL="secrets/vps-nixos-2/freshlybakedus-public-token.env.age"
 DST_REL="secrets/vps-nixos-3/freshlybakedus-public-token.env.age"
@@ -91,10 +101,11 @@ while [[ $# -gt 0 ]]; do
     --push)         DO_PUSH=1 ;;
     --keep)         KEEP=1 ;;
     --force)        FORCE=1 ;;
+    --wrap-bare)    WRAP_BARE=1 ;;
     --no-nix)       ALLOW_NIX=0 ;;
     --identity)     IDENTITY="${2:?--identity needs a path}"; shift ;;
     --identity=*)   IDENTITY="${1#*=}" ;;
-    -h|--help)      sed -n '2,80p' "$0"; exit 0 ;;
+    -h|--help)      sed -n '2,75p' "$0"; exit 0 ;;
     *) echo "error: unknown argument: $1" >&2; exit 2 ;;
   esac
   shift
@@ -172,25 +183,62 @@ VPS3_PUB="$(sed_pub vpsNixos3)"
 log "Recipients: dave + vpsNixos3 (parsed from $SECRETS_NIX)"
 
 # ── 3. Decrypt vps-nixos-2 copy, re-encrypt to vps-nixos-3 recipients ────────
+RAW="$WORK/plaintext.raw"
 PLAIN="$WORK/plaintext.env"
 log "Decrypting $SRC_REL with identity $IDENTITY"
-AGE -d -i "$IDENTITY" -o "$PLAIN" "$SRC_REL" \
+AGE -d -i "$IDENTITY" -o "$RAW" "$SRC_REL" \
   || die "decryption failed — is $IDENTITY the 'dave' key?"
+
+# Normalize encoding before inspecting/provisioning. A secret pasted from a
+# GUI / Windows tool can arrive as UTF-16 or carry a BOM / CRLF; that hides a
+# perfectly good VAR=value from a byte-wise grep (and from systemd's env-file
+# parser too), which is exactly the "decrypts fine but no keys found" symptom.
+# We transcode UTF-16 → UTF-8 (detected via embedded NUL bytes) and strip any
+# UTF-8 BOM + CR, producing a clean POSIX env file.
+if [[ "$(wc -c < "$RAW")" -ne "$(LC_ALL=C tr -d '\000' < "$RAW" | wc -c)" ]]; then
+  warn "source plaintext contains NUL bytes — looks like UTF-16; transcoding to UTF-8"
+  iconv -f UTF-16 -t UTF-8 "$RAW" > "$PLAIN" 2>/dev/null \
+    || iconv -f UTF-16LE -t UTF-8 "$RAW" > "$PLAIN" 2>/dev/null \
+    || cp "$RAW" "$PLAIN"
+else
+  cp "$RAW" "$PLAIN"
+fi
+# Strip a leading UTF-8 BOM and any trailing CR (bash $'' yields the raw bytes
+# so this is portable to BSD/macOS sed, which doesn't interpret \x escapes).
+sed -e $'1s/^\xef\xbb\xbf//' -e $'s/\r$//' "$PLAIN" > "$PLAIN.tmp" && mv "$PLAIN.tmp" "$PLAIN"
+rm -f "$RAW"
 
 # Defensive sanity check: confirm the decrypted file actually carries a
 # FRESHLYBAKEDUS_PUBLIC_TOKEN_SECRET assignment. Matched unanchored so a
-# leading `export `, indentation, a UTF-8 BOM, or CRLF endings don't trip it
-# — we only care that the var is present, not how it's formatted. If it's
-# genuinely absent we print the KEY NAMES found (values redacted) so you can
-# tell whether the wrong blob was decrypted, and --force lets you override.
+# leading `export `, indentation, or stray whitespace don't trip it — we only
+# care that the var is present, not how it's formatted.
 if ! grep -q 'FRESHLYBAKEDUS_PUBLIC_TOKEN_SECRET=' "$PLAIN"; then
   warn "decrypted plaintext has no FRESHLYBAKEDUS_PUBLIC_TOKEN_SECRET= assignment."
-  warn "env keys present in $SRC_REL (values redacted):"
-  sed -nE 's/^[[:space:]]*(export[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*)=.*/    \2/p' "$PLAIN" >&2 || true
-  if [[ "$FORCE" == 1 ]]; then
-    warn "--force given: provisioning this file to vps-nixos-3 anyway."
+  # Leak-safe diagnostics: structure only, NEVER the secret value.
+  b=$(wc -c < "$PLAIN" | tr -d ' ')
+  l=$(grep -c '' "$PLAIN" 2>/dev/null || echo '?')
+  eqs=$(LC_ALL=C tr -cd '=' < "$PLAIN" | wc -c | tr -d ' ')
+  warn "  structure (no values shown): bytes=$b lines=$l equals-signs=$eqs"
+  # A "bare value" is a non-empty file with no parseable KEY=value line. Note
+  # stray '=' (e.g. base64 padding in the secret) is NOT a key, so we key off
+  # the absence of a real assignment, not the equals-sign count.
+  keys="$(sed -nE 's/^[[:space:]]*(export[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*)=.*/\2/p' "$PLAIN")"
+  bare=0; [[ -z "$keys" && "$b" -gt 0 ]] && bare=1
+  if [[ -n "$keys" ]]; then
+    warn "  env key names present (values redacted):"
+    printf '      %s\n' $keys >&2
+  elif [[ "$bare" == 1 ]]; then
+    warn "  no KEY=value assignment — this looks like a BARE secret value, not an env file."
+    warn "  Re-run with --wrap-bare to wrap it as FRESHLYBAKEDUS_PUBLIC_TOKEN_SECRET=<value>."
+  fi
+  if [[ "$WRAP_BARE" == 1 && "$bare" == 1 ]]; then
+    warn "--wrap-bare given: wrapping the bare value as FRESHLYBAKEDUS_PUBLIC_TOKEN_SECRET=…"
+    val="$(tr -d '\r\n' < "$PLAIN")"
+    printf 'FRESHLYBAKEDUS_PUBLIC_TOKEN_SECRET=%s\n' "$val" > "$PLAIN"
+  elif [[ "$FORCE" == 1 ]]; then
+    warn "--force given: provisioning this file to vps-nixos-3 as-is anyway."
   else
-    die "refusing to provision a file without the expected var (re-run with --force to override)"
+    die "refusing to provision without the expected var (use --wrap-bare for a bare value, or --force to override)"
   fi
 fi
 
