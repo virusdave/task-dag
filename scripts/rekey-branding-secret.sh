@@ -6,34 +6,35 @@
 #
 # WHAT THIS DOES
 # --------------
-# Provisions FRESHLYBAKEDUS_PUBLIC_TOKEN_SECRET into the Helios runtime on
-# vps-nixos-3 so the branding manifest producer can derive prod-correct
-# opaque landing-page refs (opaque_ref = HMAC(secret, sweedBrandId)) when it
-# runs `branding-opaque-manifest publish --env prod`. The branding publish
-# oneshot must run on vps-nixos-3 (it writes the signed bundle to /cloud/lp,
-# which is read-write on vps3 and a read-only sshfs mirror on vps2).
+# Provisions ONE shared FRESHLYBAKEDUS_PUBLIC_TOKEN_SECRET onto every FBUS host
+# (vps-nixos-1, -2 and -3 by default) so the opaque landing-page refs match
+# everywhere: Helios on vps-nixos-3 MINTS opaque_ref = HMAC(secret, sweedBrandId)
+# when it runs `branding-opaque-manifest publish --env prod`, and the mss FBUS
+# frontends on vps-nixos-1/2 VERIFY those refs. If the three hosts don't carry
+# the identical plaintext, every opaque link breaks. (Helios publish must run on
+# vps-nixos-3 — it writes the signed bundle to /cloud/lp, read-write on vps3 and
+# a read-only sshfs mirror on vps2.)
 #
-# The required plaintext is IDENTICAL to the value already encrypted for the
-# mss FBUS frontends at secrets/vps-nixos-{1,2}/freshlybakedus-public-token.env.age
-# (a single `FRESHLYBAKEDUS_PUBLIC_TOKEN_SECRET=...` env line). So instead of
-# hand-copying a raw production secret across systems, this script:
+# The historical agenix copies at secrets/vps-nixos-{1,2}/freshlybakedus-public-token.env.age
+# were found to decrypt to EMPTY plaintext (a prior attempt mis-encrypted them),
+# so there is no canonical secret to copy. This script therefore:
 #
 #   1. ephemerally clones virusdave/top-level (canon), then uses it to locate
 #      and clone Nicponskis/nixos-sbc;
-#   2. decrypts the intact secrets/vps-nixos-1/freshlybakedus-public-token.env.age
-#      (the documented canonical copy) with YOUR age/ssh identity (the `dave`
-#      recipient). NOTE: the vps-nixos-2 copy is NOT used — it was found to
-#      decrypt to a *path string* (a prior attempt encrypted a filename instead
-#      of file contents) and is corrupt. Override the source with --source/SRC_REL,
-#      or skip agenix entirely with --plaintext-file <local file with the real
-#      FRESHLYBAKEDUS_PUBLIC_TOKEN_SECRET=… line>;
-#   3. re-encrypts the SAME plaintext to a new
-#      secrets/vps-nixos-3/freshlybakedus-public-token.env.age, targeted at the
-#      `dave` + `vpsNixos3` recipients pulled straight from secrets.nix, then
-#      decrypts that output again and verifies it is byte-for-byte identical to
+#   2. resolves ONE canonical plaintext, in priority order:
+#        a. --plaintext-file <file>  → encrypt that local file's CONTENTS;
+#        b. an existing host blob (or --source) that still decrypts (with YOUR
+#           `dave` age/ssh identity) to a real FRESHLYBAKEDUS_PUBLIC_TOKEN_SECRET=
+#           line — so reruns REUSE the live value instead of rotating it;
+#        c. otherwise, with --generate, mint a fresh 32-byte random secret;
+#   3. encrypts that SAME plaintext to each requested host's
+#      secrets/vps-nixos-N/freshlybakedus-public-token.env.age, targeted at the
+#      `dave` + `vpsNixosN` recipients pulled straight from secrets.nix, then
+#      decrypts each output again and verifies it is byte-for-byte identical to
 #      the source (so a wrong-content / path-as-data blob can never be committed);
-#   4. wires it up in nixos-sbc:
-#        - adds the publicKeys entry in secrets.nix,
+#   4. wires up vps-nixos-3 (Helios) in nixos-sbc (the mss hosts are already
+#      wired, so only their .age blobs are replaced):
+#        - adds the vps-nixos-3 publicKeys entry in secrets.nix,
 #        - declares the `helios-freshlybakedus-public-token-env` agenix secret
 #          in hosts/per-host/vps-nixos-3.nix (owner/group helios, mode 0400),
 #        - appends it to services.helios.environmentFiles;
@@ -62,17 +63,30 @@
 #
 # USAGE
 # -----
-#   scripts/rekey-branding-secret.sh            # do everything, stop before push
-#   scripts/rekey-branding-secret.sh --push     # ...and push to origin/master
+#   scripts/rekey-branding-secret.sh --generate # mint a fresh secret if none
+#                                               #   exists, provision all 3 hosts,
+#                                               #   stop before push
+#   scripts/rekey-branding-secret.sh --generate --push   # ...and push to master
+#   scripts/rekey-branding-secret.sh            # reuse an existing secret only
+#                                               #   (fails if none can be decrypted
+#                                               #   and --generate was not given)
+#   scripts/rekey-branding-secret.sh --hosts '1 2 3'     # which hosts to target
+#                                               #   (default: 1 2 3)
 #   scripts/rekey-branding-secret.sh --identity ~/.ssh/id_ed25519_dave
-#   scripts/rekey-branding-secret.sh --source secrets/vps-nixos-2/freshlybakedus-public-token.env.age
-#   scripts/rekey-branding-secret.sh --plaintext-file ./fbus-secret.env  # bypass agenix; encrypt this file's contents
+#   scripts/rekey-branding-secret.sh --source secrets/vps-nixos-1/freshlybakedus-public-token.env.age
+#   scripts/rekey-branding-secret.sh --plaintext-file ./fbus-secret.env  # encrypt this file's contents
 #   scripts/rekey-branding-secret.sh --keep     # keep the ephemeral clones
 #   scripts/rekey-branding-secret.sh --wrap-bare # source blob is a BARE secret
 #                                               #   value (no VAR=); wrap it as
 #                                               #   FRESHLYBAKEDUS_PUBLIC_TOKEN_SECRET=<value>
 #   scripts/rekey-branding-secret.sh --force    # provision even if the var-name
 #                                               #   sanity check can't confirm it
+#
+# IMPORTANT (rotation safety): once a secret is live, prefer NOT passing
+# --generate on reruns. With an existing valid blob the script REUSES it; only
+# an empty/garbage state (today's situation) triggers generation. Generating a
+# new secret rotates the live HMAC key, which invalidates every already-issued
+# opaque landing-page ref until all hosts are redeployed.
 #
 # The decrypted source is auto-normalized first: UTF-16 → UTF-8, and any UTF-8
 # BOM / CRLF stripped (those silently hide a valid VAR= from byte-wise checks
@@ -96,6 +110,11 @@ KEEP=0
 ALLOW_NIX=1
 FORCE=0
 WRAP_BARE=0
+GENERATE=0
+# Which hosts to provision the SAME secret to. mss FBUS runs on vps-nixos-1 and
+# vps-nixos-2 (they verify the opaque tokens) and Helios on vps-nixos-3 mints
+# them, so all three must share one plaintext or the opaque refs won't match.
+HOSTS="${HOSTS:-1 2 3}"
 
 # Source the real plaintext from the vps-nixos-1 copy by default: it is the
 # documented canonical FRESHLYBAKEDUS_PUBLIC_TOKEN_SECRET env file and was not
@@ -110,7 +129,7 @@ DST_REL="secrets/vps-nixos-3/freshlybakedus-public-token.env.age"
 HOST_NIX="hosts/per-host/vps-nixos-3.nix"
 SECRETS_NIX="secrets.nix"
 AGENIX_ATTR="helios-freshlybakedus-public-token-env"
-COMMIT_MSG="helios(branding): provision FRESHLYBAKEDUS_PUBLIC_TOKEN_SECRET on vps-nixos-3 (FreshlyBakedNYC/automation#48)"
+COMMIT_MSG="helios(branding): provision shared FRESHLYBAKEDUS_PUBLIC_TOKEN_SECRET across vps-nixos-1/2/3 (FreshlyBakedNYC/automation#48)"
 
 # ── Arg parsing ──────────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
@@ -119,6 +138,7 @@ while [[ $# -gt 0 ]]; do
     --keep)         KEEP=1 ;;
     --force)        FORCE=1 ;;
     --wrap-bare)    WRAP_BARE=1 ;;
+    --generate)     GENERATE=1 ;;
     --no-nix)       ALLOW_NIX=0 ;;
     --identity)     IDENTITY="${2:?--identity needs a path}"; shift ;;
     --identity=*)   IDENTITY="${1#*=}" ;;
@@ -126,7 +146,9 @@ while [[ $# -gt 0 ]]; do
     --plaintext-file=*) PLAINTEXT_FILE="${1#*=}" ;;
     --source)       SRC_REL="${2:?--source needs a path}"; shift ;;
     --source=*)     SRC_REL="${1#*=}" ;;
-    -h|--help)      sed -n '2,84p' "$0"; exit 0 ;;
+    --hosts)        HOSTS="${2:?--hosts needs a value like '1 2 3'}"; shift ;;
+    --hosts=*)      HOSTS="${1#*=}" ;;
+    -h|--help)      sed -n '2,98p' "$0"; exit 0 ;;
     *) echo "error: unknown argument: $1" >&2; exit 2 ;;
   esac
   shift
@@ -193,86 +215,119 @@ cd "$REPO"
 # ── Sanity checks on the tree ────────────────────────────────────────────────
 [[ -f "$SECRETS_NIX" ]] || die "$SECRETS_NIX missing in nixos-sbc clone"
 [[ -f "$HOST_NIX"    ]] || die "$HOST_NIX missing in nixos-sbc clone"
-[[ -f "$SRC_REL"     ]] || die "source secret missing: $SRC_REL"
+# NOTE: $SRC_REL is now only an OPTIONAL candidate (the script can reuse an
+# existing host blob or --generate a fresh secret), so its absence is not fatal.
 
 # ── 2. Pull recipients straight from secrets.nix (single source of truth) ────
 sed_pub() { sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*\"\\(ssh-[^\"]*\\)\".*/\\1/p" "$SECRETS_NIX" | head -1; }
 DAVE_PUB="$(sed_pub dave)"
-VPS3_PUB="$(sed_pub vpsNixos3)"
 [[ -n "$DAVE_PUB" ]] || die "could not read 'dave' pubkey from $SECRETS_NIX"
-[[ -n "$VPS3_PUB" ]] || die "could not read 'vpsNixos3' pubkey from $SECRETS_NIX"
-log "Recipients: dave + vpsNixos3 (parsed from $SECRETS_NIX)"
+for h in $HOSTS; do
+  [[ "$h" =~ ^[123]$ ]] || die "invalid host '$h' in --hosts (expected 1, 2, and/or 3)"
+  [[ -n "$(sed_pub "vpsNixos${h}")" ]] || die "could not read 'vpsNixos${h}' pubkey from $SECRETS_NIX"
+done
+log "Recipients parsed from $SECRETS_NIX: dave + vpsNixos{$(echo $HOSTS | tr ' ' ,)}"
 
-# ── 3. Obtain the real plaintext, re-encrypt to vps-nixos-3 recipients ───────
-# IMPORTANT: every `age` call here passes the input as a FILE (either the
-# positional `IN` argument or, for decryption, the named ciphertext). age then
-# operates on the file's CONTENTS. It never receives a path *as data*, which is
-# how a previous attempt corrupted a blob (encrypting the string
-# "/tmp/…/plaintext.env" instead of that file's bytes). The round-trip
-# verification at the end of this section makes that class of mistake
-# impossible to commit.
-RAW="$WORK/plaintext.raw"
+# ── 3. Resolve ONE canonical plaintext, fan it out to every host ─────────────
+# The SAME FRESHLYBAKEDUS_PUBLIC_TOKEN_SECRET must land on every host in $HOSTS:
+# Helios on vps-nixos-3 mints opaque landing-page refs as HMAC(secret, brandId)
+# and the mss FBUS frontends on vps-nixos-1/2 verify them, so any mismatch
+# breaks every opaque link. We therefore resolve exactly one plaintext and
+# encrypt that identical value to each host's recipients.
+#
+# IMPORTANT: every `age` call passes its input as a FILE, so age operates on the
+# file's CONTENTS, never on a path *as data* (the bug that corrupted a prior
+# blob — it encrypted the string "/tmp/…/plaintext.env" instead of its bytes).
+# The per-host round-trip verification below makes that impossible to commit.
 PLAIN="$WORK/plaintext.env"
+
+# normalize_env <in> <out>: transcode UTF-16 → UTF-8 and strip a UTF-8 BOM /
+# trailing CR (any of which hide a valid VAR= from byte-wise greps and from
+# systemd's env-file parser). Non-destructive: only overwrites when the rewrite
+# produced non-empty output, and runs under LC_ALL=C so macOS/BSD sed never
+# aborts with "RE error: illegal byte sequence" on raw BOM bytes.
+normalize_env() {
+  local in="$1" out="$2" b nb
+  b=$(wc -c < "$in" | tr -d ' ')
+  nb=$(LC_ALL=C tr -d '\000' < "$in" | wc -c | tr -d ' ')
+  if [[ "$b" -ne "$nb" ]]; then
+    iconv -f UTF-16 -t UTF-8 "$in" > "$out" 2>/dev/null \
+      || iconv -f UTF-16LE -t UTF-8 "$in" > "$out" 2>/dev/null \
+      || cp "$in" "$out"
+    [[ -s "$out" ]] || cp "$in" "$out"
+  else
+    cp "$in" "$out"
+  fi
+  if LC_ALL=C sed -e $'1s/^\xef\xbb\xbf//' -e $'s/\r$//' "$out" > "$out.tmp" 2>/dev/null && [[ -s "$out.tmp" ]]; then
+    mv "$out.tmp" "$out"
+  else
+    rm -f "$out.tmp"
+  fi
+}
+
+# try_existing_secret <age-file> <out>: decrypt with $IDENTITY; succeed only if
+# the result is non-empty AND carries FRESHLYBAKEDUS_PUBLIC_TOKEN_SECRET=. Used
+# to (a) source an already-canonical secret and (b) make reruns REUSE the
+# provisioned value instead of minting a fresh one (which would rotate the live
+# key out from under already-deployed hosts).
+try_existing_secret() {
+  local src="$1" out="$2"
+  [[ -f "$src" ]] || return 1
+  AGE -d -i "$IDENTITY" -o "$out.raw" "$src" 2>/dev/null || { rm -f "$out.raw"; return 1; }
+  normalize_env "$out.raw" "$out"; rm -f "$out.raw"
+  [[ -s "$out" ]] && grep -q 'FRESHLYBAKEDUS_PUBLIC_TOKEN_SECRET=' "$out"
+}
+
+SECRET_ORIGIN=""
 if [[ -n "$PLAINTEXT_FILE" ]]; then
   [[ -f "$PLAINTEXT_FILE" ]] || die "--plaintext-file not found: $PLAINTEXT_FILE"
   log "Using operator-supplied plaintext file (encrypting its CONTENTS): $PLAINTEXT_FILE"
-  cp "$PLAINTEXT_FILE" "$RAW"
+  normalize_env "$PLAINTEXT_FILE" "$PLAIN"
+  SECRET_ORIGIN="operator file $PLAINTEXT_FILE"
 else
-  log "Decrypting $SRC_REL with identity $IDENTITY"
-  AGE -d -i "$IDENTITY" -o "$RAW" "$SRC_REL" \
-    || die "decryption failed — is $IDENTITY the 'dave' key?"
+  # Reuse an already-provisioned secret if any candidate blob still decrypts to
+  # a real one, so the value stays stable across reruns. Candidates: the
+  # explicit --source override plus each requested host's destination blob.
+  CANDIDATES="$SRC_REL"
+  for h in $HOSTS; do CANDIDATES="$CANDIDATES secrets/vps-nixos-${h}/freshlybakedus-public-token.env.age"; done
+  for c in $CANDIDATES; do
+    if try_existing_secret "$c" "$PLAIN"; then
+      log "Reusing the existing canonical secret found in $c"
+      SECRET_ORIGIN="existing $c"
+      break
+    fi
+  done
 fi
 
-# age can exit 0 yet write nothing (e.g. the blob's payload is empty, or a
-# subtle CLI/identity edge case). Catch that here rather than silently
-# provisioning an empty secret.
-rawbytes=$(wc -c < "$RAW" | tr -d ' ')
-log "Source plaintext is $rawbytes bytes"
-[[ "$rawbytes" -gt 0 ]] || die "source decrypted to 0 bytes with $IDENTITY — wrong key/blob, or an empty blob. Try --identity, --source <age file>, or --plaintext-file <local env file>."
-
-# Normalize encoding before inspecting/provisioning. A secret pasted from a
-# GUI / Windows tool can arrive as UTF-16 or carry a BOM / CRLF; that hides a
-# perfectly good VAR=value from a byte-wise grep (and from systemd's env-file
-# parser too). All byte twiddling runs under LC_ALL=C so BSD/macOS sed never
-# aborts with "RE error: illegal byte sequence" on the raw BOM bytes, and every
-# rewrite is non-destructive: we only replace $PLAIN when the rewrite produced
-# non-empty output, so normalization can never zero out a good secret.
-if [[ "$rawbytes" -ne "$(LC_ALL=C tr -d '\000' < "$RAW" | wc -c | tr -d ' ')" ]]; then
-  warn "source plaintext contains NUL bytes — looks like UTF-16; transcoding to UTF-8"
-  iconv -f UTF-16 -t UTF-8 "$RAW" > "$PLAIN" 2>/dev/null \
-    || iconv -f UTF-16LE -t UTF-8 "$RAW" > "$PLAIN" 2>/dev/null \
-    || cp "$RAW" "$PLAIN"
-  [[ -s "$PLAIN" ]] || cp "$RAW" "$PLAIN"   # transcode produced nothing → keep raw
-else
-  cp "$RAW" "$PLAIN"
+if [[ -z "$SECRET_ORIGIN" ]]; then
+  # Nothing usable on disk. Per the operator decision on automation#48 the
+  # historical agenix copies decrypt to EMPTY plaintext (322-byte 2-recipient
+  # blobs of nothing), so there is no secret to copy — mint a fresh one. 32
+  # random bytes hex-encoded (64 chars) is ample for an HMAC key. We refuse
+  # unless --generate was given, so a stale/wrong identity that merely FAILED
+  # to decrypt a good blob can never silently rotate the live secret.
+  if [[ "$GENERATE" != 1 ]]; then
+    die "no FRESHLYBAKEDUS_PUBLIC_TOKEN_SECRET could be decrypted from any host blob with $IDENTITY, and --generate was not given. Re-run with --generate to mint a fresh secret, or pass --plaintext-file <file> / --identity <key> to supply the real one."
+  fi
+  command -v openssl >/dev/null || die "--generate needs openssl (not found on PATH)"
+  warn "No existing secret found — GENERATING a fresh FRESHLYBAKEDUS_PUBLIC_TOKEN_SECRET (32 random bytes)."
+  warn "This becomes the live HMAC key for ALL opaque landing-page refs on vps-nixos-{$(echo "$HOSTS" | tr ' ' ,)}."
+  printf 'FRESHLYBAKEDUS_PUBLIC_TOKEN_SECRET=%s\n' "$(openssl rand -hex 32)" > "$PLAIN"
+  SECRET_ORIGIN="freshly generated"
 fi
-# Strip a leading UTF-8 BOM and any trailing CR. bash $'' yields the raw bytes
-# (portable to BSD/macOS sed, which doesn't interpret \x escapes); LC_ALL=C
-# avoids the macOS illegal-byte-sequence abort; and we keep the result only if
-# it is non-empty so a sed hiccup can't blank the secret.
-if LC_ALL=C sed -e $'1s/^\xef\xbb\xbf//' -e $'s/\r$//' "$PLAIN" > "$PLAIN.tmp" 2>/dev/null && [[ -s "$PLAIN.tmp" ]]; then
-  mv "$PLAIN.tmp" "$PLAIN"
-else
-  rm -f "$PLAIN.tmp"
-fi
-rm -f "$RAW"
 
-# Defensive sanity check: confirm the decrypted file actually carries a
-# FRESHLYBAKEDUS_PUBLIC_TOKEN_SECRET assignment. Matched unanchored so a
-# leading `export `, indentation, or stray whitespace don't trip it — we only
-# care that the var is present, not how it's formatted.
+# Final guard: confirm the resolved plaintext carries the var (covers the
+# --plaintext-file / bare-value cases). Leak-safe diagnostics on failure:
+# structure only, NEVER the secret value.
+rawbytes=$(wc -c < "$PLAIN" | tr -d ' ')
+[[ "$rawbytes" -gt 0 ]] || die "resolved plaintext is empty ($SECRET_ORIGIN)"
 if ! grep -q 'FRESHLYBAKEDUS_PUBLIC_TOKEN_SECRET=' "$PLAIN"; then
-  warn "decrypted plaintext has no FRESHLYBAKEDUS_PUBLIC_TOKEN_SECRET= assignment."
-  # Leak-safe diagnostics: structure only, NEVER the secret value.
+  warn "resolved plaintext ($SECRET_ORIGIN) has no FRESHLYBAKEDUS_PUBLIC_TOKEN_SECRET= assignment."
   b=$(wc -c < "$PLAIN" | tr -d ' ')
   l=$(wc -l < "$PLAIN" | tr -d ' ')
-  eqs=$(LC_ALL=C tr -cd '=' < "$PLAIN" | wc -c | tr -d ' ')
-  warn "  structure (no values shown): bytes=$b lines=$l equals-signs=$eqs"
-  # A "bare value" is a non-empty file with no parseable KEY=value line. Note
-  # stray '=' (e.g. base64 padding in the secret) is NOT a key, so we key off
-  # the absence of a real assignment, not the equals-sign count.
   keys="$(sed -nE 's/^[[:space:]]*(export[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*)=.*/\2/p' "$PLAIN")"
   bare=0; [[ -z "$keys" && "$b" -gt 0 ]] && bare=1
+  warn "  structure (no values shown): bytes=$b lines=$l"
   if [[ -n "$keys" ]]; then
     warn "  env key names present (values redacted):"
     printf '      %s\n' $keys >&2
@@ -285,37 +340,60 @@ if ! grep -q 'FRESHLYBAKEDUS_PUBLIC_TOKEN_SECRET=' "$PLAIN"; then
     val="$(tr -d '\r\n' < "$PLAIN")"
     printf 'FRESHLYBAKEDUS_PUBLIC_TOKEN_SECRET=%s\n' "$val" > "$PLAIN"
   elif [[ "$FORCE" == 1 ]]; then
-    warn "--force given: provisioning this file to vps-nixos-3 as-is anyway."
+    warn "--force given: provisioning this plaintext as-is anyway."
   else
     die "refusing to provision without the expected var (use --wrap-bare for a bare value, or --force to override)"
   fi
 fi
+log "Canonical plaintext resolved ($SECRET_ORIGIN); fanning out to vps-nixos-{$(echo "$HOSTS" | tr ' ' ,)}"
 
-log "Re-encrypting → $DST_REL (dave + vpsNixos3)"
-AGE -r "$DAVE_PUB" -r "$VPS3_PUB" -o "$DST_REL" "$PLAIN" \
-  || die "re-encryption failed"
+# Encrypt the SAME plaintext to each requested host (recipients dave + vpsNixosN
+# straight from secrets.nix), then round-trip verify each blob decrypts back to
+# the exact plaintext. The cmp guard makes a "path-as-data" / wrong-content blob
+# impossible to commit.
+for h in $HOSTS; do
+  dst="secrets/vps-nixos-${h}/freshlybakedus-public-token.env.age"
+  hostpub="$(sed_pub "vpsNixos${h}")"
+  mkdir -p "$(dirname "$dst")"
+  # age ciphertext is non-deterministic, so blindly re-encrypting churns the
+  # blob (and git history) on every run even when the secret is unchanged. Skip
+  # the rewrite when $dst already decrypts to the exact canonical plaintext.
+  if [[ -f "$dst" ]] && try_existing_secret "$dst" "$WORK/cur.${h}.env" && cmp -s "$PLAIN" "$WORK/cur.${h}.env"; then
+    rm -f "$WORK/cur.${h}.env"
+    log "$dst already holds the canonical plaintext — leaving as-is"
+    continue
+  fi
+  rm -f "$WORK/cur.${h}.env"
+  log "Re-encrypting → $dst (dave + vpsNixos${h})"
+  AGE -r "$DAVE_PUB" -r "$hostpub" -o "$dst" "$PLAIN" \
+    || die "re-encryption failed for $dst"
+  verify="$WORK/verify.${h}.env"
+  AGE -d -i "$IDENTITY" -o "$verify" "$dst" \
+    || die "could not decrypt the file we just wrote ($dst) with $IDENTITY (recipient mismatch?)"
+  cmp -s "$PLAIN" "$verify" \
+    || die "re-encrypted $dst does NOT match the source plaintext — refusing to commit"
+  grep -q 'FRESHLYBAKEDUS_PUBLIC_TOKEN_SECRET=' "$verify" \
+    || die "verification: $dst is missing FRESHLYBAKEDUS_PUBLIC_TOKEN_SECRET="
+  rm -f "$verify"
+  log "Verified $dst contents match the canonical plaintext."
+done
+rm -f "$PLAIN"
 
-# Round-trip verification: decrypt what we just wrote and prove it is byte-for-
-# byte the source plaintext AND still carries the expected var. This is the
-# guard that makes a "path encrypted as data" (or any wrong-content) blob
-# impossible to commit — if $DST_REL ever held a path string, cmp would fail.
-log "Verifying $DST_REL decrypts back to the exact source plaintext"
-VERIFY="$WORK/verify.env"
-AGE -d -i "$IDENTITY" -o "$VERIFY" "$DST_REL" \
-  || die "could not decrypt the file we just wrote with $IDENTITY (recipient mismatch?)"
-cmp -s "$PLAIN" "$VERIFY" \
-  || die "re-encrypted output does NOT match the source plaintext — refusing to commit"
-grep -q 'FRESHLYBAKEDUS_PUBLIC_TOKEN_SECRET=' "$VERIFY" \
-  || die "verification: $DST_REL is missing FRESHLYBAKEDUS_PUBLIC_TOKEN_SECRET="
-log "Verified: $DST_REL contents match the source and contain the expected var."
-rm -f "$PLAIN" "$VERIFY"
-
-# ── 4a. secrets.nix: add the vps-nixos-3 publicKeys entry (idempotent) ───────
-SECRETS_LINE="  \"$DST_REL\".publicKeys = [ dave vpsNixos3 ];"
-if grep -qF "\"$DST_REL\".publicKeys" "$SECRETS_NIX"; then
-  log "secrets.nix already declares $DST_REL — leaving as-is"
-else
-  log "Adding $DST_REL to secrets.nix"
+# ── 4a. secrets.nix: ensure a publicKeys entry per host blob (idempotent) ────
+# The mss hosts (vps-nixos-1/2) already declare their freshlybakedus blobs, so
+# their entries are left untouched. Only vps-nixos-3 (Helios) is newly added —
+# inserted right after the existing vps-nixos-3 lp-bundle signing-key entry.
+for h in $HOSTS; do
+  dst="secrets/vps-nixos-${h}/freshlybakedus-public-token.env.age"
+  if grep -qF "\"$dst\".publicKeys" "$SECRETS_NIX"; then
+    log "secrets.nix already declares $dst — leaving as-is"
+    continue
+  fi
+  if [[ "$h" != 3 ]]; then
+    die "secrets.nix has no publicKeys entry for $dst (expected to already exist for the mss host vps-nixos-${h}); hand-edit needed"
+  fi
+  log "Adding $dst to secrets.nix"
+  SECRETS_LINE="  \"$dst\".publicKeys = [ dave vpsNixos3 ];"
   ANCHOR='vps-nixos-3/helios-lp-bundle-signing-key.age".publicKeys'
   awk -v ins="$SECRETS_LINE" -v anchor="$ANCHOR" '
     { print }
@@ -324,7 +402,7 @@ else
   ' "$SECRETS_NIX" > "$SECRETS_NIX.tmp" 2>"$WORK/awk.err" \
     || die "could not find the vps-nixos-3 anchor in $SECRETS_NIX; hand-edit needed"
   mv "$SECRETS_NIX.tmp" "$SECRETS_NIX"
-fi
+done
 
 # Helper: insert a block (read from a file, no escape mangling) BEFORE the
 # first line containing a literal anchor substring. Idempotent guard handled
@@ -352,6 +430,13 @@ insert_line_after() { # <target> <anchor-substr> <line>
   ' "$target" > "$target.tmp" \
     && mv "$target.tmp" "$target"
 }
+
+# ── 4b/4c. Helios wiring on vps-nixos-3 (only when host 3 is targeted) ───────
+# vps-nixos-1/2 already wire their freshlybakedus secret into mss, so the Nix
+# host-module edits below are vps-nixos-3-specific (declare the agenix secret +
+# add it to services.helios.environmentFiles). Skip them entirely if 3 is not
+# in $HOSTS.
+if [[ " $HOSTS " == *" 3 "* ]]; then
 
 # ── 4b. vps-nixos-3.nix: declare the agenix secret (idempotent) ──────────────
 if grep -qF "$AGENIX_ATTR = {" "$HOST_NIX"; then
@@ -388,8 +473,13 @@ else
     || die "could not find the environmentFiles anchor (helios-runtime-tokens-env.path) in $HOST_NIX; hand-edit needed"
 fi
 
+fi  # end host-3-only Helios wiring
+
 # ── 5. Stage, show diff, commit, (push) ──────────────────────────────────────
-git add "$DST_REL" "$SECRETS_NIX" "$HOST_NIX"
+git add "$SECRETS_NIX" "$HOST_NIX"
+for h in $HOSTS; do
+  git add "secrets/vps-nixos-${h}/freshlybakedus-public-token.env.age"
+done
 
 if git diff --cached --quiet; then
   log "No changes to commit — nixos-sbc already fully provisioned. Nothing to do."
@@ -416,17 +506,26 @@ else
   [[ "$KEEP" == 1 ]] || warn "NOTE: the clone at $REPO is deleted on exit; use --keep to push manually later."
 fi
 
+DEPLOY_HOSTS=""
+for h in $HOSTS; do DEPLOY_HOSTS="$DEPLOY_HOSTS vps-nixos-${h}"; done
+DEPLOY_HOSTS="${DEPLOY_HOSTS# }"
+
 cat >&2 <<EOF
 
 ────────────────────────────────────────────────────────────────────────────
 Next steps (operator, on the fleet):
 
-  1. Deploy vps-nixos-3 so agenix materialises the new secret and the helios
-     units pick it up:
+  1. Deploy EVERY affected host so agenix materialises the (identical) secret.
+     The opaque refs only match if vps-nixos-1, -2 and -3 all carry the same
+     plaintext, so deploy all of them:
 
-       ssh -p 22223 vps-nixos-3 self-deploy        # NixOS system rebuild
+EOF
+for h in $HOSTS; do
+  echo "       ssh -p 22223 vps-nixos-${h} self-deploy" >&2
+done
+cat >&2 <<EOF
 
-  2. Verify the secret is present for Helios:
+  2. Verify the secret is present for Helios (vps-nixos-3):
 
        ssh -p 22223 vps-nixos-3 'systemctl show -p EnvironmentFiles helios-server.service | tr ":" "\n" | grep freshlybakedus'
        ssh -p 22223 vps-nixos-3 'ls -l /run/agenix/$AGENIX_ATTR'
@@ -435,6 +534,8 @@ Next steps (operator, on the fleet):
      closed on the secret (runs on vps-nixos-3, where /cloud/lp is writable):
 
        branding-opaque-manifest publish --env prod   # (or build first to dry-run)
+
+Affected hosts this run: $DEPLOY_HOSTS
 
 The lp-bundle signing key is already provisioned on vps-nixos-3
 (secrets/vps-nixos-3/helios-lp-bundle-signing-key.age →
