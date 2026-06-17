@@ -223,23 +223,38 @@ else
     || die "decryption failed — is $IDENTITY the 'dave' key?"
 fi
 
+# age can exit 0 yet write nothing (e.g. the blob's payload is empty, or a
+# subtle CLI/identity edge case). Catch that here rather than silently
+# provisioning an empty secret.
+rawbytes=$(wc -c < "$RAW" | tr -d ' ')
+log "Source plaintext is $rawbytes bytes"
+[[ "$rawbytes" -gt 0 ]] || die "source decrypted to 0 bytes with $IDENTITY — wrong key/blob, or an empty blob. Try --identity, --source <age file>, or --plaintext-file <local env file>."
+
 # Normalize encoding before inspecting/provisioning. A secret pasted from a
 # GUI / Windows tool can arrive as UTF-16 or carry a BOM / CRLF; that hides a
 # perfectly good VAR=value from a byte-wise grep (and from systemd's env-file
-# parser too), which is exactly the "decrypts fine but no keys found" symptom.
-# We transcode UTF-16 → UTF-8 (detected via embedded NUL bytes) and strip any
-# UTF-8 BOM + CR, producing a clean POSIX env file.
-if [[ "$(wc -c < "$RAW")" -ne "$(LC_ALL=C tr -d '\000' < "$RAW" | wc -c)" ]]; then
+# parser too). All byte twiddling runs under LC_ALL=C so BSD/macOS sed never
+# aborts with "RE error: illegal byte sequence" on the raw BOM bytes, and every
+# rewrite is non-destructive: we only replace $PLAIN when the rewrite produced
+# non-empty output, so normalization can never zero out a good secret.
+if [[ "$rawbytes" -ne "$(LC_ALL=C tr -d '\000' < "$RAW" | wc -c | tr -d ' ')" ]]; then
   warn "source plaintext contains NUL bytes — looks like UTF-16; transcoding to UTF-8"
   iconv -f UTF-16 -t UTF-8 "$RAW" > "$PLAIN" 2>/dev/null \
     || iconv -f UTF-16LE -t UTF-8 "$RAW" > "$PLAIN" 2>/dev/null \
     || cp "$RAW" "$PLAIN"
+  [[ -s "$PLAIN" ]] || cp "$RAW" "$PLAIN"   # transcode produced nothing → keep raw
 else
   cp "$RAW" "$PLAIN"
 fi
-# Strip a leading UTF-8 BOM and any trailing CR (bash $'' yields the raw bytes
-# so this is portable to BSD/macOS sed, which doesn't interpret \x escapes).
-sed -e $'1s/^\xef\xbb\xbf//' -e $'s/\r$//' "$PLAIN" > "$PLAIN.tmp" && mv "$PLAIN.tmp" "$PLAIN"
+# Strip a leading UTF-8 BOM and any trailing CR. bash $'' yields the raw bytes
+# (portable to BSD/macOS sed, which doesn't interpret \x escapes); LC_ALL=C
+# avoids the macOS illegal-byte-sequence abort; and we keep the result only if
+# it is non-empty so a sed hiccup can't blank the secret.
+if LC_ALL=C sed -e $'1s/^\xef\xbb\xbf//' -e $'s/\r$//' "$PLAIN" > "$PLAIN.tmp" 2>/dev/null && [[ -s "$PLAIN.tmp" ]]; then
+  mv "$PLAIN.tmp" "$PLAIN"
+else
+  rm -f "$PLAIN.tmp"
+fi
 rm -f "$RAW"
 
 # Defensive sanity check: confirm the decrypted file actually carries a
@@ -250,7 +265,7 @@ if ! grep -q 'FRESHLYBAKEDUS_PUBLIC_TOKEN_SECRET=' "$PLAIN"; then
   warn "decrypted plaintext has no FRESHLYBAKEDUS_PUBLIC_TOKEN_SECRET= assignment."
   # Leak-safe diagnostics: structure only, NEVER the secret value.
   b=$(wc -c < "$PLAIN" | tr -d ' ')
-  l=$(grep -c '' "$PLAIN" 2>/dev/null || echo '?')
+  l=$(wc -l < "$PLAIN" | tr -d ' ')
   eqs=$(LC_ALL=C tr -cd '=' < "$PLAIN" | wc -c | tr -d ' ')
   warn "  structure (no values shown): bytes=$b lines=$l equals-signs=$eqs"
   # A "bare value" is a non-empty file with no parseable KEY=value line. Note
