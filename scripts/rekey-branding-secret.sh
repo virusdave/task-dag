@@ -59,6 +59,8 @@
 #   scripts/rekey-branding-secret.sh --push     # ...and push to origin/master
 #   scripts/rekey-branding-secret.sh --identity ~/.ssh/id_ed25519_dave
 #   scripts/rekey-branding-secret.sh --keep     # keep the ephemeral clones
+#   scripts/rekey-branding-secret.sh --force    # provision even if the var-name
+#                                               #   sanity check can't confirm it
 #
 # Re-running is safe: every mutation is idempotent and the script aborts loudly
 # (without writing a partial commit) if any expected anchor is missing.
@@ -74,6 +76,7 @@ BRANCH="master"
 DO_PUSH=0
 KEEP=0
 ALLOW_NIX=1
+FORCE=0
 
 SRC_REL="secrets/vps-nixos-2/freshlybakedus-public-token.env.age"
 DST_REL="secrets/vps-nixos-3/freshlybakedus-public-token.env.age"
@@ -87,6 +90,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --push)         DO_PUSH=1 ;;
     --keep)         KEEP=1 ;;
+    --force)        FORCE=1 ;;
     --no-nix)       ALLOW_NIX=0 ;;
     --identity)     IDENTITY="${2:?--identity needs a path}"; shift ;;
     --identity=*)   IDENTITY="${1#*=}" ;;
@@ -173,9 +177,21 @@ log "Decrypting $SRC_REL with identity $IDENTITY"
 AGE -d -i "$IDENTITY" -o "$PLAIN" "$SRC_REL" \
   || die "decryption failed — is $IDENTITY the 'dave' key?"
 
-# Defensive: confirm the plaintext is the expected single env var.
-if ! grep -q '^FRESHLYBAKEDUS_PUBLIC_TOKEN_SECRET=' "$PLAIN"; then
-  die "decrypted plaintext does not contain FRESHLYBAKEDUS_PUBLIC_TOKEN_SECRET= (refusing to proceed)"
+# Defensive sanity check: confirm the decrypted file actually carries a
+# FRESHLYBAKEDUS_PUBLIC_TOKEN_SECRET assignment. Matched unanchored so a
+# leading `export `, indentation, a UTF-8 BOM, or CRLF endings don't trip it
+# — we only care that the var is present, not how it's formatted. If it's
+# genuinely absent we print the KEY NAMES found (values redacted) so you can
+# tell whether the wrong blob was decrypted, and --force lets you override.
+if ! grep -q 'FRESHLYBAKEDUS_PUBLIC_TOKEN_SECRET=' "$PLAIN"; then
+  warn "decrypted plaintext has no FRESHLYBAKEDUS_PUBLIC_TOKEN_SECRET= assignment."
+  warn "env keys present in $SRC_REL (values redacted):"
+  sed -nE 's/^[[:space:]]*(export[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*)=.*/    \2/p' "$PLAIN" >&2 || true
+  if [[ "$FORCE" == 1 ]]; then
+    warn "--force given: provisioning this file to vps-nixos-3 anyway."
+  else
+    die "refusing to provision a file without the expected var (re-run with --force to override)"
+  fi
 fi
 
 log "Re-encrypting → $DST_REL (dave + vpsNixos3)"
