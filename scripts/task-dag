@@ -693,12 +693,22 @@ JSON
     # Atomic CAS: create active iff absent, delete frontier iff at expected SHA.
     local lease_active="--force-with-lease=refs/heads/tasks/active/$short_sha:"
     local lease_frontier="--force-with-lease=refs/heads/tasks/frontier/$short_sha:"
+    # Force-update marker for the active refspec. In normal mode the
+    # active ref is expected to be absent, so a plain (create) refspec
+    # fast-forwards fine. In force mode we are STEALING a known-dead
+    # claim, so the active ref already exists and pointing our claim
+    # commit at it is a non-fast-forward — without a leading '+' git
+    # rejects it ("non-fast-forward") and the steal silently fails
+    # (the bug behind every "claim --force can't recover a dead claim"
+    # report). Force-update it explicitly.
+    local active_force=""
     if [ "$do_force" = true ]; then
         # In force mode we still want atomicity, but we accept whatever
         # is currently on origin (we'll overwrite active and delete
         # frontier regardless of their prior state).
         lease_active=""
         lease_frontier=""
+        active_force="+"
     else
         # Frontier lease wants the explicit expected SHA so we don't
         # delete a frontier ref that someone has since rewritten.
@@ -709,7 +719,7 @@ JSON
     if push_output=$(git push --atomic origin \
         $lease_active \
         $lease_frontier \
-        "${claim_commit}:refs/heads/tasks/active/$short_sha" \
+        "${active_force}${claim_commit}:refs/heads/tasks/active/$short_sha" \
         ":refs/heads/tasks/frontier/$short_sha" 2>&1); then
 
         # ── Double-checked locking ────────────────────────────────────
