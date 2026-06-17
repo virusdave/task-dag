@@ -48,11 +48,60 @@ if echo "$COMMENT_BODY" | grep -q "<!-- task-dag:"; then
     fi
 fi
 
-# If the repository ships a local task-dag CLI with an ingest-comment
-# subcommand, delegate to it so the canonical ingestion logic lives in
-# one place per repo (see top-level/scripts/task-dag). This keeps the
-# shared workflow stable while the CLI evolves.
-if [ -x "./scripts/task-dag" ] && ./scripts/task-dag help 2>&1 | grep -q '^[[:space:]]*ingest-comment'; then
+# Delegate all comment ingestion to the canonical task-dag CLI so the
+# smart logic lives in ONE place (completion routing -> ingest-completion,
+# leading-`<!--`-marker skip, human-comment minting). The CLI is sourced
+# in this order:
+#   1. a vendored `./scripts/task-dag` in the target repo (transitional —
+#      most repos have retired it per the CLI-distribution migration), or
+#   2. the canonical CLI downloaded from the task-dag repo into a temp dir.
+#
+# The standalone inline fallback further below predates the CLI and does
+# NOT route cross-repo completion comments: it silently drops the
+# completion and mints a junk `intent: clarification` task (the dispatch
+# loop — virusdave/top-level#20). So we try hard to obtain the real CLI and
+# only fall through to the inline path if it is genuinely unreachable.
+TASK_DAG_REPO="${TASK_DAG_REPO:-virusdave/task-dag}"
+TASK_DAG_REF="${TASK_DAG_REF:-master}"
+TASK_DAG_CLI_TMPDIR=""
+
+cli_has_ingest_comment() {
+    "$1" help 2>&1 | grep -q '^[[:space:]]*ingest-comment'
+}
+
+# Sets globals TASK_DAG_CLI (path to an executable CLI with ingest-comment)
+# and, when downloaded, TASK_DAG_CLI_TMPDIR (caller removes it). Returns 0
+# on success, 1 if no CLI could be obtained. NOT run in a subshell so the
+# temp-dir global survives for cleanup.
+TASK_DAG_CLI=""
+resolve_task_dag_cli() {
+    # 1. Vendored copy in the target repo (transitional fallback).
+    if [ -x "./scripts/task-dag" ] && cli_has_ingest_comment "./scripts/task-dag"; then
+        TASK_DAG_CLI="./scripts/task-dag"
+        return 0
+    fi
+
+    # 2. Download the canonical CLI (script + its task-dag.d/ modules).
+    local dir base
+    dir="$(mktemp -d)"
+    base="https://raw.githubusercontent.com/${TASK_DAG_REPO}/${TASK_DAG_REF}/scripts"
+    mkdir -p "$dir/task-dag.d"
+    if curl -fsSL "$base/task-dag"                  -o "$dir/task-dag" \
+        && curl -fsSL "$base/task-dag.d/cross-repo.sh" -o "$dir/task-dag.d/cross-repo.sh"; then
+        # phase-gates.conf is optional config; absence must not fail.
+        curl -fsSL "$base/task-dag.d/phase-gates.conf" -o "$dir/task-dag.d/phase-gates.conf" 2>/dev/null || true
+        chmod +x "$dir/task-dag"
+        if cli_has_ingest_comment "$dir/task-dag"; then
+            TASK_DAG_CLI_TMPDIR="$dir"
+            TASK_DAG_CLI="$dir/task-dag"
+            return 0
+        fi
+    fi
+    rm -rf "$dir"
+    return 1
+}
+
+if resolve_task_dag_cli; then
     BODY_FILE="$(mktemp)"
     printf '%s' "$COMMENT_BODY" > "$BODY_FILE"
 
@@ -60,17 +109,21 @@ if [ -x "./scripts/task-dag" ] && ./scripts/task-dag help 2>&1 | grep -q '^[[:sp
     git config user.name "github-actions[bot]"
     git config user.email "github-actions[bot]@users.noreply.github.com"
 
-    log "Delegating to ./scripts/task-dag ingest-comment"
-    ./scripts/task-dag ingest-comment \
+    log "Delegating to ${TASK_DAG_CLI} ingest-comment (task-dag@${TASK_DAG_REF})"
+    rc=0
+    "$TASK_DAG_CLI" ingest-comment \
         --issue "$ISSUE_NUMBER" \
         --comment-id "$COMMENT_ID" \
         --author "$COMMENT_AUTHOR" \
         --comment-url "$COMMENT_URL" \
-        --body-file "$BODY_FILE"
+        --body-file "$BODY_FILE" || rc=$?
 
     rm -f "$BODY_FILE"
-    exit 0
+    [ -n "$TASK_DAG_CLI_TMPDIR" ] && rm -rf "$TASK_DAG_CLI_TMPDIR"
+    exit "$rc"
 fi
+
+log "WARNING: could not obtain the task-dag CLI (vendored or downloaded from ${TASK_DAG_REPO}@${TASK_DAG_REF}); falling back to inline ingestion. Cross-repo completion comments will NOT be routed by this path."
 
 # Check if this comment was already processed
 STATE_DIR=".github/task-dag-state"
