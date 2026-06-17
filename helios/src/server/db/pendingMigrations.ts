@@ -1254,6 +1254,14 @@ const SENTINELS: MigrationSentinel[] = [
       return checks.every(Boolean)
     },
   },
+  {
+    migrationId: '092_seo_prompt_schedules',
+    label:
+      'SEO auto-blog prompt-schedule + topic-mix config (seo_prompt_schedules) ' +
+      '— required by the /api/seo/prompt-schedules control plane (parent EPIC ' +
+      '§7.2, #44 P4). Without it the prompt-schedule routes 500.',
+    check: (db) => tableExists(db, 'seo_prompt_schedules'),
+  },
 ]
 
 interface CacheEntry {
