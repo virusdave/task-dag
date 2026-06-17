@@ -195,17 +195,120 @@ export async function createSeoFaqSet(
   return mapRow(result.rows[0]!)
 }
 
+/**
+ * Fetch the FAQ set persisted under `sourceKey` (e.g. `fbus-global-faq`),
+ * or null if none exists. Used by the idempotent server-side import / sync
+ * path to find "the same source" across re-imports. If more than one row
+ * ever shares a source key (should not happen), the oldest (the canonical
+ * original) is returned.
+ */
+export async function getSeoFaqSetBySourceKey(
+  db: Queryable,
+  sourceKey: string,
+): Promise<SeoFaqSetRecord | null> {
+  const result = await db.query<SeoFaqSetRow>(
+    `${SELECT_FAQ_SET} where f.source_key = $1 order by f.created_at asc, f.id asc limit 1`,
+    [sourceKey],
+  )
+  const row = result.rows[0]
+  return row ? mapRow(row) : null
+}
+
+export type ImportFaqSetBySourceKeyResult =
+  | { kind: 'created'; record: SeoFaqSetRecord }
+  | { kind: 'updated'; record: SeoFaqSetRecord }
+  | { kind: 'unchanged'; record: SeoFaqSetRecord }
+
+export interface ImportFaqSetBySourceKeyInput {
+  readonly sourceKey: string
+  readonly scope: string
+  readonly items: readonly SeoFaqItem[]
+  readonly source?: SeoFaqSource
+  readonly generationMeta?: unknown
+  readonly userId: number
+  readonly now?: Date
+}
+
+/**
+ * Idempotently import a source-keyed FAQ set as a DRAFT. NEVER approves or
+ * publishes — it only writes draft content for a human to review through
+ * the IRONCLAD gate (canon §1).
+ *
+ *   • no existing set for `sourceKey`  → create a fresh draft → `created`
+ *   • existing set, content unchanged   → no write             → `unchanged`
+ *   • existing set, content changed     → update (resets to draft, clears
+ *                                         any approval, recomputes the
+ *                                         fingerprint)          → `updated`
+ *
+ * "Unchanged" is decided by recomputing the existing row's content_sha256
+ * over the new scope+items (using the SAME faq_set_id) and comparing it to
+ * the row's stored fingerprint, so re-running the import is a safe no-op.
+ */
+export async function importFaqSetBySourceKey(
+  db: Queryable,
+  input: ImportFaqSetBySourceKeyInput,
+): Promise<ImportFaqSetBySourceKeyResult> {
+  const existing = await getSeoFaqSetBySourceKey(db, input.sourceKey)
+  if (!existing) {
+    const record = await createSeoFaqSet(db, {
+      scope: input.scope,
+      items: input.items,
+      source: input.source,
+      generationMeta: input.generationMeta,
+      sourceKey: input.sourceKey,
+      userId: input.userId,
+      now: input.now,
+    })
+    return { kind: 'created', record }
+  }
+
+  const candidateSha256 = faqSetContentSha256({
+    faq_set_id: existing.faqSetId,
+    scope: input.scope,
+    items: toItemInputs(input.items),
+  })
+  if (candidateSha256 === existing.contentSha256) {
+    return { kind: 'unchanged', record: existing }
+  }
+
+  const updated = await updateSeoFaqSet(db, existing.faqSetId, {
+    scope: input.scope,
+    items: input.items,
+    userId: input.userId,
+    // Refresh provenance on a changed re-import so generation_meta tracks
+    // the latest source capture (when the caller supplied one).
+    generationMeta: input.generationMeta,
+  })
+  // The row exists (we just loaded it under the same connection-less pool);
+  // a null here would mean a concurrent delete, which this control plane
+  // never does — fail loud rather than silently returning stale data.
+  if (!updated) {
+    throw new Error(
+      `importFaqSetBySourceKey: FAQ set ${existing.faqSetId} (source_key ${input.sourceKey}) vanished mid-import`,
+    )
+  }
+  return { kind: 'updated', record: updated }
+}
+
 export interface UpdateSeoFaqSetInput {
   readonly scope: string
   readonly items: readonly SeoFaqItem[]
   readonly userId: number
+  /**
+   * Optional refreshed provenance metadata. Only the server-side import /
+   * sync path passes this (to keep `generation_meta` current after a
+   * re-import); the public authoring route omits it, leaving the column
+   * untouched. `undefined` = leave unchanged.
+   */
+  readonly generationMeta?: unknown
 }
 
 /**
  * Replace a FAQ set's scope + items. Always resets the set to `draft` and
  * clears its approval (so an approval can never silently cover edited
- * content) and recomputes the content fingerprint. Returns null if the set
- * does not exist.
+ * content) and recomputes the content fingerprint. When `generationMeta` is
+ * provided it is refreshed too (import/sync provenance); otherwise the
+ * column is left as-is. Returns null if the set does not exist.
  */
 export async function updateSeoFaqSet(
   db: Queryable,
@@ -214,6 +317,7 @@ export async function updateSeoFaqSet(
 ): Promise<SeoFaqSetRecord | null> {
   const items = toItemInputs(input.items)
   const contentSha256 = faqSetContentSha256({ faq_set_id: faqSetId, scope: input.scope, items })
+  const refreshMeta = input.generationMeta !== undefined
   const result = await db.query<SeoFaqSetRow>(
     `
       update seo_faq_sets
@@ -222,6 +326,7 @@ export async function updateSeoFaqSet(
              content_sha256 = $4,
              status = 'draft',
              approval_id = null,
+             generation_meta = case when $6::boolean then $7::jsonb else generation_meta end,
              updated_by_user_id = $5,
              updated_at = now()
        where faq_set_id = $1
@@ -231,7 +336,15 @@ export async function updateSeoFaqSet(
         null::bigint as approved_by_user_id, null::timestamptz as approved_at,
         null::text as approval_note
     `,
-    [faqSetId, input.scope, JSON.stringify(input.items), contentSha256, input.userId],
+    [
+      faqSetId,
+      input.scope,
+      JSON.stringify(input.items),
+      contentSha256,
+      input.userId,
+      refreshMeta,
+      refreshMeta ? JSON.stringify(input.generationMeta) : null,
+    ],
   )
   const row = result.rows[0]
   return row ? mapRow(row) : null
