@@ -429,6 +429,11 @@ CI BROKEN-MASTER AUTO-REPAIR:
     parse-tree-fix [<commit-ish>] [--stdin] [--json]
                            Parse Tree-Fix/Tree-Fix-Chain/Tree-Fix-Mode
                            commit trailers (via git interpret-trailers)
+    chain-read <owner/repo> <branch>
+                           Read a repo/branch's CI repair-chain state
+    chain-write <owner/repo> <branch> --for-sha=<commit>
+                           Compare-and-set that state; race-safe and
+                           stale-run-safe (rejects superseded CI SHAs)
 
     help                   Show this help
 
@@ -2539,6 +2544,8 @@ main() {
         blocked) cmd_blocked "$@" ;;
         drop) cmd_drop "$@" ;;
         validate) cmd_validate "$@" ;;
+        chain-read) cmd_chain_read "$@" ;;
+        chain-write) cmd_chain_write "$@" ;;
         issue-update) cmd_issue_update "$@" ;;
         check-workflow) cmd_check_workflow "$@" ;;
         delegate) cmd_delegate "$@" ;;

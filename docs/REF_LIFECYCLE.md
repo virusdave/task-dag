@@ -13,6 +13,22 @@ duplicate work across the worker fleet (see "Known gaps").
 | `tasks/active/<short>` | `task-dag claim` | The cross-host distributed lock: this leaf is in flight. The claim commit records Claimer / Claimer-Host / Claimer-PID / Claimed-At. | `complete` (lands the task) or `release` (back to `frontier`). |
 | `tasks/blocked/<sha>` | `task-dag block` | Parked: stays in the DAG, listed by `blocked`, never dispatched. | `unblock` / `drop`. |
 
+## Non-task namespace: CI repair chains (`tasks/ci-chains/...`)
+
+`refs/heads/tasks/ci-chains/<owner>/<repo>/<branch>` is **not** a task
+workflow ref — it is the durable per-repo/branch state store for the
+CI-driven broken-master auto-repair subsystem (`chain-read` /
+`chain-write`; design §1/§4). The ref points at an empty-tree commit
+whose *message* holds the chain fields (`Current-Head`, `Last-Green`,
+`First-Red`, `State`, `Repair-Mode`, `Repair-Issue`, `Repair-Attempt`);
+each write's first parent is the prior chain commit, so the ref is the
+chain's audit history. `<branch>` is percent-encoded to one ref-safe
+path component so a slashed branch (`release/v1`) can't D/F-conflict with
+a plain `release` ref. Writes are compare-and-set: an atomic
+`--force-with-lease` push + readback (concurrency) **plus** a stale-run
+guard that refuses a `--for-sha` already superseded by a newer stored
+`Current-Head` (out-of-order CI). See `scripts/task-dag.d/ci-chains.sh`.
+
 ## Claim is frontier-only (CAS)
 
 `task-dag claim <short>` performs the only true cross-host mutex: a
