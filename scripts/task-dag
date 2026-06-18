@@ -434,6 +434,13 @@ CI BROKEN-MASTER AUTO-REPAIR:
     chain-write <owner/repo> <branch> --for-sha=<commit>
                            Compare-and-set that state; race-safe and
                            stale-run-safe (rejects superseded CI SHAs)
+    classify <owner/repo> <branch> --for-sha=<commit> (--result|--gate ...)
+                           Classify a commit's aggregate required-gate
+                           result green/red/unknown and drive the repair
+                           chain (open one chain per red streak, advance
+                           Current-Head on continuation reds, close on
+                           green only when current); ignores superseded
+                           SHAs relative to the live branch HEAD
 
     help                   Show this help
 
@@ -2553,6 +2560,7 @@ main() {
         ingest-completion) cmd_ingest_completion "$@" ;;
         close-epic) cmd_close_epic "$@" ;;
         parse-tree-fix) cmd_parse_tree_fix "$@" ;;
+        classify) cmd_classify "$@" ;;
         *)
             echo "Unknown command: $command" >&2
             echo "Run 'task-dag help' for usage" >&2

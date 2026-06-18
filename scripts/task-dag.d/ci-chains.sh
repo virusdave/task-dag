@@ -264,6 +264,7 @@ EOF
 cmd_chain_write() {
     local repo="" branch="" for_sha=""
     local do_create=false allow_stale=false json=false do_fetch=true
+    local expect_old="" have_expect=false
     declare -A overrides=()
 
     _cichain_add_override() { # key=value
@@ -288,6 +289,7 @@ cmd_chain_write() {
             --set=*) _cichain_add_override "${1#*=}" || return 1; shift ;;
             --set) shift; _cichain_add_override "${1:-}" || return 1; shift ;;
             --create) do_create=true; shift ;;
+            --expect-old=*) expect_old="${1#*=}"; have_expect=true; shift ;;
             --allow-stale) allow_stale=true; shift ;;
             --json) json=true; shift ;;
             --no-fetch) do_fetch=false; shift ;;
@@ -309,6 +311,10 @@ Options:
   --repair-attempt=<n>
   --set Field=Value    generic field override (repeatable)
   --create             fail (exit 5) if the chain already exists
+  --expect-old=<sha>   compare-and-set baseline: fail (exit 5) unless the
+                       chain ref currently equals <sha> ('' = expect absent).
+                       Lets a caller that read state X bind its write to X so
+                       a concurrent mutation in between cannot be clobbered.
   --allow-stale        bypass the out-of-order/superseded-SHA guard
   --json               machine-readable result
   --no-fetch           skip the pre-read fetch from origin
@@ -368,6 +374,22 @@ EOF
     if ! old="$(_cichain_remote_sha "$ref")"; then
         echo "Error: cannot reach origin to read chain state for $repo@$branch" >&2
         return 4
+    fi
+
+    # Caller-supplied compare-and-set baseline. A caller (e.g. the classifier)
+    # that read state at SHA X and decided an action on that basis binds its
+    # write to X here, so a concurrent mutation between its read and this write
+    # cannot be silently clobbered (fixes the read-decide-write TOCTOU). Empty
+    # baseline means "expected absent".
+    if [ "$have_expect" = true ] && [ "$old" != "$expect_old" ]; then
+        if [ "$json" = true ]; then
+            printf '{"ok":false,"reason":"expect-mismatch","ref":"%s","expectedOld":"%s","actualOld":"%s"}\n' \
+                "$(_cichain_jstr "$ref")" "$(_cichain_jstr "$expect_old")" "$(_cichain_jstr "$old")"
+        else
+            printf "${YELLOW}Chain state for %s@%s moved since it was read (expected %s, found %s) — refusing CAS write.${RESET}\n" \
+                "$repo" "$branch" "${expect_old:-<absent>}" "${old:-<absent>}" >&2
+        fi
+        return 5
     fi
 
     # Bring the prior chain commit's object local so we can read its fields
