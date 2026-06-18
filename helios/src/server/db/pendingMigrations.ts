@@ -1262,6 +1262,25 @@ const SENTINELS: MigrationSentinel[] = [
       '§7.2, #44 P4). Without it the prompt-schedule routes 500.',
     check: (db) => tableExists(db, 'seo_prompt_schedules'),
   },
+  {
+    migrationId: '093_gads_evolver_site_scope',
+    label:
+      'GAds evolver introspection per-attempt site scope (gads_ad_attempts.site ' +
+      '+ landingpage_ad_outcomes.site) — derived bronx/midtown/null scope the ' +
+      'per-site /metrics/gads-<site>/{evolution,iteration} pages (automation#51 ' +
+      'P3+) filter on with a server-derived predicate. Without it the Evolution/' +
+      'Iteration endpoints cannot scope per site and the write path insert fails ' +
+      'on the missing column.',
+    // Both columns are added by the one migration; probe both so a
+    // partial apply (one ALTER ran, the other failed) reports pending.
+    check: async (db) => {
+      const [hasAttemptsSite, hasOutcomesSite] = await Promise.all([
+        columnExists(db, 'gads_ad_attempts', 'site'),
+        columnExists(db, 'landingpage_ad_outcomes', 'site'),
+      ])
+      return hasAttemptsSite && hasOutcomesSite
+    },
+  },
 ]
 
 interface CacheEntry {

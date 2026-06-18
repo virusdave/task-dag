@@ -32,7 +32,10 @@ import * as fs from 'node:fs/promises'
 import * as os from 'node:os'
 import * as path from 'node:path'
 
+import { mapGeoToGadsSite } from '../../shared/domain/gadsSites.js'
+import type { GadsSiteKey } from '../../shared/domain/gadsSites.js'
 import { getPool } from '../db/pool.js'
+import { pickGeoTarget } from './buildSnapshotFromCsv.js'
 import {
   applyOutcomes,
   fetchOpenAttemptsForAds,
@@ -83,6 +86,22 @@ function indexSnapshot(ads: SnapshotAd[]): Map<string, SnapshotAd> {
     if (ad.ad_id) m.set(ad.ad_id, ad)
   }
   return m
+}
+
+/**
+ * Derive the grant-scoped GAds site for an attempt from the SAME
+ * campaign/ad-group names that get stored on the row, reusing the
+ * canonical `pickGeoTarget` parser + `mapGeoToGadsSite` mapper (no
+ * second campaign-name parser). Mirrors the SQL backfill in migration
+ * 093 so freshly-inserted rows and backfilled rows agree.
+ * Returns 'bronx'|'midtown' or null (unknown/cross-site).
+ */
+function deriveAttemptSite(
+  campaignName: string | null,
+  adGroupName: string | null,
+): GadsSiteKey | null {
+  const name = `${campaignName ?? ''} ${adGroupName ?? ''}`.toLowerCase()
+  return mapGeoToGadsSite(pickGeoTarget(name))
 }
 
 // ---------------------------------------------------------------------------
@@ -337,12 +356,15 @@ export async function recordAttemptsFromL2Output(args: {
         continue
       }
       const creative = action.suggested_new_creatives?.[0]
+      const campaignName = live.campaign_name ?? null
+      const adGroupName = live.ad_group_name ?? null
       inserts.push({
         runId: args.runId,
         adId,
         accountId: live.account_id ?? null,
-        campaignName: live.campaign_name ?? null,
-        adGroupName: live.ad_group_name ?? null,
+        campaignName,
+        adGroupName,
+        site: deriveAttemptSite(campaignName, adGroupName),
         familyKey: (family.family_key ?? {}) as Record<string, unknown>,
         actionType,
         rationale: action.rationale ?? action.justification ?? null,
@@ -444,12 +466,15 @@ function trialEntryToInsert(args: {
   if (!adIdRef) return null
   const live = args.snapshotByAd.get(adIdRef)
   if (!live) return null
+  const campaignName = args.campaignName ?? live.campaign_name ?? null
+  const adGroupName = args.adGroupName ?? live.ad_group_name ?? null
   return {
     runId: args.runId,
     adId: adIdRef,
     accountId: live.account_id ?? null,
-    campaignName: args.campaignName ?? live.campaign_name ?? null,
-    adGroupName: args.adGroupName ?? live.ad_group_name ?? null,
+    campaignName,
+    adGroupName,
+    site: deriveAttemptSite(campaignName, adGroupName),
     familyKey: (args.family.family_key ?? {}) as Record<string, unknown>,
     actionType: args.actionType,
     rationale: args.rationale,

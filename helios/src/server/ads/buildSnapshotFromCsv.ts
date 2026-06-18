@@ -546,7 +546,14 @@ function pickProductTag(name: string): string {
   return 'general'
 }
 
-function pickGeoTarget(name: string): string | null {
+/**
+ * Derive a geo target from a (already lower-cased) `campaign ad_group`
+ * name. Returns the raw geo token or `null`. This is the single
+ * canonical campaign-name geo parser; the GAds site-scope write path
+ * (automation#51 P2) reuses it via `mapGeoToGadsSite(pickGeoTarget(...))`
+ * rather than re-implementing the substring list.
+ */
+export function pickGeoTarget(name: string): string | null {
   if (name.includes('midtown')) return 'midtown'
   if (name.includes('bronx')) return 'bronx'
   if (name.includes('brooklyn')) return 'brooklyn'

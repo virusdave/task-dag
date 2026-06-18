@@ -19,6 +19,7 @@
  *                                       `policy_experiences`.
  */
 
+import type { GadsSiteKey } from '../../../shared/domain/gadsSites.js'
 import type { Queryable } from '../pool.js'
 
 export type GadsActionType =
@@ -44,6 +45,8 @@ export interface GadsAttemptInsert {
   accountId: string | null
   campaignName: string | null
   adGroupName: string | null
+  /** Derived GAds site scope: 'bronx'|'midtown', or null = unknown/cross-site. */
+  site: GadsSiteKey | null
   familyKey: Record<string, unknown>
   actionType: GadsActionType
   rationale: string | null
@@ -66,6 +69,8 @@ export interface GadsAttemptRow {
   accountId: string | null
   campaignName: string | null
   adGroupName: string | null
+  /** Derived GAds site scope: 'bronx'|'midtown', or null = unknown/cross-site. */
+  site: GadsSiteKey | null
   familyKey: Record<string, unknown>
   actionType: GadsActionType
   rationale: string | null
@@ -92,6 +97,7 @@ interface GadsAttemptDbRow {
   account_id: string | null
   campaign_name: string | null
   ad_group_name: string | null
+  site: string | null
   family_key: Record<string, unknown> | null
   action_type: string
   rationale: string | null
@@ -119,6 +125,7 @@ function rowToAttempt(row: GadsAttemptDbRow): GadsAttemptRow {
     accountId: row.account_id,
     campaignName: row.campaign_name,
     adGroupName: row.ad_group_name,
+    site: row.site === 'bronx' || row.site === 'midtown' ? row.site : null,
     familyKey: row.family_key ?? {},
     actionType: row.action_type as GadsActionType,
     rationale: row.rationale,
@@ -148,6 +155,7 @@ const ATTEMPT_SELECT_COLUMNS = `
   account_id,
   campaign_name,
   ad_group_name,
+  site,
   family_key,
   action_type,
   rationale,
@@ -179,19 +187,19 @@ export async function insertAttempts(
     await db.query(
       `
       insert into gads_ad_attempts (
-        run_id, ad_id, account_id, campaign_name, ad_group_name,
+        run_id, ad_id, account_id, campaign_name, ad_group_name, site,
         family_key, action_type, rationale,
         before_serving_status, before_policy_status,
         before_headlines, before_descriptions, before_final_url,
         proposed_headlines, proposed_descriptions, proposed_final_url,
         proposed_changes_json
       ) values (
-        $1, $2, $3, $4, $5,
-        $6::jsonb, $7, $8,
-        $9, $10,
-        $11::jsonb, $12::jsonb, $13,
-        $14::jsonb, $15::jsonb, $16,
-        $17::jsonb
+        $1, $2, $3, $4, $5, $6,
+        $7::jsonb, $8, $9,
+        $10, $11,
+        $12::jsonb, $13::jsonb, $14,
+        $15::jsonb, $16::jsonb, $17,
+        $18::jsonb
       )
       `,
       [
@@ -200,6 +208,7 @@ export async function insertAttempts(
         row.accountId,
         row.campaignName,
         row.adGroupName,
+        row.site,
         JSON.stringify(row.familyKey ?? {}),
         row.actionType,
         row.rationale,

@@ -46,6 +46,28 @@ export const GADS_SITES: ReadonlyArray<GadsSite> = [
 /** The superset grant: every current and future GAds site. */
 export const GADS_ALL_GRANT: MetricGrantKey = 'gads-all'
 
+/**
+ * Map a raw geo target (as produced by the ads pipeline's
+ * `pickGeoTarget()` — 'bronx' | 'midtown' | 'brooklyn' | 'queens' |
+ * 'manhattan' | null) onto a grant-scoped GAds site key, or `null` for
+ * unknown / cross-site scope.
+ *
+ * Only the two real `GADS_SITES` (bronx, midtown) map through; any other
+ * geo (brooklyn/queens/manhattan) or no match collapses to `null`
+ * ("unknown-scope"). This is the single canonical mapper used by the
+ * `gads_ad_attempts.site` / `landingpage_ad_outcomes.site` write path
+ * (automation#51 P2) — do NOT duplicate the substring list elsewhere;
+ * derive the geo with the existing `pickGeoTarget()` and pass it here.
+ *
+ * `null` is meaningful: per-site reads filter `site = $key` (server
+ * derived), which excludes `null`, so unknown-scope rows never leak into
+ * a per-site page and appear only under the `gads-all` grant (badged).
+ */
+export function mapGeoToGadsSite(geo: string | null | undefined): GadsSiteKey | null {
+  if (!geo) return null
+  return GADS_SITES.some((s) => s.key === geo) ? (geo as GadsSiteKey) : null
+}
+
 // ---------------------------------------------------------------------------
 // Scope (a site key, or the cross-site "all" view)
 // ---------------------------------------------------------------------------

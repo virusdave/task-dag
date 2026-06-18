@@ -7,6 +7,7 @@ import {
   GADS_SCOPES,
   gadsScopeLabel,
   isGadsScope,
+  mapGeoToGadsSite,
   requiredGadsGrants,
   type GadsScope,
 } from './gadsSites.js'
@@ -143,5 +144,37 @@ describe('GAds per-scope access enforcement', () => {
     expect(allGrants).toEqual(['gads-all'])
     expect(allGrants).not.toContain('gads-bronx')
     expect(allGrants).not.toContain('gads-midtown')
+  })
+})
+
+describe('mapGeoToGadsSite (automation#51 P2 site-scope derivation)', () => {
+  it('maps the two real GADS_SITES geos through unchanged', () => {
+    expect(mapGeoToGadsSite('bronx')).toBe('bronx')
+    expect(mapGeoToGadsSite('midtown')).toBe('midtown')
+  })
+
+  it('collapses every non-GADS_SITES geo to null (unknown-scope)', () => {
+    // pickGeoTarget can still return these, but they are not grant
+    // scoped sites, so they must NOT attribute to a per-site page.
+    expect(mapGeoToGadsSite('brooklyn')).toBeNull()
+    expect(mapGeoToGadsSite('queens')).toBeNull()
+    expect(mapGeoToGadsSite('manhattan')).toBeNull()
+  })
+
+  it('treats no-match / empty / null geo as unknown-scope', () => {
+    expect(mapGeoToGadsSite(null)).toBeNull()
+    expect(mapGeoToGadsSite(undefined)).toBeNull()
+    expect(mapGeoToGadsSite('')).toBeNull()
+    expect(mapGeoToGadsSite('whatever')).toBeNull()
+  })
+
+  it('never returns a value that is not a real per-site key', () => {
+    // The mapper output is the stored gads_ad_attempts.site value;
+    // anything other than a real site key must be null so per-site
+    // predicates (site = $key) can never leak unknown-scope rows.
+    for (const geo of ['bronx', 'midtown', 'brooklyn', 'queens', 'manhattan', 'x', '', null]) {
+      const site = mapGeoToGadsSite(geo)
+      expect(site === null || site === 'bronx' || site === 'midtown').toBe(true)
+    }
   })
 })
