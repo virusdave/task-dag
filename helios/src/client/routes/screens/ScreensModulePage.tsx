@@ -25,7 +25,17 @@ import {
 } from '../../../shared/contracts/index.js'
 import { isJobTerminal, loadJobStatus } from '../../app/jobPolling.js'
 import { loadJson, mutateJson } from '../../app/fetchJson.js'
+import { nyShortDateTime } from '../../app/nyTime.js'
 import { Pill } from '../../components/Pill.js'
+
+const SCREENS_SNAPSHOT_STALE_MS = 24 * 60 * 60 * 1000
+
+// All operator-facing times on this page render in America/New_York (every
+// store is NYC and the operator reasons in NY wall-clock); see repo AGENTS.md.
+function formatNyDateTime(iso: string): string {
+  const ms = new Date(iso).getTime()
+  return Number.isNaN(ms) ? 'unknown time' : nyShortDateTime(ms)
+}
 
 const moduleLabelByCode = new Map(HELIOS_MODULES.map((module) => [module.code, module.label]))
 const screensModule = getHeliosModuleDefinition('screens')
@@ -221,6 +231,32 @@ export function ScreensModulePage() {
   const summary = data.inventory.summary
   const inventorySource = data.inventory.inventorySource
 
+  // "Needs attention" signals. Counts are scoped to eligible screens (off/dead
+  // screens are skipped by the bulk workers) so the surfaced number matches what
+  // the fix would actually act on.
+  const eligibleScreens = useMemo(
+    () => allScreens.filter((screen) => isScreenEligible(screen.screenEnabled, screen.screenName)),
+    [allScreens],
+  )
+  const zeroDurationActionableCount = useMemo(
+    () => eligibleScreens.reduce(
+      (count, screen) => count + screen.banners.filter((banner) => banner.enabled && (banner.totalDuration ?? 0) === 0).length,
+      0,
+    ),
+    [eligibleScreens],
+  )
+  const disabledHealthyCount = useMemo(
+    () => eligibleScreens.reduce(
+      (count, screen) => count + screen.banners.filter((banner) => !banner.enabled && (banner.totalDuration ?? 0) > 0).length,
+      0,
+    ),
+    [eligibleScreens],
+  )
+  const offlineScreenCount = allScreens.length - eligibleScreens.length
+  const recentFailedJobCount = data.jobs.items.filter((job) => job.status === 'failed' || job.status === 'dead_letter').length
+  const snapshotMs = inventorySource ? new Date(inventorySource.capturedAt).getTime() : null
+  const snapshotStale = snapshotMs === null || Number.isNaN(snapshotMs) || (Date.now() - snapshotMs) > SCREENS_SNAPSHOT_STALE_MS
+
   return (
     <section className="screens-control-room">
       <div className="page-header">
@@ -229,7 +265,17 @@ export function ScreensModulePage() {
           <h2>Screens control room</h2>
           <p className="subtle-copy">{screensModule.summary}</p>
         </div>
-        <Pill tone={canEdit ? 'success' : 'muted'}>{canEdit ? 'editor' : 'view only'}</Pill>
+        <div className="inline-row wrap-row">
+          <button
+            className="ghost-button"
+            disabled={!canEdit || submitting}
+            onClick={() => void submit('/api/screens/banner-refresh', { apply: false, intent: 'refresh', reason: reason.trim() || null, siteDealerIds: [] }, 'Queued inventory snapshot refresh')}
+            type="button"
+          >
+            Refresh inventory
+          </button>
+          <Pill tone={canEdit ? 'success' : 'muted'}>{canEdit ? 'editor' : 'view only'}</Pill>
+        </div>
       </div>
 
       <div className="screens-snapshot">
@@ -242,7 +288,7 @@ export function ScreensModulePage() {
         </span>
         <span className="screens-snapshot-age">
           {inventorySource
-            ? `snapshot ${new Date(inventorySource.capturedAt).toLocaleString()}`
+            ? `snapshot ${formatNyDateTime(inventorySource.capturedAt)} ET`
             : 'no snapshot yet, run a refresh/bounce'}
         </span>
       </div>
@@ -251,6 +297,19 @@ export function ScreensModulePage() {
       {errorMessage ? <p className="error-text">{errorMessage}</p> : null}
 
       {activeBounceJob ? <BounceProgressCard data={activeBounceJob} onDismiss={() => setActiveBounceJob(null)} /> : null}
+
+      {/* Needs attention — health-first signals with the fix one tap away. */}
+      <NeedsAttentionStrip
+        canEdit={canEdit}
+        submitting={submitting}
+        reason={reason}
+        onSubmit={submit}
+        zeroDurationCount={zeroDurationActionableCount}
+        disabledHealthyCount={disabledHealthyCount}
+        offlineScreenCount={offlineScreenCount}
+        recentFailedJobCount={recentFailedJobCount}
+        snapshotStale={snapshotStale}
+      />
 
       {/* Copy banners — first-class, source-first workflow (the most common ask). */}
       <CopyBannersCard
@@ -348,7 +407,7 @@ export function ScreensModulePage() {
                               <>
                                 <button
                                   className="link-button"
-                                  disabled={!canEdit}
+                                  disabled={!canEdit || !eligible}
                                   onClick={() => toggleScreenSet(
                                     setSelectedBanners,
                                     visibleBanners.map((banner) => bannerKey(site.dealerId, screen.screenId, banner.bannerId)),
@@ -364,7 +423,7 @@ export function ScreensModulePage() {
                                     <label className={`screens-banner${banner.enabled ? '' : ' is-off'}`} key={bKey}>
                                       <input
                                         checked={selectedBanners.has(bKey)}
-                                        disabled={!canEdit}
+                                        disabled={!canEdit || !eligible}
                                         onChange={() => toggleInSet(setSelectedBanners, bKey)}
                                         type="checkbox"
                                       />
@@ -391,9 +450,6 @@ export function ScreensModulePage() {
         )}
       </article>
 
-      {/* Bulk rules — predicate-driven mass enable/disable across the selected scope. */}
-      <BulkRulesCard canEdit={canEdit} submitting={submitting} reason={reason} onSubmit={submit} />
-
       {/* Site-wide operations — bounce/refresh/healthy/maintenance, one consolidated form. */}
       <SiteOperationsCard
         canEdit={canEdit}
@@ -406,7 +462,8 @@ export function ScreensModulePage() {
       />
 
       <details className="screens-details">
-        <summary>Saved playbooks (site-specific one-offs)</summary>
+        <summary>Advanced bulk rules &amp; saved playbooks</summary>
+        <BulkRulesCard canEdit={canEdit} submitting={submitting} reason={reason} onSubmit={submit} />
         <div className="review-grid" style={{ marginTop: '0.75rem' }}>
           <article className="mini-card">
             <header><strong>Bronx → Midtown image fallback clone</strong></header>
@@ -441,7 +498,7 @@ export function ScreensModulePage() {
                 <div className="mini-card-row" key={job.jobId}>
                   <div>
                     <strong>{job.jobType}</strong>
-                    <p className="subtle-copy">{new Date(job.createdAt).toLocaleString()}{job.scope ? ` · ${job.scope.entityType} ${job.scope.entityId}` : ''}</p>
+                    <p className="subtle-copy">{formatNyDateTime(job.createdAt)} ET{job.scope ? ` · ${job.scope.entityType} ${job.scope.entityId}` : ''}</p>
                   </div>
                   <Pill tone={statusTone(job.status)}>{job.status}</Pill>
                 </div>
@@ -456,7 +513,7 @@ export function ScreensModulePage() {
                 <div className="mini-card-row" key={event.eventId}>
                   <div>
                     <strong>{event.eventType}</strong>
-                    <p className="subtle-copy">{new Date(event.createdAt).toLocaleString()} · {event.actorLabel}</p>
+                    <p className="subtle-copy">{formatNyDateTime(event.createdAt)} ET · {event.actorLabel}</p>
                     <p className="subtle-copy">{readEventSummary(event)}</p>
                   </div>
                   <Pill tone="muted">{moduleLabelByCode.get(event.module) ?? event.module}</Pill>
@@ -574,6 +631,142 @@ export function ScreensModulePage() {
 function FilterChip({ active, label, onToggle }: { active: boolean; label: string; onToggle: () => void }) {
   return (
     <button className={`filter-chip${active ? ' is-active' : ''}`} onClick={onToggle} type="button">{label}</button>
+  )
+}
+
+/**
+ * Health-first "what needs my attention" strip. Renders only the cards whose
+ * condition is currently triggered, each with the fix one tap away. Counts are
+ * snapshot-based; the destructive fixes route through the same audited predicate
+ * workers as the manual controls and re-evaluate server-side, so a "Disable N"
+ * label means "the N the latest snapshot shows", not a frozen id list.
+ */
+function NeedsAttentionStrip({
+  canEdit,
+  submitting,
+  reason,
+  onSubmit,
+  zeroDurationCount,
+  disabledHealthyCount,
+  offlineScreenCount,
+  recentFailedJobCount,
+  snapshotStale,
+}: {
+  canEdit: boolean
+  submitting: boolean
+  reason: string
+  onSubmit: (path: string, body: Record<string, unknown>, successLabel: string) => Promise<void>
+  zeroDurationCount: number
+  disabledHealthyCount: number
+  offlineScreenCount: number
+  recentFailedJobCount: number
+  snapshotStale: boolean
+}) {
+  function runZeroDurationDisable(apply: boolean) {
+    void onSubmit(
+      '/api/screens/banner-bulk-toggle',
+      QueueScreensBannerBulkToggleRequestSchema.parse({
+        apply,
+        desiredEnabled: false,
+        reason: reason.trim() || null,
+        target: { kind: 'predicate', predicate: { siteDealerIds: [], durationState: 'zero', currentEnabled: true } },
+      }),
+      `${apply ? 'Queued live' : 'Queued dry-run'} disable zero-duration banners`,
+    )
+  }
+
+  function runEnableHealthy(apply: boolean) {
+    void onSubmit(
+      '/api/screens/enable-healthy-banners',
+      { apply, reason: reason.trim() || null, siteDealerIds: [] },
+      `${apply ? 'Queued live' : 'Queued dry-run'} enable healthy banners`,
+    )
+  }
+
+  const cards: JSX.Element[] = []
+
+  if (snapshotStale) {
+    cards.push(
+      <article className="mini-card screens-attention-card" key="snapshot">
+        <header><strong>Inventory snapshot is stale or missing</strong><Pill tone="warning">stale</Pill></header>
+        <p className="subtle-copy">The cached screen/banner inventory is missing or over 24 hours old, so counts below may be out of date.</p>
+        <div className="inline-row wrap-row">
+          <button
+            className="primary-button"
+            disabled={!canEdit || submitting}
+            onClick={() => void onSubmit('/api/screens/banner-refresh', { apply: false, intent: 'refresh', reason: reason.trim() || null, siteDealerIds: [] }, 'Queued inventory snapshot refresh')}
+            type="button"
+          >
+            Refresh inventory
+          </button>
+        </div>
+      </article>,
+    )
+  }
+
+  if (zeroDurationCount > 0) {
+    cards.push(
+      <article className="mini-card screens-attention-card" key="zero-duration">
+        <header><strong>{zeroDurationCount} enabled zero-duration banner(s)</strong><Pill tone="danger">never display</Pill></header>
+        <p className="subtle-copy">These banners are enabled but have a zero-second duration, so they never show on screen. Disable them to clean up the carousel.</p>
+        <div className="inline-row wrap-row">
+          <button className="ghost-button" disabled={!canEdit || submitting} onClick={() => runZeroDurationDisable(false)} type="button">Dry-run</button>
+          <button className="primary-button" disabled={!canEdit || submitting} onClick={() => runZeroDurationDisable(true)} type="button">Disable {zeroDurationCount}</button>
+        </div>
+      </article>,
+    )
+  }
+
+  if (disabledHealthyCount > 0) {
+    cards.push(
+      <article className="mini-card screens-attention-card" key="disabled-healthy">
+        <header><strong>{disabledHealthyCount} disabled healthy banner(s)</strong><Pill tone="warning">could run</Pill></header>
+        <p className="subtle-copy">These banners have a positive duration but are currently disabled. Re-enable the ones that are safe to run.</p>
+        <div className="inline-row wrap-row">
+          <button className="ghost-button" disabled={!canEdit || submitting} onClick={() => runEnableHealthy(false)} type="button">Dry-run</button>
+          <button className="primary-button" disabled={!canEdit || submitting} onClick={() => runEnableHealthy(true)} type="button">Enable {disabledHealthyCount}</button>
+        </div>
+      </article>,
+    )
+  }
+
+  if (offlineScreenCount > 0) {
+    cards.push(
+      <article className="mini-card screens-attention-card" key="offline-screens">
+        <header><strong>{offlineScreenCount} offline / ineligible screen(s)</strong><Pill tone="muted">info</Pill></header>
+        <p className="subtle-copy">These screens are turned off or marked dead/retired and are skipped by bulk operations. This may be intentional.</p>
+        <div className="inline-row wrap-row">
+          <Link className="ghost-button like-button" to="/screens/devices">Review device inventory</Link>
+        </div>
+      </article>,
+    )
+  }
+
+  if (recentFailedJobCount > 0) {
+    cards.push(
+      <article className="mini-card screens-attention-card" key="failed-jobs">
+        <header><strong>{recentFailedJobCount} recent failed screen job(s)</strong><Pill tone="danger">failed</Pill></header>
+        <p className="subtle-copy">One or more recent screens jobs failed. Open the jobs view to inspect the error and retry.</p>
+        <div className="inline-row wrap-row">
+          <Link className="ghost-button like-button" to="/jobs?module=screens">View screen jobs</Link>
+        </div>
+      </article>,
+    )
+  }
+
+  if (cards.length === 0) {
+    return (
+      <p className="screens-allclear">
+        All clear: snapshot is fresh, no zero-duration or disabled-healthy banners, no offline screens, and no recent failed jobs.
+      </p>
+    )
+  }
+
+  return (
+    <section className="screens-attention" aria-label="Needs attention">
+      <p className="screens-attention-title">Needs attention</p>
+      <div className="screens-attention-grid">{cards}</div>
+    </section>
   )
 }
 
@@ -1111,8 +1304,8 @@ function BounceProgressCard({ data, onDismiss }: { data: JobStatusResponse; onDi
         <div className={`job-progress-fill${failed ? ' failed' : ''}`} style={{ width: `${percent}%` }} />
       </div>
       <div className="pricing-metric-grid" style={{ marginTop: '0.75rem' }}>
-        <div className="value-panel"><span>Phase</span><p>{data.progress ? `${data.progress.phase} (${data.progress.phaseIndex}/${data.progress.phaseCount})` : '—'}</p></div>
-        <div className="value-panel"><span>Elapsed</span><p>{elapsedSeconds !== null ? `${elapsedSeconds}s` : '—'}</p></div>
+        <div className="value-panel"><span>Phase</span><p>{data.progress ? `${data.progress.phase} (${data.progress.phaseIndex}/${data.progress.phaseCount})` : 'n/a'}</p></div>
+        <div className="value-panel"><span>Elapsed</span><p>{elapsedSeconds !== null ? `${elapsedSeconds}s` : 'n/a'}</p></div>
         <div className="value-panel"><span>Status</span><p>{data.job.status.replaceAll('_', ' ')}</p></div>
       </div>
       {data.job.lastError ? <p className="error-text">{data.job.lastError}</p> : null}
@@ -1191,6 +1384,8 @@ function deriveCopySource(
   if (!sameScreen) return null
   const screen = screenByKey.get(screenKey(first.dealerId, first.screenId))
   if (!screen) return null
+  // Never copy from an off/dead/retired source screen.
+  if (!isScreenEligible(screen.screenEnabled, screen.screenName)) return null
   // A banner can be duplicated when it is an image banner (reusable media) or a
   // product-menu/promo banner (carries a promoActionId). Anything else is not
   // supported by the duplicate worker.

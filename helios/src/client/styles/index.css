@@ -9649,6 +9649,28 @@ span.metric-chart-legend-item {
   border-top: none;
 }
 
+.screens-attention {
+  margin: 0.25rem 0 0.5rem;
+}
+.screens-attention-title {
+  margin: 0 0 0.45rem;
+  font-weight: 700;
+  font-size: 0.95rem;
+}
+.screens-attention-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 270px), 1fr));
+  gap: 0.75rem;
+}
+.screens-allclear {
+  margin: 0.5rem 0;
+  padding: 0.6rem 0.85rem;
+  border: 1px solid var(--panel-border);
+  border-radius: 10px;
+  color: var(--text-muted-strong);
+  font-size: 0.9rem;
+}
+
 .screens-copy-card .screens-copy-step {
   margin-top: 0.7rem;
 }
