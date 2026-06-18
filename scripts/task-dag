@@ -214,6 +214,7 @@ fetch_task_refs() {
         '+refs/heads/tasks/frontier/*:refs/heads/tasks/frontier/*' \
         '+refs/heads/tasks/active/*:refs/heads/tasks/active/*' \
         '+refs/heads/tasks/blocked/*:refs/heads/tasks/blocked/*' \
+        '+refs/heads/tasks/blocked-meta/*:refs/heads/tasks/blocked-meta/*' \
         2>/dev/null || true
 }
 
@@ -378,6 +379,122 @@ blocked_ref_for() {
 is_task_blocked() {
     local sha="$1"
     git show-ref --verify --quiet "$(blocked_ref_for "$sha")"
+}
+
+# Helper: canonical "blocked-meta" ref name for a task.
+#
+# Side metadata for a blocked task lives at
+# refs/heads/tasks/blocked-meta/<FULL-SHA>, alongside (not instead of)
+# the blocked overlay ref. It records WHY a task is parked (operator vs
+# downstream), the durable reason, an optional operator request URL, the
+# source repo/issue, and who/when parked it — so the operator-blocked
+# dashboard (top-level#29) can render current blockers without reparsing
+# task commit bodies. The blocked overlay ref stays the source of truth
+# for "is this task blocked"; this is purely descriptive side data, and a
+# blocked task with NO meta ref (a legacy block) is still fully valid.
+blocked_meta_ref_for() {
+    local sha="$1"
+    echo "refs/heads/tasks/blocked-meta/$sha"
+}
+
+# Helper: does a task have a blocked-meta side ref?
+has_blocked_meta() {
+    local sha="$1"
+    git show-ref --verify --quiet "$(blocked_meta_ref_for "$sha")"
+}
+
+# Helper: read one field from a task's blocked-meta commit body. Prints
+# nothing (rc 0) if the meta ref is absent or the field is unset. Uses
+# awk (not grep) so a missing field is rc 0, not a `set -e` abort.
+read_blocked_meta_field() {
+    local sha="$1" field="$2"
+    local ref; ref=$(blocked_meta_ref_for "$sha")
+    git show-ref --verify --quiet "$ref" || return 0
+    git log -1 --format='%B' "$ref" | awk -v f="$field" '
+        index($0, f ":") == 1 { sub("^[^:]+:[[:space:]]*", ""); print; exit }'
+}
+
+# Helper: derive (repo, issue-number, source-url) from a task commit.
+# Handles BOTH task commit shapes:
+#   * regular task commits ("Task: …" with "Issue: #N" / "URL: …"), and
+#   * ingested-comment task nodes (YAML "issue:\n number:" + "github:\n
+#     url:") and delegated nodes ("issue:\n repo:\n number:").
+# Emits one TAB-separated line: "<repo>\t<issue>\t<url>" (fields may be
+# empty). repo is owner/repo, parsed from the URL when present.
+derive_task_origin() {
+    local sha="$1"
+    local msg; msg=$(parse_commit_metadata "$sha")
+    local issue url repo
+    # `|| true` keeps a missing trailer from aborting under `set -e`
+    # (extract_field's grep returns non-zero when the field is absent).
+    issue=$(extract_field "$msg" "Issue" 2>/dev/null || true); issue="${issue#\#}"
+    if [ -z "$issue" ]; then
+        issue=$(echo "$msg" | awk '/^issue:[[:space:]]*$/{f=1;next} f&&/number:/{sub(/^[[:space:]]*number:[[:space:]]*/,"");print;exit}')
+    fi
+    url=$(extract_field "$msg" "URL" 2>/dev/null || true)
+    if [ -z "$url" ]; then
+        url=$(echo "$msg" | awk '/^github:[[:space:]]*$/{f=1;next} f&&/url:/{sub(/^[[:space:]]*url:[[:space:]]*/,"");print;exit}')
+    fi
+    repo=""
+    # Only parse a repo out of a real github.com URL; never echo back a
+    # non-matching URL as if it were owner/repo.
+    if [[ "$url" =~ ^https?://github\.com/([^/]+/[^/]+)(/.*)?$ ]]; then
+        repo="${BASH_REMATCH[1]}"
+    fi
+    if [ -z "$repo" ]; then
+        # Delegated/ingested nodes can carry an explicit "issue:\n repo:".
+        repo=$(echo "$msg" | awk '/^issue:[[:space:]]*$/{f=1;next} f&&/repo:/{sub(/^[[:space:]]*repo:[[:space:]]*/,"");print;exit}')
+    fi
+    printf '%s\t%s\t%s\n' "$repo" "$issue" "$url"
+}
+
+# Helper: build the blocked-meta side-commit (tree == task tree, first
+# parent == task commit, body holds the metadata). We pin a CONSTANT
+# author/committer identity and use the blocked-at timestamp as the
+# commit date so the commit is fully DETERMINISTIC: re-running `block`
+# with identical fields yields the identical commit SHA, so the ref does
+# not churn (idempotency). The actor that parked the task is recorded in
+# the body (Blocked-By), not the commit identity.
+build_blocked_meta_commit() {
+    local task_sha="$1" kind="$2" reason="$3" request_url="$4" \
+          repo="$5" issue="$6" source_url="$7" actor="$8" host="$9" blocked_at="${10}"
+
+    local task_title task_tree
+    task_title=$(get_task_title "$task_sha")
+    task_tree=$(git rev-parse "$task_sha^{tree}")
+
+    # The body is line-oriented (one "Field: value" per line) and parsed
+    # back by read_blocked_meta_field, so collapse any embedded newlines in
+    # free-form values to spaces — a stray newline would otherwise inject a
+    # bogus field line and break round-tripping.
+    reason=$(printf '%s' "$reason" | tr '\n' ' ')
+    request_url=$(printf '%s' "$request_url" | tr '\n' ' ')
+
+    local msg="Blocked-Meta: ${task_title}
+
+Task-Commit: ${task_sha}
+Blocker-Kind: ${kind}"
+    [ -n "$reason" ]      && msg="${msg}
+Reason: ${reason}"
+    [ -n "$request_url" ] && msg="${msg}
+Request-URL: ${request_url}"
+    [ -n "$repo" ]        && msg="${msg}
+Repo: ${repo}"
+    [ -n "$issue" ]       && msg="${msg}
+Issue: #${issue}"
+    [ -n "$source_url" ]  && msg="${msg}
+Source-URL: ${source_url}"
+    [ -n "$actor" ]       && msg="${msg}
+Blocked-By: ${actor}"
+    [ -n "$host" ]        && msg="${msg}
+Blocked-Host: ${host}"
+    msg="${msg}
+Blocked-At: ${blocked_at}"
+
+    GIT_AUTHOR_NAME="task-dag" GIT_AUTHOR_EMAIL="task-dag@localhost" \
+    GIT_COMMITTER_NAME="task-dag" GIT_COMMITTER_EMAIL="task-dag@localhost" \
+    GIT_AUTHOR_DATE="$blocked_at" GIT_COMMITTER_DATE="$blocked_at" \
+        git commit-tree "$task_tree" -p "$task_sha" -m "$msg"
 }
 
 # Command: help
@@ -2016,13 +2133,15 @@ Related: $issue_url"
     if [ "$no_cleanup" = false ]; then
         local frontier_ref="refs/heads/tasks/frontier/$short_sha"
         local active_ref="refs/heads/tasks/active/$short_sha"
-        local blocked_ref
+        local blocked_ref meta_ref
         blocked_ref=$(blocked_ref_for "$task_sha")
+        meta_ref=$(blocked_meta_ref_for "$task_sha")
 
         # Delete local refs (purely local bookkeeping; harmless if absent).
         git update-ref -d "$frontier_ref" 2>/dev/null && echo "Deleted local $frontier_ref" || true
         git update-ref -d "$active_ref" 2>/dev/null && echo "Deleted local $active_ref" || true
         git update-ref -d "$blocked_ref" 2>/dev/null && echo "Deleted local $blocked_ref" || true
+        git update-ref -d "$meta_ref" 2>/dev/null && echo "Deleted local $meta_ref" || true
 
         # ── CAS-clean remote refs ──────────────────────────────────────
         # Every remote delete is leased to the EXACT sha we verified, so a
@@ -2074,6 +2193,17 @@ Related: $issue_url"
             fi
             lease_args+=("--force-with-lease=$blocked_ref:$blocked_now")
             refspecs+=(":$blocked_ref")
+        fi
+
+        # Blocked-meta (full-SHA side ref): a side-commit, not the task
+        # commit, so we lease to whatever it currently points at and just
+        # require it to be present. Completing a task clears its "why
+        # parked" metadata in lockstep with the overlay ref above.
+        local meta_now
+        meta_now=$(git ls-remote origin "$meta_ref" 2>/dev/null | awk '{print $1; exit}')
+        if [ -n "$meta_now" ]; then
+            lease_args+=("--force-with-lease=$meta_ref:$meta_now")
+            refspecs+=(":$meta_ref")
         fi
 
         if [ "${#refspecs[@]}" -gt 0 ]; then
@@ -2345,13 +2475,23 @@ EOF
 
 # Command: block - park a task so workers won't pick it up (but it's not closed)
 cmd_block() {
-    local task_sha="" reason=""
+    local task_sha="" reason="" request_url="" kind=""
+    local kind_set=false reason_set=false request_url_set=false
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --reason=*) reason="${1#*=}"; shift ;;
+            --reason=*) reason="${1#*=}"; reason_set=true; shift ;;
+            --request-url=*) request_url="${1#*=}"; request_url_set=true; shift ;;
+            --operator)
+                if [ "$kind_set" = true ] && [ "$kind" != "operator" ]; then
+                    echo "Error: --operator and --downstream are mutually exclusive" >&2; return 1; fi
+                kind="operator"; kind_set=true; shift ;;
+            --downstream)
+                if [ "$kind_set" = true ] && [ "$kind" != "downstream" ]; then
+                    echo "Error: --operator and --downstream are mutually exclusive" >&2; return 1; fi
+                kind="downstream"; kind_set=true; shift ;;
             --help|-h)
                 cat <<EOF
-Usage: task-dag block <sha> [--reason="..."]
+Usage: task-dag block <sha> [--operator|--downstream] [--reason="..."] [--request-url=URL]
 
 Mark a task BLOCKED. It stays in the DAG and is listable (task-dag
 blocked), but workers will NOT pick it up. Use this when a task is
@@ -2359,10 +2499,18 @@ stalled awaiting operator input or a downstream dependency, instead of
 repeatedly posting status comments (which get ingested as new pickable
 tasks and create a worker dispatch loop).
 
-Reverse with 'task-dag unblock <sha>'.
+Classification (drives the operator-blocked #29 dashboard):
+  --operator     parked awaiting operator action/decision (DEFAULT)
+  --downstream   parked awaiting a downstream/delegated dependency
 
-Note: --reason is printed/logged only; it is not durably stored on the
-ref. Put durable context in a markered issue comment if needed.
+Durable metadata (recorded at refs/heads/tasks/blocked-meta/<sha>):
+  --reason="..."     why it is parked (shown on the dashboard)
+  --request-url=URL  link to the exact comment/decision the operator needs
+
+The blocked overlay ref (refs/heads/tasks/blocked/<sha>) is unchanged;
+the metadata is additive side data and is cleared by unblock/complete/
+drop. Re-running block updates the metadata idempotently (preserving the
+original block time/actor). Reverse with 'task-dag unblock <sha>'.
 EOF
                 return 0 ;;
             *)
@@ -2374,20 +2522,106 @@ EOF
     [ -n "$task_sha" ] || { echo "Error: task SHA required" >&2; return 1; }
     task_sha=$(resolve_sha "$task_sha") || return 1
 
-    local blocked_ref; blocked_ref=$(blocked_ref_for "$task_sha")
-    if is_task_blocked "$task_sha"; then
-        printf "${YELLOW}Task already blocked:${RESET} %s\n" "$(get_task_title "$task_sha")"
+    local blocked_ref meta_ref
+    blocked_ref=$(blocked_ref_for "$task_sha")
+    meta_ref=$(blocked_meta_ref_for "$task_sha")
+
+    # Sync the overlay+meta from origin first so we (a) preserve the most
+    # recent remote block time/actor/reason on a re-block and (b) don't act
+    # on a stale local ref that origin has already unblocked (--prune drops
+    # it). Mirrors `claim`, which also fetches before mutating.
+    fetch_task_refs
+
+    local already_blocked=false
+    is_task_blocked "$task_sha" && already_blocked=true
+
+    # Identity/time of the parking. On a re-block we PRESERVE the original
+    # block time/actor/host (read from the existing meta) so the operation
+    # is idempotent, and we preserve any prior classification/reason/url
+    # the caller did not re-specify (so a bare re-block never silently
+    # drops earlier context).
+    local now actor host
+    now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    actor="${TASK_DAG_CLAIMER:-${USER:-unknown}}"
+    host="${TASK_DAG_CLAIMER_HOST:-$(hostname -s 2>/dev/null || echo unknown)}"
+
+    if has_blocked_meta "$task_sha"; then
+        local prev
+        prev=$(read_blocked_meta_field "$task_sha" "Blocked-At"); [ -n "$prev" ] && now="$prev"
+        prev=$(read_blocked_meta_field "$task_sha" "Blocked-By"); [ -n "$prev" ] && actor="$prev"
+        prev=$(read_blocked_meta_field "$task_sha" "Blocked-Host"); [ -n "$prev" ] && host="$prev"
+        if [ "$kind_set" = false ]; then
+            prev=$(read_blocked_meta_field "$task_sha" "Blocker-Kind"); [ -n "$prev" ] && kind="$prev"
+        fi
+        if [ "$reason_set" = false ]; then
+            reason=$(read_blocked_meta_field "$task_sha" "Reason")
+        fi
+        if [ "$request_url_set" = false ]; then
+            request_url=$(read_blocked_meta_field "$task_sha" "Request-URL")
+        fi
+    fi
+    # Default classification: operator action. The #29 dashboard exists to
+    # surface operator blockers, and `block` is canonically paired with
+    # `page-dave` once for an operator stall; a purely downstream-dependency
+    # block opts out with --downstream.
+    [ -n "$kind" ] || kind="operator"
+
+    # Derive the source repo/issue/url from the task commit itself so the
+    # dashboard can link back without reparsing commit bodies.
+    local repo issue source_url
+    IFS=$'\t' read -r repo issue source_url < <(derive_task_origin "$task_sha")
+
+    local new_meta
+    new_meta=$(build_blocked_meta_commit "$task_sha" "$kind" "$reason" "$request_url" \
+        "$repo" "$issue" "$source_url" "$actor" "$host" "$now")
+
+    # ── Push overlay + meta to origin atomically, leased ───────────────
+    # The meta ref is a MUTABLE side ref: a refined re-block (new kind /
+    # reason / url) builds a SIBLING commit of the old meta, so a plain
+    # push would be a non-fast-forward update and silently rejected.
+    # Lease each ref to the exact value origin has right now, push the
+    # object SHAs, and only move the LOCAL refs after origin confirms — so
+    # a concurrent unblock/re-block can never be clobbered, and we never
+    # report success when origin was not updated (fail loud per canon).
+    local remote_blocked remote_meta lease_args=() refspecs=()
+    remote_blocked=$(git ls-remote origin "$blocked_ref" 2>/dev/null | awk '{print $1; exit}')
+    remote_meta=$(git ls-remote origin "$meta_ref" 2>/dev/null | awk '{print $1; exit}')
+
+    if [ -n "$remote_blocked" ]; then
+        if [ "$remote_blocked" != "$task_sha" ]; then
+            echo "Error: $blocked_ref points at $remote_blocked, not task $task_sha (collision?). Refusing to block." >&2
+            return 3
+        fi
+        lease_args+=("--force-with-lease=$blocked_ref:$remote_blocked")
+    fi
+    refspecs+=("$task_sha:$blocked_ref")
+    if [ -n "$remote_meta" ]; then
+        lease_args+=("--force-with-lease=$meta_ref:$remote_meta")
+    fi
+    refspecs+=("$new_meta:$meta_ref")
+
+    if git push --atomic origin "${lease_args[@]}" "${refspecs[@]}" 2>/dev/null; then
+        # Origin is authoritative now — sync local refs to match.
+        git update-ref "$blocked_ref" "$task_sha"
+        git update-ref "$meta_ref" "$new_meta"
+        if [ "$already_blocked" = true ]; then
+            printf "${GREEN}✓ Updated block metadata:${RESET} %s\n" "$(get_task_title "$task_sha")"
+        else
+            printf "${GREEN}✓ Blocked task:${RESET} %s\n" "$(get_task_title "$task_sha")"
+        fi
+        echo "  Kind: $kind"
+        [ -n "$reason" ] && echo "  Reason: $reason"
+        [ -n "$request_url" ] && echo "  Request: $request_url"
         return 0
     fi
 
-    git update-ref "$blocked_ref" "$task_sha"
-    if git push origin "$blocked_ref:$blocked_ref" 2>/dev/null; then
-        printf "${GREEN}✓ Blocked task:${RESET} %s\n" "$(get_task_title "$task_sha")"
-    else
-        printf "${YELLOW}⚠ Blocked locally but could not push %s${RESET}\n" "$blocked_ref" >&2
-    fi
-    [ -n "$reason" ] && echo "  Reason: $reason"
-    return 0
+    # Push failed (a lease mismatch = origin changed under us, or network).
+    # The task is NOT durably parked, so do NOT update local refs or claim
+    # success — another worker could still pick it up. Resync and report.
+    printf "${RED}✗ Failed to block %s on origin (it changed under us, or push failed).${RESET}\n" "$(get_task_title "$task_sha")" >&2
+    echo "Re-run 'task-dag block $(git rev-parse --short "$task_sha")' after checking 'task-dag blocked'." >&2
+    fetch_task_refs
+    return 4
 }
 
 # Command: unblock - make a previously-blocked task pickable again
@@ -2405,22 +2639,49 @@ cmd_unblock() {
     [ -n "$task_sha" ] || { echo "Error: task SHA required" >&2; return 1; }
     task_sha=$(resolve_sha "$task_sha") || return 1
 
-    local blocked_ref; blocked_ref=$(blocked_ref_for "$task_sha")
-    if ! is_task_blocked "$task_sha"; then
+    local blocked_ref meta_ref
+    blocked_ref=$(blocked_ref_for "$task_sha")
+    meta_ref=$(blocked_meta_ref_for "$task_sha")
+    # Sync from origin so a fresh checkout sees the parked state (and a
+    # remotely-resolved one is pruned) before deciding it is "not blocked".
+    fetch_task_refs
+    if ! is_task_blocked "$task_sha" && ! has_blocked_meta "$task_sha"; then
         printf "${YELLOW}Task is not blocked:${RESET} %s\n" "$(get_task_title "$task_sha")"
         return 0
     fi
 
     # Overlay semantics: deleting the blocked ref restores whatever
     # pickability the task already had (its pending/frontier ref is
-    # untouched by block/unblock).
-    git update-ref -d "$blocked_ref"
-    if git push origin ":$blocked_ref" 2>/dev/null; then
-        printf "${GREEN}✓ Unblocked task:${RESET} %s\n" "$(get_task_title "$task_sha")"
-    else
-        printf "${YELLOW}⚠ Unblocked locally but could not push deletion of %s${RESET}\n" "$blocked_ref" >&2
+    # untouched by block/unblock). The blocked-meta side data is cleared
+    # in lockstep so a revived task carries no stale "why parked" record.
+    #
+    # Each remote deletion is LEASED to the exact value origin has now, so
+    # a concurrent re-block/refinement (which moves the meta ref to a new
+    # sibling commit) is never silently clobbered: a lease mismatch fails
+    # the push instead. We push deletions only for refs that exist (a
+    # legacy block has no meta ref; an interrupted block may have only one).
+    local remote_blocked remote_meta lease_args=() refspecs=()
+    remote_blocked=$(git ls-remote origin "$blocked_ref" 2>/dev/null | awk '{print $1; exit}')
+    remote_meta=$(git ls-remote origin "$meta_ref" 2>/dev/null | awk '{print $1; exit}')
+    if [ -n "$remote_blocked" ]; then
+        lease_args+=("--force-with-lease=$blocked_ref:$remote_blocked")
+        refspecs+=(":$blocked_ref")
     fi
-    return 0
+    if [ -n "$remote_meta" ]; then
+        lease_args+=("--force-with-lease=$meta_ref:$remote_meta")
+        refspecs+=(":$meta_ref")
+    fi
+
+    if [ "${#refspecs[@]}" -eq 0 ] || git push --atomic origin "${lease_args[@]}" "${refspecs[@]}" 2>/dev/null; then
+        git show-ref --verify --quiet "$blocked_ref" && git update-ref -d "$blocked_ref"
+        git show-ref --verify --quiet "$meta_ref" && git update-ref -d "$meta_ref"
+        printf "${GREEN}✓ Unblocked task:${RESET} %s\n" "$(get_task_title "$task_sha")"
+        return 0
+    fi
+    printf "${RED}✗ Failed to unblock %s on origin (it changed under us, or push failed).${RESET}\n" "$(get_task_title "$task_sha")" >&2
+    echo "Re-check with 'task-dag blocked' and retry." >&2
+    fetch_task_refs
+    return 4
 }
 
 # Command: blocked - list parked (blocked) tasks
@@ -2530,6 +2791,7 @@ EOF
     local r
     for r in "refs/heads/tasks/frontier/$short_sha" \
              "$(blocked_ref_for "$task_sha")" \
+             "$(blocked_meta_ref_for "$task_sha")" \
              "refs/heads/tasks/active/$short_sha"; do
         if git show-ref --verify --quiet "$r"; then
             git update-ref -d "$r" && echo "Deleted local $r"

@@ -11,7 +11,8 @@ duplicate work across the worker fleet (see "Known gaps").
 | `tasks/pending/<N>` | issue-to-task workflow on issue open/edit/reopen (`create-task-commit.sh`) | **Epic root** for issue `#N`. Also the durable epic *identity* used by closure (`close-epic` / `close-completed-issues.sh`), cross-repo delegation, and comment-ingest ancestry. | Intentionally **kept** for the issue's life (it is the epic identity, not just a queue entry). |
 | `tasks/frontier/<short>` | `task-dag breakdown` (run by an agent) | A claimable **implementation leaf**. One per child task, published up front. | `task-dag claim` (renamed to `active`) or `complete`/`drop`. |
 | `tasks/active/<short>` | `task-dag claim` | The cross-host distributed lock: this leaf is in flight. The claim commit records Claimer / Claimer-Host / Claimer-PID / Claimed-At. | `complete` (lands the task) or `release` (back to `frontier`). |
-| `tasks/blocked/<sha>` | `task-dag block` | Parked: stays in the DAG, listed by `blocked`, never dispatched. | `unblock` / `drop`. |
+| `tasks/blocked/<sha>` | `task-dag block` | Parked: stays in the DAG, listed by `blocked`, never dispatched. The overlay ref points straight at the task commit (source of truth for "is this task blocked"). | `unblock` / `complete` / `drop`. |
+| `tasks/blocked-meta/<sha>` | `task-dag block` | Optional **side metadata** for a parked task: a deterministic side-commit (tree == task tree, first parent == task commit) whose body records `Blocker-Kind` (`operator`/`downstream`), durable `Reason`, optional `Request-URL`, derived `Repo`/`Issue`/`Source-URL`, and `Blocked-By`/`Blocked-Host`/`Blocked-At`. Consumed by the operator-blocked #29 dashboard so it need not reparse task bodies. A blocked task with **no** meta ref (a legacy block) is still fully valid. | `unblock` / `complete` / `drop` (cleared in lockstep with the overlay ref). |
 
 ## Non-task namespace: CI repair chains (`tasks/ci-chains/...`)
 
