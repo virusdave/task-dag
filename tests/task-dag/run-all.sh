@@ -30,7 +30,7 @@ bash -n "$TD" \
     && bash -n "$(dirname "$TD")/operator-blocked-dashboard-publish.sh" || exit 1
 
 rc=0
-for t in complete-safety.sh ingest-loop.sh ingest-selfheal.sh blocked-overlay.sh blocked-meta.sh blocked-json.sh operator-blocked-dashboard.sh operator-blocked-dashboard-publish.sh operator-blocked-dispatch.sh transitive-block.sh claim-pid.sh claim-force-steal.sh breakdown-self-claim.sh tree-fix-trailers.sh ci-chain-cas.sh ci-classifier.sh ci-verify-target.sh ci-repair-ticket.sh ci-tree-fix-outcome.sh ci-race-stale.sh; do
+for t in complete-safety.sh ingest-loop.sh ingest-selfheal.sh blocked-overlay.sh blocked-meta.sh blocked-json.sh operator-blocked-dashboard.sh operator-blocked-dashboard-publish.sh operator-blocked-dispatch.sh transitive-block.sh claim-pid.sh claim-force-steal.sh breakdown-self-claim.sh root-claim.sh tree-fix-trailers.sh ci-chain-cas.sh ci-classifier.sh ci-verify-target.sh ci-repair-ticket.sh ci-tree-fix-outcome.sh ci-race-stale.sh; do
     echo "== $t =="
     bash "$here/$t" "$TD" || rc=1
 done

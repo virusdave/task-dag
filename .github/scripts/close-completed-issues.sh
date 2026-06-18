@@ -126,7 +126,14 @@ for commit in "${new_commits[@]}"; do
 
         gh issue close "$issue_num" --comment "$comment" || true
 
-        # Delete the remote tasks/pending ref so the frontier stays clean.
+        # Drop any orchestration lock (tasks/root-active/<N>) FIRST, then
+        # the pending identity ref, so the frontier stays clean. Order
+        # matters: breakdown keys "is this an epic root?" off pending/<N>,
+        # so removing root-active before pending narrows the window in which
+        # a stale worker could see the root-lock gone but pending still
+        # present. (breakdown also fails closed when an epic root's pending
+        # identity is missing, so neither ordering can resurrect the root.)
+        git push origin --delete "refs/heads/tasks/root-active/${issue_num}" 2>/dev/null || true
         git push origin --delete "refs/heads/tasks/pending/${issue_num}" 2>/dev/null || true
     done
 done

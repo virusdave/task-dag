@@ -63,9 +63,13 @@ Type: epic")
     echo "$org"
 }
 mk_task() {  # $1=wc $2=title -> short sha
-    local wc="$1" title="$2" epic
+    local wc="$1" title="$2" epic issue
     epic=$(cat "$(dirname "$wc")/epic.sha")
     printf '[{"title":"%s","type":"leaf"}]' "$title" > "$ROOT/spec.json"
+    # Decomposing the epic root requires (and consumes) the orchestration
+    # lock (issue #2). --force re-acquires it for each incremental breakdown.
+    issue=$(git -C "$wc" log -1 --format=%B "$epic" | sed -n 's/^Issue: #//p')
+    ( cd "$wc" && "$TD" claim-root "$issue" --force >/dev/null 2>&1 )
     ( cd "$wc" && "$TD" breakdown "$epic" --spec-file="$ROOT/spec.json" --force --json 2>/dev/null ) \
         | grep -oE '"shortSha":"[0-9a-f]+"' | head -1 | cut -d'"' -f4
 }

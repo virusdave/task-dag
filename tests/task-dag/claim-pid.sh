@@ -35,6 +35,9 @@ mk_task() {  # prints the new leaf task short sha
   # --force: this helper decomposes the SAME epic repeatedly to mint
   # several independent leaves; the double-decompose guard (which now also
   # recognizes already-claimed children) would otherwise refuse the 2nd+.
+  # Decomposing the epic root also requires (and consumes) the orchestration
+  # lock (issue #2). --force re-acquires it for each incremental breakdown.
+  "$TD" claim-root 999 --force >/dev/null 2>&1
   "$TD" breakdown "$EPIC" --spec-file="$ROOT/spec.json" --force --json 2>/dev/null \
     | grep -oE '"shortSha":"[0-9a-f]+"' | head -1 | cut -d'"' -f4
 }

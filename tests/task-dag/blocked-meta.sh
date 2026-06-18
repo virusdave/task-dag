@@ -50,6 +50,9 @@ mk_task() {  # prints the new leaf task short sha
   # otherwise trip the guard — a harness artifact, not a CLI concern).
   local title="$1"
   printf '[{"title":"%s","type":"leaf"}]' "$title" > "$ROOT/spec.json"
+  # Decomposing the epic root requires (and consumes) the orchestration
+  # lock (issue #2). --force re-acquires it for each incremental breakdown.
+  "$TD" claim-root 999 --force >/dev/null 2>&1
   "$TD" breakdown "$EPIC" --spec-file="$ROOT/spec.json" --force --json 2>/dev/null \
     | grep -oE '"shortSha":"[0-9a-f]+"' | head -1 | cut -d'"' -f4
 }

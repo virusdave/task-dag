@@ -215,6 +215,8 @@ fetch_task_refs() {
         '+refs/heads/tasks/active/*:refs/heads/tasks/active/*' \
         '+refs/heads/tasks/blocked/*:refs/heads/tasks/blocked/*' \
         '+refs/heads/tasks/blocked-meta/*:refs/heads/tasks/blocked-meta/*' \
+        '+refs/heads/tasks/root-active/*:refs/heads/tasks/root-active/*' \
+        '+refs/heads/tasks/pending/*:refs/heads/tasks/pending/*' \
         2>/dev/null || true
 }
 
@@ -298,6 +300,222 @@ Note: ${note}"
     fi
 
     git commit-tree "$task_tree" -p "$task_sha" -m "$msg"
+}
+
+# ── Epic-root orchestration locking (issue #2) ────────────────────────
+#
+# An epic root (`tasks/pending/<N>`) is the durable identity of issue N
+# (closure / delegation / comment ancestry all anchor to it), so it is
+# NEVER moved or renamed. That very durability means the leaf claim CAS
+# (frontier->active) cannot protect it, so two hosts could both dispatch
+# the same undecomposed root. The fix is a SECOND, parallel lock ref:
+#
+#   tasks/root-active/<N>  — a cross-host claim on "orchestrate/decompose
+#                            issue N". Created by `claim-root <N>` via the
+#                            same atomic CAS used for leaves, keyed by
+#                            issue number (matching pending/<N>), and
+#                            CONSUMED (deleted) by `breakdown` in the same
+#                            atomic push that publishes the child leaves.
+#
+# pending/<N> is left untouched throughout, so identity is preserved.
+
+# Helper: print the SHA origin currently has at <ref>, bypassing local
+# caches (no fetch, no local-ref shortcut). Empty string = absent.
+remote_ref_sha() {
+    git ls-remote origin "$1" 2>/dev/null | awk '{print $1; exit}'
+}
+
+# Helper: SHA of tasks/pending/<N> on origin (epic-root identity).
+pending_sha_on_remote() {
+    remote_ref_sha "refs/heads/tasks/pending/$1"
+}
+
+# Helper: tri-state pending lookup so callers can FAIL CLOSED on an
+# indeterminate (transport/auth) error instead of silently treating a
+# transient failure as "no root". Echoes the SHA on success.
+#   rc 0 + SHA  -> root exists on origin
+#   rc 2        -> root cleanly absent
+#   rc 3        -> origin unreachable / error (indeterminate)
+pending_sha_on_remote_checked() {
+    local out rc
+    out=$(git ls-remote --exit-code origin "refs/heads/tasks/pending/$1" 2>/dev/null)
+    rc=$?
+    case "$rc" in
+        0) printf '%s\n' "$out" | awk '{print $1; exit}'; return 0 ;;
+        2) return 2 ;;   # exit-code 2: ref not found
+        *) return 3 ;;   # transport/auth/other
+    esac
+}
+
+# Helper: SHA of tasks/root-active/<N> on origin (root orchestration lock).
+root_active_sha_on_remote() {
+    remote_ref_sha "refs/heads/tasks/root-active/$1"
+}
+
+# Helper: fetch the refs needed to reason about issue N's epic root —
+# the pending root, its orchestration lock, and every namespace a child
+# task could live in (so child detection sees active/blocked/delegated
+# children, not just freshly-published frontier leaves).
+#
+# Returns 0 only if the sync actually completed; returns 1 on a transport/
+# auth failure. A wildcard refspec that matches nothing on origin still
+# succeeds (rc 0), so a non-zero rc means "we could not read origin", not
+# "no such refs". Safety-critical callers (claim-root child checks, the
+# breakdown double-decompose guard, the complete root-with-children guard)
+# MUST fail CLOSED on a non-zero rc rather than treating an unreadable
+# origin as "no children" — otherwise a transient failure re-opens the
+# exact duplicate-decompose race this lock exists to prevent (#2). Display
+# paths (`roots`) may ignore the rc.
+fetch_root_refs() {
+    local issue="${1:-}"
+    # --prune so a local checkout that still carries a frontier/active/etc
+    # ref origin has since removed does not give task_has_children a stale
+    # false-positive child. (Truly local-only experimental branches are
+    # still visible to `git rev-list --all`; origin is the source of truth.)
+    git fetch --quiet --prune origin \
+        '+refs/heads/tasks/pending/*:refs/heads/tasks/pending/*' \
+        '+refs/heads/tasks/root-active/*:refs/heads/tasks/root-active/*' \
+        '+refs/heads/tasks/frontier/*:refs/heads/tasks/frontier/*' \
+        '+refs/heads/tasks/active/*:refs/heads/tasks/active/*' \
+        '+refs/heads/tasks/blocked/*:refs/heads/tasks/blocked/*' \
+        2>/dev/null || return 1
+    if [ -n "$issue" ]; then
+        git fetch --quiet --prune origin \
+            "+refs/heads/tasks/delegated/${issue}/*:refs/heads/tasks/delegated/${issue}/*" \
+            2>/dev/null || return 1
+    fi
+    return 0
+}
+
+# Helper: build the root-orchestration claim commit. Mirrors the leaf
+# claim commit (so liveness/attribution tooling reads it the same way)
+# but tags it `Claim-Kind: root` and records the issue number. Its first
+# parent is the root commit, and its subject begins "Claim: " — both so
+# `task_has_children` never mistakes the lock commit for a real child.
+build_root_claim_commit() {
+    local issue="$1" root_sha="$2" claimer="$3" claimer_host="$4"
+    local ttl_hours="$5" note="$6" claimer_pid="$7"
+
+    local root_title root_tree now claim_id
+    root_title=$(get_task_title "$root_sha")
+    root_tree=$(git rev-parse "$root_sha^{tree}")
+    now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    # Per-claim nonce so two same-second / same-identity claims never
+    # collapse to the same commit SHA. The claim SHA is the lock token in
+    # the --force-with-lease CAS, so distinct lock *epochs* must have
+    # distinct tokens (else a stale holder's lease could match a fresh
+    # claim). uuidgen when available; otherwise time+pid+random.
+    claim_id=$(uuidgen 2>/dev/null || echo "$(date +%s%N)-$$-${RANDOM}")
+
+    local msg="Claim: ${root_title}
+
+Claim-Kind: root
+Issue: #${issue}
+Claim-ID: ${claim_id}
+Task-Commit: ${root_sha}
+Claimer: ${claimer}
+Claimer-Host: ${claimer_host}"
+    if [ -n "$claimer_pid" ]; then
+        msg="${msg}
+Claimer-PID: ${claimer_pid}"
+    fi
+    msg="${msg}
+Claimed-At: ${now}
+TTL-Hours: ${ttl_hours}"
+    if [ -n "$note" ]; then
+        msg="${msg}
+Note: ${note}"
+    fi
+
+    git commit-tree "$root_tree" -p "$root_sha" -m "$msg"
+}
+
+# Helper: print the SHA of the first real child task of <parent_sha> (a
+# commit that has <parent_sha> as ANY parent and is itself a task commit
+# but NOT a claim commit), and return 0; return 1 if none exist.
+#
+# This is the authoritative "has this root been decomposed?" check. It
+# uses exact parent membership over the fetched task namespaces, NOT a
+# substring grep, and it ignores claim commits (leaf `tasks/active/*` and
+# root `tasks/root-active/*` claim commits are parented to their task but
+# are locks, not children). Callers MUST `fetch_root_refs` first so the
+# child refs are present locally.
+task_has_children() {
+    local parent_sha="$1"
+    local commit parents subject
+    while read -r commit parents; do
+        case " $parents " in
+            *" $parent_sha "*) ;;
+            *) continue ;;
+        esac
+        # Skip claim commits (leaf + root); they are parented to their
+        # task/root but represent a lock, not decomposition.
+        subject=$(git log -1 --format='%s' "$commit" 2>/dev/null || true)
+        case "$subject" in
+            Claim:*) continue ;;
+        esac
+        # Only count empty-tree task commits as DAG children; real
+        # implementation/master commits that happen to list the root are
+        # not breakdown children.
+        is_task_commit "$commit" || continue
+        printf '%s\n' "$commit"
+        return 0
+    done < <(git rev-list --all --parents 2>/dev/null)
+    return 1
+}
+
+# Helper: drop OUR own root claim (used by claim-root's post-claim bail
+# paths). Deletes tasks/root-active/<N> iff it is still at our claim
+# commit, then reads back. Returns 0 if the lock is no longer ours on
+# origin (released, or already overwritten by someone else); returns 1 if
+# our claim is STILL on origin and we failed to remove it (caller must
+# surface that as a stale lock needing manual release-root).
+_release_our_root_claim() {
+    local issue="$1" claim_commit="$2"
+    local ref="refs/heads/tasks/root-active/$issue"
+    git push --atomic origin \
+        "--force-with-lease=$ref:$claim_commit" \
+        ":$ref" >/dev/null 2>&1 || true
+    git update-ref -d "$ref" 2>/dev/null || true
+    # Tri-state readback against origin (the source of truth). We must NOT
+    # report success just because a local/offline read came back empty —
+    # an unreadable origin means the delete is UNCONFIRMED and our claim
+    # may still be live, so fail (return 1) and let the caller tell the
+    # user to run release-root.
+    local out rc now
+    out=$(git ls-remote origin "$ref" 2>/dev/null); rc=$?
+    if [ "$rc" != 0 ]; then
+        return 1   # transport error: release not confirmed
+    fi
+    now=$(printf '%s\n' "$out" | awk '{print $1; exit}')
+    # Absent (released) or present at a DIFFERENT SHA (someone else's epoch
+    # — no longer ours) both mean our claim is gone: success. Still at our
+    # claim commit means the delete did not take: failure.
+    [ "$now" != "$claim_commit" ]
+}
+
+# Helper: true iff <sha> is the epic-root (pending) commit for its issue.
+# Resolved by reading the Issue trailer and confirming tasks/pending/<N>
+# points at exactly this commit. Origin is authoritative; if origin is
+# indeterminate (unreachable) we FALL BACK to the local pending ref so a
+# transient network failure can't make a real root look like a non-root
+# (which would skip the root-completion guard). Echoes the issue number on
+# success; silent + non-zero on fail.
+task_is_pending_root() {
+    local sha="$1" issue remote rc
+    issue=$(extract_field "$(parse_commit_metadata "$sha")" "Issue" 2>/dev/null | sed 's/^#//' || true)
+    [ -n "$issue" ] || return 1
+    remote=$(pending_sha_on_remote_checked "$issue"); rc=$?
+    if [ "$rc" = 0 ]; then
+        [ "$remote" = "$sha" ] || return 1
+    else
+        # rc 2 (cleanly absent) or rc 3 (indeterminate): consult the local
+        # mirror. On rc 2 the local ref is normally also absent → not a
+        # root. On rc 3 the local ref lets us still recognise our own root.
+        [ "$(git rev-parse --verify -q "refs/heads/tasks/pending/$issue" 2>/dev/null)" = "$sha" ] || return 1
+    fi
+    printf '%s\n' "$issue"
+    return 0
 }
 
 # Helper: advance HEAD to a completion commit WITHOUT destroying the
@@ -512,7 +730,16 @@ COMMANDS:
     claim <sha>            Atomically claim a frontier task across hosts (run
                            this BEFORE you start working so concurrent agents
                            on other hosts don't duplicate your work)
+    claim-root <issue>     Atomically claim an UNDECOMPOSED epic root for
+                           orchestration across hosts (run BEFORE breakdown so
+                           two hosts can't decompose the same issue). Consumed
+                           by breakdown.
     release <sha>          Drop a claim back onto the frontier
+    release-root <issue>   Drop a root orchestration claim (never creates a
+                           frontier ref)
+    roots                  List epic roots + orchestration state
+                           (decomposed/claimed/pickable); --pickable for
+                           the dispatch discovery surface
     active                 List currently-claimed (in-flight) tasks
     show <sha>             Show task details
     deps <sha>             Show task dependencies
@@ -1171,6 +1398,461 @@ JSON
     return 4
 }
 
+# Command: claim-root - atomically take the orchestration lock on an
+# undecomposed epic root, so only one host decomposes a given issue.
+#
+# The contract mirrors `claim` but operates on the epic root keyed by
+# issue number:
+#   1. Create tasks/root-active/<N> on ORIGIN iff it is ABSENT, under a
+#      compare-and-swap that also asserts tasks/pending/<N> is unchanged
+#      (a no-op refspec for pending makes a concurrent root move/delete
+#      abort the whole atomic push). pending/<N> is NEVER moved, so the
+#      epic identity is preserved.
+#   2. Refuse if the root is already decomposed (has child task refs):
+#      orchestration is finished, the leaves are the unit of work now.
+#   3. Double-checked locking: read tasks/root-active/<N> back off origin
+#      and confirm it is OUR claim commit; then re-check children, because
+#      another host could have decomposed (publishing leaves + deleting
+#      root-active) between our pre-check and our claim landing.
+#
+# Exit codes mirror `claim`:
+#   0 claimed   1 arg error   2 already-claimed/already-decomposed
+#   3 no pending root on origin   4 push failed
+cmd_claim_root() {
+    local issue=""
+    local claimer="${TASK_DAG_CLAIMER:-${USER:-unknown}}"
+    local claimer_host="${TASK_DAG_CLAIMER_HOST:-$(hostname -s 2>/dev/null || echo unknown)}"
+    local ttl_hours="${TASK_DAG_TTL_HOURS:-12}"
+    local claimer_pid="${TASK_DAG_CLAIMER_PID:-$PPID}"
+    local note="" do_force=false json=false
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --by=*) claimer="${1#*=}"; shift ;;
+            --host=*) claimer_host="${1#*=}"; shift ;;
+            --pid=*) claimer_pid="${1#*=}"; shift ;;
+            --ttl-hours=*) ttl_hours="${1#*=}"; shift ;;
+            --note=*) note="${1#*=}"; shift ;;
+            --force) do_force=true; shift ;;
+            --json) json=true; shift ;;
+            --help|-h)
+                cat <<EOF
+Usage: task-dag claim-root <issue-number> [options]
+
+Atomically claim the orchestration lock on an UNDECOMPOSED epic root so
+that only one host decomposes a given issue. This is the root-level
+counterpart of \`claim\` (which is leaf-only). Run it BEFORE you run
+\`breakdown\`; \`breakdown\` of an epic root requires this lock and
+consumes it when it publishes the child leaves.
+
+The lock lives at tasks/root-active/<issue>; the epic identity ref
+tasks/pending/<issue> is never moved.
+
+Options:
+  --by=<id>         Claimer identifier (default: \$TASK_DAG_CLAIMER or \$USER)
+  --host=<name>     Claimer hostname (default: \$TASK_DAG_CLAIMER_HOST or hostname -s)
+  --pid=<n>         Claiming worker PID (default: \$TASK_DAG_CLAIMER_PID or \$PPID)
+  --ttl-hours=<n>   Advisory TTL stored in the claim metadata (default: 12)
+  --note=<text>     Free-form note recorded in the claim metadata
+  --force           Steal an existing root claim (only if the prior holder is dead)
+  --json            Emit a machine-readable JSON result
+
+Exit codes:
+  0  claim succeeded
+  1  argument error
+  2  root already claimed by another worker, or already decomposed
+  3  no pending epic root on origin (unknown/closed issue)
+  4  push failed for an unrelated reason
+EOF
+                return 0
+                ;;
+            *)
+                if [ -z "$issue" ]; then issue="$1"; else
+                    echo "Unknown option: $1" >&2; return 1
+                fi
+                shift
+                ;;
+        esac
+    done
+
+    if [ -z "$issue" ]; then
+        echo "Error: issue number required" >&2
+        return 1
+    fi
+    if ! [[ "$issue" =~ ^[0-9]+$ ]]; then
+        echo "Error: issue must be a number (got '$issue')" >&2
+        return 1
+    fi
+
+    # Origin is the source of truth for the root identity + lock state.
+    local root_sha
+    root_sha=$(pending_sha_on_remote "$issue")
+    if [ -z "$root_sha" ]; then
+        if [ "$json" = true ]; then
+            echo "{\"ok\":false,\"reason\":\"no-pending-root\",\"issue\":$issue}"
+        else
+            printf "${RED}No epic root tasks/pending/%s on origin — unknown or closed issue.${RESET}\n" "$issue" >&2
+        fi
+        return 3
+    fi
+
+    # Sync local view (pending root object + child namespaces) so the
+    # child detector and claim-commit builder have what they need. FAIL
+    # CLOSED if origin is unreadable: the "already decomposed?" check below
+    # depends on a fresh child view, and a transient failure must not be
+    # mistaken for "no children" (that would let us claim a root someone
+    # else already decomposed).
+    if ! fetch_root_refs "$issue"; then
+        if [ "$json" = true ]; then
+            echo "{\"ok\":false,\"reason\":\"origin-unreadable\",\"issue\":$issue}"
+        else
+            printf "${RED}Cannot reach origin to verify epic root #%s state — refusing to claim.${RESET}\n" "$issue" >&2
+        fi
+        return 3
+    fi
+
+    # Already claimed by someone else?
+    local existing_active
+    existing_active=$(root_active_sha_on_remote "$issue")
+    if [ -n "$existing_active" ] && [ "$do_force" = false ]; then
+        local existing_claimer="unknown" existing_host="unknown" existing_pid="" existing_when="unknown" emsg
+        git fetch --quiet --no-tags origin \
+            "+refs/heads/tasks/root-active/$issue:refs/task-dag-tmp/root-active/$issue" 2>/dev/null || true
+        if git show-ref --verify --quiet "refs/task-dag-tmp/root-active/$issue"; then
+            emsg=$(parse_commit_metadata "refs/task-dag-tmp/root-active/$issue" 2>/dev/null || true)
+            existing_claimer=$(extract_field "$emsg" "Claimer" 2>/dev/null || true)
+            existing_host=$(extract_field "$emsg" "Claimer-Host" 2>/dev/null || true)
+            existing_pid=$(extract_field "$emsg" "Claimer-PID" 2>/dev/null || true)
+            existing_when=$(extract_field "$emsg" "Claimed-At" 2>/dev/null || true)
+            git update-ref -d "refs/task-dag-tmp/root-active/$issue" 2>/dev/null || true
+        fi
+        if [ "$json" = true ]; then
+            echo "{\"ok\":false,\"reason\":\"already-claimed\",\"issue\":$issue,\"claimer\":\"${existing_claimer:-unknown}\",\"claimerHost\":\"${existing_host:-unknown}\",\"claimerPid\":${existing_pid:-null},\"claimedAt\":\"${existing_when:-unknown}\"}"
+        else
+            printf "${RED}Epic root #%s is already claimed by %s (pid %s on %s) at %s${RESET}\n" \
+                "$issue" "${existing_claimer:-unknown}" "${existing_pid:-?}" "${existing_host:-unknown}" "${existing_when:-unknown}" >&2
+            echo "Re-run with --force ONLY if you know that claim is dead." >&2
+        fi
+        return 2
+    fi
+
+    # Already decomposed? Then orchestration is done; refuse (the leaves
+    # are the unit of work now). Skip when forcing a steal.
+    if [ "$do_force" = false ] && task_has_children "$root_sha" >/dev/null; then
+        if [ "$json" = true ]; then
+            echo "{\"ok\":false,\"reason\":\"already-decomposed\",\"issue\":$issue}"
+        else
+            printf "${RED}Epic root #%s is already decomposed — claim its frontier leaves instead.${RESET}\n" "$issue" >&2
+        fi
+        return 2
+    fi
+
+    local claim_commit
+    claim_commit=$(build_root_claim_commit "$issue" "$root_sha" "$claimer" "$claimer_host" "$ttl_hours" "$note" "$claimer_pid") || {
+        echo "Error: failed to build root claim commit" >&2
+        return 4
+    }
+
+    local root_active_ref="refs/heads/tasks/root-active/$issue"
+    local pending_ref="refs/heads/tasks/pending/$issue"
+
+    # Atomic CAS: create root-active iff absent (or force-overwrite when
+    # stealing). The create-only lease on root-active is the real
+    # cross-host mutex — two simultaneous claim-roots cannot both land.
+    # The pending lease + no-op refspec is a best-effort CLIENT-SIDE stale
+    # check (git skips sending up-to-date refs, so it is NOT a server-side
+    # atomic assertion); the authoritative pending-unchanged check is the
+    # post-claim readback below. An undecomposed root is never closed, so
+    # pending cannot legitimately move/delete during this window anyway.
+    local lease_active="--force-with-lease=$root_active_ref:"
+    local active_force=""
+    local lease_pending="--force-with-lease=$pending_ref:$root_sha"
+    if [ "$do_force" = true ]; then
+        lease_active=""
+        active_force="+"
+    fi
+
+    local push_output
+    if push_output=$(git push --atomic origin \
+        $lease_active \
+        "$lease_pending" \
+        "${active_force}${claim_commit}:$root_active_ref" \
+        "$root_sha:$pending_ref" 2>&1); then
+
+        # Double-checked locking: confirm origin holds OUR claim commit.
+        local readback
+        readback=$(root_active_sha_on_remote "$issue")
+        if [ "$readback" != "$claim_commit" ]; then
+            fetch_root_refs "$issue" >/dev/null 2>&1 || true
+            if [ "$json" = true ]; then
+                echo "{\"ok\":false,\"reason\":\"claim-not-confirmed\",\"issue\":$issue,\"attemptedClaimCommit\":\"$claim_commit\",\"actualActiveSha\":\"${readback:-}\"}"
+            else
+                printf "${RED}✗ Root claim push appeared to succeed but origin readback shows tasks/root-active/%s = %s (expected %s).${RESET}\n" \
+                    "$issue" "${readback:-<missing>}" "$claim_commit" >&2
+            fi
+            return 2
+        fi
+
+        # Mirror locally so subsequent commands see the lock.
+        git update-ref "$root_active_ref" "$claim_commit"
+
+        # Authoritative pending-unchanged check: confirm pending/<N> still
+        # points at the root we claimed. (Closes the gap left by the
+        # client-side-only pending lease above.) If it moved/vanished,
+        # drop our claim and bail.
+        local pending_now
+        pending_now=$(pending_sha_on_remote "$issue")
+        if [ "$do_force" = false ] && [ "$pending_now" != "$root_sha" ]; then
+            if ! _release_our_root_claim "$issue" "$claim_commit"; then
+                if [ "$json" = true ]; then
+                    echo "{\"ok\":false,\"reason\":\"pending-moved-claim-not-released\",\"issue\":$issue}"
+                else
+                    printf "${RED}Epic root #%s identity changed during claim (pending now %s) but our orchestration claim could NOT be released — run 'task-dag release-root %s'.${RESET}\n" \
+                        "$issue" "${pending_now:-<gone>}" "$issue" >&2
+                fi
+                return 4
+            fi
+            if [ "$json" = true ]; then
+                echo "{\"ok\":false,\"reason\":\"pending-moved\",\"issue\":$issue}"
+            else
+                printf "${RED}Epic root #%s identity changed during claim (pending now %s); released our claim.${RESET}\n" \
+                    "$issue" "${pending_now:-<gone>}" >&2
+            fi
+            return 2
+        fi
+
+        # Post-claim child re-check: another host could have decomposed
+        # (published leaves + deleted root-active) between our pre-check
+        # and our claim landing, then we'd have re-created a stale lock on
+        # an already-decomposed root. If so, release our claim and bail.
+        # Skipped under --force: a deliberate steal/re-claim (e.g. to add
+        # children to an already-decomposed root via `breakdown --force`)
+        # legitimately wants the lock even when children exist.
+        #
+        # FAIL CLOSED if origin is unreadable for this recheck: we already
+        # hold a claim on origin, but we cannot confirm the root wasn't
+        # decomposed concurrently. Drop our claim and tell the caller to
+        # retry rather than keep a possibly-stale lock on a decomposed root.
+        if [ "$do_force" = false ] && ! fetch_root_refs "$issue"; then
+            if ! _release_our_root_claim "$issue" "$claim_commit"; then
+                if [ "$json" = true ]; then
+                    echo "{\"ok\":false,\"reason\":\"postclaim-unreadable-claim-not-released\",\"issue\":$issue}"
+                else
+                    printf "${RED}Claimed epic root #%s but could not re-verify origin, and our orchestration claim could NOT be released — run 'task-dag release-root %s'.${RESET}\n" "$issue" "$issue" >&2
+                fi
+                return 4
+            fi
+            if [ "$json" = true ]; then
+                echo "{\"ok\":false,\"reason\":\"origin-unreadable-postclaim\",\"issue\":$issue}"
+            else
+                printf "${RED}Claimed epic root #%s but could not re-verify origin afterwards; released our claim — retry.${RESET}\n" "$issue" >&2
+            fi
+            return 3
+        fi
+        if [ "$do_force" = false ] && task_has_children "$root_sha" >/dev/null; then
+            if ! _release_our_root_claim "$issue" "$claim_commit"; then
+                # Our claim is still on origin and we could not drop it —
+                # surface it loudly so the stale lock gets cleaned up.
+                if [ "$json" = true ]; then
+                    echo "{\"ok\":false,\"reason\":\"stale-claim-not-released\",\"issue\":$issue}"
+                else
+                    printf "${RED}Epic root #%s was decomposed concurrently but our orchestration claim could NOT be released — run 'task-dag release-root %s'.${RESET}\n" "$issue" "$issue" >&2
+                fi
+                return 4
+            fi
+            if [ "$json" = true ]; then
+                echo "{\"ok\":false,\"reason\":\"already-decomposed\",\"issue\":$issue}"
+            else
+                printf "${RED}Epic root #%s was decomposed concurrently; released our claim. Claim its frontier leaves instead.${RESET}\n" "$issue" >&2
+            fi
+            return 2
+        fi
+
+        if [ "$json" = true ]; then
+            echo "{\"ok\":true,\"issue\":$issue,\"rootSha\":\"$root_sha\",\"claimCommit\":\"$claim_commit\",\"claimer\":\"$claimer\",\"claimerHost\":\"$claimer_host\",\"claimerPid\":${claimer_pid:-null},\"ttlHours\":$ttl_hours}"
+        else
+            printf "${GREEN}✓ Claimed epic root #%s as %s@%s (pid %s, TTL %sh, verified on origin)${RESET}\n" \
+                "$issue" "$claimer" "$claimer_host" "${claimer_pid:-?}" "$ttl_hours"
+            echo "Run 'task-dag breakdown $root_sha ...' to decompose it (this consumes the lock)."
+        fi
+        return 0
+    fi
+
+    if echo "$push_output" | grep -qiE 'rejected|stale info|non-fast-forward|fetch first'; then
+        if [ "$json" = true ]; then
+            echo "{\"ok\":false,\"reason\":\"race-lost\",\"issue\":$issue}"
+        else
+            printf "${YELLOW}Lost root claim race for #%s (another worker won).${RESET}\n" "$issue" >&2
+            echo "$push_output" >&2
+        fi
+        return 2
+    fi
+    if [ "$json" = true ]; then
+        echo "{\"ok\":false,\"reason\":\"push-failed\",\"issue\":$issue}"
+    else
+        printf "${RED}Root claim push failed:${RESET}\n%s\n" "$push_output" >&2
+    fi
+    return 4
+}
+
+# Command: release-root - drop a root orchestration claim without
+# decomposing. Deletes tasks/root-active/<N> only; it NEVER creates a
+# frontier ref (a root is not a leaf). Use when a worker takes the root
+# lock but cannot proceed and wants to hand orchestration back.
+cmd_release_root() {
+    local issue="" do_force=false json=false
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --force) do_force=true; shift ;;
+            --json) json=true; shift ;;
+            --help|-h)
+                cat <<EOF
+Usage: task-dag release-root <issue-number> [--force] [--json]
+
+Drop the orchestration lock tasks/root-active/<issue> so another worker
+can claim the root. Unlike leaf 'release', this never creates a frontier
+ref. By default it verifies the claim references the current pending root
+before deleting; --force deletes regardless.
+EOF
+                return 0
+                ;;
+            *)
+                if [ -z "$issue" ]; then issue="$1"; else
+                    echo "Unknown option: $1" >&2; return 1
+                fi
+                shift
+                ;;
+        esac
+    done
+
+    if [ -z "$issue" ]; then
+        echo "Error: issue number required" >&2
+        return 1
+    fi
+    if ! [[ "$issue" =~ ^[0-9]+$ ]]; then
+        echo "Error: issue must be a number (got '$issue')" >&2
+        return 1
+    fi
+
+    local root_active_ref="refs/heads/tasks/root-active/$issue"
+    local active_sha
+    active_sha=$(root_active_sha_on_remote "$issue")
+    if [ -z "$active_sha" ]; then
+        if [ "$json" = true ]; then
+            echo "{\"ok\":false,\"reason\":\"not-claimed\",\"issue\":$issue}"
+        else
+            printf "${YELLOW}Epic root #%s has no orchestration claim to release.${RESET}\n" "$issue" >&2
+        fi
+        return 2
+    fi
+
+    # Sanity guard: the claim must reference this issue's pending root.
+    if [ "$do_force" = false ]; then
+        git fetch --quiet --no-tags origin \
+            "+$root_active_ref:refs/task-dag-tmp/release-root/$issue" 2>/dev/null || true
+        if git show-ref --verify --quiet "refs/task-dag-tmp/release-root/$issue"; then
+            local cmsg ctask root_sha
+            cmsg=$(parse_commit_metadata "refs/task-dag-tmp/release-root/$issue" 2>/dev/null || true)
+            ctask=$(extract_field "$cmsg" "Task-Commit" 2>/dev/null || true)
+            git update-ref -d "refs/task-dag-tmp/release-root/$issue" 2>/dev/null || true
+            root_sha=$(pending_sha_on_remote "$issue")
+            if [ -n "$root_sha" ] && [ -n "$ctask" ] && [ "$ctask" != "$root_sha" ]; then
+                echo "Error: tasks/root-active/$issue references $ctask, not the current pending root $root_sha. Rerun with --force if intended." >&2
+                return 2
+            fi
+        fi
+    fi
+
+    local push_output
+    if push_output=$(git push --atomic origin \
+        "--force-with-lease=$root_active_ref:$active_sha" \
+        ":$root_active_ref" 2>&1); then
+        git update-ref -d "$root_active_ref" 2>/dev/null || true
+        if [ "$json" = true ]; then
+            echo "{\"ok\":true,\"issue\":$issue}"
+        else
+            printf "${GREEN}✓ Released orchestration claim on epic root #%s${RESET}\n" "$issue"
+        fi
+        return 0
+    fi
+    if [ "$json" = true ]; then
+        echo "{\"ok\":false,\"reason\":\"push-failed\",\"issue\":$issue}"
+    else
+        printf "${RED}Release-root push failed:${RESET}\n%s\n" "$push_output" >&2
+    fi
+    return 4
+}
+
+# Command: roots - list epic roots and their orchestration state.
+#
+# Each tasks/pending/<N> is shown with whether it is decomposed (has child
+# tasks), claimed for orchestration (tasks/root-active/<N>), or PICKABLE
+# (undecomposed + unclaimed → a worker should `claim-root <N>` then
+# `breakdown`). With --pickable, only the pickable roots are listed —
+# the discovery surface the dispatcher uses to spawn a root/decompose
+# worker without racing another host.
+cmd_roots() {
+    local json=false pickable_only=false do_fetch=true
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --json) json=true; shift ;;
+            --pickable) pickable_only=true; shift ;;
+            --no-fetch) do_fetch=false; shift ;;
+            --help|-h)
+                cat <<EOF
+Usage: task-dag roots [--pickable] [--json] [--no-fetch]
+
+List epic roots (tasks/pending/<N>) with orchestration state:
+  decomposed  — already broken down into child tasks
+  claimed     — tasks/root-active/<N> held (orchestration in flight)
+  pickable    — undecomposed AND unclaimed; claim-root then breakdown
+
+--pickable   show only pickable roots (dispatch discovery surface)
+EOF
+                return 0
+                ;;
+            *) echo "Unknown option: $1" >&2; return 1 ;;
+        esac
+    done
+
+    if [ "$do_fetch" = true ]; then
+        fetch_task_refs
+    fi
+
+    if [ "$json" = true ]; then echo "["; else
+        printf "${BOLD}%-8s %-50s %-12s${RESET}\n" "ISSUE" "TITLE" "STATE"
+        printf "%-8s %-50s %-12s\n" "========" "$(printf '%.50s' '==================================================')" "============"
+    fi
+
+    local first=true ref issue root_sha title state
+    while IFS= read -r ref; do
+        [ -z "$ref" ] && continue
+        issue="${ref##*/}"
+        root_sha=$(git rev-parse "$ref" 2>/dev/null) || continue
+        if task_has_children "$root_sha" >/dev/null 2>&1; then
+            state="decomposed"
+        elif git show-ref --verify --quiet "refs/heads/tasks/root-active/$issue"; then
+            state="claimed"
+        else
+            state="pickable"
+        fi
+        if [ "$pickable_only" = true ] && [ "$state" != "pickable" ]; then
+            continue
+        fi
+        title=$(get_task_title "$root_sha")
+        if [ "$json" = true ]; then
+            [ "$first" = false ] && echo ","
+            first=false
+            printf '    {"issue": %s, "sha": "%s", "title": "%s", "state": "%s"}' \
+                "$issue" "$root_sha" "${title//\"/\\\"}" "$state"
+        else
+            printf "%-8s %-50s %-12s\n" "#$issue" "${title:0:50}" "$state"
+        fi
+    done < <(git for-each-ref --format='%(refname)' refs/heads/tasks/pending/ | sort -t/ -k4 -n)
+
+    if [ "$json" = true ]; then echo ""; echo "]"; fi
+}
+
 # Command: active - list currently-claimed tasks (from origin).
 cmd_active() {
     local json=false
@@ -1551,6 +2233,13 @@ Create subtasks (children) of <parent-sha> from a JSON spec, publishing a
 tasks/frontier/<short> ref for each so the frontier/claim/complete flow can
 pick them up. Each child inherits the parent's Issue:/URL:/Author: metadata.
 
+If <parent-sha> is the pending epic ROOT for an issue, you MUST hold the
+orchestration lock first ('task-dag claim-root <issue>'); breakdown then
+CONSUMES that lock (deletes tasks/root-active/<issue>) in the SAME atomic
+push that publishes the leaves, so two hosts can't decompose one issue and
+no root worker can keep acting once leaves exist. --force does NOT bypass
+this lock (it only permits a second breakdown despite existing children).
+
 The DAG is encoded in the git parents of each child commit:
   * first parent  = <parent-sha>            (the breakdown/epic parent)
   * 2nd+ parents  = the child's dependencies (it is "ready" only once all
@@ -1750,41 +2439,149 @@ EOF
         out_lines[i]="[${types[i]}] ${titles[i]}${deps_str}${claim_disp}"
     done
 
+    # ── epic-root orchestration lock (issue #2) ─────────────────────
+    # If <parent> is the pending epic ROOT, decomposing it is the
+    # orchestration step that the cross-host root lock protects. Require
+    # the caller to hold tasks/root-active/<N> and CONSUME it in the same
+    # atomic push that publishes the leaves (below), so there is never a
+    # window where the leaves exist but the root lock still lets someone
+    # "implement the root". --force does NOT bypass this (force only ever
+    # meant "allow a second breakdown despite existing children").
+    local is_root_breakdown=false root_issue="" root_active_ref="" root_claim_sha=""
+    if [ "$dry_run" = false ]; then
+        # Determine whether <parent> is the pending epic root, FAILING
+        # CLOSED on an indeterminate origin lookup: if we cannot tell, we
+        # must not silently decompose a root without its lock. (We are
+        # about to push to origin anyway, so requiring origin here is fine.)
+        local parent_issue parent_pending parent_type rc
+        local parent_meta; parent_meta=$(parse_commit_metadata "$parent_sha")
+        parent_issue=$(extract_field "$parent_meta" "Issue" 2>/dev/null | sed 's/^#//' || true)
+        parent_type=$(extract_field "$parent_meta" "Type" 2>/dev/null || true)
+        # Distinguish a top-level epic ROOT from a child/intermediate epic.
+        # A root (from create-task-commit.sh) is parented on real repository
+        # history; a breakdown-created child epic is parented on another
+        # empty-tree TASK commit. Only a root-shaped epic is gated on the
+        # orchestration lock — child epics inherit Issue:/Type:epic but their
+        # pending/<N> points at the top-level root, not at them, and they
+        # decompose freely like any other intermediate task.
+        local parent_is_root_shaped=true parent_first
+        parent_first=$(get_first_parent "$parent_sha" 2>/dev/null || true)
+        if [ -n "$parent_first" ] && is_task_commit "$parent_first"; then
+            parent_is_root_shaped=false
+        fi
+        if [ -n "$parent_issue" ]; then
+            parent_pending=$(pending_sha_on_remote_checked "$parent_issue"); rc=$?
+            if [ "$rc" = 3 ] && [ "$parent_is_root_shaped" = true ]; then
+                echo "Error: cannot verify whether ${parent_sha:0:12} is the epic root for" >&2
+                echo "       issue #${parent_issue} (origin unreachable). Refusing to decompose" >&2
+                echo "       without confirming the orchestration lock. Retry when online." >&2
+                return 4
+            fi
+            if [ "$rc" = 0 ] && [ "$parent_pending" = "$parent_sha" ]; then
+                is_root_breakdown=true
+                root_issue="$parent_issue"
+            elif [ "$parent_type" = epic ] && [ "$parent_is_root_shaped" = true ]; then
+                # The parent IS a top-level epic root (Type: epic, parented
+                # on real history) but origin's pending/<N> is either gone
+                # (epic closed/unknown, rc 2) or points at a DIFFERENT commit
+                # (this root SHA is stale — the issue was re-synced into a
+                # newer root). Either way we must NOT fall through to an
+                # unlocked "normal" breakdown, which would publish leaves
+                # with no root lock held/consumed and resurrect work on a
+                # closed/stale root. FAIL CLOSED.
+                echo "Error: ${parent_sha:0:12} is an epic root for issue #${parent_issue}, but its" >&2
+                if [ "$rc" = 2 ]; then
+                    echo "       tasks/pending/${parent_issue} identity is gone on origin (closed/unknown" >&2
+                    echo "       issue). Refusing to decompose a retired epic root." >&2
+                else
+                    echo "       tasks/pending/${parent_issue} now points at ${parent_pending:0:12}, not this root." >&2
+                    echo "       Decompose the current root instead of this stale one." >&2
+                fi
+                return 3
+            fi
+        fi
+
+        if [ "$is_root_breakdown" = true ]; then
+            root_active_ref="refs/heads/tasks/root-active/$root_issue"
+            root_claim_sha=$(root_active_sha_on_remote "$root_issue")
+            if [ -z "$root_claim_sha" ]; then
+                echo "Error: epic root #${root_issue} is not claimed for orchestration." >&2
+                echo "       Run 'task-dag claim-root ${root_issue}' before decomposing it" >&2
+                echo "       so two hosts cannot decompose the same issue." >&2
+                return 1
+            fi
+            # The held lock must reference THIS root commit AND be owned by
+            # the current worker (mirrors leaf `complete` ownership). To
+            # take over a foreign/dead lock, re-`claim-root --force` first;
+            # `breakdown --force` does NOT steal another worker's lock.
+            #
+            # FAIL CLOSED throughout: we are about to consume the lock in an
+            # atomic push, so we must POSITIVELY confirm ownership first. A
+            # fetch failure, an unreadable claim commit, or a claim commit
+            # missing its identity fields all refuse — never fall through to
+            # the push, which only asserts the lock SHA is unchanged (not
+            # that WE hold it) and would otherwise let us consume a foreign
+            # lock.
+            local rtmp="refs/task-dag-tmp/breakdown-root/$root_issue"
+            git update-ref -d "$rtmp" 2>/dev/null || true
+            if ! git fetch --quiet --no-tags origin \
+                    "+$root_active_ref:$rtmp" 2>/dev/null; then
+                echo "Error: cannot read orchestration lock for #${root_issue} (origin" >&2
+                echo "       unreachable) — refusing to decompose. Retry when online." >&2
+                return 4
+            fi
+            local fetched_claim_sha
+            fetched_claim_sha=$(git rev-parse --verify -q "$rtmp" 2>/dev/null || true)
+            if [ -z "$fetched_claim_sha" ] || [ "$fetched_claim_sha" != "$root_claim_sha" ]; then
+                git update-ref -d "$rtmp" 2>/dev/null || true
+                echo "Error: orchestration lock #${root_issue} changed while verifying" >&2
+                echo "       ownership — re-run 'task-dag claim-root ${root_issue}' and retry." >&2
+                return 2
+            fi
+            local rmsg rtask rclaimer rhost me_claimer me_host
+            rmsg=$(parse_commit_metadata "$rtmp" 2>/dev/null || true)
+            rtask=$(extract_field "$rmsg" "Task-Commit" 2>/dev/null || true)
+            rclaimer=$(extract_field "$rmsg" "Claimer" 2>/dev/null || true)
+            rhost=$(extract_field "$rmsg" "Claimer-Host" 2>/dev/null || true)
+            git update-ref -d "$rtmp" 2>/dev/null || true
+            me_claimer="${TASK_DAG_CLAIMER:-${USER:-unknown}}"
+            me_host="${TASK_DAG_CLAIMER_HOST:-$(hostname -s 2>/dev/null || echo unknown)}"
+            if [ -z "$rtask" ] || [ -z "$rclaimer" ] || [ -z "$rhost" ]; then
+                echo "Error: orchestration lock #${root_issue} is malformed (missing owner/" >&2
+                echo "       root fields) — refusing to decompose. Re-claim it with" >&2
+                echo "       'task-dag claim-root ${root_issue} --force' and retry." >&2
+                return 1
+            fi
+            if [ "$rtask" != "$parent_sha" ]; then
+                echo "Error: tasks/root-active/${root_issue} references ${rtask}, not this root ${parent_sha}." >&2
+                return 1
+            fi
+            if [ "$rclaimer" != "$me_claimer" ] || [ "$rhost" != "$me_host" ]; then
+                echo "Error: orchestration lock #${root_issue} is held by ${rclaimer}@${rhost}, not you (${me_claimer}@${me_host})." >&2
+                echo "       Re-run 'task-dag claim-root ${root_issue} --force' to take it over (only if that holder is dead)." >&2
+                return 1
+            fi
+        fi
+    fi
+
     # ── guard: refuse to double-decompose unless --force (skip in dry-run) ─
     if [ "$force" = false ] && [ "$dry_run" = false ]; then
-        # Sync remote task refs first so a stale checkout still sees children.
-        git fetch --quiet origin \
-            '+refs/heads/tasks/frontier/*:refs/heads/tasks/frontier/*' \
-            '+refs/heads/tasks/active/*:refs/heads/tasks/active/*' \
-            '+refs/heads/tasks/blocked/*:refs/heads/tasks/blocked/*' \
-            2>/dev/null || true
-        local existing_child="" ref ref_sha child_task_sha
-        while IFS= read -r ref; do
-            [ -z "$ref" ] && continue
-            ref_sha=$(git rev-parse "$ref" 2>/dev/null) || continue
-            # frontier/blocked refs point straight at the child task commit;
-            # an active ref points at a CLAIM commit whose first parent is the
-            # child task commit (so a born-claimed child must be unwrapped one
-            # level, else the guard misses it and a second breakdown slips
-            # through).
-            case "$ref" in
-                refs/heads/tasks/active/*)
-                    child_task_sha=$(get_first_parent "$ref_sha" 2>/dev/null || true) ;;
-                *)
-                    child_task_sha="$ref_sha" ;;
-            esac
-            [ -z "$child_task_sha" ] && continue
-            if [ "$(get_first_parent "$child_task_sha")" = "$parent_sha" ]; then
-                existing_child="$ref"
-                break
-            fi
-        done < <(git for-each-ref --format='%(refname)' \
-                    refs/heads/tasks/frontier/ \
-                    refs/heads/tasks/active/ \
-                    refs/heads/tasks/blocked/)
+        # Sync remote task refs (and delegated children for this issue) so
+        # a stale checkout still sees children — including ACTIVE children,
+        # which the old first-parent grep missed (an active ref points at a
+        # claim commit whose first parent is the child task, not <parent>).
+        # FAIL CLOSED if origin is unreadable: a transient failure must not
+        # be read as "no children" and let a second breakdown slip through.
+        if ! fetch_root_refs "${root_issue:-${issue_num#\#}}"; then
+            echo "Error: cannot reach origin to check for an existing breakdown of" >&2
+            echo "       ${parent_sha:0:12} — refusing to decompose. Retry when online." >&2
+            return 4
+        fi
+        local existing_child
+        existing_child=$(task_has_children "$parent_sha" || true)
         if [ -n "$existing_child" ]; then
             echo "Error: parent ${parent_sha:0:12} ('${parent_title}') already has at" >&2
-            echo "       least one live child task ref ($existing_child)." >&2
+            echo "       least one live child task (${existing_child:0:12})." >&2
             echo "       Refusing to create a duplicate breakdown. Re-run with --force" >&2
             echo "       if you really mean to add more children." >&2
             return 1
@@ -1871,12 +2668,32 @@ EOF
         out_lines[i]="${short_sha}  ${out_lines[i]}"
     done
 
+    # ── for a ROOT breakdown, CONSUME the orchestration lock in the SAME
+    #    atomic push that publishes the leaves. Under one --force-with-lease
+    #    pair (root-active still at the SHA we hold; pending still at the
+    #    root) we delete tasks/root-active/<N> and assert pending unchanged
+    #    via a no-op refspec. Result: the leaves can only appear if the lock
+    #    is still ours, and the lock disappears the instant the leaves exist
+    #    — closing the "implement-after-leaves" window. If the lock was
+    #    stolen/released meanwhile, the lease fails and NOTHING is created.
+    if [ "$is_root_breakdown" = true ]; then
+        local pending_ref="refs/heads/tasks/pending/$root_issue"
+        lease_args+=("--force-with-lease=$root_active_ref:$root_claim_sha")
+        lease_args+=("--force-with-lease=$pending_ref:$parent_sha")
+        refspecs+=("$parent_sha:$pending_ref")   # no-op: assert pending unchanged
+        refspecs+=(":$root_active_ref")          # consume the lock
+    fi
+
     # ── publish all frontier refs to origin atomically, create-only ──
     local push_output push_rc=0
     push_output=$(git push --atomic "${lease_args[@]}" origin "${refspecs[@]}" 2>&1) || push_rc=$?
     if [ "$push_rc" -ne 0 ]; then
         echo "Error: failed to publish task refs to origin (nothing was created" >&2
         echo "       on origin; the local commit objects are unreferenced)." >&2
+        if [ "$is_root_breakdown" = true ]; then
+            echo "       (If the orchestration lock tasks/root-active/${root_issue} was" >&2
+            echo "        released or stolen, re-run 'task-dag claim-root ${root_issue}'.)" >&2
+        fi
         echo "$push_output" >&2
         return 4
     fi
@@ -1891,6 +2708,10 @@ EOF
             git update-ref "refs/heads/tasks/frontier/$mirror_short" "${created_shas[i]}"
         fi
     done
+    # Drop the now-consumed local orchestration lock too.
+    if [ "$is_root_breakdown" = true ]; then
+        git update-ref -d "$root_active_ref" 2>/dev/null || true
+    fi
 
     # ── report ───────────────────────────────────────────────────────
     if [ "$json" = true ]; then
@@ -1967,7 +2788,34 @@ EOF
     fi
     
     task_sha=$(resolve_sha "$task_sha") || return 1
-    
+
+    # ── root-completion guard (issue #2) ─────────────────────────────
+    # A decomposed epic root must NOT be completed as if it were an
+    # implementation unit: its work lives in the child leaves, and the
+    # epic is closed by close-epic/close-completed-issues once those land.
+    # Completing the root here would both land empty "root work" and let a
+    # root worker keep acting after leaves exist. Run this BEFORE any
+    # completion side effects (commit creation / HEAD movement). --force
+    # does NOT bypass it (force only overrides another worker's leaf claim).
+    local complete_issue
+    complete_issue=$(task_is_pending_root "$task_sha" || true)
+    if [ -n "$complete_issue" ]; then
+        # FAIL CLOSED if origin is unreadable: completing a root is only
+        # safe once we have positively confirmed it has NO children, so a
+        # transient fetch failure must refuse, not fall through and land an
+        # empty root on top of live leaves.
+        if ! fetch_root_refs "$complete_issue"; then
+            echo "Error: cannot reach origin to verify issue #${complete_issue} root has no" >&2
+            echo "       child tasks — refusing to complete the root. Retry when online." >&2
+            return 2
+        fi
+        if task_has_children "$task_sha" >/dev/null; then
+            echo "Error: issue #${complete_issue} root has child tasks; complete the leaves" >&2
+            echo "       and let the epic close (close-epic), do not complete the root." >&2
+            return 2
+        fi
+    fi
+
     # Check dependencies
     if ! cmd_deps "$task_sha" --check-complete >/dev/null 2>&1; then
         echo "Error: Dependencies not met for task $task_sha" >&2
@@ -2998,7 +3846,10 @@ main() {
         --version|-v) echo "task-dag v${VERSION}" ;;
         frontier) cmd_frontier "$@" ;;
         claim) cmd_claim "$@" ;;
+        claim-root) cmd_claim_root "$@" ;;
         release) cmd_release "$@" ;;
+        release-root) cmd_release_root "$@" ;;
+        roots) cmd_roots "$@" ;;
         active) cmd_active "$@" ;;
         show) cmd_show "$@" ;;
         deps) cmd_deps "$@" ;;

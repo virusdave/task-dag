@@ -40,6 +40,10 @@ cat > "$ROOT/spec.json" <<'JSON'
 ]
 JSON
 
+# Decomposing the epic root requires (and consumes) the orchestration lock
+# (issue #2): take it as the root worker before breaking down.
+TASK_DAG_CLAIMER=rootworker TASK_DAG_CLAIMER_HOST=hostA TASK_DAG_CLAIMER_PID=909090 \
+  "$TD" claim-root 777 >/dev/null 2>&1
 BD=$(TASK_DAG_CLAIMER=rootworker TASK_DAG_CLAIMER_HOST=hostA TASK_DAG_CLAIMER_PID=909090 \
        "$TD" breakdown "$EPIC" --spec-file="$ROOT/spec.json" --json 2>/dev/null)
 
@@ -154,9 +158,16 @@ git push -q origin refs/heads/tasks/pending/778
 
 printf '[{"title":"only child, claimed","type":"leaf","claim":true}]' > "$ROOT/spec2.json"
 TASK_DAG_CLAIMER=rootworker TASK_DAG_CLAIMER_HOST=hostA \
+  "$TD" claim-root 778 >/dev/null 2>&1
+TASK_DAG_CLAIMER=rootworker TASK_DAG_CLAIMER_HOST=hostA \
   "$TD" breakdown "$EPIC2" --spec-file="$ROOT/spec2.json" --json >/dev/null 2>&1
 
-# Second breakdown on the same parent (no --force) must refuse.
+# Second breakdown on the same parent (no --force) must refuse. Re-acquire
+# the root lock (--force, since the root is already decomposed) so breakdown
+# gets *past* the lock check and is refused specifically by the
+# double-decompose guard we are exercising here.
+TASK_DAG_CLAIMER=rootworker TASK_DAG_CLAIMER_HOST=hostA \
+  "$TD" claim-root 778 --force >/dev/null 2>&1
 printf '[{"title":"another one","type":"leaf"}]' > "$ROOT/spec3.json"
 if "$TD" breakdown "$EPIC2" --spec-file="$ROOT/spec3.json" --json >/dev/null 2>&1; then
   bad "7: second breakdown was allowed though parent already has a born-claimed child"

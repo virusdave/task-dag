@@ -56,6 +56,12 @@ git push -q origin refs/heads/gh/issues/999 refs/heads/tasks/pending/999 2>/dev/
 # Helper: breakdown <parent> into ONE child of <title>; print child short sha.
 mk_child() {  # <parent-sha> <title>
   printf '[{"title":"%s","type":"task"}]' "$2" > "$ROOT/spec.json"
+  # Decomposing the epic ROOT requires (and consumes) the orchestration
+  # lock (issue #2); only the root needs it (deeper parents do not).
+  # --force re-acquires it for each incremental breakdown of the root.
+  if [ "$1" = "$EPIC" ]; then
+    "$TD" claim-root 999 --force >/dev/null 2>&1
+  fi
   local out
   out=$("$TD" breakdown "$1" --spec-file="$ROOT/spec.json" --force --json 2>/dev/null)
   grep -oE '"shortSha":"[0-9a-f]+"' <<<"$out" | head -1 | cut -d'"' -f4
