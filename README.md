@@ -29,6 +29,7 @@ scripts/
   sync-comment-to-tasks.sh          comment → task ingestion (reusable-workflow helper)
   sync-tasks-to-github.sh           task message → issue comment (reusable-workflow helper)
   aggregate-cross-repo-completions.sh  Satisfies-trailer aggregation on push
+  operator-blocked-dashboard.sh     render the operator-blocked #29 dashboard from fleet repos' blocked refs
 
 .github/
   workflows/                        REUSABLE workflows (on: workflow_call) — call these from peers
