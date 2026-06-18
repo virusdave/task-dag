@@ -324,9 +324,15 @@ EOF
         return 1
     fi
 
-    # Resolve --for-sha to a full local commit object (same contract as
-    # chain-write: junk/abbreviated/remote-only SHAs are rejected up front so
-    # they can never poison Current-Head or the ancestry checks below).
+    # --for-sha must be a full, immutable commit SHA that is present locally.
+    # This command is driven by CI event SHAs, so we reject anything else
+    # (abbreviated SHAs, HEAD, branch/tag names, remote-only or junk values):
+    # an ambiguous/mutable ref must never be the basis for a currency or chain
+    # decision, nor be stored as Current-Head.
+    if ! printf '%s' "$for_sha" | grep -Eq '^[0-9a-f]{40,64}$'; then
+        echo "Error: --for-sha must be a full commit SHA (got '$for_sha')" >&2
+        return 1
+    fi
     local for_sha_full
     if ! for_sha_full="$(git rev-parse --verify --quiet "${for_sha}^{commit}" 2>/dev/null)"; then
         echo "Error: --for-sha must resolve to a commit object present locally (got '$for_sha')" >&2
@@ -396,6 +402,16 @@ EOF
         fi
     else
         old="$(git rev-parse --verify --quiet "$ref" 2>/dev/null || true)"
+    fi
+    # The read→decide→write CAS invariant requires that we actually READ the
+    # prior chain commit. If origin advertises a chain SHA we could not
+    # materialise (a transient fetch failure on a shallow/cold checkout), its
+    # fields parse as empty and an open red chain would look like "none open" —
+    # we'd wrongly decide 'open', re-anchor First-Red, and emit a duplicate
+    # ticket hint. Fail closed instead (deepen history / fetch and retry).
+    if [ -n "$old" ] && ! git cat-file -e "${old}^{commit}" 2>/dev/null; then
+        echo "Error: chain state $ref=$old is unavailable locally; cannot classify safely (fetch/deepen and retry)" >&2
+        return 4
     fi
     # chain_open: an active red streak accepting plain continuations.
     # chain_blocked: a chain parked by the tree-fix escalation threshold
