@@ -522,7 +522,9 @@ COMMANDS:
                            from picking it up (NOT closed). Use when stalled
                            awaiting operator/downstream input.
     unblock <sha>          Make a blocked task pickable again
-    blocked                List blocked (parked) tasks
+    blocked                List blocked (parked) tasks (--json emits
+                           enriched dashboard fields; --operator/--downstream
+                           /--kind=<k> filter by blocker kind)
     drop <sha>             Housecleaning: remove an orphaned/irrelevant task
                            from the pickable/blocked sets
     issue-update <sha>     Update GitHub issue with task progress
@@ -2684,18 +2686,68 @@ cmd_unblock() {
     return 4
 }
 
+# Helper: emit a JSON string literal (with surrounding quotes) for an
+# arbitrary value, escaped per RFC 8259. Prefers jq when present (handles
+# every control char); falls back to pure-bash escaping of the cases the
+# blocked-meta overlay can actually contain. Used so `blocked --json` is
+# safe for a dashboard to consume without reparsing commit bodies.
+json_escape() {
+    local s="$1"
+    if command -v jq >/dev/null 2>&1; then
+        printf '%s' "$s" | jq -Rs .
+        return
+    fi
+    s="${s//\\/\\\\}"
+    s="${s//\"/\\\"}"
+    s="${s//$'\t'/\\t}"
+    s="${s//$'\r'/\\r}"
+    s="${s//$'\n'/\\n}"
+    printf '"%s"' "$s"
+}
+
+# Helper: emit a JSON string for a non-empty value, else the literal null.
+json_str_or_null() {
+    if [ -n "$1" ]; then json_escape "$1"; else printf 'null'; fi
+}
+
 # Command: blocked - list parked (blocked) tasks
 cmd_blocked() {
-    local json=false issue_filter="" do_fetch=true
+    local json=false issue_filter="" do_fetch=true kind_filter=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --json) json=true; shift ;;
             --issue=*) issue_filter="${1#*=}"; shift ;;
             --no-fetch) do_fetch=false; shift ;;
-            --help|-h) echo "Usage: task-dag blocked [--issue=N] [--json] [--no-fetch]"; return 0 ;;
+            --kind=*) kind_filter="${1#*=}"; shift ;;
+            --operator) kind_filter="operator"; shift ;;
+            --downstream) kind_filter="downstream"; shift ;;
+            --help|-h)
+                cat <<EOF
+Usage: task-dag blocked [--issue=N] [--json] [--no-fetch]
+                        [--kind=operator|downstream|unknown | --operator | --downstream]
+
+List parked (blocked) tasks. --json emits one enriched object per task
+for the operator-blocked #29 dashboard, with fields derived from the
+blocked-meta overlay so the dashboard never has to reparse commit bodies:
+
+  sha, shortSha, title, issue, repo, issueUrl, kind, reason,
+  requestUrl, blockedAt, blockedBy, hasMeta
+
+Legacy blocks (overlay ref but no blocked-meta side ref) report
+kind "unknown" with best-effort repo/issue/issueUrl derived from the
+task commit and null reason/requestUrl/blockedAt/blockedBy.
+
+Filtering: --operator / --downstream / --kind=<k> restrict the listing
+to a single blocker kind (use --kind=unknown for legacy blocks).
+EOF
+                return 0 ;;
             *) echo "Unknown option: $1" >&2; return 1 ;;
         esac
     done
+    case "$kind_filter" in
+        ""|operator|downstream|unknown) ;;
+        *) echo "Error: --kind must be operator, downstream, or unknown" >&2; return 1 ;;
+    esac
 
     # Sync the blocked overlay from origin so a fresh checkout sees parked
     # tasks (the local refs are otherwise empty). Pass --no-fetch offline.
@@ -2706,8 +2758,8 @@ cmd_blocked() {
     if [ "$json" = true ]; then
         echo "["
     else
-        printf "${BOLD}%-12s %-50s %-12s${RESET}\n" "SHA" "TITLE" "ISSUE"
-        printf "%-12s %-50s %-12s\n" "$(printf '%.12s' '============')" "$(printf '%.50s' '==================================================')" "$(printf '%.12s' '============')"
+        printf "${BOLD}%-12s %-50s %-12s %-10s${RESET}\n" "SHA" "TITLE" "ISSUE" "KIND"
+        printf "%-12s %-50s %-12s %-10s\n" "$(printf '%.12s' '============')" "$(printf '%.50s' '==================================================')" "$(printf '%.12s' '============')" "$(printf '%.10s' '==========')"
     fi
 
     local first=true
@@ -2723,13 +2775,47 @@ cmd_blocked() {
         if [ -n "$issue_filter" ] && [ "$issue" != "$issue_filter" ]; then
             continue
         fi
+
+        # Enrich from the blocked-meta overlay so a dashboard never has to
+        # reparse commit bodies. A legacy block (overlay ref, no meta ref)
+        # is kind "unknown" with best-effort origin from the task commit.
+        local kind reason request_url blocked_at blocked_by repo source_url has_meta
+        if has_blocked_meta "$sha"; then
+            has_meta=true
+            kind=$(read_blocked_meta_field "$sha" "Blocker-Kind"); kind="${kind:-unknown}"
+            reason=$(read_blocked_meta_field "$sha" "Reason")
+            request_url=$(read_blocked_meta_field "$sha" "Request-URL")
+            blocked_at=$(read_blocked_meta_field "$sha" "Blocked-At")
+            blocked_by=$(read_blocked_meta_field "$sha" "Blocked-By")
+            repo=$(read_blocked_meta_field "$sha" "Repo")
+            source_url=$(read_blocked_meta_field "$sha" "Source-URL")
+            local meta_issue; meta_issue=$(read_blocked_meta_field "$sha" "Issue"); meta_issue="${meta_issue#\#}"
+            [ -n "$meta_issue" ] && issue="$meta_issue"
+        else
+            has_meta=false
+            kind="unknown"
+            reason=""; request_url=""; blocked_at=""; blocked_by=""
+            local origin; origin=$(derive_task_origin "$sha")
+            repo=$(printf '%s' "$origin" | cut -f1)
+            local derived_issue; derived_issue=$(printf '%s' "$origin" | cut -f2)
+            source_url=$(printf '%s' "$origin" | cut -f3)
+            [ -z "$issue" ] && [ -n "$derived_issue" ] && issue="$derived_issue"
+        fi
+
+        if [ -n "$kind_filter" ] && [ "$kind" != "$kind_filter" ]; then
+            continue
+        fi
+
         if [ "$json" = true ]; then
             [ "$first" = false ] && echo ","
-            printf '    {"sha": "%s", "shortSha": "%s", "title": "%s", "issue": %s}' \
-                "$sha" "$short_sha" "$title" "${issue:-null}"
+            printf '    {"sha": %s, "shortSha": %s, "title": %s, "issue": %s, "repo": %s, "issueUrl": %s, "kind": %s, "reason": %s, "requestUrl": %s, "blockedAt": %s, "blockedBy": %s, "hasMeta": %s}' \
+                "$(json_escape "$sha")" "$(json_escape "$short_sha")" "$(json_escape "$title")" \
+                "${issue:-null}" "$(json_str_or_null "$repo")" "$(json_str_or_null "$source_url")" \
+                "$(json_escape "$kind")" "$(json_str_or_null "$reason")" "$(json_str_or_null "$request_url")" \
+                "$(json_str_or_null "$blocked_at")" "$(json_str_or_null "$blocked_by")" "$has_meta"
             first=false
         else
-            printf "%-12s %-50s %-12s\n" "$short_sha" "${title:0:50}" "${issue:+#$issue}"
+            printf "%-12s %-50s %-12s %-10s\n" "$short_sha" "${title:0:50}" "${issue:+#$issue}" "$kind"
         fi
     done
 
