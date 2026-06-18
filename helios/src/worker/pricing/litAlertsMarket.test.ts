@@ -35,6 +35,20 @@ vi.mock('../litalerts/partnerClient.js', () => ({
   listRetailerProducts: vi.fn(),
 }))
 
+// Tests must never reach a real database (canon: no prod serving
+// resources in tests). Both the brand-override lookup
+// (loadBrandOverrideForCatalogName) and the retailer nearest-store map
+// (loadRetailerNearestStoreMap) go through getPool(); without this mock
+// they hit the live DB, which "passes" only on the prod host and throws
+// in CI. Returning an empty result set keeps brand resolution on its
+// heuristic path and yields an empty distance map, which matches these
+// fixtures' synthetic retailer ids (distanceBand=unknown).
+vi.mock('../../server/db/pool.js', () => ({
+  getPool: () => ({
+    query: async (): Promise<{ rows: never[] }> => ({ rows: [] }),
+  }),
+}))
+
 import type { NormalizedCatalogGroupLiveState } from '../catalog/liveState.js'
 import { assessParseReasonableness } from '../llm/parseReasonableness.js'
 import {
