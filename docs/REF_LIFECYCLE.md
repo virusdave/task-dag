@@ -70,9 +70,12 @@ caller to hold `tasks/root-active/<N>` (and to be the lock's owner —
 `Claimer`/`Claimer-Host` must match; take over a dead lock with
 `claim-root --force`, not `breakdown --force`), and **consumes** it: the child
 `tasks/frontier/<short>` refs are published and `tasks/root-active/<N>` is
-deleted in the **same atomic push**, under a `--force-with-lease` pair
-that asserts the lock is still the one we hold and `pending/<N>` is
-unchanged. `--force` only permits a *second* breakdown despite existing
+deleted in the **same atomic push**, whose real cross-host mutex is a
+`--force-with-lease` asserting `tasks/root-active/<N>` is still the lock
+SHA we hold (a paired best-effort, client-side `pending/<N>` lease is
+included too, but git skips up-to-date refs so it is not a server-side
+assertion — and an undecomposed root's `pending/<N>` is never legitimately
+moved anyway). `--force` only permits a *second* breakdown despite existing
 children; it does **not** bypass the lock.
 
 Consequences:

@@ -379,6 +379,20 @@ fetch_root_refs() {
         '+refs/heads/tasks/active/*:refs/heads/tasks/active/*' \
         '+refs/heads/tasks/blocked/*:refs/heads/tasks/blocked/*' \
         2>/dev/null || return 1
+    # Also refresh the default branch (master): a COMPLETED child's frontier/
+    # active ref is deleted on completion, but the child task commit lives on
+    # as the SECOND parent of its completion commit on master. `task_has_children`
+    # walks `git rev-list --all`, so if origin/master is stale a long-lived
+    # worktree would not see already-completed children and could re-decompose
+    # the root (false-negative #2 race). Keep this best-effort: if the default
+    # branch ref cannot be resolved, the task-namespace fetch above already
+    # succeeded, so do NOT fail the whole sync over it.
+    local default_branch
+    default_branch=$(git symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##' || true)
+    default_branch="${default_branch:-master}"
+    git fetch --quiet origin \
+        "+refs/heads/${default_branch}:refs/remotes/origin/${default_branch}" \
+        2>/dev/null || true
     if [ -n "$issue" ]; then
         git fetch --quiet --prune origin \
             "+refs/heads/tasks/delegated/${issue}/*:refs/heads/tasks/delegated/${issue}/*" \
@@ -448,11 +462,14 @@ task_has_children() {
             *" $parent_sha "*) ;;
             *) continue ;;
         esac
-        # Skip claim commits (leaf + root); they are parented to their
-        # task/root but represent a lock, not decomposition.
+        # Skip side commits that are parented to a task/root but are NOT
+        # DAG children: claim commits (leaf `tasks/active/*` + root
+        # `tasks/root-active/*`) are locks, and `Blocked-Meta:` commits are
+        # blocked-task side metadata (tree == task tree, first parent ==
+        # task), neither of which is a decomposition child.
         subject=$(git log -1 --format='%s' "$commit" 2>/dev/null || true)
         case "$subject" in
-            Claim:*) continue ;;
+            Claim:*|Blocked-Meta:*) continue ;;
         esac
         # Only count empty-tree task commits as DAG children; real
         # implementation/master commits that happen to list the root are
@@ -494,13 +511,41 @@ _release_our_root_claim() {
     [ "$now" != "$claim_commit" ]
 }
 
-# Helper: true iff <sha> is the epic-root (pending) commit for its issue.
-# Resolved by reading the Issue trailer and confirming tasks/pending/<N>
-# points at exactly this commit. Origin is authoritative; if origin is
-# indeterminate (unreachable) we FALL BACK to the local pending ref so a
-# transient network failure can't make a real root look like a non-root
-# (which would skip the root-completion guard). Echoes the issue number on
-# success; silent + non-zero on fail.
+# Helper: true iff <sha> is SHAPED like a top-level epic root, independent
+# of whether tasks/pending/<N> can be confirmed on origin. A canonical root
+# (from create-task-commit.sh) is `Type: epic` and parented on real
+# repository history; a breakdown-created CHILD epic is `Type: epic` but
+# parented on another empty-tree TASK commit. So: epic + first parent is
+# NOT a task commit ⇒ root-shaped. Used to FAIL CLOSED when origin can't
+# confirm pending identity but the commit could still be a live root.
+task_is_root_shaped_epic() {
+    local sha="$1" type first
+    type=$(extract_field "$(parse_commit_metadata "$sha")" "Type" 2>/dev/null || true)
+    [ "$type" = epic ] || return 1
+    first=$(get_first_parent "$sha" 2>/dev/null || true)
+    # Parented on a task commit ⇒ child/intermediate epic, not a root.
+    if [ -n "$first" ] && is_task_commit "$first"; then
+        return 1
+    fi
+    return 0
+}
+
+# Helper: classify whether <sha> is the epic-root (pending) commit for its
+# issue. Resolved by reading the Issue trailer and confirming
+# tasks/pending/<N> points at exactly this commit. Origin is authoritative.
+# Echoes the issue number on success.
+#
+# Exit codes:
+#   0  confirmed pending root (issue number echoed)
+#   1  confirmed NOT a (current) pending root
+#   3  INDETERMINATE: origin unreachable AND the local pending mirror cannot
+#      confirm it, but the commit is shaped like a top-level epic root — so
+#      we cannot prove it is safe to complete. Callers MUST fail closed.
+#
+# Note: a cleanly-absent pending on origin (the epic was closed and its
+# pending ref deleted) is treated as "not a current root" (rc 1): completing
+# such a retired root-shaped commit is the legitimate historical/tombstone
+# path, and it has no live leaves to clobber.
 task_is_pending_root() {
     local sha="$1" issue remote rc
     issue=$(extract_field "$(parse_commit_metadata "$sha")" "Issue" 2>/dev/null | sed 's/^#//' || true)
@@ -508,11 +553,26 @@ task_is_pending_root() {
     remote=$(pending_sha_on_remote_checked "$issue"); rc=$?
     if [ "$rc" = 0 ]; then
         [ "$remote" = "$sha" ] || return 1
+    elif [ "$rc" = 2 ]; then
+        # Cleanly absent on origin: origin is authoritative, so this is NOT a
+        # current pending root (the epic was closed/retired, or never had a
+        # root). Do not consult the local mirror here — a stale local
+        # refs/heads/tasks/pending/<N> must not resurrect a retired root and
+        # spuriously refuse the legitimate historical/tombstone completion.
+        return 1
     else
-        # rc 2 (cleanly absent) or rc 3 (indeterminate): consult the local
-        # mirror. On rc 2 the local ref is normally also absent → not a
-        # root. On rc 3 the local ref lets us still recognise our own root.
-        [ "$(git rev-parse --verify -q "refs/heads/tasks/pending/$issue" 2>/dev/null)" = "$sha" ] || return 1
+        # rc 3: origin indeterminate (transport/auth). Prefer the local
+        # mirror; if it confirms our root, treat as root. Otherwise, if the
+        # commit is SHAPED like a top-level epic root we cannot prove it is
+        # NOT a live (possibly decomposed) root, so signal indeterminate and
+        # let the caller fail closed rather than completing it blindly.
+        if [ "$(git rev-parse --verify -q "refs/heads/tasks/pending/$issue" 2>/dev/null)" = "$sha" ]; then
+            : # local mirror confirms → root
+        elif task_is_root_shaped_epic "$sha"; then
+            return 3
+        else
+            return 1
+        fi
     fi
     printf '%s\n' "$issue"
     return 0
@@ -1403,11 +1463,12 @@ JSON
 #
 # The contract mirrors `claim` but operates on the epic root keyed by
 # issue number:
-#   1. Create tasks/root-active/<N> on ORIGIN iff it is ABSENT, under a
-#      compare-and-swap that also asserts tasks/pending/<N> is unchanged
-#      (a no-op refspec for pending makes a concurrent root move/delete
-#      abort the whole atomic push). pending/<N> is NEVER moved, so the
-#      epic identity is preserved.
+#   1. Create tasks/root-active/<N> on ORIGIN iff it is ABSENT (the real
+#      cross-host mutex). A paired no-op refspec/lease for tasks/pending/<N>
+#      is included as a BEST-EFFORT client-side stale check, but git skips
+#      up-to-date refs so it is NOT a server-side assertion — the
+#      authoritative pending-unchanged check is the post-claim readback in
+#      step 3. pending/<N> is NEVER moved, so the epic identity is preserved.
 #   2. Refuse if the root is already decomposed (has child task refs):
 #      orchestration is finished, the leaves are the unit of work now.
 #   3. Double-checked locking: read tasks/root-active/<N> back off origin
@@ -2669,18 +2730,25 @@ EOF
     done
 
     # ── for a ROOT breakdown, CONSUME the orchestration lock in the SAME
-    #    atomic push that publishes the leaves. Under one --force-with-lease
-    #    pair (root-active still at the SHA we hold; pending still at the
-    #    root) we delete tasks/root-active/<N> and assert pending unchanged
-    #    via a no-op refspec. Result: the leaves can only appear if the lock
-    #    is still ours, and the lock disappears the instant the leaves exist
-    #    — closing the "implement-after-leaves" window. If the lock was
-    #    stolen/released meanwhile, the lease fails and NOTHING is created.
+    #    atomic push that publishes the leaves. The REAL cross-host mutex is
+    #    the --force-with-lease on root-active (it must still be at the SHA
+    #    we hold): the leaves can only appear if the lock is still ours, and
+    #    the lock disappears the instant the leaves exist — closing the
+    #    "implement-after-leaves" window. If the lock was stolen/released
+    #    meanwhile, the lease fails and NOTHING is created.
+    #
+    #    The pending lease + no-op refspec is only a BEST-EFFORT CLIENT-SIDE
+    #    stale check, NOT a server-side atomic assertion: git skips sending a
+    #    ref that is already up to date, so an unchanged pending may never be
+    #    transmitted for the server to verify. That is fine here — an
+    #    undecomposed root's pending/<N> is never legitimately moved (it is
+    #    deleted only on epic close, after root-active is gone), so there is
+    #    no real race for it to catch.
     if [ "$is_root_breakdown" = true ]; then
         local pending_ref="refs/heads/tasks/pending/$root_issue"
         lease_args+=("--force-with-lease=$root_active_ref:$root_claim_sha")
         lease_args+=("--force-with-lease=$pending_ref:$parent_sha")
-        refspecs+=("$parent_sha:$pending_ref")   # no-op: assert pending unchanged
+        refspecs+=("$parent_sha:$pending_ref")   # no-op: best-effort pending-unchanged
         refspecs+=(":$root_active_ref")          # consume the lock
     fi
 
@@ -2797,8 +2865,18 @@ EOF
     # root worker keep acting after leaves exist. Run this BEFORE any
     # completion side effects (commit creation / HEAD movement). --force
     # does NOT bypass it (force only overrides another worker's leaf claim).
-    local complete_issue
-    complete_issue=$(task_is_pending_root "$task_sha" || true)
+    local complete_issue="" rc_root=0
+    complete_issue=$(task_is_pending_root "$task_sha") || rc_root=$?
+    if [ "$rc_root" = 3 ]; then
+        # task_is_pending_root could not confirm pending identity on origin
+        # (unreachable) and has no local mirror, but the commit is shaped
+        # like a top-level epic root. FAIL CLOSED: completing a possibly-
+        # decomposed root would land an empty root over live leaves.
+        echo "Error: cannot verify whether ${task_sha:0:12} is a live epic root (origin" >&2
+        echo "       unreachable and no local pending mirror). Refusing to complete a" >&2
+        echo "       possibly-decomposed root. Retry when online." >&2
+        return 2
+    fi
     if [ -n "$complete_issue" ]; then
         # FAIL CLOSED if origin is unreadable: completing a root is only
         # safe once we have positively confirmed it has NO children, so a

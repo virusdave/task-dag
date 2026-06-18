@@ -357,6 +357,93 @@ else
   bad "14: child epic breakdown was wrongly refused as a stale/locked root"
 fi
 
+# ---------------------------------------------------------------------------
+# TEST 15: stale-worktree false-negative regression. A COMPLETED child's
+#          frontier ref is deleted, but the child task commit lives on as the
+#          SECOND parent of its completion commit on master. A stale clone
+#          (deleted frontier pruned, old master) must still see the root as
+#          DECOMPOSED — fetch_root_refs refreshes master so task_has_children
+#          cannot miss completed children and re-open the dup-decompose race.
+# ---------------------------------------------------------------------------
+EPIC9=$(git commit-tree "$(git rev-parse HEAD^{tree})" -p HEAD -m "Task: Epic nine
+
+Issue: #1100
+URL: https://github.com/test/test/issues/1100
+Author: tester
+Status: pending
+Type: epic")
+git update-ref refs/heads/tasks/pending/1100 "$EPIC9"
+git push -q origin refs/heads/tasks/pending/1100
+"$TD" claim-root 1100 >/dev/null 2>&1
+printf '[{"title":"to be completed","type":"leaf"}]' > "$ROOT/spec10.json"
+"$TD" breakdown "$EPIC9" --spec-file="$ROOT/spec10.json" >/dev/null 2>&1
+# Make a SECOND clone now, while the frontier leaf still exists, so wc2 has
+# the child task OBJECT in its store but no remaining REF that reaches it once
+# the frontier ref is deleted (we strip the remote-tracking task refs to model
+# a real task-dag worktree, which mirrors task refs into refs/heads/tasks/* and
+# prunes them — leaving master as the only path to a completed child).
+git clone -q "$ROOT/origin.git" "$ROOT/wc2"
+git -C "$ROOT/wc2" for-each-ref --format='%(refname)' refs/remotes/origin/tasks \
+  | while read -r r; do git -C "$ROOT/wc2" update-ref -d "$r"; done
+LEAF15=$(git ls-remote origin 'refs/heads/tasks/frontier/*' \
+  | while read -r s r; do
+      git fetch -q origin "$r:refs/tmp/c15" 2>/dev/null
+      if [ "$(git log -1 --format='%P' refs/tmp/c15 | awk '{print $1}')" = "$EPIC9" ]; then
+        echo "${r##*/}"; git update-ref -d refs/tmp/c15; break
+      fi
+      git update-ref -d refs/tmp/c15 2>/dev/null
+    done)
+# Complete the leaf in wc: pushes master (child = 2nd parent) and deletes the
+# frontier/active refs on origin.
+"$TD" claim "$LEAF15" >/dev/null 2>&1
+echo impl15 > impl15.txt; git add impl15.txt; git commit -qm "impl 1100 leaf"
+"$TD" complete "$LEAF15" >/dev/null 2>&1
+git push -q origin HEAD:master
+# Now drive the STALE clone wc2: it still carries the now-deleted frontier ref
+# locally and an old master. claim-root must refuse (already-decomposed).
+(
+  cd "$ROOT/wc2"
+  export TASK_DAG_CLAIMER=me TASK_DAG_CLAIMER_HOST=h
+  if "$TD" claim-root 1100 >/dev/null 2>&1; then
+    exit 7   # BUG: stale clone re-claimed a decomposed root
+  fi
+  exit 0
+)
+if [ $? -eq 0 ]; then
+  ok "15: stale clone sees a completed child via master and refuses re-claim"
+else
+  bad "15: stale clone re-claimed a root with a completed (master-only) child"
+fi
+
+# ---------------------------------------------------------------------------
+# TEST 16: complete fail-closed on an INDETERMINATE origin for a root-shaped
+#          epic. If origin is unreachable and there is no local pending mirror
+#          but the commit is shaped like a top-level epic root, complete must
+#          REFUSE (never fall through and land an empty root over live leaves).
+# ---------------------------------------------------------------------------
+EPIC10=$(git commit-tree "$(git rev-parse HEAD^{tree})" -p HEAD -m "Task: Epic ten
+
+Issue: #1008
+URL: https://github.com/test/test/issues/1008
+Author: tester
+Status: pending
+Type: epic")
+# Deliberately NO local refs/heads/tasks/pending/1008 mirror. Break origin so
+# the pending lookup is indeterminate (transport error), not cleanly absent.
+git remote set-url origin "$ROOT/does-not-exist.git"
+HEAD_BEFORE16=$(git rev-parse HEAD)
+rc16=0
+"$TD" complete "$EPIC10" >/dev/null 2>&1 || rc16=$?
+# Must be the clean root-guard refusal (exit 2), NOT a generic crash and NOT
+# a successful completion. (Pre-fix this fell through the guard and died with a
+# git error rc=128 instead of refusing.)
+if [ "$rc16" = 2 ] && [ "$(git rev-parse HEAD)" = "$HEAD_BEFORE16" ]; then
+  ok "16: complete fails closed (exit 2) on indeterminate origin for a root-shaped epic"
+else
+  bad "16: expected clean refusal exit 2 + HEAD unchanged, got rc=$rc16"
+fi
+git remote set-url origin "$ROOT/origin.git"
+
 echo "------------------------------------------------------------"
 echo "root-claim: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

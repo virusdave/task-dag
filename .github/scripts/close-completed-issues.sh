@@ -135,5 +135,10 @@ for commit in "${new_commits[@]}"; do
         # identity is missing, so neither ordering can resurrect the root.)
         git push origin --delete "refs/heads/tasks/root-active/${issue_num}" 2>/dev/null || true
         git push origin --delete "refs/heads/tasks/pending/${issue_num}" 2>/dev/null || true
+        # Re-delete root-active in case a worker re-claimed the (now closed)
+        # root in the window between the two deletes above, leaving a stale
+        # orchestration lock for a closed issue. (breakdown already fails
+        # closed once pending is gone, so this is debris cleanup, not safety.)
+        git push origin --delete "refs/heads/tasks/root-active/${issue_num}" 2>/dev/null || true
     done
 done
