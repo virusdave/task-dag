@@ -81,8 +81,8 @@ operator to paste another session at `/config/sweed/sessions`.
 
 ```sh
 # (1) Spin up an ephemeral checkout — never edit ~/src/automation directly
-ws=$(/home/amp-local/src/github-worker/bin/ephemeral-checkout \
-        /home/amp-local/src/automation \
+ws=$(/home/amp-local/src/top-level/scripts/ephemeral_checkout \
+        automation \
         --label my-task)
 cd "$ws"
 

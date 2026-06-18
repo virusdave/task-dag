@@ -6,11 +6,11 @@ fresh from a throwaway ephemeral checkout of `virusdave/top-level` at
 `origin/master` (never the stale shared `~/src/top-level`):
 
 ```sh
-cw=$(/home/amp-local/src/github-worker/bin/ephemeral-checkout \
-        /home/amp-local/src/top-level --label canon-read)
+cw=$(/home/amp-local/src/top-level/scripts/ephemeral_checkout \
+        top-level --label canon-read)
 cat "$cw/docs/canon/AGENTS_CANON.md"
 # … apply the rules; follow the Core's §4 dispatch table into rules/ …
-/home/amp-local/src/github-worker/bin/ephemeral-checkout --remove "$cw"
+/home/amp-local/src/top-level/scripts/ephemeral_checkout --remove "$cw"
 ```
 
 That file is the **Canon Core**: read it in full, then follow its §4
@@ -61,11 +61,11 @@ The shared trees for this repo are `/home/amp-local/src/automation` and
 its `helios/` subdir. Develop only in a throwaway checkout of them:
 
 ```sh
-ws=$(/home/amp-local/src/github-worker/bin/ephemeral-checkout \
-        /home/amp-local/src/automation --label <short-task-label>)
+ws=$(/home/amp-local/src/top-level/scripts/ephemeral_checkout \
+        automation --label <short-task-label>)
 cd "$ws"
 # … edit / build / test / commit / push HEAD:master …
-/home/amp-local/src/github-worker/bin/ephemeral-checkout --remove "$ws"
+/home/amp-local/src/top-level/scripts/ephemeral_checkout --remove "$ws"
 ```
 
 ## Pre-commit hook (one-time per clone)
@@ -105,7 +105,7 @@ specifics:
   `rules/WORKFLOW.md` — don't duplicate them here):
 
   ```sh
-  td=$(/home/amp-local/src/github-worker/bin/ephemeral-checkout \
+  td=$(/home/amp-local/src/top-level/scripts/ephemeral_checkout \
           task-dag --label task-dag-runtime)
   cd <this-repo-worktree>
   "$td/scripts/task-dag" frontier [--issue=N]        # pick a ready leaf
