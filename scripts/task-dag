@@ -121,6 +121,57 @@ deps_satisfied() {
     return 0
 }
 
+# Helper: is <sha> a task commit? Every task commit (epic/task/leaf, and
+# the comment/message/issue-root commits the workflows mint) is created
+# with the canonical EMPTY_TREE (see `breakdown`'s commit-tree call and
+# the cmd_validate "Check 1" invariant). A commit with any other tree is
+# real master/branch history — the boundary of the live task DAG. We use
+# the tree, NOT `merge-base --is-ancestor HEAD`, to detect that boundary:
+# completing one child lands a completion commit that pulls a still-live
+# (possibly blocked) structural parent into HEAD history, so "ancestor of
+# HEAD" is NOT a reliable "no longer a live task" signal, whereas the
+# empty tree is stable for the commit's whole life.
+is_task_commit() {
+    local sha="$1" tree
+    tree=$(git rev-parse "$sha^{tree}" 2>/dev/null) || return 1
+    [ "$tree" = "$EMPTY_TREE" ]
+}
+
+# Helper: walk the FIRST-parent (breakdown/structural) lineage of <sha>
+# and, if any structural ancestor is blocked, print that ancestor's SHA
+# and return 0; otherwise return 1.
+#
+# WHY: blocking must be transitive over the structural lineage. A child
+# created by `breakdown <parent>` carries <parent> as its FIRST parent,
+# which `get_dep_parents` deliberately strips — so the parent is NOT a
+# dependency and `deps_satisfied` is trivially true for the child. Without
+# this walk, blocking a parent/epic (e.g. an "awaiting operator feedback"
+# task) would NOT withhold the subtasks decomposed under it, and the
+# dispatcher would spawn no-op workers on them (the over-dispatch the
+# block mechanism exists to prevent). Explicit DEPENDENCY edges to a
+# blocked task are already handled (a blocked task is not completed, so
+# deps_satisfied fails); this closes the structural-lineage gap.
+#
+# The walk stops at the first non-task-commit first-parent (the master
+# base the root epic was minted on) — bounded to the few hops of the
+# decomposition depth. <sha> itself is NOT checked here (frontier/claim
+# check it directly via is_task_blocked); we start from its first parent.
+blocked_structural_ancestor() {
+    local cur="$1" parent
+    while :; do
+        parent="$(get_first_parent "$cur" 2>/dev/null || true)"
+        [ -n "$parent" ] || return 1
+        # Left the live task DAG (reached real history) — no blocked
+        # structural ancestor.
+        is_task_commit "$parent" || return 1
+        if is_task_blocked "$parent"; then
+            printf '%s\n' "$parent"
+            return 0
+        fi
+        cur="$parent"
+    done
+}
+
 # Helper: check if all child tasks of an epic are complete
 is_epic_complete() {
     local epic_sha="$1"
@@ -392,8 +443,9 @@ EOF
 # `tasks/active/<short>` ref are filtered out — they are in-flight on
 # some other agent. Pass `--no-fetch` to suppress the network round-trip
 # (offline use) and `--include-claimed` to override the active-ref filter.
-# Blocked tasks (tasks/blocked overlay) and tasks with unmet dependencies
-# are never pickable and are always excluded.
+# Blocked tasks (tasks/blocked overlay), tasks whose structural ancestor
+# is blocked (transitive block), and tasks with unmet dependencies are
+# never pickable and are always excluded.
 cmd_frontier() {
     local json=false
     local issue_filter=""
@@ -442,6 +494,15 @@ cmd_frontier() {
 
         # Blocked tasks stay in the DAG but are NOT pickable.
         if is_task_blocked "$sha"; then
+            continue
+        fi
+
+        # Transitive block: a task whose structural (breakdown) ancestor
+        # is blocked is also NOT pickable. Blocking a parent/epic — e.g. a
+        # task parked awaiting operator feedback — must withhold every
+        # subtask decomposed under it; otherwise the dispatcher spawns
+        # no-op workers on children of a blocked node.
+        if blocked_structural_ancestor "$sha" >/dev/null; then
             continue
         fi
 
@@ -632,6 +693,28 @@ JSON
             echo "Revive it with 'task-dag unblock $short_sha', or --force if you know the block is stale." >&2
         fi
         return 2
+    fi
+
+    # Defense-in-depth (transitive): refuse a task whose structural
+    # (breakdown) ancestor is blocked, mirroring the frontier filter. A
+    # worker could target a child of a blocked parent directly; claiming
+    # it would put work the operator parked back in flight.
+    if [ "$do_force" = false ]; then
+        local blocking_ancestor
+        blocking_ancestor=$(blocked_structural_ancestor "$task_sha" || true)
+        if [ -n "$blocking_ancestor" ]; then
+            local blocking_short
+            blocking_short=$(git rev-parse --short "$blocking_ancestor" 2>/dev/null || echo "$blocking_ancestor")
+            if [ "$json" = true ]; then
+                cat <<JSON
+{"ok":false,"reason":"ancestor-blocked","sha":"$task_sha","shortSha":"$short_sha","blockedAncestor":"$blocking_ancestor"}
+JSON
+            else
+                printf "${RED}Task %s has a BLOCKED ancestor (%s) — not claimable.${RESET}\n" "$short_sha" "$blocking_short" >&2
+                echo "Revive it with 'task-dag unblock $blocking_short', or --force if you know the block is stale." >&2
+            fi
+            return 2
+        fi
     fi
 
     local frontier_local_ref="refs/heads/tasks/frontier/$short_sha"
@@ -1151,9 +1234,29 @@ cmd_deps() {
     
     sha=$(resolve_sha "$sha") || return 1
     local deps=$(get_dep_parents "$sha")
-    
+
+    # Informational: a blocked structural (breakdown) ancestor makes the
+    # task un-pickable in `frontier`/`claim` even when its dependency
+    # parents are all met. Surface it here so `deps` and `frontier` never
+    # appear to disagree. NOTE: this is reported, not folded into
+    # `allMet`/the --check-complete exit code, because cmd_complete gates
+    # completion of an already-active task on `deps --check-complete`, and
+    # a parent blocked mid-flight must not strand an in-progress child.
+    local blocking_ancestor blocked_ancestor_json
+    blocking_ancestor=$(blocked_structural_ancestor "$sha" || true)
+    if [ -n "$blocking_ancestor" ]; then
+        blocked_ancestor_json="\"$blocking_ancestor\""
+    else
+        blocked_ancestor_json="null"
+    fi
+
     if [ -z "$deps" ]; then
-        [ "$json" = true ] && echo '{"dependencies": [], "allMet": true}' || echo "No dependencies"
+        if [ "$json" = true ]; then
+            echo "{\"dependencies\": [], \"allMet\": true, \"blockedAncestor\": $blocked_ancestor_json}"
+        else
+            echo "No dependencies"
+            [ -n "$blocking_ancestor" ] && printf "${RED}⚠${RESET} structural ancestor %s is BLOCKED (task not pickable until unblocked)\n" "$(git rev-parse --short "$blocking_ancestor")"
+        fi
         return 0
     fi
     
@@ -1196,8 +1299,11 @@ JSON
     
     if [ "$json" = true ]; then
         echo "  ],"
-        echo "  \"allMet\": $all_met"
+        echo "  \"allMet\": $all_met,"
+        echo "  \"blockedAncestor\": $blocked_ancestor_json"
         echo "}"
+    elif [ -n "$blocking_ancestor" ]; then
+        printf "${RED}⚠${RESET} structural ancestor %s is BLOCKED (task not pickable until unblocked)\n" "$(git rev-parse --short "$blocking_ancestor")"
     fi
     
     if [ "$check_complete" = true ] && [ "$all_met" = false ]; then
