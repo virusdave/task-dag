@@ -43,6 +43,26 @@ new leaves are *immediately claimable* by other workers. Nothing relates
 the root SHA to its leaf SHAs under a single lock, so the same issue's
 work can be picked up twice (root worker + leaf worker).
 
+## Born-claimed children (`breakdown ... "claim": true`)
+
+To close the same-issue root/leaf race without a fragile claim-after-create
+window, `breakdown` accepts a per-child `"claim": true` flag. Such a child
+is created **already claimed by the caller**: in the same atomic push,
+`breakdown` publishes its `tasks/active/<short>` ref (a normal claim
+commit, attributed via `TASK_DAG_CLAIMER` / `_HOST` / `_PID` /
+`TTL_HOURS`) and does **not** publish a `tasks/frontier/<short>` ref. The
+child therefore never exists as a pickable frontier ref, so no other
+worker can race to take it (zero window).
+
+An epic-root worker uses this to atomically reserve the child(ren) it will
+implement itself: decompose with those children marked `"claim": true`,
+then do the work and `task-dag complete <child>` each one (same claimer
+identity). Unmarked children remain ordinary frontier leaves for the
+fleet. A born-claimed child is recovered exactly like any other claim
+(claim-commit TTL, `claim --force`, same-host PID reaping) and can be
+handed back with `release` (active -> frontier) if the worker decides not
+to do it. `breakdown --json` reports `"claimed": true|false` per child.
+
 ## Known gaps (tracked)
 
 Both stem from the two facts above and are the root cause of observed
@@ -52,13 +72,19 @@ independently implemented the freshly-minted leaf):
 
 1. **Epic roots are not cross-host claimable.** Two hosts can dispatch
    the same `tasks/pending/<N>` before any leaf exists.
-2. **No per-issue (root-vs-leaf) relationship at claim time.** A root
-   claim and a leaf claim for the same issue are independent locks.
+2. **The root/leaf split is only as safe as the root worker's
+   decomposition.** Born-claimed children (above) give a root worker a
+   zero-race way to reserve its own implementation work, but a root
+   worker that decomposes into *plain* (unclaimed) leaves and then also
+   implements them still self-duplicates. This is enforced by the worker
+   contract, not the DAG.
 
 A first-class, cross-host-claimable epic-root state (or converting roots
-into claimable frontier tasks) would close both, but it is a lifecycle
+into claimable frontier tasks) would close gap 1, but it is a lifecycle
 redesign that must preserve pending-root identity for closure,
 delegation, and comment ancestry. Tracked as a task-dag design issue.
-The host-local half of the mitigation (decompose-only root contract +
+The born-claimed-child primitive closes the same-host root-vs-own-leaf
+race when the root worker uses it; the host-local enforcement half
+(decompose-only-or-born-claim root contract +
 same-host leaf suppression while a root claim is active) lives in the
 worker fleet; see `Nicponskis/github-worker:docs/DISPATCH_CONCURRENCY.md`.

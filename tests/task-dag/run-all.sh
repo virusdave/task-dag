@@ -19,7 +19,7 @@ echo "== bash -n =="
 bash -n "$TD" && bash -n "$(dirname "$TD")/task-dag.d/cross-repo.sh" || exit 1
 
 rc=0
-for t in complete-safety.sh ingest-loop.sh ingest-selfheal.sh blocked-overlay.sh transitive-block.sh claim-pid.sh claim-force-steal.sh; do
+for t in complete-safety.sh ingest-loop.sh ingest-selfheal.sh blocked-overlay.sh transitive-block.sh claim-pid.sh claim-force-steal.sh breakdown-self-claim.sh; do
     echo "== $t =="
     bash "$here/$t" "$TD" || rc=1
 done

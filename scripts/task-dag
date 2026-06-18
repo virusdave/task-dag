@@ -1366,6 +1366,19 @@ cmd_dag() {
 cmd_breakdown() {
     local parent_sha="" spec_file="" stdin_json=false dry_run=false force=false json=false
 
+    # Claimer identity for any child marked "claim": true in the spec. A
+    # self-claimed child is created already-claimed by THIS worker (its
+    # tasks/active/<short> ref is published in the same atomic push, and it
+    # never gets a pickable tasks/frontier/<short> ref) so no other worker
+    # can ever take it — a zero-race-window handoff from "decompose" to
+    # "implement it myself". These mirror cmd_claim's env contract so the
+    # born-claimed child is attributed to, and later completable by, the
+    # same worker. See the "claim" field in --help.
+    local claimer="${TASK_DAG_CLAIMER:-${USER:-unknown}}"
+    local claimer_host="${TASK_DAG_CLAIMER_HOST:-$(hostname -s 2>/dev/null || echo unknown)}"
+    local claimer_ttl_hours="${TASK_DAG_TTL_HOURS:-12}"
+    local claimer_pid="${TASK_DAG_CLAIMER_PID:-$PPID}"
+
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --spec-file=*) spec_file="${1#*=}"; shift ;;
@@ -1394,9 +1407,22 @@ Spec format (a non-empty JSON array, authored in dependency order):
     "description": "Longer body",     (optional string)
     "dependencies": ["@1", "..."],    (optional; see below)
     "type": "epic|task|leaf",         (optional; default "leaf")
-    "status": "pending"               (optional; only "pending" is valid)
+    "status": "pending",              (optional; only "pending" is valid)
+    "claim": true                     (optional bool; default false)
   }
 ]
+
+"claim": true creates that child ALREADY CLAIMED by the caller — its
+tasks/active/<short> ref (a claim commit) is published in the same atomic
+push and it never gets a pickable tasks/frontier/<short> ref. No other
+worker can ever take it (zero race window), so an epic-root worker can
+decompose an issue and reserve, in one atomic step, the child(ren) it
+will implement itself; it then does the work and `task-dag complete`s
+each claimed child. Unmarked children are normal frontier leaves for the
+fleet. The claim is attributed to the same identity `claim` would use
+(TASK_DAG_CLAIMER / TASK_DAG_CLAIMER_HOST / TASK_DAG_CLAIMER_PID /
+TASK_DAG_TTL_HOURS), so the same worker can later complete it and a
+janitor can detect it if the worker dies.
 
 Each "dependencies" entry must be a non-empty string, one of:
   * "@N"         — 1-based index of an EARLIER sibling in this same spec
@@ -1481,14 +1507,15 @@ EOF
             and ((has("type") | not)
                  or (.type == "epic" or .type == "task" or .type == "leaf"))
             and ((has("status") | not) or (.status == "pending"))
+            and ((has("claim") | not) or (.claim | type == "boolean"))
             and ((has("dependencies") | not)
                  or ((.dependencies | type == "array")
                      and all(.dependencies[]; type == "string" and length > 0)))
         )' >/dev/null 2>&1; then
         echo "Error: invalid spec. Each entry needs a non-empty single-line" >&2
         echo "       'title'; optional 'description' (string), 'type'" >&2
-        echo "       (epic|task|leaf), 'status' (pending), and 'dependencies'" >&2
-        echo "       (array of non-empty strings). See --help." >&2
+        echo "       (epic|task|leaf), 'status' (pending), 'claim' (bool)," >&2
+        echo "       and 'dependencies' (array of non-empty strings). See --help." >&2
         return 1
     fi
 
@@ -1504,7 +1531,7 @@ EOF
     count=$(printf '%s' "$spec_json" | jq 'length')
 
     # ── pass 1: collect fields + full title→index map (detect dup titles) ──
-    local -a titles=() types=() statuses=() descs=() dep_plans=() out_lines=()
+    local -a titles=() types=() statuses=() descs=() claims=() dep_plans=() out_lines=()
     local -A title_to_idx=()
     local i
     for (( i=0; i<count; i++ )); do
@@ -1519,6 +1546,7 @@ EOF
         types[i]=$(printf '%s' "$spec_json" | jq -r ".[$i].type // \"leaf\"")
         statuses[i]=$(printf '%s' "$spec_json" | jq -r ".[$i].status // \"pending\"")
         descs[i]=$(printf '%s' "$spec_json" | jq -r ".[$i].description // \"\"")
+        claims[i]=$(printf '%s' "$spec_json" | jq -r ".[$i].claim // false")
     done
 
     # ── pass 2: structurally validate every dependency (still no mutation) ──
@@ -1561,7 +1589,9 @@ EOF
         dep_plans[i]="$plan"
         local deps_str=""
         [ -n "$disp" ] && deps_str=" deps=[$disp]"
-        out_lines[i]="[${types[i]}] ${titles[i]}${deps_str}"
+        local claim_disp=""
+        [ "${claims[i]}" = true ] && claim_disp=" (claimed by ${claimer})"
+        out_lines[i]="[${types[i]}] ${titles[i]}${deps_str}${claim_disp}"
     done
 
     # ── guard: refuse to double-decompose unless --force (skip in dry-run) ─
@@ -1572,11 +1602,23 @@ EOF
             '+refs/heads/tasks/active/*:refs/heads/tasks/active/*' \
             '+refs/heads/tasks/blocked/*:refs/heads/tasks/blocked/*' \
             2>/dev/null || true
-        local existing_child="" ref child_sha
+        local existing_child="" ref ref_sha child_task_sha
         while IFS= read -r ref; do
             [ -z "$ref" ] && continue
-            child_sha=$(git rev-parse "$ref" 2>/dev/null) || continue
-            if [ "$(get_first_parent "$child_sha")" = "$parent_sha" ]; then
+            ref_sha=$(git rev-parse "$ref" 2>/dev/null) || continue
+            # frontier/blocked refs point straight at the child task commit;
+            # an active ref points at a CLAIM commit whose first parent is the
+            # child task commit (so a born-claimed child must be unwrapped one
+            # level, else the guard misses it and a second breakdown slips
+            # through).
+            case "$ref" in
+                refs/heads/tasks/active/*)
+                    child_task_sha=$(get_first_parent "$ref_sha" 2>/dev/null || true) ;;
+                *)
+                    child_task_sha="$ref_sha" ;;
+            esac
+            [ -z "$child_task_sha" ] && continue
+            if [ "$(get_first_parent "$child_task_sha")" = "$parent_sha" ]; then
                 existing_child="$ref"
                 break
             fi
@@ -1610,7 +1652,9 @@ EOF
     fi
 
     # ── create the commit objects (no refs yet → nothing to clean up) ─
-    local -a created_shas=() refspecs=() lease_args=()
+    # created_shas[i]   = the child task commit
+    # claim_commits[i]  = the claim commit for a self-claimed child (else "")
+    local -a created_shas=() claim_commits=() refspecs=() lease_args=()
     for (( i=0; i<count; i++ )); do
         local msg_file
         msg_file=$(mktemp)
@@ -1644,11 +1688,30 @@ EOF
         rm -f "$msg_file"
 
         created_shas[i]="$child_sha"
-        local short_sha frontier_ref
+        local short_sha
         short_sha=$(git rev-parse --short "$child_sha")
-        frontier_ref="refs/heads/tasks/frontier/$short_sha"
-        refspecs+=("$child_sha:$frontier_ref")
-        lease_args+=("--force-with-lease=$frontier_ref:")
+        claim_commits[i]=""
+        if [ "${claims[i]}" = true ]; then
+            # Born-claimed child: publish tasks/active/<short> (a claim
+            # commit) instead of a pickable tasks/frontier/<short> ref, in
+            # this same atomic push. The child never exists as a claimable
+            # frontier ref, so no other worker can race to take it.
+            local claim_commit active_ref
+            claim_commit=$(build_claim_commit "$child_sha" "$claimer" \
+                "$claimer_host" "$claimer_ttl_hours" \
+                "born-claimed at breakdown of ${parent_sha:0:12}" "$claimer_pid") || {
+                echo "Error: failed to build claim commit for entry $((i+1)) ('${titles[i]}')" >&2
+                return 1
+            }
+            claim_commits[i]="$claim_commit"
+            active_ref="refs/heads/tasks/active/$short_sha"
+            refspecs+=("$claim_commit:$active_ref")
+            lease_args+=("--force-with-lease=$active_ref:")
+        else
+            local frontier_ref="refs/heads/tasks/frontier/$short_sha"
+            refspecs+=("$child_sha:$frontier_ref")
+            lease_args+=("--force-with-lease=$frontier_ref:")
+        fi
         out_lines[i]="${short_sha}  ${out_lines[i]}"
     done
 
@@ -1656,7 +1719,7 @@ EOF
     local push_output push_rc=0
     push_output=$(git push --atomic "${lease_args[@]}" origin "${refspecs[@]}" 2>&1) || push_rc=$?
     if [ "$push_rc" -ne 0 ]; then
-        echo "Error: failed to publish frontier refs to origin (nothing was created" >&2
+        echo "Error: failed to publish task refs to origin (nothing was created" >&2
         echo "       on origin; the local commit objects are unreferenced)." >&2
         echo "$push_output" >&2
         return 4
@@ -1664,8 +1727,13 @@ EOF
 
     # ── mirror onto local refs so subsequent commands see them ───────
     for (( i=0; i<count; i++ )); do
-        git update-ref "refs/heads/tasks/frontier/$(git rev-parse --short "${created_shas[i]}")" \
-            "${created_shas[i]}"
+        local mirror_short
+        mirror_short=$(git rev-parse --short "${created_shas[i]}")
+        if [ -n "${claim_commits[i]}" ]; then
+            git update-ref "refs/heads/tasks/active/$mirror_short" "${claim_commits[i]}"
+        else
+            git update-ref "refs/heads/tasks/frontier/$mirror_short" "${created_shas[i]}"
+        fi
     done
 
     # ── report ───────────────────────────────────────────────────────
@@ -1675,8 +1743,11 @@ EOF
         for (( k=0; k<count; k++ )); do
             [ "$first" = false ] && printf ','
             first=false
-            printf '{"sha":"%s","shortSha":"%s"}' \
-                "${created_shas[k]}" "$(git rev-parse --short "${created_shas[k]}")"
+            local k_claimed=false
+            [ -n "${claim_commits[k]}" ] && k_claimed=true
+            printf '{"sha":"%s","shortSha":"%s","claimed":%s}' \
+                "${created_shas[k]}" "$(git rev-parse --short "${created_shas[k]}")" \
+                "$k_claimed"
         done
         printf ']}\n'
     else

@@ -32,7 +32,10 @@ git push -q origin refs/heads/gh/issues/999 refs/heads/tasks/pending/999
 mk_task() {  # prints the new leaf task short sha
   local title="$1"
   printf '[{"title":"%s","type":"leaf"}]' "$title" > "$ROOT/spec.json"
-  "$TD" breakdown "$EPIC" --spec-file="$ROOT/spec.json" --json 2>/dev/null \
+  # --force: this helper decomposes the SAME epic repeatedly to mint
+  # several independent leaves; the double-decompose guard (which now also
+  # recognizes already-claimed children) would otherwise refuse the 2nd+.
+  "$TD" breakdown "$EPIC" --spec-file="$ROOT/spec.json" --force --json 2>/dev/null \
     | grep -oE '"shortSha":"[0-9a-f]+"' | head -1 | cut -d'"' -f4
 }
 
