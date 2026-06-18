@@ -22,11 +22,15 @@
 #   1. ephemerally clones virusdave/top-level (canon), then uses it to locate
 #      and clone Nicponskis/nixos-sbc;
 #   2. resolves ONE canonical plaintext, in priority order:
-#        a. --plaintext-file <file>  → encrypt that local file's CONTENTS;
-#        b. an existing host blob (or --source) that still decrypts (with YOUR
-#           `dave` age/ssh identity) to a real FRESHLYBAKEDUS_PUBLIC_TOKEN_SECRET=
-#           line — so reruns REUSE the live value instead of rotating it;
-#        c. otherwise, with --generate, mint a fresh 32-byte random secret;
+#        a. --plaintext-file <file>  → encrypt that local file's CONTENTS
+#           (overrides --generate);
+#        b. --generate → ALWAYS mint a fresh 32-byte random secret (ROTATION);
+#           skips any existing blob, so `--generate` truly generates rather than
+#           silently reusing the live value;
+#        c. otherwise (DEFAULT, no --generate) → reuse an existing host blob (or
+#           --source) that still decrypts (with YOUR `dave` age/ssh identity) to
+#           a real FRESHLYBAKEDUS_PUBLIC_TOKEN_SECRET= line, so reruns REUSE the
+#           live value instead of rotating it; fails if none can be decrypted;
 #   3. encrypts that SAME plaintext to each requested host's
 #      secrets/vps-nixos-N/freshlybakedus-public-token.env.age, targeted at the
 #      `dave` + `vpsNixosN` recipients pulled straight from secrets.nix, then
@@ -63,8 +67,9 @@
 #
 # USAGE
 # -----
-#   scripts/rekey-branding-secret.sh --generate # mint a fresh secret if none
-#                                               #   exists, provision all 3 hosts,
+#   scripts/rekey-branding-secret.sh --generate # ROTATE: always mint a fresh
+#                                               #   secret, provision all 3 hosts
+#                                               #   (required), keep the clone,
 #                                               #   stop before push
 #   scripts/rekey-branding-secret.sh --generate --push   # ...and push to master
 #   scripts/rekey-branding-secret.sh            # reuse an existing secret only
@@ -82,11 +87,13 @@
 #   scripts/rekey-branding-secret.sh --force    # provision even if the var-name
 #                                               #   sanity check can't confirm it
 #
-# IMPORTANT (rotation safety): once a secret is live, prefer NOT passing
-# --generate on reruns. With an existing valid blob the script REUSES it; only
-# an empty/garbage state (today's situation) triggers generation. Generating a
-# new secret rotates the live HMAC key, which invalidates every already-issued
-# opaque landing-page ref until all hosts are redeployed.
+# IMPORTANT (rotation safety): --generate ALWAYS rotates — it mints a brand-new
+# secret every run, even when a valid one already exists. That invalidates every
+# already-issued opaque landing-page ref derived from the OLD key until all hosts
+# are redeployed with the new value. So pass --generate only when you actually
+# intend to rotate (or to bootstrap when no secret exists yet). The DEFAULT
+# (no --generate) is the safe, idempotent rerun path: it REUSES the existing
+# decryptable value and makes no change when every host already holds it.
 #
 # The decrypted source is auto-normalized first: UTF-16 → UTF-8, and any UTF-8
 # BOM / CRLF stripped (those silently hide a valid VAR= from byte-wise checks
@@ -94,8 +101,11 @@
 # script prints leak-safe structure only (byte/line/key-name counts, NEVER the
 # value) so you can tell a bare value from a wrong blob.
 #
-# Re-running is safe: every mutation is idempotent and the script aborts loudly
-# (without writing a partial commit) if any expected anchor is missing.
+# Re-running is safe in the DEFAULT (reuse) mode and with the SAME
+# --plaintext-file: every mutation is idempotent (no churn when the hosts
+# already hold the canonical plaintext) and the script aborts loudly (without
+# writing a partial commit) if any expected anchor is missing. --generate is the
+# deliberate exception: it is NOT idempotent — each run rotates to a new secret.
 
 set -euo pipefail
 umask 077
@@ -111,6 +121,7 @@ ALLOW_NIX=1
 FORCE=0
 WRAP_BARE=0
 GENERATE=0
+SOURCE_EXPLICIT=0
 # Which hosts to provision the SAME secret to. mss FBUS runs on vps-nixos-1 and
 # vps-nixos-2 (they verify the opaque tokens) and Helios on vps-nixos-3 mints
 # them, so all three must share one plaintext or the opaque refs won't match.
@@ -144,11 +155,11 @@ while [[ $# -gt 0 ]]; do
     --identity=*)   IDENTITY="${1#*=}" ;;
     --plaintext-file)   PLAINTEXT_FILE="${2:?--plaintext-file needs a path}"; shift ;;
     --plaintext-file=*) PLAINTEXT_FILE="${1#*=}" ;;
-    --source)       SRC_REL="${2:?--source needs a path}"; shift ;;
-    --source=*)     SRC_REL="${1#*=}" ;;
+    --source)       SRC_REL="${2:?--source needs a path}"; SOURCE_EXPLICIT=1; shift ;;
+    --source=*)     SRC_REL="${1#*=}"; SOURCE_EXPLICIT=1 ;;
     --hosts)        HOSTS="${2:?--hosts needs a value like '1 2 3'}"; shift ;;
     --hosts=*)      HOSTS="${1#*=}" ;;
-    -h|--help)      sed -n '2,98p' "$0"; exit 0 ;;
+    -h|--help)      sed -n '2,108p' "$0"; exit 0 ;;
     *) echo "error: unknown argument: $1" >&2; exit 2 ;;
   esac
   shift
@@ -157,6 +168,15 @@ done
 log()  { printf '\033[1;36m==>\033[0m %s\n' "$*" >&2; }
 warn() { printf '\033[1;33mWARN:\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
+
+# A --generate run mints a NEW secret and commits it into an EPHEMERAL clone. If
+# we neither push nor keep, that rotation commit is deleted on exit and silently
+# lost — easy to misread as success. So when rotating without --push, force
+# --keep so the operator can inspect/push the commit afterwards.
+if [[ "$GENERATE" == 1 && "$DO_PUSH" != 1 && "$KEEP" != 1 ]]; then
+  KEEP=1
+  warn "--generate without --push: keeping the ephemeral clone so the new-secret commit is not discarded (use --push to push automatically)."
+fi
 
 # ── Tooling: git, ssh, age ───────────────────────────────────────────────────
 command -v git >/dev/null || die "git not found on PATH"
@@ -267,9 +287,10 @@ normalize_env() {
 
 # try_existing_secret <age-file> <out>: decrypt with $IDENTITY; succeed only if
 # the result is non-empty AND carries FRESHLYBAKEDUS_PUBLIC_TOKEN_SECRET=. Used
-# to (a) source an already-canonical secret and (b) make reruns REUSE the
-# provisioned value instead of minting a fresh one (which would rotate the live
-# key out from under already-deployed hosts).
+# to (a) source an already-canonical secret and (b) in the DEFAULT (no
+# --generate) mode make reruns REUSE the provisioned value instead of minting a
+# fresh one (which would rotate the live key out from under already-deployed
+# hosts). --generate deliberately bypasses this reuse path to force a rotation.
 try_existing_secret() {
   local src="$1" out="$2"
   [[ -f "$src" ]] || return 1
@@ -278,16 +299,56 @@ try_existing_secret() {
   [[ -s "$out" ]] && grep -q 'FRESHLYBAKEDUS_PUBLIC_TOKEN_SECRET=' "$out"
 }
 
+# require_all_rotation_hosts: --generate rotates the ONE shared HMAC key, so it
+# must land on every host or the opaque refs go out of sync. Writing a fresh key
+# to only a subset is exactly the mismatch this tool exists to prevent, so we
+# refuse a rotation that does not target all of vps-nixos-{1,2,3}. (Subset
+# REPAIR is still possible without --generate: reuse mode / --plaintext-file
+# re-encrypt the *existing* canonical value to a subset.)
+require_all_rotation_hosts() {
+  local h have1=0 have2=0 have3=0
+  [[ -n "${HOSTS//[[:space:]]/}" ]] || die "--hosts cannot be empty"
+  for h in $HOSTS; do
+    case "$h" in
+      1) have1=1 ;;
+      2) have2=1 ;;
+      3) have3=1 ;;
+      *) die "invalid host '$h' in --hosts (expected 1, 2, and/or 3)" ;;
+    esac
+  done
+  [[ "$have1$have2$have3" == 111 ]] || die \
+    "--generate rotates the shared HMAC key and must target all hosts (--hosts '1 2 3'). Use reuse mode or --plaintext-file to repair a subset."
+}
+
 SECRET_ORIGIN=""
 if [[ -n "$PLAINTEXT_FILE" ]]; then
+  # An explicit plaintext file is the strongest source of truth; it overrides
+  # --generate (warn so the ignored flag is never silently surprising).
+  [[ "$GENERATE" == 1 ]] && warn "--generate ignored because --plaintext-file was supplied; encrypting the file's CONTENTS, not a fresh secret."
   [[ -f "$PLAINTEXT_FILE" ]] || die "--plaintext-file not found: $PLAINTEXT_FILE"
   log "Using operator-supplied plaintext file (encrypting its CONTENTS): $PLAINTEXT_FILE"
   normalize_env "$PLAINTEXT_FILE" "$PLAIN"
   SECRET_ORIGIN="operator file $PLAINTEXT_FILE"
+elif [[ "$GENERATE" == 1 ]]; then
+  # ROTATE: --generate ALWAYS mints a fresh secret, even when a valid one
+  # already decrypts. (The reuse-existing scan below is the DEFAULT, no-flag
+  # behaviour; --generate deliberately skips it so the operator's `--generate`
+  # actually generates rather than silently reusing the live value.) Refuse a
+  # rotation that does not cover every host (subset rotation = guaranteed
+  # mismatch), and reject --source which has no meaning when we are not reading
+  # any existing blob.
+  [[ "$SOURCE_EXPLICIT" == 1 ]] && die "--source cannot be combined with --generate; --generate mints a fresh secret and ignores existing blobs. Omit --generate to reuse a source, or use --plaintext-file to supply exact contents."
+  require_all_rotation_hosts
+  command -v openssl >/dev/null || die "--generate needs openssl (not found on PATH)"
+  warn "GENERATING a fresh FRESHLYBAKEDUS_PUBLIC_TOKEN_SECRET (32 random bytes) — this ROTATES the live HMAC key."
+  warn "Every already-issued opaque landing-page ref derived from the OLD key stops resolving until vps-nixos-{$(echo "$HOSTS" | tr ' ' ,)} are all redeployed with the new value."
+  printf 'FRESHLYBAKEDUS_PUBLIC_TOKEN_SECRET=%s\n' "$(openssl rand -hex 32)" > "$PLAIN"
+  SECRET_ORIGIN="freshly generated rotation"
 else
-  # Reuse an already-provisioned secret if any candidate blob still decrypts to
-  # a real one, so the value stays stable across reruns. Candidates: the
-  # explicit --source override plus each requested host's destination blob.
+  # DEFAULT (no --generate): reuse an already-provisioned secret if any
+  # candidate blob still decrypts to a real one, so the value stays stable
+  # across reruns. Candidates: the --source override (or its default) plus each
+  # requested host's destination blob.
   CANDIDATES="$SRC_REL"
   for h in $HOSTS; do CANDIDATES="$CANDIDATES secrets/vps-nixos-${h}/freshlybakedus-public-token.env.age"; done
   for c in $CANDIDATES; do
@@ -297,23 +358,10 @@ else
       break
     fi
   done
-fi
-
-if [[ -z "$SECRET_ORIGIN" ]]; then
-  # Nothing usable on disk. Per the operator decision on automation#48 the
-  # historical agenix copies decrypt to EMPTY plaintext (322-byte 2-recipient
-  # blobs of nothing), so there is no secret to copy — mint a fresh one. 32
-  # random bytes hex-encoded (64 chars) is ample for an HMAC key. We refuse
-  # unless --generate was given, so a stale/wrong identity that merely FAILED
-  # to decrypt a good blob can never silently rotate the live secret.
-  if [[ "$GENERATE" != 1 ]]; then
-    die "no FRESHLYBAKEDUS_PUBLIC_TOKEN_SECRET could be decrypted from any host blob with $IDENTITY, and --generate was not given. Re-run with --generate to mint a fresh secret, or pass --plaintext-file <file> / --identity <key> to supply the real one."
-  fi
-  command -v openssl >/dev/null || die "--generate needs openssl (not found on PATH)"
-  warn "No existing secret found — GENERATING a fresh FRESHLYBAKEDUS_PUBLIC_TOKEN_SECRET (32 random bytes)."
-  warn "This becomes the live HMAC key for ALL opaque landing-page refs on vps-nixos-{$(echo "$HOSTS" | tr ' ' ,)}."
-  printf 'FRESHLYBAKEDUS_PUBLIC_TOKEN_SECRET=%s\n' "$(openssl rand -hex 32)" > "$PLAIN"
-  SECRET_ORIGIN="freshly generated"
+  # Nothing usable on disk and no --generate. We refuse rather than mint, so a
+  # stale/wrong identity that merely FAILED to decrypt a good blob can never
+  # silently rotate the live secret.
+  [[ -n "$SECRET_ORIGIN" ]] || die "no FRESHLYBAKEDUS_PUBLIC_TOKEN_SECRET could be decrypted from any host blob with $IDENTITY, and --generate was not given. Re-run with --generate to mint a fresh secret (rotation), or pass --plaintext-file <file> / --identity <key> to supply the real one."
 fi
 
 # Final guard: confirm the resolved plaintext carries the var (covers the
