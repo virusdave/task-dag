@@ -70,17 +70,75 @@ cd "$ws"
 
 ## Pre-commit hook (one-time per clone)
 
-This repo ships a `.githooks/` pre-commit gate that runs the helios
-server typecheck + an in-process SPA smoke whenever a commit touches
-`helios/`. Git won't auto-enable a tracked hooks dir, so run once:
+This repo ships a `.githooks/` pre-commit gate. Git won't auto-enable a
+tracked hooks dir, so run once:
 
 ```sh
 git config core.hooksPath .githooks
 ```
 
-The hook needs `helios/node_modules/` populated (`npm install` inside
-`helios/`). Do not bypass it with `--no-verify` (canon: rules/SAFETY.md); if it
-fails, fix the cause or stop and report.
+It runs three instant repo-wide scanners on **every** commit
+(`scan-explicit-any`, `scan-disabled-gates`, `scan-test-resources` — a
+weakened gate anywhere is a master breakage), and adds package-scoped
+checks only when the staged files touch a package: helios server
+typecheck + client typecheck + in-process SPA smoke when `helios/`
+changes, and the `ads/google` typecheck when `ads/google/` changes. The
+heavy helios checks (full vitest suite, `vite build`) are **not** in the
+hook — CI owns them (see [Dev-loop checks](#dev-loop-checks) below).
+
+The hook needs the touched package's `node_modules/` populated
+(`npm install` inside `helios/` and/or `ads/google/`). Do not bypass it
+with `--no-verify` (canon: rules/SAFETY.md); if it fails, fix the cause or
+stop and report.
+
+## Dev-loop checks
+
+Iterate with the **smallest check that covers the files you touched**;
+CI owns the heavy full-suite gates. Do not hand-run heavy local gates
+repeatedly — if you need one to debug a CI failure or a harness change,
+run it **once** under `large-action-lock` and record why (canon:
+rules/QUALITY_GATES.md "Green tree"). Timings below are warm/incremental
+from a fresh ephemeral checkout on a prod host; cold runs are slower.
+
+| Touched area | Fast/targeted local gate | Commit gate (pre-commit hook) | Heavy / CI-owned final gate |
+| --- | --- | --- | --- |
+| Repo-wide scripts / docs / gates | `bash scripts/scan-explicit-any.sh`; `scan-disabled-gates.sh`; `scan-test-resources.sh` (<1s each) | all three scanners, every commit | CI `scanners` job |
+| `helios/` server (`src/server`, `src/worker`, node-only `src/shared`) | `cd helios && npm run typecheck` (~3s); focused tests `npm run test -- <file-or-pattern>` | server compile + smoke when `helios/` staged | CI `helios` job (`npm run check`) |
+| `helios/` client (`src/client`, browser `src/shared`) | `cd helios && npm run typecheck:client` (~28s); focused tests as above | client typecheck when `helios/` staged (kept — see exception) | CI `helios` job |
+| `helios/` tests | `cd helios && npm run test -- <file-or-pattern>` | not in hook | full `npm run test` (vitest, ~46s) — **CI/heavy-final-only** |
+| `helios/` prod bundle / assets | server+client typecheck + smoke while iterating | smoke checks the already-built SPA shell | `NODE_OPTIONS=--max-old-space-size=8192 npm run build` (~57s) — **CI/heavy-final-only** |
+| `ads/google` | `cd ads/google && npm run typecheck` (~6s; `npm install` ~8s) | typecheck when `ads/google/` staged | CI `ads-google` job |
+
+Focused vitest accepts a path or pattern, e.g.
+`npm run test -- src/server/metrics` or `npm run test -- timeBuckets`.
+
+### Interim CI-enforcement exception (broken-master window)
+
+GitHub branch protection / required status checks are **unavailable** on
+this private repo under the current plan: the API returns `403 "Upgrade
+to GitHub Pro or make this repository public"`. CI (`.github/workflows/ci.yml`)
+still runs on every push to `master` and on PRs and must be kept green,
+but it is **advisory, not a blocking merge/push gate**. Agents push
+straight to `master` and then `self-deploy-helios`, which does not wait
+for CI; so the **pre-commit hook is the only enforcement that runs before
+code reaches `master` and is deployed**.
+
+Consequences (until branch protection is available, the repo is public,
+or `self-deploy-helios` learns to wait for CI-green on the pushed commit):
+
+- **Do not weaken any pre-commit gate** without an equal-or-stronger
+  replacement — the two-gate "CI backstops a light hook" model does not
+  fully hold here, so the hook intentionally keeps the ~28s client
+  typecheck rather than punting it to non-blocking CI.
+- After pushing, **confirm the post-push CI run is green** for your
+  commit and record it (run URL/SHA) in your Agent Gate Record; a red
+  `master` is a stop-everything master-repair task (canon:
+  rules/WORKFLOW.md).
+
+Closing this window for real (branch protection or a CI-green-gated
+deploy) is tracked as follow-up under
+[virusdave/top-level#26](https://github.com/virusdave/top-level/issues/26)
+/ [#23](https://github.com/virusdave/top-level/issues/23).
 
 ## Commit & push when done
 

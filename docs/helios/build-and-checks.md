@@ -13,9 +13,15 @@ cd helios
 npm run check
 ```
 
-`check` is the decided "master always green" mechanism for now (design
-decision 5; a hosted-CI backstop + branch protection is deferred Phase 4,
-`virusdave/top-level#23`). It runs, in order:
+`check` is what the CI `helios` job runs (`.github/workflows/ci.yml`)
+on every push to `master` and on PRs, and what you run locally before a
+`helios/`-touching push. The hosted-CI backstop has since landed; branch
+protection / a *blocking* required status is still unavailable on this
+repo (GitHub free-plan 403), so CI is advisory and the pre-commit hook
+remains the only pre-master enforcement — see the AGENTS.md "Dev-loop
+checks" / "Interim CI-enforcement exception" sections for the full
+two-gate picture and the focused/targeted local commands. `check` runs,
+in order:
 
 | Step | Script | What it does |
 | --- | --- | --- |

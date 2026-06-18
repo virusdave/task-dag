@@ -55,7 +55,8 @@
 # What is scanned: the git INDEX (`git grep --cached`), i.e. exactly the
 # content a commit would record — not stray unstaged working-tree edits.
 # After a fresh checkout (CI) the index equals HEAD, so the same script
-# doubles as the required-status CI gate (automation#49 Phase D.8) and
+# doubles as the CI scanners-job gate (automation#49 Phase D.8;
+# advisory — branch protection unavailable, see AGENTS.md) and
 # the pre-commit gate (Phase D.12).
 #
 # Scope is restricted to git-tracked, first-party files; node_modules,

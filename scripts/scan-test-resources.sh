@@ -34,7 +34,8 @@
 # What is scanned: the git INDEX (`git grep --cached`), i.e. exactly the
 # content a commit would record — not stray unstaged working-tree edits.
 # After a fresh checkout (CI) the index equals HEAD, so the same script
-# doubles as a required-status CI gate. Scope is git-tracked, first-party
+# doubles as the CI scanners-job gate (advisory; branch protection
+# unavailable on this repo — see AGENTS.md). Scope is git-tracked, first-party
 # test files only (`*.test.*`, `*.spec.*`, and `**/__tests__/**`);
 # node_modules / dist / build output are never tracked so never scanned.
 # Run from anywhere in the repo. All three classes are reported even
