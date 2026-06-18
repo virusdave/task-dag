@@ -1,8 +1,7 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 
 import {
-  buildHeliosModulePath,
   CatalogMaintenanceMovePackageResponseSchema,
   CatalogMaintenanceSurveyResponseSchema,
   HELIOS_PENDING_PURCHASE_SITE_DEALERS,
@@ -98,8 +97,17 @@ export function useMaintenanceSurvey(): UseMaintenanceSurveyResult {
         const survey = CatalogMaintenanceSurveyResponseSchema.parse(payload)
         setState({ loading: false, refreshing: false, survey, error: null })
       } catch (error) {
-        const message = error instanceof Error ? error.message : 'Failed to load Images & Barcodes survey.'
-        setState((prev) => ({ ...prev, loading: false, refreshing: false, error: message }))
+        // Report the raw failure for debugging; show floor staff calm copy.
+        reportClientError({
+          context: 'catalog.maintenance.survey-load',
+          message: error instanceof Error ? error.message : String(error),
+        })
+        setState((prev) => ({
+          ...prev,
+          loading: false,
+          refreshing: false,
+          error: 'Couldn’t load Photos & Barcodes right now. Dave has been notified. Tap "Reload list" to try again.',
+        }))
       }
     },
     [navigate],
@@ -130,14 +138,23 @@ export function useMaintenanceSurvey(): UseMaintenanceSurveyResult {
       if (jobs.length === 0) {
         setFeedback({
           kind: 'ok',
-          message: 'Fix-cache requested, but no new jobs were enqueued (one may already be running).',
+          message: 'Already checking for new stock. This list will update when it finishes.',
         })
       } else {
         setFeedback(null)
         setRepairJobs(jobs)
       }
     } catch (error) {
-      setFeedback({ kind: 'err', message: error instanceof Error ? error.message : 'Fix cache failed.' })
+      // Don't surface the raw backend error/HTTP status to floor staff.
+      // Report it for debugging and show a calm, actionable message.
+      reportClientError({
+        context: 'catalog.maintenance.check-for-new-stock',
+        message: error instanceof Error ? error.message : String(error),
+      })
+      setFeedback({
+        kind: 'err',
+        message: 'Couldn’t check for new stock right now. Dave has been notified. Try again in a moment.',
+      })
     } finally {
       setRepairBusy(false)
     }
@@ -165,22 +182,22 @@ function buildRepairJobRefs(payload: CatalogMaintenanceCacheRepairResponse): Rep
   if (payload.stockRefreshJobId !== null) {
     refs.push({
       jobId: payload.stockRefreshJobId,
-      label: 'Stock refresh',
-      description: 'Marks just-received SKUs as in-stock from Sweed.',
+      label: 'Checking what is in stock',
+      description: 'Finds the newest items received at your stores.',
     })
   }
   if (payload.discoverOrphanGroupsJobId !== null) {
     refs.push({
       jobId: payload.discoverOrphanGroupsJobId,
-      label: 'Discover new groups',
-      description: 'Adds newly in-stock product groups to the catalog mirror the pricing picker reads.',
+      label: 'Adding new items',
+      description: 'Adds newly received items so they can be worked on here.',
     })
   }
   if (payload.fullSummaryJobId !== null) {
     refs.push({
       jobId: payload.fullSummaryJobId,
-      label: 'Catalog summary refresh',
-      description: 'Rebuilds cached catalog rollups so this page and dashboards agree.',
+      label: 'Updating this list',
+      description: 'Refreshes the photo and barcode tasks below.',
     })
   }
   return refs
@@ -285,26 +302,26 @@ export function CatalogMaintenancePage() {
       <div className="page-header">
         <div>
           <p className="eyebrow">
-            Catalog Module ·{' '}
-            <Link to={buildMaintenanceIndexPath()}>Images &amp; Barcodes</Link>
+            Catalog ·{' '}
+            <Link to={buildMaintenanceIndexPath()}>Photos &amp; Barcodes</Link>
           </p>
           <h2>
             {siteRow?.siteLabel ?? siteKey}{' '}
             {siteRow ? (
               <Pill tone={siteRow.totalIssueCount === 0 ? 'muted' : 'warning'}>
-                {siteRow.totalIssueCount} issue{siteRow.totalIssueCount === 1 ? '' : 's'}
+                {siteRow.totalIssueCount} to fix
               </Pill>
             ) : null}
           </h2>
           <p className="subtle-copy">
-            In-stock SKUs at {siteRow?.siteLabel ?? 'this site'} whose Sweed product group has no image,
-            or whose package barcode is missing. Tap a card to upload or capture a photo and Helios will
-            attach it to the group for you.
+            In-stock items at {siteRow?.siteLabel ?? 'this store'} that need a menu photo or a package
+            barcode. Tap an item to take or pick a photo, and it will be added for you. Just received
+            something new? Tap "Check for new or updated stock".
           </p>
         </div>
         <div className="inline-row wrap-row catalog-maintenance-meta">
           {state.survey?.meta.generatedAt ? (
-            <Pill tone="muted">scanned {formatRelativeTime(state.survey.meta.generatedAt)}</Pill>
+            <Pill tone="muted">Last checked {formatRelativeTime(state.survey.meta.generatedAt)}</Pill>
           ) : null}
           {activeBrand ? (
             <Pill tone="warning">
@@ -321,11 +338,19 @@ export function CatalogMaintenancePage() {
           ) : null}
           <button
             type="button"
+            className="primary-button"
+            disabled={repairBusy}
+            onClick={() => void handleRepairCache()}
+          >
+            {repairBusy ? 'Checking…' : 'Check for new or updated stock'}
+          </button>
+          <button
+            type="button"
             className="ghost-button"
             disabled={state.refreshing}
             onClick={() => void fetchSurvey(true)}
           >
-            {state.refreshing ? 'Refreshing…' : 'Refresh survey'}
+            {state.refreshing ? 'Reloading…' : 'Reload list'}
           </button>
         </div>
       </div>
@@ -355,6 +380,15 @@ export function CatalogMaintenancePage() {
         <CacheRepairProgressPanel jobs={repairJobs} onDismiss={clearRepairJobs} onRescan={() => void fetchSurvey(true)} />
       ) : null}
 
+      {!repairJobs && siteRow && siteRow.pendingImportCount > 0 ? (
+        <PendingImportPanel
+          count={siteRow.pendingImportCount}
+          siteLabel={siteRow.siteLabel}
+          busy={repairBusy}
+          onCheck={() => void handleRepairCache()}
+        />
+      ) : null}
+
       {filteredSurvey?.fatal ? (
         <FatalBanner banner={filteredSurvey.fatal} busy={repairBusy} onRepair={() => void handleRepairCache()} />
       ) : null}
@@ -374,15 +408,54 @@ export function CatalogMaintenancePage() {
 
       {filteredSurvey && filteredSurvey.sites.length === 0 && state.survey ? (
         <p className="subtle-copy">
-          No site matches <code>{siteKey}</code> in the latest survey.{' '}
-          <Link to={buildMaintenanceIndexPath()}>Back to sites</Link>.
+          We couldn’t find a store called <code>{siteKey}</code>.{' '}
+          <Link to={buildMaintenanceIndexPath()}>Back to stores</Link>.
         </p>
       ) : null}
 
-      {filteredSurvey && filteredSurvey.sites.every((s) => s.totalIssueCount === 0) ? (
-        <p className="subtle-copy">No issues to address for the active filter.</p>
+      {filteredSurvey &&
+      filteredSurvey.sites.every((s) => s.totalIssueCount === 0) &&
+      !(siteRow && siteRow.pendingImportCount > 0) ? (
+        <p className="subtle-copy">
+          {activeBrand
+            ? `No photo or barcode tasks for ${activeBrand} right now. If you just received it, tap "Check for new or updated stock".`
+            : `${siteRow?.siteLabel ?? 'This store'} is all set. No photos or barcodes need attention right now.`}
+        </p>
       ) : null}
     </section>
+  )
+}
+
+/**
+ * Friendly "still importing" panel shown when a store has just-received
+ * products that are not yet linked to a catalog group (so they can't be
+ * rendered as photo/barcode cards yet). Replaces the old scary red
+ * "Cache is incomplete" banner that listed raw product ids. Copy is
+ * written for nontechnical floor staff: no implementation jargon, no
+ * em-dashes, and the single obvious next action front and center.
+ */
+function PendingImportPanel(props: {
+  count: number
+  siteLabel: string
+  busy: boolean
+  onCheck: () => void
+}) {
+  const { count, siteLabel, busy, onCheck } = props
+  return (
+    <div className="catalog-maintenance-toast" role="status" style={{ alignItems: 'flex-start' }}>
+      <div>
+        <strong>
+          {count} new item{count === 1 ? '' : 's'} at {siteLabel} {count === 1 ? 'is' : 'are'} being added
+        </strong>
+        <p className="subtle-copy" style={{ margin: '0.25rem 0 0.5rem' }}>
+          Just-received items can take a minute to show up. Photo and barcode tasks for them will appear
+          here automatically once they finish loading.
+        </p>
+        <button type="button" className="primary-button" disabled={busy} onClick={onCheck}>
+          {busy ? 'Checking…' : 'Check for new or updated stock'}
+        </button>
+      </div>
+    </div>
   )
 }
 
@@ -456,31 +529,21 @@ interface FatalBannerProps {
 
 function FatalBanner({ banner, busy, onRepair }: FatalBannerProps) {
   return (
-    <div className="catalog-maintenance-fatal-banner catalog-maintenance-toast catalog-maintenance-toast-err">
+    <div className="catalog-maintenance-toast" role="status" style={{ alignItems: 'flex-start' }}>
       <div>
-        <strong>⚠ {banner.title}</strong>
+        <strong>{banner.title}</strong>
         <p style={{ margin: '0.25rem 0' }}>{banner.message}</p>
         <ul style={{ margin: '0 0 0.5rem 1.25rem' }}>
           {banner.reasons.map((reason) => (
-            <li key={reason.code}>
-              <strong>{reason.count}</strong> · {reason.message}
-              {reason.sampleIds.length > 0 ? (
-                <span className="subtle-copy"> (sample: {reason.sampleIds.join(', ')})</span>
-              ) : null}
+            <li key={reason.code} className="subtle-copy">
+              {reason.message}
             </li>
           ))}
         </ul>
         {banner.canRepair ? (
-          <>
-            <button type="button" className="primary-button" onClick={onRepair} disabled={busy}>
-              {busy ? 'Enqueuing repair jobs…' : '🛠 Repair image/barcode cache'}
-            </button>
-            <p className="subtle-copy" style={{ margin: '0.5rem 0 0' }}>
-              Rebuilds the METRC image/barcode cache; this also queues a stock
-              refresh as part of the repair. Need only inventory counts?{' '}
-              <Link to="/catalog/inventory/stock-refresh">→ Stock refresh</Link>
-            </p>
-          </>
+          <button type="button" className="primary-button" onClick={onRepair} disabled={busy}>
+            {busy ? 'Checking…' : 'Check for new or updated stock'}
+          </button>
         ) : null}
       </div>
     </div>
@@ -499,7 +562,7 @@ interface CacheRepairProgressPanelProps {
   onRescan: () => void
 }
 
-function CacheRepairProgressPanel({ jobs, onDismiss, onRescan }: CacheRepairProgressPanelProps) {
+export function CacheRepairProgressPanel({ jobs, onDismiss, onRescan }: CacheRepairProgressPanelProps) {
   const [statuses, setStatuses] = useState<Record<number, JobStatusResponse | null>>({})
   const jobsKey = jobs.map((job) => job.jobId).join(',')
 
@@ -558,13 +621,13 @@ function CacheRepairProgressPanel({ jobs, onDismiss, onRescan }: CacheRepairProg
     <article className="detail-panel job-progress-panel" style={{ marginBottom: '1rem' }}>
       <div className="page-header" style={{ marginBottom: '0.75rem' }}>
         <div>
-          <h3 style={{ margin: 0 }}>Fix-cache progress</h3>
+          <h3 style={{ margin: 0 }}>Checking for new or updated stock</h3>
           <p className="subtle-copy">
             {allSucceeded
-              ? 'Done — newly received SKUs are now in the catalog mirror.'
+              ? 'Done. Your newest items are ready below.'
               : anyFailed
-                ? 'One of the workers failed. Open it for the error, then retry Fix cache.'
-                : 'Workers run top-to-bottom; this panel refreshes automatically.'}
+                ? 'Something went wrong while checking. Dave has been notified. Try again in a moment.'
+                : 'This can take a minute. The page updates automatically.'}
           </p>
         </div>
         <div className="inline-row wrap-row">
@@ -584,13 +647,10 @@ function CacheRepairProgressPanel({ jobs, onDismiss, onRescan }: CacheRepairProg
 
       {allSucceeded ? (
         <div className="cache-repair-next" style={{ marginTop: '0.9rem' }}>
-          <strong>Next:</strong> the brand should now appear in the pricing brand picker.
+          <strong>Your newest items are ready.</strong> Any that need a photo or barcode now appear below.
           <div className="inline-row wrap-row module-card-links" style={{ marginTop: '0.5rem' }}>
-            <Link className="primary-button" to={buildHeliosModulePath('pricing', 'generate')}>
-              Start a pricing run →
-            </Link>
-            <button type="button" className="ghost-button" onClick={onRescan}>
-              Re-scan this page
+            <button type="button" className="primary-button" onClick={onRescan}>
+              Show my items
             </button>
           </div>
         </div>
@@ -608,21 +668,35 @@ function CacheRepairJobRow({ job, status }: { job: RepairJobRef; status: JobStat
     <div className="cache-repair-job-row">
       <div className="inline-row wrap-row" style={{ justifyContent: 'space-between' }}>
         <div>
-          <Link to={`/jobs/${job.jobId}`}>
-            #{job.jobId} · {job.label}
-          </Link>
+          <strong>{job.label}</strong>
           <p className="subtle-copy" style={{ margin: '0.1rem 0 0' }}>
-            {status?.progress?.message ?? job.description}
+            {job.description}
           </p>
         </div>
-        <Pill tone={repairStatusTone(jobStatus)}>{jobStatus.replaceAll('_', ' ')}</Pill>
+        <Pill tone={repairStatusTone(jobStatus)}>{friendlyRepairStatus(jobStatus)}</Pill>
       </div>
       <div className="job-progress-track" aria-hidden="true" style={{ marginTop: '0.4rem' }}>
         <div className={`job-progress-fill${failed ? ' failed' : ''}`} style={{ width: `${percent}%` }} />
       </div>
-      {failed && status?.job.lastError ? <p className="error-text">{status.job.lastError}</p> : null}
+      {failed ? <p className="error-text">Dave has been notified. You can keep working on the other items.</p> : null}
     </div>
   )
+}
+
+function friendlyRepairStatus(status: JobStatusResponse['job']['status']): string {
+  switch (status) {
+    case 'succeeded':
+      return 'done'
+    case 'failed':
+    case 'dead_letter':
+      return 'needs help'
+    case 'running':
+      return 'working'
+    case 'queued':
+      return 'waiting'
+    default:
+      return 'working'
+  }
 }
 
 function repairStatusTone(status: JobStatusResponse['job']['status']): 'danger' | 'muted' | 'success' | 'warning' {
@@ -675,7 +749,7 @@ function SiteSection({ site, onComplete, onError }: SiteSectionProps) {
         <h3>
           {site.siteLabel}{' '}
           <Pill tone={site.totalIssueCount === 0 ? 'muted' : 'warning'}>
-            {site.totalIssueCount} issue{site.totalIssueCount === 1 ? '' : 's'}
+            {site.totalIssueCount} to fix
           </Pill>
         </h3>
       </header>
@@ -709,7 +783,7 @@ function SectionBlock({ section, onComplete, onError }: SectionBlockProps) {
       <header className="catalog-maintenance-section-head">
         <h4>{section.label}</h4>
         <Pill tone={section.issueCount === 0 ? 'muted' : 'warning'}>
-          {section.issueCount} candidate{section.issueCount === 1 ? '' : 's'}
+          {section.issueCount} item{section.issueCount === 1 ? '' : 's'}
         </Pill>
       </header>
       {section.groups.length === 0 ? (
@@ -773,6 +847,9 @@ function MaintenanceCard(props: CardProps) {
   // on successful upload, on a fresh upload, or when the operator
   // picks a new file.
   const [failedStagedRef, setFailedStagedRef] = useState<string | null>(null)
+  // Confirm-before-navigate prompt for opening the public storefront menu.
+  // Replaces a window.confirm (canon: no browser confirm/alert dialogs).
+  const [storefrontPromptOpen, setStorefrontPromptOpen] = useState(false)
   const inputRef = useRef<HTMLInputElement | null>(null)
 
   useEffect(() => {
@@ -855,7 +932,7 @@ function MaintenanceCard(props: CardProps) {
       // cards were never blocked).
       enqueued = true
       setIsPolling(true)
-      setCardStatus({ kind: 'busy', message: 'Saving to Sweed…' })
+      setCardStatus({ kind: 'busy', message: 'Saving photo…' })
       setIsStaging(false)
 
       pollUploadJob({
@@ -865,9 +942,9 @@ function MaintenanceCard(props: CardProps) {
         group,
         onPhase: (_message) => {
           // Operator doesn't need step-by-step worker plumbing on a
-          // 4-inch screen; "Saving to Sweed…" already tells them
+          // 4-inch screen; "Saving photo…" already tells them
           // what's happening.
-          setCardStatus({ kind: 'busy', message: 'Saving to Sweed…' })
+          setCardStatus({ kind: 'busy', message: 'Saving photo…' })
         },
         onSuccess: async () => {
           const message = `✓ Photo saved to ${displayGroupName(group)} (${group.siteLabel}).`
@@ -923,7 +1000,7 @@ function MaintenanceCard(props: CardProps) {
     const stagedRef = failedStagedRef
     setIsStaging(true)
     setFailedStagedRef(null)
-    setCardStatus({ kind: 'busy', message: 'Re-trying upload…' })
+    setCardStatus({ kind: 'busy', message: 'Trying again…' })
     let enqueued = false
     try {
       const response = await fetch(
@@ -946,7 +1023,7 @@ function MaintenanceCard(props: CardProps) {
       }
       enqueued = true
       setIsPolling(true)
-      setCardStatus({ kind: 'busy', message: 'Saving to Sweed…' })
+      setCardStatus({ kind: 'busy', message: 'Saving photo…' })
       setIsStaging(false)
 
       pollUploadJob({
@@ -954,7 +1031,7 @@ function MaintenanceCard(props: CardProps) {
         jobId: payload.jobId,
         stagedRef: payload.stagedRef,
         group,
-        onPhase: () => setCardStatus({ kind: 'busy', message: 'Saving to Sweed…' }),
+        onPhase: () => setCardStatus({ kind: 'busy', message: 'Saving photo…' }),
         onSuccess: async () => {
           const message = `✓ Photo saved to ${displayGroupName(group)} (${group.siteLabel}).`
           setCardStatus({ kind: 'ok', message })
@@ -1009,12 +1086,10 @@ function MaintenanceCard(props: CardProps) {
   // parallel.
   const cardBusy = isStaging || isPolling
   const ctaLabel = cardBusy
-    ? mode === 'group'
-      ? 'Uploading group photo…'
-      : 'Uploading variant photo…'
+    ? 'Saving photo…'
     : mode === 'group'
-      ? 'Upload group photo'
-      : `Upload variant photo (${selectedVariantIds.length}/${group.variants.length})`
+      ? 'Use this photo'
+      : `Use this photo (${selectedVariantIds.length}/${group.variants.length})`
 
   const cardPreviewSrc =
     (mode === 'group' ? optimisticImageUrl : null) ?? localPreviewUrl ?? group.groupPreviewImageUrl
@@ -1022,7 +1097,7 @@ function MaintenanceCard(props: CardProps) {
   const storefrontTarget = buildStorefrontGroupUrl(group)
   const cardTopClickable = storefrontTarget !== null
   const cardTopAriaLabel = cardTopClickable
-    ? `Open ${displayGroupName(group)} on the ${group.siteLabel} storefront in a new tab`
+    ? `Open the public menu for ${displayGroupName(group)} at ${group.siteLabel}`
     : undefined
 
   return (
@@ -1034,12 +1109,12 @@ function MaintenanceCard(props: CardProps) {
               role: 'button',
               tabIndex: 0,
               'aria-label': cardTopAriaLabel,
-              title: 'Open on storefront',
-              onClick: () => offerOpenStorefront(group),
+              title: 'Open public menu',
+              onClick: () => setStorefrontPromptOpen(true),
               onKeyDown: (event: KeyboardEvent<HTMLDivElement>) => {
                 if (event.key === 'Enter' || event.key === ' ') {
                   event.preventDefault()
-                  offerOpenStorefront(group)
+                  setStorefrontPromptOpen(true)
                 }
               },
             }
@@ -1049,7 +1124,7 @@ function MaintenanceCard(props: CardProps) {
           {cardPreviewSrc ? (
             <img src={cardPreviewSrc} alt={`${displayGroupName(group)} preview`} loading="lazy" />
           ) : (
-            <div className="catalog-maintenance-card-preview-empty">No image</div>
+            <div className="catalog-maintenance-card-preview-empty">Needs photo</div>
           )}
         </div>
         <div className="catalog-maintenance-card-meta">
@@ -1057,7 +1132,7 @@ function MaintenanceCard(props: CardProps) {
             <strong>{displayGroupName(group)}</strong>
             {group.brandName ? <span className="subtle-copy">{group.brandName}</span> : null}
             <Pill tone="muted">{group.siteLabel}</Pill>
-            {(group.needsReanalysis || syncingReanalysis) ? <Pill tone="muted">syncing…</Pill> : null}
+            {(group.needsReanalysis || syncingReanalysis) ? <Pill tone="muted">updating…</Pill> : null}
           </div>
           <div className="catalog-maintenance-card-tags">
             {group.categoryName ? <Pill tone="muted">{group.categoryName}</Pill> : null}
@@ -1088,7 +1163,7 @@ function MaintenanceCard(props: CardProps) {
             </div>
           ) : (
             <div className="catalog-maintenance-variants-head">
-              <span className="subtle-copy">{mode === 'barcode' ? 'Affected variants:' : 'In-stock variants:'}</span>
+              <span className="subtle-copy">{mode === 'barcode' ? 'Needs barcode:' : 'In stock at this store:'}</span>
             </div>
           )}
           <ul className="catalog-maintenance-variant-list">
@@ -1136,7 +1211,7 @@ function MaintenanceCard(props: CardProps) {
             onClick={() => inputRef.current?.click()}
             disabled={cardBusy}
           >
-            {file ? 'Replace photo' : 'Pick / take a photo'}
+            {file ? 'Replace photo' : 'Take photo'}
           </button>
           <button
             type="button"
@@ -1185,7 +1260,7 @@ function MaintenanceCard(props: CardProps) {
                 onClick={() => void handleRetry()}
                 disabled={cardBusy}
               >
-                Retry
+                Try saving again
               </button>
             ) : null}
             {cardStatus.kind !== 'busy' ? (
@@ -1203,7 +1278,75 @@ function MaintenanceCard(props: CardProps) {
           </span>
         </div>
       ) : null}
+
+      {storefrontPromptOpen && storefrontTarget ? (
+        <OpenPublicMenuModal
+          group={group}
+          target={storefrontTarget}
+          onCancel={() => setStorefrontPromptOpen(false)}
+          onConfirm={() => {
+            window.open(storefrontTarget.url, '_blank', 'noopener,noreferrer')
+            setStorefrontPromptOpen(false)
+          }}
+        />
+      ) : null}
     </article>
+  )
+}
+
+/**
+ * Confirm-before-navigate modal for opening the public storefront menu in
+ * a new tab. Replaces a window.confirm so the prompt is on-brand, mobile
+ * friendly, and canon-compliant (no native browser dialogs).
+ */
+function OpenPublicMenuModal(props: {
+  group: CatalogMaintenanceSiteGroup
+  target: { url: string; kind: 'brand+category' | 'brand' | 'pdp' }
+  onCancel: () => void
+  onConfirm: () => void
+}) {
+  const { group, target, onCancel, onConfirm } = props
+  const cancelRef = useRef<HTMLButtonElement | null>(null)
+  // Move focus into the modal (onto the safe default action) and close on
+  // Escape, so keyboard/screen-reader users aren't left behind the overlay.
+  useEffect(() => {
+    cancelRef.current?.focus()
+    const onKey = (event: globalThis.KeyboardEvent) => {
+      if (event.key === 'Escape') onCancel()
+    }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [onCancel])
+  const brandLabel = group.brandName ?? 'this brand'
+  const categoryLabel = group.categoryName ?? 'this category'
+  const message =
+    target.kind === 'brand+category'
+      ? `Open ${brandLabel} in ${categoryLabel} on the ${group.siteLabel} public menu?`
+      : target.kind === 'brand'
+        ? `Open all ${brandLabel} products on the ${group.siteLabel} public menu?`
+        : `Open ${displayGroupName(group)} on the ${group.siteLabel} public menu?`
+  return (
+    <div
+      className="wh-modal-overlay"
+      role="presentation"
+      onClick={(event) => {
+        if (event.target === event.currentTarget) onCancel()
+      }}
+    >
+      <div className="wh-modal" role="dialog" aria-modal="true" aria-label="Open public menu">
+        <h3>Open public menu</h3>
+        <p>{message}</p>
+        <p className="subtle-copy">It opens in a new tab so you don’t lose your place here.</p>
+        <div className="wh-modal-actions">
+          <button type="button" className="ghost-button" ref={cancelRef} onClick={onCancel}>
+            Cancel
+          </button>
+          <button type="button" className="primary-button" onClick={onConfirm}>
+            Open menu
+          </button>
+        </div>
+      </div>
+    </div>
   )
 }
 
@@ -1311,7 +1454,7 @@ function VariantRow(props: VariantRowProps) {
         message: raw,
         detail: { productId: variant.productId, sweedGroupId },
       })
-      onBarcodeError('Couldn’t save the barcode right now. Dave has been paged — try again in a moment.')
+      onBarcodeError('Couldn’t save the barcode right now. Dave has been notified. Try again in a moment.')
     } finally {
       setSavingBarcode(false)
     }
@@ -1323,7 +1466,7 @@ function VariantRow(props: VariantRowProps) {
       const value = await decodeBarcodeFromImageFile(file)
       if (value === null || value.length === 0) {
         // Actionable: operator can re-aim and retake the photo.
-        onBarcodeError('No barcode detected — hold steady, fill the frame, and try again.')
+        onBarcodeError('No barcode detected. Hold steady, fill the frame, and try again.')
         return
       }
       setDraftBarcode(value)
@@ -1341,7 +1484,7 @@ function VariantRow(props: VariantRowProps) {
         message: raw,
         detail: { productId: variant.productId, sweedGroupId },
       })
-      onBarcodeError('Couldn’t read the barcode right now. Dave has been paged — try again in a moment.')
+      onBarcodeError('Couldn’t read the barcode right now. Dave has been notified. Try again in a moment.')
     } finally {
       setScanningBarcode(false)
       if (barcodeFileInputRef.current) barcodeFileInputRef.current.value = ''
@@ -1370,13 +1513,13 @@ function VariantRow(props: VariantRowProps) {
           <strong>{variantLabel(variant)}</strong>
           <span className="subtle-copy">
             {optimisticPreviewUrl
-              ? 'image just uploaded'
+              ? 'photo just added'
               : variant.variantSpecificImageCount > 0
-                ? `${variant.variantSpecificImageCount} own image${variant.variantSpecificImageCount === 1 ? '' : 's'}`
-                : 'no variant-specific image'}
-            {variant.quantity !== null ? ` · qty ${formatQty(variant.quantity)}` : null}
+                ? `${variant.variantSpecificImageCount} item photo${variant.variantSpecificImageCount === 1 ? '' : 's'}`
+                : 'no item photo'}
+            {variant.quantity !== null ? ` · in stock: ${formatQty(variant.quantity)}` : null}
           </span>
-          {syncingReanalysis ? <span className="subtle-copy">· syncing…</span> : null}
+          {syncingReanalysis ? <span className="subtle-copy">· updating…</span> : null}
         </span>
       </div>
 
@@ -1490,7 +1633,14 @@ function PackagesPanel(props: {
       setPendingLot(null)
       await onMoved(describeMoveOutcome(parsed, variant, pendingLot))
     } catch (error) {
-      onError(error instanceof Error ? error.message : String(error))
+      // Route returns internal HttpError messages (dealer ids, locations,
+      // RPC detail). Keep those out of the operator's view.
+      reportClientError({
+        context: 'catalog.maintenance.move-package-to-inspection',
+        message: error instanceof Error ? error.message : String(error),
+        detail: { productId: variant.productId },
+      })
+      onError('Couldn’t move this package right now. Dave has been notified. Try again in a moment.')
     } finally {
       setBusy(false)
     }
@@ -1510,12 +1660,12 @@ function PackagesPanel(props: {
       <ul className="catalog-maintenance-package-list">
         {lots.map((lot) => (
           <li key={lot.itemId} className="catalog-maintenance-package-row">
-            <code className="catalog-maintenance-metrc-tag" title={lot.externalTrackCode ?? '(no METRC tag)'}>
+            <code className="catalog-maintenance-metrc-tag" title={lot.externalTrackCode ?? '(no package code)'}>
               {lot.externalTrackCode ? renderMetrcTagSuffix(lot.externalTrackCode) : '—'}
             </code>
             <span className="subtle-copy">
-              {lot.stockLocationName ?? `loc #${lot.stockLocationId ?? '?'}`}
-              {lot.availableQty !== null ? ` · qty ${formatQty(lot.availableQty)}` : ''}
+              {lot.stockLocationName ?? 'current location'}
+              {lot.availableQty !== null ? ` · in stock: ${formatQty(lot.availableQty)}` : ''}
               {lot.isTradeSample ? ' · trade sample' : ''}
               {!lot.isForSale ? ' · NOT FOR SALE' : ''}
             </span>
@@ -1536,7 +1686,7 @@ function PackagesPanel(props: {
               title={
                 dealer
                   ? `Move this package into "Hold for Dave inspection" at ${dealer.siteLabel}.`
-                  : `Unknown site '${siteKey}' — cannot resolve dealer id.`
+                  : 'This store is not set up for moving packages yet.'
               }
               onClick={() => setPendingLot(lot)}
             >
@@ -1568,14 +1718,14 @@ function describeMoveOutcome(
   const target = response.targetLocationName
   const movedCount = response.movedLots.length
   if (response.outcome === 'moved-target-lot') {
-    return `Moved ${label} → ${target} (${movedCount} lot${movedCount === 1 ? '' : 's'}).`
+    return `Moved ${label} to ${target} (${movedCount} package${movedCount === 1 ? '' : 's'}).`
   }
   if (response.outcome === 'moved-fallback-all-lots') {
-    return `Specific package not found in Sweed; moved ALL remaining lots of ${variantLabel(
+    return `That exact package was no longer available, so all remaining stock of ${variantLabel(
       variant,
-    )} → ${target} (${movedCount} lot${movedCount === 1 ? '' : 's'}).`
+    )} was moved to ${target} (${movedCount} package${movedCount === 1 ? '' : 's'}).`
   }
-  return `Nothing to move for ${label} — Sweed already shows zero stock. Refreshed cache.`
+  return `Nothing to move for ${label}. It is already out of stock.`
 }
 
 /**
@@ -1630,7 +1780,7 @@ function ShelfControl(props: {
           message: raw,
           detail: { itemId, code },
         })
-        onError('Couldn’t set the shelf right now. Dave has been paged — try again in a moment.')
+        onError('Couldn’t set the shelf right now. Dave has been notified. Try again in a moment.')
         return
       } finally {
         inFlight.current = false
@@ -1646,11 +1796,11 @@ function ShelfControl(props: {
             message: outcome.error,
             detail: { itemId, code },
           })
-          onError('Couldn’t set the shelf right now. Dave has been paged — try again in a moment.')
+          onError('Couldn’t set the shelf right now. Dave has been notified. Try again in a moment.')
         } else if (outcome.status >= 500) {
           // Real write failure — already paged Dave server-side; spare the
           // operator the raw Sweed error.
-          onError('Couldn’t set the shelf right now. Dave has been paged — try again in a moment.')
+          onError('Couldn’t set the shelf right now. Dave has been notified. Try again in a moment.')
         } else {
           // User-correctable 4xx (bad code, package no longer FOR-SALE): show
           // the server's specific, actionable message as-is.
@@ -1666,7 +1816,7 @@ function ShelfControl(props: {
         // rather than show the operator a fake "(unknown)" shelf.
         const existing = conflicts[0]!.currentInternalTrackCode
         if (!existing) {
-          onError('Couldn’t set the shelf — the package’s current shelf is unclear. Please retry.')
+          onError('Couldn’t set the shelf. The package’s current shelf is unclear. Please retry.')
           return
         }
         setConflict({ existing, target: code })
@@ -1675,7 +1825,7 @@ function ShelfControl(props: {
       if (packages.length === 0) {
         // Defensive: the single-item path returns a 404 (→ !ok) when nothing
         // matches, so an empty success shouldn't happen — never crash on it.
-        onError(failures[0]?.reason ?? 'Couldn’t set the shelf — no package was updated.')
+        onError(failures[0]?.reason ?? 'Couldn’t set the shelf. No package was updated.')
         return
       }
       setConflict(null)
@@ -1821,30 +1971,49 @@ function ConfirmMoveToInspectionModal(props: {
   const { dealerLabel, variant, lot, busy, onCancel, onConfirm } = props
   const [typed, setTyped] = useState('')
   const armed = typed.trim().toUpperCase() === 'INSPECTION'
+  const inputId = useId()
+  // Close on Escape (unless a move is in flight).
+  useEffect(() => {
+    const onKey = (event: globalThis.KeyboardEvent) => {
+      if (event.key === 'Escape' && !busy) onCancel()
+    }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [busy, onCancel])
   return (
-    <div className="catalog-maintenance-modal-overlay" role="dialog" aria-modal="true">
-      <div className="catalog-maintenance-modal">
-        <h3>Move package to NOT FOR SALE — Hold for Dave inspection?</h3>
+    <div
+      className="wh-modal-overlay"
+      role="presentation"
+      onClick={(event) => {
+        if (event.target === event.currentTarget && !busy) onCancel()
+      }}
+    >
+      <div
+        className="wh-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Move this package to Hold for Dave inspection"
+      >
+        <h3>Move this package to Hold for Dave inspection?</h3>
         <p>
-          This will use Sweed's <code>store.inventory.item.transfer</code> to drain{' '}
-          <strong>{lot.availableQty !== null ? formatQty(lot.availableQty) : 'all qty'}</strong> of{' '}
+          This removes <strong>{lot.availableQty !== null ? formatQty(lot.availableQty) : 'all'}</strong> of{' '}
           <strong>{variantLabel(variant)}</strong> (package{' '}
           <code title={lot.externalTrackCode ?? lot.itemId}>
             {lot.externalTrackCode ?? lot.itemId}
           </code>
-          ) out of <strong>{lot.stockLocationName ?? `loc #${lot.stockLocationId ?? '?'}`}</strong>{' '}
-          at <strong>{dealerLabel}</strong> and into the dealer's
-          "NOT FOR SALE - Hold for Dave inspection" location.
+          ) from <strong>{lot.stockLocationName ?? 'its current location'}</strong>{' '}
+          at <strong>{dealerLabel}</strong>, takes it off the customer menu, and puts it in
+          the "Hold for Dave inspection" location.
         </p>
         <p>
-          If Sweed has already moved or consumed this package, every remaining lot of the
-          variant will be drained into Inspection instead so the variant stops appearing
-          on the store.
+          If this exact package is no longer available, all remaining stock of this item will
+          be moved to Hold for Dave inspection instead, so it stops showing on the store.
         </p>
-        <p>
+        <label htmlFor={inputId}>
           Type <code>INSPECTION</code> to confirm:
-        </p>
+        </label>
         <input
+          id={inputId}
           type="text"
           autoFocus
           autoComplete="off"
@@ -1853,8 +2022,8 @@ function ConfirmMoveToInspectionModal(props: {
           disabled={busy}
           onChange={(event) => setTyped(event.target.value)}
         />
-        <div className="catalog-maintenance-modal-actions">
-          <button type="button" onClick={onCancel} disabled={busy}>
+        <div className="wh-modal-actions">
+          <button type="button" className="ghost-button" onClick={onCancel} disabled={busy}>
             Cancel
           </button>
           <button
@@ -1882,15 +2051,15 @@ function MetrcTagsLine(props: { metrcTags?: string[] | null; cannabisCategory: b
     return (
       <span
         className="catalog-maintenance-metrc-line catalog-maintenance-metrc-line--fatal"
-        title="No METRC packages are cached for this variant. Use the page-level 'Fix cache' button to enqueue a high-priority refresh from the store-level stock items RPC."
+        title="Package details for this item are still loading. Tap 'Check for new or updated stock' to refresh."
       >
-        ⚠ METRC: missing — fix cache to repopulate
+        ⚠ Package details still loading
       </span>
     )
   }
   return (
     <span className="catalog-maintenance-metrc-line subtle-copy">
-      METRC{metrcTags.length > 1 ? ` (${metrcTags.length})` : ''}:{' '}
+      Package code{metrcTags.length > 1 ? ` (${metrcTags.length})` : ''}:{' '}
       {metrcTags.map((tag, index) => (
         <span key={`${tag}:${index}`}>
           {renderMetrcTagSuffix(tag)}
@@ -2239,29 +2408,6 @@ function toUrlSlug(value: string): string {
     .replace(/^-+|-+$/g, '')
 }
 
-/**
- * Click handler for the product card top region. Offers (does not silently
- * navigate) to open the Sweed storefront in a new tab. Uses
- * `window.confirm` for a reliable, mobile-friendly prompt that doesn't
- * require adding any extra UI state.
- */
-function offerOpenStorefront(group: CatalogMaintenanceSiteGroup): void {
-  const target = buildStorefrontGroupUrl(group)
-  if (!target) return
-  const groupLabel = displayGroupName(group)
-  const brandLabel = group.brandName ?? 'this brand'
-  const categoryLabel = group.categoryName ?? 'this category'
-  const message =
-    target.kind === 'brand+category'
-      ? `Open ${brandLabel} in ${categoryLabel} on the ${group.siteLabel} storefront in a new tab?`
-      : target.kind === 'brand'
-        ? `Open all ${brandLabel} products on the ${group.siteLabel} storefront in a new tab?`
-        : `Open ${groupLabel} on the ${group.siteLabel} storefront in a new tab?`
-  const confirmed = window.confirm(message)
-  if (!confirmed) return
-  window.open(target.url, '_blank', 'noopener,noreferrer')
-}
-
 function variantLabel(variant: CatalogMaintenanceSiteVariant): string {
   const parts: string[] = []
   if (variant.shortName) {
@@ -2279,15 +2425,18 @@ function variantLabel(variant: CatalogMaintenanceSiteVariant): string {
 
 function buildSummaryLine(group: CatalogMaintenanceSiteGroup, mode: CardMode): string {
   const parts: string[] = []
-  parts.push(`${group.variants.length} variant${group.variants.length === 1 ? '' : 's'} in stock at ${group.siteLabel}`)
-  parts.push(`${group.groupImageCount} group image${group.groupImageCount === 1 ? '' : 's'}`)
+  const n = group.variants.length
+  parts.push(`${n} item${n === 1 ? '' : 's'} in stock at ${group.siteLabel}`)
   if (mode !== 'barcode') {
+    parts.push(group.groupImageCount > 0 ? 'menu photo on file' : 'no menu photo')
     const variantsWithImages = group.variants.filter((variant) => variant.variantSpecificImageCount > 0).length
-    parts.push(`${variantsWithImages}/${group.variants.length} variants have own image`)
+    if (variantsWithImages > 0) {
+      parts.push(`${variantsWithImages}/${n} have their own photo`)
+    }
   }
   const totalQty = group.variants.reduce((acc, v) => acc + (v.quantity ?? 0), 0)
   if (totalQty > 0) {
-    parts.push(`total qty ${formatQty(totalQty)}`)
+    parts.push(`${formatQty(totalQty)} total in stock`)
   }
   return parts.join(' · ')
 }
@@ -2363,9 +2512,9 @@ function reportClientError(input: {
  * errors the operator can't actually fix from the phone (network blip,
  * Sweed token died mid-PUT, worker job dead-lettered, etc.). The raw
  * `rawMessage` is sent to the server (and logged to the browser
- * console) so engineers can debug; the operator just sees "Couldn't
- * save this photo right now — Dave has been paged. Tap Retry to try
- * again."
+ * console) so engineers can debug; the operator just sees a calm,
+ * actionable message like "Couldn't save this photo right now. Dave
+ * has been notified. Tap Try saving again."
  */
 function surfaceUnactionableUploadError(input: {
   context: string
@@ -2399,8 +2548,8 @@ function surfaceUnactionableUploadError(input: {
 
   const friendly =
     input.stagedRef !== null
-      ? 'Couldn’t save this photo right now. Dave has been paged. Tap Retry to try again.'
-      : 'Couldn’t upload this photo right now. Dave has been paged. Try again in a moment.'
+      ? 'Couldn’t save this photo right now. Dave has been notified. Tap "Try saving again".'
+      : 'Couldn’t upload this photo right now. Dave has been notified. Try again in a moment.'
   input.setCardStatus({ kind: 'err', message: friendly })
   input.onError(friendly)
 }
@@ -2496,21 +2645,21 @@ function formatUploadJobPhase(
     | null,
   jobId: number,
 ): string {
+  void jobId
   if (status === 'queued') {
-    return `Queued (job #${jobId}) — waiting for a Sweed session pool token…`
+    return 'Waiting for a connection…'
   }
   if (status === 'running' && progress) {
-    const stepFragment =
-      progress.phaseIndex != null && progress.phaseCount != null
-        ? `Step ${progress.phaseIndex}/${progress.phaseCount}: `
-        : ''
-    const messageFragment = progress.message ?? progress.phase ?? 'running'
-    return `${stepFragment}${messageFragment}`
+    const messageFragment = progress.message ?? progress.phase ?? 'Saving…'
+    return messageFragment
   }
   if (status === 'running') {
-    return `Running (job #${jobId})…`
+    return 'Saving…'
   }
-  return `Job #${jobId} ${status}.`
+  if (status === 'succeeded') {
+    return 'Saved.'
+  }
+  return 'Couldn’t finish. Dave has been notified.'
 }
 
 function delay(ms: number): Promise<void> {

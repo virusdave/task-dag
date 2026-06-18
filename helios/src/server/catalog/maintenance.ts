@@ -689,6 +689,18 @@ async function buildSurveyFromDb(): Promise<CatalogMaintenanceSurveyResponse> {
     }
   }
 
+  // Per-site count of just-received products not yet linked to a cached
+  // catalog group. These render as the friendly "still importing" panel
+  // rather than raw ids in an error banner. A product is "linked" iff it
+  // appears in some catalog group's product list (productIndex).
+  const pendingImportCountBySite = new Map<string, number>()
+  for (const [productId, sitesMap] of stockByProductId) {
+    if (productIndex.has(productId)) continue
+    for (const siteKey of sitesMap.keys()) {
+      pendingImportCountBySite.set(siteKey, (pendingImportCountBySite.get(siteKey) ?? 0) + 1)
+    }
+  }
+
   const matchedProductIds = new Set<number>()
   const sites: CatalogMaintenanceSurveySite[] = []
   const brandIssueCounts = new Map<string, number>()
@@ -787,14 +799,14 @@ async function buildSurveyFromDb(): Promise<CatalogMaintenanceSurveyResponse> {
     const sections: CatalogMaintenanceSurveySection[] = [
       {
         kind: 'missing-catalog-image',
-        label: 'Missing catalog image',
+        label: 'Needs photo',
         targetId: sectionAnchorId(site.siteKey, 'missing-catalog-image'),
         issueCount: missingCatalogImage.length,
         groups: missingCatalogImage,
       },
       {
         kind: 'missing-or-invalid-barcode',
-        label: 'Missing package barcode',
+        label: 'Needs barcode',
         targetId: sectionAnchorId(site.siteKey, 'missing-or-invalid-barcode'),
         issueCount: missingBarcode.length,
         groups: missingBarcode,
@@ -806,6 +818,7 @@ async function buildSurveyFromDb(): Promise<CatalogMaintenanceSurveyResponse> {
       siteLabel: site.siteLabel,
       targetId: siteAnchorId(site.siteKey),
       totalIssueCount: sections.reduce((acc, s) => acc + s.issueCount, 0),
+      pendingImportCount: pendingImportCountBySite.get(site.siteKey) ?? 0,
       sections,
     })
   }
@@ -818,13 +831,18 @@ async function buildSurveyFromDb(): Promise<CatalogMaintenanceSurveyResponse> {
     .map(([brandName, issueCount]) => ({ brandName, issueCount }))
     .sort((a, b) => a.brandName.localeCompare(b.brandName))
 
-  // Build fatal banner if needed.
+  // Just-received products with no cached catalog group are surfaced via
+  // the per-site pendingImportCount "still importing" panel (a calm,
+  // expected state), NOT as a scary error banner. We still compute the
+  // set so matchedProductIds stays load-bearing and so we can drop these
+  // ids from the missing-METRC complaint below.
   const orphanProductIds: number[] = []
   for (const productId of stockByProductId.keys()) {
     if (!matchedProductIds.has(productId)) {
       orphanProductIds.push(productId)
     }
   }
+  void orphanProductIds
 
   // Restrict missing-METRC complaints to cannabis-category groups. For
   // Accessories / Other groups a missing METRC tag is expected and is not
@@ -838,7 +856,6 @@ async function buildSurveyFromDb(): Promise<CatalogMaintenanceSurveyResponse> {
   })
 
   const fatal = buildFatalBanner({
-    orphanProductIds,
     productIdsMissingMetrc,
     staleSchemaCount,
     staleSchemaSampleIds,
@@ -846,10 +863,8 @@ async function buildSurveyFromDb(): Promise<CatalogMaintenanceSurveyResponse> {
     parseFailedSampleIds,
   })
 
-  if (fatal === null && orphanProductIds.length === 0 && productIdsMissingMetrc.length === 0) {
-    // Nothing to warn about. Leave warnings empty.
-  } else if (fatal !== null) {
-    warnings.push(`Cache is incomplete: ${fatal.reasons.length} issue(s) detected. Use the "Fix cache" button.`)
+  if (fatal !== null) {
+    warnings.push('Some catalog details are still loading. Tap "Check for new or updated stock" to refresh.')
   }
 
   const generatedAtMs = oldestSyncedAt?.getTime() ?? Date.now()
@@ -1133,60 +1148,48 @@ function parseMetrcTagsJson(value: unknown): string[] {
 }
 
 function buildFatalBanner(input: {
-  orphanProductIds: number[]
   productIdsMissingMetrc: number[]
   staleSchemaCount: number
   staleSchemaSampleIds: number[]
   parseFailedCount: number
   parseFailedSampleIds: number[]
 }): CatalogMaintenanceFatalBanner | null {
+  // User-facing copy only: no implementation jargon (no "cache", "METRC",
+  // "live_state", "schema", "worker job"), no raw ids, no em-dashes. The
+  // remedy for every reason here is the same single "Check for new or
+  // updated stock" action, so each message points the operator at it.
   const reasons: CatalogMaintenanceFatalReason[] = []
-  if (input.orphanProductIds.length > 0) {
-    reasons.push({
-      code: 'orphan-in-stock-variants',
-      message:
-        `${input.orphanProductIds.length} in-stock variant${input.orphanProductIds.length === 1 ? ' is' : 's are'} ` +
-        `not present in any cached catalog group. Run "Fix cache" to discover their groups and sync them.`,
-      count: input.orphanProductIds.length,
-      sampleIds: input.orphanProductIds.slice(0, 5),
-    })
-  }
   if (input.productIdsMissingMetrc.length > 0) {
+    const n = input.productIdsMissingMetrc.length
     reasons.push({
       code: 'stock-metrc-tags-missing',
-      message:
-        `${input.productIdsMissingMetrc.length} in-stock row${input.productIdsMissingMetrc.length === 1 ? '' : 's'} ` +
-        `lack cached METRC tags. The next stock refresh repopulates them.`,
-      count: input.productIdsMissingMetrc.length,
-      sampleIds: input.productIdsMissingMetrc.slice(0, 5),
+      message: `${n} item${n === 1 ? ' is' : 's are'} still loading package details. They will appear here shortly.`,
+      count: n,
+      sampleIds: [],
     })
   }
   if (input.staleSchemaCount > 0) {
+    const n = input.staleSchemaCount
     reasons.push({
       code: 'live-state-schema-stale',
-      message:
-        `${input.staleSchemaCount} catalog group${input.staleSchemaCount === 1 ? '' : 's'} ` +
-        `cached before the recent live-state schema upgrade. Run "Fix cache" to re-sync.`,
-      count: input.staleSchemaCount,
-      sampleIds: input.staleSchemaSampleIds,
+      message: `${n} item${n === 1 ? '' : 's'} need a refresh to show correctly.`,
+      count: n,
+      sampleIds: [],
     })
   }
   if (input.parseFailedCount > 0) {
+    const n = input.parseFailedCount
     reasons.push({
       code: 'live-state-parse-failed',
-      message:
-        `${input.parseFailedCount} catalog group${input.parseFailedCount === 1 ? '' : 's'} ` +
-        `have unparseable live_state_json and were skipped.`,
-      count: input.parseFailedCount,
-      sampleIds: input.parseFailedSampleIds,
+      message: `${n} item${n === 1 ? " couldn't" : "s couldn't"} be loaded right now.`,
+      count: n,
+      sampleIds: [],
     })
   }
   if (reasons.length === 0) return null
   return {
-    title: 'Cache is incomplete',
-    message:
-      'This page is hiding or misclassifying some rows because required cached data is missing or predates ' +
-      'the recent schema upgrade. Fixing the cache enqueues high-priority worker jobs to backfill it.',
+    title: 'Some items are still loading',
+    message: 'A few items are not ready to show yet. Tap the button below to check for new or updated stock.',
     reasons,
     canRepair: true,
   }

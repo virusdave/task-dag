@@ -8,7 +8,7 @@ import {
   computePerSiteBrandFilters,
   useRegisterCatalogSidebarSubtree,
 } from './catalogSidebarSubtree.js'
-import { useMaintenanceSurvey } from './CatalogMaintenancePage.js'
+import { CacheRepairProgressPanel, useMaintenanceSurvey } from './CatalogMaintenancePage.js'
 
 /**
  * Images & Barcodes — site index landing page.
@@ -22,7 +22,8 @@ import { useMaintenanceSurvey } from './CatalogMaintenancePage.js'
  * the per-site page can stay focused on the worklist.
  */
 export function CatalogMaintenanceIndexPage() {
-  const { state, feedback, setFeedback, fetchSurvey, repairBusy, handleRepairCache } = useMaintenanceSurvey()
+  const { state, feedback, setFeedback, fetchSurvey, repairBusy, handleRepairCache, repairJobs, clearRepairJobs } =
+    useMaintenanceSurvey()
 
   const sites = useMemo(
     () => (state.survey ? computePerSiteBrandFilters(state.survey) : []),
@@ -42,24 +43,32 @@ export function CatalogMaintenanceIndexPage() {
     <section className="catalog-maintenance-page">
       <div className="page-header">
         <div>
-          <p className="eyebrow">Catalog Module</p>
-          <h2>Images &amp; Barcodes</h2>
+          <p className="eyebrow">Catalog</p>
+          <h2>Photos &amp; Barcodes</h2>
           <p className="subtle-copy">
-            Pick the site you're physically at. Each site is a separate page so your phone only
-            loads the SKUs you can actually photograph from where you're standing.
+            Pick the store you're at. Each store is a separate page so your phone only loads the
+            items you can actually photograph from where you're standing.
           </p>
         </div>
         <div className="inline-row wrap-row catalog-maintenance-meta">
           {state.survey?.meta.generatedAt ? (
-            <Pill tone="muted">scanned {formatRelativeTime(state.survey.meta.generatedAt)}</Pill>
+            <Pill tone="muted">Last checked {formatRelativeTime(state.survey.meta.generatedAt)}</Pill>
           ) : null}
+          <button
+            type="button"
+            className="primary-button"
+            disabled={repairBusy}
+            onClick={() => void handleRepairCache()}
+          >
+            {repairBusy ? 'Checking…' : 'Check for new or updated stock'}
+          </button>
           <button
             type="button"
             className="ghost-button"
             disabled={state.refreshing}
             onClick={() => void fetchSurvey(true)}
           >
-            {state.refreshing ? 'Refreshing…' : 'Refresh survey'}
+            {state.refreshing ? 'Reloading…' : 'Reload list'}
           </button>
         </div>
       </div>
@@ -77,10 +86,18 @@ export function CatalogMaintenanceIndexPage() {
         <div className="catalog-maintenance-toast catalog-maintenance-toast-err">{state.error}</div>
       ) : null}
 
+      {repairJobs ? (
+        <CacheRepairProgressPanel
+          jobs={repairJobs}
+          onDismiss={clearRepairJobs}
+          onRescan={() => void fetchSurvey(true)}
+        />
+      ) : null}
+
       {state.survey?.fatal ? (
-        <div className="catalog-maintenance-fatal-banner catalog-maintenance-toast catalog-maintenance-toast-err">
+        <div className="catalog-maintenance-toast" role="status" style={{ alignItems: 'flex-start' }}>
           <div>
-            <strong>⚠ {state.survey.fatal.title}</strong>
+            <strong>{state.survey.fatal.title}</strong>
             <p style={{ margin: '0.25rem 0' }}>{state.survey.fatal.message}</p>
             {state.survey.fatal.canRepair ? (
               <button
@@ -89,7 +106,7 @@ export function CatalogMaintenanceIndexPage() {
                 disabled={repairBusy}
                 onClick={() => void handleRepairCache()}
               >
-                {repairBusy ? 'Enqueuing fix-cache jobs…' : '🛠 Fix cache (enqueue high-priority workers)'}
+                {repairBusy ? 'Checking…' : 'Check for new or updated stock'}
               </button>
             ) : null}
           </div>
@@ -111,7 +128,7 @@ export function CatalogMaintenanceIndexPage() {
         >
           {sites.length === 0 ? (
             <li className="subtle-copy">
-              No sites returned by the survey. Try Refresh, or Fix cache if the fatal banner is showing.
+              No stores to show yet. Tap "Check for new or updated stock".
             </li>
           ) : (
             sites.map((site) => (
@@ -133,12 +150,22 @@ export function CatalogMaintenanceIndexPage() {
                   <span style={{ display: 'flex', flexDirection: 'column', gap: '0.2rem' }}>
                     <strong style={{ fontSize: '1.05rem' }}>{site.siteLabel}</strong>
                     <span className="subtle-copy">
-                      {site.brands.length} brand{site.brands.length === 1 ? '' : 's'} with candidates
+                      {site.totalIssueCount === 0
+                        ? site.pendingImportCount > 0
+                          ? 'New items still loading'
+                          : 'All set'
+                        : `${site.brands.length} brand${site.brands.length === 1 ? '' : 's'} need attention`}
+                      {site.totalIssueCount > 0 && site.pendingImportCount > 0
+                        ? ` · ${site.pendingImportCount} still loading`
+                        : ''}
                     </span>
                   </span>
                   <span style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                    {site.pendingImportCount > 0 ? (
+                      <Pill tone="muted">{site.pendingImportCount} still loading</Pill>
+                    ) : null}
                     <Pill tone={site.totalIssueCount === 0 ? 'muted' : 'warning'}>
-                      {site.totalIssueCount} issue{site.totalIssueCount === 1 ? '' : 's'}
+                      {site.totalIssueCount} to fix
                     </Pill>
                     <span aria-hidden="true">›</span>
                   </span>

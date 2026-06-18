@@ -130,6 +130,17 @@ export const CatalogMaintenanceSurveySiteSchema = z.object({
   siteLabel: z.string(),
   targetId: z.string(),
   totalIssueCount: z.number().int(),
+  /**
+   * Count of in-stock products at this site that have just been received
+   * and are not yet linked to a cached catalog group, i.e. still being
+   * imported. These products cannot render as photo/barcode cards yet
+   * (we don't know their group, image state, or brand), so the page
+   * surfaces them as a friendly "still importing" panel with the count
+   * instead of as raw product ids in an error banner. Defaulted so an
+   * older client/server pair doesn't break parse during a rolling
+   * redeploy.
+   */
+  pendingImportCount: z.number().int().default(0),
   sections: z.array(CatalogMaintenanceSurveySectionSchema),
 })
 export type CatalogMaintenanceSurveySite = z.infer<typeof CatalogMaintenanceSurveySiteSchema>

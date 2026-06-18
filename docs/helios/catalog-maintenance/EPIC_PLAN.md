@@ -47,3 +47,69 @@ variant(s).
 4. **Verify and ship.**
    - Build, deploy, smoke-test on phone + desktop, page Dave.
    - Close the epic via `task-dag complete`.
+
+---
+
+## UX redesign (2026-06) — "Photos & Barcodes"
+
+The page shipped above grew over time (barcodes, METRC/shelf controls,
+cache-repair flow) and became one of the most user-hostile pages in
+Helios for nontechnical floor staff: implementation jargon everywhere
+(Sweed/METRC/cache/orphan/job ids), multiple confusing "refresh"
+buttons, and no obvious way to make a newly-received brand appear. This
+redesign reframes the page around the floor operator.
+
+### Phases 1–3 (done)
+
+- Renamed **Images & Barcodes → Photos & Barcodes** (page, sidebar,
+  index, copy).
+- One discoverable primary action, **"Check for new or updated
+  stock"**, on both index and per-site pages. It runs the
+  stock-refresh → discover-orphan-groups → group-sync chain that
+  surfaces a just-received brand into the brand-filter strip and as
+  worklist cards, with inline progress feedback.
+- New first-class **"still loading"** state (`pendingImportCount`) for
+  just-received items not yet linked to a catalog group, replacing the
+  scary raw-id "Cache is incomplete" banner.
+- Section labels → **Needs photo** / **Needs barcode**.
+- Scrubbed all user-facing implementation jargon and raw backend
+  errors (routed to telemetry via `reportClientError`; users see calm
+  "Dave has been notified" copy).
+- Replaced `window.confirm` with accessible shared `.wh-modal*` modals
+  (dialog semantics, focus management, Escape/backdrop close, labeled
+  confirmation input).
+- The live-Sweed-latency modal (warns when a refresh exceeds typical
+  page latency) is handled by a parallel effort.
+
+### Phase 4 (planned) — three co-equal per-item actions
+
+**Note (operator):** *image, barcode, and warehousing location should
+all be together as the three things we can fix/update per item.*
+
+Today only **photo** and **barcode** are first-class per-site worklist
+**sections** (`CatalogMaintenanceSectionKind` =
+`missing-catalog-image` | `missing-or-invalid-barcode`). **Warehouse /
+shelf location** exists only buried inside the per-package
+`ShelfControl` in the packages panel (`warehouseLocationCode` /
+internal track code, shared with `WarehouseLocationsPage`), and is not
+surfaced as something an operator is prompted to fix per item.
+
+Phase 4 elevates warehouse/shelf location to a co-equal third
+per-item dimension so the page consistently presents **photo,
+barcode, and shelf location** as the three fixable/updatable things
+per item. Concrete work:
+
+- Add a third section kind (e.g. `missing-warehouse-location`) to
+  `CatalogMaintenanceSectionKindSchema` and the server survey in
+  `src/server/catalog/maintenance.ts` (define what "needs a shelf
+  location" means: in-stock package with no/invalid
+  `warehouseLocationCode`).
+- Add a **"Needs shelf location"** worklist section to the per-site
+  page, reusing the existing `ShelfControl` picker as the inline fix.
+- Include the new dimension in the per-site `totalIssueCount`, the
+  brand-filter strip counts, the index/site "to fix" pills, and the
+  sidebar site counts.
+- Unify the card so photo / barcode / shelf-location status and their
+  fix actions read as one consistent set of three per item.
+- Keep all copy floor-staff-friendly (no METRC/internal-track/Sweed
+  jargon) and the modals accessible, per phases 1–3.

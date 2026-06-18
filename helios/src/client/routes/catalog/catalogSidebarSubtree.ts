@@ -55,6 +55,7 @@ export function computePerSiteBrandFilters(
       siteKey: site.siteKey,
       siteLabel: site.siteLabel,
       totalIssueCount: site.totalIssueCount,
+      pendingImportCount: site.pendingImportCount,
       brands,
       sitePath: buildMaintenanceSitePath(site.siteKey),
     }
@@ -87,6 +88,9 @@ export interface ImagesAndBarcodesSiteEntry {
   siteLabel: string
   /** Total candidates within this site. */
   totalIssueCount: number
+  /** Just-received items at this site still being imported (not yet
+   * workable as photo/barcode cards). */
+  pendingImportCount: number
   /** Brands present in this site's candidate set, sorted by site-local
    * issue count desc then alpha. */
   brands: ImagesAndBarcodesSiteBrandFilter[]
@@ -304,7 +308,7 @@ function buildImagesAndBarcodesNode(options: ImagesAndBarcodesSidebarOptions | u
     return {
       kind: 'leaf',
       navKey: 'catalog.images-and-barcodes',
-      label: 'Images & Barcodes',
+      label: 'Photos & Barcodes',
       to: buildHeliosModulePath('catalog', 'maintenance'),
     }
   }
@@ -321,18 +325,21 @@ function buildImagesAndBarcodesNode(options: ImagesAndBarcodesSidebarOptions | u
   // T-019e437d-85c8-7588-ad92-cc80f25eded0 explicitly recommended
   // site-only nav for the mobile-collapsed case.
   const siteLeaves: TreeNavNode[] = options.sites
-    .filter((site) => site.totalIssueCount > 0)
+    .filter((site) => site.totalIssueCount > 0 || site.pendingImportCount > 0)
     .map((site) => ({
       kind: 'leaf' as const,
       navKey: `catalog.images-and-barcodes.site.${site.siteKey}`,
       label: site.siteLabel,
       to: site.sitePath,
+      // Surface the count of tasks to fix; a site that only has items still
+      // importing (no current tasks) still shows in the tree so the operator
+      // can open it and tap "Check for new or updated stock".
       count: site.totalIssueCount,
     }))
   return {
     kind: 'branch',
     navKey: 'catalog.images-and-barcodes',
-    label: 'Images & Barcodes',
+    label: 'Photos & Barcodes',
     to: options.indexPath,
     defaultOpen: true,
     children: siteLeaves,
