@@ -445,6 +445,13 @@ CI BROKEN-MASTER AUTO-REPAIR:
                            Worker preflight: confirm a repair target is still
                            the current, first-red, unclaimed chain head before
                            doing work (read-only, fails closed)
+    repair-ticket <owner/repo> <branch>
+                           Reconcile the GitHub repair ticket with the CI
+                           chain state: keep EXACTLY ONE open ci-broken-master
+                           + priority:high ticket per open red chain (creating
+                           it is the pickable-task ingestion point), refresh it
+                           on continuation, close it on green. Idempotent +
+                           concurrency-safe (CAS create-lease).
 
     help                   Show this help
 
@@ -2566,6 +2573,7 @@ main() {
         parse-tree-fix) cmd_parse_tree_fix "$@" ;;
         classify) cmd_classify "$@" ;;
         verify-target) cmd_verify_target "$@" ;;
+        repair-ticket) cmd_repair_ticket "$@" ;;
         *)
             echo "Unknown command: $command" >&2
             echo "Run 'task-dag help' for usage" >&2

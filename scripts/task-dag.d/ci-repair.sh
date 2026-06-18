@@ -725,3 +725,385 @@ EOF
     fi
     return "$rc"
 }
+
+# ---------------------------------------------------------------------------
+# repair-ticket  (CI broken-master auto-repair, design §4 item: idempotent
+# repair ticket — scope item #4 of virusdave/task-dag#1)
+#
+# Reconcile the GitHub repair TICKET with the current CI repair-chain state
+# for <owner/repo>@<branch>, so that there is EXACTLY ONE open
+# `ci-broken-master` + `priority:high` ticket per open red chain. Creating
+# that issue is the ingestion point: the existing issue-to-task sync mints it
+# as a pickable task. This command is the side of the subsystem that touches
+# GitHub; `classify` (§2) only drives the durable chain state and reports a
+# ticket hint (open|close), it never calls GitHub itself.
+#
+# It is fully IDEMPOTENT and self-contained — safe to run repeatedly and
+# concurrently. The chain ref (origin) is the source of truth for desired
+# state; GitHub (queried by label + a hidden chain marker) is the authority
+# for which ticket already exists. The chain's Repair-Issue field is only a
+# best-effort cache + a compare-and-set CREATE LEASE; it is never trusted on
+# its own (classify clears it on green, and a cached write can fail), so a
+# lost cache write can never duplicate or strand a ticket.
+#
+# Dedup / binding. A ticket is bound to a chain by TWO hidden HTML-comment
+# markers in its body:
+#   <!-- ci-repair-slot:v1 repo=<owner/repo> branch=<encoded> -->  (the slot)
+#   <!-- ci-repair-first-red:<full-sha> -->                        (the chain)
+# The slot marker is stable across red streaks (so green can close whatever
+# is open for this repo/branch); the first-red marker identifies the specific
+# red streak (so a fresh red opens a NEW ticket instead of silently reusing a
+# prior streak's ticket that failed to close).
+#
+# Behaviour, driven by the chain State:
+#   red:
+#     - close any open slot ticket from a PRIOR first-red (stale streak);
+#     - 0 current-streak tickets  -> acquire a CAS create-lease on the chain
+#       (Repair-Issue=creating@<ts>, --expect-old) so only ONE concurrent
+#       runner creates; the winner files the issue (both labels + markers)
+#       and caches Repair-Issue=<n>;
+#     - 1 current-streak ticket   -> refresh its body (NOT a comment, to avoid
+#       the comment->task ingestion loop) and cache its number;
+#     - >1 current-streak tickets -> keep the oldest, close the extras.
+#   green / anything-not-red:
+#     - close every open slot ticket (any first-red) and clear the cache.
+#
+# Loop safety. The ONLY thing that should mint a pickable task is the initial
+# issue creation. Updates edit the body (issues:edited is create-only in the
+# sync). Every comment this command posts (duplicate/stale/green closes)
+# begins with the `<!-- task-dag:status -->` marker so the comment sync skips
+# it instead of minting a new task.
+#
+# Usage:
+#   task-dag repair-ticket <owner/repo> <branch>
+#       [--title=<t>] [--lease-ttl=<secs>] [--dry-run] [--json] [--no-fetch]
+#
+# Exit codes:
+#   0  reconciled (created/updated/closed/no-op)
+#   1  argument error
+#   4  origin/gh error (could not establish state or a mutation failed)
+#   5  lost the create-lease CAS race (another runner is creating) — benign;
+#      rerun reconciles
+# ---------------------------------------------------------------------------
+
+# Default time after which a stuck "creating@<ts>" lease may be stolen.
+_RT_LEASE_TTL_DEFAULT=300
+
+# Build the deterministic, automation-owned issue body.
+_rt_ticket_body() { # <repo> <branch> <slot> <frmark> <first_red> <cur_head> <mode> <attempt>
+    local repo="$1" branch="$2" slot="$3" frmark="$4" first_red="$5"
+    local cur_head="$6" mode="$7" attempt="$8"
+    cat <<EOF
+$slot
+$frmark
+
+# CI repair needed for \`${repo}@${branch}\`
+
+The required CI gate suite is **red** on \`${branch}\`. File a fix; this
+ticket is the single pickable repair task for this red streak.
+
+- First red: \`${first_red}\`
+- Current head: \`${cur_head}\`
+- Repair mode: \`${mode:-initial}\`
+- Repair attempt: \`${attempt:-1}\`
+
+When landing the fix, stamp the fix commit with these trailers so the
+classifier can interpret the outcome (design §3):
+
+\`\`\`text
+Tree-Fix: ${repo}#<this-ticket-number>
+Tree-Fix-Chain: ${first_red}
+Tree-Fix-Mode: ${mode:-initial}
+\`\`\`
+
+<sub>Maintained automatically by \`task-dag repair-ticket\`; edits to this
+body are overwritten on the next reconcile.</sub>
+EOF
+}
+
+cmd_repair_ticket() {
+    local repo="" branch="" title="" lease_ttl="$_RT_LEASE_TTL_DEFAULT"
+    local dry_run=false json=false do_fetch=true
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --title=*) title="${1#*=}"; shift ;;
+            --lease-ttl=*) lease_ttl="${1#*=}"; shift ;;
+            --dry-run) dry_run=true; shift ;;
+            --json) json=true; shift ;;
+            --no-fetch) do_fetch=false; shift ;;
+            --help | -h)
+                cat <<EOF
+Usage: task-dag repair-ticket <owner/repo> <branch> [options]
+
+Reconcile the GitHub repair ticket with the CI repair-chain state so there is
+EXACTLY ONE open ci-broken-master + priority:high ticket per open red chain
+(scope #4 of #1). Idempotent + concurrency-safe. The chain ref is the desired
+state; GitHub (label + hidden chain marker) is the authority for what exists;
+Repair-Issue is a best-effort cache + CAS create-lease.
+
+Options:
+  --title=<t>        override the generated issue title
+  --lease-ttl=<s>    seconds before a stuck create-lease may be stolen (def $_RT_LEASE_TTL_DEFAULT)
+  --dry-run          print intended GitHub mutations, change nothing
+  --json             machine-readable result on stdout (logs go to stderr)
+  --no-fetch         read last-known local chain state (offline/test)
+
+Exit: 0 reconciled  1 args  4 origin/gh error  5 lost create-lease race.
+EOF
+                return 0
+                ;;
+            -*) echo "Unknown option: $1" >&2; return 1 ;;
+            *)
+                if [ -z "$repo" ]; then repo="$1"
+                elif [ -z "$branch" ]; then branch="$1"
+                else echo "Unexpected argument: $1" >&2; return 1
+                fi
+                shift
+                ;;
+        esac
+    done
+
+    if [ -z "$repo" ] || [ -z "$branch" ]; then
+        echo "Error: <owner/repo> and <branch> are required" >&2
+        return 1
+    fi
+    if ! printf '%s' "$lease_ttl" | grep -Eq '^[0-9]+$'; then
+        echo "Error: --lease-ttl must be a non-negative integer (got '$lease_ttl')" >&2
+        return 1
+    fi
+
+    # A small mutation wrapper honouring --dry-run. Read-only `gh issue list`
+    # is NOT routed through here (it always runs). Returns gh's own status.
+    local _rt_dry="$dry_run"
+    _rt_gh() {
+        if [ "$_rt_dry" = true ]; then
+            echo "(dry-run) gh $*" >&2
+            return 0
+        fi
+        gh "$@"
+    }
+
+    # ── Current chain state (origin is the source of truth) ───────────────
+    local ref sha=""
+    ref="$(_cichain_ref "$repo" "$branch")"
+    if [ "$do_fetch" = true ]; then
+        if sha="$(_cichain_remote_sha "$ref")"; then
+            [ -n "$sha" ] && _cichain_fetch "$ref"
+        else
+            # A mutating reconcile must not act off stale local state when it
+            # cannot confirm origin: fail closed.
+            echo "Error: cannot reach origin to read chain state for $repo@$branch" >&2
+            return 4
+        fi
+    else
+        sha="$(git rev-parse --verify --quiet "$ref" 2>/dev/null || true)"
+    fi
+
+    # No chain ref at all: nothing has ever gone red here -> nothing to do.
+    if [ -z "$sha" ]; then
+        if [ "$json" = true ]; then
+            printf '{"action":"noop-nochain","repo":"%s","branch":"%s","ref":"%s"}\n' \
+                "$(_cichain_jstr "$repo")" "$(_cichain_jstr "$branch")" "$(_cichain_jstr "$ref")"
+        else
+            printf "${YELLOW}No CI chain state for %s@%s — no repair ticket to reconcile.${RESET}\n" "$repo" "$branch" >&2
+        fi
+        return 0
+    fi
+
+    local state first_red cur_head mode attempt cache_issue
+    state="$(_cichain_field "$sha" State)"
+    first_red="$(_cichain_field "$sha" First-Red)"
+    cur_head="$(_cichain_field "$sha" Current-Head)"
+    mode="$(_cichain_field "$sha" Repair-Mode)"
+    attempt="$(_cichain_field "$sha" Repair-Attempt)"
+    cache_issue="$(_cichain_field "$sha" Repair-Issue)"
+
+    # ── Markers (slot = repo/branch lineage; first-red = this red streak) ──
+    local enc slot frmark
+    enc="$(_cichain_encode "$branch")"
+    slot="<!-- ci-repair-slot:v1 repo=${repo} branch=${enc} -->"
+    frmark="<!-- ci-repair-first-red:${first_red} -->"
+
+    # ── Enumerate the open slot tickets on GitHub (authority for what is) ──
+    # Output lines "<number>\t<true|false>" (whether the body carries the
+    # CURRENT first-red marker), oldest-first. body=null is treated as "".
+    local listing list_rc=0
+    listing="$(gh issue list --repo "$repo" --state open \
+        --label ci-broken-master --label priority:high \
+        --limit 1000 --json number,body,createdAt 2>/dev/null \
+        | jq -r --arg slot "$slot" --arg fr "$frmark" '
+            [ .[] | select((.body // "") | contains($slot)) ]
+            | sort_by(.createdAt, .number)
+            | .[] | "\(.number)\t\((.body // "") | contains($fr))"')" || list_rc=$?
+    if [ "$list_rc" -ne 0 ]; then
+        echo "Error: failed to list repair tickets for $repo (gh/jq error)" >&2
+        return 4
+    fi
+
+    local -a current=() stale=()
+    local n flag
+    while IFS=$'\t' read -r n flag; do
+        [ -n "$n" ] || continue
+        if [ "$flag" = "true" ]; then current+=("$n"); else stale+=("$n"); fi
+    done <<< "$listing"
+
+    local action="" ticket_number=""
+
+    # Close one issue with a task-dag:status-markered comment (loop-safe).
+    _rt_close() { # <number> <reason>
+        local num="$1" reason="$2" body
+        body="$(printf '<!-- task-dag:status -->\n%s' "$reason")"
+        _rt_gh issue close "$num" --repo "$repo" --comment "$body" >/dev/null 2>&1 \
+            || echo "Warning: failed to close repair ticket #$num on $repo" >&2
+    }
+
+    if [ "$state" = "red" ]; then
+        # Stale prior-streak tickets must be closed so a fresh streak is not
+        # silently mistaken for a continuation (and so "one per chain" holds).
+        local s
+        for s in "${stale[@]}"; do
+            _rt_close "$s" "Superseded: a newer red streak (first-red ${first_red}) is now open for \`${repo}@${branch}\`; closing this stale repair ticket."
+            action="closed-stale${action:+,$action}"
+        done
+
+        local body
+        body="$(_rt_ticket_body "$repo" "$branch" "$slot" "$frmark" "$first_red" "$cur_head" "$mode" "$attempt")"
+        local def_title="CI broken: ${repo}@${branch} (first-red ${first_red:0:12})"
+        [ -n "$title" ] && def_title="$title"
+
+        if [ "${#current[@]}" -eq 0 ]; then
+            # ── Create path, guarded by a CAS create-lease ────────────────
+            # If a recent "creating@<ts>" lease is held by another runner,
+            # stand down (it will create); only steal a lease older than TTL.
+            local now lease_ts age
+            now="$(date +%s)"
+            if printf '%s' "$cache_issue" | grep -Eq '^creating@[0-9]+$'; then
+                lease_ts="${cache_issue#creating@}"
+                age=$(( now - lease_ts ))
+                if [ "$age" -lt "$lease_ttl" ]; then
+                    if [ "$json" = true ]; then
+                        printf '{"action":"create-in-progress","repo":"%s","branch":"%s","leaseAge":%s}\n' \
+                            "$(_cichain_jstr "$repo")" "$(_cichain_jstr "$branch")" "$age"
+                    else
+                        printf "${YELLOW}Repair ticket creation already in progress for %s@%s (lease age %ss < TTL %ss); standing down.${RESET}\n" \
+                            "$repo" "$branch" "$age" "$lease_ttl" >&2
+                    fi
+                    return 0
+                fi
+            fi
+
+            if [ "$dry_run" = true ]; then
+                echo "(dry-run) would acquire create-lease + gh issue create on $repo with title: $def_title" >&2
+                action="created${action:+,$action}"
+            else
+                # Acquire the lease: CAS Repair-Issue=creating@<now> bound to
+                # the chain commit we read. A loser (rc 5) means a concurrent
+                # runner won the lease — benign, rerun reconciles.
+                local lease_rc=0
+                cmd_chain_write "$repo" "$branch" --for-sha="$cur_head" \
+                    --expect-old="$sha" --set "Repair-Issue=creating@${now}" \
+                    >/dev/null 2>&1 || lease_rc=$?
+                if [ "$lease_rc" -ne 0 ]; then
+                    if [ "$json" = true ]; then
+                        printf '{"action":"lease-lost","repo":"%s","branch":"%s","rc":%s}\n' \
+                            "$(_cichain_jstr "$repo")" "$(_cichain_jstr "$branch")" "$lease_rc"
+                    else
+                        printf "${YELLOW}Lost the repair-ticket create-lease for %s@%s (another runner is creating); rerun reconciles.${RESET}\n" \
+                            "$repo" "$branch" >&2
+                    fi
+                    return 5
+                fi
+
+                # We own the lease. File the issue.
+                local lease_sha created_url
+                lease_sha="$(_cichain_remote_sha "$ref" 2>/dev/null || true)"
+                if ! created_url="$(gh issue create --repo "$repo" \
+                        --title "$def_title" --body "$body" \
+                        --label ci-broken-master --label priority:high 2>&1)"; then
+                    echo "Error: gh issue create failed for $repo: $created_url" >&2
+                    return 4
+                fi
+                ticket_number="$(printf '%s' "$created_url" | grep -oE '[0-9]+$' | tail -1)"
+
+                # Cache the number (best-effort, CAS-bound to the lease commit).
+                # If the cache write loses (chain moved), reconcile: only undo
+                # the creation if the chain is no longer this red streak.
+                local cache_rc=0
+                cmd_chain_write "$repo" "$branch" --for-sha="$cur_head" \
+                    --expect-old="$lease_sha" --set "Repair-Issue=${ticket_number}" \
+                    >/dev/null 2>&1 || cache_rc=$?
+                if [ "$cache_rc" -ne 0 ]; then
+                    local now_sha now_state now_fr
+                    now_sha="$(_cichain_remote_sha "$ref" 2>/dev/null || true)"
+                    [ -n "$now_sha" ] && _cichain_fetch "$ref"
+                    now_state="$(_cichain_field "$now_sha" State)"
+                    now_fr="$(_cichain_field "$now_sha" First-Red)"
+                    if [ "$now_state" != "red" ] || [ "$now_fr" != "$first_red" ]; then
+                        _rt_close "$ticket_number" "CI chain for \`${repo}@${branch}\` changed during ticket creation; this repair ticket is no longer current and is closed automatically."
+                        action="created-then-closed${action:+,$action}"
+                        ticket_number=""
+                    else
+                        echo "Warning: created ticket #$ticket_number but could not cache its number (chain raced); next reconcile will cache it." >&2
+                        action="created${action:+,$action}"
+                    fi
+                else
+                    action="created${action:+,$action}"
+                fi
+            fi
+        else
+            # ── One-or-more current-streak tickets: keep oldest, refresh ──
+            ticket_number="${current[0]}"
+            local extra
+            for extra in "${current[@]:1}"; do
+                _rt_close "$extra" "Duplicate of #${ticket_number} for the same red streak (first-red ${first_red}); closing to keep exactly one repair ticket per chain."
+                action="closed-dup${action:+,$action}"
+            done
+            # Refresh the canonical ticket's body (edit, NOT a comment).
+            if [ "$dry_run" = true ]; then
+                echo "(dry-run) would gh issue edit #$ticket_number on $repo (refresh body)" >&2
+            else
+                local bf
+                bf="$(mktemp)"
+                printf '%s' "$body" > "$bf"
+                gh issue edit "$ticket_number" --repo "$repo" --body-file "$bf" >/dev/null 2>&1 \
+                    || echo "Warning: failed to refresh repair ticket #$ticket_number body" >&2
+                rm -f "$bf"
+                # Re-cache the number if the chain still records something else.
+                if [ "$cache_issue" != "$ticket_number" ]; then
+                    cmd_chain_write "$repo" "$branch" --for-sha="$cur_head" \
+                        --expect-old="$sha" --set "Repair-Issue=${ticket_number}" \
+                        >/dev/null 2>&1 || true
+                fi
+            fi
+            action="updated${action:+,$action}"
+        fi
+    else
+        # ── Not red (green/unknown/closed): close every open slot ticket ──
+        local all=("${current[@]}" "${stale[@]}") c
+        if [ "${#all[@]}" -eq 0 ]; then
+            action="noop-no-open-ticket"
+        else
+            for c in "${all[@]}"; do
+                _rt_close "$c" "CI is green again on \`${repo}@${branch}\`; the broken-master repair chain is closed, so this repair ticket is resolved automatically."
+            done
+            action="closed"
+            # Clear the cache if it still points anywhere (best-effort).
+            if [ "$dry_run" = false ] && [ -n "$cache_issue" ]; then
+                cmd_chain_write "$repo" "$branch" --for-sha="$cur_head" \
+                    --expect-old="$sha" --set "Repair-Issue=" >/dev/null 2>&1 || true
+            fi
+        fi
+    fi
+
+    if [ "$json" = true ]; then
+        printf '{"action":"%s","state":"%s","repo":"%s","branch":"%s","firstRed":"%s","ticket":"%s","dryRun":%s}\n' \
+            "$(_cichain_jstr "$action")" "$(_cichain_jstr "$state")" \
+            "$(_cichain_jstr "$repo")" "$(_cichain_jstr "$branch")" \
+            "$(_cichain_jstr "$first_red")" "$(_cichain_jstr "$ticket_number")" "$dry_run"
+    else
+        printf "${BOLD}repair-ticket %s@%s${RESET} state=%s action=%s ticket=%s\n" \
+            "$repo" "$branch" "$state" "$action" "${ticket_number:-<none>}"
+    fi
+    return 0
+}
