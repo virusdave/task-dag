@@ -2131,6 +2131,11 @@ Related: $issue_url"
     # wipe uncommitted work in the caller's cwd peer worktree).
     advance_head_to_completion "$commit_sha" "$new_commit" || return 1
     
+    # Whether this completion actually cleared an operator/downstream block
+    # (drives the #29 dashboard refresh below; most completes are of
+    # never-blocked tasks and must not churn the dashboard).
+    local completed_was_blocked=false
+
     # Clean up refs unless --no-cleanup
     if [ "$no_cleanup" = false ]; then
         local frontier_ref="refs/heads/tasks/frontier/$short_sha"
@@ -2195,6 +2200,7 @@ Related: $issue_url"
             fi
             lease_args+=("--force-with-lease=$blocked_ref:$blocked_now")
             refspecs+=(":$blocked_ref")
+            completed_was_blocked=true
         fi
 
         # Blocked-meta (full-SHA side ref): a side-commit, not the task
@@ -2220,7 +2226,12 @@ Related: $issue_url"
     fi
     
     printf "${GREEN}✓ Task completed: %s${RESET}\n" "$(get_task_title "$task_sha")"
-    
+
+    # If this completion cleared a block, refresh the operator #29 dashboard.
+    if [ "$completed_was_blocked" = true ]; then
+        emit_operator_blocked_dispatch complete "$short_sha"
+    fi
+
     # Post progress update to GitHub issue (if issue exists and GITHUB_TOKEN is set)
     if [ -n "$issue_num" ] && [ -n "$issue_url" ] && [ -n "${GITHUB_TOKEN:-}" ]; then
         local repo=$(echo "$issue_url" | sed -E 's|https://github.com/([^/]+/[^/]+)/.*|\1|')
@@ -2475,6 +2486,72 @@ EOF
     fi
 }
 
+# ── Operator-blocked dashboard event emitter ──────────────────────────
+# After a block/unblock/complete/drop changes a BLOCKED ref, POST a
+# repository_dispatch to the dashboard repo so the operator-blocked #29
+# "one-stop shop" dashboard rebuilds within seconds. This is the latency
+# path the operator approved (the dashboard workflow's schedule is only a
+# self-healing backstop; see virusdave/top-level#29 and the epic plan).
+#
+# Best-effort by design: the leased ref push above is the source of truth,
+# so a missing/failed dispatch only means the change shows up on the next
+# scheduled rebuild instead of within seconds — it must NEVER abort the
+# command or change its exit status (fail-soft, with a clear note). Uses the
+# ambient authenticated `gh` (the worker host's GitHub auth), the same
+# mechanism the CLI already uses for its other GitHub API calls; no App
+# private key is distributed to workers.
+#
+# Safe in the fixture tests automatically: they use a local bare-repo
+# origin, and this fires only for a real network GitHub remote. Override
+# with TASK_DAG_DASHBOARD_DISPATCH_REPO (unset = default virusdave/top-level;
+# empty = disabled).
+emit_operator_blocked_dispatch() {
+    local action="$1"            # block|unblock|complete|drop (observability)
+    local source_sha="${2:-}"
+    local repo="${TASK_DAG_DASHBOARD_DISPATCH_REPO-virusdave/top-level}"
+    [ -n "$repo" ] || return 0   # explicitly disabled
+
+    local origin_url
+    origin_url=$(git remote get-url origin 2>/dev/null || true)
+    # Only fire from a real GitHub remote. The fleet's checkouts use either
+    # https://github.com/... or the `git@github-<repo>:owner/repo` SSH host
+    # ALIASES that ephemeral_checkout configures (e.g. git@github-task-dag:),
+    # so we match a github host with a URL scheme — which also auto-skips the
+    # fixture tests (their origin is a local bare-repo PATH, no scheme). A
+    # test seam (TASK_DAG_DASHBOARD_DISPATCH_FORCE=1, default off) bypasses
+    # this gate so the firing path can be exercised against a local origin.
+    if [ "${TASK_DAG_DASHBOARD_DISPATCH_FORCE:-0}" != "1" ]; then
+        case "$origin_url" in
+            https://github.com/*|http://github.com/*|git@github*:*|ssh://*github*/*|git://*github*/*) : ;;
+            *) return 0 ;;
+        esac
+    fi
+
+    if ! command -v gh >/dev/null 2>&1; then
+        printf "%bNote: gh not found; skipped the #29 dashboard refresh (it will update on the next scheduled rebuild).%b\n" "$YELLOW" "$RESET" >&2
+        return 0
+    fi
+
+    # owner/repo of the repo the change happened in, for log/debug only.
+    local source_repo
+    source_repo=$(printf '%s' "$origin_url" | sed -E 's#^(https?://[^/]+/|git@[^:]+:|ssh://[^/]+/|git://[^/]+/)##; s#\.git$##')
+
+    # Cap the call so a network stall never hangs the worker (timeout is
+    # optional — degrade to a direct call if coreutils timeout is absent).
+    local runner=(gh)
+    command -v timeout >/dev/null 2>&1 && runner=(timeout 15 gh)
+
+    if "${runner[@]}" api -X POST "repos/$repo/dispatches" \
+            -f event_type=operator-blocked-changed \
+            -f "client_payload[action]=$action" \
+            -f "client_payload[source_repo]=$source_repo" \
+            -f "client_payload[task]=$source_sha" >/dev/null 2>&1; then
+        return 0
+    fi
+    printf "%bNote: could not trigger the #29 dashboard refresh (it will still update on the next scheduled rebuild).%b\n" "$YELLOW" "$RESET" >&2
+    return 0
+}
+
 # Command: block - park a task so workers won't pick it up (but it's not closed)
 cmd_block() {
     local task_sha="" reason="" request_url="" kind=""
@@ -2614,6 +2691,7 @@ EOF
         echo "  Kind: $kind"
         [ -n "$reason" ] && echo "  Reason: $reason"
         [ -n "$request_url" ] && echo "  Request: $request_url"
+        emit_operator_blocked_dispatch block "$(git rev-parse --short "$task_sha")"
         return 0
     fi
 
@@ -2678,6 +2756,7 @@ cmd_unblock() {
         git show-ref --verify --quiet "$blocked_ref" && git update-ref -d "$blocked_ref"
         git show-ref --verify --quiet "$meta_ref" && git update-ref -d "$meta_ref"
         printf "${GREEN}✓ Unblocked task:${RESET} %s\n" "$(get_task_title "$task_sha")"
+        emit_operator_blocked_dispatch unblock "$(git rev-parse --short "$task_sha")"
         return 0
     fi
     printf "${RED}✗ Failed to unblock %s on origin (it changed under us, or push failed).${RESET}\n" "$(get_task_title "$task_sha")" >&2
@@ -2874,21 +2953,33 @@ EOF
         fi
     fi
 
+    # Track whether we actually removed the blocked OVERLAY ref from origin,
+    # so we refresh the operator #29 dashboard only when the drop changed
+    # what it shows (the dashboard scans origin; a local-only or
+    # never-blocked drop changes nothing).
+    local blocked_ref_d; blocked_ref_d=$(blocked_ref_for "$task_sha")
+    local dropped_cleared_remote_block=false
+
     local r
     for r in "refs/heads/tasks/frontier/$short_sha" \
-             "$(blocked_ref_for "$task_sha")" \
+             "$blocked_ref_d" \
              "$(blocked_meta_ref_for "$task_sha")" \
              "refs/heads/tasks/active/$short_sha"; do
         if git show-ref --verify --quiet "$r"; then
             git update-ref -d "$r" && echo "Deleted local $r"
         fi
         if git ls-remote --exit-code origin "$r" >/dev/null 2>&1; then
-            git push origin --delete "${r#refs/heads/}" 2>/dev/null \
-                && echo "Deleted remote ${r#refs/heads/}" || true
+            if git push origin --delete "${r#refs/heads/}" 2>/dev/null; then
+                echo "Deleted remote ${r#refs/heads/}"
+                if [ "$r" = "$blocked_ref_d" ]; then dropped_cleared_remote_block=true; fi
+            fi
         fi
     done
 
     printf "${GREEN}✓ Dropped task refs:${RESET} %s\n" "$title"
+    if [ "$dropped_cleared_remote_block" = true ]; then
+        emit_operator_blocked_dispatch drop "$short_sha"
+    fi
     return 0
 }
 
