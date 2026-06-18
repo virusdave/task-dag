@@ -1,0 +1,206 @@
+name: CI Broken-Master Repair Classifier (Reusable)
+
+# Reusable CI broken-master auto-repair classifier (issue #1 scope item 1,
+# design §2 + §4). A peer calls this AFTER its full required CI suite finishes
+# on `master`; this workflow classifies the aggregate required-gate result as
+# green/red/unknown, drives the durable per-repo/branch repair chain, and
+# reconciles the single GitHub repair ticket for that chain.
+#
+# It is logic-free wiring: all behaviour lives in the canonical task-dag CLI
+# (`scripts/task-dag` + `scripts/task-dag.d/ci-*.sh`), checked out at the
+# pinned `ref`. The split is exact (design §3):
+#   - ordinary commit         -> `task-dag classify`
+#   - Tree-Fix* trailer commit -> `task-dag tree-fix-outcome`
+#   - both then               -> `task-dag repair-ticket` (reconcile the issue)
+#
+# Chain state is durable git refs in the CALLER repo:
+#   refs/heads/tasks/ci-chains/<owner>/<repo>/<branch>
+# so the token needs contents:write (push chain refs) + issues:write (file /
+# refresh / close the one `ci-broken-master`+`priority:high` repair ticket).
+#
+# INERT until a peer wires it: this file only defines the reusable workflow;
+# no peer caller references it yet (that is a separate, deferred peer child
+# epic — see issue #1 "Out of scope").
+
+on:
+  workflow_call:
+    inputs:
+      repo:
+        description: 'Target repo (owner/repo) whose chain + ticket are reconciled. Defaults to the caller repo.'
+        required: false
+        type: string
+        default: ''
+      branch:
+        description: 'Protected branch the required suite ran on.'
+        required: false
+        type: string
+        default: master
+      sha:
+        description: 'Commit SHA this CI run is about. Defaults to the caller event SHA.'
+        required: false
+        type: string
+        default: ''
+      result:
+        description: 'Precomputed aggregate result: green | red | unknown. Mutually exclusive with `gates`.'
+        required: false
+        type: string
+        default: ''
+      gates:
+        description: 'Whitespace/newline-separated required-gate conclusions (e.g. "success failure"). Aggregated by the CLI. Mutually exclusive with `result`.'
+        required: false
+        type: string
+        default: ''
+      current_head:
+        description: 'Known current branch HEAD; if empty the CLI reads origin. Stale (non-current) SHAs are ignored.'
+        required: false
+        type: string
+        default: ''
+      failure_signature:
+        description: 'Failure signature for a red Tree-Fix outcome (required by tree-fix-outcome on red; drives the block+page threshold).'
+        required: false
+        type: string
+        default: ''
+      threshold:
+        description: 'Same-signature continue-failure count that BLOCKs + pages (Tree-Fix red path). 0 = use CLI default.'
+        required: false
+        type: number
+        default: 0
+      ref:
+        description: 'task-dag ref to fetch the canonical CLI from (branch, tag, or SHA).'
+        required: false
+        type: string
+        default: master
+      dry_run:
+        description: 'Print intended mutations and change nothing (for inert validation / first wiring).'
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      token:
+        description: 'Token for git ref push + issue write on the target repo (needs contents:write, issues:write).'
+        required: true
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  classify:
+    runs-on: ubuntu-latest
+    # Serialize per repo+branch so out-of-order CI runs / continuation reds
+    # cannot race the chain ref or duplicate the repair ticket (design §4:
+    # cancel-in-progress MUST be false — never drop a classification).
+    concurrency:
+      group: ci-repair-${{ inputs.repo == '' && github.repository || inputs.repo }}-${{ inputs.branch }}
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout target repository
+        uses: actions/checkout@v4
+        with:
+          # Full history so --for-sha and parent classification resolve
+          # locally, and chain refs fetch/push cleanly.
+          fetch-depth: 0
+          token: ${{ secrets.token }}
+
+      - name: Checkout canonical task-dag CLI
+        uses: actions/checkout@v4
+        with:
+          repository: virusdave/task-dag
+          ref: ${{ inputs.ref }}
+          path: .task-dag-cli
+
+      - name: Classify CI result and reconcile repair ticket
+        env:
+          GH_TOKEN: ${{ secrets.token }}
+          IN_REPO: ${{ inputs.repo }}
+          IN_BRANCH: ${{ inputs.branch }}
+          IN_SHA: ${{ inputs.sha }}
+          IN_RESULT: ${{ inputs.result }}
+          IN_GATES: ${{ inputs.gates }}
+          IN_CURRENT_HEAD: ${{ inputs.current_head }}
+          IN_SIGNATURE: ${{ inputs.failure_signature }}
+          IN_THRESHOLD: ${{ inputs.threshold }}
+          IN_DRY_RUN: ${{ inputs.dry_run }}
+          DEFAULT_REPO: ${{ github.repository }}
+          DEFAULT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          TD="$GITHUB_WORKSPACE/.task-dag-cli/scripts/task-dag"
+          if [ ! -x "$TD" ]; then
+            echo "::error::task-dag CLI not found/executable at $TD" >&2
+            exit 1
+          fi
+
+          repo="${IN_REPO:-$DEFAULT_REPO}"
+          branch="${IN_BRANCH:-master}"
+          sha="${IN_SHA:-$DEFAULT_SHA}"
+
+          if [ -z "$repo" ] || [ -z "$sha" ]; then
+            echo "::error::repo and sha must resolve to non-empty values (repo='$repo' sha='$sha')" >&2
+            exit 1
+          fi
+
+          # Exactly one of result / gates must be supplied.
+          if [ -n "$IN_RESULT" ] && [ -n "$IN_GATES" ]; then
+            echo "::error::pass either 'result' or 'gates', not both" >&2
+            exit 1
+          fi
+          if [ -z "$IN_RESULT" ] && [ -z "$IN_GATES" ]; then
+            echo "::error::one of 'result' or 'gates' is required" >&2
+            exit 1
+          fi
+
+          # Build the result/gate args (mirrors classify/tree-fix-outcome).
+          result_args=()
+          if [ -n "$IN_RESULT" ]; then
+            result_args+=("--result=$IN_RESULT")
+          else
+            # shellcheck disable=SC2086 # intentional word-split of the gate list
+            for g in $IN_GATES; do
+              result_args+=("--gate=$g")
+            done
+          fi
+
+          opt_args=()
+          [ -n "$IN_CURRENT_HEAD" ] && opt_args+=("--current-head=$IN_CURRENT_HEAD")
+          dry=""
+          if [ "$IN_DRY_RUN" = "true" ]; then
+            dry="--dry-run"
+          fi
+
+          # Ordinary commit -> classify; Tree-Fix* trailer commit ->
+          # tree-fix-outcome (design §3: advance the chain head exactly once
+          # per commit, never via both paths).
+          tf_json="$("$TD" parse-tree-fix "$sha" --json)"
+          is_tree_fix="$(printf '%s' "$tf_json" | jq -r '.treeFix')"
+          echo "parse-tree-fix($sha): $tf_json"
+
+          if [ "$is_tree_fix" = "true" ]; then
+            tf_args=()
+            [ -n "$IN_SIGNATURE" ] && tf_args+=("--signature=$IN_SIGNATURE")
+            if [ -n "$IN_THRESHOLD" ] && [ "$IN_THRESHOLD" != "0" ]; then
+              tf_args+=("--threshold=$IN_THRESHOLD")
+            fi
+            echo "== tree-fix-outcome $repo@$branch ($sha) =="
+            "$TD" tree-fix-outcome "$repo" "$branch" \
+              --for-sha="$sha" \
+              "${result_args[@]}" \
+              ${opt_args[@]+"${opt_args[@]}"} \
+              ${tf_args[@]+"${tf_args[@]}"} \
+              $dry --json
+          else
+            echo "== classify $repo@$branch ($sha) =="
+            "$TD" classify "$repo" "$branch" \
+              --for-sha="$sha" \
+              "${result_args[@]}" \
+              ${opt_args[@]+"${opt_args[@]}"} \
+              $dry --json
+          fi
+
+          # Reconcile the single repair ticket against the (now-updated) chain
+          # ref: create/refresh/close exactly one ci-broken-master+priority:high
+          # ticket per open red streak. Idempotent + concurrency-safe.
+          echo "== repair-ticket $repo@$branch =="
+          "$TD" repair-ticket "$repo" "$branch" $dry --json
