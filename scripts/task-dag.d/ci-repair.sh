@@ -289,7 +289,7 @@ Options:
   --no-fetch           skip fetching the prior chain ref / branch tip object
 
 Reported action: open | continue | close | noop-green-noncurrent |
-                 noop-unknown | noop-green-nochain
+                 noop-unknown | noop-green-nochain | noop-blocked
 Ticket hint:     open (file ONE repair ticket) | close (close it) | none
 
 Exit: 0 applied/no-op  1 args  4 git/origin  5 CAS race  6 superseded/stale.
@@ -397,11 +397,16 @@ EOF
     else
         old="$(git rev-parse --verify --quiet "$ref" 2>/dev/null || true)"
     fi
-    local prior_state="" prior_first_red="" chain_open=false
+    # chain_open: an active red streak accepting plain continuations.
+    # chain_blocked: a chain parked by the tree-fix escalation threshold
+    # (design §3) — still ACTIVE (a green must close it) but NOT repairable, so
+    # a fresh red must NOT silently open a second chain over it.
+    local prior_state="" prior_first_red="" chain_open=false chain_blocked=false
     if [ -n "$old" ]; then
         prior_state="$(_cichain_field "$old" State)"
         prior_first_red="$(_cichain_field "$old" First-Red)"
         [ "$prior_state" = "red" ] && chain_open=true
+        [ "$prior_state" = "blocked" ] && chain_blocked=true
     fi
 
     # ── Decide the action ─────────────────────────────────────────────────
@@ -423,6 +428,11 @@ EOF
                 # First-Red. One chain per red streak.
                 action="continue"
                 write_args=(--state=red)
+            elif [ "$chain_blocked" = true ]; then
+                # The chain was parked by the tree-fix escalation threshold:
+                # a human is already paged. A further red must NOT reopen a new
+                # chain (that would un-block it); stand down.
+                action="noop-blocked"
             else
                 # Fresh red streak: open ONE chain anchored at First-Red here.
                 action="open"
@@ -437,13 +447,15 @@ EOF
                 # Green but not current: a newer commit may be red; never close
                 # or record off a stale green. "Close green only when current."
                 action="noop-green-noncurrent"
-            elif [ "$chain_open" = true ]; then
-                # Close the chain: green AND current (design §4).
+            elif [ "$chain_open" = true ] || [ "$chain_blocked" = true ]; then
+                # Close the chain: green AND current (design §4). Green recovers
+                # an escalation-BLOCKED chain too, clearing the repair fields.
                 action="close"
                 ticket="close"
                 write_args=(--state=green --last-green="$for_sha"
                             --set First-Red= --set Repair-Mode=
-                            --set Repair-Issue= --set Repair-Attempt=)
+                            --set Repair-Issue= --set Repair-Attempt=
+                            --set Fail-Signature= --set Same-Sig-Count=)
             else
                 # No open chain, current green: record the green watermark.
                 action="noop-green-nochain"
@@ -516,6 +528,417 @@ EOF
     fi
 
     _classify_report 0 true
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# tree-fix-outcome  (CI broken-master auto-repair, design §3)
+#
+# The TREE-FIX-AWARE outcome handler. The classifier dispatch is EXCLUSIVE: an
+# ordinary master commit goes to `classify` (§2); a commit carrying the Tree-Fix
+# / Tree-Fix-Chain / Tree-Fix-Mode trailers (a worker's repair attempt) goes
+# HERE instead, so the chain head is advanced exactly once per commit and the
+# idempotency guard below ("already the chain head") is unambiguous. This command
+# applies the design §3 escalation table:
+#
+#   | tree-fix outcome              | action                                  |
+#   |-------------------------------|-----------------------------------------|
+#   | master now GREEN              | close the chain + clear repair fields;  |
+#   |                               | caller closes the repair ticket.        |
+#   | RED, parent still in the chain| SAME chain; Repair-Mode=continue,       |
+#   | (continuation)                | Repair-Attempt++; caller files a new    |
+#   |                               | CONTINUE-mode repair task (no first-red |
+#   |                               | back-off). State stays red.             |
+#   | RED, parent was GREEN         | NEW regression: open a fresh initial    |
+#   | (no open chain)               | chain anchored at the tree-fix commit.  |
+#   | repeated continue failures    | after a small threshold, State=blocked  |
+#   | with the SAME signature       | + page once; stop churning continue     |
+#   |                               | tasks (a human takes over).             |
+#
+# Like `classify`, this command is PURE: it only drives the durable chain state
+# (CAS-bound, currency- and stale-safe) and REPORTS hints. It never touches
+# GitHub or pages directly — it reports ticketAction (open|close|update|block|
+# none), taskAction (initial|continue|none) and page (true|false) so the
+# GitHub-side caller (`repair-ticket`) files the one ticket / continue task and
+# the operator-pager acts on them idempotently (same separation as classify).
+#
+# The design's ESCALATED state is represented as State=red + Repair-Mode=continue
+# + Repair-Attempt++ (NOT a distinct State value), so the existing classify /
+# repair-ticket / verify-target consumers keep treating the chain as an open,
+# repairable red streak. Only the threshold BLOCK persists State=blocked, which
+# those consumers now understand as "active but not repairable" (a green still
+# closes it; a fresh red does not reopen it).
+#
+# Same-signature thresholding (design §3) needs to know whether successive
+# failures are "the same". The CLI cannot read CI logs, so the caller passes the
+# failure signature (e.g. a hash of the failing required-gate / test set) via
+# --signature; we persist it (Fail-Signature) plus the consecutive same-signature
+# count (Same-Sig-Count) on the chain and BLOCK when the count reaches
+# --threshold (default 3).
+#
+# Usage:
+#   task-dag tree-fix-outcome <owner/repo> <branch> --for-sha=<commit>
+#       (--result=green|red|unknown | --gate=<conclusion> [--gate=...])
+#       --signature=<sig>        (REQUIRED when the result is red)
+#       [--threshold=<n>] [--current-head=<sha>] [--allow-stale]
+#       [--dry-run] [--json] [--no-fetch]
+#
+# Exit codes:
+#   0  handled; the resulting action was applied (or a valid no-op)
+#   1  argument error / <for-sha> is not a tree-fix commit
+#   2  malformed Tree-Fix* trailers on <for-sha>
+#   4  git/origin error
+#   5  lost the chain-write CAS race
+#   6  superseded/stale: ignored relative to the current branch HEAD / chain
+# ---------------------------------------------------------------------------
+cmd_tree_fix_outcome() {
+    local repo="" branch="" for_sha="" result="" current_head="" signature=""
+    local threshold=3 allow_stale=false dry_run=false json=false do_fetch=true
+    local -a gates=()
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --for-sha=*) for_sha="${1#*=}"; shift ;;
+            --result=*) result="${1#*=}"; shift ;;
+            --gate=*) gates+=("${1#*=}"); shift ;;
+            --gate)
+                shift
+                [ $# -gt 0 ] || { echo "Error: --gate requires a value" >&2; return 1; }
+                gates+=("$1"); shift ;;
+            --signature=*) signature="${1#*=}"; shift ;;
+            --threshold=*) threshold="${1#*=}"; shift ;;
+            --current-head=*) current_head="${1#*=}"; shift ;;
+            --allow-stale) allow_stale=true; shift ;;
+            --dry-run) dry_run=true; shift ;;
+            --json) json=true; shift ;;
+            --no-fetch) do_fetch=false; shift ;;
+            --help | -h)
+                cat <<EOF
+Usage: task-dag tree-fix-outcome <owner/repo> <branch> --for-sha=<commit> \\
+         (--result=green|red|unknown | --gate=<conclusion> [--gate=...]) \\
+         --signature=<sig> [options]
+
+CI broken-master auto-repair tree-fix outcome handler (design §3). Interprets
+the result of a commit carrying Tree-Fix* trailers and drives the §3 escalation:
+green closes the chain; a continuation red escalates to Repair-Mode=continue
+(Repair-Attempt++) and asks the caller to file a continue-mode repair task; a
+red whose parent was green opens a fresh initial chain; repeated same-signature
+continue failures BLOCK the chain + page after --threshold. Pure: drives chain
+state + reports hints, never touches GitHub.
+
+Result (pick one):
+  --result=<v>         green | red | unknown (precomputed aggregate)
+  --gate=<conclusion>  a required-gate conclusion (repeatable); aggregated as
+                       red (any failure) > unknown (any pending/other) > green
+
+Options:
+  --for-sha=<commit>   REQUIRED; the tree-fix commit this CI run is about
+  --signature=<sig>    REQUIRED when the result is red; identifies the failure
+                       so repeated SAME-signature continue failures can block
+  --threshold=<n>      same-signature continue failures before BLOCK (def 3)
+  --current-head=<sha> the live branch tip (default: origin ls-remote)
+  --allow-stale        act even when --for-sha is superseded by the branch tip
+  --dry-run            compute + report without writing chain state
+  --json               machine-readable result
+  --no-fetch           skip fetching the prior chain ref / branch tip object
+
+Reported action: close | continue | block | open-regression | noop-blocked |
+                 noop-already-open | noop-already-processed | noop-green-nochain |
+                 noop-green-noncurrent | noop-green-otherchain | noop-stale |
+                 noop-stale-otherchain | noop-unknown
+Ticket hint:     open | close | update | block | none
+Task hint:       initial | continue | none
+
+Exit: 0 applied/no-op  1 args/not-tree-fix  2 malformed trailers
+      4 git/origin  5 CAS race  6 superseded/stale.
+EOF
+                return 0
+                ;;
+            -*) echo "Unknown option: $1" >&2; return 1 ;;
+            *)
+                if [ -z "$repo" ]; then repo="$1"
+                elif [ -z "$branch" ]; then branch="$1"
+                else echo "Unexpected argument: $1" >&2; return 1
+                fi
+                shift
+                ;;
+        esac
+    done
+
+    if [ -z "$repo" ] || [ -z "$branch" ]; then
+        echo "Error: <owner/repo> and <branch> are required" >&2
+        return 1
+    fi
+    if [ -z "$for_sha" ]; then
+        echo "Error: --for-sha=<commit> is required" >&2
+        return 1
+    fi
+    if [ -z "$result" ] && [ "${#gates[@]}" -eq 0 ]; then
+        echo "Error: pass --result=<v> or at least one --gate=<conclusion>" >&2
+        return 1
+    fi
+    if [ -n "$result" ] && [ "${#gates[@]}" -gt 0 ]; then
+        echo "Error: pass either --result or --gate(s), not both" >&2
+        return 1
+    fi
+    if ! printf '%s' "$threshold" | grep -Eq '^[0-9]+$' || [ "$threshold" -lt 1 ]; then
+        echo "Error: --threshold must be a positive integer (got '$threshold')" >&2
+        return 1
+    fi
+
+    # Resolve --for-sha to a full local commit object (same contract as classify).
+    local for_sha_full
+    if ! for_sha_full="$(git rev-parse --verify --quiet "${for_sha}^{commit}" 2>/dev/null)"; then
+        echo "Error: --for-sha must resolve to a commit object present locally (got '$for_sha')" >&2
+        return 1
+    fi
+    for_sha="$for_sha_full"
+
+    # Aggregate the classification.
+    if [ -z "$result" ]; then
+        result="$(_ci_aggregate_gates "${gates[@]}")"
+    fi
+    case "$result" in
+        green | red | unknown) ;;
+        *) echo "Error: --result must be green|red|unknown (got '$result')" >&2; return 1 ;;
+    esac
+    if [ "$result" = "red" ]; then
+        case "$signature" in
+            "" )
+                echo "Error: --signature is required for a red tree-fix outcome (same-signature thresholding)" >&2
+                return 1 ;;
+            *$'\n'* | *$'\r'* )
+                # The signature is persisted into a single-line chain-state
+                # commit field; a newline would corrupt the message format.
+                echo "Error: --signature must be a single-line value" >&2
+                return 1 ;;
+        esac
+    fi
+
+    # ── This MUST be a tree-fix commit (design §3 applies only to those) ───
+    local tf_json tf_rc=0
+    tf_json="$(cmd_parse_tree_fix "$for_sha" --json 2>/dev/null)" || tf_rc=$?
+    if [ "$tf_rc" -eq 2 ]; then
+        echo "Error: $for_sha carries malformed Tree-Fix* trailers; cannot interpret its outcome" >&2
+        return 2
+    fi
+    if ! printf '%s' "$tf_json" | grep -q '"treeFix":true'; then
+        echo "Error: $for_sha is not a tree-fix commit (no Tree-Fix trailers); use 'classify' for ordinary commits" >&2
+        return 1
+    fi
+    local tf_chain tf_mode
+    tf_chain="$(printf '%s' "$tf_json" | sed -E 's/.*"chain":"([^"]*)".*/\1/;t;d')"
+    tf_mode="$(printf '%s' "$tf_json" | sed -E 's/.*"mode":"([^"]*)".*/\1/;t;d')"
+
+    # ── Currency (design §4): act relative to the current branch HEAD ──────
+    # (identical model to classify: act only on the live tip; fail closed if it
+    # cannot be established; superseded SHAs are ignored unless --allow-stale.)
+    local tip="" tip_known=false
+    if [ -n "$current_head" ]; then
+        tip="$(git rev-parse --verify --quiet "${current_head}^{commit}" 2>/dev/null || true)"
+        if [ -z "$tip" ]; then
+            if printf '%s' "$current_head" | grep -Eq '^[0-9a-f]{40,64}$'; then
+                tip="$current_head"
+            else
+                echo "Error: --current-head must resolve to a commit or be a full SHA (got '$current_head')" >&2
+                return 1
+            fi
+        fi
+        tip_known=true
+    else
+        local lsr
+        if lsr="$(git ls-remote origin "refs/heads/${branch}" 2>/dev/null)"; then
+            tip="$(printf '%s' "$lsr" | awk '{print $1; exit}')"
+            [ -n "$tip" ] && tip_known=true
+        fi
+    fi
+    local is_current=false
+    if [ "$tip_known" = true ]; then
+        [ "$tip" = "$for_sha" ] && is_current=true
+    elif [ "$allow_stale" = false ]; then
+        echo "Error: cannot determine the live HEAD of $repo@$branch; pass --current-head or --allow-stale" >&2
+        return 4
+    fi
+
+    # ── Prior chain state ─────────────────────────────────────────────────
+    local ref old=""
+    ref="$(_cichain_ref "$repo" "$branch")"
+    if [ "$do_fetch" = true ]; then
+        if old="$(_cichain_remote_sha "$ref")"; then
+            [ -n "$old" ] && _cichain_fetch "$ref"
+        else
+            old="$(git rev-parse --verify --quiet "$ref" 2>/dev/null || true)"
+        fi
+    else
+        old="$(git rev-parse --verify --quiet "$ref" 2>/dev/null || true)"
+    fi
+    local p_head="" p_state="" p_first_red="" p_attempt="" p_sig="" p_count=""
+    if [ -n "$old" ]; then
+        p_head="$(_cichain_field "$old" Current-Head)"
+        p_state="$(_cichain_field "$old" State)"
+        p_first_red="$(_cichain_field "$old" First-Red)"
+        p_attempt="$(_cichain_field "$old" Repair-Attempt)"
+        p_sig="$(_cichain_field "$old" Fail-Signature)"
+        p_count="$(_cichain_field "$old" Same-Sig-Count)"
+    fi
+    # Sanitise the persisted counters before any arithmetic (set -e would abort
+    # on a non-numeric `$(( ))`); a malformed field is treated as unset.
+    printf '%s' "$p_attempt" | grep -Eq '^[0-9]+$' || p_attempt=""
+    printf '%s' "$p_count" | grep -Eq '^[0-9]+$' || p_count=""
+    local chain_active=false ours=false
+    { [ "$p_state" = "red" ] || [ "$p_state" = "blocked" ]; } && chain_active=true
+    [ -n "$p_first_red" ] && [ "$p_first_red" = "$tf_chain" ] && ours=true
+
+    # ── Decide the action ─────────────────────────────────────────────────
+    local action="" ticket="none" task="none" page=false
+    local new_attempt="$p_attempt" new_sig="$p_sig" new_count="$p_count"
+    local -a write_args=()
+    case "$result" in
+        unknown)
+            # A transient unknown must never open/close/escalate a chain.
+            action="noop-unknown"
+            ;;
+        green)
+            if [ "$is_current" = false ] && [ "$allow_stale" = false ]; then
+                action="noop-green-noncurrent"
+            elif [ "$chain_active" = true ] && [ "$ours" = true ]; then
+                # The fix worked: close OUR chain + clear repair/signature fields.
+                action="close"; ticket="close"
+                write_args=(--state=green --last-green="$for_sha"
+                            --set First-Red= --set Repair-Mode=
+                            --set Repair-Issue= --set Repair-Attempt=
+                            --set Fail-Signature= --set Same-Sig-Count=)
+            elif [ "$chain_active" = true ]; then
+                # Green, current, but a DIFFERENT chain is open: never close
+                # someone else's streak (stale/race).
+                action="noop-green-otherchain"
+            else
+                # Nothing open: record the green watermark (idempotent).
+                action="noop-green-nochain"
+                write_args=(--state=green --last-green="$for_sha")
+            fi
+            ;;
+        red)
+            if [ "$is_current" = false ] && [ "$allow_stale" = false ]; then
+                action="noop-stale"
+            elif [ "$p_state" = "blocked" ] && [ "$ours" = true ]; then
+                # Already parked by the threshold; a human is paged. Stand down.
+                action="noop-blocked"
+            elif [ "$p_state" = "red" ] && [ "$ours" = true ] && [ "$p_head" = "$for_sha" ]; then
+                # This exact tree-fix outcome is already the chain head: a
+                # re-delivered/duplicate CI run. Do NOT increment the attempt /
+                # same-signature count again (that would inflate the counters
+                # and could falsely trip the block threshold without any new
+                # repair attempt). Idempotent no-op.
+                action="noop-already-processed"
+            elif [ "$p_state" = "red" ] && [ "$ours" = true ]; then
+                # ── Continuation of OUR red chain: escalate or block ───────
+                if [ -n "$p_sig" ] && [ "$signature" = "$p_sig" ]; then
+                    new_count=$(( ${p_count:-0} + 1 ))
+                else
+                    new_count=1
+                fi
+                new_sig="$signature"
+                new_attempt=$(( ${p_attempt:-1} + 1 ))
+                if [ "$new_count" -ge "$threshold" ]; then
+                    # Repeated same-signature failures: BLOCK + page once,
+                    # instead of churning continue tasks forever (design §3).
+                    action="block"; ticket="block"; task="none"; page=true
+                    write_args=(--state=blocked --repair-mode=continue
+                                --repair-attempt="$new_attempt"
+                                --set "Fail-Signature=$new_sig"
+                                --set "Same-Sig-Count=$new_count")
+                else
+                    # Escalate the SAME chain to continue-mode (no first-red
+                    # back-off). State stays red so the existing consumers keep
+                    # treating it as an open, repairable streak.
+                    action="continue"; ticket="update"; task="continue"
+                    write_args=(--state=red --repair-mode=continue
+                                --repair-attempt="$new_attempt"
+                                --set "Fail-Signature=$new_sig"
+                                --set "Same-Sig-Count=$new_count")
+                fi
+            elif [ "$chain_active" = false ]; then
+                # No open chain (parent was green / chain already closed): this
+                # is a NEW regression, not "more failures remain". Open a fresh
+                # initial-mode chain anchored at the tree-fix commit.
+                action="open-regression"; ticket="open"; task="initial"
+                new_attempt=1; new_sig=""; new_count=""
+                write_args=(--state=red --first-red="$for_sha"
+                            --repair-mode=initial --repair-attempt=1
+                            --set Fail-Signature= --set Same-Sig-Count=)
+            elif [ "$p_state" = "red" ] && [ "$p_first_red" = "$for_sha" ]; then
+                # A concurrent run already opened this regression as the chain
+                # anchor; idempotent no-op (don't double-open).
+                action="noop-already-open"
+            else
+                # A DIFFERENT chain is active and this fix did not target it:
+                # refuse to clobber it / open a second chain (stale/race).
+                action="noop-stale-otherchain"
+            fi
+            ;;
+    esac
+
+    # ── Report ────────────────────────────────────────────────────────────
+    _tfo_report() { # <rc> <applied:true|false>
+        local rc="$1" applied="$2" tk="$ticket" tsk="$task" pg="$page"
+        if [ "$applied" != true ]; then tk="none"; tsk="none"; pg=false; fi
+        if [ "$json" = true ]; then
+            printf '{"result":"%s","action":"%s","ticket":"%s","task":"%s","page":%s,"current":%s,"applied":%s,"ref":"%s","forSha":"%s","chain":"%s","mode":"%s","firstRed":"%s","priorState":"%s","repairAttempt":"%s","failSignature":"%s","sameSigCount":"%s","threshold":%s,"rc":%s}\n' \
+                "$result" "$action" "$tk" "$tsk" "$pg" "$is_current" "$applied" \
+                "$(_cichain_jstr "$ref")" "$for_sha" "$(_cichain_jstr "$tf_chain")" \
+                "$(_cichain_jstr "$tf_mode")" "$(_cichain_jstr "${p_first_red:-}")" \
+                "$(_cichain_jstr "${p_state:-}")" "$(_cichain_jstr "${new_attempt:-}")" \
+                "$(_cichain_jstr "${new_sig:-}")" "$(_cichain_jstr "${new_count:-}")" \
+                "$threshold" "$rc"
+        else
+            printf "${BOLD}tree-fix-outcome %s@%s${RESET} result=%s action=%s ticket=%s task=%s page=%s (current=%s applied=%s rc=%s)\n" \
+                "$repo" "$branch" "$result" "$action" "$tk" "$tsk" "$pg" "$is_current" "$applied" "$rc"
+        fi
+    }
+
+    # Stale red relative to the live HEAD: ignore (design §4).
+    if [ "$action" = "noop-stale" ]; then
+        [ "$json" = false ] && printf "${YELLOW}Superseded CI run: %s is not the current %s HEAD — ignoring (design §4).${RESET}\n" "$for_sha" "$branch" >&2
+        _tfo_report 6 false
+        return 6
+    fi
+    if [ "$action" = "noop-stale-otherchain" ]; then
+        [ "$json" = false ] && printf "${YELLOW}Tree-fix targets chain %s but %s@%s has a different active chain (first-red %s) — refusing to clobber it.${RESET}\n" "$tf_chain" "$repo" "$branch" "$p_first_red" >&2
+        _tfo_report 6 false
+        return 6
+    fi
+
+    # Pure no-ops (nothing to persist).
+    if [ "${#write_args[@]}" -eq 0 ]; then
+        _tfo_report 0 false
+        return 0
+    fi
+
+    if [ "$dry_run" = true ]; then
+        [ "$json" = false ] && printf "${BLUE}(dry-run: would chain-write %s)${RESET}\n" "${write_args[*]}" >&2
+        _tfo_report 0 false
+        return 0
+    fi
+
+    # ── Apply via the CAS/stale-safe primitive ────────────────────────────
+    local -a extra=(--expect-old="$old")
+    [ "$allow_stale" = true ] && extra+=(--allow-stale)
+    local wrc=0 wout
+    wout="$(cmd_chain_write "$repo" "$branch" --for-sha="$for_sha" --json \
+        "${extra[@]}" "${write_args[@]}" 2>&1)" || wrc=$?
+    if [ "$wrc" -ne 0 ]; then
+        if [ "$json" = false ]; then
+            printf "${RED}tree-fix-outcome: chain-write failed (rc=%s) for %s@%s action=%s${RESET}\n" \
+                "$wrc" "$repo" "$branch" "$action" >&2
+            printf '%s\n' "$wout" >&2
+        else
+            _tfo_report "$wrc" false
+        fi
+        return "$wrc"
+    fi
+
+    _tfo_report 0 true
     return 0
 }
 
@@ -822,6 +1245,7 @@ EOF
 }
 
 cmd_repair_ticket() {
+    local rt_exit=0
     local repo="" branch="" title="" lease_ttl="$_RT_LEASE_TTL_DEFAULT"
     local dry_run=false json=false do_fetch=true
 
@@ -958,6 +1382,73 @@ EOF
             || echo "Warning: failed to close repair ticket #$num on $repo" >&2
     }
 
+    # Ensure EXACTLY ONE actionable continue-mode repair task exists for the
+    # current attempt (design §3: "one repair issue per chain plus new
+    # actionable tasks per failed attempt"). The comment is INTENTIONALLY
+    # ingestable: its first non-blank line is prose (no leading "<!--") and the
+    # dedup marker is NOT a `task-dag:` marker, so the comment->task sync mints
+    # it as a fresh pickable continue task — unlike the body refresh (an edit,
+    # which the sync ignores) and unlike status comments (which it skips).
+    #
+    # Concurrency: the dedup (read comments, post if the per-(first-red,attempt)
+    # marker is absent) is idempotent for SERIAL reruns. It relies on the
+    # classifier's per-repo/branch Actions concurrency group (design §4,
+    # cancel-in-progress:false) serialising repair-ticket runs for one chain; it
+    # is not independently safe against two truly-parallel runners. It FAILS
+    # CLOSED if the comment lookup errors (rc 4), so a transient GitHub failure
+    # can never be mistaken for "no task yet" and post a duplicate.
+    _rt_ensure_continue_task() { # <ticket> <first_red> <cur_head> <attempt>
+        local tnum="$1" fr="$2" head="$3" att="$4"
+        local cmark="<!-- ci-repair-continue:v1 first-red=${fr} attempt=${att} -->"
+        if [ "$_rt_dry" = true ]; then
+            echo "(dry-run) would ensure continue-mode task comment on #$tnum (attempt $att)" >&2
+            return 0
+        fi
+        local existing view_rc=0
+        existing="$(gh issue view "$tnum" --repo "$repo" --json comments \
+            --jq '.comments[].body' 2>/dev/null)" || view_rc=$?
+        if [ "$view_rc" -ne 0 ]; then
+            echo "Error: failed to read comments for repair ticket #$tnum on $repo (failing closed, not posting)" >&2
+            return 4
+        fi
+        if printf '%s' "$existing" | grep -qF "$cmark"; then
+            return 0
+        fi
+        local cbody ctf
+        cbody="$(cat <<EOF
+Repair attempt ${att} for \`${repo}@${branch}\`: the previous tree-fix did **not** turn \`${branch}\` green — additional failures remain. Repair the **current red \`${branch}\` tip** (do NOT apply the first-red back-off heuristic).
+
+${cmark}
+
+- First red: \`${fr}\`
+- Current head: \`${head}\`
+- Repair mode: \`continue\`
+- Repair attempt: \`${att}\`
+- Repair ticket: #${tnum}
+
+Before working, confirm this chain is still yours:
+\`task-dag verify-target ${repo} ${branch} --target-sha=${fr} --mode=continue --attempt=${att}\`
+
+Stamp the fix commit with these trailers so the classifier interprets the outcome:
+
+\`\`\`text
+Tree-Fix: ${repo}#${tnum}
+Tree-Fix-Chain: ${fr}
+Tree-Fix-Mode: continue
+\`\`\`
+EOF
+)"
+        ctf="$(mktemp)"
+        printf '%s' "$cbody" > "$ctf"
+        local post_rc=0
+        gh issue comment "$tnum" --repo "$repo" --body-file "$ctf" >/dev/null 2>&1 || post_rc=$?
+        rm -f "$ctf"
+        if [ "$post_rc" -ne 0 ]; then
+            echo "Warning: failed to post continue-mode task comment on #$tnum (will retry next reconcile)" >&2
+            return 4
+        fi
+    }
+
     if [ "$state" = "red" ]; then
         # Stale prior-streak tickets must be closed so a fresh streak is not
         # silently mistaken for a continuation (and so "one per chain" holds).
@@ -1078,6 +1569,38 @@ EOF
             fi
             action="updated${action:+,$action}"
         fi
+
+        # Escalated chains (Repair-Mode=continue, attempt >= 2) get one fresh
+        # actionable continue-mode task per attempt; an initial chain (attempt
+        # 1) needs none — the repair ticket itself is the initial task. A
+        # failure here is non-fatal to the ticket reconcile but is surfaced so
+        # the workflow reruns (idempotent) until the task is filed.
+        if [ -n "$ticket_number" ] && [ "$mode" = "continue" ] \
+           && printf '%s' "$attempt" | grep -Eq '^[0-9]+$' && [ "$attempt" -ge 2 ]; then
+            _rt_ensure_continue_task "$ticket_number" "$first_red" "$cur_head" "$attempt" \
+                || rt_exit=4
+        fi
+    elif [ "$state" = "blocked" ]; then
+        # ── Escalation threshold tripped (design §3): the chain is parked ──
+        # awaiting a human. Stop the pickable repair task churning: close the
+        # auto-repair ticket(s) with a status-markered comment explaining a
+        # human has been paged. A later green reopens nothing (classify/
+        # tree-fix-outcome clear State on recovery).
+        local all=("${current[@]}" "${stale[@]}") c
+        if [ "${#all[@]}" -eq 0 ]; then
+            action="noop-blocked-no-ticket"
+        else
+            for c in "${all[@]}"; do
+                _rt_close "$c" "CI repair for \`${repo}@${branch}\` (first-red ${first_red}) is **BLOCKED**: repeated same-signature tree-fix attempts failed (attempt ${attempt:-?}), so the auto-repair chain was parked and a human was paged. This auto-filed repair task is closed to stop churn; resolve the break manually, then a green \`${branch}\` will clear the chain."
+            done
+            action="closed-blocked"
+        fi
+        # Clear the stale ticket cache either way (no pickable ticket on a
+        # parked chain).
+        if [ "$dry_run" = false ] && [ -n "$cache_issue" ]; then
+            cmd_chain_write "$repo" "$branch" --for-sha="$cur_head" \
+                --expect-old="$sha" --set "Repair-Issue=" >/dev/null 2>&1 || true
+        fi
     else
         # ── Not red (green/unknown/closed): close every open slot ticket ──
         local all=("${current[@]}" "${stale[@]}") c
@@ -1105,5 +1628,5 @@ EOF
         printf "${BOLD}repair-ticket %s@%s${RESET} state=%s action=%s ticket=%s\n" \
             "$repo" "$branch" "$state" "$action" "${ticket_number:-<none>}"
     fi
-    return 0
+    return "$rt_exit"
 }

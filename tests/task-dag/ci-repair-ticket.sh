@@ -93,6 +93,31 @@ case "$sub" in
     n="$1"; shift
     echo closed > "$GH_STATE/$n.state"
     ;;
+  view)
+    # `gh issue view <n> --json comments --jq '.comments[].body'` — emit each
+    # stored comment body on its own (the repair-ticket continue-task dedup
+    # only greps the output for its marker).
+    n="$1"; shift
+    for cf in "$GH_STATE/$n.c"*; do
+      [ -e "$cf" ] || continue
+      cat "$cf"; echo
+    done
+    ;;
+  comment)
+    # `gh issue comment <n> --body-file F` — append a comment body.
+    n="$1"; shift
+    cbody=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --body-file) cbody="$(cat "$2")"; shift 2;;
+        --body) cbody="$2"; shift 2;;
+        *) shift;;
+      esac
+    done
+    k=$(( $(cat "$GH_STATE/$n.cseq" 2>/dev/null || echo 0) + 1 ))
+    echo "$k" > "$GH_STATE/$n.cseq"
+    printf '%s' "$cbody" > "$GH_STATE/$n.c$k"
+    ;;
   *) echo "fake-gh: unsupported issue $sub" >&2; exit 99;;
 esac
 exit 0
@@ -299,6 +324,60 @@ if [ "$r1" -eq 1 ] && [ "$r2" -eq 1 ]; then
   ok "11: bad args rejected (missing branch, non-numeric --lease-ttl)"
 else
   bad "11: arg-validation r1=$r1 r2=$r2"
+fi
+
+# ---------------------------------------------------------------------------
+# TEST 12: a continue-mode escalation (Repair-Mode=continue, Repair-Attempt>=2)
+# posts EXACTLY ONE actionable continue-mode task comment per attempt, and is
+# idempotent on rerun (the ticket itself stays open — one ticket per chain).
+# ---------------------------------------------------------------------------
+"$TD" chain-write "$REPO" contb --for-sha="$C2" --state=red --first-red="$C2" \
+  --repair-mode=initial --repair-attempt=1 >/dev/null 2>&1
+"$TD" repair-ticket "$REPO" contb --json >/dev/null 2>&1
+TN=$(cf contb repairIssue)
+# Escalate the chain to continue-mode, attempt 2.
+"$TD" chain-write "$REPO" contb --for-sha="$C3" --state=red \
+  --repair-mode=continue --repair-attempt=2 \
+  --set "Fail-Signature=sigX" --set "Same-Sig-Count=1" >/dev/null 2>&1
+reset_log
+"$TD" repair-ticket "$REPO" contb --json >/dev/null 2>&1
+cnt1=$(grep -lF "ci-repair-continue:v1" "$GH_STATE/$TN.c"* 2>/dev/null | wc -l)
+"$TD" repair-ticket "$REPO" contb --json >/dev/null 2>&1
+cnt2=$(grep -lF "ci-repair-continue:v1" "$GH_STATE/$TN.c"* 2>/dev/null | wc -l)
+if [ -n "$TN" ] && [ "$(state_of "$TN")" = open ] && [ "$cnt1" -eq 1 ] && [ "$cnt2" -eq 1 ]; then
+  ok "12: continue-mode escalation posts exactly one actionable continue task (idempotent)"
+else
+  bad "12: continue TN=$TN state=$(state_of "$TN") cnt1=$cnt1 cnt2=$cnt2"
+fi
+
+# ---------------------------------------------------------------------------
+# TEST 13: that continue-task comment is INGESTABLE as a new pickable task —
+# its first non-blank line is prose (no leading "<!--") and it carries NO
+# `task-dag:` marker (so the comment->task sync mints it, not skips it).
+# ---------------------------------------------------------------------------
+ccf=$(grep -lF "ci-repair-continue:v1" "$GH_STATE/$TN.c"* 2>/dev/null | head -1)
+fnl=$(grep -m1 -v '^[[:space:]]*$' "$ccf" 2>/dev/null || true)
+if [ -n "$ccf" ] && [[ ! "$fnl" =~ ^[[:space:]]*\<\!-- ]] && ! grep -q "task-dag:" "$ccf"; then
+  ok "13: the continue task comment is ingestable (prose first line, no task-dag: marker)"
+else
+  bad "13: ingestable ccf=$ccf fnl=$fnl"
+fi
+
+# ---------------------------------------------------------------------------
+# TEST 14: a BLOCKED chain (escalation threshold tripped) closes the auto-repair
+# ticket with a status comment (stop churn; a human was paged).
+# ---------------------------------------------------------------------------
+"$TD" chain-write "$REPO" blockb --for-sha="$C2" --state=red --first-red="$C2" \
+  --repair-mode=initial --repair-attempt=1 >/dev/null 2>&1
+"$TD" repair-ticket "$REPO" blockb --json >/dev/null 2>&1
+BN=$(cf blockb repairIssue)
+"$TD" chain-write "$REPO" blockb --for-sha="$C3" --state=blocked \
+  --repair-mode=continue --repair-attempt=4 >/dev/null 2>&1
+out=$("$TD" repair-ticket "$REPO" blockb --json 2>/dev/null)
+if grep -q '"action":"closed-blocked"' <<<"$out" && [ -n "$BN" ] && [ "$(state_of "$BN")" = closed ]; then
+  ok "14: a blocked chain closes the auto-repair ticket (stop churn)"
+else
+  bad "14: blocked-close out=$out BN=$BN state=$(state_of "$BN")"
 fi
 
 echo "-----"

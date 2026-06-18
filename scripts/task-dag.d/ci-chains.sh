@@ -27,7 +27,8 @@
 #
 # The ref points at an empty-tree commit whose MESSAGE carries the design §1
 # fields (Current-Head, Last-Green, First-Red, State, Repair-Mode,
-# Repair-Issue, Repair-Attempt) plus Updated-At. Each write's first parent is
+# Repair-Issue, Repair-Attempt) plus the §3 escalation bookkeeping
+# (Fail-Signature, Same-Sig-Count) and Updated-At. Each write's first parent is
 # the prior chain commit, so `git log <ref>` is the chain's full audit
 # history. This is the same "metadata lives in the commit message, state in
 # the ref" convention the claim/cross-repo subsystems already use — no
@@ -58,7 +59,15 @@
 # cross-history supersession is layered on top by its caller.
 
 # Canonical field order for chain-state commit messages / output.
-_CICHAIN_FIELDS=(Current-Head Last-Green First-Red State Repair-Mode Repair-Issue Repair-Attempt)
+#
+# Fail-Signature / Same-Sig-Count are the tree-fix escalation bookkeeping
+# (design §3 "repeated continue failures with the same signature"): the most
+# recent failure signature seen on this chain, and the count of CONSECUTIVE
+# same-signature continuation failures, so `tree-fix-outcome` can BLOCK + page
+# after a small threshold instead of churning continue tasks forever. They are
+# inherited/written like every other field (chain-write only persists fields
+# listed here), and cleared whenever a chain closes green or a fresh chain opens.
+_CICHAIN_FIELDS=(Current-Head Last-Green First-Red State Repair-Mode Repair-Issue Repair-Attempt Fail-Signature Same-Sig-Count)
 
 # Helper: percent-encode a string to a single ref-safe path component.
 # Everything outside [A-Za-z0-9._-] becomes %XX so slashed/odd branch names

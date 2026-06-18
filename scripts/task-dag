@@ -441,6 +441,15 @@ CI BROKEN-MASTER AUTO-REPAIR:
                            Current-Head on continuation reds, close on
                            green only when current); ignores superseded
                            SHAs relative to the live branch HEAD
+    tree-fix-outcome <owner/repo> <branch> --for-sha=<commit> --signature=<s>
+                           Interpret the outcome of a Tree-Fix commit (design
+                           §3): green closes the chain; a continuation red
+                           escalates the SAME chain to continue-mode
+                           (Repair-Attempt++) and asks the caller to file a
+                           continue-mode repair task; a red with a green parent
+                           opens a fresh initial chain; repeated same-signature
+                           continue failures BLOCK + page after --threshold.
+                           Pure: drives chain state + reports hints.
     verify-target <owner/repo> <branch> --target-sha=<sha>
                            Worker preflight: confirm a repair target is still
                            the current, first-red, unclaimed chain head before
@@ -2572,6 +2581,7 @@ main() {
         close-epic) cmd_close_epic "$@" ;;
         parse-tree-fix) cmd_parse_tree_fix "$@" ;;
         classify) cmd_classify "$@" ;;
+        tree-fix-outcome) cmd_tree_fix_outcome "$@" ;;
         verify-target) cmd_verify_target "$@" ;;
         repair-ticket) cmd_repair_ticket "$@" ;;
         *)
