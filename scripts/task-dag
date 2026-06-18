@@ -441,6 +441,10 @@ CI BROKEN-MASTER AUTO-REPAIR:
                            Current-Head on continuation reds, close on
                            green only when current); ignores superseded
                            SHAs relative to the live branch HEAD
+    verify-target <owner/repo> <branch> --target-sha=<sha>
+                           Worker preflight: confirm a repair target is still
+                           the current, first-red, unclaimed chain head before
+                           doing work (read-only, fails closed)
 
     help                   Show this help
 
@@ -2561,6 +2565,7 @@ main() {
         close-epic) cmd_close_epic "$@" ;;
         parse-tree-fix) cmd_parse_tree_fix "$@" ;;
         classify) cmd_classify "$@" ;;
+        verify-target) cmd_verify_target "$@" ;;
         *)
             echo "Unknown command: $command" >&2
             echo "Run 'task-dag help' for usage" >&2

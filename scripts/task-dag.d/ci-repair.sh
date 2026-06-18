@@ -518,3 +518,210 @@ EOF
     _classify_report 0 true
     return 0
 }
+
+# ---------------------------------------------------------------------------
+# verify-target  (CI broken-master auto-repair, design §6 + §7)
+#
+# The WORKER VERIFIER: a read-only, fail-closed preflight a repair worker runs
+# BEFORE it spends effort fixing a broken master. It answers exactly one
+# question — "is my target still the current, first-red, unclaimed chain head?"
+# — so a worker never hand-implements the §6 currency contract and never burns
+# work on a chain that has since closed, escalated, or been claimed by a peer.
+#
+# It is PURE: it reads the authoritative chain-state ref on origin (and, when
+# asked, the authoritative claim ref) and mutates nothing. Origin is the source
+# of truth; if origin cannot be reached it FAILS CLOSED (a worker must not act
+# on a stale local view of whether its target is still live).
+#
+# A repair worker's "target" is the chain it was dispatched to fix, identified
+# by the chain anchor First-Red (the same value its eventual fix commit records
+# as `Tree-Fix-Chain:`). The gate passes only when ALL of these hold:
+#
+#   * a chain exists for <owner/repo>@<branch>;
+#   * State == red             (the chain is still OPEN — not closed green);
+#   * First-Red == --target-sha (it is the SAME chain, still anchored here —
+#                                not a fresh chain opened after a close);
+#   * Repair-Issue  == --repair-issue   (if given: same repair ticket);
+#   * Repair-Mode   == --mode           (if given: initial vs continue);
+#   * Repair-Attempt== --attempt        (if given: not superseded by a retry);
+#   * no active claim exists for --task  (if given: nobody else owns it).
+#
+# Any failure means the worker MUST NOT proceed: its target is no longer the
+# current first-red unclaimed chain head.
+#
+# Usage:
+#   task-dag verify-target <owner/repo> <branch> --target-sha=<sha>
+#       [--repair-issue=<n>] [--mode=initial|continue] [--attempt=<n>]
+#       [--task=<task-sha>] [--json] [--no-fetch]
+#
+# Exit codes:
+#   0  verified — the target is the current first-red unclaimed chain head
+#   1  argument error
+#   3  no chain state exists for this repo/branch (nothing to repair)
+#   4  origin unreachable / git error — fail closed
+#   5  the repair task is already claimed by another worker
+#   6  not the current first-red head (closed, escalated, or wrong chain)
+# ---------------------------------------------------------------------------
+cmd_verify_target() {
+    local repo="" branch="" target="" repair_issue="" mode="" attempt="" task=""
+    local json=false do_fetch=true
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --target-sha=*) target="${1#*=}"; shift ;;
+            --repair-issue=*) repair_issue="${1#*=}"; shift ;;
+            --mode=*) mode="${1#*=}"; shift ;;
+            --attempt=*) attempt="${1#*=}"; shift ;;
+            --task=*) task="${1#*=}"; shift ;;
+            --json) json=true; shift ;;
+            --no-fetch) do_fetch=false; shift ;;
+            --help | -h)
+                cat <<EOF
+Usage: task-dag verify-target <owner/repo> <branch> --target-sha=<sha> [options]
+
+CI broken-master auto-repair WORKER VERIFIER (design §6 + §7). A read-only,
+fail-closed preflight a repair worker runs before fixing a broken master: it
+confirms its target is still the current, first-red, unclaimed chain head.
+Origin is the source of truth; mutates nothing; fails closed if unreachable.
+
+Required:
+  --target-sha=<sha>   the chain anchor (First-Red) the worker is repairing
+
+Options (each, when given, must match the live chain state):
+  --repair-issue=<n>   the repair ticket recorded on the chain
+  --mode=<m>           expected Repair-Mode: initial | continue
+  --attempt=<n>        expected Repair-Attempt (catches a superseding retry)
+  --task=<task-sha>    repair task SHA; fail if another worker holds its claim
+  --json               machine-readable result
+  --no-fetch           read the last-known LOCAL chain ref (no origin round-trip)
+
+Passes (exit 0) only when: a chain exists, State=red, First-Red=target, and
+every supplied --repair-issue/--mode/--attempt matches and --task is unclaimed.
+
+Exit: 0 verified  1 args  3 no chain  4 origin/git (fail closed)
+      5 claimed by another worker  6 not the current first-red head.
+EOF
+                return 0
+                ;;
+            -*) echo "Unknown option: $1" >&2; return 1 ;;
+            *)
+                if [ -z "$repo" ]; then repo="$1"
+                elif [ -z "$branch" ]; then branch="$1"
+                else echo "Unexpected argument: $1" >&2; return 1
+                fi
+                shift
+                ;;
+        esac
+    done
+
+    if [ -z "$repo" ] || [ -z "$branch" ]; then
+        echo "Error: <owner/repo> and <branch> are required" >&2
+        return 1
+    fi
+    if [ -z "$target" ]; then
+        echo "Error: --target-sha=<sha> is required" >&2
+        return 1
+    fi
+    if [ -n "$mode" ] && [ "$mode" != "initial" ] && [ "$mode" != "continue" ]; then
+        echo "Error: --mode must be 'initial' or 'continue' (got '$mode')" >&2
+        return 1
+    fi
+
+    # Normalise the target to a full commit SHA when the object is present
+    # locally (same contract as classify/chain-write); otherwise accept a bare
+    # full SHA literally so a worker on a shallow checkout can still verify.
+    local target_full
+    if target_full="$(git rev-parse --verify --quiet "${target}^{commit}" 2>/dev/null)"; then
+        target="$target_full"
+    elif ! printf '%s' "$target" | grep -Eq '^[0-9a-f]{40,64}$'; then
+        echo "Error: --target-sha must resolve to a commit object or be a full SHA (got '$target')" >&2
+        return 1
+    fi
+
+    # ── Read the authoritative chain state ────────────────────────────────
+    # Origin is the source of truth. Fail closed if it cannot be reached:
+    # a worker must never decide it is still the live target from stale local
+    # state. --no-fetch is the explicit "read my last-known local ref" override.
+    local ref sha=""
+    ref="$(_cichain_ref "$repo" "$branch")"
+    if [ "$do_fetch" = true ]; then
+        if sha="$(_cichain_remote_sha "$ref")"; then
+            [ -n "$sha" ] && _cichain_fetch "$ref"
+        else
+            if [ "$json" = true ]; then
+                printf '{"ok":false,"reason":"origin-error","repo":"%s","branch":"%s","ref":"%s","rc":4}\n' \
+                    "$(_cichain_jstr "$repo")" "$(_cichain_jstr "$branch")" "$(_cichain_jstr "$ref")"
+            else
+                printf "${RED}verify-target: cannot reach origin for %s@%s — failing closed.${RESET}\n" "$repo" "$branch" >&2
+            fi
+            return 4
+        fi
+    else
+        sha="$(git rev-parse --verify --quiet "$ref" 2>/dev/null || true)"
+    fi
+
+    # Fields (empty when the chain is absent).
+    local state="" first_red="" current_head="" last_green=""
+    local r_issue="" r_mode="" r_attempt=""
+    if [ -n "$sha" ]; then
+        state="$(_cichain_field "$sha" State)"
+        first_red="$(_cichain_field "$sha" First-Red)"
+        current_head="$(_cichain_field "$sha" Current-Head)"
+        last_green="$(_cichain_field "$sha" Last-Green)"
+        r_issue="$(_cichain_field "$sha" Repair-Issue)"
+        r_mode="$(_cichain_field "$sha" Repair-Mode)"
+        r_attempt="$(_cichain_field "$sha" Repair-Attempt)"
+    fi
+
+    # ── Claim state (optional) ────────────────────────────────────────────
+    # Claims live at refs/heads/tasks/active/<short> on origin (origin is
+    # authoritative; local refs may lag). A present claim means another worker
+    # already owns the repair task.
+    local claimed=false claim_short=""
+    if [ -n "$task" ]; then
+        claim_short="${task:0:7}"
+        if [ "$(task_is_claimed_on_remote "$claim_short")" = "yes" ]; then
+            claimed=true
+        fi
+    fi
+
+    # ── Verdict ───────────────────────────────────────────────────────────
+    local ok=false reason="" rc=0
+    if [ -z "$sha" ]; then
+        reason="no-chain"; rc=3
+    elif [ "$state" != "red" ]; then
+        reason="not-red"; rc=6
+    elif [ "$first_red" != "$target" ]; then
+        reason="not-first-red"; rc=6
+    elif [ -n "$repair_issue" ] && [ "$r_issue" != "$repair_issue" ]; then
+        reason="repair-issue-mismatch"; rc=6
+    elif [ -n "$mode" ] && [ "$r_mode" != "$mode" ]; then
+        reason="repair-mode-mismatch"; rc=6
+    elif [ -n "$attempt" ] && [ "$r_attempt" != "$attempt" ]; then
+        reason="repair-attempt-mismatch"; rc=6
+    elif [ "$claimed" = true ]; then
+        reason="claimed"; rc=5
+    else
+        ok=true; reason="current-first-red-unclaimed"; rc=0
+    fi
+
+    if [ "$json" = true ]; then
+        printf '{"ok":%s,"reason":"%s","repo":"%s","branch":"%s","ref":"%s","targetSha":"%s","chainCommit":"%s","state":"%s","firstRed":"%s","currentHead":"%s","lastGreen":"%s","repairIssue":"%s","repairMode":"%s","repairAttempt":"%s","claimed":%s,"rc":%s}\n' \
+            "$ok" "$reason" \
+            "$(_cichain_jstr "$repo")" "$(_cichain_jstr "$branch")" "$(_cichain_jstr "$ref")" \
+            "$target" "${sha:-}" \
+            "$(_cichain_jstr "$state")" "$(_cichain_jstr "$first_red")" \
+            "$(_cichain_jstr "$current_head")" "$(_cichain_jstr "$last_green")" \
+            "$(_cichain_jstr "$r_issue")" "$(_cichain_jstr "$r_mode")" "$(_cichain_jstr "$r_attempt")" \
+            "$claimed" "$rc"
+    else
+        if [ "$ok" = true ]; then
+            printf "${GREEN}✓ verify-target %s@%s${RESET} target=%s is the current first-red unclaimed chain head (mode=%s attempt=%s issue=%s)\n" \
+                "$repo" "$branch" "$target" "$r_mode" "$r_attempt" "$r_issue"
+        else
+            printf "${YELLOW}✗ verify-target %s@%s${RESET} target=%s NOT the current first-red unclaimed chain head: %s (state=%s firstRed=%s claimed=%s rc=%s)\n" \
+                "$repo" "$branch" "$target" "$reason" "${state:-none}" "${first_red:-none}" "$claimed" "$rc" >&2
+        fi
+    fi
+    return "$rc"
+}
