@@ -425,6 +425,11 @@ CROSS-REPO COORDINATION:
                            Close the GitHub issue for an epic once all of
                            its tasks are complete
 
+CI BROKEN-MASTER AUTO-REPAIR:
+    parse-tree-fix [<commit-ish>] [--stdin] [--json]
+                           Parse Tree-Fix/Tree-Fix-Chain/Tree-Fix-Mode
+                           commit trailers (via git interpret-trailers)
+
     help                   Show this help
 
 OPTIONS:
@@ -2540,6 +2545,7 @@ main() {
         ingest-comment) cmd_ingest_comment "$@" ;;
         ingest-completion) cmd_ingest_completion "$@" ;;
         close-epic) cmd_close_epic "$@" ;;
+        parse-tree-fix) cmd_parse_tree_fix "$@" ;;
         *)
             echo "Unknown command: $command" >&2
             echo "Run 'task-dag help' for usage" >&2

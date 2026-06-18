@@ -13,13 +13,13 @@ TD="${1:-$(cd "$here/../../scripts" && pwd)/task-dag}"
 echo "Testing CLI: $TD"
 command -v shellcheck >/dev/null 2>&1 && {
     echo "== shellcheck =="
-    shellcheck -S error "$TD" "$(dirname "$TD")/task-dag.d/cross-repo.sh" || exit 1
+    shellcheck -S error "$TD" "$(dirname "$TD")/task-dag.d/cross-repo.sh" "$(dirname "$TD")/task-dag.d/ci-repair.sh" || exit 1
 }
 echo "== bash -n =="
-bash -n "$TD" && bash -n "$(dirname "$TD")/task-dag.d/cross-repo.sh" || exit 1
+bash -n "$TD" && bash -n "$(dirname "$TD")/task-dag.d/cross-repo.sh" && bash -n "$(dirname "$TD")/task-dag.d/ci-repair.sh" || exit 1
 
 rc=0
-for t in complete-safety.sh ingest-loop.sh ingest-selfheal.sh blocked-overlay.sh transitive-block.sh claim-pid.sh claim-force-steal.sh breakdown-self-claim.sh; do
+for t in complete-safety.sh ingest-loop.sh ingest-selfheal.sh blocked-overlay.sh transitive-block.sh claim-pid.sh claim-force-steal.sh breakdown-self-claim.sh tree-fix-trailers.sh; do
     echo "== $t =="
     bash "$here/$t" "$TD" || rc=1
 done
