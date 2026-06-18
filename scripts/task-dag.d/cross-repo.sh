@@ -92,20 +92,120 @@ _xrepo_current_repo() {
     esac
 }
 
-# Helper: determine a GitHub issue's state ("open"/"closed", lowercased;
-# empty if undeterminable) for the current repo. Prefers the ISSUE_STATE
-# env var exported by the comment/issue reusable workflows (cheap, no API
-# call); falls back to `gh issue view`. Used to gate epic self-heal: only
-# OPEN issues may have a missing dispatch root re-created (see
-# _xrepo_ingest_human_comment).
-_xrepo_issue_state() {
-    local issue="$1" state=""
-    if [ -n "${ISSUE_STATE:-}" ]; then
-        state="$ISSUE_STATE"
-    elif command -v gh >/dev/null 2>&1; then
-        state="$(gh issue view "$issue" --json state -q .state 2>/dev/null || true)"
+# Helper: resolve an issue's epic ref, BACKFILLING it if it is missing.
+# Echoes the epic commit SHA on stdout.
+#
+# Every cross-repo path that needs an issue's epic (its DAG root and the
+# parent anchor for child nodes) should call this instead of looking the
+# ref up directly and dying when it is absent. An epic ref can legitimately
+# be missing: the issue's first-sighting issue-to-task run may never have
+# created one — e.g. the repo's task-dag.yml was broken / mid-migration
+# when the issue was opened, or the issue predates task-dag. That left a
+# permanent gap where every later operation that needed the epic
+# (ingest-comment, delegate, …) died and silently dropped the work
+# (virusdave/top-level#28).
+#
+# When the epic is missing we recreate it exactly as create-task-commit.sh
+# does on first sighting — an empty-tree commit anchored to HEAD, with the
+# refs tasks/pending/<N> + gh/issues/<N>, pushed atomically and
+# race-tolerantly — and annotate the commit body (Backfilled: true) so the
+# data is self-documenting. We deliberately do NOT apply any issue-state
+# policy here: whether a (possibly closed) issue should actually be worked
+# is the dispatcher's job — github-worker gates every task it claims on the
+# live GitHub issue state (closed → skipped + pruned). task-dag's only job
+# is to keep the DAG consistent so nothing is silently lost.
+#
+# Backfill metadata is taken from the ISSUE_TITLE/ISSUE_AUTHOR/ISSUE_URL/
+# ISSUE_BODY env exported by the issue/comment reusable workflows; when
+# those are absent (e.g. the delegate path) it falls back to `gh issue
+# view`. If neither yields a title, it dies rather than write a junk epic.
+_xrepo_ensure_issue_epic() {
+    local issue="$1"
+    local gh_issues_ref="refs/heads/gh/issues/${issue}"
+    local pending_ref="refs/heads/tasks/pending/${issue}"
+
+    local epic_sha
+    epic_sha="$(git rev-parse --verify "$gh_issues_ref" 2>/dev/null || true)"
+    if [ -z "$epic_sha" ]; then
+        git fetch origin "$gh_issues_ref":"$gh_issues_ref" >/dev/null 2>&1 || true
+        epic_sha="$(git rev-parse --verify "$gh_issues_ref" 2>/dev/null || true)"
     fi
-    printf '%s' "$state" | tr '[:upper:]' '[:lower:]'
+    if [ -z "$epic_sha" ]; then
+        # Fallback to pending ref (older epics created before gh/issues/<N> existed).
+        epic_sha="$(git rev-parse --verify "$pending_ref" 2>/dev/null || true)"
+        if [ -z "$epic_sha" ]; then
+            git fetch origin "$pending_ref":"$pending_ref" >/dev/null 2>&1 || true
+            epic_sha="$(git rev-parse --verify "$pending_ref" 2>/dev/null || true)"
+        fi
+    fi
+    if [ -n "$epic_sha" ]; then
+        printf '%s' "$epic_sha"
+        return 0
+    fi
+
+    # ---- Epic missing: backfill it. ----
+    local bf_title="${ISSUE_TITLE:-}" bf_author="${ISSUE_AUTHOR:-}"
+    local bf_url="${ISSUE_URL:-}" bf_body="${ISSUE_BODY:-}"
+    if [ -z "$bf_title" ] && command -v gh >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+        local repo_slug meta
+        repo_slug="$(_xrepo_current_repo)"
+        if [ -n "$repo_slug" ]; then
+            meta="$(gh issue view "$issue" --repo "$repo_slug" --json title,body,url,author 2>/dev/null || true)"
+            if [ -n "$meta" ]; then
+                bf_title="$(printf '%s' "$meta"  | jq -r '.title // ""')"
+                bf_url="$(printf '%s' "$meta"    | jq -r '.url // ""')"
+                bf_author="$(printf '%s' "$meta" | jq -r '.author.login // ""')"
+                bf_body="$(printf '%s' "$meta"   | jq -r '.body // ""')"
+            fi
+        fi
+    fi
+    [ -n "$bf_title" ] || {
+        _xrepo_die "ensure-epic: cannot backfill epic for #${issue}: no ISSUE_TITLE env and gh lookup failed"
+        return 2
+    }
+    [ -n "$bf_author" ] || bf_author="unknown"
+    [ -n "$bf_url" ]    || bf_url="unknown"
+
+    _xrepo_ensure_git_identity
+
+    local bf_parent bf_tree bf_msg
+    bf_parent="$(git rev-parse HEAD)"
+    bf_tree="$(_xrepo_empty_tree)"
+    bf_msg="$(mktemp)"
+    {
+        printf 'Task: %s\n\n' "$bf_title"
+        printf 'Issue: #%s\n' "$issue"
+        printf 'Author: %s\n' "$bf_author"
+        printf 'URL: %s\n' "$bf_url"
+        printf 'Status: pending\n'
+        printf 'Type: epic\n'
+        printf 'Backfilled: true\n'
+        printf 'Backfill-Reason: epic ref was missing and was recreated on demand by task-dag; the first-sighting issue-to-task run never created it (workflow broken/mid-migration at open time, or issue predates task-dag). See virusdave/top-level#28.\n'
+        printf '\n'
+        printf '%s\n' "$bf_body"
+    } > "$bf_msg"
+    epic_sha="$(git commit-tree "$bf_tree" -p "$bf_parent" -F "$bf_msg")"
+    rm -f "$bf_msg"
+
+    git update-ref "$pending_ref" "$epic_sha"
+    git update-ref "$gh_issues_ref" "$epic_sha"
+    if ! git push --atomic origin "$pending_ref" "$gh_issues_ref" 1>&2; then
+        # A concurrent first-seen run (issue-to-task or another ensure)
+        # may have won the race; adopt whatever epic now exists on origin.
+        local after_pending
+        after_pending="$(git ls-remote origin "$pending_ref" | awk 'NR==1{print $1}')"
+        if [ -n "$after_pending" ]; then
+            git fetch origin "$pending_ref":"$pending_ref" >/dev/null 2>&1 || true
+            _xrepo_log "ensure-epic: lost backfill race for #${issue}; adopting ${pending_ref} at ${after_pending}"
+            printf '%s' "$after_pending"
+            return 0
+        fi
+        _xrepo_die "ensure-epic: failed to backfill missing epic for #${issue}"
+        return 2
+    fi
+    _xrepo_log "ensure-epic: backfilled missing epic for #${issue} (${epic_sha}); pushed ${pending_ref} + ${gh_issues_ref} (was never created on first sighting)"
+    printf '%s' "$epic_sha"
+    return 0
 }
 
 # Helper: parse "owner/repo#issue" → exports XREPO_OWNER, XREPO_REPO, XREPO_ISSUE.
@@ -157,20 +257,14 @@ cmd_delegate() {
     top_repo="$(_xrepo_current_repo)"
     [ -n "$top_repo" ] || { _xrepo_die "delegate: cannot determine current repo"; return 2; }
 
-    local pending_ref="refs/heads/tasks/pending/${top_issue}"
     local delegated_ref="refs/heads/tasks/delegated/${top_issue}/${XREPO_OWNER}/${XREPO_REPO}/${XREPO_ISSUE}"
 
+    # Resolve the parent epic, backfilling it (from `gh issue view`) if its
+    # first-sighting issue-to-task run never created it — same root cause as
+    # the missing-epic comment failure (virusdave/top-level#28). Without
+    # this, delegating a child of such an issue would die "no epic ref".
     local epic_sha
-    epic_sha="$(git rev-parse --verify "$pending_ref" 2>/dev/null || true)"
-    if [ -z "$epic_sha" ]; then
-        # Try to fetch the ref from origin if we don't have it locally yet.
-        git fetch origin "$pending_ref":"$pending_ref" >/dev/null 2>&1 || true
-        epic_sha="$(git rev-parse --verify "$pending_ref" 2>/dev/null || true)"
-    fi
-    [ -n "$epic_sha" ] || {
-        _xrepo_die "delegate: no epic ref ${pending_ref} (open the issue first or wait for issue-to-task workflow)"
-        return 2
-    }
+    epic_sha="$(_xrepo_ensure_issue_epic "$top_issue")" || return $?
 
     _xrepo_ensure_git_identity
 
@@ -763,87 +857,15 @@ cmd_ingest_comment() {
 _xrepo_ingest_human_comment() {
     local issue="$1" comment_id="$2" author="$3" comment_url="$4" body_file="$5"
 
-    local gh_issues_ref="refs/heads/gh/issues/${issue}"
-    local pending_ref="refs/heads/tasks/pending/${issue}"
     local comment_ref="refs/heads/gh/comments/${issue}/${comment_id}"
 
+    # Resolve the epic, backfilling it (annotated) if it was never created
+    # — so a comment on an issue whose first-sighting run failed still
+    # mints a task instead of dying (virusdave/top-level#28). Whether the
+    # resulting task is actually dispatched (e.g. the issue is closed) is
+    # the dispatcher's call, not ours.
     local epic_sha
-    epic_sha="$(git rev-parse --verify "$gh_issues_ref" 2>/dev/null || true)"
-    if [ -z "$epic_sha" ]; then
-        git fetch origin "$gh_issues_ref":"$gh_issues_ref" >/dev/null 2>&1 || true
-        epic_sha="$(git rev-parse --verify "$gh_issues_ref" 2>/dev/null || true)"
-    fi
-    if [ -z "$epic_sha" ]; then
-        # Fallback to pending ref (older epics created before gh/issues/<N> existed).
-        epic_sha="$(git rev-parse --verify "$pending_ref" 2>/dev/null || true)"
-        if [ -z "$epic_sha" ]; then
-            git fetch origin "$pending_ref":"$pending_ref" >/dev/null 2>&1 || true
-            epic_sha="$(git rev-parse --verify "$pending_ref" 2>/dev/null || true)"
-        fi
-    fi
-
-    # Self-heal a missing epic. No epic ref exists when the issue's
-    # first-sighting issue-to-task run never created one — e.g. the workflow
-    # was broken / mid-migration when the issue was opened, or the issue
-    # predates task-dag. Previously this path died "no epic ref for issue
-    # #N", which meant EVERY future human comment on such an issue silently
-    # failed to dispatch a worker (virusdave/top-level#28: an operator
-    # comment on Nicponskis/mostly-static-sites#14 spawned nothing).
-    #
-    # Backfill the epic exactly as create-task-commit.sh would on first
-    # sighting (epic commit + tasks/pending/<N> + gh/issues/<N>), but ONLY
-    # for OPEN issues — a stray comment on a closed issue must never
-    # resurrect/dispatch finished work (reopen is the explicit revive
-    # signal). tasks/pending/<N> is itself the dispatcher's pickable root,
-    # so the backfilled epic gets dispatched on its own; we deliberately do
-    # NOT also mint a comment frontier leaf for the triggering comment (a
-    # live leaf would mark the issue "decomposed" in github-worker and
-    # suppress the epic root). The comment provenance ref is still written
-    # so a re-run short-circuits as a no-op.
-    if [ -z "$epic_sha" ]; then
-        local state
-        state="$(_xrepo_issue_state "$issue")"
-        if [ "$state" != "open" ]; then
-            _xrepo_log "ingest-comment: no epic ref for issue #${issue} and state is '${state:-unknown}'; not backfilling or dispatching (reopen the issue to revive it)"
-            return 0
-        fi
-        : "${ISSUE_TITLE:?ingest-comment: ISSUE_TITLE required to backfill epic for #${issue}}"
-        : "${ISSUE_AUTHOR:?ingest-comment: ISSUE_AUTHOR required to backfill epic for #${issue}}"
-        : "${ISSUE_URL:?ingest-comment: ISSUE_URL required to backfill epic for #${issue}}"
-
-        local bf_parent bf_tree bf_msg
-        bf_parent="$(git rev-parse HEAD)"
-        bf_tree="$(_xrepo_empty_tree)"
-        bf_msg="$(mktemp)"
-        {
-            printf 'Task: %s\n\n' "$ISSUE_TITLE"
-            printf 'Issue: #%s\n' "$issue"
-            printf 'Author: %s\n' "$ISSUE_AUTHOR"
-            printf 'URL: %s\n' "$ISSUE_URL"
-            printf 'Status: pending\n'
-            printf 'Type: epic\n\n'
-            printf '%s\n' "${ISSUE_BODY:-}"
-        } > "$bf_msg"
-        epic_sha="$(git commit-tree "$bf_tree" -p "$bf_parent" -F "$bf_msg")"
-        rm -f "$bf_msg"
-
-        git update-ref "$pending_ref" "$epic_sha"
-        git update-ref "$gh_issues_ref" "$epic_sha"
-        git update-ref "$comment_ref" "$epic_sha"
-        if ! git push --atomic origin "$pending_ref" "$gh_issues_ref" "$comment_ref"; then
-            # A concurrent first-seen run may have won the epic creation.
-            local after_pending
-            after_pending="$(git ls-remote origin "$pending_ref" | awk 'NR==1{print $1}')"
-            if [ -n "$after_pending" ]; then
-                _xrepo_log "ingest-comment: lost epic backfill race for #${issue}; ${pending_ref} now at ${after_pending}"
-                return 0
-            fi
-            _xrepo_die "ingest-comment: failed to backfill missing epic for #${issue}"
-            return 2
-        fi
-        _xrepo_log "ingest-comment: backfilled missing epic for #${issue} (${epic_sha}); pushed ${pending_ref} + ${gh_issues_ref}; epic root will be dispatched (no comment leaf minted)"
-        return 0
-    fi
+    epic_sha="$(_xrepo_ensure_issue_epic "$issue")" || return $?
 
     local empty_tree msg_file message_sha
     empty_tree="$(_xrepo_empty_tree)"

@@ -54,9 +54,6 @@ jobs:
           ISSUE_BODY: ${{ github.event.issue.body }}
           ISSUE_URL: ${{ github.event.issue.html_url }}
           ISSUE_AUTHOR: ${{ github.event.issue.user.login }}
-          # Gates epic self-heal: a comment may only re-create a missing
-          # dispatch root for an OPEN issue (see _xrepo_ingest_human_comment).
-          ISSUE_STATE: ${{ github.event.issue.state }}
           COMMENT_ID: ${{ github.event.comment.id }}
           COMMENT_BODY: ${{ github.event.comment.body }}
           COMMENT_URL: ${{ github.event.comment.html_url }}
