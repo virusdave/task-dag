@@ -166,7 +166,8 @@ export function ScreensModulePage() {
   const selectedBannerRefs = useMemo(() => [...selectedBanners].map(parseBannerKey), [selectedBanners])
   const selectedScreenRefs = useMemo(() => [...selectedScreens].map(parseScreenKey), [selectedScreens])
 
-  // For "copy" we need the selected banners to all be image banners on a single source screen.
+  // For "copy" we need the selected banners to all be copyable (image or
+  // product-menu/promo) banners on a single source screen.
   const copySource = useMemo(() => deriveCopySource(selectedBannerRefs, screenByKey), [selectedBannerRefs, screenByKey])
   const zeroDurationInSelection = useMemo(
     () => selectedBannerRefs.filter((ref) => (lookupBanner(screenByKey, ref)?.totalDuration ?? 0) === 0).length,
@@ -242,7 +243,7 @@ export function ScreensModulePage() {
         <span className="screens-snapshot-age">
           {inventorySource
             ? `snapshot ${new Date(inventorySource.capturedAt).toLocaleString()}`
-            : 'no snapshot yet — run a refresh/bounce'}
+            : 'no snapshot yet, run a refresh/bounce'}
         </span>
       </div>
 
@@ -250,6 +251,16 @@ export function ScreensModulePage() {
       {errorMessage ? <p className="error-text">{errorMessage}</p> : null}
 
       {activeBounceJob ? <BounceProgressCard data={activeBounceJob} onDismiss={() => setActiveBounceJob(null)} /> : null}
+
+      {/* Copy banners — first-class, source-first workflow (the most common ask). */}
+      <CopyBannersCard
+        canEdit={canEdit}
+        submitting={submitting}
+        allScreens={allScreens}
+        reason={reason}
+        setReason={setReason}
+        onSubmit={submit}
+      />
 
       {/* Primary content: inventory explorer with first-class selection. */}
       <article className="mini-card screens-explorer">
@@ -457,7 +468,7 @@ export function ScreensModulePage() {
         </div>
         <div className="inline-row wrap-row" style={{ marginTop: '0.5rem' }}>
           <Link to={buildHeliosModulePath('catalog')}>Catalog module</Link>
-          <Link to="/screens/devices">Legacy devices view</Link>
+          <Link to="/screens/devices">Device inventory &amp; legacy image sync</Link>
           <Link to="/jobs">Global jobs</Link>
           <Link to="/history">Global history</Link>
         </div>
@@ -475,7 +486,7 @@ export function ScreensModulePage() {
               <>
                 <button className="ghost-button" disabled={!canEdit} onClick={() => openDrawer('enable')} type="button">Enable</button>
                 <button className="ghost-button" disabled={!canEdit} onClick={() => openDrawer('disable')} type="button">Disable</button>
-                <button className="ghost-button" disabled={!canEdit || !copySource} onClick={() => openDrawer('copy')} type="button">Duplicate</button>
+                <button className="ghost-button" disabled={!canEdit || !copySource} onClick={() => openDrawer('copy')} type="button">Copy banners</button>
               </>
             ) : null}
             {selectedScreens.size > 0 ? (
@@ -547,7 +558,7 @@ export function ScreensModulePage() {
                 sourceScreenId: copySource.screenId,
                 targetScreens: copyTargetKeys.map(parseScreenKey),
               }),
-              apply ? 'Queued live banner duplicate' : 'Queued dry-run banner duplicate',
+              apply ? 'Queued live banner copy' : 'Queued dry-run banner copy',
             )
           }}
         />
@@ -563,6 +574,193 @@ export function ScreensModulePage() {
 function FilterChip({ active, label, onToggle }: { active: boolean; label: string; onToggle: () => void }) {
   return (
     <button className={`filter-chip${active ? ' is-active' : ''}`} onClick={onToggle} type="button">{label}</button>
+  )
+}
+
+/**
+ * First-class, source-first banner copy. The most common operator ask
+ * ("copy this banner onto these other screens, possibly cross-site") used
+ * to be reachable only by selecting banners in the inventory explorer and
+ * finding the sticky "Copy banners" action, or on the buried legacy devices
+ * page. This card makes it a prominent, self-contained workflow that reuses
+ * the audited /api/screens/banner-duplicate worker.
+ */
+function CopyBannersCard({
+  canEdit,
+  submitting,
+  allScreens,
+  reason,
+  setReason,
+  onSubmit,
+}: {
+  canEdit: boolean
+  submitting: boolean
+  allScreens: FlatScreen[]
+  reason: string
+  setReason: (value: string) => void
+  onSubmit: (path: string, body: Record<string, unknown>, successLabel: string) => Promise<void>
+}) {
+  const eligibleScreens = useMemo(
+    () => allScreens.filter((screen) => isScreenEligible(screen.screenEnabled, screen.screenName)),
+    [allScreens],
+  )
+  const [sourceKey, setSourceKey] = useState('')
+  const [selectedBannerIds, setSelectedBannerIds] = useState<Set<string>>(() => new Set())
+  const [targetKeys, setTargetKeys] = useState<Set<string>>(() => new Set())
+
+  // Default / repair the source to the first eligible screen that actually
+  // has a copyable (image or promo) banner.
+  useEffect(() => {
+    if (eligibleScreens.length === 0) {
+      if (sourceKey !== '') setSourceKey('')
+      return
+    }
+    if (eligibleScreens.some((screen) => screenKey(screen.dealerId, screen.screenId) === sourceKey)) return
+    const firstWithCopyable = eligibleScreens.find((screen) => copyableBanners(screen.banners).length > 0) ?? eligibleScreens[0]
+    setSourceKey(screenKey(firstWithCopyable.dealerId, firstWithCopyable.screenId))
+  }, [eligibleScreens, sourceKey])
+
+  const sourceScreen = useMemo(
+    () => eligibleScreens.find((screen) => screenKey(screen.dealerId, screen.screenId) === sourceKey) ?? null,
+    [eligibleScreens, sourceKey],
+  )
+  const sourceBanners = useMemo(() => copyableBanners(sourceScreen?.banners ?? []), [sourceScreen])
+
+  // Keep the banner selection valid as the source screen changes.
+  useEffect(() => {
+    const valid = new Set(sourceBanners.map((banner) => banner.bannerId))
+    setSelectedBannerIds((current) => {
+      const next = new Set([...current].filter((id) => valid.has(id)))
+      return next.size === current.size ? current : next
+    })
+  }, [sourceBanners])
+
+  const hasPromoSelected = sourceBanners.some((banner) => selectedBannerIds.has(banner.bannerId) && banner.promoActionId !== null)
+
+  // promoActionId is dealer-scoped, so a promo banner can only target screens
+  // at its own site; image banners can go cross-site.
+  const targetOptions = useMemo(
+    () => eligibleScreens
+      .filter((screen) => !(sourceScreen !== null && screen.dealerId === sourceScreen.dealerId && screen.screenId === sourceScreen.screenId))
+      .filter((screen) => !hasPromoSelected || (sourceScreen !== null && screen.dealerId === sourceScreen.dealerId)),
+    [eligibleScreens, sourceScreen, hasPromoSelected],
+  )
+
+  // Drop targets that became invalid (e.g. cross-site after a promo is picked).
+  useEffect(() => {
+    const valid = new Set(targetOptions.map((screen) => screenKey(screen.dealerId, screen.screenId)))
+    setTargetKeys((current) => {
+      const next = new Set([...current].filter((key) => valid.has(key)))
+      return next.size === current.size ? current : next
+    })
+  }, [targetOptions])
+
+  const canRun = canEdit && !submitting && sourceScreen !== null && selectedBannerIds.size > 0 && targetKeys.size > 0
+
+  function run(apply: boolean) {
+    if (!sourceScreen) return
+    void onSubmit(
+      '/api/screens/banner-duplicate',
+      QueueScreensBannerDuplicateRequestSchema.parse({
+        apply,
+        reason: reason.trim() || null,
+        sourceBannerIds: [...selectedBannerIds],
+        sourceDealerId: sourceScreen.dealerId,
+        sourceScreenId: sourceScreen.screenId,
+        targetScreens: [...targetKeys].map(parseScreenKey),
+      }),
+      apply ? 'Queued live banner copy' : 'Queued dry-run banner copy',
+    )
+  }
+
+  return (
+    <article className="mini-card screens-copy-card">
+      <header>
+        <strong>Copy banners to screens</strong>
+        <Pill tone={canEdit ? 'success' : 'muted'}>{canEdit ? 'editor' : 'view only'}</Pill>
+      </header>
+      <p className="subtle-copy">
+        Copy image or promo banners from one source screen onto any set of target screens. Image banners can copy
+        cross-site; product-menu/promo banners stay within the source site because Sweed promo actions are
+        site-scoped. A target banner matching by name and type is replaced, so re-running is safe.
+      </p>
+
+      <label className="stack-field screens-copy-step">
+        <span>1 &middot; Source screen</span>
+        <select disabled={!canEdit || eligibleScreens.length === 0} onChange={(event) => setSourceKey(event.target.value)} value={sourceKey}>
+          {eligibleScreens.map((screen) => {
+            const key = screenKey(screen.dealerId, screen.screenId)
+            return <option key={key} value={key}>{screen.dealerName} &middot; {screen.screenName}</option>
+          })}
+        </select>
+      </label>
+
+      <div className="screens-copy-step">
+        <p><strong>2 &middot; Banners to copy</strong></p>
+        {sourceBanners.length === 0 ? (
+          <p className="empty-state">This screen has no copyable image or promo banners.</p>
+        ) : (
+          <div className="screens-drawer-targets">
+            {sourceBanners.map((banner) => (
+              <label className="screens-banner" key={banner.bannerId}>
+                <input
+                  checked={selectedBannerIds.has(banner.bannerId)}
+                  disabled={!canEdit}
+                  onChange={() => toggleInSet(setSelectedBannerIds, banner.bannerId)}
+                  type="checkbox"
+                />
+                <span className="screens-banner-name">{banner.bannerName}</span>
+                <span className="screens-banner-tags">
+                  <Pill tone={banner.type.toLowerCase() === 'image' ? 'success' : 'muted'}>{banner.type}</Pill>
+                  {banner.promoActionId !== null ? <Pill tone="warning">promo</Pill> : null}
+                </span>
+              </label>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div className="screens-copy-step">
+        <p>
+          <strong>3 &middot; Target screens</strong>
+          {hasPromoSelected && sourceScreen ? <span className="subtle-copy"> &middot; promo selected, limited to {sourceScreen.dealerName}</span> : null}
+        </p>
+        {targetOptions.length === 0 ? (
+          <p className="empty-state">No eligible target screens for this source.</p>
+        ) : (
+          <div className="screens-drawer-targets">
+            {targetOptions.map((screen) => {
+              const key = screenKey(screen.dealerId, screen.screenId)
+              return (
+                <label className="screens-banner" key={key}>
+                  <input
+                    checked={targetKeys.has(key)}
+                    disabled={!canEdit}
+                    onChange={() => toggleInSet(setTargetKeys, key)}
+                    type="checkbox"
+                  />
+                  <span className="screens-banner-name">{screen.dealerName} &middot; {screen.screenName}</span>
+                </label>
+              )
+            })}
+          </div>
+        )}
+      </div>
+
+      <label className="stack-field screens-copy-step">
+        <span>Run note (audit)</span>
+        <textarea onChange={(event) => setReason(event.target.value)} placeholder="Optional operator note for the audit trail" rows={2} value={reason} />
+      </label>
+
+      <div className="inline-row wrap-row">
+        <Pill tone="muted">{selectedBannerIds.size} banner(s)</Pill>
+        <Pill tone="muted">{targetKeys.size} target(s)</Pill>
+      </div>
+      <div className="inline-row wrap-row">
+        <button className="ghost-button" disabled={!canRun} onClick={() => run(false)} type="button">Dry-run</button>
+        <button className="primary-button" disabled={!canRun} onClick={() => run(true)} type="button">Copy banners</button>
+      </div>
+    </article>
   )
 }
 
@@ -793,7 +991,7 @@ function OperationDrawer({
       ? `Enable ${selectedBannerCount} banner(s)`
       : drawer === 'disable'
         ? `Disable ${selectedBannerCount} banner(s)`
-        : 'Duplicate banners'
+        : 'Copy banners'
 
   return (
     <div className="screens-drawer-backdrop" onClick={onClose} role="presentation">
@@ -843,7 +1041,7 @@ function OperationDrawer({
               </div>
             </div>
           ) : (
-            <p className="error-text">Select image or product-menu/promo banners from a single source screen to duplicate.</p>
+            <p className="error-text">Select image or product-menu/promo banners from a single source screen to copy.</p>
           )
         ) : null}
 
@@ -962,6 +1160,12 @@ function toggleScreenSet(setter: (updater: (current: Set<string>) => Set<string>
     }
     return next
   })
+}
+
+function copyableBanners(banners: ScreensInventoryBanner[]): ScreensInventoryBanner[] {
+  // A banner can be copied when it is an image banner (reusable media) or a
+  // product-menu/promo banner (carries a promoActionId); mirrors the worker.
+  return banners.filter((banner) => banner.type.toLowerCase() === 'image' || banner.promoActionId !== null)
 }
 
 function isRetiredScreenName(name: string): boolean {

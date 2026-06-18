@@ -9649,6 +9649,13 @@ span.metric-chart-legend-item {
   border-top: none;
 }
 
+.screens-copy-card .screens-copy-step {
+  margin-top: 0.7rem;
+}
+.screens-copy-card .screens-copy-step > p {
+  margin: 0 0 0.35rem;
+}
+
 .screens-op-grid {
   display: flex;
   flex-wrap: wrap;
