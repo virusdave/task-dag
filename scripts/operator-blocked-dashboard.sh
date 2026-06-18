@@ -186,7 +186,9 @@ for entry in "${REPO_ENTRIES[@]}"; do
             '+refs/heads/tasks/blocked/*:refs/heads/tasks/blocked/*' \
             '+refs/heads/tasks/blocked-meta/*:refs/heads/tasks/blocked-meta/*' \
             2>"$sandbox/fetch.err"; then
-        warn "failed to fetch blocked refs from $repo: $(tr '\n' ' ' < "$sandbox/fetch.err")"
+        # Strip any embedded x-access-token credential before logging, since
+        # authenticated fetch URLs (App-token overrides) can appear here.
+        warn "failed to fetch blocked refs from $repo: $(tr '\n' ' ' < "$sandbox/fetch.err" | sed -E 's#(x-access-token:)[^@[:space:]]+@#\1***@#g')"
         continue
     fi
     scanned=$((scanned + 1))

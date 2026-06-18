@@ -1,0 +1,146 @@
+name: Operator-Blocked Dashboard (Reusable)
+
+# Reusable workflow that rebuilds the operator-blocked "one-stop shop"
+# dashboard (virusdave/top-level#29, epic operator-blocked-aggregator).
+#
+# It scans each configured fleet repo's task-dag `tasks/blocked` /
+# `tasks/blocked-meta` refs and find/create/patches ONE marked comment on
+# the target issue listing everything currently blocked on the operator.
+# All the rendering/publishing lives in the canonical task-dag scripts
+# (scripts/operator-blocked-dashboard-publish.sh -> operator-blocked-dashboard.sh);
+# this workflow only fetches them at the requested ref and supplies the
+# GitHub App credentials. Resolved items disappear automatically on the next
+# run once their blocked ref is gone (unblock / complete / drop) — there is
+# no per-item comment to delete.
+#
+# Cross-account auth: operator blockers live in repos owned by several
+# accounts, and a single GitHub App installation token only covers one
+# account. The publisher mints one installation token per scanned repo from
+# the App key (so it works across accounts) and a separate Issues:write
+# token on the target repo for the comment write. A repo whose token can't
+# be minted (e.g. an org install that hasn't accepted Contents:read yet) is
+# warned and skipped, not fatal.
+#
+# ---------------------------------------------------------------------------
+# Documented caller example (e.g. virusdave/top-level —
+# .github/workflows/operator-blocked-dashboard.yml, epic task @7):
+#
+#   name: Operator-Blocked Dashboard
+#   on:
+#     schedule:
+#       - cron: '*/5 * * * *'
+#     workflow_dispatch: {}
+#   concurrency:
+#     group: operator-blocked-dashboard
+#     cancel-in-progress: false
+#   jobs:
+#     dashboard:
+#       uses: virusdave/task-dag/.github/workflows/operator-blocked-dashboard.yml@master
+#       with:
+#         top_level_repo: virusdave/top-level
+#         dashboard_issue: '29'
+#         repos: >-
+#           virusdave/top-level
+#           virusdave/task-dag
+#           FreshlyBakedNYC/automation
+#           Nicponskis/mostly-static-sites
+#           Nicponskis/nixos-sbc
+#       secrets:
+#         app_id: ${{ secrets.TASK_DAG_APP_ID }}
+#         app_private_key: ${{ secrets.TASK_DAG_APP_PRIVATE_KEY }}
+# ---------------------------------------------------------------------------
+
+on:
+  workflow_call:
+    inputs:
+      top_level_repo:
+        description: |
+          Repo (owner/repo) whose issue hosts the single dashboard comment.
+          Default targets the canonical #29 thread but nothing is hard-coded;
+          any repo/issue pair works.
+        required: false
+        type: string
+        default: virusdave/top-level
+      dashboard_issue:
+        description: Issue number on top_level_repo to publish the dashboard comment on.
+        required: false
+        type: string
+        default: '29'
+      repos:
+        description: |
+          Space/comma/newline-separated list of fleet repos (owner/repo) to
+          scan for task-dag blocked refs. The target repo should be included
+          if it can itself accumulate operator blockers.
+        required: true
+        type: string
+      ref:
+        description: 'task-dag ref to fetch the CLI + dashboard scripts from (branch, tag, or SHA).'
+        required: false
+        type: string
+        default: master
+    secrets:
+      app_id:
+        description: |
+          GitHub App ID for the task-dag cross-repo bot. The App must be
+          installed on the target repo with Issues: write and on every
+          scanned repo with Contents: read. Typically the repo/org secret
+          TASK_DAG_APP_ID.
+        required: true
+      app_private_key:
+        description: |
+          PEM-encoded private key for the same GitHub App. Typically the
+          repo/org secret TASK_DAG_APP_PRIVATE_KEY.
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  dashboard:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: operator-blocked-dashboard-${{ inputs.top_level_repo }}-${{ inputs.dashboard_issue }}
+      cancel-in-progress: false
+
+    steps:
+      - name: Validate inputs
+        env:
+          TARGET_REPO: ${{ inputs.top_level_repo }}
+          TARGET_ISSUE: ${{ inputs.dashboard_issue }}
+          REPOS: ${{ inputs.repos }}
+        run: |
+          set -euo pipefail
+          if [[ "$TARGET_REPO" != */* ]]; then
+            echo "::error::top_level_repo must be owner/repo, got: $TARGET_REPO"; exit 1
+          fi
+          if ! [[ "$TARGET_ISSUE" =~ ^[0-9]+$ ]]; then
+            echo "::error::dashboard_issue must be numeric, got: $TARGET_ISSUE"; exit 1
+          fi
+          if [[ -z "${REPOS// /}" ]]; then
+            echo "::error::repos input is empty"; exit 1
+          fi
+
+      - name: Fetch canonical task-dag CLI + dashboard scripts
+        env:
+          REF: ${{ inputs.ref }}
+        run: |
+          set -euo pipefail
+          git clone --quiet https://github.com/virusdave/task-dag /tmp/task-dag
+          git -C /tmp/task-dag checkout --quiet "$REF"
+          chmod +x /tmp/task-dag/scripts/task-dag \
+                   /tmp/task-dag/scripts/operator-blocked-dashboard.sh \
+                   /tmp/task-dag/scripts/operator-blocked-dashboard-publish.sh
+
+      - name: Publish operator-blocked dashboard
+        env:
+          APP_ID: ${{ secrets.app_id }}
+          APP_PRIVATE_KEY: ${{ secrets.app_private_key }}
+          TARGET_REPO: ${{ inputs.top_level_repo }}
+          TARGET_ISSUE: ${{ inputs.dashboard_issue }}
+          REPOS: ${{ inputs.repos }}
+        run: |
+          set -euo pipefail
+          /tmp/task-dag/scripts/operator-blocked-dashboard-publish.sh \
+            --target-repo="$TARGET_REPO" \
+            --target-issue="$TARGET_ISSUE" \
+            --repos="$REPOS"

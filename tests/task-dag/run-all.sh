@@ -17,6 +17,7 @@ command -v shellcheck >/dev/null 2>&1 && {
         "$(dirname "$TD")/task-dag.d/ci-repair.sh" \
         "$(dirname "$TD")/task-dag.d/ci-chains.sh" \
         "$(dirname "$TD")/operator-blocked-dashboard.sh" \
+        "$(dirname "$TD")/operator-blocked-dashboard-publish.sh" \
         "$here/ci-repair-ticket.sh" "$here/ci-tree-fix-outcome.sh" \
         "$here/ci-race-stale.sh" || exit 1
 }
@@ -25,10 +26,11 @@ bash -n "$TD" \
     && bash -n "$(dirname "$TD")/task-dag.d/cross-repo.sh" \
     && bash -n "$(dirname "$TD")/task-dag.d/ci-repair.sh" \
     && bash -n "$(dirname "$TD")/task-dag.d/ci-chains.sh" \
-    && bash -n "$(dirname "$TD")/operator-blocked-dashboard.sh" || exit 1
+    && bash -n "$(dirname "$TD")/operator-blocked-dashboard.sh" \
+    && bash -n "$(dirname "$TD")/operator-blocked-dashboard-publish.sh" || exit 1
 
 rc=0
-for t in complete-safety.sh ingest-loop.sh ingest-selfheal.sh blocked-overlay.sh blocked-meta.sh blocked-json.sh operator-blocked-dashboard.sh transitive-block.sh claim-pid.sh claim-force-steal.sh breakdown-self-claim.sh tree-fix-trailers.sh ci-chain-cas.sh ci-classifier.sh ci-verify-target.sh ci-repair-ticket.sh ci-tree-fix-outcome.sh ci-race-stale.sh; do
+for t in complete-safety.sh ingest-loop.sh ingest-selfheal.sh blocked-overlay.sh blocked-meta.sh blocked-json.sh operator-blocked-dashboard.sh operator-blocked-dashboard-publish.sh transitive-block.sh claim-pid.sh claim-force-steal.sh breakdown-self-claim.sh tree-fix-trailers.sh ci-chain-cas.sh ci-classifier.sh ci-verify-target.sh ci-repair-ticket.sh ci-tree-fix-outcome.sh ci-race-stale.sh; do
     echo "== $t =="
     bash "$here/$t" "$TD" || rc=1
 done
