@@ -444,6 +444,61 @@ Note: ${note}"
     git commit-tree "$root_tree" -p "$root_sha" -m "$msg"
 }
 
+claim_dead_reason="none"
+
+# Helper: determine whether a claim commit is provably dead.
+# Returns: 0 dead, 1 alive, 2 indeterminate (callers fail closed).
+claim_is_dead() {
+    local claim_sha="$1" msg claimer_host claimer_pid claimed_at ttl_hours
+    local this_host env_host pid_path_available=false ttl_path_available=false
+    claim_dead_reason="none"
+    msg=$(parse_commit_metadata "$claim_sha" 2>/dev/null || true)
+    claimer_host=$(extract_field "$msg" "Claimer-Host" 2>/dev/null || true)
+    claimer_pid=$(extract_field "$msg" "Claimer-PID" 2>/dev/null || true)
+    claimed_at=$(extract_field "$msg" "Claimed-At" 2>/dev/null || true)
+    ttl_hours=$(extract_field "$msg" "TTL-Hours" 2>/dev/null || true)
+    this_host=$(hostname -s 2>/dev/null || echo unknown)
+    env_host="${TASK_DAG_CLAIMER_HOST:-$this_host}"
+
+    if { [ "$claimer_host" = "$this_host" ] || [ "$claimer_host" = "$env_host" ]; } \
+        && [[ "$claimer_pid" =~ ^[1-9][0-9]*$ ]]; then
+        pid_path_available=true
+        if kill -0 "$claimer_pid" 2>/dev/null; then
+            return 1
+        fi
+        local kill_err
+        kill_err=$(kill -0 "$claimer_pid" 2>&1 >/dev/null || true)
+        if printf '%s' "$kill_err" | grep -qi 'Operation not permitted'; then
+            return 1
+        fi
+        if printf '%s' "$kill_err" | grep -qi 'No such process'; then
+            claim_dead_reason="pid"
+            return 0
+        fi
+    fi
+
+    if [ -n "$claimed_at" ] && [[ "$ttl_hours" =~ ^[0-9]+([.][0-9]+)?$ ]] \
+        && awk "BEGIN { exit !($ttl_hours > 0) }"; then
+        local claimed_epoch expiry_epoch now_epoch
+        claimed_epoch=$(date -u -d "$claimed_at" +%s 2>/dev/null || true)
+        if [ -n "$claimed_epoch" ]; then
+            ttl_path_available=true
+            expiry_epoch=$(awk "BEGIN { printf \"%.0f\", $claimed_epoch + ($ttl_hours * 3600) + 300 }")
+            now_epoch=$(date -u +%s)
+            if [ "$now_epoch" -gt "$expiry_epoch" ]; then
+                claim_dead_reason="ttl"
+                return 0
+            fi
+            return 1
+        fi
+    fi
+
+    if [ "$pid_path_available" = false ] && [ "$ttl_path_available" = false ]; then
+        return 2
+    fi
+    return 1
+}
+
 # Helper: print the SHA of the first real child task of <parent_sha> (a
 # commit that has <parent_sha> as ANY parent and is itself a task commit
 # but NOT a claim commit), and return 0; return 1 if none exist.
@@ -797,6 +852,7 @@ COMMANDS:
     release <sha>          Drop a claim back onto the frontier
     release-root <issue>   Drop a root orchestration claim (never creates a
                            frontier ref)
+    reap                   Reclaim provably-dead leaf/root claims safely
     roots                  List epic roots + orchestration state
                            (decomposed/claimed/pickable); --pickable for
                            the dispatch discovery surface
@@ -1844,6 +1900,150 @@ EOF
     return 4
 }
 
+reap_leaf_claim() {
+    local short_sha="$1" task_sha="$2" claim_sha="$3"
+    local ref_active ref_frontier
+    ref_active="refs/heads/tasks/active/$short_sha"
+    ref_frontier="refs/heads/tasks/frontier/$short_sha"
+    local readback_sha
+    if git push --atomic origin \
+        "--force-with-lease=$ref_active:$claim_sha" \
+        "--force-with-lease=$ref_frontier:" \
+        "$task_sha:$ref_frontier" \
+        ":$ref_active" >/dev/null 2>&1; then
+        readback_sha=$(task_active_sha_on_remote "$short_sha")
+        if [ -z "$readback_sha" ]; then
+            git update-ref "$ref_frontier" "$task_sha" 2>/dev/null || true
+            git update-ref -d "$ref_active" 2>/dev/null || true
+            return 0
+        fi
+    fi
+    return 1
+}
+
+reap_root_claim() {
+    local issue="$1" claim_sha="$2" ref
+    ref="refs/heads/tasks/root-active/$issue"
+    if git push --atomic origin \
+        "--force-with-lease=$ref:$claim_sha" \
+        ":$ref" >/dev/null 2>&1; then
+        git update-ref -d "$ref" 2>/dev/null || true
+        [ -z "$(root_active_sha_on_remote "$issue")" ] && return 0
+    fi
+    return 1
+}
+
+# Command: reap - reclaim provably-dead leaf and root claims.
+cmd_reap() {
+    local json=false dry_run=false issue_filter="" do_fetch=true
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --json) json=true; shift ;;
+            --dry-run) dry_run=true; shift ;;
+            --issue=*) issue_filter="${1#*=}"; shift ;;
+            --no-fetch) do_fetch=false; shift ;;
+            --help|-h)
+                cat <<EOF
+Usage: task-dag reap [--json] [--dry-run] [--issue=N] [--no-fetch]
+
+Reclaim provably-dead claims. Leaf claims are moved from tasks/active/<short>
+back to tasks/frontier/<short> with leased atomic pushes; root claims are
+leased-deleted from tasks/root-active/<issue> and never create frontier refs.
+EOF
+                return 0
+                ;;
+            *) echo "Unknown option: $1" >&2; return 1 ;;
+        esac
+    done
+
+    if [ "$do_fetch" = true ]; then
+        fetch_task_refs
+    fi
+
+    local entries="" count=0
+    add_reap_entry() {
+        local kind="$1" id_key="$2" id_val="$3" claim_sha="$4" reason="$5" reclaimed="$6" obj
+        obj=$(printf '{"kind":"%s","%s":"%s","claimCommit":"%s","deadReason":"%s","reclaimed":%s}' \
+            "$kind" "$id_key" "$id_val" "$claim_sha" "$reason" "$reclaimed")
+        if [ "$json" = true ]; then
+            if [ "$count" -gt 0 ]; then
+                entries="${entries},${obj}"
+            else
+                entries="$obj"
+            fi
+        else
+            if [ "$dry_run" = true ]; then
+                printf 'Would reap %s %s claim %s (%s)\n' "$kind" "$id_val" "$claim_sha" "$reason"
+            elif [ "$reclaimed" = true ]; then
+                printf 'Reaped %s %s claim %s (%s)\n' "$kind" "$id_val" "$claim_sha" "$reason"
+            fi
+        fi
+        count=$((count + 1))
+    }
+
+    local claim_sha short_ref short_sha task_sha task_msg issue rc reason reclaimed
+    while read -r claim_sha short_ref; do
+        [ -n "$claim_sha" ] || continue
+        short_sha="${short_ref#active/}"
+        task_sha=$(get_first_parent "$claim_sha" 2>/dev/null || true)
+        if [ -z "$task_sha" ] || ! git cat-file -e "$task_sha^{commit}" 2>/dev/null; then
+            [ "$json" = false ] && echo "Skipping malformed active/$short_sha: no task parent" >&2
+            continue
+        fi
+        # Validate by OBJECT IDENTITY, not by reconstructing today's
+        # abbreviation: the ref suffix must be a genuine prefix of the
+        # claim's first-parent task SHA. Older refs were created at a
+        # different `--short` length, so an exact equality check against
+        # `git rev-parse --short` would skip (and never reap) them. We
+        # keep using the OBSERVED suffix ($short_sha) for the lease/ref
+        # names so we act on the exact ref that exists on origin.
+        case "$task_sha" in
+            "$short_sha"*) : ;;
+            *)
+                [ "$json" = false ] && echo "Skipping malformed active/$short_sha: not a prefix of parent $task_sha" >&2
+                continue
+                ;;
+        esac
+        task_msg=$(parse_commit_metadata "$task_sha" 2>/dev/null || true)
+        issue=$(extract_field "$task_msg" "Issue" 2>/dev/null | sed 's/^#//' || true)
+        if [ -n "$issue_filter" ] && [ "$issue" != "$issue_filter" ]; then
+            continue
+        fi
+        if claim_is_dead "$claim_sha"; then rc=0; else rc=$?; fi
+        reason="$claim_dead_reason"
+        if [ "$rc" -eq 0 ]; then
+            reclaimed=false
+            if [ "$dry_run" = false ] && reap_leaf_claim "$short_sha" "$task_sha" "$claim_sha"; then
+                reclaimed=true
+            fi
+            add_reap_entry leaf shortSha "$short_sha" "$claim_sha" "$reason" "$reclaimed"
+        fi
+    done < <(git for-each-ref refs/heads/tasks/active/ --format='%(objectname) %(refname:strip=3)')
+
+    local root_ref root_issue
+    while read -r claim_sha root_ref; do
+        [ -n "$claim_sha" ] || continue
+        root_issue="${root_ref#root-active/}"
+        if [ -n "$issue_filter" ] && [ "$root_issue" != "$issue_filter" ]; then
+            continue
+        fi
+        if claim_is_dead "$claim_sha"; then rc=0; else rc=$?; fi
+        reason="$claim_dead_reason"
+        if [ "$rc" -eq 0 ]; then
+            reclaimed=false
+            if [ "$dry_run" = false ] && reap_root_claim "$root_issue" "$claim_sha"; then
+                reclaimed=true
+            fi
+            add_reap_entry root issue "$root_issue" "$claim_sha" "$reason" "$reclaimed"
+        fi
+    done < <(git for-each-ref refs/heads/tasks/root-active/ --format='%(objectname) %(refname:strip=3)')
+
+    if [ "$json" = true ]; then
+        printf '[%s]\n' "$entries"
+    fi
+    return 0
+}
+
 # Command: roots - list epic roots and their orchestration state.
 #
 # Each tasks/pending/<N> is shown with whether it is decomposed (has child
@@ -1936,7 +2136,7 @@ cmd_active() {
     if [ "$json" = true ]; then
         echo "["
     else
-        printf "${BOLD}%-12s %-12s %-28s %-8s %-20s %s${RESET}\n" "SHORT" "ISSUE" "CLAIMER@HOST" "PID" "CLAIMED-AT" "TITLE"
+        printf "${BOLD}%-12s %-12s %-28s %-8s %-20s %-6s %s${RESET}\n" "SHORT" "ISSUE" "CLAIMER@HOST" "PID" "CLAIMED-AT" "DEAD" "TITLE"
     fi
 
     local first=true
@@ -1965,6 +2165,12 @@ cmd_active() {
         local claimer_pid=$(extract_field "$claim_msg" "Claimer-PID" 2>/dev/null || true)
         local claimed_at=$(extract_field "$claim_msg" "Claimed-At" 2>/dev/null || true)
         local ttl_hours=$(extract_field "$claim_msg" "TTL-Hours" 2>/dev/null || true)
+        local dead=false dead_reason="none" live_rc
+        if claim_is_dead "$claim_sha"; then live_rc=0; else live_rc=$?; fi
+        if [ "$live_rc" -eq 0 ]; then
+            dead=true
+            dead_reason="$claim_dead_reason"
+        fi
 
         if [ "$json" = true ]; then
             [ "$first" = false ] && echo ","
@@ -1979,17 +2185,20 @@ cmd_active() {
         "claimerHost": "${claimer_host:-unknown}",
         "claimerPid": ${claimer_pid:-null},
         "claimedAt": "${claimed_at:-unknown}",
-        "ttlHours": ${ttl_hours:-null}
+        "ttlHours": ${ttl_hours:-null},
+        "dead": $dead,
+        "deadReason": "$dead_reason"
     }
 JSON
             first=false
         else
-            printf "%-12s %-12s %-28s %-8s %-20s %s\n" \
+            printf "%-12s %-12s %-28s %-8s %-20s %-6s %s\n" \
                 "$short_ref" \
                 "${issue:+#$issue}" \
                 "${claimer:-?}@${claimer_host:-?}" \
                 "${claimer_pid:-?}" \
                 "${claimed_at:-unknown}" \
+                "$dead_reason" \
                 "${title:0:60}"
         fi
     done
@@ -3927,6 +4136,7 @@ main() {
         claim-root) cmd_claim_root "$@" ;;
         release) cmd_release "$@" ;;
         release-root) cmd_release_root "$@" ;;
+        reap) cmd_reap "$@" ;;
         roots) cmd_roots "$@" ;;
         active) cmd_active "$@" ;;
         show) cmd_show "$@" ;;
