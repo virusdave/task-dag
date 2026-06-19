@@ -37,6 +37,8 @@ import { registerConfigParsingRoutes } from '../routes/configParsing.js'
 import { registerCustomerReviewsRoutes } from '../routes/customerReviews.js'
 import { registerCrmSegmentMetricsRoutes } from '../routes/crmSegmentMetrics.js'
 import { registerCustomerValueAnalyticsRoutes } from '../routes/customerValueAnalytics.js'
+import { registerGadsEvolutionRoutes } from '../routes/gadsEvolution.js'
+import { registerGadsIterationsRoutes } from '../routes/gadsIterations.js'
 import { registerGadsLandingPagesRoutes } from '../routes/gadsLandingPages.js'
 import { registerInventoryProcurementRoutes } from '../routes/inventoryProcurement.js'
 import { registerHistoryRoutes } from '../routes/history.js'
@@ -275,6 +277,8 @@ async function registerApplicationSurface(server: FastifyInstance) {
   await registerCrmSegmentMetricsRoutes(server)
   await registerCustomerValueAnalyticsRoutes(server)
   await registerGadsLandingPagesRoutes(server)
+  await registerGadsEvolutionRoutes(server)
+  await registerGadsIterationsRoutes(server)
   await registerInventoryProcurementRoutes(server)
   await registerJobRoutes(server)
   await registerTaskDagRoutes(server)
