@@ -11,28 +11,24 @@ name: Task-DAG
 # broken-master auto-repair epic #1 sat unpicked). This mirrors the per-peer
 # caller template in docs/MIGRATION.md.
 #
-# NOTE: the `completion-aggregate` job is intentionally OMITTED for now —
-# aggregate-cross-repo-completions.yml requires the TASK_DAG_APP_ID /
-# TASK_DAG_APP_PRIVATE_KEY app secrets, which are not yet provisioned on this
-# repo (`gh secret list` is empty). Adding it without those secrets would
-# fail every master push. Add the job once the operator provisions the
-# secrets, so `Satisfies:` trailers on task-dag commits get recorded
-# automatically.
+# This caller is now byte-for-byte the canonical per-peer template (all four
+# jobs, including `completion-aggregate`) so task-dag's infra config matches
+# every other peer (FreshlyBakedNYC/automation, Nicponskis/mostly-static-sites,
+# Nicponskis/nixos-sbc, virusdave/top-level). See docs/MIGRATION.md.
 #
-# This is NOT a task-dag-specific requirement. The completion-aggregate job
-# is the only caller job that writes cross-repo (it posts `Satisfies …`
-# completion comments onto virusdave/top-level); the built-in GITHUB_TOKEN is
-# scoped to the running repo only, so it must mint a top-level installation
-# token via the GitHub App (app_id/app_private_key). The other three jobs
-# touch only this repo's own issues, hence GITHUB_TOKEN suffices for them.
-# Every implementing peer already wires this job with the same two secrets
-# (FreshlyBakedNYC/automation, Nicponskis/mostly-static-sites,
-# Nicponskis/nixos-sbc, virusdave/top-level — see docs/MIGRATION.md per-peer
-# template). `virusdave` is a user, not an org, so there is no org-wide
-# secret; each repo carries its own copy. task-dag simply needs it now
-# because, for the first time, it hosts its own commits that satisfy a
-# top-level epic (the broken-master auto-repair work, `Satisfies:
-# virusdave/top-level#26`).
+# `completion-aggregate` is the ONLY caller job that writes cross-repo (it
+# posts `Satisfies …` completion comments onto virusdave/top-level); the
+# built-in GITHUB_TOKEN is scoped to the running repo only, so it must mint a
+# top-level installation token via the GitHub App (app_id/app_private_key).
+# The other three jobs touch only this repo's own issues, hence GITHUB_TOKEN
+# suffices for them. `virusdave` is a user, not an org, so there is no
+# org-wide secret; each repo carries its own copy.
+#
+# OPERATOR PREREQUISITE — provision these TWO repo secrets BEFORE this lands
+# on master, or the `completion-aggregate` job will fail every master push:
+#   TASK_DAG_APP_ID, TASK_DAG_APP_PRIVATE_KEY
+# They are the SAME values already set on the other four peers (the one
+# shared task-dag GitHub App). Exact steps: docs/SECRETS.md.
 
 on:
   issues:
@@ -55,7 +51,8 @@ jobs:
   comment-sync:
     if: ${{ github.event_name == 'issue_comment' }}
     # Serialize ingestion per issue so concurrent comments cannot race
-    # through comment-sync -> ingest-comment. Distinct issues stay parallel.
+    # through comment-sync -> ingest-comment -> close-epic. Distinct issues
+    # stay parallel.
     concurrency:
       group: task-dag-issue-${{ github.event.issue.number }}
       cancel-in-progress: false
@@ -74,3 +71,13 @@ jobs:
       issues: write
     secrets:
       token: ${{ secrets.GITHUB_TOKEN }}
+
+  completion-aggregate:
+    if: ${{ github.event_name == 'push' }}
+    uses: virusdave/task-dag/.github/workflows/aggregate-cross-repo-completions.yml@master
+    with:
+      base_sha: ${{ github.event.before }}
+      head_sha: ${{ github.sha }}
+    secrets:
+      app_id: ${{ secrets.TASK_DAG_APP_ID }}
+      app_private_key: ${{ secrets.TASK_DAG_APP_PRIVATE_KEY }}

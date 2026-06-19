@@ -64,6 +64,13 @@ fixture smoke test is green and pin peers to it so future patches need no
 peer edits. The workflow `ref` input (script fetch) defaults to the same
 branch the workflow is pinned to — keep them aligned.
 
+The caller is the **only** per-repo file (a logic-free shim). The single
+canonical implementation is the set of reusable workflows + scripts + CLI in
+this repo. The one manual per-repo step is provisioning the two
+`completion-aggregate` App secrets (`TASK_DAG_APP_ID`,
+`TASK_DAG_APP_PRIVATE_KEY`) — identical values on every peer; exact runbook in
+[`docs/SECRETS.md`](SECRETS.md).
+
 ## Sequenced rollout (CI-safe; canary first)
 
 0. **[done] Bootstrap.** Land CLI + scripts + reusable workflows + docs
