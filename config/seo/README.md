@@ -93,3 +93,41 @@ tsx helios/src/server/seo/cli.ts validate --root /cloud/seo --env nonprod \
 `build` writes only a **candidate** pointer (never the live
 `current.json`); `publish` flips the live pointer and is operator-only
 against prod (canon §1).
+
+### Sourcing approved content from the control plane (P3/P4)
+
+Instead of hand-listing content in the config JSON, the build/publish
+commands can pull the operator-**approved** rows straight from the
+control-plane DB (each is re-verified against the append-only
+`seo_approvals` ledger, so a broken approval record fails the build
+loudly rather than shipping):
+
+```sh
+tsx helios/src/server/seo/cli.ts build --root /cloud/seo --env nonprod \
+    --config ./bundle-input.json --privkey ./signing.pem \
+    --faq-from-db --posts-from-db --assets-from-db --sitemaps-from-posts
+```
+
+- `--faq-from-db` — approved FAQ sets ([`faqBundleSource.ts`](../../helios/src/server/seo/faqBundleSource.ts)).
+- `--posts-from-db` — approved, released blog posts ([`postBundleSource.ts`](../../helios/src/server/seo/postBundleSource.ts)).
+- `--assets-from-db` — approved image assets ([`imageAssetBundleSource.ts`](../../helios/src/server/seo/imageAssetBundleSource.ts)).
+- `--sitemaps-from-posts` — **regenerate** the per-post `sitemaps.json`
+  entries from the posts now in `content.posts` (whether they came from
+  `--posts-from-db` or the static config), merged with the config's
+  **static** (non-post) URLs ([`postSitemapUrls.ts`](../../helios/src/server/seo/postSitemapUrls.ts)).
+  The generator OWNS every post-bound entry: each is derived from the
+  post's own `canonical_url`, `noindex`/kill-listed posts are skipped,
+  and a stale hand-listed post URL (a `/sites/<id>/whats-new/<slug>`
+  loc with no `post_id`) is **rejected** so the sitemap can never drift
+  from the approved content. This is the "sitemap/RSS update from the
+  bundle" half of P4.
+
+### No separate `feeds.json` — RSS/feed derive from `content.json`
+
+The bundle layout is the frozen **five files** above. There is
+deliberately **no** `feeds.json`/`rss.xml` artifact: the RSS feed and the
+`WhatsNewFeed` widget are rendered by mss from `content.json` posts
+(ordered by `published_at`), and the `sitemaps.json` URL list above. The
+renderer **must** filter those to indexable posts only — `noindex !==
+true` and not on the `current.json` `disabled_content` post kill-list —
+so a post excluded from the sitemap can never leak into RSS/feed output.

@@ -147,12 +147,16 @@ export function checkSeoConsistency(input: ConsistencyInput): string[] {
     }
   }
 
-  // 5. Sitemap hygiene: scope valid; post refs resolve + are indexable.
+  // 5. Sitemap hygiene: scope valid; locs unique; post refs resolve, are
+  //    indexable, and point at the post's own canonical_url.
   const disabledPostIds = new Set(
     disabled.filter((d) => d.content_kind === 'post').map((d) => d.content_id),
   )
+  const seenLoc = new Set<string>()
   for (const u of sitemaps.urls) {
     if (!scopeOk(u.scope)) errors.push(`sitemap ${u.loc}: scope '${u.scope}' is not a site id or 'all'`)
+    if (seenLoc.has(u.loc)) errors.push(`sitemap ${u.loc}: duplicate loc`)
+    seenLoc.add(u.loc)
     if (u.post_id !== undefined) {
       const p = postById.get(u.post_id)
       if (!p) {
@@ -161,6 +165,11 @@ export function checkSeoConsistency(input: ConsistencyInput): string[] {
         if (p.noindex === true) errors.push(`sitemap ${u.loc}: post ${p.post_id} is noindex and must not be in the sitemap`)
         if (disabledPostIds.has(p.post_id)) {
           errors.push(`sitemap ${u.loc}: post ${p.post_id} is disabled (kill-list) and must not be in the sitemap`)
+        }
+        if (u.loc !== p.canonical_url) {
+          errors.push(
+            `sitemap ${u.loc}: post ${p.post_id} loc does not match its canonical_url '${p.canonical_url}'`,
+          )
         }
       }
     }

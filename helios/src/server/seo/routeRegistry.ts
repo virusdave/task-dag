@@ -48,6 +48,29 @@ export function blogPostPath(siteId: string, slug: string): string {
   return `${SITES_PREFIX}/${siteId}/${WHATS_NEW_SEGMENT}/${slug}`
 }
 
+/**
+ * Does `loc` (an absolute URL or a path) point at a blog-post route,
+ * i.e. `/sites/<id>/whats-new/<slug>`? Used by the sitemap merge to
+ * fail-closed on a stale, manually-entered post URL that lacks a
+ * `post_id` (which would otherwise dodge the post-bound sitemap-hygiene
+ * checks in consistency.ts). Tolerates absolute URLs, bare paths, a
+ * trailing slash, and an optional query/hash.
+ */
+export function looksLikeBlogPostUrl(loc: string): boolean {
+  let path = loc
+  // Strip scheme+host if this is an absolute URL.
+  const schemeMatch = /^[a-z][a-z0-9+.-]*:\/\/[^/]+(\/.*)?$/i.exec(loc)
+  if (schemeMatch) {
+    path = schemeMatch[1] ?? '/'
+  }
+  // Drop query/hash, then a single trailing slash.
+  path = path.split(/[?#]/, 1)[0]!.replace(/\/+$/, '')
+  const re = new RegExp(
+    `^${SITES_PREFIX}/[^/]+/${WHATS_NEW_SEGMENT}/[a-z0-9]+(?:-[a-z0-9]+)*$`,
+  )
+  return re.test(path)
+}
+
 /** The blog index path for a site/scope: /sites/<id>/whats-new */
 export function blogIndexPath(siteId: string): string {
   if (siteId.length === 0) {

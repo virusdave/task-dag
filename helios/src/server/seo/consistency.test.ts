@@ -67,6 +67,29 @@ describe('SEO cross-artifact consistency', () => {
     expect(problems.join('\n')).toMatch(/noindex and must not be in the sitemap/)
   })
 
+  it('rejects a sitemap entry for a disabled (kill-listed) post', () => {
+    const problems = compileExpectingErrors((i) => {
+      i.disabledContent = [
+        { content_kind: 'post', content_id: 'post_one', reason: 'bad', effective_at: '2026-06-11T00:00:00Z' },
+      ]
+    })
+    expect(problems.join('\n')).toMatch(/disabled \(kill-list\) and must not be in the sitemap/)
+  })
+
+  it('rejects a post-bound sitemap loc that does not match the post canonical_url', () => {
+    const problems = compileExpectingErrors((i) => {
+      i.sitemaps[0] = { ...i.sitemaps[0], loc: 'https://freshlybaked.nyc/sites/all/whats-new/wrong' }
+    })
+    expect(problems.join('\n')).toMatch(/does not match its canonical_url/)
+  })
+
+  it('rejects duplicate sitemap loc entries', () => {
+    const problems = compileExpectingErrors((i) => {
+      i.sitemaps.push({ ...i.sitemaps[0] })
+    })
+    expect(problems.join('\n')).toMatch(/duplicate loc/)
+  })
+
   it('rejects a duplicate blog route (scope + slug)', () => {
     const problems = compileExpectingErrors((i) => {
       i.content.posts.push({ ...i.content.posts[0], post_id: 'post_two' })

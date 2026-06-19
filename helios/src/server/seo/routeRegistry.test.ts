@@ -9,6 +9,7 @@ import {
   isReservedGlobalSiteId,
   isValidScope,
   isValidSlug,
+  looksLikeBlogPostUrl,
 } from './routeRegistry.js'
 
 describe('FB.nyc Reserved Prefix Registry slug', () => {
@@ -55,5 +56,19 @@ describe('FB.nyc Reserved Prefix Registry slug', () => {
     expect(isValidScope('fb_nyc', siteIds)).toBe(true)
     expect(isValidScope('all', siteIds)).toBe(true)
     expect(isValidScope('unknown', siteIds)).toBe(false)
+  })
+
+  it('detects blog-post routes (absolute url, bare path, trailing slash, query)', () => {
+    expect(looksLikeBlogPostUrl('https://freshlybaked.nyc/sites/all/whats-new/summer-drop-2026')).toBe(true)
+    expect(looksLikeBlogPostUrl('/sites/fb_nyc/whats-new/cannabis-101')).toBe(true)
+    expect(looksLikeBlogPostUrl('https://freshlybaked.nyc/sites/all/whats-new/summer-drop-2026/')).toBe(true)
+    expect(looksLikeBlogPostUrl('/sites/all/whats-new/summer-drop-2026?utm=x')).toBe(true)
+  })
+
+  it('does not flag non-post routes as blog posts', () => {
+    expect(looksLikeBlogPostUrl('https://freshlybaked.nyc/')).toBe(false)
+    expect(looksLikeBlogPostUrl('/sites/fb_nyc/whats-new')).toBe(false)
+    expect(looksLikeBlogPostUrl('/sites/fb_nyc/whats-new/Bad-Slug')).toBe(false)
+    expect(looksLikeBlogPostUrl('/categories/edibles')).toBe(false)
   })
 })

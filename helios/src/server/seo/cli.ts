@@ -27,6 +27,7 @@ import { compileSeoBundle, SeoCompileError, type CompileInput } from './compile.
 import { loadApprovedFaqSetsForBundle } from './faqBundleSource.js'
 import { loadApprovedImageAssetsForBundle } from './imageAssetBundleSource.js'
 import { loadApprovedPostsForBundle } from './postBundleSource.js'
+import { mergePostSitemaps } from './postSitemapUrls.js'
 import { publishSeoBundle, type SeoPublishOptions } from './publish.js'
 import { validateSeoBundle } from './validate.js'
 import { getPool, closePool } from '../db/pool.js'
@@ -163,6 +164,33 @@ async function applyAssetsFromDb(cfg: BundleConfig, args: Args): Promise<BundleC
   }
 }
 
+/**
+ * When `--sitemaps-from-posts` is passed, regenerate `sitemaps` so every
+ * approved, INDEXABLE post in `content.posts` gets a per-post sitemap entry
+ * derived from its own canonical_url, merged with the config's STATIC
+ * (non-post) sitemap URLs. Runs AFTER posts are loaded so it sees the
+ * DB-approved set under `--posts-from-db`. Pure / no DB access. The
+ * kill-list (disabledContent) excludes disabled posts from the sitemap
+ * while leaving them in content.posts for the pointer kill-list. Returns
+ * the (possibly unchanged) config.
+ */
+function applySitemapsFromPosts(cfg: BundleConfig, args: Args): BundleConfig {
+  if (!args.bools.has('sitemaps-from-posts')) {
+    return cfg
+  }
+  const disabledPostIds = new Set(
+    (cfg.disabledContent ?? [])
+      .filter((d) => d.content_kind === 'post')
+      .map((d) => d.content_id),
+  )
+  const sitemaps = mergePostSitemaps(cfg.sitemaps, cfg.content.posts, { disabledPostIds })
+  process.stdout.write(
+    `[sitemaps-from-posts] generated ${sitemaps.length} sitemap url(s) ` +
+      `(${cfg.content.posts.length} post(s) considered)\n`,
+  )
+  return { ...cfg, sitemaps }
+}
+
 function publishOptsFromConfig(
   cfg: BundleConfig,
   args: Args,
@@ -204,6 +232,7 @@ async function doPublish(args: Args, candidateOnly: boolean): Promise<number> {
   const environment = asEnvironment(requireFlag(args, 'env'))
   let cfg = await applyFaqFromDb(loadConfig(requireFlag(args, 'config')), args)
   cfg = await applyPostsFromDb(cfg, args)
+  cfg = applySitemapsFromPosts(cfg, args)
   cfg = await applyAssetsFromDb(cfg, args)
   const privateKeyPem = readFileSync(requireFlag(args, 'privkey'), 'utf8')
 
