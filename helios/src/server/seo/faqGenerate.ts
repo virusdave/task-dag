@@ -132,26 +132,44 @@ function sanitizedLeakWarnings(
   return warnings
 }
 
+export interface FaqGatewayRequest {
+  readonly systemPrompt: string
+  readonly userPrompt: string
+  /** Defaults to the shared mantle model. */
+  readonly model?: string
+  /** Defaults to 1500. */
+  readonly maxTokens?: number
+}
+
+export type FaqGatewayResult =
+  | { kind: 'ok'; items: FaqItemInput[]; model: string }
+  | { kind: 'error'; message: string }
+
 /**
- * Generate a FAQ draft from a topic. Never throws — gateway/parse failures
- * map to { kind: 'error' }.
+ * Low-level Bedrock-mantle call shared by every FAQ generator (topic-based
+ * here, family-contextual in faqFamilyGenerate.ts): POST a system+user
+ * prompt to the gateway, extract the assistant content, and parse it into
+ * validated FaqItemInput[]. Never throws — gateway/parse failures map to
+ * { kind: 'error' }. Keeping ONE gateway path means timeout/auth/JSON-shape
+ * handling can't drift between callers.
  */
-export async function generateFaqDraft(input: FaqGenerateInput): Promise<FaqGenerateResult> {
+export async function requestFaqItems(request: FaqGatewayRequest): Promise<FaqGatewayResult> {
   const env = getServerEnv()
   if (!env.bedrockMantleBearerToken) {
     return { kind: 'error', message: 'BEDROCK_MANTLE_BEARER_TOKEN not configured' }
   }
+  const model = request.model ?? FAQ_GEN_MODEL
 
   let response: Response
   try {
     response = await fetch(`${env.bedrockMantleBaseUrl}/chat/completions`, {
       body: JSON.stringify({
-        max_tokens: 1500,
+        max_tokens: request.maxTokens ?? 1500,
         messages: [
-          { role: 'system', content: SYSTEM_PROMPT },
-          { role: 'user', content: buildUserPrompt(input) },
+          { role: 'system', content: request.systemPrompt },
+          { role: 'user', content: request.userPrompt },
         ],
-        model: FAQ_GEN_MODEL,
+        model,
         response_format: { type: 'json_object' },
         temperature: 0.2,
         top_p: 0.9,
@@ -167,30 +185,44 @@ export async function generateFaqDraft(input: FaqGenerateInput): Promise<FaqGene
     return { kind: 'error', message: error instanceof Error ? error.message : String(error) }
   }
 
-  const responseText = await response.text()
-  if (!response.ok) {
-    return {
-      kind: 'error',
-      message: `LLM gateway returned HTTP ${response.status}: ${responseText.slice(0, 200)}`,
-    }
-  }
-
   try {
+    const responseText = await response.text()
+    if (!response.ok) {
+      return {
+        kind: 'error',
+        message: `LLM gateway returned HTTP ${response.status}: ${responseText.slice(0, 200)}`,
+      }
+    }
     const rawJson: unknown = JSON.parse(responseText)
     const content = extractAssistantContent(rawJson)
     const items = parseFaqGenerationContent(content)
-    return {
-      kind: 'ok',
-      items,
-      meta: {
-        model: FAQ_GEN_MODEL,
-        topic: input.topic,
-        itemCount: items.length,
-        generatedAt: new Date().toISOString(),
-        sanitizedLeakWarnings: sanitizedLeakWarnings(items),
-      },
-    }
+    return { kind: 'ok', items, model }
   } catch (error) {
     return { kind: 'error', message: error instanceof Error ? error.message : String(error) }
+  }
+}
+
+/**
+ * Generate a FAQ draft from a topic. Never throws — gateway/parse failures
+ * map to { kind: 'error' }.
+ */
+export async function generateFaqDraft(input: FaqGenerateInput): Promise<FaqGenerateResult> {
+  const result = await requestFaqItems({
+    systemPrompt: SYSTEM_PROMPT,
+    userPrompt: buildUserPrompt(input),
+  })
+  if (result.kind === 'error') {
+    return result
+  }
+  return {
+    kind: 'ok',
+    items: result.items,
+    meta: {
+      model: result.model,
+      topic: input.topic,
+      itemCount: result.items.length,
+      generatedAt: new Date().toISOString(),
+      sanitizedLeakWarnings: sanitizedLeakWarnings(result.items),
+    },
   }
 }

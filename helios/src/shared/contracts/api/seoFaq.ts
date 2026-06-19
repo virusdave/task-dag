@@ -132,6 +132,21 @@ export const SeoFaqGenerateBodySchema = z
   .strict()
 export type SeoFaqGenerateBody = z.infer<typeof SeoFaqGenerateBodySchema>
 
+// Family-contextual Bedrock generation (#46 P5). `familyId` is a registry
+// family id or a known alias (e.g. `conquest` → `compare`); the server
+// resolves it against the vendored mss LP-family registry, derives the FBUS
+// source key, and persists a DRAFT scoped to that family. `focus` is an
+// optional operator-supplied angle. Like topic generation, it produces a
+// DRAFT PROPOSAL only — never auto-approved, never auto-published.
+export const SeoFaqFamilyGenerateBodySchema = z
+  .object({
+    familyId: z.string().trim().min(1).max(64),
+    itemCount: z.number().int().min(1).max(10).default(5),
+    focus: z.string().trim().max(2000).optional(),
+  })
+  .strict()
+export type SeoFaqFamilyGenerateBody = z.infer<typeof SeoFaqFamilyGenerateBodySchema>
+
 export const SeoFaqRouteParamsSchema = z.object({
   faqSetId: z.string().min(1),
 })

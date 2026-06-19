@@ -1,0 +1,285 @@
+{
+  "schema": "freshlybaked.fbus.lp-family-registry.v1",
+  "site_id": "freshlybakedus",
+  "canonical_host": "freshlybaked.us",
+  "provenance": {
+    "repo": "Nicponskis/mostly-static-sites",
+    "source_commit": "1e8018503bc4467a3984b89e765a3e2d8daa8eb8",
+    "source_commit_semantics": "git HEAD at artifact-generation time (parent of the commit that contains this file)",
+    "generator": "apps/freshlybakedus-site/scripts/build-lp-family-registry.ts"
+  },
+  "families": [
+    {
+      "id": "deliverance",
+      "aliases": [],
+      "slug_kind": "site-slug",
+      "max_variant": 5,
+      "canonical_representative_route": "/midtown/deliverance/midtown/1",
+      "widget_route_patterns": [
+        "/midtown/deliverance/midtown/*",
+        "/bronx/deliverance/bronx/*"
+      ],
+      "route_patterns": [
+        {
+          "kind": "canonical_content",
+          "path_template": "/{location}/deliverance/{location}/{variant}",
+          "widget_patterns": [
+            "/midtown/deliverance/midtown/*",
+            "/bronx/deliverance/bronx/*"
+          ],
+          "regex_source": "^/(midtown|bronx)/deliverance/\\1/[1-5]/?$"
+        },
+        {
+          "kind": "random_rotation_alias",
+          "path_template": "/{location}/deliverance/{location}/0",
+          "regex_source": "^/(midtown|bronx)/deliverance/\\1/0/?$"
+        }
+      ],
+      "indexability_policy": {
+        "kind": "all_variants",
+        "robots": "noindex,nofollow"
+      },
+      "sample_crawl_routes": [
+        {
+          "path": "/midtown/deliverance/midtown/1",
+          "kind": "canonical-content",
+          "slug_source": "static"
+        },
+        {
+          "path": "/bronx/deliverance/bronx/1",
+          "kind": "canonical-content",
+          "slug_source": "static"
+        },
+        {
+          "path": "/midtown/deliverance/midtown/0",
+          "kind": "random-rotation-alias",
+          "slug_source": "static"
+        }
+      ],
+      "provenance": {
+        "source_paths": [
+          "apps/freshlybakedus-site/lib/purpose-families.ts",
+          "apps/freshlybakedus-site/app/freshlybakedus-deliverance-data.ts"
+        ]
+      }
+    },
+    {
+      "id": "recurse",
+      "aliases": [],
+      "slug_kind": "site-slug",
+      "max_variant": 5,
+      "canonical_representative_route": "/midtown/recurse/midtown/1",
+      "widget_route_patterns": [
+        "/midtown/recurse/midtown/*",
+        "/bronx/recurse/bronx/*"
+      ],
+      "route_patterns": [
+        {
+          "kind": "canonical_content",
+          "path_template": "/{location}/recurse/{location}/{variant}",
+          "widget_patterns": [
+            "/midtown/recurse/midtown/*",
+            "/bronx/recurse/bronx/*"
+          ],
+          "regex_source": "^/(midtown|bronx)/recurse/\\1/[1-5]/?$"
+        },
+        {
+          "kind": "random_rotation_alias",
+          "path_template": "/{location}/recurse/{location}/0",
+          "regex_source": "^/(midtown|bronx)/recurse/\\1/0/?$"
+        }
+      ],
+      "indexability_policy": {
+        "kind": "all_variants",
+        "robots": "noindex,nofollow"
+      },
+      "sample_crawl_routes": [
+        {
+          "path": "/midtown/recurse/midtown/1",
+          "kind": "canonical-content",
+          "slug_source": "static"
+        },
+        {
+          "path": "/bronx/recurse/bronx/1",
+          "kind": "canonical-content",
+          "slug_source": "static"
+        },
+        {
+          "path": "/midtown/recurse/midtown/0",
+          "kind": "random-rotation-alias",
+          "slug_source": "static"
+        }
+      ],
+      "provenance": {
+        "source_paths": [
+          "apps/freshlybakedus-site/lib/purpose-families.ts",
+          "apps/freshlybakedus-site/app/freshlybakedus-recurse-data.ts"
+        ]
+      }
+    },
+    {
+      "id": "tours",
+      "aliases": [],
+      "slug_kind": "site-slug",
+      "max_variant": 5,
+      "canonical_representative_route": "/midtown/tours/midtown/1",
+      "widget_route_patterns": [
+        "/midtown/tours/midtown/*",
+        "/bronx/tours/bronx/*"
+      ],
+      "route_patterns": [
+        {
+          "kind": "canonical_content",
+          "path_template": "/{location}/tours/{location}/{variant}",
+          "widget_patterns": [
+            "/midtown/tours/midtown/*",
+            "/bronx/tours/bronx/*"
+          ],
+          "regex_source": "^/(midtown|bronx)/tours/\\1/[1-5]/?$"
+        },
+        {
+          "kind": "random_rotation_alias",
+          "path_template": "/{location}/tours/{location}/0",
+          "regex_source": "^/(midtown|bronx)/tours/\\1/0/?$"
+        }
+      ],
+      "indexability_policy": {
+        "kind": "variant_overrides",
+        "default_robots": "noindex,nofollow",
+        "variant_robots": {
+          "1": "index,follow"
+        }
+      },
+      "sample_crawl_routes": [
+        {
+          "path": "/midtown/tours/midtown/1",
+          "kind": "canonical-content",
+          "slug_source": "static"
+        },
+        {
+          "path": "/bronx/tours/bronx/1",
+          "kind": "canonical-content",
+          "slug_source": "static"
+        },
+        {
+          "path": "/midtown/tours/midtown/0",
+          "kind": "random-rotation-alias",
+          "slug_source": "static"
+        }
+      ],
+      "provenance": {
+        "source_paths": [
+          "apps/freshlybakedus-site/lib/purpose-families.ts",
+          "apps/freshlybakedus-site/app/freshlybakedus-tour-variant-data.ts"
+        ]
+      }
+    },
+    {
+      "id": "branding",
+      "aliases": [],
+      "slug_kind": "per-row-slug",
+      "max_variant": 5,
+      "canonical_representative_route": "/midtown/branding/camino/1",
+      "widget_route_patterns": [
+        "/midtown/branding/*",
+        "/bronx/branding/*"
+      ],
+      "route_patterns": [
+        {
+          "kind": "canonical_content",
+          "path_template": "/{location}/branding/{brandSlug}/{variant}",
+          "widget_patterns": [
+            "/midtown/branding/*",
+            "/bronx/branding/*"
+          ],
+          "regex_source": "^/(midtown|bronx)/branding/[^/]+/[1-5]/?$"
+        },
+        {
+          "kind": "random_rotation_alias",
+          "path_template": "/{location}/branding/{brandSlug}/0",
+          "regex_source": "^/(midtown|bronx)/branding/[^/]+/0/?$"
+        }
+      ],
+      "indexability_policy": {
+        "kind": "all_variants",
+        "robots": "noindex,nofollow"
+      },
+      "sample_crawl_routes": [
+        {
+          "path": "/midtown/branding/camino/1",
+          "kind": "canonical-content",
+          "slug_source": "curated-dynamic-slug"
+        }
+      ],
+      "provenance": {
+        "source_paths": [
+          "apps/freshlybakedus-site/lib/purpose-families.ts",
+          "apps/freshlybakedus-site/app/freshlybakedus-brand-variant-data.ts"
+        ]
+      }
+    },
+    {
+      "id": "compare",
+      "aliases": [
+        "conquest"
+      ],
+      "internal_data_family": "conquest",
+      "slug_kind": "per-row-slug",
+      "max_variant": 5,
+      "canonical_representative_route": "/midtown/compare/NUYBA6PPFTTU/1",
+      "widget_route_patterns": [
+        "/midtown/compare/*",
+        "/bronx/compare/*",
+        "/compare/midtown/*",
+        "/compare/bronx/*"
+      ],
+      "route_patterns": [
+        {
+          "kind": "canonical_content",
+          "path_template": "/{location}/compare/{competitorPublicId}/{variant}",
+          "widget_patterns": [
+            "/midtown/compare/*",
+            "/bronx/compare/*"
+          ],
+          "regex_source": "^/(midtown|bronx)/compare/[^/]+/[1-5]/?$"
+        },
+        {
+          "kind": "random_rotation_alias",
+          "path_template": "/{location}/compare/{competitorPublicId}/0",
+          "regex_source": "^/(midtown|bronx)/compare/[^/]+/0/?$"
+        },
+        {
+          "kind": "legacy_redirect",
+          "path_template": "/compare/{location}/{competitorPublicId}/{variant}",
+          "widget_patterns": [
+            "/compare/midtown/*",
+            "/compare/bronx/*"
+          ],
+          "regex_source": "^/compare/(midtown|bronx)/[^/]+/\\d+/?$"
+        }
+      ],
+      "indexability_policy": {
+        "kind": "all_variants",
+        "robots": "noindex,nofollow"
+      },
+      "sample_crawl_routes": [
+        {
+          "path": "/midtown/compare/NUYBA6PPFTTU/1",
+          "kind": "canonical-content",
+          "slug_source": "committed-dataset"
+        },
+        {
+          "path": "/bronx/compare/FDGA2DB72DVJ/1",
+          "kind": "canonical-content",
+          "slug_source": "committed-dataset"
+        }
+      ],
+      "provenance": {
+        "source_paths": [
+          "apps/freshlybakedus-site/lib/purpose-families.ts",
+          "apps/freshlybakedus-site/conquest-data/competitor-production-url-map.json"
+        ]
+      }
+    }
+  ]
+}

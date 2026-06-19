@@ -14,6 +14,7 @@
 import type { FastifyInstance } from 'fastify'
 
 import {
+  SeoFaqFamilyGenerateBodySchema,
   SeoFaqGenerateBodySchema,
   SeoFaqRouteParamsSchema,
   SeoFaqSetApproveBodySchema,
@@ -35,7 +36,9 @@ import {
   updateSeoFaqSet,
 } from '../db/queries/seoFaqQueries.js'
 import { checkFaqSetApprovable } from '../seo/faqContent.js'
+import { generateFamilyFaqDraft } from '../seo/faqFamilyGenerate.js'
 import { generateFaqDraft } from '../seo/faqGenerate.js'
+import { getLpFamily, listLpFamilies, lpFamilyFaqSourceKey } from '../seo/lpFamilyRegistry.js'
 
 export async function registerSeoFaqRoutes(server: FastifyInstance): Promise<void> {
   // List all FAQ sets.
@@ -177,6 +180,71 @@ export async function registerSeoFaqRoutes(server: FastifyInstance): Promise<voi
     // narrows it to a concrete site before approving.
     const faqSet = await createSeoFaqSet(getPool(), {
       scope: 'all',
+      items: generated.items,
+      source: 'generated',
+      generationMeta: generated.meta,
+      userId: user.id,
+    })
+    return reply.status(201).send(SeoFaqSetDetailResponseSchema.parse({ faqSet }))
+  })
+
+  // List the FBUS LP families available for family-contextual generation,
+  // read from the vendored mss LP-family registry. Lets the editor UI pick a
+  // valid family id and see where its FAQs will be scoped (route patterns).
+  server.get('/api/seo/faq-families', async (request, reply) => {
+    const user = await requireSessionUser(request, reply, 'viewer')
+    if (!user) {
+      return
+    }
+    return reply.send({
+      families: listLpFamilies().map((family) => ({
+        id: family.id,
+        aliases: family.aliases,
+        sourceKey: lpFamilyFaqSourceKey(family.id),
+        canonicalRepresentativeRoute: family.canonical_representative_route,
+        routePatterns: family.widget_route_patterns,
+        indexabilityPolicy: family.indexability_policy,
+      })),
+    })
+  })
+
+  // Generate a family-contextual DRAFT proposal via Bedrock and save it as a
+  // new draft set, keyed by the family's FBUS source key (`fbus-<id>-faq`) so
+  // it is held to the stricter FBUS denylist at approval time (CI gate 2).
+  // Proposals only — never auto-approved/published (canon §1).
+  server.post('/api/seo/faq-sets/generate-family', async (request, reply) => {
+    const user = await requireSessionUser(request, reply, 'editor')
+    if (!user) {
+      return
+    }
+    const body = SeoFaqFamilyGenerateBodySchema.parse(request.body ?? {})
+    // Resolve the family up front so an unknown id is a 400 (client error),
+    // not a 502 (which we reserve for an actual Bedrock gateway failure).
+    if (!getLpFamily(body.familyId)) {
+      return reply.status(400).send({
+        error: `Unknown LP family '${body.familyId}'.`,
+        detail: `Known families: ${listLpFamilies()
+          .map((f) => f.id)
+          .join(', ')}.`,
+      })
+    }
+    const generated = await generateFamilyFaqDraft({
+      familyId: body.familyId,
+      itemCount: body.itemCount,
+      focus: body.focus,
+    })
+    if (generated.kind === 'error') {
+      return reply.status(502).send({
+        error: 'Family FAQ generation failed.',
+        detail: generated.message,
+      })
+    }
+    // Scope defaults to the reserved global `all` token; the operator
+    // narrows it to a concrete site before approving. The FBUS source key
+    // (not the scope) is what enforces sanitized-mode at approval.
+    const faqSet = await createSeoFaqSet(getPool(), {
+      scope: 'all',
+      sourceKey: generated.meta.sourceKey,
       items: generated.items,
       source: 'generated',
       generationMeta: generated.meta,
