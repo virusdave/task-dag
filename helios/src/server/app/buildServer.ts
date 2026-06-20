@@ -50,6 +50,7 @@ import { registerMetricAnnotationsRoutes } from '../routes/metricAnnotations.js'
 import { registerMetricsRoutes } from '../routes/metrics.js'
 import { registerMetricsDefaultsRoutes } from '../routes/metricsDefaults.js'
 import { registerTargetTrackingRoutes } from '../routes/targetTracking.js'
+import { registerTimeOfDayRoutes } from '../routes/timeOfDay.js'
 import { registerCatalogPurchaseSellThroughRoutes } from '../routes/catalogPurchaseSellThrough.js'
 import { registerPendingPurchaseRoutes } from '../routes/pendingPurchases.js'
 import { registerPricingRoutes } from '../routes/pricing.js'
@@ -273,6 +274,7 @@ async function registerApplicationSurface(server: FastifyInstance) {
   await registerMetricsRoutes(server)
   await registerMetricsDefaultsRoutes(server)
   await registerTargetTrackingRoutes(server)
+  await registerTimeOfDayRoutes(server)
   await registerBudtenderAnalyticsRoutes(server)
   await registerCatalogAnalyticsRoutes(server)
   await registerCrmSegmentMetricsRoutes(server)

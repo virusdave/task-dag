@@ -48,7 +48,7 @@ import {
 // insensitive against taxonomy drift. The bare variant is for
 // single-table `from sweed_orders` queries; the `so.` variant for
 // aliased / joined ones.
-const NON_CANCELLED_ORDER_SQL = `and lower(coalesce(so.raw_json->'invoiceStatus'->>'name', '')) <> 'cancelled'`
+export const NON_CANCELLED_ORDER_SQL = `and lower(coalesce(so.raw_json->'invoiceStatus'->>'name', '')) <> 'cancelled'`
 const NON_CANCELLED_ORDER_SQL_BARE = `and lower(coalesce(raw_json->'invoiceStatus'->>'name', '')) <> 'cancelled'`
 
 // Canceled (voided) LINE items inside an otherwise-live order: same
@@ -1008,13 +1008,13 @@ export async function queryDeliveryOrderCountByZone(args: MetricQueryArgs): Prom
 // pre-tax `subtotal*PromoAmount` fields ship 0 in our data. Used inside a
 // lateral over so.raw_json->'items' aliased `item`; the caller's WHERE
 // excludes canceled lines.
-const LINE_OTD_DISCOUNT_EXPR = `
+export const LINE_OTD_DISCOUNT_EXPR = `
   ( coalesce(nullif(item->>'promoAmount','')::numeric, 0)
     + coalesce(nullif(item->'managerDiscount'->>'amount','')::numeric, 0) )
 `
 // The ex-tax portion of that discount: scale the OTD discount by the
 // line's own ex-tax ratio. Guarded against a zero (fully-comped) line.
-const LINE_EXTAX_DISCOUNT_EXPR = `
+export const LINE_EXTAX_DISCOUNT_EXPR = `
   ${LINE_OTD_DISCOUNT_EXPR}
   * case
       when coalesce(nullif(item->>'subtotalAmount','')::numeric, 0)

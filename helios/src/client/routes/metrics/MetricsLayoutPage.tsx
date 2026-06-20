@@ -61,6 +61,7 @@ import { CrmSegmentsTab } from './CrmSegmentsTab.js'
 import { CustomerValueTab } from './CustomerValueTab.js'
 import { InventoryProcurementTab } from './InventoryProcurementTab.js'
 import { TargetTrackingTab } from './TargetTrackingTab.js'
+import { TimeOfDayTab } from './TimeOfDayTab.js'
 import { EssentialsDailySummaryBanner } from './EssentialsDailySummaryBanner.js'
 import {
   CatalogFilterBar,
@@ -212,6 +213,7 @@ export type MetricsTabId =
   | 'crm-segments'
   | 'crm-segment-analysis'
   | 'target'
+  | 'time-of-day'
   | 'gads-bronx'
   | 'gads-midtown'
   | 'gads-all'
@@ -251,6 +253,12 @@ interface MetricsTab {
    * tabs). Defaults to `[grant]`.
    */
   readonly grantAnyOf?: ReadonlyArray<MetricGrantKey>
+  /**
+   * Admin-only tab: visible only to users with the `admin` role,
+   * regardless of metric grants. Mirrors the server-side
+   * `requireSessionUser(..., 'admin')` gate on the tab's endpoint.
+   */
+  readonly adminOnly?: boolean
 }
 
 /** Grant visibility for a tab: ANY-of when grantAnyOf is set, else the
@@ -260,6 +268,7 @@ function userCanSeeMetricsTab(
   user: Parameters<typeof userHasMetricGrant>[0],
   tab: MetricsTab,
 ): boolean {
+  if (tab.adminOnly && user?.role !== 'admin') return false
   return userHasAnyMetricGrant(user, tab.grantAnyOf ?? [tab.grant])
 }
 
@@ -487,6 +496,20 @@ const METRICS_TABS: ReadonlyArray<MetricsTab> = [
     // Owns its full UI (see TargetTrackingTab); no registry metrics.
     include: () => false,
     grant: 'explore',
+  },
+  {
+    id: 'time-of-day',
+    label: 'Time of day',
+    description:
+      'Weekday × hour heatmap of order economics, for staffing / hours-of-operation decisions. Pick a money basis (default margin $) and an optional fulfillment slice; turn on the labor break-even model to enter a marginal staff-hour cost and see which weekday/hour blocks clear it. Admin-only; uses a manual labor cost (Helios scheduling/payroll data is not yet trusted).',
+    defaultAgg: 'date',
+    defaultStackMode: 'none',
+    showAggControl: false,
+    showStackControl: false,
+    // Owns its full UI (see TimeOfDayTab); no registry metrics.
+    include: () => false,
+    grant: 'explore',
+    adminOnly: true,
   },
   {
     id: 'scatter',
@@ -982,6 +1005,11 @@ export function MetricsLayoutPage() {
           // Target tracking owns its full UI (cost config + break-even
           // gauge + per-period bar chart). No shared toolbar.
           <TargetTrackingTab isAdmin={isAdmin} />
+        ) : activeTab.id === 'time-of-day' ? (
+          // Time of day owns its full UI (weekday × hour heatmap +
+          // basis/slice/labor controls). Admin-only; single consolidated
+          // /api/time-of-day-analytics fetch. Same short-circuit pattern.
+          <TimeOfDayTab />
         ) : activeTab.id === 'inventory' ? (
           // Inventory / Reordering: a bespoke procurement workspace
           // (reorder queue / distributor baskets / exit-liquidate / mix
