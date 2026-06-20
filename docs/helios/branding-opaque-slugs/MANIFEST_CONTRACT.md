@@ -118,18 +118,33 @@ The single live collision today (`bronx/dr-jekyll-and-mr-high`: live brand
 **not** page. The clean #13-aligned end state still migrates mss's overlay
 fixups into Helios so the canonical registry alone disambiguates.
 
-## Two prerequisites that gate the production PUBLISH (operator-side)
+## Two prerequisites that gated the production PUBLISH (operator-side) — both now RESOLVED
 
-The producer is complete and green, but it cannot emit a *production-correct*
-manifest today. Both items below are explicitly deferred by the parent plan
-(§5 P4 rollout, §6.5.1 clean end-state) and are **out of P1-prereq scope**:
+The producer is complete and green. Both prerequisites that originally gated a
+*production-correct* manifest are now resolved (item 1 provisioned + verified
+2026-06-20, #48; item 2 handled in the builder). They were explicitly deferred
+by the parent plan (§5 P4 rollout, §6.5.1 clean end-state) and **out of
+P1-prereq scope**; the historical detail is retained below for reference:
 
-1. **`FRESHLYBAKEDUS_PUBLIC_TOKEN_SECRET` must be provisioned into Helios
-   (DECISION A, operator, #48).** mss is not deployed on the Helios host and
-   the secret is absent from Helios's environment. A manifest built with the
-   non-production fallback secret would `308` live Google-Ads URLs to
-   non-existent opaque pages (404), so `publish --env prod` fails closed
-   without the real secret.
+1. **~~`FRESHLYBAKEDUS_PUBLIC_TOKEN_SECRET` must be provisioned into Helios~~
+   — RESOLVED (DECISION A, operator, #48; provisioned + verified 2026-06-20).**
+   The shared production secret is now live and identical across all three
+   FB-US hosts: vps-nixos-3 (Helios, mints `HMAC(secret, sweedBrandId)`) and
+   vps-nixos-1/2 (mss, verify). It is provisioned via
+   `Nicponskis/nixos-sbc` commit `bb365fd` (each host's
+   `secrets/vps-nixos-{1,2,3}/freshlybakedus-public-token.env.age`,
+   round-trip-verified identical plaintext by `rekey-branding-secret.sh`
+   before commit), exposed to the helios units on vps-nixos-3 via the systemd
+   `EnvironmentFile` as `FRESHLYBAKEDUS_PUBLIC_TOKEN_SECRET`
+   (`helios-freshlybakedus-public-token-env`, owner `helios:helios`, mode
+   0400), and all three hosts were `self-deploy`'d onto that commit. So
+   `publish --env prod` no longer fails closed. The provisioning history /
+   how-to below is retained for rotation reference.
+
+   mss is not deployed on the Helios host, so the secret had to be provisioned
+   into Helios's own environment; a manifest built with the non-production
+   fallback secret would `308` live Google-Ads URLs to non-existent opaque
+   pages (404), so `publish --env prod` fails closed without the real secret.
 
    The operator chose **Option A** (#48): keep `opaque_ref` in the manifest
    and provision mss's real production secret into Helios — fewer downsides /
