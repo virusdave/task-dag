@@ -41,7 +41,12 @@ jobs:
     if: ${{ github.event_name == 'push' }}
     uses: virusdave/task-dag/.github/workflows/close-completed-issues.yml@master
     permissions:
-      contents: read
+      # contents: write (not read) — after closing an epic's issue the close
+      # script deletes the now-stale tasks/pending/<N> + tasks/root-active/<N>
+      # refs via `git push --delete`; read-only makes those deletes fail
+      # silently (`|| true`), orphaning an epic-root ref for a CLOSED issue
+      # that a dispatcher can then waste a worker "decomposing".
+      contents: write
       issues: write
     secrets:
       token: ${{ secrets.GITHUB_TOKEN }}
