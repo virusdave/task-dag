@@ -107,6 +107,11 @@ export interface ImagesAndBarcodesSidebarOptions {
   /** When set, marks which brand link should be highlighted (within the
    * active site). */
   activeBrand: string | null
+  /** True when the live barcode pull failed and barcode work was
+   * suppressed server-side. Sites whose only work is hidden barcode
+   * tasks must still appear in the tree (otherwise the operator can't
+   * reach them to reload), so the issue-count filter is relaxed. */
+  barcodeCheckUnavailable?: boolean
 }
 
 export interface PendingPurchasesSidebarOptions {
@@ -325,7 +330,12 @@ function buildImagesAndBarcodesNode(options: ImagesAndBarcodesSidebarOptions | u
   // T-019e437d-85c8-7588-ad92-cc80f25eded0 explicitly recommended
   // site-only nav for the mobile-collapsed case.
   const siteLeaves: TreeNavNode[] = options.sites
-    .filter((site) => site.totalIssueCount > 0 || site.pendingImportCount > 0)
+    .filter(
+      (site) =>
+        site.totalIssueCount > 0 ||
+        site.pendingImportCount > 0 ||
+        options.barcodeCheckUnavailable === true,
+    )
     .map((site) => ({
       kind: 'leaf' as const,
       navKey: `catalog.images-and-barcodes.site.${site.siteKey}`,

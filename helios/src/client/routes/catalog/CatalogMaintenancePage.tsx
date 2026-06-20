@@ -2,6 +2,7 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState, type Keyboard
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 
 import {
+  BARCODE_CHECK_UNAVAILABLE_WARNING,
   CatalogMaintenanceMovePackageResponseSchema,
   CatalogMaintenanceSurveyResponseSchema,
   HELIOS_PENDING_PURCHASE_SITE_DEALERS,
@@ -240,12 +241,20 @@ export function CatalogMaintenancePage() {
     [state.survey],
   )
 
+  // The live grouped-inventory pull failed, so the server SUPPRESSED the
+  // barcode worklist rather than flood it with false positives. An empty
+  // barcode section here means "unknown", not "clean" — drive a distinct
+  // warning banner, hold back the "all set" message, and keep sites in the
+  // sidebar so the operator can still reach them to reload.
+  const barcodeCheckUnavailable = state.survey?.meta.barcodeCheckUnavailable === true
+
   useRegisterCatalogSidebarSubtree({
     imagesAndBarcodes: {
       indexPath: buildMaintenanceIndexPath(),
       sites: perSiteBrands,
       activeSiteKey: siteKey,
       activeBrand,
+      barcodeCheckUnavailable,
     },
   })
 
@@ -376,6 +385,31 @@ export function CatalogMaintenancePage() {
         <div className="catalog-maintenance-toast catalog-maintenance-toast-err">{state.error}</div>
       ) : null}
 
+      {barcodeCheckUnavailable ? (
+        <div className="catalog-maintenance-toast catalog-maintenance-toast-warn" role="status">
+          <span>
+            Package barcode check didn’t finish, so barcode tasks are hidden until it succeeds. This
+            is not “all clear” — barcode status is unknown right now.
+          </span>
+          <button
+            type="button"
+            className="ghost-button"
+            disabled={state.refreshing}
+            onClick={() => void fetchSurvey(true)}
+          >
+            {state.refreshing ? 'Reloading…' : 'Reload list'}
+          </button>
+        </div>
+      ) : null}
+
+      {(state.survey?.meta.warnings ?? [])
+        .filter((warning) => warning !== BARCODE_CHECK_UNAVAILABLE_WARNING)
+        .map((warning) => (
+          <div key={warning} className="catalog-maintenance-toast" role="status">
+            {warning}
+          </div>
+        ))}
+
       {repairJobs ? (
         <CacheRepairProgressPanel jobs={repairJobs} onDismiss={clearRepairJobs} onRescan={() => void fetchSurvey(true)} />
       ) : null}
@@ -400,6 +434,7 @@ export function CatalogMaintenancePage() {
             <SiteSection
               key={site.siteKey}
               site={site}
+              barcodeCheckUnavailable={barcodeCheckUnavailable}
               onComplete={handleUploadComplete}
               onError={handleUploadError}
             />
@@ -415,7 +450,8 @@ export function CatalogMaintenancePage() {
 
       {filteredSurvey &&
       filteredSurvey.sites.every((s) => s.totalIssueCount === 0) &&
-      !(siteRow && siteRow.pendingImportCount > 0) ? (
+      !(siteRow && siteRow.pendingImportCount > 0) &&
+      !barcodeCheckUnavailable ? (
         <p className="subtle-copy">
           {activeBrand
             ? `No photo or barcode tasks for ${activeBrand} right now. If you just received it, tap "Check for new or updated stock".`
@@ -738,11 +774,12 @@ function computeRepairJobPercent(status: JobStatusResponse | null): number {
 
 interface SiteSectionProps {
   site: CatalogMaintenanceSurveyResponse['sites'][number]
+  barcodeCheckUnavailable: boolean
   onComplete: (message: string) => Promise<void>
   onError: (message: string) => void
 }
 
-function SiteSection({ site, onComplete, onError }: SiteSectionProps) {
+function SiteSection({ site, barcodeCheckUnavailable, onComplete, onError }: SiteSectionProps) {
   return (
     <section className="catalog-maintenance-site" id={site.targetId} style={{ scrollMarginTop: '1rem' }}>
       <header className="page-header" style={{ marginTop: '2rem' }}>
@@ -757,6 +794,7 @@ function SiteSection({ site, onComplete, onError }: SiteSectionProps) {
         <SectionBlock
           key={section.kind}
           section={section}
+          barcodeCheckUnavailable={barcodeCheckUnavailable}
           onComplete={onComplete}
           onError={onError}
         />
@@ -767,17 +805,25 @@ function SiteSection({ site, onComplete, onError }: SiteSectionProps) {
 
 interface SectionBlockProps {
   section: CatalogMaintenanceSurveyResponse['sites'][number]['sections'][number]
+  barcodeCheckUnavailable: boolean
   onComplete: (message: string) => Promise<void>
   onError: (message: string) => void
 }
 
-function SectionBlock({ section, onComplete, onError }: SectionBlockProps) {
+function SectionBlock({ section, barcodeCheckUnavailable, onComplete, onError }: SectionBlockProps) {
   // Today the server only emits `missing-catalog-image` and
   // `missing-or-invalid-barcode` sections. The `missing-variant-image`
   // kind is left in the contract enum for forward-compat but never
   // populated. Treat anything that isn't a barcode section as a group
   // image card.
   const mode: CardMode = section.kind === 'missing-or-invalid-barcode' ? 'barcode' : 'group'
+  // The barcode worklist was suppressed because the live pull failed, so an
+  // empty list here is "unknown", not "clean" — say so instead of implying
+  // there's no work.
+  const emptyMessage =
+    mode === 'barcode' && barcodeCheckUnavailable
+      ? 'Barcode check didn’t finish — reload the list to try again.'
+      : 'Nothing to fix here.'
   return (
     <section className="catalog-maintenance-section" id={section.targetId} style={{ scrollMarginTop: '1rem' }}>
       <header className="catalog-maintenance-section-head">
@@ -787,7 +833,7 @@ function SectionBlock({ section, onComplete, onError }: SectionBlockProps) {
         </Pill>
       </header>
       {section.groups.length === 0 ? (
-        <p className="subtle-copy">Nothing to fix here.</p>
+        <p className="subtle-copy">{emptyMessage}</p>
       ) : (
         <ul className="catalog-maintenance-list">
           {section.groups.map((group) => {
@@ -1525,47 +1571,69 @@ function VariantRow(props: VariantRowProps) {
 
       <div className="catalog-maintenance-variant-row-meta">
         <MetrcTagsLine metrcTags={variant.metrcTags} cannabisCategory={cannabisCategory} />
-        <BarcodeLine
-          editing={editingBarcode}
-          draftValue={draftBarcode}
-          currentValue={variant.externalBarcode}
-          status={variant.barcodeStatus}
-          issueReason={variant.barcodeIssueReason}
-          cannabisCategory={cannabisCategory}
-          saving={savingBarcode}
-          scanning={scanningBarcode}
-          onBeginEdit={() => {
-            setDraftBarcode(variant.externalBarcode ?? '')
-            setEditingBarcode(true)
-          }}
-          onCancelEdit={() => {
-            setEditingBarcode(false)
-            setDraftBarcode(variant.externalBarcode ?? '')
-          }}
-          onChange={setDraftBarcode}
-          onSave={() => void saveBarcode(draftBarcode)}
-          onPickPhoto={() => barcodeFileInputRef.current?.click()}
-          onLiveScan={() => setLiveScannerOpen(true)}
-        />
-        <input
-          ref={barcodeFileInputRef}
-          type="file"
-          accept="image/*"
-          capture="environment"
-          className="catalog-maintenance-file-input"
-          onChange={(event) => {
-            const file = event.target.files?.[0]
-            if (file) void handleScannedFile(file)
-          }}
-        />
-        <LiveBarcodeScanner
-          open={liveScannerOpen}
-          onDetected={handleLiveScannerDetected}
-          onCancel={handleLiveScannerCancel}
-        />
+        {mode === 'barcode' ? (
+          // Barcodes are PER PACKAGE: each package below shows its own
+          // barcode status. Helios can't write a package barcode yet (no
+          // Sweed RPC), so there's no in-page fix — the operator fixes it in
+          // Sweed. We deliberately do NOT offer the old product-level
+          // barcode editor here: it writes a different field and would not
+          // clear these package-level flags.
+          <span className="catalog-maintenance-barcode-line subtle-copy">
+            Package barcodes are listed below. Fix a package barcode in Sweed; Helios can&rsquo;t
+            save package barcodes yet.
+          </span>
+        ) : (
+          <>
+            <BarcodeLine
+              editing={editingBarcode}
+              draftValue={draftBarcode}
+              currentValue={variant.externalBarcode}
+              // Photo cards only ever edit the PRODUCT-level barcode. The
+              // variant's package-rollup status (missing/invalid) is shown
+              // per-package below, NOT here — surfacing it on this
+              // product-level editor would imply this control fixes package
+              // barcodes, which it does not. So never show an issue signal
+              // here.
+              status="ok"
+              issueReason={null}
+              cannabisCategory={cannabisCategory}
+              saving={savingBarcode}
+              scanning={scanningBarcode}
+              onBeginEdit={() => {
+                setDraftBarcode(variant.externalBarcode ?? '')
+                setEditingBarcode(true)
+              }}
+              onCancelEdit={() => {
+                setEditingBarcode(false)
+                setDraftBarcode(variant.externalBarcode ?? '')
+              }}
+              onChange={setDraftBarcode}
+              onSave={() => void saveBarcode(draftBarcode)}
+              onPickPhoto={() => barcodeFileInputRef.current?.click()}
+              onLiveScan={() => setLiveScannerOpen(true)}
+            />
+            <input
+              ref={barcodeFileInputRef}
+              type="file"
+              accept="image/*"
+              capture="environment"
+              className="catalog-maintenance-file-input"
+              onChange={(event) => {
+                const file = event.target.files?.[0]
+                if (file) void handleScannedFile(file)
+              }}
+            />
+            <LiveBarcodeScanner
+              open={liveScannerOpen}
+              onDetected={handleLiveScannerDetected}
+              onCancel={handleLiveScannerCancel}
+            />
+          </>
+        )}
         <PackagesPanel
           variant={variant}
           siteKey={siteKey}
+          mode={mode}
           onError={onBarcodeError}
           onMoved={onPackageMoved}
         />
@@ -1584,12 +1652,21 @@ function VariantRow(props: VariantRowProps) {
 function PackagesPanel(props: {
   variant: CatalogMaintenanceSiteVariant
   siteKey: string
+  mode: CardMode
   onError: (message: string) => void
   onMoved: (message: string) => Promise<void>
 }) {
-  const { variant, siteKey, onError, onMoved } = props
+  const { variant, siteKey, mode, onError, onMoved } = props
   const dealer = HELIOS_PENDING_PURCHASE_SITE_DEALERS.find((s) => s.siteKey === siteKey) ?? null
-  const lots = variant.lots ?? []
+  const rawLots = variant.lots ?? []
+  // On a "Needs barcode" card, surface the packages that ACTUALLY need a
+  // barcode (sellable stock with a missing/placeholder code) first, so the
+  // operator sees the real work without scrolling. A bad barcode on a
+  // trade-sample / not-for-sale / zero-qty package is not work.
+  const lots =
+    mode === 'barcode'
+      ? [...rawLots].sort((a, b) => Number(!lotNeedsBarcodeWork(a)) - Number(!lotNeedsBarcodeWork(b)))
+      : rawLots
   const [pendingLot, setPendingLot] = useState<CatalogMaintenancePackageLot | null>(null)
   const [busy, setBusy] = useState(false)
   // Optimistic shelf overrides keyed by inventory-item id. The "Set shelf"
@@ -1669,6 +1746,7 @@ function PackagesPanel(props: {
               {lot.isTradeSample ? ' · trade sample' : ''}
               {!lot.isForSale ? ' · NOT FOR SALE' : ''}
             </span>
+            <PackageBarcodeBadge lot={lot} show={mode === 'barcode'} />
             {canSetShelf(lot) ? (
               <ShelfControl
                 itemId={lot.itemId}
@@ -1706,6 +1784,74 @@ function PackagesPanel(props: {
         />
       ) : null}
     </div>
+  )
+}
+
+/**
+ * A package only counts as barcode WORK when it's sellable stock: FOR-SALE
+ * bucket, not a trade sample, positive qty. Mirrors the server predicate
+ * (`packageLotIsActionable`) so the UI never tells the operator to fix a
+ * barcode on a package that isn't their problem.
+ */
+function lotIsActionableForBarcode(lot: CatalogMaintenancePackageLot): boolean {
+  return (
+    lot.isForSale &&
+    !lot.isTradeSample &&
+    typeof lot.availableQty === 'number' &&
+    lot.availableQty > 0
+  )
+}
+
+/** True when this package is sellable stock AND has a missing/placeholder barcode. */
+function lotNeedsBarcodeWork(lot: CatalogMaintenancePackageLot): boolean {
+  return lotIsActionableForBarcode(lot) && lot.packageBarcodeStatus !== 'ok'
+}
+
+/**
+ * Per-package barcode status shown inside the package list. Barcodes are
+ * tracked PER PACKAGE: a sellable package with no barcode, or with a Sweed
+ * auto-generated placeholder (`2500000…`), needs a real one. `show` forces
+ * the non-actionable "context" states to render too — used on the "Needs
+ * barcode" worklist so every package's state is explicit and the operator
+ * can see which ones are already fine or not their problem.
+ */
+function PackageBarcodeBadge(props: { lot: CatalogMaintenancePackageLot; show: boolean }) {
+  const { lot, show } = props
+  // Real, sellable problem: the only state that says "fix this".
+  if (lotNeedsBarcodeWork(lot)) {
+    return (
+      <span className="catalog-maintenance-package-barcode">
+        <Pill tone="warning">
+          {lot.packageBarcodeStatus === 'invalid' ? 'Sweed placeholder' : 'No package barcode'}
+        </Pill>{' '}
+        {lot.packageBarcodeStatus === 'invalid' && lot.inventoryBarcode ? (
+          <code className="catalog-maintenance-barcode-value">{lot.inventoryBarcode}</code>
+        ) : null}{' '}
+        <span className="subtle-copy">Needs real barcode.</span>
+      </span>
+    )
+  }
+  // Everything else is context only — render just on the barcode worklist.
+  if (!show) return null
+  // A bad barcode on a non-sellable package (trade sample / not-for-sale /
+  // zero qty) is not the operator's work.
+  if (lot.packageBarcodeStatus !== 'ok') {
+    return (
+      <span className="catalog-maintenance-package-barcode subtle-copy">
+        Barcode not required for this package.
+      </span>
+    )
+  }
+  return (
+    <span className="catalog-maintenance-package-barcode subtle-copy">
+      {lot.inventoryBarcode ? (
+        <>
+          barcode: <code>{lot.inventoryBarcode}</code>
+        </>
+      ) : (
+        'barcode ok'
+      )}
+    </span>
   )
 }
 

@@ -52,6 +52,31 @@ export const CatalogMaintenancePackageLotSchema = z.object({
    * doesn't break client-side parse during a rolling redeploy.
    */
   warehouseLocationCode: z.string().nullable().default(null),
+  /**
+   * The package's own scannable barcode, read from the Sweed inventory
+   * item's `inventoryBarcode` (NOT the product-level `externalBarcode`).
+   * Barcodes are tracked PER PACKAGE: two packages of the same product
+   * can carry different barcodes (e.g. one real manufacturer code and one
+   * Sweed auto-generated placeholder), so this lives on the lot, not the
+   * variant.
+   *
+   * Defaulted so an older server build that hasn't shipped the field yet
+   * doesn't break client-side parse during a rolling redeploy.
+   */
+  inventoryBarcode: z.string().nullable().default(null),
+  /**
+   * Classification of `inventoryBarcode`:
+   *   - `missing`: no package barcode on file.
+   *   - `invalid`: a Sweed auto-generated placeholder (not a real
+   *      scannable code) — these need a real barcode just like a missing
+   *      one does.
+   *   - `ok`: a real package barcode.
+   * Defaulted to `ok` for rolling-redeploy safety; the server always sets
+   * it explicitly.
+   */
+  packageBarcodeStatus: CatalogMaintenanceBarcodeStatusSchema.default('ok'),
+  /** Human-readable reason when `packageBarcodeStatus` is not `ok`. */
+  packageBarcodeIssueReason: z.string().nullable().default(null),
 })
 export type CatalogMaintenancePackageLot = z.infer<typeof CatalogMaintenancePackageLotSchema>
 
@@ -175,6 +200,13 @@ export const CatalogMaintenanceFatalBannerSchema = z.object({
 })
 export type CatalogMaintenanceFatalBanner = z.infer<typeof CatalogMaintenanceFatalBannerSchema>
 
+// Warning text pushed into `meta.warnings` when the live grouped-inventory
+// pull fails and the barcode worklist is suppressed. Shared so the client
+// can recognise it (and de-dupe it against the dedicated banner driven by
+// `meta.barcodeCheckUnavailable`) without string drift.
+export const BARCODE_CHECK_UNAVAILABLE_WARNING =
+  'Package barcode check could not finish. Reload the list to try again.'
+
 export const CatalogMaintenanceSurveyMetaSchema = z.object({
   generatedAt: z.string(),
   expiresAt: z.string(),
@@ -182,6 +214,12 @@ export const CatalogMaintenanceSurveyMetaSchema = z.object({
   totalInStockVariants: z.number().int(),
   totalUniqueGroups: z.number().int(),
   warnings: z.array(z.string()),
+  // True when the live grouped-inventory pull failed, so the "Needs
+  // barcode" worklist was SUPPRESSED rather than seeded with false
+  // positives. The client must NOT read an empty barcode section as
+  // "no work" in this state — barcode status is unknown, not clean.
+  // Defaulted for rolling-redeploy safety (older servers omit it).
+  barcodeCheckUnavailable: z.boolean().default(false),
 })
 export type CatalogMaintenanceSurveyMeta = z.infer<typeof CatalogMaintenanceSurveyMetaSchema>
 

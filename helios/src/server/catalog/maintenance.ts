@@ -9,21 +9,29 @@
  *   2. Missing variant image:  in-stock variant has no own image (its
  *                              group has one but the variant is using
  *                              the inherited group image)
- *   3. Missing or invalid package barcode:  in-stock variant has no
- *                              externalBarcode, or the barcode fails
- *                              basic validation (empty, non-digit
- *                              characters, fewer than 8 digits, or
- *                              starts with a known placeholder).
+ *   3. Missing or invalid PACKAGE barcode:  an in-stock variant has at
+ *                              least one actionable (FOR-SALE, non-trade-
+ *                              sample, qty > 0) package whose own
+ *                              `inventoryBarcode` is empty OR a Sweed
+ *                              auto-generated placeholder (`25000000` +
+ *                              5-digit counter). Barcodes are tracked PER
+ *                              PACKAGE, NOT from the product-level
+ *                              `externalBarcode` — two packages of one
+ *                              product can carry different barcodes.
  *
  * Read path:
- *   Derived from cached Helios DB tables only — `catalog_groups`
- *   (live_state_json, needs_reanalysis_at, etc.) and
+ *   Photo candidates derive from cached Helios DB tables only —
+ *   `catalog_groups` (live_state_json, needs_reanalysis_at, etc.) and
  *   `stock_variant_state` (which in-stock products at which site,
- *   quantity, METRC tags). No Sweed calls on page render.
+ *   quantity, METRC tags). The "Needs barcode" section additionally
+ *   REQUIRES the live grouped-inventory pull (`liveVerifyCandidateSet`),
+ *   because per-package `inventoryBarcode` is not cached in the DB; if
+ *   that live pull fails the barcode section is suppressed (never
+ *   flooded) and a warning is surfaced.
  *
  * Stale cache: if any required field predates the recent schema
  * upgrade (raw live_state_json missing the new `images`,
- * `externalBarcode`, `sizeName`, `packOfSize` fields; stock rows with
+ * `sizeName`, `packOfSize` fields; stock rows with
  * empty `metrc_tags_json`; in-stock product ids not present in any
  * `catalog_groups.live_state_json.products` array) the response
  * carries a `fatal` banner with codes and counts. The client
@@ -41,6 +49,7 @@
 import { z } from 'zod'
 
 import {
+  BARCODE_CHECK_UNAVAILABLE_WARNING,
   buildCatalogGroupModuleScope,
   HELIOS_PENDING_PURCHASE_SITE_DEALERS,
   isValidWarehouseLocationCode,
@@ -149,8 +158,11 @@ export async function loadCatalogMaintenanceSurvey(
       // already been fixed in Sweed but whose `catalog_groups` row
       // hasn't been re-ingested yet. Hit Sweed live for just the
       // candidate set and drop anything that's already resolved.
-      // Failures here are non-fatal — we keep the original entry so
-      // the operator can still act on it.
+      // Failures here are non-fatal but NOT uniform: photo work is kept
+      // (cached DB is authoritative for it), while the barcode worklist
+      // is SUPPRESSED (package barcodes only exist in the live feed, so
+      // without it we'd flood the page with false positives) and a
+      // `barcodeCheckUnavailable` flag + warning are surfaced instead.
       const verified = await liveVerifyCandidateSet(result)
       cachedSurvey = {
         expiresAt: Date.now() + SURVEY_TTL_MS,
@@ -222,6 +234,10 @@ const LiveVerifyItemSchema = z
     isNotForSale: z.boolean().nullable().optional(),
     isAvailableOnline: z.boolean().nullable().optional(),
     externalTrackCode: z.string().nullable().optional(),
+    // The package's own scannable barcode. This — NOT the product-level
+    // `externalBarcode` — is the barcode the "Needs barcode" worklist
+    // judges, because barcodes are tracked per package.
+    inventoryBarcode: z.string().nullable().optional(),
     // Sweed's free-form per-package code. We repurpose it as the warehouse
     // SHELF code (PREFIX-COL-ROW[-split]); only surfaced on the lot when it
     // parses as a valid shelf code, so legacy junk never shows as a shelf.
@@ -304,7 +320,6 @@ async function liveVerifyCandidateSet(
   // UI can render the "Move to Inspection" button without a second
   // round-trip.
   const groupHasImage = new Map<number, boolean>()
-  const productHasBarcode = new Map<number, boolean>()
   // siteKey → productId → has at least one FOR-SALE-locationed,
   // non-trade-sample lot with qty > 0
   const productHasForSaleLotBySite = new Map<string, Map<number, boolean>>()
@@ -332,10 +347,6 @@ async function liveVerifyCandidateSet(
             const product = row.product
             if (!product) continue
             const productId = product.id
-            if (productId !== undefined) {
-              const barcode = nonEmptyString(product.externalBarcode ?? null)
-              productHasBarcode.set(productId, barcode !== null)
-            }
             const group = product.productGroup
             if (group && group.id !== undefined && Array.isArray(group.images)) {
               groupHasImage.set(group.id, group.images.length > 0)
@@ -370,6 +381,8 @@ async function liveVerifyCandidateSet(
                   rawInternalTrackCode && isValidWarehouseLocationCode(rawInternalTrackCode)
                     ? rawInternalTrackCode
                     : null
+                const inventoryBarcode = nonEmptyString(item.inventoryBarcode ?? null)
+                const packageBarcode = classifyPackageBarcode(inventoryBarcode)
                 builtLots.push({
                   itemId: String(itemIdRaw),
                   externalTrackCode: nonEmptyString(item.externalTrackCode ?? null),
@@ -381,6 +394,9 @@ async function liveVerifyCandidateSet(
                   isForSale,
                   isTradeSample,
                   warehouseLocationCode,
+                  inventoryBarcode,
+                  packageBarcodeStatus: packageBarcode.status,
+                  packageBarcodeIssueReason: packageBarcode.reason,
                 })
               }
               // Merge with anything seen on a prior grouped-feed row for
@@ -401,10 +417,38 @@ async function liveVerifyCandidateSet(
       }
     })
   } catch (error) {
-    // No pool token available, transport blew up, etc. Fail open: return
-    // the unverified survey rather than blocking the page.
-    console.warn('[catalog-maintenance] live verify pass failed; returning unverified survey.', error)
-    return survey
+    // No pool token available, transport blew up, etc.
+    //
+    // Photo candidates come straight from the cached DB state, so they are
+    // still trustworthy — fail open on those (existing behaviour). But the
+    // "Needs barcode" section is seeded broadly (every in-stock cannabis
+    // variant) precisely BECAUSE package barcodes only exist in the live
+    // grouped feed; without that feed we cannot tell which packages are
+    // actually missing/placeholder barcodes. Returning the broad seed would
+    // flood the worklist with false positives, so SUPPRESS the barcode
+    // section instead and tell the operator the check could not finish.
+    console.warn('[catalog-maintenance] live verify pass failed; barcode check suppressed.', error)
+    const sitesWithoutBarcodeWork = survey.sites.map((site) => {
+      const sections = site.sections.map((section) =>
+        section.kind === 'missing-or-invalid-barcode'
+          ? { ...section, groups: [], issueCount: 0 }
+          : section,
+      )
+      return {
+        ...site,
+        sections,
+        totalIssueCount: sections.reduce((acc, s) => acc + s.issueCount, 0),
+      }
+    })
+    return {
+      ...survey,
+      sites: sitesWithoutBarcodeWork,
+      meta: {
+        ...survey.meta,
+        barcodeCheckUnavailable: true,
+        warnings: [...survey.meta.warnings, BARCODE_CHECK_UNAVAILABLE_WARNING],
+      },
+    }
   }
 
   const brandIssueCounts = new Map<string, number>()
@@ -431,10 +475,19 @@ async function liveVerifyCandidateSet(
       if (!siteLots.has(productId)) return true
       return siteHasForSaleLot.get(productId) === true
     }
-    const annotateVariant = (variant: CatalogMaintenanceSiteVariant): CatalogMaintenanceSiteVariant => ({
-      ...variant,
-      lots: siteLots.get(variant.productId) ?? [],
-    })
+    // A variant "needs a barcode" when at least one of its actionable
+    // packages has a missing or Sweed-placeholder barcode. Decided purely
+    // from live per-package data; if no lot data came back for this product
+    // at this site we cannot confirm a problem, so we don't flag it.
+    const variantNeedsBarcode = (productId: number): boolean => {
+      const lots = siteLots.get(productId)
+      return lots ? lotsNeedBarcode(lots) : false
+    }
+    const annotateVariant = (variant: CatalogMaintenanceSiteVariant): CatalogMaintenanceSiteVariant => {
+      const lots = siteLots.get(variant.productId) ?? []
+      const roll = rollUpVariantBarcode(lots)
+      return { ...variant, lots, barcodeStatus: roll.status, barcodeIssueReason: roll.reason }
+    }
     const newSections = site.sections.map((section) => {
       if (section.kind === 'missing-catalog-image') {
         const keptGroups: CatalogMaintenanceSiteGroup[] = []
@@ -450,9 +503,8 @@ async function liveVerifyCandidateSet(
       if (section.kind === 'missing-or-invalid-barcode') {
         const keptGroups: CatalogMaintenanceSiteGroup[] = []
         for (const group of section.groups) {
-          const keptVariants = group.variants.filter(
-            (variant) =>
-              productHasBarcode.get(variant.productId) !== true && variantPasses(variant.productId),
+          const keptVariants = group.variants.filter((variant) =>
+            variantNeedsBarcode(variant.productId),
           )
           if (keptVariants.length === 0) continue
           keptGroups.push({ ...group, variants: keptVariants.map(annotateVariant) })
@@ -742,15 +794,15 @@ async function buildSurveyFromDb(): Promise<CatalogMaintenanceSurveyResponse> {
       )
 
       const groupNeedsCatalogImage = indexed.liveState.groupImageCount === 0
-      // Variants whose barcode is missing. Like the missing-METRC check,
-      // this is only an error condition for cannabis categories —
-      // Accessories / Other groups are skipped entirely (no warning
-      // either). "Invalid" barcode detection has been deliberately removed
-      // until the human defines the validation rules they actually care
-      // about; today we only surface MISSING barcodes.
-      const barcodeIssueVariants = isCannabisCategory(indexed.categoryName)
-        ? entries.filter((entry) => classifyBarcode(entry.product.externalBarcode).status === 'missing')
-        : []
+      // Seed the "Needs barcode" candidate set with EVERY in-stock cannabis
+      // variant in the group. Barcodes are judged PER PACKAGE off the live
+      // `inventoryBarcode`, which only exists in the live grouped feed (not
+      // the cached DB state) — so we cannot pre-filter here. The live verify
+      // pass (`liveVerifyCandidateSet`) is authoritative: it trims this seed
+      // down to the variants whose actionable packages actually have a
+      // missing or Sweed-placeholder barcode. Non-cannabis groups
+      // (Accessories / Other) are never barcode work.
+      const barcodeCandidateVariants = isCannabisCategory(indexed.categoryName) ? entries : []
 
       if (groupNeedsCatalogImage) {
         const card = buildSiteGroupCard({
@@ -771,17 +823,18 @@ async function buildSurveyFromDb(): Promise<CatalogMaintenanceSurveyResponse> {
       // can't complete. The corresponding section kind in the contract
       // is left in place but always populated with zero candidates.
 
-      if (barcodeIssueVariants.length > 0) {
-        const onlyAffected = variantsForGroupCard.filter((v) => barcodeIssueVariants.some((e) => e.product.productId === v.productId))
+      if (barcodeCandidateVariants.length > 0) {
         missingBarcode.push(
           buildSiteGroupCard({
             parsedGroup: indexed,
             site,
-            entries: barcodeIssueVariants,
-            variantsForGroupCard: onlyAffected,
+            entries: barcodeCandidateVariants,
+            variantsForGroupCard,
           }),
         )
-        countBrandIssue(brandIssueCounts, indexed.brandName, barcodeIssueVariants.length)
+        // Provisional brand count for the seed; liveVerifyCandidateSet
+        // recomputes brand/issue counts from the confirmed package results.
+        countBrandIssue(brandIssueCounts, indexed.brandName, barcodeCandidateVariants.length)
       }
 
       void inStockProductIds
@@ -875,6 +928,9 @@ async function buildSurveyFromDb(): Promise<CatalogMaintenanceSurveyResponse> {
     totalInStockVariants,
     totalUniqueGroups,
     warnings,
+    // Default healthy; the live-verify failure path overrides this to true
+    // when it suppresses the barcode worklist.
+    barcodeCheckUnavailable: false,
   }
 
   return {
@@ -922,7 +978,6 @@ function buildVariantPayload(
   siteStock: PerSiteStock,
   liveState: ParsedLiveState,
 ): CatalogMaintenanceSiteVariant {
-  const barcode = classifyBarcode(product.externalBarcode)
   return {
     productId: product.productId,
     name: product.name,
@@ -940,9 +995,14 @@ function buildVariantPayload(
     previewImageUrl: product.ownImagePreviewUrl ?? liveState.groupPreviewImageUrl,
     imageCount: product.ownImageCount > 0 ? product.ownImageCount : liveState.groupImageCount,
     variantSpecificImageCount: product.variantSpecificImageCount,
+    // Barcodes are judged PER PACKAGE (see `CatalogMaintenancePackageLot`),
+    // not from the product-level `externalBarcode`. These variant-level
+    // fields are a rollup of the variant's package lots, filled in by
+    // `liveVerifyCandidateSet.annotateVariant` once live lot data is in;
+    // until then they default to "ok" (no package data yet).
     externalBarcode: product.externalBarcode,
-    barcodeStatus: barcode.status,
-    barcodeIssueReason: barcode.reason,
+    barcodeStatus: 'ok',
+    barcodeIssueReason: null,
   }
 }
 
@@ -984,20 +1044,86 @@ function isCannabisCategory(categoryName: string | null): boolean {
   return !NON_CANNABIS_CATEGORY_NAMES.has(categoryName.trim())
 }
 
-function classifyBarcode(value: string | null): { status: 'ok' | 'missing' | 'invalid'; reason: string | null } {
-  // Today we ONLY classify a barcode as missing vs ok. "Invalid" is
-  // deliberately not detected — the human has not yet defined what
-  // patterns we consider invalid (and explicitly does NOT want us to
-  // apply any ISO-spec / heuristic checks in the meantime). The 'invalid'
-  // status value is left in the shared contract for forward-compat.
-  if (value === null) {
-    return { status: 'missing', reason: 'No barcode on file.' }
-  }
-  const trimmed = value.trim()
+/**
+ * Sweed auto-generated placeholder package barcodes. When an inventory
+ * item is received without a real scannable barcode, Sweed mints an
+ * internal EAN-13 in the GS1 "2" restricted-distribution range: a fixed
+ * `25000000` prefix followed by a 5-digit incrementing counter (e.g.
+ * `2500000007552`). These are NOT real barcodes — a package carrying one
+ * still "needs a barcode" exactly like an empty one does.
+ *
+ * Kept deliberately narrow: only this confirmed family is rejected.
+ * Other "2"-prefixed numeric codes (e.g. date-coded `2025…` values seen
+ * in the live data) are real and must NOT be flagged. Do not broaden to
+ * all GS1 "2" codes without a second confirmed placeholder family.
+ */
+const SWEED_AUTO_GENERATED_PACKAGE_BARCODE_RE = /^25000000\d{5}$/
+
+/**
+ * Classify a package-level `inventoryBarcode` (the Sweed inventory item's
+ * own barcode). Operator rule: a "valid barcode" excludes Sweed
+ * auto-generated placeholders, and we only ever judge the PACKAGE barcode
+ * — never the product-level `externalBarcode`.
+ */
+export function classifyPackageBarcode(value: string | null | undefined): {
+  status: 'ok' | 'missing' | 'invalid'
+  reason: string | null
+} {
+  const trimmed = (value ?? '').trim()
   if (trimmed.length === 0) {
-    return { status: 'missing', reason: 'Barcode is empty.' }
+    return { status: 'missing', reason: 'No package barcode.' }
+  }
+  if (SWEED_AUTO_GENERATED_PACKAGE_BARCODE_RE.test(trimmed)) {
+    return { status: 'invalid', reason: 'Sweed placeholder. Needs real barcode.' }
   }
   return { status: 'ok', reason: null }
+}
+
+/**
+ * A package lot only counts as barcode work when it is actually sellable
+ * stock: in the FOR-SALE bucket, not a trade sample, and with positive
+ * available quantity. (`isForSale` alone does not require qty > 0, so we
+ * check it explicitly — a sold-through or quarantined package with a bad
+ * barcode is not the operator's problem.)
+ */
+export function packageLotIsActionable(lot: CatalogMaintenancePackageLot): boolean {
+  return (
+    lot.isForSale &&
+    !lot.isTradeSample &&
+    typeof lot.availableQty === 'number' &&
+    lot.availableQty > 0
+  )
+}
+
+/**
+ * A variant "needs a barcode" when at least one of its actionable packages
+ * carries a missing or Sweed-placeholder barcode.
+ */
+export function lotsNeedBarcode(lots: CatalogMaintenancePackageLot[]): boolean {
+  return lots.some((lot) => packageLotIsActionable(lot) && lot.packageBarcodeStatus !== 'ok')
+}
+
+/**
+ * Roll the per-package barcode statuses up to a single variant-level
+ * status + human summary, considering only actionable packages.
+ */
+export function rollUpVariantBarcode(lots: CatalogMaintenancePackageLot[]): {
+  status: 'ok' | 'missing' | 'invalid'
+  reason: string | null
+} {
+  const bad = lots.filter(
+    (lot) => packageLotIsActionable(lot) && lot.packageBarcodeStatus !== 'ok',
+  )
+  if (bad.length === 0) return { status: 'ok', reason: null }
+  const missing = bad.filter((lot) => lot.packageBarcodeStatus === 'missing').length
+  const placeholder = bad.length - missing
+  const parts: string[] = []
+  if (missing > 0) parts.push(`${missing} with no barcode`)
+  if (placeholder > 0) parts.push(`${placeholder} with a Sweed placeholder`)
+  return {
+    status: missing > 0 ? 'missing' : 'invalid',
+    reason: `${bad.length} package${bad.length === 1 ? '' : 's'} need a real barcode (${parts.join(', ')}).`,
+  }
 }
 
 function siteAnchorId(siteKey: string): string {
@@ -1032,9 +1158,10 @@ function inspectLiveStateFreshness(value: unknown): LiveStateFreshness {
       if (!Object.prototype.hasOwnProperty.call(productObj, 'images')) {
         reasons.add('live-state-schema-stale')
       }
-      if (!Object.prototype.hasOwnProperty.call(productObj, 'externalBarcode')) {
-        reasons.add('live-state-schema-stale')
-      }
+      // NOTE: product-level `externalBarcode` is intentionally NOT required
+      // for freshness anymore. The page judges barcodes per PACKAGE (from
+      // the live `inventoryBarcode`), so a cached product row lacking
+      // `externalBarcode` must not raise a "stale cache" fatal banner.
       if (!Object.prototype.hasOwnProperty.call(productObj, 'sizeName')) {
         reasons.add('live-state-schema-stale')
       }

@@ -2790,6 +2790,17 @@ a.tree-nav-branch-label.is-link,
   color: #8c2f1e;
 }
 
+.catalog-maintenance-toast-warn {
+  border-color: rgba(201, 150, 47, 0.55);
+  background: rgba(201, 150, 47, 0.14);
+  color: #7a5a12;
+  flex-wrap: wrap;
+}
+
+.catalog-maintenance-toast-warn .ghost-button {
+  flex-shrink: 0;
+}
+
 .catalog-maintenance-section {
   display: flex;
   flex-direction: column;

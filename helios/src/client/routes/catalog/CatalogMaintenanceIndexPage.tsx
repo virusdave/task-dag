@@ -30,12 +30,17 @@ export function CatalogMaintenanceIndexPage() {
     [state.survey],
   )
 
+  // Live barcode pull failed and the server suppressed all barcode work; a
+  // store showing "All set" / "0 to fix" here is "unknown", not "clean".
+  const barcodeCheckUnavailable = state.survey?.meta.barcodeCheckUnavailable === true
+
   useRegisterCatalogSidebarSubtree({
     imagesAndBarcodes: {
       indexPath: buildMaintenanceIndexPath(),
       sites,
       activeSiteKey: null,
       activeBrand: null,
+      barcodeCheckUnavailable,
     },
   })
 
@@ -84,6 +89,23 @@ export function CatalogMaintenanceIndexPage() {
 
       {state.error ? (
         <div className="catalog-maintenance-toast catalog-maintenance-toast-err">{state.error}</div>
+      ) : null}
+
+      {barcodeCheckUnavailable ? (
+        <div className="catalog-maintenance-toast catalog-maintenance-toast-warn" role="status">
+          <span>
+            Package barcode check didn’t finish, so barcode tasks are hidden across all stores. A
+            store showing “All set” may still have barcode work — this is not “all clear”.
+          </span>
+          <button
+            type="button"
+            className="ghost-button"
+            disabled={state.refreshing}
+            onClick={() => void fetchSurvey(true)}
+          >
+            {state.refreshing ? 'Reloading…' : 'Reload list'}
+          </button>
+        </div>
       ) : null}
 
       {repairJobs ? (
@@ -153,7 +175,9 @@ export function CatalogMaintenanceIndexPage() {
                       {site.totalIssueCount === 0
                         ? site.pendingImportCount > 0
                           ? 'New items still loading'
-                          : 'All set'
+                          : barcodeCheckUnavailable
+                            ? 'Barcode status unknown — reload list'
+                            : 'All set'
                         : `${site.brands.length} brand${site.brands.length === 1 ? '' : 's'} need attention`}
                       {site.totalIssueCount > 0 && site.pendingImportCount > 0
                         ? ` · ${site.pendingImportCount} still loading`
@@ -164,9 +188,13 @@ export function CatalogMaintenanceIndexPage() {
                     {site.pendingImportCount > 0 ? (
                       <Pill tone="muted">{site.pendingImportCount} still loading</Pill>
                     ) : null}
-                    <Pill tone={site.totalIssueCount === 0 ? 'muted' : 'warning'}>
-                      {site.totalIssueCount} to fix
-                    </Pill>
+                    {site.totalIssueCount === 0 && barcodeCheckUnavailable ? (
+                      <Pill tone="warning">barcode unknown</Pill>
+                    ) : (
+                      <Pill tone={site.totalIssueCount === 0 ? 'muted' : 'warning'}>
+                        {site.totalIssueCount} to fix
+                      </Pill>
+                    )}
                     <span aria-hidden="true">›</span>
                   </span>
                 </Link>
