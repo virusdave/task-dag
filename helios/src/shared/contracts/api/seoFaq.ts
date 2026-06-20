@@ -151,3 +151,95 @@ export const SeoFaqRouteParamsSchema = z.object({
   faqSetId: z.string().min(1),
 })
 export type SeoFaqRouteParams = z.infer<typeof SeoFaqRouteParamsSchema>
+
+// ── Review page (#46 P5) ──────────────────────────────────────────────
+//
+// The single, server-derived "everything a reviewer needs to decide"
+// bundle for one FAQ set, returned by GET /api/seo/faq-sets/:id/review.
+// Compliance problems are the hard approval blockers (same check the
+// approve path enforces); governance problems are advisory warnings; leak
+// markers annotate the sanitized-host fields; placement is derived from the
+// PERSISTED source key; preview is the no-cloaking JSON-LD for both modes.
+
+// Structural completeness + sanitized-host compliance blocker (mirrors the
+// server's FaqComplianceProblem). itemIndex -1 = a set-level problem.
+export const SeoFaqComplianceProblemSchema = z.object({
+  itemIndex: z.number().int(),
+  field: z.enum(['question', 'answer_sanitized', 'answer_raw']),
+  message: z.string(),
+})
+export type SeoFaqComplianceProblem = z.infer<typeof SeoFaqComplianceProblemSchema>
+
+// Advisory governance warning (mirrors the server's FaqGovernanceProblem).
+export const SeoFaqGovernanceProblemSchema = z.object({
+  category: z.enum([
+    'item_count',
+    'question_length',
+    'answer_length',
+    'forbidden_term',
+    'duplicate_question',
+    'near_duplicate_answer',
+  ]),
+  itemIndex: z.number().int(),
+  relatedItemIndex: z.number().int().optional(),
+  field: z.enum(['question', 'answer_raw', 'answer_sanitized']).optional(),
+  message: z.string(),
+})
+export type SeoFaqGovernanceProblem = z.infer<typeof SeoFaqGovernanceProblemSchema>
+
+// Per-field sanitized-host (`.us`) leak markers for one item. Only the
+// shared question and the sanitized answer are leak-checked (the raw answer
+// is the FB.nyc variant and may carry raw copy).
+export const SeoFaqReviewLeakMarkersSchema = z.object({
+  itemIndex: z.number().int().nonnegative(),
+  field: z.enum(['question', 'answer_sanitized']),
+  markers: z.array(z.string()),
+})
+export type SeoFaqReviewLeakMarkers = z.infer<typeof SeoFaqReviewLeakMarkersSchema>
+
+// Where this set publishes, resolved from its persisted source key. Every
+// shape is explicit so the page never pretends a keyless / non-LP / unknown
+// set maps to LP route patterns.
+export const SeoFaqReviewPlacementSchema = z.discriminatedUnion('kind', [
+  z.object({
+    kind: z.literal('lp_family'),
+    sourceKey: z.string(),
+    familyId: z.string(),
+    canonicalRepresentativeRoute: z.string(),
+    routePatterns: z.array(z.string()),
+    indexabilityPolicy: z.unknown(),
+  }),
+  z.object({
+    kind: z.literal('non_lp_source_key'),
+    sourceKey: z.string(),
+    familySlug: z.string(),
+  }),
+  z.object({
+    kind: z.literal('unknown_source_key'),
+    sourceKey: z.string(),
+  }),
+  z.object({
+    kind: z.literal('no_source_key'),
+    sourceKey: z.null(),
+  }),
+])
+export type SeoFaqReviewPlacement = z.infer<typeof SeoFaqReviewPlacementSchema>
+
+export const SeoFaqReviewResponseSchema = z.object({
+  faqSet: SeoFaqSetRecordSchema,
+  compliance: z.object({
+    ok: z.boolean(),
+    problems: z.array(SeoFaqComplianceProblemSchema),
+  }),
+  governance: z.object({
+    ok: z.boolean(),
+    problems: z.array(SeoFaqGovernanceProblemSchema),
+  }),
+  sanitizedHostLeakMarkers: z.array(SeoFaqReviewLeakMarkersSchema),
+  placement: SeoFaqReviewPlacementSchema,
+  preview: z.object({
+    rawJsonLd: z.record(z.string(), z.unknown()),
+    sanitizedJsonLd: z.record(z.string(), z.unknown()),
+  }),
+})
+export type SeoFaqReviewResponse = z.infer<typeof SeoFaqReviewResponseSchema>

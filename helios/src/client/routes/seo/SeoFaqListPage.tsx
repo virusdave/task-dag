@@ -143,8 +143,10 @@ export function SeoFaqListPage() {
                 <td>{s.source}</td>
                 <td style={{ textAlign: 'right' }}>{s.items.length}</td>
                 <td>{fmt(s.updatedAt)}</td>
-                <td style={{ textAlign: 'right' }}>
-                  <Link to={`/seo/faq/${s.faqSetId}`}>Open</Link>
+                <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
+                  <Link to={`/seo/faq/${s.faqSetId}/review`}>Review</Link>
+                  {' · '}
+                  <Link to={`/seo/faq/${s.faqSetId}`}>Edit</Link>
                 </td>
               </tr>
             ))}

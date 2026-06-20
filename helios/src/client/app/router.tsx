@@ -91,6 +91,7 @@ import { PricingRunsPage, pricingRunsLoader } from '../routes/pricing/PricingRun
 import { ReviewPage, reviewLoader } from '../routes/review/ReviewPage.js'
 import { SeoFaqListPage, seoFaqListLoader } from '../routes/seo/SeoFaqListPage.js'
 import { SeoFaqEditorPage, seoFaqEditorLoader } from '../routes/seo/SeoFaqEditorPage.js'
+import { SeoFaqReviewPage, seoFaqReviewLoader } from '../routes/seo/SeoFaqReviewPage.js'
 import { SeoPostListPage, seoPostListLoader } from '../routes/seo/SeoPostListPage.js'
 import { SeoPostEditorPage, seoPostEditorLoader } from '../routes/seo/SeoPostEditorPage.js'
 import {
@@ -348,6 +349,11 @@ export const router = createBrowserRouter([
         element: <SeoFaqEditorPage />,
         loader: seoFaqEditorLoader,
         path: 'seo/faq/:faqSetId',
+      },
+      {
+        element: <SeoFaqReviewPage />,
+        loader: seoFaqReviewLoader,
+        path: 'seo/faq/:faqSetId/review',
       },
       {
         element: <SeoPostListPage />,

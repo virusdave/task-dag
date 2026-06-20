@@ -21,6 +21,7 @@ import {
   SeoFaqSetCheckBodySchema,
   SeoFaqSetCreateBodySchema,
   SeoFaqSetDetailResponseSchema,
+  SeoFaqReviewResponseSchema,
   SeoFaqSetListResponseSchema,
   SeoFaqSetRejectBodySchema,
   SeoFaqSetUpdateBodySchema,
@@ -36,6 +37,7 @@ import {
   updateSeoFaqSet,
 } from '../db/queries/seoFaqQueries.js'
 import { checkFaqSetApprovable } from '../seo/faqContent.js'
+import { buildFaqReviewBundle } from '../seo/faqReview.js'
 import { generateFamilyFaqDraft } from '../seo/faqFamilyGenerate.js'
 import { generateFaqDraft } from '../seo/faqGenerate.js'
 import { getLpFamily, listLpFamilies, lpFamilyFaqSourceKey } from '../seo/lpFamilyRegistry.js'
@@ -63,6 +65,26 @@ export async function registerSeoFaqRoutes(server: FastifyInstance): Promise<voi
       return reply.status(404).send({ error: 'FAQ set not found.' })
     }
     return reply.send(SeoFaqSetDetailResponseSchema.parse({ faqSet }))
+  })
+
+  // Review bundle for one FAQ set (#46 P5) — everything a reviewer needs to
+  // decide, derived server-side from the persisted set: approval blockers,
+  // advisory governance warnings, sanitized-host leak markers, route
+  // placement (from the PERSISTED source key), and JSON-LD preview for both
+  // host modes. Read-only (viewer+); the approve/reject mutations below keep
+  // their stricter approver+ gate.
+  server.get('/api/seo/faq-sets/:faqSetId/review', async (request, reply) => {
+    const user = await requireSessionUser(request, reply, 'viewer')
+    if (!user) {
+      return
+    }
+    const params = SeoFaqRouteParamsSchema.parse(request.params)
+    const faqSet = await getSeoFaqSet(getPool(), params.faqSetId)
+    if (!faqSet) {
+      return reply.status(404).send({ error: 'FAQ set not found.' })
+    }
+    const bundle = buildFaqReviewBundle({ items: faqSet.items, sourceKey: faqSet.sourceKey })
+    return reply.send(SeoFaqReviewResponseSchema.parse({ faqSet, ...bundle }))
   })
 
   // Create a new draft FAQ set.

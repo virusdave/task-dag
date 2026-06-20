@@ -24,6 +24,7 @@ import {
 import { loadJson, mutateJson } from '../../app/fetchJson.js'
 import { nyLongDateTime } from '../../app/nyTime.js'
 import { Pill, type PillProps } from '../../components/Pill.js'
+import { approveFaqSet, rejectFaqSet } from './seoFaqActions.js'
 
 export async function seoFaqEditorLoader({
   params,
@@ -150,17 +151,31 @@ export function SeoFaqEditorPage() {
     }
   }
 
+  // Wrap a shared lifecycle mutation in the same busy/error/revalidate flow
+  // as `run`, so the editor and the review page POST identical request shapes
+  // (single-sourced in seoFaqActions.ts).
+  async function runFn(label: string, fn: () => Promise<unknown>): Promise<boolean> {
+    setBusy(true)
+    setError(null)
+    try {
+      await fn()
+      revalidator.revalidate()
+      return true
+    } catch (e) {
+      setError(`${label} failed: ${e instanceof Error ? e.message : String(e)}`)
+      return false
+    } finally {
+      setBusy(false)
+    }
+  }
+
   const save = () =>
     run('Save', `/api/seo/faq-sets/${record.faqSetId}`, 'PUT', { scope, items })
   const submit = () =>
     run('Submit for review', `/api/seo/faq-sets/${record.faqSetId}/submit`, 'POST', {})
-  const reject = () =>
-    run('Reject', `/api/seo/faq-sets/${record.faqSetId}/reject`, 'POST', { note: note || undefined })
+  const reject = () => runFn('Reject', () => rejectFaqSet(record.faqSetId, note))
   const approve = () =>
-    run('Approve', `/api/seo/faq-sets/${record.faqSetId}/approve`, 'POST', {
-      expectedContentSha256: record.contentSha256,
-      note: note || undefined,
-    })
+    runFn('Approve', () => approveFaqSet(record.faqSetId, record.contentSha256, note))
 
   const compliant = problems !== null && problems.length === 0
   const canApprove =
@@ -168,8 +183,9 @@ export function SeoFaqEditorPage() {
 
   return (
     <div style={{ padding: 16, maxWidth: 1200 }}>
-      <p style={{ marginTop: 0 }}>
+      <p style={{ marginTop: 0, display: 'flex', gap: 16 }}>
         <Link to="/seo/faq">← All FAQ sets</Link>
+        <Link to={`/seo/faq/${record.faqSetId}/review`}>Review page →</Link>
       </p>
       <h1 style={{ marginTop: 0, display: 'flex', alignItems: 'center', gap: 10 }}>
         FAQ set <Pill tone={statusTone(record.status)}>{record.status}</Pill>
@@ -211,7 +227,7 @@ export function SeoFaqEditorPage() {
             margin: '12px 0',
           }}
         >
-          <strong>Not approvable yet — fix these:</strong>
+          <strong>Not approvable yet, fix these:</strong>
           <ul style={{ margin: '6px 0 0' }}>
             {problems.map((p, i) => (
               <li key={i}>{p}</li>
@@ -242,7 +258,7 @@ export function SeoFaqEditorPage() {
             </button>
           </div>
           <label style={{ display: 'block', marginTop: 8 }}>
-            Question (shown on BOTH hosts — keep sanitized-safe)
+            Question (shown on BOTH hosts, keep sanitized-safe)
             <input
               type="text"
               value={item.question}
@@ -263,7 +279,7 @@ export function SeoFaqEditorPage() {
               />
             </label>
             <label style={{ flex: 1 }}>
-              Sanitized answer (FB.us — no cannabis terms)
+              Sanitized answer (FB.us, no cannabis terms)
               <textarea
                 value={item.answer_sanitized}
                 onChange={(e) => updateItem(index, { answer_sanitized: e.target.value })}
@@ -316,7 +332,7 @@ export function SeoFaqEditorPage() {
       </div>
       {dirty && (
         <p className="subtle-copy" style={{ marginTop: 6 }}>
-          Save your changes before approving — approval binds to the exact saved content.
+          Save your changes before approving; approval binds to the exact saved content.
         </p>
       )}
 
@@ -367,8 +383,8 @@ export function SeoFaqEditorPage() {
               <dt>Approval</dt>
               <dd>
                 <code>{record.approvalId}</code> by user {record.approvedByUserId} at{' '}
-                {record.approvedAt ? nyLongDateTime(Date.parse(record.approvedAt)) : '—'}
-                {record.approvalNote ? ` — “${record.approvalNote}”` : ''}
+                {record.approvedAt ? nyLongDateTime(Date.parse(record.approvedAt)) : 'unknown time'}
+                {record.approvalNote ? `, note: "${record.approvalNote}"` : ''}
               </dd>
             </>
           )}
