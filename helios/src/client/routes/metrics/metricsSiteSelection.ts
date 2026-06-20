@@ -1,43 +1,53 @@
 // Shared site-chip selection logic for every /metrics page.
 //
-// Convention: an EMPTY set means "All sites". Individual site chips
-// (Bronx / Midtown / …) are toggled against that set. We enforce two
-// invariants so the chip strip can't reach a nonsensical state:
+// Convention: an EMPTY set means "All sites". The chip strip behaves like
+// a segmented control / radio group: "All", "Bronx", "Midtown" are
+// mutually-exclusive states. Tapping a site chip switches focus to ONLY
+// that site — it never adds to an implicit multi-select set, and never
+// infers "All".
 //
-//   1. You can never light up every individual site at once — selecting
-//      the last remaining site collapses to "All" (empty). The only way
-//      to get an all-sites view is the dedicated "All" chip.
-//   2. You can never deselect down to zero sites — turning off the last
-//      lit site falls back to "All" rather than a no-sites view.
+// The ONE and ONLY way to reach the all-sites view is the dedicated "All"
+// chip (which sets the empty set directly, outside this helper). We almost
+// never want the all-sites blend — our stores live in wildly different
+// demographics with wildly different stock — so any behaviour that
+// *infers* "All" from an ordinary chip tap (e.g. the old "selecting the
+// last site collapses to All", or "deselecting the last site falls back to
+// All") is a bug: it strands the operator on an unwanted, backend-expensive
+// view that costs extra taps to escape.
 //
-// For the current two sites this makes All / Bronx / Midtown behave as
-// mutually-exclusive states. Genuine multi-select naturally returns once
-// there are 3+ sites: selecting a STRICT subset (e.g. 2 of 3) stays
-// explicit, and only the full set collapses to "All".
+// If genuine multi-site comparison is ever needed (3+ stores), add an
+// explicit affordance (a "Compare sites" mode / checkboxes) rather than
+// resurrecting hidden additive-toggle semantics here.
 export function toggleSiteSelection(
   prev: ReadonlySet<string>,
   id: string,
-  totalSiteCount: number,
-): Set<string> {
-  const next = new Set(prev)
-  if (next.has(id)) next.delete(id)
-  else next.add(id)
-  // Empty (deselected the last) or all-selected both canonicalise to the
-  // "All" representation (empty set).
-  if (next.size === 0 || next.size >= totalSiteCount) return new Set()
-  return next
+  // Retained for call-site compatibility; radio semantics don't need it.
+  _totalSiteCount: number,
+): ReadonlySet<string> {
+  // Already focused on exactly this site: keep it. Never toggle off to
+  // "All" — that's the operator's most-hated accidental outcome, and the
+  // explicit "All" chip is the only sanctioned path there.
+  if (prev.size === 1 && prev.has(id)) return prev
+  // Any other tap (from "All", from another site, or from a legacy
+  // multi-site state) focuses exactly the tapped site.
+  return new Set([id])
 }
 
 // Normalise an arbitrary site set (e.g. hydrated from a deep-link URL or
-// persisted defaults) to the same canonical form: an all-or-nothing set
-// becomes "All" (empty). Keeps deep links / saved state from rendering an
-// invalid "every chip lit" or "every chip off but not All" state.
+// persisted defaults) to the canonical radio form. An all-or-nothing set
+// becomes "All" (empty); a strict multi-site set (a legacy/external state
+// that the mutually-exclusive chip strip can't represent) collapses to a
+// single, deterministic concrete site rather than lighting several chips.
 export function normaliseSiteSelection(
   sites: ReadonlySet<string>,
   totalSiteCount: number,
 ): Set<string> {
   if (sites.size === 0 || sites.size >= totalSiteCount) return new Set()
-  return new Set(sites)
+  if (sites.size === 1) return new Set(sites)
+  // size > 1 but a strict subset: pick the first concrete site so the
+  // radio strip has exactly one lit chip (deterministic, no inferred All).
+  const first = sites.values().next()
+  return first.done ? new Set() : new Set([first.value])
 }
 
 // The site every /metrics page defaults to when nothing else is
