@@ -8022,6 +8022,70 @@ span.metric-chart-legend-item {
   background: rgba(255, 250, 242, 0.6);
 }
 
+/* Pricing-safety lifecycle panel (automation#54, L1) */
+.purchase-lifecycle-panel {
+  margin: 1.25rem 0;
+  border: 1px solid var(--border, #d9cfc0);
+  border-radius: 8px;
+  background: rgba(255, 250, 242, 0.6);
+  padding: 0.35rem 0.9rem;
+}
+
+.purchase-lifecycle-panel > summary {
+  cursor: pointer;
+  font-weight: 600;
+  padding: 0.45rem 0;
+}
+
+.purchase-lifecycle-body {
+  padding: 0.4rem 0 0.6rem;
+}
+
+.purchase-lifecycle-gates {
+  display: grid;
+  grid-template-columns: 1fr max-content;
+  gap: 0.2rem 1rem;
+  margin: 0.75rem 0;
+  font-size: 0.9rem;
+}
+
+.purchase-lifecycle-gates dt {
+  color: var(--muted, #7a6f5e);
+}
+
+.purchase-lifecycle-gates dd {
+  margin: 0;
+  font-weight: 700;
+  text-align: right;
+}
+
+.purchase-lifecycle-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem;
+  margin-top: 0.5rem;
+}
+
+.purchase-lifecycle-pathpick {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  margin: 0.75rem 0;
+  max-width: 22rem;
+}
+
+.purchase-lifecycle-pathpick > span {
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--muted, #7a6f5e);
+}
+
+.purchase-lifecycle-link {
+  font-weight: 600;
+}
+
 .purchase-payment-figures {
   display: flex;
   flex-wrap: wrap;

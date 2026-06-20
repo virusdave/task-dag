@@ -52,6 +52,7 @@ import { registerMetricsDefaultsRoutes } from '../routes/metricsDefaults.js'
 import { registerTargetTrackingRoutes } from '../routes/targetTracking.js'
 import { registerTimeOfDayRoutes } from '../routes/timeOfDay.js'
 import { registerCatalogPurchaseSellThroughRoutes } from '../routes/catalogPurchaseSellThrough.js'
+import { registerPurchaseInventoryLifecycleRoutes } from '../routes/purchaseInventoryLifecycle.js'
 import { registerPendingPurchaseRoutes } from '../routes/pendingPurchases.js'
 import { registerPricingRoutes } from '../routes/pricing.js'
 import { registerProposalBatchRoutes } from '../routes/proposalBatches.js'
@@ -250,6 +251,7 @@ async function registerApplicationSurface(server: FastifyInstance) {
   await registerBrandExpiryOverridesRoutes(server)
   await registerPendingPurchaseRoutes(server)
   await registerCatalogPurchaseSellThroughRoutes(server)
+  await registerPurchaseInventoryLifecycleRoutes(server)
   await registerPricingRoutes(server)
   await registerProposalBatchRoutes(server)
   await registerProposalImportRoutes(server)

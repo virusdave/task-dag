@@ -26,6 +26,7 @@ export const AuditEntityTypeSchema = z.enum([
   'comment',
   'annotation',
   'brand_expiry_override',
+  'purchase_inventory_lifecycle_run',
 ])
 export const AuditEventTypeSchema = z.enum([
   'auth.user.signed_in',
@@ -131,6 +132,11 @@ export const AuditEventTypeSchema = z.enum([
   'config.workers.market_evidence_alarm.completed',
   'config.brand_expiry_override.upserted',
   'config.brand_expiry_override.deleted',
+  // Purchase inventory pricing-safety lifecycle (automation#54, L1).
+  'purchase.lifecycle.started',
+  'purchase.lifecycle.quarantine_verified',
+  'purchase.lifecycle.market_refresh_requested',
+  'purchase.lifecycle.reprice_advanced',
 ])
 
 export type AuditEntityType = z.infer<typeof AuditEntityTypeSchema>

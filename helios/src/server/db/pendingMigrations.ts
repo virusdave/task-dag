@@ -1320,6 +1320,38 @@ const SENTINELS: MigrationSentinel[] = [
       return checks.every(Boolean)
     },
   },
+  {
+    migrationId: '095_purchase_inventory_lifecycle',
+    label:
+      'Purchase inventory pricing-safety lifecycle L1 ' +
+      '(purchase_inventory_lifecycle_runs / _items tables + the ' +
+      "'purchase-lifecycle' enqueue_reason value on " +
+      'pending_litalerts_refresh_queue) — backs the per-PO ' +
+      'quarantine → market-refresh → reprice gates on the Catalog → ' +
+      'Purchase detail page (automation#54). Without it the lifecycle ' +
+      'routes error and the market-refresh enqueue violates the ' +
+      'enqueue_reason check.',
+    // Probe all three artifacts: a partial apply (e.g. the tables
+    // landed but the constraint widening did not) must report pending.
+    check: async (db) => {
+      const [hasRuns, hasItems, enqueueReasonWidened] = await Promise.all([
+        tableExists(db, 'purchase_inventory_lifecycle_runs'),
+        tableExists(db, 'purchase_inventory_lifecycle_items'),
+        db
+          .query<{ widened: boolean }>(
+            `select coalesce(
+               pg_get_constraintdef(
+                 (select oid from pg_constraint
+                   where conname = 'pending_litalerts_refresh_queue_enqueue_reason_check')
+               ) like '%purchase-lifecycle%',
+               false
+             ) as widened`,
+          )
+          .then((r) => r.rows[0]?.widened === true),
+      ])
+      return hasRuns && hasItems && enqueueReasonWidened
+    },
+  },
 ]
 
 interface CacheEntry {

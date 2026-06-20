@@ -52,10 +52,11 @@ function buildFakeDb(): Queryable {
         const priority = params![2] as number
         const alarmClass = (params![4] as string | null) ?? null
         const notes = (params![5] as string | null) ?? null
+        const bypassDedupe = (params![6] as boolean | undefined) ?? false
         const productIds = jsonPayload.map((row) => row.product_id)
         const inserted: Array<{ id: number; product_id: number }> = []
         for (const productId of productIds) {
-          if (dbState.existingProductIds.has(productId)) {
+          if (!bypassDedupe && dbState.existingProductIds.has(productId)) {
             continue
           }
           const id = dbState.nextQueueRowId
@@ -199,6 +200,39 @@ describe('enqueueMarketRefreshForProducts', () => {
       return payload.productId
     })
     expect(enqueuedProductIds).toEqual([501, 503])
+  })
+
+  it('bypasses the dedupe window when bypassDedupe is set (purchase-lifecycle lane)', async () => {
+    // Product is "already pending" inside the 5-minute window, which would
+    // normally be skipped. The lifecycle's market-refresh leg passes
+    // bypassDedupe so a fresh queue row is still inserted (otherwise its
+    // freshly-stamped market_requested_at cutoff would be stranded).
+    dbState.existingProductIds.add(601)
+
+    const result = await enqueueMarketRefreshForProducts([601], {
+      trigger: { kind: 'purchase-lifecycle', poId: 'PO-1' },
+      bypassDedupe: true,
+    })
+
+    expect(result.enqueuedQueueRowIds).toEqual([1])
+    expect(result.skippedCount).toBe(0)
+    expect(dbState.insertCalls[0]).toMatchObject({
+      productIds: [601],
+      enqueueReason: 'purchase-lifecycle',
+      insertedProductIds: [601],
+    })
+    expect(dbState.auditEvents[0].payload).toMatchObject({ bypassDedupe: true })
+  })
+
+  it('still dedupes purchase-lifecycle when bypassDedupe is not set', async () => {
+    dbState.existingProductIds.add(602)
+
+    const result = await enqueueMarketRefreshForProducts([602], {
+      trigger: { kind: 'purchase-lifecycle', poId: 'PO-2' },
+    })
+
+    expect(result.enqueuedQueueRowIds).toEqual([])
+    expect(result.skippedCount).toBe(1)
   })
 
   it('uses priority 0 for alarm-class triggers and threads alarmClass through', async () => {

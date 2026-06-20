@@ -331,6 +331,7 @@ export const ConfigWorkersLitalertsRefreshVariantJobPayloadSchema = z.object({
       'brand-alarm',
       'in-stock-alarm',
       'manual',
+      'purchase-lifecycle',
     ])
     .default('scheduled'),
 })

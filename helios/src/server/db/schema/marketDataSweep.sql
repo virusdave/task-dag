@@ -33,7 +33,8 @@ begin
         'pending-purchase',
         'brand-alarm',
         'in-stock-alarm',
-        'manual'
+        'manual',
+        'purchase-lifecycle'
       ));
   end if;
 end$$;

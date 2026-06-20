@@ -21,6 +21,7 @@ import {
 } from '../../../shared/contracts/index.js'
 import { loadJson, mutateJson } from '../../app/fetchJson.js'
 import { Pill } from '../../components/Pill.js'
+import { PurchaseInventoryLifecyclePanel } from './PurchaseInventoryLifecyclePanel.js'
 import { useRegisterCatalogSidebarSubtree } from './catalogSidebarSubtree.js'
 
 // ---------------------------------------------------------------------------
@@ -872,6 +873,8 @@ export function PurchaseSellThroughDetailPage(): JSX.Element {
       <PurchaseDetailHero summary={summary} verdict={verdict} matchedFraction={matchedFraction} />
 
       <PurchasePaymentPanel purchase={purchase} />
+
+      <PurchaseInventoryLifecyclePanel purchase={purchase} />
 
       <h2 className="purchase-section-title">Line items</h2>
       <PurchaseLinesView lines={lines} purchase={purchase} />

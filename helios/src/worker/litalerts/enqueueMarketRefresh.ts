@@ -72,6 +72,12 @@ export type MarketRefreshTrigger =
   | { kind: 'brand-alarm'; brandName: string }
   | { kind: 'in-stock-alarm'; siteDealerId?: number }
   | { kind: 'manual'; reason?: string }
+  // Purchase inventory pricing-safety lifecycle (automation#54, L1): the
+  // purchase-reprice flow pulls live market data for a just-received PO's
+  // product ids before repricing. A distinct enqueue lane from
+  // 'pending-purchase' (a different pipeline) so the 5-minute dedupe
+  // window does not couple the two flows.
+  | { kind: 'purchase-lifecycle'; poId?: string }
 
 export type MarketRefreshAlarmClass = 'in_stock' | 'pending_purchase' | 'brand_match'
 
@@ -83,6 +89,17 @@ export interface EnqueueOptions {
   runAt?: Date
   requestedByUserId?: number | null
   alarmClass?: MarketRefreshAlarmClass | null
+  /**
+   * Skip the 5-minute `(product_id, enqueue_reason)` dedupe window and
+   * always insert a fresh queue row. The purchase-inventory lifecycle's
+   * market-refresh leg sets this: it stamps a fresh `market_requested_at`
+   * cutoff and then requires a SUCCEEDED observation captured AFTER that
+   * cutoff, so a deduped (skipped) enqueue would strand the gate — the
+   * in-flight row it deduped against may have been requested before the
+   * cutoff and never satisfies it. Defaults to false (normal dedupe) so
+   * the rolling / proposal / manual lanes are unchanged.
+   */
+  bypassDedupe?: boolean
 }
 
 export interface EnqueueMarketRefreshResult {
@@ -95,6 +112,10 @@ const DEFAULT_PRIORITY_BY_KIND: Record<MarketRefreshTrigger['kind'], number> = {
   'brand-alarm': 0,
   'pending-purchase': 0,
   'in-stock-alarm': 0,
+  // Operator-blocking inventory work: a received PO cannot be repriced
+  // (and therefore cannot be released to the floor) until its market
+  // pull completes, so it sits with the alarms ahead of proposals.
+  'purchase-lifecycle': 5,
   'proposal-source': 10,
   manual: 50,
   rolling: 100,
@@ -135,6 +156,10 @@ function buildNotesForTrigger(trigger: MarketRefreshTrigger): string | null {
         : 'Enqueued by in-stock alarm.'
     case 'manual':
       return trigger.reason ? `Manual: ${trigger.reason}` : 'Manual enqueue.'
+    case 'purchase-lifecycle':
+      return trigger.poId
+        ? `Enqueued by purchase inventory lifecycle for PO ${trigger.poId}.`
+        : 'Enqueued by purchase inventory lifecycle.'
   }
 }
 
@@ -162,6 +187,7 @@ async function insertQueueRowsWithDedupe(
     runAt: Date
     alarmClass: MarketRefreshAlarmClass | null
     notes: string | null
+    bypassDedupe: boolean
   },
 ): Promise<Array<{ productId: number; queueRowId: number }>> {
   if (productIds.length === 0) {
@@ -194,7 +220,8 @@ async function insertQueueRowsWithDedupe(
         $2,
         $5
       from jsonb_to_recordset($1::jsonb) as x(product_id bigint)
-      where not exists (
+      where $7::boolean
+         or not exists (
         select 1
         from pending_litalerts_refresh_queue existing
         where existing.product_id = x.product_id
@@ -211,6 +238,7 @@ async function insertQueueRowsWithDedupe(
       shared.runAt,
       shared.alarmClass,
       shared.notes,
+      shared.bypassDedupe,
     ],
   )
   return result.rows.map((row) => ({
@@ -230,6 +258,28 @@ function triggerToJson(trigger: MarketRefreshTrigger): JsonValue {
 }
 
 export async function enqueueMarketRefreshForProducts(
+  productIds: number[],
+  options: EnqueueOptions,
+): Promise<EnqueueMarketRefreshResult> {
+  if (productIds.length === 0) {
+    return { enqueuedQueueRowIds: [], enqueuedJobIds: [], skippedCount: 0 }
+  }
+  return withTransaction((db) =>
+    enqueueMarketRefreshForProductsInTransaction(db, productIds, options),
+  )
+}
+
+/**
+ * The transactional core of {@link enqueueMarketRefreshForProducts},
+ * running every statement on the caller-supplied `db` so it can be folded
+ * into a larger transaction (e.g. the purchase-inventory lifecycle's
+ * market-refresh leg, which must atomically stamp `market_requested_at`
+ * AND insert the queue rows — otherwise a rolled-back lifecycle txn could
+ * leave orphaned queue work, or a stamped cutoff with no enqueue). The
+ * public wrapper above just opens its own transaction around this.
+ */
+export async function enqueueMarketRefreshForProductsInTransaction(
+  db: Queryable,
   productIds: number[],
   options: EnqueueOptions,
 ): Promise<EnqueueMarketRefreshResult> {
@@ -258,7 +308,8 @@ export async function enqueueMarketRefreshForProducts(
   }
 
   // ============================================================================
-  // Phase A4 (virusdave/top-level#11): one transaction per call
+  // Phase A4 (virusdave/top-level#11): one transaction per call (owned by
+  // the public wrapper / the caller folding this into a larger txn)
   // with one bulk dedupe-window INSERT and one bulk enqueueJobs(),
   // replacing the old per-product `for (...) { await
   // withTransaction(...) { insertQueueRowWithDedupe; enqueueJob } }`
@@ -281,76 +332,72 @@ export async function enqueueMarketRefreshForProducts(
   //     inserted counts (deduped or already-pending products).
   //   - One audit event per non-empty batch (unchanged).
   // ============================================================================
-  const { enqueuedQueueRowIds, enqueuedJobIds, skippedCount } = await withTransaction(
-    async (db) => {
-      const insertedQueueRows = await insertQueueRowsWithDedupe(db, uniqueProductIds, {
-        enqueueReason,
-        priority,
-        runAt,
-        alarmClass,
-        notes,
-      })
-      const localSkipped = uniqueProductIds.length - insertedQueueRows.length
-      if (insertedQueueRows.length === 0) {
-        return {
-          enqueuedQueueRowIds: [] as number[],
-          enqueuedJobIds: [] as number[],
-          skippedCount: localSkipped,
-        }
-      }
-      const jobInputs = insertedQueueRows.map(({ productId, queueRowId }) => ({
-        // Lit Alerts variant refreshes are background batch work — they
-        // run by the thousand whenever a rolling tick or alarm scan
-        // fires, and would starve live-interactive operator clicks if
-        // they defaulted to JOB_PRIORITY_INTERACTIVE.
-        priority: JOB_PRIORITY_BEST_EFFORT,
-        // Lit Alerts refresh does not touch Sweed; no shared session lane.
-        concurrencyKey: null,
-        // One job per pending queue row keeps the dedupe surface obvious.
-        dedupeKey: `config.workers.litalerts_refresh.variant:${queueRowId}`,
-        jobType: 'config.workers.litalerts_refresh.variant' as const,
-        module: 'config' as const,
-        payload: {
-          productId,
-          queueRowId,
-          siteDealerId: null,
-          sourceSnapshotId: null,
-          requestedByUserId: options.requestedByUserId ?? null,
-          trigger: triggerKindLabel,
-        },
-        requestedByUserId: options.requestedByUserId ?? null,
-        runAt,
-        scope: null,
-      }))
-      const jobIds = await enqueueJobs(db, jobInputs)
-      const queueRowIds = insertedQueueRows.map((row) => row.queueRowId)
-      await appendAuditEvent(db, {
-        actorType: options.requestedByUserId ? 'user' : 'system',
-        actorUserId: options.requestedByUserId ?? null,
-        entityId: 'workers.scheduling.litalerts',
-        entityType: 'job',
-        eventType: 'config.workers.litalerts_refresh.requested',
-        module: 'config',
-        payload: {
-          trigger: triggerToJson(options.trigger),
-          productIds: uniqueProductIds,
-          enqueuedQueueRowIds: queueRowIds,
-          enqueuedJobIds: jobIds,
-          alarmClass,
-          priority,
-          skippedCount: localSkipped,
-        },
-        requestId: null,
-        scope: null,
-        undoPayload: null,
-      })
-      return {
-        enqueuedQueueRowIds: queueRowIds,
-        enqueuedJobIds: jobIds,
-        skippedCount: localSkipped,
-      }
+  const insertedQueueRows = await insertQueueRowsWithDedupe(db, uniqueProductIds, {
+    enqueueReason,
+    priority,
+    runAt,
+    alarmClass,
+    notes,
+    bypassDedupe: options.bypassDedupe ?? false,
+  })
+  const localSkipped = uniqueProductIds.length - insertedQueueRows.length
+  if (insertedQueueRows.length === 0) {
+    return {
+      enqueuedQueueRowIds: [],
+      enqueuedJobIds: [],
+      skippedCount: localSkipped,
+    }
+  }
+  const jobInputs = insertedQueueRows.map(({ productId, queueRowId }) => ({
+    // Lit Alerts variant refreshes are background batch work — they
+    // run by the thousand whenever a rolling tick or alarm scan
+    // fires, and would starve live-interactive operator clicks if
+    // they defaulted to JOB_PRIORITY_INTERACTIVE.
+    priority: JOB_PRIORITY_BEST_EFFORT,
+    // Lit Alerts refresh does not touch Sweed; no shared session lane.
+    concurrencyKey: null,
+    // One job per pending queue row keeps the dedupe surface obvious.
+    dedupeKey: `config.workers.litalerts_refresh.variant:${queueRowId}`,
+    jobType: 'config.workers.litalerts_refresh.variant' as const,
+    module: 'config' as const,
+    payload: {
+      productId,
+      queueRowId,
+      siteDealerId: null,
+      sourceSnapshotId: null,
+      requestedByUserId: options.requestedByUserId ?? null,
+      trigger: triggerKindLabel,
     },
-  )
-
-  return { enqueuedQueueRowIds, enqueuedJobIds, skippedCount }
+    requestedByUserId: options.requestedByUserId ?? null,
+    runAt,
+    scope: null,
+  }))
+  const jobIds = await enqueueJobs(db, jobInputs)
+  const queueRowIds = insertedQueueRows.map((row) => row.queueRowId)
+  await appendAuditEvent(db, {
+    actorType: options.requestedByUserId ? 'user' : 'system',
+    actorUserId: options.requestedByUserId ?? null,
+    entityId: 'workers.scheduling.litalerts',
+    entityType: 'job',
+    eventType: 'config.workers.litalerts_refresh.requested',
+    module: 'config',
+    payload: {
+      trigger: triggerToJson(options.trigger),
+      productIds: uniqueProductIds,
+      enqueuedQueueRowIds: queueRowIds,
+      enqueuedJobIds: jobIds,
+      alarmClass,
+      priority,
+      skippedCount: localSkipped,
+      bypassDedupe: options.bypassDedupe ?? false,
+    },
+    requestId: null,
+    scope: null,
+    undoPayload: null,
+  })
+  return {
+    enqueuedQueueRowIds: queueRowIds,
+    enqueuedJobIds: jobIds,
+    skippedCount: localSkipped,
+  }
 }
