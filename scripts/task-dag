@@ -94,15 +94,19 @@ get_dep_parents() {
     get_parents "$sha" | tail -n +2
 }
 
-# Helper: check if task is completed (appears as non-primary parent in master history)
+# Helper: check if task is completed (appears as non-primary parent in
+# HEAD history). Uses EXACT parent-field matching, not a substring grep:
+# a substring match would (a) false-positive when a short SHA is a prefix
+# of an unrelated commit's parent and (b) silently widen to any commit
+# mentioning the sha. We walk each commit's parent list and require an
+# exact whole-token match.
 is_task_completed() {
     local task_sha="$1"
-    # Check if this SHA appears as any parent in the commit history
-    local count=$(git log HEAD --format='%P' | grep -c "$task_sha" || true)
-    if [ "$count" -gt 0 ]; then
-        return 0
-    fi
-    return 1
+    git log HEAD --format='%P' 2>/dev/null |
+        awk -v sha="$task_sha" '
+            { for (i = 1; i <= NF; i++) if ($i == sha) { found = 1; exit } }
+            END { exit found ? 0 : 1 }
+        '
 }
 
 # Helper: true iff every dependency parent of <sha> is completed, i.e.
@@ -172,25 +176,13 @@ blocked_structural_ancestor() {
     done
 }
 
-# Helper: check if all child tasks of an epic are complete
-is_epic_complete() {
-    local epic_sha="$1"
-    
-    # Find all tasks that have this epic as parent
-    local all_complete=true
-    while read -r task_sha; do
-        if ! is_task_completed "$task_sha"; then
-            all_complete=false
-            break
-        fi
-    done < <(git log --all --format='%H %P' | grep "$epic_sha" | awk '{print $1}')
-    
-    if [ "$all_complete" = true ]; then
-        return 0
-    else
-        return 1
-    fi
-}
+# NOTE: the former is_epic_complete() helper was removed. It enumerated
+# children with a fragile `git log --all | grep "$epic_sha"` substring
+# match (which also miscounted claim/completion commits) and was only used
+# by the rogue direct-REST epic close in `complete`. Epic completeness is
+# now decided by epic_subtree_complete() (exact parent matching, recursive
+# over the breakdown tree) and closure goes through the canonical
+# Closes-Epic trailer merge — see maybe_emit_local_epic_close().
 
 # Helper: list all task refs
 list_task_refs() {
@@ -534,6 +526,159 @@ task_has_children() {
         return 0
     done < <(git rev-list --all --parents 2>/dev/null)
     return 1
+}
+
+# Helper: list ALL direct DAG children (breakdown child task commits) of a
+# node, one full SHA per line. Same membership/filtering rules as
+# task_has_children (exact whole-token parent match; skip Claim:/
+# Blocked-Meta: side commits and non-empty-tree commits), but enumerates
+# every child rather than short-circuiting at the first. Callers that care
+# about origin state must fetch the relevant task namespaces first.
+list_dag_children() {
+    local parent_sha="$1" commit parents subject
+    while read -r commit parents; do
+        case " $parents " in
+            *" $parent_sha "*) ;;
+            *) continue ;;
+        esac
+        subject=$(git log -1 --format='%s' "$commit" 2>/dev/null || true)
+        case "$subject" in
+            Claim:*|Blocked-Meta:*) continue ;;
+        esac
+        is_task_commit "$commit" || continue
+        printf '%s\n' "$commit"
+    done < <(git rev-list --all --parents 2>/dev/null)
+}
+
+# Helper: recursively decide whether the entire subtree rooted at <node>
+# is complete. A node with NO DAG children is a LEAF: complete iff its
+# completion commit is on HEAD (is_task_completed). A node WITH children
+# is complete iff every child subtree is complete. Intermediate epic nodes
+# never receive their own completion commit (the root-completion guard
+# refuses to complete a decomposed node), so completeness is derived from
+# the leaves, not from the intermediate node itself.
+epic_subtree_complete() {
+    local node="$1" child had_child=false
+    while IFS= read -r child; do
+        [ -z "$child" ] && continue
+        had_child=true
+        epic_subtree_complete "$child" || return 1
+    done < <(list_dag_children "$node")
+    if [ "$had_child" = false ]; then
+        is_task_completed "$node"
+        return $?
+    fi
+    return 0
+}
+
+# Helper: does epic issue <N> have any cross-repo delegated children
+# (refs under tasks/delegated/<N>/*)? Purely-local epics have none and
+# close via `complete`; epics with delegations close via `close-epic`
+# (gated on cross-repo completion signals), so `complete` must NOT emit a
+# local close for them.
+#
+# This is a SAFETY GATE for emitting a close commit, so it FAILS CLOSED:
+# we consult ORIGIN directly (ls-remote tri-state), not stale local refs,
+# and on an indeterminate origin we report "has delegated children" so the
+# caller defers to close-epic rather than risk closing a delegated epic
+# before its cross-repo children are satisfied.
+#   return 0  -> delegated children exist (OR origin indeterminate)
+#   return 1  -> confirmed NONE (purely local)
+epic_has_delegated_children() {
+    local issue="$1" rc
+    git ls-remote --exit-code origin "refs/heads/tasks/delegated/$issue/*" >/dev/null 2>&1
+    rc=$?
+    case "$rc" in
+        0) return 0 ;;   # delegated refs present on origin
+        2) return 1 ;;   # ls-remote confirms: no matching refs
+        *) return 0 ;;   # transport/auth error → fail closed (assume delegated)
+    esac
+}
+
+# Helper: is there already a trailer-bearing Closes-Epic merge for issue
+# <N> with <epic_sha> as a parent, reachable from <base_ref>? Mirrors the
+# exact gate close-completed-issues.yml enforces (epic-as-parent AND a
+# matching `Closes-Epic: #<N>` trailer), so we never emit a duplicate
+# close commit. An ordinary `complete` attach-merge also lists the epic as
+# a parent but carries NO trailer, so the trailer check is required.
+epic_already_closed_on() {
+    local issue="$1" epic_sha="$2" base_ref="$3" mc mparents
+    while read -r mc mparents; do
+        case " $mparents " in
+            *" $epic_sha "*) ;;
+            *) continue ;;
+        esac
+        if git log -1 --format='%B' "$mc" 2>/dev/null \
+            | git interpret-trailers --parse 2>/dev/null \
+            | grep -qE "^Closes-Epic:[[:space:]]*#?${issue}([^0-9]|\$)"; then
+            return 0
+        fi
+    done < <(git log "$base_ref" --merges --format='%H %P' 2>/dev/null)
+    return 1
+}
+
+# After a successful leaf completion, auto-close the epic it belongs to IFF
+# that epic is a purely-local, top-level pending root whose ENTIRE subtree
+# is now complete. We append the canonical additive close commit to local
+# HEAD:
+#   tree    = HEAD's tree (no diff)
+#   parent1 = HEAD (the completion commit just created)
+#   parent2 = the epic root SHA (== tasks/pending/<N>)
+#   message = "...\n\nCloses-Epic: #<N>"
+# The worker's subsequent `git push origin HEAD:master` carries this
+# commit, and close-completed-issues.yml then closes the issue and cleans
+# the pending/root-active refs. This keeps ONE closure mechanism (the
+# trailer-gated server workflow); the old direct REST close was removed
+# because it bypassed that gate and needed a token workers don't have.
+# All failure paths are non-fatal: a completion must never be blocked by a
+# best-effort auto-close.
+maybe_emit_local_epic_close() {
+    local task_sha="$1"
+
+    local root_sha
+    root_sha=$(get_first_parent "$task_sha" 2>/dev/null || true)
+    [ -n "$root_sha" ] || return 0
+    is_task_commit "$root_sha" || return 0
+
+    # Walk the structural (first-parent) lineage up to the TOP pending
+    # root. A leaf whose first parent is an intermediate sub-epic is not
+    # the root, but completing it can still finish the whole tree.
+    local node="$root_sha" issue="" up
+    while :; do
+        issue=$(task_is_pending_root "$node" 2>/dev/null || true)
+        [ -n "$issue" ] && break
+        up=$(get_first_parent "$node" 2>/dev/null || true)
+        [ -n "$up" ] || return 0
+        is_task_commit "$up" || return 0
+        node="$up"
+    done
+    root_sha="$node"
+
+    # Purely-local epics only; defer delegated/mixed epics to close-epic.
+    epic_has_delegated_children "$issue" && return 0
+
+    # Whole subtree must be complete (this completion is already on HEAD).
+    epic_subtree_complete "$root_sha" || return 0
+
+    # Don't duplicate an existing close (local HEAD or origin/master).
+    git fetch --quiet --no-tags origin master >/dev/null 2>&1 || true
+    epic_already_closed_on "$issue" "$root_sha" "HEAD" && return 0
+    if git rev-parse --verify -q origin/master >/dev/null 2>&1; then
+        epic_already_closed_on "$issue" "$root_sha" "origin/master" && return 0
+    fi
+
+    local head_sha head_tree close_msg close_sha
+    head_sha=$(git rev-parse HEAD)
+    head_tree=$(git rev-parse "HEAD^{tree}")
+    close_msg="Close epic #${issue} (all tasks complete)
+
+All child tasks of this epic have completed.
+
+Closes-Epic: #${issue}"
+    close_sha=$(git commit-tree "$head_tree" -p "$head_sha" -p "$root_sha" -m "$close_msg") || return 0
+    git update-ref -m 'task-dag: local epic close commit' HEAD "$close_sha" "$head_sha" || return 0
+    printf "${GREEN}🎉 Epic #%s complete — appended Closes-Epic commit %s. Push HEAD:master to close the issue.${RESET}\n" \
+        "$issue" "$(git rev-parse --short "$close_sha")"
 }
 
 # Helper: drop OUR own root claim (used by claim-root's post-claim bail
@@ -1227,6 +1372,7 @@ JSON
         local existing_when="unknown"
         local existing_host="unknown"
         local existing_pid=""
+        local existing_first_parent=""
         if git show-ref --verify --quiet "$active_local_ref"; then
             local existing_msg
             existing_msg=$(parse_commit_metadata "$active_local_ref" 2>/dev/null || true)
@@ -1234,6 +1380,35 @@ JSON
             existing_when=$(extract_field "$existing_msg" "Claimed-At")
             existing_host=$(extract_field "$existing_msg" "Claimer-Host" 2>/dev/null || true)
             existing_pid=$(extract_field "$existing_msg" "Claimer-PID" 2>/dev/null || true)
+            existing_first_parent=$(git rev-list --parents -n 1 "$active_local_ref" 2>/dev/null | awk '{print $2}')
+        fi
+
+        # Idempotent re-claim: if the live claim is already held by THIS
+        # exact worker identity (same Claimer AND Claimer-Host AND
+        # Claimer-PID) and actually claims THIS task, treat it as success
+        # rather than a race-loss. This is what lets the github-worker
+        # dispatcher PRE-CLAIM a task (the authoritative CAS) and then have
+        # the agent it spawns — which inherits TASK_DAG_CLAIMER /
+        # TASK_DAG_CLAIMER_HOST / TASK_DAG_CLAIMER_PID — VERIFY ownership by
+        # re-running `claim`. Matching the pid (not just the username) means
+        # only the same still-live worker process can re-confirm; a
+        # different worker that merely shares $USER still gets exit 2. The
+        # first-parent check stops a short-sha collision from being mistaken
+        # for our claim.
+        if [ -n "$existing_pid" ] \
+           && [ "$existing_claimer" = "$claimer" ] \
+           && [ "$existing_host" = "$claimer_host" ] \
+           && [ "$existing_pid" = "$claimer_pid" ] \
+           && [ "$existing_first_parent" = "$task_sha" ]; then
+            if [ "$json" = true ]; then
+                cat <<JSON
+{"ok":true,"sha":"$task_sha","shortSha":"$short_sha","claimer":"$claimer","claimerHost":"$claimer_host","claimerPid":${claimer_pid:-null},"alreadyHeld":true}
+JSON
+            else
+                printf "${GREEN}✓ Task %s already claimed by you (%s, pid %s on %s) — verified.${RESET}\n" \
+                    "$short_sha" "$claimer" "$claimer_pid" "$claimer_host"
+            fi
+            return 0
         fi
         if [ "$json" = true ]; then
             cat <<JSON
@@ -1632,7 +1807,7 @@ EOF
     local existing_active
     existing_active=$(root_active_sha_on_remote "$issue")
     if [ -n "$existing_active" ] && [ "$do_force" = false ]; then
-        local existing_claimer="unknown" existing_host="unknown" existing_pid="" existing_when="unknown" emsg
+        local existing_claimer="unknown" existing_host="unknown" existing_pid="" existing_when="unknown" existing_taskcommit="" emsg
         git fetch --quiet --no-tags origin \
             "+refs/heads/tasks/root-active/$issue:refs/task-dag-tmp/root-active/$issue" 2>/dev/null || true
         if git show-ref --verify --quiet "refs/task-dag-tmp/root-active/$issue"; then
@@ -1641,7 +1816,32 @@ EOF
             existing_host=$(extract_field "$emsg" "Claimer-Host" 2>/dev/null || true)
             existing_pid=$(extract_field "$emsg" "Claimer-PID" 2>/dev/null || true)
             existing_when=$(extract_field "$emsg" "Claimed-At" 2>/dev/null || true)
+            existing_taskcommit=$(extract_field "$emsg" "Task-Commit" 2>/dev/null || true)
             git update-ref -d "refs/task-dag-tmp/root-active/$issue" 2>/dev/null || true
+        fi
+
+        # Idempotent re-claim (mirrors cmd_claim): if the live root lock is
+        # already held by THIS exact worker identity (Claimer + Claimer-Host
+        # + Claimer-PID) and pins THIS root SHA, treat it as success rather
+        # than a race-loss. This is what lets the github-worker dispatcher
+        # PRE-CLAIM an epic root and then have the agent it spawns (which
+        # inherits TASK_DAG_CLAIMER / *_HOST / *_PID) VERIFY ownership by
+        # re-running `claim-root`. Matching the pid means only the same
+        # still-live worker process can re-confirm; a different worker that
+        # merely shares $USER still gets exit 2. The Task-Commit check stops
+        # a stale lock for a since-re-keyed root from being mistaken as ours.
+        if [ -n "$existing_pid" ] \
+           && [ "$existing_claimer" = "$claimer" ] \
+           && [ "$existing_host" = "$claimer_host" ] \
+           && [ "$existing_pid" = "$claimer_pid" ] \
+           && [ "$existing_taskcommit" = "$root_sha" ]; then
+            if [ "$json" = true ]; then
+                echo "{\"ok\":true,\"issue\":$issue,\"claimer\":\"$claimer\",\"claimerHost\":\"$claimer_host\",\"claimerPid\":${claimer_pid:-null},\"alreadyHeld\":true}"
+            else
+                printf "${GREEN}✓ Epic root #%s already claimed by you (%s, pid %s on %s) — verified.${RESET}\n" \
+                    "$issue" "$claimer" "$claimer_pid" "$claimer_host"
+            fi
+            return 0
         fi
         if [ "$json" = true ]; then
             echo "{\"ok\":false,\"reason\":\"already-claimed\",\"issue\":$issue,\"claimer\":\"${existing_claimer:-unknown}\",\"claimerHost\":\"${existing_host:-unknown}\",\"claimerPid\":${existing_pid:-null},\"claimedAt\":\"${existing_when:-unknown}\"}"
@@ -1906,6 +2106,23 @@ reap_leaf_claim() {
     ref_active="refs/heads/tasks/active/$short_sha"
     ref_frontier="refs/heads/tasks/frontier/$short_sha"
     local readback_sha
+
+    # Never resurrect completed work. If the task already landed on master
+    # (its completion commit lists it as a parent) but its active claim ref
+    # leaked (worker died after completing but before/while cleaning refs),
+    # recreating tasks/frontier/<short> would make finished work pickable
+    # again — the exact "wasted dispatch on already-done task" symptom we
+    # are fixing. In that case just lease-delete the stale active ref.
+    if is_task_completed "$task_sha"; then
+        if git push --atomic origin \
+            "--force-with-lease=$ref_active:$claim_sha" \
+            ":$ref_active" >/dev/null 2>&1; then
+            git update-ref -d "$ref_active" 2>/dev/null || true
+            [ -z "$(task_active_sha_on_remote "$short_sha")" ] && return 0
+        fi
+        return 1
+    fi
+
     if git push --atomic origin \
         "--force-with-lease=$ref_active:$claim_sha" \
         "--force-with-lease=$ref_frontier:" \
@@ -3388,52 +3605,21 @@ Related: $issue_url"
         fi
     fi
     
-    # Check if parent epic is now complete
-    local parent_sha=$(get_first_parent "$task_sha")
-    if [ -n "$parent_sha" ]; then
-        local parent_msg=$(parse_commit_metadata "$parent_sha")
-        local parent_type=$(extract_field "$parent_msg" "Type")
-        
-        if [ "$parent_type" = "epic" ]; then
-            if is_epic_complete "$parent_sha"; then
-                local parent_issue_num=$(extract_field "$parent_msg" "Issue" | sed 's/^#//')
-                local parent_issue_url=$(extract_field "$parent_msg" "URL")
-                
-                if [ -n "$parent_issue_num" ] && [ -n "$parent_issue_url" ]; then
-                    printf "\n${GREEN}🎉 Epic completed! All tasks done.${RESET}\n"
-                    
-                    # Extract repo from URL
-                    local repo=$(echo "$parent_issue_url" | sed -E 's|https://github.com/([^/]+/[^/]+)/.*|\1|')
-                    
-                    # Check for GITHUB_TOKEN
-                    if [ -n "${GITHUB_TOKEN:-}" ]; then
-                        # Post completion comment and close issue
-                        local epic_title=$(get_task_title "$parent_sha")
-                        local comment_body="<!-- task-dag:status -->\n🎉 Epic **$epic_title** completed!\n\nAll child tasks have been implemented and merged."
-                        
-                        # Post comment
-                        local api_url="https://api.github.com/repos/$repo/issues/$parent_issue_num/comments"
-                        curl -s -X POST "$api_url" \
-                            -H "Authorization: token $GITHUB_TOKEN" \
-                            -H "Accept: application/vnd.github.v3+json" \
-                            -d "{\"body\":\"$comment_body\"}" > /dev/null
-                        
-                        # Close issue
-                        api_url="https://api.github.com/repos/$repo/issues/$parent_issue_num"
-                        curl -s -X PATCH "$api_url" \
-                            -H "Authorization: token $GITHUB_TOKEN" \
-                            -H "Accept: application/vnd.github.v3+json" \
-                            -d '{"state":"closed"}' > /dev/null
-                        
-                        printf "${GREEN}✓ Closed issue #$parent_issue_num${RESET}\n"
-                    else
-                        echo "Note: Set GITHUB_TOKEN to auto-close issue #$parent_issue_num"
-                    fi
-                fi
-            fi
-        fi
-    fi
-    
+    # Auto-close the parent epic when this completion finishes it.
+    #
+    # We do NOT close the GitHub issue directly here. The old direct REST
+    # PATCH-to-closed (a) bypassed the `Closes-Epic:` trailer gate that
+    # close-completed-issues.yml enforces (the gate that exists precisely
+    # so an ordinary `complete` attach-merge does NOT prematurely close an
+    # in-progress epic — see the #7 incident), and (b) required a
+    # GITHUB_TOKEN that worker agents don't carry, so it almost never
+    # fired. Instead, maybe_emit_local_epic_close appends the canonical
+    # additive Closes-Epic commit to local HEAD for a purely-local,
+    # fully-complete epic; the worker's `git push origin HEAD:master` then
+    # lets the server workflow close the issue and clean the refs. Epics
+    # with cross-repo delegated children still close via `close-epic`.
+    maybe_emit_local_epic_close "$task_sha"
+
     return 0
 }
 

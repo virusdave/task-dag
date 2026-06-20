@@ -36,9 +36,14 @@ git push -q origin refs/heads/gh/issues/999 refs/heads/tasks/pending/999
 remote_has() { git ls-remote origin "$1" | grep -q .; }
 
 # ---------------------------------------------------------------------------
-# TEST 1: claim-root creates tasks/root-active/<N>; second claim-root fails.
+# TEST 1: claim-root creates tasks/root-active/<N>; a re-claim by the SAME
+# worker identity is idempotent (success), but a DIFFERENT identity is
+# refused. The idempotent re-claim is what lets the github-worker
+# dispatcher PRE-CLAIM a root and then have the agent it spawns VERIFY
+# ownership by re-running claim-root under the inherited identity.
 # ---------------------------------------------------------------------------
-if "$TD" claim-root 999 >/dev/null 2>&1; then
+if TASK_DAG_CLAIMER=w1 TASK_DAG_CLAIMER_HOST=h1 TASK_DAG_CLAIMER_PID=111 \
+     "$TD" claim-root 999 >/dev/null 2>&1; then
   if remote_has refs/heads/tasks/root-active/999; then
     ok "1a: claim-root created tasks/root-active/999 on origin"
   else
@@ -48,11 +53,20 @@ else
   bad "1a: claim-root 999 failed"
 fi
 
-if "$TD" claim-root 999 >/dev/null 2>&1; then
-  bad "1b: second claim-root 999 succeeded (should be already-claimed)"
+if TASK_DAG_CLAIMER=w1 TASK_DAG_CLAIMER_HOST=h1 TASK_DAG_CLAIMER_PID=111 \
+     "$TD" claim-root 999 >/dev/null 2>&1; then
+  ok "1b: re-claim-root by the SAME identity is idempotent (exit 0)"
 else
   rc=$?
-  [ "$rc" = 2 ] && ok "1b: second claim-root refused (exit 2)" || bad "1b: wrong exit $rc"
+  bad "1b: same-identity re-claim should succeed, got exit $rc"
+fi
+
+if TASK_DAG_CLAIMER=w2 TASK_DAG_CLAIMER_HOST=h2 TASK_DAG_CLAIMER_PID=222 \
+     "$TD" claim-root 999 >/dev/null 2>&1; then
+  bad "1c: claim-root 999 by a DIFFERENT identity succeeded (should be refused)"
+else
+  rc=$?
+  [ "$rc" = 2 ] && ok "1c: claim-root by a different identity refused (exit 2)" || bad "1c: wrong exit $rc"
 fi
 
 # ---------------------------------------------------------------------------
