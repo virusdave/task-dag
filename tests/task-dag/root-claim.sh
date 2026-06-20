@@ -458,6 +458,55 @@ else
 fi
 git remote set-url origin "$ROOT/origin.git"
 
+# ---------------------------------------------------------------------------
+# TEST 17: claim-root refuses an orphan pending root whose GitHub issue is
+# already CLOSED (defense-in-depth against wasted "decompose a done issue"
+# dispatch). We stub `gh` on PATH to report CLOSED, and a separate stub to
+# report OPEN to prove the guard is state-driven, not a blanket refusal.
+# ---------------------------------------------------------------------------
+EPIC17=$(git commit-tree "$(git rev-parse HEAD^{tree})" -p HEAD -m "Task: Closed-issue epic
+
+Issue: #1100
+URL: https://github.com/test/test/issues/1100
+Author: tester
+Status: pending
+Type: epic")
+git update-ref refs/heads/tasks/pending/1100 "$EPIC17"
+git push -q origin refs/heads/tasks/pending/1100
+
+STUBDIR="$ROOT/ghstub"; mkdir -p "$STUBDIR"
+cat > "$STUBDIR/gh" <<'STUB'
+#!/usr/bin/env bash
+# Minimal gh stub: `gh issue view <n> ... --json state --jq .state` -> $GH_STUB_STATE
+if [ "${1:-}" = "issue" ] && [ "${2:-}" = "view" ]; then
+  echo "${GH_STUB_STATE:-OPEN}"; exit 0
+fi
+exit 0
+STUB
+chmod +x "$STUBDIR/gh"
+
+rc17=0
+out17=$(PATH="$STUBDIR:$PATH" GH_STUB_STATE=CLOSED \
+        TASK_DAG_CLAIMER=w17 TASK_DAG_CLAIMER_HOST=h17 TASK_DAG_CLAIMER_PID=1700 \
+        "$TD" claim-root 1100 --json 2>/dev/null) || rc17=$?
+if [ "$rc17" = 3 ] && printf '%s' "$out17" | grep -q '"reason":"issue-closed"' \
+   && ! remote_has refs/heads/tasks/root-active/1100; then
+  ok "17: claim-root refuses a CLOSED issue's orphan root (no root-active created)"
+else
+  bad "17: expected exit 3 + issue-closed + no root-active, got rc=$rc17 out=$out17"
+fi
+
+# Same root, issue reported OPEN -> claim proceeds (guard is state-driven).
+rc17b=0
+PATH="$STUBDIR:$PATH" GH_STUB_STATE=OPEN \
+  TASK_DAG_CLAIMER=w17 TASK_DAG_CLAIMER_HOST=h17 TASK_DAG_CLAIMER_PID=1700 \
+  "$TD" claim-root 1100 --json >/dev/null 2>&1 || rc17b=$?
+if [ "$rc17b" = 0 ] && remote_has refs/heads/tasks/root-active/1100; then
+  ok "17b: claim-root proceeds when the same issue is OPEN (state-driven, not blanket)"
+else
+  bad "17b: expected successful claim on OPEN issue, got rc=$rc17b"
+fi
+
 echo "------------------------------------------------------------"
 echo "root-claim: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

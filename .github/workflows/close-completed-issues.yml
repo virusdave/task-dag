@@ -18,7 +18,15 @@ on:
         required: true
 
 permissions:
-  contents: read
+  # `contents: write` (not read) is REQUIRED: after closing an epic's issue
+  # the close script deletes the now-stale `refs/heads/tasks/pending/<N>` and
+  # `refs/heads/tasks/root-active/<N>` refs via `git push --delete`. With only
+  # `contents: read` those deletes fail silently (the script guards them with
+  # `|| true`), leaving an orphan pending/<N> epic-root ref for a CLOSED issue
+  # — which a dispatcher can then pick up and waste a worker "decomposing" a
+  # done issue. The caller job must also grant `contents: write` (the effective
+  # token permission is the intersection of caller-job and this block).
+  contents: write
   issues: write
 
 jobs:

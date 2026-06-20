@@ -28,8 +28,10 @@
 #      finally wrapped up — see virusdave/top-level#3),
 #   2. cleans up the remote `refs/heads/tasks/pending/<N>` ref.
 #
-# Idempotent: GitHub returns success on closing an already-closed
-# issue; ref-delete is `|| true` so a missing ref is fine.
+# Idempotent but NOT silent: re-closing an already-closed issue and
+# deleting an already-absent ref are both treated as success, but a REAL
+# close/delete failure (e.g. insufficient `contents` permission) fails the
+# run loudly via exit 1 — see ensure_issue_closed / delete_remote_ref_if_present.
 #
 # Invoked by .github/workflows/close-completed-issues.yml with these
 # env vars set:
@@ -42,6 +44,62 @@ set -euo pipefail
 : "${BEFORE_SHA:?BEFORE_SHA is required}"
 : "${AFTER_SHA:?AFTER_SHA is required}"
 : "${GH_TOKEN:?GH_TOKEN is required}"
+
+# Track whether any close/cleanup step failed so we can exit non-zero at the
+# end. Historically every close + ref-delete was `... || true`, which hid
+# exactly the failure that orphaned tasks/pending/<N> for closed issues when
+# the workflow token only had `contents: read` (the delete needs
+# `contents: write`). We now FAIL LOUDLY: a real failure must turn the
+# workflow red so the regression is visible, not silently swallowed. Only
+# "already in the desired state" (issue already closed, ref already absent)
+# is treated as success.
+SAW_FAILURE=0
+
+# Close the issue, tolerating "already closed" but failing on real errors.
+# Returns non-zero ONLY if the issue is still open after we tried.
+ensure_issue_closed() {
+    local issue_num="$1" comment="$2"
+    if gh issue close "$issue_num" --comment "$comment"; then
+        return 0
+    fi
+    local state
+    state="$(gh issue view "$issue_num" --json state --jq '.state' 2>/dev/null || true)"
+    if [ "$state" = "CLOSED" ]; then
+        echo "Issue #$issue_num already CLOSED; continuing with ref cleanup"
+        return 0
+    fi
+    echo "ERROR: failed to close issue #$issue_num (state='${state:-unknown}')" >&2
+    return 1
+}
+
+# Tri-state remote ref existence against origin (the source of truth):
+#   0 present, 1 absent, 3 transport/auth error.
+_remote_ref_exists() {
+    git ls-remote --exit-code origin "$1" >/dev/null 2>&1
+    case "$?" in
+        0) return 0 ;;
+        2) return 1 ;;
+        *) return 3 ;;
+    esac
+}
+
+# Delete a remote ref if present. Missing is success; a real delete failure
+# (or an indeterminate existence probe) is loud and sets SAW_FAILURE.
+delete_remote_ref_if_present() {
+    local ref="$1"
+    _remote_ref_exists "$ref"
+    case "$?" in
+        1) echo "$ref already absent"; return 0 ;;
+        3) echo "ERROR: could not query origin for $ref" >&2; SAW_FAILURE=1; return 1 ;;
+    esac
+    echo "Deleting $ref"
+    if git push origin --delete "$ref"; then
+        return 0
+    fi
+    echo "ERROR: failed to delete $ref (needs contents: write?)" >&2
+    SAW_FAILURE=1
+    return 1
+}
 
 # Walk every new commit landing on master in this push.  On the very
 # first push to a new branch BEFORE_SHA is all-zeros — fall back to
@@ -124,7 +182,14 @@ for commit in "${new_commits[@]}"; do
 
         comment="${mention}task epic completed in commit [\`${commit:0:12}\`](${commit_url}).${issue_url:+ }${issue_url:+(Epic: ${issue_url})}"
 
-        gh issue close "$issue_num" --comment "$comment" || true
+        # Close the issue FIRST; only clean up its task refs once it is
+        # confirmed closed (closing is the user-visible signal; deleting refs
+        # for a still-open issue would strand its epic). A real close failure
+        # is loud and skips ref cleanup for this issue.
+        if ! ensure_issue_closed "$issue_num" "$comment"; then
+            SAW_FAILURE=1
+            continue
+        fi
 
         # Drop any orchestration lock (tasks/root-active/<N>) FIRST, then
         # the pending identity ref, so the frontier stays clean. Order
@@ -133,12 +198,19 @@ for commit in "${new_commits[@]}"; do
         # a stale worker could see the root-lock gone but pending still
         # present. (breakdown also fails closed when an epic root's pending
         # identity is missing, so neither ordering can resurrect the root.)
-        git push origin --delete "refs/heads/tasks/root-active/${issue_num}" 2>/dev/null || true
-        git push origin --delete "refs/heads/tasks/pending/${issue_num}" 2>/dev/null || true
+        delete_remote_ref_if_present "refs/heads/tasks/root-active/${issue_num}" || true
+        delete_remote_ref_if_present "refs/heads/tasks/pending/${issue_num}" || true
         # Re-delete root-active in case a worker re-claimed the (now closed)
         # root in the window between the two deletes above, leaving a stale
         # orchestration lock for a closed issue. (breakdown already fails
         # closed once pending is gone, so this is debris cleanup, not safety.)
-        git push origin --delete "refs/heads/tasks/root-active/${issue_num}" 2>/dev/null || true
+        delete_remote_ref_if_present "refs/heads/tasks/root-active/${issue_num}" || true
     done
 done
+
+# Surface any close/cleanup failure as a red workflow run so silent ref
+# orphaning (the contents:read regression) can never recur unnoticed.
+if [ "$SAW_FAILURE" -ne 0 ]; then
+    echo "ERROR: one or more issue closes or task-ref deletions failed (see above)" >&2
+    exit 1
+fi

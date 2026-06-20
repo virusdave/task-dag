@@ -926,6 +926,26 @@ derive_task_origin() {
     printf '%s\t%s\t%s\n' "$repo" "$issue" "$url"
 }
 
+# Best-effort "is this GitHub issue CLOSED?" used as a defense-in-depth gate
+# in claim-root: an orphan tasks/pending/<N> ref for an already-closed issue
+# (e.g. left behind by a pre-fix close workflow that lacked contents:write,
+# or a repo whose caller hasn't been updated yet) must not let a worker waste
+# a full agent run "decomposing" a done issue.
+#
+# FAILS OPEN by design: if gh is missing, the repo/issue can't be derived, or
+# the API call errors (auth/network), we return 1 (treat as "not known
+# closed") so offline/low-permission CLI use and transient GitHub hiccups
+# never drop real work. Only a confirmed CLOSED state returns 0.
+#   args: <repo owner/name> <issue-number>
+#   return 0 -> confirmed CLOSED ; 1 -> open/unknown/indeterminate
+issue_is_closed_remote() {
+    local repo="$1" issue="$2" state
+    [ -n "$repo" ] && [ -n "$issue" ] || return 1
+    command -v gh >/dev/null 2>&1 || return 1
+    state="$(gh issue view "$issue" --repo "$repo" --json state --jq '.state' 2>/dev/null || true)"
+    [ "$state" = "CLOSED" ]
+}
+
 # Helper: build the blocked-meta side-commit (tree == task tree, first
 # parent == task commit, body holds the metadata). We pin a CONSTANT
 # author/committer identity and use the blocked-at timestamp as the
@@ -1799,6 +1819,23 @@ EOF
             echo "{\"ok\":false,\"reason\":\"origin-unreadable\",\"issue\":$issue}"
         else
             printf "${RED}Cannot reach origin to verify epic root #%s state — refusing to claim.${RESET}\n" "$issue" >&2
+        fi
+        return 3
+    fi
+
+    # Defense-in-depth: refuse to claim the root of an already-CLOSED issue.
+    # An orphan tasks/pending/<N> can linger for a closed issue (historical
+    # close workflow without contents:write, or a not-yet-updated caller), and
+    # decomposing a done issue is exactly the wasted dispatch we're killing.
+    # issue_is_closed_remote FAILS OPEN, so this never blocks real work when
+    # gh/network/auth is unavailable.
+    local origin_repo origin_issue _ignore_url
+    IFS=$'\t' read -r origin_repo origin_issue _ignore_url < <(derive_task_origin "$root_sha")
+    if issue_is_closed_remote "$origin_repo" "${origin_issue:-$issue}"; then
+        if [ "$json" = true ]; then
+            echo "{\"ok\":false,\"reason\":\"issue-closed\",\"issue\":$issue}"
+        else
+            printf "${RED}Epic root #%s belongs to a CLOSED issue — refusing to claim (orphan pending ref).${RESET}\n" "$issue" >&2
         fi
         return 3
     fi
