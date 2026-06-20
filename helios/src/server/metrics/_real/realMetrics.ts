@@ -308,7 +308,7 @@ export const REAL_METRICS: ReadonlyArray<MetricDef> = [
   {
     id: 'margins.stack_new_vs_returning',
     group: 'Margins',
-    title: 'Gross margin $ — new vs returning customer',
+    title: 'Gross margin $: new vs returning customer',
     description:
       'Gross margin $ per bucket, stacked by first-time vs returning customer (same pin as acquisition.first_vs_returning). Guests counted as returning to keep the curve conservative.',
     series: [
@@ -330,14 +330,13 @@ export const REAL_METRICS: ReadonlyArray<MetricDef> = [
   {
     id: 'margins.stack_new_vs_returning_region',
     group: 'Margins',
-    title: 'Gross margin $ — new vs returning × tristate',
+    title: 'Gross margin $: regional, local new/returning vs far',
     description:
-      'Gross margin $ per bucket, stacked into FOUR buckets: the first-time/returning pin (same as margins.stack_new_vs_returning) crossed with whether the customer lives in the tristate area (NY/NJ/CT) or "far" outside it. Customer region is resolved from the customer\'s geocoded address, preferring the scanned-ID address (VeriScan link) and falling back to the Sweed profile primary and the order delivery address. A customer is only counted "far" when we positively resolved a state outside the tristate; unknown / un-geocoded addresses fall back to "tristate" so the far bucket stays a high-confidence signal rather than a dumping ground for missing-address data. NOTE: only orders whose customer has a linked VeriScan ID currently resolve to a real region — the Sweed customer-profile and delivery enrichment links are largely empty today, so the far buckets reflect VeriScan-linked customers only and will grow as address enrichment improves. Guests (no customer_id) count as returning + tristate.',
+      'Gross margin $ per bucket, stacked into THREE buckets: the first-time/returning pin (same as margins.stack_new_vs_returning) applied to LOCAL (tristate NY/NJ/CT) orders, plus a single "far" bucket for every order we positively resolve as out-of-tristate. The far bucket is intentionally NOT split by new vs returning — that crossproduct added noise without actionable signal. Customer region is resolved from the customer\'s geocoded address, preferring the scanned-ID address (VeriScan link) and falling back to the Sweed profile primary and the order delivery address. A customer is only counted "far" when we positively resolved a state outside the tristate; unknown / un-geocoded addresses fall back to "local" so the far bucket stays a high-confidence signal rather than a dumping ground for missing-address data. NOTE: only orders whose customer has a linked VeriScan ID currently resolve to a real region — the Sweed customer-profile and delivery enrichment links are largely empty today, so the far bucket reflects VeriScan-linked customers only and will grow as address enrichment improves. Guests (no customer_id) count as returning + local.',
     series: [
-      { id: 'new_tri', label: 'New (tristate)', colour: '#2ca02c' },
-      { id: 'return_tri', label: 'Return (tristate)', colour: '#1f77b4' },
-      { id: 'new_far', label: 'New (far)', colour: '#98df8a' },
-      { id: 'return_far', label: 'Return (far)', colour: '#aec7e8' },
+      { id: 'new_local', label: 'New (local)', colour: '#2ca02c' },
+      { id: 'return_local', label: 'Returning (local)', colour: '#1f77b4' },
+      { id: 'far', label: 'Far (outside NY/NJ/CT)', colour: '#ff7f0e' },
     ],
     defaultAggregation: 'week',
     supportedAggregations: [...SUPPORTED],

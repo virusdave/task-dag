@@ -353,6 +353,10 @@ const ESSENTIALS_METRIC_IDS = new Set<string>([
   'margins.effective_gm_pct',
   'acquisition.first_vs_returning',
   'basket.size_by_customer_type',
+  // Gross margin $ split by new vs returning customer (local + far
+  // combined), plus the region-segmented companion (new/return local
+  // vs far) right alongside it.
+  'margins.stack_new_vs_returning',
   'margins.stack_new_vs_returning_region',
 ])
 

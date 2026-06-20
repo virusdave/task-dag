@@ -409,11 +409,20 @@ const TRISTATE_REGION_EXPR = `
   end
 `
 // Combine the first-time/returning pin with the tristate region into
-// one of four series ids: new_tri / new_far / return_tri / return_far.
+// one of THREE series ids: new_local / return_local / far.
+//
+// We deliberately do NOT cross new/returning with the far region: the
+// old four-bucket split (new_far vs return_far) added noise without
+// signal — the out-of-tristate population is small and its new/returning
+// breakdown wasn't actionable. So everything we positively resolve as
+// 'far' collapses into a single "far" series, and the new/returning pin
+// only distinguishes the (local) tristate orders.
 const NEW_VS_RETURNING_REGION_SERIES_EXPR = `
-  (case when ${FIRST_TIME_SERIES_EXPR} = 'first_time' then 'new' else 'return' end)
-  || '_' ||
-  (${TRISTATE_REGION_EXPR})
+  case
+    when (${TRISTATE_REGION_EXPR}) = 'far' then 'far'
+    when ${FIRST_TIME_SERIES_EXPR} = 'first_time' then 'new_local'
+    else 'return_local'
+  end
 `
 // Address-resolution joins shared by the region-segmented margin
 // query. None take bind params, so caller param numbering is
@@ -446,19 +455,22 @@ const CUSTOMER_REGION_ADDRESS_JOINS = `
    and deliv.geocode_status = 'ok'
 `
 
-/** margins.stack_new_vs_returning_region — gross margin $ stacked by
- *  the first-time/returning pin (same as margins.stack_new_vs_returning)
- *  CROSSED with whether the customer's resolved address is inside the
- *  tristate area (NY/NJ/CT) or 'far' outside it. Four series:
- *  new_tri / new_far / return_tri / return_far. Customer region uses
- *  the customers.origin_map address chain (primary, then delivery);
- *  unknown/un-geocoded → 'tri' (see TRISTATE_REGION_EXPR comment). */
+/** margins.stack_new_vs_returning_region — gross margin $ stacked into
+ *  THREE series: new (local) / return (local) / far. The first-time/
+ *  returning pin (same as margins.stack_new_vs_returning) is applied
+ *  only to LOCAL (tristate NY/NJ/CT) orders; every order we positively
+ *  resolve as out-of-tristate collapses into a single 'far' series
+ *  (the old new_far vs return_far split was noise). Customer region is
+ *  resolved from the scanned-ID (VeriScan) address first, then the Sweed
+ *  profile primary, then the order delivery address (see
+ *  CUSTOMER_REGION_ADDRESS_JOINS); unknown/un-geocoded → local (see
+ *  TRISTATE_REGION_EXPR comment). */
 export async function queryMarginStackNewVsReturningByRegion(
   args: MetricQueryArgs,
 ): Promise<MetricRow[]> {
   const dealerIds = resolveDealerIds(args.sites)
   const { from, to, truncUnit, buckets } = resolveWindow(args)
-  const seriesIds = ['new_tri', 'new_far', 'return_tri', 'return_far'] as const
+  const seriesIds = ['new_local', 'return_local', 'far'] as const
   if (dealerIds.length === 0 || buckets.length === 0) {
     return buckets.map((b) => {
       const row: Record<string, string | number | null> = { t: b.toISOString() }
