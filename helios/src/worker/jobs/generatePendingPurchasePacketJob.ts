@@ -477,6 +477,19 @@ interface PendingPurchasePricingSupport {
 
 type GeneratedPendingPurchaseRow = PendingPurchasePacket['rows'][number]
 
+/**
+ * Collected, reusable context for one pending-purchase generation run:
+ * the live outstanding-position groups + order summaries, the catalog
+ * cache, and the state-dealer context. Carved out of
+ * `runCatalogPendingPurchasesGenerateJob` (Stage 1 / C1) so later stages
+ * can drive the collection phase independently of how rows are built.
+ */
+interface PendingPurchaseGenerationContext {
+  cache: CatalogCache
+  liveCollection: { groups: Map<string, PendingPositionGroup>; orders: PendingOrderSummary[] }
+  stateContext: Record<string, unknown>
+}
+
 export async function runCatalogPendingPurchasesGenerateJob(
   context: JobHandlerContext,
   payload: CatalogPendingPurchasesGenerateJobPayload,
@@ -493,7 +506,49 @@ export async function runCatalogPendingPurchasesGenerateJob(
   const purchaseOrderNumber = normalizeNonEmptyString(payload.purchaseOrderNumber)
   const requestId = randomUUID()
 
-  await updateJobProgress(context.id, {
+  const generationContext = await collectPendingPurchaseContext({
+    fromDate: payload.fromDate,
+    jobId: context.id,
+    purchaseOrderNumber,
+    sites,
+    stateDealerId: env.sweedStateDealerId,
+    toDate: payload.toDate,
+  })
+
+  const packet = await buildPendingPurchasePacket({
+    context: generationContext,
+    fromDate: payload.fromDate,
+    jobId: context.id,
+    sites,
+    toDate: payload.toDate,
+  })
+
+  await persistGeneratedPendingPurchasePacket({
+    jobId: context.id,
+    packet,
+    requestId,
+    requestedByUserId: payload.requestedByUserId ?? null,
+  })
+}
+
+/**
+ * Phase 1 — collect the run context. Scans the selected sites for
+ * unresolved outstanding purchase positions, fails fast when a requested
+ * single purchase order is not found, then prepares the catalog cache and
+ * state-dealer context. No rows are built here; the result feeds
+ * `buildPendingPurchasePacket`.
+ */
+async function collectPendingPurchaseContext(input: {
+  fromDate: string
+  jobId: number
+  purchaseOrderNumber: string | null
+  sites: HeliosPendingPurchaseSiteDealer[]
+  stateDealerId: number
+  toDate: string
+}): Promise<PendingPurchaseGenerationContext> {
+  const { fromDate, jobId, purchaseOrderNumber, sites, stateDealerId, toDate } = input
+
+  await updateJobProgress(jobId, {
     completed: 0,
     message: purchaseOrderNumber
       ? `Scanning ${sites.length} site${sites.length === 1 ? '' : 's'} for outstanding purchase order ${purchaseOrderNumber}.`
@@ -504,21 +559,84 @@ export async function runCatalogPendingPurchasesGenerateJob(
     total: sites.length,
   })
 
-  const liveCollection = await collectPendingPositions(context.id, payload.fromDate, payload.toDate, sites, purchaseOrderNumber)
+  const liveCollection = await collectPendingPositions(jobId, fromDate, toDate, sites, purchaseOrderNumber)
 
   if (purchaseOrderNumber && liveCollection.orders.length === 0) {
     throw new Error(
-      `No outstanding purchase order matching "${purchaseOrderNumber}" was found on the selected site(s) between ${payload.fromDate} and ${payload.toDate}. Check the purchase number, the selected site, and the date range.`,
+      `No outstanding purchase order matching "${purchaseOrderNumber}" was found on the selected site(s) between ${fromDate} and ${toDate}. Check the purchase number, the selected site, and the date range.`,
     )
   }
-  const cache = new CatalogCache(env.sweedStateDealerId)
 
-  await ensureDealerContext(env.sweedStateDealerId)
-  const stateContext = await readCurrentDealerContext(env.sweedStateDealerId)
+  const cache = new CatalogCache(stateDealerId)
+
+  await ensureDealerContext(stateDealerId)
+  const stateContext = await readCurrentDealerContext(stateDealerId)
+
+  return { cache, liveCollection, stateContext }
+}
+
+/**
+ * Phase 2 — turn the collected context into the persistable packet. The
+ * per-row classification is delegated to `buildLegacyPendingPurchaseRows`
+ * (the legacy rule-based row builder, isolated behind that single seam so
+ * Stage 8 / C8 can swap it for the prospective LLM classifier and delete
+ * it). Everything else here — packet title/summary, site keys, ordering,
+ * state context — is generic packet assembly that survives the cutover.
+ */
+async function buildPendingPurchasePacket(input: {
+  context: PendingPurchaseGenerationContext
+  fromDate: string
+  jobId: number
+  sites: HeliosPendingPurchaseSiteDealer[]
+  toDate: string
+}): Promise<PendingPurchasePacket> {
+  const { context, fromDate, jobId, sites, toDate } = input
+  const { cache, liveCollection, stateContext } = context
+
+  const rows = await buildLegacyPendingPurchaseRows({
+    cache,
+    groups: liveCollection.groups,
+    jobId,
+  })
+
+  return {
+    generatedAt: new Date().toISOString(),
+    orders: liveCollection.orders,
+    packetTitle: buildPacketTitle(sites, fromDate, toDate),
+    rows,
+    siteKeys: sites.map((site) => site.siteKey),
+    siteLabels: sites.map((site) => site.siteLabel),
+    stateContext,
+    summary: buildPacketSummary(rows, liveCollection.orders, fromDate, toDate),
+  }
+}
+
+/**
+ * The legacy rule-based row builder seam. Resolves each unresolved
+ * distributor-product group into a review row via the deterministic
+ * hardcoded-parser / DB-rule / LLM-teacher pipeline (`buildGeneratedRow`),
+ * then applies the family-average cost fallback and the stable display
+ * ordering.
+ *
+ * This is the ONE seam isolating the legacy classifier (decision 4: go
+ * direct). Stage 8 / C8 replaces the call site in
+ * `buildPendingPurchasePacket` with the validated prospective LLM path and
+ * deletes this function outright — it is NOT a preserved fallback. A
+ * short dev-only shadow comparison during validation is fine, but it does
+ * not ship as a permanent mode toggle. See
+ * docs/designs/prospective-pending-purchase-classifier.md (Integration
+ * seams).
+ */
+async function buildLegacyPendingPurchaseRows(input: {
+  cache: CatalogCache
+  groups: Map<string, PendingPositionGroup>
+  jobId: number
+}): Promise<GeneratedPendingPurchaseRow[]> {
+  const { cache, groups, jobId } = input
 
   const rows: GeneratedPendingPurchaseRow[] = []
-  const totalGroups = liveCollection.groups.size
-  await updateJobProgress(context.id, {
+  const totalGroups = groups.size
+  await updateJobProgress(jobId, {
     completed: 0,
     message: totalGroups > 0
       ? `Resolving ${totalGroups} unresolved distributor product${totalGroups === 1 ? '' : 's'} into review rows.`
@@ -530,24 +648,24 @@ export async function runCatalogPendingPurchasesGenerateJob(
   })
 
   // Parallel processing with 20 concurrent workers
-  const groupsArray = Array.from(liveCollection.groups.values())
+  const groupsArray = Array.from(groups.values())
   const CONCURRENCY_LIMIT = 20
   let processedGroups = 0
-  
+
   const buildRow = async (group: PendingPositionGroup) => {
     const stateDistributorProductRow = await findExactDistributorProductRow(group)
     return buildGeneratedRow({ cache, group, stateDistributorProductRow })
   }
-  
+
   // Process in batches of CONCURRENCY_LIMIT
   for (let i = 0; i < groupsArray.length; i += CONCURRENCY_LIMIT) {
     const batch = groupsArray.slice(i, i + CONCURRENCY_LIMIT)
     const batchResults = await Promise.all(batch.map(buildRow))
     rows.push(...batchResults)
-    
+
     processedGroups += batch.length
     if (processedGroups === batch.length || processedGroups === totalGroups || processedGroups % 20 === 0) {
-      await updateJobProgress(context.id, {
+      await updateJobProgress(jobId, {
         completed: processedGroups,
         message: `Resolved ${processedGroups} of ${totalGroups} pending distributor product${totalGroups === 1 ? '' : 's'} (${CONCURRENCY_LIMIT} parallel workers).`,
         phase: 'Resolving catalog actions',
@@ -572,20 +690,28 @@ export async function runCatalogPendingPurchasesGenerateJob(
     return left.distributorProductName.localeCompare(right.distributorProductName)
   })
 
-  const packet: PendingPurchasePacket = {
-    generatedAt: new Date().toISOString(),
-    orders: liveCollection.orders,
-    packetTitle: buildPacketTitle(sites, payload.fromDate, payload.toDate),
-    rows,
-    siteKeys: sites.map((site) => site.siteKey),
-    siteLabels: sites.map((site) => site.siteLabel),
-    stateContext,
-    summary: buildPacketSummary(rows, liveCollection.orders, payload.fromDate, payload.toDate),
-  }
+  return rows
+}
 
-  await updateJobProgress(context.id, {
+/**
+ * Phase 3 — persist the generated packet and kick off market-data
+ * refresh. Writes the packet through the single
+ * `persistPendingPurchasePacket` contract inside one transaction, records
+ * the resulting packet id back onto the job payload, then best-effort
+ * enqueues a Lit Alerts refresh for every referenced product so the
+ * reviewer opens the packet with fresh market evidence.
+ */
+async function persistGeneratedPendingPurchasePacket(input: {
+  jobId: number
+  packet: PendingPurchasePacket
+  requestId: string
+  requestedByUserId: number | null
+}): Promise<void> {
+  const { jobId, packet, requestId, requestedByUserId } = input
+
+  await updateJobProgress(jobId, {
     completed: 1,
-    message: `Saving ${rows.length} pending-purchase review row${rows.length === 1 ? '' : 's'} into Helios.`,
+    message: `Saving ${packet.rows.length} pending-purchase review row${packet.rows.length === 1 ? '' : 's'} into Helios.`,
     phase: 'Persisting review packet',
     phaseCount: 3,
     phaseIndex: 3,
@@ -594,9 +720,9 @@ export async function runCatalogPendingPurchasesGenerateJob(
 
   const persistResult = await withTransaction(async (db) => {
     const result = await persistPendingPurchasePacket(db, {
-      createdByUserId: payload.requestedByUserId ?? null,
+      createdByUserId: requestedByUserId,
       importFileName: null,
-      jobId: context.id,
+      jobId,
       packet,
       requestId,
       source: 'generated',
@@ -610,7 +736,7 @@ export async function runCatalogPendingPurchasesGenerateJob(
             updated_at = now()
         where id = $1
       `,
-      [context.id, result.packetId],
+      [jobId, result.packetId],
     )
     return result
   })
@@ -629,7 +755,7 @@ export async function runCatalogPendingPurchasesGenerateJob(
           pendingPurchaseRowId: persistResult.packetId,
         },
         priority: 10,
-        requestedByUserId: payload.requestedByUserId ?? null,
+        requestedByUserId,
       })
     } catch (enqueueError) {
       // Refresh enqueue is best-effort; never fail packet generation
