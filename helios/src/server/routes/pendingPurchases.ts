@@ -9,10 +9,19 @@ import {
   BatchPendingPurchaseFamilyOverrideRequestSchema,
   type BatchPendingPurchaseFamilyOverrideResponse,
   BatchPendingPurchaseFamilyOverrideResponseSchema,
+  AddPendingPurchaseHintDocumentBodySchema,
   type EditedStructuredFields,
   HELIOS_PENDING_PURCHASE_SITE_DEALERS,
   type JsonValue,
   MutationAcceptedResponseSchema,
+  CreatePendingPurchaseHintBundleBodySchema,
+  PendingPurchaseHintBundleDetailResponseSchema,
+  PendingPurchaseHintBundleListQuerySchema,
+  PendingPurchaseHintBundleListResponseSchema,
+  PendingPurchaseHintBundleRouteParamsSchema,
+  PendingPurchaseHintDocumentAddResponseSchema,
+  PendingPurchaseHintDocumentRouteParamsSchema,
+  UpdatePendingPurchaseHintBundleBodySchema,
   PendingPurchaseListQuerySchema,
   PendingPurchaseListResponseSchema,
   PendingPurchaseRowRouteParamsSchema,
@@ -36,6 +45,16 @@ import {
   listPendingPurchasePacketListPage,
   listPendingPurchaseRows,
 } from '../db/queries/pendingPurchaseQueries.js'
+import {
+  addPendingPurchaseHintDocument,
+  createPendingPurchaseHintBundle,
+  deletePendingPurchaseHintDocument,
+  getPendingPurchaseHintBundle,
+  getPendingPurchaseHintBundleDetail,
+  HintBundleMutationError,
+  listPendingPurchaseHintBundles,
+  updatePendingPurchaseHintBundle,
+} from '../db/queries/pendingPurchaseHintQueries.js'
 import {
   insertPendingPurchaseParseObservation,
   normalizePendingPurchaseParserText,
@@ -225,16 +244,39 @@ export async function registerPendingPurchaseRoutes(server: FastifyInstance): Pr
       ? [...new Set(body.siteDealerIds)]
       : HELIOS_PENDING_PURCHASE_SITE_DEALERS.map((dealer) => dealer.dealerId)
     const purchaseOrderNumber = body.purchaseOrderNumber ?? null
+    const hintBundleId = body.hintBundleId ?? null
     const requestId = randomUUID()
+
+    // Validate the optional classifier hint bundle (child epic #54, C2) at
+    // enqueue time so an obviously-bad payload is rejected up front: it must
+    // exist, be active, and (since an empty bundle contributes nothing) hold
+    // at least one document. This is a guard, not a guarantee — the bundle
+    // can still be archived/edited before the worker consumes it, so the
+    // classifier (C4) must re-validate when it reads the bundle.
+    if (hintBundleId !== null) {
+      const bundle = await getPendingPurchaseHintBundle(getPool(), hintBundleId)
+      if (!bundle) {
+        return reply.status(404).send({ error: 'Hint bundle not found.' })
+      }
+      if (bundle.status !== 'active') {
+        return reply.status(409).send({ error: 'Hint bundle is archived; un-archive it before using it.' })
+      }
+      if (bundle.documentCount === 0) {
+        return reply.status(409).send({ error: 'Hint bundle has no documents; add at least one before using it.' })
+      }
+    }
 
     const mutationResult = await withTransaction(async (db) => {
       const jobId = await enqueueJob(db, {
         concurrencyKey: getOptionalSweedSessionConcurrencyKey(true),
-        dedupeKey: `catalog.pending_purchases.generate:${body.fromDate}:${body.toDate}:${siteDealerIds.join(',')}:${purchaseOrderNumber ?? 'all'}`,
+        // Include hintBundleId so two runs with the same date/site/PO but
+        // different hint bundles don't dedupe to one and silently lose hints.
+        dedupeKey: `catalog.pending_purchases.generate:${body.fromDate}:${body.toDate}:${siteDealerIds.join(',')}:${purchaseOrderNumber ?? 'all'}:${hintBundleId ?? 'no-hints'}`,
         jobType: 'catalog.pending_purchases.generate',
         module: 'catalog',
         payload: {
           fromDate: body.fromDate,
+          hintBundleId,
           purchaseOrderNumber,
           requestedByUserId: user.id,
           siteDealerIds,
@@ -253,6 +295,7 @@ export async function registerPendingPurchaseRoutes(server: FastifyInstance): Pr
         module: 'catalog',
         payload: {
           fromDate: body.fromDate,
+          hintBundleId,
           purchaseOrderNumber,
           queuedJobId: jobId,
           requestedReason: body.reason ?? null,
@@ -813,6 +856,135 @@ export async function registerPendingPurchaseRoutes(server: FastifyInstance): Pr
       }),
     )
   })
+
+  // ── classifier hint bundles (child epic #54, C2) ────────────────────
+  //
+  // Operator-curated bundles of UNTRUSTED hint material (a distributor menu,
+  // a sibling PO, a free-text note). v1 = pasted text only; the generate
+  // route attaches a bundle by its public hintBundleId. Admin-only: this is
+  // generation-affecting control-plane data. Archive (PATCH status), don't
+  // delete, a bundle; documents can be hard-deleted individually.
+
+  // List bundles (metadata + document count; never the raw paste blobs).
+  server.get('/api/catalog/pending-purchases/hint-bundles', async (request, reply) => {
+    const user = await requireSessionUser(request, reply, 'admin')
+    if (!user) {
+      return
+    }
+    const query = PendingPurchaseHintBundleListQuerySchema.parse(request.query ?? {})
+    const bundles = await listPendingPurchaseHintBundles(getPool(), {
+      status: query.status,
+      limit: query.limit,
+    })
+    return reply.send(PendingPurchaseHintBundleListResponseSchema.parse({ bundles }))
+  })
+
+  // Create a bundle.
+  server.post('/api/catalog/pending-purchases/hint-bundles', async (request, reply) => {
+    const user = await requireSessionUser(request, reply, 'admin')
+    if (!user) {
+      return
+    }
+    const body = CreatePendingPurchaseHintBundleBodySchema.parse(request.body ?? {})
+    const bundle = await createPendingPurchaseHintBundle(getPool(), {
+      label: body.label,
+      note: body.note ?? null,
+      userId: user.id,
+    })
+    return reply
+      .status(201)
+      .send(PendingPurchaseHintBundleDetailResponseSchema.parse({ bundle: { ...bundle, documents: [] } }))
+  })
+
+  // Get one bundle with its full document list (includes raw text).
+  server.get('/api/catalog/pending-purchases/hint-bundles/:hintBundleId', async (request, reply) => {
+    const user = await requireSessionUser(request, reply, 'admin')
+    if (!user) {
+      return
+    }
+    const params = PendingPurchaseHintBundleRouteParamsSchema.parse(request.params)
+    const bundle = await getPendingPurchaseHintBundleDetail(getPool(), params.hintBundleId)
+    if (!bundle) {
+      return reply.status(404).send({ error: 'Hint bundle not found.' })
+    }
+    return reply.send(PendingPurchaseHintBundleDetailResponseSchema.parse({ bundle }))
+  })
+
+  // Update a bundle's label / note / status (archive = status:'archived').
+  server.patch('/api/catalog/pending-purchases/hint-bundles/:hintBundleId', async (request, reply) => {
+    const user = await requireSessionUser(request, reply, 'admin')
+    if (!user) {
+      return
+    }
+    const params = PendingPurchaseHintBundleRouteParamsSchema.parse(request.params)
+    const body = UpdatePendingPurchaseHintBundleBodySchema.parse(request.body ?? {})
+    const updated = await updatePendingPurchaseHintBundle(getPool(), params.hintBundleId, {
+      label: body.label,
+      note: body.note,
+      status: body.status,
+      userId: user.id,
+    })
+    if (!updated) {
+      return reply.status(404).send({ error: 'Hint bundle not found.' })
+    }
+    const detail = await getPendingPurchaseHintBundleDetail(getPool(), params.hintBundleId)
+    return reply.send(PendingPurchaseHintBundleDetailResponseSchema.parse({ bundle: detail! }))
+  })
+
+  // Add a pasted-text document to a bundle. Idempotent on identical text in
+  // the same bundle (200 + deduped:true) vs a fresh insert (201).
+  server.post('/api/catalog/pending-purchases/hint-bundles/:hintBundleId/documents', async (request, reply) => {
+    const user = await requireSessionUser(request, reply, 'admin')
+    if (!user) {
+      return
+    }
+    const params = PendingPurchaseHintBundleRouteParamsSchema.parse(request.params)
+    const body = AddPendingPurchaseHintDocumentBodySchema.parse(request.body ?? {})
+    try {
+      const result = await addPendingPurchaseHintDocument({
+        hintBundleId: params.hintBundleId,
+        kind: body.kind,
+        sourceLabel: body.sourceLabel ?? null,
+        rawText: body.rawText,
+        userId: user.id,
+      })
+      return reply
+        .status(result.deduped ? 200 : 201)
+        .send(PendingPurchaseHintDocumentAddResponseSchema.parse(result))
+    } catch (error) {
+      if (error instanceof HintBundleMutationError) {
+        // bundle_not_found → 404; bundle_archived → 409.
+        const status = error.code === 'bundle_not_found' ? 404 : 409
+        return reply.status(status).send({ error: error.message, code: error.code })
+      }
+      throw error
+    }
+  })
+
+  // Remove a single document from a bundle (scoped by both ids).
+  server.delete(
+    '/api/catalog/pending-purchases/hint-bundles/:hintBundleId/documents/:hintDocumentId',
+    async (request, reply) => {
+      const user = await requireSessionUser(request, reply, 'admin')
+      if (!user) {
+        return
+      }
+      const params = PendingPurchaseHintDocumentRouteParamsSchema.parse(request.params)
+      const deleted = await deletePendingPurchaseHintDocument(
+        getPool(),
+        params.hintBundleId,
+        params.hintDocumentId,
+      )
+      if (!deleted) {
+        return reply.status(404).send({ error: 'Hint document not found in this bundle.' })
+      }
+      const detail = await getPendingPurchaseHintBundleDetail(getPool(), params.hintBundleId)
+      if (!detail) {
+        return reply.status(404).send({ error: 'Hint bundle not found.' })
+      }
+      return reply.send(PendingPurchaseHintBundleDetailResponseSchema.parse({ bundle: detail }))
+    },
+  )
 }
 
 async function lockPendingPurchaseRow(db: PoolClient, rowId: number): Promise<PendingPurchaseRowLockRow> {

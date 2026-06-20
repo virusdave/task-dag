@@ -243,6 +243,16 @@ export const CatalogPendingPurchasesGenerateJobPayloadSchema = z.object({
   requestedByUserId: z.number().int().positive().nullable().optional(),
   siteDealerIds: z.array(z.number().int().positive()).default([]),
   toDate: z.iso.date(),
+  // Optional prospective-classifier hint bundle (child epic #54, C2). Carried
+  // through from the generate route (validated there); the classifier (C4)
+  // consumes it. The generator does not read it yet in C2. job_queue.payload
+  // is also a trust boundary, so enforce the public-id grammar here too.
+  hintBundleId: z
+    .string()
+    .trim()
+    .regex(/^pphint_[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{6}_[0-9a-f]{6}$/, 'invalid hint bundle id')
+    .nullable()
+    .optional(),
 })
 export type CatalogPendingPurchasesGenerateJobPayload = z.infer<typeof CatalogPendingPurchasesGenerateJobPayloadSchema>
 

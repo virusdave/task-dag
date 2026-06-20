@@ -117,6 +117,16 @@ export const QueuePendingPurchasePacketGenerationRequestSchema = z
     reason: z.string().trim().max(500).nullable().optional(),
     siteDealerIds: z.array(z.coerce.number().int().positive()).default([]),
     toDate: z.iso.date(),
+    // Optional prospective-classifier hint bundle (child epic #54, C2). When
+    // set, the generate run is scoped to this operator-curated bundle of
+    // untrusted hint material; the route validates it exists + is active and
+    // threads it into the job payload + dedupe key. v1 = pasted text only.
+    hintBundleId: z
+      .string()
+      .trim()
+      .regex(/^pphint_[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{6}_[0-9a-f]{6}$/, 'invalid hint bundle id')
+      .nullable()
+      .optional(),
   })
   .refine((value) => value.fromDate <= value.toDate, 'fromDate must be on or before toDate.')
 export type QueuePendingPurchasePacketGenerationRequest = z.infer<typeof QueuePendingPurchasePacketGenerationRequestSchema>

@@ -1281,6 +1281,45 @@ const SENTINELS: MigrationSentinel[] = [
       return hasAttemptsSite && hasOutcomesSite
     },
   },
+  {
+    // Prospective pending-purchase classifier HINT BUNDLE storage
+    // (pending_purchase_hint_bundles + pending_purchase_hint_documents,
+    // child FreshlyBakedNYC/automation#54, task C2). Without these tables the
+    // /api/catalog/pending-purchases/hint-bundles admin routes 500 and the
+    // generate route's hintBundleId validation can't resolve a bundle.
+    migrationId: '094_pending_purchase_hint_bundles',
+    label:
+      'pending_purchase_hint_bundles + pending_purchase_hint_documents — ' +
+      'storage + admin API for the prospective classifier\'s untrusted hint ' +
+      'material (v1 pasted text). Without it the hint-bundle routes 500 and ' +
+      'generate can\'t validate a hintBundleId. See child #54 (C2).',
+    // Both tables, the C3-forward columns, the dedup unique constraint, the
+    // FK, and both list indexes — so a partial manual apply reports pending
+    // rather than "safe".
+    check: async (db) => {
+      const checks = await Promise.all([
+        tableExists(db, 'pending_purchase_hint_bundles'),
+        tableExists(db, 'pending_purchase_hint_documents'),
+        columnExists(db, 'pending_purchase_hint_documents', 'hint_intent'),
+        columnExists(db, 'pending_purchase_hint_documents', 'extraction_status'),
+        columnExists(db, 'pending_purchase_hint_documents', 'extraction_error'),
+        columnExists(db, 'pending_purchase_hint_documents', 'extracted_facts'),
+        constraintExists(
+          db,
+          'pending_purchase_hint_documents',
+          'pending_purchase_hint_documents_bundle_content_sha256_key',
+        ),
+        constraintExists(
+          db,
+          'pending_purchase_hint_documents',
+          'pending_purchase_hint_documents_bundle_id_fkey',
+        ),
+        indexExists(db, 'pending_purchase_hint_bundles_status_created_idx'),
+        indexExists(db, 'pending_purchase_hint_documents_bundle_created_idx'),
+      ])
+      return checks.every(Boolean)
+    },
+  },
 ]
 
 interface CacheEntry {
