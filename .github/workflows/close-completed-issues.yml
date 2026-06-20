@@ -17,17 +17,23 @@ on:
         description: 'GitHub token for API access (needs issues:write)'
         required: true
 
-permissions:
-  # `contents: write` (not read) is REQUIRED: after closing an epic's issue
-  # the close script deletes the now-stale `refs/heads/tasks/pending/<N>` and
-  # `refs/heads/tasks/root-active/<N>` refs via `git push --delete`. With only
-  # `contents: read` those deletes fail silently (the script guards them with
-  # `|| true`), leaving an orphan pending/<N> epic-root ref for a CLOSED issue
-  # — which a dispatcher can then pick up and waste a worker "decomposing" a
-  # done issue. The caller job must also grant `contents: write` (the effective
-  # token permission is the intersection of caller-job and this block).
-  contents: write
-  issues: write
+# NOTE: this reusable workflow deliberately does NOT declare its own
+# `permissions:` block. It INHERITS the calling job's granted permissions.
+#
+# It needs BOTH `issues: write` (to `gh issue close`) and `contents: write`
+# (the close script deletes the now-stale `refs/heads/tasks/pending/<N>` and
+# `refs/heads/tasks/root-active/<N>` refs via `git push --delete`; read-only
+# would leave orphan epic-root refs for CLOSED issues — wasted dispatch).
+# So every CALLER's close-completed job must grant
+# `permissions: { contents: write, issues: write }` (see docs/MIGRATION.md).
+#
+# Why inherit instead of declaring `contents: write` here: a reusable
+# workflow that declares MORE than the caller granted is a hard startup
+# failure (reusable perms can only narrow the caller's, never widen them).
+# Declaring write here would break every not-yet-updated caller's run on
+# EVERY push. By inheriting, an un-updated `contents: read` caller degrades
+# gracefully — the close script still runs and FAILS LOUDLY (exit 1) only
+# when it actually has an epic to clean up — instead of failing at startup.
 
 jobs:
   close-issues:

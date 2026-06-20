@@ -67,7 +67,12 @@ jobs:
     if: ${{ github.event_name == 'push' }}
     uses: virusdave/task-dag/.github/workflows/close-completed-issues.yml@master
     permissions:
-      contents: read
+      # contents: write (not read) — the close script deletes the stale
+      # tasks/pending/<N> + tasks/root-active/<N> refs after closing the
+      # issue. Must match the reusable workflow's declared write (a caller
+      # that grants less than the reusable workflow declares is a startup
+      # failure: reusable perms can only narrow the caller's, not widen).
+      contents: write
       issues: write
     secrets:
       token: ${{ secrets.GITHUB_TOKEN }}
