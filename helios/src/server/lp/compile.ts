@@ -17,7 +17,7 @@ import {
   type VariantSchema,
 } from './contracts.js'
 import { newBundleId } from './ids.js'
-import { checkBundleConsistency } from './registryCheck.js'
+import { checkBundleConsistency, type BrandingOpaqueRegistry } from './registryCheck.js'
 import type { z } from 'zod'
 
 export interface CompileInput {
@@ -27,6 +27,12 @@ export interface CompileInput {
   readonly variants: ReadonlyArray<z.infer<typeof VariantSchema>>
   readonly policy: Pick<Policy, 'policy_version_id' | 'selection_algorithm_version' | 'rules'>
   readonly disabledVariants?: readonly DisabledVariant[]
+  /**
+   * Opaque branding refs mss can serve (from the published branding manifest).
+   * Required for the P3 parity check when the bundle emits any `branding` SLUG;
+   * its absence FAILS the compile closed rather than skipping the guard.
+   */
+  readonly brandingRegistry?: BrandingOpaqueRegistry
   readonly bundleId?: string
   readonly now?: Date
 }
@@ -77,7 +83,9 @@ export function compileBundle(input: CompileInput): CompiledBundle {
   const assets = assetsParsed.data!
   const policy = policyParsed.data!
 
-  const consistency = checkBundleConsistency(bundle, policy, assets, input.disabledVariants)
+  const consistency = checkBundleConsistency(bundle, policy, assets, input.disabledVariants, {
+    brandingRegistry: input.brandingRegistry,
+  })
   if (consistency.length > 0) throw new CompileError(consistency)
 
   return { bundleId, bundle, policy, assets }

@@ -12,14 +12,16 @@
 // autonomous agent builds and tests this tooling; it does not execute it
 // against prod.
 
-import { readFileSync } from 'node:fs'
+import { readFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 
 import { CurrentPointerSchema, type CurrentPointer, type DisabledVariant } from './contracts.js'
+import type { BrandingOpaqueRegistry } from './registryCheck.js'
 import { sha256Hex } from './hash.js'
 import { resolveArtifactPath } from './paths.js'
 import {
   buildSignedPointerBytes,
+  durableRename,
   manifestUrlFor,
   readPointerVersion,
   writeFileAtomic,
@@ -41,6 +43,12 @@ export interface PromoteCandidateOptions {
    * default — the safe path is to re-run publish-candidate.
    */
   readonly allowVersionRebase?: boolean
+  /**
+   * Opaque branding refs mss can serve (from the published branding manifest),
+   * threaded into the candidate + live re-validation so a pointer carrying a
+   * branding ref the registry can't resolve cannot be promoted (P3 parity).
+   */
+  readonly brandingRegistry?: BrandingOpaqueRegistry
   readonly now?: Date
 }
 
@@ -104,6 +112,7 @@ export function promoteCandidate(opts: PromoteCandidateOptions): PromoteResult {
     pointerPath: candidatePath,
     publicKeyPem: opts.publicKeyPem,
     runningRendererVersion: opts.runningRendererVersion,
+    brandingRegistry: opts.brandingRegistry,
   })
   if (!candidateValidation.ok) {
     return {
@@ -154,6 +163,7 @@ export function promoteCandidate(opts: PromoteCandidateOptions): PromoteResult {
     pointerPath: livePath,
     publicKeyPem: opts.publicKeyPem,
     runningRendererVersion: opts.runningRendererVersion,
+    brandingRegistry: opts.brandingRegistry,
   })
 
   return {
@@ -186,6 +196,12 @@ export interface RollbackOptions {
    * an active ROI safety overlay).
    */
   readonly disabledVariants?: readonly DisabledVariant[]
+  /**
+   * Opaque branding refs mss can serve (from the published branding manifest),
+   * threaded into the post-rollback live re-validation so a rolled-back pointer
+   * carrying an unresolvable branding ref fails closed (P3 parity).
+   */
+  readonly brandingRegistry?: BrandingOpaqueRegistry
   readonly now?: Date
 }
 
@@ -246,23 +262,44 @@ export function rollbackToBundle(opts: RollbackOptions): PromoteResult {
     publishedAt: (opts.now ?? new Date()).toISOString(),
     privateKeyPem: opts.privateKeyPem,
   })
-  writeFileAtomic(livePath, envDir, `current.json.tmp.${toVersion}`, pointerBytes)
 
+  // Stage the rollback pointer, validate it fail-closed (incl. the P3
+  // branding parity guard), and only swap the live pointer on success — a
+  // rollback that fails validation must NOT flip live traffic first.
+  const pendingPath = join(envDir, `current.rollback.pending.${toVersion}.json`)
+  writeFileAtomic(pendingPath, envDir, `current.rollback.pending.${toVersion}.json.tmp`, pointerBytes)
   const liveValidation = validateBundle({
     artifactRoot: opts.artifactRoot,
-    pointerPath: livePath,
+    pointerPath: pendingPath,
     publicKeyPem: opts.publicKeyPem,
     runningRendererVersion: opts.runningRendererVersion,
+    brandingRegistry: opts.brandingRegistry,
   })
+  if (!liveValidation.ok) {
+    rmSync(pendingPath, { force: true })
+    return {
+      ok: false,
+      bundleId: opts.toBundleId,
+      fromVersion,
+      previousBundleId: live?.bundle_id,
+      livePointerPath: livePath,
+      validation: liveValidation,
+      errors: [
+        'rollback target failed validation; live pointer left frozen:',
+        ...liveValidation.errors.map((e) => `  - ${e}`),
+      ],
+    }
+  }
+  durableRename(pendingPath, livePath, envDir)
 
   return {
-    ok: liveValidation.ok,
+    ok: true,
     bundleId: opts.toBundleId,
     fromVersion,
     toVersion,
     previousBundleId: live?.bundle_id,
     livePointerPath: livePath,
     validation: liveValidation,
-    errors: liveValidation.ok ? [] : liveValidation.errors,
+    errors: [],
   }
 }

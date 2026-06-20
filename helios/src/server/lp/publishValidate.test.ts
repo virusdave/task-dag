@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import { compileBundle, CompileError, type CompileInput } from './compile.js'
 import { publishBundle } from './publish.js'
+import type { BrandingOpaqueRegistry } from './registryCheck.js'
 import { generateEd25519Pem } from './signing.js'
 import { validateBundle } from './validate.js'
 
@@ -157,5 +158,74 @@ describe('publish + validate roundtrip', () => {
     )
     const v = validateBundle({ artifactRoot: root, pointerPath: res.pointerPath, publicKeyPem, runningRendererVersion: '0.4.0' })
     expect(v.ok).toBe(true)
+  })
+})
+
+describe('branding-ref parity through compile + publish + validate (P3)', () => {
+  const BRANDING_REF = 'h78SFgtcQNLHNzKo37r1' // 20-char base64url opaque ref
+  const registry: BrandingOpaqueRegistry = {
+    bySite: new Map([['bronx', new Set([BRANDING_REF])]]),
+  }
+
+  function brandingInput(brandingRegistry?: BrandingOpaqueRegistry): CompileInput {
+    return {
+      sites: { bronx: { host: 'bronx.freshlybaked.us', purpose_max_variant: { branding: 5 } } },
+      families: { 'brand-x': { purpose: 'branding', slots: ['X1'] } },
+      components: {},
+      variants: [{ variant_id: 'hero_a', slot: 'X1', source: 'existing', approval_status: 'approved' }],
+      policy: {
+        policy_version_id: 'polv_b',
+        selection_algorithm_version: 'v1',
+        rules: [
+          {
+            policy_rule_id: 'rb',
+            match: { family: 'brand-x' },
+            assignment_key: ['site', 'family'],
+            experiment_id: 'e',
+            experiment_salt: 's',
+            exploration_rate_bps: 0,
+            slots: { X1: { exploit: 'hero_a' } },
+          },
+        ],
+      },
+      disabledVariants: [
+        { site: 'bronx', purpose: 'branding', slug: BRANDING_REF, num: 2, reason: 'roi_guardrail', effective_at: '2026-06-10T00:00:00Z' },
+      ],
+      brandingRegistry,
+    }
+  }
+
+  it('fails the compile closed when a branding ref is emitted without a registry', () => {
+    expect(() => compileBundle(brandingInput(undefined))).toThrow(/no branding-opaque/)
+  })
+
+  it('compiles, publishes, and validates a branding ref ONLY with the registry', () => {
+    const compiled = compileBundle(brandingInput(registry))
+    const res = publishBundle({
+      compiled,
+      privateKeyPem,
+      artifactRoot: root,
+      environment: 'prod' as const,
+      minRendererVersion: 'mss-lp-runtime>=0.4.0',
+      automationGitSha: '6c9e1f2',
+      generatedFrom: { policy_version_id: 'polv_b' },
+      disabledVariants: brandingInput(registry).disabledVariants,
+    })
+
+    // Without the registry, the same pointer fails closed at validate time.
+    const noReg = validateBundle({ artifactRoot: root, pointerPath: res.pointerPath, publicKeyPem, runningRendererVersion: '0.4.0' })
+    expect(noReg.ok).toBe(false)
+    expect(noReg.errors.some((e) => e.includes('no branding-opaque'))).toBe(true)
+
+    // With the registry, it validates.
+    const withReg = validateBundle({
+      artifactRoot: root,
+      pointerPath: res.pointerPath,
+      publicKeyPem,
+      runningRendererVersion: '0.4.0',
+      brandingRegistry: registry,
+    })
+    expect(withReg.errors).toEqual([])
+    expect(withReg.ok).toBe(true)
   })
 })

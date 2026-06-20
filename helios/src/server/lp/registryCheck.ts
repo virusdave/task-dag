@@ -5,12 +5,46 @@
 
 import type { Assets, Bundle, DisabledVariant, Policy } from './contracts.js'
 
+/**
+ * The set of opaque branding refs mss can actually serve, keyed by site. It
+ * is built from the published branding-opaque manifest (the SINGLE producer,
+ * `../branding/`), which mss ingests — so by construction this IS the mss
+ * branding registry. `checkBrandingRefParity` uses it as the P3 bundle-compile
+ * parity guard: Helios must never sign a `branding` SLUG (kill-list slug or a
+ * branding-family policy `cluster_slug`) that mss cannot decode, mirroring the
+ * existing `MAX_VARIANT_BY_PURPOSE` / variant-id drift guards.
+ */
+export interface BrandingOpaqueRegistry {
+  /** site_key (e.g. `bronx`) -> the opaque refs valid for that site. */
+  readonly bySite: ReadonlyMap<string, ReadonlySet<string>>
+}
+
+export interface BundleConsistencyOptions {
+  /**
+   * The branding registry to validate emitted `branding` refs against. When a
+   * branding ref IS emitted but this is absent, the check FAILS CLOSED (a
+   * branding ref that cannot be parity-checked is a publish bug, not a skip).
+   */
+  readonly brandingRegistry?: BrandingOpaqueRegistry
+}
+
+/** The `branding` LP purpose; its SLUG must be an opaque ref (parent §0/§2). */
+const BRANDING_PURPOSE = 'branding'
+
+/**
+ * An opaque branding ref is the 20-char base64url truncation of the shared
+ * HMAC scheme (`../branding/opaqueRef.ts`). Anything else (most importantly a
+ * leftover literal brand slug like `herb`) must be rejected before signing.
+ */
+const OPAQUE_BRANDING_REF_RE = /^[A-Za-z0-9_-]{20}$/
+
 /** Returns a list of human-readable problems; empty = consistent. */
 export function checkBundleConsistency(
   bundle: Bundle,
   policy: Policy,
   assets: Assets,
   disabledVariants: readonly DisabledVariant[] = [],
+  options: BundleConsistencyOptions = {},
 ): string[] {
   const errors: string[] = []
 
@@ -65,6 +99,95 @@ export function checkBundleConsistency(
 
   for (const dv of disabledVariants) {
     errors.push(...checkDisabledVariantBounds(bundle, dv))
+  }
+
+  errors.push(...checkBrandingRefParity(bundle, policy, disabledVariants, options.brandingRegistry))
+
+  return errors
+}
+
+/**
+ * P3 bundle-compile parity guard: every `branding` SLUG Helios emits in its
+ * signed outputs must resolve to an opaque ref the mss branding registry can
+ * serve. Branding SLUGs surface in two places (parent §0, automation#48 P3):
+ *
+ *   1. the kill-list `current.json.disabled_variants[].slug` (for
+ *      `purpose === 'branding'`, or a `purpose === '*'` entry that expands to
+ *      branding), and
+ *   2. a `policy.rules[].match.cluster_slug` on a rule scoped to a
+ *      branding-family (`bundle.families[match.family].purpose === 'branding'`).
+ *
+ * A `slug === '*'` kill-list is purpose-wide, not a specific ref, so it is
+ * skipped. A well-formed-but-unknown ref, a malformed (literal) slug, or an
+ * emitted ref with no registry to check against are all errors (fail-closed).
+ */
+export function checkBrandingRefParity(
+  bundle: Bundle,
+  policy: Policy,
+  disabledVariants: readonly DisabledVariant[],
+  registry: BrandingOpaqueRegistry | undefined,
+): string[] {
+  const errors: string[] = []
+
+  // The bundle sites that actually carry the `branding` purpose. A
+  // `site === '*'` / unscoped ref resolves if ANY of these serve it (a brand
+  // need not be present in every site — mss only generates pages where it is).
+  const brandingSites = Object.keys(bundle.sites).filter(
+    (s) => bundle.sites[s]?.purpose_max_variant[BRANDING_PURPOSE] !== undefined,
+  )
+
+  const checkRef = (label: string, site: string | undefined, slug: string): void => {
+    if (!OPAQUE_BRANDING_REF_RE.test(slug)) {
+      errors.push(
+        `${label}: branding slug '${slug}' is not a well-formed opaque ref ` +
+          `(expected a 20-char base64url ref); a literal brand slug must be ` +
+          `replaced with its opaque ref before signing`,
+      )
+      return
+    }
+    if (registry === undefined) {
+      errors.push(
+        `${label}: branding ref '${slug}' emitted but no branding-opaque ` +
+          `registry was supplied for the parity check (fail-closed; publish the ` +
+          `branding manifest and pass it to compile/validate)`,
+      )
+      return
+    }
+    const sites = site !== undefined && site !== '*' ? [site] : brandingSites
+    const resolves = sites.some((s) => registry.bySite.get(s)?.has(slug) === true)
+    if (!resolves) {
+      const where =
+        site !== undefined && site !== '*'
+          ? `site '${site}'`
+          : `any branding site (${brandingSites.join(', ') || 'none'})`
+      errors.push(
+        `${label}: branding ref '${slug}' does not resolve in the mss branding registry for ${where}`,
+      )
+    }
+  }
+
+  // 1. Kill-list entries that target the branding family.
+  for (const dv of disabledVariants) {
+    if (dv.slug === '*') continue
+    let targetsBranding = dv.purpose === BRANDING_PURPOSE
+    if (!targetsBranding && dv.purpose === '*') {
+      const sites = dv.site === '*' ? Object.keys(bundle.sites) : [dv.site]
+      targetsBranding = sites.some(
+        (s) => bundle.sites[s]?.purpose_max_variant[BRANDING_PURPOSE] !== undefined,
+      )
+    }
+    if (!targetsBranding) continue
+    checkRef(`disabled_variant ${dv.site}/${dv.purpose}/${dv.slug}/${dv.num}`, dv.site, dv.slug)
+  }
+
+  // 2. Policy rules scoped to a branding family carrying a per-brand cluster_slug.
+  for (const rule of policy.rules) {
+    const family = rule.match.family
+    if (family === undefined) continue
+    if (bundle.families[family]?.purpose !== BRANDING_PURPOSE) continue
+    const clusterSlug = rule.match.cluster_slug
+    if (clusterSlug === undefined) continue
+    checkRef(`policy rule ${rule.policy_rule_id} match.cluster_slug`, rule.match.site, clusterSlug)
   }
 
   return errors

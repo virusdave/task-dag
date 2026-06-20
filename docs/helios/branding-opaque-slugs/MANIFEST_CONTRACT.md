@@ -42,6 +42,47 @@
 - [`cli.ts`](../../../helios/src/server/branding/cli.ts) — `build` (read-only
   preview), `publish`, `validate`.
 
+## P3 consumer: the LP bundle-compile parity guard (automation#48 P3)
+
+The manifest above is not only the input mss ingests and the operator's
+Ads-Editor CSV migration consumes — it is also the **registry the Helios LP
+bundle publisher checks its own emitted `branding` refs against** (parent §5
+P3, §7 "Helios ↔ mss scheme drift"). This closes the loop so Helios can never
+sign a branding SLUG that mss cannot decode (which would 404 a live ad URL).
+
+Where a `branding` SLUG appears in Helios's **signed LP outputs**:
+
+- the kill-list `current.json.disabled_variants[].slug` when
+  `purpose === 'branding'` (or a `purpose === '*'` entry that expands to
+  branding), and
+- a `policy.rules[].match.cluster_slug` on a rule scoped to a branding family
+  (`bundle.families[match.family].purpose === 'branding'`).
+
+The guard ([`helios/src/server/lp/registryCheck.ts`](../../../helios/src/server/lp/registryCheck.ts)
+`checkBrandingRefParity`, run from `checkBundleConsistency` at both compile and
+validate time):
+
+- rejects a malformed slug (anything that is not a 20-char base64url opaque
+  ref — i.e. a leftover **literal** brand slug) with a clear message;
+- **fails closed** if a branding ref is emitted but no branding registry was
+  supplied (a branding ref that cannot be parity-checked is a publish bug, not
+  a skip);
+- requires a concrete-site ref to resolve in that site's set, and a
+  `site === '*'` / unscoped ref to resolve in at least one branding site
+  (a brand need not be present in every site);
+- leaves every non-branding kill-list / policy ref untouched.
+
+The registry is built (site → set of opaque refs) by
+[`buildBrandingOpaqueRegistry`](../../../helios/src/server/branding/publish.ts)
+from the **validated** published manifest entries via
+`loadBrandingOpaqueRegistry` (never an unsigned/corrupt manifest). The LP CLI
+loads it when `--branding-pubkey` is passed to
+`publish`/`publish-candidate`/`promote-candidate`/`rollback`/`validate`
+(default location `<root>/branding-opaque/<env>/current.json`; override with
+`--branding-env`/`--branding-pointer`). It lands **inert**: today no real
+branding kill-list/policy refs are emitted, so existing bundles compile
+unchanged.
+
 ## The opaque-ref scheme (shared contract)
 
 ```

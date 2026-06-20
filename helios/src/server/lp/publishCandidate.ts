@@ -35,6 +35,7 @@ import { join } from 'node:path'
 
 import { compileBundle, type CompileInput } from './compile.js'
 import type { DisabledVariant, Manifest } from './contracts.js'
+import type { BrandingOpaqueRegistry } from './registryCheck.js'
 import { durableRename, publishBundle, type LpEnvironment } from './publish.js'
 import { validateBundle, type ValidationResult } from './validate.js'
 
@@ -56,6 +57,13 @@ export interface ApprovedContentCandidateOptions {
   readonly generatedFrom: Manifest['generated_from']
   readonly previousBundleId?: string
   readonly disabledVariants?: readonly DisabledVariant[]
+  /**
+   * Opaque branding refs mss can serve (from the published branding manifest).
+   * Threaded into BOTH the compile and the self-validation so a candidate that
+   * emits a branding ref the registry can't resolve fails closed at compile
+   * AND can never pass its own validation (P3 parity guard).
+   */
+  readonly brandingRegistry?: BrandingOpaqueRegistry
   /**
    * The renderer version to self-validate against. MUST be the version
    * actually deployed in the mss runtime, so a candidate that needs a
@@ -105,7 +113,10 @@ export function publishApprovedContentCandidate(
   // compiled (validated against the registry) and signed into the pointer.
   const disabledVariants = opts.disabledVariants ?? opts.approvedContent.disabledVariants ?? []
 
-  const compiled = compileBundle({ ...opts.approvedContent, disabledVariants })
+  // The same registry is used to compile AND to self-validate below.
+  const brandingRegistry = opts.brandingRegistry ?? opts.approvedContent.brandingRegistry
+
+  const compiled = compileBundle({ ...opts.approvedContent, disabledVariants, brandingRegistry })
 
   const envDir = join(opts.artifactRoot, opts.environment)
   const stagingName = `current.candidate.pending.${compiled.bundleId}.json`
@@ -135,6 +146,7 @@ export function publishApprovedContentCandidate(
     pointerPath: published.pointerPath,
     publicKeyPem: opts.publicKeyPem,
     runningRendererVersion: opts.verifyRendererVersion,
+    brandingRegistry,
   })
 
   if (!validation.ok) {

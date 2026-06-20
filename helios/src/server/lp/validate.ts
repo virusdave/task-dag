@@ -24,7 +24,7 @@ import {
 } from './contracts.js'
 import { sha256Hex } from './hash.js'
 import { resolveArtifactPath } from './paths.js'
-import { checkBundleConsistency } from './registryCheck.js'
+import { checkBundleConsistency, type BrandingOpaqueRegistry } from './registryCheck.js'
 import { satisfiesRendererConstraint } from './rendererVersion.js'
 import { manifestSigningPayload } from './publish.js'
 import { verifyPayload } from './signing.js'
@@ -38,6 +38,13 @@ export interface ValidateOptions {
   readonly runningRendererVersion: string
   /** If set, reject a pointer whose version is <= the active version. */
   readonly activeVersion?: number
+  /**
+   * Opaque branding refs mss can serve (from the published branding manifest).
+   * The same P3 parity guard the compiler runs, applied to the pointer's
+   * kill-list / branding-family policy refs. Absent ⇒ any emitted branding ref
+   * fails closed (must match what `compileBundle` was given).
+   */
+  readonly brandingRegistry?: BrandingOpaqueRegistry
 }
 
 export interface ValidationResult {
@@ -130,7 +137,11 @@ export function validateBundle(opts: ValidateOptions): ValidationResult {
     if (bundle.bundle_id !== manifest.bundle_id) {
       errors.push(`bundle.json bundle_id ${bundle.bundle_id} != manifest ${manifest.bundle_id}`)
     }
-    errors.push(...checkBundleConsistency(bundle, policy, assets, pointer.disabled_variants ?? []))
+    errors.push(
+      ...checkBundleConsistency(bundle, policy, assets, pointer.disabled_variants ?? [], {
+        brandingRegistry: opts.brandingRegistry,
+      }),
+    )
   }
 
   return {

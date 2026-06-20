@@ -22,6 +22,7 @@ import { sha256Hex } from '../lp/hash.js'
 import { resolveArtifactPath } from '../lp/paths.js'
 import type { LpEnvironment } from '../lp/publish.js'
 import { writeFileAtomic } from '../lp/publish.js'
+import type { BrandingOpaqueRegistry } from '../lp/registryCheck.js'
 import { signPayload, verifyPayload } from '../lp/signing.js'
 import {
   BRANDING_MANIFEST_ID_RE,
@@ -32,6 +33,7 @@ import {
   checkBrandingManifestConsistency,
   type BrandingManifestBuildResult,
   type BrandingOpaqueManifest,
+  type BrandingOpaqueManifestEntry,
 } from './manifest.js'
 
 const MANIFESTS_SUBDIR = 'branding-opaque/manifests'
@@ -221,15 +223,27 @@ export interface ValidateBrandingManifestResult {
   readonly entryCount?: number
 }
 
+export interface ReadValidatedBrandingManifestResult {
+  readonly ok: boolean
+  readonly errors: string[]
+  readonly manifestId?: string
+  readonly version?: number
+  readonly entryCount?: number
+  /** The parsed manifest — present whenever the manifest itself parsed. */
+  readonly manifest?: BrandingOpaqueManifest
+}
+
 /**
  * Read a pointer + its manifest and verify everything fail-closed: pointer
  * schema + signature, manifest schema + signature, manifest sha256 matches
  * the pointer, pointer/manifest ids agree, entry count agrees, and the
- * entry-consistency guards hold. Does NOT need the opaque-ref secret.
+ * entry-consistency guards hold. Does NOT need the opaque-ref secret. Returns
+ * the parsed manifest so callers (e.g. the LP bundle parity check) can build a
+ * registry from its entries only AFTER it validated.
  */
-export function validateBrandingOpaqueManifest(
+export function readValidatedBrandingOpaqueManifest(
   opts: ValidateBrandingManifestOptions,
-): ValidateBrandingManifestResult {
+): ReadValidatedBrandingManifestResult {
   const errors: string[] = []
   const pointerPath =
     opts.pointerPath ??
@@ -309,5 +323,78 @@ export function validateBrandingOpaqueManifest(
     manifestId: pointer.manifest_id,
     version: pointer.version,
     entryCount: pointer.entry_count,
+    manifest,
+  }
+}
+
+/**
+ * Backwards-compatible thin wrapper: validate a published branding manifest
+ * and return only the pass/fail summary (no parsed manifest). Used by the
+ * `branding-opaque-manifest validate` CLI.
+ */
+export function validateBrandingOpaqueManifest(
+  opts: ValidateBrandingManifestOptions,
+): ValidateBrandingManifestResult {
+  const { manifest: _manifest, ...summary } = readValidatedBrandingOpaqueManifest(opts)
+  return summary
+}
+
+/**
+ * Build the LP-bundle parity registry (site -> set of opaque refs) from
+ * validated manifest entries. Pure; the caller is responsible for having
+ * validated the manifest first (use `loadBrandingOpaqueRegistry`).
+ */
+export function buildBrandingOpaqueRegistry(
+  entries: readonly BrandingOpaqueManifestEntry[],
+): BrandingOpaqueRegistry {
+  const bySite = new Map<string, Set<string>>()
+  for (const e of entries) {
+    let set = bySite.get(e.site_key)
+    if (set === undefined) {
+      set = new Set<string>()
+      bySite.set(e.site_key, set)
+    }
+    set.add(e.opaque_ref)
+  }
+  return { bySite }
+}
+
+export interface LoadBrandingRegistryResult {
+  readonly ok: boolean
+  readonly errors: string[]
+  /** Present only when the manifest validated fail-closed. */
+  readonly registry?: BrandingOpaqueRegistry
+  readonly manifestId?: string
+  readonly version?: number
+  readonly entryCount?: number
+}
+
+/**
+ * Read + fail-closed validate the published branding manifest, then build the
+ * LP-bundle parity registry from its entries. Never trusts an unsigned/corrupt
+ * manifest: if validation fails, `registry` is undefined and `errors` explains
+ * why (so the LP publish path can refuse to emit branding refs it can't prove
+ * mss will serve).
+ */
+export function loadBrandingOpaqueRegistry(
+  opts: ValidateBrandingManifestOptions,
+): LoadBrandingRegistryResult {
+  const read = readValidatedBrandingOpaqueManifest(opts)
+  if (!read.ok || read.manifest === undefined) {
+    return {
+      ok: false,
+      errors: read.errors,
+      manifestId: read.manifestId,
+      version: read.version,
+      entryCount: read.entryCount,
+    }
+  }
+  return {
+    ok: true,
+    errors: [],
+    registry: buildBrandingOpaqueRegistry(read.manifest.entries),
+    manifestId: read.manifestId,
+    version: read.version,
+    entryCount: read.entryCount,
   }
 }

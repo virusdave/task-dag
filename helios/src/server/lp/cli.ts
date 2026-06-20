@@ -18,6 +18,17 @@
 //   tsx src/server/lp/cli.ts validate --root /cloud/lp --env prod \
 //       --pubkey ./signing.pub.pem --renderer 0.4.0 [--active 4411]
 //
+// Branding-opaque parity (automation#48 P3): when a bundle emits a
+// `branding` SLUG (a kill-list slug for purpose `branding`, or a
+// branding-family policy `cluster_slug`), pass `--branding-pubkey <pem>`
+// (and optionally `--branding-env` / `--branding-pointer`) to any of
+// publish / publish-candidate / promote-candidate / rollback / validate.
+// The CLI then loads the published branding manifest from
+// `<root>/branding-opaque/<env>/current.json`, fail-closed, and the
+// compile/validate parity check refuses to sign a branding ref the mss
+// branding registry cannot serve. A branding ref emitted WITHOUT this
+// flag fails closed.
+//
 // `publish-candidate` is the P5 operator-approval entrypoint: it builds
 // + validates a candidate bundle from approved content and writes a
 // candidate pointer ONLY — it never swaps the live current.json. The
@@ -35,6 +46,8 @@ import { readFileSync } from 'node:fs'
 import { pathToFileURL } from 'node:url'
 
 import { compileBundle, CompileError, type CompileInput } from './compile.js'
+import type { BrandingOpaqueRegistry } from './registryCheck.js'
+import { loadBrandingOpaqueRegistry } from '../branding/publish.js'
 import { generateEd25519Pem, publicKeyPemFromPrivate } from './signing.js'
 import { publishBundle, type LpEnvironment } from './publish.js'
 import { publishApprovedContentCandidate } from './publishCandidate.js'
@@ -77,6 +90,45 @@ function requireFlag(args: Args, name: string): string {
   return v
 }
 
+/**
+ * Load the branding-opaque parity registry when `--branding-pubkey` is given
+ * (the ed25519 public key the branding manifest is signed with — typically the
+ * same key as the LP bundle). The registry is read fail-closed from
+ * `<root>/branding-opaque/<env>/current.json` (override with `--branding-env`
+ * or `--branding-pointer`); a load failure THROWS so a bundle that needs the
+ * parity check never publishes against a missing/corrupt registry.
+ *
+ * When the flag is absent the registry is `undefined`; that is fine for bundles
+ * with no `branding` refs, and the parity check itself fails closed if a
+ * branding ref IS emitted without a registry (see `checkBrandingRefParity`).
+ */
+function maybeLoadBrandingRegistry(
+  args: Args,
+  root: string,
+  environment: string | undefined,
+): BrandingOpaqueRegistry | undefined {
+  const pubkeyPath = args.flags['branding-pubkey']
+  if (pubkeyPath === undefined) return undefined
+  const publicKeyPem = readFileSync(pubkeyPath, 'utf8')
+  const loaded = loadBrandingOpaqueRegistry({
+    artifactRoot: root,
+    environment: args.flags['branding-env'] ?? environment,
+    pointerPath: args.flags['branding-pointer'],
+    publicKeyPem,
+  })
+  if (!loaded.ok || loaded.registry === undefined) {
+    throw new Error(
+      `failed to load the branding-opaque registry (required for the branding ` +
+        `parity check):\n  - ${loaded.errors.join('\n  - ')}`,
+    )
+  }
+  process.stdout.write(
+    `  branding registry: ${loaded.manifestId ?? '?'} v${loaded.version ?? 0} ` +
+      `(${loaded.entryCount ?? 0} entries)\n`,
+  )
+  return loaded.registry
+}
+
 const ENVIRONMENTS: readonly LpEnvironment[] = ['prod', 'preview', 'staging', 'nonprod']
 
 function asEnvironment(v: string): LpEnvironment {
@@ -113,6 +165,8 @@ function cmdPublish(args: Args): number {
     previousBundleId?: string
   }
 
+  const brandingRegistry = maybeLoadBrandingRegistry(args, root, environment)
+
   const compiled = compileBundle({
     sites: cfg.sites as never,
     families: cfg.families as never,
@@ -120,6 +174,7 @@ function cmdPublish(args: Args): number {
     variants: cfg.variants as never,
     policy: cfg.policy as never,
     disabledVariants: cfg.disabledVariants as never,
+    brandingRegistry,
   })
 
   const result = publishBundle({
@@ -155,6 +210,7 @@ function cmdPublish(args: Args): number {
     pointerPath: result.pointerPath,
     publicKeyPem,
     runningRendererVersion: args.flags['verify-renderer'] ?? '999.0.0',
+    brandingRegistry,
   })
   if (!v.ok) {
     process.stderr.write(`SELF-VALIDATION FAILED:\n  - ${v.errors.join('\n  - ')}\n`)
@@ -197,6 +253,8 @@ function cmdPublishCandidate(args: Args): number {
     previousBundleId?: string
   }
 
+  const brandingRegistry = maybeLoadBrandingRegistry(args, root, environment)
+
   const approvedContent: CompileInput = {
     sites: cfg.sites as never,
     families: cfg.families as never,
@@ -204,6 +262,7 @@ function cmdPublishCandidate(args: Args): number {
     variants: cfg.variants as never,
     policy: cfg.policy as never,
     disabledVariants: cfg.disabledVariants as never,
+    brandingRegistry,
   }
 
   const result = publishApprovedContentCandidate({
@@ -260,6 +319,7 @@ function cmdPromoteCandidate(args: Args): number {
     publicKeyPem,
     runningRendererVersion,
     allowVersionRebase: args.bools.has('allow-version-rebase'),
+    brandingRegistry: maybeLoadBrandingRegistry(args, root, environment),
   })
 
   if (!result.ok) {
@@ -291,6 +351,7 @@ function cmdRollback(args: Args): number {
     privateKeyPem,
     publicKeyPem,
     runningRendererVersion,
+    brandingRegistry: maybeLoadBrandingRegistry(args, root, environment),
   })
 
   if (!result.ok) {
@@ -314,6 +375,7 @@ function cmdValidate(args: Args): number {
     publicKeyPem,
     runningRendererVersion: args.flags.renderer ?? '0.0.0',
     activeVersion: args.flags.active ? Number.parseInt(args.flags.active, 10) : undefined,
+    brandingRegistry: maybeLoadBrandingRegistry(args, root, args.flags.env),
   })
   if (result.ok) {
     process.stdout.write(`VALID ${result.bundleId} v${result.version}\n`)

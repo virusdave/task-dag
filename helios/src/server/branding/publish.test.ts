@@ -8,6 +8,8 @@ import { generateEd25519Pem } from '../lp/signing.js'
 import { buildBrandingOpaqueManifest, type BrandPresenceRow } from './manifest.js'
 import { nonProductionFallbackPublicTokenSecret } from './opaqueRef.js'
 import {
+  buildBrandingOpaqueRegistry,
+  loadBrandingOpaqueRegistry,
   newBrandingManifestId,
   publishBrandingOpaqueManifest,
   readBrandingPointerVersion,
@@ -120,5 +122,77 @@ describe('publish + validate roundtrip', () => {
     })
     expect(v.ok).toBe(false)
     expect(v.errors.some((e) => e.includes('sha256'))).toBe(true)
+  })
+})
+
+describe('buildBrandingOpaqueRegistry', () => {
+  it('groups opaque refs by site_key', () => {
+    const reg = buildBrandingOpaqueRegistry([
+      { site_key: 'bronx', literal_slug: 'herb', sweed_brand_id: 1234, opaque_ref: 'h78SFgtcQNLHNzKo37r1' },
+      { site_key: 'midtown', literal_slug: 'cannaballs', sweed_brand_id: 42, opaque_ref: '-NjvyVs1MrN2lrEA71Vv' },
+      { site_key: 'bronx', literal_slug: 'other', sweed_brand_id: 1, opaque_ref: '43HM0632radpVvEdiYWj' },
+    ])
+    expect(reg.bySite.get('bronx')).toEqual(new Set(['h78SFgtcQNLHNzKo37r1', '43HM0632radpVvEdiYWj']))
+    expect(reg.bySite.get('midtown')).toEqual(new Set(['-NjvyVs1MrN2lrEA71Vv']))
+    expect(reg.bySite.has('queens')).toBe(false)
+  })
+})
+
+describe('loadBrandingOpaqueRegistry', () => {
+  let root: string
+  const keys = generateEd25519Pem()
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), 'branding-opaque-load-'))
+  })
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true })
+  })
+
+  it('loads a registry from a validated published manifest', () => {
+    publishBrandingOpaqueManifest({
+      buildResult: buildResult(),
+      privateKeyPem: keys.privateKeyPem,
+      artifactRoot: root,
+      environment: 'nonprod',
+      automationGitSha: 'abc1234',
+    })
+    const loaded = loadBrandingOpaqueRegistry({
+      artifactRoot: root,
+      environment: 'nonprod',
+      publicKeyPem: keys.publicKeyPem,
+    })
+    expect(loaded.ok).toBe(true)
+    expect(loaded.entryCount).toBe(2)
+    expect(loaded.registry?.bySite.get('bronx')?.has('h78SFgtcQNLHNzKo37r1')).toBe(true)
+    expect(loaded.registry?.bySite.get('midtown')?.has('-NjvyVs1MrN2lrEA71Vv')).toBe(true)
+  })
+
+  it('fails closed (no registry) when the manifest does not validate', () => {
+    publishBrandingOpaqueManifest({
+      buildResult: buildResult(),
+      privateKeyPem: keys.privateKeyPem,
+      artifactRoot: root,
+      environment: 'nonprod',
+      automationGitSha: 'abc1234',
+    })
+    const loaded = loadBrandingOpaqueRegistry({
+      artifactRoot: root,
+      environment: 'nonprod',
+      publicKeyPem: generateEd25519Pem().publicKeyPem, // wrong key
+    })
+    expect(loaded.ok).toBe(false)
+    expect(loaded.registry).toBeUndefined()
+    expect(loaded.errors.some((e) => e.includes('signature'))).toBe(true)
+  })
+
+  it('fails closed when there is no published manifest', () => {
+    const loaded = loadBrandingOpaqueRegistry({
+      artifactRoot: root,
+      environment: 'nonprod',
+      publicKeyPem: keys.publicKeyPem,
+    })
+    expect(loaded.ok).toBe(false)
+    expect(loaded.registry).toBeUndefined()
   })
 })
