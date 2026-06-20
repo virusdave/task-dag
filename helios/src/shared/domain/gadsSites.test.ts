@@ -3,13 +3,16 @@ import { describe, expect, it } from 'vitest'
 import type { MetricGrantKey, SessionUser } from '../contracts/domain/auth.js'
 import { userHasAnyMetricGrant } from './metricGrants.js'
 import {
+  GADS_IMPLEMENTED_SUBPAGES,
   GADS_RESERVED_SUBPAGES,
   GADS_SCOPES,
   gadsScopeLabel,
+  gadsSubPageLabel,
   isGadsScope,
   mapGeoToGadsSite,
   requiredGadsGrants,
   type GadsScope,
+  type GadsSubPage,
 } from './gadsSites.js'
 
 describe('isGadsScope', () => {
@@ -57,6 +60,33 @@ describe('GADS_RESERVED_SUBPAGES', () => {
     expect(GADS_RESERVED_SUBPAGES).toContain('campaigns')
     expect(GADS_RESERVED_SUBPAGES).toContain('evolution')
     expect(GADS_RESERVED_SUBPAGES).toContain('iteration')
+  })
+})
+
+describe('GADS_IMPLEMENTED_SUBPAGES', () => {
+  it('renders landing-pages and the P4 evolution page', () => {
+    expect(GADS_IMPLEMENTED_SUBPAGES).toContain('landing-pages')
+    expect(GADS_IMPLEMENTED_SUBPAGES).toContain('evolution')
+  })
+
+  it('only lists slugs that are also reserved IA (no nav→404 link)', () => {
+    for (const slug of GADS_IMPLEMENTED_SUBPAGES) {
+      expect(GADS_RESERVED_SUBPAGES).toContain(slug)
+    }
+  })
+})
+
+describe('gadsSubPageLabel', () => {
+  it('labels every reserved sub-page slug (exhaustive, no fallthrough)', () => {
+    for (const slug of GADS_RESERVED_SUBPAGES) {
+      const label = gadsSubPageLabel(slug as GadsSubPage)
+      expect(label.length).toBeGreaterThan(0)
+    }
+  })
+
+  it('uses readable copy for the implemented pages', () => {
+    expect(gadsSubPageLabel('landing-pages')).toBe('Landing pages')
+    expect(gadsSubPageLabel('evolution')).toBe('Evolution')
   })
 })
 

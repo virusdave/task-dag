@@ -10080,6 +10080,191 @@ span.metric-chart-legend-item {
 }
 
 /* ===========================================================================
+   GAds · Evolution sub-page (automation#51 P4)
+   The priority "how Helios reacted" screen. Reuses the gads-lp-* status
+   strip, KPI strip, pills, and table styles; adds a sub-page nav, the
+   learning-heartbeat hero, a centred-baseline weekly sparkline, and a
+   warn-styled KPI variant. Mobile-first: hero stacks, sparkline scrolls
+   horizontally inside its own box.
+   =========================================================================== */
+
+.gads-subnav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+
+.gads-subnav-link {
+  font-size: 0.8rem;
+  font-weight: 600;
+  padding: 5px 12px;
+  border-radius: 999px;
+  border: 1px solid #d3dae4;
+  background: #f4f7fb;
+  color: #3a455c;
+  text-decoration: none;
+}
+
+.gads-subnav-link:hover,
+.gads-subnav-link:focus-visible {
+  border-color: #b9c3d2;
+  background: #eaf0f8;
+}
+
+.gads-subnav-link.is-active {
+  background: #2a3550;
+  border-color: #2a3550;
+  color: #fff;
+}
+
+.gads-lp-kpi.is-warn {
+  background: #fff7ee;
+  border-color: #e6c388;
+}
+
+.gads-ev-kpi-hint {
+  font-size: 0.7rem;
+  margin-top: 2px;
+}
+
+/* ---------- Learning heartbeat hero ---------- */
+
+.gads-ev-hero {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: stretch;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 16px;
+  background: #f4f7fb;
+  border: 1px solid #d8dde6;
+  border-radius: 6px;
+}
+
+.gads-ev-hero-main {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 220px;
+  flex: 1 1 260px;
+}
+
+.gads-ev-hero-score {
+  font-size: 2.2rem;
+  font-weight: 700;
+  line-height: 1.1;
+  color: #1d2940;
+  font-variant-numeric: tabular-nums;
+}
+
+.gads-ev-hero-badges {
+  margin-top: 4px;
+}
+
+.gads-ev-hero-delta {
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.gads-ev-hero-delta.is-up {
+  color: #1a7f4b;
+}
+
+.gads-ev-hero-delta.is-down {
+  color: #b4233a;
+}
+
+/* ---------- Weekly heartbeat sparkline (centred baseline) ---------- */
+
+.gads-ev-spark-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1 1 220px;
+  min-width: 180px;
+  max-width: 360px;
+}
+
+.gads-ev-spark-caption {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.gads-ev-spark {
+  display: flex;
+  align-items: stretch;
+  gap: 3px;
+  height: 88px;
+  overflow-x: auto;
+  padding: 4px 2px;
+}
+
+.gads-ev-spark-empty {
+  align-items: center;
+  justify-content: center;
+}
+
+.gads-ev-spark-col {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  flex: 1 0 8px;
+  min-width: 8px;
+}
+
+.gads-ev-spark-top,
+.gads-ev-spark-bottom {
+  flex: 1 1 50%;
+  display: flex;
+  align-items: flex-end;
+}
+
+.gads-ev-spark-bottom {
+  align-items: flex-start;
+}
+
+.gads-ev-spark-axis {
+  height: 1px;
+  background: #c4ccd8;
+}
+
+.gads-ev-spark-bar {
+  width: 100%;
+  border-radius: 2px;
+}
+
+.gads-ev-spark-bar.is-pos {
+  background: #2f9e63;
+}
+
+.gads-ev-spark-bar.is-neg {
+  background: #d2604f;
+}
+
+.gads-ev-flags {
+  margin-bottom: 6px;
+}
+
+@media (max-width: 640px) {
+  .gads-ev-hero {
+    flex-direction: column;
+  }
+
+  .gads-ev-spark-wrap {
+    max-width: none;
+  }
+
+  .gads-subnav-link {
+    flex: 1 1 0;
+    min-height: 44px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+}
+
+/* ===========================================================================
  * Operations · Tasks (frontier / epics / detail)
  * Git-DAG task surfaces. Mobile-first: single column, generous tap targets,
  * collapsible issue groups. See helios/src/client/routes/tasks/.

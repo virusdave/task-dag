@@ -22,6 +22,7 @@ import {
   GADS_DEFAULT_SUBPAGE,
   GADS_IMPLEMENTED_SUBPAGES,
   GADS_RESERVED_SUBPAGES,
+  gadsSubPageLabel,
   requiredGadsGrants,
   type GadsScope,
   type GadsSubPage,
@@ -38,6 +39,7 @@ import {
 } from '../../app/nyTime.js'
 
 import { BudtenderPerformanceTab } from './BudtenderPerformanceTab.js'
+import { GAdsEvolutionTab } from './GAdsEvolutionTab.js'
 import { GAdsLandingPagesTab } from './GAdsLandingPagesTab.js'
 import {
   CatalogAnalyticsTab,
@@ -261,29 +263,65 @@ function userCanSeeMetricsTab(
   return userHasAnyMetricGrant(user, tab.grantAnyOf ?? [tab.grant])
 }
 
+/** In-tab nav between the GAds sub-pages that actually render today
+ *  (landing-pages, evolution). Reserved-but-unbuilt slugs are not linked
+ *  here — they still resolve to a coming-soon panel by direct URL. */
+function GAdsSubPageNav({
+  tabId,
+  activeSlug,
+}: {
+  tabId: MetricsTabId
+  activeSlug: GadsSubPage
+}): JSX.Element {
+  return (
+    <nav className="gads-subnav" aria-label="GAds sub-pages">
+      {GADS_IMPLEMENTED_SUBPAGES.map((slug) => (
+        <NavLink
+          key={slug}
+          to={`/metrics/${tabId}/${slug}`}
+          className={slug === activeSlug ? 'gads-subnav-link is-active' : 'gads-subnav-link'}
+          aria-current={slug === activeSlug ? 'page' : undefined}
+        >
+          {gadsSubPageLabel(slug)}
+        </NavLink>
+      ))}
+    </nav>
+  )
+}
+
 /**
- * Resolves the GAds `:subpage` URL segment to a rendered sub-page.
- * V1 implements only "landing-pages"; a reserved-but-unbuilt slug
+ * Resolves the GAds `:subpage` URL segment to a rendered sub-page. Today
+ * "landing-pages" and "evolution" render; a reserved-but-unbuilt slug
  * renders a coming-soon panel, and an unknown slug a not-found note
  * (never silently defaults to a different confidential page).
  */
 function GAdsTabRouter({
+  tabId,
   scope,
   subpage,
 }: {
+  tabId: MetricsTabId
   scope: GadsScope
   subpage: string | undefined
 }): JSX.Element {
   const slug = (subpage ?? GADS_DEFAULT_SUBPAGE) as GadsSubPage
   if (GADS_IMPLEMENTED_SUBPAGES.includes(slug)) {
-    return <GAdsLandingPagesTab scope={scope} />
+    return (
+      <>
+        <GAdsSubPageNav tabId={tabId} activeSlug={slug} />
+        {slug === 'evolution' ? (
+          <GAdsEvolutionTab scope={scope} />
+        ) : (
+          <GAdsLandingPagesTab scope={scope} />
+        )}
+      </>
+    )
   }
   if (GADS_RESERVED_SUBPAGES.includes(slug)) {
     return (
       <section className="gads-lp-tab">
         <p className="subtle-copy">
-          The GAds &ldquo;{slug}&rdquo; sub-page is reserved but not built yet. Landing pages is the
-          only sub-page available today.
+          The GAds &ldquo;{slug}&rdquo; sub-page is reserved but not built yet.
         </p>
       </section>
     )
@@ -914,7 +952,7 @@ export function MetricsLayoutPage() {
           // site scope; the :subpage segment selects the sub-page (V1
           // implements only "landing-pages"; reserved slugs render a
           // coming-soon panel, unknown slugs a not-found note).
-          <GAdsTabRouter scope={GADS_TAB_SCOPES[activeTab.id]!} subpage={subpage} />
+          <GAdsTabRouter tabId={activeTab.id} scope={GADS_TAB_SCOPES[activeTab.id]!} subpage={subpage} />
         ) : activeTab.id === 'catalog' ? (
           // Catalog analytics has its own filter bar + scatter grid and does
           // not share the time-series toolbar (sites / agg / stack / range).

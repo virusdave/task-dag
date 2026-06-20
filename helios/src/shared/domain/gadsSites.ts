@@ -125,11 +125,37 @@ export type GadsSubPage =
   | 'evolution'
   | 'iteration'
 
-/** The only sub-page implemented in V1. */
+/** The default sub-page (the GAds tab lands here). */
 export const GADS_DEFAULT_SUBPAGE: GadsSubPage = 'landing-pages'
 
-/** Sub-pages that actually render in V1 (others are reserved IA). */
-export const GADS_IMPLEMENTED_SUBPAGES: ReadonlyArray<GadsSubPage> = ['landing-pages']
+/** Sub-pages that actually render today (others are reserved IA).
+ *  Order is the in-tab sub-nav order. */
+export const GADS_IMPLEMENTED_SUBPAGES: ReadonlyArray<GadsSubPage> = [
+  'landing-pages',
+  'evolution',
+]
+
+/** Short human label for a sub-page slug (in-tab sub-nav + headings). */
+export function gadsSubPageLabel(subpage: GadsSubPage): string {
+  switch (subpage) {
+    case 'landing-pages':
+      return 'Landing pages'
+    case 'campaigns':
+      return 'Campaigns'
+    case 'creative':
+      return 'Creative'
+    case 'keywords':
+      return 'Keywords'
+    case 'policy-health':
+      return 'Policy health'
+    case 'experiments':
+      return 'Experiments'
+    case 'evolution':
+      return 'Evolution'
+    case 'iteration':
+      return 'Iteration'
+  }
+}
 
 /** All reserved sub-page slugs (implemented + future), for the route
  *  validator so an unknown slug 404s instead of silently defaulting
