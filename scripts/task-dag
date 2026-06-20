@@ -100,11 +100,19 @@ get_dep_parents() {
 # of an unrelated commit's parent and (b) silently widen to any commit
 # mentioning the sha. We walk each commit's parent list and require an
 # exact whole-token match.
+#
+# IMPORTANT: awk must NOT `exit` on the first match. Under `set -o
+# pipefail`, an early awk exit closes the pipe while `git log` is still
+# writing, killing it with SIGPIPE (exit 141); pipefail then makes the
+# whole pipeline return 141, so a task that IS completed (and is matched
+# on the very first line — e.g. HEAD's own 2nd parent) would be reported
+# NOT completed intermittently (a real dispatch/epic-close correctness
+# bug). Scanning the full stream keeps the producer's exit status 0.
 is_task_completed() {
     local task_sha="$1"
     git log HEAD --format='%P' 2>/dev/null |
         awk -v sha="$task_sha" '
-            { for (i = 1; i <= NF; i++) if ($i == sha) { found = 1; exit } }
+            { for (i = 1; i <= NF; i++) if ($i == sha) found = 1 }
             END { exit found ? 0 : 1 }
         '
 }
@@ -315,6 +323,24 @@ Note: ${note}"
 # caches (no fetch, no local-ref shortcut). Empty string = absent.
 remote_ref_sha() {
     git ls-remote origin "$1" 2>/dev/null | awk '{print $1; exit}'
+}
+
+# Helper: tri-state remote ref lookup so safety-critical callers can FAIL
+# CLOSED on an indeterminate (transport/auth) error instead of mistaking a
+# transient failure for "ref absent". Mirrors pending_sha_on_remote_checked.
+# Echoes the SHA on success.
+#   rc 0 + SHA  -> ref exists on origin
+#   rc 2        -> ref cleanly absent
+#   rc 3        -> origin unreachable / error (indeterminate)
+remote_ref_sha_checked() {
+    local out rc
+    out=$(git ls-remote --exit-code origin "$1" 2>/dev/null)
+    rc=$?
+    case "$rc" in
+        0) printf '%s\n' "$out" | awk '{print $1; exit}'; return 0 ;;
+        2) return 2 ;;   # exit-code 2: ref not found
+        *) return 3 ;;   # transport/auth/other
+    esac
 }
 
 # Helper: SHA of tasks/pending/<N> on origin (epic-root identity).
@@ -1026,6 +1052,12 @@ COMMANDS:
     deps <sha>             Show task dependencies
     breakdown <parent>     Create task breakdown
     complete <sha>         Mark task as complete
+    complete-historical <sha> --commit=<historical-sha>
+                           ADMIN RECOVERY ONLY: retroactively link an
+                           already-landed historical commit on master to a
+                           task (for commits a worker missed linking),
+                           without rewriting master history. NOT for normal
+                           work — use 'complete' live. Pages the operator.
     block <sha>            Park a task: keep it in the DAG but stop workers
                            from picking it up (NOT closed). Use when stalled
                            awaiting operator/downstream input.
@@ -3269,6 +3301,207 @@ EOF
     return 0
 }
 
+# Helper: honour the cross-host active-claim mutex before landing a
+# completion. Extracted from cmd_complete so BOTH `complete` and
+# `complete-historical` enforce the SAME "do not complete a task another
+# live worker holds" guard. The claim CAS on origin is the cross-host
+# mutex; we record the EXACT active-claim SHA we authorise so the ref
+# cleanup deletes only THAT claim (never a concurrent worker's fresh one).
+#   $1 = task_sha (full)   $2 = short_sha   $3 = do_force (true|false)
+# Prints the authorised active-claim SHA (possibly empty) on stdout for
+# the cleanup step to lease against. All diagnostics go to stderr.
+# Returns 0 to proceed, 2 to refuse.
+verify_task_claim_ownership() {
+    local task_sha="$1" short_sha="$2" do_force="$3"
+    local verified_active_sha=""
+    # Tri-state read so a transport/auth failure FAILS CLOSED rather than
+    # masquerading as "unclaimed" (which would let us land work over a live
+    # claim we simply couldn't see). --force overrides a known foreign/dead
+    # claim, NOT an indeterminate read.
+    local active_remote_sha="" read_rc=0
+    active_remote_sha=$(remote_ref_sha_checked "refs/heads/tasks/active/$short_sha") || read_rc=$?
+    if [ "$read_rc" = 3 ]; then
+        echo "Error: cannot read tasks/active/$short_sha on origin (indeterminate transport/auth error); refusing to proceed without knowing the claim state. Retry when origin is reachable." >&2
+        return 2
+    fi
+    if [ -n "$active_remote_sha" ]; then
+        local tmp_active="refs/task-dag-tmp/complete-check/$short_sha"
+        git update-ref -d "$tmp_active" 2>/dev/null || true
+        if git fetch --quiet --no-tags origin \
+               "+refs/heads/tasks/active/$short_sha:$tmp_active" 2>/dev/null; then
+            local claim_msg claim_taskcommit claim_first_parent claimer claimer_host
+            # Each field is `|| true`-guarded: a malformed/legacy claim
+            # missing a field must NOT abort under `set -e` (that would
+            # both defeat the malformed-ref handling below and leak the
+            # temp ref). extract_field/get_first_parent grep internally.
+            claim_msg=$(parse_commit_metadata "$tmp_active" 2>/dev/null || true)
+            claim_taskcommit=$(extract_field "$claim_msg" "Task-Commit" 2>/dev/null || true)
+            claim_first_parent=$(get_first_parent "$tmp_active" 2>/dev/null || true)
+            claimer=$(extract_field "$claim_msg" "Claimer" 2>/dev/null || true)
+            claimer_host=$(extract_field "$claim_msg" "Claimer-Host" 2>/dev/null || true)
+            git update-ref -d "$tmp_active" 2>/dev/null || true
+
+            # Guard against short-SHA collision / malformed active refs:
+            # the claim must actually reference THIS task.
+            if [ "$claim_taskcommit" != "$task_sha" ] && \
+               [ "$claim_first_parent" != "$task_sha" ]; then
+                if [ "$do_force" = false ]; then
+                    echo "Error: tasks/active/$short_sha does not reference task $task_sha (Task-Commit=${claim_taskcommit:-?}). Refusing; rerun with --force only if you know it is safe." >&2
+                    return 2
+                fi
+            fi
+
+            local me_claimer me_host
+            me_claimer="${TASK_DAG_CLAIMER:-${USER:-unknown}}"
+            me_host="${TASK_DAG_CLAIMER_HOST:-$(hostname -s 2>/dev/null || echo unknown)}"
+            if [ "$claimer" = "$me_claimer" ] && [ "$claimer_host" = "$me_host" ]; then
+                verified_active_sha="$active_remote_sha"   # owned by us
+            elif [ "$do_force" = true ]; then
+                printf '%b\n' "${YELLOW}--force: completing task ${short_sha} claimed by ${claimer:-unknown}@${claimer_host:-unknown} (you are ${me_claimer}@${me_host}).${RESET}" >&2
+                verified_active_sha="$active_remote_sha"
+            else
+                echo "Error: task $short_sha is claimed by ${claimer:-unknown}@${claimer_host:-unknown}, not you (${me_claimer}@${me_host})." >&2
+                echo "Refusing to complete another worker's active task. Use --force only if that claim is dead." >&2
+                return 2
+            fi
+        else
+            # Fetch of the active claim failed; tmp ref was pre-deleted but
+            # clean up defensively in case a partial ref exists.
+            git update-ref -d "$tmp_active" 2>/dev/null || true
+            if [ "$do_force" = false ]; then
+                echo "Error: could not read active claim tasks/active/$short_sha for the ownership check. Rerun with --force to override." >&2
+                return 2
+            fi
+            verified_active_sha="$active_remote_sha"
+        fi
+    fi
+    printf '%s\n' "$verified_active_sha"
+    return 0
+}
+
+# Helper: CAS-clean a completed task's remote refs (frontier/active/
+# blocked/blocked-meta). Extracted from cmd_complete so BOTH `complete`
+# and `complete-historical` clean dispatch state identically. Every remote
+# delete is leased to the EXACT sha we verified, so a concurrent worker's
+# fresh claim/task can never be clobbered. Any lease mismatch (the remote
+# changed under us) is FATAL: the completion/link commit is already local,
+# but we must not leave the DAG in a state that can dispatch duplicate
+# work, so we stop (return 3) and let the caller resolve it before pushing.
+#   $1 = task_sha (full)   $2 = short_sha   $3 = verified_active_sha
+#   $4 = completion/link commit (for messages)   $5 = no_cleanup (true|false)
+# Sets the global TASK_DAG_COMPLETED_WAS_BLOCKED=true iff it cleared a
+# blocked overlay (so the caller can refresh the operator #29 dashboard).
+# Returns 0 on success, 3 on a fatal lease/race conflict.
+TASK_DAG_COMPLETED_WAS_BLOCKED=false
+cleanup_completed_task_refs() {
+    local task_sha="$1" short_sha="$2" verified_active_sha="$3" new_commit="$4" no_cleanup="$5"
+    TASK_DAG_COMPLETED_WAS_BLOCKED=false
+    [ "$no_cleanup" = false ] || return 0
+
+    local frontier_ref="refs/heads/tasks/frontier/$short_sha"
+    local active_ref="refs/heads/tasks/active/$short_sha"
+    local blocked_ref meta_ref
+    blocked_ref=$(blocked_ref_for "$task_sha")
+    meta_ref=$(blocked_meta_ref_for "$task_sha")
+
+    # Delete local refs (purely local bookkeeping; harmless if absent).
+    git update-ref -d "$frontier_ref" 2>/dev/null && echo "Deleted local $frontier_ref" || true
+    git update-ref -d "$active_ref" 2>/dev/null && echo "Deleted local $active_ref" || true
+    git update-ref -d "$blocked_ref" 2>/dev/null && echo "Deleted local $blocked_ref" || true
+    git update-ref -d "$meta_ref" 2>/dev/null && echo "Deleted local $meta_ref" || true
+
+    # ── CAS-clean remote refs ──────────────────────────────────────
+    local lease_args=() refspecs=()
+
+    # Active: delete only the claim authorised by the ownership guard,
+    # and only if it is still exactly that claim right now. Tri-state read:
+    # an indeterminate origin read is FATAL (return 3) — we must not report
+    # "cleaned" when we could not confirm the remote state.
+    local active_now="" active_rc=0
+    active_now=$(remote_ref_sha_checked "$active_ref") || active_rc=$?
+    if [ "$active_rc" = 3 ]; then
+        echo "Error: cannot read $active_ref on origin (indeterminate); not cleaning refs." >&2
+        echo "Completion commit is local ($new_commit); resolve task refs before pushing." >&2
+        return 3
+    fi
+    if [ -n "$verified_active_sha" ]; then
+        if [ "$active_now" != "$verified_active_sha" ]; then
+            echo "Error: active claim for $short_sha changed during completion (authorised $verified_active_sha, now ${active_now:-<gone>}). Not cleaning refs." >&2
+            echo "Completion commit is local ($new_commit); resolve the claim before pushing." >&2
+            return 3
+        fi
+        lease_args+=("--force-with-lease=$active_ref:$verified_active_sha")
+        refspecs+=(":$active_ref")
+    elif [ -n "$active_now" ]; then
+        # No claim at guard time, but one exists now → claimed mid-flight.
+        echo "Error: a new active claim ($active_now) appeared for $short_sha during completion. Not cleaning refs." >&2
+        echo "Completion commit is local ($new_commit); resolve the claim before pushing." >&2
+        return 3
+    fi
+
+    # Frontier: delete only if it still points at THIS task commit.
+    local frontier_now="" frontier_rc=0
+    frontier_now=$(remote_ref_sha_checked "$frontier_ref") || frontier_rc=$?
+    if [ "$frontier_rc" = 3 ]; then
+        echo "Error: cannot read $frontier_ref on origin (indeterminate); not cleaning refs." >&2
+        echo "Completion commit is local ($new_commit); resolve task refs before pushing." >&2
+        return 3
+    fi
+    if [ -n "$frontier_now" ]; then
+        if [ "$frontier_now" != "$task_sha" ]; then
+            echo "Error: tasks/frontier/$short_sha points at $frontier_now, not task $task_sha (possible short-SHA collision). Not deleting." >&2
+            return 3
+        fi
+        lease_args+=("--force-with-lease=$frontier_ref:$frontier_now")
+        refspecs+=(":$frontier_ref")
+    fi
+
+    # Blocked (full-SHA overlay ref): delete only if present at the task.
+    local blocked_now="" blocked_rc=0
+    blocked_now=$(remote_ref_sha_checked "$blocked_ref") || blocked_rc=$?
+    if [ "$blocked_rc" = 3 ]; then
+        echo "Error: cannot read $blocked_ref on origin (indeterminate); not cleaning refs." >&2
+        echo "Completion commit is local ($new_commit); resolve task refs before pushing." >&2
+        return 3
+    fi
+    if [ -n "$blocked_now" ]; then
+        if [ "$blocked_now" != "$task_sha" ]; then
+            echo "Error: $blocked_ref points at $blocked_now, not task $task_sha. Not deleting." >&2
+            return 3
+        fi
+        lease_args+=("--force-with-lease=$blocked_ref:$blocked_now")
+        refspecs+=(":$blocked_ref")
+        TASK_DAG_COMPLETED_WAS_BLOCKED=true
+    fi
+
+    # Blocked-meta (full-SHA side ref): a side-commit, not the task
+    # commit, so we lease to whatever it currently points at and just
+    # require it to be present. Completing a task clears its "why
+    # parked" metadata in lockstep with the overlay ref above.
+    local meta_now="" meta_rc=0
+    meta_now=$(remote_ref_sha_checked "$meta_ref") || meta_rc=$?
+    if [ "$meta_rc" = 3 ]; then
+        echo "Error: cannot read $meta_ref on origin (indeterminate); not cleaning refs." >&2
+        echo "Completion commit is local ($new_commit); resolve task refs before pushing." >&2
+        return 3
+    fi
+    if [ -n "$meta_now" ]; then
+        lease_args+=("--force-with-lease=$meta_ref:$meta_now")
+        refspecs+=(":$meta_ref")
+    fi
+
+    if [ "${#refspecs[@]}" -gt 0 ]; then
+        if git push --atomic origin "${lease_args[@]}" "${refspecs[@]}" >/dev/null 2>&1; then
+            echo "Cleaned remote task refs for $short_sha"
+        else
+            echo "Error: failed to CAS-clean remote task refs for $short_sha (a lease failed — remote changed under us)." >&2
+            echo "Completion commit is local ($new_commit); do NOT push until the task refs are resolved." >&2
+            return 3
+        fi
+    fi
+    return 0
+}
+
 # Command: complete - mark task as complete
 cmd_complete() {
     local task_sha=""
@@ -3382,65 +3615,12 @@ EOF
     short_sha=$(git rev-parse --short "$task_sha")
 
     # ── Ownership guard (do not complete a task another worker holds) ──
-    # The claim CAS is the cross-host mutex; honour it here so 'complete'
-    # can't land work over a live claim that isn't ours. We record the
-    # exact active claim SHA we authorise so the ref cleanup below deletes
-    # only THAT claim (never a concurrent worker's fresh one).
-    local verified_active_sha=""
-    local active_remote_sha
-    active_remote_sha=$(task_active_sha_on_remote "$short_sha")
-    if [ -n "$active_remote_sha" ]; then
-        local tmp_active="refs/task-dag-tmp/complete-check/$short_sha"
-        git update-ref -d "$tmp_active" 2>/dev/null || true
-        if git fetch --quiet --no-tags origin \
-               "+refs/heads/tasks/active/$short_sha:$tmp_active" 2>/dev/null; then
-            local claim_msg claim_taskcommit claim_first_parent claimer claimer_host
-            # Each field is `|| true`-guarded: a malformed/legacy claim
-            # missing a field must NOT abort under `set -e` (that would
-            # both defeat the malformed-ref handling below and leak the
-            # temp ref). extract_field/get_first_parent grep internally.
-            claim_msg=$(parse_commit_metadata "$tmp_active" 2>/dev/null || true)
-            claim_taskcommit=$(extract_field "$claim_msg" "Task-Commit" 2>/dev/null || true)
-            claim_first_parent=$(get_first_parent "$tmp_active" 2>/dev/null || true)
-            claimer=$(extract_field "$claim_msg" "Claimer" 2>/dev/null || true)
-            claimer_host=$(extract_field "$claim_msg" "Claimer-Host" 2>/dev/null || true)
-            git update-ref -d "$tmp_active" 2>/dev/null || true
+    # Honour the cross-host active-claim mutex (shared with
+    # complete-historical). Echoes the authorised active-claim SHA for the
+    # cleanup step; returns 2 (propagated) to refuse on a foreign claim.
+    local verified_active_sha
+    verified_active_sha=$(verify_task_claim_ownership "$task_sha" "$short_sha" "$do_force") || return $?
 
-            # Guard against short-SHA collision / malformed active refs:
-            # the claim must actually reference THIS task.
-            if [ "$claim_taskcommit" != "$task_sha" ] && \
-               [ "$claim_first_parent" != "$task_sha" ]; then
-                if [ "$do_force" = false ]; then
-                    echo "Error: tasks/active/$short_sha does not reference task $task_sha (Task-Commit=${claim_taskcommit:-?}). Refusing; rerun with --force only if you know it is safe." >&2
-                    return 2
-                fi
-            fi
-
-            local me_claimer me_host
-            me_claimer="${TASK_DAG_CLAIMER:-${USER:-unknown}}"
-            me_host="${TASK_DAG_CLAIMER_HOST:-$(hostname -s 2>/dev/null || echo unknown)}"
-            if [ "$claimer" = "$me_claimer" ] && [ "$claimer_host" = "$me_host" ]; then
-                verified_active_sha="$active_remote_sha"   # owned by us
-            elif [ "$do_force" = true ]; then
-                printf '%b\n' "${YELLOW}--force: completing task ${short_sha} claimed by ${claimer:-unknown}@${claimer_host:-unknown} (you are ${me_claimer}@${me_host}).${RESET}" >&2
-                verified_active_sha="$active_remote_sha"
-            else
-                echo "Error: task $short_sha is claimed by ${claimer:-unknown}@${claimer_host:-unknown}, not you (${me_claimer}@${me_host})." >&2
-                echo "Refusing to complete another worker's active task. Use --force only if that claim is dead." >&2
-                return 2
-            fi
-        else
-            # Fetch of the active claim failed; tmp ref was pre-deleted but
-            # clean up defensively in case a partial ref exists.
-            git update-ref -d "$tmp_active" 2>/dev/null || true
-            if [ "$do_force" = false ]; then
-                echo "Error: could not read active claim tasks/active/$short_sha for the ownership check. Rerun with --force to override." >&2
-                return 2
-            fi
-            verified_active_sha="$active_remote_sha"
-        fi
-    fi
-    
     # Get current commit details
     local tree=$(git rev-parse "$commit_sha^{tree}")
     local old_message=$(git log -1 --format='%B' "$commit_sha")
@@ -3520,104 +3700,15 @@ Related: $issue_url"
     # wipe uncommitted work in the caller's cwd peer worktree).
     advance_head_to_completion "$commit_sha" "$new_commit" || return 1
     
-    # Whether this completion actually cleared an operator/downstream block
-    # (drives the #29 dashboard refresh below; most completes are of
-    # never-blocked tasks and must not churn the dashboard).
-    local completed_was_blocked=false
+    # Clean up dispatch refs (frontier/active/blocked/blocked-meta) with
+    # the same CAS discipline used by complete-historical. Sets
+    # TASK_DAG_COMPLETED_WAS_BLOCKED iff it cleared a block.
+    cleanup_completed_task_refs "$task_sha" "$short_sha" "$verified_active_sha" "$new_commit" "$no_cleanup" || return $?
 
-    # Clean up refs unless --no-cleanup
-    if [ "$no_cleanup" = false ]; then
-        local frontier_ref="refs/heads/tasks/frontier/$short_sha"
-        local active_ref="refs/heads/tasks/active/$short_sha"
-        local blocked_ref meta_ref
-        blocked_ref=$(blocked_ref_for "$task_sha")
-        meta_ref=$(blocked_meta_ref_for "$task_sha")
-
-        # Delete local refs (purely local bookkeeping; harmless if absent).
-        git update-ref -d "$frontier_ref" 2>/dev/null && echo "Deleted local $frontier_ref" || true
-        git update-ref -d "$active_ref" 2>/dev/null && echo "Deleted local $active_ref" || true
-        git update-ref -d "$blocked_ref" 2>/dev/null && echo "Deleted local $blocked_ref" || true
-        git update-ref -d "$meta_ref" 2>/dev/null && echo "Deleted local $meta_ref" || true
-
-        # ── CAS-clean remote refs ──────────────────────────────────────
-        # Every remote delete is leased to the EXACT sha we verified, so a
-        # concurrent worker's fresh claim/task can never be clobbered. Any
-        # lease mismatch (the remote changed under us) is FATAL: the
-        # completion commit is already local, but we must not leave the DAG
-        # in a state that can dispatch duplicate work, so we stop and let
-        # the caller resolve it before pushing master.
-        local lease_args=() refspecs=()
-
-        # Active: delete only the claim authorised by the ownership guard,
-        # and only if it is still exactly that claim right now.
-        local active_now
-        active_now=$(task_active_sha_on_remote "$short_sha")
-        if [ -n "$verified_active_sha" ]; then
-            if [ "$active_now" != "$verified_active_sha" ]; then
-                echo "Error: active claim for $short_sha changed during completion (authorised $verified_active_sha, now ${active_now:-<gone>}). Not cleaning refs." >&2
-                echo "Completion commit is local ($new_commit); resolve the claim before pushing." >&2
-                return 3
-            fi
-            lease_args+=("--force-with-lease=$active_ref:$verified_active_sha")
-            refspecs+=(":$active_ref")
-        elif [ -n "$active_now" ]; then
-            # No claim at guard time, but one exists now → claimed mid-flight.
-            echo "Error: a new active claim ($active_now) appeared for $short_sha during completion. Not cleaning refs." >&2
-            echo "Completion commit is local ($new_commit); resolve the claim before pushing." >&2
-            return 3
-        fi
-
-        # Frontier: delete only if it still points at THIS task commit.
-        local frontier_now
-        frontier_now=$(task_frontier_on_remote "$short_sha")
-        if [ -n "$frontier_now" ]; then
-            if [ "$frontier_now" != "$task_sha" ]; then
-                echo "Error: tasks/frontier/$short_sha points at $frontier_now, not task $task_sha (possible short-SHA collision). Not deleting." >&2
-                return 3
-            fi
-            lease_args+=("--force-with-lease=$frontier_ref:$frontier_now")
-            refspecs+=(":$frontier_ref")
-        fi
-
-        # Blocked (full-SHA overlay ref): delete only if present at the task.
-        local blocked_now
-        blocked_now=$(git ls-remote origin "$blocked_ref" 2>/dev/null | awk '{print $1; exit}')
-        if [ -n "$blocked_now" ]; then
-            if [ "$blocked_now" != "$task_sha" ]; then
-                echo "Error: $blocked_ref points at $blocked_now, not task $task_sha. Not deleting." >&2
-                return 3
-            fi
-            lease_args+=("--force-with-lease=$blocked_ref:$blocked_now")
-            refspecs+=(":$blocked_ref")
-            completed_was_blocked=true
-        fi
-
-        # Blocked-meta (full-SHA side ref): a side-commit, not the task
-        # commit, so we lease to whatever it currently points at and just
-        # require it to be present. Completing a task clears its "why
-        # parked" metadata in lockstep with the overlay ref above.
-        local meta_now
-        meta_now=$(git ls-remote origin "$meta_ref" 2>/dev/null | awk '{print $1; exit}')
-        if [ -n "$meta_now" ]; then
-            lease_args+=("--force-with-lease=$meta_ref:$meta_now")
-            refspecs+=(":$meta_ref")
-        fi
-
-        if [ "${#refspecs[@]}" -gt 0 ]; then
-            if git push --atomic origin "${lease_args[@]}" "${refspecs[@]}" >/dev/null 2>&1; then
-                echo "Cleaned remote task refs for $short_sha"
-            else
-                echo "Error: failed to CAS-clean remote task refs for $short_sha (a lease failed — remote changed under us)." >&2
-                echo "Completion commit is local ($new_commit); do NOT push until the task refs are resolved." >&2
-                return 3
-            fi
-        fi
-    fi
-    
     printf "${GREEN}✓ Task completed: %s${RESET}\n" "$(get_task_title "$task_sha")"
 
     # If this completion cleared a block, refresh the operator #29 dashboard.
-    if [ "$completed_was_blocked" = true ]; then
+    if [ "$TASK_DAG_COMPLETED_WAS_BLOCKED" = true ]; then
         emit_operator_blocked_dispatch complete "$short_sha"
     fi
 
@@ -3655,6 +3746,296 @@ Related: $issue_url"
     # fully-complete epic; the worker's `git push origin HEAD:master` then
     # lets the server workflow close the issue and clean the refs. Epics
     # with cross-repo delegated children still close via `close-epic`.
+    maybe_emit_local_epic_close "$task_sha"
+
+    return 0
+}
+
+# Helper: page the operator (priority 2 / informational audit) that the
+# retroactive historical-link path was used. Fail-soft like
+# emit_operator_blocked_dispatch: a missing/failed page-dave never undoes
+# a successful local link, but we tell the caller loudly so the operator
+# can be told by hand.
+#   $1=task_sha $2=short_sha $3=hist_sha $4=hist_short $5=link_commit
+#   $6=issue_num $7=issue_url $8=task_title
+page_retroactive_link() {
+    local task_sha="$1" short_sha="$2" hist_sha="$3" hist_short="$4" \
+          link_commit="$5" issue_num="$6" issue_url="$7" task_title="$8"
+
+    if ! command -v page-dave >/dev/null 2>&1; then
+        printf '%bNote: page-dave not found; the priority-2 retroactive-link audit page was NOT sent. Tell the operator manually that historical commit %s was linked to task %s.%b\n' \
+            "$YELLOW" "$hist_short" "$short_sha" "$RESET" >&2
+        return 0
+    fi
+
+    # owner/repo for building commit links — prefer the issue URL, fall
+    # back to the origin remote (handles the github-<repo> SSH aliases).
+    local repo=""
+    if [ -n "$issue_url" ]; then
+        repo=$(printf '%s' "$issue_url" | sed -E 's|https?://github.com/([^/]+/[^/]+)/.*|\1|')
+    fi
+    if [ -z "$repo" ] || [ "$repo" = "$issue_url" ]; then
+        local origin_url
+        origin_url=$(git remote get-url origin 2>/dev/null || true)
+        repo=$(printf '%s' "$origin_url" | sed -E 's#^(https?://[^/]+/|git@[^:]+:|ssh://[^/]+/|git://[^/]+/)##; s#\.git$##')
+    fi
+
+    local hist_link="$hist_short"
+    [ -n "$repo" ] && hist_link="https://github.com/$repo/commit/$hist_sha"
+
+    local msg="RETROACTIVE ADMIN LINK (NOT normal task completion). Repo ${repo:-unknown}: historical commit ${hist_short} was linked after-the-fact to task ${short_sha} \"${task_title}\""
+    [ -n "$issue_num" ] && msg="${msg} on issue #${issue_num}"
+    msg="${msg}. The link commit ${link_commit:0:12} is LOCAL until the worker pushes HEAD:master. Historical commit: ${hist_link}."
+    [ -n "$issue_url" ] && msg="${msg} Issue: ${issue_url}."
+
+    # Flags BEFORE the message (ntfy stops parsing flags after the first
+    # positional). Priority 2 = low/informational audit per the operator.
+    local pd=(page-dave -p 2 --title "task-dag: retroactive historical commit link" --tags memo)
+    [ -n "$issue_url" ] && pd+=(--click "$issue_url")
+    if "${pd[@]}" "$msg" >/dev/null 2>&1; then
+        printf "${GREEN}✓ Paged operator (priority 2) about the retroactive link${RESET}\n"
+    else
+        printf '%bNote: page-dave failed; tell the operator manually that historical commit %s was linked to task %s.%b\n' \
+            "$YELLOW" "$hist_short" "$short_sha" "$RESET" >&2
+    fi
+    return 0
+}
+
+# Command: complete-historical - retroactively link an ALREADY-LANDED
+# historical commit on master to a task, as though it had been completed
+# live, WITHOUT rewriting master history.
+#
+# This is an ADMINISTRATIVE RECOVERY path for the rare case where a worker
+# "went rogue"/missed task-dag and landed real work on master without
+# linking it to its task. It creates an empty (no file change) link commit
+# on top of CURRENT HEAD whose 2nd parent is the task commit (so
+# is_task_completed / close-completed-issues treat the task as done exactly
+# like a live completion) and that records the real historical commit in a
+# Historical-Commit: trailer. It is NOT for normal development — live work
+# must use `task-dag complete` at commit time. Every use pages the operator
+# (priority 2) for audit.
+cmd_complete_historical() {
+    local task_sha="" hist_sha="" do_force=false
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --commit=*) hist_sha="${1#*=}"; shift ;;
+            --force) do_force=true; shift ;;
+            --help|-h)
+                cat <<EOF
+Usage: task-dag complete-historical <task-sha> --commit=<historical-sha> [--force]
+
+ADMINISTRATIVE RECOVERY ONLY. Retroactively link an already-landed
+historical commit on master to a task, as though it had been completed
+live — WITHOUT rewriting master history. Use ONLY for historically missed
+commits (a worker landed real work but never linked it to its task). For
+all normal work, use 'task-dag complete' at commit time.
+
+How it works:
+  Creates an empty (no file change) link commit on top of CURRENT HEAD
+  with the task as its 2nd parent (so the DAG marks the task done) and a
+  Historical-Commit: <sha> trailer recording the real work. master history
+  is preserved; you then 'git push origin HEAD:master' to publish it.
+
+Required:
+  <task-sha>        the pending task to mark done
+  --commit=<sha>    the real historical implementation commit on master
+
+Options:
+  --force           proceed even if another worker holds the task's active
+                    claim (only if that claim is known dead)
+
+Guards: HEAD must be at origin/master; the historical commit must be a
+real (non-empty) commit that is an ancestor of origin/master; the task
+must not already be completed; an undecomposed epic root is refused.
+
+Every successful use pages the operator at priority 2 for audit.
+EOF
+                return 0 ;;
+            *)
+                if [ -z "$task_sha" ]; then task_sha="$1"; else
+                    echo "Unknown option: $1" >&2; return 1; fi
+                shift ;;
+        esac
+    done
+
+    [ -n "$task_sha" ] || { echo "Error: task SHA required" >&2; return 1; }
+    [ -n "$hist_sha" ] || { echo "Error: --commit=<historical-sha> required (the already-landed commit to link)" >&2; return 1; }
+
+    task_sha=$(resolve_sha "$task_sha") || return 1
+    hist_sha=$(resolve_sha "$hist_sha") || return 1
+
+    # ── Operand validation ────────────────────────────────────────────
+    if ! is_task_commit "$task_sha"; then
+        echo "Error: $task_sha is not a task commit (expected an empty-tree task object)." >&2
+        return 1
+    fi
+    if [ "$hist_sha" = "$task_sha" ]; then
+        echo "Error: --commit cannot be the task commit itself." >&2
+        return 1
+    fi
+    if is_task_commit "$hist_sha"; then
+        echo "Error: --commit=$hist_sha is itself a task/control commit (empty tree), not real historical work." >&2
+        return 1
+    fi
+    # The historical commit must represent REAL work: a tree change vs its
+    # first parent (or vs the empty tree for a root commit). This rejects
+    # no-diff completion/close/tombstone commits stronger than a bare
+    # empty-commit check, and for a merge compares H^1..H (first parent).
+    local hist_tree hist_parent hist_base_tree
+    hist_tree=$(git rev-parse "$hist_sha^{tree}") || return 1
+    hist_parent=$(get_first_parent "$hist_sha" 2>/dev/null || true)
+    if [ -n "$hist_parent" ]; then
+        hist_base_tree=$(git rev-parse "$hist_parent^{tree}") || return 1
+    else
+        hist_base_tree="$EMPTY_TREE"
+    fi
+    if [ "$hist_tree" = "$hist_base_tree" ]; then
+        echo "Error: --commit=$hist_sha introduces no tree change vs its first parent; it is not a real historical implementation commit." >&2
+        return 1
+    fi
+
+    # ── Epic-root guard (same as complete): never link an undecomposed
+    # root as if it were an implementation unit. ──
+    local hist_issue="" rc_root=0
+    hist_issue=$(task_is_pending_root "$task_sha") || rc_root=$?
+    if [ "$rc_root" = 3 ]; then
+        echo "Error: cannot verify whether ${task_sha:0:12} is a live epic root (origin" >&2
+        echo "       unreachable and no local pending mirror). Refusing. Retry when online." >&2
+        return 2
+    fi
+    if [ -n "$hist_issue" ]; then
+        if ! fetch_root_refs "$hist_issue"; then
+            echo "Error: cannot reach origin to verify issue #${hist_issue} root has no child" >&2
+            echo "       tasks — refusing. Retry when online." >&2
+            return 2
+        fi
+        if task_has_children "$task_sha" >/dev/null; then
+            echo "Error: issue #${hist_issue} root has child tasks; link the leaves, not the root." >&2
+            return 2
+        fi
+    fi
+
+    # ── Dependency guard (same as complete): the task's dependency tasks
+    # must themselves be completed/linked. ──
+    if ! cmd_deps "$task_sha" --check-complete >/dev/null 2>&1; then
+        echo "Error: dependencies not met for task $task_sha (its dependency tasks are not yet completed/linked)." >&2
+        cmd_deps "$task_sha" >&2
+        return 2
+    fi
+
+    # ── Authority: origin/master must be reachable + current, and the
+    # historical commit must really be landed on it (fail closed). ──
+    if ! git fetch --quiet --no-tags origin master 2>/dev/null; then
+        echo "Error: cannot fetch origin master — refusing the historical link (fail closed). Retry when online." >&2
+        return 2
+    fi
+    local origin_master head_sha
+    origin_master=$(git rev-parse FETCH_HEAD) || return 1
+    head_sha=$(git rev-parse HEAD) || return 1
+    if [ "$head_sha" != "$origin_master" ]; then
+        if git merge-base --is-ancestor "$origin_master" "$head_sha" 2>/dev/null; then
+            echo "Error: HEAD ($head_sha) is AHEAD of origin/master ($origin_master)." >&2
+            echo "If a previous complete-historical run created a link commit that was never" >&2
+            echo "pushed, publish it with 'git push origin HEAD:master' instead of rerunning." >&2
+            echo "Otherwise reset to origin/master in a fresh checkout and retry." >&2
+        else
+            echo "Error: HEAD ($head_sha) is not at origin/master ($origin_master)." >&2
+            echo "complete-historical must run on a fresh checkout at the master tip; sync and retry." >&2
+        fi
+        return 2
+    fi
+    if ! git merge-base --is-ancestor "$hist_sha" "$origin_master" 2>/dev/null; then
+        echo "Error: --commit=$hist_sha is not an ancestor of origin/master; it is not landed historical work on master." >&2
+        return 2
+    fi
+
+    # ── Idempotency: already linked/completed → nothing to do, no page. ──
+    if is_task_completed "$task_sha"; then
+        echo "Task ${task_sha:0:12} is already linked/completed on origin/master; nothing to do." >&2
+        return 0
+    fi
+
+    local short_sha
+    short_sha=$(git rev-parse --short "$task_sha")
+
+    # ── Honour the cross-host active-claim mutex. A historically-missed
+    # task is usually unclaimed, but if a live worker holds it, refuse
+    # (unless --force on a known-dead claim). ──
+    local verified_active_sha
+    verified_active_sha=$(verify_task_claim_ownership "$task_sha" "$short_sha" "$do_force") || return $?
+
+    # ── Build the empty link commit on CURRENT HEAD (master tip). ──
+    local issue_num issue_url task_title head_tree hist_short
+    local task_msg
+    task_msg=$(parse_commit_metadata "$task_sha")
+    # Issue/URL are optional (legacy/hand-crafted tasks may lack them);
+    # guard so a missing trailer never aborts under set -e/pipefail.
+    issue_num=$(extract_field "$task_msg" "Issue" 2>/dev/null | sed 's/^#//' || true)
+    issue_url=$(extract_field "$task_msg" "URL" 2>/dev/null || true)
+    task_title=$(get_task_title "$task_sha")
+    head_tree=$(git rev-parse "HEAD^{tree}") || return 1
+    hist_short=$(git rev-parse --short "$hist_sha")
+
+    local link_message="Retroactively link historical commit ${hist_short} to task ${short_sha}
+
+ADMINISTRATIVE RECOVERY ONLY: task-dag missed linking already-landed work.
+This empty link commit records, after the fact, that the real work for this
+task was done in historical commit ${hist_sha}. Do NOT use this path for
+normal live task completion — that must use 'task-dag complete' at commit time.
+
+Task-Commit: $task_sha
+Historical-Commit: $hist_sha
+Retroactive: true"
+    [ -n "$issue_num" ] && link_message="${link_message}
+Issue: #$issue_num"
+    [ -n "$issue_url" ] && link_message="${link_message}
+URL: $issue_url"
+    link_message="${link_message}
+Status: completed"
+    [ -n "$issue_url" ] && link_message="${link_message}
+
+Related: $issue_url"
+
+    local new_commit
+    new_commit=$(git commit-tree "$head_tree" -p "$head_sha" -p "$task_sha" -m "$link_message")
+    echo "Created retroactive link commit: $new_commit"
+
+    # Pure ref move (base == HEAD, identical tree) — preserves master
+    # history and any dirty worktree; no master rewrite.
+    advance_head_to_completion "$head_sha" "$new_commit" || return 1
+
+    # Clean dispatch refs with the same CAS discipline as complete.
+    cleanup_completed_task_refs "$task_sha" "$short_sha" "$verified_active_sha" "$new_commit" false || return $?
+
+    if [ "$TASK_DAG_COMPLETED_WAS_BLOCKED" = true ]; then
+        emit_operator_blocked_dispatch complete "$short_sha"
+    fi
+
+    # ── LOUD audit banner ──
+    printf '%b\n' "${YELLOW}" >&2
+    echo "════════════════════════════════════════════════════════════════════" >&2
+    echo " RETROACTIVE HISTORICAL LINK — administrative recovery only" >&2
+    echo "════════════════════════════════════════════════════════════════════" >&2
+    echo " This path is ONLY for historically missed commits: real work that" >&2
+    echo " landed on master without being linked to its task. It is NOT the" >&2
+    echo " normal workflow. ALL ongoing development must link work live with" >&2
+    echo " 'task-dag complete' at commit time, never with complete-historical." >&2
+    echo "" >&2
+    echo "   task:               $short_sha  ($task_title)" >&2
+    echo "   historical commit:  $hist_short  ($hist_sha)" >&2
+    echo "   link commit:        $(git rev-parse --short "$new_commit")  (push HEAD:master to publish)" >&2
+    [ -n "$issue_url" ] && echo "   issue:              $issue_url" >&2
+    echo "════════════════════════════════════════════════════════════════════" >&2
+    printf '%b' "${RESET}" >&2
+
+    printf "${GREEN}✓ Retroactively linked task: %s${RESET}\n" "$task_title"
+
+    # Audit page to the operator (priority 2). Fail-soft.
+    page_retroactive_link "$task_sha" "$short_sha" "$hist_sha" "$hist_short" \
+        "$new_commit" "$issue_num" "$issue_url" "$task_title"
+
+    # If this link finished a purely-local epic, append the Closes-Epic
+    # commit so the worker's push closes the issue (same as complete).
     maybe_emit_local_epic_close "$task_sha"
 
     return 0
@@ -4367,6 +4748,7 @@ main() {
         dag) cmd_dag "$@" ;;
         breakdown) cmd_breakdown "$@" ;;
         complete) cmd_complete "$@" ;;
+        complete-historical) cmd_complete_historical "$@" ;;
         block) cmd_block "$@" ;;
         unblock) cmd_unblock "$@" ;;
         blocked) cmd_blocked "$@" ;;
