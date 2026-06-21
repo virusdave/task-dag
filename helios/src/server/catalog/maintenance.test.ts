@@ -40,9 +40,18 @@ describe('classifyPackageBarcode', () => {
     expect(classifyPackageBarcode('   ').status).toBe('missing')
   })
 
-  it('treats the Sweed auto-generated family (25000000 + 5 digits) as invalid', () => {
-    // Boundaries of the observed live range, plus a couple in between.
-    for (const value of ['2500000000812', '2500000007552', '2500000026003', '  2500000012345  ']) {
+  it('treats the whole Sweed "25…" EAN-13 family as invalid', () => {
+    for (const value of [
+      '2500000000812',
+      '2500000007552',
+      '2500000026003', // top of the observed live range
+      '  2500000012345  ',
+      // Forward-proofing: the counter is an integer that keeps growing.
+      // Once it rolls past 5 digits the suffix gains digits — these MUST
+      // still be caught (the old `^25000000\d{5}$` would have missed them).
+      '2500000112345', // 6-digit-counter neighbour, still the 25 family
+      '2599999999998', // far-future counter, top of the 13-digit 25 block
+    ]) {
       expect(classifyPackageBarcode(value).status, value).toBe('invalid')
     }
   })
@@ -52,11 +61,10 @@ describe('classifyPackageBarcode', () => {
       '810171511027', // UPC-A
       '852873008665',
       '9780251379520', // EAN-13
-      '2025112110355', // date-coded, NOT the placeholder family
-      '2315613336', // real "2…" prefix
-      '250000007552', // only 12 digits — not the 13-digit family
-      '2400000012345', // 25000001-ish neighbour but wrong prefix
-      '2500000112345', // 13 digits but prefix is 25000001, not 25000000
+      '2025112110355', // date-coded, starts with 20 — NOT the 25 family
+      '2315613336', // real "2…" prefix, not 25 / not 13 digits
+      '250000007552', // only 12 digits — not the 13-digit 25 family
+      '2400000012345', // 13-digit "24…" neighbour — wrong prefix
     ]) {
       expect(classifyPackageBarcode(value).status, value).toBe('ok')
     }

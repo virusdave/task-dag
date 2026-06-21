@@ -13,8 +13,8 @@
  *                              least one actionable (FOR-SALE, non-trade-
  *                              sample, qty > 0) package whose own
  *                              `inventoryBarcode` is empty OR a Sweed
- *                              auto-generated placeholder (`25000000` +
- *                              5-digit counter). Barcodes are tracked PER
+ *                              auto-generated placeholder (the `25…`
+ *                              EAN-13 family). Barcodes are tracked PER
  *                              PACKAGE, NOT from the product-level
  *                              `externalBarcode` — two packages of one
  *                              product can carry different barcodes.
@@ -1047,17 +1047,27 @@ function isCannabisCategory(categoryName: string | null): boolean {
 /**
  * Sweed auto-generated placeholder package barcodes. When an inventory
  * item is received without a real scannable barcode, Sweed mints an
- * internal EAN-13 in the GS1 "2" restricted-distribution range: a fixed
- * `25000000` prefix followed by a 5-digit incrementing counter (e.g.
- * `2500000007552`). These are NOT real barcodes — a package carrying one
- * still "needs a barcode" exactly like an empty one does.
+ * internal EAN-13 in the GS1 "25" restricted-distribution range: the
+ * literal prefix `25`, then a zero-padded incrementing counter, then the
+ * EAN-13 check digit — e.g. `2500000026003` (counter ≈ 2600, check 3).
+ * These are NOT real barcodes — a package carrying one still "needs a
+ * barcode" exactly like an empty one does.
  *
- * Kept deliberately narrow: only this confirmed family is rejected.
- * Other "2"-prefixed numeric codes (e.g. date-coded `2025…` values seen
- * in the live data) are real and must NOT be flagged. Do not broaden to
- * all GS1 "2" codes without a second confirmed placeholder family.
+ * Match the WHOLE `25` family (`25` + 11 more digits = a 13-digit EAN),
+ * NOT a fixed-width suffix. The counter is an integer that simply keeps
+ * incrementing, so any pattern that pins the suffix to N digits (the old
+ * `^25000000\d{5}$` assumed ≤5) silently stops matching once the counter
+ * rolls past that width and placeholders start passing as "valid".
+ *
+ * Evidence (read-only prod sample, 2026-06): all 2567 in-stock package
+ * barcodes in the `25…` block are this one contiguous Sweed series
+ * (`2500000000010`…`2500000026003`). The only other `2…` codes are
+ * date-coded values that start with `20` (e.g. `2025112110355`), so the
+ * `^25` anchor leaves every real barcode untouched. GS1 prefix 2 is
+ * restricted/in-store and never a real manufacturer GTIN, so a genuine
+ * scannable retail barcode never lands in the `25…` range here.
  */
-const SWEED_AUTO_GENERATED_PACKAGE_BARCODE_RE = /^25000000\d{5}$/
+const SWEED_AUTO_GENERATED_PACKAGE_BARCODE_RE = /^25\d{11}$/
 
 /**
  * Classify a package-level `inventoryBarcode` (the Sweed inventory item's
