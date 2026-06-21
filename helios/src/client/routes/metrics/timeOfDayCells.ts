@@ -100,6 +100,57 @@ export function laborSurplus(
   return avgMargin - labor.loadedCostPerStaffHour * labor.headcount
 }
 
+/**
+ * Aggregate value for a ROW/COLUMN summary over a group of cells (the
+ * heatmap's "all" hour/weekday totals). Kept pure (+ unit-tested) because
+ * the per-occurrence vs pooled-vs-summed distinction here is subtle and has
+ * regressed repeatedly.
+ *
+ *  - Labor mode: pool the group's margin, divide by the shared occurrence
+ *    count `occ`, then subtract labor ONCE per `laborHoursPerOccurrence`
+ *    (1 for a single pooled hour; the open-hour count for a full day).
+ *    Runs before the empty-group check so a zero-order open hour still owes
+ *    its labor cost (margin = 0 → a deficit), since the API omits empty cells.
+ *  - avg_basket: pooled basis ÷ pooled orders (an average of averages is wrong).
+ *  - else: sum each cell's chosen metric (each divided by `occ` for the
+ *    per-occurrence metrics).
+ *
+ * `occ` must already be the correct denominator for the group (total
+ * weekday-occurrences for a per-hour row; that weekday's occurrences for a
+ * per-weekday column).
+ */
+export function groupSummary(
+  group: readonly TimeOfDayCell[],
+  occ: number,
+  laborHoursPerOccurrence: number,
+  basis: TimeOfDayBasis,
+  metric: TimeOfDayCellMetric,
+  labor: LaborConfig,
+): number | null {
+  if (labor.enabled) {
+    if (occ <= 0) return null
+    const laborCost = labor.loadedCostPerStaffHour * labor.headcount
+    const margin = group.reduce((a, c) => a + c.margin, 0)
+    return margin / occ - laborCost * laborHoursPerOccurrence
+  }
+  if (group.length === 0) return null
+  if (metric === 'avg_basket') {
+    const b = group.reduce((a, c) => a + basisValue(c, basis), 0)
+    const o = group.reduce((a, c) => a + c.orders, 0)
+    return o > 0 ? b / o : null
+  }
+  let s = 0
+  let any = false
+  for (const c of group) {
+    const v = cellValue(c, occ, basis, metric)
+    if (v !== null) {
+      s += v
+      any = true
+    }
+  }
+  return any ? s : null
+}
+
 /** Whether a metric is money-denominated (for $ vs count formatting). */
 export function metricIsMoney(metric: TimeOfDayCellMetric): boolean {
   return metric !== 'orders_per_hour'

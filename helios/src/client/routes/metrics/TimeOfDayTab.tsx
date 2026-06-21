@@ -7,6 +7,7 @@ import {
   type TimeOfDayResponse,
 } from '../../../shared/contracts/index.js'
 import { loadJson } from '../../app/fetchJson.js'
+import { nyAddDays, nyFloorToBusinessDay, nyIsoDate } from '../../app/nyTime.js'
 
 import { defaultSiteSelection, toggleSiteSelection } from './metricsSiteSelection.js'
 import {
@@ -40,19 +41,6 @@ import { hourLabel, WeekdayHourHeatmap } from './WeekdayHourHeatmap.js'
 // ---------------------------------------------------------------------------
 
 const DAY_MS = 86_400_000
-// Mirror the server guard (registerTimeOfDayRoutes MAX_WINDOW_DAYS) so a
-// custom range fails fast in the UI instead of round-tripping a 400. A
-// custom window is the SAME query as the 1y preset, just operator-chosen
-// bounds, so it's no more expensive as long as it stays within this cap.
-const MAX_WINDOW_DAYS = 366
-
-/** Local calendar date as yyyy-mm-dd, for <input type="date"> values. */
-function toYmd(d: Date): string {
-  const y = d.getFullYear()
-  const m = String(d.getMonth() + 1).padStart(2, '0')
-  const day = String(d.getDate()).padStart(2, '0')
-  return `${y}-${m}-${day}`
-}
 
 const KNOWN_SITES: ReadonlyArray<{ id: string; label: string }> = [
   { id: 'bronx', label: 'Bronx' },
@@ -116,6 +104,22 @@ function fmt1(v: number): string {
 
 const cellKey = (weekday: number, hour: number): string => `${weekday}:${hour}`
 
+// Server rejects windows longer than this (see routes/timeOfDay.ts).
+const MAX_WINDOW_DAYS = 366
+
+// Convert a YYYY-MM-DD pair into the [from, to) instant window aligned to
+// NY business-day boundaries (08:00 ET): from = 08:00 ET on the From date,
+// to = 08:00 ET the day AFTER the To date, so the To date is inclusive and
+// occurrence counting lines up with whole business days. 17:00Z is safely
+// mid-afternoon ET on the given date (well inside the open business day)
+// regardless of EST/EDT, so flooring it lands on the right business date.
+function nyBusinessWindow(fromIso: string, toIso: string): { from: Date; to: Date } {
+  const noon = (iso: string) => new Date(`${iso}T17:00:00Z`).getTime()
+  const from = nyFloorToBusinessDay(noon(fromIso))
+  const to = nyAddDays(nyFloorToBusinessDay(noon(toIso)), 1)
+  return { from: new Date(from), to: new Date(to) }
+}
+
 interface RankedBlock {
   readonly weekday: number
   readonly hour: number
@@ -127,13 +131,27 @@ export function TimeOfDayTab(): JSX.Element {
   const [selectedSites, setSelectedSites] = useState<ReadonlySet<string>>(() =>
     defaultSiteSelection(),
   )
-  const [rangeMode, setRangeMode] = useState<'preset' | 'custom'>('preset')
   const [rangeDays, setRangeDays] = useState<number>(90)
-  // Custom range as local calendar dates (yyyy-mm-dd); only consulted when
-  // rangeMode === 'custom'. `to` is treated as inclusive (end-of-day).
-  const [customFrom, setCustomFrom] = useState<string>('')
-  const [customTo, setCustomTo] = useState<string>('')
+  // Custom date range (overrides the preset when active). Server accepts
+  // any from/to window up to MAX_WINDOW_DAYS (366); the query cost scales
+  // with the window, so we cap the picker at a year client-side too.
+  const [customActive, setCustomActive] = useState(false)
+  const [customFrom, setCustomFrom] = useState<string>(() => nyIsoDate(Date.now() - 90 * DAY_MS))
+  const [customTo, setCustomTo] = useState<string>(() => nyIsoDate(Date.now()))
   const [fulfillment, setFulfillment] = useState<TimeOfDayFulfillmentSlice>('all')
+
+  const todayIso = nyIsoDate(Date.now())
+  // Keep the From picker inside the server's max window (with a day of
+  // slack for the inclusive To + DST wobble).
+  const minFromIso = nyIsoDate(Date.now() - (MAX_WINDOW_DAYS - 2) * DAY_MS)
+  // Resolve the custom window once (NY business-day aligned); null unless a
+  // complete, in-range custom selection is active.
+  const customWindow = useMemo(() => {
+    if (!customActive || customFrom === '' || customTo === '' || customFrom > customTo) return null
+    const w = nyBusinessWindow(customFrom, customTo)
+    if (w.to.getTime() - w.from.getTime() > MAX_WINDOW_DAYS * DAY_MS) return null
+    return w
+  }, [customActive, customFrom, customTo])
 
   // Client-only view controls (no refetch).
   const [basis, setBasis] = useState<TimeOfDayBasis>('margin')
@@ -145,11 +163,7 @@ export function TimeOfDayTab(): JSX.Element {
   const [selectedKey, setSelectedKey] = useState<string | null>(null)
   const [data, setData] = useState<TimeOfDayResponse | null>(null)
   const [loading, setLoading] = useState(false)
-  // `rangeError` is a client-side validation message (no request was
-  // made); `loadError` is an actual fetch failure. Kept separate so the
-  // UI never mislabels an invalid custom range as "Failed to load".
-  const [rangeError, setRangeError] = useState<string | null>(null)
-  const [loadError, setLoadError] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
 
   const sitesParam = useMemo(
     () => Array.from(selectedSites).sort().join(','),
@@ -157,61 +171,36 @@ export function TimeOfDayTab(): JSX.Element {
   )
 
   useEffect(() => {
-    // Resolve the query window. Presets are "last N days ending now";
-    // custom is an operator-picked [from 00:00, to 23:59:59.999] local
-    // range, validated against the same bounds the server enforces.
-    let fromDate: Date
-    let toDate: Date
-    if (rangeMode === 'custom') {
-      const fail = (msg: string) => {
-        setRangeError(msg)
-        setLoading(false)
-      }
-      if (!customFrom || !customTo) {
-        fail('Pick both a start and end date for the custom range.')
-        return
-      }
-      fromDate = new Date(`${customFrom}T00:00:00`)
-      toDate = new Date(`${customTo}T23:59:59.999`)
-      if (Number.isNaN(fromDate.getTime()) || Number.isNaN(toDate.getTime())) {
-        fail('Custom range dates are invalid.')
-        return
-      }
-      if (fromDate.getTime() >= toDate.getTime()) {
-        fail('The start date must be before the end date.')
-        return
-      }
-      if (toDate.getTime() - fromDate.getTime() > MAX_WINDOW_DAYS * DAY_MS) {
-        fail(`Custom range can’t exceed ${MAX_WINDOW_DAYS} days.`)
-        return
-      }
-    } else {
-      toDate = new Date()
-      fromDate = new Date(toDate.getTime() - rangeDays * DAY_MS)
-    }
-    setRangeError(null)
-
     const controller = new AbortController()
+    let from: Date
+    let to: Date
+    if (customWindow) {
+      from = customWindow.from
+      to = customWindow.to
+    } else {
+      to = new Date()
+      from = new Date(to.getTime() - rangeDays * DAY_MS)
+    }
     const params = new URLSearchParams()
-    params.set('from', fromDate.toISOString())
-    params.set('to', toDate.toISOString())
+    params.set('from', from.toISOString())
+    params.set('to', to.toISOString())
     params.set('fulfillment', fulfillment)
     if (sitesParam) params.set('sites', sitesParam)
     setLoading(true)
-    setLoadError(null)
+    setError(null)
     loadJson(`/api/time-of-day-analytics?${params.toString()}`, TimeOfDayResponseSchema, {
       signal: controller.signal,
     })
       .then((r) => setData(r))
       .catch((e: unknown) => {
         if ((e as { name?: string })?.name === 'AbortError') return
-        setLoadError(e instanceof Error ? e.message : String(e))
+        setError(e instanceof Error ? e.message : String(e))
       })
       .finally(() => {
         if (!controller.signal.aborted) setLoading(false)
       })
     return () => controller.abort()
-  }, [sitesParam, rangeMode, rangeDays, customFrom, customTo, fulfillment])
+  }, [sitesParam, rangeDays, fulfillment, customWindow])
 
   const labor: LaborConfig = useMemo(
     () => ({ enabled: laborEnabled, loadedCostPerStaffHour: loadedCost, headcount }),
@@ -316,11 +305,9 @@ export function TimeOfDayTab(): JSX.Element {
             <button
               type="button"
               key={r.days}
-              className={`ghost-button${
-                rangeMode === 'preset' && rangeDays === r.days ? ' is-active' : ''
-              }`}
+              className={`ghost-button${!customActive && rangeDays === r.days ? ' is-active' : ''}`}
               onClick={() => {
-                setRangeMode('preset')
+                setCustomActive(false)
                 setRangeDays(r.days)
               }}
             >
@@ -329,30 +316,22 @@ export function TimeOfDayTab(): JSX.Element {
           ))}
           <button
             type="button"
-            className={`ghost-button${rangeMode === 'custom' ? ' is-active' : ''}`}
-            onClick={() => {
-              // Seed the pickers from the current preset window so the
-              // operator nudges a sensible range instead of empty inputs.
-              if (!customFrom || !customTo) {
-                const to = new Date()
-                setCustomFrom(toYmd(new Date(to.getTime() - rangeDays * DAY_MS)))
-                setCustomTo(toYmd(to))
-              }
-              setRangeMode('custom')
-            }}
+            className={`ghost-button${customActive ? ' is-active' : ''}`}
+            onClick={() => setCustomActive(true)}
           >
             Custom
           </button>
         </div>
 
-        {rangeMode === 'custom' ? (
-          <div className="metrics-control-group time-of-day-custom-range">
+        {customActive ? (
+          <div className="metrics-control-group">
             <label>
               From
               <input
                 type="date"
                 value={customFrom}
-                max={customTo || toYmd(new Date())}
+                min={minFromIso}
+                max={customTo || todayIso}
                 onChange={(e) => setCustomFrom(e.target.value)}
               />
             </label>
@@ -362,10 +341,15 @@ export function TimeOfDayTab(): JSX.Element {
                 type="date"
                 value={customTo}
                 min={customFrom}
-                max={toYmd(new Date())}
+                max={todayIso}
                 onChange={(e) => setCustomTo(e.target.value)}
               />
             </label>
+            {customActive && !customWindow ? (
+              <span className="subtle-copy">
+                Pick a valid range (≤ {MAX_WINDOW_DAYS} days); showing last preset until then.
+              </span>
+            ) : null}
           </div>
         ) : null}
 
@@ -449,8 +433,7 @@ export function TimeOfDayTab(): JSX.Element {
         ) : null}
       </div>
 
-      {rangeError ? <div className="time-of-day-error">Custom range: {rangeError}</div> : null}
-      {loadError ? <div className="time-of-day-error">Failed to load: {loadError}</div> : null}
+      {error ? <div className="time-of-day-error">Failed to load: {error}</div> : null}
 
       {loading && !data ? (
         <p className="subtle-copy">Loading time-of-day analytics…</p>
@@ -494,14 +477,13 @@ export function TimeOfDayTab(): JSX.Element {
           onSelect={(_c, k) => setSelectedKey(k)}
         />
         <p className="subtle-copy time-of-day-legend">
-          Columns = business weekday (Mon→Sun); rows = open local hours (8am→2am).{' '}
+          Rows = open local hours (8am→2am); columns = business weekday (Mon→Sun).{' '}
           {labor.enabled
             ? 'Green = surplus, white = break-even, red = deficit.'
             : 'Lighter → darker = lower → higher value.'}{' '}
           <span style={{ opacity: 0.8 }}>
-            “4w” under a weekday = 4 of that weekday&apos;s business-days in range; “n12” = orders
-            behind the cell; dotted/dim cells are thin samples (&lt;5 orders) — don&apos;t over-read
-            them.
+            “n12” = orders behind the cell; dotted/dim cells are thin samples (&lt;5 orders) —
+            don&apos;t over-read them.
           </span>
         </p>
       </div>
