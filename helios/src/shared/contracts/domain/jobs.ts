@@ -286,6 +286,11 @@ export type CatalogPendingPurchasesGenerateJobPayload = z.infer<typeof CatalogPe
 export const CatalogPendingPurchasesApplyJobPayloadSchema = z.object({
   pendingPurchaseApplyRequestId: z.number().int().positive(),
   requestedByUserId: z.number().int().positive().nullable().optional(),
+  // C7 optional post-apply refresh: when true, the apply job drops every
+  // product it CREATED this run onto the Lit Alerts market-data refresh queue
+  // (best-effort) so the pricing reviewer has fresh competitor evidence for the
+  // brand-new SKUs. Default false keeps current behavior.
+  enqueueMarketRefreshForCreatedProducts: z.boolean().default(false),
 })
 export type CatalogPendingPurchasesApplyJobPayload = z.infer<typeof CatalogPendingPurchasesApplyJobPayloadSchema>
 

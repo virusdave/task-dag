@@ -216,14 +216,23 @@ function nullableTrim(value: string | null): string | null {
 }
 
 /** Lane-equality key: lowercase + whitespace-collapsed. No punctuation
- * stripping — false negatives are safe here, false positives are not. */
-function laneKey(value: string | null): string | null {
+ * stripping — false negatives are safe here, false positives are not.
+ *
+ * Exported because the C7 apply-time drift guard
+ * (`reuseDriftGuard.ts`) compares a frozen {@link ReconciledReuseSnapshot}
+ * against the live product at apply time and MUST use the exact same
+ * equality semantics as this validator — otherwise a purely-cosmetic
+ * case/whitespace difference between the catalog-cache snapshot and the
+ * apply-time RPC read would be a false drift. One source of truth. */
+export function laneKey(value: string | null): string | null {
   const trimmed = nullableTrim(value)
   return trimmed === null ? null : trimmed.toLowerCase().replace(/\s+/g, ' ')
 }
 
-/** Size-equivalence key: lowercase, all whitespace removed, so "3.5 g" === "3.5g". */
-function sizeKey(value: string | null): string | null {
+/** Size-equivalence key: lowercase, all whitespace removed, so "3.5 g" === "3.5g".
+ * Exported for the C7 drift guard for the same single-source-of-truth reason
+ * as {@link laneKey}. */
+export function sizeKey(value: string | null): string | null {
   const trimmed = nullableTrim(value)
   return trimmed === null ? null : trimmed.toLowerCase().replace(/\s+/g, '')
 }

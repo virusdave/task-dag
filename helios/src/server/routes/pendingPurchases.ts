@@ -646,6 +646,7 @@ export async function registerPendingPurchaseRoutes(server: FastifyInstance): Pr
         payload: {
           pendingPurchaseApplyRequestId,
           requestedByUserId: user.id,
+          enqueueMarketRefreshForCreatedProducts: body.enqueueMarketRefreshForCreatedProducts,
         },
         priority: JOB_PRIORITY_LIVE_REQUESTED,
         requestedByUserId: user.id,

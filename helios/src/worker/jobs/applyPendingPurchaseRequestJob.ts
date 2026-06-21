@@ -15,6 +15,14 @@ import { withTransaction } from '../../server/db/tx.js'
 import { findDescriptionMedicalClaimIssues, normalizeDescriptionText } from '../catalog/liveState.js'
 import { getWorkerEnv } from '../config/env.js'
 import { downloadValidatedImageAsset } from '../pendingPurchases/imageSafety.js'
+import {
+  compareLiveReuse,
+  precheckReuseDrift,
+  type LiveReuseProductFacts,
+  type ParsedReuseSnapshot,
+} from '../pendingPurchases/reuseDriftGuard.js'
+import { enqueueMarketRefreshForProducts } from '../litalerts/enqueueMarketRefresh.js'
+import { looksLikeSweedDeadScreenError } from './screensCarouselHelpers.js'
 import { RetryableWorkerError } from '../runtime/errors.js'
 import type { JobHandlerContext } from '../runtime/jobRegistry.js'
 import { callSweedRpcForDealer, readSweedDealerContext } from '../sweed/client.js'
@@ -79,6 +87,10 @@ const ProductSummarySchema = z.object({
     .nullable()
     .optional(),
   displayInEcommerce: z.boolean().nullable().optional(),
+  // Sweed liveness flag. The C7 drift guard refuses to link a generated reuse
+  // onto a disabled product even if its identity is otherwise unchanged (the C5
+  // validator only ever confirmed reuse onto a live product).
+  enabled: z.boolean().nullable().optional(),
   id: z.coerce.number().int(),
   isPacked: z.boolean().nullable().optional(),
   name: z.string().nullable().optional(),
@@ -98,6 +110,9 @@ const ProductGroupDetailSchema = z.object({
   brand: NamedIdSchema.nullable().optional(),
   category: NameOnlySchema.nullable().optional(),
   description: z.string().nullable().optional(),
+  // Sweed liveness flag (see ProductSummarySchema.enabled). The drift guard
+  // treats a disabled group as a non-live reuse target.
+  enabled: z.boolean().nullable().optional(),
   id: z.coerce.number().int(),
   images: z.array(z.object({ id: z.union([z.coerce.number().int(), z.string().trim().min(1)]).nullable().optional(), url: z.string().nullable().optional() }).passthrough()).default([]),
   name: z.string().nullable().optional(),
@@ -145,6 +160,44 @@ const CategoryRowSchema = NamedIdSchema.extend({
 const StrainRowSchema = NamedIdSchema.extend({
   prevalence: NameOnlySchema.nullable().optional(),
 }).passthrough()
+
+// The frozen live-product identity the C5 validator confirmed a generated reuse
+// link against, persisted on the row as `raw_row_json.validatedReuseSnapshot`.
+// Shape mirrors `ReconciledReuseSnapshot` from reconcilePendingPurchaseDrafts.ts
+// (the producer). Unknown extra keys are stripped (forward-compatible with a C8+
+// snapshot extension); a MISSING required key fails the parse, which the loader
+// surfaces as a 'malformed' snapshot so the drift guard blocks the row rather
+// than trusting unreadable safety metadata.
+const ValidatedReuseSnapshotSchema = z.object({
+  productId: z.number().int().positive(),
+  // Non-null to mirror the producer (`ReconciledReuseSnapshot.productName`): the
+  // validator only snapshots a confirmed live product, which always has a name.
+  productName: z.string(),
+  groupId: z.number().int().positive().nullable(),
+  brand: z.string().nullable(),
+  category: z.string().nullable(),
+  subcategory: z.string().nullable(),
+  groupName: z.string().nullable(),
+  variantTab: z.string().nullable(),
+  strain: z.string().nullable(),
+  size: z.string().nullable(),
+  packCount: z.number().int().positive().nullable(),
+})
+
+function readValidatedReuseSnapshot(rawRow: Record<string, JsonValue>): ParsedReuseSnapshot {
+  const raw = rawRow.validatedReuseSnapshot
+  if (raw === undefined || raw === null) {
+    return { kind: 'absent' }
+  }
+  const parsed = ValidatedReuseSnapshotSchema.safeParse(raw)
+  if (!parsed.success) {
+    return {
+      kind: 'malformed',
+      error: parsed.error.issues.map((issue) => `${issue.path.join('.') || '<root>'}: ${issue.message}`).join('; '),
+    }
+  }
+  return { kind: 'valid', snapshot: parsed.data }
+}
 
 interface PendingPurchaseApplyRequestRow extends QueryResultRow {
   id: number
@@ -234,6 +287,13 @@ interface LoadedPendingPurchaseRow {
    */
   reuseProductId: number | null
   reuseProductIdOverridePresent: boolean
+  /**
+   * Parsed `raw_row_json.validatedReuseSnapshot` — the frozen live-product
+   * identity the C5 validator confirmed a GENERATED reuse against. Consumed by
+   * the C7 apply-time drift guard (only for generator reuse, never reviewer
+   * overrides). See {@link ParsedReuseSnapshot} for the three-state semantics.
+   */
+  validatedReuseSnapshot: ParsedReuseSnapshot
   rowId: number
   siteDealerId: number | null
   siteDealerName: string | null
@@ -430,6 +490,10 @@ async function runPendingPurchaseApplyJob(
   const dictionaries = await loadStateDictionaries(env.sweedStateDealerId)
   const rows = await listPendingPurchaseApplyRows(applyRequest)
 
+  // C7 optional post-apply refresh: collect the products this run CREATES so we
+  // can drop them onto the market-data refresh queue once after the loop.
+  const createdProductIds: number[] = []
+
   for (const rowRecord of rows) {
     if (rowRecord.last_apply_status === 'applied') {
       continue
@@ -447,10 +511,14 @@ async function runPendingPurchaseApplyJob(
     try {
       const rowSummary = await applyPendingPurchaseRow(row, env.sweedStateDealerId, dictionaries, context.id)
       await markPendingPurchaseRowApplied(row, payload.pendingPurchaseApplyRequestId, rowSummary)
+      const createdProductId = (rowSummary as { createdProductId?: number | null }).createdProductId ?? null
+      if (typeof createdProductId === 'number' && Number.isInteger(createdProductId) && createdProductId > 0) {
+        createdProductIds.push(createdProductId)
+      }
       await appendApplyJobProgressLog(context.id, `Row ${row.rowId} applied`, {
         rowId: row.rowId,
         createdGroupId: (rowSummary as { createdGroupId?: number | null }).createdGroupId ?? null,
-        createdProductId: (rowSummary as { createdProductId?: number | null }).createdProductId ?? null,
+        createdProductId,
       })
     } catch (error) {
       if (error instanceof RetryableWorkerError) {
@@ -504,6 +572,31 @@ async function runPendingPurchaseApplyJob(
     })
   })
 
+  // C7 optional post-apply refresh. When the request opted in, drop every
+  // product this run created onto the Lit Alerts market-data refresh queue so
+  // the pricing reviewer has fresh competitor evidence for the brand-new SKUs.
+  // Best-effort: a refresh-enqueue hiccup must never turn an otherwise-applied
+  // run into a failure (and it runs once, after the per-row writes are durable,
+  // never inside a row's apply path). The helper dedupes within a 5-minute
+  // window.
+  if (payload.enqueueMarketRefreshForCreatedProducts === true && createdProductIds.length > 0) {
+    const uniqueCreatedProductIds = [...new Set(createdProductIds)]
+    try {
+      await enqueueMarketRefreshForProducts(uniqueCreatedProductIds, {
+        trigger: { kind: 'pending-purchase', pendingPurchaseRowId: applyRequest.packet_id },
+        priority: 10,
+        requestedByUserId: payload.requestedByUserId ?? null,
+      })
+      await appendApplyJobProgressLog(context.id, 'Enqueued post-apply market refresh for created products', {
+        productIds: uniqueCreatedProductIds,
+      })
+    } catch (enqueueError) {
+      console.warn(
+        `[applyPendingPurchaseRequestJob] post-apply market refresh enqueue failed for request ${payload.pendingPurchaseApplyRequestId}: ${enqueueError instanceof Error ? enqueueError.message : enqueueError}`,
+      )
+    }
+  }
+
   // Job-level success requires every approved/selected row to have been
   // applied. If any row failed or was blocked, surface that as a job failure
   // so the worker run shows up as `failed` (with `last_error` describing
@@ -549,7 +642,25 @@ async function applyPendingPurchaseRow(
     }
   }
 
-  const distributor = await resolveRowDistributor(row)
+  // C7 generated-reuse drift guard — RPC-independent precheck. Runs BEFORE ANY
+  // Sweed read (including the distributor resolution and the variant lookups
+  // below) so a deterministic, row-level block (malformed snapshot, or a
+  // snapshot whose productId disagrees with the row) can never be masked by a
+  // transient/permanent RPC failure that would mis-classify a `blocked` row as
+  // `failed`. The live comparison happens after the product/group fetch below,
+  // also before `resolveRowDistributor`, so a deleted/disabled reuse target
+  // blocks before any purchase-order RPC can fail.
+  const driftPrecheck = precheckReuseDrift({
+    rowId: row.rowId,
+    reuseProductId: row.reuseProductId,
+    reuseProductIdOverridePresent: row.reuseProductIdOverridePresent,
+    snapshot: row.validatedReuseSnapshot,
+  })
+  if (driftPrecheck.kind === 'block') {
+    await logMutation('reuse drift guard blocked', { productId: row.reuseProductId, reason: driftPrecheck.reason })
+    throw new PendingPurchaseBlockedError(driftPrecheck.reason)
+  }
+
   // Variant resolution waterfall:
   //  1. If the reviewer set the link-override (`targetReuseProductId`
   //     present in edited_structured_fields), trust it absolutely:
@@ -579,16 +690,61 @@ async function applyPendingPurchaseRow(
   let createdBlobId: string | null = null
   let createdGroupId: number | null = null
   let createdProductId: number | null = null
-  let product = exactVariant
-    ? ProductDetailSchema.parse(await callSweedRpcForDealer(stateDealerId, 'store.product.get', { id: String(exactVariant.id) })).product
-    : null
-  let group = product?.productGroupId
-    ? ProductGroupDetailSchema.parse(
-      await callSweedRpcForDealer(stateDealerId, 'store.product.group.get', { id: Number(product.productGroupId) }),
-    )
-    : null
+  let product: z.infer<typeof ProductSummarySchema> | null = null
+  let group: z.infer<typeof ProductGroupDetailSchema> | null = null
+  try {
+    product = exactVariant
+      ? ProductDetailSchema.parse(await callSweedRpcForDealer(stateDealerId, 'store.product.get', { id: String(exactVariant.id) })).product
+      : null
+    group = product?.productGroupId
+      ? ProductGroupDetailSchema.parse(
+        await callSweedRpcForDealer(stateDealerId, 'store.product.group.get', { id: Number(product.productGroupId) }),
+      )
+      : null
+  } catch (fetchError) {
+    // For a guarded generated reuse, Sweed's misleading "does not exist / no
+    // permission" (subcode 14002) means the validated target was deleted or
+    // disabled since validation — a drift BLOCK (reviewer must re-confirm), not
+    // a generic failure. We convert ONLY that known signal to a null target so
+    // the comparison below blocks it; every other error (transient, schema,
+    // unexpected) propagates unchanged, and the legacy/override paths never
+    // swallow load errors (which could otherwise fall into a duplicate create).
+    if (driftPrecheck.kind === 'compare-live' && looksLikeSweedDeadScreenError(fetchError)) {
+      product = null
+      group = null
+    } else {
+      throw fetchError
+    }
+  }
   const groupBefore = group ? summarizeGroup(group) : null
   const productBefore = product ? summarizeProduct(product) : null
+
+  if (driftPrecheck.kind === 'compare-live') {
+    // A disabled product/group is not a live reuse target even if its identity
+    // is otherwise unchanged (the C5 validator only confirms reuse onto live
+    // products), so treat it as a null target → block.
+    const liveFacts: LiveReuseProductFacts | null =
+      product !== null && group !== null && product.enabled !== false && group.enabled !== false
+        ? buildLiveReuseFacts(product, group)
+        : null
+    const comparison = compareLiveReuse(
+      row.rowId,
+      driftPrecheck.snapshot.productId,
+      driftPrecheck.snapshot,
+      liveFacts,
+    )
+    if (comparison.kind === 'block') {
+      await logMutation('reuse drift guard blocked', { productId: row.reuseProductId, reason: comparison.reason })
+      throw new PendingPurchaseBlockedError(comparison.reason)
+    }
+    await logMutation('reuse drift guard passed', { productId: row.reuseProductId })
+  }
+
+  // Resolve the distributor only AFTER the drift guard has run. This RPC
+  // (store.purchase.order.get) can fail transiently; running it first would
+  // surface a deterministic `blocked` row (malformed/mismatched snapshot,
+  // deleted/disabled reuse target) as a generic `failed` instead.
+  const distributor = await resolveRowDistributor(row)
 
   if (!product || !group) {
     const categoryContext = resolveCategoryContext(row, dictionaries)
@@ -1418,6 +1574,7 @@ function loadPendingPurchaseRow(row: PendingPurchaseApplyWorkRow): LoadedPending
     rawRow,
     reuseProductId: effectiveReuseProductId,
     reuseProductIdOverridePresent: reuseOverridePresent,
+    validatedReuseSnapshot: readValidatedReuseSnapshot(rawRow),
     rowId: row.id,
     siteDealerId: row.site_dealer_id,
     siteDealerName: row.site_dealer_name,
@@ -1977,6 +2134,35 @@ function summarizeProduct(product: z.infer<typeof ProductSummarySchema>): Record
     shortName: normalizeNullableString(product.shortName),
     size: normalizeNullableString(product.size?.name),
     tab: normalizeNullableString(product.tab),
+  }
+}
+
+/**
+ * Project the live Sweed product + group (read at apply time) into the
+ * identity vocabulary the C7 drift guard compares against the validator's frozen
+ * snapshot. Identity lanes only — operational fields the apply is allowed to
+ * mutate (price, ecommerce visibility, sale type, packed state) are excluded.
+ * `packCount` mirrors the generator's live-summary rule (a positive int, else
+ * null → treated as single-pack by the guard) so a single-pack product never
+ * falsely drifts.
+ */
+function buildLiveReuseFacts(
+  product: z.infer<typeof ProductSummarySchema>,
+  group: z.infer<typeof ProductGroupDetailSchema>,
+): LiveReuseProductFacts {
+  const packOfSize = product.packOfSize
+  return {
+    productId: product.id,
+    productName: normalizeNullableString(product.name),
+    groupId: product.productGroupId ? Number(product.productGroupId) : null,
+    brand: normalizeNullableString(group.brand?.name),
+    category: normalizeNullableString(group.category?.name),
+    subcategory: normalizeNullableString(group.subcategory?.name),
+    groupName: normalizeNullableString(group.name),
+    variantTab: normalizeNullableString(product.tab),
+    strain: normalizeNullableString(group.strain?.name),
+    size: normalizeNullableString(product.size?.name),
+    packCount: typeof packOfSize === 'number' && Number.isInteger(packOfSize) && packOfSize > 0 ? packOfSize : null,
   }
 }
 

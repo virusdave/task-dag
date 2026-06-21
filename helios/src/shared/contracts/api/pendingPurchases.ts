@@ -135,6 +135,9 @@ export const QueuePendingPurchaseApplyRequestSchema = z.object({
   packetId: z.number().int().positive(),
   reason: z.string().trim().max(500).nullable().optional(),
   rowIds: z.array(z.coerce.number().int().positive()).min(1).max(500),
+  // C7: opt in to enqueue a Lit Alerts market-data refresh for the products the
+  // apply CREATES this run (best-effort). Default false → unchanged behavior.
+  enqueueMarketRefreshForCreatedProducts: z.boolean().default(false),
 })
 export type QueuePendingPurchaseApplyRequest = z.infer<typeof QueuePendingPurchaseApplyRequestSchema>
 
