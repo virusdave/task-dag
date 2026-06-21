@@ -13,6 +13,7 @@ import type { Queryable } from '../pool.js'
 import type { VisitorScanRowInput } from '../../visitorScans/envelope.js'
 import { computePersonKey } from '../../visitorScans/personKey.js'
 import { seedVisitorScanLink } from './visitorScanLinkQueries.js'
+import { nonCancelledLineSql, nonCancelledOrderSql } from '../sweedOrderStatus.js'
 import { upsertAddress } from '../../../worker/geocoder/index.js'
 import {
   readMarketingSegmentChipsForCustomers,
@@ -348,6 +349,8 @@ function favoriteCategoryProductSubqueriesSql(
           where ${customer} is not null
             and so.dealer_id = ${dealer}
             and so.customer_id = ${customer}
+            ${nonCancelledOrderSql('so')}
+            ${nonCancelledLineSql('soi')}
         ),
         category_counts as (
           select category_name, count(distinct invoice_id) as invoice_count
@@ -784,7 +787,8 @@ export async function listVisitorScans(
           from sweed_orders so2
           where so2.dealer_id = l.dealer_id
             and so2.customer_id = l.sweed_customer_id
-          order by so2.pay_time asc
+            ${nonCancelledOrderSql('so2')}
+          order by so2.pay_time asc, so2.invoice_id asc
           limit 1
         )                                             as first_purchase_total,
         max(so.pay_time)                              as latest_purchase_at,
@@ -793,6 +797,7 @@ export async function listVisitorScans(
       where l.sweed_customer_id is not null
         and so.dealer_id = l.dealer_id
         and so.customer_id = l.sweed_customer_id
+        ${nonCancelledOrderSql('so')}
     ) sweed_summary on l.sweed_customer_id is not null
 
     ${fav.ctes}
@@ -1027,6 +1032,7 @@ export async function listCashierVisitorScans(
       where l.sweed_customer_id is not null
         and so.dealer_id = l.dealer_id
         and so.customer_id = l.sweed_customer_id
+        ${nonCancelledOrderSql('so')}
     ) sweed_summary on l.sweed_customer_id is not null
 
     ${fav.ctes}

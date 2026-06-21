@@ -74,6 +74,42 @@ processes 4-of-5 enabled screens and warns about the 1 disabled one
 is correct; a bounce that crashes on the disabled screen and touches
 nothing is not.
 
+## Cancelled / voided orders: exclude from every total, count, and average
+
+A **cancelled** Sweed order is not a transaction. Sweed's feed still reports
+a non-zero header `grand_total` / `subtotal` on cancelled orders, and
+cancellations are ~18% of orders, so any `sum(grand_total_dollars)` /
+`count(*)` / average over `sweed_orders` that does not exclude cancelled
+rows is silently and materially wrong (this shipped as a family of bugs:
+inflated check-ins "Total $", customer-details "Lifetime spend / N
+invoices", customers-map lifetime spend).
+
+The rule:
+
+- **Default to EXCLUDING cancelled** from every total, count, average,
+  "Nth purchase" ordinal, first-vs-returning split, and fulfillment /
+  payment / category split. Order-header status is at
+  `raw_json->'invoiceStatus'->>'name'` = `'Cancelled'`; line status is the
+  differently-spelled `raw_item->'invoiceItemStatus'->>'name'` =
+  `'Canceled'`.
+- **Never hand-write the predicate.** Import the canonical helper from
+  [`src/server/db/sweedOrderStatus.ts`](src/server/db/sweedOrderStatus.ts)
+  (`nonCancelledOrderSql` / `nonCancelledOrderPredicateSql` for headers,
+  `nonCancelledLineSql` / `nonCancelledLinePredicateSql` for lines). It is
+  the single source of truth; do not copy a `<> 'cancelled'` literal into a
+  new module.
+- **Including cancelled needs an explicit opt-out.** Only a metric that is
+  *deliberately* about cancellations (e.g. "orders submitted regardless of
+  completion") may include them, and must mark the aggregate with a comment
+  `sweed-cancelled-intentional: <reason>`.
+- A **static guard** (`src/server/db/sweedOrderStatus.guard.test.ts`, run by
+  `npm run check`) fails the build if a header-dollar sum over `sweed_orders`
+  lacks the guard or the opt-out marker.
+
+Full rationale, the two status spellings, `ON`-clause placement, the
+`raw_json`-drain durability caveat, and the returns/refunds data gap:
+[`docs/sweed/order-status-semantics.md`](../docs/sweed/order-status-semantics.md).
+
 ## Promo actions: "Show promo price and details on product(s)" is ALWAYS on
 
 Every Sweed promo action that helios creates, edits, or "fixes up"

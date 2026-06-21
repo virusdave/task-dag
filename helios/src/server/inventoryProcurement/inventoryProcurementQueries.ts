@@ -11,6 +11,7 @@ import {
   type InventorySkuRow,
 } from '../../shared/contracts/index.js'
 import { getPool } from '../db/pool.js'
+import { nonCancelledLineSql } from '../db/sweedOrderStatus.js'
 import { bucketLocalExpr } from '../metrics/bucketSelectSql.js'
 
 // ============================================================================
@@ -219,8 +220,8 @@ sales AS (
   WHERE f.dealer_id = ANY($1::bigint[])
     AND f.pay_time >= (SELECT as_of FROM params) - interval '90 days'
     -- Canceled (voided) lines are not real sales; exclude from units /
-    -- revenue / selling-day velocity. (Line status spelled 'Canceled'.)
-    AND lower(coalesce(f.raw_item->'invoiceItemStatus'->>'name', '')) <> 'canceled'
+    -- revenue / selling-day velocity.
+    ${nonCancelledLineSql('f')}
   GROUP BY d.dealer_id, d.product_id
 )
 SELECT
@@ -263,6 +264,11 @@ SELECT d.dealer_id, d.product_id,
 FROM sweed_order_items_flat f
 JOIN pkg_dim d ON d.dealer_id = f.dealer_id AND d.inventory_item_id = f.inventory_item_id
 WHERE f.dealer_id = ANY($1::bigint[])
+  -- sweed-cancelled-intentional: no canceled-line filter here on purpose.
+  -- The jsonb status predicate forces an all-time seq scan (~210ms) and
+  -- canceled lines are mostly $0 revenue, so this lifetime approximation
+  -- (already client-side-COGS'd) deliberately accepts the small skew for
+  -- the index-only flat scan. See the block comment above.
 GROUP BY d.dealer_id, d.product_id
 `
 
@@ -766,7 +772,7 @@ FROM sweed_order_items_flat f
 JOIN pkg_dim pd ON pd.dealer_id = f.dealer_id AND pd.inventory_item_id = f.inventory_item_id
 WHERE f.dealer_id = $1::bigint
   AND f.pay_time >= now() - ($3::int || ' days')::interval
-  AND lower(coalesce(f.raw_item->'invoiceItemStatus'->>'name', '')) <> 'canceled'
+  ${nonCancelledLineSql('f')}
 GROUP BY 1
 ORDER BY 1
 `

@@ -7,6 +7,7 @@ import {
   type BudtenderTotals,
 } from '../../shared/contracts/index.js'
 import { getPool } from '../db/pool.js'
+import { nonCancelledOrderSql } from '../db/sweedOrderStatus.js'
 import { bucketLocalExpr, bucketSelectExpr } from '../metrics/bucketSelectSql.js'
 
 // ============================================================================
@@ -118,8 +119,8 @@ export async function getBudtenderAnalytics(
         and pay_time >= $2
         and pay_time <  $3
         -- Fully-cancelled orders are not transactions; exclude from
-        -- cashier attribution. (Order status is spelled 'Cancelled'.)
-        and lower(coalesce(raw_json->'invoiceStatus'->>'name', '')) <> 'cancelled'
+        -- cashier attribution.
+        ${nonCancelledOrderSql('')}
     ),
     daily as (
       select
@@ -210,8 +211,8 @@ export async function getBudtenderAnalytics(
         and pay_time >= $2
         and pay_time <  $3
         -- Fully-cancelled orders are not transactions; exclude from
-        -- cashier attribution. (Order status is spelled 'Cancelled'.)
-        and lower(coalesce(raw_json->'invoiceStatus'->>'name', '')) <> 'cancelled'
+        -- cashier attribution.
+        ${nonCancelledOrderSql('')}
     ),
     -- Drop unattributed rows (NULL cashier_user_id) AFTER the
     -- projection.

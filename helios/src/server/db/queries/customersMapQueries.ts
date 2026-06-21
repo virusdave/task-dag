@@ -11,6 +11,7 @@
 
 import type { Queryable } from '../pool.js'
 import { membershipSegmentVisibleSql } from './sweedCustomerSegmentsQueries.js'
+import { nonCancelledOrderSql } from '../sweedOrderStatus.js'
 import type {
   AgeBand,
   CoordSourceFilter,
@@ -433,6 +434,7 @@ export async function listCustomersMapPoints(
       where link.sweed_customer_id is not null
         and so.dealer_id   = link.dealer_id
         and so.customer_id = link.sweed_customer_id
+        ${nonCancelledOrderSql('so')}
     ) spend on true
 
     ${segMatchJoin}

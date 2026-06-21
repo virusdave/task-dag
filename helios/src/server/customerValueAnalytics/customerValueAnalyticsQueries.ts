@@ -22,6 +22,7 @@ import {
 } from '../../shared/contracts/index.js'
 import { getPool } from '../db/pool.js'
 import { membershipSegmentVisibleSql } from '../db/queries/sweedCustomerSegmentsQueries.js'
+import { nonCancelledOrderSql } from '../db/sweedOrderStatus.js'
 // Per-line margin convention is shared verbatim with the proven
 // `margins.gross_margin_dollars` registry metric: line margin =
 // REVENUE_EXPR − COGS_EXPR over `sweed_order_items_flat f`, where
@@ -109,27 +110,6 @@ function emptyTrailingSpendByMinVisits(): TrailingSpendByMinVisits[] {
     customers: 0,
     percentiles: emptyTrailingSpendPercentiles(),
   }))
-}
-
-/**
- * Exclude fully-cancelled Sweed orders from every customer-value read.
- *
- * Mirrors `NON_CANCELLED_ORDER_SQL_BARE` in
- * metrics/_real/sweedOrdersQueries.ts. The Sweed order-list feed carries
- * a non-zero header subtotal/grand_total on `status='Cancelled'` orders,
- * so without this guard cancelled activity silently inflates every LTV /
- * contribution / receipt sum AND — worse for this surface — counts as a
- * real purchase in the `row_number()` purchase-ordinal and per-customer
- * `count(*)` rollups (a cancelled order would push a customer into a
- * higher "Nth purchase" bucket). Cancellations are ~18% of orders here,
- * so the distortion is material, not a rounding-error tail.
- *
- * Pass the table alias used in each query (`''` for an unaliased
- * `from sweed_orders`).
- */
-function nonCancelledOrderSql(alias = ''): string {
-  const prefix = alias ? `${alias}.` : ''
-  return `and lower(coalesce(${prefix}raw_json->'invoiceStatus'->>'name', '')) <> 'cancelled'`
 }
 
 /**

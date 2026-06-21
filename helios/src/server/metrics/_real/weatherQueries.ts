@@ -5,6 +5,7 @@ import {
   type HeliosPendingPurchaseSiteDealer,
 } from '../../../shared/contracts/index.js'
 import { getPool } from '../../db/pool.js'
+import { nonCancelledOrderSql } from '../../db/sweedOrderStatus.js'
 import { defaultWindow, walkBuckets } from '../timeBuckets.js'
 import type { MetricAggregation } from '../../../shared/contracts/index.js'
 import type { MetricQueryArgs, MetricRow } from '../types.js'
@@ -128,8 +129,7 @@ async function fetchPerDayRows(
          and pay_time >= $3 and pay_time < $4
          -- Fully-cancelled orders are not sales; their header
          -- subtotal/grand_total is often non-zero in Sweed's feed.
-         -- (Order status is spelled 'Cancelled'.)
-         and lower(coalesce(raw_json->'invoiceStatus'->>'name', '')) <> 'cancelled'
+         ${nonCancelledOrderSql('')}
        group by 1, 2
     )
     select w.site_zip::text as site_zip,

@@ -6,6 +6,7 @@ import {
 } from '../../../shared/contracts/index.js'
 import { bucketSelectExpr } from '../bucketSelectSql.js'
 import { getPool } from '../../db/pool.js'
+import { nonCancelledLinePredicateSql, nonCancelledOrderSql } from '../../db/sweedOrderStatus.js'
 import { advanceBucketStart, defaultWindow, walkBuckets } from '../timeBuckets.js'
 import type { MetricQueryArgs, MetricRow } from '../types.js'
 import { orderItemsCatalogFilterSql } from './catalogFilterSql.js'
@@ -238,15 +239,10 @@ async function runMarginBucketedQuery(args: {
 }
 
 /** Canceled line items are voided sales — they must NEVER contribute
- *  revenue, qty, or COGS to any margin / velocity / sell-through
- *  metric. Sweed's per-LINE status lives at
- *  `raw_item.invoiceItemStatus.name`; a voided line reads 'Canceled'
- *  (note: the differently-spelled order-level status is 'Cancelled').
- *  Canceled lines DO carry a non-zero `subtotalAmount` (and sometimes
- *  qty) in Sweed's order-list feed, so without this guard they
- *  inflated revenue and (when qty was present) COGS. Case-insensitive
- *  for safety against Sweed taxonomy drift. */
-export const NON_CANCELED_LINE_SQL = `lower(coalesce(f.raw_item->'invoiceItemStatus'->>'name', '')) <> 'canceled'`
+ *  revenue, qty, or COGS to any margin / velocity / sell-through metric.
+ *  Authoritative predicate lives in src/server/db/sweedOrderStatus.ts;
+ *  this is the bare (no leading `and`) form for use inside CASE WHEN. */
+export const NON_CANCELED_LINE_SQL = nonCancelledLinePredicateSql('f')
 
 /** Helper: per-line revenue / qty / COGS expressions over the
  *  materialised sweed_order_items_flat table (alias `f`), D1.
@@ -1195,6 +1191,7 @@ export async function querySalesVsSellableInventory(args: MetricQueryArgs): Prom
       from sweed_orders
      where dealer_id = any($1::bigint[])
        and pay_time >= $2::timestamptz and pay_time < $3::timestamptz
+       ${nonCancelledOrderSql('')}
      group by dealer_id
   `
   const invResults = await Promise.all(

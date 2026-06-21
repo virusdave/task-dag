@@ -47,6 +47,7 @@ import type {
 import { HELIOS_BUSINESS_DAY_START_HOUR } from '../../../shared/contracts/index.js'
 
 import type { Queryable } from '../pool.js'
+import { nonCancelledOrderSql } from '../sweedOrderStatus.js'
 import { SITE_PIN_BY_SLUG } from './customersMapQueries.js'
 import {
   readAddableStaticSegments,
@@ -678,6 +679,7 @@ async function loadPriorVisits(
       from sweed_orders so
       where so.dealer_id = $2
         and so.customer_id = $3
+        ${nonCancelledOrderSql('so')}
         -- Same *business day* (08:00-ET rollover) as the scan, so a
         -- late-night scan + after-midnight purchase still match. See
         -- shared/contracts/domain/businessDay.ts.
@@ -737,6 +739,7 @@ async function loadPurchaseInvoices(
     left join addresses a on a.id = so.delivery_address_id
     where so.dealer_id = $1
       and so.customer_id = $2
+      ${nonCancelledOrderSql('so')}
     order by so.pay_time desc, so.invoice_id desc
     limit ${INVOICE_LIMIT + 1}
   `
@@ -776,6 +779,7 @@ async function loadSweedCustomerAddresses(
       on so.dealer_id = sca.dealer_id
      and so.customer_id = sca.customer_id
      and so.delivery_address_id = sca.address_id
+     ${nonCancelledOrderSql('so')}
     where sca.dealer_id = $1
       and sca.customer_id = $2
     group by

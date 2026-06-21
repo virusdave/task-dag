@@ -30,20 +30,15 @@ import {
   scopeOf,
 } from '../db/queries/marketingSegmentDetailsQueries.js'
 import { catalogSegmentVisibleSql } from '../db/queries/sweedCustomerSegmentsQueries.js'
+import { nonCancelledOrderSql } from '../db/sweedOrderStatus.js'
+// Re-export so existing importers (crmSegmentAnalysisQueries) keep working
+// while the authoritative predicate lives in one place.
+export { nonCancelledOrderSql } from '../db/sweedOrderStatus.js'
 import { FULFILLMENT_SERIES_SQL_EXPR_SO } from '../metrics/_real/sweedOrdersQueries.js'
 
 export const CRM_SEGMENT_METRICS_DEFAULT_WINDOW_DAYS = 90
 
 const DAY_MS = 86_400_000
-
-// Exclude fully-cancelled Sweed orders. Shares the exact convention used by
-// the customer-value reader (header subtotal/grand_total can be non-zero on
-// cancelled orders, so without this guard cancelled activity inflates every
-// rollup). Keep in sync with customerValueAnalyticsQueries.nonCancelledOrderSql.
-export function nonCancelledOrderSql(alias = ''): string {
-  const prefix = alias ? `${alias}.` : ''
-  return `and lower(coalesce(${prefix}raw_json->'invoiceStatus'->>'name', '')) <> 'cancelled'`
-}
 
 export function resolveDealerIds(sites: readonly string[]): number[] {
   if (sites.length === 0) {

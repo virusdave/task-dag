@@ -10,6 +10,7 @@ import {
 } from '../../shared/contracts/index.js'
 import { parseUnitSize } from '../../shared/domain/catalogCohort.js'
 import { getPool } from '../db/pool.js'
+import { nonCancelledLineSql, nonCancelledOrderSql } from '../db/sweedOrderStatus.js'
 import { bucketLocalExpr } from '../metrics/bucketSelectSql.js'
 
 // ============================================================================
@@ -407,6 +408,7 @@ export async function getCatalogAnalyticsPoints(
       from sweed_orders
       where dealer_id = any($1::bigint[])
         and pay_time >= $2 and pay_time < $3
+        ${nonCancelledOrderSql('')}
       group by dealer_id
     ),
     sales as (
@@ -432,9 +434,8 @@ export async function getCatalogAnalyticsPoints(
         and oi.inventory_item_id is not null
         -- Canceled (voided) lines carry a non-zero subtotalAmount/qty
         -- in Sweed's feed but are not real sales; exclude them from
-        -- units / revenue / COGS / sales-day coverage. (Line status is
-        -- spelled 'Canceled'; order status is 'Cancelled'.)
-        and lower(coalesce(oi.raw_item->'invoiceItemStatus'->>'name', '')) <> 'canceled'
+        -- units / revenue / COGS / sales-day coverage.
+        ${nonCancelledLineSql('oi')}
       group by oi.dealer_id, oi.inventory_item_id
     ),
     mapping as (

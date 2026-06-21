@@ -24,6 +24,7 @@ import {
 import type { Queryable } from '../db/pool.js'
 import { getSegmentDetails } from '../db/queries/marketingSegmentDetailsQueries.js'
 import { FULFILLMENT_SERIES_SQL_EXPR_SO } from '../metrics/_real/sweedOrdersQueries.js'
+import { nonCancelledLineSql } from '../db/sweedOrderStatus.js'
 import {
   nonCancelledOrderSql,
   resolveDealerIds,
@@ -260,6 +261,7 @@ export async function getCrmSegmentAnalysis(
               and f.pay_time <  $4::timestamptz
               and so.customer_id is not null
               ${nonCancelledOrderSql('so')}
+              ${nonCancelledLineSql('f')}
          )
          select in_seg,
                 category,
@@ -306,6 +308,7 @@ export async function getCrmSegmentAnalysis(
               and f.pay_time <  $4::timestamptz
               and so.customer_id is not null
               ${nonCancelledOrderSql('so')}
+              ${nonCancelledLineSql('f')}
          )
          select in_seg,
                 subcategory,

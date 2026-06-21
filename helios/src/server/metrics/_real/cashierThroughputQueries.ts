@@ -8,6 +8,7 @@ import {
 } from '../../../shared/contracts/index.js'
 import { bucketSelectExpr } from '../bucketSelectSql.js'
 import { getPool } from '../../db/pool.js'
+import { nonCancelledOrderSql } from '../../db/sweedOrderStatus.js'
 import { defaultWindow, walkBuckets } from '../timeBuckets.js'
 import type { MetricQueryArgs, MetricRow } from '../types.js'
 
@@ -150,6 +151,7 @@ export async function queryCashierTransactionsPerHour(args: MetricQueryArgs): Pr
          where so.dealer_id = any($1::bigint[])
            and so.pay_time >= $2::timestamptz
            and so.pay_time <  $3::timestamptz
+           ${nonCancelledOrderSql('so')}
       )
       select case when h.cashier_hours > 0
                   then (t.tx / h.cashier_hours)
@@ -264,6 +266,7 @@ export async function queryCashierTransactionsPerHour(args: MetricQueryArgs): Pr
        where so.dealer_id = any($1::bigint[])
          and so.pay_time >= $2::timestamptz
          and so.pay_time <  $3::timestamptz
+         ${nonCancelledOrderSql('so')}
        group by 1
     )
     select c.bucket_start as bucket_start,

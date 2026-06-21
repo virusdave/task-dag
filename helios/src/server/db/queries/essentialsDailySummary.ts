@@ -5,6 +5,7 @@ import {
   type EssentialsDailySummaryRow,
 } from '../../../shared/contracts/index.js'
 import { getPool, type Queryable } from '../pool.js'
+import { nonCancelledOrderSql } from '../sweedOrderStatus.js'
 
 // ============================================================================
 // Essentials → "today, per site" daily summary.
@@ -182,6 +183,9 @@ export async function loadEssentialsDailySummary(
                select 1 from sweed_orders prior
                 where prior.customer_id = so.customer_id
                   and prior.pay_time < so.pay_time
+                  -- A cancelled prior order is not a real prior purchase;
+                  -- excluding it keeps the first-vs-returning split honest.
+                  ${nonCancelledOrderSql('prior')}
              )
             then true
             else false
@@ -204,9 +208,8 @@ export async function loadEssentialsDailySummary(
         where so.dealer_id = any($1::bigint[])
           and so.pay_time >= $2 and so.pay_time < $3
           -- A fully-cancelled order is not a purchase and contributes
-          -- no revenue: drop it from counts AND sales/receipts. (Order
-          -- status is spelled 'Cancelled'; line status is 'Canceled'.)
-          and lower(coalesce(so.raw_json->'invoiceStatus'->>'name', '')) <> 'cancelled'
+          -- no revenue: drop it from counts AND sales/receipts.
+          ${nonCancelledOrderSql('so')}
       )
       select
         dealer_id,
@@ -285,8 +288,8 @@ export async function loadEssentialsDailySummary(
           -- Exclude fully-cancelled orders: their header subtotal is
           -- often non-zero in Sweed's feed while every line is canceled
           -- (so COGS=0), which would otherwise add pure revenue with no
-          -- cost and inflate GM%. (Order status is spelled 'Cancelled'.)
-          and lower(coalesce(so.raw_json->'invoiceStatus'->>'name', '')) <> 'cancelled'
+          -- cost and inflate GM%.
+          ${nonCancelledOrderSql('so')}
       )
       select
         o.dealer_id,

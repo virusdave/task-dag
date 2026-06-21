@@ -5,6 +5,7 @@ import {
 } from '../../../shared/contracts/index.js'
 import { bucketSelectExpr } from '../bucketSelectSql.js'
 import { getPool } from '../../db/pool.js'
+import { nonCancelledLineSql, nonCancelledOrderSql } from '../../db/sweedOrderStatus.js'
 import { defaultWindow, walkBuckets } from '../timeBuckets.js'
 import type { MetricQueryArgs, MetricRow } from '../types.js'
 import {
@@ -36,25 +37,16 @@ import {
 //     or null (ratio metrics).
 // ============================================================================
 
-// A fully-cancelled order is not a transaction: it must not count
-// toward order counts, sales/receipts dollars, basket size, or
-// fulfillment / payment / category splits. Sweed's ORDER-level status
-// lives at raw_json->'invoiceStatus'->>'name' and reads 'Cancelled'
-// (note: the LINE-level status is the differently-spelled 'Canceled').
-// Its header subtotal/grand_total is frequently non-zero in Sweed's
-// feed, so without this guard cancelled orders silently inflated every
-// header-grain metric. Older orders (pre-2026-05) carry no
-// invoiceStatus at all → coalesce('') keeps them included. Case-
-// insensitive against taxonomy drift. The bare variant is for
-// single-table `from sweed_orders` queries; the `so.` variant for
-// aliased / joined ones.
-export const NON_CANCELLED_ORDER_SQL = `and lower(coalesce(so.raw_json->'invoiceStatus'->>'name', '')) <> 'cancelled'`
-const NON_CANCELLED_ORDER_SQL_BARE = `and lower(coalesce(raw_json->'invoiceStatus'->>'name', '')) <> 'cancelled'`
-
-// Canceled (voided) LINE items inside an otherwise-live order: same
-// idea at the item grain, for item-level revenue/category queries over
-// sweed_order_items_flat (alias `f`).
-const NON_CANCELED_LINE_SQL = `and lower(coalesce(f.raw_item->'invoiceItemStatus'->>'name', '')) <> 'canceled'`
+// Cancelled-order / cancelled-line guards. The authoritative predicate now
+// lives in src/server/db/sweedOrderStatus.ts (single source of truth — see
+// that file for the full rationale). These named constants are kept as thin
+// derivations so existing call sites in this file are untouched.
+//   * _BARE — unaliased `from sweed_orders`.
+//   * NON_CANCELLED_ORDER_SQL — the `so.`-aliased / joined form.
+//   * NON_CANCELED_LINE_SQL — line grain over sweed_order_items_flat (alias `f`).
+export const NON_CANCELLED_ORDER_SQL = nonCancelledOrderSql('so')
+const NON_CANCELLED_ORDER_SQL_BARE = nonCancelledOrderSql('')
+const NON_CANCELED_LINE_SQL = nonCancelledLineSql('f')
 
 const POSTGRES_TRUNC_UNIT_BY_AGG: Record<
   Exclude<MetricAggregation, 'dow' | 'dom' | 'dofortnight' | 'total'>,
@@ -133,6 +125,9 @@ export const FIRST_TIME_SERIES_EXPR = `
        select 1 from sweed_orders prior
         where prior.customer_id = so.customer_id
           and prior.pay_time < so.pay_time
+          -- A cancelled prior order is not a real prior purchase, so it
+          -- must not flip a genuine first purchase to 'returning'.
+          ${nonCancelledOrderSql('prior')}
      )
     then 'first_time'
     else 'returning'
