@@ -21,6 +21,8 @@ import {
   PendingPurchaseHintBundleRouteParamsSchema,
   PendingPurchaseHintDocumentAddResponseSchema,
   PendingPurchaseHintDocumentRouteParamsSchema,
+  TriggerPendingPurchaseHintExtractionBodySchema,
+  TriggerPendingPurchaseHintExtractionResponseSchema,
   UpdatePendingPurchaseHintBundleBodySchema,
   PendingPurchaseListQuerySchema,
   PendingPurchaseListResponseSchema,
@@ -977,6 +979,20 @@ export async function registerPendingPurchaseRoutes(server: FastifyInstance): Pr
         byteSize: pointer.byteSize,
         userId: user.id,
       })
+      // Kick off extraction (C3) so the document's facts are ready when the
+      // classifier (C4) reads the bundle. Enqueue for a genuinely new
+      // document, and also for a deduped paste that is not yet extracted (e.g.
+      // a prior add committed but its enqueue failed) — the per-(bundle,scope)
+      // dedupe key collapses a redundant enqueue onto any in-flight one.
+      if (!result.deduped || result.document.extractionStatus !== 'extracted') {
+        await enqueueHintFactExtraction({
+          hintBundleId: params.hintBundleId,
+          hintDocumentId: result.document.hintDocumentId,
+          force: false,
+          trigger: 'document_added',
+          userId: user.id,
+        })
+      }
       return reply
         .status(result.deduped ? 200 : 201)
         .send(PendingPurchaseHintDocumentAddResponseSchema.parse(result))
@@ -1044,6 +1060,76 @@ export async function registerPendingPurchaseRoutes(server: FastifyInstance): Pr
         .send(blob.text)
     },
   )
+  // Re-run the hint-fact extraction pass (C3) for a bundle (or one document).
+  // Useful after a model/config recovery or to retry a `failed` document.
+  // Returns the enqueued job id so the UI (C6) can link to it.
+  server.post('/api/catalog/pending-purchases/hint-bundles/:hintBundleId/extract', async (request, reply) => {
+    const user = await requireSessionUser(request, reply, 'admin')
+    if (!user) {
+      return
+    }
+    const params = PendingPurchaseHintBundleRouteParamsSchema.parse(request.params)
+    const body = TriggerPendingPurchaseHintExtractionBodySchema.parse(request.body ?? {})
+
+    const detail = await getPendingPurchaseHintBundleDetail(getPool(), params.hintBundleId)
+    if (!detail) {
+      return reply.status(404).send({ error: 'Hint bundle not found.' })
+    }
+    if (detail.status !== 'active') {
+      return reply.status(409).send({ error: 'Hint bundle is archived; un-archive it before extracting.' })
+    }
+    // Validate single-document scope BELONGS to this bundle so a stray id can't
+    // enqueue a no-op job that still returns 202.
+    if (
+      body.hintDocumentId !== undefined &&
+      !detail.documents.some((document) => document.hintDocumentId === body.hintDocumentId)
+    ) {
+      return reply.status(404).send({ error: 'Hint document not found in this bundle.' })
+    }
+
+    const jobId = await enqueueHintFactExtraction({
+      hintBundleId: params.hintBundleId,
+      hintDocumentId: body.hintDocumentId ?? null,
+      force: body.force ?? false,
+      trigger: 'manual_reextract',
+      userId: user.id,
+    })
+    return reply
+      .status(202)
+      .send(TriggerPendingPurchaseHintExtractionResponseSchema.parse({ jobId }))
+  })
+}
+
+/**
+ * Enqueue the hint-fact extraction job (C3). Deduped per (bundle, scope) so a
+ * burst of document adds or repeated operator clicks collapse onto one queued
+ * run while it is still pending/running.
+ */
+async function enqueueHintFactExtraction(input: {
+  hintBundleId: string
+  hintDocumentId: string | null
+  force: boolean
+  trigger: 'document_added' | 'manual_reextract'
+  userId: number
+}): Promise<number> {
+  const scope = input.hintDocumentId ?? 'all'
+  return enqueueJob(getPool(), {
+    // Serialize every extraction job for a bundle so overlapping doc/all or
+    // force/pending runs can never concurrently write the same rows.
+    concurrencyKey: `catalog.pending_purchases.extract_hint_facts:${input.hintBundleId}`,
+    dedupeKey: `catalog.pending_purchases.extract_hint_facts:${input.hintBundleId}:${scope}:${input.force ? 'force' : 'pending'}`,
+    jobType: 'catalog.pending_purchases.extract_hint_facts',
+    module: 'catalog',
+    payload: {
+      force: input.force,
+      hintBundleId: input.hintBundleId,
+      hintDocumentId: input.hintDocumentId,
+      requestedByUserId: input.userId,
+      trigger: input.trigger,
+    },
+    priority: JOB_PRIORITY_LIVE_REQUESTED,
+    requestedByUserId: input.userId,
+  })
 }
 
 async function lockPendingPurchaseRow(db: PoolClient, rowId: number): Promise<PendingPurchaseRowLockRow> {

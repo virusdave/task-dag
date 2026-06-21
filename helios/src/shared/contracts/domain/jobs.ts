@@ -25,6 +25,7 @@ export const JobTypeSchema = z.enum([
   'catalog.pending_purchases.generate',
   'catalog.pending_purchases.apply',
   'catalog.pending_purchases.import_json',
+  'catalog.pending_purchases.extract_hint_facts',
   'proposal.import.review_json',
   'proposal.generate.description_batch',
   'proposal.generate.pricing_batch',
@@ -234,6 +235,31 @@ export const CatalogPendingPurchasesImportJobPayloadSchema = z.object({
   requestedByUserId: z.number().int().positive().nullable().optional(),
 })
 export type CatalogPendingPurchasesImportJobPayload = z.infer<typeof CatalogPendingPurchasesImportJobPayloadSchema>
+
+// Hint-fact extraction pass (child epic #54, task C3). Runs the
+// intent-classify + cited-fact extraction over the documents of a hint
+// bundle, persisting hint_intent / extraction_status / extracted_facts on
+// each row so the classifier (C4) can read precomputed facts. Optionally
+// scoped to a single document; `force` re-extracts already-extracted docs.
+// job_queue.payload is a trust boundary, so enforce the public-id grammar.
+export const CatalogPendingPurchasesExtractHintFactsJobPayloadSchema = z.object({
+  hintBundleId: z
+    .string()
+    .trim()
+    .regex(/^pphint_[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{6}_[0-9a-f]{6}$/, 'invalid hint bundle id'),
+  hintDocumentId: z
+    .string()
+    .trim()
+    .regex(/^pphdoc_[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{6}_[0-9a-f]{6}$/, 'invalid hint document id')
+    .nullable()
+    .optional(),
+  force: z.boolean().optional(),
+  trigger: z.enum(['document_added', 'manual_reextract']).optional(),
+  requestedByUserId: z.number().int().positive().nullable().optional(),
+})
+export type CatalogPendingPurchasesExtractHintFactsJobPayload = z.infer<
+  typeof CatalogPendingPurchasesExtractHintFactsJobPayloadSchema
+>
 
 export const CatalogPendingPurchasesGenerateJobPayloadSchema = z.object({
   fromDate: z.iso.date(),

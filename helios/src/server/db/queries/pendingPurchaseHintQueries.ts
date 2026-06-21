@@ -11,12 +11,15 @@
 
 import type {
   PendingPurchaseHintBundleDetail,
+  PendingPurchaseHintBundleFact,
   PendingPurchaseHintBundleRecord,
   PendingPurchaseHintBundleStatus,
   PendingPurchaseHintDocumentKind,
   PendingPurchaseHintDocumentRecord,
   PendingPurchaseHintExtractionStatus,
+  PendingPurchaseHintIntent,
 } from '../../../shared/contracts/index.js'
+import { PendingPurchaseHintExtractedFactsSchema } from '../../../shared/contracts/index.js'
 import { newHintBundleId, newHintDocumentId } from '../../pendingPurchases/hintContent.js'
 import type { Queryable } from '../pool.js'
 import { withTransaction } from '../tx.js'
@@ -444,4 +447,127 @@ export async function deletePendingPurchaseHintDocument(
     [hintBundleId, hintDocumentId],
   )
   return (result.rowCount ?? 0) > 0
+}
+
+// ── extraction (C3) ───────────────────────────────────────────────────
+
+export interface RecordHintDocumentExtractionInput {
+  readonly hintDocumentId: string
+  readonly hintIntent: PendingPurchaseHintIntent | null
+  readonly extractionStatus: PendingPurchaseHintExtractionStatus
+  readonly extractionError: string | null
+  /**
+   * The validated `extracted_facts` payload, or null. On a `failed`/`skipped`
+   * outcome pass null so a prior successful payload is CLEARED — C4 must never
+   * read stale facts off a document that later failed re-extraction.
+   */
+  readonly extractedFacts: unknown
+  readonly userId?: number | null
+  /**
+   * When false (a non-forced pass), the write is GUARDED: it will not
+   * overwrite a row another job already moved to `extracted`. This stops a
+   * slow stale job (e.g. one that started before the Mantle token was
+   * restored) from clobbering a newer successful extraction. When true (an
+   * operator force re-extract), the row is always overwritten.
+   */
+  readonly force?: boolean
+}
+
+/**
+ * Persist the result of one document's extraction pass (C3). Scoped by the
+ * document public id; returns true iff a row was written (false when the
+ * non-force guard declined an already-extracted row, or the doc is missing).
+ */
+export async function recordPendingPurchaseHintDocumentExtraction(
+  db: Queryable,
+  input: RecordHintDocumentExtractionInput,
+): Promise<boolean> {
+  const result = await db.query(
+    `
+      update pending_purchase_hint_documents
+         set hint_intent = $2,
+             extraction_status = $3,
+             extraction_error = $4,
+             extracted_facts = $5::jsonb,
+             updated_by_user_id = coalesce($6, updated_by_user_id),
+             updated_at = now()
+       where hint_document_id = $1
+         and ($7::boolean or extraction_status <> 'extracted')
+    `,
+    [
+      input.hintDocumentId,
+      input.hintIntent,
+      input.extractionStatus,
+      input.extractionError,
+      input.extractedFacts === null || input.extractedFacts === undefined
+        ? null
+        : JSON.stringify(input.extractedFacts),
+      input.userId ?? null,
+      input.force ?? false,
+    ],
+  )
+  return (result.rowCount ?? 0) > 0
+}
+
+interface HintFactDocumentRow {
+  hint_document_id: string
+  bundle_public_id: string
+  kind: string
+  source_label: string | null
+  content_sha256: string
+  extracted_facts: unknown
+}
+
+/**
+ * Flatten every successfully-extracted fact across an active bundle's
+ * documents, attaching the owning-document context each citation needs. This
+ * is the read surface the classifier (C4) consumes. Documents that are still
+ * pending / failed / skipped — or whose stored payload no longer matches the
+ * current contract — contribute nothing rather than poisoning the result.
+ */
+export async function loadExtractedPendingPurchaseHintFactsForBundle(
+  db: Queryable,
+  hintBundleId: string,
+): Promise<PendingPurchaseHintBundleFact[]> {
+  const result = await db.query<HintFactDocumentRow>(
+    `
+      select
+        d.hint_document_id, b.hint_bundle_id as bundle_public_id, d.kind,
+        d.source_label, d.content_sha256, d.extracted_facts
+      from pending_purchase_hint_documents d
+      join pending_purchase_hint_bundles b on b.id = d.bundle_id
+      where b.hint_bundle_id = $1
+        and d.extraction_status = 'extracted'
+        and d.extracted_facts is not null
+      order by d.created_at asc, d.id asc
+    `,
+    [hintBundleId],
+  )
+
+  const flattened: PendingPurchaseHintBundleFact[] = []
+  for (const row of result.rows) {
+    const parsed = PendingPurchaseHintExtractedFactsSchema.safeParse(row.extracted_facts)
+    if (!parsed.success) {
+      // A stored payload that no longer matches the contract is a defect to
+      // surface (re-extract), not silent garbage to feed the classifier.
+      console.warn(
+        `[hintFacts] document ${row.hint_document_id} has extracted_facts that fail the current contract; skipping.`,
+      )
+      continue
+    }
+    for (const fact of parsed.data.facts) {
+      flattened.push({
+        hintBundleId: row.bundle_public_id,
+        hintDocumentId: row.hint_document_id,
+        // The DB kind check constrains this to the document-kind enum.
+        kind: row.kind as PendingPurchaseHintDocumentKind,
+        sourceLabel: row.source_label,
+        contentSha256: row.content_sha256,
+        intent: parsed.data.intent,
+        extractor: parsed.data.extractor,
+        fact,
+      })
+    }
+  }
+  return flattened
 }
