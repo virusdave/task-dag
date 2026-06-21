@@ -13,6 +13,14 @@
 -- uploads (CSV/PDF/manifests/POs/vendor catalogs/scrapings) are a near-term
 -- follow-up (epic FT-1) and intentionally out of scope here.
 --
+-- DOCUMENT BYTES LIVE OUT-OF-BAND (operator requirement). The DB does NOT
+-- store the hint text; it stores only a POINTER to a content-addressed,
+-- append-only blob on the `/cloud` storage box (see
+-- server/pendingPurchases/pendingPurchaseHintStore.ts), plus the small
+-- extracted facts (C3) that are worth keeping for history. The pointer is
+-- (content_sha256, storage_backend, storage_uri, byte_size); the same bytes
+-- are physically stored once and may be referenced by multiple bundles.
+--
 -- This migration is STORAGE + admin CRUD + a hintBundleId the generate
 -- job/route carries. The two-step extract pipeline that fills
 -- hint_intent / extraction_status / extracted_facts is task C3, and the
@@ -26,24 +34,24 @@
 --                                      by its public hint_bundle_id. Archive,
 --                                      don't delete (status='archived').
 --
---   pending_purchase_hint_documents  — the individual pasted-text documents
---                                      in a bundle. Each carries a
---                                      content_sha256 over its normalized
---                                      raw_text with a per-bundle UNIQUE
+--   pending_purchase_hint_documents  — one row per hint document = a POINTER
+--                                      to the out-of-band blob plus per-row
+--                                      provenance (kind, source label). Each
+--                                      carries a content_sha256 (the blob's
+--                                      address) with a per-bundle UNIQUE
 --                                      constraint, so re-pasting identical
 --                                      text into the same bundle is an
 --                                      idempotent no-op rather than a
---                                      duplicate. on delete cascade: the
---                                      documents are owned children of a
---                                      bundle.
+--                                      duplicate. on delete cascade drops only
+--                                      the pointer rows; the append-only blob
+--                                      is never deleted.
 --
 -- DB-cost note (canon §3): small, operator-write-rate control-plane tables
--- (a handful of bundles/documents per generate run; single-digit MB/year).
+-- (a handful of pointer rows per generate run; the bytes never touch the DB).
 -- There is NO recurring/background/scheduled workload here — the extraction
 -- pass (C3) is bundle-scoped and operator/job-triggered, not a global
 -- scanner — so the high-risk-DB gate does not apply and no JSONB GIN /
--- normalized-fact tables are warranted yet. raw_text is bounded
--- (<=1 MiB on disk) so an arbitrary admin paste cannot bloat the table.
+-- normalized-fact tables are warranted yet.
 -- Indexes: PK + unique(public id) on both; (status, created_at desc) for the
 -- bundle list; (bundle_id, created_at desc) for the per-bundle document list;
 -- unique(bundle_id, content_sha256) for paste dedup.
@@ -91,12 +99,18 @@ create table if not exists pending_purchase_hint_documents (
   kind                 text        not null,
   -- Optional human label for the source ("Curaleaf wholesale menu 6/20").
   source_label         text,
-  -- v1: the pasted arbitrary hint text, stored verbatim (after a single
-  -- canonical normalization: trim ends + CRLF→LF). Treated as untrusted
-  -- DATA by the extractor, never instructions.
-  raw_text             text        not null,
-  -- content_sha256 over the normalized raw_text = the per-bundle dedup key.
+  -- ── out-of-band blob POINTER (the bytes never touch the DB) ──────────
+  -- content_sha256 = sha256 of the normalized UTF-8 hint text = the blob's
+  -- content address AND the per-bundle dedup key.
   content_sha256       text        not null,
+  -- Which blob backend holds the bytes ('fs' on /cloud today; 's3' later).
+  storage_backend      text        not null default 'fs',
+  -- Logical key the backend resolves, e.g.
+  -- 'fs://pending-purchase-hints/ab/cd/<sha>.txt'. NEVER an absolute path,
+  -- so a crafted/legacy uri can't escape the storage root.
+  storage_uri          text        not null,
+  -- Size of the stored blob in bytes (the API rejects empty text, so > 0).
+  byte_size            bigint      not null,
   -- ── filled by C3 (intent classify + extract); nullable/defaulted here ──
   -- LLM-detected hint intent (canonical_sku_list / ordered_items_expectation
   -- / free_text_description / line_item_list). Left UNCONSTRAINED so C3 can
@@ -122,13 +136,36 @@ create table if not exists pending_purchase_hint_documents (
     check (hint_document_id ~ '^pphdoc_[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{6}_[0-9a-f]{6}$'),
   constraint pending_purchase_hint_documents_content_sha256_check
     check (content_sha256 ~ '^[0-9a-f]{64}$'),
-  constraint pending_purchase_hint_documents_raw_text_nonempty_check
-    check (btrim(raw_text) <> ''),
-  -- Bound an arbitrary admin paste so it cannot bloat the table. 1 MiB on
-  -- disk; the API caps at 250k chars (<=1 MiB even for 4-byte UTF-8) so a
-  -- request that passes zod can never trip this.
-  constraint pending_purchase_hint_documents_raw_text_size_check
-    check (octet_length(raw_text) <= 1048576),
+  constraint pending_purchase_hint_documents_storage_backend_check
+    check (storage_backend in ('fs', 's3')),
+  constraint pending_purchase_hint_documents_storage_uri_nonempty_check
+    check (btrim(storage_uri) <> ''),
+  -- For the fs backend the logical key is fully derived from the content
+  -- address, so the DB can reject a pointer whose uri doesn't match its sha
+  -- (a buggy/manual insert with an absolute path, wrong shard, or mismatched
+  -- sha). The store enforces the same shape on read; this is the write-time
+  -- backstop. Non-fs backends (future s3) are exempt from the fs key shape.
+  constraint pending_purchase_hint_documents_fs_uri_matches_sha_check
+    check (
+      storage_backend <> 'fs'
+      or storage_uri =
+        'fs://pending-purchase-hints/'
+        || substring(content_sha256 from 1 for 2) || '/'
+        || substring(content_sha256 from 3 for 2) || '/'
+        || content_sha256 || '.txt'
+    ),
+  -- Empty hint text is rejected by the API, so a stored blob is always > 0 B.
+  constraint pending_purchase_hint_documents_byte_size_positive_check
+    check (byte_size > 0),
+  -- extracted_facts (C3) is meant to hold SMALL cited facts only — never the
+  -- raw document text or a full LLM transcript (those belong out-of-band).
+  -- Cap it at 256 KiB so a future C3 bug can't recreate the DB-bloat problem
+  -- through this column. Bump deliberately (with a reason) if C3 needs more.
+  constraint pending_purchase_hint_documents_extracted_facts_small_check
+    check (
+      extracted_facts is null
+      or octet_length(extracted_facts::text) <= 262144
+    ),
   -- Re-pasting identical text into the same bundle is an idempotent no-op.
   constraint pending_purchase_hint_documents_bundle_content_sha256_key
     unique (bundle_id, content_sha256),

@@ -3,10 +3,12 @@
 -- pending_purchase_hint_bundles + pending_purchase_hint_documents are the
 -- Helios-side hint-bundle storage for the prospective pending-purchase
 -- classifier (child FreshlyBakedNYC/automation#54 C2, parent
--- virusdave/top-level#33). Dropping them discards all stored hint material
--- (pasted menus / POs / operator notes) and any C3-extracted facts; only do
--- this in a full teardown/rollback of the hint-bundle brick. Drop the child
--- table first (it FKs the bundles).
+-- virusdave/top-level#33). Dropping them discards the bundle metadata, the
+-- out-of-band blob POINTERS, and any C3-extracted facts; only do this in a
+-- full teardown/rollback of the hint-bundle brick. The append-only blobs on
+-- /cloud (the actual pasted text) are content-addressed and NOT removed here
+-- — they are harmless orphaned icebox bytes. Drop the child table first (it
+-- FKs the bundles).
 
 \set ON_ERROR_STOP on
 \timing on

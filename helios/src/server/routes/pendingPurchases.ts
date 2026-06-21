@@ -51,10 +51,16 @@ import {
   deletePendingPurchaseHintDocument,
   getPendingPurchaseHintBundle,
   getPendingPurchaseHintBundleDetail,
+  getPendingPurchaseHintDocumentPointer,
   HintBundleMutationError,
   listPendingPurchaseHintBundles,
   updatePendingPurchaseHintBundle,
 } from '../db/queries/pendingPurchaseHintQueries.js'
+import { normalizeHintText } from '../pendingPurchases/hintContent.js'
+import {
+  getHintDocumentStore,
+  HINT_BLOB_CONTENT_TYPE,
+} from '../pendingPurchases/pendingPurchaseHintStore.js'
 import {
   insertPendingPurchaseParseObservation,
   normalizePendingPurchaseParserText,
@@ -896,7 +902,8 @@ export async function registerPendingPurchaseRoutes(server: FastifyInstance): Pr
       .send(PendingPurchaseHintBundleDetailResponseSchema.parse({ bundle: { ...bundle, documents: [] } }))
   })
 
-  // Get one bundle with its full document list (includes raw text).
+  // Get one bundle with its full document list (pointer metadata only; fetch
+  // a document's text on demand via the .../content endpoint).
   server.get('/api/catalog/pending-purchases/hint-bundles/:hintBundleId', async (request, reply) => {
     const user = await requireSessionUser(request, reply, 'admin')
     if (!user) {
@@ -940,12 +947,34 @@ export async function registerPendingPurchaseRoutes(server: FastifyInstance): Pr
     }
     const params = PendingPurchaseHintBundleRouteParamsSchema.parse(request.params)
     const body = AddPendingPurchaseHintDocumentBodySchema.parse(request.body ?? {})
+    // Cheap preflight so an obviously-bad request (missing / archived bundle)
+    // doesn't write a blob to /cloud first. NOT authoritative — the
+    // transactional FOR SHARE check inside addPendingPurchaseHintDocument is.
+    const preflight = await getPendingPurchaseHintBundle(getPool(), params.hintBundleId)
+    if (!preflight) {
+      return reply.status(404).send({ error: 'Hint bundle not found.', code: 'bundle_not_found' })
+    }
+    if (preflight.status !== 'active') {
+      return reply.status(409).send({
+        error: `Hint bundle ${params.hintBundleId} is archived; un-archive it before adding documents.`,
+        code: 'bundle_archived',
+      })
+    }
+    // Normalize once, write the bytes to the out-of-band content-addressed
+    // blob store, and persist ONLY the resulting pointer in the DB. The store
+    // is idempotent on content, so a re-paste resolves to the same blob and
+    // the DB insert dedups on (bundle_id, content_sha256).
+    const normalized = normalizeHintText(body.rawText)
+    const pointer = await getHintDocumentStore().put(normalized)
     try {
       const result = await addPendingPurchaseHintDocument({
         hintBundleId: params.hintBundleId,
         kind: body.kind,
         sourceLabel: body.sourceLabel ?? null,
-        rawText: body.rawText,
+        contentSha256: pointer.contentSha256,
+        storageBackend: pointer.storageBackend,
+        storageUri: pointer.storageUri,
+        byteSize: pointer.byteSize,
         userId: user.id,
       })
       return reply
@@ -983,6 +1012,36 @@ export async function registerPendingPurchaseRoutes(server: FastifyInstance): Pr
         return reply.status(404).send({ error: 'Hint bundle not found.' })
       }
       return reply.send(PendingPurchaseHintBundleDetailResponseSchema.parse({ bundle: detail }))
+    },
+  )
+
+  // Fetch a single document's text on demand. The bytes live out-of-band; the
+  // DB stores only a pointer, so this reads the blob from the content store
+  // (verifying integrity) and returns plain text. Admin-only, scoped by BOTH
+  // ids, never exposes the internal storage_uri, and is no-store so the
+  // untrusted hint material is never cached.
+  server.get(
+    '/api/catalog/pending-purchases/hint-bundles/:hintBundleId/documents/:hintDocumentId/content',
+    async (request, reply) => {
+      const user = await requireSessionUser(request, reply, 'admin')
+      if (!user) {
+        return
+      }
+      const params = PendingPurchaseHintDocumentRouteParamsSchema.parse(request.params)
+      const pointer = await getPendingPurchaseHintDocumentPointer(
+        getPool(),
+        params.hintBundleId,
+        params.hintDocumentId,
+      )
+      if (!pointer) {
+        return reply.status(404).send({ error: 'Hint document not found in this bundle.' })
+      }
+      const blob = await getHintDocumentStore().read(pointer)
+      return reply
+        .header('Content-Type', HINT_BLOB_CONTENT_TYPE)
+        .header('Cache-Control', 'no-store')
+        .header('X-Content-Type-Options', 'nosniff')
+        .send(blob.text)
     },
   )
 }

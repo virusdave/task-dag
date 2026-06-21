@@ -17,12 +17,7 @@ import type {
   PendingPurchaseHintDocumentRecord,
   PendingPurchaseHintExtractionStatus,
 } from '../../../shared/contracts/index.js'
-import {
-  hintDocumentContentSha256,
-  newHintBundleId,
-  newHintDocumentId,
-  normalizeHintText,
-} from '../../pendingPurchases/hintContent.js'
+import { newHintBundleId, newHintDocumentId } from '../../pendingPurchases/hintContent.js'
 import type { Queryable } from '../pool.js'
 import { withTransaction } from '../tx.js'
 
@@ -231,8 +226,9 @@ interface HintDocumentRow {
   bundle_public_id: string
   kind: string
   source_label: string | null
-  raw_text: string
   content_sha256: string
+  storage_backend: string
+  byte_size: string | number
   hint_intent: string | null
   extraction_status: string
   extraction_error: string | null
@@ -249,8 +245,11 @@ function mapDocumentRow(row: HintDocumentRow): PendingPurchaseHintDocumentRecord
     bundleId: row.bundle_public_id,
     kind: row.kind as PendingPurchaseHintDocumentKind,
     sourceLabel: row.source_label,
-    rawText: row.raw_text,
+    // Pointer metadata only — the bytes live out-of-band, and storage_uri (an
+    // internal path) is deliberately NOT exposed in the API record.
     contentSha256: row.content_sha256,
+    storageBackend: row.storage_backend as PendingPurchaseHintDocumentRecord['storageBackend'],
+    byteSize: typeof row.byte_size === 'number' ? row.byte_size : Number.parseInt(row.byte_size, 10),
     hintIntent: row.hint_intent,
     extractionStatus: row.extraction_status as PendingPurchaseHintExtractionStatus,
     extractionError: row.extraction_error,
@@ -265,8 +264,8 @@ function mapDocumentRow(row: HintDocumentRow): PendingPurchaseHintDocumentRecord
 const SELECT_DOCUMENT = `
   select
     d.hint_document_id, b.hint_bundle_id as bundle_public_id, d.kind,
-    d.source_label, d.raw_text, d.content_sha256, d.hint_intent,
-    d.extraction_status, d.extraction_error, d.extracted_facts,
+    d.source_label, d.content_sha256, d.storage_backend, d.byte_size,
+    d.hint_intent, d.extraction_status, d.extraction_error, d.extracted_facts,
     d.created_by_user_id, d.updated_by_user_id, d.created_at, d.updated_at
   from pending_purchase_hint_documents d
   join pending_purchase_hint_bundles b on b.id = d.bundle_id
@@ -287,7 +286,12 @@ export interface AddHintDocumentInput {
   readonly hintBundleId: string
   readonly kind: PendingPurchaseHintDocumentKind
   readonly sourceLabel?: string | null
-  readonly rawText: string
+  // Out-of-band blob pointer — the caller (route) has already written the
+  // bytes to the content-addressed store and passes the resulting pointer.
+  readonly contentSha256: string
+  readonly storageBackend: 'fs' | 's3'
+  readonly storageUri: string
+  readonly byteSize: number
   readonly userId: number
   readonly now?: Date
 }
@@ -299,18 +303,17 @@ export interface AddHintDocumentResult {
 }
 
 /**
- * Add a pasted-text document to a bundle. Fail-closed: the bundle must exist
- * AND be active (locked FOR SHARE so a concurrent archive can't race the
- * insert), else throws {@link HintBundleMutationError}. Idempotent on the
- * per-bundle content hash — re-pasting identical text returns the existing
- * row with `deduped: true` instead of a 23505.
+ * Insert a pointer row for a hint document already written to the out-of-band
+ * blob store. Fail-closed: the bundle must exist AND be active (locked FOR
+ * SHARE so a concurrent archive can't race the insert), else throws
+ * {@link HintBundleMutationError}. Idempotent on the per-bundle content hash —
+ * re-adding identical text returns the existing row with `deduped: true`
+ * instead of a 23505 (and the blob, being content-addressed, is the same).
  */
 export async function addPendingPurchaseHintDocument(
   input: AddHintDocumentInput,
 ): Promise<AddHintDocumentResult> {
   const now = input.now ?? new Date()
-  const normalized = normalizeHintText(input.rawText)
-  const contentSha256 = hintDocumentContentSha256(normalized)
 
   return withTransaction(async (client) => {
     const bundle = await client.query<{ id: string; status: string }>(
@@ -335,17 +338,18 @@ export async function addPendingPurchaseHintDocument(
       `
         with ins as (
           insert into pending_purchase_hint_documents (
-            hint_document_id, bundle_id, kind, source_label, raw_text,
-            content_sha256, created_by_user_id, updated_by_user_id
+            hint_document_id, bundle_id, kind, source_label, content_sha256,
+            storage_backend, storage_uri, byte_size,
+            created_by_user_id, updated_by_user_id
           )
-          values ($1, $2, $3, $4, $5, $6, $7, $7)
+          values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9)
           on conflict (bundle_id, content_sha256) do nothing
           returning *
         )
         select
-          ins.hint_document_id, $8 as bundle_public_id, ins.kind,
-          ins.source_label, ins.raw_text, ins.content_sha256, ins.hint_intent,
-          ins.extraction_status, ins.extraction_error, ins.extracted_facts,
+          ins.hint_document_id, $10 as bundle_public_id, ins.kind,
+          ins.source_label, ins.content_sha256, ins.storage_backend, ins.byte_size,
+          ins.hint_intent, ins.extraction_status, ins.extraction_error, ins.extracted_facts,
           ins.created_by_user_id, ins.updated_by_user_id, ins.created_at, ins.updated_at
         from ins
       `,
@@ -354,8 +358,10 @@ export async function addPendingPurchaseHintDocument(
         bundleId,
         input.kind,
         input.sourceLabel ?? null,
-        normalized,
-        contentSha256,
+        input.contentSha256,
+        input.storageBackend,
+        input.storageUri,
+        input.byteSize,
         input.userId,
         input.hintBundleId,
       ],
@@ -368,10 +374,53 @@ export async function addPendingPurchaseHintDocument(
     // Conflict on (bundle_id, content_sha256): return the pre-existing row.
     const existing = await client.query<HintDocumentRow>(
       `${SELECT_DOCUMENT} where d.bundle_id = $1 and d.content_sha256 = $2`,
-      [bundleId, contentSha256],
+      [bundleId, input.contentSha256],
     )
     return { document: mapDocumentRow(existing.rows[0]!), deduped: true }
   })
+}
+
+export interface HintDocumentPointer {
+  readonly contentSha256: string
+  readonly storageBackend: 'fs' | 's3'
+  readonly storageUri: string
+  readonly byteSize: number
+}
+
+/**
+ * Fetch the out-of-band blob pointer for one document, scoped by BOTH the
+ * bundle and document public ids (so a mismatched URL can't read an unrelated
+ * document). Used by the content endpoint to read bytes back from the store.
+ */
+export async function getPendingPurchaseHintDocumentPointer(
+  db: Queryable,
+  hintBundleId: string,
+  hintDocumentId: string,
+): Promise<HintDocumentPointer | null> {
+  const result = await db.query<{
+    content_sha256: string
+    storage_backend: string
+    storage_uri: string
+    byte_size: string | number
+  }>(
+    `
+      select d.content_sha256, d.storage_backend, d.storage_uri, d.byte_size
+        from pending_purchase_hint_documents d
+        join pending_purchase_hint_bundles b on b.id = d.bundle_id
+       where b.hint_bundle_id = $1 and d.hint_document_id = $2
+    `,
+    [hintBundleId, hintDocumentId],
+  )
+  const row = result.rows[0]
+  if (!row) {
+    return null
+  }
+  return {
+    contentSha256: row.content_sha256,
+    storageBackend: row.storage_backend as 'fs' | 's3',
+    storageUri: row.storage_uri,
+    byteSize: typeof row.byte_size === 'number' ? row.byte_size : Number.parseInt(row.byte_size, 10),
+  }
 }
 
 /**

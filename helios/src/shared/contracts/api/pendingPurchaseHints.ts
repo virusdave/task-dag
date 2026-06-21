@@ -62,8 +62,13 @@ export const PendingPurchaseHintDocumentRecordSchema = z.object({
   bundleId: z.string().min(1),
   kind: PendingPurchaseHintDocumentKindSchema,
   sourceLabel: z.string().nullable(),
-  rawText: z.string(),
+  // The document BYTES live out-of-band (content-addressed blob store); the
+  // record carries only the pointer metadata, never the text. Fetch the text
+  // on demand via GET .../documents/:hintDocumentId/content.
   contentSha256: z.string().regex(/^[0-9a-f]{64}$/),
+  storageBackend: z.enum(['fs', 's3']),
+  // A stored blob is always > 0 B (empty text is rejected; DB enforces > 0).
+  byteSize: z.number().int().positive(),
   // Filled by C3 (nullable until then).
   hintIntent: z.string().nullable(),
   extractionStatus: PendingPurchaseHintExtractionStatusSchema,
@@ -93,8 +98,9 @@ export type PendingPurchaseHintBundleRecord = z.infer<
   typeof PendingPurchaseHintBundleRecordSchema
 >
 
-// Bundle detail includes the full document list (with raw_text); the list
-// view deliberately does NOT, so a list response never ships every paste.
+// Bundle detail includes the full document list (pointer metadata only — the
+// text is fetched on demand via the content endpoint); the list view
+// deliberately does NOT, so a list response never ships every document.
 export const PendingPurchaseHintBundleDetailSchema = PendingPurchaseHintBundleRecordSchema.extend({
   documents: z.array(PendingPurchaseHintDocumentRecordSchema),
 })
@@ -165,9 +171,10 @@ export type UpdatePendingPurchaseHintBundleBody = z.infer<
   typeof UpdatePendingPurchaseHintBundleBodySchema
 >
 
-// Add a pasted-text document to a bundle. v1 = raw text only. The 250k-char
-// cap keeps the stored blob under the 1 MiB DB octet-length guard even for
-// 4-byte UTF-8, so a body that passes zod can never trip the DB check.
+// Add a pasted-text document to a bundle. v1 = raw text only. The route
+// normalizes the text, content-addresses it, and writes the bytes to the
+// out-of-band blob store; only the pointer is persisted in the DB. The
+// 250k-char cap bounds a single pasted blob.
 export const AddPendingPurchaseHintDocumentBodySchema = z
   .object({
     kind: PendingPurchaseHintDocumentKindSchema,

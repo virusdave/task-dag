@@ -1291,15 +1291,20 @@ const SENTINELS: MigrationSentinel[] = [
     label:
       'pending_purchase_hint_bundles + pending_purchase_hint_documents — ' +
       'storage + admin API for the prospective classifier\'s untrusted hint ' +
-      'material (v1 pasted text). Without it the hint-bundle routes 500 and ' +
-      'generate can\'t validate a hintBundleId. See child #54 (C2).',
-    // Both tables, the C3-forward columns, the dedup unique constraint, the
-    // FK, and both list indexes — so a partial manual apply reports pending
-    // rather than "safe".
+      'material (v1 pasted text; bytes stored out-of-band, DB holds a pointer). ' +
+      'Without it the hint-bundle routes 500 and generate can\'t validate a ' +
+      'hintBundleId. See child #54 (C2).',
+    // Both tables, the out-of-band POINTER columns, the C3-forward columns,
+    // the dedup unique constraint, the FK, and both list indexes — so a
+    // partial manual apply reports pending rather than "safe".
     check: async (db) => {
       const checks = await Promise.all([
         tableExists(db, 'pending_purchase_hint_bundles'),
         tableExists(db, 'pending_purchase_hint_documents'),
+        columnExists(db, 'pending_purchase_hint_documents', 'content_sha256'),
+        columnExists(db, 'pending_purchase_hint_documents', 'storage_backend'),
+        columnExists(db, 'pending_purchase_hint_documents', 'storage_uri'),
+        columnExists(db, 'pending_purchase_hint_documents', 'byte_size'),
         columnExists(db, 'pending_purchase_hint_documents', 'hint_intent'),
         columnExists(db, 'pending_purchase_hint_documents', 'extraction_status'),
         columnExists(db, 'pending_purchase_hint_documents', 'extraction_error'),
