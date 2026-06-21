@@ -11,8 +11,9 @@ import { z } from 'zod'
 //   - It may PROPOSE reusing an existing live product (reuseProductIdCandidate
 //     + cited evidence), but C5's deterministic validator decides whether that
 //     candidate ever becomes the authoritative raw_row_json.reuseProductId.
-//   - It does NOT compute price or market evidence (Helios does that
-//     deterministically in C5).
+//   - It does NOT compute price or market evidence. Helios computes those
+//     deterministically — C5 gates the reuse link / taxonomy, and C8 composes
+//     the existing deterministic pricing + market-evidence modules.
 //
 // This contract is therefore deliberately NARROWER than the persisted
 // PendingPurchaseRow. The model returns only `{ drafts: [...] }`; the worker

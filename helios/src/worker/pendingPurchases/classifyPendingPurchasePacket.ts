@@ -14,7 +14,8 @@
 //   - It may PROPOSE a reuse link (reuseProductIdCandidate + cited evidence);
 //     C5's deterministic validator decides whether it ever becomes the
 //     authoritative reuseProductId.
-//   - It does NOT compute price or market evidence (C5 does, deterministically).
+//   - It does NOT compute price or market evidence. C5 deterministically gates
+//     the reuse link / taxonomy; C8 composes the existing pricing modules.
 //
 // Safety posture (mirrors C3, which this depends on):
 //   - Hint facts + catalog candidates + order rows travel as a JSON DATA
