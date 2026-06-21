@@ -209,15 +209,23 @@ list_task_refs() {
 # these namespaces drops local refs that origin has since removed
 # (completed/claimed/unblocked) so long-lived checkouts don't show stale
 # frontier/blocked entries.
-fetch_task_refs() {
+# fetch_task_refs_strict: the same namespace sync but RETURNS git's exit
+# status (not masked). Callers that must NOT act on a partial/stale local
+# DAG view — e.g. the epic auto-close completeness check — use this and
+# fail CLOSED on a non-zero return. Most callers want the non-fatal
+# `fetch_task_refs` wrapper below instead.
+fetch_task_refs_strict() {
     git fetch --quiet --prune origin \
         '+refs/heads/tasks/frontier/*:refs/heads/tasks/frontier/*' \
         '+refs/heads/tasks/active/*:refs/heads/tasks/active/*' \
         '+refs/heads/tasks/blocked/*:refs/heads/tasks/blocked/*' \
         '+refs/heads/tasks/blocked-meta/*:refs/heads/tasks/blocked-meta/*' \
         '+refs/heads/tasks/root-active/*:refs/heads/tasks/root-active/*' \
-        '+refs/heads/tasks/pending/*:refs/heads/tasks/pending/*' \
-        2>/dev/null || true
+        '+refs/heads/tasks/pending/*:refs/heads/tasks/pending/*'
+}
+
+fetch_task_refs() {
+    fetch_task_refs_strict 2>/dev/null || true
 }
 
 # Helper: print 'yes' iff the remote currently has a tasks/active/<short>
@@ -683,11 +691,40 @@ maybe_emit_local_epic_close() {
     # Purely-local epics only; defer delegated/mixed epics to close-epic.
     epic_has_delegated_children "$issue" && return 0
 
+    # Sync the FULL task-ref namespace (and origin/master) BEFORE judging
+    # completeness. epic_subtree_complete -> list_dag_children reads the
+    # LOCAL ref view (git rev-list --all); a worker's ephemeral checkout
+    # typically tracks ONLY master and inherited a pre-claim (it never ran
+    # claim/frontier, so it never fetched the sibling task refs). Without
+    # this sync it sees a PARTIAL DAG — just the leaf being completed — and
+    # wrongly concludes the whole epic is done, appending a spurious
+    # Closes-Epic commit that prematurely closes the issue and abandons the
+    # still-pending leaves. origin/master is needed too: a sibling whose
+    # task refs were already pruned on completion is only reachable via
+    # master history. FAIL CLOSED: if we cannot get an authoritative view,
+    # do NOT auto-close (the completion already succeeded; an open-but-done
+    # epic is repairable, a premature close is not).
+    if ! fetch_task_refs_strict; then
+        printf "${YELLOW}⚠ Could not sync task refs from origin; not auto-closing epic #%s. Retry the close after origin is reachable.${RESET}\n" \
+            "$issue" >&2
+        return 0
+    fi
+    # Explicit destination refspec so refs/remotes/origin/master is actually
+    # updated (a bare `git fetch origin master` only populates FETCH_HEAD);
+    # both the rev-list visibility of just-completed siblings and the
+    # origin/master duplicate-close check below depend on it being current.
+    if ! git fetch --quiet --no-tags origin \
+            '+refs/heads/master:refs/remotes/origin/master' >/dev/null 2>&1; then
+        printf "${YELLOW}⚠ Could not sync origin/master; not auto-closing epic #%s. Retry the close after origin is reachable.${RESET}\n" \
+            "$issue" >&2
+        return 0
+    fi
+
     # Whole subtree must be complete (this completion is already on HEAD).
     epic_subtree_complete "$root_sha" || return 0
 
-    # Don't duplicate an existing close (local HEAD or origin/master).
-    git fetch --quiet --no-tags origin master >/dev/null 2>&1 || true
+    # Don't duplicate an existing close (local HEAD or origin/master;
+    # origin/master was just synced above).
     epic_already_closed_on "$issue" "$root_sha" "HEAD" && return 0
     if git rev-parse --verify -q origin/master >/dev/null 2>&1; then
         epic_already_closed_on "$issue" "$root_sha" "origin/master" && return 0
