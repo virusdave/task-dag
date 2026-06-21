@@ -48,6 +48,7 @@ import { registerLlmRoutes } from '../routes/llm.js'
 import { registerLpEventsRoutes } from '../routes/lpEvents.js'
 import { registerMetricAnnotationsRoutes } from '../routes/metricAnnotations.js'
 import { registerMetricsRoutes } from '../routes/metrics.js'
+import { registerBedrockModelConfigRoutes } from '../routes/bedrockModelConfig.js'
 import { registerMetricsDefaultsRoutes } from '../routes/metricsDefaults.js'
 import { registerTargetTrackingRoutes } from '../routes/targetTracking.js'
 import { registerTimeOfDayRoutes } from '../routes/timeOfDay.js'
@@ -275,6 +276,7 @@ async function registerApplicationSurface(server: FastifyInstance) {
   await registerMetricAnnotationsRoutes(server)
   await registerMetricsRoutes(server)
   await registerMetricsDefaultsRoutes(server)
+  await registerBedrockModelConfigRoutes(server)
   await registerTargetTrackingRoutes(server)
   await registerTimeOfDayRoutes(server)
   await registerBudtenderAnalyticsRoutes(server)

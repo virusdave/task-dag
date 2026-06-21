@@ -127,6 +127,13 @@ export function buildConfigSidebarSubtree(): TreeNavNode[] {
           label: 'Sweed auth log',
           to: buildHeliosModulePath('config', 'sweed-auth-log'),
         },
+        {
+          // Below-the-fold: rare per-context LLM model overrides (#54 C4).
+          kind: 'leaf',
+          navKey: 'config.bedrock-models',
+          label: 'Bedrock models',
+          to: buildHeliosModulePath('config', 'bedrock-models'),
+        },
       ],
     },
   ]

@@ -55,6 +55,10 @@ import {
   configParsingPendingPurchasesLoader,
 } from '../routes/config/ConfigParsingPendingPurchasesPage.js'
 import { ConfigWorkersPage } from '../routes/config/ConfigWorkersPage.js'
+import {
+  ConfigBedrockModelsPage,
+  configBedrockModelsLoader,
+} from '../routes/config/ConfigBedrockModelsPage.js'
 import { SweedAuthLogPage, sweedAuthLogLoader } from '../routes/config/SweedAuthLogPage.js'
 import { SweedSessionsPage, sweedSessionsLoader } from '../routes/config/SweedSessionsPage.js'
 import { UsersPage, usersLoader } from '../routes/config/UsersPage.js'
@@ -560,6 +564,11 @@ export const router = createBrowserRouter([
         element: <SweedSessionsPage />,
         loader: sweedSessionsLoader,
         path: 'config/sweed/sessions',
+      },
+      {
+        element: <ConfigBedrockModelsPage />,
+        loader: configBedrockModelsLoader,
+        path: 'config/bedrock-models',
       },
       {
         element: <ConfigWorkersSchedulingPage />,
