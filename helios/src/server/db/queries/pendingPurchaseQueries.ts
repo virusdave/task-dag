@@ -18,6 +18,7 @@ import type {
   PendingPurchaseApplyRequestStatus,
   PendingPurchaseApplyRequestSummary,
   PendingPurchaseApprovalStatus,
+  PendingPurchaseLlmClassification,
   PendingPurchaseMappingStatus,
   PendingPurchaseMarketListing,
   PendingPurchasePacketSource,
@@ -267,6 +268,7 @@ function mapPendingPurchaseRow(
     lastApplyRequestId: readOptionalIntFromString(row.last_apply_request_id),
     lastApplyStatus: row.last_apply_status,
     lastApplySummary: row.last_apply_summary_json ?? {},
+    llmClassification: readLlmClassification(raw.llmClassification),
     mappingStatus: row.mapping_status,
     marketAdviceConfidence: readOptionalString(raw.marketAdviceConfidence),
     marketAdvicePosture: readOptionalString(raw.marketAdvicePosture),
@@ -476,6 +478,41 @@ function readSuggestionCandidates(value: unknown): PendingPurchaseSuggestionCand
     out.push({ productId, productName, score })
   }
   return out
+}
+
+// Read the prospective-classifier provenance block the generate job (C8) stores
+// under `raw_row_json.llmClassification`. Tolerant by design: the field is
+// absent on every legacy / imported row, so anything that isn't a well-formed
+// object returns null (the UI then simply omits the model panel). These values
+// are audit/review context only — never trusted for safety — so we coerce
+// defensively rather than throwing on a malformed blob.
+// Exported for unit testing the defensive coercion (no DB needed); the row
+// mapper above is the only production caller.
+export function readLlmClassification(value: unknown): PendingPurchaseLlmClassification | null {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return null
+  const record = value as Record<string, unknown>
+  // Confidence is a required part of the C4/C5 contract. A block missing a
+  // finite confidence is malformed, not a real classification — treat it as
+  // absent rather than fabricating a misleading "model 0%" pill in the UI.
+  if (typeof record.confidence !== 'number' || !Number.isFinite(record.confidence)) return null
+  return {
+    // Clamp to the contract's nonnegative-integer range so a malformed value
+    // (e.g. -1) can't slip past the API schema and turn into a route failure.
+    schemaVersion:
+      typeof record.schemaVersion === 'number' &&
+      Number.isInteger(record.schemaVersion) &&
+      record.schemaVersion >= 0
+        ? record.schemaVersion
+        : 0,
+    model: typeof record.model === 'string' ? record.model : '',
+    promptVersion: typeof record.promptVersion === 'string' ? record.promptVersion : '',
+    reconcilerVersion:
+      typeof record.reconcilerVersion === 'string' ? record.reconcilerVersion : '',
+    confidence: Math.min(1, Math.max(0, record.confidence)),
+    rationale: typeof record.rationale === 'string' ? record.rationale : '',
+    citedHintIds: readStringArray(record.citedHintIds as JsonValue),
+    warningFlags: readStringArray(record.warningFlags as JsonValue),
+  }
 }
 
 function computeGmPercent(cost: number | null, price: number | null): number | null {

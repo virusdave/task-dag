@@ -1798,6 +1798,22 @@ function PendingPurchaseRowCard(
         {item.reviewFlags.map((flag) => (
           <Pill key={flag} tone="warning">{flag}</Pill>
         ))}
+        {item.llmClassification ? (
+          <Pill tone={confidenceTone(item.llmClassification.confidence)}>
+            {`model ${formatConfidencePercent(item.llmClassification.confidence)}`}
+          </Pill>
+        ) : null}
+        {/*
+          The model's own warning flags (new brand / new group / no comps,
+          etc.) are LOUD by design — surface them inline next to the
+          deterministic reviewFlags rather than burying them in the
+          collapsed model panel, so a reviewer can't miss them. They carry a
+          "model:" prefix so they're never mistaken for a deterministic C5
+          safety finding in this regulated catalog-review UI.
+        */}
+        {item.llmClassification?.warningFlags.map((flag) => (
+          <Pill key={`llm-${flag}`} tone="danger">{`model: ${flag}`}</Pill>
+        ))}
       </div>
       {item.approvedByUser ? <p className="subtle-copy">Approved by {item.approvedByUser}</p> : null}
       {applySummaryText ? <p className="subtle-copy">{applySummaryText}</p> : null}
@@ -2040,6 +2056,43 @@ function PendingPurchaseRowCard(
               </li>
             ))}
           </ul>
+        </details>
+      ) : null}
+      {item.llmClassification ? (
+        <details className="pending-purchase-model-classification">
+          <summary>
+            Model provenance{' '}
+            <Pill tone={confidenceTone(item.llmClassification.confidence)}>
+              {formatConfidencePercent(item.llmClassification.confidence)}
+            </Pill>
+          </summary>
+          {item.llmClassification.rationale ? (
+            <p className="subtle-copy" style={{ marginTop: '0.35rem' }}>
+              {item.llmClassification.rationale}
+            </p>
+          ) : null}
+          {item.llmClassification.citedHintIds.length > 0 ? (
+            <p className="subtle-copy">
+              Cited hints: {item.llmClassification.citedHintIds.join(', ')}
+            </p>
+          ) : null}
+          {(item.llmClassification.model
+            || item.llmClassification.promptVersion
+            || item.llmClassification.reconcilerVersion) ? (
+            <p className="subtle-copy">
+              {[
+                item.llmClassification.model ? `model ${item.llmClassification.model}` : null,
+                item.llmClassification.promptVersion
+                  ? `prompt ${item.llmClassification.promptVersion}`
+                  : null,
+                item.llmClassification.reconcilerVersion
+                  ? `reconciler ${item.llmClassification.reconcilerVersion}`
+                  : null,
+              ]
+                .filter((part): part is string => part !== null)
+                .join(' · ')}
+            </p>
+          ) : null}
         </details>
       ) : null}
       {canApprove && effectiveApprovalStatus === 'approved' && item.lastApplyStatus !== 'applied' ? (
@@ -2677,6 +2730,21 @@ function formatPendingPurchaseMarketReferenceText(
 }
 
 
+
+// Model confidence is a [0,1] float; reviewers think in whole percent.
+function formatConfidencePercent(confidence: number): string {
+  return `${Math.round(confidence * 100)}%`
+}
+
+// Color-code the confidence pill so a low-confidence model row reads as a
+// caution at a glance (the reviewer should scrutinize it harder), without
+// implying the deterministic safety layer (C5) trusted the model: high ≥0.8,
+// medium ≥0.5, low below.
+function confidenceTone(confidence: number): 'danger' | 'success' | 'warning' {
+  if (confidence >= 0.8) return 'success'
+  if (confidence >= 0.5) return 'warning'
+  return 'danger'
+}
 
 function jobStatusTone(status: JobStatusResponse['job']['status']): 'danger' | 'muted' | 'success' | 'warning' {
   switch (status) {

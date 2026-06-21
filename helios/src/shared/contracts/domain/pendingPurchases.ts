@@ -138,6 +138,42 @@ export const PendingPurchaseSuggestionCandidateSchema = z.object({
 })
 export type PendingPurchaseSuggestionCandidate = z.infer<typeof PendingPurchaseSuggestionCandidateSchema>
 
+// Per-row provenance from the prospective LLM classifier (C4) + deterministic
+// reconciler (C5), persisted into `raw_row_json` by the generate job (C8) under
+// the `llmClassification` key and surfaced read-only in the review UI (C6,
+// child FreshlyBakedNYC/automation#54, parent virusdave/top-level#33).
+//
+// The model is a PROPOSER, never an authorizer: every field here is audit /
+// review context only and is NEVER trusted for safety. The authoritative reuse
+// link, normalized taxonomy, and deterministic review flags are the top-level
+// row fields the apply job actually trusts (set by C5); this block only explains
+// to a human reviewer *why* the pipeline landed where it did. It is absent on
+// rows that never went through the LLM pipeline (legacy / imported packets),
+// hence `PendingPurchaseRow.llmClassification` is nullable.
+export const PendingPurchaseLlmClassificationSchema = z.object({
+  // Audit provenance: which classifier/reconciler version + model produced this
+  // row, for replay/debugging. Mirrors the result-level fields on
+  // ReconcilePendingPurchaseDraftsResult.
+  schemaVersion: z.number().int().nonnegative(),
+  model: z.string(),
+  promptVersion: z.string(),
+  reconcilerVersion: z.string(),
+  // The model's self-reported confidence in [0, 1].
+  confidence: z.number().min(0).max(1),
+  // Free-text model rationale for the classification, including why a reuse link
+  // was proposed. Untrusted prose — display only.
+  rationale: z.string(),
+  // The C3 hint facts the model cited ("<hintDocumentId>#<factId>").
+  citedHintIds: z.array(z.string()),
+  // Model-emitted warning flags (e.g. new-brand / new-group / no-comps) the
+  // reviewer should weigh. Distinct from the deterministic top-level
+  // `reviewFlags` set by C5.
+  warningFlags: z.array(z.string()),
+})
+export type PendingPurchaseLlmClassification = z.infer<
+  typeof PendingPurchaseLlmClassificationSchema
+>
+
 export const PendingPurchaseMarketListingSchema = z.object({
   category: z.string().nullable(),
   distanceBand: z.enum(['near', 'mid', 'far', 'very_far', 'unknown']),
@@ -220,6 +256,10 @@ export const PendingPurchaseRowSchema = z.object({
   lastApplyRequestId: z.number().int().positive().nullable(),
   lastApplyStatus: PendingPurchaseRowApplyStatusSchema,
   lastApplySummary: JsonValueSchema,
+  // Read-only provenance from the prospective LLM classifier (C4) + reconciler
+  // (C5); null on legacy / imported rows. Audit/review context only — never a
+  // safety input. See PendingPurchaseLlmClassificationSchema.
+  llmClassification: PendingPurchaseLlmClassificationSchema.nullable().default(null),
   marketDispensaryCount: z.number().int().min(0).nullable(),
   marketEligibleListingCount: z.number().int().min(0).nullable(),
   marketListingCount: z.number().int().min(0).nullable(),
