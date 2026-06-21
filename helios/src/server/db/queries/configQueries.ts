@@ -23,6 +23,7 @@ import {
   FUZZY_SKUS_RETENTION_DEFAULT_SCHEDULE_WINDOWS,
   STOCK_SNAPSHOT_ITEMS_RETENTION_DEFAULT_SCHEDULE_WINDOWS,
   GADS_LP_ROLLUP_REFRESH_DEFAULT_SCHEDULE_WINDOWS,
+  INVENTORY_LIFECYCLE_ADVANCE_DEFAULT_SCHEDULE_WINDOWS,
   getConfigBackgroundTaskDefinition,
   type ConfigBackgroundTaskKey,
   type ConfigWorkerSchedule,
@@ -175,6 +176,7 @@ const DEFAULT_WINDOWS_BY_TASK_KEY: Partial<
   'workers.scheduling.fuzzy_skus_retention': FUZZY_SKUS_RETENTION_DEFAULT_SCHEDULE_WINDOWS,
   'workers.scheduling.stock_snapshot_items_retention': STOCK_SNAPSHOT_ITEMS_RETENTION_DEFAULT_SCHEDULE_WINDOWS,
   'workers.scheduling.gads_lp_rollup_refresh': GADS_LP_ROLLUP_REFRESH_DEFAULT_SCHEDULE_WINDOWS,
+  'workers.scheduling.inventory_lifecycle_advance': INVENTORY_LIFECYCLE_ADVANCE_DEFAULT_SCHEDULE_WINDOWS,
 }
 
 export async function ensureDefaultConfigSchedules(db: Queryable = getPool()): Promise<void> {

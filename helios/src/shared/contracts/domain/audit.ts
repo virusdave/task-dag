@@ -142,6 +142,9 @@ export const AuditEventTypeSchema = z.enum([
   'purchase.lifecycle.release_started',
   'purchase.lifecycle.release_finalized',
   'purchase.lifecycle.release_rolled_back',
+  // L3 (automation#54): automation + monitoring sweep.
+  'purchase.lifecycle.advance_completed',
+  'purchase.lifecycle.alerted',
 ])
 
 export type AuditEntityType = z.infer<typeof AuditEntityTypeSchema>

@@ -162,6 +162,8 @@ export async function tickConfigWorkersScheduler(now: Date = new Date()): Promis
         await runScheduledLitalertsRollingTick(schedule.taskKey, now)
       } else if (schedule.taskKey === 'workers.scheduling.market_evidence_alarm') {
         await runScheduledMarketEvidenceAlarmScanTick(schedule.taskKey, now)
+      } else if (schedule.taskKey === 'workers.scheduling.inventory_lifecycle_advance') {
+        await runScheduledInventoryLifecycleAdvanceTick(schedule.taskKey, now)
       } else if (schedule.taskKey === 'workers.scheduling.catalog') {
         await enqueueScheduledCatalogRefresh(schedule.taskKey, now, activeWindow.intervalMinutes)
       } else if (schedule.taskKey === 'workers.scheduling.edible_thc_clamp') {
@@ -503,6 +505,40 @@ async function runScheduledMarketEvidenceAlarmScanTick(
       dedupeKey: `config.workers.market_evidence_alarm_scan:scheduled:${bucketIso}`,
       jobType: 'config.workers.market_evidence_alarm_scan',
       module: 'config',
+      payload: {
+        trigger: 'scheduled',
+        requestedByUserId: null,
+      },
+      requestedByUserId: null,
+      runAt: now,
+      scope: null,
+    })
+    await recordEnqueueAndPatchCache(db, taskKey, jobId, now)
+  })
+}
+
+/**
+ * Enqueue a single `inventory.lifecycle.advance` job per scheduler tick
+ * (automation#54, L3). The job is idempotent — it only polls async gates,
+ * monitors quarantine breaches, and pages (audit-log deduped) — so
+ * back-to-back ticks are safe. A per-minute dedupe key stops two scheduler
+ * instances in the same minute double-queuing; a dedicated concurrency key
+ * (`inventory.lifecycle.advance`) ensures at most one advance/monitor sweep
+ * runs at a time, which the audit-log alert dedup relies on to avoid
+ * double-paging.
+ */
+async function runScheduledInventoryLifecycleAdvanceTick(
+  taskKey: ConfigBackgroundTaskKey,
+  now: Date,
+): Promise<void> {
+  const bucketIso = new Date(Math.floor(now.getTime() / 60000) * 60000).toISOString()
+  await withTransaction(async (db) => {
+    const jobId = await enqueueJob(db, {
+      priority: JOB_PRIORITY_SCHEDULED_INGEST,
+      concurrencyKey: 'inventory.lifecycle.advance',
+      dedupeKey: `inventory.lifecycle.advance:scheduled:${bucketIso}`,
+      jobType: 'inventory.lifecycle.advance',
+      module: 'catalog',
       payload: {
         trigger: 'scheduled',
         requestedByUserId: null,

@@ -17,6 +17,7 @@ import {
   ConfigWorkersLitalertsRefreshVariantJobPayloadSchema,
   ConfigWorkersLitalertsRetailerBackfillJobPayloadSchema,
   ConfigWorkersMarketEvidenceAlarmScanJobPayloadSchema,
+  InventoryLifecycleAdvanceJobPayloadSchema,
   ConfigWorkersEnrichCustomerAddressJobPayloadSchema,
   ConfigWorkersStockRefreshJobPayloadSchema,
   ConfigWorkersSweedOrdersIngestJobPayloadSchema,
@@ -68,6 +69,7 @@ import { runRefreshGadsLpRollupJob } from '../jobs/refreshGadsLpRollupJob.js'
 import { runConfigWorkersLitalertsRefreshVariantJob } from '../jobs/configWorkersLitalertsRefreshJob.js'
 import { runConfigWorkersLitalertsRetailerBackfillJob } from '../jobs/configWorkersLitalertsRetailerBackfillJob.js'
 import { runConfigWorkersMarketEvidenceAlarmScanJob } from '../jobs/configWorkersMarketEvidenceAlarmScanJob.js'
+import { runInventoryLifecycleAdvanceJob } from '../jobs/inventoryLifecycleAdvanceJob.js'
 import { runConfigWorkersStockRefreshJob } from '../jobs/configWorkersStockRefreshJob.js'
 import { runEnrichCustomerAddressJob } from '../jobs/enrichCustomerAddressJob.js'
 import { runConfigWorkersSweedOrdersIngestJob } from '../jobs/configWorkersSweedOrdersIngestJob.js'
@@ -225,6 +227,12 @@ const handlers: Record<JobType, JobHandler> = {
     await runConfigWorkersMarketEvidenceAlarmScanJob(
       context,
       ConfigWorkersMarketEvidenceAlarmScanJobPayloadSchema.parse(context.payload),
+    )
+  },
+  'inventory.lifecycle.advance': async (context) => {
+    await runInventoryLifecycleAdvanceJob(
+      context,
+      InventoryLifecycleAdvanceJobPayloadSchema.parse(context.payload),
     )
   },
   'config.workers.edible_thc_clamp': async (context) => {

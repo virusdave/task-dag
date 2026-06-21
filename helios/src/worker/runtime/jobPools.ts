@@ -82,6 +82,14 @@ export const JOB_EXECUTION_POOL_BY_TYPE: Record<JobType, JobPoolMetadata> = {
   'config.workers.fuzzy_skus_retention': { pool: 'system', requiresSweedSession: false },
   'config.workers.stock_snapshot_items_retention': { pool: 'system', requiresSweedSession: false },
   'config.workers.gads_lp_rollup_refresh': { pool: 'system', requiresSweedSession: false },
+  // Purchase inventory lifecycle advance + monitor (automation#54, L3):
+  // DB-only on the common path; it opens its OWN `withSweedSession` only
+  // to read live prices (when advancing a ready pricing batch) and live
+  // lots (the quarantine-breach monitor). Like geo_segment_rule_eval, it
+  // therefore lives in the system pool and is NOT a `requiresSweedSession`
+  // job — keeping the singleton Sweed worker free of the routine no-op
+  // gate polling.
+  'inventory.lifecycle.advance': { pool: 'system', requiresSweedSession: false },
   // Visitor-scan address enrichment hits only Postgres + Census
   // (no Sweed), so it lives in the system pool — keeps the Sweed
   // pool free for catalog / orders / shifts / etc.

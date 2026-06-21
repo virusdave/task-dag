@@ -8,6 +8,7 @@ import type {
   PurchaseLifecyclePath,
   PurchaseLifecycleRun,
   PurchaseLifecycleReleaseTargetsResponse,
+  PurchaseLifecycleState,
   PurchaseLifecycleStatusResponse,
 } from '../../shared/contracts/index.js'
 import type { PoolClient } from 'pg'
@@ -42,6 +43,7 @@ import {
   getProposalBatchStatus,
   getPurchaseExpectedScope,
   getRunByPo,
+  getRunCoreForUpdate,
   getSucceededObservationsAfter,
   lifecycleTablesExist,
   lockRunForRelease,
@@ -869,31 +871,41 @@ async function repriceWithBatch(
       : priceGate.unapprovedProductIds.length === 0
         ? 'price_apply_pending'
         : 'awaiting_price_approval'
-    await updateRunStateOrThrow(client, {
-      runId: locked.id,
-      expectedVersion: input.expectedVersion,
-      state: nextState,
-    })
-    await appendAuditEvent(client, {
-      actorType: input.userId ? 'user' : 'system',
-      actorUserId: input.userId,
-      entityId: String(locked.id),
-      entityType: 'purchase_inventory_lifecycle_run',
-      eventType: 'purchase.lifecycle.reprice_advanced',
-      module: 'catalog',
-      payload: {
-        dealerId: input.dealerId,
-        poId: input.poId,
-        phase: 'price_verified_check',
-        nextState,
-        verified: priceGate.verified,
-        unapprovedProductIds: priceGate.unapprovedProductIds,
-        unverifiedProductIds: priceGate.unverifiedProductIds,
-      },
-      requestId: randomUUID(),
-      scope: null,
-      undoPayload: null,
-    })
+    // Only bump the run state (+ version, updated_at) and emit the audit
+    // event when the state actually changes. The live-price evidence above
+    // is always refreshed, but a no-op re-verify (e.g. the L3 advance job
+    // polling a price_apply_pending run every 5 min while the Sweed
+    // reconcile is still catching up) must NOT churn version/updated_at:
+    // that keeps updated_at a stable onset timestamp for the price-apply
+    // timeout alert, avoids spurious optimistic-version bumps under a
+    // stale operator tab, and trims write/audit cost.
+    if (nextState !== locked.state) {
+      await updateRunStateOrThrow(client, {
+        runId: locked.id,
+        expectedVersion: input.expectedVersion,
+        state: nextState,
+      })
+      await appendAuditEvent(client, {
+        actorType: input.userId ? 'user' : 'system',
+        actorUserId: input.userId,
+        entityId: String(locked.id),
+        entityType: 'purchase_inventory_lifecycle_run',
+        eventType: 'purchase.lifecycle.reprice_advanced',
+        module: 'catalog',
+        payload: {
+          dealerId: input.dealerId,
+          poId: input.poId,
+          phase: 'price_verified_check',
+          nextState,
+          verified: priceGate.verified,
+          unapprovedProductIds: priceGate.unapprovedProductIds,
+          unverifiedProductIds: priceGate.unverifiedProductIds,
+        },
+        requestId: randomUUID(),
+        scope: null,
+        undoPayload: null,
+      })
+    }
     return true
   })
   if (!lockResult.acquired) {
@@ -1750,4 +1762,81 @@ export async function rollbackRelease(input: {
   }
   void now
   return statusOrThrow(input.dealerId, input.poId)
+}
+
+// ===========================================================================
+// L3 — automation + monitoring support (the sweep itself lives in
+// worker/jobs/inventoryLifecycleAdvanceJob.ts; these are the money-safety
+// primitives it composes, kept here so they share withPoLifecycleLock).
+// ===========================================================================
+
+/**
+ * Quarantine-path states in which the PO's expected lots have been
+ * received but NOT yet released, so a positive-qty lot in a FOR SALE room
+ * is a money-safety breach (not-yet-priced stock back on the floor). The
+ * release states (release_in_progress / released) are intentionally
+ * excluded — release legitimately moves lots into FOR SALE — and `blocked`
+ * is excluded so a release-incident block (partial failure / price drift,
+ * where some lots may legitimately be mid-move) is not misread as a
+ * breach; those are surfaced by the blocked alert instead.
+ */
+export const QUARANTINE_BREACH_MONITORED_STATES: ReadonlySet<PurchaseLifecycleState> = new Set([
+  'awaiting_receive_to_quarantine',
+  'quarantined',
+  'market_refresh_pending',
+  'market_ready',
+  'pricing_pending',
+  'awaiting_price_approval',
+  'price_apply_pending',
+  'priced_verified',
+])
+
+export interface BreachItemEvidence {
+  itemId: number
+  stockLocation: string | null
+  currentQty: number | null
+}
+
+/**
+ * Persist live quarantine-breach evidence for a run under the per-PO lock,
+ * but only if the run is STILL a quarantine-path run in a monitored
+ * pre-release state. The live Sweed read that found the breach happened
+ * outside the lock, so the run may have raced into release/released/blocked
+ * meanwhile; in that case we persist nothing and return false so the caller
+ * does not page on stale evidence. Returns true when evidence was persisted
+ * and the breach is still real (caller may page). Never changes run state
+ * (alert-only — a DB block would not stop Sweed sales; only the operator
+ * moving the lots back or correcting price does).
+ */
+export async function persistQuarantineBreachEvidence(input: {
+  dealerId: number
+  poId: string
+  breaches: BreachItemEvidence[]
+}): Promise<boolean> {
+  const lockResult = await withPoLifecycleLock(input.dealerId, input.poId, async (client) => {
+    const core = await getRunCoreForUpdate(client, input.dealerId, input.poId)
+    if (
+      !core ||
+      core.path !== 'quarantine' ||
+      !QUARANTINE_BREACH_MONITORED_STATES.has(core.state)
+    ) {
+      return false
+    }
+    for (const breach of input.breaches) {
+      await updateItemQuarantine(client, {
+        itemId: breach.itemId,
+        // The lot is sellable (the breach) → NOT quarantined, so clear the
+        // quarantine-verified stamp and record the live FOR SALE location +
+        // qty. buildGateSummary then surfaces it as a sellable lot.
+        verifiedAt: null,
+        stockLocation: breach.stockLocation,
+        currentQty: breach.currentQty,
+      })
+    }
+    return true
+  })
+  // A failed lock acquire means another lifecycle action is mid-flight for
+  // this PO right now; skip this tick (re-detected next tick) rather than
+  // racing it.
+  return lockResult.acquired ? (lockResult.value ?? false) : false
 }

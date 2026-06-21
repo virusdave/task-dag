@@ -31,6 +31,7 @@ export const CONFIG_BACKGROUND_TASK_KEYS = [
   'workers.scheduling.fuzzy_skus_retention',
   'workers.scheduling.stock_snapshot_items_retention',
   'workers.scheduling.gads_lp_rollup_refresh',
+  'workers.scheduling.inventory_lifecycle_advance',
 ] as const
 export const ConfigBackgroundTaskKeySchema = z.enum(CONFIG_BACKGROUND_TASK_KEYS)
 export type ConfigBackgroundTaskKey = z.infer<typeof ConfigBackgroundTaskKeySchema>
@@ -185,6 +186,13 @@ export const CONFIG_BACKGROUND_TASKS: ReadonlyArray<ConfigBackgroundTaskDefiniti
     slug: 'gads-lp-rollup-refresh',
     implemented: true,
     summary: 'GAds → Landing-pages analytics V1 (parent epic virusdave/top-level#18, child automation#47, phase P2). Every 60 minutes recomputes the small day-grain gads_lp_rollup table from the append-only lp_events sink (migration 070) and updates the singleton gads_lp_rollup_refresh_state freshness row. Idempotent bounded-horizon recompute: a single transaction (advisory-locked) deletes + re-inserts every assignment_day within the trailing 90 NY-local days, so late lp_conversions update the correct older assignment-day bucket while frozen older rows are left untouched. Anchors on the locked paid-GAds-traffic predicate (gclid/gbraid/wbraid keys or a paid_google flag, minus bot_suspected), buckets by America/New_York day, and computes assignment-level-unique funnel counts + 7/30/90d conversion windows. Cost is left unavailable in V1 (no in-DB GAds cost snapshot yet); revenue/ROAS are deferred to V2. The serving endpoint reads only this rollup, never raw lp_events.',
+  },
+  {
+    key: 'workers.scheduling.inventory_lifecycle_advance',
+    label: 'Inventory lifecycle advance + monitor',
+    slug: 'inventory-lifecycle-advance',
+    implemented: true,
+    summary: 'Purchase inventory pricing-safety lifecycle automation + monitoring (parent epic virusdave/top-level#33, child automation#54, stage L3). Every 5 minutes it (1) polls the async gates of active lifecycle runs and advances them through the existing idempotent reprice one-step advancer (market gate passes → create the explicit-product pricing batch → poll batch generation → verify live Sweed price == approved desired price within 1¢), (2) re-reads live Sweed lots for active quarantine-path runs and pages on any breach (a not-yet-priced expected lot back in a FOR SALE room before release) while persisting the live evidence for the panel, and (3) pages on market-data timeout (no succeeded competitor observation 6h after the request cutoff), price-apply timeout (live price still != approved 45m after approval), and newly-blocked runs (pricing/price-apply/release failures). It never approves prices and never starts/receives/releases stock — those stay operator-gated; it only polls gates, surfaces evidence, and alerts (audit-log deduped so a stuck run pages once, not every tick).',
   },
 ]
 
@@ -682,5 +690,30 @@ export const STOCK_SNAPSHOT_ITEMS_RETENTION_DEFAULT_SCHEDULE_WINDOWS: ReadonlyAr
     intervalMinutes: 15,
     paused: false,
     notes: 'Delete stock_snapshot_items of snapshots older than 90 days (operator-tunable) in bounded DB batches (≤2000 rows/batch, ≤20 batches/tick), keeping the referenced stock_snapshots headers. Off-hours multi-tick (not once-daily) so deletion comfortably exceeds the ≈375k rows/day aging rate without competing with daytime serving (DB-cost epic phase F6).',
+  },
+]
+
+/**
+ * Default schedule for the purchase inventory pricing-safety lifecycle
+ * advance + monitor sweep (automation#54, L3). All day, every 5 minutes:
+ * the sweep polls async gates (market data arriving, the pricing batch
+ * generating, the Sweed price reconcile applying) and re-reads live lots
+ * for breach monitoring, so a 5-minute cadence keeps an in-progress
+ * lifecycle moving and surfaces a quarantine breach / stuck gate within
+ * one window. Volume is tiny (a handful of active runs at once; only runs
+ * updated in the last 14 days are scanned), and live Sweed reads are
+ * batched per (dealer, product), so the cadence is bounded by how quickly
+ * we want gates to advance / breaches to surface, not by cost.
+ */
+export const INVENTORY_LIFECYCLE_ADVANCE_DEFAULT_SCHEDULE_WINDOWS: ReadonlyArray<
+  Omit<ConfigWorkerScheduleWindow, 'id'>
+> = [
+  {
+    weekdayMask: WEEKDAY_MASK_ALL,
+    windowStartMinute: 0,
+    windowEndMinute: 1440,
+    intervalMinutes: 5,
+    paused: false,
+    notes: 'Poll active purchase-inventory lifecycle async gates + quarantine-breach monitor + timeout/blocked alerts, every 5 minutes (only runs updated in the last 14 days).',
   },
 ]

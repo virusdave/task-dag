@@ -923,3 +923,118 @@ export async function getApprovedPricesForBatch(
 }
 
 export { mapRunRow }
+
+// ===========================================================================
+// L3 — automation + monitoring sweep support
+// ===========================================================================
+
+/**
+ * How far back the L3 sweep looks. Runs whose `updated_at` is older than
+ * this are considered abandoned/handled and are NOT scanned, so the live
+ * Sweed read + audit dedup cost stays bounded even as POs accumulate over
+ * months. A genuinely-active lifecycle is touched (advanced/verified)
+ * well within this window every tick.
+ */
+export const LIFECYCLE_SWEEP_LOOKBACK_DAYS = 14
+
+/**
+ * Load every non-terminal lifecycle run (state != 'released') touched in
+ * the last LIFECYCLE_SWEEP_LOOKBACK_DAYS days, with its item rows. The
+ * sweep partitions these in memory into advance candidates (async-gate
+ * states), quarantine-breach candidates (quarantine path, pre-release),
+ * and alert candidates (timeouts / blocked). Loads base (095) columns
+ * only — the sweep never needs the L2 release run columns.
+ */
+export async function listActiveLifecycleRuns(db: Queryable): Promise<PurchaseLifecycleRun[]> {
+  const runResult = await db.query<RunRow>(
+    `select ${runColumns(false)} from purchase_inventory_lifecycle_runs
+      where state <> 'released'
+        and updated_at > now() - ($1 || ' days')::interval
+      order by id asc`,
+    [String(LIFECYCLE_SWEEP_LOOKBACK_DAYS)],
+  )
+  if (runResult.rows.length === 0) return []
+
+  const runIds = runResult.rows.map((row) => Number(row.id))
+  const itemResult = await db.query<ItemRow & { run_id: string }>(
+    `select run_id, ${itemColumns(false)} from purchase_inventory_lifecycle_items
+      where run_id = any($1::bigint[]) order by id asc`,
+    [runIds],
+  )
+  const itemsByRun = new Map<number, PurchaseLifecycleItem[]>()
+  for (const row of itemResult.rows) {
+    const runId = Number(row.run_id)
+    const list = itemsByRun.get(runId) ?? []
+    list.push(mapItemRow(row))
+    itemsByRun.set(runId, list)
+  }
+  return runResult.rows.map((row) => mapRunRow(row, itemsByRun.get(Number(row.id)) ?? []))
+}
+
+export interface RunCoreForUpdate {
+  id: number
+  version: number
+  state: PurchaseLifecycleState
+  path: PurchaseLifecyclePath
+}
+
+/**
+ * Re-read a run's core fields FOR UPDATE (no version predicate) so the
+ * breach monitor can confirm, under the per-PO lock, that the run is still
+ * in a monitored pre-release state before it persists live evidence or
+ * pages — the live Sweed read happened outside the lock, so the run may
+ * have raced into release/released meanwhile. 095-safe (no L2 columns).
+ */
+export async function getRunCoreForUpdate(
+  db: Queryable,
+  dealerId: number,
+  poId: string,
+): Promise<RunCoreForUpdate | null> {
+  const result = await db.query<{
+    id: string
+    version: number
+    state: PurchaseLifecycleState
+    path: PurchaseLifecyclePath
+  }>(
+    `select id, version, state, path from purchase_inventory_lifecycle_runs
+      where dealer_id = $1 and po_id = $2 for update`,
+    [dealerId, poId],
+  )
+  const row = result.rows[0]
+  if (!row) return null
+  return { id: Number(row.id), version: row.version, state: row.state, path: row.path }
+}
+
+export interface RecentLifecycleAlert {
+  runId: number
+  signature: string
+  createdAt: Date
+}
+
+/**
+ * Recent `purchase.lifecycle.alerted` audit rows for the given run ids,
+ * used to dedup pages (a stuck run pages once per occurrence, not every
+ * tick). Bounded to LIFECYCLE_SWEEP_LOOKBACK_DAYS to match the run scan
+ * window. The alert signature lives in payload_json.signature.
+ */
+export async function getRecentLifecycleAlerts(
+  db: Queryable,
+  runIds: number[],
+): Promise<RecentLifecycleAlert[]> {
+  if (runIds.length === 0) return []
+  const result = await db.query<{ entity_id: string; signature: string | null; created_at: Date }>(
+    `select entity_id, payload_json->>'signature' as signature, created_at
+       from audit_events
+      where entity_type = 'purchase_inventory_lifecycle_run'
+        and event_type = 'purchase.lifecycle.alerted'
+        and entity_id = any($1::text[])
+        and created_at > now() - ($2 || ' days')::interval`,
+    [runIds.map((id) => String(id)), String(LIFECYCLE_SWEEP_LOOKBACK_DAYS)],
+  )
+  const out: RecentLifecycleAlert[] = []
+  for (const row of result.rows) {
+    if (row.signature === null) continue
+    out.push({ runId: Number(row.entity_id), signature: row.signature, createdAt: row.created_at })
+  }
+  return out
+}

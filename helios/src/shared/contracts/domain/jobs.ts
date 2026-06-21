@@ -67,6 +67,7 @@ export const JobTypeSchema = z.enum([
   'config.workers.stock_snapshot_items_retention',
   'config.workers.gads_lp_rollup_refresh',
   'catalog.maintenance.upload_group_image',
+  'inventory.lifecycle.advance',
 ])
 export type JobType = z.infer<typeof JobTypeSchema>
 
@@ -386,6 +387,27 @@ export const ConfigWorkersMarketEvidenceAlarmScanJobPayloadSchema = z.object({
 })
 export type ConfigWorkersMarketEvidenceAlarmScanJobPayload = z.infer<
   typeof ConfigWorkersMarketEvidenceAlarmScanJobPayloadSchema
+>
+
+/**
+ * Periodic purchase inventory pricing-safety lifecycle automation +
+ * monitoring sweep (automation#54, L3). Each tick (1) polls the async
+ * gates of active lifecycle runs and advances them through the existing
+ * idempotent `reprice` one-step advancer (market gate → create pricing
+ * batch → poll batch generation → verify live==approved price), (2)
+ * re-reads live Sweed lots for active quarantine-path runs and pages on
+ * any breach (a not-yet-priced expected lot back in a FOR SALE room), and
+ * (3) pages on market-data / price-apply timeouts and newly-blocked runs.
+ * The job never approves prices, never starts/receives/releases stock —
+ * those stay operator-gated; it only polls gates, surfaces evidence, and
+ * alerts.
+ */
+export const InventoryLifecycleAdvanceJobPayloadSchema = z.object({
+  trigger: z.enum(['scheduled', 'manual']),
+  requestedByUserId: z.number().int().positive().nullable(),
+})
+export type InventoryLifecycleAdvanceJobPayload = z.infer<
+  typeof InventoryLifecycleAdvanceJobPayloadSchema
 >
 
 /**
