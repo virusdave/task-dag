@@ -67,11 +67,15 @@ export interface WeekdayHourHeatmapProps {
 }
 
 /**
- * Reusable weekday × hour heatmap. Rows = business weekday (Mon→Sun),
- * columns = open local hours (8am→2am; the 3am–8am closed band is
- * hidden). Each cell shows the chosen metric value, color-coded; in
- * labor mode it shows margin-minus-modeled-labor surplus on a diverging
- * red/green scale. Designed to be dropped into any time-of-day surface.
+ * Reusable weekday × hour heatmap. Columns = business weekday (Mon→Sun),
+ * rows = open local hours (8am→2am; the 3am–8am closed band is hidden).
+ * Weekday-as-column / hour-as-row is deliberate: there are only 7
+ * weekdays but ~19 open hours, so this orientation keeps the grid narrow
+ * (8 columns) and tall, which is far less horizontally-scroll-hostile on
+ * a phone than the inverse. Each cell shows the chosen metric value,
+ * color-coded; in labor mode it shows margin-minus-modeled-labor surplus
+ * on a diverging red/green scale. Designed to drop into any time-of-day
+ * surface.
  */
 export function WeekdayHourHeatmap({
   cells,
@@ -165,9 +169,11 @@ export function WeekdayHourHeatmap({
   }
 
   const cellStyleBase: React.CSSProperties = {
-    minWidth: 52,
+    // 8 columns (7 weekdays + 1 summary) fit a phone far better than the
+    // ~20 columns the old hour-as-column layout needed; keep cells lean.
+    minWidth: 44,
     height: 40,
-    padding: '4px 3px',
+    padding: '4px 2px',
     textAlign: 'center',
     fontSize: 12,
     lineHeight: 1.1,
@@ -194,40 +200,55 @@ export function WeekdayHourHeatmap({
     borderRight: '2px solid #e2e8f0',
   }
 
+  // Constant denominator for an hour-row's all-weekday summary.
+  const totalOccAllWeekdays = WEEKDAY_ROWS.reduce(
+    (a, w) => a + (occurrencesByWeekday[w] ?? 0),
+    0,
+  )
+
   return (
     <div style={{ overflowX: 'auto' }}>
       <table style={{ borderCollapse: 'collapse', width: '100%' }}>
         <thead>
           <tr>
             <th style={{ ...rowLabelStyle, ...headStyle, textAlign: 'left' }} />
-            {OPEN_HOURS.map((h) => (
-              <th key={h} style={headStyle}>
-                {hourLabel(h)}
-              </th>
-            ))}
-            <th style={{ ...headStyle, borderLeft: '2px solid #e2e8f0' }}>day</th>
-          </tr>
-        </thead>
-        <tbody>
-          {WEEKDAY_ROWS.map((weekday) => {
-            const occ = occurrencesByWeekday[weekday] ?? 0
-            const rowCells = OPEN_HOURS.map((h) => byKey.get(key(weekday, h))).filter(
-              (c): c is TimeOfDayCell => !!c,
-            )
-            const rowSummary = summary(rowCells, occ)
-            return (
-              <tr key={weekday}>
-                <th style={rowLabelStyle} title={`${occ} ${WEEKDAY_LABELS[weekday]} business-days in range`}>
+            {WEEKDAY_ROWS.map((weekday) => {
+              const occ = occurrencesByWeekday[weekday] ?? 0
+              return (
+                <th
+                  key={weekday}
+                  style={headStyle}
+                  title={`${occ} ${WEEKDAY_LABELS[weekday]} business-days in range`}
+                >
                   {WEEKDAY_LABELS[weekday]}
                   <span style={{ display: 'block', fontSize: 9, color: '#a0aec0', fontWeight: 400 }}>
                     {occ}w
                   </span>
                 </th>
-                {OPEN_HOURS.map((h) => {
-                  const c = byKey.get(key(weekday, h))
+              )
+            })}
+            <th
+              style={{ ...headStyle, borderLeft: '2px solid #e2e8f0' }}
+              title="All weekdays at this hour"
+            >
+              all days
+            </th>
+          </tr>
+        </thead>
+        <tbody>
+          {OPEN_HOURS.map((hour) => {
+            const colCells = WEEKDAY_ROWS.map((w) => byKey.get(key(w, hour))).filter(
+              (c): c is TimeOfDayCell => !!c,
+            )
+            const hourSummary = summary(colCells, totalOccAllWeekdays)
+            return (
+              <tr key={hour}>
+                <th style={rowLabelStyle}>{hourLabel(hour)}</th>
+                {WEEKDAY_ROWS.map((weekday) => {
+                  const c = byKey.get(key(weekday, hour))
                   const v = valueOf(c, weekday)
                   const { bg, fg } = colorFor(v)
-                  const k = key(weekday, h)
+                  const k = key(weekday, hour)
                   const isSel = selectedKey === k
                   const orders = c?.orders ?? 0
                   // Sample-strength cue: a bright cell built on 1–2 orders is
@@ -237,10 +258,10 @@ export function WeekdayHourHeatmap({
                   const select = () => onSelect(c ?? null, isSel ? null : k)
                   return (
                     <td
-                      key={h}
+                      key={weekday}
                       role="button"
                       tabIndex={0}
-                      aria-label={`${WEEKDAY_LABELS[weekday]} ${hourLabel(h)}, ${fmt(v)}, ${orders} orders`}
+                      aria-label={`${WEEKDAY_LABELS[weekday]} ${hourLabel(hour)}, ${fmt(v)}, ${orders} orders`}
                       onClick={select}
                       onKeyDown={(e) => {
                         if (e.key === 'Enter' || e.key === ' ') {
@@ -248,7 +269,7 @@ export function WeekdayHourHeatmap({
                           select()
                         }
                       }}
-                      title={`${WEEKDAY_LABELS[weekday]} ${hourLabel(h)} · ${c ? `${orders} orders` : 'no orders'}`}
+                      title={`${WEEKDAY_LABELS[weekday]} ${hourLabel(hour)} · ${c ? `${orders} orders` : 'no orders'}`}
                       style={{
                         ...cellStyleBase,
                         background: bg,
@@ -277,7 +298,7 @@ export function WeekdayHourHeatmap({
                     color: '#1a202c',
                   }}
                 >
-                  {fmt(rowSummary)}
+                  {fmt(hourSummary)}
                 </td>
               </tr>
             )
@@ -285,15 +306,20 @@ export function WeekdayHourHeatmap({
         </tbody>
         <tfoot>
           <tr>
-            <th style={{ ...rowLabelStyle, ...headStyle, textAlign: 'left' }}>hr</th>
-            {OPEN_HOURS.map((h) => {
-              const colCells = WEEKDAY_ROWS.map((w) => byKey.get(key(w, h))).filter(
+            <th
+              style={{ ...rowLabelStyle, ...headStyle, textAlign: 'left' }}
+              title="All open hours for this weekday"
+            >
+              all hrs
+            </th>
+            {WEEKDAY_ROWS.map((weekday) => {
+              const occ = occurrencesByWeekday[weekday] ?? 0
+              const rowCells = OPEN_HOURS.map((h) => byKey.get(key(weekday, h))).filter(
                 (c): c is TimeOfDayCell => !!c,
               )
-              const totalOcc = WEEKDAY_ROWS.reduce((a, w) => a + (occurrencesByWeekday[w] ?? 0), 0)
               return (
                 <td
-                  key={h}
+                  key={weekday}
                   style={{
                     ...cellStyleBase,
                     cursor: 'default',
@@ -303,7 +329,7 @@ export function WeekdayHourHeatmap({
                     borderTop: '2px solid #e2e8f0',
                   }}
                 >
-                  {fmt(summary(colCells, totalOcc))}
+                  {fmt(summary(rowCells, occ))}
                 </td>
               )
             })}

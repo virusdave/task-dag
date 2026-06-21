@@ -40,6 +40,19 @@ import { hourLabel, WeekdayHourHeatmap } from './WeekdayHourHeatmap.js'
 // ---------------------------------------------------------------------------
 
 const DAY_MS = 86_400_000
+// Mirror the server guard (registerTimeOfDayRoutes MAX_WINDOW_DAYS) so a
+// custom range fails fast in the UI instead of round-tripping a 400. A
+// custom window is the SAME query as the 1y preset, just operator-chosen
+// bounds, so it's no more expensive as long as it stays within this cap.
+const MAX_WINDOW_DAYS = 366
+
+/** Local calendar date as yyyy-mm-dd, for <input type="date"> values. */
+function toYmd(d: Date): string {
+  const y = d.getFullYear()
+  const m = String(d.getMonth() + 1).padStart(2, '0')
+  const day = String(d.getDate()).padStart(2, '0')
+  return `${y}-${m}-${day}`
+}
 
 const KNOWN_SITES: ReadonlyArray<{ id: string; label: string }> = [
   { id: 'bronx', label: 'Bronx' },
@@ -114,7 +127,12 @@ export function TimeOfDayTab(): JSX.Element {
   const [selectedSites, setSelectedSites] = useState<ReadonlySet<string>>(() =>
     defaultSiteSelection(),
   )
+  const [rangeMode, setRangeMode] = useState<'preset' | 'custom'>('preset')
   const [rangeDays, setRangeDays] = useState<number>(90)
+  // Custom range as local calendar dates (yyyy-mm-dd); only consulted when
+  // rangeMode === 'custom'. `to` is treated as inclusive (end-of-day).
+  const [customFrom, setCustomFrom] = useState<string>('')
+  const [customTo, setCustomTo] = useState<string>('')
   const [fulfillment, setFulfillment] = useState<TimeOfDayFulfillmentSlice>('all')
 
   // Client-only view controls (no refetch).
@@ -127,7 +145,11 @@ export function TimeOfDayTab(): JSX.Element {
   const [selectedKey, setSelectedKey] = useState<string | null>(null)
   const [data, setData] = useState<TimeOfDayResponse | null>(null)
   const [loading, setLoading] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  // `rangeError` is a client-side validation message (no request was
+  // made); `loadError` is an actual fetch failure. Kept separate so the
+  // UI never mislabels an invalid custom range as "Failed to load".
+  const [rangeError, setRangeError] = useState<string | null>(null)
+  const [loadError, setLoadError] = useState<string | null>(null)
 
   const sitesParam = useMemo(
     () => Array.from(selectedSites).sort().join(','),
@@ -135,29 +157,61 @@ export function TimeOfDayTab(): JSX.Element {
   )
 
   useEffect(() => {
+    // Resolve the query window. Presets are "last N days ending now";
+    // custom is an operator-picked [from 00:00, to 23:59:59.999] local
+    // range, validated against the same bounds the server enforces.
+    let fromDate: Date
+    let toDate: Date
+    if (rangeMode === 'custom') {
+      const fail = (msg: string) => {
+        setRangeError(msg)
+        setLoading(false)
+      }
+      if (!customFrom || !customTo) {
+        fail('Pick both a start and end date for the custom range.')
+        return
+      }
+      fromDate = new Date(`${customFrom}T00:00:00`)
+      toDate = new Date(`${customTo}T23:59:59.999`)
+      if (Number.isNaN(fromDate.getTime()) || Number.isNaN(toDate.getTime())) {
+        fail('Custom range dates are invalid.')
+        return
+      }
+      if (fromDate.getTime() >= toDate.getTime()) {
+        fail('The start date must be before the end date.')
+        return
+      }
+      if (toDate.getTime() - fromDate.getTime() > MAX_WINDOW_DAYS * DAY_MS) {
+        fail(`Custom range can’t exceed ${MAX_WINDOW_DAYS} days.`)
+        return
+      }
+    } else {
+      toDate = new Date()
+      fromDate = new Date(toDate.getTime() - rangeDays * DAY_MS)
+    }
+    setRangeError(null)
+
     const controller = new AbortController()
-    const to = new Date()
-    const from = new Date(to.getTime() - rangeDays * DAY_MS)
     const params = new URLSearchParams()
-    params.set('from', from.toISOString())
-    params.set('to', to.toISOString())
+    params.set('from', fromDate.toISOString())
+    params.set('to', toDate.toISOString())
     params.set('fulfillment', fulfillment)
     if (sitesParam) params.set('sites', sitesParam)
     setLoading(true)
-    setError(null)
+    setLoadError(null)
     loadJson(`/api/time-of-day-analytics?${params.toString()}`, TimeOfDayResponseSchema, {
       signal: controller.signal,
     })
       .then((r) => setData(r))
       .catch((e: unknown) => {
         if ((e as { name?: string })?.name === 'AbortError') return
-        setError(e instanceof Error ? e.message : String(e))
+        setLoadError(e instanceof Error ? e.message : String(e))
       })
       .finally(() => {
         if (!controller.signal.aborted) setLoading(false)
       })
     return () => controller.abort()
-  }, [sitesParam, rangeDays, fulfillment])
+  }, [sitesParam, rangeMode, rangeDays, customFrom, customTo, fulfillment])
 
   const labor: LaborConfig = useMemo(
     () => ({ enabled: laborEnabled, loadedCostPerStaffHour: loadedCost, headcount }),
@@ -228,7 +282,7 @@ export function TimeOfDayTab(): JSX.Element {
         marginal staff-hour cost and see which blocks clear it.
         <span className="subtle-copy">
           {' '}
-          Closed 3:00–7:59am (opens 8am); weekday rows use the 8am business-day rollover.
+          Closed 3:00–7:59am (opens 8am); weekday columns use the 8am business-day rollover.
           Helios scheduling/payroll data is not yet trusted — labor cost is manual.
         </span>
       </p>
@@ -262,13 +316,58 @@ export function TimeOfDayTab(): JSX.Element {
             <button
               type="button"
               key={r.days}
-              className={`ghost-button${rangeDays === r.days ? ' is-active' : ''}`}
-              onClick={() => setRangeDays(r.days)}
+              className={`ghost-button${
+                rangeMode === 'preset' && rangeDays === r.days ? ' is-active' : ''
+              }`}
+              onClick={() => {
+                setRangeMode('preset')
+                setRangeDays(r.days)
+              }}
             >
               {r.label}
             </button>
           ))}
+          <button
+            type="button"
+            className={`ghost-button${rangeMode === 'custom' ? ' is-active' : ''}`}
+            onClick={() => {
+              // Seed the pickers from the current preset window so the
+              // operator nudges a sensible range instead of empty inputs.
+              if (!customFrom || !customTo) {
+                const to = new Date()
+                setCustomFrom(toYmd(new Date(to.getTime() - rangeDays * DAY_MS)))
+                setCustomTo(toYmd(to))
+              }
+              setRangeMode('custom')
+            }}
+          >
+            Custom
+          </button>
         </div>
+
+        {rangeMode === 'custom' ? (
+          <div className="metrics-control-group time-of-day-custom-range">
+            <label>
+              From
+              <input
+                type="date"
+                value={customFrom}
+                max={customTo || toYmd(new Date())}
+                onChange={(e) => setCustomFrom(e.target.value)}
+              />
+            </label>
+            <label>
+              To
+              <input
+                type="date"
+                value={customTo}
+                min={customFrom}
+                max={toYmd(new Date())}
+                onChange={(e) => setCustomTo(e.target.value)}
+              />
+            </label>
+          </div>
+        ) : null}
 
         <label>
           Slice
@@ -350,7 +449,8 @@ export function TimeOfDayTab(): JSX.Element {
         ) : null}
       </div>
 
-      {error ? <div className="time-of-day-error">Failed to load: {error}</div> : null}
+      {rangeError ? <div className="time-of-day-error">Custom range: {rangeError}</div> : null}
+      {loadError ? <div className="time-of-day-error">Failed to load: {loadError}</div> : null}
 
       {loading && !data ? (
         <p className="subtle-copy">Loading time-of-day analytics…</p>
@@ -394,13 +494,14 @@ export function TimeOfDayTab(): JSX.Element {
           onSelect={(_c, k) => setSelectedKey(k)}
         />
         <p className="subtle-copy time-of-day-legend">
-          Rows = business weekday (Mon→Sun); columns = open local hours (8am→2am).{' '}
+          Columns = business weekday (Mon→Sun); rows = open local hours (8am→2am).{' '}
           {labor.enabled
             ? 'Green = surplus, white = break-even, red = deficit.'
             : 'Lighter → darker = lower → higher value.'}{' '}
           <span style={{ opacity: 0.8 }}>
-            “n12” = orders behind the cell; dotted/dim cells are thin samples (&lt;5 orders) —
-            don&apos;t over-read them.
+            “4w” under a weekday = 4 of that weekday&apos;s business-days in range; “n12” = orders
+            behind the cell; dotted/dim cells are thin samples (&lt;5 orders) — don&apos;t over-read
+            them.
           </span>
         </p>
       </div>
