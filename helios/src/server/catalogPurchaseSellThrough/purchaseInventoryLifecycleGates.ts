@@ -87,6 +87,89 @@ export function evaluateItemQuarantine(
   }
 }
 
+export interface ItemReleaseVerdict {
+  /** A representative current location for the lot (for display/audit). */
+  stockLocation: string | null
+  /** A representative current on-hand qty for the lot. */
+  currentQty: number | null
+  /**
+   * True when the expected lot has been successfully released — i.e. a
+   * positive-qty matching live lot is now in a FOR SALE room, OR the lot
+   * is gone/zero (nothing left to release, so it cannot be a "not-yet-
+   * priced lot still on the floor" risk). False when at least one
+   * positive-qty matching lot is still in a NON-for-sale room (still to
+   * be moved).
+   */
+  released: boolean
+  /** True specifically when a positive-qty matching lot is now sellable. */
+  sellable: boolean
+}
+
+/**
+ * Decide whether a single expected lot is now released (sellable in a FOR
+ * SALE room), given the live lots Sweed reports for its product. The
+ * inverse of `evaluateItemQuarantine`: there, sellable is a breach; here,
+ * sellable is the goal. Matching is by inventory item id, falling back to
+ * METRC tag (Sweed can re-id a lot across a move).
+ */
+export function evaluateItemReleased(
+  expected: ExpectedLot,
+  liveLots: LiveLot[],
+): ItemReleaseVerdict {
+  const matching = liveLots.filter(
+    (lot) =>
+      lot.inventoryItemId === expected.inventoryItemId ||
+      (expected.metrcTag !== null &&
+        lot.metrcTag !== null &&
+        lot.metrcTag === expected.metrcTag),
+  )
+
+  const positiveQtyLots = matching.filter((lot) => lot.qty > 0)
+  if (positiveQtyLots.length === 0) {
+    // Gone / zero on hand → nothing left to release (cannot be a
+    // not-yet-priced lot on the floor). Report any observed location.
+    const representative = matching[0]
+    return {
+      stockLocation: representative?.stockLocationName ?? null,
+      currentQty: representative ? representative.qty : 0,
+      released: true,
+      sellable: false,
+    }
+  }
+
+  const sellableLot = positiveQtyLots.find((lot) =>
+    isForSaleStockLocationName(lot.stockLocationName),
+  )
+  const representative = sellableLot ?? positiveQtyLots[0]!
+  // Released only when EVERY positive-qty matching lot is sellable; a
+  // single still-quarantined positive-qty lot means more work remains.
+  const allSellable = positiveQtyLots.every((lot) =>
+    isForSaleStockLocationName(lot.stockLocationName),
+  )
+  return {
+    stockLocation: representative.stockLocationName,
+    currentQty: representative.qty,
+    released: allSellable,
+    sellable: sellableLot !== undefined,
+  }
+}
+
+/**
+ * Decision-8 badge: of the expected products, which already have on-floor
+ * (positive-qty FOR SALE) stock right now. Surfaced so the operator knows
+ * a SKU-level reprice/release also touches existing live stock. Purely
+ * informational — never blocks.
+ */
+export function computeProductsWithOnFloorStock(
+  productIds: number[],
+  liveLotsByProduct: ReadonlyMap<number, LiveLot[]>,
+): number[] {
+  return productIds.filter((productId) => {
+    const lots = liveLotsByProduct.get(productId) ?? []
+    return lots.some((lot) => lot.qty > 0 && isForSaleStockLocationName(lot.stockLocationName))
+  })
+}
+
 export interface MarketGateResult {
   /** Product ids without a succeeded observation after the cutoff. */
   pendingProductIds: number[]

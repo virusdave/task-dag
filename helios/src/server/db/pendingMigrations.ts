@@ -1357,6 +1357,39 @@ const SENTINELS: MigrationSentinel[] = [
       return hasRuns && hasItems && enqueueReasonWidened
     },
   },
+  {
+    migrationId: '096_purchase_inventory_lifecycle_release',
+    label:
+      'Purchase inventory pricing-safety lifecycle L2 — gated RELEASE ' +
+      '(widens the purchase_inventory_lifecycle_runs state CHECK to allow ' +
+      "'release_in_progress' / 'released' and adds the release columns + " +
+      'execution-lease fields on the runs/items tables). Backs the bulk ' +
+      'quarantine-repair + reverse/release-to-FOR-SALE controls on the ' +
+      'Catalog → Purchase detail page (automation#54, L2). Without it the ' +
+      'release routes report releaseMigrationPending and refuse to record a ' +
+      'release.',
+    // Probe the widened state CHECK AND a representative release column on
+    // each table, so a partial apply (constraint swapped but a column ALTER
+    // failed, or vice versa) reports pending rather than "safe".
+    check: async (db) => {
+      const [stateWidened, hasRunRelease, hasItemRelease] = await Promise.all([
+        db
+          .query<{ widened: boolean }>(
+            `select coalesce(
+               pg_get_constraintdef(
+                 (select oid from pg_constraint
+                   where conname = 'purchase_inventory_lifecycle_runs_state_check')
+               ) like '%release_in_progress%',
+               false
+             ) as widened`,
+          )
+          .then((r) => r.rows[0]?.widened === true),
+        columnExists(db, 'purchase_inventory_lifecycle_runs', 'release_attempt_id'),
+        columnExists(db, 'purchase_inventory_lifecycle_items', 'release_verified_at'),
+      ])
+      return stateWidened && hasRunRelease && hasItemRelease
+    },
+  },
 ]
 
 interface CacheEntry {

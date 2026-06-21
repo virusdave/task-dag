@@ -3,9 +3,12 @@ import { describe, expect, it } from 'vitest'
 import {
   computeMarketGate,
   computePriceGate,
+  computeProductsWithOnFloorStock,
   evaluateItemQuarantine,
+  evaluateItemReleased,
   isForSaleStockLocationName,
   PRICE_EQUALITY_TOLERANCE_DOLLARS,
+  type LiveLot,
 } from './purchaseInventoryLifecycleGates.js'
 
 describe('isForSaleStockLocationName', () => {
@@ -129,5 +132,73 @@ describe('computePriceGate', () => {
 
   it('is not verified with no products', () => {
     expect(computePriceGate([]).verified).toBe(false)
+  })
+})
+
+describe('evaluateItemReleased', () => {
+  const expected = { inventoryItemId: 'item-1', metrcTag: 'TAG-1' }
+
+  it('reports released + sellable when the matching lot is positive-qty in a FOR SALE room', () => {
+    const verdict = evaluateItemReleased(expected, [
+      { inventoryItemId: 'item-1', metrcTag: 'TAG-1', qty: 7, stockLocationName: 'FOR SALE - Sales Floor' },
+    ])
+    expect(verdict.released).toBe(true)
+    expect(verdict.sellable).toBe(true)
+    expect(verdict.currentQty).toBe(7)
+    expect(verdict.stockLocation).toBe('FOR SALE - Sales Floor')
+  })
+
+  it('is NOT released while a positive-qty matching lot is still in a not-for-sale room', () => {
+    const verdict = evaluateItemReleased(expected, [
+      {
+        inventoryItemId: 'item-1',
+        metrcTag: 'TAG-1',
+        qty: 4,
+        stockLocationName: 'NOT FOR SALE - Hold for Dave inspection',
+      },
+    ])
+    expect(verdict.released).toBe(false)
+    expect(verdict.sellable).toBe(false)
+  })
+
+  it('is NOT released when some matching lots are sellable but one is still quarantined', () => {
+    const verdict = evaluateItemReleased(expected, [
+      { inventoryItemId: 'item-1', metrcTag: 'TAG-1', qty: 2, stockLocationName: 'FOR SALE - Sales Floor' },
+      { inventoryItemId: 'item-9', metrcTag: 'TAG-1', qty: 1, stockLocationName: 'Quarantine' },
+    ])
+    expect(verdict.released).toBe(false)
+    // A sellable lot exists even though not all are sellable yet.
+    expect(verdict.sellable).toBe(true)
+  })
+
+  it('treats a gone / zero-qty lot as released (nothing left on the floor unpriced)', () => {
+    const verdict = evaluateItemReleased(expected, [])
+    expect(verdict.released).toBe(true)
+    expect(verdict.sellable).toBe(false)
+    expect(verdict.currentQty).toBe(0)
+  })
+
+  it('matches by METRC tag when the inventory item id changed across the move', () => {
+    const verdict = evaluateItemReleased(expected, [
+      { inventoryItemId: 'item-77', metrcTag: 'TAG-1', qty: 3, stockLocationName: 'FOR SALE - Back' },
+    ])
+    expect(verdict.released).toBe(true)
+    expect(verdict.sellable).toBe(true)
+  })
+})
+
+describe('computeProductsWithOnFloorStock', () => {
+  it('returns only the products that currently have positive-qty FOR SALE stock', () => {
+    const byProduct = new Map<number, LiveLot[]>([
+      [1, [{ inventoryItemId: 'a', metrcTag: null, qty: 5, stockLocationName: 'FOR SALE - Sales Floor' }]],
+      [2, [{ inventoryItemId: 'b', metrcTag: null, qty: 5, stockLocationName: 'Quarantine' }]],
+      [3, [{ inventoryItemId: 'c', metrcTag: null, qty: 0, stockLocationName: 'FOR SALE - Sales Floor' }]],
+      // 4 has no live lots at all.
+    ])
+    expect(computeProductsWithOnFloorStock([1, 2, 3, 4], byProduct)).toEqual([1])
+  })
+
+  it('returns an empty list when nothing is on the floor', () => {
+    expect(computeProductsWithOnFloorStock([1, 2], new Map())).toEqual([])
   })
 })

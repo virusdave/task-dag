@@ -9,9 +9,12 @@ import type {
 } from '../../../shared/contracts/index.js'
 import {
   marketGateLabel,
+  onFloorStockBadge,
   priceUnapprovedLabel,
   priceUnverifiedLabel,
   quarantineGateLabel,
+  releaseButtonLabel,
+  releaseGateLabel,
   repriceButtonLabel,
 } from './purchaseLifecyclePanelLabels.js'
 
@@ -31,6 +34,12 @@ function item(overrides: Partial<PurchaseLifecycleItem> = {}): PurchaseLifecycle
     priceAppliedVerifiedAt: null,
     approvedPriceDollars: null,
     livePriceDollars: null,
+    releaseTransferAttemptedAt: null,
+    releaseTransferredAt: null,
+    releaseVerifiedAt: null,
+    releaseStockLocation: null,
+    releaseCurrentQty: null,
+    releaseLastError: null,
     notes: null,
     ...overrides,
   }
@@ -51,6 +60,11 @@ function run(overrides: Partial<PurchaseLifecycleRun> = {}): PurchaseLifecycleRu
     version: 1,
     createdByUserId: null,
     notes: null,
+    releaseTargetLocationId: null,
+    releaseTargetLocationName: null,
+    releaseRequestedAt: null,
+    releasedAt: null,
+    releaseLastError: null,
     createdAt: '2026-01-01T00:00:00.000Z',
     updatedAt: '2026-01-01T00:00:00.000Z',
     items: [item()],
@@ -63,6 +77,8 @@ const emptySummary: PurchaseLifecycleGateSummary = {
   marketPendingProductIds: [],
   priceUnapprovedProductIds: [],
   priceUnverifiedProductIds: [],
+  releaseUnverifiedLotCount: 0,
+  productIdsWithOnFloorStock: [],
 }
 
 describe('quarantineGateLabel', () => {
@@ -134,5 +150,72 @@ describe('repriceButtonLabel', () => {
     expect(repriceButtonLabel('pricing_pending')).toBe('Check pricing batch')
     expect(repriceButtonLabel('awaiting_price_approval')).toBe('Re-verify applied prices')
     expect(repriceButtonLabel('price_apply_pending')).toBe('Re-verify applied prices')
+  })
+})
+
+describe('releaseGateLabel', () => {
+  it('shows "Not released yet" instead of a misleading 0 before any release attempt', () => {
+    expect(releaseGateLabel(run({ state: 'priced_verified' }), emptySummary)).toEqual({
+      text: 'Not released yet',
+      danger: false,
+    })
+  })
+
+  it('skips the release gate entirely on the reprice-in-place path', () => {
+    expect(releaseGateLabel(run({ path: 'reprice_in_place' }), emptySummary)).toEqual({
+      text: 'Skipped (reprice in place)',
+      danger: false,
+    })
+  })
+
+  it('shows the unverified-lot count (danger) once a release is in progress', () => {
+    expect(
+      releaseGateLabel(run({ state: 'release_in_progress' }), {
+        ...emptySummary,
+        releaseUnverifiedLotCount: 2,
+      }),
+    ).toEqual({ text: '2', danger: true })
+  })
+
+  it('shows a real, non-danger 0 once every lot is released and verified', () => {
+    expect(
+      releaseGateLabel(run({ state: 'released', releaseRequestedAt: '2026-01-02T00:00:00.000Z' }), emptySummary),
+    ).toEqual({ text: '0', danger: false })
+  })
+
+  it('counts a per-item release attempt as "attempted" even before the run flips state', () => {
+    const r = run({
+      state: 'priced_verified',
+      items: [item({ releaseTransferAttemptedAt: '2026-01-02T00:00:00.000Z' })],
+    })
+    expect(releaseGateLabel(r, { ...emptySummary, releaseUnverifiedLotCount: 1 })).toEqual({
+      text: '1',
+      danger: true,
+    })
+  })
+})
+
+describe('onFloorStockBadge', () => {
+  it('returns null when no SKU has on-floor stock', () => {
+    expect(onFloorStockBadge(emptySummary)).toBeNull()
+  })
+
+  it('pluralizes the badge by SKU count', () => {
+    expect(onFloorStockBadge({ ...emptySummary, productIdsWithOnFloorStock: [1] })).toBe(
+      '1 SKU already has on-floor stock',
+    )
+    expect(onFloorStockBadge({ ...emptySummary, productIdsWithOnFloorStock: [1, 2] })).toBe(
+      '2 SKUs already have on-floor stock',
+    )
+  })
+})
+
+describe('releaseButtonLabel', () => {
+  it('says "Release to FOR SALE" for a fresh release', () => {
+    expect(releaseButtonLabel('priced_verified')).toBe('Release to FOR SALE')
+  })
+
+  it('says "Continue release" while an attempt is in progress', () => {
+    expect(releaseButtonLabel('release_in_progress')).toBe('Continue release')
   })
 })

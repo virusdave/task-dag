@@ -27,6 +27,46 @@ export async function lifecycleTablesExist(db: Queryable): Promise<boolean> {
   return result.rows[0]?.exists === true
 }
 
+export interface LifecycleSchemaCaps {
+  /** Migration 095 applied: the lifecycle tables exist. */
+  runsTable: boolean
+  /** Migration 096 applied: the L2 release columns exist. */
+  releaseColumns: boolean
+}
+
+/**
+ * Probe which lifecycle migrations are live so the service can keep L1
+ * working when 095 is applied but the L2 release migration 096 is not yet
+ * (the columns are selected conditionally — selecting a missing column
+ * would raw-error). Cheap catalog lookups; the service caches the result.
+ */
+export async function getLifecycleSchemaCaps(db: Queryable): Promise<LifecycleSchemaCaps> {
+  // Require a release column on BOTH the runs and items tables: getRunByPo
+  // with includeRelease selects release columns from each, so a partial 096
+  // apply (one table altered, the other not) must NOT be treated as ready.
+  const result = await db.query<{ runs_table: boolean; release_columns: boolean }>(
+    `select
+       to_regclass('public.purchase_inventory_lifecycle_runs') is not null as runs_table,
+       (
+         exists (
+           select 1 from information_schema.columns
+           where table_name = 'purchase_inventory_lifecycle_runs'
+             and column_name = 'release_attempt_id'
+         )
+         and exists (
+           select 1 from information_schema.columns
+           where table_name = 'purchase_inventory_lifecycle_items'
+             and column_name = 'release_verified_at'
+         )
+       ) as release_columns`,
+  )
+  const row = result.rows[0]
+  return {
+    runsTable: row?.runs_table === true,
+    releaseColumns: row?.release_columns === true,
+  }
+}
+
 export interface ExpectedLotRow {
   lineId: string
   inventoryItemId: string
@@ -138,6 +178,16 @@ interface RunRow extends QueryResultRow {
   notes: string | null
   created_at: Date
   updated_at: Date
+  // L2 release fields — only present when migration 096 is applied AND
+  // the column set was selected (getRunByPo includeRelease=true).
+  release_target_location_id?: string | null
+  release_target_location_name?: string | null
+  release_target_stock_type_id?: string | null
+  release_requested_at?: Date | null
+  released_at?: Date | null
+  release_attempt_id?: string | null
+  release_lease_expires_at?: Date | null
+  release_last_error?: string | null
 }
 
 interface ItemRow extends QueryResultRow {
@@ -157,16 +207,26 @@ interface ItemRow extends QueryResultRow {
   approved_price_dollars: string | null
   live_price_dollars: string | null
   notes: string | null
+  // L2 release fields — only present when migration 096 is applied AND
+  // selected (includeRelease=true).
+  release_transfer_attempted_at?: Date | null
+  release_transferred_at?: Date | null
+  release_verified_at?: Date | null
+  release_stock_location?: string | null
+  release_stock_location_id?: string | null
+  release_stock_type_id?: string | null
+  release_current_qty?: string | null
+  release_last_error?: string | null
 }
 
-function num(value: string | number | null): number | null {
-  if (value === null) return null
+function num(value: string | number | null | undefined): number | null {
+  if (value === null || value === undefined) return null
   const n = typeof value === 'number' ? value : Number(value)
   return Number.isFinite(n) ? n : null
 }
 
-function iso(value: Date | null): string | null {
-  return value === null ? null : value.toISOString()
+function iso(value: Date | null | undefined): string | null {
+  return value === null || value === undefined ? null : value.toISOString()
 }
 
 function mapItemRow(row: ItemRow): PurchaseLifecycleItem {
@@ -185,6 +245,12 @@ function mapItemRow(row: ItemRow): PurchaseLifecycleItem {
     priceAppliedVerifiedAt: iso(row.price_applied_verified_at),
     approvedPriceDollars: num(row.approved_price_dollars),
     livePriceDollars: num(row.live_price_dollars),
+    releaseTransferAttemptedAt: iso(row.release_transfer_attempted_at),
+    releaseTransferredAt: iso(row.release_transferred_at),
+    releaseVerifiedAt: iso(row.release_verified_at),
+    releaseStockLocation: row.release_stock_location ?? null,
+    releaseCurrentQty: num(row.release_current_qty),
+    releaseLastError: row.release_last_error ?? null,
     notes: row.notes,
   }
 }
@@ -204,28 +270,59 @@ function mapRunRow(row: RunRow, items: PurchaseLifecycleItem[]): PurchaseLifecyc
     version: row.version,
     createdByUserId: row.created_by_user_id === null ? null : Number(row.created_by_user_id),
     notes: row.notes,
+    releaseTargetLocationId: num(row.release_target_location_id),
+    releaseTargetLocationName: row.release_target_location_name ?? null,
+    releaseRequestedAt: iso(row.release_requested_at),
+    releasedAt: iso(row.released_at),
+    releaseLastError: row.release_last_error ?? null,
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),
     items,
   }
 }
 
-const RUN_COLUMNS = `
+const RUN_COLUMNS_BASE = `
   id, dealer_id, po_id, site_key, path, state, blocked_reason,
   market_requested_at, pricing_batch_id, expected_product_ids, version,
   created_by_user_id, notes, created_at, updated_at
 `
 
-const ITEM_COLUMNS = `
+// L2 release columns (migration 096). Selected only when includeRelease,
+// so L1 keeps working in the "095 applied, 096 pending" window.
+const RUN_COLUMNS_RELEASE = `
+  , release_target_location_id, release_target_location_name,
+  release_target_stock_type_id, release_requested_at, released_at,
+  release_attempt_id, release_lease_expires_at, release_last_error
+`
+
+const ITEM_COLUMNS_BASE = `
   id, line_id, inventory_item_id, sweed_product_id, metrc_tag, expected_qty,
   quarantine_verified_at, quarantine_stock_location, quarantine_current_qty,
   market_observation_id, market_observation_captured_at, market_ready_at,
   price_applied_verified_at, approved_price_dollars, live_price_dollars, notes
 `
 
-export async function getRunItems(db: Queryable, runId: number): Promise<PurchaseLifecycleItem[]> {
+const ITEM_COLUMNS_RELEASE = `
+  , release_transfer_attempted_at, release_transferred_at, release_verified_at,
+  release_stock_location, release_stock_location_id, release_stock_type_id,
+  release_current_qty, release_last_error
+`
+
+function runColumns(includeRelease: boolean): string {
+  return includeRelease ? `${RUN_COLUMNS_BASE}${RUN_COLUMNS_RELEASE}` : RUN_COLUMNS_BASE
+}
+
+function itemColumns(includeRelease: boolean): string {
+  return includeRelease ? `${ITEM_COLUMNS_BASE}${ITEM_COLUMNS_RELEASE}` : ITEM_COLUMNS_BASE
+}
+
+export async function getRunItems(
+  db: Queryable,
+  runId: number,
+  includeRelease: boolean,
+): Promise<PurchaseLifecycleItem[]> {
   const result = await db.query<ItemRow>(
-    `select ${ITEM_COLUMNS} from purchase_inventory_lifecycle_items
+    `select ${itemColumns(includeRelease)} from purchase_inventory_lifecycle_items
       where run_id = $1 order by id asc`,
     [runId],
   )
@@ -236,15 +333,16 @@ export async function getRunByPo(
   db: Queryable,
   dealerId: number,
   poId: string,
+  includeRelease: boolean,
 ): Promise<PurchaseLifecycleRun | null> {
   const result = await db.query<RunRow>(
-    `select ${RUN_COLUMNS} from purchase_inventory_lifecycle_runs
+    `select ${runColumns(includeRelease)} from purchase_inventory_lifecycle_runs
       where dealer_id = $1 and po_id = $2`,
     [dealerId, poId],
   )
   const row = result.rows[0]
   if (!row) return null
-  const items = await getRunItems(db, Number(row.id))
+  const items = await getRunItems(db, Number(row.id), includeRelease)
   return mapRunRow(row, items)
 }
 
@@ -254,19 +352,22 @@ export async function getRunByPo(
  * version has moved on (the route maps that to a 409). Returns the raw
  * row so the caller can read current fields without remapping.
  */
-export async function lockRunForUpdate(
-  db: Queryable,
-  dealerId: number,
-  poId: string,
-  expectedVersion: number,
-): Promise<{ id: number; version: number; state: PurchaseLifecycleState; path: PurchaseLifecyclePath; pricingBatchId: number | null; expectedProductIds: number[]; marketRequestedAt: Date | null } | null> {
-  const result = await db.query<RunRow>(
-    `select ${RUN_COLUMNS} from purchase_inventory_lifecycle_runs
-      where dealer_id = $1 and po_id = $2 for update`,
-    [dealerId, poId],
-  )
-  const row = result.rows[0]
-  if (!row || row.version !== expectedVersion) return null
+export interface LockedRun {
+  id: number
+  version: number
+  state: PurchaseLifecycleState
+  path: PurchaseLifecyclePath
+  pricingBatchId: number | null
+  expectedProductIds: number[]
+  marketRequestedAt: Date | null
+  releaseAttemptId: string | null
+  releaseLeaseExpiresAt: Date | null
+  releaseTargetLocationId: number | null
+  releaseTargetStockTypeId: number | null
+  releaseTargetLocationName: string | null
+}
+
+function mapLockedRun(row: RunRow): LockedRun {
   return {
     id: Number(row.id),
     version: row.version,
@@ -275,7 +376,50 @@ export async function lockRunForUpdate(
     pricingBatchId: row.pricing_batch_id === null ? null : Number(row.pricing_batch_id),
     expectedProductIds: (row.expected_product_ids ?? []).map((id) => Number(id)),
     marketRequestedAt: row.market_requested_at,
+    releaseAttemptId: row.release_attempt_id ?? null,
+    releaseLeaseExpiresAt: row.release_lease_expires_at ?? null,
+    releaseTargetLocationId: num(row.release_target_location_id),
+    releaseTargetStockTypeId: num(row.release_target_stock_type_id),
+    releaseTargetLocationName: row.release_target_location_name ?? null,
   }
+}
+
+export async function lockRunForUpdate(
+  db: Queryable,
+  dealerId: number,
+  poId: string,
+  expectedVersion: number,
+  includeRelease = false,
+): Promise<LockedRun | null> {
+  const result = await db.query<RunRow>(
+    `select ${runColumns(includeRelease)} from purchase_inventory_lifecycle_runs
+      where dealer_id = $1 and po_id = $2 for update`,
+    [dealerId, poId],
+  )
+  const row = result.rows[0]
+  if (!row || row.version !== expectedVersion) return null
+  return mapLockedRun(row)
+}
+
+/**
+ * Like lockRunForUpdate but WITHOUT a version predicate — used to finalize
+ * a release attempt, which keys on the release_attempt_id (not the stale
+ * UI version, which the claim step already bumped). Always selects the
+ * release columns. Returns null only when the run row is missing.
+ */
+export async function lockRunForRelease(
+  db: Queryable,
+  dealerId: number,
+  poId: string,
+): Promise<LockedRun | null> {
+  const result = await db.query<RunRow>(
+    `select ${runColumns(true)} from purchase_inventory_lifecycle_runs
+      where dealer_id = $1 and po_id = $2 for update`,
+    [dealerId, poId],
+  )
+  const row = result.rows[0]
+  if (!row) return null
+  return mapLockedRun(row)
 }
 
 export interface CreateRunInput {
@@ -443,6 +587,244 @@ export async function updateItemPrice(db: Queryable, update: PriceItemUpdate): P
       where id = $1`,
     [update.itemId, update.verifiedAt, update.approvedPriceDollars, update.livePriceDollars],
   )
+}
+
+// ----------------------------- Release (L2) --------------------------------
+
+export interface ClaimReleaseInput {
+  runId: number
+  expectedVersion: number
+  attemptId: string
+  leaseExpiresAt: Date
+  targetLocationId: number
+  targetLocationName: string
+  targetStockTypeId: number
+}
+
+/**
+ * Claim a release attempt: move the run to release_in_progress, stamp the
+ * chosen FOR SALE target, mint a new attempt id + lease, and bump version
+ * (so the operator's stale tab can't re-submit). Optimistic on
+ * expectedVersion; returns false if the version moved (stale → 409).
+ */
+export async function claimReleaseAttempt(db: Queryable, input: ClaimReleaseInput): Promise<boolean> {
+  const result = await db.query(
+    `update purchase_inventory_lifecycle_runs
+        set state = 'release_in_progress',
+            blocked_reason = null,
+            release_target_location_id = $3,
+            release_target_location_name = $4,
+            release_target_stock_type_id = $5,
+            release_attempt_id = $6,
+            release_lease_expires_at = $7,
+            release_requested_at = coalesce(release_requested_at, now()),
+            release_last_error = null,
+            version = version + 1,
+            updated_at = now()
+      where id = $1 and version = $2`,
+    [
+      input.runId,
+      input.expectedVersion,
+      input.targetLocationId,
+      input.targetLocationName,
+      input.targetStockTypeId,
+      input.attemptId,
+      input.leaseExpiresAt,
+    ],
+  )
+  return (result.rowCount ?? 0) > 0
+}
+
+/**
+ * Heartbeat: extend the lease, but ONLY while this attempt still owns the
+ * run (release_attempt_id matches and state is still release_in_progress).
+ * Returns false if another attempt took over (the loop must then abort).
+ */
+export async function extendReleaseLease(
+  db: Queryable,
+  runId: number,
+  attemptId: string,
+  leaseExpiresAt: Date,
+): Promise<boolean> {
+  const result = await db.query(
+    `update purchase_inventory_lifecycle_runs
+        set release_lease_expires_at = $3, updated_at = now()
+      where id = $1
+        and release_attempt_id = $2
+        and state = 'release_in_progress'`,
+    [runId, attemptId, leaseExpiresAt],
+  )
+  return (result.rowCount ?? 0) > 0
+}
+
+export interface FinalizeReleaseInput {
+  runId: number
+  attemptId: string
+  state: PurchaseLifecycleState
+  blockedReason?: string | null
+  releasedAt?: Date | null
+  releaseLastError?: string | null
+}
+
+/**
+ * Finalize a release attempt. Keys on release_attempt_id (NOT version):
+ * the claim bumped version, and a zombie attempt whose lease expired and
+ * was taken over must NOT be able to finalize. Single-use: it also
+ * requires the run to still be release_in_progress and CLEARS the attempt
+ * id, so a second finalize for the same attempt is a no-op (no duplicate
+ * version bump). Returns false if this attempt no longer owns the run.
+ */
+export async function finalizeReleaseRun(db: Queryable, input: FinalizeReleaseInput): Promise<boolean> {
+  const blockedReason = input.state === 'blocked' ? (input.blockedReason ?? 'blocked') : null
+  const result = await db.query(
+    `update purchase_inventory_lifecycle_runs
+        set state = $3,
+            blocked_reason = $4,
+            released_at = $5,
+            release_last_error = $6,
+            release_attempt_id = null,
+            release_lease_expires_at = null,
+            version = version + 1,
+            updated_at = now()
+      where id = $1 and release_attempt_id = $2 and state = 'release_in_progress'`,
+    [
+      input.runId,
+      input.attemptId,
+      input.state,
+      blockedReason,
+      input.releasedAt ?? null,
+      input.releaseLastError ?? null,
+    ],
+  )
+  return (result.rowCount ?? 0) > 0
+}
+
+export interface ReleaseItemUpdate {
+  itemId: number
+  /**
+   * The attempt that owns this write. The update only applies while the
+   * item's run is still release_in_progress under this exact attempt id,
+   * so a zombie attempt whose lease expired (and was taken over) can never
+   * clobber the live attempt's per-lot evidence. Returns false on a lost
+   * write so the caller can abort.
+   */
+  attemptId: string
+  transferAttemptedAt: Date | null
+  transferredAt: Date | null
+  verifiedAt: Date | null
+  stockLocation: string | null
+  stockLocationId: number | null
+  stockTypeId: number | null
+  currentQty: number | null
+  lastError: string | null
+}
+
+export async function updateItemRelease(db: Queryable, update: ReleaseItemUpdate): Promise<boolean> {
+  const result = await db.query(
+    `update purchase_inventory_lifecycle_items i
+        set release_transfer_attempted_at = $2,
+            release_transferred_at = $3,
+            release_verified_at = $4,
+            release_stock_location = $5,
+            release_stock_location_id = $6,
+            release_stock_type_id = $7,
+            release_current_qty = $8,
+            release_last_error = $9,
+            updated_at = now()
+      where i.id = $1
+        and exists (
+          select 1 from purchase_inventory_lifecycle_runs r
+           where r.id = i.run_id
+             and r.release_attempt_id = $10
+             and r.state = 'release_in_progress'
+        )`,
+    [
+      update.itemId,
+      update.transferAttemptedAt,
+      update.transferredAt,
+      update.verifiedAt,
+      update.stockLocation,
+      update.stockLocationId,
+      update.stockTypeId,
+      update.currentQty,
+      update.lastError,
+      update.attemptId,
+    ],
+  )
+  return (result.rowCount ?? 0) > 0
+}
+
+/**
+ * Claim a ROLLBACK before any physical move-back. Like the release claim
+ * it CAS-bumps version (so a concurrent "continue release" can no longer
+ * win its own optimistic claim) and stamps a fresh attempt id + lease, but
+ * it deliberately leaves `state` untouched (released / blocked) — there is
+ * no dedicated rollback-in-progress state in the schema. The final
+ * `resetReleaseRun` keys on this attempt id, so the slow Sweed move-back
+ * cannot race a concurrent continue/rollback into an inconsistent run.
+ */
+export async function claimRollbackAttempt(
+  db: Queryable,
+  input: { runId: number; expectedVersion: number; attemptId: string; leaseExpiresAt: Date },
+): Promise<boolean> {
+  const result = await db.query(
+    `update purchase_inventory_lifecycle_runs
+        set release_attempt_id = $3,
+            release_lease_expires_at = $4,
+            version = version + 1,
+            updated_at = now()
+      where id = $1 and version = $2`,
+    [input.runId, input.expectedVersion, input.attemptId, input.leaseExpiresAt],
+  )
+  return (result.rowCount ?? 0) > 0
+}
+
+/**
+ * Roll a run back out of a (partial/failed) release: reset the run to a
+ * pre-release state and clear ALL release evidence on the run and its
+ * items, so a fresh release attempt starts clean. Keys on the rollback
+ * attempt id stamped by `claimRollbackAttempt` (NOT version, which the
+ * claim already bumped), so it is single-use and cannot be applied by a
+ * stale caller.
+ */
+export async function resetReleaseRun(
+  db: Queryable,
+  input: { runId: number; attemptId: string; state: PurchaseLifecycleState; blockedReason?: string | null },
+): Promise<boolean> {
+  const blockedReason = input.state === 'blocked' ? (input.blockedReason ?? 'blocked') : null
+  const result = await db.query(
+    `update purchase_inventory_lifecycle_runs
+        set state = $3,
+            blocked_reason = $4,
+            release_attempt_id = null,
+            release_lease_expires_at = null,
+            release_requested_at = null,
+            released_at = null,
+            release_target_location_id = null,
+            release_target_location_name = null,
+            release_target_stock_type_id = null,
+            release_last_error = null,
+            version = version + 1,
+            updated_at = now()
+      where id = $1 and release_attempt_id = $2`,
+    [input.runId, input.attemptId, input.state, blockedReason],
+  )
+  if ((result.rowCount ?? 0) === 0) return false
+  await db.query(
+    `update purchase_inventory_lifecycle_items
+        set release_transfer_attempted_at = null,
+            release_transferred_at = null,
+            release_verified_at = null,
+            release_stock_location = null,
+            release_stock_location_id = null,
+            release_stock_type_id = null,
+            release_current_qty = null,
+            release_last_error = null,
+            updated_at = now()
+      where run_id = $1`,
+    [input.runId],
+  )
+  return true
 }
 
 export interface SucceededObservation {

@@ -2,17 +2,25 @@ import type { FastifyInstance, FastifyReply } from 'fastify'
 
 import {
   PurchaseLifecycleActionRequestSchema,
+  PurchaseLifecycleReleaseRequestSchema,
+  PurchaseLifecycleReleaseTargetsResponseSchema,
   PurchaseLifecycleStartRequestSchema,
   PurchaseLifecycleStatusResponseSchema,
 } from '../../shared/contracts/index.js'
 import { requireSessionUser } from '../auth/requireSession.js'
 import {
+  continueRelease,
   getLifecycleStatus,
   LifecycleBadRequestError,
   LifecycleConflictError,
   LifecycleMigrationPendingError,
+  LifecycleReleaseMigrationPendingError,
+  listReleaseTargets,
   marketRefresh,
+  release,
+  repairQuarantine,
   reprice,
+  rollbackRelease,
   startLifecycle,
   verifyQuarantine,
 } from '../catalogPurchaseSellThrough/purchaseInventoryLifecycleService.js'
@@ -26,10 +34,20 @@ import {
 //   POST /api/catalog/purchases/:poId/lifecycle/market-refresh
 //   POST /api/catalog/purchases/:poId/lifecycle/reprice
 //
-// NO release/reverse-move route — that is L2.
+// L2 — bulk quarantine repair + gated release:
+//   GET  /api/catalog/purchases/:poId/lifecycle/release-targets?dealerId=…
+//   POST /api/catalog/purchases/:poId/lifecycle/repair-quarantine
+//   POST /api/catalog/purchases/:poId/lifecycle/release
+//   POST /api/catalog/purchases/:poId/lifecycle/continue-release
+//   POST /api/catalog/purchases/:poId/lifecycle/rollback-release
 // ---------------------------------------------------------------------------
 
 function handleLifecycleError(reply: FastifyReply, error: unknown): FastifyReply {
+  if (error instanceof LifecycleReleaseMigrationPendingError) {
+    return reply
+      .code(409)
+      .send({ error: error.message, migrationPending: true, releaseMigrationPending: true })
+  }
   if (error instanceof LifecycleMigrationPendingError) {
     return reply.code(409).send({ error: error.message, migrationPending: true })
   }
@@ -128,6 +146,109 @@ export async function registerPurchaseInventoryLifecycleRoutes(
       const body = PurchaseLifecycleActionRequestSchema.parse(request.body ?? {})
       try {
         const status = await reprice({
+          dealerId: body.dealerId,
+          poId: request.params.poId,
+          expectedVersion: body.expectedVersion,
+          userId: user.id,
+        })
+        return reply.send(PurchaseLifecycleStatusResponseSchema.parse(status))
+      } catch (error) {
+        return handleLifecycleError(reply, error)
+      }
+    },
+  )
+
+  // ----------------------------- L2 routes -------------------------------
+
+  // The FOR SALE rooms the operator can release into. Resolved live from
+  // Sweed so the panel's dropdown can never offer a retired/disabled room.
+  server.get<{ Params: { poId: string }; Querystring: { dealerId?: string } }>(
+    '/api/catalog/purchases/:poId/lifecycle/release-targets',
+    async (request, reply) => {
+      const user = await requireSessionUser(request, reply, 'viewer')
+      if (!user) return
+      const dealerId = Number(request.query.dealerId)
+      if (!Number.isFinite(dealerId)) {
+        return reply.code(400).send({ error: 'dealerId query param required' })
+      }
+      try {
+        const targets = await listReleaseTargets(dealerId, request.params.poId)
+        return reply.send(PurchaseLifecycleReleaseTargetsResponseSchema.parse(targets))
+      } catch (error) {
+        return handleLifecycleError(reply, error)
+      }
+    },
+  )
+
+  server.post<{ Params: { poId: string } }>(
+    '/api/catalog/purchases/:poId/lifecycle/repair-quarantine',
+    async (request, reply) => {
+      const user = await requireSessionUser(request, reply, 'editor')
+      if (!user) return
+      const body = PurchaseLifecycleActionRequestSchema.parse(request.body ?? {})
+      try {
+        const status = await repairQuarantine({
+          dealerId: body.dealerId,
+          poId: request.params.poId,
+          expectedVersion: body.expectedVersion,
+          userId: user.id,
+        })
+        return reply.send(PurchaseLifecycleStatusResponseSchema.parse(status))
+      } catch (error) {
+        return handleLifecycleError(reply, error)
+      }
+    },
+  )
+
+  server.post<{ Params: { poId: string } }>(
+    '/api/catalog/purchases/:poId/lifecycle/release',
+    async (request, reply) => {
+      const user = await requireSessionUser(request, reply, 'editor')
+      if (!user) return
+      const body = PurchaseLifecycleReleaseRequestSchema.parse(request.body ?? {})
+      try {
+        const status = await release({
+          dealerId: body.dealerId,
+          poId: request.params.poId,
+          expectedVersion: body.expectedVersion,
+          targetLocationId: body.targetLocationId,
+          userId: user.id,
+        })
+        return reply.send(PurchaseLifecycleStatusResponseSchema.parse(status))
+      } catch (error) {
+        return handleLifecycleError(reply, error)
+      }
+    },
+  )
+
+  server.post<{ Params: { poId: string } }>(
+    '/api/catalog/purchases/:poId/lifecycle/continue-release',
+    async (request, reply) => {
+      const user = await requireSessionUser(request, reply, 'editor')
+      if (!user) return
+      const body = PurchaseLifecycleActionRequestSchema.parse(request.body ?? {})
+      try {
+        const status = await continueRelease({
+          dealerId: body.dealerId,
+          poId: request.params.poId,
+          expectedVersion: body.expectedVersion,
+          userId: user.id,
+        })
+        return reply.send(PurchaseLifecycleStatusResponseSchema.parse(status))
+      } catch (error) {
+        return handleLifecycleError(reply, error)
+      }
+    },
+  )
+
+  server.post<{ Params: { poId: string } }>(
+    '/api/catalog/purchases/:poId/lifecycle/rollback-release',
+    async (request, reply) => {
+      const user = await requireSessionUser(request, reply, 'editor')
+      if (!user) return
+      const body = PurchaseLifecycleActionRequestSchema.parse(request.body ?? {})
+      try {
+        const status = await rollbackRelease({
           dealerId: body.dealerId,
           poId: request.params.poId,
           expectedVersion: body.expectedVersion,

@@ -4,8 +4,10 @@ import { z } from 'zod'
 
 import type {
   PurchaseLifecycleGateSummary,
+  PurchaseLifecycleItem,
   PurchaseLifecyclePath,
   PurchaseLifecycleRun,
+  PurchaseLifecycleReleaseTargetsResponse,
   PurchaseLifecycleStatusResponse,
 } from '../../shared/contracts/index.js'
 import type { PoolClient } from 'pg'
@@ -24,24 +26,47 @@ import {
   computeMarketGate,
   computePriceGate,
   evaluateItemQuarantine,
+  evaluateItemReleased,
   isForSaleStockLocationName,
+  PRICE_EQUALITY_TOLERANCE_DOLLARS,
   type LiveLot,
 } from './purchaseInventoryLifecycleGates.js'
 import {
+  claimReleaseAttempt,
+  claimRollbackAttempt,
   createRun,
+  extendReleaseLease,
+  finalizeReleaseRun,
   getApprovedPricesForBatch,
+  getLifecycleSchemaCaps,
   getProposalBatchStatus,
   getPurchaseExpectedScope,
   getRunByPo,
   getSucceededObservationsAfter,
   lifecycleTablesExist,
+  lockRunForRelease,
   lockRunForUpdate,
+  resetReleaseRun,
   updateItemPrice,
   updateItemQuarantine,
   updateItemMarket,
+  updateItemRelease,
   updateRunState,
+  type LifecycleSchemaCaps,
   type UpdateRunStateInput,
 } from './purchaseInventoryLifecycleQueries.js'
+import {
+  findForSaleLocations,
+  findInspectionLocation,
+  isForSaleLocationName,
+  listLiveLotsForProduct,
+  listStockLocations,
+  resolveForSaleTargetById,
+  StockTransferError,
+  transferLot,
+  type LiveInventoryLot,
+  type StockLocation,
+} from '../catalog/stockTransferService.js'
 
 // ---------------------------------------------------------------------------
 // Orchestration for the purchase inventory pricing-safety lifecycle (L1).
@@ -65,36 +90,12 @@ import {
 export class LifecycleConflictError extends Error {}
 export class LifecycleBadRequestError extends Error {}
 export class LifecycleMigrationPendingError extends Error {}
+/** 095 is applied but the L2 release migration 096 is not yet. */
+export class LifecycleReleaseMigrationPendingError extends Error {}
 
 // Sweed RPC response shapes (mirrors of the loose schemas in
 // catalog/maintenance.ts and worker/sweed/client.ts — kept local so this
 // module owns its own parse contract).
-const InventoryProductItemSchema = z
-  .object({
-    id: z.union([z.coerce.number().int(), z.string().trim().min(1)]),
-    externalTrackCode: z.string().nullable().optional(),
-    availableQty: z.coerce.number().nullable().optional(),
-    currentQty: z.coerce.number().nullable().optional(),
-    stockLocation: z
-      .object({ id: z.coerce.number().int().optional(), name: z.string().nullable().optional() })
-      .passthrough()
-      .nullable()
-      .optional(),
-  })
-  .passthrough()
-
-const InventoryProductItemListResponseSchema = z
-  .object({
-    result: z
-      .object({ data: z.array(InventoryProductItemSchema).default([]) })
-      .passthrough()
-      .nullable()
-      .optional(),
-    data: z.array(InventoryProductItemSchema).optional(),
-  })
-  .passthrough()
-  .transform((value) => value.result?.data ?? value.data ?? [])
-
 const SweedProductSummarySchema = z
   .object({
     id: z.coerce.number().int().optional(),
@@ -117,47 +118,26 @@ function readLivePrice(detail: unknown): number | null {
   return summary.priceInfo?.actualPrice ?? summary.price ?? null
 }
 
-// Quarantine is a money-safety gate: missing a sellable lot would let a
-// not-yet-priced SKU stay on the floor. So we must read EVERY live lot for
-// the product, not just page 1 — a sellable lot on page 2+ would otherwise
-// look "gone" and false-pass. Page until Sweed returns a short page, and
-// fail CLOSED (throw) if it never does within a generous bound.
-const LIVE_LOT_PAGE_SIZE = 100
-const LIVE_LOT_MAX_PAGES = 50
-
-/** Live lots per product from Sweed, normalized for the quarantine gate. */
-async function readLiveLotsForProduct(dealerId: number, productId: number): Promise<LiveLot[]> {
-  const out: LiveLot[] = []
-  for (let page = 1; page <= LIVE_LOT_MAX_PAGES; page += 1) {
-    const raw = await callSweedRpc<unknown>(dealerId, 'store.inventory.product.item.list', {
-      productId: String(productId),
-      page,
-      pageSize: LIVE_LOT_PAGE_SIZE,
-      isOnStock: true,
-    })
-    const items = InventoryProductItemListResponseSchema.parse(raw)
-    for (const item of items) {
-      out.push({
-        inventoryItemId: String(item.id),
-        metrcTag: item.externalTrackCode ?? null,
-        qty:
-          typeof item.availableQty === 'number'
-            ? item.availableQty
-            : typeof item.currentQty === 'number'
-              ? item.currentQty
-              : 0,
-        stockLocationName: item.stockLocation?.name ?? null,
-      })
-    }
-    if (items.length < LIVE_LOT_PAGE_SIZE) {
-      return out
-    }
+/** Narrow a transfer-grade live lot down to the pure gate view. */
+function toGateLot(lot: LiveInventoryLot): LiveLot {
+  return {
+    inventoryItemId: lot.inventoryItemId,
+    metrcTag: lot.externalTrackCode,
+    qty: lot.availableQty ?? lot.currentQty ?? 0,
+    stockLocationName: lot.stockLocationName,
   }
-  throw new LifecycleBadRequestError(
-    `Could not verify quarantine for product ${productId}: Sweed returned more than `
-      + `${LIVE_LOT_MAX_PAGES * LIVE_LOT_PAGE_SIZE} live lots. Refusing to pass the quarantine `
-      + 'gate without a complete lot list.',
-  )
+}
+
+/**
+ * Live lots per product from Sweed (the shared, fully-paginated,
+ * fail-closed primitive), normalized for the pure gate functions. Missing
+ * a sellable lot would let a not-yet-priced SKU stay on the floor, so the
+ * underlying read pages the WHOLE list and throws on overflow rather than
+ * false-passing a gate on page 1.
+ */
+async function readLiveLotsForProduct(dealerId: number, productId: number): Promise<LiveLot[]> {
+  const lots = await listLiveLotsForProduct(dealerId, productId)
+  return lots.map(toGateLot)
 }
 
 async function readLivePriceForProduct(dealerId: number, productId: number): Promise<number | null> {
@@ -209,6 +189,35 @@ async function updateRunStateOrThrow(client: Queryable, input: UpdateRunStateInp
   }
 }
 
+// Cached schema-capability probe so we don't pay two catalog lookups on
+// every status load. Short TTL: a freshly-applied migration 096 starts
+// the release flow within a few seconds. Mirrors the pendingMigrations
+// cache lifetime so the panel's "release migration pending" note clears
+// at the same cadence as the global banner.
+const CAPS_CACHE_TTL_MS = 30_000
+let capsCache: { caps: LifecycleSchemaCaps; at: number } | null = null
+
+async function lifecycleCaps(db: Queryable): Promise<LifecycleSchemaCaps> {
+  const now = Date.now()
+  if (capsCache !== null && now - capsCache.at < CAPS_CACHE_TTL_MS) {
+    return capsCache.caps
+  }
+  const caps = await getLifecycleSchemaCaps(db)
+  capsCache = { caps, at: now }
+  return caps
+}
+
+/** Throw unless migration 096 (the L2 release columns) is applied. */
+async function requireReleaseSchema(db: Queryable): Promise<void> {
+  const caps = await lifecycleCaps(db)
+  if (!caps.runsTable) {
+    throw new LifecycleMigrationPendingError('Lifecycle migration 095 is not applied yet.')
+  }
+  if (!caps.releaseColumns) {
+    throw new LifecycleReleaseMigrationPendingError('Lifecycle release migration 096 is not applied yet.')
+  }
+}
+
 // --------------------------- Status (read) ---------------------------------
 
 async function buildGateSummary(
@@ -221,6 +230,32 @@ async function buildGateSummary(
       item.quarantineCurrentQty > 0 &&
       isForSaleStockLocationName(item.quarantineStockLocation),
   ).length
+
+  // Release gate: expected lots we tried to release but have not yet
+  // confirmed FOR-SALE & sellable (from the last release/continue pass).
+  const releaseUnverifiedLotCount = run.items.filter(
+    (item) => item.releaseTransferAttemptedAt !== null && item.releaseVerifiedAt === null,
+  ).length
+
+  // Decision-8 badge (informational): products with on-floor (FOR SALE,
+  // positive-qty) stock per the latest PERSISTED lot evidence — no
+  // page-load Sweed read. After a release the released lots show here;
+  // for the quarantine path a sellable expected lot also shows (a breach
+  // worth flagging). Reprice-in-place runs do not persist this evidence,
+  // so the panel additionally treats that path as inherently on-floor.
+  const onFloor = new Set<number>()
+  for (const item of run.items) {
+    const quarSellable =
+      item.quarantineCurrentQty !== null &&
+      item.quarantineCurrentQty > 0 &&
+      isForSaleStockLocationName(item.quarantineStockLocation)
+    const releaseSellable =
+      item.releaseCurrentQty !== null &&
+      item.releaseCurrentQty > 0 &&
+      isForSaleStockLocationName(item.releaseStockLocation)
+    if (quarSellable || releaseSellable) onFloor.add(item.sweedProductId)
+  }
+  const productIdsWithOnFloorStock = run.expectedProductIds.filter((id) => onFloor.has(id))
 
   let marketPendingProductIds: number[] = []
   if (run.marketRequestedAt !== null && run.expectedProductIds.length > 0) {
@@ -263,6 +298,8 @@ async function buildGateSummary(
     marketPendingProductIds,
     priceUnapprovedProductIds,
     priceUnverifiedProductIds,
+    releaseUnverifiedLotCount,
+    productIdsWithOnFloorStock,
   }
 }
 
@@ -271,16 +308,24 @@ export async function getLifecycleStatus(
   poId: string,
 ): Promise<PurchaseLifecycleStatusResponse> {
   const db = getPool()
-  if (!(await lifecycleTablesExist(db))) {
-    return { migrationPending: true, expectedProductIds: [], run: null, gateSummary: null }
+  const caps = await lifecycleCaps(db)
+  if (!caps.runsTable) {
+    return {
+      migrationPending: true,
+      releaseMigrationPending: true,
+      expectedProductIds: [],
+      run: null,
+      gateSummary: null,
+    }
   }
   const [scope, run] = await Promise.all([
     getPurchaseExpectedScope(db, dealerId, poId),
-    getRunByPo(db, dealerId, poId),
+    getRunByPo(db, dealerId, poId, caps.releaseColumns),
   ])
   const gateSummary = run ? await buildGateSummary(db, run) : null
   return {
     migrationPending: false,
+    releaseMigrationPending: !caps.releaseColumns,
     expectedProductIds: scope.productIds,
     run,
     gateSummary,
@@ -336,7 +381,7 @@ export async function startLifecycle(input: {
     : 'market_refresh_pending'
 
   const lockResult = await withPoLifecycleLock(input.dealerId, input.poId, async (client) => {
-    const existing = await getRunByPo(client, input.dealerId, input.poId)
+    const existing = await getRunByPo(client, input.dealerId, input.poId, false)
     if (existing) {
       throw new LifecycleConflictError('A lifecycle run already exists for this PO.')
     }
@@ -392,7 +437,7 @@ export async function verifyQuarantine(input: {
     throw new LifecycleMigrationPendingError('Lifecycle migration 095 is not applied yet.')
   }
 
-  const run = await getRunByPo(db, input.dealerId, input.poId)
+  const run = await getRunByPo(db, input.dealerId, input.poId, false)
   if (!run) throw new LifecycleBadRequestError('No lifecycle run for this PO.')
   if (run.version !== input.expectedVersion) {
     throw new LifecycleConflictError('Lifecycle changed since this view loaded; reload and retry.')
@@ -580,7 +625,7 @@ export async function reprice(input: {
     throw new LifecycleMigrationPendingError('Lifecycle migration 095 is not applied yet.')
   }
 
-  const run = await getRunByPo(db, input.dealerId, input.poId)
+  const run = await getRunByPo(db, input.dealerId, input.poId, false)
   if (!run) throw new LifecycleBadRequestError('No lifecycle run for this PO.')
   if (run.version !== input.expectedVersion) {
     throw new LifecycleConflictError('Lifecycle changed since this view loaded; reload and retry.')
@@ -977,4 +1022,732 @@ async function queuePurchaseRepriceBatch(
     undoPayload: null,
   })
   return proposalBatchId
+}
+
+// ===========================================================================
+// L2 — bulk quarantine repair + gated release
+// ===========================================================================
+
+/**
+ * Release execution lease (ms). Only the attempt whose id matches the run
+ * may transfer/finalize; "continue release" may only take over once the
+ * lease has expired. The transfer loop heartbeats (extends) the lease
+ * before each lot, so a long but live release never looks abandoned.
+ */
+const RELEASE_LEASE_TTL_MS = 120_000
+
+/** The per-site default release room (decision 6). */
+function isDefaultReleaseRoom(name: string): boolean {
+  return name.trim().toLowerCase().startsWith('for sale - sales floor')
+}
+
+function pricesMatch(approved: number | null, live: number | null): boolean {
+  return (
+    approved !== null &&
+    live !== null &&
+    Number.isFinite(approved) &&
+    Number.isFinite(live) &&
+    Math.abs(live - approved) < PRICE_EQUALITY_TOLERANCE_DOLLARS
+  )
+}
+
+/** Live lots for an expected lot, matched by inventory item id then METRC tag. */
+function matchExpectedLots(
+  expected: { inventoryItemId: string; metrcTag: string | null },
+  liveLots: LiveInventoryLot[],
+): LiveInventoryLot[] {
+  return liveLots.filter(
+    (lot) =>
+      lot.inventoryItemId === expected.inventoryItemId ||
+      (expected.metrcTag !== null &&
+        lot.externalTrackCode !== null &&
+        lot.externalTrackCode === expected.metrcTag),
+  )
+}
+
+// ----------------------------- Release targets -----------------------------
+
+export async function listReleaseTargets(
+  dealerId: number,
+  poId: string,
+): Promise<PurchaseLifecycleReleaseTargetsResponse> {
+  const db = getPool()
+  const caps = await lifecycleCaps(db)
+  if (!caps.runsTable) {
+    return { migrationPending: true, releaseMigrationPending: true, targets: [] }
+  }
+  if (!caps.releaseColumns) {
+    return { migrationPending: false, releaseMigrationPending: true, targets: [] }
+  }
+  void poId
+  const locations = await withSweedSession(() => listStockLocations(dealerId))
+  const forSale = findForSaleLocations(locations)
+  const targets = []
+  for (const loc of forSale) {
+    if (loc.stockTypeId === null) continue
+    targets.push({
+      locationId: loc.id,
+      locationName: loc.name,
+      stockTypeId: loc.stockTypeId,
+      isDefault: isDefaultReleaseRoom(loc.name),
+    })
+  }
+  return { migrationPending: false, releaseMigrationPending: false, targets }
+}
+
+// --------------------------- Quarantine repair -----------------------------
+
+/**
+ * Bulk move the purchase's still-sellable expected lots into the Dave
+ * inspection room, then re-verify. The "repair" for path (a) when the
+ * operator received a delivery into a FOR SALE room: it physically pulls
+ * exactly the PO's lots off the floor (never other stock), then runs the
+ * same money-safety quarantine re-verify as verify-quarantine. Uses only
+ * L1 schema (no release columns), so it works once migration 095 is live.
+ */
+export async function repairQuarantine(input: {
+  dealerId: number
+  poId: string
+  expectedVersion: number
+  userId: number | null
+}): Promise<PurchaseLifecycleStatusResponse> {
+  const db = getPool()
+  if (!(await lifecycleTablesExist(db))) {
+    throw new LifecycleMigrationPendingError('Lifecycle migration 095 is not applied yet.')
+  }
+  const run = await getRunByPo(db, input.dealerId, input.poId, false)
+  if (!run) throw new LifecycleBadRequestError('No lifecycle run for this PO.')
+  if (run.version !== input.expectedVersion) {
+    throw new LifecycleConflictError('Lifecycle changed since this view loaded; reload and retry.')
+  }
+  if (run.path !== 'quarantine') {
+    throw new LifecycleBadRequestError('Quarantine repair only applies to the quarantine path.')
+  }
+  if (run.state !== 'awaiting_receive_to_quarantine') {
+    throw new LifecycleBadRequestError(`Cannot repair quarantine from state "${run.state}".`)
+  }
+  if (run.items.length === 0) {
+    throw new LifecycleBadRequestError('No expected lots to repair.')
+  }
+
+  const productIds = [...new Set(run.items.map((item) => item.sweedProductId))]
+  let movedLotCount = 0
+  try {
+    await withSweedSession(async () => {
+      const locations = await listStockLocations(input.dealerId)
+      const inspection = findInspectionLocation(locations)
+      if (inspection.stockTypeId === null) {
+        throw new StockTransferError(`Inspection room "${inspection.name}" has no stock type.`)
+      }
+      const liveByProduct = new Map<number, LiveInventoryLot[]>()
+      for (const productId of productIds) {
+        liveByProduct.set(productId, await listLiveLotsForProduct(input.dealerId, productId))
+      }
+      for (const item of run.items) {
+        const matching = matchExpectedLots(item, liveByProduct.get(item.sweedProductId) ?? [])
+        for (const lot of matching) {
+          if (!isForSaleLocationName(lot.stockLocationName)) continue
+          const moved = await transferLot({
+            dealerId: input.dealerId,
+            lot,
+            targetLocationId: inspection.id,
+            targetStockTypeId: inspection.stockTypeId,
+          })
+          if (moved) movedLotCount += 1
+        }
+      }
+    })
+  } catch (error) {
+    if (error instanceof StockTransferError) {
+      throw new LifecycleBadRequestError(error.message)
+    }
+    throw error
+  }
+
+  await appendAuditEvent(db, {
+    actorType: input.userId ? 'user' : 'system',
+    actorUserId: input.userId,
+    entityId: String(run.id),
+    entityType: 'purchase_inventory_lifecycle_run',
+    eventType: 'purchase.lifecycle.quarantine_repaired',
+    module: 'catalog',
+    payload: {
+      dealerId: input.dealerId,
+      poId: input.poId,
+      movedLotCount,
+      productIds,
+    },
+    requestId: randomUUID(),
+    scope: null,
+    undoPayload: null,
+  })
+
+  // Re-verify quarantine (re-reads live lots, persists evidence, advances
+  // to quarantined when clean). The version is unchanged — the repair did
+  // no DB state mutation — so the operator's expectedVersion still holds.
+  return verifyQuarantine(input)
+}
+
+// -------------------------------- Release ----------------------------------
+
+interface ReleaseTarget {
+  id: number
+  name: string
+  stockTypeId: number
+}
+
+function toTarget(loc: StockLocation): ReleaseTarget {
+  if (loc.stockTypeId === null) {
+    throw new StockTransferError(`Release room "${loc.name}" has no stock type.`)
+  }
+  return { id: loc.id, name: loc.name, stockTypeId: loc.stockTypeId }
+}
+
+interface ReleaseTransfersResult {
+  priceDrift: boolean
+  anyTransferred: boolean
+  allVerified: boolean
+  postPriceOk: boolean
+}
+
+/**
+ * The release write loop + verification, run OUTSIDE the per-PO DB lock
+ * (the lock is only held for the short claim/finalize transactions; we
+ * never hold a DB transaction across slow Sweed RPCs). Safety boundary:
+ *   • Heartbeat the lease before each lot; abort if another attempt took over.
+ *   • Re-read the LIVE price immediately before each lot; on drift, stop
+ *     before transferring any more (no sellable-making move on stale price).
+ *   • Move only the expected PO lots, only out of NON-FOR-SALE rooms.
+ *   • Post-pass re-reads BOTH live prices and live lots: release_verified
+ *     is set only when a lot is proven sellable in a FOR SALE room, and a
+ *     price that drifted during the loop fails the post price gate.
+ */
+async function performReleaseTransfers(args: {
+  dealerId: number
+  runId: number
+  attemptId: string
+  remaining: PurchaseLifecycleItem[]
+  allItems: PurchaseLifecycleItem[]
+  expectedProductIds: number[]
+  approved: Map<number, number>
+  target: ReleaseTarget
+}): Promise<ReleaseTransfersResult> {
+  const db = getPool()
+  let priceDrift = false
+  // Count a lot released by a PRIOR attempt (a continue) as "transferred",
+  // so a drift on a continue is classified as release_price_drift
+  // (rollbackable), never release_preflight_failed (which means nothing was
+  // ever moved). Without this, a continue that drifts before moving any new
+  // lot would falsely report a clean preflight failure with lots already
+  // on the floor.
+  let anyTransferred = args.allItems.some(
+    (i) => i.releaseTransferredAt !== null || i.releaseVerifiedAt !== null,
+  )
+  const renewLease = (): Date => new Date(Date.now() + RELEASE_LEASE_TTL_MS)
+  const reown = async (): Promise<void> => {
+    if (!(await extendReleaseLease(db, args.runId, args.attemptId, renewLease()))) {
+      throw new LifecycleConflictError('Release lease lost to another attempt; reload and retry.')
+    }
+  }
+  const writeItem = async (update: Parameters<typeof updateItemRelease>[1]): Promise<void> => {
+    if (!(await updateItemRelease(db, update))) {
+      throw new LifecycleConflictError('Release lease lost to another attempt; reload and retry.')
+    }
+  }
+  const isoToDate = (iso: string | null): Date | null => (iso === null ? null : new Date(iso))
+
+  await withSweedSession(async () => {
+    for (const item of args.remaining) {
+      // Keep the lease alive across long no-move iterations and prove we
+      // still own the run before touching this item.
+      await reown()
+      const approvedPrice = args.approved.get(item.sweedProductId) ?? null
+      const liveLots = await listLiveLotsForProduct(args.dealerId, item.sweedProductId)
+      const matching = matchExpectedLots(item, liveLots)
+      const positive = matching.filter((lot) => (lot.availableQty ?? lot.currentQty ?? 0) > 0)
+      // Only lots NOT already in a FOR SALE room need a physical move.
+      const toMove = positive.filter((lot) => !isForSaleLocationName(lot.stockLocationName))
+      const attemptedAt = new Date()
+      let transferredThisItem = false
+      let lastError: string | null = null
+      let driftHere = false
+      for (const lot of toMove) {
+        // Immediate-before-transfer preflight, per LOT: re-own the lease
+        // AND re-read the LIVE price right before each physical move, so a
+        // lot is never made sellable on a stale/drifted price.
+        await reown()
+        const livePrice = await readLivePriceForProduct(args.dealerId, item.sweedProductId)
+        if (!pricesMatch(approvedPrice, livePrice)) {
+          priceDrift = true
+          driftHere = true
+          lastError = `Live price ${livePrice ?? 'unreadable'} != approved ${approvedPrice ?? 'unapproved'} (1¢ tol).`
+          break
+        }
+        try {
+          const moved = await transferLot({
+            dealerId: args.dealerId,
+            lot,
+            targetLocationId: args.target.id,
+            targetStockTypeId: args.target.stockTypeId,
+          })
+          if (moved) {
+            anyTransferred = true
+            transferredThisItem = true
+            if (moved.reservedHeldBack) {
+              lastError = 'Some reserved units stayed put (transferReservedItems=false).'
+            }
+          }
+        } catch (error) {
+          lastError = error instanceof Error ? error.message : 'transfer failed'
+        }
+      }
+      await writeItem({
+        itemId: item.id,
+        attemptId: args.attemptId,
+        transferAttemptedAt: attemptedAt,
+        transferredAt: transferredThisItem ? new Date() : isoToDate(item.releaseTransferredAt),
+        verifiedAt: null,
+        stockLocation: item.releaseStockLocation,
+        stockLocationId: null,
+        stockTypeId: null,
+        currentQty: item.releaseCurrentQty,
+        lastError,
+      })
+      if (driftHere) break
+    }
+  })
+
+  if (priceDrift) {
+    return { priceDrift: true, anyTransferred, allVerified: false, postPriceOk: false }
+  }
+
+  // Post-pass: re-read live prices + lots for ALL expected products, prove
+  // each expected lot is now sellable, and re-check the price gate.
+  let postPriceOk = true
+  await withSweedSession(async () => {
+    const livePriceByProduct = new Map<number, number | null>()
+    const liveLotsByProduct = new Map<number, LiveLot[]>()
+    for (const productId of args.expectedProductIds) {
+      livePriceByProduct.set(productId, await readLivePriceForProduct(args.dealerId, productId))
+      liveLotsByProduct.set(
+        productId,
+        (await listLiveLotsForProduct(args.dealerId, productId)).map(toGateLot),
+      )
+    }
+    const postGate = computePriceGate(
+      args.expectedProductIds.map((productId) => ({
+        productId,
+        approvedPriceDollars: args.approved.get(productId) ?? null,
+        livePriceDollars: livePriceByProduct.get(productId) ?? null,
+      })),
+    )
+    postPriceOk = postGate.verified
+    const now = new Date()
+    for (const item of args.allItems) {
+      const verdict = evaluateItemReleased(
+        { inventoryItemId: item.inventoryItemId, metrcTag: item.metrcTag },
+        liveLotsByProduct.get(item.sweedProductId) ?? [],
+      )
+      await writeItem({
+        itemId: item.id,
+        attemptId: args.attemptId,
+        transferAttemptedAt: isoToDate(item.releaseTransferAttemptedAt),
+        transferredAt: isoToDate(item.releaseTransferredAt),
+        verifiedAt: verdict.released ? now : null,
+        stockLocation: verdict.stockLocation,
+        stockLocationId: null,
+        stockTypeId: null,
+        currentQty: verdict.currentQty,
+        lastError: verdict.released ? null : 'Not yet confirmed sellable in a FOR SALE room.',
+      })
+    }
+  })
+
+  const allVerified = await allItemsReleaseVerified(db, args.runId)
+  return { priceDrift: false, anyTransferred, allVerified, postPriceOk }
+}
+
+/** True when every item in the run has a (post-read-proven) release_verified_at. */
+async function allItemsReleaseVerified(db: Queryable, runId: number): Promise<boolean> {
+  const result = await db.query<{ unverified: string }>(
+    `select count(*)::text as unverified
+       from purchase_inventory_lifecycle_items
+      where run_id = $1 and release_verified_at is null`,
+    [runId],
+  )
+  return Number(result.rows[0]?.unverified ?? '1') === 0
+}
+
+async function runReleaseAttempt(input: {
+  dealerId: number
+  poId: string
+  expectedVersion: number
+  userId: number | null
+  fresh: boolean
+  targetLocationId?: number
+}): Promise<PurchaseLifecycleStatusResponse> {
+  const db = getPool()
+
+  const run = await getRunByPo(db, input.dealerId, input.poId, true)
+  if (!run) throw new LifecycleBadRequestError('No lifecycle run for this PO.')
+  if (run.version !== input.expectedVersion) {
+    throw new LifecycleConflictError('Lifecycle changed since this view loaded; reload and retry.')
+  }
+  if (run.path !== 'quarantine') {
+    throw new LifecycleBadRequestError(
+      'Release only applies to the quarantine path; reprice-in-place lots are already sellable.',
+    )
+  }
+  if (run.pricingBatchId === null) {
+    throw new LifecycleBadRequestError('No pricing batch on this run; cannot verify prices for release.')
+  }
+  if (input.fresh) {
+    if (run.state !== 'priced_verified') {
+      throw new LifecycleBadRequestError(`Cannot release from state "${run.state}".`)
+    }
+  } else {
+    const continuable =
+      run.state === 'release_in_progress' ||
+      (run.state === 'blocked' && run.blockedReason === 'release_partial_failure')
+    if (!continuable) {
+      throw new LifecycleBadRequestError(`Cannot continue release from state "${run.state}".`)
+    }
+  }
+
+  // Resolve the target FOR SALE room LIVE (never trust the stored/sent id
+  // blindly). Fresh release uses the chosen id; continue reuses the run's.
+  let target: ReleaseTarget
+  try {
+    target = await withSweedSession(async () => {
+      const locations = await listStockLocations(input.dealerId)
+      if (input.fresh) {
+        if (input.targetLocationId === undefined) {
+          throw new StockTransferError('No target location chosen.')
+        }
+        return toTarget(resolveForSaleTargetById(locations, input.targetLocationId))
+      }
+      if (run.releaseTargetLocationId === null) {
+        throw new StockTransferError('This run has no stored release target to continue.')
+      }
+      return toTarget(resolveForSaleTargetById(locations, run.releaseTargetLocationId))
+    })
+  } catch (error) {
+    if (error instanceof StockTransferError) throw new LifecycleBadRequestError(error.message)
+    throw error
+  }
+
+  // Claim the attempt (short tx): version CAS + lease + target. For
+  // continue, refuse if a live lease is still held by another attempt.
+  const attemptId = randomUUID()
+  const leaseExpiresAt = new Date(Date.now() + RELEASE_LEASE_TTL_MS)
+  const claim = await withPoLifecycleLock(input.dealerId, input.poId, async (client) => {
+    const locked = await lockRunForRelease(client, input.dealerId, input.poId)
+    if (!locked) throw new LifecycleBadRequestError('Lifecycle run vanished.')
+    if (locked.version !== input.expectedVersion) {
+      throw new LifecycleConflictError('Lifecycle changed since this view loaded; reload and retry.')
+    }
+    if (!input.fresh && locked.state === 'release_in_progress') {
+      const leaseLive =
+        locked.releaseLeaseExpiresAt !== null && locked.releaseLeaseExpiresAt.getTime() > Date.now()
+      if (leaseLive) {
+        throw new LifecycleConflictError(
+          'A release for this PO is already running. Wait for it to finish or for its lease to expire.',
+        )
+      }
+    }
+    const ok = await claimReleaseAttempt(client, {
+      runId: locked.id,
+      expectedVersion: locked.version,
+      attemptId,
+      leaseExpiresAt,
+      targetLocationId: target.id,
+      targetLocationName: target.name,
+      targetStockTypeId: target.stockTypeId,
+    })
+    if (!ok) {
+      throw new LifecycleConflictError('Lifecycle changed since this view loaded; reload and retry.')
+    }
+    await appendAuditEvent(client, {
+      actorType: input.userId ? 'user' : 'system',
+      actorUserId: input.userId,
+      entityId: String(locked.id),
+      entityType: 'purchase_inventory_lifecycle_run',
+      eventType: 'purchase.lifecycle.release_started',
+      module: 'catalog',
+      payload: {
+        dealerId: input.dealerId,
+        poId: input.poId,
+        attemptId,
+        fresh: input.fresh,
+        targetLocationId: target.id,
+        targetLocationName: target.name,
+      },
+      requestId: randomUUID(),
+      scope: null,
+      undoPayload: null,
+    })
+    return locked.id
+  })
+  if (!claim.acquired) {
+    throw new LifecycleConflictError('Another lifecycle action for this PO is in progress.')
+  }
+  const runId = claim.value!
+
+  // Re-read the claimed run (now release_in_progress) for the work set.
+  const claimed = await getRunByPo(db, input.dealerId, input.poId, true)
+  if (!claimed || claimed.state !== 'release_in_progress') {
+    throw new LifecycleConflictError('Release claim lost; reload and retry.')
+  }
+  const approved = await getApprovedPricesForBatch(db, run.pricingBatchId)
+  const remaining = claimed.items.filter((i) => i.releaseVerifiedAt === null)
+
+  const result = await performReleaseTransfers({
+    dealerId: input.dealerId,
+    runId,
+    attemptId,
+    remaining,
+    allItems: claimed.items,
+    expectedProductIds: claimed.expectedProductIds,
+    approved,
+    target,
+  })
+
+  // Finalize (short tx): key on attemptId, not version (the claim bumped it).
+  let finalState: PurchaseLifecycleRun['state']
+  let blockedReason: string | null = null
+  let releasedAt: Date | null = null
+  let releaseLastError: string | null = null
+  if (result.priceDrift) {
+    if (result.anyTransferred) {
+      finalState = 'blocked'
+      blockedReason = 'release_price_drift'
+      releaseLastError = 'Live price drifted after some lots were released; rollback is the safe recovery.'
+    } else {
+      finalState = 'blocked'
+      blockedReason = 'release_preflight_failed'
+      releaseLastError = 'Live price did not match the approved price; nothing was moved.'
+    }
+  } else if (!result.postPriceOk) {
+    finalState = 'blocked'
+    blockedReason = 'release_price_drift'
+    releaseLastError = 'Live price no longer matches the approved price after the release pass; rollback is the safe recovery.'
+  } else if (result.allVerified) {
+    finalState = 'released'
+    releasedAt = new Date()
+  } else {
+    finalState = 'blocked'
+    blockedReason = 'release_partial_failure'
+    releaseLastError = 'Some lots could not be confirmed sellable; continue remaining or roll back.'
+  }
+
+  await withPoLifecycleLock(input.dealerId, input.poId, async (client) => {
+    const ok = await finalizeReleaseRun(client, {
+      runId,
+      attemptId,
+      state: finalState,
+      blockedReason,
+      releasedAt,
+      releaseLastError,
+    })
+    if (!ok) {
+      // Another attempt took over this run (our lease expired). Leave its
+      // state alone — it owns the run now.
+      return false
+    }
+    await appendAuditEvent(client, {
+      actorType: input.userId ? 'user' : 'system',
+      actorUserId: input.userId,
+      entityId: String(runId),
+      entityType: 'purchase_inventory_lifecycle_run',
+      eventType: 'purchase.lifecycle.release_finalized',
+      module: 'catalog',
+      payload: {
+        dealerId: input.dealerId,
+        poId: input.poId,
+        attemptId,
+        finalState,
+        blockedReason,
+        priceDrift: result.priceDrift,
+        anyTransferred: result.anyTransferred,
+        allVerified: result.allVerified,
+        postPriceOk: result.postPriceOk,
+      },
+      requestId: randomUUID(),
+      scope: null,
+      undoPayload: null,
+    })
+    return true
+  })
+
+  return statusOrThrow(input.dealerId, input.poId)
+}
+
+export async function release(input: {
+  dealerId: number
+  poId: string
+  expectedVersion: number
+  targetLocationId: number
+  userId: number | null
+}): Promise<PurchaseLifecycleStatusResponse> {
+  await requireReleaseSchema(getPool())
+  return runReleaseAttempt({ ...input, fresh: true })
+}
+
+export async function continueRelease(input: {
+  dealerId: number
+  poId: string
+  expectedVersion: number
+  userId: number | null
+}): Promise<PurchaseLifecycleStatusResponse> {
+  await requireReleaseSchema(getPool())
+  return runReleaseAttempt({ ...input, fresh: false })
+}
+
+// ---------------------------- Rollback release -----------------------------
+
+/**
+ * Move any already-released expected lots back into the Dave inspection
+ * room (the safety recovery for a partial or price-drift release), then
+ * re-verify quarantine. On a clean re-quarantine the run returns to
+ * priced_verified — the next release attempt re-reads the live price
+ * before moving anything, so priced_verified means "ready to attempt
+ * release again," not a timeless price guarantee. If any expected lot is
+ * still sellable after the move-back, the run blocks on
+ * release_rollback_failed (retry rollback).
+ */
+export async function rollbackRelease(input: {
+  dealerId: number
+  poId: string
+  expectedVersion: number
+  userId: number | null
+}): Promise<PurchaseLifecycleStatusResponse> {
+  const db = getPool()
+  await requireReleaseSchema(db)
+  const run = await getRunByPo(db, input.dealerId, input.poId, true)
+  if (!run) throw new LifecycleBadRequestError('No lifecycle run for this PO.')
+  if (run.version !== input.expectedVersion) {
+    throw new LifecycleConflictError('Lifecycle changed since this view loaded; reload and retry.')
+  }
+  if (run.path !== 'quarantine') {
+    throw new LifecycleBadRequestError('Release rollback only applies to the quarantine path.')
+  }
+  const rollbackable =
+    run.state === 'released' ||
+    (run.state === 'blocked' &&
+      (run.blockedReason === 'release_preflight_failed' ||
+        run.blockedReason === 'release_partial_failure' ||
+        run.blockedReason === 'release_price_drift' ||
+        run.blockedReason === 'release_rollback_failed'))
+  if (!rollbackable) {
+    throw new LifecycleBadRequestError(`Cannot roll back release from state "${run.state}".`)
+  }
+
+  // Claim the rollback BEFORE any physical move-back: this CAS-bumps
+  // version (so a concurrent "continue release" can no longer win its own
+  // optimistic claim and start releasing while we are moving lots back)
+  // and stamps a fresh attempt id + lease. The final resetReleaseRun keys
+  // on this attempt id, so a slow move-back can never race another action
+  // into an inconsistent run. The run keeps its current state during the
+  // move-back; there is no dedicated rollback-in-progress state.
+  const rollbackAttemptId = randomUUID()
+  const claim = await withPoLifecycleLock(input.dealerId, input.poId, async (client) => {
+    const locked = await lockRunForRelease(client, input.dealerId, input.poId)
+    if (!locked) throw new LifecycleBadRequestError('Lifecycle run vanished.')
+    if (locked.version !== input.expectedVersion) {
+      throw new LifecycleConflictError('Lifecycle changed since this view loaded; reload and retry.')
+    }
+    const ok = await claimRollbackAttempt(client, {
+      runId: locked.id,
+      expectedVersion: locked.version,
+      attemptId: rollbackAttemptId,
+      leaseExpiresAt: new Date(Date.now() + RELEASE_LEASE_TTL_MS),
+    })
+    if (!ok) {
+      throw new LifecycleConflictError('Lifecycle changed since this view loaded; reload and retry.')
+    }
+    return locked.id
+  })
+  if (!claim.acquired) {
+    throw new LifecycleConflictError('Another lifecycle action for this PO is in progress.')
+  }
+
+  const productIds = [...new Set(run.items.map((item) => item.sweedProductId))]
+  let movedBackCount = 0
+  let sellableAfter = 0
+  const now = new Date()
+  try {
+    await withSweedSession(async () => {
+      const locations = await listStockLocations(input.dealerId)
+      const inspection = findInspectionLocation(locations)
+      if (inspection.stockTypeId === null) {
+        throw new StockTransferError(`Inspection room "${inspection.name}" has no stock type.`)
+      }
+      const liveByProduct = new Map<number, LiveInventoryLot[]>()
+      for (const productId of productIds) {
+        liveByProduct.set(productId, await listLiveLotsForProduct(input.dealerId, productId))
+      }
+      for (const item of run.items) {
+        const matching = matchExpectedLots(item, liveByProduct.get(item.sweedProductId) ?? [])
+        for (const lot of matching) {
+          if (!isForSaleLocationName(lot.stockLocationName)) continue
+          const moved = await transferLot({
+            dealerId: input.dealerId,
+            lot,
+            targetLocationId: inspection.id,
+            targetStockTypeId: inspection.stockTypeId,
+          })
+          if (moved) movedBackCount += 1
+        }
+      }
+      // Re-read and persist quarantine evidence after the move-back.
+      for (const item of run.items) {
+        const reread = (await listLiveLotsForProduct(input.dealerId, item.sweedProductId)).map(toGateLot)
+        const verdict = evaluateItemQuarantine(
+          { inventoryItemId: item.inventoryItemId, metrcTag: item.metrcTag },
+          reread,
+        )
+        if (!verdict.quarantined) sellableAfter += 1
+      }
+    })
+  } catch (error) {
+    if (error instanceof StockTransferError) throw new LifecycleBadRequestError(error.message)
+    throw error
+  }
+
+  const nextState: PurchaseLifecycleRun['state'] = sellableAfter === 0 ? 'priced_verified' : 'blocked'
+  const lockResult = await withPoLifecycleLock(input.dealerId, input.poId, async (client) => {
+    const ok = await resetReleaseRun(client, {
+      runId: run.id,
+      attemptId: rollbackAttemptId,
+      state: nextState,
+      blockedReason: sellableAfter === 0 ? null : 'release_rollback_failed',
+    })
+    if (!ok) {
+      throw new LifecycleConflictError('Lifecycle changed since this view loaded; reload and retry.')
+    }
+    await appendAuditEvent(client, {
+      actorType: input.userId ? 'user' : 'system',
+      actorUserId: input.userId,
+      entityId: String(run.id),
+      entityType: 'purchase_inventory_lifecycle_run',
+      eventType: 'purchase.lifecycle.release_rolled_back',
+      module: 'catalog',
+      payload: {
+        dealerId: input.dealerId,
+        poId: input.poId,
+        movedBackCount,
+        sellableAfter,
+        nextState,
+      },
+      requestId: randomUUID(),
+      scope: null,
+      undoPayload: null,
+    })
+    return true
+  })
+  if (!lockResult.acquired) {
+    throw new LifecycleConflictError('Another lifecycle action for this PO is in progress.')
+  }
+  void now
+  return statusOrThrow(input.dealerId, input.poId)
 }

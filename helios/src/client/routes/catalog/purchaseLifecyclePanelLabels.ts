@@ -100,3 +100,64 @@ export function repriceButtonLabel(state: PurchaseLifecycleState): string {
       return 'Re-verify applied prices'
   }
 }
+
+// ----------------------------- L2 release labels ---------------------------
+
+/** Has any release attempt run for this run yet? */
+function releaseAttempted(run: PurchaseLifecycleRun): boolean {
+  return (
+    run.releaseRequestedAt !== null ||
+    run.state === 'release_in_progress' ||
+    run.state === 'released' ||
+    run.items.some(
+      (item) =>
+        item.releaseTransferAttemptedAt !== null ||
+        item.releaseTransferredAt !== null ||
+        item.releaseVerifiedAt !== null,
+    )
+  )
+}
+
+/**
+ * Label + danger flag for the "lots not yet released" row. As with the
+ * quarantine gate, an UNCHECKED release must never render as a green "0":
+ * "Not released yet" (no attempt made) and "Skipped" (reprice-in-place)
+ * are distinct from a real post-release zero.
+ */
+export function releaseGateLabel(
+  run: PurchaseLifecycleRun,
+  summary: PurchaseLifecycleGateSummary,
+): { text: string; danger: boolean } {
+  if (run.path === 'reprice_in_place') {
+    return { text: 'Skipped (reprice in place)', danger: false }
+  }
+  if (!releaseAttempted(run)) {
+    return { text: 'Not released yet', danger: false }
+  }
+  return {
+    text: String(summary.releaseUnverifiedLotCount),
+    danger: summary.releaseUnverifiedLotCount > 0,
+  }
+}
+
+/**
+ * Decision-8 informational badge: how many of the expected SKUs already
+ * have on-floor (FOR SALE) stock, so the operator knows a reprice also
+ * touches existing live stock. Returns null when there is nothing to
+ * badge (so the panel can omit the row entirely).
+ */
+export function onFloorStockBadge(summary: PurchaseLifecycleGateSummary): string | null {
+  const n = summary.productIdsWithOnFloorStock.length
+  if (n === 0) return null
+  return n === 1
+    ? '1 SKU already has on-floor stock'
+    : `${n} SKUs already have on-floor stock`
+}
+
+/**
+ * The release button's verb depends on whether a fresh release or a
+ * resume of a partial/interrupted attempt is what the click will do.
+ */
+export function releaseButtonLabel(state: PurchaseLifecycleState): string {
+  return state === 'release_in_progress' ? 'Continue release' : 'Release to FOR SALE'
+}

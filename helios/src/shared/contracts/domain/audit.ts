@@ -137,6 +137,11 @@ export const AuditEventTypeSchema = z.enum([
   'purchase.lifecycle.quarantine_verified',
   'purchase.lifecycle.market_refresh_requested',
   'purchase.lifecycle.reprice_advanced',
+  // L2 (automation#54): bulk quarantine repair + gated release.
+  'purchase.lifecycle.quarantine_repaired',
+  'purchase.lifecycle.release_started',
+  'purchase.lifecycle.release_finalized',
+  'purchase.lifecycle.release_rolled_back',
 ])
 
 export type AuditEntityType = z.infer<typeof AuditEntityTypeSchema>
