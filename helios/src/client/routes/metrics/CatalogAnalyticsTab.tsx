@@ -31,6 +31,12 @@ import {
   type HighlightDimensionSpec,
   type HighlightSelectionState,
 } from './HighlightControls.js'
+import {
+  ratioForward,
+  ratioTicks,
+  ratioZeroFloor,
+  type RatioTick,
+} from './catalogRatioAxis.js'
 import { niceXTicks, niceYTicks } from './gridlines.js'
 import {
   buildContinuousScale,
@@ -116,6 +122,14 @@ interface PointAxisDef {
   readonly short: string
   readonly value: (p: CatalogAnalyticsPoint, ctx: AxisCtx) => number | null
   readonly format: (v: number) => string
+  /**
+   * Marks a cohort-relative *ratio* axis whose neutral point is 1.0
+   * (velocity index, price index, list ÷ market ratio). Only these
+   * axes are eligible for the "balanced" reciprocal-fold scale (see
+   * `catalogRatioAxis.ts`). Additive/pp-delta axes (baseline 0),
+   * dollars, counts and percentages leave this unset.
+   */
+  readonly scaleKind?: 'ratioBaseline1'
 }
 
 // ============================ Derived metrics ==============================
@@ -645,6 +659,7 @@ const POINT_AXES: ReadonlyArray<PointAxisDef> = [
     short: 'Vel idx',
     value: velocityIndex,
     format: fmtX,
+    scaleKind: 'ratioBaseline1',
   },
   {
     id: 'effectivePriceIndex',
@@ -652,6 +667,7 @@ const POINT_AXES: ReadonlyArray<PointAxisDef> = [
     short: 'Price idx',
     value: effectivePriceIndex,
     format: fmtX,
+    scaleKind: 'ratioBaseline1',
   },
   {
     id: 'gmPercentIndex',
@@ -746,6 +762,7 @@ const POINT_AXES: ReadonlyArray<PointAxisDef> = [
     short: 'List/Mkt',
     value: ourPriceOverMarket,
     format: fmtX,
+    scaleKind: 'ratioBaseline1',
   },
 ]
 
@@ -3274,8 +3291,14 @@ interface CatalogScatterSvgProps {
 
 interface PlottedPoint {
   readonly p: CatalogAnalyticsPoint
-  readonly x: number
-  readonly y: number
+  /** Screen-space plot coordinate (may be axis-transformed). Mutable so
+   *  the zero-floor fixup pass can place no-movement dots. */
+  x: number
+  y: number
+  /** Raw metric value for tooltips (never axis-transformed). Equals
+   *  x / y when the axis is a plain linear scale. */
+  readonly xRaw: number
+  readonly yRaw: number
   /** Categorical-colour bucket label. Empty string when the active colour-by is continuous. */
   readonly bucket: string
   /** Continuous-colour raw value (null for categorical mode). */
@@ -3334,6 +3357,18 @@ function CatalogScatterSvg({
   const plotW = Math.max(50, width - marginLeft - marginRight)
   const plotH = Math.max(50, height - marginTop - marginBottom)
 
+  // "Balanced" ratio scale (reciprocal-fold around 1.0). Only ratio
+  // axes (scaleKind 'ratioBaseline1') are eligible; the toggle is
+  // hidden entirely when neither axis qualifies. Default ON — it's the
+  // intended view (equal precision above AND below the cohort baseline);
+  // the operator can drop to Linear per-card. See catalogRatioAxis.ts.
+  const xRatio = xDef.scaleKind === 'ratioBaseline1'
+  const yRatio = yDef.scaleKind === 'ratioBaseline1'
+  const ratioEligible = xRatio || yRatio
+  const [balanced, setBalanced] = useState(true)
+  const xActive = balanced && xRatio
+  const yActive = balanced && yRatio
+
   const computed = useMemo(() => {
     const plotted: PlottedPoint[] = []
     let xLo = Number.POSITIVE_INFINITY
@@ -3345,14 +3380,29 @@ function CatalogScatterSvg({
     const sizeValuesAll: Array<number | null> = []
     const opacityValuesAll: Array<number | null> = []
     const isContinuousColour = colourByDef.kind === 'continuous'
+    // Balanced ratio axes fold r<1 into the negative via reciprocal
+    // (see catalogRatioAxis.ts). A ratio of exactly 0 (never-sold →
+    // velocity index 0) has no finite fold value, so we stash NaN and
+    // resolve it to a data-dependent floor AFTER the extents are known,
+    // keeping the no-movement dots visible and correctly ordered below
+    // every positive point. Track per-axis whether any zeros exist and
+    // the smallest finite transformed value to place that floor.
+    let xMinFinite = Number.POSITIVE_INFINITY
+    let yMinFinite = Number.POSITIVE_INFINITY
+    let xHasZero = false
+    let yHasZero = false
+    const txX = (v: number): number => (xActive ? (v > 0 ? ratioForward(v) : NaN) : v)
+    const txY = (v: number): number => (yActive ? (v > 0 ? ratioForward(v) : NaN) : v)
     for (const p of points) {
       // Plot-position resolution: real value when present, else a
       // list-price / no-movement default for never-sold variants, so
       // they land at a sensible spot instead of vanishing. See
       // `plotMetricValue` above.
-      const x = plotMetricValue(xDef.id, xDef.value(p, axisCtx), p, axisCtx)
-      const y = plotMetricValue(yDef.id, yDef.value(p, axisCtx), p, axisCtx)
-      if (x === null || y === null || !Number.isFinite(x) || !Number.isFinite(y)) continue
+      const xr = plotMetricValue(xDef.id, xDef.value(p, axisCtx), p, axisCtx)
+      const yr = plotMetricValue(yDef.id, yDef.value(p, axisCtx), p, axisCtx)
+      if (xr === null || yr === null || !Number.isFinite(xr) || !Number.isFinite(yr)) continue
+      const x = txX(xr)
+      const y = txY(yr)
       const bucket = isContinuousColour ? '' : colourByDef.bucket(p)
       if (!isContinuousColour) bucketSet.add(bucket)
       const colourRaw = isContinuousColour
@@ -3366,11 +3416,21 @@ function CatalogScatterSvg({
       const opacityValue = oRaw != null && Number.isFinite(oRaw) ? oRaw : null
       sizeValuesAll.push(sizeValue)
       opacityValuesAll.push(opacityValue)
-      plotted.push({ p, x, y, bucket, colourValue, sizeValue, opacityValue })
-      if (x < xLo) xLo = x
-      if (x > xHi) xHi = x
-      if (y < yLo) yLo = y
-      if (y > yHi) yHi = y
+      plotted.push({ p, x, y, xRaw: xr, yRaw: yr, bucket, colourValue, sizeValue, opacityValue })
+      if (Number.isNaN(x)) {
+        xHasZero = true
+      } else {
+        if (x < xLo) xLo = x
+        if (x > xHi) xHi = x
+        if (x < xMinFinite) xMinFinite = x
+      }
+      if (Number.isNaN(y)) {
+        yHasZero = true
+      } else {
+        if (y < yLo) yLo = y
+        if (y > yHi) yHi = y
+        if (y < yMinFinite) yMinFinite = y
+      }
     }
     if (plotted.length === 0) {
       return {
@@ -3380,9 +3440,35 @@ function CatalogScatterSvg({
         xMax: 1,
         yMin: 0,
         yMax: 1,
+        xFloor: null as number | null,
+        yFloor: null as number | null,
         colourScale: null as ContinuousScale | null,
         sizeScale: null as ContinuousScale | null,
         opacityScale: null as ContinuousScale | null,
+      }
+    }
+    // Resolve zero-floor positions and drop the no-movement dots there.
+    // Fold each floor into the extents so the padded domain frames them.
+    const xFloor =
+      xActive && xHasZero
+        ? ratioZeroFloor(Number.isFinite(xMinFinite) ? xMinFinite : null)
+        : null
+    const yFloor =
+      yActive && yHasZero
+        ? ratioZeroFloor(Number.isFinite(yMinFinite) ? yMinFinite : null)
+        : null
+    if (xFloor != null || yFloor != null) {
+      for (const pp of plotted) {
+        if (xFloor != null && Number.isNaN(pp.x)) pp.x = xFloor
+        if (yFloor != null && Number.isNaN(pp.y)) pp.y = yFloor
+      }
+      if (xFloor != null) {
+        if (xFloor < xLo) xLo = xFloor
+        if (xFloor > xHi) xHi = xFloor
+      }
+      if (yFloor != null) {
+        if (yFloor < yLo) yLo = yFloor
+        if (yFloor > yHi) yHi = yFloor
       }
     }
     if (xLo === xHi) {
@@ -3426,13 +3512,15 @@ function CatalogScatterSvg({
       xMax: xHi,
       yMin: yLo,
       yMax: yHi,
+      xFloor,
+      yFloor,
       colourScale,
       sizeScale,
       opacityScale,
     }
-  }, [points, xDef, yDef, colourByDef, sizeByDef, opacityByDef, axisCtx])
+  }, [points, xDef, yDef, colourByDef, sizeByDef, opacityByDef, axisCtx, xActive, yActive])
 
-  const { plotted, buckets, xMin, xMax, yMin, yMax, colourScale, sizeScale, opacityScale } =
+  const { plotted, buckets, xMin, xMax, yMin, yMax, xFloor, yFloor, colourScale, sizeScale, opacityScale } =
     computed
 
   // Zoom / pan hook. Base domain is the outlier-resistant compact
@@ -3535,8 +3623,30 @@ function CatalogScatterSvg({
   // "scatter feels different from the rest of the dashboard"). The CI
   // guardrail in `gridlines.test.ts` covers the 2.5 / 0.25 / 0.025
   // regression cases on both axes.
-  const xTicks = useMemo(() => niceXTicks(view.xMin, view.xMax, 5).ticks, [view.xMin, view.xMax])
-  const yTicks = useMemo(() => niceYTicks(view.yMin, view.yMax, 5).ticks, [view.yMin, view.yMax])
+  // Ticks carry an explicit label so a transformed (balanced) axis can
+  // show raw-ratio labels ("0.50×", "1.00×", "2.00×") at folded
+  // positions while a plain linear axis keeps the shared nice-tick
+  // ladder. `pos` is always in plot (post-transform) coordinates.
+  const xTicks: RatioTick[] = useMemo(
+    () =>
+      xActive
+        ? ratioTicks(view.xMin, view.xMax, { format: xDef.format, zeroFloor: xFloor })
+        : niceXTicks(view.xMin, view.xMax, 5).ticks.map((t) => ({
+            pos: t,
+            label: xDef.format(t),
+          })),
+    [xActive, view.xMin, view.xMax, xDef, xFloor],
+  )
+  const yTicks: RatioTick[] = useMemo(
+    () =>
+      yActive
+        ? ratioTicks(view.yMin, view.yMax, { format: yDef.format, zeroFloor: yFloor })
+        : niceYTicks(view.yMin, view.yMax, 5).ticks.map((t) => ({
+            pos: t,
+            label: yDef.format(t),
+          })),
+    [yActive, view.yMin, view.yMax, yDef, yFloor],
+  )
 
   // Hover. Stored as just the index — we recompute the dot's screen
   // position from `xScale`/`yScale` each render, so the tooltip
@@ -3710,10 +3820,10 @@ function CatalogScatterSvg({
             beneath everything else. */}
         <g pointerEvents="none">
           {xTicks.map((t) => {
-            const x = xScale(t)
+            const x = xScale(t.pos)
             return (
               <line
-                key={`xg-${t}`}
+                key={`xg-${t.pos}`}
                 x1={x}
                 x2={x}
                 y1={marginTop}
@@ -3725,10 +3835,10 @@ function CatalogScatterSvg({
             )
           })}
           {yTicks.map((t) => {
-            const y = yScale(t)
+            const y = yScale(t.pos)
             return (
               <line
-                key={`yg-${t}`}
+                key={`yg-${t.pos}`}
                 x1={marginLeft}
                 x2={marginLeft + plotW}
                 y1={y}
@@ -3756,36 +3866,36 @@ function CatalogScatterSvg({
           stroke="#888"
         />
         {xTicks.map((t) => (
-          <g key={`x-${t}`}>
+          <g key={`x-${t.pos}`}>
             <line
-              x1={xScale(t)}
-              x2={xScale(t)}
+              x1={xScale(t.pos)}
+              x2={xScale(t.pos)}
               y1={marginTop + plotH}
               y2={marginTop + plotH + 4}
               stroke="#888"
             />
             <text
-              x={xScale(t)}
+              x={xScale(t.pos)}
               y={marginTop + plotH + 16}
               fontSize="10"
               textAnchor="middle"
               fill="#666"
             >
-              {xDef.format(t)}
+              {t.label}
             </text>
           </g>
         ))}
         {yTicks.map((t) => (
-          <g key={`y-${t}`}>
-            <line x1={marginLeft - 4} x2={marginLeft} y1={yScale(t)} y2={yScale(t)} stroke="#888" />
+          <g key={`y-${t.pos}`}>
+            <line x1={marginLeft - 4} x2={marginLeft} y1={yScale(t.pos)} y2={yScale(t.pos)} stroke="#888" />
             <text
               x={marginLeft - 6}
-              y={yScale(t) + 3}
+              y={yScale(t.pos) + 3}
               fontSize="10"
               textAnchor="end"
               fill="#666"
             >
-              {yDef.format(t)}
+              {t.label}
             </text>
           </g>
         ))}
@@ -3796,7 +3906,7 @@ function CatalogScatterSvg({
           textAnchor="middle"
           fill="#444"
         >
-          {xDef.label}
+          {xActive ? `${xDef.label} (balanced at 1×)` : xDef.label}
         </text>
         <text
           transform={`rotate(-90 12 ${marginTop + plotH / 2})`}
@@ -3806,7 +3916,7 @@ function CatalogScatterSvg({
           textAnchor="middle"
           fill="#444"
         >
-          {yDef.label}
+          {yActive ? `${yDef.label} (balanced at 1×)` : yDef.label}
         </text>
         {/* Everything that lives inside the plot rectangle — reference
             lines, dots, hover highlight — is clipped so zoom/pan can't
@@ -3818,8 +3928,12 @@ function CatalogScatterSvg({
                            intersect with the visible range, since the
                            clipPath does it for us regardless of zoom).
               - unit-y:    horizontal line at y = 1 (index axes).
-              - unit-x:    vertical line at x = 1. */}
-          {referenceLine === 'diagonal' && plotted.length > 0 ? (
+              - unit-x:    vertical line at x = 1.
+              Ratio 1.0 sits at transformed 0 on a balanced axis, so the
+              unit lines use the axis-transformed baseline position. The
+              diagonal is only meaningful when both axes share the same
+              scale (both linear or both balanced). */}
+          {referenceLine === 'diagonal' && plotted.length > 0 && xActive === yActive ? (
             <line
               x1={xScale(Math.min(view.xMin, view.yMin) - 1)}
               y1={yScale(Math.min(view.xMin, view.yMin) - 1)}
@@ -3833,9 +3947,9 @@ function CatalogScatterSvg({
           {referenceLine === 'unit-y' ? (
             <line
               x1={xScale(view.xMin)}
-              y1={yScale(1)}
+              y1={yScale(yActive ? 0 : 1)}
               x2={xScale(view.xMax)}
-              y2={yScale(1)}
+              y2={yScale(yActive ? 0 : 1)}
               stroke="#999"
               strokeDasharray="4 4"
               strokeWidth={1}
@@ -3843,9 +3957,9 @@ function CatalogScatterSvg({
           ) : null}
           {referenceLine === 'unit-x' ? (
             <line
-              x1={xScale(1)}
+              x1={xScale(xActive ? 0 : 1)}
               y1={yScale(view.yMin)}
-              x2={xScale(1)}
+              x2={xScale(xActive ? 0 : 1)}
               y2={yScale(view.yMax)}
               stroke="#999"
               strokeDasharray="4 4"
@@ -3985,6 +4099,49 @@ function CatalogScatterSvg({
         </g>
       </svg>
 
+      {ratioEligible ? (
+        <div className="scatter-ratio-toolbar" role="group" aria-label="Ratio axis scale">
+          <span className="scatter-ratio-label">Ratio scale:</span>
+          <div className="scatter-view-tool-group" role="group" aria-label="Ratio scale mode">
+            <button
+              type="button"
+              className={
+                balanced ? 'scatter-view-tool-chip' : 'scatter-view-tool-chip is-active'
+              }
+              aria-pressed={!balanced}
+              onClick={() => setBalanced(false)}
+            >
+              Linear
+            </button>
+            <button
+              type="button"
+              className={
+                balanced ? 'scatter-view-tool-chip is-active' : 'scatter-view-tool-chip'
+              }
+              aria-pressed={balanced}
+              onClick={() => setBalanced(true)}
+            >
+              Balanced
+            </button>
+          </div>
+          <HelpIcon
+            text={
+              'Balanced ratio scale: 1× is the cohort baseline. A value ' +
+              'below 1× plots as far below the baseline as its reciprocal ' +
+              'plots above — 0.5× sits opposite 2×, 0.33× opposite 3× — so ' +
+              'low and high performers get equal vertical precision. Never-' +
+              'sold items (0×) sit at the bottom floor tick. Applies to ' +
+              (xRatio && yRatio
+                ? 'both axes'
+                : xRatio
+                ? `the X axis (${xDef.short})`
+                : `the Y axis (${yDef.short})`) +
+              '. Switch to Linear for the raw ratio axis.'
+            }
+          />
+        </div>
+      ) : null}
+
       <ScatterViewToolbar
         mode={zoomMode}
         setMode={setZoomMode}
@@ -4002,8 +4159,8 @@ function CatalogScatterSvg({
           point={hovered.p}
           xDef={xDef}
           yDef={yDef}
-          xValue={hovered.x}
-          yValue={hovered.y}
+          xValue={hovered.xRaw}
+          yValue={hovered.yRaw}
           noWindowSales={hasNoWindowSales(hovered.p)}
           colourLabel={
             colourByDef.kind === 'categorical'

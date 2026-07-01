@@ -8908,6 +8908,30 @@ span.metric-chart-legend-item {
   font-size: 0.74rem;
   font-weight: 600;
 }
+/* Balanced-ratio scale toggle. Rendered in normal flow just below the
+   chart SVG (NOT an absolute overlay) so it can't collide with the
+   pan/zoom view toolbar or cover the plot on narrow / mobile cards.
+   Only shown for cards whose X or Y axis is a cohort-ratio (baseline
+   1.0) axis. */
+.scatter-ratio-toolbar {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  width: fit-content;
+  max-width: calc(100% - 1rem);
+  flex-wrap: wrap;
+  margin: 0.3rem 0.5rem 0;
+  padding: 0.18rem 0.4rem;
+  border: 1px solid var(--control-border);
+  border-radius: 999px;
+  background: rgba(255, 250, 241, 0.92);
+  font-size: 0.72rem;
+  font-weight: 600;
+}
+.scatter-ratio-label {
+  color: var(--ink, #17130f);
+  white-space: nowrap;
+}
 .scatter-view-toggle {
   padding: 0.18rem 0.65rem;
   font-size: 0.74rem;
