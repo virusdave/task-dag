@@ -1482,7 +1482,16 @@ function PendingPurchaseRowCard(
     useState<PendingPurchaseRow['approvalStatus'] | null>(null)
   const effectiveApprovalStatus = optimisticApprovalStatus ?? item.approvalStatus
   const isFinalized = effectiveApprovalStatus === 'approved' || effectiveApprovalStatus === 'rejected'
-  const [isCollapsed, setIsCollapsed] = useState(isFinalized)
+  // Apply results that need the operator's eyes must not hide behind the
+  // collapse-on-decision fold. A failed/blocked apply carries the reason in
+  // bodyExtras (item.lastApplyError + summary), which is only rendered when the
+  // card is expanded — so an approved row that then failed to apply would show
+  // nothing but a "failed" pill. Auto-expand those so the reason is visible
+  // without a reopen click. (An applied-without-image row stays collapsible; it
+  // succeeded, and its "backfill needed" notice is a pill that shows collapsed.)
+  const applyNeedsAttention = item.lastApplyStatus === 'failed' || item.lastApplyStatus === 'blocked'
+  const imageSkip = readImageSkip(item)
+  const [isCollapsed, setIsCollapsed] = useState(isFinalized && !applyNeedsAttention)
   const isApplyLocked = item.lastApplyStatus === 'queued' || item.lastApplyStatus === 'running'
   const editingLocked = effectiveApprovalStatus === 'approved' || isApplyLocked
 
@@ -1596,7 +1605,11 @@ function PendingPurchaseRowCard(
     // reopened would stay open after a backend revalidate that
     // didn't change the status, but a server-side flip back to
     // pending wouldn't auto-expand the card.
-    setIsCollapsed(item.approvalStatus === 'approved' || item.approvalStatus === 'rejected')
+    setIsCollapsed(
+      (item.approvalStatus === 'approved' || item.approvalStatus === 'rejected')
+        && item.lastApplyStatus !== 'failed'
+        && item.lastApplyStatus !== 'blocked',
+    )
 
     // If the server has now caught up with (or diverged from) the
     // optimistic approval status, drop the local override so the
@@ -1751,6 +1764,9 @@ function PendingPurchaseRowCard(
     <>
       <Pill tone={approvalTone(effectiveApprovalStatus)}>{effectiveApprovalStatus}</Pill>
       <Pill tone={applyStatusTone(item.lastApplyStatus)}>{item.lastApplyStatus.replaceAll('_', ' ')}</Pill>
+      {imageSkip ? (
+        <Pill tone="warning" title={imageSkip.message}>no image, backfill needed</Pill>
+      ) : null}
       <Pill tone={mappingStatusTone(item.mappingStatus)}>{item.mappingStatus.replaceAll('_', ' ')}</Pill>
       <Pill tone="muted">{`v${item.version}`}</Pill>
     </>
@@ -2869,6 +2885,31 @@ function readLastApplySummaryText(item: PendingPurchaseRow): string | null {
 
   const summaryText = item.lastApplySummary.summaryText
   return typeof summaryText === 'string' && summaryText.trim().length > 0 ? summaryText : null
+}
+
+// Reads the structured "applied without image" marker the apply job writes into
+// last_apply_summary_json.imageUpload when a product went live but its image
+// could not be attached (e.g. an AVIF source Sweed rejects). Defensive: the
+// summary is raw passthrough JSON, so validate every field before trusting it.
+function readImageSkip(item: PendingPurchaseRow): { message: string } | null {
+  // "Applied without image" only makes sense for a row that actually applied.
+  if (item.lastApplyStatus !== 'applied') {
+    return null
+  }
+  if (!item.lastApplySummary || typeof item.lastApplySummary !== 'object' || Array.isArray(item.lastApplySummary)) {
+    return null
+  }
+  const imageUpload = item.lastApplySummary.imageUpload
+  if (!imageUpload || typeof imageUpload !== 'object' || Array.isArray(imageUpload)) {
+    return null
+  }
+  if (imageUpload.status !== 'skipped') {
+    return null
+  }
+  const message = typeof imageUpload.message === 'string' && imageUpload.message.trim().length > 0
+    ? imageUpload.message.trim()
+    : 'Image could not be attached.'
+  return { message }
 }
 
 function readVerificationSummaryText(item: PendingPurchaseRow): string | null {

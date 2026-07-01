@@ -29,6 +29,33 @@ export interface DownloadValidatedImageResult {
   finalUrl: string
 }
 
+/**
+ * Thrown when the downloaded bytes are a real image but in a format Sweed's
+ * blob upload does not accept (currently AVIF/HEIF and anything else outside
+ * ALLOWED_IMAGE_CONTENT_TYPES). This is a DETERMINISTIC, non-transient
+ * condition: retrying the same URL will fail identically. The apply job uses
+ * this type to downgrade the failure to a non-fatal "image skipped" degradation
+ * (the product is still created without an image; the image is backfilled
+ * later) rather than failing the whole row.
+ */
+export class UnsupportedImageFormatError extends Error {
+  readonly detectedFormat: string | null
+  readonly headerContentType: string | null
+
+  constructor(detectedFormat: string | null, headerContentType: string | null) {
+    const formatLabel = detectedFormat ?? 'an unrecognized format'
+    const headerLabel = headerContentType ?? 'unknown'
+    super(
+      `Image is ${formatLabel}, which Sweed does not accept ` +
+        `(supported: JPEG, PNG, GIF, WebP). The server sent content-type "${headerLabel}", ` +
+        `but the actual bytes are ${formatLabel}.`,
+    )
+    this.name = 'UnsupportedImageFormatError'
+    this.detectedFormat = detectedFormat
+    this.headerContentType = headerContentType
+  }
+}
+
 export async function downloadValidatedImageAsset(
   input: DownloadValidatedImageInput,
 ): Promise<DownloadValidatedImageResult> {
@@ -72,9 +99,13 @@ export async function downloadValidatedImageAsset(
     const bytes = await readResponseBytesWithLimit(response, MAX_IMAGE_BYTES)
     const detectedContentType = detectImageContentTypeFromBytes(bytes)
     if (!detectedContentType) {
-      const headerHint = response.headers.get('content-type') ?? 'unknown'
-      throw new Error(
-        `Image download bytes did not match any supported image format (header was ${headerHint}).`,
+      // The bytes are not one of the four formats Sweed accepts. Name the
+      // real format we DID detect (e.g. AVIF from an `ftyp` ISO-BMFF box) so
+      // the operator sees an actionable message instead of a confusing
+      // "did not match any supported format (header was image/png)".
+      throw new UnsupportedImageFormatError(
+        describeUnsupportedImageFormat(bytes),
+        response.headers.get('content-type'),
       )
     }
 
@@ -134,6 +165,38 @@ export function detectImageContentTypeFromBytes(bytes: Uint8Array): string | nul
     if (matchesImageSignature(bytes, contentType)) {
       return contentType
     }
+  }
+  return null
+}
+
+// Best-effort identification of a downloaded image whose format is NOT one of
+// the four Sweed accepts, purely so error messages are actionable. Recognizes
+// the common modern culprit — AVIF/HEIF (ISO base media file format, identified
+// by the `ftyp` box brand at bytes 4..8) — plus a few other well-known magic
+// numbers. Returns a human label (e.g. "AVIF") or null when unrecognized.
+export function describeUnsupportedImageFormat(bytes: Uint8Array): string | null {
+  if (bytes.byteLength >= 12 && bytes[4] === 0x66 && bytes[5] === 0x74 && bytes[6] === 0x79 && bytes[7] === 0x70) {
+    // ISO-BMFF: the 4-char major brand lives at bytes 8..12.
+    const brand = String.fromCharCode(bytes[8], bytes[9], bytes[10], bytes[11]).trim().toLowerCase()
+    if (brand === 'avif' || brand === 'avis') {
+      return 'AVIF'
+    }
+    if (brand.startsWith('hei') || brand === 'mif1' || brand === 'msf1') {
+      return 'HEIF/HEIC'
+    }
+    return `an ISO-BMFF container (brand "${brand}")`
+  }
+  if (bytes.byteLength >= 2 && bytes[0] === 0x42 && bytes[1] === 0x4d) {
+    return 'BMP'
+  }
+  if (bytes.byteLength >= 4 && ((bytes[0] === 0x49 && bytes[1] === 0x49) || (bytes[0] === 0x4d && bytes[1] === 0x4d))) {
+    return 'TIFF'
+  }
+  if (bytes.byteLength >= 5 && bytes[0] === 0x3c && bytes[1] === 0x3f && bytes[2] === 0x78 && bytes[3] === 0x6d && bytes[4] === 0x6c) {
+    return 'XML/SVG'
+  }
+  if (bytes.byteLength >= 4 && bytes[0] === 0x3c && bytes[1] === 0x73 && bytes[2] === 0x76 && bytes[3] === 0x67) {
+    return 'SVG'
   }
   return null
 }

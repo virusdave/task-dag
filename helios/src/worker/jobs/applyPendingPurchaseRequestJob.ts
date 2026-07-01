@@ -14,7 +14,7 @@ import {
 import { withTransaction } from '../../server/db/tx.js'
 import { findDescriptionMedicalClaimIssues, normalizeDescriptionText } from '../catalog/liveState.js'
 import { getWorkerEnv } from '../config/env.js'
-import { downloadValidatedImageAsset } from '../pendingPurchases/imageSafety.js'
+import { downloadValidatedImageAsset, UnsupportedImageFormatError } from '../pendingPurchases/imageSafety.js'
 import {
   compareLiveReuse,
   precheckReuseDrift,
@@ -198,6 +198,23 @@ function readValidatedReuseSnapshot(rawRow: Record<string, JsonValue>): ParsedRe
   }
   return { kind: 'valid', snapshot: parsed.data }
 }
+
+// Structured marker persisted into last_apply_summary_json when a product was
+// created/updated successfully but its image could not be attached (e.g. the
+// source is AVIF, which Sweed does not accept). The row still counts as
+// `applied` — the operator explicitly prefers getting inventory live over
+// blocking on images — and this record lets a later backfill find exactly
+// which live products still need an image, and why.
+interface AppliedImageSkip {
+  status: 'skipped'
+  sourceUrl: string
+  reasonCode: 'unsupported_format' | 'image_upload_failed'
+  message: string
+}
+
+// Cap the stored/displayed image-skip message so a pathological error object
+// cannot bloat the summary JSON row.
+const MAX_IMAGE_SKIP_MESSAGE_LENGTH = 400
 
 interface PendingPurchaseApplyRequestRow extends QueryResultRow {
   id: number
@@ -688,6 +705,7 @@ async function applyPendingPurchaseRow(
   const preserveLinkedVariantIdentity = row.reuseProductIdOverridePresent && row.reuseProductId !== null
 
   let createdBlobId: string | null = null
+  let imageSkip: AppliedImageSkip | null = null
   let createdGroupId: number | null = null
   let createdProductId: number | null = null
   let product: z.infer<typeof ProductSummarySchema> | null = null
@@ -759,8 +777,33 @@ async function applyPendingPurchaseRow(
     const brand = await ensureBrand(stateDealerId, dictionaries, requireNonEmptyString(row.targetBrand, 'target brand'))
     const productPrice = requirePendingPurchasePrice(row)
     if (row.effectivePrimaryImageUrl) {
-      createdBlobId = await uploadImage(row.effectivePrimaryImageUrl)
-      await logMutation('uploaded image', { blobId: createdBlobId, url: row.effectivePrimaryImageUrl })
+      // Image attachment is NON-FATAL by operator directive: it is better to
+      // create the product without an image (so the inventory can go on sale
+      // now) and backfill the image later than to block the whole apply. Any
+      // failure here — an unsupported format like AVIF, a source 4xx/network
+      // error, or a Sweed blob-upload failure — is downgraded to an
+      // `imageSkip` degradation; the product is still created below. We do NOT
+      // rethrow transient (Retryable) errors: if Sweed itself is broadly
+      // unavailable, the REQUIRED store.product.group.add / store.product.add
+      // calls immediately below will throw RetryableWorkerError and the whole
+      // job retries anyway, giving the image another attempt.
+      try {
+        createdBlobId = await uploadImage(row.effectivePrimaryImageUrl)
+      } catch (imageError) {
+        imageSkip = buildImageSkip(row.effectivePrimaryImageUrl, imageError)
+        applyDegradations.push(
+          `Image skipped; product created without an image (${imageSkip.message}). ` +
+            `Source: ${imageSkip.sourceUrl}. Backfill the image later.`,
+        )
+        await logMutation('image upload skipped', {
+          url: imageSkip.sourceUrl,
+          reasonCode: imageSkip.reasonCode,
+          error: imageSkip.message,
+        })
+      }
+      if (createdBlobId) {
+        await logMutation('uploaded image', { blobId: createdBlobId, url: row.effectivePrimaryImageUrl })
+      }
     }
 
     const groupName = requireNonEmptyString(row.targetGroupName ?? row.targetVariantName, 'target group name')
@@ -915,6 +958,11 @@ async function applyPendingPurchaseRow(
     distributorProductId: row.distributorProductId,
     groupAfter,
     groupBefore,
+    // Present only when the product was applied WITHOUT its image. The UI reads
+    // this to show an always-visible "applied without image — backfill needed"
+    // notice, and a future backfill can query for rows whose apply summary has
+    // imageUpload.status === 'skipped'.
+    ...(imageSkip ? { imageUpload: imageSkip } : {}),
     packetId: row.packetId,
     productAfter,
     productBefore,
@@ -1816,12 +1864,19 @@ async function finalizePendingPurchaseApplyRequest(
   const blockedRowCount = rowsResult.rows.filter((row) => row.last_apply_status === 'blocked').length
   const mismatchedRowCount = Math.max(selectedRowCount - rowsResult.rows.length, 0)
   const failedRowCount = rowsResult.rows.filter((row) => row.last_apply_status === 'failed').length + mismatchedRowCount
+  // How many rows went live but WITHOUT their image (non-fatal skip). Surfaced
+  // in the request summary so a systemic image/blob outage that silently skips
+  // every image cannot masquerade as a fully-clean apply.
+  const imageSkippedRowCount = rowsResult.rows.filter((row) => summaryRowHasImageSkip(row.last_apply_summary_json)).length
   const status = mismatchedRowCount > 0
     ? 'failed'
     : deriveApplyRequestStatus({ appliedRowCount, blockedRowCount, failedRowCount, selectedRowCount })
-  const summaryText = mismatchedRowCount > 0
+  const baseSummaryText = mismatchedRowCount > 0
     ? `Pending-purchase apply failed integrity checks: expected ${selectedRowCount} selected rows but only found ${rowsResult.rows.length}.`
     : buildApplyRequestSummaryText({ appliedRowCount, blockedRowCount, failedRowCount, selectedRowCount, status })
+  const summaryText = imageSkippedRowCount > 0
+    ? `${baseSummaryText} ${imageSkippedRowCount} applied without an image; backfill needed.`
+    : baseSummaryText
 
   await withTransaction(async (db) => {
     await db.query(
@@ -1844,6 +1899,7 @@ async function finalizePendingPurchaseApplyRequest(
         failedRowCount,
         JSON.stringify({
           completedAt: new Date().toISOString(),
+          imageSkippedRowCount,
           jobId: context.id,
           rows: rowsResult.rows.map((row) => ({
             rowId: row.row_id,
@@ -2064,6 +2120,37 @@ export function buildPendingPurchaseSuggestionVerification(input: {
     summaryText,
     targetProductName: input.targetProductName,
   }
+}
+
+// Classify a non-fatal image-attachment failure into the structured marker the
+// UI and future backfill consume. `UnsupportedImageFormatError` (e.g. AVIF) is
+// deterministic and unfixable by retry; everything else (source 4xx/network,
+// Sweed blob upload failure) is bucketed as a generic upload failure.
+function buildImageSkip(sourceUrl: string, error: unknown): AppliedImageSkip {
+  const rawMessage = error instanceof Error && error.message ? error.message : 'Unknown image error.'
+  const message = rawMessage.length > MAX_IMAGE_SKIP_MESSAGE_LENGTH
+    ? `${rawMessage.slice(0, MAX_IMAGE_SKIP_MESSAGE_LENGTH - 1)}…`
+    : rawMessage
+  return {
+    status: 'skipped',
+    sourceUrl,
+    reasonCode: error instanceof UnsupportedImageFormatError ? 'unsupported_format' : 'image_upload_failed',
+    message,
+  }
+}
+
+// True when a persisted row summary carries the structured "image skipped"
+// marker (product applied without its image). Defensive JsonValue narrowing —
+// no casts — because the summary is stored/loaded as raw JSON.
+function summaryRowHasImageSkip(summary: JsonValue): boolean {
+  if (summary === null || typeof summary !== 'object' || Array.isArray(summary)) {
+    return false
+  }
+  const imageUpload = summary.imageUpload
+  if (imageUpload === undefined || imageUpload === null || typeof imageUpload !== 'object' || Array.isArray(imageUpload)) {
+    return false
+  }
+  return imageUpload.status === 'skipped'
 }
 
 function buildAppliedRowSummary(

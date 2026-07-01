@@ -7,8 +7,11 @@ export interface PillProps {
   // (e.g. `{count} issue{count === 1 ? '' : 's'}`), which JSX types as
   // an array of strings/numbers/elements, i.e. ReactNode.
   children: ReactNode
+  // Optional native tooltip, e.g. to expose the full reason behind a
+  // short status label on hover.
+  title?: string
 }
 
-export function Pill({ children, tone = 'muted' }: PillProps) {
-  return <span className={`pill pill-${tone}`}>{children}</span>
+export function Pill({ children, tone = 'muted', title }: PillProps) {
+  return <span className={`pill pill-${tone}`} title={title}>{children}</span>
 }

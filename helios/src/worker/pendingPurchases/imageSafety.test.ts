@@ -1,11 +1,26 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  describeUnsupportedImageFormat,
   detectImageContentTypeFromBytes,
+  UnsupportedImageFormatError,
   validatePendingPurchaseImageBytes,
   validatePendingPurchaseImageContentType,
   validatePendingPurchaseImageUrl,
 } from './imageSafety.js'
+
+// Minimal ISO base media file format header: 4-byte box size, "ftyp" box type,
+// then the 4-char major brand. This is the shape the real failing images had —
+// an AVIF file the CDN mislabeled as image/png.
+function isoBmffHeader(brand: string): Uint8Array {
+  const bytes = new Uint8Array(12)
+  bytes.set([0x00, 0x00, 0x00, 0x20], 0)
+  bytes.set([0x66, 0x74, 0x79, 0x70], 4) // "ftyp"
+  for (let i = 0; i < 4; i += 1) {
+    bytes[8 + i] = brand.charCodeAt(i)
+  }
+  return bytes
+}
 
 describe('validatePendingPurchaseImageUrl', () => {
   it('accepts https urls that resolve to public addresses', async () => {
@@ -63,5 +78,42 @@ describe('detectImageContentTypeFromBytes', () => {
   it('returns null when no supported image signature matches', () => {
     expect(detectImageContentTypeFromBytes(new Uint8Array([0x00, 0x01, 0x02, 0x03]))).toBeNull()
     expect(detectImageContentTypeFromBytes(new Uint8Array(0))).toBeNull()
+  })
+
+  it('does not treat AVIF (an unsupported ISO-BMFF format) as a supported type', () => {
+    expect(detectImageContentTypeFromBytes(isoBmffHeader('avif'))).toBeNull()
+  })
+})
+
+describe('describeUnsupportedImageFormat', () => {
+  it('identifies AVIF from the ftyp box brand (the real packet-55 failure)', () => {
+    expect(describeUnsupportedImageFormat(isoBmffHeader('avif'))).toBe('AVIF')
+    expect(describeUnsupportedImageFormat(isoBmffHeader('avis'))).toBe('AVIF')
+  })
+
+  it('identifies HEIF/HEIC brands', () => {
+    expect(describeUnsupportedImageFormat(isoBmffHeader('heic'))).toBe('HEIF/HEIC')
+    expect(describeUnsupportedImageFormat(isoBmffHeader('mif1'))).toBe('HEIF/HEIC')
+  })
+
+  it('identifies other well-known non-web formats', () => {
+    expect(describeUnsupportedImageFormat(new Uint8Array([0x42, 0x4d, 0x00, 0x00]))).toBe('BMP')
+    expect(describeUnsupportedImageFormat(new Uint8Array([0x49, 0x49, 0x2a, 0x00]))).toBe('TIFF')
+  })
+
+  it('returns null for bytes it cannot identify', () => {
+    expect(describeUnsupportedImageFormat(new Uint8Array([0x00, 0x01, 0x02, 0x03]))).toBeNull()
+  })
+})
+
+describe('UnsupportedImageFormatError', () => {
+  it('produces an actionable message naming the real format and the misleading header', () => {
+    const error = new UnsupportedImageFormatError('AVIF', 'image/png')
+    expect(error).toBeInstanceOf(Error)
+    expect(error.detectedFormat).toBe('AVIF')
+    expect(error.headerContentType).toBe('image/png')
+    expect(error.message).toContain('AVIF')
+    expect(error.message).toContain('image/png')
+    expect(error.message).toContain('Sweed does not accept')
   })
 })
