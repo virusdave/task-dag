@@ -32,6 +32,7 @@ export const CONFIG_BACKGROUND_TASK_KEYS = [
   'workers.scheduling.stock_snapshot_items_retention',
   'workers.scheduling.gads_lp_rollup_refresh',
   'workers.scheduling.inventory_lifecycle_advance',
+  'workers.scheduling.faq_hybrid_sync',
 ] as const
 export const ConfigBackgroundTaskKeySchema = z.enum(CONFIG_BACKGROUND_TASK_KEYS)
 export type ConfigBackgroundTaskKey = z.infer<typeof ConfigBackgroundTaskKeySchema>
@@ -193,6 +194,13 @@ export const CONFIG_BACKGROUND_TASKS: ReadonlyArray<ConfigBackgroundTaskDefiniti
     slug: 'inventory-lifecycle-advance',
     implemented: true,
     summary: 'Purchase inventory pricing-safety lifecycle automation + monitoring (parent epic virusdave/top-level#33, child automation#54, stage L3). Every 5 minutes it (1) polls the async gates of active lifecycle runs and advances them through the existing idempotent reprice one-step advancer (market gate passes → create the explicit-product pricing batch → poll batch generation → verify live Sweed price == approved desired price within 1¢), (2) re-reads live Sweed lots for active quarantine-path runs and pages on any breach (a not-yet-priced expected lot back in a FOR SALE room before release) while persisting the live evidence for the panel, and (3) pages on market-data timeout (no succeeded competitor observation 6h after the request cutoff), price-apply timeout (live price still != approved 45m after approval), and newly-blocked runs (pricing/price-apply/release failures). It never approves prices and never starts/receives/releases stock — those stay operator-gated; it only polls gates, surfaces evidence, and alerts (audit-log deduped so a stuck run pages once, not every tick).',
+  },
+  {
+    key: 'workers.scheduling.faq_hybrid_sync',
+    label: 'FAQ hybrid sync / change-detection',
+    slug: 'faq-hybrid-sync',
+    implemented: true,
+    summary: 'FBUS SEO FAQ hybrid sync / change-detection (parent epic virusdave/top-level#17, child automation#46, phase P1). Each tick (1) re-imports the managed FBUS source(s) idempotently as Helios DRAFTS — unchanged content is a no-op, changed content resets the set to draft and clears any approval — and pages Dave for review on any created/updated draft (path b: source change → draft + page, never auto-publish); and (2) when an approved FAQ set is not yet live, rebuilds the signed SEO bundle EXCLUSIVELY from the ledger-verified approved sets (loadApprovedFaqSetsForBundle re-checks the approval ledger + recomputes content hashes, failing loud on any mismatch) and publishes it through a validate-before-swap staged promotion (path a: approval → publish of exactly the approved content). The IRONCLAD human-approval gate (canon §1) holds: this job never approves anything, and an observed source change always suppresses publish for that source. Publishing is operator-gated behind SEO_BUNDLE_SIGNING_KEY_FILE (reuses the LP bundle signing key); until that secret is wired the change-detection/draft/page half still runs while the publish half is inert. DB cost is tiny: a handful of indexed single-row reads + an occasional pointer read/publish per tick (no scans, no background recompute).',
   },
 ]
 
@@ -521,6 +529,28 @@ export const GADS_LP_ROLLUP_REFRESH_DEFAULT_SCHEDULE_WINDOWS: ReadonlyArray<
     intervalMinutes: 60,
     paused: false,
     notes: 'Recompute the GAds landing-pages rollup every 60 minutes (bounded 90-day horizon).',
+  },
+]
+
+/**
+ * Default schedule for the FBUS SEO FAQ hybrid sync / change-detection job
+ * (automation#46 P1). All-day, every 60 minutes. The work per tick is a
+ * handful of indexed single-row reads (re-import the hardcoded managed
+ * source, compare fingerprints) plus, only when an approval is pending
+ * publish, one bundle compile + signed staged publish. There is no
+ * background recompute or scan, so an hourly cadence keeps change detection
+ * + approval→publish latency low at negligible DB cost.
+ */
+export const FAQ_HYBRID_SYNC_DEFAULT_SCHEDULE_WINDOWS: ReadonlyArray<
+  Omit<ConfigWorkerScheduleWindow, 'id'>
+> = [
+  {
+    weekdayMask: WEEKDAY_MASK_ALL,
+    windowStartMinute: 0,
+    windowEndMinute: 1440,
+    intervalMinutes: 60,
+    paused: false,
+    notes: 'FBUS SEO FAQ hybrid sync (change-detection + approval→publish) every 60 minutes.',
   },
 ]
 

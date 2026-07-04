@@ -27,6 +27,8 @@ export const AuditEntityTypeSchema = z.enum([
   'annotation',
   'brand_expiry_override',
   'purchase_inventory_lifecycle_run',
+  'seo_faq_set',
+  'seo_bundle',
 ])
 export const AuditEventTypeSchema = z.enum([
   'auth.user.signed_in',
@@ -129,6 +131,10 @@ export const AuditEventTypeSchema = z.enum([
   'config.workers.weather_daily_ingest.completed',
   'config.workers.gads_lp_rollup_refresh.requested',
   'config.workers.gads_lp_rollup_refresh.completed',
+  'config.workers.faq_hybrid_sync.requested',
+  'config.workers.faq_hybrid_sync.completed',
+  'config.workers.faq_hybrid_sync.review_paged',
+  'config.workers.faq_hybrid_sync.published',
   'config.workers.market_evidence_alarm.completed',
   'config.brand_expiry_override.upserted',
   'config.brand_expiry_override.deleted',

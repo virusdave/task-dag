@@ -196,6 +196,8 @@ export async function tickConfigWorkersScheduler(now: Date = new Date()): Promis
         await enqueueScheduledStockSnapshotItemsRetention(schedule.taskKey, now, activeWindow.intervalMinutes)
       } else if (schedule.taskKey === 'workers.scheduling.gads_lp_rollup_refresh') {
         await enqueueScheduledGadsLpRollupRefresh(schedule.taskKey, now, activeWindow.intervalMinutes)
+      } else if (schedule.taskKey === 'workers.scheduling.faq_hybrid_sync') {
+        await enqueueScheduledFaqHybridSync(schedule.taskKey, now, activeWindow.intervalMinutes)
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown scheduler-task error.'
@@ -887,6 +889,54 @@ async function enqueueScheduledGadsLpRollupRefresh(
       entityId: String(jobId),
       entityType: 'job',
       eventType: 'config.workers.gads_lp_rollup_refresh.requested',
+      module: 'config',
+      payload: {
+        intervalMinutes,
+        taskKey,
+        trigger: 'scheduled',
+      },
+      requestId: null,
+      scope: null,
+      undoPayload: null,
+    })
+  })
+}
+
+// FBUS SEO FAQ hybrid sync / change-detection (automation#46 P1). One tick =
+// one job, deduped per interval bucket so a worker that already enqueued this
+// bucket cannot double-enqueue. The concurrency key serializes execution so
+// two ticks never race the managed-source re-import or the bundle publish.
+async function enqueueScheduledFaqHybridSync(
+  taskKey: ConfigBackgroundTaskKey,
+  now: Date,
+  intervalMinutes: number,
+): Promise<void> {
+  const bucketMs = intervalMinutes * 60 * 1000
+  const bucketStartMs = Math.floor(now.getTime() / bucketMs) * bucketMs
+  const bucketIso = new Date(bucketStartMs).toISOString()
+
+  await withTransaction(async (db) => {
+    const jobId = await enqueueJob(db, {
+      priority: JOB_PRIORITY_SCHEDULED_INGEST,
+      concurrencyKey: 'config.workers.faq_hybrid_sync',
+      dedupeKey: `config.workers.faq_hybrid_sync:scheduled:${bucketIso}`,
+      jobType: 'config.workers.faq_hybrid_sync',
+      module: 'config',
+      payload: {
+        trigger: 'scheduled',
+      },
+      requestedByUserId: null,
+      runAt: now,
+      scope: null,
+    })
+
+    await recordEnqueueAndPatchCache(db, taskKey, jobId, now)
+    await appendAuditEvent(db, {
+      actorType: 'system',
+      actorUserId: null,
+      entityId: String(jobId),
+      entityType: 'job',
+      eventType: 'config.workers.faq_hybrid_sync.requested',
       module: 'config',
       payload: {
         intervalMinutes,

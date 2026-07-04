@@ -156,7 +156,13 @@ export interface CreateSeoFaqSetInput {
    * approval time (CI gate 2). Defaults to null (manual/host-agnostic set).
    */
   readonly sourceKey?: string | null
-  readonly userId: number
+  /**
+   * The acting user, or `null` for a system-run write (e.g. the recurring
+   * FAQ hybrid-sync job, which imports drafts with no human actor). The
+   * `created_by_user_id` / `updated_by_user_id` columns are nullable
+   * (migration 071). Approval stays human-only (see {@link ApproveFaqSetInput}).
+   */
+  readonly userId: number | null
   readonly now?: Date
 }
 
@@ -225,7 +231,8 @@ export interface ImportFaqSetBySourceKeyInput {
   readonly items: readonly SeoFaqItem[]
   readonly source?: SeoFaqSource
   readonly generationMeta?: unknown
-  readonly userId: number
+  /** Acting user, or `null` for a system-run import (see {@link CreateSeoFaqSetInput}). */
+  readonly userId: number | null
   readonly now?: Date
 }
 
@@ -293,7 +300,8 @@ export async function importFaqSetBySourceKey(
 export interface UpdateSeoFaqSetInput {
   readonly scope: string
   readonly items: readonly SeoFaqItem[]
-  readonly userId: number
+  /** Acting user, or `null` for a system-run update (see {@link CreateSeoFaqSetInput}). */
+  readonly userId: number | null
   /**
    * Optional refreshed provenance metadata. Only the server-side import /
    * sync path passes this (to keep `generation_meta` current after a

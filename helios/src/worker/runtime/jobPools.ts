@@ -82,6 +82,7 @@ export const JOB_EXECUTION_POOL_BY_TYPE: Record<JobType, JobPoolMetadata> = {
   'config.workers.fuzzy_skus_retention': { pool: 'system', requiresSweedSession: false },
   'config.workers.stock_snapshot_items_retention': { pool: 'system', requiresSweedSession: false },
   'config.workers.gads_lp_rollup_refresh': { pool: 'system', requiresSweedSession: false },
+  'config.workers.faq_hybrid_sync': { pool: 'system', requiresSweedSession: false },
   // Purchase inventory lifecycle advance + monitor (automation#54, L3):
   // DB-only on the common path; it opens its OWN `withSweedSession` only
   // to read live prices (when advancing a ready pricing batch) and live

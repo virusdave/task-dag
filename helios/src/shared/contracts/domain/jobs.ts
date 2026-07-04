@@ -66,6 +66,7 @@ export const JobTypeSchema = z.enum([
   'config.workers.fuzzy_skus_retention',
   'config.workers.stock_snapshot_items_retention',
   'config.workers.gads_lp_rollup_refresh',
+  'config.workers.faq_hybrid_sync',
   'catalog.maintenance.upload_group_image',
   'inventory.lifecycle.advance',
 ])
@@ -926,6 +927,14 @@ export const ConfigWorkersGadsLpRollupRefreshJobPayloadSchema = z.object({
 })
 export type ConfigWorkersGadsLpRollupRefreshJobPayload = z.infer<
   typeof ConfigWorkersGadsLpRollupRefreshJobPayloadSchema
+>
+
+export const ConfigWorkersFaqHybridSyncJobPayloadSchema = z.object({
+  requestedByUserId: z.number().int().positive().nullable().optional(),
+  trigger: z.enum(['manual_run', 'scheduled']).default('scheduled'),
+})
+export type ConfigWorkersFaqHybridSyncJobPayload = z.infer<
+  typeof ConfigWorkersFaqHybridSyncJobPayloadSchema
 >
 
 export {
