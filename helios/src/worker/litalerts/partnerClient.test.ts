@@ -127,6 +127,28 @@ describe('listRetailerProducts', () => {
     const requestUrl = fetchMock.mock.calls[0]?.[0] as string
     expect(requestUrl).toBe('https://partnerapi.litalerts.com/v1/retailers/1234/products?state=NY')
   })
+
+  it('encodes a multi-brand filter as repeated brandIds params (not comma-joined)', async () => {
+    // The partner API binds arrays as repeated query params; the comma-joined
+    // form (`brandIds=42,77`) returns HTTP 400 for multi-id lists. Guard the
+    // encoding so we never regress back to the broken form.
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ data: [] }), {
+        headers: { 'content-type': 'application/json' },
+        status: 200,
+      }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    await listRetailerProducts(1234, { stateCode: 'NY', brandIds: [42, 77] })
+
+    const requestUrl = fetchMock.mock.calls[0]?.[0] as string
+    expect(requestUrl).toBe(
+      'https://partnerapi.litalerts.com/v1/retailers/1234/products?state=NY&brandIds=42&brandIds=77',
+    )
+    expect(requestUrl).not.toContain('brandIds=42%2C77')
+    expect(requestUrl).not.toContain('brandIds=42,77')
+  })
 })
 
 describe('token loading', () => {

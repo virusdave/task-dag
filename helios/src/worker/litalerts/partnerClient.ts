@@ -208,14 +208,22 @@ export async function listRetailerProducts(
   const opts =
     typeof stateCodeOrOptions === 'string' ? { stateCode: stateCodeOrOptions } : stateCodeOrOptions
   const params = new URLSearchParams({ state: opts.stateCode })
-  // `brandIds` (plural, comma-separated) restricts the per-retailer menu to
-  // just those brands server-side. Confirmed live June 2026: a single-brand
-  // filter shrinks the payload ~30x (≈600KB full menu → ≈20KB), which is what
-  // makes the nearest-retailer fan-out in litAlertsMarket cheap. The singular
-  // `brandId` form is silently ignored by the partner API, so always send the
-  // plural key.
+  // `brandIds` (plural) restricts the per-retailer menu to just those brands
+  // server-side. A single-brand filter shrinks the payload ~30x (≈600KB full
+  // menu → ≈20KB), which is what makes the nearest-retailer fan-out in
+  // litAlertsMarket cheap. The singular `brandId` form is silently ignored, so
+  // always send the plural key.
+  //
+  // IMPORTANT: the partner API expects the array as REPEATED query params
+  // (`?brandIds=1&brandIds=2`), i.e. ASP.NET model binding. Re-confirmed live
+  // July 2026: the previously-used comma-joined form (`?brandIds=1,2`) now
+  // returns HTTP 400 `The value '1,2' is not valid.` for any multi-id list.
+  // (Single-id comma-join happened to work only because one id has no comma,
+  // which is why the single-brand pricing fan-out never noticed the break.)
   if (opts.brandIds && opts.brandIds.length > 0) {
-    params.set('brandIds', opts.brandIds.join(','))
+    for (const brandId of opts.brandIds) {
+      params.append('brandIds', String(brandId))
+    }
   }
   if (opts.includeOutOfStock) {
     params.set('includeOOS', 'true')
