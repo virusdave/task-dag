@@ -15,6 +15,8 @@ import {
   type JsonValue,
   MutationAcceptedResponseSchema,
   CreatePendingPurchaseHintBundleBodySchema,
+  PendingPurchaseEtlDetailsResponseSchema,
+  PendingPurchaseEtlDetailsRouteParamsSchema,
   PendingPurchaseHintBundleDetailResponseSchema,
   PendingPurchaseHintBundleListQuerySchema,
   PendingPurchaseHintBundleListResponseSchema,
@@ -44,6 +46,7 @@ import { loadCatalogStructuredOverrideFacets } from '../db/queries/catalogQuerie
 import {
   getLatestPendingPurchaseApplyRequest,
   getPendingPurchasePacketSummary,
+  listPendingPurchaseEtlComparisonRows,
   listPendingPurchasePacketListPage,
   listPendingPurchaseRows,
 } from '../db/queries/pendingPurchaseQueries.js'
@@ -182,6 +185,27 @@ export async function registerPendingPurchaseRoutes(server: FastifyInstance): Pr
       pageSize,
       totalCount,
     }))
+  })
+
+  // Purchase ETL Details (C8b, child epic FreshlyBakedNYC/automation#54): the
+  // read-only per-row 3-way (LLM vs parsekit vs legacy) comparison for one
+  // packet. Viewer-visible audit surface; 404 only when the packet itself is
+  // missing (an existing packet with no comparison rows returns rows: []).
+  server.get('/api/catalog/pending-purchases/:packetId/etl-details', async (request, reply) => {
+    const user = await requireSessionUser(request, reply, 'viewer')
+    if (!user) {
+      return
+    }
+    const params = PendingPurchaseEtlDetailsRouteParamsSchema.parse(request.params)
+    const db = getPool()
+    const [packet, rows] = await Promise.all([
+      getPendingPurchasePacketSummary(db, params.packetId),
+      listPendingPurchaseEtlComparisonRows(db, params.packetId),
+    ])
+    if (!packet) {
+      return reply.status(404).send({ error: 'Pending-purchase packet not found.' })
+    }
+    return reply.send(PendingPurchaseEtlDetailsResponseSchema.parse({ packet, rows }))
   })
 
   server.post('/api/catalog/pending-purchases/import', async (request, reply) => {

@@ -4,6 +4,7 @@ import {
   PendingPurchaseApprovalStatusSchema,
   PendingPurchaseApplyRequestStatusSchema,
   PendingPurchaseApplyRequestSummarySchema,
+  PendingPurchaseEtlDetailRowSchema,
   PendingPurchasePacketListItemSchema,
   PendingPurchasePacketSourceSchema,
   PendingPurchasePacketStatusSchema,
@@ -28,6 +29,23 @@ export const PendingPurchaseRowRouteParamsSchema = z.object({
   rowId: z.coerce.number().int().positive(),
 })
 export type PendingPurchaseRowRouteParams = z.infer<typeof PendingPurchaseRowRouteParamsSchema>
+
+// Purchase ETL Details page (C8b, child epic FreshlyBakedNYC/automation#54):
+// GET /api/catalog/pending-purchases/:packetId/etl-details.
+export const PendingPurchaseEtlDetailsRouteParamsSchema = z.object({
+  packetId: z.coerce.number().int().positive(),
+})
+export type PendingPurchaseEtlDetailsRouteParams = z.infer<
+  typeof PendingPurchaseEtlDetailsRouteParamsSchema
+>
+
+export const PendingPurchaseEtlDetailsResponseSchema = z.object({
+  packet: PendingPurchasePacketSummarySchema,
+  rows: z.array(PendingPurchaseEtlDetailRowSchema),
+})
+export type PendingPurchaseEtlDetailsResponse = z.infer<
+  typeof PendingPurchaseEtlDetailsResponseSchema
+>
 
 const PendingPurchaseListModeSchema = z.enum(['packets', 'rows'])
 export type PendingPurchaseListMode = z.infer<typeof PendingPurchaseListModeSchema>

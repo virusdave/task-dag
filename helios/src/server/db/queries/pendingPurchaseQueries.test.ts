@@ -1,6 +1,6 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
-import { readLlmClassification } from './pendingPurchaseQueries.js'
+import { parseThreeWayComparison, readLlmClassification } from './pendingPurchaseQueries.js'
 
 // readLlmClassification parses the prospective-classifier provenance block the
 // generate job (C8) stores under raw_row_json.llmClassification and the review
@@ -87,5 +87,103 @@ describe('readLlmClassification', () => {
 
   it('treats a non-finite confidence with no rationale as absent', () => {
     expect(readLlmClassification({ confidence: Number.NaN })).toBeNull()
+  })
+})
+
+// parseThreeWayComparison validates the per-row 3-way (LLM vs parsekit vs
+// legacy) blob the ETL Details page (C8b) reads out of raw_row_json. A present-
+// but-malformed blob must degrade to an explicit `invalid` marker (fail-loud in
+// the UI + a server warning) rather than throwing and 500-ing the whole page.
+describe('parseThreeWayComparison', () => {
+  const parsedName = {
+    brand: 'Acme',
+    category: 'Flower',
+    groupName: 'Acme OG',
+    packCount: 1,
+    prevalence: null,
+    searchTerm: 'acme og',
+    size: '3.5g',
+    strainName: 'OG Kush',
+    subcategory: 'Indoor',
+    variantName: 'Acme OG 3.5g',
+    variantTab: 'Flower',
+  }
+  const llmLeg = {
+    actionType: 'catalog-create',
+    targetBrand: 'Acme',
+    targetCategory: 'Flower',
+    targetSubcategory: 'Indoor',
+    targetGroupName: 'Acme OG',
+    targetVariantName: 'Acme OG 3.5g',
+    targetVariantTab: 'Flower',
+    targetStrainName: 'OG Kush',
+    targetSize: '3.5g',
+    targetPackCount: 1,
+    reuseProductId: null,
+    reuseProductName: null,
+    confidence: 0.9,
+    rationale: 'Clean match.',
+    reviewFlags: [],
+    warningFlags: ['new-brand'],
+    citedHintIds: [],
+  }
+
+  it('returns the typed comparison for a well-formed blob', () => {
+    const blob = {
+      schemaVersion: 1,
+      llm: llmLeg,
+      parsekit: { status: 'ok', output: parsedName, parserId: 'p1', ruleId: 'r1', snapshotSha: 'sha' },
+      legacy: { status: 'ok', output: parsedName },
+    }
+    const result = parseThreeWayComparison(blob, 42)
+    expect('status' in result).toBe(false)
+    if (!('status' in result)) {
+      expect(result.schemaVersion).toBe(1)
+      expect(result.parsekit.status).toBe('ok')
+      expect(result.legacy.status).toBe('ok')
+      expect(result.llm.warningFlags).toEqual(['new-brand'])
+    }
+  })
+
+  it('accepts non-ok parsekit / legacy legs', () => {
+    const blob = {
+      schemaVersion: 1,
+      llm: llmLeg,
+      parsekit: { status: 'no_registry' },
+      legacy: { status: 'error', error: 'legacy could not parse' },
+    }
+    const result = parseThreeWayComparison(blob, 7)
+    expect('status' in result).toBe(false)
+    if (!('status' in result)) {
+      expect(result.parsekit.status).toBe('no_registry')
+      expect(result.legacy).toEqual({ status: 'error', error: 'legacy could not parse' })
+    }
+  })
+
+  it('degrades a malformed present blob to an invalid marker and warns', () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    // schemaVersion 2 is unsupported by the v1 literal — a present blob the
+    // page cannot read, so it must surface as invalid rather than throw.
+    const result = parseThreeWayComparison({ schemaVersion: 2, llm: {}, parsekit: {}, legacy: {} }, 99)
+    expect('status' in result).toBe(true)
+    if ('status' in result) {
+      expect(result.status).toBe('invalid')
+      expect(result.schemaVersion).toBe(2)
+      expect(result.error.length).toBeGreaterThan(0)
+    }
+    expect(warnSpy).toHaveBeenCalledOnce()
+    expect(warnSpy.mock.calls[0][0]).toContain('row 99')
+    warnSpy.mockRestore()
+  })
+
+  it('reports a null schemaVersion when the blob is not an object', () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const result = parseThreeWayComparison('not an object', 5)
+    expect('status' in result).toBe(true)
+    if ('status' in result) {
+      expect(result.status).toBe('invalid')
+      expect(result.schemaVersion).toBeNull()
+    }
+    warnSpy.mockRestore()
   })
 })

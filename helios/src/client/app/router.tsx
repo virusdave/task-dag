@@ -17,6 +17,7 @@ import { WarehouseLocationsPage } from '../routes/catalog/WarehouseLocationsPage
 import { CatalogPage, catalogLoader } from '../routes/catalog/CatalogPage.js'
 import { WhiteGlovePricingPage } from '../routes/catalog/whiteglove/WhiteGlovePricingPage.js'
 import { PendingPurchasesPage, pendingPurchasesLoader } from '../routes/catalog/PendingPurchasesPage.js'
+import { PurchaseEtlDetailsPage, purchaseEtlDetailsLoader } from '../routes/catalog/PurchaseEtlDetailsPage.js'
 import {
   PurchaseSellThroughDetailPage,
   PurchaseSellThroughItemPage,
@@ -289,6 +290,11 @@ export const router = createBrowserRouter([
         element: <PendingPurchasesPage />,
         loader: pendingPurchasesLoader,
         path: 'catalog/pending-purchases',
+      },
+      {
+        element: <PurchaseEtlDetailsPage />,
+        loader: purchaseEtlDetailsLoader,
+        path: 'catalog/pending-purchases/:packetId/etl-details',
       },
       {
         element: <PurchaseSellThroughListPage />,

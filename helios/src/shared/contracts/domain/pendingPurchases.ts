@@ -41,6 +41,14 @@ export type PendingPurchaseApplyRequestStatus = z.infer<typeof PendingPurchaseAp
 export const PendingPurchasePacketSummarySchema = z.object({
   createdAt: z.iso.datetime(),
   generatedAt: z.iso.datetime(),
+  // True when this packet came from the prospective LLM classifier pipeline
+  // (C8a) and therefore carries per-row 3-way (LLM vs parsekit vs legacy)
+  // comparison records the "Purchase ETL Details" page (C8b, child epic
+  // FreshlyBakedNYC/automation#54) can render. Derived cheaply from the
+  // packet's `summary_json.classifier` provenance (written iff every row got
+  // a `threeWayComparison`); false on legacy / imported packets so the ETL
+  // details link only appears where there is data behind it.
+  hasEtlDetails: z.boolean(),
   importFileName: z.string().nullable(),
   packetId: z.number().int().positive(),
   packetTitle: z.string().min(1),
@@ -317,3 +325,150 @@ export const PendingPurchaseRowSchema = z.object({
   version: z.number().int().positive(),
 })
 export type PendingPurchaseRow = z.infer<typeof PendingPurchaseRowSchema>
+
+// ── Purchase ETL Details (C8b, child epic FreshlyBakedNYC/automation#54) ─────
+//
+// Per-row 3-way comparison: the prospective LLM classifier's result (C4/C5)
+// next to what the parsekit parser and the legacy hardcoded heuristics would
+// have produced for the same distributor product name. Persisted by the
+// generate job (C8a) under `raw_row_json.threeWayComparison` and surfaced,
+// read-only, on the "Purchase ETL Details" page so operators can build
+// confidence in the LLM path while parsekit + legacy keep running alongside.
+//
+// Every leg here is display / audit context only and is NEVER a safety input.
+// The schemas are deliberately loose (no `.strict()`, string fields not forced
+// non-empty) so they mirror exactly what the worker writes today and do not
+// spuriously reject rows when C8a adds a field later. `parseThreeWayComparison`
+// (server side) coerces a present-but-malformed blob into an explicit invalid
+// marker rather than throwing, so one bad record can never brick the page.
+
+// The normalized parsed-name shape both the parsekit and legacy legs emit on a
+// successful parse. Mirrors the worker's `ParsedProductName`
+// (helios/src/lib/parsekit/contracts/pendingPurchases.ts); `strainName` and
+// `subcategory` may legitimately be empty strings, so they are NOT `.min(1)`.
+export const PendingPurchaseParsedNameSchema = z.object({
+  brand: z.string(),
+  category: z.string(),
+  groupName: z.string(),
+  packCount: z.number(),
+  prevalence: z.string().nullable(),
+  searchTerm: z.string(),
+  size: z.string(),
+  strainName: z.string(),
+  subcategory: z.string(),
+  variantName: z.string(),
+  variantTab: z.string(),
+})
+export type PendingPurchaseParsedName = z.infer<typeof PendingPurchaseParsedNameSchema>
+
+// The LLM/reconciler leg. Fields mirror the reconciled classification the model
+// proposed for this row, snapshotted BEFORE any operator pin override — so the
+// row's top-level resolved `actionType` can legitimately differ from
+// `llm.actionType` here (that divergence is itself an audit signal).
+export const PendingPurchaseThreeWayComparisonLlmLegSchema = z.object({
+  actionType: z.string(),
+  targetBrand: z.string().nullable(),
+  targetCategory: z.string().nullable(),
+  targetSubcategory: z.string().nullable(),
+  targetGroupName: z.string().nullable(),
+  targetVariantName: z.string().nullable(),
+  targetVariantTab: z.string().nullable(),
+  targetStrainName: z.string().nullable(),
+  targetSize: z.string().nullable(),
+  targetPackCount: z.number().nullable(),
+  reuseProductId: z.number().nullable(),
+  reuseProductName: z.string().nullable(),
+  confidence: z.number().min(0).max(1),
+  rationale: z.string(),
+  reviewFlags: z.array(z.string()),
+  warningFlags: z.array(z.string()),
+  citedHintIds: z.array(z.string()),
+})
+export type PendingPurchaseThreeWayComparisonLlmLeg = z.infer<
+  typeof PendingPurchaseThreeWayComparisonLlmLegSchema
+>
+
+// The parsekit leg: the live parser being tuned. `ok` carries the parsed
+// output; the other statuses record why parsekit produced nothing so the
+// scorecard / audit reader can tell "wrong" from "not attempted".
+export const PendingPurchaseThreeWayComparisonParsekitLegSchema = z.discriminatedUnion('status', [
+  z.object({
+    status: z.literal('ok'),
+    output: PendingPurchaseParsedNameSchema,
+    parserId: z.string(),
+    ruleId: z.string(),
+    snapshotSha: z.string(),
+  }),
+  z.object({
+    status: z.literal('fail'),
+    reason: z.string(),
+    parserId: z.string(),
+    snapshotSha: z.string(),
+  }),
+  z.object({
+    status: z.literal('no_detect_match'),
+    snapshotSha: z.string(),
+  }),
+  z.object({
+    status: z.literal('no_registry'),
+  }),
+])
+export type PendingPurchaseThreeWayComparisonParsekitLeg = z.infer<
+  typeof PendingPurchaseThreeWayComparisonParsekitLegSchema
+>
+
+// The legacy hardcoded-waterfall leg: `ok` with output, or `error` with the
+// thrown message when the legacy parser could not handle the name.
+export const PendingPurchaseThreeWayComparisonLegacyLegSchema = z.discriminatedUnion('status', [
+  z.object({
+    status: z.literal('ok'),
+    output: PendingPurchaseParsedNameSchema,
+  }),
+  z.object({
+    status: z.literal('error'),
+    error: z.string(),
+  }),
+])
+export type PendingPurchaseThreeWayComparisonLegacyLeg = z.infer<
+  typeof PendingPurchaseThreeWayComparisonLegacyLegSchema
+>
+
+export const PendingPurchaseThreeWayComparisonSchema = z.object({
+  schemaVersion: z.literal(1),
+  llm: PendingPurchaseThreeWayComparisonLlmLegSchema,
+  parsekit: PendingPurchaseThreeWayComparisonParsekitLegSchema,
+  legacy: PendingPurchaseThreeWayComparisonLegacyLegSchema,
+})
+export type PendingPurchaseThreeWayComparison = z.infer<
+  typeof PendingPurchaseThreeWayComparisonSchema
+>
+
+// A present-but-unparseable comparison blob. Surfaced (not silently dropped)
+// so a C8a writer bug is visible on the page as well as in the server logs;
+// an ABSENT blob is instead handled by simply excluding the row server-side.
+export const PendingPurchaseThreeWayComparisonInvalidSchema = z.object({
+  status: z.literal('invalid'),
+  schemaVersion: z.number().nullable(),
+  error: z.string(),
+})
+export type PendingPurchaseThreeWayComparisonInvalid = z.infer<
+  typeof PendingPurchaseThreeWayComparisonInvalidSchema
+>
+
+// One row on the ETL Details page: enough identity to orient the reviewer plus
+// the row's resolved top-level action (which the operator pin may have moved
+// away from `comparison.llm.actionType`) and the comparison itself.
+export const PendingPurchaseEtlDetailRowSchema = z.object({
+  rowId: z.number().int().positive(),
+  distributorProductName: z.string().min(1),
+  siteLabel: z.string().min(1),
+  approvalStatus: PendingPurchaseApprovalStatusSchema,
+  // The authoritative, post-reconcile (+ post-operator-pin) action stored on
+  // the row. Shown next to `comparison.llm.actionType` to flag pin overrides.
+  actionType: z.string().min(1),
+  comparison: z.union([
+    PendingPurchaseThreeWayComparisonSchema,
+    PendingPurchaseThreeWayComparisonInvalidSchema,
+  ]),
+})
+export type PendingPurchaseEtlDetailRow = z.infer<typeof PendingPurchaseEtlDetailRowSchema>

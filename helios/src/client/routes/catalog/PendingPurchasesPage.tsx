@@ -46,6 +46,7 @@ import type { TreeNavNode } from '../../components/TreeNav.js'
 import { type CompetitorListing } from '../../../shared/ui/pricing-ladder/index.js'
 import { calculateGmPercent, PRICING_GM_FORMULA } from '../../../shared/domain/pricingGeneration.js'
 import { useRegisterCatalogSidebarSubtree } from './catalogSidebarSubtree.js'
+import { buildPendingPurchaseEtlDetailsPath } from './PurchaseEtlDetailsPage.js'
 import {
   PendingPurchaseVariantLinkOverride,
   buildLinkOverridePayloadKey,
@@ -791,8 +792,8 @@ export function PendingPurchasesPage() {
                 </div>
               </header>
               <p className="subtle-copy">
-                Requested {new Date(data.latestApplyRequest.requestedAt).toLocaleString()}
-                {data.latestApplyRequest.finishedAt ? ` · Finished ${new Date(data.latestApplyRequest.finishedAt).toLocaleString()}` : ''}
+                Requested {nyLongDateTime(new Date(data.latestApplyRequest.requestedAt).getTime())}
+                {data.latestApplyRequest.finishedAt ? ` · Finished ${nyLongDateTime(new Date(data.latestApplyRequest.finishedAt).getTime())}` : ''}
                 {data.latestApplyRequest.requestedByUser ? ` · ${data.latestApplyRequest.requestedByUser}` : ''}
               </p>
               <p className="subtle-copy">
@@ -832,7 +833,7 @@ export function PendingPurchasesPage() {
                 </div>
               </header>
               <p className="subtle-copy">
-                Generated {new Date(data.activePacket.generatedAt).toLocaleString()}
+                Generated {nyLongDateTime(new Date(data.activePacket.generatedAt).getTime())}
                 {data.activePacket.importFileName ? ` · ${data.activePacket.importFileName}` : ''}
               </p>
               {data.activePacket.sourcePath ? <p className="subtle-copy">{data.activePacket.sourcePath}</p> : null}
@@ -961,6 +962,9 @@ function PendingPurchasesRowsView({
           <span className="subtle-copy">
             Packet #{activePacket.packetId} · {activePacket.packetTitle}
           </span>
+        ) : null}
+        {activePacket?.hasEtlDetails ? (
+          <Link className="ghost-button" to={buildPendingPurchaseEtlDetailsPath(activePacket.packetId)}>ETL details</Link>
         ) : null}
       </div>
 
@@ -1358,8 +1362,7 @@ interface PendingPurchasePacketCardProps {
 
 function PendingPurchasePacketCard({ filters, packet }: PendingPurchasePacketCardProps) {
   const openHref = buildPendingPurchasesHref(filters, { mode: 'rows', packetId: packet.packetId, page: 1 })
-  const generated = new Date(packet.generatedAt)
-  const generatedAbs = generated.toLocaleString()
+  const generatedAbs = nyLongDateTime(new Date(packet.generatedAt).getTime())
   const apply = packet.applyCounts
   const approval = packet.approvalCounts
   const inFlightApply = apply.queued + apply.running
@@ -1400,11 +1403,14 @@ function PendingPurchasePacketCard({ filters, packet }: PendingPurchasePacketCar
           Latest apply: <Pill tone={applyRequestTone(latestApply.status)}>{latestApply.status.replaceAll('_', ' ')}</Pill>
           {` · ${latestApply.appliedRowCount}/${latestApply.selectedRowCount} applied`}
           {latestApply.requestedByUser ? ` · ${latestApply.requestedByUser}` : ''}
-          {latestApply.finishedAt ? ` · finished ${new Date(latestApply.finishedAt).toLocaleString()}` : ''}
+          {latestApply.finishedAt ? ` · finished ${nyLongDateTime(new Date(latestApply.finishedAt).getTime())}` : ''}
         </p>
       ) : null}
       <div className="inline-row wrap-row pp-packet-card-actions">
         <Link className="primary-button" to={openHref}>Review rows</Link>
+        {packet.hasEtlDetails ? (
+          <Link className="ghost-button" to={buildPendingPurchaseEtlDetailsPath(packet.packetId)}>ETL details</Link>
+        ) : null}
         {packet.importFileName ? <span className="subtle-copy">{packet.importFileName}</span> : null}
       </div>
     </article>
@@ -2931,7 +2937,7 @@ function readJobProgressSummary(jobStatus: JobStatusResponse): string {
 }
 
 function formatTimestamp(value: string | null): string {
-  return value ? new Date(value).toLocaleString() : '—'
+  return value ? nyLongDateTime(new Date(value).getTime()) : '(none)'
 }
 
 function mappingStatusTone(status: PendingPurchaseRow['mappingStatus']): 'muted' | 'success' | 'warning' {

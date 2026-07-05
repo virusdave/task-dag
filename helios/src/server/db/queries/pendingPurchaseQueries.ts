@@ -13,11 +13,15 @@
 
 import type { Pool, QueryResultRow } from 'pg'
 
+import {
+  PendingPurchaseThreeWayComparisonSchema,
+} from '../../../shared/contracts/index.js'
 import type {
   JsonValue,
   PendingPurchaseApplyRequestStatus,
   PendingPurchaseApplyRequestSummary,
   PendingPurchaseApprovalStatus,
+  PendingPurchaseEtlDetailRow,
   PendingPurchaseLlmClassification,
   PendingPurchaseMappingStatus,
   PendingPurchaseMarketListing,
@@ -177,6 +181,86 @@ export async function listPendingPurchaseRows(
     loadSweedCatalogIndex(pool),
   ])
   return result.rows.map((row) => mapPendingPurchaseRow(row, catalogIndex))
+}
+
+interface PendingPurchaseEtlComparisonDbRow extends QueryResultRow {
+  action_type: string
+  approval_status: PendingPurchaseApprovalStatus
+  distributor_product_name: string
+  id: string
+  site_label: string
+  three_way_comparison: JsonValue
+}
+
+/**
+ * Load the per-row 3-way (LLM vs parsekit vs legacy) comparison records for one
+ * packet, powering the "Purchase ETL Details" page (C8b, child epic
+ * FreshlyBakedNYC/automation#54). Only rows that actually carry a
+ * `threeWayComparison` blob are returned (absent on legacy / imported rows,
+ * which are legitimately excluded here rather than fabricated). The blob is
+ * extracted SQL-side so the whole `raw_row_json` payload never crosses the
+ * wire; each present blob is validated by `parseThreeWayComparison`, which
+ * surfaces a malformed record as an explicit `invalid` marker instead of
+ * throwing (a corrupt record must not brick the audit page).
+ */
+export async function listPendingPurchaseEtlComparisonRows(
+  pool: Pool,
+  packetId: number,
+): Promise<PendingPurchaseEtlDetailRow[]> {
+  const result = await pool.query<PendingPurchaseEtlComparisonDbRow>(
+    `
+      select
+        r.id,
+        r.action_type,
+        r.approval_status,
+        r.distributor_product_name,
+        r.site_label,
+        r.raw_row_json -> 'threeWayComparison' as three_way_comparison
+      from pending_purchase_rows r
+      where r.packet_id = $1
+        and r.raw_row_json ? 'threeWayComparison'
+      order by r.id asc
+    `,
+    [packetId],
+  )
+  return result.rows.map((row) => ({
+    rowId: readIntFromString(row.id),
+    distributorProductName: row.distributor_product_name,
+    siteLabel: row.site_label,
+    approvalStatus: row.approval_status,
+    actionType: row.action_type,
+    comparison: parseThreeWayComparison(row.three_way_comparison, readIntFromString(row.id)),
+  }))
+}
+
+/**
+ * Validate a present `threeWayComparison` blob. On success returns the typed
+ * comparison; on failure returns an explicit `invalid` marker AND logs a
+ * warning (fail-loud in two places) so a C8a writer bug is discoverable from
+ * both the page and the server logs, without a single bad record 500-ing the
+ * whole packet. Never called for an absent blob — those rows are filtered out
+ * by the query above. Exported for unit testing the coercion (no DB needed).
+ */
+export function parseThreeWayComparison(
+  value: JsonValue,
+  rowId: number,
+): PendingPurchaseEtlDetailRow['comparison'] {
+  const parsed = PendingPurchaseThreeWayComparisonSchema.safeParse(value)
+  if (parsed.success) {
+    return parsed.data
+  }
+  const schemaVersion =
+    value !== null && typeof value === 'object' && !Array.isArray(value)
+      && typeof (value as Record<string, unknown>).schemaVersion === 'number'
+      ? ((value as Record<string, unknown>).schemaVersion as number)
+      : null
+  const error = parsed.error.issues
+    .map((issue) => `${issue.path.join('.') || '<root>'}: ${issue.message}`)
+    .join('; ')
+  console.warn(
+    `pending_purchase_rows.raw_row_json.threeWayComparison malformed for row ${rowId} (schemaVersion=${schemaVersion ?? 'null'}): ${error}`,
+  )
+  return { status: 'invalid', schemaVersion, error }
 }
 
 function mapPendingPurchaseRow(
@@ -347,6 +431,19 @@ function readRecord(value: JsonValue): Record<string, JsonValue> {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
     ? (value as Record<string, JsonValue>)
     : {}
+}
+
+// A packet has ETL Details (C8b) iff it came from the prospective LLM
+// classifier pipeline (C8a). C8a stamps `summary_json.classifier` provenance
+// on exactly the packets whose every row also got a `threeWayComparison`
+// (both were introduced together), so this cheap object-key check on the
+// already-selected `summary_json` is an accurate proxy — no per-row
+// `raw_row_json` detoast scan required. Legacy / imported packets never carry
+// `classifier`, so the ETL details link stays hidden where there is no data.
+function summaryJsonHasClassifier(value: JsonValue): boolean {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
+  const classifier = (value as Record<string, JsonValue>).classifier
+  return classifier !== undefined && classifier !== null
 }
 
 function readOptionalString(value: unknown): string | null {
@@ -576,6 +673,7 @@ export async function getPendingPurchasePacketSummary(
   return {
     createdAt: toIso(row.created_at),
     generatedAt: toIso(row.generated_at),
+    hasEtlDetails: summaryJsonHasClassifier(row.summary_json),
     importFileName: row.import_file_name,
     packetId: readIntFromString(row.id),
     packetTitle: row.packet_title,
@@ -696,6 +794,7 @@ export interface PendingPurchasePacketListItemRow {
   }
   createdAt: string
   generatedAt: string
+  hasEtlDetails: boolean
   importFileName: string | null
   latestApplyRequest: PendingPurchaseApplyRequestSummary | null
   packetId: number
@@ -936,6 +1035,7 @@ function mapPendingPurchasePacketListItem(row: PendingPurchasePacketListDbRow): 
     },
     createdAt: toIso(row.created_at),
     generatedAt: toIso(row.generated_at),
+    hasEtlDetails: summaryJsonHasClassifier(row.summary_json),
     importFileName: row.import_file_name,
     latestApplyRequest,
     packetId: readIntFromString(row.id),

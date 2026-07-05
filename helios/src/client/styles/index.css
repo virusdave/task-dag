@@ -10773,3 +10773,153 @@ span.metric-chart-legend-item {
   font-size: 1.25rem;
   color: #2b6cb0;
 }
+
+/* ── Purchase ETL Details page (C8b, child epic FreshlyBakedNYC/automation#54)
+   Per-packet 3-way (LLM vs parsekit vs legacy) parse comparison. Mirrors the
+   warm card language of the pending-purchases archive. The comparison grid is
+   a real table on desktop and stacks into labeled cells on mobile. */
+.pp-etl-page {
+  display: grid;
+  gap: 1rem;
+}
+
+.pp-etl-header {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.pp-etl-rows {
+  display: grid;
+  gap: 1rem;
+}
+
+.pp-etl-card {
+  display: grid;
+  gap: 0.7rem;
+  padding: 0.85rem 0.95rem;
+  border-radius: 14px;
+  border: 1px solid var(--panel-border);
+  background: rgba(255, 250, 241, 0.55);
+}
+
+.pp-etl-card-header {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 0.5rem;
+}
+
+.pp-etl-card-title {
+  display: grid;
+  gap: 0.1rem;
+  min-width: 0;
+}
+
+.pp-etl-card-title > strong {
+  overflow-wrap: anywhere;
+}
+
+.pp-etl-llm {
+  display: grid;
+  gap: 0.35rem;
+  padding: 0.55rem 0.65rem;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.45);
+  border: 1px solid var(--panel-border);
+}
+
+.pp-etl-rationale {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.pp-etl-grid {
+  display: grid;
+  gap: 0.25rem;
+}
+
+.pp-etl-grid-row {
+  display: grid;
+  grid-template-columns: minmax(90px, 0.7fr) 1fr 1fr 1fr;
+  gap: 0.4rem;
+  padding: 0.3rem 0.45rem;
+  border-radius: 8px;
+  align-items: start;
+}
+
+.pp-etl-grid-head {
+  font-weight: 600;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  border-bottom: 1px solid var(--panel-border);
+  border-radius: 0;
+}
+
+.pp-etl-grid-row-diff {
+  background: rgba(201, 138, 0, 0.14);
+}
+
+.pp-etl-grid-field {
+  font-weight: 600;
+}
+
+.pp-etl-grid-cell {
+  overflow-wrap: anywhere;
+}
+
+.pp-etl-cell-na,
+.pp-etl-cell-empty {
+  color: var(--color-muted, #8a7a5c);
+  font-style: italic;
+}
+
+.pp-etl-provenance {
+  margin: 0;
+}
+
+.pp-etl-provenance > summary {
+  cursor: pointer;
+}
+
+.pp-etl-provenance-body {
+  margin-top: 0.35rem;
+  overflow-wrap: anywhere;
+}
+
+.pp-etl-invalid {
+  padding: 0.55rem 0.65rem;
+  border-radius: 10px;
+  border: 1px solid var(--color-danger, #c0392b);
+  background: rgba(192, 57, 43, 0.08);
+}
+
+@media (max-width: 720px) {
+  /* Stack the 4-column comparison into labeled rows so the reviewer never
+     has to scroll a table sideways on a phone. */
+  .pp-etl-grid-head {
+    display: none;
+  }
+
+  .pp-etl-grid-row {
+    grid-template-columns: 1fr;
+    gap: 0.2rem;
+    padding: 0.45rem 0.55rem;
+    border: 1px solid var(--panel-border);
+  }
+
+  .pp-etl-grid-field {
+    font-size: 0.95rem;
+    padding-bottom: 0.1rem;
+  }
+
+  .pp-etl-grid-cell::before {
+    content: attr(data-leg) ": ";
+    font-weight: 600;
+    text-transform: uppercase;
+    font-size: 0.7rem;
+    letter-spacing: 0.03em;
+    margin-right: 0.3rem;
+  }
+}
