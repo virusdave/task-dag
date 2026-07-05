@@ -5,13 +5,14 @@ import { z } from 'zod'
 import {
   getHeliosPendingPurchaseSiteDealer,
   normalizeHeliosPendingPurchaseSiteDealerIds,
+  PENDING_PURCHASE_CLASSIFIER_SCHEMA_VERSION,
   type CatalogPendingPurchasesGenerateJobPayload,
   type JsonValue,
   type HeliosPendingPurchaseSiteDealer,
   type JobProgress,
 } from '../../shared/contracts/index.js'
 import { sha256 } from '../../shared/util/hash.js'
-import { getPool } from '../../server/db/pool.js'
+import { getPool, type Queryable } from '../../server/db/pool.js'
 import {
   buildPendingPurchaseBrandAliasCandidates,
   buildPendingPurchaseParseRuleFingerprint,
@@ -30,10 +31,25 @@ import {
   type PendingPurchaseParseRuleRecord,
 } from '../../server/db/queries/pendingPurchaseParserQueries.js'
 import { withTransaction } from '../../server/db/tx.js'
+import { loadExtractedPendingPurchaseHintFactsForBundle } from '../../server/db/queries/pendingPurchaseHintQueries.js'
 import {
   persistPendingPurchasePacket,
   type PendingPurchasePacket,
 } from '../../server/pendingPurchases/pendingPurchasePacketImport.js'
+import {
+  classifyPendingPurchasePacketWithLlm,
+  isPendingPurchaseClassifierAvailable,
+  type ClassifierAllowedTaxonomy,
+  type ClassifierCatalogCandidate,
+  type ClassifierHintFact,
+  type ClassifierRowInput,
+  type ClassifierSweedSuggestion,
+} from '../pendingPurchases/classifyPendingPurchasePacket.js'
+import {
+  reconcilePendingPurchaseDrafts,
+  type ReconciledPendingPurchaseClassification,
+  type ReconcilerCatalogCandidate,
+} from '../pendingPurchases/reconcilePendingPurchaseDrafts.js'
 import { getWorkerEnv } from '../config/env.js'
 import type { NormalizedCatalogGroupLiveState } from '../catalog/liveState.js'
 import { isRetryableWorkerError } from '../runtime/errors.js'
@@ -502,8 +518,20 @@ export async function runCatalogPendingPurchasesGenerateJob(
     )
   }
 
+  // The prospective LLM classifier is the driving path (C8a). It is NOT a
+  // best-effort enhancement: parsekit + the legacy heuristics run alongside it
+  // only for the 3-way comparison, never as a fallback (operator decision — no
+  // legacy fallback). Fail loud BEFORE the expensive Sweed collection phase
+  // when the Bedrock token is missing rather than silently degrading.
+  if (!isPendingPurchaseClassifierAvailable()) {
+    throw new Error(
+      'Pending-purchase generation requires the prospective LLM classifier, but no Bedrock token is configured (BEDROCK_MANTLE_BEARER_TOKEN). This path has no legacy fallback; configure the token and retry.',
+    )
+  }
+
   const sites = resolveSites(payload.siteDealerIds)
   const purchaseOrderNumber = normalizeNonEmptyString(payload.purchaseOrderNumber)
+  const hintBundleId = normalizeNonEmptyString(payload.hintBundleId)
   const requestId = randomUUID()
 
   const generationContext = await collectPendingPurchaseContext({
@@ -518,8 +546,10 @@ export async function runCatalogPendingPurchasesGenerateJob(
   const packet = await buildPendingPurchasePacket({
     context: generationContext,
     fromDate: payload.fromDate,
+    hintBundleId,
     jobId: context.id,
     sites,
+    stateDealerId: env.sweedStateDealerId,
     toDate: payload.toDate,
   })
 
@@ -577,37 +607,51 @@ async function collectPendingPurchaseContext(input: {
 
 /**
  * Phase 2 — turn the collected context into the persistable packet. The
- * per-row classification is delegated to `buildLegacyPendingPurchaseRows`
- * (the legacy rule-based row builder, isolated behind that single seam so
- * Stage 8 / C8 can swap it for the prospective LLM classifier and delete
- * it). Everything else here — packet title/summary, site keys, ordering,
- * state context — is generic packet assembly that survives the cutover.
+ * per-row classification is DRIVEN by the prospective LLM classifier (C4) +
+ * the deterministic reconciler (C5) via `buildLlmDrivenPendingPurchaseRows`
+ * (C8a). Parsekit + the legacy heuristics still run per row for the 3-way
+ * comparison record (operator kept parsekit alive; NO deletion). Everything
+ * else here — packet title/summary, site keys, ordering, state context — is
+ * generic packet assembly.
  */
 async function buildPendingPurchasePacket(input: {
   context: PendingPurchaseGenerationContext
   fromDate: string
+  hintBundleId: string | null
   jobId: number
   sites: HeliosPendingPurchaseSiteDealer[]
+  stateDealerId: number
   toDate: string
 }): Promise<PendingPurchasePacket> {
-  const { context, fromDate, jobId, sites, toDate } = input
+  const { context, fromDate, hintBundleId, jobId, sites, stateDealerId, toDate } = input
   const { cache, liveCollection, stateContext } = context
 
-  const rows = await buildLegacyPendingPurchaseRows({
+  const built = await buildLlmDrivenPendingPurchaseRows({
     cache,
+    db: getPool(),
     groups: liveCollection.groups,
+    hintBundleId,
     jobId,
+    stateDealerId,
   })
+
+  const summary = {
+    ...buildPacketSummary(built.rows, liveCollection.orders, fromDate, toDate),
+    classifier: built.provenance,
+  }
 
   return {
     generatedAt: new Date().toISOString(),
     orders: liveCollection.orders,
     packetTitle: buildPacketTitle(sites, fromDate, toDate),
-    rows,
+    rows: built.rows,
     siteKeys: sites.map((site) => site.siteKey),
     siteLabels: sites.map((site) => site.siteLabel),
-    stateContext,
-    summary: buildPacketSummary(rows, liveCollection.orders, fromDate, toDate),
+    stateContext: {
+      ...stateContext,
+      classifier: built.provenance,
+    },
+    summary,
   }
 }
 
@@ -691,6 +735,969 @@ async function buildLegacyPendingPurchaseRows(input: {
   })
 
   return rows
+}
+
+// ── C8a: prospective-LLM driving path ────────────────────────────────────────
+//
+// The generate job is now DRIVEN by the event-level LLM classifier (C4) behind
+// the deterministic reconciler / safety gate (C5). Parsekit + the legacy
+// heuristics still run per row (via `computePendingPurchaseParseComparison`) so
+// the Config → Parsing → Purchases reverse-shadow scorecard keeps getting new
+// events AND every packet row carries a 3-way comparison (LLM vs parsekit vs
+// legacy) in its `raw_row_json.threeWayComparison` for the C8b ETL Details page.
+// Operator decision: parsekit is KEPT ALIVE; the LLM never falls back to the
+// legacy row-builder.
+
+const LLM_CLASSIFIER_MAX_ROWS_PER_CALL = 80
+const CANDIDATE_SEARCH_HITS_PER_ROW = 25
+const CANDIDATE_BRAND_HITS_PER_ROW = 40
+const MAX_CLASSIFIER_CANDIDATES_PER_CALL = 2000
+const MAX_RECONCILER_CANDIDATES = 4000
+const MAX_CLASSIFIER_HINT_FACTS = 5000
+const GROUP_CONTEXT_CONCURRENCY = 20
+
+interface PendingPurchaseClassifierProvenance {
+  available: boolean
+  model: string | null
+  promptVersion: string | null
+  reconcilerVersion: string | null
+  hintBundleId: string | null
+  hintFactCount: number
+  catalogCandidateCount: number
+  classifierCalls: number
+  rowCount: number
+}
+
+interface LlmDrivenBuildResult {
+  rows: GeneratedPendingPurchaseRow[]
+  provenance: PendingPurchaseClassifierProvenance
+}
+
+interface PendingPurchaseGroupContext {
+  group: PendingPositionGroup
+  stateDistributorProductRow: ExactDistributorProductRow | null
+  resolvedCost: ResolvedCost
+  sampleLike: boolean
+  suggestionCandidates: SuggestedProductCandidate[]
+  rowInputSignature: string
+  parseComparison: PendingPurchaseParseComparison
+  classifierRow: ClassifierRowInput
+  pinnedDistributorBrand: string | null
+  enrichmentCandidateIds: number[]
+  relevantCandidateIds: number[]
+}
+
+interface CandidatePoolEntry {
+  classifier: ClassifierCatalogCandidate
+  reconciler: ReconcilerCatalogCandidate
+  enrichment: boolean
+}
+
+const PendingPurchaseCategoryListSchema = z.object({
+  data: z.array(z.object({
+    name: z.string().nullable().optional(),
+    subcategories: z.array(z.object({
+      name: z.string().nullable().optional(),
+    }).passthrough()).default([]),
+  }).passthrough()).default([]),
+}).passthrough()
+
+/**
+ * Build the allowed taxonomy for C4/C5: the auto-classifiable top-level
+ * categories, plus the live union of every enabled subcategory name Sweed
+ * reports. Read-only; a failure bubbles up so the job retries rather than
+ * silently shipping an all-`needs-review` packet from an empty subcategory set.
+ */
+async function loadPendingPurchaseAllowedTaxonomy(stateDealerId: number): Promise<ClassifierAllowedTaxonomy> {
+  const response = PendingPurchaseCategoryListSchema.parse(
+    await callSweedRpc(stateDealerId, 'store.product.category.list', {}),
+  )
+  const subcategories = new Set<string>()
+  for (const category of response.data) {
+    for (const subcategory of category.subcategories) {
+      const name = normalizeNonEmptyString(subcategory.name)
+      if (name !== null) {
+        subcategories.add(name)
+      }
+    }
+  }
+  return {
+    categories: [...AUTO_CLASSIFIABLE_PENDING_PURCHASE_CATEGORIES],
+    subcategories: [...subcategories],
+  }
+}
+
+/**
+ * C8a driving path. Turns the collected distributor-product groups into review
+ * rows via one (or a few, chunked) event-level LLM classification pass(es),
+ * validated by the deterministic reconciler, then composes the deterministic
+ * pricing / market-evidence fields Helios owns. Parsekit + legacy run alongside
+ * per row for the 3-way comparison record.
+ */
+async function buildLlmDrivenPendingPurchaseRows(input: {
+  cache: CatalogCache
+  db: Queryable
+  groups: Map<string, PendingPositionGroup>
+  hintBundleId: string | null
+  jobId: number
+  stateDealerId: number
+}): Promise<LlmDrivenBuildResult> {
+  const { cache, db, groups, hintBundleId, jobId, stateDealerId } = input
+
+  const groupsArray = [...groups.values()]
+  const totalGroups = groupsArray.length
+
+  const emptyProvenance = (): PendingPurchaseClassifierProvenance => ({
+    available: true,
+    model: null,
+    promptVersion: null,
+    reconcilerVersion: null,
+    hintBundleId,
+    hintFactCount: 0,
+    catalogCandidateCount: 0,
+    classifierCalls: 0,
+    rowCount: 0,
+  })
+
+  await updateJobProgress(jobId, {
+    completed: 0,
+    message: totalGroups > 0
+      ? `Preparing ${totalGroups} unresolved distributor product${totalGroups === 1 ? '' : 's'} for the prospective classifier.`
+      : 'No unresolved distributor products were found. Preparing an empty review packet.',
+    phase: 'Resolving catalog actions',
+    phaseCount: 3,
+    phaseIndex: 2,
+    total: totalGroups > 0 ? totalGroups : null,
+  })
+
+  if (totalGroups === 0) {
+    // Nothing to classify — skip C4/C5 (both throw on zero rows) and ship the
+    // empty packet exactly like the legacy path did.
+    return { rows: [], provenance: emptyProvenance() }
+  }
+
+  // ── Phase A: per-group context (parallel) ───────────────────────────────
+  const contexts = await mapWithConcurrency(groupsArray, GROUP_CONTEXT_CONCURRENCY, (group) =>
+    buildPendingPurchaseGroupContext(cache, group),
+  )
+
+  // ── Phase B: hint facts + allowed taxonomy ──────────────────────────────
+  const hintFacts = await buildClassifierHintFacts(db, hintBundleId)
+  const allowedTaxonomy = await loadPendingPurchaseAllowedTaxonomy(stateDealerId)
+
+  // ── Phase C: catalog candidate pool ─────────────────────────────────────
+  const candidatePool = await buildPendingPurchaseCandidatePool(cache, contexts)
+
+  // ── Phase D: chunked classify → single reconcile ────────────────────────
+  const chunks = chunkGroupContextsForClassifier(contexts)
+  const allDrafts: PendingPurchaseLlmDraftRowLike[] = []
+  let model: string | null = null
+  let promptVersion: string | null = null
+  let classifierCalls = 0
+
+  for (const [chunkIndex, chunk] of chunks.entries()) {
+    await updateJobProgress(jobId, {
+      completed: chunkIndex,
+      message: `Classifying delivery event ${chunkIndex + 1} of ${chunks.length} (${chunk.length} line${chunk.length === 1 ? '' : 's'}) with the prospective LLM classifier.`,
+      phase: 'Resolving catalog actions',
+      phaseCount: 3,
+      phaseIndex: 2,
+      total: chunks.length,
+    })
+
+    const chunkResult = await classifyPendingPurchasePacketWithLlm({
+      db,
+      eventDescription: describeClassifierEvent(chunk),
+      rows: chunk.map((ctx) => ctx.classifierRow),
+      catalogCandidates: selectClassifierCandidatesForChunk(chunk, candidatePool),
+      hintFacts,
+      allowedTaxonomy,
+    })
+
+    classifierCalls += 1
+    if (model === null) {
+      model = chunkResult.model
+      promptVersion = chunkResult.promptVersion
+    } else if (chunkResult.model !== model || chunkResult.promptVersion !== promptVersion) {
+      // A model/prompt switch mid-packet would make the merged envelope
+      // internally inconsistent. Fail loud rather than persist a mixed packet.
+      throw new Error(
+        `Classifier returned inconsistent provenance across chunks (${model}@${promptVersion} vs ${chunkResult.model}@${chunkResult.promptVersion}); regenerate the packet.`,
+      )
+    }
+    allDrafts.push(...chunkResult.drafts)
+  }
+
+  const mergedClassifierResult = {
+    schemaVersion: PENDING_PURCHASE_CLASSIFIER_SCHEMA_VERSION,
+    model: model ?? '',
+    promptVersion: promptVersion ?? '',
+    drafts: allDrafts,
+  }
+
+  const reconcileResult = reconcilePendingPurchaseDrafts({
+    classifierResult: mergedClassifierResult,
+    rows: contexts.map((ctx) => ctx.classifierRow),
+    catalogCandidates: selectReconcilerCandidates(candidatePool),
+    allowedTaxonomy,
+  })
+
+  const classificationByRowKey = new Map(
+    reconcileResult.classifications.map((classification) => [classification.rowKey, classification]),
+  )
+
+  // ── Phase E: compose deterministic rows ─────────────────────────────────
+  const rows = await mapWithConcurrency(contexts, GROUP_CONTEXT_CONCURRENCY, async (ctx) => {
+    const classification = classificationByRowKey.get(ctx.classifierRow.rowKey)
+    if (classification === undefined) {
+      // Reconciler guarantees one classification per input row; belt-and-braces.
+      throw new Error(`Reconciler returned no classification for row "${ctx.classifierRow.rowKey}".`)
+    }
+    return composePendingPurchaseRowFromReconciled({ cache, ctx, classification })
+  })
+
+  // Family-average cost fallback must see the WHOLE packet population.
+  applyFamilyAverageCostFallback(rows)
+
+  rows.sort((left, right) => {
+    const siteComparison = left.siteLabel.localeCompare(right.siteLabel)
+    if (siteComparison !== 0) {
+      return siteComparison
+    }
+    return left.distributorProductName.localeCompare(right.distributorProductName)
+  })
+
+  return {
+    rows,
+    provenance: {
+      available: true,
+      model: reconcileResult.model,
+      promptVersion: reconcileResult.promptVersion,
+      reconcilerVersion: reconcileResult.reconcilerVersion,
+      hintBundleId,
+      hintFactCount: hintFacts.length,
+      catalogCandidateCount: candidatePool.size,
+      classifierCalls,
+      rowCount: rows.length,
+    },
+  }
+}
+
+// The classifier's drafts are already schema-validated; we only need a
+// structural handle for merging chunk outputs before handing them back to C5.
+type PendingPurchaseLlmDraftRowLike = Awaited<
+  ReturnType<typeof classifyPendingPurchasePacketWithLlm>
+>['drafts'][number]
+
+async function mapWithConcurrency<TItem, TResult>(
+  items: readonly TItem[],
+  limit: number,
+  fn: (item: TItem) => Promise<TResult>,
+): Promise<TResult[]> {
+  const results: TResult[] = new Array<TResult>(items.length)
+  for (let start = 0; start < items.length; start += limit) {
+    const batch = items.slice(start, start + limit)
+    const batchResults = await Promise.all(batch.map((item) => fn(item)))
+    for (const [offset, value] of batchResults.entries()) {
+      results[start + offset] = value
+    }
+  }
+  return results
+}
+
+async function buildPendingPurchaseGroupContext(
+  cache: CatalogCache,
+  group: PendingPositionGroup,
+): Promise<PendingPurchaseGroupContext> {
+  const stateDistributorProductRow = await findExactDistributorProductRow(group)
+  const resolvedCost = resolveEffectiveUnitCost(group.positions, stateDistributorProductRow)
+  const sampleLike = group.positions.some((position) => isSampleLike(position))
+  const suggestionCandidates = collectSuggestionCandidates(group.positions)
+  const knownDistributorName = stateDistributorProductRow?.distributorName ?? null
+  const orderIds = [...group.orderIds].sort((left, right) => left - right)
+  const positionIds = group.positions.map((position) => position.id).sort((left, right) => left - right)
+
+  const rowInputSignature = sha256(
+    JSON.stringify({
+      distributorProductId: group.distributorProductId,
+      distributorProductName: group.distributorProductName,
+      effectiveUnitCost: resolvedCost.value,
+      knownDistributorName,
+      orderIds,
+      positionIds,
+      sampleLike,
+      siteDealerId: group.siteDealerId,
+      siteKey: group.siteKey,
+    }),
+  )
+
+  // Parsekit + legacy shadow. Runs for EVERY group (keeps the reverse-shadow
+  // scorecard live) and yields the parsekit/legacy legs of the 3-way record.
+  const parseComparison = computePendingPurchaseParseComparison(group.distributorProductName)
+
+  // Distributor-brand override (operator-curated white-label pins). Surfaced as
+  // a review flag when it disagrees with the model; never silently rewritten.
+  const override = await resolveDistributorBrandOverride(group.distributorNames)
+  const pinnedDistributorBrand = override.status === 'matched'
+    ? override.brandProfile.displayBrandName
+    : null
+
+  const sweedSuggestions: ClassifierSweedSuggestion[] = suggestionCandidates
+    .filter((candidate): candidate is SuggestedProductCandidate & { productId: number } => candidate.productId !== null)
+    .map((candidate) => ({
+      productId: candidate.productId,
+      productName: candidate.productName,
+      score: candidate.score,
+    }))
+
+  const classifierRow: ClassifierRowInput = {
+    rowKey: `${group.siteKey}:${group.distributorProductId}`,
+    distributorProductId: group.distributorProductId,
+    distributorProductName: group.distributorProductName,
+    distributorNames: [...group.distributorNames].sort(),
+    quantity: sumPositionQuantity(group.positions),
+    unitCost: resolvedCost.value,
+    currentDistributorLinkProductId: stateDistributorProductRow?.productId ?? null,
+    sweedSuggestions,
+  }
+
+  const enrichmentCandidateIds: number[] = []
+  if (stateDistributorProductRow?.productId) {
+    enrichmentCandidateIds.push(stateDistributorProductRow.productId)
+  }
+  for (const suggestion of sweedSuggestions) {
+    enrichmentCandidateIds.push(suggestion.productId)
+  }
+  // EXACT_REUSE_PRODUCT_IDS: operator-pinned exact name → productId reuse. Add
+  // it to the candidate pool so it is available for pinning/duplicate context.
+  const exactReuseId = EXACT_REUSE_PRODUCT_IDS.get(group.distributorProductName)
+  if (exactReuseId !== undefined) {
+    enrichmentCandidateIds.push(exactReuseId)
+  }
+
+  const searchCandidateIds = await collectSearchCandidateIds(cache, group.distributorProductName, parseComparison)
+
+  const relevantCandidateIds = dedupePositiveInts([...enrichmentCandidateIds, ...searchCandidateIds])
+
+  return {
+    group,
+    stateDistributorProductRow,
+    resolvedCost,
+    sampleLike,
+    suggestionCandidates,
+    rowInputSignature,
+    parseComparison,
+    classifierRow,
+    pinnedDistributorBrand,
+    enrichmentCandidateIds: dedupePositiveInts(enrichmentCandidateIds),
+    relevantCandidateIds,
+  }
+}
+
+function sumPositionQuantity(positions: z.infer<typeof PurchaseOrderPositionSchema>[]): number | null {
+  let total = 0
+  let sawValue = false
+  for (const position of positions) {
+    const qty = normalizeFiniteNumber(position.orderPositionQty)
+      ?? normalizeFiniteNumber(position.distributorProductQty)
+      ?? normalizeFiniteNumber(position.qty)
+    if (qty !== null) {
+      total += qty
+      sawValue = true
+    }
+  }
+  return sawValue ? total : null
+}
+
+async function collectSearchCandidateIds(
+  cache: CatalogCache,
+  distributorProductName: string,
+  parseComparison: PendingPurchaseParseComparison,
+): Promise<number[]> {
+  const ids: number[] = []
+  try {
+    const nameHits = await cache.searchProducts(distributorProductName)
+    for (const hit of nameHits.slice(0, CANDIDATE_SEARCH_HITS_PER_ROW)) {
+      ids.push(hit.id)
+    }
+  } catch {
+    // A search miss is non-fatal — the row just gets fewer candidate/dup
+    // context rows; the classifier still runs.
+  }
+
+  const brand = parseComparison.winner?.brand ?? null
+  if (brand !== null && brand.trim().length > 0) {
+    try {
+      const brandHits = await cache.searchProducts(brand)
+      for (const hit of brandHits.slice(0, CANDIDATE_BRAND_HITS_PER_ROW)) {
+        ids.push(hit.id)
+      }
+    } catch {
+      // non-fatal (see above)
+    }
+  }
+  return dedupePositiveInts(ids)
+}
+
+function dedupePositiveInts(values: readonly number[]): number[] {
+  const seen = new Set<number>()
+  const out: number[] = []
+  for (const value of values) {
+    if (Number.isFinite(value) && value > 0 && !seen.has(value)) {
+      seen.add(value)
+      out.push(value)
+    }
+  }
+  return out
+}
+
+/**
+ * Fetch + shape every distinct candidate product referenced by any group.
+ * Enrichment candidates (the row's current distributor link + Sweed
+ * suggestions + operator-pinned exact reuse) are ALWAYS included — the
+ * reconciler force-downgrades a row to needs-review when its link product is
+ * absent from the candidate set, so completeness there is a correctness gate,
+ * not a recall knob. Raw-name / brand search hits fill the remaining budget for
+ * duplicate detection + model context only.
+ */
+async function buildPendingPurchaseCandidatePool(
+  cache: CatalogCache,
+  contexts: readonly PendingPurchaseGroupContext[],
+): Promise<Map<number, CandidatePoolEntry>> {
+  const enrichmentIds = new Set<number>()
+  const searchIds = new Set<number>()
+  for (const ctx of contexts) {
+    for (const id of ctx.enrichmentCandidateIds) {
+      enrichmentIds.add(id)
+    }
+    for (const id of ctx.relevantCandidateIds) {
+      if (!ctx.enrichmentCandidateIds.includes(id)) {
+        searchIds.add(id)
+      }
+    }
+  }
+
+  // Enrichment first (unconditional), then search hits up to the cap.
+  const orderedIds: number[] = [...enrichmentIds]
+  for (const id of searchIds) {
+    if (orderedIds.length >= MAX_RECONCILER_CANDIDATES) {
+      break
+    }
+    orderedIds.push(id)
+  }
+
+  const pool = new Map<number, CandidatePoolEntry>()
+  const summaries = await mapWithConcurrency(orderedIds, GROUP_CONTEXT_CONCURRENCY, async (productId) => {
+    try {
+      const summary = await cache.getProductSummary(productId)
+      return { productId, summary }
+    } catch {
+      // A candidate may point at a product deleted/hidden upstream; skip it.
+      return { productId, summary: null }
+    }
+  })
+
+  for (const { productId, summary } of summaries) {
+    if (summary === null) {
+      continue
+    }
+    const entry = toCandidatePoolEntry(summary)
+    if (entry === null) {
+      continue
+    }
+    entry.enrichment = enrichmentIds.has(productId)
+    pool.set(productId, entry)
+  }
+
+  return pool
+}
+
+function toCandidatePoolEntry(summary: LiveProductSummary): CandidatePoolEntry | null {
+  const productName = normalizeNonEmptyString(summary.productName)
+  if (productName === null) {
+    // A live product with no name cannot be a validated reuse target
+    // (ReconciledReuseSnapshot.productName is non-null); do not offer it.
+    return null
+  }
+  const classifier: ClassifierCatalogCandidate = {
+    productId: summary.productId,
+    productName,
+    brand: normalizeNonEmptyString(summary.brand),
+    category: normalizeNonEmptyString(summary.category),
+    subcategory: normalizeNonEmptyString(summary.subcategory),
+    groupName: normalizeNonEmptyString(summary.groupName),
+    variantTab: normalizeNonEmptyString(summary.tab),
+    strain: normalizeNonEmptyString(summary.strain),
+    size: normalizeNonEmptyString(summary.size),
+    packCount: summary.packCount > 0 ? summary.packCount : null,
+  }
+  const reconciler: ReconcilerCatalogCandidate = {
+    ...classifier,
+    groupId: summary.groupId > 0 ? summary.groupId : null,
+  }
+  return { classifier, reconciler, enrichment: false }
+}
+
+function selectClassifierCandidatesForChunk(
+  chunk: readonly PendingPurchaseGroupContext[],
+  pool: ReadonlyMap<number, CandidatePoolEntry>,
+): ClassifierCatalogCandidate[] {
+  const enrichment: ClassifierCatalogCandidate[] = []
+  const search: ClassifierCatalogCandidate[] = []
+  const seen = new Set<number>()
+  for (const ctx of chunk) {
+    for (const id of ctx.relevantCandidateIds) {
+      if (seen.has(id)) {
+        continue
+      }
+      const entry = pool.get(id)
+      if (entry === undefined) {
+        continue
+      }
+      seen.add(id)
+      if (ctx.enrichmentCandidateIds.includes(id) || entry.enrichment) {
+        enrichment.push(entry.classifier)
+      } else {
+        search.push(entry.classifier)
+      }
+    }
+  }
+  return [...enrichment, ...search].slice(0, MAX_CLASSIFIER_CANDIDATES_PER_CALL)
+}
+
+function selectReconcilerCandidates(
+  pool: ReadonlyMap<number, CandidatePoolEntry>,
+): ReconcilerCatalogCandidate[] {
+  const enrichment: ReconcilerCatalogCandidate[] = []
+  const search: ReconcilerCatalogCandidate[] = []
+  for (const entry of pool.values()) {
+    if (entry.enrichment) {
+      enrichment.push(entry.reconciler)
+    } else {
+      search.push(entry.reconciler)
+    }
+  }
+  // Enrichment candidates (every row's current distributor link + Sweed
+  // suggestions + operator pins) MUST all reach the reconciler: a missing link
+  // candidate force-downgrades that row to needs-review. If enrichment alone
+  // exceeds the cap, silently slicing it would spuriously downgrade rows — fail
+  // loud instead of degrading (this path has no legacy fallback). Reaching this
+  // needs >MAX_RECONCILER_CANDIDATES distinct enrichment products in one packet.
+  if (enrichment.length > MAX_RECONCILER_CANDIDATES) {
+    throw new Error(
+      `Reconciler enrichment candidate set (${enrichment.length}) exceeds the ${MAX_RECONCILER_CANDIDATES} cap; raise MAX_RECONCILER_CANDIDATES or split the packet — slicing would spuriously downgrade rows.`,
+    )
+  }
+  return [...enrichment, ...search].slice(0, MAX_RECONCILER_CANDIDATES)
+}
+
+/**
+ * Chunk the group contexts on delivery boundaries (site + distributor), then
+ * sub-chunk any single delivery larger than the per-call row cap so the model
+ * sees as much of one real delivery as possible in a single call.
+ */
+function chunkGroupContextsForClassifier(
+  contexts: readonly PendingPurchaseGroupContext[],
+): PendingPurchaseGroupContext[][] {
+  const byDelivery = new Map<string, PendingPurchaseGroupContext[]>()
+  for (const ctx of contexts) {
+    const distributorKey = [...ctx.group.distributorNames].map((name) => name.toLowerCase()).sort().join('|')
+    const key = `${ctx.group.siteKey}\u0001${distributorKey}`
+    const bucket = byDelivery.get(key)
+    if (bucket === undefined) {
+      byDelivery.set(key, [ctx])
+    } else {
+      bucket.push(ctx)
+    }
+  }
+
+  const chunks: PendingPurchaseGroupContext[][] = []
+  for (const delivery of byDelivery.values()) {
+    for (let start = 0; start < delivery.length; start += LLM_CLASSIFIER_MAX_ROWS_PER_CALL) {
+      chunks.push(delivery.slice(start, start + LLM_CLASSIFIER_MAX_ROWS_PER_CALL))
+    }
+  }
+  return chunks
+}
+
+function describeClassifierEvent(chunk: readonly PendingPurchaseGroupContext[]): string {
+  const site = chunk[0]?.group.siteLabel ?? 'unknown site'
+  const distributors = [...new Set(chunk.flatMap((ctx) => [...ctx.group.distributorNames]))].sort()
+  const distributorLabel = distributors.length > 0 ? distributors.join(', ') : 'unknown distributor'
+  return `${site} — ${distributorLabel} delivery, ${chunk.length} unresolved line${chunk.length === 1 ? '' : 's'}.`
+}
+
+async function buildClassifierHintFacts(
+  db: Queryable,
+  hintBundleId: string | null,
+): Promise<ClassifierHintFact[]> {
+  if (hintBundleId === null) {
+    return []
+  }
+  const bundleFacts = await loadExtractedPendingPurchaseHintFactsForBundle(db, hintBundleId)
+  if (bundleFacts.length === 0) {
+    // The operator attached a hint bundle but nothing extracted from it. Fail
+    // loud (re-extract or drop the bundle) rather than silently ignoring the
+    // context they deliberately supplied.
+    throw new Error(
+      `Hint bundle "${hintBundleId}" has no extracted facts. Re-run extraction or remove the bundle before generating.`,
+    )
+  }
+  if (bundleFacts.length > MAX_CLASSIFIER_HINT_FACTS) {
+    throw new Error(
+      `Hint bundle "${hintBundleId}" has ${bundleFacts.length} facts (limit ${MAX_CLASSIFIER_HINT_FACTS}). Trim the bundle.`,
+    )
+  }
+  return bundleFacts.map((bundleFact) => ({
+    citedId: `${bundleFact.hintDocumentId}#${bundleFact.fact.factId}`,
+    hintDocumentId: bundleFact.hintDocumentId,
+    factId: bundleFact.fact.factId,
+    kind: bundleFact.kind,
+    intent: bundleFact.intent,
+    fact: bundleFact.fact,
+  }))
+}
+
+/**
+ * Compose one persistable review row from a reconciled classification, applying
+ * the deterministic pricing / market-evidence / anchor logic Helios owns (the
+ * reconciler is pure and computes none of that). Also attaches the 3-way
+ * comparison record + LLM provenance to `raw_row_json`.
+ */
+async function composePendingPurchaseRowFromReconciled(input: {
+  cache: CatalogCache
+  ctx: PendingPurchaseGroupContext
+  classification: ReconciledPendingPurchaseClassification
+}): Promise<GeneratedPendingPurchaseRow> {
+  const { cache, ctx } = input
+  let classification = input.classification
+  // The 3-way comparison's "llm" leg must reflect what the model + reconciler
+  // actually produced, before any operator-pin override below, so the C8b ETL
+  // page can audit the true LLM decision (the pin is surfaced separately via
+  // the row's notes/actionType).
+  const llmClassificationForComparison = input.classification
+  const { group, resolvedCost, sampleLike, suggestionCandidates } = ctx
+
+  const orderIds = [...group.orderIds].sort((left, right) => left - right)
+  const positionIds = group.positions.map((position) => position.id).sort((left, right) => left - right)
+  const rowCacheKey = `${group.siteKey}:${group.distributorProductId}`
+  const suggestionNote = formatSuggestionCandidateNote(suggestionCandidates)
+  const existingDistributorLinks = describeExistingDistributorLinks(ctx.stateDistributorProductRow)
+
+  const extraReviewFlags: string[] = []
+  const extraNotes: string[] = []
+
+  // Operator-pinned exact-name reuse (EXACT_REUSE_PRODUCT_IDS). Trusted like a
+  // DB distributor link: if the reconciler did not already confirm a reuse, pin
+  // it deterministically here (the model/reconciler cannot "discover" a hand-
+  // curated pin on its own).
+  //
+  // NEVER let the pin override an existing distributor link the reconciler
+  // couldn't confirm: when a row already has a live current distributor link
+  // that points somewhere OTHER than the pin, C5 deliberately returns
+  // reuseProductId===null / needs-review ("reviewer must resolve"). Silently
+  // pinning it to a different product there would (a) undo that guard and
+  // (b) risk creating a second distributor link at apply time. The current
+  // link keeps absolute priority (matching the legacy row builder); the pin
+  // only applies when there is no conflicting live link.
+  const exactReuseId = EXACT_REUSE_PRODUCT_IDS.get(group.distributorProductName)
+  const currentLinkId = ctx.classifierRow.currentDistributorLinkProductId
+  const pinDoesNotConflictWithCurrentLink = currentLinkId === null || currentLinkId === exactReuseId
+  if (
+    exactReuseId !== undefined
+    && classification.reuseProductId === null
+    && pinDoesNotConflictWithCurrentLink
+  ) {
+    const pinned = await tryGetProductSummary(cache, exactReuseId)
+    if (pinned !== null) {
+      classification = {
+        ...classification,
+        actionType: 'mapping-only',
+        catalogAction: `Map existing purchase distributor product ${group.distributorProductId} onto operator-pinned variant ${pinned.productName}.`,
+        reuseProductId: pinned.productId,
+        reuseProductName: pinned.productName,
+        reuseGroupId: pinned.groupId,
+        validatedReuseSnapshot: snapshotFromSummary(pinned),
+        targetBrand: pinned.brand || classification.targetBrand,
+        targetCategory: pinned.category || classification.targetCategory,
+        targetSubcategory: normalizeNonEmptyString(pinned.subcategory),
+        targetGroupName: pinned.groupName || classification.targetGroupName,
+        targetVariantName: pinned.productName,
+        targetVariantTab: pinned.tab || classification.targetVariantTab,
+        targetStrainName: pinned.strain || classification.targetStrainName,
+        targetSize: pinned.size || classification.targetSize,
+        targetPackCount: pinned.packCount > 0 ? pinned.packCount : classification.targetPackCount,
+      }
+      extraNotes.push(`Operator-pinned exact reuse to ${pinned.productName}.`)
+    }
+  }
+
+  const reuseProductId = classification.reuseProductId
+  const reuse = reuseProductId !== null ? await tryGetProductSummary(cache, reuseProductId) : null
+
+  // Distributor-brand override disagreement flag (never a silent rewrite).
+  if (
+    ctx.pinnedDistributorBrand !== null
+    && reuse === null
+    && classification.targetBrand !== null
+    && compactText(ctx.pinnedDistributorBrand) !== compactText(classification.targetBrand)
+  ) {
+    extraReviewFlags.push('Distributor brand override disagrees with classifier — verify brand')
+    extraNotes.push(
+      `Distributor mapping pins brand "${ctx.pinnedDistributorBrand}", but the classifier proposed "${classification.targetBrand}". Verify before creating.`,
+    )
+  }
+
+  const lane: PendingPurchaseFamilyLane = {
+    brand: classification.targetBrand ?? '',
+    category: classification.targetCategory ?? '',
+    subcategory: classification.targetSubcategory ?? '',
+    size: classification.targetSize ?? '',
+    packCount: classification.targetPackCount ?? 1,
+  }
+  const anchors = lane.brand.trim().length > 0 && lane.category.trim().length > 0
+    ? await familyAnchorProductsForLane(cache, lane)
+    : []
+  const anchorPrice = medianPrice(anchors)
+
+  const primaryImage = reuse?.imageUrl ?? anchors.find((anchor) => anchor.imageUrl)?.imageUrl ?? null
+  const currentDescription = reuse?.description ?? null
+  const proposedDescription = null
+  const proposedPrice = reuse?.price ?? recommendPendingPurchasePrice(resolvedCost.value, anchorPrice)
+  const currentPrice = reuse?.price ?? anchorPrice ?? proposedPrice
+  const currentPriceBasis = reuse
+    ? 'exact live reuse'
+    : anchorPrice !== null
+      ? 'live family anchor'
+      : proposedPrice !== null
+        ? 'draft fallback'
+        : null
+
+  const isNeedsReview = classification.actionType === 'needs-review'
+  const pricingSupport = isNeedsReview
+    ? null
+    : await cache.getPendingPurchasePricingSupport({
+        brand: lane.brand,
+        category: lane.category,
+        currentPrice,
+        groupName: classification.targetGroupName || classification.targetVariantName || group.distributorProductName,
+        subcategory: normalizeNonEmptyString(classification.targetSubcategory),
+        variantName: classification.targetVariantName || group.distributorProductName,
+        variantTab: classification.targetVariantTab || '',
+        wholesaleCost: resolvedCost.value,
+      })
+
+  const publicSources = pricingSupport
+    ? [...new Set(
+        (pricingSupport.evidence?.matchedListings ?? [])
+          .map((listing) => normalizeNonEmptyString(listing.url))
+          .filter((url): url is string => url !== null),
+      )]
+    : []
+
+  const reuseReason = reuse !== null
+    ? `Reuse confirmed for ${reuse.productName}.`
+    : null
+
+  const notes = joinNotes([
+    classification.notes,
+    reuseReason,
+    resolvedCost.reason,
+    !reuse && anchors.length > 0
+      ? `Family anchor median uses ${anchors.length} live ${lane.brand} row${anchors.length === 1 ? '' : 's'} in the same size/category lane.`
+      : null,
+    suggestionNote,
+    ...extraNotes,
+  ])
+
+  const reviewFlags = compactStrings([
+    ...classification.reviewFlags,
+    ...extraReviewFlags,
+    proposedPrice === null ? 'Needs manual price' : null,
+    !primaryImage ? 'Needs image review' : null,
+    !reuse && !isNeedsReview && anchors.length === 0 ? 'No live family anchor' : null,
+    pricingSupport?.marketAvailability === 'error' ? 'Pricing evidence lookup failed' : null,
+  ])
+
+  const threeWayComparison = buildThreeWayComparisonRecord(ctx, llmClassificationForComparison)
+
+  return {
+    actionType: classification.actionType,
+    allowedSaleType: reuse?.allowedSaleType ?? 'Medical and recreational',
+    anchorPrice,
+    averageCompetitorPostTaxPrice: pricingSupport?.evidence?.averagePostTaxPrice ?? null,
+    averageCompetitorPrice: pricingSupport?.evidence?.averagePreTaxPrice ?? null,
+    catalogAction: classification.catalogAction,
+    classifierConfidence: classification.confidence,
+    classifierRationale: classification.rationale,
+    citedHintIds: [...classification.citedHintIds],
+    competitorMedianPostTaxPrice: pricingSupport?.evidence?.medianPostTaxPrice ?? null,
+    currentDescription,
+    currentGmPercent: computeGmPercent(resolvedCost.value, currentPrice),
+    currentPrice,
+    currentPriceBasis,
+    descriptionAction: reuse ? 'reuse-live-catalog' : 'needs-description-review',
+    distributorProductId: group.distributorProductId,
+    distributorProductName: group.distributorProductName,
+    effectiveUnitCost: resolvedCost.value,
+    effectiveUnitCostReason: resolvedCost.reason,
+    effectiveUnitCostSource: resolvedCost.source,
+    expectedCategory: classification.targetCategory,
+    expectedSubcategory: classification.targetSubcategory,
+    existingDistributorLinks,
+    gmPercent: computeGmPercent(resolvedCost.value, proposedPrice),
+    marketAdvicePosture: pricingSupport?.marketAvailability ?? null,
+    marketAdviceSummary: pricingSupport?.marketNote ?? null,
+    marketListings: pricingSupport?.evidence?.matchedListings ?? [],
+    marketNote: pricingSupport?.marketNote ?? null,
+    marketSearchTerm: pricingSupport?.marketSearchTerm ?? null,
+    notes,
+    orderIds,
+    positionIds,
+    pricingEvidenceNote: pricingSupport?.marketNote ?? null,
+    pricingMarketEvidence: pricingSupport?.evidence ? toJsonValue(pricingSupport.evidence) : null,
+    primaryImageNote: primaryImage
+      ? reuse
+        ? 'Primary image comes from the live reused variant.'
+        : 'Primary image comes from the nearest live family anchor.'
+      : 'No live reusable or family image was available.',
+    primaryImageSource: primaryImage
+      ? reuse
+        ? 'exact live reuse'
+        : 'live family anchor'
+      : null,
+    primaryImageUrl: primaryImage,
+    publicSources,
+    pricingAction: classifyPricingAction(currentPrice, proposedPrice),
+    pricingReason: buildPricingReason({
+      anchorPrice,
+      currentPriceBasis,
+      proposedPrice,
+      resolvedCost: resolvedCost.value,
+    }),
+    parserSource: 'llm-classifier',
+    proposedDescription,
+    proposedPrice,
+    reviewFlags,
+    reviewerNotes: notes,
+    reuseGroupId: classification.reuseGroupId,
+    reuseProductId: classification.reuseProductId,
+    reuseProductName: classification.reuseProductName ?? '',
+    rowCacheKey,
+    rowInputSignature: ctx.rowInputSignature,
+    sampleLike,
+    siteDealerId: group.siteDealerId,
+    siteDealerName: group.siteDealerName,
+    siteKey: group.siteKey,
+    siteLabel: group.siteLabel,
+    suggestionCandidates: classification.suggestionCandidates.length > 0
+      ? classification.suggestionCandidates
+      : suggestionCandidates,
+    stateDistributorProductId: ctx.stateDistributorProductRow?.distributorProductId ?? null,
+    targetBrand: classification.targetBrand ?? '',
+    targetGroupName: classification.targetGroupName ?? '',
+    targetPackCount: classification.targetPackCount,
+    targetPrevalence: reuse ? null : ctx.parseComparison.winner?.prevalence ?? null,
+    targetSize: classification.targetSize ?? '',
+    targetStrain: classification.targetStrainName ?? '',
+    targetVariantName: classification.targetVariantName ?? group.distributorProductName,
+    targetVariantTab: classification.targetVariantTab ?? '',
+    threeWayComparison,
+    validatedReuseSnapshot: classification.validatedReuseSnapshot,
+    warningFlags: [...classification.warningFlags],
+  }
+}
+
+async function tryGetProductSummary(
+  cache: CatalogCache,
+  productId: number,
+): Promise<LiveProductSummary | null> {
+  try {
+    return await cache.getProductSummary(productId)
+  } catch {
+    return null
+  }
+}
+
+function snapshotFromSummary(summary: LiveProductSummary): ReconciledPendingPurchaseClassification['validatedReuseSnapshot'] {
+  return {
+    productId: summary.productId,
+    productName: summary.productName,
+    groupId: summary.groupId > 0 ? summary.groupId : null,
+    brand: normalizeNonEmptyString(summary.brand),
+    category: normalizeNonEmptyString(summary.category),
+    subcategory: normalizeNonEmptyString(summary.subcategory),
+    groupName: normalizeNonEmptyString(summary.groupName),
+    variantTab: normalizeNonEmptyString(summary.tab),
+    strain: normalizeNonEmptyString(summary.strain),
+    size: normalizeNonEmptyString(summary.size),
+    packCount: summary.packCount > 0 ? summary.packCount : null,
+  }
+}
+
+/**
+ * The per-line 3-way comparison persisted into `raw_row_json.threeWayComparison`
+ * for the C8b ETL Details page: the LLM/reconciled result next to what parsekit
+ * and the legacy heuristics would have produced for the same distributor name.
+ */
+function buildThreeWayComparisonRecord(
+  ctx: PendingPurchaseGroupContext,
+  classification: ReconciledPendingPurchaseClassification,
+): JsonValue {
+  return toJsonValue({
+    schemaVersion: 1,
+    llm: {
+      actionType: classification.actionType,
+      targetBrand: classification.targetBrand,
+      targetCategory: classification.targetCategory,
+      targetSubcategory: classification.targetSubcategory,
+      targetGroupName: classification.targetGroupName,
+      targetVariantName: classification.targetVariantName,
+      targetVariantTab: classification.targetVariantTab,
+      targetStrainName: classification.targetStrainName,
+      targetSize: classification.targetSize,
+      targetPackCount: classification.targetPackCount,
+      reuseProductId: classification.reuseProductId,
+      reuseProductName: classification.reuseProductName,
+      confidence: classification.confidence,
+      rationale: classification.rationale,
+      reviewFlags: classification.reviewFlags,
+      warningFlags: classification.warningFlags,
+      citedHintIds: classification.citedHintIds,
+    },
+    parsekit: serializeParsekitLeg(ctx.parseComparison.parsekit),
+    legacy: serializeLegacyLeg(ctx.parseComparison.legacy),
+  })
+}
+
+function serializeParsekitLeg(parsekit: PendingPurchaseParseComparison['parsekit']): unknown {
+  switch (parsekit.kind) {
+    case 'ok':
+      return {
+        status: 'ok',
+        output: parsekit.output,
+        parserId: parsekit.parserId,
+        ruleId: parsekit.ruleId,
+        snapshotSha: parsekit.snapshotSha,
+      }
+    case 'fail':
+      return {
+        status: 'fail',
+        reason: parsekit.reason,
+        parserId: parsekit.parserId,
+        snapshotSha: parsekit.snapshotSha,
+      }
+    case 'no_detect_match':
+      return { status: 'no_detect_match', snapshotSha: parsekit.snapshotSha }
+    case 'no_registry':
+      return { status: 'no_registry' }
+  }
+}
+
+function serializeLegacyLeg(legacy: PendingPurchaseParseComparison['legacy']): unknown {
+  return legacy.ok
+    ? { status: 'ok', output: legacy.output }
+    : { status: 'error', error: legacy.error }
 }
 
 /**
@@ -2225,22 +3232,52 @@ async function exactReuseSummary(
   return null
 }
 
+/**
+ * The five identity lanes that define a pending-purchase "family" (everything
+ * except the strain / group name). Both the legacy parsed shape and the C8a
+ * reconciled classification project onto this so `familyAnchorProductsForLane`
+ * can serve both paths.
+ */
+interface PendingPurchaseFamilyLane {
+  brand: string
+  category: string
+  subcategory: string
+  size: string
+  packCount: number
+}
+
 async function familyAnchorProducts(cache: CatalogCache, parsed: ParsedProductName): Promise<LiveProductSummary[]> {
-  const rows = await cache.searchProducts(parsed.brand)
+  return familyAnchorProductsForLane(cache, {
+    brand: parsed.brand,
+    category: parsed.category,
+    subcategory: parsed.subcategory,
+    size: parsed.size,
+    packCount: parsed.packCount,
+  })
+}
+
+async function familyAnchorProductsForLane(
+  cache: CatalogCache,
+  lane: PendingPurchaseFamilyLane,
+): Promise<LiveProductSummary[]> {
+  if (lane.brand.trim().length === 0) {
+    return []
+  }
+  const rows = await cache.searchProducts(lane.brand)
   const anchors: LiveProductSummary[] = []
 
   for (const row of rows) {
     const summary = await cache.getProductSummary(row.id)
-    if (summary.category !== parsed.category) {
+    if (summary.category !== lane.category) {
       continue
     }
-    if ((summary.subcategory || '') !== parsed.subcategory) {
+    if ((summary.subcategory || '') !== lane.subcategory) {
       continue
     }
-    if (summary.size !== parsed.size) {
+    if (summary.size !== lane.size) {
       continue
     }
-    if ((summary.packCount || 1) !== parsed.packCount) {
+    if ((summary.packCount || 1) !== lane.packCount) {
       continue
     }
     anchors.push(summary)
@@ -3133,7 +4170,35 @@ function derivePipeDelimitedSize(raw: string): { packCount: number; size: string
  * `getParsekitReverseShadowSnapshot()` for the Helios `Config -> Parsing
  * -> Purchases` page.
  */
-export function parseProductName(name: string): ParsedProductName {
+/**
+ * A single parsekit-vs-legacy comparison for one distributor product name.
+ * `winner` is parsekit's output when it parsed, else legacy's, else null when
+ * neither could parse. Produced by {@link computePendingPurchaseParseComparison},
+ * which is the ONE place that feeds the reverse-shadow scorecard, so the LLM
+ * driving path (C8a) and the throwing {@link parseProductName} wrapper always
+ * compare the exact same outputs.
+ */
+export interface PendingPurchaseParseComparison {
+  parsekit: ParsekitDispatchResult
+  legacy: { ok: true; output: ParsedProductName } | { ok: false; error: string }
+  winner: ParsedProductName | null
+}
+
+/**
+ * Run parsekit (the live parser being tuned) AND the legacy hardcoded waterfall
+ * (`parseProductNameLegacy`) over one name, record any divergence to the
+ * `parsekit_reverse_shadow_events` feed exactly once, and return BOTH outputs
+ * plus the winner. Never throws — an input neither parser can handle returns
+ * `winner: null`.
+ *
+ * Post-C8a, parsekit and the legacy heuristics run hand-in-hand with the LLM
+ * classifier (operator kept parsekit alive; the Config → Parsing → Purchases
+ * scorecard stays live). This function is the shared core: the LLM path calls
+ * it once per row to (a) keep feeding the scorecard and (b) build the per-line
+ * 3-way comparison record, while `parseProductName` delegates to it for its
+ * legacy throwing contract.
+ */
+export function computePendingPurchaseParseComparison(name: string): PendingPurchaseParseComparison {
   const normalized = name.trim()
   const parsekit = tryParsekitParsePendingPurchase(normalized)
 
@@ -3144,6 +4209,9 @@ export function parseProductName(name: string): ParsedProductName {
   } catch (err) {
     legacyErr = err
   }
+  const legacyLeg: PendingPurchaseParseComparison['legacy'] = legacy !== null
+    ? { ok: true, output: legacy }
+    : { ok: false, error: errMessage(legacyErr) }
 
   if (parsekit.kind === 'ok') {
     if (legacy === null) {
@@ -3159,7 +4227,7 @@ export function parseProductName(name: string): ParsedProductName {
         snapshotSha: parsekit.snapshotSha,
         legacyError: errMessage(legacyErr),
       })
-      return parsekit.output
+      return { parsekit, legacy: legacyLeg, winner: parsekit.output }
     }
     const diffs = diffParsedProductName(parsekit.output, legacy)
     if (diffs.length === 0) {
@@ -3178,14 +4246,13 @@ export function parseProductName(name: string): ParsedProductName {
         diffFields: diffs,
       })
     }
-    return parsekit.output
+    return { parsekit, legacy: legacyLeg, winner: parsekit.output }
   }
 
   // parsekit did not produce a successful parse — fall back to legacy.
   if (legacy === null) {
-    // No safety net.
-    if (legacyErr) throw legacyErr
-    throw new Error('parseProductName: legacy returned no result')
+    // No safety net; the caller decides whether to throw.
+    return { parsekit, legacy: legacyLeg, winner: null }
   }
 
   if (parsekit.kind === 'fail') {
@@ -3205,7 +4272,18 @@ export function parseProductName(name: string): ParsedProductName {
     // for boot windows before the registry has loaded.
     REVERSE_SHADOW_STATS.ok_no_detect += 1
   }
-  return legacy
+  return { parsekit, legacy: legacyLeg, winner: legacy }
+}
+
+export function parseProductName(name: string): ParsedProductName {
+  const comparison = computePendingPurchaseParseComparison(name)
+  if (comparison.winner !== null) {
+    return comparison.winner
+  }
+  if (comparison.legacy.ok === false) {
+    throw new Error(comparison.legacy.error)
+  }
+  throw new Error('parseProductName: legacy returned no result')
 }
 
 // ---------------------------------------------------------------------
