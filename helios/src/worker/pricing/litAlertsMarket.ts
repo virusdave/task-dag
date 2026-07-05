@@ -83,14 +83,29 @@ const MIN_PRICING_ELIGIBLE_COMP_COUNT = 3
  * nearest retailers and pulling only the target brand's listings from each
  * (`/v1/retailers/:id/products?brandIds=`), instead of one statewide
  * `/v1/brands/:id/products` call that routinely times out for high-volume
- * brands. We cap the fan-out at the ~50 closest retailers: the near (≤1mi)
- * and mid (≤3mi) buckets that actually drive price are dense within the first
- * couple dozen, and the existing distance weighting already prioritises the
- * closest dispensaries — there is no value in wading through all ~550 active
- * NY retailers. The cache (litalerts_products) remains the backstop when the
- * brand isn't carried nearby or the fan-out fails wholesale.
+ * brands. The cache (litalerts_products) remains the backstop when the brand
+ * isn't carried nearby or the fan-out fails wholesale.
+ *
+ * Retailer selection (see `selectNearbyRetailersForFanout`) guarantees the
+ * *entire* near (≤1mi) + mid (≤3mi) competitor set is always queried, because
+ * that is the set that drives the proposed price. It does so by construction —
+ * "every retailer within the mid radius" — rather than a fixed nearest-N cap.
+ * A fixed cap silently decoupled from the band as NY retailer density grew
+ * (it hit 50 at ~1.9mi while ~29 more competitors sat in the 1.9–3mi mid
+ * band), which is exactly the coverage bug this replaces. We still query at
+ * least `PRICING_NEARBY_RETAILER_FETCH_MIN` nearest retailers so there is a
+ * far-band (weight-0) display-only sample beyond the price-driving set, and we
+ * never exceed `PRICING_NEARBY_RETAILER_FETCH_HARD_CAP` to bound request
+ * volume against the partner ELB.
+ *
+ * Note: a retailer present in the live `/v1/retailers` roster but not yet in
+ * our geocoded `litalerts_retailer_locations` table has `minDistanceMiles=null`,
+ * sorts last, and cannot drive price (band='unknown', weight 0) until the geo
+ * backfill runs. That is a known, bounded gap closed by refreshing the geocode
+ * table (new dispensaries open rarely).
  */
-const PRICING_NEARBY_RETAILER_FETCH_LIMIT = 50
+const PRICING_NEARBY_RETAILER_FETCH_MIN = 100
+const PRICING_NEARBY_RETAILER_FETCH_HARD_CAP = 150
 const PRICING_NEARBY_RETAILER_FETCH_CONCURRENCY = 8
 // Only accept an LLM size-interpretation pick when it is at least this
 // confident; otherwise keep the deterministic convention/syntax default.
@@ -120,7 +135,7 @@ interface ParsedSizeProfile {
   unitValue: number | null
 }
 
-interface RetailerDirectoryEntry {
+export interface RetailerDirectoryEntry {
   address: string | null
   id: number
   name: string
@@ -397,7 +412,8 @@ export function resetPricingMarketCachesForTest(): void {
 }
 
 export const __test__ = {
-  PRICING_NEARBY_RETAILER_FETCH_LIMIT,
+  PRICING_NEARBY_RETAILER_FETCH_MIN,
+  PRICING_NEARBY_RETAILER_FETCH_HARD_CAP,
   assessListingForProduct,
   buildCatalogComparableProfiles,
   classifyLaneTier,
@@ -889,19 +905,61 @@ function flattenBrandProductsToListingCandidates(
 }
 
 /**
+ * Choose which retailers to fan out over for a live pricing run.
+ *
+ * Ranks competitors by `minDistanceMiles` (geocoded ⨯ helios stores), with
+ * ungeocoded retailers sorted last, and excludes our own stores ("Freshly
+ * Baked"). It then selects:
+ *   - EVERY retailer within the mid pricing band (≤`PRICING_MID_DISTANCE_MAX_MILES`),
+ *     so the near+mid comp set that drives the proposed price is always
+ *     complete by construction (never truncated by a fixed count), plus
+ *   - enough of the next-nearest to reach `PRICING_NEARBY_RETAILER_FETCH_MIN`
+ *     total, giving a far-band (weight-0) display-only sample beyond the
+ *     price-driving set,
+ * bounded by `PRICING_NEARBY_RETAILER_FETCH_HARD_CAP` so request volume can
+ * never blow up. If the mid-band set alone ever exceeds the hard cap we clip
+ * it and warn, because that would reintroduce silent mid-band omission — the
+ * exact bug this selection exists to prevent.
+ *
+ * Pure and deterministic (no I/O) so it can be unit-tested on its invariants.
+ */
+export function selectNearbyRetailersForFanout(
+  entries: RetailerDirectoryEntry[],
+): RetailerDirectoryEntry[] {
+  const ranked = entries
+    .filter((entry) => !/freshly baked/i.test(entry.name))
+    .sort(
+      (left, right) =>
+        (left.minDistanceMiles ?? Number.POSITIVE_INFINITY) -
+        (right.minDistanceMiles ?? Number.POSITIVE_INFINITY),
+    )
+  const withinMidCount = ranked.filter(
+    (entry) => (entry.minDistanceMiles ?? Number.POSITIVE_INFINITY) <= PRICING_MID_DISTANCE_MAX_MILES,
+  ).length
+  if (withinMidCount > PRICING_NEARBY_RETAILER_FETCH_HARD_CAP) {
+    console.warn(
+      `[litAlertsMarket] ${withinMidCount} competitors fall within the ${PRICING_MID_DISTANCE_MAX_MILES}mi mid band, ` +
+        `exceeding the fan-out hard cap of ${PRICING_NEARBY_RETAILER_FETCH_HARD_CAP}; ` +
+        `${withinMidCount - PRICING_NEARBY_RETAILER_FETCH_HARD_CAP} price-driving comp(s) will be skipped. ` +
+        `Raise PRICING_NEARBY_RETAILER_FETCH_HARD_CAP.`,
+    )
+  }
+  const take = Math.min(
+    PRICING_NEARBY_RETAILER_FETCH_HARD_CAP,
+    Math.max(PRICING_NEARBY_RETAILER_FETCH_MIN, withinMidCount),
+  )
+  return ranked.slice(0, take)
+}
+
+/**
  * Primary live-evidence path for `buildPricingMarketContext`.
  *
- * Fans out across the geographically nearest retailers (capped at
- * `PRICING_NEARBY_RETAILER_FETCH_LIMIT`, nearest-first) and pulls only the
- * target brand's listings from each via
- * `/v1/retailers/:id/products?brandIds=`. Replaces the single statewide
- * `/v1/brands/:id/products` call, which routinely timed out for high-volume
- * brands and forced every run onto the stale cache fallback.
- *
- * Retailers are ranked by `minDistanceMiles` (geocoded ⨯ helios stores),
- * with ungeocoded retailers sorted last so they only get queried when there
- * aren't 50 geocoded ones — in NY today the cap is always filled by geocoded
- * retailers. Our own stores ("Freshly Baked") are excluded.
+ * Fans out across the retailers chosen by `selectNearbyRetailersForFanout`
+ * (full near+mid band plus a bounded far-context sample) and pulls only the
+ * target brand's listings from each via `/v1/retailers/:id/products?brandIds=`.
+ * Replaces the single statewide `/v1/brands/:id/products` call, which routinely
+ * timed out for high-volume brands and forced every run onto the stale cache
+ * fallback.
  *
  * Concurrency is bounded (`PRICING_NEARBY_RETAILER_FETCH_CONCURRENCY`) so we
  * never hammer the already-fragile partner ELB; the partner client retries
@@ -913,14 +971,7 @@ async function loadBrandProductsFromNearbyRetailers(
   brandId: number,
   retailerDirectory: RetailerDirectory,
 ): Promise<{ products: LitAlertsProduct[]; retailersQueried: number; retailersFailed: number }> {
-  const nearest = [...retailerDirectory.byId.values()]
-    .filter((entry) => !/freshly baked/i.test(entry.name))
-    .sort(
-      (left, right) =>
-        (left.minDistanceMiles ?? Number.POSITIVE_INFINITY) -
-        (right.minDistanceMiles ?? Number.POSITIVE_INFINITY),
-    )
-    .slice(0, PRICING_NEARBY_RETAILER_FETCH_LIMIT)
+  const nearest = selectNearbyRetailersForFanout([...retailerDirectory.byId.values()])
 
   const products: LitAlertsProduct[] = []
   let retailersFailed = 0

@@ -87,6 +87,7 @@ import {
 import { RetryableWorkerError } from '../runtime/errors.js'
 import { pageDave } from '../runtime/pageDave.js'
 import {
+  PRICING_MID_DISTANCE_MAX_MILES,
   PRICING_MID_DISTANCE_WEIGHT,
   PRICING_NEAR_DISTANCE_WEIGHT,
   PRICING_POST_TAX_MULTIPLIER,
@@ -101,6 +102,8 @@ import {
   classifyPricingDistanceBand,
   deriveSearchTerms,
   resetPricingMarketCachesForTest,
+  selectNearbyRetailersForFanout,
+  type RetailerDirectoryEntry,
 } from './litAlertsMarket.js'
 
 const pageDaveMock = vi.mocked(pageDave)
@@ -850,13 +853,12 @@ describe('geographic bounding of LitAlerts market pulls (issue #55 T3)', () => {
     expect(evidence!.farAveragePostTaxPrice).toBe(roundCurrency(farPreTax * PRICING_POST_TAX_MULTIPLIER))
   })
 
-  it('caps the fan-out at the N nearest retailers, skipping farther, ungeocoded, and own-store retailers', async () => {
-    const limit = __test__.PRICING_NEARBY_RETAILER_FETCH_LIMIT
-    const extra = 5
-    // `limit + extra` geocoded competitors at strictly increasing distance,
-    // plus one of our own stores (nearest of all, must be excluded) and one
-    // ungeocoded competitor (no distance row -> sorted last, beyond the cap).
-    const geocoded = Array.from({ length: limit + extra }, (_, index) => ({
+  it('fans out over exactly the retailers chosen by the pure selector, excluding own stores', async () => {
+    // End-to-end sanity: whatever `selectNearbyRetailersForFanout` returns is
+    // exactly what gets queried (own stores excluded), and the statewide brand
+    // call is never used. Detailed selection invariants are covered by the
+    // dedicated unit tests in the `selectNearbyRetailersForFanout` block below.
+    const geocoded = Array.from({ length: 6 }, (_, index) => ({
       id: 5000 + index,
       name: `Competitor ${index}`,
       address: `${index} Comp St`,
@@ -864,15 +866,11 @@ describe('geographic bounding of LitAlerts market pulls (issue #55 T3)', () => {
       recreational: true,
     }))
     const ownStore = { id: 5900, name: 'Freshly Baked - Bronx', address: '1 Own St', medical: false, recreational: true }
-    const ungeocoded = { id: 5901, name: 'Ungeocoded Cannabis', address: '1 Nowhere Rd', medical: false, recreational: true }
-    listRetailersMock.mockResolvedValue([ungeocoded, ownStore, ...geocoded])
+    listRetailersMock.mockResolvedValue([ownStore, ...geocoded])
     dbFixture.retailerDistanceRows = [
       distanceRow(ownStore.id, 0.01), // nearest of all, yet excluded (our own store)
       ...geocoded.map((retailer, index) => distanceRow(retailer.id, 0.1 + index * 0.01)),
     ]
-    // Every geocoded competitor carries a matching listing so the fan-out
-    // yields live evidence; an empty fan-out would fall through to the cache
-    // query (also mocked empty) and throw a RetryableWorkerError.
     mockNearbyRetailerProducts(
       geocoded.map((retailer) =>
         buildBrandProduct({
@@ -888,19 +886,90 @@ describe('geographic bounding of LitAlerts market pulls (issue #55 T3)', () => {
 
     expect(listBrandProductsMock).not.toHaveBeenCalled()
     const queriedIds = new Set(listRetailerProductsMock.mock.calls.map((call) => call[0]))
-    // Exactly the `limit` nearest geocoded competitors get queried (assert the
-    // SET, not call order, which is a runner-loop implementation detail).
-    expect(queriedIds.size).toBe(limit)
-    for (const retailer of geocoded.slice(0, limit)) {
+    // All 6 competitors are within the fan-out floor, so all are queried;
+    // our own store is never queried regardless of being nearest.
+    for (const retailer of geocoded) {
       expect(queriedIds.has(retailer.id)).toBe(true)
     }
-    for (const retailer of geocoded.slice(limit)) {
-      expect(queriedIds.has(retailer.id)).toBe(false)
-    }
-    // The nearest retailer of all (our own store) and the ungeocoded
-    // competitor are never queried, regardless of the cap.
     expect(queriedIds.has(ownStore.id)).toBe(false)
-    expect(queriedIds.has(ungeocoded.id)).toBe(false)
+  })
+})
+
+describe('selectNearbyRetailersForFanout (issue #55 T3 geographic coverage)', () => {
+  const MIN = __test__.PRICING_NEARBY_RETAILER_FETCH_MIN
+  const HARD_CAP = __test__.PRICING_NEARBY_RETAILER_FETCH_HARD_CAP
+  const MID_MAX_MILES = PRICING_MID_DISTANCE_MAX_MILES
+
+  function entry(id: number, miles: number | null, name = `Competitor ${id}`): RetailerDirectoryEntry {
+    return {
+      address: `${id} Test St`,
+      id,
+      name,
+      normalizedName: name.toLowerCase(),
+      minDistanceMiles: miles,
+      nearestStoreKey: miles === null ? null : 'store-a',
+    }
+  }
+
+  it('always includes EVERY retailer within the mid band, even beyond the nearest-N floor', () => {
+    // More near+mid competitors than the floor: all of them must still be
+    // selected (this is the coverage bug the change fixes; the old fixed
+    // 50-cap dropped mid-band competitors past the cap).
+    const midBand = Array.from({ length: MIN + 25 }, (_, i) => entry(1000 + i, (i / (MIN + 25)) * MID_MAX_MILES))
+    // Include one retailer sitting EXACTLY on the mid boundary to lock the
+    // inclusive `<=` semantics (must match classifyPricingDistanceBand's `<=`).
+    const onBoundary = entry(9999, MID_MAX_MILES)
+    const selected = selectNearbyRetailersForFanout([...midBand, onBoundary])
+    const selectedIds = new Set(selected.map((e) => e.id))
+    for (const e of midBand) {
+      expect(selectedIds.has(e.id)).toBe(true)
+    }
+    expect(selectedIds.has(onBoundary.id)).toBe(true)
+    expect(selected.length).toBe(MIN + 26)
+    expect(selected.length).toBeLessThanOrEqual(HARD_CAP)
+  })
+
+  it('pads up to the nearest-N floor with farther retailers for display-only context', () => {
+    // Only a few near/mid comps, plenty of far ones: we still query up to the
+    // floor so there is a far-band (weight-0) sample on the ladder.
+    const near = [entry(1, 0.5), entry(2, 2.0)]
+    const far = Array.from({ length: 200 }, (_, i) => entry(100 + i, 4 + i * 0.1))
+    const selected = selectNearbyRetailersForFanout([...near, ...far])
+    expect(selected.length).toBe(MIN)
+    // The two near/mid comps are always present.
+    expect(selected.some((e) => e.id === 1)).toBe(true)
+    expect(selected.some((e) => e.id === 2)).toBe(true)
+  })
+
+  it('never exceeds the hard cap on request volume, even when the mid band is over-full', () => {
+    // More competitors WITHIN the mid band than the hard cap: the cap binds
+    // (and the selector warns) rather than issuing an unbounded fan-out.
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const many = Array.from({ length: HARD_CAP + 50 }, (_, i) =>
+      entry(2000 + i, (i / (HARD_CAP + 50)) * MID_MAX_MILES),
+    )
+    const selected = selectNearbyRetailersForFanout(many)
+    expect(selected.length).toBe(HARD_CAP)
+    expect(warnSpy).toHaveBeenCalledTimes(1)
+    warnSpy.mockRestore()
+  })
+
+  it('excludes our own stores and sorts nearest-first', () => {
+    const input = [
+      entry(3, 2.0),
+      entry(1, 0.5),
+      entry(99, 0.01, 'Freshly Baked - Midtown'),
+      entry(2, 1.0),
+    ]
+    const selected = selectNearbyRetailersForFanout(input)
+    expect(selected.some((e) => /freshly baked/i.test(e.name))).toBe(false)
+    expect(selected.map((e) => e.id)).toEqual([1, 2, 3])
+  })
+
+  it('sorts ungeocoded (null-distance) retailers last', () => {
+    const input = [entry(10, null), entry(1, 0.5), entry(2, 2.0)]
+    const selected = selectNearbyRetailersForFanout(input)
+    expect(selected.map((e) => e.id)).toEqual([1, 2, 10])
   })
 })
 
