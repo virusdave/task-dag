@@ -1,11 +1,15 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react'
 import { Form, Link, useLoaderData, useNavigate, useRevalidator, useRouteLoaderData } from 'react-router-dom'
 
 import {
+  AddPendingPurchaseHintDocumentBodySchema,
   BatchPendingPurchaseFamilyOverrideRequestSchema,
   BatchPendingPurchaseFamilyOverrideResponseSchema,
+  CreatePendingPurchaseHintBundleBodySchema,
   HELIOS_PENDING_PURCHASE_SITE_DEALERS,
   MutationAcceptedResponseSchema,
+  PendingPurchaseHintBundleDetailResponseSchema,
+  PendingPurchaseHintDocumentAddResponseSchema,
   PendingPurchaseListResponseSchema,
   QueuePendingPurchaseApplyRequestSchema,
   QueuePendingPurchasePacketGenerationRequestSchema,
@@ -23,6 +27,7 @@ import {
 } from '../../../shared/contracts/index.js'
 import { loadJson, mutateJson } from '../../app/fetchJson.js'
 import { isJobTerminal, loadJobStatus, waitForJob } from '../../app/jobPolling.js'
+import { nyLongDateTime } from '../../app/nyTime.js'
 import { CanonicalPricingLadder } from '../../components/CanonicalPricingLadder.js'
 import { HoverZoomImage } from '../../components/HoverZoomImage.js'
 import {
@@ -204,6 +209,7 @@ export function PendingPurchasesPage() {
     HELIOS_PENDING_PURCHASE_SITE_DEALERS.map((dealer) => dealer.dealerId),
   )
   const [generationJobStatus, setGenerationJobStatus] = useState<JobStatusResponse | null>(data.activeGenerationJob)
+  const [generateNotes, setGenerateNotes] = useState('')
   const [generatePurchaseOrderNumber, setGeneratePurchaseOrderNumber] = useState('')
   const [generateSuccessMessage, setGenerateSuccessMessage] = useState<string | null>(null)
   const [generateToDate, setGenerateToDate] = useState(defaultGenerateToDate)
@@ -354,14 +360,78 @@ export function PendingPurchasesPage() {
     }
   }
 
+  // Read a plain-text file (a wholesale menu export, a sibling PO dump, a note
+  // .txt) into the notes box so the operator can "upload" hints without leaving
+  // the page. v1 is text-only (the hint-bundle backend stores pasted text), so
+  // we read the bytes client-side and append them to whatever was already
+  // typed rather than uploading a binary. The input is cleared afterwards so
+  // re-selecting the same file re-fires onChange.
+  async function handleNotesFileUpload(event: ChangeEvent<HTMLInputElement>) {
+    const input = event.currentTarget
+    const file = input.files?.[0]
+    if (!file) {
+      return
+    }
+    try {
+      const text = await file.text()
+      setGenerateNotes((existing) => (existing.trim().length > 0 ? `${existing.trimEnd()}\n\n${text}` : text))
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : 'Could not read the selected notes file.')
+    } finally {
+      input.value = ''
+    }
+  }
+
+  // Persist the operator's freeform notes as a single-document hint bundle via
+  // the C2/C3 admin API and return its public hintBundleId. The note text is
+  // UNTRUSTED data (kind 'operator_note'); the server content-addresses it,
+  // kicks off fact extraction (C3), and the generate route re-validates the
+  // bundle before the classifier (C4) reads it.
+  //
+  // Orphan-on-partial-failure is accepted for v1: if the document-add POST
+  // fails after the bundle is created (or the later generate POST fails after
+  // both succeed) the bundle is left unreferenced. That is inert server-side
+  // garbage — the generate route re-validates any bundle it's handed and
+  // unreferenced bundles are never read — so we deliberately do NOT attempt
+  // client-side cleanup. The real fix, if it ever matters, is a server-side
+  // create-bundle-with-document endpoint (out of scope for C8c).
+  async function createHintBundleFromNotes(notes: string): Promise<string> {
+    const createBody = CreatePendingPurchaseHintBundleBodySchema.parse({
+      label: `Create-packet notes — ${nyLongDateTime(Date.now())}`,
+    })
+    const created = await mutateJson(
+      '/api/catalog/pending-purchases/hint-bundles',
+      PendingPurchaseHintBundleDetailResponseSchema,
+      { body: JSON.stringify(createBody), method: 'POST' },
+    )
+    const hintBundleId = created.bundle.hintBundleId
+    const documentBody = AddPendingPurchaseHintDocumentBodySchema.parse({
+      kind: 'operator_note',
+      rawText: notes,
+    })
+    await mutateJson(
+      `/api/catalog/pending-purchases/hint-bundles/${hintBundleId}/documents`,
+      PendingPurchaseHintDocumentAddResponseSchema,
+      { body: JSON.stringify(documentBody), method: 'POST' },
+    )
+    return hintBundleId
+  }
+
   async function handleGenerate() {
     setIsGenerating(true)
     clearFeedback()
 
     try {
       const trimmedPurchaseOrderNumber = generatePurchaseOrderNumber.trim()
+      // Freeform operator context (decision 2): if notes were typed/uploaded,
+      // stash them as an operator_note document in a fresh hint bundle via the
+      // C2/C3 admin API and thread the resulting hintBundleId into the generate
+      // request so the prospective classifier (C4) can consume them.
+      const trimmedNotes = generateNotes.trim()
+      const hintBundleId = trimmedNotes.length > 0 ? await createHintBundleFromNotes(trimmedNotes) : null
       const body = QueuePendingPurchasePacketGenerationRequestSchema.parse({
         fromDate: generateFromDate,
+        hintBundleId,
         purchaseOrderNumber: trimmedPurchaseOrderNumber.length > 0 ? trimmedPurchaseOrderNumber : null,
         reason: 'Admin live pending-purchase packet generation',
         siteDealerIds: generateSiteDealerIds,
@@ -372,13 +442,24 @@ export function PendingPurchasesPage() {
         method: 'POST',
       })
 
+      // The run accepted the notes (as hintBundleId); clear the box so a
+      // follow-up generate (e.g. re-run after tweaking dates/sites) doesn't
+      // silently re-attach the same, now-stale, notes as a second bundle. Only
+      // clear on the accepted path — the catch below preserves the text so a
+      // failed attempt can be retried without re-typing.
+      setGenerateNotes('')
+
       if (response.jobId) {
         const jobStatus = await loadJobStatus(response.jobId)
         setGenerationJobStatus(jobStatus)
         if (isJobTerminal(jobStatus.job.status)) {
           await finalizeGenerationJob(jobStatus)
         } else {
-          setGenerateSuccessMessage(`Queued live pending-purchase generation as job #${response.jobId}.`)
+          setGenerateSuccessMessage(
+            `Queued live pending-purchase generation as job #${response.jobId}.${
+              hintBundleId ? ' Your notes were attached as a classifier hint bundle.' : ''
+            }`,
+          )
         }
       } else {
         setGenerateSuccessMessage('Queued the live pending-purchase generation successfully.')
@@ -573,6 +654,27 @@ export function PendingPurchasesPage() {
                 ))}
               </div>
             </div>
+            <label className="stack-field" style={{ flexBasis: '100%', minWidth: '100%' }}>
+              <span>Notes / hints for the classifier (optional)</span>
+              <textarea
+                onChange={(event) => setGenerateNotes(event.currentTarget.value)}
+                placeholder="e.g. This PO is all Stiiizy 1g carts; expect the new Blue Dream and Skywalker OG SKUs. Paste a wholesale menu or a sibling store's PO here."
+                rows={4}
+                style={{ width: '100%', marginTop: '0.35rem' }}
+                value={generateNotes}
+              />
+            </label>
+            <span
+              className="inline-row wrap-row"
+              style={{ flexBasis: '100%', minWidth: '100%', justifyContent: 'flex-start', gap: '0.5rem' }}
+            >
+              <input
+                accept=".txt,.md,.csv,.json,text/plain"
+                onChange={(event) => void handleNotesFileUpload(event)}
+                type="file"
+              />
+              <span className="subtle-copy">…or load from a .txt file</span>
+            </span>
             <button
               className="primary-button"
               disabled={isGenerating || generateSiteDealerIds.length === 0}
