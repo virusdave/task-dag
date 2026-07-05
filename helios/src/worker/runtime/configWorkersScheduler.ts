@@ -170,6 +170,8 @@ export async function tickConfigWorkersScheduler(now: Date = new Date()): Promis
         await enqueueScheduledEdibleThcClamp(schedule.taskKey, now, activeWindow.intervalMinutes)
       } else if (schedule.taskKey === 'workers.scheduling.litalerts_retailer_backfill') {
         await enqueueScheduledLitalertsRetailerBackfill(schedule.taskKey, now, activeWindow.intervalMinutes)
+      } else if (schedule.taskKey === 'workers.scheduling.litalerts_retailer_geo_refresh') {
+        await enqueueScheduledLitalertsRetailerGeoRefresh(schedule.taskKey, now, activeWindow.intervalMinutes)
       } else if (schedule.taskKey === 'workers.scheduling.sweed_orders_ingest') {
         await enqueueScheduledSweedOrdersIngest(schedule.taskKey, now, activeWindow.intervalMinutes)
       } else if (schedule.taskKey === 'workers.scheduling.sweed_package_snapshots') {
@@ -986,6 +988,58 @@ async function enqueueScheduledLitalertsRetailerBackfill(
       entityId: String(jobId),
       entityType: 'job',
       eventType: 'config.workers.litalerts_retailer_backfill.requested',
+      module: 'config',
+      payload: {
+        intervalMinutes,
+        taskKey,
+        trigger: 'scheduled',
+      },
+      requestId: null,
+      scope: null,
+      undoPayload: null,
+    })
+  })
+}
+
+// Weekly geocode refresh of litalerts_retailer_locations (issue #56).
+// System pool, no Sweed session, no partner-facing pricing writes — it
+// only pulls /v1/retailers?state=NY and upserts/geocodes the small
+// locations table. The per-bucket dedupe key plus the scheduler's own
+// elapsed-interval check keep at most one job enqueued per weekly window
+// even if two scheduler ticks land in the same minute; the concurrency
+// key serializes execution so an overrun into the next tick can't double
+// the partner + Census load.
+async function enqueueScheduledLitalertsRetailerGeoRefresh(
+  taskKey: ConfigBackgroundTaskKey,
+  now: Date,
+  intervalMinutes: number,
+): Promise<void> {
+  const bucketMs = intervalMinutes * 60 * 1000
+  const bucketStartMs = Math.floor(now.getTime() / bucketMs) * bucketMs
+  const bucketIso = new Date(bucketStartMs).toISOString()
+
+  await withTransaction(async (db) => {
+    const jobId = await enqueueJob(db, {
+      priority: JOB_PRIORITY_SCHEDULED_INGEST,
+      concurrencyKey: 'config.workers.litalerts_retailer_geo_refresh',
+      dedupeKey: `config.workers.litalerts_retailer_geo_refresh:scheduled:${bucketIso}`,
+      jobType: 'config.workers.litalerts_retailer_geo_refresh',
+      module: 'config',
+      payload: {
+        trigger: 'scheduled',
+      },
+      requestedByUserId: null,
+      runAt: now,
+      scope: null,
+    })
+
+    await recordEnqueueAndPatchCache(db, taskKey, jobId, now)
+    await appendAuditEvent(db, {
+      actorType: 'system',
+      actorUserId: null,
+      entityId: String(jobId),
+      entityType: 'job',
+      eventType: 'config.workers.litalerts_retailer_geo_refresh.requested',
       module: 'config',
       payload: {
         intervalMinutes,

@@ -16,6 +16,7 @@ export const CONFIG_BACKGROUND_TASK_KEYS = [
   'workers.scheduling.enrich_customer_address',
   'workers.scheduling.litalerts',
   'workers.scheduling.litalerts_retailer_backfill',
+  'workers.scheduling.litalerts_retailer_geo_refresh',
   'workers.scheduling.litalerts_rolling',
   'workers.scheduling.market_evidence_alarm',
   'workers.scheduling.stock',
@@ -75,6 +76,13 @@ export const CONFIG_BACKGROUND_TASKS: ReadonlyArray<ConfigBackgroundTaskDefiniti
     slug: 'litalerts-retailer-backfill',
     implemented: true,
     summary: 'Daily slow refresh of Lit Alerts /v1/retailers/{id}/products for every NY competitor within our pricing distance bands (≤50mi). Resume-aware (skips retailers already refreshed in the last 12h), uses sub-exponential backoff on 5xx, and runs deferred-retry passes so transient upstream failures eventually drain.',
+  },
+  {
+    key: 'workers.scheduling.litalerts_retailer_geo_refresh',
+    label: 'Litalerts Retailer Geo Refresh',
+    slug: 'litalerts-retailer-geo-refresh',
+    implemented: true,
+    summary: 'Weekly refresh of the geocoded litalerts_retailer_locations table: pulls /v1/retailers?state=NY, upserts each retailer (refreshing last_seen_at), and geocodes new / address-changed rows via the shared 1-RPS US Census geocoder. Durable replacement for the hand-run scripts/backfill-litalerts-retailer-geo.mts one-off, so newly-opened dispensaries stop silently going missing from the competitor-distance / pricing path (issue #56). Idempotent; writes only litalerts_retailer_locations.',
   },
   {
     key: 'workers.scheduling.litalerts_rolling',
@@ -529,6 +537,32 @@ export const GADS_LP_ROLLUP_REFRESH_DEFAULT_SCHEDULE_WINDOWS: ReadonlyArray<
     intervalMinutes: 60,
     paused: false,
     notes: 'Recompute the GAds landing-pages rollup every 60 minutes (bounded 90-day horizon).',
+  },
+]
+
+/**
+ * Default schedule for the weekly litalerts_retailer_locations geo
+ * refresh (issue #56). New dispensaries open rarely, so once a week is
+ * ample. A single Sunday 04:00-08:00 server-local (off-hours) window with
+ * a 1440-minute interval fires exactly one job per week: the 1440-minute
+ * elapsed-interval check guarantees at most one enqueue per Sunday, and
+ * the wide 4-hour window is retry surface so a brief worker outage at
+ * 04:00 does not silently skip the whole week. The work per run is one
+ * `/v1/retailers?state=NY` pull (~600 rows) plus a Census geocode only
+ * for genuinely new / address-changed rows, so the DB touch is a bounded
+ * set of single-row upserts against the small litalerts_retailer_locations
+ * table.
+ */
+export const LITALERTS_RETAILER_GEO_REFRESH_DEFAULT_SCHEDULE_WINDOWS: ReadonlyArray<
+  Omit<ConfigWorkerScheduleWindow, 'id'>
+> = [
+  {
+    weekdayMask: 1 << 0, // Sunday only (Date.getDay(): Sunday = 0)
+    windowStartMinute: 4 * 60, // 04:00 server local (off-hours)
+    windowEndMinute: 8 * 60, // 08:00 server local
+    intervalMinutes: 1440, // at most once per day → once per week given the Sunday-only mask
+    paused: false,
+    notes: 'Weekly refresh of litalerts_retailer_locations (pull /v1/retailers?state=NY, upsert, geocode new/changed rows) — Sunday off-hours, 04:00-08:00 server local (issue #56). The 4h window is retry surface; the 1440-min interval still fires it at most once per Sunday.',
   },
 ]
 

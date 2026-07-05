@@ -49,6 +49,7 @@ export const JobTypeSchema = z.enum([
   'config.workers.market_evidence_alarm_scan',
   'config.workers.edible_thc_clamp',
   'config.workers.litalerts_retailer_backfill',
+  'config.workers.litalerts_retailer_geo_refresh',
   'config.workers.enrich_customer_address',
   'config.workers.sweed_orders_ingest',
   'config.workers.sweed_package_snapshots',
@@ -521,6 +522,24 @@ export const ConfigWorkersLitalertsRetailerBackfillJobPayloadSchema = z.object({
 })
 export type ConfigWorkersLitalertsRetailerBackfillJobPayload = z.infer<
   typeof ConfigWorkersLitalertsRetailerBackfillJobPayloadSchema
+>
+
+/**
+ * Weekly refresh of the geocoded `litalerts_retailer_locations` table
+ * (issue #56). Pulls `/v1/retailers?state=<stateCode>`, upserts each row
+ * (refreshing `last_seen_at`), and geocodes new / address-changed rows
+ * via the shared 1-RPS Census geocoder. Durable replacement for the
+ * hand-run `scripts/backfill-litalerts-retailer-geo.mts` one-off; keeps
+ * newly-opened dispensaries from silently going missing from the
+ * competitor-distance / pricing path.
+ */
+export const ConfigWorkersLitalertsRetailerGeoRefreshJobPayloadSchema = z.object({
+  requestedByUserId: z.number().int().positive().nullable().optional(),
+  trigger: z.enum(['manual_run', 'scheduled']).default('scheduled'),
+  stateCode: z.string().trim().min(2).max(2).default('NY'),
+})
+export type ConfigWorkersLitalertsRetailerGeoRefreshJobPayload = z.infer<
+  typeof ConfigWorkersLitalertsRetailerGeoRefreshJobPayloadSchema
 >
 
 /**

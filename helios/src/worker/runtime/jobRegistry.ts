@@ -17,6 +17,7 @@ import {
   ConfigWorkersFaqHybridSyncJobPayloadSchema,
   ConfigWorkersLitalertsRefreshVariantJobPayloadSchema,
   ConfigWorkersLitalertsRetailerBackfillJobPayloadSchema,
+  ConfigWorkersLitalertsRetailerGeoRefreshJobPayloadSchema,
   ConfigWorkersMarketEvidenceAlarmScanJobPayloadSchema,
   InventoryLifecycleAdvanceJobPayloadSchema,
   ConfigWorkersEnrichCustomerAddressJobPayloadSchema,
@@ -70,6 +71,7 @@ import { runRefreshGadsLpRollupJob } from '../jobs/refreshGadsLpRollupJob.js'
 import { runFaqHybridSyncJob } from '../jobs/faqHybridSyncJob.js'
 import { runConfigWorkersLitalertsRefreshVariantJob } from '../jobs/configWorkersLitalertsRefreshJob.js'
 import { runConfigWorkersLitalertsRetailerBackfillJob } from '../jobs/configWorkersLitalertsRetailerBackfillJob.js'
+import { runConfigWorkersLitalertsRetailerGeoRefreshJob } from '../jobs/configWorkersLitalertsRetailerGeoRefreshJob.js'
 import { runConfigWorkersMarketEvidenceAlarmScanJob } from '../jobs/configWorkersMarketEvidenceAlarmScanJob.js'
 import { runInventoryLifecycleAdvanceJob } from '../jobs/inventoryLifecycleAdvanceJob.js'
 import { runConfigWorkersStockRefreshJob } from '../jobs/configWorkersStockRefreshJob.js'
@@ -283,6 +285,12 @@ const handlers: Record<JobType, JobHandler> = {
     await runConfigWorkersLitalertsRetailerBackfillJob(
       context,
       ConfigWorkersLitalertsRetailerBackfillJobPayloadSchema.parse(context.payload),
+    )
+  },
+  'config.workers.litalerts_retailer_geo_refresh': async (context) => {
+    await runConfigWorkersLitalertsRetailerGeoRefreshJob(
+      context,
+      ConfigWorkersLitalertsRetailerGeoRefreshJobPayloadSchema.parse(context.payload),
     )
   },
   'config.workers.sweed_orders_ingest': async (context) => {
