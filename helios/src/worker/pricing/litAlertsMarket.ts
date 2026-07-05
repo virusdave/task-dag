@@ -397,6 +397,7 @@ export function resetPricingMarketCachesForTest(): void {
 }
 
 export const __test__ = {
+  PRICING_NEARBY_RETAILER_FETCH_LIMIT,
   assessListingForProduct,
   buildCatalogComparableProfiles,
   classifyLaneTier,

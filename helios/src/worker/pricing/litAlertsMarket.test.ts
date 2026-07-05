@@ -43,9 +43,32 @@ vi.mock('../litalerts/partnerClient.js', () => ({
 // in CI. Returning an empty result set keeps brand resolution on its
 // heuristic path and yields an empty distance map, which matches these
 // fixtures' synthetic retailer ids (distanceBand=unknown).
+//
+// The retailer-distance rows are injectable (default empty) so the
+// geographic-bounding tests below (T3) can place synthetic retailers in
+// the near/mid/far/very-far bands. `vi.hoisted` is required because the
+// `vi.mock` factory is hoisted above ordinary declarations, so a plain
+// module-level `let` would be undefined at factory-eval time. The mock
+// dispatches on the SQL text: the distance-map query selects from
+// `litalerts_retailer_locations`; every other query (brand overrides,
+// cache fallback) keeps the empty default, so all pre-existing tests are
+// byte-for-byte unaffected.
+const dbFixture = vi.hoisted(() => ({
+  retailerDistanceRows: [] as Array<{
+    miles: number
+    nearest_store_key: string
+    retailer_id: string
+  }>,
+}))
+
 vi.mock('../../server/db/pool.js', () => ({
   getPool: () => ({
-    query: async (): Promise<{ rows: never[] }> => ({ rows: [] }),
+    query: async (sql: string): Promise<{ rows: unknown[] }> => {
+      if (typeof sql === 'string' && sql.includes('litalerts_retailer_locations')) {
+        return { rows: dbFixture.retailerDistanceRows }
+      }
+      return { rows: [] }
+    },
   }),
 }))
 
@@ -53,6 +76,7 @@ import type { NormalizedCatalogGroupLiveState } from '../catalog/liveState.js'
 import { assessParseReasonableness } from '../llm/parseReasonableness.js'
 import {
   hasPartnerApiToken,
+  listBrandProducts,
   listBrandsForState,
   listRetailerProducts,
   listRetailers,
@@ -62,6 +86,11 @@ import {
 } from '../litalerts/partnerClient.js'
 import { RetryableWorkerError } from '../runtime/errors.js'
 import { pageDave } from '../runtime/pageDave.js'
+import {
+  PRICING_MID_DISTANCE_WEIGHT,
+  PRICING_NEAR_DISTANCE_WEIGHT,
+  PRICING_POST_TAX_MULTIPLIER,
+} from '../../shared/domain/pricingGeneration.js'
 import {
   __test__,
   buildAveragePrice,
@@ -76,6 +105,7 @@ import {
 
 const pageDaveMock = vi.mocked(pageDave)
 const hasPartnerApiTokenMock = vi.mocked(hasPartnerApiToken)
+const listBrandProductsMock = vi.mocked(listBrandProducts)
 const listBrandsForStateMock = vi.mocked(listBrandsForState)
 const listRetailerProductsMock = vi.mocked(listRetailerProducts)
 const listRetailersMock = vi.mocked(listRetailers)
@@ -164,9 +194,11 @@ function buildBrandProduct(input: {
 
 beforeEach(() => {
   resetPricingMarketCachesForTest()
+  dbFixture.retailerDistanceRows = []
   pageDaveMock.mockReset()
   hasPartnerApiTokenMock.mockReset()
   hasPartnerApiTokenMock.mockReturnValue(true)
+  listBrandProductsMock.mockReset()
   listBrandsForStateMock.mockReset()
   listBrandsForStateMock.mockResolvedValue([AYRLOOM_BRAND])
   listRetailerProductsMock.mockReset()
@@ -701,6 +733,174 @@ describe('buildPricingMarketContext (partner API integration)', () => {
     // surfaced as display-only evidence — never as pricing-eligible comps.
     expect(evidence?.pricingEligibleListingCount).toBe(0)
     expect(context.availability).toBe('display_only')
+  })
+})
+
+describe('geographic bounding of LitAlerts market pulls (issue #55 T3)', () => {
+  // Geographic limiting in helios is done CLIENT-SIDE by nearest-retailer
+  // selection, NOT by a request-level lat/lng/radius param (the partner
+  // client exposes none). These tests lock in the two invariants the
+  // operator's ask reduces to:
+  //   1. The interactive pricing/market-evidence path NEVER issues the
+  //      unbounded statewide `/v1/brands/:id/products` call
+  //      (`listBrandProducts`) that "routinely times out"; it fans out
+  //      over the geographically nearest retailers instead. (The statewide
+  //      endpoint is used only by the separate batch cache ingest in
+  //      `scripts/litalerts-structured-ingest.mts`, which is deliberately
+  //      statewide and timeout-hardened; it is not on this path.)
+  //   2. The proposed-price aggregate is bounded to the operator's
+  //      (a) close-competitor = near band and (b) near-mid market =
+  //      near+mid bands. Far / very-far / ungeocoded listings can appear on
+  //      the pricing ladder as display-only context but never move the price.
+
+  /**
+   * Build a `litalerts_retailer_locations`-shaped distance row.
+   * `loadRetailerNearestStoreMap` reads `retailer_id` as a `::text` string
+   * and silently drops any row whose `miles` is not a finite JS number, so
+   * both types must match the production query shape exactly.
+   */
+  function distanceRow(retailerId: number, miles: number): {
+    miles: number
+    nearest_store_key: string
+    retailer_id: string
+  } {
+    return { miles, nearest_store_key: 'store-a', retailer_id: String(retailerId) }
+  }
+
+  const roundCurrency = (value: number): number => Math.round((value + Number.EPSILON) * 100) / 100
+
+  it('never issues the unbounded statewide brand call; it fans out per nearest retailer', async () => {
+    mockNearbyRetailerProducts([
+      buildBrandProduct({
+        id: 9001,
+        name: 'Ayrloom Black Cherry 1:1 5mg',
+        retailerId: 1001,
+        configs: [{ amount: 5, units: 'mg', normalPrice: 30 }],
+      }),
+    ])
+
+    await buildPricingMarketContext(SAMPLE_LIVE_STATE)
+
+    expect(listBrandProductsMock).not.toHaveBeenCalled()
+    expect(listRetailerProductsMock).toHaveBeenCalled()
+  })
+
+  it('confines the proposed-price aggregate to the near+mid bands and leaves far/very-far display-only', async () => {
+    // One retailer per distance band, each carrying the same matching
+    // Ayrloom listing at a distinct price + distinct dispensary name (so
+    // `dedupeListingCandidates` cannot collapse any of them).
+    listRetailersMock.mockResolvedValue([
+      { id: 4001, name: 'Near Dispensary', address: '1 Near St', medical: false, recreational: true },
+      { id: 4002, name: 'Mid Cannabis', address: '2 Mid Ave', medical: false, recreational: true },
+      { id: 4003, name: 'Far Buds', address: '3 Far Rd', medical: false, recreational: true },
+      { id: 4004, name: 'VeryFar Shop', address: '4 VeryFar Blvd', medical: false, recreational: true },
+    ])
+    dbFixture.retailerDistanceRows = [
+      distanceRow(4001, 0.5), // near     (<= 1mi)
+      distanceRow(4002, 2), //   mid      (<= 3mi)
+      distanceRow(4003, 7), //   far      (<= 10mi)
+      distanceRow(4004, 14), //  very_far (> 10mi)
+    ]
+    const nearPreTax = 30
+    const midPreTax = 36
+    const farPreTax = 50
+    mockNearbyRetailerProducts([
+      buildBrandProduct({ id: 4101, name: 'Ayrloom Black Cherry 1:1 5mg', retailerId: 4001, configs: [{ amount: 5, units: 'mg', normalPrice: nearPreTax }] }),
+      buildBrandProduct({ id: 4102, name: 'Ayrloom Black Cherry 1:1 5mg', retailerId: 4002, configs: [{ amount: 5, units: 'mg', normalPrice: midPreTax }] }),
+      buildBrandProduct({ id: 4103, name: 'Ayrloom Black Cherry 1:1 5mg', retailerId: 4003, configs: [{ amount: 5, units: 'mg', normalPrice: farPreTax }] }),
+      buildBrandProduct({ id: 4104, name: 'Ayrloom Black Cherry 1:1 5mg', retailerId: 4004, configs: [{ amount: 5, units: 'mg', normalPrice: 60 }] }),
+    ])
+
+    const context = await buildPricingMarketContext(SAMPLE_LIVE_STATE)
+
+    expect(listBrandProductsMock).not.toHaveBeenCalled()
+    expect(context.availability).toBe('matched')
+    const evidence = context.productEvidenceById[2001]
+    expect(evidence).toBeDefined()
+
+    const byBand = new Map(evidence!.matchedListings.map((listing) => [listing.distanceBand, listing]))
+    // near + mid drive the price; far + very_far are excluded from it.
+    expect(byBand.get('near')?.eligibleForPricing).toBe(true)
+    expect(byBand.get('mid')?.eligibleForPricing).toBe(true)
+    expect(byBand.get('far')?.eligibleForPricing).toBe(false)
+    expect(byBand.get('very_far')?.eligibleForPricing).toBe(false)
+    // The Ayrloom gummy resolves as a brand-family ("fallback") match;
+    // assert it explicitly so a future lane-logic change fails loudly here
+    // rather than silently flipping the eligibility assertions above.
+    expect(byBand.get('near')?.matchTier).toBe('fallback')
+    // Exactly the 2 near/mid comps are pricing-eligible.
+    expect(evidence!.pricingEligibleListingCount).toBe(2)
+
+    // The proposed-price aggregate is exactly the near/mid weighted average
+    // (both comps are 'fallback', so the tier weight cancels), computed from
+    // the shared distance weights — untouched by the far/very-far comps.
+    const nearPost = roundCurrency(nearPreTax * PRICING_POST_TAX_MULTIPLIER)
+    const midPost = roundCurrency(midPreTax * PRICING_POST_TAX_MULTIPLIER)
+    const expectedPost = roundCurrency(
+      (PRICING_NEAR_DISTANCE_WEIGHT * nearPost + PRICING_MID_DISTANCE_WEIGHT * midPost) /
+        (PRICING_NEAR_DISTANCE_WEIGHT + PRICING_MID_DISTANCE_WEIGHT),
+    )
+    expect(evidence!.averagePostTaxPrice).toBe(expectedPost)
+    // Median of the two eligible comps is their mean.
+    expect(evidence!.medianPostTaxPrice).toBe(roundCurrency((nearPost + midPost) / 2))
+
+    // The far-band comp is retained as display-only context, in its own
+    // aggregate, never folded into the proposed price above.
+    expect(evidence!.farListingCount).toBe(1)
+    expect(evidence!.farAveragePostTaxPrice).toBe(roundCurrency(farPreTax * PRICING_POST_TAX_MULTIPLIER))
+  })
+
+  it('caps the fan-out at the N nearest retailers, skipping farther, ungeocoded, and own-store retailers', async () => {
+    const limit = __test__.PRICING_NEARBY_RETAILER_FETCH_LIMIT
+    const extra = 5
+    // `limit + extra` geocoded competitors at strictly increasing distance,
+    // plus one of our own stores (nearest of all, must be excluded) and one
+    // ungeocoded competitor (no distance row -> sorted last, beyond the cap).
+    const geocoded = Array.from({ length: limit + extra }, (_, index) => ({
+      id: 5000 + index,
+      name: `Competitor ${index}`,
+      address: `${index} Comp St`,
+      medical: false,
+      recreational: true,
+    }))
+    const ownStore = { id: 5900, name: 'Freshly Baked - Bronx', address: '1 Own St', medical: false, recreational: true }
+    const ungeocoded = { id: 5901, name: 'Ungeocoded Cannabis', address: '1 Nowhere Rd', medical: false, recreational: true }
+    listRetailersMock.mockResolvedValue([ungeocoded, ownStore, ...geocoded])
+    dbFixture.retailerDistanceRows = [
+      distanceRow(ownStore.id, 0.01), // nearest of all, yet excluded (our own store)
+      ...geocoded.map((retailer, index) => distanceRow(retailer.id, 0.1 + index * 0.01)),
+    ]
+    // Every geocoded competitor carries a matching listing so the fan-out
+    // yields live evidence; an empty fan-out would fall through to the cache
+    // query (also mocked empty) and throw a RetryableWorkerError.
+    mockNearbyRetailerProducts(
+      geocoded.map((retailer) =>
+        buildBrandProduct({
+          id: 60000 + retailer.id,
+          name: 'Ayrloom Black Cherry 1:1 5mg',
+          retailerId: retailer.id,
+          configs: [{ amount: 5, units: 'mg', normalPrice: 30 }],
+        }),
+      ),
+    )
+
+    await buildPricingMarketContext(SAMPLE_LIVE_STATE)
+
+    expect(listBrandProductsMock).not.toHaveBeenCalled()
+    const queriedIds = new Set(listRetailerProductsMock.mock.calls.map((call) => call[0]))
+    // Exactly the `limit` nearest geocoded competitors get queried (assert the
+    // SET, not call order, which is a runner-loop implementation detail).
+    expect(queriedIds.size).toBe(limit)
+    for (const retailer of geocoded.slice(0, limit)) {
+      expect(queriedIds.has(retailer.id)).toBe(true)
+    }
+    for (const retailer of geocoded.slice(limit)) {
+      expect(queriedIds.has(retailer.id)).toBe(false)
+    }
+    // The nearest retailer of all (our own store) and the ungeocoded
+    // competitor are never queried, regardless of the cap.
+    expect(queriedIds.has(ownStore.id)).toBe(false)
+    expect(queriedIds.has(ungeocoded.id)).toBe(false)
   })
 })
 
