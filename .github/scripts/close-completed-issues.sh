@@ -26,7 +26,15 @@
 #      of the issue author so they get a GitHub notification (this is
 #      the operator paging path operators rely on to know an epic
 #      finally wrapped up — see virusdave/top-level#3),
-#   2. cleans up the remote `refs/heads/tasks/pending/<N>` ref.
+#   2. cleans up the remote `refs/heads/tasks/pending/<N>` ref, and
+#   3. cleans up any lingering `tasks/blocked/<sha>` overlay (+ frontier /
+#      blocked-meta) refs for the closed issue — delegated to
+#      cleanup-closed-issue-task-refs.sh. Without this, an epic ROOT that
+#      was auto-parked by github-worker (agent abandoned the claim) keeps a
+#      blocked overlay forever — the epic root is closed via this merge, not
+#      via `task-dag complete`, so nothing else clears it — and the closed
+#      issue lingers in the operator-blocked #29 dashboard. See
+#      FreshlyBakedNYC/automation#6.
 #
 # Idempotent but NOT silent: re-closing an already-closed issue and
 # deleting an already-absent ref are both treated as success, but a REAL
@@ -44,6 +52,11 @@ set -euo pipefail
 : "${BEFORE_SHA:?BEFORE_SHA is required}"
 : "${AFTER_SHA:?AFTER_SHA is required}"
 : "${GH_TOKEN:?GH_TOKEN is required}"
+
+# Companion script that clears blocked/frontier overlay refs for a closed
+# issue. The workflow downloads it next to this one and points
+# CLEANUP_REFS_SCRIPT at it; fall back to a sibling path for local runs.
+CLEANUP_REFS_SCRIPT="${CLEANUP_REFS_SCRIPT:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/cleanup-closed-issue-task-refs.sh}"
 
 # Track whether any close/cleanup step failed so we can exit non-zero at the
 # end. Historically every close + ref-delete was `... || true`, which hid
@@ -205,6 +218,23 @@ for commit in "${new_commits[@]}"; do
         # orchestration lock for a closed issue. (breakdown already fails
         # closed once pending is gone, so this is debris cleanup, not safety.)
         delete_remote_ref_if_present "refs/heads/tasks/root-active/${issue_num}" || true
+
+        # Clear any lingering blocked/frontier overlay refs for the closed
+        # issue (most often the epic ROOT auto-parked by github-worker), so
+        # it stops showing in the operator-blocked #29 dashboard. We pass the
+        # matched epic-root parent as a belt-and-braces hint (cleaned by name
+        # even if the enumeration fetch/CLI fails). A real failure here is
+        # loud: propagate it into SAW_FAILURE so the workflow goes red.
+        if [ -x "$CLEANUP_REFS_SCRIPT" ]; then
+            if ! GITHUB_REPOSITORY="${GITHUB_REPOSITORY:-}" \
+                    bash "$CLEANUP_REFS_SCRIPT" "$issue_num" "$parent"; then
+                echo "ERROR: blocked-ref cleanup failed for issue #$issue_num" >&2
+                SAW_FAILURE=1
+            fi
+        else
+            echo "ERROR: cleanup-closed-issue-task-refs.sh not found/executable at '$CLEANUP_REFS_SCRIPT'; blocked overlay refs for issue #$issue_num were NOT cleaned (it would linger in the operator-blocked #29 dashboard)" >&2
+            SAW_FAILURE=1
+        fi
     done
 done
 

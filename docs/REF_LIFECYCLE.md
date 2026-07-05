@@ -13,8 +13,8 @@ orchestration lock** that closes the root/leaf double-dispatch
 | `tasks/root-active/<N>` | `task-dag claim-root <N>` | The cross-host **orchestration lock** on the epic root: "this host is decomposing issue `#N`." Atomic CAS, keyed by issue number, recording Claimer / Claimer-Host / Claimer-PID / Claimed-At, exactly like a leaf claim. | `task-dag breakdown` (which **consumes** it when it publishes the leaves), `release-root`, or `close-completed-issues.sh`. |
 | `tasks/frontier/<short>` | `task-dag breakdown` (run by an agent that holds the root lock) | A claimable **implementation leaf**. One per child task, published up front. | `task-dag claim` (renamed to `active`) or `complete`/`drop`. |
 | `tasks/active/<short>` | `task-dag claim` | The cross-host distributed lock on a leaf: this leaf is in flight. The claim commit records Claimer / Claimer-Host / Claimer-PID / Claimed-At. | `complete` (lands the task) or `release` (back to `frontier`). |
-| `tasks/blocked/<sha>` | `task-dag block` | Parked: stays in the DAG, listed by `blocked`, never dispatched. The overlay ref points straight at the task commit (source of truth for "is this task blocked"). | `unblock` / `complete` / `drop`. |
-| `tasks/blocked-meta/<sha>` | `task-dag block` | Optional **side metadata** for a parked task: a deterministic side-commit (tree == task tree, first parent == task commit) whose body records `Blocker-Kind` (`operator`/`downstream`), durable `Reason`, optional `Request-URL`, derived `Repo`/`Issue`/`Source-URL`, and `Blocked-By`/`Blocked-Host`/`Blocked-At`. Consumed by the operator-blocked #29 dashboard so it need not reparse task bodies. A blocked task with **no** meta ref (a legacy block) is still fully valid. | `unblock` / `complete` / `drop` (cleared in lockstep with the overlay ref). |
+| `tasks/blocked/<sha>` | `task-dag block` | Parked: stays in the DAG, listed by `blocked`, never dispatched. The overlay ref points straight at the task commit (source of truth for "is this task blocked"). | `unblock` / `complete` / `drop`; **also** `close-completed-issues.sh` (via `cleanup-closed-issue-task-refs.sh`) for any of the closed issue's tasks — most often the epic ROOT, which is closed by the `Closes-Epic` merge and so never `complete`d. |
+| `tasks/blocked-meta/<sha>` | `task-dag block` | Optional **side metadata** for a parked task: a deterministic side-commit (tree == task tree, first parent == task commit) whose body records `Blocker-Kind` (`operator`/`downstream`), durable `Reason`, optional `Request-URL`, derived `Repo`/`Issue`/`Source-URL`, and `Blocked-By`/`Blocked-Host`/`Blocked-At`. Consumed by the operator-blocked #29 dashboard so it need not reparse task bodies. A blocked task with **no** meta ref (a legacy block) is still fully valid. | `unblock` / `complete` / `drop` (cleared in lockstep with the overlay ref); **also** `close-completed-issues.sh` on epic close. |
 
 ## Non-task namespace: CI repair chains (`tasks/ci-chains/...`)
 
@@ -137,8 +137,38 @@ tasks/active/<short>         (leaf in flight)
       │  task-dag complete <short>
       ▼
 leaf landed → epic closes (close-completed-issues.sh deletes
-              tasks/pending/<N> and any stale tasks/root-active/<N>)
+              tasks/pending/<N>, any stale tasks/root-active/<N>, and any
+              lingering tasks/blocked|blocked-meta|frontier for the issue
+              — via cleanup-closed-issue-task-refs.sh)
 ```
+
+## Blocked-overlay cleanup on epic close
+
+`task-dag complete <sha>` clears a task's own `blocked`/`blocked-meta`
+overlay in lockstep (see `cleanup_completed_task_refs`), so completed
+**leaves** self-heal. But an epic **root** is closed by the additive
+`Closes-Epic: #<N>` merge — `close-completed-issues.sh` — and is *never*
+`complete`d, so if the root (or a stray leaf) was parked (e.g.
+github-worker's `autopark_unprogressed_task` when an agent abandoned a
+claim), its blocked overlay had nothing to clear it. The closed issue then
+lingered forever in the operator-blocked #29 dashboard, which rebuilds
+purely from live `blocked` refs (see FreshlyBakedNYC/automation#6).
+
+`close-completed-issues.sh` now delegates to
+`.github/scripts/cleanup-closed-issue-task-refs.sh`, which — for the closed
+issue only, matched on **(repo, issue)** so a cross-repo block referencing
+the same number survives — deletes each matching task's `frontier/<short>`
+**first** (leased, so a blocked leaf can't briefly become pickable and get
+re-dispatched), then its `blocked/<sha>` + `blocked-meta/<sha>`. It leaves
+`active/*` alone (the owning worker CAS-cleans that on `complete`). Fixture
+coverage: `tests/task-dag/close-issue-ref-cleanup.sh`.
+
+**Follow-up (not yet done):** the *manual*-close path
+(`page-on-manual-issue-close.sh`) still performs **no** ref cleanup at all
+— an operator manually closing a task-tracked issue orphans its
+`pending/<N>`, `root-active/<N>`, and any `blocked` overlay. Tracked
+separately; the extracted `cleanup-closed-issue-task-refs.sh` is
+deliberately reusable by that path.
 
 ## History (closed gap)
 

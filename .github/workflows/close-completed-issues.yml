@@ -45,11 +45,17 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.token }}
 
-      - name: Download close-completed-issues script
+      - name: Download close-completed-issues scripts
+        env:
+          REF: ${{ inputs.ref }}
         run: |
-          curl -fsSL "https://raw.githubusercontent.com/virusdave/task-dag/${{ inputs.ref }}/.github/scripts/close-completed-issues.sh" \
+          curl -fsSL "https://raw.githubusercontent.com/virusdave/task-dag/${REF}/.github/scripts/close-completed-issues.sh" \
             -o /tmp/close-completed-issues.sh
-          chmod +x /tmp/close-completed-issues.sh
+          # Companion cleaner for blocked/frontier overlay refs of a closed
+          # issue (invoked by close-completed-issues.sh via CLEANUP_REFS_SCRIPT).
+          curl -fsSL "https://raw.githubusercontent.com/virusdave/task-dag/${REF}/.github/scripts/cleanup-closed-issue-task-refs.sh" \
+            -o /tmp/cleanup-closed-issue-task-refs.sh
+          chmod +x /tmp/close-completed-issues.sh /tmp/cleanup-closed-issue-task-refs.sh
 
       - name: Close issues for completed task epics
         env:
@@ -57,4 +63,8 @@ jobs:
           BEFORE_SHA: ${{ github.event.before }}
           AFTER_SHA: ${{ github.sha }}
           GITHUB_REPOSITORY: ${{ github.repository }}
+          CLEANUP_REFS_SCRIPT: /tmp/cleanup-closed-issue-task-refs.sh
+          # Pin the blocked-ref enumeration's canonical CLI clone to the same
+          # task-dag ref the scripts were fetched from (default master).
+          TASK_DAG_REF: ${{ inputs.ref }}
         run: bash /tmp/close-completed-issues.sh
