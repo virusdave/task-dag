@@ -514,7 +514,10 @@ export async function loadBrandFamilyMarketMatch(
   const retailerMiles = await loadRetailerDistanceMiles(db, retailerIds)
 
   const threshold = EFFECTIVE_AUTO_PROMOTE_THRESHOLD
-  let aboveThresholdCount = 0
+  // Above/below counts are over the WHOLE scored family (not the 200-row display
+  // slice) so the header pills stay honest even when the table is capped — a
+  // matcher-quality audit must never silently skew its own counts.
+  const aboveThresholdCount = scored.filter((c) => c.finalScore >= threshold).length
   let capturedMin: string | null = null
   let capturedMax: string | null = null
 
@@ -539,7 +542,6 @@ export async function loadBrandFamilyMarketMatch(
     const retailerId = raw?.retailerId != null ? Number(raw.retailerId) : NaN
     const miles = Number.isFinite(retailerId) ? retailerMiles.get(retailerId) ?? null : null
     const aboveThreshold = c.finalScore >= threshold
-    if (aboveThreshold) aboveThresholdCount += 1
     const capturedAt = capturedAtByFuzzyId.get(c.fuzzy.id) ?? null
     if (capturedAt != null) {
       if (capturedMin === null || capturedAt < capturedMin) capturedMin = capturedAt
@@ -581,7 +583,7 @@ export async function loadBrandFamilyMarketMatch(
     fetchTruncated,
     scoredCandidateCount: scored.length,
     aboveThresholdCount,
-    belowThresholdCount: candidates.length - aboveThresholdCount,
+    belowThresholdCount: scored.length - aboveThresholdCount,
     snapshotCapturedAtMin: capturedMin,
     snapshotCapturedAtMax: capturedMax,
     candidates,

@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { Fragment, useEffect, useMemo, useState, type CSSProperties } from 'react'
 import { useLoaderData } from 'react-router-dom'
 
 import {
@@ -152,22 +152,56 @@ function mappingLabel(summary: BrandFamilyMappingSummary): string {
   }
 }
 
-/** Compact per-candidate factor breakdown, so the operator sees WHY it matched. */
-function FactorCells({ f }: { f: BrandFamilyMatchCandidate['factors'] }) {
-  const cells: [string, number][] = [
-    ['brand', f.brand],
-    ['cat', f.category],
-    ['sub', f.subcategory],
-    ['size', f.size],
-    ['pack', f.pack],
-    ['strain', f.strain],
-    ['name', f.nameOverlap],
+/** Sticky first column (Score) so it stays anchored during horizontal scroll. */
+const STICKY_SCORE_COL: CSSProperties = {
+  position: 'sticky',
+  left: 0,
+  background: 'var(--panel)',
+  zIndex: 1,
+  textAlign: 'right',
+  fontVariantNumeric: 'tabular-nums',
+}
+
+/** Human distance-band label (strip the enum underscore). */
+function distanceBandLabel(band: BrandFamilyMatchCandidate['distanceBand']): string {
+  return band === 'very_far' ? 'very far' : band
+}
+
+/**
+ * Compact per-candidate factor breakdown, so the operator sees WHY it matched.
+ * The subcategory + pack factors are constant no-data neutrals whenever the
+ * partner side is NULL for the family (`subcategoryNotMatchable` /
+ * `packNotMatchable`); we KEEP the values (they genuinely multiply into the
+ * score) but mute them so the eye skips identical-on-every-row noise.
+ */
+function FactorCells({
+  f,
+  subMuted,
+  packMuted,
+}: {
+  f: BrandFamilyMatchCandidate['factors']
+  subMuted: boolean
+  packMuted: boolean
+}) {
+  const cells: { label: string; value: number; muted: boolean }[] = [
+    { label: 'brand', value: f.brand, muted: false },
+    { label: 'cat', value: f.category, muted: false },
+    { label: 'sub', value: f.subcategory, muted: subMuted },
+    { label: 'size', value: f.size, muted: false },
+    { label: 'pack', value: f.pack, muted: packMuted },
+    { label: 'strain', value: f.strain, muted: false },
+    { label: 'name', value: f.nameOverlap, muted: false },
   ]
   return (
     <>
-      {cells.map(([label, value]) => (
-        <td key={label} title={`${label} factor`} style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>
-          {fmtScore(value)}
+      {cells.map((cell) => (
+        <td
+          key={cell.label}
+          title={`${cell.label} factor`}
+          className={cell.muted ? 'subtle-copy' : undefined}
+          style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}
+        >
+          {fmtScore(cell.value)}
         </td>
       ))}
     </>
@@ -182,44 +216,73 @@ function priceLabel(c: BrandFamilyMatchCandidate): string {
 }
 
 /**
- * Lazy per-family LitAlerts market-match diagnostic (issue #58 T2). Collapsed
- * by default; on first expand it fetches the REAL matcher's candidate listings
- * + per-candidate score/factor breakdown for this brand-categorical-family and
- * surfaces the data caveats (stale snapshot, dup rows, NULL pack/subcategory,
- * brand mapping state) rather than hiding them. Fetch happens once and is
- * cached in component state for the life of the row.
+ * One per-brand sub-family row: brand header → (on expand) the LitAlerts
+ * market-match panel + the variant table. The market-match panel is mounted
+ * ONLY while this row is open, so nothing fetches until the operator expands
+ * the brand (React renders <details> children even when collapsed, so the
+ * conditional mount — not the panel's own laziness — is what keeps the fleet of
+ * sub-families from all fetching eagerly).
+ */
+function SubFamilyRow({ familyKey, sub }: { familyKey: string; sub: BrandSubFamily }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <details
+      className="mini-card"
+      style={{ marginBottom: '0.375rem' }}
+      onToggle={(e) => setOpen((e.currentTarget as HTMLDetailsElement).open)}
+    >
+      <summary style={{ cursor: 'pointer' }}>
+        <span style={{ fontWeight: 600 }}>{sub.brandName ?? '(no brand)'}</span>{' '}
+        <Pill tone="muted">
+          {sub.memberCount} variant{sub.memberCount === 1 ? '' : 's'}
+        </Pill>
+      </summary>
+      {open ? <MarketMatchPanel familyKey={familyKey} brandKey={sub.brandKey} /> : null}
+      <VariantTable members={sub.members} />
+    </details>
+  )
+}
+
+/**
+ * Lazy per-family LitAlerts market-match diagnostic (issue #58 T2). Mounted only
+ * once its parent brand sub-family is expanded (so nothing fetches eagerly),
+ * then it fetches on mount and renders OPEN — the operator sees the candidate
+ * scores in two expands (family → sub-family) instead of three. Still
+ * collapsible. Surfaces the data caveats (stale snapshot, dup rows, NULL
+ * pack/subcategory, brand mapping state, display cap) rather than hiding them.
  */
 function MarketMatchPanel({ familyKey, brandKey }: { familyKey: string; brandKey: string | null }) {
   const [status, setStatus] = useState<'idle' | 'loading' | 'loaded' | 'error'>('idle')
   const [data, setData] = useState<BrandFamilyMarketMatchResponse | null>(null)
   const [error, setError] = useState<string | null>(null)
+  // Bump to re-trigger the fetch effect on a manual retry after an error.
+  const [attempt, setAttempt] = useState(0)
 
-  const fetchOnce = () => {
-    if (status !== 'idle') return
+  useEffect(() => {
+    let cancelled = false
     setStatus('loading')
+    setError(null)
     const qs = new URLSearchParams({ familyKey, brandKey: brandKey ?? '' }).toString()
     loadJson(`/api/catalog/family-explorer/market-match?${qs}`, BrandFamilyMarketMatchResponseSchema)
       .then((res) => {
+        if (cancelled) return
         setData(res)
         setStatus('loaded')
       })
       .catch((e: unknown) => {
+        if (cancelled) return
         setError(e instanceof Error ? e.message : String(e))
         setStatus('error')
       })
-  }
+    return () => {
+      cancelled = true
+    }
+  }, [familyKey, brandKey, attempt])
 
   return (
-    <details
-      className="mini-card"
-      style={{ marginTop: '0.375rem' }}
-      onToggle={(e) => {
-        if ((e.currentTarget as HTMLDetailsElement).open) fetchOnce()
-      }}
-    >
+    <details className="mini-card" style={{ marginTop: '0.375rem' }} open>
       <summary style={{ cursor: 'pointer' }}>
         <span style={{ fontWeight: 600 }}>LitAlerts market match</span>{' '}
-        {status === 'idle' ? <Pill tone="muted">expand to load</Pill> : null}
         {status === 'loading' ? <Pill tone="muted">loading…</Pill> : null}
         {status === 'error' ? <Pill tone="danger">error</Pill> : null}
         {status === 'loaded' && data ? (
@@ -228,16 +291,17 @@ function MarketMatchPanel({ familyKey, brandKey }: { familyKey: string; brandKey
               {data.aboveThresholdCount} ≥ {fmtScore(data.threshold)}
             </Pill>{' '}
             <Pill tone="muted">{data.belowThresholdCount} below</Pill>{' '}
-            <Pill tone={mappingTone(data.mappingSummary)} title={mappingLabel(data.mappingSummary)}>
-              {mappingLabel(data.mappingSummary)}
-            </Pill>
+            <Pill tone={mappingTone(data.mappingSummary)}>{mappingLabel(data.mappingSummary)}</Pill>
           </>
         ) : null}
       </summary>
 
       {status === 'error' ? (
-        <p className="subtle-copy" style={{ marginTop: '0.5rem', color: 'var(--danger, #b00)' }}>
-          Failed to load market match: {error}
+        <p className="subtle-copy" style={{ marginTop: '0.5rem' }}>
+          <span style={{ color: 'var(--danger, #b00)' }}>Failed to load market match: {error}</span>{' '}
+          <button type="button" className="ghost-button" onClick={() => setAttempt((n) => n + 1)}>
+            Retry
+          </button>
         </p>
       ) : null}
 
@@ -250,11 +314,15 @@ function MarketMatchBody({ data }: { data: BrandFamilyMarketMatchResponse }) {
   const capturedRange =
     data.snapshotCapturedAtMin != null
       ? data.snapshotCapturedAtMin === data.snapshotCapturedAtMax
-        ? `as of ${nyShortDateTime(new Date(data.snapshotCapturedAtMin).getTime())}`
-        : `${nyShortDateTime(new Date(data.snapshotCapturedAtMin).getTime())} – ${nyShortDateTime(
+        ? `captured ${nyShortDateTime(new Date(data.snapshotCapturedAtMin).getTime())}`
+        : `captured ${nyShortDateTime(new Date(data.snapshotCapturedAtMin).getTime())} – ${nyShortDateTime(
             new Date(data.snapshotCapturedAtMax!).getTime(),
           )}`
       : null
+  const displayCapped = data.scoredCandidateCount > data.candidates.length
+  // First below-threshold candidate: candidates are score-desc, so this is the
+  // single point where we drop a divider row for fast eye-scanning.
+  const firstBelowId = data.candidates.find((c) => !c.aboveThreshold)?.fuzzySkuId ?? null
 
   return (
     <div style={{ marginTop: '0.5rem' }}>
@@ -263,6 +331,14 @@ function MarketMatchBody({ data }: { data: BrandFamilyMarketMatchResponse }) {
           {data.rawRowCount.toLocaleString()} raw → {data.dedupedListingCount.toLocaleString()} deduped
         </Pill>
         <Pill tone="muted">{data.scoredCandidateCount.toLocaleString()} scored</Pill>
+        {displayCapped ? (
+          <Pill
+            tone="warning"
+            title={`The table shows the top-scoring ${data.candidates.length.toLocaleString()} of ${data.scoredCandidateCount.toLocaleString()} scored candidates; the above/below counts are over the full scored set.`}
+          >
+            top {data.candidates.length.toLocaleString()} of {data.scoredCandidateCount.toLocaleString()} shown
+          </Pill>
+        ) : null}
         {data.fetchTruncated ? (
           <Pill
             tone="warning"
@@ -277,7 +353,7 @@ function MarketMatchBody({ data }: { data: BrandFamilyMarketMatchResponse }) {
           </Pill>
         ) : null}
         {capturedRange ? (
-          <Pill tone="warning" title="LitAlerts is a one-shot ~6-week-old snapshot, not a live feed">
+          <Pill tone="warning" title="LitAlerts is a one-shot snapshot, not a live feed">
             {capturedRange}
           </Pill>
         ) : null}
@@ -300,12 +376,12 @@ function MarketMatchBody({ data }: { data: BrandFamilyMarketMatchResponse }) {
               key={m.rawBrandName}
               tone={m.state === 'mapped' ? 'success' : m.state === 'unmapped' ? 'danger' : 'warning'}
               title={
-                m.litalertsBrandName != null
-                  ? `${m.rawBrandName} → ${m.litalertsBrandName} (#${m.litalertsBrandId ?? '?'})`
-                  : `${m.rawBrandName}: ${m.state}`
+                m.litalertsBrandId != null ? `LitAlerts brand #${m.litalertsBrandId}` : `${m.rawBrandName}: ${m.state}`
               }
             >
-              {m.rawBrandName}: {m.state}
+              {m.state === 'mapped' && m.litalertsBrandName != null
+                ? `${m.rawBrandName} → ${m.litalertsBrandName}`
+                : `${m.rawBrandName}: ${m.state}`}
             </Pill>
           ))}
         </div>
@@ -321,69 +397,90 @@ function MarketMatchBody({ data }: { data: BrandFamilyMarketMatchResponse }) {
               : '.'}
         </p>
       ) : (
-        <div style={{ overflowX: 'auto' }}>
-          <table className="data-table">
-            <thead>
-              <tr>
-                <th>Score</th>
-                <th>Listing</th>
-                <th>Brand (raw / norm)</th>
-                <th>Cat norm</th>
-                <th>Sub norm</th>
-                <th>Parsed size</th>
-                <th>Size group</th>
-                <th>Retailer</th>
-                <th>Dist</th>
-                <th>Price ±tax</th>
-                <th>Stock</th>
-                <th title="brand factor">B</th>
-                <th title="category factor">C</th>
-                <th title="subcategory factor">Sub</th>
-                <th title="size factor">Sz</th>
-                <th title="pack factor">Pk</th>
-                <th title="strain factor">St</th>
-                <th title="name-token overlap factor">Nm</th>
-              </tr>
-            </thead>
-            <tbody>
-              {data.candidates.map((c) => (
-                <tr key={c.fuzzySkuId}>
-                  <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>
-                    {c.aboveThreshold ? (
-                      <Pill tone="success">{fmtScore(c.score)}</Pill>
-                    ) : (
-                      <Pill tone="muted">{fmtScore(c.score)}</Pill>
-                    )}
-                  </td>
-                  <td>
-                    {c.url != null ? (
-                      <a href={c.url} target="_blank" rel="noreferrer">
-                        {displayOrNull(c.listingName)}
-                      </a>
-                    ) : (
-                      displayOrNull(c.listingName)
-                    )}
-                  </td>
-                  <td>
-                    {displayOrNull(c.brandRaw)}
-                    {c.brandNorm != null ? <span className="subtle-copy"> / {c.brandNorm}</span> : null}
-                  </td>
-                  <td>{displayOrNull(c.categoryNorm)}</td>
-                  <td>{displayOrNull(c.subcategoryNorm)}</td>
-                  <td>{displayOrNull(c.parsedSizeLabel)}</td>
-                  <td>{c.matchedSizeGroupLabel}</td>
-                  <td>{displayOrNull(c.retailer)}</td>
-                  <td title={c.distanceMiles != null ? `${c.distanceMiles.toFixed(1)} mi` : 'unknown'}>
-                    {c.distanceBand}
-                  </td>
-                  <td style={{ whiteSpace: 'nowrap' }}>{priceLabel(c)}</td>
-                  <td style={{ textAlign: 'right' }}>{c.currentStock ?? '—'}</td>
-                  <FactorCells f={c.factors} />
+        <>
+          <p className="subtle-copy" style={{ margin: '0 0 0.375rem' }}>
+            Factors (each multiplies into the score): <strong>B</strong> brand · <strong>C</strong> category ·{' '}
+            <strong>Sub</strong> subcategory · <strong>Sz</strong> size · <strong>Pk</strong> pack ·{' '}
+            <strong>St</strong> strain · <strong>Nm</strong> name overlap. Muted Sub/Pk = neutral no-data constant
+            (partner side is NULL).
+          </p>
+          <div style={{ overflowX: 'auto' }}>
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th style={STICKY_SCORE_COL}>Score</th>
+                  <th>Listing</th>
+                  <th>Brand (raw / norm)</th>
+                  <th>Cat norm</th>
+                  <th>Sub norm</th>
+                  <th>Parsed size</th>
+                  <th>Size group</th>
+                  <th>Retailer</th>
+                  <th>Dist</th>
+                  <th>Price ±tax</th>
+                  <th>Stock</th>
+                  <th title="brand factor">B</th>
+                  <th title="category factor">C</th>
+                  <th title="subcategory factor">Sub</th>
+                  <th title="size factor">Sz</th>
+                  <th title="pack factor">Pk</th>
+                  <th title="strain factor">St</th>
+                  <th title="name-token overlap factor">Nm</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+              </thead>
+              <tbody>
+                {data.candidates.map((c) => (
+                  <Fragment key={c.fuzzySkuId}>
+                    {c.fuzzySkuId === firstBelowId ? (
+                      <tr>
+                        <td colSpan={18} className="subtle-copy" style={{ textAlign: 'center' }}>
+                          — below threshold {fmtScore(data.threshold)} —
+                        </td>
+                      </tr>
+                    ) : null}
+                    <tr>
+                      <td style={STICKY_SCORE_COL}>
+                        {c.aboveThreshold ? (
+                          <Pill tone="success">{fmtScore(c.score)}</Pill>
+                        ) : (
+                          <Pill tone="muted">{fmtScore(c.score)}</Pill>
+                        )}
+                      </td>
+                      <td>
+                        {c.url != null ? (
+                          <a href={c.url} target="_blank" rel="noreferrer">
+                            {displayOrNull(c.listingName)}
+                          </a>
+                        ) : (
+                          displayOrNull(c.listingName)
+                        )}
+                      </td>
+                      <td>
+                        {displayOrNull(c.brandRaw)}
+                        {c.brandNorm != null ? <span className="subtle-copy"> / {c.brandNorm}</span> : null}
+                      </td>
+                      <td>{displayOrNull(c.categoryNorm)}</td>
+                      <td>{displayOrNull(c.subcategoryNorm)}</td>
+                      <td>{displayOrNull(c.parsedSizeLabel)}</td>
+                      <td>{c.matchedSizeGroupLabel}</td>
+                      <td>{displayOrNull(c.retailer)}</td>
+                      <td title={c.distanceMiles != null ? `${c.distanceMiles.toFixed(1)} mi` : 'unknown'}>
+                        {distanceBandLabel(c.distanceBand)}
+                      </td>
+                      <td style={{ whiteSpace: 'nowrap' }}>{priceLabel(c)}</td>
+                      <td style={{ textAlign: 'right' }}>{c.currentStock ?? '—'}</td>
+                      <FactorCells
+                        f={c.factors}
+                        subMuted={data.subcategoryNotMatchable}
+                        packMuted={data.packNotMatchable}
+                      />
+                    </tr>
+                  </Fragment>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
       )}
     </div>
   )
@@ -545,20 +642,11 @@ export function CatalogFamilyExplorerPage() {
             </summary>
             <div style={{ marginTop: '0.5rem', paddingLeft: '0.75rem' }}>
               {subFamilies.map((sub) => (
-                <details
+                <SubFamilyRow
                   key={sub.brandKey ?? '\u0000(no brand)'}
-                  className="mini-card"
-                  style={{ marginBottom: '0.375rem' }}
-                >
-                  <summary style={{ cursor: 'pointer' }}>
-                    <span style={{ fontWeight: 600 }}>{sub.brandName ?? '(no brand)'}</span>{' '}
-                    <Pill tone="muted">
-                      {sub.memberCount} variant{sub.memberCount === 1 ? '' : 's'}
-                    </Pill>
-                  </summary>
-                  <MarketMatchPanel familyKey={family.familyKey} brandKey={sub.brandKey} />
-                  <VariantTable members={sub.members} />
-                </details>
+                  familyKey={family.familyKey}
+                  sub={sub}
+                />
               ))}
             </div>
           </details>
