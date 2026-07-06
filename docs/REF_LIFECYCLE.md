@@ -237,6 +237,67 @@ coverage: `tests/task-dag/close-issue-ref-cleanup.sh`.
 separately; the extracted `cleanup-closed-issue-task-refs.sh` is
 deliberately reusable by that path.
 
+## Closing an ops-only (no-code) epic (`close-ops-epic`)
+
+Some epics are resolved by a real-world **operations action** — reboot a
+host, flip a manual switch, run a one-off maintenance task — that produces
+**no implementation commit to link** and has **no cross-repo delegated
+children** (the trigger was `virusdave/top-level#37`, "operator go: reboot
+vps3"). Such an epic-root fits none of the existing closers:
+
+- `complete <root>` refuses (the root-completion guard above; it also
+  rejects an empty/tombstone link — there is no implementation commit);
+- `close-epic --issue N` refuses ("no delegated children to gate close
+  on" — its gating is built entirely around cross-repo delegated children);
+- hand-authoring the `Closes-Epic:` merge is exactly the ref surgery
+  `docs/INVARIANTS.md` forbids.
+
+`task-dag close-ops-epic --issue N [--yes] [--reason "..."]` fills that one
+cell of the matrix — **{undecomposed root × no delegations × no
+implementation commit}**. It emits the **same** additive, tree-equal
+`Closes-Epic: #<N>` merge every other closer relies on (tree == master
+tip's tree, first parent == master tip, second parent == the
+`tasks/pending/<N>` commit, trailer `Closes-Epic: #<N>`), constructed **by
+the tool**, and pushes it to `origin/master`; `close-completed-issues.sh`
+then closes the issue and cleans up `tasks/pending/<N>` + any overlay refs
+exactly as for any other close. It mints **no new ref namespace and no new
+trailer**, so it stays within the invariant floor (nothing to add to
+`TASKDAG_KNOWN_*_NS`).
+
+It is **not** the closer for a decomposed epic (complete the leaves / use
+`close-epic`); it is a **guarded, last-cell** tool. Every guard **fails
+closed** — it refuses rather than risk a premature/abusive close:
+
+- confirms the `tasks/pending/<N>` root identity on **origin** (origin
+  unreachable → refuse), mirroring `complete`'s root guard;
+- refuses if the epic has **any DAG child tasks** — decomposition, live
+  `frontier`/`active`/`blocked` leaves, or ingested-comment task nodes
+  (every such leaf is a DAG child of the root, so "no children" ⇒ no live
+  work to strand);
+- refuses if the epic has **cross-repo delegated children** (that is
+  `close-epic`'s job, gated on their completion);
+- refuses if the epic **root itself is blocked** (unblock it first — a
+  parked root closing as "ops done" would contradict the parked state);
+- refuses if a **foreign, still-live `tasks/root-active/<N>`** decompose
+  lock is held by another worker (closing under it would prune the leaves
+  they are about to publish); our own lock (the dispatcher pre-claim) or a
+  provably-dead lock is fine;
+- a **non-interactive caller must pass `--yes`** (explicit confirmation).
+
+It is **idempotent** and race/stale-tip safe: a re-run once the close merge
+is on `master` — even after `close-completed-issues.sh` has already deleted
+`tasks/pending/<N>` (in which case it matches the `Closes-Epic: #<N>`
+trailer on `master` directly, since the epic SHA is gone) — is a no-op
+success. Duplicate-close is prevented on both sides of the push: it
+re-checks for an existing close against the exact `origin/master` tip it is
+about to parent on (catching a concurrent close that already landed), and a
+close that lands *after* that fetch makes the push a non-fast-forward
+rejection that a re-run converges from — so at most one close merge is ever
+created. Fixture coverage: `tests/task-dag/close-ops-epic.sh`.
+
+> Full closure-signal contract and the `complete` vs `close-epic` vs
+> `close-ops-epic` decision: `virusdave/top-level:docs/task_dag/EPIC_CLOSURE.md`.
+
 ## History (closed gap)
 
 Before `#2`, epic roots had **no** cross-host claim protection (only each

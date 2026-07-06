@@ -1082,3 +1082,290 @@ cmd_close_epic() {
     git push origin "${close_sha}:refs/heads/master"
     echo "pushed master"
 }
+
+# ─────────────────────────────────────────────────────────────────────
+# cmd_close_ops_epic — close a single-repo, ops-only (no-code) epic
+# ─────────────────────────────────────────────────────────────────────
+#
+# The sanctioned closure path for an epic whose resolution is an
+# out-of-band OPERATIONS action (reboot a host, flip a manual switch, run a
+# one-off maintenance task): there is NO implementation commit to link and
+# NO cross-repo delegated children, so neither `complete` (needs a real
+# implementation commit; refuses to complete a root) nor `close-epic`
+# (gates entirely on delegated children) can express it. Before this
+# command the only remaining path was a hand-authored `Closes-Epic:` merge
+# — exactly the ref surgery docs/INVARIANTS.md forbids.
+#
+# It emits the SAME closure signal the tooling already relies on — a
+# tree-equal merge on master whose non-primary parent is the epic's
+# tasks/pending/<N> commit and whose message carries the `Closes-Epic: #<N>`
+# trailer — constructed BY THE TOOL (no hand ref surgery), then pushes it
+# directly to origin/master (mirroring `close-epic`), so
+# close-completed-issues.yml closes the issue and cleans up
+# tasks/pending/<N> + any blocked/frontier overlay refs.
+#
+# It mints NO new ref namespace and NO new trailer: its only artifact is
+# the documented "Close" merge shape on master, so it needs no addition to
+# TASKDAG_KNOWN_*_NS and stays within the invariant floor.
+#
+# GUARD RAILS (all fail CLOSED — refuse rather than risk a premature close):
+#   * confirm the pending-root identity on ORIGIN (origin unreachable →
+#     refuse), mirroring `complete`'s root guard;
+#   * refuse if the epic has ANY DAG child tasks — decomposed children,
+#     live frontier/active/blocked leaves, or ingested-comment tasks (every
+#     such leaf is a DAG child of the root, so "no children" ⇒ no live work);
+#   * refuse if the epic has cross-repo delegated children (that is
+#     `close-epic`'s job);
+#   * refuse if the epic ROOT itself is blocked (unblock it first);
+#   * refuse if a FOREIGN, still-live root-decompose lock
+#     (tasks/root-active/<N>) is held by another worker;
+#   * a non-interactive caller MUST pass --yes (explicit confirmation).
+# It is idempotent and race/stale-tip safe: a re-run after the close merge
+# has landed (even after close-completed-issues.yml deleted the pending
+# ref) is a no-op success; a concurrent master advance turns the push into
+# a non-fast-forward rejection that a re-run converges from.
+
+# Helper: is there a `Closes-Epic: #<N>` trailer merge anywhere on the
+# default branch? Trailer-ONLY variant used when the pending ref is already
+# gone (post-close) so we no longer have the epic SHA for a parent check.
+_ops_epic_closed_trailer_on() {
+    local issue="$1" base_ref="$2" mc
+    while read -r mc; do
+        if git log -1 --format='%B' "$mc" 2>/dev/null \
+            | git interpret-trailers --parse 2>/dev/null \
+            | grep -qE "^Closes-Epic:[[:space:]]*#?${issue}([^0-9]|\$)"; then
+            return 0
+        fi
+    done < <(git log "$base_ref" --merges --format='%H' 2>/dev/null)
+    return 1
+}
+
+cmd_close_ops_epic() {
+    local top_issue="" assume_yes=false reason=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --issue) top_issue="$2"; shift 2 ;;
+            --issue=*) top_issue="${1#*=}"; shift ;;
+            --yes|-y) assume_yes=true; shift ;;
+            --reason) reason="$2"; shift 2 ;;
+            --reason=*) reason="${1#*=}"; shift ;;
+            --help|-h)
+                cat <<'EOF'
+Usage: task-dag close-ops-epic --issue N [--yes] [--reason "..."]
+
+Close a single-repo, OPS-ONLY (no-code) epic: one whose resolution is an
+out-of-band operations action (reboot a host, flip a switch, a one-off
+maintenance task) with NO implementation commit to link and NO cross-repo
+delegated children. Neither `complete` (needs a real implementation commit)
+nor `close-epic` (gates on delegated children) can close such an epic.
+
+This emits the sanctioned tree-equal `Closes-Epic: #N` merge on master
+(constructed by the tool, never hand-rolled) and pushes it to origin/master,
+so close-completed-issues.yml closes the issue and cleans up its refs.
+
+Guard rails (all fail closed): confirms the pending root on origin; refuses
+if the epic has any DAG child tasks (decomposed / live frontier/active/
+blocked leaves / ingested-comment tasks), any cross-repo delegated children
+(use `close-epic`), a blocked root (unblock first), or a foreign live
+root-decompose lock. Idempotent: a re-run after the close landed is a no-op.
+
+Options:
+  --issue N        the epic issue number (required)
+  --yes, -y        confirm non-interactively (required for non-TTY callers)
+  --reason "..."   free-text audit note recorded in the close-merge body
+EOF
+                return 0
+                ;;
+            *) _xrepo_die "close-ops-epic: unknown arg: $1"; return 2 ;;
+        esac
+    done
+    [ -n "$top_issue" ] || { _xrepo_die "close-ops-epic: --issue is required"; return 2; }
+    case "$top_issue" in
+        ''|*[!0-9]*) _xrepo_die "close-ops-epic: --issue must be a number"; return 2 ;;
+    esac
+
+    _xrepo_ensure_git_identity
+
+    local repo_slug
+    repo_slug="$(_xrepo_current_repo)"
+
+    # ── 1. Confirm pending-root identity on ORIGIN (authoritative) ──────
+    local epic_sha rc=0
+    epic_sha=$(pending_sha_on_remote_checked "$top_issue") || rc=$?
+    if [ "$rc" = 3 ]; then
+        _xrepo_die "close-ops-epic: cannot reach origin to confirm epic #${top_issue} root (indeterminate transport/auth); refusing (fail-closed). Retry when origin is reachable."
+        return 2
+    fi
+    # Refresh origin/master for the idempotency scans below.
+    git fetch --quiet origin '+refs/heads/master:refs/remotes/origin/master' >/dev/null 2>&1 || true
+    local master_ref="master"
+    git rev-parse --verify -q origin/master >/dev/null 2>&1 && master_ref="origin/master"
+
+    if [ "$rc" = 2 ]; then
+        # Pending ref absent on origin: either it never existed, OR the epic
+        # was already closed (close-completed-issues.yml deletes pending/<N>
+        # after our close merge lands). Distinguish via a trailer-only scan
+        # of master — we no longer have the epic SHA for a parent check.
+        if _ops_epic_closed_trailer_on "$top_issue" "$master_ref"; then
+            _xrepo_log "close-ops-epic: epic #${top_issue} already closed on ${master_ref} (pending ref gone); nothing to do."
+            return 0
+        fi
+        _xrepo_die "close-ops-epic: no epic root tasks/pending/${top_issue} on origin (nothing to close)."
+        return 2
+    fi
+    [ -n "$epic_sha" ] || { _xrepo_die "close-ops-epic: could not resolve epic #${top_issue} root SHA on origin."; return 2; }
+
+    # Mirror the pending ref locally so we can inspect the root commit
+    # (blocked overlay / children reasoning below reads local refs).
+    git fetch --quiet origin \
+        "+refs/heads/tasks/pending/${top_issue}:refs/heads/tasks/pending/${top_issue}" \
+        >/dev/null 2>&1 || true
+
+    # ── 2. Idempotency: already closed on master (epic-as-parent + trailer)? ──
+    # Cheap idempotency short-circuit BEFORE the confirmation prompt so a
+    # re-run of an already-closed epic is a silent no-op (never prompts).
+    if epic_already_closed_on "$top_issue" "$epic_sha" "$master_ref"; then
+        _xrepo_log "close-ops-epic: epic #${top_issue} already closed on ${master_ref}; nothing to do."
+        return 0
+    fi
+
+    # ── 3. Explicit confirmation ────────────────────────────────────────
+    # Confirm BEFORE the substantive guards (children / delegated / blocked /
+    # root-lock) so those guards are evaluated AFTER confirmation, right
+    # before the push — an interactive prompt can sit for a long time, and we
+    # must not close on state that went stale during the wait. With --yes
+    # (the CI/worker path) this is a no-op.
+    if [ "$assume_yes" != true ]; then
+        if [ -t 0 ] && [ -t 1 ]; then
+            printf 'Close ops-only epic %s#%s (no implementation commit, no children)? [y/N] ' \
+                "$repo_slug" "$top_issue"
+            local ans=""
+            read -r ans
+            case "$ans" in
+                y|Y|yes|YES|Yes) ;;
+                *) _xrepo_die "close-ops-epic: aborted (no confirmation)."; return 1 ;;
+            esac
+        else
+            _xrepo_die "close-ops-epic: non-interactive caller must pass --yes to confirm closing epic #${top_issue}."
+            return 2
+        fi
+    fi
+
+    # ── 4. Sync the full task-ref namespace (fail closed) ───────────────
+    # Needed so the child / blocked-root / lock checks below see origin
+    # state, not a partial local view. A non-zero rc means "could not read
+    # origin", which for a close decision MUST refuse, not fall through.
+    if ! fetch_root_refs "$top_issue"; then
+        _xrepo_die "close-ops-epic: cannot reach origin to verify epic #${top_issue} state (child/lock refs); refusing (fail-closed). Retry when online."
+        return 2
+    fi
+
+    # ── 5. Refuse cross-repo delegated epics → use close-epic ───────────
+    # epic_has_delegated_children fails closed (treats an indeterminate
+    # origin as "has delegated children"), so this also covers an
+    # unreadable origin for the delegated dimension.
+    if epic_has_delegated_children "$top_issue"; then
+        _xrepo_die "close-ops-epic: epic #${top_issue} has cross-repo delegated children (or origin is unreadable); use 'task-dag close-epic --issue ${top_issue}', which gates on their completion."
+        return 3
+    fi
+
+    # ── 6. Refuse if the epic has ANY DAG child tasks ───────────────────
+    if task_has_children "$epic_sha" >/dev/null; then
+        _xrepo_die "close-ops-epic: epic #${top_issue} has DAG child tasks (decomposition, live frontier/active/blocked leaves, or ingested-comment tasks). Handle/complete/drop them, or close via the normal leaf-completion path. close-ops-epic is only for an UNdecomposed, ops-only epic."
+        return 3
+    fi
+
+    # ── 7. Refuse a blocked epic ROOT ───────────────────────────────────
+    if is_task_blocked "$epic_sha"; then
+        local breason
+        breason=$(read_blocked_meta_field "$epic_sha" "Reason")
+        _xrepo_die "close-ops-epic: epic #${top_issue} root is BLOCKED${breason:+ (reason: ${breason})}. Unblock it first: task-dag unblock ${epic_sha}."
+        return 3
+    fi
+
+    # ── 8. Refuse a FOREIGN, still-live root-decompose lock ─────────────
+    # A concurrent lock-holder on another host may be decomposing this epic
+    # right now; closing under it would prune the leaves they are about to
+    # publish. Ours (dispatcher pre-claim) or provably-dead → proceed.
+    local ra_sha ra_rc=0
+    ra_sha=$(remote_ref_sha_checked "refs/heads/tasks/root-active/${top_issue}") || ra_rc=$?
+    if [ "$ra_rc" = 3 ]; then
+        _xrepo_die "close-ops-epic: cannot read tasks/root-active/${top_issue} on origin (indeterminate); refusing (fail-closed)."
+        return 2
+    fi
+    if [ "$ra_rc" = 0 ] && [ -n "$ra_sha" ]; then
+        git fetch --quiet origin \
+            "+refs/heads/tasks/root-active/${top_issue}:refs/heads/tasks/root-active/${top_issue}" \
+            >/dev/null 2>&1 || true
+        local rmsg rclaimer rhost me_claimer me_host
+        rmsg=$(parse_commit_metadata "$ra_sha" 2>/dev/null || true)
+        rclaimer=$(extract_field "$rmsg" "Claimer" 2>/dev/null || true)
+        rhost=$(extract_field "$rmsg" "Claimer-Host" 2>/dev/null || true)
+        me_claimer="${TASK_DAG_CLAIMER:-${USER:-unknown}}"
+        me_host="${TASK_DAG_CLAIMER_HOST:-$(hostname -s 2>/dev/null || echo unknown)}"
+        if [ "$rclaimer" = "$me_claimer" ] && [ "$rhost" = "$me_host" ]; then
+            : # our own lock (dispatcher pre-claim / same worker) → proceed
+        elif claim_is_dead "$ra_sha"; then
+            _xrepo_log "close-ops-epic: root lock for #${top_issue} held by ${rclaimer:-?}@${rhost:-?} is provably dead (${claim_dead_reason}); proceeding."
+        else
+            _xrepo_die "close-ops-epic: epic #${top_issue} has a LIVE root-decompose lock held by ${rclaimer:-?}@${rhost:-?} (not you: ${me_claimer}@${me_host}). Refusing to close while decomposition may be in progress."
+            return 3
+        fi
+    fi
+
+    # ── 9. Build the sanctioned tree-equal Closes-Epic merge and push ───
+    # Same shape as close-epic:
+    #   tree    = current origin/master tip's tree (no diff)
+    #   parent1 = current origin/master tip
+    #   parent2 = epic SHA (tasks/pending/<N>)
+    # Push the OBJECT directly to origin/master; we do NOT mutate local
+    # master (that could leave a checked-out worktree in a phantom-dirty
+    # state).
+    git fetch --quiet origin '+refs/heads/master:refs/remotes/origin/master' >/dev/null 2>&1 || true
+    local master_tip master_tree
+    master_tip="$(git rev-parse --verify origin/master 2>/dev/null || git rev-parse --verify master)"
+
+    # Re-check idempotency against the EXACT tip we are about to parent on.
+    # This closes a TOCTOU duplicate-close race: a concurrent close of the
+    # same epic that landed since the step-2 check is now an ancestor of
+    # master_tip and is caught here; any close that lands AFTER this fetch
+    # makes our push a non-fast-forward rejection that a re-run converges
+    # from. Together those two cases guarantee at most one close merge.
+    if epic_already_closed_on "$top_issue" "$epic_sha" "$master_tip"; then
+        _xrepo_log "close-ops-epic: epic #${top_issue} already closed on master (concurrent close); nothing to do."
+        return 0
+    fi
+
+    master_tree="$(git rev-parse "${master_tip}^{tree}")"
+
+    local close_msg_file
+    close_msg_file="$(mktemp)"
+    {
+        printf 'Close ops-only epic for %s#%s (no code change)\n' "$repo_slug" "$top_issue"
+        printf '\n'
+        printf 'This epic was resolved by an out-of-band operations action, with no\n'
+        printf 'implementation commit to link and no cross-repo delegated children.\n'
+        printf 'This commit is intentionally tree-equal to its first parent; it records\n'
+        printf 'the epic SHA as a second parent so that close-completed-issues.yml finds\n'
+        printf 'it and closes issue #%s with the canonical "completed in <commit>"\n' "$top_issue"
+        printf 'comment, then cleans up tasks/pending/%s.\n' "$top_issue"
+        if [ -n "$reason" ]; then
+            printf '\n'
+            printf 'Reason: %s\n' "$(printf '%s' "$reason" | tr '\n' ' ')"
+        fi
+        printf '\n'
+        # Explicit close signal consumed by .github/scripts/close-completed-issues.sh.
+        # Without this trailer that workflow will NOT close the issue or delete
+        # tasks/pending/<N>, even though the parent-ref structure matches.
+        # See docs/task_dag/EPIC_CLOSURE.md.
+        printf 'Closes-Epic: #%s\n' "$top_issue"
+    } > "$close_msg_file"
+
+    local close_sha
+    close_sha="$(git commit-tree "$master_tree" -p "$master_tip" -p "$epic_sha" -F "$close_msg_file")"
+    rm -f "$close_msg_file"
+
+    echo "created close commit ${close_sha}"
+    git push origin "${close_sha}:refs/heads/master"
+    echo "pushed master — issue #${top_issue} will close via close-completed-issues.yml"
+}

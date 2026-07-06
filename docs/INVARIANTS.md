@@ -114,9 +114,13 @@ are the contract you must preserve when editing a minter.
 - **Completion merge** (on `master`, from `complete`): a merge whose
   non-first parent is the task commit, carrying `Task-Commit:` +
   `Status: completed`. Built on the **rebased** master tip.
-- **Close** (on `master`, from `close-epic` / local epic close): a merge
-  carrying `Closes-Epic: #N`, consumed by `close-completed-issues.yml`.
-  A parent-only check is **wrong** — the trailer is what triggers closure.
+- **Close** (on `master`, from `close-epic` / `close-ops-epic` / local
+  epic close): a merge carrying `Closes-Epic: #N`, consumed by
+  `close-completed-issues.yml`. A parent-only check is **wrong** — the
+  trailer is what triggers closure. (`close-ops-epic` is the sanctioned
+  closer for a single-repo, ops-only / no-code epic; it mints this exact
+  shape and **no** new namespace/trailer — see
+  `docs/REF_LIFECYCLE.md` → "Closing an ops-only (no-code) epic".)
 
 ---
 
