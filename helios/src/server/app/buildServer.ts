@@ -33,6 +33,7 @@ import { registerConfigRoutes } from '../routes/config.js'
 import { registerConfigLitalertsParsingRoutes } from '../routes/configLitalertsParsing.js'
 import { registerBudtenderAnalyticsRoutes } from '../routes/budtenderAnalytics.js'
 import { registerCatalogAnalyticsRoutes } from '../routes/catalogAnalytics.js'
+import { registerCatalogFamilyExplorerRoutes } from '../routes/catalogFamilyExplorer.js'
 import { registerConfigParsingRoutes } from '../routes/configParsing.js'
 import { registerCustomerReviewsRoutes } from '../routes/customerReviews.js'
 import { registerCrmSegmentMetricsRoutes } from '../routes/crmSegmentMetrics.js'
@@ -281,6 +282,7 @@ async function registerApplicationSurface(server: FastifyInstance) {
   await registerTimeOfDayRoutes(server)
   await registerBudtenderAnalyticsRoutes(server)
   await registerCatalogAnalyticsRoutes(server)
+  await registerCatalogFamilyExplorerRoutes(server)
   await registerCrmSegmentMetricsRoutes(server)
   await registerCustomerValueAnalyticsRoutes(server)
   await registerGadsLandingPagesRoutes(server)

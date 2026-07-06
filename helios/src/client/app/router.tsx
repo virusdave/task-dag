@@ -8,6 +8,7 @@ import { AdsIngestPage } from '../routes/ads/AdsIngestPage.js'
 import { CatalogBrandMappingPage, catalogBrandMappingLoader } from '../routes/catalog/CatalogBrandMappingPage.js'
 import { CatalogEdibleThcClampPage, catalogEdibleThcClampLoader } from '../routes/catalog/CatalogEdibleThcClampPage.js'
 import { CatalogHistoryPage, catalogHistoryLoader } from '../routes/catalog/CatalogHistoryPage.js'
+import { CatalogFamilyExplorerPage, catalogFamilyExplorerLoader } from '../routes/catalog/CatalogFamilyExplorerPage.js'
 import { CatalogMaintenanceIndexPage } from '../routes/catalog/CatalogMaintenanceIndexPage.js'
 import { CatalogMarketDataPage, catalogMarketDataLoader } from '../routes/catalog/CatalogMarketDataPage.js'
 import { CatalogMaintenancePage } from '../routes/catalog/CatalogMaintenancePage.js'
@@ -323,6 +324,11 @@ export const router = createBrowserRouter([
         element: <CatalogEdibleThcClampPage />,
         loader: catalogEdibleThcClampLoader,
         path: 'catalog/edible-thc-clamp',
+      },
+      {
+        element: <CatalogFamilyExplorerPage />,
+        loader: catalogFamilyExplorerLoader,
+        path: 'catalog/family-explorer',
       },
       {
         element: <WarehouseLocationsPage />,

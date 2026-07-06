@@ -216,6 +216,15 @@ export function buildCatalogSidebarSubtree(options?: CatalogSidebarOptions): Tre
       label: 'New entry',
       to: buildHeliosModulePath('catalog', 'new-entry'),
     },
+    {
+      // TEMPORARY (issue #55 step 1): operator-only audit surface to
+      // iterate on categorical-family grouping correctness before the
+      // richer per-family pricing UX is built in later steps.
+      kind: 'leaf',
+      navKey: 'catalog.family-explorer',
+      label: 'Family Explorer (temp)',
+      to: buildHeliosModulePath('catalog', 'family-explorer'),
+    },
     // Pricing was previously its own top-level module branch but is
     // now scoped under Catalog: pricing runs are a catalog reviewer
     // workflow, not a separate operator surface. The /pricing/* routes
