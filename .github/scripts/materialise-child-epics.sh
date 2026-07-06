@@ -8,16 +8,41 @@
 #   2. Create the peer-repo issue using the trailer-specified body
 #      file (read from the trailer commit's tree, not the workflow
 #      checkout tip).
-#   3. Run `scripts/task-dag delegate` to register the delegation on
-#      the top-level epic body and push the
-#      `refs/heads/tasks/delegated/...` ref.
+#   3. Run the canonical `task-dag delegate` (fetched at job time from the
+#      public virusdave/task-dag — see ensure_task_dag) to register the
+#      delegation on the parent epic body (the epic issue lives in THIS
+#      source repo — whichever peer carried the trailer, not necessarily
+#      top-level) and push the `refs/heads/tasks/delegated/...` ref.
 #
-# Idempotency: each materialisation pushes a marker ref
-#   refs/heads/gh/child-epics/<parent_N>/<peer_owner>/<peer_repo>
-# pointing at an empty-tree commit that records the assigned peer
-# issue number.  Re-running on the same trailer commit (or a second
-# push that re-introduces the trailer) is a no-op once the ref
-# exists.
+# Idempotency: each materialisation pushes a marker ref pointing at an
+# empty-tree commit that records the assigned peer issue number.
+# Re-running on the same trailer commit (or a second push that
+# re-introduces the trailer) is a no-op once the ref exists.
+#
+# There are TWO marker namespaces, selected by whether the group
+# carries an (optional) `Child-Epic-Slug:` trailer:
+#
+#   * No slug (the default slot, LEGACY-COMPATIBLE — unchanged):
+#       refs/heads/gh/child-epics/<parent_N>/<peer_owner>/<peer_repo>
+#     This is the historical scheme.  It permits exactly ONE child epic
+#     per (parent issue, peer repo) — the common case.
+#
+#   * With slug (NAMED slot, allows MULTIPLE child epics per
+#     (parent, peer repo)):
+#       refs/heads/gh/child-epic-slots/<parent_N>/<peer_owner>/<peer_repo>/<slug>
+#     A separate top-of-tree ref namespace (`child-epic-slots`, not
+#     `child-epics`) is used deliberately so a named-slot marker can
+#     never collide with the legacy default-slot marker via git's
+#     directory/file ref restriction (a ref at `.../<repo>` forbids refs
+#     under `.../<repo>/*`).  The two namespaces are independent: a slug
+#     lookup consults ONLY the slot namespace, and the default lookup
+#     consults ONLY the legacy namespace, so old single-child-epic
+#     behaviour is byte-for-byte unchanged and old markers are honoured
+#     forever.
+#
+# Mixing is coherent: unslugged = "the default slot"; each slug = a
+# distinct named slot.  Once you use slugs for a (parent, peer repo),
+# keep using them for every child epic on that pair.
 #
 # Trailer contract (case-insensitive keys per RFC 822):
 #
@@ -25,6 +50,7 @@
 #   Child-Epic-Title: <title>
 #   Child-Epic-Body-File: <path-in-repo>
 #   Parent-Issue: #<N>
+#   Child-Epic-Slug: <slug>            (optional; ^[a-z0-9][a-z0-9-]*$, <=64)
 #   Delegation-Note: <optional free text>
 #
 # Multiple groups per commit are allowed; each
@@ -52,31 +78,67 @@
 #     peer issue on retry) but the delegation must be re-run manually
 #     (or via a subsequent commit re-trigger).
 #
-# Invoked by .github/workflows/materialise-child-epic.yml with:
+# Invoked by the reusable .github/workflows/materialise-child-epic.yml
+# (or top-level's standalone workflow) with:
 #   BEFORE_SHA            push event before-SHA (40-zero on first push)
 #   AFTER_SHA             push event after-SHA
-#   GH_REPO               this repo (owner/repo, top-level)
-#   TOP_LEVEL_TOKEN       this repo's GITHUB_TOKEN (for delegate-back +
-#                         marker-ref push)
+#   GH_REPO               the SOURCE repo carrying the trailer (owner/repo);
+#                         any wired peer, not necessarily top-level
+#   SOURCE_TOKEN          the source repo's GITHUB_TOKEN (for delegate-back +
+#                         marker-ref push). Legacy alias TOP_LEVEL_TOKEN is
+#                         still honoured for back-compat.
 #   APP_ID                task-dag GitHub App ID
 #   APP_PRIVATE_KEY       PEM-encoded private key for the same App
 
 set -euo pipefail
 
-: "${BEFORE_SHA:?BEFORE_SHA is required}"
-: "${AFTER_SHA:?AFTER_SHA is required}"
-: "${GH_REPO:?GH_REPO is required}"
-: "${TOP_LEVEL_TOKEN:?TOP_LEVEL_TOKEN is required}"
-: "${APP_ID:?APP_ID is required}"
-: "${APP_PRIVATE_KEY:?APP_PRIVATE_KEY is required}"
+# When sourced by the unit test with MATERIALISE_LIB_ONLY=1, define the
+# helper functions but skip the required-env checks, the App-key setup,
+# and the main scan at the bottom of this file.
+if [ -z "${MATERIALISE_LIB_ONLY:-}" ]; then
+    : "${BEFORE_SHA:?BEFORE_SHA is required}"
+    : "${AFTER_SHA:?AFTER_SHA is required}"
+    : "${GH_REPO:?GH_REPO is required}"
+    # SOURCE_TOKEN is the source repo's GITHUB_TOKEN. Accept the legacy
+    # TOP_LEVEL_TOKEN name for back-compat (top-level's standalone workflow
+    # still exports it) so repointing callers is a no-flag-day migration.
+    SOURCE_TOKEN="${SOURCE_TOKEN:-${TOP_LEVEL_TOKEN:-}}"
+    : "${SOURCE_TOKEN:?SOURCE_TOKEN (or legacy TOP_LEVEL_TOKEN) is required}"
+    : "${APP_ID:?APP_ID is required}"
+    : "${APP_PRIVATE_KEY:?APP_PRIVATE_KEY is required}"
 
-# Stash the App key in a temp file for openssl signing.
-APP_KEY_FILE="$(mktemp)"
-chmod 600 "$APP_KEY_FILE"
-printf '%s\n' "$APP_PRIVATE_KEY" > "$APP_KEY_FILE"
-trap 'rm -f "$APP_KEY_FILE"' EXIT
+    # Stash the App key in a temp file for openssl signing.
+    APP_KEY_FILE="$(mktemp)"
+    chmod 600 "$APP_KEY_FILE"
+    printf '%s\n' "$APP_PRIVATE_KEY" > "$APP_KEY_FILE"
+    trap 'rm -f "$APP_KEY_FILE"' EXIT
+fi
 
 # --- helpers ----------------------------------------------------------------
+
+# Resolve the canonical task-dag CLI. top-level's vendored copy was retired
+# (virusdave/top-level#21): the single canonical runtime now lives in the
+# public repo virusdave/task-dag. Fetch it at job time (shallow clone, no
+# auth — the repo is public) and cache the path in $TASK_DAG. A pre-set
+# $TASK_DAG (tests / local override) is honoured. The CLI binds git ops to
+# the CALLER's cwd (this source-repo checkout), so `delegate` still updates the
+# parent epic in the source repo; only its own task-dag.d/ helpers are sourced
+# from the clone.
+TASK_DAG="${TASK_DAG:-}"
+ensure_task_dag() {
+    if [ -n "$TASK_DAG" ] && [ -x "$TASK_DAG" ]; then
+        return 0
+    fi
+    local td_dir
+    td_dir="$(mktemp -d)"
+    if ! git clone --quiet --depth 1 \
+            https://github.com/virusdave/task-dag "$td_dir/task-dag"; then
+        echo "::error ::failed to fetch canonical task-dag CLI from virusdave/task-dag" >&2
+        return 1
+    fi
+    TASK_DAG="$td_dir/task-dag/scripts/task-dag"
+    chmod +x "$TASK_DAG" 2>/dev/null || true
+}
 
 # base64url encode: stdin -> stdout, no padding.
 b64url() {
@@ -147,21 +209,49 @@ mint_installation_token() {
 page_on_failure() {
     local parent_issue="$1" reason="$2"
     local author
-    author="$(GH_TOKEN="$TOP_LEVEL_TOKEN" gh issue view "$parent_issue" --repo "$GH_REPO" --json author -q .author.login 2>/dev/null || echo "")"
+    author="$(GH_TOKEN="$SOURCE_TOKEN" gh issue view "$parent_issue" --repo "$GH_REPO" --json author -q .author.login 2>/dev/null || echo "")"
     local mention=""
     [ -n "$author" ] && mention="@${author} "
     local body
     body="$(printf '%s\n\n## :warning: Child-epic materialisation failed\n\n%s' \
         "<!-- materialise-failure:${AFTER_SHA}:${parent_issue}:$(date +%s) -->" \
         "${mention}\`materialise-child-epic\` workflow run on commit \`${AFTER_SHA}\` reported: ${reason}")"
-    GH_TOKEN="$TOP_LEVEL_TOKEN" gh issue comment "$parent_issue" --repo "$GH_REPO" --body "$body" >/dev/null || true
+    GH_TOKEN="$SOURCE_TOKEN" gh issue comment "$parent_issue" --repo "$GH_REPO" --body "$body" >/dev/null || true
+}
+
+# Validate an optional child-epic slug. Empty is valid (default slot).
+# A non-empty slug must be lowercase alnum + dashes, start alnum, <=64
+# chars — a charset with no git-refname hazards (`..`, `.lock`, `@{`, `/`).
+valid_slug() {
+    local slug="$1"
+    [ -z "$slug" ] && return 0
+    [[ "$slug" =~ ^[a-z0-9][a-z0-9-]{0,63}$ ]]
+}
+
+# Compute the idempotency marker ref for a group.
+#
+# No slug -> the LEGACY default-slot ref (unchanged historical scheme,
+# one child epic per (parent, peer repo)). With a slug -> a NAMED-slot
+# ref in the SEPARATE `child-epic-slots` namespace, which avoids the git
+# directory/file conflict with the legacy default-slot ref and permits
+# multiple child epics per (parent, peer repo). See the header comment.
+marker_ref_for() {
+    local parent_issue="$1" peer_owner="$2" peer_repo="$3" slug="$4"
+    if [ -n "$slug" ]; then
+        printf 'refs/heads/gh/child-epic-slots/%s/%s/%s/%s' \
+            "$parent_issue" "$peer_owner" "$peer_repo" "$slug"
+    else
+        printf 'refs/heads/gh/child-epics/%s/%s/%s' \
+            "$parent_issue" "$peer_owner" "$peer_repo"
+    fi
 }
 
 # Push the idempotency marker ref recording the peer issue number.
 # Uses the workflow checkout's pre-authenticated `origin` remote.
 push_marker_ref() {
-    local parent_issue="$1" peer_owner="$2" peer_repo="$3" peer_issue="$4" trailer_commit="$5"
-    local ref="refs/heads/gh/child-epics/${parent_issue}/${peer_owner}/${peer_repo}"
+    local parent_issue="$1" peer_owner="$2" peer_repo="$3" peer_issue="$4" trailer_commit="$5" slug="$6"
+    local ref
+    ref="$(marker_ref_for "$parent_issue" "$peer_owner" "$peer_repo" "$slug")"
 
     git config user.name "github-actions[bot]"
     git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -177,6 +267,7 @@ push_marker_ref() {
         printf 'peer:\n'
         printf '  repo: %s/%s\n' "$peer_owner" "$peer_repo"
         printf '  issue: %s\n' "$peer_issue"
+        [ -n "$slug" ] && printf 'slug: %s\n' "$slug"
         printf 'materialised_by_commit: %s\n' "$trailer_commit"
         printf 'materialised_at: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     } > "$msg_file"
@@ -188,14 +279,25 @@ push_marker_ref() {
     echo "Pushed marker ref ${ref} -> ${marker_sha}"
 }
 
-# Check whether the marker ref already exists on origin.
+# Check whether the marker ref already exists on origin. A slug lookup
+# consults ONLY the slot namespace; the default lookup consults ONLY the
+# legacy namespace (see marker_ref_for) — the two never cross-suppress.
 marker_exists() {
-    local parent_issue="$1" peer_owner="$2" peer_repo="$3"
-    local ref="refs/heads/gh/child-epics/${parent_issue}/${peer_owner}/${peer_repo}"
+    local parent_issue="$1" peer_owner="$2" peer_repo="$3" slug="$4"
+    local ref
+    ref="$(marker_ref_for "$parent_issue" "$peer_owner" "$peer_repo" "$slug")"
     git ls-remote origin "$ref" 2>/dev/null | grep -q .
 }
 
 # --- main scan --------------------------------------------------------------
+
+# Skip the scan when sourced for unit testing (helpers are defined above).
+if [ -n "${MATERIALISE_LIB_ONLY:-}" ]; then
+    # `return` succeeds when sourced; `exit` is the fallback if this file
+    # is ever executed directly with the flag set.
+    # shellcheck disable=SC2317
+    return 0 2>/dev/null || exit 0
+fi
 
 # Empty-on-first-push fallback (mirrors post-issue-comments.sh).
 if [[ "$BEFORE_SHA" =~ ^0+$ ]]; then
@@ -237,8 +339,21 @@ flush_group() {
         return 0
     fi
 
-    if marker_exists "$parent_num" "$peer_owner" "$peer_repo"; then
-        echo "Skipping ${peer_owner}/${peer_repo} for #${parent_num}: marker ref already present (already materialised)."
+    # Optional slug: validate up front so a bad value fails loud instead
+    # of minting a malformed ref. Page the parent-issue author too, so a
+    # typo'd slug surfaces at dispatch time rather than as an epic that
+    # silently never materialises.
+    if ! valid_slug "$cur_slug"; then
+        echo "::error ::Commit $commit: Child-Epic-Slug '$cur_slug' is invalid (must match ^[a-z0-9][a-z0-9-]{0,63}$). Skipping group."
+        page_on_failure "$parent_num" "Child-Epic-Slug \`${cur_slug}\` for \`${peer_owner}/${peer_repo}\` is invalid (must match \`^[a-z0-9][a-z0-9-]{0,63}\$\`). Fix the slug in the trailer and re-push to retry."
+        return 0
+    fi
+
+    local slug_label=""
+    [ -n "$cur_slug" ] && slug_label=" (slug '${cur_slug}')"
+
+    if marker_exists "$parent_num" "$peer_owner" "$peer_repo" "$cur_slug"; then
+        echo "Skipping ${peer_owner}/${peer_repo} for #${parent_num}${slug_label}: marker ref already present (already materialised)."
         return 0
     fi
 
@@ -278,23 +393,23 @@ flush_group() {
         echo "::error ::gh issue create succeeded for ${peer_owner}/${peer_repo} but no issue number parsed from output: $issue_url"
         return 0
     fi
-    echo "Created peer issue ${peer_owner}/${peer_repo}#${peer_issue} for top-level #${parent_num}"
+    echo "Created peer issue ${peer_owner}/${peer_repo}#${peer_issue} for parent #${parent_num} (${GH_REPO})"
 
     # Push the marker ref FIRST so retries don't double-create even
     # if the delegate-back step fails next.
-    push_marker_ref "$parent_num" "$peer_owner" "$peer_repo" "$peer_issue" "$commit"
+    push_marker_ref "$parent_num" "$peer_owner" "$peer_repo" "$peer_issue" "$commit" "$cur_slug"
 
-    # Register the delegation back on top-level using its own
-    # GITHUB_TOKEN (this repo's workflow token).
+    # Register the delegation back on the parent epic (in this source repo)
+    # using its own GITHUB_TOKEN (this repo's workflow token).
     local delegate_args=(--issue "$parent_num" --to "${peer_owner}/${peer_repo}#${peer_issue}")
     [ -n "$cur_note" ] && delegate_args+=(--note "$cur_note")
-    if ! GH_TOKEN="$TOP_LEVEL_TOKEN" scripts/task-dag delegate "${delegate_args[@]}"; then
-        echo "::error ::scripts/task-dag delegate failed for #${parent_num} -> ${peer_owner}/${peer_repo}#${peer_issue}. Marker ref pushed; re-run delegate manually."
+    if ! { ensure_task_dag && GH_TOKEN="$SOURCE_TOKEN" "$TASK_DAG" delegate "${delegate_args[@]}"; }; then
+        echo "::error ::task-dag delegate failed for #${parent_num} -> ${peer_owner}/${peer_repo}#${peer_issue}. Marker ref pushed; re-run delegate manually."
         return 0
     fi
 
     processed_any=true
-    echo "Materialised ${peer_owner}/${peer_repo}#${peer_issue} for top-level #${parent_num} and registered the delegation."
+    echo "Materialised ${peer_owner}/${peer_repo}#${peer_issue} for parent #${parent_num} (${GH_REPO}) and registered the delegation."
 }
 
 while IFS= read -r commit; do
@@ -304,7 +419,7 @@ while IFS= read -r commit; do
     [ -z "$trailers" ] && continue
 
     # Collect groups: each Materialise-Child-Epic: opens one.
-    cur_peer="" cur_title="" cur_body_file="" cur_parent="" cur_note=""
+    cur_peer="" cur_title="" cur_body_file="" cur_parent="" cur_note="" cur_slug=""
 
     while IFS= read -r line; do
         [ -z "$line" ] && continue
@@ -322,6 +437,7 @@ while IFS= read -r commit; do
                 cur_body_file=""
                 cur_parent=""
                 cur_note=""
+                cur_slug=""
                 ;;
             child-epic-title)
                 cur_title="$val"
@@ -331,6 +447,9 @@ while IFS= read -r commit; do
                 ;;
             parent-issue)
                 cur_parent="$val"
+                ;;
+            child-epic-slug)
+                cur_slug="$val"
                 ;;
             delegation-note)
                 cur_note="$val"
