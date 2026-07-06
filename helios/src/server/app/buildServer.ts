@@ -76,6 +76,7 @@ import { registerSweedSessionsRoutes } from '../routes/sweedSessions.js'
 import { registerUtilitiesPromoNamesRoutes } from '../routes/utilitiesPromoNames.js'
 import { registerWarehouseLocationsRoutes } from '../routes/warehouseLocations.js'
 import { registerTaskDagRoutes } from '../routes/taskDag.js'
+import { registerAgentWasteRoutes } from '../routes/agentWaste.js'
 import { registerUsersRoutes } from '../routes/users.js'
 import { registerGeoSegmentRulesRoutes } from '../routes/geoSegmentRules.js'
 import { registerMarketingSegmentsRoutes } from '../routes/marketingSegments.js'
@@ -292,6 +293,7 @@ async function registerApplicationSurface(server: FastifyInstance) {
   await registerInventoryProcurementRoutes(server)
   await registerJobRoutes(server)
   await registerTaskDagRoutes(server)
+  await registerAgentWasteRoutes(server)
   await registerUsersRoutes(server)
   await registerGeoSegmentRulesRoutes(server)
   await registerMarketingSegmentsRoutes(server)
