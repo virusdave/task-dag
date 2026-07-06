@@ -2,6 +2,7 @@ import { buildServer } from './app/buildServer.js'
 import { getServerEnv } from './config/env.js'
 import { bootstrapParserRegistry } from '../lib/parsekit/node/index.js'
 import { initTaskDagMirror } from './taskDagMirror.js'
+import { initTopLevelMirror } from './topLevelMirror.js'
 
 const env = getServerEnv()
 const server = await buildServer()
@@ -23,6 +24,14 @@ await bootstrapParserRegistry({ log: gitFetchLog })
 // the mirror can't be fetched. The production deploy tarball strips .git,
 // so this mirror is the only source of task refs in prod.
 await initTaskDagMirror({ log: gitFetchLog })
+
+// Initial top-level mirror fetch + arm periodic refresh. Loud-but-non-fatal:
+// the agent-waste backlog reports "unavailable" (structured 503) rather than
+// crashing if the mirror can't be fetched (e.g. the read deploy key is not
+// yet provisioned). This is a SECOND read-only mirror (of virusdave/top-level)
+// alongside the automation task-DAG mirror; it feeds the agent-waste backlog
+// reader (issue #60).
+await initTopLevelMirror({ log: gitFetchLog })
 
 try {
   await server.listen({ host: '0.0.0.0', port: env.port })
