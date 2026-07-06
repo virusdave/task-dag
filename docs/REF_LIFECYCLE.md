@@ -118,6 +118,73 @@ to do it. `breakdown --json` reports `"claimed": true|false` per child.
 Because `breakdown` itself now consumes the root lock (above), even a
 born-claimed decomposition happens under the single cross-host root CAS.
 
+## Born-blocked epics (block at birth via label)
+
+An issue-originated epic can be created **already blocked** so the
+github-worker dispatcher never picks it up in the window between the
+`issue-to-task` workflow minting `tasks/pending/<N>` and a *separate*
+`task-dag block` landing (the race that motivated
+[virusdave/top-level#36](https://github.com/virusdave/top-level/issues/36)).
+
+The trigger is a GitHub label — **`blocked-at-birth`** — present on the
+issue at **first sighting**. When `create-task-commit.sh`
+([`.github/scripts/create-task-commit.sh`](../.github/scripts/create-task-commit.sh))
+mints the epic, it adds `tasks/blocked/<epic-sha>` to the **same
+`git push --atomic`** that publishes `pending/<N>` + `gh/issues/<N>`. The
+dispatcher already skips a pending root whose blocked overlay exists
+(`is_task_blocked`, checked before the pre-claim in github-worker's
+`worker-loop.sh`), and both refs reach origin atomically, so there is
+**never** a dispatchable-but-unblocked window. Then, best-effort, the
+script invokes the canonical `task-dag block <sha> --operator` to attach
+the `blocked-meta` side-commit for the operator-blocked #29 dashboard —
+the CLI stays the single source of truth for the meta format; if that
+enrichment fails the epic is still blocked and merely renders as
+`kind:"unknown"` until a later `task-dag block` enriches it idempotently.
+
+Invariants that keep this safe:
+
+- **First-sighting only.** The label logic runs solely on the create path
+  (reached only when the epic did not previously exist on origin). An
+  edit/reopen of an already-tracked issue returns from the create-only
+  guards *before* the label logic, so a **stale label can never re-block
+  an epic the operator has already unblocked**. This is regression-tested
+  in [`tests/create-task-commit.sh`](../tests/create-task-commit.sh).
+- **The overlay is the blocking mechanism; the meta call is enrichment
+  only.** Never reorder so that meta-attachment becomes load-bearing —
+  that would reopen the race.
+- **The label is a birth *trigger*, not synced state.** After a
+  `task-dag unblock` the label lingers on the issue; the `blocked` overlay
+  ref remains the sole authority for "is this blocked". Toggling a block
+  from the label *after* creation is intentionally **not** wired (see
+  deferred work below). The trigger-shaped name (`blocked-at-birth`, not
+  `blocked`) is chosen so the lingering label reads as history, not a lie.
+- **Per-repo label.** The feature only fires in repos where the
+  `blocked-at-birth` label exists (GitHub requires the label to exist
+  before it can be applied). Create it once per repo that wants it.
+
+### Deferred, by design (recorded so a future implementer inherits the traps)
+
+- **Born-blocked *leaf* tasks via `breakdown` (`"blocked": true`).**
+  Deferred: children decomposed under a blocked epic are already
+  born-unpickable via the transitive-block filter, and an agent that
+  creates a task then blocks it is a single writer with no async race.
+  **If implemented:** a born-blocked child must publish its
+  **frontier ref + blocked overlay + blocked-meta in the same atomic
+  push** — do *not* mirror `claim:true`'s frontier-ref *skip*. `block`
+  never creates a frontier ref and `unblock` only deletes the overlay, so
+  a born-blocked child with no frontier ref would be permanently
+  undispatchable after `unblock`.
+- **Post-creation label toggling (`labeled`/`unlabeled` events →
+  block/unblock).** Deferred: birth is already covered above; this only
+  adds a GitHub-UI toggle after creation. **If implemented:** (1) any
+  handler sharing the per-issue concurrency group must be *convergent*
+  (reconcile from current origin state + the event's full issue snapshot,
+  i.e. extend `create-task-commit.sh` rather than adding a block-only
+  handler) so a `labeled` run arriving while the `opened` run is still
+  pending can't cancel epic creation; and (2) `unlabeled` must only
+  unblock a block that was **label-originated** (recognizable via
+  `blocked-meta`), never a `--downstream` or manual CLI block.
+
 ## End-to-end
 
 ```diagram

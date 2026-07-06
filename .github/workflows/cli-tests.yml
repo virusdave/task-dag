@@ -12,13 +12,15 @@ on:
     paths:
       - 'scripts/task-dag'
       - 'scripts/task-dag.d/**'
-      - 'tests/task-dag/**'
+      - 'tests/**'
+      - '.github/scripts/**'
       - '.github/workflows/cli-tests.yml'
   pull_request:
     paths:
       - 'scripts/task-dag'
       - 'scripts/task-dag.d/**'
-      - 'tests/task-dag/**'
+      - 'tests/**'
+      - '.github/scripts/**'
       - '.github/workflows/cli-tests.yml'
 
 jobs:

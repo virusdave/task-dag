@@ -107,6 +107,44 @@ run_script 42 "My epic" "body"
 assert_eq "pending/42 unchanged under mismatch" "$p1" "$(origin_ref_sha refs/heads/tasks/pending/42)"
 assert_eq "gh/issues/42 unchanged under mismatch" "$other_commit" "$(origin_ref_sha refs/heads/gh/issues/42)"
 
+echo "== block-at-birth: labeled first-seen creates pending+gh+blocked atomically =="
+# Use the repo's own CLI for hermetic meta enrichment (no network download).
+export TASK_DAG_CLI="$SCRIPT_DIR/../scripts/task-dag"
+ISSUE_LABELS="feature,blocked-at-birth,p2" run_script 77 "Blocked epic" "body"
+p77="$(origin_ref_sha refs/heads/tasks/pending/77)"
+g77="$(origin_ref_sha refs/heads/gh/issues/77)"
+b77="$(origin_ref_sha "refs/heads/tasks/blocked/$p77")"
+if [[ -n "$p77" ]]; then ok "tasks/pending/77 created for labeled issue"; else bad "tasks/pending/77 missing"; fi
+assert_eq "gh/issues/77 == pending on first-seen" "$p77" "$g77"
+assert_eq "blocked overlay points at epic SHA (blocked at birth)" "$p77" "$b77"
+m77="$(origin_ref_sha "refs/heads/tasks/blocked-meta/$p77")"
+if [[ -n "$m77" ]]; then ok "blocked-meta/77 created by canonical-CLI enrichment"; else bad "blocked-meta/77 missing"; fi
+
+echo "== case-insensitive label match =="
+ISSUE_LABELS="Blocked-At-Birth" run_script 88 "Case epic" "body"
+p88="$(origin_ref_sha refs/heads/tasks/pending/88)"
+b88="$(origin_ref_sha "refs/heads/tasks/blocked/$p88")"
+assert_eq "blocked overlay created for mixed-case label" "$p88" "$b88"
+
+echo "== unlabeled first-seen is NOT blocked =="
+ISSUE_LABELS="feature,something-else" run_script 78 "Normal epic" "body"
+p78="$(origin_ref_sha refs/heads/tasks/pending/78)"
+b78="$(origin_ref_sha "refs/heads/tasks/blocked/$p78")"
+if [[ -n "$p78" && -z "$b78" ]]; then ok "no blocked overlay for unlabeled issue"; else bad "unexpected blocked overlay for unlabeled issue"; fi
+
+echo "== edit after unblock stays unblocked (stale label must not re-block) =="
+# Simulate operator unblock: remove the overlay + meta on origin.
+git push -q origin --delete "refs/heads/tasks/blocked/$p77" 2>/dev/null || true
+git push -q origin --delete "refs/heads/tasks/blocked-meta/$p77" 2>/dev/null || true
+if [[ -z "$(origin_ref_sha "refs/heads/tasks/blocked/$p77")" ]]; then ok "epic 77 unblocked (precondition)"; else bad "could not unblock epic 77"; fi
+# Re-run with the label STILL present (edit/reopen); create-only must no-op.
+ISSUE_LABELS="blocked-at-birth" run_script 77 "Blocked epic (edited title)" "new body"
+p77b="$(origin_ref_sha refs/heads/tasks/pending/77)"
+b77b="$(origin_ref_sha "refs/heads/tasks/blocked/$p77b")"
+assert_eq "pending/77 unchanged on edit after unblock" "$p77" "$p77b"
+if [[ -z "$b77b" ]]; then ok "edit after unblock did NOT re-block (create-only)"; else bad "stale label re-blocked an unblocked epic"; fi
+unset TASK_DAG_CLI
+
 echo
 echo "Passed: $PASS  Failed: $FAIL"
 [[ "$FAIL" -eq 0 ]]
