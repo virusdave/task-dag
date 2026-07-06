@@ -3,6 +3,7 @@ import { getServerEnv } from './config/env.js'
 import { bootstrapParserRegistry } from '../lib/parsekit/node/index.js'
 import { initTaskDagMirror } from './taskDagMirror.js'
 import { initTopLevelMirror } from './topLevelMirror.js'
+import { initAgentWasteBacklogReader } from './agentWasteBacklogReader.js'
 
 const env = getServerEnv()
 const server = await buildServer()
@@ -32,6 +33,12 @@ await initTaskDagMirror({ log: gitFetchLog })
 // alongside the automation task-DAG mirror; it feeds the agent-waste backlog
 // reader (issue #60).
 await initTopLevelMirror({ log: gitFetchLog })
+
+// Install the top-level-mirror-backed agent-waste backlog reader, replacing
+// the default unavailable reader so GET /api/agent-waste/backlog returns real
+// pending-review items. Must run AFTER initTopLevelMirror. Still 503-degrades
+// (never 500s) while the mirror is unavailable (issue #60).
+initAgentWasteBacklogReader()
 
 try {
   await server.listen({ host: '0.0.0.0', port: env.port })
