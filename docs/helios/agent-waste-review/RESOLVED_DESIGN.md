@@ -224,10 +224,27 @@ routine infra provisioning, needing **no further operator input**:
    validated, applyConfig-pattern. Depends on #1 (write key) — downstream,
    not operator-blocked.
 
-> **Task-creation gap (flagged for the operator):** a frontier-leaf worker
-> cannot `breakdown` the epic, and `#57`'s root is already decomposed, so
-> these four follow-up tasks have **no automated creation trigger** from
-> this repo. They must be minted by a future epic-root/orchestration
-> dispatch or by an unmarked operator instruction on `#57`. Until then,
-> leaf `0d07aed` is parked `--downstream` (not operator-blocked) awaiting
-> #1/#2 above.
+> **Task-creation gap — RESOLVED via a task-dag tooling epic
+> ([virusdave/task-dag#6](https://github.com/virusdave/task-dag/issues/6)).**
+> The operator's directive on
+> [#57 (comment #4891259111)](https://github.com/FreshlyBakedNYC/automation/issues/57#issuecomment-4891259111)
+> was: if the tooling can't launch a child work-stream epic in another repo
+> and have it auto-picked-up, that's a tooling design miss to fix
+> **canonically in the tooling**, and to file a new epic in the `task-dag`
+> repo for it. Investigation confirmed the gap is real but narrow:
+> cross-repo child-epic materialisation (the `Materialise-Child-Epic:`
+> commit-trailer flow) works, but **only for `virusdave/top-level`-originated
+> epics** — `top-level` has a working self-hosted `materialise-child-epic.yml`
+> workflow, whereas `task-dag` ships the engine script *unwired* (no reusable
+> workflow) and no peer caller has a `materialise` job. So a **peer**-repo
+> epic (like `#57`) cannot spawn child epics. Canon `WORKFLOW.md`'s "Cross-repo
+> child epics are fully automated" is thus overbroad. Epic
+> [task-dag#6](https://github.com/virusdave/task-dag/issues/6) makes
+> materialisation a reusable fleet-wide capability and, as its canary, creates
+> these four child epics under parent `top-level#34`.
+>
+> Note: because the parent epic `top-level#34` lives in `top-level` (which
+> already has a working materialise workflow), the four child epics are **not**
+> blocked on that migration — they can be materialised today from a `top-level`
+> `master` commit carrying the trailers. Until they exist, leaf `0d07aed`
+> stays parked `--downstream` (not operator-blocked) awaiting #1/#2 above.
