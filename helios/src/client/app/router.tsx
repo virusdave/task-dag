@@ -57,6 +57,7 @@ import {
   configParsingPendingPurchasesLoader,
 } from '../routes/config/ConfigParsingPendingPurchasesPage.js'
 import { ConfigWorkersPage } from '../routes/config/ConfigWorkersPage.js'
+import { AgentWasteReviewPage } from '../routes/config/AgentWasteReviewPage.js'
 import {
   ConfigBedrockModelsPage,
   configBedrockModelsLoader,
@@ -566,6 +567,13 @@ export const router = createBrowserRouter([
       {
         element: <ConfigWorkersPage />,
         path: 'config/workers',
+      },
+      {
+        // Admin-gated agent-waste review queue (issue #57). Route-level
+        // admin guard lives in the page; the server API is independently
+        // admin-gated. The navbar entry is a separate follow-up task.
+        element: <AgentWasteReviewPage />,
+        path: 'config/agent-waste',
       },
       {
         element: <SweedAuthLogPage />,
