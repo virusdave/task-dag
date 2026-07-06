@@ -18,6 +18,7 @@ import { REVIEWS_SIDEBAR_SUBTREE } from '../routes/customerReviews/customerRevie
 import { SCHEDULING_SIDEBAR_SUBTREE } from '../routes/scheduling/schedulingSidebar.js'
 import { SCREENS_SIDEBAR_SUBTREE } from '../routes/screens/screensSidebar.js'
 import { TASKS_SIDEBAR_SUBTREE } from '../routes/tasks/tasksSidebar.js'
+import { AgentWasteReviewReminder } from './AgentWasteReviewReminder.js'
 import { Pill } from './Pill.js'
 import { SidebarNavProvider, useSidebarNav } from './SidebarNavContext.js'
 import { TreeNav, type TreeNavNode } from './TreeNav.js'
@@ -614,6 +615,12 @@ function AppShellInner() {
           ))}
         </section>
       ) : null}
+      {/*
+        Admin-only escalating reminder to triage the agent-waste review queue
+        (issue #57). Self-gates on admin + backlog pressure and renders
+        nothing otherwise, so it's safe to mount unconditionally here.
+      */}
+      <AgentWasteReviewReminder />
       <div className={`layout-grid${isSidebarCollapsed ? ' sidebar-collapsed' : ''}`}>
         {isSidebarCollapsed ? null : <PrimarySidebar />}
         <main className="content-panel">

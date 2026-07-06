@@ -324,6 +324,60 @@ pre {
   margin: -0.5rem 0 1.25rem;
 }
 
+/* Admin-only escalating agent-waste review reminder (issue #57). A single
+ * dismissable banner, never a modal. Tone rises with backlog pressure:
+ * notice (calm) → warn → danger. Wraps to a stacked layout on narrow
+ * screens so the CTA + Dismiss stay reachable on a phone. */
+.agent-waste-reminder {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem 1rem;
+  padding: 0.75rem 1rem;
+  margin: -0.5rem 0 1.25rem;
+  border: 1px solid var(--panel-border);
+  border-radius: 14px;
+  background: var(--accent-muted);
+}
+.agent-waste-reminder--warn {
+  border-color: var(--warning);
+  background: rgba(199, 154, 46, 0.12);
+}
+.agent-waste-reminder--danger {
+  border-color: var(--danger);
+  background: rgba(192, 99, 84, 0.12);
+}
+.agent-waste-reminder__body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  min-width: 12rem;
+  flex: 1 1 20rem;
+}
+.agent-waste-reminder__headline {
+  line-height: 1.3;
+}
+.agent-waste-reminder__actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+.agent-waste-reminder__cta {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 0 0.35rem;
+  font-weight: 600;
+  color: var(--accent-strong);
+  text-decoration: none;
+  white-space: nowrap;
+}
+.agent-waste-reminder__cta:hover {
+  text-decoration: underline;
+}
+
 .runtime-status-item {
   display: flex;
   align-items: center;
