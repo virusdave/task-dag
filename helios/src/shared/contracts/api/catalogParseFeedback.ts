@@ -137,6 +137,16 @@ const ParseFeedbackRecordBaseSchema = z.object({
   /** Convention proposals point back to the listing correction that spawned them. */
   sourceFeedbackId: z.string().uuid().nullable(),
   status: ParseFeedbackStatusSchema,
+  /**
+   * Promotion provenance (task T5). Populated only when the feedback is marked
+   * `promoted` (and preserved through a later `superseded`) by the agent/reviewer
+   * promotion path — never a web-side git write. `promotedParserId` +
+   * `promotedConfigSha` are set together; `promotedRuleId` is optional and only
+   * meaningful alongside a parser id.
+   */
+  promotedParserId: z.string().nullable(),
+  promotedRuleId: z.string().nullable(),
+  promotedConfigSha: z.string().nullable(),
   createdBy: z.string(),
   createdAt: z.string(),
   updatedBy: z.string(),
@@ -249,12 +259,151 @@ export const UpdateParseFeedbackBodySchema = z.object({
 })
 export type UpdateParseFeedbackBody = z.infer<typeof UpdateParseFeedbackBodySchema>
 
-export const UpdateParseFeedbackStatusBodySchema = z.object({
-  status: ParseFeedbackStatusSchema,
-})
+/**
+ * PATCH status body. Transitioning to `promoted` REQUIRES promotion provenance
+ * (`promotedParserId` + `promotedConfigSha`; `promotedRuleId` optional) — this
+ * is the agent/reviewer marking a DB row as realized in `helios-parser-configs`
+ * (task T5). Every other status carries no provenance (the server preserves any
+ * prior provenance on `superseded` and clears it on the draft-cycle statuses).
+ */
+export const UpdateParseFeedbackStatusBodySchema = z.discriminatedUnion('status', [
+  z
+    .object({
+      status: z.literal('promoted'),
+      promotedParserId: z.string().trim().min(1).max(200),
+      promotedRuleId: z.string().trim().min(1).max(200).nullable().optional(),
+      // parser-configs release commit sha (40-hex).
+      promotedConfigSha: z
+        .string()
+        .trim()
+        .regex(/^[0-9a-f]{40}$/i, 'promotedConfigSha must be a 40-char hex commit sha'),
+    })
+    .strict(),
+  z
+    .object({
+      status: z.enum(['draft', 'promotion_requested', 'rejected', 'superseded']),
+    })
+    .strict(),
+])
 export type UpdateParseFeedbackStatusBody = z.infer<typeof UpdateParseFeedbackStatusBodySchema>
 
 export const ParseFeedbackRecordResponseSchema = z.object({
   feedback: ParseFeedbackRecordSchema,
 })
 export type ParseFeedbackRecordResponse = z.infer<typeof ParseFeedbackRecordResponseSchema>
+
+// ---------------------------------------------------------------------------
+// Promotion export (task T5)
+//
+// A READ-ONLY, agent/reviewer-facing report that shapes the inert feedback
+// inbox into material for turning corrections into parsekit goldens + a
+// `helios-parser-configs/use-cases/litalerts/parsers/<tenantId>.jsonc` entry.
+// It NEVER writes a parser config (no web-side git writes) and never joins the
+// production scorer / market-match read path. See
+// docs/helios/catalog-market-data/PARSE_FEEDBACK_PROMOTION.md.
+// ---------------------------------------------------------------------------
+
+/** Cap on how many listing corrections a single export may return (bounded read). */
+export const PROMOTION_EXPORT_MAX_CORRECTIONS = 500
+
+const CommaStatusSchema = z
+  .string()
+  .optional()
+  .default('draft,promotion_requested')
+  .transform((raw) =>
+    raw
+      .split(',')
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0),
+  )
+  .pipe(z.array(ParseFeedbackStatusSchema).min(1, 'provide at least one status'))
+
+/** GET /api/catalog/family-explorer/parse-feedback/promotion-export?retailerId=..&statuses=.. */
+export const PromotionExportQuerySchema = z.object({
+  retailerId: z.coerce.number().int(),
+  statuses: CommaStatusSchema,
+})
+export type PromotionExportQuery = z.infer<typeof PromotionExportQuerySchema>
+
+/**
+ * Best-effort mapping of the operator's corrected fields into parsekit's
+ * LitAlerts projection shape. Fields the operator didn't supply (or that can't
+ * be normalized to the parsekit enums) stay null — this is a hint, not a golden.
+ */
+export const PromotionBestEffortExpectedSchema = z
+  .object({
+    brand: z.string().nullable(),
+    productLine: z.null(),
+    variantName: z.string().nullable(),
+    category: z.string().nullable(),
+    packCount: z.number().int().nullable(),
+    unitSize: z.object({ value: z.number(), unit: z.string() }).nullable(),
+    totalSize: z.object({ value: z.number(), unit: z.string() }).nullable(),
+    prevalence: z.null(),
+    searchTerm: z.null(),
+  })
+  .strict()
+export type PromotionBestEffortExpected = z.infer<typeof PromotionBestEffortExpectedSchema>
+
+/**
+ * A ready-to-paste parsekit golden — present ONLY when the best-effort mapping
+ * forms a full, valid LitAlerts descriptor. `expected` mirrors parsekit's
+ * `GoldenCase.expected` (validated server-side against the descriptor schema).
+ */
+export const PromotionParsekitGoldenSchema = z.object({
+  kind: z.literal('match'),
+  id: z.string(),
+  input: z.string(),
+  expected: z.unknown(),
+})
+export type PromotionParsekitGolden = z.infer<typeof PromotionParsekitGoldenSchema>
+
+export const PromotionExportConventionSchema = z.object({
+  id: z.string().uuid(),
+  status: ParseFeedbackStatusSchema,
+  details: ConventionProposalDetailsSchema,
+  createdAt: z.string(),
+})
+export type PromotionExportConvention = z.infer<typeof PromotionExportConventionSchema>
+
+export const PromotionExportCorrectionSchema = z.object({
+  feedbackId: z.string().uuid(),
+  status: ParseFeedbackStatusSchema,
+  sourceListingId: z.string().nullable(),
+  fuzzySkuId: z.number().int().nullable(),
+  rawListingName: z.string().nullable(),
+  inputSnapshot: z.record(z.string(), z.unknown()).nullable(),
+  familyKey: z.string().nullable(),
+  brandKey: z.string().nullable(),
+  matchedCatalogProductId: z.number().int().nullable(),
+  rawCorrection: ListingCorrectionDetailsSchema,
+  bestEffortExpected: PromotionBestEffortExpectedSchema,
+  parsekitGolden: PromotionParsekitGoldenSchema.nullable(),
+  /** Why `parsekitGolden` is null / caveats for the reviewer. */
+  issues: z.array(z.string()),
+  conventionProposals: z.array(PromotionExportConventionSchema),
+})
+export type PromotionExportCorrection = z.infer<typeof PromotionExportCorrectionSchema>
+
+/** All corrections for one retailer that resolve to the same parsekit tenant. */
+export const PromotionExportTenantGroupSchema = z.object({
+  tenantId: z.string(),
+  /** `litalerts.<tenantId>` — the parsekit parser id to create/update. */
+  parserId: z.string(),
+  /** `use-cases/litalerts/parsers/<tenantId>.jsonc` — the config file to author. */
+  configPath: z.string(),
+  dispensaryName: z.string().nullable(),
+  useCase: ParseFeedbackUseCaseSchema,
+  corrections: z.array(PromotionExportCorrectionSchema),
+})
+export type PromotionExportTenantGroup = z.infer<typeof PromotionExportTenantGroupSchema>
+
+export const PromotionExportResponseSchema = z.object({
+  retailerId: z.number().int(),
+  statuses: z.array(ParseFeedbackStatusSchema),
+  totalCorrections: z.number().int(),
+  /** True when the correction cap was hit (re-run narrower / by status). */
+  truncated: z.boolean(),
+  groups: z.array(PromotionExportTenantGroupSchema),
+})
+export type PromotionExportResponse = z.infer<typeof PromotionExportResponseSchema>

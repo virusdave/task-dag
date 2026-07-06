@@ -9,6 +9,9 @@ import {
   ParseFeedbackListResponseSchema,
   ParseFeedbackRecordResponseSchema,
   ParseFeedbackRouteParamsSchema,
+  PROMOTION_EXPORT_MAX_CORRECTIONS,
+  PromotionExportQuerySchema,
+  PromotionExportResponseSchema,
   UpdateParseFeedbackBodySchema,
   UpdateParseFeedbackStatusBodySchema,
 } from '../../shared/contracts/index.js'
@@ -21,21 +24,26 @@ import {
   insertListingCorrection,
   listParseFeedback,
   loadFuzzySkuProvenance,
+  loadPromotionExportFeedback,
   updateParseFeedbackDraft,
   updateParseFeedbackStatus,
 } from '../db/queries/catalogParseFeedbackQueries.js'
+import { buildPromotionExportGroups } from '../parsekit/parseFeedbackPromotion.js'
 
-const MIGRATION_MISSING_RE = /relation .*litalerts_parse_feedback.* does not exist/i
+const TABLE_MISSING_RE = /relation .*litalerts_parse_feedback.* does not exist/i
+// migration 098 promotion-provenance columns (`promoted_parser_id`, …).
+const PROMOTION_COLUMN_MISSING_RE = /column .*promoted_(parser_id|rule_id|config_sha).* does not exist/i
 
 function isMigrationMissing(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error)
-  return MIGRATION_MISSING_RE.test(message)
+  return TABLE_MISSING_RE.test(message) || PROMOTION_COLUMN_MISSING_RE.test(message)
 }
 
 function sendMigrationMissing(reply: FastifyReply): void {
   reply.status(503).send({
     error:
-      'litalerts_parse_feedback table is missing. Apply migration 097_litalerts_parse_feedback.sql.',
+      'litalerts_parse_feedback schema is out of date. Apply migrations ' +
+      '097_litalerts_parse_feedback.sql and 098_litalerts_parse_feedback_promotion.sql.',
   })
 }
 
@@ -174,11 +182,14 @@ export async function registerCatalogParseFeedbackRoutes(server: FastifyInstance
   })
 
   // PATCH /api/catalog/family-explorer/parse-feedback/:feedbackId/status
+  //
+  // Marking a row `promoted` asserts an EXTERNAL parser-config commit was
+  // reviewed/pushed/loaded and corresponds to this feedback — that is
+  // operational provenance, so it requires `admin`. Every other lifecycle
+  // transition stays `editor`. This never writes a git config (T5 boundary).
   server.patch(
     '/api/catalog/family-explorer/parse-feedback/:feedbackId/status',
     async (request, reply) => {
-      const user = await requireSessionUser(request, reply, 'editor')
-      if (!user) return
       const params = ParseFeedbackRouteParamsSchema.safeParse(request.params)
       if (!params.success) {
         return reply.code(400).send({ error: 'Invalid feedback id' })
@@ -187,15 +198,70 @@ export async function registerCatalogParseFeedbackRoutes(server: FastifyInstance
       if (!body.success) {
         return reply.code(400).send({ error: 'Invalid body', details: body.error.flatten() })
       }
+      const minRole = body.data.status === 'promoted' ? 'admin' : 'editor'
+      const user = await requireSessionUser(request, reply, minRole)
+      if (!user) return
       try {
         const updated = await updateParseFeedbackStatus(getPool(), params.data.feedbackId, {
           status: body.data.status,
           actor: user.email,
+          promotion:
+            body.data.status === 'promoted'
+              ? {
+                  parserId: body.data.promotedParserId,
+                  ruleId: body.data.promotedRuleId ?? null,
+                  configSha: body.data.promotedConfigSha,
+                }
+              : undefined,
         })
         if (!updated) {
           return reply.code(404).send({ error: 'Feedback not found.' })
         }
         return reply.send(ParseFeedbackRecordResponseSchema.parse({ feedback: updated }))
+      } catch (error) {
+        if (isMigrationMissing(error)) return sendMigrationMissing(reply)
+        throw error
+      }
+    },
+  )
+
+  // GET /api/catalog/family-explorer/parse-feedback/promotion-export?retailerId=..&statuses=..
+  //
+  // READ-ONLY, admin-gated report for the agent/reviewer promotion path (T5):
+  // the retailer's listing corrections grouped by parsekit tenant, each with a
+  // best-effort projection + (when valid) a ready-to-paste golden + linked
+  // convention proposals. It NEVER writes a parser config and never joins the
+  // production scorer / market-match read path. See
+  // docs/helios/catalog-market-data/PARSE_FEEDBACK_PROMOTION.md.
+  server.get(
+    '/api/catalog/family-explorer/parse-feedback/promotion-export',
+    async (request, reply) => {
+      const user = await requireSessionUser(request, reply, 'admin')
+      if (!user) return
+      const parsed = PromotionExportQuerySchema.safeParse(request.query)
+      if (!parsed.success) {
+        return reply.code(400).send({ error: 'Invalid query', details: parsed.error.flatten() })
+      }
+      try {
+        const rows = await loadPromotionExportFeedback(getPool(), {
+          retailerId: parsed.data.retailerId,
+          statuses: parsed.data.statuses,
+          limit: PROMOTION_EXPORT_MAX_CORRECTIONS,
+        })
+        const { groups, totalCorrections } = buildPromotionExportGroups(
+          parsed.data.retailerId,
+          rows.corrections,
+          rows.conventionsByCorrectionId,
+        )
+        return reply.send(
+          PromotionExportResponseSchema.parse({
+            retailerId: parsed.data.retailerId,
+            statuses: parsed.data.statuses,
+            totalCorrections,
+            truncated: rows.truncated,
+            groups,
+          }),
+        )
       } catch (error) {
         if (isMigrationMissing(error)) return sendMigrationMissing(reply)
         throw error

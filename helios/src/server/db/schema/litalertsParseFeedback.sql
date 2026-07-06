@@ -66,6 +66,14 @@ create table if not exists litalerts_parse_feedback (
   status_changed_by           text,
   status_changed_at           timestamptz,
 
+  -- Promotion provenance (T5). Set ONLY when the agent/reviewer marks a row
+  -- `promoted` after realizing it in `helios-parser-configs`; preserved through
+  -- a later `superseded`. This is NOT a web-side git write — it just records
+  -- which parser/rule/config-sha the DB feedback was promoted into.
+  promoted_parser_id          text,
+  promoted_rule_id            text,
+  promoted_config_sha         text,
+
   -- Actor / audit.
   created_by                  text not null,
   created_at                  timestamptz not null default now(),
@@ -90,7 +98,30 @@ create table if not exists litalerts_parse_feedback (
     ),
   -- Only convention proposals may reference a parent correction.
   constraint litalerts_parse_feedback_source_kind_ok
-    check (source_feedback_id is null or kind = 'convention_proposal')
+    check (source_feedback_id is null or kind = 'convention_proposal'),
+  -- Promotion provenance is coupled to lifecycle (T5):
+  --   promoted                          -> parser id + config sha required
+  --   draft/promotion_requested/rejected-> no provenance
+  --   superseded                        -> provenance optional (kept from a
+  --                                        prior promotion, or never promoted)
+  -- plus: parser id and config sha are both-or-neither, and a rule id requires
+  -- a parser id.
+  constraint litalerts_parse_feedback_promotion_meta_ok
+    check (
+      (
+        case
+          when status = 'promoted'
+            then promoted_parser_id is not null and promoted_config_sha is not null
+          when status in ('draft', 'promotion_requested', 'rejected')
+            then promoted_parser_id is null
+              and promoted_rule_id is null
+              and promoted_config_sha is null
+          else true
+        end
+      )
+      and (promoted_parser_id is null) = (promoted_config_sha is null)
+      and (promoted_rule_id is null or promoted_parser_id is not null)
+    )
 );
 
 -- Fetch feedback for the visible candidates (by fuzzy_sku_id).

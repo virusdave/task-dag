@@ -1418,6 +1418,31 @@ const SENTINELS: MigrationSentinel[] = [
       return hasTable && hasDetailsCheck && hasFuzzyIdx && hasRetailerIdx
     },
   },
+  {
+    migrationId: '098_litalerts_parse_feedback_promotion',
+    label:
+      'litalerts_parse_feedback promotion provenance (promoted_parser_id / ' +
+      'promoted_rule_id / promoted_config_sha + coupling CHECK) — automation#59, ' +
+      'T5. Without it the promotion export + the `promoted` status transition on ' +
+      'the /catalog family-explorer parse-feedback endpoints report the missing ' +
+      'columns (503). Provenance-only; nothing in the production scorer / ' +
+      'market-match read path joins it.',
+    // Probe the three columns AND the coupling constraint, so a partial manual
+    // apply reports pending rather than "safe".
+    check: async (db) => {
+      const [hasParserId, hasRuleId, hasConfigSha, hasCheck] = await Promise.all([
+        columnExists(db, 'litalerts_parse_feedback', 'promoted_parser_id'),
+        columnExists(db, 'litalerts_parse_feedback', 'promoted_rule_id'),
+        columnExists(db, 'litalerts_parse_feedback', 'promoted_config_sha'),
+        constraintExists(
+          db,
+          'litalerts_parse_feedback',
+          'litalerts_parse_feedback_promotion_meta_ok',
+        ),
+      ])
+      return hasParserId && hasRuleId && hasConfigSha && hasCheck
+    },
+  },
 ]
 
 interface CacheEntry {

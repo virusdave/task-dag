@@ -8,6 +8,7 @@ import {
   insertListingCorrection,
   listParseFeedback,
   loadFuzzySkuProvenance,
+  loadPromotionExportFeedback,
   updateParseFeedbackDraft,
   updateParseFeedbackStatus,
   type FuzzySkuProvenance,
@@ -42,6 +43,9 @@ const BASE_ROW = {
   source_feedback_id: null as string | null,
   details: { issueTypes: ['size'], packCount: 1 },
   status: 'draft',
+  promoted_parser_id: null as string | null,
+  promoted_rule_id: null as string | null,
+  promoted_config_sha: null as string | null,
   status_changed_by: null as string | null,
   status_changed_at: null as Date | null,
   created_by: 'op@example.com',
@@ -332,6 +336,126 @@ describe('updateParseFeedbackStatus', () => {
     expect(
       await updateParseFeedbackStatus(db, BASE_ROW.id, { status: 'rejected', actor: 'x' }),
     ).toBeNull()
+  })
+
+  it('clears promotion provenance for a draft-cycle status', async () => {
+    const { db, calls } = mockDb([
+      { match: (t) => /update litalerts_parse_feedback/.test(t), rows: [{ ...BASE_ROW, status: 'rejected' }] },
+    ])
+    await updateParseFeedbackStatus(db, BASE_ROW.id, { status: 'rejected', actor: 'op@example.com' })
+    expect(calls[0]!.text).toMatch(/promoted_parser_id = null/)
+    expect(calls[0]!.text).toMatch(/promoted_rule_id = null/)
+    expect(calls[0]!.text).toMatch(/promoted_config_sha = null/)
+    // No extra params beyond status, actor, id (nulls are literals).
+    expect(calls[0]!.params).toEqual(['rejected', 'op@example.com', BASE_ROW.id])
+  })
+
+  it('sets promotion provenance for status=promoted', async () => {
+    const { db, calls } = mockDb([
+      {
+        match: (t) => /update litalerts_parse_feedback/.test(t),
+        rows: [
+          {
+            ...BASE_ROW,
+            status: 'promoted',
+            promoted_parser_id: 'litalerts.bayside-cannabis',
+            promoted_rule_id: 'bayside.brand-desc-size',
+            promoted_config_sha: 'a'.repeat(40),
+          },
+        ],
+      },
+    ])
+    const out = await updateParseFeedbackStatus(db, BASE_ROW.id, {
+      status: 'promoted',
+      actor: 'admin@example.com',
+      promotion: {
+        parserId: 'litalerts.bayside-cannabis',
+        ruleId: 'bayside.brand-desc-size',
+        configSha: 'a'.repeat(40),
+      },
+    })
+    expect(calls[0]!.text).toMatch(/promoted_parser_id = \$3/)
+    expect(calls[0]!.text).toMatch(/promoted_rule_id = \$4/)
+    expect(calls[0]!.text).toMatch(/promoted_config_sha = \$5/)
+    expect(calls[0]!.params).toEqual([
+      'promoted',
+      'admin@example.com',
+      'litalerts.bayside-cannabis',
+      'bayside.brand-desc-size',
+      'a'.repeat(40),
+      BASE_ROW.id,
+    ])
+    expect(out!.promotedParserId).toBe('litalerts.bayside-cannabis')
+    expect(out!.promotedRuleId).toBe('bayside.brand-desc-size')
+    expect(out!.promotedConfigSha).toBe('a'.repeat(40))
+  })
+
+  it('preserves promotion provenance (no column writes) for status=superseded', async () => {
+    const { db, calls } = mockDb([
+      { match: (t) => /update litalerts_parse_feedback/.test(t), rows: [{ ...BASE_ROW, status: 'superseded' }] },
+    ])
+    await updateParseFeedbackStatus(db, BASE_ROW.id, { status: 'superseded', actor: 'op@example.com' })
+    // No assignment to the promotion columns in the SET clause (they still
+    // appear in the RETURNING column list, so match only on `col = `).
+    expect(calls[0]!.text).not.toMatch(/promoted_parser_id =/)
+    expect(calls[0]!.text).not.toMatch(/promoted_config_sha =/)
+    expect(calls[0]!.params).toEqual(['superseded', 'op@example.com', BASE_ROW.id])
+  })
+
+  it('throws when promoted is requested without provenance', async () => {
+    const { db } = mockDb([{ match: (t) => /update litalerts_parse_feedback/.test(t), rows: [BASE_ROW] }])
+    await expect(
+      updateParseFeedbackStatus(db, BASE_ROW.id, { status: 'promoted', actor: 'x' }),
+    ).rejects.toThrow(/promotion metadata required/)
+  })
+})
+
+describe('loadPromotionExportFeedback', () => {
+  it('runs a retailer+status-scoped correction read then a linked-convention read', async () => {
+    const { db, calls } = mockDb([
+      { match: (t) => /kind = 'listing_correction'/.test(t), rows: [BASE_ROW] },
+      { match: (t) => /kind = 'convention_proposal'/.test(t), rows: [conventionRow()] },
+    ])
+    const out = await loadPromotionExportFeedback(db, {
+      retailerId: 7,
+      statuses: ['draft', 'promotion_requested'],
+      limit: 500,
+    })
+    expect(calls).toHaveLength(2)
+    // First: retailer + status filtered, bounded by limit+1.
+    expect(calls[0]!.text).toMatch(/retailer_id = \$1/)
+    expect(calls[0]!.text).toMatch(/status = any\(\$2::text\[\]\)/)
+    expect(calls[0]!.params).toEqual([7, ['draft', 'promotion_requested'], 501])
+    // Second: linked conventions by source_feedback_id in the correction ids.
+    expect(calls[1]!.text).toMatch(/source_feedback_id = any\(\$1::uuid\[\]\)/)
+    expect(calls[1]!.params).toEqual([[BASE_ROW.id]])
+    expect(out.corrections).toHaveLength(1)
+    expect(out.truncated).toBe(false)
+    expect(out.conventionsByCorrectionId.get(BASE_ROW.id)).toHaveLength(1)
+  })
+
+  it('reports truncation and trims to the limit when an extra row comes back', async () => {
+    const rowB = { ...BASE_ROW, id: '33333333-3333-4333-8333-333333333333' }
+    const { db, calls } = mockDb([
+      { match: (t) => /kind = 'listing_correction'/.test(t), rows: [BASE_ROW, rowB] },
+      { match: (t) => /kind = 'convention_proposal'/.test(t), rows: [] },
+    ])
+    const out = await loadPromotionExportFeedback(db, { retailerId: 7, statuses: ['draft'], limit: 1 })
+    expect(out.truncated).toBe(true)
+    expect(out.corrections).toHaveLength(1)
+    expect(out.corrections[0]!.id).toBe(BASE_ROW.id)
+    // Second read keyed only on the trimmed correction id.
+    expect(calls[1]!.params).toEqual([[BASE_ROW.id]])
+  })
+
+  it('skips the convention read when there are no corrections', async () => {
+    const { db, calls } = mockDb([
+      { match: (t) => /kind = 'listing_correction'/.test(t), rows: [] },
+    ])
+    const out = await loadPromotionExportFeedback(db, { retailerId: 7, statuses: ['draft'], limit: 500 })
+    expect(calls).toHaveLength(1)
+    expect(out.corrections).toHaveLength(0)
+    expect(out.conventionsByCorrectionId.size).toBe(0)
   })
 })
 

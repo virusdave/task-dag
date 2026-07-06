@@ -7,6 +7,8 @@ import {
   PARSE_FEEDBACK_ID_QUERY_LIMIT,
   ParseFeedbackListQuerySchema,
   ParseFeedbackRecordSchema,
+  PromotionExportQuerySchema,
+  UpdateParseFeedbackStatusBodySchema,
 } from './catalogParseFeedback.js'
 
 // ---------------------------------------------------------------------------
@@ -73,6 +75,9 @@ describe('ParseFeedbackRecordSchema (discriminated union)', () => {
     matchedCatalogProductId: 900,
     sourceFeedbackId: null,
     status: 'draft',
+    promotedParserId: null,
+    promotedRuleId: null,
+    promotedConfigSha: null,
     createdBy: 'op',
     createdAt: '2026-07-06T10:00:00.000Z',
     updatedBy: 'op',
@@ -176,5 +181,75 @@ describe('CreateParseFeedbackBodySchema', () => {
         },
       }).success,
     ).toBe(false)
+  })
+})
+
+describe('UpdateParseFeedbackStatusBodySchema (T5 promotion)', () => {
+  const SHA = 'a'.repeat(40)
+
+  it('accepts a non-promoted status with no provenance', () => {
+    for (const status of ['draft', 'promotion_requested', 'rejected', 'superseded'] as const) {
+      expect(UpdateParseFeedbackStatusBodySchema.safeParse({ status }).success).toBe(true)
+    }
+  })
+
+  it('accepts a promoted status with parser id + config sha (rule id optional)', () => {
+    const parsed = UpdateParseFeedbackStatusBodySchema.parse({
+      status: 'promoted',
+      promotedParserId: 'litalerts.bayside-cannabis',
+      promotedConfigSha: SHA,
+    })
+    expect(parsed.status).toBe('promoted')
+    if (parsed.status === 'promoted') {
+      expect(parsed.promotedParserId).toBe('litalerts.bayside-cannabis')
+      expect(parsed.promotedConfigSha).toBe(SHA)
+    }
+  })
+
+  it('rejects promoted without provenance', () => {
+    expect(UpdateParseFeedbackStatusBodySchema.safeParse({ status: 'promoted' }).success).toBe(false)
+  })
+
+  it('rejects promoted with a non-hex / wrong-length config sha', () => {
+    expect(
+      UpdateParseFeedbackStatusBodySchema.safeParse({
+        status: 'promoted',
+        promotedParserId: 'litalerts.x',
+        promotedConfigSha: 'not-a-sha',
+      }).success,
+    ).toBe(false)
+  })
+
+  it('rejects promotion provenance on a non-promoted status (strict)', () => {
+    expect(
+      UpdateParseFeedbackStatusBodySchema.safeParse({
+        status: 'draft',
+        promotedParserId: 'litalerts.x',
+        promotedConfigSha: SHA,
+      }).success,
+    ).toBe(false)
+  })
+})
+
+describe('PromotionExportQuerySchema', () => {
+  it('coerces retailerId and defaults statuses to draft,promotion_requested', () => {
+    const parsed = PromotionExportQuerySchema.parse({ retailerId: '7' })
+    expect(parsed.retailerId).toBe(7)
+    expect(parsed.statuses).toEqual(['draft', 'promotion_requested'])
+  })
+
+  it('parses a comma status list', () => {
+    const parsed = PromotionExportQuerySchema.parse({ retailerId: '7', statuses: 'promoted,superseded' })
+    expect(parsed.statuses).toEqual(['promoted', 'superseded'])
+  })
+
+  it('rejects an unknown status', () => {
+    expect(
+      PromotionExportQuerySchema.safeParse({ retailerId: '7', statuses: 'bogus' }).success,
+    ).toBe(false)
+  })
+
+  it('requires a retailerId', () => {
+    expect(PromotionExportQuerySchema.safeParse({}).success).toBe(false)
   })
 })
