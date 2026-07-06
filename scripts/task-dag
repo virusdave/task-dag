@@ -1206,6 +1206,11 @@ COMMANDS:
                            /--kind=<k> filter by blocker kind)
     drop <sha>             Housecleaning: remove an orphaned/irrelevant task
                            from the pickable/blocked sets
+    comment <issue|sha>    Post an issue comment THROUGH task-dag (the ONLY
+                           sanctioned path) — stamps a task-dag:<kind> marker
+                           so it can't be re-ingested as a phantom task.
+                           --kind=status|operator-decision, --body/--body-file.
+                           Do NOT use raw `gh issue comment`.
     issue-update <sha>     Update GitHub issue with task progress
     validate               Validate DAG structure; --strict audits EVERY
                            task/gh ref (empty-tree + known namespace) and
@@ -4305,6 +4310,242 @@ EOF
     [ $errors -eq 0 ] && return 0 || return 3
 }
 
+# ─────────────────────────────────────────────────────────────────────
+# Shared GitHub-issue comment poster.
+#
+# _post_issue_comment <owner/repo> <issue-number> <body-with-REAL-newlines>
+#
+# JSON-encodes the body SAFELY with jq (so arbitrary agent-supplied text —
+# quotes, backslashes, real newlines, control chars — cannot break the
+# request or inject fields; the old hand-rolled `-d "{\"body\":\"$x\"}"`
+# only survived because it fed itself controlled `\n`-literal strings),
+# POSTs via the GitHub API using GITHUB_TOKEN, and prints the created
+# comment's html_url on success. Returns 0 on HTTP 201, else 1 (echoing the
+# API error to stderr). The caller must have already confirmed GITHUB_TOKEN
+# is set. This is the ONE place task-dag turns a body into an issue comment.
+# ─────────────────────────────────────────────────────────────────────
+_post_issue_comment() {
+    local repo="$1" issue="$2" body="$3"
+    local payload api_url response http_code resp_body
+    if ! command -v jq >/dev/null 2>&1; then
+        echo "Error: 'jq' is required to post issue comments but was not found on PATH" >&2
+        return 1
+    fi
+    payload=$(jq -n --arg b "$body" '{body:$b}') || {
+        echo "Error: failed to JSON-encode comment body" >&2
+        return 1
+    }
+    api_url="https://api.github.com/repos/${repo}/issues/${issue}/comments"
+    response=$(curl -s -w $'\n%{http_code}' -X POST "$api_url" \
+        -H "Authorization: token ${GITHUB_TOKEN}" \
+        -H "Accept: application/vnd.github+json" \
+        -d "$payload")
+    http_code=$(printf '%s' "$response" | tail -n1)
+    resp_body=$(printf '%s' "$response" | sed '$d')
+    if [ "$http_code" = "201" ]; then
+        printf '%s' "$resp_body" | jq -r '.html_url // empty' 2>/dev/null || true
+        return 0
+    fi
+    echo "Error: failed to post comment to ${repo}#${issue} (HTTP ${http_code})" >&2
+    printf '%s\n' "$resp_body" >&2
+    return 1
+}
+
+# Command: comment - post a convention-enforcing comment to a GitHub issue.
+#
+# THE single sanctioned way for an agent to post an issue comment. It always
+# stamps a leading `<!-- task-dag:<kind> -->` marker so the comment-sync
+# ingest can never turn it into a phantom pickable task (the comment→task
+# dispatch loop). Agents must NOT call `gh issue comment` / the raw API by
+# hand — see canon rules/WORKFLOW.md and docs/INVARIANTS.md.
+cmd_comment() {
+    local target="" kind="" body="" body_file="" repo_opt="" dry_run=false
+    local have_body=false have_body_file=false
+
+    # $1 is the flag; require a value arg or fail cleanly (avoids `shift 2`
+    # aborting the whole script under `set -u`/pipefail on a dangling flag).
+    _need_val() { [ $# -ge 2 ] || { echo "Error: $1 requires a value" >&2; return 2; }; }
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --kind=*)      kind="${1#*=}"; shift ;;
+            --kind)        _need_val "$@" || return 2; kind="$2"; shift 2 ;;
+            --body=*)      body="${1#*=}"; have_body=true; shift ;;
+            --body)        _need_val "$@" || return 2; body="$2"; have_body=true; shift 2 ;;
+            --body-file=*) body_file="${1#*=}"; have_body_file=true; shift ;;
+            --body-file)   _need_val "$@" || return 2; body_file="$2"; have_body_file=true; shift 2 ;;
+            --issue=*)     target="${1#*=}"; shift ;;
+            --issue)       _need_val "$@" || return 2; target="$2"; shift 2 ;;
+            --repo=*)      repo_opt="${1#*=}"; shift ;;
+            --repo)        _need_val "$@" || return 2; repo_opt="$2"; shift 2 ;;
+            --dry-run)     dry_run=true; shift ;;
+            --help|-h)
+                cat <<'EOF'
+Usage: task-dag comment <issue|task-sha> --kind=<status|operator-decision> \
+                        (--body=TEXT | --body-file=PATH) [--repo=owner/repo] [--dry-run]
+
+Post a comment to a GitHub issue THROUGH task-dag so it carries the correct
+machine marker and can never be mis-ingested as a new task. This is the ONLY
+sanctioned way for an agent to comment on a task-managed issue — do NOT call
+`gh issue comment` or the raw API by hand.
+
+Target (one of):
+  <task-sha>          a task commit; its issue/repo are resolved from metadata
+  <N> or #N           an issue number (repo from --repo or the origin remote)
+  --issue=N           same as passing N positionally
+
+Kinds (required; fail-closed):
+  status              non-actionable progress/handoff note
+  operator-decision   a note that needs the operator to read/decide (still
+                      non-actionable as a task; pair with `block` + page-dave)
+  completion          NOT allowed here — cross-repo completion is emitted only
+                      by the automated `Satisfies:` trailer flow.
+
+Body (exactly one of):
+  --body=TEXT         inline body
+  --body-file=PATH    read body from a file
+
+The tool stamps the marker; your body must NOT contain a `<!-- task-dag:` marker.
+--dry-run prints the resolved target (stderr) and the exact final body (stdout)
+and posts nothing. Re-running posts again (no dedup).
+EOF
+                return 0
+                ;;
+            -*) echo "Error: unknown option: $1" >&2; return 2 ;;
+            *)
+                if [ -z "$target" ]; then target="$1"; else
+                    echo "Error: unexpected argument: $1" >&2; return 2
+                fi
+                shift ;;
+        esac
+    done
+
+    # ---- validate kind (fail-closed) ----
+    case "$kind" in
+        status|operator-decision) ;;
+        completion)
+            echo "Error: --kind=completion is not allowed here. Cross-repo completion" >&2
+            echo "       is emitted only by the automated 'Satisfies:' trailer flow." >&2
+            return 2 ;;
+        "")
+            echo "Error: --kind is required (status|operator-decision)" >&2
+            return 2 ;;
+        *)
+            echo "Error: unknown --kind '$kind' (expected status|operator-decision)" >&2
+            return 2 ;;
+    esac
+
+    # ---- resolve target -> repo + issue number ----
+    [ -n "$target" ] || { echo "Error: a target issue number or task sha is required" >&2; return 2; }
+    local issue_num="" repo="" issue_url=""
+    if [[ "$target" =~ ^#?[0-9]+$ ]]; then
+        issue_num="${target#\#}"
+        repo="$repo_opt"
+        if [ -z "$repo" ]; then
+            local remote_url
+            remote_url=$(git remote get-url origin 2>/dev/null || echo "")
+            if [[ "$remote_url" =~ github\.com[:/]([^/]+/[^/]+?)(\.git)?$ ]]; then
+                repo="${BASH_REMATCH[1]}"; repo="${repo%.git}"
+            fi
+        fi
+    else
+        local task_sha task_msg
+        task_sha=$(resolve_sha "$target") || {
+            echo "Error: '$target' is neither an issue number nor a resolvable task sha" >&2
+            return 2
+        }
+        task_msg=$(parse_commit_metadata "$task_sha")
+        issue_num=$(extract_field "$task_msg" "Issue" | sed 's/^#//')
+        issue_url=$(extract_field "$task_msg" "URL")
+        if [ -n "$repo_opt" ]; then
+            repo="$repo_opt"
+        elif [ -n "$issue_url" ]; then
+            repo=$(printf '%s' "$issue_url" | sed -E 's|https://github.com/([^/]+/[^/]+)/.*|\1|')
+        fi
+        [ -n "$issue_num" ] || { echo "Error: task $target has no Issue number" >&2; return 2; }
+    fi
+    [ -n "$issue_num" ] || { echo "Error: could not determine the issue number" >&2; return 2; }
+    [ -n "$repo" ] || { echo "Error: could not determine owner/repo; pass --repo=owner/repo" >&2; return 2; }
+    # Fail-closed on anything that would land unsanitized in a GitHub API URL —
+    # this is the single sanctioned writer, so keep it strict.
+    [[ "$issue_num" =~ ^[0-9]+$ ]] || { echo "Error: resolved issue '$issue_num' is not a number" >&2; return 2; }
+    [[ "$repo" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || { echo "Error: resolved repo '$repo' is not owner/repo" >&2; return 2; }
+
+    # ---- read + normalize body ----
+    if [ "$have_body" = true ] && [ "$have_body_file" = true ]; then
+        echo "Error: pass exactly one of --body / --body-file" >&2; return 2
+    fi
+    if [ "$have_body" = false ] && [ "$have_body_file" = false ]; then
+        echo "Error: a body is required (--body=TEXT or --body-file=PATH)" >&2; return 2
+    fi
+    local raw
+    if [ "$have_body_file" = true ]; then
+        [ -r "$body_file" ] || { echo "Error: cannot read body file: $body_file" >&2; return 2; }
+        raw=$(cat "$body_file")
+    else
+        raw="$body"
+    fi
+
+    # Normalize: strip a UTF-8 BOM, CRLF/CR -> LF, drop leading blank lines.
+    # Command substitution strips trailing newlines, so trailing blank lines
+    # go too. The result is the body that will sit BELOW the marker line.
+    local normalized
+    normalized=$(printf '%s' "$raw" | tr -d '\r' | sed '1s/^\xEF\xBB\xBF//' | sed '/./,$!d')
+
+    if [ -z "$(printf '%s' "$normalized" | tr -d '[:space:]')" ]; then
+        echo "Error: comment body is empty (whitespace-only) after normalization" >&2; return 2
+    fi
+    # Reject any embedded task-dag marker (space/case-flexible) — the tool is the
+    # single writer of the marker; one marker per comment.
+    if printf '%s' "$normalized" | grep -qiE '<!--[[:space:]]*task-dag:'; then
+        echo "Error: body may not contain a '<!-- task-dag:' marker — the tool stamps" >&2
+        echo "       the marker itself (one marker per comment, one writer)." >&2
+        return 2
+    fi
+
+    # ---- stamp marker + assemble final body (marker ALWAYS physical line 1) ----
+    local marker
+    case "$kind" in
+        status)            marker="<!-- task-dag:status -->" ;;
+        operator-decision) marker="<!-- task-dag:operator-decision -->" ;;
+    esac
+    local final
+    final=$(printf '%s\n\n%s\n' "$marker" "$normalized")
+
+    # GitHub rejects comments over 65536 chars; fail before the API does.
+    if [ "${#final}" -gt 65536 ]; then
+        echo "Error: final comment body is ${#final} chars (>65536 GitHub limit)" >&2; return 2
+    fi
+
+    if [ "$dry_run" = true ]; then
+        echo "[dry-run] would post to ${repo}#${issue_num} (kind=${kind})" >&2
+        printf '%s\n' "$final"
+        return 0
+    fi
+
+    if [ -z "${GITHUB_TOKEN:-}" ]; then
+        echo "Error: GITHUB_TOKEN is not set; cannot post to GitHub" >&2
+        return 1
+    fi
+
+    # Confirm the issue exists before posting (catches a wrong bare number
+    # or wrong repo before we write to the wrong place).
+    local check_code
+    check_code=$(curl -s -o /dev/null -w '%{http_code}' \
+        -H "Authorization: token ${GITHUB_TOKEN}" \
+        -H "Accept: application/vnd.github+json" \
+        "https://api.github.com/repos/${repo}/issues/${issue_num}")
+    if [ "$check_code" != "200" ]; then
+        echo "Error: issue ${repo}#${issue_num} not reachable (HTTP ${check_code})" >&2
+        return 1
+    fi
+
+    local url
+    url=$(_post_issue_comment "$repo" "$issue_num" "$final") || return 1
+    printf "${GREEN}✓ Posted %s comment to %s#%s${RESET}\n" "$kind" "$repo" "$issue_num"
+    [ -n "$url" ] && echo "$url"
+    return 0
+}
+
 # Command: issue-update - update GitHub issue with task progress
 cmd_issue_update() {
     local task_sha=""
@@ -4960,6 +5201,7 @@ main() {
         validate) cmd_validate "$@" ;;
         chain-read) cmd_chain_read "$@" ;;
         chain-write) cmd_chain_write "$@" ;;
+        comment) cmd_comment "$@" ;;
         issue-update) cmd_issue_update "$@" ;;
         check-workflow) cmd_check_workflow "$@" ;;
         delegate) cmd_delegate "$@" ;;

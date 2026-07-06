@@ -186,13 +186,39 @@ are higher-risk and want their own Oracle diff review:
    Ruleset is the only hard gate. Deferred because it changes fleet push
    topology and needs operator sign-off.
 
-## Not fixed by commit validation (surfaced for an operator decision)
+## Agent-authored issue comments MUST go through `task-dag comment`
 
-The incident that triggered this work — an operator status comment lacking
-the `<!-- task-dag:status -->` marker getting ingested as a task — is an
-**ingestion-polarity** problem, not a malformed-commit problem: the
-ingested task was perfectly well-formed. Commit validation cannot catch it.
-The candidate fixes (either an `ingest-comment` acknowledgement reply that
-makes accidental ingestion instantly visible + reversible, or flipping to
-opt-in markers) change operator workflow semantics and are an **operator
+The incident that triggered this work — a status comment lacking the
+`<!-- task-dag:status -->` marker getting ingested as a new pickable task —
+was originally read as an operator-workflow problem. It was not: the comment
+was posted by an **agent** through an unmanaged path (raw `gh issue comment`
+/ the REST API), so the marker was simply forgotten. That is a **tooling
+gap**, and the fix is tooling, not asking anyone to remember a marker.
+
+**Invariant: agents post issue comments ONLY via `task-dag comment`.** It is
+the single writer that turns an agent body into an issue comment, and it:
+
+- **requires `--kind`** (`status` | `operator-decision`) and fails closed on
+  anything else — notably `--kind=completion` is rejected and redirected to
+  the automated `Satisfies:` trailer flow (completion has its own dedicated
+  path and must not be hand-emitted as a generic comment);
+- **stamps the `<!-- task-dag:<kind> -->` marker as physical line 1**, so the
+  comment can never be mis-ingested as a task (any leading `<!--` line, or any
+  `<!-- task-dag:` anywhere in the body, is skipped by `ingest-comment`);
+- **reserves the whole `task-dag:*` marker namespace**: a body that itself
+  contains `<!-- task-dag:` is rejected (one marker per comment, one writer),
+  so agents cannot smuggle in a second/forged marker;
+- normalizes the body, rejects empty/oversize bodies, and JSON-encodes via
+  `jq` so arbitrary text cannot break or inject into the API request.
+
+Do **NOT** use `gh issue comment`, `curl` against `/issues/*/comments`, or any
+other hand-rolled path to comment on a task-managed issue. A round-trip test
+(`tests/task-dag/comment-cmd.sh`) feeds the exact body `comment` would post
+back through the real `ingest-comment` and asserts it is skipped, locking the
+no-phantom-task guarantee to the implementation.
+
+The remaining, genuinely-operator-facing question — whether *operator* prose
+(a human typing directly in the GitHub UI, who cannot be forced through the
+CLI) should get an `ingest-comment` acknowledgement reply or opt-in markers —
+still changes operator workflow semantics and remains an **operator
 decision**, not an agent's to make unilaterally.
