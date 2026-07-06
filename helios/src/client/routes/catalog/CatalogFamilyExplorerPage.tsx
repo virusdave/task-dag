@@ -7,6 +7,8 @@ import {
   type BrandFamilyMappingSummary,
   type BrandFamilyMarketMatchResponse,
   type BrandFamilyMatchCandidate,
+  type BrandFamilyPriceOutlier,
+  type BrandFamilyPriceOutlierSummary,
   type CatalogFamilyExplorerResponse,
 } from '../../../shared/contracts/index.js'
 import {
@@ -215,6 +217,207 @@ function priceLabel(c: BrandFamilyMatchCandidate): string {
   return `$${c.preTaxPrice.toFixed(2)}${post}`
 }
 
+// ---------------------------------------------------------------------------
+// Price-outlier review UX (issue #59 T2). Surfaces T1's review signals in this
+// existing panel: a summary pill, a compact "Needs review" strip above the
+// table, and sticky score-cell affordances (badge + ✎ Fix). Outliers are a
+// REVIEW SIGNAL ONLY — never removed, reordered, or down-ranked. The Fix action
+// is an honest local seam: it selects a listing and shows a placeholder; the
+// real parse-correction drawer + feedback save ship in T4.
+// ---------------------------------------------------------------------------
+
+/** USD, or an em dash when null. e.g. "$42.00" / "—". */
+function formatUsd(n: number | null): string {
+  return n == null ? '—' : `$${n.toFixed(2)}`
+}
+
+/** Signed USD delta, e.g. "+$3.00" / "−$5.00" (minus sign is U+2212). */
+function formatUsdDelta(n: number): string {
+  const sign = n < 0 ? '\u2212' : '+'
+  return `${sign}$${Math.abs(n).toFixed(2)}`
+}
+
+/** Family pack label, e.g. "pack 1" / "(no pack)". */
+function packLabel(n: number | null): string {
+  return n == null ? '(no pack)' : `pack ${n}`
+}
+
+/** Direction glyph for the outlier (below = ↓$, above = ↑$). */
+function outlierDirectionGlyph(kind: BrandFamilyPriceOutlier['kind']): string {
+  return kind === 'low' ? '\u2193$' : '\u2191$'
+}
+
+/** Accessible phrasing for the outlier direction. */
+function outlierDirectionLabel(kind: BrandFamilyPriceOutlier['kind']): string {
+  return kind === 'low' ? 'below-market price outlier' : 'above-market price outlier'
+}
+
+/** Hover title for a single candidate's outlier badge. */
+function outlierBadgeTitle(o: BrandFamilyPriceOutlier): string {
+  return `${outlierDirectionLabel(o.kind)}: ${formatUsdDelta(o.delta)} vs median ${formatUsd(
+    o.median,
+  )} (fence ${formatUsd(o.fence)}; basis ${o.basis})`
+}
+
+/** Hover title for the family-level price-review summary pill. */
+function priceOutlierSummaryTitle(s: BrandFamilyPriceOutlierSummary): string {
+  return (
+    `Price review: method ${s.method}; basis ${s.basis} pre-tax price${s.basis === 1 ? '' : 's'}; ` +
+    `median ${formatUsd(s.median)}; low fence ${formatUsd(s.lowFence)}; high fence ${formatUsd(
+      s.highFence,
+    )}; ${s.lowCount} low / ${s.highCount} high.`
+  )
+}
+
+/** Compact "parsed X · matched Y · family Z pack N" size context line. */
+function sizeContextLabel(c: BrandFamilyMatchCandidate, data: BrandFamilyMarketMatchResponse): string {
+  return `parsed ${c.parsedSizeLabel ?? '—'} · matched ${c.matchedSizeGroupLabel} · family ${
+    data.sizeGroupLabel
+  } ${packLabel(data.packCount)}`
+}
+
+/** Left-border accent shared by outlier rows / cards / the fix placeholder. */
+const REVIEW_ACCENT = '3px solid var(--warning)'
+const REVIEW_TINT = 'rgba(214, 161, 74, 0.10)'
+
+/**
+ * Compact "Needs review" strip above the table. Renders `reviewCandidates` (the
+ * full-set, severity-sorted outliers T1 computes BEFORE the display cap, so an
+ * outlier can never be invisible for falling outside the top-N table slice).
+ * Mobile-first stacked cards that wrap on wide screens; first 3 by default with
+ * a "show all returned" toggle. `Fix parse` selects the listing (seam for T4).
+ */
+function PriceReviewStrip({
+  data,
+  showAll,
+  onToggleShowAll,
+  onFix,
+}: {
+  data: BrandFamilyMarketMatchResponse
+  showAll: boolean
+  onToggleShowAll: () => void
+  onFix: (c: BrandFamilyMatchCandidate) => void
+}) {
+  const all = data.reviewCandidates
+  const shown = showAll ? all : all.slice(0, 3)
+  const hiddenBeyondCap = Math.max(0, data.priceOutlierSummary.flaggedCount - all.length)
+  return (
+    <div style={{ marginBottom: '0.5rem' }}>
+      <div
+        className="inline-row wrap-row"
+        style={{ gap: '0.375rem', alignItems: 'center', justifyContent: 'flex-start', marginBottom: '0.375rem' }}
+      >
+        <Pill tone="warning" title={priceOutlierSummaryTitle(data.priceOutlierSummary)}>
+          Needs review
+        </Pill>
+        <span className="subtle-copy">
+          {data.priceOutlierSummary.flaggedCount} price outlier
+          {data.priceOutlierSummary.flaggedCount === 1 ? '' : 's'} to scrutinize
+        </span>
+        {all.length > 3 ? (
+          <button type="button" className="ghost-button" onClick={onToggleShowAll}>
+            {showAll ? 'show fewer' : `show all ${all.length}`}
+          </button>
+        ) : null}
+      </div>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.375rem' }}>
+        {shown.map((c) => (
+          <div
+            key={c.fuzzySkuId}
+            style={{
+              display: 'flex',
+              flexWrap: 'wrap',
+              alignItems: 'center',
+              gap: '0.5rem',
+              flex: '1 1 22rem',
+              minWidth: 0,
+              border: '1px solid var(--panel-border)',
+              borderLeft: REVIEW_ACCENT,
+              borderRadius: '0.5rem',
+              padding: '0.375rem 0.5rem',
+              background: REVIEW_TINT,
+            }}
+          >
+            <Pill tone="warning" title={outlierBadgeTitle(c.priceOutlier)}>
+              {outlierDirectionGlyph(c.priceOutlier.kind)} {formatUsdDelta(c.priceOutlier.delta)}
+            </Pill>
+            {c.url != null ? (
+              <a href={c.url} target="_blank" rel="noreferrer">
+                {displayOrNull(c.listingName)}
+              </a>
+            ) : (
+              <span>{displayOrNull(c.listingName)}</span>
+            )}
+            <span className="subtle-copy">{displayOrNull(c.retailer)}</span>
+            <span style={{ fontWeight: 600, whiteSpace: 'nowrap' }}>{priceLabel(c)}</span>
+            <span className="subtle-copy">{sizeContextLabel(c, data)}</span>
+            <button
+              type="button"
+              className="ghost-button"
+              style={{ marginLeft: 'auto' }}
+              onClick={() => onFix(c)}
+            >
+              Fix parse
+            </button>
+          </div>
+        ))}
+      </div>
+      {hiddenBeyondCap > 0 ? (
+        <p className="subtle-copy" style={{ margin: '0.375rem 0 0' }}>
+          Review list includes {all.length} of {data.priceOutlierSummary.flaggedCount} flagged; {hiddenBeyondCap} more
+          beyond the review cap ({data.reviewCandidatesLimit}).
+        </p>
+      ) : null}
+    </div>
+  )
+}
+
+/**
+ * Honest placeholder for the Fix-parse seam. T2 wires the click targets + state
+ * ownership; T4 replaces this with the real parse-correction drawer / bottom
+ * sheet + feedback save (using the same selected candidate + family context).
+ * Deliberately does NOT claim anything was saved.
+ */
+function FixParsePlaceholder({
+  candidate,
+  data,
+  onDismiss,
+}: {
+  candidate: BrandFamilyMatchCandidate
+  data: BrandFamilyMarketMatchResponse
+  onDismiss: () => void
+}) {
+  return (
+    <div
+      style={{
+        border: '1px solid var(--panel-border)',
+        borderLeft: '3px solid var(--accent)',
+        borderRadius: '0.5rem',
+        padding: '0.5rem 0.625rem',
+        marginBottom: '0.5rem',
+        background: 'var(--accent-muted)',
+      }}
+    >
+      <div className="inline-row wrap-row" style={{ gap: '0.5rem', alignItems: 'center' }}>
+        <span style={{ fontWeight: 600 }}>Selected for parse correction</span>
+        <button type="button" className="ghost-button" style={{ marginLeft: 'auto' }} onClick={onDismiss}>
+          Dismiss
+        </button>
+      </div>
+      <p className="subtle-copy" style={{ margin: '0.25rem 0 0' }}>
+        {displayOrNull(candidate.listingName)} · {displayOrNull(candidate.retailer)}
+      </p>
+      <p className="subtle-copy" style={{ margin: '0.125rem 0 0' }}>
+        {sizeContextLabel(candidate, data)}
+      </p>
+      <p className="subtle-copy" style={{ margin: '0.25rem 0 0' }}>
+        The parse-correction drawer (correct the extracted fields + record the retailer naming convention, then save)
+        ships in the next task.
+      </p>
+    </div>
+  )
+}
+
 /**
  * One per-brand sub-family row: brand header → (on expand) the LitAlerts
  * market-match panel + the variant table. The market-match panel is mounted
@@ -292,6 +495,14 @@ function MarketMatchPanel({ familyKey, brandKey }: { familyKey: string; brandKey
             </Pill>{' '}
             <Pill tone="muted">{data.belowThresholdCount} below</Pill>{' '}
             <Pill tone={mappingTone(data.mappingSummary)}>{mappingLabel(data.mappingSummary)}</Pill>
+            {data.priceOutlierSummary.flaggedCount > 0 ? (
+              <>
+                {' '}
+                <Pill tone="warning" title={priceOutlierSummaryTitle(data.priceOutlierSummary)}>
+                  {data.priceOutlierSummary.flaggedCount} price review
+                </Pill>
+              </>
+            ) : null}
           </>
         ) : null}
       </summary>
@@ -311,6 +522,8 @@ function MarketMatchPanel({ familyKey, brandKey }: { familyKey: string; brandKey
 }
 
 function MarketMatchBody({ data }: { data: BrandFamilyMarketMatchResponse }) {
+  const [showAllReview, setShowAllReview] = useState(false)
+  const [fixTarget, setFixTarget] = useState<BrandFamilyMatchCandidate | null>(null)
   const capturedRange =
     data.snapshotCapturedAtMin != null
       ? data.snapshotCapturedAtMin === data.snapshotCapturedAtMax
@@ -387,6 +600,19 @@ function MarketMatchBody({ data }: { data: BrandFamilyMarketMatchResponse }) {
         </div>
       ) : null}
 
+      {data.reviewCandidates.length > 0 ? (
+        <PriceReviewStrip
+          data={data}
+          showAll={showAllReview}
+          onToggleShowAll={() => setShowAllReview((v) => !v)}
+          onFix={setFixTarget}
+        />
+      ) : null}
+
+      {fixTarget != null ? (
+        <FixParsePlaceholder candidate={fixTarget} data={data} onDismiss={() => setFixTarget(null)} />
+      ) : null}
+
       {data.candidates.length === 0 ? (
         <p className="subtle-copy">
           No partner listings matched this family
@@ -429,7 +655,9 @@ function MarketMatchBody({ data }: { data: BrandFamilyMarketMatchResponse }) {
                 </tr>
               </thead>
               <tbody>
-                {data.candidates.map((c) => (
+                {data.candidates.map((c) => {
+                  const outlier = c.priceOutlier
+                  return (
                   <Fragment key={c.fuzzySkuId}>
                     {c.fuzzySkuId === firstBelowId ? (
                       <tr>
@@ -438,13 +666,42 @@ function MarketMatchBody({ data }: { data: BrandFamilyMarketMatchResponse }) {
                         </td>
                       </tr>
                     ) : null}
-                    <tr>
-                      <td style={STICKY_SCORE_COL}>
-                        {c.aboveThreshold ? (
-                          <Pill tone="success">{fmtScore(c.score)}</Pill>
-                        ) : (
-                          <Pill tone="muted">{fmtScore(c.score)}</Pill>
-                        )}
+                    <tr style={outlier != null ? { background: REVIEW_TINT } : undefined}>
+                      <td
+                        style={
+                          outlier != null
+                            ? { ...STICKY_SCORE_COL, background: '#faf1d9', borderLeft: REVIEW_ACCENT }
+                            : STICKY_SCORE_COL
+                        }
+                      >
+                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.25rem', justifyContent: 'flex-end' }}>
+                          {outlier != null ? (
+                            <span
+                              aria-label={outlierDirectionLabel(outlier.kind)}
+                              title={outlierBadgeTitle(outlier)}
+                              style={{ color: 'var(--warning)', fontWeight: 700, fontSize: '0.72rem' }}
+                            >
+                              {outlierDirectionGlyph(outlier.kind)}
+                            </span>
+                          ) : null}
+                          {c.aboveThreshold ? (
+                            <Pill tone="success">{fmtScore(c.score)}</Pill>
+                          ) : (
+                            <Pill tone="muted">{fmtScore(c.score)}</Pill>
+                          )}
+                          {outlier != null ? (
+                            <button
+                              type="button"
+                              className="ghost-button"
+                              onClick={() => setFixTarget(c)}
+                              aria-label={`Fix parse for ${c.listingName ?? `listing ${c.fuzzySkuId}`}`}
+                              title="Fix parse"
+                              style={{ padding: '0 0.3rem', minWidth: 0, lineHeight: 1.2, fontSize: '0.85rem' }}
+                            >
+                              ✎
+                            </button>
+                          ) : null}
+                        </span>
                       </td>
                       <td>
                         {c.url != null ? (
@@ -467,7 +724,9 @@ function MarketMatchBody({ data }: { data: BrandFamilyMarketMatchResponse }) {
                       <td title={c.distanceMiles != null ? `${c.distanceMiles.toFixed(1)} mi` : 'unknown'}>
                         {distanceBandLabel(c.distanceBand)}
                       </td>
-                      <td style={{ whiteSpace: 'nowrap' }}>{priceLabel(c)}</td>
+                      <td style={{ whiteSpace: 'nowrap', ...(outlier != null ? { fontWeight: 600 } : {}) }}>
+                        {priceLabel(c)}
+                      </td>
                       <td style={{ textAlign: 'right' }}>{c.currentStock ?? '—'}</td>
                       <FactorCells
                         f={c.factors}
@@ -476,7 +735,8 @@ function MarketMatchBody({ data }: { data: BrandFamilyMarketMatchResponse }) {
                       />
                     </tr>
                   </Fragment>
-                ))}
+                  )
+                })}
               </tbody>
             </table>
           </div>
