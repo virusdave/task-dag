@@ -6,6 +6,15 @@ write-key decision — see "Security decision (RESOLVED)"); implementation
 pending. No operator *decision* remains open; what is left is routine
 cross-repo implementation + agenix key provisioning (see "Remaining work").
 
+> **⚠️ Constraint update — D4 (operator, 2026-07): the "no agent/LLM-authored
+> text, operator-typed only" invariant is LOOSENED.** See
+> [§D4 — LLM-drafted advisory text is allowed once operator-approved](#d4--llm-drafted-advisory-text-is-allowed-once-operator-approved).
+> Wherever this doc (or issue #61) says `note` / agent-authored text can
+> **never** reach advisory `text` "because provenance is the safety gate,"
+> the **actual** load-bearing gate is now **operator approval**, not
+> provenance. The `note`-not-auto-mapped rule survives as *hygiene*, not as
+> the primary invariant.
+
 This doc records the design **after** the operator resolved the two open
 questions that had blocked the epic. It supersedes the earlier
 same-host-NDJSON transport sketch (Options A/B) that lived in the note of
@@ -135,6 +144,97 @@ Governed by the [advisory catalog contract](https://github.com/virusdave/top-lev
 - **Read path is loud-but-non-fatal** (taskDagMirror semantics): a
   top-level fetch failure shows a stale/unavailable status, never a 500.
 
+## D4 — LLM-drafted advisory text is allowed once operator-approved
+
+**Operator decision (2026-07, during #61 implementation).** The earlier
+absolute rule — *"no agent- or LLM-generated text ever gets fed back to
+agents as hints/directives; the injected allowlist is 100% operator-typed"* —
+is **loosened**. Rationale, in the operator's words: the fleet **already**
+runs on agent-drafted and Oracle-drafted agentic instructions, so "another
+relatively minor, still human-reviewed and/or tweaked agent-authored
+hint/prompt text isn't the end of the world."
+
+**The invariant is now the approval gate, not the text's provenance:**
+
+> **No *operator-unapproved or disapproved* LLM-/agent-generated text ever
+> reaches the injected allowlist.**
+
+Consequences already applied in #61's implementation (leaves L1/L2):
+
+- The promote endpoint is **provenance-agnostic**: it commits whatever `text`
+  the admin submits (typed, pasted from an LLM, or produced by draft-assist
+  and then reviewed). The authenticated admin submitting the request **is**
+  the approval.
+- `note` is still **not** an accepted request field (`.strict()` rejects it),
+  but this is now **hygiene** ("never *silently* route a free-form
+  observation note into the committed text"), not the primary safety
+  invariant.
+- The top-level [`ADVISORY_CATALOG.md`](https://github.com/virusdave/top-level/blob/master/docs/agent-runtime/ADVISORY_CATALOG.md)
+  contract is **unchanged**: it already frames the catalog as the
+  *human-reviewed* allowlist, and an LLM draft an operator reviews/approves
+  **is** human-reviewed. Design §5's "explicitly forbidden: let agents write
+  lessons that get *auto-injected*" still holds — the human gate remains.
+
+### D4 follow-on: in-Helios LLM draft-assist (proposed L3, NOT yet built)
+
+The operator further wants (and this is the point of the loosening): when
+authoring advisory `text`, **start from LLM proposals** rather than a blank
+box, because "modern advanced LLMs excel at this task" and the operators here
+are a small, mostly-trusted set (often just Dave). Desired UX:
+
+1. Generate **two independent proposals side-by-side** from two advanced
+   models, with the operator free to pick one, edit either, or write a custom
+   one; the chosen/edited text then flows into the existing L1 commit+push.
+2. **Adversarial injection cross-check:** ask each model to inspect the
+   **other** model's input *and* output for signs of prompt injection; on a
+   hit, raise a loud operator warning **and page at ~p5**.
+
+**Model sourcing (RESOLVED, operator 2026-07):**
+
+- **Two advanced Bedrock models.** The operator confirmed: *"If we have to
+  start just with bedrock, let's do so."* The **Amp Oracle is an agent-only
+  tool** — the live Helios **server** process cannot call it at request time —
+  so L3 uses **two distinct advanced Bedrock models** as the two proposers
+  (e.g. a top Anthropic/Claude model + a second top model), reached via the
+  **Bedrock-mantle** OpenAI-compatible gateway (`BEDROCK_MANTLE_BEARER_TOKEN`,
+  per-context model config in
+  [`bedrockModels.ts`](../../../helios/src/shared/domain/bedrockModels.ts))
+  and configurable via the existing Bedrock model-context override system.
+  Bedrock-first is the accepted initial path; no out-of-band agent step is
+  required for v1.
+- **The drafting prompt must declare who will *evaluate* the advisory
+  (RESOLVED, operator 2026-07).** The generated `text` is injected into and
+  judged by specific consumers, so the prompt-generation prompt must state
+  them explicitly so proposals are tailored to that audience:
+  - the advisory will be consumed by **Ampcode workers** (the fleet of
+    agentic coding agents this repo dispatches), and
+  - the **Oracle LLM base model used for complex tasks** (name the concrete
+    base model Oracle runs on) is the other likely evaluator.
+  Declaring both lets each proposer write text calibrated for how an Amp
+  worker / Oracle actually reads a hint (concise, self-contained, actionable
+  cold), rather than generic prose.
+
+**Resolved L3 building blocks (already present in Helios):**
+
+- **Paging at p5 works today.** Helios has a dependency-free
+  [`pageDave()`](../../../helios/src/worker/runtime/pageDave.ts) wrapper
+  (ntfy priority 1–5) over the `page-dave` CLI on PATH
+  (`/run/current-system/sw/bin/page-dave`); the injection cross-check can call
+  it at `priority: 5` and also emit a loud audit event + a sticky operator
+  warning in the review UI.
+- **The drafting endpoint** must be admin-gated, rate-limited, and
+  **never auto-commit** — a draft is only ever a *proposal* that flows into
+  the existing L1 operator-approval commit path. The observation text handed
+  to the drafting models is agent-adjacent, which is exactly what the
+  adversarial cross-check exists to police.
+
+L3's design questions are now resolved (two Bedrock proposers; prompt declares
+the Ampcode-worker + Oracle-base-model audience; adversarial injection
+cross-check with a p5 page), but L3 is **not yet built**. Until it is, L1
+(server commit+push) and L2 (the admin button with typed/pasted text) fully
+deliver the operator-approval promote loop; an operator can paste an LLM draft
+today and edit it before committing.
+
 ## Security: the write deploy key is the load-bearing decision
 
 D3 requires Helios to **push to `top-level`** — the repo that hosts the
@@ -223,6 +323,17 @@ routine infra provisioning, needing **no further operator input**:
    git commit to `top-level` `advisories.yaml`, admin-gated, contract-
    validated, applyConfig-pattern. Depends on #1 (write key) — downstream,
    not operator-blocked.
+5. **`automation`/Helios (L3, design RESOLVED, not built)**: in-Helios
+   LLM draft-assist for advisory `text` — two advanced Bedrock proposers
+   side-by-side via Bedrock-mantle, operator picks/edits, output flows into
+   the #4 operator-approval commit path (never auto-commits). Adversarial
+   injection cross-check (each model inspects the other's input+output) that
+   raises a sticky operator warning and pages at p5 (`pageDave()`), and a
+   prompt that declares the consuming audience — **Ampcode workers** + the
+   **Oracle complex-task base model** — so proposals are tailored to how
+   those evaluators read a hint. Depends on #4 and Bedrock-mantle config;
+   warrants its own Oracle design review before implementation (prompt-
+   injection surface). Not operator-blocked.
 
 > **Task-creation gap — RESOLVED via a task-dag tooling epic
 > ([virusdave/task-dag#6](https://github.com/virusdave/task-dag/issues/6)).**

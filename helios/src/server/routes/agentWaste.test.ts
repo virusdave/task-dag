@@ -87,3 +87,60 @@ describe('GET /api/agent-waste/backlog', () => {
     expect(readBacklog).not.toHaveBeenCalled()
   })
 })
+
+describe('POST /api/agent-waste/promote', () => {
+  const validBody = {
+    id: 'rg-short-r',
+    status: 'active',
+    scope: 'global',
+    severity: 'low',
+    max_tokens: 35,
+    text: 'Use rg -n / rg -l; never rg -r.',
+    trigger_ids: ['rg-short-r-rejected'],
+    expires_after_days: 14,
+    sourceObservationId: 'rg-short-r-rejected',
+  }
+
+  beforeEach(() => {
+    // The route must never touch prod; ensure no writable clone is wired so
+    // the apply path fails closed instead of attempting a real git write.
+    delete process.env.HELIOS_TOP_LEVEL_LOCAL_DIR
+  })
+
+  it('is admin-gated: a non-admin gets 403', async () => {
+    mockState.allow = false
+    const res = await server.inject({ method: 'POST', url: '/api/agent-waste/promote', payload: validBody })
+    expect(res.statusCode).toBe(403)
+  })
+
+  it('rejects an unknown field (crucially, `note` can never be supplied)', async () => {
+    const res = await server.inject({
+      method: 'POST',
+      url: '/api/agent-waste/promote',
+      payload: { ...validBody, note: 'agent-authored free-form text' },
+    })
+    expect(res.statusCode).toBe(400)
+    const body = res.json()
+    expect(body.ok).toBe(false)
+    expect(body.code).toBe('invalid_request')
+    expect(body.message).toContain('note')
+  })
+
+  it('rejects a structurally invalid body with 400 invalid_request', async () => {
+    const res = await server.inject({
+      method: 'POST',
+      url: '/api/agent-waste/promote',
+      payload: { id: 'Not Kebab', status: 'active' },
+    })
+    expect(res.statusCode).toBe(400)
+    expect(res.json().code).toBe('invalid_request')
+  })
+
+  it('degrades to 503 top_level_unavailable when no writable clone is configured', async () => {
+    const res = await server.inject({ method: 'POST', url: '/api/agent-waste/promote', payload: validBody })
+    expect(res.statusCode).toBe(503)
+    const body = res.json()
+    expect(body.ok).toBe(false)
+    expect(body.code).toBe('top_level_unavailable')
+  })
+})

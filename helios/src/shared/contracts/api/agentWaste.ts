@@ -86,3 +86,205 @@ export const AgentWasteUnavailableResponseSchema = z.object({
   source: AgentWasteSourceStatusSchema,
 })
 export type AgentWasteUnavailableResponse = z.infer<typeof AgentWasteUnavailableResponseSchema>
+
+// ─────────────────────────────────────────────────────────────────────────
+// Promote-to-advisory (issue #61 — the D3 admin button).
+//
+// An admin promotes a reviewed observation into the reviewed advisory catalog
+// (`advisories.yaml` in virusdave/top-level). This is a BEHAVIOR-CHANGING
+// mutation: the selector may inject the advisory's `text` into future agents.
+//
+// SAFETY GATE = OPERATOR APPROVAL (not text provenance). The fleet already
+// runs on agent- and Oracle-authored agentic instructions, so LLM-drafted
+// advisory text is acceptable — PROVIDED an operator reviews/approves (or
+// edits) it before it lands. The load-bearing invariant is therefore: no
+// operator-unapproved text ever reaches the injected allowlist. The admin
+// authenticated + submitting this request IS that approval. (The in-Helios
+// LLM draft-assist that proposes candidate text is a separate step; whatever
+// the admin finally submits here is, by definition, operator-approved.)
+//
+// The observation's display-only `note` is not a field here — the request is
+// rejected (`.strict()`) if it is supplied. This is hygiene, not the primary
+// invariant: we never SILENTLY route a free-form observation note into the
+// committed `text`; the operator authors/approves the text explicitly.
+//
+// Field mapping (audited): the source observation contributes only its `id`
+// (echoed into `trigger_ids` + recorded as the audit source) and, as a UI
+// default, its `severity`. The injected `text` is whatever the operator
+// approves and submits.
+
+/** kebab-case: lowercase alnum groups joined by single hyphens. */
+export const ADVISORY_ID_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
+
+/**
+ * Safe charset for observation ids (trigger ids + the audit source id). These
+ * flow into git commit trailers and the YAML entry, so they must contain no
+ * whitespace/control chars that could corrupt the audit record or the file.
+ * Observation ids in practice look like `rg-short-r-rejected`.
+ */
+export const OBSERVATION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/-]*$/
+
+/** Byte cap on advisory `text` (token-by-wordcount does not bound bytes). */
+export const ADVISORY_TEXT_MAX_BYTES = 8192
+
+/**
+ * Token proxy shared by the advisory-catalog contract, the selector, and the
+ * `agent-prompt-budget` CI check: `tokens(s) = ceil(1.3 × wordcount)`. It
+ * MUST match the contract's definition exactly (a mismatch would let one
+ * side accept a catalog the other rejects). Exposed here so the client can
+ * show a live token estimate against `max_tokens` while the admin types.
+ */
+export function estimateAdvisoryTokens(text: string): number {
+  const words = text.trim().split(/\s+/).filter((w) => w.length > 0).length
+  return Math.ceil(1.3 * words)
+}
+
+/** Design-§8 ceilings the catalog `budget` block may never exceed. */
+export const ADVISORY_BUDGET_MAX_TOTAL_TOKENS_CEILING = 500
+export const ADVISORY_BUDGET_MAX_ADVISORIES_CEILING = 5
+export const ADVISORY_DEFAULT_EXPIRES_AFTER_DAYS_MIN = 7
+export const ADVISORY_DEFAULT_EXPIRES_AFTER_DAYS_MAX = 14
+
+/**
+ * Statuses a *promotion* may create. The catalog also allows `retired`
+ * (dismiss/provenance), but "promote" deliberately only mints an injectable
+ * entry — an admin dismisses via a different, non-injecting path, so
+ * accepting `retired` from the promote button would be confusing (Oracle
+ * design review, issue #61).
+ */
+export const PromotableAdvisoryStatusSchema = z.enum(['active', 'permanent-safety'])
+export type PromotableAdvisoryStatus = z.infer<typeof PromotableAdvisoryStatusSchema>
+
+export const AdvisorySeveritySchema = z.enum(['low', 'medium', 'high', 'safety'])
+export type AdvisorySeverity = z.infer<typeof AdvisorySeveritySchema>
+
+/** `global` or `repo:<owner>/<repo>` (contract `scope`). */
+export const AdvisoryScopeSchema = z
+  .string()
+  .trim()
+  .refine((s) => s === 'global' || /^repo:[^\s/]+\/[^\s/]+$/.test(s), {
+    message: 'scope must be "global" or "repo:<owner>/<repo>"',
+  })
+
+// Reject control characters (except we forbid newlines/tabs too) so a
+// promoted `text` stays a single, well-formed line and cannot smuggle
+// terminal escapes or break the single-line YAML flow entry.
+const NO_CONTROL_CHARS = (s: string) => !/[\u0000-\u001f\u007f]/.test(s)
+
+export const PromoteAdvisoryRequestSchema = z
+  .object({
+    /** Stable, unique catalog id (kebab-case). Distinct from observation ids. */
+    id: z.string().trim().min(1).max(100).regex(ADVISORY_ID_PATTERN, {
+      message: 'id must be kebab-case (lowercase alphanumerics separated by single hyphens)',
+    }),
+    status: PromotableAdvisoryStatusSchema,
+    scope: AdvisoryScopeSchema,
+    severity: AdvisorySeveritySchema,
+    /** Per-advisory token cap on `text`; must be ≤ the catalog budget. */
+    max_tokens: z.number().int().positive().max(ADVISORY_BUDGET_MAX_TOTAL_TOKENS_CEILING),
+    /**
+     * The ONLY field the selector ever injects. Human-authored + reviewed,
+     * single line, no control chars. Length-capped in bytes in addition to
+     * the token cap (token-by-wordcount does not bound raw bytes).
+     */
+    text: z
+      .string()
+      .trim()
+      .min(1)
+      .max(4000)
+      .refine(NO_CONTROL_CHARS, { message: 'text must not contain control characters or newlines' })
+      .refine((s) => new TextEncoder().encode(s).length <= ADVISORY_TEXT_MAX_BYTES, {
+        message: `text must be at most ${ADVISORY_TEXT_MAX_BYTES} bytes`,
+      }),
+    /** Observation-event ids that count as recurrences of this advisory. */
+    trigger_ids: z
+      .array(
+        z.string().trim().min(1).max(200).regex(OBSERVATION_ID_PATTERN, {
+          message: 'trigger id contains disallowed characters',
+        }),
+      )
+      .max(50)
+      .default([]),
+    /** TTL from `added` (active only; omit to use the catalog default). */
+    expires_after_days: z.number().int().min(1).max(365).optional(),
+    promote_to_guardrail: z.boolean().optional(),
+    /** Human-only review context; NEVER injected. Optional, bounded. */
+    notes: z
+      .string()
+      .trim()
+      .max(2000)
+      .refine(NO_CONTROL_CHARS, { message: 'notes must not contain control characters' })
+      .optional(),
+    /**
+     * The observation this promotion came from — used ONLY for the commit
+     * message / audit provenance, NEVER mapped into any advisory field.
+     */
+    sourceObservationId: z.string().trim().min(1).max(200).regex(OBSERVATION_ID_PATTERN, {
+      message: 'sourceObservationId contains disallowed characters',
+    }),
+  })
+  .strict() // reject unknown fields — e.g. an observation `note` cannot be silently routed into the committed entry
+  .superRefine((val, ctx) => {
+    if (val.status === 'active' && val.trigger_ids.length === 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['trigger_ids'],
+        message: 'an active advisory must list at least one trigger id',
+      })
+    }
+    if (val.status === 'permanent-safety' && val.expires_after_days !== undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['expires_after_days'],
+        message: 'a permanent-safety advisory must not set expires_after_days',
+      })
+    }
+    if (estimateAdvisoryTokens(val.text) > val.max_tokens) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['text'],
+        message: `text is ~${estimateAdvisoryTokens(val.text)} tokens, over max_tokens=${val.max_tokens}`,
+      })
+    }
+  })
+export type PromoteAdvisoryRequest = z.infer<typeof PromoteAdvisoryRequestSchema>
+
+/** Structured failure codes for the promote path. */
+export const PROMOTE_ADVISORY_FAILURE_CODES = [
+  'top_level_unavailable',
+  'invalid_request',
+  'catalog_current_invalid',
+  'id_exists',
+  'catalog_result_invalid',
+  'catalog_edit_unsupported',
+  'no_op',
+  'unexpected_staged_changes',
+  'git_command_failed',
+  'git_push_failed',
+] as const
+export const PromoteAdvisoryFailureCodeSchema = z.enum(PROMOTE_ADVISORY_FAILURE_CODES)
+export type PromoteAdvisoryFailureCode = z.infer<typeof PromoteAdvisoryFailureCodeSchema>
+
+/** 200 body on a successful promotion. */
+export const PromoteAdvisoryResponseSchema = z.object({
+  ok: z.literal(true),
+  /** Advisory id that was added. */
+  id: z.string(),
+  /** File path committed, relative to the top-level repo root. */
+  relPath: z.string(),
+  /** Commit SHA created in virusdave/top-level. */
+  commitSha: z.string(),
+  /** GitHub URL of the commit, for the UI to link to. */
+  commitUrl: z.string(),
+  /** False ⇒ push succeeded but the remote already had our HEAD. */
+  pushed: z.boolean(),
+})
+export type PromoteAdvisoryResponse = z.infer<typeof PromoteAdvisoryResponseSchema>
+
+/** Non-2xx body on a failed promotion. */
+export const PromoteAdvisoryErrorResponseSchema = z.object({
+  ok: z.literal(false),
+  code: PromoteAdvisoryFailureCodeSchema,
+  message: z.string(),
+})
+export type PromoteAdvisoryErrorResponse = z.infer<typeof PromoteAdvisoryErrorResponseSchema>
