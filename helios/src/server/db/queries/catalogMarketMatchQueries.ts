@@ -27,35 +27,30 @@ import {
   hashRawInput,
   parseListingToFuzzy,
   parseSizeProfile,
-  sameSizeFamily,
 } from '../../../shared/marketMatch/listingParse.js'
 import {
-  applyVerdictPostFilter,
   scoreCatalogFuzzy,
-  scoreCatalogFuzzyFactors,
   type CatalogProfile,
-  type FuzzyProfile,
   type MarketMatchVerdict,
-  type ScoreFactors,
 } from '../../../shared/marketMatch/confidence.js'
+import {
+  scoreFuzzyCandidate,
+  type CatalogVariant,
+  type FuzzySkuRow,
+  type MarketMatchCandidate,
+  type VariantScoringTarget,
+} from '../../marketMatch/candidateScoring.js'
 import type { Queryable } from '../pool.js'
 
 const LITALERTS_PARSER_ID = 'litalerts.partner.v1'
 const LITALERTS_PARSER_VERSION = '0.1.0'
 
-export interface FuzzySkuRow {
-  id: number
-  sourceKind: string
-  sourceListingId: string
-  rawInputJsonb: unknown
-  brandNorm: string | null
-  categoryNorm: string | null
-  subcategoryNorm: string | null
-  sizeGNorm: number | null
-  sizeMgNorm: number | null
-  packCountNorm: number | null
-  strainNorm: string | null
-}
+// FuzzySkuRow / CatalogVariant / MarketMatchCandidate + the pure per-fuzzy
+// scorer now live in the pure `candidateScoring` module so the SAME matching
+// powers both this per-group review bundle and the brand-categorical-family
+// audit surface (issue #58 T2). Re-exported here (they are imported for local
+// use above) so existing importers of these types are unaffected.
+export type { FuzzySkuRow, CatalogVariant, MarketMatchCandidate }
 
 export interface MarketMatchRow {
   id: number
@@ -68,45 +63,6 @@ export interface MarketMatchRow {
   verdictSetVia: 'manual' | 'bulk' | 'imported' | 'system_inferred'
   confidenceAtVerdict: number | null
   notes: string | null
-}
-
-export interface MarketMatchCandidate {
-  fuzzy: FuzzySkuRow
-  rawScore: number
-  finalScore: number
-  factors: ScoreFactors
-  liveVerdict: MarketMatchVerdict | null
-  listingUrl: string | null
-  dispensaryName: string | null
-  /**
-   * LitAlerts dashboard imageUrl for this listing's product, sourced
-   * from `litalerts_product_images` (populated by
-   * `scripts/litalerts-backfill-product-images.mts`). Null if we have
-   * no image captured for this productId yet.
-   */
-  imageUrl: string | null
-  /** Which catalog variant this candidate scored best against. */
-  matchedCatalogProductId: number | null
-  /** Stable key for the size family the matched variant belongs to. */
-  matchedSizeKey: string
-  matchedSizeLabel: string
-}
-
-export interface CatalogVariant {
-  catalogProductId: number
-  name: string | null
-  shortName: string | null
-  tab: string | null
-  sku: string | null
-  sizeName: string | null
-  sizeGNorm: number | null
-  sizeMgNorm: number | null
-  packCountNorm: number | null
-  imageUrl: string | null
-  price: number | null
-  /** Stable key for grouping variants by their size family. */
-  sizeKey: string
-  sizeLabel: string
 }
 
 export interface SizeGroup {
@@ -574,6 +530,338 @@ export async function listGroupsForReview(
  *      family ("1g", "3.5g", "100mg", etc.) so the reviewer works
  *      one size at a time.
  */
+// ---------------------------------------------------------------------------
+// Shared override-expansion + structured-fuzzy-fetch helpers (issue #58 T2).
+//
+// Extracted from `loadGroupReview` so the per-catalog-group review bundle AND
+// the brand-categorical-family audit surface resolve brands and fetch LitAlerts
+// partner_product candidates through exactly one code path — the diagnostic can
+// only claim "this is how the REAL matcher matched it" if there is no drift.
+// ---------------------------------------------------------------------------
+
+/** Operator's mapping intent for one raw catalog brand spelling. */
+export type BrandMappingState = 'mapped' | 'operator-says-none' | 'unmapped'
+
+export interface BrandSpellingMapping {
+  /** The raw catalog brand spelling that was resolved. */
+  rawBrandName: string
+  state: BrandMappingState
+  litalertsBrandId: number | null
+  litalertsBrandName: string | null
+}
+
+export interface EffectiveBrandMapping {
+  /**
+   * Every LitAlerts `brand_norm` spelling that counts as this brand — the hard
+   * brand filter for the structured fuzzy fetch AND the alias set the scorer
+   * grants the brand factor for. Empty when every spelling is an explicit-null
+   * override (operator said "no LitAlerts equivalent").
+   */
+  norms: string[]
+  /**
+   * Representative norm used as the catalog side's brand for scoring. Null when
+   * there is no usable brand (all spellings explicit-null / no brand).
+   */
+  representativeNorm: string | null
+  /** Per raw spelling mapping state, surfaced in the audit UI. */
+  perSpelling: BrandSpellingMapping[]
+}
+
+/**
+ * Resolve a set of raw catalog brand spellings to their override-aware
+ * effective LitAlerts brand norms + mapping states.
+ *
+ * Runs the SAME single-brand override lookup `loadGroupReview` used inline,
+ * once per distinct raw spelling, then UNIONs the results. Overrides key on the
+ * EXACT raw `catalog_brand_name`, whereas a brand-categorical-family folds
+ * case/whitespace variants into one `familyBrandKey`, so a family may carry
+ * several raw spellings that map differently — hence the multi-spelling union
+ * and the per-spelling states. For a single spelling (the group path) the
+ * behaviour is identical to the original inline block.
+ */
+export async function resolveEffectiveBrandMapping(
+  db: Queryable,
+  rawBrandNames: ReadonlyArray<string | null>,
+): Promise<EffectiveBrandMapping> {
+  const seen = new Set<string>()
+  const distinctRaw: string[] = []
+  for (const raw of rawBrandNames) {
+    if (raw == null) continue
+    if (seen.has(raw)) continue
+    seen.add(raw)
+    distinctRaw.push(raw)
+  }
+
+  const normSet = new Set<string>()
+  const perSpelling: BrandSpellingMapping[] = []
+  let representativeNorm: string | null = null
+
+  for (const rawBrandName of distinctRaw) {
+    // Unmapped fallback norm (mirrors loadGroupReview's initial
+    // `effectiveBrandNorm = group.brand_name.toLowerCase().trim()`).
+    const base = rawBrandName.toLowerCase().trim()
+    // Single round-trip: operator override + expansion of the override's
+    // brand_id to every brand_name spelling seen in litalerts_products. This
+    // is the exact query the inline block used.
+    const overrideLookup = await db.query<{
+      has_override: boolean
+      litalerts_brand_id: string | null
+      litalerts_brand_name: string | null
+      brand_norms: string[] | null
+    }>(
+      `
+        with ov as (
+          select litalerts_brand_id, litalerts_brand_name
+            from catalog_litalerts_brand_overrides
+           where catalog_brand_name = $1
+           limit 1
+        )
+        select
+          exists (select 1 from ov) as has_override,
+          (select litalerts_brand_id::text from ov) as litalerts_brand_id,
+          (select litalerts_brand_name from ov) as litalerts_brand_name,
+          (
+            select array_agg(distinct lower(trim(brand_name)))
+              from litalerts_products
+             where brand_id = (select litalerts_brand_id from ov)
+               and brand_name is not null
+               and length(trim(brand_name)) > 0
+          ) as brand_norms
+      `,
+      [rawBrandName],
+    )
+    const ov = overrideLookup.rows[0]
+
+    let spellingNorms: string[] = []
+    let spellingRep: string | null = base
+    let state: BrandMappingState = 'unmapped'
+    let litalertsBrandId: number | null = null
+    let litalertsBrandName: string | null = null
+
+    if (ov?.has_override) {
+      if (ov.litalerts_brand_id == null && ov.litalerts_brand_name == null) {
+        // Explicit-null override → operator said "no LitAlerts equivalent".
+        state = 'operator-says-none'
+        spellingNorms = []
+        spellingRep = null
+      } else if (ov.litalerts_brand_id != null) {
+        // Pin by id → expand to every spelling for this brand_id.
+        state = 'mapped'
+        litalertsBrandId = Number(ov.litalerts_brand_id)
+        litalertsBrandName = ov.litalerts_brand_name
+        spellingNorms = ov.brand_norms ?? []
+        spellingRep = ov.litalerts_brand_name
+          ? ov.litalerts_brand_name.toLowerCase().trim()
+          : (spellingNorms[0] ?? base)
+      } else if (ov.litalerts_brand_name) {
+        // Pin by name only (legacy / no id captured) → single norm.
+        state = 'mapped'
+        litalertsBrandName = ov.litalerts_brand_name
+        spellingNorms = []
+        spellingRep = ov.litalerts_brand_name.toLowerCase().trim()
+      }
+    }
+    // Post-processing mirror: if the spelling produced no explicit norm set
+    // but has a representative, its norm IS that representative.
+    if (spellingNorms.length === 0 && spellingRep != null) {
+      spellingNorms = [spellingRep]
+    }
+
+    for (const n of spellingNorms) normSet.add(n.toLowerCase().trim())
+    if (representativeNorm == null && spellingRep != null) representativeNorm = spellingRep
+    perSpelling.push({ rawBrandName, state, litalertsBrandId, litalertsBrandName })
+  }
+
+  return { norms: Array.from(normSet), representativeNorm, perSpelling }
+}
+
+/** One `fuzzy_skus` partner row as fetched for scoring / audit. */
+export interface PartnerFuzzyFetchRow {
+  id: number
+  source_kind: string
+  source_listing_id: string
+  raw_input_jsonb: unknown
+  brand_norm: string | null
+  category_norm: string | null
+  subcategory_norm: string | null
+  size_g_norm: string | null
+  size_mg_norm: string | null
+  pack_count_norm: number | null
+  strain_norm: string | null
+  image_url: string | null
+  source_captured_at: string | null
+  /** Dedup-mode only: total pre-dedup rows matching the filter (per row, constant). */
+  raw_row_count?: number
+  /** Dedup-mode only: distinct source_listing_id count matching the filter. */
+  deduped_count?: number
+}
+
+export interface PartnerFuzzyFetchParams {
+  /** Effective (override-aware) brand norms — the hard brand filter. */
+  brandNorms: string[]
+  /** Canonical category family, or null to skip the category filter. */
+  categoryCanonical: string | null
+  /** Catalog-side variant grams for the size prefilter (g↔g). */
+  grams: number[]
+  /** Catalog-side variant mgs for the size prefilter (mg↔mg). */
+  mgs: number[]
+  /**
+   * ILIKE patterns for the name-token prefilter. Empty array skips the filter
+   * (same semantics as the JS gate when there are no significant tokens).
+   */
+  tokenPatterns: string[]
+  /**
+   * When true, dedup to the latest row per `source_listing_id` (the family
+   * audit's fix for the ~57% duplicate-row artifact) and include the pricing /
+   * stock / retailer fields + `source_captured_at`. When false, reproduce
+   * loadGroupReview's exact projection (top rows by `created_at desc`).
+   */
+  dedupLatestPerListing: boolean
+  limit: number
+}
+
+/**
+ * Fetch structured `litalerts_partner_product` fuzzy_skus that pass the hard
+ * brand / category-alias / size / name-token prefilters. Two modes:
+ *   - `dedupLatestPerListing: false` (the per-group review path) reproduces
+ *     loadGroupReview's original query exactly.
+ *   - `dedupLatestPerListing: true` (the family audit path) dedups to the
+ *     latest row per source_listing_id — deliberately diverging from the group
+ *     path so a listing captured 2-4× isn't triple-counted — and carries the
+ *     price/stock/retailer context the audit surfaces. The dedup sort runs on
+ *     the NARROW `fs.id` key only, joining the wide `raw_input_jsonb` back for
+ *     survivors (canon DB rule: never sort wide rows).
+ */
+export async function fetchPartnerFuzzyCandidates(
+  db: Queryable,
+  params: PartnerFuzzyFetchParams,
+): Promise<PartnerFuzzyFetchRow[]> {
+  // Shared hard-filter predicate — identical for both modes.
+  const whereSql = `
+    fs.source_kind = 'litalerts_partner_product'
+    and fs.brand_norm = any($1::text[])
+    and (
+      $3::boolean
+      or (fs.category_norm is not null and fs.category_norm = any($2::text[]))
+    )
+    and (
+      $4::boolean
+      or (
+        cardinality($5::numeric[]) > 0
+        and fs.size_g_norm is not null
+        and exists (
+          select 1 from unnest($5::numeric[]) as t(g)
+           where abs(fs.size_g_norm - t.g) <= greatest(0.05, t.g * 0.08)
+        )
+      )
+      or (
+        cardinality($6::numeric[]) > 0
+        and fs.size_mg_norm is not null
+        and exists (
+          select 1 from unnest($6::numeric[]) as t(mg)
+           where abs(fs.size_mg_norm - t.mg) <= greatest(5, t.mg * 0.08)
+        )
+      )
+    )
+    and (
+      cardinality($7::text[]) = 0
+      or lower(fs.raw_input_jsonb->>'listingName') like any($7::text[])
+    )`
+
+  // raw_input_jsonb projection. The group path keeps the original 7-field
+  // shape; the family path adds price/stock/retailer context to SURFACE it.
+  const rawJsonFields = params.dedupLatestPerListing
+    ? `jsonb_build_object(
+         'listingName',    fs.raw_input_jsonb->>'listingName',
+         'url',            fs.raw_input_jsonb->>'url',
+         'dispensaryName', fs.raw_input_jsonb->>'dispensaryName',
+         'brand',          fs.raw_input_jsonb->>'brand',
+         'category',       fs.raw_input_jsonb->>'category',
+         'productId',      fs.raw_input_jsonb->>'productId',
+         'imageUrl',       fs.raw_input_jsonb->>'imageUrl',
+         'normalPrice',    fs.raw_input_jsonb->>'normalPrice',
+         'salePrice',      fs.raw_input_jsonb->>'salePrice',
+         'currentStock',   fs.raw_input_jsonb->>'currentStock',
+         'retailerId',     fs.raw_input_jsonb->>'retailerId'
+       )`
+    : `jsonb_build_object(
+         'listingName',    fs.raw_input_jsonb->>'listingName',
+         'url',            fs.raw_input_jsonb->>'url',
+         'dispensaryName', fs.raw_input_jsonb->>'dispensaryName',
+         'brand',          fs.raw_input_jsonb->>'brand',
+         'category',       fs.raw_input_jsonb->>'category',
+         'productId',      fs.raw_input_jsonb->>'productId',
+         'imageUrl',       fs.raw_input_jsonb->>'imageUrl'
+       )`
+
+  const imageJoinSql = `
+    left join litalerts_product_images lpi
+      on lpi.state_code = 'NY'
+     and lpi.product_id = case
+           when fs.raw_input_jsonb->>'productId' ~ '^[0-9]+$'
+             then (fs.raw_input_jsonb->>'productId')::bigint
+         end`
+
+  const imageColSql = `coalesce(nullif(fs.raw_input_jsonb->>'imageUrl', ''), lpi.image_url)`
+
+  const sql = params.dedupLatestPerListing
+    ? `
+        with matched as (
+          select fs.id, fs.source_listing_id, fs.source_captured_at
+            from fuzzy_skus fs
+           where ${whereSql}
+        ),
+        latest as (
+          select distinct on (source_listing_id) id
+            from matched
+           order by source_listing_id, source_captured_at desc nulls last, id desc
+        ),
+        counts as (
+          select (select count(*) from matched)::int as raw_row_count,
+                 (select count(*) from latest)::int  as deduped_count
+        )
+        select fs.id, fs.source_kind, fs.source_listing_id,
+               ${rawJsonFields} as raw_input_jsonb,
+               fs.brand_norm, fs.category_norm, fs.subcategory_norm,
+               fs.size_g_norm::text, fs.size_mg_norm::text, fs.pack_count_norm, fs.strain_norm,
+               ${imageColSql} as image_url,
+               -- ISO-8601 UTC (with trailing Z) so the client's new Date(...)
+               -- parses it cross-browser; ::text yields a space-separated,
+               -- Safari-unparseable string. Lexicographic min/max downstream
+               -- stays valid (fixed-width, zero-padded).
+               to_char(fs.source_captured_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') as source_captured_at,
+               counts.raw_row_count, counts.deduped_count
+          from latest
+          join fuzzy_skus fs on fs.id = latest.id
+          cross join counts
+          ${imageJoinSql}
+         order by fs.source_captured_at desc nulls last, fs.id desc
+         limit ${params.limit}`
+    : `
+        select fs.id, fs.source_kind, fs.source_listing_id,
+               ${rawJsonFields} as raw_input_jsonb,
+               fs.brand_norm, fs.category_norm, fs.subcategory_norm,
+               fs.size_g_norm::text, fs.size_mg_norm::text, fs.pack_count_norm, fs.strain_norm,
+               ${imageColSql} as image_url,
+               fs.source_captured_at::text as source_captured_at
+          from fuzzy_skus fs
+          ${imageJoinSql}
+         where ${whereSql}
+         order by fs.created_at desc
+         limit ${params.limit}`
+
+  const result = await db.query<PartnerFuzzyFetchRow>(sql, [
+    params.brandNorms,
+    params.categoryCanonical ? buildCategoryAliasList(params.categoryCanonical) : [],
+    params.categoryCanonical === null,
+    params.grams.length === 0 && params.mgs.length === 0,
+    params.grams,
+    params.mgs,
+    params.tokenPatterns,
+  ])
+  return result.rows
+}
+
 export async function loadGroupReview(
   db: Queryable,
   catalogGroupId: number,
@@ -825,88 +1113,19 @@ export async function loadGroupReview(
     fuzzyRows.push(...obsFuzzy.rows)
   }
 
-  // Resolve the catalog's effective brand (override-aware) once. Used
-  // both to fetch structured fuzzies (hard brand filter) AND as the
-  // catalog brand we score against, so the scorer doesn't reject a
-  // legitimate override-mapped row just because the raw catalog brand
-  // name (e.g. "Grass Roots") differs from the LitAlerts brand name
-  // (e.g. "Grassroots (Curaleaf)").
-  // Resolve the catalog brand to the *set* of LitAlerts brand_norm
-  // spellings that should count as the same brand. When an override
-  // pins a litalerts_brand_id, we explode to every spelling
-  // observed for that brand_id in litalerts_products — same logic
-  // as the listGroupsForReview brand_effective CTE, just for one
-  // catalog brand. Without this, e.g. catalog brand "Dank" with
-  // override brand_id=4133 would only pull fuzzy_skus whose
-  // brand_norm exactly equals lower(litalerts_brand_name) and
-  // miss the ~95% of partner_product rows that use a different
-  // spelling for the same brand_id.
-  let effectiveBrandNorms: string[] = []
-  // `effectiveBrandNorm` (singular) is kept around for downstream
-  // scoring profiles where we just want one representative string.
-  let effectiveBrandNorm: string | null = group.brand_name
-    ? group.brand_name.toLowerCase().trim()
-    : null
-  if (group.brand_name) {
-    // Single round-trip: look up the operator override AND, in the
-    // same response, expand the override's brand_id to every
-    // brand_name spelling we've seen in litalerts_products. The
-    // older code split this across two serial queries (~64ms of
-    // RTT) even though there's no data dependency between them
-    // that postgres can't resolve in one statement.
-    const overrideLookup = await db.query<{
-      has_override: boolean
-      litalerts_brand_id: string | null
-      litalerts_brand_name: string | null
-      brand_norms: string[] | null
-    }>(
-      `
-        with ov as (
-          select litalerts_brand_id, litalerts_brand_name
-            from catalog_litalerts_brand_overrides
-           where catalog_brand_name = $1
-           limit 1
-        )
-        select
-          exists (select 1 from ov) as has_override,
-          (select litalerts_brand_id::text from ov) as litalerts_brand_id,
-          (select litalerts_brand_name from ov) as litalerts_brand_name,
-          (
-            select array_agg(distinct lower(trim(brand_name)))
-              from litalerts_products
-             where brand_id = (select litalerts_brand_id from ov)
-               and brand_name is not null
-               and length(trim(brand_name)) > 0
-          ) as brand_norms
-      `,
-      [group.brand_name],
-    )
-    const ov = overrideLookup.rows[0]
-    if (ov?.has_override) {
-      if (ov.litalerts_brand_id == null && ov.litalerts_brand_name == null) {
-        // Explicit-null override → operator said "no LitAlerts
-        // equivalent"; skip structured pull entirely and zero
-        // brand for scoring.
-        effectiveBrandNorm = null
-      } else if (ov.litalerts_brand_id != null) {
-        // Pin by id → expand to every spelling for this brand_id.
-        effectiveBrandNorms = ov.brand_norms ?? []
-        // Use the override's litalerts_brand_name (or the most
-        // common spelling) as the representative for scoring.
-        effectiveBrandNorm = ov.litalerts_brand_name
-          ? ov.litalerts_brand_name.toLowerCase().trim()
-          : (effectiveBrandNorms[0] ?? effectiveBrandNorm)
-      } else if (ov.litalerts_brand_name) {
-        // Pin by name only (legacy / no id captured) → single norm.
-        effectiveBrandNorm = ov.litalerts_brand_name.toLowerCase().trim()
-      }
-    }
-  }
-  if (effectiveBrandNorms.length === 0 && effectiveBrandNorm != null) {
-    effectiveBrandNorms = [effectiveBrandNorm]
-  }
-  // Set form for O(1) per-fuzzy "is this brand_norm one of the
-  // expanded spellings for our catalog brand?" lookup during scoring.
+  // Resolve the catalog's effective brand (override-aware) once, via the
+  // shared helper (see resolveEffectiveBrandMapping). Used both to fetch
+  // structured fuzzies (hard brand filter) AND as the catalog brand we score
+  // against, so the scorer doesn't reject a legitimate override-mapped row just
+  // because the raw catalog brand name (e.g. "Grass Roots") differs from the
+  // LitAlerts brand name (e.g. "Grassroots (Curaleaf)"). A group has exactly
+  // one raw brand spelling, so this is behaviourally identical to the original
+  // inline single-brand block.
+  const brandMapping = await resolveEffectiveBrandMapping(db, [group.brand_name])
+  const effectiveBrandNorms: string[] = brandMapping.norms
+  const effectiveBrandNorm: string | null = brandMapping.representativeNorm
+  // Set form for O(1) per-fuzzy "is this brand_norm one of the expanded
+  // spellings for our catalog brand?" lookup during scoring.
   const effectiveBrandSet = new Set(effectiveBrandNorms.map((n) => n.toLowerCase().trim()))
 
   // Canonicalize the catalog group's category to one of {flower,
@@ -935,7 +1154,6 @@ export async function loadGroupReview(
         .filter((mg): mg is number => typeof mg === 'number'),
     ),
   )
-  const hasAnyVariantSize = variantGrams.length > 0 || variantMgs.length > 0
 
   // Pre-compute the catalog group's significant-token set once. We
   // use the same token set both as a server-side hard-gate during
@@ -956,113 +1174,19 @@ export async function loadGroupReview(
   const groupNameTokenPatterns = Array.from(groupNameTokens).map((t) => `%${t}%`)
 
   if (effectiveBrandNorms.length > 0) {
-    // HARD filters at the SQL layer:
-    //   - brand_norm must match ANY of the effective (override-aware)
-    //     brand spellings — see effectiveBrandNorms resolution above
-    //     for why this is a set, not a single value
-    //   - if the catalog group has a canonical category, the LitAlerts
-    //     row must canonicalize to that same family (we recompute on
-    //     read so we don't have to re-run the fuzzy backfill to pick
-    //     up alias additions)
-    //   - if the catalog group has any size-bearing variants, the
-    //     LitAlerts row's size must be within ±max(epsilon, 8%) of at
-    //     least one of those sizes (g↔g, mg↔mg; never cross-unit)
-    const structuredFuzzy = await db.query<typeof fuzzyRows[number]>(
-      // `image_url` selection: prefer the per-product imageUrl the
-      // LitAlerts partner API now ships in /v1/brands/:id/products
-      // (recorded onto fuzzy_skus.raw_input_jsonb.imageUrl by the
-      // litalerts-products-to-fuzzy-skus backfill). Fall back to
-      // the legacy scraped table `litalerts_product_images` for
-      // pre-cutover rows that haven't been re-ingested yet — once
-      // the partner-API path has fully replaced the scrape, the
-      // LEFT JOIN here and the scrape script
-      // (scripts/litalerts-backfill-product-images.mts) can both
-      // go away.
-      `select fs.id, fs.source_kind, fs.source_listing_id,
-              jsonb_build_object(
-                'listingName',    fs.raw_input_jsonb->>'listingName',
-                'url',            fs.raw_input_jsonb->>'url',
-                'dispensaryName', fs.raw_input_jsonb->>'dispensaryName',
-                'brand',          fs.raw_input_jsonb->>'brand',
-                'category',       fs.raw_input_jsonb->>'category',
-                'productId',      fs.raw_input_jsonb->>'productId',
-                'imageUrl',       fs.raw_input_jsonb->>'imageUrl'
-              ) as raw_input_jsonb,
-              fs.brand_norm, fs.category_norm, fs.subcategory_norm,
-              fs.size_g_norm::text, fs.size_mg_norm::text, fs.pack_count_norm, fs.strain_norm,
-              coalesce(
-                nullif(fs.raw_input_jsonb->>'imageUrl', ''),
-                lpi.image_url
-              ) as image_url
-       from fuzzy_skus fs
-       left join litalerts_product_images lpi
-         on lpi.state_code = 'NY'
-        and lpi.product_id = case
-              when fs.raw_input_jsonb->>'productId' ~ '^[0-9]+$'
-                then (fs.raw_input_jsonb->>'productId')::bigint
-            end
-       where fs.source_kind = 'litalerts_partner_product'
-         and fs.brand_norm = any($1::text[])
-         and (
-           -- No catalog category set → don't filter by category.
-           $3::boolean
-           or (
-             fs.category_norm is not null
-             and fs.category_norm = any($2::text[])
-           )
-         )
-         and (
-           -- No variant sizes → don't filter by size.
-           $4::boolean
-           or (
-             cardinality($5::numeric[]) > 0
-             and fs.size_g_norm is not null
-             and exists (
-               select 1
-                 from unnest($5::numeric[]) as t(g)
-                where abs(fs.size_g_norm - t.g) <= greatest(0.05, t.g * 0.08)
-             )
-           )
-           or (
-             cardinality($6::numeric[]) > 0
-             and fs.size_mg_norm is not null
-             and exists (
-               select 1
-                 from unnest($6::numeric[]) as t(mg)
-                where abs(fs.size_mg_norm - t.mg) <= greatest(5, t.mg * 0.08)
-             )
-           )
-         )
-         and (
-           -- Name-token gate (mirrors HARD GATE #2 in the JS scorer
-           -- below). Skipped when the catalog group's name has no
-           -- significant tokens -- same semantics as the JS check
-           -- (groupNameTokens.size greater than 0), so nothing extra
-           -- is filtered.
-           cardinality($7::text[]) = 0
-           or lower(fs.raw_input_jsonb->>'listingName') like any($7::text[])
-         )
-       order by fs.created_at desc
-       limit 1000`,
-      [
-        effectiveBrandNorms,
-        // Category aliases: send every raw LA category string that
-        // canonicalizes to our canonical family. Cheap because the
-        // alias set is tiny; correct because we don't need to
-        // re-backfill category_norm on every alias change.
-        catalogCategoryCanonical
-          ? buildCategoryAliasList(catalogCategoryCanonical)
-          : [],
-        // SKIP-CATEGORY-FILTER flag.
-        catalogCategoryCanonical === null,
-        // SKIP-SIZE-FILTER flag.
-        !hasAnyVariantSize,
-        variantGrams,
-        variantMgs,
-        groupNameTokenPatterns,
-      ],
-    )
-    fuzzyRows.push(...structuredFuzzy.rows)
+    // Hard brand / category-alias / size / name-token prefilters live in the
+    // shared fetchPartnerFuzzyCandidates helper (dedup off + original 7-field
+    // projection + top-1000-by-created_at = the exact original group query).
+    const structuredFuzzy = await fetchPartnerFuzzyCandidates(db, {
+      brandNorms: effectiveBrandNorms,
+      categoryCanonical: catalogCategoryCanonical,
+      grams: variantGrams,
+      mgs: variantMgs,
+      tokenPatterns: groupNameTokenPatterns,
+      dedupLatestPerListing: false,
+      limit: 1000,
+    })
+    fuzzyRows.push(...structuredFuzzy)
   }
 
   const fuzzyResult = { rows: fuzzyRows }
@@ -1167,182 +1291,44 @@ export async function loadGroupReview(
     })
     .filter((row): row is NonNullable<typeof row> => row !== null)
 
-  // Score every un-verdicted fuzzy against EVERY catalog variant and
-  // keep the best (variant, score) pair per fuzzy. Bucket below
-  // `minScore` matches as "suppressed" (returned as a count only).
-  // When the group has no parsable variants at all, fall back to
-  // group-level profile scoring so we still surface candidates — the
-  // accessory-flood case in particular hinges on category mismatch,
-  // which both per-variant and group-level scoring catch identically.
+  // Per-variant scoring targets: each catalog variant scored against every
+  // fuzzy, sharing this group's name tokens for HARD GATE #2. The `null` arm is
+  // used when the group has no parseable variants (fall back to group-level
+  // profile scoring) so the page stays useful for un-populated groups.
+  const scoringVariantTargets: VariantScoringTarget[] =
+    catalogVariants.length > 0
+      ? catalogVariants.map((v) => ({
+          variant: v,
+          profile: {
+            brandNorm: catalogProfile.brandNorm,
+            categoryNorm: catalogProfile.categoryNorm,
+            subcategoryNorm: catalogProfile.subcategoryNorm,
+            sizeGNorm: v.sizeGNorm,
+            sizeMgNorm: v.sizeMgNorm,
+            packCountNorm: v.packCountNorm,
+            strainNorm: null,
+            nameTokens: variantNameTokensById.get(v.catalogProductId) ?? catalogProfile.nameTokens,
+          },
+          gate2Tokens: groupNameTokens,
+        }))
+      : [{ variant: null, profile: catalogProfile, gate2Tokens: groupNameTokens }]
+
+  // Score every un-verdicted fuzzy against EVERY catalog variant and keep the
+  // best (variant, score) pair per fuzzy, via the shared pure scorer (see
+  // scoreFuzzyCandidate — same function powers the family audit surface).
   const scoredAll = fuzzies
     .filter((fuzzy) => !verdictByFuzzy.has(fuzzy.id))
-    .map((fuzzy) => {
-      // Re-canonicalize the fuzzy's category on read so alias changes
-      // in canonicalCategoryNorm() don't require a backfill rerun.
-      const fuzzyCategoryCanonical = canonicalCategoryNorm(fuzzy.categoryNorm)
-      const listing = fuzzy.rawInputJsonb as
-        | { url?: string | null; dispensaryName?: string | null; listingName?: string | null }
-        | null
-
-      // Live-extract pack_count and significant tokens from the
-      // raw listingName instead of reading the DB columns — the
-      // partner_product ingest (litalerts-products-to-fuzzy-skus.mts)
-      // hardcodes pack_count_norm / strain_norm to NULL, so for the
-      // ~361k structured rows the persisted columns carry no signal.
-      // Tokenizing here costs ~1 μs per fuzzy and lets the existing
-      // scorer differentiate "Ayrloom Lemonade" from "Ayrloom
-      // Honeycrisp" by their distinguishing tokens. The legacy
-      // observation-derived rows DO have these columns populated, so
-      // we prefer the DB value when present and only fall back to
-      // listingName parsing.
-      const listingParsedSize = listing?.listingName
-        ? parseSizeProfile(listing.listingName)
-        : null
-      const fuzzyNameTokens = Array.from(
-        extractSignificantNameTokens(
-          [listing?.listingName, fuzzy.strainNorm].filter((s): s is string => !!s).join(' '),
-          {
-            brandText: effectiveBrandNorm ?? group.brand_name,
-            categoryText: catalogCategoryCanonical ?? group.category_name,
-          },
-        ),
-      )
-
-      const fuzzyProfile: FuzzyProfile = {
-        brandNorm: fuzzy.brandNorm,
-        categoryNorm: fuzzyCategoryCanonical ?? fuzzy.categoryNorm,
-        subcategoryNorm: fuzzy.subcategoryNorm,
-        sizeGNorm: fuzzy.sizeGNorm,
-        sizeMgNorm: fuzzy.sizeMgNorm,
-        packCountNorm: fuzzy.packCountNorm ?? listingParsedSize?.packCountNorm ?? null,
-        strainNorm: fuzzy.strainNorm,
-        nameTokens: fuzzyNameTokens,
-      }
-      // Brand-alias resolution:
-      //   1. The fuzzy's brand_norm is one of the LitAlerts spellings
-      //      we expanded from the operator's brand_id override
-      //      (effectiveBrandNorms). Same id → same brand even if the
-      //      free-text spelling differs ("Dank" vs "Dank by
-      //      definition." vs "Dank. by definition" all share id 4133).
-      //      Without this, the scorer's brand factor would be 0 for
-      //      every override-mapped spelling that isn't the exact
-      //      string in `catalog_litalerts_brand_overrides.litalerts_brand_name`.
-      //   2. Legacy heuristic rescue: if the fuzzy has no parsed brand
-      //      at all, fall back to "does the listing text mention the
-      //      catalog brand?".
-      const fuzzyBrandLower = fuzzy.brandNorm?.toLowerCase().trim() ?? null
-      const brandAliasMatch =
-        (fuzzyBrandLower !== null && effectiveBrandSet.has(fuzzyBrandLower))
-        || (
-          catalogProfile.brandNorm !== null
-          && fuzzy.brandNorm === null
-          && typeof listing?.listingName === 'string'
-          && listing.listingName.toLowerCase().includes(catalogProfile.brandNorm.toLowerCase())
-        )
-
-      // HARD GATE #1 — category. The SQL prefilter already enforces
-      // this for structured rows, but legacy observation rows go
-      // through unfiltered, so we re-check here. Either side null is
-      // tolerated (some legacy listings don't have a parsed category).
-      if (catalogCategoryCanonical && fuzzyCategoryCanonical && fuzzyCategoryCanonical !== catalogCategoryCanonical) {
-        return null
-      }
-
-      // HARD GATE #2 — shared significant name token between the
-      // catalog group/variant and the listing. Stops "Dank by
-      // Definition 3.5g Flower XXX" from matching "Dank by Definition
-      // 3.5g Flower YYY" when the strain names share no characters.
-      // Skipped when the catalog group has zero significant tokens
-      // (e.g. group name is just the brand) — we have nothing to
-      // require a shared token *with*. We reuse `fuzzyNameTokens`
-      // computed above to avoid re-tokenizing the same listingName.
-      if (groupNameTokens.size > 0) {
-        let shares = false
-        for (const tok of fuzzyNameTokens) {
-          if (groupNameTokens.has(tok)) { shares = true; break }
-        }
-        if (!shares) return null
-      }
-
-      // Per-variant scoring loop. The `sizeKey: 'unsized'` arm is
-      // used when the catalog has no parsable variants — keeps the
-      // page useful for groups that haven't been fully populated yet.
-      const variantTargets: Array<CatalogVariant | null> =
-        catalogVariants.length > 0 ? catalogVariants : [null]
-      let bestPick: {
-        variant: CatalogVariant | null
-        factors: ScoreFactors
-        rawScore: number
-        finalScore: number
-      } | null = null
-      for (const variant of variantTargets) {
-        // HARD GATE #3 — per-variant size family match. A 1g pre-roll
-        // listing should never be scored against a 3.5g flower
-        // variant. SQL already filtered to "could plausibly belong to
-        // SOME variant of this group"; here we enforce per-variant.
-        if (variant
-            && (typeof variant.sizeGNorm === 'number' || typeof variant.sizeMgNorm === 'number')
-            && (typeof fuzzy.sizeGNorm === 'number' || typeof fuzzy.sizeMgNorm === 'number')) {
-          if (!sameSizeFamily(
-            { sizeGNorm: variant.sizeGNorm, sizeMgNorm: variant.sizeMgNorm },
-            { sizeGNorm: fuzzy.sizeGNorm, sizeMgNorm: fuzzy.sizeMgNorm },
-          )) {
-            continue
-          }
-        }
-        const profile: CatalogProfile = variant
-          ? {
-              brandNorm: catalogProfile.brandNorm,
-              categoryNorm: catalogProfile.categoryNorm,
-              subcategoryNorm: catalogProfile.subcategoryNorm,
-              sizeGNorm: variant.sizeGNorm,
-              sizeMgNorm: variant.sizeMgNorm,
-              packCountNorm: variant.packCountNorm,
-              strainNorm: null,
-              nameTokens: variantNameTokensById.get(variant.catalogProductId) ?? catalogProfile.nameTokens,
-            }
-          : catalogProfile
-        const factors = scoreCatalogFuzzyFactors(profile, fuzzyProfile, { brandAliasMatch })
-        const rawScore = Math.max(
-          0,
-          factors.brand
-            * factors.category
-            * factors.subcategory
-            * factors.size
-            * factors.pack
-            * factors.strain
-            * factors.nameOverlap,
-        )
-        const finalScore = applyVerdictPostFilter(rawScore, null)
-        if (!bestPick || finalScore > bestPick.finalScore) {
-          bestPick = { variant, factors, rawScore, finalScore }
-        }
-      }
-      if (!bestPick) return null
-      const { variant, factors, rawScore, finalScore } = bestPick
-      const matchedKey = variant
-        ? { sizeKey: variant.sizeKey, sizeLabel: variant.sizeLabel, productId: variant.catalogProductId }
-        : { sizeKey: 'unsized', sizeLabel: 'No variant', productId: null }
-      const candidate: MarketMatchCandidate = {
-        fuzzy,
-        rawScore,
-        finalScore,
-        factors,
-        liveVerdict: null,
-        listingUrl: listing?.url ?? null,
-        dispensaryName: listing?.dispensaryName ?? null,
-        // imageUrl is decorated at the SQL layer via the LEFT JOIN
-        // against `litalerts_product_images` (see structuredFuzzy
-        // query). Legacy `litalerts_competitor_observation` fuzzies
-        // don't have a productId in raw_input_jsonb so they fall
-        // through as null without paying any extra cost.
-        imageUrl: imageByFuzzyId.get(fuzzy.id) ?? null,
-        matchedCatalogProductId: matchedKey.productId,
-        matchedSizeKey: matchedKey.sizeKey,
-        matchedSizeLabel: matchedKey.sizeLabel,
-      }
-      return candidate
-    })
+    .map((fuzzy) =>
+      scoreFuzzyCandidate(fuzzy, {
+        effectiveBrandSet,
+        catalogBrandNorm: catalogProfile.brandNorm,
+        catalogCategoryCanonical,
+        brandTextForTokens: effectiveBrandNorm ?? group.brand_name,
+        categoryTextForTokens: catalogCategoryCanonical ?? group.category_name,
+        variantTargets: scoringVariantTargets,
+        imageByFuzzyId,
+      }),
+    )
     .filter((c): c is MarketMatchCandidate => c !== null)
 
   // Rank-then-cap: the SPA needs the full ranked window for the
@@ -1466,7 +1452,7 @@ function buildCategoryAliasList(canonical: string): string[] {
   return Array.from(new Set([...candidates, ...family])).map((s) => s.toLowerCase().trim())
 }
 
-function makeSizeKey(
+export function makeSizeKey(
   sizeGNorm: number | null,
   sizeMgNorm: number | null,
   fallbackLabel: string | null,
@@ -1885,7 +1871,7 @@ function effectiveListingFromFuzzy(args: {
   }
 }
 
-function parseLooseNumber(v: unknown): number | null {
+export function parseLooseNumber(v: unknown): number | null {
   if (typeof v === 'number' && Number.isFinite(v)) return v
   if (typeof v === 'string') {
     const trimmed = v.trim()

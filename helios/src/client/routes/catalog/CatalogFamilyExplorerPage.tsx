@@ -2,7 +2,11 @@ import { useMemo, useState } from 'react'
 import { useLoaderData } from 'react-router-dom'
 
 import {
+  BrandFamilyMarketMatchResponseSchema,
   CatalogFamilyExplorerResponseSchema,
+  type BrandFamilyMappingSummary,
+  type BrandFamilyMarketMatchResponse,
+  type BrandFamilyMatchCandidate,
   type CatalogFamilyExplorerResponse,
 } from '../../../shared/contracts/index.js'
 import {
@@ -15,7 +19,7 @@ import {
   type FamilyMember,
 } from '../../../shared/domain/familyExplorer.js'
 import { loadJson } from '../../app/fetchJson.js'
-import { nyLongDateTime } from '../../app/nyTime.js'
+import { nyLongDateTime, nyShortDateTime } from '../../app/nyTime.js'
 import { Pill } from '../../components/Pill.js'
 import { useRegisterCatalogSidebarSubtree } from './catalogSidebarSubtree.js'
 
@@ -109,6 +113,278 @@ function VariantTable({ members }: { members: readonly FamilyMember[] }) {
           ))}
         </tbody>
       </table>
+    </div>
+  )
+}
+
+/** 0–1 score to a fixed 2-decimal string. */
+function fmtScore(n: number): string {
+  return n.toFixed(2)
+}
+
+/** Tone for the mapping-state roll-up pill (honest brand mapping surface). */
+function mappingTone(summary: BrandFamilyMappingSummary): 'success' | 'warning' | 'danger' | 'muted' {
+  switch (summary) {
+    case 'mapped':
+      return 'success'
+    case 'unmapped':
+      return 'danger'
+    case 'operator-says-none':
+    case 'mixed':
+      return 'warning'
+    case 'no-brand':
+      return 'muted'
+  }
+}
+
+function mappingLabel(summary: BrandFamilyMappingSummary): string {
+  switch (summary) {
+    case 'mapped':
+      return 'brand mapped'
+    case 'unmapped':
+      return 'brand UNMAPPED (lower(trim) fallback)'
+    case 'operator-says-none':
+      return 'operator says no brand'
+    case 'mixed':
+      return 'mixed brand mapping'
+    case 'no-brand':
+      return 'no brand'
+  }
+}
+
+/** Compact per-candidate factor breakdown, so the operator sees WHY it matched. */
+function FactorCells({ f }: { f: BrandFamilyMatchCandidate['factors'] }) {
+  const cells: [string, number][] = [
+    ['brand', f.brand],
+    ['cat', f.category],
+    ['sub', f.subcategory],
+    ['size', f.size],
+    ['pack', f.pack],
+    ['strain', f.strain],
+    ['name', f.nameOverlap],
+  ]
+  return (
+    <>
+      {cells.map(([label, value]) => (
+        <td key={label} title={`${label} factor`} style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>
+          {fmtScore(value)}
+        </td>
+      ))}
+    </>
+  )
+}
+
+/** One-line price context, e.g. "$42.00 / $47.46". */
+function priceLabel(c: BrandFamilyMatchCandidate): string {
+  if (c.preTaxPrice == null) return '—'
+  const post = c.postTaxPrice == null ? '' : ` / $${c.postTaxPrice.toFixed(2)}`
+  return `$${c.preTaxPrice.toFixed(2)}${post}`
+}
+
+/**
+ * Lazy per-family LitAlerts market-match diagnostic (issue #58 T2). Collapsed
+ * by default; on first expand it fetches the REAL matcher's candidate listings
+ * + per-candidate score/factor breakdown for this brand-categorical-family and
+ * surfaces the data caveats (stale snapshot, dup rows, NULL pack/subcategory,
+ * brand mapping state) rather than hiding them. Fetch happens once and is
+ * cached in component state for the life of the row.
+ */
+function MarketMatchPanel({ familyKey, brandKey }: { familyKey: string; brandKey: string | null }) {
+  const [status, setStatus] = useState<'idle' | 'loading' | 'loaded' | 'error'>('idle')
+  const [data, setData] = useState<BrandFamilyMarketMatchResponse | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  const fetchOnce = () => {
+    if (status !== 'idle') return
+    setStatus('loading')
+    const qs = new URLSearchParams({ familyKey, brandKey: brandKey ?? '' }).toString()
+    loadJson(`/api/catalog/family-explorer/market-match?${qs}`, BrandFamilyMarketMatchResponseSchema)
+      .then((res) => {
+        setData(res)
+        setStatus('loaded')
+      })
+      .catch((e: unknown) => {
+        setError(e instanceof Error ? e.message : String(e))
+        setStatus('error')
+      })
+  }
+
+  return (
+    <details
+      className="mini-card"
+      style={{ marginTop: '0.375rem' }}
+      onToggle={(e) => {
+        if ((e.currentTarget as HTMLDetailsElement).open) fetchOnce()
+      }}
+    >
+      <summary style={{ cursor: 'pointer' }}>
+        <span style={{ fontWeight: 600 }}>LitAlerts market match</span>{' '}
+        {status === 'idle' ? <Pill tone="muted">expand to load</Pill> : null}
+        {status === 'loading' ? <Pill tone="muted">loading…</Pill> : null}
+        {status === 'error' ? <Pill tone="danger">error</Pill> : null}
+        {status === 'loaded' && data ? (
+          <>
+            <Pill tone={data.aboveThresholdCount > 0 ? 'success' : 'muted'}>
+              {data.aboveThresholdCount} ≥ {fmtScore(data.threshold)}
+            </Pill>{' '}
+            <Pill tone="muted">{data.belowThresholdCount} below</Pill>{' '}
+            <Pill tone={mappingTone(data.mappingSummary)} title={mappingLabel(data.mappingSummary)}>
+              {mappingLabel(data.mappingSummary)}
+            </Pill>
+          </>
+        ) : null}
+      </summary>
+
+      {status === 'error' ? (
+        <p className="subtle-copy" style={{ marginTop: '0.5rem', color: 'var(--danger, #b00)' }}>
+          Failed to load market match: {error}
+        </p>
+      ) : null}
+
+      {status === 'loaded' && data ? <MarketMatchBody data={data} /> : null}
+    </details>
+  )
+}
+
+function MarketMatchBody({ data }: { data: BrandFamilyMarketMatchResponse }) {
+  const capturedRange =
+    data.snapshotCapturedAtMin != null
+      ? data.snapshotCapturedAtMin === data.snapshotCapturedAtMax
+        ? `as of ${nyShortDateTime(new Date(data.snapshotCapturedAtMin).getTime())}`
+        : `${nyShortDateTime(new Date(data.snapshotCapturedAtMin).getTime())} – ${nyShortDateTime(
+            new Date(data.snapshotCapturedAtMax!).getTime(),
+          )}`
+      : null
+
+  return (
+    <div style={{ marginTop: '0.5rem' }}>
+      <div className="inline-row wrap-row" style={{ gap: '0.375rem', marginBottom: '0.5rem' }}>
+        <Pill tone="muted">
+          {data.rawRowCount.toLocaleString()} raw → {data.dedupedListingCount.toLocaleString()} deduped
+        </Pill>
+        <Pill tone="muted">{data.scoredCandidateCount.toLocaleString()} scored</Pill>
+        {data.fetchTruncated ? (
+          <Pill
+            tone="warning"
+            title={`Only the most-recent ${data.fetchLimit.toLocaleString()} of ${data.dedupedListingCount.toLocaleString()} deduped listings were fetched and scored — the "scored" count is capped by this fetch limit, not by the matcher gating.`}
+          >
+            fetch capped at {data.fetchLimit.toLocaleString()}
+          </Pill>
+        ) : null}
+        {data.effectiveBrandNorms.length > 0 ? (
+          <Pill tone="muted" title="Override-aware effective LitAlerts brand norms used as the hard brand filter">
+            brand norms: {data.effectiveBrandNorms.join(', ')}
+          </Pill>
+        ) : null}
+        {capturedRange ? (
+          <Pill tone="warning" title="LitAlerts is a one-shot ~6-week-old snapshot, not a live feed">
+            {capturedRange}
+          </Pill>
+        ) : null}
+        {data.packNotMatchable ? (
+          <Pill tone="warning" title="partner rows have NULL pack_count_norm — pack>1 can't be matched market-side">
+            pack not matchable
+          </Pill>
+        ) : null}
+        {data.subcategoryNotMatchable ? (
+          <Pill tone="warning" title="partner rows have NULL subcategory_norm — subcategory can't be matched market-side">
+            subcategory not matchable
+          </Pill>
+        ) : null}
+      </div>
+
+      {data.mappingStates.length > 0 ? (
+        <div className="inline-row wrap-row" style={{ gap: '0.375rem', marginBottom: '0.5rem' }}>
+          {data.mappingStates.map((m) => (
+            <Pill
+              key={m.rawBrandName}
+              tone={m.state === 'mapped' ? 'success' : m.state === 'unmapped' ? 'danger' : 'warning'}
+              title={
+                m.litalertsBrandName != null
+                  ? `${m.rawBrandName} → ${m.litalertsBrandName} (#${m.litalertsBrandId ?? '?'})`
+                  : `${m.rawBrandName}: ${m.state}`
+              }
+            >
+              {m.rawBrandName}: {m.state}
+            </Pill>
+          ))}
+        </div>
+      ) : null}
+
+      {data.candidates.length === 0 ? (
+        <p className="subtle-copy">
+          No partner listings matched this family
+          {data.mappingSummary === 'no-brand'
+            ? ' (no brand to match on).'
+            : data.effectiveBrandNorms.length === 0
+              ? ' (brand resolves to no usable LitAlerts norm).'
+              : '.'}
+        </p>
+      ) : (
+        <div style={{ overflowX: 'auto' }}>
+          <table className="data-table">
+            <thead>
+              <tr>
+                <th>Score</th>
+                <th>Listing</th>
+                <th>Brand (raw / norm)</th>
+                <th>Cat norm</th>
+                <th>Sub norm</th>
+                <th>Parsed size</th>
+                <th>Size group</th>
+                <th>Retailer</th>
+                <th>Dist</th>
+                <th>Price ±tax</th>
+                <th>Stock</th>
+                <th title="brand factor">B</th>
+                <th title="category factor">C</th>
+                <th title="subcategory factor">Sub</th>
+                <th title="size factor">Sz</th>
+                <th title="pack factor">Pk</th>
+                <th title="strain factor">St</th>
+                <th title="name-token overlap factor">Nm</th>
+              </tr>
+            </thead>
+            <tbody>
+              {data.candidates.map((c) => (
+                <tr key={c.fuzzySkuId}>
+                  <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>
+                    {c.aboveThreshold ? (
+                      <Pill tone="success">{fmtScore(c.score)}</Pill>
+                    ) : (
+                      <Pill tone="muted">{fmtScore(c.score)}</Pill>
+                    )}
+                  </td>
+                  <td>
+                    {c.url != null ? (
+                      <a href={c.url} target="_blank" rel="noreferrer">
+                        {displayOrNull(c.listingName)}
+                      </a>
+                    ) : (
+                      displayOrNull(c.listingName)
+                    )}
+                  </td>
+                  <td>
+                    {displayOrNull(c.brandRaw)}
+                    {c.brandNorm != null ? <span className="subtle-copy"> / {c.brandNorm}</span> : null}
+                  </td>
+                  <td>{displayOrNull(c.categoryNorm)}</td>
+                  <td>{displayOrNull(c.subcategoryNorm)}</td>
+                  <td>{displayOrNull(c.parsedSizeLabel)}</td>
+                  <td>{c.matchedSizeGroupLabel}</td>
+                  <td>{displayOrNull(c.retailer)}</td>
+                  <td title={c.distanceMiles != null ? `${c.distanceMiles.toFixed(1)} mi` : 'unknown'}>
+                    {c.distanceBand}
+                  </td>
+                  <td style={{ whiteSpace: 'nowrap' }}>{priceLabel(c)}</td>
+                  <td style={{ textAlign: 'right' }}>{c.currentStock ?? '—'}</td>
+                  <FactorCells f={c.factors} />
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   )
 }
@@ -280,6 +556,7 @@ export function CatalogFamilyExplorerPage() {
                       {sub.memberCount} variant{sub.memberCount === 1 ? '' : 's'}
                     </Pill>
                   </summary>
+                  <MarketMatchPanel familyKey={family.familyKey} brandKey={sub.brandKey} />
                   <VariantTable members={sub.members} />
                 </details>
               ))}
