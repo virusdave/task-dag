@@ -98,6 +98,21 @@ function preTaxPriceOf(c: MarketMatchCandidate): number | null {
 }
 
 /**
+ * Parse a raw LitAlerts `retailerId` (a string in raw_input_jsonb) into a stable
+ * integer id, or null when absent / blank / non-integer. Single source so the
+ * distance-join id set and the candidate `retailerId` contract field agree, and
+ * so an empty string never collapses to `0` (a real, wrong retailer id).
+ */
+function parseRetailerId(raw: { retailerId?: string | null } | null): number | null {
+  const value = raw?.retailerId
+  if (value == null) return null
+  const trimmed = String(value).trim()
+  if (trimmed.length === 0) return null
+  const n = Number(trimmed)
+  return Number.isInteger(n) ? n : null
+}
+
+/**
  * Short-TTL process cache of the whole-catalog brand-subdivided grouping. An
  * operator expanding many families in a session would otherwise re-read the
  * whole variant catalog (~3.6k rows) + re-group it on EVERY expand. The catalog
@@ -578,11 +593,7 @@ export async function loadBrandFamilyMarketMatch(
   const retailerIds = Array.from(
     new Set(
       [...capped, ...reviewScored]
-        .map((c) => {
-          const raw = c.fuzzy.rawInputJsonb as { retailerId?: string | null } | null
-          const id = raw?.retailerId != null ? Number(raw.retailerId) : NaN
-          return Number.isFinite(id) ? id : null
-        })
+        .map((c) => parseRetailerId(c.fuzzy.rawInputJsonb as { retailerId?: string | null } | null))
         .filter((id): id is number => id != null),
     ),
   )
@@ -610,8 +621,8 @@ export async function loadBrandFamilyMarketMatch(
     const postTaxPrice =
       preTaxPrice !== null ? Math.round(preTaxPrice * PRICING_POST_TAX_MULTIPLIER * 100) / 100 : null
     const currentStock = parseLooseNumber(raw?.currentStock)
-    const retailerId = raw?.retailerId != null ? Number(raw.retailerId) : NaN
-    const miles = Number.isFinite(retailerId) ? retailerMiles.get(retailerId) ?? null : null
+    const retailerIdOrNull = parseRetailerId(raw)
+    const miles = retailerIdOrNull !== null ? retailerMiles.get(retailerIdOrNull) ?? null : null
     const capturedAt = capturedAtByFuzzyId.get(c.fuzzy.id) ?? null
     return {
       fuzzySkuId: c.fuzzy.id,
@@ -624,6 +635,7 @@ export async function loadBrandFamilyMarketMatch(
       parsedSizeLabel: parsedSizeLabelFor(c.fuzzy.sizeGNorm, c.fuzzy.sizeMgNorm),
       matchedSizeGroupLabel: c.matchedSizeLabel,
       retailer: c.dispensaryName ?? (typeof raw?.dispensaryName === 'string' ? raw.dispensaryName : null),
+      retailerId: retailerIdOrNull,
       url: c.listingUrl ?? (typeof raw?.url === 'string' ? raw.url : null),
       preTaxPrice,
       postTaxPrice,

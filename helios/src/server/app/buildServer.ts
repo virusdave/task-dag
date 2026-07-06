@@ -34,6 +34,7 @@ import { registerConfigLitalertsParsingRoutes } from '../routes/configLitalertsP
 import { registerBudtenderAnalyticsRoutes } from '../routes/budtenderAnalytics.js'
 import { registerCatalogAnalyticsRoutes } from '../routes/catalogAnalytics.js'
 import { registerCatalogFamilyExplorerRoutes } from '../routes/catalogFamilyExplorer.js'
+import { registerCatalogParseFeedbackRoutes } from '../routes/catalogParseFeedback.js'
 import { registerConfigParsingRoutes } from '../routes/configParsing.js'
 import { registerCustomerReviewsRoutes } from '../routes/customerReviews.js'
 import { registerCrmSegmentMetricsRoutes } from '../routes/crmSegmentMetrics.js'
@@ -284,6 +285,7 @@ async function registerApplicationSurface(server: FastifyInstance) {
   await registerBudtenderAnalyticsRoutes(server)
   await registerCatalogAnalyticsRoutes(server)
   await registerCatalogFamilyExplorerRoutes(server)
+  await registerCatalogParseFeedbackRoutes(server)
   await registerCrmSegmentMetricsRoutes(server)
   await registerCustomerValueAnalyticsRoutes(server)
   await registerGadsLandingPagesRoutes(server)

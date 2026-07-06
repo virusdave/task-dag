@@ -1390,6 +1390,34 @@ const SENTINELS: MigrationSentinel[] = [
       return stateWidened && hasRunRelease && hasItemRelease
     },
   },
+  {
+    migrationId: '097_litalerts_parse_feedback',
+    label:
+      'litalerts_parse_feedback table — INERT operator parse-correction feedback ' +
+      'inbox for the brand-categorical-family market-match audit panel ' +
+      '(automation#59, T3). Without it the /catalog family-explorer ' +
+      'parse-feedback endpoints report the missing table (503) and the operator ' +
+      'cannot save listing corrections / retailer naming conventions. Read only ' +
+      'by that endpoint (+ the T5 promotion export) — nothing in the production ' +
+      'scorer / market-match read path joins it, so it never affects matching, ' +
+      'scoring, fuzzy_skus, market aggregates, or IQR.',
+    // Probe the table AND a representative constraint + the two hot read indexes,
+    // so a partial manual apply (table created but an index/constraint failed)
+    // reports pending rather than "safe".
+    check: async (db) => {
+      const [hasTable, hasDetailsCheck, hasFuzzyIdx, hasRetailerIdx] = await Promise.all([
+        tableExists(db, 'litalerts_parse_feedback'),
+        constraintExists(
+          db,
+          'litalerts_parse_feedback',
+          'litalerts_parse_feedback_details_object_ok',
+        ),
+        indexExists(db, 'litalerts_parse_feedback_fuzzy_idx'),
+        indexExists(db, 'litalerts_parse_feedback_retailer_idx'),
+      ])
+      return hasTable && hasDetailsCheck && hasFuzzyIdx && hasRetailerIdx
+    },
+  },
 ]
 
 interface CacheEntry {

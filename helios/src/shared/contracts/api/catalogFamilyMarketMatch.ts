@@ -97,6 +97,12 @@ export const BrandFamilyMatchCandidateSchema = z.object({
   matchedSizeGroupLabel: z.string(),
   /** Dispensary / retailer display name. */
   retailer: z.string().nullable(),
+  /**
+   * STABLE LitAlerts retailer identifier (raw_input_jsonb.retailerId), or null
+   * when the raw listing lacks it. The display name is NOT stable — feedback
+   * (#59 T3) and retailer-scoped convention hints key on this id.
+   */
+  retailerId: z.number().int().nullable(),
   url: z.string().nullable(),
   /** Derived preTax = salePrice ?? normalPrice (context column, not the point). */
   preTaxPrice: z.number().nullable(),
